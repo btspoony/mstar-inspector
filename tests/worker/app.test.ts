@@ -1,0 +1,83 @@
+/**
+ * Worker entry (Hono app) tests — exported `fetch` with mock env.
+ * Covers route wiring: /healthz, status mapping for reject/ignore/job.
+ */
+import { describe, expect, test } from "bun:test";
+import { Webhooks } from "@octokit/webhooks";
+import worker from "../../src/worker/index";
+import type { Env } from "../../src/worker/env";
+
+const SECRET = "s3cret-webhook-secret";
+
+function makeEnv(overrides: Partial<Env> = {}): Env {
+  return {
+    APP_ID: "123",
+    PRIVATE_KEY: "private-key",
+    WEBHOOK_SECRET: SECRET,
+    REVIEW_QUEUE: {} as Env["REVIEW_QUEUE"],
+    IDEMPOTENCY_KV: {} as Env["IDEMPOTENCY_KV"],
+    ...overrides,
+  };
+}
+
+function webhookRequest(body: string, headers: Record<string, string>): Request {
+  return new Request("https://worker.local/webhook", {
+    method: "POST",
+    headers,
+    body,
+  });
+}
+
+describe("worker fetch entry", () => {
+  test("GET /healthz returns 200 ok", async () => {
+    const res = await worker.fetch(new Request("https://worker.local/healthz"), makeEnv());
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ ok: true });
+  });
+
+  test("valid signed pull_request webhook returns 200 accepted", async () => {
+    const body = JSON.stringify({
+      action: "opened",
+      number: 42,
+      installation: { id: 123 },
+      pull_request: { number: 42, head: { sha: "abc123" } },
+      repository: { name: "test-repo", owner: { login: "test-owner" } },
+    });
+    const signature = await new Webhooks({ secret: SECRET }).sign(body);
+    const res = await worker.fetch(
+      webhookRequest(body, { "x-hub-signature-256": signature, "x-github-event": "pull_request" }),
+      makeEnv(),
+    );
+    expect(res.status).toBe(200);
+    expect(await res.text()).toBe("accepted");
+  });
+
+  test("bad signature returns 401", async () => {
+    const body = "{}";
+    const res = await worker.fetch(
+      webhookRequest(body, { "x-hub-signature-256": "sha256=deadbeef", "x-github-event": "pull_request" }),
+      makeEnv(),
+    );
+    expect(res.status).toBe(401);
+  });
+
+  test('"development" secret returns 500 fail-closed', async () => {
+    const body = "{}";
+    const res = await worker.fetch(
+      webhookRequest(body, { "x-hub-signature-256": "sha256=deadbeef", "x-github-event": "pull_request" }),
+      makeEnv({ WEBHOOK_SECRET: "development" }),
+    );
+    expect(res.status).toBe(500);
+  });
+
+  test("uninteresting event returns 200 ignored (no GitHub retry)", async () => {
+    const body = "{}";
+    const signature = await new Webhooks({ secret: SECRET }).sign(body);
+    const res = await worker.fetch(
+      webhookRequest(body, { "x-hub-signature-256": signature, "x-github-event": "ping" }),
+      makeEnv(),
+    );
+    expect(res.status).toBe(200);
+    expect(await res.text()).toBe("ignored");
+  });
+});

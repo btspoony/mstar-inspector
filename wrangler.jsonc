@@ -1,0 +1,23 @@
+{
+  // 04 skeleton: Worker + KV + Queue producer bindings only.
+  // 05 appends d1_databases; 06 appends queues.consumers + sandbox (serial, single file).
+  // NO queues.consumers here — registering a consumer without code = message black hole.
+  "name": "mstar-inspector",
+  "main": "src/worker/index.ts",
+  "compatibility_date": "2026-08-20",
+  "kv_namespaces": [
+    {
+      "binding": "IDEMPOTENCY_KV",
+      // TODO(Task 4 runbook): replace with `wrangler kv namespace create IDEMPOTENCY_KV` output id.
+      "id": "00000000000000000000000000000000"
+    }
+  ],
+  "queues": {
+    "producers": [
+      {
+        "binding": "REVIEW_QUEUE",
+        "queue": "review-queue"
+      }
+    ]
+  }
+}
