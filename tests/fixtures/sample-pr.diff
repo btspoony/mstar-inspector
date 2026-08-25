@@ -1,0 +1,55 @@
+diff --git a/src/auth.ts b/src/auth.ts
+index 1a2b3c4..5d6e7f8 100644
+--- a/src/auth.ts
++++ b/src/auth.ts
+@@ -18,7 +18,7 @@ export function verifyToken(token: string): Claims {
+   const decoded = base64UrlDecode(token.split(".")[1]);
+   const claims = JSON.parse(decoded) as Claims;
+-  if (claims.exp < Date.now() / 1000) {
++  if (claims.exp < Math.floor(Date.now() / 1000)) {
+     throw new TokenExpiredError("token expired");
+   }
+   return claims;
+ }
+@@ -41,7 +41,9 @@ export function issueToken(userId: string): string {
+   const header = { alg: "HS256", typ: "JWT" };
+   const payload = {
+     sub: userId,
+     exp: Math.floor(Date.now() / 1000) + 3600,
++    iat: Math.floor(Date.now() / 1000),
++    iss: "mstar-inspector",
+   };
+   return sign(header, payload, SECRET);
+ }
+diff --git a/src/handlers/review.ts b/src/handlers/review.ts
+index 9a8b7c6..0f1e2d3 100644
+--- a/src/handlers/review.ts
++++ b/src/handlers/review.ts
+@@ -1,6 +1,11 @@
+ import { fetchPrDiff } from "../gateway/diff";
++import { parseReviewOutput } from "../review/schema";
+ import { reviewDiff } from "../review/review";
+ 
+ export async function handleReviewCommand(event: PullRequestEvent) {
+-  const diff = await fetchPrDiff(event.installationId, event.owner, event.repo, event.prNumber);
++  const diff = await fetchPrDiff(event.installationId, event.owner, event.repo, event.prNumber);
++  const { mode, result } = await reviewDiff(diff);
++  if (mode === "summary") {
++    console.warn("review degraded to summary", result.verdict);
++  }
+ }
+diff --git a/tests/auth.test.ts b/tests/auth.test.ts
+index 4c5d6e7..8f9a0b1 100644
+--- a/tests/auth.test.ts
++++ b/tests/auth.test.ts
+@@ -12,5 +12,10 @@ describe("verifyToken", () => {
+   test("rejects an expired token", () => {
+     const token = issueToken("u-1", { expOffset: -10 });
+     expect(() => verifyToken(token)).toThrow(TokenExpiredError);
+   });
++
++  test("rejects a token with a fractional expiry", () => {
++    const token = issueToken("u-1", { expOffset: -0.5 });
++    expect(() => verifyToken(token)).toThrow(TokenExpiredError);
++  });
+ });

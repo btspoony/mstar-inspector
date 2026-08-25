@@ -1,0 +1,25 @@
+{
+  "name": "mstar-inspector",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "GitHub App inspector gateway (Probot spike)",
+  "scripts": {
+    "start": "bun run src/server.ts",
+    "test": "bun test",
+    "typecheck": "tsc --noEmit",
+    "review": "bun run src/review/run.ts"
+  },
+  "engines": {
+    "bun": ">=1.3.14"
+  },
+  "dependencies": {
+    "@oh-my-pi/pi-coding-agent": "18.0.4",
+    "probot": "14.3.2",
+    "zod": "4.4.3"
+  },
+  "devDependencies": {
+    "@types/bun": "1.4.0",
+    "typescript": "5.9.3"
+  }
+}
