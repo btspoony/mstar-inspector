@@ -9,6 +9,7 @@
 import { Hono } from "hono";
 import type { Env } from "./env";
 import { classifyWebhook } from "./webhooks";
+import { defaultLog, handleReviewJob } from "./handlers";
 
 const app = new Hono<{ Bindings: Env }>();
 
@@ -28,7 +29,9 @@ app.post("/webhook", async (c) => {
   if (outcome.kind === "ignore") {
     return c.text("ignored", 200);
   }
-  // Task 2: idempotency pre-check + REVIEW_QUEUE.send(outcome.payload).
+  // Idempotency pre-check (non-null head_sha only) + REVIEW_QUEUE.send.
+  // KV failure → conservative pass (enqueue anyway, D1 fallback).
+  await handleReviewJob(outcome.payload, { env: c.env, log: defaultLog });
   return c.text("accepted", 200);
 });
 

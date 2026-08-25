@@ -1,7 +1,3 @@
-/**
- * Worker entry (Hono app) tests — exported `fetch` with mock env.
- * Covers route wiring: /healthz, status mapping for reject/ignore/job.
- */
 import { describe, expect, test } from "bun:test";
 import { Webhooks } from "@octokit/webhooks";
 import worker from "../../src/worker/index";
@@ -9,13 +5,17 @@ import type { Env } from "../../src/worker/env";
 
 const SECRET = "s3cret-webhook-secret";
 
+/** Functional KV/Queue stubs — the /webhook path now enqueues (Task 2). */
 function makeEnv(overrides: Partial<Env> = {}): Env {
   return {
     APP_ID: "123",
     PRIVATE_KEY: "private-key",
     WEBHOOK_SECRET: SECRET,
-    REVIEW_QUEUE: {} as Env["REVIEW_QUEUE"],
-    IDEMPOTENCY_KV: {} as Env["IDEMPOTENCY_KV"],
+    REVIEW_QUEUE: { send: async () => {} } as unknown as Env["REVIEW_QUEUE"],
+    IDEMPOTENCY_KV: {
+      get: async () => null,
+      put: async () => {},
+    } as unknown as Env["IDEMPOTENCY_KV"],
     ...overrides,
   };
 }
