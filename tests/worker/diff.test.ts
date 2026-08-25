@@ -7,11 +7,14 @@
  * Success value MUST be a non-empty string starting with "diff --git".
  * Errors from the octokit layer MUST reject (never swallowed).
  *
- * The production binding (`createAppAuthFromEnv`) is exercised against a
- * stubbed `fetch` with a throwaway WebCrypto-generated PKCS#8 key: inline
- * PEM and `~`-expanded path forms both resolve, the installation token is
- * cached across calls (auth-app default), and the token never appears in
- * logs or the queue payload.
+ * Key-format lock (I1 fix): GitHub's App settings download is a PKCS#1 PEM,
+ * which workerd's WebCrypto `importKey("pkcs8")` rejects. The committed
+ * fixtures `tests/fixtures/github-app-pkcs1.pem` (PKCS#1) and
+ * `github-app-pkcs8.pem` (openssl `pkcs8 -topk8 -nocrypt` of the same key)
+ * prove the pure-JS wrap is byte-identical to openssl, that a JWT minted
+ * from the PKCS#1 fixture verifies against the matching public key, and
+ * that the full production binding mints the installation token from the
+ * PKCS#1 fixture.
  */
 import { afterEach, describe, expect, mock, test } from "bun:test";
 import { mkdtempSync, writeFileSync } from "node:fs";
@@ -21,6 +24,8 @@ import {
   createAppAuthFromEnv,
   createDiffFetcher,
   expandHomePath,
+  normalizePrivateKey,
+  pkcs1ToPkcs8,
   resolvePrivateKey,
   type AppAuth,
   type OctokitLike,
@@ -35,6 +40,19 @@ index 0100000..0200000 100644
  hello
 +world
 `;
+
+/** Committed PKCS#1 fixture (GitHub App download shape). */
+const PKCS1_FIXTURE = await Bun.file(
+  new URL("../../tests/fixtures/github-app-pkcs1.pem", import.meta.url),
+).text();
+/** openssl `pkcs8 -topk8 -nocrypt` of the same key — expected wrap output. */
+const PKCS8_FIXTURE = await Bun.file(
+  new URL("../../tests/fixtures/github-app-pkcs8.pem", import.meta.url),
+).text();
+/** Public key matching the fixtures (signature verification). */
+const PUB_FIXTURE = await Bun.file(
+  new URL("../../tests/fixtures/github-app-pkcs1.pub.pem", import.meta.url),
+).text();
 
 /** Throwaway PKCS#8 key (WebCrypto — no openssl dependency in tests). */
 async function makePemKey(): Promise<string> {
@@ -243,6 +261,90 @@ describe("resolvePrivateKey", () => {
   });
 });
 
+describe("pkcs1ToPkcs8 / normalizePrivateKey (I1 key-format lock)", () => {
+  test("wraps the PKCS#1 fixture byte-identically to openssl pkcs8 -topk8 -nocrypt", () => {
+    expect(pkcs1ToPkcs8(PKCS1_FIXTURE)).toBe(PKCS8_FIXTURE);
+  });
+
+  test("mints a JWT from the PKCS#1 fixture via WebCrypto and the signature verifies against the public key", async () => {
+    const converted = normalizePrivateKey(PKCS1_FIXTURE);
+    expect(converted.startsWith("-----BEGIN PRIVATE KEY-----")).toBe(true);
+
+    // Decode the PKCS#8 DER and import it exactly as universal-github-app-jwt
+    // does on the workerd path (crypto.subtle.importKey("pkcs8", ...)).
+    const body = converted
+      .replace(/-----BEGIN PRIVATE KEY-----/, "")
+      .replace(/-----END PRIVATE KEY-----/, "")
+      .replace(/\s+/g, "");
+    const der = Uint8Array.from(atob(body), (c) => c.charCodeAt(0));
+    const key = await crypto.subtle.importKey(
+      "pkcs8",
+      der,
+      { name: "RSASSA-PKCS1-v1_5", hash: { name: "SHA-256" } },
+      false,
+      ["sign"],
+    );
+
+    const b64url = (buf: ArrayBuffer | Uint8Array) =>
+      btoa(String.fromCharCode(...new Uint8Array(buf)))
+        .replace(/=/g, "")
+        .replace(/\+/g, "-")
+        .replace(/\//g, "_");
+    const header = { alg: "RS256", typ: "JWT" };
+    const payload = { iat: 1, exp: 2, iss: "123456" };
+    const message = `${b64url(new TextEncoder().encode(JSON.stringify(header)))}.${b64url(new TextEncoder().encode(JSON.stringify(payload)))}`;
+    const signature = await crypto.subtle.sign("RSASSA-PKCS1-v1_5", key, new TextEncoder().encode(message));
+    const jwt = `${message}.${b64url(signature)}`;
+
+    expect(jwt.split(".")).toHaveLength(3);
+    expect(jwt.startsWith("eyJ")).toBe(true);
+
+    // Verify the signature against the matching public key — proves the
+    // wrapped key is the same RSA key, not just a structurally valid PEM.
+    const pubBody = PUB_FIXTURE
+      .replace(/-----BEGIN PUBLIC KEY-----/, "")
+      .replace(/-----END PUBLIC KEY-----/, "")
+      .replace(/\s+/g, "");
+    const pubDer = Uint8Array.from(atob(pubBody), (c) => c.charCodeAt(0));
+    const pubKey = await crypto.subtle.importKey(
+      "spki",
+      pubDer,
+      { name: "RSASSA-PKCS1-v1_5", hash: { name: "SHA-256" } },
+      false,
+      ["verify"],
+    );
+    const [h, p, s] = jwt.split(".") as [string, string, string];
+    const sigBytes = Uint8Array.from(
+      atob(s.replace(/-/g, "+").replace(/_/g, "/")),
+      (c) => c.charCodeAt(0),
+    );
+    expect(
+      await crypto.subtle.verify("RSASSA-PKCS1-v1_5", pubKey, sigBytes, new TextEncoder().encode(`${h}.${p}`)),
+    ).toBe(true);
+  });
+
+  test("normalizePrivateKey passes PKCS#8 through unchanged", () => {
+    expect(normalizePrivateKey(PKCS8_FIXTURE)).toBe(PKCS8_FIXTURE);
+  });
+
+  test("normalizePrivateKey hard-fails OpenSSH keys with the conversion command", () => {
+    expect(() =>
+      normalizePrivateKey("-----BEGIN OPENSSH PRIVATE KEY-----\nAAAA\n-----END OPENSSH PRIVATE KEY-----\n"),
+    ).toThrow(/OpenSSH format.*openssl pkcs8 -topk8 -nocrypt/s);
+  });
+
+  test("resolvePrivateKey converts an inline PKCS#1 PEM to PKCS#8", async () => {
+    expect(await resolvePrivateKey(PKCS1_FIXTURE)).toBe(PKCS8_FIXTURE);
+  });
+
+  test("resolvePrivateKey converts a PKCS#1 key read from a file path", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "mstar-key-"));
+    const keyPath = join(dir, "app.pem");
+    writeFileSync(keyPath, PKCS1_FIXTURE);
+    expect(await resolvePrivateKey(keyPath)).toBe(PKCS8_FIXTURE);
+  });
+});
+
 describe("createAppAuthFromEnv (production binding)", () => {
   const origFetch = globalThis.fetch;
   const requests: Array<{ url: string; auth: string | null }> = [];
@@ -308,7 +410,6 @@ describe("createAppAuthFromEnv (production binding)", () => {
     expect(allLogs).not.toContain("super-secret-installation-token-xyz");
     expect(allLogs).not.toContain("-----BEGIN");
   });
-
   test("path-form PRIVATE_KEY: reads the key file and fetches a non-empty diff", async () => {
     const pem = await makePemKey();
     const dir = mkdtempSync(join(tmpdir(), "mstar-key-"));
@@ -329,5 +430,30 @@ describe("createAppAuthFromEnv (production binding)", () => {
     const diffAuths = requests.filter((r) => r.url.includes("/pulls/")).map((r) => r.auth);
     expect(diffAuths).toEqual(["token path-form-token-abc"]);
     expect(logLines.join("\n")).not.toContain("path-form-token-abc");
+  });
+
+  test("PKCS#1 fixture (GitHub App download shape): mints the installation token and fetches a non-empty diff", async () => {
+    stubFetch("pkcs1-fixture-token-xyz");
+    console.log = mock((...args: unknown[]) => {
+      logLines.push(args.map(String).join(" "));
+    }) as typeof console.log;
+
+    const auth = createAppAuthFromEnv({ APP_ID: "123456", PRIVATE_KEY: PKCS1_FIXTURE });
+    const { fetchPrDiff } = createDiffFetcher(auth);
+
+    const result = await fetchPrDiff(999, "acme", "inspector", 42);
+
+    expect(result.startsWith("diff --git")).toBe(true);
+    expect(result.length).toBeGreaterThan(0);
+    const tokenCalls = requests.filter((r) => r.url.includes("access_tokens"));
+    expect(tokenCalls).toHaveLength(1);
+    const diffAuths = requests.filter((r) => r.url.includes("/pulls/")).map((r) => r.auth);
+    expect(diffAuths).toEqual(["token pkcs1-fixture-token-xyz"]);
+    // The JWT (Authorization on the access_tokens call) and the PEM never
+    // enter logs.
+    const allLogs = logLines.join("\n");
+    expect(allLogs).not.toContain("pkcs1-fixture-token-xyz");
+    expect(allLogs).not.toContain("-----BEGIN");
+    expect(allLogs).not.toContain("eyJ");
   });
 });
