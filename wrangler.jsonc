@@ -8,8 +8,7 @@
   "kv_namespaces": [
     {
       "binding": "IDEMPOTENCY_KV",
-      // TODO(Task 4 runbook): replace with `wrangler kv namespace create IDEMPOTENCY_KV` output id.
-      "id": "00000000000000000000000000000000"
+      "id": "554c5cd446e4401fa878570ac66bbba4"
     }
   ],
   "queues": {
