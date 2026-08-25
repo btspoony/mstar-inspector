@@ -3,10 +3,9 @@
  *
  * Mirrors `.mstar/iterations/iter-001-20260825/specs/findings-schema.md` field
  * for field. Findings `severity` is the QC-style enum
- * `critical | warning | suggestion | info` — NOT the residual register enum
- * (`critical/high/medium/low/nit`). Unknown keys are stripped (zod default),
- * required keys stay required, and `file_path` / `line_start` / `line_end` are
- * required-but-nullable.
+ * `critical | warning | suggestion | info` — NOT the residual register enum.
+ * Unknown keys are stripped (zod default), required keys stay required, and
+ * `file_path` / `line_start` / `line_end` are required-but-nullable.
  */
 
 import { z } from "zod";
@@ -68,10 +67,23 @@ const outputSchema: z.ZodType<ReviewOutput> = z.object({
   findings: z.array(findingSchema),
 });
 
-/** Extract the first ```json / ``` fenced block, or null. */
-function extractFenced(text: string): string | null {
-  const match = text.match(/```(?:json)?\s*([\s\S]*?)```/);
+/** Extract the first ```json fenced block, or null. */
+function extractJsonFence(text: string): string | null {
+  const match = text.match(/```json\s*([\s\S]*?)```/);
   return match ? match[1]!.trim() : null;
+}
+
+/** Extract the first bare ``` fenced block (no language tag), or null. */
+function extractBareFence(text: string): string | null {
+  const match = text.match(/```(?![A-Za-z0-9])\s*([\s\S]*?)```/);
+  return match ? match[1]!.trim() : null;
+}
+
+/** Extract the first ```json / bare ``` fenced block, or null. */
+function extractFenced(text: string): string | null {
+  const json = extractJsonFence(text);
+  if (json !== null) return json;
+  return extractBareFence(text);
 }
 
 /** Extract the first `{` … last `}` span, or null. */
@@ -87,6 +99,9 @@ function extractBraces(text: string): string | null {
  *
  * Algorithm (iteration spec): trim → JSON.parse whole → fall back to the
  * fenced ```json / ``` block → fall back to first `{` … last `}` → zod.
+ * Fallback extraction only runs when JSON.parse throws; the FIRST successful
+ * parse is zod-validated once and that result is returned — a parsed
+ * non-object root (e.g. an array) is rejected without inner-object recovery.
  * Any failure returns `{ ok: false, error }` and never throws.
  */
 export function parseReviewOutput(
@@ -110,8 +125,9 @@ export function parseReviewOutput(
       continue;
     }
     const result = outputSchema.safeParse(parsed);
-    if (result.success) return { ok: true, output: result.data };
-    lastError = result.error.message;
+    return result.success
+      ? { ok: true, output: result.data }
+      : { ok: false, error: result.error.message };
   }
   return { ok: false, error: lastError };
 }

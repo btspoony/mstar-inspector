@@ -6,14 +6,16 @@
  * - severity enum is critical | warning | suggestion | info (NOT the residual enum)
  * - unknown keys are stripped, not rejected
  * - file_path / line_start / line_end keys are REQUIRED but nullable
- * - fenced ```json blocks and first-{..last-} extraction both parse
+ * - fenced ```json / bare ``` blocks and first-{..last-} extraction both parse
+ * - fallback extraction only runs when JSON.parse throws; a parsed non-object
+ *   root (e.g. an array) is rejected without inner-object recovery
  * - any failure returns { ok: false } and never throws
  */
 
 import { describe, expect, test } from "bun:test";
-import { parseReviewOutput } from "../../src/review/schema";
+import { parseReviewOutput, type ReviewOutput } from "../../src/review/schema";
 
-const VALID = {
+const VALID: ReviewOutput = {
   verdict: "comment",
   summary_md: "No blocking issues.",
   findings: [
@@ -34,9 +36,7 @@ describe("parseReviewOutput", () => {
     const r = parseReviewOutput(JSON.stringify(VALID));
     expect(r.ok).toBe(true);
     if (r.ok) {
-      expect(r.output.verdict).toBe("comment");
-      expect(r.output.findings).toHaveLength(1);
-      expect(r.output.findings[0]!.severity).toBe("warning");
+      expect(r.output).toEqual(VALID);
     }
   });
 
@@ -45,24 +45,43 @@ describe("parseReviewOutput", () => {
       JSON.stringify({ verdict: "approve", summary_md: "LGTM", findings: [] }),
     );
     expect(r.ok).toBe(true);
+    if (r.ok) {
+      expect(r.output).toEqual({ verdict: "approve", summary_md: "LGTM", findings: [] });
+    }
   });
 
   test("parses JSON inside a ```json fenced block", () => {
     const raw = "Here is the review:\n```json\n" + JSON.stringify(VALID) + "\n```\n";
     const r = parseReviewOutput(raw);
     expect(r.ok).toBe(true);
+    if (r.ok) {
+      expect(r.output).toEqual(VALID);
+    }
   });
 
   test("parses JSON inside a plain ``` fenced block", () => {
     const raw = "```\n" + JSON.stringify(VALID) + "\n```";
     const r = parseReviewOutput(raw);
     expect(r.ok).toBe(true);
+    if (r.ok) {
+      expect(r.output).toEqual(VALID);
+    }
   });
 
   test("parses JSON extracted from first { to last }", () => {
     const raw = "prefix text " + JSON.stringify(VALID) + " suffix text";
     const r = parseReviewOutput(raw);
     expect(r.ok).toBe(true);
+    if (r.ok) {
+      expect(r.output).toEqual(VALID);
+    }
+  });
+
+  test("does not treat a ```ts fence as a fenced block", () => {
+    const other = { verdict: "approve", summary_md: "x", findings: [] };
+    const raw = "```ts\n" + JSON.stringify(VALID) + "\n```\n" + JSON.stringify(other);
+    const r = parseReviewOutput(raw);
+    expect(r.ok).toBe(false);
   });
 
   test("strips unknown keys instead of failing", () => {
@@ -108,6 +127,22 @@ describe("parseReviewOutput", () => {
     expect(r.ok).toBe(false);
   });
 
+  test("rejects a finding missing the required line_start key", () => {
+    const { line_start: _ls, ...rest } = VALID.findings[0]!;
+    const r = parseReviewOutput(
+      JSON.stringify({ verdict: "comment", summary_md: "ok", findings: [rest] }),
+    );
+    expect(r.ok).toBe(false);
+  });
+
+  test("rejects a finding missing the required line_end key", () => {
+    const { line_end: _le, ...rest } = VALID.findings[0]!;
+    const r = parseReviewOutput(
+      JSON.stringify({ verdict: "comment", summary_md: "ok", findings: [rest] }),
+    );
+    expect(r.ok).toBe(false);
+  });
+
   test("rejects a non-integer line number", () => {
     const bad = { ...VALID, findings: [{ ...VALID.findings[0]!, line_start: 1.5 }] };
     const r = parseReviewOutput(JSON.stringify(bad));
@@ -123,6 +158,26 @@ describe("parseReviewOutput", () => {
   test("rejects an invalid verdict", () => {
     const r = parseReviewOutput(JSON.stringify({ ...VALID, verdict: "merge" }));
     expect(r.ok).toBe(false);
+  });
+
+  test("accepts the request_changes verdict", () => {
+    const r = parseReviewOutput(
+      JSON.stringify({ ...VALID, verdict: "request_changes" }),
+    );
+    expect(r.ok).toBe(true);
+    if (r.ok) {
+      expect(r.output.verdict).toBe("request_changes");
+    }
+  });
+
+  test("accepts a critical severity finding", () => {
+    const r = parseReviewOutput(
+      JSON.stringify({ ...VALID, findings: [{ ...VALID.findings[0]!, severity: "critical" }] }),
+    );
+    expect(r.ok).toBe(true);
+    if (r.ok) {
+      expect(r.output.findings[0]!.severity).toBe("critical");
+    }
   });
 
   test("rejects residual severities high and nit", () => {
@@ -157,6 +212,11 @@ describe("parseReviewOutput", () => {
 
   test("rejects a JSON array at the root", () => {
     const r = parseReviewOutput("[1, 2, 3]");
+    expect(r.ok).toBe(false);
+  });
+
+  test("rejects a JSON array wrapping a valid ReviewOutput", () => {
+    const r = parseReviewOutput(JSON.stringify([VALID]));
     expect(r.ok).toBe(false);
   });
 
@@ -198,7 +258,7 @@ describe("parseReviewOutput", () => {
     }
   });
 
-  test("never throws on malformed input", () => {
+  test("never throws and returns ok:false on malformed input", () => {
     const inputs = [
       "",
       "   ",
@@ -210,7 +270,8 @@ describe("parseReviewOutput", () => {
       "```json\n{broken\n```",
     ];
     for (const raw of inputs) {
-      expect(() => parseReviewOutput(raw)).not.toThrow();
+      const r = parseReviewOutput(raw);
+      expect(r.ok).toBe(false);
     }
   });
 });
