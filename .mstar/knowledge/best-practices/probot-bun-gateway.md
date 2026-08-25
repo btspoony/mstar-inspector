@@ -35,6 +35,7 @@ mstar-inspector M0 spike (plan 01) proved Probot 14.3.2 runs on Bun 1.4.0 (host 
 4. **Installation Token discipline**: `app.auth(installationId)` → octokit scoped per installation; fetch diff via `GET /repos/{owner}/{repo}/pulls/{n}` with `mediaType.diff`; minimal permissions `pull_requests:read`, `contents:read`, `metadata:read`; PATs forbidden as a substitute.
 5. **Type the octokit seam structurally**: the plan-sketched `OctokitLike` was not assignable to real `ProbotOctokit` (contravariance); use structural param types (`PullsGetParams`) and guard `octokit.rest.pulls.get` exists before calling (clear rejection beats `TypeError` on `undefined`).
 6. **Workers compatibility is a first-class spike question**: record `workers_compatible` in every gateway spike conclusion; Probot-on-Workers (workerd) remains unverified — M1 must either verify a thin fetch + `@octokit/webhooks` adapter (solution doc §7/§8) or keep the process entry outside Workers.
+7. **Headless verification path**: creating the GitHub App itself needs the web UI (one-time, manual); but the deferred M0 live acceptance in a headless/no-UI CLI environment should exercise the **App installation-tokens API** (`POST /app/installations/{id}/tokens` via JWT) + `fetchPrDiff` directly, not the smee webhook tunnel — same auth surface under test, no public endpoint dependency. Cost delta vs webhook path: skips smee setup and PR-event plumbing; it does not validate signature verification (leave that to the webhook runbook or M1 e2e).
 
 ## Why This Matters
 
