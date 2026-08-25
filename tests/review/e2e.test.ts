@@ -8,7 +8,8 @@
  *   - unparseable raw (non-JSON / missing fields / empty) → mode "summary"
  *     with verdict "comment", findings [], non-empty summary_md, no throw
  *   - CLI main(): exit 0, stdout is ONLY the ReviewOutput JSON (no
- *     {mode, result} envelope); usage error → 2; unreadable file → 1
+ *     {mode, result} envelope); usage error → 2; unreadable file → 1;
+ *     reviewDiff rejection → 1 with empty stdout and a stderr diagnostic
  */
 
 import { afterEach, describe, expect, mock, test } from "bun:test";
@@ -16,11 +17,16 @@ import { readFileSync } from "node:fs";
 
 /** Raw assistant text the fake session returns; set per test. */
 let rawOutput = "";
+/** When set, the fake session's prompt throws (simulates SDK/provider failure). */
+let sessionError: Error | undefined;
 
 mock.module("@oh-my-pi/pi-coding-agent", () => ({
   createAgentSession: mock(async () => ({
     session: {
-      prompt: mock(async () => true),
+      prompt: mock(async () => {
+        if (sessionError) throw sessionError;
+        return true;
+      }),
       getLastAssistantMessage: mock(() => ({
         role: "assistant",
         content: [{ type: "text", text: rawOutput }],
@@ -30,6 +36,13 @@ mock.module("@oh-my-pi/pi-coding-agent", () => ({
   })),
   SessionManager: {
     inMemory: mock((cwd?: string) => ({ kind: "in-memory", cwd })),
+  },
+  Settings: {
+    isolated: mock((overrides: Record<string, unknown>) => ({
+      kind: "isolated",
+      overrides,
+      get: (path: string) => overrides[path],
+    })),
   },
   loadSkillsFromDir: mock(async () => ({
     skills: [
@@ -89,6 +102,7 @@ async function runCli(argv: string[]): Promise<{ code: number; stdout: string; s
 
 afterEach(() => {
   rawOutput = "";
+  sessionError = undefined;
 });
 
 describe("reviewDiff", () => {
@@ -185,5 +199,17 @@ describe("CLI (src/review/run.ts)", () => {
     expect(code).toBe(1);
     expect(stdout).toBe("");
     expect(stderr).toContain("cannot read diff file");
+  });
+
+  test("reviewDiff rejection → exit 1, empty stdout, stderr diagnostic", async () => {
+    sessionError = new Error("provider boom");
+    const { code, stdout, stderr } = await runCli(["--diff", FIXTURE]);
+
+    expect(code).toBe(1);
+    // Session failure is not a parse degrade: nothing is printed to stdout.
+    expect(stdout).toBe("");
+    // Controlled diagnostic on stderr, not a raw unhandled rejection.
+    expect(stderr).toContain("review: session failed:");
+    expect(stderr).toContain("provider boom");
   });
 });

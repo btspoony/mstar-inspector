@@ -14,10 +14,17 @@
  *   - CreateAgentSessionOptions.toolNames: string[]                    (sdk.d.ts)
  *   - CreateAgentSessionOptions.additionalExtensionPaths: string[]     (sdk.d.ts)
  *   - CreateAgentSessionOptions.skills: Skill[]                        (sdk.d.ts)
+ *   - CreateAgentSessionOptions.settings: Settings                    (sdk.d.ts)
+ *   - Settings.isolated(overrides) — in-memory settings, no user config (config/settings.d.ts)
  *   - loadSkillsFromDir({ dir, source }) -> Promise<LoadSkillsResult>  (extensibility/skills.d.ts)
  *   - AgentSession.prompt(text, options?) -> Promise<boolean>          (session/agent-session.d.ts)
  *   - AgentSession.getLastAssistantMessage() -> AssistantMessage | undefined
  *   - AgentSession.dispose(options?) -> Promise<void>
+ *
+ * Every session runs on Settings.isolated({ "fetch.enabled": false }): user
+ * ~/.omp config is never inherited and the read tool's outbound URL fetch is
+ * structurally off ("fetch.enabled" defaults true per settings-schema.d.ts;
+ * tools/read.ts gates URL reads on session settings fetch.enabled).
  */
 
 import { existsSync } from "node:fs";
@@ -28,6 +35,7 @@ import {
   createAgentSession,
   loadSkillsFromDir,
   SessionManager,
+  Settings,
   type AgentSession,
   type CreateAgentSessionOptions,
   type Skill,
@@ -129,12 +137,16 @@ export interface ReviewSessionOptions {
 
 /**
  * Build the createAgentSession options: in-memory session, read-only tool
- * whitelist, local plugin root, explicit skills, PR-adapter prompt.
+ * whitelist, local plugin root, explicit skills, PR-adapter prompt, and
+ * isolated settings with outbound fetch disabled.
  */
 export function buildSessionOptions(opts: ReviewSessionOptions): CreateAgentSessionOptions {
   return {
     cwd: opts.cwd,
     sessionManager: SessionManager.inMemory(opts.cwd),
+    // Isolated in-memory settings per session: no user ~/.omp config and no
+    // outbound URL fetch (read tool gates URL reads on fetch.enabled).
+    settings: Settings.isolated({ "fetch.enabled": false }),
     restrictToolNames: true,
     toolNames: [...REVIEW_TOOL_NAMES],
     disableExtensionDiscovery: true,

@@ -9,6 +9,7 @@
 
 import { readFileSync } from "node:fs";
 import { reviewDiff } from "./review";
+import type { ReviewDiffResult } from "./review";
 
 const USAGE = "usage: bun run review --diff <file>";
 
@@ -45,9 +46,18 @@ export async function main(argv: string[]): Promise<number> {
     return 1;
   }
 
-  const { mode, result } = await reviewDiff(diffText);
+  // Session/plugin/provider failures are a distinct class from parse degrade:
+  // exit 1 with a stderr diagnostic, stdout stays empty (no raw stack dump).
+  let review: ReviewDiffResult;
+  try {
+    review = await reviewDiff(diffText);
+  } catch (error) {
+    console.error(`review: session failed: ${(error as Error).message}`);
+    return 1;
+  }
+  const { mode, result } = review;
   console.error(`review mode: ${mode}`);
-  // stdout carries ONLY the ReviewOutput JSON (plan Module contracts).
+  // stdout carries ONLY the Review JSON (plan Module contracts).
   console.log(JSON.stringify(result));
   return 0;
 }

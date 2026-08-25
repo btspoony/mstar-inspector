@@ -9,6 +9,7 @@
  *   - options.restrictToolNames === true with toolNames ⊆ read/grep/glob
  *   - options.additionalExtensionPaths points at the local mstar-harness root
  *   - options.skills includes the mstar-audit skill
+ *   - options.settings is an isolated in-memory Settings with fetch.enabled=false
  *   - session.dispose() called exactly once on success and on error
  *   - two runReviewSession calls create two distinct sessions
  */
@@ -40,6 +41,8 @@ interface MockCreateOptions {
   enableLsp: boolean;
   requireYieldTool: boolean;
   autoApprove: boolean;
+  /** Isolated in-memory settings the implementation must pass through. */
+  settings: { kind: string; overrides: Record<string, unknown>; get: (path: string) => unknown };
 }
 
 const createdOptions: MockCreateOptions[] = [];
@@ -69,6 +72,13 @@ mock.module("@oh-my-pi/pi-coding-agent", () => ({
   }),
   SessionManager: {
     inMemory: mock((cwd?: string) => ({ kind: "in-memory", cwd })),
+  },
+  Settings: {
+    isolated: mock((overrides: Record<string, unknown>) => ({
+      kind: "isolated",
+      overrides,
+      get: (path: string) => overrides[path],
+    })),
   },
   loadSkillsFromDir: mock(async () => ({
     skills: [
@@ -121,6 +131,10 @@ describe("runReviewSession", () => {
     // MCP and LSP are disabled so no ambient tool surface leaks in.
     expect(options.enableMCP).toBe(false);
     expect(options.enableLsp).toBe(false);
+    // Settings are isolated per session (Settings.isolated): the read tool's
+    // outbound URL fetch is structurally off, no user ~/.omp config inherited.
+    expect(options.settings.kind).toBe("isolated");
+    expect(options.settings.get("fetch.enabled")).toBe(false);
   });
 
   test("loads the local mstar-harness plugin root and mentions mstar-audit", async () => {
@@ -185,6 +199,10 @@ describe("buildSessionOptions", () => {
     expect(options.enableMCP).toBe(false);
     expect(options.enableLsp).toBe(false);
     expect(options.requireYieldTool).toBe(false);
+    // The isolated settings object itself carries fetch.enabled=false.
+    const settings = options.settings as unknown as { kind: string; get: (path: string) => unknown };
+    expect(settings.kind).toBe("isolated");
+    expect(settings.get("fetch.enabled")).toBe(false);
   });
 });
 
