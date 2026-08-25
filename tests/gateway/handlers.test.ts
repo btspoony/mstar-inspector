@@ -139,6 +139,18 @@ describe("createGatewayApp webhook registration", () => {
 
     expect(log.info).not.toHaveBeenCalled();
   });
+  test("issue_comment.created with a case-variant /Review body is ignored (case-sensitive)", () => {
+    const log = makeLog();
+    const appFn = createGatewayApp({ log });
+    const { on, handlers } = makeMockApp();
+    appFn({ on } as never);
+
+    const handler = handlers["issue_comment.created"];
+    expect(handler).toBeDefined();
+    handler?.(issueCommentFixture("/Review", { number: 42, pull_request: {} }));
+
+    expect(log.info).not.toHaveBeenCalled();
+  });
 
   test("issue_comment.created on a non-PR issue is ignored", () => {
     const log = makeLog();

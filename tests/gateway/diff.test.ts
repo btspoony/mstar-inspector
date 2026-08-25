@@ -126,6 +126,14 @@ describe("createDiffFetcher", () => {
 
     await expect(fetchPrDiff(12345, "acme", "inspector", 42)).rejects.toThrow("auth failed");
   });
+  test("rejects with a clear error when the octokit surface is missing rest.pulls.get", async () => {
+    const { getOctokit } = makeGetOctokit({});
+    const { fetchPrDiff } = createDiffFetcher(getOctokit);
+
+    await expect(fetchPrDiff(12345, "acme", "inspector", 42)).rejects.toThrow(
+      /octokit is missing rest\.pulls\.get/,
+    );
+  });
 
   test("rejects a JSON patch response instead of treating it as success", async () => {
     const { getOctokit } = makeGetOctokit(makeOctokit({ data: { id: 1, title: "PR" } }));

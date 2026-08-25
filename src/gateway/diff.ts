@@ -48,7 +48,13 @@ export function createDiffFetcher(getOctokit: GetOctokit): {
         pull_number: prNumber,
         mediaType: { format: "diff" },
       };
-      const response = await octokit.rest!.pulls.get(params);
+      const pullsGet = octokit.rest?.pulls?.get;
+      if (!pullsGet) {
+        throw new Error(
+          "octokit is missing rest.pulls.get — cannot fetch the PR diff; check the injected octokit surface",
+        );
+      }
+      const response = await pullsGet(params);
       return extractDiff(response.data);
     },
   };

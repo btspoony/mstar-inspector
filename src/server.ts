@@ -14,6 +14,21 @@ import { createGatewayApp } from "./gateway/app";
 const DEFAULT_PORT = 3000;
 const DEFAULT_HOST = "127.0.0.1";
 
+/**
+ * Fail-closed guard for the webhook secret (plan fix round 1, QC F-A):
+ * Probot falls back to the public default HMAC secret "development" when
+ * `secret` is falsy — reject both the empty case and the default itself so
+ * the M1 live path can never run with a publicly-known webhook secret.
+ */
+export function validateWebhookSecret(secret: string): void {
+  if (!secret) {
+    throw new Error("WEBHOOK_SECRET environment variable is required (see .env.example)");
+  }
+  if (secret === "development") {
+    throw new Error('WEBHOOK_SECRET must not be the Probot default "development" — set a real webhook secret');
+  }
+}
+
 function readEnv(): { appId: number; privateKey: string; secret: string; port: number; host: string; webhookPath?: string } {
   const appId = Number(process.env.APP_ID);
   const privateKey = process.env.PRIVATE_KEY ?? "";
@@ -25,6 +40,7 @@ function readEnv(): { appId: number; privateKey: string; secret: string; port: n
   if (!appId || !privateKey) {
     throw new Error("APP_ID and PRIVATE_KEY environment variables are required (see .env.example)");
   }
+  validateWebhookSecret(secret);
 
   return { appId, privateKey, secret, port, host, webhookPath };
 }
@@ -68,7 +84,11 @@ async function main(): Promise<void> {
   process.on("SIGTERM", () => void stop("SIGTERM"));
 }
 
-main().catch((error: unknown) => {
-  console.error("Failed to start gateway:", error);
-  process.exit(1);
-});
+// Only auto-start when run as the entry point (`bun run src/server.ts`);
+// importing this module from tests must not bind a port or exit the process.
+if (import.meta.main) {
+  main().catch((error: unknown) => {
+    console.error("Failed to start gateway:", error);
+    process.exit(1);
+  });
+}
