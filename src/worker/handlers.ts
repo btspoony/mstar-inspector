@@ -6,13 +6,16 @@
  * only (webhook 5s timeout budget; sha comes from the webhook payload).
  *
  * Idempotency (compass S4 / plan Clarify 4):
- * - KV key only for non-null `head_sha`; a null sha must never become a KV
- *   key — `/review` commands always enqueue.
+ * - KV key only for non-empty `head_sha`; a null/empty sha must never become
+ *   a KV key — `/review` commands always enqueue.
  * - KV has no atomic conditional write (`noneMatch` is not in
  *   workers-types), so this is get-then-put with a race window; the D1
  *   UNIQUE constraint (plan 05) is the durable fallback.
  * - KV read/write failure → conservative pass: log a warning and enqueue
  *   anyway (D1 fallback covers duplicates).
+ * - Ordering invariant: the KV key is claimed only AFTER `REVIEW_QUEUE.send`
+ *   resolves. A key therefore means "enqueued" — a failed send leaves no key,
+ *   so GitHub's retry re-enqueues instead of being KV-skipped.
  */
 import type { KVNamespace } from "@cloudflare/workers-types";
 import { idemKey, IDEMPOTENCY_SECONDS } from "../contracts/idem";
@@ -63,28 +66,18 @@ function toEventLog(payload: ReviewJobPayload): WorkerEventLog {
 }
 
 /**
- * KV put-if-absent (get-then-put). Returns true when the key already exists
- * (idempotency hit → caller skips). On KV failure, returns false (conservative
- * pass) and logs a warning — the D1 UNIQUE constraint (plan 05) is the
- * durable duplicate guard.
- *
- * simplify: get-then-put has a race window for concurrent duplicate
- * deliveries; KV offers no atomic conditional write. D1 UNIQUE (05) is the
- * upgrade path.
+ * Idempotency pre-check: true when the key already exists (skip). On KV
+ * failure, returns false (conservative pass) and logs a warning — the D1
+ * UNIQUE constraint (plan 05) is the durable duplicate guard.
  */
-export async function putIfAbsent(
+export async function idempotencyHit(
   kv: KVNamespace,
   key: string,
   fields: WorkerEventLog,
   log: HandlerLog,
 ): Promise<boolean> {
   try {
-    const existing = await kv.get(key);
-    if (existing !== null) {
-      return true;
-    }
-    await kv.put(key, "1", { expirationTtl: IDEMPOTENCY_SECONDS });
-    return false;
+    return (await kv.get(key)) !== null;
   } catch (err) {
     const detail = err instanceof Error ? err.message : String(err);
     log.warn(fields, `idempotency KV error — enqueueing anyway (D1 fallback): ${detail}`);
@@ -93,8 +86,30 @@ export async function putIfAbsent(
 }
 
 /**
+ * Claim the idempotency key AFTER a successful enqueue. A key therefore
+ * means "enqueued" — a failed send never leaves a key, so GitHub's retry
+ * re-enqueues instead of being KV-skipped. On KV failure, logs a warning
+ * and still returns 200 (D1 UNIQUE is the duplicate backstop).
+ */
+export async function claimIdempotency(
+  kv: KVNamespace,
+  key: string,
+  fields: WorkerEventLog,
+  log: HandlerLog,
+): Promise<void> {
+  try {
+    await kv.put(key, "1", { expirationTtl: IDEMPOTENCY_SECONDS });
+  } catch (err) {
+    const detail = err instanceof Error ? err.message : String(err);
+    log.warn(fields, `idempotency KV error — enqueueing anyway (D1 fallback): ${detail}`);
+  }
+}
+
+/**
  * Handle a classified review job: log the seven-field structured event, run
- * the idempotency pre-check (non-null head_sha only), and enqueue.
+ * the idempotency pre-check (non-empty head_sha only), enqueue, then claim
+ * the KV key. A key therefore means "enqueued" — a failed send leaves no
+ * key, so GitHub's retry re-enqueues instead of being KV-skipped.
  */
 export async function handleReviewJob(
   payload: ReviewJobPayload,
@@ -102,15 +117,21 @@ export async function handleReviewJob(
 ): Promise<HandleOutcome> {
   const fields = toEventLog(payload);
 
-  if (payload.head_sha !== null) {
-    const key = idemKey({
-      installation_id: payload.installation_id,
-      owner: payload.owner,
-      repo: payload.repo,
-      pr_number: payload.pr_number,
-      head_sha: payload.head_sha,
-    });
-    const alreadySeen = await putIfAbsent(deps.env.IDEMPOTENCY_KV, key, fields, deps.log);
+  // Non-empty sha only: a null/empty sha (e.g. `/review` commands) must
+  // never become a KV key and always enqueues (compass S4 / Clarify 4).
+  const key =
+    payload.head_sha
+      ? idemKey({
+          installation_id: payload.installation_id,
+          owner: payload.owner,
+          repo: payload.repo,
+          pr_number: payload.pr_number,
+          head_sha: payload.head_sha,
+        })
+      : null;
+
+  if (key !== null) {
+    const alreadySeen = await idempotencyHit(deps.env.IDEMPOTENCY_KV, key, fields, deps.log);
     if (alreadySeen) {
       deps.log.info(fields, "idempotency hit — skipping enqueue");
       return { kind: "skipped", reason: "idempotency hit" };
@@ -118,6 +139,9 @@ export async function handleReviewJob(
   }
 
   await deps.env.REVIEW_QUEUE.send(payload);
+  if (key !== null) {
+    await claimIdempotency(deps.env.IDEMPOTENCY_KV, key, fields, deps.log);
+  }
   deps.log.info(fields, "review job enqueued");
   return { kind: "enqueued" };
 }

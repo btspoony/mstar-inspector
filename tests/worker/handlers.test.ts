@@ -10,7 +10,7 @@ import { describe, expect, mock, test, type Mock } from "bun:test";
 import type { KVNamespace, Queue } from "@cloudflare/workers-types";
 import { idemKey, IDEMPOTENCY_SECONDS } from "../../src/contracts/idem";
 import type { ReviewJobPayload } from "../../src/contracts/review-job";
-import { handleReviewJob, putIfAbsent, type HandlerLog } from "../../src/worker/handlers";
+import { claimIdempotency, handleReviewJob, idempotencyHit, type HandlerLog } from "../../src/worker/handlers";
 
 const HEAD_SHA = "0123456789abcdef0123456789abcdef01234567";
 
@@ -176,34 +176,64 @@ describe("handleReviewJob — null head_sha (product lock)", () => {
   });
 });
 
-describe("handleReviewJob — KV failure conservative pass", () => {
-  test("KV get failure logs a warning and still enqueues", async () => {
-    const { kv } = makeKvStub();
-    kv.get.mockRejectedValueOnce(new Error("kv down"));
+describe("handleReviewJob — send failure must not claim the KV key (C1)", () => {
+  test("a failed send leaves no KV key and the retry enqueues again", async () => {
+    const { kv, store } = makeKvStub();
     const { queue, sent } = makeQueueStub();
     const log = makeLog();
+    queue.send.mockRejectedValueOnce(new Error("queue down"));
+
+    await expect(
+      handleReviewJob(prPayload(), { env: { IDEMPOTENCY_KV: kv, REVIEW_QUEUE: queue }, log }),
+    ).rejects.toThrow("queue down");
+
+    // No key was claimed — the retry must not be KV-skipped.
+    expect(store.size).toBe(0);
+    expect(kv.put).not.toHaveBeenCalled();
+    expect(sent).toHaveLength(0);
 
     const outcome = await handleReviewJob(prPayload(), { env: { IDEMPOTENCY_KV: kv, REVIEW_QUEUE: queue }, log });
 
     expect(outcome).toEqual({ kind: "enqueued" });
-    expect(queue.send).toHaveBeenCalledTimes(1);
+    expect(queue.send).toHaveBeenCalledTimes(2);
     expect(sent).toHaveLength(1);
-    expect(log.warn).toHaveBeenCalledTimes(1);
-    expect(log.warn.mock.calls[0]?.[1]).toContain("D1 fallback");
+    expect(store.size).toBe(1);
+  });
+});
+
+describe("handleReviewJob — empty head_sha (product lock, I1)", () => {
+  test('head_sha "" enqueues, never touches KV, and does not throw', async () => {
+    const { kv, store } = makeKvStub();
+    const { queue, sent } = makeQueueStub();
+    const log = makeLog();
+
+    const outcome = await handleReviewJob(prPayload({ head_sha: "" }), {
+      env: { IDEMPOTENCY_KV: kv, REVIEW_QUEUE: queue },
+      log,
+    });
+
+    expect(outcome).toEqual({ kind: "enqueued" });
+    expect(queue.send).toHaveBeenCalledTimes(1);
+    expect(sent[0]?.head_sha).toBe("");
+    expect(kv.get).not.toHaveBeenCalled();
+    expect(kv.put).not.toHaveBeenCalled();
+    expect(store.size).toBe(0);
   });
 
-  test("KV put failure logs a warning and still enqueues", async () => {
+  test('repeated head_sha "" deliveries always enqueue (never KV-skipped)', async () => {
     const { kv } = makeKvStub();
-    kv.put.mockRejectedValueOnce(new Error("kv write failed"));
     const { queue, sent } = makeQueueStub();
     const log = makeLog();
 
-    const outcome = await handleReviewJob(prPayload(), { env: { IDEMPOTENCY_KV: kv, REVIEW_QUEUE: queue }, log });
+    await handleReviewJob(prPayload({ head_sha: "" }), { env: { IDEMPOTENCY_KV: kv, REVIEW_QUEUE: queue }, log });
+    const outcome = await handleReviewJob(prPayload({ head_sha: "" }), {
+      env: { IDEMPOTENCY_KV: kv, REVIEW_QUEUE: queue },
+      log,
+    });
 
     expect(outcome).toEqual({ kind: "enqueued" });
-    expect(queue.send).toHaveBeenCalledTimes(1);
-    expect(sent).toHaveLength(1);
-    expect(log.warn).toHaveBeenCalledTimes(1);
+    expect(queue.send).toHaveBeenCalledTimes(2);
+    expect(sent).toHaveLength(2);
   });
 });
 
@@ -233,26 +263,61 @@ describe("payload hygiene — no secrets", () => {
   });
 });
 
-describe("putIfAbsent", () => {
-  test("returns true when the key already exists", async () => {
+describe("idempotencyHit", () => {
+  test("returns true when the key already exists and never writes", async () => {
     const { kv, store } = makeKvStub();
     store.set("idem:1:a/b:2:sha", { value: "1" });
     const log = makeLog();
 
-    const result = await putIfAbsent(kv, "idem:1:a/b:2:sha", {} as never, log);
+    const result = await idempotencyHit(kv, "idem:1:a/b:2:sha", {} as never, log);
 
     expect(result).toBe(true);
     expect(kv.put).not.toHaveBeenCalled();
   });
 
-  test("returns false and writes the key with TTL when absent", async () => {
+  test("returns false when the key is absent", async () => {
+    const { kv } = makeKvStub();
+    const log = makeLog();
+
+    const result = await idempotencyHit(kv, "idem:1:a/b:2:sha", {} as never, log);
+
+    expect(result).toBe(false);
+    expect(kv.put).not.toHaveBeenCalled();
+  });
+
+  test("KV get failure returns false (conservative pass) and logs a warning", async () => {
+    const { kv } = makeKvStub();
+    kv.get.mockRejectedValueOnce(new Error("kv down"));
+    const log = makeLog();
+
+    const result = await idempotencyHit(kv, "idem:1:a/b:2:sha", {} as never, log);
+
+    expect(result).toBe(false);
+    expect(log.warn).toHaveBeenCalledTimes(1);
+    expect(log.warn.mock.calls[0]?.[1]).toContain("D1 fallback");
+  });
+});
+
+describe("claimIdempotency", () => {
+  test("writes the key with TTL", async () => {
     const { kv, store } = makeKvStub();
     const log = makeLog();
 
-    const result = await putIfAbsent(kv, "idem:1:a/b:2:sha", {} as never, log);
+    await claimIdempotency(kv, "idem:1:a/b:2:sha", {} as never, log);
 
-    expect(result).toBe(false);
     expect(store.get("idem:1:a/b:2:sha")?.value).toBe("1");
     expect(store.get("idem:1:a/b:2:sha")?.expirationTtl).toBe(IDEMPOTENCY_SECONDS);
+    expect(log.warn).not.toHaveBeenCalled();
+  });
+
+  test("KV put failure logs a warning and does not throw", async () => {
+    const { kv } = makeKvStub();
+    kv.put.mockRejectedValueOnce(new Error("kv write failed"));
+    const log = makeLog();
+
+    await claimIdempotency(kv, "idem:1:a/b:2:sha", {} as never, log);
+
+    expect(log.warn).toHaveBeenCalledTimes(1);
+    expect(log.warn.mock.calls[0]?.[1]).toContain("D1 fallback");
   });
 });
