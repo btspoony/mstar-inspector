@@ -12,11 +12,18 @@
  *   - options.settings is an isolated in-memory Settings with fetch.enabled=false
  *   - session.dispose() called exactly once on success and on error
  *   - two runReviewSession calls create two distinct sessions
+ *
+ * The plugin root is environment-independent: ./plugin-root-fixture creates a
+ * temp fixture root and injects it via $M0_HARNESS_PLUGIN_ROOT before this
+ * file's imports of src/review/session are evaluated, so no test depends on
+ * the machine-absolute default root existing.
  */
 
 import { describe, expect, mock, test } from "bun:test";
 import { existsSync } from "node:fs";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
+import "./plugin-root-fixture";
+import { PLUGIN_ROOT_FIXTURE } from "./plugin-root-fixture";
 
 /** Shape of the mocked AgentSession returned by the fake createAgentSession. */
 interface MockSession {
@@ -97,9 +104,9 @@ mock.module("@oh-my-pi/pi-coding-agent", () => ({
 import {
   buildReviewPrompt,
   buildSessionOptions,
-  M0_HARNESS_PLUGIN_ROOT,
   PR_ADAPTER_PROMPT,
   REVIEW_TOOL_NAMES,
+  resolveHarnessRoot,
   runReviewSession,
 } from "../../src/review/session";
 
@@ -109,6 +116,19 @@ function resetMocks(): void {
   nextSessionId = 1;
   promptError = undefined;
 }
+
+/**
+ * Default root the resolver would select without the env override — mirror of
+ * resolveHarnessRoot in src/review/session.ts (sibling first, then the
+ * plan-locked absolute path). Used only to decide whether the conditional
+ * local check below runs; it never drives a hard failure.
+ */
+function defaultHarnessRoot(): string {
+  const sibling = resolve(import.meta.dir, "../../../mstar-harness");
+  return existsSync(sibling) ? sibling : "/Users/bibi/workspace/ai/mstar-harness";
+}
+
+const DEFAULT_HARNESS_ROOT = defaultHarnessRoot();
 
 describe("runReviewSession", () => {
   test("creates an in-memory session with a read-only tool whitelist", async () => {
@@ -137,16 +157,19 @@ describe("runReviewSession", () => {
     expect(options.settings.get("fetch.enabled")).toBe(false);
   });
 
-  test("loads the local mstar-harness plugin root and mentions mstar-audit", async () => {
+  test("loads the injected mstar-harness plugin root and mentions mstar-audit", async () => {
     resetMocks();
     await runReviewSession("diff --git a/x b/x\n");
 
-    // Plugin root resolves to the sibling ../mstar-harness (absolute equivalent).
-    expect(M0_HARNESS_PLUGIN_ROOT.endsWith("mstar-harness")).toBe(true);
-    expect(existsSync(join(M0_HARNESS_PLUGIN_ROOT, "skills", "mstar-audit"))).toBe(true);
+    // $M0_HARNESS_PLUGIN_ROOT (set by ./plugin-root-fixture at module scope)
+    // is the primary configuration surface: the resolved root IS the temp
+    // fixture, never a machine-absolute path.
+    expect(resolveHarnessRoot()).toBe(PLUGIN_ROOT_FIXTURE);
+    expect(existsSync(join(PLUGIN_ROOT_FIXTURE, "skills", "mstar-audit"))).toBe(true);
 
+    // The fixture path is what reaches the session options.
     const options = createdOptions[0]!;
-    expect(options.additionalExtensionPaths).toContain(M0_HARNESS_PLUGIN_ROOT);
+    expect(options.additionalExtensionPaths).toContain(PLUGIN_ROOT_FIXTURE);
     expect(options.skills.some((s) => s.name === "mstar-audit")).toBe(true);
     // The PR-adapter prompt pins the mstar-audit skill and the read-only contract.
     expect(options.appendSystemPrompt).toContain("mstar-audit");
@@ -154,6 +177,17 @@ describe("runReviewSession", () => {
     expect(PR_ADAPTER_PROMPT).toContain("Never write to any plan directory");
     expect(PR_ADAPTER_PROMPT).toContain("never post anything to GitHub");
   });
+
+  // Local M0 machine-layout check only: skipped when the default root is
+  // absent (CI and any other machine). The unit contract is fully covered by
+  // the fixture test above; a missing local root is a plan-level STOP, never
+  // a hard unit-test failure.
+  test.skipIf(!existsSync(join(DEFAULT_HARNESS_ROOT, "skills", "mstar-audit")))(
+    "real mstar-harness default root is present on this machine (skipped when the default root is absent)",
+    () => {
+      expect(existsSync(join(DEFAULT_HARNESS_ROOT, "skills", "mstar-audit"))).toBe(true);
+    },
+  );
 
   test("disposes the session exactly once on success", async () => {
     resetMocks();

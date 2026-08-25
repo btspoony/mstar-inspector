@@ -41,22 +41,36 @@ import {
   type Skill,
 } from "@oh-my-pi/pi-coding-agent";
 
+/**
+ * Environment override for the mstar-harness plugin root — the primary,
+ * documented configuration surface. It wins over the sibling-directory and
+ * absolute-path defaults so tests and CI can inject a fixture root. The test
+ * fixture mirrors this name (tests/review/plugin-root-fixture.ts).
+ */
+const HARNESS_ROOT_ENV = "M0_HARNESS_PLUGIN_ROOT";
+
 /** Plan-verified absolute fallback for the M0 plugin root (plan 02 Global Constraints). */
 const ABSOLUTE_HARNESS_ROOT = "/Users/bibi/workspace/ai/mstar-harness";
 
 /**
- * Resolve the local mstar-harness plugin root: prefer the sibling directory
- * `../mstar-harness` relative to this package (the main-repo layout), then the
- * plan-verified absolute path. M0 never installs from GitHub.
+ * Resolve the local mstar-harness plugin root, in priority order:
+ *   1. $M0_HARNESS_PLUGIN_ROOT — explicit configuration (primary surface);
+ *   2. the sibling directory `../mstar-harness` relative to this package
+ *      (the main-repo layout);
+ *   3. the plan-verified absolute path (local default fallback only).
+ * M0 never installs from GitHub.
+ *
+ * Resolved lazily per call (not cached at module load) so tests can inject a
+ * fixture root through the env var regardless of module evaluation order
+ * across test files.
  */
-function resolveHarnessRoot(): string {
+export function resolveHarnessRoot(): string {
+  const fromEnv = Bun.env[HARNESS_ROOT_ENV]?.trim();
+  if (fromEnv) return fromEnv;
   const sibling = resolve(import.meta.dir, "../../../mstar-harness");
   if (existsSync(sibling)) return sibling;
   return ABSOLUTE_HARNESS_ROOT;
 }
-
-/** Absolute path of the local mstar-harness plugin loaded into review sessions. */
-export const M0_HARNESS_PLUGIN_ROOT = resolveHarnessRoot();
 
 /** Read-only tool whitelist (plan 02 Global Constraints). */
 export const REVIEW_TOOL_NAMES = ["read", "grep", "glob"] as const;
@@ -181,10 +195,11 @@ export async function runReviewSession(diffText: string): Promise<string> {
   const cwd = await mkdtemp(join(tmpdir(), "omp-review-"));
   let session: AgentSession | undefined;
   try {
-    const skills = await loadHarnessSkills(M0_HARNESS_PLUGIN_ROOT);
+    const pluginRoot = resolveHarnessRoot();
+    const skills = await loadHarnessSkills(pluginRoot);
     const modelPattern = Bun.env.OMP_REVIEW_MODEL?.trim() || DEFAULT_MODEL_PATTERN;
     const created = await createAgentSession(
-      buildSessionOptions({ cwd, pluginRoot: M0_HARNESS_PLUGIN_ROOT, skills, modelPattern }),
+      buildSessionOptions({ cwd, pluginRoot, skills, modelPattern }),
     );
     session = created.session;
     await session.prompt(buildReviewPrompt(diffText));
