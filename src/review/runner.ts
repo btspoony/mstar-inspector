@@ -17,7 +17,7 @@
  *
  * Container environment (zero secrets in the image — keys arrive only via
  * exec env injection):
- *   - M0_HARNESS_PLUGIN_ROOT=/opt/mstar-harness   (image-preinstalled harness)
+ *   - HARNESS_PLUGIN_ROOT=/opt/mstar-harness      (image-preinstalled harness)
  *   - PI_CODING_AGENT_DIR=/opt/omp-agent           (image-provisioned models.yml)
  *   - ARK_API_KEY                                  (injected per exec by the consumer)
  *

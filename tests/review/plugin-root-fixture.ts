@@ -3,7 +3,7 @@
  *
  * Creates a minimal temp mstar-harness layout — a `skills/mstar-audit/SKILL.md`
  * marker mirroring the real plugin root just far enough for the session unit
- * tests — and injects it through $M0_HARNESS_PLUGIN_ROOT BEFORE
+ * tests — and injects it through $HARNESS_PLUGIN_ROOT BEFORE
  * src/review/session.ts is evaluated (import this module first). This makes
  * the plugin-root assertions environment-independent: they never depend on the
  * machine-absolute default root existing (it does not on GitHub Actions
@@ -17,7 +17,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 /** Must match `HARNESS_ROOT_ENV` in src/review/session.ts. */
-const HARNESS_ROOT_ENV = "M0_HARNESS_PLUGIN_ROOT";
+const HARNESS_ROOT_ENV = "HARNESS_PLUGIN_ROOT";
 
 /** Absolute path of the temp fixture plugin root. */
 export const PLUGIN_ROOT_FIXTURE = mkdtempSync(join(tmpdir(), "mstar-harness-"));
@@ -40,5 +40,5 @@ writeFileSync(
   ].join("\n"),
 );
 
-// Inject before src/review/session.ts evaluates M0_HARNESS_PLUGIN_ROOT.
+// Inject before src/review/session.ts evaluates HARNESS_PLUGIN_ROOT.
 process.env[HARNESS_ROOT_ENV] = PLUGIN_ROOT_FIXTURE;

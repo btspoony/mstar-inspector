@@ -14,7 +14,7 @@
  *   - two runReviewSession calls create two distinct sessions
  *
  * The plugin root is environment-independent: ./plugin-root-fixture creates a
- * temp fixture root and injects it via $M0_HARNESS_PLUGIN_ROOT before this
+ * temp fixture root and injects it via $HARNESS_PLUGIN_ROOT before this
  * file's imports of src/review/session are evaluated, so no test depends on
  * the machine-absolute default root existing.
  */
@@ -104,6 +104,7 @@ mock.module("@oh-my-pi/pi-coding-agent", () => ({
 import {
   buildReviewPrompt,
   buildSessionOptions,
+  parseModelSelectors,
   PR_ADAPTER_PROMPT,
   REVIEW_TOOL_NAMES,
   resolveHarnessRoot,
@@ -161,7 +162,7 @@ describe("runReviewSession", () => {
     resetMocks();
     await runReviewSession("diff --git a/x b/x\n");
 
-    // $M0_HARNESS_PLUGIN_ROOT (set by ./plugin-root-fixture at module scope)
+    // $HARNESS_PLUGIN_ROOT (set by ./plugin-root-fixture at module scope)
     // is the primary configuration surface: the resolved root IS the temp
     // fixture, never a machine-absolute path.
     expect(resolveHarnessRoot()).toBe(PLUGIN_ROOT_FIXTURE);
@@ -246,5 +247,94 @@ describe("buildReviewPrompt", () => {
     expect(prompt).toContain("<diff>");
     expect(prompt).toContain("diff --git a/x b/x");
     expect(prompt).toContain("mstar-audit");
+  });
+});
+describe("parseModelSelectors", () => {
+  test("splits a comma-separated list, trims, and drops empty entries", () => {
+    expect(
+      parseModelSelectors("ark-plan/deepseek-v4-flash, openrouter/anthropic/claude-sonnet-4 ,, gemini/gemini-2.5-pro"),
+    ).toEqual([
+      "ark-plan/deepseek-v4-flash",
+      "openrouter/anthropic/claude-sonnet-4",
+      "gemini/gemini-2.5-pro",
+    ]);
+  });
+
+  test("a single selector yields a one-element list", () => {
+    expect(parseModelSelectors("ark-plan/deepseek-v4-flash")).toEqual(["ark-plan/deepseek-v4-flash"]);
+  });
+
+  test("undefined / empty / whitespace-only values yield an empty list", () => {
+    expect(parseModelSelectors(undefined)).toEqual([]);
+    expect(parseModelSelectors("")).toEqual([]);
+    expect(parseModelSelectors("   ")).toEqual([]);
+    expect(parseModelSelectors(",")).toEqual([]);
+  });
+});
+
+describe("buildSessionOptions — retry fallback chain (T2)", () => {
+  test("injects retry.modelFallback=true and the default chain into isolated settings", () => {
+    const options = buildSessionOptions({
+      cwd: "/tmp/x",
+      pluginRoot: "/tmp/harness",
+      skills: [{ name: "mstar-audit", description: "d", filePath: "f", baseDir: "b", source: "s" }],
+      modelPattern: "ark-plan/deepseek-v4-flash",
+      fallbackChain: ["ark-plan/deepseek-v4-flash", "openrouter/anthropic/claude-sonnet-4"],
+    });
+    const settings = options.settings as unknown as { kind: string; get: (path: string) => unknown };
+    expect(settings.kind).toBe("isolated");
+    expect(settings.get("fetch.enabled")).toBe(false);
+    expect(settings.get("retry.modelFallback")).toBe(true);
+    expect(settings.get("retry.fallbackChains")).toEqual({
+      default: ["ark-plan/deepseek-v4-flash", "openrouter/anthropic/claude-sonnet-4"],
+    });
+  });
+
+  test("an omitted fallbackChain injects an empty default chain (no fallback configured)", () => {
+    const options = buildSessionOptions({
+      cwd: "/tmp/x",
+      pluginRoot: "/tmp/harness",
+      skills: [{ name: "mstar-audit", description: "d", filePath: "f", baseDir: "b", source: "s" }],
+      modelPattern: "ark-plan/deepseek-v4-flash",
+    });
+    const settings = options.settings as unknown as { kind: string; get: (path: string) => unknown };
+    expect(settings.get("retry.modelFallback")).toBe(true);
+    expect(settings.get("retry.fallbackChains")).toEqual({ default: [] });
+  });
+});
+
+describe("runReviewSession — OMP_REVIEW_MODEL comma chain (T2)", () => {
+  const OMP_REVIEW_MODEL = "OMP_REVIEW_MODEL";
+
+  test("first selector becomes the modelPattern; the full list rides as the fallback chain", async () => {
+    resetMocks();
+    const prev = Bun.env[OMP_REVIEW_MODEL];
+    Bun.env[OMP_REVIEW_MODEL] = "ark-plan/deepseek-v4-flash,openrouter/anthropic/claude-sonnet-4";
+    try {
+      await runReviewSession("diff --git a/x b/x\n");
+    } finally {
+      if (prev === undefined) delete Bun.env[OMP_REVIEW_MODEL];
+      else Bun.env[OMP_REVIEW_MODEL] = prev;
+    }
+    const options = createdOptions[0]!;
+    expect(options.modelPattern).toBe("ark-plan/deepseek-v4-flash");
+    expect(options.settings.get("retry.modelFallback")).toBe(true);
+    expect(options.settings.get("retry.fallbackChains")).toEqual({
+      default: ["ark-plan/deepseek-v4-flash", "openrouter/anthropic/claude-sonnet-4"],
+    });
+  });
+
+  test("unset OMP_REVIEW_MODEL falls back to the default model with an empty chain", async () => {
+    resetMocks();
+    const prev = Bun.env[OMP_REVIEW_MODEL];
+    delete Bun.env[OMP_REVIEW_MODEL];
+    try {
+      await runReviewSession("diff --git a/x b/x\n");
+    } finally {
+      if (prev !== undefined) Bun.env[OMP_REVIEW_MODEL] = prev;
+    }
+    const options = createdOptions[0]!;
+    expect(options.modelPattern).toBe("ark-plan/deepseek-v4-flash");
+    expect(options.settings.get("retry.fallbackChains")).toEqual({ default: [] });
   });
 });

@@ -15,7 +15,7 @@
  *   GET /smoke-review    → T2: clone the real PR head (btspoony/todo-bots#1),
  *                          write the unified diff to a file, exec the in-image
  *                          runner (src/review/runner.ts) with
- *                          M0_HARNESS_PLUGIN_ROOT=/opt/mstar-harness and
+ *                          HARNESS_PLUGIN_ROOT=/opt/mstar-harness and
  *                          ARK_API_KEY via exec env, parse the stdout with
  *                          parseReviewOutput, then destroy. The model key is
  *                          never baked into the image and never echoed in the
@@ -174,7 +174,7 @@ async function runReviewSmoke(env: SmokeEnv): Promise<Response> {
       // injected via exec env only (never baked into the image).
       const run = await sandbox.exec(`bun run ${RUNNER_PATH} --diff ${DIFF_PATH}`, {
         cwd: CLONE_DIR,
-        env: { M0_HARNESS_PLUGIN_ROOT: HARNESS_ROOT, ARK_API_KEY: env.ARK_API_KEY },
+        env: { HARNESS_PLUGIN_ROOT: HARNESS_ROOT, ARK_API_KEY: env.ARK_API_KEY },
       });
       const parsed = parseReviewOutput(run.stdout);
       result = {

@@ -36,7 +36,7 @@ Verified API surface (with type anchors at 18.0.4):
 | In-memory session manager | `SessionManager.inMemory()` | `session-manager.d.ts:466` |
 | Create session | `createAgentSession({...})` → `{ session }` | `sdk.d.ts` |
 | Read-only tools | `restrictToolNames: true` + `toolNames: ["read","grep","glob"]` | `sdk.d.ts:177-179` |
-| Local plugin load | `additionalExtensionPaths: [<plugin root>]` + `disableExtensionDiscovery: true`; root resolved via **`M0_HARNESS_PLUGIN_ROOT` env var (primary, portable — CI-proven)** → sibling dir → absolute local path (dev fallbacks) | `sdk.d.ts:104-106` |
+| Local plugin load | `additionalExtensionPaths: [<plugin root>]` + `disableExtensionDiscovery: true`; root resolved via **`HARNESS_PLUGIN_ROOT` env var (primary, portable — CI-proven)** → sibling dir → absolute local path (dev fallbacks) | `sdk.d.ts:104-106` |
 | Skill load | `loadSkillsFromDir(<dir>)` | `skills.d.ts:51-57` |
 | Lifecycle | `AgentSession.prompt()` / `getLastAssistantMessage()` / `dispose()` | `agent-session.d.ts:210/278/540` |
 | Settings isolation | `Settings.isolated({ "fetch.enabled": false })` passed as `options.settings` | `settings.d.ts:56-63`, `sdk.d.ts:228` |

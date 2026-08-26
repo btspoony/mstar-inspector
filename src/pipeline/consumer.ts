@@ -6,7 +6,7 @@
  * extraheader env) → `git rev-parse HEAD` for the AUTHORITATIVE sha →
  * dedup by that sha (hit → ack) → diff → exec the in-image runner
  * (env-injected GH_TOKEN/ARK_API_KEY/PI_CODING_AGENT_DIR/
- * M0_HARNESS_PLUGIN_ROOT) → parseReviewOutput → post the overall Review
+ * HARNESS_PLUGIN_ROOT) → parseReviewOutput → post the overall Review
  * comment FIRST → insertReview (duplicate → ack) → KV completion state →
  * finally destroy. Any step throwing → structured log + rethrow (queue
  * retry → DLQ). A runner result that is not the structured main path
@@ -272,7 +272,7 @@ async function processMessage(payload: ReviewJobPayload, deps: ProcessDeps): Pro
       cwd: CLONE_DIR,
       env: {
         ARK_API_KEY: deps.env.OMP_MODEL_KEY,
-        M0_HARNESS_PLUGIN_ROOT: HARNESS_ROOT,
+        HARNESS_PLUGIN_ROOT: HARNESS_ROOT,
         PI_CODING_AGENT_DIR: OMP_AGENT_DIR,
       },
       timeout: EXEC_TIMEOUT_RUNNER_MS,
@@ -306,9 +306,11 @@ async function processMessage(payload: ReviewJobPayload, deps: ProcessDeps): Pro
     const capped = capFindings(redactReviewOutput(parsed.output));
     const output = capped.output;
 
-    // 10. Post the overall review FIRST (the user-facing deliverable must not
-    // be lost to a later store failure), then persist. Always event COMMENT
-    // with the verdict rendered in the body (SEC-01 fix, comment.ts).
+    // 10. Upsert the overall review comment FIRST (the user-facing
+    // deliverable must not be lost to a later store failure), then persist.
+    // T5: the commenter creates the app's marker comment (round=1) on a miss
+    // and PATCHes it (round=N+1) on a hit — one comment per PR, never a new
+    // review per round. The verdict is rendered as text only (SEC-01).
     await deps.commenter.postReview({
       installationId: payload.installation_id,
       owner: payload.owner,

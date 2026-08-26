@@ -275,7 +275,7 @@ describe("createReviewConsumer", () => {
       cwd: "/workspace/repo",
       env: {
         ARK_API_KEY: "ark-key",
-        M0_HARNESS_PLUGIN_ROOT: "/opt/mstar-harness",
+        HARNESS_PLUGIN_ROOT: "/opt/mstar-harness",
         PI_CODING_AGENT_DIR: "/opt/omp-agent",
       },
       timeout: 600_000,

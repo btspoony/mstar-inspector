@@ -3,7 +3,7 @@
  *
  * One-shot in-memory omp session with a read-only tool whitelist
  * (read / grep / glob), the local mstar-harness plugin loaded from
- * M0_HARNESS_PLUGIN_ROOT, and a PR-adapter system prompt that pins the §5.2
+ * HARNESS_PLUGIN_ROOT, and a PR-adapter system prompt that pins the §5.2
  * output contract. Each call creates a fresh session and disposes it in a
  * finally block; sessions are never reused across requests.
  *
@@ -25,6 +25,26 @@
  * ~/.omp config is never inherited and the read tool's outbound URL fetch is
  * structurally off ("fetch.enabled" defaults true per settings-schema.d.ts;
  * tools/read.ts gates URL reads on session settings fetch.enabled).
+ *
+ * Model fallback (postdeploy feedback T2): OMP_REVIEW_MODEL is a
+ * comma-separated list of model selectors. The FIRST selector is the primary
+ * model (modelPattern); the full list is injected as the session's
+ * `retry.fallbackChains.default` chain with `retry.modelFallback: true`, so
+ * a failed turn on the primary falls back through the remaining selectors.
+ * Verified against the installed SDK (18.0.4, src/sdk.ts + src/session/):
+ *   - sdk.ts:2283 — `retry.modelFallback` gates fallback-chain consultation;
+ *   - sdk.ts:2286-2290 — `expandDefaultRetryFallbackChains(settings.get(
+ *     "retry.fallbackChains"), [...roles, configuredRole])` builds the
+ *     resolution context;
+ *   - session/retry-fallback-chains.ts:340-349 — `resolveRetryFallbackChainKey`
+ *     step 4: a model with no role assignment and no exact/wildcard key
+ *     resolves to the `default` chain (our case: no modelRoles are set);
+ *   - session/turn-recovery.ts:1455 — the runtime retry walk is gated on
+ *     `settings.get("retry.modelFallback")` and consults the chains via
+ *     `retryFallbackChainKeys` → `findRetryFallbackCandidates`, which slices
+ *     the effective chain AFTER the current selector (so the primary entry
+ *     in the default chain is inert — only the remaining selectors are
+ *     candidates).
  */
 
 import { existsSync } from "node:fs";
@@ -47,14 +67,14 @@ import {
  * absolute-path defaults so tests and CI can inject a fixture root. The test
  * fixture mirrors this name (tests/review/plugin-root-fixture.ts).
  */
-const HARNESS_ROOT_ENV = "M0_HARNESS_PLUGIN_ROOT";
+const HARNESS_ROOT_ENV = "HARNESS_PLUGIN_ROOT";
 
 /** Plan-verified absolute fallback for the M0 plugin root (plan 02 Global Constraints). */
 const ABSOLUTE_HARNESS_ROOT = "/Users/bibi/workspace/ai/mstar-harness";
 
 /**
  * Resolve the local mstar-harness plugin root, in priority order:
- *   1. $M0_HARNESS_PLUGIN_ROOT — explicit configuration (primary surface);
+ *   1. $HARNESS_PLUGIN_ROOT — explicit configuration (primary surface);
  *   2. the sibling directory `../mstar-harness` relative to this package
  *      (the main-repo layout);
  *   3. the plan-verified absolute path (local default fallback only).
@@ -77,6 +97,18 @@ export const REVIEW_TOOL_NAMES = ["read", "grep", "glob"] as const;
 
 /** Default model selector; override with the OMP_REVIEW_MODEL env var. */
 const DEFAULT_MODEL_PATTERN = "ark-plan/deepseek-v4-flash";
+/**
+ * Parse the OMP_REVIEW_MODEL value into model selectors: comma-separated,
+ * trimmed, empty entries dropped. `undefined`/empty → `[]` (the default
+ * model pattern is used, no fallback chain configured).
+ */
+export function parseModelSelectors(raw: string | undefined): string[] {
+  if (!raw) return [];
+  return raw
+    .split(",")
+    .map((selector) => selector.trim())
+    .filter((selector) => selector.length > 0);
+}
 
 /**
  * PR-adapter system prompt. Three locked constraints (plan 02 Clarify #9):
@@ -147,6 +179,13 @@ export interface ReviewSessionOptions {
   skills: Skill[];
   /** Model selector, e.g. "ark-plan/deepseek-v4-flash". */
   modelPattern: string;
+  /**
+   * Retry fallback chain (model selectors) injected as
+   * `retry.fallbackChains.default` with `retry.modelFallback: true`. The
+   * primary selector may be included — the SDK slices the effective chain
+   * after the active model, so only the remaining selectors are candidates.
+   */
+  fallbackChain?: string[];
 }
 
 /**
@@ -158,9 +197,14 @@ export function buildSessionOptions(opts: ReviewSessionOptions): CreateAgentSess
   return {
     cwd: opts.cwd,
     sessionManager: SessionManager.inMemory(opts.cwd),
-    // Isolated in-memory settings per session: no user ~/.omp config and no
-    // outbound URL fetch (read tool gates URL reads on fetch.enabled).
-    settings: Settings.isolated({ "fetch.enabled": false }),
+    // Isolated in-memory settings per session: no user ~/.omp config, no
+    // outbound URL fetch (read tool gates URL reads on fetch.enabled), and
+    // the retry fallback chain for the explicitly selected model (T2).
+    settings: Settings.isolated({
+      "fetch.enabled": false,
+      "retry.modelFallback": true,
+      "retry.fallbackChains": { default: opts.fallbackChain ?? [] },
+    }),
     restrictToolNames: true,
     toolNames: [...REVIEW_TOOL_NAMES],
     disableExtensionDiscovery: true,
@@ -197,9 +241,13 @@ export async function runReviewSession(diffText: string): Promise<string> {
   try {
     const pluginRoot = resolveHarnessRoot();
     const skills = await loadHarnessSkills(pluginRoot);
-    const modelPattern = Bun.env.OMP_REVIEW_MODEL?.trim() || DEFAULT_MODEL_PATTERN;
+    // T2: OMP_REVIEW_MODEL is a comma-separated selector list — the first
+    // selector is the primary model; the full list rides as the session's
+    // retry.fallbackChains.default (the SDK slices after the active model).
+    const selectors = parseModelSelectors(Bun.env.OMP_REVIEW_MODEL);
+    const modelPattern = selectors[0] ?? DEFAULT_MODEL_PATTERN;
     const created = await createAgentSession(
-      buildSessionOptions({ cwd, pluginRoot, skills, modelPattern }),
+      buildSessionOptions({ cwd, pluginRoot, skills, modelPattern, fallbackChain: selectors }),
     );
     session = created.session;
     await session.prompt(buildReviewPrompt(diffText));

@@ -1,23 +1,27 @@
 /**
- * Review comment assembly + posting (plan 06 Task 3).
+ * Review comment assembly + posting (plan 06 Task 3 + postdeploy feedback T5).
  *
  * Assembly (pure, unit-tested):
  *   - summary_md truncated to 8000 chars (plan Task 3 budget);
  *   - findings rendered as a markdown list with severity/category rendered
  *     VERBATIM from the schema enums (plan Global Constraints: the Comment
  *     must not rewrite enum semantics);
- *   - NO line-comment fields: the body is a single overall review comment
- *     (plan Done criteria: the posting path uses the Reviews API, not the
- *     line-comments API);
+ *   - NO line-comment fields: the body is a single overall review comment;
  *   - verdict rendered as text in the body header (`**Verdict: …**`).
  *
- * Posting: GitHub Reviews API via @octokit/rest + createAppAuth (same deps
- * and pattern as 04's diff.ts — the auth factory is invoked separately here
- * because pipeline MUST NOT import src/worker/** and no shared module is
- * extracted per plan). Every review is posted with event "COMMENT" (SEC-01
- * fix): the model verdict can be prompt-injected, so it must NEVER map onto
- * GitHub APPROVE/REQUEST_CHANGES (merge-gate/block privileges). The model
- * verdict is rendered as text in the body header instead.
+ * Posting (T5): single-comment UPSERT via the Issues comments API
+ * (@octokit/rest + createAppAuth — same deps and pattern as 04's diff.ts;
+ * the auth factory is invoked separately here because pipeline MUST NOT
+ * import src/worker/** and no shared module is extracted per plan). The
+ * first line of the body is a hidden HTML marker
+ * (`<!-- mstar-inspector:review:v1 round=N -->`); the app locates its own
+ * previous comment via issues.listComments (marker prefix match) and PATCHes
+ * it with round = N + 1, or creates a new comment with round = 1. This
+ * replaces the old pulls.createReview posting (one review per round — the
+ * comment-duplication root cause). The model verdict is prompt-injectable,
+ * so it is NEVER mapped onto GitHub APPROVE/REQUEST_CHANGES — the Issues
+ * comments API has no review event at all, and the verdict is rendered as
+ * text in the body header (SEC-01 guarantee, structurally).
  *
  * Secrets: APP_ID/PRIVATE_KEY come from the Worker env; the installation
  * token is minted in memory and never logged or stored (compass D).
@@ -29,9 +33,6 @@
 import { createAppAuth } from "@octokit/auth-app";
 import { Octokit } from "@octokit/rest";
 import type { ReviewFinding, ReviewOutput } from "../review/schema";
-
-/** GitHub review event for every posting (SEC-01 fix — never APPROVE/REQUEST_CHANGES). */
-export const REVIEW_EVENT = "COMMENT" as const;
 
 /** summary_md budget for the overall review body (plan Task 3). */
 export const SUMMARY_MD_LIMIT = 8000;
@@ -70,6 +71,78 @@ export function buildReviewBody(output: ReviewOutput, omittedFindings = 0): stri
   const findings = renderFindings(output.findings);
   const body = findings ? `${verdict}\n\n${summary}\n\n${findings}` : `${verdict}\n\n${summary}`;
   return omittedFindings > 0 ? `${body}\n\n*(+${omittedFindings} more findings omitted)*` : body;
+}
+// ---------------------------------------------------------------------------
+// Single-comment upsert (postdeploy feedback T5)
+// ---------------------------------------------------------------------------
+
+/** Hidden HTML marker prefix — the first line of every review comment body. */
+export const REVIEW_MARKER_PREFIX = "<!-- mstar-inspector:review:v1";
+
+/** Full marker regex: `<!-- mstar-inspector:review:v1 round=N -->`. */
+const REVIEW_MARKER_RE = /^<!-- mstar-inspector:review:v1 round=(\d+) -->/;
+
+/**
+ * Parse the round number from a review comment body. Returns null when the
+ * body does not start with a well-formed marker (malformed → treated as a
+ * miss by planUpsert).
+ */
+export function parseReviewRound(body: string): number | null {
+  const match = REVIEW_MARKER_RE.exec(body);
+  return match ? Number(match[1]) : null;
+}
+
+/**
+ * Find the app's own review comment in an issues.listComments response:
+ * the first comment whose body starts with the marker prefix. Returns null
+ * when no comment carries the marker.
+ */
+export function findReviewComment(
+  comments: Array<{ id: number; body?: string | null }>,
+): { id: number; body: string } | null {
+  for (const comment of comments) {
+    if (comment.body?.startsWith(REVIEW_MARKER_PREFIX)) {
+      return { id: comment.id, body: comment.body };
+    }
+  }
+  return null;
+}
+
+export type UpsertPlan =
+  | { action: "create"; round: 1 }
+  | { action: "update"; commentId: number; round: number };
+
+/**
+ * Decide create vs update for the review comment (T5):
+ *   - no marker comment → create with round=1;
+ *   - marker comment with a well-formed round N → update that comment with
+ *     round = N + 1;
+ *   - marker comment with a MALFORMED round → treated as a miss: create a
+ *     new comment with round=1.
+ */
+export function planUpsert(
+  comments: Array<{ id: number; body?: string | null }>,
+): UpsertPlan {
+  const existing = findReviewComment(comments);
+  if (existing === null) return { action: "create", round: 1 };
+  const round = parseReviewRound(existing.body);
+  if (round === null) return { action: "create", round: 1 };
+  return { action: "update", commentId: existing.id, round: round + 1 };
+}
+
+/**
+ * Assemble the upsert body: hidden marker line (round), the「第 N 次 review ·
+ * commit <short sha>」header, then the existing buildReviewBody rendering.
+ */
+export function buildUpsertBody(
+  output: ReviewOutput,
+  omittedFindings: number,
+  round: number,
+  headSha: string,
+): string {
+  const marker = `<!-- mstar-inspector:review:v1 round=${round} -->`;
+  const header = `第 ${round} 次 review · commit ${headSha.slice(0, 7)}`;
+  return `${marker}\n${header}\n\n${buildReviewBody(output, omittedFindings)}`;
 }
 
 // ---------------------------------------------------------------------------
@@ -201,7 +274,11 @@ export type PostReviewInput = {
 export type ReviewCommenter = {
   /** Mint an installation access token (injected as GH_TOKEN into exec env). */
   getInstallationToken(installationId: number): Promise<string>;
-  /** Post one overall review comment (Reviews API; no line comments). */
+  /**
+   * Upsert one overall review comment (Issues comments API; T5): create with
+   * round=1 on a miss, PATCH the app's own marker comment with round=N+1 on
+   * a hit. No line comments, no review events.
+   */
   postReview(input: PostReviewInput): Promise<void>;
 };
 /**
@@ -244,22 +321,39 @@ export function createReviewCommenter(env: CommenterEnv): ReviewCommenter {
         installationId: input.installationId,
         factory: (options: unknown) => new Octokit({ authStrategy: createAppAuth, auth: options }),
       });
-      const createReview = octokit.rest?.pulls?.createReview;
-      if (!createReview) {
+      const issues = octokit.rest?.issues;
+      if (!issues?.listComments || !issues?.updateComment || !issues?.createComment) {
         throw new Error(
-          "octokit is missing rest.pulls.createReview — cannot post the review; check the injected auth surface",
+          "octokit is missing rest.issues comment methods — cannot upsert the review comment; check the injected auth surface",
         );
       }
-      await createReview({
+      // T5: locate the app's own previous comment (marker prefix) and PATCH
+      // it with round = N + 1; otherwise create a new comment with round = 1.
+      // The Issues comments API has no review event — the model verdict is
+      // prompt-injectable and is rendered as text only (SEC-01, structural).
+      const { data: comments } = await issues.listComments({
         owner: input.owner,
         repo: input.repo,
-        pull_number: input.prNumber,
-        commit_id: input.headSha,
-        // SEC-01 fix: always COMMENT — the model verdict is prompt-injectable
-        // and must never drive GitHub's APPROVE/REQUEST_CHANGES privileges.
-        event: REVIEW_EVENT,
-        body: buildReviewBody(input.output, input.omittedFindings),
+        issue_number: input.prNumber,
+        per_page: 100,
       });
+      const plan = planUpsert(comments);
+      const body = buildUpsertBody(input.output, input.omittedFindings ?? 0, plan.round, input.headSha);
+      if (plan.action === "update") {
+        await issues.updateComment({
+          owner: input.owner,
+          repo: input.repo,
+          comment_id: plan.commentId,
+          body,
+        });
+      } else {
+        await issues.createComment({
+          owner: input.owner,
+          repo: input.repo,
+          issue_number: input.prNumber,
+          body,
+        });
+      }
     },
   };
 }
