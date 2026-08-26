@@ -56,12 +56,17 @@ RUN mkdir -p /opt/omp-agent
 COPY sandbox-image/omp-models.yml /opt/omp-agent/models.yml
 ENV PI_CODING_AGENT_DIR=/opt/omp-agent
 
-# Runner + omp SDK deps. Production-only install (wrangler/typescript
-# devDeps are not needed inside the sandbox); versions pinned by the frozen
-# lockfile (omp SDK 18.0.4 = package.json).
+# lockfile (omp SDK 18.0.4 = package.json). `--omit=optional` is NOT used:
+# pi-natives ships its platform binary as an optional dep, so omitting optionals
+# breaks the runner at load (T4 live smoke). Size control instead prunes the
+# transformers tree (local-embedding models only — the runner uses the remote
+# ark provider; SDK guards the optional-dep imports, verified live in-image).
 WORKDIR /opt/runner
 COPY package.json bun.lock ./
-RUN bun install --frozen-lockfile --production
+RUN bun install --frozen-lockfile --production \
+    && rm -rf node_modules/@huggingface node_modules/onnxruntime-node \
+          node_modules/onnxruntime-web node_modules/sharp node_modules/@img \
+    && rm -rf /root/.bun/install/cache
 COPY src/review /opt/runner/src/review
 
 # The runner resolves the harness root from this env (plan Clarify #5; the M0
