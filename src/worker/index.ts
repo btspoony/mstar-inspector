@@ -7,7 +7,10 @@
  * - POST /webhook → verified GitHub webhook → classify → (Task 2: enqueue)
  */
 import { Hono } from "hono";
+import type { MessageBatch } from "@cloudflare/workers-types";
 import type { Env } from "./env";
+import type { ReviewJobPayload } from "../contracts/review-job";
+import type { PipelineEnv } from "../pipeline/consumer";
 import { classifyWebhook } from "./webhooks";
 import { defaultLog, handleReviewJob } from "./handlers";
 
@@ -37,4 +40,13 @@ app.post("/webhook", async (c) => {
 
 export default {
   fetch: app.fetch,
+  // 06 queue wiring — the ONLY legal worker → pipeline edge (compass A).
+  // Dynamic import: the consumer statically loads the workerd-only
+  // @cloudflare/sandbox SDK, which Bun's test runner cannot resolve — a
+  // static import would break the fetch-path tests (platform-specific
+  // module exception to the static-import rule).
+  async queue(batch: MessageBatch<ReviewJobPayload>, env: Env & PipelineEnv): Promise<void> {
+    const { createReviewConsumer } = await import("../pipeline/consumer");
+    await createReviewConsumer(env)(batch);
+  },
 };

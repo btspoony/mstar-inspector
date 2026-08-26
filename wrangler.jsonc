@@ -1,10 +1,11 @@
 {
   // 04 skeleton: Worker + KV + Queue producer bindings only.
   // 05 appends d1_databases; 06 appends queues.consumers + sandbox (serial, single file).
-  // NO queues.consumers here — registering a consumer without code = message black hole.
   "name": "mstar-inspector",
   "main": "src/worker/index.ts",
   "compatibility_date": "2026-08-20",
+  // 06: nodejs_compat required by the Sandbox container binding (T1-verified).
+  "compatibility_flags": ["nodejs_compat"],
   "kv_namespaces": [
     {
       "binding": "IDEMPOTENCY_KV",
@@ -17,6 +18,18 @@
         "binding": "REVIEW_QUEUE",
         "queue": "review-queue"
       }
+    ],
+    // 06: consumer + DLQ. max_batch_size 1 — one review per batch (wall-clock
+    // budget for the ~2–4 min review); failures retry up to max_retries then
+    // land in review-dlq. Requires `wrangler queues create review-dlq` before
+    // deploy (plan Task 4).
+    "consumers": [
+      {
+        "queue": "review-queue",
+        "max_batch_size": 1,
+        "max_retries": 3,
+        "dead_letter_queue": "review-dlq"
+      }
     ]
   },
   // 05: D1 Central Review Store (binding DB enters the 06 PipelineEnv, not the
@@ -26,6 +39,33 @@
       "binding": "DB",
       "database_name": "mstar-inspector-db",
       "database_id": "7a737173-e202-430f-8b47-e087d5e885c4"
+    }
+  ],
+  // 06: Sandbox container binding (shape verified at T1 — containers[].class_name
+  // == durable_objects.bindings[].class_name == migrations[].new_sqlite_classes[0]
+  // == "Sandbox"). image_build_context "." lets the Dockerfile COPY
+  // package.json/bun.lock and src/review into the image (T2 finding).
+  "containers": [
+    {
+      "class_name": "Sandbox",
+      "image": "./sandbox-image/Dockerfile",
+      "image_build_context": ".",
+      "instance_type": "lite",
+      "max_instances": 1
+    }
+  ],
+  "durable_objects": {
+    "bindings": [
+      {
+        "class_name": "Sandbox",
+        "name": "SANDBOX"
+      }
+    ]
+  },
+  "migrations": [
+    {
+      "new_sqlite_classes": ["Sandbox"],
+      "tag": "v1"
     }
   ]
 }
