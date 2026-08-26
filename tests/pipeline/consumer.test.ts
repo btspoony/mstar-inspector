@@ -1,9 +1,11 @@
 /**
  * Consumer tests (plan 06 Task 3) — full-mock flow. The sandbox adapter and
- * the commenter are mocked (mock.module on the resolved module paths); the
- * review store is the REAL store over the bun:sqlite D1 double (tests/store/
- * helpers.ts) so the consumer's store wiring is exercised for real. gitops
- * command construction and parseReviewOutput stay real.
+ * the commenter are injected via createReviewConsumer's overrides (DI — no
+ * process-wide mock.module on relative module paths, which leaks across test
+ * files sharing a worker on CI, run 32946710695); the review store is the REAL
+ * store over the bun:sqlite D1 double (tests/store/helpers.ts) so the
+ * consumer's store wiring is exercised for real. gitops command construction
+ * and parseReviewOutput stay real.
  *
  * Acceptance points (plan Task 3 / brief):
  *   - findByIdempotencyKey hit → ack (no sandbox, no post, no insert)
@@ -21,6 +23,7 @@ import type { ReviewJobPayload } from "../../src/contracts/review-job";
 import type { ReviewOutput } from "../../src/review/schema";
 import { createReviewStore } from "../../src/store/reviews";
 import { createTestD1 } from "../store/helpers";
+import type { ReviewCommenter } from "../../src/pipeline/comment";
 
 const VALID_OUTPUT: ReviewOutput = {
   verdict: "request_changes",
@@ -40,7 +43,7 @@ const VALID_OUTPUT: ReviewOutput = {
 
 const SHA = "0123456789abcdef0123456789abcdef01234567";
 
-// --- sandbox mock -----------------------------------------------------------
+// --- sandbox fake (injected via createReviewConsumer overrides) -------------
 const sandboxCalls: Array<{ cmd: string; opts?: unknown }> = [];
 let runnerStdout = "";
 let resolvedSha = SHA;
@@ -71,27 +74,38 @@ const fakeSandbox = {
   }),
 };
 
-mock.module("../../src/pipeline/sandbox", () => ({
-  getSandbox: mock(async () => fakeSandbox),
+// Load-shim only: consumer.ts statically imports ./sandbox → @cloudflare/sandbox,
+// whose real dist references the workerd builtin `cloudflare:workers`
+// (unresolvable in Bun's test runner). The consumer never calls this
+// getSandbox — every test injects the fake via createReviewConsumer overrides.
+mock.module("@cloudflare/sandbox", () => ({
+  getSandbox: mock(async () => {
+    throw new Error("unexpected: consumer tests inject getSandbox via overrides");
+  }),
+  Sandbox: class Sandbox {},
 }));
 
-// --- commenter mock ---------------------------------------------------------
+// --- commenter fake (injected via createReviewConsumer overrides) -----------
 const commenterCalls: Array<{ op: string; args: unknown[] }> = [];
 let tokenResult = "ghs_installation_token";
 let commentError: Error | undefined;
 
-mock.module("../../src/pipeline/comment", () => ({
-  createReviewCommenter: mock(() => ({
-    getInstallationToken: mock(async (installationId: number) => {
-      commenterCalls.push({ op: "token", args: [installationId] });
-      return tokenResult;
-    }),
-    postReview: mock(async (input: unknown) => {
-      commenterCalls.push({ op: "post", args: [input] });
-      if (commentError) throw commentError;
-    }),
-  })),
-}));
+const fakeCommenter: ReviewCommenter = {
+  getInstallationToken: mock(async (installationId: number) => {
+    commenterCalls.push({ op: "token", args: [installationId] });
+    return tokenResult;
+  }),
+  postReview: mock(async (input: unknown) => {
+    commenterCalls.push({ op: "post", args: [input] });
+    if (commentError) throw commentError;
+  }),
+};
+
+// Injected into every consumer under test (DI replaces the old mock.module).
+const testOverrides = {
+  commenter: fakeCommenter,
+  getSandbox: async () => fakeSandbox,
+};
 
 // --- consumer under test (dynamic import: mocks must be registered first) ---
 const { createReviewConsumer } = await import("../../src/pipeline/consumer");
@@ -195,7 +209,7 @@ describe("createReviewConsumer", () => {
       output: VALID_OUTPUT,
       raw: JSON.stringify(VALID_OUTPUT),
     });
-    const consumer = createReviewConsumer(makeEnv({ DB: db as never }));
+    const consumer = createReviewConsumer(makeEnv({ DB: db as never }), undefined, testOverrides);
 
     await consumer(makeBatch(makePayload()));
 
@@ -210,7 +224,7 @@ describe("createReviewConsumer", () => {
     reset();
     runnerStdout = JSON.stringify(VALID_OUTPUT);
     const db = createTestD1();
-    const consumer = createReviewConsumer(makeEnv({ DB: db as never }));
+    const consumer = createReviewConsumer(makeEnv({ DB: db as never }), undefined, testOverrides);
 
     await consumer(makeBatch(makePayload()));
 
@@ -267,7 +281,7 @@ describe("createReviewConsumer", () => {
     resolvedSha = "abcdefabcdefabcdefabcdefabcdefabcdefabcd";
     runnerStdout = JSON.stringify(VALID_OUTPUT);
     const db = createTestD1();
-    const consumer = createReviewConsumer(makeEnv({ DB: db as never }));
+    const consumer = createReviewConsumer(makeEnv({ DB: db as never }), undefined, testOverrides);
 
     await consumer(makeBatch(makePayload({ head_sha: null, triggered_by: "review_command" })));
 
@@ -284,7 +298,7 @@ describe("createReviewConsumer", () => {
     reset();
     runnerStdout = "not json at all";
     const db = createTestD1();
-    const consumer = createReviewConsumer(makeEnv({ DB: db as never }));
+    const consumer = createReviewConsumer(makeEnv({ DB: db as never }), undefined, testOverrides);
 
     await expect(consumer(makeBatch(makePayload()))).rejects.toThrow(/parse failed/);
 
@@ -298,7 +312,7 @@ describe("createReviewConsumer", () => {
     runnerStdout = JSON.stringify(VALID_OUTPUT);
     commentError = new Error("post failed");
     const db = createTestD1();
-    const consumer = createReviewConsumer(makeEnv({ DB: db as never }));
+    const consumer = createReviewConsumer(makeEnv({ DB: db as never }), undefined, testOverrides);
 
     await expect(consumer(makeBatch(makePayload()))).rejects.toThrow("post failed");
 
@@ -310,7 +324,7 @@ describe("createReviewConsumer", () => {
     reset();
     sandboxError = new Error("container unavailable");
     const db = createTestD1();
-    const consumer = createReviewConsumer(makeEnv({ DB: db as never }));
+    const consumer = createReviewConsumer(makeEnv({ DB: db as never }), undefined, testOverrides);
 
     await expect(consumer(makeBatch(makePayload()))).rejects.toThrow("container unavailable");
     expect(reviewCount(db)).toBe(0);
@@ -321,7 +335,7 @@ describe("createReviewConsumer", () => {
     reset();
     cloneExitCode = 128;
     const db = createTestD1();
-    const consumer = createReviewConsumer(makeEnv({ DB: db as never }));
+    const consumer = createReviewConsumer(makeEnv({ DB: db as never }), undefined, testOverrides);
 
     await expect(consumer(makeBatch(makePayload()))).rejects.toThrow(/clone failed/);
     expect(commenterCalls.filter((c) => c.op === "post")).toHaveLength(0);
@@ -334,7 +348,7 @@ describe("createReviewConsumer", () => {
     runnerExitCode = 1;
     runnerStderr = "review: session failed: boom";
     const db = createTestD1();
-    const consumer = createReviewConsumer(makeEnv({ DB: db as never }));
+    const consumer = createReviewConsumer(makeEnv({ DB: db as never }), undefined, testOverrides);
 
     await expect(consumer(makeBatch(makePayload()))).rejects.toThrow(/runner failed/);
     expect(commenterCalls.filter((c) => c.op === "post")).toHaveLength(0);
@@ -351,7 +365,7 @@ describe("createReviewConsumer", () => {
     });
     runnerStderr = "review mode: summary\n";
     const db = createTestD1();
-    const consumer = createReviewConsumer(makeEnv({ DB: db as never }), testLog);
+    const consumer = createReviewConsumer(makeEnv({ DB: db as never }), testLog, testOverrides);
 
     await expect(consumer(makeBatch(makePayload()))).rejects.toThrow(/structured mode marker/);
 
@@ -366,7 +380,7 @@ describe("createReviewConsumer", () => {
     reset();
     runnerStdout = "not json at all";
     const db = createTestD1();
-    const consumer = createReviewConsumer(makeEnv({ DB: db as never }), testLog);
+    const consumer = createReviewConsumer(makeEnv({ DB: db as never }), testLog, testOverrides);
 
     await expect(consumer(makeBatch(makePayload()))).rejects.toThrow(/parse failed/);
 
@@ -383,7 +397,7 @@ describe("createReviewConsumer", () => {
     resolvedSha = "";
     runnerStdout = JSON.stringify(VALID_OUTPUT);
     const db = createTestD1();
-    const consumer = createReviewConsumer(makeEnv({ DB: db as never }), testLog);
+    const consumer = createReviewConsumer(makeEnv({ DB: db as never }), testLog, testOverrides);
 
     await expect(
       consumer(makeBatch(makePayload({ head_sha: null, triggered_by: "review_command" }))),
@@ -401,7 +415,7 @@ describe("createReviewConsumer", () => {
     runnerStdout = JSON.stringify(VALID_OUTPUT);
     kvPutError = new Error("kv down");
     const db = createTestD1();
-    const consumer = createReviewConsumer(makeEnv({ DB: db as never }), testLog);
+    const consumer = createReviewConsumer(makeEnv({ DB: db as never }), testLog, testOverrides);
 
     await consumer(makeBatch(makePayload())); // resolves — KV failure is warn-only
 
@@ -417,7 +431,7 @@ describe("createReviewConsumer", () => {
     runnerStdout = JSON.stringify(VALID_OUTPUT);
     destroyError = new Error("destroy boom");
     const db = createTestD1();
-    const consumer = createReviewConsumer(makeEnv({ DB: db as never }), testLog);
+    const consumer = createReviewConsumer(makeEnv({ DB: db as never }), testLog, testOverrides);
 
     await consumer(makeBatch(makePayload())); // resolves — destroy failure is warn-only
 

@@ -90,7 +90,16 @@ type ProcessDeps = {
   store: ReviewStore;
   commenter: ReviewCommenter;
   log: ConsumerLog;
+  getSandbox: (binding: unknown, id: string) => Promise<ReviewSandbox>;
 };
+
+/**
+ * Test seam for createReviewConsumer: additive overrides for the process
+ * dependencies (store / commenter / getSandbox). The plan contract
+ * `createReviewConsumer(env)` is unchanged — every field defaults to the
+ * production implementation when omitted.
+ */
+type ConsumerOverrides = Partial<Pick<ProcessDeps, "store" | "commenter" | "getSandbox">>;
 
 /**
  * Create the queue consumer. The store and commenter are created once per
@@ -98,16 +107,21 @@ type ProcessDeps = {
  * cache across messages). Each message gets its own sandbox, destroyed in
  * finally; failures rethrow so the queue retries and eventually DLQs.
  *
- * `log` is injectable for tests (default: structured JSON lines).
+ * `log` is injectable for tests (default: structured JSON lines). `overrides`
+ * lets tests substitute the store / commenter / sandbox factory without
+ * process-wide mock.module (bun's relative-path mock.module leaks across test
+ * files sharing a worker — CI run 32946710695).
  */
 export function createReviewConsumer(
   env: PipelineEnv,
   log: ConsumerLog = defaultConsumerLog,
+  overrides: ConsumerOverrides = {},
 ): (batch: MessageBatch<ReviewJobPayload>) => Promise<void> {
   const deps: ProcessDeps = {
     env,
-    store: createReviewStore(env.DB),
-    commenter: createReviewCommenter(env),
+    store: overrides.store ?? createReviewStore(env.DB),
+    commenter: overrides.commenter ?? createReviewCommenter(env),
+    getSandbox: overrides.getSandbox ?? ((binding, id) => getSandbox(binding, id)),
     log,
   };
   return async (batch) => {
@@ -140,7 +154,7 @@ async function processMessage(payload: ReviewJobPayload, deps: ProcessDeps): Pro
     // → gh pr view inside the sandbox.
     let headSha = payload.head_sha;
     if (!headSha) {
-      sandbox = await getSandbox(deps.env.SANDBOX, sandboxId);
+      sandbox = await deps.getSandbox(deps.env.SANDBOX, sandboxId);
       const token = await deps.commenter.getInstallationToken(payload.installation_id);
       const resolved = await sandbox.exec(
         resolveHeadShaCommand(payload.owner, payload.repo, payload.pr_number),
@@ -177,7 +191,7 @@ async function processMessage(payload: ReviewJobPayload, deps: ProcessDeps): Pro
 
     // 3. Sandbox (created lazily; destroyed in finally).
     if (sandbox === null) {
-      sandbox = await getSandbox(deps.env.SANDBOX, sandboxId);
+      sandbox = await deps.getSandbox(deps.env.SANDBOX, sandboxId);
     }
     const token = await deps.commenter.getInstallationToken(payload.installation_id);
     const cmds = buildGitOpsCommands({
