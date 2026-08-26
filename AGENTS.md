@@ -22,9 +22,8 @@ notice. The live Cloudflare Worker is remote — it is not this checklist.
 
 - `docker ps -a` — names `workerd-mstar-inspector-*` / `mstar-inspector-*`, or
   image `mstar-inspector-sandbox:*` (including unnamed containers on those tags).
-- local images tagged `mstar-inspector-sandbox:*`, `mstar-review-runner-test:*`,
-  and `registry.cloudflare.com/*/mstar-inspector-sandbox:*` (this repo's
-  custom sandbox builds and CF-registry copies of those builds).
+- local images tagged `mstar-inspector-sandbox:*` and
+  `mstar-review-runner-test:*` (this repo's custom sandbox builds / trial tags).
 - orphan `workerd` processes whose argv/cwd is this repo or a deleted
   `mstar-inspector-wt-*` worktree (`ppid=1` after the parent wrangler died).
 - leftover git worktrees (`git worktree list`) and local branches already
@@ -50,6 +49,12 @@ notice. The live Cloudflare Worker is remote — it is not this checklist.
   projects reuse: `cloudflare/sandbox`, `cloudflare/proxy-everything`,
   `cloudflare-dev/sandbox`, any other `cloudflare/*` Hub image. Next
   `wrangler dev` / Sandbox smoke reuses them; deleting only forces a re-pull.
+- pull, push, login, or `docker rmi` `registry.cloudflare.com/*`. That registry
+  is wrangler's **deploy** staging/remote for Containers — not a local-dev
+  leftover. `wrangler deploy` may also retag the same local image ID with a
+  `registry.cloudflare.com/.../mstar-inspector-sandbox:<hash>` name; leave
+  that tag. Untagging it does not delete the remote copy, and local-dev
+  cleanup must not talk to that registry.
 - disable, redeploy, or `wrangler` the live Worker as "cleanup".
 - kill a `workerd` whose parent is a still-running `wrangler dev` the user owns.
 
