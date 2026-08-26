@@ -255,12 +255,14 @@ describe("createReviewConsumer", () => {
       expect.stringContaining("bun run '/opt/runner/src/review/runner.ts' --diff '/workspace/pr.diff'"),
     ]);
     // Clone: git transport auth via scoped extraheader env (bugbot A1) — the
-    // token lives in GIT_CONFIG_VALUE_0, never in the command string.
+    // token lives in GIT_CONFIG_VALUE_0, never in the command string. Form is
+    // basic auth with username `x-access-token` (GitHub app-token git auth);
+    // a `Bearer` header would be rejected by GitHub even on public repos.
     expect(sandboxCalls[0]!.opts).toEqual({
       env: {
         GIT_CONFIG_COUNT: "1",
         GIT_CONFIG_KEY_0: "http.https://github.com/.extraheader",
-        GIT_CONFIG_VALUE_0: "Authorization: Bearer ghs_installation_token",
+        GIT_CONFIG_VALUE_0: "AUTHORIZATION: basic eC1hY2Nlc3MtdG9rZW46Z2hzX2luc3RhbGxhdGlvbl90b2tlbg==",
       },
       timeout: 120_000,
     });

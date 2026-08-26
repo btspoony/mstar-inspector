@@ -87,7 +87,7 @@ export default {
             env: {
               GIT_CONFIG_COUNT: "1",
               GIT_CONFIG_KEY_0: "http.extraheader",
-              GIT_CONFIG_VALUE_0: `Authorization: Bearer ${env.GH_TOKEN}`,
+              GIT_CONFIG_VALUE_0: `AUTHORIZATION: basic ${btoa(`x-access-token:${env.GH_TOKEN}`)}`,
             },
           },
         );

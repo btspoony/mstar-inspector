@@ -202,14 +202,18 @@ async function processMessage(payload: ReviewJobPayload, deps: ProcessDeps): Pro
 
     // 2. Clone the PR head branch. Git transport auth via scoped extraheader
     // env (bugbot A1 — git ignores GH_TOKEN, so private-repo clones failed
-    // without this; same pattern as the smoke-entry git fallback). GH_TOKEN
-    // stays for the gh steps below. Credentials are exec env only — never in
-    // the command string, never in the image, never in logs.
+    // without this; same pattern as the smoke-entry git fallback). The header
+    // is the GitHub-app token form `AUTHORIZATION: basic base64(x-access-token:<token>)`
+    // (basic auth with username `x-access-token`) — NOT `Bearer <token>`,
+    // which GitHub's git server rejects even on public repos (post-remediation
+    // deploy finding; verified live). GH_TOKEN stays for the gh steps below.
+    // Credentials are exec env only — never in the command string, never in
+    // the image, never in logs.
     const clone = await sandbox.exec(cmds.clone, {
       env: {
         GIT_CONFIG_COUNT: "1",
         GIT_CONFIG_KEY_0: "http.https://github.com/.extraheader",
-        GIT_CONFIG_VALUE_0: `Authorization: Bearer ${token}`,
+        GIT_CONFIG_VALUE_0: `AUTHORIZATION: basic ${btoa(`x-access-token:${token}`)}`,
       },
       timeout: EXEC_TIMEOUT_GIT_MS,
     });
