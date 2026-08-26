@@ -2,8 +2,13 @@
  * Webhook verification + event filtering tests.
  * Real signatures via `@octokit/webhooks` `sign()` (Web Crypto) — no mocks
  * for the crypto path; mock env is injected at the handler level (Task 2).
+ *
+ * Phase 5 B5: /review is an exact command (not a bare prefix) and only the
+ * PR author or the repository owner may trigger it.
+ * Phase 5 B6b: every signature/secret reject path emits a structured
+ * warning with a machine `reason` and no secret material.
  */
-import { describe, expect, test } from "bun:test";
+import { describe, expect, mock, test } from "bun:test";
 import { Webhooks } from "@octokit/webhooks";
 import { classifyEvent, classifyWebhook, PULL_REQUEST_ACTIONS } from "../../src/worker/webhooks";
 
@@ -12,6 +17,12 @@ const HEAD_SHA = "0123456789abcdef0123456789abcdef01234567";
 
 function makeWebhooks(secret: string): Webhooks {
   return new Webhooks({ secret });
+}
+
+function makeLog() {
+  const info = mock((_fields: unknown, _msg?: string) => {});
+  const warn = mock((_fields: unknown, _msg?: string) => {});
+  return { info, warn };
 }
 
 function pullRequestBody(action: string, overrides: Record<string, unknown> = {}): string {
@@ -32,9 +43,13 @@ function issueCommentBody(
     action: "created",
     installation: { id: 123 },
     comment: { body: "/review" },
-    issue: { number: 42, pull_request: { url: "https://api.github.com/repos/test-owner/test-repo/pulls/42" } },
+    issue: {
+      number: 42,
+      user: { login: "test-author" },
+      pull_request: { url: "https://api.github.com/repos/test-owner/test-repo/pulls/42" },
+    },
     repository: { name: "test-repo", owner: { login: "test-owner" } },
-    sender: { type: "User", login: "human" },
+    sender: { type: "User", login: "test-author" },
     ...overrides,
   });
 }
@@ -98,6 +113,50 @@ describe("classifyWebhook — signature verification (fail-closed)", () => {
   });
 });
 
+describe("classifyWebhook — reject paths log structured warnings (B6b)", () => {
+  test("secret misconfig warns with reason=secret_misconfigured and no secret field", async () => {
+    const log = makeLog();
+    const outcome = await classifyWebhook("development", "{}", "sha256=deadbeef", "pull_request", log);
+    expect(outcome.kind).toBe("reject");
+    expect(log.warn).toHaveBeenCalledTimes(1);
+    const [fields, msg] = log.warn.mock.calls[0] ?? [];
+    expect(fields).toMatchObject({ event: "unknown", reason: "secret_misconfigured" });
+    expect(msg).toContain("500");
+    // The secret itself is never a log field — only a fixed diagnostic
+    // reason/detail (which is a constant string, not the secret value).
+    expect(Object.keys(fields as Record<string, unknown>)).not.toContain("secret");
+    expect((fields as Record<string, unknown>).detail).toBe(
+      "secret missing, empty, or the default 'development'",
+    );
+  });
+
+  test("missing signature warns with reason=missing_signature", async () => {
+    const log = makeLog();
+    await classifyWebhook(SECRET, "{}", null, "pull_request", log);
+    expect(log.warn).toHaveBeenCalledTimes(1);
+    const [fields, msg] = log.warn.mock.calls[0] ?? [];
+    expect(fields).toMatchObject({ event: "unknown", reason: "missing_signature" });
+    expect(msg).toContain("401");
+  });
+
+  test("bad signature warns with reason=signature_verification_failed", async () => {
+    const log = makeLog();
+    await classifyWebhook(SECRET, "{}", "sha256=deadbeef", "pull_request", log);
+    expect(log.warn).toHaveBeenCalledTimes(1);
+    const [fields, msg] = log.warn.mock.calls[0] ?? [];
+    expect(fields).toMatchObject({ event: "unknown", reason: "signature_verification_failed" });
+    expect(msg).toContain("401");
+  });
+
+  test("a valid request logs no rejection warning", async () => {
+    const log = makeLog();
+    const body = pullRequestBody("opened");
+    const signature = await makeWebhooks(SECRET).sign(body);
+    await classifyWebhook(SECRET, body, signature, "pull_request", log);
+    expect(log.warn).not.toHaveBeenCalled();
+  });
+});
+
 describe("classifyEvent — pull_request whitelist", () => {
   for (const action of PULL_REQUEST_ACTIONS) {
     test(`pull_request.${action} yields a job`, () => {
@@ -127,8 +186,8 @@ describe("classifyEvent — pull_request whitelist", () => {
   });
 });
 
-describe("classifyEvent — issue_comment /review command", () => {
-  test("issue_comment.created with /review on a PR yields a job with null head_sha", () => {
+describe("classifyEvent — issue_comment /review exact command (B5)", () => {
+  test("issue_comment.created with /review on a PR by the author yields a job with null head_sha", () => {
     const outcome = classifyEvent("issue_comment", issueCommentBody());
     expect(outcome.kind).toBe("job");
     if (outcome.kind === "job") {
@@ -144,14 +203,29 @@ describe("classifyEvent — issue_comment /review command", () => {
     }
   });
 
+  test("/review with trailing whitespace is accepted (trimmed)", () => {
+    const outcome = classifyEvent("issue_comment", issueCommentBody({ comment: { body: "  /review  " } }));
+    expect(outcome.kind).toBe("job");
+  });
+
+  test("/review with arguments is accepted", () => {
+    const outcome = classifyEvent("issue_comment", issueCommentBody({ comment: { body: "/review focused on auth" } }));
+    expect(outcome.kind).toBe("job");
+  });
+
   test("case-variant /Review body is ignored (case-sensitive)", () => {
     const outcome = classifyEvent("issue_comment", issueCommentBody({ comment: { body: "/Review" } }));
-    expect(outcome).toEqual({ kind: "ignore", reason: "comment body does not start with /review" });
+    expect(outcome).toEqual({ kind: "ignore", reason: "comment body is not the exact /review command" });
+  });
+
+  test("/reviewing prefix does NOT trigger (exact command)", () => {
+    const outcome = classifyEvent("issue_comment", issueCommentBody({ comment: { body: "/reviewing the diff" } }));
+    expect(outcome).toEqual({ kind: "ignore", reason: "comment body is not the exact /review command" });
   });
 
   test("non-/review body is ignored", () => {
     const outcome = classifyEvent("issue_comment", issueCommentBody({ comment: { body: "please review" } }));
-    expect(outcome).toEqual({ kind: "ignore", reason: "comment body does not start with /review" });
+    expect(outcome).toEqual({ kind: "ignore", reason: "comment body is not the exact /review command" });
   });
 
   test("comment on a non-PR issue is ignored", () => {
@@ -170,6 +244,43 @@ describe("classifyEvent — issue_comment /review command", () => {
   test("issue_comment.edited is ignored", () => {
     const outcome = classifyEvent("issue_comment", issueCommentBody({ action: "edited" }));
     expect(outcome).toEqual({ kind: "ignore", reason: "issue_comment action edited is not whitelisted" });
+  });
+});
+
+describe("classifyEvent — /review actor allowlist (B5)", () => {
+  test("the PR author is allowed", () => {
+    const outcome = classifyEvent(
+      "issue_comment",
+      issueCommentBody({ sender: { type: "User", login: "test-author" } }),
+    );
+    expect(outcome.kind).toBe("job");
+  });
+
+  test("the repository owner is allowed", () => {
+    const outcome = classifyEvent(
+      "issue_comment",
+      issueCommentBody({ sender: { type: "User", login: "test-owner" } }),
+    );
+    expect(outcome.kind).toBe("job");
+  });
+
+  test("a random commenter is ignored with a structured actor_not_allowed warning", () => {
+    const log = makeLog();
+    const outcome = classifyEvent(
+      "issue_comment",
+      issueCommentBody({ sender: { type: "User", login: "hacker-123" } }),
+      log,
+    );
+    expect(outcome).toEqual({ kind: "ignore", reason: "comment actor is not the PR author or repo owner" });
+    expect(log.warn).toHaveBeenCalledTimes(1);
+    const [fields, msg] = log.warn.mock.calls[0] ?? [];
+    expect(fields).toMatchObject({ event: "unknown", reason: "actor_not_allowed" });
+    expect(msg).toContain("not the PR author or repo owner");
+  });
+
+  test("a missing sender login is ignored (fail closed)", () => {
+    const outcome = classifyEvent("issue_comment", issueCommentBody({ sender: { type: "User" } }));
+    expect(outcome).toEqual({ kind: "ignore", reason: "comment actor is not the PR author or repo owner" });
   });
 });
 

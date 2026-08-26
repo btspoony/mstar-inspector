@@ -67,6 +67,41 @@ const outputSchema: z.ZodType<ReviewOutput> = z.object({
   findings: z.array(findingSchema),
 });
 
+/**
+
+ * Cap on findings per review (Phase 5 B4): 50. The GitHub review body and
+ * the D1 findings write both have practical limits; beyond that the most
+ * severe findings are kept and the rest are omitted (body footer notes the
+ * count). Severity priority: critical > warning > suggestion > info; ties
+ * keep their original order (stable sort).
+ */
+export const FINDINGS_MAX = 50;
+
+const SEVERITY_RANK: Record<FindingSeverity, number> = {
+  critical: 0,
+  warning: 1,
+  suggestion: 2,
+  info: 3,
+};
+
+/**
+ * Severity-priority cap on a ReviewOutput's findings (stable within a
+ * severity). Returns the capped output plus the number of omitted findings;
+ * a within-limit input is returned unchanged with omitted = 0.
+ */
+export function capFindings(
+  output: ReviewOutput,
+  limit: number = FINDINGS_MAX,
+): { output: ReviewOutput; omitted: number } {
+  if (output.findings.length <= limit) {
+    return { output, omitted: 0 };
+  }
+  const findings = [...output.findings]
+    .sort((a, b) => SEVERITY_RANK[a.severity] - SEVERITY_RANK[b.severity])
+    .slice(0, limit);
+  return { output: { ...output, findings }, omitted: output.findings.length - limit };
+}
+
 /** Extract the first ```json fenced block, or null. */
 function extractJsonFence(text: string): string | null {
   const match = text.match(/```json\s*([\s\S]*?)```/);

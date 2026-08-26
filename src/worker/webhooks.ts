@@ -4,12 +4,16 @@
  * Fail-closed secret policy (compass S4, along M0): missing, empty, or the
  * Probot default "development" secret → reject with zero side effects.
  * Signature verification uses `@octokit/webhooks` (Web Crypto, workerd-safe).
+ * Every reject path logs a structured warning (no secret material) so the
+ * operator can spot bad configurations / probes (Phase 5 B6).
  *
  * Event whitelist (compass S4 / plan Clarify 3):
  * - `pull_request.{opened,synchronize,reopened}`
- * - `issue_comment.created` whose body starts with `/review` (case-sensitive)
- *   on a pull request thread, and whose sender is NOT a bot (prevents
- *   self-comment loops).
+ * - `issue_comment.created` whose body is EXACTLY `/review` or starts with
+ *   `/review ` (case-sensitive; `/reviewing` must not trigger), on a pull
+ *   request thread, sent by a non-bot whose login is the PR author or the
+ *   repository owner (Phase 5 B5 actor allowlist — prevents quota abuse by
+ *   arbitrary commenters on public installs).
  * Everything else returns 200 quickly — GitHub retries non-2xx, so
  * uninteresting events must not 4xx.
  */
@@ -21,6 +25,9 @@ import type { HandlerLog } from "./handlers";
 export const REVIEW_COMMAND_PREFIX = "/review";
 
 export const PULL_REQUEST_ACTIONS = ["opened", "synchronize", "reopened"] as const;
+
+/** Webhook body size cap (B6): checked BEFORE the body is buffered (413). */
+export const WEBHOOK_BODY_LIMIT = 1_000_000;
 
 /**
  * Module-level verifier singleton (QC F-005): the hot path constructed a
@@ -97,11 +104,17 @@ const issueCommentSchema = z.object({
   installation: installationSchema,
   comment: z.object({ body: z.string() }).nullable().optional(),
   issue: z
-    .object({ number: z.number(), pull_request: z.unknown().optional() })
+    .object({
+      number: z.number(),
+      // PR author (issue.user.login) — the actor allowlist (B5).
+      user: z.object({ login: z.string() }).nullable().optional(),
+      pull_request: z.unknown().optional(),
+    })
     .nullable()
     .optional(),
   repository: repositorySchema,
-  sender: z.object({ type: z.string().optional() }).nullable().optional(),
+  // Commenter identity: type (bot guard) + login (actor allowlist, B5).
+  sender: z.object({ type: z.string().optional(), login: z.string().optional() }).nullable().optional(),
 });
 
 /**
@@ -109,7 +122,9 @@ const issueCommentSchema = z.object({
  * reject. The fail-closed secret check runs first — no verification, no
  * side effects when the secret is missing/empty/"development". The
  * `Webhooks` verifier is constructed lazily only after the secret passes,
- * so an empty/default secret can never reach the crypto path.
+ * so an empty/default secret can never reach the crypto path. Each reject
+ * path emits a structured warning with a machine reason and NO secret
+ * material (Phase 5 B6).
  *
  * `log` is optional (defaults to no logging) so the pure classifier stays
  * testable without a sink; the fetch entry passes `defaultLog`.
@@ -122,20 +137,36 @@ export async function classifyWebhook(
   log?: HandlerLog,
 ): Promise<WebhookOutcome> {
   if (!secret || secret === "development") {
+    log?.warn(
+      { event: "unknown", reason: "secret_misconfigured", detail: "secret missing, empty, or the default 'development'" },
+      "webhook rejected with 500 — secret misconfigured",
+    );
     return { kind: "reject", status: 500, reason: "webhook secret is missing, empty, or the default 'development'" };
   }
   if (!signature) {
+    log?.warn(
+      { event: "unknown", reason: "missing_signature", detail: "X-Hub-Signature-256 header absent" },
+      "webhook rejected with 401 — missing signature",
+    );
     return { kind: "reject", status: 401, reason: "missing X-Hub-Signature-256 header" };
   }
   const valid = await verifySignature(getWebhooks(secret).verify, rawBody, signature, log);
   if (!valid) {
+    log?.warn(
+      { event: "unknown", reason: "signature_verification_failed", detail: "HMAC did not verify (or malformed)" },
+      "webhook rejected with 401 — signature verification failed",
+    );
     return { kind: "reject", status: 401, reason: "signature verification failed" };
   }
-  return classifyEvent(eventName, rawBody);
+  return classifyEvent(eventName, rawBody, log);
 }
 
 /** Event whitelist → ReviewJobPayload. Returns `ignore` for everything else. */
-export function classifyEvent(eventName: string | null, rawBody: string): WebhookOutcome {
+export function classifyEvent(
+  eventName: string | null,
+  rawBody: string,
+  log?: HandlerLog,
+): WebhookOutcome {
   if (!eventName) {
     return { kind: "ignore", reason: "missing X-GitHub-Event header" };
   }
@@ -143,7 +174,7 @@ export function classifyEvent(eventName: string | null, rawBody: string): Webhoo
     return classifyPullRequest(rawBody);
   }
   if (eventName === "issue_comment") {
-    return classifyIssueComment(rawBody);
+    return classifyIssueComment(rawBody, log);
   }
   return { kind: "ignore", reason: `event ${eventName} is not whitelisted` };
 }
@@ -183,7 +214,7 @@ function classifyPullRequest(rawBody: string): WebhookOutcome {
   };
 }
 
-function classifyIssueComment(rawBody: string): WebhookOutcome {
+function classifyIssueComment(rawBody: string, log?: HandlerLog): WebhookOutcome {
   const parsed = parseBody(rawBody);
   if (parsed === null) {
     return { kind: "reject", status: 400, reason: "invalid JSON body" };
@@ -196,15 +227,34 @@ function classifyIssueComment(rawBody: string): WebhookOutcome {
   if (action !== "created") {
     return { kind: "ignore", reason: `issue_comment action ${action} is not whitelisted` };
   }
+  // Exact command (B5): `/review` or `/review <anything>` — a bare `/review`
+  // prefix (e.g. `/reviewing`) must NOT trigger.
   const body = comment?.body ?? "";
-  if (!body.startsWith(REVIEW_COMMAND_PREFIX)) {
-    return { kind: "ignore", reason: "comment body does not start with /review" };
+  const trimmed = body.trim();
+  if (trimmed !== REVIEW_COMMAND_PREFIX && !trimmed.startsWith(`${REVIEW_COMMAND_PREFIX} `)) {
+    return { kind: "ignore", reason: "comment body is not the exact /review command" };
   }
   if (issue?.pull_request == null) {
     return { kind: "ignore", reason: "comment is not on a pull request thread" };
   }
   if (sender?.type === "Bot") {
     return { kind: "ignore", reason: "comment sent by a bot (self-comment loop guard)" };
+  }
+  // Actor allowlist (B5): only the PR author or the repository owner may
+  // trigger a review. Ignore + structured log otherwise (quota abuse guard).
+  const actorLogin = sender?.login ?? null;
+  const authorLogin = issue?.user?.login ?? null;
+  const ownerLogin = repository?.owner?.login ?? null;
+  if (actorLogin === null || (actorLogin !== authorLogin && actorLogin !== ownerLogin)) {
+    log?.warn(
+      {
+        event: "unknown",
+        reason: "actor_not_allowed",
+        detail: `actor=${actorLogin ?? "null"} author=${authorLogin ?? "null"} owner=${ownerLogin ?? "null"}`,
+      },
+      "review command ignored — commenter is not the PR author or repo owner",
+    );
+    return { kind: "ignore", reason: "comment actor is not the PR author or repo owner" };
   }
   const installationId = installation?.id;
   const owner = repository?.owner.login;

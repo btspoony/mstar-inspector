@@ -1,12 +1,15 @@
 /**
- * Review comment assembly tests (plan 06 Task 3) — pure functions only (the
- * posting path needs a live octokit; the consumer test covers the wiring).
+ * Review comment assembly tests (plan 06 Task 3 + Phase 5 B1/B4) — pure
+ * functions only (the posting path needs a live octokit; the consumer test
+ * covers the wiring).
  *
- * Acceptance points (plan Task 3 / brief):
- *   - verdict → event mapping: approve→APPROVE, request_changes→REQUEST_CHANGES,
- *     comment→COMMENT
+ * Acceptance points:
+ *   - every review is posted with event COMMENT (SEC-01 fix — the model
+ *     verdict must never map onto GitHub APPROVE/REQUEST_CHANGES)
+ *   - the model verdict is rendered as text in the body header
  *   - summary_md truncated at 8000 chars
  *   - findings rendered with severity/category verbatim (enum SSOT)
+ *   - omitted-findings footer when the severity cap dropped findings (B4)
  *   - the assembled body carries NO line-comment fields (overall review only)
  */
 
@@ -14,17 +17,15 @@ import { describe, expect, test } from "bun:test";
 import {
   buildReviewBody,
   renderFindings,
+  REVIEW_EVENT,
   SUMMARY_MD_LIMIT,
   truncateSummary,
-  verdictToEvent,
 } from "../../src/pipeline/comment";
 import type { ReviewOutput } from "../../src/review/schema";
 
-describe("verdictToEvent", () => {
-  test("maps approve → APPROVE, request_changes → REQUEST_CHANGES, comment → COMMENT", () => {
-    expect(verdictToEvent("approve")).toBe("APPROVE");
-    expect(verdictToEvent("request_changes")).toBe("REQUEST_CHANGES");
-    expect(verdictToEvent("comment")).toBe("COMMENT");
+describe("review event (SEC-01)", () => {
+  test("every posting uses COMMENT — the model verdict is never mapped onto APPROVE/REQUEST_CHANGES", () => {
+    expect(REVIEW_EVENT).toBe("COMMENT");
   });
 });
 
@@ -100,8 +101,9 @@ describe("buildReviewBody", () => {
     ],
   };
 
-  test("assembles the truncated summary plus the findings section", () => {
+  test("renders the verdict as text in the body header (SEC-01)", () => {
     const body = buildReviewBody(output);
+    expect(body.startsWith("**Verdict: request_changes**")).toBe(true);
     expect(body).toContain("Two issues found in the diff.");
     expect(body).toContain("## Findings");
     expect(body).toContain("**[warning] Fractional expiry comparison**");
@@ -117,9 +119,9 @@ describe("buildReviewBody", () => {
     expect(body).not.toContain('"line"');
   });
 
-  test("empty findings → summary only, no findings section", () => {
+  test("empty findings → verdict header + summary only, no findings section", () => {
     const body = buildReviewBody({ ...output, findings: [] });
-    expect(body).toBe("Two issues found in the diff.");
+    expect(body).toBe("**Verdict: request_changes**\n\nTwo issues found in the diff.");
     expect(body).not.toContain("## Findings");
   });
 
@@ -127,5 +129,15 @@ describe("buildReviewBody", () => {
     const body = buildReviewBody({ ...output, summary_md: "x".repeat(SUMMARY_MD_LIMIT + 50) });
     expect(body.length).toBeLessThan(SUMMARY_MD_LIMIT + 200);
     expect(body).toContain("…\n\n## Findings");
+  });
+
+  test("omitted-findings count renders as a body footer (B4)", () => {
+    const body = buildReviewBody(output, 10);
+    expect(body.endsWith("\n\n*(+10 more findings omitted)*")).toBe(true);
+  });
+
+  test("no footer when nothing was omitted (B4)", () => {
+    const body = buildReviewBody(output, 0);
+    expect(body).not.toContain("more findings omitted");
   });
 });

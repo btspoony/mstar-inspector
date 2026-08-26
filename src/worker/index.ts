@@ -11,7 +11,7 @@ import type { MessageBatch } from "@cloudflare/workers-types";
 import type { Env } from "./env";
 import type { ReviewJobPayload } from "../contracts/review-job";
 import type { PipelineEnv } from "../pipeline/consumer";
-import { classifyWebhook } from "./webhooks";
+import { classifyWebhook, WEBHOOK_BODY_LIMIT } from "./webhooks";
 import { defaultLog, handleReviewJob } from "./handlers";
 
 const app = new Hono<{ Bindings: Env }>();
@@ -20,6 +20,20 @@ app.get("/healthz", (c) => c.json({ ok: true }));
 
 app.post("/webhook", async (c) => {
   const secret = c.env.WEBHOOK_SECRET;
+  // Body-size cap checked BEFORE buffering the body (B6): an oversized
+  // payload is rejected with 413 before any signature work or body read.
+  const contentLength = Number(c.req.header("content-length") ?? "0");
+  if (contentLength > WEBHOOK_BODY_LIMIT) {
+    defaultLog.warn(
+      {
+        event: "unknown",
+        reason: "webhook_body_too_large",
+        detail: `content_length=${contentLength}`,
+      },
+      "webhook rejected with 413 — body exceeds size limit",
+    );
+    return c.text("payload too large", 413);
+  }
   const rawBody = await c.req.text();
   const signature = c.req.header("x-hub-signature-256") ?? null;
   const eventName = c.req.header("x-github-event") ?? null;

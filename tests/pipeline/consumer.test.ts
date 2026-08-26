@@ -137,7 +137,9 @@ const testLog: ConsumerLog = {
 // --- helpers ----------------------------------------------------------------
 const kvPuts: Array<{ key: string; value: string; options?: unknown }> = [];
 let kvPutError: Error | undefined;
+let kvGetValue: string | null = null;
 const kv = {
+  get: mock(async () => kvGetValue),
   put: mock(async (key: string, value: string, options?: unknown) => {
     kvPuts.push({ key, value, options });
     if (kvPutError) throw kvPutError;
@@ -203,6 +205,7 @@ function reset(): void {
   tokenResult = "ghs_installation_token";
   commentError = undefined;
   kvPutError = undefined;
+  kvGetValue = null;
 }
 
 /** Count review rows in the real D1 double. */
@@ -505,5 +508,150 @@ describe("createReviewConsumer", () => {
     expect(warnLine).toBeDefined();
     expect(warnLine!.fields.idempotency_key).toBe(`idem:123:acme/widgets:42:${SHA}`);
     expect(warnLine!.fields.sandbox_id).toMatch(/^review-/);
+  });
+
+  test("model output containing secrets is redacted before post and insert (B2/SEC-02)", async () => {
+    reset();
+    const leaked: ReviewOutput = {
+      verdict: "comment",
+      summary_md: `Provider key AKIAIOSFODNN7EXAMPLE and ${"a".repeat(40)} leaked`,
+      findings: [
+        {
+          severity: "critical",
+          category: "security",
+          file_path: "src/auth.ts",
+          line_start: 1,
+          line_end: 1,
+          title: "Leak",
+          body: "token ghp_abcdef1234567890 and Bearer ghs_abcdef1234567890",
+        },
+      ],
+    };
+    runnerStdout = JSON.stringify(leaked);
+    const db = createTestD1();
+    const consumer = createReviewConsumer(makeEnv({ DB: db as never }), undefined, testOverrides);
+
+    await consumer(makeBatch(makePayload()));
+
+    // The POSTED review carries no secret-shaped text.
+    const posted = commenterCalls.find((c) => c.op === "post")!.args[0] as {
+      output: ReviewOutput;
+      omittedFindings: number;
+    };
+    expect(posted.output.summary_md).not.toContain("AKIAIOSFODNN7EXAMPLE");
+    expect(posted.output.summary_md).not.toContain("a".repeat(40));
+    expect(posted.output.findings[0]!.body).not.toContain("ghp_abcdef1234567890");
+    expect(posted.output.findings[0]!.body).not.toContain("ghs_abcdef1234567890");
+    expect(posted.omittedFindings).toBe(0);
+
+    // The stored row (summary_md + raw_output) carries no secret-shaped text.
+    const row = db.raw.query("SELECT * FROM reviews").get() as { summary_md: string; raw_output: string };
+    expect(row.summary_md).not.toContain("AKIAIOSFODNN7EXAMPLE");
+    expect(row.raw_output).not.toContain("AKIAIOSFODNN7EXAMPLE");
+    expect(row.raw_output).not.toContain("ghp_abcdef1234567890");
+  });
+
+  test("findings over the cap are trimmed to Top-50 by severity on post AND insert (B4)", async () => {
+    reset();
+    const findings: Array<{
+      severity: "critical" | "warning" | "suggestion" | "info";
+      category: "security" | "logic" | "style" | "perf" | "test" | "other";
+      file_path: string;
+      line_start: number;
+      line_end: number;
+      title: string;
+      body: string;
+    }> = Array.from({ length: 60 }, (_, i) => ({
+      severity: "info" as const,
+      category: "style" as const,
+      file_path: "f.ts",
+      line_start: i,
+      line_end: i,
+      title: `F${i}`,
+      body: "",
+    }));
+    findings[0]!.severity = "critical"; // earliest critical keeps its slot
+    findings[59]!.severity = "critical"; // later critical sorts after F0
+    findings[58]!.severity = "warning";
+    runnerStdout = JSON.stringify({ verdict: "comment", summary_md: "many findings", findings });
+    const db = createTestD1();
+    const consumer = createReviewConsumer(makeEnv({ DB: db as never }), undefined, testOverrides);
+
+    await consumer(makeBatch(makePayload()));
+
+    const posted = commenterCalls.find((c) => c.op === "post")!.args[0] as {
+      output: ReviewOutput;
+      omittedFindings: number;
+    };
+    expect(posted.output.findings).toHaveLength(50);
+    expect(posted.omittedFindings).toBe(10);
+    // Severity priority: the two criticals first (stable — F0 before F59),
+    // then the warning, then info.
+    expect(posted.output.findings[0]!.title).toBe("F0");
+    expect(posted.output.findings[1]!.title).toBe("F59");
+    expect(posted.output.findings[2]!.title).toBe("F58");
+    expect(posted.output.findings[2]!.severity).toBe("warning");
+
+    // The same capped array landed in D1 (渲染与落库同一裁剪数组).
+    const stored = db.raw.query("SELECT COUNT(*) AS n FROM findings").get() as { n: number };
+    expect(stored.n).toBe(50);
+  });
+
+  test("KV done-state hit → ack without post/insert (B3)", async () => {
+    reset();
+    kvGetValue = "done";
+    runnerStdout = JSON.stringify(VALID_OUTPUT);
+    const db = createTestD1();
+    const consumer = createReviewConsumer(makeEnv({ DB: db as never }), testLog, testOverrides);
+
+    await consumer(makeBatch(makePayload()));
+
+    // Clone + rev-parse run (the authoritative sha is only known post-clone),
+    // then the KV done hit acks before any post/insert.
+    expect(sandboxCalls.map((c) => c.cmd)).toEqual([
+      expect.stringContaining("git init '/workspace/repo'"),
+      expect.stringContaining("git -C '/workspace/repo' rev-parse HEAD"),
+    ]);
+    expect(commenterCalls.filter((c) => c.op === "post")).toHaveLength(0);
+    expect(reviewCount(db)).toBe(0);
+    expect(kvPuts).toHaveLength(0);
+    expect(destroyCalls).toBe(1);
+    const infoLine = logLines.find((l) => l.level === "info" && l.msg.includes("KV idempotency hit"));
+    expect(infoLine).toBeDefined();
+  });
+
+  test("insert failure after a successful post → one comment, KV done, warn + ack, no rethrow (B3)", async () => {
+    reset();
+    runnerStdout = JSON.stringify(VALID_OUTPUT);
+    const db = createTestD1();
+    const failingStore = {
+      insertReview: mock(async () => {
+        throw new Error("d1 down");
+      }),
+      findByIdempotencyKey: mock(async () => null),
+      listByRepo: mock(async () => []),
+    };
+    const consumer = createReviewConsumer(
+      makeEnv({ DB: db as never }),
+      testLog,
+      { ...testOverrides, store: failingStore },
+    );
+
+    await consumer(makeBatch(makePayload())); // resolves (ack) — no rethrow
+
+    // Exactly one comment was posted; the KV done-state was written BEFORE
+    // the insert attempt, so a retry acks instead of re-posting.
+    expect(commenterCalls.filter((c) => c.op === "post")).toHaveLength(1);
+    expect(kvPuts).toEqual([
+      {
+        key: `idem:123:acme/widgets:42:${SHA}`,
+        value: "done",
+        options: { expirationTtl: 86400 },
+      },
+    ]);
+    const warnLine = logLines.find((l) => l.level === "warn" && l.msg.includes("insert failed"));
+    expect(warnLine).toBeDefined();
+    expect(warnLine!.fields.idempotency_key).toBe(`idem:123:acme/widgets:42:${SHA}`);
+    expect(destroyCalls).toBe(1);
   });
 });

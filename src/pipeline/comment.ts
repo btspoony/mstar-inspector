@@ -8,39 +8,33 @@
  *     must not rewrite enum semantics);
  *   - NO line-comment fields: the body is a single overall review comment
  *     (plan Done criteria: the posting path uses the Reviews API, not the
- *     line-comments API).
+ *     line-comments API);
+ *   - verdict rendered as text in the body header (`**Verdict: …**`).
  *
  * Posting: GitHub Reviews API via @octokit/rest + createAppAuth (same deps
  * and pattern as 04's diff.ts — the auth factory is invoked separately here
  * because pipeline MUST NOT import src/worker/** and no shared module is
- * extracted per plan). verdict → event: approve→APPROVE,
- * request_changes→REQUEST_CHANGES, comment→COMMENT.
+ * extracted per plan). Every review is posted with event "COMMENT" (SEC-01
+ * fix): the model verdict can be prompt-injected, so it must NEVER map onto
+ * GitHub APPROVE/REQUEST_CHANGES (merge-gate/block privileges). The model
+ * verdict is rendered as text in the body header instead.
  *
  * Secrets: APP_ID/PRIVATE_KEY come from the Worker env; the installation
  * token is minted in memory and never logged or stored (compass D).
+ * Model-produced text (summary/finding bodies) is redacted BEFORE it reaches
+ * this module (consumer choke point, SEC-02 fix) so a prompt-injected token
+ * can never appear in the public review body or D1 raw_output.
  */
 
 import { createAppAuth } from "@octokit/auth-app";
 import { Octokit } from "@octokit/rest";
-import type { ReviewFinding, ReviewOutput, ReviewVerdict } from "../review/schema";
+import type { ReviewFinding, ReviewOutput } from "../review/schema";
 
-/** GitHub review event names (Reviews API). */
-export type ReviewEvent = "APPROVE" | "REQUEST_CHANGES" | "COMMENT";
+/** GitHub review event for every posting (SEC-01 fix — never APPROVE/REQUEST_CHANGES). */
+export const REVIEW_EVENT = "COMMENT" as const;
 
 /** summary_md budget for the overall review body (plan Task 3). */
 export const SUMMARY_MD_LIMIT = 8000;
-
-/** verdict → review event (plan Task 3 mapping; enum SSOT = findings-schema). */
-export function verdictToEvent(verdict: ReviewVerdict): ReviewEvent {
-  switch (verdict) {
-    case "approve":
-      return "APPROVE";
-    case "request_changes":
-      return "REQUEST_CHANGES";
-    case "comment":
-      return "COMMENT";
-  }
-}
 
 /** Truncate summary_md to the body budget (char-based; GitHub counts chars). */
 export function truncateSummary(md: string, limit: number = SUMMARY_MD_LIMIT): string {
@@ -64,11 +58,18 @@ export function renderFindings(findings: ReviewFinding[]): string {
   return `## Findings\n\n${lines.join("\n\n")}`;
 }
 
-/** Assemble the overall review body: truncated summary + findings section. */
-export function buildReviewBody(output: ReviewOutput): string {
+/**
+ * Assemble the overall review body: verdict header + truncated summary +
+ * findings section + optional omitted-findings footer. `omittedFindings` is
+ * the count of findings dropped by the consumer's severity cap (B4) — the
+ * footer tells readers the review is a Top-N subset.
+ */
+export function buildReviewBody(output: ReviewOutput, omittedFindings = 0): string {
+  const verdict = `**Verdict: ${output.verdict}**`;
   const summary = truncateSummary(output.summary_md);
   const findings = renderFindings(output.findings);
-  return findings ? `${summary}\n\n${findings}` : summary;
+  const body = findings ? `${verdict}\n\n${summary}\n\n${findings}` : `${verdict}\n\n${summary}`;
+  return omittedFindings > 0 ? `${body}\n\n*(+${omittedFindings} more findings omitted)*` : body;
 }
 
 // ---------------------------------------------------------------------------
@@ -193,6 +194,8 @@ export type PostReviewInput = {
   prNumber: number;
   headSha: string;
   output: ReviewOutput;
+  /** Findings dropped by the severity cap (B4) — rendered as a body footer. */
+  omittedFindings?: number;
 };
 
 export type ReviewCommenter = {
@@ -252,8 +255,10 @@ export function createReviewCommenter(env: CommenterEnv): ReviewCommenter {
         repo: input.repo,
         pull_number: input.prNumber,
         commit_id: input.headSha,
-        event: verdictToEvent(input.output.verdict),
-        body: buildReviewBody(input.output),
+        // SEC-01 fix: always COMMENT — the model verdict is prompt-injectable
+        // and must never drive GitHub's APPROVE/REQUEST_CHANGES privileges.
+        event: REVIEW_EVENT,
+        body: buildReviewBody(input.output, input.omittedFindings),
       });
     },
   };

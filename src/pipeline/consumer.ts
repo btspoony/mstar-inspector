@@ -32,7 +32,8 @@
 import type { D1Database, KVNamespace, MessageBatch } from "@cloudflare/workers-types";
 import type { ReviewJobPayload } from "../contracts/review-job";
 import { idemKey, IDEMPOTENCY_SECONDS, type IdempotencyKey } from "../contracts/idem";
-import { parseReviewOutput } from "../review/schema";
+import { parseReviewOutput, capFindings } from "../review/schema";
+import { redactReviewOutput, redactSecrets } from "./redact";
 import { createReviewStore, type ReviewStore } from "../store/reviews";
 import { getSandbox, type ReviewSandbox } from "./sandbox";
 import { buildGitOpsCommands } from "./gitops";
@@ -105,6 +106,28 @@ type ProcessDeps = {
   getSandbox: (binding: unknown, id: string) => Promise<ReviewSandbox>;
 };
 
+/**
+ * KV done-state read (B3): `done` means a review was already POSTED for this
+ * sha (the consumer writes it right after posting, before the D1 insert).
+ * The worker's enqueue marker uses the SAME key format with value "1", so
+ * only the literal "done" counts as completed — "1" means "enqueued, not yet
+ * processed" and falls through to the D1 check. KV failure → warn + fall
+ * through (D1 is the durable backstop).
+ */
+async function kvDoneHit(
+  kv: KVNamespace,
+  key: string,
+  fields: ConsumerLogFields,
+  log: ConsumerLog,
+): Promise<boolean> {
+  try {
+    return (await kv.get(key)) === "done";
+  } catch (err) {
+    const detail = err instanceof Error ? err.message : String(err);
+    log.warn(fields, `idempotency KV read failed — falling back to D1: ${detail}`);
+    return false;
+  }
+}
 /**
  * Test seam for createReviewConsumer: additive overrides for the process
  * dependencies (store / commenter / getSandbox). The plan contract
@@ -218,9 +241,15 @@ async function processMessage(payload: ReviewJobPayload, deps: ProcessDeps): Pro
       sandbox_id: sandboxId,
     };
 
-    // 4. Dedup: a stored review for this checked-out sha → ack (no post, no
-    // insert). Keyed off the checkout, so a force-push between delivery and
-    // processing is never mis-deduped against the stale payload sha.
+    // 4. Dedup: already completed for this checked-out sha → ack (no post,
+    // no insert). KV done-state first (B3), then D1. Keyed off the checkout,
+    // so a force-push between delivery and processing is never mis-deduped
+    // against the stale payload sha.
+    const done = await kvDoneHit(deps.env.IDEMPOTENCY_KV, idemKey(key), fields, deps.log);
+    if (done) {
+      deps.log.info(fields, "KV idempotency hit — ack");
+      return;
+    }
     const existing = await deps.store.findByIdempotencyKey(key);
     if (existing) {
       deps.log.info(fields, "idempotency hit — ack");
@@ -265,28 +294,30 @@ async function processMessage(payload: ReviewJobPayload, deps: ProcessDeps): Pro
       throw new Error(`parse failed: ${parsed.error}`);
     }
 
-    // 9. Post the overall review FIRST (the user-facing deliverable must not
-    // be lost to a later store failure), then insert.
+    // 9. SEC-02 + B4 choke point: redact secret-shaped spans (PEM, tokens,
+    // keys, long hex) and cap findings to the Top-50 by severity BEFORE
+    // anything can reach the public review body or D1 raw_output. The SAME
+    // capped array feeds both the post and the insert (B4: 渲染与落库同一
+    // 裁剪数组).
+    const capped = capFindings(redactReviewOutput(parsed.output));
+    const output = capped.output;
+
+    // 10. Post the overall review FIRST (the user-facing deliverable must not
+    // be lost to a later store failure), then persist. Always event COMMENT
+    // with the verdict rendered in the body (SEC-01 fix, comment.ts).
     await deps.commenter.postReview({
       installationId: payload.installation_id,
       owner: payload.owner,
       repo: payload.repo,
       prNumber: payload.pr_number,
       headSha,
-      output: parsed.output,
+      output,
+      omittedFindings: capped.omitted,
     });
 
-    // 10. Insert: duplicate (race lost) → ack; the review row already exists.
-    const result = await deps.store.insertReview({
-      key,
-      output: parsed.output,
-      raw: run.stdout,
-    });
-    if (result.outcome === "duplicate") {
-      deps.log.info(fields, "duplicate insert — ack");
-    }
-
-    // 11. KV completion state (observability; the D1 row is the durable record).
+    // 11. KV done-state immediately after the comment lands, BEFORE the D1
+    // insert (B3): if the insert then fails, a retry hits the KV done key and
+    // acks — the comment is already out and must never be re-posted.
     try {
       await deps.env.IDEMPOTENCY_KV.put(idemKey(key), "done", {
         expirationTtl: IDEMPOTENCY_SECONDS,
@@ -294,6 +325,27 @@ async function processMessage(payload: ReviewJobPayload, deps: ProcessDeps): Pro
     } catch (err) {
       const detail = err instanceof Error ? err.message : String(err);
       deps.log.warn(fields, `KV completion write failed: ${detail}`);
+    }
+
+    // 12. Insert: duplicate (race lost) → ack; the review row already exists.
+    // An insert failure AFTER a successful post is a warn + ack, never a
+    // rethrow (B3): the comment is out, retrying would re-post it. The
+    // missing D1 row is acceptable (KV done marks completion) and alerted.
+    try {
+      const result = await deps.store.insertReview({
+        key,
+        output,
+        raw: redactSecrets(run.stdout),
+      });
+      if (result.outcome === "duplicate") {
+        deps.log.info(fields, "duplicate insert — ack");
+      }
+    } catch (err) {
+      const detail = err instanceof Error ? err.message : String(err);
+      deps.log.warn(
+        fields,
+        `review posted but insert failed — D1 row missing, acking to avoid a duplicate comment: ${detail}`,
+      );
     }
   } catch (err) {
     // Structured failure log carrying the idempotency key + sandbox id

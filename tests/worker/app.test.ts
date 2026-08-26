@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect, mock, test } from "bun:test";
 import { Webhooks } from "@octokit/webhooks";
 import worker from "../../src/worker/index";
 import type { Env } from "../../src/worker/env";
@@ -79,5 +79,31 @@ describe("worker fetch entry", () => {
     );
     expect(res.status).toBe(200);
     expect(await res.text()).toBe("ignored");
+  });
+
+  test("oversized webhook body (Content-Length > 1MB) is rejected with 413 before buffering", async () => {
+    const origWarn = console.warn;
+    const warn = mock((_msg: unknown) => {});
+    console.warn = warn;
+    try {
+      // The body is never sent: the handler rejects on the Content-Length
+      // header before reading the body, so a header-only oversized request
+      // exercises the same gate.
+      const res = await worker.fetch(
+        webhookRequest(
+          "",
+          { "x-github-event": "ping", "content-length": String(1_000_001) },
+        ),
+        makeEnv(),
+      );
+      expect(res.status).toBe(413);
+      expect(await res.text()).toBe("payload too large");
+      // The rejection is structured-logged (reason=webhook_body_too_large).
+      expect(warn).toHaveBeenCalledTimes(1);
+      const payload = warn.mock.calls[0]?.[0] as string;
+      expect(payload).toContain("webhook_body_too_large");
+    } finally {
+      console.warn = origWarn;
+    }
   });
 });
