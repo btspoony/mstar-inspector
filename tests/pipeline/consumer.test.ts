@@ -48,13 +48,22 @@ let sandboxError: Error | undefined;
 let destroyCalls = 0;
 let destroyError: Error | undefined;
 
+let runnerStderr = "review mode: structured\n";
+let runnerExitCode = 0;
+let cloneExitCode = 0;
+let diffExitCode = 0;
+
 const fakeSandbox = {
   exec: mock(async (cmd: string, opts?: unknown) => {
     sandboxCalls.push({ cmd, opts });
     if (sandboxError) throw sandboxError;
-    if (cmd.includes("gh pr view")) return { stdout: `${resolvedSha}\n`, exitCode: 0 };
-    if (cmd.includes("--diff")) return { stdout: runnerStdout, exitCode: 0 };
-    return { stdout: "", exitCode: 0 };
+    if (cmd.includes("gh pr view")) return { stdout: `${resolvedSha}\n`, stderr: "", exitCode: 0 };
+    if (cmd.includes("git init")) return { stdout: "", stderr: "", exitCode: cloneExitCode };
+    if (cmd.includes("gh pr diff")) return { stdout: "", stderr: "", exitCode: diffExitCode };
+    if (cmd.includes("--diff")) {
+      return { stdout: runnerStdout, stderr: runnerStderr, exitCode: runnerExitCode };
+    }
+    return { stdout: "", stderr: "", exitCode: 0 };
   }),
   destroy: mock(async () => {
     destroyCalls += 1;
@@ -87,12 +96,26 @@ mock.module("../../src/pipeline/comment", () => ({
 // --- consumer under test (dynamic import: mocks must be registered first) ---
 const { createReviewConsumer } = await import("../../src/pipeline/consumer");
 import type { PipelineEnv } from "../../src/pipeline/consumer";
+import type { ConsumerLog, ConsumerLogFields } from "../../src/pipeline/consumer";
 
+// --- test log sink (injected via the consumer's optional log param) --------
+const logLines: Array<{
+  level: "info" | "warn" | "error";
+  fields: ConsumerLogFields;
+  msg: string;
+}> = [];
+const testLog: ConsumerLog = {
+  info: (fields, msg) => logLines.push({ level: "info", fields, msg: msg ?? "" }),
+  warn: (fields, msg) => logLines.push({ level: "warn", fields, msg: msg ?? "" }),
+  error: (fields, msg) => logLines.push({ level: "error", fields, msg: msg ?? "" }),
+};
 // --- helpers ----------------------------------------------------------------
 const kvPuts: Array<{ key: string; value: string; options?: unknown }> = [];
+let kvPutError: Error | undefined;
 const kv = {
   put: mock(async (key: string, value: string, options?: unknown) => {
     kvPuts.push({ key, value, options });
+    if (kvPutError) throw kvPutError;
   }),
 };
 
@@ -141,13 +164,19 @@ function reset(): void {
   sandboxCalls.length = 0;
   commenterCalls.length = 0;
   kvPuts.length = 0;
+  logLines.length = 0;
   runnerStdout = "";
+  runnerStderr = "review mode: structured\n";
+  runnerExitCode = 0;
+  cloneExitCode = 0;
+  diffExitCode = 0;
   resolvedSha = SHA;
   sandboxError = undefined;
   destroyCalls = 0;
   destroyError = undefined;
   tokenResult = "ghs_installation_token";
   commentError = undefined;
+  kvPutError = undefined;
 }
 
 /** Count review rows in the real D1 double. */
@@ -275,7 +304,7 @@ describe("createReviewConsumer", () => {
     expect(destroyCalls).toBe(1);
   });
 
-  test("runner failure → rethrow, destroy", async () => {
+  test("sandbox exec failure → rethrow, destroy", async () => {
     reset();
     sandboxError = new Error("container unavailable");
     const db = createTestD1();
@@ -284,5 +313,117 @@ describe("createReviewConsumer", () => {
     await expect(consumer(makeBatch(makePayload()))).rejects.toThrow("container unavailable");
     expect(reviewCount(db)).toBe(0);
     expect(destroyCalls).toBe(1);
+  });
+
+  test("clone exitCode !== 0 → rethrow, destroy, no post/insert", async () => {
+    reset();
+    cloneExitCode = 128;
+    const db = createTestD1();
+    const consumer = createReviewConsumer(makeEnv({ DB: db as never }));
+
+    await expect(consumer(makeBatch(makePayload()))).rejects.toThrow(/clone failed/);
+    expect(commenterCalls.filter((c) => c.op === "post")).toHaveLength(0);
+    expect(reviewCount(db)).toBe(0);
+    expect(destroyCalls).toBe(1);
+  });
+
+  test("runner exitCode !== 0 → rethrow, destroy, no post/insert", async () => {
+    reset();
+    runnerExitCode = 1;
+    runnerStderr = "review: session failed: boom";
+    const db = createTestD1();
+    const consumer = createReviewConsumer(makeEnv({ DB: db as never }));
+
+    await expect(consumer(makeBatch(makePayload()))).rejects.toThrow(/runner failed/);
+    expect(commenterCalls.filter((c) => c.op === "post")).toHaveLength(0);
+    expect(reviewCount(db)).toBe(0);
+    expect(destroyCalls).toBe(1);
+  });
+
+  test("summary degrade (non-structured) → no post, no insert, rethrow, destroy", async () => {
+    reset();
+    runnerStdout = JSON.stringify({
+      verdict: "comment",
+      summary_md: "raw model text that could not be parsed",
+      findings: [],
+    });
+    runnerStderr = "review mode: summary\n";
+    const db = createTestD1();
+    const consumer = createReviewConsumer(makeEnv({ DB: db as never }), testLog);
+
+    await expect(consumer(makeBatch(makePayload()))).rejects.toThrow(/structured mode marker/);
+
+    expect(commenterCalls.filter((c) => c.op === "post")).toHaveLength(0);
+    expect(reviewCount(db)).toBe(0);
+    expect(destroyCalls).toBe(1);
+    const errLine = logLines.find((l) => l.level === "error");
+    expect(errLine?.fields.idempotency_key).toBe(`idem:123:acme/widgets:42:${SHA}`);
+  });
+
+  test("failure logs a structured error with idempotency key + sandbox id before rethrow", async () => {
+    reset();
+    runnerStdout = "not json at all";
+    const db = createTestD1();
+    const consumer = createReviewConsumer(makeEnv({ DB: db as never }), testLog);
+
+    await expect(consumer(makeBatch(makePayload()))).rejects.toThrow(/parse failed/);
+
+    const errLine = logLines.find((l) => l.level === "error");
+    expect(errLine).toBeDefined();
+    expect(errLine!.fields.idempotency_key).toBe(`idem:123:acme/widgets:42:${SHA}`);
+    expect(errLine!.fields.sandbox_id).toMatch(/^review-/);
+    expect(errLine!.fields.head_sha).toBe(SHA);
+    expect(errLine!.msg).toContain("parse failed");
+  });
+
+  test("empty sha after gh pr view → no post/insert, rethrow, destroy", async () => {
+    reset();
+    resolvedSha = "";
+    runnerStdout = JSON.stringify(VALID_OUTPUT);
+    const db = createTestD1();
+    const consumer = createReviewConsumer(makeEnv({ DB: db as never }), testLog);
+
+    await expect(
+      consumer(makeBatch(makePayload({ head_sha: null, triggered_by: "review_command" }))),
+    ).rejects.toThrow(/cannot resolve head sha/);
+
+    expect(commenterCalls.filter((c) => c.op === "post")).toHaveLength(0);
+    expect(reviewCount(db)).toBe(0);
+    expect(destroyCalls).toBe(1);
+    const errLine = logLines.find((l) => l.level === "error");
+    expect(errLine?.fields.sandbox_id).toMatch(/^review-/);
+  });
+
+  test("KV completion write failure → warn, still ack (D1 row is durable)", async () => {
+    reset();
+    runnerStdout = JSON.stringify(VALID_OUTPUT);
+    kvPutError = new Error("kv down");
+    const db = createTestD1();
+    const consumer = createReviewConsumer(makeEnv({ DB: db as never }), testLog);
+
+    await consumer(makeBatch(makePayload())); // resolves — KV failure is warn-only
+
+    expect(reviewCount(db)).toBe(1);
+    expect(commenterCalls.filter((c) => c.op === "post")).toHaveLength(1);
+    const warnLine = logLines.find((l) => l.level === "warn" && l.msg.includes("KV"));
+    expect(warnLine).toBeDefined();
+    expect(warnLine!.fields.idempotency_key).toBe(`idem:123:acme/widgets:42:${SHA}`);
+  });
+
+  test("destroy failure after success → warn with idempotency key, result not masked", async () => {
+    reset();
+    runnerStdout = JSON.stringify(VALID_OUTPUT);
+    destroyError = new Error("destroy boom");
+    const db = createTestD1();
+    const consumer = createReviewConsumer(makeEnv({ DB: db as never }), testLog);
+
+    await consumer(makeBatch(makePayload())); // resolves — destroy failure is warn-only
+
+    expect(reviewCount(db)).toBe(1);
+    expect(commenterCalls.filter((c) => c.op === "post")).toHaveLength(1);
+    const warnLine = logLines.find((l) => l.level === "warn" && l.msg.includes("destroy"));
+    expect(warnLine).toBeDefined();
+    expect(warnLine!.fields.idempotency_key).toBe(`idem:123:acme/widgets:42:${SHA}`);
+    expect(warnLine!.fields.sandbox_id).toMatch(/^review-/);
   });
 });

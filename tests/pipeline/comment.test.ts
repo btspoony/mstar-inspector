@@ -34,11 +34,11 @@ describe("truncateSummary", () => {
     expect(truncateSummary("x".repeat(SUMMARY_MD_LIMIT))).toHaveLength(SUMMARY_MD_LIMIT);
   });
 
-  test("truncates over-budget summaries to 8000 chars", () => {
+  test("truncates over-budget summaries to the 8000-char budget", () => {
     const long = "x".repeat(SUMMARY_MD_LIMIT + 100);
     const truncated = truncateSummary(long);
-    expect(truncated.length).toBe(SUMMARY_MD_LIMIT + 1); // 8000 chars + ellipsis
-    expect(truncated.startsWith("x".repeat(SUMMARY_MD_LIMIT))).toBe(true);
+    expect(truncated.length).toBe(SUMMARY_MD_LIMIT); // budget incl. ellipsis
+    expect(truncated.startsWith("x".repeat(SUMMARY_MD_LIMIT - 1))).toBe(true);
     expect(truncated.endsWith("…")).toBe(true);
   });
 });

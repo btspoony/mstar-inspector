@@ -44,7 +44,7 @@ export function verdictToEvent(verdict: ReviewVerdict): ReviewEvent {
 
 /** Truncate summary_md to the body budget (char-based; GitHub counts chars). */
 export function truncateSummary(md: string, limit: number = SUMMARY_MD_LIMIT): string {
-  return md.length <= limit ? md : `${md.slice(0, limit)}…`;
+  return md.length <= limit ? md : `${md.slice(0, limit - 1)}…`;
 }
 
 /**

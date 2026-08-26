@@ -36,7 +36,7 @@ export type ReviewSandbox = {
   exec(
     cmd: string,
     opts?: { env?: Record<string, string>; cwd?: string },
-  ): Promise<{ stdout: string; exitCode: number }>;
+  ): Promise<{ stdout: string; stderr: string; exitCode: number }>;
   destroy(): Promise<void>;
 };
 
@@ -54,7 +54,7 @@ export async function getSandbox(binding: SandboxBinding, id: string): Promise<R
   return {
     async exec(cmd, opts) {
       const result = await sandbox.exec(cmd, { env: opts?.env, cwd: opts?.cwd });
-      return { stdout: result.stdout, exitCode: result.exitCode };
+      return { stdout: result.stdout, stderr: result.stderr, exitCode: result.exitCode };
     },
     async destroy() {
       await sandbox.destroy();

@@ -7,7 +7,9 @@
  * GH_TOKEN/ARK_API_KEY/PI_CODING_AGENT_DIR/M0_HARNESS_PLUGIN_ROOT) →
  * parseReviewOutput → post the overall Review comment FIRST → insertReview
  * (duplicate → ack) → KV completion state → finally destroy. Any step
- * throwing → structured log + rethrow (queue retry → DLQ).
+ * throwing → structured log + rethrow (queue retry → DLQ). A runner result
+ * that is not the structured main path (summary degrade, Clarify #9.5) is
+ * treated as a failure: no post, no insert, structured log, rethrow.
  *
  * Module boundary (compass contracts A): this is the ONLY legal edge from
  * worker → pipeline (worker/index.ts queue wiring). It imports contracts/
@@ -40,6 +42,15 @@ const RUNNER_PATH = "/opt/runner/src/review/runner.ts";
 const HARNESS_ROOT = "/opt/mstar-harness";
 const OMP_AGENT_DIR = "/opt/omp-agent";
 
+/**
+ * Runner stderr marker for the structured main path (src/review/run.ts prints
+ * `review mode: ${mode}` to stderr; stdout carries only the ReviewOutput JSON
+ * in BOTH modes). Clarify #9.5: a summary degrade must not count as a
+ * successful e2e — the consumer refuses post/insert unless this marker is
+ * present, and rethrows into retry/DLQ.
+ */
+const STRUCTURED_MODE_MARKER = "review mode: structured";
+
 /** Structured log fields: seven event fields + sandbox id + idempotency key. */
 export type ConsumerLogFields = {
   event: "pull_request" | "review_command";
@@ -56,12 +67,14 @@ export type ConsumerLogFields = {
 export type ConsumerLog = {
   info: (fields: ConsumerLogFields, msg?: string) => void;
   warn: (fields: ConsumerLogFields, msg?: string) => void;
+  error: (fields: ConsumerLogFields, msg?: string) => void;
 };
 
 /** Default sink: structured JSON lines on stdout/stderr. No secrets logged. */
 export const defaultConsumerLog: ConsumerLog = {
   info: (fields, msg) => console.log(JSON.stringify({ ...fields, msg: msg ?? "" })),
   warn: (fields, msg) => console.warn(JSON.stringify({ ...fields, msg: msg ?? "" })),
+  error: (fields, msg) => console.error(JSON.stringify({ ...fields, msg: msg ?? "" })),
 };
 
 type ProcessDeps = {
@@ -76,15 +89,18 @@ type ProcessDeps = {
  * consumer instance (the commenter memoizes the app-auth installation-token
  * cache across messages). Each message gets its own sandbox, destroyed in
  * finally; failures rethrow so the queue retries and eventually DLQs.
+ *
+ * `log` is injectable for tests (default: structured JSON lines).
  */
 export function createReviewConsumer(
   env: PipelineEnv,
+  log: ConsumerLog = defaultConsumerLog,
 ): (batch: MessageBatch<ReviewJobPayload>) => Promise<void> {
   const deps: ProcessDeps = {
     env,
     store: createReviewStore(env.DB),
     commenter: createReviewCommenter(env),
-    log: defaultConsumerLog,
+    log,
   };
   return async (batch) => {
     for (const message of batch.messages) {
@@ -107,6 +123,9 @@ async function processMessage(payload: ReviewJobPayload, deps: ProcessDeps): Pro
   // reused — attach-after-destroy behavior is unknown, uniqueness wins.
   const sandboxId = `review-${crypto.randomUUID()}`;
   let sandbox: ReviewSandbox | null = null;
+  // Set once the sha is resolved; the failure log carries the idempotency
+  // key + sandbox id whenever they exist (plan Clarify #11 / Done criteria).
+  let fields: ConsumerLogFields | undefined;
 
   try {
     // 1. Resolve the head sha: payload sha wins; null (e.g. /review command)
@@ -134,7 +153,7 @@ async function processMessage(payload: ReviewJobPayload, deps: ProcessDeps): Pro
       pr_number: payload.pr_number,
       head_sha: headSha,
     };
-    const fields: ConsumerLogFields = {
+    fields = {
       ...baseFields,
       head_sha: headSha,
       idempotency_key: idemKey(key),
@@ -187,13 +206,24 @@ async function processMessage(payload: ReviewJobPayload, deps: ProcessDeps): Pro
       throw new Error(`runner failed: exit ${run.exitCode}, stdout ${run.stdout.length}B`);
     }
 
-    // 6. Parse: failure → no review, no insert (plan Notes for findings-schema).
+    // 6. Structured-mode gate (Clarify #9.5): the runner exits 0 for BOTH
+    // structured and summary modes (M0 CLI contract), so the mode lives on
+    // stderr (`review mode: ${mode}`). A summary degrade — or a missing
+    // marker — is NOT a successful e2e: no review, no insert, rethrow into
+    // retry/DLQ (M2 decides the GitHub-side posting policy for degrades).
+    if (!run.stderr.includes(STRUCTURED_MODE_MARKER)) {
+      throw new Error(
+        `runner did not emit the structured mode marker (${JSON.stringify(STRUCTURED_MODE_MARKER)}); stderr ${run.stderr.length}B`,
+      );
+    }
+
+    // 7. Parse: failure → no review, no insert (plan Notes for findings-schema).
     const parsed = parseReviewOutput(run.stdout);
     if (!parsed.ok) {
       throw new Error(`parse failed: ${parsed.error}`);
     }
 
-    // 7. Post the overall review FIRST (the user-facing deliverable must not
+    // 8. Post the overall review FIRST (the user-facing deliverable must not
     // be lost to a later store failure), then insert.
     await deps.commenter.postReview({
       installationId: payload.installation_id,
@@ -204,7 +234,7 @@ async function processMessage(payload: ReviewJobPayload, deps: ProcessDeps): Pro
       output: parsed.output,
     });
 
-    // 8. Insert: duplicate (race lost) → ack; the review row already exists.
+    // 9. Insert: duplicate (race lost) → ack; the review row already exists.
     const result = await deps.store.insertReview({
       key,
       output: parsed.output,
@@ -214,7 +244,7 @@ async function processMessage(payload: ReviewJobPayload, deps: ProcessDeps): Pro
       deps.log.info(fields, "duplicate insert — ack");
     }
 
-    // 9. KV completion state (observability; the D1 row is the durable record).
+    // 10. KV completion state (observability; the D1 row is the durable record).
     try {
       await deps.env.IDEMPOTENCY_KV.put(idemKey(key), "done", {
         expirationTtl: IDEMPOTENCY_SECONDS,
@@ -223,6 +253,16 @@ async function processMessage(payload: ReviewJobPayload, deps: ProcessDeps): Pro
       const detail = err instanceof Error ? err.message : String(err);
       deps.log.warn(fields, `KV completion write failed: ${detail}`);
     }
+  } catch (err) {
+    // Structured failure log carrying the idempotency key + sandbox id
+    // (plan Clarify #11 / Done criteria: 失败路径错误日志含幂等键), then
+    // rethrow so the queue retries and eventually DLQs.
+    const detail = err instanceof Error ? err.message : String(err);
+    deps.log.error(
+      fields ?? { ...baseFields, sandbox_id: sandboxId },
+      `review failed: ${detail}`,
+    );
+    throw err;
   } finally {
     if (sandbox !== null) {
       try {
@@ -230,7 +270,7 @@ async function processMessage(payload: ReviewJobPayload, deps: ProcessDeps): Pro
       } catch (err) {
         const detail = err instanceof Error ? err.message : String(err);
         deps.log.warn(
-          { ...baseFields, sandbox_id: sandboxId },
+          { ...(fields ?? baseFields), sandbox_id: sandboxId },
           `sandbox destroy failed: ${detail}`,
         );
       }
