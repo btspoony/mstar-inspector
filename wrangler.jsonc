@@ -18,5 +18,14 @@
         "queue": "review-queue"
       }
     ]
-  }
+  },
+  // 05: D1 Central Review Store (binding DB enters the 06 PipelineEnv, not the
+  // fetch-face Env — src/worker/env.ts stays untouched).
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "mstar-inspector-db",
+      "database_id": "7a737173-e202-430f-8b47-e087d5e885c4"
+    }
+  ]
 }

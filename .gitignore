@@ -8,6 +8,8 @@ lerna-debug.log*
 
 # database
 *.sqlite
+# wrangler local state (miniflare D1/KV dev data)
+.wrangler/
 
 # package-json
 package-json.lock
