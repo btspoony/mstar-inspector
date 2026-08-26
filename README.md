@@ -37,8 +37,10 @@ and posts the result as a single upserted comment on the PR.
 ## Setting provider keys: `bun run keys`
 
 `scripts/provider-keys.ts` maps omp built-in providers to the Worker env var
-name and runs `wrangler secret put <ENV>` with the value piped on stdin — the
-value never appears in argv, logs, or git.
+name and runs `wrangler secret put <ENV>` with the value piped on stdin. In
+the stdin / env-var paths the value never appears in argv, logs, or git;
+`--value` places the secret in argv and the OS process table (`ps -ef`), so
+reserve it for a contained CI runner.
 
 ```bash
 # Interactive: numbered provider picker → masked value prompt
@@ -47,16 +49,19 @@ bun run keys
 # List the provider → env-name table
 bun run keys --list
 
-# Non-interactive (CI-friendly): value from --value, the provider's env var,
-# or piped stdin. Unknown provider / missing value → exit 1.
-bun run keys --provider openrouter --value sk-or-...
+# Non-interactive (CI-friendly): value from the provider's env var or piped
+# stdin — both keep the secret out of argv. `--value sk-or-...` works too but
+# puts the key in the process table; use it only in a contained CI runner.
+# Unknown provider / missing value → exit 1.
 ANTHROPIC_API_KEY=sk-ant-... bun run keys --provider anthropic
 echo -n "sk-ant-..." | bun run keys --provider anthropic
+bun run keys --provider openrouter --value sk-or-...   # contained CI only
 ```
 
-Supported providers: `anthropic`, `openai`, `gemini`, `groq`, `cerebras`,
-`xai`, `openrouter`, `kilo`, `mistral`, `zai`, `minimax`, `opencode`,
-`cursor`, `ai-gateway`. (`ark-plan` is a custom baseUrl provider configured in
+Supported providers: `anthropic`, `openai`, `gemini`, `copilot`,
+`azure-openai`, `groq`, `cerebras`, `xai`, `openrouter`, `kilo`, `mistral`,
+`zai`, `umans`, `minimax`, `opencode`, `cursor`, `ai-gateway`,
+`wafer-serverless`. (`ark-plan` is a custom baseUrl provider configured in
 `sandbox-image/omp-models.yml` — its key is `OMP_MODEL_KEY`, not a built-in.)
 
 ### GitHub Actions snippet

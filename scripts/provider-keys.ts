@@ -4,7 +4,10 @@
  * Maps an omp built-in provider name to the Worker env var the review
  * sandbox expects (the same env names omp's built-in provider discovery
  * reads), then runs `wrangler secret put <ENV>` with the value piped on
- * stdin — the value never appears in argv, logs, or git (repo hard rule).
+ * stdin. In the stdin / env-var paths the value never appears in argv,
+ * logs, or git (repo hard rule); the CI-only `--value` flag DOES place the
+ * secret in argv and the OS process table (`ps -ef`), so it is allowed only
+ * in a contained CI environment where the process table is not exposed.
  *
  * Modes:
  *   bun run keys                 → interactive: numbered provider picker,
@@ -12,14 +15,15 @@
  *   bun run keys --list          → print the provider → env-name table.
  *   bun run keys --provider <name> [--value <secret>]
  *                                → non-interactive (CI-friendly). Value
- *                                  resolution order: --value, the env var
+ *                                  resolution order: --value (contained CI
+ *                                  only — it lands in argv), the env var
  *                                  named by the provider (e.g.
  *                                  ANTHROPIC_API_KEY), then piped stdin.
  *                                  Unknown provider or missing value → exit 1.
  *
  * The PROVIDERS table and providerEnvName() are pure and unit-tested
  * (tests/scripts/provider-keys.test.ts); the interactive path is
- * manual-smoke only (plan postdeploy-review-feedback T3).
+ * manual-smoke only (plan postdeploy-review-feedback T3 / UC-001).
  */
 
 import { spawn } from "node:child_process";
@@ -34,17 +38,23 @@ export type ProviderInfo = {
 
 /**
  * omp built-in providers → Worker env var names (pure mapping table, T3).
- * The env names match omp's built-in provider discovery (ANTHROPIC_API_KEY,
- * OPENAI_API_KEY, GEMINI_API_KEY, GROQ_API_KEY, CEREBRAS_API_KEY,
- * XAI_API_KEY, OPENROUTER_API_KEY, KILO_API_KEY, MISTRAL_API_KEY,
- * ZAI_API_KEY, MINIMAX_API_KEY, OPENCODE_API_KEY, CURSOR_ACCESS_TOKEN,
- * AI_GATEWAY_API_KEY). ARK_* is NOT built-in — the ark-plan provider stays
- * configured via sandbox-image/omp-models.yml (custom baseUrl provider).
+ * The env names match omp's built-in provider discovery (help-extra "Core
+ * Providers" + "Additional LLM Providers" API-key envs: ANTHROPIC_API_KEY,
+ * OPENAI_API_KEY, GEMINI_API_KEY, COPILOT_GITHUB_TOKEN, AZURE_OPENAI_API_KEY,
+ * GROQ_API_KEY, CEREBRAS_API_KEY, XAI_API_KEY, OPENROUTER_API_KEY,
+ * KILO_API_KEY, MISTRAL_API_KEY, ZAI_API_KEY, UMANS_AI_CODING_PLAN_API_KEY,
+ * MINIMAX_API_KEY, OPENCODE_API_KEY, CURSOR_ACCESS_TOKEN, AI_GATEWAY_API_KEY,
+ * WAFER_SERVERLESS_API_KEY — WF-004). ARK_* is NOT built-in — the ark-plan
+ * provider stays configured via sandbox-image/omp-models.yml (custom
+ * baseUrl provider); OAuth (ANTHROPIC_OAUTH_TOKEN), AWS/Vertex and search
+ * keys are deliberately absent (different auth mechanisms).
  */
 export const PROVIDERS: Record<string, ProviderInfo> = {
   anthropic: { envName: "ANTHROPIC_API_KEY", label: "Anthropic" },
   openai: { envName: "OPENAI_API_KEY", label: "OpenAI" },
   gemini: { envName: "GEMINI_API_KEY", label: "Google Gemini" },
+  copilot: { envName: "COPILOT_GITHUB_TOKEN", label: "GitHub Copilot" },
+  "azure-openai": { envName: "AZURE_OPENAI_API_KEY", label: "Azure OpenAI" },
   groq: { envName: "GROQ_API_KEY", label: "Groq" },
   cerebras: { envName: "CEREBRAS_API_KEY", label: "Cerebras" },
   xai: { envName: "XAI_API_KEY", label: "xAI" },
@@ -52,10 +62,12 @@ export const PROVIDERS: Record<string, ProviderInfo> = {
   kilo: { envName: "KILO_API_KEY", label: "Kilo" },
   mistral: { envName: "MISTRAL_API_KEY", label: "Mistral" },
   zai: { envName: "ZAI_API_KEY", label: "Z.AI" },
+  umans: { envName: "UMANS_AI_CODING_PLAN_API_KEY", label: "Umans AI Coding Plan" },
   minimax: { envName: "MINIMAX_API_KEY", label: "MiniMax" },
   opencode: { envName: "OPENCODE_API_KEY", label: "OpenCode" },
   cursor: { envName: "CURSOR_ACCESS_TOKEN", label: "Cursor" },
   "ai-gateway": { envName: "AI_GATEWAY_API_KEY", label: "AI Gateway" },
+  "wafer-serverless": { envName: "WAFER_SERVERLESS_API_KEY", label: "Wafer Serverless" },
 };
 
 /** Resolve the Worker env var name for a provider, or undefined if unknown. */
@@ -100,28 +112,34 @@ function runWranglerSecretPut(envName: string, value: string): Promise<void> {
   return promise;
 }
 
-/** Prompt for a value with echo suppressed (interactive secret entry). */
+/**
+ * Prompt for a value with echo suppressed (interactive secret entry).
+ *
+ * Uses readline's documented `_writeToOutput` hook with a `muted` flag
+ * rather than a content filter — no chunking assumption is made: readline
+ * writes the question while unmuted, then every keystroke echo is dropped
+ * wholesale while muted. (The previous content-filter version relied on
+ * readline never bundling the question and a typed character into one
+ * write chunk, which is internal behavior.) The trailing newline is
+ * written explicitly because the Enter echo is suppressed too. Interactive
+ * path is manual-smoke only (UC-001); verified against Bun's readline.
+ */
 function promptMasked(question: string): Promise<string> {
   const { promise, resolve, reject } = Promise.withResolvers<string>();
-  // Write-through stream that echoes ONLY the prompt, never typed characters
-  // (readline writes the prompt and each echoed char through `output`).
-  const mutedOutput = {
-    write(chunk: unknown, ...rest: unknown[]) {
-      if (String(chunk).includes(question)) {
-        return process.stdout.write(String(chunk), ...(rest as [BufferEncoding?, ((err?: Error | null) => void)?]));
-      }
-      return true;
-    },
+  const rl = createInterface({ input: process.stdin, output: process.stdout, terminal: true });
+  let muted = false;
+  // `_writeToOutput` is readline's documented echo hook; not typed by
+  // @types/node yet, hence the cast.
+  (rl as unknown as { _writeToOutput(chunk: string): void })._writeToOutput = (chunk: string) => {
+    if (!muted) process.stdout.write(chunk);
   };
-  const rl = createInterface({
-    input: process.stdin,
-    output: mutedOutput as unknown as NodeJS.WritableStream,
-    terminal: true,
-  });
   rl.question(question, (answer) => {
+    muted = false;
+    process.stdout.write("\n");
     rl.close();
     resolve(answer);
   });
+  muted = true;
   rl.on("error", reject);
   return promise;
 }

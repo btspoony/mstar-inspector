@@ -119,7 +119,7 @@ const testOverrides = {
 };
 
 // --- consumer under test (dynamic import: mocks must be registered first) ---
-const { createReviewConsumer } = await import("../../src/pipeline/consumer");
+const { createReviewConsumer, REVIEW_GUARD_TTL_SECONDS } = await import("../../src/pipeline/consumer");
 import type { PipelineEnv } from "../../src/pipeline/consumer";
 import type { ConsumerLog, ConsumerLogFields } from "../../src/pipeline/consumer";
 
@@ -136,13 +136,29 @@ const testLog: ConsumerLog = {
 };
 // --- helpers ----------------------------------------------------------------
 const kvPuts: Array<{ key: string; value: string; options?: unknown }> = [];
+const kvGuardPuts: Array<{ key: string; value: string; options?: unknown }> = [];
+const kvGuardDeletes: string[] = [];
 let kvPutError: Error | undefined;
 let kvGetValue: string | null = null;
+let kvGuardValue: string | null = null;
 const kv = {
-  get: mock(async () => kvGetValue),
+  // The in-flight guard (WF-002) uses the `inflight:` key family on the SAME
+  // KV binding — route by prefix so the idem-done assertions on kvPuts stay
+  // unambiguous.
+  get: mock(async (key: string) => {
+    if (key.startsWith("inflight:")) return kvGuardValue;
+    return kvGetValue;
+  }),
   put: mock(async (key: string, value: string, options?: unknown) => {
-    kvPuts.push({ key, value, options });
+    if (key.startsWith("inflight:")) {
+      kvGuardPuts.push({ key, value, options });
+    } else {
+      kvPuts.push({ key, value, options });
+    }
     if (kvPutError) throw kvPutError;
+  }),
+  delete: mock(async (key: string) => {
+    kvGuardDeletes.push(key);
   }),
 };
 
@@ -191,6 +207,8 @@ function reset(): void {
   sandboxCalls.length = 0;
   commenterCalls.length = 0;
   kvPuts.length = 0;
+  kvGuardPuts.length = 0;
+  kvGuardDeletes.length = 0;
   logLines.length = 0;
   runnerStdout = "";
   runnerStderr = "review mode: structured\n";
@@ -206,6 +224,7 @@ function reset(): void {
   commentError = undefined;
   kvPutError = undefined;
   kvGetValue = null;
+  kvGuardValue = null;
 }
 
 /** Count review rows in the real D1 double. */
@@ -490,7 +509,9 @@ describe("createReviewConsumer", () => {
 
     expect(reviewCount(db)).toBe(1);
     expect(commenterCalls.filter((c) => c.op === "post")).toHaveLength(1);
-    const warnLine = logLines.find((l) => l.level === "warn" && l.msg.includes("KV"));
+    // The completion-write warn (the guard KV warn fires earlier with only
+    // baseFields — no idempotency key yet).
+    const warnLine = logLines.find((l) => l.level === "warn" && l.msg.includes("KV completion write failed"));
     expect(warnLine).toBeDefined();
     expect(warnLine!.fields.idempotency_key).toBe(`idem:123:acme/widgets:42:${SHA}`);
   });
@@ -651,9 +672,51 @@ describe("createReviewConsumer", () => {
         options: { expirationTtl: 86400 },
       },
     ]);
+
     const warnLine = logLines.find((l) => l.level === "warn" && l.msg.includes("insert failed"));
     expect(warnLine).toBeDefined();
     expect(warnLine!.fields.idempotency_key).toBe(`idem:123:acme/widgets:42:${SHA}`);
     expect(destroyCalls).toBe(1);
+  });
+
+  test("in-flight guard held → rethrow for queue backoff, no post/insert (WF-002)", async () => {
+    reset();
+    kvGuardValue = "inflight";
+    runnerStdout = JSON.stringify(VALID_OUTPUT);
+    const db = createTestD1();
+    const consumer = createReviewConsumer(makeEnv({ DB: db as never }), testLog, testOverrides);
+
+    await expect(consumer(makeBatch(makePayload()))).rejects.toThrow(/already in flight/);
+
+    // Fail fast: no sandbox, no token, no post, no insert, no guard mutation.
+    expect(sandboxCalls).toHaveLength(0);
+    expect(commenterCalls).toHaveLength(0);
+    expect(reviewCount(db)).toBe(0);
+    expect(kvGuardPuts).toHaveLength(0);
+    expect(kvGuardDeletes).toHaveLength(0);
+    expect(destroyCalls).toBe(0);
+    const errLine = logLines.find((l) => l.level === "error");
+    expect(errLine?.msg).toContain("already in flight");
+  });
+
+  test("in-flight guard acquired before the pipeline and released after the post settles (WF-002)", async () => {
+    reset();
+    runnerStdout = JSON.stringify(VALID_OUTPUT);
+    const db = createTestD1();
+    const consumer = createReviewConsumer(makeEnv({ DB: db as never }), testLog, testOverrides);
+
+    await consumer(makeBatch(makePayload()));
+
+    // Guard keyed per PR (no head_sha), written BEFORE the pipeline runs and
+    // deleted in the finally once the post settled.
+    expect(kvGuardPuts).toEqual([
+      {
+        key: "inflight:123:acme/widgets:42",
+        value: "inflight",
+        options: { expirationTtl: REVIEW_GUARD_TTL_SECONDS },
+      },
+    ]);
+    expect(kvGuardDeletes).toEqual(["inflight:123:acme/widgets:42"]);
+    expect(reviewCount(db)).toBe(1);
   });
 });

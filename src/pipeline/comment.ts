@@ -294,6 +294,101 @@ export type AppAuthStrategy = {
 };
 
 /**
+ * Minimal octokit surface `postReview` consumes: `paginate` (from
+ * plugin-paginate-rest, bundled with @octokit/rest) plus the three Issues
+ * comments methods. The real Octokit satisfies this structurally at
+ * runtime; the cast at the call site bridges plugin-paginate-rest's
+ * overloaded types to this minimal interface (SG-001 mock seam).
+ */
+export type PostOctokit = {
+  paginate: (
+    route: unknown,
+    parameters: Record<string, unknown>,
+  ) => Promise<Array<{ id: number; body?: string | null }>>;
+  rest: {
+    issues: {
+      listComments: (
+        parameters: Record<string, unknown>,
+      ) => Promise<{ data: Array<{ id: number; body?: string | null }> }>;
+      updateComment: (parameters: Record<string, unknown>) => Promise<unknown>;
+      createComment: (parameters: Record<string, unknown>) => Promise<unknown>;
+    };
+  };
+};
+
+/**
+ * Upsert the overall review comment against a caller-provided octokit
+ * (T5 + WF-001/WF-003). Exported so tests can drive the full wiring with a
+ * mock octokit (SG-001); the production commenter builds the real octokit
+ * and delegates here.
+ *
+ * The Issues comments API has no review event — the model verdict is
+ * prompt-injectable and is rendered as text only (SEC-01, structural).
+ */
+export async function postReviewWithOctokit(octokit: PostOctokit, input: PostReviewInput): Promise<void> {
+  const issues = octokit.rest?.issues;
+  if (
+    !issues?.listComments ||
+    !issues?.updateComment ||
+    !issues?.createComment ||
+    typeof octokit.paginate !== "function"
+  ) {
+    throw new Error(
+      "octokit is missing rest.issues comment methods / paginate — cannot upsert the review comment; check the injected auth surface",
+    );
+  }
+  // WF-001: scan the FULL comment list. `issues.listComments` caps at 100
+  // per page — on a busy PR the app's marker can sit beyond page 1, and a
+  // page-1-only scan would treat it as a miss and create a duplicate
+  // round=1 comment (round counter resets, old marker orphaned).
+  const comments = await octokit.paginate(issues.listComments, {
+    owner: input.owner,
+    repo: input.repo,
+    issue_number: input.prNumber,
+    per_page: 100,
+  });
+  const plan = planUpsert(comments);
+  const body = buildUpsertBody(input.output, input.omittedFindings ?? 0, plan.round, input.headSha);
+  if (plan.action === "update") {
+    try {
+      await issues.updateComment({
+        owner: input.owner,
+        repo: input.repo,
+        comment_id: plan.commentId,
+        body,
+      });
+    } catch (err) {
+      // WF-003 soft recovery: between listComments and updateComment the
+      // marker can be deleted by a human or another bot — the PATCH then
+      // 404s. The marker is gone, so POST a fresh round=1 comment (new
+      // marker) instead of letting the error bubble into a queue retry
+      // that would re-create round=1 anyway but only AFTER the retry
+      // delay. The round counter legitimately resets across the gap —
+      // the deleted comment no longer exists to chain from.
+      // A RequestError from octokit carries `.status` (duck-typed so the
+      // mock-octokit tests can reject with a plain { status: 404 }).
+      if (typeof err === "object" && err !== null && (err as { status?: unknown }).status === 404) {
+        await issues.createComment({
+          owner: input.owner,
+          repo: input.repo,
+          issue_number: input.prNumber,
+          body: buildUpsertBody(input.output, input.omittedFindings ?? 0, 1, input.headSha),
+        });
+        return;
+      }
+      throw err;
+    }
+    return;
+  }
+  await issues.createComment({
+    owner: input.owner,
+    repo: input.repo,
+    issue_number: input.prNumber,
+    body,
+  });
+}
+
+/**
  * Production commenter: createAppAuth (APP_ID + normalized PRIVATE_KEY) →
  * per-installation octokit via the documented factory pattern. The
  * createAppAuth instance is memoized so its installation-token cache is
@@ -321,39 +416,10 @@ export function createReviewCommenter(env: CommenterEnv): ReviewCommenter {
         installationId: input.installationId,
         factory: (options: unknown) => new Octokit({ authStrategy: createAppAuth, auth: options }),
       });
-      const issues = octokit.rest?.issues;
-      if (!issues?.listComments || !issues?.updateComment || !issues?.createComment) {
-        throw new Error(
-          "octokit is missing rest.issues comment methods — cannot upsert the review comment; check the injected auth surface",
-        );
-      }
-      // T5: locate the app's own previous comment (marker prefix) and PATCH
-      // it with round = N + 1; otherwise create a new comment with round = 1.
-      // The Issues comments API has no review event — the model verdict is
-      // prompt-injectable and is rendered as text only (SEC-01, structural).
-      const { data: comments } = await issues.listComments({
-        owner: input.owner,
-        repo: input.repo,
-        issue_number: input.prNumber,
-        per_page: 100,
-      });
-      const plan = planUpsert(comments);
-      const body = buildUpsertBody(input.output, input.omittedFindings ?? 0, plan.round, input.headSha);
-      if (plan.action === "update") {
-        await issues.updateComment({
-          owner: input.owner,
-          repo: input.repo,
-          comment_id: plan.commentId,
-          body,
-        });
-      } else {
-        await issues.createComment({
-          owner: input.owner,
-          repo: input.repo,
-          issue_number: input.prNumber,
-          body,
-        });
-      }
+      // The real Octokit satisfies PostOctokit at runtime (paginate is
+      // bundled with @octokit/rest); the cast bridges the overloaded
+      // plugin-paginate-rest types to the minimal surface above.
+      await postReviewWithOctokit(octokit as unknown as PostOctokit, input);
     },
   };
 }

@@ -98,6 +98,80 @@ export const defaultConsumerLog: ConsumerLog = {
   error: (fields, msg) => console.error(JSON.stringify({ ...fields, msg: msg ?? "" })),
 };
 
+// ---------------------------------------------------------------------------
+// In-flight review guard (WF-002): one review per PR at a time.
+// ---------------------------------------------------------------------------
+
+/**
+ * Guard TTL (seconds): must exceed the max review wall-clock — the runner
+ * step (600s) plus the three git steps (clone / rev-parse / diff, 120s each)
+ * plus slack — so the guard can never expire mid-review and unblock a
+ * concurrent duplicate. KV expirationTtl is in seconds.
+ */
+export const REVIEW_GUARD_TTL_SECONDS = Math.ceil(
+  (EXEC_TIMEOUT_RUNNER_MS + 3 * EXEC_TIMEOUT_GIT_MS + 60_000) / 1000,
+);
+
+/**
+ * In-flight guard key: `inflight:{installation_id}:{owner}/{repo}:{pr_number}`.
+ * Keyed WITHOUT head_sha on purpose — `/review` commands carry head_sha=null
+ * and must still be serialized per PR.
+ */
+export function reviewGuardKey(key: {
+  installation_id: number;
+  owner: string;
+  repo: string;
+  pr_number: number;
+}): string {
+  return `inflight:${key.installation_id}:${key.owner}/${key.repo}:${key.pr_number}`;
+}
+
+/**
+ * Try to acquire the in-flight guard. Held → false (the caller rethrows into
+ * the queue retry/backoff, so the later attempt lands on the update path
+ * once the first attempt's marker exists).
+ *
+ * KV caveat: Cloudflare KV is eventually consistent (reads may lag writes by
+ * up to ~60s) and has no compare-and-set, so this is a BEST-EFFORT mutex —
+ * two attempts racing the GET can both pass before either PUT is visible.
+ * It narrows the duplicate window from the full review wall-clock to a
+ * sub-second KV race; the marker-based upsert (T5) remains the durable
+ * backstop. KV failure → warn + proceed WITHOUT the guard (the same
+ * conservative-pass policy as the idempotency keys), logging that the
+ * duplicate-comment race window is open until KV recovers.
+ */
+async function acquireReviewGuard(
+  kv: KVNamespace,
+  key: string,
+  fields: ConsumerLogFields,
+  log: ConsumerLog,
+): Promise<boolean> {
+  try {
+    if ((await kv.get(key)) !== null) return false;
+    await kv.put(key, "inflight", { expirationTtl: REVIEW_GUARD_TTL_SECONDS });
+    return true;
+  } catch (err) {
+    const detail = err instanceof Error ? err.message : String(err);
+    log.warn(fields, `in-flight guard KV error — proceeding without guard (race window open): ${detail}`);
+    return true;
+  }
+}
+
+/** Release the in-flight guard. Failure → warn; the TTL still expires it. */
+async function releaseReviewGuard(
+  kv: KVNamespace,
+  key: string,
+  fields: ConsumerLogFields,
+  log: ConsumerLog,
+): Promise<void> {
+  try {
+    await kv.delete(key);
+  } catch (err) {
+    const detail = err instanceof Error ? err.message : String(err);
+    log.warn(fields, `in-flight guard release failed — guard expires by TTL (${REVIEW_GUARD_TTL_SECONDS}s): ${detail}`);
+  }
+}
+
 type ProcessDeps = {
   env: PipelineEnv;
   store: ReviewStore;
@@ -184,8 +258,27 @@ async function processMessage(payload: ReviewJobPayload, deps: ProcessDeps): Pro
   // the idempotency key + sandbox id whenever they exist (Clarify #11 / Done
   // criteria: 失败路径错误日志含幂等键).
   let fields: ConsumerLogFields | undefined;
+  // In-flight guard (WF-002): serializes concurrent reviews per PR — keyed
+  // without head_sha so `/review` commands (head_sha=null) are covered too.
+  const guardKey = reviewGuardKey({
+    installation_id: payload.installation_id,
+    owner: payload.owner,
+    repo: payload.repo,
+    pr_number: payload.pr_number,
+  });
+  let guardHeld = false;
 
   try {
+    // 0. In-flight guard (WF-002): fail fast when another review is already
+    // running for this PR. The queue retries with backoff — by then the
+    // earlier attempt has posted its marker, so the retry lands on the
+    // update path (round=N+1) instead of creating a duplicate round=1.
+    if (!(await acquireReviewGuard(deps.env.IDEMPOTENCY_KV, guardKey, baseFields, deps.log))) {
+      throw new Error(
+        `review already in flight for ${payload.owner}/${payload.repo}#${payload.pr_number} — backing off for the queue retry`,
+      );
+    }
+    guardHeld = true;
     // 1. Sandbox + installation token (created lazily; destroyed in finally).
     if (sandbox === null) {
       sandbox = await deps.getSandbox(deps.env.SANDBOX, sandboxId);
@@ -364,6 +457,12 @@ async function processMessage(payload: ReviewJobPayload, deps: ProcessDeps): Pro
     );
     throw err;
   } finally {
+    // Release the in-flight guard once the review settled (posted, KV done,
+    // insert attempted) OR failed — either way the next attempt may proceed.
+    // releaseReviewGuard never throws (KV failure → warn; TTL expires it).
+    if (guardHeld) {
+      await releaseReviewGuard(deps.env.IDEMPOTENCY_KV, guardKey, fields ?? baseFields, deps.log);
+    }
     if (sandbox !== null) {
       try {
         await sandbox.destroy();

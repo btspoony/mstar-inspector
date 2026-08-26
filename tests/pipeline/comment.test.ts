@@ -1,7 +1,7 @@
 /**
  * Review comment assembly tests (plan 06 Task 3 + Phase 5 B1/B4 +
- * postdeploy feedback T5) — pure functions only (the posting path needs a
- * live octokit; the consumer test covers the wiring).
+ * postdeploy feedback T5) — pure functions (the posting wiring is covered
+ * with a mock octokit; see "postReview wiring" below).
  *
  * Acceptance points:
  *   - the model verdict is rendered as text in the body header (SEC-01 —
@@ -13,18 +13,22 @@
  *   - the assembled body carries NO line-comment fields (overall review only)
  *   - T5 upsert: marker parse, create-on-miss, patch-on-hit with round
  *     increment, malformed marker treated as a miss
+ *   - postReview wiring (WF-001/WF-003/SG-001): paginated scan, create vs
+ *     update dispatch, 404 soft-recovery fallback
  */
 
-import { describe, expect, test } from "bun:test";
+import { describe, expect, mock, test } from "bun:test";
 import {
   buildReviewBody,
   buildUpsertBody,
   findReviewComment,
   parseReviewRound,
   planUpsert,
+  postReviewWithOctokit,
   renderFindings,
   SUMMARY_MD_LIMIT,
   truncateSummary,
+  type PostOctokit,
 } from "../../src/pipeline/comment";
 import type { ReviewOutput } from "../../src/review/schema";
 
@@ -140,6 +144,7 @@ describe("buildReviewBody", () => {
     expect(body).not.toContain("more findings omitted");
   });
 });
+
 describe("review comment upsert (T5)", () => {
   const output: ReviewOutput = {
     verdict: "request_changes",
@@ -220,5 +225,111 @@ describe("review comment upsert (T5)", () => {
       const body = buildUpsertBody(output, 10, 1, "abc1234");
       expect(body.endsWith("\n\n*(+10 more findings omitted)*")).toBe(true);
     });
+  });
+});
+
+describe("postReview wiring (mock octokit, SG-001)", () => {
+  const output: ReviewOutput = {
+    verdict: "request_changes",
+    summary_md: "Two issues found in the diff.",
+    findings: [],
+  };
+  const input = {
+    installationId: 1,
+    owner: "acme",
+    repo: "widgets",
+    prNumber: 42,
+    headSha: "0123456789abcdef0123456789abcdef01234567",
+    output,
+  };
+
+  type Calls = {
+    listRoute?: unknown;
+    listParams?: Record<string, unknown>;
+    updateParams?: Record<string, unknown>;
+    createParams?: Record<string, unknown>;
+  };
+
+  function mockOctok(comments: Array<{ id: number; body?: string | null }>, updateError?: unknown) {
+    const calls: Calls = {};
+    const octokit: PostOctokit = {
+      paginate: mock(
+        async (route: unknown, params: Record<string, unknown>): Promise<Array<{ id: number; body?: string | null }>> => {
+          calls.listRoute = route;
+          calls.listParams = params;
+          return comments;
+        },
+      ),
+      rest: {
+        issues: {
+          listComments: mock(async (_params: Record<string, unknown>) => {
+            throw new Error("unexpected: listComments is driven through paginate");
+          }),
+          updateComment: mock(async (params: Record<string, unknown>) => {
+            calls.updateParams = params;
+            if (updateError) throw updateError;
+            return {};
+          }),
+          createComment: mock(async (params: Record<string, unknown>) => {
+            calls.createParams = params;
+            return {};
+          }),
+        },
+      },
+    };
+    return { calls, octokit };
+  }
+
+  test("paginates the full comment list with the issues.listComments call shape (WF-001)", async () => {
+    const { calls, octokit } = mockOctok([]);
+    await postReviewWithOctokit(octokit, input);
+    expect(calls.listRoute).toBe(octokit.rest.issues.listComments);
+    expect(calls.listParams).toEqual({
+      owner: "acme",
+      repo: "widgets",
+      issue_number: 42,
+      per_page: 100,
+    });
+  });
+
+  test("no marker comment → createComment with a round=1 body+marker", async () => {
+    const { calls, octokit } = mockOctok([{ id: 1, body: "a human comment" }]);
+    await postReviewWithOctokit(octokit, input);
+    expect(calls.updateParams).toBeUndefined();
+    expect(calls.createParams).toMatchObject({
+      owner: "acme",
+      repo: "widgets",
+      issue_number: 42,
+    });
+    expect(String(calls.createParams!.body)).toMatch(/^<!-- mstar-inspector:review:v1 round=1 -->/);
+  });
+
+  test("marker hit → updateComment with round+1", async () => {
+    const { calls, octokit } = mockOctok([
+      { id: 7, body: "<!-- mstar-inspector:review:v1 round=2 -->\n第 2 次 review" },
+    ]);
+    await postReviewWithOctokit(octokit, input);
+    expect(calls.createParams).toBeUndefined();
+    expect(calls.updateParams).toMatchObject({ owner: "acme", repo: "widgets", comment_id: 7 });
+    expect(String(calls.updateParams!.body)).toMatch(/^<!-- mstar-inspector:review:v1 round=3 -->/);
+  });
+
+  test("updateComment 404 → soft-recovery fallback to createComment round=1 (WF-003)", async () => {
+    const notFound = Object.assign(new Error("not found"), { status: 404 });
+    const { calls, octokit } = mockOctok(
+      [{ id: 7, body: "<!-- mstar-inspector:review:v1 round=2 -->\n第 2 次 review" }],
+      notFound,
+    );
+    await postReviewWithOctokit(octokit, input);
+    expect(calls.updateParams).toMatchObject({ comment_id: 7 });
+    expect(String(calls.createParams!.body)).toMatch(/^<!-- mstar-inspector:review:v1 round=1 -->/);
+  });
+
+  test("non-404 updateComment errors rethrow (no fallback)", async () => {
+    const { octokit } = mockOctok(
+      [{ id: 7, body: "<!-- mstar-inspector:review:v1 round=2 -->\n第 2 次 review" }],
+      new Error("rate limited"),
+    );
+    await expect(postReviewWithOctokit(octokit, input)).rejects.toThrow("rate limited");
   });
 });
