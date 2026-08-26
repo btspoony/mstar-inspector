@@ -192,6 +192,22 @@ describe("handleReviewJob — send failure must not claim the KV key (C1)", () =
     expect(kv.put).not.toHaveBeenCalled();
     expect(sent).toHaveLength(0);
 
+    // The failure path logs the seven-field structured event (QC F-002) so
+    // the operator can map the 500 to the specific event.
+    expect(log.warn).toHaveBeenCalledTimes(1);
+    const [warnFields, warnMsg] = log.warn.mock.calls[0] ?? [];
+    expect(warnFields).toMatchObject({
+      event: "pull_request",
+      action: "opened",
+      installation_id: 12345,
+      owner: "acme",
+      repo: "inspector",
+      pr_number: 42,
+      head_sha: HEAD_SHA,
+    });
+    expect(warnMsg).toContain("queue send failed");
+    expect(warnMsg).toContain("queue down");
+
     const outcome = await handleReviewJob(prPayload(), { env: { IDEMPOTENCY_KV: kv, REVIEW_QUEUE: queue }, log });
 
     expect(outcome).toEqual({ kind: "enqueued" });

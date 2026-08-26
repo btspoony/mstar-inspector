@@ -33,9 +33,16 @@ export type WorkerEventLog = {
   head_sha: string | null;
 };
 
+/** Structured log fields for a verification failure where the event is unknown. */
+export type UnknownEventLog = {
+  event: "unknown";
+  reason: string;
+  detail: string;
+};
+
 export type HandlerLog = {
   info: (fields: WorkerEventLog, msg?: string) => void;
-  warn: (fields: WorkerEventLog, msg?: string) => void;
+  warn: (fields: WorkerEventLog | UnknownEventLog, msg?: string) => void;
 };
 
 export type HandlerDeps = {
@@ -138,7 +145,17 @@ export async function handleReviewJob(
     }
   }
 
-  await deps.env.REVIEW_QUEUE.send(payload);
+  try {
+    await deps.env.REVIEW_QUEUE.send(payload);
+  } catch (err) {
+    // Seven-field structured log on the send failure path (QC F-002): the
+    // operator must be able to map the 500 to the specific event. Rethrow —
+    // the 500 signals GitHub to retry, and no KV key is claimed, so the
+    // retry re-enqueues instead of being KV-skipped (C1 invariant).
+    const detail = err instanceof Error ? err.message : String(err);
+    deps.log.warn(fields, `queue send failed — 500 for GitHub retry: ${detail}`);
+    throw err;
+  }
   if (key !== null) {
     await claimIdempotency(deps.env.IDEMPOTENCY_KV, key, fields, deps.log);
   }

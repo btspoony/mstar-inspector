@@ -21,7 +21,7 @@ app.post("/webhook", async (c) => {
   const signature = c.req.header("x-hub-signature-256") ?? null;
   const eventName = c.req.header("x-github-event") ?? null;
 
-  const outcome = await classifyWebhook(secret, rawBody, signature, eventName);
+  const outcome = await classifyWebhook(secret, rawBody, signature, eventName, defaultLog);
 
   if (outcome.kind === "reject") {
     return c.text(outcome.reason, outcome.status);

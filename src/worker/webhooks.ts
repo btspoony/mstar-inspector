@@ -16,10 +16,55 @@
 import { Webhooks } from "@octokit/webhooks";
 import { z } from "zod";
 import type { ReviewJobPayload } from "../contracts/review-job";
+import type { HandlerLog } from "./handlers";
 
 export const REVIEW_COMMAND_PREFIX = "/review";
 
 export const PULL_REQUEST_ACTIONS = ["opened", "synchronize", "reopened"] as const;
+
+/**
+ * Module-level verifier singleton (QC F-005): the hot path constructed a
+ * `Webhooks` instance per request only to call `verify`, which uses nothing
+ * but `options.secret`. The instance is created lazily on first use, after
+ * the fail-closed secret check, so a missing/empty/"development" secret
+ * never reaches the crypto path. Exported as a test seam to lock the reuse
+ * behavior.
+ */
+let webhooks: Webhooks | null = null;
+
+export function getWebhooks(secret: string): Webhooks {
+  if (webhooks === null) {
+    webhooks = new Webhooks({ secret });
+  }
+  return webhooks;
+}
+
+/**
+ * Verify a signature, treating any throw as invalid (QC F-001). On the
+ * deployed Worker, wrangler resolves `@octokit/webhooks-methods` via the
+ * `browser` condition → WebCrypto verify → `hexToUInt8Array` throws a
+ * TypeError on malformed (non-hex) signatures, while Bun/node resolves the
+ * `node` condition → `timingSafeEqual` → returns false. Both must fail
+ * closed with 401; this wrapper unifies the two paths and logs the
+ * malformed input structurally so the operator can spot it.
+ */
+export async function verifySignature(
+  verify: (rawBody: string, signature: string) => Promise<boolean>,
+  rawBody: string,
+  signature: string,
+  log?: HandlerLog,
+): Promise<boolean> {
+  try {
+    return await verify(rawBody, signature);
+  } catch (err) {
+    const detail = err instanceof Error ? err.message : String(err);
+    log?.warn(
+      { event: "unknown", reason: "signature verification threw", detail },
+      "malformed signature rejected with 401",
+    );
+    return false;
+  }
+}
 
 export type WebhookOutcome =
   | { kind: "reject"; status: 400 | 401 | 500; reason: string }
@@ -63,14 +108,18 @@ const issueCommentSchema = z.object({
  * Verify the signature and map the event to a review job, an ignore, or a
  * reject. The fail-closed secret check runs first — no verification, no
  * side effects when the secret is missing/empty/"development". The
- * `Webhooks` verifier is constructed only after the secret passes, so an
- * empty/default secret can never reach the crypto path.
+ * `Webhooks` verifier is constructed lazily only after the secret passes,
+ * so an empty/default secret can never reach the crypto path.
+ *
+ * `log` is optional (defaults to no logging) so the pure classifier stays
+ * testable without a sink; the fetch entry passes `defaultLog`.
  */
 export async function classifyWebhook(
   secret: string,
   rawBody: string,
   signature: string | null,
   eventName: string | null,
+  log?: HandlerLog,
 ): Promise<WebhookOutcome> {
   if (!secret || secret === "development") {
     return { kind: "reject", status: 500, reason: "webhook secret is missing, empty, or the default 'development'" };
@@ -78,8 +127,7 @@ export async function classifyWebhook(
   if (!signature) {
     return { kind: "reject", status: 401, reason: "missing X-Hub-Signature-256 header" };
   }
-  const webhooks = new Webhooks({ secret });
-  const valid = await webhooks.verify(rawBody, signature);
+  const valid = await verifySignature(getWebhooks(secret).verify, rawBody, signature, log);
   if (!valid) {
     return { kind: "reject", status: 401, reason: "signature verification failed" };
   }
