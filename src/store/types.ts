@@ -70,9 +70,11 @@ export type StoreResult =
 
 /**
  * Narrow D1 face the store depends on (plan Clarify 5): prepare/bind/first/
- * all/run only. A real `D1Database` satisfies this structurally; tests provide
- * a bun:sqlite-backed implementation via `tests/store/helpers.ts`. The store
- * never touches batch/exec/withSession/dump, so the test double stays small.
+ * all/run + batch. A real `D1Database` satisfies this structurally; tests
+ * provide a bun:sqlite-backed implementation via `tests/store/helpers.ts`.
+ * `batch` was added in the T2 fix round: insertReview writes the review row
+ * and its findings in ONE atomic D1 batch (plan 05 T2 review I1) — the store
+ * never touches exec/withSession/dump, so the test double stays small.
  */
 export type D1StatementLike = {
   bind(...values: unknown[]): D1StatementLike;
@@ -84,6 +86,13 @@ export type D1StatementLike = {
   }>;
 };
 
+/** One statement's result inside a D1 `batch()` (order matches input). */
+export type D1BatchResult = {
+  results: unknown[];
+  meta: { changes: number; last_row_id: number };
+};
+
 export type D1Like = {
   prepare(query: string): D1StatementLike;
+  batch(statements: D1StatementLike[]): Promise<D1BatchResult[]>;
 };

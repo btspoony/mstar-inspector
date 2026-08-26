@@ -2,7 +2,7 @@
  * Test D1 double (plan 05 Task 1) — bun:sqlite in-memory database executing
  * the REAL migration SQL (`migrations/0001_reviews.sql`, DDL single source),
  * exposing only the narrow D1 face the store depends on (plan Clarify 5:
- * prepare/bind/first/all/run).
+ * prepare/bind/first/all/run + batch).
  *
  * bun:sqlite and D1 are both SQLite, so UNIQUE/ON CONFLICT semantics match;
  * if a divergence ever shows up against real D1, the remote apply is
@@ -11,7 +11,7 @@
 import { Database, type Statement } from "bun:sqlite";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import type { D1Like, D1StatementLike } from "../../src/store/types";
+import type { D1BatchResult, D1Like, D1StatementLike } from "../../src/store/types";
 
 const MIGRATION_PATH = join(import.meta.dir, "../../migrations/0001_reviews.sql");
 
@@ -68,6 +68,30 @@ export function createTestD1(): D1Like & { raw: Database } {
     raw: db,
     prepare(query: string): D1StatementLike {
       return wrapStatement(db.prepare(query));
+    },
+    /**
+     * D1 `batch()` runs the statements sequentially as ONE transaction —
+     * "if any statement fails, the entire sequence is aborted or rolled
+     * back" (developers.cloudflare.com/d1/worker-api/d1-database). The
+     * bun:sqlite equivalent is an explicit BEGIN/COMMIT/ROLLBACK around the
+     * async `run()` calls: bun:sqlite's `db.transaction()` does not roll
+     * back when the callback is async (probed), so the transaction is
+     * bracketed manually. A thrown statement aborts the batch and rolls
+     * back every prior statement, matching D1.
+     */
+    async batch(statements: D1StatementLike[]): Promise<D1BatchResult[]> {
+      db.exec("BEGIN");
+      try {
+        const results: D1BatchResult[] = [];
+        for (const stmt of statements) {
+          results.push(await stmt.run());
+        }
+        db.exec("COMMIT");
+        return results;
+      } catch (error) {
+        db.exec("ROLLBACK");
+        throw error;
+      }
     },
   };
 }

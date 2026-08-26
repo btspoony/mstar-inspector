@@ -177,6 +177,71 @@ describe("createReviewStore().insertReview", () => {
     expect(row.raw_output).toBe(raw);
   });
 
+  test("raw_output truncation never exceeds 64KB with multi-byte UTF-8", async () => {
+    const db = createTestD1();
+    const store = createReviewStore(db);
+
+    // 3-byte code points: the 64KB byte boundary always falls mid-sequence,
+    // so a naive byte cut produces a replacement character that re-encodes
+    // to 3 bytes and pushes the payload back over the cap (plan 05 T2 review
+    // Minor 1). The stored payload must stay ≤ 64KB with no split sequence.
+    const big = "€".repeat(30 * 1024); // 90KB of UTF-8
+    await store.insertReview(insert({ raw: big }));
+
+    const row = db.raw.query("SELECT raw_output FROM reviews").get() as { raw_output: string };
+    const stored = new TextEncoder().encode(row.raw_output).byteLength;
+    expect(stored).toBeLessThanOrEqual(64 * 1024);
+    expect(row.raw_output.includes("\uFFFD")).toBe(false);
+  });
+  test("a findings failure mid-batch rolls back the review row (atomic insert)", async () => {
+    const db = createTestD1();
+    // Inject a failure on the SECOND findings insert (title 'boom') to prove
+    // the review row written earlier in the same batch is rolled back too —
+    // a partial review must never survive (plan 05 T2 review I1).
+    db.raw.exec(
+      `CREATE TRIGGER fail_findings BEFORE INSERT ON findings
+       WHEN NEW.title = 'boom' BEGIN SELECT RAISE(ABORT, 'injected findings failure'); END;`,
+    );
+    const store = createReviewStore(db);
+
+    await expect(
+      store.insertReview(
+        insert({
+          output: output({
+            findings: [
+              {
+                severity: "warning",
+                category: "logic",
+                file_path: "src/a.ts",
+                line_start: 1,
+                line_end: 1,
+                title: "ok",
+                body: "b1",
+              },
+              {
+                severity: "warning",
+                category: "logic",
+                file_path: "src/b.ts",
+                line_start: 1,
+                line_end: 1,
+                title: "boom",
+                body: "b2",
+              },
+            ],
+          }),
+        }),
+      ),
+    ).rejects.toThrow(/injected findings failure/);
+
+    // A non-UNIQUE failure must throw (not be reported as duplicate) and
+    // leave ZERO review rows — the queue retry's findByIdempotencyKey then
+    // finds nothing and re-runs the review instead of skipping it.
+    const reviews = db.raw.query("SELECT COUNT(*) AS n FROM reviews").get() as { n: number };
+    expect(reviews.n).toBe(0);
+    const findings = db.raw.query("SELECT COUNT(*) AS n FROM findings").get() as { n: number };
+    expect(findings.n).toBe(0);
+  });
+
   test("an empty head_sha cannot be inserted (store-layer rejection)", async () => {
     const db = createTestD1();
     const store = createReviewStore(db);

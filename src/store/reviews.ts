@@ -6,6 +6,28 @@
  * (`meta.changes === 0`) means another consumer already wrote the row, so the
  * outcome is `duplicate` and no findings are written (plan Clarify 3.4).
  *
+ * Atomicity (plan 05 T2 review I1): the review row and ALL its findings are
+ * written in ONE `db.batch([...])` call. Cloudflare D1 documents batch as a
+ * transaction — "Statements are executed sequentially and non-concurrently as
+ * a transaction. If any statement fails, the entire sequence is aborted or
+ * rolled back" (developers.cloudflare.com/d1/worker-api/d1-database). A
+ * mid-batch findings failure therefore leaves ZERO review rows, so a queue
+ * retry's `findByIdempotencyKey` cannot find a partial review and skip the
+ * GitHub comment (the unrecoverable-partial-review failure mode). The real
+ * `D1Database` has no `transaction()` method (workers-types 5.20260825.1:
+ * prepare/batch/exec/withSession/dump only), so batch is the transactional
+ * primitive; the bun:sqlite test double implements it with an explicit
+ * BEGIN/COMMIT/ROLLBACK around the statements (bun:sqlite's async
+ * `db.transaction()` does not roll back, so it cannot model D1 batch).
+ *
+ * Duplicate outcome inside the batch: findings are guarded by
+ * `INSERT ... SELECT ... WHERE EXISTS (SELECT 1 FROM reviews WHERE id = ?)`.
+ * On a UNIQUE no-op the review insert changes 0 rows, the new UUID does not
+ * exist, and each findings statement writes 0 rows — no FK failure, batch
+ * succeeds, and the caller branches on `changes === 0` to return
+ * `{ outcome: "duplicate" }`. Only the named UNIQUE conflict is treated as
+ * duplicate; any other statement error still throws (and rolls back).
+ *
  * Module boundary (compass contracts A): type-only imports only — no
  * worker/pipeline/session/omp runtime dependencies. The `db` parameter is the
  * narrow D1 face (`D1Like`) so the bun:sqlite test double and a real
@@ -18,14 +40,27 @@ import type { D1Like, ReviewInsert, ReviewRow, StoreResult } from "./types";
 /** Cap for `raw_output` (plan Clarify 4): summary_md + raw JSON, 64KB max. */
 const RAW_OUTPUT_LIMIT_BYTES = 64 * 1024;
 
-const encoder = new TextEncoder();
 const decoder = new TextDecoder();
+const encoder = new TextEncoder();
 
-/** Truncate the raw payload to 64KB of UTF-8 bytes (byte-exact cap). */
+/**
+ * Truncate the raw payload to 64KB of UTF-8 bytes (byte-exact cap, plan 05 T2
+ * review Minor 1). Cutting at the byte boundary can split a multi-byte code
+ * point; the replacement character re-encodes to 3 bytes, which can push the
+ * result back over the cap. Shrink until the re-encoded payload fits — the
+ * loop invariant is "stored bytes ≤ 64KB", and it terminates within a few
+ * bytes (only the single incomplete trailing sequence can grow).
+ */
 function truncateRaw(raw: string): string {
   const bytes = encoder.encode(raw);
   if (bytes.byteLength <= RAW_OUTPUT_LIMIT_BYTES) return raw;
-  return decoder.decode(bytes.subarray(0, RAW_OUTPUT_LIMIT_BYTES));
+  let end = RAW_OUTPUT_LIMIT_BYTES;
+  let truncated = decoder.decode(bytes.subarray(0, end));
+  while (encoder.encode(truncated).byteLength > RAW_OUTPUT_LIMIT_BYTES) {
+    end--;
+    truncated = decoder.decode(bytes.subarray(0, end));
+  }
+  return truncated;
 }
 
 export type ReviewStore = {
@@ -43,7 +78,7 @@ export function createReviewStore(db: D1Like): ReviewStore {
       const reviewId = crypto.randomUUID();
       const raw = truncateRaw(input.raw);
 
-      const inserted = await db
+      const reviewStmt = db
         .prepare(
           `INSERT INTO reviews (id, installation_id, owner, repo, pr_number, head_sha, verdict, summary_md, model, skill_version, raw_output)
            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -61,19 +96,18 @@ export function createReviewStore(db: D1Like): ReviewStore {
           input.model ?? null,
           input.skill_version ?? null,
           raw,
-        )
-        .run();
+        );
 
-      if (inserted.meta.changes === 0) {
-        // UNIQUE conflict — another consumer already stored this sha.
-        return { outcome: "duplicate" };
-      }
-
-      for (const finding of input.output.findings) {
-        await db
+      // Findings are guarded by WHERE EXISTS on the review id: on a UNIQUE
+      // no-op the review insert writes 0 rows, the new UUID does not exist,
+      // and each findings statement writes 0 rows — the batch succeeds and
+      // the caller returns { outcome: "duplicate" } below.
+      const findingStmts = input.output.findings.map((finding) =>
+        db
           .prepare(
             `INSERT INTO findings (id, review_id, severity, category, file_path, line_start, line_end, title, body, fingerprint)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+             SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+             WHERE EXISTS (SELECT 1 FROM reviews WHERE id = ?)`,
           )
           .bind(
             crypto.randomUUID(),
@@ -86,8 +120,15 @@ export function createReviewStore(db: D1Like): ReviewStore {
             finding.title,
             finding.body,
             finding.fingerprint_hint ?? null,
-          )
-          .run();
+            reviewId,
+          ),
+      );
+
+      const results = await db.batch([reviewStmt, ...findingStmts]);
+
+      if (results[0]!.meta.changes === 0) {
+        // UNIQUE conflict — another consumer already stored this sha.
+        return { outcome: "duplicate" };
       }
 
       return { outcome: "inserted", reviewId };
