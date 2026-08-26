@@ -1,17 +1,25 @@
 /**
- * Consumer tests (plan 06 Task 3) — full-mock flow. The sandbox adapter and
- * the commenter are injected via createReviewConsumer's overrides (DI — no
- * process-wide mock.module on relative module paths, which leaks across test
- * files sharing a worker on CI, run 32946710695); the review store is the REAL
- * store over the bun:sqlite D1 double (tests/store/helpers.ts) so the
- * consumer's store wiring is exercised for real. gitops command construction
- * and parseReviewOutput stay real.
+ * Consumer tests (plan 06 Task 3 + Phase 5 Wave A) — full-mock flow. The
+ * sandbox adapter and the commenter are injected via createReviewConsumer's
+ * overrides (DI — no process-wide mock.module on relative module paths, which
+ * leaks across test files sharing a worker on CI, run 32946710695); the review
+ * store is the REAL store over the bun:sqlite D1 double
+ * (tests/store/helpers.ts) so the consumer's store wiring is exercised for
+ * real. gitops command construction and parseReviewOutput stay real.
+ *
+ * Wave A (bugbot) changes:
+ *   - clone uses the LIVE PR head (`pull/<n>/head`), git transport auth via
+ *     scoped extraheader env (GIT_CONFIG_*), GH_TOKEN only for gh steps
+ *   - the AUTHORITATIVE sha comes from `git rev-parse HEAD` AFTER the clone;
+ *     idem key / D1 row / commit_id / KV all key off it (payload.head_sha is
+ *     no longer used for dedup — a force-push mid-flight is self-consistent)
+ *   - dedup runs AFTER clone against the checked-out sha
  *
  * Acceptance points (plan Task 3 / brief):
- *   - findByIdempotencyKey hit → ack (no sandbox, no post, no insert)
- *   - full flow: clone → diff → runner (env-injected secrets) → parse →
- *     post FIRST → insert → KV completion → destroy
- *   - null payload sha → gh pr view resolves it before dedup
+ *   - findByIdempotencyKey hit after clone → ack (no post, no insert)
+ *   - full flow: clone → rev-parse → diff → runner (env-injected secrets) →
+ *     parse → post FIRST → insert → KV completion → destroy
+ *   - null payload sha → sha resolved from the checkout (no gh pr view)
  *   - parse failure → no post, no insert, rethrow, destroy
  *   - comment failure → no insert, rethrow, destroy
  *   - finally destroy on every path
@@ -47,6 +55,7 @@ const SHA = "0123456789abcdef0123456789abcdef01234567";
 const sandboxCalls: Array<{ cmd: string; opts?: unknown }> = [];
 let runnerStdout = "";
 let resolvedSha = SHA;
+let revParseExitCode = 0;
 let sandboxError: Error | undefined;
 let destroyCalls = 0;
 let destroyError: Error | undefined;
@@ -60,7 +69,9 @@ const fakeSandbox = {
   exec: mock(async (cmd: string, opts?: unknown) => {
     sandboxCalls.push({ cmd, opts });
     if (sandboxError) throw sandboxError;
-    if (cmd.includes("gh pr view")) return { stdout: `${resolvedSha}\n`, stderr: "", exitCode: 0 };
+    if (cmd.includes("rev-parse")) {
+      return { stdout: `${resolvedSha}\n`, stderr: "", exitCode: revParseExitCode };
+    }
     if (cmd.includes("git init")) return { stdout: "", stderr: "", exitCode: cloneExitCode };
     if (cmd.includes("gh pr diff")) return { stdout: "", stderr: "", exitCode: diffExitCode };
     if (cmd.includes("--diff")) {
@@ -185,6 +196,7 @@ function reset(): void {
   cloneExitCode = 0;
   diffExitCode = 0;
   resolvedSha = SHA;
+  revParseExitCode = 0;
   sandboxError = undefined;
   destroyCalls = 0;
   destroyError = undefined;
@@ -200,7 +212,7 @@ function reviewCount(db: ReturnType<typeof createTestD1>): number {
 }
 
 describe("createReviewConsumer", () => {
-  test("findByIdempotencyKey hit → ack: no sandbox, no post, no insert", async () => {
+  test("findByIdempotencyKey hit after clone → ack: no post, no insert, destroy", async () => {
     reset();
     const db = createTestD1();
     const store = createReviewStore(db);
@@ -213,14 +225,19 @@ describe("createReviewConsumer", () => {
 
     await consumer(makeBatch(makePayload()));
 
-    expect(sandboxCalls).toHaveLength(0);
-    expect(commenterCalls).toHaveLength(0);
+    // The authoritative sha comes from the checkout, so the dedup runs after
+    // clone + rev-parse; the D1 hit acks before any post/insert.
+    expect(sandboxCalls.map((c) => c.cmd)).toEqual([
+      expect.stringContaining("git init '/workspace/repo'"),
+      expect.stringContaining("git -C '/workspace/repo' rev-parse HEAD"),
+    ]);
+    expect(commenterCalls.filter((c) => c.op === "post")).toHaveLength(0);
     expect(kvPuts).toHaveLength(0);
-    expect(destroyCalls).toBe(0);
+    expect(destroyCalls).toBe(1);
     expect(reviewCount(db)).toBe(1); // untouched
   });
 
-  test("full flow: clone → diff → runner → parse → post → insert → KV done → destroy", async () => {
+  test("full flow: clone → rev-parse → diff → runner → parse → post → insert → KV done → destroy", async () => {
     reset();
     runnerStdout = JSON.stringify(VALID_OUTPUT);
     const db = createTestD1();
@@ -230,13 +247,26 @@ describe("createReviewConsumer", () => {
 
     expect(sandboxCalls.map((c) => c.cmd)).toEqual([
       expect.stringContaining("git init '/workspace/repo'"),
+      expect.stringContaining("git -C '/workspace/repo' rev-parse HEAD"),
       expect.stringContaining("gh pr diff '42' --repo 'acme/widgets'"),
       expect.stringContaining("bun run '/opt/runner/src/review/runner.ts' --diff '/workspace/pr.diff'"),
     ]);
-    expect(sandboxCalls[0]!.opts).toEqual({ env: { GH_TOKEN: "ghs_installation_token" }, timeout: 120_000 });
-    expect(sandboxCalls[1]!.opts).toEqual({ env: { GH_TOKEN: "ghs_installation_token" }, timeout: 120_000 });
+    // Clone: git transport auth via scoped extraheader env (bugbot A1) — the
+    // token lives in GIT_CONFIG_VALUE_0, never in the command string.
+    expect(sandboxCalls[0]!.opts).toEqual({
+      env: {
+        GIT_CONFIG_COUNT: "1",
+        GIT_CONFIG_KEY_0: "http.https://github.com/.extraheader",
+        GIT_CONFIG_VALUE_0: "Authorization: Bearer ghs_installation_token",
+      },
+      timeout: 120_000,
+    });
+    // rev-parse: no credentials needed.
+    expect(sandboxCalls[1]!.opts).toEqual({ timeout: 120_000 });
+    // Diff: gh step, GH_TOKEN via exec env only.
+    expect(sandboxCalls[2]!.opts).toEqual({ env: { GH_TOKEN: "ghs_installation_token" }, timeout: 120_000 });
     // Runner: cwd = clone dir; model key + harness paths via exec env only.
-    expect(sandboxCalls[2]!.opts).toEqual({
+    expect(sandboxCalls[3]!.opts).toEqual({
       cwd: "/workspace/repo",
       env: {
         ARK_API_KEY: "ark-key",
@@ -276,7 +306,7 @@ describe("createReviewConsumer", () => {
     expect(destroyCalls).toBe(1);
   });
 
-  test("null payload sha → gh pr view resolves it before dedup", async () => {
+  test("null payload sha → actual sha read from the checkout (no gh pr view)", async () => {
     reset();
     resolvedSha = "abcdefabcdefabcdefabcdefabcdefabcdefabcd";
     runnerStdout = JSON.stringify(VALID_OUTPUT);
@@ -285,12 +315,46 @@ describe("createReviewConsumer", () => {
 
     await consumer(makeBatch(makePayload({ head_sha: null, triggered_by: "review_command" })));
 
-    expect(sandboxCalls[0]!.cmd).toBe(
-      "gh pr view '42' --repo 'acme/widgets' --json headRefOid --jq .headRefOid",
-    );
-    expect(sandboxCalls[0]!.opts).toEqual({ env: { GH_TOKEN: "ghs_installation_token" }, timeout: 120_000 });
+    // No gh pr view anywhere: the authoritative sha comes from the clone.
+    expect(sandboxCalls.some((c) => c.cmd.includes("gh pr view"))).toBe(false);
+    expect(sandboxCalls[0]!.cmd).toContain("git init '/workspace/repo'");
+    expect(sandboxCalls[1]!.cmd).toContain("git -C '/workspace/repo' rev-parse HEAD");
     const row = db.raw.query("SELECT * FROM reviews").get() as { head_sha: string };
     expect(row.head_sha).toBe("abcdefabcdefabcdefabcdefabcdefabcdefabcd");
+    expect(kvPuts).toEqual([
+      {
+        key: "idem:123:acme/widgets:42:abcdefabcdefabcdefabcdefabcdefabcdefabcd",
+        value: "done",
+        options: { expirationTtl: 86400 },
+      },
+    ]);
+    expect(destroyCalls).toBe(1);
+  });
+
+  test("rev-parse sha differs from payload sha → D1 row, commit_id, KV all use the checkout sha", async () => {
+    reset();
+    const actualSha = "feedfacefeedfacefeedfacefeedfacefeedface";
+    resolvedSha = actualSha;
+    runnerStdout = JSON.stringify(VALID_OUTPUT);
+    const db = createTestD1();
+    const consumer = createReviewConsumer(makeEnv({ DB: db as never }), undefined, testOverrides);
+
+    await consumer(makeBatch(makePayload())); // payload head_sha = SHA (stale)
+
+    // The posted commit_id, the D1 row and the KV key all key off the
+    // checkout sha — the diff/files/commit_id triple stays consistent even
+    // when the webhook payload sha is stale (force-push mid-flight).
+    expect(commenterCalls.filter((c) => c.op === "post")).toHaveLength(1);
+    expect(commenterCalls[1]!.args[0]).toMatchObject({ headSha: actualSha });
+    const row = db.raw.query("SELECT * FROM reviews").get() as { head_sha: string };
+    expect(row.head_sha).toBe(actualSha);
+    expect(kvPuts).toEqual([
+      {
+        key: `idem:123:acme/widgets:42:${actualSha}`,
+        value: "done",
+        options: { expirationTtl: 86400 },
+      },
+    ]);
     expect(destroyCalls).toBe(1);
   });
 
@@ -392,7 +456,7 @@ describe("createReviewConsumer", () => {
     expect(errLine!.msg).toContain("parse failed");
   });
 
-  test("empty sha after gh pr view → no post/insert, rethrow, destroy", async () => {
+  test("empty actual sha from rev-parse → no post/insert, rethrow, destroy", async () => {
     reset();
     resolvedSha = "";
     runnerStdout = JSON.stringify(VALID_OUTPUT);
@@ -400,7 +464,7 @@ describe("createReviewConsumer", () => {
     const consumer = createReviewConsumer(makeEnv({ DB: db as never }), testLog, testOverrides);
 
     await expect(
-      consumer(makeBatch(makePayload({ head_sha: null, triggered_by: "review_command" }))),
+      consumer(makeBatch(makePayload())),
     ).rejects.toThrow(/cannot resolve head sha/);
 
     expect(commenterCalls.filter((c) => c.op === "post")).toHaveLength(0);

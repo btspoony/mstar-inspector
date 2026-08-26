@@ -1,15 +1,27 @@
 /**
  * Queue consumer — the review pipeline main flow (plan 06 Task 3).
  *
- * Flow (plan Tasks / compass S6): message → resolve sha (null → gh pr view
- * in the sandbox) → findByIdempotencyKey (hit → ack) → getSandbox (unique id
- * per attempt) → clone + diff → exec the in-image runner (env-injected
- * GH_TOKEN/ARK_API_KEY/PI_CODING_AGENT_DIR/M0_HARNESS_PLUGIN_ROOT) →
- * parseReviewOutput → post the overall Review comment FIRST → insertReview
- * (duplicate → ack) → KV completion state → finally destroy. Any step
- * throwing → structured log + rethrow (queue retry → DLQ). A runner result
- * that is not the structured main path (summary degrade, Clarify #9.5) is
- * treated as a failure: no post, no insert, structured log, rethrow.
+ * Flow (plan Tasks / compass S6): message → getSandbox (unique id per
+ * attempt) → clone the PR head branch (git transport auth via scoped
+ * extraheader env) → `git rev-parse HEAD` for the AUTHORITATIVE sha →
+ * dedup by that sha (hit → ack) → diff → exec the in-image runner
+ * (env-injected GH_TOKEN/ARK_API_KEY/PI_CODING_AGENT_DIR/
+ * M0_HARNESS_PLUGIN_ROOT) → parseReviewOutput → post the overall Review
+ * comment FIRST → insertReview (duplicate → ack) → KV completion state →
+ * finally destroy. Any step throwing → structured log + rethrow (queue
+ * retry → DLQ). A runner result that is not the structured main path
+ * (summary degrade, Clarify #9.5) is treated as a failure: no post, no
+ * insert, structured log, rethrow.
+ *
+ * Sha consistency (bugbot A2): every downstream use — idempotency key, D1
+ * row, posted commit_id, KV completion — is keyed off the sha read back
+ * from the checked-out HEAD, never the webhook payload sha (which only
+ * feeds the pre-enqueue KV fast path in the worker). The diff, the clone
+ * files and the commit_id therefore always describe the same commit; a
+ * force-push between webhook delivery and processing is captured by the
+ * rev-parse instead of drifting silently. The pre-clone payload-sha dedup
+ * is gone for the same reason: it could skip a review that the live clone
+ * would have picked up (force-push between delivery and processing).
  *
  * Module boundary (compass contracts A): this is the ONLY legal edge from
  * worker → pipeline (worker/index.ts queue wiring). It imports contracts/
@@ -23,7 +35,7 @@ import { idemKey, IDEMPOTENCY_SECONDS, type IdempotencyKey } from "../contracts/
 import { parseReviewOutput } from "../review/schema";
 import { createReviewStore, type ReviewStore } from "../store/reviews";
 import { getSandbox, type ReviewSandbox } from "./sandbox";
-import { buildGitOpsCommands, resolveHeadShaCommand } from "./gitops";
+import { buildGitOpsCommands } from "./gitops";
 import { createReviewCommenter, type ReviewCommenter } from "./comment";
 
 export type PipelineEnv = {
@@ -45,7 +57,7 @@ const OMP_AGENT_DIR = "/opt/omp-agent";
 // Per-call exec bounds (ms) — every sandbox exec carries an explicit timeout
 // so a hung gh/git/model call fails deterministically instead of silently
 // eating a container (plan QC 06 fix round 1 / qc3 F-001).
-/** gh/git steps (resolve sha, clone, diff) — measured ~2.6s, 2min is generous. */
+/** gh/git steps (clone, rev-parse, diff) — measured ~2.6s, 2min is generous. */
 const EXEC_TIMEOUT_GIT_MS = 120_000;
 /** In-image runner (real model call, measured ~52s) — 10min ceiling. */
 const EXEC_TIMEOUT_RUNNER_MS = 600_000;
@@ -145,28 +157,52 @@ async function processMessage(payload: ReviewJobPayload, deps: ProcessDeps): Pro
   // reused — attach-after-destroy behavior is unknown, uniqueness wins.
   const sandboxId = `review-${crypto.randomUUID()}`;
   let sandbox: ReviewSandbox | null = null;
-  // Set once the sha is resolved; the failure log carries the idempotency
-  // key + sandbox id whenever they exist (plan Clarify #11 / Done criteria).
+  // Set once the sha is resolved from the checkout; the failure log carries
+  // the idempotency key + sandbox id whenever they exist (Clarify #11 / Done
+  // criteria: 失败路径错误日志含幂等键).
   let fields: ConsumerLogFields | undefined;
 
   try {
-    // 1. Resolve the head sha: payload sha wins; null (e.g. /review command)
-    // → gh pr view inside the sandbox.
-    let headSha = payload.head_sha;
-    if (!headSha) {
+    // 1. Sandbox + installation token (created lazily; destroyed in finally).
+    if (sandbox === null) {
       sandbox = await deps.getSandbox(deps.env.SANDBOX, sandboxId);
-      const token = await deps.commenter.getInstallationToken(payload.installation_id);
-      const resolved = await sandbox.exec(
-        resolveHeadShaCommand(payload.owner, payload.repo, payload.pr_number),
-        { env: { GH_TOKEN: token }, timeout: EXEC_TIMEOUT_GIT_MS },
-      );
-      if (resolved.exitCode !== 0 || resolved.stdout.trim() === "") {
-        throw new Error(
-          `cannot resolve head sha: gh exit ${resolved.exitCode}, stdout ${resolved.stdout.length}B`,
-        );
-      }
-      headSha = resolved.stdout.trim();
     }
+    const token = await deps.commenter.getInstallationToken(payload.installation_id);
+    const cmds = buildGitOpsCommands({
+      owner: payload.owner,
+      repo: payload.repo,
+      prNumber: payload.pr_number,
+      cloneDir: CLONE_DIR,
+      diffPath: DIFF_PATH,
+      runnerPath: RUNNER_PATH,
+    });
+
+    // 2. Clone the PR head branch. Git transport auth via scoped extraheader
+    // env (bugbot A1 — git ignores GH_TOKEN, so private-repo clones failed
+    // without this; same pattern as the smoke-entry git fallback). GH_TOKEN
+    // stays for the gh steps below. Credentials are exec env only — never in
+    // the command string, never in the image, never in logs.
+    const clone = await sandbox.exec(cmds.clone, {
+      env: {
+        GIT_CONFIG_COUNT: "1",
+        GIT_CONFIG_KEY_0: "http.https://github.com/.extraheader",
+        GIT_CONFIG_VALUE_0: `Authorization: Bearer ${token}`,
+      },
+      timeout: EXEC_TIMEOUT_GIT_MS,
+    });
+    if (clone.exitCode !== 0) {
+      throw new Error(`clone failed: exit ${clone.exitCode}, stdout ${clone.stdout.length}B`);
+    }
+
+    // 3. AUTHORITATIVE sha: read the checked-out HEAD (bugbot A2). Everything
+    // downstream — idempotency key, D1 row, posted commit_id, KV state — is
+    // keyed off this sha, so diff/files/commit_id always describe the same
+    // commit and a force-push mid-flight is captured here, not drifted.
+    const rev = await sandbox.exec(cmds.checkedOutSha, { timeout: EXEC_TIMEOUT_GIT_MS });
+    if (rev.exitCode !== 0 || rev.stdout.trim() === "") {
+      throw new Error(`cannot resolve head sha: git exit ${rev.exitCode}, stdout ${rev.stdout.length}B`);
+    }
+    const headSha = rev.stdout.trim();
 
     const key: IdempotencyKey = {
       installation_id: payload.installation_id,
@@ -182,39 +218,22 @@ async function processMessage(payload: ReviewJobPayload, deps: ProcessDeps): Pro
       sandbox_id: sandboxId,
     };
 
-    // 2. Dedup: a stored review for this sha → ack (no post, no insert).
+    // 4. Dedup: a stored review for this checked-out sha → ack (no post, no
+    // insert). Keyed off the checkout, so a force-push between delivery and
+    // processing is never mis-deduped against the stale payload sha.
     const existing = await deps.store.findByIdempotencyKey(key);
     if (existing) {
       deps.log.info(fields, "idempotency hit — ack");
       return;
     }
 
-    // 3. Sandbox (created lazily; destroyed in finally).
-    if (sandbox === null) {
-      sandbox = await deps.getSandbox(deps.env.SANDBOX, sandboxId);
-    }
-    const token = await deps.commenter.getInstallationToken(payload.installation_id);
-    const cmds = buildGitOpsCommands({
-      owner: payload.owner,
-      repo: payload.repo,
-      prNumber: payload.pr_number,
-      headSha,
-      cloneDir: CLONE_DIR,
-      diffPath: DIFF_PATH,
-      runnerPath: RUNNER_PATH,
-    });
-
-    // 4. Clone + diff (GH_TOKEN via exec env only — never in the command).
-    const clone = await sandbox.exec(cmds.clone, { env: { GH_TOKEN: token }, timeout: EXEC_TIMEOUT_GIT_MS });
-    if (clone.exitCode !== 0) {
-      throw new Error(`clone failed: exit ${clone.exitCode}, stdout ${clone.stdout.length}B`);
-    }
+    // 5. Diff (GH_TOKEN via exec env only — never in the command).
     const diff = await sandbox.exec(cmds.diff, { env: { GH_TOKEN: token }, timeout: EXEC_TIMEOUT_GIT_MS });
     if (diff.exitCode !== 0) {
       throw new Error(`diff failed: exit ${diff.exitCode}, stdout ${diff.stdout.length}B`);
     }
 
-    // 5. In-image runner: cwd = clone dir; model key + harness paths via exec
+    // 6. In-image runner: cwd = clone dir; model key + harness paths via exec
     // env (compass D — secrets never baked into the image).
     const run = await sandbox.exec(cmds.runner, {
       cwd: CLONE_DIR,
@@ -229,7 +248,7 @@ async function processMessage(payload: ReviewJobPayload, deps: ProcessDeps): Pro
       throw new Error(`runner failed: exit ${run.exitCode}, stdout ${run.stdout.length}B`);
     }
 
-    // 6. Structured-mode gate (Clarify #9.5): the runner exits 0 for BOTH
+    // 7. Structured-mode gate (Clarify #9.5): the runner exits 0 for BOTH
     // structured and summary modes (M0 CLI contract), so the mode lives on
     // stderr (`review mode: ${mode}`). A summary degrade — or a missing
     // marker — is NOT a successful e2e: no review, no insert, rethrow into
@@ -240,13 +259,13 @@ async function processMessage(payload: ReviewJobPayload, deps: ProcessDeps): Pro
       );
     }
 
-    // 7. Parse: failure → no review, no insert (plan Notes for findings-schema).
+    // 8. Parse: failure → no review, no insert (plan Notes for findings-schema).
     const parsed = parseReviewOutput(run.stdout);
     if (!parsed.ok) {
       throw new Error(`parse failed: ${parsed.error}`);
     }
 
-    // 8. Post the overall review FIRST (the user-facing deliverable must not
+    // 9. Post the overall review FIRST (the user-facing deliverable must not
     // be lost to a later store failure), then insert.
     await deps.commenter.postReview({
       installationId: payload.installation_id,
@@ -257,7 +276,7 @@ async function processMessage(payload: ReviewJobPayload, deps: ProcessDeps): Pro
       output: parsed.output,
     });
 
-    // 9. Insert: duplicate (race lost) → ack; the review row already exists.
+    // 10. Insert: duplicate (race lost) → ack; the review row already exists.
     const result = await deps.store.insertReview({
       key,
       output: parsed.output,
@@ -267,7 +286,7 @@ async function processMessage(payload: ReviewJobPayload, deps: ProcessDeps): Pro
       deps.log.info(fields, "duplicate insert — ack");
     }
 
-    // 10. KV completion state (observability; the D1 row is the durable record).
+    // 11. KV completion state (observability; the D1 row is the durable record).
     try {
       await deps.env.IDEMPOTENCY_KV.put(idemKey(key), "done", {
         expirationTtl: IDEMPOTENCY_SECONDS,
@@ -279,7 +298,7 @@ async function processMessage(payload: ReviewJobPayload, deps: ProcessDeps): Pro
   } catch (err) {
     // Structured failure log carrying the idempotency key + sandbox id
     // (plan Clarify #11 / Done criteria: 失败路径错误日志含幂等键), then
-    // rethrow so the queue retries and eventually DLQs.
+    // rethrow so the worker retries and eventually DLQs.
     const detail = err instanceof Error ? err.message : String(err);
     deps.log.error(
       fields ?? { ...baseFields, sandbox_id: sandboxId },

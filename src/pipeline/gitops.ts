@@ -1,36 +1,46 @@
 /**
  * GitOps command construction (plan 06 Task 3) — pure command builders for the
  * sandbox exec steps. Trusted orchestration: the consumer runs these commands
- * inside the sandbox with GH_TOKEN injected via exec env (never in the command
- * string, never in the image, never in logs — compass contracts D). The
- * interpolated fields (owner/repo/pr number/sha) come from the verified
- * webhook payload, not from untrusted free text.
+ * inside the sandbox with credentials injected via exec env (never in the
+ * command string, never in the image, never in logs — compass contracts D).
+ * The interpolated fields (owner/repo/pr number/clone dir) come from the
+ * verified webhook payload, not from untrusted free text.
  *
  * Every payload-derived field is validated against a strict allowlist and
  * single-quoted before interpolation (plan QC 06 fix round 1 / qc2 F-001):
- * owner/repo are GitHub name chars ([A-Za-z0-9._-]), headSha is hex (40–64
- * chars), prNumber is a positive integer. Anything else fails closed with a
- * descriptive error BEFORE a shell string is built — a metacharacter (`;`,
- * space, backtick, `$(...)`, `'`) can never reach `sh -c`.
+ * owner/repo are GitHub name chars ([A-Za-z0-9._-]), prNumber is a positive
+ * integer, clone/diff/runner paths are fixed in-image constants. Anything
+ * else fails closed with a descriptive error BEFORE a shell string is built
+ * — a metacharacter (`;`, space, backtick, `$(...)`, `'`) can never reach
+ * `sh -c`.
  *
  * Primary diff path is `gh pr diff` (T1 falsified: GH_TOKEN env injection
  * works, non-empty diff, exit 0). The clone step exists so the in-image
  * runner's session cwd is the PR head checkout (the model reads repo files).
+ *
+ * Sha consistency (bugbot A2): the clone checks out the LIVE PR head
+ * (`pull/<n>/head`, the same commit `gh pr diff` reads), then the consumer
+ * reads the checked-out sha back with `git rev-parse HEAD` and keys the
+ * idempotency/D1/KV/commit_id off THAT sha. The diff, the clone files and
+ * the posted commit_id therefore always describe the same commit — a
+ * force-push between webhook delivery and processing is captured by the
+ * rev-parse instead of drifting silently.
  */
 
 export type GitOpsInput = {
   owner: string;
   repo: string;
   prNumber: number;
-  headSha: string;
   cloneDir: string;
   diffPath: string;
   runnerPath: string;
 };
 
 export type GitOpsCommands = {
-  /** Shallow clone of the PR head sha into cloneDir. */
+  /** Shallow clone of the PR head branch into cloneDir. */
   clone: string;
+  /** Read the sha of the checked-out HEAD (authoritative review sha). */
+  checkedOutSha: string;
   /** Write the PR unified diff to diffPath via gh. */
   diff: string;
   /** Run the in-image review runner against diffPath. */
@@ -39,8 +49,6 @@ export type GitOpsCommands = {
 
 /** GitHub name charset (owner/repo) — matches signed webhook payload reality. */
 const GITHUB_NAME_RE = /^[A-Za-z0-9._-]+$/;
-/** Git object id: 40-char SHA-1 or 64-char SHA-256, lowercase hex. */
-const HEAD_SHA_RE = /^[0-9a-f]{40,64}$/;
 
 function assertShellSafe(value: string, pattern: RegExp, label: string): void {
   if (!pattern.test(value)) {
@@ -59,37 +67,36 @@ function assertPrNumber(prNumber: number): void {
   }
 }
 
-function assertHeadSha(headSha: string): void {
-  assertShellSafe(headSha, HEAD_SHA_RE, "headSha");
-}
-
 /**
- * Resolve the PR head sha via gh (used when the queue payload sha is null —
- * e.g. `/review` commands). stdout is the bare sha (gh --jq .headRefOid).
+ * Shallow clone of the PR head branch. `gh pr diff` reads the LIVE PR head,
+ * so the checkout must match the diff: fetch the `pull/<n>/head` ref (GitHub
+ * serves it for every open PR) and detach at FETCH_HEAD. The authoritative
+ * sha is read back with checkedOutShaCommand AFTER the clone (bugbot A2).
+ * Private-repo transport auth is injected by the consumer via scoped git
+ * env config (http.https://github.com/.extraheader) — never in the string.
  */
-export function resolveHeadShaCommand(owner: string, repo: string, prNumber: number): string {
+export function cloneCommand(owner: string, repo: string, prNumber: number, cloneDir: string): string {
   assertOwnerRepo(owner, repo);
   assertPrNumber(prNumber);
-  return `gh pr view '${prNumber}' --repo '${owner}/${repo}' --json headRefOid --jq .headRefOid`;
-}
-
-/**
- * Shallow clone of the exact head sha. `git clone --branch <sha>` does not
- * accept a sha, so the clone is init + fetch of the pinned commit (GitHub
- * serves arbitrary reachable shas for public repos) + checkout FETCH_HEAD.
- */
-export function cloneCommand(owner: string, repo: string, headSha: string, cloneDir: string): string {
-  assertOwnerRepo(owner, repo);
-  assertHeadSha(headSha);
   const repoUrl = `https://github.com/${owner}/${repo}.git`;
   return [
     `rm -rf '${cloneDir}'`,
     `git init '${cloneDir}'`,
     `cd '${cloneDir}'`,
     `git remote add origin '${repoUrl}'`,
-    `git fetch --depth 1 origin '${headSha}'`,
+    `git fetch --depth 1 origin 'pull/${prNumber}/head'`,
     `git checkout FETCH_HEAD`,
   ].join(" && ");
+}
+
+/**
+ * Read the sha of the checked-out HEAD — the authoritative review sha. The
+ * consumer keys the idempotency check, the D1 row, the posted commit_id and
+ * the KV completion state off it (bugbot A2: diff/files/commit_id always
+ * describe the same commit; a force-push mid-flight is captured here).
+ */
+export function checkedOutShaCommand(cloneDir: string): string {
+  return `git -C '${cloneDir}' rev-parse HEAD`;
 }
 
 /** Write the PR unified diff to diffPath via gh (primary path, T1-falsified). */
@@ -104,10 +111,11 @@ export function runnerCommand(runnerPath: string, diffPath: string): string {
   return `bun run '${runnerPath}' --diff '${diffPath}'`;
 }
 
-/** All main-flow commands in execution order (clone → diff → runner). */
+/** All main-flow commands in execution order (clone → sha → diff → runner). */
 export function buildGitOpsCommands(input: GitOpsInput): GitOpsCommands {
   return {
-    clone: cloneCommand(input.owner, input.repo, input.headSha, input.cloneDir),
+    clone: cloneCommand(input.owner, input.repo, input.prNumber, input.cloneDir),
+    checkedOutSha: checkedOutShaCommand(input.cloneDir),
     diff: diffCommand(input.owner, input.repo, input.prNumber, input.diffPath),
     runner: runnerCommand(input.runnerPath, input.diffPath),
   };
