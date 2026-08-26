@@ -1,4 +1,6 @@
 ---
+
+> **ARCHIVED 2026-08-26（v0.2）**：Probot 路线已退役（用户裁决 + spike `workers_compatible: partial`）。网关改为 Hono + Octokit 直用（`@octokit/webhooks` + `@octokit/auth-app`）。本文档保留为 M0 spike 历史；新实现见 `cloudflare-sandbox-review-isolation` / `github-app-pem-workerd` / `github-app-headless-verification`。
 module: app-gateway
 date: 2026-08-25
 problem_type: best_practice

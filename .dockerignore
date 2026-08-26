@@ -1,0 +1,19 @@
+# Keep the sandbox-image Docker build context (repo root) lean.
+# The Dockerfile only needs: package.json, bun.lock, src/review/, and
+# sandbox-image/ (Dockerfile + omp-models.yml). Everything heavy is excluded.
+
+node_modules
+.git
+.wrangler
+.mstar
+tests
+scripts
+*.md
+.env*
+migrations
+.github
+wrangler.jsonc
+wrangler.smoke.jsonc
+tsconfig.json
+LICENSE
+README.md

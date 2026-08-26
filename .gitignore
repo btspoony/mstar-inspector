@@ -8,6 +8,8 @@ lerna-debug.log*
 
 # database
 *.sqlite
+# wrangler local state (miniflare D1/KV dev data)
+.wrangler/
 
 # package-json
 package-json.lock
@@ -79,7 +81,8 @@ typings/
 
 # dotenv environment variables file
 .env
-.env.test
+.env**.test
+.env**.local
 
 # parcel-bundler cache (https://parceljs.org/)
 .cache

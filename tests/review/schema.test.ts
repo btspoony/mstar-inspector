@@ -13,7 +13,7 @@
  */
 
 import { describe, expect, test } from "bun:test";
-import { parseReviewOutput, type ReviewOutput } from "../../src/review/schema";
+import { capFindings, parseReviewOutput, type ReviewOutput } from "../../src/review/schema";
 
 const VALID: ReviewOutput = {
   verdict: "comment",
@@ -273,5 +273,55 @@ describe("parseReviewOutput", () => {
       const r = parseReviewOutput(raw);
       expect(r.ok).toBe(false);
     }
+  });
+});
+
+describe("capFindings (Phase 5 B4)", () => {
+  const base: ReviewOutput = { verdict: "comment", summary_md: "x", findings: [] };
+
+  function finding(severity: "critical" | "warning" | "suggestion" | "info", title: string) {
+    return {
+      severity,
+      category: "style" as const,
+      file_path: "f.ts",
+      line_start: 1,
+      line_end: 1,
+      title,
+      body: "",
+    };
+  }
+
+  test("returns the input unchanged with omitted=0 when within the cap", () => {
+    const output = { ...base, findings: [finding("info", "a"), finding("warning", "b")] };
+    const { output: out, omitted } = capFindings(output);
+    expect(out).toBe(output); // same reference, no copy
+    expect(omitted).toBe(0);
+  });
+
+  test("caps to FINDINGS_MAX and reports the omitted count", () => {
+    const findings = Array.from({ length: 60 }, (_, i) => finding("info", `F${i}`));
+    const { output, omitted } = capFindings({ ...base, findings });
+    expect(output.findings).toHaveLength(50);
+    expect(omitted).toBe(10);
+  });
+
+  test("keeps the most severe findings first, ties in original order (stable)", () => {
+    const findings = Array.from({ length: 60 }, (_, i) => finding("info", `F${i}`));
+    findings[0]!.severity = "critical";
+    findings[59]!.severity = "critical";
+    findings[58]!.severity = "warning";
+    const { output } = capFindings({ ...base, findings });
+    expect(output.findings[0]!.title).toBe("F0");
+    expect(output.findings[1]!.title).toBe("F59");
+    expect(output.findings[2]!.title).toBe("F58");
+    expect(output.findings[2]!.severity).toBe("warning");
+    expect(output.findings.slice(3).every((f) => f.severity === "info")).toBe(true);
+  });
+
+  test("never returns more than the limit even with all criticals", () => {
+    const findings = Array.from({ length: 60 }, (_, i) => finding("critical", `C${i}`));
+    const { output, omitted } = capFindings({ ...base, findings });
+    expect(output.findings).toHaveLength(50);
+    expect(omitted).toBe(10);
   });
 });
