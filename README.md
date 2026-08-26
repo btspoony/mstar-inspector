@@ -26,21 +26,37 @@ and posts the result as a single upserted comment on the PR.
 |---|---|---|
 | `REVIEW_ENABLED` | **off** | Fail-closed kill-switch. Reviews run **only** when this is exactly `"true"`. Unset or any other value → every webhook is ignored with HTTP 2xx and nothing is enqueued. Ship it unset until you are ready to go live. |
 
-### Review runtime (injected into the sandbox container)
+These vars are read from the **Worker environment** and forwarded by the
+queue consumer into the review container's exec env (`OMP_REVIEW_MODEL` only
+when set; `OMP_MODEL_KEY` always). Set them on the Worker (`wrangler secret
+put` / `wrangler.jsonc` vars; `.dev.vars` for local `wrangler dev`) — values
+set only in your shell never reach reviews.
 
-| Var | Purpose |
-|---|---|
-| `HARNESS_PLUGIN_ROOT` | Absolute path of the mstar-harness plugin root inside the review container (image default `/opt/mstar-harness`; the Dockerfile `ENV` and the consumer's exec env both use this name). |
-| `OMP_REVIEW_MODEL` | Comma-separated omp model selectors. The **first** selector is the primary review model; the full list is injected as the session's `retry.fallbackChains.default` with `retry.modelFallback: true`, so a failed turn falls back through the remaining selectors. Example: `ark-plan/deepseek-v4-flash,openrouter/anthropic/claude-sonnet-4`. Unset → `ark-plan/deepseek-v4-flash` with no fallback chain. |
-| `OMP_MODEL_KEY` | omp model key for the primary provider; injected into the container as `ARK_API_KEY` (exec env only, never in the image). |
+### Provider API keys (bugbot PR-3 BB-2)
+
+The review container authenticates fallback providers from their standard
+API-key env names (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GEMINI_API_KEY`,
+`COPILOT_GITHUB_TOKEN`, `AZURE_OPENAI_API_KEY`, `GROQ_API_KEY`,
+`CEREBRAS_API_KEY`, `XAI_API_KEY`, `OPENROUTER_API_KEY`, `KILO_API_KEY`,
+`MISTRAL_API_KEY`, `ZAI_API_KEY`, `UMANS_AI_CODING_PLAN_API_KEY`,
+`MINIMAX_API_KEY`, `OPENCODE_API_KEY`, `CURSOR_ACCESS_TOKEN`,
+`AI_GATEWAY_API_KEY`, `WAFER_SERVERLESS_API_KEY`). The queue consumer
+forwards **every known provider key that is present and non-empty on the
+Worker** into the container's exec env — and only the known allowlist (the
+`PROVIDERS` mapping in `src/pipeline/providers.ts`, shared with
+`scripts/provider-keys.ts`), never arbitrary Worker env.
+
+Keys therefore **must also be set on the Worker** to reach reviews —
+`bun run keys` does exactly this (it runs `wrangler secret put <ENV>`). Keys
+set only locally (`.dev.vars`, shell) never reach the container.
 
 ## Setting provider keys: `bun run keys`
 
-`scripts/provider-keys.ts` maps omp built-in providers to the Worker env var
-name and runs `wrangler secret put <ENV>` with the value piped on stdin. In
-the stdin / env-var paths the value never appears in argv, logs, or git;
-`--value` places the secret in argv and the OS process table (`ps -ef`), so
-reserve it for a contained CI runner.
+
+The mapping is shared with the queue consumer
+(`src/pipeline/providers.ts`) — the same env names the container reads, so a
+key set here is automatically forwarded into reviews (see **Provider API
+keys** above).
 
 ```bash
 # Interactive: numbered provider picker → masked value prompt

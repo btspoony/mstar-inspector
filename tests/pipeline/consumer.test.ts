@@ -117,6 +117,11 @@ const testOverrides = {
   commenter: fakeCommenter,
   getSandbox: async () => fakeSandbox,
 };
+/** Runner exec call's env (the sandbox fake stores opts as unknown). */
+function runnerExecEnv(): Record<string, string> {
+  const call = sandboxCalls.find((c) => c.cmd.includes("bun run"))!;
+  return (call.opts as { env?: Record<string, string> }).env ?? {};
+}
 
 // --- consumer under test (dynamic import: mocks must be registered first) ---
 const { createReviewConsumer, REVIEW_GUARD_TTL_SECONDS } = await import("../../src/pipeline/consumer");
@@ -138,6 +143,9 @@ const testLog: ConsumerLog = {
 const kvPuts: Array<{ key: string; value: string; options?: unknown }> = [];
 const kvGuardPuts: Array<{ key: string; value: string; options?: unknown }> = [];
 const kvGuardDeletes: string[] = [];
+const messageRetryCalls: Array<{ attempts: number; delaySeconds?: number }> = [];
+const messageAckCalls: Array<{ attempts: number }> = [];
+let messageAttempts = 1;
 let kvPutError: Error | undefined;
 let kvGetValue: string | null = null;
 let kvGuardValue: string | null = null;
@@ -194,10 +202,14 @@ function makeBatch(payload: ReviewJobPayload): MessageBatch<ReviewJobPayload> {
       {
         id: "m1",
         timestamp: new Date(),
-        attempts: 1,
+        attempts: messageAttempts,
         body: payload,
-        retry() {},
-        ack() {},
+        retry: (options?: { delaySeconds?: number }) => {
+          messageRetryCalls.push({ attempts: messageAttempts, delaySeconds: options?.delaySeconds });
+        },
+        ack: () => {
+          messageAckCalls.push({ attempts: messageAttempts });
+        },
       },
     ],
   } as unknown as MessageBatch<ReviewJobPayload>;
@@ -209,6 +221,9 @@ function reset(): void {
   kvPuts.length = 0;
   kvGuardPuts.length = 0;
   kvGuardDeletes.length = 0;
+  messageRetryCalls.length = 0;
+  messageAckCalls.length = 0;
+  messageAttempts = 1;
   logLines.length = 0;
   runnerStdout = "";
   runnerStderr = "review mode: structured\n";
@@ -679,14 +694,114 @@ describe("createReviewConsumer", () => {
     expect(destroyCalls).toBe(1);
   });
 
-  test("in-flight guard held → rethrow for queue backoff, no post/insert (WF-002)", async () => {
+  test("BB-1: OMP_REVIEW_MODEL set on PipelineEnv → forwarded into the runner exec env", async () => {
+    reset();
+    runnerStdout = JSON.stringify(VALID_OUTPUT);
+    const db = createTestD1();
+    const consumer = createReviewConsumer(
+      makeEnv({
+        DB: db as never,
+        OMP_REVIEW_MODEL: "ark-plan/deepseek-v4-flash,openrouter/anthropic/claude-sonnet-4",
+      }),
+      undefined,
+      testOverrides,
+    );
+
+    await consumer(makeBatch(makePayload()));
+
+    const runnerCall = sandboxCalls.find((c) => c.cmd.includes("bun run"))!;
+    expect(runnerCall.opts).toEqual({
+      cwd: "/workspace/repo",
+      env: {
+        ARK_API_KEY: "ark-key",
+        HARNESS_PLUGIN_ROOT: "/opt/mstar-harness",
+        PI_CODING_AGENT_DIR: "/opt/omp-agent",
+        OMP_REVIEW_MODEL: "ark-plan/deepseek-v4-flash,openrouter/anthropic/claude-sonnet-4",
+      },
+      timeout: 600_000,
+    });
+  });
+
+  test("BB-1: OMP_REVIEW_MODEL unset/empty → omitted from the runner exec env (in-image default)", async () => {
+    reset();
+    runnerStdout = JSON.stringify(VALID_OUTPUT);
+    const db = createTestD1();
+    const consumer = createReviewConsumer(
+      makeEnv({ DB: db as never, OMP_REVIEW_MODEL: "" }),
+      undefined,
+      testOverrides,
+    );
+
+    await consumer(makeBatch(makePayload()));
+
+    const runnerEnv = runnerExecEnv();
+    expect(runnerEnv.OMP_REVIEW_MODEL).toBeUndefined();
+    // And an entirely unset chain on makeEnv also stays absent.
+    expect(Object.keys(runnerEnv).sort()).toEqual(
+      ["ARK_API_KEY", "HARNESS_PLUGIN_ROOT", "PI_CODING_AGENT_DIR"].sort(),
+    );
+  });
+
+  test("BB-2: known provider keys present-and-non-empty on PipelineEnv → forwarded into the runner exec env", async () => {
+    reset();
+    runnerStdout = JSON.stringify(VALID_OUTPUT);
+    const db = createTestD1();
+    const consumer = createReviewConsumer(
+      makeEnv({
+        DB: db as never,
+        ANTHROPIC_API_KEY: "sk-ant-test",
+        OPENROUTER_API_KEY: "sk-or-test",
+        MISTRAL_API_KEY: "", // empty → not forwarded
+      }),
+      undefined,
+      testOverrides,
+    );
+
+    await consumer(makeBatch(makePayload()));
+
+    const runnerEnv = runnerExecEnv();
+    expect(runnerEnv).toMatchObject({
+      ARK_API_KEY: "ark-key",
+      ANTHROPIC_API_KEY: "sk-ant-test",
+      OPENROUTER_API_KEY: "sk-or-test",
+    });
+    expect(runnerEnv.MISTRAL_API_KEY).toBeUndefined();
+  });
+
+  test("BB-2: absent provider keys omitted; non-provider env is NEVER forwarded (allowlist)", async () => {
+    reset();
+    runnerStdout = JSON.stringify(VALID_OUTPUT);
+    const db = createTestD1();
+    // A var that is NOT in the PROVIDERS allowlist sits on the Worker env —
+    // it must never leak into the container.
+    const env = makeEnv({ DB: db as never, GEMINI_API_KEY: "gem-test" }) as PipelineEnv & Record<string, string>;
+    env.SOME_ARBITRARY_SECRET = "must-not-leak";
+    const consumer = createReviewConsumer(env, testLog, testOverrides);
+
+    await consumer(makeBatch(makePayload()));
+
+    const runnerEnv = runnerExecEnv();
+    expect(runnerEnv).toEqual({
+      ARK_API_KEY: "ark-key",
+      HARNESS_PLUGIN_ROOT: "/opt/mstar-harness",
+      PI_CODING_AGENT_DIR: "/opt/omp-agent",
+      GEMINI_API_KEY: "gem-test",
+    });
+    expect(Object.values(runnerEnv)).not.toContain("must-not-leak");
+  });
+
+  test("guard held on attempt 1 → per-message delayed retry (60s), no throw, no post/insert (BB-3)", async () => {
     reset();
     kvGuardValue = "inflight";
     runnerStdout = JSON.stringify(VALID_OUTPUT);
     const db = createTestD1();
     const consumer = createReviewConsumer(makeEnv({ DB: db as never }), testLog, testOverrides);
 
-    await expect(consumer(makeBatch(makePayload()))).rejects.toThrow(/already in flight/);
+    // BB-3: the consumer RESOLVES — guard-held is a typed outcome, not a
+    // rethrow. Rethrowing would burn the queue's three immediate retries and
+    // DLQ the job (plus later synchronize events for the same PR) while the
+    // first review is still running.
+    await consumer(makeBatch(makePayload()));
 
     // Fail fast: no sandbox, no token, no post, no insert, no guard mutation.
     expect(sandboxCalls).toHaveLength(0);
@@ -695,8 +810,68 @@ describe("createReviewConsumer", () => {
     expect(kvGuardPuts).toHaveLength(0);
     expect(kvGuardDeletes).toHaveLength(0);
     expect(destroyCalls).toBe(0);
-    const errLine = logLines.find((l) => l.level === "error");
-    expect(errLine?.msg).toContain("already in flight");
+    // A DELAYED per-message retry is scheduled — 60s on the first attempt.
+    expect(messageRetryCalls).toEqual([{ attempts: 1, delaySeconds: 60 }]);
+    expect(messageAckCalls).toHaveLength(0);
+    const infoLine = logLines.find((l) => l.level === "info" && l.msg.includes("already in flight"));
+    expect(infoLine).toBeDefined();
+    expect(infoLine!.msg).toContain("60s");
+  });
+
+  test("guard-held backoff escalates 60s → 120s → 240s across attempts (BB-3)", async () => {
+    reset();
+    kvGuardValue = "inflight";
+    const db = createTestD1();
+    const consumer = createReviewConsumer(makeEnv({ DB: db as never }), testLog, testOverrides);
+    for (const [attempts, delaySeconds] of [
+      [1, 60],
+      [2, 120],
+      [3, 240],
+    ] as const) {
+      messageAttempts = attempts;
+      await consumer(makeBatch(makePayload()));
+    }
+    expect(messageRetryCalls).toEqual([
+      { attempts: 1, delaySeconds: 60 },
+      { attempts: 2, delaySeconds: 120 },
+      { attempts: 3, delaySeconds: 240 },
+    ]);
+    expect(messageAckCalls).toHaveLength(0);
+    expect(sandboxCalls).toHaveLength(0);
+  });
+
+  test("guard still held after the 3 delayed retries → ack with a warning, no DLQ (BB-3)", async () => {
+    reset();
+    kvGuardValue = "inflight";
+    messageAttempts = 4; // final delivery before the queue would DLQ
+    const db = createTestD1();
+    const consumer = createReviewConsumer(makeEnv({ DB: db as never }), testLog, testOverrides);
+
+    await consumer(makeBatch(makePayload())); // resolves — acked, never DLQed
+
+    expect(sandboxCalls).toHaveLength(0);
+    expect(messageRetryCalls).toHaveLength(0);
+    expect(messageAckCalls).toEqual([{ attempts: 4 }]);
+    const warnLine = logLines.find((l) => l.level === "warn" && l.msg.includes("acking"));
+    expect(warnLine).toBeDefined();
+    expect(warnLine!.msg).toContain("no DLQ");
+    expect(warnLine!.fields.pr_number).toBe(42);
+    expect(warnLine!.fields.installation_id).toBe(123);
+  });
+
+  test("real failures keep the throw → queue retry → DLQ behavior (BB-3 unchanged)", async () => {
+    reset();
+    runnerStdout = "not json at all";
+    const db = createTestD1();
+    const consumer = createReviewConsumer(makeEnv({ DB: db as never }), testLog, testOverrides);
+
+    await expect(consumer(makeBatch(makePayload()))).rejects.toThrow(/parse failed/);
+
+    // Only the guard-held path is handled with message-level retry/ack; a
+    // real failure rethrows exactly as before.
+    expect(messageRetryCalls).toHaveLength(0);
+    expect(messageAckCalls).toHaveLength(0);
+    expect(destroyCalls).toBe(1);
   });
 
   test("in-flight guard acquired before the pipeline and released after the post settles (WF-002)", async () => {

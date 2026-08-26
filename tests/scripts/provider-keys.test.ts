@@ -8,8 +8,14 @@
 
 import { describe, expect, test } from "bun:test";
 import { listProviders, providerEnvName, PROVIDERS } from "../../scripts/provider-keys";
+import { PROVIDERS as SHARED_PROVIDERS, PROVIDER_ENV_NAMES } from "../../src/pipeline/providers";
 
 describe("PROVIDERS mapping table (T3)", () => {
+  test("the script re-exports the shared src mapping — zero duplicated literals (BB-2)", () => {
+    expect(PROVIDERS).toBe(SHARED_PROVIDERS);
+    expect([...PROVIDER_ENV_NAMES]).toEqual(Object.values(PROVIDERS).map((info) => info.envName));
+  });
+
   test("covers every omp built-in provider with its Worker env var name", () => {
     expect(PROVIDERS).toEqual({
       anthropic: { envName: "ANTHROPIC_API_KEY", label: "Anthropic" },

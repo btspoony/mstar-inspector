@@ -21,59 +21,20 @@
  *                                  ANTHROPIC_API_KEY), then piped stdin.
  *                                  Unknown provider or missing value → exit 1.
  *
- * The PROVIDERS table and providerEnvName() are pure and unit-tested
- * (tests/scripts/provider-keys.test.ts); the interactive path is
- * manual-smoke only (plan postdeploy-review-feedback T3 / UC-001).
+ * The provider → env-name mapping lives in src/pipeline/providers.ts
+ * (bugbot BB-2: the queue consumer forwards the same allowlist into the
+ * review container); this script imports and re-exports it — zero
+ * duplicated literals. The mapping and providerEnvName() are pure and
+ * unit-tested (tests/scripts/provider-keys.test.ts); the interactive path
+ * is manual-smoke only (plan postdeploy-review-feedback T3 / UC-001).
  */
 
 import { spawn } from "node:child_process";
 import { createInterface } from "node:readline";
+import { PROVIDERS, providerEnvName, type ProviderInfo } from "../src/pipeline/providers";
 
-export type ProviderInfo = {
-  /** Worker env var name the key is stored under (wrangler secret put target). */
-  envName: string;
-  /** Human-readable provider label for the picker/table. */
-  label: string;
-};
-
-/**
- * omp built-in providers → Worker env var names (pure mapping table, T3).
- * The env names match omp's built-in provider discovery (help-extra "Core
- * Providers" + "Additional LLM Providers" API-key envs: ANTHROPIC_API_KEY,
- * OPENAI_API_KEY, GEMINI_API_KEY, COPILOT_GITHUB_TOKEN, AZURE_OPENAI_API_KEY,
- * GROQ_API_KEY, CEREBRAS_API_KEY, XAI_API_KEY, OPENROUTER_API_KEY,
- * KILO_API_KEY, MISTRAL_API_KEY, ZAI_API_KEY, UMANS_AI_CODING_PLAN_API_KEY,
- * MINIMAX_API_KEY, OPENCODE_API_KEY, CURSOR_ACCESS_TOKEN, AI_GATEWAY_API_KEY,
- * WAFER_SERVERLESS_API_KEY — WF-004). ARK_* is NOT built-in — the ark-plan
- * provider stays configured via sandbox-image/omp-models.yml (custom
- * baseUrl provider); OAuth (ANTHROPIC_OAUTH_TOKEN), AWS/Vertex and search
- * keys are deliberately absent (different auth mechanisms).
- */
-export const PROVIDERS: Record<string, ProviderInfo> = {
-  anthropic: { envName: "ANTHROPIC_API_KEY", label: "Anthropic" },
-  openai: { envName: "OPENAI_API_KEY", label: "OpenAI" },
-  gemini: { envName: "GEMINI_API_KEY", label: "Google Gemini" },
-  copilot: { envName: "COPILOT_GITHUB_TOKEN", label: "GitHub Copilot" },
-  "azure-openai": { envName: "AZURE_OPENAI_API_KEY", label: "Azure OpenAI" },
-  groq: { envName: "GROQ_API_KEY", label: "Groq" },
-  cerebras: { envName: "CEREBRAS_API_KEY", label: "Cerebras" },
-  xai: { envName: "XAI_API_KEY", label: "xAI" },
-  openrouter: { envName: "OPENROUTER_API_KEY", label: "OpenRouter" },
-  kilo: { envName: "KILO_API_KEY", label: "Kilo" },
-  mistral: { envName: "MISTRAL_API_KEY", label: "Mistral" },
-  zai: { envName: "ZAI_API_KEY", label: "Z.AI" },
-  umans: { envName: "UMANS_AI_CODING_PLAN_API_KEY", label: "Umans AI Coding Plan" },
-  minimax: { envName: "MINIMAX_API_KEY", label: "MiniMax" },
-  opencode: { envName: "OPENCODE_API_KEY", label: "OpenCode" },
-  cursor: { envName: "CURSOR_ACCESS_TOKEN", label: "Cursor" },
-  "ai-gateway": { envName: "AI_GATEWAY_API_KEY", label: "AI Gateway" },
-  "wafer-serverless": { envName: "WAFER_SERVERLESS_API_KEY", label: "Wafer Serverless" },
-};
-
-/** Resolve the Worker env var name for a provider, or undefined if unknown. */
-export function providerEnvName(name: string): string | undefined {
-  return PROVIDERS[name]?.envName;
-}
+export { PROVIDERS, providerEnvName } from "../src/pipeline/providers";
+export type { ProviderInfo } from "../src/pipeline/providers";
 
 /** Render the provider → env-name table (aligned, one row per provider). */
 export function listProviders(): string {
