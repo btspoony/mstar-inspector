@@ -1,10 +1,12 @@
 {
-  // T1 smoke config (plan 06 Task 1, STOP gate) — dedicated entry
-  // src/pipeline/smoke-entry.ts. NOT the production config: the production
-  // worker (src/worker/index.ts) gains the consumer + sandbox wiring at T3.
+  // T1/T2 smoke config (plan 06) — dedicated entry src/pipeline/smoke-entry.ts.
+  // NOT the production config: the production worker (src/worker/index.ts)
+  // gains the consumer + sandbox wiring at T3.
   // Binding shape verified against @cloudflare/sandbox 0.12.8 docs + types:
   //   containers[].class_name == durable_objects.bindings[].class_name ==
   //   migrations[].new_sqlite_classes[0] == "Sandbox" (the SDK's DO class).
+  // image_build_context: "." = repo root, so the Dockerfile can COPY
+  // package.json/bun.lock and src/review into the image (T2 runner deps).
   "name": "mstar-inspector-smoke",
   "main": "src/pipeline/smoke-entry.ts",
   "compatibility_date": "2026-08-20",
@@ -13,6 +15,7 @@
     {
       "class_name": "Sandbox",
       "image": "./sandbox-image/Dockerfile",
+      "image_build_context": ".",
       "instance_type": "lite",
       "max_instances": 1
     }

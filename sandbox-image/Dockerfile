@@ -1,17 +1,21 @@
-# mstar-inspector review sandbox image (plan 06 Task 1, STOP gate).
+# mstar-inspector review sandbox image (plan 06 Task 2, review-runner containerization).
 #
-# Version pinning (compass contracts E): base tag, Bun, and gh are pinned to
-# exact versions. git is pinned implicitly by the base image tag
-# (cloudflare/sandbox:0.12.8 = Ubuntu 22.04.5 LTS, git 2.34.1).
+# Version pinning (compass contracts E): base tag, Bun, gh, mstar-harness ref,
+# and the omp SDK (via package.json/bun.lock) are all pinned to exact versions.
 #
-# NO SECRETS (HARD): this image is built with no build args, no env files,
-# and no credentials. Tokens/keys enter only via ReviewSandbox.exec env
-# injection at runtime (compass contracts D).
+# NO SECRETS (HARD): this image is built with no build args, no env values, no
+# credentials. Tokens/keys enter only via ReviewSandbox.exec env injection at
+# runtime (compass contracts D). The omp models.yml references the ARK_API_KEY
+# env var NAME — the key value itself is never in the image.
 #
-# T2 (review-runner containerization) will:
-#   - COPY the mstar-harness plugin (pinned ref) into /opt/mstar-harness
-#   - COPY the runner + omp deps and `bun install --frozen-lockfile`
-# T1 reserves the directory structure only.
+# T2 additions over T1:
+#   - mstar-harness plugin preinstalled at a pinned ref (build-time clone);
+#   - omp agent config (models.yml) for the ark-plan provider;
+#   - runner + omp SDK deps installed via `bun install --frozen-lockfile`.
+#
+# Build context: repo root (wrangler containers `image_build_context: "."`), so
+# the Dockerfile can COPY package.json/bun.lock and src/review from the repo.
+# A repo-root .dockerignore keeps the context lean (node_modules excluded).
 
 FROM docker.io/cloudflare/sandbox:0.12.8
 
@@ -29,5 +33,38 @@ RUN curl -fsSL https://github.com/cli/cli/releases/download/v2.98.0/gh_2.98.0_li
     && chmod +x /usr/local/bin/gh \
     && rm -rf /tmp/gh_2.98.0_linux_amd64 /tmp/gh.tar.gz
 
-# Reserved preinstall root for mstar-harness (T2 copies the pinned ref here).
-RUN mkdir -p /opt/mstar-harness
+# mstar-harness plugin, pinned ref c188934c807184f416656a80ca50adb61ccbd525.
+# Choice: build-time shallow clone (NOT a git submodule, NOT COPY):
+#   - the harness is a separate PUBLIC repo — a submodule would couple this
+#     repo's git metadata to it and require submodule state inside the build
+#     context; COPY would drag the 1.0G local checkout (node_modules included);
+#   - a shallow fetch of the exact pinned commit is ~10MB, needs no
+#     credentials, and the image only needs the working tree
+#     (skills/ + plugin.json + .omp-plugin) at runtime.
+# .git is removed after checkout to keep the image lean.
+RUN git init /opt/mstar-harness \
+    && git -C /opt/mstar-harness remote add origin https://github.com/btspoony/mstar-harness.git \
+    && git -C /opt/mstar-harness fetch --depth 1 origin c188934c807184f416656a80ca50adb61ccbd525 \
+    && git -C /opt/mstar-harness checkout FETCH_HEAD \
+    && rm -rf /opt/mstar-harness/.git
+
+# omp agent config: models.yml declares the ark-plan provider. The apiKey field
+# is the ENV VAR NAME (ARK_API_KEY) — the SDK resolves the value from the
+# process env at request time (config-value resolution: env first, literal
+# fallback). No secret material lives here.
+RUN mkdir -p /opt/omp-agent
+COPY sandbox-image/omp-models.yml /opt/omp-agent/models.yml
+ENV PI_CODING_AGENT_DIR=/opt/omp-agent
+
+# Runner + omp SDK deps. Production-only install (wrangler/typescript
+# devDeps are not needed inside the sandbox); versions pinned by the frozen
+# lockfile (omp SDK 18.0.4 = package.json).
+WORKDIR /opt/runner
+COPY package.json bun.lock ./
+RUN bun install --frozen-lockfile --production
+COPY src/review /opt/runner/src/review
+
+# The runner resolves the harness root from this env (plan Clarify #5; the M0
+# env name is unchanged). Model key (ARK_API_KEY) is injected per exec — never
+# baked into the image.
+ENV M0_HARNESS_PLUGIN_ROOT=/opt/mstar-harness

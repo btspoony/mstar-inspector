@@ -1,21 +1,28 @@
 /**
- * T1 sandbox smoke entry (plan 06 Task 1, STOP gate) — a dedicated Worker
- * entry that exercises the real sandbox path locally via `wrangler dev`:
- *   getSandbox → exec `gh pr diff` (GH_TOKEN env injection) → destroy.
- *
- * This is NOT the production worker entry: it exists only to falsify the
- * Sandbox ASSUMPTIONS (SDK API shape, binding config, gh auth, exec latency,
- * destroy). The production consumer wiring lands in `src/worker/index.ts`
- * at T3. The `Sandbox` Durable Object class is re-exported here (and only
- * here) so the containers binding resolves; the SDK import point stays
- * `src/pipeline/sandbox.ts` (compass contracts A).
+ * Sandbox smoke entry (plan 06 Task 1 STOP gate + Task 2 runner falsification)
+ * — a dedicated Worker entry that exercises the real sandbox path locally via
+ * `wrangler dev`. Not the production worker entry: the production consumer
+ * wiring lands in `src/worker/index.ts` at T3. The `Sandbox` Durable Object
+ * class is re-exported here (and only here) so the containers binding
+ * resolves; the SDK import point stays `src/pipeline/sandbox.ts`.
  *
  * Routes:
- *   GET /healthz → 200 {"ok":true} (readiness probe for the orchestrator)
- *   GET /smoke   → runs the falsification sequence and returns JSON evidence
- *                  (no secrets in the response)
+ *   GET /healthz         → 200 {"ok":true} (readiness probe for the orchestrator)
+ *   GET /smoke           → T1 falsification: getSandbox → exec gh pr diff →
+ *                          destroy. Path 2 falls back to a git clone + diff
+ *                          (token injected via git env config, never in the
+ *                          command string). Returns JSON evidence, no secrets.
+ *   GET /smoke-review    → T2: clone the real PR head (btspoony/todo-bots#1),
+ *                          write the unified diff to a file, exec the in-image
+ *                          runner (src/review/runner.ts) with
+ *                          M0_HARNESS_PLUGIN_ROOT=/opt/mstar-harness and
+ *                          ARK_API_KEY via exec env, parse the stdout with
+ *                          parseReviewOutput, then destroy. The model key is
+ *                          never baked into the image and never echoed in the
+ *                          response (only a pass/fail + review shape).
  */
 
+import { parseReviewOutput } from "../review/schema";
 import { getSandbox, Sandbox, type SandboxBinding } from "./sandbox";
 
 export { Sandbox };
@@ -24,17 +31,26 @@ type SmokeEnv = {
   SANDBOX: SandboxBinding;
   /** Installation token minted by the orchestrator (scripts/sandbox-smoke.ts). */
   GH_TOKEN: string;
+  /** omp model key for the ark-plan provider (T2 runner smoke; injected per exec). */
+  ARK_API_KEY?: string;
 };
 
 const GH_REPO = "btspoony/todo-bots";
 const GH_PR = "1";
 const CLONE_DIR = "/workspace/repo";
+const DIFF_PATH = "/workspace/pr.diff";
+/** In-image runner path (Dockerfile v2: WORKDIR /opt/runner, COPY src/review). */
+const RUNNER_PATH = "/opt/runner/src/review/runner.ts";
+const HARNESS_ROOT = "/opt/mstar-harness";
 
 export default {
   async fetch(request: Request, env: SmokeEnv): Promise<Response> {
     const url = new URL(request.url);
     if (url.pathname === "/healthz") {
       return Response.json({ ok: true });
+    }
+    if (url.pathname === "/smoke-review") {
+      return runReviewSmoke(env);
     }
     if (url.pathname !== "/smoke") {
       return new Response("not found", { status: 404 });
@@ -118,3 +134,79 @@ export default {
     return Response.json(result, { status: result.ok ? 200 : 500 });
   },
 };
+
+/**
+ * T2 runner falsification: real SDK, real model key (ARK_API_KEY via exec env),
+ * real PR clone (btspoony/todo-bots#1). The runner inside the image reads the
+ * diff file, runs the omp review session, and prints ONLY the ReviewOutput JSON
+ * to stdout. We parse that stdout with parseReviewOutput and return the verdict
+ * shape — never the key, never the raw model text.
+ */
+async function runReviewSmoke(env: SmokeEnv): Promise<Response> {
+  const sandbox = await getSandbox(env.SANDBOX, `smoke-review-${crypto.randomUUID()}`);
+  const startedAt = Date.now();
+  let result: Record<string, unknown>;
+  try {
+    if (!env.ARK_API_KEY) {
+      throw new Error("ARK_API_KEY env is required for /smoke-review");
+    }
+
+    // 1. Clone the real PR head + base into the container.
+    const clone = await sandbox.exec(
+      [
+        `rm -rf ${CLONE_DIR}`,
+        `git clone --depth 1 --branch mstar-inspector-seed https://github.com/${GH_REPO}.git ${CLONE_DIR}`,
+        `cd ${CLONE_DIR}`,
+        "git fetch --depth 1 origin main",
+        `git diff FETCH_HEAD HEAD > ${DIFF_PATH}`,
+      ].join(" && "),
+    );
+    if (clone.exitCode !== 0) {
+      result = {
+        ok: false,
+        step: "clone",
+        exitCode: clone.exitCode,
+        stdoutBytes: clone.stdout.length,
+        latencyMs: Date.now() - startedAt,
+      };
+    } else {
+      // 2. Run the in-image review runner. cwd = clone dir; the model key is
+      // injected via exec env only (never baked into the image).
+      const run = await sandbox.exec(`bun run ${RUNNER_PATH} --diff ${DIFF_PATH}`, {
+        cwd: CLONE_DIR,
+        env: { M0_HARNESS_PLUGIN_ROOT: HARNESS_ROOT, ARK_API_KEY: env.ARK_API_KEY },
+      });
+      const parsed = parseReviewOutput(run.stdout);
+      result = {
+        ok: run.exitCode === 0 && parsed.ok,
+        step: "runner",
+        runnerExitCode: run.exitCode,
+        stdoutBytes: run.stdout.length,
+        parseOk: parsed.ok,
+        mode: parsed.ok ? "structured" : undefined,
+        verdict: parsed.ok ? parsed.output.verdict : undefined,
+        findingsCount: parsed.ok ? parsed.output.findings.length : undefined,
+        summaryBytes: parsed.ok ? parsed.output.summary_md.length : undefined,
+        latencyMs: Date.now() - startedAt,
+      };
+    }
+  } catch (error) {
+    result = {
+      ok: false,
+      error: error instanceof Error ? error.message : String(error),
+      latencyMs: Date.now() - startedAt,
+    };
+  }
+
+  try {
+    await sandbox.destroy();
+    result.destroyEvidence = { ok: true };
+  } catch (error) {
+    result.destroyEvidence = {
+      ok: false,
+      error: error instanceof Error ? error.message : String(error),
+    };
+  }
+
+  return Response.json(result, { status: result.ok ? 200 : 500 });
+}
