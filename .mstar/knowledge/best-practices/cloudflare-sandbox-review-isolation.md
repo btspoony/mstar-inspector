@@ -34,7 +34,7 @@ mstar-inspector 在 Cloudflare Workers 上编排每 PR 隔离的代码审查：Q
 - clone / `gh pr view` / `gh pr diff` 是 **Worker→exec 的受信任编排**，不是 agent 工具。
 - `gh` 认证：`GH_TOKEN` 经 `exec` 的 `env` 注入（实测 `gh pr diff` 对真实 PR 返回非空 diff）；**密钥不进镜像**（含 build args）。
 - 每消息一个 sandbox，id 用 `randomUUID()`（per-attempt 唯一），`finally` 中 `destroy()`；禁止跨消息复用。
-- 容器内 omp：`M0_HARNESS_PLUGIN_ROOT` 指向镜像预装根（env 注入）；模型 key 经 exec env（`OMP_MODEL_KEY` → 容器内 `ARK_API_KEY` 单一映射点）。
+- 容器内 omp：`HARNESS_PLUGIN_ROOT` 指向镜像预装根（env 注入）；模型 key 经 exec env（`OMP_MODEL_KEY` → 容器内 `ARK_API_KEY` 单一映射点）。
 
 ### 性能口径（实测）
 

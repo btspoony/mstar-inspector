@@ -38,7 +38,10 @@ app.post("/webhook", async (c) => {
   const signature = c.req.header("x-hub-signature-256") ?? null;
   const eventName = c.req.header("x-github-event") ?? null;
 
-  const outcome = await classifyWebhook(secret, rawBody, signature, eventName, defaultLog);
+  // T4 kill-switch: reviews run ONLY when REVIEW_ENABLED is exactly "true"
+  // (fail-closed — unset/any other value → every webhook is ignored, 2xx).
+  const reviewEnabled = c.env.REVIEW_ENABLED === "true";
+  const outcome = await classifyWebhook(secret, rawBody, signature, eventName, defaultLog, reviewEnabled);
 
   if (outcome.kind === "reject") {
     return c.text(outcome.reason, outcome.status);

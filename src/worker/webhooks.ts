@@ -126,6 +126,11 @@ const issueCommentSchema = z.object({
  * path emits a structured warning with a machine reason and NO secret
  * material (Phase 5 B6).
  *
+ * Kill-switch (postdeploy feedback T4): `reviewEnabled` is the computed
+ * REVIEW_ENABLED state ("true" only). When disabled, EVERY webhook is
+ * classified as `ignore` (HTTP 2xx, no queue enqueue) BEFORE any signature
+ * work — fail-closed by default (unset REVIEW_ENABLED → disabled).
+ *
  * `log` is optional (defaults to no logging) so the pure classifier stays
  * testable without a sink; the fetch entry passes `defaultLog`.
  */
@@ -135,7 +140,15 @@ export async function classifyWebhook(
   signature: string | null,
   eventName: string | null,
   log?: HandlerLog,
+  reviewEnabled = true,
 ): Promise<WebhookOutcome> {
+  if (!reviewEnabled) {
+    log?.warn(
+      { event: "unknown", reason: "review_disabled", detail: "REVIEW_ENABLED is not 'true'" },
+      "webhook ignored — reviews disabled by the REVIEW_ENABLED kill-switch",
+    );
+    return { kind: "ignore", reason: "reviews disabled by the REVIEW_ENABLED kill-switch" };
+  }
   if (!secret || secret === "development") {
     log?.warn(
       { event: "unknown", reason: "secret_misconfigured", detail: "secret missing, empty, or the default 'development'" },
@@ -158,15 +171,27 @@ export async function classifyWebhook(
     );
     return { kind: "reject", status: 401, reason: "signature verification failed" };
   }
-  return classifyEvent(eventName, rawBody, log);
+  return classifyEvent(eventName, rawBody, log, reviewEnabled);
 }
 
-/** Event whitelist → ReviewJobPayload. Returns `ignore` for everything else. */
+/**
+ * Event whitelist → ReviewJobPayload. Returns `ignore` for everything else.
+ * `reviewEnabled` is the computed REVIEW_ENABLED state (T4): when disabled,
+ * every event is ignored (HTTP 2xx, no queue enqueue) — fail-closed.
+ */
 export function classifyEvent(
   eventName: string | null,
   rawBody: string,
   log?: HandlerLog,
+  reviewEnabled = true,
 ): WebhookOutcome {
+  if (!reviewEnabled) {
+    log?.warn(
+      { event: "unknown", reason: "review_disabled", detail: "REVIEW_ENABLED is not 'true'" },
+      "event ignored — reviews disabled by the REVIEW_ENABLED kill-switch",
+    );
+    return { kind: "ignore", reason: "reviews disabled by the REVIEW_ENABLED kill-switch" };
+  }
   if (!eventName) {
     return { kind: "ignore", reason: "missing X-GitHub-Event header" };
   }

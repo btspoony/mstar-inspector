@@ -69,7 +69,6 @@ RUN bun install --frozen-lockfile --production \
     && rm -rf /root/.bun/install/cache
 COPY src/review /opt/runner/src/review
 
-# The runner resolves the harness root from this env (plan Clarify #5; the M0
-# env name is unchanged). Model key (ARK_API_KEY) is injected per exec — never
-# baked into the image.
-ENV M0_HARNESS_PLUGIN_ROOT=/opt/mstar-harness
+# The runner resolves the harness root from this env (plan Clarify #5). Model
+# key (ARK_API_KEY) is injected per exec — never baked into the image.
+ENV HARNESS_PLUGIN_ROOT=/opt/mstar-harness

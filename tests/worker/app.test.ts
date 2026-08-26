@@ -16,6 +16,9 @@ function makeEnv(overrides: Partial<Env> = {}): Env {
       get: async () => null,
       put: async () => {},
     } as unknown as Env["IDEMPOTENCY_KV"],
+    // T4: the classification tests exercise the ENABLED path; the kill-switch
+    // (unset REVIEW_ENABLED → ignore) has its own test below.
+    REVIEW_ENABLED: "true",
     ...overrides,
   };
 }
@@ -79,6 +82,49 @@ describe("worker fetch entry", () => {
     );
     expect(res.status).toBe(200);
     expect(await res.text()).toBe("ignored");
+  });
+  test("REVIEW_ENABLED unset → every webhook is ignored with 200 and nothing is enqueued (T4)", async () => {
+    const body = JSON.stringify({
+      action: "opened",
+      number: 42,
+      installation: { id: 123 },
+      pull_request: { number: 42, head: { sha: "abc123" } },
+      repository: { name: "test-repo", owner: { login: "test-owner" } },
+    });
+    const signature = await new Webhooks({ secret: SECRET }).sign(body);
+    const sent: unknown[] = [];
+    const res = await worker.fetch(
+      webhookRequest(body, { "x-hub-signature-256": signature, "x-github-event": "pull_request" }),
+      makeEnv({
+        REVIEW_ENABLED: undefined,
+        REVIEW_QUEUE: { send: async (message: unknown) => { sent.push(message); } } as unknown as Env["REVIEW_QUEUE"],
+      }),
+    );
+    expect(res.status).toBe(200);
+    expect(await res.text()).toBe("ignored");
+    expect(sent).toHaveLength(0);
+  });
+
+  test('REVIEW_ENABLED "false" → webhook ignored with 200, nothing enqueued (T4)', async () => {
+    const body = JSON.stringify({
+      action: "opened",
+      number: 42,
+      installation: { id: 123 },
+      pull_request: { number: 42, head: { sha: "abc123" } },
+      repository: { name: "test-repo", owner: { login: "test-owner" } },
+    });
+    const signature = await new Webhooks({ secret: SECRET }).sign(body);
+    const sent: unknown[] = [];
+    const res = await worker.fetch(
+      webhookRequest(body, { "x-hub-signature-256": signature, "x-github-event": "pull_request" }),
+      makeEnv({
+        REVIEW_ENABLED: "false",
+        REVIEW_QUEUE: { send: async (message: unknown) => { sent.push(message); } } as unknown as Env["REVIEW_QUEUE"],
+      }),
+    );
+    expect(res.status).toBe(200);
+    expect(await res.text()).toBe("ignored");
+    expect(sent).toHaveLength(0);
   });
 
   test("oversized webhook body (Content-Length > 1MB) is rejected with 413 before buffering", async () => {

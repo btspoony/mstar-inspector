@@ -6,12 +6,15 @@
  * extraheader env) → `git rev-parse HEAD` for the AUTHORITATIVE sha →
  * dedup by that sha (hit → ack) → diff → exec the in-image runner
  * (env-injected GH_TOKEN/ARK_API_KEY/PI_CODING_AGENT_DIR/
- * M0_HARNESS_PLUGIN_ROOT) → parseReviewOutput → post the overall Review
+ * HARNESS_PLUGIN_ROOT) → parseReviewOutput → post the overall Review
  * comment FIRST → insertReview (duplicate → ack) → KV completion state →
  * finally destroy. Any step throwing → structured log + rethrow (queue
  * retry → DLQ). A runner result that is not the structured main path
  * (summary degrade, Clarify #9.5) is treated as a failure: no post, no
- * insert, structured log, rethrow.
+ * insert, structured log, rethrow. The in-flight guard is the ONE typed
+ * exception (bugbot BB-3): guard-held returns a distinct outcome, not a
+ * throw — the consumer schedules a per-message delayed retry
+ * (60s/120s/240s) and finally acks with a warning instead of DLQing.
  *
  * Sha consistency (bugbot A2): every downstream use — idempotency key, D1
  * row, posted commit_id, KV completion — is keyed off the sha read back
@@ -29,7 +32,7 @@
  * and the pipeline modules — never src/worker/**.
  */
 
-import type { D1Database, KVNamespace, MessageBatch } from "@cloudflare/workers-types";
+import type { D1Database, KVNamespace, Message, MessageBatch } from "@cloudflare/workers-types";
 import type { ReviewJobPayload } from "../contracts/review-job";
 import { idemKey, IDEMPOTENCY_SECONDS, type IdempotencyKey } from "../contracts/idem";
 import { parseReviewOutput, capFindings } from "../review/schema";
@@ -38,6 +41,7 @@ import { createReviewStore, type ReviewStore } from "../store/reviews";
 import { getSandbox, type ReviewSandbox } from "./sandbox";
 import { buildGitOpsCommands } from "./gitops";
 import { createReviewCommenter, type ReviewCommenter } from "./comment";
+import { pickProviderKeys } from "./providers";
 
 export type PipelineEnv = {
   APP_ID: string;
@@ -46,6 +50,39 @@ export type PipelineEnv = {
   DB: D1Database;
   IDEMPOTENCY_KV: KVNamespace;
   SANDBOX: unknown; // binding shape = DurableObjectNamespace<Sandbox> (T1-pinned)
+  /**
+   * omp review model chain (postdeploy feedback T2 / bugbot BB-1): the
+   * comma-separated selector list is forwarded into the runner exec env as
+   * OMP_REVIEW_MODEL so the container's session uses the configured primary
+   * model + fallback chain. Unset/empty → in-image default
+   * (ark-plan/deepseek-v4-flash, no fallback chain).
+   */
+  OMP_REVIEW_MODEL?: string;
+  /**
+   * omp built-in provider API keys (bugbot BB-2): set on the deployed Worker
+   * with `bun run keys` → `wrangler secret put` (scripts/provider-keys.ts,
+   * mapping SSOT = src/pipeline/providers.ts). The consumer forwards every
+   * present-and-non-empty key into the runner exec env (allowlist = the
+   * PROVIDERS mapping only — arbitrary Worker env is never forwarded).
+   */
+  ANTHROPIC_API_KEY?: string;
+  OPENAI_API_KEY?: string;
+  GEMINI_API_KEY?: string;
+  COPILOT_GITHUB_TOKEN?: string;
+  AZURE_OPENAI_API_KEY?: string;
+  GROQ_API_KEY?: string;
+  CEREBRAS_API_KEY?: string;
+  XAI_API_KEY?: string;
+  OPENROUTER_API_KEY?: string;
+  KILO_API_KEY?: string;
+  MISTRAL_API_KEY?: string;
+  ZAI_API_KEY?: string;
+  UMANS_AI_CODING_PLAN_API_KEY?: string;
+  MINIMAX_API_KEY?: string;
+  OPENCODE_API_KEY?: string;
+  CURSOR_ACCESS_TOKEN?: string;
+  AI_GATEWAY_API_KEY?: string;
+  WAFER_SERVERLESS_API_KEY?: string;
 };
 
 /** In-image paths (Dockerfile v2 / T2 smoke — single source of truth). */
@@ -98,6 +135,129 @@ export const defaultConsumerLog: ConsumerLog = {
   error: (fields, msg) => console.error(JSON.stringify({ ...fields, msg: msg ?? "" })),
 };
 
+// ---------------------------------------------------------------------------
+// In-flight review guard (WF-002): one review per PR at a time.
+// ---------------------------------------------------------------------------
+
+/**
+ * Guard TTL (seconds): must exceed the max review wall-clock — the runner
+ * step (600s) plus the three git steps (clone / rev-parse / diff, 120s each)
+ * plus slack — so the guard can never expire mid-review and unblock a
+ * concurrent duplicate. KV expirationTtl is in seconds.
+ */
+export const REVIEW_GUARD_TTL_SECONDS = Math.ceil(
+  (EXEC_TIMEOUT_RUNNER_MS + 3 * EXEC_TIMEOUT_GIT_MS + 60_000) / 1000,
+);
+
+/**
+ * In-flight guard key: `inflight:{installation_id}:{owner}/{repo}:{pr_number}`.
+ * Keyed WITHOUT head_sha on purpose — `/review` commands carry head_sha=null
+ * and must still be serialized per PR.
+ */
+export function reviewGuardKey(key: {
+  installation_id: number;
+  owner: string;
+  repo: string;
+  pr_number: number;
+}): string {
+  return `inflight:${key.installation_id}:${key.owner}/${key.repo}:${key.pr_number}`;
+}
+
+/**
+ * Try to acquire the in-flight guard. Held → false (the caller returns the
+ * guard-held outcome; the consumer schedules a per-message delayed retry, so
+ * the later attempt lands on the update path once the first attempt's marker
+ * exists).
+ *
+ * KV caveat: Cloudflare KV is eventually consistent (reads may lag writes by
+ * up to ~60s) and has no compare-and-set, so this is a BEST-EFFORT mutex —
+ * two attempts racing the GET can both pass before either PUT is visible.
+ * It narrows the duplicate window from the full review wall-clock to a
+ * sub-second KV race; the marker-based upsert (T5) remains the durable
+ * backstop. KV failure → warn + proceed WITHOUT the guard (the same
+ * conservative-pass policy as the idempotency keys), logging that the
+ * duplicate-comment race window is open until KV recovers.
+ */
+async function acquireReviewGuard(
+  kv: KVNamespace,
+  key: string,
+  fields: ConsumerLogFields,
+  log: ConsumerLog,
+): Promise<boolean> {
+  try {
+    if ((await kv.get(key)) !== null) return false;
+    await kv.put(key, "inflight", { expirationTtl: REVIEW_GUARD_TTL_SECONDS });
+    return true;
+  } catch (err) {
+    const detail = err instanceof Error ? err.message : String(err);
+    log.warn(fields, `in-flight guard KV error — proceeding without guard (race window open): ${detail}`);
+    return true;
+  }
+}
+
+/** Release the in-flight guard. Failure → warn; the TTL still expires it. */
+async function releaseReviewGuard(
+  kv: KVNamespace,
+  key: string,
+  fields: ConsumerLogFields,
+  log: ConsumerLog,
+): Promise<void> {
+  try {
+    await kv.delete(key);
+  } catch (err) {
+    const detail = err instanceof Error ? err.message : String(err);
+    log.warn(fields, `in-flight guard release failed — guard expires by TTL (${REVIEW_GUARD_TTL_SECONDS}s): ${detail}`);
+  }
+}
+
+/**
+ * Guard-held backoff schedule (seconds), indexed by message.attempts (1-based
+ * — the first delivery is attempt 1). 60s → 120s → 240s, all below
+ * REVIEW_GUARD_TTL_SECONDS (the constant above, ~17min) so the held guard
+ * can never expire mid-backoff into a duplicate race. Attempts past the
+ * schedule's end have consumed the queue's max_retries and must be acked, not
+ * retried (a further retry() would land the job on the DLQ).
+ */
+export const GUARD_RETRY_DELAYS_SECONDS = [60, 120, 240] as const;
+
+/**
+ * Outcome of one message pass (bugbot BB-3). The in-flight guard is a
+ * DISTINCT typed outcome, not a failure: a guard-held message is scheduled
+ * for a per-message delayed retry and finally acked with a warning — it is
+ * never rethrown into the immediate-retry ×3 → DLQ path. Real failures keep
+ * the existing throw → retry → DLQ behavior.
+ */
+export type ProcessOutcome = { kind: "ok" } | { kind: "guard-held" };
+
+/**
+ * Handle a guard-held message (bugbot BB-3). The guard is not an error
+ * state: instead of throwing (which burns the queue's three immediate
+ * retries and DLQs the job — including later synchronize events for the same
+ * PR — while the first review is still running), schedule a per-message
+ * DELAYED retry via `message.retry({ delaySeconds })`. After the final
+ * delayed attempt, ack with a warning: the job is dropped cleanly and the
+ * next event for the PR (e.g. a later synchronize) re-reviews. Structured
+ * log fields carry the PR identity + attempt count; the idempotency key is
+ * not yet derivable at guard time (it comes from the checked-out sha).
+ */
+function handleGuardHeld(message: Message<ReviewJobPayload>, deps: ProcessDeps): void {
+  const fields = toBaseFields(message.body);
+  const delaySeconds = GUARD_RETRY_DELAYS_SECONDS[message.attempts - 1];
+  if (delaySeconds !== undefined) {
+    deps.log.info(
+      fields,
+      `review already in flight — scheduling delayed retry in ${delaySeconds}s (attempt ${message.attempts})`,
+    );
+    message.retry({ delaySeconds });
+  } else {
+    deps.log.warn(
+      fields,
+      `review still in flight after ${GUARD_RETRY_DELAYS_SECONDS.length} delayed retries (attempt ${message.attempts}) — acking, no DLQ (guard-held is not an error; the next event for the PR re-reviews)`,
+    );
+    message.ack();
+  }
+}
+
 type ProcessDeps = {
   env: PipelineEnv;
   store: ReviewStore;
@@ -105,6 +265,40 @@ type ProcessDeps = {
   log: ConsumerLog;
   getSandbox: (binding: unknown, id: string) => Promise<ReviewSandbox>;
 };
+
+/** Structured base fields derived from the job payload (no sandbox/sha yet). */
+function toBaseFields(payload: ReviewJobPayload): ConsumerLogFields {
+  return {
+    event: payload.triggered_by === "pull_request" ? "pull_request" : "review_command",
+    action: payload.action,
+    installation_id: payload.installation_id,
+    owner: payload.owner,
+    repo: payload.repo,
+    pr_number: payload.pr_number,
+    head_sha: payload.head_sha,
+  };
+}
+
+/**
+ * Build the in-image runner exec env (step 6): the provider key + harness
+ * paths (compass D — secrets never baked into the image), the OMP_REVIEW_MODEL
+ * chain when set (bugbot BB-1), and every known provider key that is
+ * present-and-non-empty on the Worker env (bugbot BB-2). Forwarding is an
+ * ALLOWLIST — only the src/pipeline/providers.ts PROVIDERS keys are read;
+ * arbitrary Worker env never reaches the container.
+ */
+function buildRunnerEnv(env: PipelineEnv): Record<string, string> {
+  const runnerEnv: Record<string, string> = {
+    ARK_API_KEY: env.OMP_MODEL_KEY,
+    HARNESS_PLUGIN_ROOT: HARNESS_ROOT,
+    PI_CODING_AGENT_DIR: OMP_AGENT_DIR,
+  };
+  if (env.OMP_REVIEW_MODEL !== undefined && env.OMP_REVIEW_MODEL !== "") {
+    runnerEnv.OMP_REVIEW_MODEL = env.OMP_REVIEW_MODEL;
+  }
+  Object.assign(runnerEnv, pickProviderKeys(env as Record<string, unknown>));
+  return runnerEnv;
+}
 
 /**
  * KV done-state read (B3): `done` means a review was already POSTED for this
@@ -161,21 +355,19 @@ export function createReviewConsumer(
   };
   return async (batch) => {
     for (const message of batch.messages) {
-      await processMessage(message.body, deps);
+      const outcome = await processMessage(message.body, deps);
+      // BB-3: guard-held is a typed outcome — schedule the per-message
+      // delayed retry (or the final ack-with-warning) instead of throwing
+      // into the queue's immediate ×3 retry → DLQ path.
+      if (outcome.kind === "guard-held") {
+        handleGuardHeld(message, deps);
+      }
     }
   };
 }
 
-async function processMessage(payload: ReviewJobPayload, deps: ProcessDeps): Promise<void> {
-  const baseFields: ConsumerLogFields = {
-    event: payload.triggered_by === "pull_request" ? "pull_request" : "review_command",
-    action: payload.action,
-    installation_id: payload.installation_id,
-    owner: payload.owner,
-    repo: payload.repo,
-    pr_number: payload.pr_number,
-    head_sha: payload.head_sha,
-  };
+async function processMessage(payload: ReviewJobPayload, deps: ProcessDeps): Promise<ProcessOutcome> {
+  const baseFields = toBaseFields(payload);
   // Unique per attempt (plan Clarify #11): a destroyed sandbox's id is never
   // reused — attach-after-destroy behavior is unknown, uniqueness wins.
   const sandboxId = `review-${crypto.randomUUID()}`;
@@ -184,8 +376,28 @@ async function processMessage(payload: ReviewJobPayload, deps: ProcessDeps): Pro
   // the idempotency key + sandbox id whenever they exist (Clarify #11 / Done
   // criteria: 失败路径错误日志含幂等键).
   let fields: ConsumerLogFields | undefined;
+  // In-flight guard (WF-002): serializes concurrent reviews per PR — keyed
+  // without head_sha so `/review` commands (head_sha=null) are covered too.
+  const guardKey = reviewGuardKey({
+    installation_id: payload.installation_id,
+    owner: payload.owner,
+    repo: payload.repo,
+    pr_number: payload.pr_number,
+  });
+  let guardHeld = false;
 
   try {
+    // 0. In-flight guard (WF-002 / bugbot BB-3): when another review is
+    // already running for this PR, return the DISTINCT guard-held outcome —
+    // NOT a throw. The consumer schedules a per-message delayed retry
+    // (60s/120s/240s), so the later attempt lands on the update path
+    // (round=N+1) once the earlier attempt has posted its marker; after the
+    // final delayed attempt the job is acked with a warning — guard-held is
+    // not an error state and never goes to the DLQ.
+    if (!(await acquireReviewGuard(deps.env.IDEMPOTENCY_KV, guardKey, baseFields, deps.log))) {
+      return { kind: "guard-held" };
+    }
+    guardHeld = true;
     // 1. Sandbox + installation token (created lazily; destroyed in finally).
     if (sandbox === null) {
       sandbox = await deps.getSandbox(deps.env.SANDBOX, sandboxId);
@@ -252,12 +464,12 @@ async function processMessage(payload: ReviewJobPayload, deps: ProcessDeps): Pro
     const done = await kvDoneHit(deps.env.IDEMPOTENCY_KV, idemKey(key), fields, deps.log);
     if (done) {
       deps.log.info(fields, "KV idempotency hit — ack");
-      return;
+      return { kind: "ok" };
     }
     const existing = await deps.store.findByIdempotencyKey(key);
     if (existing) {
       deps.log.info(fields, "idempotency hit — ack");
-      return;
+      return { kind: "ok" };
     }
 
     // 5. Diff (GH_TOKEN via exec env only — never in the command).
@@ -266,15 +478,13 @@ async function processMessage(payload: ReviewJobPayload, deps: ProcessDeps): Pro
       throw new Error(`diff failed: exit ${diff.exitCode}, stdout ${diff.stdout.length}B`);
     }
 
-    // 6. In-image runner: cwd = clone dir; model key + harness paths via exec
-    // env (compass D — secrets never baked into the image).
+    // 6. In-image runner: cwd = clone dir; provider key + harness paths +
+    // OMP_REVIEW_MODEL chain + configured provider keys via exec env
+    // (buildRunnerEnv — compass D, BB-1, BB-2; secrets never baked into the
+    // image, never in logs).
     const run = await sandbox.exec(cmds.runner, {
       cwd: CLONE_DIR,
-      env: {
-        ARK_API_KEY: deps.env.OMP_MODEL_KEY,
-        M0_HARNESS_PLUGIN_ROOT: HARNESS_ROOT,
-        PI_CODING_AGENT_DIR: OMP_AGENT_DIR,
-      },
+      env: buildRunnerEnv(deps.env),
       timeout: EXEC_TIMEOUT_RUNNER_MS,
     });
     if (run.exitCode !== 0) {
@@ -306,9 +516,11 @@ async function processMessage(payload: ReviewJobPayload, deps: ProcessDeps): Pro
     const capped = capFindings(redactReviewOutput(parsed.output));
     const output = capped.output;
 
-    // 10. Post the overall review FIRST (the user-facing deliverable must not
-    // be lost to a later store failure), then persist. Always event COMMENT
-    // with the verdict rendered in the body (SEC-01 fix, comment.ts).
+    // 10. Upsert the overall review comment FIRST (the user-facing
+    // deliverable must not be lost to a later store failure), then persist.
+    // T5: the commenter creates the app's marker comment (round=1) on a miss
+    // and PATCHes it (round=N+1) on a hit — one comment per PR, never a new
+    // review per round. The verdict is rendered as text only (SEC-01).
     await deps.commenter.postReview({
       installationId: payload.installation_id,
       owner: payload.owner,
@@ -351,6 +563,7 @@ async function processMessage(payload: ReviewJobPayload, deps: ProcessDeps): Pro
         `review posted but insert failed — D1 row missing, acking to avoid a duplicate comment: ${detail}`,
       );
     }
+    return { kind: "ok" };
   } catch (err) {
     // Structured failure log carrying the idempotency key + sandbox id
     // (plan Clarify #11 / Done criteria: 失败路径错误日志含幂等键), then
@@ -362,6 +575,12 @@ async function processMessage(payload: ReviewJobPayload, deps: ProcessDeps): Pro
     );
     throw err;
   } finally {
+    // Release the in-flight guard once the review settled (posted, KV done,
+    // insert attempted) OR failed — either way the next attempt may proceed.
+    // releaseReviewGuard never throws (KV failure → warn; TTL expires it).
+    if (guardHeld) {
+      await releaseReviewGuard(deps.env.IDEMPOTENCY_KV, guardKey, fields ?? baseFields, deps.log);
+    }
     if (sandbox !== null) {
       try {
         await sandbox.destroy();

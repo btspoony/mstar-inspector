@@ -300,3 +300,57 @@ describe("classifyEvent — everything else", () => {
     expect(outcome).toEqual({ kind: "reject", status: 400, reason: "invalid JSON body" });
   });
 });
+describe("REVIEW_ENABLED kill-switch (T4) — fail-closed", () => {
+  test("classifyEvent with reviews disabled ignores even a whitelisted event", () => {
+    const outcome = classifyEvent("pull_request", pullRequestBody("opened"), undefined, false);
+    expect(outcome).toEqual({
+      kind: "ignore",
+      reason: "reviews disabled by the REVIEW_ENABLED kill-switch",
+    });
+  });
+
+  test("classifyEvent with reviews disabled ignores a /review command", () => {
+    const outcome = classifyEvent("issue_comment", issueCommentBody(), undefined, false);
+    expect(outcome.kind).toBe("ignore");
+  });
+
+  test("classifyEvent with reviews disabled logs a structured review_disabled warning", () => {
+    const log = makeLog();
+    const outcome = classifyEvent("pull_request", pullRequestBody("opened"), log, false);
+    expect(outcome.kind).toBe("ignore");
+    expect(log.warn).toHaveBeenCalledTimes(1);
+    const [fields, msg] = log.warn.mock.calls[0] ?? [];
+    expect(fields).toMatchObject({ event: "unknown", reason: "review_disabled" });
+    expect(msg).toContain("kill-switch");
+  });
+
+  test("classifyWebhook with reviews disabled ignores before any signature work", async () => {
+    const log = makeLog();
+    // Even a bad signature is ignored (2xx) — the kill-switch short-circuits
+    // before verification, so a disabled worker never rejects/retries.
+    const outcome = await classifyWebhook(SECRET, "{}", "sha256=deadbeef", "pull_request", log, false);
+    expect(outcome).toEqual({
+      kind: "ignore",
+      reason: "reviews disabled by the REVIEW_ENABLED kill-switch",
+    });
+    expect(log.warn).toHaveBeenCalledTimes(1);
+  });
+
+  test("classifyWebhook with reviews enabled keeps the payload unchanged", async () => {
+    const body = pullRequestBody("opened");
+    const signature = await makeWebhooks(SECRET).sign(body);
+    const outcome = await classifyWebhook(SECRET, body, signature, "pull_request", undefined, true);
+    expect(outcome.kind).toBe("job");
+    if (outcome.kind === "job") {
+      expect(outcome.payload).toEqual({
+        installation_id: 123,
+        owner: "test-owner",
+        repo: "test-repo",
+        pr_number: 42,
+        head_sha: HEAD_SHA,
+        action: "opened",
+        triggered_by: "pull_request",
+      });
+    }
+  });
+});

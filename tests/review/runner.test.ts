@@ -10,7 +10,7 @@
  *     summary mode still exits 0 with a valid ReviewOutput; usage error → 2;
  *     unreadable diff file → 1; session failure → 1 with empty stdout.
  *
- * The container-specific pieces (M0_HARNESS_PLUGIN_ROOT=/opt/mstar-harness
+ * The container-specific pieces (HARNESS_PLUGIN_ROOT=/opt/mstar-harness
  * resolution, fetch.enabled=false isolation, read/grep/glob whitelist) are
  * covered by session.test.ts — they are inherited here unchanged.
  */
