@@ -12,6 +12,11 @@
  *     timeout?: number, ... } — per-command env/cwd, buffered result
  *   - Sandbox.destroy() -> Promise<void> (terminates container, deletes state)
  *
+ * `timeout` (ms) is the SDK's max execution time per command. Every exec is
+ * bounded: a caller-provided timeout wins, otherwise DEFAULT_EXEC_TIMEOUT_MS
+ * applies — a hung gh/git/model call can never outlive the container silently
+ * (plan QC 06 fix round 1 / qc3 F-001).
+ *
  * `enableDefaultSession: false` (lifecycle docs recommendation): each exec
  * runs in isolation — no shell state carries between calls. The consumer
  * passes cwd/env per exec, so no session state is needed.
@@ -31,11 +36,14 @@ export { Sandbox } from "@cloudflare/sandbox";
 /** The Worker binding shape (pinned at T1; plan `PipelineEnv.SANDBOX`). */
 export type SandboxBinding = unknown;
 
+/** Default exec bound (ms) when a caller passes no explicit timeout. */
+export const DEFAULT_EXEC_TIMEOUT_MS = 600_000;
+
 /** Locked contract (plan interface section / compass contracts B). */
 export type ReviewSandbox = {
   exec(
     cmd: string,
-    opts?: { env?: Record<string, string>; cwd?: string },
+    opts?: { env?: Record<string, string>; cwd?: string; timeout?: number },
   ): Promise<{ stdout: string; stderr: string; exitCode: number }>;
   destroy(): Promise<void>;
 };
@@ -53,7 +61,11 @@ export async function getSandbox(binding: SandboxBinding, id: string): Promise<R
   );
   return {
     async exec(cmd, opts) {
-      const result = await sandbox.exec(cmd, { env: opts?.env, cwd: opts?.cwd });
+      const result = await sandbox.exec(cmd, {
+        env: opts?.env,
+        cwd: opts?.cwd,
+        timeout: opts?.timeout ?? DEFAULT_EXEC_TIMEOUT_MS,
+      });
       return { stdout: result.stdout, stderr: result.stderr, exitCode: result.exitCode };
     },
     async destroy() {

@@ -214,14 +214,13 @@ describe("createReviewConsumer", () => {
 
     await consumer(makeBatch(makePayload()));
 
-    // clone + diff + runner, in order, with GH_TOKEN injected via exec env.
     expect(sandboxCalls.map((c) => c.cmd)).toEqual([
-      expect.stringContaining("git init /workspace/repo"),
-      expect.stringContaining("gh pr diff 42 --repo acme/widgets"),
-      expect.stringContaining("bun run /opt/runner/src/review/runner.ts --diff /workspace/pr.diff"),
+      expect.stringContaining("git init '/workspace/repo'"),
+      expect.stringContaining("gh pr diff '42' --repo 'acme/widgets'"),
+      expect.stringContaining("bun run '/opt/runner/src/review/runner.ts' --diff '/workspace/pr.diff'"),
     ]);
-    expect(sandboxCalls[0]!.opts).toEqual({ env: { GH_TOKEN: "ghs_installation_token" } });
-    expect(sandboxCalls[1]!.opts).toEqual({ env: { GH_TOKEN: "ghs_installation_token" } });
+    expect(sandboxCalls[0]!.opts).toEqual({ env: { GH_TOKEN: "ghs_installation_token" }, timeout: 120_000 });
+    expect(sandboxCalls[1]!.opts).toEqual({ env: { GH_TOKEN: "ghs_installation_token" }, timeout: 120_000 });
     // Runner: cwd = clone dir; model key + harness paths via exec env only.
     expect(sandboxCalls[2]!.opts).toEqual({
       cwd: "/workspace/repo",
@@ -230,8 +229,8 @@ describe("createReviewConsumer", () => {
         M0_HARNESS_PLUGIN_ROOT: "/opt/mstar-harness",
         PI_CODING_AGENT_DIR: "/opt/omp-agent",
       },
+      timeout: 600_000,
     });
-
     // Token minted once (shared for clone/diff); post happens BEFORE insert.
     expect(commenterCalls.filter((c) => c.op === "token")).toHaveLength(1);
     expect(commenterCalls.map((c) => c.op)).toEqual(["token", "post"]);
@@ -272,7 +271,10 @@ describe("createReviewConsumer", () => {
 
     await consumer(makeBatch(makePayload({ head_sha: null, triggered_by: "review_command" })));
 
-    expect(sandboxCalls[0]!.cmd).toContain("gh pr view 42 --repo acme/widgets");
+    expect(sandboxCalls[0]!.cmd).toBe(
+      "gh pr view '42' --repo 'acme/widgets' --json headRefOid --jq .headRefOid",
+    );
+    expect(sandboxCalls[0]!.opts).toEqual({ env: { GH_TOKEN: "ghs_installation_token" }, timeout: 120_000 });
     const row = db.raw.query("SELECT * FROM reviews").get() as { head_sha: string };
     expect(row.head_sha).toBe("abcdefabcdefabcdefabcdefabcdefabcdefabcd");
     expect(destroyCalls).toBe(1);

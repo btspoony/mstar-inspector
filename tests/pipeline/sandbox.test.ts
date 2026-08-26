@@ -3,8 +3,10 @@
  * SDK boundary (same technique as tests/review/session.test.ts) so the tests
  * are deterministic. Contract under test (plan interface section):
  *   - getSandbox(binding, id) returns a ReviewSandbox whose exec passes the
- *     command string + env/cwd options through to the SDK and maps the
- *     buffered result to { stdout, stderr, exitCode }
+ *     command string + env/cwd/timeout options through to the SDK and maps
+ *     the buffered result to { stdout, stderr, exitCode }
+ *   - every exec is time-bounded: an explicit opts.timeout wins, otherwise
+ *     DEFAULT_EXEC_TIMEOUT_MS is applied (plan QC 06 fix round 1 / qc3 F-001)
  *   - destroy() delegates to the SDK destroy
  *   - the SDK import point is this module only (compass contracts A)
  *
@@ -42,39 +44,54 @@ mock.module("@cloudflare/sandbox", () => ({
   Sandbox: class Sandbox {},
 }));
 
-const { getSandbox } = await import("../../src/pipeline/sandbox");
+const { getSandbox, DEFAULT_EXEC_TIMEOUT_MS } = await import("../../src/pipeline/sandbox");
 import type { ReviewSandbox } from "../../src/pipeline/sandbox";
 
 const binding = {} as never;
 
 describe("getSandbox", () => {
-  test("exec passes the command string and env/cwd options through and maps the result", async () => {
+  test("exec passes the command string and env/cwd/timeout options through and maps the result", async () => {
     execResult = { success: true, exitCode: 0, stdout: "diff --git a/x b/x\n", stderr: "review mode: structured\n" };
     const sandbox: ReviewSandbox = await getSandbox(binding, "smoke-abc");
 
     const result = await sandbox.exec("gh pr diff 1 --repo btspoony/todo-bots", {
       env: { GH_TOKEN: "tok" },
       cwd: "/workspace/repo",
+      timeout: 120_000,
     });
 
     expect(execCalls).toEqual([
       {
         cmd: "gh pr diff 1 --repo btspoony/todo-bots",
-        opts: { env: { GH_TOKEN: "tok" }, cwd: "/workspace/repo" },
+        opts: { env: { GH_TOKEN: "tok" }, cwd: "/workspace/repo", timeout: 120_000 },
       },
     ]);
     expect(result).toEqual({ stdout: "diff --git a/x b/x\n", stderr: "review mode: structured\n", exitCode: 0 });
   });
 
-  test("exec without options passes undefined env/cwd", async () => {
+  test("exec without options passes undefined env/cwd and applies the default timeout", async () => {
     execCalls.length = 0;
     execResult = { success: true, exitCode: 0, stdout: "out", stderr: "" };
     const sandbox: ReviewSandbox = await getSandbox(binding, "smoke-2");
 
     const result = await sandbox.exec("echo hi");
 
-    expect(execCalls).toEqual([{ cmd: "echo hi", opts: { env: undefined, cwd: undefined } }]);
+    expect(execCalls).toEqual([
+      { cmd: "echo hi", opts: { env: undefined, cwd: undefined, timeout: DEFAULT_EXEC_TIMEOUT_MS } },
+    ]);
     expect(result).toEqual({ stdout: "out", stderr: "", exitCode: 0 });
+  });
+
+  test("exec with an explicit timeout forwards it unchanged (per-call override wins)", async () => {
+    execCalls.length = 0;
+    execResult = { success: true, exitCode: 0, stdout: "out", stderr: "" };
+    const sandbox: ReviewSandbox = await getSandbox(binding, "smoke-6");
+
+    await sandbox.exec("gh pr view 1", { timeout: 120_000 });
+
+    expect(execCalls).toEqual([
+      { cmd: "gh pr view 1", opts: { env: undefined, cwd: undefined, timeout: 120_000 } },
+    ]);
   });
 
   test("exec propagates SDK errors (caller decides retry/DLQ)", async () => {

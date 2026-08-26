@@ -42,6 +42,14 @@ const RUNNER_PATH = "/opt/runner/src/review/runner.ts";
 const HARNESS_ROOT = "/opt/mstar-harness";
 const OMP_AGENT_DIR = "/opt/omp-agent";
 
+// Per-call exec bounds (ms) — every sandbox exec carries an explicit timeout
+// so a hung gh/git/model call fails deterministically instead of silently
+// eating a container (plan QC 06 fix round 1 / qc3 F-001).
+/** gh/git steps (resolve sha, clone, diff) — measured ~2.6s, 2min is generous. */
+const EXEC_TIMEOUT_GIT_MS = 120_000;
+/** In-image runner (real model call, measured ~52s) — 10min ceiling. */
+const EXEC_TIMEOUT_RUNNER_MS = 600_000;
+
 /**
  * Runner stderr marker for the structured main path (src/review/run.ts prints
  * `review mode: ${mode}` to stderr; stdout carries only the ReviewOutput JSON
@@ -136,7 +144,7 @@ async function processMessage(payload: ReviewJobPayload, deps: ProcessDeps): Pro
       const token = await deps.commenter.getInstallationToken(payload.installation_id);
       const resolved = await sandbox.exec(
         resolveHeadShaCommand(payload.owner, payload.repo, payload.pr_number),
-        { env: { GH_TOKEN: token } },
+        { env: { GH_TOKEN: token }, timeout: EXEC_TIMEOUT_GIT_MS },
       );
       if (resolved.exitCode !== 0 || resolved.stdout.trim() === "") {
         throw new Error(
@@ -183,11 +191,11 @@ async function processMessage(payload: ReviewJobPayload, deps: ProcessDeps): Pro
     });
 
     // 4. Clone + diff (GH_TOKEN via exec env only — never in the command).
-    const clone = await sandbox.exec(cmds.clone, { env: { GH_TOKEN: token } });
+    const clone = await sandbox.exec(cmds.clone, { env: { GH_TOKEN: token }, timeout: EXEC_TIMEOUT_GIT_MS });
     if (clone.exitCode !== 0) {
       throw new Error(`clone failed: exit ${clone.exitCode}, stdout ${clone.stdout.length}B`);
     }
-    const diff = await sandbox.exec(cmds.diff, { env: { GH_TOKEN: token } });
+    const diff = await sandbox.exec(cmds.diff, { env: { GH_TOKEN: token }, timeout: EXEC_TIMEOUT_GIT_MS });
     if (diff.exitCode !== 0) {
       throw new Error(`diff failed: exit ${diff.exitCode}, stdout ${diff.stdout.length}B`);
     }
@@ -201,6 +209,7 @@ async function processMessage(payload: ReviewJobPayload, deps: ProcessDeps): Pro
         M0_HARNESS_PLUGIN_ROOT: HARNESS_ROOT,
         PI_CODING_AGENT_DIR: OMP_AGENT_DIR,
       },
+      timeout: EXEC_TIMEOUT_RUNNER_MS,
     });
     if (run.exitCode !== 0) {
       throw new Error(`runner failed: exit ${run.exitCode}, stdout ${run.stdout.length}B`);
