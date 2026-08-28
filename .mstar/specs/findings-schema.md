@@ -1,8 +1,9 @@
 # 审查输出 Schema（findings-schema）
 
 > **状态：** 已升格 `{SPECS_DIR}`（2026-08-25，自 `iterations/iter-001-20260825/specs/findings-schema.md` 快照升格；源文件保留并标注）。  
-> **SSOT：** 本文件（类型 + 校验规则）；语义源头 `projects/_default/references/mstar-inspector-solution.md` v0.2 §5.2。  
-> **用途：** `parseReviewOutput` / zod / D1 findings 列 / Review Comment 渲染必须与本文件逐字段一致。  
+> **v0.3 起写入退役：** 本文件仍是 **M1 已落库行** 的历史契约（`ReviewOutput`）。新审查 persist / GitHub 发表的权威 = harness `mstar.review/v1` + [github-review-comment-mapping.md](github-review-comment-mapping.md)。实现不得再把本节枚举当 `ArtifactStore.put` 或评论渲染的 SSOT。  
+> **SSOT（历史）：** 本文件（类型 + 校验规则）；语义源头 `projects/_default/references/mstar-inspector-solution.md` v0.2 §5.2。  
+> **用途（历史）：** `parseReviewOutput` / zod / D1 findings 列 / Review Comment 渲染必须与本文件逐字段一致。  
 > **非目标：** 这不是 `{PROJECT_DIR}/residuals.json` 行。禁止 residual 独有值 `high` / `medium` / `low` / `nit`。`critical` 在本 schema 的 findings 中**合法**（与 residual 的 `critical` 同名不同登记处）。
 
 ## ReviewOutput（§5.2）
@@ -119,7 +120,7 @@ export type ReviewRunResult = {
 
 容器内 runner 解析失败：`reviewDiff` 返回 `{ mode: "summary", result: { verdict: "comment", summary_md: <非空>, findings: [] } }`。`summary_md` 优先使用原始模型文本（建议 ≤ 8000 UTF-16 code units，必须非空）；raw 为空用固定句 `Review output could not be parsed.`。
 
-GitHub 上「解析失败则只发 summary」的发表策略属 roadmap **M2**；M1 e2e 主路径要求 structured。
+GitHub 上「解析失败则只发 summary」的发表策略属 roadmap **M3**（2026-08-26 里程碑重排：原 M2 生产级 → M3；**不是** v0.3 的 M2 review-engine）。M1 e2e 主路径要求 structured；v0.3 仍是解析失败不发、不 insert。
 
 ## 与 residual 的关系
 

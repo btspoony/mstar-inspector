@@ -3,11 +3,15 @@
  *
  * Assembly (pure, unit-tested):
  *   - summary_md truncated to 8000 chars (plan Task 3 budget);
- *   - findings rendered as a markdown list with severity/category rendered
- *     VERBATIM from the schema enums (plan Global Constraints: the Comment
- *     must not rewrite enum semantics);
+ *   - findings grouped and listed BY merge class, category verbatim
+ *     (mapping spec §3: findings 按 merge class 列出 — class原文写入, never
+ *     rewritten to M1 severity);
+ *   - tally line rendered when the envelope carries one (must-fix /
+ *     should-fix / nit / unverified counts, engine REVIEW_EMOJI);
  *   - NO line-comment fields: the body is a single overall review comment;
- *   - verdict rendered as text in the body header (`**Verdict: …**`).
+ *   - verdict rendered VERBATIM as text in the body header (`**Verdict:
+ *     ship it**` / `needs fixes` / `blocked` — never M1 vocab, never a
+ *     GitHub review event).
  *
  * Posting (T5): single-comment UPSERT via the Issues comments API
  * (@octokit/rest + createAppAuth — same deps and pattern as 04's diff.ts;
@@ -15,8 +19,10 @@
  * import src/worker/** and no shared module is extracted per plan). The
  * first line of the body is a hidden HTML marker
  * (`<!-- mstar-inspector:review:v1 round=N -->`); the app locates its own
- * previous comment via issues.listComments (marker prefix match) and PATCHes
- * it with round = N + 1, or creates a new comment with round = 1. This
+ * previous comment via issues.listComments (marker prefix match AND
+ * bot-authorship — qc2 F-002: a human-planted marker is a miss, and a
+ * 403/404 on the PATCH replans past the dead comment or creates) and
+ * PATCHes it with round = N + 1, or creates a new comment with round = 1. This
  * replaces the old pulls.createReview posting (one review per round — the
  * comment-duplication root cause). The model verdict is prompt-injectable,
  * so it is NEVER mapped onto GitHub APPROVE/REQUEST_CHANGES — the Issues
@@ -29,13 +35,22 @@
  * this module (consumer choke point, SEC-02 fix) so a prompt-injected token
  * can never appear in the public review body or D1 raw_output.
  */
-
 import { createAppAuth } from "@octokit/auth-app";
 import { Octokit } from "@octokit/rest";
+import { MERGE_CLASSES, REVIEW_EMOJI } from "@mstar-harness/engine";
 import type { ReviewFinding, ReviewOutput } from "../review/schema";
 
 /** summary_md budget for the overall review body (plan Task 3). */
 export const SUMMARY_MD_LIMIT = 8000;
+
+/**
+ * Hard ceiling on the assembled review body (qc2 F-003 / qc3 F-304): GitHub
+ * Issues comments cap the body at 65536 chars — an over-limit body would
+ * fail at createComment/updateComment AFTER the container model run, and
+ * every queue retry would fail again (→ DLQ). The ceiling leaves room for
+ * the upsert marker + round header (~80 chars) on top.
+ */
+export const REVIEW_BODY_LIMIT = 65000;
 
 /** Truncate summary_md to the body budget (char-based; GitHub counts chars). */
 export function truncateSummary(md: string, limit: number = SUMMARY_MD_LIMIT): string {
@@ -43,34 +58,58 @@ export function truncateSummary(md: string, limit: number = SUMMARY_MD_LIMIT): s
 }
 
 /**
- * Render findings as a markdown list. Severity/category are emitted verbatim
- * (enum SSOT); location is `file_path[:line_start]` or "repo-wide" when the
- * finding is not file-scoped. Empty findings → empty string (no section).
+ * Render findings grouped BY merge class (mapping spec §3), fixed engine
+ * order (must-fix → should-fix → nit; empty classes omitted). Category is
+ * emitted verbatim when present; location is `file_path[:line_start]` or
+ * "repo-wide" when the finding is not file-scoped. Empty findings → empty
+ * string (no section).
  */
 export function renderFindings(findings: ReviewFinding[]): string {
   if (findings.length === 0) return "";
-  const lines = findings.map((finding, index) => {
-    const location = finding.file_path
-      ? `${finding.file_path}${finding.line_start != null ? `:${finding.line_start}` : ""}`
-      : "repo-wide";
-    const body = finding.body ? `\n\n${finding.body}` : "";
-    return `${index + 1}. **[${finding.severity}] ${finding.title}** (${finding.category}) — ${location}${body}`;
-  });
-  return `## Findings\n\n${lines.join("\n\n")}`;
+  const sections = MERGE_CLASSES.map((mergeClass) => {
+    const inClass = findings.filter((finding) => finding.mergeClass === mergeClass);
+    if (inClass.length === 0) return null;
+    const items = inClass.map((finding, index) => {
+      const location = finding.file_path
+        ? `${finding.file_path}${finding.line_start != null ? `:${finding.line_start}` : ""}`
+        : "repo-wide";
+      const body = finding.body ? `\n\n${finding.body}` : "";
+      const category = finding.category !== undefined ? ` (${finding.category})` : "";
+      return `${index + 1}. **${finding.title}**${category} — ${location}${body}`;
+    });
+    return `### ${REVIEW_EMOJI[mergeClass]} ${mergeClass}\n\n${items.join("\n\n")}`;
+  }).filter((section) => section !== null);
+  return `## Findings\n\n${sections.join("\n\n")}`;
+}
+
+/** Tally line from the envelope's PrTallyResult; empty when absent (§3). */
+function renderTally(tally: ReviewOutput["tally"]): string {
+  if (tally === undefined) return "";
+  const { mustFix, shouldFix, nit, unverified } = tally.tally;
+  return (
+    `**Tally:** ${REVIEW_EMOJI["must-fix"]} must-fix ${mustFix} · ` +
+    `${REVIEW_EMOJI["should-fix"]} should-fix ${shouldFix} · ` +
+    `${REVIEW_EMOJI.nit} nit ${nit} · ${REVIEW_EMOJI.unverified} unverified ${unverified}`
+  );
 }
 
 /**
- * Assemble the overall review body: verdict header + truncated summary +
- * findings section + optional omitted-findings footer. `omittedFindings` is
- * the count of findings dropped by the consumer's severity cap (B4) — the
- * footer tells readers the review is a Top-N subset.
+ * Assemble the overall review body: verdict header (verbatim) + tally line
+ * (when present) + truncated summary + findings-by-class section + optional
+ * omitted-findings footer, finally clamped to REVIEW_BODY_LIMIT (qc2 F-003 /
+ * qc3 F-304 — the API never sees an over-limit body). `omittedFindings` is
+ * the count of findings dropped by the consumer's merge-class cap (B4) —
+ * the footer tells readers the review is a Top-N subset.
  */
 export function buildReviewBody(output: ReviewOutput, omittedFindings = 0): string {
   const verdict = `**Verdict: ${output.verdict}**`;
+  const tally = renderTally(output.tally);
   const summary = truncateSummary(output.summary_md);
   const findings = renderFindings(output.findings);
-  const body = findings ? `${verdict}\n\n${summary}\n\n${findings}` : `${verdict}\n\n${summary}`;
-  return omittedFindings > 0 ? `${body}\n\n*(+${omittedFindings} more findings omitted)*` : body;
+  const head = tally ? `${verdict}\n\n${tally}` : verdict;
+  const body = findings ? `${head}\n\n${summary}\n\n${findings}` : `${head}\n\n${summary}`;
+  const full = omittedFindings > 0 ? `${body}\n\n*(+${omittedFindings} more findings omitted)*` : body;
+  return full.length <= REVIEW_BODY_LIMIT ? full : `${full.slice(0, REVIEW_BODY_LIMIT - 1)}…`;
 }
 // ---------------------------------------------------------------------------
 // Single-comment upsert (postdeploy feedback T5)
@@ -93,14 +132,28 @@ export function parseReviewRound(body: string): number | null {
 }
 
 /**
- * Find the app's own review comment in an issues.listComments response:
- * the first comment whose body starts with the marker prefix. Returns null
- * when no comment carries the marker.
+ * Minimal issues.listComments item shape the upsert scan needs. `user.type`
+ * is how GitHub distinguishes app-authored comments ("Bot" — the identity
+ * our installation posts as) from human ones ("User").
+ */
+export type ReviewComment = { id: number; body?: string | null; user?: { type?: string } | null };
+
+/**
+ * Find OUR review comment in an issues.listComments response (qc2 F-002):
+ * the first BOT-AUTHORED comment whose body starts with the marker prefix.
+ * Any PR participant can plant the marker text on a human account, and
+ * GitHub refuses issues.updateComment on a foreign author's comment (403)
+ * — so a marker comment is only a match when a bot account wrote it.
+ * `excludeIds` skips comments already known dead (403/404 recovery replan).
+ * Returns null when no eligible comment carries the marker.
  */
 export function findReviewComment(
-  comments: Array<{ id: number; body?: string | null }>,
+  comments: ReviewComment[],
+  excludeIds?: ReadonlySet<number>,
 ): { id: number; body: string } | null {
   for (const comment of comments) {
+    if (excludeIds?.has(comment.id)) continue;
+    if (comment.user?.type !== "Bot") continue;
     if (comment.body?.startsWith(REVIEW_MARKER_PREFIX)) {
       return { id: comment.id, body: comment.body };
     }
@@ -113,17 +166,16 @@ export type UpsertPlan =
   | { action: "update"; commentId: number; round: number };
 
 /**
- * Decide create vs update for the review comment (T5):
- *   - no marker comment → create with round=1;
- *   - marker comment with a well-formed round N → update that comment with
- *     round = N + 1;
+ * Decide create vs update for the review comment (T5 + qc2 F-002):
+ *   - no bot-authored marker comment → create with round=1;
+ *   - bot marker comment with a well-formed round N → update that comment
+ *     with round = N + 1;
  *   - marker comment with a MALFORMED round → treated as a miss: create a
- *     new comment with round=1.
+ *     new comment with round=1;
+ *   - `excludeIds` removes dead comments from the scan (recovery replan).
  */
-export function planUpsert(
-  comments: Array<{ id: number; body?: string | null }>,
-): UpsertPlan {
-  const existing = findReviewComment(comments);
+export function planUpsert(comments: ReviewComment[], excludeIds?: ReadonlySet<number>): UpsertPlan {
+  const existing = findReviewComment(comments, excludeIds);
   if (existing === null) return { action: "create", round: 1 };
   const round = parseReviewRound(existing.body);
   if (round === null) return { action: "create", round: 1 };
@@ -267,7 +319,7 @@ export type PostReviewInput = {
   prNumber: number;
   headSha: string;
   output: ReviewOutput;
-  /** Findings dropped by the severity cap (B4) — rendered as a body footer. */
+  /** Findings dropped by the merge-class cap (B4) — rendered as a body footer. */
   omittedFindings?: number;
 };
 
@@ -301,15 +353,10 @@ export type AppAuthStrategy = {
  * overloaded types to this minimal interface (SG-001 mock seam).
  */
 export type PostOctokit = {
-  paginate: (
-    route: unknown,
-    parameters: Record<string, unknown>,
-  ) => Promise<Array<{ id: number; body?: string | null }>>;
+  paginate: (route: unknown, parameters: Record<string, unknown>) => Promise<ReviewComment[]>;
   rest: {
     issues: {
-      listComments: (
-        parameters: Record<string, unknown>,
-      ) => Promise<{ data: Array<{ id: number; body?: string | null }> }>;
+      listComments: (parameters: Record<string, unknown>) => Promise<{ data: ReviewComment[] }>;
       updateComment: (parameters: Record<string, unknown>) => Promise<unknown>;
       createComment: (parameters: Record<string, unknown>) => Promise<unknown>;
     };
@@ -347,9 +394,26 @@ export async function postReviewWithOctokit(octokit: PostOctokit, input: PostRev
     issue_number: input.prNumber,
     per_page: 100,
   });
-  const plan = planUpsert(comments);
-  const body = buildUpsertBody(input.output, input.omittedFindings ?? 0, plan.round, input.headSha);
-  if (plan.action === "update") {
+  // WF-003 / qc2 F-002 recovery: a PATCH that dies between the scan and
+  // the write must not bubble into a queue retry. 404 = the marker was
+  // deleted mid-flight; 403 = the marker belongs to another author (only
+  // bot-authored comments are matched, but another app's bot can still
+  // plant one). Both are treated as a MISS: re-plan with that comment
+  // excluded — the next bot marker wins, else a fresh round=1 is created.
+  // Each replan permanently excludes one id, so the loop always terminates.
+  const dead = new Set<number>();
+  for (;;) {
+    const plan = planUpsert(comments, dead);
+    const body = buildUpsertBody(input.output, input.omittedFindings ?? 0, plan.round, input.headSha);
+    if (plan.action === "create") {
+      await issues.createComment({
+        owner: input.owner,
+        repo: input.repo,
+        issue_number: input.prNumber,
+        body,
+      });
+      return;
+    }
     try {
       await issues.updateComment({
         owner: input.owner,
@@ -357,35 +421,18 @@ export async function postReviewWithOctokit(octokit: PostOctokit, input: PostRev
         comment_id: plan.commentId,
         body,
       });
+      return;
     } catch (err) {
-      // WF-003 soft recovery: between listComments and updateComment the
-      // marker can be deleted by a human or another bot — the PATCH then
-      // 404s. The marker is gone, so POST a fresh round=1 comment (new
-      // marker) instead of letting the error bubble into a queue retry
-      // that would re-create round=1 anyway but only AFTER the retry
-      // delay. The round counter legitimately resets across the gap —
-      // the deleted comment no longer exists to chain from.
       // A RequestError from octokit carries `.status` (duck-typed so the
-      // mock-octokit tests can reject with a plain { status: 404 }).
-      if (typeof err === "object" && err !== null && (err as { status?: unknown }).status === 404) {
-        await issues.createComment({
-          owner: input.owner,
-          repo: input.repo,
-          issue_number: input.prNumber,
-          body: buildUpsertBody(input.output, input.omittedFindings ?? 0, 1, input.headSha),
-        });
-        return;
+      // mock-octokit tests can reject with a plain { status: N }).
+      const status = typeof err === "object" && err !== null ? (err as { status?: unknown }).status : undefined;
+      if (status === 404 || status === 403) {
+        dead.add(plan.commentId);
+        continue;
       }
       throw err;
     }
-    return;
   }
-  await issues.createComment({
-    owner: input.owner,
-    repo: input.repo,
-    issue_number: input.prNumber,
-    body,
-  });
 }
 
 /**

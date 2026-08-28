@@ -6,13 +6,15 @@
  * The interpolated fields (owner/repo/pr number/clone dir) come from the
  * verified webhook payload, not from untrusted free text.
  *
- * Every payload-derived field is validated against a strict allowlist and
- * single-quoted before interpolation (plan QC 06 fix round 1 / qc2 F-001):
- * owner/repo are GitHub name chars ([A-Za-z0-9._-]), prNumber is a positive
- * integer, clone/diff/runner paths are fixed in-image constants. Anything
- * else fails closed with a descriptive error BEFORE a shell string is built
- * — a metacharacter (`;`, space, backtick, `$(...)`, `'`) can never reach
- * `sh -c`.
+ * Payload-derived fields (owner/repo/prNumber) are validated against a
+ * strict allowlist and single-quoted before interpolation (plan QC 06 fix
+ * round 1 / qc2 F-001): owner/repo are GitHub name chars
+ * ([A-Za-z0-9._-]), prNumber is a positive integer. The in-image path
+ * fields (clone/diff/runner/input) are NOT payload-derived — they are
+ * fixed constants supplied by the consumer (verified against qc2 F-006);
+ * they are still single-quoted. Anything else fails closed with a
+ * descriptive error BEFORE a shell string is built — a metacharacter
+ * (`;`, space, backtick, `$(...)`, `'`) can never reach `sh -c`.
  *
  * Primary diff path is `gh pr diff` (T1 falsified: GH_TOKEN env injection
  * works, non-empty diff, exit 0). The clone step exists so the in-image
@@ -27,6 +29,8 @@
  * rev-parse instead of drifting silently.
  */
 
+import type { ReviewLevel } from "../review/runtime";
+
 export type GitOpsInput = {
   owner: string;
   repo: string;
@@ -34,6 +38,10 @@ export type GitOpsInput = {
   cloneDir: string;
   diffPath: string;
   runnerPath: string;
+  /** Review tier for the runner CLI `--level` (port-validated upstream). */
+  level: ReviewLevel;
+  /** In-image path of the runner `--input` JSON file (reconFacts carrier). */
+  inputPath: string;
 };
 
 export type GitOpsCommands = {
@@ -43,7 +51,9 @@ export type GitOpsCommands = {
   checkedOutSha: string;
   /** Write the PR unified diff to diffPath via gh. */
   diff: string;
-  /** Run the in-image review runner against diffPath. */
+  /** Numstat of the PR diff — the runner's seat-partition universe. */
+  numstat: string;
+  /** Run the in-image review runner (`--level`/`--input` reconFacts JSON). */
   runner: string;
 };
 
@@ -106,17 +116,43 @@ export function diffCommand(owner: string, repo: string, prNumber: number, diffP
   return `gh pr diff '${prNumber}' --repo '${owner}/${repo}' > '${diffPath}'`;
 }
 
-/** Run the in-image review runner against the diff file (stdout = ReviewOutput JSON). */
-export function runnerCommand(runnerPath: string, diffPath: string): string {
-  return `bun run '${runnerPath}' --diff '${diffPath}'`;
+/**
+ * Numstat lines (`"<add>\t<del>\t<path>"`) of the PR diff without applying it
+ * (`git apply --numstat` reads a unified diff from any cwd). These lines are
+ * the runner's seat-partition universe (reconFacts convention, plan 07 T5).
+ */
+export function numstatCommand(diffPath: string): string {
+  return `git apply --numstat '${diffPath}'`;
 }
 
-/** All main-flow commands in execution order (clone → sha → diff → runner). */
+/**
+ * Write a JSON document to an in-image path (the runner `--input` file). The
+ * caller base64-encodes the content; `base64 -d` decodes it in-container, so
+ * arbitrary JSON (quotes, unicode, tabs, newlines) never touches shell
+ * interpolation. The base64 payload itself is allowlist-validated.
+ */
+export function writeJsonCommand(path: string, contentBase64: string): string {
+  assertShellSafe(contentBase64, /^[A-Za-z0-9+/]+={0,2}$/, "base64 content");
+  return `printf '%s' '${contentBase64}' | base64 -d > '${path}'`;
+}
+
+/**
+ * Run the in-image review runner on the runtime envelope path (plan 07 T5):
+ * `--level` is the review tier, `--input` the reconFacts JSON file. stdout
+ * carries ONLY the validated mstar.review/v1 envelope; exit 0 = success
+ * (there is no summary-degrade mode on this path).
+ */
+export function runnerCommand(runnerPath: string, level: ReviewLevel, inputPath: string): string {
+  return `bun run '${runnerPath}' --level '${level}' --input '${inputPath}'`;
+}
+
+/** Main-flow commands in execution order (clone → sha → diff → numstat → runner). */
 export function buildGitOpsCommands(input: GitOpsInput): GitOpsCommands {
   return {
     clone: cloneCommand(input.owner, input.repo, input.prNumber, input.cloneDir),
     checkedOutSha: checkedOutShaCommand(input.cloneDir),
     diff: diffCommand(input.owner, input.repo, input.prNumber, input.diffPath),
-    runner: runnerCommand(input.runnerPath, input.diffPath),
+    numstat: numstatCommand(input.diffPath),
+    runner: runnerCommand(input.runnerPath, input.level, input.inputPath),
   };
 }

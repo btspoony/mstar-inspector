@@ -1,11 +1,14 @@
 /**
- * Migration tests (plan 05 Task 1) — the DDL in `migrations/0001_reviews.sql`
- * is the single source of truth; these tests execute it verbatim through the
- * bun:sqlite test double and assert the schema contract:
+ * Migration tests (plan 05 Task 1 + plan 07 Task 4) — the DDL in
+ * `migrations/0001_reviews.sql` + `0002_mstar_review_v1.sql` is the single
+ * source of truth; these tests execute it verbatim through the bun:sqlite
+ * test double and assert the schema contract:
  *   - reviews / findings tables + indexes exist
  *   - UNIQUE (installation_id, owner, repo, pr_number, head_sha) rejects a
  *     second row for the same sha (authoritative dedup, must not weaken)
  *   - head_sha is NOT NULL — an empty sha cannot be inserted
+ *   - 0002 adds reviews.envelope: TEXT, nullable (M1 rows), CHECK
+ *     json_valid for v1 rows
  */
 import { describe, expect, test } from "bun:test";
 import { createTestD1 } from "./helpers";
@@ -55,6 +58,7 @@ describe("migrations/0001_reviews.sql", () => {
     expect("provider" in reviewCols).toBe(true);
     expect("skill_version" in reviewCols).toBe(true);
     expect("raw_output" in reviewCols).toBe(true);
+    expect("envelope" in reviewCols).toBe(true); // migration 0002
 
     const findings = db.raw.query("PRAGMA table_info(findings)").all() as Array<{ name: string; notnull: number; pk: number }>;
     const findingCols: Record<string, number> = Object.fromEntries(findings.map((c) => [c.name, c.notnull]));
@@ -117,5 +121,39 @@ describe("migrations/0001_reviews.sql", () => {
     await db.prepare("DELETE FROM reviews WHERE id = ?").bind(REVIEW.id).run();
     const remaining = db.raw.query("SELECT COUNT(*) AS n FROM findings").get() as { n: number };
     expect(remaining.n).toBe(0);
+  });
+});
+
+describe("migrations/0002_mstar_review_v1.sql", () => {
+  test("adds the envelope column to reviews (TEXT, nullable)", async () => {
+    const db = createTestD1();
+    // The M1-era insert path (no envelope) is unchanged by the ALTER, and a
+    // fresh row defaults to envelope NULL.
+    await insertReview(db);
+    const row = db.raw.query("SELECT envelope FROM reviews").get() as { envelope: string | null };
+    expect(row.envelope).toBeNull();
+  });
+
+  test("CHECK json_valid rejects a non-JSON envelope, NULL stays allowed (M1 rows)", async () => {
+    const db = createTestD1();
+    await insertReview(db);
+    await expect(
+      db.prepare("UPDATE reviews SET envelope = 'not json' WHERE id = ?").bind(REVIEW.id).run(),
+    ).rejects.toThrow(/CHECK constraint failed/);
+    // NULL envelope is legal — every M1-era row keeps envelope NULL.
+    await db.prepare("UPDATE reviews SET envelope = NULL WHERE id = ?").bind(REVIEW.id).run();
+    const row = db.raw.query("SELECT envelope FROM reviews").get() as { envelope: string | null };
+    expect(row.envelope).toBeNull();
+  });
+
+  test("accepts a valid JSON envelope (era marker for v1 rows)", async () => {
+    const db = createTestD1();
+    await insertReview(db);
+    await db
+      .prepare("UPDATE reviews SET envelope = ? WHERE id = ?")
+      .bind('{"schema":"mstar.review/v1"}', REVIEW.id)
+      .run();
+    const row = db.raw.query("SELECT envelope FROM reviews").get() as { envelope: string };
+    expect(JSON.parse(row.envelope)).toEqual({ schema: "mstar.review/v1" });
   });
 });

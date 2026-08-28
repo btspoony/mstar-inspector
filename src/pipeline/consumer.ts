@@ -1,16 +1,19 @@
 /**
  * Queue consumer — the review pipeline main flow (plan 06 Task 3).
  *
- * Flow (plan Tasks / compass S6): message → getSandbox (unique id per
+ * Flow (plan 07 Task 5 / compass S7): message → getSandbox (unique id per
  * attempt) → clone the PR head branch (git transport auth via scoped
  * extraheader env) → `git rev-parse HEAD` for the AUTHORITATIVE sha →
- * dedup by that sha (hit → ack) → diff → exec the in-image runner
- * (env-injected GH_TOKEN/ARK_API_KEY/PI_CODING_AGENT_DIR/
- * HARNESS_PLUGIN_ROOT) → parseReviewOutput → post the overall Review
- * comment FIRST → insertReview (duplicate → ack) → KV completion state →
- * finally destroy. Any step throwing → structured log + rethrow (queue
- * retry → DLQ). A runner result that is not the structured main path
- * (summary degrade, Clarify #9.5) is treated as a failure: no post, no
+ * dedup by that sha (hit → ack) → diff → numstat (the seat-partition
+ * universe) → write the runner `--input` JSON (reconFacts) → exec the
+ * in-image runner `--level <quick|default>` (env-injected
+ * GH_TOKEN/ARK_API_KEY/PI_CODING_AGENT_DIR/HARNESS_PLUGIN_ROOT) → parse
+ * the mstar.review/v1 envelope → post the overall review comment FIRST →
+ * store.put (idempotent — the UNIQUE first-written row wins) → KV
+ * completion state → finally destroy. Any step throwing → structured log
+ * + rethrow (queue retry → DLQ). The runtime runner has NO
+ * summary-degrade path: exit 0 means stdout is the engine-validated
+ * envelope; a non-zero exit or a parse/validate failure is no post, no
  * insert, structured log, rethrow. The in-flight guard is the ONE typed
  * exception (bugbot BB-3): guard-held returns a distinct outcome, not a
  * throw — the consumer schedules a per-message delayed retry
@@ -28,18 +31,21 @@
  *
  * Module boundary (compass contracts A): this is the ONLY legal edge from
  * worker → pipeline (worker/index.ts queue wiring). It imports contracts/
- * (payload + idempotency key), review/schema (pure zod), store/reviews (05),
- * and the pipeline modules — never src/worker/**.
+ * (payload + idempotency key), review/schema (pure zod) + review/runtime
+ * (pure port types/constants — dual-face, zero omp SDK),
+ * store/artifact-store (07 D1 ArtifactStore), and the pipeline modules —
+ * never src/worker/**.
  */
 
 import type { D1Database, KVNamespace, Message, MessageBatch } from "@cloudflare/workers-types";
 import type { ReviewJobPayload } from "../contracts/review-job";
 import { idemKey, IDEMPOTENCY_SECONDS, type IdempotencyKey } from "../contracts/idem";
-import { parseReviewOutput, capFindings } from "../review/schema";
-import { redactReviewOutput, redactSecrets } from "./redact";
-import { createReviewStore, type ReviewStore } from "../store/reviews";
+import { parseReviewOutput, capFindings, clampFindingSizes } from "../review/schema";
+import { isReviewLevel, REVIEW_SEATS, type ReviewLevel } from "../review/runtime";
+import { redactReviewOutput } from "./redact";
+import { createArtifactStore, type D1ArtifactStore } from "../store/artifact-store";
 import { getSandbox, type ReviewSandbox } from "./sandbox";
-import { buildGitOpsCommands } from "./gitops";
+import { buildGitOpsCommands, writeJsonCommand } from "./gitops";
 import { createReviewCommenter, type ReviewCommenter } from "./comment";
 import { pickProviderKeys } from "./providers";
 
@@ -58,6 +64,14 @@ export type PipelineEnv = {
    * (ark-plan/deepseek-v4-flash, no fallback chain).
    */
   OMP_REVIEW_MODEL?: string;
+  /**
+   * Review tier for the in-image runner (plan 07 AC-S7-level — quick and
+   * default configurable): "quick" (1 seat) or "default" (2 seats, the
+   * harness no-flag landing tier). Unset/empty → "default". Any other
+   * value (incl. "deep", not delivered this iteration) fails the review
+   * fail-loud — the port never silently downgrades.
+   */
+  REVIEW_LEVEL?: string;
   /**
    * omp built-in provider API keys (bugbot BB-2): set on the deployed Worker
    * with `bun run keys` → `wrangler secret put` (scripts/provider-keys.ts,
@@ -88,6 +102,7 @@ export type PipelineEnv = {
 /** In-image paths (Dockerfile v2 / T2 smoke — single source of truth). */
 const CLONE_DIR = "/workspace/repo";
 const DIFF_PATH = "/workspace/pr.diff";
+const RUNNER_INPUT_PATH = "/workspace/review-input.json";
 const RUNNER_PATH = "/opt/runner/src/review/runner.ts";
 const HARNESS_ROOT = "/opt/mstar-harness";
 const OMP_AGENT_DIR = "/opt/omp-agent";
@@ -95,19 +110,10 @@ const OMP_AGENT_DIR = "/opt/omp-agent";
 // Per-call exec bounds (ms) — every sandbox exec carries an explicit timeout
 // so a hung gh/git/model call fails deterministically instead of silently
 // eating a container (plan QC 06 fix round 1 / qc3 F-001).
-/** gh/git steps (clone, rev-parse, diff) — measured ~2.6s, 2min is generous. */
+/** gh/git steps (clone, rev-parse, diff, numstat, runner-input write) — measured ~2.6s total, 2min each is generous. */
 const EXEC_TIMEOUT_GIT_MS = 120_000;
 /** In-image runner (real model call, measured ~52s) — 10min ceiling. */
 const EXEC_TIMEOUT_RUNNER_MS = 600_000;
-
-/**
- * Runner stderr marker for the structured main path (src/review/run.ts prints
- * `review mode: ${mode}` to stderr; stdout carries only the ReviewOutput JSON
- * in BOTH modes). Clarify #9.5: a summary degrade must not count as a
- * successful e2e — the consumer refuses post/insert unless this marker is
- * present, and rethrows into retry/DLQ.
- */
-const STRUCTURED_MODE_MARKER = "review mode: structured";
 
 /** Structured log fields: seven event fields + sandbox id + idempotency key. */
 export type ConsumerLogFields = {
@@ -140,13 +146,18 @@ export const defaultConsumerLog: ConsumerLog = {
 // ---------------------------------------------------------------------------
 
 /**
- * Guard TTL (seconds): must exceed the max review wall-clock — the runner
- * step (600s) plus the three git steps (clone / rev-parse / diff, 120s each)
- * plus slack — so the guard can never expire mid-review and unblock a
- * concurrent duplicate. KV expirationTtl is in seconds.
+ * Guard TTL (seconds): must exceed the max review wall-clock — ALL FIVE
+ * git-timed steps (clone / rev-parse / diff / numstat / runner-input write,
+ * 120s each — numstat + the input write were added by plan 07 without
+ * recomputing this, qc3 F-301) plus the runner step (600s) plus slack for
+ * the untimed steps (token mint, sandbox create, comment post, KV/D1
+ * puts) — so the guard can never expire mid-review and unblock a
+ * concurrent duplicate. KV expirationTtl is in seconds. Pinned exactly by
+ * consumer.test.ts ("REVIEW_GUARD_TTL_SECONDS covers the full step-budget
+ * arithmetic") so a future step addition re-breaks loudly.
  */
 export const REVIEW_GUARD_TTL_SECONDS = Math.ceil(
-  (EXEC_TIMEOUT_RUNNER_MS + 3 * EXEC_TIMEOUT_GIT_MS + 60_000) / 1000,
+  (EXEC_TIMEOUT_RUNNER_MS + 5 * EXEC_TIMEOUT_GIT_MS + 120_000) / 1000,
 );
 
 /**
@@ -213,7 +224,7 @@ async function releaseReviewGuard(
 /**
  * Guard-held backoff schedule (seconds), indexed by message.attempts (1-based
  * — the first delivery is attempt 1). 60s → 120s → 240s, all below
- * REVIEW_GUARD_TTL_SECONDS (the constant above, ~17min) so the held guard
+ * REVIEW_GUARD_TTL_SECONDS (the constant above, ~22min) so the held guard
  * can never expire mid-backoff into a duplicate race. Attempts past the
  * schedule's end have consumed the queue's max_retries and must be acked, not
  * retried (a further retry() would land the job on the DLQ).
@@ -260,7 +271,7 @@ function handleGuardHeld(message: Message<ReviewJobPayload>, deps: ProcessDeps):
 
 type ProcessDeps = {
   env: PipelineEnv;
-  store: ReviewStore;
+  store: D1ArtifactStore;
   commenter: ReviewCommenter;
   log: ConsumerLog;
   getSandbox: (binding: unknown, id: string) => Promise<ReviewSandbox>;
@@ -280,7 +291,38 @@ function toBaseFields(payload: ReviewJobPayload): ConsumerLogFields {
 }
 
 /**
- * Build the in-image runner exec env (step 6): the provider key + harness
+ * Resolve the review tier from PipelineEnv.REVIEW_LEVEL (plan 07
+ * AC-S7-level). Unset/empty → "default" (the harness no-flag landing tier).
+ * Anything else throws — the port rejects unknown levels fail-loud and never
+ * silently downgrades (spec § 档位; "deep" is a roadmap item, not a tier
+ * this build delivers).
+ */
+export function resolveReviewLevel(value: string | undefined): ReviewLevel {
+  if (value === undefined || value === "") return "default";
+  if (isReviewLevel(value)) return value;
+  throw new Error(
+    `invalid REVIEW_LEVEL ${JSON.stringify(value)} — expected one of: ${Object.keys(REVIEW_SEATS).join(", ")}`,
+  );
+}
+
+/**
+ * Base64-encode UTF-8 text for the in-image JSON write step (workerd-safe).
+ * Byte→char conversion is CHUNKED (qc3 F-303): a plain per-byte `+=` loop
+ * is O(n²) and this sits in the worker hot path; 0x8000 chars per
+ * `String.fromCharCode` call stays far below the engine arg-count cliff.
+ */
+function toBase64Utf8(text: string): string {
+  const bytes = new TextEncoder().encode(text);
+  const CHUNK = 0x8000;
+  let binary = "";
+  for (let i = 0; i < bytes.length; i += CHUNK) {
+    binary += String.fromCharCode(...bytes.subarray(i, i + CHUNK));
+  }
+  return btoa(binary);
+}
+
+/**
+ * Build the in-image runner exec env (step 8): the provider key + harness
  * paths (compass D — secrets never baked into the image), the OMP_REVIEW_MODEL
  * chain when set (bugbot BB-1), and every known provider key that is
  * present-and-non-empty on the Worker env (bugbot BB-2). Forwarding is an
@@ -348,7 +390,7 @@ export function createReviewConsumer(
 ): (batch: MessageBatch<ReviewJobPayload>) => Promise<void> {
   const deps: ProcessDeps = {
     env,
-    store: overrides.store ?? createReviewStore(env.DB),
+    store: overrides.store ?? createArtifactStore(env.DB),
     commenter: overrides.commenter ?? createReviewCommenter(env),
     getSandbox: overrides.getSandbox ?? ((binding, id) => getSandbox(binding, id)),
     log,
@@ -387,6 +429,10 @@ async function processMessage(payload: ReviewJobPayload, deps: ProcessDeps): Pro
   let guardHeld = false;
 
   try {
+    // Review tier (AC-S7-level): resolved BEFORE any sandbox/KV step so a
+    // misconfigured REVIEW_LEVEL fails loud (structured log + rethrow)
+    // without touching the in-flight guard.
+    const level = resolveReviewLevel(deps.env.REVIEW_LEVEL);
     // 0. In-flight guard (WF-002 / bugbot BB-3): when another review is
     // already running for this PR, return the DISTINCT guard-held outcome —
     // NOT a throw. The consumer schedules a per-message delayed retry
@@ -410,6 +456,8 @@ async function processMessage(payload: ReviewJobPayload, deps: ProcessDeps): Pro
       cloneDir: CLONE_DIR,
       diffPath: DIFF_PATH,
       runnerPath: RUNNER_PATH,
+      level,
+      inputPath: RUNNER_INPUT_PATH,
     });
 
     // 2. Clone the PR head branch. Git transport auth via scoped extraheader
@@ -478,10 +526,45 @@ async function processMessage(payload: ReviewJobPayload, deps: ProcessDeps): Pro
       throw new Error(`diff failed: exit ${diff.exitCode}, stdout ${diff.stdout.length}B`);
     }
 
-    // 6. In-image runner: cwd = clone dir; provider key + harness paths +
+    // 6. Numstat of the PR diff — `git apply --numstat` reads the unified
+    // diff without applying it. The lines ("<add>\t<del>\t<path>") are the
+    // runner's seat-partition universe (reconFacts convention, Task 2 port).
+    const numstat = await sandbox.exec(cmds.numstat, { timeout: EXEC_TIMEOUT_GIT_MS });
+    if (numstat.exitCode !== 0) {
+      throw new Error(`numstat failed: exit ${numstat.exitCode}, stdout ${numstat.stdout.length}B`);
+    }
+    const numstatLines = numstat.stdout
+      .split("\n")
+      .map((line) => line.trimEnd())
+      .filter((line) => line !== "");
+
+    // 7. Runner input JSON (reconFacts): `<owner>/<repo>#<pr>` and
+    // `head <sha>` fold into the envelope target INSIDE the runtime — the
+    // AUTHORITATIVE checkout sha is used so the ArtifactStore.put target
+    // cross-check agrees with the idempotency key — plus the numstat
+    // universe. base64-transported so the JSON never touches shell quoting;
+    // worktreePath = the clone (the seats' read cwd).
+    const reconFacts = [
+      `${payload.owner}/${payload.repo}#${payload.pr_number}`,
+      `head ${headSha}`,
+      ...numstatLines,
+    ];
+    const writeInput = await sandbox.exec(
+      writeJsonCommand(
+        RUNNER_INPUT_PATH,
+        toBase64Utf8(JSON.stringify({ worktreePath: CLONE_DIR, reconFacts })),
+      ),
+      { timeout: EXEC_TIMEOUT_GIT_MS },
+    );
+    if (writeInput.exitCode !== 0) {
+      throw new Error(`runner input write failed: exit ${writeInput.exitCode}`);
+    }
+
+    // 8. In-image runner: cwd = clone dir; provider key + harness paths +
     // OMP_REVIEW_MODEL chain + configured provider keys via exec env
     // (buildRunnerEnv — compass D, BB-1, BB-2; secrets never baked into the
-    // image, never in logs).
+    // image, never in logs). The runtime runner has NO summary-degrade path:
+    // exit 0 ⇒ stdout is the engine-validated mstar.review/v1 envelope.
     const run = await sandbox.exec(cmds.runner, {
       cwd: CLONE_DIR,
       env: buildRunnerEnv(deps.env),
@@ -491,32 +574,23 @@ async function processMessage(payload: ReviewJobPayload, deps: ProcessDeps): Pro
       throw new Error(`runner failed: exit ${run.exitCode}, stdout ${run.stdout.length}B`);
     }
 
-    // 7. Structured-mode gate (Clarify #9.5): the runner exits 0 for BOTH
-    // structured and summary modes (M0 CLI contract), so the mode lives on
-    // stderr (`review mode: ${mode}`). A summary degrade — or a missing
-    // marker — is NOT a successful e2e: no review, no insert, rethrow into
-    // retry/DLQ (M2 decides the GitHub-side posting policy for degrades).
-    if (!run.stderr.includes(STRUCTURED_MODE_MARKER)) {
-      throw new Error(
-        `runner did not emit the structured mode marker (${JSON.stringify(STRUCTURED_MODE_MARKER)}); stderr ${run.stderr.length}B`,
-      );
-    }
-
-    // 8. Parse: failure → no review, no insert (plan Notes for findings-schema).
+    // 9. Parse + validate the envelope (engine gate inside parseReviewOutput;
+    // mapping spec §4.2): failure → no review, no insert.
     const parsed = parseReviewOutput(run.stdout);
     if (!parsed.ok) {
       throw new Error(`parse failed: ${parsed.error}`);
     }
 
-    // 9. SEC-02 + B4 choke point: redact secret-shaped spans (PEM, tokens,
-    // keys, long hex) and cap findings to the Top-50 by severity BEFORE
-    // anything can reach the public review body or D1 raw_output. The SAME
-    // capped array feeds both the post and the insert (B4: 渲染与落库同一
-    // 裁剪数组).
-    const capped = capFindings(redactReviewOutput(parsed.output));
+    // 10. SEC-02 + B4 + size-budget choke point: redact secret-shaped spans
+    // (PEM, tokens, keys, long hex — F-001: every model-controlled field),
+    // clamp per-finding title/body to their budgets (qc2 F-003), then cap
+    // findings to the Top-50 by merge class BEFORE anything can reach the
+    // public review body or the D1 envelope. The SAME capped array feeds
+    // both the post and the put (B4: 渲染与落库同一裁剪数组).
+    const capped = capFindings(clampFindingSizes(redactReviewOutput(parsed.output)));
     const output = capped.output;
 
-    // 10. Upsert the overall review comment FIRST (the user-facing
+    // 11. Upsert the overall review comment FIRST (the user-facing
     // deliverable must not be lost to a later store failure), then persist.
     // T5: the commenter creates the app's marker comment (round=1) on a miss
     // and PATCHes it (round=N+1) on a hit — one comment per PR, never a new
@@ -531,8 +605,8 @@ async function processMessage(payload: ReviewJobPayload, deps: ProcessDeps): Pro
       omittedFindings: capped.omitted,
     });
 
-    // 11. KV done-state immediately after the comment lands, BEFORE the D1
-    // insert (B3): if the insert then fails, a retry hits the KV done key and
+    // 12. KV done-state immediately after the comment lands, BEFORE the D1
+    // insert (B3): if the put then fails, a retry hits the KV done key and
     // acks — the comment is already out and must never be re-posted.
     try {
       await deps.env.IDEMPOTENCY_KV.put(idemKey(key), "done", {
@@ -543,19 +617,20 @@ async function processMessage(payload: ReviewJobPayload, deps: ProcessDeps): Pro
       deps.log.warn(fields, `KV completion write failed: ${detail}`);
     }
 
-    // 12. Insert: duplicate (race lost) → ack; the review row already exists.
-    // An insert failure AFTER a successful post is a warn + ack, never a
-    // rethrow (B3): the comment is out, retrying would re-post it. The
-    // missing D1 row is acceptable (KV done marks completion) and alerted.
+    // 13. Persist via the D1 ArtifactStore (plan 07 Task 4): the parsed
+    // envelope is the write authority (put re-validates it as defense in
+    // depth; a UNIQUE race loss resolves idempotently — the first-written
+    // row wins and is never overwritten, so no raw_output twin exists). A
+    // put failure AFTER a successful post is a warn + ack, never a rethrow
+    // (B3): the comment is out, retrying would re-post it. The missing D1
+    // row is acceptable (KV done marks completion) and alerted.
     try {
-      const result = await deps.store.insertReview({
-        key,
-        output,
-        raw: redactSecrets(run.stdout),
+      await deps.store.put({
+        kind: "review",
+        key: idemKey(key),
+        schema: "mstar.review/v1",
+        payload: output,
       });
-      if (result.outcome === "duplicate") {
-        deps.log.info(fields, "duplicate insert — ack");
-      }
     } catch (err) {
       const detail = err instanceof Error ? err.message : String(err);
       deps.log.warn(
@@ -576,7 +651,7 @@ async function processMessage(payload: ReviewJobPayload, deps: ProcessDeps): Pro
     throw err;
   } finally {
     // Release the in-flight guard once the review settled (posted, KV done,
-    // insert attempted) OR failed — either way the next attempt may proceed.
+    // put attempted) OR failed — either way the next attempt may proceed.
     // releaseReviewGuard never throws (KV failure → warn; TTL expires it).
     if (guardHeld) {
       await releaseReviewGuard(deps.env.IDEMPOTENCY_KV, guardKey, fields ?? baseFields, deps.log);

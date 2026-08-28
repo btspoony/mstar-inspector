@@ -1,10 +1,12 @@
 /**
  * Secret redaction for model-produced text (Phase 5 B2 / SEC-02) — pure,
  * unit-tested. The review session can be prompt-injected into echoing
- * secrets (provider keys, installation tokens, PEM material) into
- * summary_md / finding bodies; everything that can reach the PUBLIC PR
- * review comment or D1 raw_output passes through here first (consumer choke
- * point, applied before postReview and insertReview).
+ * secrets (provider keys,
+ * installation tokens, PEM material) into ANY model-controlled envelope
+ * string — summary_md, finding title/body/category/file_path/fingerprint_hint,
+ * tally chatHeader. Everything that can reach the PUBLIC PR review comment
+ * or the D1 envelope passes through here first (consumer choke point,
+ * applied before postReview and insertReview).
  *
  * Redaction is intentionally conservative: an over-redacted phrase in a
  * finding body is acceptable; a leaked token is not.
@@ -48,14 +50,32 @@ export function redactSecrets(text: string): string {
   return out;
 }
 
-/** Redact summary_md and every finding body of a ReviewOutput. */
+/**
+ * Redact EVERY model-controlled string of a ReviewOutput (qc2 F-001): not
+ * only summary_md and the finding bodies, but also each finding's title,
+ * category, file_path, fingerprint_hint and the tally chatHeader — all of
+ * them reach the public review comment body and/or the D1 envelope, so all
+ * of them pass the SEC-02 choke point. Structural fields (mergeClass,
+ * verdict, line numbers, counts) are engine-vocabulary, not model text.
+ */
 export function redactReviewOutput(output: ReviewOutput): ReviewOutput {
   return {
     ...output,
     summary_md: redactSecrets(output.summary_md),
+    ...(output.tally === undefined
+      ? {}
+      : { tally: { ...output.tally, chatHeader: redactSecrets(output.tally.chatHeader) } }),
     findings: output.findings.map((finding) => ({
       ...finding,
+      title: redactSecrets(finding.title),
       body: redactSecrets(finding.body),
+      // Conditional spreads keep ABSENT optional fields absent (no
+      // `key: undefined` materialization on the envelope).
+      ...(finding.category === undefined ? {} : { category: redactSecrets(finding.category) }),
+      ...(finding.file_path == null ? {} : { file_path: redactSecrets(finding.file_path) }),
+      ...(finding.fingerprint_hint === undefined
+        ? {}
+        : { fingerprint_hint: redactSecrets(finding.fingerprint_hint) }),
     })),
   };
 }
