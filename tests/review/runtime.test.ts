@@ -77,7 +77,20 @@ describe("partitionSeats", () => {
     expect(second!.seat).toBe("lib");
   });
 
-  test("default: root files cluster under one bucket; ties go to group 1", () => {
+  test("default: equal-weight clusters — the greedy tie goes to group 0", () => {
+    // Equal lines → the cluster sort falls back to localeCompare (lib before
+    // src), then `groups[1] < groups[0]` is false on the tie, so the first
+    // cluster lands in changeset-1 (group 0) and the second in changeset-2.
+    const facts = [numstat(3, 0, "src/a.ts"), numstat(3, 0, "lib/b.ts")];
+    const [first, second] = partitionSeats(facts, "default");
+
+    expect(first!.seat).toBe("lib");
+    expect(first!.scope).toEqual(["lib/b.ts"]);
+    expect(second!.seat).toBe("src");
+    expect(second!.scope).toEqual(["src/a.ts"]);
+  });
+
+  test("default: root files cluster under one bucket; single (root) cluster → degenerate half split", () => {
     const facts = [numstat(3, 0, "README.md"), numstat(3, 0, "package.json")];
     const plans = partitionSeats(facts, "default");
 

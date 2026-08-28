@@ -9,8 +9,10 @@
  *   - parent session isolation: fetch.enabled=false, restrictToolNames +
  *     read/grep/glob, additionalExtensionPaths=[fixture root], explicit
  *     skills, retry fallback chain — and NO appendSystemPrompt;
- *   - seat-agent.md is copied into the throwaway session cwd at
- *     .omp/agents/mstar-review-seat.md (name/tools frontmatter, no spawns);
+ *   - the session cwd IS input.worktreePath (never a throwaway temp dir):
+ *     seat-agent.md is installed into the PR clone at
+ *     .omp/agents/mstar-review-seat.md (name/tools frontmatter, no spawns)
+ *     and removed again when the run ends;
  *   - quick → 1 seat, default → 2 seats, Promise.all fan-out, agent
  *     "mstar-review-seat", strict schema, model = selector chain;
  *   - seat assignment is engine prReviewSeatPrompt output (zero harness
@@ -20,16 +22,28 @@
  *   - level "deep" is rejected at the port.
  */
 
-import { afterEach, describe, expect, mock, test } from "bun:test";
-import { existsSync, readFileSync } from "node:fs";
+import { afterAll, afterEach, describe, expect, mock, test } from "bun:test";
+import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { PLUGIN_ROOT_FIXTURE } from "./plugin-root-fixture";
 
+/**
+ * Real temp dir standing in for the PR clone: installSeatAgent performs real
+ * writes under <worktree>/.omp/agents/, and the cwd regression assertions
+ * compare against this exact path.
+ */
+const TEST_WORKTREE = mkdtempSync(join(tmpdir(), "omp-review-worktree-"));
+
+afterAll(() => {
+  rmSync(TEST_WORKTREE, { recursive: true, force: true });
+});
+
 /** Captured createAgentSession options (one entry per runReview call). */
 const createdOptions: Record<string, unknown>[] = [];
 let seatResults: Array<{ error?: string; status?: string; data?: unknown; stderr?: string }> = [];
-/** Definition content snapshotted from the throwaway cwd at session creation. */
+/** Definition content snapshotted from the PR-clone cwd at session creation. */
 let installedSeatAgent: string | null = null;
 /** Count of fake session.dispose() calls since the last createAgentSession. */
 let disposeCalls = 0;
@@ -40,8 +54,8 @@ mock.module("@oh-my-pi/pi-coding-agent", () => ({
   createAgentSession: mock(async (options: Record<string, unknown>) => {
     createdOptions.push(options);
     disposeCalls = 0;
-    // The seat agent definition is copied into the throwaway cwd BEFORE
-    // session creation — snapshot it here, the cwd is rm'd afterwards.
+    // The seat agent definition is installed into the PR-clone cwd BEFORE
+    // session creation — snapshot it here, the runtime removes it afterwards.
     const installed = join(options.cwd as string, ".omp", "agents", "mstar-review-seat.md");
     installedSeatAgent = existsSync(installed) ? readFileSync(installed, "utf8") : null;
     return {
@@ -126,7 +140,7 @@ const TWO_CLUSTER_FACTS = [
 
 const BASE_INPUT = {
   level: "default" as const,
-  worktreePath: "/workspace/clone",
+  worktreePath: TEST_WORKTREE,
   reconFacts: TWO_CLUSTER_FACTS,
   modelSelectors: ["ark-plan/deepseek-v4-flash", "ark-plan/backup-model"],
 };
@@ -137,11 +151,11 @@ afterEach(() => {
   seatResults = [];
   installedSeatAgent = null;
   disposeCalls = 0;
+  delete process.env.OMP_REVIEW_MODEL;
 });
 
 describe("ompAgentRuntime.runReview — parent session", () => {
   test("keeps the M1 isolation set and drops appendSystemPrompt", async () => {
-    process.env.OMP_REVIEW_MODEL = "ark-plan/deepseek-v4-flash, ark-plan/backup-model";
     seatResults = [{ data: seatPayload() }, { data: seatPayload({ findings: [] }) }];
     await ompAgentRuntime.runReview(BASE_INPUT);
 
@@ -154,27 +168,88 @@ describe("ompAgentRuntime.runReview — parent session", () => {
       overrides: {
         "fetch.enabled": false,
         "retry.modelFallback": true,
-        "retry.fallbackChains": { default: ["ark-plan/deepseek-v4-flash", "ark-plan/backup-model"] },
+        "retry.fallbackChains": { default: [...BASE_INPUT.modelSelectors] },
       },
     });
+    expect(options.restrictToolNames).toBe(true);
     expect(options.toolNames).toEqual(["read", "grep", "glob"]);
+    expect(options.enableMCP).toBe(false);
+    expect(options.appendSystemPrompt).toBeUndefined();
     expect(options.additionalExtensionPaths).toEqual([PLUGIN_ROOT_FIXTURE]);
     expect(options.skills).toEqual([{ name: "mstar-audit" }, { name: "other-skill" }]);
-    // The OMP_REVIEW_MODEL chain rode in as the retry fallback chain above.
-    delete process.env.OMP_REVIEW_MODEL;
   });
 
-  test("copies seat-agent.md into the throwaway cwd at .omp/agents/", async () => {
+  test("session cwd is input.worktreePath, never a throwaway temp dir", async () => {
     seatResults = [{ data: seatPayload() }, { data: seatPayload({ findings: [] }) }];
     await ompAgentRuntime.runReview(BASE_INPUT);
 
-    // The definition was snapshotted from the throwaway cwd at session
-    // creation (the cwd itself is rm'd when the runtime resolves).
+    // Parent session cwd…
+    expect(createdOptions[0]!.cwd).toBe(TEST_WORKTREE);
+    // …and the ToolSession handed to every seat reports the same cwd — SDK
+    // buildExecutorOptions derives each seat's tool cwd from session.cwd, so
+    // relative read/grep/glob paths resolve against the PR clone.
+    expect(subagentRequests).toHaveLength(2);
+    for (const request of subagentRequests) {
+      // Our own shim proxy erases to unknown in the mock record; the SDK
+      // reads members by property access (the get trap), so probe the same
+      // way — `in` would hit the default has trap and miss the shim.
+      const seatSession = request.session as { cwd: unknown };
+      expect(seatSession.cwd).toBe(TEST_WORKTREE);
+    }
+  });
+
+  test("parent model + fallback chain come from input.modelSelectors, never re-parsed from env", async () => {
+    process.env.OMP_REVIEW_MODEL = "ark-plan/env-only-model";
+    seatResults = [{ data: seatPayload() }];
+    await ompAgentRuntime.runReview({ ...BASE_INPUT, level: "quick" });
+
+    // A conflicting env value must NOT leak into the session (split-brain
+    // guard): the runner parses OMP_REVIEW_MODEL once, into modelSelectors.
+    const options = createdOptions[0]!;
+    expect(options.modelPattern).toBe(BASE_INPUT.modelSelectors[0]);
+    expect(options.settings).toEqual({
+      kind: "isolated",
+      overrides: {
+        "fetch.enabled": false,
+        "retry.modelFallback": true,
+        "retry.fallbackChains": { default: [...BASE_INPUT.modelSelectors] },
+      },
+    });
+  });
+
+  test("empty modelSelectors falls back to the default model pattern", async () => {
+    seatResults = [{ data: seatPayload() }];
+    await ompAgentRuntime.runReview({ ...BASE_INPUT, level: "quick", modelSelectors: [] });
+
+    const options = createdOptions[0]!;
+    expect(options.modelPattern).toBe("ark-plan/deepseek-v4-flash");
+    expect(options.settings).toEqual({
+      kind: "isolated",
+      overrides: {
+        "fetch.enabled": false,
+        "retry.modelFallback": true,
+        "retry.fallbackChains": { default: [] },
+      },
+    });
+    // The seat receives the same (empty) chain verbatim.
+    expect(subagentRequests[0]!.model).toEqual([]);
+  });
+
+  test("installs seat-agent.md into the PR clone at .omp/agents/ and removes it afterwards", async () => {
+    seatResults = [{ data: seatPayload() }, { data: seatPayload({ findings: [] }) }];
+    await ompAgentRuntime.runReview(BASE_INPUT);
+
+    // The definition was snapshotted from the clone at session creation (the
+    // runtime removes it again when the run resolves).
     expect(installedSeatAgent).toBe(readFileSync(join(import.meta.dir, "../../src/review/seat-agent.md"), "utf8"));
     expect(installedSeatAgent).toContain("name: mstar-review-seat");
     expect(installedSeatAgent).toContain("tools: [read, grep, glob]");
     expect(installedSeatAgent).not.toMatch(/^spawns:/m);
-    // The throwaway cwd is disposed with the session.
+    // The clone is caller-owned: only the installed definition is cleaned up;
+    // the worktree itself must survive.
+    expect(existsSync(join(TEST_WORKTREE, ".omp", "agents", "mstar-review-seat.md"))).toBe(false);
+    expect(existsSync(join(TEST_WORKTREE, ".omp"))).toBe(false);
+    expect(existsSync(TEST_WORKTREE)).toBe(true);
     expect(disposeCalls).toBe(1);
   });
 });
@@ -205,7 +280,7 @@ describe("ompAgentRuntime.runReview — seat fan-out", () => {
     await ompAgentRuntime.runReview(BASE_INPUT);
 
     const first = subagentRequests[0]!.assignment as string;
-    expect(first).toContain("/workspace/clone");
+    expect(first).toContain(TEST_WORKTREE);
     expect(first).toContain(`${PLUGIN_ROOT_FIXTURE}/skills/mstar-audit`);
     // Per-seat recon facts: shared facts + the seat's file scope.
     expect(first).toContain("acme/widgets#7");

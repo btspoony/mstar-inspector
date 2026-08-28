@@ -10,8 +10,11 @@
  *      (Settings.isolated fetch.enabled=false, restrictToolNames + read/grep/
  *      glob, additionalExtensionPaths=[HARNESS_PLUGIN_ROOT], autoApprove),
  *      minus appendSystemPrompt; the seat agent definition (./seat-agent.md)
- *      is copied into the throwaway session cwd at .omp/agents/ so omp's
- *      project-scope agent discovery finds it.
+ *      is copied into the PR clone (input.worktreePath) at .omp/agents/ so
+ *      omp's project-scope agent discovery finds it. The session cwd IS the
+ *      clone: SDK buildExecutorOptions derives every seat's tool cwd from
+ *      session.cwd, so relative read/grep/glob paths (reconFacts are
+ *      repo-relative) resolve against the review tree.
  *   2. Deterministic seat partition over reconFacts numstat lines (no LLM
  *      dispatch): quick = 1 seat (full diff), default = 2 seats clustered by
  *      top-level directory balanced on changed lines; degenerate inputs fall
@@ -39,8 +42,7 @@
  */
 
 import { existsSync } from "node:fs";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { mkdir, readFile, rm, rmdir, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import {
   createAgentSession,
@@ -94,7 +96,7 @@ export function resolveHarnessRoot(): string {
 /** Read-only tool whitelist (plan 02 Global Constraints — parent + seat). */
 export const REVIEW_TOOL_NAMES = ["read", "grep", "glob"] as const;
 
-/** Default model selector; override with the OMP_REVIEW_MODEL env var. */
+/** Default model selector; used when the caller passes an empty modelSelectors chain (the runner parses OMP_REVIEW_MODEL into modelSelectors). */
 const DEFAULT_MODEL_PATTERN = "ark-plan/deepseek-v4-flash";
 
 /**
@@ -136,7 +138,7 @@ export async function loadHarnessSkills(pluginRoot: string): Promise<Skill[]> {
  * `appendSystemPrompt` REMOVED (the seat prompts are engine-generated; the
  * parent never prompts a model). Everything else is the M1 isolation set:
  * in-memory session, read-only tool whitelist, no outbound fetch, local
- * plugin root, explicit skills, and the OMP_REVIEW_MODEL retry fallback chain
+ * plugin root, explicit skills, and the caller's model retry fallback chain
  * (the full selector list rides as retry.fallbackChains.default — the SDK
  * slices the chain after the active model, session/turn-recovery.ts:1455).
  */
@@ -173,8 +175,9 @@ export function buildSessionOptions(opts: {
  * getSessionFile / getSessionSpawns — tsc-verified against 18.0.4). Shim the
  * four members over a Proxy and delegate everything else, bound to the real
  * session so private internal state keeps working:
- *   - cwd = the throwaway session dir (drives .omp/agents discovery and the
- *     seat cwd);
+ *   - cwd = the PR clone (input.worktreePath) — drives .omp/agents
+ *     discovery and every seat's tool cwd (SDK buildExecutorOptions reads
+ *     `cwd: session.cwd`);
  *   - hasUI = false (headless container);
  *   - getSessionFile = () => null (in-memory session);
  *   - getSessionSpawns = () => null (spawn policy "*" — we pass `agent:`
@@ -336,7 +339,7 @@ export function partitionSeats(reconFacts: readonly string[], level: ReviewLevel
     { dirs: [] as string[], paths: [] as string[], lines: 0 },
   ];
   for (const [dir, cluster] of sorted) {
-    // Lightest group wins; ties go to group 1 (deterministic).
+    // Lightest group wins; ties go to group 0 (deterministic).
     const target = groups[1]!.lines < groups[0]!.lines ? groups[1]! : groups[0]!;
     target.dirs.push(dir);
     target.paths.push(...cluster.paths);
@@ -413,7 +416,7 @@ export function mergeSeatOutputs(outputs: readonly SeatOutput[]): {
   return { findings: [...findings.values()], unverifiedCount: unverified.size };
 }
 
-/** Copy the shipped seat-agent definition into the session cwd for omp discovery. */
+/** Install the shipped seat-agent definition into the PR clone (the session cwd) for omp discovery; runReview removes it again when the run ends. */
 async function installSeatAgent(cwd: string): Promise<void> {
   const definition = await readFile(join(import.meta.dir, "seat-agent.md"), "utf8");
   const agentsDir = join(cwd, ".omp", "agents");
@@ -436,21 +439,27 @@ export const ompAgentRuntime: AgentRuntime = {
 
     const pluginRoot = resolveHarnessRoot();
     const skills = await loadHarnessSkills(pluginRoot);
-    const cwd = await mkdtemp(join(tmpdir(), "omp-review-runtime-"));
+    // The session cwd IS the PR clone (spec § 席位 worktree = 该只读 clone).
+    // Seat read/grep/glob resolve relative paths against
+    // buildExecutorOptions' `cwd: session.cwd`, and omp agent discovery picks
+    // up the seat definition installed at <worktree>/.omp/agents/ (the clone
+    // is ephemeral, so installing there is fine — it is removed on exit).
+    const cwd = input.worktreePath;
+    const seatAgentPath = join(cwd, ".omp", "agents", "mstar-review-seat.md");
     let session: AgentSession | undefined;
     try {
       await installSeatAgent(cwd);
-      // OMP_REVIEW_MODEL is a comma-separated selector list — the first
-      // selector is the primary model; the full list rides as the session's
-      // retry.fallbackChains.default and is passed verbatim per seat.
-      const selectors = parseModelSelectors(Bun.env.OMP_REVIEW_MODEL);
+      // input.modelSelectors is the single model SSOT (the runner parses
+      // OMP_REVIEW_MODEL once) — the first selector is the parent's primary
+      // model, the full list rides as retry.fallbackChains.default and is
+      // passed verbatim per seat. Never re-parse env here (split-brain).
       const created = await createAgentSession(
         buildSessionOptions({
           cwd,
           pluginRoot,
           skills,
-          modelPattern: selectors[0] ?? DEFAULT_MODEL_PATTERN,
-          fallbackChain: selectors,
+          modelPattern: input.modelSelectors[0] ?? DEFAULT_MODEL_PATTERN,
+          fallbackChain: [...input.modelSelectors],
         }),
       );
       session = created.session;
@@ -497,7 +506,11 @@ export const ompAgentRuntime: AgentRuntime = {
           console.error("omp review runtime session dispose failed", error);
         }
       }
-      await rm(cwd, { recursive: true, force: true }).catch(() => {});
+      // Undo the seat-agent install; the clone itself is caller-owned and
+      // must survive (rmdir removes the dirs only if we left them empty).
+      await rm(seatAgentPath, { force: true }).catch(() => {});
+      await rmdir(join(cwd, ".omp", "agents")).catch(() => {});
+      await rmdir(join(cwd, ".omp")).catch(() => {});
     }
   },
 };
