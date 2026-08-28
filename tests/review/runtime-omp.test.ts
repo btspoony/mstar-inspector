@@ -27,6 +27,7 @@ import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
+import type { AgentRuntime } from "../../src/review/runtime";
 import { PLUGIN_ROOT_FIXTURE } from "./plugin-root-fixture";
 
 /**
@@ -109,7 +110,20 @@ mock.module("@oh-my-pi/pi-coding-agent/task/structured-subagent", () => ({
 // Dynamic import is REQUIRED here: mock.module must be registered before the
 // module under test evaluates its omp SDK imports, and static imports hoist
 // above the mock calls. (Bun mock.module + module-loading test boundary.)
-const { ompAgentRuntime } = await import("../../src/review/runtime-omp");
+//
+// The `?test=runtime-omp` query is REQUIRED as well: bun's mock.module
+// registry is process-global and leaks across test files in one `bun test`
+// run, keyed by resolved specifier. tests/review/runner.test.ts mocks this
+// very module ("../../src/review/runtime-omp"), and test-file execution order
+// is filesystem-dependent — Linux CI (bun 1.4.0) ran runner.test.ts first, so
+// this import bound runner's stub and every createAgentSession /
+// runStructuredSubagent assertion saw zero calls (13 failures). The query
+// suffix gives this file a distinct registry key: the REAL module always loads
+// here, while its own omp SDK imports still resolve through the mocks above.
+// The specifier goes through a const so tsc never resolves the query-suffixed
+// path (non-literal dynamic imports are untyped, hence the cast).
+const RUNTIME_OMP_SPEC = "../../src/review/runtime-omp.ts?test=runtime-omp";
+const { ompAgentRuntime } = (await import(RUNTIME_OMP_SPEC)) as { ompAgentRuntime: AgentRuntime };
 
 /** A valid strict seat payload the engine vocab accepts. */
 function seatPayload(overrides: Record<string, unknown> = {}): unknown {

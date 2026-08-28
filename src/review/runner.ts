@@ -26,7 +26,7 @@
  *   - ARK_API_KEY                                  (injected per exec by the consumer)
  */
 import { readFileSync } from "node:fs";
-import { isReviewLevel, REVIEW_SEATS, type AgentRuntimeRunInput } from "./runtime";
+import { isReviewLevel, REVIEW_SEATS, type AgentRuntime, type AgentRuntimeRunInput } from "./runtime";
 import { ompAgentRuntime, parseModelSelectors } from "./runtime-omp";
 
 const USAGE =
@@ -85,9 +85,10 @@ function parseRunnerInput(parsed: unknown): RunnerInputJson {
 /**
  * Run the CLI. Returns the process exit code; prints the mstar.review/v1
  * envelope JSON to stdout and diagnostics to stderr. Exported for
- * deterministic tests.
+ * deterministic tests, which inject a fake `runtime` (mock.module on this
+ * shared specifier is process-global and leaks across bun test files).
  */
-export async function main(argv: string[]): Promise<number> {
+export async function main(argv: string[], runtime: AgentRuntime = ompAgentRuntime): Promise<number> {
   let level: string;
   let inputPath: string;
   try {
@@ -120,7 +121,7 @@ export async function main(argv: string[]): Promise<number> {
   }
 
   try {
-    const envelope = await ompAgentRuntime.runReview(input);
+    const envelope = await runtime.runReview(input);
     // stdout carries ONLY the envelope JSON (plan Module contracts).
     console.log(JSON.stringify(envelope));
     return 0;

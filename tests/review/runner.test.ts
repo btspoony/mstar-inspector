@@ -1,8 +1,13 @@
 /**
  * Unit tests for the container review-runner entry (plan 07 Task 2).
  *
- * The runtime boundary (src/review/runtime-omp) is mocked so the tests are
- * deterministic. Contract under test:
+ * The AgentRuntime is INJECTED (main(argv, runtime)) so the tests are
+ * deterministic. mock.module on the shared "../../src/review/runtime-omp"
+ * specifier is deliberately avoided: bun's module-mock registry is
+ * process-global and leaks across test files in one `bun test` run, with a
+ * filesystem-dependent execution order — on Linux CI (bun 1.4.0) this stub
+ * leaked into runtime-omp.test.ts and shadowed the module under test there.
+ * Contract under test:
  *   - `--level <quick|default> --input <json-file>` → exit 0 and stdout is
  *     ONLY the mstar.review/v1 envelope JSON (no envelope wrapper, no logs);
  *   - usage errors (missing flags, unknown level) → exit 2, stdout empty;
@@ -17,30 +22,25 @@ import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
+import type { MstarReviewV1 } from "@mstar-harness/engine";
+import type { AgentRuntime, AgentRuntimeRunInput } from "../../src/review/runtime";
+import { main } from "../../src/review/runner";
+
 /** Envelope the fake runtime resolves with; overridden per test. */
 let fakeEnvelope: Record<string, unknown> | undefined;
 /** Error the fake runtime rejects with; takes precedence when set. */
 let runtimeError: Error | undefined;
 /** Captured runReview inputs. */
 const runInputs: unknown[] = [];
-/** Fake parseModelSelectors result (proves the env chain flows through). */
-let fakeSelectors: string[] = [];
 
-mock.module("../../src/review/runtime-omp", () => ({
-  ompAgentRuntime: {
-    runReview: mock(async (input: unknown) => {
-      runInputs.push(input);
-      if (runtimeError) throw runtimeError;
-      return fakeEnvelope;
-    }),
-  },
-  parseModelSelectors: mock(() => fakeSelectors),
-}));
-
-// Dynamic import is REQUIRED here: mock.module must be registered before the
-// runner module evaluates its runtime-omp import (hoisted static imports
-// would bind the real module). See bun mock.module semantics.
-const { main } = await import("../../src/review/runner");
+/** Injected AgentRuntime double: records inputs, then rejects or resolves. */
+const fakeRuntime: AgentRuntime = {
+  runReview: mock(async (input: AgentRuntimeRunInput): Promise<MstarReviewV1> => {
+    runInputs.push(input);
+    if (runtimeError) throw runtimeError;
+    return fakeEnvelope as MstarReviewV1;
+  }),
+};
 
 const ENVELOPE = {
   schema: "mstar.review/v1",
@@ -66,7 +66,7 @@ async function runCli(argv: string[]): Promise<{ code: number; stdout: string; s
   console.log = (...args: unknown[]) => logs.push(args.join(" "));
   console.error = (...args: unknown[]) => errors.push(args.join(" "));
   try {
-    const code = await main(argv);
+    const code = await main(argv, fakeRuntime);
     return { code, stdout: logs.join("\n"), stderr: errors.join("\n") };
   } finally {
     console.log = originalLog;
@@ -78,7 +78,7 @@ afterEach(() => {
   fakeEnvelope = ENVELOPE;
   runtimeError = undefined;
   runInputs.length = 0;
-  fakeSelectors = [];
+  delete process.env.OMP_REVIEW_MODEL;
 });
 
 describe("runner entry (src/review/runner.ts)", () => {
@@ -101,7 +101,9 @@ describe("runner entry (src/review/runner.ts)", () => {
   });
 
   test("defaults: worktreePath = cwd, reconFacts = [], model chain from env parsing", async () => {
-    fakeSelectors = ["ark-plan/deepseek-v4-flash", "ark-plan/backup"];
+    // Real parseModelSelectors wiring: the env chain flows verbatim into the
+    // runtime input (comma-separated, trimmed).
+    process.env.OMP_REVIEW_MODEL = "ark-plan/deepseek-v4-flash, ark-plan/backup";
     const inputPath = writeInput({});
     const { code } = await runCli(["--level", "default", "--input", inputPath]);
 
@@ -110,7 +112,7 @@ describe("runner entry (src/review/runner.ts)", () => {
       level: "default",
       worktreePath: process.cwd(),
       reconFacts: [],
-      modelSelectors: fakeSelectors,
+      modelSelectors: ["ark-plan/deepseek-v4-flash", "ark-plan/backup"],
     });
   });
 
