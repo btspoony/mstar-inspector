@@ -14,7 +14,9 @@
  *   must agree with the top-level verdict (consistency rule)
  * - title/body are required non-empty; category is a free string;
  *   file_path / line_start / line_end are optional and nullable
- * - unknown keys are stripped, not rejected
+ * - unknown keys are stripped, not rejected — EXCEPT a residual M1
+ *   `severity` key (top-level or per-finding), which is REJECTED with
+ *   `review.inspector-vocab` before zod can strip it
  * - fenced ```json / bare ``` blocks and first-{..last-} extraction both parse
  * - any failure returns { ok: false } and never throws
  */
@@ -112,6 +114,26 @@ describe("parseReviewOutput", () => {
   test("rejects a wrong schema literal", () => {
     const r = parseReviewOutput(JSON.stringify({ ...VALID, schema: "mstar.review/v2" }));
     expect(r.ok).toBe(false);
+  });
+  test("rejects a stray M1 severity key on the review document (never stripped)", () => {
+    const hybrid = { ...VALID, severity: "critical" };
+    const r = parseReviewOutput(JSON.stringify(hybrid));
+    expect(r.ok).toBe(false);
+    if (!r.ok) {
+      expect(r.error).toContain("review.inspector-vocab");
+    }
+  });
+
+  test("rejects a stray M1 severity key on a finding (never stripped)", () => {
+    const hybrid = {
+      ...VALID,
+      findings: [{ ...VALID.findings[0]!, severity: "warning" }],
+    };
+    const r = parseReviewOutput(JSON.stringify(hybrid));
+    expect(r.ok).toBe(false);
+    if (!r.ok) {
+      expect(r.error).toContain("review.inspector-vocab");
+    }
   });
 
   test("parses JSON inside a ```json fenced block", () => {

@@ -156,6 +156,37 @@ describe("createReviewStore().insertReview", () => {
     });
   });
 
+  test("a finding omitting category and location keys inserts with NULL columns (D1 rejects undefined)", async () => {
+    const db = createTestD1();
+    const store = createReviewStore(db);
+
+    const result = await store.insertReview(
+      insert({
+        output: output({
+          findings: [{ mergeClass: "must-fix", title: "No location", body: "b" }],
+        }),
+      }),
+    );
+
+    expect(result.outcome).toBe("inserted");
+    const row = db.raw.query("SELECT * FROM findings").get() as {
+      severity: string;
+      category: string | null;
+      file_path: string | null;
+      line_start: number | null;
+      line_end: number | null;
+      fingerprint: string | null;
+    };
+    expect(row).toMatchObject({
+      severity: "must-fix",
+      category: null,
+      file_path: null,
+      line_start: null,
+      line_end: null,
+      fingerprint: null,
+    });
+  });
+
   test("raw_output is truncated to 64KB of UTF-8 bytes", async () => {
     const db = createTestD1();
     const store = createReviewStore(db);

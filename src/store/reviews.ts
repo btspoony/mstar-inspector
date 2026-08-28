@@ -116,10 +116,13 @@ export function createReviewStore(db: D1Like): ReviewStore {
             // carry the mstar.review/v1 mergeClass in the legacy `severity`
             // column until Task 4's ArtifactStore replaces this store.
             finding.mergeClass,
-            finding.category,
-            finding.file_path,
-            finding.line_start,
-            finding.line_end,
+            // D1 .bind() rejects undefined; optional finding fields
+            // (envelope contract: category/location may be omitted) are
+            // coalesced to NULL.
+            finding.category ?? null,
+            finding.file_path ?? null,
+            finding.line_start ?? null,
+            finding.line_end ?? null,
             finding.title,
             finding.body,
             finding.fingerprint_hint ?? null,

@@ -13,10 +13,12 @@
  * The M1 inspector vocab (verdict comment|request_changes|approve, severity
  * critical|warning|suggestion|info) is rejected on the write path: an M1
  * document fails the required `schema: "mstar.review/v1"` literal and the
- * verdict/mergeClass enums. The engine gate additionally rejects a stray M1
- * `severity` KEY with `review.inspector-vocab` at persist/runtime; this zod
- * layer mirrors the value vocab and the envelope shape, not that key-level
- * check.
+ * verdict/mergeClass enums. A stray M1 `severity` KEY is REJECTED (never
+ * silently stripped) before zod: `validateMstarReviewV1` runs on the parsed
+ * JSON first (it fails findings[].severity with `review.inspector-vocab`),
+ * and the top-level stray key — the one position the engine does not check —
+ * is banned here with the same `review.inspector-vocab` code (mapping spec
+ * §4.2: parse/validate failure → no post, no insert).
  *
  * Unknown keys are stripped (zod default), required keys stay required, and
  * file_path / line_start / line_end are OPTIONAL and nullable (envelope
@@ -27,6 +29,7 @@
 import {
   MERGE_CLASSES,
   PR_VERDICTS,
+  validateMstarReviewV1,
   type MergeClass,
   type MstarReviewFinding,
   type MstarReviewV1,
@@ -151,10 +154,15 @@ function extractBraces(text: string): string | null {
  *
  * Algorithm (unchanged transport decoding): trim → JSON.parse whole → fall
  * back to the fenced ```json / ``` block → fall back to first `{` … last `}`
- * → zod. Fallback extraction only runs when JSON.parse throws; the FIRST
- * successful parse is zod-validated once and that result is returned — a
+ * → validate. Fallback extraction only runs when JSON.parse throws; the
+ * FIRST successful parse is validated once and that result is returned — a
  * parsed non-object root (e.g. an array) is rejected without inner-object
- * recovery. Any failure returns `{ ok: false, error }` and never throws. An
+ * recovery. Validation is engine-first (mapping spec §4.2): the parsed JSON
+ * goes through the engine `validateMstarReviewV1` gate BEFORE zod strips
+ * unknown keys, so a residual M1 `severity` key (top-level or per-finding)
+ * is rejected with `review.inspector-vocab` instead of being silently
+ * dropped; zod then narrows types (int line numbers, tally consistency).
+ * Any failure returns `{ ok: false, error }` and never throws. An
  * M1-shaped document (no `schema` literal, M1 verdict/severity vocab) fails
  * here — it is never posted or persisted.
  */
@@ -177,6 +185,28 @@ export function parseReviewOutput(
       parsed = JSON.parse(candidate);
     } catch {
       continue;
+    }
+    // Reject residual M1 vocab BEFORE zod strips unknown keys: a stray
+    // `severity` key must fail, never be silently dropped. The engine gate
+    // covers findings[].severity; the top-level stray key is the one
+    // position the engine does not check, so it is banned here with the
+    // same `review.inspector-vocab` code.
+    if (typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)) {
+      if ((parsed as Record<string, unknown>).severity !== undefined) {
+        return {
+          ok: false,
+          error:
+            'review.inspector-vocab: review document carries inspector M1 field "severity" - ' +
+            `harness merge classes are ${JSON.stringify(MERGE_CLASSES)}; use verdict + findings[].mergeClass`,
+        };
+      }
+    }
+    const gate = validateMstarReviewV1(parsed);
+    if (!gate.ok) {
+      return {
+        ok: false,
+        error: gate.violations.map((v) => `${v.code}: ${v.message}`).join("; "),
+      };
     }
     const result = outputSchema.safeParse(parsed);
     return result.success
