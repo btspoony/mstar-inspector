@@ -21,7 +21,7 @@
  *     (reconFacts) → runner `--level/--input` (env-injected secrets) →
  *     parse the mstar.review/v1 envelope → post FIRST → put → KV
  *     completion → destroy
- *   - REVIEW_LEVEL configurable (quick/default); invalid value fails loud
+ *   - REVIEW_LEVEL configurable (quick/default/deep); invalid value fails loud
  *     BEFORE any sandbox step (never a silent downgrade)
  *   - null payload sha → sha resolved from the checkout (no gh pr view)
  *   - parse failure → no post, no insert, rethrow, destroy
@@ -574,10 +574,29 @@ describe("createReviewConsumer", () => {
     expect(reviewCount(db)).toBe(1);
   });
 
-  test("invalid REVIEW_LEVEL (incl. 'deep' and Object.prototype keys) → fail-loud BEFORE any sandbox step (never a silent downgrade)", async () => {
-    // qc3 F-302: "toString"/"__proto__" pass `in REVIEW_SEATS` — only an
-    // own-key check rejects them at this first, pre-sandbox guard.
-    for (const level of ["deep", "toString", "constructor", "__proto__"]) {
+  test("REVIEW_LEVEL=deep → runner runs `--level 'deep'` forwarded unchanged (plan 09 T3 / AC-S9-trigger)", async () => {
+    reset();
+    runnerStdout = JSON.stringify(VALID_OUTPUT);
+    const db = createTestD1();
+    const consumer = createReviewConsumer(
+      makeEnv({ DB: db as never, REVIEW_LEVEL: "deep" }),
+      undefined,
+      testOverrides,
+    );
+
+    await consumer(makeBatch(makePayload()));
+
+    const runnerCall = sandboxCalls.find((c) => c.cmd.includes("--input"))!;
+    expect(runnerCall.cmd).toContain("--level 'deep'");
+    expect(reviewCount(db)).toBe(1);
+  });
+
+  test("invalid REVIEW_LEVEL (Object.prototype keys) → fail-loud BEFORE any sandbox step (never a silent downgrade)", async () => {
+    // qc3 F-302: "toString"/"__proto__" would pass an `in`-style guard — only
+    // REVIEW_LEVELS membership (isReviewLevel) rejects them at this first,
+    // pre-sandbox guard. "deep" is NOT here: it is a legal tier since plan 09
+    // T1 and is covered by the success test above.
+    for (const level of ["toString", "constructor", "__proto__"]) {
       reset();
       const db = createTestD1();
       const consumer = createReviewConsumer(

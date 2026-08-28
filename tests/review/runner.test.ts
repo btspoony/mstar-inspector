@@ -133,7 +133,7 @@ describe("runner entry (src/review/runner.ts)", () => {
     expect(runInputs).toHaveLength(0);
   });
 
-  test("--level deep parses and reaches the runtime (deep adapter lands in T2)", async () => {
+  test("--level deep parses and reaches the runtime — forwarded into runReview (plan 09 T3)", async () => {
     fakeEnvelope = ENVELOPE;
     const inputPath = writeInput({ worktreePath: "/workspace/clone" });
     const { code, stdout, stderr } = await runCli(["--level", "deep", "--input", inputPath]);
