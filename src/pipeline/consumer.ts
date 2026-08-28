@@ -114,8 +114,28 @@ const OMP_AGENT_DIR = "/opt/omp-agent";
 // eating a container (plan QC 06 fix round 1 / qc3 F-001).
 /** gh/git steps (clone, rev-parse, diff, numstat, runner-input write) — measured ~2.6s total, 2min each is generous. */
 const EXEC_TIMEOUT_GIT_MS = 120_000;
-/** In-image runner (real model call, measured ~52s) — 10min ceiling. */
-const EXEC_TIMEOUT_RUNNER_MS = 600_000;
+/**
+ * In-image runner budget per review level (ms). One Worker deployment = one
+ * REVIEW_LEVEL = one timeout table (spec d5-budget § Trigger): quick/default
+ * keep the frozen 10min ceiling (measured ~52s on a real model call); deep
+ * gets 30min so its three-phase parent-session run cannot false-timeout into
+ * the DLQ. Record<ReviewLevel, …> makes a future level widen fail at compile
+ * time, never silently fall back.
+ */
+const RUNNER_TIMEOUT_MS: Record<ReviewLevel, number> = {
+  quick: 600_000,
+  default: 600_000,
+  deep: 1_800_000,
+};
+
+/**
+ * Runner exec timeout for the job's review level (spec d5-budget L4 — the
+ * helper trio runnerTimeoutMs / reviewGuardTtlSeconds /
+ * guardRetryDelaysSeconds is the naming SSOT; no bare re-exported constants).
+ */
+export function runnerTimeoutMs(level: ReviewLevel): number {
+  return RUNNER_TIMEOUT_MS[level];
+}
 
 /** Structured log fields: seven event fields + sandbox id + idempotency key. */
 export type ConsumerLogFields = {
@@ -151,16 +171,17 @@ export const defaultConsumerLog: ConsumerLog = {
  * Guard TTL (seconds): must exceed the max review wall-clock — ALL FIVE
  * git-timed steps (clone / rev-parse / diff / numstat / runner-input write,
  * 120s each — numstat + the input write were added by plan 07 without
- * recomputing this, qc3 F-301) plus the runner step (600s) plus slack for
+ * recomputing this, qc3 F-301) plus the LEVEL's runner step
+ * (runnerTimeoutMs(level) — 600s quick/default, 1800s deep) plus slack for
  * the untimed steps (token mint, sandbox create, comment post, KV/D1
  * puts) — so the guard can never expire mid-review and unblock a
  * concurrent duplicate. KV expirationTtl is in seconds. Pinned exactly by
- * consumer.test.ts ("REVIEW_GUARD_TTL_SECONDS covers the full step-budget
- * arithmetic") so a future step addition re-breaks loudly.
+ * consumer.test.ts ("reviewGuardTtlSeconds covers the full step-budget
+ * arithmetic per level") so a future step addition re-breaks loudly.
  */
-export const REVIEW_GUARD_TTL_SECONDS = Math.ceil(
-  (EXEC_TIMEOUT_RUNNER_MS + 5 * EXEC_TIMEOUT_GIT_MS + 120_000) / 1000,
-);
+export function reviewGuardTtlSeconds(level: ReviewLevel): number {
+  return Math.ceil((runnerTimeoutMs(level) + 5 * EXEC_TIMEOUT_GIT_MS + 120_000) / 1000);
+}
 
 /**
  * In-flight guard key: `inflight:{installation_id}:{owner}/{repo}:{pr_number}`.
@@ -194,12 +215,13 @@ export function reviewGuardKey(key: {
 async function acquireReviewGuard(
   kv: KVNamespace,
   key: string,
+  level: ReviewLevel,
   fields: ConsumerLogFields,
   log: ConsumerLog,
 ): Promise<boolean> {
   try {
     if ((await kv.get(key)) !== null) return false;
-    await kv.put(key, "inflight", { expirationTtl: REVIEW_GUARD_TTL_SECONDS });
+    await kv.put(key, "inflight", { expirationTtl: reviewGuardTtlSeconds(level) });
     return true;
   } catch (err) {
     const detail = err instanceof Error ? err.message : String(err);
@@ -212,6 +234,7 @@ async function acquireReviewGuard(
 async function releaseReviewGuard(
   kv: KVNamespace,
   key: string,
+  level: ReviewLevel,
   fields: ConsumerLogFields,
   log: ConsumerLog,
 ): Promise<void> {
@@ -219,19 +242,28 @@ async function releaseReviewGuard(
     await kv.delete(key);
   } catch (err) {
     const detail = err instanceof Error ? err.message : String(err);
-    log.warn(fields, `in-flight guard release failed — guard expires by TTL (${REVIEW_GUARD_TTL_SECONDS}s): ${detail}`);
+    log.warn(fields, `in-flight guard release failed — guard expires by TTL (${reviewGuardTtlSeconds(level)}s): ${detail}`);
   }
 }
 
 /**
  * Guard-held backoff schedule (seconds), indexed by message.attempts (1-based
- * — the first delivery is attempt 1). 60s → 120s → 240s, all below
- * REVIEW_GUARD_TTL_SECONDS (the constant above, ~22min) so the held guard
+ * — the first delivery is attempt 1). quick/default: 60s → 120s → 240s; deep: 180s → 360s → 720s
+ * — every entry below the LEVEL's guard TTL (1320s / 2520s) so the held guard
  * can never expire mid-backoff into a duplicate race. Attempts past the
  * schedule's end have consumed the queue's max_retries and must be acked, not
  * retried (a further retry() would land the job on the DLQ).
  */
-export const GUARD_RETRY_DELAYS_SECONDS = [60, 120, 240] as const;
+const GUARD_RETRY_DELAYS_SECONDS: Record<ReviewLevel, readonly [number, number, number]> = {
+  quick: [60, 120, 240],
+  default: [60, 120, 240],
+  deep: [180, 360, 720],
+};
+
+/** Guard-held backoff schedule for the job's review level (spec d5-budget L4). */
+export function guardRetryDelaysSeconds(level: ReviewLevel): readonly number[] {
+  return GUARD_RETRY_DELAYS_SECONDS[level];
+}
 
 /**
  * Outcome of one message pass (bugbot BB-3). The in-flight guard is a
@@ -255,7 +287,12 @@ export type ProcessOutcome = { kind: "ok" } | { kind: "guard-held" };
  */
 function handleGuardHeld(message: Message<ReviewJobPayload>, deps: ProcessDeps): void {
   const fields = toBaseFields(message.body);
-  const delaySeconds = GUARD_RETRY_DELAYS_SECONDS[message.attempts - 1];
+  // REVIEW_LEVEL is a Worker-level setting (one deployment = one level), and
+  // processMessage already resolved it before touching the guard — re-resolving
+  // here cannot throw on the guard-held path.
+  const level = resolveReviewLevel(deps.env.REVIEW_LEVEL);
+  const delays = guardRetryDelaysSeconds(level);
+  const delaySeconds = delays[message.attempts - 1];
   if (delaySeconds !== undefined) {
     deps.log.info(
       fields,
@@ -265,7 +302,7 @@ function handleGuardHeld(message: Message<ReviewJobPayload>, deps: ProcessDeps):
   } else {
     deps.log.warn(
       fields,
-      `review still in flight after ${GUARD_RETRY_DELAYS_SECONDS.length} delayed retries (attempt ${message.attempts}) — acking, no DLQ (guard-held is not an error; the next event for the PR re-reviews)`,
+      `review still in flight after ${delays.length} delayed retries (attempt ${message.attempts}) — acking, no DLQ (guard-held is not an error; the next event for the PR re-reviews)`,
     );
     message.ack();
   }
@@ -430,20 +467,25 @@ async function processMessage(payload: ReviewJobPayload, deps: ProcessDeps): Pro
     pr_number: payload.pr_number,
   });
   let guardHeld = false;
+  // Set once REVIEW_LEVEL resolves inside the try (resolution must stay in
+  // the try so an invalid value gets the structured error log); the finally
+  // guard release needs the same level's TTL. guardHeld ⇒ level is set
+  // (resolution precedes acquisition).
+  let level: ReviewLevel | undefined;
 
   try {
     // Review tier (AC-S7-level): resolved BEFORE any sandbox/KV step so a
     // misconfigured REVIEW_LEVEL fails loud (structured log + rethrow)
     // without touching the in-flight guard.
-    const level = resolveReviewLevel(deps.env.REVIEW_LEVEL);
+    level = resolveReviewLevel(deps.env.REVIEW_LEVEL);
     // 0. In-flight guard (WF-002 / bugbot BB-3): when another review is
     // already running for this PR, return the DISTINCT guard-held outcome —
     // NOT a throw. The consumer schedules a per-message delayed retry
-    // (60s/120s/240s), so the later attempt lands on the update path
+    // (per level: 60/120/240s quick/default, 180/360/720s deep), so the later attempt lands on the update path
     // (round=N+1) once the earlier attempt has posted its marker; after the
     // final delayed attempt the job is acked with a warning — guard-held is
     // not an error state and never goes to the DLQ.
-    if (!(await acquireReviewGuard(deps.env.IDEMPOTENCY_KV, guardKey, baseFields, deps.log))) {
+    if (!(await acquireReviewGuard(deps.env.IDEMPOTENCY_KV, guardKey, level, baseFields, deps.log))) {
       return { kind: "guard-held" };
     }
     guardHeld = true;
@@ -571,7 +613,7 @@ async function processMessage(payload: ReviewJobPayload, deps: ProcessDeps): Pro
     const run = await sandbox.exec(cmds.runner, {
       cwd: CLONE_DIR,
       env: buildRunnerEnv(deps.env),
-      timeout: EXEC_TIMEOUT_RUNNER_MS,
+      timeout: runnerTimeoutMs(level),
     });
     if (run.exitCode !== 0) {
       throw new Error(`runner failed: exit ${run.exitCode}, stdout ${run.stdout.length}B`);
@@ -656,8 +698,8 @@ async function processMessage(payload: ReviewJobPayload, deps: ProcessDeps): Pro
     // Release the in-flight guard once the review settled (posted, KV done,
     // put attempted) OR failed — either way the next attempt may proceed.
     // releaseReviewGuard never throws (KV failure → warn; TTL expires it).
-    if (guardHeld) {
-      await releaseReviewGuard(deps.env.IDEMPOTENCY_KV, guardKey, fields ?? baseFields, deps.log);
+    if (guardHeld && level !== undefined) {
+      await releaseReviewGuard(deps.env.IDEMPOTENCY_KV, guardKey, level, fields ?? baseFields, deps.log);
     }
     if (sandbox !== null) {
       try {
