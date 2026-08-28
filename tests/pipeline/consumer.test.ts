@@ -34,11 +34,12 @@ import { createTestD1 } from "../store/helpers";
 import type { ReviewCommenter } from "../../src/pipeline/comment";
 
 const VALID_OUTPUT: ReviewOutput = {
-  verdict: "request_changes",
+  schema: "mstar.review/v1",
+  verdict: "needs fixes",
   summary_md: "Two issues found in the diff.",
   findings: [
     {
-      severity: "warning",
+      mergeClass: "should-fix",
       category: "logic",
       file_path: "src/auth.ts",
       line_start: 21,
@@ -330,10 +331,9 @@ describe("createReviewConsumer", () => {
     expect(reviewCount(db)).toBe(1);
     const row = db.raw.query("SELECT * FROM reviews").get() as { head_sha: string; verdict: string };
     expect(row.head_sha).toBe(SHA);
-    expect(row.verdict).toBe("request_changes");
+    expect(row.verdict).toBe("needs fixes");
     const findings = db.raw.query("SELECT COUNT(*) AS n FROM findings").get() as { n: number };
     expect(findings.n).toBe(1);
-
     // KV completion state written with the idem key + TTL.
     expect(kvPuts).toEqual([
       {
@@ -462,7 +462,8 @@ describe("createReviewConsumer", () => {
   test("summary degrade (non-structured) → no post, no insert, rethrow, destroy", async () => {
     reset();
     runnerStdout = JSON.stringify({
-      verdict: "comment",
+      schema: "mstar.review/v1",
+      verdict: "needs fixes",
       summary_md: "raw model text that could not be parsed",
       findings: [],
     });
@@ -551,11 +552,12 @@ describe("createReviewConsumer", () => {
   test("model output containing secrets is redacted before post and insert (B2/SEC-02)", async () => {
     reset();
     const leaked: ReviewOutput = {
-      verdict: "comment",
+      schema: "mstar.review/v1",
+      verdict: "blocked",
       summary_md: `Provider key AKIAIOSFODNN7EXAMPLE and ${"a".repeat(40)} leaked`,
       findings: [
         {
-          severity: "critical",
+          mergeClass: "must-fix",
           category: "security",
           file_path: "src/auth.ts",
           line_start: 1,
@@ -589,29 +591,32 @@ describe("createReviewConsumer", () => {
     expect(row.raw_output).not.toContain("ghp_abcdef1234567890");
   });
 
-  test("findings over the cap are trimmed to Top-50 by severity on post AND insert (B4)", async () => {
+  test("findings over the cap are trimmed to Top-50 by merge class on post AND insert (B4)", async () => {
     reset();
     const findings: Array<{
-      severity: "critical" | "warning" | "suggestion" | "info";
-      category: "security" | "logic" | "style" | "perf" | "test" | "other";
+      mergeClass: "must-fix" | "should-fix" | "nit";
       file_path: string;
       line_start: number;
       line_end: number;
       title: string;
       body: string;
     }> = Array.from({ length: 60 }, (_, i) => ({
-      severity: "info" as const,
-      category: "style" as const,
+      mergeClass: "nit" as const,
       file_path: "f.ts",
       line_start: i,
       line_end: i,
       title: `F${i}`,
-      body: "",
+      body: `body ${i}`,
     }));
-    findings[0]!.severity = "critical"; // earliest critical keeps its slot
-    findings[59]!.severity = "critical"; // later critical sorts after F0
-    findings[58]!.severity = "warning";
-    runnerStdout = JSON.stringify({ verdict: "comment", summary_md: "many findings", findings });
+    findings[0]!.mergeClass = "must-fix"; // earliest must-fix keeps its slot
+    findings[59]!.mergeClass = "must-fix"; // later must-fix sorts after F0
+    findings[58]!.mergeClass = "should-fix";
+    runnerStdout = JSON.stringify({
+      schema: "mstar.review/v1",
+      verdict: "blocked",
+      summary_md: "many findings",
+      findings,
+    });
     const db = createTestD1();
     const consumer = createReviewConsumer(makeEnv({ DB: db as never }), undefined, testOverrides);
 
@@ -623,12 +628,12 @@ describe("createReviewConsumer", () => {
     };
     expect(posted.output.findings).toHaveLength(50);
     expect(posted.omittedFindings).toBe(10);
-    // Severity priority: the two criticals first (stable — F0 before F59),
-    // then the warning, then info.
+    // Merge-class priority: the two must-fix first (stable — F0 before F59),
+    // then the should-fix, then the nits.
     expect(posted.output.findings[0]!.title).toBe("F0");
     expect(posted.output.findings[1]!.title).toBe("F59");
     expect(posted.output.findings[2]!.title).toBe("F58");
-    expect(posted.output.findings[2]!.severity).toBe("warning");
+    expect(posted.output.findings[2]!.mergeClass).toBe("should-fix");
 
     // The same capped array landed in D1 (渲染与落库同一裁剪数组).
     const stored = db.raw.query("SELECT COUNT(*) AS n FROM findings").get() as { n: number };

@@ -3,11 +3,15 @@
  *
  * Assembly (pure, unit-tested):
  *   - summary_md truncated to 8000 chars (plan Task 3 budget);
- *   - findings rendered as a markdown list with severity/category rendered
- *     VERBATIM from the schema enums (plan Global Constraints: the Comment
- *     must not rewrite enum semantics);
+ *   - findings grouped and listed BY merge class, category verbatim
+ *     (mapping spec §3: findings 按 merge class 列出 — class原文写入, never
+ *     rewritten to M1 severity);
+ *   - tally line rendered when the envelope carries one (must-fix /
+ *     should-fix / nit / unverified counts, engine REVIEW_EMOJI);
  *   - NO line-comment fields: the body is a single overall review comment;
- *   - verdict rendered as text in the body header (`**Verdict: …**`).
+ *   - verdict rendered VERBATIM as text in the body header (`**Verdict:
+ *     ship it**` / `needs fixes` / `blocked` — never M1 vocab, never a
+ *     GitHub review event).
  *
  * Posting (T5): single-comment UPSERT via the Issues comments API
  * (@octokit/rest + createAppAuth — same deps and pattern as 04's diff.ts;
@@ -29,9 +33,9 @@
  * this module (consumer choke point, SEC-02 fix) so a prompt-injected token
  * can never appear in the public review body or D1 raw_output.
  */
-
 import { createAppAuth } from "@octokit/auth-app";
 import { Octokit } from "@octokit/rest";
+import { MERGE_CLASSES, REVIEW_EMOJI } from "@mstar-harness/engine";
 import type { ReviewFinding, ReviewOutput } from "../review/schema";
 
 /** summary_md budget for the overall review body (plan Task 3). */
@@ -43,33 +47,55 @@ export function truncateSummary(md: string, limit: number = SUMMARY_MD_LIMIT): s
 }
 
 /**
- * Render findings as a markdown list. Severity/category are emitted verbatim
- * (enum SSOT); location is `file_path[:line_start]` or "repo-wide" when the
- * finding is not file-scoped. Empty findings → empty string (no section).
+ * Render findings grouped BY merge class (mapping spec §3), fixed engine
+ * order (must-fix → should-fix → nit; empty classes omitted). Category is
+ * emitted verbatim when present; location is `file_path[:line_start]` or
+ * "repo-wide" when the finding is not file-scoped. Empty findings → empty
+ * string (no section).
  */
 export function renderFindings(findings: ReviewFinding[]): string {
   if (findings.length === 0) return "";
-  const lines = findings.map((finding, index) => {
-    const location = finding.file_path
-      ? `${finding.file_path}${finding.line_start != null ? `:${finding.line_start}` : ""}`
-      : "repo-wide";
-    const body = finding.body ? `\n\n${finding.body}` : "";
-    return `${index + 1}. **[${finding.severity}] ${finding.title}** (${finding.category}) — ${location}${body}`;
-  });
-  return `## Findings\n\n${lines.join("\n\n")}`;
+  const sections = MERGE_CLASSES.map((mergeClass) => {
+    const inClass = findings.filter((finding) => finding.mergeClass === mergeClass);
+    if (inClass.length === 0) return null;
+    const items = inClass.map((finding, index) => {
+      const location = finding.file_path
+        ? `${finding.file_path}${finding.line_start != null ? `:${finding.line_start}` : ""}`
+        : "repo-wide";
+      const body = finding.body ? `\n\n${finding.body}` : "";
+      const category = finding.category !== undefined ? ` (${finding.category})` : "";
+      return `${index + 1}. **${finding.title}**${category} — ${location}${body}`;
+    });
+    return `### ${REVIEW_EMOJI[mergeClass]} ${mergeClass}\n\n${items.join("\n\n")}`;
+  }).filter((section) => section !== null);
+  return `## Findings\n\n${sections.join("\n\n")}`;
+}
+
+/** Tally line from the envelope's PrTallyResult; empty when absent (§3). */
+function renderTally(tally: ReviewOutput["tally"]): string {
+  if (tally === undefined) return "";
+  const { mustFix, shouldFix, nit, unverified } = tally.tally;
+  return (
+    `**Tally:** ${REVIEW_EMOJI["must-fix"]} must-fix ${mustFix} · ` +
+    `${REVIEW_EMOJI["should-fix"]} should-fix ${shouldFix} · ` +
+    `${REVIEW_EMOJI.nit} nit ${nit} · ${REVIEW_EMOJI.unverified} unverified ${unverified}`
+  );
 }
 
 /**
- * Assemble the overall review body: verdict header + truncated summary +
- * findings section + optional omitted-findings footer. `omittedFindings` is
- * the count of findings dropped by the consumer's severity cap (B4) — the
- * footer tells readers the review is a Top-N subset.
+ * Assemble the overall review body: verdict header (verbatim) + tally line
+ * (when present) + truncated summary + findings-by-class section + optional
+ * omitted-findings footer. `omittedFindings` is the count of findings
+ * dropped by the consumer's merge-class cap (B4) — the footer tells readers
+ * the review is a Top-N subset.
  */
 export function buildReviewBody(output: ReviewOutput, omittedFindings = 0): string {
   const verdict = `**Verdict: ${output.verdict}**`;
+  const tally = renderTally(output.tally);
   const summary = truncateSummary(output.summary_md);
   const findings = renderFindings(output.findings);
-  const body = findings ? `${verdict}\n\n${summary}\n\n${findings}` : `${verdict}\n\n${summary}`;
+  const head = tally ? `${verdict}\n\n${tally}` : verdict;
+  const body = findings ? `${head}\n\n${summary}\n\n${findings}` : `${head}\n\n${summary}`;
   return omittedFindings > 0 ? `${body}\n\n*(+${omittedFindings} more findings omitted)*` : body;
 }
 // ---------------------------------------------------------------------------
@@ -267,7 +293,7 @@ export type PostReviewInput = {
   prNumber: number;
   headSha: string;
   output: ReviewOutput;
-  /** Findings dropped by the severity cap (B4) — rendered as a body footer. */
+  /** Findings dropped by the merge-class cap (B4) — rendered as a body footer. */
   omittedFindings?: number;
 };
 

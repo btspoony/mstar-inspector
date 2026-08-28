@@ -1,18 +1,23 @@
 /**
- * Review comment assembly tests (plan 06 Task 3 + Phase 5 B1/B4 +
+ * Review comment assembly tests (plan 07 Task 3 + Phase 5 B1/B4 +
  * postdeploy feedback T5) — pure functions (the posting wiring is covered
  * with a mock octokit; see "postReview wiring" below).
  *
  * Acceptance points:
- *   - the model verdict is rendered as text in the body header (SEC-01 —
- *     the Issues comments API has no review event, so the prompt-injectable
- *     verdict can never map onto GitHub APPROVE/REQUEST_CHANGES)
+ *   - the harness verdict (ship it | needs fixes | blocked) is rendered
+ *     VERBATIM as text in the body header; `blocked` and `ship it` bodies
+ *     carry NO REQUEST_CHANGES / APPROVE mapping — the Issues comments API
+ *     has no review event at all, and the octokit calls carry no `event`
+ *     (SEC-01, structural; mapping spec §2)
+ *   - findings are grouped and listed BY merge class (must-fix / should-fix
+ *     / nit verbatim; mapping spec §3), category rendered verbatim
  *   - summary_md truncated at 8000 chars
- *   - findings rendered with severity/category verbatim (enum SSOT)
- *   - omitted-findings footer when the severity cap dropped findings (B4)
+ *   - tally line rendered when the envelope carries a PrTallyResult
+ *   - omitted-findings footer when the merge-class cap dropped findings (B4)
  *   - the assembled body carries NO line-comment fields (overall review only)
  *   - T5 upsert: marker parse, create-on-miss, patch-on-hit with round
- *     increment, malformed marker treated as a miss
+ *     increment, malformed marker treated as a miss (same PR never gets a
+ *     new comment per round)
  *   - postReview wiring (WF-001/WF-003/SG-001): paginated scan, create vs
  *     update dispatch, 404 soft-recovery fallback
  */
@@ -30,7 +35,19 @@ import {
   truncateSummary,
   type PostOctokit,
 } from "../../src/pipeline/comment";
-import type { ReviewOutput } from "../../src/review/schema";
+import type { ReviewFinding, ReviewOutput } from "../../src/review/schema";
+
+function finding(mergeClass: ReviewFinding["mergeClass"], title: string): ReviewFinding {
+  return {
+    mergeClass,
+    category: "logic",
+    file_path: "src/auth.ts",
+    line_start: 21,
+    line_end: 21,
+    title,
+    body: `\`${title}\` body.`,
+  };
+}
 
 describe("truncateSummary", () => {
   test("keeps summaries at or under the 8000-char budget verbatim", () => {
@@ -48,38 +65,42 @@ describe("truncateSummary", () => {
 });
 
 describe("renderFindings", () => {
-  test("renders severity/category verbatim with location and body", () => {
+  test("groups findings BY merge class in engine order, class verbatim", () => {
     const md = renderFindings([
-      {
-        severity: "critical",
-        category: "security",
-        file_path: "src/auth.ts",
-        line_start: 21,
-        line_end: 21,
-        title: "Secrets in code",
-        body: "A token is hardcoded.",
-      },
+      finding("should-fix", "Should fix"),
+      finding("must-fix", "Must fix"),
+      finding("nit", "Nit"),
     ]);
-    expect(md).toContain("**[critical] Secrets in code**");
-    expect(md).toContain("(security)");
+    const mustFix = md.indexOf("### 🔴 must-fix");
+    const shouldFix = md.indexOf("### 🟠 should-fix");
+    const nit = md.indexOf("### 🔵 nit");
+    expect(mustFix).toBeGreaterThan(-1);
+    expect(shouldFix).toBeGreaterThan(mustFix);
+    expect(nit).toBeGreaterThan(shouldFix);
+    expect(md).toContain("**Must fix**");
+    expect(md).toContain("**Nit**");
+  });
+
+  test("omits merge classes with no findings", () => {
+    const md = renderFindings([finding("nit", "Only a nit")]);
+    expect(md).not.toContain("must-fix");
+    expect(md).not.toContain("should-fix");
+    expect(md).toContain("### 🔵 nit");
+  });
+
+  test("renders category and location verbatim", () => {
+    const md = renderFindings([finding("must-fix", "Fractional expiry comparison")]);
+    expect(md).toContain("(logic)");
     expect(md).toContain("src/auth.ts:21");
-    expect(md).toContain("A token is hardcoded.");
+    expect(md).toContain("`Fractional expiry comparison` body.");
   });
 
   test("renders repo-wide when the finding has no file scope", () => {
     const md = renderFindings([
-      {
-        severity: "info",
-        category: "style",
-        file_path: null,
-        line_start: null,
-        line_end: null,
-        title: "Nit",
-        body: "",
-      },
+      { mergeClass: "nit", file_path: null, line_start: null, line_end: null, title: "Note", body: "" },
     ]);
     expect(md).toContain("repo-wide");
-    expect(md).toContain("**[info] Nit**");
+    expect(md).toContain("**Note**");
   });
 
   test("returns an empty string for no findings", () => {
@@ -89,27 +110,45 @@ describe("renderFindings", () => {
 
 describe("buildReviewBody", () => {
   const output: ReviewOutput = {
-    verdict: "request_changes",
+    schema: "mstar.review/v1",
+    verdict: "needs fixes",
     summary_md: "Two issues found in the diff.",
-    findings: [
-      {
-        severity: "warning",
-        category: "logic",
-        file_path: "src/auth.ts",
-        line_start: 21,
-        line_end: 21,
-        title: "Fractional expiry comparison",
-        body: "`claims.exp < Date.now() / 1000` compares against a fractional value.",
-      },
-    ],
+    findings: [finding("should-fix", "Fractional expiry comparison")],
   };
 
-  test("renders the verdict as text in the body header (SEC-01)", () => {
+  test("renders the harness verdict verbatim as text (mapping spec §3)", () => {
     const body = buildReviewBody(output);
-    expect(body.startsWith("**Verdict: request_changes**")).toBe(true);
+    expect(body.startsWith("**Verdict: needs fixes**")).toBe(true);
     expect(body).toContain("Two issues found in the diff.");
     expect(body).toContain("## Findings");
-    expect(body).toContain("**[warning] Fractional expiry comparison**");
+    expect(body).toContain("### 🟠 should-fix");
+    expect(body).toContain("**Fractional expiry comparison**");
+  });
+
+  test("blocked and ship it verdicts never carry REQUEST_CHANGES/APPROVE mapping", () => {
+    for (const verdict of ["blocked", "ship it"] as const) {
+      const body = buildReviewBody({ ...output, verdict });
+      expect(body).toContain(`**Verdict: ${verdict}**`);
+      expect(body).not.toContain("REQUEST_CHANGES");
+      expect(body).not.toContain("APPROVE");
+    }
+  });
+
+  test("renders the tally line when the envelope carries a PrTallyResult (§3)", () => {
+    const body = buildReviewBody({
+      ...output,
+      tally: {
+        verdict: "needs fixes",
+        scorePct: 45,
+        tally: { mustFix: 0, shouldFix: 2, nit: 1, unverified: 1 },
+        chatHeader: "unused here",
+      },
+    });
+    expect(body).toContain("**Tally:** 🔴 must-fix 0 · 🟠 should-fix 2 · 🔵 nit 1 · ❓ unverified 1");
+  });
+
+  test("no tally line when the envelope has no tally", () => {
+    expect(buildReviewBody(output)).not.toContain("Tally:");
   });
 
   test("carries NO line-comment fields (overall review body only)", () => {
@@ -124,7 +163,7 @@ describe("buildReviewBody", () => {
 
   test("empty findings → verdict header + summary only, no findings section", () => {
     const body = buildReviewBody({ ...output, findings: [] });
-    expect(body).toBe("**Verdict: request_changes**\n\nTwo issues found in the diff.");
+    expect(body).toBe("**Verdict: needs fixes**\n\nTwo issues found in the diff.");
     expect(body).not.toContain("## Findings");
   });
 
@@ -147,8 +186,9 @@ describe("buildReviewBody", () => {
 
 describe("review comment upsert (T5)", () => {
   const output: ReviewOutput = {
-    verdict: "request_changes",
-    summary_md: "Two issues found in the diff.",
+    schema: "mstar.review/v1",
+    verdict: "blocked",
+    summary_md: "One must-fix blocks the merge.",
     findings: [],
   };
 
@@ -158,7 +198,7 @@ describe("review comment upsert (T5)", () => {
     });
 
     test("returns null for a body without the marker", () => {
-      expect(parseReviewRound("**Verdict: comment**")).toBeNull();
+      expect(parseReviewRound("**Verdict: blocked**")).toBeNull();
       expect(parseReviewRound("")).toBeNull();
     });
 
@@ -217,8 +257,8 @@ describe("review comment upsert (T5)", () => {
       const lines = body.split("\n");
       expect(lines[0]).toBe("<!-- mstar-inspector:review:v1 round=2 -->");
       expect(lines[1]).toBe("第 2 次 review · commit 0123456");
-      expect(body).toContain("**Verdict: request_changes**");
-      expect(body).toContain("Two issues found in the diff.");
+      expect(body).toContain("**Verdict: blocked**");
+      expect(body).toContain("One must-fix blocks the merge.");
     });
 
     test("omitted-findings footer still renders after the review body", () => {
@@ -230,8 +270,9 @@ describe("review comment upsert (T5)", () => {
 
 describe("postReview wiring (mock octokit, SG-001)", () => {
   const output: ReviewOutput = {
-    verdict: "request_changes",
-    summary_md: "Two issues found in the diff.",
+    schema: "mstar.review/v1",
+    verdict: "blocked",
+    summary_md: "One must-fix blocks the merge.",
     findings: [],
   };
   const input = {
@@ -304,7 +345,7 @@ describe("postReview wiring (mock octokit, SG-001)", () => {
     expect(String(calls.createParams!.body)).toMatch(/^<!-- mstar-inspector:review:v1 round=1 -->/);
   });
 
-  test("marker hit → updateComment with round+1", async () => {
+  test("marker hit → updateComment with round+1 (same PR never gets a new comment per round)", async () => {
     const { calls, octokit } = mockOctok([
       { id: 7, body: "<!-- mstar-inspector:review:v1 round=2 -->\n第 2 次 review" },
     ]);
@@ -312,6 +353,24 @@ describe("postReview wiring (mock octokit, SG-001)", () => {
     expect(calls.createParams).toBeUndefined();
     expect(calls.updateParams).toMatchObject({ owner: "acme", repo: "widgets", comment_id: 7 });
     expect(String(calls.updateParams!.body)).toMatch(/^<!-- mstar-inspector:review:v1 round=3 -->/);
+  });
+
+  test("blocked and ship it both post with NO review event, never REQUEST_CHANGES/APPROVE (mapping spec §2)", async () => {
+    for (const verdict of ["blocked", "ship it"] as const) {
+      const { calls, octokit } = mockOctok([]);
+      await postReviewWithOctokit(octokit, { ...input, output: { ...output, verdict } });
+
+      // Every captured octokit call: Issues comments API only — no `event`
+      // parameter, no APPROVE/REQUEST_CHANGES anywhere.
+      for (const captured of [calls.listParams, calls.updateParams, calls.createParams]) {
+        if (captured === undefined) continue;
+        expect("event" in captured).toBe(false);
+        expect(JSON.stringify(captured)).not.toContain("REQUEST_CHANGES");
+        expect(JSON.stringify(captured)).not.toContain("APPROVE");
+      }
+      expect(calls.createParams).toBeDefined();
+      expect(String(calls.createParams!.body)).toContain(`**Verdict: ${verdict}**`);
+    }
   });
 
   test("updateComment 404 → soft-recovery fallback to createComment round=1 (WF-003)", async () => {

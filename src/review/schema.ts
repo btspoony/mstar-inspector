@@ -1,93 +1,110 @@
 /**
- * Review output schema (plan 02 Task 1) — executable SSOT for solution §5.2.
+ * Review envelope schema (plan 07 Task 3) — the inspector-side zod mirror of
+ * the harness `mstar.review/v1` envelope. SSOT for the vocabulary is the
+ * pinned engine (`@mstar-harness/engine` `validateMstarReviewV1` /
+ * `synthesizeReview`); the publishing contract is
+ * `.mstar/specs/github-review-comment-mapping.md`. The M1
+ * findings-schema.md contract is write-retired — it is never the write
+ * authority again.
  *
- * Mirrors `.mstar/iterations/iter-001-20260825/specs/findings-schema.md` field
- * for field. Findings `severity` is the QC-style enum
- * `critical | warning | suggestion | info` — NOT the residual register enum.
+ * Vocab is imported from the engine — never re-declared:
+ *   - verdict:              PR_VERDICTS   = "ship it" | "needs fixes" | "blocked"
+ *   - findings[].mergeClass: MERGE_CLASSES = "must-fix" | "should-fix" | "nit"
+ * The M1 inspector vocab (verdict comment|request_changes|approve, severity
+ * critical|warning|suggestion|info) is rejected on the write path: an M1
+ * document fails the required `schema: "mstar.review/v1"` literal and the
+ * verdict/mergeClass enums. The engine gate additionally rejects a stray M1
+ * `severity` KEY with `review.inspector-vocab` at persist/runtime; this zod
+ * layer mirrors the value vocab and the envelope shape, not that key-level
+ * check.
+ *
  * Unknown keys are stripped (zod default), required keys stay required, and
- * `file_path` / `line_start` / `line_end` are required-but-nullable.
+ * file_path / line_start / line_end are OPTIONAL and nullable (envelope
+ * contract: a finding's location is optional). title and body are required
+ * non-empty strings.
  */
 
+import {
+  MERGE_CLASSES,
+  PR_VERDICTS,
+  type MergeClass,
+  type MstarReviewFinding,
+  type MstarReviewV1,
+} from "@mstar-harness/engine";
 import { z } from "zod";
 
-export type ReviewVerdict = "comment" | "request_changes" | "approve";
-export type FindingSeverity = "critical" | "warning" | "suggestion" | "info";
-export type FindingCategory =
-  | "security"
-  | "logic"
-  | "style"
-  | "perf"
-  | "test"
-  | "other";
+export type ReviewFinding = MstarReviewFinding;
+export type ReviewOutput = MstarReviewV1;
 
-export type ReviewFinding = {
-  severity: FindingSeverity;
-  category: FindingCategory;
-  file_path: string | null;
-  line_start: number | null;
-  line_end: number | null;
-  title: string;
-  body: string;
-  fingerprint_hint?: string;
-};
+const verdictSchema = z.enum(PR_VERDICTS);
 
-export type ReviewOutput = {
-  verdict: ReviewVerdict;
-  summary_md: string;
-  findings: ReviewFinding[];
-};
-
-const verdictSchema = z.enum(["comment", "request_changes", "approve"]);
-const severitySchema = z.enum(["critical", "warning", "suggestion", "info"]);
-const categorySchema = z.enum(["security", "logic", "style", "perf", "test", "other"]);
-
-const findingSchema = z
-  .object({
-    severity: severitySchema,
-    category: categorySchema,
-    file_path: z.string().nullable(),
-    line_start: z.number().int().nullable(),
-    line_end: z.number().int().nullable(),
-    title: z.string(),
-    body: z.string(),
-    fingerprint_hint: z.string().optional(),
-  })
-  .transform((f) => {
-    // Empty fingerprint_hint is stripped as if absent (spec: "空串可在 parse 时剥掉当缺省").
-    if (f.fingerprint_hint === undefined || f.fingerprint_hint === "") {
-      const { fingerprint_hint: _drop, ...rest } = f;
-      return rest;
-    }
-    return f;
-  });
-
-const outputSchema: z.ZodType<ReviewOutput> = z.object({
-  verdict: verdictSchema,
-  summary_md: z.string().min(1),
-  findings: z.array(findingSchema),
+const findingSchema = z.object({
+  mergeClass: z.enum(MERGE_CLASSES),
+  category: z.string().optional(),
+  file_path: z.string().nullable().optional(),
+  line_start: z.number().int().nullable().optional(),
+  line_end: z.number().int().nullable().optional(),
+  title: z.string().refine((title) => title.trim() !== "", "title must be a non-empty string"),
+  body: z.string().refine((body) => body.trim() !== "", "body must be a non-empty string"),
+  fingerprint_hint: z.string().optional(),
 });
 
-/**
+/** Mirror of the engine `PrTallyResult` shape (what `computePrTally` produces). */
+const tallySchema = z.object({
+  verdict: verdictSchema,
+  scorePct: z.number().int().min(0).max(100),
+  tally: z.object({
+    mustFix: z.number().int().min(0),
+    shouldFix: z.number().int().min(0),
+    nit: z.number().int().min(0),
+    unverified: z.number().int().min(0),
+  }),
+  chatHeader: z.string(),
+});
 
+const targetSchema = z.object({
+  owner: z.string().optional(),
+  repo: z.string().optional(),
+  pr: z.number().optional(),
+  head_sha: z.string().optional(),
+});
+
+const outputSchema: z.ZodType<ReviewOutput> = z
+  .object({
+    schema: z.literal("mstar.review/v1"),
+    verdict: verdictSchema,
+    summary_md: z.string().refine((s) => s.trim() !== "", "summary_md must be a non-empty string"),
+    tally: tallySchema.optional(),
+    findings: z.array(findingSchema),
+    target: targetSchema.optional(),
+  })
+  .superRefine((output, ctx) => {
+    // Consistency rule (engine-locked): a provided tally must agree with the
+    // top-level verdict (validateMstarReviewV1 review.verdict-tally-mismatch).
+    if (output.tally !== undefined && output.tally.verdict !== output.verdict) {
+      ctx.addIssue({ code: "custom", message: "tally.verdict must equal the top-level verdict" });
+    }
+  });
+
+/**
  * Cap on findings per review (Phase 5 B4): 50. The GitHub review body and
- * the D1 findings write both have practical limits; beyond that the most
- * severe findings are kept and the rest are omitted (body footer notes the
- * count). Severity priority: critical > warning > suggestion > info; ties
- * keep their original order (stable sort).
+ * the D1 findings write both have practical limits; beyond that the
+ * highest-priority findings are kept and the rest are omitted (body footer
+ * notes the count). Priority: must-fix > should-fix > nit; ties keep their
+ * original order (stable sort).
  */
 export const FINDINGS_MAX = 50;
 
-const SEVERITY_RANK: Record<FindingSeverity, number> = {
-  critical: 0,
-  warning: 1,
-  suggestion: 2,
-  info: 3,
+const MERGE_CLASS_RANK: Record<MergeClass, number> = {
+  "must-fix": 0,
+  "should-fix": 1,
+  nit: 2,
 };
 
 /**
- * Severity-priority cap on a ReviewOutput's findings (stable within a
- * severity). Returns the capped output plus the number of omitted findings;
- * a within-limit input is returned unchanged with omitted = 0.
+ * Merge-class-priority cap on a ReviewOutput's findings (stable within a
+ * class). Returns the capped output plus the number of omitted findings; a
+ * within-limit input is returned unchanged with omitted = 0.
  */
 export function capFindings(
   output: ReviewOutput,
@@ -97,7 +114,7 @@ export function capFindings(
     return { output, omitted: 0 };
   }
   const findings = [...output.findings]
-    .sort((a, b) => SEVERITY_RANK[a.severity] - SEVERITY_RANK[b.severity])
+    .sort((a, b) => MERGE_CLASS_RANK[a.mergeClass] - MERGE_CLASS_RANK[b.mergeClass])
     .slice(0, limit);
   return { output: { ...output, findings }, omitted: output.findings.length - limit };
 }
@@ -130,14 +147,16 @@ function extractBraces(text: string): string | null {
 }
 
 /**
- * Parse raw model output into a validated ReviewOutput.
+ * Parse raw runner stdout into a validated `mstar.review/v1` envelope.
  *
- * Algorithm (iteration spec): trim → JSON.parse whole → fall back to the
- * fenced ```json / ``` block → fall back to first `{` … last `}` → zod.
- * Fallback extraction only runs when JSON.parse throws; the FIRST successful
- * parse is zod-validated once and that result is returned — a parsed
- * non-object root (e.g. an array) is rejected without inner-object recovery.
- * Any failure returns `{ ok: false, error }` and never throws.
+ * Algorithm (unchanged transport decoding): trim → JSON.parse whole → fall
+ * back to the fenced ```json / ``` block → fall back to first `{` … last `}`
+ * → zod. Fallback extraction only runs when JSON.parse throws; the FIRST
+ * successful parse is zod-validated once and that result is returned — a
+ * parsed non-object root (e.g. an array) is rejected without inner-object
+ * recovery. Any failure returns `{ ok: false, error }` and never throws. An
+ * M1-shaped document (no `schema` literal, M1 verdict/severity vocab) fails
+ * here — it is never posted or persisted.
  */
 export function parseReviewOutput(
   raw: string,

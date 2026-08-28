@@ -509,7 +509,7 @@ async function processMessage(payload: ReviewJobPayload, deps: ProcessDeps): Pro
     }
 
     // 9. SEC-02 + B4 choke point: redact secret-shaped spans (PEM, tokens,
-    // keys, long hex) and cap findings to the Top-50 by severity BEFORE
+    // keys, long hex) and cap findings to the Top-50 by merge class BEFORE
     // anything can reach the public review body or D1 raw_output. The SAME
     // capped array feeds both the post and the insert (B4: 渲染与落库同一
     // 裁剪数组).

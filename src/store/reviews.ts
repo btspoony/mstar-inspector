@@ -112,7 +112,10 @@ export function createReviewStore(db: D1Like): ReviewStore {
           .bind(
             crypto.randomUUID(),
             reviewId,
-            finding.severity,
+            // Interim vocab mapping point (plan 07 Task 3): findings rows
+            // carry the mstar.review/v1 mergeClass in the legacy `severity`
+            // column until Task 4's ArtifactStore replaces this store.
+            finding.mergeClass,
             finding.category,
             finding.file_path,
             finding.line_start,

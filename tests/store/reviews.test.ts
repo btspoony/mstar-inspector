@@ -19,11 +19,12 @@ const SHA = "0123456789abcdef0123456789abcdef01234567";
 
 function output(overrides: Partial<ReviewOutput> = {}): ReviewOutput {
   return {
-    verdict: "comment",
+    schema: "mstar.review/v1",
+    verdict: "needs fixes",
     summary_md: "No blocking issues.",
     findings: [
       {
-        severity: "warning",
+        mergeClass: "should-fix",
         category: "logic",
         file_path: "src/a.ts",
         line_start: 10,
@@ -41,7 +42,7 @@ function insert(overrides: Partial<ReviewInsert> = {}): ReviewInsert {
   return {
     key: { installation_id: 123, owner: "acme", repo: "widgets", pr_number: 42, head_sha: SHA },
     output: output(),
-    raw: JSON.stringify({ verdict: "comment" }),
+    raw: JSON.stringify({ schema: "mstar.review/v1", verdict: "needs fixes" }),
     ...overrides,
   };
 }
@@ -62,9 +63,9 @@ describe("createReviewStore().insertReview", () => {
     expect(row.repo).toBe("widgets");
     expect(row.pr_number).toBe(42);
     expect(row.head_sha).toBe(SHA);
-    expect(row.verdict).toBe("comment");
+    expect(row.verdict).toBe("needs fixes");
     expect(row.summary_md).toBe("No blocking issues.");
-    expect(row.raw_output).toBe(JSON.stringify({ verdict: "comment" }));
+    expect(row.raw_output).toBe(JSON.stringify({ schema: "mstar.review/v1", verdict: "needs fixes" }));
   });
 
   test("second insert for the same sha → { outcome: 'duplicate' }, still 1 review row, no duplicate findings", async () => {
@@ -92,7 +93,7 @@ describe("createReviewStore().insertReview", () => {
         output: output({
           findings: [
             {
-              severity: "critical",
+              mergeClass: "must-fix",
               category: "security",
               file_path: "src/b.ts",
               line_start: 1,
@@ -102,7 +103,7 @@ describe("createReviewStore().insertReview", () => {
               fingerprint_hint: "fp-sec",
             },
             {
-              severity: "info",
+              mergeClass: "nit",
               category: "style",
               file_path: null,
               line_start: null,
@@ -134,7 +135,7 @@ describe("createReviewStore().insertReview", () => {
       expect(row.status).toBe("open"); // column default
     }
     expect(rows[0]).toMatchObject({
-      severity: "info",
+      severity: "nit",
       category: "style",
       file_path: null,
       line_start: null,
@@ -144,7 +145,7 @@ describe("createReviewStore().insertReview", () => {
       fingerprint: null,
     });
     expect(rows[1]).toMatchObject({
-      severity: "critical",
+      severity: "must-fix",
       category: "security",
       file_path: "src/b.ts",
       line_start: 1,
@@ -170,7 +171,7 @@ describe("createReviewStore().insertReview", () => {
     const db = createTestD1();
     const store = createReviewStore(db);
 
-    const raw = JSON.stringify({ verdict: "comment", note: "small" });
+    const raw = JSON.stringify({ schema: "mstar.review/v1", verdict: "ship it", note: "small" });
     await store.insertReview(insert({ raw }));
 
     const row = db.raw.query("SELECT raw_output FROM reviews").get() as { raw_output: string };
@@ -210,7 +211,7 @@ describe("createReviewStore().insertReview", () => {
           output: output({
             findings: [
               {
-                severity: "warning",
+                mergeClass: "should-fix",
                 category: "logic",
                 file_path: "src/a.ts",
                 line_start: 1,
@@ -219,7 +220,7 @@ describe("createReviewStore().insertReview", () => {
                 body: "b1",
               },
               {
-                severity: "warning",
+                mergeClass: "should-fix",
                 category: "logic",
                 file_path: "src/b.ts",
                 line_start: 1,

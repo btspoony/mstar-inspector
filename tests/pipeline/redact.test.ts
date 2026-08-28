@@ -69,11 +69,12 @@ describe("redactSecrets", () => {
 
 describe("redactReviewOutput", () => {
   const output: ReviewOutput = {
-    verdict: "comment",
+    schema: "mstar.review/v1",
+    verdict: "blocked",
     summary_md: "Provider key leaked here: AKIAIOSFODNN7EXAMPLE",
     findings: [
       {
-        severity: "critical",
+        mergeClass: "must-fix",
         category: "security",
         file_path: "src/auth.ts",
         line_start: 1,
@@ -89,7 +90,7 @@ describe("redactReviewOutput", () => {
     expect(redacted.summary_md).not.toContain("AKIAIOSFODNN7EXAMPLE");
     expect(redacted.findings[0]!.body).not.toContain("ghp_abcdef1234567890");
     expect(redacted.findings[0]!.title).toBe("Leak");
-    expect(redacted.findings[0]!.severity).toBe("critical");
-    expect(redacted.verdict).toBe("comment");
+    expect(redacted.findings[0]!.mergeClass).toBe("must-fix");
+    expect(redacted.verdict).toBe("blocked");
   });
 });
