@@ -1,16 +1,15 @@
 /**
- * Central Review Store row/insert types (plan 05 Task 1).
+ * Central Review Store row types (v1 caliber, plan 07 Task 4).
  *
- * Type-only imports only: `IdempotencyKey` from contracts/idem (04 SSOT) and
- * `ReviewOutput` from review/schema (pure zod, M0). No runtime imports — the
- * store module boundary (compass contracts A) forbids worker/pipeline/session
- * dependencies, and these types carry no behavior.
+ * Type-only module. `D1Like` (the narrow D1 face the store depends on) is
+ * reused by the ArtifactStore adapter (`src/store/artifact-store.ts`) and
+ * its bun:sqlite test double (`tests/store/helpers.ts`). No runtime imports
+ * — the store module boundary (compass contracts A) forbids
+ * worker/pipeline/session dependencies.
  *
- * Column shapes mirror `migrations/0001_reviews.sql` (DDL single source).
+ * Column shapes mirror `migrations/0001_reviews.sql` +
+ * `0002_mstar_review_v1.sql` (DDL single sources).
  */
-
-import type { IdempotencyKey } from "../contracts/idem";
-import type { ReviewOutput } from "../review/schema";
 
 /** A row of the `reviews` table (D1 column names, snake_case). */
 export type ReviewRow = {
@@ -28,9 +27,22 @@ export type ReviewRow = {
   provider: string | null;
   skill_version: string | null;
   raw_output: string | null;
+  /**
+   * Complete `mstar.review/v1` envelope JSON (v1 rows); NULL on M1-era
+   * rows — the row-level era marker (`envelope IS NOT NULL` ⇔ v1 path,
+   * migration 0002). New (v1) rows never write `raw_output`; the envelope
+   * is the authoritative, losslessly restorable document.
+   */
+  envelope: string | null;
 };
 
-/** A row of the `findings` table (D1 column names, snake_case). */
+/**
+ * A row of the `findings` table (D1 column names, snake_case). For v1 rows
+ * `severity` carries the harness merge class (`must-fix` | `should-fix` |
+ * `nit` — the single vocab-switch mapping point lives in the ArtifactStore
+ * adapter); M1 rows keep critical | warning | suggestion | info. Era is
+ * disambiguated by the parent review row's `envelope IS NOT NULL`.
+ */
 export type FindingRow = {
   id: string;
   review_id: string;
@@ -46,35 +58,13 @@ export type FindingRow = {
 };
 
 /**
- * Input to `insertReview` (plan 05 interface contract):
- * the idempotency key, the parsed structured output, the raw JSON payload
- * (stored in `raw_output`, truncated at 64KB by the store), and optional
- * model/provider metadata (M2 hardens these to NOT NULL).
- */
-export type ReviewInsert = {
-  key: IdempotencyKey;
-  output: ReviewOutput;
-  raw: string;
-  model?: string;
-  skill_version?: string;
-};
-
-/**
- * Outcome of `insertReview`: `inserted` carries the new review id;
- * `duplicate` means the UNIQUE (installation_id, owner, repo, pr_number,
- * head_sha) constraint already has a row (another consumer won the race).
- */
-export type StoreResult =
-  | { outcome: "inserted"; reviewId: string }
-  | { outcome: "duplicate" };
-
-/**
- * Narrow D1 face the store depends on (plan Clarify 5): prepare/bind/first/
- * all/run + batch. A real `D1Database` satisfies this structurally; tests
- * provide a bun:sqlite-backed implementation via `tests/store/helpers.ts`.
- * `batch` was added in the T2 fix round: insertReview writes the review row
- * and its findings in ONE atomic D1 batch (plan 05 T2 review I1) — the store
- * never touches exec/withSession/dump, so the test double stays small.
+ * Narrow D1 face the ArtifactStore adapter depends on (plan Clarify 5):
+ * prepare/bind/first/all/run + batch. A real `D1Database` satisfies this
+ * structurally; tests provide a bun:sqlite-backed implementation via
+ * `tests/store/helpers.ts`. The store writes the review row and its
+ * findings in ONE atomic D1 batch (plan 05 T2 review I1, absorbed by the
+ * adapter) — it never touches exec/withSession/dump, so the test double
+ * stays small.
  */
 export type D1StatementLike = {
   bind(...values: unknown[]): D1StatementLike;

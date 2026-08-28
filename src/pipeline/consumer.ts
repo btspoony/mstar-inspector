@@ -7,7 +7,8 @@
  * dedup by that sha (hit → ack) → diff → exec the in-image runner
  * (env-injected GH_TOKEN/ARK_API_KEY/PI_CODING_AGENT_DIR/
  * HARNESS_PLUGIN_ROOT) → parseReviewOutput → post the overall Review
- * comment FIRST → insertReview (duplicate → ack) → KV completion state →
+ * comment FIRST → store.put (idempotent — the UNIQUE first-written row
+ * wins) → KV completion state →
  * finally destroy. Any step throwing → structured log + rethrow (queue
  * retry → DLQ). A runner result that is not the structured main path
  * (summary degrade, Clarify #9.5) is treated as a failure: no post, no
@@ -28,16 +29,17 @@
  *
  * Module boundary (compass contracts A): this is the ONLY legal edge from
  * worker → pipeline (worker/index.ts queue wiring). It imports contracts/
- * (payload + idempotency key), review/schema (pure zod), store/reviews (05),
- * and the pipeline modules — never src/worker/**.
+ * (payload + idempotency key), review/schema (pure zod),
+ * store/artifact-store (07 D1 ArtifactStore), and the pipeline modules —
+ * never src/worker/**.
  */
 
 import type { D1Database, KVNamespace, Message, MessageBatch } from "@cloudflare/workers-types";
 import type { ReviewJobPayload } from "../contracts/review-job";
 import { idemKey, IDEMPOTENCY_SECONDS, type IdempotencyKey } from "../contracts/idem";
 import { parseReviewOutput, capFindings } from "../review/schema";
-import { redactReviewOutput, redactSecrets } from "./redact";
-import { createReviewStore, type ReviewStore } from "../store/reviews";
+import { redactReviewOutput } from "./redact";
+import { createArtifactStore, type D1ArtifactStore } from "../store/artifact-store";
 import { getSandbox, type ReviewSandbox } from "./sandbox";
 import { buildGitOpsCommands } from "./gitops";
 import { createReviewCommenter, type ReviewCommenter } from "./comment";
@@ -260,7 +262,7 @@ function handleGuardHeld(message: Message<ReviewJobPayload>, deps: ProcessDeps):
 
 type ProcessDeps = {
   env: PipelineEnv;
-  store: ReviewStore;
+  store: D1ArtifactStore;
   commenter: ReviewCommenter;
   log: ConsumerLog;
   getSandbox: (binding: unknown, id: string) => Promise<ReviewSandbox>;
@@ -348,7 +350,7 @@ export function createReviewConsumer(
 ): (batch: MessageBatch<ReviewJobPayload>) => Promise<void> {
   const deps: ProcessDeps = {
     env,
-    store: overrides.store ?? createReviewStore(env.DB),
+    store: overrides.store ?? createArtifactStore(env.DB),
     commenter: overrides.commenter ?? createReviewCommenter(env),
     getSandbox: overrides.getSandbox ?? ((binding, id) => getSandbox(binding, id)),
     log,
@@ -510,8 +512,8 @@ async function processMessage(payload: ReviewJobPayload, deps: ProcessDeps): Pro
 
     // 9. SEC-02 + B4 choke point: redact secret-shaped spans (PEM, tokens,
     // keys, long hex) and cap findings to the Top-50 by merge class BEFORE
-    // anything can reach the public review body or D1 raw_output. The SAME
-    // capped array feeds both the post and the insert (B4: 渲染与落库同一
+    // anything can reach the public review body or the D1 envelope. The SAME
+    // capped array feeds both the post and the put (B4: 渲染与落库同一
     // 裁剪数组).
     const capped = capFindings(redactReviewOutput(parsed.output));
     const output = capped.output;
@@ -532,7 +534,7 @@ async function processMessage(payload: ReviewJobPayload, deps: ProcessDeps): Pro
     });
 
     // 11. KV done-state immediately after the comment lands, BEFORE the D1
-    // insert (B3): if the insert then fails, a retry hits the KV done key and
+    // insert (B3): if the put then fails, a retry hits the KV done key and
     // acks — the comment is already out and must never be re-posted.
     try {
       await deps.env.IDEMPOTENCY_KV.put(idemKey(key), "done", {
@@ -543,19 +545,20 @@ async function processMessage(payload: ReviewJobPayload, deps: ProcessDeps): Pro
       deps.log.warn(fields, `KV completion write failed: ${detail}`);
     }
 
-    // 12. Insert: duplicate (race lost) → ack; the review row already exists.
-    // An insert failure AFTER a successful post is a warn + ack, never a
-    // rethrow (B3): the comment is out, retrying would re-post it. The
-    // missing D1 row is acceptable (KV done marks completion) and alerted.
+    // 12. Persist via the D1 ArtifactStore (plan 07 Task 4): the parsed
+    // envelope is the write authority (put re-validates it as defense in
+    // depth; a UNIQUE race loss resolves idempotently — the first-written
+    // row wins and is never overwritten, so no raw_output twin exists). A
+    // put failure AFTER a successful post is a warn + ack, never a rethrow
+    // (B3): the comment is out, retrying would re-post it. The missing D1
+    // row is acceptable (KV done marks completion) and alerted.
     try {
-      const result = await deps.store.insertReview({
-        key,
-        output,
-        raw: redactSecrets(run.stdout),
+      await deps.store.put({
+        kind: "review",
+        key: idemKey(key),
+        schema: "mstar.review/v1",
+        payload: output,
       });
-      if (result.outcome === "duplicate") {
-        deps.log.info(fields, "duplicate insert — ack");
-      }
     } catch (err) {
       const detail = err instanceof Error ? err.message : String(err);
       deps.log.warn(
@@ -576,7 +579,7 @@ async function processMessage(payload: ReviewJobPayload, deps: ProcessDeps): Pro
     throw err;
   } finally {
     // Release the in-flight guard once the review settled (posted, KV done,
-    // insert attempted) OR failed — either way the next attempt may proceed.
+    // put attempted) OR failed — either way the next attempt may proceed.
     // releaseReviewGuard never throws (KV failure → warn; TTL expires it).
     if (guardHeld) {
       await releaseReviewGuard(deps.env.IDEMPOTENCY_KV, guardKey, fields ?? baseFields, deps.log);

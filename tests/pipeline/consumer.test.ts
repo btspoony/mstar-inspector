@@ -18,7 +18,7 @@
  * Acceptance points (plan Task 3 / brief):
  *   - findByIdempotencyKey hit after clone → ack (no post, no insert)
  *   - full flow: clone → rev-parse → diff → runner (env-injected secrets) →
- *     parse → post FIRST → insert → KV completion → destroy
+ *     parse → post FIRST → put → KV completion → destroy
  *   - null payload sha → sha resolved from the checkout (no gh pr view)
  *   - parse failure → no post, no insert, rethrow, destroy
  *   - comment failure → no insert, rethrow, destroy
@@ -29,7 +29,8 @@ import { describe, expect, mock, test } from "bun:test";
 import type { MessageBatch } from "@cloudflare/workers-types";
 import type { ReviewJobPayload } from "../../src/contracts/review-job";
 import type { ReviewOutput } from "../../src/review/schema";
-import { createReviewStore } from "../../src/store/reviews";
+import { createArtifactStore } from "../../src/store/artifact-store";
+import { idemKey } from "../../src/contracts/idem";
 import { createTestD1 } from "../store/helpers";
 import type { ReviewCommenter } from "../../src/pipeline/comment";
 
@@ -253,11 +254,12 @@ describe("createReviewConsumer", () => {
   test("findByIdempotencyKey hit after clone → ack: no post, no insert, destroy", async () => {
     reset();
     const db = createTestD1();
-    const store = createReviewStore(db);
-    await store.insertReview({
-      key: { installation_id: 123, owner: "acme", repo: "widgets", pr_number: 42, head_sha: SHA },
-      output: VALID_OUTPUT,
-      raw: JSON.stringify(VALID_OUTPUT),
+    const store = createArtifactStore(db);
+    await store.put({
+      kind: "review",
+      key: idemKey({ installation_id: 123, owner: "acme", repo: "widgets", pr_number: 42, head_sha: SHA }),
+      schema: "mstar.review/v1",
+      payload: VALID_OUTPUT,
     });
     const consumer = createReviewConsumer(makeEnv({ DB: db as never }), undefined, testOverrides);
 
@@ -584,11 +586,17 @@ describe("createReviewConsumer", () => {
     expect(posted.output.findings[0]!.body).not.toContain("ghs_abcdef1234567890");
     expect(posted.omittedFindings).toBe(0);
 
-    // The stored row (summary_md + raw_output) carries no secret-shaped text.
-    const row = db.raw.query("SELECT * FROM reviews").get() as { summary_md: string; raw_output: string };
+    // The stored row (summary_md + envelope) carries no secret-shaped text;
+    // raw_output is never written on the v1 path (envelope is authoritative).
+    const row = db.raw.query("SELECT summary_md, envelope, raw_output FROM reviews").get() as {
+      summary_md: string;
+      envelope: string;
+      raw_output: string | null;
+    };
     expect(row.summary_md).not.toContain("AKIAIOSFODNN7EXAMPLE");
-    expect(row.raw_output).not.toContain("AKIAIOSFODNN7EXAMPLE");
-    expect(row.raw_output).not.toContain("ghp_abcdef1234567890");
+    expect(row.raw_output).toBeNull();
+    expect(row.envelope).not.toContain("AKIAIOSFODNN7EXAMPLE");
+    expect(row.envelope).not.toContain("ghp_abcdef1234567890");
   });
 
   test("findings over the cap are trimmed to Top-50 by merge class on post AND insert (B4)", async () => {
@@ -663,16 +671,16 @@ describe("createReviewConsumer", () => {
     expect(infoLine).toBeDefined();
   });
 
-  test("insert failure after a successful post → one comment, KV done, warn + ack, no rethrow (B3)", async () => {
+  test("put failure after a successful post → one comment, KV done, warn + ack, no rethrow (B3)", async () => {
     reset();
     runnerStdout = JSON.stringify(VALID_OUTPUT);
     const db = createTestD1();
     const failingStore = {
-      insertReview: mock(async () => {
+      put: mock(async () => {
         throw new Error("d1 down");
       }),
+      get: mock(async () => undefined),
       findByIdempotencyKey: mock(async () => null),
-      listByRepo: mock(async () => []),
     };
     const consumer = createReviewConsumer(
       makeEnv({ DB: db as never }),

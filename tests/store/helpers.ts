@@ -1,7 +1,9 @@
 /**
- * Test D1 double (plan 05 Task 1) — bun:sqlite in-memory database executing
- * the REAL migration SQL (`migrations/0001_reviews.sql`, DDL single source),
- * exposing only the narrow D1 face the store depends on (plan Clarify 5:
+ * Test D1 double (plan 05 Task 1 + plan 07 Task 4) — bun:sqlite in-memory
+ * database executing the REAL migration SQL (`migrations/0001_reviews.sql`
+ * + `0002_mstar_review_v1.sql`, DDL single sources, applied in filename
+ * order exactly like `wrangler d1 migrations apply`), exposing only the
+ * narrow D1 face the store depends on (plan Clarify 5:
  * prepare/bind/first/all/run + batch).
  *
  * bun:sqlite and D1 are both SQLite, so UNIQUE/ON CONFLICT semantics match;
@@ -13,14 +15,15 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import type { D1BatchResult, D1Like, D1StatementLike } from "../../src/store/types";
 
-const MIGRATION_PATH = join(import.meta.dir, "../../migrations/0001_reviews.sql");
+const MIGRATIONS = ["0001_reviews.sql", "0002_mstar_review_v1.sql"];
 
 /** Execute the migration DDL on a fresh in-memory database. */
 function applyMigration(db: Database): void {
   // SQLite enforces foreign keys per-connection; D1 has them on by default.
   db.exec("PRAGMA foreign_keys = ON;");
-  const sql = readFileSync(MIGRATION_PATH, "utf8");
-  db.exec(sql);
+  for (const name of MIGRATIONS) {
+    db.exec(readFileSync(join(import.meta.dir, "../../migrations", name), "utf8"));
+  }
 }
 
 /**
