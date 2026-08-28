@@ -624,6 +624,69 @@ describe("createReviewConsumer", () => {
     expect(runnerTimeoutMs("deep")).toBe(1_800_000);
   });
 
+  test("success path logs one runner-attempt line with level + runner_timeout_ms + elapsed_ms; default → bun-fanout (AC-S10-logs)", async () => {
+    reset();
+    runnerStdout = JSON.stringify(VALID_OUTPUT);
+    const db = createTestD1();
+    const consumer = createReviewConsumer(makeEnv({ DB: db as never }), testLog, testOverrides);
+
+    await consumer(makeBatch(makePayload()));
+
+    // One runner attempt → at least one budget line on the existing
+    // structured-log channel (spec d5-budget L5).
+    const line = logLines.find((l) => l.level === "info" && l.msg.includes("runner finished"));
+    expect(line).toBeDefined();
+    expect(line!.fields.level).toBe("default");
+    expect(line!.fields.runner_timeout_ms).toBe(600_000);
+    expect(typeof line!.fields.elapsed_ms).toBe("number");
+    expect(line!.fields.elapsed_ms).toBeGreaterThanOrEqual(0);
+    expect(line!.fields.orchestration).toBe("bun-fanout");
+  });
+
+  test("REVIEW_LEVEL=deep → runner log: level=deep, budget 1_800_000, orchestration=parent, NO fake seat_count (AC-S10-logs)", async () => {
+    reset();
+    runnerStdout = JSON.stringify(VALID_OUTPUT);
+    const db = createTestD1();
+    const consumer = createReviewConsumer(
+      makeEnv({ DB: db as never, REVIEW_LEVEL: "deep" }),
+      testLog,
+      testOverrides,
+    );
+
+    await consumer(makeBatch(makePayload()));
+
+    const line = logLines.find((l) => l.level === "info" && l.msg.includes("runner finished"));
+    expect(line).toBeDefined();
+    expect(line!.fields.level).toBe("deep");
+    expect(line!.fields.runner_timeout_ms).toBe(1_800_000);
+    expect(typeof line!.fields.elapsed_ms).toBe("number");
+    // Deep runs the three-stage parent session — never a fabricated Bun
+    // seat count (spec § Queue visibility: 禁止写假 seat_count: 7).
+    expect(line!.fields.orchestration).toBe("parent");
+    expect("seat_count" in line!.fields).toBe(false);
+  });
+
+  test("runner failure → error log carries level + runner_timeout_ms + elapsed_ms (AC-S10-logs timeout path)", async () => {
+    reset();
+    runnerExitCode = 1;
+    runnerStderr = "review: session failed: boom";
+    const db = createTestD1();
+    const consumer = createReviewConsumer(makeEnv({ DB: db as never }), testLog, testOverrides);
+
+    await expect(consumer(makeBatch(makePayload()))).rejects.toThrow(/runner failed/);
+
+    // The failure line is the runner attempt's budget line on this path —
+    // elapsed_ms is recorded, never used to abort (spec 不 abort: only the
+    // sandbox exec timeout itself fails the wall-clock).
+    const errLine = logLines.find((l) => l.level === "error");
+    expect(errLine).toBeDefined();
+    expect(errLine!.fields.level).toBe("default");
+    expect(errLine!.fields.runner_timeout_ms).toBe(600_000);
+    expect(typeof errLine!.fields.elapsed_ms).toBe("number");
+    expect(errLine!.fields.elapsed_ms).toBeGreaterThanOrEqual(0);
+    expect(errLine!.msg).toContain("runner failed");
+  });
+
   test("invalid REVIEW_LEVEL (Object.prototype keys) → fail-loud BEFORE any sandbox step (never a silent downgrade)", async () => {
     // qc3 F-302: "toString"/"__proto__" would pass an `in`-style guard — only
     // REVIEW_LEVELS membership (isReviewLevel) rejects them at this first,

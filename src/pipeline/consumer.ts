@@ -137,7 +137,10 @@ export function runnerTimeoutMs(level: ReviewLevel): number {
   return RUNNER_TIMEOUT_MS[level];
 }
 
-/** Structured log fields: seven event fields + sandbox id + idempotency key. */
+/** Structured log fields: seven event fields + sandbox id + idempotency key
+ * + the d5-budget visibility quartet (level / runner_timeout_ms /
+ * elapsed_ms / orchestration — spec d5-budget L5: they ride THIS channel;
+ * no new APM, no webhook sink). */
 export type ConsumerLogFields = {
   event: "pull_request" | "review_command";
   action: string;
@@ -148,6 +151,14 @@ export type ConsumerLogFields = {
   head_sha: string | null;
   sandbox_id?: string;
   idempotency_key?: string;
+  /** Review tier resolved from REVIEW_LEVEL. */
+  level?: ReviewLevel;
+  /** Runner wall-clock budget for `level` (ms) — runnerTimeoutMs(level). */
+  runner_timeout_ms?: number;
+  /** Runner exec elapsed wall-clock (ms) — set on runner-attempt log lines. */
+  elapsed_ms?: number;
+  /** Runner orchestration: deep = parent session; quick/default = Bun fan-out. */
+  orchestration?: "bun-fanout" | "parent";
 };
 
 export type ConsumerLog = {
@@ -472,6 +483,11 @@ async function processMessage(payload: ReviewJobPayload, deps: ProcessDeps): Pro
   // guard release needs the same level's TTL. guardHeld ⇒ level is set
   // (resolution precedes acquisition).
   let level: ReviewLevel | undefined;
+  // Runner wall-clock start (d5-budget AC-S10-logs): set just before the
+  // runner exec so the failure log can carry elapsed_ms. VISIBILITY ONLY —
+  // elapsed never aborts; the sandbox exec timeout is the only wall-clock
+  // failure (spec 不 abort).
+  let runnerStartedAt: number | undefined;
 
   try {
     // Review tier (AC-S7-level): resolved BEFORE any sandbox/KV step so a
@@ -545,6 +561,13 @@ async function processMessage(payload: ReviewJobPayload, deps: ProcessDeps): Pro
     };
     fields = {
       ...baseFields,
+      // d5-budget L5: the level's clock rides every structured log from here
+      // on (same ConsumerLogFields channel — no new sink).
+      level,
+      runner_timeout_ms: runnerTimeoutMs(level),
+      // deep = parent session; quick/default = Bun seat fan-out. Never a
+      // fabricated seat_count for deep (spec § Queue visibility).
+      orchestration: level === "deep" ? "parent" : "bun-fanout",
       head_sha: headSha,
       idempotency_key: idemKey(key),
       sandbox_id: sandboxId,
@@ -610,14 +633,24 @@ async function processMessage(payload: ReviewJobPayload, deps: ProcessDeps): Pro
     // (buildRunnerEnv — compass D, BB-1, BB-2; secrets never baked into the
     // image, never in logs). The runtime runner has NO summary-degrade path:
     // exit 0 ⇒ stdout is the engine-validated mstar.review/v1 envelope.
+    runnerStartedAt = Date.now();
     const run = await sandbox.exec(cmds.runner, {
       cwd: CLONE_DIR,
       env: buildRunnerEnv(deps.env),
       timeout: runnerTimeoutMs(level),
     });
+    const runnerElapsedMs = Date.now() - runnerStartedAt;
     if (run.exitCode !== 0) {
       throw new Error(`runner failed: exit ${run.exitCode}, stdout ${run.stdout.length}B`);
     }
+    // d5-budget AC-S10-logs: one runner attempt → at least one budget line
+    // (level + runner_timeout_ms + elapsed_ms + orchestration). elapsed_ms is
+    // VISIBILITY ONLY — it never throws; the sandbox exec timeout above is
+    // the only wall-clock failure (spec 不 abort).
+    deps.log.info(
+      { ...fields, elapsed_ms: runnerElapsedMs },
+      `runner finished in ${runnerElapsedMs}ms (budget ${runnerTimeoutMs(level)}ms)`,
+    );
 
     // 9. Parse + validate the envelope (engine gate inside parseReviewOutput;
     // mapping spec §4.2): failure → no review, no insert.
@@ -690,7 +723,22 @@ async function processMessage(payload: ReviewJobPayload, deps: ProcessDeps): Pro
     // rethrow so the worker retries and eventually DLQs.
     const detail = err instanceof Error ? err.message : String(err);
     deps.log.error(
-      fields ?? { ...baseFields, sandbox_id: sandboxId },
+      {
+        ...(fields ?? { ...baseFields, sandbox_id: sandboxId }),
+        // d5-budget AC-S10-logs: the failure line carries the level's budget
+        // once known (post-step-3 `fields` already has it; this spread covers
+        // the pre-checkout fallback) and the runner's elapsed wall-clock once
+        // it started. elapsed never aborts — the sandbox exec timeout is the
+        // only wall-clock failure (spec 不 abort).
+        ...(level === undefined
+          ? {}
+          : {
+              level,
+              runner_timeout_ms: runnerTimeoutMs(level),
+              orchestration: level === "deep" ? "parent" : "bun-fanout",
+            }),
+        ...(runnerStartedAt === undefined ? {} : { elapsed_ms: Date.now() - runnerStartedAt }),
+      },
       `review failed: ${detail}`,
     );
     throw err;
