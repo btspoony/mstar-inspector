@@ -1,6 +1,6 @@
 # Specs Index（仓库级跨迭代契约）
 
-本目录 = **仓库级规范**：已锁定契约与历史权威。迭代内仍在演进的草案 → `../iterations/<id>/specs/`（如 `../iterations/v0.3/specs/`）。
+本目录 = **仓库级规范**：已锁定契约与历史权威。迭代内仍在演进的草案 → `../iterations/<id>/specs/`（如 `../iterations/v0.4/specs/`）。
 
 | Document | Status | 用途 |
 |----------|--------|------|
