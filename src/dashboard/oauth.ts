@@ -32,32 +32,47 @@ export async function exchangeCodeForToken(
   clientSecret: string,
   redirectUri: string,
 ): Promise<string | null> {
-  const res = await fetch("https://github.com/login/oauth/access_token", {
-    method: "POST",
-    headers: { ...GITHUB_HEADERS, "Content-Type": "application/json" },
-    body: JSON.stringify({
-      client_id: clientId,
-      client_secret: clientSecret,
-      code,
-      redirect_uri: redirectUri,
-    }),
-  });
-  if (!res.ok) return null;
-  const data = (await res.json()) as { access_token?: unknown };
-  return typeof data.access_token === "string" && data.access_token.length > 0
-    ? data.access_token
-    : null;
+  try {
+    const res = await fetch("https://github.com/login/oauth/access_token", {
+      method: "POST",
+      // The OAuth token endpoint is NOT the REST API: JSON only with
+      // `Accept: application/json` (vnd.github+json is for api.github.com).
+      headers: {
+        ...GITHUB_HEADERS,
+        Accept: "application/json",
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        client_id: clientId,
+        client_secret: clientSecret,
+        code,
+        redirect_uri: redirectUri,
+      }),
+    });
+    if (!res.ok) return null;
+    // GitHub may still answer form-urlencoded / HTML; never throw on parse.
+    const data = (await res.json()) as { access_token?: unknown };
+    return typeof data.access_token === "string" && data.access_token.length > 0
+      ? data.access_token
+      : null;
+  } catch {
+    return null;
+  }
 }
 
 export type GitHubUser = { login: string; name: string | null };
 
 /** null on any upstream failure or unexpected payload (fail-closed). */
 export async function fetchGitHubUser(accessToken: string): Promise<GitHubUser | null> {
-  const res = await fetch("https://api.github.com/user", {
-    headers: { ...GITHUB_HEADERS, Authorization: `Bearer ${accessToken}` },
-  });
-  if (!res.ok) return null;
-  const data = (await res.json()) as { login?: unknown; name?: unknown };
-  if (typeof data.login !== "string" || data.login.length === 0) return null;
-  return { login: data.login, name: typeof data.name === "string" ? data.name : null };
+  try {
+    const res = await fetch("https://api.github.com/user", {
+      headers: { ...GITHUB_HEADERS, Authorization: `Bearer ${accessToken}` },
+    });
+    if (!res.ok) return null;
+    const data = (await res.json()) as { login?: unknown; name?: unknown };
+    if (typeof data.login !== "string" || data.login.length === 0) return null;
+    return { login: data.login, name: typeof data.name === "string" ? data.name : null };
+  } catch {
+    return null;
+  }
 }

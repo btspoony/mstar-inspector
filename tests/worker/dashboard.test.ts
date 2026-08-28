@@ -6,8 +6,9 @@
  * live smoke (user-gated); here callback coverage stops at the fail-closed
  * state checks, which run before any network call.
  */
-import { describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, test } from "bun:test";
 import worker from "../../src/worker/index";
+import { exchangeCodeForToken } from "../../src/dashboard/oauth";
 import type { Env } from "../../src/worker/env";
 import {
   OAUTH_STATE_COOKIE,
@@ -76,6 +77,56 @@ describe("signed session cookie (session.ts)", () => {
     const session = await readSessionValue(value, SESSION_SECRET);
     expect(session?.login).toBe("octocat");
     expect(session?.name).toBe("The Octocat");
+  });
+});
+
+describe("exchangeCodeForToken (oauth.ts, stubbed fetch)", () => {
+  const origFetch = globalThis.fetch;
+  afterEach(() => {
+    globalThis.fetch = origFetch;
+  });
+
+  test("requests the token URL with Accept: application/json and returns the token", async () => {
+    let seenUrl = "";
+    let seenAccept = "";
+    globalThis.fetch = (async (url: unknown, init?: RequestInit) => {
+      seenUrl = String(url);
+      seenAccept = ((init?.headers ?? {}) as Record<string, string>).Accept ?? "";
+      return new Response(JSON.stringify({ access_token: "gho_token", scope: "read:user" }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }) as typeof fetch;
+
+    const token = await exchangeCodeForToken("code", CLIENT_ID, CLIENT_SECRET, "https://cb");
+    expect(seenUrl).toBe("https://github.com/login/oauth/access_token");
+    expect(seenAccept).toBe("application/json");
+    expect(token).toBe("gho_token");
+  });
+
+  test("form-urlencoded (non-JSON) response returns null without throwing", async () => {
+    globalThis.fetch = (async (_url: unknown, _init?: RequestInit) =>
+      new Response("access_token=gho_token&scope=read%3Auser", {
+        status: 200,
+        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      })) as typeof fetch;
+    expect(await exchangeCodeForToken("code", CLIENT_ID, CLIENT_SECRET, "https://cb")).toBeNull();
+  });
+
+  test("JSON payload missing access_token returns null", async () => {
+    globalThis.fetch = (async (_url: unknown, _init?: RequestInit) =>
+      new Response(JSON.stringify({ error: "bad_verification_code" }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      })) as typeof fetch;
+    expect(await exchangeCodeForToken("code", CLIENT_ID, CLIENT_SECRET, "https://cb")).toBeNull();
+  });
+
+  test("network failure (fetch rejects) returns null without throwing", async () => {
+    globalThis.fetch = (async (_url: unknown, _init?: RequestInit) => {
+      throw new TypeError("fetch failed");
+    }) as unknown as typeof fetch;
+    expect(await exchangeCodeForToken("code", CLIENT_ID, CLIENT_SECRET, "https://cb")).toBeNull();
   });
 });
 
