@@ -2,7 +2,9 @@
  * Plan 08 Task 2 tests: signed session cookie + OAuth state CSRF, through
  * the real worker mount (app.route("/dashboard", dashboardApp)). Plan 11
  * Task 1 adds the GitHub App Manifest start/callback coverage (state CSRF,
- * locked conversion headers, encrypted hold cookie, no-secret HTML).
+ * locked conversion headers, encrypted hold cookie, no-secret HTML); Task 2
+ * adds the commit coverage (confirm gate, single-use hold, ONE secrets-bulk
+ * PATCH, fail-closed Cloudflare config, no-secret success HTML).
  *
  * The end-to-end callback network path is exercised only in live smoke
  * (user-gated); here callback coverage stops at the fail-closed state/code
@@ -23,12 +25,16 @@ import {
   verifyValue,
 } from "../../src/dashboard/session";
 import {
+  DEFAULT_CLOUDFLARE_WORKER_NAME,
   MANIFEST_HOLD_COOKIE,
+  MANIFEST_HOLD_MAX_AGE_SEC,
   MANIFEST_STATE_COOKIE,
   createHoldValue,
   exchangeManifestCode,
   readHoldValue,
 } from "../../src/dashboard/manifest";
+import { normalizePrivateKey } from "../../src/dashboard/private-key";
+import { normalizePrivateKey as pipelineNormalizePrivateKey } from "../../src/pipeline/comment";
 
 const SESSION_SECRET = "test-dashboard-session-secret-32-bytes!";
 const CLIENT_ID = "oauth-client-id";
@@ -843,6 +849,247 @@ describe("/dashboard manifest routes (plan 11 Task 1)", () => {
     const body = await res.text();
     expect(body).not.toContain("BEGIN");
     expect(body).not.toContain(FAKE_WEBHOOK_SECRET);
+  });
+});
+
+describe("dashboard private-key normalization (private-key.ts)", () => {
+  test("L8 default worker name is pinned to the wrangler.jsonc name", () => {
+    expect(DEFAULT_CLOUDFLARE_WORKER_NAME).toBe("mstar-inspector");
+  });
+
+  test("PKCS#1 wraps to PKCS#8, byte-identical to the pipeline implementation", () => {
+    const wrapped = normalizePrivateKey(FAKE_PEM);
+    // The dashboard copy must never drift from the pipeline one (Q2 route
+    // isolation forbids the import, so the test pins the equivalence).
+    expect(wrapped).toBe(pipelineNormalizePrivateKey(FAKE_PEM));
+    expect(wrapped.startsWith("-----BEGIN PRIVATE KEY-----\n")).toBe(true);
+    expect(wrapped).not.toContain("RSA PRIVATE KEY");
+  });
+
+  test("PKCS#8 passes through unchanged; OpenSSH is a hard error", () => {
+    const pkcs8 = "-----BEGIN PRIVATE KEY-----\nAAAA\n-----END PRIVATE KEY-----\n";
+    expect(normalizePrivateKey(pkcs8)).toBe(pkcs8);
+    expect(() =>
+      normalizePrivateKey("-----BEGIN OPENSSH PRIVATE KEY-----\nAAAA\n-----END OPENSSH PRIVATE KEY-----"),
+    ).toThrow();
+  });
+
+  test(".env.example documents the Cloudflare commit env vars and the default worker name", async () => {
+    const example = await Bun.file(new URL("../../.env.example", import.meta.url)).text();
+    expect(example).toContain("CLOUDFLARE_API_TOKEN");
+    expect(example).toContain("CLOUDFLARE_ACCOUNT_ID");
+    expect(example).toContain(DEFAULT_CLOUDFLARE_WORKER_NAME);
+  });
+});
+
+describe("/dashboard manifest commit (plan 11 Task 2)", () => {
+  const origFetch = globalThis.fetch;
+  afterEach(() => {
+    globalThis.fetch = origFetch;
+  });
+
+  const CF_TOKEN = "cf-api-token";
+  const CF_ACCOUNT = "cf-account-id";
+
+  function commitEnv(overrides: Partial<Env> = {}): Env {
+    return makeEnv({
+      CLOUDFLARE_API_TOKEN: CF_TOKEN,
+      CLOUDFLARE_ACCOUNT_ID: CF_ACCOUNT,
+      ...overrides,
+    });
+  }
+
+  /** Records every fetch call and serves a canned Cloudflare response. */
+  function stubCloudflareFetch(status = 200) {
+    const calls: { url: string; method: string; headers: Record<string, string>; body: string }[] = [];
+    globalThis.fetch = (async (url: unknown, init?: RequestInit) => {
+      calls.push({
+        url: String(url),
+        method: init?.method ?? "GET",
+        headers: { ...((init?.headers ?? {}) as Record<string, string>) },
+        body: String(init?.body ?? ""),
+      });
+      return new Response(JSON.stringify({ success: status < 400, errors: [], messages: [] }), {
+        status,
+      });
+    }) as unknown as typeof fetch;
+    return calls;
+  }
+
+  const freshHold = () => createHoldValue(CONVERSION, "octocat", SESSION_SECRET);
+
+  /** POST /dashboard/manifest/commit; holdValue=null omits the hold cookie. */
+  async function doCommit(args: {
+    env?: Env;
+    withSession?: boolean;
+    holdValue?: string | null;
+    body?: string;
+  }): Promise<Response> {
+    const cookies: string[] = [];
+    if (args.withSession ?? true) {
+      cookies.push(`${SESSION_COOKIE}=${await createSessionValue("octocat", null, SESSION_SECRET)}`);
+    }
+    if (args.holdValue) cookies.push(`${MANIFEST_HOLD_COOKIE}=${args.holdValue}`);
+    return worker.fetch(
+      new Request("https://worker.local/dashboard/manifest/commit", {
+        method: "POST",
+        headers: {
+          Cookie: cookies.join("; "),
+          "Content-Type": "application/x-www-form-urlencoded",
+        },
+        body: args.body ?? "confirm=overwrite",
+      }),
+      args.env ?? commitEnv(),
+    );
+  }
+
+  function expectHoldExpired(res: Response): void {
+    const cookies = res.headers.getSetCookie();
+    expect(
+      cookies.some((c) => c.startsWith(`${MANIFEST_HOLD_COOKIE}=;`) && c.includes("Max-Age=0")),
+    ).toBe(true);
+  }
+
+  test("without confirm=overwrite → 400, zero Cloudflare requests, hold cookie expired", async () => {
+    const calls = stubCloudflareFetch();
+    const warns = spyOnWarn();
+    for (const body of ["", "confirm=yes"]) {
+      const res = await doCommit({ holdValue: await freshHold(), body });
+      expect(res.status).toBe(400);
+      expectHoldExpired(res);
+    }
+    expect(calls).toHaveLength(0);
+    const entry = JSON.parse(warns[0] ?? "") as Record<string, unknown>;
+    expect(entry.event).toBe("dashboard_manifest");
+    expect(entry.stage).toBe("commit");
+    expect(entry.reason).toBe("confirm_missing");
+  });
+
+  test("logged out → 302 to login, zero writes", async () => {
+    const calls = stubCloudflareFetch();
+    const res = await doCommit({ withSession: false, holdValue: await freshHold() });
+    expect(res.status).toBe(302);
+    expect(res.headers.get("Location")).toBe("/dashboard/login");
+    expect(calls).toHaveLength(0);
+  });
+
+  test("missing hold cookie → 302 back to the flow start, zero writes", async () => {
+    const calls = stubCloudflareFetch();
+    const res = await doCommit({ holdValue: null });
+    expect(res.status).toBe(302);
+    expect(res.headers.get("Location")).toBe("/dashboard");
+    expect(calls).toHaveLength(0);
+  });
+
+  test("tampered or expired hold cookie → 302 back to the flow start, zero writes", async () => {
+    const calls = stubCloudflareFetch();
+    const hold = await freshHold();
+    const tampered = `${hold.slice(0, 20)}${hold[20] === "A" ? "B" : "A"}${hold.slice(21)}`;
+    const expired = await createHoldValue(
+      CONVERSION,
+      "octocat",
+      SESSION_SECRET,
+      Date.now() - (MANIFEST_HOLD_MAX_AGE_SEC + 100) * 1000,
+    );
+    for (const holdValue of [tampered, expired]) {
+      const res = await doCommit({ holdValue });
+      expect(res.status).toBe(302);
+      expect(res.headers.get("Location")).toBe("/dashboard");
+    }
+    expect(calls).toHaveLength(0);
+  });
+
+  test("missing CLOUDFLARE_API_TOKEN or CLOUDFLARE_ACCOUNT_ID → 5xx, zero writes", async () => {
+    const calls = stubCloudflareFetch();
+    const noToken = await doCommit({
+      holdValue: await freshHold(),
+      env: makeEnv({ CLOUDFLARE_ACCOUNT_ID: CF_ACCOUNT }),
+    });
+    expect(noToken.status).toBe(500);
+    expectHoldExpired(noToken);
+    const noAccount = await doCommit({
+      holdValue: await freshHold(),
+      env: makeEnv({ CLOUDFLARE_API_TOKEN: CF_TOKEN }),
+    });
+    expect(noAccount.status).toBe(500);
+    expect(calls).toHaveLength(0);
+    const body = await noToken.text();
+    expect(body).not.toContain("BEGIN");
+    expect(body).not.toContain(FAKE_WEBHOOK_SECRET);
+  });
+
+  test("confirm → exactly one secrets-bulk PATCH writing exactly the three secrets, PKCS#8 PEM", async () => {
+    const calls = stubCloudflareFetch(200);
+    const res = await doCommit({ holdValue: await freshHold() });
+    expect(res.status).toBe(200);
+    // AC-S11-secrets / L6: ONE PATCH to the locked bulk endpoint (L8 base+auth).
+    expect(calls).toHaveLength(1);
+    const call = calls[0]!;
+    expect(call.method).toBe("PATCH");
+    expect(call.url).toBe(
+      `https://api.cloudflare.com/client/v4/accounts/${CF_ACCOUNT}/workers/scripts/${DEFAULT_CLOUDFLARE_WORKER_NAME}/secrets-bulk`,
+    );
+    expect(call.headers.Authorization).toBe(`Bearer ${CF_TOKEN}`);
+    const payload = JSON.parse(call.body) as {
+      secrets: Record<string, { name: string; text: string; type: string }>;
+    };
+    // Exactly the three names — never REVIEW_ENABLED or model keys.
+    expect(Object.keys(payload.secrets).sort()).toEqual(["APP_ID", "PRIVATE_KEY", "WEBHOOK_SECRET"]);
+    expect(call.body).not.toContain("REVIEW_ENABLED");
+    expect(payload.secrets.APP_ID).toEqual({
+      name: "APP_ID",
+      text: String(CONVERSION.id),
+      type: "secret_text",
+    });
+    expect(payload.secrets.WEBHOOK_SECRET).toEqual({
+      name: "WEBHOOK_SECRET",
+      text: FAKE_WEBHOOK_SECRET,
+      type: "secret_text",
+    });
+    // PEM normalized: PKCS#1 → PKCS#8 wrap per normalizePrivateKey.
+    expect(payload.secrets.PRIVATE_KEY).toEqual({
+      name: "PRIVATE_KEY",
+      text: normalizePrivateKey(FAKE_PEM),
+      type: "secret_text",
+    });
+    expect(payload.secrets.PRIVATE_KEY?.text.startsWith("-----BEGIN PRIVATE KEY-----")).toBe(true);
+    // Hold cookie is single-use: expired on success too.
+    expectHoldExpired(res);
+    // Locked success copy; AC-S11-html: no PEM / webhook_secret in the HTML.
+    const html = await res.text();
+    expect(html).toContain(`GitHub App <span class="id">${CONVERSION.id}</span> credentials stored.`);
+    expect(html).toContain("Credentials take effect as the new Worker version rolls out — deployed automatically, no manual redeploy step.");
+    expect(html).not.toContain("BEGIN");
+    expect(html).not.toContain(FAKE_PEM);
+    expect(html).not.toContain(FAKE_WEBHOOK_SECRET);
+  });
+
+  test("CLOUDFLARE_WORKER_NAME override changes the script path", async () => {
+    const calls = stubCloudflareFetch(200);
+    const res = await doCommit({
+      holdValue: await freshHold(),
+      env: commitEnv({ CLOUDFLARE_WORKER_NAME: "custom-worker" }),
+    });
+    expect(res.status).toBe(200);
+    expect(calls[0]?.url).toBe(
+      `https://api.cloudflare.com/client/v4/accounts/${CF_ACCOUNT}/workers/scripts/custom-worker/secrets-bulk`,
+    );
+  });
+
+  test("Cloudflare 403 (token misconfiguration) → 502 error page, one request, no secrets in HTML", async () => {
+    const calls = stubCloudflareFetch(403);
+    const warns = spyOnWarn();
+    const res = await doCommit({ holdValue: await freshHold() });
+    expect(res.status).toBe(502);
+    expect(calls).toHaveLength(1);
+    expectHoldExpired(res);
+    const entry = JSON.parse(warns[0] ?? "") as Record<string, unknown>;
+    expect(entry.stage).toBe("secret_write");
+    expect(entry.reason).toBe("http_error");
+    expect(entry.cf_status).toBe(403);
+    const html = await res.text();
+    expect(html).not.toContain("BEGIN");
+    expect(html).not.toContain(FAKE_WEBHOOK_SECRET);
   });
 });
 

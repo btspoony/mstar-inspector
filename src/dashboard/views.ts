@@ -249,6 +249,29 @@ export function manifestConfirmPage(
   );
 }
 
+/**
+ * Manifest success surface (B1 Task 2, spec § 确认页文案 — locked copy):
+ * gray-1000 + copy-16, tabular-nums App id, NO success green (spec §
+ * DESIGN.md 意图). PEM / webhook_secret NEVER appear here.
+ */
+export function manifestSuccessPage(
+  user: { login: string; name?: string },
+  app: { id: number },
+): string {
+  return page(
+    "GitHub App credentials stored",
+    `${shellHeader(user)}
+  <main>
+    <section class="enabled">
+      <h2>GitHub App setup complete</h2>
+      <p>GitHub App <span class="id">${app.id}</span> credentials stored.</p>
+      <p class="status">Credentials take effect as the new Worker version rolls out — deployed automatically, no manual redeploy step.</p>
+      <p><a href="/dashboard">Back to /dashboard</a></p>
+    </section>
+  </main>`,
+  );
+}
+
 /** Manifest failure surface: red-700 banner + what-to-do-next, never secrets. */
 export function manifestErrorPage(message: string): string {
   return page(

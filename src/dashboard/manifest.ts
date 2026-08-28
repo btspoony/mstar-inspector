@@ -1,9 +1,9 @@
 /**
- * GitHub App Manifest flow (plan 11 B1 Task 1): start → GitHub form POST →
- * callback → code conversion → encrypted hold cookie. The Cloudflare secret
- * write (commit) is Task 2 — this module never calls the Cloudflare API.
+ * GitHub App Manifest flow (plan 11 B1): start → GitHub form POST →
+ * callback → code conversion → encrypted hold cookie (Task 1) →
+ * confirm-gated Cloudflare secrets-bulk commit (Task 2).
  *
- * Architect locks (spec dashboard-b1-manifest.md § L7/L9):
+ * Architect locks (spec dashboard-b1-manifest.md § L6/L7/L8/L9):
  * - CSRF state cookie `__Host-mstar-manifest-state`: reuses the B0 HMAC
  *   createStateValue/verifyStateValue, single-use, Max-Age 600; DISTINCT from
  *   B0's `__Host-mstar-oauth-state`. `state` rides the GitHub form-action
@@ -17,6 +17,7 @@
  *   info "mstar-manifest-hold"), Max-Age 600, single-use (consumed in T2).
  *   Payload NEVER enters HTML, logs, or D1.
  */
+import { normalizePrivateKey } from "./private-key";
 import { base64urlDecode, base64urlEncode } from "./session";
 
 export const MANIFEST_STATE_COOKIE = "__Host-mstar-manifest-state";
@@ -46,7 +47,7 @@ const GITHUB_MANIFEST_HEADERS = {
  * values — stages, reasons, and upstream statuses are not secrets.
  */
 export function logManifestFailure(
-  stage: "state_verify" | "callback" | "conversion",
+  stage: "state_verify" | "callback" | "conversion" | "commit" | "secret_write",
   reason: string,
   extra: Record<string, unknown> = {},
 ): void {
@@ -251,4 +252,83 @@ export async function readHoldValue(
   if (typeof payload.exp !== "number") return null;
   if (payload.exp <= Math.floor(nowMs / 1000)) return null;
   return payload;
+}
+
+// --- Cloudflare secrets-bulk write (architect lock spec L6/L8) ---
+
+/** L8: script name when CLOUDFLARE_WORKER_NAME is unset (= wrangler.jsonc `name`). */
+export const DEFAULT_CLOUDFLARE_WORKER_NAME = "mstar-inspector";
+/** L8: Cloudflare API base. */
+export const CLOUDFLARE_API_BASE = "https://api.cloudflare.com/client/v4";
+
+// Cloudflare API calls are bounded (same convention as the GitHub fetches).
+const CLOUDFLARE_FETCH_TIMEOUT_MS = 10_000;
+
+/** Commit-face Cloudflare config (subset of Env; missing pieces fail closed). */
+export type CloudflareSecretEnv = {
+  CLOUDFLARE_API_TOKEN?: string;
+  CLOUDFLARE_ACCOUNT_ID?: string;
+  CLOUDFLARE_WORKER_NAME?: string;
+};
+
+export type SecretWriteResult = "stored" | "missing_config" | "upstream_error";
+
+/**
+ * L6: ONE `PATCH …/workers/scripts/{script_name}/secrets-bulk` (JSON Merge
+ * Patch, RFC 7396) writing exactly APP_ID / PRIVATE_KEY / WEBHOOK_SECRET as
+ * `secret_text` — single-request atomicity; secrets not listed are left
+ * untouched; REVIEW_ENABLED / GITHUB_OAUTH_* / model keys are NEVER sent.
+ * The PEM is normalized to PKCS#8 before the write. Missing API token or
+ * account id → "missing_config" (fail-closed, zero requests). Any upstream
+ * non-2xx (incl. 403 token misconfiguration) → "upstream_error" → the route
+ * renders a 5xx error page.
+ */
+export async function writeWorkerSecrets(
+  env: CloudflareSecretEnv,
+  hold: ManifestHoldPayload,
+): Promise<SecretWriteResult> {
+  const token = env.CLOUDFLARE_API_TOKEN;
+  const accountId = env.CLOUDFLARE_ACCOUNT_ID;
+  if (!token || !accountId) return "missing_config";
+  let privateKey: string;
+  try {
+    privateKey = normalizePrivateKey(hold.pem);
+  } catch (err) {
+    logManifestFailure("secret_write", "pem_normalize_failed", { error_type: errorType(err) });
+    return "upstream_error";
+  }
+  // An empty-string override is misconfiguration, not a name → fall back.
+  const scriptName = env.CLOUDFLARE_WORKER_NAME || DEFAULT_CLOUDFLARE_WORKER_NAME;
+  const url = `${CLOUDFLARE_API_BASE}/accounts/${encodeURIComponent(accountId)}/workers/scripts/${encodeURIComponent(scriptName)}/secrets-bulk`;
+  const body = {
+    secrets: {
+      APP_ID: { name: "APP_ID", text: String(hold.id), type: "secret_text" },
+      PRIVATE_KEY: { name: "PRIVATE_KEY", text: privateKey, type: "secret_text" },
+      WEBHOOK_SECRET: { name: "WEBHOOK_SECRET", text: hold.webhook_secret, type: "secret_text" },
+    },
+  };
+  let res: Response;
+  try {
+    res = await fetch(url, {
+      method: "PATCH",
+      signal: AbortSignal.timeout(CLOUDFLARE_FETCH_TIMEOUT_MS),
+      headers: {
+        // L8: Bearer API token (operator-scoped `Workers Scripts Write`).
+        Authorization: `Bearer ${token}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(body),
+    });
+  } catch (err) {
+    logManifestFailure("secret_write", "fetch_failed", { error_type: errorType(err) });
+    return "upstream_error";
+  }
+  const cfStatus = res.status;
+  // Consume the body so the connection is released promptly.
+  await res.body?.cancel();
+  if (!res.ok) {
+    logManifestFailure("secret_write", "http_error", { cf_status: cfStatus });
+    return "upstream_error";
+  }
+  return "stored";
 }

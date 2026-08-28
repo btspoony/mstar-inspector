@@ -1,6 +1,6 @@
 /**
  * /dashboard Hono sub-app: GitHub OAuth login + signed-cookie session (08 B0)
- * + GitHub App Manifest start/callback (11 B1 T1). Mounted by
+ * + GitHub App Manifest start/callback/commit (11 B1 T1/T2). Mounted by
  * src/worker/index.ts as `app.route("/dashboard", dashboardApp)`.
  *
  * Route isolation (architect decision Q2): this module MUST NOT import
@@ -33,8 +33,10 @@ import {
   createHoldValue,
   exchangeManifestCode,
   logManifestFailure,
+  readHoldValue,
+  writeWorkerSecrets,
 } from "./manifest";
-import { dashboardPage, errorPage, manifestConfirmPage, manifestErrorPage, manifestStartPage } from "./views";
+import { dashboardPage, errorPage, manifestConfirmPage, manifestErrorPage, manifestStartPage, manifestSuccessPage } from "./views";
 
 export const dashboardApp = new Hono<{ Bindings: Env }>();
 
@@ -152,6 +154,52 @@ dashboardApp.get("/manifest/callback", async (c) => {
     append: true,
   });
   return c.html(manifestConfirmPage(session, { id: conversion.id, name: conversion.name }));
+});
+
+// Commit (B1 Task 2, spec § L6/L7/L8): the confirm gate. Without
+// `confirm=overwrite` → 400 with ZERO Cloudflare requests. The hold cookie
+// is single-use — expired on every outcome; missing/undecryptable/expired
+// hold = flow expired → 302 back to the start of the flow, zero writes. On
+// confirm, ONE secrets-bulk PATCH writes exactly APP_ID / PRIVATE_KEY /
+// WEBHOOK_SECRET (PEM PKCS#8-normalized) — never REVIEW_ENABLED or model
+// keys. Missing Cloudflare config → 5xx, zero writes.
+dashboardApp.post("/manifest/commit", async (c) => {
+  const secrets = dashboardSecrets(c.env);
+  if (!secrets) return c.text("dashboard OAuth is not configured", 500);
+  // Hold cookie is single-use (spec L7): expired on every commit outcome.
+  c.header("Set-Cookie", expireCookie(MANIFEST_HOLD_COOKIE));
+  const session = await readSessionValue(getCookie(c, SESSION_COOKIE), secrets.sessionSecret);
+  if (!session) return c.redirect("/dashboard/login", 302);
+  const form = await c.req.parseBody();
+  if (form.confirm !== "overwrite") {
+    logManifestFailure("commit", "confirm_missing");
+    return c.html(
+      manifestErrorPage("The overwrite was not confirmed — tick the checkbox to proceed."),
+      400,
+    );
+  }
+  const hold = await readHoldValue(getCookie(c, MANIFEST_HOLD_COOKIE), secrets.sessionSecret);
+  if (!hold) {
+    logManifestFailure("commit", "hold_missing_or_expired");
+    return c.redirect("/dashboard", 302);
+  }
+  const result = await writeWorkerSecrets(c.env, hold);
+  if (result === "missing_config") {
+    logManifestFailure("commit", "cloudflare_not_configured");
+    return c.html(
+      manifestErrorPage(
+        "Cloudflare API access is not configured on this Worker (CLOUDFLARE_API_TOKEN / CLOUDFLARE_ACCOUNT_ID).",
+      ),
+      500,
+    );
+  }
+  if (result === "upstream_error") {
+    return c.html(
+      manifestErrorPage("Cloudflare rejected the secret write (check the API token permissions)."),
+      502,
+    );
+  }
+  return c.html(manifestSuccessPage(session, { id: hold.id }));
 });
 
 dashboardApp.get("/", async (c) => {
