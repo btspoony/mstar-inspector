@@ -16,7 +16,9 @@ import {
   checkedOutShaCommand,
   cloneCommand,
   diffCommand,
+  numstatCommand,
   runnerCommand,
+  writeJsonCommand,
 } from "../../src/pipeline/gitops";
 
 describe("gitops command builders", () => {
@@ -35,9 +37,25 @@ describe("gitops command builders", () => {
     expect(diffCommand("acme", "widgets", 42, "/workspace/pr.diff")).toBe(
       "gh pr diff '42' --repo 'acme/widgets' > '/workspace/pr.diff'",
     );
-    expect(runnerCommand("/opt/runner/src/review/runner.ts", "/workspace/pr.diff")).toBe(
-      "bun run '/opt/runner/src/review/runner.ts' --diff '/workspace/pr.diff'",
+    // Plan 07 T5: the runner consumes the runtime envelope path — --level +
+    // --input reconFacts JSON; the diff feeds the numstat partition universe.
+    expect(numstatCommand("/workspace/pr.diff")).toBe("git apply --numstat '/workspace/pr.diff'");
+    expect(writeJsonCommand("/workspace/review-input.json", "eyJhIjoxfQ==")).toBe(
+      "printf '%s' 'eyJhIjoxfQ==' | base64 -d > '/workspace/review-input.json'",
     );
+    expect(runnerCommand("/opt/runner/src/review/runner.ts", "default", "/workspace/review-input.json")).toBe(
+      "bun run '/opt/runner/src/review/runner.ts' --level 'default' --input '/workspace/review-input.json'",
+    );
+    expect(runnerCommand("/opt/runner/src/review/runner.ts", "quick", "/workspace/review-input.json")).toBe(
+      "bun run '/opt/runner/src/review/runner.ts' --level 'quick' --input '/workspace/review-input.json'",
+    );
+  });
+
+  test("writeJsonCommand rejects non-base64 content before any shell string is built", () => {
+    expect(() => writeJsonCommand("/workspace/review-input.json", "a'; rm -rf / #")).toThrow(
+      /unsafe base64 content/,
+    );
+    expect(() => writeJsonCommand("/workspace/review-input.json", "ey Jh")).toThrow(/unsafe base64 content/);
   });
 
   test("buildGitOpsCommands accepts dotted/dashed GitHub names and a high pr number", () => {
@@ -48,11 +66,17 @@ describe("gitops command builders", () => {
       cloneDir: "/workspace/repo",
       diffPath: "/workspace/pr.diff",
       runnerPath: "/opt/runner/src/review/runner.ts",
+      level: "default",
+      inputPath: "/workspace/review-input.json",
     });
     expect(cmds.clone).toContain("origin 'https://github.com/my-org.example/repo_name-2.git'");
     expect(cmds.clone).toContain("origin 'pull/7/head'");
     expect(cmds.checkedOutSha).toBe("git -C '/workspace/repo' rev-parse HEAD");
     expect(cmds.diff).toBe("gh pr diff '7' --repo 'my-org.example/repo_name-2' > '/workspace/pr.diff'");
+    expect(cmds.numstat).toBe("git apply --numstat '/workspace/pr.diff'");
+    expect(cmds.runner).toBe(
+      "bun run '/opt/runner/src/review/runner.ts' --level 'default' --input '/workspace/review-input.json'",
+    );
   });
 
   describe("injection rejection (fail closed before any shell string is built)", () => {
@@ -99,6 +123,8 @@ describe("gitops command builders", () => {
           cloneDir: "/workspace/repo",
           diffPath: "/workspace/pr.diff",
           runnerPath: "/opt/runner/src/review/runner.ts",
+          level: "quick",
+          inputPath: "/workspace/review-input.json",
         }),
       ).toThrow(/unsafe owner/);
     });
@@ -112,6 +138,8 @@ describe("gitops command builders", () => {
           cloneDir: "/workspace/repo",
           diffPath: "/workspace/pr.diff",
           runnerPath: "/opt/runner/src/review/runner.ts",
+          level: "quick",
+          inputPath: "/workspace/review-input.json",
         }),
       ).toThrow(/unsafe prNumber/);
     });

@@ -15,10 +15,14 @@
  *     no longer used for dedup — a force-push mid-flight is self-consistent)
  *   - dedup runs AFTER clone against the checked-out sha
  *
- * Acceptance points (plan Task 3 / brief):
+ * Acceptance points (plan Task 3 / brief; plan 07 Task 5 rewire):
  *   - findByIdempotencyKey hit after clone → ack (no post, no insert)
- *   - full flow: clone → rev-parse → diff → runner (env-injected secrets) →
- *     parse → post FIRST → put → KV completion → destroy
+ *   - full flow: clone → rev-parse → diff → numstat → write runner input
+ *     (reconFacts) → runner `--level/--input` (env-injected secrets) →
+ *     parse the mstar.review/v1 envelope → post FIRST → put → KV
+ *     completion → destroy
+ *   - REVIEW_LEVEL configurable (quick/default); invalid value fails loud
+ *     BEFORE any sandbox step (never a silent downgrade)
  *   - null payload sha → sha resolved from the checkout (no gh pr view)
  *   - parse failure → no post, no insert, rethrow, destroy
  *   - comment failure → no insert, rethrow, destroy
@@ -62,10 +66,17 @@ let sandboxError: Error | undefined;
 let destroyCalls = 0;
 let destroyError: Error | undefined;
 
-let runnerStderr = "review mode: structured\n";
+// Plan 07 Task 5: the runtime runner contract — exit 0 ⇒ stdout is the
+// engine-validated envelope; stderr is diagnostics-only (no mode marker).
+let runnerStderr = "";
 let runnerExitCode = 0;
 let cloneExitCode = 0;
 let diffExitCode = 0;
+let numstatStdout = "10\t2\tsrc/auth.ts\n5\t0\tdocs/readme.md\n";
+let numstatExitCode = 0;
+let writeInputExitCode = 0;
+/** Decoded runner --input JSON written via the base64 write step. */
+let writtenInputJson: string | undefined;
 
 const fakeSandbox = {
   exec: mock(async (cmd: string, opts?: unknown) => {
@@ -76,7 +87,15 @@ const fakeSandbox = {
     }
     if (cmd.includes("git init")) return { stdout: "", stderr: "", exitCode: cloneExitCode };
     if (cmd.includes("gh pr diff")) return { stdout: "", stderr: "", exitCode: diffExitCode };
-    if (cmd.includes("--diff")) {
+    if (cmd.includes("git apply --numstat")) {
+      return { stdout: numstatStdout, stderr: "", exitCode: numstatExitCode };
+    }
+    if (cmd.includes("base64 -d")) {
+      const match = /printf '%s' '([A-Za-z0-9+/=]+)'/.exec(cmd);
+      writtenInputJson = match ? Buffer.from(match[1]!, "base64").toString("utf8") : undefined;
+      return { stdout: "", stderr: "", exitCode: writeInputExitCode };
+    }
+    if (cmd.includes("--input")) {
       return { stdout: runnerStdout, stderr: runnerStderr, exitCode: runnerExitCode };
     }
     return { stdout: "", stderr: "", exitCode: 0 };
@@ -228,10 +247,14 @@ function reset(): void {
   messageAttempts = 1;
   logLines.length = 0;
   runnerStdout = "";
-  runnerStderr = "review mode: structured\n";
+  runnerStderr = "";
   runnerExitCode = 0;
   cloneExitCode = 0;
   diffExitCode = 0;
+  numstatStdout = "10\t2\tsrc/auth.ts\n5\t0\tdocs/readme.md\n";
+  numstatExitCode = 0;
+  writeInputExitCode = 0;
+  writtenInputJson = undefined;
   resolvedSha = SHA;
   revParseExitCode = 0;
   sandboxError = undefined;
@@ -277,7 +300,7 @@ describe("createReviewConsumer", () => {
     expect(reviewCount(db)).toBe(1); // untouched
   });
 
-  test("full flow: clone → rev-parse → diff → runner → parse → post → insert → KV done → destroy", async () => {
+  test("full flow: clone → rev-parse → diff → numstat → input → runner → parse → post → insert → KV done → destroy", async () => {
     reset();
     runnerStdout = JSON.stringify(VALID_OUTPUT);
     const db = createTestD1();
@@ -289,8 +312,19 @@ describe("createReviewConsumer", () => {
       expect.stringContaining("git init '/workspace/repo'"),
       expect.stringContaining("git -C '/workspace/repo' rev-parse HEAD"),
       expect.stringContaining("gh pr diff '42' --repo 'acme/widgets'"),
-      expect.stringContaining("bun run '/opt/runner/src/review/runner.ts' --diff '/workspace/pr.diff'"),
+      expect.stringContaining("git apply --numstat '/workspace/pr.diff'"),
+      expect.stringContaining("base64 -d > '/workspace/review-input.json'"),
+      expect.stringContaining(
+        "bun run '/opt/runner/src/review/runner.ts' --level 'default' --input '/workspace/review-input.json'",
+      ),
     ]);
+    // The runner input JSON carries the reconFacts the runtime folds into
+    // the envelope target (owner/repo#pr + the AUTHORITATIVE checkout sha)
+    // plus the numstat seat-partition universe.
+    expect(JSON.parse(writtenInputJson!)).toEqual({
+      worktreePath: "/workspace/repo",
+      reconFacts: ["acme/widgets#42", `head ${SHA}`, "10\t2\tsrc/auth.ts", "5\t0\tdocs/readme.md"],
+    });
     // Clone: git transport auth via scoped extraheader env (bugbot A1) — the
     // token lives in GIT_CONFIG_VALUE_0, never in the command string. Form is
     // basic auth with username `x-access-token` (GitHub app-token git auth);
@@ -307,8 +341,11 @@ describe("createReviewConsumer", () => {
     expect(sandboxCalls[1]!.opts).toEqual({ timeout: 120_000 });
     // Diff: gh step, GH_TOKEN via exec env only.
     expect(sandboxCalls[2]!.opts).toEqual({ env: { GH_TOKEN: "ghs_installation_token" }, timeout: 120_000 });
+    // Numstat + input write: plain git/shell steps, git timeout.
+    expect(sandboxCalls[3]!.opts).toEqual({ timeout: 120_000 });
+    expect(sandboxCalls[4]!.opts).toEqual({ timeout: 120_000 });
     // Runner: cwd = clone dir; model key + harness paths via exec env only.
-    expect(sandboxCalls[3]!.opts).toEqual({
+    expect(sandboxCalls[5]!.opts).toEqual({
       cwd: "/workspace/repo",
       env: {
         ARK_API_KEY: "ark-key",
@@ -461,25 +498,115 @@ describe("createReviewConsumer", () => {
     expect(destroyCalls).toBe(1);
   });
 
-  test("summary degrade (non-structured) → no post, no insert, rethrow, destroy", async () => {
+  test("runtime runner: exit 0 with a valid envelope succeeds regardless of stderr diagnostics (no mode marker gate)", async () => {
     reset();
-    runnerStdout = JSON.stringify({
-      schema: "mstar.review/v1",
-      verdict: "needs fixes",
-      summary_md: "raw model text that could not be parsed",
-      findings: [],
-    });
-    runnerStderr = "review mode: summary\n";
+    runnerStdout = JSON.stringify(VALID_OUTPUT);
+    runnerStderr = "seat full-diff/combined done in 41s\nsynthesizeReview ok\n";
     const db = createTestD1();
     const consumer = createReviewConsumer(makeEnv({ DB: db as never }), testLog, testOverrides);
 
-    await expect(consumer(makeBatch(makePayload()))).rejects.toThrow(/structured mode marker/);
+    await consumer(makeBatch(makePayload())); // resolves — stderr is never a gate
 
+    expect(commenterCalls.filter((c) => c.op === "post")).toHaveLength(1);
+    expect(reviewCount(db)).toBe(1);
+    expect(destroyCalls).toBe(1);
+  });
+
+  test("numstat failure → no runner, no post, no insert, rethrow, destroy", async () => {
+    reset();
+    numstatExitCode = 1;
+    runnerStdout = JSON.stringify(VALID_OUTPUT);
+    const db = createTestD1();
+    const consumer = createReviewConsumer(makeEnv({ DB: db as never }), testLog, testOverrides);
+
+    await expect(consumer(makeBatch(makePayload()))).rejects.toThrow(/numstat failed/);
+
+    expect(sandboxCalls.some((c) => c.cmd.includes("--input"))).toBe(false);
     expect(commenterCalls.filter((c) => c.op === "post")).toHaveLength(0);
     expect(reviewCount(db)).toBe(0);
     expect(destroyCalls).toBe(1);
     const errLine = logLines.find((l) => l.level === "error");
     expect(errLine?.fields.idempotency_key).toBe(`idem:123:acme/widgets:42:${SHA}`);
+  });
+
+  test("runner input write failure → no runner, no post, no insert, rethrow, destroy", async () => {
+    reset();
+    writeInputExitCode = 1;
+    runnerStdout = JSON.stringify(VALID_OUTPUT);
+    const db = createTestD1();
+    const consumer = createReviewConsumer(makeEnv({ DB: db as never }), undefined, testOverrides);
+
+    await expect(consumer(makeBatch(makePayload()))).rejects.toThrow(/runner input write failed/);
+
+    expect(sandboxCalls.some((c) => c.cmd.includes("--input"))).toBe(false);
+    expect(commenterCalls.filter((c) => c.op === "post")).toHaveLength(0);
+    expect(reviewCount(db)).toBe(0);
+    expect(destroyCalls).toBe(1);
+  });
+
+  test("REVIEW_LEVEL unset → runner runs the harness landing tier 'default' (AC-S7-level)", async () => {
+    reset();
+    runnerStdout = JSON.stringify(VALID_OUTPUT);
+    const db = createTestD1();
+    const consumer = createReviewConsumer(makeEnv({ DB: db as never }), undefined, testOverrides);
+
+    await consumer(makeBatch(makePayload()));
+
+    const runnerCall = sandboxCalls.find((c) => c.cmd.includes("--input"))!;
+    expect(runnerCall.cmd).toContain("--level 'default'");
+  });
+
+  test("REVIEW_LEVEL=quick → runner runs `--level 'quick'` (AC-S7-level configurable)", async () => {
+    reset();
+    runnerStdout = JSON.stringify(VALID_OUTPUT);
+    const db = createTestD1();
+    const consumer = createReviewConsumer(
+      makeEnv({ DB: db as never, REVIEW_LEVEL: "quick" }),
+      undefined,
+      testOverrides,
+    );
+
+    await consumer(makeBatch(makePayload()));
+
+    const runnerCall = sandboxCalls.find((c) => c.cmd.includes("--input"))!;
+    expect(runnerCall.cmd).toContain("--level 'quick'");
+    expect(reviewCount(db)).toBe(1);
+  });
+
+  test("invalid REVIEW_LEVEL (incl. undelivered 'deep') → fail-loud BEFORE any sandbox step (never a silent downgrade)", async () => {
+    reset();
+    const db = createTestD1();
+    const consumer = createReviewConsumer(
+      makeEnv({ DB: db as never, REVIEW_LEVEL: "deep" }),
+      testLog,
+      testOverrides,
+    );
+
+    await expect(consumer(makeBatch(makePayload()))).rejects.toThrow(/invalid REVIEW_LEVEL/);
+
+    expect(sandboxCalls).toHaveLength(0);
+    expect(commenterCalls).toHaveLength(0);
+    expect(reviewCount(db)).toBe(0);
+    expect(kvGuardPuts).toHaveLength(0); // the in-flight guard is never touched
+    const errLine = logLines.find((l) => l.level === "error");
+    expect(errLine).toBeDefined();
+    expect(errLine!.msg).toContain("invalid REVIEW_LEVEL");
+  });
+
+  test("envelope target folded from reconFacts agrees with the idem key → put cross-check passes (T4 store gate)", async () => {
+    reset();
+    runnerStdout = JSON.stringify({
+      ...VALID_OUTPUT,
+      target: { owner: "acme", repo: "widgets", pr: 42, head_sha: SHA },
+    });
+    const db = createTestD1();
+    const consumer = createReviewConsumer(makeEnv({ DB: db as never }), undefined, testOverrides);
+
+    await consumer(makeBatch(makePayload()));
+
+    expect(reviewCount(db)).toBe(1);
+    const row = db.raw.query("SELECT envelope FROM reviews").get() as { envelope: string };
+    expect(JSON.parse(row.envelope).target).toEqual({ owner: "acme", repo: "widgets", pr: 42, head_sha: SHA });
   });
 
   test("failure logs a structured error with idempotency key + sandbox id before rethrow", async () => {
