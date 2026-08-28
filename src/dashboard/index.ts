@@ -10,7 +10,7 @@
 import { Hono } from "hono";
 import { getCookie } from "hono/cookie";
 import type { Env } from "../worker/env";
-import { buildAuthorizeUrl, exchangeCodeForToken, fetchGitHubUser } from "./oauth";
+import { buildAuthorizeUrl, exchangeCodeForToken, fetchGitHubUser, logOAuthFailure } from "./oauth";
 import {
   OAUTH_STATE_COOKIE,
   OAUTH_STATE_MAX_AGE_SEC,
@@ -58,10 +58,12 @@ dashboardApp.get("/oauth/callback", async (c) => {
     secrets.sessionSecret,
   );
   if (!stateOk) {
+    logOAuthFailure("state_verify", "state_mismatch");
     return c.html(errorPage("Sign-in could not be verified (bad or expired state)."), 400);
   }
   const code = c.req.query("code");
   if (!code) {
+    logOAuthFailure("callback", "missing_code");
     return c.html(errorPage("GitHub did not return an authorization code."), 400);
   }
   const callbackUri = `${new URL(c.req.url).origin}/dashboard/oauth/callback`;

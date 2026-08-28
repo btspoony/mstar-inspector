@@ -15,6 +15,28 @@ const GITHUB_HEADERS = {
   Accept: "application/vnd.github+json",
   "User-Agent": "mstar-inspector",
 } as const;
+// Upstream GitHub calls are bounded (worker convention: explicit timeout,
+// deterministic failure — consumer.ts EXEC_TIMEOUT_GIT_MS / qc F-001 class).
+const GITHUB_FETCH_TIMEOUT_MS = 10_000;
+
+/**
+ * Structured operator log for OAuth verification failures (same convention as
+ * webhooks.ts signature-reject logging). NEVER log codes/tokens/secrets —
+ * stages, reasons, and upstream statuses are not secrets.
+ */
+export function logOAuthFailure(
+  stage: "state_verify" | "callback" | "token_exchange" | "user_fetch",
+  reason: string,
+  extra: Record<string, unknown> = {},
+): void {
+  console.warn(JSON.stringify({ event: "dashboard_oauth", stage, reason, ...extra }));
+}
+
+function errorType(err: unknown): string {
+  // DOMException (timeout/abort) and TypeError (network) both carry `name`.
+  if (err instanceof Error) return err.name;
+  return String(err);
+}
 
 export function buildAuthorizeUrl(clientId: string, redirectUri: string, state: string): string {
   const url = new URL("https://github.com/login/oauth/authorize");
@@ -32,9 +54,11 @@ export async function exchangeCodeForToken(
   clientSecret: string,
   redirectUri: string,
 ): Promise<string | null> {
+  let res: Response;
   try {
-    const res = await fetch("https://github.com/login/oauth/access_token", {
+    res = await fetch("https://github.com/login/oauth/access_token", {
       method: "POST",
+      signal: AbortSignal.timeout(GITHUB_FETCH_TIMEOUT_MS),
       // The OAuth token endpoint is NOT the REST API: JSON only with
       // `Accept: application/json` (vnd.github+json is for api.github.com).
       headers: {
@@ -49,30 +73,53 @@ export async function exchangeCodeForToken(
         redirect_uri: redirectUri,
       }),
     });
-    if (!res.ok) return null;
-    // GitHub may still answer form-urlencoded / HTML; never throw on parse.
-    const data = (await res.json()) as { access_token?: unknown };
-    return typeof data.access_token === "string" && data.access_token.length > 0
-      ? data.access_token
-      : null;
-  } catch {
+  } catch (err) {
+    logOAuthFailure("token_exchange", "fetch_failed", { error_type: errorType(err) });
     return null;
   }
+  if (!res.ok) {
+    const githubStatus = res.status;
+    // Consume the failed body so the connection is released promptly.
+    await res.body?.cancel();
+    logOAuthFailure("token_exchange", "http_error", { github_status: githubStatus });
+    return null;
+  }
+  // GitHub may still answer form-urlencoded / HTML; never throw on parse.
+  const data = (await res.json().catch(() => null)) as { access_token?: unknown } | null;
+  if (data && typeof data.access_token === "string" && data.access_token.length > 0) {
+    return data.access_token;
+  }
+  logOAuthFailure("token_exchange", "unexpected_payload");
+  return null;
 }
 
 export type GitHubUser = { login: string; name: string | null };
 
 /** null on any upstream failure or unexpected payload (fail-closed). */
 export async function fetchGitHubUser(accessToken: string): Promise<GitHubUser | null> {
+  let res: Response;
   try {
-    const res = await fetch("https://api.github.com/user", {
+    res = await fetch("https://api.github.com/user", {
+      signal: AbortSignal.timeout(GITHUB_FETCH_TIMEOUT_MS),
       headers: { ...GITHUB_HEADERS, Authorization: `Bearer ${accessToken}` },
     });
-    if (!res.ok) return null;
-    const data = (await res.json()) as { login?: unknown; name?: unknown };
-    if (typeof data.login !== "string" || data.login.length === 0) return null;
-    return { login: data.login, name: typeof data.name === "string" ? data.name : null };
-  } catch {
+  } catch (err) {
+    logOAuthFailure("user_fetch", "fetch_failed", { error_type: errorType(err) });
     return null;
   }
+  if (!res.ok) {
+    const githubStatus = res.status;
+    await res.body?.cancel();
+    logOAuthFailure("user_fetch", "http_error", { github_status: githubStatus });
+    return null;
+  }
+  const data = (await res.json().catch(() => null)) as {
+    login?: unknown;
+    name?: unknown;
+  } | null;
+  if (data && typeof data.login === "string" && data.login.length > 0) {
+    return { login: data.login, name: typeof data.name === "string" ? data.name : null };
+  }
+  logOAuthFailure("user_fetch", "unexpected_payload");
+  return null;
 }

@@ -2,13 +2,14 @@
  * Plan 08 Task 2 tests: signed session cookie + OAuth state CSRF, through
  * the real worker mount (app.route("/dashboard", dashboardApp)).
  *
- * The GitHub code-exchange/user-fetch network path is exercised only in
- * live smoke (user-gated); here callback coverage stops at the fail-closed
- * state checks, which run before any network call.
+ * The end-to-end callback network path is exercised only in live smoke
+ * (user-gated); here callback coverage stops at the fail-closed state/code
+ * checks, and the two GitHub helpers (code exchange, user fetch) are
+ * unit-tested with stubbed fetch.
  */
 import { afterEach, describe, expect, test } from "bun:test";
 import worker from "../../src/worker/index";
-import { exchangeCodeForToken } from "../../src/dashboard/oauth";
+import { exchangeCodeForToken, fetchGitHubUser } from "../../src/dashboard/oauth";
 import type { Env } from "../../src/worker/env";
 import {
   OAUTH_STATE_COOKIE,
@@ -45,6 +46,19 @@ function dashboardRequest(path: string, cookie?: string): Request {
   return new Request(`https://worker.local${path}`, {
     headers: cookie ? { Cookie: cookie } : {},
   });
+}
+// Structured-log assertions: capture console.warn JSON lines for one test.
+const origWarn = console.warn;
+afterEach(() => {
+  console.warn = origWarn;
+});
+
+function spyOnWarn(): string[] {
+  const warns: string[] = [];
+  console.warn = (msg: unknown) => {
+    warns.push(String(msg));
+  };
+  return warns;
 }
 
 describe("signed session cookie (session.ts)", () => {
@@ -127,6 +141,120 @@ describe("exchangeCodeForToken (oauth.ts, stubbed fetch)", () => {
       throw new TypeError("fetch failed");
     }) as unknown as typeof fetch;
     expect(await exchangeCodeForToken("code", CLIENT_ID, CLIENT_SECRET, "https://cb")).toBeNull();
+  });
+
+  test("fetch is bounded by an AbortSignal (W-1)", async () => {
+    let seenSignal: unknown;
+    globalThis.fetch = (async (_url: unknown, init?: RequestInit) => {
+      seenSignal = init?.signal;
+      return new Response(JSON.stringify({ access_token: "gho_token" }), { status: 200 });
+    }) as typeof fetch;
+    await exchangeCodeForToken("code", CLIENT_ID, CLIENT_SECRET, "https://cb");
+    expect(seenSignal).toBeInstanceOf(AbortSignal);
+  });
+
+  test("non-OK response consumes the body and logs stage + github_status without secrets (W-1/W-2)", async () => {
+    let bodyCancelled = false;
+    const failedResponse = {
+      ok: false,
+      status: 401,
+      body: {
+        cancel: async () => {
+          bodyCancelled = true;
+        },
+      },
+    } as unknown as Response;
+    globalThis.fetch = (async () => failedResponse) as unknown as typeof fetch;
+    const warns = spyOnWarn();
+    const token = await exchangeCodeForToken("secret-code-value", CLIENT_ID, CLIENT_SECRET, "https://cb");
+    expect(token).toBeNull();
+    expect(bodyCancelled).toBe(true);
+    expect(warns).toHaveLength(1);
+    const entry = JSON.parse(warns[0] ?? "") as Record<string, unknown>;
+    expect(entry.event).toBe("dashboard_oauth");
+    expect(entry.stage).toBe("token_exchange");
+    expect(entry.reason).toBe("http_error");
+    expect(entry.github_status).toBe(401);
+    expect(warns[0]).not.toContain(CLIENT_SECRET);
+    expect(warns[0]).not.toContain("secret-code-value");
+  });
+
+  test("fetch throw is logged with error_type, never the secret (W-2)", async () => {
+    globalThis.fetch = (async () => {
+      throw new TypeError("fetch failed");
+    }) as unknown as typeof fetch;
+    const warns = spyOnWarn();
+    expect(await exchangeCodeForToken("code", CLIENT_ID, CLIENT_SECRET, "https://cb")).toBeNull();
+    expect(warns).toHaveLength(1);
+    const entry = JSON.parse(warns[0] ?? "") as Record<string, unknown>;
+    expect(entry.stage).toBe("token_exchange");
+    expect(entry.reason).toBe("fetch_failed");
+    expect(entry.error_type).toBe("TypeError");
+    expect(warns[0]).not.toContain(CLIENT_SECRET);
+  });
+});
+
+describe("fetchGitHubUser (oauth.ts, stubbed fetch)", () => {
+  const origFetch = globalThis.fetch;
+  afterEach(() => {
+    globalThis.fetch = origFetch;
+  });
+
+  test("returns login/name and sends a bounded AbortSignal (W-1)", async () => {
+    let seenSignal: unknown;
+    let seenAuth = "";
+    globalThis.fetch = (async (_url: unknown, init?: RequestInit) => {
+      seenSignal = init?.signal;
+      seenAuth = ((init?.headers ?? {}) as Record<string, string>).Authorization ?? "";
+      return new Response(JSON.stringify({ login: "octocat", name: null }), { status: 200 });
+    }) as typeof fetch;
+    const user = await fetchGitHubUser("gho_token");
+    expect(user).toEqual({ login: "octocat", name: null });
+    expect(seenAuth).toBe("Bearer gho_token");
+    expect(seenSignal).toBeInstanceOf(AbortSignal);
+  });
+
+  test("non-OK response consumes the body and logs github_status (W-1/W-2)", async () => {
+    let bodyCancelled = false;
+    const failedResponse = {
+      ok: false,
+      status: 403,
+      body: {
+        cancel: async () => {
+          bodyCancelled = true;
+        },
+      },
+    } as unknown as Response;
+    globalThis.fetch = (async () => failedResponse) as unknown as typeof fetch;
+    const warns = spyOnWarn();
+    expect(await fetchGitHubUser("gho_token")).toBeNull();
+    expect(bodyCancelled).toBe(true);
+    const entry = JSON.parse(warns[0] ?? "") as Record<string, unknown>;
+    expect(entry.stage).toBe("user_fetch");
+    expect(entry.reason).toBe("http_error");
+    expect(entry.github_status).toBe(403);
+  });
+
+  test("payload without login returns null and logs unexpected_payload", async () => {
+    globalThis.fetch = (async () =>
+      new Response(JSON.stringify({ id: 1 }), { status: 200 })) as unknown as typeof fetch;
+    const warns = spyOnWarn();
+    expect(await fetchGitHubUser("gho_token")).toBeNull();
+    const entry = JSON.parse(warns[0] ?? "") as Record<string, unknown>;
+    expect(entry.stage).toBe("user_fetch");
+    expect(entry.reason).toBe("unexpected_payload");
+  });
+
+  test("network failure (fetch rejects) returns null and logs fetch_failed", async () => {
+    globalThis.fetch = (async () => {
+      throw new TypeError("fetch failed");
+    }) as unknown as typeof fetch;
+    const warns = spyOnWarn();
+    expect(await fetchGitHubUser("gho_token")).toBeNull();
+    const entry = JSON.parse(warns[0] ?? "") as Record<string, unknown>;
+    expect(entry.stage).toBe("user_fetch");
+    expect(entry.reason).toBe("fetch_failed");
+    expect(entry.error_type).toBe("TypeError");
   });
 });
 
@@ -236,6 +364,32 @@ describe("/dashboard routes", () => {
       makeEnv(),
     );
     expect(res.status).toBe(400);
+  });
+  test("callback state mismatch logs a structured state_verify warning (W-2)", async () => {
+    const warns = spyOnWarn();
+    const res = await worker.fetch(
+      dashboardRequest("/dashboard/oauth/callback?code=x&state=y"),
+      makeEnv(),
+    );
+    expect(res.status).toBe(400);
+    const entry = JSON.parse(warns[0] ?? "") as Record<string, unknown>;
+    expect(entry.event).toBe("dashboard_oauth");
+    expect(entry.stage).toBe("state_verify");
+    expect(entry.reason).toBe("state_mismatch");
+  });
+
+  test("callback with valid state but no code → 400 and a structured missing_code warning (W-2)", async () => {
+    const state = await createStateValue(SESSION_SECRET);
+    const warns = spyOnWarn();
+    const res = await worker.fetch(
+      dashboardRequest(`/dashboard/oauth/callback?state=${state}`, `${OAUTH_STATE_COOKIE}=${state}`),
+      makeEnv(),
+    );
+    expect(res.status).toBe(400);
+    const entry = JSON.parse(warns[0] ?? "") as Record<string, unknown>;
+    expect(entry.event).toBe("dashboard_oauth");
+    expect(entry.stage).toBe("callback");
+    expect(entry.reason).toBe("missing_code");
   });
 
   test("GET /dashboard/logout → 302 to login and session cookie expired", async () => {
