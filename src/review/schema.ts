@@ -122,6 +122,47 @@ export function capFindings(
   return { output: { ...output, findings }, omitted: output.findings.length - limit };
 }
 
+/**
+ * Per-finding size budgets (qc2 F-003): title/body are non-empty only in
+ * the schema — a single multi-megabyte body would blow the GitHub comment
+ * limit (65536 chars) and the D1 findings write AFTER the container model
+ * work is already paid. Char-based, mirroring truncateSummary: over-budget
+ * text is truncated with an ellipsis at the choke point (consumer step 10,
+ * before postReview/put), never rejected — a degraded finding beats a lost
+ * review. The assembled comment carries its own final ceiling
+ * (REVIEW_BODY_LIMIT, comment.ts).
+ */
+export const FINDING_TITLE_MAX = 200;
+export const FINDING_BODY_MAX = 2000;
+
+
+/**
+ * Clamp every finding's title/body to the budgets above; a fully
+ * within-budget output is returned unchanged (same reference).
+ */
+export function clampFindingSizes(output: ReviewOutput): ReviewOutput {
+  const oversized = output.findings.some(
+    (finding) => finding.title.length > FINDING_TITLE_MAX || finding.body.length > FINDING_BODY_MAX,
+  );
+  if (!oversized) {
+    return output;
+  }
+  return {
+    ...output,
+    findings: output.findings.map((finding) => ({
+      ...finding,
+      title:
+        finding.title.length <= FINDING_TITLE_MAX
+          ? finding.title
+          : `${finding.title.slice(0, FINDING_TITLE_MAX - 1)}…`,
+      body:
+        finding.body.length <= FINDING_BODY_MAX
+          ? finding.body
+          : `${finding.body.slice(0, FINDING_BODY_MAX - 1)}…`,
+    })),
+  };
+}
+
 /** Extract the first ```json fenced block, or null. */
 function extractJsonFence(text: string): string | null {
   const match = text.match(/```json\s*([\s\S]*?)```/);

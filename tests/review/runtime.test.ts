@@ -28,6 +28,11 @@ describe("REVIEW_SEATS (harness tier table)", () => {
     expect(isReviewLevel("deep")).toBe(false);
     expect(isReviewLevel(2)).toBe(false);
     expect(isReviewLevel(undefined)).toBe(false);
+    // qc3 F-302: Object.prototype keys must NOT pass (`in` would accept them).
+    expect(isReviewLevel("toString")).toBe(false);
+    expect(isReviewLevel("constructor")).toBe(false);
+    expect(isReviewLevel("hasOwnProperty")).toBe(false);
+    expect(isReviewLevel("__proto__")).toBe(false);
   });
 });
 

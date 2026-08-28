@@ -34,7 +34,12 @@ export interface AgentRuntime {
   runReview(input: AgentRuntimeRunInput): Promise<MstarReviewV1>;
 }
 
-/** Type guard narrowing an arbitrary runtime value (JSON wire input) onto the delivered tiers. */
+/**
+ * Type guard narrowing an arbitrary runtime value (JSON wire input) onto the
+ * delivered tiers. Own-key check (qc3 F-302): `value in REVIEW_SEATS` also
+ * matches Object.prototype keys ("toString", "constructor", …) — only
+ * Object.hasOwn rejects them fail-fast at the port.
+ */
 export function isReviewLevel(value: unknown): value is ReviewLevel {
-  return typeof value === "string" && value in REVIEW_SEATS;
+  return typeof value === "string" && Object.hasOwn(REVIEW_SEATS, value);
 }

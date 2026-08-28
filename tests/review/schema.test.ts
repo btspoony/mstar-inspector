@@ -22,7 +22,14 @@
  */
 
 import { describe, expect, test } from "bun:test";
-import { capFindings, parseReviewOutput, type ReviewOutput } from "../../src/review/schema";
+import {
+  clampFindingSizes,
+  FINDING_BODY_MAX,
+  FINDING_TITLE_MAX,
+  capFindings,
+  parseReviewOutput,
+  type ReviewOutput,
+} from "../../src/review/schema";
 import type { PrTallyResult } from "@mstar-harness/engine";
 
 const VALID: ReviewOutput = {
@@ -411,5 +418,50 @@ describe("capFindings (Phase 5 B4, merge-class priority)", () => {
     const { output, omitted } = capFindings({ ...base, findings });
     expect(output.findings).toHaveLength(50);
     expect(omitted).toBe(10);
+  });
+});
+
+describe("clampFindingSizes (qc2 F-003, per-finding byte budgets)", () => {
+  const base: ReviewOutput = {
+    schema: "mstar.review/v1",
+    verdict: "blocked",
+    summary_md: "s",
+    findings: [],
+  };
+  const finding = (title: string, body: string): ReviewOutput["findings"][number] => ({
+    mergeClass: "nit",
+    title,
+    body,
+  });
+
+  test("within-budget findings pass through unchanged (same reference)", () => {
+    const output = { ...base, findings: [finding("t", "b")] };
+    expect(clampFindingSizes(output)).toBe(output);
+  });
+
+  test("oversized title/body are truncated to the budgets with an ellipsis", () => {
+    const output = {
+      ...base,
+      findings: [finding("T".repeat(FINDING_TITLE_MAX + 50), "B".repeat(FINDING_BODY_MAX + 99))],
+    };
+    const clamped = clampFindingSizes(output);
+    expect(clamped.findings[0]!.title).toHaveLength(FINDING_TITLE_MAX);
+    expect(clamped.findings[0]!.title!.endsWith("…")).toBe(true);
+    expect(clamped.findings[0]!.body).toHaveLength(FINDING_BODY_MAX);
+    expect(clamped.findings[0]!.body.endsWith("…")).toBe(true);
+  });
+
+  test("boundary-length values are kept verbatim", () => {
+    const output = { ...base, findings: [finding("T".repeat(FINDING_TITLE_MAX), "B".repeat(FINDING_BODY_MAX))] };
+    const clamped = clampFindingSizes(output);
+    expect(clamped.findings[0]!.title).toBe("T".repeat(FINDING_TITLE_MAX));
+    expect(clamped.findings[0]!.body).toBe("B".repeat(FINDING_BODY_MAX));
+  });
+
+  test("mixed sets clamp only the oversized findings", () => {
+    const output = { ...base, findings: [finding("ok", "ok"), finding("X".repeat(FINDING_BODY_MAX + 1), "b")] };
+    const clamped = clampFindingSizes(output);
+    expect(clamped.findings[0]!.title).toBe("ok");
+    expect(clamped.findings[1]!.title).toHaveLength(FINDING_TITLE_MAX);
   });
 });

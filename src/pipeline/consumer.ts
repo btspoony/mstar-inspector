@@ -40,7 +40,7 @@
 import type { D1Database, KVNamespace, Message, MessageBatch } from "@cloudflare/workers-types";
 import type { ReviewJobPayload } from "../contracts/review-job";
 import { idemKey, IDEMPOTENCY_SECONDS, type IdempotencyKey } from "../contracts/idem";
-import { parseReviewOutput, capFindings } from "../review/schema";
+import { parseReviewOutput, capFindings, clampFindingSizes } from "../review/schema";
 import { isReviewLevel, REVIEW_SEATS, type ReviewLevel } from "../review/runtime";
 import { redactReviewOutput } from "./redact";
 import { createArtifactStore, type D1ArtifactStore } from "../store/artifact-store";
@@ -110,7 +110,7 @@ const OMP_AGENT_DIR = "/opt/omp-agent";
 // Per-call exec bounds (ms) — every sandbox exec carries an explicit timeout
 // so a hung gh/git/model call fails deterministically instead of silently
 // eating a container (plan QC 06 fix round 1 / qc3 F-001).
-/** gh/git steps (clone, rev-parse, diff) — measured ~2.6s, 2min is generous. */
+/** gh/git steps (clone, rev-parse, diff, numstat, runner-input write) — measured ~2.6s total, 2min each is generous. */
 const EXEC_TIMEOUT_GIT_MS = 120_000;
 /** In-image runner (real model call, measured ~52s) — 10min ceiling. */
 const EXEC_TIMEOUT_RUNNER_MS = 600_000;
@@ -146,13 +146,18 @@ export const defaultConsumerLog: ConsumerLog = {
 // ---------------------------------------------------------------------------
 
 /**
- * Guard TTL (seconds): must exceed the max review wall-clock — the runner
- * step (600s) plus the three git steps (clone / rev-parse / diff, 120s each)
- * plus slack — so the guard can never expire mid-review and unblock a
- * concurrent duplicate. KV expirationTtl is in seconds.
+ * Guard TTL (seconds): must exceed the max review wall-clock — ALL FIVE
+ * git-timed steps (clone / rev-parse / diff / numstat / runner-input write,
+ * 120s each — numstat + the input write were added by plan 07 without
+ * recomputing this, qc3 F-301) plus the runner step (600s) plus slack for
+ * the untimed steps (token mint, sandbox create, comment post, KV/D1
+ * puts) — so the guard can never expire mid-review and unblock a
+ * concurrent duplicate. KV expirationTtl is in seconds. Pinned exactly by
+ * consumer.test.ts ("REVIEW_GUARD_TTL_SECONDS covers the full step-budget
+ * arithmetic") so a future step addition re-breaks loudly.
  */
 export const REVIEW_GUARD_TTL_SECONDS = Math.ceil(
-  (EXEC_TIMEOUT_RUNNER_MS + 3 * EXEC_TIMEOUT_GIT_MS + 60_000) / 1000,
+  (EXEC_TIMEOUT_RUNNER_MS + 5 * EXEC_TIMEOUT_GIT_MS + 120_000) / 1000,
 );
 
 /**
@@ -219,7 +224,7 @@ async function releaseReviewGuard(
 /**
  * Guard-held backoff schedule (seconds), indexed by message.attempts (1-based
  * — the first delivery is attempt 1). 60s → 120s → 240s, all below
- * REVIEW_GUARD_TTL_SECONDS (the constant above, ~17min) so the held guard
+ * REVIEW_GUARD_TTL_SECONDS (the constant above, ~22min) so the held guard
  * can never expire mid-backoff into a duplicate race. Attempts past the
  * schedule's end have consumed the queue's max_retries and must be acked, not
  * retried (a further retry() would land the job on the DLQ).
@@ -300,11 +305,19 @@ export function resolveReviewLevel(value: string | undefined): ReviewLevel {
   );
 }
 
-/** Base64-encode UTF-8 text for the in-image JSON write step (workerd-safe). */
+/**
+ * Base64-encode UTF-8 text for the in-image JSON write step (workerd-safe).
+ * Byte→char conversion is CHUNKED (qc3 F-303): a plain per-byte `+=` loop
+ * is O(n²) and this sits in the worker hot path; 0x8000 chars per
+ * `String.fromCharCode` call stays far below the engine arg-count cliff.
+ */
 function toBase64Utf8(text: string): string {
   const bytes = new TextEncoder().encode(text);
+  const CHUNK = 0x8000;
   let binary = "";
-  for (const byte of bytes) binary += String.fromCharCode(byte);
+  for (let i = 0; i < bytes.length; i += CHUNK) {
+    binary += String.fromCharCode(...bytes.subarray(i, i + CHUNK));
+  }
   return btoa(binary);
 }
 
@@ -568,12 +581,13 @@ async function processMessage(payload: ReviewJobPayload, deps: ProcessDeps): Pro
       throw new Error(`parse failed: ${parsed.error}`);
     }
 
-    // 10. SEC-02 + B4 choke point: redact secret-shaped spans (PEM, tokens,
-    // keys, long hex) and cap findings to the Top-50 by merge class BEFORE
-    // anything can reach the public review body or the D1 envelope. The SAME
-    // capped array feeds both the post and the put (B4: 渲染与落库同一
-    // 裁剪数组).
-    const capped = capFindings(redactReviewOutput(parsed.output));
+    // 10. SEC-02 + B4 + size-budget choke point: redact secret-shaped spans
+    // (PEM, tokens, keys, long hex — F-001: every model-controlled field),
+    // clamp per-finding title/body to their budgets (qc2 F-003), then cap
+    // findings to the Top-50 by merge class BEFORE anything can reach the
+    // public review body or the D1 envelope. The SAME capped array feeds
+    // both the post and the put (B4: 渲染与落库同一裁剪数组).
+    const capped = capFindings(clampFindingSizes(redactReviewOutput(parsed.output)));
     const output = capped.output;
 
     // 11. Upsert the overall review comment FIRST (the user-facing

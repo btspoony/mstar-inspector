@@ -6,13 +6,15 @@
  * The interpolated fields (owner/repo/pr number/clone dir) come from the
  * verified webhook payload, not from untrusted free text.
  *
- * Every payload-derived field is validated against a strict allowlist and
- * single-quoted before interpolation (plan QC 06 fix round 1 / qc2 F-001):
- * owner/repo are GitHub name chars ([A-Za-z0-9._-]), prNumber is a positive
- * integer, clone/diff/runner paths are fixed in-image constants. Anything
- * else fails closed with a descriptive error BEFORE a shell string is built
- * — a metacharacter (`;`, space, backtick, `$(...)`, `'`) can never reach
- * `sh -c`.
+ * Payload-derived fields (owner/repo/prNumber) are validated against a
+ * strict allowlist and single-quoted before interpolation (plan QC 06 fix
+ * round 1 / qc2 F-001): owner/repo are GitHub name chars
+ * ([A-Za-z0-9._-]), prNumber is a positive integer. The in-image path
+ * fields (clone/diff/runner/input) are NOT payload-derived — they are
+ * fixed constants supplied by the consumer (verified against qc2 F-006);
+ * they are still single-quoted. Anything else fails closed with a
+ * descriptive error BEFORE a shell string is built — a metacharacter
+ * (`;`, space, backtick, `$(...)`, `'`) can never reach `sh -c`.
  *
  * Primary diff path is `gh pr diff` (T1 falsified: GH_TOKEN env injection
  * works, non-empty diff, exit 0). The clone step exists so the in-image

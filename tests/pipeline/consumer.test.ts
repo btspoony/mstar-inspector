@@ -33,6 +33,7 @@ import { describe, expect, mock, test } from "bun:test";
 import type { MessageBatch } from "@cloudflare/workers-types";
 import type { ReviewJobPayload } from "../../src/contracts/review-job";
 import type { ReviewOutput } from "../../src/review/schema";
+import { FINDING_BODY_MAX, FINDING_TITLE_MAX } from "../../src/review/schema";
 import { createArtifactStore } from "../../src/store/artifact-store";
 import { idemKey } from "../../src/contracts/idem";
 import { createTestD1 } from "../store/helpers";
@@ -573,24 +574,29 @@ describe("createReviewConsumer", () => {
     expect(reviewCount(db)).toBe(1);
   });
 
-  test("invalid REVIEW_LEVEL (incl. undelivered 'deep') → fail-loud BEFORE any sandbox step (never a silent downgrade)", async () => {
-    reset();
-    const db = createTestD1();
-    const consumer = createReviewConsumer(
-      makeEnv({ DB: db as never, REVIEW_LEVEL: "deep" }),
-      testLog,
-      testOverrides,
-    );
+  test("invalid REVIEW_LEVEL (incl. 'deep' and Object.prototype keys) → fail-loud BEFORE any sandbox step (never a silent downgrade)", async () => {
+    // qc3 F-302: "toString"/"__proto__" pass `in REVIEW_SEATS` — only an
+    // own-key check rejects them at this first, pre-sandbox guard.
+    for (const level of ["deep", "toString", "constructor", "__proto__"]) {
+      reset();
+      const db = createTestD1();
+      const consumer = createReviewConsumer(
+        makeEnv({ DB: db as never, REVIEW_LEVEL: level }),
+        testLog,
+        testOverrides,
+      );
 
-    await expect(consumer(makeBatch(makePayload()))).rejects.toThrow(/invalid REVIEW_LEVEL/);
+      await expect(consumer(makeBatch(makePayload()))).rejects.toThrow(/invalid REVIEW_LEVEL/);
 
-    expect(sandboxCalls).toHaveLength(0);
-    expect(commenterCalls).toHaveLength(0);
-    expect(reviewCount(db)).toBe(0);
-    expect(kvGuardPuts).toHaveLength(0); // the in-flight guard is never touched
-    const errLine = logLines.find((l) => l.level === "error");
-    expect(errLine).toBeDefined();
-    expect(errLine!.msg).toContain("invalid REVIEW_LEVEL");
+      expect(sandboxCalls).toHaveLength(0);
+      expect(commenterCalls).toHaveLength(0);
+      expect(reviewCount(db)).toBe(0);
+      expect(kvGuardPuts).toHaveLength(0); // the in-flight guard is never touched
+      const errLine = logLines.find((l) => l.level === "error");
+      expect(errLine).toBeDefined();
+      expect(errLine!.msg).toContain("invalid REVIEW_LEVEL");
+      expect(errLine!.msg).toContain(JSON.stringify(level));
+    }
   });
 
   test("envelope target folded from reconFacts agrees with the idem key → put cross-check passes (T4 store gate)", async () => {
@@ -691,8 +697,15 @@ describe("createReviewConsumer", () => {
           file_path: "src/auth.ts",
           line_start: 1,
           line_end: 1,
-          title: "Leak",
+          title: "Leak ghp_abcdef1234567890",
           body: "token ghp_abcdef1234567890 and Bearer ghs_abcdef1234567890",
+        },
+        {
+          mergeClass: "should-fix",
+          category: "AKIAIOSFODNN7EXAMPLE leak",
+          file_path: "evil/AKIAIOSFODNN7EXAMPLE/x.ts",
+          title: "Exfil",
+          body: "clean body",
         },
       ],
     };
@@ -707,10 +720,12 @@ describe("createReviewConsumer", () => {
       output: ReviewOutput;
       omittedFindings: number;
     };
-    expect(posted.output.summary_md).not.toContain("AKIAIOSFODNN7EXAMPLE");
-    expect(posted.output.summary_md).not.toContain("a".repeat(40));
-    expect(posted.output.findings[0]!.body).not.toContain("ghp_abcdef1234567890");
     expect(posted.output.findings[0]!.body).not.toContain("ghs_abcdef1234567890");
+    // qc2 F-001: title / category / file_path are model-controlled public
+    // channels too — redacted through the same consumer choke point.
+    expect(posted.output.findings[0]!.title).not.toContain("ghp_abcdef1234567890");
+    expect(posted.output.findings[1]!.category).not.toContain("AKIAIOSFODNN7EXAMPLE");
+    expect(posted.output.findings[1]!.file_path).not.toContain("AKIAIOSFODNN7EXAMPLE");
     expect(posted.omittedFindings).toBe(0);
 
     // The stored row (summary_md + envelope) carries no secret-shaped text;
@@ -724,6 +739,37 @@ describe("createReviewConsumer", () => {
     expect(row.raw_output).toBeNull();
     expect(row.envelope).not.toContain("AKIAIOSFODNN7EXAMPLE");
     expect(row.envelope).not.toContain("ghp_abcdef1234567890");
+  });
+
+
+  test("oversized finding title/body are clamped before post and insert (qc2 F-003 wiring)", async () => {
+    reset();
+    const big: ReviewOutput = {
+      schema: "mstar.review/v1",
+      verdict: "blocked",
+      summary_md: "s",
+      findings: [
+        {
+          mergeClass: "nit",
+          // Non-hex filler: a long [0-9a-fA-F] run would be redacted
+          // (long-hex pattern) before the clamp under test ever runs.
+          title: "T".repeat(FINDING_TITLE_MAX + 10),
+          body: "Z".repeat(FINDING_BODY_MAX + 10),
+        },
+      ],
+    };
+    runnerStdout = JSON.stringify(big);
+    const db = createTestD1();
+    const consumer = createReviewConsumer(makeEnv({ DB: db as never }), undefined, testOverrides);
+
+    await consumer(makeBatch(makePayload()));
+
+    const posted = commenterCalls.find((c) => c.op === "post")!.args[0] as { output: ReviewOutput };
+    expect(posted.output.findings[0]!.title).toHaveLength(FINDING_TITLE_MAX);
+    expect(posted.output.findings[0]!.body).toHaveLength(FINDING_BODY_MAX);
+    // The D1 envelope carries the same clamped array (B4: one capped array).
+    const row = db.raw.query("SELECT envelope FROM reviews").get() as { envelope: string };
+    expect(row.envelope).not.toContain("T".repeat(FINDING_TITLE_MAX + 10));
   });
 
   test("findings over the cap are trimmed to Top-50 by merge class on post AND insert (B4)", async () => {
@@ -1033,5 +1079,14 @@ describe("createReviewConsumer", () => {
     ]);
     expect(kvGuardDeletes).toEqual(["inflight:123:acme/widgets:42"]);
     expect(reviewCount(db)).toBe(1);
+  });
+  test("REVIEW_GUARD_TTL_SECONDS covers the full step-budget arithmetic (qc3 F-301 pin)", () => {
+    // Exact pin: FIVE git-timed steps (clone, rev-parse, diff, numstat,
+    // runner-input write) × 120s + the 600s runner + 120s slack for the
+    // untimed steps (token mint, sandbox create, comment post, KV/D1 puts)
+    // = 1320s. numstat + the input write were added by plan 07 without
+    // recomputing the old 3-step formula (1020s) — any future step or
+    // ceiling change must recompute this constant ON PURPOSE.
+    expect(REVIEW_GUARD_TTL_SECONDS).toBe(1320);
   });
 });

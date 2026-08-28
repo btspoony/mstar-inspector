@@ -432,8 +432,11 @@ export const ompAgentRuntime: AgentRuntime = {
   async runReview(input: AgentRuntimeRunInput): Promise<MstarReviewV1> {
     // Port-level guard: the type system makes a bad level unrepresentable in
     // TS, but runtime values arrive from JSON (runner `--level`) — reject
-    // instead of silently degrading (spec: throw, 不静默降档).
-    if (!(input.level in REVIEW_SEATS)) {
+    // instead of silently degrading (spec: throw, 不静默降档). Own-key check
+    // (qc3 F-302): `in` also matches Object.prototype keys, which would pass
+    // this guard and only explode later inside runReview with a misleading
+    // seat-partition message.
+    if (!Object.hasOwn(REVIEW_SEATS, input.level)) {
       throw new Error(`unsupported review level: ${JSON.stringify(String(input.level))}`);
     }
 

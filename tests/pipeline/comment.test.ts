@@ -31,6 +31,7 @@ import {
   planUpsert,
   postReviewWithOctokit,
   renderFindings,
+  REVIEW_BODY_LIMIT,
   SUMMARY_MD_LIMIT,
   truncateSummary,
   type PostOctokit,
@@ -209,19 +210,44 @@ describe("review comment upsert (T5)", () => {
     });
   });
 
+  // F-002: a marker comment is only PATCHable when a bot account (our
+  // GitHub App user) authored it. Any PR participant can plant the marker
+  // text on a human account — such comments are misses, never update
+  // targets; excluded ids model the 403/404 recovery replan.
+  const botMarker = (id: number, round: number) => ({
+    id,
+    body: `<!-- mstar-inspector:review:v1 round=${round} -->\n第 ${round} 次 review`,
+    user: { type: "Bot" },
+  });
+
   describe("findReviewComment", () => {
-    test("finds the first comment whose body starts with the marker prefix", () => {
+    test("finds the first bot-authored comment whose body starts with the marker prefix", () => {
       const comments = [
-        { id: 1, body: "a human comment" },
-        { id: 2, body: "<!-- mstar-inspector:review:v1 round=2 -->\n第 2 次 review" },
-        { id: 3, body: "<!-- mstar-inspector:review:v1 round=1 -->\n第 1 次 review" },
+        { id: 1, body: "a human comment", user: { type: "User" } },
+        botMarker(2, 2),
+        botMarker(3, 1),
       ];
       expect(findReviewComment(comments)).toEqual({ id: 2, body: comments[1]!.body });
     });
 
     test("returns null when no comment carries the marker", () => {
-      expect(findReviewComment([{ id: 1, body: "hello" }, { id: 2, body: null }])).toBeNull();
+      expect(findReviewComment([{ id: 1, body: "hello", user: { type: "User" } }, { id: 2, body: null }])).toBeNull();
       expect(findReviewComment([])).toBeNull();
+    });
+
+    test("a human-planted marker (user.type User) is NEVER a hit (qc2 F-002)", () => {
+      const comments = [{ id: 7, body: "<!-- mstar-inspector:review:v1 round=2 -->\nplanted", user: { type: "User" } }];
+      expect(findReviewComment(comments)).toBeNull();
+    });
+
+    test("a comment with no user info is not provably app-authored → miss", () => {
+      expect(findReviewComment([{ id: 7, body: "<!-- mstar-inspector:review:v1 round=1 -->" }])).toBeNull();
+    });
+
+    test("excluded ids are skipped (403/404 recovery replans past dead comments)", () => {
+      const comments = [botMarker(2, 2), botMarker(3, 1)];
+      expect(findReviewComment(comments, new Set([2]))).toEqual({ id: 3, body: comments[1]!.body });
+      expect(findReviewComment(comments, new Set([2, 3]))).toBeNull();
     });
   });
 
@@ -231,23 +257,27 @@ describe("review comment upsert (T5)", () => {
       expect(planUpsert([])).toEqual({ action: "create", round: 1 });
     });
 
-    test("marker comment with round N → update that comment with round N+1", () => {
-      expect(planUpsert([{ id: 7, body: "<!-- mstar-inspector:review:v1 round=2 -->\n第 2 次 review" }])).toEqual({
-        action: "update",
-        commentId: 7,
-        round: 3,
-      });
+    test("bot marker comment with round N → update that comment with round N+1", () => {
+      expect(planUpsert([botMarker(7, 2)])).toEqual({ action: "update", commentId: 7, round: 3 });
     });
 
     test("malformed marker is treated as a miss → create with round=1", () => {
-      expect(planUpsert([{ id: 7, body: "<!-- mstar-inspector:review:v1 round=abc -->" }])).toEqual({
+      expect(planUpsert([{ id: 7, body: "<!-- mstar-inspector:review:v1 round=abc -->", user: { type: "Bot" } }])).toEqual({
         action: "create",
         round: 1,
       });
-      expect(planUpsert([{ id: 7, body: "<!-- mstar-inspector:review:v1 -->" }])).toEqual({
+      expect(planUpsert([{ id: 7, body: "<!-- mstar-inspector:review:v1 -->", user: { type: "Bot" } }])).toEqual({
         action: "create",
         round: 1,
       });
+    });
+
+    test("human-planted marker with the bot marker excluded → create with round=1 (qc2 F-002)", () => {
+      const comments = [
+        { id: 9, body: "<!-- mstar-inspector:review:v1 round=2 -->\nplanted", user: { type: "User" } },
+        botMarker(7, 2),
+      ];
+      expect(planUpsert(comments, new Set([7]))).toEqual({ action: "create", round: 1 });
     });
   });
 
@@ -265,6 +295,28 @@ describe("review comment upsert (T5)", () => {
       const body = buildUpsertBody(output, 10, 1, "abc1234");
       expect(body.endsWith("\n\n*(+10 more findings omitted)*")).toBe(true);
     });
+  });
+});
+describe("REVIEW_BODY_LIMIT clamp (qc2 F-003 / qc3 F-304)", () => {
+  const output: ReviewOutput = {
+    schema: "mstar.review/v1",
+    verdict: "blocked",
+    summary_md: "x".repeat(REVIEW_BODY_LIMIT + 5000),
+    findings: [],
+  };
+
+  test("an over-limit assembled body is clamped under the GitHub 65536-char cap, marker/header intact", () => {
+    const body = buildUpsertBody(output, 0, 4, "0123456789abcdef0123456789abcdef01234567");
+    expect(body.length).toBeLessThan(65536);
+    expect(body.startsWith("<!-- mstar-inspector:review:v1 round=4 -->\n")).toBe(true);
+    expect(body.endsWith("…")).toBe(true);
+  });
+
+  test("within-limit bodies pass through verbatim", () => {
+    const small: ReviewOutput = { ...output, summary_md: "small" };
+    const body = buildUpsertBody(small, 0, 1, "abc1234");
+    expect(body.endsWith("…")).toBe(false);
+    expect(body).toContain("small");
   });
 });
 
@@ -291,11 +343,13 @@ describe("postReview wiring (mock octokit, SG-001)", () => {
     createParams?: Record<string, unknown>;
   };
 
-  function mockOctok(comments: Array<{ id: number; body?: string | null }>, updateError?: unknown) {
+  type MockComment = { id: number; body?: string | null; user?: { type?: string } | null };
+
+  function mockOctok(comments: MockComment[], updateError?: unknown) {
     const calls: Calls = {};
     const octokit: PostOctokit = {
       paginate: mock(
-        async (route: unknown, params: Record<string, unknown>): Promise<Array<{ id: number; body?: string | null }>> => {
+        async (route: unknown, params: Record<string, unknown>): Promise<MockComment[]> => {
           calls.listRoute = route;
           calls.listParams = params;
           return comments;
@@ -347,7 +401,7 @@ describe("postReview wiring (mock octokit, SG-001)", () => {
 
   test("marker hit → updateComment with round+1 (same PR never gets a new comment per round)", async () => {
     const { calls, octokit } = mockOctok([
-      { id: 7, body: "<!-- mstar-inspector:review:v1 round=2 -->\n第 2 次 review" },
+      { id: 7, body: "<!-- mstar-inspector:review:v1 round=2 -->\n第 2 次 review", user: { type: "Bot" } },
     ]);
     await postReviewWithOctokit(octokit, input);
     expect(calls.createParams).toBeUndefined();
@@ -376,7 +430,7 @@ describe("postReview wiring (mock octokit, SG-001)", () => {
   test("updateComment 404 → soft-recovery fallback to createComment round=1 (WF-003)", async () => {
     const notFound = Object.assign(new Error("not found"), { status: 404 });
     const { calls, octokit } = mockOctok(
-      [{ id: 7, body: "<!-- mstar-inspector:review:v1 round=2 -->\n第 2 次 review" }],
+      [{ id: 7, body: "<!-- mstar-inspector:review:v1 round=2 -->\n第 2 次 review", user: { type: "Bot" } }],
       notFound,
     );
     await postReviewWithOctokit(octokit, input);
@@ -384,9 +438,51 @@ describe("postReview wiring (mock octokit, SG-001)", () => {
     expect(String(calls.createParams!.body)).toMatch(/^<!-- mstar-inspector:review:v1 round=1 -->/);
   });
 
+
+  test("updateComment 403 on a foreign bot's marker → treat as a miss, create round=1 (qc2 F-002)", async () => {
+    const forbidden = Object.assign(new Error("forbidden"), { status: 403 });
+    const { calls, octokit } = mockOctok(
+      [{ id: 7, body: "<!-- mstar-inspector:review:v1 round=2 -->\nforeign bot", user: { type: "Bot" } }],
+      forbidden,
+    );
+    await postReviewWithOctokit(octokit, input);
+    expect(calls.updateParams).toMatchObject({ comment_id: 7 });
+    expect(String(calls.createParams!.body)).toMatch(/^<!-- mstar-inspector:review:v1 round=1 -->/);
+  });
+
+  test("updateComment 403 on the oldest marker → replan updates the NEXT bot marker (qc2 F-002)", async () => {
+    const comments = [
+      { id: 7, body: "<!-- mstar-inspector:review:v1 round=1 -->\nforeign bot", user: { type: "Bot" } },
+      { id: 8, body: "<!-- mstar-inspector:review:v1 round=2 -->\nours", user: { type: "Bot" } },
+    ];
+    const updatedIds: number[] = [];
+    const created: string[] = [];
+    const octokit: PostOctokit = {
+      paginate: mock(async () => comments),
+      rest: {
+        issues: {
+          listComments: mock(async () => {
+            throw new Error("unexpected: listComments is driven through paginate");
+          }),
+          updateComment: mock(async (params: Record<string, unknown>) => {
+            updatedIds.push(params.comment_id as number);
+            if (params.comment_id === 7) throw Object.assign(new Error("forbidden"), { status: 403 });
+            return {};
+          }),
+          createComment: mock(async (params: Record<string, unknown>) => {
+            created.push(String(params.body));
+            return {};
+          }),
+        },
+      },
+    };
+    await postReviewWithOctokit(octokit, input);
+    expect(updatedIds).toEqual([7, 8]);
+    expect(created).toHaveLength(0);
+  });
   test("non-404 updateComment errors rethrow (no fallback)", async () => {
     const { octokit } = mockOctok(
-      [{ id: 7, body: "<!-- mstar-inspector:review:v1 round=2 -->\n第 2 次 review" }],
+      [{ id: 7, body: "<!-- mstar-inspector:review:v1 round=2 -->\n第 2 次 review", user: { type: "Bot" } }],
       new Error("rate limited"),
     );
     await expect(postReviewWithOctokit(octokit, input)).rejects.toThrow("rate limited");
