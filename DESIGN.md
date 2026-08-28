@@ -59,7 +59,7 @@ rounded:
 # tokens. See mstar-design-md completeness-checklist § Level 2.
 ---
 
-<!-- COMPLETENESS_LEVEL: 1 — last audited 2026-08-28 -->
+<!-- COMPLETENESS_LEVEL: 1 — last audited 2026-08-29 -->
 
 # mstar-inspector Console
 
@@ -81,22 +81,33 @@ All values live in the frontmatter (`colors:` is the SSOT). Usage rules:
   fill**: a placeholder block reads as inert because its fill is flat gray, its
   text is `gray-900`, and it never uses `blue-700`.
 - `gray-1000` — primary text (page title, section titles, logged-in user).
-- `gray-900` — secondary text (descriptions, "Not in B0" status lines).
-- `blue-700` — the single brand accent: primary action (Login / Sign in with
-  GitHub) and links. Never used for disabled or placeholder affordances.
-- `red-700` — error only (OAuth failure banner, bad-state notices). Pair with
-  an explicit "what happened + what to do next" sentence.
-- `amber-700` — warning only (e.g. the read-only "reviews are fail-closed in
-  production" note on the Review section). Text on `background-100`.
+- `gray-900` — secondary text (descriptions, "Not in this iteration (B2/B3)" status lines).
+- `blue-700` — the single brand accent: constructive primary actions (Login /
+  Sign in with GitHub, Create GitHub App) and links. Never used for disabled
+  or placeholder affordances.
+- `red-700` — error banners (OAuth / manifest failure, bad-state notices) and
+  the destructive `Overwrite secrets` submit on the manifest confirm view.
+  Error banners pair with an explicit "what happened + what to do next"
+  sentence.
+- `amber-700` — warning only: the overwrite banner on the manifest confirm
+  view and the read-only "reviews are fail-closed in production" note on the
+  Review section. Text on `background-100`.
 
-### State legibility (B0 gate)
+### State legibility (B0 shell + B1 manifest flow)
+
+The page header (product name, GitHub identity, Logout) is unchanged from B0.
+B1 states below mirror the locked table in
+`.mstar/iterations/v0.4/specs/dashboard-b1-manifest.md` § DESIGN.md 意图 and
+use existing Level 1 tokens only — no success green, no component tokens.
 
 | State | Expression |
 |-------|------------|
 | Logged out | login view; exactly one `blue-700` primary action, no sections |
-| Logged in | header with GitHub login + Logout link; sections visible |
-| Placeholder disabled | `background-200` fill, `gray-900` text, `aria-disabled="true"`, no `blue-700`, no pointer cursor, no client-side submission |
-| Error (OAuth failed) | `red-700` text/border banner on the login view; session cookie never set |
+| GitHub App enabled | NOT `aria-disabled`; `background-100` fill with a 1px `gray-900` border; `Create GitHub App` primary submit = `blue-700` (same constructive class as Login) |
+| Model keys / Review placeholder | B0 inert rules: `background-200` fill, `gray-900` text, `aria-disabled="true"`, no `blue-700`, no pointer cursor, no client-side submission |
+| Confirm overwrite | single column (the `lg` three-column grid does not apply); `amber-700` warning banner; confirm checkbox; `Overwrite secrets` = `red-700` native submit (NOT Login blue); Cancel = `gray-1000` link to `/dashboard` |
+| Success | `gray-1000` + `copy-16` (`GitHub App {id} credentials stored.`); App id in tabular figures; NO success green |
+| Error (OAuth / manifest) | `red-700` banner + what-to-do-next; messages never contain PEM or webhook_secret |
 
 A disabled placeholder must never look like a clickable primary button. There
 is no hover/active styling for placeholders at this level.
@@ -109,7 +120,7 @@ build step (plan 08 locks zero-build SSR).
 - `heading-24` — page title ("Dashboard", login title).
 - `heading-16` — the three section titles (GitHub App / Model keys / Review).
 - `copy-16` — body text, section descriptions.
-- `copy-14` — secondary text: "Not in B0" status lines, muted hints.
+- `copy-14` — secondary text: "Not in this iteration (B2/B3)" status lines, muted hints.
 
 Dashboard-flavored numerals: where counts or ids appear later, use tabular
 figures (`font-variant-numeric: tabular-nums`). No marketing display sizes.
@@ -133,8 +144,10 @@ Rhythm rules:
 | `sm` | 640px | Single column; sections stack; full-width cards |
 | `lg` | 900px | Three equal-weight sections in one row (CSS grid `repeat(3, 1fr)`); below `lg` they stack |
 
-Two breakpoints are deliberate (Level 1): the B0 shell has no navigation,
-tables, or forms that would need intermediate widths.
+Two breakpoints are deliberate (Level 1): the shell has no navigation,
+tables, or wide forms that would need intermediate widths. Manifest flow
+views (start / confirm / success) are single column at every width — the `lg`
+three-column grid applies to the dashboard shell's sections only.
 
 <!-- LEVEL3_PLACEHOLDER: add Elevation (card/popover/modal shadows), Motion
 (durations + easing + prefers-reduced-motion), Shapes table, Voice & Content

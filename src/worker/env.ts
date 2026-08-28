@@ -30,4 +30,20 @@ export type Env = {
    * bytes; never reuse GITHUB_OAUTH_CLIENT_SECRET — rotation decoupled).
    */
   DASHBOARD_SESSION_SECRET?: string;
+  /**
+   * Cloudflare API access for /dashboard/manifest/commit (plan 11 B1 T2,
+   * architect lock spec L8): the confirm gate writes APP_ID / PRIVATE_KEY /
+   * WEBHOOK_SECRET via ONE PATCH to the Workers secrets-bulk endpoint
+   * (auto-deploys a new version — no manual redeploy). The token needs the
+   * `Workers Scripts Write` permission; the account id locates the script.
+   * Either missing → commit fails closed (5xx, zero writes). wrangler
+   * secret / .dev.vars only — never in git.
+   */
+  CLOUDFLARE_API_TOKEN?: string;
+  CLOUDFLARE_ACCOUNT_ID?: string;
+  /**
+   * Script name override; unset (or empty) → DEFAULT_CLOUDFLARE_WORKER_NAME
+   * ("mstar-inspector", = wrangler.jsonc `name`).
+   */
+  CLOUDFLARE_WORKER_NAME?: string;
 };
