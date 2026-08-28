@@ -92,3 +92,15 @@ dashboardApp.get("/", async (c) => {
   if (!session) return c.redirect("/dashboard/login", 302);
   return c.html(dashboardPage(session));
 });
+
+// B0 placeholder actions (IA routing table): every POST under /dashboard is a
+// placeholder submit and must never succeed — logged out → 302 to login;
+// logged in → 405 (the shell exists, the method does not). Zero secret
+// writes, zero REVIEW_ENABLED changes on this path.
+dashboardApp.post("*", async (c) => {
+  const sessionSecret = c.env.DASHBOARD_SESSION_SECRET;
+  if (!sessionSecret) return c.text("dashboard OAuth is not configured", 500);
+  const session = await readSessionValue(getCookie(c, SESSION_COOKIE), sessionSecret);
+  if (!session) return c.redirect("/dashboard/login", 302);
+  return c.text("placeholder actions are not implemented in B0", 405);
+});

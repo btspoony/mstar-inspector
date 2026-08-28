@@ -259,7 +259,7 @@ describe("/dashboard routes", () => {
     expect((await worker.fetch(dashboardRequest("/dashboard/login"), env)).status).toBe(500);
   });
 
-  test("POST to a dashboard placeholder → 4xx (never succeeds)", async () => {
+  test("POST /dashboard logged in → 405 (placeholder actions never succeed)", async () => {
     const session = await createSessionValue("octocat", null, SESSION_SECRET);
     const res = await worker.fetch(
       new Request("https://worker.local/dashboard", {
@@ -268,8 +268,51 @@ describe("/dashboard routes", () => {
       }),
       makeEnv(),
     );
-    expect(res.status).toBeGreaterThanOrEqual(400);
-    expect(res.status).toBeLessThan(500);
+    expect(res.status).toBe(405);
+  });
+
+  test("POST to a placeholder subpath logged in → 405", async () => {
+    const session = await createSessionValue("octocat", null, SESSION_SECRET);
+    const res = await worker.fetch(
+      new Request("https://worker.local/dashboard/github-app", {
+        method: "POST",
+        headers: { Cookie: `${SESSION_COOKIE}=${session}` },
+      }),
+      makeEnv(),
+    );
+    expect(res.status).toBe(405);
+  });
+
+  test("POST /dashboard without a session → 302 to login (IA routing table)", async () => {
+    const res = await worker.fetch(
+      new Request("https://worker.local/dashboard", { method: "POST" }),
+      makeEnv(),
+    );
+    expect(res.status).toBe(302);
+    expect(res.headers.get("Location")).toBe("/dashboard/login");
+  });
+
+  test("POST /dashboard with a tampered session → 302 (treated as logged out)", async () => {
+    const session = await createSessionValue("octocat", null, SESSION_SECRET);
+    const res = await worker.fetch(
+      new Request("https://worker.local/dashboard", {
+        method: "POST",
+        headers: {
+          Cookie: `${SESSION_COOKIE}=${session.slice(0, -1)}${session.endsWith("A") ? "B" : "A"}`,
+        },
+      }),
+      makeEnv(),
+    );
+    expect(res.status).toBe(302);
+    expect(res.headers.get("Location")).toBe("/dashboard/login");
+  });
+
+  test("POST placeholder fails closed when the session secret is unset → 500", async () => {
+    const res = await worker.fetch(
+      new Request("https://worker.local/dashboard", { method: "POST" }),
+      makeEnv({ DASHBOARD_SESSION_SECRET: undefined }),
+    );
+    expect(res.status).toBe(500);
   });
 });
 
@@ -278,5 +321,19 @@ describe("existing routes unaffected", () => {
     const res = await worker.fetch(new Request("https://worker.local/healthz"), makeEnv());
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual({ ok: true });
+  });
+
+  test("POST /webhook with a bad signature still returns 401 (dashboard mount does not intercept it)", async () => {
+    const res = await worker.fetch(
+      new Request("https://worker.local/webhook", {
+        method: "POST",
+        headers: { "x-hub-signature-256": "sha256=deadbeef", "x-github-event": "pull_request" },
+        body: "{}",
+      }),
+      // REVIEW_ENABLED "true" so the kill-switch ignore path does not mask
+      // signature verification (classifyWebhook checks the switch first).
+      makeEnv({ REVIEW_ENABLED: "true" }),
+    );
+    expect(res.status).toBe(401);
   });
 });
