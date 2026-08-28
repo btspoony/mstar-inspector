@@ -1,9 +1,11 @@
 /**
- * omp AgentRuntime adapter (plan 07 Task 2) — the SINGLE omp SDK import point
- * of this module tree. The former single-session PR adapter (src/review/
- * session.ts + review.ts + run.ts) is retired here: the parent session never
- * runs an LLM turn and never carries `appendSystemPrompt`; it only hosts the
- * deterministic seat fan-out (spec: grill-me / architect lock).
+ * omp AgentRuntime adapter (plan 07 Task 2; deep path plan 09 Task 2) — the
+ * SINGLE omp SDK import point of this module tree. The former single-session
+ * PR adapter (src/review/session.ts + review.ts + run.ts) is retired here.
+ * quick/default: the parent session never prompts a model — it only hosts
+ * the deterministic seat fan-out. deep: the parent session runs ONE LLM turn
+ * that drives the harness three-stage flow and must yield the envelope.
+ * No level carries `appendSystemPrompt` (spec: grill-me / architect lock).
  *
  * Flow (`.mstar/iterations/v0.3/specs/agent-runtime.md` § omp adapter 内部形状):
  *   1. createAgentSession — parent session, M1 isolation items unchanged
@@ -25,6 +27,14 @@
  *      prompt text in this repo — and a strict seat output schema.
  *   4. Merge + dedupe seat findings (fingerprint_hint ?? file:line:title),
  *      synthesizeReview (engine default summary template), validateMstarReviewV1.
+ *   5. deep (plan 09 T2): no partition, no Bun fan-out — createAgentSession
+ *      with read/grep/glob + the SDK built-in `task` tool and a strict
+ *      PARENT_OUTPUT_SCHEMA; the harness /amazing-pr-review command is loaded
+ *      from HARNESS_PLUGIN_ROOT into the assignment (zero copy), the harness
+ *      role agents (*.md) are run-time-installed into <worktree>/.omp/agents/
+ *      for task discovery, and one session.prompt() drives the three stages;
+ *      the turn must end in a schema-validated yield, which the adapter
+ *      re-validates with validateMstarReviewV1 (spec Architect locks L1/L2).
  *
  * Failure contract: ANY seat/parse/validation failure throws — the caller
  * never receives an M1-shaped fake success and nothing is posted or stored.
@@ -42,7 +52,7 @@
  */
 
 import { existsSync } from "node:fs";
-import { mkdir, readFile, rm, rmdir, writeFile } from "node:fs/promises";
+import { copyFile, mkdir, readFile, readdir, rm, rmdir, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import {
   createAgentSession,
@@ -57,6 +67,7 @@ import {
 import { runStructuredSubagent, type StructuredSubagentResult } from "@oh-my-pi/pi-coding-agent/task/structured-subagent";
 import {
   MERGE_CLASSES,
+  PR_VERDICTS,
   prReviewSeatPrompt,
   synthesizeReview,
   validateMstarReviewV1,
@@ -134,13 +145,15 @@ export async function loadHarnessSkills(pluginRoot: string): Promise<Skill[]> {
 }
 
 /**
- * Parent session options — migrated from the M1 src/review/session.ts with
- * `appendSystemPrompt` REMOVED (the seat prompts are engine-generated; the
- * parent never prompts a model). Everything else is the M1 isolation set:
- * in-memory session, read-only tool whitelist, no outbound fetch, local
- * plugin root, explicit skills, and the caller's model retry fallback chain
- * (the full selector list rides as retry.fallbackChains.default — the SDK
- * slices the chain after the active model, session/turn-recovery.ts:1455).
+ * quick/default parent session options — migrated from the M1
+ * src/review/session.ts with `appendSystemPrompt` REMOVED (the seat prompts
+ * are engine-generated; this parent never prompts a model). Everything else
+ * is the M1 isolation set: in-memory session, read-only tool whitelist, no
+ * outbound fetch, local plugin root, explicit skills, and the caller's model
+ * retry fallback chain (the full selector list rides as
+ * retry.fallbackChains.default — the SDK slices the chain after the active
+ * model, session/turn-recovery.ts:1455). The deep parent (deepSessionOptions)
+ * spreads this and adds the deep-only deltas on top.
  */
 export function buildSessionOptions(opts: {
   cwd: string;
@@ -196,31 +209,80 @@ function asToolSession(session: AgentSession, cwd: string): ToolSession {
   }) as unknown as ToolSession; // the get-trap supplies the four members tsc flags as missing
 }
 
+/** One accepted finding — shared by the seat wire contract and the deep parent envelope schema (mstar.review/v1 finding shape, SP3 § Schema). */
+const REVIEW_FINDING_SCHEMA = {
+  type: "object",
+  additionalProperties: false,
+  required: ["mergeClass", "title", "body"],
+  properties: {
+    mergeClass: { enum: [...MERGE_CLASSES] },
+    title: { type: "string" },
+    body: { type: "string" },
+    category: { type: "string" },
+    file_path: { type: ["string", "null"] },
+    line_start: { type: ["integer", "null"] },
+    line_end: { type: ["integer", "null"] },
+    fingerprint_hint: { type: "string" },
+  },
+} as const;
+
 /** Inspector-owned seat wire contract (spec § 席位输出契约), strict-validated by the SDK. */
 const SEAT_OUTPUT_SCHEMA = {
   type: "object",
   additionalProperties: false,
   required: ["findings"],
   properties: {
-    findings: {
-      type: "array",
-      items: {
-        type: "object",
-        additionalProperties: false,
-        required: ["mergeClass", "title", "body"],
-        properties: {
-          mergeClass: { enum: [...MERGE_CLASSES] },
-          title: { type: "string" },
-          body: { type: "string" },
-          category: { type: "string" },
-          file_path: { type: ["string", "null"] },
-          line_start: { type: ["integer", "null"] },
-          line_end: { type: ["integer", "null"] },
-          fingerprint_hint: { type: "string" },
+    findings: { type: "array", items: REVIEW_FINDING_SCHEMA },
+    unverified: { type: "array", items: { type: "string" } },
+  },
+} as const;
+
+/**
+ * Parent-session output contract for the deep path (plan 09 T2) — the
+ * mstar.review/v1 envelope shape as a strict JSON Schema (spec Architect
+ * lock L2). The SDK's strict mode only enforces shape; the engine
+ * vocabulary SSOT re-validates the extracted payload.
+ */
+const PARENT_OUTPUT_SCHEMA = {
+  type: "object",
+  additionalProperties: false,
+  required: ["schema", "verdict", "summary_md", "findings"],
+  properties: {
+    schema: { enum: ["mstar.review/v1"] },
+    verdict: { enum: [...PR_VERDICTS] },
+    summary_md: { type: "string" },
+    findings: { type: "array", items: REVIEW_FINDING_SCHEMA },
+    tally: {
+      type: "object",
+      additionalProperties: false,
+      required: ["verdict", "scorePct", "tally", "chatHeader"],
+      properties: {
+        verdict: { enum: [...PR_VERDICTS] },
+        scorePct: { type: "integer" },
+        tally: {
+          type: "object",
+          additionalProperties: false,
+          required: ["mustFix", "shouldFix", "nit", "unverified"],
+          properties: {
+            mustFix: { type: "integer" },
+            shouldFix: { type: "integer" },
+            nit: { type: "integer" },
+            unverified: { type: "integer" },
+          },
         },
+        chatHeader: { type: "string" },
       },
     },
-    unverified: { type: "array", items: { type: "string" } },
+    target: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        owner: { type: "string" },
+        repo: { type: "string" },
+        pr: { type: "integer" },
+        head_sha: { type: "string" },
+      },
+    },
   },
 } as const;
 
@@ -425,6 +487,206 @@ async function installSeatAgent(cwd: string): Promise<void> {
 }
 
 /**
+ * Install the harness role agent definitions (<pluginRoot>/agents/*.md) into
+ * the PR clone for omp project-scope discovery (discoverAgents reads
+ * <session-cwd>/.omp/agents/): the deep parent dispatches its Stage 1/2
+ * seats with the SDK built-in `task` tool against these definitions (spec
+ * Architect lock L1). Zero-copy rule: the markdown lives in the plugin root;
+ * only run-time copies touch the ephemeral clone. Returns the installed
+ * names so the run can remove them again.
+ */
+async function installHarnessAgents(cwd: string, pluginRoot: string): Promise<string[]> {
+  const definitions = (await readdir(join(pluginRoot, "agents")))
+    .filter((name) => name.endsWith(".md"))
+    .sort();
+  if (definitions.length === 0) {
+    throw new Error(`mstar-harness plugin at ${pluginRoot} exposes no agent definitions under agents/`);
+  }
+  const agentsDir = join(cwd, ".omp", "agents");
+  await mkdir(agentsDir, { recursive: true });
+  await Promise.all(
+    definitions.map((name) => copyFile(join(pluginRoot, "agents", name), join(agentsDir, name))),
+  );
+  return definitions;
+}
+
+/** Remove the agent definitions a run installed; rmdir only removes the dirs we left empty. */
+async function removeInstalledAgents(cwd: string, names: readonly string[]): Promise<void> {
+  await Promise.all(names.map((name) => rm(join(cwd, ".omp", "agents", name), { force: true }).catch(() => {})));
+  await rmdir(join(cwd, ".omp", "agents")).catch(() => {});
+  await rmdir(join(cwd, ".omp")).catch(() => {});
+}
+
+/**
+ * Run `review` with GH_TOKEN removed from the process env (spec: the deep
+ * parent env carries no writable GH_TOKEN). The SDK session has no env
+ * override surface, so the strip window covers the parent turn — the phase
+ * in which every seat spawns — and the previous value is restored afterwards
+ * even on throw (the consumer's own git/gh steps run in their own exec envs,
+ * outside this window).
+ */
+async function withoutGitHubTokenEnv<T>(review: () => Promise<T>): Promise<T> {
+  const saved = process.env.GH_TOKEN;
+  delete process.env.GH_TOKEN;
+  try {
+    return await review();
+  } finally {
+    if (saved === undefined) delete process.env.GH_TOKEN;
+    else process.env.GH_TOKEN = saved;
+  }
+}
+
+/**
+ * Deep parent session options — the quick/default isolation set plus the
+ * three deep-only deltas (spec Architect locks L1/L2): the SDK built-in
+ * `task` tool joins the whitelist so the parent can dispatch seats
+ * (`canSpawnAtDepth(task.maxRecursionDepth ?? 2, 0)` passes for a top-level
+ * session), and the strict PARENT_OUTPUT_SCHEMA + required yield tool make
+ * the turn's final act a schema-validated yield. GitHub write tools stay
+ * structurally absent: restrictToolNames admits ONLY the four named tools,
+ * extension/MCP discovery is disabled, and fetch is off.
+ */
+function deepSessionOptions(opts: {
+  cwd: string;
+  pluginRoot: string;
+  skills: Skill[];
+  modelPattern: string;
+  fallbackChain?: string[];
+}): CreateAgentSessionOptions {
+  return {
+    ...buildSessionOptions(opts),
+    toolNames: [...REVIEW_TOOL_NAMES, "task"],
+    outputSchema: PARENT_OUTPUT_SCHEMA,
+    outputSchemaMode: "strict",
+    requireYieldTool: true,
+  };
+}
+
+/**
+ * Deep parent assignment — orchestration glue only. The review procedure is
+ * the harness /amazing-pr-review command loaded from the plugin root at
+ * runtime (zero-copy: no command text lives in this repo); the return
+ * contract is the session's strict output schema, so the prompt only needs
+ * to point at the yield tool and forbid GitHub publication (the caller owns
+ * it — spec § GitHub: COMMENT-only, posted by the inspector).
+ */
+async function deepAssignment(input: AgentRuntimeRunInput, pluginRoot: string): Promise<string> {
+  const command = await readFile(join(pluginRoot, "commands", "amazing-pr-review.md"), "utf8");
+  return [
+    "You are the parent session of a deep (three-stage) code review.",
+    "",
+    "Recon facts:",
+    ...input.reconFacts.map((fact) => `- ${fact}`),
+    "",
+    `The review worktree is ${input.worktreePath} (read-only clone; your cwd).`,
+    "The harness role agents are installed at .omp/agents/ — dispatch the",
+    "Stage 1 collect and Stage 2 domain (± security) seats with the `task`",
+    "tool; Stage 3 synthesis is yours alone.",
+    "",
+    "Execute the following review command for tier `deep`, with one override:",
+    "do NOT post anything to GitHub (no reviews, no comments) — the caller",
+    "owns publication and only consumes your verdict envelope.",
+    "",
+    "--- begin /amazing-pr-review (loaded from the mstar-harness plugin root) ---",
+    command,
+    "--- end /amazing-pr-review ---",
+    "",
+    "Final answer: call the `yield` tool once with data = the complete",
+    "mstar.review/v1 envelope JSON.",
+  ].join("\n");
+}
+
+/**
+ * The deep parent-session path (plan 09 T2; spec § 父 session 约束 +
+ * Architect locks L1/L2): one parent LLM turn runs the harness three-stage
+ * flow and dispatches its own seats via the built-in `task` tool; the turn
+ * must end in a schema-validated `yield` of the mstar.review/v1 envelope,
+ * which is re-validated against the engine vocabulary. No yield, a yielded
+ * error, or a validation failure throws — nothing is posted or stored.
+ */
+async function runDeepReview(input: AgentRuntimeRunInput): Promise<MstarReviewV1> {
+  const pluginRoot = resolveHarnessRoot();
+  const skills = await loadHarnessSkills(pluginRoot);
+  // The session cwd IS the PR clone: .omp/agents discovery and every task
+  // tool seat cwd resolve against the review tree.
+  const cwd = input.worktreePath;
+  let session: AgentSession | undefined;
+  let installedAgents: readonly string[] = [];
+  try {
+    installedAgents = await installHarnessAgents(cwd, pluginRoot);
+    return await withoutGitHubTokenEnv(async () => {
+      const created = await createAgentSession(
+        deepSessionOptions({
+          cwd,
+          pluginRoot,
+          skills,
+          modelPattern: input.modelSelectors[0] ?? DEFAULT_MODEL_PATTERN,
+          fallbackChain: [...input.modelSelectors],
+        }),
+      );
+      session = created.session;
+
+      // Capture the structured yield the turn must end with. The SDK yield
+      // tool wraps the schema payload under `result` (successResultSchema =
+      // { data }; errors under { error }).
+      let yielded: unknown;
+      let yieldError: string | undefined;
+      const unsubscribe = session.subscribe((event) => {
+        if (event.type !== "tool_execution_start" || event.toolName !== "yield") return;
+        const args = event.args as { result?: { data?: unknown; error?: string } } | undefined;
+        const result = args?.result;
+        if (!result || typeof result !== "object") return;
+        if ("error" in result && typeof result.error === "string") {
+          yieldError ??= result.error;
+          return;
+        }
+        if ("data" in result) yielded ??= result.data;
+      });
+      let turnError: unknown;
+      try {
+        await session.prompt(await deepAssignment(input, pluginRoot));
+      } catch (error) {
+        turnError = error;
+      } finally {
+        unsubscribe();
+      }
+      if (yielded === undefined) {
+        if (turnError !== undefined) {
+          throw turnError;
+        }
+        throw new Error(
+          yieldError !== undefined
+            ? `deep parent yielded an error: ${yieldError}`
+            : "deep parent turn produced no structured yield (mstar.review/v1 envelope)",
+        );
+      }
+
+      // SDK strict schema enforcement only guarantees shape — the engine
+      // vocabulary stays the SSOT (spec Architect lock L2).
+      const gate = validateMstarReviewV1(yielded);
+      if (!gate.ok) {
+        const detail = gate.violations.map((violation) => `${violation.code}: ${violation.message}`).join("; ");
+        throw new Error(`deep parent yield failed mstar.review/v1 validation: ${detail}`);
+      }
+      return yielded as MstarReviewV1;
+    });
+  } finally {
+    if (session) {
+      try {
+        await session.dispose();
+      } catch (error) {
+        // Teardown failure must not mask the primary outcome; the session
+        // is one-shot and owns no other resources.
+        console.error("omp review runtime session dispose failed", error);
+      }
+    }
+    // Undo the agent installs; the clone itself is caller-owned and must
+    // survive (rmdir removes the dirs only if we left them empty).
+    await removeInstalledAgents(cwd, installedAgents);
+  }
+}
+
+/**
  * The delivered omp AgentRuntime (plan 07 Task 2). Resolves ONLY with an
  * engine-validated mstar.review/v1 envelope; anything short of that throws.
  */
@@ -432,14 +694,17 @@ export const ompAgentRuntime: AgentRuntime = {
   async runReview(input: AgentRuntimeRunInput): Promise<MstarReviewV1> {
     // Port-level guard: the type system makes a bad level unrepresentable in
     // TS, but runtime values arrive from JSON (runner `--level`) — reject
-    // instead of silently degrading (spec: throw, 不静默降档). Own-key check
-    // (qc3 F-302): `in` also matches Object.prototype keys, which would pass
-    // this guard and only explode later inside runReview with a misleading
-    // seat-partition message.
-    // `deep` is a valid tier (plan 09 T1) with no seats entry — it throws here
-    // until the parent-session path (T2) branches ahead of this Bun fan-out.
-    // Naming it first also narrows `input.level` to the REVIEW_SEATS keys.
-    if (input.level === "deep" || !Object.hasOwn(REVIEW_SEATS, input.level)) {
+    // instead of silently degrading (spec: throw, 不静默降档). Deep branches
+    // first (plan 09 T2): the parent-session path never enters this Bun
+    // fan-out, and naming the branch first narrows `input.level` to the
+    // REVIEW_SEATS keys. The own-key check (qc3 F-302) stays for the
+    // remaining runtime values: `in` also matches Object.prototype keys,
+    // which would pass a looser guard and only explode later with a
+    // misleading seat-partition message.
+    if (input.level === "deep") {
+      return runDeepReview(input);
+    }
+    if (!Object.hasOwn(REVIEW_SEATS, input.level)) {
       throw new Error(`unsupported review level: ${JSON.stringify(String(input.level))}`);
     }
 
@@ -451,7 +716,6 @@ export const ompAgentRuntime: AgentRuntime = {
     // up the seat definition installed at <worktree>/.omp/agents/ (the clone
     // is ephemeral, so installing there is fine — it is removed on exit).
     const cwd = input.worktreePath;
-    const seatAgentPath = join(cwd, ".omp", "agents", "mstar-review-seat.md");
     let session: AgentSession | undefined;
     try {
       await installSeatAgent(cwd);
@@ -518,9 +782,7 @@ export const ompAgentRuntime: AgentRuntime = {
       }
       // Undo the seat-agent install; the clone itself is caller-owned and
       // must survive (rmdir removes the dirs only if we left them empty).
-      await rm(seatAgentPath, { force: true }).catch(() => {});
-      await rmdir(join(cwd, ".omp", "agents")).catch(() => {});
-      await rmdir(join(cwd, ".omp")).catch(() => {});
+      await removeInstalledAgents(cwd, ["mstar-review-seat.md"]);
     }
   },
 };

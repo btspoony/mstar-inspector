@@ -49,5 +49,13 @@ writeFileSync(
   ["# amazing-pr-review", "", "Fixture marker for the pinned 3.5.0 command.", ""].join("\n"),
 );
 
+// Plan 09 Task 2: the deep parent path installs the harness role agents
+// (<pluginRoot>/agents/*.md) into the PR clone at .omp/agents/ so omp task
+// discovery can spawn them — the fixture mirrors two markers only (zero
+// copy of the real role definitions, plan 02 Global Constraints).
+mkdirSync(join(PLUGIN_ROOT_FIXTURE, "agents"), { recursive: true });
+writeFileSync(join(PLUGIN_ROOT_FIXTURE, "agents", "code-reviewer.md"), "# fixture agent: code-reviewer\n");
+writeFileSync(join(PLUGIN_ROOT_FIXTURE, "agents", "frontend-dev.md"), "# fixture agent: frontend-dev\n");
+
 // Inject before src/review/session.ts evaluates HARNESS_PLUGIN_ROOT.
 process.env[HARNESS_ROOT_ENV] = PLUGIN_ROOT_FIXTURE;

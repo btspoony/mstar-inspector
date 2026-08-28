@@ -19,11 +19,19 @@
  *     copies here) carrying the worktree path and the seat file scope;
  *   - strict seat output → merge → synthesizeReview → validateMstarReviewV1
  *     envelope; any failure throws (never an M1-shaped success);
- *   - level "deep" is rejected at the port.
+ *   - level "deep" drives the parent-session path (plan 09 Task 2): the
+ *     parent session (cwd = worktreePath, read/grep/glob + `task`, strict
+ *     output schema) is prompted once, the harness review command is loaded
+ *     from the plugin-root fixture at runtime, harness agents/*.md are
+ *     installed into <worktree>/.omp/agents/ for the run and removed after,
+ *     the strict yield payload is re-validated against the engine vocab, and
+ *     partitionSeats/runStructuredSubagent are never called — quick/default
+ *     keep the Bun fan-out untouched;
+ *   - a non-delivered level is rejected at the port.
  */
 
 import { afterAll, afterEach, describe, expect, mock, test } from "bun:test";
-import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -46,10 +54,21 @@ const createdOptions: Record<string, unknown>[] = [];
 let seatResults: Array<{ error?: string; status?: string; data?: unknown; stderr?: string }> = [];
 /** Definition content snapshotted from the PR-clone cwd at session creation. */
 let installedSeatAgent: string | null = null;
+/** Agents-dir listing snapshotted from the PR-clone cwd at session creation. */
+let installedAgentFiles: string[] | null = null;
+/** GH_TOKEN seen in process.env at session creation (must be stripped on deep). */
+let ghTokenAtCreation: string | undefined;
 /** Count of fake session.dispose() calls since the last createAgentSession. */
 let disposeCalls = 0;
 /** Captured runStructuredSubagent requests, in dispatch order. */
 const subagentRequests: Record<string, unknown>[] = [];
+/** Captured parent-session prompt texts (deep path, in call order). */
+const promptTexts: string[] = [];
+/** Structured yield payloads / errors the fake parent emits to its subscriber during prompt. */
+let parentYields: unknown[] = [];
+let parentYieldErrors: string[] = [];
+/** Session event listeners registered by the runtime (one per deep run). */
+const yieldListeners: Array<(event: unknown) => void> = [];
 
 mock.module("@oh-my-pi/pi-coding-agent", () => ({
   createAgentSession: mock(async (options: Record<string, unknown>) => {
@@ -59,10 +78,42 @@ mock.module("@oh-my-pi/pi-coding-agent", () => ({
     // session creation — snapshot it here, the runtime removes it afterwards.
     const installed = join(options.cwd as string, ".omp", "agents", "mstar-review-seat.md");
     installedSeatAgent = existsSync(installed) ? readFileSync(installed, "utf8") : null;
+    // Same creation-time snapshots for the deep path: the full installed
+    // agents listing (harness role agents) and the GH_TOKEN strip window.
+    const agentsDir = join(options.cwd as string, ".omp", "agents");
+    installedAgentFiles = existsSync(agentsDir) ? readdirSync(agentsDir).sort() : null;
+    ghTokenAtCreation = process.env.GH_TOKEN;
     return {
       session: {
         dispose: mock(async () => {
           disposeCalls += 1;
+        }),
+        subscribe: mock((listener: (event: unknown) => void) => {
+          yieldListeners.push(listener);
+          return () => {};
+        }),
+        prompt: mock(async (text: string) => {
+          promptTexts.push(text);
+          // The parent turn emits each queued yield (success payload, then
+          // error) to the listener the runtime registered before prompting.
+          const listener = yieldListeners[yieldListeners.length - 1];
+          parentYields.forEach((data, index) => {
+            listener?.({
+              type: "tool_execution_start",
+              toolCallId: `yield-${index}`,
+              toolName: "yield",
+              args: { result: { data } },
+            });
+          });
+          parentYieldErrors.forEach((error, index) => {
+            listener?.({
+              type: "tool_execution_start",
+              toolCallId: `yield-error-${index}`,
+              toolName: "yield",
+              args: { result: { error } },
+            });
+          });
+          return true;
         }),
       },
     };
@@ -143,6 +194,25 @@ function seatPayload(overrides: Record<string, unknown> = {}): unknown {
   };
 }
 
+/** A complete mstar.review/v1 envelope a deep parent would yield. */
+function deepEnvelope(): unknown {
+  return {
+    schema: "mstar.review/v1",
+    verdict: "needs fixes",
+    summary_md: "## Review\n\nOne should-fix finding.",
+    findings: [
+      {
+        mergeClass: "should-fix",
+        title: "Missing null check",
+        body: "The handler assumes the payload is always present.",
+        file_path: "lib/c.ts",
+        line_start: 4,
+      },
+    ],
+    target: { owner: "acme", repo: "widgets", pr: 7 },
+  };
+}
+
 /** reconFacts with numstat lines spanning two top-level dirs. */
 const TWO_CLUSTER_FACTS = [
   "acme/widgets#7",
@@ -159,12 +229,21 @@ const BASE_INPUT = {
   modelSelectors: ["ark-plan/deepseek-v4-flash", "ark-plan/backup-model"],
 };
 
+/** The deep-tier input: same clone/facts/models, level deep. */
+const DEEP_INPUT = { ...BASE_INPUT, level: "deep" as const };
+
 afterEach(() => {
   createdOptions.length = 0;
   subagentRequests.length = 0;
   seatResults = [];
   installedSeatAgent = null;
+  installedAgentFiles = null;
+  ghTokenAtCreation = undefined;
   disposeCalls = 0;
+  promptTexts.length = 0;
+  parentYields = [];
+  parentYieldErrors = [];
+  yieldListeners.length = 0;
   delete process.env.OMP_REVIEW_MODEL;
 });
 
@@ -186,7 +265,10 @@ describe("ompAgentRuntime.runReview — parent session", () => {
       },
     });
     expect(options.restrictToolNames).toBe(true);
+    // quick/default keep the Bun fan-out tool set: no `task`, no yield schema.
     expect(options.toolNames).toEqual(["read", "grep", "glob"]);
+    expect(options.requireYieldTool).toBe(false);
+    expect(options.outputSchema).toBeUndefined();
     expect(options.enableMCP).toBe(false);
     expect(options.appendSystemPrompt).toBeUndefined();
     expect(options.additionalExtensionPaths).toEqual([PLUGIN_ROOT_FIXTURE]);
@@ -314,9 +396,10 @@ describe("ompAgentRuntime.runReview — seat fan-out", () => {
 
   test("rejects a non-delivered level instead of silently degrading", async () => {
     await expect(
-      ompAgentRuntime.runReview({ ...BASE_INPUT, level: "deep" as never }),
+      ompAgentRuntime.runReview({ ...BASE_INPUT, level: "nope" as never }),
     ).rejects.toThrow(/unsupported review level/);
     expect(subagentRequests).toHaveLength(0);
+    expect(promptTexts).toHaveLength(0);
   });
 
   test("propagates SDK preflight/execution failures", async () => {
@@ -340,6 +423,133 @@ describe("ompAgentRuntime.runReview — seat fan-out", () => {
     await expect(ompAgentRuntime.runReview({ ...BASE_INPUT, level: "quick" })).rejects.toThrow(
       /no valid structured output/,
     );
+  });
+});
+
+describe("ompAgentRuntime.runReview — deep parent path (plan 09 T2)", () => {
+  test("drives the parent session: one prompt, zero seat fan-out", async () => {
+    parentYields = [deepEnvelope()];
+    const envelope = await ompAgentRuntime.runReview(DEEP_INPUT);
+
+    expect(promptTexts).toHaveLength(1);
+    expect(subagentRequests).toHaveLength(0);
+    // The assignment carries the review tree and the recon facts.
+    expect(promptTexts[0]).toContain(TEST_WORKTREE);
+    expect(promptTexts[0]).toContain("acme/widgets#7");
+    expect(envelope.schema).toBe("mstar.review/v1");
+    expect(disposeCalls).toBe(1);
+  });
+
+  test("parent session keeps the isolation set and adds the task tool + strict yield schema", async () => {
+    parentYields = [deepEnvelope()];
+    await ompAgentRuntime.runReview(DEEP_INPUT);
+
+    expect(createdOptions).toHaveLength(1);
+    const options = createdOptions[0]!;
+    expect(options.cwd).toBe(TEST_WORKTREE);
+    expect(options.restrictToolNames).toBe(true);
+    // deep-only: the SDK built-in `task` tool joins the read-only whitelist.
+    expect(options.toolNames).toEqual(["read", "grep", "glob", "task"]);
+    expect(options.outputSchema).toBeDefined();
+    expect(options.outputSchemaMode).toBe("strict");
+    expect(options.requireYieldTool).toBe(true);
+    expect(options.enableMCP).toBe(false);
+    expect(options.appendSystemPrompt).toBeUndefined();
+    expect(options.settings).toEqual({
+      kind: "isolated",
+      overrides: {
+        "fetch.enabled": false,
+        "retry.modelFallback": true,
+        "retry.fallbackChains": { default: [...DEEP_INPUT.modelSelectors] },
+      },
+    });
+  });
+
+  test("returns the strict yield payload after engine re-validation", async () => {
+    parentYields = [deepEnvelope()];
+    const envelope = await ompAgentRuntime.runReview(DEEP_INPUT);
+
+    expect(envelope.schema).toBe("mstar.review/v1");
+    expect(envelope.verdict).toBe("needs fixes");
+    expect(envelope.findings).toHaveLength(1);
+    expect(envelope.findings[0]!.title).toBe("Missing null check");
+  });
+
+  test("a yield payload that fails engine validation is fatal", async () => {
+    parentYields = [
+      {
+        schema: "mstar.review/v1",
+        verdict: "ship it",
+        summary_md: "x",
+        findings: [{ mergeClass: "critical", title: "t", body: "b" }],
+      },
+    ];
+    await expect(ompAgentRuntime.runReview(DEEP_INPUT)).rejects.toThrow(
+      /failed mstar\.review\/v1 validation/,
+    );
+    expect(promptTexts).toHaveLength(1);
+  });
+
+  test("a parent turn without a structured yield is fatal", async () => {
+    await expect(ompAgentRuntime.runReview(DEEP_INPUT)).rejects.toThrow(/no structured yield/);
+    expect(promptTexts).toHaveLength(1);
+    expect(subagentRequests).toHaveLength(0);
+  });
+
+  test("a yielded error result is fatal", async () => {
+    parentYieldErrors = ["model refused"];
+    await expect(ompAgentRuntime.runReview(DEEP_INPUT)).rejects.toThrow(
+      /deep parent yielded an error: model refused/,
+    );
+  });
+
+  test("installs harness agents into the PR clone for the run and removes them after", async () => {
+    parentYields = [deepEnvelope()];
+    await ompAgentRuntime.runReview(DEEP_INPUT);
+
+    // Snapshotted from the clone at session creation: exactly the fixture
+    // role agents (no seat-agent.md on the deep path).
+    expect(installedAgentFiles).toEqual(["code-reviewer.md", "frontend-dev.md"]);
+    expect(installedSeatAgent).toBeNull();
+    // The clone is caller-owned: installed definitions are cleaned up, the
+    // worktree itself must survive.
+    expect(existsSync(join(TEST_WORKTREE, ".omp", "agents"))).toBe(false);
+    expect(existsSync(join(TEST_WORKTREE, ".omp"))).toBe(false);
+    expect(existsSync(TEST_WORKTREE)).toBe(true);
+    expect(disposeCalls).toBe(1);
+  });
+
+  test("assignment loads the review command from the plugin root at runtime (zero copy)", async () => {
+    parentYields = [deepEnvelope()];
+    await ompAgentRuntime.runReview(DEEP_INPUT);
+
+    // The fixture marker text only exists in $HARNESS_PLUGIN_ROOT — its
+    // presence in the prompt proves the runtime loaded the command from the
+    // plugin root instead of a pasted copy in src/.
+    expect(promptTexts[0]).toContain("Fixture marker for the pinned 3.5.0 command.");
+  });
+
+  test("GH_TOKEN never reaches the deep parent env and is restored after success", async () => {
+    process.env.GH_TOKEN = "test-installation-token";
+    parentYields = [deepEnvelope()];
+    try {
+      await ompAgentRuntime.runReview(DEEP_INPUT);
+      expect(ghTokenAtCreation).toBeUndefined();
+      expect(process.env.GH_TOKEN).toBe("test-installation-token");
+    } finally {
+      delete process.env.GH_TOKEN;
+    }
+  });
+
+  test("GH_TOKEN is restored even when the deep run fails", async () => {
+    process.env.GH_TOKEN = "test-installation-token";
+    try {
+      await expect(ompAgentRuntime.runReview(DEEP_INPUT)).rejects.toThrow(/no structured yield/);
+      expect(ghTokenAtCreation).toBeUndefined();
+      expect(process.env.GH_TOKEN).toBe("test-installation-token");
+    } finally {
+      delete process.env.GH_TOKEN;
+    }
   });
 });
 
