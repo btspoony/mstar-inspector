@@ -5,6 +5,7 @@
  * Routes:
  * - GET /healthz → 200 {"ok":true}
  * - POST /webhook → verified GitHub webhook → classify → (Task 2: enqueue)
+ * - /dashboard/* → GitHub OAuth login + signed-cookie session shell (08 B0)
  */
 import { Hono } from "hono";
 import type { MessageBatch } from "@cloudflare/workers-types";
@@ -13,10 +14,14 @@ import type { ReviewJobPayload } from "../contracts/review-job";
 import type { PipelineEnv } from "../pipeline/consumer";
 import { classifyWebhook, WEBHOOK_BODY_LIMIT } from "./webhooks";
 import { defaultLog, handleReviewJob } from "./handlers";
+import { dashboardApp } from "../dashboard/index";
 
 const app = new Hono<{ Bindings: Env }>();
 
 app.get("/healthz", (c) => c.json({ ok: true }));
+// 08 B0: GitHub OAuth + dashboard shell. Route isolation: the dashboard
+// module never imports pipeline/store/review (architect decision Q2).
+app.route("/dashboard", dashboardApp);
 
 app.post("/webhook", async (c) => {
   const secret = c.env.WEBHOOK_SECRET;
