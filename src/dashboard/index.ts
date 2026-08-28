@@ -219,5 +219,5 @@ dashboardApp.post("*", async (c) => {
   if (!sessionSecret) return c.text("dashboard OAuth is not configured", 500);
   const session = await readSessionValue(getCookie(c, SESSION_COOKIE), sessionSecret);
   if (!session) return c.redirect("/dashboard/login", 302);
-  return c.text("placeholder actions are not implemented in B0", 405);
+  return c.text("placeholder actions are not implemented", 405);
 });

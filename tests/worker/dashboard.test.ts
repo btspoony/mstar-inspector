@@ -1093,6 +1093,57 @@ describe("/dashboard manifest commit (plan 11 Task 2)", () => {
   });
 });
 
+describe("/dashboard placeholder lock + DESIGN alignment (plan 11 Task 3)", () => {
+  const origFetch = globalThis.fetch;
+  afterEach(() => {
+    globalThis.fetch = origFetch;
+  });
+
+  test("GitHub App section is enabled: primary submit, not aria-disabled (AC-S11-design)", async () => {
+    const session = await createSessionValue("octocat", null, SESSION_SECRET);
+    const res = await worker.fetch(
+      dashboardRequest("/dashboard", `${SESSION_COOKIE}=${session}`),
+      makeEnv(),
+    );
+    expect(res.status).toBe(200);
+    const body = await res.text();
+    // Spec § DESIGN.md 意图: the enabled GitHub App section is NOT
+    // aria-disabled and its constructive primary (blue-700) is a live submit.
+    const appSection = body.split('<section class="enabled">')[1]?.split("</section>")[0] ?? "";
+    expect(appSection).toContain('action="/dashboard/manifest/start"');
+    expect(appSection).toContain('<button type="submit" class="primary">Create GitHub App</button>');
+    expect(appSection).not.toContain("aria-disabled");
+    expect(appSection).not.toContain("disabled");
+  });
+
+  test("BYOK / Review placeholder POSTs → 405, zero fetch, zero env writes, no stale B0 copy", async () => {
+    const calls: string[] = [];
+    globalThis.fetch = (async (url: unknown) => {
+      calls.push(String(url));
+      return new Response("{}");
+    }) as unknown as typeof fetch;
+    const session = await createSessionValue("octocat", null, SESSION_SECRET);
+    const env = makeEnv({ REVIEW_ENABLED: "false" });
+    for (const path of ["/dashboard/model-keys", "/dashboard/review"]) {
+      const res = await worker.fetch(
+        new Request(`https://worker.local${path}`, {
+          method: "POST",
+          headers: { Cookie: `${SESSION_COOKIE}=${session}` },
+        }),
+        env,
+      );
+      // AC-S11-placeholders: still 405 (B0 behavior kept); the stale "in B0"
+      // wording is gone (plan 11 T1 review minor).
+      expect(res.status).toBe(405);
+      expect(await res.text()).not.toContain("B0");
+    }
+    // Zero outbound requests — no CF secret write, no GitHub call — and the
+    // Worker env is untouched: REVIEW_ENABLED never flips on this path.
+    expect(calls).toHaveLength(0);
+    expect(env.REVIEW_ENABLED).toBe("false");
+  });
+});
+
 describe("existing routes unaffected", () => {
   test("GET /healthz still returns 200 ok", async () => {
     const res = await worker.fetch(new Request("https://worker.local/healthz"), makeEnv());
