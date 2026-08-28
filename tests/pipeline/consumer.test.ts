@@ -15,10 +15,14 @@
  *     no longer used for dedup — a force-push mid-flight is self-consistent)
  *   - dedup runs AFTER clone against the checked-out sha
  *
- * Acceptance points (plan Task 3 / brief):
+ * Acceptance points (plan Task 3 / brief; plan 07 Task 5 rewire):
  *   - findByIdempotencyKey hit after clone → ack (no post, no insert)
- *   - full flow: clone → rev-parse → diff → runner (env-injected secrets) →
- *     parse → post FIRST → insert → KV completion → destroy
+ *   - full flow: clone → rev-parse → diff → numstat → write runner input
+ *     (reconFacts) → runner `--level/--input` (env-injected secrets) →
+ *     parse the mstar.review/v1 envelope → post FIRST → put → KV
+ *     completion → destroy
+ *   - REVIEW_LEVEL configurable (quick/default); invalid value fails loud
+ *     BEFORE any sandbox step (never a silent downgrade)
  *   - null payload sha → sha resolved from the checkout (no gh pr view)
  *   - parse failure → no post, no insert, rethrow, destroy
  *   - comment failure → no insert, rethrow, destroy
@@ -29,16 +33,19 @@ import { describe, expect, mock, test } from "bun:test";
 import type { MessageBatch } from "@cloudflare/workers-types";
 import type { ReviewJobPayload } from "../../src/contracts/review-job";
 import type { ReviewOutput } from "../../src/review/schema";
-import { createReviewStore } from "../../src/store/reviews";
+import { FINDING_BODY_MAX, FINDING_TITLE_MAX } from "../../src/review/schema";
+import { createArtifactStore } from "../../src/store/artifact-store";
+import { idemKey } from "../../src/contracts/idem";
 import { createTestD1 } from "../store/helpers";
 import type { ReviewCommenter } from "../../src/pipeline/comment";
 
 const VALID_OUTPUT: ReviewOutput = {
-  verdict: "request_changes",
+  schema: "mstar.review/v1",
+  verdict: "needs fixes",
   summary_md: "Two issues found in the diff.",
   findings: [
     {
-      severity: "warning",
+      mergeClass: "should-fix",
       category: "logic",
       file_path: "src/auth.ts",
       line_start: 21,
@@ -60,10 +67,17 @@ let sandboxError: Error | undefined;
 let destroyCalls = 0;
 let destroyError: Error | undefined;
 
-let runnerStderr = "review mode: structured\n";
+// Plan 07 Task 5: the runtime runner contract — exit 0 ⇒ stdout is the
+// engine-validated envelope; stderr is diagnostics-only (no mode marker).
+let runnerStderr = "";
 let runnerExitCode = 0;
 let cloneExitCode = 0;
 let diffExitCode = 0;
+let numstatStdout = "10\t2\tsrc/auth.ts\n5\t0\tdocs/readme.md\n";
+let numstatExitCode = 0;
+let writeInputExitCode = 0;
+/** Decoded runner --input JSON written via the base64 write step. */
+let writtenInputJson: string | undefined;
 
 const fakeSandbox = {
   exec: mock(async (cmd: string, opts?: unknown) => {
@@ -74,7 +88,15 @@ const fakeSandbox = {
     }
     if (cmd.includes("git init")) return { stdout: "", stderr: "", exitCode: cloneExitCode };
     if (cmd.includes("gh pr diff")) return { stdout: "", stderr: "", exitCode: diffExitCode };
-    if (cmd.includes("--diff")) {
+    if (cmd.includes("git apply --numstat")) {
+      return { stdout: numstatStdout, stderr: "", exitCode: numstatExitCode };
+    }
+    if (cmd.includes("base64 -d")) {
+      const match = /printf '%s' '([A-Za-z0-9+/=]+)'/.exec(cmd);
+      writtenInputJson = match ? Buffer.from(match[1]!, "base64").toString("utf8") : undefined;
+      return { stdout: "", stderr: "", exitCode: writeInputExitCode };
+    }
+    if (cmd.includes("--input")) {
       return { stdout: runnerStdout, stderr: runnerStderr, exitCode: runnerExitCode };
     }
     return { stdout: "", stderr: "", exitCode: 0 };
@@ -226,10 +248,14 @@ function reset(): void {
   messageAttempts = 1;
   logLines.length = 0;
   runnerStdout = "";
-  runnerStderr = "review mode: structured\n";
+  runnerStderr = "";
   runnerExitCode = 0;
   cloneExitCode = 0;
   diffExitCode = 0;
+  numstatStdout = "10\t2\tsrc/auth.ts\n5\t0\tdocs/readme.md\n";
+  numstatExitCode = 0;
+  writeInputExitCode = 0;
+  writtenInputJson = undefined;
   resolvedSha = SHA;
   revParseExitCode = 0;
   sandboxError = undefined;
@@ -252,11 +278,12 @@ describe("createReviewConsumer", () => {
   test("findByIdempotencyKey hit after clone → ack: no post, no insert, destroy", async () => {
     reset();
     const db = createTestD1();
-    const store = createReviewStore(db);
-    await store.insertReview({
-      key: { installation_id: 123, owner: "acme", repo: "widgets", pr_number: 42, head_sha: SHA },
-      output: VALID_OUTPUT,
-      raw: JSON.stringify(VALID_OUTPUT),
+    const store = createArtifactStore(db);
+    await store.put({
+      kind: "review",
+      key: idemKey({ installation_id: 123, owner: "acme", repo: "widgets", pr_number: 42, head_sha: SHA }),
+      schema: "mstar.review/v1",
+      payload: VALID_OUTPUT,
     });
     const consumer = createReviewConsumer(makeEnv({ DB: db as never }), undefined, testOverrides);
 
@@ -274,7 +301,7 @@ describe("createReviewConsumer", () => {
     expect(reviewCount(db)).toBe(1); // untouched
   });
 
-  test("full flow: clone → rev-parse → diff → runner → parse → post → insert → KV done → destroy", async () => {
+  test("full flow: clone → rev-parse → diff → numstat → input → runner → parse → post → insert → KV done → destroy", async () => {
     reset();
     runnerStdout = JSON.stringify(VALID_OUTPUT);
     const db = createTestD1();
@@ -286,8 +313,19 @@ describe("createReviewConsumer", () => {
       expect.stringContaining("git init '/workspace/repo'"),
       expect.stringContaining("git -C '/workspace/repo' rev-parse HEAD"),
       expect.stringContaining("gh pr diff '42' --repo 'acme/widgets'"),
-      expect.stringContaining("bun run '/opt/runner/src/review/runner.ts' --diff '/workspace/pr.diff'"),
+      expect.stringContaining("git apply --numstat '/workspace/pr.diff'"),
+      expect.stringContaining("base64 -d > '/workspace/review-input.json'"),
+      expect.stringContaining(
+        "bun run '/opt/runner/src/review/runner.ts' --level 'default' --input '/workspace/review-input.json'",
+      ),
     ]);
+    // The runner input JSON carries the reconFacts the runtime folds into
+    // the envelope target (owner/repo#pr + the AUTHORITATIVE checkout sha)
+    // plus the numstat seat-partition universe.
+    expect(JSON.parse(writtenInputJson!)).toEqual({
+      worktreePath: "/workspace/repo",
+      reconFacts: ["acme/widgets#42", `head ${SHA}`, "10\t2\tsrc/auth.ts", "5\t0\tdocs/readme.md"],
+    });
     // Clone: git transport auth via scoped extraheader env (bugbot A1) — the
     // token lives in GIT_CONFIG_VALUE_0, never in the command string. Form is
     // basic auth with username `x-access-token` (GitHub app-token git auth);
@@ -304,8 +342,11 @@ describe("createReviewConsumer", () => {
     expect(sandboxCalls[1]!.opts).toEqual({ timeout: 120_000 });
     // Diff: gh step, GH_TOKEN via exec env only.
     expect(sandboxCalls[2]!.opts).toEqual({ env: { GH_TOKEN: "ghs_installation_token" }, timeout: 120_000 });
+    // Numstat + input write: plain git/shell steps, git timeout.
+    expect(sandboxCalls[3]!.opts).toEqual({ timeout: 120_000 });
+    expect(sandboxCalls[4]!.opts).toEqual({ timeout: 120_000 });
     // Runner: cwd = clone dir; model key + harness paths via exec env only.
-    expect(sandboxCalls[3]!.opts).toEqual({
+    expect(sandboxCalls[5]!.opts).toEqual({
       cwd: "/workspace/repo",
       env: {
         ARK_API_KEY: "ark-key",
@@ -330,10 +371,9 @@ describe("createReviewConsumer", () => {
     expect(reviewCount(db)).toBe(1);
     const row = db.raw.query("SELECT * FROM reviews").get() as { head_sha: string; verdict: string };
     expect(row.head_sha).toBe(SHA);
-    expect(row.verdict).toBe("request_changes");
+    expect(row.verdict).toBe("needs fixes");
     const findings = db.raw.query("SELECT COUNT(*) AS n FROM findings").get() as { n: number };
     expect(findings.n).toBe(1);
-
     // KV completion state written with the idem key + TTL.
     expect(kvPuts).toEqual([
       {
@@ -459,24 +499,120 @@ describe("createReviewConsumer", () => {
     expect(destroyCalls).toBe(1);
   });
 
-  test("summary degrade (non-structured) → no post, no insert, rethrow, destroy", async () => {
+  test("runtime runner: exit 0 with a valid envelope succeeds regardless of stderr diagnostics (no mode marker gate)", async () => {
     reset();
-    runnerStdout = JSON.stringify({
-      verdict: "comment",
-      summary_md: "raw model text that could not be parsed",
-      findings: [],
-    });
-    runnerStderr = "review mode: summary\n";
+    runnerStdout = JSON.stringify(VALID_OUTPUT);
+    runnerStderr = "seat full-diff/combined done in 41s\nsynthesizeReview ok\n";
     const db = createTestD1();
     const consumer = createReviewConsumer(makeEnv({ DB: db as never }), testLog, testOverrides);
 
-    await expect(consumer(makeBatch(makePayload()))).rejects.toThrow(/structured mode marker/);
+    await consumer(makeBatch(makePayload())); // resolves — stderr is never a gate
 
+    expect(commenterCalls.filter((c) => c.op === "post")).toHaveLength(1);
+    expect(reviewCount(db)).toBe(1);
+    expect(destroyCalls).toBe(1);
+  });
+
+  test("numstat failure → no runner, no post, no insert, rethrow, destroy", async () => {
+    reset();
+    numstatExitCode = 1;
+    runnerStdout = JSON.stringify(VALID_OUTPUT);
+    const db = createTestD1();
+    const consumer = createReviewConsumer(makeEnv({ DB: db as never }), testLog, testOverrides);
+
+    await expect(consumer(makeBatch(makePayload()))).rejects.toThrow(/numstat failed/);
+
+    expect(sandboxCalls.some((c) => c.cmd.includes("--input"))).toBe(false);
     expect(commenterCalls.filter((c) => c.op === "post")).toHaveLength(0);
     expect(reviewCount(db)).toBe(0);
     expect(destroyCalls).toBe(1);
     const errLine = logLines.find((l) => l.level === "error");
     expect(errLine?.fields.idempotency_key).toBe(`idem:123:acme/widgets:42:${SHA}`);
+  });
+
+  test("runner input write failure → no runner, no post, no insert, rethrow, destroy", async () => {
+    reset();
+    writeInputExitCode = 1;
+    runnerStdout = JSON.stringify(VALID_OUTPUT);
+    const db = createTestD1();
+    const consumer = createReviewConsumer(makeEnv({ DB: db as never }), undefined, testOverrides);
+
+    await expect(consumer(makeBatch(makePayload()))).rejects.toThrow(/runner input write failed/);
+
+    expect(sandboxCalls.some((c) => c.cmd.includes("--input"))).toBe(false);
+    expect(commenterCalls.filter((c) => c.op === "post")).toHaveLength(0);
+    expect(reviewCount(db)).toBe(0);
+    expect(destroyCalls).toBe(1);
+  });
+
+  test("REVIEW_LEVEL unset → runner runs the harness landing tier 'default' (AC-S7-level)", async () => {
+    reset();
+    runnerStdout = JSON.stringify(VALID_OUTPUT);
+    const db = createTestD1();
+    const consumer = createReviewConsumer(makeEnv({ DB: db as never }), undefined, testOverrides);
+
+    await consumer(makeBatch(makePayload()));
+
+    const runnerCall = sandboxCalls.find((c) => c.cmd.includes("--input"))!;
+    expect(runnerCall.cmd).toContain("--level 'default'");
+  });
+
+  test("REVIEW_LEVEL=quick → runner runs `--level 'quick'` (AC-S7-level configurable)", async () => {
+    reset();
+    runnerStdout = JSON.stringify(VALID_OUTPUT);
+    const db = createTestD1();
+    const consumer = createReviewConsumer(
+      makeEnv({ DB: db as never, REVIEW_LEVEL: "quick" }),
+      undefined,
+      testOverrides,
+    );
+
+    await consumer(makeBatch(makePayload()));
+
+    const runnerCall = sandboxCalls.find((c) => c.cmd.includes("--input"))!;
+    expect(runnerCall.cmd).toContain("--level 'quick'");
+    expect(reviewCount(db)).toBe(1);
+  });
+
+  test("invalid REVIEW_LEVEL (incl. 'deep' and Object.prototype keys) → fail-loud BEFORE any sandbox step (never a silent downgrade)", async () => {
+    // qc3 F-302: "toString"/"__proto__" pass `in REVIEW_SEATS` — only an
+    // own-key check rejects them at this first, pre-sandbox guard.
+    for (const level of ["deep", "toString", "constructor", "__proto__"]) {
+      reset();
+      const db = createTestD1();
+      const consumer = createReviewConsumer(
+        makeEnv({ DB: db as never, REVIEW_LEVEL: level }),
+        testLog,
+        testOverrides,
+      );
+
+      await expect(consumer(makeBatch(makePayload()))).rejects.toThrow(/invalid REVIEW_LEVEL/);
+
+      expect(sandboxCalls).toHaveLength(0);
+      expect(commenterCalls).toHaveLength(0);
+      expect(reviewCount(db)).toBe(0);
+      expect(kvGuardPuts).toHaveLength(0); // the in-flight guard is never touched
+      const errLine = logLines.find((l) => l.level === "error");
+      expect(errLine).toBeDefined();
+      expect(errLine!.msg).toContain("invalid REVIEW_LEVEL");
+      expect(errLine!.msg).toContain(JSON.stringify(level));
+    }
+  });
+
+  test("envelope target folded from reconFacts agrees with the idem key → put cross-check passes (T4 store gate)", async () => {
+    reset();
+    runnerStdout = JSON.stringify({
+      ...VALID_OUTPUT,
+      target: { owner: "acme", repo: "widgets", pr: 42, head_sha: SHA },
+    });
+    const db = createTestD1();
+    const consumer = createReviewConsumer(makeEnv({ DB: db as never }), undefined, testOverrides);
+
+    await consumer(makeBatch(makePayload()));
+
+    expect(reviewCount(db)).toBe(1);
+    const row = db.raw.query("SELECT envelope FROM reviews").get() as { envelope: string };
+    expect(JSON.parse(row.envelope).target).toEqual({ owner: "acme", repo: "widgets", pr: 42, head_sha: SHA });
   });
 
   test("failure logs a structured error with idempotency key + sandbox id before rethrow", async () => {
@@ -551,17 +687,25 @@ describe("createReviewConsumer", () => {
   test("model output containing secrets is redacted before post and insert (B2/SEC-02)", async () => {
     reset();
     const leaked: ReviewOutput = {
-      verdict: "comment",
+      schema: "mstar.review/v1",
+      verdict: "blocked",
       summary_md: `Provider key AKIAIOSFODNN7EXAMPLE and ${"a".repeat(40)} leaked`,
       findings: [
         {
-          severity: "critical",
+          mergeClass: "must-fix",
           category: "security",
           file_path: "src/auth.ts",
           line_start: 1,
           line_end: 1,
-          title: "Leak",
+          title: "Leak ghp_abcdef1234567890",
           body: "token ghp_abcdef1234567890 and Bearer ghs_abcdef1234567890",
+        },
+        {
+          mergeClass: "should-fix",
+          category: "AKIAIOSFODNN7EXAMPLE leak",
+          file_path: "evil/AKIAIOSFODNN7EXAMPLE/x.ts",
+          title: "Exfil",
+          body: "clean body",
         },
       ],
     };
@@ -576,42 +720,84 @@ describe("createReviewConsumer", () => {
       output: ReviewOutput;
       omittedFindings: number;
     };
-    expect(posted.output.summary_md).not.toContain("AKIAIOSFODNN7EXAMPLE");
-    expect(posted.output.summary_md).not.toContain("a".repeat(40));
-    expect(posted.output.findings[0]!.body).not.toContain("ghp_abcdef1234567890");
     expect(posted.output.findings[0]!.body).not.toContain("ghs_abcdef1234567890");
+    // qc2 F-001: title / category / file_path are model-controlled public
+    // channels too — redacted through the same consumer choke point.
+    expect(posted.output.findings[0]!.title).not.toContain("ghp_abcdef1234567890");
+    expect(posted.output.findings[1]!.category).not.toContain("AKIAIOSFODNN7EXAMPLE");
+    expect(posted.output.findings[1]!.file_path).not.toContain("AKIAIOSFODNN7EXAMPLE");
     expect(posted.omittedFindings).toBe(0);
 
-    // The stored row (summary_md + raw_output) carries no secret-shaped text.
-    const row = db.raw.query("SELECT * FROM reviews").get() as { summary_md: string; raw_output: string };
+    // The stored row (summary_md + envelope) carries no secret-shaped text;
+    // raw_output is never written on the v1 path (envelope is authoritative).
+    const row = db.raw.query("SELECT summary_md, envelope, raw_output FROM reviews").get() as {
+      summary_md: string;
+      envelope: string;
+      raw_output: string | null;
+    };
     expect(row.summary_md).not.toContain("AKIAIOSFODNN7EXAMPLE");
-    expect(row.raw_output).not.toContain("AKIAIOSFODNN7EXAMPLE");
-    expect(row.raw_output).not.toContain("ghp_abcdef1234567890");
+    expect(row.raw_output).toBeNull();
+    expect(row.envelope).not.toContain("AKIAIOSFODNN7EXAMPLE");
+    expect(row.envelope).not.toContain("ghp_abcdef1234567890");
   });
 
-  test("findings over the cap are trimmed to Top-50 by severity on post AND insert (B4)", async () => {
+
+  test("oversized finding title/body are clamped before post and insert (qc2 F-003 wiring)", async () => {
+    reset();
+    const big: ReviewOutput = {
+      schema: "mstar.review/v1",
+      verdict: "blocked",
+      summary_md: "s",
+      findings: [
+        {
+          mergeClass: "nit",
+          // Non-hex filler: a long [0-9a-fA-F] run would be redacted
+          // (long-hex pattern) before the clamp under test ever runs.
+          title: "T".repeat(FINDING_TITLE_MAX + 10),
+          body: "Z".repeat(FINDING_BODY_MAX + 10),
+        },
+      ],
+    };
+    runnerStdout = JSON.stringify(big);
+    const db = createTestD1();
+    const consumer = createReviewConsumer(makeEnv({ DB: db as never }), undefined, testOverrides);
+
+    await consumer(makeBatch(makePayload()));
+
+    const posted = commenterCalls.find((c) => c.op === "post")!.args[0] as { output: ReviewOutput };
+    expect(posted.output.findings[0]!.title).toHaveLength(FINDING_TITLE_MAX);
+    expect(posted.output.findings[0]!.body).toHaveLength(FINDING_BODY_MAX);
+    // The D1 envelope carries the same clamped array (B4: one capped array).
+    const row = db.raw.query("SELECT envelope FROM reviews").get() as { envelope: string };
+    expect(row.envelope).not.toContain("T".repeat(FINDING_TITLE_MAX + 10));
+  });
+
+  test("findings over the cap are trimmed to Top-50 by merge class on post AND insert (B4)", async () => {
     reset();
     const findings: Array<{
-      severity: "critical" | "warning" | "suggestion" | "info";
-      category: "security" | "logic" | "style" | "perf" | "test" | "other";
+      mergeClass: "must-fix" | "should-fix" | "nit";
       file_path: string;
       line_start: number;
       line_end: number;
       title: string;
       body: string;
     }> = Array.from({ length: 60 }, (_, i) => ({
-      severity: "info" as const,
-      category: "style" as const,
+      mergeClass: "nit" as const,
       file_path: "f.ts",
       line_start: i,
       line_end: i,
       title: `F${i}`,
-      body: "",
+      body: `body ${i}`,
     }));
-    findings[0]!.severity = "critical"; // earliest critical keeps its slot
-    findings[59]!.severity = "critical"; // later critical sorts after F0
-    findings[58]!.severity = "warning";
-    runnerStdout = JSON.stringify({ verdict: "comment", summary_md: "many findings", findings });
+    findings[0]!.mergeClass = "must-fix"; // earliest must-fix keeps its slot
+    findings[59]!.mergeClass = "must-fix"; // later must-fix sorts after F0
+    findings[58]!.mergeClass = "should-fix";
+    runnerStdout = JSON.stringify({
+      schema: "mstar.review/v1",
+      verdict: "blocked",
+      summary_md: "many findings",
+      findings,
+    });
     const db = createTestD1();
     const consumer = createReviewConsumer(makeEnv({ DB: db as never }), undefined, testOverrides);
 
@@ -623,12 +809,12 @@ describe("createReviewConsumer", () => {
     };
     expect(posted.output.findings).toHaveLength(50);
     expect(posted.omittedFindings).toBe(10);
-    // Severity priority: the two criticals first (stable — F0 before F59),
-    // then the warning, then info.
+    // Merge-class priority: the two must-fix first (stable — F0 before F59),
+    // then the should-fix, then the nits.
     expect(posted.output.findings[0]!.title).toBe("F0");
     expect(posted.output.findings[1]!.title).toBe("F59");
     expect(posted.output.findings[2]!.title).toBe("F58");
-    expect(posted.output.findings[2]!.severity).toBe("warning");
+    expect(posted.output.findings[2]!.mergeClass).toBe("should-fix");
 
     // The same capped array landed in D1 (渲染与落库同一裁剪数组).
     const stored = db.raw.query("SELECT COUNT(*) AS n FROM findings").get() as { n: number };
@@ -658,16 +844,16 @@ describe("createReviewConsumer", () => {
     expect(infoLine).toBeDefined();
   });
 
-  test("insert failure after a successful post → one comment, KV done, warn + ack, no rethrow (B3)", async () => {
+  test("put failure after a successful post → one comment, KV done, warn + ack, no rethrow (B3)", async () => {
     reset();
     runnerStdout = JSON.stringify(VALID_OUTPUT);
     const db = createTestD1();
     const failingStore = {
-      insertReview: mock(async () => {
+      put: mock(async () => {
         throw new Error("d1 down");
       }),
+      get: mock(async () => undefined),
       findByIdempotencyKey: mock(async () => null),
-      listByRepo: mock(async () => []),
     };
     const consumer = createReviewConsumer(
       makeEnv({ DB: db as never }),
@@ -893,5 +1079,14 @@ describe("createReviewConsumer", () => {
     ]);
     expect(kvGuardDeletes).toEqual(["inflight:123:acme/widgets:42"]);
     expect(reviewCount(db)).toBe(1);
+  });
+  test("REVIEW_GUARD_TTL_SECONDS covers the full step-budget arithmetic (qc3 F-301 pin)", () => {
+    // Exact pin: FIVE git-timed steps (clone, rev-parse, diff, numstat,
+    // runner-input write) × 120s + the 600s runner + 120s slack for the
+    // untimed steps (token mint, sandbox create, comment post, KV/D1 puts)
+    // = 1320s. numstat + the input write were added by plan 07 without
+    // recomputing the old 3-step formula (1020s) — any future step or
+    // ceiling change must recompute this constant ON PURPOSE.
+    expect(REVIEW_GUARD_TTL_SECONDS).toBe(1320);
   });
 });

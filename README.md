@@ -100,7 +100,7 @@ bun test
 ```
 
 - Local `wrangler dev` secrets go in `.dev.vars` (gitignored) — see `.env.example`.
-- The review runner CLI: `bun run review --diff <file>` (prints the ReviewOutput JSON on stdout).
+- The review runner CLI (in-image entry): `bun run review --level <quick|default> --input <json-file>` (prints the mstar.review/v1 envelope JSON on stdout).
 - Sandbox smoke: `bun run scripts/sandbox-smoke.ts` (see the file header).
 
 ## Deploy

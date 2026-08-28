@@ -1,29 +1,34 @@
 /**
- * Live smoke evidence capture: run one real session, save the raw output to
- * a temp file, and report whether parseReviewOutput accepts it.
+ * Live smoke evidence capture (plan 07): run one real review (quick tier,
+ * single seat) through the omp AgentRuntime, save the mstar.review/v1
+ * envelope to a temp file, and report whether validateMstarReviewV1 accepts
+ * it. Requires HARNESS_PLUGIN_ROOT + a configured provider key + a PR clone
+ * path to review.
  */
-import { readFileSync, writeFileSync } from "node:fs";
+import { writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { runReviewSession } from "../src/review/session";
-import { parseReviewOutput } from "../src/review/schema";
+import { validateMstarReviewV1 } from "@mstar-harness/engine";
+import { ompAgentRuntime, parseModelSelectors } from "../src/review/runtime-omp";
 
-const diff = readFileSync(new URL("../tests/fixtures/sample-pr.diff", import.meta.url), "utf8");
-const raw = await runReviewSession(diff);
-const outPath = join(tmpdir(), "omp-review-live-raw.txt");
-writeFileSync(outPath, raw);
-const parsed = parseReviewOutput(raw);
-console.log(`RAW_LENGTH=${raw.length}`);
-console.log(`RAW_SAVED=${outPath}`);
-console.log(`PARSE_OK=${parsed.ok}`);
-if (parsed.ok) {
-  console.log(`VERDICT=${parsed.output.verdict}`);
-  console.log(`FINDINGS=${parsed.output.findings.length}`);
-} else {
-  console.log(`PARSE_ERROR=${parsed.error}`);
+const worktreePath = process.argv[2] ?? process.cwd();
+const envelope = await ompAgentRuntime.runReview({
+  level: "quick",
+  worktreePath,
+  reconFacts: [],
+  modelSelectors: parseModelSelectors(Bun.env.OMP_REVIEW_MODEL),
+});
+const outPath = join(tmpdir(), "omp-review-live-envelope.json");
+writeFileSync(outPath, JSON.stringify(envelope, null, 2));
+const gate = validateMstarReviewV1(envelope);
+console.log(`WORKTREE=${worktreePath}`);
+console.log(`ENVELOPE_SAVED=${outPath}`);
+console.log(`VALIDATE_OK=${gate.ok}`);
+console.log(`VERDICT=${envelope.verdict}`);
+console.log(`FINDINGS=${envelope.findings.length}`);
+for (const violation of gate.violations) {
+  console.log(`VIOLATION=${violation.code}: ${violation.message}`);
 }
-if (raw.trim().length === 0) {
-  console.error("LIVE_SMOKE_FAILED: empty output");
-  process.exit(1);
+if (!gate.ok) {
+  process.exitCode = 1;
 }
-console.log("LIVE_SMOKE_OK");

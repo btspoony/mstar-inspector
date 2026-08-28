@@ -68,12 +68,23 @@ describe("redactSecrets", () => {
 });
 
 describe("redactReviewOutput", () => {
+  // F-001: EVERY model-controlled string that reaches the public comment or
+  // the D1 envelope passes through redactSecrets — including finding
+  // title/category/file_path/fingerprint_hint and tally.chatHeader, not
+  // just summary_md/finding bodies.
   const output: ReviewOutput = {
-    verdict: "comment",
+    schema: "mstar.review/v1",
+    verdict: "blocked",
     summary_md: "Provider key leaked here: AKIAIOSFODNN7EXAMPLE",
+    tally: {
+      verdict: "blocked",
+      scorePct: 0,
+      tally: { mustFix: 1, shouldFix: 0, nit: 0, unverified: 0 },
+      chatHeader: "chat: ghp_abcdef1234567890",
+    },
     findings: [
       {
-        severity: "critical",
+        mergeClass: "must-fix",
         category: "security",
         file_path: "src/auth.ts",
         line_start: 1,
@@ -81,15 +92,38 @@ describe("redactReviewOutput", () => {
         title: "Leak",
         body: "secret = ghp_abcdef1234567890",
       },
+      {
+        mergeClass: "should-fix",
+        title: "Exfil via TOKEN sk-proj-abcdefghijklmnopqrstuvwx",
+        body: "Bearer ghs_zzz at AKIAIOSFODNN7EXAMPLE",
+        category: "AKIAIOSFODNN7EXAMPLE leak",
+        file_path: "evil/AKIAIOSFODNN7EXAMPLE/x.ts",
+        fingerprint_hint: "x.ts:1 ghp_abcdef1234567890",
+      },
     ],
   };
 
-  test("redacts summary_md and every finding body, keeping structure", () => {
+  test("redacts every model-controlled field, keeping structure", () => {
     const redacted = redactReviewOutput(output);
     expect(redacted.summary_md).not.toContain("AKIAIOSFODNN7EXAMPLE");
     expect(redacted.findings[0]!.body).not.toContain("ghp_abcdef1234567890");
+    expect(redacted.findings[1]!.title).not.toContain("sk-proj-");
+    expect(redacted.findings[1]!.body).not.toContain("AKIAIOSFODNN7EXAMPLE");
+    expect(redacted.findings[1]!.category).not.toContain("AKIAIOSFODNN7EXAMPLE");
+    expect(redacted.findings[1]!.file_path).not.toContain("AKIAIOSFODNN7EXAMPLE");
+    expect(redacted.findings[1]!.fingerprint_hint).not.toContain("ghp_abcdef1234567890");
+    expect(redacted.tally!.chatHeader).not.toContain("ghp_abcdef1234567890");
+    expect(redacted.findings[0]!.mergeClass).toBe("must-fix");
+    expect(redacted.findings[0]!.line_start).toBe(1);
+    expect(redacted.tally!.tally.mustFix).toBe(1);
+    expect(redacted.verdict).toBe("blocked");
+  });
+
+  test("clean model text passes through untouched (no over-redaction)", () => {
+    const redacted = redactReviewOutput(output);
     expect(redacted.findings[0]!.title).toBe("Leak");
-    expect(redacted.findings[0]!.severity).toBe("critical");
-    expect(redacted.verdict).toBe("comment");
+    expect(redacted.findings[0]!.category).toBe("security");
+    expect(redacted.findings[0]!.file_path).toBe("src/auth.ts");
+    expect("fingerprint_hint" in redacted.findings[0]!).toBe(false);
   });
 });

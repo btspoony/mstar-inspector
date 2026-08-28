@@ -1,180 +1,177 @@
 /**
- * Unit tests for the container review-runner entry (plan 06 Task 2).
+ * Unit tests for the container review-runner entry (plan 07 Task 2).
  *
- * The @oh-my-pi/pi-coding-agent SDK boundary is mocked (same technique as
- * e2e.test.ts) so the tests are deterministic. Contract under test:
- *   - runner.ts reuses the M0 CLI main (src/review/run.ts) — identity pin so
- *     the container entry can never drift from the reviewed CLI semantics;
- *   - main() via the runner: valid diff → exit 0, stdout is ONLY the
- *     ReviewOutput JSON (no {mode, result} envelope); unparseable raw →
- *     summary mode still exits 0 with a valid ReviewOutput; usage error → 2;
- *     unreadable diff file → 1; session failure → 1 with empty stdout.
- *
- * The container-specific pieces (HARNESS_PLUGIN_ROOT=/opt/mstar-harness
- * resolution, fetch.enabled=false isolation, read/grep/glob whitelist) are
- * covered by session.test.ts — they are inherited here unchanged.
+ * The runtime boundary (src/review/runtime-omp) is mocked so the tests are
+ * deterministic. Contract under test:
+ *   - `--level <quick|default> --input <json-file>` → exit 0 and stdout is
+ *     ONLY the mstar.review/v1 envelope JSON (no envelope wrapper, no logs);
+ *   - usage errors (missing flags, unknown level) → exit 2, stdout empty;
+ *   - unreadable/malformed input file → exit 1, stdout empty;
+ *   - runtime failure → exit 1, stdout empty, stderr diagnostic;
+ *   - `worktreePath` defaults to the process cwd; `reconFacts` defaults to [];
+ *   - the OMP_REVIEW_MODEL chain flows into the runtime input.
  */
 
 import { afterEach, describe, expect, mock, test } from "bun:test";
-import { readFileSync } from "node:fs";
+import { mkdtempSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
-/** Raw assistant text the fake session returns; set per test. */
-let rawOutput = "";
-/** When set, the fake session's prompt throws (simulates SDK/provider failure). */
-let sessionError: Error | undefined;
+/** Envelope the fake runtime resolves with; overridden per test. */
+let fakeEnvelope: Record<string, unknown> | undefined;
+/** Error the fake runtime rejects with; takes precedence when set. */
+let runtimeError: Error | undefined;
+/** Captured runReview inputs. */
+const runInputs: unknown[] = [];
+/** Fake parseModelSelectors result (proves the env chain flows through). */
+let fakeSelectors: string[] = [];
 
-mock.module("@oh-my-pi/pi-coding-agent", () => ({
-  createAgentSession: mock(async () => ({
-    session: {
-      prompt: mock(async () => {
-        if (sessionError) throw sessionError;
-        return true;
-      }),
-      getLastAssistantMessage: mock(() => ({
-        role: "assistant",
-        content: [{ type: "text", text: rawOutput }],
-      })),
-      dispose: mock(async () => {}),
-    },
-  })),
-  SessionManager: {
-    inMemory: mock((cwd?: string) => ({ kind: "in-memory", cwd })),
+mock.module("../../src/review/runtime-omp", () => ({
+  ompAgentRuntime: {
+    runReview: mock(async (input: unknown) => {
+      runInputs.push(input);
+      if (runtimeError) throw runtimeError;
+      return fakeEnvelope;
+    }),
   },
-  Settings: {
-    isolated: mock((overrides: Record<string, unknown>) => ({
-      kind: "isolated",
-      overrides,
-      get: (path: string) => overrides[path],
-    })),
-  },
-  loadSkillsFromDir: mock(async () => ({
-    skills: [
-      {
-        name: "mstar-audit",
-        description: "Morning Star codebase audit",
-        filePath: "/virtual/mstar-harness/skills/mstar-audit/SKILL.md",
-        baseDir: "/virtual/mstar-harness/skills/mstar-audit",
-        source: "mstar-harness",
-      },
-    ],
-    warnings: [],
-  })),
+  parseModelSelectors: mock(() => fakeSelectors),
 }));
 
-import { main as runMain } from "../../src/review/run";
-import { main as runnerMain } from "../../src/review/runner";
-import { parseReviewOutput, type ReviewOutput } from "../../src/review/schema";
+// Dynamic import is REQUIRED here: mock.module must be registered before the
+// runner module evaluates its runtime-omp import (hoisted static imports
+// would bind the real module). See bun mock.module semantics.
+const { main } = await import("../../src/review/runner");
 
-const FIXTURE = new URL("../../tests/fixtures/sample-pr.diff", import.meta.url).pathname;
-const sampleDiff = readFileSync(FIXTURE, "utf8");
-
-const VALID_OUTPUT: ReviewOutput = {
-  verdict: "request_changes",
-  summary_md: "Two issues found in the diff.",
-  findings: [
-    {
-      severity: "warning",
-      category: "logic",
-      file_path: "src/auth.ts",
-      line_start: 21,
-      line_end: 21,
-      title: "Fractional expiry comparison",
-      body: "`claims.exp < Date.now() / 1000` compares against a fractional value.",
-    },
-  ],
+const ENVELOPE = {
+  schema: "mstar.review/v1",
+  verdict: "blocked",
+  summary_md: "summary",
+  findings: [],
 };
+
+/** Write a JSON input file into a fresh temp dir and return its path. */
+function writeInput(json: unknown): string {
+  const dir = mkdtempSync(join(tmpdir(), "runner-input-"));
+  const path = join(dir, "input.json");
+  writeFileSync(path, JSON.stringify(json));
+  return path;
+}
 
 /** Capture console.log / console.error while a runner main() call runs. */
 async function runCli(argv: string[]): Promise<{ code: number; stdout: string; stderr: string }> {
-  const stdout: string[] = [];
-  const stderr: string[] = [];
-  const log = mock((...args: unknown[]) => stdout.push(args.map(String).join(" ")));
-  const err = mock((...args: unknown[]) => stderr.push(args.map(String).join(" ")));
-  const prevLog = console.log;
-  const prevErr = console.error;
-  console.log = log as typeof console.log;
-  console.error = err as typeof console.error;
+  const logs: string[] = [];
+  const errors: string[] = [];
+  const originalLog = console.log;
+  const originalError = console.error;
+  console.log = (...args: unknown[]) => logs.push(args.join(" "));
+  console.error = (...args: unknown[]) => errors.push(args.join(" "));
   try {
-    const code = await runnerMain(argv);
-    return { code, stdout: stdout.join("\n"), stderr: stderr.join("\n") };
+    const code = await main(argv);
+    return { code, stdout: logs.join("\n"), stderr: errors.join("\n") };
   } finally {
-    console.log = prevLog;
-    console.error = prevErr;
+    console.log = originalLog;
+    console.error = originalError;
   }
 }
 
 afterEach(() => {
-  rawOutput = "";
-  sessionError = undefined;
+  fakeEnvelope = ENVELOPE;
+  runtimeError = undefined;
+  runInputs.length = 0;
+  fakeSelectors = [];
 });
 
 describe("runner entry (src/review/runner.ts)", () => {
-  test("reuses the M0 CLI main — identity pin against run.ts", () => {
-    // The container entry must stay byte-identical to the reviewed M0 CLI
-    // semantics (exit codes + stdout purity). If this pin breaks, the runner
-    // has drifted from the reviewed contract.
-    expect(runnerMain).toBe(runMain);
-  });
-
-  test("--diff <file> exits 0 and prints ONLY the ReviewOutput JSON", async () => {
-    rawOutput = JSON.stringify(VALID_OUTPUT);
-    const { code, stdout, stderr } = await runCli(["--diff", FIXTURE]);
+  test("valid invocation → exit 0, stdout is ONLY the envelope JSON", async () => {
+    fakeEnvelope = ENVELOPE;
+    const inputPath = writeInput({ worktreePath: "/workspace/clone", reconFacts: ["acme/widgets#7"] });
+    const { code, stdout, stderr } = await runCli(["--level", "quick", "--input", inputPath]);
 
     expect(code).toBe(0);
-    const parsed = JSON.parse(stdout) as Record<string, unknown>;
-    expect(parsed).not.toHaveProperty("mode");
-    expect(parsed).toHaveProperty("verdict");
-    expect(parsed).toHaveProperty("summary_md");
-    expect(parsed).toHaveProperty("findings");
-    expect(parsed.verdict).toBe("request_changes");
-    // Diagnostics go to stderr, not stdout.
-    expect(stderr).toContain("review mode: structured");
+    expect(JSON.parse(stdout)).toEqual(ENVELOPE);
+    expect(stderr).toBe("");
+    expect(runInputs).toEqual([
+      {
+        level: "quick",
+        worktreePath: "/workspace/clone",
+        reconFacts: ["acme/widgets#7"],
+        modelSelectors: [],
+      },
+    ]);
   });
 
-  test("summary fallback still exits 0 with a valid ReviewOutput on stdout", async () => {
-    rawOutput = "not json at all";
-    const { code, stdout, stderr } = await runCli(["--diff", FIXTURE]);
+  test("defaults: worktreePath = cwd, reconFacts = [], model chain from env parsing", async () => {
+    fakeSelectors = ["ark-plan/deepseek-v4-flash", "ark-plan/backup"];
+    const inputPath = writeInput({});
+    const { code } = await runCli(["--level", "default", "--input", inputPath]);
 
     expect(code).toBe(0);
-    const parsed = JSON.parse(stdout) as ReviewOutput;
-    expect(parsed.verdict).toBe("comment");
-    expect(parsed.findings).toEqual([]);
-    expect(parsed.summary_md.length).toBeGreaterThan(0);
-    expect(stderr).toContain("review mode: summary");
+    expect(runInputs[0]).toEqual({
+      level: "default",
+      worktreePath: process.cwd(),
+      reconFacts: [],
+      modelSelectors: fakeSelectors,
+    });
   });
 
-  test("the structured stdout itself passes parseReviewOutput", async () => {
-    rawOutput = JSON.stringify(VALID_OUTPUT);
-    const { stdout } = await runCli(["--diff", FIXTURE]);
+  test("usage errors → exit 2, stdout empty", async () => {
+    const inputPath = writeInput({});
+    for (const argv of [
+      [],
+      ["--level", "quick"],
+      ["--input", inputPath],
+      ["--level", "quick", "--input"],
+      ["--level", "quick", "--input", inputPath, "--extra"],
+      ["--level", "deep", "--input", inputPath],
+      ["--level", "9000", "--input", inputPath],
+    ]) {
+      const { code, stdout } = await runCli(argv);
+      expect(code).toBe(2);
+      expect(stdout).toBe("");
+    }
+    expect(runInputs).toHaveLength(0);
+  });
 
-    const parsed = parseReviewOutput(stdout);
-    expect(parsed.ok).toBe(true);
-    if (parsed.ok) {
-      expect(parsed.output).toEqual(VALID_OUTPUT);
+  test("unreadable input file → exit 1, stdout empty, stderr diagnostic", async () => {
+    const { code, stdout, stderr } = await runCli(["--level", "quick", "--input", "/nonexistent/input.json"]);
+
+    expect(code).toBe(1);
+    expect(stdout).toBe("");
+    expect(stderr).toContain("cannot read runner input");
+  });
+
+  test("malformed input JSON → exit 1", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "runner-input-"));
+    const path = join(dir, "input.json");
+    writeFileSync(path, "{ not json");
+    const { code, stdout } = await runCli(["--level", "quick", "--input", path]);
+
+    expect(code).toBe(1);
+    expect(stdout).toBe("");
+  });
+
+  test("input shape violations → exit 1", async () => {
+    for (const bad of [
+      [1, 2, 3],
+      { worktreePath: 42 },
+      { reconFacts: "not-an-array" },
+      { reconFacts: [1, 2] },
+    ]) {
+      const inputPath = writeInput(bad);
+      const { code, stdout } = await runCli(["--level", "quick", "--input", inputPath]);
+      expect(code).toBe(1);
+      expect(stdout).toBe("");
     }
   });
 
-  test("missing --diff flag → usage error, exit 2", async () => {
-    const { code, stdout, stderr } = await runCli([]);
-    expect(code).toBe(2);
-    expect(stdout).toBe("");
-    expect(stderr).toContain("usage: bun run review --diff <file>");
-  });
-
-  test("unreadable diff file → exit 1 with empty stdout", async () => {
-    const { code, stdout, stderr } = await runCli(["--diff", "/nonexistent/diff.patch"]);
-    expect(code).toBe(1);
-    expect(stdout).toBe("");
-    expect(stderr).toContain("cannot read diff file");
-  });
-
-  test("session rejection → exit 1, empty stdout, stderr diagnostic", async () => {
-    sessionError = new Error("provider boom");
-    const { code, stdout, stderr } = await runCli(["--diff", FIXTURE]);
+  test("runtime failure → exit 1, stdout empty, stderr diagnostic", async () => {
+    runtimeError = new Error("seat 0 failed: provider boom");
+    const inputPath = writeInput({});
+    const { code, stdout, stderr } = await runCli(["--level", "quick", "--input", inputPath]);
 
     expect(code).toBe(1);
     expect(stdout).toBe("");
-    expect(stderr).toContain("review: session failed:");
+    expect(stderr).toContain("runtime failed");
     expect(stderr).toContain("provider boom");
   });
 });
