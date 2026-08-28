@@ -436,7 +436,10 @@ export const ompAgentRuntime: AgentRuntime = {
     // (qc3 F-302): `in` also matches Object.prototype keys, which would pass
     // this guard and only explode later inside runReview with a misleading
     // seat-partition message.
-    if (!Object.hasOwn(REVIEW_SEATS, input.level)) {
+    // `deep` is a valid tier (plan 09 T1) with no seats entry — it throws here
+    // until the parent-session path (T2) branches ahead of this Bun fan-out.
+    // Naming it first also narrows `input.level` to the REVIEW_SEATS keys.
+    if (input.level === "deep" || !Object.hasOwn(REVIEW_SEATS, input.level)) {
       throw new Error(`unsupported review level: ${JSON.stringify(String(input.level))}`);
     }
 
