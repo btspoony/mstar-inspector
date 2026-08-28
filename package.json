@@ -7,7 +7,7 @@
   "scripts": {
     "test": "bun test",
     "typecheck": "tsc --noEmit",
-    "review": "bun run src/review/run.ts",
+    "review": "bun run src/review/runner.ts",
     "keys": "bun run scripts/provider-keys.ts"
   },
   "engines": {
