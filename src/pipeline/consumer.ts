@@ -6,8 +6,9 @@
  * extraheader env) → `git rev-parse HEAD` for the AUTHORITATIVE sha →
  * dedup by that sha (hit → ack) → diff → numstat (the seat-partition
  * universe) → write the runner `--input` JSON (reconFacts) → exec the
- * in-image runner `--level <quick|default|deep>` (env-injected
- * GH_TOKEN/ARK_API_KEY/PI_CODING_AGENT_DIR/HARNESS_PLUGIN_ROOT) → parse
+ * in-image runner `--level <quick|default|deep>` (exec env =
+ * ARK_API_KEY/PI_CODING_AGENT_DIR/HARNESS_PLUGIN_ROOT + OMP_REVIEW_MODEL and
+ * configured provider keys — GH_TOKEN rides ONLY the git/gh step envs) → parse
  * the mstar.review/v1 envelope → post the overall review comment FIRST →
  * store.put (idempotent — the UNIQUE first-written row wins) → KV
  * completion state → finally destroy. Any step throwing → structured log
@@ -65,11 +66,12 @@ export type PipelineEnv = {
    */
   OMP_REVIEW_MODEL?: string;
   /**
-   * Review tier for the in-image runner (plan 07 AC-S7-level — quick and
-   * default configurable): "quick" (1 seat) or "default" (2 seats, the
-   * harness no-flag landing tier). Unset/empty → "default". Any other
-   * value (incl. "deep", not delivered this iteration) fails the review
-   * fail-loud — the port never silently downgrades.
+   * Review tier for the in-image runner (plan 09 T1): "quick" (1 seat),
+   * "default" (2 seats, the harness no-flag landing tier), or "deep" (the
+   * three-stage parent-session path). Unset/empty → "default". Any other
+   * value fails the review fail-loud — the port never silently downgrades;
+   * the valid-value list lives in REVIEW_LEVELS (the SSOT the error message
+   * quotes), so this doc cannot drift when the universe widens again.
    */
   REVIEW_LEVEL?: string;
   /**

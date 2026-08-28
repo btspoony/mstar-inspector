@@ -30,11 +30,13 @@
  *   5. deep (plan 09 T2): no partition, no Bun fan-out — createAgentSession
  *      with read/grep/glob + the SDK built-in `task` tool and a strict
  *      PARENT_OUTPUT_SCHEMA; the harness /amazing-pr-review command is loaded
- *      from HARNESS_PLUGIN_ROOT into the assignment (zero copy), the harness
- *      role agents (*.md) are run-time-installed into <worktree>/.omp/agents/
- *      for task discovery, and one session.prompt() drives the three stages;
- *      the turn must end in a schema-validated yield, which the adapter
- *      re-validates with validateMstarReviewV1 (spec Architect locks L1/L2).
+ *      from HARNESS_PLUGIN_ROOT into the assignment (zero copy), the deep
+ *      seat roles (DEEP_SEAT_ROLES) are installed into <worktree>/.omp/agents/
+ *      as OMP-native read-only seat definitions (seat-agent.md frontmatter
+ *      contract, bodies loaded from the plugin root), and one session.prompt()
+ *      drives the three stages; the turn must end in a schema-validated
+ *      yield, which the adapter re-validates with validateMstarReviewV1
+ *      (spec Architect locks L1/L2).
  *
  * Failure contract: ANY seat/parse/validation failure throws — the caller
  * never receives an M1-shaped fake success and nothing is posted or stored.
@@ -50,9 +52,8 @@
  * is derived as `!restrictToolNames && …` (structured-subagent.ts:387), so the
  * restricted parent session structurally disables MCP for every seat.
  */
-
 import { existsSync } from "node:fs";
-import { copyFile, mkdir, readFile, readdir, rm, rmdir, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rm, rmdir, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import {
   createAgentSession,
@@ -487,27 +488,70 @@ async function installSeatAgent(cwd: string): Promise<void> {
 }
 
 /**
- * Install the harness role agent definitions (<pluginRoot>/agents/*.md) into
- * the PR clone for omp project-scope discovery (discoverAgents reads
- * <session-cwd>/.omp/agents/): the deep parent dispatches its Stage 1/2
- * seats with the SDK built-in `task` tool against these definitions (spec
- * Architect lock L1). Zero-copy rule: the markdown lives in the plugin root;
- * only run-time copies touch the ephemeral clone. Returns the installed
- * names so the run can remove them again.
+ * Deep Stage 2 seat roles (harness pr-review § Review pipeline): the
+ * three-stage flow dispatches exactly these harness roles as domain seats
+ * (each carrying the in-domain security lens). Installing ONLY these keeps
+ * the task-tool agent schema minimal, and the cleanup set static.
  */
-async function installHarnessAgents(cwd: string, pluginRoot: string): Promise<string[]> {
-  const definitions = (await readdir(join(pluginRoot, "agents")))
-    .filter((name) => name.endsWith(".md"))
-    .sort();
-  if (definitions.length === 0) {
-    throw new Error(`mstar-harness plugin at ${pluginRoot} exposes no agent definitions under agents/`);
-  }
+const DEEP_SEAT_ROLES = ["code-reviewer", "fullstack-dev", "frontend-dev"] as const;
+
+/** Filenames the deep path may install — known statically, so a partially-failed install cleans up exactly like a complete one. */
+const DEEP_SEAT_ROLE_FILES: readonly string[] = DEEP_SEAT_ROLES.map((role) => `${role}.md`);
+
+/** Strip a `---`-fenced frontmatter block; the role body is what the seat reads. */
+function stripFrontmatter(markdown: string): string {
+  const normalized = markdown.replace(/\r\n?/g, "\n");
+  if (!normalized.startsWith("---")) return normalized.trim();
+  const end = normalized.indexOf("\n---", 3);
+  if (end === -1) return normalized.trim();
+  return normalized.slice(end + 4).trim();
+}
+
+/**
+ * Rewrite a harness role file into an OMP-native read-only seat definition
+ * (qc2 F-001): harness agents/*.md carry OpenCode-style frontmatter (`tools`
+ * as an object map), which the SDK `parseAgentFields` reads as NO tool list —
+ * under the parent's restrictToolNames that spawns a yield-only seat that
+ * cannot read the clone. The installed contract is the same as
+ * ./seat-agent.md — name + description + `tools: [read, grep, glob]` — with
+ * the harness role BODY kept verbatim (zero-copy: sourced from the plugin
+ * root at runtime, never pasted into src/).
+ */
+function toOmpSeatDefinition(role: string, source: string): string {
+  const body = stripFrontmatter(source);
+  return [
+    "---",
+    `name: ${role}`,
+    `description: Read-only deep-review seat for the ${role} harness role — collects and vets review findings for its assigned domain using only read, grep, and glob.`,
+    `tools: [${REVIEW_TOOL_NAMES.join(", ")}]`,
+    "---",
+    "",
+    body,
+    "",
+  ].join("\n");
+}
+
+/**
+ * Install the deep seat definitions into the PR clone for omp project-scope
+ * discovery (discoverAgents reads <session-cwd>/.omp/agents/): the deep
+ * parent dispatches its Stage 2 domain seats with the SDK built-in `task`
+ * tool against these definitions (spec Architect lock L1). Each harness role
+ * file is loaded from the plugin root at runtime and rewritten with the
+ * OMP-native frontmatter contract; a missing role file throws fail-loud (a
+ * seat the flow cannot dispatch is a broken review, not a degraded one).
+ */
+async function installDeepSeatAgents(cwd: string, pluginRoot: string): Promise<void> {
   const agentsDir = join(cwd, ".omp", "agents");
   await mkdir(agentsDir, { recursive: true });
-  await Promise.all(
-    definitions.map((name) => copyFile(join(pluginRoot, "agents", name), join(agentsDir, name))),
-  );
-  return definitions;
+  for (const role of DEEP_SEAT_ROLES) {
+    let source: string;
+    try {
+      source = await readFile(join(pluginRoot, "agents", `${role}.md`), "utf8");
+    } catch {
+      throw new Error(`mstar-harness plugin at ${pluginRoot} is missing the deep seat role agents/${role}.md`);
+    }
+    await writeFile(join(agentsDir, `${role}.md`), toOmpSeatDefinition(role, source));
+  }
 }
 
 /** Remove the agent definitions a run installed; rmdir only removes the dirs we left empty. */
@@ -518,24 +562,28 @@ async function removeInstalledAgents(cwd: string, names: readonly string[]): Pro
 }
 
 /**
- * Run `review` with GH_TOKEN removed from the process env (spec: the deep
- * parent env carries no writable GH_TOKEN). The SDK session has no env
- * override surface, so the strip window covers the parent turn — the phase
- * in which every seat spawns — and the previous value is restored afterwards
- * even on throw (the consumer's own git/gh steps run in their own exec envs,
- * outside this window).
+ * Run `review` with the GitHub token env aliases removed from the process
+ * env (qc2 F-004: `GH_TOKEN` and `GITHUB_TOKEN` — the common `gh` alias;
+ * spec: the deep parent env carries no writable GitHub token). The SDK
+ * session has no env override surface, so the strip window covers the parent
+ * turn — the phase in which every seat spawns — and the previous values are
+ * restored afterwards even on throw (the consumer's own git/gh steps run in
+ * their own exec envs, outside this window).
  */
 async function withoutGitHubTokenEnv<T>(review: () => Promise<T>): Promise<T> {
-  const saved = process.env.GH_TOKEN;
+  const savedGhToken = process.env.GH_TOKEN;
+  const savedGithubToken = process.env.GITHUB_TOKEN;
   delete process.env.GH_TOKEN;
+  delete process.env.GITHUB_TOKEN;
   try {
     return await review();
   } finally {
-    if (saved === undefined) delete process.env.GH_TOKEN;
-    else process.env.GH_TOKEN = saved;
+    if (savedGhToken === undefined) delete process.env.GH_TOKEN;
+    else process.env.GH_TOKEN = savedGhToken;
+    if (savedGithubToken === undefined) delete process.env.GITHUB_TOKEN;
+    else process.env.GITHUB_TOKEN = savedGithubToken;
   }
 }
-
 /**
  * Deep parent session options — the quick/default isolation set plus the
  * three deep-only deltas (spec Architect locks L1/L2): the SDK built-in
@@ -579,9 +627,10 @@ async function deepAssignment(input: AgentRuntimeRunInput, pluginRoot: string): 
     ...input.reconFacts.map((fact) => `- ${fact}`),
     "",
     `The review worktree is ${input.worktreePath} (read-only clone; your cwd).`,
-    "The harness role agents are installed at .omp/agents/ — dispatch the",
-    "Stage 1 collect and Stage 2 domain (± security) seats with the `task`",
-    "tool; Stage 3 synthesis is yours alone.",
+    "The review seat definitions (code-reviewer / fullstack-dev /",
+    "frontend-dev) are installed at .omp/agents/ — dispatch the Stage 1",
+    "collect and Stage 2 domain (± security) seats with the `task` tool;",
+    "Stage 3 synthesis is yours alone.",
     "",
     "Execute the following review command for tier `deep`, with one override:",
     "do NOT post anything to GitHub (no reviews, no comments) — the caller",
@@ -611,9 +660,8 @@ async function runDeepReview(input: AgentRuntimeRunInput): Promise<MstarReviewV1
   // tool seat cwd resolve against the review tree.
   const cwd = input.worktreePath;
   let session: AgentSession | undefined;
-  let installedAgents: readonly string[] = [];
   try {
-    installedAgents = await installHarnessAgents(cwd, pluginRoot);
+    await installDeepSeatAgents(cwd, pluginRoot);
     return await withoutGitHubTokenEnv(async () => {
       const created = await createAgentSession(
         deepSessionOptions({
@@ -626,21 +674,33 @@ async function runDeepReview(input: AgentRuntimeRunInput): Promise<MstarReviewV1
       );
       session = created.session;
 
-      // Capture the structured yield the turn must end with. The SDK yield
-      // tool wraps the schema payload under `result` (successResultSchema =
-      // { data }; errors under { error }).
+      // Capture the structured yield the turn must end with. Capture rides
+      // `tool_execution_end`, NOT start: the SDK yield tool validates the
+      // payload inside execute() — after the start event — and retries up to
+      // MAX_SCHEMA_RETRIES before overriding, so a start-args capture can
+      // keep a payload the SDK went on to reject (qc2 F-002). On end,
+      // `isError` marks a rejected attempt (the model retries); a successful
+      // end carries the accepted payload in result.details.data, and the
+      // LAST successful capture wins (`=`, never `??=`) so a corrected
+      // re-yield replaces an earlier accepted one.
       let yielded: unknown;
       let yieldError: string | undefined;
       const unsubscribe = session.subscribe((event) => {
-        if (event.type !== "tool_execution_start" || event.toolName !== "yield") return;
-        const args = event.args as { result?: { data?: unknown; error?: string } } | undefined;
-        const result = args?.result;
-        if (!result || typeof result !== "object") return;
-        if ("error" in result && typeof result.error === "string") {
-          yieldError ??= result.error;
+        if (event.type !== "tool_execution_end" || event.toolName !== "yield") return;
+        if (event.isError) return;
+        const details = (event.result as { details?: unknown } | undefined)?.details;
+        if (!details || typeof details !== "object") return;
+        const record = details as { data?: unknown; error?: string; status?: string; type?: unknown };
+        if (typeof record.error === "string") {
+          yieldError = record.error;
           return;
         }
-        if ("data" in result) yielded ??= result.data;
+        // Incremental section yields (array-typed `type`) carry partial data
+        // that can never satisfy the envelope; only terminal (untyped) yields
+        // with a payload count.
+        if (record.status === "success" && !Array.isArray(record.type) && record.data !== undefined) {
+          yielded = record.data;
+        }
       });
       let turnError: unknown;
       try {
@@ -659,6 +719,12 @@ async function runDeepReview(input: AgentRuntimeRunInput): Promise<MstarReviewV1
             ? `deep parent yielded an error: ${yieldError}`
             : "deep parent turn produced no structured yield (mstar.review/v1 envelope)",
         );
+      }
+      // A prompt throw AFTER a successful yield must stay observable (qc3
+      // S-002): the envelope below is engine-validated, so returning it
+      // stands — but the partially-failed turn is logged, not swallowed.
+      if (turnError !== undefined) {
+        console.error("deep parent turn raised after a successful yield", turnError);
       }
 
       // SDK strict schema enforcement only guarantees shape — the engine
@@ -680,9 +746,11 @@ async function runDeepReview(input: AgentRuntimeRunInput): Promise<MstarReviewV1
         console.error("omp review runtime session dispose failed", error);
       }
     }
-    // Undo the agent installs; the clone itself is caller-owned and must
-    // survive (rmdir removes the dirs only if we left them empty).
-    await removeInstalledAgents(cwd, installedAgents);
+    // Undo the seat installs; the set is static (DEEP_SEAT_ROLE_FILES), so a
+    // partially-failed install cleans up exactly like a complete one (qc1
+    // F-002). The clone itself is caller-owned and must survive (rmdir
+    // removes the dirs only if we left them empty).
+    await removeInstalledAgents(cwd, DEEP_SEAT_ROLE_FILES);
   }
 }
 

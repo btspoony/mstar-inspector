@@ -22,18 +22,20 @@
  *   - level "deep" drives the parent-session path (plan 09 Task 2): the
  *     parent session (cwd = worktreePath, read/grep/glob + `task`, strict
  *     output schema) is prompted once, the harness review command is loaded
- *     from the plugin-root fixture at runtime, harness agents/*.md are
- *     installed into <worktree>/.omp/agents/ for the run and removed after,
- *     the strict yield payload is re-validated against the engine vocab, and
+ *     from the plugin-root fixture at runtime, the deep seat roles are
+ *     installed into <worktree>/.omp/agents/ as OMP-native read-only seat
+ *     definitions (bodies from the fixture, `tools: [read, grep, glob]`
+ *     frontmatter) for the run and removed after, the LAST successful yield
+ *     is re-validated against the engine vocab, and
  *     partitionSeats/runStructuredSubagent are never called — quick/default
  *     keep the Bun fan-out untouched;
  *   - a non-delivered level is rejected at the port.
  */
-
-import { afterAll, afterEach, describe, expect, mock, test } from "bun:test";
-import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
+import { afterAll, afterEach, describe, expect, mock, spyOn, test } from "bun:test";
+import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { parseAgent } from "@oh-my-pi/pi-coding-agent/task/agents";
 
 import type { AgentRuntime } from "../../src/review/runtime";
 import { PLUGIN_ROOT_FIXTURE } from "./plugin-root-fixture";
@@ -56,8 +58,11 @@ let seatResults: Array<{ error?: string; status?: string; data?: unknown; stderr
 let installedSeatAgent: string | null = null;
 /** Agents-dir listing snapshotted from the PR-clone cwd at session creation. */
 let installedAgentFiles: string[] | null = null;
-/** GH_TOKEN seen in process.env at session creation (must be stripped on deep). */
+/** Per-file contents of the installed deep seat definitions, snapshotted at session creation. */
+let installedSeatDefs: Record<string, string> | null = null;
+/** GH_TOKEN/GITHUB_TOKEN seen in process.env at session creation (must be stripped on deep). */
 let ghTokenAtCreation: string | undefined;
+let githubTokenAtCreation: string | undefined;
 /** Count of fake session.dispose() calls since the last createAgentSession. */
 let disposeCalls = 0;
 /** Captured runStructuredSubagent requests, in dispatch order. */
@@ -67,6 +72,10 @@ const promptTexts: string[] = [];
 /** Structured yield payloads / errors the fake parent emits to its subscriber during prompt. */
 let parentYields: unknown[] = [];
 let parentYieldErrors: string[] = [];
+/** Yield attempts the SDK rejects (tool_execution_end with isError) before a later success. */
+let parentRejectedYields: unknown[] = [];
+/** When set, the fake prompt throws this message AFTER emitting the queued yields. */
+let parentPromptThrow: string | null = null;
 /** Session event listeners registered by the runtime (one per deep run). */
 const yieldListeners: Array<(event: unknown) => void> = [];
 
@@ -78,11 +87,20 @@ mock.module("@oh-my-pi/pi-coding-agent", () => ({
     // session creation — snapshot it here, the runtime removes it afterwards.
     const installed = join(options.cwd as string, ".omp", "agents", "mstar-review-seat.md");
     installedSeatAgent = existsSync(installed) ? readFileSync(installed, "utf8") : null;
-    // Same creation-time snapshots for the deep path: the full installed
-    // agents listing (harness role agents) and the GH_TOKEN strip window.
+    // Same creation-time snapshots for the deep path: the installed seat
+    // definitions (name → content, for the SDK parseAgent assertion) and the
+    // GitHub-token strip window.
     const agentsDir = join(options.cwd as string, ".omp", "agents");
     installedAgentFiles = existsSync(agentsDir) ? readdirSync(agentsDir).sort() : null;
+    installedSeatDefs = null;
+    if (installedAgentFiles !== null && !installedAgentFiles.includes("mstar-review-seat.md")) {
+      installedSeatDefs = {};
+      for (const name of installedAgentFiles) {
+        installedSeatDefs[name] = readFileSync(join(agentsDir, name), "utf8");
+      }
+    }
     ghTokenAtCreation = process.env.GH_TOKEN;
+    githubTokenAtCreation = process.env.GITHUB_TOKEN;
     return {
       session: {
         dispose: mock(async () => {
@@ -94,25 +112,42 @@ mock.module("@oh-my-pi/pi-coding-agent", () => ({
         }),
         prompt: mock(async (text: string) => {
           promptTexts.push(text);
-          // The parent turn emits each queued yield (success payload, then
-          // error) to the listener the runtime registered before prompting.
+          // The parent turn emits each queued yield to the listener the
+          // runtime registered before prompting — as tool_execution_end
+          // events (the shape the runtime captures): rejected attempts first
+          // (isError), then successes (details.status "success"), then
+          // aborted error yields (details.error).
           const listener = yieldListeners[yieldListeners.length - 1];
+          parentRejectedYields.forEach((data, index) => {
+            listener?.({
+              type: "tool_execution_end",
+              toolCallId: `yield-rejected-${index}`,
+              toolName: "yield",
+              isError: true,
+              result: { content: [], details: { data, status: "success" } },
+            });
+          });
           parentYields.forEach((data, index) => {
             listener?.({
-              type: "tool_execution_start",
+              type: "tool_execution_end",
               toolCallId: `yield-${index}`,
               toolName: "yield",
-              args: { result: { data } },
+              isError: false,
+              result: { content: [], details: { data, status: "success", type: undefined } },
             });
           });
           parentYieldErrors.forEach((error, index) => {
             listener?.({
-              type: "tool_execution_start",
+              type: "tool_execution_end",
               toolCallId: `yield-error-${index}`,
               toolName: "yield",
-              args: { result: { error } },
+              isError: false,
+              result: { content: [], details: { data: undefined, status: "aborted", error } },
             });
           });
+          if (parentPromptThrow !== null) {
+            throw new Error(parentPromptThrow);
+          }
           return true;
         }),
       },
@@ -238,11 +273,15 @@ afterEach(() => {
   seatResults = [];
   installedSeatAgent = null;
   installedAgentFiles = null;
+  installedSeatDefs = null;
   ghTokenAtCreation = undefined;
+  githubTokenAtCreation = undefined;
   disposeCalls = 0;
   promptTexts.length = 0;
   parentYields = [];
   parentYieldErrors = [];
+  parentRejectedYields = [];
+  parentPromptThrow = null;
   yieldListeners.length = 0;
   delete process.env.OMP_REVIEW_MODEL;
 });
@@ -475,6 +514,56 @@ describe("ompAgentRuntime.runReview — deep parent path (plan 09 T2)", () => {
     expect(envelope.findings[0]!.title).toBe("Missing null check");
   });
 
+  test("a schema-rejected yield attempt is retried: the later success wins (qc2 F-002)", async () => {
+    // First attempt ends with isError (the SDK yield tool rejected the
+    // payload and the model retried) — it must not be captured even though
+    // its args carried a payload; the corrected re-yield is the envelope.
+    parentRejectedYields = [{ schema: "mstar.review/v1", verdict: "ship it", summary_md: "bad", findings: [] }];
+    parentYields = [deepEnvelope()];
+    const envelope = await ompAgentRuntime.runReview(DEEP_INPUT);
+
+    expect(envelope.schema).toBe("mstar.review/v1");
+    expect(envelope.verdict).toBe("needs fixes");
+  });
+
+  test("the LAST successful yield wins over an earlier accepted one (qc3 S-001)", async () => {
+    parentYields = [
+      { schema: "mstar.review/v1", verdict: "ship it", summary_md: "earlier", findings: [] },
+      deepEnvelope(),
+    ];
+    const envelope = await ompAgentRuntime.runReview(DEEP_INPUT);
+
+    expect(envelope.verdict).toBe("needs fixes");
+    expect(envelope.findings).toHaveLength(1);
+  });
+
+  test("a prompt throw AFTER a successful yield is logged, not fatal (qc3 S-002)", async () => {
+    parentYields = [deepEnvelope()];
+    parentPromptThrow = "provider connection dropped after the yield";
+    const errorCalls: unknown[][] = [];
+    const spy = spyOn(console, "error").mockImplementation((...args: unknown[]) => {
+      errorCalls.push(args);
+    });
+    try {
+      // The envelope was yielded and engine-validated before the throw —
+      // returning it stands, but the turn error must stay observable.
+      const envelope = await ompAgentRuntime.runReview(DEEP_INPUT);
+      expect(envelope.schema).toBe("mstar.review/v1");
+    } finally {
+      spy.mockRestore();
+    }
+    expect(errorCalls.length).toBeGreaterThan(0);
+    expect(String(errorCalls[0]![1])).toContain("provider connection dropped");
+  });
+
+  test("a prompt throw WITHOUT a yield rethrows the turn error", async () => {
+    parentPromptThrow = "model provider exploded before any yield";
+    await expect(ompAgentRuntime.runReview(DEEP_INPUT)).rejects.toThrow(
+      "model provider exploded before any yield",
+    );
+    expect(subagentRequests).toHaveLength(0);
+  });
+
   test("a yield payload that fails engine validation is fatal", async () => {
     parentYields = [
       {
@@ -503,13 +592,13 @@ describe("ompAgentRuntime.runReview — deep parent path (plan 09 T2)", () => {
     );
   });
 
-  test("installs harness agents into the PR clone for the run and removes them after", async () => {
+  test("installs the deep seat roles as OMP-native defs and removes them after", async () => {
     parentYields = [deepEnvelope()];
     await ompAgentRuntime.runReview(DEEP_INPUT);
 
-    // Snapshotted from the clone at session creation: exactly the fixture
-    // role agents (no seat-agent.md on the deep path).
-    expect(installedAgentFiles).toEqual(["code-reviewer.md", "frontend-dev.md"]);
+    // Snapshotted from the clone at session creation: exactly the deep seat
+    // roles (no seat-agent.md, no other harness roles on the deep path).
+    expect(installedAgentFiles).toEqual(["code-reviewer.md", "frontend-dev.md", "fullstack-dev.md"]);
     expect(installedSeatAgent).toBeNull();
     // The clone is caller-owned: installed definitions are cleaned up, the
     // worktree itself must survive.
@@ -517,6 +606,45 @@ describe("ompAgentRuntime.runReview — deep parent path (plan 09 T2)", () => {
     expect(existsSync(join(TEST_WORKTREE, ".omp"))).toBe(false);
     expect(existsSync(TEST_WORKTREE)).toBe(true);
     expect(disposeCalls).toBe(1);
+  });
+
+  test("every installed seat parses as a read-only OMP agent via the SDK parser (qc2 F-001)", async () => {
+    parentYields = [deepEnvelope()];
+    await ompAgentRuntime.runReview(DEEP_INPUT);
+
+    expect(installedSeatDefs).not.toBeNull();
+    for (const [name, content] of Object.entries(installedSeatDefs!)) {
+      // parseAgent is the SDK's own pipeline for an installed agent file:
+      // frontmatter parse + parseAgentFields — exactly what omp task
+      // discovery runs. A regression to raw harness agents/*.md (OpenCode
+      // `tools:` object map) lands here as tools: undefined (an empty
+      // whitelist under the parent's restrictToolNames — the yield-only
+      // blind seat).
+      const agent = parseAgent(name, content, "project");
+      expect(agent.name).toBe(name.replace(/\.md$/, ""));
+      expect(agent.tools).toEqual(["read", "grep", "glob", "yield"]);
+      // Zero-copy: the role BODY is the fixture marker loaded from the
+      // plugin root at runtime, not a pasted copy.
+      expect(agent.systemPrompt).toContain(`# fixture agent: ${agent.name}`);
+    }
+  });
+
+  test("a partially-failed install cleans the seat files from the clone (qc1 F-002)", async () => {
+    const rolePath = join(PLUGIN_ROOT_FIXTURE, "agents", "fullstack-dev.md");
+    const original = readFileSync(rolePath, "utf8");
+    rmSync(rolePath);
+    try {
+      // code-reviewer.md lands first, then the missing fullstack-dev.md
+      // fails the install — cleanup must still remove what was written.
+      await expect(ompAgentRuntime.runReview(DEEP_INPUT)).rejects.toThrow(
+        /missing the deep seat role agents\/fullstack-dev\.md/,
+      );
+    } finally {
+      writeFileSync(rolePath, original);
+    }
+    expect(existsSync(join(TEST_WORKTREE, ".omp", "agents"))).toBe(false);
+    expect(existsSync(join(TEST_WORKTREE, ".omp"))).toBe(false);
+    expect(existsSync(TEST_WORKTREE)).toBe(true);
   });
 
   test("assignment loads the review command from the plugin root at runtime (zero copy)", async () => {
@@ -529,26 +657,34 @@ describe("ompAgentRuntime.runReview — deep parent path (plan 09 T2)", () => {
     expect(promptTexts[0]).toContain("Fixture marker for the pinned 3.5.0 command.");
   });
 
-  test("GH_TOKEN never reaches the deep parent env and is restored after success", async () => {
+  test("GitHub token aliases never reach the deep parent env and are restored after success", async () => {
     process.env.GH_TOKEN = "test-installation-token";
+    process.env.GITHUB_TOKEN = "test-classic-token";
     parentYields = [deepEnvelope()];
     try {
       await ompAgentRuntime.runReview(DEEP_INPUT);
       expect(ghTokenAtCreation).toBeUndefined();
+      expect(githubTokenAtCreation).toBeUndefined();
       expect(process.env.GH_TOKEN).toBe("test-installation-token");
+      expect(process.env.GITHUB_TOKEN).toBe("test-classic-token");
     } finally {
       delete process.env.GH_TOKEN;
+      delete process.env.GITHUB_TOKEN;
     }
   });
 
-  test("GH_TOKEN is restored even when the deep run fails", async () => {
+  test("GitHub token aliases are restored even when the deep run fails", async () => {
     process.env.GH_TOKEN = "test-installation-token";
+    process.env.GITHUB_TOKEN = "test-classic-token";
     try {
       await expect(ompAgentRuntime.runReview(DEEP_INPUT)).rejects.toThrow(/no structured yield/);
       expect(ghTokenAtCreation).toBeUndefined();
+      expect(githubTokenAtCreation).toBeUndefined();
       expect(process.env.GH_TOKEN).toBe("test-installation-token");
+      expect(process.env.GITHUB_TOKEN).toBe("test-classic-token");
     } finally {
       delete process.env.GH_TOKEN;
+      delete process.env.GITHUB_TOKEN;
     }
   });
 });
