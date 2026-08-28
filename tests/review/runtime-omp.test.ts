@@ -14,7 +14,7 @@
  *     .omp/agents/mstar-review-seat.md (name/tools frontmatter, no spawns)
  *     and removed again when the run ends;
  *   - quick → 1 seat, default → 2 seats, Promise.all fan-out, agent
- *     "mstar-review-seat", strict schema, model = selector chain;
+ *     "mstar-review-seat", strict schema, model = selector chain (default pattern when the chain is empty);
  *   - seat assignment is engine prReviewSeatPrompt output (zero harness
  *     copies here) carrying the worktree path and the seat file scope;
  *   - strict seat output → merge → synthesizeReview → validateMstarReviewV1
@@ -245,8 +245,9 @@ describe("ompAgentRuntime.runReview — parent session", () => {
         "retry.fallbackChains": { default: [] },
       },
     });
-    // The seat receives the same (empty) chain verbatim.
-    expect(subagentRequests[0]!.model).toEqual([]);
+    // The seat receives the same default the parent gets — never an empty
+    // (truthy) model list (PR #4 Bugbot High: `model: []` reaches the SDK).
+    expect(subagentRequests[0]!.model).toEqual(["ark-plan/deepseek-v4-flash"]);
   });
 
   test("installs seat-agent.md into the PR clone at .omp/agents/ and removes it afterwards", async () => {

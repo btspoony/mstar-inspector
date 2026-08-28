@@ -455,7 +455,11 @@ export const ompAgentRuntime: AgentRuntime = {
       // input.modelSelectors is the single model SSOT (the runner parses
       // OMP_REVIEW_MODEL once) — the first selector is the parent's primary
       // model, the full list rides as retry.fallbackChains.default and is
-      // passed verbatim per seat. Never re-parse env here (split-brain).
+      // passed verbatim per seat (falling back to the default pattern when empty). Never re-parse env here (split-brain).
+      // Seats must never see `model: []` — an empty array is truthy, not
+      // "inherit from parent", so an unset OMP_REVIEW_MODEL means every seat
+      // gets the same DEFAULT_MODEL_PATTERN the parent gets (PR #4 Bugbot).
+      const seatModels = input.modelSelectors.length > 0 ? [...input.modelSelectors] : [DEFAULT_MODEL_PATTERN];
       const created = await createAgentSession(
         buildSessionOptions({
           cwd,
@@ -481,7 +485,7 @@ export const ompAgentRuntime: AgentRuntime = {
             invocationKind: "task",
             assignment: seatAssignment(input, pluginRoot, plan),
             agent: "mstar-review-seat",
-            model: [...input.modelSelectors],
+            model: seatModels,
             outputSchema: SEAT_OUTPUT_SCHEMA,
             schemaMode: "strict",
             enableLsp: false,
