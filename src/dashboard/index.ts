@@ -97,6 +97,9 @@ dashboardApp.get("/oauth/callback", async (c) => {
 
 dashboardApp.get("/logout", (c) => {
   c.header("Set-Cookie", expireCookie(SESSION_COOKIE));
+  // Any parked manifest credentials die with the session (spec L7).
+  c.header("Set-Cookie", expireCookie(MANIFEST_HOLD_COOKIE), { append: true });
+  c.header("Set-Cookie", expireCookie(MANIFEST_STATE_COOKIE), { append: true });
   return c.redirect("/dashboard/login", 302);
 });
 
@@ -158,20 +161,23 @@ dashboardApp.get("/manifest/callback", async (c) => {
 
 // Commit (B1 Task 2, spec § L6/L7/L8): the confirm gate. Without
 // `confirm=overwrite` → 400 with ZERO Cloudflare requests. The hold cookie
-// is single-use — expired on every outcome; missing/undecryptable/expired
-// hold = flow expired → 302 back to the start of the flow, zero writes. On
+// is bound to the committing session (`hold.login === session.login`, else
+// 403, zero writes) and survives RETRYABLE outcomes (400 missing confirm,
+// 500 missing Cloudflare config, 502 CF/network) so the operator can retry
+// without creating a second GitHub App; it is expired on success, login
+// mismatch, undecryptable/expired hold, and logout. Missing/undecryptable/
+// expired hold = flow expired → 302 back to the start, zero writes. On
 // confirm, ONE secrets-bulk PATCH writes exactly APP_ID / PRIVATE_KEY /
 // WEBHOOK_SECRET (PEM PKCS#8-normalized) — never REVIEW_ENABLED or model
 // keys. Missing Cloudflare config → 5xx, zero writes.
 dashboardApp.post("/manifest/commit", async (c) => {
   const secrets = dashboardSecrets(c.env);
   if (!secrets) return c.text("dashboard OAuth is not configured", 500);
-  // Hold cookie is single-use (spec L7): expired on every commit outcome.
-  c.header("Set-Cookie", expireCookie(MANIFEST_HOLD_COOKIE));
   const session = await readSessionValue(getCookie(c, SESSION_COOKIE), secrets.sessionSecret);
   if (!session) return c.redirect("/dashboard/login", 302);
   const form = await c.req.parseBody();
   if (form.confirm !== "overwrite") {
+    // Retryable: keep the hold so the operator can re-tick and resubmit.
     logManifestFailure("commit", "confirm_missing");
     return c.html(
       manifestErrorPage("The overwrite was not confirmed — tick the checkbox to proceed."),
@@ -181,10 +187,25 @@ dashboardApp.post("/manifest/commit", async (c) => {
   const hold = await readHoldValue(getCookie(c, MANIFEST_HOLD_COOKIE), secrets.sessionSecret);
   if (!hold) {
     logManifestFailure("commit", "hold_missing_or_expired");
+    // Bad hold: burn the cookie so no stale credential lingers.
+    c.header("Set-Cookie", expireCookie(MANIFEST_HOLD_COOKIE));
     return c.redirect("/dashboard", 302);
+  }
+  if (hold.login !== session.login) {
+    // The hold is bound to the login that ran the callback: a different
+    // operator must restart the flow (zero writes, hold burned).
+    logManifestFailure("commit", "login_mismatch");
+    c.header("Set-Cookie", expireCookie(MANIFEST_HOLD_COOKIE));
+    return c.html(
+      manifestErrorPage(
+        "This confirmation belongs to a different GitHub login — sign back in and restart the app-creation flow.",
+      ),
+      403,
+    );
   }
   const result = await writeWorkerSecrets(c.env, hold);
   if (result === "missing_config") {
+    // Retryable: keep the hold; fix the Worker env and resubmit.
     logManifestFailure("commit", "cloudflare_not_configured");
     return c.html(
       manifestErrorPage(
@@ -194,11 +215,14 @@ dashboardApp.post("/manifest/commit", async (c) => {
     );
   }
   if (result === "upstream_error") {
+    // Retryable: keep the hold; a CF/network failure must not burn it.
     return c.html(
       manifestErrorPage("Cloudflare rejected the secret write (check the API token permissions)."),
       502,
     );
   }
+  // Success: the hold is single-success — burned now that secrets are stored.
+  c.header("Set-Cookie", expireCookie(MANIFEST_HOLD_COOKIE));
   return c.html(manifestSuccessPage(session, { id: hold.id }));
 });
 

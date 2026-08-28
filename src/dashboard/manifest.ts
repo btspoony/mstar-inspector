@@ -14,7 +14,9 @@
  *   bearer returns 406).
  * - PEM/webhook_secret hold: AES-256-GCM encrypted cookie
  *   `__Host-mstar-manifest-hold`, key = HKDF-SHA256(DASHBOARD_SESSION_SECRET,
- *   info "mstar-manifest-hold"), Max-Age 600, single-use (consumed in T2).
+ *   info "mstar-manifest-hold"), Max-Age 600; bound to the callback session
+ *   login, kept across retryable commit outcomes (400/500/502), burned on
+ *   success, login mismatch, bad hold, or logout (T2).
  *   Payload NEVER enters HTML, logs, or D1.
  */
 import { normalizePrivateKey } from "./private-key";

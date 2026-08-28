@@ -3,7 +3,7 @@
  * the real worker mount (app.route("/dashboard", dashboardApp)). Plan 11
  * Task 1 adds the GitHub App Manifest start/callback coverage (state CSRF,
  * locked conversion headers, encrypted hold cookie, no-secret HTML); Task 2
- * adds the commit coverage (confirm gate, single-use hold, ONE secrets-bulk
+ * adds the commit coverage (confirm gate, session-bound retry-aware hold, ONE secrets-bulk
  * PATCH, fail-closed Cloudflare config, no-secret success HTML).
  *
  * The end-to-end callback network path is exercised only in live smoke
@@ -431,15 +431,18 @@ describe("/dashboard routes", () => {
     expect(entry.reason).toBe("missing_code");
   });
 
-  test("GET /dashboard/logout → 302 to login and session cookie expired", async () => {
+  test("GET /dashboard/logout → 302 to login; session, manifest hold, and manifest state cookies expired", async () => {
     const res = await worker.fetch(dashboardRequest("/dashboard/logout"), makeEnv());
     expect(res.status).toBe(302);
     expect(res.headers.get("Location")).toBe("/dashboard/login");
     const setCookie = res.headers.getSetCookie();
-    expect(setCookie).toHaveLength(1);
-    const cookie = setCookie[0] ?? "";
-    expect(cookie.startsWith(`${SESSION_COOKIE}=;`)).toBe(true);
-    expect(cookie).toContain("Max-Age=0");
+    expect(setCookie).toHaveLength(3);
+    // Parked manifest credentials must die with the session (qc2 F-001).
+    for (const name of [SESSION_COOKIE, MANIFEST_HOLD_COOKIE, MANIFEST_STATE_COOKIE]) {
+      const cookie = setCookie.find((c) => c.startsWith(`${name}=;`));
+      expect(cookie, name).toBeDefined();
+      expect(cookie).toContain("Max-Age=0");
+    }
   });
 
   test("dashboard routes fail closed when OAuth secrets are unset", async () => {
@@ -922,12 +925,15 @@ describe("/dashboard manifest commit (plan 11 Task 2)", () => {
   async function doCommit(args: {
     env?: Env;
     withSession?: boolean;
+    sessionLogin?: string;
     holdValue?: string | null;
     body?: string;
   }): Promise<Response> {
     const cookies: string[] = [];
     if (args.withSession ?? true) {
-      cookies.push(`${SESSION_COOKIE}=${await createSessionValue("octocat", null, SESSION_SECRET)}`);
+      cookies.push(
+        `${SESSION_COOKIE}=${await createSessionValue(args.sessionLogin ?? "octocat", null, SESSION_SECRET)}`,
+      );
     }
     if (args.holdValue) cookies.push(`${MANIFEST_HOLD_COOKIE}=${args.holdValue}`);
     return worker.fetch(
@@ -950,13 +956,21 @@ describe("/dashboard manifest commit (plan 11 Task 2)", () => {
     ).toBe(true);
   }
 
-  test("without confirm=overwrite → 400, zero Cloudflare requests, hold cookie expired", async () => {
+  /** Retryable outcomes (400/500/502) must NOT burn the hold (qc3 F-01). */
+  function expectHoldKept(res: Response): void {
+    const cookies = res.headers.getSetCookie();
+    expect(
+      cookies.some((c) => c.startsWith(`${MANIFEST_HOLD_COOKIE}=;`) && c.includes("Max-Age=0")),
+    ).toBe(false);
+  }
+
+  test("without confirm=overwrite → 400, zero Cloudflare requests, hold KEPT for retry", async () => {
     const calls = stubCloudflareFetch();
     const warns = spyOnWarn();
     for (const body of ["", "confirm=yes"]) {
       const res = await doCommit({ holdValue: await freshHold(), body });
       expect(res.status).toBe(400);
-      expectHoldExpired(res);
+      expectHoldKept(res);
     }
     expect(calls).toHaveLength(0);
     const entry = JSON.parse(warns[0] ?? "") as Record<string, unknown>;
@@ -965,20 +979,36 @@ describe("/dashboard manifest commit (plan 11 Task 2)", () => {
     expect(entry.reason).toBe("confirm_missing");
   });
 
-  test("logged out → 302 to login, zero writes", async () => {
+  test("a hold kept by a retryable 400 still commits on retry", async () => {
+    const calls = stubCloudflareFetch(200);
+    const hold = await freshHold();
+    const rejected = await doCommit({ holdValue: hold, body: "" });
+    expect(rejected.status).toBe(400);
+    expectHoldKept(rejected);
+    expect(calls).toHaveLength(0);
+    // Same hold, checkbox ticked this time → the write goes through.
+    const retried = await doCommit({ holdValue: hold });
+    expect(retried.status).toBe(200);
+    expect(calls).toHaveLength(1);
+    expectHoldExpired(retried); // burned on success
+  });
+
+  test("logged out → 302 to login, zero writes, hold kept (operator can sign back in)", async () => {
     const calls = stubCloudflareFetch();
     const res = await doCommit({ withSession: false, holdValue: await freshHold() });
     expect(res.status).toBe(302);
     expect(res.headers.get("Location")).toBe("/dashboard/login");
     expect(calls).toHaveLength(0);
+    expectHoldKept(res);
   });
 
-  test("missing hold cookie → 302 back to the flow start, zero writes", async () => {
+  test("missing hold cookie → 302 back to the flow start, zero writes, hold cleared", async () => {
     const calls = stubCloudflareFetch();
     const res = await doCommit({ holdValue: null });
     expect(res.status).toBe(302);
     expect(res.headers.get("Location")).toBe("/dashboard");
     expect(calls).toHaveLength(0);
+    expectHoldExpired(res);
   });
 
   test("tampered or expired hold cookie → 302 back to the flow start, zero writes", async () => {
@@ -995,27 +1025,63 @@ describe("/dashboard manifest commit (plan 11 Task 2)", () => {
       const res = await doCommit({ holdValue });
       expect(res.status).toBe(302);
       expect(res.headers.get("Location")).toBe("/dashboard");
+      expectHoldExpired(res); // bad hold is burned, not retried
     }
     expect(calls).toHaveLength(0);
   });
 
-  test("missing CLOUDFLARE_API_TOKEN or CLOUDFLARE_ACCOUNT_ID → 5xx, zero writes", async () => {
+  test("hold.login ≠ session.login → 403, zero writes, hold burned", async () => {
+    const calls = stubCloudflareFetch();
+    const warns = spyOnWarn();
+    // Hold minted for "octocat" presented by a different logged-in operator.
+    const res = await doCommit({ holdValue: await freshHold(), sessionLogin: "mallory" });
+    expect(res.status).toBe(403);
+    expect(calls).toHaveLength(0);
+    expectHoldExpired(res);
+    const entry = JSON.parse(warns[0] ?? "") as Record<string, unknown>;
+    expect(entry.event).toBe("dashboard_manifest");
+    expect(entry.stage).toBe("commit");
+    expect(entry.reason).toBe("login_mismatch");
+    const html = await res.text();
+    expect(html).not.toContain("BEGIN");
+    expect(html).not.toContain(FAKE_WEBHOOK_SECRET);
+  });
+
+  test("missing CLOUDFLARE_API_TOKEN or CLOUDFLARE_ACCOUNT_ID → 5xx, zero writes, hold KEPT", async () => {
     const calls = stubCloudflareFetch();
     const noToken = await doCommit({
       holdValue: await freshHold(),
       env: makeEnv({ CLOUDFLARE_ACCOUNT_ID: CF_ACCOUNT }),
     });
     expect(noToken.status).toBe(500);
-    expectHoldExpired(noToken);
+    expectHoldKept(noToken);
     const noAccount = await doCommit({
       holdValue: await freshHold(),
       env: makeEnv({ CLOUDFLARE_API_TOKEN: CF_TOKEN }),
     });
     expect(noAccount.status).toBe(500);
+    expectHoldKept(noAccount);
     expect(calls).toHaveLength(0);
     const body = await noToken.text();
     expect(body).not.toContain("BEGIN");
     expect(body).not.toContain(FAKE_WEBHOOK_SECRET);
+  });
+
+  test("a hold kept by a retryable 500 still commits once the env is fixed", async () => {
+    const calls = stubCloudflareFetch(200);
+    const hold = await freshHold();
+    const misconfigured = await doCommit({
+      holdValue: hold,
+      env: makeEnv({ CLOUDFLARE_ACCOUNT_ID: CF_ACCOUNT }),
+    });
+    expect(misconfigured.status).toBe(500);
+    expectHoldKept(misconfigured);
+    expect(calls).toHaveLength(0);
+    // Same hold against a configured Worker → the write goes through.
+    const retried = await doCommit({ holdValue: hold });
+    expect(retried.status).toBe(200);
+    expect(calls).toHaveLength(1);
+    expectHoldExpired(retried);
   });
 
   test("confirm → exactly one secrets-bulk PATCH writing exactly the three secrets, PKCS#8 PEM", async () => {
@@ -1082,7 +1148,7 @@ describe("/dashboard manifest commit (plan 11 Task 2)", () => {
     const res = await doCommit({ holdValue: await freshHold() });
     expect(res.status).toBe(502);
     expect(calls).toHaveLength(1);
-    expectHoldExpired(res);
+    expectHoldKept(res); // CF/network failure must not burn the hold (qc3 F-01)
     const entry = JSON.parse(warns[0] ?? "") as Record<string, unknown>;
     expect(entry.stage).toBe("secret_write");
     expect(entry.reason).toBe("http_error");
