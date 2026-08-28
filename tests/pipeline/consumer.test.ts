@@ -595,7 +595,7 @@ describe("createReviewConsumer", () => {
     expect(runnerCall.cmd).toContain("--level 'deep'");
     expect(reviewCount(db)).toBe(1);
   });
-  test("REVIEW_LEVEL=deep → runner exec timeout 1_800_000 + guard TTL 2520; quick/default stay 600_000 (AC-S10-clock)", async () => {
+  test("REVIEW_LEVEL=deep → runner exec timeout 840_000 + guard TTL 1560; quick/default stay 600_000 (AC-S10-clock)", async () => {
     reset();
     runnerStdout = JSON.stringify(VALID_OUTPUT);
     const db = createTestD1();
@@ -607,21 +607,24 @@ describe("createReviewConsumer", () => {
 
     await consumer(makeBatch(makePayload()));
 
-    // Deep runner budget: 30 min (the 10 min ceiling would false-timeout a
-    // deep three-phase run into the DLQ — spec d5-budget Problem Statement).
-    expect(runnerExecTimeout()).toBe(1_800_000);
+    // Deep runner budget: 14 min — CF Queue consumers cap at 15 min
+    // wall-clock, so grill-me's 30 min could never finish in-consumer
+    // (10-review-d5-budget qc2/qc3 Critical); the old 10 min ceiling would
+    // false-timeout a deep three-phase run into the DLQ (spec d5-budget
+    // Problem Statement).
+    expect(runnerExecTimeout()).toBe(840_000);
     // The in-flight guard TTL follows the same level table (AC-S10-guard).
     expect(kvGuardPuts).toEqual([
       {
         key: "inflight:123:acme/widgets:42",
         value: "inflight",
-        options: { expirationTtl: 2520 },
+        options: { expirationTtl: 1560 },
       },
     ]);
-    // The quick/default 10-minute table is frozen (spec: 禁止把 quick 全局改成 30 min).
+    // The quick/default 10-minute table is frozen (spec: 禁止把 quick 全局改成 deep 档预算).
     expect(runnerTimeoutMs("quick")).toBe(600_000);
     expect(runnerTimeoutMs("default")).toBe(600_000);
-    expect(runnerTimeoutMs("deep")).toBe(1_800_000);
+    expect(runnerTimeoutMs("deep")).toBe(840_000);
   });
 
   test("success path logs one runner-attempt line with level + runner_timeout_ms + elapsed_ms; default → bun-fanout (AC-S10-logs)", async () => {
@@ -643,7 +646,7 @@ describe("createReviewConsumer", () => {
     expect(line!.fields.orchestration).toBe("bun-fanout");
   });
 
-  test("REVIEW_LEVEL=deep → runner log: level=deep, budget 1_800_000, orchestration=parent, NO fake seat_count (AC-S10-logs)", async () => {
+  test("REVIEW_LEVEL=deep → runner log: level=deep, budget 840_000, orchestration=parent, NO fake seat_count (AC-S10-logs)", async () => {
     reset();
     runnerStdout = JSON.stringify(VALID_OUTPUT);
     const db = createTestD1();
@@ -658,7 +661,7 @@ describe("createReviewConsumer", () => {
     const line = logLines.find((l) => l.level === "info" && l.msg.includes("runner finished"));
     expect(line).toBeDefined();
     expect(line!.fields.level).toBe("deep");
-    expect(line!.fields.runner_timeout_ms).toBe(1_800_000);
+    expect(line!.fields.runner_timeout_ms).toBe(840_000);
     expect(typeof line!.fields.elapsed_ms).toBe("number");
     // Deep runs the three-stage parent session — never a fabricated Bun
     // seat count (spec § Queue visibility: 禁止写假 seat_count: 7).
@@ -1224,13 +1227,13 @@ describe("createReviewConsumer", () => {
     // Exact pin: FIVE git-timed steps (clone, rev-parse, diff, numstat,
     // runner-input write) × 120s + the LEVEL's runner budget + 120s slack
     // for the untimed steps (token mint, sandbox create, comment post,
-    // KV/D1 puts) = 1320s quick/default, 2520s deep (spec d5-budget L4).
+    // KV/D1 puts) = 1320s quick/default, 1560s deep (spec d5-budget L4).
     // numstat + the input write were added by plan 07 without recomputing
     // the old 3-step formula (1020s) — any future step or ceiling change
     // must recompute this helper ON PURPOSE.
     expect(reviewGuardTtlSeconds("quick")).toBe(1320);
     expect(reviewGuardTtlSeconds("default")).toBe(1320);
-    expect(reviewGuardTtlSeconds("deep")).toBe(2520);
+    expect(reviewGuardTtlSeconds("deep")).toBe(1560);
   });
 
   test("guardRetryDelaysSeconds per level — every delay below that level's guard TTL (AC-S10-guard)", () => {

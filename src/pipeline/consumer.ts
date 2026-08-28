@@ -118,14 +118,17 @@ const EXEC_TIMEOUT_GIT_MS = 120_000;
  * In-image runner budget per review level (ms). One Worker deployment = one
  * REVIEW_LEVEL = one timeout table (spec d5-budget § Trigger): quick/default
  * keep the frozen 10min ceiling (measured ~52s on a real model call); deep
- * gets 30min so its three-phase parent-session run cannot false-timeout into
- * the DLQ. Record<ReviewLevel, …> makes a future level widen fail at compile
+ * gets 14min: Cloudflare Queue consumers cap at 15min wall-clock, so the
+ * grill-me 30min budget could never finish in-consumer (force-kill skips
+ * finally, retries DLQ — 10-review-d5-budget qc2/qc3 Critical); 14min still
+ * covers the three-phase parent-session run without false-timeout into the
+ * DLQ. Record<ReviewLevel, …> makes a future level widen fail at compile
  * time, never silently fall back.
  */
 const RUNNER_TIMEOUT_MS: Record<ReviewLevel, number> = {
   quick: 600_000,
   default: 600_000,
-  deep: 1_800_000,
+  deep: 840_000,
 };
 
 /**
@@ -183,7 +186,7 @@ export const defaultConsumerLog: ConsumerLog = {
  * git-timed steps (clone / rev-parse / diff / numstat / runner-input write,
  * 120s each — numstat + the input write were added by plan 07 without
  * recomputing this, qc3 F-301) plus the LEVEL's runner step
- * (runnerTimeoutMs(level) — 600s quick/default, 1800s deep) plus slack for
+ * (runnerTimeoutMs(level) — 600s quick/default, 840s deep) plus slack for
  * the untimed steps (token mint, sandbox create, comment post, KV/D1
  * puts) — so the guard can never expire mid-review and unblock a
  * concurrent duplicate. KV expirationTtl is in seconds. Pinned exactly by
@@ -260,7 +263,7 @@ async function releaseReviewGuard(
 /**
  * Guard-held backoff schedule (seconds), indexed by message.attempts (1-based
  * — the first delivery is attempt 1). quick/default: 60s → 120s → 240s; deep: 180s → 360s → 720s
- * — every entry below the LEVEL's guard TTL (1320s / 2520s) so the held guard
+ * — every entry below the LEVEL's guard TTL (1320s / 1560s) so the held guard
  * can never expire mid-backoff into a duplicate race. Attempts past the
  * schedule's end have consumed the queue's max_retries and must be acked, not
  * retried (a further retry() would land the job on the DLQ).
