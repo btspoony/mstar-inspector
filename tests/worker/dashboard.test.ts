@@ -47,6 +47,17 @@ function dashboardRequest(path: string, cookie?: string): Request {
     headers: cookie ? { Cookie: cookie } : {},
   });
 }
+/**
+ * Unambiguously invalid tamper: replace the base64url HMAC with zeros.
+ * A last-char flip is NOT reliable — the final base64url char of a 32-byte
+ * HMAC carries only 4 data bits, so flipping within its low 2 padding bits
+ * (any char ≡ 0 mod 4 → "A") decodes to identical bytes and still verifies
+ * (~25% flake per run since `iat` makes the signature run-dependent).
+ */
+function tamperSignature(value: string): string {
+  const dot = value.lastIndexOf(".");
+  return `${value.slice(0, dot + 1)}${"A".repeat(value.length - dot - 1)}`;
+}
 // Structured-log assertions: capture console.warn JSON lines for one test.
 const origWarn = console.warn;
 afterEach(() => {
@@ -280,12 +291,7 @@ describe("/dashboard routes", () => {
   test("GET /dashboard with a tampered session cookie → 302 (treated as logged out)", async () => {
     const session = await createSessionValue("octocat", null, SESSION_SECRET);
     const res = await worker.fetch(
-      dashboardRequest(
-        "/dashboard",
-        // Flip the last signature char deterministically (appending a fixed
-        // char is a no-op 1/64 of the time when the char already matches).
-        `${SESSION_COOKIE}=${session.slice(0, -1)}${session.endsWith("A") ? "B" : "A"}`,
-      ),
+      dashboardRequest("/dashboard", `${SESSION_COOKIE}=${tamperSignature(session)}`),
       makeEnv(),
     );
     expect(res.status).toBe(302);
@@ -452,7 +458,7 @@ describe("/dashboard routes", () => {
       new Request("https://worker.local/dashboard", {
         method: "POST",
         headers: {
-          Cookie: `${SESSION_COOKIE}=${session.slice(0, -1)}${session.endsWith("A") ? "B" : "A"}`,
+          Cookie: `${SESSION_COOKIE}=${tamperSignature(session)}`,
         },
       }),
       makeEnv(),
