@@ -6,8 +6,9 @@
  * extraheader env) → `git rev-parse HEAD` for the AUTHORITATIVE sha →
  * dedup by that sha (hit → ack) → diff → numstat (the seat-partition
  * universe) → write the runner `--input` JSON (reconFacts) → exec the
- * in-image runner `--level <quick|default>` (env-injected
- * GH_TOKEN/ARK_API_KEY/PI_CODING_AGENT_DIR/HARNESS_PLUGIN_ROOT) → parse
+ * in-image runner `--level <quick|default|deep>` (exec env =
+ * ARK_API_KEY/PI_CODING_AGENT_DIR/HARNESS_PLUGIN_ROOT + OMP_REVIEW_MODEL and
+ * configured provider keys — GH_TOKEN rides ONLY the git/gh step envs) → parse
  * the mstar.review/v1 envelope → post the overall review comment FIRST →
  * store.put (idempotent — the UNIQUE first-written row wins) → KV
  * completion state → finally destroy. Any step throwing → structured log
@@ -41,7 +42,7 @@ import type { D1Database, KVNamespace, Message, MessageBatch } from "@cloudflare
 import type { ReviewJobPayload } from "../contracts/review-job";
 import { idemKey, IDEMPOTENCY_SECONDS, type IdempotencyKey } from "../contracts/idem";
 import { parseReviewOutput, capFindings, clampFindingSizes } from "../review/schema";
-import { isReviewLevel, REVIEW_SEATS, type ReviewLevel } from "../review/runtime";
+import { isReviewLevel, REVIEW_LEVELS, type ReviewLevel } from "../review/runtime";
 import { redactReviewOutput } from "./redact";
 import { createArtifactStore, type D1ArtifactStore } from "../store/artifact-store";
 import { getSandbox, type ReviewSandbox } from "./sandbox";
@@ -65,11 +66,12 @@ export type PipelineEnv = {
    */
   OMP_REVIEW_MODEL?: string;
   /**
-   * Review tier for the in-image runner (plan 07 AC-S7-level — quick and
-   * default configurable): "quick" (1 seat) or "default" (2 seats, the
-   * harness no-flag landing tier). Unset/empty → "default". Any other
-   * value (incl. "deep", not delivered this iteration) fails the review
-   * fail-loud — the port never silently downgrades.
+   * Review tier for the in-image runner (plan 09 T1): "quick" (1 seat),
+   * "default" (2 seats, the harness no-flag landing tier), or "deep" (the
+   * three-stage parent-session path). Unset/empty → "default". Any other
+   * value fails the review fail-loud — the port never silently downgrades;
+   * the valid-value list lives in REVIEW_LEVELS (the SSOT the error message
+   * quotes), so this doc cannot drift when the universe widens again.
    */
   REVIEW_LEVEL?: string;
   /**
@@ -294,14 +296,15 @@ function toBaseFields(payload: ReviewJobPayload): ConsumerLogFields {
  * Resolve the review tier from PipelineEnv.REVIEW_LEVEL (plan 07
  * AC-S7-level). Unset/empty → "default" (the harness no-flag landing tier).
  * Anything else throws — the port rejects unknown levels fail-loud and never
- * silently downgrades (spec § 档位; "deep" is a roadmap item, not a tier
- * this build delivers).
+ * silently downgrades (spec § 档位). "deep" is a legal tier (plan 09 T1);
+ * the message lists every tier from REVIEW_LEVELS so it cannot drift when
+ * the level universe widens again (architect lock L3).
  */
 export function resolveReviewLevel(value: string | undefined): ReviewLevel {
   if (value === undefined || value === "") return "default";
   if (isReviewLevel(value)) return value;
   throw new Error(
-    `invalid REVIEW_LEVEL ${JSON.stringify(value)} — expected one of: ${Object.keys(REVIEW_SEATS).join(", ")}`,
+    `invalid REVIEW_LEVEL ${JSON.stringify(value)} — expected one of: ${REVIEW_LEVELS.join(", ")}`,
   );
 }
 

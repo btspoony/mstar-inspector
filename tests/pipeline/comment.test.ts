@@ -20,6 +20,10 @@
  *     new comment per round)
  *   - postReview wiring (WF-001/WF-003/SG-001): paginated scan, create vs
  *     update dispatch, 404 soft-recovery fallback
+ *   - plan 09 T4 deep lock: a deep-path envelope (parent-session yield,
+ *     same mstar.review/v1 shape) posts through the SAME COMMENT/upsert
+ *     path — `pulls.createReview` is present on the client but never
+ *     called, and no call carries `event` / APPROVE / REQUEST_CHANGES
  */
 
 import { describe, expect, mock, test } from "bun:test";
@@ -424,6 +428,46 @@ describe("postReview wiring (mock octokit, SG-001)", () => {
       }
       expect(calls.createParams).toBeDefined();
       expect(String(calls.createParams!.body)).toContain(`**Verdict: ${verdict}**`);
+    }
+  });
+
+  test("deep envelope posts COMMENT-only: pulls.createReview never called, no event/APPROVE/REQUEST_CHANGES (plan 09 T4)", async () => {
+    // Representative deep-path envelope: the plan 09 T2 parent session
+    // yields exactly this mstar.review/v1 shape and the consumer forwards
+    // it here unchanged — the poster must stay on the Issues comments API.
+    const deepOutput: ReviewOutput = {
+      schema: "mstar.review/v1",
+      verdict: "needs fixes",
+      summary_md: "Deep three-stage parent-session review.",
+      findings: [finding("must-fix", "Deep seat must-fix"), finding("nit", "Deep seat nit")],
+    };
+
+    // Both write branches: create on a marker miss, update on a hit.
+    for (const comments of [
+      [],
+      [{ id: 7, body: "<!-- mstar-inspector:review:v1 round=1 -->\n第 1 次 review", user: { type: "Bot" } }],
+    ]) {
+      const { calls, octokit } = mockOctok(comments);
+      const createReview = mock(async () => {
+        throw new Error("pulls.createReview must never be called (SEC-01: COMMENT-only posting)");
+      });
+      // No PostOctokit annotation: `pulls` is deliberately NOT part of the
+      // poster's consumed surface — a variable (not a fresh literal) keeps
+      // the extra trap assignable while proving the poster never touches it.
+      const withPulls = { ...octokit, rest: { ...octokit.rest, pulls: { createReview } } };
+      await postReviewWithOctokit(withPulls, { ...input, output: deepOutput });
+
+      expect(createReview).not.toHaveBeenCalled();
+      for (const captured of [calls.listParams, calls.updateParams, calls.createParams]) {
+        if (captured === undefined) continue;
+        expect("event" in captured).toBe(false);
+        expect(JSON.stringify(captured)).not.toContain("REQUEST_CHANGES");
+        expect(JSON.stringify(captured)).not.toContain("APPROVE");
+      }
+      const posted = calls.createParams ?? calls.updateParams;
+      expect(posted).toBeDefined();
+      expect(String(posted!.body)).toContain("**Verdict: needs fixes**");
+      expect(String(posted!.body)).toContain("Deep seat must-fix");
     }
   });
 
