@@ -40,5 +40,14 @@ writeFileSync(
   ].join("\n"),
 );
 
+// Plan 07 Task 1: the pinned harness 3.5.0 plugin root ships
+// `commands/amazing-pr-review.md`; the fixture mirrors it as a marker only
+// (zero-copy of the real command body — plan 07 Global Constraints).
+mkdirSync(join(PLUGIN_ROOT_FIXTURE, "commands"), { recursive: true });
+writeFileSync(
+  join(PLUGIN_ROOT_FIXTURE, "commands", "amazing-pr-review.md"),
+  ["# amazing-pr-review", "", "Fixture marker for the pinned 3.5.0 command.", ""].join("\n"),
+);
+
 // Inject before src/review/session.ts evaluates HARNESS_PLUGIN_ROOT.
 process.env[HARNESS_ROOT_ENV] = PLUGIN_ROOT_FIXTURE;
