@@ -54,7 +54,9 @@ const VALID_OUTPUT: ReviewOutput = {
 
 function createMigratedD1(): ReturnType<typeof createTestD1> {
   const db = createTestD1();
-  for (const name of ["0004_github_apps.sql", "0005_reviews_app_id.sql"]) {
+  // 0006 (plan 14): the per-App config tables the Task-3 consumer now reads
+  // on EVERY app-path message — the fixture must stay production-shaped.
+  for (const name of ["0004_github_apps.sql", "0005_reviews_app_id.sql", "0006_app_provider_config.sql"]) {
     db.raw.exec(readFileSync(join(MIGRATIONS_DIR, name), "utf8"));
   }
   return db;

@@ -8,7 +8,9 @@
  * universe) → write the runner `--input` JSON (reconFacts) → exec the
  * in-image runner `--level <quick|default|deep>` (exec env =
  * ARK_API_KEY/PI_CODING_AGENT_DIR/HARNESS_PLUGIN_ROOT + OMP_REVIEW_MODEL and
- * configured provider keys — GH_TOKEN rides ONLY the git/gh step envs) → parse
+ * configured provider keys — per-App messages assemble BYOK keys/model chain
+ * with global-env fallback, plan 14 B2; GH_TOKEN rides ONLY the git/gh step
+ * envs) → parse
  * the mstar.review/v1 envelope → post the overall review comment FIRST →
  * store.put (idempotent — the UNIQUE first-written row wins) → KV
  * completion state → finally destroy. Any step throwing → structured log
@@ -48,13 +50,17 @@ import { createArtifactStore, type D1ArtifactStore } from "../store/artifact-sto
 import { getSandbox, type ReviewSandbox } from "./sandbox";
 import { buildGitOpsCommands, writeJsonCommand } from "./gitops";
 import { createReviewCommenter, type CommenterEnv, type ReviewCommenter } from "./comment";
-import { pickProviderKeys } from "./providers";
+import { PROVIDERS, pickProviderKeys, providerEnvName } from "./providers";
 // Per-App credential resolution (plan 13 Task 2, lock L4): the consumer is a
 // sanctioned reader of the dashboard store leaves (apps-store reads the
 // github_apps row, secretbox decrypts the PEM) — the dashboard ↛
 // pipeline/worker isolation is one-directional and unaffected.
 import { createAppsStore } from "../dashboard/apps-store";
 import { createSecretbox } from "../dashboard/secretbox";
+// Per-App AI-config resolution (plan 14 Task 3): the same sanctioned reader
+// edge — app-config-store reads app_provider_keys / app_model_config and
+// decrypts keys via secretbox (itself a zero-dependency leaf, lock L1).
+import { createAppConfigStore } from "../dashboard/app-config-store";
 
 export type PipelineEnv = {
   APP_ID: string;
@@ -180,6 +186,23 @@ export type ConsumerLogFields = {
   elapsed_ms?: number;
   /** Runner orchestration: deep = parent session; quick/default = Bun fan-out. */
   orchestration?: "bun-fanout" | "parent";
+  /**
+   * Per-App key assembly (plan 14 B2, per-App messages only): the provider id
+   * (a PROVIDERS key) the key_source field refers to. An id, never a
+   * credential — key material is NEVER logged.
+   */
+  provider?: string;
+  /**
+   * Which source supplied `provider`'s key for the runner env: the App's own
+   * config ("app") or the global Worker env ("global" — the spec fallback).
+   */
+  key_source?: "app" | "global";
+  /**
+   * Whether a per-App message's runner env drew on the App's own config
+   * ("app": ≥1 App key or an App model chain) or fell back to the global env
+   * wholesale ("fallback": zero App keys + no App model chain).
+   */
+  config_source?: "app" | "fallback";
 };
 
 export type ConsumerLog = {
@@ -460,14 +483,83 @@ function toBase64Utf8(text: string): string {
 }
 
 /**
+ * Per-App AI configuration for the runner exec env (plan 14 Task 3) — the
+ * `getAppConfig` decrypt face of src/dashboard/app-config-store.ts narrowed
+ * to what assembly consumes. `keys` maps provider id → DECRYPTED plaintext
+ * key (only providers with a stored row appear); `modelChain` is the verbatim
+ * stored selector chain, null or "" = unset (global OMP_REVIEW_MODEL wins —
+ * any falsy chain is treated as unset).
+ */
+export type RunnerAppConfig = {
+  keys: Record<string, string>;
+  modelChain: string | null;
+};
+
+/**
+ * Resolve the per-App AI config for one message (plan 14 Task 3). Legacy
+ * (appRef absent — old in-flight messages — or `{ kind: "legacy" }`) →
+ * `undefined`: the caller assembles the runner env exactly as before. 
+ * `{ kind: "app", appId }` → ONE `getAppConfig` read per message (all
+ * provider keys + the model chain in a single store call — never per key),
+ * decrypted in memory. The read hangs off the same appRef resolution as
+ * `resolveCommenter` (the App row is already proven present, active and
+ * non-deleted there) and runs BEFORE the in-flight guard so an unresolvable
+ * config fails with zero side effects. Keys are re-read every message (no
+ * cache) so a dashboard key update applies to the very next review.
+ *
+ * Failure = fail closed: an undecryptable envelope (tampered row, AAD
+ * mismatch) or a missing/malformed DASHBOARD_ENCRYPTION_KEY throws — the
+ * structured error log + rethrow keep the existing retry/DLQ semantics. The
+ * review never silently proceeds on global keys: with the App's own key
+ * unreadable, falling back would spend the WRONG account's quota. Decrypted
+ * keys live only in this call's memory and the assembled exec env — never
+ * logged, never in queue payloads or errors.
+ */
+async function resolveAppConfig(payload: ReviewJobPayload, deps: ProcessDeps): Promise<RunnerAppConfig | undefined> {
+  const appRef = payload.appRef;
+  if (appRef === undefined || appRef.kind === "legacy") {
+    return undefined;
+  }
+  try {
+    const cfg = await createAppConfigStore(
+      deps.env.DB,
+      deps.env.DASHBOARD_ENCRYPTION_KEY,
+    ).getAppConfig(appRef.appId);
+    return { keys: cfg.keys, modelChain: cfg.modelChain };
+  } catch (err) {
+    const detail = err instanceof Error ? err.message : String(err);
+    throw new Error(`per-App config resolution failed: app ${appRef.appId}: ${detail}`);
+  }
+}
+
+/**
  * Build the in-image runner exec env (step 8): the provider key + harness
  * paths (compass D — secrets never baked into the image), the OMP_REVIEW_MODEL
  * chain when set (bugbot BB-1), and every known provider key that is
  * present-and-non-empty on the Worker env (bugbot BB-2). Forwarding is an
  * ALLOWLIST — only the src/pipeline/providers.ts PROVIDERS keys are read;
  * arbitrary Worker env never reaches the container.
+ *
+ * Per-App assembly (plan 14 B2, `appCfg` present — per-App messages only):
+ * the App's own key wins per provider, injected under the PROVIDERS-mapped
+ * env name (skipped when empty/whitespace or when the provider id is not on
+ * the allowlist); every provider the App did NOT configure falls back to the
+ * global env key (spec fallback chain — a zero-config App keeps working);
+ * an App model chain overrides OMP_REVIEW_MODEL. Every injected key is logged
+ * with `key_source: app|global` (the source, never the key), and the assembly
+ * logs `config_source: app|fallback`. The function builds a FRESH object per
+ * call and never mutates its inputs or any module-level record, so key
+ * material cannot leak across Apps structurally.
+ *
+ * Legacy (`appCfg` undefined) is byte-identical to the pre-plan-14 assembly
+ * and logs nothing (pinned by tests/pipeline/consumer.test.ts).
  */
-function buildRunnerEnv(env: PipelineEnv): Record<string, string> {
+export function buildRunnerEnv(
+  env: PipelineEnv,
+  appCfg?: RunnerAppConfig,
+  log?: ConsumerLog,
+  fields?: ConsumerLogFields,
+): Record<string, string> {
   const runnerEnv: Record<string, string> = {
     ARK_API_KEY: env.OMP_MODEL_KEY,
     HARNESS_PLUGIN_ROOT: HARNESS_ROOT,
@@ -476,7 +568,56 @@ function buildRunnerEnv(env: PipelineEnv): Record<string, string> {
   if (env.OMP_REVIEW_MODEL !== undefined && env.OMP_REVIEW_MODEL !== "") {
     runnerEnv.OMP_REVIEW_MODEL = env.OMP_REVIEW_MODEL;
   }
-  Object.assign(runnerEnv, pickProviderKeys(env as Record<string, unknown>));
+  if (appCfg === undefined) {
+    Object.assign(runnerEnv, pickProviderKeys(env as Record<string, unknown>));
+    return runnerEnv;
+  }
+  // Log only when the caller supplied BOTH the sink and the identity fields
+  // (the consumer flow does; direct unit calls may omit them).
+  const emit = log !== undefined && fields !== undefined;
+  // 1. The App's own keys, mapped through the PROVIDERS allowlist. A provider
+  //    id without a mapping has no env name — it is never injected.
+  let appKeys = 0;
+  for (const [provider, plainKey] of Object.entries(appCfg.keys)) {
+    const envName = providerEnvName(provider);
+    if (envName === undefined || plainKey.trim() === "") continue;
+    runnerEnv[envName] = plainKey;
+    appKeys += 1;
+    if (emit) {
+      log.info({ ...fields, provider, key_source: "app" }, `provider key from App config: ${envName}`);
+    }
+  }
+  // 2. Global fallback per provider (spec Per-App BYOK): every allowlisted
+  //    provider the App did not configure falls back to the global env key.
+  const globalKeys = pickProviderKeys(env as Record<string, unknown>);
+  let globalCount = 0;
+  for (const [provider, info] of Object.entries(PROVIDERS)) {
+    if (runnerEnv[info.envName] !== undefined) continue; // the App's own key won
+    const value = globalKeys[info.envName];
+    if (value === undefined) continue; // no global key either
+    runnerEnv[info.envName] = value;
+    globalCount += 1;
+    if (emit) {
+      log.info(
+        { ...fields, provider, key_source: "global" },
+        `provider key from global env (not configured on the App): ${info.envName}`,
+      );
+    }
+  }
+  // 3. Model chain: the App's verbatim chain overrides OMP_REVIEW_MODEL; any
+  //    falsy chain (null or "") is unset → the global chain stays untouched.
+  const chain =
+    typeof appCfg.modelChain === "string" && appCfg.modelChain !== "" ? appCfg.modelChain : undefined;
+  if (chain !== undefined) {
+    runnerEnv.OMP_REVIEW_MODEL = chain;
+  }
+  if (emit) {
+    log.info(
+      { ...fields, config_source: appKeys > 0 || chain !== undefined ? "app" : "fallback" },
+      `per-App env assembly: ${appKeys} provider key(s) from App config, ${globalCount} global fallback` +
+        `${chain !== undefined ? ", model chain from App config" : ""}`,
+    );
+  }
   return runnerEnv;
 }
 
@@ -597,6 +738,12 @@ async function processMessage(payload: ReviewJobPayload, deps: ProcessDeps): Pro
     // happens. Token mint and postReview below both use THIS resolved
     // instance (same App identity, lock L4).
     const commenter = await resolveCommenter(payload, deps);
+    // Per-App AI config (plan 14 B2): hangs off the SAME appRef resolution as
+    // the commenter — one getAppConfig read per message, before the
+    // guard/sandbox so an unresolvable config (undecryptable key envelope,
+    // missing DASHBOARD_ENCRYPTION_KEY) fails closed with zero side effects.
+    // Legacy → undefined → the byte-identical pre-plan-14 env assembly.
+    const appCfg = await resolveAppConfig(payload, deps);
     // 0. In-flight guard (WF-002 / bugbot BB-3): when another review is
     // already running for this PR, return the DISTINCT guard-held outcome —
     // NOT a throw. The consumer schedules a per-message delayed retry
@@ -733,13 +880,15 @@ async function processMessage(payload: ReviewJobPayload, deps: ProcessDeps): Pro
 
     // 8. In-image runner: cwd = clone dir; provider key + harness paths +
     // OMP_REVIEW_MODEL chain + configured provider keys via exec env
-    // (buildRunnerEnv — compass D, BB-1, BB-2; secrets never baked into the
-    // image, never in logs). The runtime runner has NO summary-degrade path:
-    // exit 0 ⇒ stdout is the engine-validated mstar.review/v1 envelope.
+    // (buildRunnerEnv — compass D, BB-1, BB-2; per-App messages assemble the
+    // App's BYOK keys/model chain with global-env fallback and key_source
+    // logging, plan 14 B2; secrets never baked into the image, never in
+    // logs). The runtime runner has NO summary-degrade path: exit 0 ⇒ stdout
+    // is the engine-validated mstar.review/v1 envelope.
     runnerStartedAt = Date.now();
     const run = await sandbox.exec(cmds.runner, {
       cwd: CLONE_DIR,
-      env: buildRunnerEnv(deps.env),
+      env: buildRunnerEnv(deps.env, appCfg, deps.log, fields),
       timeout: runnerTimeoutMs(level),
     });
     const runnerElapsedMs = Date.now() - runnerStartedAt;
