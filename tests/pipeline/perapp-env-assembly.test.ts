@@ -648,6 +648,12 @@ describe("per-App runner env assembly (plan 14 Task 3, spec § Per-App BYOK)", (
       PI_CODING_AGENT_DIR: "/opt/omp-agent",
     });
     expect(JSON.stringify(runnerEnvs()[0])).not.toContain("sk-rogue-SECRET");
+    // Plan 15 log hygiene (硬化项 3): the rogue row's skip is a structured
+    // warn carrying the provider id + app_id — never key material.
+    const warn = logLines.find((l) => l.level === "warn" && l.fields.provider === "not-a-provider");
+    expect(warn).toBeDefined();
+    expect(warn!.fields.app_id).toBe(appX.id);
+    expect(JSON.stringify(warn)).not.toContain("sk-rogue-SECRET");
   });
 
   test("whitespace-only App key is not configured → global fallback (same rule as pickProviderKeys)", async () => {

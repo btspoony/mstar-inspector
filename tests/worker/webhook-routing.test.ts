@@ -130,6 +130,11 @@ async function signatureFor(secret: string, body: string): Promise<string> {
   return new Webhooks({ secret }).sign(body);
 }
 
+/** Full GitHub webhook headers for a signed delivery. */
+async function sigHeaders(secret: string, body: string, event = "pull_request"): Promise<Record<string, string>> {
+  return { "x-hub-signature-256": await signatureFor(secret, body), "x-github-event": event };
+}
+
 const PR_PAYLOAD = {
   action: "opened",
   number: 42,
@@ -632,5 +637,94 @@ describe("POST /webhook (legacy face, lock L3 regression)", () => {
 
     expect(res.status).toBe(401);
     expect(sent).toHaveLength(0);
+  });
+
+  test("legacy-face 413 warn carries the real stage label (plan 15: no literal 'unknown')", async () => {
+    const db = createMigratedD1();
+    const env = makeEnv(db);
+
+    const warn = mock((_msg: unknown) => {});
+    const origWarn = console.warn;
+    console.warn = warn;
+    let res: Response;
+    try {
+      res = await postWebhook(
+        "/webhook",
+        "",
+        { "content-length": String(1_000_001), "x-github-event": "pull_request" },
+        env,
+      );
+    } finally {
+      console.warn = origWarn;
+    }
+
+    expect(res.status).toBe(413);
+    const line = warn.mock.calls.map((call) => String(call[0])).find((s) => s.includes("webhook_body_too_large"));
+    expect(line).toBeDefined();
+    const fields = JSON.parse(line!) as { event: string; reason: string; detail: string };
+    expect(fields.event).toBe("webhook_body_too_large");
+    expect(fields.event).not.toBe("unknown");
+    expect(fields.reason).toBe("webhook_body_too_large");
+    expect(fields.detail).toContain("content_length=");
+  });
+});
+
+describe("verifier cache — rotation + cacheKey isolation (plan 15 L1)", () => {
+  test("rotated webhook secret verifies with the NEW secret only (secret mismatch → rebuild + replace)", async () => {
+    const db = createMigratedD1();
+    const appRow = await seedApp(db, { slug: "app-x", secret: "secret-v1" });
+    const body = JSON.stringify(PR_PAYLOAD);
+
+    // 1. First delivery memoizes the verifier under the row id (secret-v1).
+    const firstQueue = makeQueue();
+    const firstEnv = makeEnv(db, { REVIEW_QUEUE: firstQueue.queue as never });
+    const first = await postWebhook("/webhook/app-x", body, await sigHeaders("secret-v1", body), firstEnv);
+    expect(first.status).toBe(200);
+    expect(firstQueue.sent).toHaveLength(1);
+
+    // 2. Rotate: a NEW envelope for a NEW secret on the SAME row (the
+    //    dashboard re-save path; AES-GCM random IV → a fresh envelope).
+    const box = createSecretbox(TEST_KEY);
+    db.raw
+      .prepare("UPDATE github_apps SET webhook_secret_enc = ? WHERE id = ?")
+      .run(await box.encryptSecret("secret-v2", `github_apps.webhook_secret_enc:${appRow.id}`), appRow.id);
+
+    // The NEW secret verifies — the cached entry's secret mismatched, so the
+    // verifier was rebuilt + replaced under the same row-id cacheKey.
+    const secondQueue = makeQueue();
+    const secondEnv = makeEnv(db, { REVIEW_QUEUE: secondQueue.queue as never });
+    const second = await postWebhook("/webhook/app-x", body, await sigHeaders("secret-v2", body), secondEnv);
+    expect(second.status).toBe(200);
+    expect(secondQueue.sent).toHaveLength(1);
+
+    // 3. The OLD secret no longer verifies — the replaced entry is gone
+    //    exactly (rotation evicts the old secret's verifier).
+    const staleQueue = makeQueue();
+    const staleEnv = makeEnv(db, { REVIEW_QUEUE: staleQueue.queue as never });
+    const stale = await postWebhook("/webhook/app-x", body, await sigHeaders("secret-v1", body), staleEnv);
+    expect(stale.status).toBe(401);
+    expect(staleQueue.sent).toHaveLength(0);
+  });
+
+  test("legacy and per-App verifier entries are isolated (\"legacy\" vs row-id cacheKeys)", async () => {
+    const db = createMigratedD1();
+    await seedApp(db, { slug: "app-x", secret: "secret-x" });
+    const body = JSON.stringify(PR_PAYLOAD);
+
+    // Warm the legacy entry first; the per-App route must still verify ITS
+    // OWN secret afterwards (a different cacheKey → a different entry — the
+    // pre-plan-15 single-secret-keyed cache would have collided here only
+    // on equal secrets; the point is the two keys never cross).
+    const legacyQueue = makeQueue();
+    const legacyEnv = makeEnv(db, { REVIEW_QUEUE: legacyQueue.queue as never });
+    const legacy = await postWebhook("/webhook", body, await sigHeaders(LEGACY_SECRET, body), legacyEnv);
+    expect(legacy.status).toBe(200);
+    expect(legacyQueue.sent).toHaveLength(1);
+
+    const perAppQueue = makeQueue();
+    const perAppEnv = makeEnv(db, { REVIEW_QUEUE: perAppQueue.queue as never });
+    const perApp = await postWebhook("/webhook/app-x", body, await sigHeaders("secret-x", body), perAppEnv);
+    expect(perApp.status).toBe(200);
+    expect(perAppQueue.sent).toHaveLength(1);
   });
 });

@@ -28,8 +28,9 @@ import { dashboardApp } from "../dashboard/index";
 const app = new Hono<{ Bindings: Env }>();
 
 /**
- * Structured warn for the per-App route's rejection/bookkeeping paths (plan
- * 13 QC F-005): the caller passes the real stage label (e.g.
+ * Structured warn for the webhook faces' rejection/bookkeeping paths (plan
+ * 13 QC F-005; plan 15 extends it to the legacy face's pre-classify stage):
+ * the caller passes the real stage label (e.g. `webhook_body_too_large`,
  * `db_binding_missing`, `installation_upsert_failed`) and it rides `event` —
  * never the generic "unknown" — so log consumers can filter these warns by
  * event alone; `reason` keeps the same label for the reason-keyed greps and
@@ -48,14 +49,13 @@ app.post("/webhook", async (c) => {
   const secret = c.env.WEBHOOK_SECRET;
   // Body-size cap checked BEFORE buffering the body (B6): an oversized
   // payload is rejected with 413 before any signature work or body read.
+  // Plan 15 log hygiene: the legacy face uses the same structured stage
+  // warn as the per-App face — a real stage label, never "unknown".
   const contentLength = Number(c.req.header("content-length") ?? "0");
   if (contentLength > WEBHOOK_BODY_LIMIT) {
-    defaultLog.warn(
-      {
-        event: "unknown",
-        reason: "webhook_body_too_large",
-        detail: `content_length=${contentLength}`,
-      },
+    webhookWarn(
+      "webhook_body_too_large",
+      `content_length=${contentLength}`,
       "webhook rejected with 413 — body exceeds size limit",
     );
     return c.text("payload too large", 413);
@@ -67,7 +67,9 @@ app.post("/webhook", async (c) => {
   // T4 kill-switch: reviews run ONLY when REVIEW_ENABLED is exactly "true"
   // (fail-closed — unset/any other value → every webhook is ignored, 2xx).
   const reviewEnabled = c.env.REVIEW_ENABLED === "true";
-  const outcome = await classifyWebhook(secret, rawBody, signature, eventName, defaultLog, reviewEnabled);
+  // Plan 15 (architect lock L1): the legacy face memoizes its verifier under
+  // the dedicated "legacy" cacheKey — isolated from every per-App row id.
+  const outcome = await classifyWebhook(secret, rawBody, signature, eventName, defaultLog, reviewEnabled, "legacy");
 
   if (outcome.kind === "reject") {
     return c.text(outcome.reason, outcome.status);
@@ -188,7 +190,11 @@ app.post("/webhook/:appSlug", async (c) => {
     return c.text("webhook secret decrypt failed", 500);
   }
 
-  const outcome = await classifyWebhook(appSecret, rawBody, signature, eventName, defaultLog, reviewEnabled);
+  // Plan 15 (architect lock L1): the verifier memoizes under the row id as
+  // cacheKey — a rotated webhook secret (same id, new envelope → new
+  // secret) is rebuilt + REPLACED on the next delivery; entries are
+  // structurally bounded (≤ Apps + 1) with no eviction policy.
+  const outcome = await classifyWebhook(appSecret, rawBody, signature, eventName, defaultLog, reviewEnabled, row.id);
 
   if (outcome.kind === "reject") {
     return c.text(outcome.reason, outcome.status);
