@@ -10,14 +10,15 @@
  *   i.e. production BEFORE plan 13. Kept for fixtures that exercise the
  *   append-only ALTER sequence itself (tests/worker/apps-store.test.ts
  *   seeds rows, THEN applies 0004/0005).
- * - `createMigratedTestD1()` — the full current shape (0001 → 0006 in
+ * - `createMigratedTestD1()` — the full current shape (0001 → 0007 in
  *   filename order: 0003 dashboard users, 0004 github_apps +
  *   app_installations, 0005 reviews.app_id, 0006 app_provider_keys +
- *   app_model_config), i.e. what `wrangler d1 migrations apply` produces
- *   today. The store adapter's INSERT binds `reviews.app_id` (plan 13, QC
- *   fix wave 1 F-001), so every test exercising the REAL store.put against
- *   production-shaped data runs on this one — and plan-14 fixtures get the
- *   per-App config tables without re-applying migrations by hand.
+ *   app_model_config, 0007 idx_reviews_app_id), i.e. what
+ *   `wrangler d1 migrations apply` produces today. The store adapter's INSERT
+ *   binds `reviews.app_id` (plan 13, QC fix wave 1 F-001), so every test
+ *   exercising the REAL store.put against production-shaped data runs on this
+ *   one — and plan-14 fixtures get the per-App config tables without
+ *   re-applying migrations by hand.
  *
  * bun:sqlite and D1 are both SQLite, so UNIQUE/ON CONFLICT semantics match;
  * if a divergence ever shows up against real D1, the remote apply is
@@ -38,6 +39,7 @@ const ALL_MIGRATIONS = [
   "0004_github_apps.sql",
   "0005_reviews_app_id.sql",
   "0006_app_provider_config.sql",
+  "0007_reviews_app_id_index.sql",
 ];
 
 /** Execute the migration DDL on a fresh in-memory database. */
@@ -129,10 +131,10 @@ export function createTestD1(): D1Like & { raw: Database } {
 }
 
 /**
- * Fully-migrated variant (plan 13; extended by plan 14): the same double with
- * the complete migration list applied (0001 → 0006, filename order). Reviews
- * carries the `app_id` column (FK to github_apps), so tests exercising the
- * REAL store.put — whose INSERT binds `app_id` — run against the
+ * Fully-migrated variant (plan 13; extended by plans 14–15): the same double
+ * with the complete migration list applied (0001 → 0007, filename order).
+ * Reviews carries the `app_id` column (FK to github_apps), so tests exercising
+ * the REAL store.put — whose INSERT binds `app_id` — run against the
  * production-shaped schema, and the plan-14 per-App config tables
  * (app_provider_keys / app_model_config) exist without extra fixture work.
  * Each call returns an independent database.

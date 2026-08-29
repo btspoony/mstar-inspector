@@ -33,6 +33,7 @@ import type { ReviewJobPayload } from "../../src/contracts/review-job";
 import type { ReviewOutput } from "../../src/review/schema";
 import { createTestD1 } from "../store/helpers";
 import { createAppsStore } from "../../src/dashboard/apps-store";
+import { createAppConfigStore } from "../../src/dashboard/app-config-store";
 import { createSecretbox } from "../../src/dashboard/secretbox";
 import type { CommenterEnv, ReviewCommenter } from "../../src/pipeline/comment";
 import type { ConsumerLog, ConsumerLogFields, PipelineEnv } from "../../src/pipeline/consumer";
@@ -418,5 +419,145 @@ describe("consumer appRef resolution (plan 13 Task 2, lock L4)", () => {
     const instance = factoryCreds[0]!.instance;
     expect(appCalls.map((c) => c.instance)).toEqual([instance, instance]);
     expect(appCalls.map((c) => c.call.op)).toEqual(["token", "post"]);
+  });
+});
+
+describe("appCommenters fingerprint cache (plan 15 hardening item 1, architect lock L1)", () => {
+  /** The row-id AAD the consumer decrypts `private_key_enc` under. */
+  const keyAad = (id: string) => `github_apps.private_key_enc:${id}`;
+
+  test("unchanged credentials across batches → fingerprint match reuses the SAME instance", async () => {
+    reset();
+    const db = createMigratedD1();
+    const appX = await seedApp(db, { slug: "app-x", githubAppId: 111222, pem: PEM_X });
+    const consumer = createReviewConsumer(makeEnv({ DB: db as never }), testLog, testOverrides);
+
+    await consumer(makeBatch(makePayload({ pr_number: 42, appRef: { kind: "app", appId: appX.id } })));
+    await consumer(makeBatch(makePayload({ pr_number: 43, appRef: { kind: "app", appId: appX.id } })));
+
+    // One factory invocation total; BOTH messages were served by that one
+    // instance (identity via the factory's instance numbers).
+    expect(factoryCreds).toHaveLength(1);
+    expect(appCalls.map((c) => c.instance)).toEqual([
+      factoryCreds[0]!.instance,
+      factoryCreds[0]!.instance,
+      factoryCreds[0]!.instance,
+      factoryCreds[0]!.instance,
+    ]);
+  });
+
+  test("rotated credentials (new envelope) → fingerprint mismatch rebuilds with the NEW PEM and replaces", async () => {
+    reset();
+    const db = createMigratedD1();
+    const appX = await seedApp(db, { slug: "app-x", githubAppId: 111222, pem: PEM_X });
+    const consumer = createReviewConsumer(makeEnv({ DB: db as never }), testLog, testOverrides);
+
+    await consumer(makeBatch(makePayload({ pr_number: 42, appRef: { kind: "app", appId: appX.id } })));
+
+    // Rotation: a NEW envelope for a NEW PEM on the SAME row — the dashboard
+    // re-save path (AES-GCM random IV → a fresh envelope string).
+    const box = createSecretbox(TEST_KEY);
+    db.raw
+      .prepare("UPDATE github_apps SET private_key_enc = ? WHERE id = ?")
+      .run(await box.encryptSecret(PEM_Y, keyAad(appX.id)), appX.id);
+
+    await consumer(makeBatch(makePayload({ pr_number: 43, appRef: { kind: "app", appId: appX.id } })));
+
+    expect(factoryCreds).toHaveLength(2);
+    expect(factoryCreds[0]!.cred).toEqual({ APP_ID: "111222", PRIVATE_KEY: PEM_X });
+    expect(factoryCreds[1]!.cred).toEqual({ APP_ID: "111222", PRIVATE_KEY: PEM_Y });
+    // Message 2 was served by the NEW instance only — the old one is replaced.
+    expect(appCalls.map((c) => c.instance)).toEqual([1, 1, 2, 2]);
+  });
+
+  test("re-saved identical PEM → NEW envelope (random IV) → ONE harmless rebuild, same credential", async () => {
+    reset();
+    const db = createMigratedD1();
+    const appX = await seedApp(db, { slug: "app-x", githubAppId: 111222, pem: PEM_X });
+    const consumer = createReviewConsumer(makeEnv({ DB: db as never }), testLog, testOverrides);
+
+    await consumer(makeBatch(makePayload({ pr_number: 42, appRef: { kind: "app", appId: appX.id } })));
+
+    const box = createSecretbox(TEST_KEY);
+    db.raw
+      .prepare("UPDATE github_apps SET private_key_enc = ? WHERE id = ?")
+      .run(await box.encryptSecret(PEM_X, keyAad(appX.id)), appX.id);
+
+    await consumer(makeBatch(makePayload({ pr_number: 43, appRef: { kind: "app", appId: appX.id } })));
+    expect(factoryCreds).toHaveLength(2); // rebuilt — envelope string changed
+    expect(factoryCreds[1]!.cred).toEqual(factoryCreds[0]!.cred); // same PEM, no rotation
+
+    // The rebuilt entry is cached again: a third message does not rebuild.
+    await consumer(makeBatch(makePayload({ pr_number: 44, appRef: { kind: "app", appId: appX.id } })));
+    expect(factoryCreds).toHaveLength(2);
+  });
+
+  test("disabled gate EVICTS the cached instance — re-enabled App rebuilds instead of reusing the stale one", async () => {
+    reset();
+    const db = createMigratedD1();
+    const appX = await seedApp(db, { slug: "app-x", githubAppId: 111222, pem: PEM_X });
+    const consumer = createReviewConsumer(makeEnv({ DB: db as never }), testLog, testOverrides);
+    await consumer(makeBatch(makePayload({ pr_number: 42, appRef: { kind: "app", appId: appX.id } })));
+    expect(factoryCreds).toHaveLength(1);
+
+    // Disable → the unchanged throw path (retry/DLQ) AND the eviction.
+    const store = createAppsStore(db);
+    await store.setAppStatus(appX.id, "disabled");
+    await expect(
+      consumer(makeBatch(makePayload({ pr_number: 43, appRef: { kind: "app", appId: appX.id } }))),
+    ).rejects.toThrow(/per-App credential resolution failed: app .* is disabled/);
+    expect(factoryCreds).toHaveLength(1); // no rebuild on the failure path
+
+    // Re-enable (a real operator path): the envelope is UNCHANGED, so a
+    // fingerprint hit would reuse instance 1 — a second factory call proves
+    // the disabled gate evicted the entry.
+    await store.setAppStatus(appX.id, "active");
+    await consumer(makeBatch(makePayload({ pr_number: 44, appRef: { kind: "app", appId: appX.id } })));
+    expect(factoryCreds).toHaveLength(2);
+    expect(factoryCreds[1]!.cred).toEqual({ APP_ID: "111222", PRIVATE_KEY: PEM_X });
+    expect(appCalls.at(-1)!.instance).toBe(factoryCreds[1]!.instance);
+  });
+
+  test("soft-deleted gate EVICTS the cached instance (restored row rebuilds, never reuses the stale one)", async () => {
+    reset();
+    const db = createMigratedD1();
+    const appX = await seedApp(db, { slug: "app-x", githubAppId: 111222, pem: PEM_X });
+    const consumer = createReviewConsumer(makeEnv({ DB: db as never }), testLog, testOverrides);
+    await consumer(makeBatch(makePayload({ pr_number: 42, appRef: { kind: "app", appId: appX.id } })));
+    expect(factoryCreds).toHaveLength(1);
+
+    await createAppsStore(db).softDeleteApp(appX.id);
+    await expect(
+      consumer(makeBatch(makePayload({ pr_number: 43, appRef: { kind: "app", appId: appX.id } }))),
+    ).rejects.toThrow(/per-App credential resolution failed: app .* is soft-deleted/);
+
+    // Production never un-deletes; the probe restores the row via direct SQL
+    // purely to make the eviction OBSERVABLE: the envelope is unchanged, so
+    // a surviving entry would fingerprint-hit and reuse instance 1.
+    db.raw.prepare("UPDATE github_apps SET deleted_at = NULL, status = 'active' WHERE id = ?").run(appX.id);
+    await consumer(makeBatch(makePayload({ pr_number: 44, appRef: { kind: "app", appId: appX.id } })));
+    expect(factoryCreds).toHaveLength(2);
+    expect(appCalls.at(-1)!.instance).toBe(factoryCreds[1]!.instance);
+  });
+
+  test("rogue provider row (id ∉ PROVIDERS) → structured warn {provider, app_id}, skip continues", async () => {
+    reset();
+    const db = createMigratedD1();
+    const appX = await seedApp(db, { slug: "app-x", githubAppId: 111222, pem: PEM_X });
+    // The store itself does not validate provider ids (routes do) — seed a
+    // rogue row the way a direct-DB write would.
+    await createAppConfigStore(db, TEST_KEY).setProviderKey(appX.id, "not-a-provider", "sk-rogue-SECRET");
+    const consumer = createReviewConsumer(makeEnv({ DB: db as never }), testLog, testOverrides);
+
+    await consumer(makeBatch(makePayload({ appRef: { kind: "app", appId: appX.id } })));
+
+    const warn = logLines.find((l) => l.level === "warn" && l.fields.provider === "not-a-provider");
+    expect(warn).toBeDefined();
+    // The warn carries the id + app_id and NEVER key material.
+    expect(warn!.fields.app_id).toBe(appX.id);
+    expect(JSON.stringify(warn)).not.toContain("sk-rogue-SECRET");
+    // The skip continues: the review ran to completion (posted + persisted).
+    expect(appCalls.map((c) => c.call.op)).toEqual(["token", "post"]);
+    expect(kvPuts).toEqual([{ key: `idem:123:acme/widgets:42:${SHA}`, value: "done" }]);
   });
 });

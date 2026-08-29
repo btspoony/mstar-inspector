@@ -369,13 +369,24 @@ type ProcessDeps = {
   commenter: ReviewCommenter;
   /**
    * Per-App commenter instance cache keyed by appId (plan 13 Task 2, lock
-   * L4), beside the legacy env singleton above. auth-app's
-   * installation-token cache is per-instance, so one instance per App keeps
-   * token caches isolated AND prevents credentials from crossing instances.
-   * The row status is still re-checked per message — the cache only spares
-   * the decrypt + construction, never the active/not-deleted gate.
+   * L4; plan 15 hardening item 1 / architect lock L1), beside the legacy
+   * env singleton above. Entry = `{ commenter, fingerprint }` where the
+   * fingerprint is the EXACT string pair `github_app_id` +
+   * `private_key_enc` (the envelope as stored) from the per-message row the
+   * resolver already re-reads: a fingerprint match reuses the instance
+   * (auth-app token caches stay warm), a mismatch (rotation — a new AES-GCM
+   * envelope, even for a re-saved identical PEM) decrypts + rebuilds +
+   * REPLACES, and the not-found/disabled/deleted gates evict before their
+   * unchanged throw. Deliberately NOT keyed or fingerprinted on
+   * `updated_at` (plan 16's per-webhook `touchLastWebhook` would make it
+   * high-frequency) and not on a decrypted-PEM digest (that would spend the
+   * decrypt the cache exists to spare). The row status is still re-checked
+   * per message — the cache only spares the decrypt + construction, never
+   * the active/not-deleted gate. auth-app's installation-token cache is
+   * per-instance, so one instance per App keeps token caches isolated AND
+   * prevents credentials from crossing instances.
    */
-  appCommenters: Map<string, ReviewCommenter>;
+  appCommenters: Map<string, { commenter: ReviewCommenter; fingerprint: string }>;
   /**
    * Per-App commenter factory — `createReviewCommenter` in production (the
    * ONLY createAppAuth construction point stays src/pipeline/comment.ts,
@@ -412,10 +423,13 @@ function toBaseFields(payload: ReviewJobPayload): ConsumerLogFields {
  *   behavior.
  * - `{ kind: "app", appId }` → the `github_apps` row via D1 (must be active
  *   and not soft-deleted — re-read per message so a disabled/deleted App
- *   fails closed even when an instance is cached) → the row's PEM decrypted
- *   in memory (secretbox, AAD `github_apps.private_key_enc:<id>`) →
+ *   fails closed even when an instance is cached, and the failed gate
+ *   EVICTS the cached instance) → the row's PEM decrypted in memory
+ *   (secretbox, AAD `github_apps.private_key_enc:<id>`) →
  *   `createAppCommenter({ APP_ID: String(github_app_id), PRIVATE_KEY })`,
- *   cached per appId in `deps.appCommenters`.
+ *   cached per appId in `deps.appCommenters` with the row's credential
+ *   fingerprint (plan 15 L1: `github_app_id` + `private_key_enc` envelope
+ *   exact-string match — reuse on match, rebuild + replace on rotation).
  *
  * Any unresolvable state — missing row, disabled, soft-deleted, missing
  * DASHBOARD_ENCRYPTION_KEY (SecretboxKeyError), tampered envelope — THROWS:
@@ -430,23 +444,39 @@ async function resolveCommenter(payload: ReviewJobPayload, deps: ProcessDeps): P
   }
   const row = await createAppsStore(deps.env.DB).getAppById(appRef.appId);
   if (row === null) {
+    deps.appCommenters.delete(appRef.appId);
     throw new Error(`per-App credential resolution failed: app ${appRef.appId} not found`);
   }
   if (row.deleted_at !== null) {
+    deps.appCommenters.delete(appRef.appId);
     throw new Error(`per-App credential resolution failed: app ${appRef.appId} is soft-deleted`);
   }
   if (row.status !== "active") {
+    deps.appCommenters.delete(appRef.appId);
     throw new Error(`per-App credential resolution failed: app ${appRef.appId} is ${row.status}`);
   }
-  let commenter = deps.appCommenters.get(appRef.appId);
-  if (commenter === undefined) {
-    const pem = await createSecretbox(deps.env.DASHBOARD_ENCRYPTION_KEY).decryptSecret(
-      row.private_key_enc,
-      `github_apps.private_key_enc:${row.id}`,
-    );
-    commenter = deps.createAppCommenter({ APP_ID: String(row.github_app_id), PRIVATE_KEY: pem });
-    deps.appCommenters.set(appRef.appId, commenter);
+  // Plan 15 hardening item 1 (architect lock L1): the fingerprint is the
+  // exact string pair read from the row THIS call already fetched — zero
+  // extra reads, no hashing, never `updated_at` (plan 16's per-webhook
+  // touchLastWebhook would churn it). A re-saved identical PEM yields a NEW
+  // AES-GCM envelope → one harmless rebuild; a real rotation rebuilds with
+  // the new credential on the very next message.
+  const fingerprint = JSON.stringify([row.github_app_id, row.private_key_enc]);
+  const cached = deps.appCommenters.get(appRef.appId);
+  if (cached !== undefined && cached.fingerprint === fingerprint) {
+    return cached.commenter;
   }
+  // Cache miss (first message for this App) or fingerprint mismatch
+  // (rotation): decrypt + build + REPLACE the entry. A decrypt failure here
+  // leaves any pre-rotation entry in place but UNREACHABLE — it can only
+  // ever be returned by an exact fingerprint match, i.e. the envelope
+  // reverting to that entry's own bytes.
+  const pem = await createSecretbox(deps.env.DASHBOARD_ENCRYPTION_KEY).decryptSecret(
+    row.private_key_enc,
+    `github_apps.private_key_enc:${row.id}`,
+  );
+  const commenter = deps.createAppCommenter({ APP_ID: String(row.github_app_id), PRIVATE_KEY: pem });
+  deps.appCommenters.set(appRef.appId, { commenter, fingerprint });
   return commenter;
 }
 
@@ -487,8 +517,9 @@ function toBase64Utf8(text: string): string {
  * `getAppConfig` decrypt face of src/dashboard/app-config-store.ts narrowed
  * to what assembly consumes. `keys` maps provider id → DECRYPTED plaintext
  * key (only providers with a stored row appear); `modelChain` is the verbatim
- * stored selector chain, null or "" = unset (global OMP_REVIEW_MODEL wins —
- * any falsy chain is treated as unset).
+ * stored selector chain, null / "" / whitespace-only = unset (global
+ * OMP_REVIEW_MODEL wins — any falsy or blank chain is treated as unset,
+ * plan 15 input bounds).
  */
 export type RunnerAppConfig = {
   keys: Record<string, string>;
@@ -542,10 +573,12 @@ async function resolveAppConfig(payload: ReviewJobPayload, deps: ProcessDeps): P
  *
  * Per-App assembly (plan 14 B2, `appCfg` present — per-App messages only):
  * the App's own key wins per provider, injected under the PROVIDERS-mapped
- * env name (skipped when empty/whitespace or when the provider id is not on
- * the allowlist); every provider the App did NOT configure falls back to the
- * global env key (spec fallback chain — a zero-config App keeps working);
- * an App model chain overrides OMP_REVIEW_MODEL. Every injected key is logged
+ * env name (skipped when empty/whitespace; a provider id outside the
+ * allowlist is skipped with a structured warn — plan 15 log hygiene — that
+ * carries the id + app_id, never key material); every provider the App did
+ * NOT configure falls back to the global env key (spec fallback chain — a
+ * zero-config App keeps working); an App model chain overrides
+ * OMP_REVIEW_MODEL. Every injected key is logged
  * with `key_source: app|global` (the source, never the key), and the assembly
  * logs `config_source: app|fallback`. The function builds a FRESH object per
  * call and never mutates its inputs or any module-level record, so key
@@ -576,11 +609,23 @@ export function buildRunnerEnv(
   // (the consumer flow does; direct unit calls may omit them).
   const emit = log !== undefined && fields !== undefined;
   // 1. The App's own keys, mapped through the PROVIDERS allowlist. A provider
-  //    id without a mapping has no env name — it is never injected.
+  //    id without a mapping has no env name — it is never injected, and the
+  //    skip is no longer silent (plan 15 log hygiene 硬化项 3): the rogue id
+  //    rides a structured warn (an id + app_id, NEVER key material) so the
+  //    operator can see a stored credential going unused.
   let appKeys = 0;
   for (const [provider, plainKey] of Object.entries(appCfg.keys)) {
     const envName = providerEnvName(provider);
-    if (envName === undefined || plainKey.trim() === "") continue;
+    if (envName === undefined) {
+      if (emit) {
+        log.warn(
+          { ...fields, provider },
+          "stored provider key id is not on the PROVIDERS allowlist — row skipped",
+        );
+      }
+      continue;
+    }
+    if (plainKey.trim() === "") continue;
     runnerEnv[envName] = plainKey;
     appKeys += 1;
     if (emit) {
@@ -605,9 +650,14 @@ export function buildRunnerEnv(
     }
   }
   // 3. Model chain: the App's verbatim chain overrides OMP_REVIEW_MODEL; any
-  //    falsy chain (null or "") is unset → the global chain stays untouched.
+  //    falsy or BLANK chain (null / "" / whitespace-only — plan 15 input
+  //    bounds: a direct-DB write can store a blank chain the routes would
+  //    have normalized) is unset → the global chain stays untouched. A chain
+  //    with content forwards verbatim — the guard only decides unset-vs-set.
   const chain =
-    typeof appCfg.modelChain === "string" && appCfg.modelChain !== "" ? appCfg.modelChain : undefined;
+    typeof appCfg.modelChain === "string" && appCfg.modelChain.trim() !== ""
+      ? appCfg.modelChain
+      : undefined;
   if (chain !== undefined) {
     runnerEnv.OMP_REVIEW_MODEL = chain;
   }

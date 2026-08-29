@@ -30,27 +30,40 @@ export const PULL_REQUEST_ACTIONS = ["opened", "synchronize", "reopened"] as con
 export const WEBHOOK_BODY_LIMIT = 1_000_000;
 
 /**
- * Module-level verifier cache (QC F-005): the hot path constructed a
- * `Webhooks` instance per request only to call `verify`, which uses nothing
- * but `options.secret`. Instances are created lazily on first use, after
- * the fail-closed secret check, so a missing/empty/"development" secret
- * never reaches the crypto path. KEYED BY SECRET (plan 13 Task 2): the
- * legacy route and each per-App `POST /webhook/:appSlug` route pass
- * different secrets, and a single-instance cache would verify every later
- * secret against the first-cached one — valid signatures would fail (and
- * the App isolation would be void). One small instance per configured App
- * is negligible; `getWebhooks` stays exported as a test seam to lock the
- * reuse behavior.
+ * Module-level verifier cache (QC F-005; plan 15 hardening item 1 /
+ * architect lock L1): the hot path constructed a `Webhooks` instance per
+ * request only to call `verify`, which uses nothing but `options.secret`.
+ * KEYED BY CACHEKEY, NOT the raw secret: each entry is `{ secret, webhooks }`
+ * under the caller's cache key — the legacy `POST /webhook` route passes
+ * `"legacy"`, each per-App `POST /webhook/:appSlug` route passes its
+ * `github_apps.id` — so per-App isolation holds AND a cached entry whose
+ * `secret` differs from the caller's current secret (credential rotation)
+ * is rebuilt and REPLACED: the rotated secret verifies with the NEW secret
+ * only, and the old entry is evicted exactly (no LRU wait). The bound is
+ * STRUCTURAL (≤ github_apps rows + 1 legacy entry — keys are drawn from the
+ * fixed universe of row ids + "legacy"), so no eviction policy is tunable
+ * or needed; an entry outliving its row (soft-deleted App) is dead weight
+ * only — that route 404s before classifyWebhook, so the entry can never be
+ * hit again. `getWebhooks` stays exported as a test seam to lock the reuse
+ * and rotation-replace behavior; the worker always passes an explicit
+ * cacheKey, and direct callers that omit it fall back to the pre-plan-15
+ * secret-keyed memoization.
  */
-const webhooksCache = new Map<string, Webhooks>();
+type VerifierCacheEntry = { secret: string; webhooks: Webhooks };
 
-export function getWebhooks(secret: string): Webhooks {
-  let cached = webhooksCache.get(secret);
-  if (cached === undefined) {
-    cached = new Webhooks({ secret });
-    webhooksCache.set(secret, cached);
+const webhooksCache = new Map<string, VerifierCacheEntry>();
+
+export function getWebhooks(cacheKey: string, secret: string): Webhooks {
+  const cached = webhooksCache.get(cacheKey);
+  if (cached !== undefined && cached.secret === secret) {
+    return cached.webhooks;
   }
-  return cached;
+  // First use for this cacheKey, or a SECRET MISMATCH (rotation): build and
+  // REPLACE the entry — the old instance (and its old secret) is dropped
+  // exactly, never retained alongside the new one.
+  const webhooks = new Webhooks({ secret });
+  webhooksCache.set(cacheKey, { secret, webhooks });
+  return webhooks;
 }
 
 /**
@@ -60,20 +73,23 @@ export function getWebhooks(secret: string): Webhooks {
  * TypeError on malformed (non-hex) signatures, while Bun/node resolves the
  * `node` condition → `timingSafeEqual` → returns false. Both must fail
  * closed with 401; this wrapper unifies the two paths and logs the
- * malformed input structurally so the operator can spot it.
+ * malformed input structurally so the operator can spot it. `event` is the
+ * real GitHub event when the caller knows it (plan 15 log hygiene) — the
+ * warn falls back to a stage label, never the literal "unknown".
  */
 export async function verifySignature(
   verify: (rawBody: string, signature: string) => Promise<boolean>,
   rawBody: string,
   signature: string,
   log?: HandlerLog,
+  event?: string,
 ): Promise<boolean> {
   try {
     return await verify(rawBody, signature);
   } catch (err) {
     const detail = err instanceof Error ? err.message : String(err);
     log?.warn(
-      { event: "unknown", reason: "signature verification threw", detail },
+      { event: event ?? "signature_verification_error", reason: "signature verification threw", detail },
       "malformed signature rejected with 401",
     );
     return false;
@@ -140,6 +156,18 @@ const issueCommentSchema = z.object({
  *
  * `log` is optional (defaults to no logging) so the pure classifier stays
  * testable without a sink; the fetch entry passes `defaultLog`.
+ *
+ * `cacheKey` (plan 15 hardening item 1 / architect lock L1) is a
+ * MEMOIZATION-ONLY parameter for the verifier cache — the legacy route
+ * passes `"legacy"`, a per-App route passes its `github_apps.id`; the
+ * classifier NEVER branches on it (same secret + same payload classifies
+ * identically whichever key rides along). Omitted → the verifier memoizes
+ * under the secret itself (the pre-plan-15 shape, for direct callers).
+ *
+ * Warn labels (plan 15 log hygiene 硬化项 3): every structured warn carries
+ * the REAL GitHub event in `event` when the header is present, falling back
+ * to the stage label (= the machine `reason`) when the header is absent —
+ * never the literal "unknown", so log consumers can filter by event alone.
  */
 export async function classifyWebhook(
   secret: string,
@@ -148,32 +176,39 @@ export async function classifyWebhook(
   eventName: string | null,
   log?: HandlerLog,
   reviewEnabled = true,
+  cacheKey?: string,
 ): Promise<WebhookOutcome> {
   if (!reviewEnabled) {
     log?.warn(
-      { event: "unknown", reason: "review_disabled", detail: "REVIEW_ENABLED is not 'true'" },
+      { event: eventName ?? "review_disabled", reason: "review_disabled", detail: "REVIEW_ENABLED is not 'true'" },
       "webhook ignored — reviews disabled by the REVIEW_ENABLED kill-switch",
     );
     return { kind: "ignore", reason: "reviews disabled by the REVIEW_ENABLED kill-switch" };
   }
   if (!secret || secret === "development") {
     log?.warn(
-      { event: "unknown", reason: "secret_misconfigured", detail: "secret missing, empty, or the default 'development'" },
+      { event: eventName ?? "secret_misconfigured", reason: "secret_misconfigured", detail: "secret missing, empty, or the default 'development'" },
       "webhook rejected with 500 — secret misconfigured",
     );
     return { kind: "reject", status: 500, reason: "webhook secret is missing, empty, or the default 'development'" };
   }
   if (!signature) {
     log?.warn(
-      { event: "unknown", reason: "missing_signature", detail: "X-Hub-Signature-256 header absent" },
+      { event: eventName ?? "missing_signature", reason: "missing_signature", detail: "X-Hub-Signature-256 header absent" },
       "webhook rejected with 401 — missing signature",
     );
     return { kind: "reject", status: 401, reason: "missing X-Hub-Signature-256 header" };
   }
-  const valid = await verifySignature(getWebhooks(secret).verify, rawBody, signature, log);
+  const valid = await verifySignature(
+    getWebhooks(cacheKey ?? secret, secret).verify,
+    rawBody,
+    signature,
+    log,
+    eventName ?? undefined,
+  );
   if (!valid) {
     log?.warn(
-      { event: "unknown", reason: "signature_verification_failed", detail: "HMAC did not verify (or malformed)" },
+      { event: eventName ?? "signature_verification_failed", reason: "signature_verification_failed", detail: "HMAC did not verify (or malformed)" },
       "webhook rejected with 401 — signature verification failed",
     );
     return { kind: "reject", status: 401, reason: "signature verification failed" };
@@ -194,7 +229,7 @@ export function classifyEvent(
 ): WebhookOutcome {
   if (!reviewEnabled) {
     log?.warn(
-      { event: "unknown", reason: "review_disabled", detail: "REVIEW_ENABLED is not 'true'" },
+      { event: eventName ?? "review_disabled", reason: "review_disabled", detail: "REVIEW_ENABLED is not 'true'" },
       "event ignored — reviews disabled by the REVIEW_ENABLED kill-switch",
     );
     return { kind: "ignore", reason: "reviews disabled by the REVIEW_ENABLED kill-switch" };
@@ -280,7 +315,10 @@ function classifyIssueComment(rawBody: string, log?: HandlerLog): WebhookOutcome
   if (actorLogin === null || (actorLogin !== authorLogin && actorLogin !== ownerLogin)) {
     log?.warn(
       {
-        event: "unknown",
+        // Plan 15 log hygiene: this warn is only reachable via
+        // classifyEvent("issue_comment", …), so `event` carries the REAL
+        // GitHub event — filterable, never the literal "unknown".
+        event: "issue_comment",
         reason: "actor_not_allowed",
         detail: `actor=${actorLogin ?? "null"} author=${authorLogin ?? "null"} owner=${ownerLogin ?? "null"}`,
       },

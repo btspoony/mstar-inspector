@@ -32,16 +32,20 @@
  *
  * Semantics (the Task 2 UI + Task 3 consumer call sites rely on these):
  *   - setProviderKey upserts: re-setting a provider replaces the ciphertext
- *     (one row per (app_id, provider) — the composite PK).
+ *     (one row per (app_id, provider) — the composite PK). A key longer than
+ *     MAX_PROVIDER_KEY_LENGTH (4096) throws ProviderKeyTooLongError before
+ *     any crypto or write (plan 15 input bounds; the settings route re-renders
+ *     400 first — the guard here is the backstop for direct callers).
  *   - removeProviderKey returns whether a row was deleted (an unconfigured
  *     provider is an idempotent no-op, like setAppStatus).
  *   - listProviderKeys is the settings-page face: provider + masked tail
  *     only, provider-ascending; a key of ≤4 characters reveals NOTHING
  *     (the mask must never render a whole key).
- *   - setModelChain(null) REMOVES the row (absent = unset = global fallback,
- *     Clarify #2: 空 = 全局); a non-null chain upserts verbatim. Read it
- *     back with getModelChain (the settings route prefills the editor from
- *     it WITHOUT decrypting any key material).
+ *   - setModelChain(null) — or any BLANK chain (empty / whitespace-only,
+ *     plan 15: aligned with the route's 空 = 清除) — REMOVES the row (absent
+ *     = unset = global fallback, Clarify #2: 空 = 全局); a chain with content
+ *     upserts verbatim. Read it back with getModelChain (the settings route
+ *     prefills the editor from it WITHOUT decrypting any key material).
  *   - getAppConfig decrypts for the consumer face: an App with no config
  *     yields an EMPTY keys map and a null chain (zero-config compatibility —
  *     the consumer falls back to global env), and an undecryptable row is a
@@ -116,6 +120,27 @@ export function parseModelChain(raw: string | undefined): string[] {
 }
 
 /**
+ * Provider-key length bound (plan 15 Task 1, spec dashboard-ops-and-role-models
+ * § 硬化项 4): a pasted API key longer than this is rejected BEFORE any
+ * encryption or D1 write, so an oversized input can never bloat the store.
+ */
+export const MAX_PROVIDER_KEY_LENGTH = 4096;
+
+/**
+ * Input-bound error (plan 15): the plaintext key passed to setProviderKey
+ * exceeds MAX_PROVIDER_KEY_LENGTH. The settings route never surfaces it —
+ * it validates the same bound first and re-renders 400 — so this typed throw
+ * is the backstop for any caller that skips the route. Same class convention
+ * as SecretboxKeyError (name set for structured logs).
+ */
+export class ProviderKeyTooLongError extends Error {
+  constructor() {
+    super(`provider API key exceeds the ${MAX_PROVIDER_KEY_LENGTH}-character limit`);
+    this.name = "ProviderKeyTooLongError";
+  }
+}
+
+/**
  * Composite-PK secretbox AAD rowKey (lock L1): the envelope is bound to BOTH
  * primary-key columns of app_provider_keys, joined in DDL order.
  */
@@ -186,9 +211,14 @@ export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | un
     /**
      * Store (or replace) one provider key for the App: encrypts INSIDE with
      * the composite-PK AAD, then upserts the (app_id, provider) row. The
-     * plaintext is never persisted, logged, or returned.
+     * plaintext is never persisted, logged, or returned. A key longer than
+     * MAX_PROVIDER_KEY_LENGTH throws ProviderKeyTooLongError before any
+     * crypto or write (the route answers 400 first; this is the backstop).
      */
     async setProviderKey(appId: string, provider: string, plainKey: string): Promise<void> {
+      if (plainKey.length > MAX_PROVIDER_KEY_LENGTH) {
+        throw new ProviderKeyTooLongError();
+      }
       const keyEnc = await box.encryptSecret(plainKey, providerKeyAad(appId, provider));
       await db
         .prepare(
@@ -236,11 +266,13 @@ export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | un
 
     /**
      * Store the App's model chain VERBATIM (the route has already validated
-     * ≥1 selector), or clear it with `null` (row removed — absent = unset =
-     * global fallback).
+     * ≥1 selector), or clear it: `null` AND any blank chain (empty or
+     * whitespace-only — the route's 空 = 清除 semantics, plan 15 alignment)
+     * REMOVE the row (absent = unset = global fallback). A chain with content
+     * upserts verbatim, interior/trailing whitespace included.
      */
     async setModelChain(appId: string, chain: string | null): Promise<void> {
-      if (chain === null) {
+      if (chain === null || chain.trim() === "") {
         await db.prepare(`DELETE FROM app_model_config WHERE app_id = ?`).bind(appId).run();
         return;
       }

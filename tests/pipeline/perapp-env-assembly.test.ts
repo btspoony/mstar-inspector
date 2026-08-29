@@ -8,8 +8,10 @@
  *     env name (empty/whitespace keys and unknown provider ids never inject);
  *   - every provider the App did NOT configure falls back to the global env
  *     key (spec fallback chain — zero-config Apps keep working);
- *   - an App model chain overrides OMP_REVIEW_MODEL; null/"" = unset → global
- *     chain unchanged (T1-review forward note: any falsy chain is unset);
+ *   - an App model chain overrides OMP_REVIEW_MODEL; null/""/whitespace-only =
+ *     unset → global chain unchanged (plan 15 input bounds: any falsy or
+ *     blank chain — including a direct-DB write the store never saw — is
+ *     unset; a padded chain with content forwards VERBATIM);
  *   - every injected key logs `key_source: app|global` (the source, never the
  *     key) and the assembly logs `config_source: app|fallback`;
  *   - legacy (appRef absent / `{ kind: "legacy" }`) → `appCfg` undefined →
@@ -407,8 +409,8 @@ describe("per-App runner env assembly (plan 14 Task 3, spec § Per-App BYOK)", (
     const appY = await seedApp(db, "app-y");
     const appZ = await seedApp(db, "app-z");
     await createAppConfigStore(db, TEST_KEY).setModelChain(appX.id, "openai/gpt-app,anthropic/claude-app");
-    // Y stores an EMPTY chain — the T1-review forward note: any falsy chain
-    // (empty string or null) is unset → the global chain stays.
+    // Y's chain is EMPTY — the store itself clears it (plan 15: "" = same path
+    // as null), so Y reads back a null chain → the global chain stays.
     await createAppConfigStore(db, TEST_KEY).setModelChain(appY.id, "");
     const consumer = createReviewConsumer(
       makeEnv({ DB: db as never, OMP_REVIEW_MODEL: "ark-plan/global-chain" }),
@@ -433,6 +435,52 @@ describe("per-App runner env assembly (plan 14 Task 3, spec § Per-App BYOK)", (
     expect(cfgLines[0]?.fields.config_source).toBe("app");
     expect(cfgLines[1]?.fields.config_source).toBe("fallback");
     expect(cfgLines[2]?.fields.config_source).toBe("fallback");
+  });
+
+  test("blank chain via direct-DB write is unset; a padded real chain forwards VERBATIM (plan 15 trim guard)", async () => {
+    reset();
+    const db = createMigratedTestD1();
+    const appX = await seedApp(db, "app-x");
+    const appY = await seedApp(db, "app-y");
+    // Bypass the store (the plan-15 threat model: a direct DB write can hold a
+    // blank chain the routes would have normalized away) — the raw rows pin
+    // the buildRunnerEnv trim guard itself, independent of store semantics.
+    db.raw
+      .prepare(
+        `INSERT INTO app_model_config (app_id, model_chain, updated_at)
+         VALUES (?, '   ', datetime('now'))`,
+      )
+      .run(appX.id);
+    const padded = "  openai/gpt-padded , anthropic/claude-padded  ";
+    db.raw
+      .prepare(
+        `INSERT INTO app_model_config (app_id, model_chain, updated_at)
+         VALUES (?, ?, datetime('now'))`,
+      )
+      .run(appY.id, padded);
+    const consumer = createReviewConsumer(
+      makeEnv({ DB: db as never, OMP_REVIEW_MODEL: "ark-plan/global-chain" }),
+      testLog,
+      testOverrides,
+    );
+
+    await consumer(
+      makeBatch(
+        makePayload({ pr_number: 42, appRef: { kind: "app", appId: appX.id } }),
+        makePayload({ pr_number: 43, appRef: { kind: "app", appId: appY.id } }),
+      ),
+    );
+
+    const [xEnv, yEnv] = runnerEnvs() as [Record<string, string>, Record<string, string>];
+    // Whitespace-only chain = unset → the global chain reaches the runner.
+    expect(xEnv.OMP_REVIEW_MODEL).toBe("ark-plan/global-chain");
+    // A padded chain WITH content is configuration — forwarded exactly as
+    // stored (the guard only decides unset-vs-set; it never mutates the value;
+    // the runner-side selector parse trims segments).
+    expect(yEnv.OMP_REVIEW_MODEL).toBe(padded);
+    const cfgLines = logLines.filter((l) => l.fields.config_source !== undefined);
+    expect(cfgLines[0]?.fields.config_source).toBe("fallback");
+    expect(cfgLines[1]?.fields.config_source).toBe("app");
   });
 
   test("cross-App isolation: App X's env never contains App Y's key names or values (full env object)", async () => {
@@ -600,6 +648,12 @@ describe("per-App runner env assembly (plan 14 Task 3, spec § Per-App BYOK)", (
       PI_CODING_AGENT_DIR: "/opt/omp-agent",
     });
     expect(JSON.stringify(runnerEnvs()[0])).not.toContain("sk-rogue-SECRET");
+    // Plan 15 log hygiene (硬化项 3): the rogue row's skip is a structured
+    // warn carrying the provider id + app_id — never key material.
+    const warn = logLines.find((l) => l.level === "warn" && l.fields.provider === "not-a-provider");
+    expect(warn).toBeDefined();
+    expect(warn!.fields.app_id).toBe(appX.id);
+    expect(JSON.stringify(warn)).not.toContain("sk-rogue-SECRET");
   });
 
   test("whitespace-only App key is not configured → global fallback (same rule as pickProviderKeys)", async () => {
