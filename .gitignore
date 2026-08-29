@@ -84,6 +84,9 @@ typings/
 .env**.test
 .env**.local
 
+# wrangler dev local secrets (README documents this as gitignored)
+.dev.vars
+
 # parcel-bundler cache (https://parceljs.org/)
 .cache
 
