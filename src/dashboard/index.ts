@@ -1,7 +1,7 @@
 /**
- * /dashboard Hono sub-app (plan 08 B0): GitHub OAuth login + signed-cookie
- * session + placeholder shell. Mounted by src/worker/index.ts as
- * `app.route("/dashboard", dashboardApp)`.
+ * /dashboard Hono sub-app: GitHub OAuth login + signed-cookie session (08 B0)
+ * + GitHub App Manifest start/callback/commit (11 B1 T1/T2). Mounted by
+ * src/worker/index.ts as `app.route("/dashboard", dashboardApp)`.
  *
  * Route isolation (architect decision Q2): this module MUST NOT import
  * pipeline/store/review code. Fail-closed everywhere: missing OAuth secrets
@@ -23,7 +23,20 @@ import {
   serializeCookie,
   verifyStateValue,
 } from "./session";
-import { dashboardPage, errorPage } from "./views";
+import {
+  MANIFEST_HOLD_COOKIE,
+  MANIFEST_HOLD_MAX_AGE_SEC,
+  MANIFEST_STATE_COOKIE,
+  MANIFEST_STATE_MAX_AGE_SEC,
+  buildManifest,
+  buildManifestCreateUrl,
+  createHoldValue,
+  exchangeManifestCode,
+  logManifestFailure,
+  readHoldValue,
+  writeWorkerSecrets,
+} from "./manifest";
+import { dashboardPage, errorPage, manifestConfirmPage, manifestErrorPage, manifestStartPage, manifestSuccessPage } from "./views";
 
 export const dashboardApp = new Hono<{ Bindings: Env }>();
 
@@ -84,7 +97,148 @@ dashboardApp.get("/oauth/callback", async (c) => {
 
 dashboardApp.get("/logout", (c) => {
   c.header("Set-Cookie", expireCookie(SESSION_COOKIE));
+  // Any parked manifest credentials die with the session (spec L7).
+  c.header("Set-Cookie", expireCookie(MANIFEST_HOLD_COOKIE), { append: true });
+  c.header("Set-Cookie", expireCookie(MANIFEST_STATE_COOKIE), { append: true });
   return c.redirect("/dashboard/login", 302);
+});
+
+// --- B1 Task 1: GitHub App Manifest start + callback (no secret write) ---
+
+// Start: logged-in only. Mints the single-use CSRF state cookie and renders
+// the zero-JS form POST to https://github.com/settings/apps/new (state rides
+// the form-action query). Logged out → 302 to login (IA routing table).
+dashboardApp.post("/manifest/start", async (c) => {
+  const secrets = dashboardSecrets(c.env);
+  if (!secrets) return c.text("dashboard OAuth is not configured", 500);
+  const session = await readSessionValue(getCookie(c, SESSION_COOKIE), secrets.sessionSecret);
+  if (!session) return c.redirect("/dashboard/login", 302);
+  const state = await createStateValue(secrets.sessionSecret);
+  c.header("Set-Cookie", serializeCookie(MANIFEST_STATE_COOKIE, state, MANIFEST_STATE_MAX_AGE_SEC));
+  const manifest = buildManifest(new URL(c.req.url).origin, session.login);
+  return c.html(manifestStartPage(session, manifest.name, JSON.stringify(manifest), buildManifestCreateUrl(state)));
+});
+
+// Callback: GitHub redirects here with ?code=…&state=…. Bad/missing state →
+// 4xx with ZERO secret-API calls (the conversion fetch never runs). On
+// success the code is exchanged and the credentials are parked in the
+// encrypted, single-use hold cookie for the T2 confirm gate — the response
+// HTML carries the App id/name only, never PEM or webhook_secret.
+dashboardApp.get("/manifest/callback", async (c) => {
+  const secrets = dashboardSecrets(c.env);
+  if (!secrets) return c.text("dashboard OAuth is not configured", 500);
+  // The state cookie is single-use: invalidated on every callback outcome.
+  c.header("Set-Cookie", expireCookie(MANIFEST_STATE_COOKIE));
+  const session = await readSessionValue(getCookie(c, SESSION_COOKIE), secrets.sessionSecret);
+  if (!session) return c.redirect("/dashboard/login", 302);
+  const stateOk = await verifyStateValue(
+    getCookie(c, MANIFEST_STATE_COOKIE),
+    c.req.query("state"),
+    secrets.sessionSecret,
+  );
+  if (!stateOk) {
+    logManifestFailure("state_verify", "state_mismatch");
+    return c.html(
+      manifestErrorPage("The app-creation flow could not be verified (bad or expired state)."),
+      400,
+    );
+  }
+  const code = c.req.query("code");
+  if (!code) {
+    logManifestFailure("callback", "missing_code");
+    return c.html(manifestErrorPage("GitHub did not return an app-manifest code."), 400);
+  }
+  const conversion = await exchangeManifestCode(code);
+  if (!conversion) {
+    return c.html(manifestErrorPage("GitHub rejected the app-manifest code."), 502);
+  }
+  const hold = await createHoldValue(conversion, session.login, secrets.sessionSecret);
+  c.header("Set-Cookie", serializeCookie(MANIFEST_HOLD_COOKIE, hold, MANIFEST_HOLD_MAX_AGE_SEC), {
+    append: true,
+  });
+  return c.html(manifestConfirmPage(session, { id: conversion.id, name: conversion.name }));
+});
+
+// Commit (B1 Task 2, spec § L6/L7/L8): the confirm gate. Without
+// `confirm=overwrite` → 400 with ZERO Cloudflare requests. The hold cookie
+// is bound to the committing session (`hold.login === session.login`, else
+// 403, zero writes) and survives RETRYABLE outcomes (400 missing confirm,
+// 500 missing Cloudflare config, 502 CF/network) so the operator can retry
+// without creating a second GitHub App; it is expired on success, login
+// mismatch, undecryptable/expired hold, and logout. Missing/undecryptable/
+// expired hold = flow expired → 302 back to the start, zero writes. On
+// confirm, ONE secrets-bulk PATCH writes exactly APP_ID / PRIVATE_KEY /
+// WEBHOOK_SECRET (PEM PKCS#8-normalized) — never REVIEW_ENABLED or model
+// keys. Missing Cloudflare config → 5xx, zero writes.
+dashboardApp.post("/manifest/commit", async (c) => {
+  const secrets = dashboardSecrets(c.env);
+  if (!secrets) return c.text("dashboard OAuth is not configured", 500);
+  const session = await readSessionValue(getCookie(c, SESSION_COOKIE), secrets.sessionSecret);
+  if (!session) return c.redirect("/dashboard/login", 302);
+  const form = await c.req.parseBody();
+  if (form.confirm !== "overwrite") {
+    // Retryable: keep the hold so the operator can re-tick and resubmit.
+    logManifestFailure("commit", "confirm_missing");
+    return c.html(
+      manifestErrorPage("The overwrite was not confirmed — tick the checkbox to proceed.", true),
+      400,
+    );
+  }
+  const hold = await readHoldValue(getCookie(c, MANIFEST_HOLD_COOKIE), secrets.sessionSecret);
+  if (!hold) {
+    logManifestFailure("commit", "hold_missing_or_expired");
+    // Bad hold: burn the cookie so no stale credential lingers.
+    c.header("Set-Cookie", expireCookie(MANIFEST_HOLD_COOKIE));
+    return c.redirect("/dashboard", 302);
+  }
+  if (hold.login !== session.login) {
+    // The hold is bound to the login that ran the callback: a different
+    // operator must restart the flow (zero writes, hold burned).
+    logManifestFailure("commit", "login_mismatch");
+    c.header("Set-Cookie", expireCookie(MANIFEST_HOLD_COOKIE));
+    return c.html(
+      manifestErrorPage(
+        "This confirmation belongs to a different GitHub login — sign back in and restart the app-creation flow.",
+      ),
+      403,
+    );
+  }
+  const result = await writeWorkerSecrets(c.env, hold);
+  if (result === "missing_config") {
+    // Retryable: keep the hold; fix the Worker env and resubmit.
+    logManifestFailure("commit", "cloudflare_not_configured");
+    return c.html(
+      manifestErrorPage(
+        "Cloudflare API access is not configured on this Worker (CLOUDFLARE_API_TOKEN / CLOUDFLARE_ACCOUNT_ID).",
+        true,
+      ),
+      500,
+    );
+  }
+  if (result === "upstream_error") {
+    // Retryable: keep the hold; a CF/network failure must not burn it.
+    return c.html(
+      manifestErrorPage("Cloudflare rejected the secret write (check the API token permissions).", true),
+      502,
+    );
+  }
+  // Success: the hold is single-success — burned now that secrets are stored.
+  c.header("Set-Cookie", expireCookie(MANIFEST_HOLD_COOKIE));
+  return c.html(manifestSuccessPage(session, { id: hold.id }));
+});
+
+// Confirm resume (Bugbot: the hold survives retryable commit outcomes, so a
+// refresh / error-page link must re-render the confirm gate, not a dead
+// shell). Hold decrypts + hold.login === session.login → confirm page with
+// id/name only (PEM/webhook_secret never render); anything else → 302 shell.
+dashboardApp.get("/manifest/confirm", async (c) => {
+  const secrets = dashboardSecrets(c.env);
+  if (!secrets) return c.text("dashboard OAuth is not configured", 500);
+  const session = await readSessionValue(getCookie(c, SESSION_COOKIE), secrets.sessionSecret);
+  if (!session) return c.redirect("/dashboard/login", 302);
+  const hold = await readHoldValue(getCookie(c, MANIFEST_HOLD_COOKIE), secrets.sessionSecret);
+  if (!hold || hold.login !== session.login) return c.redirect("/dashboard", 302);
+  return c.html(manifestConfirmPage(session, { id: hold.id, name: hold.name }));
 });
 
 dashboardApp.get("/", async (c) => {
@@ -92,17 +246,23 @@ dashboardApp.get("/", async (c) => {
   if (!sessionSecret) return c.text("dashboard OAuth is not configured", 500);
   const session = await readSessionValue(getCookie(c, SESSION_COOKIE), sessionSecret);
   if (!session) return c.redirect("/dashboard/login", 302);
+  // A parked manifest hold resumes the confirm gate in place of the shell
+  // (same rule as GET /dashboard/manifest/confirm).
+  const hold = await readHoldValue(getCookie(c, MANIFEST_HOLD_COOKIE), sessionSecret);
+  if (hold && hold.login === session.login) {
+    return c.html(manifestConfirmPage(session, { id: hold.id, name: hold.name }));
+  }
   return c.html(dashboardPage(session));
 });
 
-// B0 placeholder actions (IA routing table): every POST under /dashboard is a
-// placeholder submit and must never succeed — logged out → 302 to login;
-// logged in → 405 (the shell exists, the method does not). Zero secret
-// writes, zero REVIEW_ENABLED changes on this path.
+// Placeholder actions (IA routing table): every POST under /dashboard that is
+// not a wired route above is a placeholder submit and must never succeed —
+// logged out → 302 to login; logged in → 405 (the shell exists, the method
+// does not). Zero secret writes, zero REVIEW_ENABLED changes on this path.
 dashboardApp.post("*", async (c) => {
   const sessionSecret = c.env.DASHBOARD_SESSION_SECRET;
   if (!sessionSecret) return c.text("dashboard OAuth is not configured", 500);
   const session = await readSessionValue(getCookie(c, SESSION_COOKIE), sessionSecret);
   if (!session) return c.redirect("/dashboard/login", 302);
-  return c.text("placeholder actions are not implemented in B0", 405);
+  return c.text("placeholder actions are not implemented", 405);
 });

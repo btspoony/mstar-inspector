@@ -9,12 +9,20 @@
 
 import type { MstarReviewV1 } from "@mstar-harness/engine";
 
-/** Review depth tiers delivered this iteration (harness tier table). */
-export type ReviewLevel = "quick" | "default";
-/** 其它值（含 "deep"）由端口层拒绝：throw，不静默降档。 */
+/**
+ * Full review-tier universe (plan 09 Task 1). `deep` is a first-class tier
+ * (parent-session path lands in Task 2); unknown values are still rejected
+ * at the port: throw, never a silent downgrade.
+ */
+export const REVIEW_LEVELS = ["quick", "default", "deep"] as const;
+export type ReviewLevel = (typeof REVIEW_LEVELS)[number];
 
-/** Seats per level — commands/amazing-pr-review.md 档位表. */
-export const REVIEW_SEATS: Record<ReviewLevel, number> = { quick: 1, default: 2 };
+/**
+ * Seats per Bun fan-out level — commands/amazing-pr-review.md 档位表.
+ * `deep` deliberately has NO seats entry: it runs one parent session, not a
+ * seat partition (plan 09 Task 2).
+ */
+export const REVIEW_SEATS: Record<Exclude<ReviewLevel, "deep">, number> = { quick: 1, default: 2 };
 
 export type AgentRuntimeRunInput = {
   level: ReviewLevel;
@@ -36,10 +44,11 @@ export interface AgentRuntime {
 
 /**
  * Type guard narrowing an arbitrary runtime value (JSON wire input) onto the
- * delivered tiers. Own-key check (qc3 F-302): `value in REVIEW_SEATS` also
- * matches Object.prototype keys ("toString", "constructor", …) — only
- * Object.hasOwn rejects them fail-fast at the port.
+ * tier universe. Membership is checked against REVIEW_LEVELS (NOT
+ * REVIEW_SEATS, which has no `deep` key); a plain-array `includes` compares
+ * values only, so Object.prototype keys ("toString", "constructor", …) are
+ * rejected fail-fast at the port (qc3 F-302).
  */
 export function isReviewLevel(value: unknown): value is ReviewLevel {
-  return typeof value === "string" && Object.hasOwn(REVIEW_SEATS, value);
+  return typeof value === "string" && (REVIEW_LEVELS as readonly string[]).includes(value);
 }

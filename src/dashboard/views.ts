@@ -65,6 +65,13 @@ section {
   border-radius: var(--rounded-sm);
   padding: 24px; /* spacing-6 card padding */
 }
+/* Enabled section (B1 GitHub App): background-100 fill + gray-900 1px border,
+   explicitly NOT aria-disabled (spec dashboard-b1-manifest.md § DESIGN intent). */
+section.enabled {
+  background: var(--background-100);
+  border: 1px solid var(--gray-900);
+}
+section form { margin-top: 16px; } /* spacing-4 */
 section h2 { margin: 0 0 8px; font-size: 16px; font-weight: 600; line-height: 1.4; } /* heading-16 */
 section p { margin: 0 0 8px; }
 .status { color: var(--gray-900); font-size: 14px; line-height: 1.55; } /* copy-14 */
@@ -87,6 +94,26 @@ button[disabled] {
   color: var(--red-700);
   padding: 16px; /* spacing-4 */
 }
+.banner.warn {
+  border-color: var(--amber-700);
+  color: var(--amber-700);
+}
+/* Constructive primary (Login / Create GitHub App) = blue-700; destructive
+   submit (Overwrite secrets) = red-700. Native buttons, no client JS. */
+button.primary, button.danger {
+  appearance: none;
+  border: 1px solid transparent;
+  border-radius: var(--rounded-sm);
+  color: var(--background-100);
+  padding: 8px 12px; /* spacing-2 / spacing-3 control rhythm */
+  font: inherit;
+  cursor: pointer;
+}
+button.primary { background: var(--blue-700); border-color: var(--blue-700); }
+button.danger { background: var(--red-700); border-color: var(--red-700); }
+label.checkbox { display: block; margin: 16px 0; } /* spacing-4 */
+.id { font-variant-numeric: tabular-nums; }
+a.cancel { color: var(--gray-1000); margin-left: 12px; } /* spacing-3 */
 </style>`;
 
 function page(title: string, body: string): string {
@@ -102,35 +129,164 @@ ${STYLE}
 </html>`;
 }
 
-function placeholderSection(title: string, description: string, action: string, extra = ""): string {
+function placeholderSection(
+  title: string,
+  description: string,
+  status: string,
+  action: string,
+  extra = "",
+): string {
   return `<section aria-disabled="true">
     <h2>${title}</h2>
     <p>${description}</p>
-    <p class="status">Not in B0 — this iteration ships the login shell only.</p>
+    <p class="status">${status}</p>
     ${extra}
     <button type="button" disabled aria-disabled="true">${action}</button>
   </section>`;
 }
 
-/** Logged-in shell: header + the three B0 placeholder sections (IA spec). */
-export function dashboardPage(user: { login: string; name?: string }): string {
+/** Page header (IA: product name, GitHub identity, Logout — unchanged). */
+function shellHeader(user: { login: string; name?: string }): string {
   const display = user.name ? `${user.name} (${user.login})` : user.login;
-  return page(
-    "Dashboard",
-    `<header>
+  return `<header>
     <h1>mstar-inspector</h1>
     <span class="user">Signed in as ${escapeHtml(display)} · <a href="/dashboard/logout">Logout</a></span>
-  </header>
+  </header>`;
+}
+
+/** B1: GitHub App section is live — primary constructive action (blue-700). */
+function githubAppSection(): string {
+  return `<section class="enabled">
+    <h2>GitHub App</h2>
+    <p>Create the review GitHub App in your GitHub account via the Manifest flow — no local wrangler secret put.</p>
+    <form method="post" action="/dashboard/manifest/start">
+      <button type="submit" class="primary">Create GitHub App</button>
+    </form>
+  </section>`;
+}
+
+/** Logged-in shell: header + sections (B1: GitHub App live; BYOK/Review placeholders). */
+export function dashboardPage(user: { login: string; name?: string }): string {
+  return page(
+    "Dashboard",
+    `${shellHeader(user)}
   <main>
     <div class="sections">
-      ${placeholderSection("GitHub App", "Create a review GitHub App in your account via Manifest.", "Create GitHub App")}
-      ${placeholderSection("Model keys", "Store a model provider key without local wrangler secret put.", "Add model key")}
+      ${githubAppSection()}
+      ${placeholderSection(
+        "Model keys",
+        "Store a model provider key without local wrangler secret put.",
+        "Not in this iteration (B2).",
+        "Add model key",
+      )}
       ${placeholderSection(
         "Review",
         "Turn cloud reviews on or off (REVIEW_ENABLED).",
+        "Not in this iteration (B3).",
         "Enable reviews",
         '<p class="note">Reviews stay fail-closed in production until enabled here (B3).</p>',
       )}
+    </div>
+  </main>`,
+  );
+}
+
+/**
+ * Manifest start interstitial (B1 Task 1): zero-JS form POST to GitHub
+ * carrying the manifest JSON; `state` rides the form-action query (GitHub
+ * echoes it into the redirect_url next to `code`). Nothing is created until
+ * the operator confirms on GitHub.
+ */
+export function manifestStartPage(
+  user: { login: string; name?: string },
+  appName: string,
+  manifestJson: string,
+  createUrl: string,
+): string {
+  return page(
+    "Create GitHub App",
+    `${shellHeader(user)}
+  <main>
+    <section class="enabled">
+      <h2>Create GitHub App</h2>
+      <p>Continue to GitHub to register <strong>${escapeHtml(appName)}</strong>
+      with the review permissions and webhook for this Worker. GitHub shows the requested
+      permissions first — nothing is created until you confirm there.</p>
+      <form method="post" action="${escapeHtml(createUrl)}">
+        <input type="hidden" name="manifest" value="${escapeHtml(manifestJson)}">
+        <button type="submit" class="primary">Continue on GitHub</button>
+        <a class="cancel" href="/dashboard">Cancel</a>
+      </form>
+    </section>
+  </main>`,
+  );
+}
+
+/**
+ * Overwrite confirm gate (B1, spec § 确认页文案 — locked copy): single
+ * column, amber-700 warning, read-only summary, confirm checkbox, red-700
+ * destructive submit. PEM / webhook_secret NEVER appear here.
+ */
+export function manifestConfirmPage(
+  user: { login: string; name?: string },
+  app: { id: number; name: string },
+): string {
+  return page(
+    "Confirm secret overwrite",
+    `${shellHeader(user)}
+  <main>
+    <section class="enabled">
+      <h2>Store GitHub App credentials</h2>
+      <div class="banner warn" role="alert">This will overwrite the existing APP_ID, PRIVATE_KEY, and WEBHOOK_SECRET secrets on this Worker. Incoming webhooks will be verified with the new WEBHOOK_SECRET.</div>
+      <p>GitHub App <strong>${escapeHtml(app.name)}</strong> (id <span class="id">${app.id}</span>) is ready.
+      Review the warning above before storing its credentials on this Worker.</p>
+      <form method="post" action="/dashboard/manifest/commit">
+        <label class="checkbox"><input type="checkbox" name="confirm" value="overwrite"> I understand that APP_ID, PRIVATE_KEY, and WEBHOOK_SECRET on this Worker will be overwritten.</label>
+        <button type="submit" class="danger">Overwrite secrets</button>
+        <a class="cancel" href="/dashboard">Cancel</a>
+      </form>
+    </section>
+  </main>`,
+  );
+}
+
+/**
+ * Manifest success surface (B1 Task 2, spec § 确认页文案 — locked copy):
+ * gray-1000 + copy-16, tabular-nums App id, NO success green (spec §
+ * DESIGN.md 意图). PEM / webhook_secret NEVER appear here.
+ */
+export function manifestSuccessPage(
+  user: { login: string; name?: string },
+  app: { id: number },
+): string {
+  return page(
+    "GitHub App credentials stored",
+    `${shellHeader(user)}
+  <main>
+    <section class="enabled">
+      <h2>GitHub App setup complete</h2>
+      <p>GitHub App <span class="id">${app.id}</span> credentials stored.</p>
+      <p class="status">Credentials take effect as the new Worker version rolls out — deployed automatically, no manual redeploy step.</p>
+      <p><a href="/dashboard">Back to /dashboard</a></p>
+    </section>
+  </main>`,
+  );
+}
+
+/** Manifest failure surface: red-700 banner + what-to-do-next, never secrets. */
+export function manifestErrorPage(message: string, resumable = false): string {
+  // Resumable failures (retryable commit outcomes: 400/500/502) keep the
+  // hold cookie, so the what-to-do-next link goes back to the confirm gate,
+  // not a shell with no confirm form.
+  const next = resumable
+    ? `Your GitHub App is still held for retry — return to the <a href="/dashboard/manifest/confirm">confirmation page</a> to resubmit.`
+    : `Return to <a href="/dashboard">/dashboard</a> to try again.`;
+  return page(
+    "GitHub App setup",
+    `<main>
+    <div class="banner" role="alert">
+      <strong>GitHub App setup failed.</strong> ${escapeHtml(message)}
+      No Worker secrets were changed. ${next}
     </div>
   </main>`,
   );

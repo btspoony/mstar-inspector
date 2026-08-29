@@ -10,22 +10,23 @@
 
 import { describe, expect, test } from "bun:test";
 
-import { isReviewLevel, REVIEW_SEATS } from "../../src/review/runtime";
+import { isReviewLevel, REVIEW_LEVELS, REVIEW_SEATS } from "../../src/review/runtime";
 import { mergeSeatOutputs, partitionSeats, parseTarget } from "../../src/review/runtime-omp";
 
 const numstat = (added: number | "-", deleted: number | "-", path: string): string =>
   `${added}\t${deleted}\t${path}`;
 
 describe("REVIEW_SEATS (harness tier table)", () => {
-  test("quick = 1 seat, default = 2 seats, deep not delivered", () => {
+  test("quick = 1 seat, default = 2 seats, deep tier exists but has no seats entry", () => {
+    expect(REVIEW_LEVELS).toEqual(["quick", "default", "deep"]);
     expect(REVIEW_SEATS).toEqual({ quick: 1, default: 2 });
     expect(Object.keys(REVIEW_SEATS).sort()).toEqual(["default", "quick"]);
   });
 
-  test("isReviewLevel accepts delivered tiers and rejects the rest", () => {
+  test("isReviewLevel accepts every tier incl. deep and rejects the rest", () => {
     expect(isReviewLevel("quick")).toBe(true);
     expect(isReviewLevel("default")).toBe(true);
-    expect(isReviewLevel("deep")).toBe(false);
+    expect(isReviewLevel("deep")).toBe(true);
     expect(isReviewLevel(2)).toBe(false);
     expect(isReviewLevel(undefined)).toBe(false);
     // qc3 F-302: Object.prototype keys must NOT pass (`in` would accept them).

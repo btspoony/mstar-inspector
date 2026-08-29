@@ -20,12 +20,14 @@
       }
     ],
     // 06: consumer + DLQ. max_batch_size 1 — one review per batch (wall-clock
-    // budget for the ~2–4 min review); failures retry up to max_retries then
-    // land in review-dlq. Requires `wrangler queues create review-dlq` before
+    // budget per REVIEW_LEVEL: 10 min runner quick/default, 14 min deep
+    // in-flight — deep is pinned under the 15 min CF Queue consumer wall-clock
+    // cap, src/pipeline/consumer.ts runnerTimeoutMs); failures retry
+    // up to max_retries then land in review-dlq. Requires `wrangler queues create review-dlq` before
     // deploy (plan Task 4). The in-flight guard (bugbot PR-3 BB-3) never uses
     // these retries: guard-held jobs are scheduled via per-message
-    // `message.retry({ delaySeconds })` (60/120/240s, see
-    // src/pipeline/consumer.ts GUARD_RETRY_DELAYS_SECONDS) and finally acked —
+    // `message.retry({ delaySeconds })` (60/120/240s quick/default, 180/360/720s deep — see
+    // src/pipeline/consumer.ts guardRetryDelaysSeconds) and finally acked —
     // only REAL processing failures hit max_retries → DLQ.
     "consumers": [
       {

@@ -8,7 +8,7 @@
  * filesystem-dependent execution order — on Linux CI (bun 1.4.0) this stub
  * leaked into runtime-omp.test.ts and shadowed the module under test there.
  * Contract under test:
- *   - `--level <quick|default> --input <json-file>` → exit 0 and stdout is
+ *   - `--level <quick|default|deep> --input <json-file>` → exit 0 and stdout is
  *     ONLY the mstar.review/v1 envelope JSON (no envelope wrapper, no logs);
  *   - usage errors (missing flags, unknown level) → exit 2, stdout empty;
  *   - unreadable/malformed input file → exit 1, stdout empty;
@@ -124,7 +124,6 @@ describe("runner entry (src/review/runner.ts)", () => {
       ["--input", inputPath],
       ["--level", "quick", "--input"],
       ["--level", "quick", "--input", inputPath, "--extra"],
-      ["--level", "deep", "--input", inputPath],
       ["--level", "9000", "--input", inputPath],
     ]) {
       const { code, stdout } = await runCli(argv);
@@ -132,6 +131,26 @@ describe("runner entry (src/review/runner.ts)", () => {
       expect(stdout).toBe("");
     }
     expect(runInputs).toHaveLength(0);
+  });
+
+  test("--level deep parses and reaches the runtime — forwarded into runReview (plan 09 T3)", async () => {
+    fakeEnvelope = ENVELOPE;
+    const inputPath = writeInput({ worktreePath: "/workspace/clone" });
+    const { code, stdout, stderr } = await runCli(["--level", "deep", "--input", inputPath]);
+
+    expect(code).toBe(0);
+    expect(stderr).toBe("");
+    expect(JSON.parse(stdout)).toEqual(ENVELOPE);
+    expect(runInputs[0]).toMatchObject({ level: "deep", worktreePath: "/workspace/clone" });
+  });
+
+  test("unknown level → exit 2; message lists every tier from REVIEW_LEVELS", async () => {
+    const inputPath = writeInput({});
+    const { code, stdout, stderr } = await runCli(["--level", "9000", "--input", inputPath]);
+
+    expect(code).toBe(2);
+    expect(stdout).toBe("");
+    expect(stderr).toContain("quick, default, deep");
   });
 
   test("unreadable input file → exit 1, stdout empty, stderr diagnostic", async () => {

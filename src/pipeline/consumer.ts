@@ -6,8 +6,9 @@
  * extraheader env) → `git rev-parse HEAD` for the AUTHORITATIVE sha →
  * dedup by that sha (hit → ack) → diff → numstat (the seat-partition
  * universe) → write the runner `--input` JSON (reconFacts) → exec the
- * in-image runner `--level <quick|default>` (env-injected
- * GH_TOKEN/ARK_API_KEY/PI_CODING_AGENT_DIR/HARNESS_PLUGIN_ROOT) → parse
+ * in-image runner `--level <quick|default|deep>` (exec env =
+ * ARK_API_KEY/PI_CODING_AGENT_DIR/HARNESS_PLUGIN_ROOT + OMP_REVIEW_MODEL and
+ * configured provider keys — GH_TOKEN rides ONLY the git/gh step envs) → parse
  * the mstar.review/v1 envelope → post the overall review comment FIRST →
  * store.put (idempotent — the UNIQUE first-written row wins) → KV
  * completion state → finally destroy. Any step throwing → structured log
@@ -41,7 +42,7 @@ import type { D1Database, KVNamespace, Message, MessageBatch } from "@cloudflare
 import type { ReviewJobPayload } from "../contracts/review-job";
 import { idemKey, IDEMPOTENCY_SECONDS, type IdempotencyKey } from "../contracts/idem";
 import { parseReviewOutput, capFindings, clampFindingSizes } from "../review/schema";
-import { isReviewLevel, REVIEW_SEATS, type ReviewLevel } from "../review/runtime";
+import { isReviewLevel, REVIEW_LEVELS, type ReviewLevel } from "../review/runtime";
 import { redactReviewOutput } from "./redact";
 import { createArtifactStore, type D1ArtifactStore } from "../store/artifact-store";
 import { getSandbox, type ReviewSandbox } from "./sandbox";
@@ -65,11 +66,12 @@ export type PipelineEnv = {
    */
   OMP_REVIEW_MODEL?: string;
   /**
-   * Review tier for the in-image runner (plan 07 AC-S7-level — quick and
-   * default configurable): "quick" (1 seat) or "default" (2 seats, the
-   * harness no-flag landing tier). Unset/empty → "default". Any other
-   * value (incl. "deep", not delivered this iteration) fails the review
-   * fail-loud — the port never silently downgrades.
+   * Review tier for the in-image runner (plan 09 T1): "quick" (1 seat),
+   * "default" (2 seats, the harness no-flag landing tier), or "deep" (the
+   * three-stage parent-session path). Unset/empty → "default". Any other
+   * value fails the review fail-loud — the port never silently downgrades;
+   * the valid-value list lives in REVIEW_LEVELS (the SSOT the error message
+   * quotes), so this doc cannot drift when the universe widens again.
    */
   REVIEW_LEVEL?: string;
   /**
@@ -112,10 +114,36 @@ const OMP_AGENT_DIR = "/opt/omp-agent";
 // eating a container (plan QC 06 fix round 1 / qc3 F-001).
 /** gh/git steps (clone, rev-parse, diff, numstat, runner-input write) — measured ~2.6s total, 2min each is generous. */
 const EXEC_TIMEOUT_GIT_MS = 120_000;
-/** In-image runner (real model call, measured ~52s) — 10min ceiling. */
-const EXEC_TIMEOUT_RUNNER_MS = 600_000;
+/**
+ * In-image runner budget per review level (ms). One Worker deployment = one
+ * REVIEW_LEVEL = one timeout table (spec d5-budget § Trigger): quick/default
+ * keep the frozen 10min ceiling (measured ~52s on a real model call); deep
+ * gets 14min: Cloudflare Queue consumers cap at 15min wall-clock, so the
+ * grill-me 30min budget could never finish in-consumer (force-kill skips
+ * finally, retries DLQ — 10-review-d5-budget qc2/qc3 Critical); 14min still
+ * covers the three-phase parent-session run without false-timeout into the
+ * DLQ. Record<ReviewLevel, …> makes a future level widen fail at compile
+ * time, never silently fall back.
+ */
+const RUNNER_TIMEOUT_MS: Record<ReviewLevel, number> = {
+  quick: 600_000,
+  default: 600_000,
+  deep: 840_000,
+};
 
-/** Structured log fields: seven event fields + sandbox id + idempotency key. */
+/**
+ * Runner exec timeout for the job's review level (spec d5-budget L4 — the
+ * helper trio runnerTimeoutMs / reviewGuardTtlSeconds /
+ * guardRetryDelaysSeconds is the naming SSOT; no bare re-exported constants).
+ */
+export function runnerTimeoutMs(level: ReviewLevel): number {
+  return RUNNER_TIMEOUT_MS[level];
+}
+
+/** Structured log fields: seven event fields + sandbox id + idempotency key
+ * + the d5-budget visibility quartet (level / runner_timeout_ms /
+ * elapsed_ms / orchestration — spec d5-budget L5: they ride THIS channel;
+ * no new APM, no webhook sink). */
 export type ConsumerLogFields = {
   event: "pull_request" | "review_command";
   action: string;
@@ -126,6 +154,14 @@ export type ConsumerLogFields = {
   head_sha: string | null;
   sandbox_id?: string;
   idempotency_key?: string;
+  /** Review tier resolved from REVIEW_LEVEL. */
+  level?: ReviewLevel;
+  /** Runner wall-clock budget for `level` (ms) — runnerTimeoutMs(level). */
+  runner_timeout_ms?: number;
+  /** Runner exec elapsed wall-clock (ms) — set on runner-attempt log lines. */
+  elapsed_ms?: number;
+  /** Runner orchestration: deep = parent session; quick/default = Bun fan-out. */
+  orchestration?: "bun-fanout" | "parent";
 };
 
 export type ConsumerLog = {
@@ -149,16 +185,17 @@ export const defaultConsumerLog: ConsumerLog = {
  * Guard TTL (seconds): must exceed the max review wall-clock — ALL FIVE
  * git-timed steps (clone / rev-parse / diff / numstat / runner-input write,
  * 120s each — numstat + the input write were added by plan 07 without
- * recomputing this, qc3 F-301) plus the runner step (600s) plus slack for
+ * recomputing this, qc3 F-301) plus the LEVEL's runner step
+ * (runnerTimeoutMs(level) — 600s quick/default, 840s deep) plus slack for
  * the untimed steps (token mint, sandbox create, comment post, KV/D1
  * puts) — so the guard can never expire mid-review and unblock a
  * concurrent duplicate. KV expirationTtl is in seconds. Pinned exactly by
- * consumer.test.ts ("REVIEW_GUARD_TTL_SECONDS covers the full step-budget
- * arithmetic") so a future step addition re-breaks loudly.
+ * consumer.test.ts ("reviewGuardTtlSeconds covers the full step-budget
+ * arithmetic per level") so a future step addition re-breaks loudly.
  */
-export const REVIEW_GUARD_TTL_SECONDS = Math.ceil(
-  (EXEC_TIMEOUT_RUNNER_MS + 5 * EXEC_TIMEOUT_GIT_MS + 120_000) / 1000,
-);
+export function reviewGuardTtlSeconds(level: ReviewLevel): number {
+  return Math.ceil((runnerTimeoutMs(level) + 5 * EXEC_TIMEOUT_GIT_MS + 120_000) / 1000);
+}
 
 /**
  * In-flight guard key: `inflight:{installation_id}:{owner}/{repo}:{pr_number}`.
@@ -192,12 +229,13 @@ export function reviewGuardKey(key: {
 async function acquireReviewGuard(
   kv: KVNamespace,
   key: string,
+  level: ReviewLevel,
   fields: ConsumerLogFields,
   log: ConsumerLog,
 ): Promise<boolean> {
   try {
     if ((await kv.get(key)) !== null) return false;
-    await kv.put(key, "inflight", { expirationTtl: REVIEW_GUARD_TTL_SECONDS });
+    await kv.put(key, "inflight", { expirationTtl: reviewGuardTtlSeconds(level) });
     return true;
   } catch (err) {
     const detail = err instanceof Error ? err.message : String(err);
@@ -210,6 +248,7 @@ async function acquireReviewGuard(
 async function releaseReviewGuard(
   kv: KVNamespace,
   key: string,
+  level: ReviewLevel,
   fields: ConsumerLogFields,
   log: ConsumerLog,
 ): Promise<void> {
@@ -217,19 +256,28 @@ async function releaseReviewGuard(
     await kv.delete(key);
   } catch (err) {
     const detail = err instanceof Error ? err.message : String(err);
-    log.warn(fields, `in-flight guard release failed — guard expires by TTL (${REVIEW_GUARD_TTL_SECONDS}s): ${detail}`);
+    log.warn(fields, `in-flight guard release failed — guard expires by TTL (${reviewGuardTtlSeconds(level)}s): ${detail}`);
   }
 }
 
 /**
  * Guard-held backoff schedule (seconds), indexed by message.attempts (1-based
- * — the first delivery is attempt 1). 60s → 120s → 240s, all below
- * REVIEW_GUARD_TTL_SECONDS (the constant above, ~22min) so the held guard
+ * — the first delivery is attempt 1). quick/default: 60s → 120s → 240s; deep: 180s → 360s → 720s
+ * — every entry below the LEVEL's guard TTL (1320s / 1560s) so the held guard
  * can never expire mid-backoff into a duplicate race. Attempts past the
  * schedule's end have consumed the queue's max_retries and must be acked, not
  * retried (a further retry() would land the job on the DLQ).
  */
-export const GUARD_RETRY_DELAYS_SECONDS = [60, 120, 240] as const;
+const GUARD_RETRY_DELAYS_SECONDS: Record<ReviewLevel, readonly [number, number, number]> = {
+  quick: [60, 120, 240],
+  default: [60, 120, 240],
+  deep: [180, 360, 720],
+};
+
+/** Guard-held backoff schedule for the job's review level (spec d5-budget L4). */
+export function guardRetryDelaysSeconds(level: ReviewLevel): readonly number[] {
+  return GUARD_RETRY_DELAYS_SECONDS[level];
+}
 
 /**
  * Outcome of one message pass (bugbot BB-3). The in-flight guard is a
@@ -253,7 +301,12 @@ export type ProcessOutcome = { kind: "ok" } | { kind: "guard-held" };
  */
 function handleGuardHeld(message: Message<ReviewJobPayload>, deps: ProcessDeps): void {
   const fields = toBaseFields(message.body);
-  const delaySeconds = GUARD_RETRY_DELAYS_SECONDS[message.attempts - 1];
+  // REVIEW_LEVEL is a Worker-level setting (one deployment = one level), and
+  // processMessage already resolved it before touching the guard — re-resolving
+  // here cannot throw on the guard-held path.
+  const level = resolveReviewLevel(deps.env.REVIEW_LEVEL);
+  const delays = guardRetryDelaysSeconds(level);
+  const delaySeconds = delays[message.attempts - 1];
   if (delaySeconds !== undefined) {
     deps.log.info(
       fields,
@@ -263,7 +316,7 @@ function handleGuardHeld(message: Message<ReviewJobPayload>, deps: ProcessDeps):
   } else {
     deps.log.warn(
       fields,
-      `review still in flight after ${GUARD_RETRY_DELAYS_SECONDS.length} delayed retries (attempt ${message.attempts}) — acking, no DLQ (guard-held is not an error; the next event for the PR re-reviews)`,
+      `review still in flight after ${delays.length} delayed retries (attempt ${message.attempts}) — acking, no DLQ (guard-held is not an error; the next event for the PR re-reviews)`,
     );
     message.ack();
   }
@@ -294,14 +347,15 @@ function toBaseFields(payload: ReviewJobPayload): ConsumerLogFields {
  * Resolve the review tier from PipelineEnv.REVIEW_LEVEL (plan 07
  * AC-S7-level). Unset/empty → "default" (the harness no-flag landing tier).
  * Anything else throws — the port rejects unknown levels fail-loud and never
- * silently downgrades (spec § 档位; "deep" is a roadmap item, not a tier
- * this build delivers).
+ * silently downgrades (spec § 档位). "deep" is a legal tier (plan 09 T1);
+ * the message lists every tier from REVIEW_LEVELS so it cannot drift when
+ * the level universe widens again (architect lock L3).
  */
 export function resolveReviewLevel(value: string | undefined): ReviewLevel {
   if (value === undefined || value === "") return "default";
   if (isReviewLevel(value)) return value;
   throw new Error(
-    `invalid REVIEW_LEVEL ${JSON.stringify(value)} — expected one of: ${Object.keys(REVIEW_SEATS).join(", ")}`,
+    `invalid REVIEW_LEVEL ${JSON.stringify(value)} — expected one of: ${REVIEW_LEVELS.join(", ")}`,
   );
 }
 
@@ -427,20 +481,30 @@ async function processMessage(payload: ReviewJobPayload, deps: ProcessDeps): Pro
     pr_number: payload.pr_number,
   });
   let guardHeld = false;
+  // Set once REVIEW_LEVEL resolves inside the try (resolution must stay in
+  // the try so an invalid value gets the structured error log); the finally
+  // guard release needs the same level's TTL. guardHeld ⇒ level is set
+  // (resolution precedes acquisition).
+  let level: ReviewLevel | undefined;
+  // Runner wall-clock start (d5-budget AC-S10-logs): set just before the
+  // runner exec so the failure log can carry elapsed_ms. VISIBILITY ONLY —
+  // elapsed never aborts; the sandbox exec timeout is the only wall-clock
+  // failure (spec 不 abort).
+  let runnerStartedAt: number | undefined;
 
   try {
     // Review tier (AC-S7-level): resolved BEFORE any sandbox/KV step so a
     // misconfigured REVIEW_LEVEL fails loud (structured log + rethrow)
     // without touching the in-flight guard.
-    const level = resolveReviewLevel(deps.env.REVIEW_LEVEL);
+    level = resolveReviewLevel(deps.env.REVIEW_LEVEL);
     // 0. In-flight guard (WF-002 / bugbot BB-3): when another review is
     // already running for this PR, return the DISTINCT guard-held outcome —
     // NOT a throw. The consumer schedules a per-message delayed retry
-    // (60s/120s/240s), so the later attempt lands on the update path
+    // (per level: 60/120/240s quick/default, 180/360/720s deep), so the later attempt lands on the update path
     // (round=N+1) once the earlier attempt has posted its marker; after the
     // final delayed attempt the job is acked with a warning — guard-held is
     // not an error state and never goes to the DLQ.
-    if (!(await acquireReviewGuard(deps.env.IDEMPOTENCY_KV, guardKey, baseFields, deps.log))) {
+    if (!(await acquireReviewGuard(deps.env.IDEMPOTENCY_KV, guardKey, level, baseFields, deps.log))) {
       return { kind: "guard-held" };
     }
     guardHeld = true;
@@ -500,6 +564,13 @@ async function processMessage(payload: ReviewJobPayload, deps: ProcessDeps): Pro
     };
     fields = {
       ...baseFields,
+      // d5-budget L5: the level's clock rides every structured log from here
+      // on (same ConsumerLogFields channel — no new sink).
+      level,
+      runner_timeout_ms: runnerTimeoutMs(level),
+      // deep = parent session; quick/default = Bun seat fan-out. Never a
+      // fabricated seat_count for deep (spec § Queue visibility).
+      orchestration: level === "deep" ? "parent" : "bun-fanout",
       head_sha: headSha,
       idempotency_key: idemKey(key),
       sandbox_id: sandboxId,
@@ -565,14 +636,24 @@ async function processMessage(payload: ReviewJobPayload, deps: ProcessDeps): Pro
     // (buildRunnerEnv — compass D, BB-1, BB-2; secrets never baked into the
     // image, never in logs). The runtime runner has NO summary-degrade path:
     // exit 0 ⇒ stdout is the engine-validated mstar.review/v1 envelope.
+    runnerStartedAt = Date.now();
     const run = await sandbox.exec(cmds.runner, {
       cwd: CLONE_DIR,
       env: buildRunnerEnv(deps.env),
-      timeout: EXEC_TIMEOUT_RUNNER_MS,
+      timeout: runnerTimeoutMs(level),
     });
+    const runnerElapsedMs = Date.now() - runnerStartedAt;
     if (run.exitCode !== 0) {
       throw new Error(`runner failed: exit ${run.exitCode}, stdout ${run.stdout.length}B`);
     }
+    // d5-budget AC-S10-logs: one runner attempt → at least one budget line
+    // (level + runner_timeout_ms + elapsed_ms + orchestration). elapsed_ms is
+    // VISIBILITY ONLY — it never throws; the sandbox exec timeout above is
+    // the only wall-clock failure (spec 不 abort).
+    deps.log.info(
+      { ...fields, elapsed_ms: runnerElapsedMs },
+      `runner finished in ${runnerElapsedMs}ms (budget ${runnerTimeoutMs(level)}ms)`,
+    );
 
     // 9. Parse + validate the envelope (engine gate inside parseReviewOutput;
     // mapping spec §4.2): failure → no review, no insert.
@@ -645,7 +726,22 @@ async function processMessage(payload: ReviewJobPayload, deps: ProcessDeps): Pro
     // rethrow so the worker retries and eventually DLQs.
     const detail = err instanceof Error ? err.message : String(err);
     deps.log.error(
-      fields ?? { ...baseFields, sandbox_id: sandboxId },
+      {
+        ...(fields ?? { ...baseFields, sandbox_id: sandboxId }),
+        // d5-budget AC-S10-logs: the failure line carries the level's budget
+        // once known (post-step-3 `fields` already has it; this spread covers
+        // the pre-checkout fallback) and the runner's elapsed wall-clock once
+        // it started. elapsed never aborts — the sandbox exec timeout is the
+        // only wall-clock failure (spec 不 abort).
+        ...(level === undefined
+          ? {}
+          : {
+              level,
+              runner_timeout_ms: runnerTimeoutMs(level),
+              orchestration: level === "deep" ? "parent" : "bun-fanout",
+            }),
+        ...(runnerStartedAt === undefined ? {} : { elapsed_ms: Date.now() - runnerStartedAt }),
+      },
       `review failed: ${detail}`,
     );
     throw err;
@@ -653,8 +749,8 @@ async function processMessage(payload: ReviewJobPayload, deps: ProcessDeps): Pro
     // Release the in-flight guard once the review settled (posted, KV done,
     // put attempted) OR failed — either way the next attempt may proceed.
     // releaseReviewGuard never throws (KV failure → warn; TTL expires it).
-    if (guardHeld) {
-      await releaseReviewGuard(deps.env.IDEMPOTENCY_KV, guardKey, fields ?? baseFields, deps.log);
+    if (guardHeld && level !== undefined) {
+      await releaseReviewGuard(deps.env.IDEMPOTENCY_KV, guardKey, level, fields ?? baseFields, deps.log);
     }
     if (sandbox !== null) {
       try {

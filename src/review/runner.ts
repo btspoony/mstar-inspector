@@ -4,10 +4,10 @@
  * Runs INSIDE the sandbox image and is invoked by the Worker consumer via
  * `exec` (the consumer wiring to the new runtime lands in plan 07 Task 5):
  *
- *   bun run /opt/runner/src/review/runner.ts --level <quick|default> --input <json-file>
+ *   bun run /opt/runner/src/review/runner.ts --level <quick|default|deep> --input <json-file>
  *
  * Contract:
- *   - `--level` is the review tier (quick | default); anything else is a
+ *   - `--level` is the review tier (quick | default | deep); anything else is a
  *     usage error (the runtime itself rejects unknown levels as well);
  *   - `--input` points at a JSON file `{ worktreePath?: string,
  *     reconFacts?: string[] }`; `worktreePath` defaults to the process cwd
@@ -26,11 +26,11 @@
  *   - ARK_API_KEY                                  (injected per exec by the consumer)
  */
 import { readFileSync } from "node:fs";
-import { isReviewLevel, REVIEW_SEATS, type AgentRuntime, type AgentRuntimeRunInput } from "./runtime";
+import { isReviewLevel, REVIEW_LEVELS, type AgentRuntime, type AgentRuntimeRunInput } from "./runtime";
 import { ompAgentRuntime, parseModelSelectors } from "./runtime-omp";
 
 const USAGE =
-  "usage: bun run runner.ts --level <quick|default> --input <json-file> " +
+  `usage: bun run runner.ts --level <${REVIEW_LEVELS.join(", ")}> --input <json-file> ` +
   "(input JSON: { worktreePath?: string, reconFacts?: string[] })";
 
 /** Validated shape of the --input JSON file. */
@@ -100,7 +100,7 @@ export async function main(argv: string[], runtime: AgentRuntime = ompAgentRunti
   // Level validity is knowable before any I/O — treat it as a usage error.
   if (!isReviewLevel(level)) {
     console.error(
-      `review: unknown level ${JSON.stringify(level)} (expected one of: ${Object.keys(REVIEW_SEATS).join(", ")})`,
+      `review: unknown level ${JSON.stringify(level)} (expected one of: ${REVIEW_LEVELS.join(", ")})`,
     );
     return 2;
   }
