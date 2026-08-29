@@ -183,7 +183,8 @@ label.field input, label.field select {
   color: var(--gray-1000);
 }
 /* Stacked single-column pages (App settings = two sections): the shell grid's
-   between-sections rhythm applies outside .sections too. */
+   between-sections rhythm applies outside .sections too.
+   Page-local today — re-check this selector when adding pages with stacked sections. */
 main > section + section { margin-top: 32px; } /* spacing-8 */
 </style>`;
 
@@ -245,9 +246,25 @@ function githubAppSection(): string {
 }
 
 /**
- * Logged-in shell: header + sections (B1: GitHub App live; BYOK/Review
- * placeholders). `isAdmin` renders the Members entry in the header — plain
- * Level 1 link (existing `header a` token), no new CSS (qc1/qc2 F-001).
+ * B2 delivered: Model keys are per-App, so this shell card is an entry point,
+ * not a placeholder — the copy states keys/models are configured per App and
+ * links to the Apps list, where members reach Settings on the Apps they
+ * manage. Existing Level 1 tokens only: enabled-card fill + a plain body
+ * link (same as the manifest success page) — no new CSS, no button.
+ */
+function modelKeysSection(): string {
+  return `<section class="enabled">
+    <h2>Model keys</h2>
+    <p>Provider keys and model chains are configured per App — each App's Settings manages its own keys, with the deployment's global keys as the fallback when an App has none.</p>
+    <p><a href="/dashboard/apps">Open the Apps list</a> to reach Settings on an App you manage.</p>
+  </section>`;
+}
+
+/**
+ * Logged-in shell: header + sections (B1: GitHub App live; B2: per-App
+ * Model keys entry point; Review stays a placeholder). `isAdmin` renders the
+ * Members entry in the header — plain Level 1 link (existing `header a`
+ * token), no new CSS (qc1/qc2 F-001).
  */
 export function dashboardPage(user: { login: string; name?: string }, isAdmin = false): string {
   return page(
@@ -256,12 +273,7 @@ export function dashboardPage(user: { login: string; name?: string }, isAdmin = 
   <main>
     <div class="sections">
       ${githubAppSection()}
-      ${placeholderSection(
-        "Model keys",
-        "Store a model provider key without local wrangler secret put.",
-        "Not in this iteration (B2).",
-        "Add model key",
-      )}
+      ${modelKeysSection()}
       ${placeholderSection(
         "Review",
         "Turn cloud reviews on or off (REVIEW_ENABLED).",
@@ -561,7 +573,10 @@ export function appsPage(
  * 意图): single column; masked key list — provider + last-4 ONLY (key_enc and
  * any full key material never render); add-key = provider select bound to the
  * PROVIDER_IDS allowlist (the UI can never drift from the route's 400
- * validation) + password input, blue-700 primary; per-key Remove = red-700
+ * validation), led by an empty disabled placeholder — a forgetful submit
+ * 400s on the empty provider — + password input (`autocomplete="new-password"`:
+ * pasted API keys are new secrets, never a saved login), blue-700 primary;
+ * per-key Remove = red-700
  * destructive; model chain editor with the empty = deployment-default
  * fallback spelled out (a whitespace-only save clears with a success notice —
  * the copy says so). The hint copy is replace-aware ("replaces its stored
@@ -599,7 +614,12 @@ export function appSettingsPage(
       : `<ul class="keys">
       ${rows}
       </ul>`;
-  const options = PROVIDER_IDS.map((id) => `<option value="${escapeHtml(id)}">${escapeHtml(id)}</option>`).join("");
+  // Empty disabled first option = the preselected placeholder: a forgetful
+  // submit sends provider="" and hits the route's 400 re-render instead of
+  // silently picking the first allowlist id.
+  const options = ['<option value="" disabled selected>Select a provider…</option>']
+    .concat(PROVIDER_IDS.map((id) => `<option value="${escapeHtml(id)}">${escapeHtml(id)}</option>`))
+    .join("");
   return page(
     "App settings",
     `${shellHeader(user)}
@@ -615,7 +635,7 @@ export function appSettingsPage(
           <select name="provider">${options}</select>
         </label>
         <label class="field">API key
-          <input type="password" name="key" placeholder="Paste the provider API key">
+          <input type="password" name="key" autocomplete="new-password" placeholder="Paste the provider API key">
         </label>
         <button type="submit" class="primary">Add key</button>
       </form>

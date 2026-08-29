@@ -594,6 +594,22 @@ describe("POST /dashboard/apps/:slug/settings — add-key (op=add-key)", () => {
     expect(rawCount(db, "app_provider_keys")).toBe(0);
   });
 
+  test("empty provider (untouched placeholder) → 400 re-render, zero rows written", async () => {
+    const { db } = await seededWorld();
+    const cookie = `${SESSION_COOKIE}=${await sessionCookie("mallory")}`;
+    const res = await postForm(SETTINGS, cookie, makeEnv(db), {
+      op: "add-key",
+      provider: "",
+      key: PLAIN_ANTHROPIC_KEY,
+    });
+    expect(res.status).toBe(400);
+    const body = await res.text();
+    expect(body).toContain("Pick a provider for the key.");
+    // 400 is the full page re-render — the user can retry inline.
+    expect(body).toContain('name="op" value="add-key"');
+    expect(rawCount(db, "app_provider_keys")).toBe(0);
+  });
+
   test("empty / whitespace-only key → 400, zero rows written", async () => {
     const { db } = await seededWorld();
     const cookie = `${SESSION_COOKIE}=${await sessionCookie("mallory")}`;
@@ -778,7 +794,13 @@ describe("settings view DESIGN mapping (plan 14 T2)", () => {
 
   test("add-key form: password input; provider select offers EXACTLY the 18-id allowlist", async () => {
     const body = await getSettingsPage("mallory");
-    expect(body).toContain('<input type="password" name="key"');
+    // autocomplete=new-password: the pasted provider API key is a new secret
+    // per submit — never a saved dashboard login for password managers.
+    expect(body).toContain('<input type="password" name="key" autocomplete="new-password"');
+    // The select leads with an empty disabled placeholder (preselected), so a
+    // forgetful submit sends provider="" — the route's 400 path — instead of
+    // silently picking the first allowlist id.
+    expect(body).toContain('<option value="" disabled selected>Select a provider…</option>');
     // The select is the only place a provider id can enter — bound to the
     // same allowlist the POST route 400s against.
     const options = [...body.matchAll(/<option value="([^"]+)">/g)].map((m) => m[1]);

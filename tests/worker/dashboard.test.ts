@@ -374,8 +374,12 @@ describe("/dashboard routes", () => {
     // route, not a disabled placeholder button.
     expect(body).toContain('action="/dashboard/manifest/start"');
     expect(body).toContain('<button type="submit" class="primary">Create GitHub App</button>');
-    // BYOK / Review stay inert placeholders (AC-S11-placeholders).
-    expect(body).toContain("Not in this iteration (B2).");
+    // B2 delivered: the Model keys card is a live per-App entry point — the
+    // copy states keys/models are configured per App and it links to the
+    // Apps list, where members reach Settings on manageable Apps.
+    expect(body).toContain("configured per App");
+    expect(body).toContain('<a href="/dashboard/apps">Open the Apps list</a>');
+    // The Review card (B3) stays an inert placeholder (AC-S11-placeholders).
     expect(body).toContain("Not in this iteration (B3).");
     expect(body).toContain('aria-disabled="true"');
     expect(body).not.toContain("Not in B0");
