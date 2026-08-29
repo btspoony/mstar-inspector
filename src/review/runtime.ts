@@ -32,6 +32,17 @@ export type AgentRuntimeRunInput = {
   reconFacts: readonly string[];
   /** 模型选择链；SSOT = env `OMP_REVIEW_MODEL`（逗号分隔，容器注入）。 */
   modelSelectors: readonly string[];
+  /**
+   * Per-seat model overrides (plan 17 B6, spec Architect lock L3): agent
+   * name → selector chain (B2 `parseModelChain` grammar, `:thinking` suffix
+   * verbatim). OPTIONAL — absent = the legacy runner input, resolved
+   * byte-identically to the pre-plan-17 behavior. Shape is validated by the
+   * runner guard (`parseRunnerInput`); the role vocabulary and selector
+   * grammar live dashboard-side (`MODEL_ROLE_IDS` + its parse mirror), and
+   * unknown agent names pass through inertly (the SDK consumes only names it
+   * actually dispatches).
+   */
+  modelOverrides?: Record<string, string>;
 };
 
 export interface AgentRuntime {

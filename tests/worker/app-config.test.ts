@@ -41,7 +41,7 @@ import {
 } from "../../src/dashboard/app-config-store";
 import { createSecretbox } from "../../src/dashboard/secretbox";
 import { PROVIDERS } from "../../src/pipeline/providers";
-import { parseModelSelectors } from "../../src/review/runtime-omp";
+import { DEEP_SEAT_ROLES, parseModelSelectors } from "../../src/review/runtime-omp";
 import { SESSION_COOKIE, createSessionValue } from "../../src/dashboard/session";
 import { createUser, type DashboardD1 } from "../../src/dashboard/users";
 import type { Env } from "../../src/worker/env";
@@ -700,15 +700,11 @@ describe("duplication locks", () => {
     const seatAgent = readFileSync(join(import.meta.dir, "../../src/review/seat-agent.md"), "utf8");
     const quickSeat = /^name:\s*(\S+)\s*$/m.exec(seatAgent)?.[1];
     expect(quickSeat).toBe("mstar-review-seat");
-    // Deep seats: runtime-omp's DEEP_SEAT_ROLES declaration is module-private
-    // (Q2 keeps the dashboard from importing review code, and tests must not
-    // widen that surface either) — extract the literal from source so a
-    // rename/addition on the review side fails this lock loudly.
-    const runtimeSource = readFileSync(join(import.meta.dir, "../../src/review/runtime-omp.ts"), "utf8");
-    const deepSeats = /const DEEP_SEAT_ROLES = \[([^\]]*)\] as const;/
-      .exec(runtimeSource)?.[1]
-      ?.match(/"([^"]+)"/g)
-      ?.map((quoted) => quoted.slice(1, -1));
+    // Deep seats: DEEP_SEAT_ROLES is exported from runtime-omp since plan 17
+    // Task 2 (the export exists for this parity lock; the dashboard's own
+    // import boundary — Q2 — stays: src/dashboard still has zero review
+    // imports, the mirror constant remains its SSOT).
+    const deepSeats: readonly string[] = DEEP_SEAT_ROLES;
     expect(deepSeats).toEqual(["code-reviewer", "fullstack-dev", "frontend-dev"]);
     // The mirror is exactly the quick seat followed by the deep seats.
     expect([...MODEL_ROLE_IDS]).toEqual([quickSeat!, ...(deepSeats ?? [])]);
