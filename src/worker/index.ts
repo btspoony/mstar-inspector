@@ -9,7 +9,9 @@
  * - POST /webhook/:appSlug → per-App webhook face (plan 13 Task 2): slug →
  *   github_apps row (active, not deleted) → that App's decrypted webhook
  *   secret verifies the signature → classify → enqueue with
- *   `{ kind: "app", appId }` (spec § Multi-App 契约, locks L3/L4)
+ *   `{ kind: "app", appId }` (spec § Multi-App 契约, locks L3/L4); the
+ *   classified payload's installation_id touches `app_installations`
+ *   (fire-and-forget relative to the enqueue, plan 13 Task 4)
  * - /dashboard/* → GitHub OAuth login + signed-cookie session shell (08 B0)
  */
 import { Hono } from "hono";
@@ -25,17 +27,7 @@ import { dashboardApp } from "../dashboard/index";
 
 const app = new Hono<{ Bindings: Env }>();
 
-/**
- * Fetch-face D1: the per-App webhook route (plan 13 Task 2) reads the
- * `github_apps` row for its slug. The DB binding IS on the deployed Worker
- * env for every face (wrangler.jsonc 05 — "binding DB enters the 06
- * PipelineEnv, not the fetch-face Env" predates this route); the fetch-face
- * `Env` type in env.ts stays untouched (plan 12 parallel work), so the face
- * is declared here as the queue face's PipelineEnv intersection.
- */
-type WebhookFaceEnv = Env & Pick<PipelineEnv, "DB">;
-
-/** Structured warn for the per-App route's pre-classification rejections. */
+/** Structured warn for the per-App route's rejection/bookkeeping paths. */
 function webhookWarn(reason: string, detail: string, msg: string): void {
   defaultLog.warn({ event: "unknown", reason, detail }, msg);
 }
@@ -88,8 +80,9 @@ app.post("/webhook", async (c) => {
  * Per-App webhook face (plan 13 Task 2, spec § Multi-App 契约). Shared
  * pre-order with the legacy route: body-size cap (413) → REVIEW_ENABLED
  * kill-switch (non-"true" → 2xx ignore, zero side effects; deployment-level
- * global switch, not per-App) → slug lookup → signature verify. The slug
- * locates the `github_apps` row (active, not deleted) whose DECRYPTED
+ * global switch, not per-App) → DB-unbound guard (500 fail-closed — the
+ * dashboard-dependency convention) → slug lookup → signature verify. The
+ * slug locates the `github_apps` row (active, not deleted) whose DECRYPTED
  * webhook secret parameterizes the same `classifyWebhook` classifier
  * (secret-parameterized only — the classifier never sees the App
  * identity); the route handler attaches `appRef { kind: "app", appId }`
@@ -97,9 +90,17 @@ app.post("/webhook", async (c) => {
  * Unknown slug / disabled / soft-deleted → 404, zero enqueue. Any webhook
  * secret decrypt failure (missing DASHBOARD_ENCRYPTION_KEY, tampered
  * envelope) → 500 fail-closed (lock L1); GitHub retries, nothing enqueues.
+ *
+ * Install bookkeeping (plan 13 Task 4): a classified job payload always
+ * carries `installation_id`, so the accepted path touches
+ * `app_installations` (seen_at upsert, lock L1 store). The touch runs AFTER
+ * the enqueue — fire-and-forget relative to it, so the review path never
+ * waits on bookkeeping — and a bookkeeping failure only logs a structured
+ * warn: it never blocks the enqueue nor fails the webhook (best-effort
+ * install health, B3 roadmap). The legacy face has no app row to attach and
+ * deliberately performs NO upsert.
  */
 app.post("/webhook/:appSlug", async (c) => {
-  const env = c.env as WebhookFaceEnv;
   // Body-size cap checked BEFORE buffering the body (B6) — same gate as the
   // legacy route.
   const contentLength = Number(c.req.header("content-length") ?? "0");
@@ -118,7 +119,7 @@ app.post("/webhook/:appSlug", async (c) => {
   // Kill-switch BEFORE the slug lookup (spec ordering; zero side effects —
   // no D1 read when reviews are off). The flag is still passed to
   // classifyWebhook below so both routes share the identical classifier.
-  const reviewEnabled = env.REVIEW_ENABLED === "true";
+  const reviewEnabled = c.env.REVIEW_ENABLED === "true";
   if (!reviewEnabled) {
     webhookWarn(
       "review_disabled",
@@ -128,11 +129,26 @@ app.post("/webhook/:appSlug", async (c) => {
     return c.text("ignored", 200);
   }
 
+  // DB-unbound guard (plan 13 T4 fold): unreachable on the deployed Worker
+  // (wrangler.jsonc binds DB globally) — the branch exists because the
+  // shared fetch-face Env keeps DB optional for the dashboard's unbound-D1
+  // premises. Fail-closed 500, zero enqueue.
+  const db = c.env.DB;
+  if (db === undefined) {
+    webhookWarn(
+      "db_binding_missing",
+      "env.DB is unbound",
+      "per-App webhook rejected with 500 — DB binding missing (fail-closed)",
+    );
+    return c.text("db binding missing", 500);
+  }
+  const appsStore = createAppsStore(db);
+
   // Slug lookup: exactly one active, non-deleted App may serve this route.
   // Unknown / disabled / soft-deleted are all 404 with zero side effects
   // (the log distinguishes them for the operator; the response does not).
   const slug = c.req.param("appSlug");
-  const row = await createAppsStore(env.DB).getAppBySlug(slug);
+  const row = await appsStore.getAppBySlug(slug);
   if (row === null) {
     webhookWarn("unknown_app_slug", `slug=${slug}`, "per-App webhook rejected with 404 — unknown app slug");
     return c.text("unknown app slug", 404);
@@ -151,7 +167,7 @@ app.post("/webhook/:appSlug", async (c) => {
   // verified against anything but the stored secret, and nothing enqueues.
   let appSecret: string;
   try {
-    appSecret = await createSecretbox(env.DASHBOARD_ENCRYPTION_KEY).decryptSecret(
+    appSecret = await createSecretbox(c.env.DASHBOARD_ENCRYPTION_KEY).decryptSecret(
       row.webhook_secret_enc,
       `github_apps.webhook_secret_enc:${row.id}`,
     );
@@ -180,6 +196,19 @@ app.post("/webhook/:appSlug", async (c) => {
     env: c.env,
     log: defaultLog,
   });
+  // Install bookkeeping (plan 13 Task 4): the classified job payload always
+  // carries installation_id, so touch `app_installations` AFTER the enqueue
+  // — fire-and-forget relative to it (the review path never waits on
+  // bookkeeping) and best-effort: a failure logs a structured warn and the
+  // webhook still returns 200 (never blocks or fails the enqueue). The
+  // bare touch passes no account_login — the store's COALESCE preserves the
+  // stored login.
+  try {
+    await appsStore.upsertInstallation({ appId: row.id, installationId: outcome.payload.installation_id });
+  } catch (err) {
+    const detail = err instanceof Error ? err.message : String(err);
+    webhookWarn("installation_upsert_failed", detail, "installation upsert failed — enqueue unaffected");
+  }
   return c.text("accepted", 200);
 });
 

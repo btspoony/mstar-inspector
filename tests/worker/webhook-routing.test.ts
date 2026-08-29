@@ -30,7 +30,6 @@ import { createSecretbox } from "../../src/dashboard/secretbox";
 import { createAppsStore } from "../../src/dashboard/apps-store";
 import { createTestD1 } from "../store/helpers";
 import type { ReviewJobPayload } from "../../src/contracts/review-job";
-import type { PipelineEnv } from "../../src/pipeline/consumer";
 
 const MIGRATIONS_DIR = join(import.meta.dir, "../../migrations");
 /** base64 of exactly 32 bytes (the secretbox master-key requirement). */
@@ -101,7 +100,10 @@ function makeKv() {
   };
 }
 
-type RouteEnv = Env & Pick<PipelineEnv, "DB">;
+// Plan 13 T4: `Env` itself declares `DB` (optional, fail-closed when
+// unbound) — the T2 local `Env & Pick<PipelineEnv, "DB">` intersection is
+// retired on both the route and here.
+type RouteEnv = Env;
 
 function makeEnv(db: ReturnType<typeof createTestD1>, overrides: Partial<RouteEnv> = {}): RouteEnv {
   const { kv } = makeKv();
@@ -345,6 +347,24 @@ describe("POST /webhook/:appSlug (per-App routing)", () => {
     expect(sent).toHaveLength(0);
   });
 
+  test("DB binding unbound → 500 fail-closed, zero enqueue (T4 Env fold)", async () => {
+    const db = createMigratedD1();
+    await seedApp(db, { slug: "app-x", secret: "secret-x" });
+    const { queue, sent } = makeQueue();
+    const env = makeEnv(db, { REVIEW_QUEUE: queue as never, DB: undefined });
+    const body = JSON.stringify(PR_PAYLOAD);
+
+    const res = await postWebhook(
+      "/webhook/app-x",
+      body,
+      { "x-hub-signature-256": await signatureFor("secret-x", body), "x-github-event": "pull_request" },
+      env,
+    );
+
+    expect(res.status).toBe(500);
+    expect(sent).toHaveLength(0);
+  });
+
   test("/review command via the per-App route enqueues the review_command payload with the appRef", async () => {
     const db = createMigratedD1();
     const appRow = await seedApp(db, { slug: "app-x", secret: "secret-x" });
@@ -400,6 +420,117 @@ describe("POST /webhook/:appSlug (per-App routing)", () => {
   });
 });
 
+describe("installations upsert wiring (plan 13 Task 4)", () => {
+  test("per-App webhook with installation_id → app_installations row INSERTED (seen_at set, bare login)", async () => {
+    const db = createMigratedD1();
+    const appRow = await seedApp(db, { slug: "app-x", secret: "secret-x" });
+    const { queue, sent } = makeQueue();
+    const env = makeEnv(db, { REVIEW_QUEUE: queue as never });
+    const body = JSON.stringify(PR_PAYLOAD);
+
+    const res = await postWebhook(
+      "/webhook/app-x",
+      body,
+      { "x-hub-signature-256": await signatureFor("secret-x", body), "x-github-event": "pull_request" },
+      env,
+    );
+
+    expect(res.status).toBe(200);
+    expect(sent).toHaveLength(1);
+    const rows = db.raw
+      .query("SELECT app_id, installation_id, account_login, seen_at FROM app_installations")
+      .all() as Array<{ app_id: string; installation_id: number; account_login: string | null; seen_at: string }>;
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.app_id).toBe(appRow.id);
+    expect(rows[0]!.installation_id).toBe(123);
+    expect(rows[0]!.account_login).toBeNull(); // the classified payload carries no login
+    expect(typeof rows[0]!.seen_at).toBe("string");
+  });
+
+  test("second delivery touches the SAME row — seen_at refreshed, stored login preserved (COALESCE bare touch)", async () => {
+    const db = createMigratedD1();
+    await seedApp(db, { slug: "app-x", secret: "secret-x" });
+    const { queue, sent } = makeQueue();
+    const env = makeEnv(db, { REVIEW_QUEUE: queue as never });
+
+    const body1 = JSON.stringify(PR_PAYLOAD);
+    await postWebhook(
+      "/webhook/app-x",
+      body1,
+      { "x-hub-signature-256": await signatureFor("secret-x", body1), "x-github-event": "pull_request" },
+      env,
+    );
+    // Backdate + stamp a login: the second delivery must UPDATE this row
+    // (seen_at refresh) without wiping the stored login (bare touch).
+    db.raw
+      .prepare("UPDATE app_installations SET seen_at = '2000-01-01 00:00:00', account_login = 'alice'")
+      .run();
+
+    // Different PR/sha → a different idempotency key, so delivery 2 enqueues
+    // (and therefore reaches the touch) instead of being KV-skipped.
+    const body2 = JSON.stringify({ ...PR_PAYLOAD, number: 43, pull_request: { number: 43, head: { sha: "def456" } } });
+    const res2 = await postWebhook(
+      "/webhook/app-x",
+      body2,
+      { "x-hub-signature-256": await signatureFor("secret-x", body2), "x-github-event": "pull_request" },
+      env,
+    );
+
+    expect(res2.status).toBe(200);
+    expect(sent).toHaveLength(2);
+    const rows = db.raw
+      .query("SELECT installation_id, account_login, seen_at FROM app_installations")
+      .all() as Array<{ installation_id: number; account_login: string | null; seen_at: string }>;
+    expect(rows).toHaveLength(1); // upsert — no duplicate row
+    expect(rows[0]!.installation_id).toBe(123);
+    expect(rows[0]!.account_login).toBe("alice"); // preserved by the COALESCE bare touch
+    expect(rows[0]!.seen_at).not.toBe("2000-01-01 00:00:00"); // refreshed by the touch
+  });
+
+  test("upsert failure → structured warn, enqueue still succeeds (fire-and-forget bookkeeping)", async () => {
+    const db = createMigratedD1();
+    await seedApp(db, { slug: "app-x", secret: "secret-x" });
+    // D1 double that fails ONLY the app_installations upsert statement —
+    // slug lookup / decrypt path stay healthy.
+    const brokenDb = {
+      raw: db.raw,
+      batch: db.batch.bind(db),
+      prepare(query: string) {
+        if (query.includes("INSERT INTO app_installations")) {
+          throw new Error("d1 unavailable (test injection)");
+        }
+        return db.prepare(query);
+      },
+    } as unknown as ReturnType<typeof createTestD1>;
+    const { queue, sent } = makeQueue();
+    const env = makeEnv(brokenDb, { REVIEW_QUEUE: queue as never });
+    const body = JSON.stringify(PR_PAYLOAD);
+
+    const warn = mock((_msg: unknown) => {});
+    const origWarn = console.warn;
+    console.warn = warn;
+    let res: Response;
+    try {
+      res = await postWebhook(
+        "/webhook/app-x",
+        body,
+        { "x-hub-signature-256": await signatureFor("secret-x", body), "x-github-event": "pull_request" },
+        env,
+      );
+    } finally {
+      console.warn = origWarn;
+    }
+
+    expect(res.status).toBe(200);
+    expect(await res.text()).toBe("accepted");
+    expect(sent).toHaveLength(1); // the review job was enqueued anyway
+    const logged = warn.mock.calls.map((call) => String(call[0])).join("\n");
+    expect(logged).toContain("installation_upsert_failed");
+    // The failed bookkeeping write left no row.
+    expect((db.raw.query("SELECT COUNT(*) AS n FROM app_installations").get() as { n: number }).n).toBe(0);
+  });
+});
+
 describe("POST /webhook (legacy face, lock L3 regression)", () => {
   test("still verifies with WEBHOOK_SECRET and attaches an EXPLICIT appRef {kind:'legacy'}", async () => {
     const db = createMigratedD1(); // unused by the legacy face — present for env shape parity
@@ -428,6 +559,26 @@ describe("POST /webhook (legacy face, lock L3 regression)", () => {
     });
     // Never an App identity on the legacy face.
     expect((sent[0]!.appRef as { kind: string }).kind).toBe("legacy");
+  });
+
+  test("legacy face never touches app_installations (Task 4: no app row to attach)", async () => {
+    const db = createMigratedD1();
+    const { queue, sent } = makeQueue();
+    const env = makeEnv(db, { REVIEW_QUEUE: queue as never });
+    const body = JSON.stringify(PR_PAYLOAD);
+
+    const res = await postWebhook(
+      "/webhook",
+      body,
+      { "x-hub-signature-256": await signatureFor(LEGACY_SECRET, body), "x-github-event": "pull_request" },
+      env,
+    );
+
+    // The delivery itself succeeds — but no installation row is written:
+    // upsert wiring is per-App-route only (plan Scope line applies to new Apps).
+    expect(res.status).toBe(200);
+    expect(sent).toHaveLength(1);
+    expect((db.raw.query("SELECT COUNT(*) AS n FROM app_installations").get() as { n: number }).n).toBe(0);
   });
 
   test("legacy signature verification unchanged: bad signature → 401", async () => {

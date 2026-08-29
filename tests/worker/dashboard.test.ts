@@ -119,7 +119,9 @@ function seededDashboardD1(
 }
 
 function makeEnv(overrides: Partial<Env> = {}): Env {
-  return { ...baseEnv(overrides), DB: seededDashboardD1() } as Env;
+  // `as unknown`: the test D1 double is the narrow DashboardD1 face + raw —
+  // not comparable to the full D1Database the T4 fetch-face Env.DB declares.
+  return { ...baseEnv(overrides), DB: seededDashboardD1() } as unknown as Env;
 }
 
 function dashboardRequest(path: string, cookie?: string): Request {
@@ -1240,7 +1242,7 @@ describe("/dashboard manifest commit (plan 13 B5 T3: manifest → D1, zero CF AP
       env: {
         ...baseEnv({ DASHBOARD_ENCRYPTION_KEY: TEST_ENCRYPTION_KEY }),
         DB: seededDashboardD1(3),
-      } as Env,
+      } as unknown as Env,
       holdValue: await freshHold(),
     });
     expect(res.status).toBe(500);

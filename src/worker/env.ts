@@ -1,8 +1,12 @@
 /**
  * Worker fetch-face environment (compass contracts B).
- * No `DB` here — D1 enters only the 06 `PipelineEnv` (consumer face).
+ * `DB` (plan 13 T4 — folded from the T2 local `WebhookFaceEnv` intersection)
+ * is declared optional: the deployed Worker binds it on every face
+ * (wrangler.jsonc 05), but this shared type also covers the dashboard
+ * module, whose unbound-D1 premises fail closed — the per-App webhook route
+ * guards it the same way (500 fail-closed when unbound).
  */
-import type { KVNamespace, Queue } from "@cloudflare/workers-types";
+import type { D1Database, KVNamespace, Queue } from "@cloudflare/workers-types";
 import type { ReviewJobPayload } from "../contracts/review-job";
 
 export type Env = {
@@ -11,6 +15,16 @@ export type Env = {
   WEBHOOK_SECRET: string;
   REVIEW_QUEUE: Queue<ReviewJobPayload>;
   IDEMPOTENCY_KV: KVNamespace;
+  /**
+   * D1 binding (plan 13 T4): the per-App webhook face (`POST
+   * /webhook/:appSlug`) reads the `github_apps` row for its slug and touches
+   * `app_installations` through src/dashboard/apps-store.ts (lock L1 leaf);
+   * the dashboard reads it through its own optional local face, and the 06
+   * queue face declares the same binding as the REQUIRED `PipelineEnv.DB`.
+   * Unbound → the per-App route fails closed with 500 (dashboard-dependency
+   * convention: fail closed like every missing dashboard dependency).
+   */
+  DB?: D1Database;
   /**
    * Fail-closed kill-switch (postdeploy feedback T4): reviews run ONLY when
    * this is exactly "true". Unset or any other value → every webhook is
