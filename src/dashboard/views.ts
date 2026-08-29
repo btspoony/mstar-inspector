@@ -170,12 +170,18 @@ function placeholderSection(
   </section>`;
 }
 
-/** Page header (IA: product name, GitHub identity, Logout — unchanged). */
-function shellHeader(user: { login: string; name?: string }): string {
+/**
+ * Page header (IA: product name, GitHub identity, Logout — unchanged).
+ * `adminNav` adds the admin-only Members entry (qc1/qc2 F-001 — spec § IA
+ * row 1 / plan Target State "Admin sees Members section"); only the shell
+ * passes it, so the link never appears mid-flow on manifest/members pages.
+ */
+function shellHeader(user: { login: string; name?: string }, adminNav = false): string {
   const display = user.name ? `${user.name} (${user.login})` : user.login;
+  const members = adminNav ? ` · <a href="/dashboard/members">Members</a>` : "";
   return `<header>
     <h1>mstar-inspector</h1>
-    <span class="user">Signed in as ${escapeHtml(display)} · <a href="/dashboard/logout">Logout</a></span>
+    <span class="user">Signed in as ${escapeHtml(display)}${members} · <a href="/dashboard/logout">Logout</a></span>
   </header>`;
 }
 
@@ -190,11 +196,15 @@ function githubAppSection(): string {
   </section>`;
 }
 
-/** Logged-in shell: header + sections (B1: GitHub App live; BYOK/Review placeholders). */
-export function dashboardPage(user: { login: string; name?: string }): string {
+/**
+ * Logged-in shell: header + sections (B1: GitHub App live; BYOK/Review
+ * placeholders). `isAdmin` renders the Members entry in the header — plain
+ * Level 1 link (existing `header a` token), no new CSS (qc1/qc2 F-001).
+ */
+export function dashboardPage(user: { login: string; name?: string }, isAdmin = false): string {
   return page(
     "Dashboard",
-    `${shellHeader(user)}
+    `${shellHeader(user, isAdmin)}
   <main>
     <div class="sections">
       ${githubAppSection()}

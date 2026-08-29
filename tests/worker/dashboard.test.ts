@@ -24,6 +24,7 @@ import {
   countUsers,
   createUser,
   deleteUser,
+  deleteUserUnlessLastAdmin,
   getUserByLogin,
   listUsers,
   parseAdminLogins,
@@ -355,6 +356,9 @@ describe("/dashboard routes", () => {
     expect(res.status).toBe(200);
     const body = await res.text();
     expect(body).toContain("Signed in as octocat");
+    // qc1/qc2 F-001: octocat is an admin (default seed) — the shell header
+    // carries the Members entry next to Logout.
+    expect(body).toContain(' · <a href="/dashboard/members">Members</a> · <a href="/dashboard/logout">Logout</a>');
     // B1: the GitHub App section is live — a submit to the manifest start
     // route, not a disabled placeholder button.
     expect(body).toContain('action="/dashboard/manifest/start"');
@@ -364,6 +368,23 @@ describe("/dashboard routes", () => {
     expect(body).toContain("Not in this iteration (B3).");
     expect(body).toContain('aria-disabled="true"');
     expect(body).not.toContain("Not in B0");
+  });
+
+  test("Members entry is admin-aware: member shell renders no /dashboard/members reference (F-001)", async () => {
+    const admin = await worker.fetch(
+      dashboardRequest("/dashboard", `${SESSION_COOKIE}=${await createSessionValue("octocat", null, SESSION_SECRET)}`),
+      makeEnv(),
+    );
+    expect(admin.status).toBe(200);
+    expect(await admin.text()).toContain('href="/dashboard/members"');
+    const member = await worker.fetch(
+      dashboardRequest("/dashboard", `${SESSION_COOKIE}=${await createSessionValue("mallory", null, SESSION_SECRET)}`),
+      makeEnv(),
+    );
+    expect(member.status).toBe(200);
+    const memberBody = await member.text();
+    expect(memberBody).toContain("Signed in as mallory");
+    expect(memberBody).not.toContain("/dashboard/members");
   });
 
   test("GET /dashboard with a tampered session cookie → 302 (treated as logged out)", async () => {
@@ -1547,6 +1568,36 @@ describe("dashboard users store (plan 12 T1, users.ts)", () => {
     expect((await getUserByLogin(db, admin.github_login))?.id).toBe(admin.id);
   });
 
+  test("deleteUserUnlessLastAdmin: members and non-last admins delete; the sole admin is refused (qc1 hardening)", async () => {
+    const db = createDashboardTestD1();
+    const admin = await createUser(db, { login: "octocat", role: "admin" });
+    const member = await createUser(db, { login: "hubot", role: "member" });
+    // Member row: unconditional delete.
+    expect(await deleteUserUnlessLastAdmin(db, member.id)).toBe(true);
+    expect(await getUserByLogin(db, "hubot")).toBeNull();
+    // Sole admin: the conditional statement refuses, row intact.
+    expect(await deleteUserUnlessLastAdmin(db, admin.id)).toBe(false);
+    expect((await getUserByLogin(db, "octocat"))?.id).toBe(admin.id);
+    expect(await countAdmins(db)).toBe(1);
+    // With a second admin present, either row is deletable again.
+    await createUser(db, { login: "ada", role: "admin" });
+    expect(await deleteUserUnlessLastAdmin(db, admin.id)).toBe(true);
+    expect(await countAdmins(db)).toBe(1);
+    expect(await deleteUserUnlessLastAdmin(db, "missing-id")).toBe(false);
+  });
+
+  test("listUsers breaks created_at ties by github_login (deterministic order, qc1/qc3)", async () => {
+    const db = createDashboardTestD1();
+    const insert = db.raw.prepare(
+      "INSERT INTO users (id, github_login, role, created_at) VALUES (?, ?, 'member', ?)",
+    );
+    const sameTs = "2026-01-01T00:00:00.000Z";
+    insert.run("u-3", "zeta", sameTs);
+    insert.run("u-1", "Alpha", sameTs);
+    insert.run("u-2", "midway", sameTs);
+    expect((await listUsers(db)).map((u) => u.github_login)).toEqual(["Alpha", "midway", "zeta"]);
+  });
+
   test("parseAdminLogins trims entries, drops empties, treats unset/blank as not configured", () => {
     expect(parseAdminLogins(undefined)).toEqual([]);
     expect(parseAdminLogins("")).toEqual([]);
@@ -1791,16 +1842,24 @@ describe("per-request allowlist guard (plan 12 T2, spec § AuthZ + lock L5)", ()
     expect(body).not.toContain('action="/dashboard/manifest/start"');
   });
 
-  test("/dashboard/logout stays guarded: removed member → 403 with zero Set-Cookie", async () => {
-    // Spec L5: the exempt set is exactly /login + /oauth/callback, so a
-    // removed member cannot even burn their cookies via logout — the page
-    // 403s and every cookie stays as-is.
+  test("removed member CAN log out: logout is session-gated, not membership-gated (qc2 F-002)", async () => {
+    // L5: /logout is NOT in the exempt set — a session-less visitor still
+    // 302s (pinned below). But a VALID session with no user row must reach
+    // the route so its owner can burn the stale cookie: the normal
+    // expired-cookie response (session + manifest hold + state), 302 login.
     const res = await worker.fetch(
       dashboardRequest("/dashboard/logout", `${SESSION_COOKIE}=${await mallorySession()}`),
       await removedMemberEnv(),
     );
-    expect(res.status).toBe(403);
-    expect(res.headers.getSetCookie()).toHaveLength(0);
+    expect(res.status).toBe(302);
+    expect(res.headers.get("Location")).toBe("/dashboard/login");
+    const setCookie = res.headers.getSetCookie();
+    expect(setCookie).toHaveLength(3);
+    for (const name of [SESSION_COOKIE, MANIFEST_HOLD_COOKIE, MANIFEST_STATE_COOKIE]) {
+      const cookie = setCookie.find((c) => c.startsWith(`${name}=;`));
+      expect(cookie, name).toBeDefined();
+      expect(cookie).toContain("Max-Age=0");
+    }
   });
 
   test("session-less /dashboard/logout → 302 to login with zero Set-Cookie (guard branch, route never runs)", async () => {
@@ -2023,6 +2082,38 @@ describe("members page (plan 12 T3, admin-only)", () => {
       expect(body).toContain('action="/dashboard/members/invite"');
     }
     expect(userCount(db)).toBe(1);
+  });
+
+  test("invite invalid GitHub login syntax → 400 re-render, zero rows (qc1/qc2 F-003)", async () => {
+    const db = createDashboardTestD1();
+    await createUser(db, { login: "octocat", role: "admin" });
+    // Spaces, symbols, >39 chars, non-ASCII — all can never match a real
+    // GitHub login, so none may persist as a member row.
+    const invalid = [
+      "has%20space",
+      "under_score",
+      "dot.name",
+      "a".repeat(40),
+      "emoji%F0%9F%99%82",
+    ];
+    for (const value of invalid) {
+      const res = await membersPost("invite", await adminCookie(), `login=${value}`, makeDbEnv(db));
+      expect(res.status).toBe(400);
+      const body = await res.text();
+      expect(body).toContain("not a valid GitHub login");
+      expect(body).toContain('action="/dashboard/members/invite"');
+    }
+    expect(userCount(db)).toBe(1);
+  });
+
+  test("invite accepts the 39-char login boundary (F-003 regex upper bound)", async () => {
+    const db = createDashboardTestD1();
+    await createUser(db, { login: "octocat", role: "admin" });
+    const long = "a".repeat(39);
+    const res = await membersPost("invite", await adminCookie(), `login=${long}`, makeDbEnv(db));
+    expect(res.status).toBe(200);
+    expect(await res.text()).toContain(`Invited ${long}`);
+    expect((await getUserByLogin(db, long))?.role).toBe("member");
   });
 
   test("self-remove → 400, row intact (the only admin is always the actor, so this is also the last-admin case)", async () => {

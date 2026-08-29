@@ -129,15 +129,40 @@ export async function createUser(
   return row;
 }
 
-/** Full membership list (Task 3 members page): oldest member first. */
+/**
+ * Full membership list (Task 3 members page): oldest member first;
+ * `github_login` breaks same-millisecond `created_at` ties so the display
+ * order is deterministic (qc1/qc3).
+ */
 export async function listUsers(db: DashboardD1): Promise<DashboardUserRow[]> {
-  const { results } = await db.prepare("SELECT * FROM users ORDER BY created_at ASC").all<DashboardUserRow>();
+  const { results } = await db
+    .prepare("SELECT * FROM users ORDER BY created_at ASC, github_login ASC")
+    .all<DashboardUserRow>();
   return results;
 }
 
 /** Remove by row id (Task 3 remove — row id avoids login case ambiguity). */
 export async function deleteUser(db: DashboardD1, id: string): Promise<boolean> {
   const result = await db.prepare("DELETE FROM users WHERE id = ?").bind(id).run();
+  return result.meta.changes > 0;
+}
+
+/**
+ * Remove by row id UNLESS the row is the last remaining admin — ONE
+ * conditional statement, so the last-admin invariant does not ride a
+ * read-check-then-delete window (qc1): two concurrent removes of the last
+ * two admins cannot both land; the loser sees changes === 0. Returns true
+ * when the row was deleted.
+ */
+export async function deleteUserUnlessLastAdmin(db: DashboardD1, id: string): Promise<boolean> {
+  const result = await db
+    .prepare(
+      `DELETE FROM users
+       WHERE id = ?
+         AND NOT (role = 'admin' AND (SELECT COUNT(*) FROM users WHERE role = 'admin') <= 1)`,
+    )
+    .bind(id)
+    .run();
   return result.meta.changes > 0;
 }
 
