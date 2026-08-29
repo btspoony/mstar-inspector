@@ -51,8 +51,9 @@ export type Env = {
    * logins that are created as `admin` at the OAuth callback when they have
    * no users row yet (compared case-insensitively — GitHub logins are
    * case-insensitive). A Worker VAR, NOT a secret (login names are public
-   * identity): set via `wrangler vars put` / wrangler.jsonc vars, or
-   * .dev.vars locally. Unset → the first login against an EMPTY users table
+   * identity): set in wrangler.jsonc `vars` (or the Cloudflare dashboard's
+   * Worker variable settings) and redeploy; .dev.vars locally. Unset → the
+   * first login against an EMPTY users table
    * bootstraps as admin (first-login fallback); every other unknown login
    * is denied (403, zero cookies) until an admin invites it.
    */

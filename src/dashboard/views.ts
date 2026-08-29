@@ -6,6 +6,7 @@
  * breakpoints) — DESIGN.md is the SSOT; update both when tokens change.
  * No client JS, no build chain, no new dependencies.
  */
+import type { DashboardUserRow } from "./users";
 
 /** Escape GitHub-sourced user data before HTML interpolation (XSS guard). */
 export function escapeHtml(value: string): string {
@@ -114,6 +115,30 @@ button.danger { background: var(--red-700); border-color: var(--red-700); }
 label.checkbox { display: block; margin: 16px 0; } /* spacing-4 */
 .id { font-variant-numeric: tabular-nums; }
 a.cancel { color: var(--gray-1000); margin-left: 12px; } /* spacing-3 */
+/* Members page (plan 12 B4 T3): single column, masked list (login + role +
+   created_at only), invite primary (blue-700), remove danger (red-700). */
+.members { list-style: none; margin: 16px 0 0; padding: 0; } /* spacing-4 */
+.members li {
+  display: flex;
+  align-items: center;
+  gap: 12px; /* spacing-3 */
+  padding: 8px 0; /* spacing-2 */
+  border-top: 1px solid var(--background-200);
+}
+.members .meta, .members .you { color: var(--gray-900); font-size: 14px; } /* copy-14 */
+.members .you { margin-left: auto; }
+.members form { margin: 0 0 0 auto; } /* inline remove control overrides the section form rhythm */
+label.field { display: block; margin: 16px 0 8px; } /* spacing-4 / spacing-2 */
+label.field input {
+  display: block;
+  margin-top: 8px; /* spacing-2 */
+  border: 1px solid var(--gray-900);
+  border-radius: var(--rounded-sm);
+  padding: 8px 12px; /* spacing-2 / spacing-3 control rhythm */
+  font: inherit;
+  background: var(--background-100);
+  color: var(--gray-1000);
+}
 </style>`;
 
 function page(title: string, body: string): string {
@@ -320,6 +345,82 @@ export function removedPage(login: string): string {
     "Access removed",
     `<main>
     <div class="banner" role="alert">Your dashboard access was removed. Ask an admin to re-invite ${escapeHtml(login)}.</div>
+  </main>`,
+  );
+}
+
+/**
+ * Non-admin denial for admin-only surfaces (plan 12 B4 T3): the visitor IS a
+ * member — the per-request guard passed — but has no `admin` row. Distinct
+ * from deniedPage / removedPage: access exists, this page does not. Red-700
+ * banner with a way back to the shell.
+ */
+export function forbiddenPage(login: string): string {
+  return page(
+    "Forbidden",
+    `<main>
+    <div class="banner" role="alert">This page is restricted to dashboard admins. You are signed in as ${escapeHtml(login)} — back to <a href="/dashboard">/dashboard</a>.</div>
+  </main>`,
+  );
+}
+
+/** Notice slot for membersPage: existing classes only, no new tokens. */
+export type MembersNotice = { kind: "success" | "warn" | "error"; message: string };
+
+function membersNoticeHtml(notice?: MembersNotice): string {
+  if (!notice) return "";
+  if (notice.kind === "error") {
+    return `<div class="banner" role="alert">${escapeHtml(notice.message)}</div>`;
+  }
+  return `<p class="${notice.kind === "warn" ? "note" : "status"}">${escapeHtml(notice.message)}</p>`;
+}
+
+/**
+ * Members management (plan 12 B4 T3, admin-only): single column (same rule
+ * as the B1 confirm page), masked list — login + role + created_at only; no
+ * row ids, no invited_by. Remove is red-700 and is NOT offered on the
+ * acting admin's own row ("you") — the route refuses self-removal, so the
+ * UI never presents a control that can only fail. Invite is the blue-700
+ * constructive primary.
+ */
+export function membersPage(
+  user: { login: string; name?: string },
+  members: DashboardUserRow[],
+  notice?: MembersNotice,
+): string {
+  const rows = members
+    .map((m) => {
+      const self = m.github_login.toLowerCase() === user.login.toLowerCase();
+      const control = self
+        ? '<span class="you">you</span>'
+        : `<form method="post" action="/dashboard/members/remove">
+          <input type="hidden" name="userId" value="${escapeHtml(m.id)}">
+          <button type="submit" class="danger">Remove</button>
+        </form>`;
+      return `<li>
+        <strong>${escapeHtml(m.github_login)}</strong>
+        <span class="meta">${escapeHtml(m.role)} · <span class="id">${escapeHtml(m.created_at)}</span></span>
+        ${control}
+      </li>`;
+    })
+    .join("\n");
+  return page(
+    "Members",
+    `${shellHeader(user)}
+  <main>
+    <section class="enabled">
+      <h2>Members</h2>
+      ${membersNoticeHtml(notice)}
+      <ul class="members">
+      ${rows}
+      </ul>
+      <form method="post" action="/dashboard/members/invite">
+        <label class="field">Invite by GitHub login
+          <input type="text" name="login" placeholder="e.g. octocat">
+        </label>
+        <button type="submit" class="primary">Invite member</button>
+      </form>
+    </section>
   </main>`,
   );
 }

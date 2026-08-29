@@ -1884,3 +1884,205 @@ describe("per-request allowlist guard (plan 12 T2, spec § AuthZ + lock L5)", ()
     expect(entry.login).toBe("mallory");
   });
 });
+
+// --- plan 12 T3: members page (admin-only) + DESIGN mapping ------------------
+
+describe("members page (plan 12 T3, admin-only)", () => {
+  const adminCookie = async () =>
+    `${SESSION_COOKIE}=${await createSessionValue("octocat", null, SESSION_SECRET)}`;
+  const memberCookie = async () =>
+    `${SESSION_COOKIE}=${await createSessionValue("mallory", null, SESSION_SECRET)}`;
+
+  async function membersGet(cookie: string, env?: Env): Promise<Response> {
+    return await worker.fetch(dashboardRequest("/dashboard/members", cookie), env ?? makeEnv());
+  }
+
+  async function membersPost(
+    path: string,
+    cookie: string,
+    body: string,
+    env?: Env,
+  ): Promise<Response> {
+    return await worker.fetch(
+      new Request(`https://worker.local/dashboard/members/${path}`, {
+        method: "POST",
+        headers: { Cookie: cookie, "Content-Type": "application/x-www-form-urlencoded" },
+        body,
+      }),
+      env ?? makeEnv(),
+    );
+  }
+
+  test("the new routes sit behind the guard: no session → 302 to login", async () => {
+    const get = await membersGet("");
+    expect(get.status).toBe(302);
+    expect(get.headers.get("Location")).toBe("/dashboard/login");
+    const post = await membersPost("invite", "", "login=hubot");
+    expect(post.status).toBe(302);
+    expect(post.headers.get("Location")).toBe("/dashboard/login");
+  });
+
+  test("admin GET → 200: single column, masked list (login + role + created_at only)", async () => {
+    const db = createDashboardTestD1();
+    const admin = await createUser(db, { login: "octocat", role: "admin" });
+    const member = await createUser(db, { login: "hubot", role: "member", invitedBy: "secret-inviter" });
+    const res = await membersGet(await adminCookie(), makeDbEnv(db));
+    expect(res.status).toBe(200);
+    const body = await res.text();
+    // List shows logins, roles, and created_at.
+    expect(body).toContain("<strong>hubot</strong>");
+    expect(body).toContain('<span class="meta">admin · ');
+    expect(body).toContain('<span class="meta">member · ');
+    expect(body).toContain(member.created_at);
+    // Masked DISPLAY: logins, roles, and created_at only — no row ids, no
+    // invited_by. (The row id does ride the remove form's hidden userId
+    // control — POST /members/remove {userId} removes by row id, spec §
+    // AuthZ "remove 按列表行 id，避免 login 大小写歧义" — so strip those
+    // transport-only fields before asserting what the list shows.)
+    expect(body).toContain(`name="userId" value="${member.id}"`);
+    const visible = body.replace(/<input type="hidden" name="userId" value="[^"]*">/g, "");
+    expect(visible).not.toContain(admin.id);
+    expect(visible).not.toContain(member.id);
+    expect(visible).not.toContain("secret-inviter");
+    // Single column (B1 confirm-page rule): no 3-column sections grid.
+    expect(body).not.toContain('<div class="sections">');
+    // invite primary (blue-700) + remove danger (red-700), per spec §
+    // DESIGN.md 意图.
+    expect(body).toContain('action="/dashboard/members/invite"');
+    expect(body).toContain('<button type="submit" class="primary">Invite member</button>');
+    expect(body).toContain('class="danger">Remove</button>');
+    // The acting admin's own row never offers removal (the route refuses it).
+    expect(body).toContain('<span class="you">you</span>');
+  });
+
+  test("non-admin member GET → 403 restricted view, no membership data", async () => {
+    const db = createDashboardTestD1();
+    await createUser(db, { login: "octocat", role: "admin" });
+    await createUser(db, { login: "mallory", role: "member" });
+    const res = await membersGet(await memberCookie(), makeDbEnv(db));
+    expect(res.status).toBe(403);
+    const body = await res.text();
+    expect(body).toContain("restricted to dashboard admins");
+    expect(body).not.toContain("/dashboard/members/invite");
+    expect(body).not.toContain("/dashboard/members/remove");
+  });
+
+  test("non-admin POST invite → 403, zero mutations", async () => {
+    const db = createDashboardTestD1();
+    await createUser(db, { login: "octocat", role: "admin" });
+    await createUser(db, { login: "mallory", role: "member" });
+    const res = await membersPost("invite", await memberCookie(), "login=hubot", makeDbEnv(db));
+    expect(res.status).toBe(403);
+    expect(userCount(db)).toBe(2);
+    expect(await getUserByLogin(db, "hubot")).toBeNull();
+  });
+
+  test("non-admin POST remove → 403, zero mutations (target row intact)", async () => {
+    const db = createDashboardTestD1();
+    const admin = await createUser(db, { login: "octocat", role: "admin" });
+    await createUser(db, { login: "mallory", role: "member" });
+    const res = await membersPost("remove", await memberCookie(), `userId=${admin.id}`, makeDbEnv(db));
+    expect(res.status).toBe(403);
+    expect(userCount(db)).toBe(2);
+    expect((await getUserByLogin(db, "octocat"))?.id).toBe(admin.id);
+  });
+
+  test("admin invite → 200 success notice, member row created with invitedBy (input trimmed)", async () => {
+    const db = createDashboardTestD1();
+    await createUser(db, { login: "octocat", role: "admin" });
+    const res = await membersPost("invite", await adminCookie(), "login=%20%20hubot%20%20", makeDbEnv(db));
+    expect(res.status).toBe(200);
+    expect(await res.text()).toContain("Invited hubot");
+    const row = await getUserByLogin(db, "hubot");
+    expect(row?.role).toBe("member");
+    expect(row?.invited_by).toBe("octocat");
+    expect(userCount(db)).toBe(2);
+  });
+
+  test("T1 pin (Minor 2): invite resolves case variants — existing login → no-op notice, NO second row", async () => {
+    const db = createDashboardTestD1();
+    await createUser(db, { login: "OctoCat", role: "admin" });
+    // The DDL UNIQUE is BINARY-collated: a direct createUser("octocat") would
+    // succeed and mint a second row — the NOCASE pre-read must catch it first.
+    const res = await membersPost("invite", await adminCookie(), "login=octocat", makeDbEnv(db));
+    expect(res.status).toBe(200);
+    const body = await res.text();
+    expect(body).toContain("octocat is already a member — nothing changed.");
+    expect(body).not.toContain("Invited octocat");
+    expect(userCount(db)).toBe(1);
+  });
+
+  test("invite empty / whitespace login → 400 re-render, zero rows", async () => {
+    const db = createDashboardTestD1();
+    await createUser(db, { login: "octocat", role: "admin" });
+    for (const value of ["", "%20%20%20"]) {
+      const res = await membersPost("invite", await adminCookie(), `login=${value}`, makeDbEnv(db));
+      expect(res.status).toBe(400);
+      const body = await res.text();
+      expect(body).toContain("Enter a GitHub login");
+      expect(body).toContain('action="/dashboard/members/invite"');
+    }
+    expect(userCount(db)).toBe(1);
+  });
+
+  test("self-remove → 400, row intact (the only admin is always the actor, so this is also the last-admin case)", async () => {
+    const db = createDashboardTestD1();
+    const admin = await createUser(db, { login: "octocat", role: "admin" });
+    const res = await membersPost("remove", await adminCookie(), `userId=${admin.id}`, makeDbEnv(db));
+    expect(res.status).toBe(400);
+    expect(await res.text()).toContain("You cannot remove yourself.");
+    expect(await countAdmins(db)).toBe(1);
+    expect(userCount(db)).toBe(1);
+  });
+
+  test("removing another admin succeeds while 2 admins exist; the remaining last admin cannot then be removed", async () => {
+    const db = createDashboardTestD1();
+    await createUser(db, { login: "octocat", role: "admin" });
+    const ada = await createUser(db, { login: "ada", role: "admin" });
+    const ok = await membersPost("remove", await adminCookie(), `userId=${ada.id}`, makeDbEnv(db));
+    expect(ok.status).toBe(200);
+    expect(await ok.text()).toContain("Removed ada.");
+    expect(await countAdmins(db)).toBe(1);
+    // Now octocat IS the last admin — removal must refuse, row intact.
+    const octocat = await getUserByLogin(db, "octocat");
+    const refused = await membersPost("remove", await adminCookie(), `userId=${octocat?.id}`, makeDbEnv(db));
+    expect(refused.status).toBe(400);
+    expect(await countAdmins(db)).toBe(1);
+    expect(userCount(db)).toBe(1);
+  });
+
+  test("remove unknown / blank userId → 400, rows intact", async () => {
+    const db = createDashboardTestD1();
+    await createUser(db, { login: "octocat", role: "admin" });
+    await createUser(db, { login: "mallory", role: "member" });
+    for (const value of ["missing-id", ""]) {
+      const res = await membersPost("remove", await adminCookie(), `userId=${value}`, makeDbEnv(db));
+      expect(res.status).toBe(400);
+    }
+    expect(userCount(db)).toBe(2);
+  });
+
+  test("remove member → 200 success, row gone; the removed member's old cookie then 403s everywhere", async () => {
+    const db = createDashboardTestD1();
+    await createUser(db, { login: "octocat", role: "admin" });
+    const mallory = await createUser(db, { login: "mallory", role: "member" });
+    const staleCookie = await memberCookie(); // minted BEFORE the removal
+    const res = await membersPost("remove", await adminCookie(), `userId=${mallory.id}`, makeDbEnv(db));
+    expect(res.status).toBe(200);
+    expect(await res.text()).toContain("Removed mallory.");
+    expect(await getUserByLogin(db, "mallory")).toBeNull();
+    // Done criterion: a removed member cannot reach any /dashboard/** route
+    // with the still-valid session cookie — the T2 guard fails it closed.
+    const shell = await worker.fetch(dashboardRequest("/dashboard", staleCookie), makeDbEnv(db));
+    expect(shell.status).toBe(403);
+  });
+
+  test("T1 pin (Minor 1): ADMIN_LOGINS docs name the real var mechanism, not the nonexistent `wrangler vars put`", async () => {
+    const example = await Bun.file(new URL("../../.env.example", import.meta.url)).text();
+    expect(example).toContain("ADMIN_LOGINS");
+    expect(example).not.toContain("wrangler vars put");
+    const envTs = await Bun.file(new URL("../../src/worker/env.ts", import.meta.url)).text();
+    expect(envTs).toContain("ADMIN_LOGINS");
+    expect(envTs).not.toContain("wrangler vars put");
+  });
+});

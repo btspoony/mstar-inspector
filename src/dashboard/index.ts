@@ -1,14 +1,15 @@
 /**
  * /dashboard Hono sub-app: GitHub OAuth login + signed-cookie session (08 B0)
  * + GitHub App Manifest start/callback/commit (11 B1 T1/T2) behind a
- * per-request membership guard (12 B4 T2). Mounted by src/worker/index.ts as
+ * per-request membership guard (12 B4 T2) + admin-only members management
+ * (12 B4 T3). Mounted by src/worker/index.ts as
  * `app.route("/dashboard", dashboardApp)`.
  *
  * Route isolation (architect decision Q2): this module MUST NOT import
  * pipeline/store/review code. Fail-closed everywhere: missing OAuth secrets
  * → 5xx; bad CSRF state → 4xx and the session cookie is never set.
  */
-import { Hono } from "hono";
+import { Hono, type Context } from "hono";
 import { getCookie } from "hono/cookie";
 import type { Env } from "../worker/env";
 import { buildAuthorizeUrl, exchangeCodeForToken, fetchGitHubUser, logOAuthFailure } from "./oauth";
@@ -23,6 +24,7 @@ import {
   readSessionValue,
   serializeCookie,
   verifyStateValue,
+  type SessionPayload,
 } from "./session";
 import {
   MANIFEST_HOLD_COOKIE,
@@ -39,10 +41,26 @@ import {
 } from "./manifest";
 import {
   bootstrapDashboardAccess,
+  countAdmins,
+  createUser,
+  deleteUser,
   getUserByLogin,
+  listUsers,
   type DashboardD1,
+  type DashboardUserRow,
 } from "./users";
-import { dashboardPage, deniedPage, errorPage, manifestConfirmPage, manifestErrorPage, manifestStartPage, manifestSuccessPage, removedPage } from "./views";
+import {
+  dashboardPage,
+  deniedPage,
+  errorPage,
+  forbiddenPage,
+  manifestConfirmPage,
+  manifestErrorPage,
+  manifestStartPage,
+  manifestSuccessPage,
+  membersPage,
+  removedPage,
+} from "./views";
 
 export const dashboardApp = new Hono<{ Bindings: Env }>();
 
@@ -315,6 +333,119 @@ dashboardApp.get("/manifest/confirm", async (c) => {
   const hold = await readHoldValue(getCookie(c, MANIFEST_HOLD_COOKIE), secrets.sessionSecret);
   if (!hold || hold.login !== session.login) return c.redirect("/dashboard", 302);
   return c.html(manifestConfirmPage(session, { id: hold.id, name: hold.name }));
+});
+
+// --- Plan 12 B4 T3: admin-only members management (spec § AuthZ) ---
+//
+// The per-request guard above has already verified membership on every route
+// below; the admin gate re-resolves the acting row per request (same
+// route-local read pattern as the manifest routes) and 403s non-admins
+// BEFORE any membership read or write — zero mutations on the deny path.
+// POSTs ride the existing session cookie (same discipline as
+// manifest/commit) — no new token scheme.
+
+type AdminGate =
+  | { ok: true; session: SessionPayload; db: DashboardD1; admin: DashboardUserRow }
+  | { ok: false; response: Response };
+
+/** Route-local admin gate shared by the three /dashboard/members routes. */
+async function requireAdmin(c: Context<{ Bindings: Env }>): Promise<AdminGate> {
+  const secrets = dashboardSecrets(c.env);
+  if (!secrets) return { ok: false, response: c.text("dashboard OAuth is not configured", 500) };
+  const session = await readSessionValue(getCookie(c, SESSION_COOKIE), secrets.sessionSecret);
+  if (!session) return { ok: false, response: c.redirect("/dashboard/login", 302) };
+  const db = dashboardD1(c.env);
+  if (!db) return { ok: false, response: c.text("dashboard storage is not configured", 500) };
+  const admin = await getUserByLogin(db, session.login);
+  // Fail closed: no row (removed between guard and here) or a plain member
+  // is equally non-admin — the 403 view carries zero membership data.
+  if (!admin || admin.role !== "admin") {
+    return { ok: false, response: c.html(forbiddenPage(session.login), 403) };
+  }
+  return { ok: true, session, db, admin };
+}
+
+dashboardApp.get("/members", async (c) => {
+  const gate = await requireAdmin(c);
+  if (!gate.ok) return gate.response;
+  return c.html(membersPage(gate.session, await listUsers(gate.db)));
+});
+
+dashboardApp.post("/members/invite", async (c) => {
+  const gate = await requireAdmin(c);
+  if (!gate.ok) return gate.response;
+  const form = await c.req.parseBody();
+  const login = typeof form.login === "string" ? form.login.trim() : "";
+  if (login.length === 0) {
+    return c.html(
+      membersPage(gate.session, await listUsers(gate.db), {
+        kind: "error",
+        message: "Enter a GitHub login to invite.",
+      }),
+      400,
+    );
+  }
+  // T1 review pin (Minor 2): resolve the login case-insensitively BEFORE any
+  // createUser call — the DDL UNIQUE is BINARY-collated, so ON CONFLICT alone
+  // misses case variants ("OctoCat" vs "octocat") and would mint a second row.
+  if (await getUserByLogin(gate.db, login)) {
+    return c.html(
+      membersPage(gate.session, await listUsers(gate.db), {
+        kind: "warn",
+        message: `${login} is already a member — nothing changed.`,
+      }),
+    );
+  }
+  await createUser(gate.db, { login, role: "member", invitedBy: gate.admin.github_login });
+  return c.html(
+    membersPage(gate.session, await listUsers(gate.db), {
+      kind: "success",
+      message: `Invited ${login} — they can sign in with GitHub now.`,
+    }),
+  );
+});
+
+dashboardApp.post("/members/remove", async (c) => {
+  const gate = await requireAdmin(c);
+  if (!gate.ok) return gate.response;
+  const form = await c.req.parseBody();
+  const userId = typeof form.userId === "string" ? form.userId : "";
+  const members = await listUsers(gate.db);
+  const target = members.find((m) => m.id === userId);
+  if (!target) {
+    return c.html(
+      membersPage(gate.session, members, {
+        kind: "error",
+        message: "Unknown member — nothing was removed, try again.",
+      }),
+      400,
+    );
+  }
+  // Refuse self-removal: an admin must not be able to lock themselves out.
+  if (target.github_login.toLowerCase() === gate.admin.github_login.toLowerCase()) {
+    return c.html(
+      membersPage(gate.session, members, { kind: "error", message: "You cannot remove yourself." }),
+      400,
+    );
+  }
+  // Refuse removing an admin while they are the last one (removal = row
+  // delete, so this is the deployment's only admin-lockout guard).
+  if (target.role === "admin" && (await countAdmins(gate.db)) === 1) {
+    return c.html(
+      membersPage(gate.session, members, {
+        kind: "error",
+        message: "The last admin cannot be removed.",
+      }),
+      400,
+    );
+  }
+  await deleteUser(gate.db, target.id);
+  return c.html(
+    membersPage(gate.session, await listUsers(gate.db), {
+      kind: "success",
+      message: `Removed ${target.github_login}.`,
+    }),
+  );
 });
 
 dashboardApp.get("/", async (c) => {
