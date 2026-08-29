@@ -199,6 +199,7 @@ export function dashboardPage(user: { login: string; name?: string }): string {
  */
 export function manifestStartPage(
   user: { login: string; name?: string },
+  appName: string,
   manifestJson: string,
   createUrl: string,
 ): string {
@@ -208,7 +209,7 @@ export function manifestStartPage(
   <main>
     <section class="enabled">
       <h2>Create GitHub App</h2>
-      <p>Continue to GitHub to register <strong>${escapeHtml(`mstar-inspector-${user.login}`)}</strong>
+      <p>Continue to GitHub to register <strong>${escapeHtml(appName)}</strong>
       with the review permissions and webhook for this Worker. GitHub shows the requested
       permissions first — nothing is created until you confirm there.</p>
       <form method="post" action="${escapeHtml(createUrl)}">
@@ -273,13 +274,19 @@ export function manifestSuccessPage(
 }
 
 /** Manifest failure surface: red-700 banner + what-to-do-next, never secrets. */
-export function manifestErrorPage(message: string): string {
+export function manifestErrorPage(message: string, resumable = false): string {
+  // Resumable failures (retryable commit outcomes: 400/500/502) keep the
+  // hold cookie, so the what-to-do-next link goes back to the confirm gate,
+  // not a shell with no confirm form.
+  const next = resumable
+    ? `Your GitHub App is still held for retry — return to the <a href="/dashboard/manifest/confirm">confirmation page</a> to resubmit.`
+    : `Return to <a href="/dashboard">/dashboard</a> to try again.`;
   return page(
     "GitHub App setup",
     `<main>
     <div class="banner" role="alert">
       <strong>GitHub App setup failed.</strong> ${escapeHtml(message)}
-      No Worker secrets were changed. Return to <a href="/dashboard">/dashboard</a> to try again.
+      No Worker secrets were changed. ${next}
     </div>
   </main>`,
   );

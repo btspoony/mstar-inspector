@@ -116,7 +116,7 @@ dashboardApp.post("/manifest/start", async (c) => {
   const state = await createStateValue(secrets.sessionSecret);
   c.header("Set-Cookie", serializeCookie(MANIFEST_STATE_COOKIE, state, MANIFEST_STATE_MAX_AGE_SEC));
   const manifest = buildManifest(new URL(c.req.url).origin, session.login);
-  return c.html(manifestStartPage(session, JSON.stringify(manifest), buildManifestCreateUrl(state)));
+  return c.html(manifestStartPage(session, manifest.name, JSON.stringify(manifest), buildManifestCreateUrl(state)));
 });
 
 // Callback: GitHub redirects here with ?code=…&state=…. Bad/missing state →
@@ -180,7 +180,7 @@ dashboardApp.post("/manifest/commit", async (c) => {
     // Retryable: keep the hold so the operator can re-tick and resubmit.
     logManifestFailure("commit", "confirm_missing");
     return c.html(
-      manifestErrorPage("The overwrite was not confirmed — tick the checkbox to proceed."),
+      manifestErrorPage("The overwrite was not confirmed — tick the checkbox to proceed.", true),
       400,
     );
   }
@@ -210,6 +210,7 @@ dashboardApp.post("/manifest/commit", async (c) => {
     return c.html(
       manifestErrorPage(
         "Cloudflare API access is not configured on this Worker (CLOUDFLARE_API_TOKEN / CLOUDFLARE_ACCOUNT_ID).",
+        true,
       ),
       500,
     );
@@ -217,7 +218,7 @@ dashboardApp.post("/manifest/commit", async (c) => {
   if (result === "upstream_error") {
     // Retryable: keep the hold; a CF/network failure must not burn it.
     return c.html(
-      manifestErrorPage("Cloudflare rejected the secret write (check the API token permissions)."),
+      manifestErrorPage("Cloudflare rejected the secret write (check the API token permissions).", true),
       502,
     );
   }
@@ -226,11 +227,31 @@ dashboardApp.post("/manifest/commit", async (c) => {
   return c.html(manifestSuccessPage(session, { id: hold.id }));
 });
 
+// Confirm resume (Bugbot: the hold survives retryable commit outcomes, so a
+// refresh / error-page link must re-render the confirm gate, not a dead
+// shell). Hold decrypts + hold.login === session.login → confirm page with
+// id/name only (PEM/webhook_secret never render); anything else → 302 shell.
+dashboardApp.get("/manifest/confirm", async (c) => {
+  const secrets = dashboardSecrets(c.env);
+  if (!secrets) return c.text("dashboard OAuth is not configured", 500);
+  const session = await readSessionValue(getCookie(c, SESSION_COOKIE), secrets.sessionSecret);
+  if (!session) return c.redirect("/dashboard/login", 302);
+  const hold = await readHoldValue(getCookie(c, MANIFEST_HOLD_COOKIE), secrets.sessionSecret);
+  if (!hold || hold.login !== session.login) return c.redirect("/dashboard", 302);
+  return c.html(manifestConfirmPage(session, { id: hold.id, name: hold.name }));
+});
+
 dashboardApp.get("/", async (c) => {
   const sessionSecret = c.env.DASHBOARD_SESSION_SECRET;
   if (!sessionSecret) return c.text("dashboard OAuth is not configured", 500);
   const session = await readSessionValue(getCookie(c, SESSION_COOKIE), sessionSecret);
   if (!session) return c.redirect("/dashboard/login", 302);
+  // A parked manifest hold resumes the confirm gate in place of the shell
+  // (same rule as GET /dashboard/manifest/confirm).
+  const hold = await readHoldValue(getCookie(c, MANIFEST_HOLD_COOKIE), sessionSecret);
+  if (hold && hold.login === session.login) {
+    return c.html(manifestConfirmPage(session, { id: hold.id, name: hold.name }));
+  }
   return c.html(dashboardPage(session));
 });
 

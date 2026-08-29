@@ -77,6 +77,18 @@ export type ManifestPayload = {
     issues: "write";
   };
 };
+/** Manifest App name prefix; GitHub rejects App names over 34 characters. */
+export const APP_NAME_PREFIX = "mstar-inspector-";
+export const GITHUB_APP_NAME_MAX_LENGTH = 34;
+
+/**
+ * Manifest App name: prefix + login, truncated to GitHub's 34-char cap.
+ * Without the cap a long login makes GitHub reject the manifest POST and no
+ * callback ever fires (the App is never created).
+ */
+export function buildAppName(login: string): string {
+  return `${APP_NAME_PREFIX}${login}`.slice(0, GITHUB_APP_NAME_MAX_LENGTH);
+}
 
 /**
  * Manifest JSON for the locked review permission set (mirrors the
@@ -86,7 +98,7 @@ export type ManifestPayload = {
  */
 export function buildManifest(origin: string, login: string): ManifestPayload {
   return {
-    name: `mstar-inspector-${login}`,
+    name: buildAppName(login),
     url: origin,
     hook_attributes: { url: `${origin}/webhook` },
     redirect_url: `${origin}/dashboard/manifest/callback`,

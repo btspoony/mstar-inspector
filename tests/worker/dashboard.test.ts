@@ -29,6 +29,7 @@ import {
   MANIFEST_HOLD_COOKIE,
   MANIFEST_HOLD_MAX_AGE_SEC,
   MANIFEST_STATE_COOKIE,
+  buildAppName,
   createHoldValue,
   exchangeManifestCode,
   readHoldValue,
@@ -644,8 +645,8 @@ describe("/dashboard manifest routes (plan 11 Task 1)", () => {
   }
 
   /** Authenticated manifest start; returns the minted state + parsed manifest. */
-  async function startManifest() {
-    const session = await createSessionValue("octocat", null, SESSION_SECRET);
+  async function startManifest(login = "octocat") {
+    const session = await createSessionValue(login, null, SESSION_SECRET);
     const res = await worker.fetch(
       new Request("https://worker.local/dashboard/manifest/start", {
         method: "POST",
@@ -717,6 +718,16 @@ describe("/dashboard manifest routes (plan 11 Task 1)", () => {
       pull_requests: "write",
       issues: "write",
     });
+  });
+  test("long login: manifest name is capped at 34 chars and the start page shows the truncated name", async () => {
+    const { body, manifest } = await startManifest("octocat-with-a-long-login");
+    const name = manifest.name as string;
+    expect(name.length).toBeLessThanOrEqual(34);
+    expect(name.startsWith("mstar-inspector-")).toBe(true);
+    // The start copy names the App GitHub will actually register — never the
+    // untruncated name that GitHub would reject.
+    expect(body).toContain(`<strong>${name}</strong>`);
+    expect(body).not.toContain("mstar-inspector-octocat-with-a-long-login");
   });
 
   test("callback without a session → 302 to login (IA routing table)", async () => {
@@ -852,6 +863,93 @@ describe("/dashboard manifest routes (plan 11 Task 1)", () => {
     const body = await res.text();
     expect(body).not.toContain("BEGIN");
     expect(body).not.toContain(FAKE_WEBHOOK_SECRET);
+  });
+});
+
+describe("buildAppName (manifest.ts, GitHub 34-char App-name cap)", () => {
+  test("short login keeps the full name unchanged", () => {
+    expect(buildAppName("octocat")).toBe("mstar-inspector-octocat");
+  });
+
+  test("18+ char login is truncated to ≤34 chars, prefix kept", () => {
+    const name = buildAppName("octocat-with-a-long-login");
+    expect(name.length).toBeLessThanOrEqual(34);
+    expect(name.startsWith("mstar-inspector-")).toBe(true);
+  });
+});
+
+describe("/dashboard confirm resume (Bugbot: confirm step must be resumable)", () => {
+  const freshHold = () => createHoldValue(CONVERSION, "octocat", SESSION_SECRET);
+
+  function resumeRequest(path: string, session: string, hold?: string): Request {
+    const cookies = hold ? `${SESSION_COOKIE}=${session}; ${MANIFEST_HOLD_COOKIE}=${hold}` : `${SESSION_COOKIE}=${session}`;
+    return dashboardRequest(path, cookies);
+  }
+
+  test("GET /dashboard with a valid hold renders the confirm gate, never PEM/webhook_secret", async () => {
+    const session = await createSessionValue("octocat", null, SESSION_SECRET);
+    const res = await worker.fetch(resumeRequest("/dashboard", session, await freshHold()), makeEnv());
+    expect(res.status).toBe(200);
+    const body = await res.text();
+    expect(body).toContain('name="confirm" value="overwrite"');
+    expect(body).toContain(`<span class="id">${CONVERSION.id}</span>`);
+    expect(body).toContain(CONVERSION.name);
+    expect(body).not.toContain("BEGIN");
+    expect(body).not.toContain(FAKE_PEM);
+    expect(body).not.toContain(FAKE_WEBHOOK_SECRET);
+    // A hold-bearing operator never lands on the dead shell start form.
+    expect(body).not.toContain('action="/dashboard/manifest/start"');
+  });
+
+  test("after a retryable 400, GET /dashboard still shows the confirm gate (error page links to it)", async () => {
+    const session = await createSessionValue("octocat", null, SESSION_SECRET);
+    const hold = await freshHold();
+    const rejected = await worker.fetch(
+      new Request("https://worker.local/dashboard/manifest/commit", {
+        method: "POST",
+        headers: {
+          Cookie: `${SESSION_COOKIE}=${session}; ${MANIFEST_HOLD_COOKIE}=${hold}`,
+          "Content-Type": "application/x-www-form-urlencoded",
+        },
+        body: "", // confirm checkbox not ticked → retryable 400, hold kept
+      }),
+      makeEnv(),
+    );
+    expect(rejected.status).toBe(400);
+    // The retryable error page links back to the confirm surface.
+    expect(await rejected.text()).toContain('href="/dashboard/manifest/confirm"');
+    // Resume via the shell URL: the confirm gate comes back with the same hold.
+    const resumed = await worker.fetch(resumeRequest("/dashboard", session, hold), makeEnv());
+    expect(resumed.status).toBe(200);
+    const body = await resumed.text();
+    expect(body).toContain('name="confirm" value="overwrite"');
+    expect(body).toContain(`<span class="id">${CONVERSION.id}</span>`);
+  });
+
+  test("hold bound to a different login → dashboard shell, no confirm, no secrets", async () => {
+    const session = await createSessionValue("mallory", null, SESSION_SECRET);
+    const res = await worker.fetch(resumeRequest("/dashboard", session, await freshHold()), makeEnv());
+    expect(res.status).toBe(200);
+    const body = await res.text();
+    expect(body).toContain('action="/dashboard/manifest/start"');
+    expect(body).not.toContain("BEGIN");
+    expect(body).not.toContain(FAKE_WEBHOOK_SECRET);
+  });
+
+  test("GET /dashboard/manifest/confirm: valid hold → 200 confirm; no hold → 302 to the shell", async () => {
+    const session = await createSessionValue("octocat", null, SESSION_SECRET);
+    const ok = await worker.fetch(
+      resumeRequest("/dashboard/manifest/confirm", session, await freshHold()),
+      makeEnv(),
+    );
+    expect(ok.status).toBe(200);
+    expect(await ok.text()).toContain('name="confirm" value="overwrite"');
+    const noHold = await worker.fetch(
+      resumeRequest("/dashboard/manifest/confirm", session),
+      makeEnv(),
+    );
+    expect(noHold.status).toBe(302);
+    expect(noHold.headers.get("Location")).toBe("/dashboard");
   });
 });
 
