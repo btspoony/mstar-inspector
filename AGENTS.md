@@ -35,10 +35,9 @@ notice. The live Cloudflare Worker is remote — it is not this checklist.
 - local images tagged `mstar-inspector-sandbox:*` and
   `mstar-review-runner-test:*` (this repo's custom sandbox builds / trial tags).
 - orphan `workerd` processes whose argv/cwd is this repo or a deleted
-  `.worktrees/*` / `mstar-inspector-wt-*` worktree (`ppid=1` after the parent wrangler died).
-- leftover git worktrees under `.worktrees/` (`git worktree list`) and local
-  branches already merged to `origin/main`. Sibling `mstar-inspector-wt-*`
-  paths from older sessions also count.
+  `.worktrees/*` checkout (`ppid=1` after the parent wrangler died).
+- leftover git worktrees: `git worktree list` — abandoned paths under
+  `.worktrees/`, plus any local branches already merged to `origin/main`.
 
 ### Tear down
 
