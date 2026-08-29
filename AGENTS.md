@@ -11,6 +11,16 @@ Morning Star harness SSOT lives in [`.mstar/AGENTS.md`](.mstar/AGENTS.md) — pa
 3. `.mstar/AGENTS.md`
 4. `mstar-*` skills
 
+## Git worktrees
+
+Feature worktrees for this repo are created **under `./.worktrees/`** (repo-relative), not as sibling directories next to the clone.
+
+Examples: `.worktrees/09-review-deep-parent/`, `.worktrees/feat-foo/`.
+
+`git worktree add .worktrees/<plan-id> -b feat/<plan-id> <base>`
+
+The directory is gitignored. Do not `git add` it. Cleanup still uses `git worktree remove` on abandoned paths listed by `git worktree list`.
+
 ## Post-work cleanup
 
 After a session that spawned **local** wrangler / Cloudflare Sandbox / Docker
@@ -25,9 +35,10 @@ notice. The live Cloudflare Worker is remote — it is not this checklist.
 - local images tagged `mstar-inspector-sandbox:*` and
   `mstar-review-runner-test:*` (this repo's custom sandbox builds / trial tags).
 - orphan `workerd` processes whose argv/cwd is this repo or a deleted
-  `mstar-inspector-wt-*` worktree (`ppid=1` after the parent wrangler died).
-- leftover git worktrees (`git worktree list`) and local branches already
-  merged to `origin/main`.
+  `.worktrees/*` / `mstar-inspector-wt-*` worktree (`ppid=1` after the parent wrangler died).
+- leftover git worktrees under `.worktrees/` (`git worktree list`) and local
+  branches already merged to `origin/main`. Sibling `mstar-inspector-wt-*`
+  paths from older sessions also count.
 
 ### Tear down
 
