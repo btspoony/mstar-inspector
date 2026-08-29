@@ -52,6 +52,7 @@ import {
 import { createAppsStore, type GithubAppRow } from "./apps-store";
 import { SecretboxKeyError, createSecretbox } from "./secretbox";
 import {
+  MAX_PROVIDER_KEY_LENGTH,
   PROVIDER_IDS,
   createAppConfigStore,
   parseModelChain,
@@ -810,12 +811,14 @@ dashboardApp.get("/apps/:slug/settings", async (c) => {
 /**
  * The settings POST: two operations on the pinned action path, discriminated
  * by the forms' hidden `op` field. add-key = provider allowlist (400 on any
- * other id — the allowlist is the plan's Global Constraint) + non-empty key,
- * then the store encrypts inside. save-chain = empty → clear (global
- * fallback), otherwise ≥1 comma-separated selector required and the chain is
- * stored VERBATIM (a `:thinking`-style suffix is legal omp syntax; full
- * selector validation stays omp-side). Validation failures re-render the
- * page at 400 with zero writes.
+ * other id — the allowlist is the plan's Global Constraint) + non-empty key
+ * of at most MAX_PROVIDER_KEY_LENGTH characters (plan 15 input bounds — an
+ * oversized key is a 400 re-render with zero writes; the store guard beneath
+ * is the backstop), then the store encrypts inside. save-chain = empty →
+ * clear (global fallback), otherwise ≥1 comma-separated selector required and
+ * the chain is stored VERBATIM (a `:thinking`-style suffix is legal omp
+ * syntax; full selector validation stays omp-side). Validation failures
+ * re-render the page at 400 with zero writes.
  */
 dashboardApp.post("/apps/:slug/settings", async (c) => {
   const gate = await requireAppSettings(c);
@@ -849,6 +852,19 @@ dashboardApp.post("/apps/:slug/settings", async (c) => {
         store,
         gate.app,
         { kind: "error", message: "Enter an API key to store." },
+        400,
+      );
+    }
+    if (plainKey.length > MAX_PROVIDER_KEY_LENGTH) {
+      return settingsResponse(
+        c,
+        gate.session,
+        store,
+        gate.app,
+        {
+          kind: "error",
+          message: `That API key is too long (${plainKey.length} characters) — keys are limited to ${MAX_PROVIDER_KEY_LENGTH} characters. Nothing was stored.`,
+        },
         400,
       );
     }

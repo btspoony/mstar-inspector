@@ -487,8 +487,9 @@ function toBase64Utf8(text: string): string {
  * `getAppConfig` decrypt face of src/dashboard/app-config-store.ts narrowed
  * to what assembly consumes. `keys` maps provider id → DECRYPTED plaintext
  * key (only providers with a stored row appear); `modelChain` is the verbatim
- * stored selector chain, null or "" = unset (global OMP_REVIEW_MODEL wins —
- * any falsy chain is treated as unset).
+ * stored selector chain, null / "" / whitespace-only = unset (global
+ * OMP_REVIEW_MODEL wins — any falsy or blank chain is treated as unset,
+ * plan 15 input bounds).
  */
 export type RunnerAppConfig = {
   keys: Record<string, string>;
@@ -605,9 +606,14 @@ export function buildRunnerEnv(
     }
   }
   // 3. Model chain: the App's verbatim chain overrides OMP_REVIEW_MODEL; any
-  //    falsy chain (null or "") is unset → the global chain stays untouched.
+  //    falsy or BLANK chain (null / "" / whitespace-only — plan 15 input
+  //    bounds: a direct-DB write can store a blank chain the routes would
+  //    have normalized) is unset → the global chain stays untouched. A chain
+  //    with content forwards verbatim — the guard only decides unset-vs-set.
   const chain =
-    typeof appCfg.modelChain === "string" && appCfg.modelChain !== "" ? appCfg.modelChain : undefined;
+    typeof appCfg.modelChain === "string" && appCfg.modelChain.trim() !== ""
+      ? appCfg.modelChain
+      : undefined;
   if (chain !== undefined) {
     runnerEnv.OMP_REVIEW_MODEL = chain;
   }

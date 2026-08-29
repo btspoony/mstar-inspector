@@ -29,7 +29,9 @@ import worker from "../../src/worker/index";
 import { createTestD1 } from "../store/helpers";
 import { createAppsStore, type GithubAppRow } from "../../src/dashboard/apps-store";
 import {
+  MAX_PROVIDER_KEY_LENGTH,
   PROVIDER_IDS,
+  ProviderKeyTooLongError,
   createAppConfigStore,
   parseModelChain,
 } from "../../src/dashboard/app-config-store";
@@ -384,6 +386,22 @@ describe("app-config store (createAppConfigStore) — provider keys", () => {
     const listX = await store.listProviderKeys(x.id);
     expect(listX).toEqual([{ provider: "anthropic", last4: "1111" }]);
   });
+
+  test("setProviderKey accepts a key of exactly 4096 characters (the bound is inclusive)", async () => {
+    const db = createAppConfigD1();
+    const app = await seedApp(db, { slug: "a", createdBy: "mallory" });
+    await configStore(db).setProviderKey(app.id, "anthropic", "k".repeat(MAX_PROVIDER_KEY_LENGTH));
+    expect(rawCount(db, "app_provider_keys")).toBe(1);
+  });
+
+  test("setProviderKey rejects a key over 4096 characters with the typed error — zero rows written", async () => {
+    const db = createAppConfigD1();
+    const app = await seedApp(db, { slug: "a", createdBy: "mallory" });
+    await expect(
+      configStore(db).setProviderKey(app.id, "anthropic", "k".repeat(MAX_PROVIDER_KEY_LENGTH + 1)),
+    ).rejects.toThrow(ProviderKeyTooLongError);
+    expect(rawCount(db, "app_provider_keys")).toBe(0);
+  });
 });
 
 // --- store: model chain + full config ---
@@ -422,6 +440,34 @@ describe("app-config store (createAppConfigStore) — model chain + getAppConfig
     expect(await store.getModelChain(app.id)).toBeNull();
     // Clearing an app that never had a chain is a quiet no-op.
     await expect(store.setModelChain(app.id, null)).resolves.toBeUndefined();
+  });
+
+  test("setModelChain(\"\") CLEARS the row — same path as null (plan 15: empty = fallback)", async () => {
+    const db = createAppConfigD1();
+    const app = await seedApp(db, { slug: "a", createdBy: "mallory" });
+    const store = configStore(db);
+    await store.setModelChain(app.id, "first/model");
+    await store.setModelChain(app.id, "");
+    expect(rawCount(db, "app_model_config")).toBe(0);
+    expect(await store.getModelChain(app.id)).toBeNull();
+    // Clearing an app with no stored chain is a quiet no-op, like null.
+    await expect(store.setModelChain(app.id, "")).resolves.toBeUndefined();
+  });
+
+  test("a whitespace-only chain is blank = clear; a padded real chain upserts VERBATIM", async () => {
+    const db = createAppConfigD1();
+    const app = await seedApp(db, { slug: "a", createdBy: "mallory" });
+    const store = configStore(db);
+    // Route semantics (空 = 清除, raw.trim() === "") aligned at the store: a
+    // blank chain never lands as a row, whatever the caller passed.
+    await store.setModelChain(app.id, "   ");
+    expect(rawCount(db, "app_model_config")).toBe(0);
+    expect(await store.getModelChain(app.id)).toBeNull();
+    // Interior/trailing whitespace in a chain WITH content is configuration —
+    // stored exactly as given (the runner-side selector parse trims segments).
+    const padded = "  openai/gpt-5 , anthropic/claude-x  ";
+    await store.setModelChain(app.id, padded);
+    expect(await store.getModelChain(app.id)).toBe(padded);
   });
 
   test("getAppConfig returns the decrypted keys + chain; an app without config is an EMPTY config", async () => {
@@ -623,6 +669,37 @@ describe("POST /dashboard/apps/:slug/settings — add-key (op=add-key)", () => {
       expect(await res.text()).toContain("Enter an API key");
     }
     expect(rawCount(db, "app_provider_keys")).toBe(0);
+  });
+
+  test("key over 4096 characters → 400 full-page re-render, zero rows written (plan 15 input bounds)", async () => {
+    const { db } = await seededWorld();
+    const cookie = `${SESSION_COOKIE}=${await sessionCookie("mallory")}`;
+    const res = await postForm(SETTINGS, cookie, makeEnv(db), {
+      op: "add-key",
+      provider: "anthropic",
+      key: "k".repeat(MAX_PROVIDER_KEY_LENGTH + 1),
+    });
+    expect(res.status).toBe(400);
+    const body = await res.text();
+    expect(body).toContain("limited to 4096 characters");
+    // 400 is the full page re-render — the user can retry inline.
+    expect(body).toContain('name="op" value="add-key"');
+    expect(rawCount(db, "app_provider_keys")).toBe(0);
+  });
+
+  test("a key of exactly 4096 characters stores fine (the bound is inclusive)", async () => {
+    const { db, app } = await seededWorld();
+    const cookie = `${SESSION_COOKIE}=${await sessionCookie("mallory")}`;
+    const res = await postForm(SETTINGS, cookie, makeEnv(db), {
+      op: "add-key",
+      provider: "anthropic",
+      key: "k".repeat(MAX_PROVIDER_KEY_LENGTH),
+    });
+    expect(res.status).toBe(200);
+    const row = db.raw
+      .query("SELECT key_enc FROM app_provider_keys WHERE app_id = ? AND provider = 'anthropic'")
+      .get(app.id) as { key_enc: string };
+    expect(row.key_enc).toMatch(/^v1\.primary\./);
   });
 
   test("non-owner member → 403, zero mutation; owner of a DIFFERENT app → 403", async () => {

@@ -11,8 +11,12 @@
  *     json_valid for v1 rows
  */
 import { describe, expect, test } from "bun:test";
-import { createTestD1 } from "./helpers";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
+import { createMigratedTestD1, createTestD1 } from "./helpers";
 import type { D1Like } from "../../src/store/types";
+
+const MIGRATIONS_DIR = join(import.meta.dir, "../../migrations");
 
 const REVIEW = {
   id: "review-1",
@@ -121,6 +125,63 @@ describe("migrations/0001_reviews.sql", () => {
     await db.prepare("DELETE FROM reviews WHERE id = ?").bind(REVIEW.id).run();
     const remaining = db.raw.query("SELECT COUNT(*) AS n FROM findings").get() as { n: number };
     expect(remaining.n).toBe(0);
+  });
+});
+
+describe("migrations/0007_reviews_app_id_index.sql", () => {
+  /** Apply one migration file verbatim (filename order = wrangler order). */
+  function applyMigrationFile(db: ReturnType<typeof createTestD1>, name: string): void {
+    db.raw.exec(readFileSync(join(MIGRATIONS_DIR, name), "utf8"));
+  }
+
+  test("applies cleanly over a seeded production-shaped DB (0001–0006 with live rows)", () => {
+    const db = createTestD1();
+    // Reviews exist BEFORE the later migrations — the wrangler sequence on a
+    // live deployment: a legacy row (app_id NULL) and, once 0004/0005 exist,
+    // an attributed row.
+    insertReview(db);
+    insertReview(db, { id: "review-2", head_sha: "ffffffffffffffffffffffffffffffffffffffff" });
+    for (const name of [
+      "0003_dashboard_users.sql",
+      "0004_github_apps.sql",
+      "0005_reviews_app_id.sql",
+      "0006_app_provider_config.sql",
+    ]) {
+      applyMigrationFile(db, name);
+    }
+    db.raw
+      .prepare(
+        `INSERT INTO github_apps (id, slug, github_app_id, name, private_key_enc, webhook_secret_enc,
+           created_by, status, deleted_at, created_at, updated_at)
+         VALUES ('app-1', 'acmes-app', 1001, 'acmes-app', 'enc', 'enc', 'mallory', 'active', NULL,
+           datetime('now'), datetime('now'))`,
+      )
+      .run();
+    db.raw.exec("UPDATE reviews SET app_id = 'app-1' WHERE id = 'review-2'");
+
+    // Metadata-only CREATE INDEX builds over the live rows without rewriting.
+    expect(() => applyMigrationFile(db, "0007_reviews_app_id_index.sql")).not.toThrow();
+    const count = db.raw.query("SELECT COUNT(*) AS n FROM reviews").get() as { n: number };
+    expect(count.n).toBe(2);
+  });
+
+  test("creates idx_reviews_app_id ON reviews(app_id) (fully migrated schema)", () => {
+    const db = createMigratedTestD1();
+    const index = db.raw
+      .query("SELECT tbl_name FROM sqlite_master WHERE type = 'index' AND name = 'idx_reviews_app_id'")
+      .get() as { tbl_name: string } | null;
+    expect(index).not.toBeNull();
+    expect(index!.tbl_name).toBe("reviews");
+    const columns = db.raw.query("PRAGMA index_info(idx_reviews_app_id)").all() as Array<{ name: string }>;
+    expect(columns.map((c) => c.name)).toEqual(["app_id"]);
+  });
+
+  test("the per-App attribution lookup uses the index (EXPLAIN QUERY PLAN)", () => {
+    const db = createMigratedTestD1();
+    const plan = db.raw
+      .query("EXPLAIN QUERY PLAN SELECT id FROM reviews WHERE app_id = 'app-1'")
+      .all() as Array<{ detail: string }>;
+    expect(plan.some((p) => p.detail.includes("USING INDEX idx_reviews_app_id"))).toBe(true);
   });
 });
 
