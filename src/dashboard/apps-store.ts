@@ -113,8 +113,9 @@ export function createAppsStore(db: AppsStoreD1) {
      * Insert a new active app row (status 'active', deleted_at NULL) with
      * the CALLER-SUPPLIED id as the row PK (T1 review pin — the caller's
      * secretbox AAD rowKey is this id). UNIQUE violations on slug
-     * or github_app_id throw — the manifest flow resolves slug collisions
-     * with a retry suffix at the route layer.
+     * or github_app_id throw — the route layer pre-resolves the slug at
+     * start, and a commit-time race burns the hold (409) instead of
+     * remapping (the manifest registered the webhook URL with GitHub).
      */
     async createApp(input: CreateAppInput): Promise<GithubAppRow> {
       const id = input.id;

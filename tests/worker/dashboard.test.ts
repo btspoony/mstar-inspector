@@ -4,8 +4,9 @@
  * Task 1 adds the GitHub App Manifest start/callback coverage (state CSRF,
  * locked conversion headers, encrypted hold cookie, no-secret HTML); plan 13
  * B5 T3 rewrites the commit coverage: slug-carrying signed state, hold-bound
- * D1 write of the encrypted github_apps row (AAD rowKey = row PK), slug
- * collision retries, fail-closed DASHBOARD_ENCRYPTION_KEY, zero
+ * D1 write of the encrypted github_apps row (AAD rowKey = row PK), the
+ * commit-time slug-conflict 409 burn (never remap — the manifest registered
+ * the webhook URL), fail-closed DASHBOARD_ENCRYPTION_KEY, zero
  * api.cloudflare.com calls, no-secret summary HTML.
  *
  * The end-to-end callback network path is exercised only in live smoke
@@ -1410,7 +1411,8 @@ describe("/dashboard manifest commit (plan 13 B5 T3: manifest → D1, zero CF AP
     expect(html).toContain(startUrl);
   });
 
-  test("commit-time slug race (row appeared after start) → INSERT retries with a fresh suffix and succeeds", async () => {
+  test("commit-time slug race (row appeared after start) → 409, hold burned, zero rows (never remap: the manifest registered the webhook URL)", async () => {
+    const rec = stubFetchRecording();
     const env = commitEnv();
     const db = dbOf(env);
     // Hold carries the base slug as if start had seen a free namespace.
@@ -1430,16 +1432,28 @@ describe("/dashboard manifest commit (plan 13 B5 T3: manifest → D1, zero CF AP
       webhookSecretEnc: "v1.primary.aXZpdi.cHJldGV4dA==",
       createdBy: "someone-else",
     });
+    const warns = spyOnWarn();
     const res = await doCommit({ env, holdValue });
-    expect(res.status).toBe(200);
+    expect(res.status).toBe(409);
+    expectHoldExpired(res); // the hold can never commit correctly — burned
+    // Zero rows written for the held App, and the only row in the table is
+    // the racer's pre-existing one.
     const rows = db.raw.query("SELECT slug FROM github_apps WHERE github_app_id = ?").all(CONVERSION.id) as Array<{ slug: string }>;
-    expect(rows).toHaveLength(1);
-    expect(rows[0]!.slug).not.toBe("mstar-inspector-octocat");
-    expect(rows[0]!.slug.startsWith("mstar-inspector-octocat-")).toBe(true);
-    // The success page shows the FINAL slug's webhook URL, not the stale one.
+    expect(rows).toHaveLength(0);
+    expect(appRowCount(env)).toBe(1);
+    // No remap, no upstream rescue (no webhook PATCH path) — zero fetch.
+    expect(rec.urls).toHaveLength(0);
+    // Copy: the App was created on GitHub but NOT connected + how to recover.
     const html = await res.text();
-    expect(html).toContain(`https://worker.local/webhook/${rows[0]!.slug}`);
-    expect(html).not.toContain("webhook/mstar-inspector-octocat<");
+    expect(html).toContain("not connected");
+    expect(html).toContain("delete the just-created App on GitHub");
+    expect(html).not.toContain("BEGIN");
+    expect(html).not.toContain(FAKE_WEBHOOK_SECRET);
+    // Structured log names the reason for operators.
+    const entry = JSON.parse(warns[0] ?? "") as Record<string, unknown>;
+    expect(entry.event).toBe("dashboard_manifest");
+    expect(entry.stage).toBe("commit");
+    expect(entry.reason).toBe("slug_conflict");
   });
 
   test("github_app_id already connected → 409, zero new rows, hold burned (non-retryable)", async () => {

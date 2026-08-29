@@ -108,8 +108,9 @@ export const APP_SLUG_PREFIX = "mstar-inspector-";
  * Login-derived webhook slug: `mstar-inspector-{login}` minus non-URL
  * characters (GitHub logins are already `[A-Za-z0-9-]`; the strip is
  * defensive so the slug is always a safe URL path segment). Collisions are
- * resolved with a short random suffix — `slugCollisionSuffix` at start
- * (pre-resolve for display) and again at commit if the INSERT races.
+ * resolved with a short random suffix at start (pre-resolve); a commit-time
+ * race burns the hold with a 409 instead of remapping — the manifest has
+ * already registered the slug's webhook URL with GitHub.
  */
 export function buildAppSlug(login: string): string {
   return `${APP_SLUG_PREFIX}${login}`.replace(/[^a-zA-Z0-9-]/g, "");

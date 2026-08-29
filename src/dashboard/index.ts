@@ -121,8 +121,10 @@ function isAppsUniqueViolation(err: unknown, column: "slug" | "github_app_id"): 
 /**
  * First slug in `[base, base-<suffix>…]` not present in github_apps
  * (soft-deleted rows count — their UNIQUE slug still owns the namespace).
- * Minted at start and carried through the signed state; the commit retries
- * with a fresh suffix if a racing INSERT takes the slug anyway.
+ * Minted at start and carried through the signed state — the first line of
+ * defense against collisions. A commit-time race does NOT remap (the
+ * manifest already registered the slug's webhook URL with GitHub): the hold
+ * is burned with a 409 instead.
  */
 async function resolveAvailableSlug(db: DashboardD1, base: string): Promise<string> {
   const apps = createAppsStore(db);
@@ -334,10 +336,12 @@ dashboardApp.get("/manifest/callback", async (c) => {
 // (`hold.login === session.login`, else 403, zero writes) and survives
 // RETRYABLE outcomes (500 encrypt/DB failures, 502 conversion retries) so
 // the operator can retry without creating a second GitHub App; it is burned
-// on success, login mismatch, undecryptable/expired hold, and the
-// non-retryable already-connected conflict. Missing/undecryptable/expired
-// hold = flow expired → 302 back to the start, zero writes. On submit, the
-// PEM and webhook secret are encrypted with the DASHBOARD_ENCRYPTION_KEY
+// on success, login mismatch, undecryptable/expired hold, the non-retryable
+// already-connected conflict, and the non-retryable slug-conflict race (the
+// manifest already registered the webhook URL — remapping would desync it).
+// Missing/undecryptable/expired hold = flow expired → 302 back to the start,
+// zero writes. On submit, the PEM and webhook secret are encrypted with the
+// DASHBOARD_ENCRYPTION_KEY
 // master key (AAD rowKey = the row PK — caller-supplied id, T1 review pin)
 // and ONE github_apps row is written. Missing/malformed key → 500
 // fail-closed, hold kept (spec § Crypto envelope). Zero Cloudflare API
@@ -396,57 +400,69 @@ dashboardApp.post("/manifest/commit", async (c) => {
       500,
     );
   }
-  // Slug: pre-resolved at start and carried through the hold; a racing
-  // INSERT can still take it → bounded retries with a fresh short suffix.
+  // Slug: pre-resolved at start and carried through the hold. A commit-time
+  // UNIQUE conflict means the slug was taken between start and commit — the
+  // manifest already registered {origin}/webhook/{hold.slug} with GitHub, so
+  // remapping the row to a fresh suffix would desync the webhook URL (the
+  // App would look connected yet never receive events, Bugbot F-1). The hold
+  // is burned instead: zero rows written, 409, and the operator restarts the
+  // flow with a fresh slug.
   const apps = createAppsStore(db);
-  let slug = hold.slug;
-  for (let attempt = 0; ; attempt++) {
-    try {
-      const row = await apps.createApp({
-        id: appId,
-        slug,
-        githubAppId: hold.id,
-        name: hold.name,
-        privateKeyEnc,
-        webhookSecretEnc,
-        createdBy: session.login,
-      });
-      // Success: the hold is single-success — burned now that the row exists.
+  try {
+    const row = await apps.createApp({
+      id: appId,
+      slug: hold.slug,
+      githubAppId: hold.id,
+      name: hold.name,
+      privateKeyEnc,
+      webhookSecretEnc,
+      createdBy: session.login,
+    });
+    // Success: the hold is single-success — burned now that the row exists.
+    c.header("Set-Cookie", expireCookie(MANIFEST_HOLD_COOKIE));
+    return c.html(
+      manifestSuccessPage(session, {
+        id: row.github_app_id,
+        name: row.name,
+        slug: row.slug,
+        webhookUrl: `${new URL(c.req.url).origin}/webhook/${row.slug}`,
+      }),
+    );
+  } catch (err) {
+    if (isAppsUniqueViolation(err, "slug")) {
+      // The GitHub App WAS created on GitHub, but its webhook slug was
+      // claimed before the row could land. Storing the row under any other
+      // slug would advertise a URL GitHub never posts to — burn the hold
+      // and make the operator start a fresh creation flow.
+      logManifestFailure("commit", "slug_conflict", { slug: hold.slug });
       c.header("Set-Cookie", expireCookie(MANIFEST_HOLD_COOKIE));
       return c.html(
-        manifestSuccessPage(session, {
-          id: row.github_app_id,
-          name: row.name,
-          slug: row.slug,
-          webhookUrl: `${new URL(c.req.url).origin}/webhook/${row.slug}`,
-        }),
-      );
-    } catch (err) {
-      if (attempt < SLUG_SUFFIX_ATTEMPTS && isAppsUniqueViolation(err, "slug")) {
-        slug = `${hold.slug}-${randomSlugSuffix()}`;
-        continue;
-      }
-      if (isAppsUniqueViolation(err, "github_app_id")) {
-        // The same GitHub App is already connected — retrying cannot help.
-        logManifestFailure("commit", "github_app_id_conflict", { github_app_id: hold.id });
-        c.header("Set-Cookie", expireCookie(MANIFEST_HOLD_COOKIE));
-        return c.html(
-          manifestErrorPage(
-            "This GitHub App is already connected on this deployment — no changes were made.",
-          ),
-          409,
-        );
-      }
-      // Retryable (missing migrations, transient D1 failure, …): hold kept.
-      logManifestFailure("commit", "db_error", { error_type: errorTypeName(err) });
-      return c.html(
         manifestErrorPage(
-          "The App could not be stored — the dashboard database rejected the write. You can resubmit.",
-          true,
+          "Another App claimed this App's webhook slug while setup was in progress, so the GitHub App was created on GitHub but not connected to this deployment — no Worker data was stored. A manifest-created App cannot be connected twice: delete the just-created App on GitHub, then run a new app-creation flow from the dashboard.",
         ),
-        500,
+        409,
       );
     }
+    if (isAppsUniqueViolation(err, "github_app_id")) {
+      // The same GitHub App is already connected — retrying cannot help.
+      logManifestFailure("commit", "github_app_id_conflict", { github_app_id: hold.id });
+      c.header("Set-Cookie", expireCookie(MANIFEST_HOLD_COOKIE));
+      return c.html(
+        manifestErrorPage(
+          "This GitHub App is already connected on this deployment — no changes were made.",
+        ),
+        409,
+      );
+    }
+    // Retryable (missing migrations, transient D1 failure, …): hold kept.
+    logManifestFailure("commit", "db_error", { error_type: errorTypeName(err) });
+    return c.html(
+      manifestErrorPage(
+        "The App could not be stored — the dashboard database rejected the write. You can resubmit.",
+        true,
+      ),
+      500,
+    );
   }
 });
 
