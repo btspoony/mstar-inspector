@@ -1,13 +1,18 @@
 /**
- * GitHub App Manifest flow (plan 11 B1): start → GitHub form POST →
- * callback → code conversion → encrypted hold cookie (Task 1) →
- * confirm-gated Cloudflare secrets-bulk commit (Task 2).
+ * GitHub App Manifest flow (plan 11 B1: start → GitHub form POST →
+ * callback → code conversion → encrypted hold cookie; plan 13 B5 T3:
+ * commit writes the encrypted `github_apps` D1 row — the dashboard's
+ * Cloudflare API dependency is retired, spec § Multi-App 契约).
  *
- * Architect locks (spec dashboard-b1-manifest.md § L6/L7/L8/L9):
+ * Architect locks (spec dashboard-b1-manifest.md § L6/L7/L8/L9 + plan 13):
  * - CSRF state cookie `__Host-mstar-manifest-state`: reuses the B0 HMAC
- *   createStateValue/verifyStateValue, single-use, Max-Age 600; DISTINCT from
- *   B0's `__Host-mstar-oauth-state`. `state` rides the GitHub form-action
- *   query (GitHub echoes it into the redirect_url next to `code`).
+ *   signValue/verifyValue discipline (createStateValue), single-use,
+ *   Max-Age 600; DISTINCT from B0's `__Host-mstar-oauth-state`. `state`
+ *   rides the GitHub form-action query (GitHub echoes it into the
+ *   redirect_url next to `code`). B5: the value CARRIES the webhook slug
+ *   minted at start — the slug survives start → callback only through
+ *   this signed carrier (the manifest form is client-editable, so it is
+ *   not a trusted carrier).
  * - Conversion: POST https://api.github.com/app-manifests/{code}/conversions
  *   with Accept: application/vnd.github+json + X-GitHub-Api-Version
  *   2022-11-28 and NO Authorization header (the code is the credential; a
@@ -15,12 +20,16 @@
  * - PEM/webhook_secret hold: AES-256-GCM encrypted cookie
  *   `__Host-mstar-manifest-hold`, key = HKDF-SHA256(DASHBOARD_SESSION_SECRET,
  *   info "mstar-manifest-hold"), Max-Age 600; bound to the callback session
- *   login, kept across retryable commit outcomes (400/500/502), burned on
+ *   login, kept across retryable commit outcomes (500/502), burned on
  *   success, login mismatch, bad hold, or logout (T2).
- *   Payload NEVER enters HTML, logs, or D1.
+ *   Payload NEVER enters HTML, logs, or D1. B5: the payload also carries
+ *   the slug so the commit can write the D1 row after the state cookie is
+ *   burned.
+ * - Storage口径 (plan 13 lock L1): the conversion PEM is stored VERBATIM
+ *   (encrypted) — normalization to PKCS#8 stays at createReviewCommenter
+ *   construction on the consumer side.
  */
-import { normalizePrivateKey } from "./private-key";
-import { base64urlDecode, base64urlEncode } from "./session";
+import { base64urlDecode, base64urlEncode, signValue, timingSafeEqual, verifyValue } from "./session";
 
 export const MANIFEST_STATE_COOKIE = "__Host-mstar-manifest-state";
 export const MANIFEST_HOLD_COOKIE = "__Host-mstar-manifest-hold";
@@ -49,7 +58,7 @@ const GITHUB_MANIFEST_HEADERS = {
  * values — stages, reasons, and upstream statuses are not secrets.
  */
 export function logManifestFailure(
-  stage: "state_verify" | "callback" | "conversion" | "commit" | "secret_write",
+  stage: "state_verify" | "callback" | "conversion" | "commit",
   reason: string,
   extra: Record<string, unknown> = {},
 ): void {
@@ -90,17 +99,44 @@ export function buildAppName(login: string): string {
   return `${APP_NAME_PREFIX}${login}`.slice(0, GITHUB_APP_NAME_MAX_LENGTH);
 }
 
+// --- webhook slug (plan 13 B5: per-App webhook URL, spec § Multi-App 契约) ---
+
+/** Per-App slug prefix; the slug routes `/webhook/{slug}` and names the row. */
+export const APP_SLUG_PREFIX = "mstar-inspector-";
+
+/**
+ * Login-derived webhook slug: `mstar-inspector-{login}` minus non-URL
+ * characters (GitHub logins are already `[A-Za-z0-9-]`; the strip is
+ * defensive so the slug is always a safe URL path segment). Collisions are
+ * resolved with a short random suffix at start (pre-resolve); a commit-time
+ * race burns the hold with a 409 instead of remapping — the manifest has
+ * already registered the slug's webhook URL with GitHub.
+ */
+export function buildAppSlug(login: string): string {
+  return `${APP_SLUG_PREFIX}${login}`.replace(/[^a-zA-Z0-9-]/g, "");
+}
+
+const SLUG_SUFFIX_ALPHABET = "abcdefghijklmnopqrstuvwxyz0123456789";
+
+/** Short random collision suffix, e.g. `k3f9` → appended as `-{suffix}`. */
+export function randomSlugSuffix(length = 4): string {
+  const bytes = crypto.getRandomValues(new Uint8Array(length));
+  return Array.from(bytes, (b) => SLUG_SUFFIX_ALPHABET[b % SLUG_SUFFIX_ALPHABET.length]!).join("");
+}
+
 /**
  * Manifest JSON for the locked review permission set (mirrors the
  * `.env.example` permission comment; no extra permissions, no OAuth App
  * fields). `redirect_url` stays the bare callback — CSRF `state` rides the
- * form-action query instead (GitHub echoes it back next to `code`).
+ * form-action query instead (GitHub echoes it back next to `code`). B5: the
+ * webhook is the App's OWN route `{origin}/webhook/{slug}` — the slug is
+ * minted at start and carried to the commit through the signed state.
  */
-export function buildManifest(origin: string, login: string): ManifestPayload {
+export function buildManifest(origin: string, login: string, slug: string): ManifestPayload {
   return {
     name: buildAppName(login),
     url: origin,
-    hook_attributes: { url: `${origin}/webhook` },
+    hook_attributes: { url: `${origin}/webhook/${slug}` },
     redirect_url: `${origin}/dashboard/manifest/callback`,
     public: false,
     default_events: ["pull_request", "issue_comment"],
@@ -118,6 +154,45 @@ export function buildManifestCreateUrl(state: string): string {
   const url = new URL(GITHUB_MANIFEST_CREATE_URL);
   url.searchParams.set("state", state);
   return url.toString();
+}
+
+// --- slug-carrying CSRF state (B5: same createStateValue HMAC discipline) ---
+
+export type ManifestStatePayload = {
+  slug: string;
+};
+
+/**
+ * Signed manifest state carrying the webhook slug minted at start. Same
+ * discipline as B0's createStateValue: HMAC-signed with
+ * DASHBOARD_SESSION_SECRET, used as BOTH the state cookie value and the
+ * form-action query param, single-use (expired at the callback).
+ */
+export async function createManifestStateValue(secret: string, slug: string): Promise<string> {
+  return signValue(JSON.stringify({ slug }), secret);
+}
+
+/**
+ * Callback check (verifyStateValue discipline): cookie === param byte-compare
+ * (timing-safe), HMAC verify, then payload shape. Anything off → null.
+ */
+export async function readManifestStateValue(
+  cookieValue: string | undefined,
+  stateParam: string | null | undefined,
+  secret: string,
+): Promise<ManifestStatePayload | null> {
+  if (!cookieValue || !stateParam) return null;
+  if (!timingSafeEqual(enc.encode(cookieValue), enc.encode(stateParam))) return null;
+  const raw = await verifyValue(cookieValue, secret);
+  if (raw === null) return null;
+  let payload: ManifestStatePayload;
+  try {
+    payload = JSON.parse(raw) as ManifestStatePayload;
+  } catch {
+    return null;
+  }
+  if (typeof payload.slug !== "string" || !/^[a-zA-Z0-9-]+$/.test(payload.slug)) return null;
+  return payload;
 }
 
 // --- code → conversion ---
@@ -177,6 +252,8 @@ export type ManifestHoldPayload = {
   id: number;
   name: string;
   login: string;
+  /** Webhook slug minted at start (carried from the signed state). */
+  slug: string;
   pem: string;
   webhook_secret: string;
   /** Expiry, seconds since epoch (server-side double-check beside Max-Age). */
@@ -211,12 +288,14 @@ export async function createHoldValue(
   conversion: ManifestConversion,
   login: string,
   secret: string,
+  slug: string,
   nowMs = Date.now(),
 ): Promise<string> {
   const payload: ManifestHoldPayload = {
     id: conversion.id,
     name: conversion.name,
     login,
+    slug,
     pem: conversion.pem,
     webhook_secret: conversion.webhook_secret,
     exp: Math.floor(nowMs / 1000) + MANIFEST_HOLD_MAX_AGE_SEC,
@@ -261,88 +340,10 @@ export async function readHoldValue(
   if (typeof payload.id !== "number") return null;
   if (typeof payload.name !== "string" || payload.name.length === 0) return null;
   if (typeof payload.login !== "string" || payload.login.length === 0) return null;
+  if (typeof payload.slug !== "string" || payload.slug.length === 0) return null;
   if (typeof payload.pem !== "string" || payload.pem.length === 0) return null;
   if (typeof payload.webhook_secret !== "string" || payload.webhook_secret.length === 0) return null;
   if (typeof payload.exp !== "number") return null;
   if (payload.exp <= Math.floor(nowMs / 1000)) return null;
   return payload;
-}
-
-// --- Cloudflare secrets-bulk write (architect lock spec L6/L8) ---
-
-/** L8: script name when CLOUDFLARE_WORKER_NAME is unset (= wrangler.jsonc `name`). */
-export const DEFAULT_CLOUDFLARE_WORKER_NAME = "mstar-inspector";
-/** L8: Cloudflare API base. */
-export const CLOUDFLARE_API_BASE = "https://api.cloudflare.com/client/v4";
-
-// Cloudflare API calls are bounded (same convention as the GitHub fetches).
-const CLOUDFLARE_FETCH_TIMEOUT_MS = 10_000;
-
-/** Commit-face Cloudflare config (subset of Env; missing pieces fail closed). */
-export type CloudflareSecretEnv = {
-  CLOUDFLARE_API_TOKEN?: string;
-  CLOUDFLARE_ACCOUNT_ID?: string;
-  CLOUDFLARE_WORKER_NAME?: string;
-};
-
-export type SecretWriteResult = "stored" | "missing_config" | "upstream_error";
-
-/**
- * L6: ONE `PATCH …/workers/scripts/{script_name}/secrets-bulk` (JSON Merge
- * Patch, RFC 7396) writing exactly APP_ID / PRIVATE_KEY / WEBHOOK_SECRET as
- * `secret_text` — single-request atomicity; secrets not listed are left
- * untouched; REVIEW_ENABLED / GITHUB_OAUTH_* / model keys are NEVER sent.
- * The PEM is normalized to PKCS#8 before the write. Missing API token or
- * account id → "missing_config" (fail-closed, zero requests). Any upstream
- * non-2xx (incl. 403 token misconfiguration) → "upstream_error" → the route
- * renders a 5xx error page.
- */
-export async function writeWorkerSecrets(
-  env: CloudflareSecretEnv,
-  hold: ManifestHoldPayload,
-): Promise<SecretWriteResult> {
-  const token = env.CLOUDFLARE_API_TOKEN;
-  const accountId = env.CLOUDFLARE_ACCOUNT_ID;
-  if (!token || !accountId) return "missing_config";
-  let privateKey: string;
-  try {
-    privateKey = normalizePrivateKey(hold.pem);
-  } catch (err) {
-    logManifestFailure("secret_write", "pem_normalize_failed", { error_type: errorType(err) });
-    return "upstream_error";
-  }
-  // An empty-string override is misconfiguration, not a name → fall back.
-  const scriptName = env.CLOUDFLARE_WORKER_NAME || DEFAULT_CLOUDFLARE_WORKER_NAME;
-  const url = `${CLOUDFLARE_API_BASE}/accounts/${encodeURIComponent(accountId)}/workers/scripts/${encodeURIComponent(scriptName)}/secrets-bulk`;
-  const body = {
-    secrets: {
-      APP_ID: { name: "APP_ID", text: String(hold.id), type: "secret_text" },
-      PRIVATE_KEY: { name: "PRIVATE_KEY", text: privateKey, type: "secret_text" },
-      WEBHOOK_SECRET: { name: "WEBHOOK_SECRET", text: hold.webhook_secret, type: "secret_text" },
-    },
-  };
-  let res: Response;
-  try {
-    res = await fetch(url, {
-      method: "PATCH",
-      signal: AbortSignal.timeout(CLOUDFLARE_FETCH_TIMEOUT_MS),
-      headers: {
-        // L8: Bearer API token (operator-scoped `Workers Scripts Write`).
-        Authorization: `Bearer ${token}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify(body),
-    });
-  } catch (err) {
-    logManifestFailure("secret_write", "fetch_failed", { error_type: errorType(err) });
-    return "upstream_error";
-  }
-  const cfStatus = res.status;
-  // Consume the body so the connection is released promptly.
-  await res.body?.cancel();
-  if (!res.ok) {
-    logManifestFailure("secret_write", "http_error", { cf_status: cfStatus });
-    return "upstream_error";
-  }
-  return "stored";
 }

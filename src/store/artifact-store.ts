@@ -32,6 +32,13 @@
  * dependencies. The `db` parameter is the narrow D1 face (`D1Like`) so the
  * bun:sqlite test double and a real `D1Database` both satisfy it
  * structurally (plan Clarify 5).
+ *
+ * Per-App attribution (plan 13, migration 0005): the put doc carries an
+ * OPTIONAL caller-supplied `appId` — the resolved `appRef`'s id for per-App
+ * messages — which is bound into `reviews.app_id`. Legacy messages (appRef
+ * absent or `{ kind: "legacy" }`) omit it and the row keeps `app_id` NULL
+ * (Clarify #3: NULL = legacy). The column's FK to `github_apps(id)` makes an
+ * unknown appId a loud batch failure, never a silent mis-attribution.
  */
 
 import {
@@ -127,8 +134,28 @@ function assertTargetAgrees(key: IdempotencyKey, payload: MstarReviewV1): void {
   }
 }
 
+/**
+ * The review put input: the engine `ArtifactDoc` plus the caller-supplied
+ * per-App attribution (plan 13, QC fix wave 1 F-001). A structural superset
+ * of the engine contract — the engine package is unchanged; the consumer is
+ * the only production caller and passes `appId` for per-App messages only
+ * (legacy/absent appRef omits it → the row keeps `app_id` NULL).
+ */
+export type ReviewArtifactDoc = ArtifactDoc & {
+  /**
+   * `github_apps.id` the review belongs to (per-App jobs). Optional —
+   * absent/NULL means a legacy (env-App) review. Never a credential.
+   */
+  appId?: string;
+};
+
 /** The D1 store face: the engine `ArtifactStore` plus the consumer's pre-check. */
 export type D1ArtifactStore = ArtifactStore & {
+  /**
+   * Widened put input (see `ReviewArtifactDoc`): the optional `appId` rides
+   * the doc into `reviews.app_id`.
+   */
+  put(doc: ReviewArtifactDoc): Promise<void>;
   /**
    * Consumer idempotency pre-check (dedup before clone/diff/run). Not part
    * of the engine `ArtifactStore` interface — it stays on the store face
@@ -157,7 +184,7 @@ export type D1ArtifactStore = ArtifactStore & {
  */
 export function createArtifactStore(db: D1Like): D1ArtifactStore {
   return {
-    async put(doc: ArtifactDoc): Promise<void> {
+    async put(doc: ReviewArtifactDoc): Promise<void> {
       if (doc.kind !== "review") {
         throw new Error(
           `artifact-store: kind ${JSON.stringify(doc.kind)} is not persisted by the D1 store (only "review")`,
@@ -184,10 +211,14 @@ export function createArtifactStore(db: D1Like): D1ArtifactStore {
       assertTargetAgrees(key, payload);
 
       const reviewId = crypto.randomUUID();
+      // app_id: the caller-supplied per-App attribution (NULL for legacy —
+      // Clarify #3: NULL = legacy). `?? null` because D1 .bind() rejects
+      // undefined; the FK to github_apps(id) rejects an unknown appId loud.
+      const appId = doc.appId ?? null;
       const reviewStmt = db
         .prepare(
-          `INSERT INTO reviews (id, installation_id, owner, repo, pr_number, head_sha, verdict, summary_md, skill_version, envelope)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          `INSERT INTO reviews (id, installation_id, owner, repo, pr_number, head_sha, verdict, summary_md, skill_version, envelope, app_id)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
            ON CONFLICT (installation_id, owner, repo, pr_number, head_sha) DO NOTHING`,
         )
         .bind(
@@ -203,6 +234,7 @@ export function createArtifactStore(db: D1Like): D1ArtifactStore {
           // The validated envelope object itself — full JSON, losslessly
           // restorable via get() (no 64KB truncation on this column).
           JSON.stringify(payload),
+          appId,
         );
       // model / provider stay NULL (write caliber: 未知则 NULL — the Worker
       // face has no resolved model identity; raw_output stays NULL: the

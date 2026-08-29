@@ -440,6 +440,14 @@ export async function postReviewWithOctokit(octokit: PostOctokit, input: PostRev
  * per-installation octokit via the documented factory pattern. The
  * createAppAuth instance is memoized so its installation-token cache is
  * shared across calls (auth-app default: tokens cached until expiry).
+ *
+ * This factory is the ONLY createAppAuth construction point in the pipeline
+ * (architect lock L4, plan 13): every credential enters through the
+ * `CommenterEnv` parameter — the legacy env-App singleton and every per-App
+ * instance (consumer-side appRef resolution, src/pipeline/consumer.ts) are
+ * built here, one instance per credential so each App keeps its own
+ * installation-token cache. Octokit construction stays inside this module;
+ * call sites never duplicate it.
  */
 export function createReviewCommenter(env: CommenterEnv): ReviewCommenter {
   let appAuth: AppAuthStrategy | null = null;

@@ -8,7 +8,12 @@
  * worker/pipeline/session dependencies.
  *
  * Column shapes mirror `migrations/0001_reviews.sql` +
- * `0002_mstar_review_v1.sql` (DDL single sources).
+ * `0002_mstar_review_v1.sql` (DDL single sources). Later append-only
+ * migrations extend the table WITHOUT changing these types: migration 0005
+ * added `reviews.app_id` (TEXT, NULL = legacy; FK to github_apps), which is
+ * bound on WRITE only — the ArtifactStore `put` doc carries the per-App
+ * `appId` (src/store/artifact-store.ts) — and `ReviewRow` deliberately
+ * omits it because no read path consumes the column.
  */
 
 /** A row of the `reviews` table (D1 column names, snake_case). */
