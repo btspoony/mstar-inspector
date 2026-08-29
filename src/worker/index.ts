@@ -27,9 +27,16 @@ import { dashboardApp } from "../dashboard/index";
 
 const app = new Hono<{ Bindings: Env }>();
 
-/** Structured warn for the per-App route's rejection/bookkeeping paths. */
-function webhookWarn(reason: string, detail: string, msg: string): void {
-  defaultLog.warn({ event: "unknown", reason, detail }, msg);
+/**
+ * Structured warn for the per-App route's rejection/bookkeeping paths (plan
+ * 13 QC F-005): the caller passes the real stage label (e.g.
+ * `db_binding_missing`, `installation_upsert_failed`) and it rides `event` —
+ * never the generic "unknown" — so log consumers can filter these warns by
+ * event alone; `reason` keeps the same label for the reason-keyed greps and
+ * the three-field structured shape is unchanged.
+ */
+function webhookWarn(event: string, detail: string, msg: string): void {
+  defaultLog.warn({ event, reason: event, detail }, msg);
 }
 
 app.get("/healthz", (c) => c.json({ ok: true }));

@@ -1,10 +1,20 @@
 /**
  * Test D1 double (plan 05 Task 1 + plan 07 Task 4) — bun:sqlite in-memory
- * database executing the REAL migration SQL (`migrations/0001_reviews.sql`
- * + `0002_mstar_review_v1.sql`, DDL single sources, applied in filename
- * order exactly like `wrangler d1 migrations apply`), exposing only the
- * narrow D1 face the store depends on (plan Clarify 5:
+ * database executing the REAL migration SQL (DDL single sources, applied in
+ * filename order exactly like `wrangler d1 migrations apply`), exposing only
+ * the narrow D1 face the store depends on (plan Clarify 5:
  * prepare/bind/first/all/run + batch).
+ *
+ * Two schema shapes:
+ * - `createTestD1()` — the plan-07-era review-store shape (0001 + 0002),
+ *   i.e. production BEFORE plan 13. Kept for fixtures that exercise the
+ *   append-only ALTER sequence itself (tests/worker/apps-store.test.ts
+ *   seeds rows, THEN applies 0004/0005).
+ * - `createMigratedTestD1()` — the full current shape (0001 → 0005 in
+ *   filename order), i.e. what `wrangler d1 migrations apply` produces
+ *   today. The store adapter's INSERT binds `reviews.app_id` (plan 13, QC
+ *   fix wave 1 F-001), so every test exercising the REAL store.put against
+ *   production-shaped data runs on this one.
  *
  * bun:sqlite and D1 are both SQLite, so UNIQUE/ON CONFLICT semantics match;
  * if a divergence ever shows up against real D1, the remote apply is
@@ -15,14 +25,18 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import type { D1BatchResult, D1Like, D1StatementLike } from "../../src/store/types";
 
-const MIGRATIONS = ["0001_reviews.sql", "0002_mstar_review_v1.sql"];
+const MIGRATIONS_DIR = join(import.meta.dir, "../../migrations");
+/** Plan-07-era review-store schema (production before plan 13). */
+const BASE_MIGRATIONS = ["0001_reviews.sql", "0002_mstar_review_v1.sql"];
+/** Full current migration list, filename order = wrangler apply order. */
+const ALL_MIGRATIONS = [...BASE_MIGRATIONS, "0004_github_apps.sql", "0005_reviews_app_id.sql"];
 
 /** Execute the migration DDL on a fresh in-memory database. */
-function applyMigration(db: Database): void {
+function applyMigration(db: Database, migrations: readonly string[]): void {
   // SQLite enforces foreign keys per-connection; D1 has them on by default.
   db.exec("PRAGMA foreign_keys = ON;");
-  for (const name of MIGRATIONS) {
-    db.exec(readFileSync(join(import.meta.dir, "../../migrations", name), "utf8"));
+  for (const name of migrations) {
+    db.exec(readFileSync(join(MIGRATIONS_DIR, name), "utf8"));
   }
 }
 
@@ -58,15 +72,8 @@ function wrapStatement(stmt: Statement): D1StatementLike {
   };
 }
 
-/**
- * Create a fresh in-memory D1-like database with the review-store schema
- * applied. Each call returns an independent database (tests must not share
- * state). The underlying bun:sqlite handle is exposed for direct assertions
- * (e.g. counting rows) via the `raw` property.
- */
-export function createTestD1(): D1Like & { raw: Database } {
-  const db = new Database(":memory:");
-  applyMigration(db);
+/** Wrap a bun:sqlite handle in the narrow D1 face (shared by both shapes). */
+function wrapDb(db: Database): D1Like & { raw: Database } {
   return {
     raw: db,
     prepare(query: string): D1StatementLike {
@@ -97,4 +104,30 @@ export function createTestD1(): D1Like & { raw: Database } {
       }
     },
   };
+}
+
+/**
+ * Create a fresh in-memory D1-like database with the plan-07-era
+ * review-store schema (0001 + 0002) applied. Each call returns an
+ * independent database (tests must not share state). The underlying
+ * bun:sqlite handle is exposed for direct assertions (e.g. counting rows)
+ * via the `raw` property.
+ */
+export function createTestD1(): D1Like & { raw: Database } {
+  const db = new Database(":memory:");
+  applyMigration(db, BASE_MIGRATIONS);
+  return wrapDb(db);
+}
+
+/**
+ * Fully-migrated variant (plan 13): the same double with the complete
+ * migration list applied (0001 → 0005, filename order). Reviews carries the
+ * `app_id` column (FK to github_apps), so tests exercising the REAL
+ * store.put — whose INSERT binds `app_id` — run against the
+ * production-shaped schema. Each call returns an independent database.
+ */
+export function createMigratedTestD1(): D1Like & { raw: Database } {
+  const db = new Database(":memory:");
+  applyMigration(db, ALL_MIGRATIONS);
+  return wrapDb(db);
 }

@@ -805,13 +805,17 @@ async function processMessage(payload: ReviewJobPayload, deps: ProcessDeps): Pro
     // row wins and is never overwritten, so no raw_output twin exists). A
     // put failure AFTER a successful post is a warn + ack, never a rethrow
     // (B3): the comment is out, retrying would re-post it. The missing D1
-    // row is acceptable (KV done marks completion) and alerted.
+    // row is acceptable (KV done marks completion) and alerted. Per-App
+    // attribution (plan 13 Done criterion, QC F-001): the resolved appRef's
+    // appId rides the put into `reviews.app_id`; legacy messages (appRef
+    // absent or `{ kind: "legacy" }`) omit it → the row keeps app_id NULL.
     try {
       await deps.store.put({
         kind: "review",
         key: idemKey(key),
         schema: "mstar.review/v1",
         payload: output,
+        ...(payload.appRef?.kind === "app" ? { appId: payload.appRef.appId } : {}),
       });
     } catch (err) {
       const detail = err instanceof Error ? err.message : String(err);

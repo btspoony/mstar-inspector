@@ -487,6 +487,42 @@ describe("installations upsert wiring (plan 13 Task 4)", () => {
     expect(rows[0]!.seen_at).not.toBe("2000-01-01 00:00:00"); // refreshed by the touch
   });
 
+  test("KV-skipped duplicate delivery (identical body) still refreshes seen_at (QC F-006: upsert on ANY webhook)", async () => {
+    const db = createMigratedD1();
+    await seedApp(db, { slug: "app-x", secret: "secret-x" });
+    const { kv, store } = makeKv();
+    const { queue, sent } = makeQueue();
+    const env = makeEnv(db, { REVIEW_QUEUE: queue as never, IDEMPOTENCY_KV: kv as never });
+
+    const body = JSON.stringify(PR_PAYLOAD);
+    const headers = { "x-hub-signature-256": await signatureFor("secret-x", body), "x-github-event": "pull_request" };
+    const first = await postWebhook("/webhook/app-x", body, headers, env);
+    expect(first.status).toBe(200);
+    // Backdate + stamp a login: the duplicate delivery must refresh seen_at
+    // WITHOUT wiping the stored login (bare touch).
+    db.raw
+      .prepare("UPDATE app_installations SET seen_at = '2000-01-01 00:00:00', account_login = 'alice'")
+      .run();
+
+    // GitHub redelivers the IDENTICAL signed body → the idempotency key is
+    // already claimed, handleReviewJob skips the enqueue — but the touch
+    // runs after handleReviewJob regardless of the skip outcome, so seen_at
+    // is still refreshed (spec: upsert on ANY webhook carrying
+    // installation_id; a duplicate delivery is still evidence the install
+    // is alive).
+    const second = await postWebhook("/webhook/app-x", body, headers, env);
+
+    expect(second.status).toBe(200);
+    expect(sent).toHaveLength(1); // the duplicate was KV-skipped, NOT re-enqueued
+    expect(store.get(`idem:123:test-owner/test-repo:42:abc123`)).toBe("1");
+    const rows = db.raw
+      .query("SELECT installation_id, account_login, seen_at FROM app_installations")
+      .all() as Array<{ installation_id: number; account_login: string | null; seen_at: string }>;
+    expect(rows).toHaveLength(1); // upsert — no duplicate row
+    expect(rows[0]!.account_login).toBe("alice"); // preserved by the COALESCE bare touch
+    expect(rows[0]!.seen_at).not.toBe("2000-01-01 00:00:00"); // refreshed despite the KV skip
+  });
+
   test("upsert failure → structured warn, enqueue still succeeds (fire-and-forget bookkeeping)", async () => {
     const db = createMigratedD1();
     await seedApp(db, { slug: "app-x", secret: "secret-x" });

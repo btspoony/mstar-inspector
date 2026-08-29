@@ -246,6 +246,9 @@ describe("consumer appRef resolution (plan 13 Task 2, lock L4)", () => {
     expect(factoryCreds).toHaveLength(0);
     expect(appCalls).toHaveLength(0);
     expect(kvPuts).toEqual([{ key: `idem:123:acme/widgets:42:${SHA}`, value: "done" }]);
+    // Legacy rows keep app_id NULL (QC F-001 / Clarify #3: NULL = legacy).
+    const row = db.raw.query("SELECT app_id FROM reviews").get() as { app_id: string | null };
+    expect(row.app_id).toBeNull();
   });
 
   test("appRef {kind:'legacy'} → legacy env commenter", async () => {
@@ -257,6 +260,9 @@ describe("consumer appRef resolution (plan 13 Task 2, lock L4)", () => {
 
     expect(legacyCalls.map((c) => c.op)).toEqual(["token", "post"]);
     expect(factoryCreds).toHaveLength(0);
+    // Explicit-legacy rows keep app_id NULL too (QC F-001).
+    const row = db.raw.query("SELECT app_id FROM reviews").get() as { app_id: string | null };
+    expect(row.app_id).toBeNull();
   });
 
   test("appRef {kind:'app'} → authenticates with THAT App's decrypted PEM (sibling isolation)", async () => {
@@ -282,6 +288,10 @@ describe("consumer appRef resolution (plan 13 Task 2, lock L4)", () => {
     const errOrInfo = logLines.filter((l) => l.fields.app_id !== undefined);
     expect(errOrInfo.length).toBeGreaterThan(0);
     expect(errOrInfo.every((l) => l.fields.app_id === appX.id)).toBe(true);
+    // The persisted review row carries the App identity (QC F-001: the
+    // resolved appRef's appId rides the put into reviews.app_id).
+    const row = db.raw.query("SELECT app_id FROM reviews").get() as { app_id: string | null };
+    expect(row.app_id).toBe(appX.id);
   });
 
   test("two messages for the same App in one batch → ONE instance (per-appId cache), both served by it", async () => {

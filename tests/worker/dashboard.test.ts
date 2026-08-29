@@ -1989,11 +1989,12 @@ describe("per-request allowlist guard (plan 12 T2, spec § AuthZ + lock L5)", ()
     const confirm = await worker.fetch(dashboardRequest("/dashboard/manifest/confirm", cookie), env);
     expect(confirm.status).toBe(403);
     // POST manifest commit (B1 confirm gate) — guard fires before secret work
+    // (no body: the commit route retired the confirm=overwrite requirement in
+    // plan 13 T3, and the guard 403s before any handler logic anyway).
     const commit = await worker.fetch(
       new Request("https://worker.local/dashboard/manifest/commit", {
         method: "POST",
-        headers: { Cookie: cookie, "Content-Type": "application/x-www-form-urlencoded" },
-        body: "confirm=overwrite",
+        headers: { Cookie: cookie },
       }),
       env,
     );

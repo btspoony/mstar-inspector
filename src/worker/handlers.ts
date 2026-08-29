@@ -40,9 +40,23 @@ export type UnknownEventLog = {
   detail: string;
 };
 
+/**
+ * Structured log fields for a per-App webhook-face rejection/bookkeeping
+ * warn (plan 13 QC F-005): the route's stage label rides `event` — never the
+ * generic "unknown" — so e.g. `installation_upsert_failed` /
+ * `db_binding_missing` warns are filterable by event alone, without
+ * colliding with the legacy face's "unknown" signature-rejection events.
+ * `reason` keeps the same label for the reason-keyed greps.
+ */
+export type WebhookStageWarnLog = {
+  event: string;
+  reason: string;
+  detail: string;
+};
+
 export type HandlerLog = {
   info: (fields: WorkerEventLog, msg?: string) => void;
-  warn: (fields: WorkerEventLog | UnknownEventLog, msg?: string) => void;
+  warn: (fields: WorkerEventLog | UnknownEventLog | WebhookStageWarnLog, msg?: string) => void;
 };
 
 export type HandlerDeps = {

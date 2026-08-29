@@ -1,12 +1,17 @@
 /**
  * ArtifactStore adapter tests (plan 07 Task 4) — `src/store/artifact-store.ts`
  * against the bun:sqlite test double running the real migration SQL
- * (0001 + 0002, DDL single sources).
+ * (0001 → 0005 via createMigratedTestD1 — the put INSERT binds
+ * `reviews.app_id`, so the full production-shaped schema is required; DDL
+ * single sources).
  *
  * Acceptance points (brief T4 / spec mstar-review-v1-consumption):
  *   - put writes the v1-caliber row: envelope = full JSON, raw_output NULL,
  *     skill_version pinned, findings.severity = mergeClass (the single
  *     vocab-switch mapping point)
+ *   - per-App attribution (plan 13 QC F-001): an appId on the put doc lands
+ *     in reviews.app_id (FK-valid); a put without one keeps app_id NULL;
+ *     an unknown appId is FK-rejected with zero rows written
  *   - second put for the same sha resolves idempotently — still 1 review
  *     row, no duplicate findings, the first-written row is NOT overwritten
  *     (declared deviation from FsStore overwrite semantics)
@@ -19,10 +24,15 @@
  *     NULL) → undefined
  */
 import { describe, expect, test } from "bun:test";
-import type { ArtifactDoc, MstarReviewV1 } from "@mstar-harness/engine";
-import { createArtifactStore, parseIdemKey, REVIEW_SKILL_VERSION } from "../../src/store/artifact-store";
+import type { MstarReviewV1 } from "@mstar-harness/engine";
+import {
+  createArtifactStore,
+  parseIdemKey,
+  REVIEW_SKILL_VERSION,
+  type ReviewArtifactDoc,
+} from "../../src/store/artifact-store";
 import { idemKey } from "../../src/contracts/idem";
-import { createTestD1 } from "./helpers";
+import { createMigratedTestD1 } from "./helpers";
 import type { ReviewRow } from "../../src/store/types";
 
 const SHA = "0123456789abcdef0123456789abcdef01234567";
@@ -50,13 +60,25 @@ function payload(overrides: Partial<MstarReviewV1> = {}): MstarReviewV1 {
   };
 }
 
-function reviewDoc(overrides: Partial<ArtifactDoc> = {}): ArtifactDoc {
+function reviewDoc(overrides: Partial<ReviewArtifactDoc> = {}): ReviewArtifactDoc {
   return { kind: "review", key: KEY, schema: "mstar.review/v1", payload: payload(), ...overrides };
+}
+
+/** Raw-insert the FK parent the per-App attribution tests need. */
+function seedAppRow(db: ReturnType<typeof createMigratedTestD1>, id: string): void {
+  db.raw
+    .prepare(
+      `INSERT INTO github_apps
+         (id, slug, github_app_id, name, private_key_enc, webhook_secret_enc,
+          created_by, status, deleted_at, created_at, updated_at)
+       VALUES (?, 'store-test-app', 1001, 'store-test-app', 'enc', 'enc', 'tester', 'active', NULL, datetime('now'), datetime('now'))`,
+    )
+    .run(id);
 }
 
 describe("createArtifactStore().put", () => {
   test("writes the v1-caliber review row + findings with the envelope as authority", async () => {
-    const db = createTestD1();
+    const db = createMigratedTestD1();
     const store = createArtifactStore(db);
 
     await store.put(reviewDoc());
@@ -101,8 +123,39 @@ describe("createArtifactStore().put", () => {
     });
   });
 
+  test("per-App put persists app_id; a put without appId keeps app_id NULL (QC F-001 / Clarify #3: NULL = legacy)", async () => {
+    const db = createMigratedTestD1();
+    const store = createArtifactStore(db);
+    const appId = crypto.randomUUID();
+    seedAppRow(db, appId); // FK parent — the attribution is a reference to a real row
+
+    await store.put(reviewDoc({ appId }));
+    await store.put(reviewDoc({ key: idemKey({ ...KEY_TUPLE, head_sha: "f".repeat(40) }) })); // legacy: no appId
+
+    const perApp = db.raw.query("SELECT app_id FROM reviews WHERE head_sha = ?").get(SHA) as {
+      app_id: string | null;
+    };
+    expect(perApp.app_id).toBe(appId);
+    const legacy = db.raw.query("SELECT app_id FROM reviews WHERE head_sha = ?").get("f".repeat(40)) as {
+      app_id: string | null;
+    };
+    expect(legacy.app_id).toBeNull();
+  });
+
+  test("an appId with no github_apps row is FK-rejected with zero rows written", async () => {
+    const db = createMigratedTestD1();
+    const store = createArtifactStore(db);
+
+    // The app_id FK (migration 0005) makes an unknown appId a loud batch
+    // failure — never a silently mis-attributed row (the batch rolls back).
+    await expect(store.put(reviewDoc({ appId: "no-such-app" }))).rejects.toThrow(/FOREIGN KEY/);
+
+    expect(db.raw.query("SELECT COUNT(*) AS n FROM reviews").get()).toEqual({ n: 0 });
+    expect(db.raw.query("SELECT COUNT(*) AS n FROM findings").get()).toEqual({ n: 0 });
+  });
+
   test("second put for the same key resolves idempotently — 1 row, first write wins", async () => {
-    const db = createTestD1();
+    const db = createMigratedTestD1();
     const store = createArtifactStore(db);
 
     await store.put(reviewDoc());
@@ -124,7 +177,7 @@ describe("createArtifactStore().put", () => {
   });
 
   test("rejects an M1 payload (verdict 'approve') with zero rows written", async () => {
-    const db = createTestD1();
+    const db = createMigratedTestD1();
     const store = createArtifactStore(db);
 
     await expect(
@@ -136,7 +189,7 @@ describe("createArtifactStore().put", () => {
   });
 
   test("rejects a stray M1 severity key on a finding with review.inspector-vocab", async () => {
-    const db = createTestD1();
+    const db = createMigratedTestD1();
     const store = createArtifactStore(db);
 
     const m1 = payload();
@@ -148,7 +201,7 @@ describe("createArtifactStore().put", () => {
   });
 
   test("rejects a doc whose schema id is not mstar.review/v1", async () => {
-    const db = createTestD1();
+    const db = createMigratedTestD1();
     const store = createArtifactStore(db);
 
     await expect(store.put(reviewDoc({ schema: "mstar.review/v2" }))).rejects.toThrow(/doc\.schema/);
@@ -158,7 +211,7 @@ describe("createArtifactStore().put", () => {
   });
 
   test("rejects a payload.target that disagrees with the key five-tuple", async () => {
-    const db = createTestD1();
+    const db = createMigratedTestD1();
     const store = createArtifactStore(db);
 
     const owner = payload({ target: { owner: "other", repo: "widgets", pr: 42, head_sha: SHA } });
@@ -175,7 +228,7 @@ describe("createArtifactStore().put", () => {
   });
 
   test("accepts a payload with no target (the key five-tuple is authoritative)", async () => {
-    const db = createTestD1();
+    const db = createMigratedTestD1();
     const store = createArtifactStore(db);
 
     await store.put(reviewDoc({ payload: payload({ target: undefined }) }));
@@ -184,7 +237,7 @@ describe("createArtifactStore().put", () => {
   });
 
   test("rejects keys that are not parseable idemKey() strings, including an empty sha", async () => {
-    const db = createTestD1();
+    const db = createMigratedTestD1();
     const store = createArtifactStore(db);
 
     await expect(store.put(reviewDoc({ key: "not-an-idem-key" }))).rejects.toThrow(/idemKey\(\) string/);
@@ -202,7 +255,7 @@ describe("createArtifactStore().put", () => {
   });
 
   test("throws for every non-review kind and writes nothing", async () => {
-    const db = createTestD1();
+    const db = createMigratedTestD1();
     const store = createArtifactStore(db);
 
     for (const kind of ["status", "snapshot", "residuals", "json"] as const) {
@@ -215,7 +268,7 @@ describe("createArtifactStore().put", () => {
   });
 
   test("a findings failure mid-batch rolls back the review row (atomic put)", async () => {
-    const db = createTestD1();
+    const db = createMigratedTestD1();
     // Inject a failure on the SECOND findings insert (title 'boom') to prove
     // the review row written earlier in the same batch is rolled back too —
     // a partial review must never survive (plan 05 T2 review I1, absorbed).
@@ -243,7 +296,7 @@ describe("createArtifactStore().put", () => {
   });
 
   test("delete and list are omitted (engine contract: probe typeof)", () => {
-    const db = createTestD1();
+    const db = createMigratedTestD1();
     const store = createArtifactStore(db);
 
     expect(typeof store.delete).toBe("undefined");
@@ -253,7 +306,7 @@ describe("createArtifactStore().put", () => {
 
 describe("createArtifactStore().get", () => {
   test("returns the parsed envelope for a v1 row", async () => {
-    const db = createTestD1();
+    const db = createMigratedTestD1();
     const store = createArtifactStore(db);
     await store.put(reviewDoc());
 
@@ -264,14 +317,14 @@ describe("createArtifactStore().get", () => {
   });
 
   test("returns undefined for a missing row", async () => {
-    const db = createTestD1();
+    const db = createMigratedTestD1();
     const store = createArtifactStore(db);
 
     expect(await store.get({ kind: "review", key: KEY })).toBeUndefined();
   });
 
   test("returns undefined for an M1-era row (envelope NULL) — never served as v1", async () => {
-    const db = createTestD1();
+    const db = createMigratedTestD1();
     const store = createArtifactStore(db);
     db.raw
       .prepare(
@@ -286,7 +339,7 @@ describe("createArtifactStore().get", () => {
   });
 
   test("throws for a non-review kind and an unparseable key", async () => {
-    const db = createTestD1();
+    const db = createMigratedTestD1();
     const store = createArtifactStore(db);
 
     await expect(store.get({ kind: "status", key: "root" })).rejects.toThrow(/"status" is not served/);
@@ -296,7 +349,7 @@ describe("createArtifactStore().get", () => {
 
 describe("createArtifactStore().findByIdempotencyKey", () => {
   test("returns the row for an existing key and null for an unknown key", async () => {
-    const db = createTestD1();
+    const db = createMigratedTestD1();
     const store = createArtifactStore(db);
     await store.put(reviewDoc());
 

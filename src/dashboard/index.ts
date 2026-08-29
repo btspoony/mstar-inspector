@@ -667,7 +667,7 @@ async function appStatusAction(
   const verb = action === "delete" ? "Deleted" : action === "disable" ? "Disabled" : "Enabled";
   const notice: PageNotice = changed
     ? { kind: "success", message: `${verb} ${app.slug}.` }
-    : { kind: "warn", message: `${app.slug} was already ${action === "enable" ? "enabled" : action} — nothing changed.` };
+    : { kind: "warn", message: `${app.slug} was already ${action === "enable" ? "enabled" : `${action}d`} — nothing changed.` };
   return c.html(appsPage(gate.session, await apps.listApps(), { login: gate.user.github_login, role: gate.user.role }, notice));
 }
 

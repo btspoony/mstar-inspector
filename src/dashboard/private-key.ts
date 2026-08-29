@@ -1,15 +1,22 @@
 /**
- * Private-key PEM normalization for the manifest commit (plan 11 B1 Task 2):
- * the GitHub App manifest conversion returns a PKCS#1 PEM
- * (`-----BEGIN RSA PRIVATE KEY-----`), which workerd WebCrypto `importKey`
- * cannot consume — the PRIVATE_KEY secret is normalized to PKCS#8 before the
- * Cloudflare secrets-bulk write.
+ * Private-key PEM normalization — the lock-L1 reserved utility (plan 11 B1
+ * Task 2, retained through plan 13): PKCS#1 → PKCS#8 wrapping, PKCS#8
+ * pass-through, OpenSSH hard error.
  *
- * Same algorithm as src/worker/diff.ts and src/pipeline/comment.ts —
- * duplicated here because dashboard ↛ pipeline/worker (architect decision Q2
- * route isolation; plan 11 Global Constraints forbid importing pipeline/**)
- * and no shared module is extracted per plan. The equivalence is pinned by
- * tests/worker/dashboard.test.ts.
+ * Plan-13 storage口径 (lock L1): the GitHub App manifest conversion PEM is
+ * stored VERBATIM (encrypted via secretbox) — no normalization happens at
+ * the write side, and the retired plan-12 secrets-bulk flow no longer
+ * exists. PKCS#8 normalization (the only format workerd WebCrypto
+ * `importKey` accepts) happens at `createReviewCommenter` construction on
+ * the consumer side (src/pipeline/comment.ts — its own copy, since dashboard
+ * ↛ pipeline/worker, architect decision Q2).
+ *
+ * This module therefore has no src/ call site today: it is reserved as the
+ * optional write-side format self-check (check-only — never persists a
+ * normalized secret) and its equivalence pin against the consumer copy
+ * (tests/worker/dashboard.test.ts) guards consumer-side drift. Same
+ * algorithm as src/worker/diff.ts and src/pipeline/comment.ts — duplicated
+ * per the Q2 route isolation; no shared module is extracted.
  */
 
 /** DER tag for a SEQUENCE (0x30). */
