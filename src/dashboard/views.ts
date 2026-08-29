@@ -6,6 +6,7 @@
  * breakpoints) — DESIGN.md is the SSOT; update both when tokens change.
  * No client JS, no build chain, no new dependencies.
  */
+import type { DashboardUserRow } from "./users";
 
 /** Escape GitHub-sourced user data before HTML interpolation (XSS guard). */
 export function escapeHtml(value: string): string {
@@ -114,6 +115,30 @@ button.danger { background: var(--red-700); border-color: var(--red-700); }
 label.checkbox { display: block; margin: 16px 0; } /* spacing-4 */
 .id { font-variant-numeric: tabular-nums; }
 a.cancel { color: var(--gray-1000); margin-left: 12px; } /* spacing-3 */
+/* Members page (plan 12 B4 T3): single column, masked list (login + role +
+   created_at only), invite primary (blue-700), remove danger (red-700). */
+.members { list-style: none; margin: 16px 0 0; padding: 0; } /* spacing-4 */
+.members li {
+  display: flex;
+  align-items: center;
+  gap: 12px; /* spacing-3 */
+  padding: 8px 0; /* spacing-2 */
+  border-top: 1px solid var(--background-200);
+}
+.members .meta, .members .you { color: var(--gray-900); font-size: 14px; } /* copy-14 */
+.members .you { margin-left: auto; }
+.members form { margin: 0 0 0 auto; } /* inline remove control overrides the section form rhythm */
+label.field { display: block; margin: 16px 0 8px; } /* spacing-4 / spacing-2 */
+label.field input {
+  display: block;
+  margin-top: 8px; /* spacing-2 */
+  border: 1px solid var(--gray-900);
+  border-radius: var(--rounded-sm);
+  padding: 8px 12px; /* spacing-2 / spacing-3 control rhythm */
+  font: inherit;
+  background: var(--background-100);
+  color: var(--gray-1000);
+}
 </style>`;
 
 function page(title: string, body: string): string {
@@ -145,12 +170,18 @@ function placeholderSection(
   </section>`;
 }
 
-/** Page header (IA: product name, GitHub identity, Logout — unchanged). */
-function shellHeader(user: { login: string; name?: string }): string {
+/**
+ * Page header (IA: product name, GitHub identity, Logout — unchanged).
+ * `adminNav` adds the admin-only Members entry (qc1/qc2 F-001 — spec § IA
+ * row 1 / plan Target State "Admin sees Members section"); only the shell
+ * passes it, so the link never appears mid-flow on manifest/members pages.
+ */
+function shellHeader(user: { login: string; name?: string }, adminNav = false): string {
   const display = user.name ? `${user.name} (${user.login})` : user.login;
+  const members = adminNav ? ` · <a href="/dashboard/members">Members</a>` : "";
   return `<header>
     <h1>mstar-inspector</h1>
-    <span class="user">Signed in as ${escapeHtml(display)} · <a href="/dashboard/logout">Logout</a></span>
+    <span class="user">Signed in as ${escapeHtml(display)}${members} · <a href="/dashboard/logout">Logout</a></span>
   </header>`;
 }
 
@@ -165,11 +196,15 @@ function githubAppSection(): string {
   </section>`;
 }
 
-/** Logged-in shell: header + sections (B1: GitHub App live; BYOK/Review placeholders). */
-export function dashboardPage(user: { login: string; name?: string }): string {
+/**
+ * Logged-in shell: header + sections (B1: GitHub App live; BYOK/Review
+ * placeholders). `isAdmin` renders the Members entry in the header — plain
+ * Level 1 link (existing `header a` token), no new CSS (qc1/qc2 F-001).
+ */
+export function dashboardPage(user: { login: string; name?: string }, isAdmin = false): string {
   return page(
     "Dashboard",
-    `${shellHeader(user)}
+    `${shellHeader(user, isAdmin)}
   <main>
     <div class="sections">
       ${githubAppSection()}
@@ -288,6 +323,114 @@ export function manifestErrorPage(message: string, resumable = false): string {
       <strong>GitHub App setup failed.</strong> ${escapeHtml(message)}
       No Worker secrets were changed. ${next}
     </div>
+  </main>`,
+  );
+}
+
+/**
+ * Invite-only denial (plan 12 B4 T1, spec § User-visible behavior 1) —
+ * locked English copy with the GitHub-verified login interpolated
+ * (escaped). The callback deny path renders this at 403 with ZERO
+ * Set-Cookie: no session, no state expiry, nothing. Red-700 banner, no
+ * login link back (an unknown user has nothing to return to).
+ */
+export function deniedPage(login: string): string {
+  return page(
+    "Access denied",
+    `<main>
+    <div class="banner" role="alert">This deployment is invite-only. Ask an admin to add ${escapeHtml(login)}.</div>
+  </main>`,
+  );
+}
+
+/**
+ * Removed-member denial (plan 12 B4 T2, per-request guard) — distinct from
+ * deniedPage: this visitor's cookie verified but has no users row (access
+ * removed after the session was minted; removal = row delete, no status
+ * column). Red-700 banner, no login link back — re-authenticating lands on
+ * the OAuth callback bootstrap deny until an admin re-invites the login.
+ */
+export function removedPage(login: string): string {
+  return page(
+    "Access removed",
+    `<main>
+    <div class="banner" role="alert">Your dashboard access was removed. Ask an admin to re-invite ${escapeHtml(login)}.</div>
+  </main>`,
+  );
+}
+
+/**
+ * Non-admin denial for admin-only surfaces (plan 12 B4 T3): the visitor IS a
+ * member — the per-request guard passed — but has no `admin` row. Distinct
+ * from deniedPage / removedPage: access exists, this page does not. Red-700
+ * banner with a way back to the shell.
+ */
+export function forbiddenPage(login: string): string {
+  return page(
+    "Forbidden",
+    `<main>
+    <div class="banner" role="alert">This page is restricted to dashboard admins. You are signed in as ${escapeHtml(login)} — back to <a href="/dashboard">/dashboard</a>.</div>
+  </main>`,
+  );
+}
+
+/** Notice slot for membersPage: existing classes only, no new tokens. */
+export type MembersNotice = { kind: "success" | "warn" | "error"; message: string };
+
+function membersNoticeHtml(notice?: MembersNotice): string {
+  if (!notice) return "";
+  if (notice.kind === "error") {
+    return `<div class="banner" role="alert">${escapeHtml(notice.message)}</div>`;
+  }
+  return `<p class="${notice.kind === "warn" ? "note" : "status"}">${escapeHtml(notice.message)}</p>`;
+}
+
+/**
+ * Members management (plan 12 B4 T3, admin-only): single column (same rule
+ * as the B1 confirm page), masked list — login + role + created_at only; no
+ * row ids, no invited_by. Remove is red-700 and is NOT offered on the
+ * acting admin's own row ("you") — the route refuses self-removal, so the
+ * UI never presents a control that can only fail. Invite is the blue-700
+ * constructive primary.
+ */
+export function membersPage(
+  user: { login: string; name?: string },
+  members: DashboardUserRow[],
+  notice?: MembersNotice,
+): string {
+  const rows = members
+    .map((m) => {
+      const self = m.github_login.toLowerCase() === user.login.toLowerCase();
+      const control = self
+        ? '<span class="you">you</span>'
+        : `<form method="post" action="/dashboard/members/remove">
+          <input type="hidden" name="userId" value="${escapeHtml(m.id)}">
+          <button type="submit" class="danger">Remove</button>
+        </form>`;
+      return `<li>
+        <strong>${escapeHtml(m.github_login)}</strong>
+        <span class="meta">${escapeHtml(m.role)} · <span class="id">${escapeHtml(m.created_at)}</span></span>
+        ${control}
+      </li>`;
+    })
+    .join("\n");
+  return page(
+    "Members",
+    `${shellHeader(user)}
+  <main>
+    <section class="enabled">
+      <h2>Members</h2>
+      ${membersNoticeHtml(notice)}
+      <ul class="members">
+      ${rows}
+      </ul>
+      <form method="post" action="/dashboard/members/invite">
+        <label class="field">Invite by GitHub login
+          <input type="text" name="login" placeholder="e.g. octocat">
+        </label>
+        <button type="submit" class="primary">Invite member</button>
+      </form>
+    </section>
   </main>`,
   );
 }

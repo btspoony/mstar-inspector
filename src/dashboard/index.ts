@@ -1,13 +1,15 @@
 /**
  * /dashboard Hono sub-app: GitHub OAuth login + signed-cookie session (08 B0)
- * + GitHub App Manifest start/callback/commit (11 B1 T1/T2). Mounted by
- * src/worker/index.ts as `app.route("/dashboard", dashboardApp)`.
+ * + GitHub App Manifest start/callback/commit (11 B1 T1/T2) behind a
+ * per-request membership guard (12 B4 T2) + admin-only members management
+ * (12 B4 T3). Mounted by src/worker/index.ts as
+ * `app.route("/dashboard", dashboardApp)`.
  *
  * Route isolation (architect decision Q2): this module MUST NOT import
  * pipeline/store/review code. Fail-closed everywhere: missing OAuth secrets
  * → 5xx; bad CSRF state → 4xx and the session cookie is never set.
  */
-import { Hono } from "hono";
+import { Hono, type Context } from "hono";
 import { getCookie } from "hono/cookie";
 import type { Env } from "../worker/env";
 import { buildAuthorizeUrl, exchangeCodeForToken, fetchGitHubUser, logOAuthFailure } from "./oauth";
@@ -22,6 +24,7 @@ import {
   readSessionValue,
   serializeCookie,
   verifyStateValue,
+  type SessionPayload,
 } from "./session";
 import {
   MANIFEST_HOLD_COOKIE,
@@ -36,7 +39,28 @@ import {
   readHoldValue,
   writeWorkerSecrets,
 } from "./manifest";
-import { dashboardPage, errorPage, manifestConfirmPage, manifestErrorPage, manifestStartPage, manifestSuccessPage } from "./views";
+import {
+  bootstrapDashboardAccess,
+  countAdmins,
+  createUser,
+  deleteUserUnlessLastAdmin,
+  getUserByLogin,
+  listUsers,
+  type DashboardD1,
+  type DashboardUserRow,
+} from "./users";
+import {
+  dashboardPage,
+  deniedPage,
+  errorPage,
+  forbiddenPage,
+  manifestConfirmPage,
+  manifestErrorPage,
+  manifestStartPage,
+  manifestSuccessPage,
+  membersPage,
+  removedPage,
+} from "./views";
 
 export const dashboardApp = new Hono<{ Bindings: Env }>();
 
@@ -46,6 +70,70 @@ function dashboardSecrets(env: Env) {
   const sessionSecret = env.DASHBOARD_SESSION_SECRET;
   return clientId && clientSecret && sessionSecret ? { clientId, clientSecret, sessionSecret } : null;
 }
+
+/**
+ * D1 membership store binding (plan 12 B4). Runtime-real via wrangler.jsonc
+ * `d1_databases` (binding DB), but the fetch-face Env deliberately does not
+ * declare it (src/worker/env.ts stays ADMIN_LOGINS-only this plan) — read
+ * through this local intersection and fail closed when unbound, like every
+ * missing dashboard dependency.
+ */
+function dashboardD1(env: Env): DashboardD1 | null {
+  const db = (env as Env & { DB?: DashboardD1 }).DB;
+  return db ?? null;
+}
+
+// --- Plan 12 B4 T2: per-request allowlist guard (spec § AuthZ, lock L5) ---
+//
+// ONE middleware mount before every route definition auto-covers all
+// /dashboard routes (B1 manifest trio + the POST "*" catch-all today, plan
+// 13/14 routes tomorrow) — no per-route guard copies. Membership is the
+// users row: removal = row delete, so a removed member's stateless cookie
+// fails here on every request. Exempt set is EXACTLY the two pre-session
+// routes — a guard on /dashboard/login would loop the login page, and
+// /dashboard/oauth/callback is the request that establishes the session.
+// /logout stays guarded (L5 — NOT in the exempt set) but is SESSION-gated,
+// not membership-gated (qc2 F-002): the owner of a valid-but-stale cookie
+// (removed member) must be able to burn it, so a row-less session reaches
+// the logout route; without a session it still 302s into the OAuth flow.
+// Per-route readSessionValue handling (incl. B1 hold/state cookies) stays
+// as-is below — the guard only ADDS the D1 membership check. Paths are the
+// full mount-pinned form: dashboardApp is mounted once at /dashboard
+// (src/worker/index.ts, L5 code-verified).
+const GUARD_EXEMPT_PATHS = new Set(["/dashboard/login", "/dashboard/oauth/callback"]);
+
+dashboardApp.use("*", async (c, next) => {
+  if (GUARD_EXEMPT_PATHS.has(c.req.path)) return next();
+  const sessionSecret = c.env.DASHBOARD_SESSION_SECRET;
+  if (!sessionSecret) return c.text("dashboard OAuth is not configured", 500);
+  const session = await readSessionValue(getCookie(c, SESSION_COOKIE), sessionSecret);
+  // No session → the pre-guard behavior: 302 into the OAuth flow.
+  if (!session) return c.redirect("/dashboard/login", 302);
+  // Logout needs no membership row (qc2 F-002): any VALID session may burn
+  // its own cookies. The route itself touches no membership data, so this
+  // sits before the D1 check — storage misconfiguration cannot trap a
+  // stale cookie on the browser either.
+  if (c.req.path === "/dashboard/logout") return next();
+  // Logged in → the only new check: an active user row (spec § AuthZ).
+  // Fail closed on an unbound store, like every missing dashboard dependency.
+  const db = dashboardD1(c.env);
+  if (!db) return c.text("dashboard storage is not configured", 500);
+  const user = await getUserByLogin(db, session.login);
+  if (!user) {
+    // Same structured-log convention as logOAuthFailure / logManifestFailure;
+    // the login is public identity (it renders on the denial page).
+    console.warn(
+      JSON.stringify({
+        event: "dashboard_access",
+        stage: "guard",
+        reason: "not_a_member",
+        login: session.login,
+      }),
+    );
+    return c.html(removedPage(session.login), 403);
+  }
+  return next();
+});
 
 dashboardApp.get("/login", async (c) => {
   const secrets = dashboardSecrets(c.env);
@@ -87,6 +175,19 @@ dashboardApp.get("/oauth/callback", async (c) => {
   const user = await fetchGitHubUser(token);
   if (!user) {
     return c.html(errorPage("Could not read your GitHub profile."), 502);
+  }
+  // Plan 12 B4 T1: invite-only bootstrap decision (spec § AuthZ precedence:
+  // row → ADMIN_LOGINS → empty-table fallback → deny) BEFORE any session is
+  // minted. Deny = 403 page with ZERO Set-Cookie (spec: 零 cookie、零写入) —
+  // the single-use state-expiry header set above is withdrawn here — and
+  // zero D1 writes (the deny branch never inserts).
+  const db = dashboardD1(c.env);
+  if (!db) return c.text("dashboard storage is not configured", 500);
+  const decision = await bootstrapDashboardAccess(db, user.login, c.env.ADMIN_LOGINS);
+  if (decision.outcome === "deny") {
+    logOAuthFailure("bootstrap", "not_invited", { login: user.login });
+    c.header("Set-Cookie", undefined);
+    return c.html(deniedPage(user.login), 403);
   }
   const session = await createSessionValue(user.login, user.name, secrets.sessionSecret);
   c.header("Set-Cookie", serializeCookie(SESSION_COOKIE, session, SESSION_MAX_AGE_SEC), {
@@ -241,6 +342,149 @@ dashboardApp.get("/manifest/confirm", async (c) => {
   return c.html(manifestConfirmPage(session, { id: hold.id, name: hold.name }));
 });
 
+// --- Plan 12 B4 T3: admin-only members management (spec § AuthZ) ---
+//
+// The per-request guard above has already verified membership on every route
+// below; the admin gate re-resolves the acting row per request (same
+// route-local read pattern as the manifest routes) and 403s non-admins
+// BEFORE any membership read or write — zero mutations on the deny path.
+// POSTs ride the existing session cookie (same discipline as
+// manifest/commit) — no new token scheme.
+
+type AdminGate =
+  | { ok: true; session: SessionPayload; db: DashboardD1; admin: DashboardUserRow }
+  | { ok: false; response: Response };
+
+// GitHub login syntax (qc1/qc2 F-003): letters, digits, hyphens — 1–39
+// chars. Anything else can never match a real GitHub login and would sit in
+// the table as a dead row an admin cannot fix by re-inviting.
+const GITHUB_LOGIN_PATTERN = /^[a-zA-Z0-9-]{1,39}$/;
+
+/** Route-local admin gate shared by the three /dashboard/members routes. */
+async function requireAdmin(c: Context<{ Bindings: Env }>): Promise<AdminGate> {
+  const secrets = dashboardSecrets(c.env);
+  if (!secrets) return { ok: false, response: c.text("dashboard OAuth is not configured", 500) };
+  const session = await readSessionValue(getCookie(c, SESSION_COOKIE), secrets.sessionSecret);
+  if (!session) return { ok: false, response: c.redirect("/dashboard/login", 302) };
+  const db = dashboardD1(c.env);
+  if (!db) return { ok: false, response: c.text("dashboard storage is not configured", 500) };
+  const admin = await getUserByLogin(db, session.login);
+  // Fail closed: no row (removed between guard and here) or a plain member
+  // is equally non-admin — the 403 view carries zero membership data.
+  if (!admin || admin.role !== "admin") {
+    return { ok: false, response: c.html(forbiddenPage(session.login), 403) };
+  }
+  return { ok: true, session, db, admin };
+}
+
+dashboardApp.get("/members", async (c) => {
+  const gate = await requireAdmin(c);
+  if (!gate.ok) return gate.response;
+  return c.html(membersPage(gate.session, await listUsers(gate.db)));
+});
+
+dashboardApp.post("/members/invite", async (c) => {
+  const gate = await requireAdmin(c);
+  if (!gate.ok) return gate.response;
+  const form = await c.req.parseBody();
+  const login = typeof form.login === "string" ? form.login.trim() : "";
+  if (login.length === 0) {
+    return c.html(
+      membersPage(gate.session, await listUsers(gate.db), {
+        kind: "error",
+        message: "Enter a GitHub login to invite.",
+      }),
+      400,
+    );
+  }
+  // F-003: reject values outside the GitHub login syntax before any read or
+  // write — they would persist as rows that no real login can ever claim.
+  if (!GITHUB_LOGIN_PATTERN.test(login)) {
+    return c.html(
+      membersPage(gate.session, await listUsers(gate.db), {
+        kind: "error",
+        message: `${login} is not a valid GitHub login — use 1–39 letters, digits, or hyphens.`,
+      }),
+      400,
+    );
+  }
+  // T1 review pin (Minor 2): resolve the login case-insensitively BEFORE any
+  // createUser call — the DDL UNIQUE is BINARY-collated, so ON CONFLICT alone
+  // misses case variants ("OctoCat" vs "octocat") and would mint a second row.
+  if (await getUserByLogin(gate.db, login)) {
+    return c.html(
+      membersPage(gate.session, await listUsers(gate.db), {
+        kind: "warn",
+        message: `${login} is already a member — nothing changed.`,
+      }),
+    );
+  }
+  await createUser(gate.db, { login, role: "member", invitedBy: gate.admin.github_login });
+  return c.html(
+    membersPage(gate.session, await listUsers(gate.db), {
+      kind: "success",
+      message: `Invited ${login} — they can sign in with GitHub now.`,
+    }),
+  );
+});
+
+dashboardApp.post("/members/remove", async (c) => {
+  const gate = await requireAdmin(c);
+  if (!gate.ok) return gate.response;
+  const form = await c.req.parseBody();
+  const userId = typeof form.userId === "string" ? form.userId : "";
+  const members = await listUsers(gate.db);
+  const target = members.find((m) => m.id === userId);
+  if (!target) {
+    return c.html(
+      membersPage(gate.session, members, {
+        kind: "error",
+        message: "Unknown member — nothing was removed, try again.",
+      }),
+      400,
+    );
+  }
+  // Refuse self-removal: an admin must not be able to lock themselves out.
+  if (target.github_login.toLowerCase() === gate.admin.github_login.toLowerCase()) {
+    return c.html(
+      membersPage(gate.session, members, { kind: "error", message: "You cannot remove yourself." }),
+      400,
+    );
+  }
+  // Refuse removing an admin while they are the last one (removal = row
+  // delete, so this is the deployment's only admin-lockout guard). This
+  // pre-check only shapes the message; the ENFORCEMENT is the single
+  // conditional DELETE below, which closes the read-check-delete TOCTOU
+  // (qc1): two concurrent removes of the last two admins cannot both land.
+  if (target.role === "admin" && (await countAdmins(gate.db)) === 1) {
+    return c.html(
+      membersPage(gate.session, members, {
+        kind: "error",
+        message: "The last admin cannot be removed.",
+      }),
+      400,
+    );
+  }
+  if (!(await deleteUserUnlessLastAdmin(gate.db, target.id))) {
+    // Lost a race (the row vanished or just became the last admin between
+    // the reads above and this delete): re-render with a retry notice —
+    // zero partial state either way.
+    return c.html(
+      membersPage(gate.session, await listUsers(gate.db), {
+        kind: "error",
+        message: `Could not remove ${target.github_login} — the member list just changed, try again.`,
+      }),
+      400,
+    );
+  }
+  return c.html(
+    membersPage(gate.session, await listUsers(gate.db), {
+      kind: "success",
+      message: `Removed ${target.github_login}.`,
+    }),
+  );
+});
+
 dashboardApp.get("/", async (c) => {
   const sessionSecret = c.env.DASHBOARD_SESSION_SECRET;
   if (!sessionSecret) return c.text("dashboard OAuth is not configured", 500);
@@ -252,7 +496,13 @@ dashboardApp.get("/", async (c) => {
   if (hold && hold.login === session.login) {
     return c.html(manifestConfirmPage(session, { id: hold.id, name: hold.name }));
   }
-  return c.html(dashboardPage(session));
+  // Members entry is admin-aware (qc1/qc2 F-001): the guard already resolved
+  // the row; re-read it here (same route-local read pattern as the manifest
+  // routes) to learn the role. A row removed between guard and render simply
+  // renders without the entry — the next request 403s at the guard.
+  const db = dashboardD1(c.env);
+  const member = db ? await getUserByLogin(db, session.login) : null;
+  return c.html(dashboardPage(session, member?.role === "admin"));
 });
 
 // Placeholder actions (IA routing table): every POST under /dashboard that is

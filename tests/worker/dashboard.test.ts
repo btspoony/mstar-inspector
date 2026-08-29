@@ -12,9 +12,25 @@
  * conversion) are unit-tested with stubbed fetch.
  */
 import { afterEach, describe, expect, test } from "bun:test";
+import { Database } from "bun:sqlite";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import worker from "../../src/worker/index";
 import { exchangeCodeForToken, fetchGitHubUser } from "../../src/dashboard/oauth";
 import type { Env } from "../../src/worker/env";
+import {
+  bootstrapDashboardAccess,
+  countAdmins,
+  countUsers,
+  createUser,
+  deleteUser,
+  deleteUserUnlessLastAdmin,
+  getUserByLogin,
+  listUsers,
+  parseAdminLogins,
+  type DashboardD1,
+  type DashboardD1Statement,
+} from "../../src/dashboard/users";
 import {
   OAUTH_STATE_COOKIE,
   SESSION_COOKIE,
@@ -51,7 +67,7 @@ const CONVERSION = {
   webhook_secret: FAKE_WEBHOOK_SECRET,
 };
 
-function makeEnv(overrides: Partial<Env> = {}): Env {
+function baseEnv(overrides: Partial<Env> = {}): Env {
   return {
     APP_ID: "123",
     PRIVATE_KEY: "private-key",
@@ -66,6 +82,35 @@ function makeEnv(overrides: Partial<Env> = {}): Env {
     DASHBOARD_SESSION_SECRET: SESSION_SECRET,
     ...overrides,
   };
+}
+
+/**
+ * Plan 12 T2: every /dashboard route sits behind the per-request membership
+ * guard, so each session-bearing request resolves a users row through D1.
+ * The default env therefore ships a store seeded with exactly the logins the
+ * existing route tests sign in as (the "existing tests pass unchanged with a
+ * seeded member" AC). Tests that need different membership pass their own DB
+ * via makeDbEnv; baseEnv is the DB-less env for unbound-D1 premises.
+ */
+const DEFAULT_SEEDED_MEMBERS: Array<[login: string, role: "admin" | "member"]> = [
+  ["octocat", "admin"],
+  ["octocat-with-a-long-login", "member"],
+  ["mallory", "member"],
+];
+
+function seededDashboardD1(): DashboardD1 & { raw: Database } {
+  const db = createDashboardTestD1();
+  const insert = db.raw.prepare(
+    "INSERT INTO users (id, github_login, role, created_at, invited_by) VALUES (?, ?, ?, ?, NULL)",
+  );
+  for (const [login, role] of DEFAULT_SEEDED_MEMBERS) {
+    insert.run(crypto.randomUUID(), login, role, new Date().toISOString());
+  }
+  return db;
+}
+
+function makeEnv(overrides: Partial<Env> = {}): Env {
+  return { ...baseEnv(overrides), DB: seededDashboardD1() } as Env;
 }
 
 function dashboardRequest(path: string, cookie?: string): Request {
@@ -311,6 +356,9 @@ describe("/dashboard routes", () => {
     expect(res.status).toBe(200);
     const body = await res.text();
     expect(body).toContain("Signed in as octocat");
+    // qc1/qc2 F-001: octocat is an admin (default seed) — the shell header
+    // carries the Members entry next to Logout.
+    expect(body).toContain(' · <a href="/dashboard/members">Members</a> · <a href="/dashboard/logout">Logout</a>');
     // B1: the GitHub App section is live — a submit to the manifest start
     // route, not a disabled placeholder button.
     expect(body).toContain('action="/dashboard/manifest/start"');
@@ -320,6 +368,23 @@ describe("/dashboard routes", () => {
     expect(body).toContain("Not in this iteration (B3).");
     expect(body).toContain('aria-disabled="true"');
     expect(body).not.toContain("Not in B0");
+  });
+
+  test("Members entry is admin-aware: member shell renders no /dashboard/members reference (F-001)", async () => {
+    const admin = await worker.fetch(
+      dashboardRequest("/dashboard", `${SESSION_COOKIE}=${await createSessionValue("octocat", null, SESSION_SECRET)}`),
+      makeEnv(),
+    );
+    expect(admin.status).toBe(200);
+    expect(await admin.text()).toContain('href="/dashboard/members"');
+    const member = await worker.fetch(
+      dashboardRequest("/dashboard", `${SESSION_COOKIE}=${await createSessionValue("mallory", null, SESSION_SECRET)}`),
+      makeEnv(),
+    );
+    expect(member.status).toBe(200);
+    const memberBody = await member.text();
+    expect(memberBody).toContain("Signed in as mallory");
+    expect(memberBody).not.toContain("/dashboard/members");
   });
 
   test("GET /dashboard with a tampered session cookie → 302 (treated as logged out)", async () => {
@@ -433,7 +498,14 @@ describe("/dashboard routes", () => {
   });
 
   test("GET /dashboard/logout → 302 to login; session, manifest hold, and manifest state cookies expired", async () => {
-    const res = await worker.fetch(dashboardRequest("/dashboard/logout"), makeEnv());
+    // Plan 12 T2: /logout is guarded (spec L5 — not exempt), so a real logout
+    // arrives with a member session (the shell header link); without one the
+    // guard 302s before the cookie-expiry route (asserted in the guard suite).
+    const session = await createSessionValue("octocat", null, SESSION_SECRET);
+    const res = await worker.fetch(
+      dashboardRequest("/dashboard/logout", `${SESSION_COOKIE}=${session}`),
+      makeEnv(),
+    );
     expect(res.status).toBe(302);
     expect(res.headers.get("Location")).toBe("/dashboard/login");
     const setCookie = res.headers.getSetCookie();
@@ -1327,5 +1399,781 @@ describe("existing routes unaffected", () => {
       makeEnv({ REVIEW_ENABLED: "true" }),
     );
     expect(res.status).toBe(401);
+  });
+});
+
+// --- plan 12 T1: D1 fixture + dashboard membership --------------------------
+// Local mirror of tests/store/helpers.ts createTestD1 (which pins 0001+0002
+// only and sits outside this plan's file set): the users migration must
+// apply on a DB that ALREADY has 0001/0002 rows, so the fixture seeds a
+// review row between 0002 and 0003 (plan 12 T1 AC).
+
+function applyMigrationFile(db: Database, name: string): void {
+  db.exec(readFileSync(join(import.meta.dir, "../../migrations", name), "utf8"));
+}
+
+function createDashboardTestD1(): DashboardD1 & { raw: Database } {
+  const db = new Database(":memory:");
+  db.exec("PRAGMA foreign_keys = ON;");
+  applyMigrationFile(db, "0001_reviews.sql");
+  applyMigrationFile(db, "0002_mstar_review_v1.sql");
+  db.exec(
+    `INSERT INTO reviews (id, installation_id, owner, repo, pr_number, head_sha, verdict, summary_md)
+     VALUES ('review-1', 123, 'acme', 'widgets', 42, '0123456789abcdef0123456789abcdef01234567', 'comment', 'No blocking issues.')`,
+  );
+  applyMigrationFile(db, "0003_dashboard_users.sql");
+  return {
+    raw: db,
+    prepare(query: string): DashboardD1Statement {
+      let bound: unknown[] = [];
+      const stmt = db.prepare(query);
+      return {
+        bind(...values: unknown[]) {
+          bound = values;
+          return this;
+        },
+        async first<T = Record<string, unknown>>(): Promise<T | null> {
+          return (stmt.get(...(bound as [])) as T | undefined) ?? null;
+        },
+        async all<T = Record<string, unknown>>(): Promise<{ results: T[] }> {
+          return { results: stmt.all(...(bound as [])) as T[] };
+        },
+        async run<T = Record<string, unknown>>(): Promise<{
+          results: T[];
+          meta: { changes: number; last_row_id: number };
+        }> {
+          const info = stmt.run(...(bound as []));
+          return {
+            results: [] as T[],
+            meta: { changes: Number(info.changes), last_row_id: Number(info.lastInsertRowid) },
+          };
+        },
+      };
+    },
+  };
+}
+
+function userCount(db: DashboardD1 & { raw: Database }): number {
+  return (db.raw.query("SELECT COUNT(*) AS n FROM users").get() as { n: number }).n;
+}
+
+/**
+ * The D1 binding is runtime-real (wrangler.jsonc `d1_databases` binding DB)
+ * but the fetch-face Env deliberately does not declare it (plan 12 keeps
+ * src/worker/env.ts changes to ADMIN_LOGINS only) — the callback reads it
+ * through a local intersection type, and the test env carries it the same
+ * way.
+ */
+function makeDbEnv(db: DashboardD1, overrides: Partial<Env> = {}): Env {
+  return { ...baseEnv(overrides), DB: db } as Env;
+}
+
+describe("migrations/0003_dashboard_users.sql (plan 12 T1)", () => {
+  test("creates the users table per spec § Data model — no status column (removal = delete row)", () => {
+    const db = createDashboardTestD1();
+    const cols = db.raw.query("PRAGMA table_info(users)").all() as Array<{
+      name: string;
+      notnull: number;
+      pk: number;
+    }>;
+    const byName: Record<string, { notnull: number; pk: number }> = Object.fromEntries(
+      cols.map((c) => [c.name, { notnull: c.notnull, pk: c.pk }]),
+    );
+    expect(Object.keys(byName).sort()).toEqual(["created_at", "github_login", "id", "invited_by", "role"]);
+    expect(byName["id"]?.pk).toBe(1); // TEXT PRIMARY KEY (caller-supplied UUID)
+    expect(byName["github_login"]?.notnull).toBe(1);
+    expect(byName["role"]?.notnull).toBe(1);
+    expect(byName["created_at"]?.notnull).toBe(1);
+    expect("status" in byName).toBe(false);
+  });
+
+  test("applies on a DB that already has 0001/0002 rows — the seeded review row survives", () => {
+    const db = createDashboardTestD1();
+    const review = db.raw.query("SELECT id, owner, repo FROM reviews").get() as {
+      id: string;
+      owner: string;
+      repo: string;
+    };
+    expect(review).toEqual({ id: "review-1", owner: "acme", repo: "widgets" });
+  });
+
+  test("UNIQUE github_login rejects a second row for the same login", async () => {
+    const db = createDashboardTestD1();
+    await createUser(db, { login: "octocat", role: "admin" });
+    await expect(
+      db
+        .prepare("INSERT INTO users (id, github_login, role, created_at) VALUES (?, ?, ?, ?)")
+        .bind("users-2", "octocat", "member", "2026-01-01T00:00:00.000Z")
+        .run(),
+    ).rejects.toThrow(/UNIQUE constraint failed/);
+  });
+
+  test("CHECK pins role to admin|member", async () => {
+    const db = createDashboardTestD1();
+    await expect(
+      db
+        .prepare("INSERT INTO users (id, github_login, role, created_at) VALUES (?, ?, ?, ?)")
+        .bind("users-3", "mallory", "owner", "2026-01-01T00:00:00.000Z")
+        .run(),
+    ).rejects.toThrow(/CHECK constraint failed/);
+  });
+});
+
+describe("dashboard users store (plan 12 T1, users.ts)", () => {
+  test("createUser + getUserByLogin round trip (bootstrapped admin shape)", async () => {
+    const db = createDashboardTestD1();
+    const created = await createUser(db, { login: "octocat", role: "admin" });
+    expect(created.github_login).toBe("octocat");
+    expect(created.role).toBe("admin");
+    expect(created.invited_by).toBeNull(); // bootstrapped, not invited
+    expect(created.id).toBeTruthy();
+    expect(created.created_at).toBeTruthy();
+    expect(await getUserByLogin(db, "octocat")).toEqual(created);
+  });
+
+  test("createUser records invitedBy for invited members", async () => {
+    const db = createDashboardTestD1();
+    const row = await createUser(db, { login: "hubot", role: "member", invitedBy: "octocat" });
+    expect(row.role).toBe("member");
+    expect(row.invited_by).toBe("octocat");
+  });
+
+  test("getUserByLogin is case-insensitive; a missing login returns null", async () => {
+    const db = createDashboardTestD1();
+    await createUser(db, { login: "octocat", role: "member" });
+    expect((await getUserByLogin(db, "OCTOCAT"))?.github_login).toBe("octocat");
+    expect(await getUserByLogin(db, "nobody")).toBeNull();
+  });
+
+  test("createUser is idempotent on an exact-case UNIQUE race (first row wins)", async () => {
+    const db = createDashboardTestD1();
+    const first = await createUser(db, { login: "octocat", role: "admin" });
+    const raced = await createUser(db, { login: "octocat", role: "member", invitedBy: "someone" });
+    expect(raced.id).toBe(first.id);
+    expect(userCount(db)).toBe(1);
+  });
+
+  test("listUsers / deleteUser / countUsers / countAdmins", async () => {
+    const db = createDashboardTestD1();
+    const admin = await createUser(db, { login: "octocat", role: "admin" });
+    const member = await createUser(db, { login: "hubot", role: "member" });
+    expect(await countUsers(db)).toBe(2);
+    expect(await countAdmins(db)).toBe(1);
+    const logins = (await listUsers(db)).map((u) => u.github_login).sort();
+    expect(logins).toEqual(["hubot", "octocat"]);
+    expect(await deleteUser(db, member.id)).toBe(true);
+    expect(await deleteUser(db, member.id)).toBe(false); // already gone
+    expect(await deleteUser(db, "missing-id")).toBe(false);
+    expect(await countUsers(db)).toBe(1);
+    expect((await getUserByLogin(db, admin.github_login))?.id).toBe(admin.id);
+  });
+
+  test("deleteUserUnlessLastAdmin: members and non-last admins delete; the sole admin is refused (qc1 hardening)", async () => {
+    const db = createDashboardTestD1();
+    const admin = await createUser(db, { login: "octocat", role: "admin" });
+    const member = await createUser(db, { login: "hubot", role: "member" });
+    // Member row: unconditional delete.
+    expect(await deleteUserUnlessLastAdmin(db, member.id)).toBe(true);
+    expect(await getUserByLogin(db, "hubot")).toBeNull();
+    // Sole admin: the conditional statement refuses, row intact.
+    expect(await deleteUserUnlessLastAdmin(db, admin.id)).toBe(false);
+    expect((await getUserByLogin(db, "octocat"))?.id).toBe(admin.id);
+    expect(await countAdmins(db)).toBe(1);
+    // With a second admin present, either row is deletable again.
+    await createUser(db, { login: "ada", role: "admin" });
+    expect(await deleteUserUnlessLastAdmin(db, admin.id)).toBe(true);
+    expect(await countAdmins(db)).toBe(1);
+    expect(await deleteUserUnlessLastAdmin(db, "missing-id")).toBe(false);
+  });
+
+  test("listUsers breaks created_at ties by github_login (deterministic order, qc1/qc3)", async () => {
+    const db = createDashboardTestD1();
+    const insert = db.raw.prepare(
+      "INSERT INTO users (id, github_login, role, created_at) VALUES (?, ?, 'member', ?)",
+    );
+    const sameTs = "2026-01-01T00:00:00.000Z";
+    insert.run("u-3", "zeta", sameTs);
+    insert.run("u-1", "Alpha", sameTs);
+    insert.run("u-2", "midway", sameTs);
+    expect((await listUsers(db)).map((u) => u.github_login)).toEqual(["Alpha", "midway", "zeta"]);
+  });
+
+  test("parseAdminLogins trims entries, drops empties, treats unset/blank as not configured", () => {
+    expect(parseAdminLogins(undefined)).toEqual([]);
+    expect(parseAdminLogins("")).toEqual([]);
+    expect(parseAdminLogins("   ")).toEqual([]);
+    expect(parseAdminLogins(" octocat , Hubot ,, ada ")).toEqual(["octocat", "Hubot", "ada"]);
+  });
+});
+
+describe("bootstrapDashboardAccess precedence matrix (plan 12 T1, spec § AuthZ)", () => {
+  test("1. row exists → allow, zero writes, no promotion (ADMIN_LOGINS does not outrank the row)", async () => {
+    const db = createDashboardTestD1();
+    const existing = await createUser(db, { login: "octocat", role: "member" });
+    const decision = await bootstrapDashboardAccess(db, "octocat", "octocat");
+    expect(decision).toEqual({ outcome: "allow", user: existing, created: false });
+    expect(userCount(db)).toBe(1);
+  });
+
+  test("1b. row lookup is case-insensitive", async () => {
+    const db = createDashboardTestD1();
+    const existing = await createUser(db, { login: "octocat", role: "member" });
+    const decision = await bootstrapDashboardAccess(db, "OCTOCAT", undefined);
+    expect(decision).toEqual({ outcome: "allow", user: existing, created: false });
+  });
+
+  test("2. ADMIN_LOGINS hit (no row) → creates an invited_by=NULL admin", async () => {
+    const db = createDashboardTestD1();
+    const decision = await bootstrapDashboardAccess(db, "octocat", "  Ada , octocat ");
+    expect(decision.outcome).toBe("allow");
+    if (decision.outcome === "allow") {
+      expect(decision.created).toBe(true);
+      expect(decision.user.role).toBe("admin");
+      expect(decision.user.invited_by).toBeNull();
+    }
+    expect(userCount(db)).toBe(1);
+  });
+
+  test("2b. ADMIN_LOGINS comparison is case-insensitive (GitHub logins are)", async () => {
+    const db = createDashboardTestD1();
+    const decision = await bootstrapDashboardAccess(db, "OCTOCAT", "octocat");
+    expect(decision.outcome).toBe("allow");
+  });
+
+  test("3. empty table && ADMIN_LOGINS unset → first login bootstraps as admin", async () => {
+    const db = createDashboardTestD1();
+    const decision = await bootstrapDashboardAccess(db, "deployer", undefined);
+    expect(decision.outcome).toBe("allow");
+    if (decision.outcome === "allow") expect(decision.user.role).toBe("admin");
+    // Whitespace-only counts as unset for the fallback.
+    const blank = createDashboardTestD1();
+    expect((await bootstrapDashboardAccess(blank, "deployer", "   ")).outcome).toBe("allow");
+  });
+
+  test("4. deny: populated table, unknown login → deny with ZERO writes", async () => {
+    const db = createDashboardTestD1();
+    await createUser(db, { login: "octocat", role: "admin" });
+    expect(await bootstrapDashboardAccess(db, "mallory", undefined)).toEqual({ outcome: "deny" });
+    expect(userCount(db)).toBe(1); // no user row created
+  });
+
+  test("4b. deny: empty table but ADMIN_LOGINS configured without the login", async () => {
+    const db = createDashboardTestD1();
+    expect(await bootstrapDashboardAccess(db, "mallory", "octocat")).toEqual({ outcome: "deny" });
+    expect(userCount(db)).toBe(0);
+  });
+});
+
+describe("/dashboard/oauth/callback bootstrap + deny (plan 12 T1)", () => {
+  const origFetch = globalThis.fetch;
+  afterEach(() => {
+    globalThis.fetch = origFetch;
+  });
+
+  /** Successful identity: token exchange then /user for the given login. */
+  function stubGitHubIdentity(login: string): void {
+    globalThis.fetch = (async (url: unknown) => {
+      const target = String(url);
+      if (target === "https://github.com/login/oauth/access_token") {
+        return new Response(JSON.stringify({ access_token: "gho_test-token" }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+      if (target === "https://api.github.com/user") {
+        return new Response(JSON.stringify({ login, name: null }), { status: 200 });
+      }
+      throw new Error(`unexpected fetch target: ${target}`);
+    }) as unknown as typeof fetch;
+  }
+
+  async function oauthCallback(login: string, env: Env): Promise<Response> {
+    const state = await createStateValue(SESSION_SECRET);
+    return worker.fetch(
+      dashboardRequest(
+        `/dashboard/oauth/callback?code=x&state=${state}`,
+        `${OAUTH_STATE_COOKIE}=${state}`,
+      ),
+      env,
+    );
+  }
+
+  test("unknown login, populated table, ADMIN_LOGINS unset → 403 invite-only page, ZERO Set-Cookie, zero user writes", async () => {
+    const db = createDashboardTestD1();
+    await createUser(db, { login: "octocat", role: "admin" });
+    stubGitHubIdentity("mallory");
+    const res = await oauthCallback("mallory", makeDbEnv(db));
+    expect(res.status).toBe(403);
+    const body = await res.text();
+    // Locked deny copy (spec § User-visible behavior 1).
+    expect(body).toContain("This deployment is invite-only. Ask an admin to add mallory.");
+    // Zero cookies — not even the single-use state expiry (spec: 零 cookie、零写入).
+    expect(res.headers.getSetCookie()).toHaveLength(0);
+    // Zero D1 writes on deny.
+    expect(userCount(db)).toBe(1);
+  });
+
+  test("ADMIN_LOGINS hit → 302 /dashboard, session cookie minted, admin row created", async () => {
+    const db = createDashboardTestD1();
+    stubGitHubIdentity("octocat");
+    const res = await oauthCallback("octocat", makeDbEnv(db, { ADMIN_LOGINS: "octocat" }));
+    expect(res.status).toBe(302);
+    expect(res.headers.get("Location")).toBe("/dashboard");
+    expect(res.headers.getSetCookie().some((c) => c.startsWith(`${SESSION_COOKIE}=`))).toBe(true);
+    expect((await getUserByLogin(db, "octocat"))?.role).toBe("admin");
+  });
+
+  test("empty-table fallback (ADMIN_LOGINS unset) → first login becomes admin", async () => {
+    const db = createDashboardTestD1();
+    stubGitHubIdentity("deployer");
+    const res = await oauthCallback("deployer", makeDbEnv(db));
+    expect(res.status).toBe(302);
+    expect((await getUserByLogin(db, "deployer"))?.role).toBe("admin");
+  });
+
+  test("existing member row → 302 with no second row (row-hit precedence)", async () => {
+    const db = createDashboardTestD1();
+    await createUser(db, { login: "octocat", role: "member" });
+    stubGitHubIdentity("octocat");
+    const res = await oauthCallback("octocat", makeDbEnv(db));
+    expect(res.status).toBe(302);
+    expect(userCount(db)).toBe(1);
+  });
+
+  test("session payload unchanged on allow (login/iat/exp — no new claims)", async () => {
+    const db = createDashboardTestD1();
+    stubGitHubIdentity("octocat");
+    const res = await oauthCallback("octocat", makeDbEnv(db, { ADMIN_LOGINS: "octocat" }));
+    const cookie = res.headers.getSetCookie().find((c) => c.startsWith(`${SESSION_COOKIE}=`)) ?? "";
+    const value = cookie.split(";")[0]?.slice(SESSION_COOKIE.length + 1) ?? "";
+    const payload = await readSessionValue(value, SESSION_SECRET);
+    expect(payload?.login).toBe("octocat");
+    expect(Object.keys(payload ?? {}).sort()).toEqual(["exp", "iat", "login"]);
+  });
+
+  test("missing D1 binding on the post-identity path → 500 fail-closed, no session cookie", async () => {
+    stubGitHubIdentity("octocat");
+    // baseEnv (no D1): makeEnv ships the default seeded store for the guarded
+    // routes — the callback's unbound-D1 premise needs the bare env.
+    const res = await oauthCallback("octocat", baseEnv({ ADMIN_LOGINS: "octocat" }));
+    expect(res.status).toBe(500);
+    expect(res.headers.getSetCookie().some((c) => c.startsWith(`${SESSION_COOKIE}=`))).toBe(false);
+  });
+
+  test(".env.example documents ADMIN_LOGINS (a var, not a secret)", async () => {
+    const example = await Bun.file(new URL("../../.env.example", import.meta.url)).text();
+    expect(example).toContain("ADMIN_LOGINS");
+    expect(example).toContain("not a secret");
+  });
+});
+
+describe("per-request allowlist guard (plan 12 T2, spec § AuthZ + lock L5)", () => {
+  const origFetch = globalThis.fetch;
+  afterEach(() => {
+    globalThis.fetch = origFetch;
+  });
+
+  /**
+   * Removed-member fixture: a seeded store where mallory's row was deleted
+   * through the real revocation path (deleteUser — removal = row delete, no
+   * status column). Mallory still holds a cryptographically valid session
+   * cookie: the stateless session cannot see the removal, the guard must.
+   */
+  async function removedMemberEnv(): Promise<Env> {
+    const db = createDashboardTestD1();
+    await createUser(db, { login: "octocat", role: "admin" });
+    const mallory = await createUser(db, { login: "mallory", role: "member" });
+    await deleteUser(db, mallory.id);
+    return makeDbEnv(db);
+  }
+
+  const mallorySession = () => createSessionValue("mallory", null, SESSION_SECRET);
+
+  test("removed member with a valid cookie → 403 on every route family (shell, manifest start/confirm/commit, catch-all)", async () => {
+    // Zero network behind the guard: the 403 must short-circuit BEFORE the
+    // manifest conversion / Cloudflare secrets paths.
+    let networkCalls = 0;
+    globalThis.fetch = (async () => {
+      networkCalls++;
+      throw new Error("no network may run behind the guard");
+    }) as unknown as typeof fetch;
+    const env = await removedMemberEnv();
+    const cookie = `${SESSION_COOKIE}=${await mallorySession()}`;
+    // GET shell (B0)
+    const shell = await worker.fetch(dashboardRequest("/dashboard", cookie), env);
+    expect(shell.status).toBe(403);
+    // POST manifest start (B1)
+    const start = await worker.fetch(
+      new Request("https://worker.local/dashboard/manifest/start", {
+        method: "POST",
+        headers: { Cookie: cookie },
+      }),
+      env,
+    );
+    expect(start.status).toBe(403);
+    // GET manifest confirm (B1 resume gate)
+    const confirm = await worker.fetch(dashboardRequest("/dashboard/manifest/confirm", cookie), env);
+    expect(confirm.status).toBe(403);
+    // POST manifest commit (B1 confirm gate) — guard fires before secret work
+    const commit = await worker.fetch(
+      new Request("https://worker.local/dashboard/manifest/commit", {
+        method: "POST",
+        headers: { Cookie: cookie, "Content-Type": "application/x-www-form-urlencoded" },
+        body: "confirm=overwrite",
+      }),
+      env,
+    );
+    expect(commit.status).toBe(403);
+    // POST catch-all placeholder — the single use("*") mount auto-covers
+    // routes that do not exist yet (plan 13/14 will add /dashboard/* routes).
+    const future = await worker.fetch(
+      new Request("https://worker.local/dashboard/some-future-route", {
+        method: "POST",
+        headers: { Cookie: cookie },
+      }),
+      env,
+    );
+    expect(future.status).toBe(403);
+    expect(networkCalls).toBe(0);
+    const body = await shell.text();
+    // Removed-member page (not the shell): no identity header, no sections.
+    expect(body).toContain("Your dashboard access was removed. Ask an admin to re-invite mallory.");
+    expect(body).not.toContain("Signed in as");
+    expect(body).not.toContain('action="/dashboard/manifest/start"');
+  });
+
+  test("removed member CAN log out: logout is session-gated, not membership-gated (qc2 F-002)", async () => {
+    // L5: /logout is NOT in the exempt set — a session-less visitor still
+    // 302s (pinned below). But a VALID session with no user row must reach
+    // the route so its owner can burn the stale cookie: the normal
+    // expired-cookie response (session + manifest hold + state), 302 login.
+    const res = await worker.fetch(
+      dashboardRequest("/dashboard/logout", `${SESSION_COOKIE}=${await mallorySession()}`),
+      await removedMemberEnv(),
+    );
+    expect(res.status).toBe(302);
+    expect(res.headers.get("Location")).toBe("/dashboard/login");
+    const setCookie = res.headers.getSetCookie();
+    expect(setCookie).toHaveLength(3);
+    for (const name of [SESSION_COOKIE, MANIFEST_HOLD_COOKIE, MANIFEST_STATE_COOKIE]) {
+      const cookie = setCookie.find((c) => c.startsWith(`${name}=;`));
+      expect(cookie, name).toBeDefined();
+      expect(cookie).toContain("Max-Age=0");
+    }
+  });
+
+  test("session-less /dashboard/logout → 302 to login with zero Set-Cookie (guard branch, route never runs)", async () => {
+    const res = await worker.fetch(dashboardRequest("/dashboard/logout"), makeEnv());
+    expect(res.status).toBe(302);
+    expect(res.headers.get("Location")).toBe("/dashboard/login");
+    expect(res.headers.getSetCookie()).toHaveLength(0);
+  });
+
+  test("the two pre-session routes stay exempt: /login works and the callback reaches its own checks", async () => {
+    const env = await removedMemberEnv(); // even a store with no mallory row
+    // /login: guard exempt → the route's OAuth flow runs (302 to GitHub).
+    const login = await worker.fetch(dashboardRequest("/dashboard/login"), env);
+    expect(login.status).toBe(302);
+    expect(new URL(login.headers.get("Location") ?? "").host).toBe("github.com");
+    // /oauth/callback: guard exempt → the route's state check decides (400),
+    // NOT a guard 302/403 — this request is what establishes the session.
+    const callback = await worker.fetch(
+      dashboardRequest("/dashboard/oauth/callback?code=x&state=y"),
+      env,
+    );
+    expect(callback.status).toBe(400);
+  });
+
+  test("member requests pass the guard and reach the routes unchanged (B0 shell + B1 manifest)", async () => {
+    const env = makeEnv();
+    const cookie = `${SESSION_COOKIE}=${await createSessionValue("octocat", null, SESSION_SECRET)}`;
+    const shell = await worker.fetch(dashboardRequest("/dashboard", cookie), env);
+    expect(shell.status).toBe(200);
+    expect(await shell.text()).toContain("Signed in as octocat");
+    const start = await worker.fetch(
+      new Request("https://worker.local/dashboard/manifest/start", {
+        method: "POST",
+        headers: { Cookie: cookie },
+      }),
+      env,
+    );
+    expect(start.status).toBe(200);
+    // Logout is reachable for a member: the guarded route expires all three cookies.
+    const out = await worker.fetch(dashboardRequest("/dashboard/logout", cookie), env);
+    expect(out.status).toBe(302);
+    expect(out.headers.get("Location")).toBe("/dashboard/login");
+    expect(out.headers.getSetCookie()).toHaveLength(3);
+  });
+
+  test("membership lookup is case-insensitive: session login case variant of a member row passes", async () => {
+    // Session carries the GitHub-verified casing; the row was invited with
+    // another casing — getUserByLogin is COLLATE NOCASE (spec § AuthZ).
+    const session = await createSessionValue("OctoCat", null, SESSION_SECRET);
+    const res = await worker.fetch(
+      dashboardRequest("/dashboard", `${SESSION_COOKIE}=${session}`),
+      makeEnv(),
+    );
+    expect(res.status).toBe(200);
+    expect(await res.text()).toContain("Signed in as OctoCat");
+  });
+
+  test("guard fails closed when D1 is unbound: valid session → 500, route never runs", async () => {
+    const res = await worker.fetch(
+      dashboardRequest(
+        "/dashboard",
+        `${SESSION_COOKIE}=${await createSessionValue("octocat", null, SESSION_SECRET)}`,
+      ),
+      baseEnv(), // no DB binding
+    );
+    expect(res.status).toBe(500);
+    expect(await res.text()).toContain("dashboard storage is not configured");
+  });
+
+  test("removed-member denial logs a structured not_a_member warning (login only, no secrets)", async () => {
+    const warns = spyOnWarn();
+    await worker.fetch(
+      dashboardRequest("/dashboard", `${SESSION_COOKIE}=${await mallorySession()}`),
+      await removedMemberEnv(),
+    );
+    expect(warns).toHaveLength(1);
+    const entry = JSON.parse(warns[0] ?? "") as Record<string, unknown>;
+    expect(entry.event).toBe("dashboard_access");
+    expect(entry.stage).toBe("guard");
+    expect(entry.reason).toBe("not_a_member");
+    expect(entry.login).toBe("mallory");
+  });
+});
+
+// --- plan 12 T3: members page (admin-only) + DESIGN mapping ------------------
+
+describe("members page (plan 12 T3, admin-only)", () => {
+  const adminCookie = async () =>
+    `${SESSION_COOKIE}=${await createSessionValue("octocat", null, SESSION_SECRET)}`;
+  const memberCookie = async () =>
+    `${SESSION_COOKIE}=${await createSessionValue("mallory", null, SESSION_SECRET)}`;
+
+  async function membersGet(cookie: string, env?: Env): Promise<Response> {
+    return await worker.fetch(dashboardRequest("/dashboard/members", cookie), env ?? makeEnv());
+  }
+
+  async function membersPost(
+    path: string,
+    cookie: string,
+    body: string,
+    env?: Env,
+  ): Promise<Response> {
+    return await worker.fetch(
+      new Request(`https://worker.local/dashboard/members/${path}`, {
+        method: "POST",
+        headers: { Cookie: cookie, "Content-Type": "application/x-www-form-urlencoded" },
+        body,
+      }),
+      env ?? makeEnv(),
+    );
+  }
+
+  test("the new routes sit behind the guard: no session → 302 to login", async () => {
+    const get = await membersGet("");
+    expect(get.status).toBe(302);
+    expect(get.headers.get("Location")).toBe("/dashboard/login");
+    const post = await membersPost("invite", "", "login=hubot");
+    expect(post.status).toBe(302);
+    expect(post.headers.get("Location")).toBe("/dashboard/login");
+  });
+
+  test("admin GET → 200: single column, masked list (login + role + created_at only)", async () => {
+    const db = createDashboardTestD1();
+    const admin = await createUser(db, { login: "octocat", role: "admin" });
+    const member = await createUser(db, { login: "hubot", role: "member", invitedBy: "secret-inviter" });
+    const res = await membersGet(await adminCookie(), makeDbEnv(db));
+    expect(res.status).toBe(200);
+    const body = await res.text();
+    // List shows logins, roles, and created_at.
+    expect(body).toContain("<strong>hubot</strong>");
+    expect(body).toContain('<span class="meta">admin · ');
+    expect(body).toContain('<span class="meta">member · ');
+    expect(body).toContain(member.created_at);
+    // Masked DISPLAY: logins, roles, and created_at only — no row ids, no
+    // invited_by. (The row id does ride the remove form's hidden userId
+    // control — POST /members/remove {userId} removes by row id, spec §
+    // AuthZ "remove 按列表行 id，避免 login 大小写歧义" — so strip those
+    // transport-only fields before asserting what the list shows.)
+    expect(body).toContain(`name="userId" value="${member.id}"`);
+    const visible = body.replace(/<input type="hidden" name="userId" value="[^"]*">/g, "");
+    expect(visible).not.toContain(admin.id);
+    expect(visible).not.toContain(member.id);
+    expect(visible).not.toContain("secret-inviter");
+    // Single column (B1 confirm-page rule): no 3-column sections grid.
+    expect(body).not.toContain('<div class="sections">');
+    // invite primary (blue-700) + remove danger (red-700), per spec §
+    // DESIGN.md 意图.
+    expect(body).toContain('action="/dashboard/members/invite"');
+    expect(body).toContain('<button type="submit" class="primary">Invite member</button>');
+    expect(body).toContain('class="danger">Remove</button>');
+    // The acting admin's own row never offers removal (the route refuses it).
+    expect(body).toContain('<span class="you">you</span>');
+  });
+
+  test("non-admin member GET → 403 restricted view, no membership data", async () => {
+    const db = createDashboardTestD1();
+    await createUser(db, { login: "octocat", role: "admin" });
+    await createUser(db, { login: "mallory", role: "member" });
+    const res = await membersGet(await memberCookie(), makeDbEnv(db));
+    expect(res.status).toBe(403);
+    const body = await res.text();
+    expect(body).toContain("restricted to dashboard admins");
+    expect(body).not.toContain("/dashboard/members/invite");
+    expect(body).not.toContain("/dashboard/members/remove");
+  });
+
+  test("non-admin POST invite → 403, zero mutations", async () => {
+    const db = createDashboardTestD1();
+    await createUser(db, { login: "octocat", role: "admin" });
+    await createUser(db, { login: "mallory", role: "member" });
+    const res = await membersPost("invite", await memberCookie(), "login=hubot", makeDbEnv(db));
+    expect(res.status).toBe(403);
+    expect(userCount(db)).toBe(2);
+    expect(await getUserByLogin(db, "hubot")).toBeNull();
+  });
+
+  test("non-admin POST remove → 403, zero mutations (target row intact)", async () => {
+    const db = createDashboardTestD1();
+    const admin = await createUser(db, { login: "octocat", role: "admin" });
+    await createUser(db, { login: "mallory", role: "member" });
+    const res = await membersPost("remove", await memberCookie(), `userId=${admin.id}`, makeDbEnv(db));
+    expect(res.status).toBe(403);
+    expect(userCount(db)).toBe(2);
+    expect((await getUserByLogin(db, "octocat"))?.id).toBe(admin.id);
+  });
+
+  test("admin invite → 200 success notice, member row created with invitedBy (input trimmed)", async () => {
+    const db = createDashboardTestD1();
+    await createUser(db, { login: "octocat", role: "admin" });
+    const res = await membersPost("invite", await adminCookie(), "login=%20%20hubot%20%20", makeDbEnv(db));
+    expect(res.status).toBe(200);
+    expect(await res.text()).toContain("Invited hubot");
+    const row = await getUserByLogin(db, "hubot");
+    expect(row?.role).toBe("member");
+    expect(row?.invited_by).toBe("octocat");
+    expect(userCount(db)).toBe(2);
+  });
+
+  test("T1 pin (Minor 2): invite resolves case variants — existing login → no-op notice, NO second row", async () => {
+    const db = createDashboardTestD1();
+    await createUser(db, { login: "OctoCat", role: "admin" });
+    // The DDL UNIQUE is BINARY-collated: a direct createUser("octocat") would
+    // succeed and mint a second row — the NOCASE pre-read must catch it first.
+    const res = await membersPost("invite", await adminCookie(), "login=octocat", makeDbEnv(db));
+    expect(res.status).toBe(200);
+    const body = await res.text();
+    expect(body).toContain("octocat is already a member — nothing changed.");
+    expect(body).not.toContain("Invited octocat");
+    expect(userCount(db)).toBe(1);
+  });
+
+  test("invite empty / whitespace login → 400 re-render, zero rows", async () => {
+    const db = createDashboardTestD1();
+    await createUser(db, { login: "octocat", role: "admin" });
+    for (const value of ["", "%20%20%20"]) {
+      const res = await membersPost("invite", await adminCookie(), `login=${value}`, makeDbEnv(db));
+      expect(res.status).toBe(400);
+      const body = await res.text();
+      expect(body).toContain("Enter a GitHub login");
+      expect(body).toContain('action="/dashboard/members/invite"');
+    }
+    expect(userCount(db)).toBe(1);
+  });
+
+  test("invite invalid GitHub login syntax → 400 re-render, zero rows (qc1/qc2 F-003)", async () => {
+    const db = createDashboardTestD1();
+    await createUser(db, { login: "octocat", role: "admin" });
+    // Spaces, symbols, >39 chars, non-ASCII — all can never match a real
+    // GitHub login, so none may persist as a member row.
+    const invalid = [
+      "has%20space",
+      "under_score",
+      "dot.name",
+      "a".repeat(40),
+      "emoji%F0%9F%99%82",
+    ];
+    for (const value of invalid) {
+      const res = await membersPost("invite", await adminCookie(), `login=${value}`, makeDbEnv(db));
+      expect(res.status).toBe(400);
+      const body = await res.text();
+      expect(body).toContain("not a valid GitHub login");
+      expect(body).toContain('action="/dashboard/members/invite"');
+    }
+    expect(userCount(db)).toBe(1);
+  });
+
+  test("invite accepts the 39-char login boundary (F-003 regex upper bound)", async () => {
+    const db = createDashboardTestD1();
+    await createUser(db, { login: "octocat", role: "admin" });
+    const long = "a".repeat(39);
+    const res = await membersPost("invite", await adminCookie(), `login=${long}`, makeDbEnv(db));
+    expect(res.status).toBe(200);
+    expect(await res.text()).toContain(`Invited ${long}`);
+    expect((await getUserByLogin(db, long))?.role).toBe("member");
+  });
+
+  test("self-remove → 400, row intact (the only admin is always the actor, so this is also the last-admin case)", async () => {
+    const db = createDashboardTestD1();
+    const admin = await createUser(db, { login: "octocat", role: "admin" });
+    const res = await membersPost("remove", await adminCookie(), `userId=${admin.id}`, makeDbEnv(db));
+    expect(res.status).toBe(400);
+    expect(await res.text()).toContain("You cannot remove yourself.");
+    expect(await countAdmins(db)).toBe(1);
+    expect(userCount(db)).toBe(1);
+  });
+
+  test("removing another admin succeeds while 2 admins exist; the remaining last admin cannot then be removed", async () => {
+    const db = createDashboardTestD1();
+    await createUser(db, { login: "octocat", role: "admin" });
+    const ada = await createUser(db, { login: "ada", role: "admin" });
+    const ok = await membersPost("remove", await adminCookie(), `userId=${ada.id}`, makeDbEnv(db));
+    expect(ok.status).toBe(200);
+    expect(await ok.text()).toContain("Removed ada.");
+    expect(await countAdmins(db)).toBe(1);
+    // Now octocat IS the last admin — removal must refuse, row intact.
+    const octocat = await getUserByLogin(db, "octocat");
+    const refused = await membersPost("remove", await adminCookie(), `userId=${octocat?.id}`, makeDbEnv(db));
+    expect(refused.status).toBe(400);
+    expect(await countAdmins(db)).toBe(1);
+    expect(userCount(db)).toBe(1);
+  });
+
+  test("remove unknown / blank userId → 400, rows intact", async () => {
+    const db = createDashboardTestD1();
+    await createUser(db, { login: "octocat", role: "admin" });
+    await createUser(db, { login: "mallory", role: "member" });
+    for (const value of ["missing-id", ""]) {
+      const res = await membersPost("remove", await adminCookie(), `userId=${value}`, makeDbEnv(db));
+      expect(res.status).toBe(400);
+    }
+    expect(userCount(db)).toBe(2);
+  });
+
+  test("remove member → 200 success, row gone; the removed member's old cookie then 403s everywhere", async () => {
+    const db = createDashboardTestD1();
+    await createUser(db, { login: "octocat", role: "admin" });
+    const mallory = await createUser(db, { login: "mallory", role: "member" });
+    const staleCookie = await memberCookie(); // minted BEFORE the removal
+    const res = await membersPost("remove", await adminCookie(), `userId=${mallory.id}`, makeDbEnv(db));
+    expect(res.status).toBe(200);
+    expect(await res.text()).toContain("Removed mallory.");
+    expect(await getUserByLogin(db, "mallory")).toBeNull();
+    // Done criterion: a removed member cannot reach any /dashboard/** route
+    // with the still-valid session cookie — the T2 guard fails it closed.
+    const shell = await worker.fetch(dashboardRequest("/dashboard", staleCookie), makeDbEnv(db));
+    expect(shell.status).toBe(403);
+  });
+
+  test("T1 pin (Minor 1): ADMIN_LOGINS docs name the real var mechanism, not the nonexistent `wrangler vars put`", async () => {
+    const example = await Bun.file(new URL("../../.env.example", import.meta.url)).text();
+    expect(example).toContain("ADMIN_LOGINS");
+    expect(example).not.toContain("wrangler vars put");
+    const envTs = await Bun.file(new URL("../../src/worker/env.ts", import.meta.url)).text();
+    expect(envTs).toContain("ADMIN_LOGINS");
+    expect(envTs).not.toContain("wrangler vars put");
   });
 });
