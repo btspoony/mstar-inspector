@@ -36,7 +36,11 @@ import {
   readHoldValue,
   writeWorkerSecrets,
 } from "./manifest";
-import { dashboardPage, errorPage, manifestConfirmPage, manifestErrorPage, manifestStartPage, manifestSuccessPage } from "./views";
+import {
+  bootstrapDashboardAccess,
+  type DashboardD1,
+} from "./users";
+import { dashboardPage, deniedPage, errorPage, manifestConfirmPage, manifestErrorPage, manifestStartPage, manifestSuccessPage } from "./views";
 
 export const dashboardApp = new Hono<{ Bindings: Env }>();
 
@@ -45,6 +49,18 @@ function dashboardSecrets(env: Env) {
   const clientSecret = env.GITHUB_OAUTH_CLIENT_SECRET;
   const sessionSecret = env.DASHBOARD_SESSION_SECRET;
   return clientId && clientSecret && sessionSecret ? { clientId, clientSecret, sessionSecret } : null;
+}
+
+/**
+ * D1 membership store binding (plan 12 B4). Runtime-real via wrangler.jsonc
+ * `d1_databases` (binding DB), but the fetch-face Env deliberately does not
+ * declare it (src/worker/env.ts stays ADMIN_LOGINS-only this plan) — read
+ * through this local intersection and fail closed when unbound, like every
+ * missing dashboard dependency.
+ */
+function dashboardD1(env: Env): DashboardD1 | null {
+  const db = (env as Env & { DB?: DashboardD1 }).DB;
+  return db ?? null;
 }
 
 dashboardApp.get("/login", async (c) => {
@@ -87,6 +103,19 @@ dashboardApp.get("/oauth/callback", async (c) => {
   const user = await fetchGitHubUser(token);
   if (!user) {
     return c.html(errorPage("Could not read your GitHub profile."), 502);
+  }
+  // Plan 12 B4 T1: invite-only bootstrap decision (spec § AuthZ precedence:
+  // row → ADMIN_LOGINS → empty-table fallback → deny) BEFORE any session is
+  // minted. Deny = 403 page with ZERO Set-Cookie (spec: 零 cookie、零写入) —
+  // the single-use state-expiry header set above is withdrawn here — and
+  // zero D1 writes (the deny branch never inserts).
+  const db = dashboardD1(c.env);
+  if (!db) return c.text("dashboard storage is not configured", 500);
+  const decision = await bootstrapDashboardAccess(db, user.login, c.env.ADMIN_LOGINS);
+  if (decision.outcome === "deny") {
+    logOAuthFailure("bootstrap", "not_invited", { login: user.login });
+    c.header("Set-Cookie", undefined);
+    return c.html(deniedPage(user.login), 403);
   }
   const session = await createSessionValue(user.login, user.name, secrets.sessionSecret);
   c.header("Set-Cookie", serializeCookie(SESSION_COOKIE, session, SESSION_MAX_AGE_SEC), {

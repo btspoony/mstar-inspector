@@ -292,6 +292,22 @@ export function manifestErrorPage(message: string, resumable = false): string {
   );
 }
 
+/**
+ * Invite-only denial (plan 12 B4 T1, spec § User-visible behavior 1) —
+ * locked English copy with the GitHub-verified login interpolated
+ * (escaped). The callback deny path renders this at 403 with ZERO
+ * Set-Cookie: no session, no state expiry, nothing. Red-700 banner, no
+ * login link back (an unknown user has nothing to return to).
+ */
+export function deniedPage(login: string): string {
+  return page(
+    "Access denied",
+    `<main>
+    <div class="banner" role="alert">This deployment is invite-only. Ask an admin to add ${escapeHtml(login)}.</div>
+  </main>`,
+  );
+}
+
 /** OAuth failure surface: red-700 banner + what-to-do-next (DESIGN.md § State legibility). */
 export function errorPage(message: string): string {
   return page(
