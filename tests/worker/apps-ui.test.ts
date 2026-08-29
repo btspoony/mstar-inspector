@@ -11,7 +11,9 @@
  * was found and passed to signature verification).
  *
  * The D1 double is the real bun:sqlite helper over migrations
- * 0001/0002 + 0003/0004/0005 (production-shaped, filename order).
+ * 0001/0002 + 0003–0008 (production-shaped, filename order — 0006 backs the
+ * per-App config tables the settings page reads; 0008 is plan 16's per-App
+ * ops columns behind the pause toggle and the install-health panel).
  */
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
@@ -50,6 +52,9 @@ function createAppsUiD1(): ReturnType<typeof createTestD1> {
     "0003_dashboard_users.sql",
     "0004_github_apps.sql",
     "0005_reviews_app_id.sql",
+    "0006_app_provider_config.sql",
+    "0007_reviews_app_id_index.sql",
+    "0008_github_apps_ops.sql",
   ]) {
     db.raw.exec(readFileSync(join(MIGRATIONS_DIR, name), "utf8"));
   }
@@ -130,6 +135,14 @@ function appStatus(db: ReturnType<typeof createAppsUiD1>, slug: string): string 
     status: string;
   } | null;
   return row?.status ?? null;
+}
+
+/** The per-App pause switch column (migration 0008) straight from the row. */
+function reviewEnabled(db: ReturnType<typeof createAppsUiD1>, slug: string): number | null {
+  const row = db.raw.query("SELECT review_enabled FROM github_apps WHERE slug = ?").get(slug) as {
+    review_enabled: number;
+  } | null;
+  return row?.review_enabled ?? null;
 }
 
 describe("GET /dashboard/apps (plan 13 B5 T3, member-visible list)", () => {
@@ -316,5 +329,214 @@ describe("POST /dashboard/apps/:slug/disable|enable|delete (pinned action paths)
     // Managing a deleted app is 404 — it no longer exists for the UI.
     const manage = await post("/dashboard/apps/mstar-inspector-mallory/disable", cookie, makeEnv(db));
     expect(manage.status).toBe(404);
+  });
+});
+
+describe("POST /dashboard/apps/:slug/pause|resume (plan 16, per-App review pause)", () => {
+  test("guard covers the pinned routes: no session → 302 to login, zero mutation", async () => {
+    const db = await seededWorld();
+    for (const path of ["pause", "resume"]) {
+      const res = await post(`/dashboard/apps/mstar-inspector-mallory/${path}`, "", makeEnv(db));
+      expect(res.status).toBe(302);
+      expect(res.headers.get("Location")).toBe("/dashboard/login");
+    }
+    expect(reviewEnabled(db, "mstar-inspector-mallory")).toBe(1);
+  });
+
+  test("creator pauses → 200 notice, review_enabled=0, the re-rendered list immediately shows the amber paused badge + Resume", async () => {
+    const db = await seededWorld();
+    const cookie = `${SESSION_COOKIE}=${await sessionCookie("mallory")}`;
+    const res = await post("/dashboard/apps/mstar-inspector-mallory/pause", cookie, makeEnv(db));
+    expect(res.status).toBe(200);
+    const body = await res.text();
+    expect(body).toContain("Paused mstar-inspector-mallory.");
+    expect(reviewEnabled(db, "mstar-inspector-mallory")).toBe(0);
+    // Paused badge = the amber-700 token (spec § DESIGN.md 意图); the row now
+    // offers Resume (not Pause) to its manager — Disable stays (pause ≠ disable).
+    expect(body).toContain('<span class="note">paused</span>');
+    expect(body).toContain('action="/dashboard/apps/mstar-inspector-mallory/resume"');
+    expect(body).not.toContain('action="/dashboard/apps/mstar-inspector-mallory/pause"');
+    expect(body).toContain('action="/dashboard/apps/mstar-inspector-mallory/disable"');
+  });
+
+  test("pausing leaves the webhook CONNECTED (pause ≠ disable): the route still resolves and verifies — 401 on a bad signature, not 404", async () => {
+    const db = await seededWorld();
+    const cookie = `${SESSION_COOKIE}=${await sessionCookie("mallory")}`;
+    await post("/dashboard/apps/mstar-inspector-mallory/pause", cookie, makeEnv(db));
+    const webhook = await post("/webhook/mstar-inspector-mallory", "", makeEnv(db));
+    expect(webhook.status).toBe(401);
+    expect(reviewEnabled(db, "mstar-inspector-mallory")).toBe(0);
+  });
+
+  test("creator resumes → 200 notice, review_enabled=1, the list shows the gray active badge again", async () => {
+    const db = await seededWorld();
+    const apps = createAppsStore(db);
+    await apps.setReviewEnabled(
+      (await apps.listApps()).find((a) => a.slug === "mstar-inspector-mallory")!.id,
+      false,
+    );
+    const cookie = `${SESSION_COOKIE}=${await sessionCookie("mallory")}`;
+    const res = await post("/dashboard/apps/mstar-inspector-mallory/resume", cookie, makeEnv(db));
+    expect(res.status).toBe(200);
+    const body = await res.text();
+    expect(body).toContain("Resumed mstar-inspector-mallory.");
+    expect(reviewEnabled(db, "mstar-inspector-mallory")).toBe(1);
+    expect(body).toContain('<span class="status">active</span>');
+    expect(body).toContain('action="/dashboard/apps/mstar-inspector-mallory/pause"');
+  });
+
+  test("pausing an already-paused app is an idempotent no-op re-render — warn notice, zero mutation", async () => {
+    const db = await seededWorld();
+    const cookie = `${SESSION_COOKIE}=${await sessionCookie("mallory")}`;
+    await post("/dashboard/apps/mstar-inspector-mallory/pause", cookie, makeEnv(db));
+    const res = await post("/dashboard/apps/mstar-inspector-mallory/pause", cookie, makeEnv(db));
+    expect(res.status).toBe(200);
+    expect(await res.text()).toContain("mstar-inspector-mallory was already paused — nothing changed.");
+    expect(reviewEnabled(db, "mstar-inspector-mallory")).toBe(0);
+  });
+
+  test("resuming an active app is an idempotent no-op re-render — warn notice, zero mutation", async () => {
+    const db = await seededWorld();
+    const cookie = `${SESSION_COOKIE}=${await sessionCookie("mallory")}`;
+    const res = await post("/dashboard/apps/mstar-inspector-mallory/resume", cookie, makeEnv(db));
+    expect(res.status).toBe(200);
+    expect(await res.text()).toContain("mstar-inspector-mallory was already active — nothing changed.");
+    expect(reviewEnabled(db, "mstar-inspector-mallory")).toBe(1);
+  });
+
+  test("authz matrix: another member → 403 zero mutation; the creator of a DIFFERENT app → 403 (scope is per-App)", async () => {
+    const db = await seededWorld();
+    for (const login of ["hubot", "ada"]) {
+      const res = await post(
+        "/dashboard/apps/mstar-inspector-mallory/pause",
+        `${SESSION_COOKIE}=${await sessionCookie(login)}`,
+        makeEnv(db),
+      );
+      expect(res.status).toBe(403);
+      expect(await res.text()).toContain("restricted to dashboard admins");
+      expect(reviewEnabled(db, "mstar-inspector-mallory")).toBe(1);
+    }
+  });
+
+  test("admin (non-creator) may pause and resume another creator's app", async () => {
+    const db = await seededWorld();
+    const cookie = `${SESSION_COOKIE}=${await sessionCookie("octocat")}`;
+    const pause = await post("/dashboard/apps/mstar-inspector-ada/pause", cookie, makeEnv(db));
+    expect(pause.status).toBe(200);
+    expect(await pause.text()).toContain("Paused mstar-inspector-ada.");
+    expect(reviewEnabled(db, "mstar-inspector-ada")).toBe(0);
+    const resume = await post("/dashboard/apps/mstar-inspector-ada/resume", cookie, makeEnv(db));
+    expect(resume.status).toBe(200);
+    expect(reviewEnabled(db, "mstar-inspector-ada")).toBe(1);
+  });
+
+  test("unknown slug → 404; soft-deleted app → 404, zero side effects", async () => {
+    const db = await seededWorld();
+    const apps = createAppsStore(db);
+    const cookie = `${SESSION_COOKIE}=${await sessionCookie("octocat")}`;
+    for (const path of ["/dashboard/apps/no-such-app/pause", "/dashboard/apps/no-such-app/resume"]) {
+      const res = await post(path, cookie, makeEnv(db));
+      expect(res.status).toBe(404);
+    }
+    await apps.softDeleteApp((await apps.listApps()).find((a) => a.slug === "mstar-inspector-mallory")!.id);
+    for (const path of [
+      "/dashboard/apps/mstar-inspector-mallory/pause",
+      "/dashboard/apps/mstar-inspector-mallory/resume",
+    ]) {
+      const res = await post(path, cookie, makeEnv(db));
+      expect(res.status).toBe(404);
+    }
+  });
+
+  test("the list offers Pause on manageable active rows and Resume on paused ones — never to non-managers", async () => {
+    const db = await seededWorld();
+    const apps = createAppsStore(db);
+    await apps.setReviewEnabled(
+      (await apps.listApps()).find((a) => a.slug === "mstar-inspector-mallory")!.id,
+      false,
+    );
+    const admin = await get("/dashboard/apps", `${SESSION_COOKIE}=${await sessionCookie("octocat")}`, makeEnv(db));
+    const adminBody = await admin.text();
+    expect(adminBody).toContain('action="/dashboard/apps/mstar-inspector-mallory/resume"');
+    expect(adminBody).toContain('action="/dashboard/apps/mstar-inspector-ada/pause"');
+    const outsider = await get("/dashboard/apps", `${SESSION_COOKIE}=${await sessionCookie("hubot")}`, makeEnv(db));
+    const outsiderBody = await outsider.text();
+    expect(outsiderBody).not.toContain("/pause");
+    expect(outsiderBody).not.toContain("/resume");
+  });
+});
+
+describe("App settings — Review switch + install health panel (plan 16)", () => {
+  const SETTINGS = "/dashboard/apps/mstar-inspector-mallory/settings";
+  const ownerCookie = async () => `${SESSION_COOKIE}=${await sessionCookie("mallory")}`;
+
+  test("active app: Review switch POSTs to the pinned pause route (blue-700 primary); NULL last webhook reads 'never'; empty install list", async () => {
+    const db = await seededWorld();
+    const res = await get(SETTINGS, await ownerCookie(), makeEnv(db));
+    expect(res.status).toBe(200);
+    const body = await res.text();
+    expect(body).toContain('<h2>Review</h2>');
+    expect(body).toContain('<form method="post" action="/dashboard/apps/mstar-inspector-mallory/pause">');
+    expect(body).toContain('<button type="submit" class="primary">Pause reviews</button>');
+    // Level 1 tokens only: the panel reuses the gray status line and the
+    // .keys empty-state rhythm (spec § DESIGN.md 意图) — no new markup classes.
+    expect(body).toContain("Last webhook: never");
+    expect(body).toContain("No installations yet.");
+  });
+
+  test("paused app: amber paused badge + Resume reviews (also primary); a touched last_webhook_at renders as relative time", async () => {
+    const db = await seededWorld();
+    const apps = createAppsStore(db);
+    const app = (await apps.listApps()).find((a) => a.slug === "mstar-inspector-mallory")!;
+    await apps.setReviewEnabled(app.id, false);
+    await apps.touchLastWebhook(app.id);
+    const res = await get(SETTINGS, await ownerCookie(), makeEnv(db));
+    expect(res.status).toBe(200);
+    const body = await res.text();
+    expect(body).toContain('<p><span class="note">paused</span></p>');
+    expect(body).toContain('<form method="post" action="/dashboard/apps/mstar-inspector-mallory/resume">');
+    expect(body).toContain('<button type="submit" class="primary">Resume reviews</button>');
+    expect(body).not.toContain('action="/dashboard/apps/mstar-inspector-mallory/pause"');
+    expect(body).toContain("Last webhook: just now");
+  });
+
+  test("installations render newest-first (seen_at DESC face) with relative last-seen; installation ids in tabular figures", async () => {
+    const db = await seededWorld();
+    const apps = createAppsStore(db);
+    const app = (await apps.listApps()).find((a) => a.slug === "mstar-inspector-mallory")!;
+    await apps.upsertInstallation({ appId: app.id, installationId: 101, accountLogin: "octo-install" });
+    await apps.upsertInstallation({ appId: app.id, installationId: 102, accountLogin: "hubot-install" });
+    // Backdate the FIRST-seen installation so the ordering face is observable.
+    db.raw
+      .prepare("UPDATE app_installations SET seen_at = datetime('now', '-3 hours') WHERE installation_id = 101")
+      .run();
+    const res = await get(SETTINGS, await ownerCookie(), makeEnv(db));
+    const body = await res.text();
+    // The list reuses the .keys rhythm verbatim (spec § DESIGN.md 意图).
+    expect(body).toContain('<ul class="keys">');
+    expect(body).toContain("<strong>hubot-install</strong>");
+    expect(body).toContain("last seen just now");
+    expect(body).toContain("<strong>octo-install</strong>");
+    expect(body).toContain("last seen 3 hours ago");
+    expect(body).toContain('installation <span class="id">101</span>');
+    // Newest first: installation 102 precedes 101 in the document.
+    expect(body.indexOf("hubot-install")).toBeLessThan(body.indexOf("octo-install"));
+  });
+
+  test("XSS pins: a webhook-supplied login never renders raw; a NULL login renders as 'unknown'", async () => {
+    const db = await seededWorld();
+    const apps = createAppsStore(db);
+    const app = (await apps.listApps()).find((a) => a.slug === "mstar-inspector-mallory")!;
+    await apps.upsertInstallation({
+      appId: app.id,
+      installationId: 103,
+      accountLogin: '<script>alert(1)</script>',
+    });
+    await apps.upsertInstallation({ appId: app.id, installationId: 104 });
+    const res = await get(SETTINGS, await ownerCookie(), makeEnv(db));
+    const body = await res.text();
+    expect(body).not.toContain("<script>");
+    expect(body).toContain("&lt;script&gt;alert(1)&lt;/script&gt;");
+    expect(body).toContain("<strong>unknown</strong>");
   });
 });

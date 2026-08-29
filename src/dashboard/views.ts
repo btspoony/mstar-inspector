@@ -7,6 +7,7 @@
  * No client JS, no build chain, no new dependencies.
  */
 import { PROVIDER_IDS, type MaskedProviderKey } from "./app-config-store";
+import type { AppInstallationRow } from "./apps-store";
 import type { DashboardUserRow } from "./users";
 
 /** Escape GitHub-sourced user data before HTML interpolation (XSS guard). */
@@ -17,6 +18,37 @@ export function escapeHtml(value: string): string {
     .replaceAll(">", "&gt;")
     .replaceAll('"', "&quot;")
     .replaceAll("'", "&#39;");
+}
+
+/**
+ * Relative time for store-generated SQLite datetime('now') stamps (UTC
+ * "YYYY-MM-DD HH:MM:SS" — the reviews.reviewed_at convention), plan 16
+ * install-health panel: coarse buckets only (just now / N minutes / N hours
+ * / N days ago — each spelled exactly once per bucket size). NULL = "never"
+ * (the github_apps.last_webhook_at sentinel); unparseable input degrades to
+ * "unknown" rather than guessing. Output is always a constant phrase — the
+ * raw (escaped-elsewhere) timestamp never renders.
+ */
+function relativeTime(value: string | null): string {
+  if (value === null) return "never";
+  const m = /^(\d{4})-(\d{2})-(\d{2}) (\d{2}):(\d{2}):(\d{2})$/.exec(value);
+  if (!m) return "unknown";
+  const then = Date.UTC(
+    Number(m[1]),
+    Number(m[2]) - 1,
+    Number(m[3]),
+    Number(m[4]),
+    Number(m[5]),
+    Number(m[6]),
+  );
+  const diffMs = Date.now() - then;
+  if (diffMs < 60_000) return "just now"; // clock skew into the future reads as just now
+  const minutes = Math.floor(diffMs / 60_000);
+  if (minutes < 60) return `${minutes} minute${minutes === 1 ? "" : "s"} ago`;
+  const hours = Math.floor(diffMs / 3_600_000);
+  if (hours < 24) return `${hours} hour${hours === 1 ? "" : "s"} ago`;
+  const days = Math.floor(diffMs / 86_400_000);
+  return `${days} day${days === 1 ? "" : "s"} ago`;
 }
 
 const STYLE = `<style>
@@ -131,9 +163,10 @@ a.cancel { color: var(--gray-1000); margin-left: 12px; } /* spacing-3 */
 .members .you { margin-left: auto; }
 .members form { margin: 0 0 0 auto; } /* inline remove control overrides the section form rhythm */
 /* Apps list (plan 13 B5 T3): same single-column rhythm as members; status
-   badge reuses the gray (.status) / amber (.note) tokens; per-row manage
-   controls sit right-aligned. button.secondary reuses the existing gray
-   border token for reversible actions (no new design token). */
+   badge reuses the gray (.status) / amber (.note) tokens — plan 16 adds the
+   paused badge on the same amber token; per-row manage controls sit
+   right-aligned. button.secondary reuses the existing gray border token for
+   reversible actions (no new design token). */
 .apps { list-style: none; margin: 16px 0 0; padding: 0; } /* spacing-4 */
 .apps li {
   display: flex;
@@ -149,7 +182,9 @@ a.cancel { color: var(--gray-1000); margin-left: 12px; } /* spacing-3 */
 .apps .empty { margin-top: 16px; } /* spacing-4 */
 /* App settings key list (plan 14 B2 T2): the members/apps masked-list rhythm —
    provider + masked tail only, per-row destructive Remove (red-700). Existing
-   tokens only (gray-900 meta, background-200 hairline) — no new tokens. */
+   tokens only (gray-900 meta, background-200 hairline) — no new tokens.
+   Plan 16's install-health panel reuses this rhythm verbatim for the
+   installations list (spec § DESIGN.md 意图: 表格复用 .keys 风格). */
 .keys { list-style: none; margin: 16px 0 0; padding: 0; } /* spacing-4 */
 .keys li {
   display: flex;
@@ -502,14 +537,18 @@ export function membersPage(
 /**
  * Apps list (plan 13 B5 T3, spec § IA): member-visible list of non-deleted
  * Apps — slug, numeric App id, status (gray for active / amber for
- * disabled), creator. Disable/enable + delete controls render ONLY where
- * the viewer may manage (admin, or the App's creator — Clarify #6); the
- * route enforces the same rule, so the UI never offers a control that can
- * only 403. The Settings entry (plan 14 B2 T2) rides the same manage rule —
- * it links to the per-App BYOK page for exactly the rows the viewer could
- * edit there. Delete is red-700 (soft-delete is irreversible from the UI);
- * disable/enable are reversible (secondary gray). Create GitHub App is the
- * blue-700 primary. Encrypted columns and row ids never render.
+ * disabled; plan 16 adds the amber `paused` badge for an active row with
+ * review_enabled=0), creator. Disable/enable + delete controls render ONLY
+ * where the viewer may manage (admin, or the App's creator — Clarify #6);
+ * the route enforces the same rule, so the UI never offers a control that
+ * can only 403. The Settings entry (plan 14 B2 T2) rides the same manage
+ * rule — it links to the per-App BYOK page for exactly the rows the viewer
+ * could edit there. Plan 16 adds the pause/resume list actions on the same
+ * manage rule — both the settings-page Review switch and these actions POST
+ * to the pinned /pause · /resume routes (spec § IA). Delete is red-700
+ * (soft-delete is irreversible from the UI); disable/enable and pause/
+ * resume are reversible (secondary gray). Create GitHub App is the blue-700
+ * primary. Encrypted columns and row ids never render.
  */
 export function appsPage(
   user: { login: string; name?: string },
@@ -517,6 +556,8 @@ export function appsPage(
     slug: string;
     github_app_id: number;
     status: string;
+    /** Per-App pause switch (migration 0008): 0 on an active row = paused. */
+    review_enabled: number;
     created_by: string;
   }>,
   viewer: { login: string; role: "admin" | "member" },
@@ -528,11 +569,22 @@ export function appsPage(
       const badge =
         app.status === "disabled"
           ? '<span class="note">disabled</span>'
-          : `<span class="status">${escapeHtml(app.status)}</span>`;
+          : app.review_enabled === 0
+            ? '<span class="note">paused</span>'
+            : `<span class="status">${escapeHtml(app.status)}</span>`;
       // Zero-JS action-path POSTs (spec § IA — architect-pinned route
-      // shapes; HTML forms cannot emit a DELETE verb).
+      // shapes; HTML forms cannot emit a DELETE verb). The pause toggle is
+      // only offered on active rows — a disabled App is disconnected
+      // (webhook 404), so pausing it is meaningless.
       const controls = manageable
         ? `<span class="controls"><a href="/dashboard/apps/${escapeHtml(app.slug)}/settings">Settings</a>${
+            app.status === "active"
+              ? app.review_enabled === 0
+                ? `<form method="post" action="/dashboard/apps/${escapeHtml(app.slug)}/resume"><button type="submit" class="secondary">Resume</button></form>`
+                : `<form method="post" action="/dashboard/apps/${escapeHtml(app.slug)}/pause"><button type="submit" class="secondary">Pause</button></form>`
+              : ""
+          }
+          ${
             app.status === "active"
               ? `<form method="post" action="/dashboard/apps/${escapeHtml(app.slug)}/disable"><button type="submit" class="secondary">Disable</button></form>`
               : `<form method="post" action="/dashboard/apps/${escapeHtml(app.slug)}/enable"><button type="submit" class="secondary">Enable</button></form>`
@@ -584,12 +636,24 @@ export function appsPage(
  * storage recency is never labeled "created". Status/hints reuse the gray
  * (.status) / amber-700 (.note) tokens — no new tokens, no Level 2. Every
  * user-controlled string (slug, provider, masked tail, chain) is escaped.
+ *
+ * Plan 16 additions (spec § IA + § DESIGN.md 意图), appended after the
+ * config sections: the Review switch — pause/resume POSTs to the pinned
+ * `/pause` · `/resume` action paths (both directions blue-700 primary,
+ * confirm-free and reversible; the paused state shows the amber-700 badge) —
+ * and the read-only install-health panel: the App's installations as a
+ * `.keys`-rhythm list (account_login + last-seen, newest first, empty state
+ * "No installations yet.") plus the App-level "Last webhook" line (relative
+ * time, or "never" for a NULL last_webhook_at — connection health is
+ * decoupled from the pause switch). Panel data renders read-only; GitHub
+ * logins are escaped (they arrive from webhook payloads).
  */
 export function appSettingsPage(
   user: { login: string; name?: string },
-  app: { slug: string },
+  app: { slug: string; reviewEnabled: boolean; lastWebhookAt: string | null },
   maskedKeys: MaskedProviderKey[],
   modelChain: string | null,
+  installations: AppInstallationRow[],
   notice?: PageNotice,
 ): string {
   const base = `/dashboard/apps/${escapeHtml(app.slug)}/settings`;
@@ -620,6 +684,48 @@ export function appSettingsPage(
   const options = ['<option value="" disabled selected>Select a provider…</option>']
     .concat(PROVIDER_IDS.map((id) => `<option value="${escapeHtml(id)}">${escapeHtml(id)}</option>`))
     .join("");
+  // Plan 16 Review switch: pause ≠ disable — the webhook stays connected
+  // (2xx) while paused; the copy says so. Both directions are blue-700
+  // primary (spec § DESIGN.md 意图), confirm-free and reversible.
+  const reviewSection = app.reviewEnabled
+    ? `<section class="enabled">
+      <h2>Review</h2>
+      <p class="status">Reviews are on for this App&apos;s pull requests.</p>
+      <form method="post" action="/dashboard/apps/${escapeHtml(app.slug)}/pause">
+        <button type="submit" class="primary">Pause reviews</button>
+      </form>
+    </section>`
+    : `<section class="enabled">
+      <h2>Review</h2>
+      <p><span class="note">paused</span></p>
+      <p class="status">Webhooks stay connected — deliveries are answered and ignored, and nothing is reviewed until you resume.</p>
+      <form method="post" action="/dashboard/apps/${escapeHtml(app.slug)}/resume">
+        <button type="submit" class="primary">Resume reviews</button>
+      </form>
+    </section>`;
+  // Install-health panel (read-only, plan 16): the App's installations,
+  // newest seen first (the store face orders seen_at DESC), plus the App's
+  // last verified webhook delivery. A NULL login (never observed) renders
+  // as "unknown"; every login is escaped — it arrives from webhook payloads.
+  const installRows = installations
+    .map(
+      (inst) => `<li>
+        <strong>${escapeHtml(inst.account_login ?? "unknown")}</strong>
+        <span class="meta">installation <span class="id">${inst.installation_id}</span> · last seen ${relativeTime(inst.seen_at)}</span>
+      </li>`,
+    )
+    .join("\n");
+  const installList =
+    installations.length === 0
+      ? `<p class="status">No installations yet.</p>`
+      : `<ul class="keys">
+      ${installRows}
+      </ul>`;
+  const installSection = `<section class="enabled">
+      <h2>Install health</h2>
+      <p class="status">Last webhook: ${relativeTime(app.lastWebhookAt)}</p>
+      ${installList}
+    </section>`;
   return page(
     "App settings",
     `${shellHeader(user)}
@@ -652,6 +758,8 @@ export function appSettingsPage(
         <button type="submit" class="primary">Save model chain</button>
       </form>
     </section>
+    ${reviewSection}
+    ${installSection}
   </main>`,
   );
 }
