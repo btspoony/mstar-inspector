@@ -17,10 +17,12 @@
  * + rethrow (queue retry → DLQ). The runtime runner has NO
  * summary-degrade path: exit 0 means stdout is the engine-validated
  * envelope; a non-zero exit or a parse/validate failure is no post, no
- * insert, structured log, rethrow. The in-flight guard is the ONE typed
- * exception (bugbot BB-3): guard-held returns a distinct outcome, not a
- * throw — the consumer schedules a per-message delayed retry
- * (60s/120s/240s) and finally acks with a warning instead of DLQing.
+ * insert, structured log, rethrow. Two typed outcomes never throw: the
+ * in-flight guard (bugbot BB-3) — guard-held schedules a per-message
+ * delayed retry (60s/120s/240s) and finally acks with a warning instead of
+ * DLQing — and a PAUSED App's message (plan 16, review_enabled=0), which
+ * acks immediately with ZERO side effects (no guard, no sandbox, no token
+ * mint, no app-config read, no GitHub write, no retry, no DLQ).
  *
  * Sha consistency (bugbot A2): every downstream use — idempotency key, D1
  * row, posted commit_id, KV completion — is keyed off the sha read back
@@ -167,7 +169,13 @@ export function runnerTimeoutMs(level: ReviewLevel): number {
  * elapsed_ms / orchestration — spec d5-budget L5: they ride THIS channel;
  * no new APM, no webhook sink). */
 export type ConsumerLogFields = {
-  event: "pull_request" | "review_command";
+  /**
+   * `pull_request` / `review_command` — the trigger that produced the job.
+   * `review_paused` (plan 16, architect lock L4 — union widened ADDITIVELY):
+   * the ack-skip line for a paused App's in-flight message; it overrides the
+   * trigger fields' event on that one log line.
+   */
+  event: "pull_request" | "review_command" | "review_paused";
   action: string;
   installation_id: number;
   owner: string;
@@ -321,13 +329,16 @@ export function guardRetryDelaysSeconds(level: ReviewLevel): readonly number[] {
 }
 
 /**
- * Outcome of one message pass (bugbot BB-3). The in-flight guard is a
- * DISTINCT typed outcome, not a failure: a guard-held message is scheduled
- * for a per-message delayed retry and finally acked with a warning — it is
- * never rethrown into the immediate-retry ×3 → DLQ path. Real failures keep
- * the existing throw → retry → DLQ behavior.
+ * Outcome of one message pass (bugbot BB-3 + plan 16 lock L4). Two DISTINCT
+ * typed outcomes never throw: a guard-held message is scheduled for a
+ * per-message delayed retry and finally acked with a warning — it is never
+ * rethrown into the immediate-retry ×3 → DLQ path; a PAUSED message (the
+ * App's review_enabled=0) is acked directly — an intentional skip with zero
+ * side effects, never a retry or a DLQ entry (a throw would be the wrong
+ * semantics for an operator pause). Real failures keep the existing
+ * throw → retry → DLQ behavior.
  */
-export type ProcessOutcome = { kind: "ok" } | { kind: "guard-held" };
+export type ProcessOutcome = { kind: "ok" } | { kind: "guard-held" } | { kind: "paused" };
 
 /**
  * Handle a guard-held message (bugbot BB-3). The guard is not an error
@@ -415,16 +426,30 @@ function toBaseFields(payload: ReviewJobPayload): ConsumerLogFields {
 }
 
 /**
+ * Outcome of the per-message commenter resolution (plan 16, architect lock
+ * L4): `ok` carries the commenter the review runs with; `paused` is the
+ * DISTINCT typed outcome for a paused App (review_enabled=0) — returned
+ * AFTER the status/deleted gates (disabled is judged first and keeps its
+ * byte-identical throw→retry→DLQ semantics) and consumed by processMessage
+ * as an immediate ack-skip. NOT a throw: a throw would enter the
+ * retry→DLQ path — the wrong semantics for an intentional pause.
+ */
+type CommenterResolution = { kind: "ok"; commenter: ReviewCommenter } | { kind: "paused" };
+
+/**
  * Resolve the commenter for one message (plan 13 Task 2, architect lock L4
  * — consumer-side credential resolution):
  *
  * - legacy (appRef absent — old in-flight messages — or `{ kind: "legacy" }`)
  *   → the env-App singleton commenter, byte-identical to the pre-multi-App
  *   behavior.
- * - `{ kind: "app", appId }` → the `github_apps` row via D1 (must be active
- *   and not soft-deleted — re-read per message so a disabled/deleted App
- *   fails closed even when an instance is cached, and the failed gate
- *   EVICTS the cached instance) → the row's PEM decrypted in memory
+ * - `{ kind: "app", appId }` → the `github_apps` row via D1 (re-read per
+ *   message) gated in order: missing row / soft-deleted / disabled THROWS
+ *   (unchanged retry→DLQ semantics; the failed gate EVICTS the cached
+ *   instance) → PAUSED (`review_enabled = 0`, plan 16 lock L4) returns the
+ *   DISTINCT `paused` outcome AFTER those gates, leaving any cached
+ *   instance in place (resume reuses the warm instance — the plan-15
+ *   fingerprint ignores review_enabled) → the row's PEM decrypted in memory
  *   (secretbox, AAD `github_apps.private_key_enc:<id>`) →
  *   `createAppCommenter({ APP_ID: String(github_app_id), PRIVATE_KEY })`,
  *   cached per appId in `deps.appCommenters` with the row's credential
@@ -437,10 +462,10 @@ function toBaseFields(payload: ReviewJobPayload): ConsumerLogFields {
  * and no GitHub write ever happens. The decrypted PEM lives only in this
  * call's memory and the commenter instance; it is never logged.
  */
-async function resolveCommenter(payload: ReviewJobPayload, deps: ProcessDeps): Promise<ReviewCommenter> {
+async function resolveCommenter(payload: ReviewJobPayload, deps: ProcessDeps): Promise<CommenterResolution> {
   const appRef = payload.appRef;
   if (appRef === undefined || appRef.kind === "legacy") {
-    return deps.commenter;
+    return { kind: "ok", commenter: deps.commenter };
   }
   const row = await createAppsStore(deps.env.DB).getAppById(appRef.appId);
   if (row === null) {
@@ -455,6 +480,16 @@ async function resolveCommenter(payload: ReviewJobPayload, deps: ProcessDeps): P
     deps.appCommenters.delete(appRef.appId);
     throw new Error(`per-App credential resolution failed: app ${appRef.appId} is ${row.status}`);
   }
+  // Plan 16 (architect lock L4): the PAUSED gate sits AFTER the status/
+  // deleted gates (disabled is judged first — its throw→retry→DLQ semantics
+  // stay byte-identical) and returns the DISTINCT typed outcome instead of
+  // throwing. The cached instance (if any) is deliberately LEFT in place —
+  // resuming the App must reuse the warm instance, and the plan-15
+  // fingerprint (`github_app_id` + `private_key_enc`) is immune to
+  // review_enabled writes.
+  if (row.review_enabled === 0) {
+    return { kind: "paused" };
+  }
   // Plan 15 hardening item 1 (architect lock L1): the fingerprint is the
   // exact string pair read from the row THIS call already fetched — zero
   // extra reads, no hashing, never `updated_at` (plan 16's per-webhook
@@ -464,7 +499,7 @@ async function resolveCommenter(payload: ReviewJobPayload, deps: ProcessDeps): P
   const fingerprint = JSON.stringify([row.github_app_id, row.private_key_enc]);
   const cached = deps.appCommenters.get(appRef.appId);
   if (cached !== undefined && cached.fingerprint === fingerprint) {
-    return cached.commenter;
+    return { kind: "ok", commenter: cached.commenter };
   }
   // Cache miss (first message for this App) or fingerprint mismatch
   // (rotation): decrypt + build + REPLACE the entry. A decrypt failure here
@@ -477,7 +512,7 @@ async function resolveCommenter(payload: ReviewJobPayload, deps: ProcessDeps): P
   );
   const commenter = deps.createAppCommenter({ APP_ID: String(row.github_app_id), PRIVATE_KEY: pem });
   deps.appCommenters.set(appRef.appId, { commenter, fingerprint });
-  return commenter;
+  return { kind: "ok", commenter };
 }
 
 /**
@@ -739,6 +774,11 @@ export function createReviewConsumer(
       // into the queue's immediate ×3 retry → DLQ path.
       if (outcome.kind === "guard-held") {
         handleGuardHeld(message, deps);
+      } else if (outcome.kind === "paused") {
+        // Plan 16 (architect lock L4): a paused App's in-flight message is
+        // acked DIRECTLY — an intentional skip with zero side effects, never
+        // a retry and never a DLQ entry.
+        message.ack();
       }
     }
   };
@@ -780,14 +820,31 @@ async function processMessage(payload: ReviewJobPayload, deps: ProcessDeps): Pro
     // without touching the in-flight guard.
     level = resolveReviewLevel(deps.env.REVIEW_LEVEL);
     // Credential resolution FIRST (plan 13 Task 2, lock L4 — consumer-side),
-    // before the guard/sandbox: legacy → env singleton; app → D1 row (active,
-    // not deleted) → decrypted PEM → per-App commenter instance (cached per
-    // appId). An unresolvable App (missing / disabled / soft-deleted /
-    // undecryptable) fails structurally here with zero side effects — the
-    // rethrow keeps the existing retry/DLQ semantics and no GitHub write ever
-    // happens. Token mint and postReview below both use THIS resolved
-    // instance (same App identity, lock L4).
-    const commenter = await resolveCommenter(payload, deps);
+    // before the guard/sandbox: legacy → env singleton; app → D1 row gated
+    // missing/deleted/disabled (throw → retry/DLQ, byte-identical) then
+    // PAUSED (plan 16 lock L4: DISTINCT typed outcome, below) → decrypted
+    // PEM → per-App commenter instance (cached per appId). An unresolvable
+    // App (missing / disabled / soft-deleted / undecryptable) fails
+    // structurally here with zero side effects — the rethrow keeps the
+    // existing retry/DLQ semantics and no GitHub write ever happens. Token
+    // mint and postReview below both use THIS resolved instance (same App
+    // identity, lock L4).
+    const resolution = await resolveCommenter(payload, deps);
+    // Plan 16 ack-skip (architect lock L4): a paused App's in-flight message
+    // is the DISTINCT `paused` outcome — the queue handler acks it directly.
+    // EVERYTHING below is skipped: no in-flight guard acquisition (no guard
+    // TTL consumed), no sandbox creation, no token mint, no app-config read,
+    // no GitHub API call, no retry, no DLQ. The structured log rides the
+    // existing ConsumerLogFields channel with `event: "review_paused"`
+    // (union widened additively) + app_id + the baseFields PR identity.
+    if (resolution.kind === "paused") {
+      deps.log.info(
+        { ...baseFields, event: "review_paused" },
+        "review paused — app review_enabled=0; acking with zero side effects (no retry, no DLQ)",
+      );
+      return { kind: "paused" };
+    }
+    const commenter = resolution.commenter;
     // Per-App AI config (plan 14 B2): hangs off the SAME appRef resolution as
     // the commenter — one getAppConfig read per message, before the
     // guard/sandbox so an unresolvable config (undecryptable key envelope,

@@ -92,10 +92,16 @@ function createPopulatedPre0006D1(): ReturnType<typeof createTestD1> {
   return db;
 }
 
-/** Fully-migrated shape with 0006 applied over the populated DB. */
+/**
+ * Fully-migrated shape with 0006 applied over the populated DB (0008 too —
+ * plan 16: the settings page renders the Review switch and the install-health
+ * panel from github_apps.review_enabled / last_webhook_at and
+ * app_installations, so the route tests run on the production shape).
+ */
 function createAppConfigD1(): ReturnType<typeof createTestD1> {
   const db = createPopulatedPre0006D1();
   applyMigration(db, "0006_app_provider_config.sql");
+  applyMigration(db, "0008_github_apps_ops.sql");
   return db;
 }
 

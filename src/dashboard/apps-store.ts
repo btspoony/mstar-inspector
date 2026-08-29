@@ -25,6 +25,17 @@
  *   - listApps is the dashboard-list face: non-deleted rows, newest first.
  *   - setAppStatus refuses soft-deleted rows (a deleted app can never be
  *     re-activated) and returns whether a row changed.
+ *   - setReviewEnabled (plan 16, migration 0008) is the per-App pause
+ *     switch: writes review_enabled + updated_at (an operator mutation) and
+ *     refuses soft-deleted rows exactly like setAppStatus.
+ *   - touchLastWebhook (plan 16, migration 0008) writes ONLY
+ *     last_webhook_at — never updated_at, which stays the operator-mutation
+ *     timestamp (L5: the per-webhook frequency of this touch must not churn
+ *     the operator timestamp, and the plan-15 commenter fingerprint ignores
+ *     both columns, so the cache cannot be thrashed by it either).
+ *   - listInstallations is the install-health read face for the settings
+ *     panel (plan 16 Task 2): this App's installations, most recently seen
+ *     first.
  *   - softDeleteApp is idempotent — the FIRST deleted_at wins; returns
  *     whether THIS call performed the delete.
  *   - upsertInstallation touches seen_at (any webhook carrying
@@ -54,6 +65,10 @@ export type GithubAppRow = {
   status: GithubAppStatus;
   /** NULL = live row; a timestamp = soft-deleted (the only removal path). */
   deleted_at: string | null;
+  /** Per-App pause switch (migration 0008): 1 = reviewing, 0 = paused. */
+  review_enabled: number;
+  /** Last verified (2xx) webhook delivery (migration 0008); NULL = never. */
+  last_webhook_at: string | null;
   created_at: string;
   updated_at: string;
 };
@@ -86,6 +101,18 @@ export type UpsertInstallationInput = {
   installationId: number;
   /** Absent/null → preserve the stored login (a bare touch must not wipe it). */
   accountLogin?: string | null;
+};
+
+/**
+ * An `app_installations` row as the settings health panel reads it (plan 16
+ * Task 2; DDL = migration 0004). The `id` PK is deliberately not projected —
+ * the panel keys installations by installation_id.
+ */
+export type AppInstallationRow = {
+  installation_id: number;
+  /** GitHub login of the installation account; NULL = never observed. */
+  account_login: string | null;
+  seen_at: string;
 };
 
 /**
@@ -178,6 +205,25 @@ export function createAppsStore(db: AppsStoreD1) {
     },
 
     /**
+     * Toggle the per-App pause switch (plan 16, spec 语义锁 B3): 1 = the App's
+     * PRs are reviewed, 0 = paused — webhook face 2xx-ignores with zero
+     * enqueue, in-flight messages ack-skip. Writes review_enabled +
+     * updated_at (an operator mutation, L5) and refuses soft-deleted rows
+     * exactly like setAppStatus (a deleted app can never be re-activated).
+     * Returns whether a row changed (false also covers unknown ids).
+     */
+    async setReviewEnabled(id: string, enabled: boolean): Promise<boolean> {
+      const res = await db
+        .prepare(
+          `UPDATE github_apps SET review_enabled = ?, updated_at = datetime('now')
+           WHERE id = ? AND deleted_at IS NULL`,
+        )
+        .bind(enabled ? 1 : 0, id)
+        .run();
+      return res.meta.changes > 0;
+    },
+
+    /**
      * Soft delete (the only removal path, Clarify #4): stamps deleted_at
      * once — a second call is a no-op returning false and the first
      * timestamp wins. Returns whether THIS call performed the delete.
@@ -191,6 +237,21 @@ export function createAppsStore(db: AppsStoreD1) {
         .bind(id)
         .run();
       return res.meta.changes > 0;
+    },
+
+    /**
+     * Record the App's most recent verified (2xx) webhook delivery (plan 16,
+     * L5). Writes ONLY last_webhook_at — deliberately NOT updated_at: this
+     * touch runs per webhook (high-frequency), while updated_at must stay
+     * the operator-mutation timestamp. An unknown id is a silent no-op (the
+     * caller has already verified the signature — there is nothing to fail
+     * or retry here).
+     */
+    async touchLastWebhook(id: string): Promise<void> {
+      await db
+        .prepare(`UPDATE github_apps SET last_webhook_at = datetime('now') WHERE id = ?`)
+        .bind(id)
+        .run();
     },
 
     /**
@@ -209,6 +270,22 @@ export function createAppsStore(db: AppsStoreD1) {
         )
         .bind(crypto.randomUUID(), input.appId, input.installationId, input.accountLogin ?? null)
         .run();
+    },
+
+    /**
+     * Install-health read face (plan 16 Task 2 settings panel): this App's
+     * installation rows, most recently seen first (stable installation_id
+     * tiebreak). Read-only — the panel never mutates through this face.
+     */
+    async listInstallations(appId: string): Promise<AppInstallationRow[]> {
+      const res = await db
+        .prepare(
+          `SELECT installation_id, account_login, seen_at FROM app_installations
+           WHERE app_id = ? ORDER BY seen_at DESC, installation_id`,
+        )
+        .bind(appId)
+        .all<AppInstallationRow>();
+      return res.results;
     },
   };
 }
