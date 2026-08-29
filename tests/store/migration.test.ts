@@ -185,6 +185,93 @@ describe("migrations/0007_reviews_app_id_index.sql", () => {
   });
 });
 
+describe("migrations/0008_github_apps_ops.sql", () => {
+  /** Apply one migration file verbatim (filename order = wrangler order). */
+  function applyMigrationFile(db: ReturnType<typeof createTestD1>, name: string): void {
+    db.raw.exec(readFileSync(join(MIGRATIONS_DIR, name), "utf8"));
+  }
+
+  /** Raw-insert one pre-0008-shaped github_apps row (the 0004 column list). */
+  function insertPre0008App(db: ReturnType<typeof createTestD1>): void {
+    db.raw
+      .prepare(
+        `INSERT INTO github_apps (id, slug, github_app_id, name, private_key_enc, webhook_secret_enc,
+           created_by, status, deleted_at, created_at, updated_at)
+         VALUES ('app-1', 'acmes-app', 1001, 'acmes-app', 'enc', 'enc', 'mallory', 'active', NULL,
+           datetime('now'), datetime('now'))`,
+      )
+      .run();
+  }
+
+  test("applies cleanly over a seeded production-shaped DB (0001–0007 with live rows)", () => {
+    const db = createTestD1();
+    insertReview(db); // a live review predates the ALTER (wrangler order)
+    for (const name of [
+      "0003_dashboard_users.sql",
+      "0004_github_apps.sql",
+      "0005_reviews_app_id.sql",
+      "0006_app_provider_config.sql",
+      "0007_reviews_app_id_index.sql",
+    ]) {
+      applyMigrationFile(db, name);
+    }
+    insertPre0008App(db);
+
+    // Metadata-only ADD COLUMNs alter the table without rewriting it (the
+    // 0002/0005 precedent) — the live row survives untouched.
+    expect(() => applyMigrationFile(db, "0008_github_apps_ops.sql")).not.toThrow();
+    const row = db.raw
+      .query("SELECT slug, status, review_enabled, last_webhook_at FROM github_apps WHERE id = 'app-1'")
+      .get() as { slug: string; status: string; review_enabled: number; last_webhook_at: string | null };
+    // Existing rows materialize to the resume default (L5: every App known
+    // before the migration stays reviewing), last delivery never seen.
+    expect(row.review_enabled).toBe(1);
+    expect(row.last_webhook_at).toBeNull();
+    expect(row.slug).toBe("acmes-app");
+    expect(row.status).toBe("active");
+    const count = db.raw.query("SELECT COUNT(*) AS n FROM reviews").get() as { n: number };
+    expect(count.n).toBe(1);
+  });
+
+  test("adds review_enabled (INTEGER NOT NULL DEFAULT 1) + last_webhook_at (TEXT nullable) to github_apps", () => {
+    const db = createMigratedTestD1();
+    const columns = db.raw.query("PRAGMA table_info(github_apps)").all() as Array<{
+      name: string;
+      notnull: number;
+      dflt_value: string | null;
+    }>;
+    const reviewEnabled = columns.find((col) => col.name === "review_enabled");
+    expect(reviewEnabled).toBeDefined();
+    expect(reviewEnabled!.notnull).toBe(1); // NOT NULL is legal with a non-NULL DEFAULT (L5)
+    expect(reviewEnabled!.dflt_value).toBe("1");
+    const lastWebhookAt = columns.find((col) => col.name === "last_webhook_at");
+    expect(lastWebhookAt).toBeDefined();
+    expect(lastWebhookAt!.notnull).toBe(0);
+    expect(lastWebhookAt!.dflt_value).toBeNull();
+  });
+
+  test("a row inserted without the new columns defaults to review_enabled=1, last_webhook_at NULL", () => {
+    const db = createMigratedTestD1();
+    insertPre0008App(db);
+    const row = db.raw
+      .query("SELECT review_enabled, last_webhook_at FROM github_apps WHERE id = 'app-1'")
+      .get() as { review_enabled: number; last_webhook_at: string | null };
+    expect(row.review_enabled).toBe(1);
+    expect(row.last_webhook_at).toBeNull();
+  });
+
+  test("the ops columns are writable and read back (pause + last-delivery shapes)", () => {
+    const db = createMigratedTestD1();
+    insertPre0008App(db);
+    db.raw.prepare("UPDATE github_apps SET review_enabled = 0, last_webhook_at = datetime('now') WHERE id = 'app-1'").run();
+    const row = db.raw
+      .query("SELECT review_enabled, last_webhook_at FROM github_apps WHERE id = 'app-1'")
+      .get() as { review_enabled: number; last_webhook_at: string | null };
+    expect(row.review_enabled).toBe(0);
+    expect(row.last_webhook_at).toMatch(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/);
+  });
+});
+
 describe("migrations/0002_mstar_review_v1.sql", () => {
   test("adds the envelope column to reviews (TEXT, nullable)", async () => {
     const db = createTestD1();

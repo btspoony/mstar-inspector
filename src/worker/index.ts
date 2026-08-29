@@ -100,6 +100,17 @@ app.post("/webhook", async (c) => {
  * secret decrypt failure (missing DASHBOARD_ENCRYPTION_KEY, tampered
  * envelope) → 500 fail-closed (lock L1); GitHub retries, nothing enqueues.
  *
+ * Per-App pause (plan 16, spec 语义锁 B3 — paused ≠ disabled): once the
+ * signature VERIFIED (classifyWebhook returned a non-reject),
+ * `last_webhook_at` is touched exactly once per 2xx outcome (job / ignore /
+ * paused), before the pause check — reject paths and the pre-verify
+ * kill-switch return never touch, so the column stays "last verified
+ * delivery" and is decoupled from the review switch. Then
+ * `review_enabled=0` answers 2xx with ZERO enqueue (the webhook stays
+ * healthy while reviews are paused); disabled/deleted keep their 404 above.
+ * The in-flight queue face ack-skips paused messages symmetrically
+ * (consumer lock L4).
+ *
  * Install bookkeeping (plan 13 Task 4): a classified job payload always
  * carries `installation_id`, so the accepted path touches
  * `app_installations` (seen_at upsert, lock L1 store). The touch runs AFTER
@@ -199,7 +210,37 @@ app.post("/webhook/:appSlug", async (c) => {
   if (outcome.kind === "reject") {
     return c.text(outcome.reason, outcome.status);
   }
+
+  // Plan 16 (L5): the signature VERIFIED (classifyWebhook returned a
+  // non-reject), so this is a healthy GitHub-side delivery — touch
+  // last_webhook_at exactly ONCE per 2xx outcome (job / ignore / paused),
+  // before the pause check below. The reject returns above and the
+  // pre-verify kill-switch return never reach this line, so the column
+  // stays "last verified delivery". Best-effort (same pattern as the
+  // install upsert below): a failure logs a structured warn and never
+  // blocks the response.
+  try {
+    await appsStore.touchLastWebhook(row.id);
+  } catch (err) {
+    const detail = err instanceof Error ? err.message : String(err);
+    webhookWarn("last_webhook_touch_failed", detail, "last_webhook_at touch failed — webhook response unaffected");
+  }
+
   if (outcome.kind === "ignore") {
+    return c.text("ignored", 200);
+  }
+
+  // Pause gate (plan 16, spec 语义锁 B3 — paused ≠ disabled): review_enabled
+  // =0 answers 2xx with ZERO enqueue — the webhook stays healthy (and
+  // touched, above) while reviews are paused. disabled/deleted already
+  // returned 404 above; the consumer ack-skips the in-flight messages it
+  // can no longer prevent (lock L4).
+  if (row.review_enabled === 0) {
+    webhookWarn(
+      "review_paused",
+      `slug=${slug}`,
+      "per-App webhook ignored with 2xx — app review paused (zero enqueue)",
+    );
     return c.text("ignored", 200);
   }
   // Lock L3: the App identity is attached at the route handler — after

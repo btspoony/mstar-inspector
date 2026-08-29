@@ -57,7 +57,14 @@ function createMigratedD1(): ReturnType<typeof createTestD1> {
   const db = createTestD1();
   // 0006 (plan 14): the per-App config tables the Task-3 consumer now reads
   // on EVERY app-path message — the fixture must stay production-shaped.
-  for (const name of ["0004_github_apps.sql", "0005_reviews_app_id.sql", "0006_app_provider_config.sql"]) {
+  // 0008 (plan 16): the github_apps ops columns (review_enabled) the
+  // paused gate reads on every app-path message.
+  for (const name of [
+    "0004_github_apps.sql",
+    "0005_reviews_app_id.sql",
+    "0006_app_provider_config.sql",
+    "0008_github_apps_ops.sql",
+  ]) {
     db.raw.exec(readFileSync(join(MIGRATIONS_DIR, name), "utf8"));
   }
   return db;
@@ -220,11 +227,19 @@ function makeBatch(...bodies: ReviewJobPayload[]): MessageBatch<ReviewJobPayload
       timestamp: new Date(),
       attempts: 1,
       body,
-      retry: () => {},
-      ack: () => {},
+      retry: () => {
+        retryIds.push(`m${i}`);
+      },
+      ack: () => {
+        ackIds.push(`m${i}`);
+      },
     })),
   } as unknown as MessageBatch<ReviewJobPayload>;
 }
+
+/** Queue-handler outcomes per message id (plan 16 ack-skip assertions). */
+const ackIds: string[] = [];
+const retryIds: string[] = [];
 
 function reset(): void {
   sandboxCalls.length = 0;
@@ -235,6 +250,8 @@ function reset(): void {
   kvPuts.length = 0;
   kvGuardPuts.length = 0;
   logLines.length = 0;
+  ackIds.length = 0;
+  retryIds.length = 0;
 }
 
 describe("consumer appRef resolution (plan 13 Task 2, lock L4)", () => {
@@ -559,5 +576,137 @@ describe("appCommenters fingerprint cache (plan 15 hardening item 1, architect l
     // The skip continues: the review ran to completion (posted + persisted).
     expect(appCalls.map((c) => c.call.op)).toEqual(["token", "post"]);
     expect(kvPuts).toEqual([{ key: `idem:123:acme/widgets:42:${SHA}`, value: "done" }]);
+  });
+});
+
+describe("per-App pause ack-skip (plan 16, architect lock L4)", () => {
+  test("paused App (review_enabled=0) → direct ack, ZERO sandbox/guard/token/config/GitHub calls, no retry, no DLQ", async () => {
+    reset();
+    const db = createMigratedD1();
+    const appX = await seedApp(db, { slug: "app-x", githubAppId: 111222, pem: PEM_X });
+    await createAppsStore(db).setReviewEnabled(appX.id, false);
+    const consumer = createReviewConsumer(makeEnv({ DB: db as never }), testLog, testOverrides);
+
+    await consumer(makeBatch(makePayload({ appRef: { kind: "app", appId: appX.id } })));
+
+    // Acked DIRECTLY by the queue handler — never retried, never DLQed (a
+    // pause is intentional; a throw would be the wrong semantics).
+    expect(ackIds).toEqual(["m0"]);
+    expect(retryIds).toEqual([]);
+    // Zero side effects: no per-App instance built, no token mint, no post,
+    // no sandbox step, no guard acquisition, no idempotency claim.
+    expect(factoryCreds).toHaveLength(0);
+    expect(appCalls).toHaveLength(0);
+    expect(legacyCalls).toHaveLength(0);
+    expect(sandboxCalls).toHaveLength(0);
+    expect(kvGuardPuts).toHaveLength(0);
+    expect(kvPuts).toEqual([]);
+    expect((db.raw.query("SELECT COUNT(*) AS n FROM reviews").get() as { n: number }).n).toBe(0);
+    // The structured log rides the existing channel: event "review_paused"
+    // (union widened additively) + app_id + the baseFields PR identity.
+    expect(logLines).toHaveLength(1);
+    expect(logLines[0]!.level).toBe("info");
+    expect(logLines[0]!.fields.event).toBe("review_paused");
+    expect(logLines[0]!.fields.app_id).toBe(appX.id);
+    expect(logLines[0]!.fields.installation_id).toBe(123);
+    expect(logLines[0]!.fields.owner).toBe("acme");
+    expect(logLines[0]!.fields.repo).toBe("widgets");
+    expect(logLines[0]!.fields.pr_number).toBe(42);
+    expect(logLines[0]!.fields.head_sha).toBe(SHA);
+  });
+
+  test("disabled is judged BEFORE paused: a disabled AND paused App keeps the throw→retry/DLQ semantics", async () => {
+    reset();
+    const db = createMigratedD1();
+    const appX = await seedApp(db, { slug: "app-x", githubAppId: 111222, pem: PEM_X });
+    const store = createAppsStore(db);
+    await store.setReviewEnabled(appX.id, false); // paused too…
+    await store.setAppStatus(appX.id, "disabled"); // …but disabled wins
+    const consumer = createReviewConsumer(makeEnv({ DB: db as never }), testLog, testOverrides);
+
+    await expect(consumer(makeBatch(makePayload({ appRef: { kind: "app", appId: appX.id } })))).rejects.toThrow(
+      /per-App credential resolution failed: app .* is disabled/,
+    );
+
+    // The throw path: neither ack nor retry fired (the queue retries it).
+    expect(ackIds).toEqual([]);
+    expect(retryIds).toEqual([]);
+    // No paused log — the gate order pinned disabled before paused.
+    expect(logLines.some((l) => l.fields.event === "review_paused")).toBe(false);
+    expect(sandboxCalls).toHaveLength(0);
+  });
+
+  test("paused gate does NOT evict the cached instance — resume reuses the warm instance on the next review", async () => {
+    reset();
+    const db = createMigratedD1();
+    const appX = await seedApp(db, { slug: "app-x", githubAppId: 111222, pem: PEM_X });
+    const store = createAppsStore(db);
+    const consumer = createReviewConsumer(makeEnv({ DB: db as never }), testLog, testOverrides);
+
+    await consumer(makeBatch(makePayload({ pr_number: 42, appRef: { kind: "app", appId: appX.id } })));
+    expect(factoryCreds).toHaveLength(1);
+
+    // Pause → ack-skip; the cache is untouched (no rebuild, no eviction).
+    await store.setReviewEnabled(appX.id, false);
+    await consumer(makeBatch(makePayload({ pr_number: 43, appRef: { kind: "app", appId: appX.id } })));
+    expect(ackIds).toEqual(["m0"]); // batch-local message ids restart at m0
+    expect(factoryCreds).toHaveLength(1);
+
+    // Resume → the VERY NEXT review runs (恢复后下一次 review 生效), served
+    // by the SAME warm instance (the plan-15 fingerprint ignores
+    // review_enabled writes).
+    await store.setReviewEnabled(appX.id, true);
+    await consumer(makeBatch(makePayload({ pr_number: 44, appRef: { kind: "app", appId: appX.id } })));
+    expect(factoryCreds).toHaveLength(1);
+    expect(appCalls.filter((c) => c.call.op === "post")).toHaveLength(2); // PRs 42 + 44
+    expect(appCalls.at(-1)!.instance).toBe(factoryCreds[0]!.instance);
+  });
+
+  test("not-found gate EVICTS the cached instance (re-created identical row rebuilds, never reuses the stale one)", async () => {
+    reset();
+    const db = createMigratedD1();
+    const appX = await seedApp(db, { slug: "app-x", githubAppId: 111222, pem: PEM_X });
+    const consumer = createReviewConsumer(makeEnv({ DB: db as never }), testLog, testOverrides);
+    await consumer(makeBatch(makePayload({ pr_number: 42, appRef: { kind: "app", appId: appX.id } })));
+    expect(factoryCreds).toHaveLength(1);
+
+    // Capture the row, then hard-delete it (the not-found gate also guards
+    // a row that vanished outside the soft-delete path). The completed
+    // review row references the App (reviews.app_id FK, 0005) — clear it
+    // first so the DELETE can proceed.
+    const row = db.raw.query("SELECT * FROM github_apps WHERE id = ?").get(appX.id) as {
+      id: string;
+      slug: string;
+      github_app_id: number;
+      name: string;
+      private_key_enc: string;
+      webhook_secret_enc: string;
+      created_by: string;
+      status: string;
+      deleted_at: string | null;
+      created_at: string;
+      updated_at: string;
+    };
+    db.raw.prepare("DELETE FROM reviews WHERE app_id = ?").run(appX.id);
+    db.raw.prepare("DELETE FROM github_apps WHERE id = ?").run(appX.id);
+    await expect(
+      consumer(makeBatch(makePayload({ pr_number: 43, appRef: { kind: "app", appId: appX.id } }))),
+    ).rejects.toThrow(/per-App credential resolution failed: app .* not found/);
+    expect(factoryCreds).toHaveLength(1); // no rebuild on the failure path
+
+    // Re-insert the IDENTICAL row (same envelope bytes, plan-15 L1): a
+    // surviving cache entry would fingerprint-hit and reuse instance 1 — a
+    // second factory call proves the not-found gate evicted the entry.
+    db.raw
+      .prepare(
+        `INSERT INTO github_apps (id, slug, github_app_id, name, private_key_enc, webhook_secret_enc,
+           created_by, status, deleted_at, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(row.id, row.slug, row.github_app_id, row.name, row.private_key_enc, row.webhook_secret_enc, row.created_by, row.status, row.deleted_at, row.created_at, row.updated_at);
+    await consumer(makeBatch(makePayload({ pr_number: 44, appRef: { kind: "app", appId: appX.id } })));
+    expect(factoryCreds).toHaveLength(2);
+    expect(factoryCreds[1]!.cred).toEqual({ APP_ID: "111222", PRIVATE_KEY: PEM_X });
+    expect(appCalls.at(-1)!.instance).toBe(factoryCreds[1]!.instance);
   });
 });
