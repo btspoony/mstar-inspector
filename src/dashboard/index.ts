@@ -4,10 +4,10 @@
  * commit writes the encrypted github_apps D1 row, the Cloudflare secrets-bulk
  * path is retired) + per-App management UI (13 B5 T3: /dashboard/apps list,
  * POST …/disable|enable|delete — creator-or-admin) + per-App AI config
- * settings (14 B2 T1: GET/POST /dashboard/apps/:slug/settings — BYOK provider
- * keys, masked, + model chain — and POST …/settings/key/delete,
- * creator-or-admin) behind a per-request membership guard (12 B4 T2) +
- * admin-only members management (12 B4 T3).
+ * settings (14 B2 T1 routes + T2 view: GET/POST
+ * /dashboard/apps/:slug/settings — BYOK provider keys, masked, + model chain
+ * — and POST …/settings/key/delete, creator-or-admin) behind a per-request
+ * membership guard (12 B4 T2) + admin-only members management (12 B4 T3).
  * Mounted by src/worker/index.ts as `app.route("/dashboard", dashboardApp)`.
  *
  * Route isolation (architect decision Q2): this module MUST NOT import
@@ -56,7 +56,6 @@ import {
   createAppConfigStore,
   parseModelChain,
   type AppConfigStore,
-  type MaskedProviderKey,
 } from "./app-config-store";
 import {
   bootstrapDashboardAccess,
@@ -69,11 +68,11 @@ import {
   type DashboardUserRow,
 } from "./users";
 import {
+  appSettingsPage,
   appsPage,
   dashboardPage,
   deniedPage,
   errorPage,
-  escapeHtml,
   forbiddenPage,
   manifestConfirmPage,
   manifestErrorPage,
@@ -702,10 +701,12 @@ dashboardApp.post("/apps/:slug/delete", (c) => appStatusAction(c, "delete"));
 // Encryption-dependent reads AND writes: masking needs plaintext (the last-4
 // tail), so a missing/malformed DASHBOARD_ENCRYPTION_KEY fails the whole
 // family closed with 5xx (spec § Crypto envelope) — never a partial page,
-// never a stored key.
+// never a stored key. Rendering = the DESIGN-token appSettingsPage view in
+// src/dashboard/views.ts (plan 14 T2 — single column, masked list, no new
+// tokens); the T1 temporary placeholder render is gone.
 
 type AppSettingsGate =
-  | { ok: true; db: DashboardD1; app: GithubAppRow }
+  | { ok: true; session: SessionPayload; db: DashboardD1; app: GithubAppRow }
   | { ok: false; response: Response };
 
 /** Route-local owner-or-admin gate shared by the settings route family. */
@@ -729,7 +730,7 @@ async function requireAppSettings(c: Context<{ Bindings: Env }>): Promise<AppSet
       response: c.text("the app settings need a configured DASHBOARD_ENCRYPTION_KEY", 500),
     };
   }
-  return { ok: true, db: member.db, app };
+  return { ok: true, session: member.session, db: member.db, app };
 }
 
 /** Same structured-log convention as logOAuthFailure / logManifestFailure. */
@@ -760,70 +761,14 @@ function settingsFailureNotice(err: unknown): PageNotice {
 }
 
 /**
- * temporary: minimal plan-14 T1 settings render — functional (masked key
- * list, zero-JS forms, notices) but unstyled and local to this module.
- * Removal path: plan 14-dashboard-perapp-byok Task 2 replaces it with the
- * DESIGN-token settings view in src/dashboard/views.ts and re-points these
- * same routes at it (Task 2 owns that file's write surface, so the T1 render
- * stays out of views.ts).
+ * Re-read the settings state and render the DESIGN-token view (plan 14 T2:
+ * src/dashboard/views.ts appSettingsPage) — every route's response body. The
+ * masked key list is the only key face, so no route here can leak key
+ * material into HTML; a decrypt failure on re-read is the 500 fail-closed.
  */
-function settingsPlaceholderPage(
-  slug: string,
-  maskedKeys: MaskedProviderKey[],
-  modelChain: string | null,
-  notice?: PageNotice,
-): string {
-  const noticeHtml = !notice
-    ? ""
-    : notice.kind === "error"
-      ? `<div class="banner" role="alert">${escapeHtml(notice.message)}</div>`
-      : `<p class="${notice.kind === "warn" ? "note" : "status"}">${escapeHtml(notice.message)}</p>`;
-  const keyItems = maskedKeys
-    .map((k) => {
-      const tail = k.last4
-        ? ` — key ending <code>${escapeHtml(k.last4)}</code>`
-        : " — key too short to show a tail";
-      return `<li><strong>${escapeHtml(k.provider)}</strong><span>${tail}</span>
-        <form method="post" action="/dashboard/apps/${escapeHtml(slug)}/settings/key/delete">
-          <input type="hidden" name="provider" value="${escapeHtml(k.provider)}">
-          <button type="submit">Remove key</button>
-        </form>
-      </li>`;
-    })
-    .join("\n");
-  const options = PROVIDER_IDS.map((id) => `<option value="${escapeHtml(id)}">${escapeHtml(id)}</option>`).join("");
-  const base = `/dashboard/apps/${escapeHtml(slug)}/settings`;
-  return `<!doctype html>
-<html lang="en">
-<head><meta charset="utf-8"><title>Settings — ${escapeHtml(slug)} — mstar-inspector</title></head>
-<body>
-<h1>Settings — ${escapeHtml(slug)}</h1>
-${noticeHtml}
-<h2>Provider keys</h2>
-<ul>
-${keyItems}
-</ul>
-<form method="post" action="${base}">
-  <input type="hidden" name="op" value="add-key">
-  <select name="provider">${options}</select>
-  <input type="password" name="key" placeholder="API key">
-  <button type="submit">Add key</button>
-</form>
-<h2>Model chain</h2>
-<p>Comma-separated model selectors, same syntax as OMP_REVIEW_MODEL. Empty = use the deployment default.</p>
-<form method="post" action="${base}">
-  <input type="hidden" name="op" value="save-chain">
-  <input type="text" name="model_chain" value="${escapeHtml(modelChain ?? "")}">
-  <button type="submit">Save model chain</button>
-</form>
-<p><a href="/dashboard/apps">Back to Apps</a></p>
-</body>
-</html>`;
-}
-
-/** Re-read the settings state and render the page — every route's response body. */
 async function settingsResponse(
   c: Context<{ Bindings: Env }>,
+  session: SessionPayload,
   store: AppConfigStore,
   app: GithubAppRow,
   notice?: PageNotice,
@@ -832,7 +777,7 @@ async function settingsResponse(
   try {
     const maskedKeys = await store.listProviderKeys(app.id);
     const modelChain = await store.getModelChain(app.id);
-    return c.html(settingsPlaceholderPage(app.slug, maskedKeys, modelChain, notice), status);
+    return c.html(appSettingsPage(session, app, maskedKeys, modelChain, notice), status);
   } catch (err) {
     logSettingsFailure("render", app.id, err);
     return c.text("the app settings could not be read from encrypted storage", 500);
@@ -843,7 +788,7 @@ dashboardApp.get("/apps/:slug/settings", async (c) => {
   const gate = await requireAppSettings(c);
   if (!gate.ok) return gate.response;
   const store = createAppConfigStore(gate.db, c.env.DASHBOARD_ENCRYPTION_KEY);
-  return settingsResponse(c, store, gate.app);
+  return settingsResponse(c, gate.session, store, gate.app);
 });
 
 /**
@@ -868,6 +813,7 @@ dashboardApp.post("/apps/:slug/settings", async (c) => {
     if (!PROVIDER_IDS.includes(provider)) {
       return settingsResponse(
         c,
+        gate.session,
         store,
         gate.app,
         {
@@ -881,15 +827,22 @@ dashboardApp.post("/apps/:slug/settings", async (c) => {
       );
     }
     if (plainKey === "") {
-      return settingsResponse(c, store, gate.app, { kind: "error", message: "Enter an API key to store." }, 400);
+      return settingsResponse(
+        c,
+        gate.session,
+        store,
+        gate.app,
+        { kind: "error", message: "Enter an API key to store." },
+        400,
+      );
     }
     try {
       await store.setProviderKey(gate.app.id, provider, plainKey);
     } catch (err) {
       logSettingsFailure("add_key", gate.app.id, err);
-      return settingsResponse(c, store, gate.app, settingsFailureNotice(err), 500);
+      return settingsResponse(c, gate.session, store, gate.app, settingsFailureNotice(err), 500);
     }
-    return settingsResponse(c, store, gate.app, {
+    return settingsResponse(c, gate.session, store, gate.app, {
       kind: "success",
       message: `Stored the ${provider} key for ${gate.app.slug} — it is only ever shown masked.`,
     });
@@ -899,7 +852,7 @@ dashboardApp.post("/apps/:slug/settings", async (c) => {
     try {
       if (raw.trim() === "") {
         await store.setModelChain(gate.app.id, null);
-        return settingsResponse(c, store, gate.app, {
+        return settingsResponse(c, gate.session, store, gate.app, {
           kind: "success",
           message: `Cleared the model chain for ${gate.app.slug} — reviews fall back to the deployment default.`,
         });
@@ -907,6 +860,7 @@ dashboardApp.post("/apps/:slug/settings", async (c) => {
       if (parseModelChain(raw).length === 0) {
         return settingsResponse(
           c,
+          gate.session,
           store,
           gate.app,
           { kind: "error", message: "Enter at least one comma-separated model selector." },
@@ -916,14 +870,23 @@ dashboardApp.post("/apps/:slug/settings", async (c) => {
       await store.setModelChain(gate.app.id, raw);
     } catch (err) {
       logSettingsFailure("save_chain", gate.app.id, err);
-      return settingsResponse(c, store, gate.app, settingsFailureNotice(err), 500);
+      return settingsResponse(c, gate.session, store, gate.app, settingsFailureNotice(err), 500);
     }
-    return settingsResponse(c, store, gate.app, {
+    return settingsResponse(c, gate.session, store, gate.app, {
       kind: "success",
       message: `Saved the model chain for ${gate.app.slug}.`,
     });
   }
-  return c.text("unknown settings operation", 400);
+  // T2 review fold (T1 minor): an unknown op is a validation failure like any
+  // other — re-render the HTML page at 400 instead of a plain-text body.
+  return settingsResponse(
+    c,
+    gate.session,
+    store,
+    gate.app,
+    { kind: "error", message: "Unknown settings operation — resubmit one of this page's forms." },
+    400,
+  );
 });
 
 dashboardApp.post("/apps/:slug/settings/key/delete", async (c) => {
@@ -937,7 +900,7 @@ dashboardApp.post("/apps/:slug/settings/key/delete", async (c) => {
     removed = await store.removeProviderKey(gate.app.id, provider);
   } catch (err) {
     logSettingsFailure("remove_key", gate.app.id, err);
-    return settingsResponse(c, store, gate.app, settingsFailureNotice(err), 500);
+    return settingsResponse(c, gate.session, store, gate.app, settingsFailureNotice(err), 500);
   }
   // Tolerant no-op (the allowlist already bounds what can ever be stored):
   // an unknown provider simply has no row — a warn, not a 400.
@@ -947,7 +910,7 @@ dashboardApp.post("/apps/:slug/settings/key/delete", async (c) => {
         kind: "warn",
         message: `No stored ${provider === "" ? "(unspecified)" : provider} key on ${gate.app.slug} — nothing changed.`,
       };
-  return settingsResponse(c, store, gate.app, notice);
+  return settingsResponse(c, gate.session, store, gate.app, notice);
 });
 
 dashboardApp.get("/", async (c) => {

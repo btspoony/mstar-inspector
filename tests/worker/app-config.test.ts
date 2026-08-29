@@ -507,7 +507,7 @@ describe("GET /dashboard/apps/:slug/settings", () => {
     const body = await res.text();
     // Masked list (provider + last-4) and the chain prefilled verbatim.
     expect(body).toContain("<strong>anthropic</strong>");
-    expect(body).toContain("key ending <code>9988</code>");
+    expect(body).toContain(`key ending <code class="id">9988</code>`);
     expect(body).toContain(`value="${PLAIN_CHAIN}"`);
     // The zero-JS forms: add-key + save-chain on the pinned POST path, and
     // the per-key delete action path.
@@ -577,7 +577,7 @@ describe("POST /dashboard/apps/:slug/settings — add-key (op=add-key)", () => {
       .get(app.id) as { key_enc: string };
     expect(row.key_enc).toMatch(/^v1\.primary\./);
     // The response re-renders the page: masked tail only, never the plaintext.
-    expect(body).toContain("key ending <code>9988</code>");
+    expect(body).toContain(`key ending <code class="id">9988</code>`);
     expect(body).not.toContain(PLAIN_ANTHROPIC_KEY);
   });
 
@@ -695,12 +695,15 @@ describe("POST /dashboard/apps/:slug/settings — save-chain (op=save-chain)", (
     expect(rawCount(db, "app_model_config")).toBe(0);
   });
 
-  test("unknown op → 400", async () => {
+  test("unknown op → 400 re-rendered as the HTML page (T2 fold: consistent with other validation failures)", async () => {
     const { db } = await seededWorld();
     const res = await postForm(SETTINGS, `${SESSION_COOKIE}=${await sessionCookie("mallory")}`, makeEnv(db), {
       op: "something-else",
     });
     expect(res.status).toBe(400);
+    const body = await res.text();
+    expect(body).toContain("<!doctype html>");
+    expect(body).toContain("Unknown settings operation");
   });
 });
 
@@ -745,5 +748,84 @@ describe("POST /dashboard/apps/:slug/settings/key/delete (delete-key route)", ()
     });
     expect(res.status).toBe(200);
     expect(rawCount(db, "app_provider_keys")).toBe(0);
+  });
+});
+
+// --- plan 14 T2: the settings view (views.ts) + DESIGN mapping ---
+
+describe("settings view DESIGN mapping (plan 14 T2)", () => {
+  const getSettingsPage = async (login: string): Promise<string> => {
+    const { db } = await seededWorld();
+    const res = await get(SETTINGS, `${SESSION_COOKIE}=${await sessionCookie(login)}`, makeEnv(db));
+    expect(res.status).toBe(200);
+    return res.text();
+  };
+
+  test("single column; Add key / Save model chain are the blue-700 primary; per-key Remove is red-700 danger", async () => {
+    const { db, app } = await seededWorld();
+    await configStore(db).setProviderKey(app.id, "anthropic", PLAIN_ANTHROPIC_KEY);
+    const res = await get(SETTINGS, `${SESSION_COOKIE}=${await sessionCookie("mallory")}`, makeEnv(db));
+    expect(res.status).toBe(200);
+    const body = await res.text();
+    // Single column: the page never mounts the shell's lg 3-column grid.
+    expect(body).not.toContain('class="sections"');
+    // Constructive submits = the blue-700 primary class; destructive remove =
+    // the red-700 danger class (spec § DESIGN.md 意图, no new tokens).
+    expect(body).toContain('<button type="submit" class="primary">Add key</button>');
+    expect(body).toContain('<button type="submit" class="primary">Save model chain</button>');
+    expect(body).toContain('<button type="submit" class="danger">Remove</button>');
+  });
+
+  test("add-key form: password input; provider select offers EXACTLY the 18-id allowlist", async () => {
+    const body = await getSettingsPage("mallory");
+    expect(body).toContain('<input type="password" name="key"');
+    // The select is the only place a provider id can enter — bound to the
+    // same allowlist the POST route 400s against.
+    const options = [...body.matchAll(/<option value="([^"]+)">/g)].map((m) => m[1]);
+    expect(options).toEqual([...PROVIDER_IDS]);
+  });
+
+  test("model chain copy states the empty = deployment-default fallback explicitly (whitespace-only save clears)", async () => {
+    const body = await getSettingsPage("mallory");
+    expect(body).toContain("fall back to the deployment default");
+  });
+
+  test("a key of ≤4 characters renders the no-tail copy — the mask never reveals a whole key", async () => {
+    const { db, app } = await seededWorld();
+    await configStore(db).setProviderKey(app.id, "groq", "abcd");
+    const res = await get(SETTINGS, `${SESSION_COOKIE}=${await sessionCookie("mallory")}`, makeEnv(db));
+    const body = await res.text();
+    expect(body).toContain("key too short to show a tail");
+    expect(body).not.toContain("abcd");
+  });
+
+  test("key-list hint is replace-aware (upsert bumps the row timestamp — recency is never labeled 'created')", async () => {
+    const body = await getSettingsPage("mallory");
+    expect(body).toContain("Re-adding a provider replaces its stored key");
+  });
+
+  test("user-controlled strings are escaped — a stored chain with HTML-special characters never renders raw", async () => {
+    const { db, app } = await seededWorld();
+    // The chain is stored VERBATIM (configuration, not a secret) — the view
+    // must escape it on the way out (attribute context).
+    await configStore(db).setModelChain(app.id, '"><script>alert(1)</script>');
+    const res = await get(SETTINGS, `${SESSION_COOKIE}=${await sessionCookie("mallory")}`, makeEnv(db));
+    const body = await res.text();
+    expect(body).not.toContain("<script>");
+    expect(body).toContain(`value="&quot;&gt;&lt;script&gt;alert(1)&lt;/script&gt;"`);
+  });
+});
+
+describe("Apps list → settings nav (plan 14 T2)", () => {
+  test("manageable Apps (owner / admin) get a Settings link; a non-owner sees none", async () => {
+    const { db } = await seededWorld();
+    const owner = await get("/dashboard/apps", `${SESSION_COOKIE}=${await sessionCookie("mallory")}`, makeEnv(db));
+    const ownerBody = await owner.text();
+    expect(ownerBody).toContain('href="/dashboard/apps/mallorys-app/settings"');
+    expect(ownerBody).not.toContain('href="/dashboard/apps/adas-app/settings"');
+    const admin = await get("/dashboard/apps", `${SESSION_COOKIE}=${await sessionCookie("octocat")}`, makeEnv(db));
+    const adminBody = await admin.text();
+    expect(adminBody).toContain('href="/dashboard/apps/mallorys-app/settings"');
+    expect(adminBody).toContain('href="/dashboard/apps/adas-app/settings"');
   });
 });
