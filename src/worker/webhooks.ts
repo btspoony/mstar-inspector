@@ -30,20 +30,27 @@ export const PULL_REQUEST_ACTIONS = ["opened", "synchronize", "reopened"] as con
 export const WEBHOOK_BODY_LIMIT = 1_000_000;
 
 /**
- * Module-level verifier singleton (QC F-005): the hot path constructed a
+ * Module-level verifier cache (QC F-005): the hot path constructed a
  * `Webhooks` instance per request only to call `verify`, which uses nothing
- * but `options.secret`. The instance is created lazily on first use, after
+ * but `options.secret`. Instances are created lazily on first use, after
  * the fail-closed secret check, so a missing/empty/"development" secret
- * never reaches the crypto path. Exported as a test seam to lock the reuse
- * behavior.
+ * never reaches the crypto path. KEYED BY SECRET (plan 13 Task 2): the
+ * legacy route and each per-App `POST /webhook/:appSlug` route pass
+ * different secrets, and a single-instance cache would verify every later
+ * secret against the first-cached one — valid signatures would fail (and
+ * the App isolation would be void). One small instance per configured App
+ * is negligible; `getWebhooks` stays exported as a test seam to lock the
+ * reuse behavior.
  */
-let webhooks: Webhooks | null = null;
+const webhooksCache = new Map<string, Webhooks>();
 
 export function getWebhooks(secret: string): Webhooks {
-  if (webhooks === null) {
-    webhooks = new Webhooks({ secret });
+  let cached = webhooksCache.get(secret);
+  if (cached === undefined) {
+    cached = new Webhooks({ secret });
+    webhooksCache.set(secret, cached);
   }
-  return webhooks;
+  return cached;
 }
 
 /**

@@ -47,8 +47,14 @@ import { redactReviewOutput } from "./redact";
 import { createArtifactStore, type D1ArtifactStore } from "../store/artifact-store";
 import { getSandbox, type ReviewSandbox } from "./sandbox";
 import { buildGitOpsCommands, writeJsonCommand } from "./gitops";
-import { createReviewCommenter, type ReviewCommenter } from "./comment";
+import { createReviewCommenter, type CommenterEnv, type ReviewCommenter } from "./comment";
 import { pickProviderKeys } from "./providers";
+// Per-App credential resolution (plan 13 Task 2, lock L4): the consumer is a
+// sanctioned reader of the dashboard store leaves (apps-store reads the
+// github_apps row, secretbox decrypts the PEM) — the dashboard ↛
+// pipeline/worker isolation is one-directional and unaffected.
+import { createAppsStore } from "../dashboard/apps-store";
+import { createSecretbox } from "../dashboard/secretbox";
 
 export type PipelineEnv = {
   APP_ID: string;
@@ -65,6 +71,16 @@ export type PipelineEnv = {
    * (ark-plan/deepseek-v4-flash, no fallback chain).
    */
   OMP_REVIEW_MODEL?: string;
+  /**
+   * Envelope master key for the per-App credential resolution (plan 13 Task
+   * 2, lock L4): base64 of exactly 32 bytes (the same DASHBOARD_ENCRYPTION_KEY
+   * Worker secret the dashboard write face uses, src/dashboard/secretbox.ts).
+   * Missing / malformed → SecretboxKeyError → per-App resolution fails
+   * closed (structured error + the existing retry/DLQ semantics, zero GitHub
+   * writes); the legacy env-App path is unaffected. This face reads the key
+   * only — the consumer never encrypts.
+   */
+  DASHBOARD_ENCRYPTION_KEY?: string;
   /**
    * Review tier for the in-image runner (plan 09 T1): "quick" (1 seat),
    * "default" (2 seats, the harness no-flag landing tier), or "deep" (the
@@ -153,6 +169,8 @@ export type ConsumerLogFields = {
   pr_number: number;
   head_sha: string | null;
   sandbox_id?: string;
+  /** github_apps.id the job resolves to (per-App jobs only, plan 13 T2). */
+  app_id?: string;
   idempotency_key?: string;
   /** Review tier resolved from REVIEW_LEVEL. */
   level?: ReviewLevel;
@@ -326,6 +344,22 @@ type ProcessDeps = {
   env: PipelineEnv;
   store: D1ArtifactStore;
   commenter: ReviewCommenter;
+  /**
+   * Per-App commenter instance cache keyed by appId (plan 13 Task 2, lock
+   * L4), beside the legacy env singleton above. auth-app's
+   * installation-token cache is per-instance, so one instance per App keeps
+   * token caches isolated AND prevents credentials from crossing instances.
+   * The row status is still re-checked per message — the cache only spares
+   * the decrypt + construction, never the active/not-deleted gate.
+   */
+  appCommenters: Map<string, ReviewCommenter>;
+  /**
+   * Per-App commenter factory — `createReviewCommenter` in production (the
+   * ONLY createAppAuth construction point stays src/pipeline/comment.ts,
+   * lock L4); tests inject a spy to assert the exact credentials each App
+   * instance is built from.
+   */
+  createAppCommenter: (cred: CommenterEnv) => ReviewCommenter;
   log: ConsumerLog;
   getSandbox: (binding: unknown, id: string) => Promise<ReviewSandbox>;
 };
@@ -340,7 +374,57 @@ function toBaseFields(payload: ReviewJobPayload): ConsumerLogFields {
     repo: payload.repo,
     pr_number: payload.pr_number,
     head_sha: payload.head_sha,
+    // Per-App jobs carry the appId reference in every structured log line
+    // (an id, never a credential — lock L4).
+    ...(payload.appRef?.kind === "app" ? { app_id: payload.appRef.appId } : {}),
   };
+}
+
+/**
+ * Resolve the commenter for one message (plan 13 Task 2, architect lock L4
+ * — consumer-side credential resolution):
+ *
+ * - legacy (appRef absent — old in-flight messages — or `{ kind: "legacy" }`)
+ *   → the env-App singleton commenter, byte-identical to the pre-multi-App
+ *   behavior.
+ * - `{ kind: "app", appId }` → the `github_apps` row via D1 (must be active
+ *   and not soft-deleted — re-read per message so a disabled/deleted App
+ *   fails closed even when an instance is cached) → the row's PEM decrypted
+ *   in memory (secretbox, AAD `github_apps.private_key_enc:<id>`) →
+ *   `createAppCommenter({ APP_ID: String(github_app_id), PRIVATE_KEY })`,
+ *   cached per appId in `deps.appCommenters`.
+ *
+ * Any unresolvable state — missing row, disabled, soft-deleted, missing
+ * DASHBOARD_ENCRYPTION_KEY (SecretboxKeyError), tampered envelope — THROWS:
+ * the structured error log + rethrow keep the existing retry/DLQ semantics
+ * and no GitHub write ever happens. The decrypted PEM lives only in this
+ * call's memory and the commenter instance; it is never logged.
+ */
+async function resolveCommenter(payload: ReviewJobPayload, deps: ProcessDeps): Promise<ReviewCommenter> {
+  const appRef = payload.appRef;
+  if (appRef === undefined || appRef.kind === "legacy") {
+    return deps.commenter;
+  }
+  const row = await createAppsStore(deps.env.DB).getAppById(appRef.appId);
+  if (row === null) {
+    throw new Error(`per-App credential resolution failed: app ${appRef.appId} not found`);
+  }
+  if (row.deleted_at !== null) {
+    throw new Error(`per-App credential resolution failed: app ${appRef.appId} is soft-deleted`);
+  }
+  if (row.status !== "active") {
+    throw new Error(`per-App credential resolution failed: app ${appRef.appId} is ${row.status}`);
+  }
+  let commenter = deps.appCommenters.get(appRef.appId);
+  if (commenter === undefined) {
+    const pem = await createSecretbox(deps.env.DASHBOARD_ENCRYPTION_KEY).decryptSecret(
+      row.private_key_enc,
+      `github_apps.private_key_enc:${row.id}`,
+    );
+    commenter = deps.createAppCommenter({ APP_ID: String(row.github_app_id), PRIVATE_KEY: pem });
+    deps.appCommenters.set(appRef.appId, commenter);
+  }
+  return commenter;
 }
 
 /**
@@ -420,22 +504,27 @@ async function kvDoneHit(
 }
 /**
  * Test seam for createReviewConsumer: additive overrides for the process
- * dependencies (store / commenter / getSandbox). The plan contract
- * `createReviewConsumer(env)` is unchanged — every field defaults to the
- * production implementation when omitted.
+ * dependencies (store / commenter / per-App commenter factory / getSandbox).
+ * The plan contract `createReviewConsumer(env)` is unchanged — every field
+ * defaults to the production implementation when omitted.
  */
-type ConsumerOverrides = Partial<Pick<ProcessDeps, "store" | "commenter" | "getSandbox">>;
+type ConsumerOverrides = Partial<
+  Pick<ProcessDeps, "store" | "commenter" | "createAppCommenter" | "getSandbox">
+>;
 
 /**
- * Create the queue consumer. The store and commenter are created once per
- * consumer instance (the commenter memoizes the app-auth installation-token
- * cache across messages). Each message gets its own sandbox, destroyed in
- * finally; failures rethrow so the queue retries and eventually DLQs.
+ * Create the queue consumer. The store and commenters are created once per
+ * consumer instance (the legacy env-App commenter memoizes the app-auth
+ * installation-token cache across messages; per-App instances live in the
+ * appCommenters Map — one per appId, plan 13 Task 2 lock L4). Each message
+ * gets its own sandbox, destroyed in finally; failures rethrow so the queue
+ * retries and eventually DLQs.
  *
  * `log` is injectable for tests (default: structured JSON lines). `overrides`
- * lets tests substitute the store / commenter / sandbox factory without
- * process-wide mock.module (bun's relative-path mock.module leaks across test
- * files sharing a worker — CI run 32946710695).
+ * lets tests substitute the store / commenter / per-App commenter factory /
+ * sandbox factory without process-wide mock.module (bun's relative-path
+ * mock.module leaks across test files sharing a worker — CI run
+ * 32946710695).
  */
 export function createReviewConsumer(
   env: PipelineEnv,
@@ -446,6 +535,8 @@ export function createReviewConsumer(
     env,
     store: overrides.store ?? createArtifactStore(env.DB),
     commenter: overrides.commenter ?? createReviewCommenter(env),
+    appCommenters: new Map(),
+    createAppCommenter: overrides.createAppCommenter ?? createReviewCommenter,
     getSandbox: overrides.getSandbox ?? ((binding, id) => getSandbox(binding, id)),
     log,
   };
@@ -497,6 +588,15 @@ async function processMessage(payload: ReviewJobPayload, deps: ProcessDeps): Pro
     // misconfigured REVIEW_LEVEL fails loud (structured log + rethrow)
     // without touching the in-flight guard.
     level = resolveReviewLevel(deps.env.REVIEW_LEVEL);
+    // Credential resolution FIRST (plan 13 Task 2, lock L4 — consumer-side),
+    // before the guard/sandbox: legacy → env singleton; app → D1 row (active,
+    // not deleted) → decrypted PEM → per-App commenter instance (cached per
+    // appId). An unresolvable App (missing / disabled / soft-deleted /
+    // undecryptable) fails structurally here with zero side effects — the
+    // rethrow keeps the existing retry/DLQ semantics and no GitHub write ever
+    // happens. Token mint and postReview below both use THIS resolved
+    // instance (same App identity, lock L4).
+    const commenter = await resolveCommenter(payload, deps);
     // 0. In-flight guard (WF-002 / bugbot BB-3): when another review is
     // already running for this PR, return the DISTINCT guard-held outcome —
     // NOT a throw. The consumer schedules a per-message delayed retry
@@ -512,7 +612,7 @@ async function processMessage(payload: ReviewJobPayload, deps: ProcessDeps): Pro
     if (sandbox === null) {
       sandbox = await deps.getSandbox(deps.env.SANDBOX, sandboxId);
     }
-    const token = await deps.commenter.getInstallationToken(payload.installation_id);
+    const token = await commenter.getInstallationToken(payload.installation_id);
     const cmds = buildGitOpsCommands({
       owner: payload.owner,
       repo: payload.repo,
@@ -676,7 +776,8 @@ async function processMessage(payload: ReviewJobPayload, deps: ProcessDeps): Pro
     // T5: the commenter creates the app's marker comment (round=1) on a miss
     // and PATCHes it (round=N+1) on a hit — one comment per PR, never a new
     // review per round. The verdict is rendered as text only (SEC-01).
-    await deps.commenter.postReview({
+    // Same resolved commenter instance as the token mint above (lock L4).
+    await commenter.postReview({
       installationId: payload.installation_id,
       owner: payload.owner,
       repo: payload.repo,

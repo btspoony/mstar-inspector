@@ -4,7 +4,12 @@
  *
  * Routes:
  * - GET /healthz → 200 {"ok":true}
- * - POST /webhook → verified GitHub webhook → classify → (Task 2: enqueue)
+ * - POST /webhook → verified GitHub webhook → classify → enqueue (legacy
+ *   env-App face; attaches an explicit `{ kind: "legacy" }` appRef, lock L3)
+ * - POST /webhook/:appSlug → per-App webhook face (plan 13 Task 2): slug →
+ *   github_apps row (active, not deleted) → that App's decrypted webhook
+ *   secret verifies the signature → classify → enqueue with
+ *   `{ kind: "app", appId }` (spec § Multi-App 契约, locks L3/L4)
  * - /dashboard/* → GitHub OAuth login + signed-cookie session shell (08 B0)
  */
 import { Hono } from "hono";
@@ -14,9 +19,26 @@ import type { ReviewJobPayload } from "../contracts/review-job";
 import type { PipelineEnv } from "../pipeline/consumer";
 import { classifyWebhook, WEBHOOK_BODY_LIMIT } from "./webhooks";
 import { defaultLog, handleReviewJob } from "./handlers";
+import { createAppsStore } from "../dashboard/apps-store";
+import { createSecretbox } from "../dashboard/secretbox";
 import { dashboardApp } from "../dashboard/index";
 
 const app = new Hono<{ Bindings: Env }>();
+
+/**
+ * Fetch-face D1: the per-App webhook route (plan 13 Task 2) reads the
+ * `github_apps` row for its slug. The DB binding IS on the deployed Worker
+ * env for every face (wrangler.jsonc 05 — "binding DB enters the 06
+ * PipelineEnv, not the fetch-face Env" predates this route); the fetch-face
+ * `Env` type in env.ts stays untouched (plan 12 parallel work), so the face
+ * is declared here as the queue face's PipelineEnv intersection.
+ */
+type WebhookFaceEnv = Env & Pick<PipelineEnv, "DB">;
+
+/** Structured warn for the per-App route's pre-classification rejections. */
+function webhookWarn(reason: string, detail: string, msg: string): void {
+  defaultLog.warn({ event: "unknown", reason, detail }, msg);
+}
 
 app.get("/healthz", (c) => c.json({ ok: true }));
 // 08 B0: GitHub OAuth + dashboard shell. Route isolation: the dashboard
@@ -56,7 +78,108 @@ app.post("/webhook", async (c) => {
   }
   // Idempotency pre-check (non-null head_sha only) + REVIEW_QUEUE.send.
   // KV failure → conservative pass (enqueue anyway, D1 fallback).
-  await handleReviewJob(outcome.payload, { env: c.env, log: defaultLog });
+  // Lock L3: the legacy face attaches an EXPLICIT `{ kind: "legacy" }` — no
+  // "absent = legacy" dual convention on the producer side.
+  await handleReviewJob({ ...outcome.payload, appRef: { kind: "legacy" } }, { env: c.env, log: defaultLog });
+  return c.text("accepted", 200);
+});
+
+/**
+ * Per-App webhook face (plan 13 Task 2, spec § Multi-App 契约). Shared
+ * pre-order with the legacy route: body-size cap (413) → REVIEW_ENABLED
+ * kill-switch (non-"true" → 2xx ignore, zero side effects; deployment-level
+ * global switch, not per-App) → slug lookup → signature verify. The slug
+ * locates the `github_apps` row (active, not deleted) whose DECRYPTED
+ * webhook secret parameterizes the same `classifyWebhook` classifier
+ * (secret-parameterized only — the classifier never sees the App
+ * identity); the route handler attaches `appRef { kind: "app", appId }`
+ * after classification, before `REVIEW_QUEUE.send` (lock L3).
+ * Unknown slug / disabled / soft-deleted → 404, zero enqueue. Any webhook
+ * secret decrypt failure (missing DASHBOARD_ENCRYPTION_KEY, tampered
+ * envelope) → 500 fail-closed (lock L1); GitHub retries, nothing enqueues.
+ */
+app.post("/webhook/:appSlug", async (c) => {
+  const env = c.env as WebhookFaceEnv;
+  // Body-size cap checked BEFORE buffering the body (B6) — same gate as the
+  // legacy route.
+  const contentLength = Number(c.req.header("content-length") ?? "0");
+  if (contentLength > WEBHOOK_BODY_LIMIT) {
+    webhookWarn(
+      "webhook_body_too_large",
+      `content_length=${contentLength}`,
+      "per-App webhook rejected with 413 — body exceeds size limit",
+    );
+    return c.text("payload too large", 413);
+  }
+  const rawBody = await c.req.text();
+  const signature = c.req.header("x-hub-signature-256") ?? null;
+  const eventName = c.req.header("x-github-event") ?? null;
+
+  // Kill-switch BEFORE the slug lookup (spec ordering; zero side effects —
+  // no D1 read when reviews are off). The flag is still passed to
+  // classifyWebhook below so both routes share the identical classifier.
+  const reviewEnabled = env.REVIEW_ENABLED === "true";
+  if (!reviewEnabled) {
+    webhookWarn(
+      "review_disabled",
+      "REVIEW_ENABLED is not 'true'",
+      "webhook ignored — reviews disabled by the REVIEW_ENABLED kill-switch",
+    );
+    return c.text("ignored", 200);
+  }
+
+  // Slug lookup: exactly one active, non-deleted App may serve this route.
+  // Unknown / disabled / soft-deleted are all 404 with zero side effects
+  // (the log distinguishes them for the operator; the response does not).
+  const slug = c.req.param("appSlug");
+  const row = await createAppsStore(env.DB).getAppBySlug(slug);
+  if (row === null) {
+    webhookWarn("unknown_app_slug", `slug=${slug}`, "per-App webhook rejected with 404 — unknown app slug");
+    return c.text("unknown app slug", 404);
+  }
+  if (row.deleted_at !== null) {
+    webhookWarn("app_deleted", `slug=${slug}`, "per-App webhook rejected with 404 — app is soft-deleted");
+    return c.text("unknown app slug", 404);
+  }
+  if (row.status !== "active") {
+    webhookWarn("app_disabled", `slug=${slug}`, "per-App webhook rejected with 404 — app is disabled");
+    return c.text("unknown app slug", 404);
+  }
+
+  // Decrypt this App's webhook secret (secretbox envelope, AAD pins the
+  // row). Fail-closed 500 on any decrypt failure — the signature is never
+  // verified against anything but the stored secret, and nothing enqueues.
+  let appSecret: string;
+  try {
+    appSecret = await createSecretbox(env.DASHBOARD_ENCRYPTION_KEY).decryptSecret(
+      row.webhook_secret_enc,
+      `github_apps.webhook_secret_enc:${row.id}`,
+    );
+  } catch (err) {
+    const detail = err instanceof Error ? err.message : String(err);
+    webhookWarn(
+      "webhook_secret_decrypt_failed",
+      detail,
+      "per-App webhook rejected with 500 — webhook secret decrypt failed (fail-closed)",
+    );
+    return c.text("webhook secret decrypt failed", 500);
+  }
+
+  const outcome = await classifyWebhook(appSecret, rawBody, signature, eventName, defaultLog, reviewEnabled);
+
+  if (outcome.kind === "reject") {
+    return c.text(outcome.reason, outcome.status);
+  }
+  if (outcome.kind === "ignore") {
+    return c.text("ignored", 200);
+  }
+  // Lock L3: the App identity is attached at the route handler — after
+  // classification, before the queue send. The queue message carries the
+  // appId reference only (lock L4: the PEM never leaves the consumer).
+  await handleReviewJob({ ...outcome.payload, appRef: { kind: "app", appId: row.id } }, {
+    env: c.env,
+    log: defaultLog,
+  });
   return c.text("accepted", 200);
 });
 
