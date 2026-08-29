@@ -982,6 +982,180 @@ describe("POST /dashboard/apps/:slug/settings — save-chain (op=save-chain)", (
   });
 });
 
+// --- plan 17 T3: the Role models editor (settings op save-roles) ---
+
+/**
+ * The exact body the Role models editor posts: the hidden op plus one
+ * role_<role> field per MODEL_ROLE_IDS seat (blank = clear), plus any
+ * `extra` fields for the tampering cases.
+ */
+function roleForm(
+  values: Record<string, string>,
+  extra: Record<string, string> = {},
+): Record<string, string> {
+  const fields: Record<string, string> = { op: "save-roles" };
+  for (const role of MODEL_ROLE_IDS) fields[`role_${role}`] = values[role] ?? "";
+  return { ...fields, ...extra };
+}
+
+describe("Role models editor (plan 17 T3 — view + save-roles op)", () => {
+  test("GET renders the 4 seat rows prefilled from the stored map (unmapped = blank), one blue-700 save, empty = chain copy", async () => {
+    const { db, app } = await seededWorld();
+    await configStore(db).setModelRole(app.id, "code-reviewer", "openai/gpt-5:thinking");
+    const res = await get(SETTINGS, `${SESSION_COOKIE}=${await sessionCookie("mallory")}`, makeEnv(db));
+    expect(res.status).toBe(200);
+    const body = await res.text();
+    // The section: heading, copy, hidden op, single blue-700 save.
+    expect(body).toContain("<h2>Role models</h2>");
+    expect(body).toContain("Empty = use the App model chain.");
+    expect(body).toContain('name="op" value="save-roles"');
+    expect(body).toContain('<button type="submit" class="primary">Save role models</button>');
+    expect(body.match(/Save role models</g)).toHaveLength(1);
+    // The 4 rows, prefilled / blank exactly per the stored map.
+    expect(body).toContain('name="role_mstar-review-seat" value=""');
+    expect(body).toContain('name="role_code-reviewer" value="openai/gpt-5:thinking"');
+    expect(body).toContain('name="role_fullstack-dev" value=""');
+    expect(body).toContain('name="role_frontend-dev" value=""');
+    // Rows render in MODEL_ROLE_IDS order (the quick/default seat first).
+    const seat = body.indexOf('name="role_mstar-review-seat"');
+    expect(seat).toBeGreaterThanOrEqual(0);
+    expect(body.indexOf('name="role_code-reviewer"')).toBeGreaterThan(seat);
+  });
+
+  test("owner saves the map: stored VERBATIM (:thinking suffix and padding kept), success notice, editor re-rendered", async () => {
+    const { db, app } = await seededWorld();
+    const padded = "  openai/gpt-5 , anthropic/claude-x  ";
+    const res = await postForm(
+      SETTINGS,
+      `${SESSION_COOKIE}=${await sessionCookie("mallory")}`,
+      makeEnv(db),
+      roleForm({
+        "mstar-review-seat": "ark-plan/deepseek-v4-flash:high",
+        "code-reviewer": padded,
+      }),
+    );
+    expect(res.status).toBe(200);
+    const body = await res.text();
+    expect(body).toContain("Saved the role models for mallorys-app");
+    expect(body).toContain('name="op" value="save-roles"');
+    expect(await configStore(db).getAppModelRoles(app.id)).toEqual({
+      "mstar-review-seat": "ark-plan/deepseek-v4-flash:high",
+      "code-reviewer": padded,
+    });
+  });
+
+  test("one save maps AND clears: blanks = cleared, content = upserted (full-map editor semantics)", async () => {
+    const { db, app } = await seededWorld();
+    const store = configStore(db);
+    await store.setModelRole(app.id, "code-reviewer", "old/model");
+    await store.setModelRole(app.id, "frontend-dev", "old-2/model");
+    const res = await postForm(
+      SETTINGS,
+      `${SESSION_COOKIE}=${await sessionCookie("mallory")}`,
+      makeEnv(db),
+      roleForm({
+        "mstar-review-seat": "new/model",
+        // code-reviewer / frontend-dev posted blank → cleared by the same save
+      }),
+    );
+    expect(res.status).toBe(200);
+    expect(await store.getAppModelRoles(app.id)).toEqual({ "mstar-review-seat": "new/model" });
+  });
+
+  test("an all-blank save clears every mapping (empty = the App model chain)", async () => {
+    const { db, app } = await seededWorld();
+    const store = configStore(db);
+    await store.setModelRole(app.id, "code-reviewer", "old/model");
+    const res = await postForm(
+      SETTINGS,
+      `${SESSION_COOKIE}=${await sessionCookie("mallory")}`,
+      makeEnv(db),
+      roleForm({}),
+    );
+    expect(res.status).toBe(200);
+    expect(await res.text()).toContain("Saved the role models for mallorys-app");
+    expect(rawCount(db, "app_model_roles")).toBe(0);
+    expect(await store.getAppModelRoles(app.id)).toEqual({});
+  });
+
+  test("invalid selector grammar → 400 re-render naming the role, zero rows written (validate-all-first)", async () => {
+    const { db, app } = await seededWorld();
+    const store = configStore(db);
+    await store.setModelRole(app.id, "code-reviewer", "old/model");
+    const res = await postForm(
+      SETTINGS,
+      `${SESSION_COOKIE}=${await sessionCookie("mallory")}`,
+      makeEnv(db),
+      roleForm({
+        "mstar-review-seat": "new/model",
+        "code-reviewer": " , ,",
+      }),
+    );
+    expect(res.status).toBe(400);
+    const body = await res.text();
+    expect(body).toContain("<!doctype html>"); // HTML page, never a plain-text 400
+    expect(body).toContain("The code-reviewer selector needs at least one comma-separated model selector");
+    // Zero partial writes: the valid entry never landed, the old row is intact.
+    expect(await store.getAppModelRoles(app.id)).toEqual({ "code-reviewer": "old/model" });
+  });
+
+  test("a tampered role_<unknown> field → 400 re-render, zero rows written", async () => {
+    const { db, app } = await seededWorld();
+    const res = await postForm(
+      SETTINGS,
+      `${SESSION_COOKIE}=${await sessionCookie("mallory")}`,
+      makeEnv(db),
+      roleForm({ "code-reviewer": "openai/gpt-5" }, { role_root: "evil/model" }),
+    );
+    expect(res.status).toBe(400);
+    const body = await res.text();
+    expect(body).toContain("<!doctype html>");
+    expect(body).toContain("root is not a known review role");
+    expect(rawCount(db, "app_model_roles")).toBe(0);
+  });
+
+  test("a save with NO role fields at all → 400 re-render, zero rows written (never a silent no-op)", async () => {
+    const { db, app } = await seededWorld();
+    await configStore(db).setModelRole(app.id, "code-reviewer", "old/model");
+    const res = await postForm(SETTINGS, `${SESSION_COOKIE}=${await sessionCookie("mallory")}`, makeEnv(db), {
+      op: "save-roles",
+    });
+    expect(res.status).toBe(400);
+    expect(await res.text()).toContain("No role selectors were submitted");
+    // The existing mapping survives — an empty map was never saved.
+    expect(await configStore(db).getAppModelRoles(app.id)).toEqual({ "code-reviewer": "old/model" });
+  });
+
+  test("non-owner member → 403, zero mutation; admin (non-creator) may save — owner-or-admin", async () => {
+    const { db } = await seededWorld();
+    const res = await postForm(
+      SETTINGS,
+      `${SESSION_COOKIE}=${await sessionCookie("hubot")}`,
+      makeEnv(db),
+      roleForm({ "code-reviewer": "openai/gpt-5" }),
+    );
+    expect(res.status).toBe(403);
+    expect(rawCount(db, "app_model_roles")).toBe(0);
+    const adminRes = await postForm(
+      SETTINGS,
+      `${SESSION_COOKIE}=${await sessionCookie("octocat")}`,
+      makeEnv(db),
+      roleForm({ "code-reviewer": "openai/gpt-5" }),
+    );
+    expect(adminRes.status).toBe(200);
+    expect(rawCount(db, "app_model_roles")).toBe(1);
+  });
+
+  test("a stored selector with HTML-special characters renders escaped in the role input (attribute context)", async () => {
+    const { db, app } = await seededWorld();
+    await configStore(db).setModelRole(app.id, "code-reviewer", '"><script>alert(1)</script>');
+    const res = await get(SETTINGS, `${SESSION_COOKIE}=${await sessionCookie("mallory")}`, makeEnv(db));
+    const body = await res.text();
+    expect(body).not.toContain("<script>");
+    expect(body).toContain(`name="role_code-reviewer" value="&quot;&gt;&lt;script&gt;alert(1)&lt;/script&gt;"`);
+  });
+});
+
 describe("POST /dashboard/apps/:slug/settings/key/delete (delete-key route)", () => {
   test("owner removes a stored key: row gone, notice confirms", async () => {
     const { db, app } = await seededWorld();
