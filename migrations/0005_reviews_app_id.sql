@@ -1,0 +1,17 @@
+-- 0005_reviews_app_id.sql — attribute reviews to their GitHub App (plan 13
+-- Task 1, spec dashboard-multi-app-platform § Data model, architect lock L2).
+--
+-- app_id = NULL marks legacy rows (the Worker-secrets global App) — legacy
+-- rows are never backfilled with a synthetic app row (Clarify #3). Must
+-- apply AFTER 0004 (SQLite ADD COLUMN ... REFERENCES re-parses the schema
+-- and fails if the parent table does not exist yet).
+--
+-- Legal as ONE metadata-only ALTER — no batching (lock L2): SQLite requires
+-- an ADD COLUMN carrying a REFERENCES clause to default to NULL, which this
+-- column does (no DEFAULT clause); existing NULL rows never trigger FK
+-- checks. ADD COLUMN does not rewrite the table, so it is instantaneous
+-- regardless of row count (0002's reviews.envelope is the same-table
+-- precedent). No ON DELETE clause: the default NO ACTION refuses hard-
+-- deleting an app with review history — soft-delete (github_apps.deleted_at)
+-- is the only removal path.
+ALTER TABLE reviews ADD COLUMN app_id TEXT REFERENCES github_apps(id);

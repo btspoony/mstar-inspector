@@ -1,13 +1,17 @@
 /**
  * /dashboard Hono sub-app: GitHub OAuth login + signed-cookie session (08 B0)
- * + GitHub App Manifest start/callback/commit (11 B1 T1/T2) behind a
- * per-request membership guard (12 B4 T2) + admin-only members management
- * (12 B4 T3). Mounted by src/worker/index.ts as
- * `app.route("/dashboard", dashboardApp)`.
+ * + GitHub App Manifest start/callback/commit (11 B1 T1/T2; 13 B5 T3 — the
+ * commit writes the encrypted github_apps D1 row, the Cloudflare secrets-bulk
+ * path is retired) + per-App management UI (13 B5 T3: /dashboard/apps list,
+ * POST …/disable|enable|delete — creator-or-admin) behind a per-request
+ * membership guard (12 B4 T2) + admin-only members management (12 B4 T3).
+ * Mounted by src/worker/index.ts as `app.route("/dashboard", dashboardApp)`.
  *
  * Route isolation (architect decision Q2): this module MUST NOT import
  * pipeline/store/review code. Fail-closed everywhere: missing OAuth secrets
- * → 5xx; bad CSRF state → 4xx and the session cookie is never set.
+ * → 5xx; bad CSRF state → 4xx and the session cookie is never set; missing
+ * DASHBOARD_ENCRYPTION_KEY → the encryption-dependent commit route 5xxs with
+ * the hold kept (spec § Crypto envelope).
  */
 import { Hono, type Context } from "hono";
 import { getCookie } from "hono/cookie";
@@ -31,14 +35,19 @@ import {
   MANIFEST_HOLD_MAX_AGE_SEC,
   MANIFEST_STATE_COOKIE,
   MANIFEST_STATE_MAX_AGE_SEC,
+  buildAppSlug,
   buildManifest,
   buildManifestCreateUrl,
   createHoldValue,
+  createManifestStateValue,
   exchangeManifestCode,
   logManifestFailure,
+  randomSlugSuffix,
   readHoldValue,
-  writeWorkerSecrets,
+  readManifestStateValue,
 } from "./manifest";
+import { createAppsStore, type GithubAppRow } from "./apps-store";
+import { SecretboxKeyError, createSecretbox } from "./secretbox";
 import {
   bootstrapDashboardAccess,
   countAdmins,
@@ -50,6 +59,7 @@ import {
   type DashboardUserRow,
 } from "./users";
 import {
+  appsPage,
   dashboardPage,
   deniedPage,
   errorPage,
@@ -60,6 +70,7 @@ import {
   manifestSuccessPage,
   membersPage,
   removedPage,
+  type PageNotice,
 } from "./views";
 
 export const dashboardApp = new Hono<{ Bindings: Env }>();
@@ -81,6 +92,36 @@ function dashboardSecrets(env: Env) {
 function dashboardD1(env: Env): DashboardD1 | null {
   const db = (env as Env & { DB?: DashboardD1 }).DB;
   return db ?? null;
+}
+
+// --- Plan 13 B5 T3: webhook slug resolution + manifest commit helpers ---
+
+/** Bounded suffix attempts before the INSERT's own UNIQUE error surfaces. */
+const SLUG_SUFFIX_ATTEMPTS = 6;
+
+function errorTypeName(err: unknown): string {
+  return err instanceof Error ? err.name : String(err);
+}
+
+/** The sqlite UNIQUE violation for one github_apps column (slug retries). */
+function isAppsUniqueViolation(err: unknown, column: "slug" | "github_app_id"): boolean {
+  return err instanceof Error && err.message.includes(`github_apps.${column}`);
+}
+
+/**
+ * First slug in `[base, base-<suffix>…]` not present in github_apps
+ * (soft-deleted rows count — their UNIQUE slug still owns the namespace).
+ * Minted at start and carried through the signed state; the commit retries
+ * with a fresh suffix if a racing INSERT takes the slug anyway.
+ */
+async function resolveAvailableSlug(db: DashboardD1, base: string): Promise<string> {
+  const apps = createAppsStore(db);
+  let slug = base;
+  for (let attempt = 0; attempt <= SLUG_SUFFIX_ATTEMPTS; attempt++) {
+    if ((await apps.getAppBySlug(slug)) === null) return slug;
+    slug = `${base}-${randomSlugSuffix()}`;
+  }
+  return slug;
 }
 
 // --- Plan 12 B4 T2: per-request allowlist guard (spec § AuthZ, lock L5) ---
@@ -205,26 +246,35 @@ dashboardApp.get("/logout", (c) => {
 });
 
 // --- B1 Task 1: GitHub App Manifest start + callback (no secret write) ---
+// --- B5 Task 3: per-App slug mints here and rides the signed state ---
 
-// Start: logged-in only. Mints the single-use CSRF state cookie and renders
-// the zero-JS form POST to https://github.com/settings/apps/new (state rides
-// the form-action query). Logged out → 302 to login (IA routing table).
+// Start: logged-in only. Mints the webhook slug (login-derived, DB
+// pre-resolved against existing slugs), the single-use CSRF state cookie
+// CARRYING it (createManifestStateValue — same createStateValue HMAC
+// discipline), and renders the zero-JS form POST to
+// https://github.com/settings/apps/new (state rides the form-action query).
+// The manifest's webhook URL is the App's own route /webhook/{slug}.
+// Logged out → 302 to login (IA routing table).
 dashboardApp.post("/manifest/start", async (c) => {
   const secrets = dashboardSecrets(c.env);
   if (!secrets) return c.text("dashboard OAuth is not configured", 500);
   const session = await readSessionValue(getCookie(c, SESSION_COOKIE), secrets.sessionSecret);
   if (!session) return c.redirect("/dashboard/login", 302);
-  const state = await createStateValue(secrets.sessionSecret);
+  const db = dashboardD1(c.env);
+  if (!db) return c.text("dashboard storage is not configured", 500);
+  const slug = await resolveAvailableSlug(db, buildAppSlug(session.login));
+  const state = await createManifestStateValue(secrets.sessionSecret, slug);
   c.header("Set-Cookie", serializeCookie(MANIFEST_STATE_COOKIE, state, MANIFEST_STATE_MAX_AGE_SEC));
-  const manifest = buildManifest(new URL(c.req.url).origin, session.login);
+  const manifest = buildManifest(new URL(c.req.url).origin, session.login, slug);
   return c.html(manifestStartPage(session, manifest.name, JSON.stringify(manifest), buildManifestCreateUrl(state)));
 });
 
 // Callback: GitHub redirects here with ?code=…&state=…. Bad/missing state →
 // 4xx with ZERO secret-API calls (the conversion fetch never runs). On
-// success the code is exchanged and the credentials are parked in the
-// encrypted, single-use hold cookie for the T2 confirm gate — the response
-// HTML carries the App id/name only, never PEM or webhook_secret.
+// success the code is exchanged and the credentials plus the state-carried
+// slug are parked in the encrypted, single-use hold cookie for the T3
+// commit gate — the response HTML carries the App id/name/slug/webhook URL
+// only, never PEM or webhook_secret.
 dashboardApp.get("/manifest/callback", async (c) => {
   const secrets = dashboardSecrets(c.env);
   if (!secrets) return c.text("dashboard OAuth is not configured", 500);
@@ -232,12 +282,12 @@ dashboardApp.get("/manifest/callback", async (c) => {
   c.header("Set-Cookie", expireCookie(MANIFEST_STATE_COOKIE));
   const session = await readSessionValue(getCookie(c, SESSION_COOKIE), secrets.sessionSecret);
   if (!session) return c.redirect("/dashboard/login", 302);
-  const stateOk = await verifyStateValue(
+  const state = await readManifestStateValue(
     getCookie(c, MANIFEST_STATE_COOKIE),
     c.req.query("state"),
     secrets.sessionSecret,
   );
-  if (!stateOk) {
+  if (!state) {
     logManifestFailure("state_verify", "state_mismatch");
     return c.html(
       manifestErrorPage("The app-creation flow could not be verified (bad or expired state)."),
@@ -253,38 +303,40 @@ dashboardApp.get("/manifest/callback", async (c) => {
   if (!conversion) {
     return c.html(manifestErrorPage("GitHub rejected the app-manifest code."), 502);
   }
-  const hold = await createHoldValue(conversion, session.login, secrets.sessionSecret);
+  const hold = await createHoldValue(conversion, session.login, secrets.sessionSecret, state.slug);
   c.header("Set-Cookie", serializeCookie(MANIFEST_HOLD_COOKIE, hold, MANIFEST_HOLD_MAX_AGE_SEC), {
     append: true,
   });
-  return c.html(manifestConfirmPage(session, { id: conversion.id, name: conversion.name }));
+  const origin = new URL(c.req.url).origin;
+  return c.html(
+    manifestConfirmPage(session, {
+      id: conversion.id,
+      name: conversion.name,
+      slug: state.slug,
+      webhookUrl: `${origin}/webhook/${state.slug}`,
+    }),
+  );
 });
 
-// Commit (B1 Task 2, spec § L6/L7/L8): the confirm gate. Without
-// `confirm=overwrite` → 400 with ZERO Cloudflare requests. The hold cookie
-// is bound to the committing session (`hold.login === session.login`, else
-// 403, zero writes) and survives RETRYABLE outcomes (400 missing confirm,
-// 500 missing Cloudflare config, 502 CF/network) so the operator can retry
-// without creating a second GitHub App; it is expired on success, login
-// mismatch, undecryptable/expired hold, and logout. Missing/undecryptable/
-// expired hold = flow expired → 302 back to the start, zero writes. On
-// confirm, ONE secrets-bulk PATCH writes exactly APP_ID / PRIVATE_KEY /
-// WEBHOOK_SECRET (PEM PKCS#8-normalized) — never REVIEW_ENABLED or model
-// keys. Missing Cloudflare config → 5xx, zero writes.
+// Commit (B5 Task 3, spec § Multi-App 契约 — replaces the B1 Cloudflare
+// secrets-bulk write; `confirm=overwrite` is gone because nothing shared is
+// overwritten). The hold cookie is bound to the committing session
+// (`hold.login === session.login`, else 403, zero writes) and survives
+// RETRYABLE outcomes (500 encrypt/DB failures, 502 conversion retries) so
+// the operator can retry without creating a second GitHub App; it is burned
+// on success, login mismatch, undecryptable/expired hold, and the
+// non-retryable already-connected conflict. Missing/undecryptable/expired
+// hold = flow expired → 302 back to the start, zero writes. On submit, the
+// PEM and webhook secret are encrypted with the DASHBOARD_ENCRYPTION_KEY
+// master key (AAD rowKey = the row PK — caller-supplied id, T1 review pin)
+// and ONE github_apps row is written. Missing/malformed key → 500
+// fail-closed, hold kept (spec § Crypto envelope). Zero Cloudflare API
+// calls from this route.
 dashboardApp.post("/manifest/commit", async (c) => {
   const secrets = dashboardSecrets(c.env);
   if (!secrets) return c.text("dashboard OAuth is not configured", 500);
   const session = await readSessionValue(getCookie(c, SESSION_COOKIE), secrets.sessionSecret);
   if (!session) return c.redirect("/dashboard/login", 302);
-  const form = await c.req.parseBody();
-  if (form.confirm !== "overwrite") {
-    // Retryable: keep the hold so the operator can re-tick and resubmit.
-    logManifestFailure("commit", "confirm_missing");
-    return c.html(
-      manifestErrorPage("The overwrite was not confirmed — tick the checkbox to proceed.", true),
-      400,
-    );
-  }
   const hold = await readHoldValue(getCookie(c, MANIFEST_HOLD_COOKIE), secrets.sessionSecret);
   if (!hold) {
     logManifestFailure("commit", "hold_missing_or_expired");
@@ -304,34 +356,95 @@ dashboardApp.post("/manifest/commit", async (c) => {
       403,
     );
   }
-  const result = await writeWorkerSecrets(c.env, hold);
-  if (result === "missing_config") {
-    // Retryable: keep the hold; fix the Worker env and resubmit.
-    logManifestFailure("commit", "cloudflare_not_configured");
+  const db = dashboardD1(c.env);
+  if (!db) return c.text("dashboard storage is not configured", 500);
+  // T1 review pin: the row id exists BEFORE encryption so the secretbox AAD
+  // rowKey (github_apps.<column>:<id>) equals the row's primary key.
+  const appId = crypto.randomUUID();
+  let privateKeyEnc: string;
+  let webhookSecretEnc: string;
+  try {
+    const box = createSecretbox(c.env.DASHBOARD_ENCRYPTION_KEY);
+    privateKeyEnc = await box.encryptSecret(hold.pem, `github_apps.private_key_enc:${appId}`);
+    webhookSecretEnc = await box.encryptSecret(
+      hold.webhook_secret,
+      `github_apps.webhook_secret_enc:${appId}`,
+    );
+  } catch (err) {
+    // SecretboxKeyError (missing/malformed DASHBOARD_ENCRYPTION_KEY) and any
+    // other encrypt failure are equally fail-closed: 500, zero writes, hold
+    // KEPT — fixing the env makes the retry succeed.
+    logManifestFailure("commit", "encrypt_failed", {
+      error_type: errorTypeName(err),
+      key_error: err instanceof SecretboxKeyError,
+    });
     return c.html(
       manifestErrorPage(
-        "Cloudflare API access is not configured on this Worker (CLOUDFLARE_API_TOKEN / CLOUDFLARE_ACCOUNT_ID).",
+        "This deployment has no valid DASHBOARD_ENCRYPTION_KEY to store App credentials with — ask the operator to configure it, then resubmit.",
         true,
       ),
       500,
     );
   }
-  if (result === "upstream_error") {
-    // Retryable: keep the hold; a CF/network failure must not burn it.
-    return c.html(
-      manifestErrorPage("Cloudflare rejected the secret write (check the API token permissions).", true),
-      502,
-    );
+  // Slug: pre-resolved at start and carried through the hold; a racing
+  // INSERT can still take it → bounded retries with a fresh short suffix.
+  const apps = createAppsStore(db);
+  let slug = hold.slug;
+  for (let attempt = 0; ; attempt++) {
+    try {
+      const row = await apps.createApp({
+        id: appId,
+        slug,
+        githubAppId: hold.id,
+        name: hold.name,
+        privateKeyEnc,
+        webhookSecretEnc,
+        createdBy: session.login,
+      });
+      // Success: the hold is single-success — burned now that the row exists.
+      c.header("Set-Cookie", expireCookie(MANIFEST_HOLD_COOKIE));
+      return c.html(
+        manifestSuccessPage(session, {
+          id: row.github_app_id,
+          name: row.name,
+          slug: row.slug,
+          webhookUrl: `${new URL(c.req.url).origin}/webhook/${row.slug}`,
+        }),
+      );
+    } catch (err) {
+      if (attempt < SLUG_SUFFIX_ATTEMPTS && isAppsUniqueViolation(err, "slug")) {
+        slug = `${hold.slug}-${randomSlugSuffix()}`;
+        continue;
+      }
+      if (isAppsUniqueViolation(err, "github_app_id")) {
+        // The same GitHub App is already connected — retrying cannot help.
+        logManifestFailure("commit", "github_app_id_conflict", { github_app_id: hold.id });
+        c.header("Set-Cookie", expireCookie(MANIFEST_HOLD_COOKIE));
+        return c.html(
+          manifestErrorPage(
+            "This GitHub App is already connected on this deployment — no changes were made.",
+          ),
+          409,
+        );
+      }
+      // Retryable (missing migrations, transient D1 failure, …): hold kept.
+      logManifestFailure("commit", "db_error", { error_type: errorTypeName(err) });
+      return c.html(
+        manifestErrorPage(
+          "The App could not be stored — the dashboard database rejected the write. You can resubmit.",
+          true,
+        ),
+        500,
+      );
+    }
   }
-  // Success: the hold is single-success — burned now that secrets are stored.
-  c.header("Set-Cookie", expireCookie(MANIFEST_HOLD_COOKIE));
-  return c.html(manifestSuccessPage(session, { id: hold.id }));
 });
 
 // Confirm resume (Bugbot: the hold survives retryable commit outcomes, so a
 // refresh / error-page link must re-render the confirm gate, not a dead
-// shell). Hold decrypts + hold.login === session.login → confirm page with
-// id/name only (PEM/webhook_secret never render); anything else → 302 shell.
+// shell). Hold decrypts + hold.login === session.login → summary page with
+// id/name/slug/webhook URL (PEM/webhook_secret never render); anything else
+// → 302 shell.
 dashboardApp.get("/manifest/confirm", async (c) => {
   const secrets = dashboardSecrets(c.env);
   if (!secrets) return c.text("dashboard OAuth is not configured", 500);
@@ -339,7 +452,14 @@ dashboardApp.get("/manifest/confirm", async (c) => {
   if (!session) return c.redirect("/dashboard/login", 302);
   const hold = await readHoldValue(getCookie(c, MANIFEST_HOLD_COOKIE), secrets.sessionSecret);
   if (!hold || hold.login !== session.login) return c.redirect("/dashboard", 302);
-  return c.html(manifestConfirmPage(session, { id: hold.id, name: hold.name }));
+  return c.html(
+    manifestConfirmPage(session, {
+      id: hold.id,
+      name: hold.name,
+      slug: hold.slug,
+      webhookUrl: `${new URL(c.req.url).origin}/webhook/${hold.slug}`,
+    }),
+  );
 });
 
 // --- Plan 12 B4 T3: admin-only members management (spec § AuthZ) ---
@@ -485,6 +605,76 @@ dashboardApp.post("/members/remove", async (c) => {
   );
 });
 
+// --- Plan 13 B5 T3: Apps list + per-App management (spec § Multi-App 契约,
+// Clarify #6, architect-pinned POST action paths) ---
+//
+// The per-request guard above has already verified membership on every route
+// here; the route-local gate re-resolves the acting row per request (same
+// pattern as the members routes). List = every member; disable/enable/
+// soft-delete = the App creator or any admin (invite-only team trust model).
+// POSTs ride the existing session cookie (same discipline as the members
+// routes) — no new token scheme. Routes are the pinned action-path POSTs:
+// the zero-JS `<form method="post">` convention cannot emit a DELETE verb.
+
+/** Route-local member gate shared by the /dashboard/apps routes. */
+async function requireMember(c: Context<{ Bindings: Env }>): Promise<
+  | { ok: true; session: SessionPayload; db: DashboardD1; user: DashboardUserRow }
+  | { ok: false; response: Response }
+> {
+  const secrets = dashboardSecrets(c.env);
+  if (!secrets) return { ok: false, response: c.text("dashboard OAuth is not configured", 500) };
+  const session = await readSessionValue(getCookie(c, SESSION_COOKIE), secrets.sessionSecret);
+  if (!session) return { ok: false, response: c.redirect("/dashboard/login", 302) };
+  const db = dashboardD1(c.env);
+  if (!db) return { ok: false, response: c.text("dashboard storage is not configured", 500) };
+  const user = await getUserByLogin(db, session.login);
+  // Fail closed: no row (removed between guard and here) → 403, the 403 view
+  // carries zero membership data.
+  if (!user) return { ok: false, response: c.html(forbiddenPage(session.login), 403) };
+  return { ok: true, session, db, user };
+}
+
+/** Clarify #6: manage = any admin, or the App's creator (case-insensitive). */
+function canManageApp(user: DashboardUserRow, app: GithubAppRow): boolean {
+  return user.role === "admin" || app.created_by.toLowerCase() === user.github_login.toLowerCase();
+}
+
+dashboardApp.get("/apps", async (c) => {
+  const gate = await requireMember(c);
+  if (!gate.ok) return gate.response;
+  const apps = await createAppsStore(gate.db).listApps();
+  return c.html(appsPage(gate.session, apps, { login: gate.user.github_login, role: gate.user.role }));
+});
+
+/**
+ * One handler for the three pinned action routes. Unknown and soft-deleted
+ * apps are equally invisible (the list never shows them) → 404, zero writes.
+ * A lost race (the row vanished between the read and the write) re-renders
+ * the list with a warn notice — zero partial state.
+ */
+async function appStatusAction(
+  c: Context<{ Bindings: Env }>,
+  action: "disable" | "enable" | "delete",
+): Promise<Response> {
+  const gate = await requireMember(c);
+  if (!gate.ok) return gate.response;
+  const apps = createAppsStore(gate.db);
+  const app = await apps.getAppBySlug(c.req.param("slug") ?? "");
+  if (!app || app.deleted_at !== null) return c.text("unknown app", 404);
+  if (!canManageApp(gate.user, app)) return c.html(forbiddenPage(gate.session.login), 403);
+  const changed =
+    action === "delete" ? await apps.softDeleteApp(app.id) : await apps.setAppStatus(app.id, action === "disable" ? "disabled" : "active");
+  const verb = action === "delete" ? "Deleted" : action === "disable" ? "Disabled" : "Enabled";
+  const notice: PageNotice = changed
+    ? { kind: "success", message: `${verb} ${app.slug}.` }
+    : { kind: "warn", message: `${app.slug} was already ${action === "enable" ? "enabled" : `${action}d`} — nothing changed.` };
+  return c.html(appsPage(gate.session, await apps.listApps(), { login: gate.user.github_login, role: gate.user.role }, notice));
+}
+
+dashboardApp.post("/apps/:slug/disable", (c) => appStatusAction(c, "disable"));
+dashboardApp.post("/apps/:slug/enable", (c) => appStatusAction(c, "enable"));
+dashboardApp.post("/apps/:slug/delete", (c) => appStatusAction(c, "delete"));
+
 dashboardApp.get("/", async (c) => {
   const sessionSecret = c.env.DASHBOARD_SESSION_SECRET;
   if (!sessionSecret) return c.text("dashboard OAuth is not configured", 500);
@@ -494,7 +684,14 @@ dashboardApp.get("/", async (c) => {
   // (same rule as GET /dashboard/manifest/confirm).
   const hold = await readHoldValue(getCookie(c, MANIFEST_HOLD_COOKIE), sessionSecret);
   if (hold && hold.login === session.login) {
-    return c.html(manifestConfirmPage(session, { id: hold.id, name: hold.name }));
+    return c.html(
+      manifestConfirmPage(session, {
+        id: hold.id,
+        name: hold.name,
+        slug: hold.slug,
+        webhookUrl: `${new URL(c.req.url).origin}/webhook/${hold.slug}`,
+      }),
+    );
   }
   // Members entry is admin-aware (qc1/qc2 F-001): the guard already resolved
   // the row; re-read it here (same route-local read pattern as the manifest

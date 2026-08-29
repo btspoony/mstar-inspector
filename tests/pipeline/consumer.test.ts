@@ -36,7 +36,7 @@ import type { ReviewOutput } from "../../src/review/schema";
 import { FINDING_BODY_MAX, FINDING_TITLE_MAX } from "../../src/review/schema";
 import { createArtifactStore } from "../../src/store/artifact-store";
 import { idemKey } from "../../src/contracts/idem";
-import { createTestD1 } from "../store/helpers";
+import { createMigratedTestD1 } from "../store/helpers";
 import type { ReviewCommenter } from "../../src/pipeline/comment";
 
 const VALID_OUTPUT: ReviewOutput = {
@@ -202,7 +202,7 @@ function makeEnv(overrides: Partial<PipelineEnv> = {}): PipelineEnv {
     APP_ID: "123",
     PRIVATE_KEY: "-----BEGIN PRIVATE KEY-----\nkey\n-----END PRIVATE KEY-----\n",
     OMP_MODEL_KEY: "ark-key",
-    DB: createTestD1() as never,
+    DB: createMigratedTestD1() as never,
     IDEMPOTENCY_KV: kv as never,
     SANDBOX: {} as never,
     ...overrides,
@@ -274,7 +274,7 @@ function reset(): void {
 }
 
 /** Count review rows in the real D1 double. */
-function reviewCount(db: ReturnType<typeof createTestD1>): number {
+function reviewCount(db: ReturnType<typeof createMigratedTestD1>): number {
   const row = db.raw.query("SELECT COUNT(*) AS n FROM reviews").get() as { n: number };
   return row.n;
 }
@@ -282,7 +282,7 @@ function reviewCount(db: ReturnType<typeof createTestD1>): number {
 describe("createReviewConsumer", () => {
   test("findByIdempotencyKey hit after clone → ack: no post, no insert, destroy", async () => {
     reset();
-    const db = createTestD1();
+    const db = createMigratedTestD1();
     const store = createArtifactStore(db);
     await store.put({
       kind: "review",
@@ -309,7 +309,7 @@ describe("createReviewConsumer", () => {
   test("full flow: clone → rev-parse → diff → numstat → input → runner → parse → post → insert → KV done → destroy", async () => {
     reset();
     runnerStdout = JSON.stringify(VALID_OUTPUT);
-    const db = createTestD1();
+    const db = createMigratedTestD1();
     const consumer = createReviewConsumer(makeEnv({ DB: db as never }), undefined, testOverrides);
 
     await consumer(makeBatch(makePayload()));
@@ -374,9 +374,15 @@ describe("createReviewConsumer", () => {
 
     // The review row + findings landed in the real D1 double.
     expect(reviewCount(db)).toBe(1);
-    const row = db.raw.query("SELECT * FROM reviews").get() as { head_sha: string; verdict: string };
+    const row = db.raw.query("SELECT * FROM reviews").get() as {
+      head_sha: string;
+      verdict: string;
+      app_id: string | null;
+    };
     expect(row.head_sha).toBe(SHA);
     expect(row.verdict).toBe("needs fixes");
+    // Legacy payload (no appRef) — Clarify #3: app_id NULL = legacy (QC F-001 pin).
+    expect(row.app_id).toBeNull();
     const findings = db.raw.query("SELECT COUNT(*) AS n FROM findings").get() as { n: number };
     expect(findings.n).toBe(1);
     // KV completion state written with the idem key + TTL.
@@ -394,7 +400,7 @@ describe("createReviewConsumer", () => {
     reset();
     resolvedSha = "abcdefabcdefabcdefabcdefabcdefabcdefabcd";
     runnerStdout = JSON.stringify(VALID_OUTPUT);
-    const db = createTestD1();
+    const db = createMigratedTestD1();
     const consumer = createReviewConsumer(makeEnv({ DB: db as never }), undefined, testOverrides);
 
     await consumer(makeBatch(makePayload({ head_sha: null, triggered_by: "review_command" })));
@@ -420,7 +426,7 @@ describe("createReviewConsumer", () => {
     const actualSha = "feedfacefeedfacefeedfacefeedfacefeedface";
     resolvedSha = actualSha;
     runnerStdout = JSON.stringify(VALID_OUTPUT);
-    const db = createTestD1();
+    const db = createMigratedTestD1();
     const consumer = createReviewConsumer(makeEnv({ DB: db as never }), undefined, testOverrides);
 
     await consumer(makeBatch(makePayload())); // payload head_sha = SHA (stale)
@@ -445,7 +451,7 @@ describe("createReviewConsumer", () => {
   test("parse failure → no post, no insert, rethrow, destroy", async () => {
     reset();
     runnerStdout = "not json at all";
-    const db = createTestD1();
+    const db = createMigratedTestD1();
     const consumer = createReviewConsumer(makeEnv({ DB: db as never }), undefined, testOverrides);
 
     await expect(consumer(makeBatch(makePayload()))).rejects.toThrow(/parse failed/);
@@ -459,7 +465,7 @@ describe("createReviewConsumer", () => {
     reset();
     runnerStdout = JSON.stringify(VALID_OUTPUT);
     commentError = new Error("post failed");
-    const db = createTestD1();
+    const db = createMigratedTestD1();
     const consumer = createReviewConsumer(makeEnv({ DB: db as never }), undefined, testOverrides);
 
     await expect(consumer(makeBatch(makePayload()))).rejects.toThrow("post failed");
@@ -471,7 +477,7 @@ describe("createReviewConsumer", () => {
   test("sandbox exec failure → rethrow, destroy", async () => {
     reset();
     sandboxError = new Error("container unavailable");
-    const db = createTestD1();
+    const db = createMigratedTestD1();
     const consumer = createReviewConsumer(makeEnv({ DB: db as never }), undefined, testOverrides);
 
     await expect(consumer(makeBatch(makePayload()))).rejects.toThrow("container unavailable");
@@ -482,7 +488,7 @@ describe("createReviewConsumer", () => {
   test("clone exitCode !== 0 → rethrow, destroy, no post/insert", async () => {
     reset();
     cloneExitCode = 128;
-    const db = createTestD1();
+    const db = createMigratedTestD1();
     const consumer = createReviewConsumer(makeEnv({ DB: db as never }), undefined, testOverrides);
 
     await expect(consumer(makeBatch(makePayload()))).rejects.toThrow(/clone failed/);
@@ -495,7 +501,7 @@ describe("createReviewConsumer", () => {
     reset();
     runnerExitCode = 1;
     runnerStderr = "review: session failed: boom";
-    const db = createTestD1();
+    const db = createMigratedTestD1();
     const consumer = createReviewConsumer(makeEnv({ DB: db as never }), undefined, testOverrides);
 
     await expect(consumer(makeBatch(makePayload()))).rejects.toThrow(/runner failed/);
@@ -508,7 +514,7 @@ describe("createReviewConsumer", () => {
     reset();
     runnerStdout = JSON.stringify(VALID_OUTPUT);
     runnerStderr = "seat full-diff/combined done in 41s\nsynthesizeReview ok\n";
-    const db = createTestD1();
+    const db = createMigratedTestD1();
     const consumer = createReviewConsumer(makeEnv({ DB: db as never }), testLog, testOverrides);
 
     await consumer(makeBatch(makePayload())); // resolves — stderr is never a gate
@@ -522,7 +528,7 @@ describe("createReviewConsumer", () => {
     reset();
     numstatExitCode = 1;
     runnerStdout = JSON.stringify(VALID_OUTPUT);
-    const db = createTestD1();
+    const db = createMigratedTestD1();
     const consumer = createReviewConsumer(makeEnv({ DB: db as never }), testLog, testOverrides);
 
     await expect(consumer(makeBatch(makePayload()))).rejects.toThrow(/numstat failed/);
@@ -539,7 +545,7 @@ describe("createReviewConsumer", () => {
     reset();
     writeInputExitCode = 1;
     runnerStdout = JSON.stringify(VALID_OUTPUT);
-    const db = createTestD1();
+    const db = createMigratedTestD1();
     const consumer = createReviewConsumer(makeEnv({ DB: db as never }), undefined, testOverrides);
 
     await expect(consumer(makeBatch(makePayload()))).rejects.toThrow(/runner input write failed/);
@@ -553,7 +559,7 @@ describe("createReviewConsumer", () => {
   test("REVIEW_LEVEL unset → runner runs the harness landing tier 'default' (AC-S7-level)", async () => {
     reset();
     runnerStdout = JSON.stringify(VALID_OUTPUT);
-    const db = createTestD1();
+    const db = createMigratedTestD1();
     const consumer = createReviewConsumer(makeEnv({ DB: db as never }), undefined, testOverrides);
 
     await consumer(makeBatch(makePayload()));
@@ -565,7 +571,7 @@ describe("createReviewConsumer", () => {
   test("REVIEW_LEVEL=quick → runner runs `--level 'quick'` (AC-S7-level configurable)", async () => {
     reset();
     runnerStdout = JSON.stringify(VALID_OUTPUT);
-    const db = createTestD1();
+    const db = createMigratedTestD1();
     const consumer = createReviewConsumer(
       makeEnv({ DB: db as never, REVIEW_LEVEL: "quick" }),
       undefined,
@@ -582,7 +588,7 @@ describe("createReviewConsumer", () => {
   test("REVIEW_LEVEL=deep → runner runs `--level 'deep'` forwarded unchanged (plan 09 T3 / AC-S9-trigger)", async () => {
     reset();
     runnerStdout = JSON.stringify(VALID_OUTPUT);
-    const db = createTestD1();
+    const db = createMigratedTestD1();
     const consumer = createReviewConsumer(
       makeEnv({ DB: db as never, REVIEW_LEVEL: "deep" }),
       undefined,
@@ -598,7 +604,7 @@ describe("createReviewConsumer", () => {
   test("REVIEW_LEVEL=deep → runner exec timeout 840_000 + guard TTL 1560; quick/default stay 600_000 (AC-S10-clock)", async () => {
     reset();
     runnerStdout = JSON.stringify(VALID_OUTPUT);
-    const db = createTestD1();
+    const db = createMigratedTestD1();
     const consumer = createReviewConsumer(
       makeEnv({ DB: db as never, REVIEW_LEVEL: "deep" }),
       undefined,
@@ -630,7 +636,7 @@ describe("createReviewConsumer", () => {
   test("success path logs one runner-attempt line with level + runner_timeout_ms + elapsed_ms; default → bun-fanout (AC-S10-logs)", async () => {
     reset();
     runnerStdout = JSON.stringify(VALID_OUTPUT);
-    const db = createTestD1();
+    const db = createMigratedTestD1();
     const consumer = createReviewConsumer(makeEnv({ DB: db as never }), testLog, testOverrides);
 
     await consumer(makeBatch(makePayload()));
@@ -649,7 +655,7 @@ describe("createReviewConsumer", () => {
   test("REVIEW_LEVEL=deep → runner log: level=deep, budget 840_000, orchestration=parent, NO fake seat_count (AC-S10-logs)", async () => {
     reset();
     runnerStdout = JSON.stringify(VALID_OUTPUT);
-    const db = createTestD1();
+    const db = createMigratedTestD1();
     const consumer = createReviewConsumer(
       makeEnv({ DB: db as never, REVIEW_LEVEL: "deep" }),
       testLog,
@@ -673,7 +679,7 @@ describe("createReviewConsumer", () => {
     reset();
     runnerExitCode = 1;
     runnerStderr = "review: session failed: boom";
-    const db = createTestD1();
+    const db = createMigratedTestD1();
     const consumer = createReviewConsumer(makeEnv({ DB: db as never }), testLog, testOverrides);
 
     await expect(consumer(makeBatch(makePayload()))).rejects.toThrow(/runner failed/);
@@ -697,7 +703,7 @@ describe("createReviewConsumer", () => {
     // T1 and is covered by the success test above.
     for (const level of ["toString", "constructor", "__proto__"]) {
       reset();
-      const db = createTestD1();
+      const db = createMigratedTestD1();
       const consumer = createReviewConsumer(
         makeEnv({ DB: db as never, REVIEW_LEVEL: level }),
         testLog,
@@ -723,7 +729,7 @@ describe("createReviewConsumer", () => {
       ...VALID_OUTPUT,
       target: { owner: "acme", repo: "widgets", pr: 42, head_sha: SHA },
     });
-    const db = createTestD1();
+    const db = createMigratedTestD1();
     const consumer = createReviewConsumer(makeEnv({ DB: db as never }), undefined, testOverrides);
 
     await consumer(makeBatch(makePayload()));
@@ -736,7 +742,7 @@ describe("createReviewConsumer", () => {
   test("failure logs a structured error with idempotency key + sandbox id before rethrow", async () => {
     reset();
     runnerStdout = "not json at all";
-    const db = createTestD1();
+    const db = createMigratedTestD1();
     const consumer = createReviewConsumer(makeEnv({ DB: db as never }), testLog, testOverrides);
 
     await expect(consumer(makeBatch(makePayload()))).rejects.toThrow(/parse failed/);
@@ -753,7 +759,7 @@ describe("createReviewConsumer", () => {
     reset();
     resolvedSha = "";
     runnerStdout = JSON.stringify(VALID_OUTPUT);
-    const db = createTestD1();
+    const db = createMigratedTestD1();
     const consumer = createReviewConsumer(makeEnv({ DB: db as never }), testLog, testOverrides);
 
     await expect(
@@ -771,7 +777,7 @@ describe("createReviewConsumer", () => {
     reset();
     runnerStdout = JSON.stringify(VALID_OUTPUT);
     kvPutError = new Error("kv down");
-    const db = createTestD1();
+    const db = createMigratedTestD1();
     const consumer = createReviewConsumer(makeEnv({ DB: db as never }), testLog, testOverrides);
 
     await consumer(makeBatch(makePayload())); // resolves — KV failure is warn-only
@@ -789,7 +795,7 @@ describe("createReviewConsumer", () => {
     reset();
     runnerStdout = JSON.stringify(VALID_OUTPUT);
     destroyError = new Error("destroy boom");
-    const db = createTestD1();
+    const db = createMigratedTestD1();
     const consumer = createReviewConsumer(makeEnv({ DB: db as never }), testLog, testOverrides);
 
     await consumer(makeBatch(makePayload())); // resolves — destroy failure is warn-only
@@ -828,7 +834,7 @@ describe("createReviewConsumer", () => {
       ],
     };
     runnerStdout = JSON.stringify(leaked);
-    const db = createTestD1();
+    const db = createMigratedTestD1();
     const consumer = createReviewConsumer(makeEnv({ DB: db as never }), undefined, testOverrides);
 
     await consumer(makeBatch(makePayload()));
@@ -877,7 +883,7 @@ describe("createReviewConsumer", () => {
       ],
     };
     runnerStdout = JSON.stringify(big);
-    const db = createTestD1();
+    const db = createMigratedTestD1();
     const consumer = createReviewConsumer(makeEnv({ DB: db as never }), undefined, testOverrides);
 
     await consumer(makeBatch(makePayload()));
@@ -916,7 +922,7 @@ describe("createReviewConsumer", () => {
       summary_md: "many findings",
       findings,
     });
-    const db = createTestD1();
+    const db = createMigratedTestD1();
     const consumer = createReviewConsumer(makeEnv({ DB: db as never }), undefined, testOverrides);
 
     await consumer(makeBatch(makePayload()));
@@ -943,7 +949,7 @@ describe("createReviewConsumer", () => {
     reset();
     kvGetValue = "done";
     runnerStdout = JSON.stringify(VALID_OUTPUT);
-    const db = createTestD1();
+    const db = createMigratedTestD1();
     const consumer = createReviewConsumer(makeEnv({ DB: db as never }), testLog, testOverrides);
 
     await consumer(makeBatch(makePayload()));
@@ -965,7 +971,7 @@ describe("createReviewConsumer", () => {
   test("put failure after a successful post → one comment, KV done, warn + ack, no rethrow (B3)", async () => {
     reset();
     runnerStdout = JSON.stringify(VALID_OUTPUT);
-    const db = createTestD1();
+    const db = createMigratedTestD1();
     const failingStore = {
       put: mock(async () => {
         throw new Error("d1 down");
@@ -1001,7 +1007,7 @@ describe("createReviewConsumer", () => {
   test("BB-1: OMP_REVIEW_MODEL set on PipelineEnv → forwarded into the runner exec env", async () => {
     reset();
     runnerStdout = JSON.stringify(VALID_OUTPUT);
-    const db = createTestD1();
+    const db = createMigratedTestD1();
     const consumer = createReviewConsumer(
       makeEnv({
         DB: db as never,
@@ -1029,7 +1035,7 @@ describe("createReviewConsumer", () => {
   test("BB-1: OMP_REVIEW_MODEL unset/empty → omitted from the runner exec env (in-image default)", async () => {
     reset();
     runnerStdout = JSON.stringify(VALID_OUTPUT);
-    const db = createTestD1();
+    const db = createMigratedTestD1();
     const consumer = createReviewConsumer(
       makeEnv({ DB: db as never, OMP_REVIEW_MODEL: "" }),
       undefined,
@@ -1049,7 +1055,7 @@ describe("createReviewConsumer", () => {
   test("BB-2: known provider keys present-and-non-empty on PipelineEnv → forwarded into the runner exec env", async () => {
     reset();
     runnerStdout = JSON.stringify(VALID_OUTPUT);
-    const db = createTestD1();
+    const db = createMigratedTestD1();
     const consumer = createReviewConsumer(
       makeEnv({
         DB: db as never,
@@ -1075,7 +1081,7 @@ describe("createReviewConsumer", () => {
   test("BB-2: absent provider keys omitted; non-provider env is NEVER forwarded (allowlist)", async () => {
     reset();
     runnerStdout = JSON.stringify(VALID_OUTPUT);
-    const db = createTestD1();
+    const db = createMigratedTestD1();
     // A var that is NOT in the PROVIDERS allowlist sits on the Worker env —
     // it must never leak into the container.
     const env = makeEnv({ DB: db as never, GEMINI_API_KEY: "gem-test" }) as PipelineEnv & Record<string, string>;
@@ -1098,7 +1104,7 @@ describe("createReviewConsumer", () => {
     reset();
     kvGuardValue = "inflight";
     runnerStdout = JSON.stringify(VALID_OUTPUT);
-    const db = createTestD1();
+    const db = createMigratedTestD1();
     const consumer = createReviewConsumer(makeEnv({ DB: db as never }), testLog, testOverrides);
 
     // BB-3: the consumer RESOLVES — guard-held is a typed outcome, not a
@@ -1125,7 +1131,7 @@ describe("createReviewConsumer", () => {
   test("guard-held backoff escalates 60s → 120s → 240s across attempts (BB-3)", async () => {
     reset();
     kvGuardValue = "inflight";
-    const db = createTestD1();
+    const db = createMigratedTestD1();
     const consumer = createReviewConsumer(makeEnv({ DB: db as never }), testLog, testOverrides);
     for (const [attempts, delaySeconds] of [
       [1, 60],
@@ -1146,7 +1152,7 @@ describe("createReviewConsumer", () => {
   test("REVIEW_LEVEL=deep guard-held → delayed retries use the deep backoff 180s → 360s → 720s (AC-S10-guard)", async () => {
     reset();
     kvGuardValue = "inflight";
-    const db = createTestD1();
+    const db = createMigratedTestD1();
     const consumer = createReviewConsumer(
       makeEnv({ DB: db as never, REVIEW_LEVEL: "deep" }),
       testLog,
@@ -1173,7 +1179,7 @@ describe("createReviewConsumer", () => {
     reset();
     kvGuardValue = "inflight";
     messageAttempts = 4; // final delivery before the queue would DLQ
-    const db = createTestD1();
+    const db = createMigratedTestD1();
     const consumer = createReviewConsumer(makeEnv({ DB: db as never }), testLog, testOverrides);
 
     await consumer(makeBatch(makePayload())); // resolves — acked, never DLQed
@@ -1191,7 +1197,7 @@ describe("createReviewConsumer", () => {
   test("real failures keep the throw → queue retry → DLQ behavior (BB-3 unchanged)", async () => {
     reset();
     runnerStdout = "not json at all";
-    const db = createTestD1();
+    const db = createMigratedTestD1();
     const consumer = createReviewConsumer(makeEnv({ DB: db as never }), testLog, testOverrides);
 
     await expect(consumer(makeBatch(makePayload()))).rejects.toThrow(/parse failed/);
@@ -1206,7 +1212,7 @@ describe("createReviewConsumer", () => {
   test("in-flight guard acquired before the pipeline and released after the post settles (WF-002)", async () => {
     reset();
     runnerStdout = JSON.stringify(VALID_OUTPUT);
-    const db = createTestD1();
+    const db = createMigratedTestD1();
     const consumer = createReviewConsumer(makeEnv({ DB: db as never }), testLog, testOverrides);
 
     await consumer(makeBatch(makePayload()));
