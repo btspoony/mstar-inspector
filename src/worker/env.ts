@@ -31,6 +31,17 @@ export type Env = {
    */
   DASHBOARD_SESSION_SECRET?: string;
   /**
+   * Envelope master key for D1-stored dashboard secrets (plan 13 B5, spec
+   * dashboard-multi-app-platform § Crypto envelope): base64 of exactly 32
+   * random bytes (AES-256-GCM secretbox, src/dashboard/secretbox.ts) —
+   * encrypts github_apps credentials (PEM / webhook secret; plan 14 adds
+   * per-App provider keys). Missing / malformed → SecretboxKeyError and the
+   * encryption-dependent dashboard routes fail closed with 5xx; the legacy
+   * env-secret App path is unaffected. Never reuse DASHBOARD_SESSION_SECRET
+   * — rotation decoupled. wrangler secret / .dev.vars only — never in git.
+   */
+  DASHBOARD_ENCRYPTION_KEY?: string;
+  /**
    * Cloudflare API access for /dashboard/manifest/commit (plan 11 B1 T2,
    * architect lock spec L8): the confirm gate writes APP_ID / PRIVATE_KEY /
    * WEBHOOK_SECRET via ONE PATCH to the Workers secrets-bulk endpoint
