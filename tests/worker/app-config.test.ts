@@ -18,8 +18,9 @@
  *
  * Duplication locks (architect decision Q2 forbids the dashboard from
  * importing pipeline/review code, so the copies must be pinned):
- * PROVIDER_IDS ≡ the pipeline PROVIDERS key sequence, and parseModelChain ≡
- * the runtime-omp parseModelSelectors behavior, both asserted against the
+ * PROVIDER_IDS ≡ the pipeline PROVIDERS key sequence, parseModelChain ≡
+ * the runtime-omp parseModelSelectors behavior, and MODEL_ROLE_IDS ≡ the
+ * review-side seat vocabulary (plan 17 B6), all asserted against the
  * originals here.
  */
 import { describe, expect, test } from "bun:test";
@@ -29,9 +30,12 @@ import worker from "../../src/worker/index";
 import { createTestD1 } from "../store/helpers";
 import { createAppsStore, type GithubAppRow } from "../../src/dashboard/apps-store";
 import {
+  InvalidModelSelectorError,
   MAX_PROVIDER_KEY_LENGTH,
+  MODEL_ROLE_IDS,
   PROVIDER_IDS,
   ProviderKeyTooLongError,
+  UnknownModelRoleError,
   createAppConfigStore,
   parseModelChain,
 } from "../../src/dashboard/app-config-store";
@@ -93,15 +97,18 @@ function createPopulatedPre0006D1(): ReturnType<typeof createTestD1> {
 }
 
 /**
- * Fully-migrated shape with 0006 applied over the populated DB (0008 too —
- * plan 16: the settings page renders the Review switch and the install-health
- * panel from github_apps.review_enabled / last_webhook_at and
- * app_installations, so the route tests run on the production shape).
+ * Fully-migrated shape with 0006 applied over the populated DB (0008 and 0009
+ * too — plan 16: the settings page renders the Review switch and the
+ * install-health panel from github_apps.review_enabled / last_webhook_at and
+ * app_installations; plan 17: the role-models store tests need
+ * app_model_roles — so the route tests run on the production shape; the 0007
+ * index skip stays, harmless for these tables).
  */
 function createAppConfigD1(): ReturnType<typeof createTestD1> {
   const db = createPopulatedPre0006D1();
   applyMigration(db, "0006_app_provider_config.sql");
   applyMigration(db, "0008_github_apps_ops.sql");
+  applyMigration(db, "0009_app_model_roles.sql");
   return db;
 }
 
@@ -508,6 +515,157 @@ describe("app-config store (createAppConfigStore) — model chain + getAppConfig
   });
 });
 
+// --- store: model roles (plan 17 B6) ---
+
+describe("app-config store (createAppConfigStore) — model roles (plan 17 T1)", () => {
+  test("setModelRole stores VERBATIM (:thinking suffix and padding untouched); getAppModelRoles reads it back", async () => {
+    const db = createAppConfigD1();
+    const app = await seedApp(db, { slug: "a", createdBy: "mallory" });
+    const store = configStore(db);
+    await store.setModelRole(app.id, "mstar-review-seat", "  ark-plan/deepseek-v4-flash:high ");
+    await store.setModelRole(app.id, "code-reviewer", "openai/gpt-5:thinking, anthropic/claude-x");
+    // Only the MAPPED roles appear; selectors come back exactly as stored.
+    expect(await store.getAppModelRoles(app.id)).toEqual({
+      "code-reviewer": "openai/gpt-5:thinking, anthropic/claude-x",
+      "mstar-review-seat": "  ark-plan/deepseek-v4-flash:high ",
+    });
+    const row = db.raw.query("SELECT app_id, role, selector FROM app_model_roles WHERE role = 'mstar-review-seat'").get() as {
+      app_id: string;
+      role: string;
+      selector: string;
+    };
+    expect(row.selector).toBe("  ark-plan/deepseek-v4-flash:high "); // plaintext by design — not a secret
+    expect(row.app_id).toBe(app.id);
+  });
+
+  test("setModelRole upserts: a second save replaces the selector (one row per (app_id, role))", async () => {
+    const db = createAppConfigD1();
+    const app = await seedApp(db, { slug: "a", createdBy: "mallory" });
+    const store = configStore(db);
+    await store.setModelRole(app.id, "fullstack-dev", "first/model");
+    await store.setModelRole(app.id, "fullstack-dev", "second/model");
+    expect(rawCount(db, "app_model_roles")).toBe(1);
+    expect(await store.getAppModelRoles(app.id)).toEqual({ "fullstack-dev": "second/model" });
+  });
+
+  test('setModelRole(role, "") CLEARS the mapping; clearing an unmapped role is a quiet no-op', async () => {
+    const db = createAppConfigD1();
+    const app = await seedApp(db, { slug: "a", createdBy: "mallory" });
+    const store = configStore(db);
+    await store.setModelRole(app.id, "frontend-dev", "first/model");
+    await store.setModelRole(app.id, "frontend-dev", "");
+    expect(rawCount(db, "app_model_roles")).toBe(0);
+    expect(await store.getAppModelRoles(app.id)).toEqual({});
+    // Clearing a role that never had a mapping resolves without error.
+    await expect(store.setModelRole(app.id, "frontend-dev", "")).resolves.toBeUndefined();
+  });
+
+  test("a whitespace-only selector is blank = clear; a padded real selector upserts VERBATIM", async () => {
+    const db = createAppConfigD1();
+    const app = await seedApp(db, { slug: "a", createdBy: "mallory" });
+    const store = configStore(db);
+    // The setModelChain 空 = 清除 convention aligned at the store: a blank
+    // selector never lands as a row, whatever the caller passed.
+    await store.setModelRole(app.id, "code-reviewer", "   ");
+    expect(rawCount(db, "app_model_roles")).toBe(0);
+    // Interior/trailing whitespace in a selector WITH content is
+    // configuration — stored exactly as given (the runner-side parse trims).
+    const padded = "  openai/gpt-5 , anthropic/claude-x  ";
+    await store.setModelRole(app.id, "code-reviewer", padded);
+    expect(await store.getAppModelRoles(app.id)).toEqual({ "code-reviewer": padded });
+  });
+
+  test("clearModelRole removes the row, then is an idempotent no-op like the blank-selector path", async () => {
+    const db = createAppConfigD1();
+    const app = await seedApp(db, { slug: "a", createdBy: "mallory" });
+    const store = configStore(db);
+    await store.setModelRole(app.id, "code-reviewer", "openai/gpt-5");
+    await store.clearModelRole(app.id, "code-reviewer");
+    expect(rawCount(db, "app_model_roles")).toBe(0);
+    await expect(store.clearModelRole(app.id, "code-reviewer")).resolves.toBeUndefined();
+    await expect(store.clearModelRole(app.id, "never-stored-role-name")).rejects.toThrow(
+      UnknownModelRoleError,
+    );
+  });
+
+  test("off-vocabulary role → UnknownModelRoleError, zero rows written (setModelRole/clearModelRole/setModelRoles)", async () => {
+    const db = createAppConfigD1();
+    const app = await seedApp(db, { slug: "a", createdBy: "mallory" });
+    const store = configStore(db);
+    for (const role of ["reviewer", "smol", "mstar-review-seat "]) {
+      await expect(store.setModelRole(app.id, role, "openai/gpt-5")).rejects.toThrow(UnknownModelRoleError);
+      await expect(store.clearModelRole(app.id, role)).rejects.toThrow(UnknownModelRoleError);
+      await expect(store.setModelRoles(app.id, { [role]: "openai/gpt-5" })).rejects.toThrow(UnknownModelRoleError);
+    }
+    // Even a VALID role is rejected when it rides an invalid map entry.
+    await expect(
+      store.setModelRoles(app.id, { "code-reviewer": "openai/gpt-5", reviewer: "openai/gpt-5" }),
+    ).rejects.toThrow(UnknownModelRoleError);
+    expect(rawCount(db, "app_model_roles")).toBe(0);
+  });
+
+  test("content-bearing selector that parses to zero selectors → InvalidModelSelectorError, zero rows written", async () => {
+    const db = createAppConfigD1();
+    const app = await seedApp(db, { slug: "a", createdBy: "mallory" });
+    const store = configStore(db);
+    for (const selector of [",, ,", " , , ,"]) {
+      await expect(store.setModelRole(app.id, "code-reviewer", selector)).rejects.toThrow(
+        InvalidModelSelectorError,
+      );
+    }
+    expect(rawCount(db, "app_model_roles")).toBe(0);
+  });
+
+  test("setModelRoles saves the full map in one call; one bad entry fails BEFORE any write", async () => {
+    const db = createAppConfigD1();
+    const app = await seedApp(db, { slug: "a", createdBy: "mallory" });
+    const store = configStore(db);
+    // The settings single-save face (plan 17 T3): all four rows at once,
+    // blank entries clearing their role.
+    await store.setModelRole(app.id, "code-reviewer", "old/model");
+    await store.setModelRoles(app.id, {
+      "mstar-review-seat": "ark-plan/deepseek-v4-flash:high",
+      "code-reviewer": "", // cleared by the same save
+      "fullstack-dev": "openai/gpt-5",
+      "frontend-dev": "",
+    });
+    expect(await store.getAppModelRoles(app.id)).toEqual({
+      "fullstack-dev": "openai/gpt-5",
+      "mstar-review-seat": "ark-plan/deepseek-v4-flash:high",
+    });
+    // Validation is whole-map-first: the valid entry in this map must NOT
+    // reach the DB — zero rows touched by the failed call.
+    await expect(
+      store.setModelRoles(app.id, { "frontend-dev": "x/y", "code-reviewer": ",," }),
+    ).rejects.toThrow(InvalidModelSelectorError);
+    expect(rawCount(db, "app_model_roles")).toBe(2);
+  });
+
+  test("getAppModelRoles on an app with no roles is an EMPTY map (= the chain behavior)", async () => {
+    const db = createAppConfigD1();
+    const bare = await seedApp(db, { slug: "bare", createdBy: "mallory" });
+    expect(await configStore(db).getAppModelRoles(bare.id)).toEqual({});
+  });
+
+  test("cross-App isolation: App X's role map never contains App Y's roles (full-object assert)", async () => {
+    const db = createAppConfigD1();
+    const x = await seedApp(db, { slug: "app-x", createdBy: "mallory" });
+    const y = await seedApp(db, { slug: "app-y", createdBy: "ada", githubAppId: 1002 });
+    const store = configStore(db);
+    await store.setModelRole(x.id, "code-reviewer", "openai/gpt-x");
+    await store.setModelRole(y.id, "mstar-review-seat", "anthropic/claude-y");
+    expect(await store.getAppModelRoles(x.id)).toEqual({ "code-reviewer": "openai/gpt-x" });
+    expect(await store.getAppModelRoles(y.id)).toEqual({ "mstar-review-seat": "anthropic/claude-y" });
+  });
+
+  test("unknown app_id → FK violation on insert (fail-loud, same as every write here)", async () => {
+    const db = createAppConfigD1();
+    await expect(
+      configStore(db).setModelRole("no-such-app", "code-reviewer", "openai/gpt-5"),
+    ).rejects.toThrow(/FOREIGN KEY constraint failed/);
+  });
+});
+
 // --- duplication locks (Q2: dashboard may not import pipeline/review) ---
 
 describe("duplication locks", () => {
@@ -533,6 +691,28 @@ describe("duplication locks", () => {
     for (const input of cases) {
       expect(parseModelChain(input)).toEqual(parseModelSelectors(input));
     }
+  });
+
+  test("MODEL_ROLE_IDS mirrors the review-side seat vocabulary exactly (plan 17 B6 parity lock)", () => {
+    // quick/default seat: the frontmatter `name:` of the agent definition the
+    // runtime installs for Bun fan-out (src/review/seat-agent.md — the real
+    // seat-name SSOT on the review side).
+    const seatAgent = readFileSync(join(import.meta.dir, "../../src/review/seat-agent.md"), "utf8");
+    const quickSeat = /^name:\s*(\S+)\s*$/m.exec(seatAgent)?.[1];
+    expect(quickSeat).toBe("mstar-review-seat");
+    // Deep seats: runtime-omp's DEEP_SEAT_ROLES declaration is module-private
+    // (Q2 keeps the dashboard from importing review code, and tests must not
+    // widen that surface either) — extract the literal from source so a
+    // rename/addition on the review side fails this lock loudly.
+    const runtimeSource = readFileSync(join(import.meta.dir, "../../src/review/runtime-omp.ts"), "utf8");
+    const deepSeats = /const DEEP_SEAT_ROLES = \[([^\]]*)\] as const;/
+      .exec(runtimeSource)?.[1]
+      ?.match(/"([^"]+)"/g)
+      ?.map((quoted) => quoted.slice(1, -1));
+    expect(deepSeats).toEqual(["code-reviewer", "fullstack-dev", "frontend-dev"]);
+    // The mirror is exactly the quick seat followed by the deep seats.
+    expect([...MODEL_ROLE_IDS]).toEqual([quickSeat!, ...(deepSeats ?? [])]);
+    expect(MODEL_ROLE_IDS).toHaveLength(4); // spec § B6 语义锁: exactly the 4 audit seats
   });
 });
 
