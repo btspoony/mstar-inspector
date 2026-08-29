@@ -2,9 +2,11 @@
  * Plan 08 Task 2 tests: signed session cookie + OAuth state CSRF, through
  * the real worker mount (app.route("/dashboard", dashboardApp)). Plan 11
  * Task 1 adds the GitHub App Manifest start/callback coverage (state CSRF,
- * locked conversion headers, encrypted hold cookie, no-secret HTML); Task 2
- * adds the commit coverage (confirm gate, session-bound retry-aware hold, ONE secrets-bulk
- * PATCH, fail-closed Cloudflare config, no-secret success HTML).
+ * locked conversion headers, encrypted hold cookie, no-secret HTML); plan 13
+ * B5 T3 rewrites the commit coverage: slug-carrying signed state, hold-bound
+ * D1 write of the encrypted github_apps row (AAD rowKey = row PK), slug
+ * collision retries, fail-closed DASHBOARD_ENCRYPTION_KEY, zero
+ * api.cloudflare.com calls, no-secret summary HTML.
  *
  * The end-to-end callback network path is exercised only in live smoke
  * (user-gated); here callback coverage stops at the fail-closed state/code
@@ -41,21 +43,26 @@ import {
   verifyValue,
 } from "../../src/dashboard/session";
 import {
-  DEFAULT_CLOUDFLARE_WORKER_NAME,
   MANIFEST_HOLD_COOKIE,
   MANIFEST_HOLD_MAX_AGE_SEC,
   MANIFEST_STATE_COOKIE,
   buildAppName,
+  buildAppSlug,
   createHoldValue,
+  createManifestStateValue,
   exchangeManifestCode,
   readHoldValue,
 } from "../../src/dashboard/manifest";
+import { createSecretbox } from "../../src/dashboard/secretbox";
+import { createAppsStore } from "../../src/dashboard/apps-store";
 import { normalizePrivateKey } from "../../src/dashboard/private-key";
 import { normalizePrivateKey as pipelineNormalizePrivateKey } from "../../src/pipeline/comment";
 
 const SESSION_SECRET = "test-dashboard-session-secret-32-bytes!";
 const CLIENT_ID = "oauth-client-id";
 const CLIENT_SECRET = "oauth-client-secret";
+/** base64 of exactly 32 bytes — the secretbox master-key requirement. */
+const TEST_ENCRYPTION_KEY = Buffer.alloc(32, 7).toString("base64");
 
 // RSA-2048-shaped PEM (~1.7KB) for the cookie-size budget — not a real key.
 const FAKE_PEM = `-----BEGIN RSA PRIVATE KEY-----\n${Array.from({ length: 26 }, () => "A".repeat(64)).join("\n")}\n-----END RSA PRIVATE KEY-----\n`;
@@ -98,8 +105,10 @@ const DEFAULT_SEEDED_MEMBERS: Array<[login: string, role: "admin" | "member"]> =
   ["mallory", "member"],
 ];
 
-function seededDashboardD1(): DashboardD1 & { raw: Database } {
-  const db = createDashboardTestD1();
+function seededDashboardD1(
+  through: number = DASHBOARD_MIGRATION_SEQUENCE.length,
+): DashboardD1 & { raw: Database } {
+  const db = createDashboardTestD1(through);
   const insert = db.raw.prepare(
     "INSERT INTO users (id, github_login, role, created_at, invited_by) VALUES (?, ?, ?, ?, NULL)",
   );
@@ -586,25 +595,33 @@ describe("/dashboard routes", () => {
 });
 
 describe("manifest hold cookie (manifest.ts)", () => {
-  test("round trip carries id/name/login/pem/webhook_secret", async () => {
-    const value = await createHoldValue(CONVERSION, "octocat", SESSION_SECRET);
+  const freshHold = (login = "octocat", nowMs = Date.now()) =>
+    createHoldValue(CONVERSION, login, SESSION_SECRET, buildAppSlug(login), nowMs);
+
+  test("round trip carries id/name/login/slug/pem/webhook_secret", async () => {
+    const value = await freshHold();
     const payload = await readHoldValue(value, SESSION_SECRET);
-    expect(payload).toEqual({ ...CONVERSION, login: "octocat", exp: expect.any(Number) });
+    expect(payload).toEqual({
+      ...CONVERSION,
+      login: "octocat",
+      slug: buildAppSlug("octocat"),
+      exp: expect.any(Number),
+    });
   });
 
   test("serialized value stays under the 4096B cookie budget with an RSA-2048-size PEM", async () => {
     expect(FAKE_PEM.length).toBeGreaterThan(1500); // realistic key size, else the budget test is vacuous
-    const value = await createHoldValue(CONVERSION, "octocat", SESSION_SECRET);
+    const value = await freshHold();
     expect(value.length).toBeLessThan(4096);
   });
 
   test("wrong secret fails closed", async () => {
-    const value = await createHoldValue(CONVERSION, "octocat", SESSION_SECRET);
+    const value = await freshHold();
     expect(await readHoldValue(value, "another-secret")).toBeNull();
   });
 
   test("tampered ciphertext fails closed (GCM tag)", async () => {
-    const value = await createHoldValue(CONVERSION, "octocat", SESSION_SECRET);
+    const value = await freshHold();
     // Flip a mid-string character: unlike the last base64url char (padding
     // bits), this always changes the decoded bytes → GCM tag must fail.
     const at = 24;
@@ -614,7 +631,7 @@ describe("manifest hold cookie (manifest.ts)", () => {
 
   test("expired hold fails closed (server-side exp beside Max-Age)", async () => {
     const past = Date.now() - 10 * 60 * 1000; // minted 10min ago, 600s TTL
-    const value = await createHoldValue(CONVERSION, "octocat", SESSION_SECRET, past);
+    const value = await freshHold("octocat", past);
     expect(await readHoldValue(value, SESSION_SECRET)).toBeNull();
   });
 
@@ -777,10 +794,11 @@ describe("/dashboard manifest routes (plan 11 Task 1)", () => {
     // The form POSTs to GitHub; state rides the action query (official flow).
     expect(body).toContain('method="post"');
     expect(body).toContain(`action="https://github.com/settings/apps/new?state=${state}"`);
-    // Locked manifest content (spec § Manifest 内容).
+    // Locked manifest content (spec § Manifest 内容); B5: the webhook URL is
+    // the App's OWN route /webhook/{slug} with the login-derived slug.
     expect(manifest.name).toBe("mstar-inspector-octocat");
     expect(manifest.url).toBe("https://worker.local");
-    expect(manifest.hook_attributes).toEqual({ url: "https://worker.local/webhook" });
+    expect(manifest.hook_attributes).toEqual({ url: "https://worker.local/webhook/mstar-inspector-octocat" });
     expect(manifest.redirect_url).toBe("https://worker.local/dashboard/manifest/callback");
     expect(manifest.public).toBe(false);
     expect(manifest.default_events).toEqual(["pull_request", "issue_comment"]);
@@ -799,7 +817,12 @@ describe("/dashboard manifest routes (plan 11 Task 1)", () => {
     // The start copy names the App GitHub will actually register — never the
     // untruncated name that GitHub would reject.
     expect(body).toContain(`<strong>${name}</strong>`);
-    expect(body).not.toContain("mstar-inspector-octocat-with-a-long-login");
+    // B5: the webhook SLUG is login-derived and uncapped — it is a URL path
+    // segment, not the GitHub App name, so it legitimately carries the full
+    // login inside the hook URL.
+    expect(manifest.hook_attributes).toEqual({
+      url: "https://worker.local/webhook/mstar-inspector-octocat-with-a-long-login",
+    });
   });
 
   test("callback without a session → 302 to login (IA routing table)", async () => {
@@ -855,7 +878,9 @@ describe("/dashboard manifest routes (plan 11 Task 1)", () => {
   test("callback with valid state but no code → 400, zero fetch, structured missing_code log", async () => {
     const guard = stubFetchMustNotBeCalled();
     const session = await createSessionValue("octocat", null, SESSION_SECRET);
-    const state = await createStateValue(SESSION_SECRET);
+    // B5: a valid manifest state carries the slug (createStateValue alone is
+    // a B0 OAuth state and must NOT verify here).
+    const state = await createManifestStateValue(SESSION_SECRET, "mstar-inspector-octocat");
     const warns = spyOnWarn();
     const res = await worker.fetch(callbackRequest(session, state, `state=${state}`), makeEnv());
     expect(res.status).toBe(400);
@@ -866,7 +891,7 @@ describe("/dashboard manifest routes (plan 11 Task 1)", () => {
     expect(entry.reason).toBe("missing_code");
   });
 
-  test("callback success → conversion exchanged, hold cookie set, HTML carries no secrets", async () => {
+  test("callback success → conversion exchanged, hold cookie set (with the state slug), HTML carries no secrets", async () => {
     const { session, state } = await startManifest();
     let seenUrl = "";
     let seenHeaders: Record<string, string> = {};
@@ -901,24 +926,30 @@ describe("/dashboard manifest routes (plan 11 Task 1)", () => {
     const holdValue = (holdCookie.split(";")[0] ?? "").slice(MANIFEST_HOLD_COOKIE.length + 1);
     expect(holdValue.length).toBeGreaterThan(0);
     expect(holdValue.length).toBeLessThan(4096);
-    // Hold round-trips to the converted credentials for the T2 commit gate.
+    // Hold round-trips to the converted credentials + the state-carried slug
+    // for the T3 commit gate.
     const payload = await readHoldValue(holdValue, SESSION_SECRET);
     expect(payload?.id).toBe(CONVERSION.id);
     expect(payload?.name).toBe(CONVERSION.name);
     expect(payload?.login).toBe("octocat");
+    expect(payload?.slug).toBe("mstar-inspector-octocat");
     expect(payload?.pem).toBe(CONVERSION.pem);
     expect(payload?.webhook_secret).toBe(CONVERSION.webhook_secret);
-    // AC-S11-html: the confirm HTML never carries PEM or webhook_secret.
+    // AC-S11-html / B5: the summary HTML never carries PEM or webhook_secret;
+    // it shows the slug + webhook URL instead of the retired overwrite gate.
     const body = await res.text();
     expect(body).not.toContain("BEGIN");
     expect(body).not.toContain(FAKE_PEM);
     expect(body).not.toContain(FAKE_WEBHOOK_SECRET);
     expect(body).toContain(`<span class="id">${CONVERSION.id}</span>`);
-    // Locked confirm copy (spec § 确认页文案) — wired commit lands in T2.
-    expect(body).toContain(
-      "This will overwrite the existing APP_ID, PRIVATE_KEY, and WEBHOOK_SECRET secrets on this Worker.",
-    );
-    expect(body).toContain('name="confirm" value="overwrite"');
+    expect(body).toContain("mstar-inspector-octocat");
+    expect(body).toContain("https://worker.local/webhook/mstar-inspector-octocat");
+    expect(body).toContain('action="/dashboard/manifest/commit"');
+    expect(body).toContain(">Create App</button>");
+    // B5: the overwrite-confirm semantics are gone (nothing shared changes).
+    expect(body).not.toContain("overwrite");
+    expect(body).not.toContain("APP_ID");
+    expect(body).not.toContain('class="danger"');
   });
 
   test("conversion failure → 502, no hold cookie, HTML carries no secrets", async () => {
@@ -951,7 +982,8 @@ describe("buildAppName (manifest.ts, GitHub 34-char App-name cap)", () => {
 });
 
 describe("/dashboard confirm resume (Bugbot: confirm step must be resumable)", () => {
-  const freshHold = () => createHoldValue(CONVERSION, "octocat", SESSION_SECRET);
+  const freshHold = () =>
+    createHoldValue(CONVERSION, "octocat", SESSION_SECRET, buildAppSlug("octocat"));
 
   function resumeRequest(path: string, session: string, hold?: string): Request {
     const cookies = hold ? `${SESSION_COOKIE}=${session}; ${MANIFEST_HOLD_COOKIE}=${hold}` : `${SESSION_COOKIE}=${session}`;
@@ -963,9 +995,12 @@ describe("/dashboard confirm resume (Bugbot: confirm step must be resumable)", (
     const res = await worker.fetch(resumeRequest("/dashboard", session, await freshHold()), makeEnv());
     expect(res.status).toBe(200);
     const body = await res.text();
-    expect(body).toContain('name="confirm" value="overwrite"');
+    expect(body).toContain('action="/dashboard/manifest/commit"');
+    expect(body).toContain(">Create App</button>");
     expect(body).toContain(`<span class="id">${CONVERSION.id}</span>`);
     expect(body).toContain(CONVERSION.name);
+    expect(body).toContain("mstar-inspector-octocat");
+    expect(body).toContain("https://worker.local/webhook/mstar-inspector-octocat");
     expect(body).not.toContain("BEGIN");
     expect(body).not.toContain(FAKE_PEM);
     expect(body).not.toContain(FAKE_WEBHOOK_SECRET);
@@ -973,7 +1008,7 @@ describe("/dashboard confirm resume (Bugbot: confirm step must be resumable)", (
     expect(body).not.toContain('action="/dashboard/manifest/start"');
   });
 
-  test("after a retryable 400, GET /dashboard still shows the confirm gate (error page links to it)", async () => {
+  test("after a retryable 500 (missing encryption key), GET /dashboard still shows the confirm gate", async () => {
     const session = await createSessionValue("octocat", null, SESSION_SECRET);
     const hold = await freshHold();
     const rejected = await worker.fetch(
@@ -981,20 +1016,19 @@ describe("/dashboard confirm resume (Bugbot: confirm step must be resumable)", (
         method: "POST",
         headers: {
           Cookie: `${SESSION_COOKIE}=${session}; ${MANIFEST_HOLD_COOKIE}=${hold}`,
-          "Content-Type": "application/x-www-form-urlencoded",
         },
-        body: "", // confirm checkbox not ticked → retryable 400, hold kept
+        body: "",
       }),
-      makeEnv(),
+      makeEnv({ DASHBOARD_ENCRYPTION_KEY: undefined }),
     );
-    expect(rejected.status).toBe(400);
+    expect(rejected.status).toBe(500);
     // The retryable error page links back to the confirm surface.
     expect(await rejected.text()).toContain('href="/dashboard/manifest/confirm"');
     // Resume via the shell URL: the confirm gate comes back with the same hold.
     const resumed = await worker.fetch(resumeRequest("/dashboard", session, hold), makeEnv());
     expect(resumed.status).toBe(200);
     const body = await resumed.text();
-    expect(body).toContain('name="confirm" value="overwrite"');
+    expect(body).toContain('action="/dashboard/manifest/commit"');
     expect(body).toContain(`<span class="id">${CONVERSION.id}</span>`);
   });
 
@@ -1015,7 +1049,7 @@ describe("/dashboard confirm resume (Bugbot: confirm step must be resumable)", (
       makeEnv(),
     );
     expect(ok.status).toBe(200);
-    expect(await ok.text()).toContain('name="confirm" value="overwrite"');
+    expect(await ok.text()).toContain('action="/dashboard/manifest/commit"');
     const noHold = await worker.fetch(
       resumeRequest("/dashboard/manifest/confirm", session),
       makeEnv(),
@@ -1026,10 +1060,6 @@ describe("/dashboard confirm resume (Bugbot: confirm step must be resumable)", (
 });
 
 describe("dashboard private-key normalization (private-key.ts)", () => {
-  test("L8 default worker name is pinned to the wrangler.jsonc name", () => {
-    expect(DEFAULT_CLOUDFLARE_WORKER_NAME).toBe("mstar-inspector");
-  });
-
   test("PKCS#1 wraps to PKCS#8, byte-identical to the pipeline implementation", () => {
     const wrapped = normalizePrivateKey(FAKE_PEM);
     // The dashboard copy must never drift from the pipeline one (Q2 route
@@ -1047,49 +1077,60 @@ describe("dashboard private-key normalization (private-key.ts)", () => {
     ).toThrow();
   });
 
-  test(".env.example documents the Cloudflare commit env vars and the default worker name", async () => {
+  test("AC-B5-nocf: CLOUDFLARE_* is gone from the dashboard deps (env.ts + .env.example); the encryption key remains", async () => {
     const example = await Bun.file(new URL("../../.env.example", import.meta.url)).text();
-    expect(example).toContain("CLOUDFLARE_API_TOKEN");
-    expect(example).toContain("CLOUDFLARE_ACCOUNT_ID");
-    expect(example).toContain(DEFAULT_CLOUDFLARE_WORKER_NAME);
+    expect(example).not.toContain("CLOUDFLARE_");
+    expect(example).toContain("DASHBOARD_ENCRYPTION_KEY");
+    const envTs = await Bun.file(new URL("../../src/worker/env.ts", import.meta.url)).text();
+    expect(envTs).not.toContain("CLOUDFLARE_");
+    // The dashboard module surface carries no Cloudflare API path either.
+    const manifestTs = await Bun.file(new URL("../../src/dashboard/manifest.ts", import.meta.url)).text();
+    expect(manifestTs).not.toContain("api.cloudflare.com");
+    expect(manifestTs).not.toContain("secrets-bulk");
   });
 });
 
-describe("/dashboard manifest commit (plan 11 Task 2)", () => {
+describe("/dashboard manifest commit (plan 13 B5 T3: manifest → D1, zero CF API)", () => {
   const origFetch = globalThis.fetch;
   afterEach(() => {
     globalThis.fetch = origFetch;
   });
 
-  const CF_TOKEN = "cf-api-token";
-  const CF_ACCOUNT = "cf-account-id";
+  /**
+   * Recording fetch stub: EVERY upstream URL is captured, and anything that
+   * is not the pinned GitHub conversion endpoint throws. The D1 write is
+   * local, so the commit phase must record ZERO calls — this is the
+   * no-Cloudflare-API + no-unexpected-upstream contract for every path.
+   */
+  function stubFetchRecording(): { urls: string[] } {
+    const urls: string[] = [];
+    globalThis.fetch = (async (url: unknown) => {
+      urls.push(String(url));
+      throw new Error(`no upstream may be called on this path (${String(url)})`);
+    }) as unknown as typeof fetch;
+    return { urls };
+  }
+
+  function stubGitHubConversionOnly(): { urls: string[] } {
+    const urls: string[] = [];
+    globalThis.fetch = (async (url: unknown) => {
+      urls.push(String(url));
+      if (String(url) === "https://api.github.com/app-manifests/manifest-code/conversions") {
+        return new Response(JSON.stringify(CONVERSION), { status: 201 });
+      }
+      throw new Error(`unexpected upstream: ${String(url)}`);
+    }) as unknown as typeof fetch;
+    return { urls };
+  }
+
+  const freshHold = () =>
+    createHoldValue(CONVERSION, "octocat", SESSION_SECRET, buildAppSlug("octocat"));
 
   function commitEnv(overrides: Partial<Env> = {}): Env {
-    return makeEnv({
-      CLOUDFLARE_API_TOKEN: CF_TOKEN,
-      CLOUDFLARE_ACCOUNT_ID: CF_ACCOUNT,
-      ...overrides,
-    });
+    // makeEnv seeds the default members (octocat is an admin) and the
+    // production-shaped plan-13 DB — the commit writes github_apps.
+    return makeEnv({ DASHBOARD_ENCRYPTION_KEY: TEST_ENCRYPTION_KEY, ...overrides });
   }
-
-  /** Records every fetch call and serves a canned Cloudflare response. */
-  function stubCloudflareFetch(status = 200) {
-    const calls: { url: string; method: string; headers: Record<string, string>; body: string }[] = [];
-    globalThis.fetch = (async (url: unknown, init?: RequestInit) => {
-      calls.push({
-        url: String(url),
-        method: init?.method ?? "GET",
-        headers: { ...((init?.headers ?? {}) as Record<string, string>) },
-        body: String(init?.body ?? ""),
-      });
-      return new Response(JSON.stringify({ success: status < 400, errors: [], messages: [] }), {
-        status,
-      });
-    }) as unknown as typeof fetch;
-    return calls;
-  }
-
-  const freshHold = () => createHoldValue(CONVERSION, "octocat", SESSION_SECRET);
 
   /** POST /dashboard/manifest/commit; holdValue=null omits the hold cookie. */
   async function doCommit(args: {
@@ -1097,7 +1138,6 @@ describe("/dashboard manifest commit (plan 11 Task 2)", () => {
     withSession?: boolean;
     sessionLogin?: string;
     holdValue?: string | null;
-    body?: string;
   }): Promise<Response> {
     const cookies: string[] = [];
     if (args.withSession ?? true) {
@@ -1109,11 +1149,7 @@ describe("/dashboard manifest commit (plan 11 Task 2)", () => {
     return worker.fetch(
       new Request("https://worker.local/dashboard/manifest/commit", {
         method: "POST",
-        headers: {
-          Cookie: cookies.join("; "),
-          "Content-Type": "application/x-www-form-urlencoded",
-        },
-        body: args.body ?? "confirm=overwrite",
+        headers: { Cookie: cookies.join("; ") },
       }),
       args.env ?? commitEnv(),
     );
@@ -1126,7 +1162,7 @@ describe("/dashboard manifest commit (plan 11 Task 2)", () => {
     ).toBe(true);
   }
 
-  /** Retryable outcomes (400/500/502) must NOT burn the hold (qc3 F-01). */
+  /** Retryable outcomes (500) must NOT burn the hold (qc3 F-01 discipline). */
   function expectHoldKept(res: Response): void {
     const cookies = res.headers.getSetCookie();
     expect(
@@ -1134,61 +1170,26 @@ describe("/dashboard manifest commit (plan 11 Task 2)", () => {
     ).toBe(false);
   }
 
-  test("without confirm=overwrite → 400, zero Cloudflare requests, hold KEPT for retry", async () => {
-    const calls = stubCloudflareFetch();
-    const warns = spyOnWarn();
-    for (const body of ["", "confirm=yes"]) {
-      const res = await doCommit({ holdValue: await freshHold(), body });
-      expect(res.status).toBe(400);
-      expectHoldKept(res);
-    }
-    expect(calls).toHaveLength(0);
-    const entry = JSON.parse(warns[0] ?? "") as Record<string, unknown>;
-    expect(entry.event).toBe("dashboard_manifest");
-    expect(entry.stage).toBe("commit");
-    expect(entry.reason).toBe("confirm_missing");
-  });
-
-  test("a hold kept by a retryable 400 still commits on retry", async () => {
-    const calls = stubCloudflareFetch(200);
-    const hold = await freshHold();
-    const rejected = await doCommit({ holdValue: hold, body: "" });
-    expect(rejected.status).toBe(400);
-    expectHoldKept(rejected);
-    expect(calls).toHaveLength(0);
-    // Same hold, checkbox ticked this time → the write goes through.
-    const retried = await doCommit({ holdValue: hold });
-    expect(retried.status).toBe(200);
-    expect(calls).toHaveLength(1);
-    expectHoldExpired(retried); // burned on success
-  });
-
-  test("logged out → 302 to login, zero writes, hold kept (operator can sign back in)", async () => {
-    const calls = stubCloudflareFetch();
-    const res = await doCommit({ withSession: false, holdValue: await freshHold() });
-    expect(res.status).toBe(302);
-    expect(res.headers.get("Location")).toBe("/dashboard/login");
-    expect(calls).toHaveLength(0);
-    expectHoldKept(res);
-  });
-
-  test("missing hold cookie → 302 back to the flow start, zero writes, hold cleared", async () => {
-    const calls = stubCloudflareFetch();
+  test("missing hold cookie → 302 back to the flow start, zero writes, zero fetch, hold cleared", async () => {
+    const rec = stubFetchRecording();
+    const env = commitEnv();
     const res = await doCommit({ holdValue: null });
     expect(res.status).toBe(302);
     expect(res.headers.get("Location")).toBe("/dashboard");
-    expect(calls).toHaveLength(0);
+    expect(rec.urls).toHaveLength(0);
     expectHoldExpired(res);
+    expect(appRowCount(env)).toBe(0);
   });
 
   test("tampered or expired hold cookie → 302 back to the flow start, zero writes", async () => {
-    const calls = stubCloudflareFetch();
+    const rec = stubFetchRecording();
     const hold = await freshHold();
     const tampered = `${hold.slice(0, 20)}${hold[20] === "A" ? "B" : "A"}${hold.slice(21)}`;
     const expired = await createHoldValue(
       CONVERSION,
       "octocat",
       SESSION_SECRET,
+      buildAppSlug("octocat"),
       Date.now() - (MANIFEST_HOLD_MAX_AGE_SEC + 100) * 1000,
     );
     for (const holdValue of [tampered, expired]) {
@@ -1197,16 +1198,16 @@ describe("/dashboard manifest commit (plan 11 Task 2)", () => {
       expect(res.headers.get("Location")).toBe("/dashboard");
       expectHoldExpired(res); // bad hold is burned, not retried
     }
-    expect(calls).toHaveLength(0);
+    expect(rec.urls).toHaveLength(0);
   });
 
   test("hold.login ≠ session.login → 403, zero writes, hold burned", async () => {
-    const calls = stubCloudflareFetch();
+    const rec = stubFetchRecording();
     const warns = spyOnWarn();
     // Hold minted for "octocat" presented by a different logged-in operator.
     const res = await doCommit({ holdValue: await freshHold(), sessionLogin: "mallory" });
     expect(res.status).toBe(403);
-    expect(calls).toHaveLength(0);
+    expect(rec.urls).toHaveLength(0);
     expectHoldExpired(res);
     const entry = JSON.parse(warns[0] ?? "") as Record<string, unknown>;
     expect(entry.event).toBe("dashboard_manifest");
@@ -1217,115 +1218,254 @@ describe("/dashboard manifest commit (plan 11 Task 2)", () => {
     expect(html).not.toContain(FAKE_WEBHOOK_SECRET);
   });
 
-  test("missing CLOUDFLARE_API_TOKEN or CLOUDFLARE_ACCOUNT_ID → 5xx, zero writes, hold KEPT", async () => {
-    const calls = stubCloudflareFetch();
-    const noToken = await doCommit({
+  test("missing DASHBOARD_ENCRYPTION_KEY → 500 fail-closed, zero rows, zero fetch, hold KEPT (AC-SEC)", async () => {
+    const rec = stubFetchRecording();
+    const res = await doCommit({
+      env: commitEnv({ DASHBOARD_ENCRYPTION_KEY: undefined }),
       holdValue: await freshHold(),
-      env: makeEnv({ CLOUDFLARE_ACCOUNT_ID: CF_ACCOUNT }),
     });
-    expect(noToken.status).toBe(500);
-    expectHoldKept(noToken);
-    const noAccount = await doCommit({
-      holdValue: await freshHold(),
-      env: makeEnv({ CLOUDFLARE_API_TOKEN: CF_TOKEN }),
-    });
-    expect(noAccount.status).toBe(500);
-    expectHoldKept(noAccount);
-    expect(calls).toHaveLength(0);
-    const body = await noToken.text();
+    expect(res.status).toBe(500);
+    expectHoldKept(res); // retryable: fix the env and resubmit
+    expect(rec.urls).toHaveLength(0);
+    const body = await res.text();
+    expect(body).toContain("DASHBOARD_ENCRYPTION_KEY");
     expect(body).not.toContain("BEGIN");
     expect(body).not.toContain(FAKE_WEBHOOK_SECRET);
   });
 
-  test("a hold kept by a retryable 500 still commits once the env is fixed", async () => {
-    const calls = stubCloudflareFetch(200);
-    const hold = await freshHold();
-    const misconfigured = await doCommit({
-      holdValue: hold,
-      env: makeEnv({ CLOUDFLARE_ACCOUNT_ID: CF_ACCOUNT }),
+  test("migrations not applied (no github_apps table) → 500 fail-closed, hold KEPT", async () => {
+    const rec = stubFetchRecording();
+    // through=3: a pre-plan-13 DB (users only — no github_apps table).
+    const res = await doCommit({
+      env: {
+        ...baseEnv({ DASHBOARD_ENCRYPTION_KEY: TEST_ENCRYPTION_KEY }),
+        DB: seededDashboardD1(3),
+      } as Env,
+      holdValue: await freshHold(),
     });
-    expect(misconfigured.status).toBe(500);
-    expectHoldKept(misconfigured);
-    expect(calls).toHaveLength(0);
-    // Same hold against a configured Worker → the write goes through.
-    const retried = await doCommit({ holdValue: hold });
-    expect(retried.status).toBe(200);
-    expect(calls).toHaveLength(1);
-    expectHoldExpired(retried);
+    expect(res.status).toBe(500);
+    expectHoldKept(res);
+    expect(rec.urls).toHaveLength(0);
   });
 
-  test("confirm → exactly one secrets-bulk PATCH writing exactly the three secrets, PKCS#8 PEM", async () => {
-    const calls = stubCloudflareFetch(200);
-    const res = await doCommit({ holdValue: await freshHold() });
-    expect(res.status).toBe(200);
-    // AC-S11-secrets / L6: ONE PATCH to the locked bulk endpoint (L8 base+auth).
-    expect(calls).toHaveLength(1);
-    const call = calls[0]!;
-    expect(call.method).toBe("PATCH");
-    expect(call.url).toBe(
-      `https://api.cloudflare.com/client/v4/accounts/${CF_ACCOUNT}/workers/scripts/${DEFAULT_CLOUDFLARE_WORKER_NAME}/secrets-bulk`,
+  test("e2e start→callback→commit: encrypted github_apps row, PEM verbatim (L1), AAD rowKey = row PK, summary slug/webhook URL/id, ZERO api.cloudflare.com calls, no secrets in HTML", async () => {
+    const rec = stubGitHubConversionOnly();
+    const env = commitEnv();
+    const session = await createSessionValue("octocat", null, SESSION_SECRET);
+    // 1. start: mint the slug-carrying state + manifest with the per-App hook URL.
+    const start = await worker.fetch(
+      new Request("https://worker.local/dashboard/manifest/start", {
+        method: "POST",
+        headers: { Cookie: `${SESSION_COOKIE}=${session}` },
+      }),
+      env,
     );
-    expect(call.headers.Authorization).toBe(`Bearer ${CF_TOKEN}`);
-    const payload = JSON.parse(call.body) as {
-      secrets: Record<string, { name: string; text: string; type: string }>;
-    };
-    // Exactly the three names — never REVIEW_ENABLED or model keys.
-    expect(Object.keys(payload.secrets).sort()).toEqual(["APP_ID", "PRIVATE_KEY", "WEBHOOK_SECRET"]);
-    expect(call.body).not.toContain("REVIEW_ENABLED");
-    expect(payload.secrets.APP_ID).toEqual({
-      name: "APP_ID",
-      text: String(CONVERSION.id),
-      type: "secret_text",
-    });
-    expect(payload.secrets.WEBHOOK_SECRET).toEqual({
-      name: "WEBHOOK_SECRET",
-      text: FAKE_WEBHOOK_SECRET,
-      type: "secret_text",
-    });
-    // PEM normalized: PKCS#1 → PKCS#8 wrap per normalizePrivateKey.
-    expect(payload.secrets.PRIVATE_KEY).toEqual({
-      name: "PRIVATE_KEY",
-      text: normalizePrivateKey(FAKE_PEM),
-      type: "secret_text",
-    });
-    expect(payload.secrets.PRIVATE_KEY?.text.startsWith("-----BEGIN PRIVATE KEY-----")).toBe(true);
-    // Hold cookie is single-use: expired on success too.
-    expectHoldExpired(res);
-    // Locked success copy; AC-S11-html: no PEM / webhook_secret in the HTML.
-    const html = await res.text();
-    expect(html).toContain(`GitHub App <span class="id">${CONVERSION.id}</span> credentials stored.`);
-    expect(html).toContain("Credentials take effect as the new Worker version rolls out — deployed automatically, no manual redeploy step.");
+    expect(start.status).toBe(200);
+    const stateCookie =
+      start.headers.getSetCookie().find((c) => c.startsWith(`${MANIFEST_STATE_COOKIE}=`)) ?? "";
+    const state = (stateCookie.split(";")[0] ?? "").slice(MANIFEST_STATE_COOKIE.length + 1);
+    // 2. callback: the GitHub conversion runs; hold carries the slug.
+    const callback = await worker.fetch(
+      dashboardRequest(
+        `/dashboard/manifest/callback?code=manifest-code&state=${state}`,
+        `${SESSION_COOKIE}=${session}; ${MANIFEST_STATE_COOKIE}=${state}`,
+      ),
+      env,
+    );
+    expect(callback.status).toBe(200);
+    const holdCookie =
+      callback.headers.getSetCookie().find((c) => c.startsWith(`${MANIFEST_HOLD_COOKIE}=`)) ?? "";
+    const holdValue = (holdCookie.split(";")[0] ?? "").slice(MANIFEST_HOLD_COOKIE.length + 1);
+    // 3. commit: write the D1 row — zero upstream calls on this phase.
+    const githubCallsBefore = rec.urls.length;
+    const committed = await worker.fetch(
+      new Request("https://worker.local/dashboard/manifest/commit", {
+        method: "POST",
+        headers: { Cookie: `${SESSION_COOKIE}=${session}; ${MANIFEST_HOLD_COOKIE}=${holdValue}` },
+      }),
+      env,
+    );
+    expect(committed.status).toBe(200);
+    expect(rec.urls.length).toBe(githubCallsBefore); // commit phase: ZERO fetch
+    // AC-B5-nocf: no api.cloudflare.com anywhere in the whole flow.
+    for (const url of rec.urls) expect(url).not.toContain("api.cloudflare.com");
+    expect(rec.urls).toEqual([
+      "https://api.github.com/app-manifests/manifest-code/conversions",
+    ]);
+    // Hold burned on success.
+    expectHoldExpired(committed);
+    // The row: exactly one, slug = the state-carried slug, encrypted columns.
+    const db = dbOf(env);
+    const rows = db.raw.query("SELECT * FROM github_apps").all() as Array<{
+      id: string;
+      slug: string;
+      github_app_id: number;
+      name: string;
+      private_key_enc: string;
+      webhook_secret_enc: string;
+      created_by: string;
+      status: string;
+      deleted_at: string | null;
+    }>;
+    expect(rows).toHaveLength(1);
+    const row = rows[0]!;
+    expect(row.slug).toBe("mstar-inspector-octocat");
+    expect(row.github_app_id).toBe(CONVERSION.id);
+    expect(row.name).toBe(CONVERSION.name);
+    expect(row.created_by).toBe("octocat");
+    expect(row.status).toBe("active");
+    expect(row.deleted_at).toBeNull();
+    expect(row.private_key_enc.startsWith("v1.primary.")).toBe(true);
+    expect(row.webhook_secret_enc.startsWith("v1.primary.")).toBe(true);
+    // Lock L1: ciphertext only in D1; decrypt with the AAD rowKey = row PK.
+    const box = createSecretbox(TEST_ENCRYPTION_KEY);
+    expect(
+      await box.decryptSecret(row.private_key_enc, `github_apps.private_key_enc:${row.id}`),
+    ).toBe(CONVERSION.pem);
+    expect(
+      await box.decryptSecret(row.webhook_secret_enc, `github_apps.webhook_secret_enc:${row.id}`),
+    ).toBe(FAKE_WEBHOOK_SECRET);
+    // L1 storage口径: the PEM is stored VERBATIM — NOT PKCS#8-normalized
+    // (normalization stays at createReviewCommenter construction).
+    expect(row.private_key_enc.startsWith("v1.")).toBe(true);
+    const decryptedPem = await box.decryptSecret(
+      row.private_key_enc,
+      `github_apps.private_key_enc:${row.id}`,
+    );
+    expect(decryptedPem.startsWith("-----BEGIN RSA PRIVATE KEY-----")).toBe(true);
+    expect(decryptedPem).not.toBe(normalizePrivateKey(FAKE_PEM));
+    // Summary HTML: slug + webhook URL + numeric id; never the secrets.
+    const html = await committed.text();
+    expect(html).toContain("mstar-inspector-octocat");
+    expect(html).toContain("https://worker.local/webhook/mstar-inspector-octocat");
+    expect(html).toContain(`<span class="id">${CONVERSION.id}</span>`);
     expect(html).not.toContain("BEGIN");
     expect(html).not.toContain(FAKE_PEM);
     expect(html).not.toContain(FAKE_WEBHOOK_SECRET);
   });
 
-  test("CLOUDFLARE_WORKER_NAME override changes the script path", async () => {
-    const calls = stubCloudflareFetch(200);
-    const res = await doCommit({
-      holdValue: await freshHold(),
-      env: commitEnv({ CLOUDFLARE_WORKER_NAME: "custom-worker" }),
+  test("slug collision at start: the taken base slug is pre-resolved with a suffix and the row lands on the SAME slug (webhook URL displayed matches route)", async () => {
+    const env = commitEnv();
+    const db = dbOf(env);
+    // Someone already owns the login-derived base slug.
+    await envDb(env).createApp({
+      id: crypto.randomUUID(),
+      slug: "mstar-inspector-octocat",
+      githubAppId: 999,
+      name: "occupied",
+      privateKeyEnc: "v1.primary.aXZpdi.cHJldGV4dA==",
+      webhookSecretEnc: "v1.primary.aXZpdi.cHJldGV4dA==",
+      createdBy: "someone-else",
     });
-    expect(res.status).toBe(200);
-    expect(calls[0]?.url).toBe(
-      `https://api.cloudflare.com/client/v4/accounts/${CF_ACCOUNT}/workers/scripts/custom-worker/secrets-bulk`,
+    const session = await createSessionValue("octocat", null, SESSION_SECRET);
+    const start = await worker.fetch(
+      new Request("https://worker.local/dashboard/manifest/start", {
+        method: "POST",
+        headers: { Cookie: `${SESSION_COOKIE}=${session}` },
+      }),
+      env,
     );
+    const body = await start.text();
+    const field = /name="manifest" value="([^"]*)"/.exec(body)?.[1] ?? "";
+    const manifest = JSON.parse(
+      field
+        .replaceAll("&#39;", "'")
+        .replaceAll("&quot;", '"')
+        .replaceAll("&gt;", ">")
+        .replaceAll("&lt;", "<")
+        .replaceAll("&amp;", "&"),
+    ) as { hook_attributes: { url: string } };
+    const startUrl = manifest.hook_attributes.url;
+    expect(startUrl).not.toBe("https://worker.local/webhook/mstar-inspector-octocat");
+    expect(startUrl.startsWith("https://worker.local/webhook/mstar-inspector-octocat-")).toBe(true);
+    // Drive callback + commit with the state that carries the suffixed slug.
+    const stateCookie =
+      start.headers.getSetCookie().find((c) => c.startsWith(`${MANIFEST_STATE_COOKIE}=`)) ?? "";
+    const state = (stateCookie.split(";")[0] ?? "").slice(MANIFEST_STATE_COOKIE.length + 1);
+    stubGitHubConversionOnly();
+    const callback = await worker.fetch(
+      dashboardRequest(
+        `/dashboard/manifest/callback?code=manifest-code&state=${state}`,
+        `${SESSION_COOKIE}=${session}; ${MANIFEST_STATE_COOKIE}=${state}`,
+      ),
+      env,
+    );
+    const holdCookie =
+      callback.headers.getSetCookie().find((c) => c.startsWith(`${MANIFEST_HOLD_COOKIE}=`)) ?? "";
+    const holdValue = (holdCookie.split(";")[0] ?? "").slice(MANIFEST_HOLD_COOKIE.length + 1);
+    const committed = await doCommit({ env, holdValue });
+    expect(committed.status).toBe(200);
+    const rows = db.raw.query("SELECT slug, github_app_id FROM github_apps WHERE github_app_id = ?").all(CONVERSION.id) as Array<{ slug: string; github_app_id: number }>;
+    expect(rows).toHaveLength(1);
+    // The committed slug equals the URL the manifest registered with GitHub.
+    expect(`https://worker.local/webhook/${rows[0]!.slug}`).toBe(startUrl);
+    const html = await committed.text();
+    expect(html).toContain(rows[0]!.slug);
+    expect(html).toContain(startUrl);
   });
 
-  test("Cloudflare 403 (token misconfiguration) → 502 error page, one request, no secrets in HTML", async () => {
-    const calls = stubCloudflareFetch(403);
-    const warns = spyOnWarn();
-    const res = await doCommit({ holdValue: await freshHold() });
-    expect(res.status).toBe(502);
-    expect(calls).toHaveLength(1);
-    expectHoldKept(res); // CF/network failure must not burn the hold (qc3 F-01)
-    const entry = JSON.parse(warns[0] ?? "") as Record<string, unknown>;
-    expect(entry.stage).toBe("secret_write");
-    expect(entry.reason).toBe("http_error");
-    expect(entry.cf_status).toBe(403);
+  test("commit-time slug race (row appeared after start) → INSERT retries with a fresh suffix and succeeds", async () => {
+    const env = commitEnv();
+    const db = dbOf(env);
+    // Hold carries the base slug as if start had seen a free namespace.
+    const holdValue = await createHoldValue(
+      CONVERSION,
+      "octocat",
+      SESSION_SECRET,
+      "mstar-inspector-octocat",
+    );
+    // …but the slug got taken before the commit landed (the race).
+    await envDb(env).createApp({
+      id: crypto.randomUUID(),
+      slug: "mstar-inspector-octocat",
+      githubAppId: 999,
+      name: "raced",
+      privateKeyEnc: "v1.primary.aXZpdi.cHJldGV4dA==",
+      webhookSecretEnc: "v1.primary.aXZpdi.cHJldGV4dA==",
+      createdBy: "someone-else",
+    });
+    const res = await doCommit({ env, holdValue });
+    expect(res.status).toBe(200);
+    const rows = db.raw.query("SELECT slug FROM github_apps WHERE github_app_id = ?").all(CONVERSION.id) as Array<{ slug: string }>;
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.slug).not.toBe("mstar-inspector-octocat");
+    expect(rows[0]!.slug.startsWith("mstar-inspector-octocat-")).toBe(true);
+    // The success page shows the FINAL slug's webhook URL, not the stale one.
     const html = await res.text();
+    expect(html).toContain(`https://worker.local/webhook/${rows[0]!.slug}`);
+    expect(html).not.toContain("webhook/mstar-inspector-octocat<");
+  });
+
+  test("github_app_id already connected → 409, zero new rows, hold burned (non-retryable)", async () => {
+    const rec = stubFetchRecording();
+    const env = commitEnv();
+    await envDb(env).createApp({
+      id: crypto.randomUUID(),
+      slug: "mstar-inspector-earlier",
+      githubAppId: CONVERSION.id,
+      name: "earlier",
+      privateKeyEnc: "v1.primary.aXZpdi.cHJldGV4dA==",
+      webhookSecretEnc: "v1.primary.aXZpdi.cHJldGV4dA==",
+      createdBy: "someone-else",
+    });
+    const res = await doCommit({ env, holdValue: await freshHold() });
+    expect(res.status).toBe(409);
+    expectHoldExpired(res);
+    expect(rec.urls).toHaveLength(0);
+    expect(appRowCount(env)).toBe(1);
+    const html = await res.text();
+    expect(html).toContain("already connected");
     expect(html).not.toContain("BEGIN");
     expect(html).not.toContain(FAKE_WEBHOOK_SECRET);
+  });
+
+  test("logged out → 302 to login, zero writes, hold kept (operator can sign back in)", async () => {
+    const rec = stubFetchRecording();
+    const res = await doCommit({ withSession: false, holdValue: await freshHold() });
+    expect(res.status).toBe(302);
+    expect(res.headers.get("Location")).toBe("/dashboard/login");
+    expect(rec.urls).toHaveLength(0);
+    expectHoldKept(res);
   });
 });
 
@@ -1402,26 +1542,42 @@ describe("existing routes unaffected", () => {
   });
 });
 
-// --- plan 12 T1: D1 fixture + dashboard membership --------------------------
+// --- plan 12 T1 + plan 13 T3: D1 fixture + dashboard membership --------------
 // Local mirror of tests/store/helpers.ts createTestD1 (which pins 0001+0002
-// only and sits outside this plan's file set): the users migration must
-// apply on a DB that ALREADY has 0001/0002 rows, so the fixture seeds a
-// review row between 0002 and 0003 (plan 12 T1 AC).
+// and sits outside this plan's file set): migrations apply over a DB that
+// ALREADY holds rows, so the fixture seeds a review row between 0002 and
+// 0003 (plan 12 T1 AC). Plan 13 B5 extends the production shape through
+// 0005 — /dashboard routes (manifest start/commit, apps UI) read/write
+// github_apps — with a `through` index kept for pre-plan-13 DB premises.
 
 function applyMigrationFile(db: Database, name: string): void {
   db.exec(readFileSync(join(import.meta.dir, "../../migrations", name), "utf8"));
 }
 
-function createDashboardTestD1(): DashboardD1 & { raw: Database } {
+const DASHBOARD_MIGRATION_SEQUENCE = [
+  "0001_reviews.sql",
+  "0002_mstar_review_v1.sql",
+  "0003_dashboard_users.sql",
+  "0004_github_apps.sql",
+  "0005_reviews_app_id.sql",
+] as const;
+
+function createDashboardTestD1(
+  through: number = DASHBOARD_MIGRATION_SEQUENCE.length,
+): DashboardD1 & { raw: Database } {
   const db = new Database(":memory:");
   db.exec("PRAGMA foreign_keys = ON;");
-  applyMigrationFile(db, "0001_reviews.sql");
-  applyMigrationFile(db, "0002_mstar_review_v1.sql");
-  db.exec(
-    `INSERT INTO reviews (id, installation_id, owner, repo, pr_number, head_sha, verdict, summary_md)
-     VALUES ('review-1', 123, 'acme', 'widgets', 42, '0123456789abcdef0123456789abcdef01234567', 'comment', 'No blocking issues.')`,
-  );
-  applyMigrationFile(db, "0003_dashboard_users.sql");
+  for (const [index, name] of DASHBOARD_MIGRATION_SEQUENCE.entries()) {
+    if (index >= through) break;
+    // The seeded review row lands between 0002 and 0003 (see block comment).
+    if (index === 2) {
+      db.exec(
+        `INSERT INTO reviews (id, installation_id, owner, repo, pr_number, head_sha, verdict, summary_md)
+         VALUES ('review-1', 123, 'acme', 'widgets', 42, '0123456789abcdef0123456789abcdef01234567', 'comment', 'No blocking issues.')`,
+      );
+    }
+    applyMigrationFile(db, name);
+  }
   return {
     raw: db,
     prepare(query: string): DashboardD1Statement {
@@ -1455,6 +1611,22 @@ function createDashboardTestD1(): DashboardD1 & { raw: Database } {
 
 function userCount(db: DashboardD1 & { raw: Database }): number {
   return (db.raw.query("SELECT COUNT(*) AS n FROM users").get() as { n: number }).n;
+}
+
+type DashboardTestDb = DashboardD1 & { raw: Database };
+
+/** Commit-flow envs carry a full plan-13 DB — pull it back out for asserts. */
+function dbOf(env: Env): DashboardTestDb {
+  return (env as Env & { DB: DashboardTestDb }).DB;
+}
+
+function appRowCount(env: Env): number {
+  return (dbOf(env).raw.query("SELECT COUNT(*) AS n FROM github_apps").get() as { n: number }).n;
+}
+
+/** Apps store over the env's DB (seeding colliding rows before a commit). */
+function envDb(env: Env) {
+  return createAppsStore(dbOf(env));
 }
 
 /**

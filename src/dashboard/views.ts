@@ -100,7 +100,8 @@ button[disabled] {
   color: var(--amber-700);
 }
 /* Constructive primary (Login / Create GitHub App) = blue-700; destructive
-   submit (Overwrite secrets) = red-700. Native buttons, no client JS. */
+   submits (member Remove, App Delete) = red-700; reversible per-row App
+   actions = secondary gray. Native buttons, no client JS. */
 button.primary, button.danger {
   appearance: none;
   border: 1px solid transparent;
@@ -128,6 +129,33 @@ a.cancel { color: var(--gray-1000); margin-left: 12px; } /* spacing-3 */
 .members .meta, .members .you { color: var(--gray-900); font-size: 14px; } /* copy-14 */
 .members .you { margin-left: auto; }
 .members form { margin: 0 0 0 auto; } /* inline remove control overrides the section form rhythm */
+/* Apps list (plan 13 B5 T3): same single-column rhythm as members; status
+   badge reuses the gray (.status) / amber (.note) tokens; per-row manage
+   controls sit right-aligned. button.secondary reuses the existing gray
+   border token for reversible actions (no new design token). */
+.apps { list-style: none; margin: 16px 0 0; padding: 0; } /* spacing-4 */
+.apps li {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 12px; /* spacing-3 */
+  padding: 8px 0; /* spacing-2 */
+  border-top: 1px solid var(--background-200);
+}
+.apps .meta { color: var(--gray-900); font-size: 14px; } /* copy-14 */
+.apps .controls { margin-left: auto; display: flex; gap: 8px; } /* spacing-2 */
+.apps form { margin: 0; }
+.apps .empty { margin-top: 16px; } /* spacing-4 */
+button.secondary {
+  appearance: none;
+  border: 1px solid var(--gray-900);
+  border-radius: var(--rounded-sm);
+  background: transparent;
+  color: var(--gray-1000);
+  padding: 8px 12px; /* spacing-2 / spacing-3 control rhythm */
+  font: inherit;
+  cursor: pointer;
+}
 label.field { display: block; margin: 16px 0 8px; } /* spacing-4 / spacing-2 */
 label.field input {
   display: block;
@@ -173,15 +201,17 @@ function placeholderSection(
 /**
  * Page header (IA: product name, GitHub identity, Logout — unchanged).
  * `adminNav` adds the admin-only Members entry (qc1/qc2 F-001 — spec § IA
- * row 1 / plan Target State "Admin sees Members section"); only the shell
- * passes it, so the link never appears mid-flow on manifest/members pages.
+ * row 1 / plan Target State "Admin sees Members section"). The Apps entry is
+ * member-visible (spec § Multi-App 契约: Apps 列表全员可见), so it renders
+ * for everyone ahead of the Members link; only the shell passes `adminNav`,
+ * so the link never appears mid-flow on manifest/members/apps pages.
  */
 function shellHeader(user: { login: string; name?: string }, adminNav = false): string {
   const display = user.name ? `${user.name} (${user.login})` : user.login;
   const members = adminNav ? ` · <a href="/dashboard/members">Members</a>` : "";
   return `<header>
     <h1>mstar-inspector</h1>
-    <span class="user">Signed in as ${escapeHtml(display)}${members} · <a href="/dashboard/logout">Logout</a></span>
+    <span class="user">Signed in as ${escapeHtml(display)} · <a href="/dashboard/apps">Apps</a>${members} · <a href="/dashboard/logout">Logout</a></span>
   </header>`;
 }
 
@@ -258,26 +288,28 @@ export function manifestStartPage(
 }
 
 /**
- * Overwrite confirm gate (B1, spec § 确认页文案 — locked copy): single
- * column, amber-700 warning, read-only summary, confirm checkbox, red-700
- * destructive submit. PEM / webhook_secret NEVER appear here.
+ * App summary confirm gate (B5 T3, spec § Multi-App 契约 — the B1
+ * overwrite-confirm semantics are GONE: nothing shared is overwritten, the
+ * commit writes a NEW github_apps row). Single column, read-only summary
+ * (name, numeric id, slug, webhook URL), amber-700 note, blue-700 primary
+ * submit. PEM / webhook_secret NEVER appear here.
  */
 export function manifestConfirmPage(
   user: { login: string; name?: string },
-  app: { id: number; name: string },
+  app: { id: number; name: string; slug: string; webhookUrl: string },
 ): string {
   return page(
-    "Confirm secret overwrite",
+    "Create GitHub App",
     `${shellHeader(user)}
   <main>
     <section class="enabled">
-      <h2>Store GitHub App credentials</h2>
-      <div class="banner warn" role="alert">This will overwrite the existing APP_ID, PRIVATE_KEY, and WEBHOOK_SECRET secrets on this Worker. Incoming webhooks will be verified with the new WEBHOOK_SECRET.</div>
-      <p>GitHub App <strong>${escapeHtml(app.name)}</strong> (id <span class="id">${app.id}</span>) is ready.
-      Review the warning above before storing its credentials on this Worker.</p>
+      <h2>Create GitHub App</h2>
+      <p>GitHub App <strong>${escapeHtml(app.name)}</strong> (id <span class="id">${app.id}</span>) is ready to connect.</p>
+      <p>It will be registered for this deployment as:</p>
+      <p class="status">Slug <strong>${escapeHtml(app.slug)}</strong> · webhook URL <strong>${escapeHtml(app.webhookUrl)}</strong></p>
+      <p class="note">Connecting delivers this App's pull_request and issue_comment webhooks to this Worker. Reviews stay fail-closed until the deployment's REVIEW_ENABLED kill-switch is turned on.</p>
       <form method="post" action="/dashboard/manifest/commit">
-        <label class="checkbox"><input type="checkbox" name="confirm" value="overwrite"> I understand that APP_ID, PRIVATE_KEY, and WEBHOOK_SECRET on this Worker will be overwritten.</label>
-        <button type="submit" class="danger">Overwrite secrets</button>
+        <button type="submit" class="primary">Create App</button>
         <a class="cancel" href="/dashboard">Cancel</a>
       </form>
     </section>
@@ -286,23 +318,25 @@ export function manifestConfirmPage(
 }
 
 /**
- * Manifest success surface (B1 Task 2, spec § 确认页文案 — locked copy):
- * gray-1000 + copy-16, tabular-nums App id, NO success green (spec §
- * DESIGN.md 意图). PEM / webhook_secret NEVER appear here.
+ * App summary success surface (B5 T3, spec § User-visible behavior 3):
+ * slug, webhook URL, numeric App id — gray-1000 + copy-16, tabular-nums id,
+ * NO success green (spec § DESIGN.md 意图). PEM / webhook_secret NEVER
+ * appear here; the displayed webhook URL is the row's own route.
  */
 export function manifestSuccessPage(
   user: { login: string; name?: string },
-  app: { id: number },
+  app: { id: number; name: string; slug: string; webhookUrl: string },
 ): string {
   return page(
-    "GitHub App credentials stored",
+    "GitHub App connected",
     `${shellHeader(user)}
   <main>
     <section class="enabled">
-      <h2>GitHub App setup complete</h2>
-      <p>GitHub App <span class="id">${app.id}</span> credentials stored.</p>
-      <p class="status">Credentials take effect as the new Worker version rolls out — deployed automatically, no manual redeploy step.</p>
-      <p><a href="/dashboard">Back to /dashboard</a></p>
+      <h2>GitHub App connected</h2>
+      <p>GitHub App <strong>${escapeHtml(app.name)}</strong> (id <span class="id">${app.id}</span>) is stored for this deployment.</p>
+      <p class="status">Slug: ${escapeHtml(app.slug)}<br>Webhook URL: ${escapeHtml(app.webhookUrl)}</p>
+      <p class="status">Pull requests in repos where this App is installed are reviewed by this Worker once REVIEW_ENABLED is on.</p>
+      <p><a href="/dashboard/apps">View Apps</a> · <a href="/dashboard">Back to /dashboard</a></p>
     </section>
   </main>`,
   );
@@ -374,10 +408,10 @@ export function forbiddenPage(login: string): string {
   );
 }
 
-/** Notice slot for membersPage: existing classes only, no new tokens. */
-export type MembersNotice = { kind: "success" | "warn" | "error"; message: string };
+/** Notice slot for membersPage / appsPage: existing classes only, no new tokens. */
+export type PageNotice = { kind: "success" | "warn" | "error"; message: string };
 
-function membersNoticeHtml(notice?: MembersNotice): string {
+function pageNoticeHtml(notice?: PageNotice): string {
   if (!notice) return "";
   if (notice.kind === "error") {
     return `<div class="banner" role="alert">${escapeHtml(notice.message)}</div>`;
@@ -396,7 +430,7 @@ function membersNoticeHtml(notice?: MembersNotice): string {
 export function membersPage(
   user: { login: string; name?: string },
   members: DashboardUserRow[],
-  notice?: MembersNotice,
+  notice?: PageNotice,
 ): string {
   const rows = members
     .map((m) => {
@@ -420,7 +454,7 @@ export function membersPage(
   <main>
     <section class="enabled">
       <h2>Members</h2>
-      ${membersNoticeHtml(notice)}
+      ${pageNoticeHtml(notice)}
       <ul class="members">
       ${rows}
       </ul>
@@ -429,6 +463,73 @@ export function membersPage(
           <input type="text" name="login" placeholder="e.g. octocat">
         </label>
         <button type="submit" class="primary">Invite member</button>
+      </form>
+    </section>
+  </main>`,
+  );
+}
+
+/**
+ * Apps list (plan 13 B5 T3, spec § IA): member-visible list of non-deleted
+ * Apps — slug, numeric App id, status (gray for active / amber for
+ * disabled), creator. Disable/enable + delete controls render ONLY where
+ * the viewer may manage (admin, or the App's creator — Clarify #6); the
+ * route enforces the same rule, so the UI never offers a control that can
+ * only 403. Delete is red-700 (soft-delete is irreversible from the UI);
+ * disable/enable are reversible (secondary gray). Create GitHub App is the
+ * blue-700 primary. Encrypted columns and row ids never render.
+ */
+export function appsPage(
+  user: { login: string; name?: string },
+  apps: Array<{
+    slug: string;
+    github_app_id: number;
+    status: string;
+    created_by: string;
+  }>,
+  viewer: { login: string; role: "admin" | "member" },
+  notice?: PageNotice,
+): string {
+  const rows = apps
+    .map((app) => {
+      const manageable = viewer.role === "admin" || app.created_by.toLowerCase() === viewer.login.toLowerCase();
+      const badge =
+        app.status === "disabled"
+          ? '<span class="note">disabled</span>'
+          : `<span class="status">${escapeHtml(app.status)}</span>`;
+      // Zero-JS action-path POSTs (spec § IA — architect-pinned route
+      // shapes; HTML forms cannot emit a DELETE verb).
+      const controls = manageable
+        ? `<span class="controls">${
+            app.status === "active"
+              ? `<form method="post" action="/dashboard/apps/${escapeHtml(app.slug)}/disable"><button type="submit" class="secondary">Disable</button></form>`
+              : `<form method="post" action="/dashboard/apps/${escapeHtml(app.slug)}/enable"><button type="submit" class="secondary">Enable</button></form>`
+          }
+          <form method="post" action="/dashboard/apps/${escapeHtml(app.slug)}/delete"><button type="submit" class="danger">Delete</button></form>
+        </span>`
+        : "";
+      return `<li>
+        <strong>${escapeHtml(app.slug)}</strong>
+        <span class="meta">App id <span class="id">${app.github_app_id}</span> · by ${escapeHtml(app.created_by)}</span>
+        ${badge}
+        ${controls}
+      </li>`;
+    })
+    .join("\n");
+  const empty = apps.length === 0 ? '<p class="status empty">No Apps yet — create one below.</p>' : "";
+  return page(
+    "Apps",
+    `${shellHeader(user)}
+  <main>
+    <section class="enabled">
+      <h2>Apps</h2>
+      ${pageNoticeHtml(notice)}
+      <ul class="apps">
+      ${rows}
+      </ul>
+      ${empty}
+      <form method="post" action="/dashboard/manifest/start">
+        <button type="submit" class="primary">Create GitHub App</button>
       </form>
     </section>
   </main>`,

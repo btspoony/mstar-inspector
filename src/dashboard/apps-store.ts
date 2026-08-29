@@ -31,8 +31,9 @@
  *     installation_id) and preserves the stored account_login when the
  *     incoming value is absent.
  *   - Timestamps are SQLite datetime('now') (UTC — the reviews.reviewed_at
- *     convention); ids are crypto.randomUUID() (the reviews.id caller-UUID
- *     convention).
+ *     convention); createApp ids are caller-supplied UUIDs (the reviews.id
+ *     caller-UUID convention — the T1 review pin: secretbox AAD rowKey MUST
+ *     equal the row PK, so the caller generates the id before encrypting).
  *   - UNIQUE / FK violations throw (fail-loud): duplicate slug,
  *     github_app_id, or (app_id, installation_id) pairs, and unknown app
  *     references are caller-visible errors, never swallowed.
@@ -61,6 +62,15 @@ export type GithubAppStatus = "active" | "disabled";
 
 /** Input for createApp — encrypted payloads are built by the caller. */
 export type CreateAppInput = {
+  /**
+   * Caller-supplied row PK (plan 13 T1 review pin): the caller encrypts
+   * private_key_enc / webhook_secret_enc with secretbox AAD
+   * `github_apps.<column>:<id>` BEFORE insert, so the id must exist first —
+   * the encrypted columns' AAD rowKey always equals this primary key. Not
+   * optional: a store-generated default would make the caller's AAD
+   * unknowable and the row undecryptable.
+   */
+  id: string;
   slug: string;
   githubAppId: number;
   name: string;
@@ -100,13 +110,14 @@ type AppsStoreD1 = {
 export function createAppsStore(db: AppsStoreD1) {
   return {
     /**
-     * Insert a new active app row (status 'active', deleted_at NULL). The
-     * id is generated here (crypto.randomUUID()); UNIQUE violations on slug
+     * Insert a new active app row (status 'active', deleted_at NULL) with
+     * the CALLER-SUPPLIED id as the row PK (T1 review pin — the caller's
+     * secretbox AAD rowKey is this id). UNIQUE violations on slug
      * or github_app_id throw — the manifest flow resolves slug collisions
      * with a retry suffix at the route layer.
      */
     async createApp(input: CreateAppInput): Promise<GithubAppRow> {
-      const id = crypto.randomUUID();
+      const id = input.id;
       await db
         .prepare(
           `INSERT INTO github_apps

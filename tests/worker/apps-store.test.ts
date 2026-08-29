@@ -24,6 +24,7 @@ import { join } from "node:path";
 import { describe, expect, test } from "bun:test";
 import { createTestD1 } from "../store/helpers";
 import { createAppsStore } from "../../src/dashboard/apps-store";
+import { createSecretbox } from "../../src/dashboard/secretbox";
 import type { D1Like } from "../../src/store/types";
 import type { CreateAppInput, GithubAppRow } from "../../src/dashboard/apps-store";
 
@@ -75,6 +76,9 @@ function store(db: D1Like) {
 }
 
 const APP_INPUT: CreateAppInput = {
+  // T1 review pin: the caller supplies the row PK so the secretbox AAD
+  // (github_apps.<column>:<id>) is computable BEFORE insert.
+  id: "018f4a2e-7c1d-4e5a-9b2f-3d6c8a1e4f70",
   slug: "mstar-inspector-octocat",
   githubAppId: 123456,
   name: "mstar-inspector-octocat",
@@ -84,7 +88,9 @@ const APP_INPUT: CreateAppInput = {
 };
 
 async function seedApp(db: D1Like, overrides: Partial<CreateAppInput> = {}): Promise<GithubAppRow> {
-  return store(db).createApp({ ...APP_INPUT, ...overrides });
+  // Every seed mints its OWN caller-supplied id (the T1 pin shape) unless
+  // the test explicitly pins one; APP_INPUT.id documents a fixed example.
+  return store(db).createApp({ ...APP_INPUT, id: crypto.randomUUID(), ...overrides });
 }
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -247,9 +253,13 @@ describe("migration 0005_reviews_app_id.sql (on a seeded production-shaped DB)",
 });
 
 describe("apps-store (createAppsStore)", () => {
-  test("createApp persists a full active row with a caller-UUID id and timestamps", async () => {
+  test("createApp persists a full active row with the CALLER-SUPPLIED id and timestamps", async () => {
     const db = createMigratedD1();
-    const app = await seedApp(db);
+    // Direct call (not seedApp) so the pinned APP_INPUT.id is the row PK.
+    const app = await store(db).createApp(APP_INPUT);
+    // T1 review pin: the row PK is exactly the caller's id — never a
+    // store-generated default that would break the pre-computed AAD.
+    expect(app.id).toBe(APP_INPUT.id);
     expect(UUID_RE.test(app.id)).toBe(true);
     expect(app.slug).toBe(APP_INPUT.slug);
     expect(app.github_app_id).toBe(APP_INPUT.githubAppId);
@@ -262,6 +272,34 @@ describe("apps-store (createAppsStore)", () => {
     expect(app.deleted_at).toBeNull();
     expect(app.created_at).toMatch(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/);
     expect(app.updated_at).toMatch(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/);
+  });
+
+  test("T1 review pin: secretbox AAD rowKey equals the row PK across create+read-back (end-to-end)", async () => {
+    const db = createMigratedD1();
+    const id = crypto.randomUUID();
+    const box = createSecretbox(Buffer.alloc(32, 9).toString("base64"));
+    // Caller encrypts BEFORE insert, with the caller-supplied id in the AAD.
+    const privateKeyEnc = await box.encryptSecret("pem-plaintext", `github_apps.private_key_enc:${id}`);
+    const row = await store(db).createApp({
+      ...APP_INPUT,
+      id,
+      slug: "aad-pin",
+      githubAppId: 424242,
+      privateKeyEnc,
+      webhookSecretEnc: "v1.primary.aXZpdi.cGxhY2Vob2xkZXI=",
+    });
+    // Read back and decrypt with the AAD derived from the RETURNED row PK:
+    // decryptSecret(row.private_key_enc, `github_apps.private_key_enc:${row.id}`)
+    // must succeed — the row is NOT undecryptable.
+    const readBack = await store(db).getAppById(row.id);
+    expect(readBack?.id).toBe(id);
+    expect(
+      await box.decryptSecret(readBack!.private_key_enc, `github_apps.private_key_enc:${readBack!.id}`),
+    ).toBe("pem-plaintext");
+    // And the tamper anchor: any other rowKey fails the GCM tag.
+    await expect(
+      box.decryptSecret(readBack!.private_key_enc, "github_apps.private_key_enc:not-this-row"),
+    ).rejects.toThrow(/AAD mismatch/);
   });
 
   test("getAppBySlug / getAppById round-trip; missing lookups return null", async () => {
