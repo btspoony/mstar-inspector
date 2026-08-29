@@ -6,6 +6,7 @@
  * breakpoints) — DESIGN.md is the SSOT; update both when tokens change.
  * No client JS, no build chain, no new dependencies.
  */
+import { PROVIDER_IDS, type MaskedProviderKey } from "./app-config-store";
 import type { DashboardUserRow } from "./users";
 
 /** Escape GitHub-sourced user data before HTML interpolation (XSS guard). */
@@ -146,6 +147,20 @@ a.cancel { color: var(--gray-1000); margin-left: 12px; } /* spacing-3 */
 .apps .controls { margin-left: auto; display: flex; gap: 8px; } /* spacing-2 */
 .apps form { margin: 0; }
 .apps .empty { margin-top: 16px; } /* spacing-4 */
+/* App settings key list (plan 14 B2 T2): the members/apps masked-list rhythm —
+   provider + masked tail only, per-row destructive Remove (red-700). Existing
+   tokens only (gray-900 meta, background-200 hairline) — no new tokens. */
+.keys { list-style: none; margin: 16px 0 0; padding: 0; } /* spacing-4 */
+.keys li {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 12px; /* spacing-3 */
+  padding: 8px 0; /* spacing-2 */
+  border-top: 1px solid var(--background-200);
+}
+.keys .meta { color: var(--gray-900); font-size: 14px; } /* copy-14 */
+.keys form { margin: 0 0 0 auto; } /* right-aligned remove control, same as .members */
 button.secondary {
   appearance: none;
   border: 1px solid var(--gray-900);
@@ -157,7 +172,7 @@ button.secondary {
   cursor: pointer;
 }
 label.field { display: block; margin: 16px 0 8px; } /* spacing-4 / spacing-2 */
-label.field input {
+label.field input, label.field select {
   display: block;
   margin-top: 8px; /* spacing-2 */
   border: 1px solid var(--gray-900);
@@ -167,6 +182,10 @@ label.field input {
   background: var(--background-100);
   color: var(--gray-1000);
 }
+/* Stacked single-column pages (App settings = two sections): the shell grid's
+   between-sections rhythm applies outside .sections too.
+   Page-local today — re-check this selector when adding pages with stacked sections. */
+main > section + section { margin-top: 32px; } /* spacing-8 */
 </style>`;
 
 function page(title: string, body: string): string {
@@ -227,9 +246,25 @@ function githubAppSection(): string {
 }
 
 /**
- * Logged-in shell: header + sections (B1: GitHub App live; BYOK/Review
- * placeholders). `isAdmin` renders the Members entry in the header — plain
- * Level 1 link (existing `header a` token), no new CSS (qc1/qc2 F-001).
+ * B2 delivered: Model keys are per-App, so this shell card is an entry point,
+ * not a placeholder — the copy states keys/models are configured per App and
+ * links to the Apps list, where members reach Settings on the Apps they
+ * manage. Existing Level 1 tokens only: enabled-card fill + a plain body
+ * link (same as the manifest success page) — no new CSS, no button.
+ */
+function modelKeysSection(): string {
+  return `<section class="enabled">
+    <h2>Model keys</h2>
+    <p>Provider keys and model chains are configured per App — each App's Settings manages its own keys, with the deployment's global keys as the fallback when an App has none.</p>
+    <p><a href="/dashboard/apps">Open the Apps list</a> to reach Settings on an App you manage.</p>
+  </section>`;
+}
+
+/**
+ * Logged-in shell: header + sections (B1: GitHub App live; B2: per-App
+ * Model keys entry point; Review stays a placeholder). `isAdmin` renders the
+ * Members entry in the header — plain Level 1 link (existing `header a`
+ * token), no new CSS (qc1/qc2 F-001).
  */
 export function dashboardPage(user: { login: string; name?: string }, isAdmin = false): string {
   return page(
@@ -238,12 +273,7 @@ export function dashboardPage(user: { login: string; name?: string }, isAdmin = 
   <main>
     <div class="sections">
       ${githubAppSection()}
-      ${placeholderSection(
-        "Model keys",
-        "Store a model provider key without local wrangler secret put.",
-        "Not in this iteration (B2).",
-        "Add model key",
-      )}
+      ${modelKeysSection()}
       ${placeholderSection(
         "Review",
         "Turn cloud reviews on or off (REVIEW_ENABLED).",
@@ -475,7 +505,9 @@ export function membersPage(
  * disabled), creator. Disable/enable + delete controls render ONLY where
  * the viewer may manage (admin, or the App's creator — Clarify #6); the
  * route enforces the same rule, so the UI never offers a control that can
- * only 403. Delete is red-700 (soft-delete is irreversible from the UI);
+ * only 403. The Settings entry (plan 14 B2 T2) rides the same manage rule —
+ * it links to the per-App BYOK page for exactly the rows the viewer could
+ * edit there. Delete is red-700 (soft-delete is irreversible from the UI);
  * disable/enable are reversible (secondary gray). Create GitHub App is the
  * blue-700 primary. Encrypted columns and row ids never render.
  */
@@ -500,7 +532,7 @@ export function appsPage(
       // Zero-JS action-path POSTs (spec § IA — architect-pinned route
       // shapes; HTML forms cannot emit a DELETE verb).
       const controls = manageable
-        ? `<span class="controls">${
+        ? `<span class="controls"><a href="/dashboard/apps/${escapeHtml(app.slug)}/settings">Settings</a>${
             app.status === "active"
               ? `<form method="post" action="/dashboard/apps/${escapeHtml(app.slug)}/disable"><button type="submit" class="secondary">Disable</button></form>`
               : `<form method="post" action="/dashboard/apps/${escapeHtml(app.slug)}/enable"><button type="submit" class="secondary">Enable</button></form>`
@@ -530,6 +562,94 @@ export function appsPage(
       ${empty}
       <form method="post" action="/dashboard/manifest/start">
         <button type="submit" class="primary">Create GitHub App</button>
+      </form>
+    </section>
+  </main>`,
+  );
+}
+
+/**
+ * Per-App AI settings (plan 14 B2 T2, spec § Per-App BYOK + § DESIGN.md
+ * 意图): single column; masked key list — provider + last-4 ONLY (key_enc and
+ * any full key material never render); add-key = provider select bound to the
+ * PROVIDER_IDS allowlist (the UI can never drift from the route's 400
+ * validation), led by an empty disabled placeholder — a forgetful submit
+ * 400s on the empty provider — + password input (`autocomplete="new-password"`:
+ * pasted API keys are new secrets, never a saved login), blue-700 primary;
+ * per-key Remove = red-700
+ * destructive; model chain editor with the empty = deployment-default
+ * fallback spelled out (a whitespace-only save clears with a success notice —
+ * the copy says so). The hint copy is replace-aware ("replaces its stored
+ * key") because the store upserts and bumps the row timestamp on re-set —
+ * storage recency is never labeled "created". Status/hints reuse the gray
+ * (.status) / amber-700 (.note) tokens — no new tokens, no Level 2. Every
+ * user-controlled string (slug, provider, masked tail, chain) is escaped.
+ */
+export function appSettingsPage(
+  user: { login: string; name?: string },
+  app: { slug: string },
+  maskedKeys: MaskedProviderKey[],
+  modelChain: string | null,
+  notice?: PageNotice,
+): string {
+  const base = `/dashboard/apps/${escapeHtml(app.slug)}/settings`;
+  const rows = maskedKeys
+    .map((k) => {
+      const tail = k.last4
+        ? `key ending <code class="id">${escapeHtml(k.last4)}</code>`
+        : "key too short to show a tail";
+      return `<li>
+        <strong>${escapeHtml(k.provider)}</strong>
+        <span class="meta">${tail}</span>
+        <form method="post" action="${base}/key/delete">
+          <input type="hidden" name="provider" value="${escapeHtml(k.provider)}">
+          <button type="submit" class="danger">Remove</button>
+        </form>
+      </li>`;
+    })
+    .join("\n");
+  const emptyList =
+    maskedKeys.length === 0
+      ? `<p class="status">No provider keys stored for this App — its reviews fall back to the deployment&apos;s global keys.</p>`
+      : `<ul class="keys">
+      ${rows}
+      </ul>`;
+  // Empty disabled first option = the preselected placeholder: a forgetful
+  // submit sends provider="" and hits the route's 400 re-render instead of
+  // silently picking the first allowlist id.
+  const options = ['<option value="" disabled selected>Select a provider…</option>']
+    .concat(PROVIDER_IDS.map((id) => `<option value="${escapeHtml(id)}">${escapeHtml(id)}</option>`))
+    .join("");
+  return page(
+    "App settings",
+    `${shellHeader(user)}
+  <main>
+    <section class="enabled">
+      <h2>Provider keys</h2>
+      ${pageNoticeHtml(notice)}
+      <p class="status">Keys for App <strong>${escapeHtml(app.slug)}</strong> are stored encrypted and shown masked — the last 4 characters only. Re-adding a provider replaces its stored key.</p>
+      ${emptyList}
+      <form method="post" action="${base}">
+        <input type="hidden" name="op" value="add-key">
+        <label class="field">Provider
+          <select name="provider">${options}</select>
+        </label>
+        <label class="field">API key
+          <input type="password" name="key" autocomplete="new-password" placeholder="Paste the provider API key">
+        </label>
+        <button type="submit" class="primary">Add key</button>
+      </form>
+    </section>
+    <section class="enabled">
+      <h2>Model chain</h2>
+      <p>Comma-separated model selectors for this App&apos;s reviews — same syntax as the deployment&apos;s OMP_REVIEW_MODEL.</p>
+      <p class="note">Saving an empty chain clears it — reviews fall back to the deployment default (the global OMP_REVIEW_MODEL).</p>
+      <form method="post" action="${base}">
+        <input type="hidden" name="op" value="save-chain">
+        <label class="field">Model chain
+          <input type="text" name="model_chain" value="${escapeHtml(modelChain ?? "")}" placeholder="e.g. ark-plan/deepseek-v4-flash, openai/gpt-5:thinking">
+        </label>
+        <button type="submit" class="primary">Save model chain</button>
       </form>
     </section>
   </main>`,

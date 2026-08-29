@@ -3,15 +3,18 @@
  * + GitHub App Manifest start/callback/commit (11 B1 T1/T2; 13 B5 T3 — the
  * commit writes the encrypted github_apps D1 row, the Cloudflare secrets-bulk
  * path is retired) + per-App management UI (13 B5 T3: /dashboard/apps list,
- * POST …/disable|enable|delete — creator-or-admin) behind a per-request
+ * POST …/disable|enable|delete — creator-or-admin) + per-App AI config
+ * settings (14 B2 T1 routes + T2 view: GET/POST
+ * /dashboard/apps/:slug/settings — BYOK provider keys, masked, + model chain
+ * — and POST …/settings/key/delete, creator-or-admin) behind a per-request
  * membership guard (12 B4 T2) + admin-only members management (12 B4 T3).
  * Mounted by src/worker/index.ts as `app.route("/dashboard", dashboardApp)`.
  *
  * Route isolation (architect decision Q2): this module MUST NOT import
  * pipeline/store/review code. Fail-closed everywhere: missing OAuth secrets
  * → 5xx; bad CSRF state → 4xx and the session cookie is never set; missing
- * DASHBOARD_ENCRYPTION_KEY → the encryption-dependent commit route 5xxs with
- * the hold kept (spec § Crypto envelope).
+ * DASHBOARD_ENCRYPTION_KEY → the encryption-dependent commit and settings
+ * routes 5xx with the hold kept / nothing stored (spec § Crypto envelope).
  */
 import { Hono, type Context } from "hono";
 import { getCookie } from "hono/cookie";
@@ -49,6 +52,12 @@ import {
 import { createAppsStore, type GithubAppRow } from "./apps-store";
 import { SecretboxKeyError, createSecretbox } from "./secretbox";
 import {
+  PROVIDER_IDS,
+  createAppConfigStore,
+  parseModelChain,
+  type AppConfigStore,
+} from "./app-config-store";
+import {
   bootstrapDashboardAccess,
   countAdmins,
   createUser,
@@ -59,6 +68,7 @@ import {
   type DashboardUserRow,
 } from "./users";
 import {
+  appSettingsPage,
   appsPage,
   dashboardPage,
   deniedPage,
@@ -674,6 +684,234 @@ async function appStatusAction(
 dashboardApp.post("/apps/:slug/disable", (c) => appStatusAction(c, "disable"));
 dashboardApp.post("/apps/:slug/enable", (c) => appStatusAction(c, "enable"));
 dashboardApp.post("/apps/:slug/delete", (c) => appStatusAction(c, "delete"));
+
+// --- Plan 14 B2 T1: per-App AI configuration settings (spec § Per-App BYOK) ---
+//
+// The settings family for one App: provider API keys (BYOK, masked list) and
+// the model chain. Authorization = the same canManageApp rule as the status
+// actions above (owner-or-admin, Clarify #6); unknown/soft-deleted App → 404;
+// the per-request guard has already verified membership. POSTs ride the
+// session cookie (same discipline as the members and apps action routes — no
+// new token scheme). Route shapes per the plan brief: GET/POST
+// /dashboard/apps/:slug/settings — the POST carries an explicit `op`
+// discriminator (add-key | save-chain) because the zero-JS page has two forms
+// on one action path — and the delete-key action path …/settings/key/delete
+// (the HTML-form convention cannot emit a DELETE verb).
+//
+// Encryption-dependent reads AND writes: masking needs plaintext (the last-4
+// tail), so a missing/malformed DASHBOARD_ENCRYPTION_KEY fails the whole
+// family closed with 5xx (spec § Crypto envelope) — never a partial page,
+// never a stored key. Rendering = the DESIGN-token appSettingsPage view in
+// src/dashboard/views.ts (plan 14 T2 — single column, masked list, no new
+// tokens); the T1 temporary placeholder render is gone.
+
+type AppSettingsGate =
+  | { ok: true; session: SessionPayload; db: DashboardD1; app: GithubAppRow }
+  | { ok: false; response: Response };
+
+/** Route-local owner-or-admin gate shared by the settings route family. */
+async function requireAppSettings(c: Context<{ Bindings: Env }>): Promise<AppSettingsGate> {
+  const member = await requireMember(c);
+  if (!member.ok) return member;
+  const app = await createAppsStore(member.db).getAppBySlug(c.req.param("slug") ?? "");
+  if (!app || app.deleted_at !== null) return { ok: false, response: c.text("unknown app", 404) };
+  if (!canManageApp(member.user, app)) {
+    return { ok: false, response: c.html(forbiddenPage(member.session.login), 403) };
+  }
+  // The settings family is encryption-dependent end to end (masking needs
+  // plaintext, adding a key encrypts): a missing master key fails EVERY
+  // settings route closed with 5xx — the plan Global Constraint — rather
+  // than serving a page that could not round-trip key material. A key that
+  // is set but malformed surfaces the same way through the decrypt/encrypt
+  // failure paths below.
+  if (!c.env.DASHBOARD_ENCRYPTION_KEY) {
+    return {
+      ok: false,
+      response: c.text("the app settings need a configured DASHBOARD_ENCRYPTION_KEY", 500),
+    };
+  }
+  return { ok: true, session: member.session, db: member.db, app };
+}
+
+/** Same structured-log convention as logOAuthFailure / logManifestFailure. */
+function logSettingsFailure(stage: string, appId: string, err: unknown): void {
+  console.warn(
+    JSON.stringify({
+      event: "dashboard_settings",
+      stage,
+      app_id: appId,
+      error_type: errorTypeName(err),
+      key_error: err instanceof SecretboxKeyError,
+    }),
+  );
+}
+
+/** 500 fail-closed notice: key misconfiguration vs storage rejection (commit-route copy style). */
+function settingsFailureNotice(err: unknown): PageNotice {
+  return err instanceof SecretboxKeyError
+    ? {
+        kind: "error",
+        message:
+          "This deployment has no valid DASHBOARD_ENCRYPTION_KEY for its stored keys — ask the operator to configure it, then resubmit.",
+      }
+    : {
+        kind: "error",
+        message: "The dashboard database rejected the change — nothing was stored. You can resubmit.",
+      };
+}
+
+/**
+ * Re-read the settings state and render the DESIGN-token view (plan 14 T2:
+ * src/dashboard/views.ts appSettingsPage) — every route's response body. The
+ * masked key list is the only key face, so no route here can leak key
+ * material into HTML; a decrypt failure on re-read is the 500 fail-closed.
+ */
+async function settingsResponse(
+  c: Context<{ Bindings: Env }>,
+  session: SessionPayload,
+  store: AppConfigStore,
+  app: GithubAppRow,
+  notice?: PageNotice,
+  status: 200 | 400 | 500 = 200,
+): Promise<Response> {
+  try {
+    const maskedKeys = await store.listProviderKeys(app.id);
+    const modelChain = await store.getModelChain(app.id);
+    return c.html(appSettingsPage(session, app, maskedKeys, modelChain, notice), status);
+  } catch (err) {
+    logSettingsFailure("render", app.id, err);
+    return c.text("the app settings could not be read from encrypted storage", 500);
+  }
+}
+
+dashboardApp.get("/apps/:slug/settings", async (c) => {
+  const gate = await requireAppSettings(c);
+  if (!gate.ok) return gate.response;
+  const store = createAppConfigStore(gate.db, c.env.DASHBOARD_ENCRYPTION_KEY);
+  return settingsResponse(c, gate.session, store, gate.app);
+});
+
+/**
+ * The settings POST: two operations on the pinned action path, discriminated
+ * by the forms' hidden `op` field. add-key = provider allowlist (400 on any
+ * other id — the allowlist is the plan's Global Constraint) + non-empty key,
+ * then the store encrypts inside. save-chain = empty → clear (global
+ * fallback), otherwise ≥1 comma-separated selector required and the chain is
+ * stored VERBATIM (a `:thinking`-style suffix is legal omp syntax; full
+ * selector validation stays omp-side). Validation failures re-render the
+ * page at 400 with zero writes.
+ */
+dashboardApp.post("/apps/:slug/settings", async (c) => {
+  const gate = await requireAppSettings(c);
+  if (!gate.ok) return gate.response;
+  const form = await c.req.parseBody();
+  const op = typeof form.op === "string" ? form.op : "";
+  const store = createAppConfigStore(gate.db, c.env.DASHBOARD_ENCRYPTION_KEY);
+  if (op === "add-key") {
+    const provider = typeof form.provider === "string" ? form.provider.trim() : "";
+    const plainKey = typeof form.key === "string" ? form.key.trim() : "";
+    if (!PROVIDER_IDS.includes(provider)) {
+      return settingsResponse(
+        c,
+        gate.session,
+        store,
+        gate.app,
+        {
+          kind: "error",
+          message:
+            provider === ""
+              ? "Pick a provider for the key."
+              : `${provider} is not a supported provider — pick one from the list.`,
+        },
+        400,
+      );
+    }
+    if (plainKey === "") {
+      return settingsResponse(
+        c,
+        gate.session,
+        store,
+        gate.app,
+        { kind: "error", message: "Enter an API key to store." },
+        400,
+      );
+    }
+    try {
+      await store.setProviderKey(gate.app.id, provider, plainKey);
+    } catch (err) {
+      logSettingsFailure("add_key", gate.app.id, err);
+      return settingsResponse(c, gate.session, store, gate.app, settingsFailureNotice(err), 500);
+    }
+    return settingsResponse(c, gate.session, store, gate.app, {
+      kind: "success",
+      message: `Stored the ${provider} key for ${gate.app.slug} — it is only ever shown masked.`,
+    });
+  }
+  if (op === "save-chain") {
+    const raw = typeof form.model_chain === "string" ? form.model_chain : "";
+    try {
+      if (raw.trim() === "") {
+        await store.setModelChain(gate.app.id, null);
+        return settingsResponse(c, gate.session, store, gate.app, {
+          kind: "success",
+          message: `Cleared the model chain for ${gate.app.slug} — reviews fall back to the deployment default.`,
+        });
+      }
+      if (parseModelChain(raw).length === 0) {
+        return settingsResponse(
+          c,
+          gate.session,
+          store,
+          gate.app,
+          { kind: "error", message: "Enter at least one comma-separated model selector." },
+          400,
+        );
+      }
+      await store.setModelChain(gate.app.id, raw);
+    } catch (err) {
+      logSettingsFailure("save_chain", gate.app.id, err);
+      return settingsResponse(c, gate.session, store, gate.app, settingsFailureNotice(err), 500);
+    }
+    return settingsResponse(c, gate.session, store, gate.app, {
+      kind: "success",
+      message: `Saved the model chain for ${gate.app.slug}.`,
+    });
+  }
+  // T2 review fold (T1 minor): an unknown op is a validation failure like any
+  // other — re-render the HTML page at 400 instead of a plain-text body.
+  return settingsResponse(
+    c,
+    gate.session,
+    store,
+    gate.app,
+    { kind: "error", message: "Unknown settings operation — resubmit one of this page's forms." },
+    400,
+  );
+});
+
+dashboardApp.post("/apps/:slug/settings/key/delete", async (c) => {
+  const gate = await requireAppSettings(c);
+  if (!gate.ok) return gate.response;
+  const form = await c.req.parseBody();
+  const provider = typeof form.provider === "string" ? form.provider.trim() : "";
+  const store = createAppConfigStore(gate.db, c.env.DASHBOARD_ENCRYPTION_KEY);
+  let removed: boolean;
+  try {
+    removed = await store.removeProviderKey(gate.app.id, provider);
+  } catch (err) {
+    logSettingsFailure("remove_key", gate.app.id, err);
+    return settingsResponse(c, gate.session, store, gate.app, settingsFailureNotice(err), 500);
+  }
+  // Tolerant no-op (the allowlist already bounds what can ever be stored):
+  // an unknown provider simply has no row — a warn, not a 400.
+  const notice: PageNotice = removed
+    ? { kind: "success", message: `Removed the stored ${provider} key for ${gate.app.slug}.` }
+    : {
+        kind: "warn",
+        message: `No stored ${provider === "" ? "(unspecified)" : provider} key on ${gate.app.slug} — nothing changed.`,
+      };
+  return settingsResponse(c, gate.session, store, gate.app, notice);
+});
 
 dashboardApp.get("/", async (c) => {
   const sessionSecret = c.env.DASHBOARD_SESSION_SECRET;
