@@ -308,6 +308,22 @@ export function deniedPage(login: string): string {
   );
 }
 
+/**
+ * Removed-member denial (plan 12 B4 T2, per-request guard) — distinct from
+ * deniedPage: this visitor's cookie verified but has no users row (access
+ * removed after the session was minted; removal = row delete, no status
+ * column). Red-700 banner, no login link back — re-authenticating lands on
+ * the OAuth callback bootstrap deny until an admin re-invites the login.
+ */
+export function removedPage(login: string): string {
+  return page(
+    "Access removed",
+    `<main>
+    <div class="banner" role="alert">Your dashboard access was removed. Ask an admin to re-invite ${escapeHtml(login)}.</div>
+  </main>`,
+  );
+}
+
 /** OAuth failure surface: red-700 banner + what-to-do-next (DESIGN.md § State legibility). */
 export function errorPage(message: string): string {
   return page(

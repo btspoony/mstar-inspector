@@ -66,7 +66,7 @@ const CONVERSION = {
   webhook_secret: FAKE_WEBHOOK_SECRET,
 };
 
-function makeEnv(overrides: Partial<Env> = {}): Env {
+function baseEnv(overrides: Partial<Env> = {}): Env {
   return {
     APP_ID: "123",
     PRIVATE_KEY: "private-key",
@@ -81,6 +81,35 @@ function makeEnv(overrides: Partial<Env> = {}): Env {
     DASHBOARD_SESSION_SECRET: SESSION_SECRET,
     ...overrides,
   };
+}
+
+/**
+ * Plan 12 T2: every /dashboard route sits behind the per-request membership
+ * guard, so each session-bearing request resolves a users row through D1.
+ * The default env therefore ships a store seeded with exactly the logins the
+ * existing route tests sign in as (the "existing tests pass unchanged with a
+ * seeded member" AC). Tests that need different membership pass their own DB
+ * via makeDbEnv; baseEnv is the DB-less env for unbound-D1 premises.
+ */
+const DEFAULT_SEEDED_MEMBERS: Array<[login: string, role: "admin" | "member"]> = [
+  ["octocat", "admin"],
+  ["octocat-with-a-long-login", "member"],
+  ["mallory", "member"],
+];
+
+function seededDashboardD1(): DashboardD1 & { raw: Database } {
+  const db = createDashboardTestD1();
+  const insert = db.raw.prepare(
+    "INSERT INTO users (id, github_login, role, created_at, invited_by) VALUES (?, ?, ?, ?, NULL)",
+  );
+  for (const [login, role] of DEFAULT_SEEDED_MEMBERS) {
+    insert.run(crypto.randomUUID(), login, role, new Date().toISOString());
+  }
+  return db;
+}
+
+function makeEnv(overrides: Partial<Env> = {}): Env {
+  return { ...baseEnv(overrides), DB: seededDashboardD1() } as Env;
 }
 
 function dashboardRequest(path: string, cookie?: string): Request {
@@ -448,7 +477,14 @@ describe("/dashboard routes", () => {
   });
 
   test("GET /dashboard/logout → 302 to login; session, manifest hold, and manifest state cookies expired", async () => {
-    const res = await worker.fetch(dashboardRequest("/dashboard/logout"), makeEnv());
+    // Plan 12 T2: /logout is guarded (spec L5 — not exempt), so a real logout
+    // arrives with a member session (the shell header link); without one the
+    // guard 302s before the cookie-expiry route (asserted in the guard suite).
+    const session = await createSessionValue("octocat", null, SESSION_SECRET);
+    const res = await worker.fetch(
+      dashboardRequest("/dashboard/logout", `${SESSION_COOKIE}=${session}`),
+      makeEnv(),
+    );
     expect(res.status).toBe(302);
     expect(res.headers.get("Location")).toBe("/dashboard/login");
     const setCookie = res.headers.getSetCookie();
@@ -1408,7 +1444,7 @@ function userCount(db: DashboardD1 & { raw: Database }): number {
  * way.
  */
 function makeDbEnv(db: DashboardD1, overrides: Partial<Env> = {}): Env {
-  return { ...makeEnv(overrides), DB: db } as Env;
+  return { ...baseEnv(overrides), DB: db } as Env;
 }
 
 describe("migrations/0003_dashboard_users.sql (plan 12 T1)", () => {
@@ -1666,7 +1702,9 @@ describe("/dashboard/oauth/callback bootstrap + deny (plan 12 T1)", () => {
 
   test("missing D1 binding on the post-identity path → 500 fail-closed, no session cookie", async () => {
     stubGitHubIdentity("octocat");
-    const res = await oauthCallback("octocat", makeEnv({ ADMIN_LOGINS: "octocat" }));
+    // baseEnv (no D1): makeEnv ships the default seeded store for the guarded
+    // routes — the callback's unbound-D1 premise needs the bare env.
+    const res = await oauthCallback("octocat", baseEnv({ ADMIN_LOGINS: "octocat" }));
     expect(res.status).toBe(500);
     expect(res.headers.getSetCookie().some((c) => c.startsWith(`${SESSION_COOKIE}=`))).toBe(false);
   });
@@ -1675,5 +1713,174 @@ describe("/dashboard/oauth/callback bootstrap + deny (plan 12 T1)", () => {
     const example = await Bun.file(new URL("../../.env.example", import.meta.url)).text();
     expect(example).toContain("ADMIN_LOGINS");
     expect(example).toContain("not a secret");
+  });
+});
+
+describe("per-request allowlist guard (plan 12 T2, spec § AuthZ + lock L5)", () => {
+  const origFetch = globalThis.fetch;
+  afterEach(() => {
+    globalThis.fetch = origFetch;
+  });
+
+  /**
+   * Removed-member fixture: a seeded store where mallory's row was deleted
+   * through the real revocation path (deleteUser — removal = row delete, no
+   * status column). Mallory still holds a cryptographically valid session
+   * cookie: the stateless session cannot see the removal, the guard must.
+   */
+  async function removedMemberEnv(): Promise<Env> {
+    const db = createDashboardTestD1();
+    await createUser(db, { login: "octocat", role: "admin" });
+    const mallory = await createUser(db, { login: "mallory", role: "member" });
+    await deleteUser(db, mallory.id);
+    return makeDbEnv(db);
+  }
+
+  const mallorySession = () => createSessionValue("mallory", null, SESSION_SECRET);
+
+  test("removed member with a valid cookie → 403 on every route family (shell, manifest start/confirm/commit, catch-all)", async () => {
+    // Zero network behind the guard: the 403 must short-circuit BEFORE the
+    // manifest conversion / Cloudflare secrets paths.
+    let networkCalls = 0;
+    globalThis.fetch = (async () => {
+      networkCalls++;
+      throw new Error("no network may run behind the guard");
+    }) as unknown as typeof fetch;
+    const env = await removedMemberEnv();
+    const cookie = `${SESSION_COOKIE}=${await mallorySession()}`;
+    // GET shell (B0)
+    const shell = await worker.fetch(dashboardRequest("/dashboard", cookie), env);
+    expect(shell.status).toBe(403);
+    // POST manifest start (B1)
+    const start = await worker.fetch(
+      new Request("https://worker.local/dashboard/manifest/start", {
+        method: "POST",
+        headers: { Cookie: cookie },
+      }),
+      env,
+    );
+    expect(start.status).toBe(403);
+    // GET manifest confirm (B1 resume gate)
+    const confirm = await worker.fetch(dashboardRequest("/dashboard/manifest/confirm", cookie), env);
+    expect(confirm.status).toBe(403);
+    // POST manifest commit (B1 confirm gate) — guard fires before secret work
+    const commit = await worker.fetch(
+      new Request("https://worker.local/dashboard/manifest/commit", {
+        method: "POST",
+        headers: { Cookie: cookie, "Content-Type": "application/x-www-form-urlencoded" },
+        body: "confirm=overwrite",
+      }),
+      env,
+    );
+    expect(commit.status).toBe(403);
+    // POST catch-all placeholder — the single use("*") mount auto-covers
+    // routes that do not exist yet (plan 13/14 will add /dashboard/* routes).
+    const future = await worker.fetch(
+      new Request("https://worker.local/dashboard/some-future-route", {
+        method: "POST",
+        headers: { Cookie: cookie },
+      }),
+      env,
+    );
+    expect(future.status).toBe(403);
+    expect(networkCalls).toBe(0);
+    const body = await shell.text();
+    // Removed-member page (not the shell): no identity header, no sections.
+    expect(body).toContain("Your dashboard access was removed. Ask an admin to re-invite mallory.");
+    expect(body).not.toContain("Signed in as");
+    expect(body).not.toContain('action="/dashboard/manifest/start"');
+  });
+
+  test("/dashboard/logout stays guarded: removed member → 403 with zero Set-Cookie", async () => {
+    // Spec L5: the exempt set is exactly /login + /oauth/callback, so a
+    // removed member cannot even burn their cookies via logout — the page
+    // 403s and every cookie stays as-is.
+    const res = await worker.fetch(
+      dashboardRequest("/dashboard/logout", `${SESSION_COOKIE}=${await mallorySession()}`),
+      await removedMemberEnv(),
+    );
+    expect(res.status).toBe(403);
+    expect(res.headers.getSetCookie()).toHaveLength(0);
+  });
+
+  test("session-less /dashboard/logout → 302 to login with zero Set-Cookie (guard branch, route never runs)", async () => {
+    const res = await worker.fetch(dashboardRequest("/dashboard/logout"), makeEnv());
+    expect(res.status).toBe(302);
+    expect(res.headers.get("Location")).toBe("/dashboard/login");
+    expect(res.headers.getSetCookie()).toHaveLength(0);
+  });
+
+  test("the two pre-session routes stay exempt: /login works and the callback reaches its own checks", async () => {
+    const env = await removedMemberEnv(); // even a store with no mallory row
+    // /login: guard exempt → the route's OAuth flow runs (302 to GitHub).
+    const login = await worker.fetch(dashboardRequest("/dashboard/login"), env);
+    expect(login.status).toBe(302);
+    expect(new URL(login.headers.get("Location") ?? "").host).toBe("github.com");
+    // /oauth/callback: guard exempt → the route's state check decides (400),
+    // NOT a guard 302/403 — this request is what establishes the session.
+    const callback = await worker.fetch(
+      dashboardRequest("/dashboard/oauth/callback?code=x&state=y"),
+      env,
+    );
+    expect(callback.status).toBe(400);
+  });
+
+  test("member requests pass the guard and reach the routes unchanged (B0 shell + B1 manifest)", async () => {
+    const env = makeEnv();
+    const cookie = `${SESSION_COOKIE}=${await createSessionValue("octocat", null, SESSION_SECRET)}`;
+    const shell = await worker.fetch(dashboardRequest("/dashboard", cookie), env);
+    expect(shell.status).toBe(200);
+    expect(await shell.text()).toContain("Signed in as octocat");
+    const start = await worker.fetch(
+      new Request("https://worker.local/dashboard/manifest/start", {
+        method: "POST",
+        headers: { Cookie: cookie },
+      }),
+      env,
+    );
+    expect(start.status).toBe(200);
+    // Logout is reachable for a member: the guarded route expires all three cookies.
+    const out = await worker.fetch(dashboardRequest("/dashboard/logout", cookie), env);
+    expect(out.status).toBe(302);
+    expect(out.headers.get("Location")).toBe("/dashboard/login");
+    expect(out.headers.getSetCookie()).toHaveLength(3);
+  });
+
+  test("membership lookup is case-insensitive: session login case variant of a member row passes", async () => {
+    // Session carries the GitHub-verified casing; the row was invited with
+    // another casing — getUserByLogin is COLLATE NOCASE (spec § AuthZ).
+    const session = await createSessionValue("OctoCat", null, SESSION_SECRET);
+    const res = await worker.fetch(
+      dashboardRequest("/dashboard", `${SESSION_COOKIE}=${session}`),
+      makeEnv(),
+    );
+    expect(res.status).toBe(200);
+    expect(await res.text()).toContain("Signed in as OctoCat");
+  });
+
+  test("guard fails closed when D1 is unbound: valid session → 500, route never runs", async () => {
+    const res = await worker.fetch(
+      dashboardRequest(
+        "/dashboard",
+        `${SESSION_COOKIE}=${await createSessionValue("octocat", null, SESSION_SECRET)}`,
+      ),
+      baseEnv(), // no DB binding
+    );
+    expect(res.status).toBe(500);
+    expect(await res.text()).toContain("dashboard storage is not configured");
+  });
+
+  test("removed-member denial logs a structured not_a_member warning (login only, no secrets)", async () => {
+    const warns = spyOnWarn();
+    await worker.fetch(
+      dashboardRequest("/dashboard", `${SESSION_COOKIE}=${await mallorySession()}`),
+      await removedMemberEnv(),
+    );
+    expect(warns).toHaveLength(1);
+    const entry = JSON.parse(warns[0] ?? "") as Record<string, unknown>;
+    expect(entry.event).toBe("dashboard_access");
+    expect(entry.stage).toBe("guard");
+    expect(entry.reason).toBe("not_a_member");
+    expect(entry.login).toBe("mallory");
   });
 });

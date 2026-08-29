@@ -1,7 +1,8 @@
 /**
  * /dashboard Hono sub-app: GitHub OAuth login + signed-cookie session (08 B0)
- * + GitHub App Manifest start/callback/commit (11 B1 T1/T2). Mounted by
- * src/worker/index.ts as `app.route("/dashboard", dashboardApp)`.
+ * + GitHub App Manifest start/callback/commit (11 B1 T1/T2) behind a
+ * per-request membership guard (12 B4 T2). Mounted by src/worker/index.ts as
+ * `app.route("/dashboard", dashboardApp)`.
  *
  * Route isolation (architect decision Q2): this module MUST NOT import
  * pipeline/store/review code. Fail-closed everywhere: missing OAuth secrets
@@ -38,9 +39,10 @@ import {
 } from "./manifest";
 import {
   bootstrapDashboardAccess,
+  getUserByLogin,
   type DashboardD1,
 } from "./users";
-import { dashboardPage, deniedPage, errorPage, manifestConfirmPage, manifestErrorPage, manifestStartPage, manifestSuccessPage } from "./views";
+import { dashboardPage, deniedPage, errorPage, manifestConfirmPage, manifestErrorPage, manifestStartPage, manifestSuccessPage, removedPage } from "./views";
 
 export const dashboardApp = new Hono<{ Bindings: Env }>();
 
@@ -62,6 +64,51 @@ function dashboardD1(env: Env): DashboardD1 | null {
   const db = (env as Env & { DB?: DashboardD1 }).DB;
   return db ?? null;
 }
+
+// --- Plan 12 B4 T2: per-request allowlist guard (spec § AuthZ, lock L5) ---
+//
+// ONE middleware mount before every route definition auto-covers all
+// /dashboard routes (B1 manifest trio + the POST "*" catch-all today, plan
+// 13/14 routes tomorrow) — no per-route guard copies. Membership is the
+// users row: removal = row delete, so a removed member's stateless cookie
+// fails here on every request. Exempt set is EXACTLY the two pre-session
+// routes — a guard on /dashboard/login would loop the login page, and
+// /dashboard/oauth/callback is the request that establishes the session.
+// /logout stays guarded (L5, strictest AC-B4-guard reading): a removed
+// member re-authenticates via OAuth instead, where the callback bootstrap
+// denies with zero cookies. Per-route readSessionValue handling (incl. B1
+// hold/state cookies) stays as-is below — the guard only ADDS the D1
+// membership check. Paths are the full mount-pinned form: dashboardApp is
+// mounted once at /dashboard (src/worker/index.ts, L5 code-verified).
+const GUARD_EXEMPT_PATHS = new Set(["/dashboard/login", "/dashboard/oauth/callback"]);
+
+dashboardApp.use("*", async (c, next) => {
+  if (GUARD_EXEMPT_PATHS.has(c.req.path)) return next();
+  const sessionSecret = c.env.DASHBOARD_SESSION_SECRET;
+  if (!sessionSecret) return c.text("dashboard OAuth is not configured", 500);
+  const session = await readSessionValue(getCookie(c, SESSION_COOKIE), sessionSecret);
+  // No session → the pre-guard behavior: 302 into the OAuth flow.
+  if (!session) return c.redirect("/dashboard/login", 302);
+  // Logged in → the only new check: an active user row (spec § AuthZ).
+  // Fail closed on an unbound store, like every missing dashboard dependency.
+  const db = dashboardD1(c.env);
+  if (!db) return c.text("dashboard storage is not configured", 500);
+  const user = await getUserByLogin(db, session.login);
+  if (!user) {
+    // Same structured-log convention as logOAuthFailure / logManifestFailure;
+    // the login is public identity (it renders on the denial page).
+    console.warn(
+      JSON.stringify({
+        event: "dashboard_access",
+        stage: "guard",
+        reason: "not_a_member",
+        login: session.login,
+      }),
+    );
+    return c.html(removedPage(session.login), 403);
+  }
+  return next();
+});
 
 dashboardApp.get("/login", async (c) => {
   const secrets = dashboardSecrets(c.env);
