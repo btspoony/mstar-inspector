@@ -8,7 +8,9 @@
  *     rewritten to M1 severity);
  *   - tally line rendered when the envelope carries one (must-fix /
  *     should-fix / nit / unverified counts, engine REVIEW_EMOJI);
- *   - NO line-comment fields: the body is a single overall review comment;
+ *   - the overall body carries NO per-line comment fields — anchored line
+ *     comments are a SEPARATE chain (pulls.createReview COMMENT, see
+ *     "Line comments" below);
  *   - verdict rendered VERBATIM as text in the body header (`**Verdict:
  *     ship it**` / `needs fixes` / `blocked` — never M1 vocab, never a
  *     GitHub review event).
@@ -768,7 +770,9 @@ export function parseDiffHunkRanges(diff: string): Map<string, Array<[number, nu
 /**
  * Layered qualifying filter (AL-3):
  *   - base layer (always): `file_path` non-empty AND `line_end` an integer
- *     ≥ 1 — findings without a position can never anchor;
+ *     ≥ 1 (runtime check: `typeof line_end === "number" && line_end >= 1`;
+ *     the integer guarantee comes from the schema's `z.number().int()`
+ *     upstream) — findings without a position can never anchor;
  *   - hunk layer (only when the prefetched diff is available): the b-side
  *     path must exact-match a diff file AND `line_end` must fall inside one
  *     of its right-side hunk ranges (binary/deleted files have no right

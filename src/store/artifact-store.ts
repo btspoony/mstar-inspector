@@ -173,7 +173,9 @@ export type ReviewArtifactDoc = ArtifactDoc & {
 export type D1ArtifactStore = ArtifactStore & {
   /**
    * Widened put input (see `ReviewArtifactDoc`): the optional `appId` rides
-   * the doc into `reviews.app_id`.
+   * the doc into `reviews.app_id`; the optional `model` / `provider`
+   * version records (plan 18 Task 1) ride into `reviews.model` /
+   * `reviews.provider` (absent/NULL = unset).
    */
   put(doc: ReviewArtifactDoc): Promise<void>;
   /**

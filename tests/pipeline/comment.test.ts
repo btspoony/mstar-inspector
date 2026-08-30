@@ -419,6 +419,18 @@ describe("postReview wiring (mock octokit, SG-001)", () => {
     expect(String(calls.updateParams!.body)).toMatch(/^<!-- mstar-inspector:review:v1 round=3 -->/);
   });
 
+  test("returns the round just posted: create → 1, marker hit → next round (T3-M4 / qc3 F-104)", async () => {
+    // The consumer pins the line-comments marker body to postReview's
+    // RETURN (single-sourced from the upsert scan) — the contract is pinned
+    // at the real postReviewWithOctokit, not only the consumer fake seam.
+    const create = mockOctok([]);
+    await expect(postReviewWithOctokit(create.octokit, input)).resolves.toBe(1);
+    const update = mockOctok([
+      { id: 7, body: "<!-- mstar-inspector:review:v1 round=2 -->\nRound 2", user: { type: "Bot" } },
+    ]);
+    await expect(postReviewWithOctokit(update.octokit, input)).resolves.toBe(3);
+  });
+
   test("blocked and ship it both post with NO review event, never REQUEST_CHANGES/APPROVE (mapping spec §2)", async () => {
     for (const verdict of ["blocked", "ship it"] as const) {
       const { calls, octokit } = mockOctok([]);

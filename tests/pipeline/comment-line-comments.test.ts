@@ -140,6 +140,59 @@ describe("parseDiffHunkRanges", () => {
     ].join("\n");
     expect(parseDiffHunkRanges(empty)).toEqual(new Map([["src/new.ts", [[1, 2]]]]));
   });
+
+  test("space-bearing b-side paths ride the UNQUOTED b/ strip and bind (git does not quote plain spaces) (T3-M2 / qc3 F-103)", () => {
+    // Real git output for a path with spaces is UNQUOTED
+    // (`+++ b/space dir/has spaces.ts`) — the b/ strip binds the raw path
+    // and a finding whose file_path carries the space matches.
+    const spaces = [
+      "diff --git a/src/space dir/has spaces.ts b/src/space dir/has spaces.ts",
+      "index 1111111..2222222 100644",
+      "--- a/src/space dir/has spaces.ts",
+      "+++ b/src/space dir/has spaces.ts",
+      "@@ -1,1 +1,2 @@",
+      " const x = 1;",
+      "+fixed",
+    ].join("\n");
+    expect(parseDiffHunkRanges(spaces)).toEqual(
+      new Map([["src/space dir/has spaces.ts", [[1, 2]]]]),
+    );
+  });
+
+  test("C-quoted b-side path whose JSON.parse succeeds unquotes via the best-effort branch (T3-M2 / qc3 F-103)", () => {
+    // Real git quotes only escape-requiring paths (`+++ "b/with\"quote.ts"`).
+    // The b/ strip runs BEFORE the unquote, so the JSON-parsed value keeps
+    // the prefix and exact-matches no finding's file_path — the safe
+    // direction (excluded). Pin the branch's parse result verbatim against
+    // a refactor silently changing it.
+    const quoted = [
+      'diff --git "a/with\\"quote.ts" "b/with\\"quote.ts"',
+      "index 1111111..2222222 100644",
+      '--- "a/with\\"quote.ts"',
+      '+++ "b/with\\"quote.ts"',
+      "@@ -1,1 +1,2 @@",
+      " const x = 1;",
+      "+fixed",
+    ].join("\n");
+    expect(parseDiffHunkRanges(quoted).has('b/with"quote.ts')).toBe(true);
+  });
+
+  test("unquotable quoted b-side path (octal escapes) keeps the raw quoted path → matches nothing (excluded)", () => {
+    // Real git form for non-ASCII paths (`+++ "b/h\303\251.go"`): JSON.parse
+    // throws on the octal escapes, the raw quoted target stays as the key,
+    // and the exact-match layer excludes the finding — no 422.
+    const unquotable = [
+      "diff --git \"a/h\\303\\251.go\" \"b/h\\303\\251.go\"",
+      "index 1111111..2222222 100644",
+      "--- \"a/h\\303\\251.go\"",
+      "+++ \"b/h\\303\\251.go\"",
+      "@@ -1,1 +1,2 @@",
+      " const x = 1;",
+      "+fixed",
+    ].join("\n");
+    expect(parseDiffHunkRanges(unquotable).has('"b/h\\303\\251.go"')).toBe(true);
+    expect(parseDiffHunkRanges(unquotable).has("h é.go")).toBe(false);
+  });
 });
 
 describe("filterLineCommentFindings", () => {

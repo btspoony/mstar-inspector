@@ -58,7 +58,7 @@ import type { ReviewJobPayload } from "../contracts/review-job";
 import { idemKey, IDEMPOTENCY_SECONDS, type IdempotencyKey } from "../contracts/idem";
 import { parseReviewOutput, capFindings, clampFindingSizes } from "../review/schema";
 import { isReviewLevel, REVIEW_LEVELS, type ReviewLevel } from "../review/runtime";
-import { redactReviewOutput } from "./redact";
+import { redactReviewOutput, redactSecrets } from "./redact";
 import { createArtifactStore, type D1ArtifactStore } from "../store/artifact-store";
 import { createFailureStore, type FailureStage, type FailureStore } from "../store/failure-store";
 import { getSandbox, type ReviewSandbox } from "./sandbox";
@@ -171,6 +171,15 @@ const RUNNER_TIMEOUT_MS: Record<ReviewLevel, number> = {
   default: 600_000,
   deep: 840_000,
 };
+
+/**
+ * Cap on the prefetched PR diff considered for the line-comments hunk
+ * prefilter (plan 18 QC fix r1 / qc3 F-101): 2 MiB of diff text. Beyond it,
+ * parseDiffHunkRanges would materialize a full line array per qualifying
+ * round on multi-MB PRs; overflow degrades to the prefetch-failure path
+ * (base-filter attempt; a residual 422 still falls back per AL-3).
+ */
+export const DIFF_PREFETCH_MAX_BYTES = 2 * 1024 * 1024;
 
 /**
  * Runner exec timeout for the job's review level (spec d5-budget L4 — the
@@ -828,6 +837,7 @@ export function buildRunnerEnv(
   }
   return runnerEnv;
 }
+
 /**
  * KV done-state read (B3): `done` means a review was already POSTED for this
  * sha (the consumer writes it right after posting, before the D1 insert).
@@ -1197,7 +1207,11 @@ async function processMessage(payload: ReviewJobPayload, deps: ProcessDeps): Pro
           pr_number: payload.pr_number,
           head_sha: headSha,
           stage: "parse",
-          error: parsed.error,
+          // qc3 F-001 / qc2 F-001: the zod/engine error can echo a
+          // model-emitted secret-shaped value (`verdict "ghp_…" is not one
+          // of …`) — redactSecrets BEFORE the durable D1 row, same face as
+          // buildDegradedBody's public-comment choke point.
+          error: redactSecrets(parsed.error),
         });
       } catch (err) {
         const detail = err instanceof Error ? err.message : String(err);
@@ -1223,7 +1237,7 @@ async function processMessage(payload: ReviewJobPayload, deps: ProcessDeps): Pro
       }
       deps.log.warn(
         fields,
-        `review degraded: output failed schema validation (${parsed.error}) — acked, no retry/DLQ`,
+        `review degraded: output failed schema validation (${redactSecrets(parsed.error)}) — acked, no retry/DLQ`,
       );
       return { kind: "degraded" };
     }
@@ -1279,6 +1293,16 @@ async function processMessage(payload: ReviewJobPayload, deps: ProcessDeps): Pro
           repo: payload.repo,
           prNumber: payload.pr_number,
         });
+        // qc3 F-101: bound the considered diff payload — a multi-MB PR diff
+        // would otherwise be materialized into a full line array by
+        // parseDiffHunkRanges on EVERY qualifying round. Overflow is treated
+        // exactly like a prefetch failure (the catch below): base-filter
+        // attempt, residual 422 still falls back per AL-3.
+        if (diff.length > DIFF_PREFETCH_MAX_BYTES) {
+          throw new Error(
+            `diff payload ${diff.length} bytes exceeds DIFF_PREFETCH_MAX_BYTES (${DIFF_PREFETCH_MAX_BYTES}) — skipping the hunk prefilter`,
+          );
+        }
         qualifying = filterLineCommentFindings(lineCommentable, diff);
       } catch (err) {
         const detail = err instanceof Error ? err.message : String(err);

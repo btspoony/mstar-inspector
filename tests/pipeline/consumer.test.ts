@@ -45,6 +45,7 @@ import { FINDING_BODY_MAX, FINDING_TITLE_MAX } from "../../src/review/schema";
 import { createArtifactStore } from "../../src/store/artifact-store";
 import { idemKey } from "../../src/contracts/idem";
 import { createMigratedTestD1 } from "../store/helpers";
+import { REDACTED } from "../../src/pipeline/redact";
 import type { ReviewCommenter } from "../../src/pipeline/comment";
 
 const VALID_OUTPUT: ReviewOutput = {
@@ -198,7 +199,13 @@ function runnerExecTimeout(): number | undefined {
 }
 
 // --- consumer under test (dynamic import: mocks must be registered first) ---
-const { createReviewConsumer, runnerTimeoutMs, reviewGuardTtlSeconds, guardRetryDelaysSeconds } = await import("../../src/pipeline/consumer");
+const {
+  createReviewConsumer,
+  runnerTimeoutMs,
+  reviewGuardTtlSeconds,
+  guardRetryDelaysSeconds,
+  DIFF_PREFETCH_MAX_BYTES,
+} = await import("../../src/pipeline/consumer");
 import type { PipelineEnv } from "../../src/pipeline/consumer";
 import type { ConsumerLog, ConsumerLogFields } from "../../src/pipeline/consumer";
 
@@ -312,6 +319,7 @@ function reset(): void {
   revParseExitCode = 0;
   sandboxError = undefined;
   destroyCalls = 0;
+  destroyError = undefined;
   tokenResult = "ghs_installation_token";
   tokenError = undefined;
   commentError = undefined;
@@ -562,6 +570,40 @@ describe("createReviewConsumer", () => {
     expect(messageAckCalls).toHaveLength(1);
     expect(messageRetryCalls).toHaveLength(0);
     expect(destroyCalls).toBe(1);
+  });
+
+  test("parse error echoing a model-emitted token is REDACTED in the failure row and the warn log (qc3 F-001 / qc2 F-001)", async () => {
+    reset();
+    // The engine gate echoes the received verdict verbatim — a
+    // prompt-injected token as the verdict lands in parsed.error, and the
+    // durable review_failures row + operator warn log must carry only the
+    // [REDACTED] form (the public degraded comment was already redacted by
+    // buildDegradedBody; this pins the D1/log channel).
+    const token = "ghp_modelEmittedSecretToken123";
+    runnerStdout = JSON.stringify({
+      schema: "mstar.review/v1",
+      verdict: token,
+      summary_md: "x",
+      findings: [],
+    });
+    const db = createMigratedTestD1();
+    const consumer = createReviewConsumer(makeEnv({ DB: db as never }), testLog, testOverrides);
+
+    await consumer(makeBatch(makePayload())); // resolves — acked
+
+    const rows = failureRows(db);
+    expect(rows).toHaveLength(1);
+    expect(String(rows[0]!.error)).toContain(REDACTED);
+    expect(String(rows[0]!.error)).not.toContain(token);
+    const warn = logLines.find((l) => l.level === "warn" && l.msg.includes("review degraded"));
+    expect(warn).toBeDefined();
+    expect(warn!.msg).toContain(REDACTED);
+    expect(warn!.msg).not.toContain(token);
+    // The commenter input still rides UNREDACTED — buildDegradedBody is the
+    // degraded chain's redaction choke point (unchanged by this fix).
+    const degradeInput = commenterCalls.filter((c) => c.op === "degrade")[0]!.args[0] as { error: string };
+    expect(degradeInput.error).toContain(token);
+    expect(messageAckCalls).toHaveLength(1);
   });
 
   test("parse failure with a failing failure-store → degrade still posts + acks (best-effort record)", async () => {
@@ -1566,6 +1608,37 @@ describe("line comments (plan 18 Task 3 / AL-3 layered delivery)", () => {
     const warn = logLines.find((l) => l.level === "warn" && l.msg.includes("diff prefetch failed"));
     expect(warn).toBeDefined();
     expect(warn!.fields.line_comments_fallback).toBeUndefined();
+    expect(logLines.some((l) => l.fields.line_comments_fallback === true)).toBe(false);
+    expect(reviewCount(db)).toBe(1);
+    expect(kvPuts).toHaveLength(1);
+    expect(destroyCalls).toBe(1);
+  });
+
+  test("oversized diff prefetch → the hunk prefilter is skipped exactly like a prefetch failure (qc3 F-101)", async () => {
+    reset();
+    // A finding OUTSIDE every VALID_DIFF hunk (line 100): with a bounded
+    // prefetch the hunk layer would EXCLUDE it — an over-cap diff must
+    // degrade to the base-filter attempt, never materialize a multi-MB
+    // line array in parseDiffHunkRanges.
+    runnerStdout = JSON.stringify({
+      ...VALID_OUTPUT,
+      findings: [{ ...VALID_OUTPUT.findings[0]!, line_start: 100, line_end: 100 }],
+    });
+    diffResult = `${VALID_DIFF}\n${" ".repeat(DIFF_PREFETCH_MAX_BYTES)}`;
+    const db = createMigratedTestD1();
+    const consumer = createReviewConsumer(makeEnv({ DB: db as never }), testLog, testOverrides);
+
+    await consumer(makeBatch(makePayload()));
+
+    // The attempt still ran on the base-filtered set — the hunk-external
+    // finding SURVIVED because the hunk layer never saw the diff.
+    expect(commenterCalls.map((c) => c.op)).toEqual(["token", "post", "fetch-diff", "line-comments"]);
+    const lineInput = commenterCalls[3]!.args[0] as { findings: unknown[] };
+    expect(lineInput.findings).toHaveLength(1);
+    const warn = logLines.find((l) => l.level === "warn" && l.msg.includes("diff prefetch failed"));
+    expect(warn).toBeDefined();
+    expect(warn!.msg).toContain("exceeds DIFF_PREFETCH_MAX_BYTES");
+    // Not a delivery fallback — the createReview attempt proceeded.
     expect(logLines.some((l) => l.fields.line_comments_fallback === true)).toBe(false);
     expect(reviewCount(db)).toBe(1);
     expect(kvPuts).toHaveLength(1);

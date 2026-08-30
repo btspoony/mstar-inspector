@@ -157,6 +157,14 @@ describe("createArtifactStore().put", () => {
     await store.put(
       reviewDoc({ key: idemKey({ ...KEY_TUPLE, head_sha: "f".repeat(40) }), model: null }),
     );
+    // Positive provider pin (M1 / qc1 S2): the `?? null` bind must not be a
+    // hardcoded null — a non-null provider round-trips verbatim.
+    await store.put(
+      reviewDoc({
+        key: idemKey({ ...KEY_TUPLE, head_sha: "e".repeat(40) }),
+        provider: "openrouter",
+      }),
+    );
 
     const withModel = db.raw.query("SELECT model, provider FROM reviews WHERE head_sha = ?").get(SHA) as {
       model: string | null;
@@ -169,6 +177,11 @@ describe("createArtifactStore().put", () => {
       .get("f".repeat(40)) as { model: string | null; provider: string | null };
     expect(explicitNull.model).toBeNull();
     expect(explicitNull.provider).toBeNull();
+    const withProvider = db.raw
+      .query("SELECT model, provider FROM reviews WHERE head_sha = ?")
+      .get("e".repeat(40)) as { model: string | null; provider: string | null };
+    expect(withProvider.model).toBeNull();
+    expect(withProvider.provider).toBe("openrouter");
   });
 
   test("an appId with no github_apps row is FK-rejected with zero rows written", async () => {
