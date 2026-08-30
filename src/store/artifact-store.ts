@@ -39,6 +39,11 @@
  * absent or `{ kind: "legacy" }`) omit it and the row keeps `app_id` NULL
  * (Clarify #3: NULL = legacy). The column's FK to `github_apps(id)` makes an
  * unknown appId a loud batch failure, never a silent mis-attribution.
+ *
+ * Version records (plan 18 Task 1): the put doc may carry the review's
+ * `model` (the effective model chain's head selector, consumer-resolved)
+ * and `provider` (always NULL on the v1 path — architect AL-2) — both
+ * OPTIONAL; omitted = NULL (byte-compat for pre-plan-18 callers).
  */
 
 import {
@@ -136,7 +141,8 @@ function assertTargetAgrees(key: IdempotencyKey, payload: MstarReviewV1): void {
 
 /**
  * The review put input: the engine `ArtifactDoc` plus the caller-supplied
- * per-App attribution (plan 13, QC fix wave 1 F-001). A structural superset
+ * per-App attribution (plan 13, QC fix wave 1 F-001) and the plan-18
+ * version records (`model` / `provider`). A structural superset
  * of the engine contract — the engine package is unchanged; the consumer is
  * the only production caller and passes `appId` for per-App messages only
  * (legacy/absent appRef omits it → the row keeps `app_id` NULL).
@@ -147,13 +153,29 @@ export type ReviewArtifactDoc = ArtifactDoc & {
    * absent/NULL means a legacy (env-App) review. Never a credential.
    */
   appId?: string;
+  /**
+   * Version record (plan 18 Task 1): the effective model chain's HEAD
+   * selector the review ran with, resolved consumer-side via
+   * `effectiveModelChain` (single-sourced with `buildRunnerEnv`). Optional;
+   * absent/NULL = unset (the in-image default ran — the default selector is
+   * recorded in plan 19's runbook, never hardcoded worker-side).
+   */
+  model?: string | null;
+  /**
+   * Version record (plan 18 Task 1): always NULL on the v1 path —
+   * `RunnerAppConfig` carries a multi-provider key set, not one provider
+   * (architect AL-2: do not invent a mapping). Optional; omitted = NULL.
+   */
+  provider?: string | null;
 };
 
 /** The D1 store face: the engine `ArtifactStore` plus the consumer's pre-check. */
 export type D1ArtifactStore = ArtifactStore & {
   /**
    * Widened put input (see `ReviewArtifactDoc`): the optional `appId` rides
-   * the doc into `reviews.app_id`.
+   * the doc into `reviews.app_id`; the optional `model` / `provider`
+   * version records (plan 18 Task 1) ride into `reviews.model` /
+   * `reviews.provider` (absent/NULL = unset).
    */
   put(doc: ReviewArtifactDoc): Promise<void>;
   /**
@@ -217,8 +239,8 @@ export function createArtifactStore(db: D1Like): D1ArtifactStore {
       const appId = doc.appId ?? null;
       const reviewStmt = db
         .prepare(
-          `INSERT INTO reviews (id, installation_id, owner, repo, pr_number, head_sha, verdict, summary_md, skill_version, envelope, app_id)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          `INSERT INTO reviews (id, installation_id, owner, repo, pr_number, head_sha, verdict, summary_md, skill_version, envelope, app_id, model, provider)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
            ON CONFLICT (installation_id, owner, repo, pr_number, head_sha) DO NOTHING`,
         )
         .bind(
@@ -235,10 +257,14 @@ export function createArtifactStore(db: D1Like): D1ArtifactStore {
           // restorable via get() (no 64KB truncation on this column).
           JSON.stringify(payload),
           appId,
+          // Version records (plan 18 Task 1): the caller-supplied chain head
+          // selector / provider — `?? null` because D1 .bind() rejects
+          // undefined; omitted put-input fields persist NULL (byte-compat).
+          doc.model ?? null,
+          doc.provider ?? null,
         );
-      // model / provider stay NULL (write caliber: 未知则 NULL — the Worker
-      // face has no resolved model identity; raw_output stays NULL: the
-      // envelope is authoritative).
+      // raw_output stays NULL on the v1 path: the envelope is authoritative
+      // (its 64KB truncation is not losslessly restorable).
 
       // Findings are guarded by WHERE EXISTS on the review id: on a UNIQUE
       // no-op the review insert writes 0 rows, the new UUID does not exist,

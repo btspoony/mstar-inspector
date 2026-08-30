@@ -28,11 +28,17 @@
 
 import { describe, expect, mock, test } from "bun:test";
 import {
+  buildDegradedBody,
   buildReviewBody,
   buildUpsertBody,
+  DEGRADED_EXCERPT_LIMIT,
+  findDegradedComment,
   findReviewComment,
+  parseDegradedRound,
   parseReviewRound,
+  planDegradedUpsert,
   planUpsert,
+  postDegradedWithOctokit,
   postReviewWithOctokit,
   renderFindings,
   REVIEW_BODY_LIMIT,
@@ -413,6 +419,18 @@ describe("postReview wiring (mock octokit, SG-001)", () => {
     expect(String(calls.updateParams!.body)).toMatch(/^<!-- mstar-inspector:review:v1 round=3 -->/);
   });
 
+  test("returns the round just posted: create → 1, marker hit → next round (T3-M4 / qc3 F-104)", async () => {
+    // The consumer pins the line-comments marker body to postReview's
+    // RETURN (single-sourced from the upsert scan) — the contract is pinned
+    // at the real postReviewWithOctokit, not only the consumer fake seam.
+    const create = mockOctok([]);
+    await expect(postReviewWithOctokit(create.octokit, input)).resolves.toBe(1);
+    const update = mockOctok([
+      { id: 7, body: "<!-- mstar-inspector:review:v1 round=2 -->\nRound 2", user: { type: "Bot" } },
+    ]);
+    await expect(postReviewWithOctokit(update.octokit, input)).resolves.toBe(3);
+  });
+
   test("blocked and ship it both post with NO review event, never REQUEST_CHANGES/APPROVE (mapping spec §2)", async () => {
     for (const verdict of ["blocked", "ship it"] as const) {
       const { calls, octokit } = mockOctok([]);
@@ -451,9 +469,10 @@ describe("postReview wiring (mock octokit, SG-001)", () => {
       const createReview = mock(async () => {
         throw new Error("pulls.createReview must never be called (SEC-01: COMMENT-only posting)");
       });
-      // No PostOctokit annotation: `pulls` is deliberately NOT part of the
-      // poster's consumed surface — a variable (not a fresh literal) keeps
-      // the extra trap assignable while proving the poster never touches it.
+      // `pulls` sits on PostOctokit for plan 18 T3 line comments, but the
+      // OVERALL poster must never touch it — a variable (not a fresh
+      // literal) keeps the extra trap assignable while proving postReview
+      // stays on the Issues comments API.
       const withPulls = { ...octokit, rest: { ...octokit.rest, pulls: { createReview } } };
       await postReviewWithOctokit(withPulls, { ...input, output: deepOutput });
 
@@ -530,5 +549,220 @@ describe("postReview wiring (mock octokit, SG-001)", () => {
       new Error("rate limited"),
     );
     await expect(postReviewWithOctokit(octokit, input)).rejects.toThrow("rate limited");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Degraded chain (plan 18 Task 2 / architect AL-1)
+// ---------------------------------------------------------------------------
+
+const botReviewMarker = (id: number, round: number) => ({
+  id,
+  body: `<!-- mstar-inspector:review:v1 round=${round} -->\n第 ${round} 次 review`,
+  user: { type: "Bot" },
+});
+
+type Calls = {
+  listRoute?: unknown;
+  listParams?: Record<string, unknown>;
+  updateParams?: Record<string, unknown>;
+  createParams?: Record<string, unknown>;
+};
+
+type MockComment = { id: number; body?: string | null; user?: { type?: string } | null };
+
+const degradedBotMarker = (id: number, round: number) => ({
+  id,
+  body: `<!-- mstar-inspector:review-degraded:v1 round=${round} -->\n**Review degraded: output failed schema validation**`,
+  user: { type: "Bot" },
+});
+
+describe("parseDegradedRound / findDegradedComment / planDegradedUpsert", () => {
+  test("parses a well-formed degraded marker; null on malformed / absent", () => {
+    expect(parseDegradedRound("<!-- mstar-inspector:review-degraded:v1 round=2 -->\nbody")).toBe(2);
+    expect(parseDegradedRound("<!-- mstar-inspector:review-degraded:v1 round=abc -->")).toBeNull();
+    expect(parseDegradedRound("no marker")).toBeNull();
+  });
+
+  test("chain separation: a real review marker is a MISS for the degraded scan and vice versa", () => {
+    // The degraded prefix never starts with `review:v1` and the review scan
+    // never matches `review-degraded:v1` — the chains cannot cross.
+    expect(findDegradedComment([botReviewMarker(7, 2)])).toBeNull();
+    expect(findReviewComment([degradedBotMarker(7, 2)])).toBeNull();
+    expect(planDegradedUpsert([botReviewMarker(7, 2)])).toEqual({ action: "create", round: 1 });
+    expect(planUpsert([degradedBotMarker(7, 2)])).toEqual({ action: "create", round: 1 });
+  });
+
+  test("bot-authorship gate + prefix restriction + create/update plan mirror the review chain", () => {
+    // Human-planted degraded marker → miss; bot marker → update round=N+1.
+    expect(findDegradedComment([{ id: 9, body: "<!-- mstar-inspector:review-degraded:v1 round=5 -->\nplanted", user: { type: "User" } }])).toBeNull();
+    expect(planDegradedUpsert([degradedBotMarker(7, 5)])).toEqual({ action: "update", commentId: 7, round: 6 });
+    expect(planDegradedUpsert([{ id: 8, body: "a human comment", user: { type: "User" } }])).toEqual({
+      action: "create",
+      round: 1,
+    });
+    // Excluded ids (403/404 recovery) are skipped.
+    expect(planDegradedUpsert([degradedBotMarker(7, 2), degradedBotMarker(8, 1)], new Set([7]))).toEqual({
+      action: "update",
+      commentId: 8,
+      round: 2,
+    });
+  });
+});
+
+describe("buildDegradedBody", () => {
+  const sha = "0123456789abcdef0123456789abcdef01234567";
+  const input = { error: "not valid ReviewOutput JSON", rawOutput: "not json at all", round: 2 };
+
+  test("marker line, headline, error line, and the raw excerpt behind a details collapse", () => {
+    const body = buildDegradedBody(input);
+    const lines = body.split("\n");
+    expect(lines[0]).toBe("<!-- mstar-inspector:review-degraded:v1 round=2 -->");
+    expect(lines[1]).toBe("**Review degraded: output failed schema validation**");
+    expect(body).toContain("not valid ReviewOutput JSON");
+    expect(body).toContain("<details>");
+    expect(body).toContain("not json at all");
+  });
+
+  test("excerpt is REDACTED BEFORE truncation — a secret never survives, whole or partial (AL-1)", () => {
+    const secret = "ghp_" + "a".repeat(36);
+    // Secret INSIDE the excerpt window → redaction marker, never the token.
+    const inside = buildDegradedBody({ ...input, rawOutput: `${"x".repeat(500)} ${secret} ${"y".repeat(2000)}` });
+    expect(inside).not.toContain(secret);
+    expect(inside).toContain("[REDACTED]");
+    // Secret STRADDLING the 1000-char cut → redact-first leaves no partial
+    // token (a truncate-first order would leak the token's first chars).
+    const straddling = buildDegradedBody({ ...input, rawOutput: `${"x".repeat(980)} ${secret}` });
+    expect(straddling).not.toContain(secret);
+    expect(straddling).not.toContain("ghp_");
+  });
+
+  test("the ERROR line is redacted too — a zod `received` token never reaches the body (AL-1)", () => {
+    // parseReviewOutput zod errors can echo the offending value, e.g. an
+    // enum failure on verdict — the received span rides the error line
+    // ABOVE the details fold, so it must be redactSecrets'd like the
+    // excerpt (redact-then-truncate keeps the order safe).
+    const token = "ghp_" + "b".repeat(36);
+    const body = buildDegradedBody({
+      ...input,
+      error: `schema validation failed at verdict: Invalid enum value. Expected 'ship it' | 'needs fixes' | 'blocked', received '${token}'`,
+    });
+    expect(body).not.toContain(token);
+    expect(body).not.toContain("ghp_");
+    expect(body).toContain("[REDACTED]");
+  });
+
+  test("excerpt ≤ 1000 chars; over-budget output is truncated with an ellipsis", () => {
+    const body = buildDegradedBody({ ...input, rawOutput: "y".repeat(5000) });
+    const excerpt = body.slice(body.indexOf("```\n") + 4, body.lastIndexOf("\n```"));
+    expect(excerpt.length).toBe(DEGRADED_EXCERPT_LIMIT); // budget incl. ellipsis
+    expect(excerpt.endsWith("…")).toBe(true);
+  });
+
+  test("the code fence sizes past the excerpt's longest backtick run (runner prints fenced JSON)", () => {
+    const body = buildDegradedBody({ ...input, rawOutput: "```json\n{\"broken\": true}\n```" });
+    // The excerpt contains ``` runs — the surrounding fence must be longer.
+    expect(body).toContain("````");
+    const excerpt = body.slice(body.indexOf("````\n") + 5, body.lastIndexOf("\n````"));
+    expect(excerpt).toContain('```json');
+  });
+
+  test("an absurdly long parse error still keeps the body under REVIEW_BODY_LIMIT", () => {
+    const body = buildDegradedBody({ ...input, error: "z".repeat(REVIEW_BODY_LIMIT), round: 1 });
+    expect(body.length).toBeLessThan(REVIEW_BODY_LIMIT);
+  });
+});
+
+describe("postDegraded wiring (mock octokit)", () => {
+  const degradeInput = {
+    installationId: 1,
+    owner: "acme",
+    repo: "widgets",
+    prNumber: 42,
+    error: "not valid ReviewOutput JSON",
+    rawOutput: "not json at all",
+  };
+
+  function mockOctok(comments: MockComment[], updateError?: unknown) {
+    const calls: Calls = {};
+    const octokit: PostOctokit = {
+      paginate: mock(
+        async (route: unknown, params: Record<string, unknown>): Promise<MockComment[]> => {
+          calls.listRoute = route;
+          calls.listParams = params;
+          return comments;
+        },
+      ),
+      rest: {
+        issues: {
+          listComments: mock(async (_params: Record<string, unknown>) => {
+            throw new Error("unexpected: listComments is driven through paginate");
+          }),
+          updateComment: mock(async (params: Record<string, unknown>) => {
+            calls.updateParams = params;
+            if (updateError) throw updateError;
+            return {};
+          }),
+          createComment: mock(async (params: Record<string, unknown>) => {
+            calls.createParams = params;
+            return {};
+          }),
+        },
+      },
+    };
+    return { calls, octokit };
+  }
+
+  test("no degraded marker → createComment with a round=1 degraded body", async () => {
+    const { calls, octokit } = mockOctok([{ id: 1, body: "a human comment" }]);
+    await postDegradedWithOctokit(octokit, degradeInput);
+    expect(calls.createParams).toMatchObject({ owner: "acme", repo: "widgets", issue_number: 42 });
+    const body = String(calls.createParams!.body);
+    expect(body).toMatch(/^<!-- mstar-inspector:review-degraded:v1 round=1 -->/);
+    expect(body).toContain("**Review degraded: output failed schema validation**");
+  });
+
+  test("a REAL review marker does not satisfy the degraded scan — still creates round=1", async () => {
+    const { calls, octokit } = mockOctok([botReviewMarker(7, 3)]);
+    await postDegradedWithOctokit(octokit, degradeInput);
+    expect(calls.updateParams).toBeUndefined();
+    expect(String(calls.createParams!.body)).toMatch(/^<!-- mstar-inspector:review-degraded:v1 round=1 -->/);
+  });
+
+  test("degraded marker hit → updateComment with round=N+1; 404 → replan to create round=1 (WF-003 parity)", async () => {
+    const { calls, octokit } = mockOctok([degradedBotMarker(7, 2)]);
+    await postDegradedWithOctokit(octokit, degradeInput);
+    expect(String(calls.updateParams!.body)).toMatch(/^<!-- mstar-inspector:review-degraded:v1 round=3 -->/);
+
+    const notFound = Object.assign(new Error("not found"), { status: 404 });
+    const recovery = mockOctok([degradedBotMarker(7, 2)], notFound);
+    await postDegradedWithOctokit(recovery.octokit, degradeInput);
+    expect(String(recovery.calls.createParams!.body)).toMatch(/^<!-- mstar-inspector:review-degraded:v1 round=1 -->/);
+  });
+});
+
+describe("missing octokit surface → per-chain error noun (review feedback fix)", () => {
+  test("the review chain names the review comment; the degraded chain names the degraded comment", async () => {
+    const bare = {} as PostOctokit;
+    await expect(
+      postReviewWithOctokit(bare, {
+        installationId: 1,
+        owner: "acme",
+        repo: "widgets",
+        prNumber: 42,
+        headSha: "0123456789abcdef0123456789abcdef01234567",
+        output: { schema: "mstar.review/v1", verdict: "blocked", summary_md: "s", findings: [] },
+      }),
+    ).rejects.toThrow(/cannot upsert the review comment/);
+    await expect(
+      postDegradedWithOctokit(bare, {
+        installationId: 1,
+        owner: "acme",
+        repo: "widgets",
+        prNumber: 42,
+        error: "not valid ReviewOutput JSON",
+        rawOutput: "not json at all",
+      }),
+    ).rejects.toThrow(/cannot upsert the degraded comment/);
   });
 });

@@ -360,6 +360,133 @@ describe("migrations/0009_app_model_roles.sql", () => {
   });
 });
 
+describe("migrations/0010_review_failures.sql", () => {
+  /** Apply one migration file verbatim (filename order = wrangler order). */
+  function applyMigrationFile(db: ReturnType<typeof createTestD1>, name: string): void {
+    db.raw.exec(readFileSync(join(MIGRATIONS_DIR, name), "utf8"));
+  }
+
+  /** Raw-insert one failure row (full column control). */
+  function insertFailure(
+    db: ReturnType<typeof createTestD1>,
+    overrides: Partial<Record<string, unknown>> = {},
+  ): void {
+    const row = {
+      id: "failure-1",
+      installation_id: 123,
+      owner: "acme",
+      repo: "widgets",
+      pr_number: 42,
+      head_sha: "0123456789abcdef0123456789abcdef01234567",
+      stage: "parse",
+      error: "not valid ReviewOutput JSON",
+      ...overrides,
+    };
+    db.raw
+      .prepare(
+        `INSERT INTO review_failures (id, installation_id, owner, repo, pr_number, head_sha, stage, error)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(row.id, row.installation_id, row.owner, row.repo, row.pr_number, row.head_sha, row.stage, row.error);
+  }
+
+  test("applies cleanly over a seeded production-shaped DB (0001–0009 with live rows); existing tables untouched", () => {
+    const db = createTestD1();
+    insertReview(db); // a live review predates the CREATE TABLE (wrangler order)
+    for (const name of [
+      "0003_dashboard_users.sql",
+      "0004_github_apps.sql",
+      "0005_reviews_app_id.sql",
+      "0006_app_provider_config.sql",
+      "0007_reviews_app_id_index.sql",
+      "0008_github_apps_ops.sql",
+      "0009_app_model_roles.sql",
+    ]) {
+      applyMigrationFile(db, name);
+    }
+
+    // Append-only CREATE TABLE over the live rows — nothing existing changes.
+    expect(() => applyMigrationFile(db, "0010_review_failures.sql")).not.toThrow();
+    const reviewCount = db.raw.query("SELECT COUNT(*) AS n FROM reviews").get() as { n: number };
+    expect(reviewCount.n).toBe(1);
+    const index = db.raw
+      .query("SELECT name FROM sqlite_master WHERE type = 'index' AND name = 'idx_review_failures_created'")
+      .get();
+    expect(index).toBeDefined();
+  });
+
+  test("created_at defaults to datetime('now'); every NOT NULL column rejects NULL", () => {
+    const db = createMigratedTestD1();
+    insertFailure(db);
+    const row = db.raw.query("SELECT * FROM review_failures").get() as {
+      id: string;
+      created_at: string;
+    };
+    expect(row.created_at).toMatch(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/);
+
+    // A NULL in any one of the NOT NULL columns is refused while the rest
+    // stay valid.
+    const base = {
+      installation_id: 123,
+      owner: "acme",
+      repo: "widgets",
+      pr_number: 42,
+      head_sha: "0123456789abcdef0123456789abcdef01234567",
+      stage: "parse",
+      error: "err",
+    };
+    for (const column of Object.keys(base)) {
+      // The nulled column is only known at runtime; the cast restores the
+      // static shape so bun:sqlite's binding types accept the spread.
+      const values = { ...base, [column]: null } as typeof base;
+      expect(() =>
+        db.raw
+          .prepare(
+            `INSERT INTO review_failures (id, installation_id, owner, repo, pr_number, head_sha, stage, error)
+             VALUES ('f-null', ?, ?, ?, ?, ?, ?, ?)`,
+          )
+          .run(
+            values.installation_id,
+            values.owner,
+            values.repo,
+            values.pr_number,
+            values.head_sha,
+            values.stage,
+            values.error,
+          ),
+      ).toThrow(/NOT NULL constraint failed/);
+    }
+  });
+
+  test("stage has NO CHECK — the vocabulary is producer-side (0009 precedent); any stage string is storable", () => {
+    const db = createMigratedTestD1();
+    insertFailure(db, { stage: "runner" });
+    insertFailure(db, { id: "failure-2", stage: "sandbox" });
+    insertFailure(db, { id: "failure-3", stage: "pipeline" });
+    // Even a nonsense stage stores — the store leaf's FAILURE_STAGES gate is
+    // the enforcement point, never the schema.
+    insertFailure(db, { id: "failure-4", stage: "not-a-stage" });
+    const count = db.raw.query("SELECT COUNT(*) AS n FROM review_failures").get() as { n: number };
+    expect(count.n).toBe(4);
+  });
+
+  test("rows are per-attempt events — the five-tuple is NOT unique; head_sha may be empty (pre-checkout failure)", () => {
+    const db = createMigratedTestD1();
+    insertFailure(db);
+    insertFailure(db, { id: "failure-2" }); // same sha, attempt 2 (retry)
+    insertFailure(db, { id: "failure-3", head_sha: "" }); // failed before the checkout resolved
+    const count = db.raw.query("SELECT COUNT(*) AS n FROM review_failures").get() as { n: number };
+    expect(count.n).toBe(3);
+  });
+
+  test("era invariant: a failure row never writes reviews — the tables stay separate", () => {
+    const db = createMigratedTestD1();
+    insertFailure(db);
+    const reviewCount = db.raw.query("SELECT COUNT(*) AS n FROM reviews").get() as { n: number };
+    expect(reviewCount.n).toBe(0);
+  });
+});
+
 describe("migrations/0002_mstar_review_v1.sql", () => {
   test("adds the envelope column to reviews (TEXT, nullable)", async () => {
     const db = createTestD1();
