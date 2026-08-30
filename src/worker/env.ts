@@ -67,4 +67,25 @@ export type Env = {
    * is denied (403, zero cookies) until an admin invites it.
    */
   ADMIN_LOGINS?: string;
+  /**
+   * Optional ops alert webhook (plan 19 T1, architect verdict AL-6): when
+   * set, the cron sweep POSTs the `ops_sweep_alert` payload here on
+   * threshold breach (JSON body, 3s timeout; a POST failure degrades to a
+   * warn log — src/worker/sweep.ts). Absent/empty = log-only alerting.
+   * wrangler secret / .dev.vars only — never in git.
+   */
+  ALERT_WEBHOOK_URL?: string;
+};
+
+/**
+ * Cron scheduled-face environment (plan 19 T1, AL-6): the `scheduled`
+ * handler receives the same Worker bindings as every other face; this
+ * narrows the type to what the sweep actually reads. `DB` stays optional
+ * (the shared fetch-face `Env` declares it optional) — unbound fails closed
+ * with a warn, never a throw. The sweep is read-only: no queue/KV mutation
+ * from this face, so those bindings are deliberately absent here.
+ */
+export type ScheduledEnv = {
+  DB?: D1Database;
+  ALERT_WEBHOOK_URL?: string;
 };
