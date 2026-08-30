@@ -8,8 +8,10 @@
  *     env name (empty/whitespace keys and unknown provider ids never inject);
  *   - every provider the App did NOT configure falls back to the global env
  *     key (spec fallback chain — zero-config Apps keep working);
- *   - an App model chain overrides OMP_REVIEW_MODEL; null/"" = unset → global
- *     chain unchanged (T1-review forward note: any falsy chain is unset);
+ *   - an App model chain overrides OMP_REVIEW_MODEL; null/""/whitespace-only =
+ *     unset → global chain unchanged (plan 15 input bounds: any falsy or
+ *     blank chain — including a direct-DB write the store never saw — is
+ *     unset; a padded chain with content forwards VERBATIM);
  *   - every injected key logs `key_source: app|global` (the source, never the
  *     key) and the assembly logs `config_source: app|fallback`;
  *   - legacy (appRef absent / `{ kind: "legacy" }`) → `appCfg` undefined →
@@ -18,6 +20,13 @@
  *     env) — cross-App leakage is structurally impossible (full-object pins);
  *   - an UNREADABLE App key (tampered envelope / missing master key) fails
  *     closed BEFORE guard/sandbox — never a silent fallback to global keys.
+ *
+ * Runner-input threading (plan 17 Task 1): for `{kind:"app"}` messages the
+ * consumer resolves the App's per-role selector map (decrypt-free
+ * `getAppModelRoles`) into the runner input JSON's OPTIONAL `modelOverrides`
+ * field; legacy/absent appRef and empty maps omit the field entirely
+ * (byte-identical payload). The runner-side guard/type extension is plan 17
+ * Task 2's.
  *
  * Same technique as tests/pipeline/consumer.test.ts: sandbox + commenters
  * injected via createReviewConsumer overrides (no process-wide relative-path
@@ -231,6 +240,21 @@ function runnerEnvs(): Array<Record<string, string>> {
     .map((c) => (c.opts as { env?: Record<string, string> }).env ?? {});
 }
 
+/**
+ * The DECODED runner input JSON payloads, in write order (one per
+ * `printf … | base64 -d > '/workspace/review-input.json'` step — the runner
+ * exec command references the same path but carries no base64 payload).
+ */
+function runnerInputs(): Array<Record<string, unknown>> {
+  return sandboxCalls
+    .filter((c) => c.cmd.includes("base64 -d > '/workspace/review-input.json'"))
+    .map((c) => {
+      const payload = /printf '%s' '([A-Za-z0-9+/=]+)' \| base64 -d/.exec(c.cmd)?.[1];
+      if (!payload) throw new Error(`runner-input write command without a base64 payload: ${c.cmd}`);
+      return JSON.parse(atob(payload)) as Record<string, unknown>;
+    });
+}
+
 /** The assembly log lines (key_source per injected key + config_source summary). */
 function keySourceLines(): Array<{ fields: ConsumerLogFields; msg: string }> {
   return logLines.filter((l) => l.fields.key_source !== undefined);
@@ -407,8 +431,8 @@ describe("per-App runner env assembly (plan 14 Task 3, spec § Per-App BYOK)", (
     const appY = await seedApp(db, "app-y");
     const appZ = await seedApp(db, "app-z");
     await createAppConfigStore(db, TEST_KEY).setModelChain(appX.id, "openai/gpt-app,anthropic/claude-app");
-    // Y stores an EMPTY chain — the T1-review forward note: any falsy chain
-    // (empty string or null) is unset → the global chain stays.
+    // Y's chain is EMPTY — the store itself clears it (plan 15: "" = same path
+    // as null), so Y reads back a null chain → the global chain stays.
     await createAppConfigStore(db, TEST_KEY).setModelChain(appY.id, "");
     const consumer = createReviewConsumer(
       makeEnv({ DB: db as never, OMP_REVIEW_MODEL: "ark-plan/global-chain" }),
@@ -433,6 +457,52 @@ describe("per-App runner env assembly (plan 14 Task 3, spec § Per-App BYOK)", (
     expect(cfgLines[0]?.fields.config_source).toBe("app");
     expect(cfgLines[1]?.fields.config_source).toBe("fallback");
     expect(cfgLines[2]?.fields.config_source).toBe("fallback");
+  });
+
+  test("blank chain via direct-DB write is unset; a padded real chain forwards VERBATIM (plan 15 trim guard)", async () => {
+    reset();
+    const db = createMigratedTestD1();
+    const appX = await seedApp(db, "app-x");
+    const appY = await seedApp(db, "app-y");
+    // Bypass the store (the plan-15 threat model: a direct DB write can hold a
+    // blank chain the routes would have normalized away) — the raw rows pin
+    // the buildRunnerEnv trim guard itself, independent of store semantics.
+    db.raw
+      .prepare(
+        `INSERT INTO app_model_config (app_id, model_chain, updated_at)
+         VALUES (?, '   ', datetime('now'))`,
+      )
+      .run(appX.id);
+    const padded = "  openai/gpt-padded , anthropic/claude-padded  ";
+    db.raw
+      .prepare(
+        `INSERT INTO app_model_config (app_id, model_chain, updated_at)
+         VALUES (?, ?, datetime('now'))`,
+      )
+      .run(appY.id, padded);
+    const consumer = createReviewConsumer(
+      makeEnv({ DB: db as never, OMP_REVIEW_MODEL: "ark-plan/global-chain" }),
+      testLog,
+      testOverrides,
+    );
+
+    await consumer(
+      makeBatch(
+        makePayload({ pr_number: 42, appRef: { kind: "app", appId: appX.id } }),
+        makePayload({ pr_number: 43, appRef: { kind: "app", appId: appY.id } }),
+      ),
+    );
+
+    const [xEnv, yEnv] = runnerEnvs() as [Record<string, string>, Record<string, string>];
+    // Whitespace-only chain = unset → the global chain reaches the runner.
+    expect(xEnv.OMP_REVIEW_MODEL).toBe("ark-plan/global-chain");
+    // A padded chain WITH content is configuration — forwarded exactly as
+    // stored (the guard only decides unset-vs-set; it never mutates the value;
+    // the runner-side selector parse trims segments).
+    expect(yEnv.OMP_REVIEW_MODEL).toBe(padded);
+    const cfgLines = logLines.filter((l) => l.fields.config_source !== undefined);
+    expect(cfgLines[0]?.fields.config_source).toBe("fallback");
+    expect(cfgLines[1]?.fields.config_source).toBe("app");
   });
 
   test("cross-App isolation: App X's env never contains App Y's key names or values (full env object)", async () => {
@@ -600,6 +670,12 @@ describe("per-App runner env assembly (plan 14 Task 3, spec § Per-App BYOK)", (
       PI_CODING_AGENT_DIR: "/opt/omp-agent",
     });
     expect(JSON.stringify(runnerEnvs()[0])).not.toContain("sk-rogue-SECRET");
+    // Plan 15 log hygiene (硬化项 3): the rogue row's skip is a structured
+    // warn carrying the provider id + app_id — never key material.
+    const warn = logLines.find((l) => l.level === "warn" && l.fields.provider === "not-a-provider");
+    expect(warn).toBeDefined();
+    expect(warn!.fields.app_id).toBe(appX.id);
+    expect(JSON.stringify(warn)).not.toContain("sk-rogue-SECRET");
   });
 
   test("whitespace-only App key is not configured → global fallback (same rule as pickProviderKeys)", async () => {
@@ -619,5 +695,129 @@ describe("per-App runner env assembly (plan 14 Task 3, spec § Per-App BYOK)", (
     expect(env.ANTHROPIC_API_KEY).toBe("sk-global-anthropic-SECRET");
     const line = keySourceLines().find((l) => l.fields.provider === "anthropic");
     expect(line?.fields.key_source).toBe("global");
+  });
+});
+
+// --- runner input modelOverrides threading (plan 17 Task 1) ---
+
+describe("runner input modelOverrides threading (plan 17 Task 1)", () => {
+  test("app message with a role map: the input JSON carries modelOverrides exactly as mapped (:thinking suffix verbatim)", async () => {
+    reset();
+    const db = createMigratedTestD1();
+    const appX = await seedApp(db, "app-x");
+    const store = createAppConfigStore(db, TEST_KEY);
+    await store.setModelRole(appX.id, "mstar-review-seat", "ark-plan/deepseek-v4-flash:high");
+    await store.setModelRole(appX.id, "code-reviewer", "openai/gpt-5:thinking, anthropic/claude-x");
+    const consumer = createReviewConsumer(makeEnv({ DB: db as never }), testLog, testOverrides);
+
+    await consumer(makeBatch(makePayload({ appRef: { kind: "app", appId: appX.id } })));
+
+    const input = runnerInputs()[0]!;
+    expect(input.modelOverrides).toEqual({
+      "mstar-review-seat": "ark-plan/deepseek-v4-flash:high",
+      "code-reviewer": "openai/gpt-5:thinking, anthropic/claude-x",
+    });
+    // The field rides AFTER the pre-plan-17 shape (additive optional field).
+    expect(Object.keys(input)).toEqual(["worktreePath", "reconFacts", "modelOverrides"]);
+  });
+
+  test("app message with NO role map: input JSON BYTE-IDENTICAL to the legacy payload (field omitted)", async () => {
+    reset();
+    const appDb = createMigratedTestD1();
+    const appX = await seedApp(appDb, "app-x"); // github_apps row, NO role rows
+    const appConsumer = createReviewConsumer(makeEnv({ DB: appDb as never }), testLog, testOverrides);
+    await appConsumer(makeBatch(makePayload({ pr_number: 42, appRef: { kind: "app", appId: appX.id } })));
+    const [appInput] = runnerInputs();
+    expect(Object.keys(appInput!)).toEqual(["worktreePath", "reconFacts"]);
+
+    // The same PR identity through the legacy path (appRef absent, fresh DB so
+    // the app run's artifact row cannot dedup it away): the decoded input
+    // documents must be byte-identical — absent map ⇒ absent field.
+    reset();
+    const legacyConsumer = createReviewConsumer(makeEnv({ DB: createMigratedTestD1() as never }), testLog, testOverrides);
+    await legacyConsumer(makeBatch(makePayload({ pr_number: 42 })));
+    const [legacyInput] = runnerInputs();
+    expect(Object.keys(legacyInput!)).toEqual(["worktreePath", "reconFacts"]);
+    expect(JSON.stringify(appInput)).toBe(JSON.stringify(legacyInput));
+  });
+
+  test("explicit legacy marker {kind:'legacy'}: field omitted", async () => {
+    reset();
+    const db = createMigratedTestD1();
+    const consumer = createReviewConsumer(makeEnv({ DB: db as never }), testLog, testOverrides);
+
+    await consumer(makeBatch(makePayload({ appRef: { kind: "legacy" } })));
+
+    const input = runnerInputs()[0]!;
+    expect(Object.keys(input)).toEqual(["worktreePath", "reconFacts"]);
+    expect(input.modelOverrides).toBeUndefined();
+  });
+
+  test("an all-cleared role map resolves to NO field (empty map = current behavior)", async () => {
+    reset();
+    const db = createMigratedTestD1();
+    const appX = await seedApp(db, "app-x");
+    const store = createAppConfigStore(db, TEST_KEY);
+    await store.setModelRole(appX.id, "mstar-review-seat", "first/model");
+    await store.setModelRole(appX.id, "mstar-review-seat", ""); // cleared → empty map
+    const consumer = createReviewConsumer(makeEnv({ DB: db as never }), testLog, testOverrides);
+
+    await consumer(makeBatch(makePayload({ appRef: { kind: "app", appId: appX.id } })));
+
+    const input = runnerInputs()[0]!;
+    expect(Object.keys(input)).toEqual(["worktreePath", "reconFacts"]);
+    expect(input.modelOverrides).toBeUndefined();
+  });
+
+  test("role maps are re-read per message: a dashboard role update applies to the very next review", async () => {
+    reset();
+    const db = createMigratedTestD1();
+    const appX = await seedApp(db, "app-x");
+    const store = createAppConfigStore(db, TEST_KEY);
+    await store.setModelRole(appX.id, "code-reviewer", "openai/v1");
+    const consumer = createReviewConsumer(makeEnv({ DB: db as never }), testLog, testOverrides);
+
+    await consumer(makeBatch(makePayload({ pr_number: 42, appRef: { kind: "app", appId: appX.id } })));
+    await store.setModelRole(appX.id, "code-reviewer", "openai/v2");
+    await consumer(makeBatch(makePayload({ pr_number: 43, appRef: { kind: "app", appId: appX.id } })));
+
+    const [first, second] = runnerInputs();
+    expect(first!.modelOverrides).toEqual({ "code-reviewer": "openai/v1" });
+    expect(second!.modelOverrides).toEqual({ "code-reviewer": "openai/v2" });
+  });
+
+  test("a roles-read failure rethrows with the per-App context wrapper (mirror of resolveAppConfig), zero side effects", async () => {
+    reset();
+    const db = createMigratedTestD1();
+    const appX = await seedApp(db, "app-x");
+    // Fail ONLY the model-roles read (the resolveModelOverrides face) — the
+    // PEM/config reads stay healthy, so the wrapper's prefix is observable.
+    const failingDb = new Proxy(db, {
+      get(target, prop, receiver) {
+        if (prop === "prepare") {
+          return (query: string) => {
+            if (query.includes("FROM app_model_roles")) throw new Error("roles read boom");
+            return (target as typeof db).prepare(query);
+          };
+        }
+        return Reflect.get(target, prop, receiver);
+      },
+    });
+    const consumer = createReviewConsumer(makeEnv({ DB: failingDb as never }), testLog, testOverrides);
+
+    await expect(
+      consumer(makeBatch(makePayload({ appRef: { kind: "app", appId: appX.id } }))),
+    ).rejects.toThrow(`per-App model-role resolution failed: app ${appX.id}: roles read boom`);
+
+    // Zero side effects: no sandbox, no input write, no guard acquisition
+    // (the read hangs off the appRef gate, before the in-flight guard).
+    expect(sandboxCalls).toHaveLength(0);
+    expect(runnerInputs()).toHaveLength(0);
+    expect(kvGuardPuts).toHaveLength(0);
+    // The structured failure log carries the same greppable prefix + app id.
+    const errLine = logLines.find((l) => l.level === "error");
+    expect(errLine).toBeDefined();
+    expect(errLine!.msg).toContain("per-App model-role resolution failed");
+    expect(errLine!.fields.app_id).toBe(appX.id);
   });
 });

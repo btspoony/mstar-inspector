@@ -28,8 +28,9 @@ import { dashboardApp } from "../dashboard/index";
 const app = new Hono<{ Bindings: Env }>();
 
 /**
- * Structured warn for the per-App route's rejection/bookkeeping paths (plan
- * 13 QC F-005): the caller passes the real stage label (e.g.
+ * Structured warn for the webhook faces' rejection/bookkeeping paths (plan
+ * 13 QC F-005; plan 15 extends it to the legacy face's pre-classify stage):
+ * the caller passes the real stage label (e.g. `webhook_body_too_large`,
  * `db_binding_missing`, `installation_upsert_failed`) and it rides `event` —
  * never the generic "unknown" — so log consumers can filter these warns by
  * event alone; `reason` keeps the same label for the reason-keyed greps and
@@ -48,14 +49,13 @@ app.post("/webhook", async (c) => {
   const secret = c.env.WEBHOOK_SECRET;
   // Body-size cap checked BEFORE buffering the body (B6): an oversized
   // payload is rejected with 413 before any signature work or body read.
+  // Plan 15 log hygiene: the legacy face uses the same structured stage
+  // warn as the per-App face — a real stage label, never "unknown".
   const contentLength = Number(c.req.header("content-length") ?? "0");
   if (contentLength > WEBHOOK_BODY_LIMIT) {
-    defaultLog.warn(
-      {
-        event: "unknown",
-        reason: "webhook_body_too_large",
-        detail: `content_length=${contentLength}`,
-      },
+    webhookWarn(
+      "webhook_body_too_large",
+      `content_length=${contentLength}`,
       "webhook rejected with 413 — body exceeds size limit",
     );
     return c.text("payload too large", 413);
@@ -67,7 +67,9 @@ app.post("/webhook", async (c) => {
   // T4 kill-switch: reviews run ONLY when REVIEW_ENABLED is exactly "true"
   // (fail-closed — unset/any other value → every webhook is ignored, 2xx).
   const reviewEnabled = c.env.REVIEW_ENABLED === "true";
-  const outcome = await classifyWebhook(secret, rawBody, signature, eventName, defaultLog, reviewEnabled);
+  // Plan 15 (architect lock L1): the legacy face memoizes its verifier under
+  // the dedicated "legacy" cacheKey — isolated from every per-App row id.
+  const outcome = await classifyWebhook(secret, rawBody, signature, eventName, defaultLog, reviewEnabled, "legacy");
 
   if (outcome.kind === "reject") {
     return c.text(outcome.reason, outcome.status);
@@ -97,6 +99,19 @@ app.post("/webhook", async (c) => {
  * Unknown slug / disabled / soft-deleted → 404, zero enqueue. Any webhook
  * secret decrypt failure (missing DASHBOARD_ENCRYPTION_KEY, tampered
  * envelope) → 500 fail-closed (lock L1); GitHub retries, nothing enqueues.
+ *
+ * Per-App pause (plan 16, spec 语义锁 B3 — paused ≠ disabled): once the
+ * signature VERIFIED (classifyWebhook returned a non-reject),
+ * `last_webhook_at` is touched exactly once — after signature verification,
+ * regardless of the subsequent enqueue outcome (job / ignore / paused; a
+ * queue-send failure below still leaves the touch committed), before the
+ * pause check. Reject paths and the pre-verify kill-switch return never
+ * touch, so the column reads "last verified delivery" (NOT "last successful
+ * enqueue") and is decoupled from the review switch. Then
+ * `review_enabled=0` answers 2xx with ZERO enqueue (the webhook stays
+ * healthy while reviews are paused); disabled/deleted keep their 404 above.
+ * The in-flight queue face ack-skips paused messages symmetrically
+ * (consumer lock L4).
  *
  * Install bookkeeping (plan 13 Task 4): a classified job payload always
  * carries `installation_id`, so the accepted path touches
@@ -188,12 +203,47 @@ app.post("/webhook/:appSlug", async (c) => {
     return c.text("webhook secret decrypt failed", 500);
   }
 
-  const outcome = await classifyWebhook(appSecret, rawBody, signature, eventName, defaultLog, reviewEnabled);
+  // Plan 15 (architect lock L1): the verifier memoizes under the row id as
+  // cacheKey — a rotated webhook secret (same id, new envelope → new
+  // secret) is rebuilt + REPLACED on the next delivery; entries are
+  // structurally bounded (≤ Apps + 1) with no eviction policy.
+  const outcome = await classifyWebhook(appSecret, rawBody, signature, eventName, defaultLog, reviewEnabled, row.id);
 
   if (outcome.kind === "reject") {
     return c.text(outcome.reason, outcome.status);
   }
+
+  // Plan 16 (L5): the signature VERIFIED (classifyWebhook returned a
+  // non-reject), so this delivery is touched — after signature verification,
+  // regardless of the subsequent enqueue outcome (job / ignore / paused; a
+  // queue-send failure in handleReviewJob below still leaves this touch
+  // committed). The reject returns above and the pre-verify kill-switch
+  // return never reach this line, so the column reads "last verified
+  // delivery", NOT "last successful enqueue". Best-effort (same pattern as
+  // the install upsert below): a failure logs a structured warn and never
+  // blocks the response.
+  try {
+    await appsStore.touchLastWebhook(row.id);
+  } catch (err) {
+    const detail = err instanceof Error ? err.message : String(err);
+    webhookWarn("last_webhook_touch_failed", detail, "last_webhook_at touch failed — webhook response unaffected");
+  }
+
   if (outcome.kind === "ignore") {
+    return c.text("ignored", 200);
+  }
+
+  // Pause gate (plan 16, spec 语义锁 B3 — paused ≠ disabled): review_enabled
+  // =0 answers 2xx with ZERO enqueue — the webhook stays healthy (and
+  // touched, above) while reviews are paused. disabled/deleted already
+  // returned 404 above; the consumer ack-skips the in-flight messages it
+  // can no longer prevent (lock L4).
+  if (row.review_enabled === 0) {
+    webhookWarn(
+      "review_paused",
+      `slug=${slug}`,
+      "per-App webhook ignored with 2xx — app review paused (zero enqueue)",
+    );
     return c.text("ignored", 200);
   }
   // Lock L3: the App identity is attached at the route handler — after

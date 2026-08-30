@@ -28,20 +28,36 @@
  * isolation stays intact. The `db` parameter is a locally-declared narrow D1
  * face (types only, zero imports) — a real `D1Database`, the bun:sqlite test
  * double (tests/store/helpers.ts), and the store layer's `D1Like` all satisfy
- * it structurally (same pattern as apps-store.ts; this store never batches).
+ * it structurally (same pattern as apps-store.ts). Every write here is a
+ * single statement EXCEPT setModelRoles (Phase 5 fix, PR #7 review): the
+ * role editor's full-map save is ONE atomic `db.batch` — the only batch on
+ * the face, added for multi-write atomicity, never for throughput.
+ *
+ * Model roles (plan 17 B6): `app_model_roles` (migration 0009) maps each of
+ * the 4 audit-seat agent names to its own selector chain per App. The role
+ * vocabulary lives here as the MODEL_ROLE_IDS mirror (importing the runner
+ * side via src/review is forbidden by the dashboard isolation — Q2), and the
+ * selector grammar is validated with the parseModelChain mirror above; both
+ * copies are parity-locked by tests/worker/app-config.test.ts. Roles are
+ * decrypt-free (selectors are configuration, not secrets) and are consumed
+ * by the pipeline consumer as the runner input `modelOverrides` field.
  *
  * Semantics (the Task 2 UI + Task 3 consumer call sites rely on these):
  *   - setProviderKey upserts: re-setting a provider replaces the ciphertext
- *     (one row per (app_id, provider) — the composite PK).
+ *     (one row per (app_id, provider) — the composite PK). A key longer than
+ *     MAX_PROVIDER_KEY_LENGTH (4096) throws ProviderKeyTooLongError before
+ *     any crypto or write (plan 15 input bounds; the settings route re-renders
+ *     400 first — the guard here is the backstop for direct callers).
  *   - removeProviderKey returns whether a row was deleted (an unconfigured
  *     provider is an idempotent no-op, like setAppStatus).
  *   - listProviderKeys is the settings-page face: provider + masked tail
  *     only, provider-ascending; a key of ≤4 characters reveals NOTHING
  *     (the mask must never render a whole key).
- *   - setModelChain(null) REMOVES the row (absent = unset = global fallback,
- *     Clarify #2: 空 = 全局); a non-null chain upserts verbatim. Read it
- *     back with getModelChain (the settings route prefills the editor from
- *     it WITHOUT decrypting any key material).
+ *   - setModelChain(null) — or any BLANK chain (empty / whitespace-only,
+ *     plan 15: aligned with the route's 空 = 清除) — REMOVES the row (absent
+ *     = unset = global fallback, Clarify #2: 空 = 全局); a chain with content
+ *     upserts verbatim. Read it back with getModelChain (the settings route
+ *     prefills the editor from it WITHOUT decrypting any key material).
  *   - getAppConfig decrypts for the consumer face: an App with no config
  *     yields an EMPTY keys map and a null chain (zero-config compatibility —
  *     the consumer falls back to global env), and an undecryptable row is a
@@ -67,6 +83,15 @@ export type AppModelConfigRow = {
   /** Verbatim comma-separated selector chain; NULL = unset (global fallback). */
   model_chain: string | null;
   updated_at: string;
+};
+
+/** A row of `app_model_roles` (migration 0009, plan 17). Absent row = the role is unmapped (chain behavior). */
+export type AppModelRoleRow = {
+  app_id: string;
+  /** One of the MODEL_ROLE_IDS audit-seat agent names. */
+  role: string;
+  /** Verbatim comma-separated selector chain — configuration, not a secret. */
+  selector: string;
 };
 
 /**
@@ -100,6 +125,25 @@ export const PROVIDER_IDS: readonly string[] = Object.freeze([
 ]);
 
 /**
+ * The per-role model vocabulary (plan 17 B6, spec § B6 语义锁) — EXACTLY the
+ * 4 audit-seat agent names the runner dispatches: `mstar-review-seat` is the
+ * quick/default seat (the agent definition installed from
+ * src/review/seat-agent.md), the three deep seats are the harness roles
+ * dispatched by name from runtime-omp's DEEP_SEAT_ROLES. Declared locally,
+ * NOT imported: dashboard modules must not import review code (architect
+ * decision Q2, src/dashboard/index.ts header). The copy is locked in sync by
+ * tests/worker/app-config.test.ts against both review-side definitions (the
+ * PROVIDER_IDS parity-lock pattern). UI and storage expose ONLY these 4 keys;
+ * runner-side consumption of unknown names is a lazy pass-through (lock L3).
+ */
+export const MODEL_ROLE_IDS: readonly string[] = Object.freeze([
+  "mstar-review-seat",
+  "code-reviewer",
+  "fullstack-dev",
+  "frontend-dev",
+]);
+
+/**
  * Mirror of src/review/runtime-omp.ts `parseModelSelectors` (runtime-omp.ts:119):
  * comma-separated, trimmed, empty segments dropped; `undefined`/empty → `[]`.
  * Selectors pass through verbatim — a `:thinking`-style suffix is legal omp
@@ -116,11 +160,84 @@ export function parseModelChain(raw: string | undefined): string[] {
 }
 
 /**
+ * Provider-key length bound (plan 15 Task 1, spec dashboard-ops-and-role-models
+ * § 硬化项 4): a pasted API key longer than this is rejected BEFORE any
+ * encryption or D1 write, so an oversized input can never bloat the store.
+ */
+export const MAX_PROVIDER_KEY_LENGTH = 4096;
+
+/**
+ * Input-bound error (plan 15): the plaintext key passed to setProviderKey
+ * exceeds MAX_PROVIDER_KEY_LENGTH. The settings route never surfaces it —
+ * it validates the same bound first and re-renders 400 — so this typed throw
+ * is the backstop for any caller that skips the route. Same class convention
+ * as SecretboxKeyError (name set for structured logs).
+ */
+export class ProviderKeyTooLongError extends Error {
+  constructor() {
+    super(`provider API key exceeds the ${MAX_PROVIDER_KEY_LENGTH}-character limit`);
+    this.name = "ProviderKeyTooLongError";
+  }
+}
+
+/**
+ * Role-vocabulary error (plan 17): a setModelRole/setModelRoles/clearModelRole
+ * call named a role outside MODEL_ROLE_IDS. The settings route re-renders 400
+ * first (plan 17 Task 3); this typed throw is the backstop for direct callers.
+ * Same class convention as ProviderKeyTooLongError (name set for structured
+ * logs).
+ */
+export class UnknownModelRoleError extends Error {
+  constructor(role: string) {
+    super(
+      `unknown model role ${JSON.stringify(role)} (expected one of: ${MODEL_ROLE_IDS.join(", ")})`,
+    );
+    this.name = "UnknownModelRoleError";
+  }
+}
+
+/**
+ * Selector-grammar error (plan 17): a role selector with content parses to
+ * ZERO comma-separated selectors (e.g. only commas/whitespace — the same
+ * parseModelChain mirror the save-chain route 400s against). A BLANK selector
+ * is NOT an error: it clears the mapping (the setModelChain 空 = 清除
+ * convention).
+ */
+export class InvalidModelSelectorError extends Error {
+  constructor(selector: string) {
+    super(
+      `invalid model selector chain ${JSON.stringify(selector)}: at least one comma-separated model selector required`,
+    );
+    this.name = "InvalidModelSelectorError";
+  }
+}
+
+/**
  * Composite-PK secretbox AAD rowKey (lock L1): the envelope is bound to BOTH
  * primary-key columns of app_provider_keys, joined in DDL order.
  */
 function providerKeyAad(appId: string, provider: string): string {
   return `app_provider_keys.key_enc:${appId}:${provider}`;
+}
+
+/** Role vocabulary gate: anything outside MODEL_ROLE_IDS is a caller bug. */
+function assertModelRole(role: string): void {
+  if (!MODEL_ROLE_IDS.includes(role)) {
+    throw new UnknownModelRoleError(role);
+  }
+}
+
+/**
+ * Validate one (role, selector) entry (plan 17): the role must be on the
+ * MODEL_ROLE_IDS vocabulary and a selector WITH content must parse to ≥1
+ * comma-separated selector (the parseModelChain mirror). A BLANK selector is
+ * legal by design — it clears the mapping.
+ */
+function assertModelRoleEntry(role: string, selector: string): void {
+  assertModelRole(role);
+  if (selector.trim() !== "" && parseModelChain(selector).length === 0) {
+    throw new InvalidModelSelectorError(selector);
+  }
 }
 
 /**
@@ -148,9 +265,31 @@ export type AppConfig = {
 };
 
 /**
+ * One statement's result inside a D1 `batch()` (order matches input).
+ * Declared locally — same shape as src/store/types.ts `D1BatchResult`.
+ */
+export type AppConfigBatchResult = {
+  results: unknown[];
+  meta: { changes: number; last_row_id: number };
+};
+
+/**
+ * The D1 `batch` face alone (exported for callers): a holder of a narrower
+ * D1 face that lacks batch (e.g. users.ts `DashboardD1`) intersects with
+ * this — truthful for the runtime D1Database binding and the bun:sqlite
+ * test double, which both implement batch.
+ */
+export type AppConfigBatchFace = {
+  batch(statements: AppConfigStatement[]): Promise<AppConfigBatchResult[]>;
+};
+
+/**
  * Narrow D1 face, declared locally so this leaf module imports nothing
- * structural (prepare/bind/first/all/run; no batch — this store never
- * batches).
+ * structural: prepare/bind/first/all/run for every single-statement write,
+ * plus exactly ONE `batch` (the setModelRoles atomic full-map save — the
+ * store never batches for any other purpose). A real `D1Database`, the
+ * bun:sqlite test double (tests/store/helpers.ts) and the store layer's
+ * `D1Like` all satisfy it structurally.
  */
 type AppConfigStatement = {
   bind(...values: unknown[]): AppConfigStatement;
@@ -162,8 +301,9 @@ type AppConfigStatement = {
   }>;
 };
 
-type AppConfigD1 = {
+export type AppConfigD1 = {
   prepare(query: string): AppConfigStatement;
+  batch(statements: AppConfigStatement[]): Promise<AppConfigBatchResult[]>;
 };
 
 /**
@@ -182,13 +322,61 @@ export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | un
     return row?.model_chain ?? null;
   }
 
+  /**
+   * The App's role → selector map, role-ascending for deterministic key
+   * order; only MAPPED roles appear (no row = unmapped = chain behavior).
+   */
+  async function readModelRoles(appId: string): Promise<Record<string, string>> {
+    const res = await db
+      .prepare(`SELECT role, selector FROM app_model_roles WHERE app_id = ? ORDER BY role ASC`)
+      .bind(appId)
+      .all<Pick<AppModelRoleRow, "role" | "selector">>();
+    const roles: Record<string, string> = {};
+    for (const row of res.results) {
+      roles[row.role] = row.selector;
+    }
+    return roles;
+  }
+
+  /** Prepared DELETE for one role's mapping row (run() or ride in a batch). */
+  function deleteModelRoleStatement(appId: string, role: string): AppConfigStatement {
+    return db.prepare(`DELETE FROM app_model_roles WHERE app_id = ? AND role = ?`).bind(appId, role);
+  }
+
+  /** Prepared verbatim upsert of one role's selector (run() or ride in a batch). */
+  function upsertModelRoleStatement(appId: string, role: string, selector: string): AppConfigStatement {
+    return db
+      .prepare(
+        `INSERT INTO app_model_roles (app_id, role, selector)
+         VALUES (?, ?, ?)
+         ON CONFLICT (app_id, role) DO UPDATE SET
+           selector = excluded.selector`,
+      )
+      .bind(appId, role, selector);
+  }
+
+  /** Delete one role's mapping row (idempotent — an unmapped role deletes nothing). */
+  async function deleteModelRole(appId: string, role: string): Promise<void> {
+    await deleteModelRoleStatement(appId, role).run();
+  }
+
+  /** Upsert one role's selector VERBATIM (one row per (app_id, role) composite PK). */
+  async function upsertModelRole(appId: string, role: string, selector: string): Promise<void> {
+    await upsertModelRoleStatement(appId, role, selector).run();
+  }
+
   return {
     /**
      * Store (or replace) one provider key for the App: encrypts INSIDE with
      * the composite-PK AAD, then upserts the (app_id, provider) row. The
-     * plaintext is never persisted, logged, or returned.
+     * plaintext is never persisted, logged, or returned. A key longer than
+     * MAX_PROVIDER_KEY_LENGTH throws ProviderKeyTooLongError before any
+     * crypto or write (the route answers 400 first; this is the backstop).
      */
     async setProviderKey(appId: string, provider: string, plainKey: string): Promise<void> {
+      if (plainKey.length > MAX_PROVIDER_KEY_LENGTH) {
+        throw new ProviderKeyTooLongError();
+      }
       const keyEnc = await box.encryptSecret(plainKey, providerKeyAad(appId, provider));
       await db
         .prepare(
@@ -236,11 +424,13 @@ export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | un
 
     /**
      * Store the App's model chain VERBATIM (the route has already validated
-     * ≥1 selector), or clear it with `null` (row removed — absent = unset =
-     * global fallback).
+     * ≥1 selector), or clear it: `null` AND any blank chain (empty or
+     * whitespace-only — the route's 空 = 清除 semantics, plan 15 alignment)
+     * REMOVE the row (absent = unset = global fallback). A chain with content
+     * upserts verbatim, interior/trailing whitespace included.
      */
     async setModelChain(appId: string, chain: string | null): Promise<void> {
-      if (chain === null) {
+      if (chain === null || chain.trim() === "") {
         await db.prepare(`DELETE FROM app_model_config WHERE app_id = ?`).bind(appId).run();
         return;
       }
@@ -277,6 +467,72 @@ export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | un
         keys[row.provider] = await box.decryptSecret(row.key_enc, providerKeyAad(row.app_id, row.provider));
       }
       return { appId, keys, modelChain: await readModelChain(appId) };
+    },
+
+    /**
+     * The App's per-role selector map (plan 17 B6): role → verbatim selector
+     * chain, only the MAPPED roles appear; an App with no mapped roles
+     * yields `{}` (= today's chain behavior). Decrypt-free by design — a
+     * model selector is configuration, not a secret (the 0006 model_chain
+     * rationale) — the pipeline consumer reads this per message to build the
+     * runner input `modelOverrides` field, so a dashboard role update
+     * applies to the very next review.
+     */
+    getAppModelRoles(appId: string): Promise<Record<string, string>> {
+      return readModelRoles(appId);
+    },
+
+    /**
+     * Map (or replace) one role's selector VERBATIM, or clear the mapping: a
+     * BLANK selector (empty / whitespace-only — the setModelChain 空 = 清除
+     * convention) DELETES the row. Validation BEFORE any write: an
+     * off-vocabulary role throws UnknownModelRoleError and a content-bearing
+     * selector that parses to zero selectors throws InvalidModelSelectorError
+     * (the route re-renders 400 first; these are the backstop for direct
+     * callers). An unknown app_id fails the FK on insert (fail-loud, same as
+     * every write here); clearing an unmapped role is a quiet no-op.
+     */
+    async setModelRole(appId: string, role: string, selector: string): Promise<void> {
+      assertModelRoleEntry(role, selector);
+      if (selector.trim() === "") {
+        await deleteModelRole(appId, role);
+        return;
+      }
+      await upsertModelRole(appId, role, selector);
+    },
+
+    /**
+     * Remove one role's mapping explicitly (idempotent — an unmapped role,
+     * like any role the vocabulary could never have stored, is a no-op
+     * returning nothing, mirroring removeProviderKey's tolerance).
+     */
+    async clearModelRole(appId: string, role: string): Promise<void> {
+      assertModelRole(role);
+      await deleteModelRole(appId, role);
+    },
+
+    /**
+     * Bulk face for the settings single-save (plan 17 Task 3's 4-row editor):
+     * validates EVERY (role, selector) entry BEFORE any write (one bad entry
+     * → typed throw, zero rows touched), then applies the whole map as ONE
+     * atomic `db.batch` (Phase 5 fix, PR #7 review) — blank = clear, content
+     * = verbatim upsert. D1 batch is transactional: a mid-save failure rolls
+     * back every statement, so a partially applied role map is impossible and
+     * the route's "nothing was stored" failure notice stays truthful. An
+     * empty map is a no-op (no batch is issued).
+     */
+    async setModelRoles(appId: string, selectors: Record<string, string>): Promise<void> {
+      for (const [role, selector] of Object.entries(selectors)) {
+        assertModelRoleEntry(role, selector);
+      }
+      const statements = Object.entries(selectors).map(([role, selector]) =>
+        selector.trim() === ""
+          ? deleteModelRoleStatement(appId, role)
+          : upsertModelRoleStatement(appId, role, selector),
+      );
+      if (statements.length > 0) {
+        await db.batch(statements);
+      }
     },
   };
 }

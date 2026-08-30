@@ -146,6 +146,28 @@ export async function loadHarnessSkills(pluginRoot: string): Promise<Skill[]> {
 }
 
 /**
+ * The base isolation settings record shared by EVERY review session
+ * (quick/default parent, deep parent): in-memory-equivalent isolation minus
+ * the deep-only deltas — no outbound fetch, model fallback on, the caller's
+ * model chain as the retry fallback. ONE definition: the deep
+ * with-overrides branch spreads this record and adds exactly the
+ * `task.agentModelOverrides` key, so a future isolation setting can never
+ * drift between the two paths (Phase 5 fix, PR #7 review). Callers wrap the
+ * record in Settings.isolated().
+ */
+function baseIsolationSettings(fallbackChain: string[] | undefined): {
+  "fetch.enabled": false;
+  "retry.modelFallback": true;
+  "retry.fallbackChains": { default: string[] };
+} {
+  return {
+    "fetch.enabled": false,
+    "retry.modelFallback": true,
+    "retry.fallbackChains": { default: fallbackChain ?? [] },
+  };
+}
+
+/**
  * quick/default parent session options — migrated from the M1
  * src/review/session.ts with `appendSystemPrompt` REMOVED (the seat prompts
  * are engine-generated; this parent never prompts a model). Everything else
@@ -166,11 +188,7 @@ export function buildSessionOptions(opts: {
   return {
     cwd: opts.cwd,
     sessionManager: SessionManager.inMemory(opts.cwd),
-    settings: Settings.isolated({
-      "fetch.enabled": false,
-      "retry.modelFallback": true,
-      "retry.fallbackChains": { default: opts.fallbackChain ?? [] },
-    }),
+    settings: Settings.isolated(baseIsolationSettings(opts.fallbackChain)),
     restrictToolNames: true,
     toolNames: [...REVIEW_TOOL_NAMES],
     disableExtensionDiscovery: true,
@@ -491,9 +509,11 @@ async function installSeatAgent(cwd: string): Promise<void> {
  * Deep Stage 2 seat roles (harness pr-review § Review pipeline): the
  * three-stage flow dispatches exactly these harness roles as domain seats
  * (each carrying the in-domain security lens). Installing ONLY these keeps
- * the task-tool agent schema minimal, and the cleanup set static.
+ * the task-tool agent schema minimal, and the cleanup set static. Exported
+ * for the dashboard-side MODEL_ROLE_IDS parity lock (plan 17 B6 — the test
+ * import does not widen the dashboard's own import boundary).
  */
-const DEEP_SEAT_ROLES = ["code-reviewer", "fullstack-dev", "frontend-dev"] as const;
+export const DEEP_SEAT_ROLES = ["code-reviewer", "fullstack-dev", "frontend-dev"] as const;
 
 /** Filenames the deep path may install — known statically, so a partially-failed install cleans up exactly like a complete one. */
 const DEEP_SEAT_ROLE_FILES: readonly string[] = DEEP_SEAT_ROLES.map((role) => `${role}.md`);
@@ -593,6 +613,23 @@ async function withoutGitHubTokenEnv<T>(review: () => Promise<T>): Promise<T> {
  * the turn's final act a schema-validated yield. GitHub write tools stay
  * structurally absent: restrictToolNames admits ONLY the four named tools,
  * extension/MCP discovery is disabled, and fetch is off.
+ *
+ * Plan 17 B6 (Architect lock L2): a non-empty `agentModelOverrides` map is
+ * written into the isolated settings record as `task.agentModelOverrides` —
+ * the deep `task`-tool dispatch passes NO explicit model, so the SDK preflight
+ * resolves each spawned seat from that record per agent name (resolution
+ * order: explicit request model → task.agentModelOverrides → agent
+ * frontmatter → parent active). The spawned seat session is created with
+ * `settings: session.settings` (SDK structured-subagent), i.e. the SAME
+ * record the parent session options carry — one write covers parent + seats.
+ * Unmapped seats keep today's resolution (the installed definitions carry no
+ * model frontmatter → the parent active model). buildSessionOptions stays
+ * untouched (the key must never reach the quick/default settings where it is
+ * a dead surface), so the overrides branch constructs the deep settings
+ * record from the SHARED baseIsolationSettings record plus exactly the one
+ * overrides key — zero drift surface between the two paths (Phase 5 fix,
+ * PR #7 review); the map is copied — the record must not alias caller-owned
+ * state.
  */
 function deepSessionOptions(opts: {
   cwd: string;
@@ -600,9 +637,24 @@ function deepSessionOptions(opts: {
   skills: Skill[];
   modelPattern: string;
   fallbackChain?: string[];
+  agentModelOverrides?: Record<string, string>;
 }): CreateAgentSessionOptions {
+  const overrides = opts.agentModelOverrides;
+  const hasOverrides = overrides !== undefined && Object.keys(overrides).length > 0;
   return {
     ...buildSessionOptions(opts),
+    ...(hasOverrides
+      ? {
+          // The base isolation record (ONE definition, shared with
+          // buildSessionOptions) plus EXACTLY the overrides key — a future
+          // isolation setting added to the base can never drift away from
+          // the deep-with-overrides path (Phase 5 fix, PR #7 review).
+          settings: Settings.isolated({
+            ...baseIsolationSettings(opts.fallbackChain),
+            "task.agentModelOverrides": { ...overrides },
+          }),
+        }
+      : {}),
     toolNames: [...REVIEW_TOOL_NAMES, "task"],
     outputSchema: PARENT_OUTPUT_SCHEMA,
     outputSchemaMode: "strict",
@@ -670,6 +722,7 @@ async function runDeepReview(input: AgentRuntimeRunInput): Promise<MstarReviewV1
           skills,
           modelPattern: input.modelSelectors[0] ?? DEFAULT_MODEL_PATTERN,
           fallbackChain: [...input.modelSelectors],
+          agentModelOverrides: input.modelOverrides,
         }),
       );
       session = created.session;
@@ -794,7 +847,26 @@ export const ompAgentRuntime: AgentRuntime = {
       // Seats must never see `model: []` — an empty array is truthy, not
       // "inherit from parent", so an unset OMP_REVIEW_MODEL means every seat
       // gets the same DEFAULT_MODEL_PATTERN the parent gets (PR #4 Bugbot).
-      const seatModels = input.modelSelectors.length > 0 ? [...input.modelSelectors] : [DEFAULT_MODEL_PATTERN];
+      //
+      // Plan 17 B6 (Architect lock L2): the quick/default seat override is
+      // applied HERE, at the seatModels synthesis — quick/default always
+      // passes the explicit `model` param, and the SDK resolves an explicit
+      // model BEFORE the `task.agentModelOverrides` settings override, so
+      // writing the settings key would be a dead surface (it is NOT written:
+      // buildSessionOptions is untouched). A present, non-blank override
+      // REPLACES the global chain as the seat's explicit model — sole
+      // verbatim entry (the SDK comma-splits and trims model entries, so a
+      // stored chain value resolves identically; `:thinking` suffixes ride
+      // along). No merge: the App's global chain remains only the
+      // session-level retry fallback configured by buildSessionOptions.
+      // Blank value or no map → today's synthesis verbatim.
+      const seatOverride = input.modelOverrides?.["mstar-review-seat"];
+      const seatModels =
+        seatOverride !== undefined && seatOverride.trim() !== ""
+          ? [seatOverride]
+          : input.modelSelectors.length > 0
+            ? [...input.modelSelectors]
+            : [DEFAULT_MODEL_PATTERN];
       const created = await createAgentSession(
         buildSessionOptions({
           cwd,

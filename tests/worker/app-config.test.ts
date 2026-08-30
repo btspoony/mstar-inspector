@@ -18,8 +18,9 @@
  *
  * Duplication locks (architect decision Q2 forbids the dashboard from
  * importing pipeline/review code, so the copies must be pinned):
- * PROVIDER_IDS ≡ the pipeline PROVIDERS key sequence, and parseModelChain ≡
- * the runtime-omp parseModelSelectors behavior, both asserted against the
+ * PROVIDER_IDS ≡ the pipeline PROVIDERS key sequence, parseModelChain ≡
+ * the runtime-omp parseModelSelectors behavior, and MODEL_ROLE_IDS ≡ the
+ * review-side seat vocabulary (plan 17 B6), all asserted against the
  * originals here.
  */
 import { describe, expect, test } from "bun:test";
@@ -29,13 +30,19 @@ import worker from "../../src/worker/index";
 import { createTestD1 } from "../store/helpers";
 import { createAppsStore, type GithubAppRow } from "../../src/dashboard/apps-store";
 import {
+  InvalidModelSelectorError,
+  MAX_PROVIDER_KEY_LENGTH,
+  MODEL_ROLE_IDS,
   PROVIDER_IDS,
+  ProviderKeyTooLongError,
+  UnknownModelRoleError,
   createAppConfigStore,
   parseModelChain,
+  type AppConfigD1,
 } from "../../src/dashboard/app-config-store";
 import { createSecretbox } from "../../src/dashboard/secretbox";
 import { PROVIDERS } from "../../src/pipeline/providers";
-import { parseModelSelectors } from "../../src/review/runtime-omp";
+import { DEEP_SEAT_ROLES, parseModelSelectors } from "../../src/review/runtime-omp";
 import { SESSION_COOKIE, createSessionValue } from "../../src/dashboard/session";
 import { createUser, type DashboardD1 } from "../../src/dashboard/users";
 import type { Env } from "../../src/worker/env";
@@ -90,14 +97,43 @@ function createPopulatedPre0006D1(): ReturnType<typeof createTestD1> {
   return db;
 }
 
-/** Fully-migrated shape with 0006 applied over the populated DB. */
+/**
+ * Fully-migrated shape with 0006 applied over the populated DB (0008 and 0009
+ * too — plan 16: the settings page renders the Review switch and the
+ * install-health panel from github_apps.review_enabled / last_webhook_at and
+ * app_installations; plan 17: the role-models store tests need
+ * app_model_roles — so the route tests run on the production shape; the 0007
+ * index skip stays, harmless for these tables).
+ */
 function createAppConfigD1(): ReturnType<typeof createTestD1> {
   const db = createPopulatedPre0006D1();
   applyMigration(db, "0006_app_provider_config.sql");
+  applyMigration(db, "0008_github_apps_ops.sql");
+  applyMigration(db, "0009_app_model_roles.sql");
   return db;
 }
 
-const configStore = (db: DashboardD1) => createAppConfigStore(db, TEST_KEY);
+const configStore = (db: AppConfigD1) => createAppConfigStore(db, TEST_KEY);
+
+/**
+ * D1 double whose batch() ALWAYS rejects (Phase 5 fix, PR #7 review): every
+ * other member delegates to the real migrated double, so the failure is
+ * exactly "the batch was issued and failed". D1 batch is transactional (the
+ * bun:sqlite helper brackets BEGIN/COMMIT/ROLLBACK the same way), so zero of
+ * its statements may land — the atomicity the setModelRoles save now relies
+ * on.
+ */
+function createBatchRejectingD1(inner: AppConfigD1): AppConfigD1 & { batchCalls(): number } {
+  let batchCalls = 0;
+  return {
+    prepare: (query: string) => inner.prepare(query),
+    batch: async () => {
+      batchCalls += 1;
+      throw new Error("simulated D1 batch failure");
+    },
+    batchCalls: () => batchCalls,
+  };
+}
 
 /** Seed a github_apps row with genuinely decryptable encrypted columns. */
 async function seedApp(
@@ -384,6 +420,22 @@ describe("app-config store (createAppConfigStore) — provider keys", () => {
     const listX = await store.listProviderKeys(x.id);
     expect(listX).toEqual([{ provider: "anthropic", last4: "1111" }]);
   });
+
+  test("setProviderKey accepts a key of exactly 4096 characters (the bound is inclusive)", async () => {
+    const db = createAppConfigD1();
+    const app = await seedApp(db, { slug: "a", createdBy: "mallory" });
+    await configStore(db).setProviderKey(app.id, "anthropic", "k".repeat(MAX_PROVIDER_KEY_LENGTH));
+    expect(rawCount(db, "app_provider_keys")).toBe(1);
+  });
+
+  test("setProviderKey rejects a key over 4096 characters with the typed error — zero rows written", async () => {
+    const db = createAppConfigD1();
+    const app = await seedApp(db, { slug: "a", createdBy: "mallory" });
+    await expect(
+      configStore(db).setProviderKey(app.id, "anthropic", "k".repeat(MAX_PROVIDER_KEY_LENGTH + 1)),
+    ).rejects.toThrow(ProviderKeyTooLongError);
+    expect(rawCount(db, "app_provider_keys")).toBe(0);
+  });
 });
 
 // --- store: model chain + full config ---
@@ -424,6 +476,34 @@ describe("app-config store (createAppConfigStore) — model chain + getAppConfig
     await expect(store.setModelChain(app.id, null)).resolves.toBeUndefined();
   });
 
+  test("setModelChain(\"\") CLEARS the row — same path as null (plan 15: empty = fallback)", async () => {
+    const db = createAppConfigD1();
+    const app = await seedApp(db, { slug: "a", createdBy: "mallory" });
+    const store = configStore(db);
+    await store.setModelChain(app.id, "first/model");
+    await store.setModelChain(app.id, "");
+    expect(rawCount(db, "app_model_config")).toBe(0);
+    expect(await store.getModelChain(app.id)).toBeNull();
+    // Clearing an app with no stored chain is a quiet no-op, like null.
+    await expect(store.setModelChain(app.id, "")).resolves.toBeUndefined();
+  });
+
+  test("a whitespace-only chain is blank = clear; a padded real chain upserts VERBATIM", async () => {
+    const db = createAppConfigD1();
+    const app = await seedApp(db, { slug: "a", createdBy: "mallory" });
+    const store = configStore(db);
+    // Route semantics (空 = 清除, raw.trim() === "") aligned at the store: a
+    // blank chain never lands as a row, whatever the caller passed.
+    await store.setModelChain(app.id, "   ");
+    expect(rawCount(db, "app_model_config")).toBe(0);
+    expect(await store.getModelChain(app.id)).toBeNull();
+    // Interior/trailing whitespace in a chain WITH content is configuration —
+    // stored exactly as given (the runner-side selector parse trims segments).
+    const padded = "  openai/gpt-5 , anthropic/claude-x  ";
+    await store.setModelChain(app.id, padded);
+    expect(await store.getModelChain(app.id)).toBe(padded);
+  });
+
   test("getAppConfig returns the decrypted keys + chain; an app without config is an EMPTY config", async () => {
     const db = createAppConfigD1();
     const bare = await seedApp(db, { slug: "bare", createdBy: "mallory" });
@@ -456,6 +536,176 @@ describe("app-config store (createAppConfigStore) — model chain + getAppConfig
   });
 });
 
+// --- store: model roles (plan 17 B6) ---
+
+describe("app-config store (createAppConfigStore) — model roles (plan 17 T1)", () => {
+  test("setModelRole stores VERBATIM (:thinking suffix and padding untouched); getAppModelRoles reads it back", async () => {
+    const db = createAppConfigD1();
+    const app = await seedApp(db, { slug: "a", createdBy: "mallory" });
+    const store = configStore(db);
+    await store.setModelRole(app.id, "mstar-review-seat", "  ark-plan/deepseek-v4-flash:high ");
+    await store.setModelRole(app.id, "code-reviewer", "openai/gpt-5:thinking, anthropic/claude-x");
+    // Only the MAPPED roles appear; selectors come back exactly as stored.
+    expect(await store.getAppModelRoles(app.id)).toEqual({
+      "code-reviewer": "openai/gpt-5:thinking, anthropic/claude-x",
+      "mstar-review-seat": "  ark-plan/deepseek-v4-flash:high ",
+    });
+    const row = db.raw.query("SELECT app_id, role, selector FROM app_model_roles WHERE role = 'mstar-review-seat'").get() as {
+      app_id: string;
+      role: string;
+      selector: string;
+    };
+    expect(row.selector).toBe("  ark-plan/deepseek-v4-flash:high "); // plaintext by design — not a secret
+    expect(row.app_id).toBe(app.id);
+  });
+
+  test("setModelRole upserts: a second save replaces the selector (one row per (app_id, role))", async () => {
+    const db = createAppConfigD1();
+    const app = await seedApp(db, { slug: "a", createdBy: "mallory" });
+    const store = configStore(db);
+    await store.setModelRole(app.id, "fullstack-dev", "first/model");
+    await store.setModelRole(app.id, "fullstack-dev", "second/model");
+    expect(rawCount(db, "app_model_roles")).toBe(1);
+    expect(await store.getAppModelRoles(app.id)).toEqual({ "fullstack-dev": "second/model" });
+  });
+
+  test('setModelRole(role, "") CLEARS the mapping; clearing an unmapped role is a quiet no-op', async () => {
+    const db = createAppConfigD1();
+    const app = await seedApp(db, { slug: "a", createdBy: "mallory" });
+    const store = configStore(db);
+    await store.setModelRole(app.id, "frontend-dev", "first/model");
+    await store.setModelRole(app.id, "frontend-dev", "");
+    expect(rawCount(db, "app_model_roles")).toBe(0);
+    expect(await store.getAppModelRoles(app.id)).toEqual({});
+    // Clearing a role that never had a mapping resolves without error.
+    await expect(store.setModelRole(app.id, "frontend-dev", "")).resolves.toBeUndefined();
+  });
+
+  test("a whitespace-only selector is blank = clear; a padded real selector upserts VERBATIM", async () => {
+    const db = createAppConfigD1();
+    const app = await seedApp(db, { slug: "a", createdBy: "mallory" });
+    const store = configStore(db);
+    // The setModelChain 空 = 清除 convention aligned at the store: a blank
+    // selector never lands as a row, whatever the caller passed.
+    await store.setModelRole(app.id, "code-reviewer", "   ");
+    expect(rawCount(db, "app_model_roles")).toBe(0);
+    // Interior/trailing whitespace in a selector WITH content is
+    // configuration — stored exactly as given (the runner-side parse trims).
+    const padded = "  openai/gpt-5 , anthropic/claude-x  ";
+    await store.setModelRole(app.id, "code-reviewer", padded);
+    expect(await store.getAppModelRoles(app.id)).toEqual({ "code-reviewer": padded });
+  });
+
+  test("clearModelRole removes the row, then is an idempotent no-op like the blank-selector path", async () => {
+    const db = createAppConfigD1();
+    const app = await seedApp(db, { slug: "a", createdBy: "mallory" });
+    const store = configStore(db);
+    await store.setModelRole(app.id, "code-reviewer", "openai/gpt-5");
+    await store.clearModelRole(app.id, "code-reviewer");
+    expect(rawCount(db, "app_model_roles")).toBe(0);
+    await expect(store.clearModelRole(app.id, "code-reviewer")).resolves.toBeUndefined();
+    await expect(store.clearModelRole(app.id, "never-stored-role-name")).rejects.toThrow(
+      UnknownModelRoleError,
+    );
+  });
+
+  test("off-vocabulary role → UnknownModelRoleError, zero rows written (setModelRole/clearModelRole/setModelRoles)", async () => {
+    const db = createAppConfigD1();
+    const app = await seedApp(db, { slug: "a", createdBy: "mallory" });
+    const store = configStore(db);
+    for (const role of ["reviewer", "smol", "mstar-review-seat "]) {
+      await expect(store.setModelRole(app.id, role, "openai/gpt-5")).rejects.toThrow(UnknownModelRoleError);
+      await expect(store.clearModelRole(app.id, role)).rejects.toThrow(UnknownModelRoleError);
+      await expect(store.setModelRoles(app.id, { [role]: "openai/gpt-5" })).rejects.toThrow(UnknownModelRoleError);
+    }
+    // Even a VALID role is rejected when it rides an invalid map entry.
+    await expect(
+      store.setModelRoles(app.id, { "code-reviewer": "openai/gpt-5", reviewer: "openai/gpt-5" }),
+    ).rejects.toThrow(UnknownModelRoleError);
+    expect(rawCount(db, "app_model_roles")).toBe(0);
+  });
+
+  test("content-bearing selector that parses to zero selectors → InvalidModelSelectorError, zero rows written", async () => {
+    const db = createAppConfigD1();
+    const app = await seedApp(db, { slug: "a", createdBy: "mallory" });
+    const store = configStore(db);
+    for (const selector of [",, ,", " , , ,"]) {
+      await expect(store.setModelRole(app.id, "code-reviewer", selector)).rejects.toThrow(
+        InvalidModelSelectorError,
+      );
+    }
+    expect(rawCount(db, "app_model_roles")).toBe(0);
+  });
+
+  test("setModelRoles saves the full map in one call; one bad entry fails BEFORE any write", async () => {
+    const db = createAppConfigD1();
+    const app = await seedApp(db, { slug: "a", createdBy: "mallory" });
+    const store = configStore(db);
+    // The settings single-save face (plan 17 T3): all four rows at once,
+    // blank entries clearing their role.
+    await store.setModelRole(app.id, "code-reviewer", "old/model");
+    await store.setModelRoles(app.id, {
+      "mstar-review-seat": "ark-plan/deepseek-v4-flash:high",
+      "code-reviewer": "", // cleared by the same save
+      "fullstack-dev": "openai/gpt-5",
+      "frontend-dev": "",
+    });
+    expect(await store.getAppModelRoles(app.id)).toEqual({
+      "fullstack-dev": "openai/gpt-5",
+      "mstar-review-seat": "ark-plan/deepseek-v4-flash:high",
+    });
+    // Validation is whole-map-first: the valid entry in this map must NOT
+    // reach the DB — zero rows touched by the failed call.
+    await expect(
+      store.setModelRoles(app.id, { "frontend-dev": "x/y", "code-reviewer": ",," }),
+    ).rejects.toThrow(InvalidModelSelectorError);
+    expect(rawCount(db, "app_model_roles")).toBe(2);
+  });
+
+  test("setModelRoles is ONE atomic batch: a batch failure leaves ZERO rows changed (Phase 5, PR #7 review)", async () => {
+    const db = createAppConfigD1();
+    const app = await seedApp(db, { slug: "a", createdBy: "mallory" });
+    const store = configStore(db);
+    await store.setModelRole(app.id, "code-reviewer", "old/model");
+    const failing = createBatchRejectingD1(db);
+    await expect(
+      configStore(failing).setModelRoles(app.id, {
+        "mstar-review-seat": "new/model",
+        "code-reviewer": "", // blank = clear — must not land either
+      }),
+    ).rejects.toThrow(/simulated D1 batch failure/);
+    // The whole map rides ONE batch — there is no sequential-apply path.
+    expect(failing.batchCalls()).toBe(1);
+    // Atomic: the pre-existing row is untouched — nothing half-applied.
+    expect(await configStore(db).getAppModelRoles(app.id)).toEqual({ "code-reviewer": "old/model" });
+    expect(rawCount(db, "app_model_roles")).toBe(1);
+  });
+
+  test("getAppModelRoles on an app with no roles is an EMPTY map (= the chain behavior)", async () => {
+    const db = createAppConfigD1();
+    const bare = await seedApp(db, { slug: "bare", createdBy: "mallory" });
+    expect(await configStore(db).getAppModelRoles(bare.id)).toEqual({});
+  });
+
+  test("cross-App isolation: App X's role map never contains App Y's roles (full-object assert)", async () => {
+    const db = createAppConfigD1();
+    const x = await seedApp(db, { slug: "app-x", createdBy: "mallory" });
+    const y = await seedApp(db, { slug: "app-y", createdBy: "ada", githubAppId: 1002 });
+    const store = configStore(db);
+    await store.setModelRole(x.id, "code-reviewer", "openai/gpt-x");
+    await store.setModelRole(y.id, "mstar-review-seat", "anthropic/claude-y");
+    expect(await store.getAppModelRoles(x.id)).toEqual({ "code-reviewer": "openai/gpt-x" });
+    expect(await store.getAppModelRoles(y.id)).toEqual({ "mstar-review-seat": "anthropic/claude-y" });
+  });
+
+  test("unknown app_id → FK violation on insert (fail-loud, same as every write here)", async () => {
+    const db = createAppConfigD1();
+    await expect(
+      configStore(db).setModelRole("no-such-app", "code-reviewer", "openai/gpt-5"),
+    ).rejects.toThrow(/FOREIGN KEY constraint failed/);
+  });
+});
+
 // --- duplication locks (Q2: dashboard may not import pipeline/review) ---
 
 describe("duplication locks", () => {
@@ -481,6 +731,24 @@ describe("duplication locks", () => {
     for (const input of cases) {
       expect(parseModelChain(input)).toEqual(parseModelSelectors(input));
     }
+  });
+
+  test("MODEL_ROLE_IDS mirrors the review-side seat vocabulary exactly (plan 17 B6 parity lock)", () => {
+    // quick/default seat: the frontmatter `name:` of the agent definition the
+    // runtime installs for Bun fan-out (src/review/seat-agent.md — the real
+    // seat-name SSOT on the review side).
+    const seatAgent = readFileSync(join(import.meta.dir, "../../src/review/seat-agent.md"), "utf8");
+    const quickSeat = /^name:\s*(\S+)\s*$/m.exec(seatAgent)?.[1];
+    expect(quickSeat).toBe("mstar-review-seat");
+    // Deep seats: DEEP_SEAT_ROLES is exported from runtime-omp since plan 17
+    // Task 2 (the export exists for this parity lock; the dashboard's own
+    // import boundary — Q2 — stays: src/dashboard still has zero review
+    // imports, the mirror constant remains its SSOT).
+    const deepSeats: readonly string[] = DEEP_SEAT_ROLES;
+    expect(deepSeats).toEqual(["code-reviewer", "fullstack-dev", "frontend-dev"]);
+    // The mirror is exactly the quick seat followed by the deep seats.
+    expect([...MODEL_ROLE_IDS]).toEqual([quickSeat!, ...(deepSeats ?? [])]);
+    expect(MODEL_ROLE_IDS).toHaveLength(4); // spec § B6 语义锁: exactly the 4 audit seats
   });
 });
 
@@ -625,6 +893,37 @@ describe("POST /dashboard/apps/:slug/settings — add-key (op=add-key)", () => {
     expect(rawCount(db, "app_provider_keys")).toBe(0);
   });
 
+  test("key over 4096 characters → 400 full-page re-render, zero rows written (plan 15 input bounds)", async () => {
+    const { db } = await seededWorld();
+    const cookie = `${SESSION_COOKIE}=${await sessionCookie("mallory")}`;
+    const res = await postForm(SETTINGS, cookie, makeEnv(db), {
+      op: "add-key",
+      provider: "anthropic",
+      key: "k".repeat(MAX_PROVIDER_KEY_LENGTH + 1),
+    });
+    expect(res.status).toBe(400);
+    const body = await res.text();
+    expect(body).toContain("limited to 4096 characters");
+    // 400 is the full page re-render — the user can retry inline.
+    expect(body).toContain('name="op" value="add-key"');
+    expect(rawCount(db, "app_provider_keys")).toBe(0);
+  });
+
+  test("a key of exactly 4096 characters stores fine (the bound is inclusive)", async () => {
+    const { db, app } = await seededWorld();
+    const cookie = `${SESSION_COOKIE}=${await sessionCookie("mallory")}`;
+    const res = await postForm(SETTINGS, cookie, makeEnv(db), {
+      op: "add-key",
+      provider: "anthropic",
+      key: "k".repeat(MAX_PROVIDER_KEY_LENGTH),
+    });
+    expect(res.status).toBe(200);
+    const row = db.raw
+      .query("SELECT key_enc FROM app_provider_keys WHERE app_id = ? AND provider = 'anthropic'")
+      .get(app.id) as { key_enc: string };
+    expect(row.key_enc).toMatch(/^v1\.primary\./);
+  });
+
   test("non-owner member → 403, zero mutation; owner of a DIFFERENT app → 403", async () => {
     const { db } = await seededWorld();
     for (const login of ["hubot", "ada"]) {
@@ -720,6 +1019,202 @@ describe("POST /dashboard/apps/:slug/settings — save-chain (op=save-chain)", (
     const body = await res.text();
     expect(body).toContain("<!doctype html>");
     expect(body).toContain("Unknown settings operation");
+  });
+});
+
+// --- plan 17 T3: the Role models editor (settings op save-roles) ---
+
+/**
+ * The exact body the Role models editor posts: the hidden op plus one
+ * role_<role> field per MODEL_ROLE_IDS seat (blank = clear), plus any
+ * `extra` fields for the tampering cases.
+ */
+function roleForm(
+  values: Record<string, string>,
+  extra: Record<string, string> = {},
+): Record<string, string> {
+  const fields: Record<string, string> = { op: "save-roles" };
+  for (const role of MODEL_ROLE_IDS) fields[`role_${role}`] = values[role] ?? "";
+  return { ...fields, ...extra };
+}
+
+describe("Role models editor (plan 17 T3 — view + save-roles op)", () => {
+  test("GET renders the 4 seat rows prefilled from the stored map (unmapped = blank), one blue-700 save, empty = chain copy", async () => {
+    const { db, app } = await seededWorld();
+    await configStore(db).setModelRole(app.id, "code-reviewer", "openai/gpt-5:thinking");
+    const res = await get(SETTINGS, `${SESSION_COOKIE}=${await sessionCookie("mallory")}`, makeEnv(db));
+    expect(res.status).toBe(200);
+    const body = await res.text();
+    // The section: heading, copy, hidden op, single blue-700 save.
+    expect(body).toContain("<h2>Role models</h2>");
+    expect(body).toContain("Empty = use the App model chain.");
+    expect(body).toContain('name="op" value="save-roles"');
+    expect(body).toContain('<button type="submit" class="primary">Save role models</button>');
+    expect(body.match(/Save role models</g)).toHaveLength(1);
+    // The 4 rows, prefilled / blank exactly per the stored map.
+    expect(body).toContain('name="role_mstar-review-seat" value=""');
+    expect(body).toContain('name="role_code-reviewer" value="openai/gpt-5:thinking"');
+    expect(body).toContain('name="role_fullstack-dev" value=""');
+    expect(body).toContain('name="role_frontend-dev" value=""');
+    // Rows render in MODEL_ROLE_IDS order (the quick/default seat first).
+    const seat = body.indexOf('name="role_mstar-review-seat"');
+    expect(seat).toBeGreaterThanOrEqual(0);
+    expect(body.indexOf('name="role_code-reviewer"')).toBeGreaterThan(seat);
+  });
+
+  test("owner saves the map: stored VERBATIM (:thinking suffix and padding kept), success notice, editor re-rendered", async () => {
+    const { db, app } = await seededWorld();
+    const padded = "  openai/gpt-5 , anthropic/claude-x  ";
+    const res = await postForm(
+      SETTINGS,
+      `${SESSION_COOKIE}=${await sessionCookie("mallory")}`,
+      makeEnv(db),
+      roleForm({
+        "mstar-review-seat": "ark-plan/deepseek-v4-flash:high",
+        "code-reviewer": padded,
+      }),
+    );
+    expect(res.status).toBe(200);
+    const body = await res.text();
+    expect(body).toContain("Saved the role models for mallorys-app");
+    expect(body).toContain('name="op" value="save-roles"');
+    expect(await configStore(db).getAppModelRoles(app.id)).toEqual({
+      "mstar-review-seat": "ark-plan/deepseek-v4-flash:high",
+      "code-reviewer": padded,
+    });
+  });
+
+  test("one save maps AND clears: blanks = cleared, content = upserted (full-map editor semantics)", async () => {
+    const { db, app } = await seededWorld();
+    const store = configStore(db);
+    await store.setModelRole(app.id, "code-reviewer", "old/model");
+    await store.setModelRole(app.id, "frontend-dev", "old-2/model");
+    const res = await postForm(
+      SETTINGS,
+      `${SESSION_COOKIE}=${await sessionCookie("mallory")}`,
+      makeEnv(db),
+      roleForm({
+        "mstar-review-seat": "new/model",
+        // code-reviewer / frontend-dev posted blank → cleared by the same save
+      }),
+    );
+    expect(res.status).toBe(200);
+    expect(await store.getAppModelRoles(app.id)).toEqual({ "mstar-review-seat": "new/model" });
+  });
+
+  test("a D1 batch failure mid-save → 500 re-render, truthful 'nothing was stored' notice, ZERO rows changed (Phase 5, PR #7 review)", async () => {
+    const { db, app } = await seededWorld();
+    await configStore(db).setModelRole(app.id, "code-reviewer", "old/model");
+    const failing = createBatchRejectingD1(db);
+    const res = await postForm(
+      SETTINGS,
+      `${SESSION_COOKIE}=${await sessionCookie("mallory")}`,
+      makeEnv(failing),
+      roleForm({ "mstar-review-seat": "new/model", "code-reviewer": "" }),
+    );
+    expect(res.status).toBe(500);
+    const body = await res.text();
+    // With the atomic batch the pre-existing copy is now TRUE — a failed
+    // save genuinely stored nothing.
+    expect(body).toContain("The dashboard database rejected the change — nothing was stored.");
+    // The 500 is the full page re-render showing the TRUE stored state.
+    expect(body).toContain('name="role_code-reviewer" value="old/model"');
+    // Atomic: the store state is exactly as before the failed save.
+    expect(await configStore(db).getAppModelRoles(app.id)).toEqual({ "code-reviewer": "old/model" });
+    expect(rawCount(db, "app_model_roles")).toBe(1);
+  });
+
+  test("an all-blank save clears every mapping (empty = the App model chain)", async () => {
+    const { db, app } = await seededWorld();
+    const store = configStore(db);
+    await store.setModelRole(app.id, "code-reviewer", "old/model");
+    const res = await postForm(
+      SETTINGS,
+      `${SESSION_COOKIE}=${await sessionCookie("mallory")}`,
+      makeEnv(db),
+      roleForm({}),
+    );
+    expect(res.status).toBe(200);
+    expect(await res.text()).toContain("Saved the role models for mallorys-app");
+    expect(rawCount(db, "app_model_roles")).toBe(0);
+    expect(await store.getAppModelRoles(app.id)).toEqual({});
+  });
+
+  test("invalid selector grammar → 400 re-render naming the role, zero rows written (validate-all-first)", async () => {
+    const { db, app } = await seededWorld();
+    const store = configStore(db);
+    await store.setModelRole(app.id, "code-reviewer", "old/model");
+    const res = await postForm(
+      SETTINGS,
+      `${SESSION_COOKIE}=${await sessionCookie("mallory")}`,
+      makeEnv(db),
+      roleForm({
+        "mstar-review-seat": "new/model",
+        "code-reviewer": " , ,",
+      }),
+    );
+    expect(res.status).toBe(400);
+    const body = await res.text();
+    expect(body).toContain("<!doctype html>"); // HTML page, never a plain-text 400
+    expect(body).toContain("The code-reviewer selector needs at least one comma-separated model selector");
+    // Zero partial writes: the valid entry never landed, the old row is intact.
+    expect(await store.getAppModelRoles(app.id)).toEqual({ "code-reviewer": "old/model" });
+  });
+
+  test("a tampered role_<unknown> field → 400 re-render, zero rows written", async () => {
+    const { db, app } = await seededWorld();
+    const res = await postForm(
+      SETTINGS,
+      `${SESSION_COOKIE}=${await sessionCookie("mallory")}`,
+      makeEnv(db),
+      roleForm({ "code-reviewer": "openai/gpt-5" }, { role_root: "evil/model" }),
+    );
+    expect(res.status).toBe(400);
+    const body = await res.text();
+    expect(body).toContain("<!doctype html>");
+    expect(body).toContain("root is not a known review role");
+    expect(rawCount(db, "app_model_roles")).toBe(0);
+  });
+
+  test("a save with NO role fields at all → 400 re-render, zero rows written (never a silent no-op)", async () => {
+    const { db, app } = await seededWorld();
+    await configStore(db).setModelRole(app.id, "code-reviewer", "old/model");
+    const res = await postForm(SETTINGS, `${SESSION_COOKIE}=${await sessionCookie("mallory")}`, makeEnv(db), {
+      op: "save-roles",
+    });
+    expect(res.status).toBe(400);
+    expect(await res.text()).toContain("No role selectors were submitted");
+    // The existing mapping survives — an empty map was never saved.
+    expect(await configStore(db).getAppModelRoles(app.id)).toEqual({ "code-reviewer": "old/model" });
+  });
+
+  test("non-owner member → 403, zero mutation; admin (non-creator) may save — owner-or-admin", async () => {
+    const { db } = await seededWorld();
+    const res = await postForm(
+      SETTINGS,
+      `${SESSION_COOKIE}=${await sessionCookie("hubot")}`,
+      makeEnv(db),
+      roleForm({ "code-reviewer": "openai/gpt-5" }),
+    );
+    expect(res.status).toBe(403);
+    expect(rawCount(db, "app_model_roles")).toBe(0);
+    const adminRes = await postForm(
+      SETTINGS,
+      `${SESSION_COOKIE}=${await sessionCookie("octocat")}`,
+      makeEnv(db),
+      roleForm({ "code-reviewer": "openai/gpt-5" }),
+    );
+    expect(adminRes.status).toBe(200);
+    expect(rawCount(db, "app_model_roles")).toBe(1);
+  });
+
+  test("a stored selector with HTML-special characters renders escaped in the role input (attribute context)", async () => {
+    const { db, app } = await seededWorld();
+    await configStore(db).setModelRole(app.id, "code-reviewer", '"><script>alert(1)</script>');
+    const res = await get(SETTINGS, `${SESSION_COOKIE}=${await sessionCookie("mallory")}`, makeEnv(db));
+    const body = await res.text();
+    expect(body).not.toContain("<script>");
+    expect(body).toContain(`name="role_code-reviewer" value="&quot;&gt;&lt;script&gt;alert(1)&lt;/script&gt;"`);
   });
 });
 

@@ -10,10 +10,15 @@
  */
 import { describe, expect, mock, test } from "bun:test";
 import { Webhooks } from "@octokit/webhooks";
-import { classifyEvent, classifyWebhook, PULL_REQUEST_ACTIONS } from "../../src/worker/webhooks";
+import { classifyEvent, classifyWebhook, PULL_REQUEST_ACTIONS, verifySignature } from "../../src/worker/webhooks";
 
 const SECRET = "s3cret-webhook-secret";
 const HEAD_SHA = "0123456789abcdef0123456789abcdef01234567";
+
+/** The workerd WebCrypto throw shape (mirrors tests/worker/webhooks-workerd.test.ts). */
+const workerdVerify = async (): Promise<boolean> => {
+  throw new TypeError("Cannot read properties of null (reading 'map')");
+};
 
 function makeWebhooks(secret: string): Webhooks {
   return new Webhooks({ secret });
@@ -120,7 +125,9 @@ describe("classifyWebhook — reject paths log structured warnings (B6b)", () =>
     expect(outcome.kind).toBe("reject");
     expect(log.warn).toHaveBeenCalledTimes(1);
     const [fields, msg] = log.warn.mock.calls[0] ?? [];
-    expect(fields).toMatchObject({ event: "unknown", reason: "secret_misconfigured" });
+    // Plan 15 log hygiene: `event` carries the REAL GitHub event — no more
+    // literal "unknown" at the classifier call sites.
+    expect(fields).toMatchObject({ event: "pull_request", reason: "secret_misconfigured" });
     expect(msg).toContain("500");
     // The secret itself is never a log field — only a fixed diagnostic
     // reason/detail (which is a constant string, not the secret value).
@@ -135,7 +142,7 @@ describe("classifyWebhook — reject paths log structured warnings (B6b)", () =>
     await classifyWebhook(SECRET, "{}", null, "pull_request", log);
     expect(log.warn).toHaveBeenCalledTimes(1);
     const [fields, msg] = log.warn.mock.calls[0] ?? [];
-    expect(fields).toMatchObject({ event: "unknown", reason: "missing_signature" });
+    expect(fields).toMatchObject({ event: "pull_request", reason: "missing_signature" });
     expect(msg).toContain("401");
   });
 
@@ -144,7 +151,7 @@ describe("classifyWebhook — reject paths log structured warnings (B6b)", () =>
     await classifyWebhook(SECRET, "{}", "sha256=deadbeef", "pull_request", log);
     expect(log.warn).toHaveBeenCalledTimes(1);
     const [fields, msg] = log.warn.mock.calls[0] ?? [];
-    expect(fields).toMatchObject({ event: "unknown", reason: "signature_verification_failed" });
+    expect(fields).toMatchObject({ event: "pull_request", reason: "signature_verification_failed" });
     expect(msg).toContain("401");
   });
 
@@ -154,6 +161,61 @@ describe("classifyWebhook — reject paths log structured warnings (B6b)", () =>
     const signature = await makeWebhooks(SECRET).sign(body);
     await classifyWebhook(SECRET, body, signature, "pull_request", log);
     expect(log.warn).not.toHaveBeenCalled();
+  });
+});
+
+describe("warn event labels (plan 15 log hygiene 硬化项 3)", () => {
+  test("absent event header → event falls back to the stage label (= reason)", async () => {
+    const log = makeLog();
+    await classifyWebhook(SECRET, "{}", null, null, log);
+    const [fields] = log.warn.mock.calls[0] ?? [];
+    expect(fields).toMatchObject({ event: "missing_signature", reason: "missing_signature" });
+  });
+
+  test("secret misconfig with absent event header → event = secret_misconfigured", async () => {
+    const log = makeLog();
+    await classifyWebhook("development", "{}", "sha256=deadbeef", null, log);
+    const [fields] = log.warn.mock.calls[0] ?? [];
+    expect(fields).toMatchObject({ event: "secret_misconfigured", reason: "secret_misconfigured" });
+  });
+
+  test("issue_comment actor reject carries the real event (issue_comment)", () => {
+    const log = makeLog();
+    classifyEvent("issue_comment", issueCommentBody({ sender: { type: "User", login: "hacker-123" } }), log);
+    const [fields] = log.warn.mock.calls[0] ?? [];
+    expect(fields).toMatchObject({ event: "issue_comment", reason: "actor_not_allowed" });
+  });
+
+  test("kill-switch warn on classifyEvent carries the real event when the header is present", () => {
+    const log = makeLog();
+    classifyEvent("pull_request", pullRequestBody("opened"), log, false);
+    const [fields] = log.warn.mock.calls[0] ?? [];
+    expect(fields).toMatchObject({ event: "pull_request", reason: "review_disabled" });
+  });
+
+  test("kill-switch warn with absent event header → event = review_disabled", () => {
+    const log = makeLog();
+    classifyEvent(null, pullRequestBody("opened"), log, false);
+    const [fields] = log.warn.mock.calls[0] ?? [];
+    expect(fields).toMatchObject({ event: "review_disabled", reason: "review_disabled" });
+  });
+
+  test("verifySignature throw warn: real event when threaded, stage label otherwise", async () => {
+    const threaded = makeLog();
+    await verifySignature(workerdVerify, "{}", "sha256=zz", threaded, "issue_comment");
+    const [threadedFields] = threaded.warn.mock.calls[0] ?? [];
+    expect(threadedFields).toMatchObject({
+      event: "issue_comment",
+      reason: "signature verification threw",
+    });
+
+    const fallback = makeLog();
+    await verifySignature(workerdVerify, "{}", "sha256=zz", fallback);
+    const [fallbackFields] = fallback.warn.mock.calls[0] ?? [];
+    expect(fallbackFields).toMatchObject({
+      event: "signature_verification_error",
+      reason: "signature verification threw",
+    });
   });
 });
 
@@ -274,7 +336,7 @@ describe("classifyEvent — /review actor allowlist (B5)", () => {
     expect(outcome).toEqual({ kind: "ignore", reason: "comment actor is not the PR author or repo owner" });
     expect(log.warn).toHaveBeenCalledTimes(1);
     const [fields, msg] = log.warn.mock.calls[0] ?? [];
-    expect(fields).toMatchObject({ event: "unknown", reason: "actor_not_allowed" });
+    expect(fields).toMatchObject({ event: "issue_comment", reason: "actor_not_allowed" });
     expect(msg).toContain("not the PR author or repo owner");
   });
 
@@ -320,7 +382,7 @@ describe("REVIEW_ENABLED kill-switch (T4) — fail-closed", () => {
     expect(outcome.kind).toBe("ignore");
     expect(log.warn).toHaveBeenCalledTimes(1);
     const [fields, msg] = log.warn.mock.calls[0] ?? [];
-    expect(fields).toMatchObject({ event: "unknown", reason: "review_disabled" });
+    expect(fields).toMatchObject({ event: "pull_request", reason: "review_disabled" });
     expect(msg).toContain("kill-switch");
   });
 

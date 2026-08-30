@@ -38,7 +38,10 @@ const LEGACY_SECRET = "legacy-webhook-secret";
 
 function createMigratedD1(): ReturnType<typeof createTestD1> {
   const db = createTestD1();
-  for (const name of ["0004_github_apps.sql", "0005_reviews_app_id.sql"]) {
+  // 0008 (plan 16): the github_apps ops columns (review_enabled /
+  // last_webhook_at) the pause gate + touch read and write on every delivery
+  // — the fixture must stay production-shaped.
+  for (const name of ["0004_github_apps.sql", "0005_reviews_app_id.sql", "0008_github_apps_ops.sql"]) {
     db.raw.exec(readFileSync(join(MIGRATIONS_DIR, name), "utf8"));
   }
   return db;
@@ -128,6 +131,11 @@ async function postWebhook(path: string, body: string, headers: Record<string, s
 /** Sign a body the way GitHub does (the sha256=… header value). */
 async function signatureFor(secret: string, body: string): Promise<string> {
   return new Webhooks({ secret }).sign(body);
+}
+
+/** Full GitHub webhook headers for a signed delivery. */
+async function sigHeaders(secret: string, body: string, event = "pull_request"): Promise<Record<string, string>> {
+  return { "x-hub-signature-256": await signatureFor(secret, body), "x-github-event": event };
 }
 
 const PR_PAYLOAD = {
@@ -632,5 +640,287 @@ describe("POST /webhook (legacy face, lock L3 regression)", () => {
 
     expect(res.status).toBe(401);
     expect(sent).toHaveLength(0);
+  });
+
+  test("legacy-face 413 warn carries the real stage label (plan 15: no literal 'unknown')", async () => {
+    const db = createMigratedD1();
+    const env = makeEnv(db);
+
+    const warn = mock((_msg: unknown) => {});
+    const origWarn = console.warn;
+    console.warn = warn;
+    let res: Response;
+    try {
+      res = await postWebhook(
+        "/webhook",
+        "",
+        { "content-length": String(1_000_001), "x-github-event": "pull_request" },
+        env,
+      );
+    } finally {
+      console.warn = origWarn;
+    }
+
+    expect(res.status).toBe(413);
+    const line = warn.mock.calls.map((call) => String(call[0])).find((s) => s.includes("webhook_body_too_large"));
+    expect(line).toBeDefined();
+    const fields = JSON.parse(line!) as { event: string; reason: string; detail: string };
+    expect(fields.event).toBe("webhook_body_too_large");
+    expect(fields.event).not.toBe("unknown");
+    expect(fields.reason).toBe("webhook_body_too_large");
+    expect(fields.detail).toContain("content_length=");
+  });
+});
+
+describe("per-App pause gate + last_webhook_at (plan 16, spec 语义锁 B3 / L5)", () => {
+  /** Read the App row's ops columns back raw. */
+  function appOps(
+    db: ReturnType<typeof createTestD1>,
+    id: string,
+  ): { review_enabled: number; last_webhook_at: string | null; updated_at: string } {
+    return db.raw
+      .query("SELECT review_enabled, last_webhook_at, updated_at FROM github_apps WHERE id = ?")
+      .get(id) as { review_enabled: number; last_webhook_at: string | null; updated_at: string };
+  }
+
+  test("enabled App → job enqueued AND last_webhook_at touched (2xx job outcome)", async () => {
+    const db = createMigratedD1();
+    const appRow = await seedApp(db, { slug: "app-x", secret: "secret-x" });
+    const { queue, sent } = makeQueue();
+    const env = makeEnv(db, { REVIEW_QUEUE: queue as never });
+    const body = JSON.stringify(PR_PAYLOAD);
+
+    const res = await postWebhook("/webhook/app-x", body, await sigHeaders("secret-x", body), env);
+
+    expect(res.status).toBe(200);
+    expect(await res.text()).toBe("accepted");
+    expect(sent).toHaveLength(1);
+    expect(appOps(db, appRow.id).review_enabled).toBe(1); // the 0008 resume default
+    expect(appOps(db, appRow.id).last_webhook_at).not.toBeNull();
+  });
+
+  test("paused App (review_enabled=0) → 2xx ignored, ZERO enqueue, last_webhook_at STILL touched", async () => {
+    const db = createMigratedD1();
+    const appRow = await seedApp(db, { slug: "app-x", secret: "secret-x" });
+    expect(await createAppsStore(db).setReviewEnabled(appRow.id, false)).toBe(true);
+    const { queue, sent } = makeQueue();
+    const env = makeEnv(db, { REVIEW_QUEUE: queue as never });
+    const body = JSON.stringify(PR_PAYLOAD);
+
+    const warn = mock((_msg: unknown) => {});
+    const origWarn = console.warn;
+    console.warn = warn;
+    let res: Response;
+    try {
+      res = await postWebhook("/webhook/app-x", body, await sigHeaders("secret-x", body), env);
+    } finally {
+      console.warn = origWarn;
+    }
+
+    expect(res.status).toBe(200);
+    expect(await res.text()).toBe("ignored");
+    expect(sent).toHaveLength(0); // zero enqueue — paused ≠ disabled
+    // The touch is decoupled from the review switch (L5: paused still counts
+    // as a verified 2xx delivery).
+    expect(appOps(db, appRow.id).last_webhook_at).not.toBeNull();
+    // The pause rides the structured stage-warn channel, filterable by event.
+    const line = warn.mock.calls.map((call) => String(call[0])).find((s) => s.includes("review_paused"));
+    expect(line).toBeDefined();
+    const fields = JSON.parse(line!) as { event: string };
+    expect(fields.event).toBe("review_paused");
+  });
+
+  test("paused App, non-whitelisted event → 2xx ignored + touched (ignore outcome also counts)", async () => {
+    const db = createMigratedD1();
+    const appRow = await seedApp(db, { slug: "app-x", secret: "secret-x" });
+    await createAppsStore(db).setReviewEnabled(appRow.id, false);
+    const { queue, sent } = makeQueue();
+    const env = makeEnv(db, { REVIEW_QUEUE: queue as never });
+    const body = JSON.stringify(PR_PAYLOAD);
+
+    const res = await postWebhook("/webhook/app-x", body, await sigHeaders("secret-x", body, "ping"), env);
+
+    expect(res.status).toBe(200);
+    expect(sent).toHaveLength(0);
+    expect(appOps(db, appRow.id).last_webhook_at).not.toBeNull();
+  });
+
+  test("reject path (bad signature → 401) never touches last_webhook_at", async () => {
+    const db = createMigratedD1();
+    const appRow = await seedApp(db, { slug: "app-x", secret: "secret-x" });
+    const { queue, sent } = makeQueue();
+    const env = makeEnv(db, { REVIEW_QUEUE: queue as never });
+    const body = JSON.stringify(PR_PAYLOAD);
+
+    const res = await postWebhook(
+      "/webhook/app-x",
+      body,
+      { "x-hub-signature-256": await signatureFor("wrong-secret", body), "x-github-event": "pull_request" },
+      env,
+    );
+
+    expect(res.status).toBe(401);
+    expect(sent).toHaveLength(0);
+    expect(appOps(db, appRow.id).last_webhook_at).toBeNull();
+  });
+
+  test("pre-verify kill-switch return never touches last_webhook_at", async () => {
+    const db = createMigratedD1();
+    const appRow = await seedApp(db, { slug: "app-x", secret: "secret-x" });
+    const { queue, sent } = makeQueue();
+    const env = makeEnv(db, { REVIEW_QUEUE: queue as never, REVIEW_ENABLED: undefined });
+    const body = JSON.stringify(PR_PAYLOAD);
+
+    const res = await postWebhook("/webhook/app-x", body, await sigHeaders("secret-x", body), env);
+
+    expect(res.status).toBe(200);
+    expect(sent).toHaveLength(0);
+    expect(appOps(db, appRow.id).last_webhook_at).toBeNull();
+  });
+
+  test("disabled / soft-deleted Apps → 404 never touch last_webhook_at (gate matrix)", async () => {
+    const db = createMigratedD1();
+    const disabledRow = await seedApp(db, { slug: "app-disabled", secret: "secret-d" });
+    const deletedRow = await seedApp(db, { slug: "app-deleted", secret: "secret-r" });
+    await createAppsStore(db).setAppStatus(disabledRow.id, "disabled");
+    await createAppsStore(db).softDeleteApp(deletedRow.id);
+    const { queue, sent } = makeQueue();
+    const env = makeEnv(db, { REVIEW_QUEUE: queue as never });
+    const body = JSON.stringify(PR_PAYLOAD);
+
+    const resDisabled = await postWebhook(
+      "/webhook/app-disabled",
+      body,
+      await sigHeaders("secret-d", body),
+      env,
+    );
+    const resDeleted = await postWebhook("/webhook/app-deleted", body, await sigHeaders("secret-r", body), env);
+
+    expect(resDisabled.status).toBe(404);
+    expect(resDeleted.status).toBe(404);
+    expect(sent).toHaveLength(0);
+    expect(appOps(db, disabledRow.id).last_webhook_at).toBeNull();
+    expect(appOps(db, deletedRow.id).last_webhook_at).toBeNull();
+  });
+
+  test("touchLastWebhook writes ONLY last_webhook_at — updated_at stays the operator timestamp (L5)", async () => {
+    const db = createMigratedD1();
+    const appRow = await seedApp(db, { slug: "app-x", secret: "secret-x" });
+    // Backdate BOTH columns: only last_webhook_at may move.
+    db.raw
+      .prepare("UPDATE github_apps SET updated_at = '2000-01-01 00:00:00', last_webhook_at = '2000-01-01 00:00:00' WHERE id = ?")
+      .run(appRow.id);
+
+    await createAppsStore(db).touchLastWebhook(appRow.id);
+
+    const ops = appOps(db, appRow.id);
+    expect(ops.last_webhook_at).not.toBe("2000-01-01 00:00:00"); // touched
+    expect(ops.updated_at).toBe("2000-01-01 00:00:00"); // untouched
+  });
+
+  test("setReviewEnabled toggles review_enabled, writes updated_at, and refuses soft-deleted rows (setAppStatus precedent)", async () => {
+    const db = createMigratedD1();
+    const appRow = await seedApp(db, { slug: "app-x", secret: "secret-x" });
+    const store = createAppsStore(db);
+    db.raw.prepare("UPDATE github_apps SET updated_at = '2000-01-01 00:00:00' WHERE id = ?").run(appRow.id);
+
+    // Pause: returns changed, writes both columns (an operator mutation).
+    expect(await store.setReviewEnabled(appRow.id, false)).toBe(true);
+    let ops = appOps(db, appRow.id);
+    expect(ops.review_enabled).toBe(0);
+    expect(ops.updated_at).not.toBe("2000-01-01 00:00:00");
+
+    // Resume.
+    expect(await store.setReviewEnabled(appRow.id, true)).toBe(true);
+    expect(appOps(db, appRow.id).review_enabled).toBe(1);
+
+    // Soft-deleted rows are refused: no write, false (a deleted app can
+    // never be re-activated — or paused).
+    await store.softDeleteApp(appRow.id);
+    expect(await store.setReviewEnabled(appRow.id, false)).toBe(false);
+    expect(appOps(db, appRow.id).review_enabled).toBe(1);
+
+    // Unknown id → false, no write.
+    expect(await store.setReviewEnabled("no-such-app", false)).toBe(false);
+  });
+
+  test("listInstallations returns THIS App's installations, most recently seen first (panel read face)", async () => {
+    const db = createMigratedD1();
+    const appRow = await seedApp(db, { slug: "app-x", secret: "secret-x" });
+    const sibling = await seedApp(db, { slug: "app-y", secret: "secret-y" });
+    const store = createAppsStore(db);
+    await store.upsertInstallation({ appId: appRow.id, installationId: 1, accountLogin: "old" });
+    await store.upsertInstallation({ appId: appRow.id, installationId: 2, accountLogin: "recent" });
+    await store.upsertInstallation({ appId: sibling.id, installationId: 3, accountLogin: "other-app" });
+    // Backdate installation 1 so the order is observable.
+    db.raw.prepare("UPDATE app_installations SET seen_at = '2000-01-01 00:00:00' WHERE installation_id = 1").run();
+
+    const rows = await store.listInstallations(appRow.id);
+
+    expect(rows).toHaveLength(2); // the sibling App's row is never included
+    expect(rows[0]).toMatchObject({ installation_id: 2, account_login: "recent" }); // newest seen first
+    expect(rows[1]).toMatchObject({ installation_id: 1, account_login: "old" });
+    expect(typeof rows[0]!.seen_at).toBe("string");
+    expect(await store.listInstallations("no-such-app")).toEqual([]);
+  });
+});
+
+describe("verifier cache — rotation + cacheKey isolation (plan 15 L1)", () => {
+  test("rotated webhook secret verifies with the NEW secret only (secret mismatch → rebuild + replace)", async () => {
+    const db = createMigratedD1();
+    const appRow = await seedApp(db, { slug: "app-x", secret: "secret-v1" });
+    const body = JSON.stringify(PR_PAYLOAD);
+
+    // 1. First delivery memoizes the verifier under the row id (secret-v1).
+    const firstQueue = makeQueue();
+    const firstEnv = makeEnv(db, { REVIEW_QUEUE: firstQueue.queue as never });
+    const first = await postWebhook("/webhook/app-x", body, await sigHeaders("secret-v1", body), firstEnv);
+    expect(first.status).toBe(200);
+    expect(firstQueue.sent).toHaveLength(1);
+
+    // 2. Rotate: a NEW envelope for a NEW secret on the SAME row (the
+    //    dashboard re-save path; AES-GCM random IV → a fresh envelope).
+    const box = createSecretbox(TEST_KEY);
+    db.raw
+      .prepare("UPDATE github_apps SET webhook_secret_enc = ? WHERE id = ?")
+      .run(await box.encryptSecret("secret-v2", `github_apps.webhook_secret_enc:${appRow.id}`), appRow.id);
+
+    // The NEW secret verifies — the cached entry's secret mismatched, so the
+    // verifier was rebuilt + replaced under the same row-id cacheKey.
+    const secondQueue = makeQueue();
+    const secondEnv = makeEnv(db, { REVIEW_QUEUE: secondQueue.queue as never });
+    const second = await postWebhook("/webhook/app-x", body, await sigHeaders("secret-v2", body), secondEnv);
+    expect(second.status).toBe(200);
+    expect(secondQueue.sent).toHaveLength(1);
+
+    // 3. The OLD secret no longer verifies — the replaced entry is gone
+    //    exactly (rotation evicts the old secret's verifier).
+    const staleQueue = makeQueue();
+    const staleEnv = makeEnv(db, { REVIEW_QUEUE: staleQueue.queue as never });
+    const stale = await postWebhook("/webhook/app-x", body, await sigHeaders("secret-v1", body), staleEnv);
+    expect(stale.status).toBe(401);
+    expect(staleQueue.sent).toHaveLength(0);
+  });
+
+  test("legacy and per-App verifier entries are isolated (\"legacy\" vs row-id cacheKeys)", async () => {
+    const db = createMigratedD1();
+    await seedApp(db, { slug: "app-x", secret: "secret-x" });
+    const body = JSON.stringify(PR_PAYLOAD);
+
+    // Warm the legacy entry first; the per-App route must still verify ITS
+    // OWN secret afterwards (a different cacheKey → a different entry — the
+    // pre-plan-15 single-secret-keyed cache would have collided here only
+    // on equal secrets; the point is the two keys never cross).
+    const legacyQueue = makeQueue();
+    const legacyEnv = makeEnv(db, { REVIEW_QUEUE: legacyQueue.queue as never });
+    const legacy = await postWebhook("/webhook", body, await sigHeaders(LEGACY_SECRET, body), legacyEnv);
+    expect(legacy.status).toBe(200);
+    expect(legacyQueue.sent).toHaveLength(1);
+
+    const perAppQueue = makeQueue();
+    const perAppEnv = makeEnv(db, { REVIEW_QUEUE: perAppQueue.queue as never });
+    const perApp = await postWebhook("/webhook/app-x", body, await sigHeaders("secret-x", body), perAppEnv);
+    expect(perApp.status).toBe(200);
+    expect(perAppQueue.sent).toHaveLength(1);
   });
 });

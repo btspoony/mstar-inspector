@@ -3,12 +3,16 @@
  * + GitHub App Manifest start/callback/commit (11 B1 T1/T2; 13 B5 T3 — the
  * commit writes the encrypted github_apps D1 row, the Cloudflare secrets-bulk
  * path is retired) + per-App management UI (13 B5 T3: /dashboard/apps list,
- * POST …/disable|enable|delete — creator-or-admin) + per-App AI config
- * settings (14 B2 T1 routes + T2 view: GET/POST
+ * POST …/disable|enable|delete — creator-or-admin) + per-App review
+ * pause/resume (16 T2: POST …/pause|/resume — same gate, plan-13 action
+ * pattern) + per-App AI config settings (14 B2 T1 routes + T2 view: GET/POST
  * /dashboard/apps/:slug/settings — BYOK provider keys, masked, + model chain
- * — and POST …/settings/key/delete, creator-or-admin) behind a per-request
- * membership guard (12 B4 T2) + admin-only members management (12 B4 T3).
- * Mounted by src/worker/index.ts as `app.route("/dashboard", dashboardApp)`.
+ * — and POST …/settings/key/delete, creator-or-admin; 16 T2 adds the
+ * settings Review switch and the read-only install-health panel; 17 T3 adds
+ * the Role models editor on the same op-discriminated POST) behind a
+ * per-request membership guard (12 B4 T2) + admin-only members management
+ * (12 B4 T3). Mounted by src/worker/index.ts as
+ * `app.route("/dashboard", dashboardApp)`.
  *
  * Route isolation (architect decision Q2): this module MUST NOT import
  * pipeline/store/review code. Fail-closed everywhere: missing OAuth secrets
@@ -52,9 +56,12 @@ import {
 import { createAppsStore, type GithubAppRow } from "./apps-store";
 import { SecretboxKeyError, createSecretbox } from "./secretbox";
 import {
+  MAX_PROVIDER_KEY_LENGTH,
+  MODEL_ROLE_IDS,
   PROVIDER_IDS,
   createAppConfigStore,
   parseModelChain,
+  type AppConfigBatchFace,
   type AppConfigStore,
 } from "./app-config-store";
 import {
@@ -93,14 +100,24 @@ function dashboardSecrets(env: Env) {
 }
 
 /**
+ * The dashboard D1 binding's face: the users-store narrow face PLUS D1
+ * `batch` (Phase 5 fix, PR #7 review) — the settings routes hand this
+ * binding to the App-config store, whose setModelRoles full-map save is ONE
+ * atomic batch. Truthful for the runtime binding (a real D1Database) and
+ * the bun:sqlite test double, which both implement batch; the DashboardD1
+ * face alone (a single-row store's view) just doesn't declare it.
+ */
+type DashboardDb = DashboardD1 & AppConfigBatchFace;
+
+/**
  * D1 membership store binding (plan 12 B4). Runtime-real via wrangler.jsonc
  * `d1_databases` (binding DB), but the fetch-face Env deliberately does not
  * declare it (src/worker/env.ts stays ADMIN_LOGINS-only this plan) — read
  * through this local intersection and fail closed when unbound, like every
  * missing dashboard dependency.
  */
-function dashboardD1(env: Env): DashboardD1 | null {
-  const db = (env as Env & { DB?: DashboardD1 }).DB;
+function dashboardD1(env: Env): DashboardDb | null {
+  const db = (env as Env & { DB?: DashboardDb }).DB;
   return db ?? null;
 }
 
@@ -644,7 +661,7 @@ dashboardApp.post("/members/remove", async (c) => {
 
 /** Route-local member gate shared by the /dashboard/apps routes. */
 async function requireMember(c: Context<{ Bindings: Env }>): Promise<
-  | { ok: true; session: SessionPayload; db: DashboardD1; user: DashboardUserRow }
+  | { ok: true; session: SessionPayload; db: DashboardDb; user: DashboardUserRow }
   | { ok: false; response: Response }
 > {
   const secrets = dashboardSecrets(c.env);
@@ -701,6 +718,62 @@ dashboardApp.post("/apps/:slug/disable", (c) => appStatusAction(c, "disable"));
 dashboardApp.post("/apps/:slug/enable", (c) => appStatusAction(c, "enable"));
 dashboardApp.post("/apps/:slug/delete", (c) => appStatusAction(c, "delete"));
 
+// --- Plan 16 B3 T2: per-App review pause/resume (spec § IA, pinned action
+// paths) ---
+//
+// The per-App pause switch (migration 0008 review_enabled) surfaced on the
+// pinned zero-JS action paths — both the settings-page Review switch and the
+// Apps-list actions POST here (spec § IA). Gate/order mirror appStatusAction
+// exactly: the per-request guard has verified membership, then unknown and
+// soft-deleted apps are equally invisible (→ 404, zero writes), then
+// creator-or-admin (→ 403 forbiddenPage, zero writes). Confirm-free and
+// reversible (pause ≠ disable — the webhook face stays healthy while
+// paused); the response re-renders the Apps list with a notice, so the
+// state change is visible immediately (the settings page reads the row
+// fresh on every GET).
+
+/**
+ * One handler for the two pinned review-action routes. The idempotent no-op
+ * case is short-circuited BEFORE the store write — pausing a paused App /
+ * resuming an active one re-renders with a warn notice and never touches
+ * the row (setReviewEnabled would count a same-value UPDATE as changed and
+ * would churn updated_at, the operator-mutation timestamp). Grammar pinned:
+ * "already paused" / "already active".
+ */
+async function appReviewAction(
+  c: Context<{ Bindings: Env }>,
+  action: "pause" | "resume",
+): Promise<Response> {
+  const gate = await requireMember(c);
+  if (!gate.ok) return gate.response;
+  const apps = createAppsStore(gate.db);
+  const app = await apps.getAppBySlug(c.req.param("slug") ?? "");
+  if (!app || app.deleted_at !== null) return c.text("unknown app", 404);
+  if (!canManageApp(gate.user, app)) return c.html(forbiddenPage(gate.session.login), 403);
+  const paused = app.review_enabled === 0;
+  let notice: PageNotice;
+  if (action === "pause" ? paused : !paused) {
+    notice = {
+      kind: "warn",
+      message: `${app.slug} was already ${paused ? "paused" : "active"} — nothing changed.`,
+    };
+  } else if (await apps.setReviewEnabled(app.id, action === "resume")) {
+    notice = {
+      kind: "success",
+      message: `${action === "pause" ? "Paused" : "Resumed"} ${app.slug}.`,
+    };
+  } else {
+    // Lost a race: the row was soft-deleted between the read and the write.
+    notice = { kind: "warn", message: `${app.slug} was just removed — nothing changed.` };
+  }
+  return c.html(
+    appsPage(gate.session, await apps.listApps(), { login: gate.user.github_login, role: gate.user.role }, notice),
+  );
+}
+
+dashboardApp.post("/apps/:slug/pause", (c) => appReviewAction(c, "pause"));
+dashboardApp.post("/apps/:slug/resume", (c) => appReviewAction(c, "resume"));
+
 // --- Plan 14 B2 T1: per-App AI configuration settings (spec § Per-App BYOK) ---
 //
 // The settings family for one App: provider API keys (BYOK, masked list) and
@@ -710,9 +783,9 @@ dashboardApp.post("/apps/:slug/delete", (c) => appStatusAction(c, "delete"));
 // session cookie (same discipline as the members and apps action routes — no
 // new token scheme). Route shapes per the plan brief: GET/POST
 // /dashboard/apps/:slug/settings — the POST carries an explicit `op`
-// discriminator (add-key | save-chain) because the zero-JS page has two forms
-// on one action path — and the delete-key action path …/settings/key/delete
-// (the HTML-form convention cannot emit a DELETE verb).
+// discriminator (add-key | save-chain | save-roles) because the zero-JS page
+// has three forms on one action path — and the delete-key action path
+// …/settings/key/delete (the HTML-form convention cannot emit a DELETE verb).
 //
 // Encryption-dependent reads AND writes: masking needs plaintext (the last-4
 // tail), so a missing/malformed DASHBOARD_ENCRYPTION_KEY fails the whole
@@ -722,7 +795,7 @@ dashboardApp.post("/apps/:slug/delete", (c) => appStatusAction(c, "delete"));
 // tokens); the T1 temporary placeholder render is gone.
 
 type AppSettingsGate =
-  | { ok: true; session: SessionPayload; db: DashboardD1; app: GithubAppRow }
+  | { ok: true; session: SessionPayload; db: DashboardDb; app: GithubAppRow }
   | { ok: false; response: Response };
 
 /** Route-local owner-or-admin gate shared by the settings route family. */
@@ -781,11 +854,18 @@ function settingsFailureNotice(err: unknown): PageNotice {
  * src/dashboard/views.ts appSettingsPage) — every route's response body. The
  * masked key list is the only key face, so no route here can leak key
  * material into HTML; a decrypt failure on re-read is the 500 fail-closed.
+ * Plan 16: the install-health panel data (installations, review_enabled,
+ * last_webhook_at) is read fresh on every render too, so every re-render —
+ * including POST re-renders — reflects the current pause/health state.
+ * Plan 17: the role map (app_model_roles) rides the same fresh read for the
+ * Role models editor — a 400 re-render shows the STORED map (an invalid
+ * submission is never echoed back as if it had been kept).
  */
 async function settingsResponse(
   c: Context<{ Bindings: Env }>,
   session: SessionPayload,
   store: AppConfigStore,
+  apps: ReturnType<typeof createAppsStore>,
   app: GithubAppRow,
   notice?: PageNotice,
   status: 200 | 400 | 500 = 200,
@@ -793,7 +873,25 @@ async function settingsResponse(
   try {
     const maskedKeys = await store.listProviderKeys(app.id);
     const modelChain = await store.getModelChain(app.id);
-    return c.html(appSettingsPage(session, app, maskedKeys, modelChain, notice), status);
+    const modelRoles = await store.getAppModelRoles(app.id);
+    const installations = await apps.listInstallations(app.id);
+    return c.html(
+      appSettingsPage(
+        session,
+        {
+          slug: app.slug,
+          status: app.status,
+          reviewEnabled: app.review_enabled !== 0,
+          lastWebhookAt: app.last_webhook_at ?? null,
+        },
+        maskedKeys,
+        modelChain,
+        modelRoles,
+        installations,
+        notice,
+      ),
+      status,
+    );
   } catch (err) {
     logSettingsFailure("render", app.id, err);
     return c.text("the app settings could not be read from encrypted storage", 500);
@@ -804,18 +902,25 @@ dashboardApp.get("/apps/:slug/settings", async (c) => {
   const gate = await requireAppSettings(c);
   if (!gate.ok) return gate.response;
   const store = createAppConfigStore(gate.db, c.env.DASHBOARD_ENCRYPTION_KEY);
-  return settingsResponse(c, gate.session, store, gate.app);
+  const apps = createAppsStore(gate.db);
+  return settingsResponse(c, gate.session, store, apps, gate.app);
 });
 
 /**
- * The settings POST: two operations on the pinned action path, discriminated
+ * The settings POST: three operations on the pinned action path, discriminated
  * by the forms' hidden `op` field. add-key = provider allowlist (400 on any
- * other id — the allowlist is the plan's Global Constraint) + non-empty key,
- * then the store encrypts inside. save-chain = empty → clear (global
- * fallback), otherwise ≥1 comma-separated selector required and the chain is
- * stored VERBATIM (a `:thinking`-style suffix is legal omp syntax; full
- * selector validation stays omp-side). Validation failures re-render the
- * page at 400 with zero writes.
+ * other id — the allowlist is the plan's Global Constraint) + non-empty key
+ * of at most MAX_PROVIDER_KEY_LENGTH characters (plan 15 input bounds — an
+ * oversized key is a 400 re-render with zero writes; the store guard beneath
+ * is the backstop), then the store encrypts inside. save-chain = empty →
+ * clear (global fallback), otherwise ≥1 comma-separated selector required and
+ * the chain is stored VERBATIM (a `:thinking`-style suffix is legal omp
+ * syntax; full selector validation stays omp-side). save-roles (plan 17 T3)
+ * = the Role models editor's full map — one `role_<role>` field per audit
+ * seat, blanks = cleared, saved through the validate-all-first setModelRoles
+ * (zero partial writes on any validation failure). Validation failures
+ * re-render the page at 400 with zero writes — never a plain-text body (the
+ * plan-14 T1 review lesson).
  */
 dashboardApp.post("/apps/:slug/settings", async (c) => {
   const gate = await requireAppSettings(c);
@@ -823,6 +928,7 @@ dashboardApp.post("/apps/:slug/settings", async (c) => {
   const form = await c.req.parseBody();
   const op = typeof form.op === "string" ? form.op : "";
   const store = createAppConfigStore(gate.db, c.env.DASHBOARD_ENCRYPTION_KEY);
+  const apps = createAppsStore(gate.db);
   if (op === "add-key") {
     const provider = typeof form.provider === "string" ? form.provider.trim() : "";
     const plainKey = typeof form.key === "string" ? form.key.trim() : "";
@@ -831,6 +937,7 @@ dashboardApp.post("/apps/:slug/settings", async (c) => {
         c,
         gate.session,
         store,
+        apps,
         gate.app,
         {
           kind: "error",
@@ -847,8 +954,23 @@ dashboardApp.post("/apps/:slug/settings", async (c) => {
         c,
         gate.session,
         store,
+        apps,
         gate.app,
         { kind: "error", message: "Enter an API key to store." },
+        400,
+      );
+    }
+    if (plainKey.length > MAX_PROVIDER_KEY_LENGTH) {
+      return settingsResponse(
+        c,
+        gate.session,
+        store,
+        apps,
+        gate.app,
+        {
+          kind: "error",
+          message: `That API key is too long (${plainKey.length} characters) — keys are limited to ${MAX_PROVIDER_KEY_LENGTH} characters. Nothing was stored.`,
+        },
         400,
       );
     }
@@ -856,9 +978,9 @@ dashboardApp.post("/apps/:slug/settings", async (c) => {
       await store.setProviderKey(gate.app.id, provider, plainKey);
     } catch (err) {
       logSettingsFailure("add_key", gate.app.id, err);
-      return settingsResponse(c, gate.session, store, gate.app, settingsFailureNotice(err), 500);
+      return settingsResponse(c, gate.session, store, apps, gate.app, settingsFailureNotice(err), 500);
     }
-    return settingsResponse(c, gate.session, store, gate.app, {
+    return settingsResponse(c, gate.session, store, apps, gate.app, {
       kind: "success",
       message: `Stored the ${provider} key for ${gate.app.slug} — it is only ever shown masked.`,
     });
@@ -868,7 +990,7 @@ dashboardApp.post("/apps/:slug/settings", async (c) => {
     try {
       if (raw.trim() === "") {
         await store.setModelChain(gate.app.id, null);
-        return settingsResponse(c, gate.session, store, gate.app, {
+        return settingsResponse(c, gate.session, store, apps, gate.app, {
           kind: "success",
           message: `Cleared the model chain for ${gate.app.slug} — reviews fall back to the deployment default.`,
         });
@@ -878,6 +1000,7 @@ dashboardApp.post("/apps/:slug/settings", async (c) => {
           c,
           gate.session,
           store,
+          apps,
           gate.app,
           { kind: "error", message: "Enter at least one comma-separated model selector." },
           400,
@@ -886,11 +1009,78 @@ dashboardApp.post("/apps/:slug/settings", async (c) => {
       await store.setModelChain(gate.app.id, raw);
     } catch (err) {
       logSettingsFailure("save_chain", gate.app.id, err);
-      return settingsResponse(c, gate.session, store, gate.app, settingsFailureNotice(err), 500);
+      return settingsResponse(c, gate.session, store, apps, gate.app, settingsFailureNotice(err), 500);
     }
-    return settingsResponse(c, gate.session, store, gate.app, {
+    return settingsResponse(c, gate.session, store, apps, gate.app, {
       kind: "success",
       message: `Saved the model chain for ${gate.app.slug}.`,
+    });
+  }
+  if (op === "save-roles") {
+    // Plan 17 T3: the Role models editor posts one `role_<role>` field per
+    // audit seat (the page always renders all four rows, blank inputs
+    // included), so the submitted map is FULL — blanks = cleared (the
+    // setModelRole 空 = 清除 convention), content = verbatim upsert, all
+    // through the validate-all-first setModelRoles bulk face. Any
+    // `role_`-prefixed field naming a role outside MODEL_ROLE_IDS is client
+    // tampering → 400 re-render, zero writes; a save with NO role fields at
+    // all is equally malformed (it could not come from this page, and an
+    // empty map must never masquerade as a successful save).
+    const selectors: Record<string, string> = {};
+    for (const [field, value] of Object.entries(form)) {
+      if (!field.startsWith("role_") || typeof value !== "string") continue;
+      const role = field.slice("role_".length);
+      if (!MODEL_ROLE_IDS.includes(role)) {
+        return settingsResponse(
+          c,
+          gate.session,
+          store,
+          apps,
+          gate.app,
+          { kind: "error", message: `${role} is not a known review role — nothing was saved.` },
+          400,
+        );
+      }
+      selectors[role] = value;
+    }
+    if (Object.keys(selectors).length === 0) {
+      return settingsResponse(
+        c,
+        gate.session,
+        store,
+        apps,
+        gate.app,
+        { kind: "error", message: "No role selectors were submitted — resubmit the Role models form." },
+        400,
+      );
+    }
+    // Selector grammar, role-named for the 4-row form (the same parseModelChain
+    // mirror the save-chain op 400s against); blank stays legal = clear.
+    for (const [role, selector] of Object.entries(selectors)) {
+      if (selector.trim() !== "" && parseModelChain(selector).length === 0) {
+        return settingsResponse(
+          c,
+          gate.session,
+          store,
+          apps,
+          gate.app,
+          {
+            kind: "error",
+            message: `The ${role} selector needs at least one comma-separated model selector — or leave it empty to use the App model chain. Nothing was saved.`,
+          },
+          400,
+        );
+      }
+    }
+    try {
+      await store.setModelRoles(gate.app.id, selectors);
+    } catch (err) {
+      logSettingsFailure("save_roles", gate.app.id, err);
+      return settingsResponse(c, gate.session, store, apps, gate.app, settingsFailureNotice(err), 500);
+    }
+    return settingsResponse(c, gate.session, store, apps, gate.app, {
+      kind: "success",
+      message: `Saved the role models for ${gate.app.slug}.`,
     });
   }
   // T2 review fold (T1 minor): an unknown op is a validation failure like any
@@ -899,6 +1089,7 @@ dashboardApp.post("/apps/:slug/settings", async (c) => {
     c,
     gate.session,
     store,
+    apps,
     gate.app,
     { kind: "error", message: "Unknown settings operation — resubmit one of this page's forms." },
     400,
@@ -911,12 +1102,13 @@ dashboardApp.post("/apps/:slug/settings/key/delete", async (c) => {
   const form = await c.req.parseBody();
   const provider = typeof form.provider === "string" ? form.provider.trim() : "";
   const store = createAppConfigStore(gate.db, c.env.DASHBOARD_ENCRYPTION_KEY);
+  const apps = createAppsStore(gate.db);
   let removed: boolean;
   try {
     removed = await store.removeProviderKey(gate.app.id, provider);
   } catch (err) {
     logSettingsFailure("remove_key", gate.app.id, err);
-    return settingsResponse(c, gate.session, store, gate.app, settingsFailureNotice(err), 500);
+    return settingsResponse(c, gate.session, store, apps, gate.app, settingsFailureNotice(err), 500);
   }
   // Tolerant no-op (the allowlist already bounds what can ever be stored):
   // an unknown provider simply has no row — a warn, not a 400.
@@ -926,7 +1118,7 @@ dashboardApp.post("/apps/:slug/settings/key/delete", async (c) => {
         kind: "warn",
         message: `No stored ${provider === "" ? "(unspecified)" : provider} key on ${gate.app.slug} — nothing changed.`,
       };
-  return settingsResponse(c, gate.session, store, gate.app, notice);
+  return settingsResponse(c, gate.session, store, apps, gate.app, notice);
 });
 
 dashboardApp.get("/", async (c) => {

@@ -11,8 +11,12 @@
  *     json_valid for v1 rows
  */
 import { describe, expect, test } from "bun:test";
-import { createTestD1 } from "./helpers";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
+import { createMigratedTestD1, createTestD1 } from "./helpers";
 import type { D1Like } from "../../src/store/types";
+
+const MIGRATIONS_DIR = join(import.meta.dir, "../../migrations");
 
 const REVIEW = {
   id: "review-1",
@@ -121,6 +125,238 @@ describe("migrations/0001_reviews.sql", () => {
     await db.prepare("DELETE FROM reviews WHERE id = ?").bind(REVIEW.id).run();
     const remaining = db.raw.query("SELECT COUNT(*) AS n FROM findings").get() as { n: number };
     expect(remaining.n).toBe(0);
+  });
+});
+
+describe("migrations/0007_reviews_app_id_index.sql", () => {
+  /** Apply one migration file verbatim (filename order = wrangler order). */
+  function applyMigrationFile(db: ReturnType<typeof createTestD1>, name: string): void {
+    db.raw.exec(readFileSync(join(MIGRATIONS_DIR, name), "utf8"));
+  }
+
+  test("applies cleanly over a seeded production-shaped DB (0001–0006 with live rows)", () => {
+    const db = createTestD1();
+    // Reviews exist BEFORE the later migrations — the wrangler sequence on a
+    // live deployment: a legacy row (app_id NULL) and, once 0004/0005 exist,
+    // an attributed row.
+    insertReview(db);
+    insertReview(db, { id: "review-2", head_sha: "ffffffffffffffffffffffffffffffffffffffff" });
+    for (const name of [
+      "0003_dashboard_users.sql",
+      "0004_github_apps.sql",
+      "0005_reviews_app_id.sql",
+      "0006_app_provider_config.sql",
+    ]) {
+      applyMigrationFile(db, name);
+    }
+    db.raw
+      .prepare(
+        `INSERT INTO github_apps (id, slug, github_app_id, name, private_key_enc, webhook_secret_enc,
+           created_by, status, deleted_at, created_at, updated_at)
+         VALUES ('app-1', 'acmes-app', 1001, 'acmes-app', 'enc', 'enc', 'mallory', 'active', NULL,
+           datetime('now'), datetime('now'))`,
+      )
+      .run();
+    db.raw.exec("UPDATE reviews SET app_id = 'app-1' WHERE id = 'review-2'");
+
+    // Metadata-only CREATE INDEX builds over the live rows without rewriting.
+    expect(() => applyMigrationFile(db, "0007_reviews_app_id_index.sql")).not.toThrow();
+    const count = db.raw.query("SELECT COUNT(*) AS n FROM reviews").get() as { n: number };
+    expect(count.n).toBe(2);
+  });
+
+  test("creates idx_reviews_app_id ON reviews(app_id) (fully migrated schema)", () => {
+    const db = createMigratedTestD1();
+    const index = db.raw
+      .query("SELECT tbl_name FROM sqlite_master WHERE type = 'index' AND name = 'idx_reviews_app_id'")
+      .get() as { tbl_name: string } | null;
+    expect(index).not.toBeNull();
+    expect(index!.tbl_name).toBe("reviews");
+    const columns = db.raw.query("PRAGMA index_info(idx_reviews_app_id)").all() as Array<{ name: string }>;
+    expect(columns.map((c) => c.name)).toEqual(["app_id"]);
+  });
+
+  test("the per-App attribution lookup uses the index (EXPLAIN QUERY PLAN)", () => {
+    const db = createMigratedTestD1();
+    const plan = db.raw
+      .query("EXPLAIN QUERY PLAN SELECT id FROM reviews WHERE app_id = 'app-1'")
+      .all() as Array<{ detail: string }>;
+    expect(plan.some((p) => p.detail.includes("USING INDEX idx_reviews_app_id"))).toBe(true);
+  });
+});
+
+describe("migrations/0008_github_apps_ops.sql", () => {
+  /** Apply one migration file verbatim (filename order = wrangler order). */
+  function applyMigrationFile(db: ReturnType<typeof createTestD1>, name: string): void {
+    db.raw.exec(readFileSync(join(MIGRATIONS_DIR, name), "utf8"));
+  }
+
+  /** Raw-insert one pre-0008-shaped github_apps row (the 0004 column list). */
+  function insertPre0008App(db: ReturnType<typeof createTestD1>): void {
+    db.raw
+      .prepare(
+        `INSERT INTO github_apps (id, slug, github_app_id, name, private_key_enc, webhook_secret_enc,
+           created_by, status, deleted_at, created_at, updated_at)
+         VALUES ('app-1', 'acmes-app', 1001, 'acmes-app', 'enc', 'enc', 'mallory', 'active', NULL,
+           datetime('now'), datetime('now'))`,
+      )
+      .run();
+  }
+
+  test("applies cleanly over a seeded production-shaped DB (0001–0007 with live rows)", () => {
+    const db = createTestD1();
+    insertReview(db); // a live review predates the ALTER (wrangler order)
+    for (const name of [
+      "0003_dashboard_users.sql",
+      "0004_github_apps.sql",
+      "0005_reviews_app_id.sql",
+      "0006_app_provider_config.sql",
+      "0007_reviews_app_id_index.sql",
+    ]) {
+      applyMigrationFile(db, name);
+    }
+    insertPre0008App(db);
+
+    // Metadata-only ADD COLUMNs alter the table without rewriting it (the
+    // 0002/0005 precedent) — the live row survives untouched.
+    expect(() => applyMigrationFile(db, "0008_github_apps_ops.sql")).not.toThrow();
+    const row = db.raw
+      .query("SELECT slug, status, review_enabled, last_webhook_at FROM github_apps WHERE id = 'app-1'")
+      .get() as { slug: string; status: string; review_enabled: number; last_webhook_at: string | null };
+    // Existing rows materialize to the resume default (L5: every App known
+    // before the migration stays reviewing), last delivery never seen.
+    expect(row.review_enabled).toBe(1);
+    expect(row.last_webhook_at).toBeNull();
+    expect(row.slug).toBe("acmes-app");
+    expect(row.status).toBe("active");
+    const count = db.raw.query("SELECT COUNT(*) AS n FROM reviews").get() as { n: number };
+    expect(count.n).toBe(1);
+  });
+
+  test("adds review_enabled (INTEGER NOT NULL DEFAULT 1) + last_webhook_at (TEXT nullable) to github_apps", () => {
+    const db = createMigratedTestD1();
+    const columns = db.raw.query("PRAGMA table_info(github_apps)").all() as Array<{
+      name: string;
+      notnull: number;
+      dflt_value: string | null;
+    }>;
+    const reviewEnabled = columns.find((col) => col.name === "review_enabled");
+    expect(reviewEnabled).toBeDefined();
+    expect(reviewEnabled!.notnull).toBe(1); // NOT NULL is legal with a non-NULL DEFAULT (L5)
+    expect(reviewEnabled!.dflt_value).toBe("1");
+    const lastWebhookAt = columns.find((col) => col.name === "last_webhook_at");
+    expect(lastWebhookAt).toBeDefined();
+    expect(lastWebhookAt!.notnull).toBe(0);
+    expect(lastWebhookAt!.dflt_value).toBeNull();
+  });
+
+  test("a row inserted without the new columns defaults to review_enabled=1, last_webhook_at NULL", () => {
+    const db = createMigratedTestD1();
+    insertPre0008App(db);
+    const row = db.raw
+      .query("SELECT review_enabled, last_webhook_at FROM github_apps WHERE id = 'app-1'")
+      .get() as { review_enabled: number; last_webhook_at: string | null };
+    expect(row.review_enabled).toBe(1);
+    expect(row.last_webhook_at).toBeNull();
+  });
+
+  test("the ops columns are writable and read back (pause + last-delivery shapes)", () => {
+    const db = createMigratedTestD1();
+    insertPre0008App(db);
+    db.raw.prepare("UPDATE github_apps SET review_enabled = 0, last_webhook_at = datetime('now') WHERE id = 'app-1'").run();
+    const row = db.raw
+      .query("SELECT review_enabled, last_webhook_at FROM github_apps WHERE id = 'app-1'")
+      .get() as { review_enabled: number; last_webhook_at: string | null };
+    expect(row.review_enabled).toBe(0);
+    expect(row.last_webhook_at).toMatch(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/);
+  });
+});
+
+describe("migrations/0009_app_model_roles.sql", () => {
+  /** Apply one migration file verbatim (filename order = wrangler order). */
+  function applyMigrationFile(db: ReturnType<typeof createTestD1>, name: string): void {
+    db.raw.exec(readFileSync(join(MIGRATIONS_DIR, name), "utf8"));
+  }
+
+  /** Raw-insert one github_apps row (the 0004 column list is sufficient). */
+  function insertApp(db: ReturnType<typeof createTestD1>, id: string, githubAppId = 1001): void {
+    db.raw
+      .prepare(
+        `INSERT INTO github_apps (id, slug, github_app_id, name, private_key_enc, webhook_secret_enc,
+           created_by, status, deleted_at, created_at, updated_at)
+         VALUES (?, ?, ?, ?, 'enc', 'enc', 'mallory', 'active', NULL,
+           datetime('now'), datetime('now'))`,
+      )
+      .run(id, id, githubAppId, id);
+  }
+
+  test("applies cleanly over a seeded production-shaped DB (0001–0008 with live rows)", () => {
+    const db = createTestD1();
+    insertReview(db); // a live review predates the CREATE TABLE (wrangler order)
+    for (const name of [
+      "0003_dashboard_users.sql",
+      "0004_github_apps.sql",
+      "0005_reviews_app_id.sql",
+      "0006_app_provider_config.sql",
+      "0007_reviews_app_id_index.sql",
+      "0008_github_apps_ops.sql",
+    ]) {
+      applyMigrationFile(db, name);
+    }
+    insertApp(db, "app-1");
+
+    // Append-only CREATE TABLE over the live rows — nothing existing changes.
+    expect(() => applyMigrationFile(db, "0009_app_model_roles.sql")).not.toThrow();
+    const count = db.raw.query("SELECT COUNT(*) AS n FROM reviews").get() as { n: number };
+    expect(count.n).toBe(1);
+  });
+
+  test("composite PK (app_id, role) rejects a duplicate pair; other apps may repeat the role", () => {
+    const db = createMigratedTestD1();
+    insertApp(db, "app-1");
+    insertApp(db, "app-2", 1002);
+    db.raw
+      .prepare(`INSERT INTO app_model_roles (app_id, role, selector) VALUES ('app-1', 'code-reviewer', 'openai/gpt-5')`)
+      .run();
+    expect(() =>
+      db.raw
+        .prepare(`INSERT INTO app_model_roles (app_id, role, selector) VALUES ('app-1', 'code-reviewer', 'x/y')`)
+        .run(),
+    ).toThrow(/UNIQUE constraint failed/);
+    // The same role under ANOTHER app is a distinct row (per-App role maps).
+    db.raw
+      .prepare(`INSERT INTO app_model_roles (app_id, role, selector) VALUES ('app-2', 'code-reviewer', 'x/y')`)
+      .run();
+    const count = db.raw.query("SELECT COUNT(*) AS n FROM app_model_roles").get() as { n: number };
+    expect(count.n).toBe(2);
+  });
+
+  test("FK to github_apps — unknown app refused; a role not on the runner's seat names is storable (no CHECK — vocabulary is producer-side, lock L3)", () => {
+    const db = createMigratedTestD1();
+    insertApp(db, "app-1");
+    expect(() =>
+      db.raw
+        .prepare(`INSERT INTO app_model_roles (app_id, role, selector) VALUES ('no-such-app', 'code-reviewer', 'x/y')`)
+        .run(),
+    ).toThrow(/FOREIGN KEY constraint failed/);
+    // Deliberate: the schema carries NO role CHECK — the store's MODEL_ROLE_IDS
+    // mirror + parity test own the 4-name vocabulary (spec § B6 语义锁).
+    db.raw
+      .prepare(`INSERT INTO app_model_roles (app_id, role, selector) VALUES ('app-1', 'not-a-seat', 'x/y')`)
+      .run();
+    const count = db.raw.query("SELECT COUNT(*) AS n FROM app_model_roles").get() as { n: number };
+    expect(count.n).toBe(1);
+  });
+
+  test("no ON DELETE: hard-deleting an app with role rows is refused (soft-delete is the only removal path)", async () => {
+    const db = createMigratedTestD1();
+    insertApp(db, "app-1");
+    db.raw
+      .prepare(`INSERT INTO app_model_roles (app_id, role, selector) VALUES ('app-1', 'mstar-review-seat', 'ark-plan/deepseek-v4-flash:high')`)
+      .run();
+    expect(() => db.raw.prepare("DELETE FROM github_apps WHERE id = 'app-1'").run()).toThrow(
+      /FOREIGN KEY constraint failed/,
+    );
   });
 });
 

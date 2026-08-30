@@ -5,7 +5,9 @@
  * attempt) → clone the PR head branch (git transport auth via scoped
  * extraheader env) → `git rev-parse HEAD` for the AUTHORITATIVE sha →
  * dedup by that sha (hit → ack) → diff → numstat (the seat-partition
- * universe) → write the runner `--input` JSON (reconFacts) → exec the
+ * universe) → write the runner `--input` JSON (reconFacts, plus the per-App
+ * `modelOverrides` role map for app-path messages — plan 17 B6; legacy /
+ * unmapped App = byte-identical payload) → exec the
  * in-image runner `--level <quick|default|deep>` (exec env =
  * ARK_API_KEY/PI_CODING_AGENT_DIR/HARNESS_PLUGIN_ROOT + OMP_REVIEW_MODEL and
  * configured provider keys — per-App messages assemble BYOK keys/model chain
@@ -17,10 +19,12 @@
  * + rethrow (queue retry → DLQ). The runtime runner has NO
  * summary-degrade path: exit 0 means stdout is the engine-validated
  * envelope; a non-zero exit or a parse/validate failure is no post, no
- * insert, structured log, rethrow. The in-flight guard is the ONE typed
- * exception (bugbot BB-3): guard-held returns a distinct outcome, not a
- * throw — the consumer schedules a per-message delayed retry
- * (60s/120s/240s) and finally acks with a warning instead of DLQing.
+ * insert, structured log, rethrow. Two typed outcomes never throw: the
+ * in-flight guard (bugbot BB-3) — guard-held schedules a per-message
+ * delayed retry (60s/120s/240s) and finally acks with a warning instead of
+ * DLQing — and a PAUSED App's message (plan 16, review_enabled=0), which
+ * acks immediately with ZERO side effects (no guard, no sandbox, no token
+ * mint, no app-config read, no GitHub write, no retry, no DLQ).
  *
  * Sha consistency (bugbot A2): every downstream use — idempotency key, D1
  * row, posted commit_id, KV completion — is keyed off the sha read back
@@ -167,7 +171,13 @@ export function runnerTimeoutMs(level: ReviewLevel): number {
  * elapsed_ms / orchestration — spec d5-budget L5: they ride THIS channel;
  * no new APM, no webhook sink). */
 export type ConsumerLogFields = {
-  event: "pull_request" | "review_command";
+  /**
+   * `pull_request` / `review_command` — the trigger that produced the job.
+   * `review_paused` (plan 16, architect lock L4 — union widened ADDITIVELY):
+   * the ack-skip line for a paused App's in-flight message; it overrides the
+   * trigger fields' event on that one log line.
+   */
+  event: "pull_request" | "review_command" | "review_paused";
   action: string;
   installation_id: number;
   owner: string;
@@ -321,13 +331,16 @@ export function guardRetryDelaysSeconds(level: ReviewLevel): readonly number[] {
 }
 
 /**
- * Outcome of one message pass (bugbot BB-3). The in-flight guard is a
- * DISTINCT typed outcome, not a failure: a guard-held message is scheduled
- * for a per-message delayed retry and finally acked with a warning — it is
- * never rethrown into the immediate-retry ×3 → DLQ path. Real failures keep
- * the existing throw → retry → DLQ behavior.
+ * Outcome of one message pass (bugbot BB-3 + plan 16 lock L4). Two DISTINCT
+ * typed outcomes never throw: a guard-held message is scheduled for a
+ * per-message delayed retry and finally acked with a warning — it is never
+ * rethrown into the immediate-retry ×3 → DLQ path; a PAUSED message (the
+ * App's review_enabled=0) is acked directly — an intentional skip with zero
+ * side effects, never a retry or a DLQ entry (a throw would be the wrong
+ * semantics for an operator pause). Real failures keep the existing
+ * throw → retry → DLQ behavior.
  */
-export type ProcessOutcome = { kind: "ok" } | { kind: "guard-held" };
+export type ProcessOutcome = { kind: "ok" } | { kind: "guard-held" } | { kind: "paused" };
 
 /**
  * Handle a guard-held message (bugbot BB-3). The guard is not an error
@@ -369,13 +382,24 @@ type ProcessDeps = {
   commenter: ReviewCommenter;
   /**
    * Per-App commenter instance cache keyed by appId (plan 13 Task 2, lock
-   * L4), beside the legacy env singleton above. auth-app's
-   * installation-token cache is per-instance, so one instance per App keeps
-   * token caches isolated AND prevents credentials from crossing instances.
-   * The row status is still re-checked per message — the cache only spares
-   * the decrypt + construction, never the active/not-deleted gate.
+   * L4; plan 15 hardening item 1 / architect lock L1), beside the legacy
+   * env singleton above. Entry = `{ commenter, fingerprint }` where the
+   * fingerprint is the EXACT string pair `github_app_id` +
+   * `private_key_enc` (the envelope as stored) from the per-message row the
+   * resolver already re-reads: a fingerprint match reuses the instance
+   * (auth-app token caches stay warm), a mismatch (rotation — a new AES-GCM
+   * envelope, even for a re-saved identical PEM) decrypts + rebuilds +
+   * REPLACES, and the not-found/disabled/deleted gates evict before their
+   * unchanged throw. Deliberately NOT keyed or fingerprinted on
+   * `updated_at` (plan 16's per-webhook `touchLastWebhook` would make it
+   * high-frequency) and not on a decrypted-PEM digest (that would spend the
+   * decrypt the cache exists to spare). The row status is still re-checked
+   * per message — the cache only spares the decrypt + construction, never
+   * the active/not-deleted gate. auth-app's installation-token cache is
+   * per-instance, so one instance per App keeps token caches isolated AND
+   * prevents credentials from crossing instances.
    */
-  appCommenters: Map<string, ReviewCommenter>;
+  appCommenters: Map<string, { commenter: ReviewCommenter; fingerprint: string }>;
   /**
    * Per-App commenter factory — `createReviewCommenter` in production (the
    * ONLY createAppAuth construction point stays src/pipeline/comment.ts,
@@ -404,18 +428,35 @@ function toBaseFields(payload: ReviewJobPayload): ConsumerLogFields {
 }
 
 /**
+ * Outcome of the per-message commenter resolution (plan 16, architect lock
+ * L4): `ok` carries the commenter the review runs with; `paused` is the
+ * DISTINCT typed outcome for a paused App (review_enabled=0) — returned
+ * AFTER the status/deleted gates (disabled is judged first and keeps its
+ * byte-identical throw→retry→DLQ semantics) and consumed by processMessage
+ * as an immediate ack-skip. NOT a throw: a throw would enter the
+ * retry→DLQ path — the wrong semantics for an intentional pause.
+ */
+type CommenterResolution = { kind: "ok"; commenter: ReviewCommenter } | { kind: "paused" };
+
+/**
  * Resolve the commenter for one message (plan 13 Task 2, architect lock L4
  * — consumer-side credential resolution):
  *
  * - legacy (appRef absent — old in-flight messages — or `{ kind: "legacy" }`)
  *   → the env-App singleton commenter, byte-identical to the pre-multi-App
  *   behavior.
- * - `{ kind: "app", appId }` → the `github_apps` row via D1 (must be active
- *   and not soft-deleted — re-read per message so a disabled/deleted App
- *   fails closed even when an instance is cached) → the row's PEM decrypted
- *   in memory (secretbox, AAD `github_apps.private_key_enc:<id>`) →
+ * - `{ kind: "app", appId }` → the `github_apps` row via D1 (re-read per
+ *   message) gated in order: missing row / soft-deleted / disabled THROWS
+ *   (unchanged retry→DLQ semantics; the failed gate EVICTS the cached
+ *   instance) → PAUSED (`review_enabled = 0`, plan 16 lock L4) returns the
+ *   DISTINCT `paused` outcome AFTER those gates, leaving any cached
+ *   instance in place (resume reuses the warm instance — the plan-15
+ *   fingerprint ignores review_enabled) → the row's PEM decrypted in memory
+ *   (secretbox, AAD `github_apps.private_key_enc:<id>`) →
  *   `createAppCommenter({ APP_ID: String(github_app_id), PRIVATE_KEY })`,
- *   cached per appId in `deps.appCommenters`.
+ *   cached per appId in `deps.appCommenters` with the row's credential
+ *   fingerprint (plan 15 L1: `github_app_id` + `private_key_enc` envelope
+ *   exact-string match — reuse on match, rebuild + replace on rotation).
  *
  * Any unresolvable state — missing row, disabled, soft-deleted, missing
  * DASHBOARD_ENCRYPTION_KEY (SecretboxKeyError), tampered envelope — THROWS:
@@ -423,31 +464,57 @@ function toBaseFields(payload: ReviewJobPayload): ConsumerLogFields {
  * and no GitHub write ever happens. The decrypted PEM lives only in this
  * call's memory and the commenter instance; it is never logged.
  */
-async function resolveCommenter(payload: ReviewJobPayload, deps: ProcessDeps): Promise<ReviewCommenter> {
+async function resolveCommenter(payload: ReviewJobPayload, deps: ProcessDeps): Promise<CommenterResolution> {
   const appRef = payload.appRef;
   if (appRef === undefined || appRef.kind === "legacy") {
-    return deps.commenter;
+    return { kind: "ok", commenter: deps.commenter };
   }
   const row = await createAppsStore(deps.env.DB).getAppById(appRef.appId);
   if (row === null) {
+    deps.appCommenters.delete(appRef.appId);
     throw new Error(`per-App credential resolution failed: app ${appRef.appId} not found`);
   }
   if (row.deleted_at !== null) {
+    deps.appCommenters.delete(appRef.appId);
     throw new Error(`per-App credential resolution failed: app ${appRef.appId} is soft-deleted`);
   }
   if (row.status !== "active") {
+    deps.appCommenters.delete(appRef.appId);
     throw new Error(`per-App credential resolution failed: app ${appRef.appId} is ${row.status}`);
   }
-  let commenter = deps.appCommenters.get(appRef.appId);
-  if (commenter === undefined) {
-    const pem = await createSecretbox(deps.env.DASHBOARD_ENCRYPTION_KEY).decryptSecret(
-      row.private_key_enc,
-      `github_apps.private_key_enc:${row.id}`,
-    );
-    commenter = deps.createAppCommenter({ APP_ID: String(row.github_app_id), PRIVATE_KEY: pem });
-    deps.appCommenters.set(appRef.appId, commenter);
+  // Plan 16 (architect lock L4): the PAUSED gate sits AFTER the status/
+  // deleted gates (disabled is judged first — its throw→retry→DLQ semantics
+  // stay byte-identical) and returns the DISTINCT typed outcome instead of
+  // throwing. The cached instance (if any) is deliberately LEFT in place —
+  // resuming the App must reuse the warm instance, and the plan-15
+  // fingerprint (`github_app_id` + `private_key_enc`) is immune to
+  // review_enabled writes.
+  if (row.review_enabled === 0) {
+    return { kind: "paused" };
   }
-  return commenter;
+  // Plan 15 hardening item 1 (architect lock L1): the fingerprint is the
+  // exact string pair read from the row THIS call already fetched — zero
+  // extra reads, no hashing, never `updated_at` (plan 16's per-webhook
+  // touchLastWebhook would churn it). A re-saved identical PEM yields a NEW
+  // AES-GCM envelope → one harmless rebuild; a real rotation rebuilds with
+  // the new credential on the very next message.
+  const fingerprint = JSON.stringify([row.github_app_id, row.private_key_enc]);
+  const cached = deps.appCommenters.get(appRef.appId);
+  if (cached !== undefined && cached.fingerprint === fingerprint) {
+    return { kind: "ok", commenter: cached.commenter };
+  }
+  // Cache miss (first message for this App) or fingerprint mismatch
+  // (rotation): decrypt + build + REPLACE the entry. A decrypt failure here
+  // leaves any pre-rotation entry in place but UNREACHABLE — it can only
+  // ever be returned by an exact fingerprint match, i.e. the envelope
+  // reverting to that entry's own bytes.
+  const pem = await createSecretbox(deps.env.DASHBOARD_ENCRYPTION_KEY).decryptSecret(
+    row.private_key_enc,
+    `github_apps.private_key_enc:${row.id}`,
+  );
+  const commenter = deps.createAppCommenter({ APP_ID: String(row.github_app_id), PRIVATE_KEY: pem });
+  deps.appCommenters.set(appRef.appId, { commenter, fingerprint });
+  return { kind: "ok", commenter };
 }
 
 /**
@@ -487,8 +554,9 @@ function toBase64Utf8(text: string): string {
  * `getAppConfig` decrypt face of src/dashboard/app-config-store.ts narrowed
  * to what assembly consumes. `keys` maps provider id → DECRYPTED plaintext
  * key (only providers with a stored row appear); `modelChain` is the verbatim
- * stored selector chain, null or "" = unset (global OMP_REVIEW_MODEL wins —
- * any falsy chain is treated as unset).
+ * stored selector chain, null / "" / whitespace-only = unset (global
+ * OMP_REVIEW_MODEL wins — any falsy or blank chain is treated as unset,
+ * plan 15 input bounds).
  */
 export type RunnerAppConfig = {
   keys: Record<string, string>;
@@ -533,6 +601,43 @@ async function resolveAppConfig(payload: ReviewJobPayload, deps: ProcessDeps): P
 }
 
 /**
+ * Resolve the App's per-role model overrides for one message (plan 17 B6
+ * Task 1): role → verbatim selector chain via the decrypt-free
+ * `getAppModelRoles` read (a model selector is configuration, not a secret —
+ * no secretbox). Only `{ kind: "app" }` messages carry the map: legacy
+ * (appRef absent — old in-flight messages — or `{ kind: "legacy" }`) →
+ * `undefined`, and an App with NO (or an all-cleared) role map → `undefined`
+ * — in both cases the runner input JSON serializes byte-identically to
+ * today's (plan Global Constraints: absent/empty map = unchanged runner
+ * behavior). Hangs off the same appRef resolution as `resolveAppConfig` (the
+ * App row is already proven present, active and non-deleted there) and runs
+ * BEFORE the in-flight guard so a resolution failure has zero side effects.
+ * The map is re-read every message (no cache) so a dashboard role update
+ * applies to the very next review. A roles-read failure rethrows with the
+ * same app-id-prefixed context wrapper as `resolveAppConfig` (greppable
+ * retry/DLQ triage).
+ */
+async function resolveModelOverrides(
+  payload: ReviewJobPayload,
+  deps: ProcessDeps,
+): Promise<Record<string, string> | undefined> {
+  const appRef = payload.appRef;
+  if (appRef === undefined || appRef.kind === "legacy") {
+    return undefined;
+  }
+  try {
+    const roles = await createAppConfigStore(
+      deps.env.DB,
+      deps.env.DASHBOARD_ENCRYPTION_KEY,
+    ).getAppModelRoles(appRef.appId);
+    return Object.keys(roles).length > 0 ? roles : undefined;
+  } catch (err) {
+    const detail = err instanceof Error ? err.message : String(err);
+    throw new Error(`per-App model-role resolution failed: app ${appRef.appId}: ${detail}`);
+  }
+}
+
+/**
  * Build the in-image runner exec env (step 8): the provider key + harness
  * paths (compass D — secrets never baked into the image), the OMP_REVIEW_MODEL
  * chain when set (bugbot BB-1), and every known provider key that is
@@ -542,10 +647,12 @@ async function resolveAppConfig(payload: ReviewJobPayload, deps: ProcessDeps): P
  *
  * Per-App assembly (plan 14 B2, `appCfg` present — per-App messages only):
  * the App's own key wins per provider, injected under the PROVIDERS-mapped
- * env name (skipped when empty/whitespace or when the provider id is not on
- * the allowlist); every provider the App did NOT configure falls back to the
- * global env key (spec fallback chain — a zero-config App keeps working);
- * an App model chain overrides OMP_REVIEW_MODEL. Every injected key is logged
+ * env name (skipped when empty/whitespace; a provider id outside the
+ * allowlist is skipped with a structured warn — plan 15 log hygiene — that
+ * carries the id + app_id, never key material); every provider the App did
+ * NOT configure falls back to the global env key (spec fallback chain — a
+ * zero-config App keeps working); an App model chain overrides
+ * OMP_REVIEW_MODEL. Every injected key is logged
  * with `key_source: app|global` (the source, never the key), and the assembly
  * logs `config_source: app|fallback`. The function builds a FRESH object per
  * call and never mutates its inputs or any module-level record, so key
@@ -576,11 +683,23 @@ export function buildRunnerEnv(
   // (the consumer flow does; direct unit calls may omit them).
   const emit = log !== undefined && fields !== undefined;
   // 1. The App's own keys, mapped through the PROVIDERS allowlist. A provider
-  //    id without a mapping has no env name — it is never injected.
+  //    id without a mapping has no env name — it is never injected, and the
+  //    skip is no longer silent (plan 15 log hygiene 硬化项 3): the rogue id
+  //    rides a structured warn (an id + app_id, NEVER key material) so the
+  //    operator can see a stored credential going unused.
   let appKeys = 0;
   for (const [provider, plainKey] of Object.entries(appCfg.keys)) {
     const envName = providerEnvName(provider);
-    if (envName === undefined || plainKey.trim() === "") continue;
+    if (envName === undefined) {
+      if (emit) {
+        log.warn(
+          { ...fields, provider },
+          "stored provider key id is not on the PROVIDERS allowlist — row skipped",
+        );
+      }
+      continue;
+    }
+    if (plainKey.trim() === "") continue;
     runnerEnv[envName] = plainKey;
     appKeys += 1;
     if (emit) {
@@ -605,9 +724,14 @@ export function buildRunnerEnv(
     }
   }
   // 3. Model chain: the App's verbatim chain overrides OMP_REVIEW_MODEL; any
-  //    falsy chain (null or "") is unset → the global chain stays untouched.
+  //    falsy or BLANK chain (null / "" / whitespace-only — plan 15 input
+  //    bounds: a direct-DB write can store a blank chain the routes would
+  //    have normalized) is unset → the global chain stays untouched. A chain
+  //    with content forwards verbatim — the guard only decides unset-vs-set.
   const chain =
-    typeof appCfg.modelChain === "string" && appCfg.modelChain !== "" ? appCfg.modelChain : undefined;
+    typeof appCfg.modelChain === "string" && appCfg.modelChain.trim() !== ""
+      ? appCfg.modelChain
+      : undefined;
   if (chain !== undefined) {
     runnerEnv.OMP_REVIEW_MODEL = chain;
   }
@@ -689,6 +813,11 @@ export function createReviewConsumer(
       // into the queue's immediate ×3 retry → DLQ path.
       if (outcome.kind === "guard-held") {
         handleGuardHeld(message, deps);
+      } else if (outcome.kind === "paused") {
+        // Plan 16 (architect lock L4): a paused App's in-flight message is
+        // acked DIRECTLY — an intentional skip with zero side effects, never
+        // a retry and never a DLQ entry.
+        message.ack();
       }
     }
   };
@@ -730,20 +859,41 @@ async function processMessage(payload: ReviewJobPayload, deps: ProcessDeps): Pro
     // without touching the in-flight guard.
     level = resolveReviewLevel(deps.env.REVIEW_LEVEL);
     // Credential resolution FIRST (plan 13 Task 2, lock L4 — consumer-side),
-    // before the guard/sandbox: legacy → env singleton; app → D1 row (active,
-    // not deleted) → decrypted PEM → per-App commenter instance (cached per
-    // appId). An unresolvable App (missing / disabled / soft-deleted /
-    // undecryptable) fails structurally here with zero side effects — the
-    // rethrow keeps the existing retry/DLQ semantics and no GitHub write ever
-    // happens. Token mint and postReview below both use THIS resolved
-    // instance (same App identity, lock L4).
-    const commenter = await resolveCommenter(payload, deps);
+    // before the guard/sandbox: legacy → env singleton; app → D1 row gated
+    // missing/deleted/disabled (throw → retry/DLQ, byte-identical) then
+    // PAUSED (plan 16 lock L4: DISTINCT typed outcome, below) → decrypted
+    // PEM → per-App commenter instance (cached per appId). An unresolvable
+    // App (missing / disabled / soft-deleted / undecryptable) fails
+    // structurally here with zero side effects — the rethrow keeps the
+    // existing retry/DLQ semantics and no GitHub write ever happens. Token
+    // mint and postReview below both use THIS resolved instance (same App
+    // identity, lock L4).
+    const resolution = await resolveCommenter(payload, deps);
+    // Plan 16 ack-skip (architect lock L4): a paused App's in-flight message
+    // is the DISTINCT `paused` outcome — the queue handler acks it directly.
+    // EVERYTHING below is skipped: no in-flight guard acquisition (no guard
+    // TTL consumed), no sandbox creation, no token mint, no app-config read,
+    // no GitHub API call, no retry, no DLQ. The structured log rides the
+    // existing ConsumerLogFields channel with `event: "review_paused"`
+    // (union widened additively) + app_id + the baseFields PR identity.
+    if (resolution.kind === "paused") {
+      deps.log.info(
+        { ...baseFields, event: "review_paused" },
+        "review paused — app review_enabled=0; acking with zero side effects (no retry, no DLQ)",
+      );
+      return { kind: "paused" };
+    }
+    const commenter = resolution.commenter;
     // Per-App AI config (plan 14 B2): hangs off the SAME appRef resolution as
     // the commenter — one getAppConfig read per message, before the
     // guard/sandbox so an unresolvable config (undecryptable key envelope,
     // missing DASHBOARD_ENCRYPTION_KEY) fails closed with zero side effects.
     // Legacy → undefined → the byte-identical pre-plan-14 env assembly.
     const appCfg = await resolveAppConfig(payload, deps);
+    // Per-role model overrides (plan 17 B6): rides the SAME appRef gate,
+    // before the guard like the config above. undefined (legacy / empty map)
+    // → the runner input JSON below stays byte-identical.
+    const modelOverrides = await resolveModelOverrides(payload, deps);
     // 0. In-flight guard (WF-002 / bugbot BB-3): when another review is
     // already running for this PR, return the DISTINCT guard-held outcome —
     // NOT a throw. The consumer schedules a per-message delayed retry
@@ -867,11 +1017,17 @@ async function processMessage(payload: ReviewJobPayload, deps: ProcessDeps): Pro
       `head ${headSha}`,
       ...numstatLines,
     ];
+    // Plan 17 B6: the App's per-role model overrides ride as an OPTIONAL
+    // input field, included ONLY when a role map resolved above — legacy /
+    // unmapped messages serialize byte-identically to the pre-plan-17 payload
+    // (the runner-side guard + type extension are plan 17 Task 2's).
+    const runnerInput = {
+      worktreePath: CLONE_DIR,
+      reconFacts,
+      ...(modelOverrides !== undefined ? { modelOverrides } : {}),
+    };
     const writeInput = await sandbox.exec(
-      writeJsonCommand(
-        RUNNER_INPUT_PATH,
-        toBase64Utf8(JSON.stringify({ worktreePath: CLONE_DIR, reconFacts })),
-      ),
+      writeJsonCommand(RUNNER_INPUT_PATH, toBase64Utf8(JSON.stringify(runnerInput))),
       { timeout: EXEC_TIMEOUT_GIT_MS },
     );
     if (writeInput.exitCode !== 0) {

@@ -1,0 +1,31 @@
+-- 0008_github_apps_ops.sql — per-App ops columns (plan 16 Task 1, spec
+-- dashboard-ops-and-role-models § Data model + § 语义锁(B3), architect lock L5).
+--
+-- review_enabled is the per-App PAUSE switch (B3: paused ≠ disabled):
+--   1 = reviewing (every existing row materializes to 1 — the correct
+--       opt-out default: all Apps known before this migration stay on);
+--   0 = paused — the webhook face still verifies signatures and answers 2xx
+--       with ZERO enqueue (the connection stays healthy), and in-flight
+--       queue messages ack-skip (no retry, no DLQ). status='disabled'
+--       remains the disconnect path (webhook 404, unchanged).
+-- INTEGER NOT NULL DEFAULT 1 is legal D1/SQLite ADD COLUMN form: NOT NULL
+-- requires a non-NULL DEFAULT (present: 1) and there is no REFERENCES clause
+-- — the 0005 header's "FK columns need a NULL default" rule does not apply.
+--
+-- last_webhook_at records the App's most recent signature-VERIFIED webhook
+-- delivery — touched after signature verification, regardless of the
+-- subsequent enqueue outcome (job / ignore / paused; a queue-send failure
+-- still leaves the touch committed, so the column reads "last verified
+-- delivery", not "last successful enqueue"), never on rejects
+-- (400/401/413/500) nor the pre-verify kill-switch return. Nullable, no
+-- default: NULL = the App has never sent a verified event. High-frequency
+-- by design — writers must touch ONLY this column (never updated_at, which
+-- stays the operator mutation timestamp; see apps-store.touchLastWebhook).
+--
+-- Metadata-only: two ADD COLUMNs alter the schema without rewriting the
+-- table (0002 reviews.envelope / 0005 reviews.app_id precedent), so it is
+-- safe to apply over a live production DB with existing rows. Must apply
+-- AFTER 0004 (the altered table must exist).
+
+ALTER TABLE github_apps ADD COLUMN review_enabled INTEGER NOT NULL DEFAULT 1;
+ALTER TABLE github_apps ADD COLUMN last_webhook_at TEXT;

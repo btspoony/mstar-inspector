@@ -7,10 +7,12 @@
  * `node` condition → `timingSafeEqual` → returns false. The `verifySignature`
  * seam reproduces the workerd throw path and locks the behavior both
  * runtimes must share: malformed signature → 401, never 500, with a
- * structured `event=unknown` warning.
+ * structured stage-labeled warning (plan 15 log hygiene).
  *
- * The `getWebhooks` accessor is used to lock the module-level singleton
- * (F-005): the hot path must not build a `Webhooks` instance per request.
+ * The `getWebhooks` accessor is used to lock the module-level verifier
+ * cache (F-005 + plan 15 L1): the hot path must not build a `Webhooks`
+ * instance per request, cacheKeys are isolated, and a secret mismatch
+ * (rotation) rebuilds + replaces the entry.
  */
 import { describe, expect, mock, test } from "bun:test";
 import worker from "../../src/worker/index";
@@ -47,7 +49,7 @@ describe("verifySignature — workerd hex-decode throw path (F-001)", () => {
     expect(valid).toBe(false);
   });
 
-  test("a throwing verifier logs a structured event=unknown warning", async () => {
+  test("a throwing verifier logs a structured warning with a stage-label event", async () => {
     const warn = mock((_fields: unknown, _msg?: string) => {});
     const valid = await verifySignature(workerdVerify, "{}", "sha256=zz", {
       info: mock(() => {}),
@@ -57,8 +59,10 @@ describe("verifySignature — workerd hex-decode throw path (F-001)", () => {
     expect(valid).toBe(false);
     expect(warn).toHaveBeenCalledTimes(1);
     const [fields, msg] = warn.mock.calls[0] ?? [];
+    // Plan 15 log hygiene: no literal "unknown" — the direct call passes no
+    // event, so the warn falls back to the stage label.
     expect(fields).toMatchObject({
-      event: "unknown",
+      event: "signature_verification_error",
       reason: "signature verification threw",
       detail: "Cannot read properties of null (reading 'map')",
     });
@@ -108,10 +112,28 @@ describe("worker fetch entry — malformed signature maps to 401 (F-001)", () =>
   });
 });
 
-describe("module-level Webhooks singleton (F-005)", () => {
-  test("getWebhooks returns the same instance across calls", () => {
-    const first = getWebhooks(SECRET);
-    const second = getWebhooks(SECRET);
+describe("module-level verifier cache (F-005 + plan 15 L1)", () => {
+  test("getWebhooks returns the same instance across calls for one cacheKey", () => {
+    const first = getWebhooks("workerd-test-key", SECRET);
+    const second = getWebhooks("workerd-test-key", SECRET);
     expect(second).toBe(first);
+  });
+
+  test("distinct cacheKeys never share an instance (legacy / appId isolation)", () => {
+    const legacy = getWebhooks("legacy", SECRET);
+    const perApp = getWebhooks("some-app-row-id", SECRET);
+    expect(perApp).not.toBe(legacy);
+    // Same key again → the memoized instance (not a third one).
+    expect(getWebhooks("legacy", SECRET)).toBe(legacy);
+  });
+
+  test("secret mismatch on the same cacheKey → rebuild + REPLACE (rotation evicts the old entry exactly)", () => {
+    const before = getWebhooks("workerd-rotation-key", "secret-v1");
+    const rotated = getWebhooks("workerd-rotation-key", "secret-v2");
+    expect(rotated).not.toBe(before); // rebuilt
+    expect(getWebhooks("workerd-rotation-key", "secret-v2")).toBe(rotated); // memoized
+    // The old secret's entry is GONE: the same cacheKey + old secret rebuilds
+    // again instead of returning the pre-rotation instance.
+    expect(getWebhooks("workerd-rotation-key", "secret-v1")).not.toBe(before);
   });
 });
