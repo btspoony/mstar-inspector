@@ -259,9 +259,9 @@ Deployed image record (executed plan 19 T3, 2026-08-31 UTC):
   across ALL stages (parse + runner/sandbox/pipeline; the per-attempt rows
   written by plan 18 T2 make this table the sufficient failure signal).
 - Threshold: `failures_24h > 5` (per-attempt semantics — a DLQ'd message
-  leaves up to 3 rows). Constants pinned in src/worker/sweep.ts
-  (`SWEEP_FAILURE_THRESHOLD`, `SWEEP_WINDOW_HOURS`,
-  `SWEEP_WEBHOOK_TIMEOUT_MS`).
+  leaves up to 4 rows: 1 initial delivery + max_retries = 3 retries).
+  Constants pinned in src/worker/sweep.ts (`SWEEP_FAILURE_THRESHOLD`,
+  `SWEEP_WINDOW_HOURS`, `SWEEP_WEBHOOK_TIMEOUT_MS`).
 - Alert transport: structured `ops_sweep_alert` log event
   (`{failures_24h, dlq_check: "skipped", thresholds}`) + optional POST to
   `ALERT_WEBHOOK_URL` (JSON body, 3s timeout; a POST failure degrades to a

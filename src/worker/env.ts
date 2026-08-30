@@ -80,12 +80,10 @@ export type Env = {
 /**
  * Cron scheduled-face environment (plan 19 T1, AL-6): the `scheduled`
  * handler receives the same Worker bindings as every other face; this
- * narrows the type to what the sweep actually reads. `DB` stays optional
- * (the shared fetch-face `Env` declares it optional) — unbound fails closed
- * with a warn, never a throw. The sweep is read-only: no queue/KV mutation
- * from this face, so those bindings are deliberately absent here.
+ * narrows the type to what the sweep actually reads. Derived via `Pick` so
+ * the narrowing is compiler-enforced against `Env` and cannot drift as `Env`
+ * evolves (optionality rides along: `DB` stays optional — unbound fails
+ * closed with a warn, never a throw). The sweep is read-only: no queue/KV
+ * mutation from this face, so those bindings are deliberately absent here.
  */
-export type ScheduledEnv = {
-  DB?: D1Database;
-  ALERT_WEBHOOK_URL?: string;
-};
+export type ScheduledEnv = Pick<Env, "DB" | "ALERT_WEBHOOK_URL">;

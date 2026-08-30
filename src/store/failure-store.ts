@@ -10,8 +10,9 @@
  * Rows are APPEND-ONLY per-attempt events: the parse-fail degrade path
  * writes one row (stage="parse") before acking; the infra-failure catch
  * writes one best-effort row (stage="runner" | "sandbox" | "pipeline")
- * before each rethrow, so a DLQ'd message leaves up to 3 rows. There is no
- * update/delete face by design — audit-log semantics (the plan-19 sweep
+ * before each rethrow, so a DLQ'd message leaves up to 4 rows (one per
+ * delivery: 1 initial + max_retries = 3 retries). There is no update/delete
+ * face by design — audit-log semantics (the plan-19 sweep
  * counts rows over a created_at window; it never mutates them).
  *
  * The `stage` vocabulary is enforced producer-side (0009 precedent — no

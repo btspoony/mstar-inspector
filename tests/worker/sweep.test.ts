@@ -17,6 +17,7 @@ import type { D1Like, D1StatementLike } from "../../src/store/types";
 import {
   runSweep,
   SWEEP_FAILURE_THRESHOLD,
+  SWEEP_LOG_DETAIL_MAX,
   SWEEP_WEBHOOK_TIMEOUT_MS,
   SWEEP_WINDOW_HOURS,
   type SweepAlertFields,
@@ -183,6 +184,37 @@ describe("runSweep", () => {
     expect(calls).toHaveLength(2);
     expect(calls[0]!.fields).toMatchObject({ event: "ops_sweep_alert" });
     expect(calls[1]!.fields).toMatchObject({ event: "ops_sweep_alert_webhook_failed", detail: "sink unreachable" });
+  });
+
+  test("webhook non-2xx response is NOT posted — warn + failed disposition (qc W-2/F-001)", async () => {
+    const db = createMigratedTestD1();
+    await seedInWindow(db, SWEEP_FAILURE_THRESHOLD + 1);
+    const { log, calls } = captureLog();
+    const fetchImpl = (async () => new Response("sink degraded", { status: 503 })) as unknown as typeof fetch;
+
+    const result = await runSweep(db, { alertUrl: "https://ops.example/hook", fetchImpl, log });
+    expect(result.webhook).toBe("failed");
+    expect(calls).toHaveLength(2);
+    expect(calls[0]!.fields).toMatchObject({ event: "ops_sweep_alert" });
+    expect(calls[1]!.fields).toMatchObject({ event: "ops_sweep_alert_webhook_failed" });
+    expect((calls[1]!.fields as SweepWarnFields).detail).toContain("503");
+  });
+
+  test("webhook failure detail is redacted then truncated before logging (qc2 F-002)", async () => {
+    const db = createMigratedTestD1();
+    await seedInWindow(db, SWEEP_FAILURE_THRESHOLD + 1);
+    const { log, calls } = captureLog();
+    const fetchImpl = (async () => {
+      throw new Error(`POST https://ops.example/hook failed: ghp_abcdefghijklmnopqrstuvwxyz ${"x".repeat(600)}`);
+    }) as unknown as typeof fetch;
+
+    const result = await runSweep(db, { alertUrl: "https://ops.example/hook", fetchImpl, log });
+    expect(result.webhook).toBe("failed");
+    const detail = (calls[1]!.fields as SweepWarnFields).detail;
+    expect(detail).not.toContain("ghp_");
+    expect(detail).toContain("[REDACTED]");
+    expect(detail.length).toBeLessThanOrEqual(SWEEP_LOG_DETAIL_MAX);
+    expect(detail.endsWith("…")).toBe(true);
   });
 
   test("D1 errors propagate to the caller (the scheduled handler owns the catch-all)", async () => {
