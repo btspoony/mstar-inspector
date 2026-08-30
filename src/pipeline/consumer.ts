@@ -1408,8 +1408,8 @@ async function processMessage(payload: ReviewJobPayload, deps: ProcessDeps): Pro
     // rethrow — DLQ-bound infra failures otherwise leave zero D1 trace (the
     // plan-19 sweep blind spot). `stage` = the coarse phase in flight
     // (failureStage); rows are per-attempt events (a DLQ'd message leaves
-    // up to 3). The insert must never mask the rethrow: its own failure is
-    // a warn line only.
+    // up to 4: 1 initial delivery + max_retries = 3 retries). The insert
+    // must never mask the rethrow: its own failure is a warn line only.
     try {
       await deps.failureStore.record({
         installation_id: payload.installation_id,

@@ -11,8 +11,9 @@
 --     orchestration): stage = "runner" | "sandbox" | "pipeline", written
 --     best-effort at the consumer's catch site BEFORE the rethrow — the
 --     throw→retry→DLQ semantics are unchanged, so a DLQ'd message leaves up
---     to 3 rows (one per attempt). `error` carries the attempt's structured
---     error detail (the same string the failure log line carries).
+--     to 4 rows (one per delivery: 1 initial + max_retries = 3 retries).
+--     `error` carries the attempt's structured error detail (the same
+--     string the failure log line carries).
 --
 -- stage vocabulary is enforced PRODUCER-side (src/store/failure-store.ts
 -- FAILURE_STAGES, 0009 precedent) — no CHECK constraint.

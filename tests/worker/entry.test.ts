@@ -11,6 +11,9 @@
  */
 
 import { describe, expect, mock, test } from "bun:test";
+import type { D1Database, ExecutionContext, ScheduledController } from "@cloudflare/workers-types";
+import { createFailureStore } from "../../src/store/failure-store";
+import { createMigratedTestD1 } from "../store/helpers";
 
 mock.module("@cloudflare/sandbox", () => ({
   getSandbox: mock(() => ({})),
@@ -43,5 +46,85 @@ describe("worker entry (deploy)", () => {
     const res = await worker.fetch(new Request("https://worker.local/healthz"), makeEnv());
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual({ ok: true });
+  });
+});
+
+/**
+ * Cron scheduled wiring (plan 19 T1, AL-6): the deploy entry must expose the
+ * `scheduled` face (re-exported from ./index) that runs the trailing-24h
+ * failure sweep over the bound D1 — read-only, and NEVER throwing out of the
+ * handler (a throwing cron handler just retries into alert noise).
+ */
+describe("worker entry scheduled wiring (plan 19 T1)", () => {
+  const NOOP_CONTROLLER = {} as ScheduledController;
+  const NOOP_CTX = {} as ExecutionContext;
+
+  test("exports a scheduled handler", () => {
+    expect(typeof worker.scheduled).toBe("function");
+  });
+
+  test("scheduled runs the sweep over the bound DB and POSTs the alert to ALERT_WEBHOOK_URL on breach", async () => {
+    const db = createMigratedTestD1();
+    const store = createFailureStore(db);
+    for (let i = 0; i < 6; i++) {
+      await store.record({
+        installation_id: 1,
+        owner: "acme",
+        repo: "widgets",
+        pr_number: 1,
+        head_sha: "",
+        stage: "runner",
+        error: `boom-${i}`,
+      });
+    }
+    const calls: Array<{ url: string; init?: RequestInit }> = [];
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async (url: unknown, init?: RequestInit) => {
+      calls.push({ url: String(url), init });
+      return new Response("ok");
+    }) as typeof fetch;
+    try {
+      await worker.scheduled(
+        NOOP_CONTROLLER,
+        makeEnv({ DB: db as unknown as D1Database, ALERT_WEBHOOK_URL: "https://ops.example/hook" }),
+        NOOP_CTX,
+      );
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+    expect(calls).toHaveLength(1);
+    expect(calls[0]!.url).toBe("https://ops.example/hook");
+    expect(JSON.parse(String(calls[0]!.init?.body))).toMatchObject({
+      event: "ops_sweep_alert",
+      failures_24h: 6,
+      dlq_check: "skipped",
+    });
+  });
+
+  test("scheduled without a DB binding fails closed — warn log, no webhook, no throw", async () => {
+    const originalFetch = globalThis.fetch;
+    let fetchCalls = 0;
+    globalThis.fetch = (async () => {
+      fetchCalls++;
+      return new Response("ok");
+    }) as unknown as typeof fetch;
+    try {
+      await worker.scheduled(NOOP_CONTROLLER, makeEnv({ ALERT_WEBHOOK_URL: "https://ops.example/hook" }), NOOP_CTX);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+    expect(fetchCalls).toBe(0);
+  });
+
+  test("scheduled never throws when the sweep itself fails", async () => {
+    const brokenDb = {
+      prepare(): never {
+        throw new Error("d1 down");
+      },
+      batch: async () => [],
+    };
+    await expect(
+      worker.scheduled(NOOP_CONTROLLER, makeEnv({ DB: brokenDb as unknown as D1Database }), NOOP_CTX),
+    ).resolves.toBeUndefined();
   });
 });
