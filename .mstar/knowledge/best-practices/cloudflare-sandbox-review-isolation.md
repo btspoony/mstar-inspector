@@ -7,7 +7,7 @@ severity: medium
 date: 2026-08-26
 status: active
 created_at: 2026-08-26
-last_updated: 2026-08-26
+last_updated: 2026-08-31
 source_plan: 06-sandbox-review-pipeline
 iteration: v0.2
 verified: true
@@ -35,6 +35,12 @@ mstar-inspector 在 Cloudflare Workers 上编排每 PR 隔离的代码审查：Q
 - `gh` 认证：`GH_TOKEN` 经 `exec` 的 `env` 注入（实测 `gh pr diff` 对真实 PR 返回非空 diff）；**密钥不进镜像**（含 build args）。
 - 每消息一个 sandbox，id 用 `randomUUID()`（per-attempt 唯一），`finally` 中 `destroy()`；禁止跨消息复用。
 - 容器内 omp：`HARNESS_PLUGIN_ROOT` 指向镜像预装根（env 注入）；模型 key 经 exec env（`OMP_MODEL_KEY` → 容器内 `ARK_API_KEY` 单一映射点）。
+
+### 网络出站控制面（v0.7 / plan 19, AL-4 核实）
+
+- `@cloudflare/sandbox` 0.12.8 自身 **无** egress 配置面（`SandboxOptions` 无网络字段）；控制面在其钉版依赖 **`@cloudflare/containers` 0.3.7** 的 `Container` 超类上：`allowedHosts`（白名单外 → 520 fail-closed）/ `deniedHosts` / `enableInternet` / `interceptHttps`。
+- **启用前先问 host 清单是否有仓内 SSOT**：BYOK 开放 provider 集时，漏一个 host = 全部该 App review 520→DLQ，失败模式比不启用更差。先落 host SSOT + staging 验证，再启用。
+- 本仓事实（v0.7）：runtime 必需出站 = `github.com`/`api.github.com`（gh CLI）+ provider API host（镜像内 `models.yml`）；构建期安装不限（build-time only）。
 
 ### 性能口径（实测）
 
