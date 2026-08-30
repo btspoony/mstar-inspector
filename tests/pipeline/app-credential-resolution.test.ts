@@ -131,7 +131,7 @@ mock.module("@cloudflare/sandbox", () => ({
 
 // --- commenter fakes --------------------------------------------------------
 
-type CommenterCall = { op: "token" | "post"; installationId?: number };
+type CommenterCall = { op: "token" | "post" | "degrade"; installationId?: number };
 /** Calls grouped by instance — same-instance assertions key off this. */
 const legacyCalls: CommenterCall[] = [];
 const appCalls: Array<{ instance: number; call: CommenterCall }> = [];
@@ -147,6 +147,9 @@ const legacyCommenter: ReviewCommenter = {
   postReview: mock(async () => {
     legacyCalls.push({ op: "post" });
   }),
+  postDegraded: mock(async () => {
+    legacyCalls.push({ op: "degrade" });
+  }),
 };
 
 /** The test seam: records the EXACT credentials each App instance gets. */
@@ -160,6 +163,9 @@ const appCommenterFactory = mock((cred: CommenterEnv): ReviewCommenter => {
     }),
     postReview: mock(async () => {
       appCalls.push({ instance, call: { op: "post" } });
+    }),
+    postDegraded: mock(async () => {
+      appCalls.push({ instance, call: { op: "degrade" } });
     }),
   };
 });

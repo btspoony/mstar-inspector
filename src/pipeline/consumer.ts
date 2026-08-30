@@ -16,15 +16,23 @@
  * the mstar.review/v1 envelope → post the overall review comment FIRST →
  * store.put (idempotent — the UNIQUE first-written row wins) → KV
  * completion state → finally destroy. Any step throwing → structured log
- * + rethrow (queue retry → DLQ). The runtime runner has NO
+ * + a best-effort review_failures row (stage classified from the phase in
+ * flight; plan 18 Task 2 / AL-6 — DLQ-bound infra failures otherwise leave
+ * zero D1 trace) + rethrow (queue retry → DLQ). The runtime runner has NO
  * summary-degrade path: exit 0 means stdout is the engine-validated
- * envelope; a non-zero exit or a parse/validate failure is no post, no
- * insert, structured log, rethrow. Two typed outcomes never throw: the
- * in-flight guard (bugbot BB-3) — guard-held schedules a per-message
- * delayed retry (60s/120s/240s) and finally acks with a warning instead of
- * DLQing — and a PAUSED App's message (plan 16, review_enabled=0), which
- * acks immediately with ZERO side effects (no guard, no sandbox, no token
- * mint, no app-config read, no GitHub write, no retry, no DLQ).
+ * envelope; a non-zero exit keeps the no-post/no-insert rethrow. A
+ * parse/validate failure takes the DEGRADE path instead (plan 18 Task 2 /
+ * AL-1): review_failures row (stage=parse) + degraded comment (both
+ * best-effort) + ack — parseReviewOutput is a pure function of
+ * run.stdout, so retry is deterministic waste. No reviews row and NO KV
+ * done-state on degrade: a later webhook for the same sha legitimately
+ * re-runs the review. Three typed outcomes never throw: the in-flight
+ * guard (bugbot BB-3) — guard-held schedules a per-message delayed retry
+ * (60s/120s/240s) and finally acks with a warning instead of DLQing — a
+ * PAUSED App's message (plan 16, review_enabled=0), which acks
+ * immediately with ZERO side effects (no guard, no sandbox, no token
+ * mint, no app-config read, no GitHub write, no retry, no DLQ) — and the
+ * parse-fail degrade.
  *
  * Sha consistency (bugbot A2): every downstream use — idempotency key, D1
  * row, posted commit_id, KV completion — is keyed off the sha read back
@@ -40,7 +48,8 @@
  * worker → pipeline (worker/index.ts queue wiring). It imports contracts/
  * (payload + idempotency key), review/schema (pure zod) + review/runtime
  * (pure port types/constants — dual-face, zero omp SDK),
- * store/artifact-store (07 D1 ArtifactStore), and the pipeline modules —
+ * store/artifact-store (07 D1 ArtifactStore) + store/failure-store (plan 18
+ * Task 2 review_failures leaf), and the pipeline modules —
  * never src/worker/**.
  */
 
@@ -51,6 +60,7 @@ import { parseReviewOutput, capFindings, clampFindingSizes } from "../review/sch
 import { isReviewLevel, REVIEW_LEVELS, type ReviewLevel } from "../review/runtime";
 import { redactReviewOutput } from "./redact";
 import { createArtifactStore, type D1ArtifactStore } from "../store/artifact-store";
+import { createFailureStore, type FailureStage, type FailureStore } from "../store/failure-store";
 import { getSandbox, type ReviewSandbox } from "./sandbox";
 import { buildGitOpsCommands, writeJsonCommand } from "./gitops";
 import { createReviewCommenter, type CommenterEnv, type ReviewCommenter } from "./comment";
@@ -331,16 +341,24 @@ export function guardRetryDelaysSeconds(level: ReviewLevel): readonly number[] {
 }
 
 /**
- * Outcome of one message pass (bugbot BB-3 + plan 16 lock L4). Two DISTINCT
- * typed outcomes never throw: a guard-held message is scheduled for a
- * per-message delayed retry and finally acked with a warning — it is never
- * rethrown into the immediate-retry ×3 → DLQ path; a PAUSED message (the
- * App's review_enabled=0) is acked directly — an intentional skip with zero
- * side effects, never a retry or a DLQ entry (a throw would be the wrong
- * semantics for an operator pause). Real failures keep the existing
- * throw → retry → DLQ behavior.
+ * Outcome of one message pass (bugbot BB-3 + plan 16 lock L4 + plan 18 Task
+ * 2 AL-1). THREE DISTINCT typed outcomes never throw: a guard-held message
+ * is scheduled for a per-message delayed retry and finally acked with a
+ * warning — it is never rethrown into the immediate-retry ×3 → DLQ path; a
+ * PAUSED message (the App's review_enabled=0) is acked directly — an
+ * intentional skip with zero side effects, never a retry or a DLQ entry (a
+ * throw would be the wrong semantics for an operator pause); a DEGRADED
+ * message (parse-fail) is acked directly after its best-effort
+ * review_failures row + degraded comment — a deterministic model-output
+ * failure where retry is deterministic waste. Infra failures keep the
+ * existing throw → retry → DLQ behavior (plus the AL-6 best-effort failure
+ * row before the rethrow).
  */
-export type ProcessOutcome = { kind: "ok" } | { kind: "guard-held" } | { kind: "paused" };
+export type ProcessOutcome =
+  | { kind: "ok" }
+  | { kind: "guard-held" }
+  | { kind: "paused" }
+  | { kind: "degraded" };
 
 /**
  * Handle a guard-held message (bugbot BB-3). The guard is not an error
@@ -379,6 +397,13 @@ function handleGuardHeld(message: Message<ReviewJobPayload>, deps: ProcessDeps):
 type ProcessDeps = {
   env: PipelineEnv;
   store: D1ArtifactStore;
+  /**
+   * review_failures leaf (plan 18 Task 2 / AL-1 + AL-6): the parse-fail
+   * degrade branch and the infra-failure catch record through it. Both call
+   * sites are best-effort (try/catch at the call site — an insert failure
+   * never masks the ack or the rethrow).
+   */
+  failureStore: FailureStore;
   commenter: ReviewCommenter;
   /**
    * Per-App commenter instance cache keyed by appId (plan 13 Task 2, lock
@@ -820,7 +845,7 @@ async function kvDoneHit(
  * defaults to the production implementation when omitted.
  */
 type ConsumerOverrides = Partial<
-  Pick<ProcessDeps, "store" | "commenter" | "createAppCommenter" | "getSandbox">
+  Pick<ProcessDeps, "store" | "failureStore" | "commenter" | "createAppCommenter" | "getSandbox">
 >;
 
 /**
@@ -845,6 +870,7 @@ export function createReviewConsumer(
   const deps: ProcessDeps = {
     env,
     store: overrides.store ?? createArtifactStore(env.DB),
+    failureStore: overrides.failureStore ?? createFailureStore(env.DB),
     commenter: overrides.commenter ?? createReviewCommenter(env),
     appCommenters: new Map(),
     createAppCommenter: overrides.createAppCommenter ?? createReviewCommenter,
@@ -863,6 +889,13 @@ export function createReviewConsumer(
         // Plan 16 (architect lock L4): a paused App's in-flight message is
         // acked DIRECTLY — an intentional skip with zero side effects, never
         // a retry and never a DLQ entry.
+        message.ack();
+      } else if (outcome.kind === "degraded") {
+        // Plan 18 Task 2 (architect AL-1): parse-fail degrade — the
+        // best-effort failure row and degraded comment already ran inside
+        // processMessage; the message is acked DIRECTLY (deterministic
+        // model-output failure — retry re-runs the same pure function on the
+        // same stdout), never a retry and never a DLQ entry.
         message.ack();
       }
     }
@@ -898,6 +931,15 @@ async function processMessage(payload: ReviewJobPayload, deps: ProcessDeps): Pro
   // elapsed never aborts; the sandbox exec timeout is the only wall-clock
   // failure (spec 不 abort).
   let runnerStartedAt: number | undefined;
+  // Failure-stage tracking (plan 18 Task 2 / AL-6): the catch site's
+  // best-effort review_failures row classifies `stage` from the coarse phase
+  // in flight — "pipeline" (default) = worker-side orchestration (level /
+  // credential / config resolution, token mint, comment post); "sandbox" =
+  // container acquisition + the in-sandbox git/diff/numstat/input steps
+  // (exec exception OR non-zero exit); "runner" = the in-image review run
+  // itself. "parse" never goes through this variable — the degrade branch
+  // records stage="parse" directly and acks without reaching the catch.
+  let failureStage: FailureStage = "pipeline";
 
   try {
     // Review tier (AC-S7-level): resolved BEFORE any sandbox/KV step so a
@@ -952,6 +994,10 @@ async function processMessage(payload: ReviewJobPayload, deps: ProcessDeps): Pro
     }
     guardHeld = true;
     // 1. Sandbox + installation token (created lazily; destroyed in finally).
+    // AL-6 stage window: container acquisition + every in-sandbox step below
+    // (clone/rev-parse/diff/numstat/input-write) classify "sandbox" until the
+    // runner step takes over.
+    failureStage = "sandbox";
     if (sandbox === null) {
       sandbox = await deps.getSandbox(deps.env.SANDBOX, sandboxId);
     }
@@ -1087,6 +1133,9 @@ async function processMessage(payload: ReviewJobPayload, deps: ProcessDeps): Pro
     // logging, plan 14 B2; secrets never baked into the image, never in
     // logs). The runtime runner has NO summary-degrade path: exit 0 ⇒ stdout
     // is the engine-validated mstar.review/v1 envelope.
+    // AL-6 stage window: the review run itself — a non-zero exit or an exec
+    // exception (timeout / container error) here classifies "runner".
+    failureStage = "runner";
     runnerStartedAt = Date.now();
     const run = await sandbox.exec(cmds.runner, {
       cwd: CLONE_DIR,
@@ -1106,11 +1155,60 @@ async function processMessage(payload: ReviewJobPayload, deps: ProcessDeps): Pro
       `runner finished in ${runnerElapsedMs}ms (budget ${runnerTimeoutMs(level)}ms)`,
     );
 
+    // AL-6 stage window: post-runner steps (parse has its own branch; the
+    // post/KV/put orchestration is worker-side) are "pipeline" again.
+    failureStage = "pipeline";
+
     // 9. Parse + validate the envelope (engine gate inside parseReviewOutput;
-    // mapping spec §4.2): failure → no review, no insert.
+    // mapping spec §4.2). Parse-fail is the DEGRADE path (plan 18 Task 2 /
+    // architect AL-1): parseReviewOutput is a pure function of run.stdout —
+    // the same stdout fails identically on a retry (a deterministic
+    // model-output failure), so the message ACKS instead of throwing. Order:
+    // review_failures row (best-effort — an insert failure must never mask
+    // the degrade) → degraded comment (best-effort — a post failure is a
+    // structured log line only) → the `degraded` outcome the queue handler
+    // acks. KV done-state is deliberately NOT set (a later webhook for the
+    // same sha legitimately re-runs the review; queue redelivery stops via
+    // the ack) and no `reviews` row is written.
     const parsed = parseReviewOutput(run.stdout);
     if (!parsed.ok) {
-      throw new Error(`parse failed: ${parsed.error}`);
+      try {
+        await deps.failureStore.record({
+          installation_id: payload.installation_id,
+          owner: payload.owner,
+          repo: payload.repo,
+          pr_number: payload.pr_number,
+          head_sha: headSha,
+          stage: "parse",
+          error: parsed.error,
+        });
+      } catch (err) {
+        const detail = err instanceof Error ? err.message : String(err);
+        deps.log.warn(fields, `review_failures insert failed (degrade continues): ${detail}`);
+      }
+      try {
+        // The same resolved commenter instance as the token mint above
+        // (lock L4) — the degraded chain rides the PR's own App identity.
+        await commenter.postDegraded({
+          installationId: payload.installation_id,
+          owner: payload.owner,
+          repo: payload.repo,
+          prNumber: payload.pr_number,
+          error: parsed.error,
+          // Raw stdout rides to the commenter UNREDACTED — buildDegradedBody
+          // is the redaction+truncation choke point (redact first, then the
+          // ≤1000-char cut, so no partial secret straddles the boundary).
+          rawOutput: run.stdout,
+        });
+      } catch (err) {
+        const detail = err instanceof Error ? err.message : String(err);
+        deps.log.warn(fields, `degraded comment post failed (acking anyway): ${detail}`);
+      }
+      deps.log.warn(
+        fields,
+        `review degraded: output failed schema validation (${parsed.error}) — acked, no retry/DLQ`,
+      );
+      return { kind: "degraded" };
     }
 
     // 10. SEC-02 + B4 + size-budget choke point: redact secret-shaped spans
@@ -1209,6 +1307,32 @@ async function processMessage(payload: ReviewJobPayload, deps: ProcessDeps): Pro
       },
       `review failed: ${detail}`,
     );
+
+    // AL-6 (plan 18 Task 2): best-effort review_failures row BEFORE the
+    // rethrow — DLQ-bound infra failures otherwise leave zero D1 trace (the
+    // plan-19 sweep blind spot). `stage` = the coarse phase in flight
+    // (failureStage); rows are per-attempt events (a DLQ'd message leaves
+    // up to 3). The insert must never mask the rethrow: its own failure is
+    // a warn line only.
+    try {
+      await deps.failureStore.record({
+        installation_id: payload.installation_id,
+        owner: payload.owner,
+        repo: payload.repo,
+        pr_number: payload.pr_number,
+        // The authoritative sha once the checkout resolved it; before that
+        // the payload sha, else "" (= never resolved).
+        head_sha: fields?.head_sha ?? payload.head_sha ?? "",
+        stage: failureStage,
+        error: detail,
+      });
+    } catch (recordErr) {
+      const recordDetail = recordErr instanceof Error ? recordErr.message : String(recordErr);
+      deps.log.warn(
+        fields ?? { ...baseFields, sandbox_id: sandboxId },
+        `review_failures insert failed (rethrow unchanged): ${recordDetail}`,
+      );
+    }
     throw err;
   } finally {
     // Release the in-flight guard once the review settled (posted, KV done,

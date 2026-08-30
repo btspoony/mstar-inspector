@@ -143,6 +143,9 @@ const legacyCommenter: ReviewCommenter = {
   postReview: mock(async () => {
     legacyCalls.push("post");
   }),
+  postDegraded: mock(async () => {
+    legacyCalls.push("degrade");
+  }),
 };
 
 const appCommenterFactory = mock((_cred: CommenterEnv): ReviewCommenter => ({
@@ -152,6 +155,9 @@ const appCommenterFactory = mock((_cred: CommenterEnv): ReviewCommenter => ({
   }),
   postReview: mock(async () => {
     appCalls.push("post");
+  }),
+  postDegraded: mock(async () => {
+    appCalls.push("degrade");
   }),
 }));
 

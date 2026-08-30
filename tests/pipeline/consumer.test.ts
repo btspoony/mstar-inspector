@@ -24,8 +24,11 @@
  *   - REVIEW_LEVEL configurable (quick/default/deep); invalid value fails loud
  *     BEFORE any sandbox step (never a silent downgrade)
  *   - null payload sha → sha resolved from the checkout (no gh pr view)
- *   - parse failure → no post, no insert, rethrow, destroy
- *   - comment failure → no insert, rethrow, destroy
+ *   - parse failure (plan 18 T2 / AL-1) → failure row (stage=parse) +
+ *     degraded comment + ack — no post, no reviews row, no KV done, zero DLQ
+ *   - infra failure (AL-6) → best-effort failure row with the phase stage
+ *     (runner | sandbox | pipeline) + unchanged rethrow → retry/DLQ
+ *   - comment failure → failure row (stage=pipeline) + rethrow, destroy
  *   - finally destroy on every path
  */
 
@@ -122,6 +125,7 @@ mock.module("@cloudflare/sandbox", () => ({
 const commenterCalls: Array<{ op: string; args: unknown[] }> = [];
 let tokenResult = "ghs_installation_token";
 let commentError: Error | undefined;
+let degradeError: Error | undefined;
 
 const fakeCommenter: ReviewCommenter = {
   getInstallationToken: mock(async (installationId: number) => {
@@ -131,6 +135,10 @@ const fakeCommenter: ReviewCommenter = {
   postReview: mock(async (input: unknown) => {
     commenterCalls.push({ op: "post", args: [input] });
     if (commentError) throw commentError;
+  }),
+  postDegraded: mock(async (input: unknown) => {
+    commenterCalls.push({ op: "degrade", args: [input] });
+    if (degradeError) throw degradeError;
   }),
 };
 
@@ -268,6 +276,7 @@ function reset(): void {
   destroyError = undefined;
   tokenResult = "ghs_installation_token";
   commentError = undefined;
+  degradeError = undefined;
   kvPutError = undefined;
   kvGetValue = null;
   kvGuardValue = null;
@@ -277,6 +286,11 @@ function reset(): void {
 function reviewCount(db: ReturnType<typeof createMigratedTestD1>): number {
   const row = db.raw.query("SELECT COUNT(*) AS n FROM reviews").get() as { n: number };
   return row.n;
+}
+
+/** All rows of the review_failures table in the real D1 double. */
+function failureRows(db: ReturnType<typeof createMigratedTestD1>): Array<Record<string, unknown>> {
+  return db.raw.query("SELECT * FROM review_failures ORDER BY rowid").all() as Array<Record<string, unknown>>;
 }
 
 describe("createReviewConsumer", () => {
@@ -455,20 +469,83 @@ describe("createReviewConsumer", () => {
     expect(destroyCalls).toBe(1);
   });
 
-  test("parse failure → no post, no insert, rethrow, destroy", async () => {
+  test("parse failure → failure row (stage=parse) + degraded comment + ack, zero DLQ (plan 18 T2 / AL-1)", async () => {
     reset();
     runnerStdout = "not json at all";
     const db = createMigratedTestD1();
-    const consumer = createReviewConsumer(makeEnv({ DB: db as never }), undefined, testOverrides);
+    const consumer = createReviewConsumer(makeEnv({ DB: db as never }), testLog, testOverrides);
 
-    await expect(consumer(makeBatch(makePayload()))).rejects.toThrow(/parse failed/);
+    await consumer(makeBatch(makePayload())); // resolves — acked, never DLQed
 
+    // No real-review side effects: no overall post, no reviews row, NO KV
+    // done-state (a later webhook for the same sha legitimately re-runs).
     expect(commenterCalls.filter((c) => c.op === "post")).toHaveLength(0);
     expect(reviewCount(db)).toBe(0);
+    expect(kvPuts).toHaveLength(0);
+    // Degraded comment posted with the parse error + the RAW stdout (the
+    // commenter side is the redaction/truncation choke point).
+    const degrades = commenterCalls.filter((c) => c.op === "degrade");
+    expect(degrades).toHaveLength(1);
+    const degradeInput = degrades[0]!.args[0] as { error: string; rawOutput: string };
+    expect(degradeInput.error).toBe("not valid ReviewOutput JSON");
+    expect(degradeInput.rawOutput).toBe("not json at all");
+    // Failure row: stage=parse, keyed off the AUTHORITATIVE checkout sha.
+    const rows = failureRows(db);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({
+      installation_id: 123,
+      owner: "acme",
+      repo: "widgets",
+      pr_number: 42,
+      head_sha: SHA,
+      stage: "parse",
+      error: "not valid ReviewOutput JSON",
+    });
+    // Queue redelivery stops via the ack — no throw, no retry call.
+    expect(messageAckCalls).toHaveLength(1);
+    expect(messageRetryCalls).toHaveLength(0);
     expect(destroyCalls).toBe(1);
   });
 
-  test("comment failure → no insert, rethrow, destroy", async () => {
+  test("parse failure with a failing failure-store → degrade still posts + acks (best-effort record)", async () => {
+    reset();
+    runnerStdout = "not json at all";
+    const db = createMigratedTestD1();
+    const consumer = createReviewConsumer(makeEnv({ DB: db as never }), testLog, {
+      ...testOverrides,
+      failureStore: {
+        record: async () => {
+          throw new Error("d1 down");
+        },
+        listRecent: async () => [],
+      },
+    });
+
+    await consumer(makeBatch(makePayload())); // resolves — the insert must not mask the degrade
+
+    expect(commenterCalls.filter((c) => c.op === "degrade")).toHaveLength(1);
+    expect(failureRows(db)).toHaveLength(0);
+    expect(messageAckCalls).toHaveLength(1);
+    const warn = logLines.find((l) => l.level === "warn" && l.msg.includes("review_failures insert failed"));
+    expect(warn).toBeDefined();
+  });
+
+  test("parse failure with a failing degraded post → failure row + ack anyway (best-effort comment)", async () => {
+    reset();
+    runnerStdout = "not json at all";
+    degradeError = new Error("github down");
+    const db = createMigratedTestD1();
+    const consumer = createReviewConsumer(makeEnv({ DB: db as never }), testLog, testOverrides);
+
+    await consumer(makeBatch(makePayload())); // resolves — a post failure is a log line only
+
+    expect(failureRows(db)).toHaveLength(1);
+    expect(messageAckCalls).toHaveLength(1);
+    const warn = logLines.find((l) => l.level === "warn" && l.msg.includes("degraded comment post failed"));
+    expect(warn).toBeDefined();
+  });
+
+  test("comment failure → failure row (stage=pipeline) + rethrow, destroy (AL-6)", async () => {
     reset();
     runnerStdout = JSON.stringify(VALID_OUTPUT);
     commentError = new Error("post failed");
@@ -478,10 +555,12 @@ describe("createReviewConsumer", () => {
     await expect(consumer(makeBatch(makePayload()))).rejects.toThrow("post failed");
 
     expect(reviewCount(db)).toBe(0);
+    expect(failureRows(db)).toHaveLength(1);
+    expect(failureRows(db)[0]).toMatchObject({ stage: "pipeline", head_sha: SHA });
     expect(destroyCalls).toBe(1);
   });
 
-  test("sandbox exec failure → rethrow, destroy", async () => {
+  test("sandbox exec failure → failure row (stage=sandbox) + rethrow, destroy (AL-6)", async () => {
     reset();
     sandboxError = new Error("container unavailable");
     const db = createMigratedTestD1();
@@ -489,10 +568,12 @@ describe("createReviewConsumer", () => {
 
     await expect(consumer(makeBatch(makePayload()))).rejects.toThrow("container unavailable");
     expect(reviewCount(db)).toBe(0);
+    expect(failureRows(db)).toHaveLength(1);
+    expect(failureRows(db)[0]).toMatchObject({ stage: "sandbox", error: "container unavailable" });
     expect(destroyCalls).toBe(1);
   });
 
-  test("clone exitCode !== 0 → rethrow, destroy, no post/insert", async () => {
+  test("clone exitCode !== 0 → failure row (stage=sandbox) + rethrow, destroy, no post/insert", async () => {
     reset();
     cloneExitCode = 128;
     const db = createMigratedTestD1();
@@ -501,19 +582,8 @@ describe("createReviewConsumer", () => {
     await expect(consumer(makeBatch(makePayload()))).rejects.toThrow(/clone failed/);
     expect(commenterCalls.filter((c) => c.op === "post")).toHaveLength(0);
     expect(reviewCount(db)).toBe(0);
-    expect(destroyCalls).toBe(1);
-  });
-
-  test("runner exitCode !== 0 → rethrow, destroy, no post/insert", async () => {
-    reset();
-    runnerExitCode = 1;
-    runnerStderr = "review: session failed: boom";
-    const db = createMigratedTestD1();
-    const consumer = createReviewConsumer(makeEnv({ DB: db as never }), undefined, testOverrides);
-
-    await expect(consumer(makeBatch(makePayload()))).rejects.toThrow(/runner failed/);
-    expect(commenterCalls.filter((c) => c.op === "post")).toHaveLength(0);
-    expect(reviewCount(db)).toBe(0);
+    expect(failureRows(db)).toHaveLength(1);
+    expect(failureRows(db)[0]).toMatchObject({ stage: "sandbox" });
     expect(destroyCalls).toBe(1);
   });
 
@@ -529,6 +599,42 @@ describe("createReviewConsumer", () => {
     expect(commenterCalls.filter((c) => c.op === "post")).toHaveLength(1);
     expect(reviewCount(db)).toBe(1);
     expect(destroyCalls).toBe(1);
+  });
+
+  test("runner exitCode !== 0 → failure row (stage=runner) + rethrow, destroy, no post/insert (AL-6)", async () => {
+    reset();
+    runnerExitCode = 1;
+    runnerStderr = "review: session failed: boom";
+    const db = createMigratedTestD1();
+    const consumer = createReviewConsumer(makeEnv({ DB: db as never }), undefined, testOverrides);
+
+    await expect(consumer(makeBatch(makePayload()))).rejects.toThrow(/runner failed/);
+    expect(commenterCalls.filter((c) => c.op === "post")).toHaveLength(0);
+    expect(reviewCount(db)).toBe(0);
+    expect(failureRows(db)).toHaveLength(1);
+    expect(failureRows(db)[0]).toMatchObject({ stage: "runner", head_sha: SHA });
+    expect(failureRows(db)[0]!.error).toContain("runner failed");
+    expect(destroyCalls).toBe(1);
+  });
+
+  test("infra failure with a failing failure-store → rethrow not masked (AL-6 best-effort)", async () => {
+    reset();
+    runnerExitCode = 1;
+    const db = createMigratedTestD1();
+    const consumer = createReviewConsumer(makeEnv({ DB: db as never }), testLog, {
+      ...testOverrides,
+      failureStore: {
+        record: async () => {
+          throw new Error("d1 down");
+        },
+        listRecent: async () => [],
+      },
+    });
+
+    await expect(consumer(makeBatch(makePayload()))).rejects.toThrow(/runner failed/);
+
+    const warn = logLines.find((l) => l.level === "warn" && l.msg.includes("review_failures insert failed"));
+    expect(warn).toBeDefined();
   });
 
   test("numstat failure → no runner, no post, no insert, rethrow, destroy", async () => {
@@ -746,20 +852,24 @@ describe("createReviewConsumer", () => {
     expect(JSON.parse(row.envelope).target).toEqual({ owner: "acme", repo: "widgets", pr: 42, head_sha: SHA });
   });
 
-  test("failure logs a structured error with idempotency key + sandbox id before rethrow", async () => {
+  test("infra failure logs a structured error with idempotency key + sandbox id before rethrow", async () => {
     reset();
-    runnerStdout = "not json at all";
+    // A parse failure no longer rethrows (it degrades + acks) — the
+    // structured error-log-before-rethrow contract is pinned on a genuine
+    // infra failure (runner non-zero exit).
+    runnerExitCode = 1;
+    runnerStderr = "review: session failed: boom";
     const db = createMigratedTestD1();
     const consumer = createReviewConsumer(makeEnv({ DB: db as never }), testLog, testOverrides);
 
-    await expect(consumer(makeBatch(makePayload()))).rejects.toThrow(/parse failed/);
+    await expect(consumer(makeBatch(makePayload()))).rejects.toThrow(/runner failed/);
 
     const errLine = logLines.find((l) => l.level === "error");
     expect(errLine).toBeDefined();
     expect(errLine!.fields.idempotency_key).toBe(`idem:123:acme/widgets:42:${SHA}`);
     expect(errLine!.fields.sandbox_id).toMatch(/^review-/);
     expect(errLine!.fields.head_sha).toBe(SHA);
-    expect(errLine!.msg).toContain("parse failed");
+    expect(errLine!.msg).toContain("runner failed");
   });
 
   test("empty actual sha from rev-parse → no post/insert, rethrow, destroy", async () => {
@@ -778,6 +888,25 @@ describe("createReviewConsumer", () => {
     expect(destroyCalls).toBe(1);
     const errLine = logLines.find((l) => l.level === "error");
     expect(errLine?.fields.sandbox_id).toMatch(/^review-/);
+  });
+
+  test("pre-checkout failure (invalid REVIEW_LEVEL) → failure row stage=pipeline with the payload sha", async () => {
+    reset();
+    const db = createMigratedTestD1();
+    const consumer = createReviewConsumer(
+      makeEnv({ DB: db as never, REVIEW_LEVEL: "bogus" }),
+      testLog,
+      testOverrides,
+    );
+
+    await expect(consumer(makeBatch(makePayload()))).rejects.toThrow(/invalid REVIEW_LEVEL/);
+
+    // The checkout never ran: no authoritative sha — the row carries the
+    // payload sha as the best attribution available ("pipeline" phase).
+    expect(failureRows(db)).toHaveLength(1);
+    expect(failureRows(db)[0]).toMatchObject({ stage: "pipeline", head_sha: SHA });
+    expect(sandboxCalls).toHaveLength(0);
+    expect(destroyCalls).toBe(0);
   });
 
   test("KV completion write failure → warn, still ack (D1 row is durable)", async () => {
@@ -1216,11 +1345,14 @@ describe("createReviewConsumer", () => {
 
   test("real failures keep the throw → queue retry → DLQ behavior (BB-3 unchanged)", async () => {
     reset();
-    runnerStdout = "not json at all";
+    // A parse failure now DEGRADES (acks) — the real-failure throw path is
+    // pinned on a genuine infra failure instead (runner non-zero exit).
+    runnerExitCode = 1;
+    runnerStderr = "review: session failed: boom";
     const db = createMigratedTestD1();
     const consumer = createReviewConsumer(makeEnv({ DB: db as never }), testLog, testOverrides);
 
-    await expect(consumer(makeBatch(makePayload()))).rejects.toThrow(/parse failed/);
+    await expect(consumer(makeBatch(makePayload()))).rejects.toThrow(/runner failed/);
 
     // Only the guard-held path is handled with message-level retry/ack; a
     // real failure rethrows exactly as before.

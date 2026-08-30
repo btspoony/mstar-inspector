@@ -29,6 +29,14 @@
  * comments API has no review event at all, and the verdict is rendered as
  * text in the body header (SEC-01 guarantee, structurally).
  *
+ * Degraded chain (plan 18 Task 2 / architect AL-1): a parse-fail review
+ * posts a summary-only "Review degraded" comment on a SEPARATE marker
+ * family (`<!-- mstar-inspector:review-degraded:v1 round=N -->`) with an
+ * independent round counter — the real review chain is untouched. The
+ * body carries the parse error line plus a redacted (redactSecrets),
+ * ≤1000-char raw-output excerpt behind a details collapse; both chains
+ * share the scan/upsert/403-404-replan mechanics (upsertMarkerComment).
+ *
  * Secrets: APP_ID/PRIVATE_KEY come from the Worker env; the installation
  * token is minted in memory and never logged or stored (compass D).
  * Model-produced text (summary/finding bodies) is redacted BEFORE it reaches
@@ -39,6 +47,7 @@ import { createAppAuth } from "@octokit/auth-app";
 import { Octokit } from "@octokit/rest";
 import { MERGE_CLASSES, REVIEW_EMOJI } from "@mstar-harness/engine";
 import type { ReviewFinding, ReviewOutput } from "../review/schema";
+import { redactSecrets } from "./redact";
 
 /** summary_md budget for the overall review body (plan Task 3). */
 export const SUMMARY_MD_LIMIT = 8000;
@@ -196,6 +205,115 @@ export function buildUpsertBody(
   const header = `第 ${round} 次 review · commit ${headSha.slice(0, 7)}`;
   return `${marker}\n${header}\n\n${buildReviewBody(output, omittedFindings)}`;
 }
+// ---------------------------------------------------------------------------
+// Degraded comment chain (plan 18 Task 2 / architect AL-1): the parse-fail
+// visibility chain. A SEPARATE marker family from the real review upsert —
+// `review-degraded:v1` never starts with the `review:v1` prefix and vice
+// versa, so the two scans and their round counters stay independent (the
+// real chain is untouched). One degraded comment per PR, upserted with the
+// same create-on-miss / PATCH-on-hit mechanics.
+// ---------------------------------------------------------------------------
+
+/** Hidden HTML marker prefix — the first line of every degraded comment body. */
+export const DEGRADED_MARKER_PREFIX = "<!-- mstar-inspector:review-degraded:v1";
+
+/** Full marker regex: `<!-- mstar-inspector:review-degraded:v1 round=N -->`. */
+const DEGRADED_MARKER_RE = /^<!-- mstar-inspector:review-degraded:v1 round=(\d+) -->/;
+
+/**
+ * Parse the round number from a degraded comment body. Returns null when the
+ * body does not start with a well-formed degraded marker (malformed →
+ * treated as a miss by planDegradedUpsert).
+ */
+export function parseDegradedRound(body: string): number | null {
+  const match = DEGRADED_MARKER_RE.exec(body);
+  return match ? Number(match[1]) : null;
+}
+
+/**
+ * Find OUR degraded comment in an issues.listComments response: the first
+ * BOT-AUTHORED comment whose body starts with the degraded marker prefix.
+ * Same bot-authorship gate as findReviewComment (qc2 F-002) — a
+ * human-planted marker is a miss. Real review-chain markers (`review:v1`)
+ * are NOT matched: the chains never cross.
+ */
+export function findDegradedComment(
+  comments: ReviewComment[],
+  excludeIds?: ReadonlySet<number>,
+): { id: number; body: string } | null {
+  for (const comment of comments) {
+    if (excludeIds?.has(comment.id)) continue;
+    if (comment.user?.type !== "Bot") continue;
+    if (comment.body?.startsWith(DEGRADED_MARKER_PREFIX)) {
+      return { id: comment.id, body: comment.body };
+    }
+  }
+  return null;
+}
+
+/**
+ * planUpsert-equivalent for the degraded chain, restricted to bodies
+ * starting with the degraded prefix: create with round=1 on a miss (or a
+ * malformed marker), update with round=N+1 on a hit.
+ */
+export function planDegradedUpsert(comments: ReviewComment[], excludeIds?: ReadonlySet<number>): UpsertPlan {
+  const existing = findDegradedComment(comments, excludeIds);
+  if (existing === null) return { action: "create", round: 1 };
+  const round = parseDegradedRound(existing.body);
+  if (round === null) return { action: "create", round: 1 };
+  return { action: "update", commentId: existing.id, round: round + 1 };
+}
+
+/** Raw-excerpt budget for the degraded body (AL-1: ≤1000 chars, redacted). */
+export const DEGRADED_EXCERPT_LIMIT = 1000;
+
+export type DegradedBodyInput = {
+  /**
+   * The parseReviewOutput error (engine/zod violation vocabulary — it never
+   * embeds raw stdout). Clamped to the summary budget so the total body
+   * stays under REVIEW_BODY_LIMIT by construction.
+   */
+  error: string;
+  /** Raw runner stdout — redacted via redactSecrets, then truncated to the excerpt budget. */
+  rawOutput: string;
+  /** The degraded-chain round (independent counter from the real review chain). */
+  round: number;
+};
+
+/**
+ * Assemble the degraded body (AL-1): hidden marker line (degraded round),
+ * the fixed "Review degraded" headline, the parse error line, then the raw
+ * excerpt behind a details collapse. The excerpt is REDACTED FIRST
+ * (redactSecrets — the raw-string face, redact.ts) and truncated AFTER, so
+ * a secret straddling the 1000-char cut is already gone before the slice
+ * (a truncated-before-redact secret could evade the patterns and leak a
+ * partial token). The code fence is sized past the excerpt's longest
+ * backtick run — runner output routinely prints fenced ```json blocks.
+ */
+export function buildDegradedBody(input: DegradedBodyInput): string {
+  const marker = `${DEGRADED_MARKER_PREFIX} round=${input.round} -->`;
+  const error = truncateSummary(input.error);
+  const redacted = redactSecrets(input.rawOutput);
+  const excerpt =
+    redacted.length <= DEGRADED_EXCERPT_LIMIT
+      ? redacted
+      : `${redacted.slice(0, DEGRADED_EXCERPT_LIMIT - 1)}…`;
+  const longestRun = Math.max(0, ...[...excerpt.matchAll(/`+/g)].map((m) => m[0].length));
+  const fence = "`".repeat(Math.max(3, longestRun + 1));
+  return `${marker}
+**Review degraded: output failed schema validation**
+
+${error}
+
+<details>
+<summary>Raw output excerpt (redacted, ≤${DEGRADED_EXCERPT_LIMIT} chars)</summary>
+
+${fence}
+${excerpt}
+${fence}
+
+</details>`;
+}
 
 // ---------------------------------------------------------------------------
 // Auth + posting (self-contained; pipeline ↛ worker, no shared module).
@@ -332,6 +450,14 @@ export type ReviewCommenter = {
    * a hit. No line comments, no review events.
    */
   postReview(input: PostReviewInput): Promise<void>;
+  /**
+   * Upsert the degraded comment (plan 18 Task 2 / AL-1): the parse-fail
+   * visibility chain — a SEPARATE marker family (`review-degraded:v1`) with
+   * an independent round counter from postReview's real review chain. The
+   * consumer calls it best-effort on the degrade path: a rejection is a
+   * structured log line, never a mask for the ack.
+   */
+  postDegraded(input: PostDegradedInput): Promise<void>;
 };
 /**
  * Structural auth surface for the createAppAuth strategy. `AuthInterface` is
@@ -363,16 +489,31 @@ export type PostOctokit = {
   };
 };
 
+/** PR coordinates shared by both marker-comment chains. */
+type CommentTarget = { owner: string; repo: string; prNumber: number };
+
 /**
- * Upsert the overall review comment against a caller-provided octokit
- * (T5 + WF-001/WF-003). Exported so tests can drive the full wiring with a
- * mock octokit (SG-001); the production commenter builds the real octokit
- * and delegates here.
- *
- * The Issues comments API has no review event — the model verdict is
- * prompt-injectable and is rendered as text only (SEC-01, structural).
+ * Shared marker-comment upsert behind BOTH public chains (the T5 review
+ * upsert and the plan-18 degraded chain): guard the octokit surface, scan
+ * the FULL comment list (WF-001: `issues.listComments` caps at 100 per
+ * page — on a busy PR the app's marker can sit beyond page 1, and a
+ * page-1-only scan would treat it as a miss and create a duplicate round=1
+ * comment), then create-on-miss / PATCH-on-hit with the 403/404
+ * dead-comment replan (WF-003 / qc2 F-002: 404 = the marker was deleted
+ * mid-flight; 403 = the marker belongs to another author — only
+ * bot-authored comments are matched, but another app's bot can still plant
+ * one. Both are treated as a MISS: re-plan with that comment excluded —
+ * the next bot marker wins, else a fresh round=1 is created. Each replan
+ * permanently excludes one id, so the loop always terminates). The chain
+ * the scan matches is the caller's `planComment` choice — the recovery
+ * semantics must never drift between the two chains.
  */
-export async function postReviewWithOctokit(octokit: PostOctokit, input: PostReviewInput): Promise<void> {
+async function upsertMarkerComment(
+  octokit: PostOctokit,
+  target: CommentTarget,
+  planComment: (comments: ReviewComment[], excludeIds?: ReadonlySet<number>) => UpsertPlan,
+  buildBody: (round: number) => string,
+): Promise<void> {
   const issues = octokit.rest?.issues;
   if (
     !issues?.listComments ||
@@ -384,41 +525,30 @@ export async function postReviewWithOctokit(octokit: PostOctokit, input: PostRev
       "octokit is missing rest.issues comment methods / paginate — cannot upsert the review comment; check the injected auth surface",
     );
   }
-  // WF-001: scan the FULL comment list. `issues.listComments` caps at 100
-  // per page — on a busy PR the app's marker can sit beyond page 1, and a
-  // page-1-only scan would treat it as a miss and create a duplicate
-  // round=1 comment (round counter resets, old marker orphaned).
   const comments = await octokit.paginate(issues.listComments, {
-    owner: input.owner,
-    repo: input.repo,
-    issue_number: input.prNumber,
+    owner: target.owner,
+    repo: target.repo,
+    issue_number: target.prNumber,
     per_page: 100,
   });
-  // WF-003 / qc2 F-002 recovery: a PATCH that dies between the scan and
-  // the write must not bubble into a queue retry. 404 = the marker was
-  // deleted mid-flight; 403 = the marker belongs to another author (only
-  // bot-authored comments are matched, but another app's bot can still
-  // plant one). Both are treated as a MISS: re-plan with that comment
-  // excluded — the next bot marker wins, else a fresh round=1 is created.
-  // Each replan permanently excludes one id, so the loop always terminates.
   const dead = new Set<number>();
   for (;;) {
-    const plan = planUpsert(comments, dead);
-    const body = buildUpsertBody(input.output, input.omittedFindings ?? 0, plan.round, input.headSha);
-    if (plan.action === "create") {
+    const planned = planComment(comments, dead);
+    const body = buildBody(planned.round);
+    if (planned.action === "create") {
       await issues.createComment({
-        owner: input.owner,
-        repo: input.repo,
-        issue_number: input.prNumber,
+        owner: target.owner,
+        repo: target.repo,
+        issue_number: target.prNumber,
         body,
       });
       return;
     }
     try {
       await issues.updateComment({
-        owner: input.owner,
-        repo: input.repo,
-        comment_id: plan.commentId,
+        owner: target.owner,
+        repo: target.repo,
+        comment_id: planned.commentId,
         body,
       });
       return;
@@ -427,12 +557,51 @@ export async function postReviewWithOctokit(octokit: PostOctokit, input: PostRev
       // mock-octokit tests can reject with a plain { status: N }).
       const status = typeof err === "object" && err !== null ? (err as { status?: unknown }).status : undefined;
       if (status === 404 || status === 403) {
-        dead.add(plan.commentId);
+        dead.add(planned.commentId);
         continue;
       }
       throw err;
     }
   }
+}
+
+/**
+ * Upsert the overall review comment against a caller-provided octokit
+ * (T5 + WF-001/WF-003). Exported so tests can drive the full wiring with a
+ * mock octokit (SG-001); the production commenter builds the real octokit
+ * and delegates here.
+ *
+ * The Issues comments API has no review event — the model verdict is
+ * prompt-injectable and is rendered as text only (SEC-01, structural).
+ */
+export async function postReviewWithOctokit(octokit: PostOctokit, input: PostReviewInput): Promise<void> {
+  await upsertMarkerComment(octokit, input, planUpsert, (round) =>
+    buildUpsertBody(input.output, input.omittedFindings ?? 0, round, input.headSha),
+  );
+}
+
+export type PostDegradedInput = {
+  installationId: number;
+  owner: string;
+  repo: string;
+  prNumber: number;
+  /** The parseReviewOutput error line (posted verbatim after the headline). */
+  error: string;
+  /** Raw runner stdout — redacted + truncated inside buildDegradedBody. */
+  rawOutput: string;
+};
+
+/**
+ * Upsert the degraded comment against a caller-provided octokit (plan 18
+ * Task 2 / AL-1): the parse-fail visibility chain. Same scan/replan
+ * mechanics as the real review upsert, but the scan is restricted to the
+ * `review-degraded:v1` marker prefix — the real review chain (`review:v1`)
+ * and its round counter stay independent.
+ */
+export async function postDegradedWithOctokit(octokit: PostOctokit, input: PostDegradedInput): Promise<void> {
+  await upsertMarkerComment(octokit, input, planDegradedUpsert, (round) =>
+    buildDegradedBody({ error: input.error, rawOutput: input.rawOutput, round }),
+  );
 }
 
 /**
@@ -458,6 +627,22 @@ export function createReviewCommenter(env: CommenterEnv): ReviewCommenter {
     return appAuth;
   }
 
+  /**
+   * Per-installation octokit via the documented factory pattern. The real
+   * Octokit satisfies PostOctokit at runtime (paginate is bundled with
+   * @octokit/rest); the cast bridges the overloaded plugin-paginate-rest
+   * types to the minimal surface above.
+   */
+  async function getOctokit(installationId: number): Promise<PostOctokit> {
+    const auth = await getAppAuth();
+    const octokit = await auth({
+      type: "installation",
+      installationId,
+      factory: (options: unknown) => new Octokit({ authStrategy: createAppAuth, auth: options }),
+    });
+    return octokit as unknown as PostOctokit;
+  }
+
   return {
     async getInstallationToken(installationId) {
       const auth = await getAppAuth();
@@ -465,16 +650,10 @@ export function createReviewCommenter(env: CommenterEnv): ReviewCommenter {
       return installation.token;
     },
     async postReview(input) {
-      const auth = await getAppAuth();
-      const octokit = await auth({
-        type: "installation",
-        installationId: input.installationId,
-        factory: (options: unknown) => new Octokit({ authStrategy: createAppAuth, auth: options }),
-      });
-      // The real Octokit satisfies PostOctokit at runtime (paginate is
-      // bundled with @octokit/rest); the cast bridges the overloaded
-      // plugin-paginate-rest types to the minimal surface above.
-      await postReviewWithOctokit(octokit as unknown as PostOctokit, input);
+      await postReviewWithOctokit(await getOctokit(input.installationId), input);
+    },
+    async postDegraded(input) {
+      await postDegradedWithOctokit(await getOctokit(input.installationId), input);
     },
   };
 }
