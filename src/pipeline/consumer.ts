@@ -5,7 +5,9 @@
  * attempt) → clone the PR head branch (git transport auth via scoped
  * extraheader env) → `git rev-parse HEAD` for the AUTHORITATIVE sha →
  * dedup by that sha (hit → ack) → diff → numstat (the seat-partition
- * universe) → write the runner `--input` JSON (reconFacts) → exec the
+ * universe) → write the runner `--input` JSON (reconFacts, plus the per-App
+ * `modelOverrides` role map for app-path messages — plan 17 B6; legacy /
+ * unmapped App = byte-identical payload) → exec the
  * in-image runner `--level <quick|default|deep>` (exec env =
  * ARK_API_KEY/PI_CODING_AGENT_DIR/HARNESS_PLUGIN_ROOT + OMP_REVIEW_MODEL and
  * configured provider keys — per-App messages assemble BYOK keys/model chain
@@ -599,6 +601,36 @@ async function resolveAppConfig(payload: ReviewJobPayload, deps: ProcessDeps): P
 }
 
 /**
+ * Resolve the App's per-role model overrides for one message (plan 17 B6
+ * Task 1): role → verbatim selector chain via the decrypt-free
+ * `getAppModelRoles` read (a model selector is configuration, not a secret —
+ * no secretbox). Only `{ kind: "app" }` messages carry the map: legacy
+ * (appRef absent — old in-flight messages — or `{ kind: "legacy" }`) →
+ * `undefined`, and an App with NO (or an all-cleared) role map → `undefined`
+ * — in both cases the runner input JSON serializes byte-identically to
+ * today's (plan Global Constraints: absent/empty map = unchanged runner
+ * behavior). Hangs off the same appRef resolution as `resolveAppConfig` (the
+ * App row is already proven present, active and non-deleted there) and runs
+ * BEFORE the in-flight guard so a resolution failure has zero side effects.
+ * The map is re-read every message (no cache) so a dashboard role update
+ * applies to the very next review.
+ */
+async function resolveModelOverrides(
+  payload: ReviewJobPayload,
+  deps: ProcessDeps,
+): Promise<Record<string, string> | undefined> {
+  const appRef = payload.appRef;
+  if (appRef === undefined || appRef.kind === "legacy") {
+    return undefined;
+  }
+  const roles = await createAppConfigStore(
+    deps.env.DB,
+    deps.env.DASHBOARD_ENCRYPTION_KEY,
+  ).getAppModelRoles(appRef.appId);
+  return Object.keys(roles).length > 0 ? roles : undefined;
+}
+
+/**
  * Build the in-image runner exec env (step 8): the provider key + harness
  * paths (compass D — secrets never baked into the image), the OMP_REVIEW_MODEL
  * chain when set (bugbot BB-1), and every known provider key that is
@@ -851,6 +883,10 @@ async function processMessage(payload: ReviewJobPayload, deps: ProcessDeps): Pro
     // missing DASHBOARD_ENCRYPTION_KEY) fails closed with zero side effects.
     // Legacy → undefined → the byte-identical pre-plan-14 env assembly.
     const appCfg = await resolveAppConfig(payload, deps);
+    // Per-role model overrides (plan 17 B6): rides the SAME appRef gate,
+    // before the guard like the config above. undefined (legacy / empty map)
+    // → the runner input JSON below stays byte-identical.
+    const modelOverrides = await resolveModelOverrides(payload, deps);
     // 0. In-flight guard (WF-002 / bugbot BB-3): when another review is
     // already running for this PR, return the DISTINCT guard-held outcome —
     // NOT a throw. The consumer schedules a per-message delayed retry
@@ -974,11 +1010,17 @@ async function processMessage(payload: ReviewJobPayload, deps: ProcessDeps): Pro
       `head ${headSha}`,
       ...numstatLines,
     ];
+    // Plan 17 B6: the App's per-role model overrides ride as an OPTIONAL
+    // input field, included ONLY when a role map resolved above — legacy /
+    // unmapped messages serialize byte-identically to the pre-plan-17 payload
+    // (the runner-side guard + type extension are plan 17 Task 2's).
+    const runnerInput = {
+      worktreePath: CLONE_DIR,
+      reconFacts,
+      ...(modelOverrides !== undefined ? { modelOverrides } : {}),
+    };
     const writeInput = await sandbox.exec(
-      writeJsonCommand(
-        RUNNER_INPUT_PATH,
-        toBase64Utf8(JSON.stringify({ worktreePath: CLONE_DIR, reconFacts })),
-      ),
+      writeJsonCommand(RUNNER_INPUT_PATH, toBase64Utf8(JSON.stringify(runnerInput))),
       { timeout: EXEC_TIMEOUT_GIT_MS },
     );
     if (writeInput.exitCode !== 0) {

@@ -8,7 +8,8 @@
  * pattern) + per-App AI config settings (14 B2 T1 routes + T2 view: GET/POST
  * /dashboard/apps/:slug/settings — BYOK provider keys, masked, + model chain
  * — and POST …/settings/key/delete, creator-or-admin; 16 T2 adds the
- * settings Review switch and the read-only install-health panel) behind a
+ * settings Review switch and the read-only install-health panel; 17 T3 adds
+ * the Role models editor on the same op-discriminated POST) behind a
  * per-request membership guard (12 B4 T2) + admin-only members management
  * (12 B4 T3). Mounted by src/worker/index.ts as
  * `app.route("/dashboard", dashboardApp)`.
@@ -56,6 +57,7 @@ import { createAppsStore, type GithubAppRow } from "./apps-store";
 import { SecretboxKeyError, createSecretbox } from "./secretbox";
 import {
   MAX_PROVIDER_KEY_LENGTH,
+  MODEL_ROLE_IDS,
   PROVIDER_IDS,
   createAppConfigStore,
   parseModelChain,
@@ -770,9 +772,9 @@ dashboardApp.post("/apps/:slug/resume", (c) => appReviewAction(c, "resume"));
 // session cookie (same discipline as the members and apps action routes — no
 // new token scheme). Route shapes per the plan brief: GET/POST
 // /dashboard/apps/:slug/settings — the POST carries an explicit `op`
-// discriminator (add-key | save-chain) because the zero-JS page has two forms
-// on one action path — and the delete-key action path …/settings/key/delete
-// (the HTML-form convention cannot emit a DELETE verb).
+// discriminator (add-key | save-chain | save-roles) because the zero-JS page
+// has three forms on one action path — and the delete-key action path
+// …/settings/key/delete (the HTML-form convention cannot emit a DELETE verb).
 //
 // Encryption-dependent reads AND writes: masking needs plaintext (the last-4
 // tail), so a missing/malformed DASHBOARD_ENCRYPTION_KEY fails the whole
@@ -844,6 +846,9 @@ function settingsFailureNotice(err: unknown): PageNotice {
  * Plan 16: the install-health panel data (installations, review_enabled,
  * last_webhook_at) is read fresh on every render too, so every re-render —
  * including POST re-renders — reflects the current pause/health state.
+ * Plan 17: the role map (app_model_roles) rides the same fresh read for the
+ * Role models editor — a 400 re-render shows the STORED map (an invalid
+ * submission is never echoed back as if it had been kept).
  */
 async function settingsResponse(
   c: Context<{ Bindings: Env }>,
@@ -857,6 +862,7 @@ async function settingsResponse(
   try {
     const maskedKeys = await store.listProviderKeys(app.id);
     const modelChain = await store.getModelChain(app.id);
+    const modelRoles = await store.getAppModelRoles(app.id);
     const installations = await apps.listInstallations(app.id);
     return c.html(
       appSettingsPage(
@@ -868,6 +874,7 @@ async function settingsResponse(
         },
         maskedKeys,
         modelChain,
+        modelRoles,
         installations,
         notice,
       ),
@@ -888,7 +895,7 @@ dashboardApp.get("/apps/:slug/settings", async (c) => {
 });
 
 /**
- * The settings POST: two operations on the pinned action path, discriminated
+ * The settings POST: three operations on the pinned action path, discriminated
  * by the forms' hidden `op` field. add-key = provider allowlist (400 on any
  * other id — the allowlist is the plan's Global Constraint) + non-empty key
  * of at most MAX_PROVIDER_KEY_LENGTH characters (plan 15 input bounds — an
@@ -896,8 +903,12 @@ dashboardApp.get("/apps/:slug/settings", async (c) => {
  * is the backstop), then the store encrypts inside. save-chain = empty →
  * clear (global fallback), otherwise ≥1 comma-separated selector required and
  * the chain is stored VERBATIM (a `:thinking`-style suffix is legal omp
- * syntax; full selector validation stays omp-side). Validation failures
- * re-render the page at 400 with zero writes.
+ * syntax; full selector validation stays omp-side). save-roles (plan 17 T3)
+ * = the Role models editor's full map — one `role_<role>` field per audit
+ * seat, blanks = cleared, saved through the validate-all-first setModelRoles
+ * (zero partial writes on any validation failure). Validation failures
+ * re-render the page at 400 with zero writes — never a plain-text body (the
+ * plan-14 T1 review lesson).
  */
 dashboardApp.post("/apps/:slug/settings", async (c) => {
   const gate = await requireAppSettings(c);
@@ -991,6 +1002,73 @@ dashboardApp.post("/apps/:slug/settings", async (c) => {
     return settingsResponse(c, gate.session, store, apps, gate.app, {
       kind: "success",
       message: `Saved the model chain for ${gate.app.slug}.`,
+    });
+  }
+  if (op === "save-roles") {
+    // Plan 17 T3: the Role models editor posts one `role_<role>` field per
+    // audit seat (the page always renders all four rows, blank inputs
+    // included), so the submitted map is FULL — blanks = cleared (the
+    // setModelRole 空 = 清除 convention), content = verbatim upsert, all
+    // through the validate-all-first setModelRoles bulk face. Any
+    // `role_`-prefixed field naming a role outside MODEL_ROLE_IDS is client
+    // tampering → 400 re-render, zero writes; a save with NO role fields at
+    // all is equally malformed (it could not come from this page, and an
+    // empty map must never masquerade as a successful save).
+    const selectors: Record<string, string> = {};
+    for (const [field, value] of Object.entries(form)) {
+      if (!field.startsWith("role_") || typeof value !== "string") continue;
+      const role = field.slice("role_".length);
+      if (!MODEL_ROLE_IDS.includes(role)) {
+        return settingsResponse(
+          c,
+          gate.session,
+          store,
+          apps,
+          gate.app,
+          { kind: "error", message: `${role} is not a known review role — nothing was saved.` },
+          400,
+        );
+      }
+      selectors[role] = value;
+    }
+    if (Object.keys(selectors).length === 0) {
+      return settingsResponse(
+        c,
+        gate.session,
+        store,
+        apps,
+        gate.app,
+        { kind: "error", message: "No role selectors were submitted — resubmit the Role models form." },
+        400,
+      );
+    }
+    // Selector grammar, role-named for the 4-row form (the same parseModelChain
+    // mirror the save-chain op 400s against); blank stays legal = clear.
+    for (const [role, selector] of Object.entries(selectors)) {
+      if (selector.trim() !== "" && parseModelChain(selector).length === 0) {
+        return settingsResponse(
+          c,
+          gate.session,
+          store,
+          apps,
+          gate.app,
+          {
+            kind: "error",
+            message: `The ${role} selector needs at least one comma-separated model selector — or leave it empty to use the App model chain. Nothing was saved.`,
+          },
+          400,
+        );
+      }
+    }
+    try {
+      await store.setModelRoles(gate.app.id, selectors);
+    } catch (err) {
+      logSettingsFailure("save_roles", gate.app.id, err);
+      return settingsResponse(c, gate.session, store, apps, gate.app, settingsFailureNotice(err), 500);
+    }
+    return settingsResponse(c, gate.session, store, apps, gate.app, {
+      kind: "success",
+      message: `Saved the role models for ${gate.app.slug}.`,
     });
   }
   // T2 review fold (T1 minor): an unknown op is a validation failure like any

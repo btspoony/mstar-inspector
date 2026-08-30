@@ -59,11 +59,14 @@ function createMigratedD1(): ReturnType<typeof createTestD1> {
   // on EVERY app-path message — the fixture must stay production-shaped.
   // 0008 (plan 16): the github_apps ops columns (review_enabled) the
   // paused gate reads on every app-path message.
+  // 0009 (plan 17): the per-role table the consumer's modelOverrides read
+  // queries on every app-path message.
   for (const name of [
     "0004_github_apps.sql",
     "0005_reviews_app_id.sql",
     "0006_app_provider_config.sql",
     "0008_github_apps_ops.sql",
+    "0009_app_model_roles.sql",
   ]) {
     db.raw.exec(readFileSync(join(MIGRATIONS_DIR, name), "utf8"));
   }

@@ -29,7 +29,12 @@
  *     is re-validated against the engine vocab, and
  *     partitionSeats/runStructuredSubagent are never called — quick/default
  *     keep the Bun fan-out untouched;
- *   - a non-delivered level is rejected at the port.
+ *   - a non-delivered level is rejected at the port;
+ *   - per-role model overrides (plan 17 B6): quick/default applies the
+ *     `mstar-review-seat` override at the seatModels synthesis (explicit
+ *     model replaces the global chain verbatim; NO settings key), deep writes
+ *     the map into the isolated settings as `task.agentModelOverrides` with
+ *     exact agent names; absent/empty map = today's options byte-for-byte.
  */
 import { afterAll, afterEach, describe, expect, mock, spyOn, test } from "bun:test";
 import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -462,6 +467,133 @@ describe("ompAgentRuntime.runReview — seat fan-out", () => {
     await expect(ompAgentRuntime.runReview({ ...BASE_INPUT, level: "quick" })).rejects.toThrow(
       /no valid structured output/,
     );
+  });
+});
+
+describe("ompAgentRuntime.runReview — per-role model overrides (plan 17 B6)", () => {
+  test("quick/default: the mstar-review-seat override replaces the seat model chain verbatim", async () => {
+    seatResults = [{ data: seatPayload() }, { data: seatPayload({ findings: [] }) }];
+    await ompAgentRuntime.runReview({
+      ...BASE_INPUT,
+      modelOverrides: { "mstar-review-seat": "ark-plan/deepseek-v4-flash:high" },
+    });
+
+    // L2: the override is applied at the seatModels synthesis — it REPLACES
+    // the global chain as the explicit `model` param, sole verbatim entry
+    // (no merge, `:thinking` suffix rides along).
+    expect(subagentRequests).toHaveLength(2);
+    for (const request of subagentRequests) {
+      expect(request.model).toEqual(["ark-plan/deepseek-v4-flash:high"]);
+    }
+    // The settings key is a DEAD surface for quick/default (an explicit
+    // request model beats task.agentModelOverrides in the SDK resolution
+    // order) — the session settings must never carry it.
+    expect(createdOptions[0]!.settings).toEqual({
+      kind: "isolated",
+      overrides: {
+        "fetch.enabled": false,
+        "retry.modelFallback": true,
+        "retry.fallbackChains": { default: [...BASE_INPUT.modelSelectors] },
+      },
+    });
+  });
+
+  test("quick/default: the App chain stays the session-level retry fallback under a seat override", async () => {
+    seatResults = [{ data: seatPayload() }];
+    await ompAgentRuntime.runReview({
+      ...BASE_INPUT,
+      level: "quick",
+      modelOverrides: { "mstar-review-seat": "ark-plan/override-model" },
+    });
+
+    // The parent keeps the global chain (primary model + retry fallback) —
+    // only the seat's explicit model is overridden.
+    expect(createdOptions[0]!.modelPattern).toBe(BASE_INPUT.modelSelectors[0]);
+    expect((createdOptions[0]!.settings as { overrides: Record<string, unknown> }).overrides[
+      "retry.fallbackChains"
+    ]).toEqual({ default: [...BASE_INPUT.modelSelectors] });
+  });
+
+  test("quick/default: the seat override wins even when the global chain falls back to the default pattern", async () => {
+    seatResults = [{ data: seatPayload() }];
+    await ompAgentRuntime.runReview({
+      ...BASE_INPUT,
+      level: "quick",
+      modelSelectors: [],
+      modelOverrides: { "mstar-review-seat": "ark-plan/override-model" },
+    });
+
+    expect(subagentRequests[0]!.model).toEqual(["ark-plan/override-model"]);
+  });
+
+  test("quick/default: overrides for other seats and blank values leave today's synthesis untouched", async () => {
+    seatResults = [{ data: seatPayload() }, { data: seatPayload({ findings: [] }) }];
+    await ompAgentRuntime.runReview({
+      ...BASE_INPUT,
+      // An unmapped-for-this-path agent name is inert; a blank
+      // mstar-review-seat value ≡ no override (L2).
+      modelOverrides: { "code-reviewer": "ark-plan/other:high", "mstar-review-seat": "   " },
+    });
+
+    for (const request of subagentRequests) {
+      expect(request.model).toEqual([...BASE_INPUT.modelSelectors]);
+    }
+  });
+
+  test("quick/default: an empty overrides map is byte-compat with today's options and seat models", async () => {
+    seatResults = [{ data: seatPayload() }];
+    await ompAgentRuntime.runReview({ ...BASE_INPUT, level: "quick" });
+    const baselineOptions = JSON.stringify(createdOptions[0]);
+    const baselineModels = JSON.stringify(subagentRequests.map((request) => request.model));
+
+    createdOptions.length = 0;
+    subagentRequests.length = 0;
+    seatResults = [{ data: seatPayload() }];
+    await ompAgentRuntime.runReview({ ...BASE_INPUT, level: "quick", modelOverrides: {} });
+
+    expect(JSON.stringify(createdOptions[0])).toBe(baselineOptions);
+    expect(JSON.stringify(subagentRequests.map((request) => request.model))).toBe(baselineModels);
+  });
+
+  test("deep: the overrides map lands in the isolated settings as task.agentModelOverrides (exact agent names)", async () => {
+    parentYields = [deepEnvelope()];
+    const overrides = {
+      "code-reviewer": "ark-plan/deepseek-v4-flash:high",
+      "fullstack-dev": "openai/gpt-5",
+      "frontend-dev": "anthropic/claude-x:low",
+    };
+    await ompAgentRuntime.runReview({ ...DEEP_INPUT, modelOverrides: overrides });
+
+    // L2: the deep task-tool dispatch passes NO explicit model, so the SDK
+    // preflight resolves each spawned seat from this settings record per
+    // agent name — the record carries EXACTLY the mapped names (unmapped
+    // seats stay keyless → parent active model, today's behavior). The
+    // values pass through verbatim (thinking suffixes included).
+    expect(createdOptions[0]!.settings).toEqual({
+      kind: "isolated",
+      overrides: {
+        "fetch.enabled": false,
+        "retry.modelFallback": true,
+        "retry.fallbackChains": { default: [...DEEP_INPUT.modelSelectors] },
+        "task.agentModelOverrides": overrides,
+      },
+    });
+    // The deep-only deltas and the parent's own model chain are unchanged.
+    expect(createdOptions[0]!.modelPattern).toBe(DEEP_INPUT.modelSelectors[0]);
+    expect(createdOptions[0]!.toolNames).toEqual(["read", "grep", "glob", "task"]);
+    expect(createdOptions[0]!.requireYieldTool).toBe(true);
+  });
+
+  test("deep: an absent or empty overrides map keeps today's settings byte-for-byte", async () => {
+    parentYields = [deepEnvelope()];
+    await ompAgentRuntime.runReview(DEEP_INPUT);
+    const baseline = JSON.stringify(createdOptions[0]);
+
+    createdOptions.length = 0;
+    await ompAgentRuntime.runReview({ ...DEEP_INPUT, modelOverrides: {} });
+    // Byte-compat gate: no `task.agentModelOverrides` key appears — the
+    // serialized options are identical to the no-map run.
+    expect(JSON.stringify(createdOptions[0])).toBe(baseline);
   });
 });
 

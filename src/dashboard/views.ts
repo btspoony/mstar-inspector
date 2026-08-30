@@ -6,7 +6,7 @@
  * breakpoints) — DESIGN.md is the SSOT; update both when tokens change.
  * No client JS, no build chain, no new dependencies.
  */
-import { PROVIDER_IDS, type MaskedProviderKey } from "./app-config-store";
+import { MODEL_ROLE_IDS, PROVIDER_IDS, type MaskedProviderKey } from "./app-config-store";
 import type { AppInstallationRow } from "./apps-store";
 import type { DashboardUserRow } from "./users";
 
@@ -621,6 +621,20 @@ export function appsPage(
 }
 
 /**
+ * One-line seat hint per MODEL_ROLE_IDS entry (UI copy only — the vocabulary
+ * SSOT stays MODEL_ROLE_IDS in app-config-store; the parity lock in
+ * tests/worker pins it to exactly these 4 seats). `mstar-review-seat` is the
+ * quick/default Bun-fan-out seat; the other three are the deep-session seats
+ * dispatched by agent name (plan 17 spec § 调研结论).
+ */
+const MODEL_ROLE_HINTS: Record<string, string> = {
+  "mstar-review-seat": "quick + default review seats",
+  "code-reviewer": "deep review seat",
+  "fullstack-dev": "deep review seat",
+  "frontend-dev": "deep review seat",
+};
+
+/**
  * Per-App AI settings (plan 14 B2 T2, spec § Per-App BYOK + § DESIGN.md
  * 意图): single column; masked key list — provider + last-4 ONLY (key_enc and
  * any full key material never render); add-key = provider select bound to the
@@ -647,12 +661,23 @@ export function appsPage(
  * time, or "never" for a NULL last_webhook_at — connection health is
  * decoupled from the pause switch). Panel data renders read-only; GitHub
  * logins are escaped (they arrive from webhook payloads).
+ *
+ * Plan 17 addition (spec § IA + § DESIGN.md 意图), after the Model chain
+ * section: the Role models editor — one text row per audit seat (iterating
+ * the MODEL_ROLE_IDS vocabulary, prefilled from the App's stored role map;
+ * an unmapped role is a blank input), a single blue-700 save, and the
+ * empty = App-model-chain fallback spelled out in the copy. Selectors are
+ * configuration, not secrets (plain text inputs), but they ARE user input —
+ * escaped in attribute context on the way out. Input names carry the
+ * `role_` prefix (role_<role>) so the POST route can tell a role field from
+ * any other form field and 400 a tampered role name.
  */
 export function appSettingsPage(
   user: { login: string; name?: string },
   app: { slug: string; reviewEnabled: boolean; lastWebhookAt: string | null },
   maskedKeys: MaskedProviderKey[],
   modelChain: string | null,
+  modelRoles: Record<string, string>,
   installations: AppInstallationRow[],
   notice?: PageNotice,
 ): string {
@@ -726,6 +751,29 @@ export function appSettingsPage(
       <p class="status">Last webhook: ${relativeTime(app.lastWebhookAt)}</p>
       ${installList}
     </section>`;
+  // Role models editor (plan 17, spec § IA + § DESIGN.md 意图): one text row
+  // per audit seat in MODEL_ROLE_IDS order, prefilled from the stored role
+  // map (unmapped = blank), a SINGLE blue-700 save, and the empty =
+  // App-model-chain fallback stated in the copy. Selectors are plain text
+  // (configuration, not secrets) but user input — the value is escaped in
+  // attribute context. Inputs are named role_<role>; role names themselves
+  // are the frozen vocabulary constant, not user data.
+  const roleRows = MODEL_ROLE_IDS.map((role) => {
+    const hint = MODEL_ROLE_HINTS[role];
+    return `<label class="field">${role}${hint ? ` — ${hint}` : ""}
+          <input type="text" name="role_${role}" value="${escapeHtml(modelRoles[role] ?? "")}" placeholder="e.g. openai/gpt-5:high">
+        </label>`;
+  }).join("\n");
+  const roleSection = `<section class="enabled">
+      <h2>Role models</h2>
+      <p>Optional per-seat model overrides for this App&apos;s reviews — each audit role runs on its own comma-separated selector chain (a <code>:thinking</code> suffix passes through).</p>
+      <p class="note">Empty = use the App model chain.</p>
+      <form method="post" action="${base}">
+        <input type="hidden" name="op" value="save-roles">
+        ${roleRows}
+        <button type="submit" class="primary">Save role models</button>
+      </form>
+    </section>`;
   return page(
     "App settings",
     `${shellHeader(user)}
@@ -758,6 +806,7 @@ export function appSettingsPage(
         <button type="submit" class="primary">Save model chain</button>
       </form>
     </section>
+    ${roleSection}
     ${reviewSection}
     ${installSection}
   </main>`,

@@ -272,6 +272,94 @@ describe("migrations/0008_github_apps_ops.sql", () => {
   });
 });
 
+describe("migrations/0009_app_model_roles.sql", () => {
+  /** Apply one migration file verbatim (filename order = wrangler order). */
+  function applyMigrationFile(db: ReturnType<typeof createTestD1>, name: string): void {
+    db.raw.exec(readFileSync(join(MIGRATIONS_DIR, name), "utf8"));
+  }
+
+  /** Raw-insert one github_apps row (the 0004 column list is sufficient). */
+  function insertApp(db: ReturnType<typeof createTestD1>, id: string, githubAppId = 1001): void {
+    db.raw
+      .prepare(
+        `INSERT INTO github_apps (id, slug, github_app_id, name, private_key_enc, webhook_secret_enc,
+           created_by, status, deleted_at, created_at, updated_at)
+         VALUES (?, ?, ?, ?, 'enc', 'enc', 'mallory', 'active', NULL,
+           datetime('now'), datetime('now'))`,
+      )
+      .run(id, id, githubAppId, id);
+  }
+
+  test("applies cleanly over a seeded production-shaped DB (0001–0008 with live rows)", () => {
+    const db = createTestD1();
+    insertReview(db); // a live review predates the CREATE TABLE (wrangler order)
+    for (const name of [
+      "0003_dashboard_users.sql",
+      "0004_github_apps.sql",
+      "0005_reviews_app_id.sql",
+      "0006_app_provider_config.sql",
+      "0007_reviews_app_id_index.sql",
+      "0008_github_apps_ops.sql",
+    ]) {
+      applyMigrationFile(db, name);
+    }
+    insertApp(db, "app-1");
+
+    // Append-only CREATE TABLE over the live rows — nothing existing changes.
+    expect(() => applyMigrationFile(db, "0009_app_model_roles.sql")).not.toThrow();
+    const count = db.raw.query("SELECT COUNT(*) AS n FROM reviews").get() as { n: number };
+    expect(count.n).toBe(1);
+  });
+
+  test("composite PK (app_id, role) rejects a duplicate pair; other apps may repeat the role", () => {
+    const db = createMigratedTestD1();
+    insertApp(db, "app-1");
+    insertApp(db, "app-2", 1002);
+    db.raw
+      .prepare(`INSERT INTO app_model_roles (app_id, role, selector) VALUES ('app-1', 'code-reviewer', 'openai/gpt-5')`)
+      .run();
+    expect(() =>
+      db.raw
+        .prepare(`INSERT INTO app_model_roles (app_id, role, selector) VALUES ('app-1', 'code-reviewer', 'x/y')`)
+        .run(),
+    ).toThrow(/UNIQUE constraint failed/);
+    // The same role under ANOTHER app is a distinct row (per-App role maps).
+    db.raw
+      .prepare(`INSERT INTO app_model_roles (app_id, role, selector) VALUES ('app-2', 'code-reviewer', 'x/y')`)
+      .run();
+    const count = db.raw.query("SELECT COUNT(*) AS n FROM app_model_roles").get() as { n: number };
+    expect(count.n).toBe(2);
+  });
+
+  test("FK to github_apps — unknown app refused; a role not on the runner's seat names is storable (no CHECK — vocabulary is producer-side, lock L3)", () => {
+    const db = createMigratedTestD1();
+    insertApp(db, "app-1");
+    expect(() =>
+      db.raw
+        .prepare(`INSERT INTO app_model_roles (app_id, role, selector) VALUES ('no-such-app', 'code-reviewer', 'x/y')`)
+        .run(),
+    ).toThrow(/FOREIGN KEY constraint failed/);
+    // Deliberate: the schema carries NO role CHECK — the store's MODEL_ROLE_IDS
+    // mirror + parity test own the 4-name vocabulary (spec § B6 语义锁).
+    db.raw
+      .prepare(`INSERT INTO app_model_roles (app_id, role, selector) VALUES ('app-1', 'not-a-seat', 'x/y')`)
+      .run();
+    const count = db.raw.query("SELECT COUNT(*) AS n FROM app_model_roles").get() as { n: number };
+    expect(count.n).toBe(1);
+  });
+
+  test("no ON DELETE: hard-deleting an app with role rows is refused (soft-delete is the only removal path)", async () => {
+    const db = createMigratedTestD1();
+    insertApp(db, "app-1");
+    db.raw
+      .prepare(`INSERT INTO app_model_roles (app_id, role, selector) VALUES ('app-1', 'mstar-review-seat', 'ark-plan/deepseek-v4-flash:high')`)
+      .run();
+    expect(() => db.raw.prepare("DELETE FROM github_apps WHERE id = 'app-1'").run()).toThrow(
+      /FOREIGN KEY constraint failed/,
+    );
+  });
+});
+
 describe("migrations/0002_mstar_review_v1.sql", () => {
   test("adds the envelope column to reviews (TEXT, nullable)", async () => {
     const db = createTestD1();

@@ -11,9 +11,11 @@
  * was found and passed to signature verification).
  *
  * The D1 double is the real bun:sqlite helper over migrations
- * 0001/0002 + 0003–0008 (production-shaped, filename order — 0006 backs the
+ * 0001/0002 + 0003–0009 (production-shaped, filename order — 0006 backs the
  * per-App config tables the settings page reads; 0008 is plan 16's per-App
- * ops columns behind the pause toggle and the install-health panel).
+ * ops columns behind the pause toggle and the install-health panel; 0009 is
+ * plan 17's app_model_roles, read on every settings render by the Role
+ * models editor).
  */
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
@@ -55,6 +57,7 @@ function createAppsUiD1(): ReturnType<typeof createTestD1> {
     "0006_app_provider_config.sql",
     "0007_reviews_app_id_index.sql",
     "0008_github_apps_ops.sql",
+    "0009_app_model_roles.sql",
   ]) {
     db.raw.exec(readFileSync(join(MIGRATIONS_DIR, name), "utf8"));
   }

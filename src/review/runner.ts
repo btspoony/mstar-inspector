@@ -10,8 +10,11 @@
  *   - `--level` is the review tier (quick | default | deep); anything else is a
  *     usage error (the runtime itself rejects unknown levels as well);
  *   - `--input` points at a JSON file `{ worktreePath?: string,
- *     reconFacts?: string[] }`; `worktreePath` defaults to the process cwd
- *     (the consumer execs with cwd = the in-container PR clone dir);
+ *     reconFacts?: string[], modelOverrides?: Record<string, string> }`;
+ *     `worktreePath` defaults to the process cwd (the consumer execs with
+ *     cwd = the in-container PR clone dir); `modelOverrides` (plan 17 B6)
+ *     maps an audit-seat agent name to a verbatim selector chain and is
+ *     absent for legacy payloads;
  *   - stdout carries ONLY the mstar.review/v1 envelope JSON (validated by
  *     validateMstarReviewV1 inside the runtime); all diagnostics to stderr;
  *   - exit codes: 0 success, 1 runtime/I-O failure, 2 usage error. There is
@@ -31,12 +34,13 @@ import { ompAgentRuntime, parseModelSelectors } from "./runtime-omp";
 
 const USAGE =
   `usage: bun run runner.ts --level <${REVIEW_LEVELS.join(", ")}> --input <json-file> ` +
-  "(input JSON: { worktreePath?: string, reconFacts?: string[] })";
+  "(input JSON: { worktreePath?: string, reconFacts?: string[], modelOverrides?: Record<string, string> })";
 
 /** Validated shape of the --input JSON file. */
 type RunnerInputJson = {
   worktreePath?: string;
   reconFacts?: string[];
+  modelOverrides?: Record<string, string>;
 };
 
 /** Parse CLI flags. Throws (usage) on missing/unknown flags or missing values. */
@@ -79,6 +83,24 @@ function parseRunnerInput(parsed: unknown): RunnerInputJson {
     }
     input.reconFacts = record.reconFacts;
   }
+  if (record.modelOverrides !== undefined) {
+    // Plan 17 B6 (spec Architect lock L3): shape validation ONLY here — the
+    // role vocabulary lives dashboard-side and selector grammar in the
+    // dashboard store's parseModelChain mirror; unknown agent names pass
+    // through inertly (the SDK consumes only names it actually dispatches).
+    const map = record.modelOverrides;
+    if (map === null || typeof map !== "object" || Array.isArray(map)) {
+      throw new Error("input JSON field `modelOverrides` must be an object of string selectors when present");
+    }
+    for (const [role, selector] of Object.entries(map)) {
+      if (typeof selector !== "string") {
+        throw new Error(
+          `input JSON field \`modelOverrides\`[${JSON.stringify(role)}] must be a string when present`,
+        );
+      }
+    }
+    input.modelOverrides = map as Record<string, string>;
+  }
   return input;
 }
 
@@ -114,6 +136,9 @@ export async function main(argv: string[], runtime: AgentRuntime = ompAgentRunti
       worktreePath: json.worktreePath ?? process.cwd(),
       reconFacts: json.reconFacts ?? [],
       modelSelectors: parseModelSelectors(Bun.env.OMP_REVIEW_MODEL),
+      // Optional per-role overrides (plan 17 B6): included ONLY when the map
+      // is present, so legacy input builds a byte-identical runtime input.
+      ...(json.modelOverrides !== undefined ? { modelOverrides: json.modelOverrides } : {}),
     };
   } catch (error) {
     console.error(`review: cannot read runner input ${inputPath}: ${(error as Error).message}`);

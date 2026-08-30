@@ -21,6 +21,13 @@
  *   - an UNREADABLE App key (tampered envelope / missing master key) fails
  *     closed BEFORE guard/sandbox — never a silent fallback to global keys.
  *
+ * Runner-input threading (plan 17 Task 1): for `{kind:"app"}` messages the
+ * consumer resolves the App's per-role selector map (decrypt-free
+ * `getAppModelRoles`) into the runner input JSON's OPTIONAL `modelOverrides`
+ * field; legacy/absent appRef and empty maps omit the field entirely
+ * (byte-identical payload). The runner-side guard/type extension is plan 17
+ * Task 2's.
+ *
  * Same technique as tests/pipeline/consumer.test.ts: sandbox + commenters
  * injected via createReviewConsumer overrides (no process-wide relative-path
  * mock.module); the @cloudflare/sandbox mock is a load shim only. Config is
@@ -231,6 +238,21 @@ function runnerEnvs(): Array<Record<string, string>> {
   return sandboxCalls
     .filter((c) => c.cmd.includes("bun run"))
     .map((c) => (c.opts as { env?: Record<string, string> }).env ?? {});
+}
+
+/**
+ * The DECODED runner input JSON payloads, in write order (one per
+ * `printf … | base64 -d > '/workspace/review-input.json'` step — the runner
+ * exec command references the same path but carries no base64 payload).
+ */
+function runnerInputs(): Array<Record<string, unknown>> {
+  return sandboxCalls
+    .filter((c) => c.cmd.includes("base64 -d > '/workspace/review-input.json'"))
+    .map((c) => {
+      const payload = /printf '%s' '([A-Za-z0-9+/=]+)' \| base64 -d/.exec(c.cmd)?.[1];
+      if (!payload) throw new Error(`runner-input write command without a base64 payload: ${c.cmd}`);
+      return JSON.parse(atob(payload)) as Record<string, unknown>;
+    });
 }
 
 /** The assembly log lines (key_source per injected key + config_source summary). */
@@ -673,5 +695,94 @@ describe("per-App runner env assembly (plan 14 Task 3, spec § Per-App BYOK)", (
     expect(env.ANTHROPIC_API_KEY).toBe("sk-global-anthropic-SECRET");
     const line = keySourceLines().find((l) => l.fields.provider === "anthropic");
     expect(line?.fields.key_source).toBe("global");
+  });
+});
+
+// --- runner input modelOverrides threading (plan 17 Task 1) ---
+
+describe("runner input modelOverrides threading (plan 17 Task 1)", () => {
+  test("app message with a role map: the input JSON carries modelOverrides exactly as mapped (:thinking suffix verbatim)", async () => {
+    reset();
+    const db = createMigratedTestD1();
+    const appX = await seedApp(db, "app-x");
+    const store = createAppConfigStore(db, TEST_KEY);
+    await store.setModelRole(appX.id, "mstar-review-seat", "ark-plan/deepseek-v4-flash:high");
+    await store.setModelRole(appX.id, "code-reviewer", "openai/gpt-5:thinking, anthropic/claude-x");
+    const consumer = createReviewConsumer(makeEnv({ DB: db as never }), testLog, testOverrides);
+
+    await consumer(makeBatch(makePayload({ appRef: { kind: "app", appId: appX.id } })));
+
+    const input = runnerInputs()[0]!;
+    expect(input.modelOverrides).toEqual({
+      "mstar-review-seat": "ark-plan/deepseek-v4-flash:high",
+      "code-reviewer": "openai/gpt-5:thinking, anthropic/claude-x",
+    });
+    // The field rides AFTER the pre-plan-17 shape (additive optional field).
+    expect(Object.keys(input)).toEqual(["worktreePath", "reconFacts", "modelOverrides"]);
+  });
+
+  test("app message with NO role map: input JSON BYTE-IDENTICAL to the legacy payload (field omitted)", async () => {
+    reset();
+    const appDb = createMigratedTestD1();
+    const appX = await seedApp(appDb, "app-x"); // github_apps row, NO role rows
+    const appConsumer = createReviewConsumer(makeEnv({ DB: appDb as never }), testLog, testOverrides);
+    await appConsumer(makeBatch(makePayload({ pr_number: 42, appRef: { kind: "app", appId: appX.id } })));
+    const [appInput] = runnerInputs();
+    expect(Object.keys(appInput!)).toEqual(["worktreePath", "reconFacts"]);
+
+    // The same PR identity through the legacy path (appRef absent, fresh DB so
+    // the app run's artifact row cannot dedup it away): the decoded input
+    // documents must be byte-identical — absent map ⇒ absent field.
+    reset();
+    const legacyConsumer = createReviewConsumer(makeEnv({ DB: createMigratedTestD1() as never }), testLog, testOverrides);
+    await legacyConsumer(makeBatch(makePayload({ pr_number: 42 })));
+    const [legacyInput] = runnerInputs();
+    expect(Object.keys(legacyInput!)).toEqual(["worktreePath", "reconFacts"]);
+    expect(JSON.stringify(appInput)).toBe(JSON.stringify(legacyInput));
+  });
+
+  test("explicit legacy marker {kind:'legacy'}: field omitted", async () => {
+    reset();
+    const db = createMigratedTestD1();
+    const consumer = createReviewConsumer(makeEnv({ DB: db as never }), testLog, testOverrides);
+
+    await consumer(makeBatch(makePayload({ appRef: { kind: "legacy" } })));
+
+    const input = runnerInputs()[0]!;
+    expect(Object.keys(input)).toEqual(["worktreePath", "reconFacts"]);
+    expect(input.modelOverrides).toBeUndefined();
+  });
+
+  test("an all-cleared role map resolves to NO field (empty map = current behavior)", async () => {
+    reset();
+    const db = createMigratedTestD1();
+    const appX = await seedApp(db, "app-x");
+    const store = createAppConfigStore(db, TEST_KEY);
+    await store.setModelRole(appX.id, "mstar-review-seat", "first/model");
+    await store.setModelRole(appX.id, "mstar-review-seat", ""); // cleared → empty map
+    const consumer = createReviewConsumer(makeEnv({ DB: db as never }), testLog, testOverrides);
+
+    await consumer(makeBatch(makePayload({ appRef: { kind: "app", appId: appX.id } })));
+
+    const input = runnerInputs()[0]!;
+    expect(Object.keys(input)).toEqual(["worktreePath", "reconFacts"]);
+    expect(input.modelOverrides).toBeUndefined();
+  });
+
+  test("role maps are re-read per message: a dashboard role update applies to the very next review", async () => {
+    reset();
+    const db = createMigratedTestD1();
+    const appX = await seedApp(db, "app-x");
+    const store = createAppConfigStore(db, TEST_KEY);
+    await store.setModelRole(appX.id, "code-reviewer", "openai/v1");
+    const consumer = createReviewConsumer(makeEnv({ DB: db as never }), testLog, testOverrides);
+
+    await consumer(makeBatch(makePayload({ pr_number: 42, appRef: { kind: "app", appId: appX.id } })));
+    await store.setModelRole(appX.id, "code-reviewer", "openai/v2");
+    await consumer(makeBatch(makePayload({ pr_number: 43, appRef: { kind: "app", appId: appX.id } })));
+
+    const [first, second] = runnerInputs();
+    expect(first!.modelOverrides).toEqual({ "code-reviewer": "openai/v1" });
+    expect(second!.modelOverrides).toEqual({ "code-reviewer": "openai/v2" });
   });
 });

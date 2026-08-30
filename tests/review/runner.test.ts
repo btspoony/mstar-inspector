@@ -14,7 +14,9 @@
  *   - unreadable/malformed input file → exit 1, stdout empty;
  *   - runtime failure → exit 1, stdout empty, stderr diagnostic;
  *   - `worktreePath` defaults to the process cwd; `reconFacts` defaults to [];
- *   - the OMP_REVIEW_MODEL chain flows into the runtime input.
+ *   - the OMP_REVIEW_MODEL chain flows into the runtime input;
+ *   - the optional `modelOverrides` map (plan 17 B6) is shape-guarded and
+ *     rides into the runtime input verbatim; absent = the legacy shape.
  */
 
 import { afterEach, describe, expect, mock, test } from "bun:test";
@@ -177,12 +179,60 @@ describe("runner entry (src/review/runner.ts)", () => {
       { worktreePath: 42 },
       { reconFacts: "not-an-array" },
       { reconFacts: [1, 2] },
+      // Plan 17 B6: shape-only guard on the optional overrides map.
+      { modelOverrides: "not-an-object" },
+      { modelOverrides: [] },
+      { modelOverrides: null },
+      { modelOverrides: { "mstar-review-seat": 42 } },
+      { modelOverrides: { "code-reviewer": { nested: "object" } } },
     ]) {
       const inputPath = writeInput(bad);
       const { code, stdout } = await runCli(["--level", "quick", "--input", inputPath]);
       expect(code).toBe(1);
       expect(stdout).toBe("");
     }
+  });
+
+  test("modelOverrides rides into the runtime input verbatim (plan 17 B6)", async () => {
+    // Shape-only validation: unknown agent names and `:thinking` suffixes are
+    // NOT the runner's business — they pass through untouched (L3).
+    const overrides = {
+      "mstar-review-seat": "ark-plan/deepseek-v4-flash:high",
+      "code-reviewer": "openai/gpt-5:thinking, anthropic/claude-x",
+      "unknown-agent": "whatever/provider",
+    };
+    const inputPath = writeInput({ worktreePath: "/workspace/clone", modelOverrides: overrides });
+    const { code, stderr } = await runCli(["--level", "deep", "--input", inputPath]);
+
+    expect(code).toBe(0);
+    expect(stderr).toBe("");
+    expect(runInputs[0]).toEqual({
+      level: "deep",
+      worktreePath: "/workspace/clone",
+      reconFacts: [],
+      modelSelectors: [],
+      modelOverrides: overrides,
+    });
+  });
+
+  test("absent or empty modelOverrides keeps the legacy runtime input shape (byte-compat)", async () => {
+    const absentPath = writeInput({ worktreePath: "/workspace/clone" });
+    expect((await runCli(["--level", "quick", "--input", absentPath])).code).toBe(0);
+    const legacyShape = {
+      level: "quick",
+      worktreePath: "/workspace/clone",
+      reconFacts: [],
+      modelSelectors: [],
+    };
+    // The field is absent — not present-with-undefined — for legacy payloads.
+    expect(runInputs[0]).toEqual(legacyShape);
+    expect(Object.keys(runInputs[0] as object)).not.toContain("modelOverrides");
+
+    // An empty map is shape-valid and passes through; the runtime treats it
+    // exactly like absent (byte-compat gate).
+    const emptyPath = writeInput({ worktreePath: "/workspace/clone", modelOverrides: {} });
+    expect((await runCli(["--level", "quick", "--input", emptyPath])).code).toBe(0);
+    expect(runInputs[1]).toEqual({ ...legacyShape, modelOverrides: {} });
   });
 
   test("runtime failure → exit 1, stdout empty, stderr diagnostic", async () => {
