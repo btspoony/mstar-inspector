@@ -1,6 +1,7 @@
 ---
 module: dashboard / multi-App platform (B4+B5+B2 contract)
 date: 2026-08-29
+last_updated: 2026-08-30
 problem_type: best_practice
 category: best-practices
 severity: medium
@@ -36,7 +37,12 @@ v0.5 turned the single-App dashboard into a platform: invite-only members, N aud
 
 ## Why This Matters
 
-B3 (per-App `REVIEW_ENABLED`, install-health UI) and B6 (per-role models via omp `modelRoles`, custom-provider `models.yml` generation) build directly on these tables and seams; the omp-side research for B6 lives in `.mstar/projects/dev-dashboard/research/2026-08-29-access-control-and-multi-app.md` (process-local — re-promote when B6 starts).
+**v0.6 update — B3 and B6 are now delivered:**
+- **B3 per-App pause** (`github_apps.review_enabled`, migration 0008): pause ≠ disable — paused = webhook verify → **2xx silent ignore** (zero enqueue; `last_webhook_at` still touched), consumer in-flight = **ack-skip** (no retry/DLQ), while disabled = 404 + retry→DLQ. UI toggle (`/dashboard/apps/:slug/pause|/resume`) + install-health panel (`app_installations` + `last_webhook_at`).
+- **B6 per-role models** (`app_model_roles`, migration 0009): per-App seat → selector map (4 seat agents), applied runner-side via settings overrides — mechanism doc: `omp-runner-settings-overrides.md`. Quick/default applies at the `seatModels` synthesis (explicit `model` wins over settings overrides); deep via `task.agentModelOverrides`. Custom provider catalog still deferred (image-baked `models.yml`).
+- **Hardening** (0007 + caches): commenter cache fingerprinted on `github_app_id`+`private_key_enc` envelope (never `updated_at` — per-webhook writes would thrash it); verifier cache keyed by `cacheKey` with rotation-rebuild; `reviews.app_id` indexed; webhook warns carry real event/stage labels.
+
+The omp B6 research doc (`.mstar/projects/dev-dashboard/research/2026-08-29-access-control-and-multi-app.md`) is superseded by `omp-runner-settings-overrides.md` for the mechanism; the project doc remains as roadmap history.
 
 ## When to Apply
 
