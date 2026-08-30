@@ -638,6 +638,51 @@ async function resolveModelOverrides(
 }
 
 /**
+ * The effective model selector chain for one message (plan 18 Task 1,
+ * architect AL-2) plus WHERE it came from. Precedence: the App's verbatim
+ * non-blank chain wins (any falsy or whitespace-only chain = unset, plan 15
+ * input bounds); otherwise the global `env.OMP_REVIEW_MODEL`; both unset →
+ * `chain: undefined` (the in-image default runs). `fromApp` is the
+ * config_source predicate — a chain that comes from the global env is NOT
+ * an App contribution, only the App's own stored chain is. This is THE
+ * chain-precedence single source — used by BOTH `buildRunnerEnv` (step 3)
+ * and the version-record put below, so the recorded model can never drift
+ * from the chain the runner actually saw (the chain rides the exec env,
+ * never the runner input JSON).
+ */
+export function effectiveModelChain(
+  appCfg: RunnerAppConfig | undefined,
+  env: PipelineEnv,
+): { chain: string | undefined; fromApp: boolean } {
+  const appChain =
+    typeof appCfg?.modelChain === "string" && appCfg.modelChain.trim() !== ""
+      ? appCfg.modelChain
+      : undefined;
+  if (appChain !== undefined) return { chain: appChain, fromApp: true };
+  if (env.OMP_REVIEW_MODEL !== undefined && env.OMP_REVIEW_MODEL !== "") {
+    return { chain: env.OMP_REVIEW_MODEL, fromApp: false };
+  }
+  return { chain: undefined, fromApp: false };
+}
+
+/**
+ * The head (primary) selector of an effective chain — the version record
+ * written to `reviews.model` (plan 18 Task 1). Comma-separated, trimmed,
+ * empty segments dropped (the same grammar as the runner-side selector
+ * parse). No chain → NULL: the in-image default ran, and the default
+ * selector is NEVER hardcoded worker-side (plan 19's runbook records it
+ * next to the image digest).
+ */
+function chainHeadSelector(chain: string | undefined): string | null {
+  if (chain === undefined) return null;
+  for (const segment of chain.split(",")) {
+    const selector = segment.trim();
+    if (selector !== "") return selector;
+  }
+  return null;
+}
+
+/**
  * Build the in-image runner exec env (step 8): the provider key + harness
  * paths (compass D — secrets never baked into the image), the OMP_REVIEW_MODEL
  * chain when set (bugbot BB-1), and every known provider key that is
@@ -728,23 +773,24 @@ export function buildRunnerEnv(
   //    bounds: a direct-DB write can store a blank chain the routes would
   //    have normalized) is unset → the global chain stays untouched. A chain
   //    with content forwards verbatim — the guard only decides unset-vs-set.
-  const chain =
-    typeof appCfg.modelChain === "string" && appCfg.modelChain.trim() !== ""
-      ? appCfg.modelChain
-      : undefined;
+  //    The precedence lives in effectiveModelChain (plan 18 Task 1: ONE
+  //    resolution shared with the version-record put; re-resolving the env
+  //    chain here to the same value is a harmless no-op overwrite).
+  //    config_source stays keyed to the App's OWN chain (fromApp) — a
+  //    global-env chain is not an App contribution (plan 14 pin).
+  const { chain, fromApp: appChainSet } = effectiveModelChain(appCfg, env);
   if (chain !== undefined) {
     runnerEnv.OMP_REVIEW_MODEL = chain;
   }
   if (emit) {
     log.info(
-      { ...fields, config_source: appKeys > 0 || chain !== undefined ? "app" : "fallback" },
+      { ...fields, config_source: appKeys > 0 || appChainSet ? "app" : "fallback" },
       `per-App env assembly: ${appKeys} provider key(s) from App config, ${globalCount} global fallback` +
-        `${chain !== undefined ? ", model chain from App config" : ""}`,
+        `${appChainSet ? ", model chain from App config" : ""}`,
     );
   }
   return runnerEnv;
 }
-
 /**
  * KV done-state read (B3): `done` means a review was already POSTED for this
  * sha (the consumer writes it right after posting, before the D1 insert).
@@ -1121,6 +1167,15 @@ async function processMessage(payload: ReviewJobPayload, deps: ProcessDeps): Pro
         schema: "mstar.review/v1",
         payload: output,
         ...(payload.appRef?.kind === "app" ? { appId: payload.appRef.appId } : {}),
+        // Version records (plan 18 Task 1, architect AL-2): `model` = the
+        // head selector of the SAME effective chain the runner exec env
+        // carried (single-sourced via effectiveModelChain — no re-resolution
+        // split-brain; both unset → NULL = the in-image default ran).
+        // `provider` is NULL on BOTH paths: RunnerAppConfig carries a
+        // multi-provider key set, not one provider — never invent a mapping.
+        // Plan-17 modelOverrides are NOT reflected in the columns.
+        model: chainHeadSelector(effectiveModelChain(appCfg, deps.env).chain),
+        provider: null,
       });
     } catch (err) {
       const detail = err instanceof Error ? err.message : String(err);

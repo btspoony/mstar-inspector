@@ -505,6 +505,56 @@ describe("per-App runner env assembly (plan 14 Task 3, spec § Per-App BYOK)", (
     expect(cfgLines[1]?.fields.config_source).toBe("app");
   });
 
+  test("version records (plan 18 Task 1): reviews.model = the effective chain's head selector on BOTH paths; provider always NULL", async () => {
+    reset();
+    const db = createMigratedTestD1();
+    const appX = await seedApp(db, "app-x");
+    const appY = await seedApp(db, "app-y");
+    await createAppConfigStore(db, TEST_KEY).setModelChain(appX.id, "openai/gpt-app,anthropic/claude-app");
+    // Y has no config row → null chain → falls back to the global chain.
+    const consumer = createReviewConsumer(
+      makeEnv({ DB: db as never, OMP_REVIEW_MODEL: "ark-plan/global-chain,openai/global-fallback" }),
+      testLog,
+      testOverrides,
+    );
+
+    await consumer(
+      makeBatch(
+        makePayload({ pr_number: 42, appRef: { kind: "app", appId: appX.id } }),
+        makePayload({ pr_number: 43, appRef: { kind: "app", appId: appY.id } }),
+        makePayload({ pr_number: 44 }), // legacy — no appRef
+      ),
+    );
+
+    const rows = db.raw
+      .query("SELECT pr_number, model, provider FROM reviews ORDER BY pr_number")
+      .all() as Array<{ pr_number: number; model: string | null; provider: string | null }>;
+    expect(rows).toEqual([
+      // The App's chain wins — its HEAD selector is recorded (architect AL-2).
+      { pr_number: 42, model: "openai/gpt-app", provider: null },
+      // No App chain → the global OMP_REVIEW_MODEL chain's head.
+      { pr_number: 43, model: "ark-plan/global-chain", provider: null },
+      // Legacy path: the same env chain's head; provider NULL here too.
+      { pr_number: 44, model: "ark-plan/global-chain", provider: null },
+    ]);
+  });
+
+  test("version records: chain unset on both levels → model NULL (the in-image default ran — never hardcoded worker-side)", async () => {
+    reset();
+    const db = createMigratedTestD1();
+    const appX = await seedApp(db, "app-x");
+    const consumer = createReviewConsumer(makeEnv({ DB: db as never }), testLog, testOverrides);
+
+    await consumer(makeBatch(makePayload({ appRef: { kind: "app", appId: appX.id } })));
+
+    const row = db.raw.query("SELECT model, provider FROM reviews").get() as {
+      model: string | null;
+      provider: string | null;
+    };
+    expect(row.model).toBeNull();
+    expect(row.provider).toBeNull();
+  });
+
   test("cross-App isolation: App X's env never contains App Y's key names or values (full env object)", async () => {
     reset();
     const db = createMigratedTestD1();

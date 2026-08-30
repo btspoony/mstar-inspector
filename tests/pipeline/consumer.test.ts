@@ -378,11 +378,18 @@ describe("createReviewConsumer", () => {
       head_sha: string;
       verdict: string;
       app_id: string | null;
+      model: string | null;
+      provider: string | null;
     };
     expect(row.head_sha).toBe(SHA);
     expect(row.verdict).toBe("needs fixes");
     // Legacy payload (no appRef) — Clarify #3: app_id NULL = legacy (QC F-001 pin).
     expect(row.app_id).toBeNull();
+    // Version records (plan 18 Task 1): no OMP_REVIEW_MODEL on the env →
+    // model NULL (the in-image default ran — never hardcoded worker-side);
+    // provider is NULL on BOTH paths (architect AL-2).
+    expect(row.model).toBeNull();
+    expect(row.provider).toBeNull();
     const findings = db.raw.query("SELECT COUNT(*) AS n FROM findings").get() as { n: number };
     expect(findings.n).toBe(1);
     // KV completion state written with the idem key + TTL.
@@ -1030,6 +1037,14 @@ describe("createReviewConsumer", () => {
       },
       timeout: 600_000,
     });
+    // Version record (plan 18 Task 1, legacy path): the row records the
+    // chain's HEAD selector; provider stays NULL.
+    const versionRow = db.raw.query("SELECT model, provider FROM reviews").get() as {
+      model: string | null;
+      provider: string | null;
+    };
+    expect(versionRow.model).toBe("ark-plan/deepseek-v4-flash");
+    expect(versionRow.provider).toBeNull();
   });
 
   test("BB-1: OMP_REVIEW_MODEL unset/empty → omitted from the runner exec env (in-image default)", async () => {
@@ -1046,6 +1061,11 @@ describe("createReviewConsumer", () => {
 
     const runnerEnv = runnerExecEnv();
     expect(runnerEnv.OMP_REVIEW_MODEL).toBeUndefined();
+    // Version record (plan 18 Task 1): an empty chain = unset → model NULL
+    // (the in-image default ran).
+    expect(
+      (db.raw.query("SELECT model FROM reviews").get() as { model: string | null }).model,
+    ).toBeNull();
     // And an entirely unset chain on makeEnv also stays absent.
     expect(Object.keys(runnerEnv).sort()).toEqual(
       ["ARK_API_KEY", "HARNESS_PLUGIN_ROOT", "PI_CODING_AGENT_DIR"].sort(),
