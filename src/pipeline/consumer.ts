@@ -613,7 +613,9 @@ async function resolveAppConfig(payload: ReviewJobPayload, deps: ProcessDeps): P
  * App row is already proven present, active and non-deleted there) and runs
  * BEFORE the in-flight guard so a resolution failure has zero side effects.
  * The map is re-read every message (no cache) so a dashboard role update
- * applies to the very next review.
+ * applies to the very next review. A roles-read failure rethrows with the
+ * same app-id-prefixed context wrapper as `resolveAppConfig` (greppable
+ * retry/DLQ triage).
  */
 async function resolveModelOverrides(
   payload: ReviewJobPayload,
@@ -623,11 +625,16 @@ async function resolveModelOverrides(
   if (appRef === undefined || appRef.kind === "legacy") {
     return undefined;
   }
-  const roles = await createAppConfigStore(
-    deps.env.DB,
-    deps.env.DASHBOARD_ENCRYPTION_KEY,
-  ).getAppModelRoles(appRef.appId);
-  return Object.keys(roles).length > 0 ? roles : undefined;
+  try {
+    const roles = await createAppConfigStore(
+      deps.env.DB,
+      deps.env.DASHBOARD_ENCRYPTION_KEY,
+    ).getAppModelRoles(appRef.appId);
+    return Object.keys(roles).length > 0 ? roles : undefined;
+  } catch (err) {
+    const detail = err instanceof Error ? err.message : String(err);
+    throw new Error(`per-App model-role resolution failed: app ${appRef.appId}: ${detail}`);
+  }
 }
 
 /**

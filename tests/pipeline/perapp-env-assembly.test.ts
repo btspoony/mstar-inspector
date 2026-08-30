@@ -785,4 +785,39 @@ describe("runner input modelOverrides threading (plan 17 Task 1)", () => {
     expect(first!.modelOverrides).toEqual({ "code-reviewer": "openai/v1" });
     expect(second!.modelOverrides).toEqual({ "code-reviewer": "openai/v2" });
   });
+
+  test("a roles-read failure rethrows with the per-App context wrapper (mirror of resolveAppConfig), zero side effects", async () => {
+    reset();
+    const db = createMigratedTestD1();
+    const appX = await seedApp(db, "app-x");
+    // Fail ONLY the model-roles read (the resolveModelOverrides face) — the
+    // PEM/config reads stay healthy, so the wrapper's prefix is observable.
+    const failingDb = new Proxy(db, {
+      get(target, prop, receiver) {
+        if (prop === "prepare") {
+          return (query: string) => {
+            if (query.includes("FROM app_model_roles")) throw new Error("roles read boom");
+            return (target as typeof db).prepare(query);
+          };
+        }
+        return Reflect.get(target, prop, receiver);
+      },
+    });
+    const consumer = createReviewConsumer(makeEnv({ DB: failingDb as never }), testLog, testOverrides);
+
+    await expect(
+      consumer(makeBatch(makePayload({ appRef: { kind: "app", appId: appX.id } }))),
+    ).rejects.toThrow(`per-App model-role resolution failed: app ${appX.id}: roles read boom`);
+
+    // Zero side effects: no sandbox, no input write, no guard acquisition
+    // (the read hangs off the appRef gate, before the in-flight guard).
+    expect(sandboxCalls).toHaveLength(0);
+    expect(runnerInputs()).toHaveLength(0);
+    expect(kvGuardPuts).toHaveLength(0);
+    // The structured failure log carries the same greppable prefix + app id.
+    const errLine = logLines.find((l) => l.level === "error");
+    expect(errLine).toBeDefined();
+    expect(errLine!.msg).toContain("per-App model-role resolution failed");
+    expect(errLine!.fields.app_id).toBe(appX.id);
+  });
 });

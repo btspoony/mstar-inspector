@@ -146,6 +146,28 @@ export async function loadHarnessSkills(pluginRoot: string): Promise<Skill[]> {
 }
 
 /**
+ * The base isolation settings record shared by EVERY review session
+ * (quick/default parent, deep parent): in-memory-equivalent isolation minus
+ * the deep-only deltas — no outbound fetch, model fallback on, the caller's
+ * model chain as the retry fallback. ONE definition: the deep
+ * with-overrides branch spreads this record and adds exactly the
+ * `task.agentModelOverrides` key, so a future isolation setting can never
+ * drift between the two paths (Phase 5 fix, PR #7 review). Callers wrap the
+ * record in Settings.isolated().
+ */
+function baseIsolationSettings(fallbackChain: string[] | undefined): {
+  "fetch.enabled": false;
+  "retry.modelFallback": true;
+  "retry.fallbackChains": { default: string[] };
+} {
+  return {
+    "fetch.enabled": false,
+    "retry.modelFallback": true,
+    "retry.fallbackChains": { default: fallbackChain ?? [] },
+  };
+}
+
+/**
  * quick/default parent session options — migrated from the M1
  * src/review/session.ts with `appendSystemPrompt` REMOVED (the seat prompts
  * are engine-generated; this parent never prompts a model). Everything else
@@ -166,11 +188,7 @@ export function buildSessionOptions(opts: {
   return {
     cwd: opts.cwd,
     sessionManager: SessionManager.inMemory(opts.cwd),
-    settings: Settings.isolated({
-      "fetch.enabled": false,
-      "retry.modelFallback": true,
-      "retry.fallbackChains": { default: opts.fallbackChain ?? [] },
-    }),
+    settings: Settings.isolated(baseIsolationSettings(opts.fallbackChain)),
     restrictToolNames: true,
     toolNames: [...REVIEW_TOOL_NAMES],
     disableExtensionDiscovery: true,
@@ -608,7 +626,9 @@ async function withoutGitHubTokenEnv<T>(review: () => Promise<T>): Promise<T> {
  * model frontmatter → the parent active model). buildSessionOptions stays
  * untouched (the key must never reach the quick/default settings where it is
  * a dead surface), so the overrides branch constructs the deep settings
- * record itself; the map is copied — the record must not alias caller-owned
+ * record from the SHARED baseIsolationSettings record plus exactly the one
+ * overrides key — zero drift surface between the two paths (Phase 5 fix,
+ * PR #7 review); the map is copied — the record must not alias caller-owned
  * state.
  */
 function deepSessionOptions(opts: {
@@ -625,10 +645,12 @@ function deepSessionOptions(opts: {
     ...buildSessionOptions(opts),
     ...(hasOverrides
       ? {
+          // The base isolation record (ONE definition, shared with
+          // buildSessionOptions) plus EXACTLY the overrides key — a future
+          // isolation setting added to the base can never drift away from
+          // the deep-with-overrides path (Phase 5 fix, PR #7 review).
           settings: Settings.isolated({
-            "fetch.enabled": false,
-            "retry.modelFallback": true,
-            "retry.fallbackChains": { default: opts.fallbackChain ?? [] },
+            ...baseIsolationSettings(opts.fallbackChain),
             "task.agentModelOverrides": { ...overrides },
           }),
         }

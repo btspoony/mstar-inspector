@@ -503,6 +503,31 @@ describe("App settings — Review switch + install health panel (plan 16)", () =
     expect(body).toContain("Last webhook: just now");
   });
 
+  test("disabled app: the Review section shows the gray disconnected line — no Pause/Resume toggle, no paused/resumes copy; install health still renders (Phase 5, PR #7 review)", async () => {
+    const db = await seededWorld();
+    const apps = createAppsStore(db);
+    const app = (await apps.listApps()).find((a) => a.slug === "mstar-inspector-mallory")!;
+    await apps.setAppStatus(app.id, "disabled");
+    const res = await get(SETTINGS, await ownerCookie(), makeEnv(db));
+    expect(res.status).toBe(200);
+    const body = await res.text();
+    // The disconnected line replaces BOTH the active toggle ("Reviews are on"
+    // + Pause) and the paused copy ("Webhooks stay connected" + Resume) — a
+    // disabled App is disconnected (webhook 404), so pausing is meaningless
+    // (mirror of the list's status-gated pause toggle).
+    expect(body).toContain("This App is disconnected — enable it to review.");
+    expect(body).not.toContain("Pause reviews");
+    expect(body).not.toContain("Resume reviews");
+    expect(body).not.toContain('action="/dashboard/apps/mstar-inspector-mallory/pause"');
+    expect(body).not.toContain('action="/dashboard/apps/mstar-inspector-mallory/resume"');
+    expect(body).not.toContain("Reviews are on");
+    expect(body).not.toContain("Webhooks stay connected");
+    expect(body).not.toContain('<span class="note">paused</span>');
+    // The install-health panel renders regardless of status.
+    expect(body).toContain("Last webhook: never");
+    expect(body).toContain("No installations yet.");
+  });
+
   test("installations render newest-first (seen_at DESC face) with relative last-seen; installation ids in tabular figures", async () => {
     const db = await seededWorld();
     const apps = createAppsStore(db);

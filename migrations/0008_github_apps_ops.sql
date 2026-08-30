@@ -12,13 +12,15 @@
 -- requires a non-NULL DEFAULT (present: 1) and there is no REFERENCES clause
 -- — the 0005 header's "FK columns need a NULL default" rule does not apply.
 --
--- last_webhook_at records the App's most recent VERIFIED (2xx) webhook
--- delivery — written after signature verification on every 2xx outcome
--- (job / ignore / paused), never on rejects (400/401/413/500) nor the
--- pre-verify kill-switch return. Nullable, no default: NULL = the App has
--- never sent a verified event. High-frequency by design — writers must
--- touch ONLY this column (never updated_at, which stays the operator
--- mutation timestamp; see apps-store.touchLastWebhook).
+-- last_webhook_at records the App's most recent signature-VERIFIED webhook
+-- delivery — touched after signature verification, regardless of the
+-- subsequent enqueue outcome (job / ignore / paused; a queue-send failure
+-- still leaves the touch committed, so the column reads "last verified
+-- delivery", not "last successful enqueue"), never on rejects
+-- (400/401/413/500) nor the pre-verify kill-switch return. Nullable, no
+-- default: NULL = the App has never sent a verified event. High-frequency
+-- by design — writers must touch ONLY this column (never updated_at, which
+-- stays the operator mutation timestamp; see apps-store.touchLastWebhook).
 --
 -- Metadata-only: two ADD COLUMNs alter the schema without rewriting the
 -- table (0002 reviews.envelope / 0005 reviews.app_id precedent), so it is

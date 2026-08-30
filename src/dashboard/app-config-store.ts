@@ -28,7 +28,10 @@
  * isolation stays intact. The `db` parameter is a locally-declared narrow D1
  * face (types only, zero imports) — a real `D1Database`, the bun:sqlite test
  * double (tests/store/helpers.ts), and the store layer's `D1Like` all satisfy
- * it structurally (same pattern as apps-store.ts; this store never batches).
+ * it structurally (same pattern as apps-store.ts). Every write here is a
+ * single statement EXCEPT setModelRoles (Phase 5 fix, PR #7 review): the
+ * role editor's full-map save is ONE atomic `db.batch` — the only batch on
+ * the face, added for multi-write atomicity, never for throughput.
  *
  * Model roles (plan 17 B6): `app_model_roles` (migration 0009) maps each of
  * the 4 audit-seat agent names to its own selector chain per App. The role
@@ -262,9 +265,31 @@ export type AppConfig = {
 };
 
 /**
+ * One statement's result inside a D1 `batch()` (order matches input).
+ * Declared locally — same shape as src/store/types.ts `D1BatchResult`.
+ */
+export type AppConfigBatchResult = {
+  results: unknown[];
+  meta: { changes: number; last_row_id: number };
+};
+
+/**
+ * The D1 `batch` face alone (exported for callers): a holder of a narrower
+ * D1 face that lacks batch (e.g. users.ts `DashboardD1`) intersects with
+ * this — truthful for the runtime D1Database binding and the bun:sqlite
+ * test double, which both implement batch.
+ */
+export type AppConfigBatchFace = {
+  batch(statements: AppConfigStatement[]): Promise<AppConfigBatchResult[]>;
+};
+
+/**
  * Narrow D1 face, declared locally so this leaf module imports nothing
- * structural (prepare/bind/first/all/run; no batch — this store never
- * batches).
+ * structural: prepare/bind/first/all/run for every single-statement write,
+ * plus exactly ONE `batch` (the setModelRoles atomic full-map save — the
+ * store never batches for any other purpose). A real `D1Database`, the
+ * bun:sqlite test double (tests/store/helpers.ts) and the store layer's
+ * `D1Like` all satisfy it structurally.
  */
 type AppConfigStatement = {
   bind(...values: unknown[]): AppConfigStatement;
@@ -276,8 +301,9 @@ type AppConfigStatement = {
   }>;
 };
 
-type AppConfigD1 = {
+export type AppConfigD1 = {
   prepare(query: string): AppConfigStatement;
+  batch(statements: AppConfigStatement[]): Promise<AppConfigBatchResult[]>;
 };
 
 /**
@@ -312,25 +338,31 @@ export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | un
     return roles;
   }
 
-  /** Delete one role's mapping row (idempotent — an unmapped role deletes nothing). */
-  async function deleteModelRole(appId: string, role: string): Promise<void> {
-    await db
-      .prepare(`DELETE FROM app_model_roles WHERE app_id = ? AND role = ?`)
-      .bind(appId, role)
-      .run();
+  /** Prepared DELETE for one role's mapping row (run() or ride in a batch). */
+  function deleteModelRoleStatement(appId: string, role: string): AppConfigStatement {
+    return db.prepare(`DELETE FROM app_model_roles WHERE app_id = ? AND role = ?`).bind(appId, role);
   }
 
-  /** Upsert one role's selector VERBATIM (one row per (app_id, role) composite PK). */
-  async function upsertModelRole(appId: string, role: string, selector: string): Promise<void> {
-    await db
+  /** Prepared verbatim upsert of one role's selector (run() or ride in a batch). */
+  function upsertModelRoleStatement(appId: string, role: string, selector: string): AppConfigStatement {
+    return db
       .prepare(
         `INSERT INTO app_model_roles (app_id, role, selector)
          VALUES (?, ?, ?)
          ON CONFLICT (app_id, role) DO UPDATE SET
            selector = excluded.selector`,
       )
-      .bind(appId, role, selector)
-      .run();
+      .bind(appId, role, selector);
+  }
+
+  /** Delete one role's mapping row (idempotent — an unmapped role deletes nothing). */
+  async function deleteModelRole(appId: string, role: string): Promise<void> {
+    await deleteModelRoleStatement(appId, role).run();
+  }
+
+  /** Upsert one role's selector VERBATIM (one row per (app_id, role) composite PK). */
+  async function upsertModelRole(appId: string, role: string, selector: string): Promise<void> {
+    await upsertModelRoleStatement(appId, role, selector).run();
   }
 
   return {
@@ -482,20 +514,24 @@ export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | un
     /**
      * Bulk face for the settings single-save (plan 17 Task 3's 4-row editor):
      * validates EVERY (role, selector) entry BEFORE any write (one bad entry
-     * → typed throw, zero rows touched), then applies each with the
-     * setModelRole semantics — blank = clear, content = verbatim upsert. An
-     * empty map is a no-op.
+     * → typed throw, zero rows touched), then applies the whole map as ONE
+     * atomic `db.batch` (Phase 5 fix, PR #7 review) — blank = clear, content
+     * = verbatim upsert. D1 batch is transactional: a mid-save failure rolls
+     * back every statement, so a partially applied role map is impossible and
+     * the route's "nothing was stored" failure notice stays truthful. An
+     * empty map is a no-op (no batch is issued).
      */
     async setModelRoles(appId: string, selectors: Record<string, string>): Promise<void> {
       for (const [role, selector] of Object.entries(selectors)) {
         assertModelRoleEntry(role, selector);
       }
-      for (const [role, selector] of Object.entries(selectors)) {
-        if (selector.trim() === "") {
-          await deleteModelRole(appId, role);
-        } else {
-          await upsertModelRole(appId, role, selector);
-        }
+      const statements = Object.entries(selectors).map(([role, selector]) =>
+        selector.trim() === ""
+          ? deleteModelRoleStatement(appId, role)
+          : upsertModelRoleStatement(appId, role, selector),
+      );
+      if (statements.length > 0) {
+        await db.batch(statements);
       }
     },
   };

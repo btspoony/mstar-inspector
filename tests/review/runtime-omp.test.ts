@@ -595,6 +595,32 @@ describe("ompAgentRuntime.runReview — per-role model overrides (plan 17 B6)", 
     // serialized options are identical to the no-map run.
     expect(JSON.stringify(createdOptions[0])).toBe(baseline);
   });
+
+  test("deep: mapped settings = the no-map settings plus EXACTLY the overrides key (diff-of-one drift lock)", async () => {
+    // Phase 5 fix (PR #7 review): the deep-with-overrides record must be
+    // DERIVED from the shared base isolation record, not re-declared — a
+    // future isolation setting added to the base can never silently miss
+    // this path. Derived expectation, not a re-declared pin: run the no-map
+    // path, then require the mapped record to differ by exactly one key.
+    parentYields = [deepEnvelope()];
+    await ompAgentRuntime.runReview(DEEP_INPUT);
+    const baseOverrides = (createdOptions[0]!.settings as { overrides: Record<string, unknown> })
+      .overrides;
+
+    createdOptions.length = 0;
+    parentYields = [deepEnvelope()];
+    const overrides = { "code-reviewer": "ark-plan/deepseek-v4-flash:high", "frontend-dev": "openai/gpt-5" };
+    await ompAgentRuntime.runReview({ ...DEEP_INPUT, modelOverrides: overrides });
+    const mappedOverrides = (createdOptions[0]!.settings as { overrides: Record<string, unknown> })
+      .overrides;
+
+    // Exactly ONE added key, appended last; every other entry identical
+    // (serialized equality against base + the one entry).
+    expect(Object.keys(mappedOverrides)).toEqual([...Object.keys(baseOverrides), "task.agentModelOverrides"]);
+    expect(JSON.stringify(mappedOverrides)).toBe(
+      JSON.stringify({ ...baseOverrides, "task.agentModelOverrides": overrides }),
+    );
+  });
 });
 
 describe("ompAgentRuntime.runReview — deep parent path (plan 09 T2)", () => {

@@ -61,6 +61,7 @@ import {
   PROVIDER_IDS,
   createAppConfigStore,
   parseModelChain,
+  type AppConfigBatchFace,
   type AppConfigStore,
 } from "./app-config-store";
 import {
@@ -99,14 +100,24 @@ function dashboardSecrets(env: Env) {
 }
 
 /**
+ * The dashboard D1 binding's face: the users-store narrow face PLUS D1
+ * `batch` (Phase 5 fix, PR #7 review) — the settings routes hand this
+ * binding to the App-config store, whose setModelRoles full-map save is ONE
+ * atomic batch. Truthful for the runtime binding (a real D1Database) and
+ * the bun:sqlite test double, which both implement batch; the DashboardD1
+ * face alone (a single-row store's view) just doesn't declare it.
+ */
+type DashboardDb = DashboardD1 & AppConfigBatchFace;
+
+/**
  * D1 membership store binding (plan 12 B4). Runtime-real via wrangler.jsonc
  * `d1_databases` (binding DB), but the fetch-face Env deliberately does not
  * declare it (src/worker/env.ts stays ADMIN_LOGINS-only this plan) — read
  * through this local intersection and fail closed when unbound, like every
  * missing dashboard dependency.
  */
-function dashboardD1(env: Env): DashboardD1 | null {
-  const db = (env as Env & { DB?: DashboardD1 }).DB;
+function dashboardD1(env: Env): DashboardDb | null {
+  const db = (env as Env & { DB?: DashboardDb }).DB;
   return db ?? null;
 }
 
@@ -650,7 +661,7 @@ dashboardApp.post("/members/remove", async (c) => {
 
 /** Route-local member gate shared by the /dashboard/apps routes. */
 async function requireMember(c: Context<{ Bindings: Env }>): Promise<
-  | { ok: true; session: SessionPayload; db: DashboardD1; user: DashboardUserRow }
+  | { ok: true; session: SessionPayload; db: DashboardDb; user: DashboardUserRow }
   | { ok: false; response: Response }
 > {
   const secrets = dashboardSecrets(c.env);
@@ -784,7 +795,7 @@ dashboardApp.post("/apps/:slug/resume", (c) => appReviewAction(c, "resume"));
 // tokens); the T1 temporary placeholder render is gone.
 
 type AppSettingsGate =
-  | { ok: true; session: SessionPayload; db: DashboardD1; app: GithubAppRow }
+  | { ok: true; session: SessionPayload; db: DashboardDb; app: GithubAppRow }
   | { ok: false; response: Response };
 
 /** Route-local owner-or-admin gate shared by the settings route family. */
@@ -869,6 +880,7 @@ async function settingsResponse(
         session,
         {
           slug: app.slug,
+          status: app.status,
           reviewEnabled: app.review_enabled !== 0,
           lastWebhookAt: app.last_webhook_at ?? null,
         },

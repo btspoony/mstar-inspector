@@ -660,7 +660,10 @@ const MODEL_ROLE_HINTS: Record<string, string> = {
  * "No installations yet.") plus the App-level "Last webhook" line (relative
  * time, or "never" for a NULL last_webhook_at — connection health is
  * decoupled from the pause switch). Panel data renders read-only; GitHub
- * logins are escaped (they arrive from webhook payloads).
+ * logins are escaped (they arrive from webhook payloads). A disabled App
+ * renders a gray "disconnected" line instead of the switch (Phase 5 fix,
+ * PR #7 review — mirror of the list's status-gated pause toggle); the
+ * install-health panel still renders.
  *
  * Plan 17 addition (spec § IA + § DESIGN.md 意图), after the Model chain
  * section: the Role models editor — one text row per audit seat (iterating
@@ -674,7 +677,7 @@ const MODEL_ROLE_HINTS: Record<string, string> = {
  */
 export function appSettingsPage(
   user: { login: string; name?: string },
-  app: { slug: string; reviewEnabled: boolean; lastWebhookAt: string | null },
+  app: { slug: string; status: string; reviewEnabled: boolean; lastWebhookAt: string | null },
   maskedKeys: MaskedProviderKey[],
   modelChain: string | null,
   modelRoles: Record<string, string>,
@@ -711,16 +714,26 @@ export function appSettingsPage(
     .join("");
   // Plan 16 Review switch: pause ≠ disable — the webhook stays connected
   // (2xx) while paused; the copy says so. Both directions are blue-700
-  // primary (spec § DESIGN.md 意图), confirm-free and reversible.
-  const reviewSection = app.reviewEnabled
-    ? `<section class="enabled">
+  // primary (spec § DESIGN.md 意图), confirm-free and reversible. A DISABLED
+  // App is disconnected (webhook 404 — the list withholds the pause toggle
+  // on disabled rows for the same reason), so the switch and its paused/
+  // resumes copy are replaced by a gray status line (Phase 5 fix, PR #7
+  // review); the install-health panel below renders regardless.
+  const reviewSection =
+    app.status !== "active"
+      ? `<section class="enabled">
+      <h2>Review</h2>
+      <p class="status">This App is disconnected — enable it to review.</p>
+    </section>`
+      : app.reviewEnabled
+        ? `<section class="enabled">
       <h2>Review</h2>
       <p class="status">Reviews are on for this App&apos;s pull requests.</p>
       <form method="post" action="/dashboard/apps/${escapeHtml(app.slug)}/pause">
         <button type="submit" class="primary">Pause reviews</button>
       </form>
     </section>`
-    : `<section class="enabled">
+        : `<section class="enabled">
       <h2>Review</h2>
       <p><span class="note">paused</span></p>
       <p class="status">Webhooks stay connected — deliveries are answered and ignored, and nothing is reviewed until you resume.</p>

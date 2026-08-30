@@ -102,10 +102,12 @@ app.post("/webhook", async (c) => {
  *
  * Per-App pause (plan 16, spec 语义锁 B3 — paused ≠ disabled): once the
  * signature VERIFIED (classifyWebhook returned a non-reject),
- * `last_webhook_at` is touched exactly once per 2xx outcome (job / ignore /
- * paused), before the pause check — reject paths and the pre-verify
- * kill-switch return never touch, so the column stays "last verified
- * delivery" and is decoupled from the review switch. Then
+ * `last_webhook_at` is touched exactly once — after signature verification,
+ * regardless of the subsequent enqueue outcome (job / ignore / paused; a
+ * queue-send failure below still leaves the touch committed), before the
+ * pause check. Reject paths and the pre-verify kill-switch return never
+ * touch, so the column reads "last verified delivery" (NOT "last successful
+ * enqueue") and is decoupled from the review switch. Then
  * `review_enabled=0` answers 2xx with ZERO enqueue (the webhook stays
  * healthy while reviews are paused); disabled/deleted keep their 404 above.
  * The in-flight queue face ack-skips paused messages symmetrically
@@ -212,12 +214,13 @@ app.post("/webhook/:appSlug", async (c) => {
   }
 
   // Plan 16 (L5): the signature VERIFIED (classifyWebhook returned a
-  // non-reject), so this is a healthy GitHub-side delivery — touch
-  // last_webhook_at exactly ONCE per 2xx outcome (job / ignore / paused),
-  // before the pause check below. The reject returns above and the
-  // pre-verify kill-switch return never reach this line, so the column
-  // stays "last verified delivery". Best-effort (same pattern as the
-  // install upsert below): a failure logs a structured warn and never
+  // non-reject), so this delivery is touched — after signature verification,
+  // regardless of the subsequent enqueue outcome (job / ignore / paused; a
+  // queue-send failure in handleReviewJob below still leaves this touch
+  // committed). The reject returns above and the pre-verify kill-switch
+  // return never reach this line, so the column reads "last verified
+  // delivery", NOT "last successful enqueue". Best-effort (same pattern as
+  // the install upsert below): a failure logs a structured warn and never
   // blocks the response.
   try {
     await appsStore.touchLastWebhook(row.id);

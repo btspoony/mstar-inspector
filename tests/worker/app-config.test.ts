@@ -38,6 +38,7 @@ import {
   UnknownModelRoleError,
   createAppConfigStore,
   parseModelChain,
+  type AppConfigD1,
 } from "../../src/dashboard/app-config-store";
 import { createSecretbox } from "../../src/dashboard/secretbox";
 import { PROVIDERS } from "../../src/pipeline/providers";
@@ -112,7 +113,27 @@ function createAppConfigD1(): ReturnType<typeof createTestD1> {
   return db;
 }
 
-const configStore = (db: DashboardD1) => createAppConfigStore(db, TEST_KEY);
+const configStore = (db: AppConfigD1) => createAppConfigStore(db, TEST_KEY);
+
+/**
+ * D1 double whose batch() ALWAYS rejects (Phase 5 fix, PR #7 review): every
+ * other member delegates to the real migrated double, so the failure is
+ * exactly "the batch was issued and failed". D1 batch is transactional (the
+ * bun:sqlite helper brackets BEGIN/COMMIT/ROLLBACK the same way), so zero of
+ * its statements may land — the atomicity the setModelRoles save now relies
+ * on.
+ */
+function createBatchRejectingD1(inner: AppConfigD1): AppConfigD1 & { batchCalls(): number } {
+  let batchCalls = 0;
+  return {
+    prepare: (query: string) => inner.prepare(query),
+    batch: async () => {
+      batchCalls += 1;
+      throw new Error("simulated D1 batch failure");
+    },
+    batchCalls: () => batchCalls,
+  };
+}
 
 /** Seed a github_apps row with genuinely decryptable encrypted columns. */
 async function seedApp(
@@ -641,6 +662,25 @@ describe("app-config store (createAppConfigStore) — model roles (plan 17 T1)",
     expect(rawCount(db, "app_model_roles")).toBe(2);
   });
 
+  test("setModelRoles is ONE atomic batch: a batch failure leaves ZERO rows changed (Phase 5, PR #7 review)", async () => {
+    const db = createAppConfigD1();
+    const app = await seedApp(db, { slug: "a", createdBy: "mallory" });
+    const store = configStore(db);
+    await store.setModelRole(app.id, "code-reviewer", "old/model");
+    const failing = createBatchRejectingD1(db);
+    await expect(
+      configStore(failing).setModelRoles(app.id, {
+        "mstar-review-seat": "new/model",
+        "code-reviewer": "", // blank = clear — must not land either
+      }),
+    ).rejects.toThrow(/simulated D1 batch failure/);
+    // The whole map rides ONE batch — there is no sequential-apply path.
+    expect(failing.batchCalls()).toBe(1);
+    // Atomic: the pre-existing row is untouched — nothing half-applied.
+    expect(await configStore(db).getAppModelRoles(app.id)).toEqual({ "code-reviewer": "old/model" });
+    expect(rawCount(db, "app_model_roles")).toBe(1);
+  });
+
   test("getAppModelRoles on an app with no roles is an EMPTY map (= the chain behavior)", async () => {
     const db = createAppConfigD1();
     const bare = await seedApp(db, { slug: "bare", createdBy: "mallory" });
@@ -1060,6 +1100,28 @@ describe("Role models editor (plan 17 T3 — view + save-roles op)", () => {
     );
     expect(res.status).toBe(200);
     expect(await store.getAppModelRoles(app.id)).toEqual({ "mstar-review-seat": "new/model" });
+  });
+
+  test("a D1 batch failure mid-save → 500 re-render, truthful 'nothing was stored' notice, ZERO rows changed (Phase 5, PR #7 review)", async () => {
+    const { db, app } = await seededWorld();
+    await configStore(db).setModelRole(app.id, "code-reviewer", "old/model");
+    const failing = createBatchRejectingD1(db);
+    const res = await postForm(
+      SETTINGS,
+      `${SESSION_COOKIE}=${await sessionCookie("mallory")}`,
+      makeEnv(failing),
+      roleForm({ "mstar-review-seat": "new/model", "code-reviewer": "" }),
+    );
+    expect(res.status).toBe(500);
+    const body = await res.text();
+    // With the atomic batch the pre-existing copy is now TRUE — a failed
+    // save genuinely stored nothing.
+    expect(body).toContain("The dashboard database rejected the change — nothing was stored.");
+    // The 500 is the full page re-render showing the TRUE stored state.
+    expect(body).toContain('name="role_code-reviewer" value="old/model"');
+    // Atomic: the store state is exactly as before the failed save.
+    expect(await configStore(db).getAppModelRoles(app.id)).toEqual({ "code-reviewer": "old/model" });
+    expect(rawCount(db, "app_model_roles")).toBe(1);
   });
 
   test("an all-blank save clears every mapping (empty = the App model chain)", async () => {
