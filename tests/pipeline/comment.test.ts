@@ -624,6 +624,21 @@ describe("buildDegradedBody", () => {
     expect(straddling).not.toContain("ghp_");
   });
 
+  test("the ERROR line is redacted too — a zod `received` token never reaches the body (AL-1)", () => {
+    // parseReviewOutput zod errors can echo the offending value, e.g. an
+    // enum failure on verdict — the received span rides the error line
+    // ABOVE the details fold, so it must be redactSecrets'd like the
+    // excerpt (redact-then-truncate keeps the order safe).
+    const token = "ghp_" + "b".repeat(36);
+    const body = buildDegradedBody({
+      ...input,
+      error: `schema validation failed at verdict: Invalid enum value. Expected 'ship it' | 'needs fixes' | 'blocked', received '${token}'`,
+    });
+    expect(body).not.toContain(token);
+    expect(body).not.toContain("ghp_");
+    expect(body).toContain("[REDACTED]");
+  });
+
   test("excerpt ≤ 1000 chars; over-budget output is truncated with an ellipsis", () => {
     const body = buildDegradedBody({ ...input, rawOutput: "y".repeat(5000) });
     const excerpt = body.slice(body.indexOf("```\n") + 4, body.lastIndexOf("\n```"));
@@ -710,5 +725,31 @@ describe("postDegraded wiring (mock octokit)", () => {
     const recovery = mockOctok([degradedBotMarker(7, 2)], notFound);
     await postDegradedWithOctokit(recovery.octokit, degradeInput);
     expect(String(recovery.calls.createParams!.body)).toMatch(/^<!-- mstar-inspector:review-degraded:v1 round=1 -->/);
+  });
+});
+
+describe("missing octokit surface → per-chain error noun (review feedback fix)", () => {
+  test("the review chain names the review comment; the degraded chain names the degraded comment", async () => {
+    const bare = {} as PostOctokit;
+    await expect(
+      postReviewWithOctokit(bare, {
+        installationId: 1,
+        owner: "acme",
+        repo: "widgets",
+        prNumber: 42,
+        headSha: "0123456789abcdef0123456789abcdef01234567",
+        output: { schema: "mstar.review/v1", verdict: "blocked", summary_md: "s", findings: [] },
+      }),
+    ).rejects.toThrow(/cannot upsert the review comment/);
+    await expect(
+      postDegradedWithOctokit(bare, {
+        installationId: 1,
+        owner: "acme",
+        repo: "widgets",
+        prNumber: 42,
+        error: "not valid ReviewOutput JSON",
+        rawOutput: "not json at all",
+      }),
+    ).rejects.toThrow(/cannot upsert the degraded comment/);
   });
 });

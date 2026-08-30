@@ -124,12 +124,14 @@ mock.module("@cloudflare/sandbox", () => ({
 // --- commenter fake (injected via createReviewConsumer overrides) -----------
 const commenterCalls: Array<{ op: string; args: unknown[] }> = [];
 let tokenResult = "ghs_installation_token";
+let tokenError: Error | undefined;
 let commentError: Error | undefined;
 let degradeError: Error | undefined;
 
 const fakeCommenter: ReviewCommenter = {
   getInstallationToken: mock(async (installationId: number) => {
     commenterCalls.push({ op: "token", args: [installationId] });
+    if (tokenError) throw tokenError;
     return tokenResult;
   }),
   postReview: mock(async (input: unknown) => {
@@ -273,8 +275,8 @@ function reset(): void {
   revParseExitCode = 0;
   sandboxError = undefined;
   destroyCalls = 0;
-  destroyError = undefined;
   tokenResult = "ghs_installation_token";
+  tokenError = undefined;
   commentError = undefined;
   degradeError = undefined;
   kvPutError = undefined;
@@ -573,6 +575,22 @@ describe("createReviewConsumer", () => {
     expect(destroyCalls).toBe(1);
   });
 
+  test("token mint failure → failure row (stage=pipeline, GitHub auth not sandbox) + rethrow, destroy", async () => {
+    reset();
+    tokenError = new Error("installation token mint failed");
+    const db = createMigratedTestD1();
+    const consumer = createReviewConsumer(makeEnv({ DB: db as never }), undefined, testOverrides);
+
+    await expect(consumer(makeBatch(makePayload()))).rejects.toThrow("installation token mint failed");
+    expect(commenterCalls.filter((c) => c.op === "post")).toHaveLength(0);
+    expect(reviewCount(db)).toBe(0);
+    expect(failureRows(db)).toHaveLength(1);
+    // The mint rides the payload sha (head not yet resolved) and the
+    // "pipeline" stage — it sits between the sandbox window's edges.
+    expect(failureRows(db)[0]).toMatchObject({ stage: "pipeline", head_sha: SHA });
+    expect(destroyCalls).toBe(1);
+  });
+
   test("clone exitCode !== 0 → failure row (stage=sandbox) + rethrow, destroy, no post/insert", async () => {
     reset();
     cloneExitCode = 128;
@@ -637,7 +655,7 @@ describe("createReviewConsumer", () => {
     expect(warn).toBeDefined();
   });
 
-  test("numstat failure → no runner, no post, no insert, rethrow, destroy", async () => {
+  test("numstat failure → failure row (stage=sandbox) + no runner/post/insert, rethrow, destroy", async () => {
     reset();
     numstatExitCode = 1;
     runnerStdout = JSON.stringify(VALID_OUTPUT);
@@ -649,6 +667,9 @@ describe("createReviewConsumer", () => {
     expect(sandboxCalls.some((c) => c.cmd.includes("--input"))).toBe(false);
     expect(commenterCalls.filter((c) => c.op === "post")).toHaveLength(0);
     expect(reviewCount(db)).toBe(0);
+    expect(failureRows(db)).toHaveLength(1);
+    expect(failureRows(db)[0]).toMatchObject({ stage: "sandbox", head_sha: SHA });
+    expect(String(failureRows(db)[0]!.error)).toContain("numstat failed");
     expect(destroyCalls).toBe(1);
     const errLine = logLines.find((l) => l.level === "error");
     expect(errLine?.fields.idempotency_key).toBe(`idem:123:acme/widgets:42:${SHA}`);
@@ -872,7 +893,7 @@ describe("createReviewConsumer", () => {
     expect(errLine!.msg).toContain("runner failed");
   });
 
-  test("empty actual sha from rev-parse → no post/insert, rethrow, destroy", async () => {
+  test("empty actual sha from rev-parse → failure row (stage=sandbox) + no post/insert, rethrow, destroy", async () => {
     reset();
     resolvedSha = "";
     runnerStdout = JSON.stringify(VALID_OUTPUT);
@@ -885,6 +906,8 @@ describe("createReviewConsumer", () => {
 
     expect(commenterCalls.filter((c) => c.op === "post")).toHaveLength(0);
     expect(reviewCount(db)).toBe(0);
+    expect(failureRows(db)).toHaveLength(1);
+    expect(failureRows(db)[0]).toMatchObject({ stage: "sandbox", head_sha: SHA });
     expect(destroyCalls).toBe(1);
     const errLine = logLines.find((l) => l.level === "error");
     expect(errLine?.fields.sandbox_id).toMatch(/^review-/);

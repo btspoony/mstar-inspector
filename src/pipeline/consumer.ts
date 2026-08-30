@@ -996,12 +996,17 @@ async function processMessage(payload: ReviewJobPayload, deps: ProcessDeps): Pro
     // 1. Sandbox + installation token (created lazily; destroyed in finally).
     // AL-6 stage window: container acquisition + every in-sandbox step below
     // (clone/rev-parse/diff/numstat/input-write) classify "sandbox" until the
-    // runner step takes over.
-    failureStage = "sandbox";
+    // runner step takes over. The installation-token mint is a GITHUB AUTH
+    // call, not a sandbox step — it stays OUTSIDE the sandbox window so a
+    // mint failure (bad App credentials, GitHub auth outage) records
+    // stage "pipeline" and is never mis-tagged as a sandbox/infra failure.
     if (sandbox === null) {
+      failureStage = "sandbox";
       sandbox = await deps.getSandbox(deps.env.SANDBOX, sandboxId);
     }
+    failureStage = "pipeline";
     const token = await commenter.getInstallationToken(payload.installation_id);
+    failureStage = "sandbox";
     const cmds = buildGitOpsCommands({
       owner: payload.owner,
       repo: payload.repo,

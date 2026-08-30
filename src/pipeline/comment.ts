@@ -33,15 +33,21 @@
  * posts a summary-only "Review degraded" comment on a SEPARATE marker
  * family (`<!-- mstar-inspector:review-degraded:v1 round=N -->`) with an
  * independent round counter — the real review chain is untouched. The
- * body carries the parse error line plus a redacted (redactSecrets),
- * ≤1000-char raw-output excerpt behind a details collapse; both chains
- * share the scan/upsert/403-404-replan mechanics (upsertMarkerComment).
+ * body carries the redacted parse error line plus a redacted
+ * (redactSecrets), ≤1000-char raw-output excerpt behind a details
+ * collapse; both chains share the scan/upsert/403-404-replan mechanics
+ * (upsertMarkerComment).
  *
  * Secrets: APP_ID/PRIVATE_KEY come from the Worker env; the installation
  * token is minted in memory and never logged or stored (compass D).
  * Model-produced text (summary/finding bodies) is redacted BEFORE it reaches
  * this module (consumer choke point, SEC-02 fix) so a prompt-injected token
- * can never appear in the public review body or D1 raw_output.
+ * can never appear in the public review body or D1 raw_output. The DEGRADED
+ * chain is the exception: raw runner stdout and the parse error line arrive
+ * UNREDACTED (the consumer must not pre-cut them), so buildDegradedBody is
+ * the in-module redaction choke point — both are redactSecrets'd BEFORE the
+ * truncation cut, keeping a straddling or zod-`received`-embedded token out
+ * of the public body.
  */
 import { createAppAuth } from "@octokit/auth-app";
 import { Octokit } from "@octokit/rest";
@@ -270,8 +276,10 @@ export const DEGRADED_EXCERPT_LIMIT = 1000;
 export type DegradedBodyInput = {
   /**
    * The parseReviewOutput error (engine/zod violation vocabulary — it never
-   * embeds raw stdout). Clamped to the summary budget so the total body
-   * stays under REVIEW_BODY_LIMIT by construction.
+   * embeds raw stdout, but a zod/engine `received` span CAN echo a
+   * model-emitted token, e.g. an enum failure on `verdict: "ghp_…"`).
+   * Redacted via redactSecrets, then clamped to the summary budget so the
+   * total body stays under REVIEW_BODY_LIMIT by construction.
    */
   error: string;
   /** Raw runner stdout — redacted via redactSecrets, then truncated to the excerpt budget. */
@@ -283,16 +291,17 @@ export type DegradedBodyInput = {
 /**
  * Assemble the degraded body (AL-1): hidden marker line (degraded round),
  * the fixed "Review degraded" headline, the parse error line, then the raw
- * excerpt behind a details collapse. The excerpt is REDACTED FIRST
- * (redactSecrets — the raw-string face, redact.ts) and truncated AFTER, so
- * a secret straddling the 1000-char cut is already gone before the slice
- * (a truncated-before-redact secret could evade the patterns and leak a
- * partial token). The code fence is sized past the excerpt's longest
- * backtick run — runner output routinely prints fenced ```json blocks.
+ * excerpt behind a details collapse. BOTH the error line and the excerpt
+ * are REDACTED FIRST (redactSecrets — the raw-string face, redact.ts) and
+ * truncated AFTER, so a secret straddling the 1000-char cut is already gone
+ * before the slice (a truncated-before-redact secret could evade the
+ * patterns and leak a partial token). The code fence is sized past the
+ * excerpt's longest backtick run — runner output routinely prints fenced
+ * ```json blocks.
  */
 export function buildDegradedBody(input: DegradedBodyInput): string {
   const marker = `${DEGRADED_MARKER_PREFIX} round=${input.round} -->`;
-  const error = truncateSummary(input.error);
+  const error = truncateSummary(redactSecrets(input.error));
   const redacted = redactSecrets(input.rawOutput);
   const excerpt =
     redacted.length <= DEGRADED_EXCERPT_LIMIT
@@ -513,6 +522,8 @@ async function upsertMarkerComment(
   target: CommentTarget,
   planComment: (comments: ReviewComment[], excludeIds?: ReadonlySet<number>) => UpsertPlan,
   buildBody: (round: number) => string,
+  /** Which marker chain is posting — names the missing-surface error per chain. */
+  surface: "review" | "degraded",
 ): Promise<void> {
   const issues = octokit.rest?.issues;
   if (
@@ -522,7 +533,7 @@ async function upsertMarkerComment(
     typeof octokit.paginate !== "function"
   ) {
     throw new Error(
-      "octokit is missing rest.issues comment methods / paginate — cannot upsert the review comment; check the injected auth surface",
+      `octokit is missing rest.issues comment methods / paginate — cannot upsert the ${surface} comment; check the injected auth surface`,
     );
   }
   const comments = await octokit.paginate(issues.listComments, {
@@ -575,8 +586,12 @@ async function upsertMarkerComment(
  * prompt-injectable and is rendered as text only (SEC-01, structural).
  */
 export async function postReviewWithOctokit(octokit: PostOctokit, input: PostReviewInput): Promise<void> {
-  await upsertMarkerComment(octokit, input, planUpsert, (round) =>
-    buildUpsertBody(input.output, input.omittedFindings ?? 0, round, input.headSha),
+  await upsertMarkerComment(
+    octokit,
+    input,
+    planUpsert,
+    (round) => buildUpsertBody(input.output, input.omittedFindings ?? 0, round, input.headSha),
+    "review",
   );
 }
 
@@ -585,7 +600,7 @@ export type PostDegradedInput = {
   owner: string;
   repo: string;
   prNumber: number;
-  /** The parseReviewOutput error line (posted verbatim after the headline). */
+  /** The parseReviewOutput error line (redacted + truncated inside buildDegradedBody). */
   error: string;
   /** Raw runner stdout — redacted + truncated inside buildDegradedBody. */
   rawOutput: string;
@@ -599,8 +614,12 @@ export type PostDegradedInput = {
  * and its round counter stay independent.
  */
 export async function postDegradedWithOctokit(octokit: PostOctokit, input: PostDegradedInput): Promise<void> {
-  await upsertMarkerComment(octokit, input, planDegradedUpsert, (round) =>
-    buildDegradedBody({ error: input.error, rawOutput: input.rawOutput, round }),
+  await upsertMarkerComment(
+    octokit,
+    input,
+    planDegradedUpsert,
+    (round) => buildDegradedBody({ error: input.error, rawOutput: input.rawOutput, round }),
+    "degraded",
   );
 }
 
