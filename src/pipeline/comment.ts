@@ -48,11 +48,30 @@
  * the in-module redaction choke point — both are redactSecrets'd BEFORE the
  * truncation cut, keeping a straddling or zod-`received`-embedded token out
  * of the public body.
+ *
+ * Line comments (plan 18 Task 3 / architect AL-3, layered delivery):
+ * qualifying findings (file_path non-empty, line_end ≥ 1, inside a
+ * right-side hunk of the prefetched PR diff) are anchored as ONE
+ * pulls.createReview call with `event: "COMMENT"` (D4 permanent event lock —
+ * never APPROVE/REQUEST_CHANGES) and `comments: [{path, side: "RIGHT",
+ * line, body}]`. The top-level `body` is REQUIRED for COMMENT events
+ * (installed octokit schema) and is a short marker line only
+ * (`mstar-inspector line comments · round N · <short sha>`) — never a copy
+ * of the overall review body. The consumer prefetches the diff via
+ * `pulls.get` + `mediaType: { format: "diff" }` on this module's extended
+ * PostOctokit surface (pattern mirrored from src/worker/diff.ts:226-256,
+ * NOT imported — pipeline ↛ worker isolation holds), prefilters with the
+ * pure `parseDiffHunkRanges` (createReview is atomic: one invalid line →
+ * whole request 422), attempts the review, and on residual 422/any Octokit
+ * error falls back to overall-comment-only (structured log, never throws
+ * after the overall comment succeeded). Empty qualifying set → zero API
+ * calls. No `start_line` this iteration; old rounds' line comments stay in
+ * place.
  */
 import { createAppAuth } from "@octokit/auth-app";
 import { Octokit } from "@octokit/rest";
 import { MERGE_CLASSES, REVIEW_EMOJI } from "@mstar-harness/engine";
-import type { ReviewFinding, ReviewOutput } from "../review/schema";
+import { FINDING_BODY_MAX, type ReviewFinding, type ReviewOutput } from "../review/schema";
 import { redactSecrets } from "./redact";
 
 /** summary_md budget for the overall review body (plan Task 3). */
@@ -456,9 +475,11 @@ export type ReviewCommenter = {
   /**
    * Upsert one overall review comment (Issues comments API; T5): create with
    * round=1 on a miss, PATCH the app's own marker comment with round=N+1 on
-   * a hit. No line comments, no review events.
+   * a hit. Returns the round just posted — the consumer pins the
+   * line-comments marker body (plan 18 Task 3) to the SAME round, single
+   * source: the upsert scan.
    */
-  postReview(input: PostReviewInput): Promise<void>;
+  postReview(input: PostReviewInput): Promise<number>;
   /**
    * Upsert the degraded comment (plan 18 Task 2 / AL-1): the parse-fail
    * visibility chain — a SEPARATE marker family (`review-degraded:v1`) with
@@ -467,6 +488,20 @@ export type ReviewCommenter = {
    * structured log line, never a mask for the ack.
    */
   postDegraded(input: PostDegradedInput): Promise<void>;
+  /**
+   * Fetch the PR diff as a unified-diff string (plan 18 Task 3 / AL-3):
+   * `pulls.get` + `mediaType: { format: "diff" }` — the hunk prefilter input.
+   * Throws on a missing surface or a non-diff response; the consumer treats
+   * any failure as "prefetch failed → base-filter attempt".
+   */
+  fetchPrDiff(input: FetchPrDiffInput): Promise<string>;
+  /**
+   * Post the line-comments review (plan 18 Task 3 / AL-3): ONE
+   * pulls.createReview with `event: "COMMENT"` (D4 event lock) and the
+   * pre-filtered qualifying findings as `comments[]`. Throws on any Octokit
+   * error — the consumer's never-throw guard is the catch site.
+   */
+  postLineComments(input: PostLineCommentsInput): Promise<void>;
 };
 /**
  * Structural auth surface for the createAppAuth strategy. `AuthInterface` is
@@ -495,6 +530,17 @@ export type PostOctokit = {
       updateComment: (parameters: Record<string, unknown>) => Promise<unknown>;
       createComment: (parameters: Record<string, unknown>) => Promise<unknown>;
     };
+    /**
+     * Pulls surface for plan 18 Task 3 line comments: `get` with
+     * `mediaType: { format: "diff" }` (diff prefetch for the hunk prefilter)
+     * and `createReview` (COMMENT-event delivery). Optional and per-method
+     * guarded — the marker-comment chains never touch it, and the
+     * line-comment path fails soft through the consumer's catch.
+     */
+    pulls?: {
+      get?: (parameters: Record<string, unknown>) => Promise<{ data: unknown }>;
+      createReview?: (parameters: Record<string, unknown>) => Promise<unknown>;
+    };
   };
 };
 
@@ -515,7 +561,9 @@ type CommentTarget = { owner: string; repo: string; prNumber: number };
  * the next bot marker wins, else a fresh round=1 is created. Each replan
  * permanently excludes one id, so the loop always terminates). The chain
  * the scan matches is the caller's `planComment` choice — the recovery
- * semantics must never drift between the two chains.
+ * semantics must never drift between the two chains. Returns the round
+ * just posted (the caller's `buildBody` round) — the line-comments marker
+ * (plan 18 Task 3) pins itself to the review chain's round.
  */
 async function upsertMarkerComment(
   octokit: PostOctokit,
@@ -524,7 +572,7 @@ async function upsertMarkerComment(
   buildBody: (round: number) => string,
   /** Which marker chain is posting — names the missing-surface error per chain. */
   surface: "review" | "degraded",
-): Promise<void> {
+): Promise<number> {
   const issues = octokit.rest?.issues;
   if (
     !issues?.listComments ||
@@ -553,7 +601,7 @@ async function upsertMarkerComment(
         issue_number: target.prNumber,
         body,
       });
-      return;
+      return planned.round;
     }
     try {
       await issues.updateComment({
@@ -562,7 +610,7 @@ async function upsertMarkerComment(
         comment_id: planned.commentId,
         body,
       });
-      return;
+      return planned.round;
     } catch (err) {
       // A RequestError from octokit carries `.status` (duck-typed so the
       // mock-octokit tests can reject with a plain { status: N }).
@@ -584,9 +632,12 @@ async function upsertMarkerComment(
  *
  * The Issues comments API has no review event — the model verdict is
  * prompt-injectable and is rendered as text only (SEC-01, structural).
+ *
+ * Returns the round just posted (plan 18 Task 3: the line-comments marker
+ * body carries `round N` from THIS source, never a re-scan).
  */
-export async function postReviewWithOctokit(octokit: PostOctokit, input: PostReviewInput): Promise<void> {
-  await upsertMarkerComment(
+export async function postReviewWithOctokit(octokit: PostOctokit, input: PostReviewInput): Promise<number> {
+  return upsertMarkerComment(
     octokit,
     input,
     planUpsert,
@@ -621,6 +672,237 @@ export async function postDegradedWithOctokit(octokit: PostOctokit, input: PostD
     (round) => buildDegradedBody({ error: input.error, rawOutput: input.rawOutput, round }),
     "degraded",
   );
+}
+
+// ---------------------------------------------------------------------------
+// Line comments (plan 18 Task 3 / architect AL-3, layered delivery): a pure
+// hunk-range parser over the prefetched PR diff, the layered qualifying
+// filter, and the pulls.createReview COMMENT poster. The consumer
+// orchestrates prefetch → filter → attempt; THIS module never decides
+// fallback policy — it throws and the consumer's never-throw guard logs
+// `line_comments_fallback=true` and proceeds.
+// ---------------------------------------------------------------------------
+
+/** Hunk header: `@@ -<oldStart>[,<oldCount>] +<newStart>[,<newCount>] @@`. */
+const HUNK_HEADER_RE = /^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@/;
+
+/**
+ * The b-side (new-file) path of a `+++ ` header line: `/dev/null` (deleted
+ * file) → null; the `b/` prefix is stripped; C-style-quoted paths (spaces or
+ * special chars) are unquoted best-effort — a path we cannot unquote simply
+ * never matches a finding's file_path and the finding is excluded.
+ */
+function bSidePath(target: string): string | null {
+  if (target === "/dev/null") return null;
+  let path = target.startsWith("b/") ? target.slice(2) : target;
+  if (path.startsWith('"') && path.endsWith('"')) {
+    try {
+      path = JSON.parse(path) as string;
+    } catch {
+      /* keep the raw path — exact-match against findings still applies */
+    }
+  }
+  return path;
+}
+
+/**
+ * Parse a unified diff into right-side (b-side / new-file) line ranges per
+ * path: for every `@@ -a,b +c,d @@` hunk the covered new-file range is
+ * `[c, c + d - 1]` (d omitted → 1). Multi-file diffs, renames (the `+++ b/…`
+ * header carries the NEW path), and multiple hunks per file are all
+ * supported; binary files (no hunks) and deleted files (`+++ /dev/null`)
+ * end up with no ranges → excluded by the filter.
+ *
+ * Hunk bodies are consumed by COUNT (old-side and new-side line tallies
+ * from the header), not by prefix guessing — an added content line starting
+ * with `++ ` can otherwise masquerade as a `+++ ` file header.
+ */
+export function parseDiffHunkRanges(diff: string): Map<string, Array<[number, number]>> {
+  const rangesByPath = new Map<string, Array<[number, number]>>();
+  /** Ranges of the file whose hunks are being read; null = between files. */
+  let current: Array<[number, number]> | null = null;
+  /** Remaining hunk-body lines (old/new tallies); 0/0 = between hunks. */
+  let remainingOld = 0;
+  let remainingNew = 0;
+  for (const line of diff.split("\n")) {
+    if (remainingOld > 0 || remainingNew > 0) {
+      // Inside a hunk body: consume counted lines; header-like content lines
+      // (e.g. an added "++ x" rendered as "+++ x") are NEVER misparsed.
+      const marker = line.charAt(0);
+      if (marker === " " || marker === "-") remainingOld -= 1;
+      if (marker === " " || marker === "+") remainingNew -= 1;
+      // "\" ("\ No newline at end of file") consumes neither tally.
+      continue;
+    }
+    if (line.startsWith("diff --git ")) {
+      current = null; // wait for the +++ header to bind the b-side path
+      continue;
+    }
+    if (line.startsWith("+++ ")) {
+      const path = bSidePath(line.slice(4).trim());
+      if (path === null) {
+        current = null;
+        continue;
+      }
+      let ranges = rangesByPath.get(path);
+      if (ranges === undefined) {
+        ranges = [];
+        rangesByPath.set(path, ranges);
+      }
+      current = ranges;
+      continue;
+    }
+    if (current === null) continue;
+    const hunk = HUNK_HEADER_RE.exec(line);
+    if (hunk !== null) {
+      const newStart = Number(hunk[3]);
+      const newCount = hunk[4] === undefined ? 1 : Number(hunk[4]);
+      current.push([newStart, newStart + newCount - 1]);
+      remainingOld = hunk[2] === undefined ? 1 : Number(hunk[2]);
+      remainingNew = newCount;
+    }
+  }
+  return rangesByPath;
+}
+
+/**
+ * Layered qualifying filter (AL-3):
+ *   - base layer (always): `file_path` non-empty AND `line_end` an integer
+ *     ≥ 1 — findings without a position can never anchor;
+ *   - hunk layer (only when the prefetched diff is available): the b-side
+ *     path must exact-match a diff file AND `line_end` must fall inside one
+ *     of its right-side hunk ranges (binary/deleted files have no right
+ *     hunks → excluded).
+ * With `diff` undefined (prefetch failed) the base layer alone decides —
+ * draft-attempt semantics: GitHub's own validation is the backstop.
+ */
+export function filterLineCommentFindings(findings: ReviewFinding[], diff?: string): ReviewFinding[] {
+  const base = findings.filter(
+    (finding) =>
+      typeof finding.file_path === "string" &&
+      finding.file_path !== "" &&
+      typeof finding.line_end === "number" &&
+      finding.line_end >= 1,
+  );
+  if (diff === undefined) return base;
+  const hunksByPath = parseDiffHunkRanges(diff);
+  return base.filter((finding) => {
+    const ranges = hunksByPath.get(finding.file_path ?? "");
+    if (ranges === undefined) return false;
+    const line = finding.line_end ?? 0;
+    return ranges.some(([start, end]) => line >= start && line <= end);
+  });
+}
+
+/**
+ * One line-comment body: title + merge-class tag (engine emoji + class
+ * verbatim, the renderFindings vocabulary) + finding body, clamped to the
+ * FINDING_BODY_MAX budget (clampFindingSizes bounds title/body
+ * individually; the ASSEMBLED comment can still exceed it).
+ */
+export function buildLineCommentBody(finding: ReviewFinding): string {
+  const tag = `${REVIEW_EMOJI[finding.mergeClass]} ${finding.mergeClass}`;
+  const body = `**${finding.title}** · ${tag}\n\n${finding.body}`;
+  return body.length <= FINDING_BODY_MAX ? body : `${body.slice(0, FINDING_BODY_MAX - 1)}…`;
+}
+
+export type FetchPrDiffInput = {
+  installationId: number;
+  owner: string;
+  repo: string;
+  prNumber: number;
+};
+
+export type PostLineCommentsInput = {
+  installationId: number;
+  owner: string;
+  repo: string;
+  prNumber: number;
+  headSha: string;
+  /**
+   * The round the overall-comment upsert just posted (postReview's return
+   * value) — the required top-level marker body pins itself to it.
+   */
+  round: number;
+  /** Qualifying findings, pre-filtered by the consumer (≥ 1 or NO call). */
+  findings: ReviewFinding[];
+};
+
+/**
+ * Extract the unified-diff string from a `pulls.get` diff-mediaType response
+ * (mirrored from src/worker/diff.ts extractDiff — pipeline ↛ worker
+ * isolation holds): octokit returns the diff as `data` (string) or nested
+ * `data.data`. A non-diff response is a prefetch failure — the consumer
+ * falls back to the base-filter attempt.
+ */
+function extractDiffText(data: unknown): string {
+  const candidate = typeof data === "string" ? data : (data as { data?: unknown } | null)?.data;
+  if (typeof candidate !== "string" || candidate.length === 0 || !candidate.startsWith("diff --git")) {
+    throw new Error(
+      "pulls.get did not return a unified diff (expected non-empty string starting with 'diff --git'); check the Accept/mediaType header",
+    );
+  }
+  return candidate;
+}
+
+/**
+ * Fetch the PR diff against a caller-provided octokit (plan 18 Task 3):
+ * `pulls.get` with `mediaType: { format: "diff" }` — the
+ * GitHub-schema-documented pattern for validating review-comment positions
+ * (same-mode precedent: src/worker/diff.ts:226-256, pattern only).
+ */
+export async function fetchPrDiffWithOctokit(octokit: PostOctokit, input: FetchPrDiffInput): Promise<string> {
+  const pullsGet = octokit.rest?.pulls?.get;
+  if (!pullsGet) {
+    throw new Error(
+      "octokit is missing rest.pulls.get — cannot fetch the PR diff for line comments; check the injected auth surface",
+    );
+  }
+  const response = await pullsGet({
+    owner: input.owner,
+    repo: input.repo,
+    pull_number: input.prNumber,
+    mediaType: { format: "diff" },
+  });
+  return extractDiffText(response.data);
+}
+
+/**
+ * Post the line-comments review against a caller-provided octokit (plan 18
+ * Task 3 / AL-3): ONE pulls.createReview, `event: "COMMENT"` (D4 permanent
+ * event lock — never APPROVE/REQUEST_CHANGES), `commit_id` pinned to the
+ * review's head sha, per-comment `{path, side: "RIGHT", line: line_end,
+ * body}`. The top-level `body` is REQUIRED for COMMENT events (installed
+ * octokit schema: "Required when using REQUEST_CHANGES or COMMENT") and is
+ * a marker short line only — never a copy of the overall review body.
+ * Empty qualifying set → zero API calls (byte-compat). No `start_line`
+ * this iteration; old rounds' line comments stay in place.
+ */
+export async function postLineCommentsWithOctokit(
+  octokit: PostOctokit,
+  input: PostLineCommentsInput,
+): Promise<void> {
+  if (input.findings.length === 0) return;
+  const createReview = octokit.rest?.pulls?.createReview;
+  if (!createReview) {
+    throw new Error(
+      "octokit is missing rest.pulls.createReview — cannot post line comments; check the injected auth surface",
+    );
+  }
+  await createReview({
+    owner: input.owner,
+    repo: input.repo,
+    pull_number: input.prNumber,
+    commit_id: input.headSha,
+    event: "COMMENT",
+    body: `mstar-inspector line comments · round ${input.round} · ${input.headSha.slice(0, 7)}`,
+    comments: input.findings.map((finding) => ({
+      path: finding.file_path,
+      side: "RIGHT",
+      line: finding.line_end,
+      body: buildLineCommentBody(finding),
+    })),
+  });
 }
 
 /**
@@ -669,10 +951,16 @@ export function createReviewCommenter(env: CommenterEnv): ReviewCommenter {
       return installation.token;
     },
     async postReview(input) {
-      await postReviewWithOctokit(await getOctokit(input.installationId), input);
+      return postReviewWithOctokit(await getOctokit(input.installationId), input);
     },
     async postDegraded(input) {
       await postDegradedWithOctokit(await getOctokit(input.installationId), input);
+    },
+    async fetchPrDiff(input) {
+      return fetchPrDiffWithOctokit(await getOctokit(input.installationId), input);
+    },
+    async postLineComments(input) {
+      await postLineCommentsWithOctokit(await getOctokit(input.installationId), input);
     },
   };
 }

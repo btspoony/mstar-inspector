@@ -63,7 +63,12 @@ import { createArtifactStore, type D1ArtifactStore } from "../store/artifact-sto
 import { createFailureStore, type FailureStage, type FailureStore } from "../store/failure-store";
 import { getSandbox, type ReviewSandbox } from "./sandbox";
 import { buildGitOpsCommands, writeJsonCommand } from "./gitops";
-import { createReviewCommenter, type CommenterEnv, type ReviewCommenter } from "./comment";
+import {
+  createReviewCommenter,
+  filterLineCommentFindings,
+  type CommenterEnv,
+  type ReviewCommenter,
+} from "./comment";
 import { PROVIDERS, pickProviderKeys, providerEnvName } from "./providers";
 // Per-App credential resolution (plan 13 Task 2, lock L4): the consumer is a
 // sanctioned reader of the dashboard store leaves (apps-store reads the
@@ -223,6 +228,13 @@ export type ConsumerLogFields = {
    * wholesale ("fallback": zero App keys + no App model chain).
    */
   config_source?: "app" | "fallback";
+  /**
+   * Plan 18 Task 3 (AL-3): the line-comments createReview FAILED after the
+   * overall comment landed (residual 422 position validation or any other
+   * Octokit error) — the review degraded to overall-comment-only for this
+   * round. The overall comment + D1 row + KV done are unaffected.
+   */
+  line_comments_fallback?: boolean;
 };
 
 export type ConsumerLog = {
@@ -1231,7 +1243,8 @@ async function processMessage(payload: ReviewJobPayload, deps: ProcessDeps): Pro
     // and PATCHes it (round=N+1) on a hit — one comment per PR, never a new
     // review per round. The verdict is rendered as text only (SEC-01).
     // Same resolved commenter instance as the token mint above (lock L4).
-    await commenter.postReview({
+    // Returns the round just posted — the line-comments marker pins to it.
+    const round = await commenter.postReview({
       installationId: payload.installation_id,
       owner: payload.owner,
       repo: payload.repo,
@@ -1240,6 +1253,60 @@ async function processMessage(payload: ReviewJobPayload, deps: ProcessDeps): Pro
       output,
       omittedFindings: capped.omitted,
     });
+
+    // 11b. Line comments (plan 18 Task 3, architect AL-3 layered delivery) —
+    // AFTER the overall-comment upsert succeeded and NEVER throwing: any
+    // Octokit error → structured log + continue (the overall comment, KV
+    // done and D1 row below are unaffected). Ordering per brief: upsert →
+    // diff prefetch → createReview → done; no retry (next round re-anchors).
+    //
+    // Layered filter: base = file_path non-empty AND line_end ≥ 1; with the
+    // prefetched diff, additionally b-side path exact-match + line_end inside
+    // a right-side hunk range (createReview is ATOMIC — one invalid line →
+    // the whole request 422s and every line comment is lost, so prefilter).
+    // Prefetch failure → base-filter attempt (draft semantics; GitHub
+    // validates). Residual 422 (race: fetched diff vs pinned commit_id) or
+    // any other createReview error → line_comments_fallback=true log and
+    // overall-comment-only for this round. Zero qualifying findings → zero
+    // API calls (byte-compat; the diff is not even prefetched).
+    const lineCommentable = filterLineCommentFindings(output.findings);
+    if (lineCommentable.length > 0) {
+      let qualifying = lineCommentable;
+      try {
+        const diff = await commenter.fetchPrDiff({
+          installationId: payload.installation_id,
+          owner: payload.owner,
+          repo: payload.repo,
+          prNumber: payload.pr_number,
+        });
+        qualifying = filterLineCommentFindings(lineCommentable, diff);
+      } catch (err) {
+        const detail = err instanceof Error ? err.message : String(err);
+        deps.log.warn(
+          fields,
+          `line-comments diff prefetch failed — attempting the base-filtered set unfiltered: ${detail}`,
+        );
+      }
+      if (qualifying.length > 0) {
+        try {
+          await commenter.postLineComments({
+            installationId: payload.installation_id,
+            owner: payload.owner,
+            repo: payload.repo,
+            prNumber: payload.pr_number,
+            headSha,
+            round,
+            findings: qualifying,
+          });
+        } catch (err) {
+          const detail = err instanceof Error ? err.message : String(err);
+          deps.log.warn(
+            { ...fields, line_comments_fallback: true },
+            `line comments failed — overall comment already posted, continuing overall-only: ${detail}`,
+          );
+        }
+      }
+    }
 
     // 12. KV done-state immediately after the comment lands, BEFORE the D1
     // insert (B3): if the put then fails, a retry hits the KV done key and

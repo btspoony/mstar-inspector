@@ -146,9 +146,18 @@ const legacyCommenter: ReviewCommenter = {
   }),
   postReview: mock(async () => {
     legacyCalls.push({ op: "post" });
+    return 1;
   }),
   postDegraded: mock(async () => {
     legacyCalls.push({ op: "degrade" });
+  }),
+  // Plan 18 T3 line comments: VALID_OUTPUT has no findings → the base filter
+  // is empty → these are never called (byte-compat).
+  fetchPrDiff: mock(async () => {
+    throw new Error("unexpected: no qualifying findings → no diff prefetch");
+  }),
+  postLineComments: mock(async () => {
+    throw new Error("unexpected: no qualifying findings → no line comments");
   }),
 };
 
@@ -163,9 +172,17 @@ const appCommenterFactory = mock((cred: CommenterEnv): ReviewCommenter => {
     }),
     postReview: mock(async () => {
       appCalls.push({ instance, call: { op: "post" } });
+      return 1;
     }),
     postDegraded: mock(async () => {
       appCalls.push({ instance, call: { op: "degrade" } });
+    }),
+    // Plan 18 T3 line comments: VALID_OUTPUT has no findings → never called.
+    fetchPrDiff: mock(async () => {
+      throw new Error("unexpected: no qualifying findings → no diff prefetch");
+    }),
+    postLineComments: mock(async () => {
+      throw new Error("unexpected: no qualifying findings → no line comments");
     }),
   };
 });

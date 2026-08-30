@@ -457,9 +457,10 @@ describe("postReview wiring (mock octokit, SG-001)", () => {
       const createReview = mock(async () => {
         throw new Error("pulls.createReview must never be called (SEC-01: COMMENT-only posting)");
       });
-      // No PostOctokit annotation: `pulls` is deliberately NOT part of the
-      // poster's consumed surface — a variable (not a fresh literal) keeps
-      // the extra trap assignable while proving the poster never touches it.
+      // `pulls` sits on PostOctokit for plan 18 T3 line comments, but the
+      // OVERALL poster must never touch it — a variable (not a fresh
+      // literal) keeps the extra trap assignable while proving postReview
+      // stays on the Issues comments API.
       const withPulls = { ...octokit, rest: { ...octokit.rest, pulls: { createReview } } };
       await postReviewWithOctokit(withPulls, { ...input, output: deepOutput });
 

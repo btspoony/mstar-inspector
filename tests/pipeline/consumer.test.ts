@@ -30,6 +30,11 @@
  *     (runner | sandbox | pipeline) + unchanged rethrow → retry/DLQ
  *   - comment failure → failure row (stage=pipeline) + rethrow, destroy
  *   - finally destroy on every path
+ *   - line comments (plan 18 T3 / AL-3): upsert → diff prefetch →
+ *     createReview ordering; hunk prefilter; prefetch failure → base-filter
+ *     attempt; residual 422/any error → line_comments_fallback log +
+ *     continue (never throws after the overall comment landed); zero
+ *     qualifying findings → zero API calls
  */
 
 import { describe, expect, mock, test } from "bun:test";
@@ -127,6 +132,28 @@ let tokenResult = "ghs_installation_token";
 let tokenError: Error | undefined;
 let commentError: Error | undefined;
 let degradeError: Error | undefined;
+// Plan 18 T3 line comments: the round postReview returns (pinned into the
+// line-comments marker body), the prefetched diff, and per-method errors.
+let postRound = 1;
+let diffError: Error | undefined;
+let lineCommentsError: Error | undefined;
+/** Default prefetched diff: a src/auth.ts hunk whose right range covers line 21. */
+const VALID_DIFF = [
+  "diff --git a/src/auth.ts b/src/auth.ts",
+  "index 1111111..2222222 100644",
+  "--- a/src/auth.ts",
+  "+++ b/src/auth.ts",
+  "@@ -18,4 +18,6 @@ export function verify() {",
+  " const header = req.headers;",
+  " const claims = decode(token);",
+  "-if (claims.exp < Date.now() / 1000) throw 401;",
+  "+if (!Number.isInteger(claims.exp)) throw 401;",
+  "+if (claims.exp < Math.floor(Date.now() / 1000)) throw 401;",
+  "+audit(claims.sub);",
+  " return claims;",
+  "",
+].join("\n");
+let diffResult: string = VALID_DIFF;
 
 const fakeCommenter: ReviewCommenter = {
   getInstallationToken: mock(async (installationId: number) => {
@@ -137,10 +164,20 @@ const fakeCommenter: ReviewCommenter = {
   postReview: mock(async (input: unknown) => {
     commenterCalls.push({ op: "post", args: [input] });
     if (commentError) throw commentError;
+    return postRound;
   }),
   postDegraded: mock(async (input: unknown) => {
     commenterCalls.push({ op: "degrade", args: [input] });
     if (degradeError) throw degradeError;
+  }),
+  fetchPrDiff: mock(async (input: unknown) => {
+    commenterCalls.push({ op: "fetch-diff", args: [input] });
+    if (diffError) throw diffError;
+    return diffResult;
+  }),
+  postLineComments: mock(async (input: unknown) => {
+    commenterCalls.push({ op: "line-comments", args: [input] });
+    if (lineCommentsError) throw lineCommentsError;
   }),
 };
 
@@ -279,6 +316,10 @@ function reset(): void {
   tokenError = undefined;
   commentError = undefined;
   degradeError = undefined;
+  postRound = 1;
+  diffError = undefined;
+  lineCommentsError = undefined;
+  diffResult = VALID_DIFF;
   kvPutError = undefined;
   kvGetValue = null;
   kvGuardValue = null;
@@ -377,8 +418,11 @@ describe("createReviewConsumer", () => {
       timeout: 600_000,
     });
     // Token minted once (shared for clone/diff); post happens BEFORE insert.
+    // Plan 18 T3 ordering: overall-comment upsert → diff prefetch →
+    // line-comments review (the qualifying finding anchors at line 21,
+    // inside VALID_DIFF's right hunk [18,23]).
     expect(commenterCalls.filter((c) => c.op === "token")).toHaveLength(1);
-    expect(commenterCalls.map((c) => c.op)).toEqual(["token", "post"]);
+    expect(commenterCalls.map((c) => c.op)).toEqual(["token", "post", "fetch-diff", "line-comments"]);
     expect(commenterCalls[1]!.args[0]).toMatchObject({
       installationId: 123,
       owner: "acme",
@@ -386,6 +430,17 @@ describe("createReviewConsumer", () => {
       prNumber: 42,
       headSha: SHA,
       output: VALID_OUTPUT,
+    });
+    // The line-comments input: same coordinates, the round the upsert
+    // returned, and the capped findings array (B4 — same array as post/put).
+    expect(commenterCalls[3]!.args[0]).toMatchObject({
+      installationId: 123,
+      owner: "acme",
+      repo: "widgets",
+      prNumber: 42,
+      headSha: SHA,
+      round: 1,
+      findings: VALID_OUTPUT.findings,
     });
 
     // The review row + findings landed in the real D1 double.
@@ -1429,5 +1484,136 @@ describe("createReviewConsumer", () => {
         expect(delay).toBeLessThan(reviewGuardTtlSeconds(level));
       }
     }
+  });
+});
+
+describe("line comments (plan 18 Task 3 / AL-3 layered delivery)", () => {
+  test("no qualifying findings (no position) → zero line-comment API calls (byte-compat)", async () => {
+    reset();
+    runnerStdout = JSON.stringify({
+      ...VALID_OUTPUT,
+      findings: [
+        { mergeClass: "nit", title: "Repo-wide nit", body: "No location." },
+        { mergeClass: "nit", file_path: "src/auth.ts", title: "No line", body: "Path only." },
+        { mergeClass: "nit", file_path: "src/auth.ts", line_end: 0, title: "Zero line", body: "Line 0." },
+      ],
+    });
+    const db = createMigratedTestD1();
+    const consumer = createReviewConsumer(makeEnv({ DB: db as never }), testLog, testOverrides);
+
+    await consumer(makeBatch(makePayload()));
+
+    // Overall comment + persistence all landed; the diff is NOT even
+    // prefetched when the base filter is empty (no extra API call).
+    expect(commenterCalls.map((c) => c.op)).toEqual(["token", "post"]);
+    expect(reviewCount(db)).toBe(1);
+    expect(kvPuts).toHaveLength(1);
+    expect(destroyCalls).toBe(1);
+  });
+
+  test("hunk-external findings are excluded; all excluded → prefetch ran but no createReview call", async () => {
+    reset();
+    // VALID_DIFF covers src/auth.ts right range [18,23]: line 100 is
+    // outside every hunk; docs/readme.md is not in the diff at all.
+    runnerStdout = JSON.stringify({
+      ...VALID_OUTPUT,
+      findings: [
+        { mergeClass: "must-fix", file_path: "src/auth.ts", line_start: 100, line_end: 100, title: "Outside", body: "B." },
+        { mergeClass: "nit", file_path: "docs/readme.md", line_start: 5, line_end: 5, title: "Other file", body: "B." },
+        { mergeClass: "should-fix", file_path: "src/auth.ts", line_start: 21, line_end: 21, title: "Inside", body: "B." },
+      ],
+    });
+    const db = createMigratedTestD1();
+    const consumer = createReviewConsumer(makeEnv({ DB: db as never }), testLog, testOverrides);
+
+    await consumer(makeBatch(makePayload()));
+
+    expect(commenterCalls.map((c) => c.op)).toEqual(["token", "post", "fetch-diff", "line-comments"]);
+    const lineInput = commenterCalls[3]!.args[0] as { findings: Array<{ title: string; line_end?: number }> };
+    // Only the hunk-internal finding survives the prefilter.
+    expect(lineInput.findings.map((f) => f.title)).toEqual(["Inside"]);
+
+    // And when NOTHING survives, the createReview call is skipped entirely.
+    reset();
+    runnerStdout = JSON.stringify({
+      ...VALID_OUTPUT,
+      findings: [
+        { mergeClass: "must-fix", file_path: "src/auth.ts", line_start: 100, line_end: 100, title: "Outside", body: "B." },
+      ],
+    });
+    const db2 = createMigratedTestD1();
+    const consumer2 = createReviewConsumer(makeEnv({ DB: db2 as never }), testLog, testOverrides);
+    await consumer2(makeBatch(makePayload()));
+    expect(commenterCalls.map((c) => c.op)).toEqual(["token", "post", "fetch-diff"]);
+    expect(reviewCount(db2)).toBe(1);
+  });
+
+  test("diff prefetch failure → base-filter attempt (draft semantics), warn without the fallback flag", async () => {
+    reset();
+    runnerStdout = JSON.stringify(VALID_OUTPUT);
+    diffError = new Error("diff fetch 500");
+    const db = createMigratedTestD1();
+    const consumer = createReviewConsumer(makeEnv({ DB: db as never }), testLog, testOverrides);
+
+    await consumer(makeBatch(makePayload()));
+
+    // The createReview attempt still runs, on the UNFILTERED base set.
+    expect(commenterCalls.map((c) => c.op)).toEqual(["token", "post", "fetch-diff", "line-comments"]);
+    const lineInput = commenterCalls[3]!.args[0] as { findings: unknown[] };
+    expect(lineInput.findings).toHaveLength(1);
+    // The prefetch failure is a plain warn — NOT a fallback (the attempt
+    // proceeded), and the review completed normally.
+    const warn = logLines.find((l) => l.level === "warn" && l.msg.includes("diff prefetch failed"));
+    expect(warn).toBeDefined();
+    expect(warn!.fields.line_comments_fallback).toBeUndefined();
+    expect(logLines.some((l) => l.fields.line_comments_fallback === true)).toBe(false);
+    expect(reviewCount(db)).toBe(1);
+    expect(kvPuts).toHaveLength(1);
+    expect(destroyCalls).toBe(1);
+  });
+
+  test("residual 422 / network error on createReview → line_comments_fallback log + continue, never throws", async () => {
+    for (const failure of [
+      Object.assign(new Error("Validation Failed: line is not part of the diff"), { status: 422 }),
+      new Error("socket hangup"),
+    ]) {
+      reset();
+      runnerStdout = JSON.stringify(VALID_OUTPUT);
+      lineCommentsError = failure;
+      const db = createMigratedTestD1();
+      const consumer = createReviewConsumer(makeEnv({ DB: db as never }), testLog, testOverrides);
+
+      // NEVER throws after the overall comment succeeded: the run resolves,
+      // the message acks, KV done + D1 row land exactly as without line
+      // comments.
+      await consumer(makeBatch(makePayload()));
+
+      expect(commenterCalls.map((c) => c.op)).toEqual(["token", "post", "fetch-diff", "line-comments"]);
+      const fallback = logLines.find((l) => l.fields.line_comments_fallback === true);
+      expect(fallback).toBeDefined();
+      expect(fallback!.level).toBe("warn");
+      expect(fallback!.fields.idempotency_key).toBe(`idem:123:acme/widgets:42:${SHA}`);
+      expect(reviewCount(db)).toBe(1);
+      expect(kvPuts).toEqual([
+        { key: `idem:123:acme/widgets:42:${SHA}`, value: "done", options: { expirationTtl: 86400 } },
+      ]);
+      // The ok path resolves silently (queue auto-ack) — the point is that
+      // NOTHING retried: the failure never escaped processMessage.
+      expect(messageRetryCalls).toHaveLength(0);
+      expect(destroyCalls).toBe(1);
+    }
+  });
+
+  test("the line-comments round pins to the round the overall upsert returned", async () => {
+    reset();
+    runnerStdout = JSON.stringify(VALID_OUTPUT);
+    postRound = 4;
+    const db = createMigratedTestD1();
+    const consumer = createReviewConsumer(makeEnv({ DB: db as never }), testLog, testOverrides);
+
+    await consumer(makeBatch(makePayload()));
+
+    const lineInput = commenterCalls.find((c) => c.op === "line-comments")!.args[0] as { round: number };
+    expect(lineInput.round).toBe(4);
   });
 });
