@@ -229,10 +229,16 @@ set, the runner falls back to this selector and the Worker records
 `reviews.model = NULL` rather than duplicating the constant — audits resolve
 NULL against THIS line.
 
-Deployed image record (filled by plan 19 T3 at execution):
+Deployed image record (executed plan 19 T3, 2026-08-31 UTC):
 
-- Image digest: `<pending — plan 19 T3>`
-- Deploy date: `<pending — plan 19 T3>`
+- Image digest: `sha256:09724a204ef38dab02b88a6537bdd3f051997ac144f0aeff7d5901d9d75aa57d`
+  (registry.cloudflare.com/f68fcd78e7c5c10f0466788bb9e85b8e/mstar-inspector-sandbox;
+  replaces `sha256:4dae83cd…ccad2ada`)
+- Deploy date: 2026-08-31 (Worker version `62c18d0a` — the digest-carrying
+  deploy; post-deploy smoke PASS: cron registered, D1 0001–0010 complete,
+  e2e review on btspoony/todo-bots#1 landed with in-image runner
+  `skill_version 3.5.0+f1b60df0`, `reviews.envelope` written, `reviews.model
+  = NULL` → the default selector above)
 
 ## Ops config (plan 19 T1)
 
