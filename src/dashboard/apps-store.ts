@@ -38,9 +38,12 @@
  *     first.
  *   - softDeleteApp is idempotent — the FIRST deleted_at wins; returns
  *     whether THIS call performed the delete.
- *   - upsertInstallation touches seen_at (any webhook carrying
- *     installation_id) and preserves the stored account_login when the
- *     incoming value is absent.
+ *   - recordDelivery / deliverySummary / listRecentDeliveries (plan 20,
+ *     migration 0011) are the webhook_deliveries face: the per-App webhook
+ *     route appends one best-effort row per VERIFIED delivery (outcome
+ *     vocabulary DELIVERY_OUTCOMES, producer-side enforced), and the
+ *     dashboard reads the health summary + recent list through the same
+ *     store (AL-20-1: the legacy face records nothing).
  *   - Timestamps are SQLite datetime('now') (UTC — the reviews.reviewed_at
  *     convention); createApp ids are caller-supplied UUIDs (the reviews.id
  *     caller-UUID convention — the T1 review pin: secretbox AAD rowKey MUST
@@ -113,6 +116,56 @@ export type AppInstallationRow = {
   /** GitHub login of the installation account; NULL = never observed. */
   account_login: string | null;
   seen_at: string;
+};
+
+/**
+ * The producer-side delivery-outcome vocabulary (plan 20 Task 1, AL-20-1;
+ * 0010 FAILURE_STAGES precedent): `ok` = job enqueued, `paused` = the App's
+ * review switch is off (2xx ignore, zero enqueue), `ignored` = verified but
+ * not a reviewable event (e.g. ping), `rejected` = the classifier refused
+ * the delivery (400|401|500 — "sent but refused" is the R2 visibility
+ * core). Enforced producer-side: an off-vocabulary outcome throws BEFORE
+ * any row is written; the schema has no CHECK (0010 precedent).
+ */
+export const DELIVERY_OUTCOMES: readonly string[] = Object.freeze([
+  "ok",
+  "paused",
+  "ignored",
+  "rejected",
+]);
+
+export type DeliveryOutcome = "ok" | "paused" | "ignored" | "rejected";
+
+/** Input for recordDelivery — one VERIFIED per-App webhook delivery. */
+export type RecordDeliveryInput = {
+  appId: string;
+  /** The x-github-event header; NULL when the header was absent. */
+  eventName: string | null;
+  outcome: DeliveryOutcome;
+  /** The classifier's status for rejected; NULL for every other outcome. */
+  statusCode: number | null;
+};
+
+/** A row of `webhook_deliveries` (D1 column names, snake_case; migration 0011). */
+export type WebhookDeliveryRow = {
+  id: string;
+  app_id: string;
+  event_name: string | null;
+  outcome: DeliveryOutcome;
+  status_code: number | null;
+  created_at: string;
+};
+
+/**
+ * The dashboard health read face (plan 20 Task 2 consumes this): the App's
+ * LATEST delivery row + the count of `rejected` rows inside the trailing
+ * 24h window (`created_at > datetime('now', '-24 hours')` — the plan-19
+ * sweep window convention). ignored/paused/ok are healthy states and are
+ * deliberately NOT counted (AL-20-2).
+ */
+export type DeliverySummary = {
+  latest: WebhookDeliveryRow | null;
+  rejected24h: number;
 };
 
 /**
@@ -285,6 +338,72 @@ export function createAppsStore(db: AppsStoreD1) {
         )
         .bind(appId)
         .all<AppInstallationRow>();
+      return res.results;
+    },
+
+    /**
+     * Append one delivery row (plan 20 Task 1, AL-20-1) — the R2 diagnostics
+     * face. Fail-loud like the rest of this store: an off-vocabulary outcome
+     * throws BEFORE any row is written (producer-side enforcement, 0010
+     * FAILURE_STAGES precedent); FK violations (unknown appId) throw. The
+     * webhook face wraps this in try/catch itself — an insert failure must
+     * never change the webhook response (best-effort旁路).
+     */
+    async recordDelivery(input: RecordDeliveryInput): Promise<void> {
+      if (!DELIVERY_OUTCOMES.includes(input.outcome)) {
+        throw new Error(
+          `apps-store: outcome ${JSON.stringify(input.outcome)} is not on the producer vocabulary (${DELIVERY_OUTCOMES.join(" | ")}) — zero rows written`,
+        );
+      }
+      await db
+        .prepare(
+          `INSERT INTO webhook_deliveries (id, app_id, event_name, outcome, status_code)
+           VALUES (?, ?, ?, ?, ?)`,
+        )
+        .bind(crypto.randomUUID(), input.appId, input.eventName, input.outcome, input.statusCode)
+        .run();
+    },
+
+    /**
+     * Health read face (plan 20 Task 2): the App's LATEST delivery row +
+     * the count of `rejected` rows inside the trailing 24h window
+     * (`created_at > datetime('now', '-24 hours')` — the plan-19 sweep
+     * window convention). ignored/paused/ok are healthy states and are
+     * deliberately NOT counted (AL-20-2). An app with no rows → latest
+     * null, rejected24h 0.
+     */
+    async deliverySummary(appId: string): Promise<DeliverySummary> {
+      const latest = await db
+        .prepare(
+          `SELECT * FROM webhook_deliveries
+           WHERE app_id = ? ORDER BY created_at DESC, rowid DESC LIMIT 1`,
+        )
+        .bind(appId)
+        .first<WebhookDeliveryRow>();
+      const rejected = await db
+        .prepare(
+          `SELECT COUNT(*) AS n FROM webhook_deliveries
+           WHERE app_id = ? AND outcome = 'rejected' AND created_at > datetime('now', '-24 hours')`,
+        )
+        .bind(appId)
+        .first<{ n: number }>();
+      return { latest, rejected24h: rejected?.n ?? 0 };
+    },
+
+    /**
+     * Recent-deliveries read face (plan 20 Task 2 settings panel): THIS
+     * App's rows, newest first (created_at has second precision, so rowid
+     * breaks ties inside one second — the order is total and
+     * deterministic), bounded by the caller's N (default 5).
+     */
+    async listRecentDeliveries(appId: string, limit = 5): Promise<WebhookDeliveryRow[]> {
+      const res = await db
+        .prepare(
+          `SELECT * FROM webhook_deliveries
+           WHERE app_id = ? ORDER BY created_at DESC, rowid DESC LIMIT ?`,
+        )
+        .bind(appId, limit)
+        .all<WebhookDeliveryRow>();
       return res.results;
     },
   };
