@@ -135,6 +135,12 @@ export function renderFindings(findings: ReviewFinding[], previousFingerprints?:
  * in the rendered (capped) array — repeats are still listed but no longer
  * re-voted. unverified is a fingerprint-less independent list and keeps the
  * envelope value; verdict/scorePct are never rendered here.
+ *
+ * Invariant (B4): the recomputed counts run over the SAME capped array that
+ * renderFindings renders (the consumer's shared capped array feeds both the
+ * post and the put) — the tally always describes the visible findings, never
+ * the pre-cap envelope counts; a cap that dropped findings is surfaced by
+ * the omitted-findings footer, not by the tally.
  */
 function renderTally(
   tally: ReviewOutput["tally"],

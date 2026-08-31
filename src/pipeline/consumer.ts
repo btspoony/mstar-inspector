@@ -59,8 +59,7 @@ import { idemKey, IDEMPOTENCY_SECONDS, type IdempotencyKey } from "../contracts/
 import { parseReviewOutput, capFindings, clampFindingSizes } from "../review/schema";
 import { isReviewLevel, REVIEW_LEVELS, type ReviewLevel } from "../review/runtime";
 import { redactExactSecrets, redactReviewOutput, redactReviewOutputExact, redactSecrets } from "./redact";
-import { createArtifactStore, type D1ArtifactStore } from "../store/artifact-store";
-import { previousRoundFingerprints } from "../store/artifact-store";
+import { createArtifactStore, previousRoundFingerprints, type D1ArtifactStore } from "../store/artifact-store";
 import { createFailureStore, type FailureStage, type FailureStore } from "../store/failure-store";
 import { getSandbox, type ReviewSandbox } from "./sandbox";
 import { buildGitOpsCommands, writeJsonCommand } from "./gitops";
@@ -254,6 +253,12 @@ export type ConsumerLogFields = {
    */
   degraded_delete_deleted?: number;
   degraded_delete_skipped?: number;
+  /**
+   * Plan 21 Task 3 (S-3, qc3 F-003): the previous-round fingerprint query
+   * THREW — repeat dedup degraded to first-round semantics (empty set).
+   * Set only on the dedup-failure warn; an empty previous round is silent.
+   */
+  dedup?: "degraded";
 };
 
 export type ConsumerLog = {
@@ -1314,9 +1319,10 @@ async function processMessage(payload: ReviewJobPayload, deps: ProcessDeps): Pro
     const output = capped.output;
     // 10a. Plan 21 Task 3 (AL-21-2): cross-round repeat dedup — read the
     // previous round's fingerprint set BEFORE the post (the current sha row
-    // does not exist yet at this point; post → put order). Query failure or
-    // no previous round = first-round semantics: log a structured warn and
-    // continue — dedup is display-layer, never a review blocker.
+    // does not exist yet at this point; post → put order). A query THROW is
+    // first-round semantics: log a structured warn (dedup: "degraded") and
+    // continue — dedup is display-layer, never a review blocker. An empty
+    // set (no previous round) is a SILENT first round — no warn (S-7).
     let previousFingerprints: ReadonlySet<string> | undefined;
     try {
       const set = await previousRoundFingerprints(deps.env.DB, {
@@ -1328,7 +1334,10 @@ async function processMessage(payload: ReviewJobPayload, deps: ProcessDeps): Pro
       previousFingerprints = set.size > 0 ? set : undefined;
     } catch (err) {
       const detail = err instanceof Error ? err.message : String(err);
-      deps.log.warn(fields, `previous-round fingerprint query failed — treating as first round: ${detail}`);
+      deps.log.warn(
+        { ...fields, dedup: "degraded" },
+        `previous-round fingerprint query failed — treating as first round: ${detail}`,
+      );
     }
 
     // 11. Upsert the overall review comment FIRST (the user-facing

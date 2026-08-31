@@ -9,10 +9,12 @@
  *
  * - normPath: `\` → `/` (Windows path normalization), NO case folding
  * - normTitle: trim → collapse whitespace → lowercase → strip TRAILING punctuation
- * - bucket: `line_start == null ? "noline" : String(Math.floor((line_start - 1) / 10) * 10 + 1)`
- *   (N=10 FIXED line bucket, not a sliding window)
+ * - bucket: N=10 FIXED line bucket (not a sliding window); null/undefined or
+ *   non-positive line_start → "noline" (S-2)
  * - `body` / `line_end` / `category` / `mergeClass` never enter the hash
- * - `fingerprint_hint` (non-blank) wins verbatim — legacy passthrough behavior
+ * - `fingerprint_hint` (non-blank, non-marker) wins verbatim — legacy
+ *   passthrough; a blank or `[REDACTED]`-marker hint falls back to
+ *   normalization (W-1)
  *
  * These pins are the AC-21a evidence set ("归一化单测 pin 过": near-line same
  * fingerprint / cross-file different / title normalization / mergeClass no
@@ -53,8 +55,9 @@ describe("computeFindingFingerprint", () => {
 
   test("golden vector: pins FNV-1a 64 over the normalized composite", () => {
     // normPath("src/foo.ts") + "\0" + bucket(15 → "11") + "\0" + normTitle("Fix the bug!") =
-    // "src/foo.ts\011\0fix the bug" → FNV-1a 64 = c3f136c3fe89ebbb (canonical vector, verified
-    // against the BigInt FNV-1a 64 reference: "" → cbf29ce484222325, "a" → af63dc4c8601ec8c).
+    // "src/foo.ts" + "\0" + "11" + "\0" + "fix the bug" (two NUL separators, literal "11")
+    // → FNV-1a 64 = c3f136c3fe89ebbb (canonical vector, verified against the BigInt
+    // FNV-1a 64 reference: "" → cbf29ce484222325, "a" → af63dc4c8601ec8c).
     expect(fp(finding({ file_path: "src/foo.ts", title: "Fix the bug!" }))).toBe("c3f136c3fe89ebbb");
   });
 
@@ -88,6 +91,15 @@ describe("computeFindingFingerprint", () => {
     expect(fp(finding({ line_start: undefined }))).toBe(fp(finding({ line_start: null })));
   });
 
+  test("non-positive line_start → noline bucket (S-2)", () => {
+    const noline = fp(finding({ line_start: null }));
+    expect(fp(finding({ line_start: 0 }))).toBe(noline);
+    expect(fp(finding({ line_start: -5 }))).toBe(noline);
+    // Not a null-handling regression: still distinct from the line-1 bucket.
+    expect(fp(finding({ line_start: 0 }))).not.toBe(fp(finding({ line_start: 1 })));
+    expect(fp(finding({ line_start: -5 }))).not.toBe(fp(finding({ line_start: 1 })));
+  });
+
   test("cross-file: different file_path → different fingerprint", () => {
     expect(fp(finding({ file_path: "src/app.ts" }))).not.toBe(fp(finding({ file_path: "src/other.ts" })));
   });
@@ -115,6 +127,15 @@ describe("computeFindingFingerprint", () => {
 
   test("title normalization: different content → different fingerprint", () => {
     expect(fp(finding({ title: "Fix the bug" }))).not.toBe(fp(finding({ title: "Fix the typo" })));
+  });
+
+  test("title normalization: CJK trailing punctuation is stripped (。！…)", () => {
+    const base = fp(finding({ title: "修复空指针" }));
+    for (const title of ["修复空指针。", "修复空指针！", "修复空指针…", "修复空指针。！…"]) {
+      expect(fp(finding({ title }))).toBe(base);
+    }
+    // Different CJK content still differs.
+    expect(fp(finding({ title: "修复空指针" }))).not.toBe(fp(finding({ title: "修复越界" })));
   });
 
   test("mergeClass and category never enter the hash", () => {
@@ -148,5 +169,18 @@ describe("computeFindingFingerprint", () => {
     expect(fp(finding({ fingerprint_hint: undefined }))).toBe(base);
     expect(fp(finding({ fingerprint_hint: "" }))).toBe(base);
     expect(fp(finding({ fingerprint_hint: "   " }))).toBe(base);
+  });
+
+  test("hint priority: the redaction marker [REDACTED] is never identity — falls back to normalization (W-1)", () => {
+    const base = fp(finding());
+    expect(fp(finding({ fingerprint_hint: "[REDACTED]" }))).toBe(base);
+    // Two DIFFERENT findings both carrying the marker normalize over their
+    // own title/path — they must NOT collapse into one false repeat.
+    const a = fp(finding({ fingerprint_hint: "[REDACTED]", title: "Secret leak in auth" }));
+    const b = fp(finding({ fingerprint_hint: "[REDACTED]", title: "Secret leak in billing" }));
+    expect(a).not.toBe(b);
+    // And each equals its own hint-less fingerprint.
+    expect(a).toBe(fp(finding({ title: "Secret leak in auth" })));
+    expect(b).toBe(fp(finding({ title: "Secret leak in billing" })));
   });
 });

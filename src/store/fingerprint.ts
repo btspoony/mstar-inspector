@@ -11,12 +11,14 @@
  *   `null`/`undefined` file_path normalizes to "" (repo-level dimension)
  * - normTitle: trim → collapse whitespace → lowercase → strip TRAILING
  *   punctuation (locked set below)
- * - bucket: `line_start == null ? "noline" : String(Math.floor((line_start - 1) / 10) * 10 + 1)`
- *   — N=10 FIXED line bucket (lines 1–10 → "1", 11–20 → "11", …), NOT a
- *   sliding window; null/undefined line → "noline" (file+title dimension)
+ * - bucket: N=10 FIXED line bucket (lines 1–10 → "1", 11–20 → "11", …), NOT
+ *   a sliding window; null/undefined OR non-positive line_start → "noline"
+ *   (file+title dimension; S-2 — a ≤0 line is not a real location)
  * - `body` / `line_end` / `category` / `mergeClass` NEVER enter the hash
- * - `fingerprint_hint` (non-blank) wins verbatim — legacy passthrough
- *   behavior preserved (Global Constraint "fingerprint_hint 优先")
+ * - `fingerprint_hint` (non-blank, non-marker) wins verbatim — legacy
+ *   passthrough preserved (Global Constraint "fingerprint_hint 优先"); a
+ *   blank or `[REDACTED]`-marker hint falls back to the normalized path
+ *   (W-1, qc2 F-001 — the marker is never identity)
  *
  * This is a LEAF pure function: no imports, no IO, no clock — the same
  * output in Bun tests and workerd production. FNV-1a 64-bit is a two-word
@@ -42,6 +44,15 @@ export type FindingFingerprintInput = {
  * sentence punctuation plus closing quotes/brackets.
  */
 const TRAILING_PUNCTUATION = /[.,;:!?'"。，；：！？、…”’」』）】》〉]+$/;
+/**
+ * The redaction marker `redactSecrets` substitutes for every secret-shaped
+ * span (src/pipeline/redact.ts `REDACTED`). A hint equal to it must never be
+ * persisted or matched as identity — every secret-bearing finding would
+ * otherwise collapse into one false repeat. Kept as a literal here: this
+ * module is a zero-import leaf (AL-21-1), so the constant is mirrored with a
+ * sync comment instead of imported.
+ */
+const REDACTION_MARKER = "[REDACTED]";
 
 /** FNV-1a 64-bit offset basis, split into high/low 32-bit words. */
 const FNV_HIGH = 0xcbf29ce4;
@@ -70,9 +81,9 @@ function fnv1a64Hex(input: string): string {
   return (hi >>> 0).toString(16).padStart(8, "0") + (lo >>> 0).toString(16).padStart(8, "0");
 }
 
-/** bucket: N=10 fixed line bucket; null/undefined line_start → "noline". */
+/** bucket: N=10 fixed line bucket; null/undefined or non-positive line_start → "noline" (S-2). */
 function lineBucket(lineStart: number | null | undefined): string {
-  if (lineStart == null) return "noline";
+  if (lineStart == null || lineStart <= 0) return "noline";
   return String(Math.floor((lineStart - 1) / 10) * 10 + 1);
 }
 
@@ -86,14 +97,17 @@ function normalizeTitle(title: string): string {
 }
 
 /**
- * Deterministic finding fingerprint: non-blank `fingerprint_hint` is returned
- * verbatim (legacy passthrough), otherwise FNV-1a 64 over the normalized
- * composite `path \0 bucket \0 title`. Synchronous pure function — safe to
- * call inside the persist path's synchronous `.map()` (AL-21-1).
+ * Deterministic finding fingerprint: a non-blank `fingerprint_hint` that is
+ * NOT the redaction marker is returned verbatim (legacy passthrough);
+ * otherwise FNV-1a 64 over the normalized composite `path \0 bucket \0 title`
+ * (W-1 — a blank or `[REDACTED]` hint falls back so the marker is never
+ * identity). Synchronous pure function — safe to call inside the persist
+ * path's synchronous `.map()` (AL-21-1).
  */
 export function computeFindingFingerprint(f: FindingFingerprintInput): string {
-  if (f.fingerprint_hint != null && f.fingerprint_hint.trim() !== "") {
-    return f.fingerprint_hint;
+  const hint = f.fingerprint_hint;
+  if (hint != null && hint.trim() !== "" && hint !== REDACTION_MARKER) {
+    return hint;
   }
   // normPath: `\` → `/`, no case folding; null/undefined file_path → "" (repo-level dimension).
   const path = (f.file_path ?? "").replace(/\\/g, "/");

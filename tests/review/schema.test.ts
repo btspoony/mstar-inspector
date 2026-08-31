@@ -464,4 +464,21 @@ describe("clampFindingSizes (qc2 F-003, per-finding byte budgets)", () => {
     expect(clamped.findings[0]!.title).toBe("ok");
     expect(clamped.findings[1]!.title).toHaveLength(FINDING_TITLE_MAX);
   });
+
+  test("oversized fingerprint_hint is clamped to the title budget (S-1)", () => {
+    const output = {
+      ...base,
+      findings: [{ ...finding("t", "b"), fingerprint_hint: "H".repeat(FINDING_TITLE_MAX + 50) }],
+    };
+    const clamped = clampFindingSizes(output);
+    expect(clamped.findings[0]!.fingerprint_hint).toHaveLength(FINDING_TITLE_MAX);
+    expect(clamped.findings[0]!.fingerprint_hint!.endsWith("…")).toBe(true);
+  });
+
+  test("boundary-length fingerprint_hint is kept verbatim (S-1)", () => {
+    const hint = "H".repeat(FINDING_TITLE_MAX);
+    const output = { ...base, findings: [{ ...finding("t", "b"), fingerprint_hint: hint }] };
+    const clamped = clampFindingSizes(output);
+    expect(clamped.findings[0]!.fingerprint_hint).toBe(hint);
+  });
 });

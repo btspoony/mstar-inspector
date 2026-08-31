@@ -30,11 +30,12 @@ import type { MstarReviewFinding, MstarReviewV1 } from "@mstar-harness/engine";
 import {
   createArtifactStore,
   parseIdemKey,
+  previousRoundFingerprints,
   REVIEW_SKILL_VERSION,
   type ReviewArtifactDoc,
 } from "../../src/store/artifact-store";
 import { computeFindingFingerprint } from "../../src/store/fingerprint";
-import { previousRoundFingerprints } from "../../src/store/artifact-store";
+import { REDACTED } from "../../src/pipeline/redact";
 import { idemKey } from "../../src/contracts/idem";
 import { createMigratedTestD1 } from "./helpers";
 import type { ReviewRow } from "../../src/store/types";
@@ -201,8 +202,20 @@ describe("createArtifactStore().put", () => {
       )
       .run(crypto.randomUUID(), oldReviewId);
 
-    // A NEW v1 put for a different sha must not touch the era row.
-    await store.put(reviewDoc());
+    // A NEW v1 put for a different sha must not touch the era row. The new
+    // finding is HINT-LESS so the row's fingerprint must equal the computed
+    // normalized value (S-5 — not merely non-NULL, which the old hint-verbatim
+    // bind would also satisfy).
+    const newFinding: MstarReviewFinding = {
+      mergeClass: "should-fix",
+      category: "logic",
+      file_path: "src/a.ts",
+      line_start: 10,
+      line_end: 12,
+      title: "Null deref risk",
+      body: "body",
+    };
+    await store.put(reviewDoc({ payload: payload({ findings: [newFinding] }) }));
 
     const eraRow = db.raw
       .query("SELECT fingerprint FROM findings WHERE review_id = ?")
@@ -211,7 +224,26 @@ describe("createArtifactStore().put", () => {
     const newRow = db.raw
       .query("SELECT fingerprint FROM findings WHERE review_id != ?")
       .get(oldReviewId) as { fingerprint: string | null };
-    expect(newRow.fingerprint).not.toBeNull();
+    expect(newRow.fingerprint).toBe(computeFindingFingerprint(newFinding));
+  });
+
+  test("a [REDACTED] hint is never persisted as identity — the normalized fingerprint lands instead (W-1)", async () => {
+    const db = createMigratedTestD1();
+    const store = createArtifactStore(db);
+    const finding: MstarReviewFinding = {
+      mergeClass: "should-fix",
+      category: "logic",
+      file_path: "src/a.ts",
+      line_start: 10,
+      line_end: 12,
+      title: "Null deref risk",
+      body: "body",
+      fingerprint_hint: REDACTED,
+    };
+    await store.put(reviewDoc({ payload: payload({ findings: [finding] }) }));
+    const row = db.raw.query("SELECT fingerprint FROM findings").get() as { fingerprint: string | null };
+    expect(row.fingerprint).not.toBe(REDACTED);
+    expect(row.fingerprint).toBe(computeFindingFingerprint(finding));
   });
 
   test("per-App put persists app_id; a put without appId keeps app_id NULL (QC F-001 / Clarify #3: NULL = legacy)", async () => {
@@ -525,12 +557,23 @@ describe("previousRoundFingerprints", () => {
         { mergeClass: "must-fix", file_path: "src/b.ts", line_start: 5, title: "Newer issue", body: "b" },
       ],
     });
-    await store.put({
-      kind: "review",
-      key: idemKey({ ...KEY_TUPLE, head_sha: "a".repeat(40) }),
-      schema: "mstar.review/v1",
-      payload: older,
-    });
+    // Raw-insert the OLDER review with an explicit past reviewed_at: two
+    // store.put calls in the same second would tie on datetime('now') and
+    // fall to the random-UUID id DESC tie-break (flaky — same pattern as the
+    // era test's explicit-timestamp insert).
+    const olderId = "older-review";
+    db.raw
+      .query(
+        `INSERT INTO reviews (id, installation_id, owner, repo, pr_number, head_sha, reviewed_at, verdict, summary_md, envelope)
+         VALUES (?, 123, 'acme', 'widgets', 42, ?, '2000-01-01 00:00:00', 'needs fixes', 's', ?)`,
+      )
+      .run(olderId, "a".repeat(40), JSON.stringify(older));
+    db.raw
+      .query(
+        `INSERT INTO findings (id, review_id, severity, file_path, line_start, title, body, fingerprint)
+         VALUES (?, ?, 'should-fix', 'src/a.ts', 1, 'Older issue', 'b', ?)`,
+      )
+      .run(crypto.randomUUID(), olderId, computeFindingFingerprint(older.findings[0]!));
     await store.put({
       kind: "review",
       key: idemKey({ ...KEY_TUPLE, head_sha: "b".repeat(40) }),
@@ -572,5 +615,23 @@ describe("previousRoundFingerprints", () => {
     const set = await previousRoundFingerprints(db, PR_KEY);
     expect(set).toEqual(new Set([computeFindingFingerprint(payload().findings[0]!)]));
     expect(set.size).toBe(1);
+  });
+
+  test("same-sha re-review: the query returns the same sha's own fingerprints (all-repeat, AL-21-2)", async () => {
+    const db = createMigratedTestD1();
+    const store = createArtifactStore(db);
+    const findings: MstarReviewFinding[] = [
+      { mergeClass: "must-fix", file_path: "src/c.ts", line_start: 3, title: "Same sha issue", body: "b" },
+    ];
+    await store.put({
+      kind: "review",
+      key: idemKey({ ...KEY_TUPLE, head_sha: SHA }),
+      schema: "mstar.review/v1",
+      payload: payload({ findings }),
+    });
+    // No head_sha exclusion: a re-review of the SAME sha reads its own
+    // previous row → every current finding is a repeat (S-8).
+    const set = await previousRoundFingerprints(db, PR_KEY);
+    expect(set).toEqual(new Set(findings.map((f) => computeFindingFingerprint(f))));
   });
 });

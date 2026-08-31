@@ -294,8 +294,9 @@ export function createArtifactStore(db: D1Like): D1ArtifactStore {
             finding.title,
             finding.body,
             // Plan 21 (AL-21-1): the persist path is the single fingerprint
-            // write point — a non-blank hint is returned verbatim by the
-            // pure function; otherwise the normalized FNV-1a fingerprint.
+            // write point — a non-blank, non-marker hint is returned verbatim
+            // by the pure function; a blank or [REDACTED]-marker hint falls
+            // back to the normalized FNV-1a fingerprint (W-1).
             computeFindingFingerprint(finding),
             reviewId,
           ),

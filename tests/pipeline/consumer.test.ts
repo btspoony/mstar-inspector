@@ -1892,9 +1892,29 @@ describe("cross-round repeat dedup (plan 21 Task 3 / AL-21-2)", () => {
 
     const post = commenterCalls.find((c) => c.op === "post")!;
     expect((post.args[0] as { previousFingerprints?: unknown }).previousFingerprints).toBeUndefined();
-    expect(
-      logLines.some((l) => l.level === "warn" && l.msg.includes("previous-round fingerprint query failed")),
-    ).toBe(true);
+    const warn = logLines.find((l) => l.level === "warn" && l.msg.includes("previous-round fingerprint query failed"));
+    expect(warn).toBeDefined();
+    // S-3: the dedup-degradation warn carries a structured field, not just text.
+    expect(warn!.fields.dedup).toBe("degraded");
     expect(reviewCount(db)).toBe(1);
+  });
+
+  test("oversized fingerprint_hint is clamped at the choke point — never lands verbatim in the D1 fingerprint column (S-1)", async () => {
+    reset();
+    const oversizedHint = "hint-" + "x".repeat(FINDING_TITLE_MAX + 100);
+    runnerStdout = JSON.stringify({
+      ...VALID_OUTPUT,
+      findings: [{ ...VALID_OUTPUT.findings[0]!, fingerprint_hint: oversizedHint }],
+    });
+    const db = createMigratedTestD1();
+    const consumer = createReviewConsumer(makeEnv({ DB: db as never }), testLog, testOverrides);
+
+    await consumer(makeBatch(makePayload()));
+
+    const row = db.raw.query("SELECT fingerprint FROM findings").get() as { fingerprint: string | null };
+    // The full hint never reaches the index column…
+    expect(row.fingerprint).not.toContain(oversizedHint);
+    // …the clamped hint (title budget + ellipsis) is what lands.
+    expect(row.fingerprint).toBe(oversizedHint.slice(0, FINDING_TITLE_MAX - 1) + "…");
   });
 });
