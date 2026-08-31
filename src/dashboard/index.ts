@@ -53,7 +53,7 @@ import {
   readHoldValue,
   readManifestStateValue,
 } from "./manifest";
-import { createAppsStore, type GithubAppRow } from "./apps-store";
+import { createAppsStore, type DeliverySummary, type GithubAppRow } from "./apps-store";
 import { SecretboxKeyError, createSecretbox } from "./secretbox";
 import {
   MAX_PROVIDER_KEY_LENGTH,
@@ -682,11 +682,37 @@ function canManageApp(user: DashboardUserRow, app: GithubAppRow): boolean {
   return user.role === "admin" || app.created_by.toLowerCase() === user.github_login.toLowerCase();
 }
 
+/**
+ * The Apps list with the plan-20 health column data (AL-20-2): every row
+ * carries its deliverySummary (the App's LATEST webhook_deliveries row +
+ * the 24h rejected count). The health column reads webhook_deliveries —
+ * NOT the github_apps.last_webhook_at column, which stays the L5 "last
+ * verified delivery" stamp (display-only, no computed health).
+ *
+ * The summaries come from the store's BATCHED deliverySummaries face
+ * (plan 20 QC wave 1, W-1): exactly TWO D1 statements for any N instead
+ * of the per-App 2N fan-out — this helper runs on every POST re-render
+ * (three action paths plus the bare GET), so the statement count must not
+ * scale with the App count.
+ */
+async function appsListWithHealth(
+  db: DashboardDb,
+): Promise<Array<GithubAppRow & { health: DeliverySummary }>> {
+  const apps = createAppsStore(db);
+  const rows = await apps.listApps();
+  const summaries = await apps.deliverySummaries(rows.map((app) => app.id));
+  return rows.map((app) => ({ ...app, health: summaries[app.id]! }));
+}
+
 dashboardApp.get("/apps", async (c) => {
   const gate = await requireMember(c);
   if (!gate.ok) return gate.response;
-  const apps = await createAppsStore(gate.db).listApps();
-  return c.html(appsPage(gate.session, apps, { login: gate.user.github_login, role: gate.user.role }));
+  return c.html(
+    appsPage(gate.session, await appsListWithHealth(gate.db), {
+      login: gate.user.github_login,
+      role: gate.user.role,
+    }),
+  );
 });
 
 /**
@@ -711,7 +737,12 @@ async function appStatusAction(
   const notice: PageNotice = changed
     ? { kind: "success", message: `${verb} ${app.slug}.` }
     : { kind: "warn", message: `${app.slug} was already ${action === "enable" ? "enabled" : `${action}d`} — nothing changed.` };
-  return c.html(appsPage(gate.session, await apps.listApps(), { login: gate.user.github_login, role: gate.user.role }, notice));
+  return c.html(
+    appsPage(gate.session, await appsListWithHealth(gate.db), {
+      login: gate.user.github_login,
+      role: gate.user.role,
+    }, notice),
+  );
 }
 
 dashboardApp.post("/apps/:slug/disable", (c) => appStatusAction(c, "disable"));
@@ -767,7 +798,10 @@ async function appReviewAction(
     notice = { kind: "warn", message: `${app.slug} was just removed — nothing changed.` };
   }
   return c.html(
-    appsPage(gate.session, await apps.listApps(), { login: gate.user.github_login, role: gate.user.role }, notice),
+    appsPage(gate.session, await appsListWithHealth(gate.db), {
+      login: gate.user.github_login,
+      role: gate.user.role,
+    }, notice),
   );
 }
 
@@ -875,6 +909,10 @@ async function settingsResponse(
     const modelChain = await store.getModelChain(app.id);
     const modelRoles = await store.getAppModelRoles(app.id);
     const installations = await apps.listInstallations(app.id);
+    // Plan 20 Task 2: the recent-deliveries panel data (AL-20-2) — the
+    // App's last 5 webhook_deliveries rows, read fresh on every render so
+    // POST re-renders reflect the latest deliveries too.
+    const deliveries = await apps.listRecentDeliveries(app.id, 5);
     return c.html(
       appSettingsPage(
         session,
@@ -889,6 +927,7 @@ async function settingsResponse(
         modelRoles,
         installations,
         notice,
+        deliveries,
       ),
       status,
     );

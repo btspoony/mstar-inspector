@@ -7,7 +7,7 @@
  * No client JS, no build chain, no new dependencies.
  */
 import { MODEL_ROLE_IDS, PROVIDER_IDS, type MaskedProviderKey } from "./app-config-store";
-import type { AppInstallationRow } from "./apps-store";
+import type { AppInstallationRow, DeliveryOutcome, DeliverySummary, WebhookDeliveryRow } from "./apps-store";
 import type { DashboardUserRow } from "./users";
 
 /** Escape GitHub-sourced user data before HTML interpolation (XSS guard). */
@@ -49,6 +49,19 @@ function relativeTime(value: string | null): string {
   if (hours < 24) return `${hours} hour${hours === 1 ? "" : "s"} ago`;
   const days = Math.floor(diffMs / 86_400_000);
   return `${days} day${days === 1 ? "" : "s"} ago`;
+}
+/**
+ * Delivery-outcome badge (plan 20 Task 2, AL-20-2): the producer vocabulary
+ * is ok | paused | ignored | rejected — rejected is the ONLY attention
+ * state (amber-700 .note token, the same token the list uses for the
+ * disabled/paused badges); ok, paused, and ignored are healthy (gray
+ * .status). The outcome text is escaped — it is a stored string, and the
+ * brief pins escapeHtml on every user-influenced string.
+ */
+function deliveryOutcomeBadge(outcome: DeliveryOutcome): string {
+  return outcome === "rejected"
+    ? `<span class="note">${escapeHtml(outcome)}</span>`
+    : `<span class="status">${escapeHtml(outcome)}</span>`;
 }
 
 const STYLE = `<style>
@@ -559,6 +572,13 @@ export function appsPage(
     /** Per-App pause switch (migration 0008): 0 on an active row = paused. */
     review_enabled: number;
     created_by: string;
+    /**
+     * Plan 20 health column data (AL-20-2): the App's LATEST
+     * webhook_deliveries row + the 24h rejected count — assembled by the
+     * route from deliverySummary, NOT the github_apps.last_webhook_at
+     * column (that stays the L5 "last verified delivery" stamp).
+     */
+    health: DeliverySummary;
   }>,
   viewer: { login: string; role: "admin" | "member" },
   notice?: PageNotice,
@@ -572,6 +592,14 @@ export function appsPage(
           : app.review_enabled === 0
             ? '<span class="note">paused</span>'
             : `<span class="status">${escapeHtml(app.status)}</span>`;
+      // Plan 20 health column (AL-20-2, display-only — no computed health):
+      // relative time of the latest delivery row + its outcome badge + the
+      // 24h rejected count badge (rendered only when > 0 — absence is the
+      // healthy state). No rows → "delivery never", no badges.
+      const latest = app.health.latest;
+      const healthCell = `<span class="meta">delivery ${relativeTime(latest?.created_at ?? null)}${
+        latest ? ` ${deliveryOutcomeBadge(latest.outcome)}` : ""
+      }${app.health.rejected24h > 0 ? ` <span class="note">${app.health.rejected24h} rejected in 24h</span>` : ""}</span>`;
       // Zero-JS action-path POSTs (spec § IA — architect-pinned route
       // shapes; HTML forms cannot emit a DELETE verb). The pause toggle is
       // only offered on active rows — a disabled App is disconnected
@@ -596,6 +624,7 @@ export function appsPage(
         <strong>${escapeHtml(app.slug)}</strong>
         <span class="meta">App id <span class="id">${app.github_app_id}</span> · by ${escapeHtml(app.created_by)}</span>
         ${badge}
+        ${healthCell}
         ${controls}
       </li>`;
     })
@@ -683,6 +712,16 @@ export function appSettingsPage(
   modelRoles: Record<string, string>,
   installations: AppInstallationRow[],
   notice?: PageNotice,
+  /**
+   * Plan 20 recent-deliveries panel data (AL-20-2): the App's last N
+   * webhook_deliveries rows, newest first (the route reads
+   * listRecentDeliveries(appId, 5)). Appended at the END of the signature —
+   * plan 23 (feat/23-dashboard-consolidation) appends its own parameter at
+   * the SAME position on its branch; the PM reconciles this single
+   * signature line (and the one settingsResponse call site) at the plan-23
+   * merge — one of the two appends is rewritten during that merge.
+   */
+  deliveries: WebhookDeliveryRow[] = [],
 ): string {
   const base = `/dashboard/apps/${escapeHtml(app.slug)}/settings`;
   const rows = maskedKeys
@@ -764,6 +803,33 @@ export function appSettingsPage(
       <p class="status">Last webhook: ${relativeTime(app.lastWebhookAt)}</p>
       ${installList}
     </section>`;
+  // Recent-deliveries panel (plan 20 Task 2, AL-20-2): the App's last 5
+  // webhook_deliveries rows, newest first — time / event name / outcome /
+  // status_code per row, reusing the .keys list rhythm (no new tokens, no
+  // JS). Event names are the x-github-event header (user-influenced) →
+  // escaped; a NULL event name renders the "unknown event" placeholder;
+  // status_code goes through escapeHtml too (SQLite INTEGER affinity can
+  // store a non-numeric TEXT from a future caller); a NULL status_code
+  // (every non-rejected outcome stores NULL) renders "—".
+  const deliveryRows = deliveries
+    .map(
+      (d) => `<li>
+        <strong>${escapeHtml(d.event_name ?? "unknown event")}</strong>
+        <span class="meta">${relativeTime(d.created_at)} · ${deliveryOutcomeBadge(d.outcome)} · status <span class="id">${escapeHtml(d.status_code === null ? "—" : String(d.status_code))}</span></span>
+      </li>`,
+    )
+    .join("\n");
+  const deliveryList =
+    deliveries.length === 0
+      ? `<p class="status">No deliveries yet.</p>`
+      : `<ul class="keys">
+      ${deliveryRows}
+      </ul>`;
+  const deliveriesSection = `<section class="enabled">
+      <h2>Recent deliveries</h2>
+      <p class="status">The last 5 webhook deliveries for this App — newest first.</p>
+      ${deliveryList}
+    </section>`;
   // Role models editor (plan 17, spec § IA + § DESIGN.md 意图): one text row
   // per audit seat in MODEL_ROLE_IDS order, prefilled from the stored role
   // map (unmapped = blank), a SINGLE blue-700 save, and the empty =
@@ -822,6 +888,7 @@ export function appSettingsPage(
     ${roleSection}
     ${reviewSection}
     ${installSection}
+    ${deliveriesSection}
   </main>`,
   );
 }

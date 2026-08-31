@@ -154,6 +154,168 @@ smoke → record the digest.
    `model` is the effective chain head selector, or NULL meaning the in-image
    default ran (§ Image pins and digest record).
 
+## Multi-App go-live
+
+> Plan 20: activates the multi-App platform on a deployed Worker — the
+> `DASHBOARD_ENCRYPTION_KEY`, the dashboard registration flow, the per-App
+> webhook repoint, and the R1/R2 verification pins. Run AFTER § Deploy steps
+> and § Post-deploy smoke (the base Worker and D1 0001–0011 must be live);
+> the live execution is QA-coordinated (plan 20 Task 4).
+
+### 1. Set DASHBOARD_ENCRYPTION_KEY
+
+The multi-App registry stores each App's private key and webhook secret
+encrypted in D1 (migration 0004). The master key is the
+`DASHBOARD_ENCRYPTION_KEY` Worker secret: **standard base64 of exactly 32
+bytes** (AES-256-GCM; `src/dashboard/secretbox.ts` `KEY_BYTES = 32` — a
+missing, non-base64, or wrong-length value throws `SecretboxKeyError` on
+first use). Encryption-dependent dashboard routes (manifest commit, App
+settings) fail **closed with 5xx** when it is missing or malformed — the
+hold is kept and nothing is stored, so fixing the env makes the retry
+succeed. The legacy env-secret App path is unaffected.
+
+```bash
+# Generate: base64 of exactly 32 random bytes
+openssl rand -base64 32
+
+# Set on the deployed Worker (never in git; .dev.vars for local wrangler dev)
+wrangler secret put DASHBOARD_ENCRYPTION_KEY
+```
+
+There is no `bun run keys` entry for this key — that script manages the 18
+built-in provider keys only (`scripts/provider-keys.ts`); the encryption key
+is a plain `wrangler secret put`. It is independent of
+`DASHBOARD_SESSION_SECRET` (session HMAC) — never reuse either key for the
+other duty (rotation stays decoupled).
+
+### 2. Register an App from the dashboard
+
+Prerequisites: dashboard OAuth (`GITHUB_OAUTH_CLIENT_ID` /
+`GITHUB_OAUTH_CLIENT_SECRET`), `DASHBOARD_SESSION_SECRET`, an admin login
+(`ADMIN_LOGINS` bootstrap or the first-login fallback),
+`DASHBOARD_ENCRYPTION_KEY` set, and D1 migrations 0001–0011 applied.
+
+1. **Admin login** — open `/dashboard/login` and complete the GitHub OAuth
+   flow. The first login against an empty `dashboard_users` table becomes
+   admin (or `ADMIN_LOGINS` bootstraps the listed logins).
+2. **Create GitHub App** — on the Apps page (`/dashboard/apps`) click
+   **Create GitHub App**. The dashboard mints the webhook slug
+   (`mstar-inspector-<login>`-derived, DB pre-resolved) and POSTs the App
+   manifest to `https://github.com/settings/apps/new` — the manifest's
+   webhook URL is the App's OWN route `{origin}/webhook/{slug}`
+   (`src/dashboard/manifest.ts` `buildManifest`). Confirm the requested
+   permissions on GitHub.
+3. **Manifest commit** — GitHub redirects back to
+   `/dashboard/manifest/callback`; the dashboard exchanges the code, parks
+   the credentials in the single-use hold cookie, and shows the confirm
+   page (App id / name / slug / webhook URL — never the PEM or webhook
+   secret). Submit the confirm form (`/dashboard/manifest/commit`): the PEM
+   and webhook secret are encrypted with `DASHBOARD_ENCRYPTION_KEY` (AAD
+   rowKey = the row PK) and ONE `github_apps` row is written. Missing key →
+   500 fail-closed, hold kept (fix the env, then resubmit).
+4. **Confirm the row + delivery health** — the success page shows the slug
+   and webhook URL. Verify in D1 (grab the `id` — the R1 pin below needs
+   it):
+   ```bash
+   wrangler d1 execute mstar-inspector-db --remote --command \
+     "SELECT id, slug, name, status, created_by, created_at FROM github_apps ORDER BY created_at DESC LIMIT 1"
+   ```
+   Healthy — exactly one row (the App just committed; the query caps at
+   `LIMIT 1`). Zero rows means the manifest commit produced no App (the
+   confirm form was not submitted, or the missing/malformed
+   `DASHBOARD_ENCRYPTION_KEY` 500 held) — re-check step 3.
+   The Apps list now shows the new App with `delivery never` (no
+   `webhook_deliveries` rows yet — the healthy pre-traffic state). The
+   settings page (`/dashboard/apps/<slug>/settings`) is where the model
+   chain, per-role overrides, and provider keys are configured.
+
+### 3. Repoint the webhook + R2 checklist
+
+A freshly manifest-registered App needs no repoint — the flow already set
+the per-App webhook URL on GitHub. Repointing applies when an App was
+created with a different URL (e.g. the legacy `/webhook` face) or the
+Worker host changed:
+
+1. Open the GitHub App settings page
+   (`https://github.com/settings/apps/<app-name>`).
+2. Under **Webhook**, set **Webhook URL** to
+   `https://<worker-host>/webhook/<slug>` (the slug from the dashboard
+   success page / Apps list) and save.
+
+**R2 checklist** (the "断线看得见" verification face — run after any repoint
+or when deliveries look dead):
+
+| Check | Where | Healthy state |
+|---|---|---|
+| Webhook URL | GitHub App settings → Webhook | `https://<worker-host>/webhook/<slug>` — the per-App route, NOT the legacy `/webhook` |
+| Webhook secret | GitHub App settings → Webhook | A secret is set (masked). The manifest flow's GitHub-generated secret is stored encrypted in the dashboard; changing it on GitHub without updating the dashboard breaks signature verification → `rejected` (401) deliveries |
+| Active | GitHub App settings → Webhook | The **Active** checkbox is on and the App is not suspended; the dashboard row's status is `active` (a disabled row 404s the per-App route) |
+| Delivery health | Dashboard Apps list health column + settings recent-deliveries panel | Recent rows show `ok` / `ignored` / `paused` outcomes; NO `N rejected in 24h` badge; the latest row's relative time is recent |
+
+The dashboard face is the ground truth: every VERIFIED per-App delivery
+lands a `webhook_deliveries` row (best-effort, `src/worker/index.ts` per-App
+face — `ok` / `paused` / `ignored` / `rejected`; the legacy `/webhook` face
+records nothing by design, AL-20-1). A `rejected` row with 401 = signature
+mismatch (secret drift); 400 = malformed payload; 500 = the App's stored
+secret is missing/empty/default. Pre-classify failures (unknown/disabled
+slug, decrypt failure) record NO row — they surface in the Worker logs, not
+the panel. No rows at all = GitHub is not posting (URL wrong, App suspended,
+or the event never fired).
+
+### 4. R1 pin: reviews.model vs configured chain head
+
+The R1 pin proves the per-App model configuration reaches the review and is
+recorded. `reviews.model` records the **effective BASE chain head** — the
+first selector of the App's stored model chain, falling back to
+`OMP_REVIEW_MODEL`, then NULL = the in-image default
+(`src/pipeline/consumer.ts` `effectiveModelChain` + `chainHeadSelector`).
+Per-role overrides (`app_model_roles`, migration 0009) are deliberately NOT
+column-reflected — pin those with the completed review + `wrangler tail`
+runner evidence, not the column.
+
+1. **Configure the chain** — on the App's settings page, set **Model chain**
+   to a distinctive chain, e.g. `ark-plan/deepseek-v4-flash, openai/gpt-5:thinking`
+   and save. The head (the first selector) is what the column must show.
+2. **Real PR** — with `REVIEW_ENABLED=true`, open or update a PR on an
+   installed repo of that App.
+3. **Assert the column** — the review lands and the row records the chain
+   head:
+   ```bash
+   wrangler d1 execute mstar-inspector-db --remote --command \
+     "SELECT model, skill_version, reviewed_at FROM reviews WHERE app_id = '<app-id>' ORDER BY reviewed_at DESC LIMIT 1"
+   ```
+   `model` must equal the configured chain head (`ark-plan/deepseek-v4-flash`
+   in the example); NULL means the in-image default ran — the chain was not
+   picked up (check the settings save and the precedence in
+   `effectiveModelChain`). The triggering delivery is visible in the same
+   window:
+   ```bash
+   wrangler d1 execute mstar-inspector-db --remote --command \
+     "SELECT outcome, event_name, status_code, created_at FROM webhook_deliveries WHERE app_id = '<app-id>' ORDER BY created_at DESC LIMIT 1"
+   ```
+   `outcome` must be `ok` — the ok row records the webhook ACCEPTED
+   (classification, written before the enqueue); the review outcome
+   follows via the queue. A failed enqueue leaves this ok row until
+   GitHub's retry re-records a fresh one — that retry's row is the
+   authoritative delivery.
+
+### 5. Rollback (multi-App)
+
+- **Webhook repoint back** — point the GitHub App's Webhook URL back to the
+  legacy face `https://<worker-host>/webhook` (verified by the global
+  `WEBHOOK_SECRET` env secret). The legacy face keeps reviewing with the
+  deployment-level App; it records no `webhook_deliveries` rows (AL-20-1)
+  and has no dashboard consumer.
+- **Worker rollback** — `wrangler rollback` (or check out the previous
+  commit and `wrangler deploy`); restores Worker code + cron triggers +
+  consumer config. The container image follows the checked-out Dockerfile.
+- **D1 is forward-only** — never reverse migration 0011 on rollback; new
+  code tolerates the prior schema (0002 precedent), roll back code only.
+- **Secrets untouched** — rollback does not remove
+  `DASHBOARD_ENCRYPTION_KEY`; rotate it explicitly when the rollback is
+  security-motivated. A registered App's encrypted credentials stay valid
+  across a Worker rollback (the key is unchanged).
+
 ## Rollback
 
 - Worker code/config: redeploy the previous version — `wrangler rollback`

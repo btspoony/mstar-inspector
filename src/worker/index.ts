@@ -24,13 +24,31 @@ import { defaultSweepLog, runSweep } from "./sweep";
 import { redactSecrets } from "../pipeline/redact";
 import type { ReviewJobPayload } from "../contracts/review-job";
 import type { PipelineEnv } from "../pipeline/consumer";
-import { classifyWebhook, WEBHOOK_BODY_LIMIT } from "./webhooks";
+import { classifyWebhook, WEBHOOK_BODY_LIMIT, type WebhookOutcome } from "./webhooks";
 import { defaultLog, handleReviewJob } from "./handlers";
-import { createAppsStore } from "../dashboard/apps-store";
+import { createAppsStore, type DeliveryOutcome } from "../dashboard/apps-store";
 import { createSecretbox } from "../dashboard/secretbox";
 import { dashboardApp } from "../dashboard/index";
 
 const app = new Hono<{ Bindings: Env }>();
+/**
+ * Classifier outcome → delivery-record outcome (plan 20 QC wave 1, S-2):
+ * the pure mapping the per-App route applies immediately after
+ * classifyWebhook — reject → rejected / ignore → ignored / job → paused
+ * when the App's review switch is off, else ok. Extracted from the inline
+ * ternary so a future outcome (e.g. AL-21's `hold`) extends one function
+ * instead of every call site; unit-tested in
+ * tests/worker/webhook-deliveries.test.ts. `reviewEnabled` is the App
+ * row's review_enabled flag (0 = the producer-side pause gate).
+ */
+export function deliveryOutcomeFromWebhook(
+  outcome: { kind: WebhookOutcome["kind"] },
+  reviewEnabled: number,
+): DeliveryOutcome {
+  if (outcome.kind === "reject") return "rejected";
+  if (outcome.kind === "ignore") return "ignored";
+  return reviewEnabled === 0 ? "paused" : "ok";
+}
 
 /**
  * Structured warn for the webhook faces' rejection/bookkeeping paths (plan
@@ -126,6 +144,14 @@ app.post("/webhook", async (c) => {
  * warn: it never blocks the enqueue nor fails the webhook (best-effort
  * install health, B3 roadmap). The legacy face has no app row to attach and
  * deliberately performs NO upsert.
+ *
+ * Delivery recording (plan 20 Task 1, AL-20-1): immediately after
+ * classification (before the reject return) ONE best-effort row is appended
+ * to `webhook_deliveries` — every classified outcome lands (rejected /
+ * ignored / paused / ok), the pre-classify failures record nothing, and a
+ * store failure only logs a structured warn (the response and enqueue are
+ * never affected). The legacy face records NOTHING (AL-20-1: legacy
+ * 不落行 — it is the fallback path with no dashboard consumer).
  */
 app.post("/webhook/:appSlug", async (c) => {
   // Body-size cap checked BEFORE buffering the body (B6) — same gate as the
@@ -213,6 +239,29 @@ app.post("/webhook/:appSlug", async (c) => {
   // secret) is rebuilt + REPLACED on the next delivery; entries are
   // structurally bounded (≤ Apps + 1) with no eviction policy.
   const outcome = await classifyWebhook(appSecret, rawBody, signature, eventName, defaultLog, reviewEnabled, row.id);
+
+  // Plan 20 (AL-20-1): best-effort delivery recording — the R2 diagnostics
+  // face ("断线看得见"). ONE row per VERIFIED delivery, written immediately
+  // after classification (before the reject return) so EVERY classified
+  // outcome lands: reject → rejected (status_code = the classifier's
+  // status), ignore → ignored, job + review_enabled=0 → paused, job → ok.
+  // The pre-classify failures (413 / kill-switch / db-guard / 404 /
+  // decrypt 500) never reach this line and record nothing; the legacy face
+  // records nothing by design (AL-20-1: legacy 不落行 — app_id is NOT NULL
+  // FK and the legacy path has no dashboard consumer). Best-effort like the
+  // last_webhook_at touch: a store failure logs a structured warn and never
+  // changes the response or the enqueue.
+  try {
+    await appsStore.recordDelivery({
+      appId: row.id,
+      eventName,
+      outcome: deliveryOutcomeFromWebhook(outcome, row.review_enabled),
+      statusCode: outcome.kind === "reject" ? outcome.status : null,
+    });
+  } catch (err) {
+    const detail = err instanceof Error ? err.message : String(err);
+    webhookWarn("delivery_record_failed", detail, "webhook delivery record failed — webhook response unaffected");
+  }
 
   if (outcome.kind === "reject") {
     return c.text(outcome.reason, outcome.status);

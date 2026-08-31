@@ -110,6 +110,10 @@ function createAppConfigD1(): ReturnType<typeof createTestD1> {
   applyMigration(db, "0006_app_provider_config.sql");
   applyMigration(db, "0008_github_apps_ops.sql");
   applyMigration(db, "0009_app_model_roles.sql");
+  // 0011 (plan 20): the settings page now renders the recent-deliveries
+  // panel from webhook_deliveries on every render — the fixture must carry
+  // the table or every settings route 500s.
+  applyMigration(db, "0011_webhook_deliveries.sql");
   return db;
 }
 

@@ -423,3 +423,82 @@ describe("apps-store (createAppsStore)", () => {
     ).rejects.toThrow(/FOREIGN KEY constraint failed/);
   });
 });
+describe("apps-store delivery read faces (plan 20 Task 2 consumption)", () => {
+  /** The apps-store fixture + migration 0011 (the webhook_deliveries table). */
+  function createDeliveryD1(): ReturnType<typeof createTestD1> {
+    const db = createMigratedD1();
+    applyMigration(db, "0011_webhook_deliveries.sql");
+    return db;
+  }
+
+  test("deliverySummary + listRecentDeliveries serve the Task-2 UI faces over the apps-store fixture", async () => {
+    const db = createDeliveryD1();
+    const app = await seedApp(db);
+    const s = store(db);
+    await s.recordDelivery({ appId: app.id, eventName: "ping", outcome: "ignored", statusCode: null });
+    await s.recordDelivery({ appId: app.id, eventName: "pull_request", outcome: "rejected", statusCode: 401 });
+    // Backdate the ignored row so the rejected row is the LATEST.
+    db.raw
+      .prepare("UPDATE webhook_deliveries SET created_at = datetime('now', '-1 hour') WHERE outcome = 'ignored'")
+      .run();
+
+    const summary = await s.deliverySummary(app.id);
+    expect(summary.latest).toMatchObject({
+      event_name: "pull_request",
+      outcome: "rejected",
+      status_code: 401,
+    });
+    expect(summary.rejected24h).toBe(1);
+
+    const recent = await s.listRecentDeliveries(app.id, 5);
+    expect(recent.map((r) => r.outcome)).toEqual(["rejected", "ignored"]);
+    expect(recent[0]!.created_at >= recent[1]!.created_at).toBe(true);
+  });
+
+  test("deliverySummaries batches latest row + 24h rejected count per app in ONE call (QC W-1), incl. zero-delivery apps", async () => {
+    const db = createDeliveryD1();
+    const appA = await seedApp(db);
+    const appB = await seedApp(db, { slug: "app-b", githubAppId: 123457 });
+    const appC = await seedApp(db, { slug: "app-c", githubAppId: 123458 }); // zero deliveries
+    const s = store(db);
+    // appA: latest = rejected (in-window) after an ok + an ignored.
+    await s.recordDelivery({ appId: appA.id, eventName: "ping", outcome: "ignored", statusCode: null });
+    await s.recordDelivery({ appId: appA.id, eventName: "pull_request", outcome: "ok", statusCode: null });
+    await s.recordDelivery({ appId: appA.id, eventName: "pull_request", outcome: "rejected", statusCode: 401 });
+    // appB: latest = ok; its one rejected row is aged OUT of the 24h window.
+    await s.recordDelivery({ appId: appB.id, eventName: "pull_request", outcome: "rejected", statusCode: 500 });
+    await s.recordDelivery({ appId: appB.id, eventName: "pull_request", outcome: "ok", statusCode: null });
+    db.raw
+      .prepare(
+        `UPDATE webhook_deliveries SET created_at = datetime('now', '-25 hours')
+         WHERE app_id = ? AND outcome = 'rejected'`,
+      )
+      .run(appB.id);
+
+    const summaries = await s.deliverySummaries([appA.id, appB.id, appC.id]);
+
+    expect(Object.keys(summaries).sort()).toEqual([appA.id, appB.id, appC.id].sort());
+    expect(summaries[appA.id]).toMatchObject({
+      latest: { event_name: "pull_request", outcome: "rejected", status_code: 401 },
+      rejected24h: 1,
+    });
+    expect(summaries[appB.id]).toMatchObject({
+      latest: { event_name: "pull_request", outcome: "ok", status_code: null },
+      rejected24h: 0, // the rejected row is 25h old — outside the window
+    });
+    expect(summaries[appC.id]).toEqual({ latest: null, rejected24h: 0 });
+  });
+
+  test("deliverySummaries returns ONLY the requested apps; an empty list is an empty map", async () => {
+    const db = createDeliveryD1();
+    const appA = await seedApp(db);
+    await seedApp(db, { slug: "app-b", githubAppId: 123459 }); // appB — never requested
+    const s = store(db);
+    await s.recordDelivery({ appId: appA.id, eventName: "ping", outcome: "ok", statusCode: null });
+
+    expect(await s.deliverySummaries([appA.id])).toEqual(
+      expect.objectContaining({ [appA.id]: { latest: expect.objectContaining({ outcome: "ok" }), rejected24h: 0 } }),
+    );
+    expect(Object.keys(await s.deliverySummaries([]))).toEqual([]);
+  });
+});
