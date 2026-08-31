@@ -63,6 +63,32 @@ export type FindingRow = {
 };
 
 /**
+ * Input for the cross-PR recurrence aggregation (plan 21 Task 4, AC-21c).
+ * Both filters are optional: omitted `window_days` = all-time; omitted
+ * `repo` = all repos. `window_days` is used as-is (the plan 22 API layer
+ * owns validation/clamping per AL-22-1).
+ */
+export type RecurrenceQuery = {
+  /** Only reviews with `reviewed_at` within the last N days count. */
+  window_days?: number;
+  /** Restrict the aggregation to one owner/repo pair. */
+  repo?: { owner: string; repo: string };
+};
+
+/**
+ * One recurrence group (plan 21 Task 4): a fingerprint seen in >= 2
+ * distinct reviews. `count` = distinct reviews; `repos` = distinct
+ * owner/repo pairs among them (sorted); `title_sample` = any one title
+ * for the fingerprint (MIN, deterministic).
+ */
+export type RecurrenceGroup = {
+  fingerprint: string;
+  title_sample: string;
+  count: number;
+  repos: string[];
+};
+
+/**
  * Narrow D1 face the ArtifactStore adapter depends on (plan Clarify 5):
  * prepare/bind/first/all/run + batch. A real `D1Database` satisfies this
  * structurally; tests provide a bun:sqlite-backed implementation via
