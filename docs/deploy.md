@@ -194,6 +194,26 @@ smoke → record the digest.
    record in § Image pins and digest record; update the record on EVERY
    deploy (a stale record makes the "which image is live" audit wrong).
 
+### Sandbox image — U-001 synthesis verification (plan 25 Task 2)
+
+The image ships `/opt/verify-synthesis.sh` (repo `sandbox-image/verify-synthesis.sh`,
+COPY'd into the digest — plan 25 AL-25-3). It replays the U-001 evidence on
+ANY image build: custom-provider models.yml synthesis through the runner's
+real `writePerReviewModelsYaml` (keyless declaration `u001-verify` /
+`https://example.invalid/v1` / `verify-model`), omp SDK `ModelRegistry`
+resolution of the synthesized file, and a minimal `createAgentSession` on the
+synthesized `agentDir`. Load-level only — no provider call, no network, zero
+secrets; idempotent (`/tmp/omp-agent-<uuid>` only, cleaned up). Not a build
+gate; run manually after a build/deploy:
+
+```bash
+docker run --rm --entrypoint /opt/verify-synthesis.sh <image>
+# expect U001_VERIFY=pass and exit 0 (KEY=VALUE evidence lines per layer)
+# --entrypoint is required — the sandbox default entrypoint is long-lived
+# (it keeps the server alive after the user command) and would never
+# surface this one-shot script's exit code.
+```
+
 ## Post-deploy smoke
 
 1. **Cron trigger registered** — the `wrangler deploy` output lists the cron
@@ -454,15 +474,15 @@ controls are installed (the Dockerfile carries the documentation block only).
 
 ## Image pins and digest record
 
-Four pins — re-verified this iteration, **no bump** (plan 19 constraint;
-upgrading any pin is a future iteration's explicit decision):
+Four pins — mstar-harness bumped to **3.5.1** this iteration (plan 25 Task 1,
+the explicit upgrade decision); base image / Bun / gh re-verified, no bump:
 
 | Pin | Value | Where |
 |---|---|---|
 | base image | `docker.io/cloudflare/sandbox:0.12.8` | `sandbox-image/Dockerfile` FROM |
 | Bun | `1.4.0` | `sandbox-image/Dockerfile` |
 | gh CLI | `2.98.0` | `sandbox-image/Dockerfile` |
-| mstar-harness | `f1b60df0b3b2e29b9a904edb4077e52cf6d7ca66` (3.5.0) | `sandbox-image/Dockerfile` |
+| mstar-harness | `bde437075aeefd4cdb4e87060c6c44149968c3b0` (3.5.1) | `sandbox-image/Dockerfile` |
 
 **In-image DEFAULT model selector: `ark-plan/deepseek-v4-flash`** (pins:
 `src/review/runtime-omp.ts` `DEFAULT_MODEL_PATTERN` +

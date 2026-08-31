@@ -24,7 +24,7 @@
  */
 
 import { afterEach, describe, expect, test } from "bun:test";
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { CustomProviderDeclaration } from "../../src/review/runtime";
@@ -239,5 +239,23 @@ describe("models base path resolution and per-review write (AL-23-1)", () => {
       delete process.env.PI_CODING_AGENT_DIR;
       rmSync(fixtureDir, { recursive: true, force: true });
     }
+  });
+
+  test("writePerReviewModelsYaml removes the /tmp dir when synthesis throws mid-write", async () => {
+    const fixtureDir = mkdtempSync(join(tmpdir(), "omp-models-badbase-"));
+    // A base WITHOUT a top-level `providers:` map makes synthesizeModelsYaml
+    // throw AFTER mkdir created /tmp/omp-agent-<uuid> — the exact mid-write
+    // window the self-clean covers (plan 25 qc3 S-001).
+    writeFileSync(join(fixtureDir, "models.yml"), "# no providers map\n");
+    process.env.PI_CODING_AGENT_DIR = fixtureDir;
+    const before = new Set(readdirSync("/tmp").filter((n) => n.startsWith("omp-agent-")));
+    try {
+      await expect(writePerReviewModelsYaml([CUSTOM])).rejects.toThrow(/no top-level `providers:` map/);
+    } finally {
+      delete process.env.PI_CODING_AGENT_DIR;
+      rmSync(fixtureDir, { recursive: true, force: true });
+    }
+    const leaked = readdirSync("/tmp").filter((n) => n.startsWith("omp-agent-") && !before.has(n));
+    expect(leaked).toEqual([]);
   });
 });
