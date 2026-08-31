@@ -30,8 +30,9 @@ export type Env = {
   REVIEW_ENABLED?: string;
   /**
    * Dashboard (plan 08 B0) GitHub OAuth App credentials — user-to-server
-   * login, DISTINCT from the review GitHub App above
-   * (.mstar/iterations/v0.3/guides/oauth-vs-github-app.md). Unset →
+   * login, DISTINCT from the review GitHub App (whose Worker-env secrets
+   * were retired in plan 24 — per-App credentials now live encrypted in
+   * D1) (.mstar/iterations/v0.3/guides/oauth-vs-github-app.md). Unset →
    * /dashboard routes fail closed.
    */
   GITHUB_OAUTH_CLIENT_ID?: string;

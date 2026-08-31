@@ -2,23 +2,25 @@
 
 A GitHub App that self-deploys for automated PR reviews and bug detection, utilizing omp.
 
-The Worker verifies GitHub webhooks, enqueues review jobs, runs each review in a
-Cloudflare Sandbox container (real omp session with the mstar-harness plugin),
-and posts the result as a single upserted comment on the PR.
+The Worker verifies GitHub webhooks on the per-App route
+(`POST /webhook/:appSlug` — the only review entry; each registered GitHub App
+gets its own slug), enqueues review jobs, runs each review in a Cloudflare
+Sandbox container (real omp session with the mstar-harness plugin), and posts
+the result as a single upserted comment on the PR.
 
 ## Architecture (one line)
 
-`GitHub webhook → Worker (verify + classify) → Queue → Consumer → Sandbox (clone + omp review) → Issues comment upsert + D1 store`
+`GitHub webhook → POST /webhook/:appSlug (verify + classify) → Queue → Consumer → Sandbox (clone + omp review) → Issues comment upsert + D1 store`
 
 ## Environment variables
 
 ### Worker secrets (`wrangler secret put`)
 
-| Var | Required | Purpose |
-|---|---|---|
-| `APP_ID` | yes | GitHub App ID (numeric) |
-| `PRIVATE_KEY` | yes | GitHub App private key PEM (PKCS#1 or PKCS#8; OpenSSH rejected) |
-| `WEBHOOK_SECRET` | yes | GitHub webhook secret (fail-closed: missing/empty/`"development"` → 500) |
+There are no Worker-level GitHub App secrets: each App's credentials (private
+key + webhook secret) are stored encrypted in D1 and resolved per slug at
+request time. The full secrets inventory (dashboard OAuth, session, D1
+encryption key, model key, alert webhook, provider keys) lives in
+`docs/deploy.md` § Secrets and vars inventory.
 
 ### Worker settings (plain vars / `wrangler.jsonc` `vars`)
 

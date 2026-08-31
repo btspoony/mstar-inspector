@@ -139,7 +139,8 @@ app.post("/webhook/:appSlug", async (c) => {
 
   // Kill-switch BEFORE the slug lookup (spec ordering; zero side effects —
   // no D1 read when reviews are off). The flag is still passed to
-  // classifyWebhook below so both routes share the identical classifier.
+  // classifyWebhook below so the handler and classifier share the same
+  // computed REVIEW_ENABLED.
   const reviewEnabled = c.env.REVIEW_ENABLED === "true";
   if (!reviewEnabled) {
     webhookWarn(
