@@ -805,6 +805,58 @@ describe("createReviewConsumer", () => {
     expect(warn).toBeDefined();
   });
 
+  test("in-flight legacy-shape payload (absent appRef) → structured channel + healthy batch sibling completes (plan 24 F-001)", async () => {
+    reset();
+    runnerStdout = JSON.stringify(VALID_OUTPUT);
+    const db = createSeededTestD1();
+    const consumer = createReviewConsumer(makeEnv({ DB: db as never }), testLog, testOverrides);
+
+    // The in-flight legacy shape: a pre-deploy queue message whose payload
+    // carries NO appRef (impossible at the type layer post-24 — cast to
+    // simulate the stranded message AL-24-4 accepts). It sits AFTER a
+    // healthy sibling in the same batch: the sibling's review completes,
+    // then the legacy message throws INSIDE the try and flows through the
+    // structured channel (review failed: log + AL-6 row + rethrow) instead
+    // of leaving the batch with zero D1/log trace.
+    const legacyPayload = makePayload() as unknown as { appRef?: unknown };
+    delete legacyPayload.appRef;
+    const batch = {
+      queue: "review-queue",
+      messages: [
+        {
+          id: "m-healthy",
+          timestamp: new Date(),
+          attempts: 1,
+          body: makePayload(),
+          retry: () => {},
+          ack: () => {},
+        },
+        {
+          id: "m-legacy",
+          timestamp: new Date(),
+          attempts: 1,
+          body: legacyPayload as ReviewJobPayload,
+          retry: () => {},
+          ack: () => {},
+        },
+      ],
+    } as unknown as MessageBatch<ReviewJobPayload>;
+
+    await expect(consumer(batch)).rejects.toThrow(TypeError);
+
+    // The healthy sibling completed before the legacy message threw.
+    expect(commenterCalls.filter((c) => c.op === "post")).toHaveLength(1);
+    expect(reviewCount(db)).toBe(1);
+    expect(destroyCalls).toBe(1);
+    // The structured channel caught the legacy message: error log + AL-6 row.
+    const errLine = logLines.find((l) => l.level === "error" && l.msg.startsWith("review failed:"));
+    expect(errLine).toBeDefined();
+    expect(errLine!.msg).toContain("appId");
+    expect(failureRows(db)).toHaveLength(1);
+    expect(failureRows(db)[0]).toMatchObject({ stage: "pipeline" });
+    expect(String(failureRows(db)[0]!.error)).toContain("appId");
+  });
+
   test("numstat failure → failure row (stage=sandbox) + no runner/post/insert, rethrow, destroy", async () => {
     reset();
     numstatExitCode = 1;

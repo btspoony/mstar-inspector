@@ -40,9 +40,11 @@
  * collapse; both chains share the scan/upsert/403-404-replan mechanics
  * (upsertMarkerComment).
  *
- * Secrets: APP_ID/PRIVATE_KEY come from the D1 row's decrypted per-App
- * credentials; the installation token is minted in memory and never logged
- * or stored (compass D).
+ * Secrets: the CommenterEnv APP_ID/PRIVATE_KEY pair (same literal names as
+ * the retired Worker env secrets) is populated by consumer.ts
+ * resolveCommenter from the D1 row's decrypted per-App credentials, never
+ * from the env; the installation token is minted in memory and never
+ * logged or stored (compass D).
  * Model-produced text (summary/finding bodies) is redacted BEFORE it reaches
  * this module (consumer choke point, SEC-02 fix) so a prompt-injected token
  * can never appear in the public review body or D1 raw_output. The DEGRADED

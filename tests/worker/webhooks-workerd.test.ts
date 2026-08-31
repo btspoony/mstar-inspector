@@ -102,11 +102,11 @@ describe("module-level verifier cache (F-005 + plan 15 L1)", () => {
   });
 
   test("distinct cacheKeys never share an instance (per-App row-id isolation)", () => {
-    const legacy = getWebhooks("legacy", SECRET);
+    const second = getWebhooks("another-app-row-id", SECRET);
     const perApp = getWebhooks("some-app-row-id", SECRET);
-    expect(perApp).not.toBe(legacy);
+    expect(perApp).not.toBe(second);
     // Same key again → the memoized instance (not a third one).
-    expect(getWebhooks("legacy", SECRET)).toBe(legacy);
+    expect(getWebhooks("another-app-row-id", SECRET)).toBe(second);
   });
 
   test("secret mismatch on the same cacheKey → rebuild + REPLACE (rotation evicts the old entry exactly)", () => {

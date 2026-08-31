@@ -469,8 +469,13 @@ type ProcessDeps = {
   getSandbox: (binding: unknown, id: string) => Promise<ReviewSandbox>;
 };
 
-/** Structured base fields derived from the job payload (no sandbox/sha yet). */
-function toBaseFields(payload: ReviewJobPayload): ConsumerLogFields {
+/**
+ * The job's PR identity, derivable WITHOUT appRef — the AL-24-4 in-flight
+ * legacy message (absent appRef) throws in toBaseFields, but the structured
+ * failure channel still carries these (only app_id needed the deref, and
+ * ConsumerLogFields requires the base identity).
+ */
+function payloadIdentityFields(payload: ReviewJobPayload): ConsumerLogFields {
   return {
     event: payload.triggered_by === "pull_request" ? "pull_request" : "review_command",
     action: payload.action,
@@ -479,6 +484,13 @@ function toBaseFields(payload: ReviewJobPayload): ConsumerLogFields {
     repo: payload.repo,
     pr_number: payload.pr_number,
     head_sha: payload.head_sha,
+  };
+}
+
+/** Structured base fields derived from the job payload (no sandbox/sha yet). */
+function toBaseFields(payload: ReviewJobPayload): ConsumerLogFields {
+  return {
+    ...payloadIdentityFields(payload),
     // Every job carries the appId reference in every structured log line
     // (an id, never a credential — lock L4; plan 24: appRef is required).
     app_id: payload.appRef.appId,
@@ -1030,7 +1042,6 @@ export function createReviewConsumer(
 }
 
 async function processMessage(payload: ReviewJobPayload, deps: ProcessDeps): Promise<ProcessOutcome> {
-  const baseFields = toBaseFields(payload);
   // Unique per attempt (plan Clarify #11): a destroyed sandbox's id is never
   // reused — attach-after-destroy behavior is unknown, uniqueness wins.
   const sandboxId = `review-${crypto.randomUUID()}`;
@@ -1074,8 +1085,16 @@ async function processMessage(payload: ReviewJobPayload, deps: ProcessDeps): Pro
   // assembled. Hoisted so the catch site's best-effort failure row can
   // exact-redact the error detail too (SEC-03).
   let secretValues: string[] = [];
+  // F-001 (plan 24 QC wave 1): toBaseFields derefs payload.appRef.appId, so
+  // an in-flight pre-deploy message (absent appRef — AL-24-4 accepts the
+  // TypeError) must throw INSIDE the try: it then flows through the
+  // established structured channel (review failed: log + AL-6
+  // review_failures row + rethrow). Pure relocation — no runtime guard
+  // (AL-24-4 forbids one).
+  let baseFields: ConsumerLogFields | undefined;
 
   try {
+    baseFields = toBaseFields(payload);
     // Review tier (AC-S7-level): resolved BEFORE any sandbox/KV step so a
     // misconfigured REVIEW_LEVEL fails loud (structured log + rethrow)
     // without touching the in-flight guard.
@@ -1594,7 +1613,7 @@ async function processMessage(payload: ReviewJobPayload, deps: ProcessDeps): Pro
     const detail = err instanceof Error ? err.message : String(err);
     deps.log.error(
       {
-        ...(fields ?? { ...baseFields, sandbox_id: sandboxId }),
+        ...(fields ?? { ...(baseFields ?? payloadIdentityFields(payload)), sandbox_id: sandboxId }),
         // d5-budget AC-S10-logs: the failure line carries the level's budget
         // once known (post-step-3 `fields` already has it; this spread covers
         // the pre-checkout fallback) and the runner's elapsed wall-clock once
@@ -1636,7 +1655,7 @@ async function processMessage(payload: ReviewJobPayload, deps: ProcessDeps): Pro
     } catch (recordErr) {
       const recordDetail = recordErr instanceof Error ? recordErr.message : String(recordErr);
       deps.log.warn(
-        fields ?? { ...baseFields, sandbox_id: sandboxId },
+        fields ?? { ...(baseFields ?? payloadIdentityFields(payload)), sandbox_id: sandboxId },
         `review_failures insert failed (rethrow unchanged): ${recordDetail}`,
       );
     }
@@ -1646,7 +1665,10 @@ async function processMessage(payload: ReviewJobPayload, deps: ProcessDeps): Pro
     // put attempted) OR failed — either way the next attempt may proceed.
     // releaseReviewGuard never throws (KV failure → warn; TTL expires it).
     if (guardHeld && level !== undefined) {
-      await releaseReviewGuard(deps.env.IDEMPOTENCY_KV, guardKey, level, fields ?? baseFields, deps.log);
+      // The guard is acquired only after baseFields resolves (try statement
+      // 1), so the payload fallback below is unreachable on this path — it
+      // only exists to keep the ConsumerLogFields type total.
+      await releaseReviewGuard(deps.env.IDEMPOTENCY_KV, guardKey, level, fields ?? baseFields ?? payloadIdentityFields(payload), deps.log);
     }
     if (sandbox !== null) {
       try {
@@ -1654,7 +1676,7 @@ async function processMessage(payload: ReviewJobPayload, deps: ProcessDeps): Pro
       } catch (err) {
         const detail = err instanceof Error ? err.message : String(err);
         deps.log.warn(
-          { ...(fields ?? baseFields), sandbox_id: sandboxId },
+          { ...(fields ?? baseFields ?? payloadIdentityFields(payload)), sandbox_id: sandboxId },
           `sandbox destroy failed: ${detail}`,
         );
       }

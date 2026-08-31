@@ -161,12 +161,16 @@ smoke → record the digest.
 
 1. `bun install`
 2. `bun run typecheck && bun test` — both must exit 0.
+
+### Sandbox smoke
+
 3. Local sandbox smoke — builds the image and exercises the real sandbox path
    via `wrangler dev` (config `wrangler.smoke.jsonc`, entry
    `src/pipeline/smoke-entry.ts`). The orchestrator reads **shell env only**
    (never Worker secrets, never D1): `SMOKE_APP_ID` + `SMOKE_PRIVATE_KEY`
-   (inline PEM or `~`-relative/absolute path — the same dual form the
-   dashboard accepts) for the installation-token mint, plus the optional
+   (inline PEM or `~`-relative/absolute path — the local orchestrator's
+   dual form, resolved by scripts/sandbox-smoke.ts) for the
+   installation-token mint, plus the optional
    `INSTALLATION_ID` (default 156621513), `GH_REPO` (default
    btspoony/todo-bots), `GH_PR` (default 1), `SMOKE_ROUTE` (default `/smoke`),
    and `ARK_API_KEY` (required when `SMOKE_ROUTE=/smoke-review`):
