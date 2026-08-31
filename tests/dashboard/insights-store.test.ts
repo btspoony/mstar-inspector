@@ -22,7 +22,7 @@
  * Fixtures seed through raw INSERTs (explicit reviewed_at control — the
  * window and week-bucket tests need timestamps, which store.put's
  * datetime('now') default cannot provide). The bun:sqlite double applies
- * migrations 0001..0010 (tests/store/helpers.ts — the full current shape;
+ * migrations 0001..0013 (tests/store/helpers.ts — the full current shape;
  * 0011/0012 do not exist in this branch).
  */
 import { describe, expect, test } from "bun:test";

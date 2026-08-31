@@ -89,6 +89,7 @@ import {
   removedPage,
   type PageNotice,
 } from "./views";
+import { clampWindow, createInsightsStore } from "./insights-store";
 
 export const dashboardApp = new Hono<{ Bindings: Env }>();
 
@@ -1146,6 +1147,56 @@ dashboardApp.get("/", async (c) => {
   const db = dashboardD1(c.env);
   const member = db ? await getUserByLogin(db, session.login) : null;
   return c.html(dashboardPage(session, member?.role === "admin"));
+});
+// --- Plan 22 T2: Review Health insights summary API -------------------------
+//
+// JSON read face for the insights aggregation (src/dashboard/insights-store.ts
+// — the T1 module-boundary leaf, zero store/pipeline/review imports, AL-22-1
+// candidate A). The mount-level guard above has already verified membership
+// on every /dashboard route, so this handler adds ZERO auth code (AL-22-1):
+// it only parses the two query params and serializes the store result.
+//   - window: pure integer days, default 30. Non-integer (incl. negative and
+//     empty) → 400 (AL-22-1: malformed 400). Values > 90 are NOT rejected —
+//     the single clamp point caps them at 90, and the response echoes the
+//     EFFECTIVE window so clients see what the aggregation actually used.
+//   - repo: optional owner/repo filter, malformed → 400.
+// Response = the store return plus the two echoed params (snake_case keys).
+const INSIGHTS_REPO_PATTERN = /^[^/\s]+\/[^/\s]+$/;
+
+dashboardApp.get("/api/insights/summary", async (c) => {
+  const db = dashboardD1(c.env);
+  if (!db) return c.text("dashboard storage is not configured", 500);
+
+  let windowDays = 30;
+  const rawWindow = c.req.query("window");
+  if (rawWindow !== undefined) {
+    if (!/^\d+$/.test(rawWindow)) {
+      return c.json({ error: "window must be a non-negative integer number of days" }, 400);
+    }
+    windowDays = Number(rawWindow);
+  }
+
+  let repoFilter: { owner: string; repo: string } | undefined;
+  const rawRepo = c.req.query("repo");
+  if (rawRepo !== undefined) {
+    if (!INSIGHTS_REPO_PATTERN.test(rawRepo)) {
+      return c.json({ error: "repo must be owner/repo" }, 400);
+    }
+    const slash = rawRepo.indexOf("/");
+    repoFilter = { owner: rawRepo.slice(0, slash), repo: rawRepo.slice(slash + 1) };
+  }
+
+  const insights = await createInsightsStore(db, { windowDays, repo: repoFilter });
+  return c.json({
+    window_days: clampWindow(windowDays),
+    ...(repoFilter !== undefined ? { repo: rawRepo } : {}),
+    reviews_total: insights.reviewsTotal,
+    findings_by_severity: insights.findingsBySeverity,
+    findings_by_category: insights.findingsByCategory,
+    verdict_distribution: insights.verdictDistribution,
+    weekly_trend: insights.weeklyTrend,
+    recurring_top: insights.recurringTop,
+  });
 });
 
 // Placeholder actions (IA routing table): every POST under /dashboard that is

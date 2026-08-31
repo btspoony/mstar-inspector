@@ -14,6 +14,7 @@ import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { createMigratedTestD1, createTestD1 } from "./helpers";
+import type { TestD1 } from "./helpers";
 import type { D1Like } from "../../src/store/types";
 
 const MIGRATIONS_DIR = join(import.meta.dir, "../../migrations");
@@ -518,5 +519,64 @@ describe("migrations/0002_mstar_review_v1.sql", () => {
       .run();
     const row = db.raw.query("SELECT envelope FROM reviews").get() as { envelope: string };
     expect(JSON.parse(row.envelope)).toEqual({ schema: "mstar.review/v1" });
+  });
+});
+describe("migrations/0013_findings_review_id_index.sql", () => {
+  /** Apply one migration file verbatim (filename order = wrangler order). */
+  function applyMigrationFile(db: TestD1, name: string): void {
+    db.raw.exec(readFileSync(join(MIGRATIONS_DIR, name), "utf8"));
+  }
+
+  test("applies cleanly over a seeded production-shaped DB (0001–0010 with live rows)", () => {
+    const db = createTestD1();
+    insertReview(db); // a live review AND finding predate the CREATE INDEX
+    db.raw
+      .prepare(
+        `INSERT INTO findings (id, review_id, severity, category, title)
+         VALUES (?, ?, ?, ?, ?)`,
+      )
+      .run("finding-1", REVIEW.id, "warning", "logic", "Null deref risk");
+    for (const name of [
+      "0003_dashboard_users.sql",
+      "0004_github_apps.sql",
+      "0005_reviews_app_id.sql",
+      "0006_app_provider_config.sql",
+      "0007_reviews_app_id_index.sql",
+      "0008_github_apps_ops.sql",
+      "0009_app_model_roles.sql",
+      "0010_review_failures.sql",
+    ]) {
+      applyMigrationFile(db, name);
+    }
+
+    // Metadata-only CREATE INDEX builds over the live rows without rewriting.
+    expect(() => applyMigrationFile(db, "0013_findings_review_id_index.sql")).not.toThrow();
+    const reviewCount = db.raw.query("SELECT COUNT(*) AS n FROM reviews").get() as { n: number };
+    expect(reviewCount.n).toBe(1);
+    const findingCount = db.raw.query("SELECT COUNT(*) AS n FROM findings").get() as { n: number };
+    expect(findingCount.n).toBe(1);
+  });
+
+  test("creates idx_findings_review_id ON findings(review_id) (fully migrated schema)", () => {
+    const db = createMigratedTestD1();
+    const index = db.raw
+      .query("SELECT tbl_name FROM sqlite_master WHERE type = 'index' AND name = 'idx_findings_review_id'")
+      .get() as { tbl_name: string } | null;
+    expect(index).not.toBeNull();
+    expect(index!.tbl_name).toBe("findings");
+    const columns = db.raw.query("PRAGMA index_info(idx_findings_review_id)").all() as Array<{ name: string }>;
+    expect(columns.map((c) => c.name)).toEqual(["review_id"]);
+  });
+
+  test("the findings-by-review hot path uses the index (EXPLAIN QUERY PLAN)", () => {
+    // Mirrors the 0007 index assertion: on the fully migrated (empty) schema
+    // the equality probe binds to the index — same planner determinism the
+    // 0007 test relies on. AL-21-2's planner-brittleness caveat applies to
+    // the GROUP-BY recurrence query, not this single-column probe.
+    const db = createMigratedTestD1();
+    const plan = db.raw
+      .query("EXPLAIN QUERY PLAN SELECT fingerprint FROM findings WHERE review_id = 'review-1'")
+      .all() as Array<{ detail: string }>;
+    expect(plan.some((p) => p.detail.includes("USING INDEX idx_findings_review_id"))).toBe(true);
   });
 });

@@ -88,7 +88,7 @@ export type InsightsD1 = {
 };
 
 /** The clamped window (default 30, >90 → 90) — the single clamp point. */
-function clampWindow(windowDays: number | undefined): number {
+export function clampWindow(windowDays: number | undefined): number {
   return windowDays === undefined ? 30 : Math.min(windowDays, 90);
 }
 
