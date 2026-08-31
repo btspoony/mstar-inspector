@@ -134,6 +134,7 @@ let tokenError: Error | undefined;
 let commentError: Error | undefined;
 let degradeError: Error | undefined;
 let deleteDegradedError: Error | undefined;
+let deleteDegradedOutcome: { deleted: number; skipped: number; errors: string[] } = { deleted: 0, skipped: 0, errors: [] };
 // Plan 18 T3 line comments: the round postReview returns (pinned into the
 // line-comments marker body), the prefetched diff, and per-method errors.
 let postRound = 1;
@@ -175,6 +176,7 @@ const fakeCommenter: ReviewCommenter = {
   deleteDegradedComment: mock(async (input: unknown) => {
     commenterCalls.push({ op: "delete-degraded", args: [input] });
     if (deleteDegradedError) throw deleteDegradedError;
+    return deleteDegradedOutcome;
   }),
   fetchPrDiff: mock(async (input: unknown) => {
     commenterCalls.push({ op: "fetch-diff", args: [input] });
@@ -330,6 +332,7 @@ function reset(): void {
   commentError = undefined;
   degradeError = undefined;
   deleteDegradedError = undefined;
+  deleteDegradedOutcome = { deleted: 0, skipped: 0, errors: [] };
   postRound = 1;
   diffError = undefined;
   lineCommentsError = undefined;
@@ -1687,6 +1690,7 @@ describe("degraded-comment lifecycle (Bugbot finding)", () => {
   test("success flow with a pre-existing degraded comment → the delete scan runs after the upsert", async () => {
     reset();
     runnerStdout = JSON.stringify(VALID_OUTPUT);
+    deleteDegradedOutcome = { deleted: 1, skipped: 1, errors: ["rate limited"] };
     const db = createMigratedTestD1();
     const consumer = createReviewConsumer(makeEnv({ DB: db as never }), testLog, testOverrides);
 
@@ -1694,7 +1698,7 @@ describe("degraded-comment lifecycle (Bugbot finding)", () => {
 
     // The delete scan runs between the overall upsert and the line-comments
     // step (the fake's deleteDegradedComment records the call; the real
-    // implementation scans + deletes the stale bot-authored comment).
+    // implementation scans + deletes the stale bot-authored comments).
     expect(commenterCalls.map((c) => c.op)).toEqual(["token", "post", "delete-degraded", "fetch-diff", "line-comments"]);
     const deleteInput = commenterCalls.find((c) => c.op === "delete-degraded")!.args[0] as {
       installationId: number;
@@ -1703,6 +1707,13 @@ describe("degraded-comment lifecycle (Bugbot finding)", () => {
       prNumber: number;
     };
     expect(deleteInput).toMatchObject({ installationId: 123, owner: "acme", repo: "widgets", prNumber: 42 });
+    // The outcome is logged as a structured warn (never throws, never blocks).
+    const warn = logLines.find((l) => l.level === "warn" && l.msg.includes("stale degraded comment cleanup"));
+    expect(warn).toBeDefined();
+    expect(warn!.msg).toContain("deleted=1, skipped=1");
+    expect(warn!.msg).toContain("rate limited");
+    expect(warn!.fields.degraded_delete_deleted).toBe(1);
+    expect(warn!.fields.degraded_delete_skipped).toBe(1);
     expect(reviewCount(db)).toBe(1);
     expect(kvPuts).toHaveLength(1);
     // The ok path resolves silently (queue auto-ack) — nothing retried.

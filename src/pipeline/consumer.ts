@@ -244,6 +244,15 @@ export type ConsumerLogFields = {
    * round. The overall comment + D1 row + KV done are unaffected.
    */
   line_comments_fallback?: boolean;
+  /**
+   * Bugbot round-2 fix: the degraded-comment cleanup outcome on the success
+   * path — how many stale bot-authored `review-degraded:v1` comments were
+   * deleted vs skipped (403/404 foreign/already-gone, or any other
+   * per-match error). Counts, never content; the error messages ride the
+   * warn line's message text.
+   */
+  degraded_delete_deleted?: number;
+  degraded_delete_skipped?: number;
 };
 
 export type ConsumerLog = {
@@ -1337,12 +1346,15 @@ async function processMessage(payload: ReviewJobPayload, deps: ProcessDeps): Pro
     }
 
     // 11a2. Degraded-comment lifecycle (Bugbot finding): the successful
-    // review supersedes any earlier degradation — scan for a bot-authored
-    // `review-degraded:v1` comment on the PR and DELETE it (Issues comments
-    // API, app-authored only). Best-effort: a delete failure is a
-    // structured warn, never throws, never blocks the review flow.
+    // review supersedes any earlier degradation — scan for bot-authored
+    // `review-degraded:v1` comments on the PR and DELETE them (Issues
+    // comments API, app-authored only). Best-effort: the delete step NEVER
+    // throws — it returns an outcome (deleted/skipped/errors) that is
+    // logged as a structured warn; a stale comment left behind is a warn,
+    // never a review blocker. The catch is a defensive guard only — the
+    // real implementation never rejects.
     try {
-      await commenter.deleteDegradedComment({
+      const deleteOutcome = await commenter.deleteDegradedComment({
         installationId: payload.installation_id,
         owner: payload.owner,
         repo: payload.repo,
@@ -1350,6 +1362,14 @@ async function processMessage(payload: ReviewJobPayload, deps: ProcessDeps): Pro
         error: "",
         rawOutput: "",
       });
+      if (deleteOutcome.deleted > 0 || deleteOutcome.skipped > 0 || deleteOutcome.errors.length > 0) {
+        deps.log.warn(
+          { ...fields, degraded_delete_deleted: deleteOutcome.deleted, degraded_delete_skipped: deleteOutcome.skipped },
+          `stale degraded comment cleanup (review stands): deleted=${deleteOutcome.deleted}, skipped=${deleteOutcome.skipped}${
+            deleteOutcome.errors.length > 0 ? `, errors=[${deleteOutcome.errors.join("; ")}]` : ""
+          }`,
+        );
+      }
     } catch (err) {
       const detail = err instanceof Error ? err.message : String(err);
       deps.log.warn(fields, `stale degraded comment delete failed (review stands): ${detail}`);

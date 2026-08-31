@@ -279,6 +279,29 @@ export function findDegradedComment(
 }
 
 /**
+ * Collect ALL bot-authored `review-degraded:v1` matches in an
+ * issues.listComments response (Bugbot round-2 fix): the delete path must
+ * clean every stale marker, not just the first — after a 403/404
+ * miss-and-replan recovery the PR can carry TWO bot markers (a foreign
+ * App's and ours). Same bot-authorship gate + prefix restriction as
+ * findDegradedComment; real review-chain markers (`review:v1`) never match.
+ */
+export function findDegradedComments(
+  comments: ReviewComment[],
+  excludeIds?: ReadonlySet<number>,
+): Array<{ id: number; body: string }> {
+  const matches: Array<{ id: number; body: string }> = [];
+  for (const comment of comments) {
+    if (excludeIds?.has(comment.id)) continue;
+    if (comment.user?.type !== "Bot") continue;
+    if (comment.body?.startsWith(DEGRADED_MARKER_PREFIX)) {
+      matches.push({ id: comment.id, body: comment.body });
+    }
+  }
+  return matches;
+}
+
+/**
  * planUpsert-equivalent for the degraded chain, restricted to bodies
  * starting with the degraded prefix: create with round=1 on a miss (or a
  * malformed marker), update with round=N+1 on a hit.
@@ -491,13 +514,13 @@ export type ReviewCommenter = {
    */
   postDegraded(input: PostDegradedInput): Promise<void>;
   /**
-   * Delete a stale bot-authored `review-degraded:v1` comment (Bugbot
+   * Delete stale bot-authored `review-degraded:v1` comments (Bugbot
    * finding — degraded-comment lifecycle): the success path calls this
-   * best-effort once a real review supersedes the degradation. Throws on
-   * any Octokit error — the consumer's never-throw guard is the catch
-   * site (a delete failure is a structured warn, never a review blocker).
+   * best-effort once a real review supersedes the degradation. NEVER
+   * throws — returns the outcome (deleted/skipped/errors) for the
+   * consumer's warn-only log line.
    */
-  deleteDegradedComment(input: PostDegradedInput): Promise<void>;
+  deleteDegradedComment(input: PostDegradedInput): Promise<DegradedDeleteOutcome>;
   /**
    * Fetch the PR diff as a unified-diff string (plan 18 Task 3 / AL-3):
    * `pulls.get` + `mediaType: { format: "diff" }` — the hunk prefilter input.
@@ -691,31 +714,50 @@ export async function postDegradedWithOctokit(octokit: PostOctokit, input: PostD
   );
 }
 
+/** Degraded-comment delete outcome (Bugbot round-2 fix): the consumer logs
+ * this instead of catching — the delete step is best-effort and never
+ * throws. `skipped` counts 403/404 (foreign App's marker or already gone)
+ * and any other per-match error; `errors` carries the non-403/404
+ * messages so the warn line stays actionable.
+ */
+export type DegradedDeleteOutcome = {
+  deleted: number;
+  skipped: number;
+  errors: string[];
+};
+
 /**
- * Delete a stale bot-authored `review-degraded:v1` comment (Bugbot finding —
- * degraded-comment lifecycle): scan the FULL comment list (same WF-001
- * pagination as the upsert — the marker can sit beyond page 1 on a busy
- * PR), and when OUR degraded comment exists, DELETE it via the Issues
- * comments API. The successful review supersedes the degradation, so the
- * stale "Review degraded" comment must not outlive it. App-authored only
- * (findDegradedComment's bot-authorship gate) — a human-planted marker is
- * never touched. No degraded comment → no API call. Throws on any Octokit
- * error — the consumer's never-throw guard is the catch site (a delete
- * failure is a structured warn, never a review blocker).
+ * Delete stale bot-authored `review-degraded:v1` comments (Bugbot finding —
+ * degraded-comment lifecycle, round-2 fix): scan the FULL comment list
+ * (same WF-001 pagination as the upsert — the marker can sit beyond page 1
+ * on a busy PR), collect EVERY bot-authored degraded marker (after a
+ * 403/404 miss-and-replan recovery the PR can carry TWO — a foreign App's
+ * and ours), and DELETE each via the Issues comments API. The successful
+ * review supersedes the degradation, so stale "Review degraded" comments
+ * must not outlive it. App-authored only (findDegradedComments' bot-
+ * authorship gate) — a human-planted marker is never touched. No degraded
+ * comment → no API call. NEVER throws: 403/404 on a match (foreign or
+ * already gone) → skip and continue; any other error → skip that match and
+ * surface the message in the outcome, still attempting the remaining
+ * deletes. The consumer logs the outcome (warn-only, best-effort).
  */
 export async function deleteDegradedCommentWithOctokit(
   octokit: PostOctokit,
   input: PostDegradedInput,
-): Promise<void> {
+): Promise<DegradedDeleteOutcome> {
   const issues = octokit.rest?.issues;
   if (
     !issues?.listComments ||
     !issues?.deleteComment ||
     typeof octokit.paginate !== "function"
   ) {
-    throw new Error(
-      "octokit is missing rest.issues.listComments/deleteComment / paginate — cannot delete the degraded comment; check the injected auth surface",
-    );
+    return {
+      deleted: 0,
+      skipped: 0,
+      errors: [
+        "octokit is missing rest.issues.listComments/deleteComment / paginate — cannot delete the degraded comment; check the injected auth surface",
+      ],
+    };
   }
   const comments = await octokit.paginate(issues.listComments, {
     owner: input.owner,
@@ -723,13 +765,29 @@ export async function deleteDegradedCommentWithOctokit(
     issue_number: input.prNumber,
     per_page: 100,
   });
-  const existing = findDegradedComment(comments);
-  if (existing === null) return;
-  await issues.deleteComment({
-    owner: input.owner,
-    repo: input.repo,
-    comment_id: existing.id,
-  });
+  const matches = findDegradedComments(comments);
+  const outcome: DegradedDeleteOutcome = { deleted: 0, skipped: 0, errors: [] };
+  for (const match of matches) {
+    try {
+      await issues.deleteComment({
+        owner: input.owner,
+        repo: input.repo,
+        comment_id: match.id,
+      });
+      outcome.deleted += 1;
+    } catch (err) {
+      // A RequestError from octokit carries `.status` (duck-typed so the
+      // mock-octokit tests can reject with a plain { status: N }).
+      const status = typeof err === "object" && err !== null ? (err as { status?: unknown }).status : undefined;
+      if (status === 403 || status === 404) {
+        outcome.skipped += 1;
+        continue;
+      }
+      outcome.skipped += 1;
+      outcome.errors.push(err instanceof Error ? err.message : String(err));
+    }
+  }
+  return outcome;
 }
 
 // ---------------------------------------------------------------------------
@@ -1017,7 +1075,7 @@ export function createReviewCommenter(env: CommenterEnv): ReviewCommenter {
       await postDegradedWithOctokit(await getOctokit(input.installationId), input);
     },
     async deleteDegradedComment(input) {
-      await deleteDegradedCommentWithOctokit(await getOctokit(input.installationId), input);
+      return deleteDegradedCommentWithOctokit(await getOctokit(input.installationId), input);
     },
     async fetchPrDiff(input) {
       return fetchPrDiffWithOctokit(await getOctokit(input.installationId), input);

@@ -149,8 +149,8 @@ const legacyCommenter: ReviewCommenter = {
   }),
   // Bugbot degraded-comment lifecycle: the success path runs the delete
   // scan (no stale comment → the real implementation finds nothing); the
-  // double is a no-op so the flow exercises the real call.
-  deleteDegradedComment: mock(async () => {}),
+  // double is a no-op outcome so the flow exercises the real call.
+  deleteDegradedComment: mock(async () => ({ deleted: 0, skipped: 0, errors: [] })),
   // Plan 18 T3 line comments: VALID_OUTPUT has no findings → never called.
   fetchPrDiff: mock(async () => {
     throw new Error("unexpected: no qualifying findings → no diff prefetch");
@@ -174,8 +174,8 @@ const appCommenterFactory = mock((_cred: CommenterEnv): ReviewCommenter => ({
   }),
   // Bugbot degraded-comment lifecycle: the success path runs the delete
   // scan (no stale comment → the real implementation finds nothing); the
-  // double is a no-op so the flow exercises the real call.
-  deleteDegradedComment: mock(async () => {}),
+  // double is a no-op outcome so the flow exercises the real call.
+  deleteDegradedComment: mock(async () => ({ deleted: 0, skipped: 0, errors: [] })),
   // Plan 18 T3 line comments: VALID_OUTPUT has no findings → never called.
   fetchPrDiff: mock(async () => {
     throw new Error("unexpected: no qualifying findings → no diff prefetch");
