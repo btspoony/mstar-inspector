@@ -9,6 +9,7 @@
 import { MODEL_ROLE_IDS, PROVIDER_IDS, type MaskedProviderKey } from "./app-config-store";
 import type { AppInstallationRow } from "./apps-store";
 import type { DashboardUserRow } from "./users";
+import type { Insights } from "./insights-store";
 
 /** Escape GitHub-sourced user data before HTML interpolation (XSS guard). */
 export function escapeHtml(value: string): string {
@@ -265,7 +266,7 @@ function shellHeader(user: { login: string; name?: string }, adminNav = false): 
   const members = adminNav ? ` · <a href="/dashboard/members">Members</a>` : "";
   return `<header>
     <h1>mstar-inspector</h1>
-    <span class="user">Signed in as ${escapeHtml(display)} · <a href="/dashboard/apps">Apps</a>${members} · <a href="/dashboard/logout">Logout</a></span>
+    <span class="user">Signed in as ${escapeHtml(display)} · <a href="/dashboard/apps">Apps</a> · <a href="/dashboard/insights">Insights</a>${members} · <a href="/dashboard/logout">Logout</a></span>
   </header>`;
 }
 
@@ -835,6 +836,148 @@ export function errorPage(message: string): string {
       <strong>Sign-in failed.</strong> ${escapeHtml(message)}
       No session was created. Return to <a href="/dashboard/login">/dashboard/login</a> to try again.
     </div>
+  </main>`,
+  );
+}
+
+/**
+ * Review Health insights panel (plan 22 Task 3, spec § M4b + § DESIGN.md
+ * 意图): the member-visible HTML face of the SAME store aggregation as the
+ * JSON API (GET /dashboard/api/insights/summary — one store call, two
+ * faces). Five cards: window/repo summary (reviews total + verdict
+ * distribution), findings by severity (horizontal bars), findings by
+ * category, weekly trend (Monday-anchored weeks), and the recurring-top
+ * list (title + count + repos — the fingerprint technical id NEVER
+ * renders). Existing Level 1 tokens only (.status/.note/.meta/.keys/.id/
+ * .enabled rhythm); the severity bars are inline-styled spans reusing the
+ * CSS custom properties (no new classes, no new DESIGN tokens). Zero JS.
+ * Every user-controlled string (title_sample, repo) is escaped. Empty
+ * state: zero reviews in the window → the summary card carries the note
+ * and the data cards are omitted; a non-empty window with no recurrences
+ * shows the recurring card's own empty line.
+ */
+export function insightsPage(
+  user: { login: string; name?: string },
+  insights: Insights,
+  opts: { windowDays: number; repo?: string },
+): string {
+  const {
+    reviewsTotal,
+    findingsBySeverity,
+    findingsByCategory,
+    verdictDistribution,
+    weeklyTrend,
+    recurringTop,
+  } = insights;
+  const windowLabel = `last ${opts.windowDays} day${opts.windowDays === 1 ? "" : "s"}`;
+  const repoLabel = opts.repo ? ` · repo ${escapeHtml(opts.repo)}` : "";
+
+  const verdictLine = verdictDistribution
+    .map((v) => `${escapeHtml(v.verdict)} <span class="id">${v.count}</span>`)
+    .join(" · ");
+
+  // Severity bars: width relative to the top bucket; inline styles reuse
+  // the existing CSS custom properties (no new classes, no new tokens).
+  const maxSeverity = Math.max(1, ...findingsBySeverity.map((s) => s.count));
+  const severityRows = findingsBySeverity
+    .map((s) => {
+      const pct = Math.round((s.count / maxSeverity) * 100);
+      return `<li>
+        <strong>${escapeHtml(s.severity)}</strong>
+        <span class="meta"><span class="id">${s.count}</span> finding${s.count === 1 ? "" : "s"}</span>
+        <span style="display:block;height:8px;border-radius:var(--rounded-sm);background:var(--blue-700);width:${pct}%"></span>
+      </li>`;
+    })
+    .join("\n");
+
+  const categoryRows = findingsByCategory
+    .map(
+      (c) => `<li>
+        <strong>${escapeHtml(c.category ?? "uncategorized")}</strong>
+        <span class="meta"><span class="id">${c.count}</span> finding${c.count === 1 ? "" : "s"}</span>
+      </li>`,
+    )
+    .join("\n");
+
+  const trendRows = weeklyTrend
+    .map(
+      (w) => `<li>
+        <strong>${escapeHtml(w.week_start)}</strong>
+        <span class="meta"><span class="id">${w.reviews}</span> review${w.reviews === 1 ? "" : "s"} · <span class="id">${w.findings}</span> finding${w.findings === 1 ? "" : "s"}</span>
+      </li>`,
+    )
+    .join("\n");
+
+  const recurringRows = recurringTop
+    .map(
+      (r) => `<li>
+        <strong>${escapeHtml(r.title_sample)}</strong>
+        <span class="meta"><span class="id">${r.count}</span> review${r.count === 1 ? "" : "s"} · ${r.repos.map(escapeHtml).join(", ")}</span>
+      </li>`,
+    )
+    .join("\n");
+
+  const empty = reviewsTotal === 0;
+  const summaryCard = `<section class="enabled">
+      <h2>Review health</h2>
+      <p class="status">Window: ${windowLabel}${repoLabel}</p>
+      <p class="status">Reviews: <span class="id">${reviewsTotal}</span></p>
+      ${
+        empty
+          ? '<p class="note">No reviews in this window.</p>'
+          : `<p class="status">Verdicts: ${verdictLine}</p>`
+      }
+    </section>`;
+
+  const dataCards = empty
+    ? ""
+    : `<section class="enabled">
+      <h2>Findings by severity</h2>
+      ${
+        severityRows === ""
+          ? '<p class="status">No findings in this window.</p>'
+          : `<ul class="keys">
+      ${severityRows}
+      </ul>`
+      }
+    </section>
+    <section class="enabled">
+      <h2>Findings by category</h2>
+      ${
+        categoryRows === ""
+          ? '<p class="status">No findings in this window.</p>'
+          : `<ul class="keys">
+      ${categoryRows}
+      </ul>`
+      }
+    </section>
+    <section class="enabled">
+      <h2>Weekly trend</h2>
+      ${
+        trendRows === ""
+          ? '<p class="status">No reviews in this window.</p>'
+          : `<ul class="keys">
+      ${trendRows}
+      </ul>`
+      }
+    </section>
+    <section class="enabled">
+      <h2>Recurring findings</h2>
+      ${
+        recurringRows === ""
+          ? '<p class="status">No recurring findings in this window.</p>'
+          : `<ul class="keys">
+      ${recurringRows}
+      </ul>`
+      }
+    </section>`;
+
+  return page(
+    "Review health",
+    `${shellHeader(user)}
+  <main>
+    ${summaryCard}
+    ${dataCards}
   </main>`,
   );
 }

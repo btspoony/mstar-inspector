@@ -81,6 +81,7 @@ import {
   deniedPage,
   errorPage,
   forbiddenPage,
+  insightsPage,
   manifestConfirmPage,
   manifestErrorPage,
   manifestStartPage,
@@ -1197,6 +1198,52 @@ dashboardApp.get("/api/insights/summary", async (c) => {
     weekly_trend: insights.weeklyTrend,
     recurring_top: insights.recurringTop,
   });
+});
+
+// --- Plan 22 T3: Review Health insights HTML panel --------------------------
+//
+// The member-visible HTML face of the SAME store aggregation as the JSON
+// API above (one store call, two faces). The mount-level guard has already
+// verified membership, so this handler adds ZERO auth code (AL-22-1); the
+// session is re-read for the shellHeader (same route-local pattern as the
+// "/" shell). Query-param contract mirrors the T2 route exactly: window
+// (integer days, default 30, >90 clamped to 90 with the EFFECTIVE value
+// echoed) and optional repo owner/repo filter — malformed → 400, rendered
+// as the standard error page (the JSON face's 400 shape is API-only).
+dashboardApp.get("/insights", async (c) => {
+  const sessionSecret = c.env.DASHBOARD_SESSION_SECRET;
+  if (!sessionSecret) return c.text("dashboard OAuth is not configured", 500);
+  const session = await readSessionValue(getCookie(c, SESSION_COOKIE), sessionSecret);
+  if (!session) return c.redirect("/dashboard/login", 302);
+
+  const db = dashboardD1(c.env);
+  if (!db) return c.text("dashboard storage is not configured", 500);
+
+  let windowDays = 30;
+  const rawWindow = c.req.query("window");
+  if (rawWindow !== undefined) {
+    if (!/^\d+$/.test(rawWindow)) {
+      return c.html(errorPage("window must be a non-negative integer number of days"), 400);
+    }
+    windowDays = Number(rawWindow);
+  }
+
+  let repoFilter: { owner: string; repo: string } | undefined;
+  let rawRepo: string | undefined;
+  const rawRepoParam = c.req.query("repo");
+  if (rawRepoParam !== undefined) {
+    if (!INSIGHTS_REPO_PATTERN.test(rawRepoParam)) {
+      return c.html(errorPage("repo must be owner/repo"), 400);
+    }
+    rawRepo = rawRepoParam;
+    const slash = rawRepoParam.indexOf("/");
+    repoFilter = { owner: rawRepoParam.slice(0, slash), repo: rawRepoParam.slice(slash + 1) };
+  }
+
+  const insights = await createInsightsStore(db, { windowDays, repo: repoFilter });
+  return c.html(
+    insightsPage(session, insights, { windowDays: clampWindow(windowDays), repo: rawRepo }),
+  );
 });
 
 // Placeholder actions (IA routing table): every POST under /dashboard that is
