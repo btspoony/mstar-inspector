@@ -265,6 +265,15 @@ export const MAX_CUSTOM_PROVIDER_MODEL_IDS = 32;
 export const MAX_CUSTOM_PROVIDER_MODEL_ID_LENGTH = 128;
 
 /**
+ * Model selector/chain input bound (AL-23-2 verdict, plan 23 Global
+ * Constraints): the save-chain `model_chain` and each save-roles role
+ * selector are capped at 400 characters at the ROUTE (400 re-render, zero
+ * writes); the store keeps whatever it is given verbatim — the cap is an
+ * input bound, not a storage shape.
+ */
+export const MAX_MODEL_SELECTOR_LENGTH = 400;
+
+/**
  * Declaration-shape error (plan 23 T2): an upsertCustomProvider call named
  * an id outside the `[a-z0-9][a-z0-9-]{0,63}` grammar, a non-https or
  * over-length base URL, an api outside the AL-23-1 three-form enum, an

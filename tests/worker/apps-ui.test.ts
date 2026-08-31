@@ -190,6 +190,24 @@ describe("GET /dashboard/apps (plan 13 B5 T3, member-visible list)", () => {
     expect(body).toContain("mstar-inspector-mallory");
   });
 
+  test("disabled rows withhold the pause/resume toggle — two-face consistency with the settings disconnected line (polish #2)", async () => {
+    const db = await seededWorld();
+    const apps = createAppsStore(db);
+    await apps.setAppStatus((await apps.listApps()).find((a) => a.slug === "mstar-inspector-mallory")!.id, "disabled");
+    const res = await get("/dashboard/apps", `${SESSION_COOKIE}=${await sessionCookie("octocat")}`, makeEnv(db));
+    const body = await res.text();
+    // The list hides the pause toggle on disabled rows (a disabled App is
+    // disconnected — webhook 404 — so pausing is meaningless), mirroring the
+    // settings page's gray "disconnected" line instead of the Review switch.
+    expect(body).toContain('<span class="note">disabled</span>');
+    expect(body).not.toContain('action="/dashboard/apps/mstar-inspector-mallory/pause"');
+    expect(body).not.toContain('action="/dashboard/apps/mstar-inspector-mallory/resume"');
+    expect(body).not.toContain('<span class="note">paused</span>');
+    // The row still offers its reversible status control (Enable) and Settings.
+    expect(body).toContain('action="/dashboard/apps/mstar-inspector-mallory/enable"');
+    expect(body).toContain('href="/dashboard/apps/mstar-inspector-mallory/settings"');
+  });
+
   test("manage = admin or creator (Clarify #6): admin sees controls on every row; a member without creations sees none", async () => {
     const db = await seededWorld();
     const admin = await get("/dashboard/apps", `${SESSION_COOKIE}=${await sessionCookie("octocat")}`, makeEnv(db));

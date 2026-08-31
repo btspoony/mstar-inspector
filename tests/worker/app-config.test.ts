@@ -33,6 +33,7 @@ import {
   CUSTOM_PROVIDER_API_IDS,
   InvalidCustomProviderError,
   InvalidModelSelectorError,
+  MAX_MODEL_SELECTOR_LENGTH,
   MAX_PROVIDER_KEY_LENGTH,
   MODEL_ROLE_IDS,
   PROVIDER_IDS,
@@ -1302,6 +1303,53 @@ describe("POST /dashboard/apps/:slug/settings — save-chain (op=save-chain)", (
     expect(rawCount(db, "app_model_config")).toBe(0);
   });
 
+  test("chain over 400 chars → 400 re-render, zero rows written (AL-23-2 selector/chain cap)", async () => {
+    const { db } = await seededWorld();
+    const cookie = `${SESSION_COOKIE}=${await sessionCookie("mallory")}`;
+    const res = await postForm(SETTINGS, cookie, makeEnv(db), {
+      op: "save-chain",
+      model_chain: "a".repeat(MAX_MODEL_SELECTOR_LENGTH + 1),
+    });
+    expect(res.status).toBe(400);
+    const body = await res.text();
+    expect(body).toContain("<!doctype html>");
+    expect(body).toContain(`limited to ${MAX_MODEL_SELECTOR_LENGTH}`);
+    expect(rawCount(db, "app_model_config")).toBe(0);
+  });
+
+  test("a chain of exactly 400 chars saves (the bound is inclusive)", async () => {
+    const { db, app } = await seededWorld();
+    const cookie = `${SESSION_COOKIE}=${await sessionCookie("mallory")}`;
+    const res = await postForm(SETTINGS, cookie, makeEnv(db), {
+      op: "save-chain",
+      model_chain: "a".repeat(MAX_MODEL_SELECTOR_LENGTH),
+    });
+    expect(res.status).toBe(200);
+    expect(await configStore(db).getModelChain(app.id)).toBe("a".repeat(MAX_MODEL_SELECTOR_LENGTH));
+  });
+
+  test("a duplicate model_chain field → 400 re-render, zero rows written (never a silent clear)", async () => {
+    const { db, app } = await seededWorld();
+    await configStore(db).setModelChain(app.id, "existing/model");
+    const cookie = `${SESSION_COOKIE}=${await sessionCookie("mallory")}`;
+    // parseBody({ all: true }) aggregates duplicate keys into an array — the
+    // handler must reject, never treat the array as an empty clear.
+    const res = await worker.fetch(
+      new Request(`https://worker.local${SETTINGS}`, {
+        method: "POST",
+        headers: { Cookie: cookie, "Content-Type": "application/x-www-form-urlencoded" },
+        body: "op=save-chain&model_chain=first/model&model_chain=second/model",
+      }),
+      makeEnv(db),
+    );
+    expect(res.status).toBe(400);
+    const body = await res.text();
+    expect(body).toContain("<!doctype html>");
+    expect(body).toContain("submitted more than once");
+    // The stored chain is untouched — the duplicate was never a clear.
+    expect(await configStore(db).getModelChain(app.id)).toBe("existing/model");
+  });
+
   test("non-owner member → 403, zero mutation", async () => {
     const { db } = await seededWorld();
     const res = await postForm(SETTINGS, `${SESSION_COOKIE}=${await sessionCookie("hubot")}`, makeEnv(db), {
@@ -1476,6 +1524,45 @@ describe("Role models editor (plan 17 T3 — view + save-roles op)", () => {
     expect(body).toContain("<!doctype html>");
     expect(body).toContain("root is not a known review role");
     expect(rawCount(db, "app_model_roles")).toBe(0);
+  });
+  test("a duplicate role_* field → 400 re-render, zero rows written (AL-23-2 explicit rejection)", async () => {
+    const { db, app } = await seededWorld();
+    await configStore(db).setModelRole(app.id, "code-reviewer", "old/model");
+    const cookie = `${SESSION_COOKIE}=${await sessionCookie("mallory")}`;
+    // parseBody({ all: true }) aggregates duplicate keys into an array — the
+    // handler must reject the duplicate explicitly, never silently last-wins.
+    const res = await worker.fetch(
+      new Request(`https://worker.local${SETTINGS}`, {
+        method: "POST",
+        headers: { Cookie: cookie, "Content-Type": "application/x-www-form-urlencoded" },
+        body: "op=save-roles&role_code-reviewer=openai/gpt-5&role_code-reviewer=anthropic/claude-x",
+      }),
+      makeEnv(db),
+    );
+    expect(res.status).toBe(400);
+    const body = await res.text();
+    expect(body).toContain("<!doctype html>");
+    expect(body).toContain("submitted more than once");
+    // Zero writes: the pre-existing mapping survives untouched.
+    expect(await configStore(db).getAppModelRoles(app.id)).toEqual({ "code-reviewer": "old/model" });
+    expect(rawCount(db, "app_model_roles")).toBe(1);
+  });
+
+  test("a role selector over 400 chars → 400 re-render, zero rows written (AL-23-2 selector cap)", async () => {
+    const { db, app } = await seededWorld();
+    await configStore(db).setModelRole(app.id, "code-reviewer", "old/model");
+    const res = await postForm(
+      SETTINGS,
+      `${SESSION_COOKIE}=${await sessionCookie("mallory")}`,
+      makeEnv(db),
+      roleForm({ "code-reviewer": "a".repeat(MAX_MODEL_SELECTOR_LENGTH + 1) }),
+    );
+    expect(res.status).toBe(400);
+    const body = await res.text();
+    expect(body).toContain("<!doctype html>");
+    expect(body).toContain(`limited to ${MAX_MODEL_SELECTOR_LENGTH}`);
+    // Zero partial writes: the valid entries never landed, the old row is intact.
+    expect(await configStore(db).getAppModelRoles(app.id)).toEqual({ "code-reviewer": "old/model" });
   });
 
   test("a save with NO role fields at all → 400 re-render, zero rows written (never a silent no-op)", async () => {

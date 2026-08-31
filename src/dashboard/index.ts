@@ -61,6 +61,7 @@ import {
   MAX_CUSTOM_PROVIDER_BASE_URL_LENGTH,
   MAX_CUSTOM_PROVIDER_MODEL_ID_LENGTH,
   MAX_CUSTOM_PROVIDER_MODEL_IDS,
+  MAX_MODEL_SELECTOR_LENGTH,
   MAX_PROVIDER_KEY_LENGTH,
   MODEL_ROLE_IDS,
   PROVIDER_IDS,
@@ -697,8 +698,15 @@ dashboardApp.get("/apps", async (c) => {
 /**
  * One handler for the three pinned action routes. Unknown and soft-deleted
  * apps are equally invisible (the list never shows them) → 404, zero writes.
- * A lost race (the row vanished between the read and the write) re-renders
- * the list with a warn notice — zero partial state.
+ * The store write returns whether a row changed; the warn notice below
+ * covers BOTH the idempotent no-op (the row was already in the target
+ * state — "was already X — nothing changed") and the lost race (the row
+ * was soft-deleted between the read and the write) — either way the list
+ * re-renders with a warn, zero partial state. Note a same-value status
+ * write still counts as changed (the UPDATE churns updated_at), so for
+ * status toggles the no-op copy is effectively the lost-race path;
+ * appReviewAction instead short-circuits its idempotent no-op before the
+ * store write.
  */
 async function appStatusAction(
   c: Context<{ Bindings: Env }>,
@@ -936,7 +944,12 @@ dashboardApp.get("/apps/:slug/settings", async (c) => {
 dashboardApp.post("/apps/:slug/settings", async (c) => {
   const gate = await requireAppSettings(c);
   if (!gate.ok) return gate.response;
-  const form = await c.req.parseBody();
+  // AL-23-2 (save-roles duplicate fields): parseBody({ all: true }) makes
+  // duplicate keys VISIBLE as string[] (Hono 4.13.4 aggregates; the default
+  // all=false silently last-wins) — the save-roles branch rejects any
+  // array-valued role_* field with 400, and single-value fields keep their
+  // exact current behavior.
+  const form = await c.req.parseBody({ all: true });
   const op = typeof form.op === "string" ? form.op : "";
   const store = createAppConfigStore(gate.db, c.env.DASHBOARD_ENCRYPTION_KEY);
   const apps = createAppsStore(gate.db);
@@ -997,6 +1010,20 @@ dashboardApp.post("/apps/:slug/settings", async (c) => {
     });
   }
   if (op === "save-chain") {
+    // AL-23-2: a duplicate model_chain field (parseBody all:true aggregates
+    // it into an array) must be rejected — never treated as the empty-clear
+    // path, which would silently wipe the stored chain.
+    if (Array.isArray(form.model_chain)) {
+      return settingsResponse(
+        c,
+        gate.session,
+        store,
+        apps,
+        gate.app,
+        { kind: "error", message: "The model chain field was submitted more than once — resubmit the form. Nothing was saved." },
+        400,
+      );
+    }
     const raw = typeof form.model_chain === "string" ? form.model_chain : "";
     try {
       if (raw.trim() === "") {
@@ -1005,6 +1032,20 @@ dashboardApp.post("/apps/:slug/settings", async (c) => {
           kind: "success",
           message: `Cleared the model chain for ${gate.app.slug} — reviews fall back to the deployment default.`,
         });
+      }
+      if (raw.length > MAX_MODEL_SELECTOR_LENGTH) {
+        return settingsResponse(
+          c,
+          gate.session,
+          store,
+          apps,
+          gate.app,
+          {
+            kind: "error",
+            message: `That model chain is too long (${raw.length} characters) — limited to ${MAX_MODEL_SELECTOR_LENGTH}. Nothing was saved.`,
+          },
+          400,
+        );
       }
       if (parseModelChain(raw).length === 0) {
         return settingsResponse(
@@ -1039,7 +1080,25 @@ dashboardApp.post("/apps/:slug/settings", async (c) => {
     // empty map must never masquerade as a successful save).
     const selectors: Record<string, string> = {};
     for (const [field, value] of Object.entries(form)) {
-      if (!field.startsWith("role_") || typeof value !== "string") continue;
+      if (!field.startsWith("role_")) continue;
+      // AL-23-2: with parseBody({ all: true }) a duplicate role_* field
+      // arrives as an ARRAY — explicit 400 rejection (re-render + zero
+      // writes), never the silent last-wins the default parseBody had.
+      if (Array.isArray(value)) {
+        return settingsResponse(
+          c,
+          gate.session,
+          store,
+          apps,
+          gate.app,
+          {
+            kind: "error",
+            message: `The ${field} field was submitted more than once — resubmit the Role models form with one value per role. Nothing was saved.`,
+          },
+          400,
+        );
+      }
+      if (typeof value !== "string") continue;
       const role = field.slice("role_".length);
       if (!MODEL_ROLE_IDS.includes(role)) {
         return settingsResponse(
@@ -1068,6 +1127,20 @@ dashboardApp.post("/apps/:slug/settings", async (c) => {
     // Selector grammar, role-named for the 4-row form (the same parseModelChain
     // mirror the save-chain op 400s against); blank stays legal = clear.
     for (const [role, selector] of Object.entries(selectors)) {
+      if (selector.length > MAX_MODEL_SELECTOR_LENGTH) {
+        return settingsResponse(
+          c,
+          gate.session,
+          store,
+          apps,
+          gate.app,
+          {
+            kind: "error",
+            message: `The ${role} selector is too long (${selector.length} characters) — limited to ${MAX_MODEL_SELECTOR_LENGTH}. Nothing was saved.`,
+          },
+          400,
+        );
+      }
       if (selector.trim() !== "" && parseModelChain(selector).length === 0) {
         return settingsResponse(
           c,

@@ -707,14 +707,14 @@ describe("per-App pause gate + last_webhook_at (plan 16, spec 语义锁 B3 / L5)
     const env = makeEnv(db, { REVIEW_QUEUE: queue as never });
     const body = JSON.stringify(PR_PAYLOAD);
 
-    const warn = mock((_msg: unknown) => {});
-    const origWarn = console.warn;
-    console.warn = warn;
+    const info = mock((_msg: unknown) => {});
+    const origLog = console.log;
+    console.log = info;
     let res: Response;
     try {
       res = await postWebhook("/webhook/app-x", body, await sigHeaders("secret-x", body), env);
     } finally {
-      console.warn = origWarn;
+      console.log = origLog;
     }
 
     expect(res.status).toBe(200);
@@ -723,8 +723,9 @@ describe("per-App pause gate + last_webhook_at (plan 16, spec 语义锁 B3 / L5)
     // The touch is decoupled from the review switch (L5: paused still counts
     // as a verified 2xx delivery).
     expect(appOps(db, appRow.id).last_webhook_at).not.toBeNull();
-    // The pause rides the structured stage-warn channel, filterable by event.
-    const line = warn.mock.calls.map((call) => String(call[0])).find((s) => s.includes("review_paused"));
+    // AL-23-2: the pause rides the structured INFO channel (warn→info —
+    // paused is a legitimate ops state answering 2xx), filterable by event.
+    const line = info.mock.calls.map((call) => String(call[0])).find((s) => s.includes("review_paused"));
     expect(line).toBeDefined();
     const fields = JSON.parse(line!) as { event: string };
     expect(fields.event).toBe("review_paused");
