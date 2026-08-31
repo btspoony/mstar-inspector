@@ -63,6 +63,16 @@ function webhookWarn(event: string, detail: string, msg: string): void {
   defaultLog.warn({ event, reason: event, detail }, msg);
 }
 
+/**
+ * Structured INFO twin (AL-23-2): the review_paused line is a legitimate
+ * ops state answering 2xx, so it drops from warn to info — same
+ * three-field shape, filterable by event, no sampling, no aggregation
+ * state.
+ */
+function webhookInfo(event: string, detail: string, msg: string): void {
+  defaultLog.info({ event, reason: event, detail }, msg);
+}
+
 app.get("/healthz", (c) => c.json({ ok: true }));
 // 08 B0: GitHub OAuth + dashboard shell. Route isolation: the dashboard
 // module never imports pipeline/store/review (architect decision Q2).
@@ -293,7 +303,10 @@ app.post("/webhook/:appSlug", async (c) => {
   // returned 404 above; the consumer ack-skips the in-flight messages it
   // can no longer prevent (lock L4).
   if (row.review_enabled === 0) {
-    webhookWarn(
+    // AL-23-2: warn→info — paused is a legitimate ops state (2xx, zero
+    // enqueue), so the line rides the info channel with the same structured
+    // fields; no sampling, no aggregation state.
+    webhookInfo(
       "review_paused",
       `slug=${slug}`,
       "per-App webhook ignored with 2xx — app review paused (zero enqueue)",

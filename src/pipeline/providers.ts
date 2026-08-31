@@ -75,3 +75,15 @@ export function pickProviderKeys(env: Record<string, unknown>): Record<string, s
   }
   return picked;
 }
+/**
+ * AL-23-1 custom-provider env-name contract — re-exported from
+ * src/review/runtime.ts (the single source of truth): the sandbox image
+ * COPYs only src/review (sandbox-image/Dockerfile:88), so the helper must
+ * live in-image next to CustomProviderDeclaration; the Worker-side SSOT
+ * stays single-source through this re-export (zero duplicated literals).
+ */
+export {
+  CUSTOM_PROVIDER_ENV_PREFIX,
+  CUSTOM_PROVIDER_ENV_SUFFIX,
+  customProviderEnvName,
+} from "../review/runtime";

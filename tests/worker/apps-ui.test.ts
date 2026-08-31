@@ -11,7 +11,7 @@
  * was found and passed to signature verification).
  *
  * The D1 double is the real bun:sqlite helper over migrations
- * 0001/0002 + 0003–0009 (production-shaped, filename order — 0006 backs the
+ * 0001/0002 + 0003–0009 + 0012 (production-shaped, filename order — 0006 backs the
  * per-App config tables the settings page reads; 0008 is plan 16's per-App
  * ops columns behind the pause toggle and the install-health panel; 0009 is
  * plan 17's app_model_roles, read on every settings render by the Role
@@ -23,6 +23,7 @@ import { join } from "node:path";
 import worker from "../../src/worker/index";
 import { createSecretbox } from "../../src/dashboard/secretbox";
 import type { Env } from "../../src/worker/env";
+import { createAppConfigStore } from "../../src/dashboard/app-config-store";
 import { createAppsStore, type GithubAppRow } from "../../src/dashboard/apps-store";
 import { SESSION_COOKIE, createSessionValue } from "../../src/dashboard/session";
 import { createUser, type DashboardD1 } from "../../src/dashboard/users";
@@ -59,6 +60,7 @@ function createAppsUiD1(): ReturnType<typeof createTestD1> {
     "0008_github_apps_ops.sql",
     "0009_app_model_roles.sql",
     "0011_webhook_deliveries.sql",
+    "0012_custom_providers_and_key_updated_at.sql",
   ]) {
     db.raw.exec(readFileSync(join(MIGRATIONS_DIR, name), "utf8"));
   }
@@ -187,6 +189,24 @@ describe("GET /dashboard/apps (plan 13 B5 T3, member-visible list)", () => {
     expect(body).toContain('<span class="note">disabled</span>');
     expect(body).not.toContain("mstar-inspector-ada");
     expect(body).toContain("mstar-inspector-mallory");
+  });
+
+  test("disabled rows withhold the pause/resume toggle — two-face consistency with the settings disconnected line (polish #2)", async () => {
+    const db = await seededWorld();
+    const apps = createAppsStore(db);
+    await apps.setAppStatus((await apps.listApps()).find((a) => a.slug === "mstar-inspector-mallory")!.id, "disabled");
+    const res = await get("/dashboard/apps", `${SESSION_COOKIE}=${await sessionCookie("octocat")}`, makeEnv(db));
+    const body = await res.text();
+    // The list hides the pause toggle on disabled rows (a disabled App is
+    // disconnected — webhook 404 — so pausing is meaningless), mirroring the
+    // settings page's gray "disconnected" line instead of the Review switch.
+    expect(body).toContain('<span class="note">disabled</span>');
+    expect(body).not.toContain('action="/dashboard/apps/mstar-inspector-mallory/pause"');
+    expect(body).not.toContain('action="/dashboard/apps/mstar-inspector-mallory/resume"');
+    expect(body).not.toContain('<span class="note">paused</span>');
+    // The row still offers its reversible status control (Enable) and Settings.
+    expect(body).toContain('action="/dashboard/apps/mstar-inspector-mallory/enable"');
+    expect(body).toContain('href="/dashboard/apps/mstar-inspector-mallory/settings"');
   });
 
   test("manage = admin or creator (Clarify #6): admin sees controls on every row; a member without creations sees none", async () => {
@@ -731,5 +751,91 @@ describe("Apps list health column + settings recent deliveries (plan 20 Task 2)"
     const body = await res.text();
     expect(body).not.toContain("<script>");
     expect(body).toContain('status <span class="id">&lt;script&gt;alert(1)&lt;/script&gt;</span>');
+  });
+});
+
+
+describe("App settings — masked key last-updated (plan 23 T1, AC-23c)", () => {
+  const SETTINGS = "/dashboard/apps/mstar-inspector-mallory/settings";
+  const ownerCookie = async () => `${SESSION_COOKIE}=${await sessionCookie("mallory")}`;
+
+  const store = (db: ReturnType<typeof createAppsUiD1>) => createAppConfigStore(db, TEST_KEY);
+  const appRow = async (db: ReturnType<typeof createAppsUiD1>) =>
+    (await createAppsStore(db).listApps()).find((a) => a.slug === "mstar-inspector-mallory")!;
+
+  test("a freshly stored key renders its last-update time in the masked row", async () => {
+    const db = await seededWorld();
+    await store(db).setProviderKey((await appRow(db)).id, "anthropic", "sk-ant-view-9988");
+    const res = await get(SETTINGS, await ownerCookie(), makeEnv(db));
+    expect(res.status).toBe(200);
+    const body = await res.text();
+    expect(body).toContain(`key ending <code class="id">9988</code> · updated just now`);
+  });
+
+  test("a pre-0012 row (NULL updated_at) shows the em dash placeholder, never 'never'", async () => {
+    const db = await seededWorld();
+    const app = await appRow(db);
+    await store(db).setProviderKey(app.id, "anthropic", "sk-ant-view-9988");
+    db.raw
+      .prepare("UPDATE app_provider_keys SET updated_at = NULL WHERE app_id = ? AND provider = 'anthropic'")
+      .run(app.id);
+    const res = await get(SETTINGS, await ownerCookie(), makeEnv(db));
+    expect(res.status).toBe(200);
+    const body = await res.text();
+    expect(body).toContain(`key ending <code class="id">9988</code> · updated &mdash;`);
+  });
+
+  test("hostile updated_at never renders raw — the meta shows the constant 'unknown' phrase instead", async () => {
+    const db = await seededWorld();
+    const app = await appRow(db);
+    await store(db).setProviderKey(app.id, "anthropic", "sk-ant-view-9988");
+    db.raw
+      .prepare("UPDATE app_provider_keys SET updated_at = ? WHERE app_id = ? AND provider = 'anthropic'")
+      .run('<script>alert("x")</script>', app.id);
+    const res = await get(SETTINGS, await ownerCookie(), makeEnv(db));
+    const body = await res.text();
+    expect(body).not.toContain("<script>");
+    expect(body).toContain(`key ending <code class="id">9988</code> · updated unknown`);
+  });
+});
+
+describe("App settings — custom providers (plan 23 T2)", () => {
+  const SETTINGS = "/dashboard/apps/mstar-inspector-mallory/settings";
+  const ownerCookie = async () => `${SESSION_COOKIE}=${await sessionCookie("mallory")}`;
+
+  const store = (db: ReturnType<typeof createAppsUiD1>) => createAppConfigStore(db, TEST_KEY);
+  const appRow = async (db: ReturnType<typeof createAppsUiD1>) =>
+    (await createAppsStore(db).listApps()).find((a) => a.slug === "mstar-inspector-mallory")!;
+
+  test("the section renders between Model chain and Role models with the api enum select and a password key input", async () => {
+    const db = await seededWorld();
+    const res = await get(SETTINGS, await ownerCookie(), makeEnv(db));
+    expect(res.status).toBe(200);
+    const body = await res.text();
+    expect(body.indexOf("Model chain")).toBeLessThan(body.indexOf("Custom providers"));
+    expect(body.indexOf("Custom providers")).toBeLessThan(body.indexOf("Role models"));
+    expect(body).toContain('<select name="api">');
+    expect(body).toContain('<input type="password" name="key" autocomplete="new-password"');
+  });
+
+  test("a stored declaration renders provider_id / base_url / api / model_ids with escaped values", async () => {
+    const db = await seededWorld();
+    const app = await appRow(db);
+    await store(db).upsertCustomProvider(
+      app.id,
+      {
+        provider_id: "ark",
+        base_url: 'https://evil.example.com/?q="><script>alert(1)</script>',
+        api: "openai-completions",
+        model_ids: ['"><img src=x onerror=alert(1)>'],
+      },
+      "sk-custom-ark-9988",
+    );
+    const res = await get(SETTINGS, await ownerCookie(), makeEnv(db));
+    const body = await res.text();
+    expect(body).not.toContain("<script>");
+    expect(body).not.toContain("<img");
+    expect(body).toContain("&lt;script&gt;alert(1)&lt;/script&gt;");
+    expect(body).toContain("&lt;img src=x onerror=alert(1)&gt;");
   });
 });

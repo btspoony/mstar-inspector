@@ -61,12 +61,15 @@ function createMigratedD1(): ReturnType<typeof createTestD1> {
   // paused gate reads on every app-path message.
   // 0009 (plan 17): the per-role table the consumer's modelOverrides read
   // queries on every app-path message.
+  // 0012 (plan 23): app_provider_keys.updated_at — the store's upsert writes
+  // it, so the fixture must carry the column.
   for (const name of [
     "0004_github_apps.sql",
     "0005_reviews_app_id.sql",
     "0006_app_provider_config.sql",
     "0008_github_apps_ops.sql",
     "0009_app_model_roles.sql",
+    "0012_custom_providers_and_key_updated_at.sql",
   ]) {
     db.raw.exec(readFileSync(join(MIGRATIONS_DIR, name), "utf8"));
   }

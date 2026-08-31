@@ -6,8 +6,19 @@
  * breakpoints) — DESIGN.md is the SSOT; update both when tokens change.
  * No client JS, no build chain, no new dependencies.
  */
-import { MODEL_ROLE_IDS, PROVIDER_IDS, type MaskedProviderKey } from "./app-config-store";
-import type { AppInstallationRow, DeliveryOutcome, DeliverySummary, WebhookDeliveryRow } from "./apps-store";
+import {
+  CUSTOM_PROVIDER_API_IDS,
+  MODEL_ROLE_IDS,
+  PROVIDER_IDS,
+  type AppCustomProvider,
+  type MaskedProviderKey,
+} from "./app-config-store";
+import type {
+  AppInstallationRow,
+  DeliveryOutcome,
+  DeliverySummary,
+  WebhookDeliveryRow,
+} from "./apps-store";
 import type { DashboardUserRow } from "./users";
 
 /** Escape GitHub-sourced user data before HTML interpolation (XSS guard). */
@@ -676,7 +687,9 @@ const MODEL_ROLE_HINTS: Record<string, string> = {
  * fallback spelled out (a whitespace-only save clears with a success notice —
  * the copy says so). The hint copy is replace-aware ("replaces its stored
  * key") because the store upserts and bumps the row timestamp on re-set —
- * storage recency is never labeled "created". Status/hints reuse the gray
+ * storage recency is never labeled "created". Plan 23: each masked row also
+ * shows its last-update time (migration 0012) — a pre-existing row (NULL)
+ * renders an em dash until the key is re-set. Status/hints reuse the gray
  * (.status) / amber-700 (.note) tokens — no new tokens, no Level 2. Every
  * user-controlled string (slug, provider, masked tail, chain) is escaped.
  *
@@ -715,13 +728,13 @@ export function appSettingsPage(
   /**
    * Plan 20 recent-deliveries panel data (AL-20-2): the App's last N
    * webhook_deliveries rows, newest first (the route reads
-   * listRecentDeliveries(appId, 5)). Appended at the END of the signature —
-   * plan 23 (feat/23-dashboard-consolidation) appends its own parameter at
-   * the SAME position on its branch; the PM reconciles this single
-   * signature line (and the one settingsResponse call site) at the plan-23
-   * merge — one of the two appends is rewritten during that merge.
+   * listRecentDeliveries(appId, 5)). C-1 merge reconcile (v0.8): plan 20 and
+   * plan 23 both appended at this position on their branches — the reconciled
+   * signature carries BOTH (deliveries, then customProviders).
    */
   deliveries: WebhookDeliveryRow[] = [],
+  // Plan 23 T2: per-App custom provider declarations for the settings section.
+  customProviders: AppCustomProvider[] = [],
 ): string {
   const base = `/dashboard/apps/${escapeHtml(app.slug)}/settings`;
   const rows = maskedKeys
@@ -729,9 +742,14 @@ export function appSettingsPage(
       const tail = k.last4
         ? `key ending <code class="id">${escapeHtml(k.last4)}</code>`
         : "key too short to show a tail";
+      // Plan 23 T1 (migration 0012): each masked row shows its last-update
+      // time. NULL (a row written before 0012) reads as an em dash until the
+      // key is re-set; relativeTime turns any other value into a constant
+      // phrase, so no raw timestamp can ever reach the HTML.
+      const updated = k.updated_at === null ? "&mdash;" : relativeTime(k.updated_at);
       return `<li>
         <strong>${escapeHtml(k.provider)}</strong>
-        <span class="meta">${tail}</span>
+        <span class="meta">${tail} · updated ${updated}</span>
         <form method="post" action="${base}/key/delete">
           <input type="hidden" name="provider" value="${escapeHtml(k.provider)}">
           <button type="submit" class="danger">Remove</button>
@@ -853,6 +871,61 @@ export function appSettingsPage(
         <button type="submit" class="primary">Save role models</button>
       </form>
     </section>`;
+  // Custom providers (plan 23 T2, AL-23-1): per-App declarations of
+  // NON-built-in model providers. The key is stored encrypted and injected
+  // into the review runner by ENVIRONMENT VARIABLE NAME (CUSTOM_<ID>_API_KEY)
+  // — never as a literal — so the declaration list shows no key material at
+  // all. Every user-controlled string (provider_id, base_url, model_ids) is
+  // escaped; the api select is bound to the frozen three-form enum.
+  const customRows = customProviders
+    .map(
+      (p) => `<li>
+        <strong>${escapeHtml(p.provider_id)}</strong>
+        <span class="meta">${escapeHtml(p.base_url)} · ${escapeHtml(p.api)} · ${escapeHtml(p.model_ids.join(", "))}</span>
+        <form method="post" action="${base}">
+          <input type="hidden" name="op" value="remove-custom-provider">
+          <input type="hidden" name="provider_id" value="${escapeHtml(p.provider_id)}">
+          <button type="submit" class="danger">Remove</button>
+        </form>
+      </li>`,
+    )
+    .join("\n");
+  const customEmpty =
+    customProviders.length === 0
+      ? `<p class="status">No custom providers declared for this App — its reviews use the built-in providers.</p>`
+      : `<ul class="keys">
+      ${customRows}
+      </ul>`;
+  // Empty disabled first option = the preselected placeholder: a forgetful
+  // submit sends api="" and hits the route's 400 re-render instead of
+  // silently picking the first enum value (the provider-select discipline).
+  const apiOptions = ['<option value="" disabled selected>Select an API…</option>']
+    .concat(CUSTOM_PROVIDER_API_IDS.map((id) => `<option value="${escapeHtml(id)}">${escapeHtml(id)}</option>`))
+    .join("");
+  const customSection = `<section class="enabled">
+      <h2>Custom providers</h2>
+      <p>Declare a non-built-in model provider for this App&apos;s reviews — the API key is stored encrypted and injected into the review runner by environment variable name, never as a literal.</p>
+      ${customEmpty}
+      <form method="post" action="${base}">
+        <input type="hidden" name="op" value="add-custom-provider">
+        <label class="field">Provider id
+          <input type="text" name="provider_id" placeholder="e.g. ark" pattern="[a-z0-9][a-z0-9-]{0,63}">
+        </label>
+        <label class="field">Base URL
+          <input type="text" name="base_url" placeholder="https://api.example.com/v1">
+        </label>
+        <label class="field">API
+          <select name="api">${apiOptions}</select>
+        </label>
+        <label class="field">Model ids
+          <input type="text" name="model_ids" placeholder="e.g. deepseek-v4-flash, deepseek-r1">
+        </label>
+        <label class="field">API key
+          <input type="password" name="key" autocomplete="new-password" placeholder="Paste the provider API key">
+        </label>
+        <button type="submit" class="primary">Add custom provider</button>
+      </form>
+    </section>`;
   return page(
     "App settings",
     `${shellHeader(user)}
@@ -885,6 +958,7 @@ export function appSettingsPage(
         <button type="submit" class="primary">Save model chain</button>
       </form>
     </section>
+    ${customSection}
     ${roleSection}
     ${reviewSection}
     ${installSection}

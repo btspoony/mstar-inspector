@@ -30,7 +30,12 @@ import worker from "../../src/worker/index";
 import { createTestD1 } from "../store/helpers";
 import { createAppsStore, type GithubAppRow } from "../../src/dashboard/apps-store";
 import {
+  CUSTOM_PROVIDER_API_IDS,
+  IN_IMAGE_BASE_PROVIDER_IDS,
+  MAX_CUSTOM_PROVIDER_COUNT,
+  InvalidCustomProviderError,
   InvalidModelSelectorError,
+  MAX_MODEL_SELECTOR_LENGTH,
   MAX_PROVIDER_KEY_LENGTH,
   MODEL_ROLE_IDS,
   PROVIDER_IDS,
@@ -39,6 +44,7 @@ import {
   createAppConfigStore,
   parseModelChain,
   type AppConfigD1,
+  type AppCustomProvider,
 } from "../../src/dashboard/app-config-store";
 import { createSecretbox } from "../../src/dashboard/secretbox";
 import { PROVIDERS } from "../../src/pipeline/providers";
@@ -53,6 +59,8 @@ const TEST_KEY = Buffer.alloc(32, 11).toString("base64");
 const SESSION_SECRET = "test-dashboard-session-secret-32-bytes!";
 const PLAIN_ANTHROPIC_KEY = "sk-ant-mallory-verysecret-9988";
 const PLAIN_CHAIN = "ark-plan/deepseek-v4-flash, openai/gpt-5:thinking";
+/** SQLite datetime('now') format the store writes (UTC "YYYY-MM-DD HH:MM:SS"). */
+const SQLITE_TS_RE = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/;
 
 // --- fixtures ---
 
@@ -114,6 +122,7 @@ function createAppConfigD1(): ReturnType<typeof createTestD1> {
   // panel from webhook_deliveries on every render — the fixture must carry
   // the table or every settings route 500s.
   applyMigration(db, "0011_webhook_deliveries.sql");
+  applyMigration(db, "0012_custom_providers_and_key_updated_at.sql");
   return db;
 }
 
@@ -313,6 +322,61 @@ describe("migration 0006_app_provider_config.sql (on a seeded production-shaped 
   });
 });
 
+// --- migration 0012 (plan 23 T1: app_provider_keys.updated_at) ---
+
+describe("migration 0012_custom_providers_and_key_updated_at.sql (plan 23 T1)", () => {
+  test("applies cleanly after 0006; pre-existing key rows keep created_at and carry NULL updated_at until the key is re-set", async () => {
+    const db = createPopulatedPre0006D1();
+    const app = await seedApp(db, { slug: "a", createdBy: "mallory" });
+    applyMigration(db, "0006_app_provider_config.sql");
+    // A key row written BEFORE 0012 (the pre-migration column set).
+    rawRun(
+      db,
+      `INSERT INTO app_provider_keys (app_id, provider, key_enc, created_at)
+       VALUES (?, 'anthropic', 'v1.primary.aXZpdi.Y3Q=', '2026-01-01 00:00:00')`,
+      app.id,
+    );
+    expect(() => applyMigration(db, "0012_custom_providers_and_key_updated_at.sql")).not.toThrow();
+    let row = db.raw.query("SELECT created_at, updated_at FROM app_provider_keys").get() as {
+      created_at: string;
+      updated_at: string | null;
+    };
+    expect(row.created_at).toBe("2026-01-01 00:00:00"); // untouched by the ALTER
+    expect(row.updated_at).toBeNull(); // the 存量行 placeholder source
+    // The store's re-set fills updated_at from the SAME clock read as
+    // created_at — a legacy row becomes current.
+    await configStore(db).setProviderKey(app.id, "anthropic", PLAIN_ANTHROPIC_KEY);
+    row = db.raw.query("SELECT created_at, updated_at FROM app_provider_keys").get() as {
+      created_at: string;
+      updated_at: string;
+    };
+    expect(row.updated_at).toMatch(SQLITE_TS_RE);
+    expect(row.updated_at).toBe(row.created_at);
+  });
+
+  test("full-file direct run (0001→0012 order) creates app_custom_providers with the AL-23-1 DDL shape", async () => {
+    const db = createAppConfigD1(); // 0001→0012 in filename order (0007 index skip, harmless)
+    const cols = db.raw.query("PRAGMA table_info(app_custom_providers)").all() as Array<{
+      name: string;
+      type: string;
+      notnull: number;
+      pk: number;
+    }>;
+    const byName: Record<string, { type: string; notnull: number; pk: number }> = {};
+    for (const c of cols) byName[c.name] = c;
+    // AL-23-1 DDL: app_id FK, provider_id, base_url, api, model_ids TEXT
+    // (JSON array), api_key_enc NOT NULL, created_at/updated_at, composite
+    // PK (app_id, provider_id) — the AAD rowKey source.
+    for (const col of ["app_id", "provider_id", "base_url", "api", "model_ids", "api_key_enc", "created_at", "updated_at"]) {
+      expect(byName[col], col).toBeDefined();
+      expect(byName[col]!.notnull, col).toBe(1);
+    }
+    expect(byName["model_ids"]!.type).toBe("TEXT");
+    const pkCols = cols.filter((c) => c.pk > 0).map((c) => c.name);
+    expect(pkCols).toEqual(["app_id", "provider_id"]);
+  });
+});
+
 // --- store: provider keys ---
 
 describe("app-config store (createAppConfigStore) — provider keys", () => {
@@ -361,7 +425,7 @@ describe("app-config store (createAppConfigStore) — provider keys", () => {
     await store.setProviderKey(app.id, "anthropic", "sk-second-key-bbbb");
     expect(rawCount(db, "app_provider_keys")).toBe(1);
     const list = await store.listProviderKeys(app.id);
-    expect(list).toEqual([{ provider: "anthropic", last4: "bbbb" }]);
+    expect(list).toEqual([{ provider: "anthropic", last4: "bbbb", updated_at: expect.any(String) }]);
   });
 
   test("listProviderKeys masks to provider + last-4 only — plaintext never returns", async () => {
@@ -373,8 +437,8 @@ describe("app-config store (createAppConfigStore) — provider keys", () => {
     const list = await store.listProviderKeys(app.id);
     // Provider-ascending; ONLY the masked tail of each key.
     expect(list).toEqual([
-      { provider: "anthropic", last4: "9988" },
-      { provider: "openai", last4: "7777" },
+      { provider: "anthropic", last4: "9988", updated_at: expect.any(String) },
+      { provider: "openai", last4: "7777", updated_at: expect.any(String) },
     ]);
     expect(JSON.stringify(list)).not.toContain(PLAIN_ANTHROPIC_KEY);
     expect(JSON.stringify(list)).not.toContain("sk-openai-key-7777");
@@ -388,8 +452,8 @@ describe("app-config store (createAppConfigStore) — provider keys", () => {
     await store.setProviderKey(app.id, "kilo", "xyz");
     const list = await store.listProviderKeys(app.id);
     expect(list).toEqual([
-      { provider: "groq", last4: "" },
-      { provider: "kilo", last4: "" },
+      { provider: "groq", last4: "", updated_at: expect.any(String) },
+      { provider: "kilo", last4: "", updated_at: expect.any(String) },
     ]);
     expect(JSON.stringify(list)).not.toContain("abcd");
     expect(JSON.stringify(list)).not.toContain("xyz");
@@ -422,7 +486,58 @@ describe("app-config store (createAppConfigStore) — provider keys", () => {
     expect(serialized).not.toContain("sk-y-openai-key-3333");
     // The masked list is scoped the same way.
     const listX = await store.listProviderKeys(x.id);
-    expect(listX).toEqual([{ provider: "anthropic", last4: "1111" }]);
+    expect(listX).toEqual([{ provider: "anthropic", last4: "1111", updated_at: expect.any(String) }]);
+  });
+
+  test("fresh insert: updated_at == created_at — one clock read for both (migration 0012)", async () => {
+    const db = createAppConfigD1();
+    const app = await seedApp(db, { slug: "a", createdBy: "mallory" });
+    await configStore(db).setProviderKey(app.id, "anthropic", PLAIN_ANTHROPIC_KEY);
+    const row = db.raw.query("SELECT created_at, updated_at FROM app_provider_keys").get() as {
+      created_at: string;
+      updated_at: string;
+    };
+    expect(row.updated_at).toMatch(SQLITE_TS_RE);
+    expect(row.updated_at).toBe(row.created_at);
+  });
+
+  test("re-set bumps updated_at forward (the upsert writes a fresh clock on conflict)", async () => {
+    const db = createAppConfigD1();
+    const app = await seedApp(db, { slug: "a", createdBy: "mallory" });
+    const store = configStore(db);
+    await store.setProviderKey(app.id, "anthropic", "sk-v1-aaaa");
+    // Backdate the row so the second write's clock is observably LATER.
+    rawRun(
+      db,
+      "UPDATE app_provider_keys SET created_at = '2026-01-01 00:00:00', updated_at = '2026-01-01 00:00:00' WHERE app_id = ? AND provider = 'anthropic'",
+      app.id,
+    );
+    await store.setProviderKey(app.id, "anthropic", "sk-v2-bbbb");
+    const row = db.raw.query("SELECT created_at, updated_at FROM app_provider_keys").get() as {
+      created_at: string;
+      updated_at: string;
+    };
+    expect(row.updated_at).toMatch(SQLITE_TS_RE);
+    expect(row.updated_at).toBe(row.created_at); // conflict path: same single-clock read
+    expect(row.updated_at > "2026-01-01 00:00:00").toBe(true); // same-format string compare
+    // The masked list reflects the moved timestamp.
+    const list = await store.listProviderKeys(app.id);
+    expect(list).toEqual([{ provider: "anthropic", last4: "bbbb", updated_at: row.updated_at }]);
+  });
+
+  test("listProviderKeys returns updated_at per row; a pre-0012 row reads NULL until re-set", async () => {
+    const db = createAppConfigD1();
+    const app = await seedApp(db, { slug: "a", createdBy: "mallory" });
+    const store = configStore(db);
+    await store.setProviderKey(app.id, "anthropic", PLAIN_ANTHROPIC_KEY);
+    await store.setProviderKey(app.id, "kilo", "sk-kilo-key-1234");
+    // The legacy shape: a pre-0012 row whose updated_at is NULL.
+    rawRun(db, "UPDATE app_provider_keys SET updated_at = NULL WHERE provider = 'kilo'");
+    const list = await store.listProviderKeys(app.id);
+    expect(list).toHaveLength(2);
+    // provider-ascending: anthropic (current) then kilo (legacy placeholder).
+    expect(list[0]).toEqual({ provider: "anthropic", last4: "9988", updated_at: expect.stringMatching(SQLITE_TS_RE) });
+    expect(list[1]).toEqual({ provider: "kilo", last4: "1234", updated_at: null });
   });
 
   test("setProviderKey accepts a key of exactly 4096 characters (the bound is inclusive)", async () => {
@@ -710,6 +825,204 @@ describe("app-config store (createAppConfigStore) — model roles (plan 17 T1)",
   });
 });
 
+// --- store: custom providers (plan 23 T2) ---
+
+describe("app-config store (createAppConfigStore) — custom providers (plan 23 T2)", () => {
+  const CUSTOM: AppCustomProvider = {
+    provider_id: "ark",
+    base_url: "https://ark.cn-beijing.volces.com/api/v3",
+    api: "openai-completions",
+    model_ids: ["deepseek-v4-flash", "deepseek-r1"],
+  };
+  const PLAIN_CUSTOM_KEY = "sk-custom-ark-9988";
+
+  test("upsert encrypts the key at rest (secretbox envelope) and list returns the declaration with NO key material", async () => {
+    const { db, app } = await seededWorld();
+    await configStore(db).upsertCustomProvider(app.id, CUSTOM, PLAIN_CUSTOM_KEY);
+    // At rest: a secretbox envelope, never the plaintext.
+    const row = db.raw
+      .query("SELECT * FROM app_custom_providers WHERE app_id = ? AND provider_id = ?")
+      .get(app.id, CUSTOM.provider_id) as {
+      api_key_enc: string;
+      model_ids: string;
+      created_at: string;
+      updated_at: string;
+    };
+    expect(row.api_key_enc).toMatch(/^v1\.primary\./);
+    expect(row.api_key_enc).not.toContain(PLAIN_CUSTOM_KEY);
+    // model_ids is stored as a TEXT JSON array (AL-23-1 DDL).
+    expect(JSON.parse(row.model_ids)).toEqual([...CUSTOM.model_ids]);
+    expect(row.created_at).toMatch(SQLITE_TS_RE);
+    expect(row.updated_at).toBe(row.created_at);
+    // The list face is decrypt-free: declaration only, never key material.
+    await expect(configStore(db).listCustomProviders(app.id)).resolves.toEqual([CUSTOM]);
+  });
+
+  test("AAD rowKey is the exact composite string app_custom_providers.api_key_enc:<app_id>:<provider_id> — the T3 consumer decrypts with it", async () => {
+    const { db, app } = await seededWorld();
+    await configStore(db).upsertCustomProvider(app.id, CUSTOM, PLAIN_CUSTOM_KEY);
+    const row = db.raw
+      .query("SELECT api_key_enc FROM app_custom_providers WHERE app_id = ? AND provider_id = ?")
+      .get(app.id, CUSTOM.provider_id) as { api_key_enc: string };
+    const box = createSecretbox(TEST_KEY);
+    // The exact composite-PK rowKey (0006 L1 precedent) decrypts the envelope.
+    await expect(
+      box.decryptSecret(row.api_key_enc, `app_custom_providers.api_key_enc:${app.id}:${CUSTOM.provider_id}`),
+    ).resolves.toBe(PLAIN_CUSTOM_KEY);
+    // The envelope is bound to BOTH PK columns — any single component off fails.
+    await expect(
+      box.decryptSecret(row.api_key_enc, `app_custom_providers.api_key_enc:${app.id}:other`),
+    ).rejects.toThrow();
+    await expect(
+      box.decryptSecret(row.api_key_enc, `app_custom_providers.api_key_enc:other:${CUSTOM.provider_id}`),
+    ).rejects.toThrow();
+  });
+
+  test("re-upserting the same provider_id replaces the key and the declaration, bumping updated_at", async () => {
+    const { db, app } = await seededWorld();
+    await configStore(db).upsertCustomProvider(app.id, CUSTOM, PLAIN_CUSTOM_KEY);
+    db.raw
+      .prepare("UPDATE app_custom_providers SET updated_at = '2026-01-01 00:00:00' WHERE app_id = ? AND provider_id = ?")
+      .run(app.id, CUSTOM.provider_id);
+    await configStore(db).upsertCustomProvider(
+      app.id,
+      { ...CUSTOM, model_ids: ["deepseek-v4-flash"] },
+      "sk-custom-ark-7777",
+    );
+    const row = db.raw
+      .query("SELECT api_key_enc, model_ids, updated_at FROM app_custom_providers WHERE app_id = ? AND provider_id = ?")
+      .get(app.id, CUSTOM.provider_id) as { api_key_enc: string; model_ids: string; updated_at: string };
+    await expect(
+      createSecretbox(TEST_KEY).decryptSecret(row.api_key_enc, `app_custom_providers.api_key_enc:${app.id}:${CUSTOM.provider_id}`),
+    ).resolves.toBe("sk-custom-ark-7777");
+    expect(JSON.parse(row.model_ids)).toEqual(["deepseek-v4-flash"]);
+    expect(row.updated_at).toMatch(SQLITE_TS_RE);
+    expect(row.updated_at > "2026-01-01 00:00:00").toBe(true);
+  });
+
+  test("removeCustomProvider deletes the row and reports it; an unknown id is an idempotent no-op", async () => {
+    const { db, app } = await seededWorld();
+    await configStore(db).upsertCustomProvider(app.id, CUSTOM, PLAIN_CUSTOM_KEY);
+    await expect(configStore(db).removeCustomProvider(app.id, "nope")).resolves.toBe(false);
+    await expect(configStore(db).removeCustomProvider(app.id, CUSTOM.provider_id)).resolves.toBe(true);
+    await expect(configStore(db).listCustomProviders(app.id)).resolves.toEqual([]);
+    await expect(configStore(db).removeCustomProvider(app.id, CUSTOM.provider_id)).resolves.toBe(false);
+  });
+
+  test("store backstop: an invalid declaration throws InvalidCustomProviderError before any write", async () => {
+    const { db, app } = await seededWorld();
+    // Record<string, unknown> so the enum-violating api literal type-checks;
+    // the spread is cast to AppCustomProvider at the call site.
+    const bad: Array<Record<string, unknown>> = [
+      { provider_id: "Bad_ID" }, // uppercase — outside [a-z0-9][a-z0-9-]{0,63}
+      { provider_id: "-lead" }, // leading hyphen
+      { provider_id: "x".repeat(65) }, // over 64 chars
+      { provider_id: "anthropic" }, // collides with a PROVIDER_IDS built-in (copy says NON-built-in)
+      { base_url: "http://insecure.example.com" }, // http, not https
+      { base_url: `https://example.com/${"x".repeat(2049)}` }, // over 2048 chars
+      { api: "google-vertex" }, // outside the AL-23-1 three-form enum
+      { model_ids: [] }, // empty
+      { model_ids: ["ok", " "] }, // blank model id entry
+      { model_ids: ["ok", "   "] }, // whitespace-only model id entry
+      { model_ids: ["ok", "x".repeat(129)] }, // over-length model id
+      { model_ids: Array.from({ length: 33 }, (_, i) => `m${i}`) }, // over 32 items
+    ];
+    for (const patch of bad) {
+      await expect(
+        configStore(db).upsertCustomProvider(app.id, { ...CUSTOM, ...patch } as AppCustomProvider, PLAIN_CUSTOM_KEY),
+      ).rejects.toThrow(InvalidCustomProviderError);
+    }
+    // The key is required at declaration and bounded by the existing 4096 cap.
+    await expect(configStore(db).upsertCustomProvider(app.id, CUSTOM, "")).rejects.toThrow(InvalidCustomProviderError);
+    await expect(configStore(db).upsertCustomProvider(app.id, CUSTOM, "k".repeat(4097))).rejects.toThrow(ProviderKeyTooLongError);
+    expect(rawCount(db, "app_custom_providers")).toBe(0);
+  });
+
+  // QC wave-1 (seat3 W-1): the runner's base-wins merge skips a custom id
+  // colliding with the IN-IMAGE base models.yml (sandbox-image/omp-models.yml
+  // declares ark-plan) while the consumer STILL injects its key — the
+  // declaration is silently dead on every review, so the backstop refuses it.
+  test("store backstop: an in-image base provider id (ark-plan) throws InvalidCustomProviderError before any write", async () => {
+    const { db, app } = await seededWorld();
+    await expect(
+      configStore(db).upsertCustomProvider(
+        app.id,
+        { ...CUSTOM, provider_id: "ark-plan", base_url: "https://evil.example.com/" },
+        PLAIN_CUSTOM_KEY,
+      ),
+    ).rejects.toThrow(InvalidCustomProviderError);
+    expect(rawCount(db, "app_custom_providers")).toBe(0);
+  });
+
+  // QC wave-1 (seat3 W-2): every other AL-23-1/AL-23-2 input dimension is
+  // bounded; the DECLARATION COUNT per App is the missing one (exec env +
+  // runner input grow without bound). The cap is growth-only: updating an
+  // existing declaration never counts against it.
+  test("store backstop: at MAX_CUSTOM_PROVIDER_COUNT a NEW id throws; updating an existing id and another App are unaffected", async () => {
+    const { db, app } = await seededWorld();
+    const store = configStore(db);
+    for (let i = 1; i <= MAX_CUSTOM_PROVIDER_COUNT; i++) {
+      await store.upsertCustomProvider(app.id, { ...CUSTOM, provider_id: `prov-${i}` }, PLAIN_CUSTOM_KEY);
+    }
+    expect(rawCount(db, "app_custom_providers")).toBe(MAX_CUSTOM_PROVIDER_COUNT);
+    // Growth past the cap is refused with zero writes.
+    await expect(
+      store.upsertCustomProvider(app.id, { ...CUSTOM, provider_id: "prov-new" }, PLAIN_CUSTOM_KEY),
+    ).rejects.toThrow(InvalidCustomProviderError);
+    expect(rawCount(db, "app_custom_providers")).toBe(MAX_CUSTOM_PROVIDER_COUNT);
+    // Re-declaring an EXISTING id is an update, not growth — allowed.
+    await expect(
+      store.upsertCustomProvider(app.id, { ...CUSTOM, provider_id: "prov-1", model_ids: ["fresh-model"] }, PLAIN_CUSTOM_KEY),
+    ).resolves.toBeUndefined();
+    expect(rawCount(db, "app_custom_providers")).toBe(MAX_CUSTOM_PROVIDER_COUNT);
+    // The cap is per-App: a different App starts from zero.
+    const other = await seededWorld();
+    await expect(
+      configStore(other.db).upsertCustomProvider(other.app.id, { ...CUSTOM, provider_id: "prov-1" }, PLAIN_CUSTOM_KEY),
+    ).resolves.toBeUndefined();
+    expect(rawCount(other.db, "app_custom_providers")).toBe(1);
+  });
+
+  test("unknown app_id → FK violation on insert (fail-loud, same as every write here)", async () => {
+    const db = createAppConfigD1();
+    await expect(
+      configStore(db).upsertCustomProvider("no-such-app", CUSTOM, PLAIN_CUSTOM_KEY),
+    ).rejects.toThrow(/FOREIGN KEY constraint failed/);
+  });
+
+  test("getCustomProvidersForConsumer decrypts the key through the store face; a tampered row throws (fail-loud)", async () => {
+    const { db, app } = await seededWorld();
+    const store = configStore(db);
+    await store.upsertCustomProvider(app.id, CUSTOM, PLAIN_CUSTOM_KEY);
+    // Upsert → consumer face → key matches (the Task 3 consume contract —
+    // the round-trip goes through the store, not ad-hoc secretbox).
+    await expect(store.getCustomProvidersForConsumer(app.id)).resolves.toEqual([
+      { ...CUSTOM, api_key: PLAIN_CUSTOM_KEY },
+    ]);
+    // Tamper: flip the last base64 char of the stored envelope — the GCM
+    // tag fails and the consumer face throws (never swallowed).
+    const row = db.raw
+      .query("SELECT api_key_enc FROM app_custom_providers WHERE app_id = ? AND provider_id = ?")
+      .get(app.id, CUSTOM.provider_id) as { api_key_enc: string };
+    const tampered = row.api_key_enc.slice(0, -1) + (row.api_key_enc.endsWith("A") ? "B" : "A");
+    db.raw
+      .prepare("UPDATE app_custom_providers SET api_key_enc = ? WHERE app_id = ? AND provider_id = ?")
+      .run(tampered, app.id, CUSTOM.provider_id);
+    await expect(store.getCustomProvidersForConsumer(app.id)).rejects.toThrow(/secretbox/);
+  });
+
+  test("listCustomProviders fails loud on a malformed model_ids row (non-array / non-string JSON)", async () => {
+    const { db, app } = await seededWorld();
+    await configStore(db).upsertCustomProvider(app.id, CUSTOM, PLAIN_CUSTOM_KEY);
+    for (const malformed of ["null", "{}", '"x"', "[1, \"ok\"]"]) {
+      db.raw
+        .prepare("UPDATE app_custom_providers SET model_ids = ? WHERE app_id = ? AND provider_id = ?")
+        .run(malformed, app.id, CUSTOM.provider_id);
+      await expect(configStore(db).listCustomProviders(app.id)).rejects.toThrow(/not a JSON array of strings/);
+    }
+  });
+});
+
 // --- duplication locks (Q2: dashboard may not import pipeline/review) ---
 
 describe("duplication locks", () => {
@@ -754,6 +1067,19 @@ describe("duplication locks", () => {
     expect([...MODEL_ROLE_IDS]).toEqual([quickSeat!, ...(deepSeats ?? [])]);
     expect(MODEL_ROLE_IDS).toHaveLength(4); // spec § B6 语义锁: exactly the 4 audit seats
   });
+
+  test("IN_IMAGE_BASE_PROVIDER_IDS mirrors the in-image base models.yml provider ids (plan 23 QC W-1 parity lock)", () => {
+    // SSOT: sandbox-image/omp-models.yml — installed in the runner image as
+    // /opt/omp-agent/models.yml (src/review/models-synthesis.ts
+    // BASE_MODELS_YAML_PATH), the base the Task 3 merge preserves verbatim.
+    // A custom declaration colliding with one of these ids is skipped by the
+    // base-wins merge (silently dead if the dashboard allowed it), so the
+    // mirror MUST track the file exactly (the PROVIDER_IDS lock pattern).
+    const baseYaml = readFileSync(join(import.meta.dir, "../../sandbox-image/omp-models.yml"), "utf8");
+    const baseIds = [...baseYaml.matchAll(/^  ([A-Za-z0-9_-]+):\s*(?:#.*)?$/gm)].map((m) => m[1]!);
+    expect(baseIds.length).toBeGreaterThan(0); // a base with no providers would make the mirror vacuous
+    expect([...IN_IMAGE_BASE_PROVIDER_IDS]).toEqual(baseIds);
+  });
 });
 
 // --- routes ---
@@ -780,6 +1106,9 @@ describe("GET /dashboard/apps/:slug/settings", () => {
     // Masked list (provider + last-4) and the chain prefilled verbatim.
     expect(body).toContain("<strong>anthropic</strong>");
     expect(body).toContain(`key ending <code class="id">9988</code>`);
+    // Plan 23 T1 (migration 0012): the row also shows its last-update time —
+    // a freshly stored key reads "just now".
+    expect(body).toContain(`key ending <code class="id">9988</code> · updated just now`);
     expect(body).toContain(`value="${PLAIN_CHAIN}"`);
     // The zero-JS forms: add-key + save-chain on the pinned POST path, and
     // the per-key delete action path.
@@ -789,6 +1118,41 @@ describe("GET /dashboard/apps/:slug/settings", () => {
     // NO full key material anywhere in the HTML.
     expect(body).not.toContain(PLAIN_ANTHROPIC_KEY);
     expect(body).not.toContain("key_enc");
+  });
+
+  test("plan 23 T1: a freshly stored key renders its last-update time in the masked row", async () => {
+    const { db, app } = await seededWorld();
+    await configStore(db).setProviderKey(app.id, "anthropic", PLAIN_ANTHROPIC_KEY);
+    const res = await get(SETTINGS, `${SESSION_COOKIE}=${await sessionCookie("mallory")}`, makeEnv(db));
+    expect(res.status).toBe(200);
+    const body = await res.text();
+    expect(body).toContain(`key ending <code class="id">9988</code> · updated just now`);
+  });
+
+  test("plan 23 T1: a pre-0012 row (NULL updated_at) renders an em dash placeholder", async () => {
+    const { db, app } = await seededWorld();
+    await configStore(db).setProviderKey(app.id, "anthropic", PLAIN_ANTHROPIC_KEY);
+    rawRun(db, "UPDATE app_provider_keys SET updated_at = NULL WHERE app_id = ? AND provider = 'anthropic'", app.id);
+    const res = await get(SETTINGS, `${SESSION_COOKIE}=${await sessionCookie("mallory")}`, makeEnv(db));
+    expect(res.status).toBe(200);
+    const body = await res.text();
+    expect(body).toContain(`key ending <code class="id">9988</code> · updated &mdash;`);
+  });
+
+  test("plan 23 T1: a hostile updated_at never renders raw — the meta degrades to the safe 'unknown' phrase", async () => {
+    const { db, app } = await seededWorld();
+    await configStore(db).setProviderKey(app.id, "anthropic", PLAIN_ANTHROPIC_KEY);
+    rawRun(
+      db,
+      "UPDATE app_provider_keys SET updated_at = '<img src=x onerror=alert(1)>' WHERE app_id = ? AND provider = 'anthropic'",
+      app.id,
+    );
+    const res = await get(SETTINGS, `${SESSION_COOKIE}=${await sessionCookie("mallory")}`, makeEnv(db));
+    expect(res.status).toBe(200);
+    const body = await res.text();
+    expect(body).not.toContain("<img");
+    expect(body).not.toContain("onerror=alert(1)>");
+    expect(body).toContain(`key ending <code class="id">9988</code> · updated unknown`);
   });
 
   test("non-owner member → 403; the owner of a DIFFERENT app → 403 (per-App scope)", async () => {
@@ -1004,6 +1368,53 @@ describe("POST /dashboard/apps/:slug/settings — save-chain (op=save-chain)", (
     expect(rawCount(db, "app_model_config")).toBe(0);
   });
 
+  test("chain over 400 chars → 400 re-render, zero rows written (AL-23-2 selector/chain cap)", async () => {
+    const { db } = await seededWorld();
+    const cookie = `${SESSION_COOKIE}=${await sessionCookie("mallory")}`;
+    const res = await postForm(SETTINGS, cookie, makeEnv(db), {
+      op: "save-chain",
+      model_chain: "a".repeat(MAX_MODEL_SELECTOR_LENGTH + 1),
+    });
+    expect(res.status).toBe(400);
+    const body = await res.text();
+    expect(body).toContain("<!doctype html>");
+    expect(body).toContain(`limited to ${MAX_MODEL_SELECTOR_LENGTH}`);
+    expect(rawCount(db, "app_model_config")).toBe(0);
+  });
+
+  test("a chain of exactly 400 chars saves (the bound is inclusive)", async () => {
+    const { db, app } = await seededWorld();
+    const cookie = `${SESSION_COOKIE}=${await sessionCookie("mallory")}`;
+    const res = await postForm(SETTINGS, cookie, makeEnv(db), {
+      op: "save-chain",
+      model_chain: "a".repeat(MAX_MODEL_SELECTOR_LENGTH),
+    });
+    expect(res.status).toBe(200);
+    expect(await configStore(db).getModelChain(app.id)).toBe("a".repeat(MAX_MODEL_SELECTOR_LENGTH));
+  });
+
+  test("a duplicate model_chain field → 400 re-render, zero rows written (never a silent clear)", async () => {
+    const { db, app } = await seededWorld();
+    await configStore(db).setModelChain(app.id, "existing/model");
+    const cookie = `${SESSION_COOKIE}=${await sessionCookie("mallory")}`;
+    // parseBody({ all: true }) aggregates duplicate keys into an array — the
+    // handler must reject, never treat the array as an empty clear.
+    const res = await worker.fetch(
+      new Request(`https://worker.local${SETTINGS}`, {
+        method: "POST",
+        headers: { Cookie: cookie, "Content-Type": "application/x-www-form-urlencoded" },
+        body: "op=save-chain&model_chain=first/model&model_chain=second/model",
+      }),
+      makeEnv(db),
+    );
+    expect(res.status).toBe(400);
+    const body = await res.text();
+    expect(body).toContain("<!doctype html>");
+    expect(body).toContain("submitted more than once");
+    // The stored chain is untouched — the duplicate was never a clear.
+    expect(await configStore(db).getModelChain(app.id)).toBe("existing/model");
+  });
+
   test("non-owner member → 403, zero mutation", async () => {
     const { db } = await seededWorld();
     const res = await postForm(SETTINGS, `${SESSION_COOKIE}=${await sessionCookie("hubot")}`, makeEnv(db), {
@@ -1179,6 +1590,45 @@ describe("Role models editor (plan 17 T3 — view + save-roles op)", () => {
     expect(body).toContain("root is not a known review role");
     expect(rawCount(db, "app_model_roles")).toBe(0);
   });
+  test("a duplicate role_* field → 400 re-render, zero rows written (AL-23-2 explicit rejection)", async () => {
+    const { db, app } = await seededWorld();
+    await configStore(db).setModelRole(app.id, "code-reviewer", "old/model");
+    const cookie = `${SESSION_COOKIE}=${await sessionCookie("mallory")}`;
+    // parseBody({ all: true }) aggregates duplicate keys into an array — the
+    // handler must reject the duplicate explicitly, never silently last-wins.
+    const res = await worker.fetch(
+      new Request(`https://worker.local${SETTINGS}`, {
+        method: "POST",
+        headers: { Cookie: cookie, "Content-Type": "application/x-www-form-urlencoded" },
+        body: "op=save-roles&role_code-reviewer=openai/gpt-5&role_code-reviewer=anthropic/claude-x",
+      }),
+      makeEnv(db),
+    );
+    expect(res.status).toBe(400);
+    const body = await res.text();
+    expect(body).toContain("<!doctype html>");
+    expect(body).toContain("submitted more than once");
+    // Zero writes: the pre-existing mapping survives untouched.
+    expect(await configStore(db).getAppModelRoles(app.id)).toEqual({ "code-reviewer": "old/model" });
+    expect(rawCount(db, "app_model_roles")).toBe(1);
+  });
+
+  test("a role selector over 400 chars → 400 re-render, zero rows written (AL-23-2 selector cap)", async () => {
+    const { db, app } = await seededWorld();
+    await configStore(db).setModelRole(app.id, "code-reviewer", "old/model");
+    const res = await postForm(
+      SETTINGS,
+      `${SESSION_COOKIE}=${await sessionCookie("mallory")}`,
+      makeEnv(db),
+      roleForm({ "code-reviewer": "a".repeat(MAX_MODEL_SELECTOR_LENGTH + 1) }),
+    );
+    expect(res.status).toBe(400);
+    const body = await res.text();
+    expect(body).toContain("<!doctype html>");
+    expect(body).toContain(`limited to ${MAX_MODEL_SELECTOR_LENGTH}`);
+    // Zero partial writes: the valid entries never landed, the old row is intact.
+    expect(await configStore(db).getAppModelRoles(app.id)).toEqual({ "code-reviewer": "old/model" });
+  });
 
   test("a save with NO role fields at all → 400 re-render, zero rows written (never a silent no-op)", async () => {
     const { db, app } = await seededWorld();
@@ -1266,6 +1716,119 @@ describe("POST /dashboard/apps/:slug/settings/key/delete (delete-key route)", ()
   });
 });
 
+// --- plan 23 T2: custom provider declarations (settings ops) ---
+
+describe("POST /dashboard/apps/:slug/settings — custom providers (op=add-custom-provider / remove-custom-provider, plan 23 T2)", () => {
+  const CUSTOM_FORM: Record<string, string> = {
+    op: "add-custom-provider",
+    provider_id: "ark",
+    base_url: "https://ark.cn-beijing.volces.com/api/v3",
+    api: "openai-completions",
+    model_ids: "deepseek-v4-flash, deepseek-r1",
+    key: "sk-custom-ark-9988",
+  };
+  const mallory = async () => `${SESSION_COOKIE}=${await sessionCookie("mallory")}`;
+
+  test("add stores the declaration (key encrypted at rest) and re-renders the page with it listed", async () => {
+    const { db, app } = await seededWorld();
+    const res = await postForm(SETTINGS, await mallory(), makeEnv(db), CUSTOM_FORM);
+    expect(res.status).toBe(200);
+    const body = await res.text();
+    expect(body).toContain("Custom providers");
+    expect(body).toContain("<strong>ark</strong>");
+    expect(body).toContain("deepseek-v4-flash");
+    const row = db.raw
+      .query("SELECT api_key_enc FROM app_custom_providers WHERE app_id = ? AND provider_id = 'ark'")
+      .get(app.id) as { api_key_enc: string };
+    expect(row.api_key_enc).toMatch(/^v1\.primary\./);
+    expect(row.api_key_enc).not.toContain("sk-custom-ark-9988");
+  });
+
+  test("400 matrix: bad id / http baseUrl / enum-violating api / empty model_ids / over-length — zero writes", async () => {
+    const { db } = await seededWorld();
+    const cases: Array<{ patch: Record<string, string>; label: string }> = [
+      { patch: { provider_id: "Bad_ID" }, label: "uppercase id" },
+      { patch: { provider_id: "-lead" }, label: "leading hyphen" },
+      { patch: { provider_id: "x".repeat(65) }, label: "id over 64 chars" },
+      { patch: { provider_id: "anthropic" }, label: "built-in provider id collision" },
+      { patch: { provider_id: "ark-plan" }, label: "in-image base provider id collision (QC W-1)" },
+      { patch: { base_url: "http://insecure.example.com" }, label: "http baseUrl" },
+      { patch: { base_url: `https://example.com/${"x".repeat(2049)}` }, label: "baseUrl over 2048 chars" },
+      { patch: { api: "google-vertex" }, label: "api outside the AL-23-1 enum" },
+      { patch: { model_ids: "  ,  " }, label: "empty model_ids" },
+      { patch: { model_ids: `ok, ${"x".repeat(129)}` }, label: "model id over 128 chars" },
+      { patch: { model_ids: Array.from({ length: 33 }, (_, i) => `m${i}`).join(",") }, label: "over 32 model ids" },
+      { patch: { key: "" }, label: "empty key" },
+      { patch: { key: "k".repeat(4097) }, label: "key over 4096 chars" },
+    ];
+    for (const { patch, label } of cases) {
+      const res = await postForm(SETTINGS, await mallory(), makeEnv(db), { ...CUSTOM_FORM, ...patch });
+      expect(res.status, label).toBe(400);
+    }
+    expect(rawCount(db, "app_custom_providers")).toBe(0);
+  });
+
+  test("400: a NEW declaration beyond the 8-provider cap → 400 re-render, zero writes; filling the cap and updating an existing id stay allowed (QC W-2)", async () => {
+    const { db, app } = await seededWorld();
+    const store = configStore(db);
+    // A local declaration fixture (the store describe's CUSTOM is scoped
+    // there; the route describe carries CUSTOM_FORM instead).
+    const decl = (providerId: string): AppCustomProvider => ({
+      provider_id: providerId,
+      base_url: "https://ark.cn-beijing.volces.com/api/v3",
+      api: "openai-completions",
+      model_ids: ["deepseek-v4-flash"],
+    });
+    // The bound is inclusive: with 7 declared, the 8th NEW id is allowed.
+    for (let i = 1; i < MAX_CUSTOM_PROVIDER_COUNT; i++) {
+      await store.upsertCustomProvider(app.id, decl(`prov-${i}`), "sk-custom-ark-9988");
+    }
+    const fill = await postForm(SETTINGS, await mallory(), makeEnv(db), { ...CUSTOM_FORM, provider_id: "prov-8" });
+    expect(fill.status).toBe(200);
+    expect(rawCount(db, "app_custom_providers")).toBe(MAX_CUSTOM_PROVIDER_COUNT);
+    // A 9th NEW id → 400 with a cap message, zero writes.
+    const over = await postForm(SETTINGS, await mallory(), makeEnv(db), { ...CUSTOM_FORM, provider_id: "prov-9" });
+    expect(over.status).toBe(400);
+    expect(await over.text()).toContain("custom providers");
+    expect(rawCount(db, "app_custom_providers")).toBe(MAX_CUSTOM_PROVIDER_COUNT);
+    // Updating an EXISTING declaration at the cap stays allowed (no growth).
+    const update = await postForm(SETTINGS, await mallory(), makeEnv(db), {
+      ...CUSTOM_FORM,
+      provider_id: "prov-1",
+      model_ids: "fresh-model",
+    });
+    expect(update.status).toBe(200);
+    expect(rawCount(db, "app_custom_providers")).toBe(MAX_CUSTOM_PROVIDER_COUNT);
+  });
+
+  test("remove-custom-provider deletes the row; an unknown id is a tolerant no-op", async () => {
+    const { db } = await seededWorld();
+    await postForm(SETTINGS, await mallory(), makeEnv(db), CUSTOM_FORM);
+    const res = await postForm(SETTINGS, await mallory(), makeEnv(db), {
+      op: "remove-custom-provider",
+      provider_id: "ark",
+    });
+    expect(res.status).toBe(200);
+    expect(rawCount(db, "app_custom_providers")).toBe(0);
+    const noop = await postForm(SETTINGS, await mallory(), makeEnv(db), {
+      op: "remove-custom-provider",
+      provider_id: "ghost",
+    });
+    expect(noop.status).toBe(200);
+    expect(await noop.text()).toContain("nothing changed");
+  });
+
+  test("non-owner member → 403, zero mutation; admin (non-creator) may add", async () => {
+    const { db } = await seededWorld();
+    const denied = await postForm(SETTINGS, `${SESSION_COOKIE}=${await sessionCookie("hubot")}`, makeEnv(db), CUSTOM_FORM);
+    expect(denied.status).toBe(403);
+    expect(rawCount(db, "app_custom_providers")).toBe(0);
+    const admin = await postForm(SETTINGS, `${SESSION_COOKIE}=${await sessionCookie("octocat")}`, makeEnv(db), CUSTOM_FORM);
+    expect(admin.status).toBe(200);
+    expect(rawCount(db, "app_custom_providers")).toBe(1);
+  });
+});
+
 // --- plan 14 T2: the settings view (views.ts) + DESIGN mapping ---
 
 describe("settings view DESIGN mapping (plan 14 T2)", () => {
@@ -1301,8 +1864,11 @@ describe("settings view DESIGN mapping (plan 14 T2)", () => {
     // silently picking the first allowlist id.
     expect(body).toContain('<option value="" disabled selected>Select a provider…</option>');
     // The select is the only place a provider id can enter — bound to the
-    // same allowlist the POST route 400s against.
-    const options = [...body.matchAll(/<option value="([^"]+)">/g)].map((m) => m[1]);
+    // same allowlist the POST route 400s against. Scoped to the provider
+    // select: the plan-23 T2 custom-providers section adds its own api
+    // select to the page, so a whole-page option scan would pick those up.
+    const providerSelect = /<select name="provider">([\s\S]*?)<\/select>/.exec(body)?.[1] ?? "";
+    const options = [...providerSelect.matchAll(/<option value="([^"]+)">/g)].map((m) => m[1]);
     expect(options).toEqual([...PROVIDER_IDS]);
   });
 
@@ -1334,6 +1900,70 @@ describe("settings view DESIGN mapping (plan 14 T2)", () => {
     const body = await res.text();
     expect(body).not.toContain("<script>");
     expect(body).toContain(`value="&quot;&gt;&lt;script&gt;alert(1)&lt;/script&gt;"`);
+  });
+});
+
+// --- plan 23 T2: the settings view custom-providers section ---
+
+describe("settings view — custom providers section (plan 23 T2)", () => {
+  const getSettingsPage = async (login: string): Promise<string> => {
+    const { db } = await seededWorld();
+    const res = await get(SETTINGS, `${SESSION_COOKIE}=${await sessionCookie(login)}`, makeEnv(db));
+    expect(res.status).toBe(200);
+    return res.text();
+  };
+
+  test("the section sits between Model chain and Role models; the add form has the api enum select and a password key input", async () => {
+    const body = await getSettingsPage("mallory");
+    const modelChain = body.indexOf("Model chain");
+    const custom = body.indexOf("Custom providers");
+    const roleModels = body.indexOf("Role models");
+    expect(modelChain).toBeGreaterThanOrEqual(0);
+    expect(custom).toBeGreaterThan(modelChain);
+    expect(roleModels).toBeGreaterThan(custom);
+    // The api select offers EXACTLY the AL-23-1 three-form enum (the empty
+    // disabled placeholder does not match the value regex — same discipline
+    // as the provider select).
+    const apiSelect = /<select name="api">([\s\S]*?)<\/select>/.exec(body)?.[1] ?? "";
+    const values = [...apiSelect.matchAll(/<option value="([^"]+)"/g)].map((m) => m[1]);
+    expect(values).toEqual([...CUSTOM_PROVIDER_API_IDS]);
+    // The key input reuses the password semantics of the provider-key form.
+    expect(body).toContain('<input type="password" name="key" autocomplete="new-password"');
+  });
+
+  test("a stored declaration renders with escaped user-controlled strings (base_url / model_ids)", async () => {
+    const { db, app } = await seededWorld();
+    await configStore(db).upsertCustomProvider(
+      app.id,
+      {
+        provider_id: "ark",
+        base_url: 'https://evil.example.com/?q="><script>alert(1)</script>',
+        api: "openai-completions",
+        model_ids: ['"><img src=x onerror=alert(1)>'],
+      },
+      "sk-custom-ark-9988",
+    );
+    const res = await get(SETTINGS, `${SESSION_COOKIE}=${await sessionCookie("mallory")}`, makeEnv(db));
+    const body = await res.text();
+    expect(body).not.toContain("<script>");
+    expect(body).not.toContain("<img");
+    expect(body).toContain("&lt;script&gt;alert(1)&lt;/script&gt;");
+    expect(body).toContain("&lt;img src=x onerror=alert(1)&gt;");
+  });
+
+  test("the remove form posts op=remove-custom-provider with the provider_id", async () => {
+    const { db, app } = await seededWorld();
+    await configStore(db).upsertCustomProvider(
+      app.id,
+      { provider_id: "ark", base_url: "https://ark.example.com", api: "openai-completions", model_ids: ["deepseek-v4-flash"] },
+      "sk-custom-ark-9988",
+    );
+    // Same db as the stored declaration — getSettingsPage builds a FRESH
+    // world, so the page must be fetched over the db that holds the row.
+    const res = await get(SETTINGS, `${SESSION_COOKIE}=${await sessionCookie("mallory")}`, makeEnv(db));
+    const body = await res.text();
+    expect(body).toContain('<input type="hidden" name="op" value="remove-custom-provider">');
+    expect(body).toContain('<input type="hidden" name="provider_id" value="ark">');
   });
 });
 
