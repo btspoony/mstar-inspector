@@ -41,10 +41,11 @@
  *     whether THIS call performed the delete.
  *   - recordDelivery / deliverySummary / listRecentDeliveries (plan 20,
  *     migration 0011) are the webhook_deliveries face: the per-App webhook
- *     route appends one best-effort row per VERIFIED delivery (outcome
- *     vocabulary DELIVERY_OUTCOMES, producer-side enforced), and the
- *     dashboard reads the health summary + recent list through the same
- *     store (AL-20-1: the legacy face records nothing).
+ *     route appends one best-effort row per CLASSIFIED delivery (ok /
+ *     paused / ignored / rejected — outcome vocabulary DELIVERY_OUTCOMES,
+ *     producer-side enforced), and the dashboard reads the health summary +
+ *     recent list through the same store (AL-20-1: the legacy face records
+ *     nothing).
  *   - deliverySummaries (plan 20 QC wave 1, W-1) is the BATCHED health
  *     read face for the Apps list: latest row + 24h rejected count for
  *     every requested app in exactly TWO statements regardless of N;

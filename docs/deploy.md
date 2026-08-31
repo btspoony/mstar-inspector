@@ -27,7 +27,7 @@ exist before the first deploy:
   `sandbox-image/Dockerfile` at deploy time (`image_build_context: "."`,
   `instance_type: lite`, `max_instances: 1`).
 
-### D1 migrations (0001–0013, forward-only)
+### D1 migrations (0001–0014, forward-only)
 
 ```bash
 wrangler d1 migrations apply mstar-inspector-db --remote   # production
@@ -48,6 +48,8 @@ wrangler d1 migrations apply mstar-inspector-db            # local dev
 | `0010_review_failures` | all-stage failure table (plan 18) — the cron sweep's signal |
 | `0011_webhook_deliveries` | per-App webhook delivery log (plan 20) |
 | `0012_custom_providers_and_key_updated_at` | per-App custom provider declarations + provider-key `updated_at` (plan 23) |
+| `0013_findings_review_id_index` | index on `findings.review_id` — insights/previous-round lookups (plan 22) |
+| `0014_idx_reviews_reviewed_at` | index on `reviews.reviewed_at` — insights window scans (plan 22) |
 
 Migrations are **forward-only** (0002 precedent): never hand-edit an applied
 migration; add the next file.
@@ -249,6 +251,7 @@ or when deliveries look dead):
 
 | Check | Where | Healthy state |
 |---|---|---|
+| Kill-switch | Worker env var `REVIEW_ENABLED` | `"true"` — check FIRST: the kill-switch return precedes classification and delivery recording, so a zero-rows state can mean kill-switch rather than GitHub-side delivery death |
 | Webhook URL | GitHub App settings → Webhook | `https://<worker-host>/webhook/<slug>` — the per-App route, NOT the legacy `/webhook` |
 | Webhook secret | GitHub App settings → Webhook | A secret is set (masked). The manifest flow's GitHub-generated secret is stored encrypted in the dashboard; changing it on GitHub without updating the dashboard breaks signature verification → `rejected` (401) deliveries |
 | Active | GitHub App settings → Webhook | The **Active** checkbox is on and the App is not suspended; the dashboard row's status is `active` (a disabled row 404s the per-App route) |
@@ -262,7 +265,8 @@ mismatch (secret drift); 400 = malformed payload; 500 = the App's stored
 secret is missing/empty/default. Pre-classify failures (unknown/disabled
 slug, decrypt failure) record NO row — they surface in the Worker logs, not
 the panel. No rows at all = GitHub is not posting (URL wrong, App suspended,
-or the event never fired).
+the event never fired, or the kill-switch is off — confirm `REVIEW_ENABLED`
+first, per the checklist above).
 
 ### 4. R1 pin: reviews.model vs configured chain head
 

@@ -392,6 +392,22 @@ function customProviderAad(appId: string, providerId: string): string {
  * The settings route re-renders 400 first; this is the backstop for direct
  * callers.
  */
+/**
+ * Strict https base-URL predicate (PR #10 review): a valid custom-provider
+ * base URL must PARSE as an absolute https URL WITH a host — the old
+ * prefix-only regex accepted `https://` with no host. Shared by the store
+ * backstop (assertCustomProvider) and the settings route (one predicate,
+ * two layers).
+ */
+export function isValidCustomProviderBaseUrl(raw: string): boolean {
+  try {
+    const u = new URL(raw);
+    return u.protocol === "https:" && u.hostname !== "";
+  } catch {
+    return false;
+  }
+}
+
 function assertCustomProvider(decl: AppCustomProvider, plainKey: string): void {
   if (!CUSTOM_PROVIDER_ID_PATTERN.test(decl.provider_id)) {
     throw new InvalidCustomProviderError(
@@ -411,9 +427,9 @@ function assertCustomProvider(decl: AppCustomProvider, plainKey: string): void {
       `custom provider id ${JSON.stringify(decl.provider_id)} collides with an in-image base provider id`,
     );
   }
-  if (!/^https:\/\//.test(decl.base_url)) {
+  if (!isValidCustomProviderBaseUrl(decl.base_url)) {
     throw new InvalidCustomProviderError(
-      `custom provider base URL must be https: ${JSON.stringify(decl.base_url)}`,
+      `custom provider base URL must be a valid https URL with a host: ${JSON.stringify(decl.base_url)}`,
     );
   }
   if (decl.base_url.length > MAX_CUSTOM_PROVIDER_BASE_URL_LENGTH) {
@@ -791,6 +807,11 @@ export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | un
      * The declaration-count bound (MAX_CUSTOM_PROVIDER_COUNT, QC wave-1 W-2)
      * is growth-only: a NEW id at the cap throws before any crypto or write;
      * re-declaring an EXISTING id (an update, not growth) always proceeds.
+     * The cap is enforced ATOMICALLY (PR #10 cap-race fix): the new-id
+     * insert is conditional (`WHERE count < cap`), so two concurrent saves
+     * racing for the last slot cannot both land — the loser's insert matches
+     * zero rows and throws the cap error. The pre-check below stays as the
+     * fast 400 path (defense in depth, both layers).
      * The upsert maintains the row's write time from ONE clock read (the
      * 0012 T1 convention): a fresh insert writes updated_at == created_at;
      * re-declaring moves both forward.
@@ -806,18 +827,37 @@ export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | un
         .prepare(`SELECT provider_id FROM app_custom_providers WHERE app_id = ? AND provider_id = ?`)
         .bind(appId, decl.provider_id)
         .first<{ provider_id: string }>();
-      if (existing === null) {
+      const isNew = existing === null;
+      if (isNew) {
         const countRow = await db
           .prepare(`SELECT COUNT(*) AS n FROM app_custom_providers WHERE app_id = ?`)
           .bind(appId)
           .first<{ n: number }>();
         if ((countRow?.n ?? 0) >= MAX_CUSTOM_PROVIDER_COUNT) {
-          throw new InvalidCustomProviderError(
-            `App ${appId} already has the maximum of ${MAX_CUSTOM_PROVIDER_COUNT} custom provider declarations`,
-          );
+          throw new InvalidCustomProviderError(`custom provider cap (${MAX_CUSTOM_PROVIDER_COUNT}) reached`);
         }
       }
       const keyEnc = await box.encryptSecret(plainKey, customProviderAad(appId, decl.provider_id));
+      if (isNew) {
+        // Atomic cap (PR #10 cap-race fix): the INSERT only fires while the
+        // App is under the cap — a concurrent save that won the last slot
+        // makes this one match zero rows (changes === 0) and the cap error
+        // is thrown instead of a silent over-cap insert. One clock read for
+        // both timestamps (the 0012 T1 convention, same as the upsert).
+        const res = await db
+          .prepare(
+            `WITH now AS (SELECT datetime('now') AS ts)
+             INSERT INTO app_custom_providers (app_id, provider_id, base_url, api, model_ids, api_key_enc, created_at, updated_at)
+             SELECT ?, ?, ?, ?, ?, ?, (SELECT ts FROM now), (SELECT ts FROM now)
+             WHERE (SELECT COUNT(*) FROM app_custom_providers WHERE app_id = ?) < ${MAX_CUSTOM_PROVIDER_COUNT}`,
+          )
+          .bind(appId, decl.provider_id, decl.base_url, decl.api, JSON.stringify(decl.model_ids), keyEnc, appId)
+          .run();
+        if (res.meta.changes === 0) {
+          throw new InvalidCustomProviderError(`custom provider cap (${MAX_CUSTOM_PROVIDER_COUNT}) reached`);
+        }
+        return;
+      }
       await db
         .prepare(
           `WITH now AS (SELECT datetime('now') AS ts)

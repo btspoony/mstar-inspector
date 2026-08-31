@@ -58,7 +58,9 @@ import { SecretboxKeyError, createSecretbox } from "./secretbox";
 import {
   CUSTOM_PROVIDER_API_IDS,
   CUSTOM_PROVIDER_ID_PATTERN,
+  InvalidCustomProviderError,
   IN_IMAGE_BASE_PROVIDER_IDS,
+  isValidCustomProviderBaseUrl,
   MAX_CUSTOM_PROVIDER_BASE_URL_LENGTH,
   MAX_CUSTOM_PROVIDER_COUNT,
   MAX_CUSTOM_PROVIDER_MODEL_ID_LENGTH,
@@ -1318,14 +1320,14 @@ dashboardApp.post("/apps/:slug/settings", async (c) => {
         400,
       );
     }
-    if (!/^https:\/\//.test(baseUrl)) {
+    if (!isValidCustomProviderBaseUrl(baseUrl)) {
       return settingsResponse(
         c,
         gate.session,
         store,
         apps,
         gate.app,
-        { kind: "error", message: "The base URL must be https — nothing was stored." },
+        { kind: "error", message: "The base URL must be a valid https URL with a host — nothing was stored." },
         400,
       );
     }
@@ -1440,6 +1442,12 @@ dashboardApp.post("/apps/:slug/settings", async (c) => {
       );
     } catch (err) {
       logSettingsFailure("add_custom_provider", gate.app.id, err);
+      // PR #10 cap-race fix: the store's atomic cap check can legitimately
+      // throw InvalidCustomProviderError AFTER the route pre-check passed
+      // (a concurrent save won the last slot) — that is a 400, not a 500.
+      if (err instanceof InvalidCustomProviderError) {
+        return settingsResponse(c, gate.session, store, apps, gate.app, { kind: "error", message: err.message }, 400);
+      }
       return settingsResponse(c, gate.session, store, apps, gate.app, settingsFailureNotice(err), 500);
     }
     return settingsResponse(c, gate.session, store, apps, gate.app, {

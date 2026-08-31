@@ -1,13 +1,14 @@
 -- 0011_webhook_deliveries.sql — per-App webhook delivery log (plan 20 Task 1,
 -- architect verdict AL-20-1, iteration spec v0.8-platform-insights §4).
 --
--- webhook_deliveries: one row per VERIFIED per-App webhook delivery — the
--- R2 diagnostics face ("断线看得见"). Written best-effort at the per-App
--- webhook face immediately after classifyWebhook returns (before the reject
--- return), so EVERY classified outcome lands: ok / paused / ignored /
--- rejected. The legacy /webhook face deliberately records NOTHING
--- (AL-20-1: legacy 不落行 — it is the fallback path with no dashboard
--- consumer, and app_id is NOT NULL FK).
+-- webhook_deliveries: one row per CLASSIFIED per-App webhook delivery
+-- (ok / paused / ignored / rejected) — the R2 diagnostics face
+-- ("断线看得见"). Written best-effort at the per-App webhook face
+-- immediately after classifyWebhook returns (before the reject return), so
+-- EVERY classified outcome lands: ok / paused / ignored / rejected. The
+-- legacy /webhook face deliberately records NOTHING (AL-20-1: legacy 不落行
+-- — it is the fallback path with no dashboard consumer, and app_id is NOT
+-- NULL FK).
 --
 -- outcome vocabulary is enforced PRODUCER-side
 -- (src/dashboard/apps-store.ts DELIVERY_OUTCOMES, 0010 FAILURE_STAGES

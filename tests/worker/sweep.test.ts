@@ -18,10 +18,13 @@ import {
   runSweep,
   SWEEP_FAILURE_THRESHOLD,
   SWEEP_LOG_DETAIL_MAX,
+  SWEEP_RETENTION_CAP,
+  SWEEP_RETENTION_DAYS,
   SWEEP_WEBHOOK_TIMEOUT_MS,
   SWEEP_WINDOW_HOURS,
   type SweepAlertFields,
   type SweepLog,
+  type SweepRetentionFields,
   type SweepWarnFields,
 } from "../../src/worker/sweep";
 import { createMigratedTestD1 } from "../store/helpers";
@@ -34,7 +37,7 @@ const BASE = {
   head_sha: "0123456789abcdef0123456789abcdef01234567",
 };
 
-type WarnCall = { fields: SweepAlertFields | SweepWarnFields; msg?: string };
+type WarnCall = { fields: SweepAlertFields | SweepWarnFields | SweepRetentionFields; msg?: string };
 
 function captureLog(): { log: SweepLog; calls: WarnCall[] } {
   const calls: WarnCall[] = [];
@@ -99,10 +102,95 @@ describe("runSweep", () => {
   test("counts review_failures with the trailing-24h window SQL", async () => {
     const captured: string[] = [];
     const result = await runSweep(recordingDb(captured));
-    expect(captured).toHaveLength(1);
-    expect(captured[0]).toContain("FROM review_failures");
-    expect(captured[0]).toContain("created_at > datetime('now', '-24 hours')");
+    expect(captured).toHaveLength(2);
+    expect(captured[0]).toContain("DELETE FROM webhook_deliveries");
+    expect(captured[1]).toContain("FROM review_failures");
+    expect(captured[1]).toContain("created_at > datetime('now', '-24 hours')");
     expect(result).toEqual({ failures24h: 0, thresholdBreached: false, webhook: "not_attempted" });
+  });
+  test("retention: DELETE shape (30-day window, 500-row cap, no bound params) + retention_swept log carries the deleted count", async () => {
+    const captured: string[] = [];
+    const binds: unknown[][] = [];
+    const db: D1Like = {
+      prepare(query: string): D1StatementLike {
+        captured.push(query);
+        const stmt: D1StatementLike = {
+          bind(...values: unknown[]): D1StatementLike {
+            binds.push(values);
+            return stmt;
+          },
+          async first<T = Record<string, unknown>>(): Promise<T | null> {
+            return { n: 0 } as T;
+          },
+          async all<T = Record<string, unknown>>(): Promise<{ results: T[] }> {
+            return { results: [] as T[] };
+          },
+          async run<T = Record<string, unknown>>(): Promise<{
+            results: T[];
+            meta: { changes: number; last_row_id: number };
+          }> {
+            return { results: [] as T[], meta: { changes: 3, last_row_id: 0 } };
+          },
+        };
+        return stmt;
+      },
+      async batch(): Promise<[]> {
+        return [];
+      },
+    };
+    const { log, calls } = captureLog();
+    const result = await runSweep(db, { log });
+    // The retention DELETE is parameter-free — no `?` placeholders to bind.
+    expect(captured[0]).not.toContain("?");
+    expect(binds).toEqual([]);
+    expect(calls).toHaveLength(1);
+    expect(calls[0]!.fields).toEqual({ event: "retention_swept", deleted: 3 });
+    expect(result).toEqual({ failures24h: 0, thresholdBreached: false, webhook: "not_attempted" });
+  });
+
+  test("retention deletes only rows older than 30 days (real D1)", async () => {
+    const db = createMigratedTestD1();
+    db.raw
+      .query(
+        `INSERT INTO github_apps (id, slug, github_app_id, name, private_key_enc, webhook_secret_enc, created_by, created_at, updated_at)
+         VALUES ('app-1', 'retention-app', 9001, 'retention-app', 'enc', 'enc', 'tester', datetime('now'), datetime('now'))`,
+      )
+      .run();
+    const insertDelivery = (id: string, created_at: string): void => {
+      db.raw
+        .query(
+          `INSERT INTO webhook_deliveries (id, app_id, event_name, outcome, created_at)
+           VALUES (?, 'app-1', 'pull_request', 'ok', ?)`,
+        )
+        .run(id, created_at);
+    };
+    insertDelivery("old-1", "2026-07-01 00:00:00"); // 61 days old — swept
+    insertDelivery("old-2", "2026-07-31 00:00:00"); // 31 days old — swept
+    insertDelivery("fresh", "2026-08-30 00:00:00"); // 1 day old — kept
+    const { log } = captureLog();
+    const result = await runSweep(db, { log });
+    const remaining = db.raw.query("SELECT id FROM webhook_deliveries ORDER BY id").all() as Array<{ id: string }>;
+    expect(remaining.map((r) => r.id)).toEqual(["fresh"]);
+    expect(result).toEqual({ failures24h: 0, thresholdBreached: false, webhook: "not_attempted" });
+  });
+
+  test("retention failure degrades to a warn and the failure-sweep still runs (breach alert fires)", async () => {
+    const db = createMigratedTestD1();
+    await seedInWindow(db, SWEEP_FAILURE_THRESHOLD + 1);
+    const { log, calls } = captureLog();
+    const wrapped: D1Like = {
+      prepare(query: string): D1StatementLike {
+        if (query.includes("DELETE FROM webhook_deliveries")) {
+          throw new Error("retention table locked");
+        }
+        return db.prepare(query);
+      },
+      batch: (statements) => db.batch(statements),
+    };
+    const result = await runSweep(wrapped, { log });
+    expect(calls[0]!.fields).toMatchObject({ event: "retention_swept_failed", detail: "retention table locked" });
+    expect(calls[1]!.fields).toMatchObject({ event: "ops_sweep_alert", failures_24h: 6 });
+    expect(result).toEqual({ failures24h: 6, thresholdBreached: true, webhook: "absent" });
   });
 
   test("counts only in-window rows, across all stages (parse + runner/sandbox/pipeline)", async () => {

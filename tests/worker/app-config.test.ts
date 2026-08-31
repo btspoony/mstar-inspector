@@ -52,6 +52,7 @@ import { DEEP_SEAT_ROLES, parseModelSelectors } from "../../src/review/runtime-o
 import { SESSION_COOKIE, createSessionValue } from "../../src/dashboard/session";
 import { createUser, type DashboardD1 } from "../../src/dashboard/users";
 import type { Env } from "../../src/worker/env";
+import type { D1StatementLike } from "../../src/store/types";
 
 const MIGRATIONS_DIR = join(import.meta.dir, "../../migrations");
 /** base64 of exactly 32 bytes — the secretbox master-key requirement. */
@@ -919,6 +920,7 @@ describe("app-config store (createAppConfigStore) — custom providers (plan 23 
       { provider_id: "x".repeat(65) }, // over 64 chars
       { provider_id: "anthropic" }, // collides with a PROVIDER_IDS built-in (copy says NON-built-in)
       { base_url: "http://insecure.example.com" }, // http, not https
+      { base_url: "https://" }, // https prefix but NO host (PR #10 review)
       { base_url: `https://example.com/${"x".repeat(2049)}` }, // over 2048 chars
       { api: "google-vertex" }, // outside the AL-23-1 three-form enum
       { model_ids: [] }, // empty
@@ -968,7 +970,7 @@ describe("app-config store (createAppConfigStore) — custom providers (plan 23 
     // Growth past the cap is refused with zero writes.
     await expect(
       store.upsertCustomProvider(app.id, { ...CUSTOM, provider_id: "prov-new" }, PLAIN_CUSTOM_KEY),
-    ).rejects.toThrow(InvalidCustomProviderError);
+    ).rejects.toThrow("custom provider cap (8) reached");
     expect(rawCount(db, "app_custom_providers")).toBe(MAX_CUSTOM_PROVIDER_COUNT);
     // Re-declaring an EXISTING id is an update, not growth — allowed.
     await expect(
@@ -1753,6 +1755,7 @@ describe("POST /dashboard/apps/:slug/settings — custom providers (op=add-custo
       { patch: { provider_id: "anthropic" }, label: "built-in provider id collision" },
       { patch: { provider_id: "ark-plan" }, label: "in-image base provider id collision (QC W-1)" },
       { patch: { base_url: "http://insecure.example.com" }, label: "http baseUrl" },
+      { patch: { base_url: "https://" }, label: "https baseUrl with no host (PR #10 review)" },
       { patch: { base_url: `https://example.com/${"x".repeat(2049)}` }, label: "baseUrl over 2048 chars" },
       { patch: { api: "google-vertex" }, label: "api outside the AL-23-1 enum" },
       { patch: { model_ids: "  ,  " }, label: "empty model_ids" },
@@ -1799,6 +1802,67 @@ describe("POST /dashboard/apps/:slug/settings — custom providers (op=add-custo
     });
     expect(update.status).toBe(200);
     expect(rawCount(db, "app_custom_providers")).toBe(MAX_CUSTOM_PROVIDER_COUNT);
+  });
+  test("400: the store's atomic cap throw (race — pre-check passed, insert lost) maps to 400, not 500 (PR #10)", async () => {
+    const { db } = await seededWorld();
+    // The route pre-check reads listCustomProviders (7 rows → passes); the
+    // store's atomic conditional INSERT then matches zero rows (a concurrent
+    // save won the last slot) → InvalidCustomProviderError → the route must
+    // answer 400 with the cap message, never 500.
+    const sevenRows = Array.from({ length: 7 }, (_, i) => ({
+      provider_id: `prov-${i + 1}`,
+      base_url: "https://example.com/v1",
+      api: "openai-completions",
+      model_ids: JSON.stringify(["m1"]),
+    }));
+    const fakeStmt = (overrides: {
+      first?: unknown;
+      all?: unknown[];
+      run?: { changes: number };
+    }): D1StatementLike => {
+      const stmt: D1StatementLike = {
+        bind(..._values: unknown[]): D1StatementLike {
+          return stmt;
+        },
+        async first<T = Record<string, unknown>>(): Promise<T | null> {
+          return (overrides.first ?? null) as T | null;
+        },
+        async all<T = Record<string, unknown>>(): Promise<{ results: T[] }> {
+          return { results: (overrides.all ?? []) as T[] };
+        },
+        async run<T = Record<string, unknown>>(): Promise<{
+          results: T[];
+          meta: { changes: number; last_row_id: number };
+        }> {
+          return { results: [] as T[], meta: { changes: overrides.run?.changes ?? 0, last_row_id: 0 } };
+        },
+      };
+      return stmt;
+    };
+    const raceLosing: AppConfigD1 = {
+      prepare(query: string): D1StatementLike {
+        if (query.includes("SELECT * FROM app_custom_providers")) {
+          return fakeStmt({ all: sevenRows }); // route pre-check: 7 < 8 → passes
+        }
+        if (query.includes("SELECT provider_id FROM app_custom_providers")) {
+          return fakeStmt({ first: null }); // new id
+        }
+        if (query.includes("SELECT COUNT(*) AS n FROM app_custom_providers")) {
+          return fakeStmt({ first: { n: 7 } }); // store pre-check passes
+        }
+        if (query.includes("INSERT INTO app_custom_providers")) {
+          return fakeStmt({ run: { changes: 0 } }); // race lost → cap error
+        }
+        return db.prepare(query);
+      },
+      batch: (statements) => db.batch(statements),
+    };
+    const res = await postForm(SETTINGS, await mallory(), makeEnv(raceLosing), {
+      ...CUSTOM_FORM,
+      provider_id: "prov-9",
+    });
+    expect(res.status).toBe(400);
+    expect(await res.text()).toContain("custom provider cap (8) reached");
   });
 
   test("remove-custom-provider deletes the row; an unknown id is a tolerant no-op", async () => {
