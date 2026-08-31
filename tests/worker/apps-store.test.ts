@@ -423,3 +423,35 @@ describe("apps-store (createAppsStore)", () => {
     ).rejects.toThrow(/FOREIGN KEY constraint failed/);
   });
 });
+describe("apps-store delivery read faces (plan 20 Task 2 consumption)", () => {
+  /** The apps-store fixture + migration 0011 (the webhook_deliveries table). */
+  function createDeliveryD1(): ReturnType<typeof createTestD1> {
+    const db = createMigratedD1();
+    applyMigration(db, "0011_webhook_deliveries.sql");
+    return db;
+  }
+
+  test("deliverySummary + listRecentDeliveries serve the Task-2 UI faces over the apps-store fixture", async () => {
+    const db = createDeliveryD1();
+    const app = await seedApp(db);
+    const s = store(db);
+    await s.recordDelivery({ appId: app.id, eventName: "ping", outcome: "ignored", statusCode: null });
+    await s.recordDelivery({ appId: app.id, eventName: "pull_request", outcome: "rejected", statusCode: 401 });
+    // Backdate the ignored row so the rejected row is the LATEST.
+    db.raw
+      .prepare("UPDATE webhook_deliveries SET created_at = datetime('now', '-1 hour') WHERE outcome = 'ignored'")
+      .run();
+
+    const summary = await s.deliverySummary(app.id);
+    expect(summary.latest).toMatchObject({
+      event_name: "pull_request",
+      outcome: "rejected",
+      status_code: 401,
+    });
+    expect(summary.rejected24h).toBe(1);
+
+    const recent = await s.listRecentDeliveries(app.id, 5);
+    expect(recent.map((r) => r.outcome)).toEqual(["rejected", "ignored"]);
+    expect(recent[0]!.created_at >= recent[1]!.created_at).toBe(true);
+  });
+});

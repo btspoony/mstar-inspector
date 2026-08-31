@@ -23,7 +23,7 @@ import { join } from "node:path";
 import worker from "../../src/worker/index";
 import { createSecretbox } from "../../src/dashboard/secretbox";
 import type { Env } from "../../src/worker/env";
-import { createAppsStore, type GithubAppRow } from "../../src/dashboard/apps-store";
+import { createAppsStore, type DeliveryOutcome, type GithubAppRow } from "../../src/dashboard/apps-store";
 import { SESSION_COOKIE, createSessionValue } from "../../src/dashboard/session";
 import { createUser, type DashboardD1 } from "../../src/dashboard/users";
 import { createTestD1 } from "../store/helpers";
@@ -58,6 +58,7 @@ function createAppsUiD1(): ReturnType<typeof createTestD1> {
     "0007_reviews_app_id_index.sql",
     "0008_github_apps_ops.sql",
     "0009_app_model_roles.sql",
+    "0011_webhook_deliveries.sql",
   ]) {
     db.raw.exec(readFileSync(join(MIGRATIONS_DIR, name), "utf8"));
   }
@@ -566,5 +567,128 @@ describe("App settings — Review switch + install health panel (plan 16)", () =
     expect(body).not.toContain("<script>");
     expect(body).toContain("&lt;script&gt;alert(1)&lt;/script&gt;");
     expect(body).toContain("<strong>unknown</strong>");
+  });
+});
+describe("Apps list health column + settings recent deliveries (plan 20 Task 2)", () => {
+  const SETTINGS = "/dashboard/apps/mstar-inspector-mallory/settings";
+  const ownerCookie = async () => `${SESSION_COOKIE}=${await sessionCookie("mallory")}`;
+
+  test("list health column: no delivery rows → 'delivery never', no outcome badge, no rejected badge; last_webhook_at does NOT light it up (AL-20-2)", async () => {
+    const db = await seededWorld();
+    const cookie = `${SESSION_COOKIE}=${await sessionCookie("hubot")}`;
+    const res = await get("/dashboard/apps", cookie, makeEnv(db));
+    expect(res.status).toBe(200);
+    const body = await res.text();
+    expect(body).toContain("delivery never");
+    expect(body).not.toContain("rejected in 24h");
+    // The health column reads webhook_deliveries — the github_apps
+    // last_webhook_at column (the L5 "last verified delivery" stamp) must
+    // NOT light it up: touch it and the column still reads "never".
+    const apps = createAppsStore(db);
+    const app = (await apps.listApps()).find((a) => a.slug === "mstar-inspector-mallory")!;
+    await apps.touchLastWebhook(app.id);
+    const res2 = await get("/dashboard/apps", cookie, makeEnv(db));
+    expect(await res2.text()).toContain("delivery never");
+  });
+
+  test("list health column: latest delivery renders relative time + outcome badge; the 24h rejected count renders as a badge", async () => {
+    const db = await seededWorld();
+    const apps = createAppsStore(db);
+    const app = (await apps.listApps()).find((a) => a.slug === "mstar-inspector-mallory")!;
+    await apps.recordDelivery({ appId: app.id, eventName: "pull_request", outcome: "ok", statusCode: null });
+    await apps.recordDelivery({ appId: app.id, eventName: "pull_request", outcome: "rejected", statusCode: 401 });
+    // Backdate the ok row so the rejected row is the LATEST (created_at has
+    // second resolution — backdating makes the order total and observable).
+    db.raw
+      .prepare("UPDATE webhook_deliveries SET created_at = datetime('now', '-1 hour') WHERE outcome = 'ok'")
+      .run();
+    const res = await get("/dashboard/apps", `${SESSION_COOKIE}=${await sessionCookie("hubot")}`, makeEnv(db));
+    const body = await res.text();
+    expect(body).toContain("delivery just now");
+    expect(body).toContain('<span class="note">rejected</span>');
+    expect(body).toContain("1 rejected in 24h");
+    // The healthy sibling App (no rows) still reads "delivery never".
+    expect(body).toContain("delivery never");
+  });
+
+  test("settings recent deliveries: empty state renders", async () => {
+    const db = await seededWorld();
+    const res = await get(SETTINGS, await ownerCookie(), makeEnv(db));
+    expect(res.status).toBe(200);
+    const body = await res.text();
+    expect(body).toContain("<h2>Recent deliveries</h2>");
+    expect(body).toContain("No deliveries yet.");
+  });
+
+  test("settings recent deliveries: last 5 rows, newest first, time/event/outcome/status_code", async () => {
+    const db = await seededWorld();
+    const apps = createAppsStore(db);
+    const app = (await apps.listApps()).find((a) => a.slug === "mstar-inspector-mallory")!;
+    for (let i = 1; i <= 6; i++) {
+      await apps.recordDelivery({ appId: app.id, eventName: `pull_request-${i}`, outcome: "ok", statusCode: null });
+    }
+    await apps.recordDelivery({ appId: app.id, eventName: "ping", outcome: "ignored", statusCode: null });
+    // Backdate the first six so the newest-first order is observable.
+    db.raw
+      .prepare(
+        `UPDATE webhook_deliveries SET created_at = datetime('now', '-1 hour')
+         WHERE id IN (SELECT id FROM webhook_deliveries ORDER BY rowid LIMIT 6)`,
+      )
+      .run();
+    const res = await get(SETTINGS, await ownerCookie(), makeEnv(db));
+    const body = await res.text();
+    // Seven rows, N=5: the two oldest (pull_request-1, -2) are cut; the
+    // five newest (ping + pull_request-6..3) render.
+    expect(body).not.toContain("pull_request-1");
+    expect(body).not.toContain("pull_request-2");
+    expect(body).toContain("pull_request-3");
+    expect(body).toContain("pull_request-6");
+    expect(body).toContain("ping");
+    // Newest first: ping precedes pull_request-6 in the document.
+    expect(body.indexOf("ping")).toBeLessThan(body.indexOf("pull_request-6"));
+    expect(body).toContain('<span class="status">ok</span>');
+    expect(body).toContain('<span class="status">ignored</span>');
+  });
+
+  test("settings recent deliveries: the N=5 bound cuts the 6th-newest row", async () => {
+    const db = await seededWorld();
+    const apps = createAppsStore(db);
+    const app = (await apps.listApps()).find((a) => a.slug === "mstar-inspector-mallory")!;
+    for (let i = 1; i <= 6; i++) {
+      await apps.recordDelivery({ appId: app.id, eventName: `pull_request-${i}`, outcome: "ok", statusCode: null });
+    }
+    const res = await get(SETTINGS, await ownerCookie(), makeEnv(db));
+    const body = await res.text();
+    // Six rows, N=5: the oldest (pull_request-1) is cut; the other five render.
+    expect(body).not.toContain("pull_request-1");
+    expect(body).toContain("pull_request-2");
+    expect(body).toContain("pull_request-6");
+  });
+
+  test("settings recent deliveries: NULL event name and NULL status_code render placeholders", async () => {
+    const db = await seededWorld();
+    const apps = createAppsStore(db);
+    const app = (await apps.listApps()).find((a) => a.slug === "mstar-inspector-mallory")!;
+    await apps.recordDelivery({ appId: app.id, eventName: null, outcome: "ok", statusCode: null });
+    const res = await get(SETTINGS, await ownerCookie(), makeEnv(db));
+    const body = await res.text();
+    expect(body).toContain("<strong>unknown event</strong>");
+    expect(body).toContain('status <span class="id">—</span>');
+  });
+
+  test("XSS pins: a webhook-supplied event name never renders raw in the settings list", async () => {
+    const db = await seededWorld();
+    const apps = createAppsStore(db);
+    const app = (await apps.listApps()).find((a) => a.slug === "mstar-inspector-mallory")!;
+    await apps.recordDelivery({
+      appId: app.id,
+      eventName: "<script>alert(1)</script>",
+      outcome: "rejected",
+      statusCode: 401,
+    });
+    const res = await get(SETTINGS, await ownerCookie(), makeEnv(db));
+    const body = await res.text();
+    expect(body).not.toContain("<script>");
+    expect(body).toContain("&lt;script&gt;alert(1)&lt;/script&gt;");
   });
 });
