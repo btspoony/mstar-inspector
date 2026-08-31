@@ -30,6 +30,8 @@ import worker from "../../src/worker/index";
 import { createTestD1 } from "../store/helpers";
 import { createAppsStore, type GithubAppRow } from "../../src/dashboard/apps-store";
 import {
+  CUSTOM_PROVIDER_API_IDS,
+  InvalidCustomProviderError,
   InvalidModelSelectorError,
   MAX_PROVIDER_KEY_LENGTH,
   MODEL_ROLE_IDS,
@@ -39,6 +41,7 @@ import {
   createAppConfigStore,
   parseModelChain,
   type AppConfigD1,
+  type AppCustomProvider,
 } from "../../src/dashboard/app-config-store";
 import { createSecretbox } from "../../src/dashboard/secretbox";
 import { PROVIDERS } from "../../src/pipeline/providers";
@@ -342,6 +345,28 @@ describe("migration 0012_custom_providers_and_key_updated_at.sql (plan 23 T1)", 
     };
     expect(row.updated_at).toMatch(SQLITE_TS_RE);
     expect(row.updated_at).toBe(row.created_at);
+  });
+
+  test("full-file direct run (0001→0012 order) creates app_custom_providers with the AL-23-1 DDL shape", async () => {
+    const db = createAppConfigD1(); // 0001→0012 in filename order (0007 index skip, harmless)
+    const cols = db.raw.query("PRAGMA table_info(app_custom_providers)").all() as Array<{
+      name: string;
+      type: string;
+      notnull: number;
+      pk: number;
+    }>;
+    const byName: Record<string, { type: string; notnull: number; pk: number }> = {};
+    for (const c of cols) byName[c.name] = c;
+    // AL-23-1 DDL: app_id FK, provider_id, base_url, api, model_ids TEXT
+    // (JSON array), api_key_enc NOT NULL, created_at/updated_at, composite
+    // PK (app_id, provider_id) — the AAD rowKey source.
+    for (const col of ["app_id", "provider_id", "base_url", "api", "model_ids", "api_key_enc", "created_at", "updated_at"]) {
+      expect(byName[col], col).toBeDefined();
+      expect(byName[col]!.notnull, col).toBe(1);
+    }
+    expect(byName["model_ids"]!.type).toBe("TEXT");
+    const pkCols = cols.filter((c) => c.pk > 0).map((c) => c.name);
+    expect(pkCols).toEqual(["app_id", "provider_id"]);
   });
 });
 
@@ -790,6 +815,117 @@ describe("app-config store (createAppConfigStore) — model roles (plan 17 T1)",
     await expect(
       configStore(db).setModelRole("no-such-app", "code-reviewer", "openai/gpt-5"),
     ).rejects.toThrow(/FOREIGN KEY constraint failed/);
+  });
+});
+
+// --- store: custom providers (plan 23 T2) ---
+
+describe("app-config store (createAppConfigStore) — custom providers (plan 23 T2)", () => {
+  const CUSTOM: AppCustomProvider = {
+    provider_id: "ark",
+    base_url: "https://ark.cn-beijing.volces.com/api/v3",
+    api: "openai-completions",
+    model_ids: ["deepseek-v4-flash", "deepseek-r1"],
+  };
+  const PLAIN_CUSTOM_KEY = "sk-custom-ark-9988";
+
+  test("upsert encrypts the key at rest (secretbox envelope) and list returns the declaration with NO key material", async () => {
+    const { db, app } = await seededWorld();
+    await configStore(db).upsertCustomProvider(app.id, CUSTOM, PLAIN_CUSTOM_KEY);
+    // At rest: a secretbox envelope, never the plaintext.
+    const row = db.raw
+      .query("SELECT * FROM app_custom_providers WHERE app_id = ? AND provider_id = ?")
+      .get(app.id, CUSTOM.provider_id) as {
+      api_key_enc: string;
+      model_ids: string;
+      created_at: string;
+      updated_at: string;
+    };
+    expect(row.api_key_enc).toMatch(/^v1\.primary\./);
+    expect(row.api_key_enc).not.toContain(PLAIN_CUSTOM_KEY);
+    // model_ids is stored as a TEXT JSON array (AL-23-1 DDL).
+    expect(JSON.parse(row.model_ids)).toEqual([...CUSTOM.model_ids]);
+    expect(row.created_at).toMatch(SQLITE_TS_RE);
+    expect(row.updated_at).toBe(row.created_at);
+    // The list face is decrypt-free: declaration only, never key material.
+    await expect(configStore(db).listCustomProviders(app.id)).resolves.toEqual([CUSTOM]);
+  });
+
+  test("AAD rowKey is the exact composite string app_custom_providers.api_key_enc:<app_id>:<provider_id> — the T3 consumer decrypts with it", async () => {
+    const { db, app } = await seededWorld();
+    await configStore(db).upsertCustomProvider(app.id, CUSTOM, PLAIN_CUSTOM_KEY);
+    const row = db.raw
+      .query("SELECT api_key_enc FROM app_custom_providers WHERE app_id = ? AND provider_id = ?")
+      .get(app.id, CUSTOM.provider_id) as { api_key_enc: string };
+    const box = createSecretbox(TEST_KEY);
+    // The exact composite-PK rowKey (0006 L1 precedent) decrypts the envelope.
+    await expect(
+      box.decryptSecret(row.api_key_enc, `app_custom_providers.api_key_enc:${app.id}:${CUSTOM.provider_id}`),
+    ).resolves.toBe(PLAIN_CUSTOM_KEY);
+    // The envelope is bound to BOTH PK columns — any single component off fails.
+    await expect(
+      box.decryptSecret(row.api_key_enc, `app_custom_providers.api_key_enc:${app.id}:other`),
+    ).rejects.toThrow();
+    await expect(
+      box.decryptSecret(row.api_key_enc, `app_custom_providers.api_key_enc:other:${CUSTOM.provider_id}`),
+    ).rejects.toThrow();
+  });
+
+  test("re-upserting the same provider_id replaces the key and the declaration, bumping updated_at", async () => {
+    const { db, app } = await seededWorld();
+    await configStore(db).upsertCustomProvider(app.id, CUSTOM, PLAIN_CUSTOM_KEY);
+    db.raw
+      .prepare("UPDATE app_custom_providers SET updated_at = '2026-01-01 00:00:00' WHERE app_id = ? AND provider_id = ?")
+      .run(app.id, CUSTOM.provider_id);
+    await configStore(db).upsertCustomProvider(
+      app.id,
+      { ...CUSTOM, model_ids: ["deepseek-v4-flash"] },
+      "sk-custom-ark-7777",
+    );
+    const row = db.raw
+      .query("SELECT api_key_enc, model_ids, updated_at FROM app_custom_providers WHERE app_id = ? AND provider_id = ?")
+      .get(app.id, CUSTOM.provider_id) as { api_key_enc: string; model_ids: string; updated_at: string };
+    await expect(
+      createSecretbox(TEST_KEY).decryptSecret(row.api_key_enc, `app_custom_providers.api_key_enc:${app.id}:${CUSTOM.provider_id}`),
+    ).resolves.toBe("sk-custom-ark-7777");
+    expect(JSON.parse(row.model_ids)).toEqual(["deepseek-v4-flash"]);
+    expect(row.updated_at).toMatch(SQLITE_TS_RE);
+    expect(row.updated_at > "2026-01-01 00:00:00").toBe(true);
+  });
+
+  test("removeCustomProvider deletes the row and reports it; an unknown id is an idempotent no-op", async () => {
+    const { db, app } = await seededWorld();
+    await configStore(db).upsertCustomProvider(app.id, CUSTOM, PLAIN_CUSTOM_KEY);
+    await expect(configStore(db).removeCustomProvider(app.id, "nope")).resolves.toBe(false);
+    await expect(configStore(db).removeCustomProvider(app.id, CUSTOM.provider_id)).resolves.toBe(true);
+    await expect(configStore(db).listCustomProviders(app.id)).resolves.toEqual([]);
+    await expect(configStore(db).removeCustomProvider(app.id, CUSTOM.provider_id)).resolves.toBe(false);
+  });
+
+  test("store backstop: an invalid declaration throws InvalidCustomProviderError before any write", async () => {
+    const { db, app } = await seededWorld();
+    // Record<string, unknown> so the enum-violating api literal type-checks;
+    // the spread is cast to AppCustomProvider at the call site.
+    const bad: Array<Record<string, unknown>> = [
+      { provider_id: "Bad_ID" }, // uppercase — outside [a-z0-9][a-z0-9-]{0,63}
+      { provider_id: "-lead" }, // leading hyphen
+      { provider_id: "x".repeat(65) }, // over 64 chars
+      { base_url: "http://insecure.example.com" }, // http, not https
+      { base_url: `https://example.com/${"x".repeat(2049)}` }, // over 2048 chars
+      { api: "google-vertex" }, // outside the AL-23-1 three-form enum
+      { model_ids: [] }, // empty
+      { model_ids: ["ok", "x".repeat(129)] }, // over-length model id
+      { model_ids: Array.from({ length: 33 }, (_, i) => `m${i}`) }, // over 32 items
+    ];
+    for (const patch of bad) {
+      await expect(
+        configStore(db).upsertCustomProvider(app.id, { ...CUSTOM, ...patch } as AppCustomProvider, PLAIN_CUSTOM_KEY),
+      ).rejects.toThrow(InvalidCustomProviderError);
+    }
+    // The key is required at declaration and bounded by the existing 4096 cap.
+    await expect(configStore(db).upsertCustomProvider(app.id, CUSTOM, "")).rejects.toThrow(InvalidCustomProviderError);
+    await expect(configStore(db).upsertCustomProvider(app.id, CUSTOM, "k".repeat(4097))).rejects.toThrow(ProviderKeyTooLongError);
+    expect(rawCount(db, "app_custom_providers")).toBe(0);
   });
 });
 
@@ -1387,6 +1523,84 @@ describe("POST /dashboard/apps/:slug/settings/key/delete (delete-key route)", ()
   });
 });
 
+// --- plan 23 T2: custom provider declarations (settings ops) ---
+
+describe("POST /dashboard/apps/:slug/settings — custom providers (op=add-custom-provider / remove-custom-provider, plan 23 T2)", () => {
+  const CUSTOM_FORM: Record<string, string> = {
+    op: "add-custom-provider",
+    provider_id: "ark",
+    base_url: "https://ark.cn-beijing.volces.com/api/v3",
+    api: "openai-completions",
+    model_ids: "deepseek-v4-flash, deepseek-r1",
+    key: "sk-custom-ark-9988",
+  };
+  const mallory = async () => `${SESSION_COOKIE}=${await sessionCookie("mallory")}`;
+
+  test("add stores the declaration (key encrypted at rest) and re-renders the page with it listed", async () => {
+    const { db, app } = await seededWorld();
+    const res = await postForm(SETTINGS, await mallory(), makeEnv(db), CUSTOM_FORM);
+    expect(res.status).toBe(200);
+    const body = await res.text();
+    expect(body).toContain("Custom providers");
+    expect(body).toContain("<strong>ark</strong>");
+    expect(body).toContain("deepseek-v4-flash");
+    const row = db.raw
+      .query("SELECT api_key_enc FROM app_custom_providers WHERE app_id = ? AND provider_id = 'ark'")
+      .get(app.id) as { api_key_enc: string };
+    expect(row.api_key_enc).toMatch(/^v1\.primary\./);
+    expect(row.api_key_enc).not.toContain("sk-custom-ark-9988");
+  });
+
+  test("400 matrix: bad id / http baseUrl / enum-violating api / empty model_ids / over-length — zero writes", async () => {
+    const { db } = await seededWorld();
+    const cases: Array<{ patch: Record<string, string>; label: string }> = [
+      { patch: { provider_id: "Bad_ID" }, label: "uppercase id" },
+      { patch: { provider_id: "-lead" }, label: "leading hyphen" },
+      { patch: { provider_id: "x".repeat(65) }, label: "id over 64 chars" },
+      { patch: { base_url: "http://insecure.example.com" }, label: "http baseUrl" },
+      { patch: { base_url: `https://example.com/${"x".repeat(2049)}` }, label: "baseUrl over 2048 chars" },
+      { patch: { api: "google-vertex" }, label: "api outside the AL-23-1 enum" },
+      { patch: { model_ids: "  ,  " }, label: "empty model_ids" },
+      { patch: { model_ids: `ok, ${"x".repeat(129)}` }, label: "model id over 128 chars" },
+      { patch: { model_ids: Array.from({ length: 33 }, (_, i) => `m${i}`).join(",") }, label: "over 32 model ids" },
+      { patch: { key: "" }, label: "empty key" },
+      { patch: { key: "k".repeat(4097) }, label: "key over 4096 chars" },
+    ];
+    for (const { patch, label } of cases) {
+      const res = await postForm(SETTINGS, await mallory(), makeEnv(db), { ...CUSTOM_FORM, ...patch });
+      expect(res.status, label).toBe(400);
+    }
+    expect(rawCount(db, "app_custom_providers")).toBe(0);
+  });
+
+  test("remove-custom-provider deletes the row; an unknown id is a tolerant no-op", async () => {
+    const { db } = await seededWorld();
+    await postForm(SETTINGS, await mallory(), makeEnv(db), CUSTOM_FORM);
+    const res = await postForm(SETTINGS, await mallory(), makeEnv(db), {
+      op: "remove-custom-provider",
+      provider_id: "ark",
+    });
+    expect(res.status).toBe(200);
+    expect(rawCount(db, "app_custom_providers")).toBe(0);
+    const noop = await postForm(SETTINGS, await mallory(), makeEnv(db), {
+      op: "remove-custom-provider",
+      provider_id: "ghost",
+    });
+    expect(noop.status).toBe(200);
+    expect(await noop.text()).toContain("nothing changed");
+  });
+
+  test("non-owner member → 403, zero mutation; admin (non-creator) may add", async () => {
+    const { db } = await seededWorld();
+    const denied = await postForm(SETTINGS, `${SESSION_COOKIE}=${await sessionCookie("hubot")}`, makeEnv(db), CUSTOM_FORM);
+    expect(denied.status).toBe(403);
+    expect(rawCount(db, "app_custom_providers")).toBe(0);
+    const admin = await postForm(SETTINGS, `${SESSION_COOKIE}=${await sessionCookie("octocat")}`, makeEnv(db), CUSTOM_FORM);
+    expect(admin.status).toBe(200);
+    expect(rawCount(db, "app_custom_providers")).toBe(1);
+  });
+});
+
 // --- plan 14 T2: the settings view (views.ts) + DESIGN mapping ---
 
 describe("settings view DESIGN mapping (plan 14 T2)", () => {
@@ -1422,8 +1636,11 @@ describe("settings view DESIGN mapping (plan 14 T2)", () => {
     // silently picking the first allowlist id.
     expect(body).toContain('<option value="" disabled selected>Select a provider…</option>');
     // The select is the only place a provider id can enter — bound to the
-    // same allowlist the POST route 400s against.
-    const options = [...body.matchAll(/<option value="([^"]+)">/g)].map((m) => m[1]);
+    // same allowlist the POST route 400s against. Scoped to the provider
+    // select: the plan-23 T2 custom-providers section adds its own api
+    // select to the page, so a whole-page option scan would pick those up.
+    const providerSelect = /<select name="provider">([\s\S]*?)<\/select>/.exec(body)?.[1] ?? "";
+    const options = [...providerSelect.matchAll(/<option value="([^"]+)">/g)].map((m) => m[1]);
     expect(options).toEqual([...PROVIDER_IDS]);
   });
 
@@ -1455,6 +1672,70 @@ describe("settings view DESIGN mapping (plan 14 T2)", () => {
     const body = await res.text();
     expect(body).not.toContain("<script>");
     expect(body).toContain(`value="&quot;&gt;&lt;script&gt;alert(1)&lt;/script&gt;"`);
+  });
+});
+
+// --- plan 23 T2: the settings view custom-providers section ---
+
+describe("settings view — custom providers section (plan 23 T2)", () => {
+  const getSettingsPage = async (login: string): Promise<string> => {
+    const { db } = await seededWorld();
+    const res = await get(SETTINGS, `${SESSION_COOKIE}=${await sessionCookie(login)}`, makeEnv(db));
+    expect(res.status).toBe(200);
+    return res.text();
+  };
+
+  test("the section sits between Model chain and Role models; the add form has the api enum select and a password key input", async () => {
+    const body = await getSettingsPage("mallory");
+    const modelChain = body.indexOf("Model chain");
+    const custom = body.indexOf("Custom providers");
+    const roleModels = body.indexOf("Role models");
+    expect(modelChain).toBeGreaterThanOrEqual(0);
+    expect(custom).toBeGreaterThan(modelChain);
+    expect(roleModels).toBeGreaterThan(custom);
+    // The api select offers EXACTLY the AL-23-1 three-form enum (the empty
+    // disabled placeholder does not match the value regex — same discipline
+    // as the provider select).
+    const apiSelect = /<select name="api">([\s\S]*?)<\/select>/.exec(body)?.[1] ?? "";
+    const values = [...apiSelect.matchAll(/<option value="([^"]+)"/g)].map((m) => m[1]);
+    expect(values).toEqual([...CUSTOM_PROVIDER_API_IDS]);
+    // The key input reuses the password semantics of the provider-key form.
+    expect(body).toContain('<input type="password" name="key" autocomplete="new-password"');
+  });
+
+  test("a stored declaration renders with escaped user-controlled strings (base_url / model_ids)", async () => {
+    const { db, app } = await seededWorld();
+    await configStore(db).upsertCustomProvider(
+      app.id,
+      {
+        provider_id: "ark",
+        base_url: 'https://evil.example.com/?q="><script>alert(1)</script>',
+        api: "openai-completions",
+        model_ids: ['"><img src=x onerror=alert(1)>'],
+      },
+      "sk-custom-ark-9988",
+    );
+    const res = await get(SETTINGS, `${SESSION_COOKIE}=${await sessionCookie("mallory")}`, makeEnv(db));
+    const body = await res.text();
+    expect(body).not.toContain("<script>");
+    expect(body).not.toContain("<img");
+    expect(body).toContain("&lt;script&gt;alert(1)&lt;/script&gt;");
+    expect(body).toContain("&lt;img src=x onerror=alert(1)&gt;");
+  });
+
+  test("the remove form posts op=remove-custom-provider with the provider_id", async () => {
+    const { db, app } = await seededWorld();
+    await configStore(db).upsertCustomProvider(
+      app.id,
+      { provider_id: "ark", base_url: "https://ark.example.com", api: "openai-completions", model_ids: ["deepseek-v4-flash"] },
+      "sk-custom-ark-9988",
+    );
+    // Same db as the stored declaration — getSettingsPage builds a FRESH
+    // world, so the page must be fetched over the db that holds the row.
+    const res = await get(SETTINGS, `${SESSION_COOKIE}=${await sessionCookie("mallory")}`, makeEnv(db));
+    const body = await res.text();
+    expect(body).toContain('<input type="hidden" name="op" value="remove-custom-provider">');
+    expect(body).toContain('<input type="hidden" name="provider_id" value="ark">');
   });
 });
 

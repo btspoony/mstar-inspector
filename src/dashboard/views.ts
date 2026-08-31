@@ -6,7 +6,13 @@
  * breakpoints) — DESIGN.md is the SSOT; update both when tokens change.
  * No client JS, no build chain, no new dependencies.
  */
-import { MODEL_ROLE_IDS, PROVIDER_IDS, type MaskedProviderKey } from "./app-config-store";
+import {
+  CUSTOM_PROVIDER_API_IDS,
+  MODEL_ROLE_IDS,
+  PROVIDER_IDS,
+  type AppCustomProvider,
+  type MaskedProviderKey,
+} from "./app-config-store";
 import type { AppInstallationRow } from "./apps-store";
 import type { DashboardUserRow } from "./users";
 
@@ -685,6 +691,9 @@ export function appSettingsPage(
   modelRoles: Record<string, string>,
   installations: AppInstallationRow[],
   notice?: PageNotice,
+  // Plan 23 T2: appended at the end (additive — plan 20's deliver panel
+  // lands after this in its own track).
+  customProviders: AppCustomProvider[] = [],
 ): string {
   const base = `/dashboard/apps/${escapeHtml(app.slug)}/settings`;
   const rows = maskedKeys
@@ -794,6 +803,61 @@ export function appSettingsPage(
         <button type="submit" class="primary">Save role models</button>
       </form>
     </section>`;
+  // Custom providers (plan 23 T2, AL-23-1): per-App declarations of
+  // NON-built-in model providers. The key is stored encrypted and injected
+  // into the review runner by ENVIRONMENT VARIABLE NAME (CUSTOM_<ID>_API_KEY)
+  // — never as a literal — so the declaration list shows no key material at
+  // all. Every user-controlled string (provider_id, base_url, model_ids) is
+  // escaped; the api select is bound to the frozen three-form enum.
+  const customRows = customProviders
+    .map(
+      (p) => `<li>
+        <strong>${escapeHtml(p.provider_id)}</strong>
+        <span class="meta">${escapeHtml(p.base_url)} · ${escapeHtml(p.api)} · ${escapeHtml(p.model_ids.join(", "))}</span>
+        <form method="post" action="${base}">
+          <input type="hidden" name="op" value="remove-custom-provider">
+          <input type="hidden" name="provider_id" value="${escapeHtml(p.provider_id)}">
+          <button type="submit" class="danger">Remove</button>
+        </form>
+      </li>`,
+    )
+    .join("\n");
+  const customEmpty =
+    customProviders.length === 0
+      ? `<p class="status">No custom providers declared for this App — its reviews use the built-in providers.</p>`
+      : `<ul class="keys">
+      ${customRows}
+      </ul>`;
+  // Empty disabled first option = the preselected placeholder: a forgetful
+  // submit sends api="" and hits the route's 400 re-render instead of
+  // silently picking the first enum value (the provider-select discipline).
+  const apiOptions = ['<option value="" disabled selected>Select an API…</option>']
+    .concat(CUSTOM_PROVIDER_API_IDS.map((id) => `<option value="${escapeHtml(id)}">${escapeHtml(id)}</option>`))
+    .join("");
+  const customSection = `<section class="enabled">
+      <h2>Custom providers</h2>
+      <p>Declare a non-built-in model provider for this App&apos;s reviews — the API key is stored encrypted and injected into the review runner by environment variable name, never as a literal.</p>
+      ${customEmpty}
+      <form method="post" action="${base}">
+        <input type="hidden" name="op" value="add-custom-provider">
+        <label class="field">Provider id
+          <input type="text" name="provider_id" placeholder="e.g. ark" pattern="[a-z0-9][a-z0-9-]{0,63}">
+        </label>
+        <label class="field">Base URL
+          <input type="text" name="base_url" placeholder="https://api.example.com/v1">
+        </label>
+        <label class="field">API
+          <select name="api">${apiOptions}</select>
+        </label>
+        <label class="field">Model ids
+          <input type="text" name="model_ids" placeholder="e.g. deepseek-v4-flash, deepseek-r1">
+        </label>
+        <label class="field">API key
+          <input type="password" name="key" autocomplete="new-password" placeholder="Paste the provider API key">
+        </label>
+        <button type="submit" class="primary">Add custom provider</button>
+      </form>
+    </section>`;
   return page(
     "App settings",
     `${shellHeader(user)}
@@ -826,6 +890,7 @@ export function appSettingsPage(
         <button type="submit" class="primary">Save model chain</button>
       </form>
     </section>
+    ${customSection}
     ${roleSection}
     ${reviewSection}
     ${installSection}

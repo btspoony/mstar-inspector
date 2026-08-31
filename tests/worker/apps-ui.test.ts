@@ -614,3 +614,44 @@ describe("App settings — masked key last-updated (plan 23 T1, AC-23c)", () => 
     expect(body).toContain(`key ending <code class="id">9988</code> · updated unknown`);
   });
 });
+
+describe("App settings — custom providers (plan 23 T2)", () => {
+  const SETTINGS = "/dashboard/apps/mstar-inspector-mallory/settings";
+  const ownerCookie = async () => `${SESSION_COOKIE}=${await sessionCookie("mallory")}`;
+
+  const store = (db: ReturnType<typeof createAppsUiD1>) => createAppConfigStore(db, TEST_KEY);
+  const appRow = async (db: ReturnType<typeof createAppsUiD1>) =>
+    (await createAppsStore(db).listApps()).find((a) => a.slug === "mstar-inspector-mallory")!;
+
+  test("the section renders between Model chain and Role models with the api enum select and a password key input", async () => {
+    const db = await seededWorld();
+    const res = await get(SETTINGS, await ownerCookie(), makeEnv(db));
+    expect(res.status).toBe(200);
+    const body = await res.text();
+    expect(body.indexOf("Model chain")).toBeLessThan(body.indexOf("Custom providers"));
+    expect(body.indexOf("Custom providers")).toBeLessThan(body.indexOf("Role models"));
+    expect(body).toContain('<select name="api">');
+    expect(body).toContain('<input type="password" name="key" autocomplete="new-password"');
+  });
+
+  test("a stored declaration renders provider_id / base_url / api / model_ids with escaped values", async () => {
+    const db = await seededWorld();
+    const app = await appRow(db);
+    await store(db).upsertCustomProvider(
+      app.id,
+      {
+        provider_id: "ark",
+        base_url: 'https://evil.example.com/?q="><script>alert(1)</script>',
+        api: "openai-completions",
+        model_ids: ['"><img src=x onerror=alert(1)>'],
+      },
+      "sk-custom-ark-9988",
+    );
+    const res = await get(SETTINGS, await ownerCookie(), makeEnv(db));
+    const body = await res.text();
+    expect(body).not.toContain("<script>");
+    expect(body).not.toContain("<img");
+    expect(body).toContain("&lt;script&gt;alert(1)&lt;/script&gt;");
+    expect(body).toContain("&lt;img src=x onerror=alert(1)&gt;");
+  });
+});

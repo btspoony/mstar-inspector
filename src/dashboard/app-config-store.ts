@@ -62,6 +62,14 @@
  *     yields an EMPTY keys map and a null chain (zero-config compatibility —
  *     the consumer falls back to global env), and an undecryptable row is a
  *     loud throw (tamper/misconfiguration is never swallowed).
+ *   - Custom providers (plan 23 T2, migration 0012): upsertCustomProvider /
+ *     removeCustomProvider / listCustomProviders manage per-App declarations
+ *     of NON-built-in model providers (base URL + AL-23-1 api enum + model
+ *     ids). The key is encrypted INSIDE the store with the composite-PK AAD
+ *     `app_custom_providers.api_key_enc:<app_id>:<provider_id>` (0006 L1
+ *     precedent) and never appears in the list face; the Task 3 consumer
+ *     decrypts it with the same AAD. Declaration bounds (AL-23-1/AL-23-2)
+ *     are enforced here as the backstop and by the settings route as 400.
  *   - Timestamps are SQLite datetime('now') (UTC — the reviews.reviewed_at
  *     convention). UNIQUE / FK violations throw (fail-loud): an unknown
  *     app_id is a caller bug, never a silent no-op.
@@ -94,6 +102,52 @@ export type AppModelRoleRow = {
   role: string;
   /** Verbatim comma-separated selector chain — configuration, not a secret. */
   selector: string;
+};
+/**
+ * The custom-provider API protocol enum (AL-23-1 verdict): of the omp SDK
+ * Api full set, ONLY the three open protocol forms are declarable BYOK —
+ * the google, bedrock, azure, and codex shapes are vendor
+ * OAuth/credential-chain forms that do not fit a baseUrl+key declaration.
+ * Declared locally, NOT imported: dashboard modules must not import
+ * pipeline/review code (Q2).
+ */
+export const CUSTOM_PROVIDER_API_IDS = [
+  "anthropic-messages",
+  "openai-completions",
+  "openai-responses",
+] as const;
+
+export type CustomProviderApi = (typeof CUSTOM_PROVIDER_API_IDS)[number];
+
+/**
+ * A row of `app_custom_providers` (migration 0012, plan 23 T2 — D1 column
+ * names, snake_case). model_ids is a TEXT JSON array (AL-23-1 DDL);
+ * api_key_enc is a secretbox envelope (lock L1, composite-PK AAD).
+ */
+export type AppCustomProviderRow = {
+  app_id: string;
+  provider_id: string;
+  base_url: string;
+  api: string;
+  model_ids: string;
+  api_key_enc: string;
+  created_at: string;
+  updated_at: string;
+};
+
+/**
+ * One custom-provider declaration (the settings-page face and the Task 3
+ * consumer input): a NON-built-in model provider bound to a base URL, one
+ * of the AL-23-1 protocol forms, and the model ids it serves. The API key
+ * is NEVER part of this shape — it exists only as the encrypted
+ * api_key_enc column (declaration-time input, decrypt consumer face in
+ * plan 23 Task 3).
+ */
+export type AppCustomProvider = {
+  provider_id: string;
+  base_url: string;
+  api: CustomProviderApi;
+  model_ids: string[];
 };
 
 /**
@@ -167,6 +221,33 @@ export function parseModelChain(raw: string | undefined): string[] {
  * encryption or D1 write, so an oversized input can never bloat the store.
  */
 export const MAX_PROVIDER_KEY_LENGTH = 4096;
+/**
+ * Custom-provider declaration bounds (AL-23-2 verdict, plan 23 Global
+ * Constraints): provider id `[a-z0-9][a-z0-9-]{0,63}` (the env-name mapping
+ * `CUSTOM_<UPPER_SNAKE>_API_KEY` the Task 3 consumer injects), baseUrl
+ * https-only ≤2048, model_ids 1..32 entries × ≤128 characters (AL-23-1).
+ * The route answers 400 first; the store re-validates as the backstop for
+ * direct callers (the ProviderKeyTooLongError pattern).
+ */
+export const CUSTOM_PROVIDER_ID_PATTERN = /^[a-z0-9][a-z0-9-]{0,63}$/;
+export const MAX_CUSTOM_PROVIDER_BASE_URL_LENGTH = 2048;
+export const MAX_CUSTOM_PROVIDER_MODEL_IDS = 32;
+export const MAX_CUSTOM_PROVIDER_MODEL_ID_LENGTH = 128;
+
+/**
+ * Declaration-shape error (plan 23 T2): an upsertCustomProvider call named
+ * an id outside the `[a-z0-9][a-z0-9-]{0,63}` grammar, a non-https or
+ * over-length base URL, an api outside the AL-23-1 three-form enum, an
+ * empty / over-long / over-count model_ids list, or an empty key. The
+ * settings route re-renders 400 first; this typed throw is the backstop
+ * for direct callers (the UnknownModelRoleError convention).
+ */
+export class InvalidCustomProviderError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "InvalidCustomProviderError";
+  }
+}
 
 /**
  * Input-bound error (plan 15): the plaintext key passed to setProviderKey
@@ -220,6 +301,67 @@ export class InvalidModelSelectorError extends Error {
  */
 function providerKeyAad(appId: string, provider: string): string {
   return `app_provider_keys.key_enc:${appId}:${provider}`;
+}
+/**
+ * Composite-PK secretbox AAD rowKey for app_custom_providers (lock L1, 0006
+ * precedent): the envelope is bound to BOTH primary-key columns, joined in
+ * DDL order — `app_custom_providers.api_key_enc:<app_id>:<provider_id>`.
+ * The Task 3 consumer decrypts with this exact string.
+ */
+function customProviderAad(appId: string, providerId: string): string {
+  return `app_custom_providers.api_key_enc:${appId}:${providerId}`;
+}
+
+/**
+ * Declaration-shape gate (plan 23 T2): every bound in the AL-23-1/AL-23-2
+ * verdicts, checked BEFORE any crypto or write — an invalid declaration
+ * throws InvalidCustomProviderError (or ProviderKeyTooLongError for an
+ * over-length key, the setProviderKey convention) and touches zero rows.
+ * The settings route re-renders 400 first; this is the backstop for direct
+ * callers.
+ */
+function assertCustomProvider(decl: AppCustomProvider, plainKey: string): void {
+  if (!CUSTOM_PROVIDER_ID_PATTERN.test(decl.provider_id)) {
+    throw new InvalidCustomProviderError(
+      `invalid custom provider id ${JSON.stringify(decl.provider_id)} (expected [a-z0-9][a-z0-9-]{0,63})`,
+    );
+  }
+  if (!/^https:\/\//.test(decl.base_url)) {
+    throw new InvalidCustomProviderError(
+      `custom provider base URL must be https: ${JSON.stringify(decl.base_url)}`,
+    );
+  }
+  if (decl.base_url.length > MAX_CUSTOM_PROVIDER_BASE_URL_LENGTH) {
+    throw new InvalidCustomProviderError(
+      `custom provider base URL exceeds the ${MAX_CUSTOM_PROVIDER_BASE_URL_LENGTH}-character limit`,
+    );
+  }
+  if (!CUSTOM_PROVIDER_API_IDS.includes(decl.api)) {
+    throw new InvalidCustomProviderError(
+      `unknown custom provider API ${JSON.stringify(decl.api)} (expected one of: ${CUSTOM_PROVIDER_API_IDS.join(", ")})`,
+    );
+  }
+  if (decl.model_ids.length === 0) {
+    throw new InvalidCustomProviderError("custom provider model_ids must not be empty");
+  }
+  if (decl.model_ids.length > MAX_CUSTOM_PROVIDER_MODEL_IDS) {
+    throw new InvalidCustomProviderError(
+      `custom provider model_ids exceed the ${MAX_CUSTOM_PROVIDER_MODEL_IDS}-entry limit`,
+    );
+  }
+  for (const id of decl.model_ids) {
+    if (id.length > MAX_CUSTOM_PROVIDER_MODEL_ID_LENGTH) {
+      throw new InvalidCustomProviderError(
+        `custom provider model id exceeds the ${MAX_CUSTOM_PROVIDER_MODEL_ID_LENGTH}-character limit`,
+      );
+    }
+  }
+  if (plainKey === "") {
+    throw new InvalidCustomProviderError("custom provider API key is required at declaration");
+  }
+  if (plainKey.length > MAX_PROVIDER_KEY_LENGTH) {
+    throw new ProviderKeyTooLongError();
+  }
 }
 
 /** Role vocabulary gate: anything outside MODEL_ROLE_IDS is a caller bug. */
@@ -547,6 +689,73 @@ export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | un
       if (statements.length > 0) {
         await db.batch(statements);
       }
+    },
+    /**
+     * Store (or replace) one custom-provider declaration for the App (plan
+     * 23 T2): validates the full AL-23-1/AL-23-2 shape, encrypts the key
+     * INSIDE with the composite-PK AAD, then upserts the (app_id,
+     * provider_id) row. The plaintext key is never persisted, logged, or
+     * returned — it exists only as the api_key_enc envelope (the Task 3
+     * consumer decrypts it with the same AAD). model_ids is stored as a
+     * TEXT JSON array (AL-23-1 DDL). An invalid declaration throws
+     * InvalidCustomProviderError / ProviderKeyTooLongError before any
+     * crypto or write (the route answers 400 first; this is the backstop).
+     * The upsert maintains the row's write time from ONE clock read (the
+     * 0012 T1 convention): a fresh insert writes updated_at == created_at;
+     * re-declaring moves both forward.
+     */
+    async upsertCustomProvider(appId: string, decl: AppCustomProvider, plainKey: string): Promise<void> {
+      assertCustomProvider(decl, plainKey);
+      const keyEnc = await box.encryptSecret(plainKey, customProviderAad(appId, decl.provider_id));
+      await db
+        .prepare(
+          `WITH now AS (SELECT datetime('now') AS ts)
+           INSERT INTO app_custom_providers (app_id, provider_id, base_url, api, model_ids, api_key_enc, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, (SELECT ts FROM now), (SELECT ts FROM now))
+           ON CONFLICT (app_id, provider_id) DO UPDATE SET
+             base_url = excluded.base_url,
+             api = excluded.api,
+             model_ids = excluded.model_ids,
+             api_key_enc = excluded.api_key_enc,
+             created_at = (SELECT ts FROM now),
+             updated_at = (SELECT ts FROM now)`,
+        )
+        .bind(appId, decl.provider_id, decl.base_url, decl.api, JSON.stringify(decl.model_ids), keyEnc)
+        .run();
+    },
+
+    /**
+     * Delete one custom-provider declaration. Returns whether THIS call
+     * removed a row (an undeclared provider id is an idempotent no-op
+     * returning false, mirroring removeProviderKey's tolerance).
+     */
+    async removeCustomProvider(appId: string, providerId: string): Promise<boolean> {
+      const res = await db
+        .prepare(`DELETE FROM app_custom_providers WHERE app_id = ? AND provider_id = ?`)
+        .bind(appId, providerId)
+        .run();
+      return res.meta.changes > 0;
+    },
+
+    /**
+     * The settings-page list face (plan 23 T2): every declaration for the
+     * App, provider_id-ascending, as the decrypt-free AppCustomProvider
+     * shape — the key material NEVER appears (it exists only as the
+     * api_key_enc envelope; the Task 3 consumer decrypts it separately).
+     * model_ids is parsed from the stored TEXT JSON array; a malformed row
+     * throws (fail-loud, the getAppConfig tamper convention).
+     */
+    async listCustomProviders(appId: string): Promise<AppCustomProvider[]> {
+      const res = await db
+        .prepare(`SELECT * FROM app_custom_providers WHERE app_id = ? ORDER BY provider_id ASC`)
+        .bind(appId)
+        .all<AppCustomProviderRow>();
+      return res.results.map((row) => ({
+        provider_id: row.provider_id,
+        base_url: row.base_url,
+        api: row.api as CustomProviderApi,
+        model_ids: JSON.parse(row.model_ids) as string[],
+      }));
     },
   };
 }

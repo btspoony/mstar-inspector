@@ -56,6 +56,11 @@ import {
 import { createAppsStore, type GithubAppRow } from "./apps-store";
 import { SecretboxKeyError, createSecretbox } from "./secretbox";
 import {
+  CUSTOM_PROVIDER_API_IDS,
+  CUSTOM_PROVIDER_ID_PATTERN,
+  MAX_CUSTOM_PROVIDER_BASE_URL_LENGTH,
+  MAX_CUSTOM_PROVIDER_MODEL_ID_LENGTH,
+  MAX_CUSTOM_PROVIDER_MODEL_IDS,
   MAX_PROVIDER_KEY_LENGTH,
   MODEL_ROLE_IDS,
   PROVIDER_IDS,
@@ -874,6 +879,7 @@ async function settingsResponse(
     const maskedKeys = await store.listProviderKeys(app.id);
     const modelChain = await store.getModelChain(app.id);
     const modelRoles = await store.getAppModelRoles(app.id);
+    const customProviders = await store.listCustomProviders(app.id);
     const installations = await apps.listInstallations(app.id);
     return c.html(
       appSettingsPage(
@@ -889,6 +895,7 @@ async function settingsResponse(
         modelRoles,
         installations,
         notice,
+        customProviders,
       ),
       status,
     );
@@ -918,9 +925,13 @@ dashboardApp.get("/apps/:slug/settings", async (c) => {
  * syntax; full selector validation stays omp-side). save-roles (plan 17 T3)
  * = the Role models editor's full map — one `role_<role>` field per audit
  * seat, blanks = cleared, saved through the validate-all-first setModelRoles
- * (zero partial writes on any validation failure). Validation failures
- * re-render the page at 400 with zero writes — never a plain-text body (the
- * plan-14 T1 review lesson).
+ * (zero partial writes on any validation failure). add-custom-provider /
+ * remove-custom-provider (plan 23 T2) = the custom-provider declarations
+ * section: every AL-23-1/AL-23-2 bound (id grammar, https-only baseUrl,
+ * three-form api enum, model_ids 1..32 × ≤128, key required ≤4096) is a 400
+ * re-render with zero writes; the key is encrypted inside the store and
+ * never echoed. Validation failures re-render the page at 400 with zero
+ * writes — never a plain-text body (the plan-14 T1 review lesson).
  */
 dashboardApp.post("/apps/:slug/settings", async (c) => {
   const gate = await requireAppSettings(c);
@@ -1082,6 +1093,205 @@ dashboardApp.post("/apps/:slug/settings", async (c) => {
       kind: "success",
       message: `Saved the role models for ${gate.app.slug}.`,
     });
+  }
+  if (op === "add-custom-provider") {
+    // Plan 23 T2: declare a NON-built-in model provider for the App. Every
+    // AL-23-1/AL-23-2 bound is checked here (400 re-render, zero writes —
+    // the store re-validates as the backstop): provider id grammar
+    // `[a-z0-9][a-z0-9-]{0,63}` (the env-name mapping the Task 3 consumer
+    // injects), baseUrl https-only ≤2048, api one of the three-form enum,
+    // model_ids 1..32 entries × ≤128 chars, key required and ≤ the
+    // existing 4096 cap. The key is encrypted inside the store and never
+    // echoed back.
+    const providerId = typeof form.provider_id === "string" ? form.provider_id.trim() : "";
+    const baseUrl = typeof form.base_url === "string" ? form.base_url.trim() : "";
+    const api = typeof form.api === "string" ? form.api.trim() : "";
+    const modelIds = parseModelChain(typeof form.model_ids === "string" ? form.model_ids : "");
+    const plainKey = typeof form.key === "string" ? form.key.trim() : "";
+    if (providerId === "") {
+      return settingsResponse(
+        c,
+        gate.session,
+        store,
+        apps,
+        gate.app,
+        { kind: "error", message: "Enter a provider id for the custom provider." },
+        400,
+      );
+    }
+    if (!CUSTOM_PROVIDER_ID_PATTERN.test(providerId)) {
+      return settingsResponse(
+        c,
+        gate.session,
+        store,
+        apps,
+        gate.app,
+        {
+          kind: "error",
+          message:
+            "Provider ids are lowercase letters, digits, and hyphens — 1 to 64 characters, starting with a letter or digit. Nothing was stored.",
+        },
+        400,
+      );
+    }
+    if (baseUrl === "") {
+      return settingsResponse(
+        c,
+        gate.session,
+        store,
+        apps,
+        gate.app,
+        { kind: "error", message: "Enter the provider's base URL." },
+        400,
+      );
+    }
+    if (!/^https:\/\//.test(baseUrl)) {
+      return settingsResponse(
+        c,
+        gate.session,
+        store,
+        apps,
+        gate.app,
+        { kind: "error", message: "The base URL must be https — nothing was stored." },
+        400,
+      );
+    }
+    if (baseUrl.length > MAX_CUSTOM_PROVIDER_BASE_URL_LENGTH) {
+      return settingsResponse(
+        c,
+        gate.session,
+        store,
+        apps,
+        gate.app,
+        {
+          kind: "error",
+          message: `That base URL is too long (${baseUrl.length} characters) — limited to ${MAX_CUSTOM_PROVIDER_BASE_URL_LENGTH}. Nothing was stored.`,
+        },
+        400,
+      );
+    }
+    if (api === "") {
+      return settingsResponse(
+        c,
+        gate.session,
+        store,
+        apps,
+        gate.app,
+        { kind: "error", message: "Pick an API protocol for the custom provider." },
+        400,
+      );
+    }
+    if (!CUSTOM_PROVIDER_API_IDS.includes(api as (typeof CUSTOM_PROVIDER_API_IDS)[number])) {
+      return settingsResponse(
+        c,
+        gate.session,
+        store,
+        apps,
+        gate.app,
+        {
+          kind: "error",
+          message: `${api} is not a supported API protocol — pick one from the list. Nothing was stored.`,
+        },
+        400,
+      );
+    }
+    if (modelIds.length === 0) {
+      return settingsResponse(
+        c,
+        gate.session,
+        store,
+        apps,
+        gate.app,
+        { kind: "error", message: "Enter at least one model id for the custom provider." },
+        400,
+      );
+    }
+    if (modelIds.length > MAX_CUSTOM_PROVIDER_MODEL_IDS) {
+      return settingsResponse(
+        c,
+        gate.session,
+        store,
+        apps,
+        gate.app,
+        {
+          kind: "error",
+          message: `Too many model ids (${modelIds.length}) — at most ${MAX_CUSTOM_PROVIDER_MODEL_IDS}. Nothing was stored.`,
+        },
+        400,
+      );
+    }
+    if (modelIds.some((id) => id.length > MAX_CUSTOM_PROVIDER_MODEL_ID_LENGTH)) {
+      return settingsResponse(
+        c,
+        gate.session,
+        store,
+        apps,
+        gate.app,
+        {
+          kind: "error",
+          message: `Model ids are limited to ${MAX_CUSTOM_PROVIDER_MODEL_ID_LENGTH} characters each. Nothing was stored.`,
+        },
+        400,
+      );
+    }
+    if (plainKey === "") {
+      return settingsResponse(
+        c,
+        gate.session,
+        store,
+        apps,
+        gate.app,
+        { kind: "error", message: "Enter an API key to store." },
+        400,
+      );
+    }
+    if (plainKey.length > MAX_PROVIDER_KEY_LENGTH) {
+      return settingsResponse(
+        c,
+        gate.session,
+        store,
+        apps,
+        gate.app,
+        {
+          kind: "error",
+          message: `That API key is too long (${plainKey.length} characters) — keys are limited to ${MAX_PROVIDER_KEY_LENGTH} characters. Nothing was stored.`,
+        },
+        400,
+      );
+    }
+    try {
+      await store.upsertCustomProvider(
+        gate.app.id,
+        { provider_id: providerId, base_url: baseUrl, api: api as (typeof CUSTOM_PROVIDER_API_IDS)[number], model_ids: modelIds },
+        plainKey,
+      );
+    } catch (err) {
+      logSettingsFailure("add_custom_provider", gate.app.id, err);
+      return settingsResponse(c, gate.session, store, apps, gate.app, settingsFailureNotice(err), 500);
+    }
+    return settingsResponse(c, gate.session, store, apps, gate.app, {
+      kind: "success",
+      message: `Declared custom provider ${providerId} for ${gate.app.slug} — its key is stored encrypted and injected by environment variable name.`,
+    });
+  }
+  if (op === "remove-custom-provider") {
+    const providerId = typeof form.provider_id === "string" ? form.provider_id.trim() : "";
+    let removed: boolean;
+    try {
+      removed = await store.removeCustomProvider(gate.app.id, providerId);
+    } catch (err) {
+      logSettingsFailure("remove_custom_provider", gate.app.id, err);
+      return settingsResponse(c, gate.session, store, apps, gate.app, settingsFailureNotice(err), 500);
+    }
+    // Tolerant no-op (the id grammar already bounds what can ever be
+    // stored): an unknown provider id simply has no row — a warn, not a 400.
+    const notice: PageNotice = removed
+      ? { kind: "success", message: `Removed the custom provider ${providerId} from ${gate.app.slug}.` }
+      : {
+          kind: "warn",
+          message: `No custom provider ${providerId === "" ? "(unspecified)" : providerId} on ${gate.app.slug} — nothing changed.`,
+        };
+    return settingsResponse(c, gate.session, store, apps, gate.app, notice);
   }
   // T2 review fold (T1 minor): an unknown op is a validation failure like any
   // other — re-render the HTML page at 400 instead of a plain-text body.
