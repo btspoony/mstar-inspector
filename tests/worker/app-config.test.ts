@@ -183,9 +183,6 @@ async function seededWorld(): Promise<{ db: ReturnType<typeof createAppConfigD1>
 
 function makeEnv(db: unknown, overrides: Partial<Env> = {}): Env {
   return {
-    APP_ID: "123",
-    PRIVATE_KEY: "private-key",
-    WEBHOOK_SECRET: "s3cret-webhook-secret",
     REVIEW_QUEUE: { send: async () => {} } as unknown as Env["REVIEW_QUEUE"],
     IDEMPOTENCY_KV: { get: async () => null, put: async () => {} } as unknown as Env["IDEMPOTENCY_KV"],
     GITHUB_OAUTH_CLIENT_ID: "oauth-client-id",

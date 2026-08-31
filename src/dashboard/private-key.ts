@@ -15,8 +15,9 @@
  * optional write-side format self-check (check-only — never persists a
  * normalized secret) and its equivalence pin against the consumer copy
  * (tests/worker/dashboard.test.ts) guards consumer-side drift. Same
- * algorithm as src/worker/diff.ts and src/pipeline/comment.ts — duplicated
- * per the Q2 route isolation; no shared module is extracted.
+ * algorithm as src/pipeline/comment.ts (the worker/diff.ts copy was deleted
+ * in plan 24) — duplicated per the Q2 route isolation; no shared module is
+ * extracted.
  */
 
 /** DER tag for a SEQUENCE (0x30). */

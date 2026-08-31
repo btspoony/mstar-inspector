@@ -9,9 +9,10 @@
  *   - put writes the v1-caliber row: envelope = full JSON, raw_output NULL,
  *     skill_version pinned, findings.severity = mergeClass (the single
  *     vocab-switch mapping point)
- *   - per-App attribution (plan 13 QC F-001): an appId on the put doc lands
- *     in reviews.app_id (FK-valid); a put without one keeps app_id NULL;
- *     an unknown appId is FK-rejected with zero rows written
+ *   - per-App attribution (plan 13 QC F-001; plan 24 Task 1: REQUIRED): the
+ *     put doc's appId lands in reviews.app_id (FK-valid); an unknown appId
+ *     is FK-rejected with zero rows written; historical NULL rows (direct
+ *     SQL) stay readable — the column stays nullable, zero DDL
  *   - version records (plan 18 Task 1): a put carrying `model`/`provider`
  *     lands them in the columns; omitted fields persist NULL (byte-compat)
  *   - second put for the same sha resolves idempotently — still 1 review
@@ -37,12 +38,15 @@ import {
 import { computeFindingFingerprint } from "../../src/store/fingerprint";
 import { REDACTED } from "../../src/pipeline/redact";
 import { idemKey } from "../../src/contracts/idem";
-import { createMigratedTestD1 } from "./helpers";
+import { createMigratedTestD1, type TestD1 } from "./helpers";
 import type { ReviewRow } from "../../src/store/types";
 
 const SHA = "0123456789abcdef0123456789abcdef01234567";
 const KEY_TUPLE = { installation_id: 123, owner: "acme", repo: "widgets", pr_number: 42, head_sha: SHA };
 const KEY = idemKey(KEY_TUPLE);
+
+/** Default attribution for the shared doc factory — every new-contract put carries an appId. */
+const TEST_APP_ID = "11111111-2222-3333-4444-555555555555";
 
 function payload(overrides: Partial<MstarReviewV1> = {}): MstarReviewV1 {
   return {
@@ -66,7 +70,14 @@ function payload(overrides: Partial<MstarReviewV1> = {}): MstarReviewV1 {
 }
 
 function reviewDoc(overrides: Partial<ReviewArtifactDoc> = {}): ReviewArtifactDoc {
-  return { kind: "review", key: KEY, schema: "mstar.review/v1", payload: payload(), ...overrides };
+  return {
+    kind: "review",
+    key: KEY,
+    schema: "mstar.review/v1",
+    payload: payload(),
+    appId: TEST_APP_ID,
+    ...overrides,
+  };
 }
 
 /** Raw-insert the FK parent the per-App attribution tests need. */
@@ -81,9 +92,16 @@ function seedAppRow(db: ReturnType<typeof createMigratedTestD1>, id: string): vo
     .run(id);
 }
 
+/** Fully-migrated D1 with the default attribution's FK parent seeded. */
+function createSeededTestD1(): TestD1 {
+  const db = createMigratedTestD1();
+  seedAppRow(db, TEST_APP_ID);
+  return db;
+}
+
 describe("createArtifactStore().put", () => {
   test("writes the v1-caliber review row + findings with the envelope as authority", async () => {
-    const db = createMigratedTestD1();
+    const db = createSeededTestD1();
     const store = createArtifactStore(db);
 
     await store.put(reviewDoc());
@@ -134,7 +152,7 @@ describe("createArtifactStore().put", () => {
   });
 
   test("writes the normalized computed fingerprint for findings without a hint (plan 21 T2)", async () => {
-    const db = createMigratedTestD1();
+    const db = createSeededTestD1();
     const store = createArtifactStore(db);
     const findings: MstarReviewFinding[] = [
       {
@@ -166,7 +184,7 @@ describe("createArtifactStore().put", () => {
   });
 
   test("hint findings keep the hint verbatim, even when the normalized value would differ (plan 21 T2)", async () => {
-    const db = createMigratedTestD1();
+    const db = createSeededTestD1();
     const store = createArtifactStore(db);
     const findings: MstarReviewFinding[] = [
       { mergeClass: "should-fix", title: "Titled", body: "b", fingerprint_hint: "legacy-hint-42" },
@@ -184,7 +202,7 @@ describe("createArtifactStore().put", () => {
   });
 
   test("era semantics: put never backfills historical NULL fingerprints (plan 21)", async () => {
-    const db = createMigratedTestD1();
+    const db = createSeededTestD1();
     const store = createArtifactStore(db);
     // Simulate a pre-fingerprint era review row (envelope NULL = M1-era) with
     // a NULL-fingerprint finding — the shape put() wrote before plan 21.
@@ -228,7 +246,7 @@ describe("createArtifactStore().put", () => {
   });
 
   test("a [REDACTED] hint is never persisted as identity — the normalized fingerprint lands instead (W-1)", async () => {
-    const db = createMigratedTestD1();
+    const db = createSeededTestD1();
     const store = createArtifactStore(db);
     const finding: MstarReviewFinding = {
       mergeClass: "should-fix",
@@ -246,19 +264,26 @@ describe("createArtifactStore().put", () => {
     expect(row.fingerprint).toBe(computeFindingFingerprint(finding));
   });
 
-  test("per-App put persists app_id; a put without appId keeps app_id NULL (QC F-001 / Clarify #3: NULL = legacy)", async () => {
-    const db = createMigratedTestD1();
+  test("per-App put persists app_id; historical NULL rows stay NULL (plan 24: appId required, zero DDL)", async () => {
+    const db = createSeededTestD1();
     const store = createArtifactStore(db);
-    const appId = crypto.randomUUID();
-    seedAppRow(db, appId); // FK parent — the attribution is a reference to a real row
 
-    await store.put(reviewDoc({ appId }));
-    await store.put(reviewDoc({ key: idemKey({ ...KEY_TUPLE, head_sha: "f".repeat(40) }) })); // legacy: no appId
+    await store.put(reviewDoc());
 
     const perApp = db.raw.query("SELECT app_id FROM reviews WHERE head_sha = ?").get(SHA) as {
       app_id: string | null;
     };
-    expect(perApp.app_id).toBe(appId);
+    expect(perApp.app_id).toBe(TEST_APP_ID);
+    // Historical NULL semantics (pre-plan-24 rows) are preserved at the
+    // column level: an unattributed put is now impossible at the type layer,
+    // so the NULL row is asserted via a direct SQL insert (the column stays
+    // nullable — zero DDL, AL-24-4).
+    db.raw
+      .prepare(
+        `INSERT INTO reviews (id, installation_id, owner, repo, pr_number, head_sha, verdict, summary_md, skill_version, envelope, app_id)
+         VALUES (?, 123, 'acme', 'widgets', 42, ?, 'needs fixes', 'historical', 'mstar.review/v1', NULL, NULL)`,
+      )
+      .run(crypto.randomUUID(), "f".repeat(40));
     const legacy = db.raw.query("SELECT app_id FROM reviews WHERE head_sha = ?").get("f".repeat(40)) as {
       app_id: string | null;
     };
@@ -266,7 +291,7 @@ describe("createArtifactStore().put", () => {
   });
 
   test("version records: a put carrying model/provider persists them; explicit nulls stay NULL (plan 18 Task 1)", async () => {
-    const db = createMigratedTestD1();
+    const db = createSeededTestD1();
     const store = createArtifactStore(db);
 
     await store.put(reviewDoc({ model: "ark-plan/deepseek-v4-flash", provider: null }));
@@ -301,7 +326,7 @@ describe("createArtifactStore().put", () => {
   });
 
   test("an appId with no github_apps row is FK-rejected with zero rows written", async () => {
-    const db = createMigratedTestD1();
+    const db = createSeededTestD1();
     const store = createArtifactStore(db);
 
     // The app_id FK (migration 0005) makes an unknown appId a loud batch
@@ -313,7 +338,7 @@ describe("createArtifactStore().put", () => {
   });
 
   test("second put for the same key resolves idempotently — 1 row, first write wins", async () => {
-    const db = createMigratedTestD1();
+    const db = createSeededTestD1();
     const store = createArtifactStore(db);
 
     await store.put(reviewDoc());
@@ -335,7 +360,7 @@ describe("createArtifactStore().put", () => {
   });
 
   test("rejects an M1 payload (verdict 'approve') with zero rows written", async () => {
-    const db = createMigratedTestD1();
+    const db = createSeededTestD1();
     const store = createArtifactStore(db);
 
     await expect(
@@ -347,7 +372,7 @@ describe("createArtifactStore().put", () => {
   });
 
   test("rejects a stray M1 severity key on a finding with review.inspector-vocab", async () => {
-    const db = createMigratedTestD1();
+    const db = createSeededTestD1();
     const store = createArtifactStore(db);
 
     const m1 = payload();
@@ -359,7 +384,7 @@ describe("createArtifactStore().put", () => {
   });
 
   test("rejects a doc whose schema id is not mstar.review/v1", async () => {
-    const db = createMigratedTestD1();
+    const db = createSeededTestD1();
     const store = createArtifactStore(db);
 
     await expect(store.put(reviewDoc({ schema: "mstar.review/v2" }))).rejects.toThrow(/doc\.schema/);
@@ -369,7 +394,7 @@ describe("createArtifactStore().put", () => {
   });
 
   test("rejects a payload.target that disagrees with the key five-tuple", async () => {
-    const db = createMigratedTestD1();
+    const db = createSeededTestD1();
     const store = createArtifactStore(db);
 
     const owner = payload({ target: { owner: "other", repo: "widgets", pr: 42, head_sha: SHA } });
@@ -386,7 +411,7 @@ describe("createArtifactStore().put", () => {
   });
 
   test("accepts a payload with no target (the key five-tuple is authoritative)", async () => {
-    const db = createMigratedTestD1();
+    const db = createSeededTestD1();
     const store = createArtifactStore(db);
 
     await store.put(reviewDoc({ payload: payload({ target: undefined }) }));
@@ -395,7 +420,7 @@ describe("createArtifactStore().put", () => {
   });
 
   test("rejects keys that are not parseable idemKey() strings, including an empty sha", async () => {
-    const db = createMigratedTestD1();
+    const db = createSeededTestD1();
     const store = createArtifactStore(db);
 
     await expect(store.put(reviewDoc({ key: "not-an-idem-key" }))).rejects.toThrow(/idemKey\(\) string/);
@@ -413,11 +438,11 @@ describe("createArtifactStore().put", () => {
   });
 
   test("throws for every non-review kind and writes nothing", async () => {
-    const db = createMigratedTestD1();
+    const db = createSeededTestD1();
     const store = createArtifactStore(db);
 
     for (const kind of ["status", "snapshot", "residuals", "json"] as const) {
-      await expect(store.put({ kind, key: "root", payload: {} })).rejects.toThrow(
+      await expect(store.put({ kind, key: "root", payload: {}, appId: TEST_APP_ID })).rejects.toThrow(
         new RegExp(`"${kind}" is not persisted`),
       );
     }
@@ -426,7 +451,7 @@ describe("createArtifactStore().put", () => {
   });
 
   test("a findings failure mid-batch rolls back the review row (atomic put)", async () => {
-    const db = createMigratedTestD1();
+    const db = createSeededTestD1();
     // Inject a failure on the SECOND findings insert (title 'boom') to prove
     // the review row written earlier in the same batch is rolled back too —
     // a partial review must never survive (plan 05 T2 review I1, absorbed).
@@ -454,7 +479,7 @@ describe("createArtifactStore().put", () => {
   });
 
   test("delete and list are omitted (engine contract: probe typeof)", () => {
-    const db = createMigratedTestD1();
+    const db = createSeededTestD1();
     const store = createArtifactStore(db);
 
     expect(typeof store.delete).toBe("undefined");
@@ -464,7 +489,7 @@ describe("createArtifactStore().put", () => {
 
 describe("createArtifactStore().get", () => {
   test("returns the parsed envelope for a v1 row", async () => {
-    const db = createMigratedTestD1();
+    const db = createSeededTestD1();
     const store = createArtifactStore(db);
     await store.put(reviewDoc());
 
@@ -475,14 +500,14 @@ describe("createArtifactStore().get", () => {
   });
 
   test("returns undefined for a missing row", async () => {
-    const db = createMigratedTestD1();
+    const db = createSeededTestD1();
     const store = createArtifactStore(db);
 
     expect(await store.get({ kind: "review", key: KEY })).toBeUndefined();
   });
 
   test("returns undefined for an M1-era row (envelope NULL) — never served as v1", async () => {
-    const db = createMigratedTestD1();
+    const db = createSeededTestD1();
     const store = createArtifactStore(db);
     db.raw
       .prepare(
@@ -497,7 +522,7 @@ describe("createArtifactStore().get", () => {
   });
 
   test("throws for a non-review kind and an unparseable key", async () => {
-    const db = createMigratedTestD1();
+    const db = createSeededTestD1();
     const store = createArtifactStore(db);
 
     await expect(store.get({ kind: "status", key: "root" })).rejects.toThrow(/"status" is not served/);
@@ -507,7 +532,7 @@ describe("createArtifactStore().get", () => {
 
 describe("createArtifactStore().findByIdempotencyKey", () => {
   test("returns the row for an existing key and null for an unknown key", async () => {
-    const db = createMigratedTestD1();
+    const db = createSeededTestD1();
     const store = createArtifactStore(db);
     await store.put(reviewDoc());
 
@@ -537,15 +562,15 @@ describe("previousRoundFingerprints", () => {
   const PR_KEY = { installation_id: 123, owner: "acme", repo: "widgets", pr_number: 42 };
 
   test("empty set when no v1 review exists for the PR (first round)", async () => {
-    const db = createMigratedTestD1();
+    const db = createSeededTestD1();
     const store = createArtifactStore(db);
-    await store.put({ kind: "review", key: KEY, schema: "mstar.review/v1", payload: payload() });
+    await store.put({ kind: "review", key: KEY, schema: "mstar.review/v1", payload: payload(), appId: TEST_APP_ID });
     const set = await previousRoundFingerprints(db, { ...PR_KEY, pr_number: 99 });
     expect(set.size).toBe(0);
   });
 
   test("returns the latest v1 review row's non-NULL fingerprints, no head_sha exclusion (AL-21-2)", async () => {
-    const db = createMigratedTestD1();
+    const db = createSeededTestD1();
     const store = createArtifactStore(db);
     const older = payload({
       findings: [
@@ -579,15 +604,16 @@ describe("previousRoundFingerprints", () => {
       key: idemKey({ ...KEY_TUPLE, head_sha: "b".repeat(40) }),
       schema: "mstar.review/v1",
       payload: newer,
+      appId: TEST_APP_ID,
     });
     const set = await previousRoundFingerprints(db, PR_KEY);
     expect(set).toEqual(new Set([computeFindingFingerprint(newer.findings[0]!)]));
   });
 
   test("skips M1-era rows (envelope NULL) even when they are the latest", async () => {
-    const db = createMigratedTestD1();
+    const db = createSeededTestD1();
     const store = createArtifactStore(db);
-    await store.put({ kind: "review", key: KEY, schema: "mstar.review/v1", payload: payload() });
+    await store.put({ kind: "review", key: KEY, schema: "mstar.review/v1", payload: payload(), appId: TEST_APP_ID });
     // Raw-insert an M1-era row (envelope NULL) with a later reviewed_at —
     // the era gate (envelope IS NOT NULL) must exclude it.
     db.raw
@@ -601,9 +627,9 @@ describe("previousRoundFingerprints", () => {
   });
 
   test("excludes NULL fingerprints from the latest row's set", async () => {
-    const db = createMigratedTestD1();
+    const db = createSeededTestD1();
     const store = createArtifactStore(db);
-    await store.put({ kind: "review", key: KEY, schema: "mstar.review/v1", payload: payload() });
+    await store.put({ kind: "review", key: KEY, schema: "mstar.review/v1", payload: payload(), appId: TEST_APP_ID });
     const row = db.raw.query("SELECT id FROM reviews").get() as { id: string };
     // Raw-insert a finding with a NULL fingerprint under the same review.
     db.raw
@@ -618,7 +644,7 @@ describe("previousRoundFingerprints", () => {
   });
 
   test("same-sha re-review: the query returns the same sha's own fingerprints (all-repeat, AL-21-2)", async () => {
-    const db = createMigratedTestD1();
+    const db = createSeededTestD1();
     const store = createArtifactStore(db);
     const findings: MstarReviewFinding[] = [
       { mergeClass: "must-fix", file_path: "src/c.ts", line_start: 3, title: "Same sha issue", body: "b" },
@@ -628,6 +654,7 @@ describe("previousRoundFingerprints", () => {
       key: idemKey({ ...KEY_TUPLE, head_sha: SHA }),
       schema: "mstar.review/v1",
       payload: payload({ findings }),
+      appId: TEST_APP_ID,
     });
     // No head_sha exclusion: a re-review of the SAME sha reads its own
     // previous row → every current finding is a repeat (S-8).

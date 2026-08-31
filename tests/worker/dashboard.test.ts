@@ -78,9 +78,6 @@ const CONVERSION = {
 
 function baseEnv(overrides: Partial<Env> = {}): Env {
   return {
-    APP_ID: "123",
-    PRIVATE_KEY: "private-key",
-    WEBHOOK_SECRET: "s3cret-webhook-secret",
     REVIEW_QUEUE: { send: async () => {} } as unknown as Env["REVIEW_QUEUE"],
     IDEMPOTENCY_KV: {
       get: async () => null,
@@ -1548,18 +1545,28 @@ describe("existing routes unaffected", () => {
     expect(await res.json()).toEqual({ ok: true });
   });
 
-  test("POST /webhook with a bad signature still returns 401 (dashboard mount does not intercept it)", async () => {
+  test("bare POST /webhook is 404 — the legacy face is retired and the dashboard mount does not intercept it", async () => {
+    const db = createDashboardTestD1();
+    applyMigrationFile(db.raw, "0011_webhook_deliveries.sql");
+    const sent: unknown[] = [];
+    const env = makeDbEnv(db, {
+      REVIEW_ENABLED: "true",
+      REVIEW_QUEUE: { send: async (msg: unknown) => { sent.push(msg); } } as unknown as Env["REVIEW_QUEUE"],
+    });
     const res = await worker.fetch(
       new Request("https://worker.local/webhook", {
         method: "POST",
         headers: { "x-hub-signature-256": "sha256=deadbeef", "x-github-event": "pull_request" },
         body: "{}",
       }),
-      // REVIEW_ENABLED "true" so the kill-switch ignore path does not mask
-      // signature verification (classifyWebhook checks the switch first).
-      makeEnv({ REVIEW_ENABLED: "true" }),
+      env,
     );
-    expect(res.status).toBe(401);
+    // No bare route exists (plan 24 Task 1) — Hono's default 404, zero
+    // enqueue, zero delivery rows; the dashboard mount never intercepts it.
+    expect(res.status).toBe(404);
+    expect(sent).toHaveLength(0);
+    const rows = db.raw.query("SELECT COUNT(*) AS n FROM webhook_deliveries").get() as { n: number };
+    expect(rows.n).toBe(0);
   });
 });
 

@@ -58,9 +58,6 @@ function seedInsightsReview(
 
 function makeEnv(db: unknown, overrides: Partial<Env> = {}): Env {
   return {
-    APP_ID: "123",
-    PRIVATE_KEY: "private-key",
-    WEBHOOK_SECRET: "s3cret-webhook-secret",
     REVIEW_QUEUE: { send: async () => {} } as unknown as Env["REVIEW_QUEUE"],
     IDEMPOTENCY_KV: {
       get: async () => null,

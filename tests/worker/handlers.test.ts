@@ -23,6 +23,8 @@ function prPayload(overrides: Partial<ReviewJobPayload> = {}): ReviewJobPayload 
     head_sha: HEAD_SHA,
     action: "opened",
     triggered_by: "pull_request",
+    // Required single shape (plan 24 Task 1) — a reference, never a credential.
+    appRef: { appId: "11111111-2222-3333-4444-555555555555" },
     ...overrides,
   };
 }
@@ -36,6 +38,7 @@ function reviewCommandPayload(overrides: Partial<ReviewJobPayload> = {}): Review
     head_sha: null,
     action: "created",
     triggered_by: "review_command",
+    appRef: { appId: "11111111-2222-3333-4444-555555555555" },
     ...overrides,
   };
 }
@@ -270,6 +273,8 @@ describe("payload hygiene — no secrets", () => {
       head_sha: true,
       action: true,
       triggered_by: true,
+      // The App attribution reference (plan 24 Task 1) — an id, never a secret.
+      appRef: true,
     };
     for (const payload of sent) {
       for (const key of Object.keys(payload)) {

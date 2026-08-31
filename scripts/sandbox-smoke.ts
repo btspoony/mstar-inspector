@@ -14,7 +14,7 @@
  *   4. Print the JSON evidence (no secrets) and exit with the verdict.
  *
  * Usage: bun run scripts/sandbox-smoke.ts
- * Env:  APP_ID, PRIVATE_KEY (inline PEM or path — same forms as the Worker),
+ * Env:  SMOKE_APP_ID, SMOKE_PRIVATE_KEY (inline PEM or path),
  *       INSTALLATION_ID (default 156621513), GH_REPO (default btspoony/todo-bots),
  *       GH_PR (default 1), SMOKE_ROUTE (default /smoke), ARK_API_KEY (required
  *       when SMOKE_ROUTE=/smoke-review).
@@ -30,10 +30,10 @@ import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
-const APP_ID = Bun.env.APP_ID;
-const PRIVATE_KEY = Bun.env.PRIVATE_KEY;
-if (!APP_ID || !PRIVATE_KEY) {
-  console.error("sandbox-smoke: APP_ID and PRIVATE_KEY env vars are required");
+const SMOKE_APP_ID = Bun.env.SMOKE_APP_ID;
+const SMOKE_PRIVATE_KEY = Bun.env.SMOKE_PRIVATE_KEY;
+if (!SMOKE_APP_ID || !SMOKE_PRIVATE_KEY) {
+  console.error("sandbox-smoke: SMOKE_APP_ID and SMOKE_PRIVATE_KEY env vars are required");
   process.exit(2);
 }
 
@@ -48,7 +48,7 @@ if (SMOKE_ROUTE === "/smoke-review" && !ARK_API_KEY) {
   process.exit(2);
 }
 
-/** Resolve PRIVATE_KEY the same way the Worker does (inline PEM or path). */
+/** Resolve SMOKE_PRIVATE_KEY (inline PEM or path). */
 function resolvePrivateKey(value: string): string {
   if (value.includes("-----BEGIN")) return value;
   const path = value.startsWith("~/") ? join(homedir(), value.slice(2)) : value;
@@ -57,7 +57,7 @@ function resolvePrivateKey(value: string): string {
 
 /** Mint an installation token via the GitHub App auth flow. */
 async function mintInstallationToken(): Promise<string> {
-  const auth = createAppAuth({ appId: APP_ID, privateKey: resolvePrivateKey(PRIVATE_KEY) });
+  const auth = createAppAuth({ appId: SMOKE_APP_ID, privateKey: resolvePrivateKey(SMOKE_PRIVATE_KEY) });
   const { token } = await auth({ type: "installation", installationId: INSTALLATION_ID });
   return token;
 }

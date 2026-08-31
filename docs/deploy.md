@@ -41,7 +41,7 @@ wrangler d1 migrations apply mstar-inspector-db            # local dev
 | `0002_mstar_review_v1` | mstar.review/v1 envelope columns (era lock: `envelope IS NOT NULL` ⇔ v1 row) |
 | `0003_dashboard_users` | dashboard membership |
 | `0004_github_apps` | multi-App registry (secretbox-encrypted App credentials) |
-| `0005_reviews_app_id` | `reviews.app_id` attribution (NULL = legacy global App) |
+| `0005_reviews_app_id` | `reviews.app_id` attribution (NULL = historical rows from the retired global App — archaeology: the legacy env-App face was deleted in plan 24) |
 | `0006_app_provider_config` | per-App BYOK provider keys + model chain |
 | `0007_reviews_app_id_index` | index on `reviews.app_id` |
 | `0008_github_apps_ops` | per-App ops columns (`review_enabled` pause switch) |
@@ -62,9 +62,6 @@ never in git (full per-key notes in `.env.example`):
 
 | Name | Required | Purpose |
 |---|---|---|
-| `APP_ID` | yes | GitHub App ID (numeric) |
-| `PRIVATE_KEY` | yes | GitHub App private key PEM (PKCS#1 or PKCS#8) |
-| `WEBHOOK_SECRET` | yes | webhook HMAC secret (fail-closed when empty/`"development"`) |
 | `GITHUB_OAUTH_CLIENT_ID` / `GITHUB_OAUTH_CLIENT_SECRET` | dashboard | user OAuth login (distinct from the review App) |
 | `DASHBOARD_SESSION_SECRET` | dashboard | session-cookie HMAC key |
 | `DASHBOARD_ENCRYPTION_KEY` | multi-App | AES-256-GCM master key for D1-stored App credentials |
@@ -164,14 +161,24 @@ smoke → record the digest.
 
 1. `bun install`
 2. `bun run typecheck && bun test` — both must exit 0.
+
+### Sandbox smoke
+
 3. Local sandbox smoke — builds the image and exercises the real sandbox path
    via `wrangler dev` (config `wrangler.smoke.jsonc`, entry
-   `src/pipeline/smoke-entry.ts`; requires `APP_ID` + `PRIVATE_KEY` in the
-   shell env for the installation-token mint):
+   `src/pipeline/smoke-entry.ts`). The orchestrator reads **shell env only**
+   (never Worker secrets, never D1): `SMOKE_APP_ID` + `SMOKE_PRIVATE_KEY`
+   (inline PEM or `~`-relative/absolute path — the local orchestrator's
+   dual form, resolved by scripts/sandbox-smoke.ts) for the
+   installation-token mint, plus the optional
+   `INSTALLATION_ID` (default 156621513), `GH_REPO` (default
+   btspoony/todo-bots), `GH_PR` (default 1), `SMOKE_ROUTE` (default `/smoke`),
+   and `ARK_API_KEY` (required when `SMOKE_ROUTE=/smoke-review`):
    ```bash
-   bun run scripts/sandbox-smoke.ts
+   SMOKE_APP_ID=… SMOKE_PRIVATE_KEY=… bun run scripts/sandbox-smoke.ts
    # /smoke: getSandbox → exec gh pr diff → destroy
-   SMOKE_ROUTE=/smoke-review ARK_API_KEY=… bun run scripts/sandbox-smoke.ts
+   SMOKE_APP_ID=… SMOKE_PRIVATE_KEY=… SMOKE_ROUTE=/smoke-review ARK_API_KEY=… \
+     bun run scripts/sandbox-smoke.ts
    # /smoke-review: full in-image runner (clone + omp review + parse) → destroy
    ```
 4. `wrangler deploy` — deploys the Worker (webhook face + queue consumer +
@@ -241,7 +248,7 @@ missing, non-base64, or wrong-length value throws `SecretboxKeyError` on
 first use). Encryption-dependent dashboard routes (manifest commit, App
 settings) fail **closed with 5xx** when it is missing or malformed — the
 hold is kept and nothing is stored, so fixing the env makes the retry
-succeed. The legacy env-secret App path is unaffected.
+succeed.
 
 ```bash
 # Generate: base64 of exactly 32 random bytes
@@ -302,8 +309,7 @@ Prerequisites: dashboard OAuth (`GITHUB_OAUTH_CLIENT_ID` /
 
 A freshly manifest-registered App needs no repoint — the flow already set
 the per-App webhook URL on GitHub. Repointing applies when an App was
-created with a different URL (e.g. the legacy `/webhook` face) or the
-Worker host changed:
+created with a different URL or the Worker host changed:
 
 1. Open the GitHub App settings page
    (`https://github.com/settings/apps/<app-name>`).
@@ -317,15 +323,15 @@ or when deliveries look dead):
 | Check | Where | Healthy state |
 |---|---|---|
 | Kill-switch | Worker env var `REVIEW_ENABLED` | `"true"` — check FIRST: the kill-switch return precedes classification and delivery recording, so a zero-rows state can mean kill-switch rather than GitHub-side delivery death |
-| Webhook URL | GitHub App settings → Webhook | `https://<worker-host>/webhook/<slug>` — the per-App route, NOT the legacy `/webhook` |
+| Webhook URL | GitHub App settings → Webhook | `https://<worker-host>/webhook/<slug>` — the per-App route |
 | Webhook secret | GitHub App settings → Webhook | A secret is set (masked). The manifest flow's GitHub-generated secret is stored encrypted in the dashboard; changing it on GitHub without updating the dashboard breaks signature verification → `rejected` (401) deliveries |
 | Active | GitHub App settings → Webhook | The **Active** checkbox is on and the App is not suspended; the dashboard row's status is `active` (a disabled row 404s the per-App route) |
 | Delivery health | Dashboard Apps list health column + settings recent-deliveries panel | Recent rows show `ok` / `ignored` / `paused` outcomes; NO `N rejected in 24h` badge; the latest row's relative time is recent |
 
 The dashboard face is the ground truth: every VERIFIED per-App delivery
 lands a `webhook_deliveries` row (best-effort, `src/worker/index.ts` per-App
-face — `ok` / `paused` / `ignored` / `rejected`; the legacy `/webhook` face
-records nothing by design, AL-20-1). A `rejected` row with 401 = signature
+face — `ok` / `paused` / `ignored` / `rejected`; the retired legacy face
+recorded nothing by design, AL-20-1 — archaeology). A `rejected` row with 401 = signature
 mismatch (secret drift); 400 = malformed payload; 500 = the App's stored
 secret is missing/empty/default. Pre-classify failures (unknown/disabled
 slug, decrypt failure) record NO row — they surface in the Worker logs, not
@@ -372,14 +378,10 @@ runner evidence, not the column.
 
 ### 5. Rollback (multi-App)
 
-- **Webhook repoint back** — point the GitHub App's Webhook URL back to the
-  legacy face `https://<worker-host>/webhook` (verified by the global
-  `WEBHOOK_SECRET` env secret). The legacy face keeps reviewing with the
-  deployment-level App; it records no `webhook_deliveries` rows (AL-20-1)
-  and has no dashboard consumer.
-- **Worker rollback** — `wrangler rollback` (or check out the previous
-  commit and `wrangler deploy`); restores Worker code + cron triggers +
-  consumer config. The container image follows the checked-out Dockerfile.
+Rollback is `wrangler rollback` (see § Rollback below) — there is no legacy
+face to repoint to; the per-App webhook URL on GitHub is unchanged by a
+Worker rollback.
+
 - **D1 is forward-only** — never reverse migration 0011 on rollback; new
   code tolerates the prior schema (0002 precedent), roll back code only.
 - **Secrets untouched** — rollback does not remove

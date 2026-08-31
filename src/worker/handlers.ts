@@ -35,8 +35,8 @@ export type WorkerEventLog = {
 
 /**
  * Structured log fields for a webhook-face rejection/bookkeeping warn (plan
- * 13 QC F-005; plan 15 log hygiene extended it to the legacy face): the
- * caller's REAL stage label rides `event` — the literal "unknown" no longer
+ * 13 QC F-005; plan 15 log hygiene): the caller's REAL stage label rides
+ * `event` — the literal "unknown" no longer
  * exists anywhere — so e.g. `installation_upsert_failed` /
  * `webhook_body_too_large` warns are filterable by event alone. `reason`
  * keeps the same label for the reason-keyed greps.
