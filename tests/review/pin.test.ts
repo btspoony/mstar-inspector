@@ -45,6 +45,13 @@ describe("engine dependency pin", () => {
   test("@mstar-harness/engine is pinned to exact 3.5.1 (no range prefix)", () => {
     expect(pkg.dependencies["@mstar-harness/engine"]).toBe("3.5.1");
   });
+
+  test("@mstar-harness/engine bun.lock row resolves to exact 3.5.1 (no range prefix)", () => {
+    const lockfile = readFileSync(join(REPO_ROOT, "bun.lock"), "utf8");
+    // The packages row names the resolved version verbatim; a ^/~ range would
+    // surface as "@mstar-harness/engine@^3.5.1" and fail this anchor.
+    expect(lockfile).toContain('"@mstar-harness/engine": ["@mstar-harness/engine@3.5.1"');
+  });
 });
 
 describe("fixture plugin root layout", () => {

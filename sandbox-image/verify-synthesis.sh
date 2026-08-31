@@ -29,7 +29,10 @@
 # ARK_API_KEY). No key material is read, written, or printed.
 #
 # Idempotent: the only writes are /tmp/omp-agent-<uuid>/ (fresh per run via
-# crypto.randomUUID) and they are removed before exit. Safe to re-run.
+# crypto.randomUUID) and they are removed before exit on EVERY path — success,
+# assertion failure, and mid-write throw (writePerReviewModelsYaml self-cleans
+# its dir before rethrowing; the finally below covers the success path and any
+# post-return failure). Safe to re-run.
 #
 # Output: KEY=VALUE evidence lines on stdout; exit 0 = all three layers pass,
 # non-zero = at least one layer failed (set -e aborts on the first failure).
@@ -92,6 +95,9 @@ try {
   console.log("U001_LAYER_C_SESSION_ID=" + session.sessionId);
   console.log("U001_VERIFY=pass");
 } finally {
+  // writePerReviewModelsYaml self-cleans its /tmp/omp-agent-<uuid> dir on a
+  // mid-write throw (models-synthesis.ts), so this finally only removes the
+  // dir on the success path / post-return failures — a throw cannot leak it.
   if (agentDir !== undefined) rmSync(agentDir, { recursive: true, force: true });
 }
 process.exit(0);

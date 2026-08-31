@@ -23,7 +23,7 @@
  * no PI_CODING_AGENT_DIR changes — each attempt owns its /tmp directory.
  */
 
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { customProviderEnvName, type CustomProviderDeclaration } from "./runtime";
 
@@ -152,6 +152,8 @@ export function synthesizeModelsYaml(
  * `agentDir` the runner passes to createAgentSession). Fail-loud on any I/O
  * or merge problem — custom providers must never be silently dropped. The
  * /tmp directory belongs to the per-attempt container and dies with it.
+ * Self-cleaning: a throw between mkdir and writeFile removes the dir before
+ * rethrowing, so no exit path leaks /tmp/omp-agent-<uuid>.
  */
 export async function writePerReviewModelsYaml(
   customProviders: readonly CustomProviderDeclaration[],
@@ -163,7 +165,15 @@ export async function writePerReviewModelsYaml(
   }
   const baseYaml = await readFile(basePath, "utf8");
   const dir = join("/tmp", `omp-agent-${crypto.randomUUID()}`);
-  await mkdir(dir, { recursive: true });
-  await writeFile(join(dir, MODELS_YAML_NAME), synthesizeModelsYaml(baseYaml, customProviders, onCollision));
+  try {
+    await mkdir(dir, { recursive: true });
+    await writeFile(join(dir, MODELS_YAML_NAME), synthesizeModelsYaml(baseYaml, customProviders, onCollision));
+  } catch (err) {
+    // A throw between mkdir and writeFile must not leak the fresh
+    // /tmp/omp-agent-<uuid> dir: remove it before rethrowing so every caller
+    // (runner, verify-synthesis.sh) keeps fail-loud semantics with no residue.
+    await rm(dir, { recursive: true, force: true });
+    throw err;
+  }
   return dir;
 }
