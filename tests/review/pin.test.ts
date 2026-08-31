@@ -1,11 +1,13 @@
 /**
- * Pin assertions for plan 07 Task 1.
+ * Pin assertions for the sandbox image harness ref and engine dep (plan 25
+ * Task 1 — supersedes the plan 07 Task 1 pin; plan 07 Global Constraints:
+ * no `^`/`~`/`latest` still apply).
  *
  * The sandbox image and the runner deps are pinned to exact upstream
- * versions (plan 07 Global Constraints: no `^`/`~`/`latest`). These tests
- * fail if the harness image ref drifts off the 3.5.0 commit, if the engine
- * dep loosens, or if the test fixture plugin root stops mirroring the
- * pinned layout (`commands/amazing-pr-review.md` + `skills/mstar-audit`).
+ * versions. These tests fail if the harness image ref drifts off the 3.5.1
+ * commit, if the engine dep loosens, or if the test fixture plugin root
+ * stops mirroring the pinned layout (`commands/amazing-pr-review.md` +
+ * `skills/mstar-audit`).
  */
 
 import { describe, expect, test } from "bun:test";

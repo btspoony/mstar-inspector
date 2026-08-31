@@ -90,3 +90,9 @@ COPY src/review /opt/runner/src/review
 # The runner resolves the harness root from this env (plan Clarify #5). Model
 # key (ARK_API_KEY) is injected per exec — never baked into the image.
 ENV HARNESS_PLUGIN_ROOT=/opt/mstar-harness
+# U-001 in-image models.yml synthesis verification (plan 25 Task 2, AL-25-3):
+# the script ships inside the image so the evidence replays on the exact
+# digest being verified. Not a build gate — run manually in a container:
+#   docker run --rm <image> /opt/verify-synthesis.sh
+COPY sandbox-image/verify-synthesis.sh /opt/verify-synthesis.sh
+RUN chmod +x /opt/verify-synthesis.sh
