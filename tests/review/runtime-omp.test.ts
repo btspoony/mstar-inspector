@@ -900,3 +900,42 @@ describe("ompAgentRuntime.runReview — envelope", () => {
     });
   });
 });
+describe("ompAgentRuntime.runReview — per-review agentDir threading (plan 23 Task 3, AL-23-1)", () => {
+  test("quick/default: input.agentDir flows into createAgentSession options verbatim", async () => {
+    seatResults = [{ data: seatPayload() }];
+    await ompAgentRuntime.runReview({ ...BASE_INPUT, level: "quick", agentDir: "/tmp/omp-agent-abc" });
+
+    expect(createdOptions).toHaveLength(1);
+    expect(createdOptions[0]!.agentDir).toBe("/tmp/omp-agent-abc");
+    // The rest of the isolation set is untouched (agentDir is additive).
+    expect(createdOptions[0]!.cwd).toBe(TEST_WORKTREE);
+    expect(createdOptions[0]!.settings).toEqual({
+      kind: "isolated",
+      overrides: {
+        "fetch.enabled": false,
+        "retry.modelFallback": true,
+        "retry.fallbackChains": { default: [...BASE_INPUT.modelSelectors] },
+      },
+    });
+  });
+
+  test("deep: input.agentDir flows into createAgentSession options verbatim", async () => {
+    parentYields = [deepEnvelope()];
+    await ompAgentRuntime.runReview({ ...DEEP_INPUT, agentDir: "/tmp/omp-agent-deep-7" });
+
+    expect(createdOptions[0]!.agentDir).toBe("/tmp/omp-agent-deep-7");
+    expect(createdOptions[0]!.toolNames).toEqual(["read", "grep", "glob", "task"]);
+  });
+
+  test("absent agentDir keeps today's options byte-for-byte (no agentDir key)", async () => {
+    seatResults = [{ data: seatPayload() }];
+    await ompAgentRuntime.runReview({ ...BASE_INPUT, level: "quick" });
+    const quick = JSON.stringify(createdOptions[0]);
+    expect(JSON.stringify(Object.keys(createdOptions[0]!))).not.toContain('"agentDir"');
+
+    createdOptions.length = 0;
+    seatResults = [{ data: seatPayload() }];
+    await ompAgentRuntime.runReview({ ...BASE_INPUT, level: "quick", agentDir: undefined });
+    expect(JSON.stringify(createdOptions[0])).toBe(quick);
+  });
+});

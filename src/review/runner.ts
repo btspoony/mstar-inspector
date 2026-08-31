@@ -9,12 +9,14 @@
  * Contract:
  *   - `--level` is the review tier (quick | default | deep); anything else is a
  *     usage error (the runtime itself rejects unknown levels as well);
- *   - `--input` points at a JSON file `{ worktreePath?: string,
- *     reconFacts?: string[], modelOverrides?: Record<string, string> }`;
- *     `worktreePath` defaults to the process cwd (the consumer execs with
- *     cwd = the in-container PR clone dir); `modelOverrides` (plan 17 B6)
- *     maps an audit-seat agent name to a verbatim selector chain and is
- *     absent for legacy payloads;
+ *    - `customProviders` (plan 23 Task 3) is an optional array of keyless
+ *      declarations `{ provider_id, base_url, api, model_ids }`; when present
+ *      and non-empty the runner synthesizes a COMPLETE per-review models.yml
+ *      (/tmp/omp-agent-<uuid>/models.yml from the in-image base) with every
+ *      custom key as a CUSTOM_<ID>_API_KEY env-name reference (the consumer
+ *      injects the decrypted values into the exec env) and rides that
+ *      directory as the runtime `agentDir` — absent/empty = the legacy
+ *      in-image models.yml, byte-identical behavior;
  *   - stdout carries ONLY the mstar.review/v1 envelope JSON (validated by
  *     validateMstarReviewV1 inside the runtime); all diagnostics to stderr;
  *   - exit codes: 0 success, 1 runtime/I-O failure, 2 usage error. There is
@@ -31,16 +33,20 @@
 import { readFileSync } from "node:fs";
 import { isReviewLevel, REVIEW_LEVELS, type AgentRuntime, type AgentRuntimeRunInput } from "./runtime";
 import { ompAgentRuntime, parseModelSelectors } from "./runtime-omp";
+import { writePerReviewModelsYaml } from "./models-synthesis";
+import type { CustomProviderDeclaration } from "./runtime";
 
 const USAGE =
   `usage: bun run runner.ts --level <${REVIEW_LEVELS.join(", ")}> --input <json-file> ` +
-  "(input JSON: { worktreePath?: string, reconFacts?: string[], modelOverrides?: Record<string, string> })";
+  "(input JSON: { worktreePath?: string, reconFacts?: string[], modelOverrides?: Record<string, string>, " +
+  "customProviders?: [{ provider_id, base_url, api, model_ids }] })";
 
 /** Validated shape of the --input JSON file. */
 type RunnerInputJson = {
   worktreePath?: string;
   reconFacts?: string[];
   modelOverrides?: Record<string, string>;
+  customProviders?: CustomProviderDeclaration[];
 };
 
 /** Parse CLI flags. Throws (usage) on missing/unknown flags or missing values. */
@@ -101,6 +107,44 @@ function parseRunnerInput(parsed: unknown): RunnerInputJson {
     }
     input.modelOverrides = map as Record<string, string>;
   }
+  if (record.customProviders !== undefined) {
+    // Plan 23 Task 3 (AL-23-1): shape validation ONLY here — the id
+    // pattern/baseUrl/api-enum/model bounds live dashboard-side
+    // (assertCustomProvider). The declarations carry NO keys: each key rides
+    // the container exec env under CUSTOM_<id>_API_KEY (the synthesized
+    // models.yml references that env name; zero key literals in any file).
+    const list = record.customProviders;
+    if (!Array.isArray(list)) {
+      throw new Error(
+        "input JSON field `customProviders` must be an array of declarations when present " +
+          "(keys ride the exec env under CUSTOM_<id>_API_KEY, never the input)",
+      );
+    }
+    input.customProviders = list.map((entry, index) => {
+      if (entry === null || typeof entry !== "object" || Array.isArray(entry)) {
+        throw new Error(`input JSON field \`customProviders\`[${index}] must be an object`);
+      }
+      const decl = entry as Record<string, unknown>;
+      if (typeof decl.provider_id !== "string") {
+        throw new Error(`input JSON field \`customProviders\`[${index}].provider_id must be a string`);
+      }
+      if (typeof decl.base_url !== "string") {
+        throw new Error(`input JSON field \`customProviders\`[${index}].base_url must be a string`);
+      }
+      if (typeof decl.api !== "string") {
+        throw new Error(`input JSON field \`customProviders\`[${index}].api must be a string`);
+      }
+      if (!Array.isArray(decl.model_ids) || decl.model_ids.some((id: unknown) => typeof id !== "string")) {
+        throw new Error(`input JSON field \`customProviders\`[${index}].model_ids must be an array of strings`);
+      }
+      return {
+        provider_id: decl.provider_id,
+        base_url: decl.base_url,
+        api: decl.api,
+        model_ids: [...decl.model_ids],
+      };
+    });
+  }
   return input;
 }
 
@@ -131,6 +175,15 @@ export async function main(argv: string[], runtime: AgentRuntime = ompAgentRunti
   try {
     const parsed: unknown = JSON.parse(readFileSync(inputPath, "utf8"));
     const json = parseRunnerInput(parsed);
+    // Plan 23 Task 3 (AL-23-1): when the input declares custom providers,
+    // synthesize the COMPLETE per-review models.yml (/tmp/omp-agent-<uuid>/
+    // from the in-image base) and ride the directory as `agentDir` — the SDK
+    // reads <agentDir>/models.yml instead of the in-image default. Absent or
+    // empty declarations = no synthesis, no agentDir (legacy byte-identical).
+    const agentDir =
+      json.customProviders !== undefined && json.customProviders.length > 0
+        ? await writePerReviewModelsYaml(json.customProviders)
+        : undefined;
     input = {
       level,
       worktreePath: json.worktreePath ?? process.cwd(),
@@ -139,6 +192,9 @@ export async function main(argv: string[], runtime: AgentRuntime = ompAgentRunti
       // Optional per-role overrides (plan 17 B6): included ONLY when the map
       // is present, so legacy input builds a byte-identical runtime input.
       ...(json.modelOverrides !== undefined ? { modelOverrides: json.modelOverrides } : {}),
+      // Optional per-review models dir (plan 23 Task 3): included ONLY when
+      // declarations triggered a synthesis.
+      ...(agentDir !== undefined ? { agentDir } : {}),
     };
   } catch (error) {
     console.error(`review: cannot read runner input ${inputPath}: ${(error as Error).message}`);

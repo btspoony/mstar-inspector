@@ -24,6 +24,22 @@ export type ReviewLevel = (typeof REVIEW_LEVELS)[number];
  */
 export const REVIEW_SEATS: Record<Exclude<ReviewLevel, "deep">, number> = { quick: 1, default: 2 };
 
+/**
+ * One custom-provider declaration as the runner input JSON carries it (plan
+ * 23 Task 3, AL-23-1): the SETTINGS declaration, keyless — the API key rides
+ * ONLY the container exec env under CUSTOM_<UPPER_SNAKE(id)>_API_KEY (never
+ * the input JSON, never a synthesized models.yml, never a log line). The
+ * `api` vocabulary (anthropic-messages | openai-completions |
+ * openai-responses) and the id/baseUrl bounds live dashboard-side
+ * (assertCustomProvider); the runner guard validates shape only.
+ */
+export type CustomProviderDeclaration = {
+  provider_id: string;
+  base_url: string;
+  api: string;
+  model_ids: string[];
+};
+
 export type AgentRuntimeRunInput = {
   level: ReviewLevel;
   /** 容器内 PR clone 的绝对路径（exec cwd；席位 worktree = 该只读 clone）。 */
@@ -43,6 +59,15 @@ export type AgentRuntimeRunInput = {
    * actually dispatches).
    */
   modelOverrides?: Record<string, string>;
+  /**
+   * Directory holding the synthesized COMPLETE per-review models.yml (plan 23
+   * Task 3, AL-23-1): the runner synthesizes /tmp/omp-agent-<uuid>/models.yml
+   * from the image base when the input carries custom providers and rides the
+   * directory here; runtime-omp passes it to createAgentSession({ agentDir }).
+   * OPTIONAL — absent = today's session path reads the in-image base file
+   * (byte-identical behavior).
+   */
+  agentDir?: string;
 };
 
 export interface AgentRuntime {

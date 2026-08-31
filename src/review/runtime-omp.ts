@@ -184,6 +184,15 @@ export function buildSessionOptions(opts: {
   skills: Skill[];
   modelPattern: string;
   fallbackChain?: string[];
+  /**
+   * Directory holding the synthesized COMPLETE per-review models.yml (plan 23
+   * Task 3, AL-23-1): passed to createAgentSession so the SDK's ModelRegistry
+   * reads <agentDir>/models.yml (discoverModels → model-registry single-file
+   * loader) instead of the in-image /opt/omp-agent/models.yml. OPTIONAL —
+   * absent = the key is omitted, today's in-image models.yml path (verified
+   * byte-compat by the runtime tests).
+   */
+  agentDir?: string;
 }): CreateAgentSessionOptions {
   return {
     cwd: opts.cwd,
@@ -199,6 +208,7 @@ export function buildSessionOptions(opts: {
     enableLsp: false,
     requireYieldTool: false,
     autoApprove: true,
+    ...(opts.agentDir !== undefined ? { agentDir: opts.agentDir } : {}),
   };
 }
 
@@ -638,6 +648,7 @@ function deepSessionOptions(opts: {
   modelPattern: string;
   fallbackChain?: string[];
   agentModelOverrides?: Record<string, string>;
+  agentDir?: string;
 }): CreateAgentSessionOptions {
   const overrides = opts.agentModelOverrides;
   const hasOverrides = overrides !== undefined && Object.keys(overrides).length > 0;
@@ -723,6 +734,9 @@ async function runDeepReview(input: AgentRuntimeRunInput): Promise<MstarReviewV1
           modelPattern: input.modelSelectors[0] ?? DEFAULT_MODEL_PATTERN,
           fallbackChain: [...input.modelSelectors],
           agentModelOverrides: input.modelOverrides,
+          // Plan 23 Task 3 (AL-23-1): the synthesized per-review models.yml
+          // directory — absent for legacy runs (byte-identical sessions).
+          ...(input.agentDir !== undefined ? { agentDir: input.agentDir } : {}),
         }),
       );
       session = created.session;
@@ -874,6 +888,9 @@ export const ompAgentRuntime: AgentRuntime = {
           skills,
           modelPattern: input.modelSelectors[0] ?? DEFAULT_MODEL_PATTERN,
           fallbackChain: [...input.modelSelectors],
+          // Plan 23 Task 3 (AL-23-1): the synthesized per-review models.yml
+          // directory — absent for legacy runs (byte-identical sessions).
+          ...(input.agentDir !== undefined ? { agentDir: input.agentDir } : {}),
         }),
       );
       session = created.session;

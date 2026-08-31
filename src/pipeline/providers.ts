@@ -75,3 +75,22 @@ export function pickProviderKeys(env: Record<string, unknown>): Record<string, s
   }
   return picked;
 }
+/**
+ * AL-23-1 env-name contract fragments for custom-provider API keys. The full
+ * mapping is CUSTOM_<UPPER_SNAKE(provider_id)>_API_KEY — provider ids are
+ * store-enforced `[a-z0-9][a-z0-9-]{0,63}` (hyphen → underscore, uppercased).
+ */
+export const CUSTOM_PROVIDER_ENV_PREFIX = "CUSTOM_";
+export const CUSTOM_PROVIDER_ENV_SUFFIX = "_API_KEY";
+
+/**
+ * Env var name for a custom-provider API key (plan 23 Task 3, AL-23-1): a
+ * total function — any id maps to a syntactically valid env var name. The
+ * queue consumer injects the decrypted key under this name and the runner's
+ * synthesized per-review models.yml references the SAME name (`apiKey:
+ * CUSTOM_<ID>_API_KEY` — omp resolves env first, literal fallback, so the
+ * consumer-side injection closes the "declaration ⇒ key ⇒ env" loop).
+ */
+export function customProviderEnvName(providerId: string): string {
+  return `${CUSTOM_PROVIDER_ENV_PREFIX}${providerId.toUpperCase().replace(/-/g, "_")}${CUSTOM_PROVIDER_ENV_SUFFIX}`;
+}
