@@ -6,9 +6,21 @@
  * breakpoints) — DESIGN.md is the SSOT; update both when tokens change.
  * No client JS, no build chain, no new dependencies.
  */
-import { MODEL_ROLE_IDS, PROVIDER_IDS, type MaskedProviderKey } from "./app-config-store";
-import type { AppInstallationRow } from "./apps-store";
+import {
+  CUSTOM_PROVIDER_API_IDS,
+  MODEL_ROLE_IDS,
+  PROVIDER_IDS,
+  type AppCustomProvider,
+  type MaskedProviderKey,
+} from "./app-config-store";
+import type {
+  AppInstallationRow,
+  DeliveryOutcome,
+  DeliverySummary,
+  WebhookDeliveryRow,
+} from "./apps-store";
 import type { DashboardUserRow } from "./users";
+import type { Insights } from "./insights-store";
 
 /** Escape GitHub-sourced user data before HTML interpolation (XSS guard). */
 export function escapeHtml(value: string): string {
@@ -49,6 +61,19 @@ function relativeTime(value: string | null): string {
   if (hours < 24) return `${hours} hour${hours === 1 ? "" : "s"} ago`;
   const days = Math.floor(diffMs / 86_400_000);
   return `${days} day${days === 1 ? "" : "s"} ago`;
+}
+/**
+ * Delivery-outcome badge (plan 20 Task 2, AL-20-2): the producer vocabulary
+ * is ok | paused | ignored | rejected — rejected is the ONLY attention
+ * state (amber-700 .note token, the same token the list uses for the
+ * disabled/paused badges); ok, paused, and ignored are healthy (gray
+ * .status). The outcome text is escaped — it is a stored string, and the
+ * brief pins escapeHtml on every user-influenced string.
+ */
+function deliveryOutcomeBadge(outcome: DeliveryOutcome): string {
+  return outcome === "rejected"
+    ? `<span class="note">${escapeHtml(outcome)}</span>`
+    : `<span class="status">${escapeHtml(outcome)}</span>`;
 }
 
 const STYLE = `<style>
@@ -265,7 +290,7 @@ function shellHeader(user: { login: string; name?: string }, adminNav = false): 
   const members = adminNav ? ` · <a href="/dashboard/members">Members</a>` : "";
   return `<header>
     <h1>mstar-inspector</h1>
-    <span class="user">Signed in as ${escapeHtml(display)} · <a href="/dashboard/apps">Apps</a>${members} · <a href="/dashboard/logout">Logout</a></span>
+    <span class="user">Signed in as ${escapeHtml(display)} · <a href="/dashboard/apps">Apps</a> · <a href="/dashboard/insights">Insights</a>${members} · <a href="/dashboard/logout">Logout</a></span>
   </header>`;
 }
 
@@ -559,6 +584,13 @@ export function appsPage(
     /** Per-App pause switch (migration 0008): 0 on an active row = paused. */
     review_enabled: number;
     created_by: string;
+    /**
+     * Plan 20 health column data (AL-20-2): the App's LATEST
+     * webhook_deliveries row + the 24h rejected count — assembled by the
+     * route from deliverySummary, NOT the github_apps.last_webhook_at
+     * column (that stays the L5 "last verified delivery" stamp).
+     */
+    health: DeliverySummary;
   }>,
   viewer: { login: string; role: "admin" | "member" },
   notice?: PageNotice,
@@ -572,6 +604,14 @@ export function appsPage(
           : app.review_enabled === 0
             ? '<span class="note">paused</span>'
             : `<span class="status">${escapeHtml(app.status)}</span>`;
+      // Plan 20 health column (AL-20-2, display-only — no computed health):
+      // relative time of the latest delivery row + its outcome badge + the
+      // 24h rejected count badge (rendered only when > 0 — absence is the
+      // healthy state). No rows → "delivery never", no badges.
+      const latest = app.health.latest;
+      const healthCell = `<span class="meta">delivery ${relativeTime(latest?.created_at ?? null)}${
+        latest ? ` ${deliveryOutcomeBadge(latest.outcome)}` : ""
+      }${app.health.rejected24h > 0 ? ` <span class="note">${app.health.rejected24h} rejected in 24h</span>` : ""}</span>`;
       // Zero-JS action-path POSTs (spec § IA — architect-pinned route
       // shapes; HTML forms cannot emit a DELETE verb). The pause toggle is
       // only offered on active rows — a disabled App is disconnected
@@ -596,6 +636,7 @@ export function appsPage(
         <strong>${escapeHtml(app.slug)}</strong>
         <span class="meta">App id <span class="id">${app.github_app_id}</span> · by ${escapeHtml(app.created_by)}</span>
         ${badge}
+        ${healthCell}
         ${controls}
       </li>`;
     })
@@ -647,7 +688,9 @@ const MODEL_ROLE_HINTS: Record<string, string> = {
  * fallback spelled out (a whitespace-only save clears with a success notice —
  * the copy says so). The hint copy is replace-aware ("replaces its stored
  * key") because the store upserts and bumps the row timestamp on re-set —
- * storage recency is never labeled "created". Status/hints reuse the gray
+ * storage recency is never labeled "created". Plan 23: each masked row also
+ * shows its last-update time (migration 0012) — a pre-existing row (NULL)
+ * renders an em dash until the key is re-set. Status/hints reuse the gray
  * (.status) / amber-700 (.note) tokens — no new tokens, no Level 2. Every
  * user-controlled string (slug, provider, masked tail, chain) is escaped.
  *
@@ -683,6 +726,16 @@ export function appSettingsPage(
   modelRoles: Record<string, string>,
   installations: AppInstallationRow[],
   notice?: PageNotice,
+  /**
+   * Plan 20 recent-deliveries panel data (AL-20-2): the App's last N
+   * webhook_deliveries rows, newest first (the route reads
+   * listRecentDeliveries(appId, 5)). C-1 merge reconcile (v0.8): plan 20 and
+   * plan 23 both appended at this position on their branches — the reconciled
+   * signature carries BOTH (deliveries, then customProviders).
+   */
+  deliveries: WebhookDeliveryRow[] = [],
+  // Plan 23 T2: per-App custom provider declarations for the settings section.
+  customProviders: AppCustomProvider[] = [],
 ): string {
   const base = `/dashboard/apps/${escapeHtml(app.slug)}/settings`;
   const rows = maskedKeys
@@ -690,9 +743,14 @@ export function appSettingsPage(
       const tail = k.last4
         ? `key ending <code class="id">${escapeHtml(k.last4)}</code>`
         : "key too short to show a tail";
+      // Plan 23 T1 (migration 0012): each masked row shows its last-update
+      // time. NULL (a row written before 0012) reads as an em dash until the
+      // key is re-set; relativeTime turns any other value into a constant
+      // phrase, so no raw timestamp can ever reach the HTML.
+      const updated = k.updated_at === null ? "&mdash;" : relativeTime(k.updated_at);
       return `<li>
         <strong>${escapeHtml(k.provider)}</strong>
-        <span class="meta">${tail}</span>
+        <span class="meta">${tail} · updated ${updated}</span>
         <form method="post" action="${base}/key/delete">
           <input type="hidden" name="provider" value="${escapeHtml(k.provider)}">
           <button type="submit" class="danger">Remove</button>
@@ -764,6 +822,33 @@ export function appSettingsPage(
       <p class="status">Last webhook: ${relativeTime(app.lastWebhookAt)}</p>
       ${installList}
     </section>`;
+  // Recent-deliveries panel (plan 20 Task 2, AL-20-2): the App's last 5
+  // webhook_deliveries rows, newest first — time / event name / outcome /
+  // status_code per row, reusing the .keys list rhythm (no new tokens, no
+  // JS). Event names are the x-github-event header (user-influenced) →
+  // escaped; a NULL event name renders the "unknown event" placeholder;
+  // status_code goes through escapeHtml too (SQLite INTEGER affinity can
+  // store a non-numeric TEXT from a future caller); a NULL status_code
+  // (every non-rejected outcome stores NULL) renders "—".
+  const deliveryRows = deliveries
+    .map(
+      (d) => `<li>
+        <strong>${escapeHtml(d.event_name ?? "unknown event")}</strong>
+        <span class="meta">${relativeTime(d.created_at)} · ${deliveryOutcomeBadge(d.outcome)} · status <span class="id">${escapeHtml(d.status_code === null ? "—" : String(d.status_code))}</span></span>
+      </li>`,
+    )
+    .join("\n");
+  const deliveryList =
+    deliveries.length === 0
+      ? `<p class="status">No deliveries yet.</p>`
+      : `<ul class="keys">
+      ${deliveryRows}
+      </ul>`;
+  const deliveriesSection = `<section class="enabled">
+      <h2>Recent deliveries</h2>
+      <p class="status">The last 5 webhook deliveries for this App — newest first.</p>
+      ${deliveryList}
+    </section>`;
   // Role models editor (plan 17, spec § IA + § DESIGN.md 意图): one text row
   // per audit seat in MODEL_ROLE_IDS order, prefilled from the stored role
   // map (unmapped = blank), a SINGLE blue-700 save, and the empty =
@@ -785,6 +870,61 @@ export function appSettingsPage(
         <input type="hidden" name="op" value="save-roles">
         ${roleRows}
         <button type="submit" class="primary">Save role models</button>
+      </form>
+    </section>`;
+  // Custom providers (plan 23 T2, AL-23-1): per-App declarations of
+  // NON-built-in model providers. The key is stored encrypted and injected
+  // into the review runner by ENVIRONMENT VARIABLE NAME (CUSTOM_<ID>_API_KEY)
+  // — never as a literal — so the declaration list shows no key material at
+  // all. Every user-controlled string (provider_id, base_url, model_ids) is
+  // escaped; the api select is bound to the frozen three-form enum.
+  const customRows = customProviders
+    .map(
+      (p) => `<li>
+        <strong>${escapeHtml(p.provider_id)}</strong>
+        <span class="meta">${escapeHtml(p.base_url)} · ${escapeHtml(p.api)} · ${escapeHtml(p.model_ids.join(", "))}</span>
+        <form method="post" action="${base}">
+          <input type="hidden" name="op" value="remove-custom-provider">
+          <input type="hidden" name="provider_id" value="${escapeHtml(p.provider_id)}">
+          <button type="submit" class="danger">Remove</button>
+        </form>
+      </li>`,
+    )
+    .join("\n");
+  const customEmpty =
+    customProviders.length === 0
+      ? `<p class="status">No custom providers declared for this App — its reviews use the built-in providers.</p>`
+      : `<ul class="keys">
+      ${customRows}
+      </ul>`;
+  // Empty disabled first option = the preselected placeholder: a forgetful
+  // submit sends api="" and hits the route's 400 re-render instead of
+  // silently picking the first enum value (the provider-select discipline).
+  const apiOptions = ['<option value="" disabled selected>Select an API…</option>']
+    .concat(CUSTOM_PROVIDER_API_IDS.map((id) => `<option value="${escapeHtml(id)}">${escapeHtml(id)}</option>`))
+    .join("");
+  const customSection = `<section class="enabled">
+      <h2>Custom providers</h2>
+      <p>Declare a non-built-in model provider for this App&apos;s reviews — the API key is stored encrypted and injected into the review runner by environment variable name, never as a literal.</p>
+      ${customEmpty}
+      <form method="post" action="${base}">
+        <input type="hidden" name="op" value="add-custom-provider">
+        <label class="field">Provider id
+          <input type="text" name="provider_id" placeholder="e.g. ark" pattern="[a-z0-9][a-z0-9-]{0,63}">
+        </label>
+        <label class="field">Base URL
+          <input type="text" name="base_url" placeholder="https://api.example.com/v1">
+        </label>
+        <label class="field">API
+          <select name="api">${apiOptions}</select>
+        </label>
+        <label class="field">Model ids
+          <input type="text" name="model_ids" placeholder="e.g. deepseek-v4-flash, deepseek-r1">
+        </label>
+        <label class="field">API key
+          <input type="password" name="key" autocomplete="new-password" placeholder="Paste the provider API key">
+        </label>
+        <button type="submit" class="primary">Add custom provider</button>
       </form>
     </section>`;
   return page(
@@ -819,9 +959,11 @@ export function appSettingsPage(
         <button type="submit" class="primary">Save model chain</button>
       </form>
     </section>
+    ${customSection}
     ${roleSection}
     ${reviewSection}
     ${installSection}
+    ${deliveriesSection}
   </main>`,
   );
 }
@@ -835,6 +977,164 @@ export function errorPage(message: string): string {
       <strong>Sign-in failed.</strong> ${escapeHtml(message)}
       No session was created. Return to <a href="/dashboard/login">/dashboard/login</a> to try again.
     </div>
+  </main>`,
+  );
+}
+/**
+ * Input-validation 400 surface (plan 22 QC W-B): a minimal notice page for
+ * malformed query params on authenticated member pages — deliberately NOT
+ * the OAuth errorPage (no "Sign-in failed" / "Sign-in error" copy; the
+ * visitor here IS signed in, they just typed a bad ?window= / ?repo=).
+ */
+export function badRequestPage(message: string): string {
+  return page(
+    "Bad request",
+    `<main>
+    <div class="banner" role="alert">
+      <strong>Bad request.</strong> ${escapeHtml(message)}
+    </div>
+  </main>`,
+  );
+}
+
+/**
+ * Review Health insights panel (plan 22 Task 3, spec § M4b + § DESIGN.md
+ * 意图): the member-visible HTML face of the SAME store aggregation as the
+ * JSON API (GET /dashboard/api/insights/summary — one store call, two
+ * faces). Five cards: window/repo summary (reviews total + verdict
+ * distribution), findings by severity (horizontal bars), findings by
+ * category, weekly trend (Monday-anchored weeks), and the recurring-top
+ * list (title + count + repos — the fingerprint technical id NEVER
+ * renders). Existing Level 1 tokens only (.status/.note/.meta/.keys/.id/
+ * .enabled rhythm); the severity bars are inline-styled spans reusing the
+ * CSS custom properties (no new classes, no new DESIGN tokens). Zero JS.
+ * Every user-controlled string (title_sample, repo) is escaped. Empty
+ * state: zero reviews in the window → the summary card carries the note
+ * and the data cards are omitted; a non-empty window with no recurrences
+ * shows the recurring card's own empty line.
+ */
+export function insightsPage(
+  user: { login: string; name?: string },
+  insights: Insights,
+  opts: { windowDays: number; repo?: string },
+): string {
+  const {
+    reviewsTotal,
+    findingsBySeverity,
+    findingsByCategory,
+    verdictDistribution,
+    weeklyTrend,
+    recurringTop,
+  } = insights;
+  const windowLabel = `last ${opts.windowDays} day${opts.windowDays === 1 ? "" : "s"}`;
+  const repoLabel = opts.repo ? ` · repo ${escapeHtml(opts.repo)}` : "";
+
+  const verdictLine = verdictDistribution
+    .map((v) => `${escapeHtml(v.verdict)} <span class="id">${v.count}</span>`)
+    .join(" · ");
+
+  // Severity bars: width relative to the top bucket; inline styles reuse
+  // the existing CSS custom properties (no new classes, no new tokens).
+  const maxSeverity = Math.max(1, ...findingsBySeverity.map((s) => s.count));
+  const severityRows = findingsBySeverity
+    .map((s) => {
+      const pct = Math.round((s.count / maxSeverity) * 100);
+      return `<li>
+        <strong>${escapeHtml(s.severity)}</strong>
+        <span class="meta"><span class="id">${s.count}</span> finding${s.count === 1 ? "" : "s"}</span>
+        <span style="display:block;height:8px;border-radius:var(--rounded-sm);background:var(--blue-700);width:${pct}%"></span>
+      </li>`;
+    })
+    .join("\n");
+
+  const categoryRows = findingsByCategory
+    .map(
+      (c) => `<li>
+        <strong>${escapeHtml(c.category ?? "uncategorized")}</strong>
+        <span class="meta"><span class="id">${c.count}</span> finding${c.count === 1 ? "" : "s"}</span>
+      </li>`,
+    )
+    .join("\n");
+
+  const trendRows = weeklyTrend
+    .map(
+      (w) => `<li>
+        <strong>${escapeHtml(w.week_start)}</strong>
+        <span class="meta"><span class="id">${w.reviews}</span> review${w.reviews === 1 ? "" : "s"} · <span class="id">${w.findings}</span> finding${w.findings === 1 ? "" : "s"}</span>
+      </li>`,
+    )
+    .join("\n");
+
+  const recurringRows = recurringTop
+    .map(
+      (r) => `<li>
+        <strong>${escapeHtml(r.title_sample)}</strong>
+        <span class="meta"><span class="id">${r.count}</span> review${r.count === 1 ? "" : "s"} · ${r.repos.map(escapeHtml).join(", ")}</span>
+      </li>`,
+    )
+    .join("\n");
+
+  const empty = reviewsTotal === 0;
+  const summaryCard = `<section class="enabled">
+      <h2>Review health</h2>
+      <p class="status">Window: ${windowLabel}${repoLabel}</p>
+      <p class="status">Reviews: <span class="id">${reviewsTotal}</span></p>
+      ${
+        empty
+          ? '<p class="note">No reviews in this window.</p>'
+          : `<p class="status">Verdicts: ${verdictLine}</p>`
+      }
+    </section>`;
+
+  const dataCards = empty
+    ? ""
+    : `<section class="enabled">
+      <h2>Findings by severity</h2>
+      ${
+        severityRows === ""
+          ? '<p class="status">No findings in this window.</p>'
+          : `<ul class="keys">
+      ${severityRows}
+      </ul>`
+      }
+    </section>
+    <section class="enabled">
+      <h2>Findings by category</h2>
+      ${
+        categoryRows === ""
+          ? '<p class="status">No findings in this window.</p>'
+          : `<ul class="keys">
+      ${categoryRows}
+      </ul>`
+      }
+    </section>
+    <section class="enabled">
+      <h2>Weekly trend</h2>
+      ${
+        trendRows === ""
+          ? '<p class="status">No reviews in this window.</p>'
+          : `<ul class="keys">
+      ${trendRows}
+      </ul>`
+      }
+    </section>
+    <section class="enabled">
+      <h2>Recurring findings</h2>
+      ${
+        recurringRows === ""
+          ? '<p class="status">No recurring findings in this window.</p>'
+          : `<ul class="keys">
+      ${recurringRows}
+      </ul>`
+      }
+    </section>`;
+
+  return page(
+    "Review health",
+    `${shellHeader(user)}
+  <main>
+    ${summaryCard}
+    ${dataCards}
   </main>`,
   );
 }

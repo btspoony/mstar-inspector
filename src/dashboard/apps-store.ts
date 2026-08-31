@@ -16,7 +16,8 @@
  * (tests/store/helpers.ts), and the store layer's `D1Like` all satisfy it
  * structurally. Declared locally instead of importing `store/types` because
  * dashboard modules must not import store/pipeline/review code (architect
- * decision Q2), and this store never batches, so it needs a narrower face.
+ * decision Q2), and this store never uses D1 batch() — multi-row reads go
+ * through IN-list queries (deliverySummaries) — so it needs a narrower face.
  *
  * Semantics (Task 2/3 call sites rely on these):
  *   - getAppBySlug / getAppById return the row REGARDLESS of status or
@@ -38,9 +39,20 @@
  *     first.
  *   - softDeleteApp is idempotent — the FIRST deleted_at wins; returns
  *     whether THIS call performed the delete.
- *   - upsertInstallation touches seen_at (any webhook carrying
- *     installation_id) and preserves the stored account_login when the
- *     incoming value is absent.
+ *   - recordDelivery / deliverySummary / listRecentDeliveries (plan 20,
+ *     migration 0011) are the webhook_deliveries face: the per-App webhook
+ *     route appends one best-effort row per CLASSIFIED delivery (ok /
+ *     paused / ignored / rejected — outcome vocabulary DELIVERY_OUTCOMES,
+ *     producer-side enforced), and the dashboard reads the health summary +
+ *     recent list through the same store (AL-20-1: the legacy face records
+ *     nothing).
+ *   - deliverySummaries (plan 20 QC wave 1, W-1) is the BATCHED health
+ *     read face for the Apps list: latest row + 24h rejected count for
+ *     every requested app in exactly TWO statements regardless of N;
+ *     deliverySummary(appId) stays the single-settings-page face.
+ *   - event_name is bounded to EVENT_NAME_MAX_LENGTH (64) chars at
+ *     persist time — the x-github-event header is attacker-influenced on
+ *     the unauthenticated reject path; the DDL has no length constraint.
  *   - Timestamps are SQLite datetime('now') (UTC — the reviews.reviewed_at
  *     convention); createApp ids are caller-supplied UUIDs (the reviews.id
  *     caller-UUID convention — the T1 review pin: secretbox AAD rowKey MUST
@@ -116,6 +128,70 @@ export type AppInstallationRow = {
 };
 
 /**
+ * The producer-side delivery-outcome vocabulary (plan 20 Task 1, AL-20-1;
+ * 0010 FAILURE_STAGES precedent; 0011 webhook_deliveries is current):
+ * `ok` = job enqueued, `paused` = the App's
+ * review switch is off (2xx ignore, zero enqueue), `ignored` = verified but
+ * not a reviewable event (e.g. ping), `rejected` = the classifier refused
+ * the delivery (400|401|500 — "sent but refused" is the R2 visibility
+ * core). Enforced producer-side: an off-vocabulary outcome throws BEFORE
+ * any row is written; the schema has no CHECK (0010 precedent).
+ */
+export const DELIVERY_OUTCOMES: readonly string[] = Object.freeze([
+  "ok",
+  "paused",
+  "ignored",
+  "rejected",
+]);
+
+export type DeliveryOutcome = "ok" | "paused" | "ignored" | "rejected";
+
+/**
+ * Persist bound for the x-github-event header (plan 20 QC wave 1, seat2
+ * hygiene pin): the header is attacker-influenced on the unauthenticated
+ * reject path, and the DDL has no length constraint — store the bounded
+ * prefix, never the raw blob (GitHub's longest real event names sit well
+ * under this; 64 chars is headroom, not a truncation risk for them).
+ */
+export const EVENT_NAME_MAX_LENGTH = 64;
+
+/** Input for recordDelivery — one VERIFIED per-App webhook delivery. */
+export type RecordDeliveryInput = {
+  appId: string;
+  /**
+   * The x-github-event header; NULL when the header was absent. Truncated
+   * to EVENT_NAME_MAX_LENGTH (64) chars at persist — the header is
+   * attacker-influenced on the unauthenticated reject path.
+   */
+  eventName: string | null;
+  outcome: DeliveryOutcome;
+  /** The classifier's status for rejected; NULL for every other outcome. */
+  statusCode: number | null;
+};
+
+/** A row of `webhook_deliveries` (D1 column names, snake_case; migration 0011). */
+export type WebhookDeliveryRow = {
+  id: string;
+  app_id: string;
+  event_name: string | null;
+  outcome: DeliveryOutcome;
+  status_code: number | null;
+  created_at: string;
+};
+
+/**
+ * The dashboard health read face (plan 20 Task 2 consumes this): the App's
+ * LATEST delivery row + the count of `rejected` rows inside the trailing
+ * 24h window (`created_at > datetime('now', '-24 hours')` — the plan-19
+ * sweep window convention). ignored/paused/ok are healthy states and are
+ * deliberately NOT counted (AL-20-2).
+ */
+export type DeliverySummary = {
+  latest: WebhookDeliveryRow | null;
+  rejected24h: number;
+};
+
+/**
  * Narrow D1 face, declared locally so this leaf module imports nothing
  * (prepare/bind/first/all/run; no batch — this store never batches).
  */
@@ -135,6 +211,57 @@ type AppsStoreD1 = {
 
 /** Create the github_apps / app_installations store over one D1 handle. */
 export function createAppsStore(db: AppsStoreD1) {
+  /**
+   * BATCHED health-read face (plan 20 QC wave 1, W-1): the Apps list
+   * renders every row's health on each POST re-render, so the per-App
+   * deliverySummary fan-out (2N statements) is replaced by exactly TWO
+   * statements for any N: (a) the latest row per app — the same
+   * created_at DESC, rowid DESC tiebreak as deliverySummary, via a
+   * ROW_NUMBER() window (SQLite 3.25+, D1-supported) — and (b) the
+   * 24h `rejected` count grouped by app (same window + healthy-outcome
+   * exclusion as deliverySummary; AL-20-2). Apps with no rows → latest
+   * null, rejected24h 0; unknown ids are absent from the result unless
+   * the caller asked for them (each requested id gets an entry).
+   * deliverySummary(appId) delegates here.
+   */
+  async function deliverySummaries(appIds: string[]): Promise<Record<string, DeliverySummary>> {
+    if (appIds.length === 0) return {};
+    const placeholders = appIds.map(() => "?").join(", ");
+    const [latestRes, rejectedRes] = await Promise.all([
+      db
+        .prepare(
+          `SELECT app_id, id, event_name, outcome, status_code, created_at FROM (
+             SELECT *, ROW_NUMBER() OVER (PARTITION BY app_id ORDER BY created_at DESC, rowid DESC) AS rn
+             FROM webhook_deliveries WHERE app_id IN (${placeholders})
+           ) WHERE rn = 1`,
+        )
+        .bind(...appIds)
+        .all<WebhookDeliveryRow>(),
+      db
+        .prepare(
+          `SELECT app_id, COUNT(*) AS n FROM webhook_deliveries
+           WHERE app_id IN (${placeholders}) AND outcome = 'rejected'
+             AND created_at > datetime('now', '-24 hours')
+           GROUP BY app_id`,
+        )
+        .bind(...appIds)
+        .all<{ app_id: string; n: number }>(),
+    ]);
+    const byApp: Record<string, DeliverySummary> = {};
+    for (const appId of appIds) {
+      byApp[appId] = { latest: null, rejected24h: 0 };
+    }
+    for (const row of latestRes.results) {
+      const entry = byApp[row.app_id];
+      if (entry) entry.latest = row;
+    }
+    for (const row of rejectedRes.results) {
+      const entry = byApp[row.app_id];
+      if (entry) entry.rejected24h = row.n;
+    }
+    return byApp;
+  }
+
   return {
     /**
      * Insert a new active app row (status 'active', deleted_at NULL) with
@@ -285,6 +412,65 @@ export function createAppsStore(db: AppsStoreD1) {
         )
         .bind(appId)
         .all<AppInstallationRow>();
+      return res.results;
+    },
+
+    /**
+     * Append one delivery row (plan 20 Task 1, AL-20-1) — the R2 diagnostics
+     * face. Fail-loud like the rest of this store: an off-vocabulary outcome
+     * throws BEFORE any row is written (producer-side enforcement, 0010
+     * FAILURE_STAGES precedent); FK violations (unknown appId) throw. The
+     * webhook face wraps this in try/catch itself — an insert failure must
+     * never change the webhook response (best-effort旁路). The event_name
+     * header is capped at EVENT_NAME_MAX_LENGTH chars at persist (seat2
+     * hygiene pin).
+     */
+    async recordDelivery(input: RecordDeliveryInput): Promise<void> {
+      if (!DELIVERY_OUTCOMES.includes(input.outcome)) {
+        throw new Error(
+          `apps-store: outcome ${JSON.stringify(input.outcome)} is not on the producer vocabulary (${DELIVERY_OUTCOMES.join(" | ")}) — zero rows written`,
+        );
+      }
+      const eventName = input.eventName === null ? null : input.eventName.slice(0, EVENT_NAME_MAX_LENGTH);
+      await db
+        .prepare(
+          `INSERT INTO webhook_deliveries (id, app_id, event_name, outcome, status_code)
+           VALUES (?, ?, ?, ?, ?)`,
+        )
+        .bind(crypto.randomUUID(), input.appId, eventName, input.outcome, input.statusCode)
+        .run();
+    },
+
+    /**
+     * Health read face (plan 20 Task 2): the App's LATEST delivery row +
+     * the count of `rejected` rows inside the trailing 24h window
+     * (`created_at > datetime('now', '-24 hours')` — the plan-19 sweep
+     * window convention). ignored/paused/ok are healthy states and are
+     * deliberately NOT counted (AL-20-2). An app with no rows → latest
+     * null, rejected24h 0. Single-app delegate of the batched
+     * deliverySummaries face (the grouped-query implementation).
+     */
+    async deliverySummary(appId: string): Promise<DeliverySummary> {
+      return (await deliverySummaries([appId]))[appId]!;
+    },
+
+    /** Batched variant of deliverySummary — see the local implementation above. */
+    deliverySummaries,
+
+    /**
+     * Recent-deliveries read face (plan 20 Task 2 settings panel): THIS
+     * App's rows, newest first (created_at has second precision, so rowid
+     * breaks ties inside one second — the order is total and
+     * deterministic), bounded by the caller's N (default 5).
+     */
+    async listRecentDeliveries(appId: string, limit = 5): Promise<WebhookDeliveryRow[]> {
+      const res = await db
+        .prepare(
+          `SELECT * FROM webhook_deliveries
+           WHERE app_id = ? ORDER BY created_at DESC, rowid DESC LIMIT ?`,
+        )
+        .bind(appId, limit)
+        .all<WebhookDeliveryRow>();
       return res.results;
     },
   };

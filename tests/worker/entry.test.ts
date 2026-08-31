@@ -134,7 +134,8 @@ describe("worker entry scheduled wiring (plan 19 T1)", () => {
       },
       batch: async () => [],
     };
-    // TEST-01: the throwing-sweep case fires the `ops_sweep_failed` event.
+    // The retention step runs first and degrades to its own warn (PR #10) —
+    // the failure-sweep D1 error then propagates to the handler's catch.
     const warnCalls: Array<{ fields: Record<string, unknown>; msg?: string }> = [];
     const originalWarn = defaultSweepLog.warn;
     defaultSweepLog.warn = (fields, msg) => void warnCalls.push({ fields: fields as Record<string, unknown>, msg });
@@ -145,8 +146,9 @@ describe("worker entry scheduled wiring (plan 19 T1)", () => {
     } finally {
       defaultSweepLog.warn = originalWarn;
     }
-    expect(warnCalls).toHaveLength(1);
-    expect(warnCalls[0]!.fields.event).toBe("ops_sweep_failed");
-    expect(warnCalls[0]!.fields.detail).toContain("d1 down");
+    expect(warnCalls).toHaveLength(2);
+    expect(warnCalls[0]!.fields.event).toBe("retention_swept_failed");
+    expect(warnCalls[1]!.fields.event).toBe("ops_sweep_failed");
+    expect(warnCalls[1]!.fields.detail).toContain("d1 down");
   });
 });

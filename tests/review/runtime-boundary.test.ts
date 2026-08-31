@@ -9,7 +9,7 @@
 
 import { describe, expect, test } from "bun:test";
 import { readdirSync, readFileSync, statSync } from "node:fs";
-import { join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 
 /** Faces that run on workerd and are barred from the omp SDK. */
 const WORKERD_FACES = ["src/worker", "src/pipeline", "src/store"] as const;
@@ -43,4 +43,31 @@ describe("module import matrix — omp SDK is container-only", () => {
       expect(offenders).toEqual([]);
     });
   }
+});
+// --- in-image module graph (plan 23 T3 regression) ---------------------------
+
+/** The sandbox image COPYs ONLY src/review (sandbox-image/Dockerfile:88). */
+const IN_IMAGE_FACE = "src/review";
+
+/**
+ * Relative import specifiers (`./…` / `../…`) in any import/require spelling
+ * (static import, side-effect import, dynamic import, require, re-export).
+ */
+const RELATIVE_IMPORT_RE = /(?:from\s+|import\s*|require\s*\()\s*['"](\.\.?\/[^'"]+)['"]/g;
+
+describe("in-image module graph — src/review is self-contained (Dockerfile COPY src/review)", () => {
+  test("no src/review module imports outside src/review (relative specifiers)", () => {
+    const offenders: string[] = [];
+    for (const file of collectFiles(IN_IMAGE_FACE)) {
+      const source = readFileSync(file, "utf8");
+      for (const match of source.matchAll(RELATIVE_IMPORT_RE)) {
+        const specifier = match[1]!;
+        const target = resolve(dirname(file), specifier);
+        if (!target.startsWith(`${resolve(IN_IMAGE_FACE)}/`)) {
+          offenders.push(`${file}: ${specifier}`);
+        }
+      }
+    }
+    expect(offenders).toEqual([]);
+  });
 });

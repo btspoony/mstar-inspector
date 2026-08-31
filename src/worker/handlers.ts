@@ -48,7 +48,10 @@ export type WebhookStageWarnLog = {
 };
 
 export type HandlerLog = {
-  info: (fields: WorkerEventLog, msg?: string) => void;
+  // info widened to the stage-warn shape (AL-23-2): the webhook face's
+  // review_paused line rides info — paused is a legitimate ops state
+  // answering 2xx — with the same structured fields as its warn siblings.
+  info: (fields: WorkerEventLog | WebhookStageWarnLog, msg?: string) => void;
   warn: (fields: WorkerEventLog | WebhookStageWarnLog, msg?: string) => void;
 };
 

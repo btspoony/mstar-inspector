@@ -10,12 +10,14 @@
  *   i.e. production BEFORE plan 13. Kept for fixtures that exercise the
  *   append-only ALTER sequence itself (tests/worker/apps-store.test.ts
  *   seeds rows, THEN applies 0004/0005).
- * - `createMigratedTestD1()` — the full current shape (0001 → 0010 in
+ * - `createMigratedTestD1()` — the full current shape (0001 → 0014 in
  *   filename order: 0003 dashboard users, 0004 github_apps +
  *   app_installations, 0005 reviews.app_id, 0006 app_provider_keys +
  *   app_model_config, 0007 idx_reviews_app_id, 0008 github_apps
  *   review_enabled + last_webhook_at, 0009 app_model_roles, 0010
- *   review_failures), i.e. what
+ *   review_failures, 0011 webhook_deliveries (plan 20), 0012 app_provider_keys
+ *   updated_at + app_custom_providers (plan 23), 0013 idx_findings_review_id,
+ *   0014 idx_reviews_reviewed_at (plan 22)), i.e. what
  *   `wrangler d1 migrations apply` produces today. The store adapter's INSERT
  *   binds `reviews.app_id` (plan 13, QC fix wave 1 F-001), so every test
  *   exercising the REAL store.put against production-shaped data runs on this
@@ -45,6 +47,10 @@ const ALL_MIGRATIONS = [
   "0008_github_apps_ops.sql",
   "0009_app_model_roles.sql",
   "0010_review_failures.sql",
+  "0011_webhook_deliveries.sql",
+  "0012_custom_providers_and_key_updated_at.sql",
+  "0013_findings_review_id_index.sql",
+  "0014_idx_reviews_reviewed_at.sql",
 ];
 
 /** Execute the migration DDL on a fresh in-memory database. */
@@ -123,13 +129,20 @@ function wrapDb(db: Database): D1Like & { raw: Database } {
 }
 
 /**
+ * The test D1 double handle: the narrow D1 face plus the raw bun:sqlite
+ * handle for direct assertions. Named type so consumers do not reach
+ * through `ReturnType<typeof createMigratedTestD1>`.
+ */
+export type TestD1 = D1Like & { raw: Database };
+
+/**
  * Create a fresh in-memory D1-like database with the plan-07-era
  * review-store schema (0001 + 0002) applied. Each call returns an
  * independent database (tests must not share state). The underlying
  * bun:sqlite handle is exposed for direct assertions (e.g. counting rows)
  * via the `raw` property.
  */
-export function createTestD1(): D1Like & { raw: Database } {
+export function createTestD1(): TestD1 {
   const db = new Database(":memory:");
   applyMigration(db, BASE_MIGRATIONS);
   return wrapDb(db);
@@ -147,7 +160,7 @@ export function createTestD1(): D1Like & { raw: Database } {
  * for the consumer modelOverrides tests. Each call returns an independent
  * database.
  */
-export function createMigratedTestD1(): D1Like & { raw: Database } {
+export function createMigratedTestD1(): TestD1 {
   const db = new Database(":memory:");
   applyMigration(db, ALL_MIGRATIONS);
   return wrapDb(db);

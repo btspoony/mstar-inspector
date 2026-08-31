@@ -39,6 +39,12 @@ export const SWEEP_WEBHOOK_TIMEOUT_MS = 3000;
 /** Cap on the webhook-failure `detail` log field — a warn line stays single-line. */
 export const SWEEP_LOG_DETAIL_MAX = 500;
 
+/** Retention window in days (PR #10): webhook_deliveries rows older than this are swept. */
+export const SWEEP_RETENTION_DAYS = 30;
+
+/** Retention row cap per run (PR #10): bounded work per 15-min sweep. */
+export const SWEEP_RETENTION_CAP = 500;
+
 /**
  * The structured breach event — a JSON line on the consumer-derived log
  * channel (SweepLog below), also POSTed verbatim to the webhook.
@@ -64,15 +70,24 @@ export type SweepWarnFields = Omit<WebhookStageWarnLog, "event" | "reason"> & {
 };
 
 /**
+ * Retention log fields (PR #10): the best-effort webhook_deliveries sweep.
+ * `retention_swept` carries the deleted count; a failure degrades to a warn
+ * and never breaks the failure-sweep path.
+ */
+export type SweepRetentionFields =
+  | { event: "retention_swept"; deleted: number }
+  | { event: "retention_swept_failed"; detail: string };
+
+/**
  * The sweep only ever warns: a quiet system logs nothing. A warn-only view
  * of the consumer log channel — the `msg` parameter type is derived from
  * `ConsumerLog["warn"]` so the call shape cannot drift; the field union is
- * narrowed to the sweep's two payloads (ops events carry no PR identity, so
+ * narrowed to the sweep's payloads (ops events carry no PR identity, so
  * they cannot ride ConsumerLogFields itself).
  */
 export type SweepLog = {
   warn: (
-    fields: SweepAlertFields | SweepWarnFields,
+    fields: SweepAlertFields | SweepWarnFields | SweepRetentionFields,
     msg?: Parameters<ConsumerLog["warn"]>[1],
   ) => void;
 };
@@ -112,6 +127,37 @@ export type SweepResult = {
  */
 export async function runSweep(db: D1Like, deps: SweepDeps = {}): Promise<SweepResult> {
   const log = deps.log ?? defaultSweepLog;
+  // Best-effort retention (PR #10): sweep webhook_deliveries rows older
+  // than SWEEP_RETENTION_DAYS, capped at SWEEP_RETENTION_CAP rows per run.
+  // simplify: bounded work per 15-min sweep — a full table drains over
+  // successive runs; raise the cap or move to a dedicated janitor cron if
+  // the drain rate ever matters. A failure degrades to a warn and NEVER
+  // breaks the failure-sweep path below.
+  try {
+    const retention = await db
+      .prepare(
+        `DELETE FROM webhook_deliveries WHERE id IN (SELECT id FROM webhook_deliveries WHERE created_at < datetime('now', '-${SWEEP_RETENTION_DAYS} days') LIMIT ${SWEEP_RETENTION_CAP})`,
+      )
+      .run();
+    if (retention.meta.changes > 0) {
+      log.warn({ event: "retention_swept", deleted: retention.meta.changes }, "webhook_deliveries retention sweep");
+    }
+  } catch (error) {
+    // Redact before truncate (repo convention: a secret straddling the cut
+    // would leak a partial token) — same posture as the webhook-failure path.
+    const raw = error instanceof Error ? error.message : String(error);
+    const detail = redactExactSecrets(redactSecrets(raw), deps.alertUrl ? [deps.alertUrl] : []);
+    log.warn(
+      {
+        event: "retention_swept_failed",
+        detail:
+          detail.length <= SWEEP_LOG_DETAIL_MAX
+            ? detail
+            : `${detail.slice(0, SWEEP_LOG_DETAIL_MAX - 1)}…`,
+      },
+      "webhook_deliveries retention sweep failed — continuing",
+    );
+  }
   // The window modifier is built from SWEEP_WINDOW_HOURS (the constant is
   // the single source) so the SQL cannot drift from the pinned threshold
   // table. The composed text is byte-identical to the pre-constant form

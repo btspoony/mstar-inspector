@@ -58,6 +58,7 @@ import { createSecretbox } from "../../src/dashboard/secretbox";
 import { createAppsStore } from "../../src/dashboard/apps-store";
 import { normalizePrivateKey } from "../../src/dashboard/private-key";
 import { normalizePrivateKey as pipelineNormalizePrivateKey } from "../../src/pipeline/comment";
+import { reviewedAt, mondayOf } from "../../src/dashboard/insights-dates";
 
 const SESSION_SECRET = "test-dashboard-session-secret-32-bytes!";
 const CLIENT_ID = "oauth-client-id";
@@ -2368,5 +2369,281 @@ describe("members page (plan 12 T3, admin-only)", () => {
     const envTs = await Bun.file(new URL("../../src/worker/env.ts", import.meta.url)).text();
     expect(envTs).toContain("ADMIN_LOGINS");
     expect(envTs).not.toContain("wrangler vars put");
+  });
+});
+// --- plan 22 T2: Review Health insights summary API --------------------------
+// GET /dashboard/api/insights/summary — the JSON read face for the insights
+// aggregation (src/dashboard/insights-store.ts). The guard is the SAME
+// mount-level membership gate as every other /dashboard route (AL-22-1: zero
+// new auth code); these tests pin that regression plus the query-param
+// contract (window parse + clamp echo, repo filter) against a fixture D1.
+
+type InsightsFixtureFinding = {
+  id: string;
+  severity: string;
+  category: string | null;
+  title: string;
+  fingerprint: string | null;
+};
+
+/** Raw-insert one review + its findings (explicit reviewed_at / verdict). */
+function seedInsightsReview(
+  db: DashboardTestDb,
+  opts: {
+    id: string;
+    owner: string;
+    repo: string;
+    pr_number: number;
+    reviewedAt: string;
+    verdict: string;
+    findings: InsightsFixtureFinding[];
+  },
+): void {
+  db.raw
+    .query(
+      `INSERT INTO reviews (id, installation_id, owner, repo, pr_number, head_sha, reviewed_at, verdict, summary_md, envelope)
+       VALUES (?, 123, ?, ?, ?, 'sha', ?, ?, 's', '{}')`,
+    )
+    .run(opts.id, opts.owner, opts.repo, opts.pr_number, opts.reviewedAt, opts.verdict);
+  const insertFinding = db.raw.query(
+    `INSERT INTO findings (id, review_id, severity, category, title, body, fingerprint)
+     VALUES (?, ?, ?, ?, ?, 'b', ?)`,
+  );
+  for (const f of opts.findings) {
+    insertFinding.run(f.id, opts.id, f.severity, f.category, f.title, f.fingerprint);
+  }
+}
+
+/**
+ * A member-seeded, insights-fixture D1 env:
+ *   - r-a acme/widgets PR 1, 25d ago, verdict "comment": must-fix/logic fp-x,
+ *     nit/NULL-category fp-y
+ *   - r-b acme/widgets PR 2, 15d ago, verdict "approve": must-fix/logic fp-x
+ *     (shares fp-x with r-a → recurrence, count 2)
+ *   - r-c globex/gadgets PR 3, 5d ago, verdict "request changes":
+ *     should-fix/security fp-z (single occurrence → never recurs)
+ *   - r-d acme/widgets PR 4, 60d ago, verdict "approve", no findings —
+ *     inside a 90-day window, outside the default 30
+ * The interleaved sentinel `review-1` (createDashboardTestD1 seeds it between
+ * 0002 and 0003) is deleted so every aggregation counts ONLY these rows.
+ */
+function insightsFixtureEnv(): Env {
+  const db = createDashboardTestD1();
+  const insertUser = db.raw.prepare(
+    "INSERT INTO users (id, github_login, role, created_at, invited_by) VALUES (?, ?, ?, ?, NULL)",
+  );
+  for (const [login, role] of DEFAULT_SEEDED_MEMBERS) {
+    insertUser.run(crypto.randomUUID(), login, role, new Date().toISOString());
+  }
+  db.raw.query("DELETE FROM reviews WHERE id = 'review-1'").run();
+  seedInsightsReview(db, {
+    id: "r-a",
+    owner: "acme",
+    repo: "widgets",
+    pr_number: 1,
+    reviewedAt: reviewedAt(25),
+    verdict: "comment",
+    findings: [
+      { id: "f-a1", severity: "must-fix", category: "logic", title: "Null deref risk", fingerprint: "fp-x" },
+      { id: "f-a2", severity: "nit", category: null, title: "Trailing space", fingerprint: "fp-y" },
+    ],
+  });
+  seedInsightsReview(db, {
+    id: "r-b",
+    owner: "acme",
+    repo: "widgets",
+    pr_number: 2,
+    reviewedAt: reviewedAt(15),
+    verdict: "approve",
+    findings: [
+      { id: "f-b1", severity: "must-fix", category: "logic", title: "Null deref risk", fingerprint: "fp-x" },
+    ],
+  });
+  seedInsightsReview(db, {
+    id: "r-c",
+    owner: "globex",
+    repo: "gadgets",
+    pr_number: 3,
+    reviewedAt: reviewedAt(5),
+    verdict: "request changes",
+    findings: [
+      { id: "f-c1", severity: "should-fix", category: "security", title: "Injection", fingerprint: "fp-z" },
+    ],
+  });
+  seedInsightsReview(db, {
+    id: "r-d",
+    owner: "acme",
+    repo: "widgets",
+    pr_number: 4,
+    reviewedAt: reviewedAt(60),
+    verdict: "approve",
+    findings: [],
+  });
+  return makeDbEnv(db);
+}
+
+function insightsUrl(query: string): string {
+  return `/dashboard/api/insights/summary${query === "" ? "" : `?${query}`}`;
+}
+
+describe("/dashboard/api/insights/summary (plan 22 Task 2)", () => {
+  const octocatCookie = async () => `${SESSION_COOKIE}=${await createSessionValue("octocat", null, SESSION_SECRET)}`;
+  const malloryCookie = async () => `${SESSION_COOKIE}=${await createSessionValue("mallory", null, SESSION_SECRET)}`;
+
+  async function insightsGet(query: string, cookie: string, env?: Env): Promise<Response> {
+    return await worker.fetch(dashboardRequest(insightsUrl(query), cookie), env ?? insightsFixtureEnv());
+  }
+
+  test("guard three states: no session 302, removed member 403, non-admin member 200", async () => {
+    // Session-less → the shared OAuth redirect; the route never runs.
+    const anon = await worker.fetch(dashboardRequest(insightsUrl("")), insightsFixtureEnv());
+    expect(anon.status).toBe(302);
+    expect(anon.headers.get("Location")).toBe("/dashboard/login");
+
+    // Removed member (valid cookie, no user row) → 403 removed-page.
+    const db = createDashboardTestD1();
+    await createUser(db, { login: "octocat", role: "admin" });
+    const mallory = await createUser(db, { login: "mallory", role: "member" });
+    await deleteUser(db, mallory.id);
+    const removed = await worker.fetch(
+      dashboardRequest(insightsUrl(""), await malloryCookie()),
+      makeDbEnv(db),
+    );
+    expect(removed.status).toBe(403);
+    expect(await removed.text()).toContain("Your dashboard access was removed");
+
+    // Non-admin member (mallory is role "member") → 200 JSON.
+    const member = await worker.fetch(dashboardRequest(insightsUrl(""), await malloryCookie()), insightsFixtureEnv());
+    expect(member.status).toBe(200);
+    expect(((await member.json()) as { reviews_total: number }).reviews_total).toBe(3);
+  });
+
+  test("default params: full JSON shape, 30-day window, no repo key", async () => {
+    const res = await insightsGet("", await octocatCookie());
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      window_days: number;
+      repo?: string;
+      reviews_total: number;
+      findings_by_severity: Array<{ severity: string; count: number }>;
+      findings_by_category: Array<{ category: string | null; count: number }>;
+      verdict_distribution: Array<{ verdict: string; count: number }>;
+      weekly_trend: Array<{ week_start: string; reviews: number; findings: number }>;
+      recurring_top: Array<{ fingerprint: string; title_sample: string; count: number; repos: string[] }>;
+    };
+    // Exact key set: store return + the two echo params (snake_case API).
+    expect(Object.keys(body).sort()).toEqual(
+      [
+        "window_days",
+        "reviews_total",
+        "findings_by_severity",
+        "findings_by_category",
+        "verdict_distribution",
+        "weekly_trend",
+        "recurring_top",
+      ].sort(),
+    );
+    expect(body.repo).toBeUndefined();
+    expect(body.window_days).toBe(30);
+    expect(body.reviews_total).toBe(3); // r-d (60d) is outside the default window
+    expect(body.findings_by_severity).toEqual([
+      { severity: "must-fix", count: 2 },
+      { severity: "nit", count: 1 },
+      { severity: "should-fix", count: 1 },
+    ]);
+    expect(body.findings_by_category).toEqual([
+      { category: "logic", count: 2 },
+      { category: null, count: 1 },
+      { category: "security", count: 1 },
+    ]);
+    expect(body.verdict_distribution).toEqual([
+      { verdict: "approve", count: 1 },
+      { verdict: "comment", count: 1 },
+      { verdict: "request changes", count: 1 },
+    ]);
+    // The three in-window reviews are 10 days apart → always three distinct
+    // Monday-anchored weeks; buckets ascend oldest → newest.
+    const weekA = mondayOf(reviewedAt(25));
+    const weekB = mondayOf(reviewedAt(15));
+    const weekC = mondayOf(reviewedAt(5));
+    expect(new Set([weekA, weekB, weekC]).size).toBe(3);
+    expect(body.weekly_trend).toEqual([
+      { week_start: weekA, reviews: 1, findings: 2 },
+      { week_start: weekB, reviews: 1, findings: 1 },
+      { week_start: weekC, reviews: 1, findings: 1 },
+    ]);
+    expect(body.recurring_top).toEqual([
+      { fingerprint: "fp-x", title_sample: "Null deref risk", count: 2, repos: ["acme/widgets"] },
+    ]);
+  });
+
+  test("window parse: non-integer, negative, and empty → 400; 0 is a legal day count", async () => {
+    const cookie = await octocatCookie();
+    for (const window of ["abc", "30.5", "1e2", "-5", "+5", ""]) {
+      const res = await insightsGet(`window=${window}`, cookie);
+      expect(res.status, `window=${window}`).toBe(400);
+      expect(((await res.json()) as { error?: string }).error, `window=${window}`).toContain("window");
+    }
+    // AL-22-1: only negative is malformed — zero is a valid integer window.
+    const zero = await insightsGet("window=0", cookie);
+    expect(zero.status).toBe(200);
+    const zeroBody = (await zero.json()) as { window_days: number; reviews_total: number };
+    expect(zeroBody.window_days).toBe(0);
+    expect(zeroBody.reviews_total).toBe(0);
+  });
+
+  test("window=400 clamps to 90: non-4xx, effective window echoed, r-d enters the window", async () => {
+    const res = await insightsGet("window=400", await octocatCookie());
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      window_days: number;
+      reviews_total: number;
+      weekly_trend: unknown[];
+    };
+    // The response echoes the EFFECTIVE window (the store's single clamp
+    // point at 90), not the raw request value.
+    expect(body.window_days).toBe(90);
+    expect(body.reviews_total).toBe(4); // r-d (60d) now fits the 90-day window
+    expect(body.weekly_trend).toHaveLength(4);
+  });
+
+  test("repo filter: valid owner/repo echoed and forwarded; each aggregation restricted", async () => {
+    const res = await insightsGet("repo=globex/gadgets", await octocatCookie());
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      repo: string;
+      reviews_total: number;
+      findings_by_severity: Array<{ severity: string; count: number }>;
+      recurring_top: unknown[];
+    };
+    expect(body.repo).toBe("globex/gadgets");
+    expect(body.reviews_total).toBe(1);
+    expect(body.findings_by_severity).toEqual([{ severity: "should-fix", count: 1 }]);
+    expect(body.recurring_top).toEqual([]); // fp-z appears once → no recurrence
+  });
+
+  test("repo parse: malformed owner/repo → 400 (no slash, extra slash, whitespace, empty parts)", async () => {
+    const cookie = await octocatCookie();
+    for (const repo of ["oops", "owner/repo/extra", "owner%20x/repo", "/repo", "owner/"]) {
+      const res = await insightsGet(`repo=${repo}`, cookie);
+      expect(res.status, `repo=${repo}`).toBe(400);
+      expect(((await res.json()) as { error?: string }).error, `repo=${repo}`).toContain("repo");
+    }
+  });
+
+  test("window + repo combine: both echoed, aggregation filtered with a custom window", async () => {
+    const res = await insightsGet("window=20&repo=acme/widgets", await octocatCookie());
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      window_days: number;
+      repo: string;
+      reviews_total: number;
+      weekly_trend: unknown[];
+    };
+    expect(body.window_days).toBe(20);
+    expect(body.repo).toBe("acme/widgets");
+    // 20-day window: r-a (25d) drops out — only r-b (15d) remains for acme.
+    expect(body.reviews_total).toBe(1);
+    expect(body.weekly_trend).toHaveLength(1);
   });
 });

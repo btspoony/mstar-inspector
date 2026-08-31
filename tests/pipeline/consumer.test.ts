@@ -43,6 +43,7 @@ import type { ReviewJobPayload } from "../../src/contracts/review-job";
 import type { ReviewOutput } from "../../src/review/schema";
 import { FINDING_BODY_MAX, FINDING_TITLE_MAX } from "../../src/review/schema";
 import { createArtifactStore } from "../../src/store/artifact-store";
+import { computeFindingFingerprint } from "../../src/store/fingerprint";
 import { idemKey } from "../../src/contracts/idem";
 import { createMigratedTestD1 } from "../store/helpers";
 import { REDACTED } from "../../src/pipeline/redact";
@@ -1813,5 +1814,107 @@ describe("SEC-01 exact-value redaction through the consumer", () => {
     expect(degradeInput.rawOutput).not.toContain("ghs_installation_token");
     const rows = failureRows(db);
     expect(String(rows[0]!.error)).not.toContain("ghs_installation_token");
+  });
+});
+describe("cross-round repeat dedup (plan 21 Task 3 / AL-21-2)", () => {
+  test("previous round fingerprints are queried before the post and passed to comment assembly", async () => {
+    reset();
+    runnerStdout = JSON.stringify(VALID_OUTPUT);
+    const db = createMigratedTestD1();
+    const store = createArtifactStore(db);
+    // A previous round for the SAME PR (different sha — the current sha row
+    // does not exist yet at assembly time; no head_sha exclusion).
+    const prevFinding = {
+      mergeClass: "should-fix",
+      category: "logic",
+      file_path: "src/auth.ts",
+      line_start: 21,
+      line_end: 21,
+      title: "Fractional expiry comparison",
+      body: "same finding as this round",
+    };
+    await store.put({
+      kind: "review",
+      key: idemKey({ installation_id: 123, owner: "acme", repo: "widgets", pr_number: 42, head_sha: "a".repeat(40) }),
+      schema: "mstar.review/v1",
+      payload: { ...VALID_OUTPUT, findings: [prevFinding] },
+    });
+    const consumer = createReviewConsumer(makeEnv({ DB: db as never }), testLog, testOverrides);
+
+    await consumer(makeBatch(makePayload()));
+
+    const post = commenterCalls.find((c) => c.op === "post")!;
+    expect(post.args[0]).toMatchObject({
+      installationId: 123,
+      owner: "acme",
+      repo: "widgets",
+      prNumber: 42,
+    });
+    const input = post.args[0] as { previousFingerprints?: ReadonlySet<string> };
+    expect(input.previousFingerprints).toEqual(new Set([computeFindingFingerprint(prevFinding)]));
+  });
+
+  test("no previous round → post proceeds with no previousFingerprints (first round)", async () => {
+    reset();
+    runnerStdout = JSON.stringify(VALID_OUTPUT);
+    const db = createMigratedTestD1();
+    const consumer = createReviewConsumer(makeEnv({ DB: db as never }), testLog, testOverrides);
+
+    await consumer(makeBatch(makePayload()));
+
+    const post = commenterCalls.find((c) => c.op === "post")!;
+    expect((post.args[0] as { previousFingerprints?: unknown }).previousFingerprints).toBeUndefined();
+    expect(reviewCount(db)).toBe(1);
+  });
+
+  test("query failure → first-round semantics: post proceeds, warn logged, review still lands", async () => {
+    reset();
+    runnerStdout = JSON.stringify(VALID_OUTPUT);
+    const db = createMigratedTestD1();
+    // Break ONLY the previous-round query (the store's own statements keep
+    // working) — the consumer must treat the failure as first round.
+    const failingDb = {
+      ...db,
+      prepare: (query: string) => {
+        if (query.includes("envelope IS NOT NULL")) {
+          return {
+            bind: () => {
+              throw new Error("simulated previous-round query failure");
+            },
+          } as never;
+        }
+        return db.prepare(query);
+      },
+    };
+    const consumer = createReviewConsumer(makeEnv({ DB: failingDb as never }), testLog, testOverrides);
+
+    await consumer(makeBatch(makePayload()));
+
+    const post = commenterCalls.find((c) => c.op === "post")!;
+    expect((post.args[0] as { previousFingerprints?: unknown }).previousFingerprints).toBeUndefined();
+    const warn = logLines.find((l) => l.level === "warn" && l.msg.includes("previous-round fingerprint query failed"));
+    expect(warn).toBeDefined();
+    // S-3: the dedup-degradation warn carries a structured field, not just text.
+    expect(warn!.fields.dedup).toBe("degraded");
+    expect(reviewCount(db)).toBe(1);
+  });
+
+  test("oversized fingerprint_hint is clamped at the choke point — never lands verbatim in the D1 fingerprint column (S-1)", async () => {
+    reset();
+    const oversizedHint = "hint-" + "x".repeat(FINDING_TITLE_MAX + 100);
+    runnerStdout = JSON.stringify({
+      ...VALID_OUTPUT,
+      findings: [{ ...VALID_OUTPUT.findings[0]!, fingerprint_hint: oversizedHint }],
+    });
+    const db = createMigratedTestD1();
+    const consumer = createReviewConsumer(makeEnv({ DB: db as never }), testLog, testOverrides);
+
+    await consumer(makeBatch(makePayload()));
+
+    const row = db.raw.query("SELECT fingerprint FROM findings").get() as { fingerprint: string | null };
+    // The full hint never reaches the index column…
+    expect(row.fingerprint).not.toContain(oversizedHint);
+    // …the clamped hint (title budget + ellipsis) is what lands.
+    expect(row.fingerprint).toBe(oversizedHint.slice(0, FINDING_TITLE_MAX - 1) + "…");
   });
 });

@@ -4,7 +4,7 @@
  */
 
 import { describe, expect, test } from "bun:test";
-import { pickProviderKeys, PROVIDERS, PROVIDER_ENV_NAMES, providerEnvName } from "../../src/pipeline/providers";
+import { pickProviderKeys, PROVIDERS, PROVIDER_ENV_NAMES, providerEnvName , customProviderEnvName, CUSTOM_PROVIDER_ENV_PREFIX, CUSTOM_PROVIDER_ENV_SUFFIX } from "../../src/pipeline/providers";
 
 describe("pickProviderKeys (BB-2 allowlist)", () => {
   test("forwards only known keys that are present AND non-empty", () => {
@@ -51,5 +51,19 @@ describe("shared provider mapping", () => {
     expect(providerEnvName("anthropic")).toBe("ANTHROPIC_API_KEY");
     expect(providerEnvName("openrouter")).toBe("OPENROUTER_API_KEY");
     expect(providerEnvName("not-a-provider")).toBeUndefined();
+  });
+});
+describe("customProviderEnvName (plan 23 Task 3, AL-23-1)", () => {
+  test("maps provider ids to CUSTOM_<UPPER_SNAKE>_API_KEY — hyphen → underscore, uppercased", () => {
+    expect(customProviderEnvName("my-provider")).toBe("CUSTOM_MY_PROVIDER_API_KEY");
+    expect(customProviderEnvName("ark")).toBe("CUSTOM_ARK_API_KEY");
+    expect(customProviderEnvName("a1-b2")).toBe("CUSTOM_A1_B2_API_KEY");
+    expect(customProviderEnvName("deep-model-x")).toBe("CUSTOM_DEEP_MODEL_X_API_KEY");
+  });
+
+  test("the prefix/suffix constants are the frozen contract fragments", () => {
+    expect(CUSTOM_PROVIDER_ENV_PREFIX).toBe("CUSTOM_");
+    expect(CUSTOM_PROVIDER_ENV_SUFFIX).toBe("_API_KEY");
+    expect(customProviderEnvName("x")).toBe(`${CUSTOM_PROVIDER_ENV_PREFIX}X${CUSTOM_PROVIDER_ENV_SUFFIX}`);
   });
 });

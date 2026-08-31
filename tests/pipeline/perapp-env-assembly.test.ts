@@ -901,3 +901,185 @@ describe("runner input modelOverrides threading (plan 17 Task 1)", () => {
     expect(errLine!.fields.app_id).toBe(appX.id);
   });
 });
+describe("custom provider env injection + runner input threading (plan 23 Task 3, AL-23-1)", () => {
+  test("app with custom providers: env carries CUSTOM_<ID>_API_KEY values, input JSON carries keyless declarations", async () => {
+    reset();
+    const db = createMigratedTestD1();
+    const appX = await seedApp(db, "app-x");
+    const store = createAppConfigStore(db, TEST_KEY);
+    await store.upsertCustomProvider(
+      appX.id,
+      {
+        provider_id: "my-provider",
+        base_url: "https://my-provider.example.com/v1",
+        api: "openai-completions",
+        model_ids: ["my-model-1", "my-model-2"],
+      },
+      "sk-custom-fixture-AAA",
+    );
+    await store.upsertCustomProvider(
+      appX.id,
+      {
+        provider_id: "second-one",
+        base_url: "https://second.example.com/v1",
+        api: "anthropic-messages",
+        model_ids: ["b-model"],
+      },
+      "sk-custom-fixture-BBB",
+    );
+    const consumer = createReviewConsumer(makeEnv({ DB: db as never }), testLog, testOverrides);
+
+    await consumer(makeBatch(makePayload({ appRef: { kind: "app", appId: appX.id } })));
+
+    // Env injection: decrypted keys under the mapped env names.
+    const env = runnerEnvs()[0]!;
+    expect(env.CUSTOM_MY_PROVIDER_API_KEY).toBe("sk-custom-fixture-AAA");
+    expect(env.CUSTOM_SECOND_ONE_API_KEY).toBe("sk-custom-fixture-BBB");
+    // The App/global key assembly is untouched (custom injection is additive).
+    expect(env.ARK_API_KEY).toBe("ark-key");
+    expect(env.PI_CODING_AGENT_DIR).toBe("/opt/omp-agent");
+    // Runner input JSON: keyless declarations only (zero key material).
+    const input = runnerInputs()[0]!;
+    expect(input.customProviders).toEqual([
+      {
+        provider_id: "my-provider",
+        base_url: "https://my-provider.example.com/v1",
+        api: "openai-completions",
+        model_ids: ["my-model-1", "my-model-2"],
+      },
+      {
+        provider_id: "second-one",
+        base_url: "https://second.example.com/v1",
+        api: "anthropic-messages",
+        model_ids: ["b-model"],
+      },
+    ]);
+    // Additive optional field after the pre-plan-23 shape.
+    expect(Object.keys(input)).toEqual(["worktreePath", "reconFacts", "customProviders"]);
+    const serialized = JSON.stringify(input);
+    expect(serialized).not.toContain("sk-custom-fixture");
+  });
+
+  test("custom providers: keys never reach logs — key_source: custom lines carry ids and env names only", async () => {
+    reset();
+    const db = createMigratedTestD1();
+    const appX = await seedApp(db, "app-x");
+    const store = createAppConfigStore(db, TEST_KEY);
+    await store.upsertCustomProvider(
+      appX.id,
+      {
+        provider_id: "my-provider",
+        base_url: "https://my-provider.example.com/v1",
+        api: "openai-completions",
+        model_ids: ["m1"],
+      },
+      "sk-custom-fixture-AAA",
+    );
+    const consumer = createReviewConsumer(makeEnv({ DB: db as never }), testLog, testOverrides);
+
+    await consumer(makeBatch(makePayload({ appRef: { kind: "app", appId: appX.id } })));
+
+    const customLines = keySourceLines().filter((l) => l.fields.key_source === "custom");
+    expect(customLines).toHaveLength(1);
+    expect(customLines[0]!.fields.provider).toBe("my-provider");
+    expect(customLines[0]!.msg).toContain("CUSTOM_MY_PROVIDER_API_KEY");
+    // Zero key material in ANY log line (the key_source discipline).
+    for (const line of logLines) {
+      expect(JSON.stringify(line.fields)).not.toContain("sk-custom-fixture");
+      expect(line.msg).not.toContain("sk-custom-fixture");
+    }
+  });
+
+  test("app with NO custom providers: input JSON + env BYTE-IDENTICAL to the pre-plan-23 payload", async () => {
+    reset();
+    const appDb = createMigratedTestD1();
+    const appX = await seedApp(appDb, "app-x"); // github_apps row, NO custom rows
+    const appConsumer = createReviewConsumer(makeEnv({ DB: appDb as never }), testLog, testOverrides);
+    await appConsumer(makeBatch(makePayload({ pr_number: 42, appRef: { kind: "app", appId: appX.id } })));
+    const [appInput] = runnerInputs();
+    // Snapshot the app env BEFORE the legacy run (cloned, so later mutations
+    // of the recorded object cannot alias the comparison).
+    const [appEnv] = runnerEnvs();
+    expect(Object.keys(appInput!)).toEqual(["worktreePath", "reconFacts"]);
+    expect(JSON.stringify(appEnv)).not.toContain("CUSTOM_");
+
+    reset();
+    const legacyConsumer = createReviewConsumer(makeEnv({ DB: createMigratedTestD1() as never }), testLog, testOverrides);
+    await legacyConsumer(makeBatch(makePayload({ pr_number: 42 })));
+    const [legacyInput] = runnerInputs();
+    expect(Object.keys(legacyInput!)).toEqual(["worktreePath", "reconFacts"]);
+    expect(JSON.stringify(appInput)).toBe(JSON.stringify(legacyInput));
+    // Real before/after equality: the app env (no custom rows) is byte-identical
+    // to the legacy env — compared as a cloned snapshot, never self-referential.
+    expect(structuredClone(appEnv)).toEqual(runnerEnvs()[0]);
+  });
+
+  test("explicit legacy marker {kind:'legacy'}: no custom env injection, field omitted", async () => {
+    reset();
+    const db = createMigratedTestD1();
+    const consumer = createReviewConsumer(makeEnv({ DB: db as never }), testLog, testOverrides);
+
+    await consumer(makeBatch(makePayload({ appRef: { kind: "legacy" } })));
+
+    const input = runnerInputs()[0]!;
+    expect(Object.keys(input)).toEqual(["worktreePath", "reconFacts"]);
+    expect(JSON.stringify(runnerEnvs()[0])).not.toContain("CUSTOM_");
+  });
+
+  test("custom providers are re-read per message: a dashboard declaration update applies to the very next review", async () => {
+    reset();
+    const db = createMigratedTestD1();
+    const appX = await seedApp(db, "app-x");
+    const store = createAppConfigStore(db, TEST_KEY);
+    await store.upsertCustomProvider(
+      appX.id,
+      { provider_id: "my-provider", base_url: "https://one.example.com/v1", api: "openai-completions", model_ids: ["m1"] },
+      "sk-custom-fixture-AAA",
+    );
+    const consumer = createReviewConsumer(makeEnv({ DB: db as never }), testLog, testOverrides);
+
+    await consumer(makeBatch(makePayload({ pr_number: 42, appRef: { kind: "app", appId: appX.id } })));
+    await store.upsertCustomProvider(
+      appX.id,
+      { provider_id: "my-provider", base_url: "https://two.example.com/v1", api: "openai-completions", model_ids: ["m2"] },
+      "sk-custom-fixture-BBB",
+    );
+    await consumer(makeBatch(makePayload({ pr_number: 43, appRef: { kind: "app", appId: appX.id } })));
+
+    const [first, second] = runnerInputs();
+    expect((first!.customProviders as Array<{ base_url: string; model_ids: string[] }>)[0]!.base_url).toBe(
+      "https://one.example.com/v1",
+    );
+    expect((second!.customProviders as Array<{ base_url: string; model_ids: string[] }>)[0]!.base_url).toBe(
+      "https://two.example.com/v1",
+    );
+    expect((runnerEnvs()[0] as Record<string, string>).CUSTOM_MY_PROVIDER_API_KEY).toBe("sk-custom-fixture-AAA");
+    expect((runnerEnvs()[1] as Record<string, string>).CUSTOM_MY_PROVIDER_API_KEY).toBe("sk-custom-fixture-BBB");
+  });
+
+  test("an undecryptable custom-provider row fails closed with the per-App wrapper, zero side effects", async () => {
+    reset();
+    const db = createMigratedTestD1();
+    const appX = await seedApp(db, "app-x");
+    // Tamper the stored envelope so the decrypt face must throw.
+    const enc = await createSecretbox(TEST_KEY).encryptSecret("sk-custom-fixture-AAA", "app_custom_providers.api_key_enc:wrong-aad");
+    db.raw
+      .prepare(
+        `INSERT INTO app_custom_providers (app_id, provider_id, base_url, api, model_ids, api_key_enc, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))`,
+      )
+      .run(appX.id, "my-provider", "https://my-provider.example.com/v1", "openai-completions", JSON.stringify(["m1"]), enc);
+    const consumer = createReviewConsumer(makeEnv({ DB: db as never }), testLog, testOverrides);
+
+    await expect(
+      consumer(makeBatch(makePayload({ appRef: { kind: "app", appId: appX.id } }))),
+    ).rejects.toThrow(`per-App custom-provider resolution failed: app ${appX.id}`);
+
+    expect(sandboxCalls).toHaveLength(0);
+    expect(kvGuardPuts).toHaveLength(0);
+    const errLine = logLines.find((l) => l.level === "error");
+    expect(errLine).toBeDefined();
+    expect(errLine!.msg).toContain("per-App custom-provider resolution failed");
+    expect(errLine!.fields.app_id).toBe(appX.id);
+  });
+});

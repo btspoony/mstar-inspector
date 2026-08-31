@@ -17,15 +17,21 @@
  *   - the OMP_REVIEW_MODEL chain flows into the runtime input;
  *   - the optional `modelOverrides` map (plan 17 B6) is shape-guarded and
  *     rides into the runtime input verbatim; absent = the legacy shape.
+ *   - the optional `customProviders` list (plan 23 Task 3, AL-23-1) is
+ *     shape-guarded; when non-empty the runner synthesizes a COMPLETE
+ *     per-review models.yml (/tmp/omp-agent-<uuid>/models.yml from the base
+ *     models.yml — custom-keys referenced as CUSTOM_<ID>_API_KEY env names,
+ *     never literals) and rides that directory as `agentDir` in the runtime
+ *     input; absent or empty = the legacy shape (no synthesis, no agentDir).
  */
 
 import { afterEach, describe, expect, mock, test } from "bun:test";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import type { MstarReviewV1 } from "@mstar-harness/engine";
-import type { AgentRuntime, AgentRuntimeRunInput } from "../../src/review/runtime";
+import type { AgentRuntime, AgentRuntimeRunInput, CustomProviderDeclaration } from "../../src/review/runtime";
 import { main } from "../../src/review/runner";
 
 /** Envelope the fake runtime resolves with; overridden per test. */
@@ -185,6 +191,13 @@ describe("runner entry (src/review/runner.ts)", () => {
       { modelOverrides: null },
       { modelOverrides: { "mstar-review-seat": 42 } },
       { modelOverrides: { "code-reviewer": { nested: "object" } } },
+      // Plan 23 T3: shape-only guard on the optional customProviders list.
+      { customProviders: "not-an-array" },
+      { customProviders: [42] },
+      { customProviders: [{}] },
+      { customProviders: [{ provider_id: 42, base_url: "u", api: "a", model_ids: ["m"] }] },
+      { customProviders: [{ provider_id: "p", base_url: "u", api: "a", model_ids: "nope" }] },
+      { customProviders: [{ provider_id: "p", base_url: "u", api: "a", model_ids: [1, 2] }] },
     ]) {
       const inputPath = writeInput(bad);
       const { code, stdout } = await runCli(["--level", "quick", "--input", inputPath]);
@@ -244,5 +257,115 @@ describe("runner entry (src/review/runner.ts)", () => {
     expect(stdout).toBe("");
     expect(stderr).toContain("runtime failed");
     expect(stderr).toContain("provider boom");
+  });
+  test("customProviders: a non-empty list synthesizes a per-review models.yml and rides agentDir into the runtime input", async () => {
+    // The base models.yml comes from $PI_CODING_AGENT_DIR/models.yml (the
+    // image sets it to /opt/omp-agent) — point it at a fixture for the test.
+    const fixtureDir = mkdtempSync(join(tmpdir(), "runner-models-fixture-"));
+    writeFileSync(
+      join(fixtureDir, "models.yml"),
+      "# base\nproviders:\n  ark-plan:\n    baseUrl: https://ark.cn-beijing.volces.com/api/plan\n    apiKey: ARK_API_KEY\n",
+    );
+    process.env.PI_CODING_AGENT_DIR = fixtureDir;
+    fakeEnvelope = ENVELOPE;
+    const decls: CustomProviderDeclaration[] = [
+      {
+        provider_id: "my-provider",
+        base_url: "https://my-provider.example.com/v1",
+        api: "openai-completions",
+        model_ids: ["my-model-1"],
+      },
+    ];
+    try {
+      const inputPath = writeInput({ worktreePath: "/workspace/clone", customProviders: decls });
+      const { code, stderr } = await runCli(["--level", "quick", "--input", inputPath]);
+
+      expect(code).toBe(0);
+      expect(stderr).toBe("");
+      expect(runInputs).toHaveLength(1);
+      const input = runInputs[0] as Record<string, unknown>;
+      // The declarations themselves do NOT ride the runtime input — only the
+      // synthesized per-review directory (the keys ride the exec env).
+      expect(Object.keys(input)).not.toContain("customProviders");
+      expect(input.agentDir).toMatch(/^\/tmp\/omp-agent-/);
+      expect(input.worktreePath).toBe("/workspace/clone");
+      const yaml = readFileSync(join(input.agentDir as string, "models.yml"), "utf8");
+      expect(yaml).toContain("ark-plan:");
+      expect(yaml).toContain("apiKey: CUSTOM_MY_PROVIDER_API_KEY");
+      // ZERO key literals: the env-name reference form only.
+      expect(yaml).not.toContain("sk-live-fixture");
+      rmSync(input.agentDir as string, { recursive: true, force: true });
+    } finally {
+      delete process.env.PI_CODING_AGENT_DIR;
+      rmSync(fixtureDir, { recursive: true, force: true });
+    }
+  });
+
+  test("customProviders colliding with a base provider id: skipped with a structured stderr warn (id + count, no keys)", async () => {
+    const fixtureDir = mkdtempSync(join(tmpdir(), "runner-models-fixture-"));
+    writeFileSync(
+      join(fixtureDir, "models.yml"),
+      "# base\nproviders:\n  ark-plan:\n    baseUrl: https://ark.cn-beijing.volces.com/api/plan\n    apiKey: ARK_API_KEY\n",
+    );
+    process.env.PI_CODING_AGENT_DIR = fixtureDir;
+    fakeEnvelope = ENVELOPE;
+    const decls: CustomProviderDeclaration[] = [
+      {
+        provider_id: "ark-plan", // collides with the base declaration
+        base_url: "https://evil.example.com/",
+        api: "openai-completions",
+        model_ids: ["m1"],
+      },
+      {
+        provider_id: "my-provider",
+        base_url: "https://my-provider.example.com/v1",
+        api: "openai-completions",
+        model_ids: ["my-model-1"],
+      },
+    ];
+    try {
+      const inputPath = writeInput({ worktreePath: "/workspace/clone", customProviders: decls });
+      const { code, stderr } = await runCli(["--level", "quick", "--input", inputPath]);
+
+      expect(code).toBe(0);
+      // Structured warn on stderr: event + id + count; zero key material.
+      const warn = JSON.parse(stderr) as { event: string; provider_id: string; count: number };
+      expect(warn).toEqual({ event: "custom_provider_collision", provider_id: "ark-plan", count: 1 });
+      expect(stderr).not.toContain("sk-");
+      // The synthesized file keeps the BASE ark-plan block (base wins) and
+      // appends the non-colliding custom provider.
+      const input = runInputs[0] as Record<string, unknown>;
+      const yaml = readFileSync(join(input.agentDir as string, "models.yml"), "utf8");
+      expect(yaml).toContain("baseUrl: https://ark.cn-beijing.volces.com/api/plan");
+      expect(yaml).not.toContain("https://evil.example.com/");
+      expect(yaml).toContain('"my-provider":');
+      rmSync(input.agentDir as string, { recursive: true, force: true });
+    } finally {
+      delete process.env.PI_CODING_AGENT_DIR;
+      rmSync(fixtureDir, { recursive: true, force: true });
+    }
+  });
+
+  test("customProviders absent or empty keeps the legacy runtime input shape (no agentDir, no synthesis)", async () => {
+    const inputPath = writeInput({ worktreePath: "/workspace/clone" });
+    expect((await runCli(["--level", "quick", "--input", inputPath])).code).toBe(0);
+    expect(runInputs[0]).toEqual({
+      level: "quick",
+      worktreePath: "/workspace/clone",
+      reconFacts: [],
+      modelSelectors: [],
+    });
+    expect(Object.keys(runInputs[0] as object)).not.toContain("agentDir");
+
+    // An explicit empty list is shape-valid and behaves exactly like absent:
+    // zero synthesis, no agentDir — PI_CODING_AGENT_DIR is never even read.
+    const emptyPath = writeInput({ worktreePath: "/workspace/clone", customProviders: [] });
+    expect((await runCli(["--level", "quick", "--input", emptyPath])).code).toBe(0);
+    expect(runInputs[1]).toEqual({
+      level: "quick",
+      worktreePath: "/workspace/clone",
+      reconFacts: [],
+      modelSelectors: [],
+    });
   });
 });
