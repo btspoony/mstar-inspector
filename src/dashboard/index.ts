@@ -1134,6 +1134,20 @@ dashboardApp.post("/apps/:slug/settings", async (c) => {
         400,
       );
     }
+    if (PROVIDER_IDS.includes(providerId)) {
+      return settingsResponse(
+        c,
+        gate.session,
+        store,
+        apps,
+        gate.app,
+        {
+          kind: "error",
+          message: `${providerId} is a built-in provider — custom providers must use a new id. Nothing was stored.`,
+        },
+        400,
+      );
+    }
     if (baseUrl === "") {
       return settingsResponse(
         c,

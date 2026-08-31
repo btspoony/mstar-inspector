@@ -910,10 +910,13 @@ describe("app-config store (createAppConfigStore) — custom providers (plan 23 
       { provider_id: "Bad_ID" }, // uppercase — outside [a-z0-9][a-z0-9-]{0,63}
       { provider_id: "-lead" }, // leading hyphen
       { provider_id: "x".repeat(65) }, // over 64 chars
+      { provider_id: "anthropic" }, // collides with a PROVIDER_IDS built-in (copy says NON-built-in)
       { base_url: "http://insecure.example.com" }, // http, not https
       { base_url: `https://example.com/${"x".repeat(2049)}` }, // over 2048 chars
       { api: "google-vertex" }, // outside the AL-23-1 three-form enum
       { model_ids: [] }, // empty
+      { model_ids: ["ok", " "] }, // blank model id entry
+      { model_ids: ["ok", "   "] }, // whitespace-only model id entry
       { model_ids: ["ok", "x".repeat(129)] }, // over-length model id
       { model_ids: Array.from({ length: 33 }, (_, i) => `m${i}`) }, // over 32 items
     ];
@@ -926,6 +929,44 @@ describe("app-config store (createAppConfigStore) — custom providers (plan 23 
     await expect(configStore(db).upsertCustomProvider(app.id, CUSTOM, "")).rejects.toThrow(InvalidCustomProviderError);
     await expect(configStore(db).upsertCustomProvider(app.id, CUSTOM, "k".repeat(4097))).rejects.toThrow(ProviderKeyTooLongError);
     expect(rawCount(db, "app_custom_providers")).toBe(0);
+  });
+  test("unknown app_id → FK violation on insert (fail-loud, same as every write here)", async () => {
+    const db = createAppConfigD1();
+    await expect(
+      configStore(db).upsertCustomProvider("no-such-app", CUSTOM, PLAIN_CUSTOM_KEY),
+    ).rejects.toThrow(/FOREIGN KEY constraint failed/);
+  });
+
+  test("getCustomProvidersForConsumer decrypts the key through the store face; a tampered row throws (fail-loud)", async () => {
+    const { db, app } = await seededWorld();
+    const store = configStore(db);
+    await store.upsertCustomProvider(app.id, CUSTOM, PLAIN_CUSTOM_KEY);
+    // Upsert → consumer face → key matches (the Task 3 consume contract —
+    // the round-trip goes through the store, not ad-hoc secretbox).
+    await expect(store.getCustomProvidersForConsumer(app.id)).resolves.toEqual([
+      { ...CUSTOM, api_key: PLAIN_CUSTOM_KEY },
+    ]);
+    // Tamper: flip the last base64 char of the stored envelope — the GCM
+    // tag fails and the consumer face throws (never swallowed).
+    const row = db.raw
+      .query("SELECT api_key_enc FROM app_custom_providers WHERE app_id = ? AND provider_id = ?")
+      .get(app.id, CUSTOM.provider_id) as { api_key_enc: string };
+    const tampered = row.api_key_enc.slice(0, -1) + (row.api_key_enc.endsWith("A") ? "B" : "A");
+    db.raw
+      .prepare("UPDATE app_custom_providers SET api_key_enc = ? WHERE app_id = ? AND provider_id = ?")
+      .run(tampered, app.id, CUSTOM.provider_id);
+    await expect(store.getCustomProvidersForConsumer(app.id)).rejects.toThrow(/secretbox/);
+  });
+
+  test("listCustomProviders fails loud on a malformed model_ids row (non-array / non-string JSON)", async () => {
+    const { db, app } = await seededWorld();
+    await configStore(db).upsertCustomProvider(app.id, CUSTOM, PLAIN_CUSTOM_KEY);
+    for (const malformed of ["null", "{}", '"x"', "[1, \"ok\"]"]) {
+      db.raw
+        .prepare("UPDATE app_custom_providers SET model_ids = ? WHERE app_id = ? AND provider_id = ?")
+        .run(malformed, app.id, CUSTOM.provider_id);
+      await expect(configStore(db).listCustomProviders(app.id)).rejects.toThrow(/not a JSON array of strings/);
+    }
   });
 });
 
@@ -1557,6 +1598,7 @@ describe("POST /dashboard/apps/:slug/settings — custom providers (op=add-custo
       { patch: { provider_id: "Bad_ID" }, label: "uppercase id" },
       { patch: { provider_id: "-lead" }, label: "leading hyphen" },
       { patch: { provider_id: "x".repeat(65) }, label: "id over 64 chars" },
+      { patch: { provider_id: "anthropic" }, label: "built-in provider id collision" },
       { patch: { base_url: "http://insecure.example.com" }, label: "http baseUrl" },
       { patch: { base_url: `https://example.com/${"x".repeat(2049)}` }, label: "baseUrl over 2048 chars" },
       { patch: { api: "google-vertex" }, label: "api outside the AL-23-1 enum" },

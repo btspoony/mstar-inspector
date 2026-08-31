@@ -68,8 +68,10 @@
  *     ids). The key is encrypted INSIDE the store with the composite-PK AAD
  *     `app_custom_providers.api_key_enc:<app_id>:<provider_id>` (0006 L1
  *     precedent) and never appears in the list face; the Task 3 consumer
- *     decrypts it with the same AAD. Declaration bounds (AL-23-1/AL-23-2)
- *     are enforced here as the backstop and by the settings route as 400.
+ *     decrypts it with the same AAD via getCustomProvidersForConsumer (the
+ *     getAppConfig analogue — fail-loud on tamper). Declaration bounds
+ *     (AL-23-1/AL-23-2) are enforced here as the backstop and by the
+ *     settings route as 400.
  *   - Timestamps are SQLite datetime('now') (UTC — the reviews.reviewed_at
  *     convention). UNIQUE / FK violations throw (fail-loud): an unknown
  *     app_id is a caller bug, never a silent no-op.
@@ -149,6 +151,19 @@ export type AppCustomProvider = {
   api: CustomProviderApi;
   model_ids: string[];
 };
+/**
+ * One custom-provider declaration as the Task 3 consumer sees it (the
+ * getAppConfig analogue for app_custom_providers): the decrypt-free
+ * declaration PLUS the decrypted API key. The key exists ONLY on this
+ * face — the settings list (listCustomProviders) stays decrypt-free.
+ */
+export type CustomProviderConsumerConfig = {
+  provider_id: string;
+  base_url: string;
+  api: CustomProviderApi;
+  model_ids: string[];
+  api_key: string;
+};
 
 /**
  * The provider id allowlist — the keys of the `PROVIDERS` mapping in
@@ -213,6 +228,21 @@ export function parseModelChain(raw: string | undefined): string[] {
     .split(",")
     .map((selector) => selector.trim())
     .filter((selector) => selector.length > 0);
+}
+/**
+ * Parse the stored TEXT JSON array of model ids (AL-23-1 DDL) — fail-loud
+ * on anything that is not a JSON array of strings (the getAppConfig tamper
+ * convention): a malformed row throws in the store, never deferring to a
+ * caller's `.join` on a non-array.
+ */
+function parseCustomProviderModelIds(raw: string): string[] {
+  const parsed: unknown = JSON.parse(raw);
+  if (!Array.isArray(parsed) || !parsed.every((id) => typeof id === "string")) {
+    throw new Error(
+      `app-config-store: app_custom_providers.model_ids is not a JSON array of strings: ${JSON.stringify(raw)}`,
+    );
+  }
+  return parsed;
 }
 
 /**
@@ -326,6 +356,11 @@ function assertCustomProvider(decl: AppCustomProvider, plainKey: string): void {
       `invalid custom provider id ${JSON.stringify(decl.provider_id)} (expected [a-z0-9][a-z0-9-]{0,63})`,
     );
   }
+  if (PROVIDER_IDS.includes(decl.provider_id)) {
+    throw new InvalidCustomProviderError(
+      `custom provider id ${JSON.stringify(decl.provider_id)} collides with a built-in provider id`,
+    );
+  }
   if (!/^https:\/\//.test(decl.base_url)) {
     throw new InvalidCustomProviderError(
       `custom provider base URL must be https: ${JSON.stringify(decl.base_url)}`,
@@ -350,6 +385,9 @@ function assertCustomProvider(decl: AppCustomProvider, plainKey: string): void {
     );
   }
   for (const id of decl.model_ids) {
+    if (id.trim() === "") {
+      throw new InvalidCustomProviderError("custom provider model_ids must not contain empty entries");
+    }
     if (id.length > MAX_CUSTOM_PROVIDER_MODEL_ID_LENGTH) {
       throw new InvalidCustomProviderError(
         `custom provider model id exceeds the ${MAX_CUSTOM_PROVIDER_MODEL_ID_LENGTH}-character limit`,
@@ -754,8 +792,33 @@ export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | un
         provider_id: row.provider_id,
         base_url: row.base_url,
         api: row.api as CustomProviderApi,
-        model_ids: JSON.parse(row.model_ids) as string[],
+        model_ids: parseCustomProviderModelIds(row.model_ids),
       }));
+    },
+    /**
+     * Decrypt the App's custom-provider declarations for the consumer
+     * (plan 23 Task 3 models synthesis): the getAppConfig analogue for
+     * app_custom_providers — every declaration plus its decrypted key,
+     * provider_id-ascending. An undecryptable row throws (tamper /
+     * misconfiguration is never swallowed, the getAppConfig convention).
+     * The settings list face (listCustomProviders) stays decrypt-free.
+     */
+    async getCustomProvidersForConsumer(appId: string): Promise<CustomProviderConsumerConfig[]> {
+      const res = await db
+        .prepare(`SELECT * FROM app_custom_providers WHERE app_id = ? ORDER BY provider_id ASC`)
+        .bind(appId)
+        .all<AppCustomProviderRow>();
+      const out: CustomProviderConsumerConfig[] = [];
+      for (const row of res.results) {
+        out.push({
+          provider_id: row.provider_id,
+          base_url: row.base_url,
+          api: row.api as CustomProviderApi,
+          model_ids: parseCustomProviderModelIds(row.model_ids),
+          api_key: await box.decryptSecret(row.api_key_enc, customProviderAad(row.app_id, row.provider_id)),
+        });
+      }
+      return out;
     },
   };
 }
