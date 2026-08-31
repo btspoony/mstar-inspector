@@ -4,6 +4,7 @@
 > cron failure sweep + optional alert webhook — SSOT in § Ops config below);
 > T2 (this document) completed the full runbook; T3 executes it and fills the
 > deployed image digest + deploy date in § Image pins and digest record.
+> 2026-08-31: domains/preview surface added (§ Domains and previews).
 
 ## Prerequisites
 
@@ -86,6 +87,70 @@ GitHub App setup (permissions, webhook events, installation):
   bare `wrangler` works when the global install matches).
 - Authenticated to the target Cloudflare account (`wrangler login`, or
   `CLOUDFLARE_API_TOKEN` + `CLOUDFLARE_ACCOUNT_ID` in CI).
+  Account-id trap (hit live 2026-08-31): a stale `CLOUDFLARE_ACCOUNT_ID`
+  exported in the shell (from another account/project) makes wrangler target
+  the WRONG account → `Authentication error [code 10000]` on every API call
+  (even `deployments list`). The correct account for this repo is
+  `f68fcd78e7c5c10f0466788bb9e85b8e` (Bohao's Account). `wrangler whoami`
+  prints the OAuth account but does NOT override the env var — unset it:
+
+  ```bash
+  unset CLOUDFLARE_ACCOUNT_ID   # or export the id above
+  ```
+
+## Domains and previews (2026-08-31 record)
+
+Production URL: `https://mstar-inspector.42ch.dev` — a Workers **Custom
+Domain** (Cloudflare API/dashboard-attached, NOT declared in
+`wrangler.jsonc`; `wrangler deploy` leaves such attachments untouched). The
+Worker also serves its default
+`https://mstar-inspector.silent-dew-2478.workers.dev` (account subdomain
+`silent-dew-2478`).
+
+A second custom domain `staging-inspector.42ch.dev` was briefly attached to
+the SAME production script (a production alias, not a staging environment).
+Decision 2026-08-31: REMOVED. Rationale: a genuine staging pair needs a
+separate Worker (`env.staging`-style, own name) with its own KV/queues/D1/
+container resources — sharing this Worker's bindings or pointing another
+domain at the same environments would consume production queue messages and
+write production D1. Until that iteration lands, pre-release verification
+runs through the flows below instead of a staging domain.
+
+### Pre-production verification (this Worker's real options)
+
+**No versioned Preview URLs.** The Worker implements the `Sandbox` Durable
+Object (container binding) — Cloudflare does NOT generate preview URLs for
+Workers implementing a DO (docs: Preview URLs → Limitations; verified live:
+every version row reports `has_preview:false` and versioned
+`<prefix>-mstar-inspector.silent-dew-2478.workers.dev` hosts 404). The
+flows that DO work:
+
+1. **Version upload without deploy (verification via gradual rollout).**
+   `wrangler versions upload` registers a version that serves 0% traffic and
+   prints NO preview URL for this Worker — verify by deploying it at 0%:
+   ```bash
+   wrangler versions upload --tag "pr-<N>" --message "..."
+   wrangler versions deploy <version-id>@0%          # prod stays 100% old
+   # pin a test request to the new version in the CURRENT deployment:
+   curl -s https://mstar-inspector.42ch.dev/healthz \
+     -H 'Cloudflare-Workers-Version-Overrides: mstar-inspector="<version-id>"'
+   ```
+   The override header only applies while the version is in the active
+   deployment (the 0% slot above) — that IS the pre-prod check. Bump to 100%
+   with `wrangler versions deploy <version-id>@100%` when satisfied.
+   (Version override smoke-tested semantics: docs Version overrides.)
+2. **Gradual canary** — same command with e.g. `@10%` instead of `@0%`:
+   real traffic splits between old/new; DO instances are assigned a version
+   per deployment and reset once when reassigned (docs: Gradual deployments
+   with Durable Objects).
+3. **Dashboard** — Workers & Pages → mstar-inspector → Deployments: promote
+   a version or adjust the split graphically.
+
+Caveats for this container Worker: only ONE version of the Sandbox DO runs
+at a time (per-DO assignment, single global class) — a 0% version pinned via
+override still boots the container; keep DO-class lifecycle changes out of
+verified versions (uploads with lifecycle changes are rejected; deploy them
+only via `wrangler deploy`).
 
 ## Deploy steps (ordered)
 
