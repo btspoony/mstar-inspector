@@ -788,8 +788,8 @@ function chainHeadSelector(chain: string | undefined): string | null {
  * ALLOWLIST — only the src/pipeline/providers.ts PROVIDERS keys are read;
  * arbitrary Worker env never reaches the container.
  *
- * Per-App assembly (plan 14 B2, `appCfg` present — per-App messages only):
- * the App's own key wins per provider, injected under the PROVIDERS-mapped
+ * Per-App assembly (plan 14 B2 — per-App messages only): the App's own key
+ * wins per provider, injected under the PROVIDERS-mapped
  * env name (skipped when empty/whitespace; a provider id outside the
  * allowlist is skipped with a structured warn — plan 15 log hygiene — that
  * carries the id + app_id, never key material); every provider the App did
@@ -969,9 +969,9 @@ async function kvDoneHit(
 }
 /**
  * Test seam for createReviewConsumer: additive overrides for the process
- * dependencies (store / commenter / per-App commenter factory / getSandbox).
- * The plan contract `createReviewConsumer(env)` is unchanged — every field
- * defaults to the production implementation when omitted.
+ * dependencies (store / failureStore / per-App commenter factory /
+ * getSandbox). The plan contract `createReviewConsumer(env)` is unchanged
+ * — every field defaults to the production implementation when omitted.
  */
 type ConsumerOverrides = Partial<
   Pick<ProcessDeps, "store" | "failureStore" | "createAppCommenter" | "getSandbox">
@@ -985,10 +985,10 @@ type ConsumerOverrides = Partial<
  * retries and eventually DLQs.
  *
  * `log` is injectable for tests (default: structured JSON lines). `overrides`
- * lets tests substitute the store / commenter / per-App commenter factory /
- * sandbox factory without process-wide mock.module (bun's relative-path
- * mock.module leaks across test files sharing a worker — CI run
- * 32946710695).
+ * lets tests substitute the store / failureStore / per-App commenter
+ * factory / sandbox factory without process-wide mock.module (bun's
+ * relative-path mock.module leaks across test files sharing a worker — CI
+ * run 32946710695).
  */
 export function createReviewConsumer(
   env: PipelineEnv,

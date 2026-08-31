@@ -34,7 +34,6 @@ import type { ReviewJobPayload } from "../../src/contracts/review-job";
 const MIGRATIONS_DIR = join(import.meta.dir, "../../migrations");
 /** base64 of exactly 32 bytes (the secretbox master-key requirement). */
 const TEST_KEY = Buffer.alloc(32, 7).toString("base64");
-const LEGACY_SECRET = "legacy-webhook-secret";
 
 function createMigratedD1(): ReturnType<typeof createTestD1> {
   const db = createTestD1();
@@ -112,9 +111,6 @@ function makeEnv(db: ReturnType<typeof createTestD1>, overrides: Partial<RouteEn
   const { kv } = makeKv();
   const { queue } = makeQueue();
   return {
-    APP_ID: "999",
-    PRIVATE_KEY: "legacy-pem",
-    WEBHOOK_SECRET: LEGACY_SECRET,
     REVIEW_ENABLED: "true",
     IDEMPOTENCY_KV: kv as never,
     REVIEW_QUEUE: queue as never,
@@ -201,15 +197,6 @@ describe("POST /webhook/:appSlug (per-App routing)", () => {
 
     expect(resXY.status).toBe(401);
     expect(resYX.status).toBe(401);
-    expect(sent).toHaveLength(0);
-    // And the global env secret must not verify on a per-App route either.
-    const resEnv = await postWebhook(
-      `/webhook/${appX.slug}`,
-      body,
-      { "x-hub-signature-256": await signatureFor(LEGACY_SECRET, body), "x-github-event": "pull_request" },
-      env,
-    );
-    expect(resEnv.status).toBe(401);
     expect(sent).toHaveLength(0);
   });
 
@@ -408,7 +395,7 @@ describe("POST /webhook/:appSlug (per-App routing)", () => {
     });
   });
 
-  test("idempotency identical to legacy: a second identical delivery is KV-skipped", async () => {
+  test("idempotency: a second identical delivery is KV-skipped", async () => {
     const db = createMigratedD1();
     await seedApp(db, { slug: "app-x", secret: "secret-x" });
     const { kv, store } = makeKv();

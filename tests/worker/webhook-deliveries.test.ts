@@ -15,7 +15,8 @@
  *     reject → rejected (status_code = the classifier's status), ignore →
  *     ignored, job + review_enabled=0 → paused, job → ok. Pre-classify
  *     failures (413 / kill-switch / db-guard / 404 / decrypt 500) record
- *     nothing; the legacy face records nothing (AL-20-1: legacy 不落行).
+ *     nothing (the retired legacy face recorded nothing — AL-20-1: legacy
+ *     不落行).
  *   - Recording is best-effort: a store failure logs a structured warn
  *     (event "delivery_record_failed") and the webhook response is
  *     unchanged.
@@ -36,7 +37,6 @@ import type { ReviewJobPayload } from "../../src/contracts/review-job";
 const MIGRATIONS_DIR = join(import.meta.dir, "../../migrations");
 /** base64 of exactly 32 bytes (the secretbox master-key requirement). */
 const TEST_KEY = Buffer.alloc(32, 7).toString("base64");
-const LEGACY_SECRET = "legacy-webhook-secret";
 
 describe("migrations/0011_webhook_deliveries.sql", () => {
   /** Apply one migration file verbatim (filename order = wrangler order). */
@@ -397,9 +397,6 @@ describe("per-App webhook face — best-effort delivery recording (plan 20)", ()
     const { kv } = makeKv();
     const { queue } = makeQueue();
     return {
-      APP_ID: "999",
-      PRIVATE_KEY: "legacy-pem",
-      WEBHOOK_SECRET: LEGACY_SECRET,
       REVIEW_ENABLED: "true",
       IDEMPOTENCY_KV: kv as never,
       REVIEW_QUEUE: queue as never,

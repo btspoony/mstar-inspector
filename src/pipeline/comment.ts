@@ -16,10 +16,10 @@
  *     GitHub review event).
  *
  * Posting (T5): single-comment UPSERT via the Issues comments API
- * (@octokit/rest + createAppAuth — same deps and pattern as 04's diff.ts;
- * the auth factory is invoked separately here because pipeline MUST NOT
- * import src/worker/** and no shared module is extracted per plan). The
- * first line of the body is a hidden HTML marker
+ * (@octokit/rest + createAppAuth — same deps and pattern as the deleted
+ * worker/diff.ts, plan 04; the auth factory is invoked separately here
+ * because pipeline MUST NOT import src/worker/** and no shared module is
+ * extracted per plan). The first line of the body is a hidden HTML marker
  * (`<!-- mstar-inspector:review:v1 round=N -->`); the app locates its own
  * previous comment via issues.listComments (marker prefix match AND
  * bot-authorship — qc2 F-002: a human-planted marker is a miss, and a
@@ -62,14 +62,14 @@
  * (`mstar-inspector line comments · round N · <short sha>`) — never a copy
  * of the overall review body. The consumer prefetches the diff via
  * `pulls.get` + `mediaType: { format: "diff" }` on this module's extended
- * PostOctokit surface (pattern mirrored from src/worker/diff.ts:226-256,
- * NOT imported — pipeline ↛ worker isolation holds), prefilters with the
- * pure `parseDiffHunkRanges` (createReview is atomic: one invalid line →
- * whole request 422), attempts the review, and on residual 422/any Octokit
- * error falls back to overall-comment-only (structured log, never throws
- * after the overall comment succeeded). Empty qualifying set → zero API
- * calls. No `start_line` this iteration; old rounds' line comments stay in
- * place.
+ * PostOctokit surface (pattern originated from the deleted worker/diff.ts,
+ * plan 24 — NOT imported, pipeline ↛ worker isolation holds), prefilters
+ * with the pure `parseDiffHunkRanges` (createReview is atomic: one invalid
+ * line → whole request 422), attempts the review, and on residual 422/any
+ * Octokit error falls back to overall-comment-only (structured log, never
+ * throws after the overall comment succeeded). Empty qualifying set → zero
+ * API calls. No `start_line` this iteration; old rounds' line comments
+ * stay in place.
  */
 import { createAppAuth } from "@octokit/auth-app";
 import { Octokit } from "@octokit/rest";
@@ -493,8 +493,8 @@ function bytesToBase64(bytes: Uint8Array): string {
  * (version 0, rsaEncryption algorithm, OCTET STRING payload). Pure JS — no
  * `node:crypto` — so Bun and workerd behave identically. The output is
  * byte-identical to `openssl pkcs8 -topk8 -nocrypt` for RSA keys (same
- * algorithm as 04's diff.ts; duplicated here because pipeline ↛ worker and
- * no shared module is extracted per plan).
+ * algorithm as the deleted worker/diff.ts, plan 04; duplicated here because
+ * pipeline ↛ worker and no shared module is extracted per plan).
  */
 export function pkcs1ToPkcs8(pkcs1Pem: string): string {
   const body = pkcs1Pem
@@ -597,9 +597,10 @@ export type ReviewCommenter = {
 /**
  * Structural auth surface for the createAppAuth strategy. `AuthInterface` is
  * not exported by @octokit/auth-app, so the surface is named here; the real
- * strategy is assignable (same pattern as 04's diff.ts AppAuth). With a
- * factory the call resolves to the factory's return (the octokit); without
- * one it resolves to the installation access token.
+ * strategy is assignable (same pattern as the deleted worker/diff.ts
+ * AppAuth, plan 04). With a factory the call resolves to the factory's
+ * return (the octokit); without one it resolves to the installation access
+ * token.
  */
 export type AppAuthStrategy = {
   (options: { type: "installation"; installationId: number }): Promise<{ token: string }>;
@@ -1007,10 +1008,10 @@ export type PostLineCommentsInput = {
 
 /**
  * Extract the unified-diff string from a `pulls.get` diff-mediaType response
- * (mirrored from src/worker/diff.ts extractDiff — pipeline ↛ worker
- * isolation holds): octokit returns the diff as `data` (string) or nested
- * `data.data`. A non-diff response is a prefetch failure — the consumer
- * falls back to the base-filter attempt.
+ * (pattern originated from the deleted worker/diff.ts extractDiff — pipeline
+ * ↛ worker isolation holds): octokit returns the diff as `data` (string)
+ * or nested `data.data`. A non-diff response is a prefetch failure — the
+ * consumer falls back to the base-filter attempt.
  */
 function extractDiffText(data: unknown): string {
   const candidate = typeof data === "string" ? data : (data as { data?: unknown } | null)?.data;
@@ -1026,7 +1027,7 @@ function extractDiffText(data: unknown): string {
  * Fetch the PR diff against a caller-provided octokit (plan 18 Task 3):
  * `pulls.get` with `mediaType: { format: "diff" }` — the
  * GitHub-schema-documented pattern for validating review-comment positions
- * (same-mode precedent: src/worker/diff.ts:226-256, pattern only).
+ * (same-mode precedent: the deleted worker/diff.ts:226-256, pattern only).
  */
 export async function fetchPrDiffWithOctokit(octokit: PostOctokit, input: FetchPrDiffInput): Promise<string> {
   const pullsGet = octokit.rest?.pulls?.get;

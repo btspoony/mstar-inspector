@@ -10,9 +10,6 @@ import type { D1Database, KVNamespace, Queue } from "@cloudflare/workers-types";
 import type { ReviewJobPayload } from "../contracts/review-job";
 
 export type Env = {
-  APP_ID: string;
-  PRIVATE_KEY: string;
-  WEBHOOK_SECRET: string;
   REVIEW_QUEUE: Queue<ReviewJobPayload>;
   IDEMPOTENCY_KV: KVNamespace;
   /**
@@ -50,9 +47,9 @@ export type Env = {
    * random bytes (AES-256-GCM secretbox, src/dashboard/secretbox.ts) —
    * encrypts github_apps credentials (PEM / webhook secret; plan 14 adds
    * per-App provider keys). Missing / malformed → SecretboxKeyError and the
-   * encryption-dependent dashboard routes fail closed with 5xx; the legacy
-   * env-secret App path is unaffected. Never reuse DASHBOARD_SESSION_SECRET
-   * — rotation decoupled. wrangler secret / .dev.vars only — never in git.
+   * encryption-dependent dashboard routes fail closed with 5xx. Never
+   * reuse DASHBOARD_SESSION_SECRET — rotation decoupled. wrangler secret /
+   * .dev.vars only — never in git.
    */
   DASHBOARD_ENCRYPTION_KEY?: string;
   /**

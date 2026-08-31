@@ -2,9 +2,10 @@
  * GitHub OAuth App (user-to-server) helpers for /dashboard login —
  * authorize URL, code→token exchange, user fetch.
  *
- * These credentials are DISTINCT from the review GitHub App
- * (APP_ID / PRIVATE_KEY / WEBHOOK_SECRET): dashboard login uses
- * GITHUB_OAUTH_CLIENT_ID / GITHUB_OAUTH_CLIENT_SECRET only
+ * These credentials are DISTINCT from the review GitHub App (whose
+ * Worker-env secrets APP_ID / PRIVATE_KEY / WEBHOOK_SECRET were retired in
+ * plan 24 — per-App credentials now live encrypted in D1): dashboard login
+ * uses GITHUB_OAUTH_CLIENT_ID / GITHUB_OAUTH_CLIENT_SECRET only
  * (.mstar/iterations/v0.3/guides/oauth-vs-github-app.md). Scope is locked
  * to `read:user` — identity only (product decision 7, plan 08).
  */

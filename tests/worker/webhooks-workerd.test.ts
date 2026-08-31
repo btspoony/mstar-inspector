@@ -27,9 +27,6 @@ const workerdVerify = async (): Promise<boolean> => {
 
 function makeEnv(overrides: Partial<Env> = {}): Env {
   return {
-    APP_ID: "123",
-    PRIVATE_KEY: "private-key",
-    WEBHOOK_SECRET: SECRET,
     REVIEW_QUEUE: { send: async () => {} } as unknown as Env["REVIEW_QUEUE"],
     IDEMPOTENCY_KV: {
       get: async () => null,
@@ -104,7 +101,7 @@ describe("module-level verifier cache (F-005 + plan 15 L1)", () => {
     expect(second).toBe(first);
   });
 
-  test("distinct cacheKeys never share an instance (legacy / appId isolation)", () => {
+  test("distinct cacheKeys never share an instance (per-App row-id isolation)", () => {
     const legacy = getWebhooks("legacy", SECRET);
     const perApp = getWebhooks("some-app-row-id", SECRET);
     expect(perApp).not.toBe(legacy);

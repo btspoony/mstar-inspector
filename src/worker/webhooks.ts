@@ -34,20 +34,19 @@ export const WEBHOOK_BODY_LIMIT = 1_000_000;
  * architect lock L1): the hot path constructed a `Webhooks` instance per
  * request only to call `verify`, which uses nothing but `options.secret`.
  * KEYED BY CACHEKEY, NOT the raw secret: each entry is `{ secret, webhooks }`
- * under the caller's cache key — the legacy `POST /webhook` route passes
- * `"legacy"`, each per-App `POST /webhook/:appSlug` route passes its
- * `github_apps.id` — so per-App isolation holds AND a cached entry whose
- * `secret` differs from the caller's current secret (credential rotation)
- * is rebuilt and REPLACED: the rotated secret verifies with the NEW secret
- * only, and the old entry is evicted exactly (no LRU wait). The bound is
- * STRUCTURAL (≤ github_apps rows + 1 legacy entry — keys are drawn from the
- * fixed universe of row ids + "legacy"), so no eviction policy is tunable
- * or needed; an entry outliving its row (soft-deleted App) is dead weight
- * only — that route 404s before classifyWebhook, so the entry can never be
- * hit again. `getWebhooks` stays exported as a test seam to lock the reuse
- * and rotation-replace behavior; the worker always passes an explicit
- * cacheKey, and direct callers that omit it fall back to the pre-plan-15
- * secret-keyed memoization.
+ * under the caller's cache key — each per-App `POST /webhook/:appSlug`
+ * route passes its `github_apps.id` — so per-App isolation holds AND a
+ * cached entry whose `secret` differs from the caller's current secret
+ * (credential rotation) is rebuilt and REPLACED: the rotated secret
+ * verifies with the NEW secret only, and the old entry is evicted exactly
+ * (no LRU wait). The bound is STRUCTURAL (≤ github_apps rows — keys are
+ * drawn from the fixed universe of row ids), so no eviction policy is
+ * tunable or needed; an entry outliving its row (soft-deleted App) is dead
+ * weight only — that route 404s before classifyWebhook, so the entry can
+ * never be hit again. `getWebhooks` stays exported as a test seam to lock
+ * the reuse and rotation-replace behavior; the worker always passes an
+ * explicit cacheKey, and direct callers that omit it fall back to the
+ * pre-plan-15 secret-keyed memoization.
  */
 type VerifierCacheEntry = { secret: string; webhooks: Webhooks };
 
@@ -165,11 +164,11 @@ const issueCommentSchema = z.object({
  * testable without a sink; the fetch entry passes `defaultLog`.
  *
  * `cacheKey` (plan 15 hardening item 1 / architect lock L1) is a
- * MEMOIZATION-ONLY parameter for the verifier cache — the legacy route
- * passes `"legacy"`, a per-App route passes its `github_apps.id`; the
- * classifier NEVER branches on it (same secret + same payload classifies
- * identically whichever key rides along). Omitted → the verifier memoizes
- * under the secret itself (the pre-plan-15 shape, for direct callers).
+ * MEMOIZATION-ONLY parameter for the verifier cache — a per-App route
+ * passes its `github_apps.id`; the classifier NEVER branches on it (same
+ * secret + same payload classifies identically whichever key rides along).
+ * Omitted → the verifier memoizes under the secret itself (the pre-plan-15
+ * shape, for direct callers).
  *
  * Warn labels (plan 15 log hygiene 硬化项 3): every structured warn carries
  * the REAL GitHub event in `event` when the header is present, falling back

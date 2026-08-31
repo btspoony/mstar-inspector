@@ -50,9 +50,9 @@ export function deliveryOutcomeFromWebhook(
 }
 
 /**
- * Structured warn for the webhook faces' rejection/bookkeeping paths (plan
- * 13 QC F-005; plan 15 extends it to the legacy face's pre-classify stage):
- * the caller passes the real stage label (e.g. `webhook_body_too_large`,
+ * Structured warn for the webhook face's rejection/bookkeeping paths (plan
+ * 13 QC F-005; plan 15 log hygiene): the caller passes the real stage label
+ * (e.g. `webhook_body_too_large`,
  * `db_binding_missing`, `installation_upsert_failed`) and it rides `event` —
  * never the generic "unknown" — so log consumers can filter these warns by
  * event alone; `reason` keeps the same label for the reason-keyed greps and
@@ -112,20 +112,18 @@ app.route("/dashboard", dashboardApp);
  * the enqueue — fire-and-forget relative to it, so the review path never
  * waits on bookkeeping — and a bookkeeping failure only logs a structured
  * warn: it never blocks the enqueue nor fails the webhook (best-effort
- * install health, B3 roadmap). The legacy face has no app row to attach and
- * deliberately performs NO upsert.
+ * install health, B3 roadmap).
  *
  * Delivery recording (plan 20 Task 1, AL-20-1): immediately after
  * classification (before the reject return) ONE best-effort row is appended
  * to `webhook_deliveries` — every classified outcome lands (rejected /
  * ignored / paused / ok), the pre-classify failures record nothing, and a
  * store failure only logs a structured warn (the response and enqueue are
- * never affected). The legacy face records NOTHING (AL-20-1: legacy
- * 不落行 — it is the fallback path with no dashboard consumer).
+ * never affected). The retired legacy face recorded nothing (AL-20-1:
+ * legacy 不落行 — it was the fallback path with no dashboard consumer).
  */
 app.post("/webhook/:appSlug", async (c) => {
-  // Body-size cap checked BEFORE buffering the body (B6) — same gate as the
-  // legacy route.
+  // Body-size cap checked BEFORE buffering the body (B6).
   const contentLength = Number(c.req.header("content-length") ?? "0");
   if (contentLength > WEBHOOK_BODY_LIMIT) {
     webhookWarn(
@@ -207,7 +205,7 @@ app.post("/webhook/:appSlug", async (c) => {
   // Plan 15 (architect lock L1): the verifier memoizes under the row id as
   // cacheKey — a rotated webhook secret (same id, new envelope → new
   // secret) is rebuilt + REPLACED on the next delivery; entries are
-  // structurally bounded (≤ Apps + 1) with no eviction policy.
+  // structurally bounded (≤ github_apps rows) with no eviction policy.
   const outcome = await classifyWebhook(appSecret, rawBody, signature, eventName, defaultLog, reviewEnabled, row.id);
 
   // Plan 20 (AL-20-1): best-effort delivery recording — the R2 diagnostics
@@ -216,9 +214,9 @@ app.post("/webhook/:appSlug", async (c) => {
   // outcome lands: reject → rejected (status_code = the classifier's
   // status), ignore → ignored, job + review_enabled=0 → paused, job → ok.
   // The pre-classify failures (413 / kill-switch / db-guard / 404 /
-  // decrypt 500) never reach this line and record nothing; the legacy face
-  // records nothing by design (AL-20-1: legacy 不落行 — app_id is NOT NULL
-  // FK and the legacy path has no dashboard consumer). Best-effort like the
+  // decrypt 500) never reach this line and record nothing (the retired
+  // legacy face recorded nothing by design — AL-20-1: legacy 不落行; app_id
+  // is NOT NULL FK). Best-effort like the
   // last_webhook_at touch: a store failure logs a structured warn and never
   // changes the response or the enqueue.
   try {
