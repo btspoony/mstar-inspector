@@ -58,7 +58,7 @@ import type { ReviewJobPayload } from "../contracts/review-job";
 import { idemKey, IDEMPOTENCY_SECONDS, type IdempotencyKey } from "../contracts/idem";
 import { parseReviewOutput, capFindings, clampFindingSizes } from "../review/schema";
 import { isReviewLevel, REVIEW_LEVELS, type ReviewLevel } from "../review/runtime";
-import { redactReviewOutput, redactSecrets } from "./redact";
+import { redactExactSecrets, redactReviewOutput, redactReviewOutputExact, redactSecrets } from "./redact";
 import { createArtifactStore, type D1ArtifactStore } from "../store/artifact-store";
 import { createFailureStore, type FailureStage, type FailureStore } from "../store/failure-store";
 import { getSandbox, type ReviewSandbox } from "./sandbox";
@@ -839,6 +839,28 @@ export function buildRunnerEnv(
 }
 
 /**
+ * The ACTUAL secret values one review session used (SEC-01 exact-value
+ * defense): every credential-shaped value the runner env carried — the
+ * provider-key entries (the allowlist-picked global keys + the App's own
+ * BYOK keys, both forwarded via buildRunnerEnv) and the ARK_API_KEY source
+ * value — plus the installation token minted for the session. These are the
+ * values a prompt-injected model could echo verbatim; redactExactSecrets
+ * removes them even when they evade every shape pattern. The list is
+ * derived from the SAME buildRunnerEnv result the runner exec used (no
+ * re-resolution split-brain) and the token minted above.
+ */
+function sessionSecretValues(runnerEnv: Record<string, string>, token: string): string[] {
+  const values: string[] = [token];
+  for (const [name, value] of Object.entries(runnerEnv)) {
+    if (name === "OMP_REVIEW_MODEL" || name === "HARNESS_PLUGIN_ROOT" || name === "PI_CODING_AGENT_DIR") {
+      continue; // configuration/paths, not credentials
+    }
+    if (value !== "") values.push(value);
+  }
+  return values;
+}
+
+/**
  * KV done-state read (B3): `done` means a review was already POSTED for this
  * sha (the consumer writes it right after posting, before the D1 insert).
  * The worker's enqueue marker uses the SAME key format with value "1", so
@@ -962,6 +984,11 @@ async function processMessage(payload: ReviewJobPayload, deps: ProcessDeps): Pro
   // itself. "parse" never goes through this variable — the degrade branch
   // records stage="parse" directly and acks without reaching the catch.
   let failureStage: FailureStage = "pipeline";
+  // SEC-01 exact-value defense: the session's ACTUAL secret values (runner
+  // env provider keys + the minted installation token), set once the runner
+  // env is assembled. Hoisted so the catch site's best-effort failure row
+  // can exact-redact the error detail too (SEC-03).
+  let secretValues: string[] = [];
 
   try {
     // Review tier (AC-S7-level): resolved BEFORE any sandbox/KV step so a
@@ -1164,9 +1191,14 @@ async function processMessage(payload: ReviewJobPayload, deps: ProcessDeps): Pro
     // exception (timeout / container error) here classifies "runner".
     failureStage = "runner";
     runnerStartedAt = Date.now();
+    // SEC-01 exact-value defense: the SAME env object the runner exec used
+    // is captured here (single source — no re-resolution split-brain) so
+    // the session's actual secret values can be exact-redacted from any
+    // model-echoed output below.
+    const runnerEnv = buildRunnerEnv(deps.env, appCfg, deps.log, fields);
     const run = await sandbox.exec(cmds.runner, {
       cwd: CLONE_DIR,
-      env: buildRunnerEnv(deps.env, appCfg, deps.log, fields),
+      env: runnerEnv,
       timeout: runnerTimeoutMs(level),
     });
     const runnerElapsedMs = Date.now() - runnerStartedAt;
@@ -1181,6 +1213,10 @@ async function processMessage(payload: ReviewJobPayload, deps: ProcessDeps): Pro
       { ...fields, elapsed_ms: runnerElapsedMs },
       `runner finished in ${runnerElapsedMs}ms (budget ${runnerTimeoutMs(level)}ms)`,
     );
+    // SEC-01 exact-value defense: the session's ACTUAL secret values
+    // (runner env provider keys + the minted installation token) — shared
+    // by the degrade path and the success path below.
+    const secretValues = sessionSecretValues(runnerEnv, token);
 
     // AL-6 stage window: post-runner steps (parse has its own branch; the
     // post/KV/put orchestration is worker-side) are "pipeline" again.
@@ -1194,11 +1230,15 @@ async function processMessage(payload: ReviewJobPayload, deps: ProcessDeps): Pro
     // review_failures row (best-effort — an insert failure must never mask
     // the degrade) → degraded comment (best-effort — a post failure is a
     // structured log line only) → the `degraded` outcome the queue handler
-    // acks. KV done-state is deliberately NOT set (a later webhook for the
-    // same sha legitimately re-runs the review; queue redelivery stops via
-    // the ack) and no `reviews` row is written.
     const parsed = parseReviewOutput(run.stdout);
     if (!parsed.ok) {
+      // SEC-01 exact-value defense: the session's ACTUAL secret values
+      // (runner env provider keys + the minted installation token) are
+      // exact-redacted from the parse error and the raw stdout BEFORE they
+      // reach the durable failure row or the public degraded comment — a
+      // credential that evades every shape pattern is still removed.
+      const redactedError = redactExactSecrets(redactSecrets(parsed.error), secretValues);
+      const redactedStdout = redactExactSecrets(redactSecrets(run.stdout), secretValues);
       try {
         await deps.failureStore.record({
           installation_id: payload.installation_id,
@@ -1210,8 +1250,9 @@ async function processMessage(payload: ReviewJobPayload, deps: ProcessDeps): Pro
           // qc3 F-001 / qc2 F-001: the zod/engine error can echo a
           // model-emitted secret-shaped value (`verdict "ghp_…" is not one
           // of …`) — redactSecrets BEFORE the durable D1 row, same face as
-          // buildDegradedBody's public-comment choke point.
-          error: redactSecrets(parsed.error),
+          // buildDegradedBody's public-comment choke point. SEC-01 adds the
+          // exact-value pass on top.
+          error: redactedError,
         });
       } catch (err) {
         const detail = err instanceof Error ? err.message : String(err);
@@ -1220,16 +1261,16 @@ async function processMessage(payload: ReviewJobPayload, deps: ProcessDeps): Pro
       try {
         // The same resolved commenter instance as the token mint above
         // (lock L4) — the degraded chain rides the PR's own App identity.
+        // SEC-01: the error + raw stdout arrive PRE-REDACTED (shape +
+        // exact-value passes) — buildDegradedBody's own redaction remains
+        // the in-module choke point for anything it adds.
         await commenter.postDegraded({
           installationId: payload.installation_id,
           owner: payload.owner,
           repo: payload.repo,
           prNumber: payload.pr_number,
-          error: parsed.error,
-          // Raw stdout rides to the commenter UNREDACTED — buildDegradedBody
-          // is the redaction+truncation choke point (redact first, then the
-          // ≤1000-char cut, so no partial secret straddles the boundary).
-          rawOutput: run.stdout,
+          error: redactedError,
+          rawOutput: redactedStdout,
         });
       } catch (err) {
         const detail = err instanceof Error ? err.message : String(err);
@@ -1237,7 +1278,7 @@ async function processMessage(payload: ReviewJobPayload, deps: ProcessDeps): Pro
       }
       deps.log.warn(
         fields,
-        `review degraded: output failed schema validation (${redactSecrets(parsed.error)}) — acked, no retry/DLQ`,
+        `review degraded: output failed schema validation (${redactedError}) — acked, no retry/DLQ`,
       );
       return { kind: "degraded" };
     }
@@ -1247,8 +1288,13 @@ async function processMessage(payload: ReviewJobPayload, deps: ProcessDeps): Pro
     // clamp per-finding title/body to their budgets (qc2 F-003), then cap
     // findings to the Top-50 by merge class BEFORE anything can reach the
     // public review body or the D1 envelope. The SAME capped array feeds
-    // both the post and the put (B4: 渲染与落库同一裁剪数组).
-    const capped = capFindings(clampFindingSizes(redactReviewOutput(parsed.output)));
+    // both the post and the put (B4: 渲染与落库同一裁剪数组). SEC-01 adds
+    // the exact-value second pass (the session's ACTUAL secret values) on
+    // top of the shape-based redaction — a credential that evades every
+    // pattern is still removed before the post or the put.
+    const capped = capFindings(
+      clampFindingSizes(redactReviewOutputExact(redactReviewOutput(parsed.output), secretValues)),
+    );
     const output = capped.output;
 
     // 11. Upsert the overall review comment FIRST (the user-facing
@@ -1268,11 +1314,47 @@ async function processMessage(payload: ReviewJobPayload, deps: ProcessDeps): Pro
       omittedFindings: capped.omitted,
     });
 
+    // 11a. KV done-state fence (BUG-01): written immediately after the
+    // overall-comment upsert succeeds, BEFORE the line-comments step — a
+    // crash in the line-comments window redelivers and sees the done key →
+    // acks (outcome = overall-only, same as the 422 fallback). Line
+    // comments become best-effort after the fence. The D1 insert below
+    // still runs after; a put failure keeps the B3 semantics (KV done
+    // marks completion, never re-post).
+    try {
+      await deps.env.IDEMPOTENCY_KV.put(idemKey(key), "done", {
+        expirationTtl: IDEMPOTENCY_SECONDS,
+      });
+    } catch (err) {
+      const detail = err instanceof Error ? err.message : String(err);
+      deps.log.warn(fields, `KV completion write failed: ${detail}`);
+    }
+
+    // 11a2. Degraded-comment lifecycle (Bugbot finding): the successful
+    // review supersedes any earlier degradation — scan for a bot-authored
+    // `review-degraded:v1` comment on the PR and DELETE it (Issues comments
+    // API, app-authored only). Best-effort: a delete failure is a
+    // structured warn, never throws, never blocks the review flow.
+    try {
+      await commenter.deleteDegradedComment({
+        installationId: payload.installation_id,
+        owner: payload.owner,
+        repo: payload.repo,
+        prNumber: payload.pr_number,
+        error: "",
+        rawOutput: "",
+      });
+    } catch (err) {
+      const detail = err instanceof Error ? err.message : String(err);
+      deps.log.warn(fields, `stale degraded comment delete failed (review stands): ${detail}`);
+    }
+
     // 11b. Line comments (plan 18 Task 3, architect AL-3 layered delivery) —
-    // AFTER the overall-comment upsert succeeded and NEVER throwing: any
-    // Octokit error → structured log + continue (the overall comment, KV
-    // done and D1 row below are unaffected). Ordering per brief: upsert →
-    // diff prefetch → createReview → done; no retry (next round re-anchors).
+    // AFTER the overall-comment upsert + KV fence succeeded and NEVER
+    // throwing: any Octokit error → structured log + continue (the overall
+    // comment, KV done and D1 row below are unaffected). Ordering per
+    // brief: upsert → done → diff prefetch → createReview; no retry (next
+    // round re-anchors).
     //
     // Layered filter: base = file_path non-empty AND line_end ≥ 1; with the
     // prefetched diff, additionally b-side path exact-match + line_end inside
@@ -1330,18 +1412,6 @@ async function processMessage(payload: ReviewJobPayload, deps: ProcessDeps): Pro
           );
         }
       }
-    }
-
-    // 12. KV done-state immediately after the comment lands, BEFORE the D1
-    // insert (B3): if the put then fails, a retry hits the KV done key and
-    // acks — the comment is already out and must never be re-posted.
-    try {
-      await deps.env.IDEMPOTENCY_KV.put(idemKey(key), "done", {
-        expirationTtl: IDEMPOTENCY_SECONDS,
-      });
-    } catch (err) {
-      const detail = err instanceof Error ? err.message : String(err);
-      deps.log.warn(fields, `KV completion write failed: ${detail}`);
     }
 
     // 13. Persist via the D1 ArtifactStore (plan 07 Task 4): the parsed
@@ -1410,6 +1480,9 @@ async function processMessage(payload: ReviewJobPayload, deps: ProcessDeps): Pro
     // (failureStage); rows are per-attempt events (a DLQ'd message leaves
     // up to 4: 1 initial delivery + max_retries = 3 retries). The insert
     // must never mask the rethrow: its own failure is a warn line only.
+    // SEC-03: the error detail is redacted (shape + exact-value passes)
+    // before the durable row — an infra error can interpolate a
+    // secret-shaped value (defense-in-depth; clean strings pass through).
     try {
       await deps.failureStore.record({
         installation_id: payload.installation_id,
@@ -1420,7 +1493,7 @@ async function processMessage(payload: ReviewJobPayload, deps: ProcessDeps): Pro
         // the payload sha, else "" (= never resolved).
         head_sha: fields?.head_sha ?? payload.head_sha ?? "",
         stage: failureStage,
-        error: detail,
+        error: redactExactSecrets(redactSecrets(detail), secretValues),
       });
     } catch (recordErr) {
       const recordDetail = recordErr instanceof Error ? recordErr.message : String(recordErr);

@@ -15,12 +15,16 @@
  * face by design — audit-log semantics (the plan-19 sweep
  * counts rows over a created_at window; it never mutates them).
  *
- * The `stage` vocabulary is enforced producer-side (0009 precedent — no
- * CHECK constraint in the DDL): FAILURE_STAGES is the single source and
- * `record` rejects anything off it fail-loud. The BEST-EFFORT contract is
- * the caller's (the consumer wraps `record` in try/catch so an insert
- * failure never masks the degrade/ack or the rethrow) — the store itself
- * never swallows a write error.
+ * created_at contract (BUG-03, documented — no schema rebuild): `record`
+ * NEVER writes created_at — the column is ALWAYS the DDL DEFAULT
+ * `datetime('now')` (migration 0010), i.e. the `YYYY-MM-DD HH:MM:SS` UTC
+ * format. The plan-19 sweep's TEXT window comparison
+ * (`created_at > datetime('now', '-24 hours')`) depends on this exact
+ * format; a producer that wrote an ISO-8601 or epoch value would silently
+ * break the sweep. A CHECK constraint would require a table-rebuild
+ * migration (SQLite) — disproportionate for a nit, so the contract is
+ * pinned here + by the producer test. Retention is runbook-executed, NOT
+ * in the read-only cron sweep (AL-6) — see docs/deploy.md § Maintenance.
  *
  * Module boundary (compass contracts A): type imports from ./types only —
  * no worker/pipeline/session/omp dependencies. The `db` parameter is the

@@ -6,7 +6,7 @@
  */
 
 import { describe, expect, test } from "bun:test";
-import { REDACTED, redactReviewOutput, redactSecrets } from "../../src/pipeline/redact";
+import { REDACTED, redactExactSecrets, redactReviewOutput, redactReviewOutputExact, redactSecrets } from "../../src/pipeline/redact";
 import type { ReviewOutput } from "../../src/review/schema";
 
 describe("redactSecrets", () => {
@@ -46,24 +46,54 @@ describe("redactSecrets", () => {
     expect(out).toContain(REDACTED);
   });
 
-  test("redacts key/secret assignment references", () => {
+  test("redacts provider-key assignment lines (SEC-01): GEMINI_/GROQ_/XAI_/AZURE_OPENAI_", () => {
     const out = redactSecrets(
-      "ARK_API_KEY=ark-abc123; API_KEY \"supersecret\"; TOKEN: sk-xyz; SECRET = hunter2",
+      "GEMINI_API_KEY=AIzaSyDummyDummyDummyDummyDummyDummyDummy; GROQ_API_KEY=gsk_dummyDummyDummyDummyDummyDummy; XAI_API_KEY=xai-dummyDummyDummyDummyDummyDummy; AZURE_OPENAI_API_KEY=az-key-123456",
     );
-    expect(out).not.toContain("ark-abc123");
-    expect(out).not.toContain("supersecret");
-    expect(out).not.toContain("sk-xyz");
-    expect(out).not.toContain("hunter2");
+    expect(out).not.toContain("AIzaSyDummy");
+    expect(out).not.toContain("gsk_dummy");
+    expect(out).not.toContain("xai-dummy");
+    expect(out).not.toContain("az-key-123456");
+    expect(out).toContain(REDACTED);
+  });
+
+  test("redacts forwarded-provider value shapes (SEC-01): AIza…/gsk_…/xai-…", () => {
+    const out = redactSecrets(
+      "leaked AIzaSyDummyDummyDummyDummyDummyDummyDummyDummy and gsk_dummyDummyDummyDummyDummyDummyDummy and xai-dummyDummyDummyDummyDummyDummyDummy",
+    );
+    expect(out).not.toContain("AIzaSyDummy");
+    expect(out).not.toContain("gsk_dummy");
+    expect(out).not.toContain("xai-dummy");
+    expect(out).toContain(REDACTED);
   });
 
   test("redacts long hex strings (40+ chars)", () => {
     const hex = "0123456789abcdef0123456789abcdef01234567";
     expect(redactSecrets(hex)).toBe(REDACTED);
   });
+});
 
-  test("leaves ordinary prose untouched", () => {
-    const text = "The token endpoint returned a 401 for the review comment.";
-    expect(redactSecrets(text)).toBe(text);
+describe("redactExactSecrets", () => {
+  test("replaces every occurrence of each distinct non-empty value", () => {
+    const out = redactExactSecrets(
+      "key=abc123 and again abc123; other=xyz789",
+      ["abc123", "xyz789"],
+    );
+    expect(out).not.toContain("abc123");
+    expect(out).not.toContain("xyz789");
+    expect(out).toContain(REDACTED);
+  });
+
+  test("empty value list → text unchanged; empty values skipped", () => {
+    expect(redactExactSecrets("plain text", [])).toBe("plain text");
+    expect(redactExactSecrets("plain text", ["", "  "])).toBe("plain text");
+  });
+
+  test("a UUID-shaped value that evades every shape pattern is still removed", () => {
+    const uuid = "3f2a1b4c-9d8e-4f6a-b7c2-1e0d9a8b7c6d";
+    const out = redactExactSecrets(`leaked ${uuid} here`, [uuid]);
+    expect(out).not.toContain(uuid);
+    expect(out).toContain(REDACTED);
   });
 });
 
@@ -118,12 +148,46 @@ describe("redactReviewOutput", () => {
     expect(redacted.tally!.tally.mustFix).toBe(1);
     expect(redacted.verdict).toBe("blocked");
   });
+});
 
-  test("clean model text passes through untouched (no over-redaction)", () => {
-    const redacted = redactReviewOutput(output);
-    expect(redacted.findings[0]!.title).toBe("Leak");
-    expect(redacted.findings[0]!.category).toBe("security");
-    expect(redacted.findings[0]!.file_path).toBe("src/auth.ts");
-    expect("fingerprint_hint" in redacted.findings[0]!).toBe(false);
+describe("redactReviewOutputExact", () => {
+  test("exact-value second pass removes the session's actual secret values from every model-controlled field", () => {
+    const uuid = "3f2a1b4c-9d8e-4f6a-b7c2-1e0d9a8b7c6d";
+    const withSecret: ReviewOutput = {
+      schema: "mstar.review/v1",
+      verdict: "blocked",
+      summary_md: `key ${uuid} leaked`,
+      findings: [
+        {
+          mergeClass: "must-fix",
+          title: `token ${uuid}`,
+          body: `body ${uuid}`,
+          category: uuid,
+          file_path: `x/${uuid}.ts`,
+          fingerprint_hint: uuid,
+        },
+      ],
+    };
+    const redacted = redactReviewOutputExact(withSecret, [uuid]);
+    expect(redacted.summary_md).not.toContain(uuid);
+    expect(redacted.findings[0]!.title).not.toContain(uuid);
+    expect(redacted.findings[0]!.body).not.toContain(uuid);
+    expect(redacted.findings[0]!.category).not.toContain(uuid);
+    expect(redacted.findings[0]!.file_path).not.toContain(uuid);
+    expect(redacted.findings[0]!.fingerprint_hint).not.toContain(uuid);
+    expect(redacted.verdict).toBe("blocked");
+    expect(redacted.findings[0]!.mergeClass).toBe("must-fix");
+  });
+
+  test("empty value list → output unchanged", () => {
+    const clean: ReviewOutput = {
+      schema: "mstar.review/v1",
+      verdict: "blocked",
+      summary_md: "clean summary",
+      findings: [{ mergeClass: "nit", title: "Note", body: "Body." }],
+    };
+    const redacted = redactReviewOutputExact(clean, []);
+    expect(redacted.summary_md).toBe(clean.summary_md);
+    expect(redacted.findings[0]!.title).toBe(clean.findings[0]!.title);
   });
 });

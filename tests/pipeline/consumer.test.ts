@@ -133,6 +133,7 @@ let tokenResult = "ghs_installation_token";
 let tokenError: Error | undefined;
 let commentError: Error | undefined;
 let degradeError: Error | undefined;
+let deleteDegradedError: Error | undefined;
 // Plan 18 T3 line comments: the round postReview returns (pinned into the
 // line-comments marker body), the prefetched diff, and per-method errors.
 let postRound = 1;
@@ -170,6 +171,10 @@ const fakeCommenter: ReviewCommenter = {
   postDegraded: mock(async (input: unknown) => {
     commenterCalls.push({ op: "degrade", args: [input] });
     if (degradeError) throw degradeError;
+  }),
+  deleteDegradedComment: mock(async (input: unknown) => {
+    commenterCalls.push({ op: "delete-degraded", args: [input] });
+    if (deleteDegradedError) throw deleteDegradedError;
   }),
   fetchPrDiff: mock(async (input: unknown) => {
     commenterCalls.push({ op: "fetch-diff", args: [input] });
@@ -324,6 +329,7 @@ function reset(): void {
   tokenError = undefined;
   commentError = undefined;
   degradeError = undefined;
+  deleteDegradedError = undefined;
   postRound = 1;
   diffError = undefined;
   lineCommentsError = undefined;
@@ -425,12 +431,11 @@ describe("createReviewConsumer", () => {
       },
       timeout: 600_000,
     });
-    // Token minted once (shared for clone/diff); post happens BEFORE insert.
-    // Plan 18 T3 ordering: overall-comment upsert → diff prefetch →
-    // line-comments review (the qualifying finding anchors at line 21,
-    // inside VALID_DIFF's right hunk [18,23]).
+    // inside VALID_DIFF's right hunk [18,23]). BUG-01: the KV done fence
+    // and the degraded-comment delete (Bugbot) sit between the upsert and
+    // the line-comments step.
     expect(commenterCalls.filter((c) => c.op === "token")).toHaveLength(1);
-    expect(commenterCalls.map((c) => c.op)).toEqual(["token", "post", "fetch-diff", "line-comments"]);
+    expect(commenterCalls.map((c) => c.op)).toEqual(["token", "post", "delete-degraded", "fetch-diff", "line-comments"]);
     expect(commenterCalls[1]!.args[0]).toMatchObject({
       installationId: 123,
       owner: "acme",
@@ -441,7 +446,7 @@ describe("createReviewConsumer", () => {
     });
     // The line-comments input: same coordinates, the round the upsert
     // returned, and the capped findings array (B4 — same array as post/put).
-    expect(commenterCalls[3]!.args[0]).toMatchObject({
+    expect(commenterCalls[4]!.args[0]).toMatchObject({
       installationId: 123,
       owner: "acme",
       repo: "widgets",
@@ -595,14 +600,13 @@ describe("createReviewConsumer", () => {
     expect(rows).toHaveLength(1);
     expect(String(rows[0]!.error)).toContain(REDACTED);
     expect(String(rows[0]!.error)).not.toContain(token);
-    const warn = logLines.find((l) => l.level === "warn" && l.msg.includes("review degraded"));
-    expect(warn).toBeDefined();
-    expect(warn!.msg).toContain(REDACTED);
-    expect(warn!.msg).not.toContain(token);
-    // The commenter input still rides UNREDACTED — buildDegradedBody is the
-    // degraded chain's redaction choke point (unchanged by this fix).
+    // SEC-01: the degraded-comment input now arrives PRE-REDACTED (shape +
+    // exact-value passes applied before postDegraded) — the token never
+    // reaches the commenter, and buildDegradedBody's own redaction remains
+    // the in-module choke point for anything it adds.
     const degradeInput = commenterCalls.filter((c) => c.op === "degrade")[0]!.args[0] as { error: string };
-    expect(degradeInput.error).toContain(token);
+    expect(degradeInput.error).toContain(REDACTED);
+    expect(degradeInput.error).not.toContain(token);
     expect(messageAckCalls).toHaveLength(1);
   });
 
@@ -1546,8 +1550,9 @@ describe("line comments (plan 18 Task 3 / AL-3 layered delivery)", () => {
     await consumer(makeBatch(makePayload()));
 
     // Overall comment + persistence all landed; the diff is NOT even
-    // prefetched when the base filter is empty (no extra API call).
-    expect(commenterCalls.map((c) => c.op)).toEqual(["token", "post"]);
+    // prefetched when the base filter is empty (no extra API call). The
+    // degraded-comment delete scan still runs (no stale comment → no call).
+    expect(commenterCalls.map((c) => c.op)).toEqual(["token", "post", "delete-degraded"]);
     expect(reviewCount(db)).toBe(1);
     expect(kvPuts).toHaveLength(1);
     expect(destroyCalls).toBe(1);
@@ -1570,8 +1575,8 @@ describe("line comments (plan 18 Task 3 / AL-3 layered delivery)", () => {
 
     await consumer(makeBatch(makePayload()));
 
-    expect(commenterCalls.map((c) => c.op)).toEqual(["token", "post", "fetch-diff", "line-comments"]);
-    const lineInput = commenterCalls[3]!.args[0] as { findings: Array<{ title: string; line_end?: number }> };
+    expect(commenterCalls.map((c) => c.op)).toEqual(["token", "post", "delete-degraded", "fetch-diff", "line-comments"]);
+    const lineInput = commenterCalls[4]!.args[0] as { findings: Array<{ title: string; line_end?: number }> };
     // Only the hunk-internal finding survives the prefilter.
     expect(lineInput.findings.map((f) => f.title)).toEqual(["Inside"]);
 
@@ -1586,7 +1591,7 @@ describe("line comments (plan 18 Task 3 / AL-3 layered delivery)", () => {
     const db2 = createMigratedTestD1();
     const consumer2 = createReviewConsumer(makeEnv({ DB: db2 as never }), testLog, testOverrides);
     await consumer2(makeBatch(makePayload()));
-    expect(commenterCalls.map((c) => c.op)).toEqual(["token", "post", "fetch-diff"]);
+    expect(commenterCalls.map((c) => c.op)).toEqual(["token", "post", "delete-degraded", "fetch-diff"]);
     expect(reviewCount(db2)).toBe(1);
   });
 
@@ -1600,8 +1605,8 @@ describe("line comments (plan 18 Task 3 / AL-3 layered delivery)", () => {
     await consumer(makeBatch(makePayload()));
 
     // The createReview attempt still runs, on the UNFILTERED base set.
-    expect(commenterCalls.map((c) => c.op)).toEqual(["token", "post", "fetch-diff", "line-comments"]);
-    const lineInput = commenterCalls[3]!.args[0] as { findings: unknown[] };
+    expect(commenterCalls.map((c) => c.op)).toEqual(["token", "post", "delete-degraded", "fetch-diff", "line-comments"]);
+    const lineInput = commenterCalls[4]!.args[0] as { findings: unknown[] };
     expect(lineInput.findings).toHaveLength(1);
     // The prefetch failure is a plain warn — NOT a fallback (the attempt
     // proceeded), and the review completed normally.
@@ -1632,8 +1637,8 @@ describe("line comments (plan 18 Task 3 / AL-3 layered delivery)", () => {
 
     // The attempt still ran on the base-filtered set — the hunk-external
     // finding SURVIVED because the hunk layer never saw the diff.
-    expect(commenterCalls.map((c) => c.op)).toEqual(["token", "post", "fetch-diff", "line-comments"]);
-    const lineInput = commenterCalls[3]!.args[0] as { findings: unknown[] };
+    expect(commenterCalls.map((c) => c.op)).toEqual(["token", "post", "delete-degraded", "fetch-diff", "line-comments"]);
+    const lineInput = commenterCalls[4]!.args[0] as { findings: unknown[] };
     expect(lineInput.findings).toHaveLength(1);
     const warn = logLines.find((l) => l.level === "warn" && l.msg.includes("diff prefetch failed"));
     expect(warn).toBeDefined();
@@ -1661,7 +1666,7 @@ describe("line comments (plan 18 Task 3 / AL-3 layered delivery)", () => {
       // comments.
       await consumer(makeBatch(makePayload()));
 
-      expect(commenterCalls.map((c) => c.op)).toEqual(["token", "post", "fetch-diff", "line-comments"]);
+      expect(commenterCalls.map((c) => c.op)).toEqual(["token", "post", "delete-degraded", "fetch-diff", "line-comments"]);
       const fallback = logLines.find((l) => l.fields.line_comments_fallback === true);
       expect(fallback).toBeDefined();
       expect(fallback!.level).toBe("warn");
@@ -1676,17 +1681,90 @@ describe("line comments (plan 18 Task 3 / AL-3 layered delivery)", () => {
       expect(destroyCalls).toBe(1);
     }
   });
+});
 
-  test("the line-comments round pins to the round the overall upsert returned", async () => {
+describe("degraded-comment lifecycle (Bugbot finding)", () => {
+  test("success flow with a pre-existing degraded comment → the delete scan runs after the upsert", async () => {
     reset();
     runnerStdout = JSON.stringify(VALID_OUTPUT);
-    postRound = 4;
     const db = createMigratedTestD1();
     const consumer = createReviewConsumer(makeEnv({ DB: db as never }), testLog, testOverrides);
 
     await consumer(makeBatch(makePayload()));
 
-    const lineInput = commenterCalls.find((c) => c.op === "line-comments")!.args[0] as { round: number };
-    expect(lineInput.round).toBe(4);
+    // The delete scan runs between the overall upsert and the line-comments
+    // step (the fake's deleteDegradedComment records the call; the real
+    // implementation scans + deletes the stale bot-authored comment).
+    expect(commenterCalls.map((c) => c.op)).toEqual(["token", "post", "delete-degraded", "fetch-diff", "line-comments"]);
+    const deleteInput = commenterCalls.find((c) => c.op === "delete-degraded")!.args[0] as {
+      installationId: number;
+      owner: string;
+      repo: string;
+      prNumber: number;
+    };
+    expect(deleteInput).toMatchObject({ installationId: 123, owner: "acme", repo: "widgets", prNumber: 42 });
+    expect(reviewCount(db)).toBe(1);
+    expect(kvPuts).toHaveLength(1);
+    // The ok path resolves silently (queue auto-ack) — nothing retried.
+    expect(messageRetryCalls).toHaveLength(0);
+  });
+});
+
+describe("SEC-01 exact-value redaction through the consumer", () => {
+  test("a UUID-shaped provider key in the runner env never reaches the comment body or the D1 envelope", async () => {
+    reset();
+    // A UUID-shaped key evades every shape pattern — only the exact-value
+    // pass (sessionSecretValues from the runner env) can remove it.
+    const uuidKey = "3f2a1b4c-9d8e-4f6a-b7c2-1e0d9a8b7c6d";
+    runnerStdout = JSON.stringify({
+      ...VALID_OUTPUT,
+      summary_md: `leaked ${uuidKey} in the summary`,
+      findings: [
+        { ...VALID_OUTPUT.findings[0]!, body: `body ${uuidKey}` },
+      ],
+    });
+    const db = createMigratedTestD1();
+    const consumer = createReviewConsumer(
+      makeEnv({ DB: db as never, GEMINI_API_KEY: uuidKey }),
+      testLog,
+      testOverrides,
+    );
+
+    await consumer(makeBatch(makePayload()));
+
+    // The posted comment body never carries the key.
+    const postInput = commenterCalls.find((c) => c.op === "post")!.args[0] as { output: ReviewOutput };
+    expect(JSON.stringify(postInput.output)).not.toContain(uuidKey);
+    // The D1 envelope never carries the key either.
+    const row = db.raw.query("SELECT envelope FROM reviews").get() as { envelope: string };
+    expect(row.envelope).not.toContain(uuidKey);
+    expect(row.envelope).toContain(REDACTED);
+  });
+
+  test("the minted installation token is exact-redacted from the degraded comment input", async () => {
+    reset();
+    tokenResult = "ghs_installation_token";
+    // The parse error echoes the installation token verbatim (a
+    // prompt-injected echo) — the exact-value pass must remove it before
+    // postDegraded and the failure row.
+    runnerStdout = JSON.stringify({
+      schema: "mstar.review/v1",
+      verdict: "ghs_installation_token",
+      summary_md: "x",
+      findings: [],
+    });
+    const db = createMigratedTestD1();
+    const consumer = createReviewConsumer(makeEnv({ DB: db as never }), testLog, testOverrides);
+
+    await consumer(makeBatch(makePayload())); // resolves — acked
+
+    const degradeInput = commenterCalls.filter((c) => c.op === "degrade")[0]!.args[0] as {
+      error: string;
+      rawOutput: string;
+    };
+    expect(degradeInput.error).not.toContain("ghs_installation_token");
+    expect(degradeInput.rawOutput).not.toContain("ghs_installation_token");
+    const rows = failureRows(db);
+    expect(String(rows[0]!.error)).not.toContain("ghs_installation_token");
   });
 });

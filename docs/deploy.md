@@ -109,6 +109,14 @@ smoke → record the digest.
    cron trigger) and rebuilds/pushes the container image when the build
    context changed. **Copy the image digest from the deploy output.**
 5. Record the digest + deploy date in § Image pins and digest record below.
+   **Digest drift check (DOCS-01):** after every deploy, verify the live
+   version + image against the recorded line —
+   ```bash
+   wrangler deployments list   # or: wrangler versions list
+   ```
+   Compare the live Worker version and the container image digest with the
+   record in § Image pins and digest record; update the record on EVERY
+   deploy (a stale record makes the "which image is live" audit wrong).
 
 ## Post-deploy smoke
 
@@ -277,3 +285,29 @@ Deployed image record (executed plan 19 T3, 2026-08-31 UTC):
 - `ALERT_WEBHOOK_URL` (NEW, optional, secret class): generic alert webhook
   for the sweep — set via `wrangler secret put ALERT_WEBHOOK_URL`
   (`.dev.vars` locally). Unset = log-only alerting.
+
+## Maintenance (DEBT-01)
+
+`review_failures` is an append-only per-attempt event log: a DLQ'd message
+leaves up to 4 rows (1 initial delivery + max_retries = 3 retries), so the
+table grows with every failed attempt. Retention is **runbook-executed** —
+the cron sweep is read-only by design (AL-6) and must never mutate D1.
+
+Monthly (or when the table grows noticeably), delete rows older than 30
+days:
+
+```bash
+wrangler d1 execute mstar-inspector-db --remote --command \
+  "DELETE FROM review_failures WHERE created_at < datetime('now','-30 days')"
+```
+
+Notes:
+
+- The DELETE is bounded by `idx_review_failures_created` (migration 0010) —
+  the same index the sweep's trailing-window scan uses, so the maintenance
+  cost stays proportional to the deleted window, not the table size.
+- `created_at` is ALWAYS the column DEFAULT `datetime('now')` format
+  (`YYYY-MM-DD HH:MM:SS` UTC) — the TEXT comparison above depends on it
+  (see `src/store/failure-store.ts` header, BUG-03 contract).
+- The sweep's 24h window is unaffected: 30-day retention never touches
+  in-window rows.

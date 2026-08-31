@@ -21,6 +21,7 @@ import { Hono } from "hono";
 import type { ExecutionContext, MessageBatch, ScheduledController } from "@cloudflare/workers-types";
 import type { Env, ScheduledEnv } from "./env";
 import { defaultSweepLog, runSweep } from "./sweep";
+import { redactSecrets } from "../pipeline/redact";
 import type { ReviewJobPayload } from "../contracts/review-job";
 import type { PipelineEnv } from "../pipeline/consumer";
 import { classifyWebhook, WEBHOOK_BODY_LIMIT } from "./webhooks";
@@ -301,8 +302,14 @@ export default {
       }
       await runSweep(env.DB, { alertUrl: env.ALERT_WEBHOOK_URL });
     } catch (error) {
+      // SEC-03: the sweep-failure detail is redacted before the warn line —
+      // an infra error can interpolate a secret-shaped value
+      // (defense-in-depth; clean strings pass through unchanged).
       defaultSweepLog.warn(
-        { event: "ops_sweep_failed", detail: error instanceof Error ? error.message : String(error) },
+        {
+          event: "ops_sweep_failed",
+          detail: redactSecrets(error instanceof Error ? error.message : String(error)),
+        },
         "ops sweep failed",
       );
     }

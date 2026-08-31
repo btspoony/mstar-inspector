@@ -14,6 +14,7 @@ import { describe, expect, mock, test } from "bun:test";
 import type { D1Database, ExecutionContext, ScheduledController } from "@cloudflare/workers-types";
 import { createFailureStore } from "../../src/store/failure-store";
 import { createMigratedTestD1 } from "../store/helpers";
+import { defaultSweepLog } from "../../src/worker/sweep";
 
 mock.module("@cloudflare/sandbox", () => ({
   getSandbox: mock(() => ({})),
@@ -108,12 +109,22 @@ describe("worker entry scheduled wiring (plan 19 T1)", () => {
       fetchCalls++;
       return new Response("ok");
     }) as unknown as typeof fetch;
+    // TEST-01: capture the handler's warn events through the sweep log sink.
+    const warnCalls: Array<{ fields: Record<string, unknown>; msg?: string }> = [];
+    const originalWarn = defaultSweepLog.warn;
+    defaultSweepLog.warn = (fields, msg) => void warnCalls.push({ fields: fields as Record<string, unknown>, msg });
     try {
       await worker.scheduled(NOOP_CONTROLLER, makeEnv({ ALERT_WEBHOOK_URL: "https://ops.example/hook" }), NOOP_CTX);
     } finally {
       globalThis.fetch = originalFetch;
+      defaultSweepLog.warn = originalWarn;
     }
     expect(fetchCalls).toBe(0);
+    // The DB-unbound case fires the `ops_sweep_db_unbound` event with the
+    // binding-missing detail (TEST-01).
+    expect(warnCalls).toHaveLength(1);
+    expect(warnCalls[0]!.fields.event).toBe("ops_sweep_db_unbound");
+    expect(warnCalls[0]!.fields.detail).toContain("DB binding missing");
   });
 
   test("scheduled never throws when the sweep itself fails", async () => {
@@ -123,8 +134,19 @@ describe("worker entry scheduled wiring (plan 19 T1)", () => {
       },
       batch: async () => [],
     };
-    await expect(
-      worker.scheduled(NOOP_CONTROLLER, makeEnv({ DB: brokenDb as unknown as D1Database }), NOOP_CTX),
-    ).resolves.toBeUndefined();
+    // TEST-01: the throwing-sweep case fires the `ops_sweep_failed` event.
+    const warnCalls: Array<{ fields: Record<string, unknown>; msg?: string }> = [];
+    const originalWarn = defaultSweepLog.warn;
+    defaultSweepLog.warn = (fields, msg) => void warnCalls.push({ fields: fields as Record<string, unknown>, msg });
+    try {
+      await expect(
+        worker.scheduled(NOOP_CONTROLLER, makeEnv({ DB: brokenDb as unknown as D1Database }), NOOP_CTX),
+      ).resolves.toBeUndefined();
+    } finally {
+      defaultSweepLog.warn = originalWarn;
+    }
+    expect(warnCalls).toHaveLength(1);
+    expect(warnCalls[0]!.fields.event).toBe("ops_sweep_failed");
+    expect(warnCalls[0]!.fields.detail).toContain("d1 down");
   });
 });

@@ -491,6 +491,14 @@ export type ReviewCommenter = {
    */
   postDegraded(input: PostDegradedInput): Promise<void>;
   /**
+   * Delete a stale bot-authored `review-degraded:v1` comment (Bugbot
+   * finding — degraded-comment lifecycle): the success path calls this
+   * best-effort once a real review supersedes the degradation. Throws on
+   * any Octokit error — the consumer's never-throw guard is the catch
+   * site (a delete failure is a structured warn, never a review blocker).
+   */
+  deleteDegradedComment(input: PostDegradedInput): Promise<void>;
+  /**
    * Fetch the PR diff as a unified-diff string (plan 18 Task 3 / AL-3):
    * `pulls.get` + `mediaType: { format: "diff" }` — the hunk prefilter input.
    * Throws on a missing surface or a non-diff response; the consumer treats
@@ -531,6 +539,13 @@ export type PostOctokit = {
       listComments: (parameters: Record<string, unknown>) => Promise<{ data: ReviewComment[] }>;
       updateComment: (parameters: Record<string, unknown>) => Promise<unknown>;
       createComment: (parameters: Record<string, unknown>) => Promise<unknown>;
+      /**
+       * Issues comments delete (Bugbot finding — degraded-comment
+       * lifecycle): the success path removes a stale bot-authored
+       * `review-degraded:v1` comment once a real review supersedes it.
+       * Optional and guarded — the marker-comment chains never touch it.
+       */
+      deleteComment?: (parameters: Record<string, unknown>) => Promise<unknown>;
     };
     /**
      * Pulls surface for plan 18 Task 3 line comments: `get` with
@@ -674,6 +689,47 @@ export async function postDegradedWithOctokit(octokit: PostOctokit, input: PostD
     (round) => buildDegradedBody({ error: input.error, rawOutput: input.rawOutput, round }),
     "degraded",
   );
+}
+
+/**
+ * Delete a stale bot-authored `review-degraded:v1` comment (Bugbot finding —
+ * degraded-comment lifecycle): scan the FULL comment list (same WF-001
+ * pagination as the upsert — the marker can sit beyond page 1 on a busy
+ * PR), and when OUR degraded comment exists, DELETE it via the Issues
+ * comments API. The successful review supersedes the degradation, so the
+ * stale "Review degraded" comment must not outlive it. App-authored only
+ * (findDegradedComment's bot-authorship gate) — a human-planted marker is
+ * never touched. No degraded comment → no API call. Throws on any Octokit
+ * error — the consumer's never-throw guard is the catch site (a delete
+ * failure is a structured warn, never a review blocker).
+ */
+export async function deleteDegradedCommentWithOctokit(
+  octokit: PostOctokit,
+  input: PostDegradedInput,
+): Promise<void> {
+  const issues = octokit.rest?.issues;
+  if (
+    !issues?.listComments ||
+    !issues?.deleteComment ||
+    typeof octokit.paginate !== "function"
+  ) {
+    throw new Error(
+      "octokit is missing rest.issues.listComments/deleteComment / paginate — cannot delete the degraded comment; check the injected auth surface",
+    );
+  }
+  const comments = await octokit.paginate(issues.listComments, {
+    owner: input.owner,
+    repo: input.repo,
+    issue_number: input.prNumber,
+    per_page: 100,
+  });
+  const existing = findDegradedComment(comments);
+  if (existing === null) return;
+  await issues.deleteComment({
+    owner: input.owner,
+    repo: input.repo,
+    comment_id: existing.id,
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -959,6 +1015,9 @@ export function createReviewCommenter(env: CommenterEnv): ReviewCommenter {
     },
     async postDegraded(input) {
       await postDegradedWithOctokit(await getOctokit(input.installationId), input);
+    },
+    async deleteDegradedComment(input) {
+      await deleteDegradedCommentWithOctokit(await getOctokit(input.installationId), input);
     },
     async fetchPrDiff(input) {
       return fetchPrDiffWithOctokit(await getOctokit(input.installationId), input);

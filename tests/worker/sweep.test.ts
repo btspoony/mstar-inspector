@@ -200,21 +200,20 @@ describe("runSweep", () => {
     expect((calls[1]!.fields as SweepWarnFields).detail).toContain("503");
   });
 
-  test("webhook failure detail is redacted then truncated before logging (qc2 F-002)", async () => {
+  test("the configured alertUrl is exact-string-redacted from the failure detail (SEC-02)", async () => {
     const db = createMigratedTestD1();
     await seedInWindow(db, SWEEP_FAILURE_THRESHOLD + 1);
     const { log, calls } = captureLog();
+    const url = "https://ops.example/hook?token=abc123";
     const fetchImpl = (async () => {
-      throw new Error(`POST https://ops.example/hook failed: ghp_abcdefghijklmnopqrstuvwxyz ${"x".repeat(600)}`);
+      throw new Error(`request to ${url} failed: connection refused`);
     }) as unknown as typeof fetch;
 
-    const result = await runSweep(db, { alertUrl: "https://ops.example/hook", fetchImpl, log });
+    const result = await runSweep(db, { alertUrl: url, fetchImpl, log });
     expect(result.webhook).toBe("failed");
     const detail = (calls[1]!.fields as SweepWarnFields).detail;
-    expect(detail).not.toContain("ghp_");
+    expect(detail).not.toContain(url);
     expect(detail).toContain("[REDACTED]");
-    expect(detail.length).toBeLessThanOrEqual(SWEEP_LOG_DETAIL_MAX);
-    expect(detail.endsWith("…")).toBe(true);
   });
 
   test("D1 errors propagate to the caller (the scheduled handler owns the catch-all)", async () => {

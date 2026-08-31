@@ -37,6 +37,17 @@ const SECRET_PATTERNS: RegExp[] = [
   // Key/secret assignment-ish references: `ARK_API_KEY=...`, `API_KEY: ...`,
   // `TOKEN "..."`, `SECRET = ...` (Phase 5 B2 pattern, verbatim).
   /\b(?:ARK_API_KEY|API_KEY|TOKEN|SECRET)["'\s:=]+\S+/g,
+  // Provider-key assignment lines (SEC-01): `GEMINI_API_KEY=…`,
+  // `CURSOR_ACCESS_TOKEN=…`, `AZURE_OPENAI_API_KEY=…` — the `_` before
+  // API_KEY/ACCESS_TOKEN/TOKEN/SECRET is a word char, so the alternation
+  // above cannot see past it; this form anchors on the full `PREFIX_SUFFIX`
+  // name (the old alternation keeps working for the bare names).
+  /\b[A-Z0-9][A-Z0-9_]*_(?:API_KEY|ACCESS_TOKEN|TOKEN|SECRET)["'\s:=]+\S+/g,
+  // Forwarded-provider value shapes (SEC-01): Gemini / Groq / xAI keys —
+  // bare-value forms that may appear without an assignment line.
+  /AIza[0-9A-Za-z_-]{30,}/g,
+  /gsk_[A-Za-z0-9]{20,}/g,
+  /xai-[A-Za-z0-9]{20,}/g,
   // Long hex strings (40+ chars — git object ids, API key material).
   /\b[0-9a-fA-F]{40,}\b/g,
 ];
@@ -46,6 +57,23 @@ export function redactSecrets(text: string): string {
   let out = text;
   for (const pattern of SECRET_PATTERNS) {
     out = out.replace(pattern, REDACTED);
+  }
+  return out;
+}
+
+/**
+ * Exact-value redaction (SEC-01 defense-in-depth): replace every occurrence
+ * of each distinct non-empty value with `[REDACTED]`. This is the strongest
+ * defense — a credential that evades every shape pattern (e.g. a UUID-ish
+ * key) is still removed verbatim. Returns `text` unchanged when `values` is
+ * empty. Callers pass the ACTUAL secret values the session used (runner env
+ * provider keys + the minted installation token).
+ */
+export function redactExactSecrets(text: string, values: readonly string[]): string {
+  let out = text;
+  for (const value of new Set(values)) {
+    if (value === "") continue;
+    out = out.split(value).join(REDACTED);
   }
   return out;
 }
@@ -76,6 +104,34 @@ export function redactReviewOutput(output: ReviewOutput): ReviewOutput {
       ...(finding.fingerprint_hint === undefined
         ? {}
         : { fingerprint_hint: redactSecrets(finding.fingerprint_hint) }),
+    })),
+  };
+}
+
+/**
+ * Exact-value second pass over a ReviewOutput (SEC-01): after
+ * redactReviewOutput's shape-based pass, replace the ACTUAL secret values
+ * the session used (runner env provider keys + the minted installation
+ * token) in every model-controlled string. A credential that evades every
+ * shape pattern is still removed verbatim before the output reaches the
+ * public review body or the D1 envelope. Structural fields are untouched.
+ */
+export function redactReviewOutputExact(output: ReviewOutput, values: readonly string[]): ReviewOutput {
+  return {
+    ...output,
+    summary_md: redactExactSecrets(output.summary_md, values),
+    ...(output.tally === undefined
+      ? {}
+      : { tally: { ...output.tally, chatHeader: redactExactSecrets(output.tally.chatHeader, values) } }),
+    findings: output.findings.map((finding) => ({
+      ...finding,
+      title: redactExactSecrets(finding.title, values),
+      body: redactExactSecrets(finding.body, values),
+      ...(finding.category === undefined ? {} : { category: redactExactSecrets(finding.category, values) }),
+      ...(finding.file_path == null ? {} : { file_path: redactExactSecrets(finding.file_path, values) }),
+      ...(finding.fingerprint_hint === undefined
+        ? {}
+        : { fingerprint_hint: redactExactSecrets(finding.fingerprint_hint, values) }),
     })),
   };
 }

@@ -37,6 +37,11 @@ describe("createFailureStore", () => {
     });
     expect(typeof rows[0]!.id).toBe("string");
     expect(rows[0]!.id).toMatch(/^[0-9a-f-]{36}$/);
+    // BUG-03 created_at contract: `record` NEVER writes created_at — the
+    // column is ALWAYS the DDL DEFAULT `datetime('now')` (migration 0010),
+    // i.e. the `YYYY-MM-DD HH:MM:SS` UTC format the sweep's TEXT window
+    // comparison depends on. A producer writing ISO-8601/epoch would
+    // silently break the sweep — this pin is the guard.
     expect(rows[0]!.created_at).toMatch(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/);
   });
 

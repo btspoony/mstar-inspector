@@ -38,6 +38,7 @@ import {
   parseReviewRound,
   planDegradedUpsert,
   planUpsert,
+  deleteDegradedCommentWithOctokit,
   postDegradedWithOctokit,
   postReviewWithOctokit,
   renderFindings,
@@ -738,6 +739,79 @@ describe("postDegraded wiring (mock octokit)", () => {
     const recovery = mockOctok([degradedBotMarker(7, 2)], notFound);
     await postDegradedWithOctokit(recovery.octokit, degradeInput);
     expect(String(recovery.calls.createParams!.body)).toMatch(/^<!-- mstar-inspector:review-degraded:v1 round=1 -->/);
+  });
+});
+
+describe("deleteDegradedComment wiring (mock octokit, Bugbot lifecycle)", () => {
+  const degradeInput = {
+    installationId: 1,
+    owner: "acme",
+    repo: "widgets",
+    prNumber: 42,
+    error: "",
+    rawOutput: "",
+  };
+
+  type DeleteCalls = {
+    listParams?: Record<string, unknown>;
+    deleteParams?: Record<string, unknown>;
+  };
+
+  function mockOctok(comments: MockComment[], deleteError?: unknown) {
+    const calls: DeleteCalls = {};
+    const octokit: PostOctokit = {
+      paginate: mock(
+        async (route: unknown, params: Record<string, unknown>): Promise<MockComment[]> => {
+          calls.listParams = params;
+          return comments;
+        },
+      ),
+      rest: {
+        issues: {
+          listComments: mock(async () => {
+            throw new Error("unexpected: listComments is driven through paginate");
+          }),
+          updateComment: mock(async () => {
+            throw new Error("unexpected: no update on the delete path");
+          }),
+          createComment: mock(async () => {
+            throw new Error("unexpected: no create on the delete path");
+          }),
+          deleteComment: mock(async (params: Record<string, unknown>) => {
+            calls.deleteParams = params;
+            if (deleteError) throw deleteError;
+            return {};
+          }),
+        },
+      },
+    };
+    return { calls, octokit };
+  }
+
+  test("a bot-authored degraded comment is deleted via the Issues comments API", async () => {
+    const { calls, octokit } = mockOctok([degradedBotMarker(7, 2)]);
+    await deleteDegradedCommentWithOctokit(octokit, degradeInput);
+    expect(calls.listParams).toEqual({ owner: "acme", repo: "widgets", issue_number: 42, per_page: 100 });
+    expect(calls.deleteParams).toEqual({ owner: "acme", repo: "widgets", comment_id: 7 });
+  });
+
+  test("no degraded comment → no delete call", async () => {
+    const { calls, octokit } = mockOctok([{ id: 1, body: "a human comment", user: { type: "User" } }]);
+    await deleteDegradedCommentWithOctokit(octokit, degradeInput);
+    expect(calls.deleteParams).toBeUndefined();
+  });
+
+  test("a human-planted degraded marker is never deleted (bot-authorship gate)", async () => {
+    const { calls, octokit } = mockOctok([
+      { id: 9, body: "<!-- mstar-inspector:review-degraded:v1 round=5 -->\nplanted", user: { type: "User" } },
+    ]);
+    await deleteDegradedCommentWithOctokit(octokit, degradeInput);
+    expect(calls.deleteParams).toBeUndefined();
+  });
+
+  test("delete errors propagate — the consumer's never-throw guard is the catch site", async () => {
+    const { octokit } = mockOctok([degradedBotMarker(7, 2)], new Error("rate limited"));
+    await expect(deleteDegradedCommentWithOctokit(octokit, degradeInput)).rejects.toThrow("rate limited");
   });
 });
 

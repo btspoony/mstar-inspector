@@ -23,7 +23,7 @@
  */
 
 import type { ConsumerLog } from "../pipeline/consumer";
-import { redactSecrets } from "../pipeline/redact";
+import { redactExactSecrets, redactSecrets } from "../pipeline/redact";
 import type { D1Like } from "../store/types";
 import type { WebhookStageWarnLog } from "./handlers";
 
@@ -112,8 +112,14 @@ export type SweepResult = {
  */
 export async function runSweep(db: D1Like, deps: SweepDeps = {}): Promise<SweepResult> {
   const log = deps.log ?? defaultSweepLog;
+  // The window modifier is built from SWEEP_WINDOW_HOURS (the constant is
+  // the single source) so the SQL cannot drift from the pinned threshold
+  // table. The composed text is byte-identical to the pre-constant form
+  // (`datetime('now', '-24 hours')`), keeping the pinned SQL test green.
   const row = await db
-    .prepare(`SELECT COUNT(*) AS n FROM review_failures WHERE created_at > datetime('now', '-24 hours')`)
+    .prepare(
+      `SELECT COUNT(*) AS n FROM review_failures WHERE created_at > datetime('now', '-${SWEEP_WINDOW_HOURS} hours')`,
+    )
     .first<{ n: number }>();
   const failures24h = row?.n ?? 0;
   const thresholdBreached = failures24h > SWEEP_FAILURE_THRESHOLD;
@@ -151,7 +157,10 @@ export async function runSweep(db: D1Like, deps: SweepDeps = {}): Promise<SweepR
     // Redact BEFORE truncate (repo convention: a secret straddling the cut
     // would leak a partial token) — ALERT_WEBHOOK_URL is secret-class and a
     // runtime may interpolate the request URL into the error message.
-    const detail = redactSecrets(error instanceof Error ? error.message : String(error));
+    // SEC-02: additionally exact-string-replace the configured alertUrl
+    // itself (a URL-shaped value evades the shape patterns) when present.
+    const raw = error instanceof Error ? error.message : String(error);
+    const detail = redactExactSecrets(redactSecrets(raw), deps.alertUrl ? [deps.alertUrl] : []);
     log.warn(
       {
         event: "ops_sweep_alert_webhook_failed",
