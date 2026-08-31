@@ -6,8 +6,8 @@
  * extraheader env) → `git rev-parse HEAD` for the AUTHORITATIVE sha →
  * dedup by that sha (hit → ack) → diff → numstat (the seat-partition
  * universe) → write the runner `--input` JSON (reconFacts, plus the per-App
- * `modelOverrides` role map for app-path messages — plan 17 B6; legacy /
- * unmapped App = byte-identical payload) → exec the
+ * `modelOverrides` role map — plan 17 B6; no-map App = byte-identical
+ * payload) → exec the
  * in-image runner `--level <quick|default|deep>` (exec env =
  * ARK_API_KEY/PI_CODING_AGENT_DIR/HARNESS_PLUGIN_ROOT + OMP_REVIEW_MODEL and
  * configured provider keys — per-App messages assemble BYOK keys/model chain
@@ -82,8 +82,6 @@ import { createSecretbox } from "../dashboard/secretbox";
 import { createAppConfigStore, type CustomProviderConsumerConfig } from "../dashboard/app-config-store";
 
 export type PipelineEnv = {
-  APP_ID: string;
-  PRIVATE_KEY: string;
   OMP_MODEL_KEY: string; // omp model key; injected into the container as ARK_API_KEY
   DB: D1Database;
   IDEMPOTENCY_KV: KVNamespace;
@@ -102,8 +100,7 @@ export type PipelineEnv = {
    * Worker secret the dashboard write face uses, src/dashboard/secretbox.ts).
    * Missing / malformed → SecretboxKeyError → per-App resolution fails
    * closed (structured error + the existing retry/DLQ semantics, zero GitHub
-   * writes); the legacy env-App path is unaffected. This face reads the key
-   * only — the consumer never encrypts.
+   * writes). This face reads the key only — the consumer never encrypts.
    */
   DASHBOARD_ENCRYPTION_KEY?: string;
   /**
@@ -442,11 +439,9 @@ type ProcessDeps = {
    * never masks the ack or the rethrow).
    */
   failureStore: FailureStore;
-  commenter: ReviewCommenter;
   /**
    * Per-App commenter instance cache keyed by appId (plan 13 Task 2, lock
-   * L4; plan 15 hardening item 1 / architect lock L1), beside the legacy
-   * env singleton above. Entry = `{ commenter, fingerprint }` where the
+   * L4; plan 15 hardening item 1 / architect lock L1). Entry = `{ commenter, fingerprint }` where the
    * fingerprint is the EXACT string pair `github_app_id` +
    * `private_key_enc` (the envelope as stored) from the per-message row the
    * resolver already re-reads: a fingerprint match reuses the instance
@@ -640,7 +635,7 @@ export type RunnerAppConfig = {
  * keys live only in this call's memory and the assembled exec env — never
  * logged, never in queue payloads or errors.
  */
-async function resolveAppConfig(payload: ReviewJobPayload, deps: ProcessDeps): Promise<RunnerAppConfig | undefined> {
+async function resolveAppConfig(payload: ReviewJobPayload, deps: ProcessDeps): Promise<RunnerAppConfig> {
   const appRef = payload.appRef;
   try {
     const cfg = await createAppConfigStore(
@@ -818,12 +813,10 @@ function chainHeadSelector(chain: string | undefined): string | null {
  * time, never a junk key. Every custom injection logs `key_source: "custom"`
  * with the id + env name, NEVER the key.
  *
- * Legacy (`appCfg` undefined) is byte-identical to the pre-plan-14 assembly
- * and logs nothing (pinned by tests/pipeline/consumer.test.ts).
  */
 export function buildRunnerEnv(
   env: PipelineEnv,
-  appCfg?: RunnerAppConfig,
+  appCfg: RunnerAppConfig,
   log?: ConsumerLog,
   fields?: ConsumerLogFields,
   customProviders?: readonly CustomProviderConsumerConfig[],
@@ -835,10 +828,6 @@ export function buildRunnerEnv(
   };
   if (env.OMP_REVIEW_MODEL !== undefined && env.OMP_REVIEW_MODEL !== "") {
     runnerEnv.OMP_REVIEW_MODEL = env.OMP_REVIEW_MODEL;
-  }
-  if (appCfg === undefined) {
-    Object.assign(runnerEnv, pickProviderKeys(env as Record<string, unknown>));
-    return runnerEnv;
   }
   // Log only when the caller supplied BOTH the sink and the identity fields
   // (the consumer flow does; direct unit calls may omit them).
@@ -887,7 +876,7 @@ export function buildRunnerEnv(
   // 2b. Custom-provider keys (plan 23 Task 3, AL-23-1): each declaration's
   //     decrypted key under CUSTOM_<UPPER_SNAKE(provider_id)>_API_KEY — the
   //     env name the synthesized models.yml references. Only per-App
-  //     messages carry declarations (resolveCustomProviders gates legacy).
+  //     messages carry declarations (resolveCustomProviders).
   //     key_source: "custom" logs the id + env name, NEVER the key.
   if (customProviders !== undefined && customProviders.length > 0) {
     for (const decl of customProviders) {
@@ -985,14 +974,13 @@ async function kvDoneHit(
  * defaults to the production implementation when omitted.
  */
 type ConsumerOverrides = Partial<
-  Pick<ProcessDeps, "store" | "failureStore" | "commenter" | "createAppCommenter" | "getSandbox">
+  Pick<ProcessDeps, "store" | "failureStore" | "createAppCommenter" | "getSandbox">
 >;
 
 /**
  * Create the queue consumer. The store and commenters are created once per
- * consumer instance (the legacy env-App commenter memoizes the app-auth
- * installation-token cache across messages; per-App instances live in the
- * appCommenters Map — one per appId, plan 13 Task 2 lock L4). Each message
+ * consumer instance (per-App commenter instances live in the appCommenters
+ * Map — one per appId, plan 13 Task 2 lock L4). Each message
  * gets its own sandbox, destroyed in finally; failures rethrow so the queue
  * retries and eventually DLQs.
  *
@@ -1011,7 +999,6 @@ export function createReviewConsumer(
     env,
     store: overrides.store ?? createArtifactStore(env.DB),
     failureStore: overrides.failureStore ?? createFailureStore(env.DB),
-    commenter: overrides.commenter ?? createReviewCommenter(env),
     appCommenters: new Map(),
     createAppCommenter: overrides.createAppCommenter ?? createReviewCommenter,
     getSandbox: overrides.getSandbox ?? ((binding, id) => getSandbox(binding, id)),
@@ -1094,7 +1081,7 @@ async function processMessage(payload: ReviewJobPayload, deps: ProcessDeps): Pro
     // without touching the in-flight guard.
     level = resolveReviewLevel(deps.env.REVIEW_LEVEL);
     // Credential resolution FIRST (plan 13 Task 2, lock L4 — consumer-side),
-    // before the guard/sandbox: legacy → env singleton; app → D1 row gated
+    // before the guard/sandbox: app → D1 row gated
     // missing/deleted/disabled (throw → retry/DLQ, byte-identical) then
     // PAUSED (plan 16 lock L4: DISTINCT typed outcome, below) → decrypted
     // PEM → per-App commenter instance (cached per appId). An unresolvable
@@ -1272,15 +1259,15 @@ async function processMessage(payload: ReviewJobPayload, deps: ProcessDeps): Pro
       ...numstatLines,
     ];
     // Plan 17 B6: the App's per-role model overrides ride as an OPTIONAL
-    // input field, included ONLY when a role map resolved above — legacy /
-    // unmapped messages serialize byte-identically to the pre-plan-17 payload
+    // input field, included ONLY when a role map resolved above — no-map
+    // messages serialize byte-identically to the pre-plan-17 payload
     // (the runner-side guard + type extension are plan 17 Task 2's).
     // Plan 23 T3: the App's custom-provider declarations ride as an OPTIONAL
     // input field — keyless (toRunnerCustomProvider strips the decrypted
     // key; keys reach the container ONLY via the exec env) — included ONLY
-    // when declarations resolved above. Legacy / no-declaration messages
-    // serialize byte-identically to the pre-plan-23 payload (the runner-side
-    // guard + synthesis are plan 23 Task 3's).
+    // when declarations resolved above. No-declaration messages serialize
+    // byte-identically to the pre-plan-23 payload (the runner-side guard +
+    // synthesis are plan 23 Task 3's).
     const runnerInput = {
       worktreePath: CLONE_DIR,
       reconFacts,

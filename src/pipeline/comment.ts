@@ -40,8 +40,9 @@
  * collapse; both chains share the scan/upsert/403-404-replan mechanics
  * (upsertMarkerComment).
  *
- * Secrets: APP_ID/PRIVATE_KEY come from the Worker env; the installation
- * token is minted in memory and never logged or stored (compass D).
+ * Secrets: APP_ID/PRIVATE_KEY come from the D1 row's decrypted per-App
+ * credentials; the installation token is minted in memory and never logged
+ * or stored (compass D).
  * Model-produced text (summary/finding bodies) is redacted BEFORE it reaches
  * this module (consumer choke point, SEC-02 fix) so a prompt-injected token
  * can never appear in the public review body or D1 raw_output. The DEGRADED
@@ -1089,11 +1090,10 @@ export async function postLineCommentsWithOctokit(
  *
  * This factory is the ONLY createAppAuth construction point in the pipeline
  * (architect lock L4, plan 13): every credential enters through the
- * `CommenterEnv` parameter — the legacy env-App singleton and every per-App
- * instance (consumer-side appRef resolution, src/pipeline/consumer.ts) are
- * built here, one instance per credential so each App keeps its own
- * installation-token cache. Octokit construction stays inside this module;
- * call sites never duplicate it.
+ * `CommenterEnv` parameter — every per-App instance (consumer-side appRef
+ * resolution, src/pipeline/consumer.ts) is built here, one instance per
+ * credential so each App keeps its own installation-token cache. Octokit
+ * construction stays inside this module; call sites never duplicate it.
  */
 export function createReviewCommenter(env: CommenterEnv): ReviewCommenter {
   let appAuth: AppAuthStrategy | null = null;

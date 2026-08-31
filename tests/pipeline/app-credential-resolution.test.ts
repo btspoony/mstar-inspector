@@ -135,37 +135,10 @@ mock.module("@cloudflare/sandbox", () => ({
 
 type CommenterCall = { op: "token" | "post" | "degrade"; installationId?: number };
 /** Calls grouped by instance — same-instance assertions key off this. */
-const legacyCalls: CommenterCall[] = [];
 const appCalls: Array<{ instance: number; call: CommenterCall }> = [];
 /** Credential each factory invocation built an instance from. */
 const factoryCreds: Array<{ instance: number; cred: CommenterEnv }> = [];
 let factoryInstanceSeq = 0;
-
-const legacyCommenter: ReviewCommenter = {
-  getInstallationToken: mock(async (installationId: number) => {
-    legacyCalls.push({ op: "token", installationId });
-    return "legacy-token";
-  }),
-  postReview: mock(async () => {
-    legacyCalls.push({ op: "post" });
-    return 1;
-  }),
-  postDegraded: mock(async () => {
-    legacyCalls.push({ op: "degrade" });
-  }),
-  // Bugbot degraded-comment lifecycle: the success path runs the delete
-  // scan (no stale comment → the real implementation finds nothing); the
-  // double is a no-op outcome so the flow exercises the real call.
-  deleteDegradedComment: mock(async () => ({ deleted: 0, skipped: 0, errors: [] })),
-  // Plan 18 T3 line comments: VALID_OUTPUT has no findings → the base filter
-  // is empty → these are never called (byte-compat).
-  fetchPrDiff: mock(async () => {
-    throw new Error("unexpected: no qualifying findings → no diff prefetch");
-  }),
-  postLineComments: mock(async () => {
-    throw new Error("unexpected: no qualifying findings → no line comments");
-  }),
-};
 
 /** The test seam: records the EXACT credentials each App instance gets. */
 const appCommenterFactory = mock((cred: CommenterEnv): ReviewCommenter => {
@@ -198,7 +171,6 @@ const appCommenterFactory = mock((cred: CommenterEnv): ReviewCommenter => {
 });
 
 const testOverrides = {
-  commenter: legacyCommenter,
   createAppCommenter: appCommenterFactory,
   getSandbox: async () => fakeSandbox,
 };
@@ -231,8 +203,6 @@ const kv = {
 
 function makeEnv(overrides: Partial<PipelineEnv> = {}): PipelineEnv {
   return {
-    APP_ID: "999",
-    PRIVATE_KEY: "-----BEGIN PRIVATE KEY-----\nlegacy\n-----END PRIVATE KEY-----\n",
     OMP_MODEL_KEY: "ark-key",
     DB: createTestD1() as never,
     IDEMPOTENCY_KV: kv as never,
@@ -282,7 +252,6 @@ const retryIds: string[] = [];
 
 function reset(): void {
   sandboxCalls.length = 0;
-  legacyCalls.length = 0;
   appCalls.length = 0;
   factoryCreds.length = 0;
   factoryInstanceSeq = 0;
@@ -306,12 +275,11 @@ describe("consumer appRef resolution (plan 13 Task 2, lock L4)", () => {
     // Exactly one App instance, built from X's DECRYPTED PEM + X's github_app_id.
     expect(factoryCreds).toHaveLength(1);
     expect(factoryCreds[0]!.cred).toEqual({ APP_ID: "111222", PRIVATE_KEY: PEM_X });
-    // Token mint + postReview both on that same instance; legacy untouched.
+    // Token mint + postReview both on that same instance.
     expect(appCalls.map((c) => c.call.op)).toEqual(["token", "post"]);
     expect(appCalls[0]!.instance).toBe(factoryCreds[0]!.instance);
     expect(appCalls[1]!.instance).toBe(factoryCreds[0]!.instance);
     expect(appCalls[0]!.call.installationId).toBe(123);
-    expect(legacyCalls).toHaveLength(0);
     expect(kvPuts).toEqual([{ key: `idem:123:acme/widgets:42:${SHA}`, value: "done" }]);
     // Every structured log line carries the appId reference (never a credential).
     const errOrInfo = logLines.filter((l) => l.fields.app_id !== undefined);
@@ -339,7 +307,6 @@ describe("consumer appRef resolution (plan 13 Task 2, lock L4)", () => {
     expect(factoryCreds).toHaveLength(1); // cache hit on the second message
     expect(appCalls).toHaveLength(4); // token+post × 2 messages, same instance
     expect(new Set(appCalls.map((c) => c.instance))).toEqual(new Set([factoryCreds[0]!.instance]));
-    expect(legacyCalls).toHaveLength(0);
   });
 
   test("disabled-app mid-flight → structured failure, rethrow (retry/DLQ), ZERO GitHub writes, guard untouched", async () => {
@@ -353,7 +320,6 @@ describe("consumer appRef resolution (plan 13 Task 2, lock L4)", () => {
       /per-App credential resolution failed: app .* is disabled/,
     );
 
-    expect(legacyCalls).toHaveLength(0);
     expect(factoryCreds).toHaveLength(0);
     expect(appCalls).toHaveLength(0);
     expect(sandboxCalls).toHaveLength(0); // fails before any sandbox step
@@ -600,7 +566,6 @@ describe("per-App pause ack-skip (plan 16, architect lock L4)", () => {
     // no sandbox step, no guard acquisition, no idempotency claim.
     expect(factoryCreds).toHaveLength(0);
     expect(appCalls).toHaveLength(0);
-    expect(legacyCalls).toHaveLength(0);
     expect(sandboxCalls).toHaveLength(0);
     expect(kvGuardPuts).toHaveLength(0);
     expect(kvPuts).toEqual([]);

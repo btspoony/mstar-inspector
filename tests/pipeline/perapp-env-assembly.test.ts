@@ -129,33 +129,7 @@ mock.module("@cloudflare/sandbox", () => ({
 
 // --- commenter fakes (app-path messages construct via the factory seam) -----
 
-const legacyCalls: string[] = [];
 const appCalls: string[] = [];
-
-const legacyCommenter: ReviewCommenter = {
-  getInstallationToken: mock(async () => {
-    legacyCalls.push("token");
-    return "legacy-token";
-  }),
-  postReview: mock(async () => {
-    legacyCalls.push("post");
-    return 1;
-  }),
-  postDegraded: mock(async () => {
-    legacyCalls.push("degrade");
-  }),
-  // Bugbot degraded-comment lifecycle: the success path runs the delete
-  // scan (no stale comment → the real implementation finds nothing); the
-  // double is a no-op outcome so the flow exercises the real call.
-  deleteDegradedComment: mock(async () => ({ deleted: 0, skipped: 0, errors: [] })),
-  // Plan 18 T3 line comments: VALID_OUTPUT has no findings → never called.
-  fetchPrDiff: mock(async () => {
-    throw new Error("unexpected: no qualifying findings → no diff prefetch");
-  }),
-  postLineComments: mock(async () => {
-    throw new Error("unexpected: no qualifying findings → no line comments");
-  }),
-};
 
 const appCommenterFactory = mock((_cred: CommenterEnv): ReviewCommenter => ({
   getInstallationToken: mock(async () => {
@@ -183,7 +157,6 @@ const appCommenterFactory = mock((_cred: CommenterEnv): ReviewCommenter => ({
 }));
 
 const testOverrides = {
-  commenter: legacyCommenter,
   createAppCommenter: appCommenterFactory,
   getSandbox: async () => fakeSandbox,
 };
@@ -214,8 +187,6 @@ const kv = {
 
 function makeEnv(overrides: Partial<PipelineEnv> = {}): PipelineEnv {
   return {
-    APP_ID: "999",
-    PRIVATE_KEY: "-----BEGIN PRIVATE KEY-----\nlegacy\n-----END PRIVATE KEY-----\n",
     OMP_MODEL_KEY: "ark-key",
     DB: createMigratedTestD1() as never,
     IDEMPOTENCY_KV: kv as never,
@@ -257,7 +228,6 @@ function makeBatch(...bodies: ReviewJobPayload[]): MessageBatch<ReviewJobPayload
 
 function reset(): void {
   sandboxCalls.length = 0;
-  legacyCalls.length = 0;
   appCalls.length = 0;
   kvGuardPuts.length = 0;
   logLines.length = 0;

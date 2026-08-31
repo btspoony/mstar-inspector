@@ -228,7 +228,6 @@ const fakeCommenter: ReviewCommenter = {
 
 // Injected into every consumer under test (DI replaces the old mock.module).
 const testOverrides = {
-  commenter: fakeCommenter,
   createAppCommenter: () => fakeCommenter,
   getSandbox: async () => fakeSandbox,
 };
@@ -299,8 +298,6 @@ const kv = {
 
 function makeEnv(overrides: Partial<PipelineEnv> = {}): PipelineEnv {
   return {
-    APP_ID: "123",
-    PRIVATE_KEY: "-----BEGIN PRIVATE KEY-----\nkey\n-----END PRIVATE KEY-----\n",
     OMP_MODEL_KEY: "ark-key",
     DB: createSeededTestD1() as never,
     IDEMPOTENCY_KV: kv as never,
