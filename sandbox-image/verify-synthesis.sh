@@ -34,7 +34,7 @@
 # Output: KEY=VALUE evidence lines on stdout; exit 0 = all three layers pass,
 # non-zero = at least one layer failed (set -e aborts on the first failure).
 #
-# Replay: docker run --rm <image> /opt/verify-synthesis.sh
+# Replay: docker run --rm --entrypoint /opt/verify-synthesis.sh <image>
 set -euo pipefail
 
 cd /opt/runner

@@ -207,8 +207,11 @@ secrets; idempotent (`/tmp/omp-agent-<uuid>` only, cleaned up). Not a build
 gate; run manually after a build/deploy:
 
 ```bash
-docker run --rm <image> /opt/verify-synthesis.sh
+docker run --rm --entrypoint /opt/verify-synthesis.sh <image>
 # expect U001_VERIFY=pass and exit 0 (KEY=VALUE evidence lines per layer)
+# --entrypoint is required — the sandbox default entrypoint is long-lived
+# (it keeps the server alive after the user command) and would never
+# surface this one-shot script's exit code.
 ```
 
 ## Post-deploy smoke
