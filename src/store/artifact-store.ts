@@ -54,7 +54,8 @@ import {
   type MstarReviewV1,
 } from "@mstar-harness/engine";
 import type { IdempotencyKey } from "../contracts/idem";
-import type { D1Like, ReviewRow } from "./types";
+import type { D1Like, RecurrenceGroup, RecurrenceQuery, ReviewRow } from "./types";
+import { computeFindingFingerprint } from "./fingerprint";
 
 /** Schema id accepted by `put` / carried by every persisted review doc. */
 export const REVIEW_SCHEMA = "mstar.review/v1" as const;
@@ -292,7 +293,11 @@ export function createArtifactStore(db: D1Like): D1ArtifactStore {
             finding.line_end ?? null,
             finding.title,
             finding.body,
-            finding.fingerprint_hint ?? null,
+            // Plan 21 (AL-21-1): the persist path is the single fingerprint
+            // write point — a non-blank, non-marker hint is returned verbatim
+            // by the pure function; a blank or [REDACTED]-marker hint falls
+            // back to the normalized FNV-1a fingerprint (W-1).
+            computeFindingFingerprint(finding),
             reviewId,
           ),
       );
@@ -338,4 +343,101 @@ export function createArtifactStore(db: D1Like): D1ArtifactStore {
         .first<ReviewRow>();
     },
   };
+}
+/**
+ * Previous-round fingerprint set for cross-round repeat dedup (plan 21
+ * Task 3, AL-21-2): the latest v1 review row for the same
+ * (installation_id, owner, repo, pr_number) — `envelope IS NOT NULL` era
+ * gate, ORDER BY reviewed_at DESC, id DESC LIMIT 1 — then that row's
+ * findings' non-NULL fingerprints. NO head_sha exclusion: the consumer
+ * assembles BEFORE the current sha row exists (post → put order), so a
+ * same-sha re-review reads its own previous row = all-repeat semantics
+ * (documented in AL-21-2). Returns an empty set when no v1 review exists
+ * (first round) or the latest row has no fingerprint-bearing findings.
+ * Callers treat a throw as first-round semantics (never blocks the review).
+ */
+export async function previousRoundFingerprints(
+  db: D1Like,
+  key: { installation_id: number; owner: string; repo: string; pr_number: number },
+): Promise<ReadonlySet<string>> {
+  const review = await db
+    .prepare(
+      `SELECT id FROM reviews
+       WHERE installation_id = ? AND owner = ? AND repo = ? AND pr_number = ? AND envelope IS NOT NULL
+       ORDER BY reviewed_at DESC, id DESC LIMIT 1`,
+    )
+    .bind(key.installation_id, key.owner, key.repo, key.pr_number)
+    .first<{ id: string }>();
+  if (review === null) return new Set();
+  const rows = await db
+    .prepare(`SELECT fingerprint FROM findings WHERE review_id = ? AND fingerprint IS NOT NULL`)
+    .bind(review.id)
+    .all<{ fingerprint: string }>();
+  return new Set(rows.results.map((row) => row.fingerprint));
+}
+/**
+ * Cross-PR recurrence aggregation (plan 21 Task 4, AC-21c) — the store-layer
+ * query consumed by plan 22 (review-health-insights) for the "复现 top"
+ * panel. Groups findings by fingerprint across reviews:
+ *
+ *   - count = number of DISTINCT reviews containing the fingerprint; only
+ *     count >= 2 groups are returned (recurrence definition, AL-21-2)
+ *   - repos = distinct owner/repo pairs among those reviews (sorted for
+ *     deterministic output)
+ *   - title_sample = any one title for the fingerprint (MIN, deterministic)
+ *   - NULL fingerprints are excluded — the era gate: pre-v0.8 rows were
+ *     never backfilled (AC-21c), so `fingerprint IS NOT NULL` is the
+ *     recurrence-system filter (hint-bearing legacy rows carry a real
+ *     fingerprint and are included by design)
+ *   - optional `window_days` restricts to reviews with `reviewed_at` within
+ *     the last N days (SQLite `datetime('now', ...)` — same format as the
+ *     column default); omitted = all-time
+ *   - optional `repo` restricts the aggregation to one owner/repo pair
+ *
+ * Module boundary (AL-21-2 / AL-22-1 candidate A): this plan delivers the
+ * store-layer aggregation; plan 22's dashboard insights-store inlines
+ * equivalent SQL and keeps a parity test against this function (bidirectional
+ * anchor — mirror any SQL change here in the plan 22 consumer).
+ *
+ * Index: the group-by rides the 0001-era `idx_findings_fingerprint`
+ * (existence locked by tests/store/migration.test.ts). Planner choice is NOT
+ * asserted — brittle across SQLite versions (AL-21-2); the query plan is
+ * recorded in tests/store/recurrence.test.ts.
+ */
+export async function recurrenceByFingerprint(
+  db: D1Like,
+  query: RecurrenceQuery = {},
+): Promise<RecurrenceGroup[]> {
+  const where: string[] = ["f.fingerprint IS NOT NULL"];
+  const binds: unknown[] = [];
+  if (query.repo !== undefined) {
+    where.push("r.owner = ?", "r.repo = ?");
+    binds.push(query.repo.owner, query.repo.repo);
+  }
+  if (query.window_days !== undefined) {
+    where.push("r.reviewed_at >= datetime('now', '-' || ? || ' days')");
+    binds.push(query.window_days);
+  }
+  const rows = await db
+    .prepare(
+      `SELECT
+         f.fingerprint AS fingerprint,
+         MIN(f.title) AS title_sample,
+         COUNT(DISTINCT f.review_id) AS count,
+         GROUP_CONCAT(DISTINCT r.owner || '/' || r.repo) AS repos_csv
+       FROM findings f
+       JOIN reviews r ON r.id = f.review_id
+       WHERE ${where.join(" AND ")}
+       GROUP BY f.fingerprint
+       HAVING COUNT(DISTINCT f.review_id) >= 2
+       ORDER BY count DESC, f.fingerprint ASC`,
+    )
+    .bind(...binds)
+    .all<{ fingerprint: string; title_sample: string; count: number; repos_csv: string | null }>();
+  return rows.results.map((row) => ({
+    fingerprint: row.fingerprint,
+    title_sample: row.title_sample,
+    count: row.count,
+    repos: (row.repos_csv ?? "").split(",").filter((repo) => repo.length > 0).sort(),
+  }));
 }

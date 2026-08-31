@@ -134,15 +134,24 @@ export function capFindings(
  */
 export const FINDING_TITLE_MAX = 200;
 export const FINDING_BODY_MAX = 2000;
-
-
 /**
- * Clamp every finding's title/body to the budgets above; a fully
- * within-budget output is returned unchanged (same reference).
+ * Plan 21 (S-1, qc2 F-002): `fingerprint_hint` is clamped at the SAME choke
+ * point with FINDING_TITLE_MAX semantics — the hint feeds the D1
+ * `findings.fingerprint` index column verbatim, so an unbounded hint would
+ * blow the column budget. Over-budget hints are truncated like titles; a
+ * clamped hint that still equals the redaction marker is then normalized
+  * away by computeFindingFingerprint (W-1).
+ */
+ /**
+ * Clamp every finding's title/body/fingerprint_hint to the budgets above; a
+ * fully within-budget output is returned unchanged (same reference).
  */
 export function clampFindingSizes(output: ReviewOutput): ReviewOutput {
   const oversized = output.findings.some(
-    (finding) => finding.title.length > FINDING_TITLE_MAX || finding.body.length > FINDING_BODY_MAX,
+    (finding) =>
+      finding.title.length > FINDING_TITLE_MAX ||
+      finding.body.length > FINDING_BODY_MAX ||
+      (finding.fingerprint_hint?.length ?? 0) > FINDING_TITLE_MAX,
   );
   if (!oversized) {
     return output;
@@ -159,6 +168,10 @@ export function clampFindingSizes(output: ReviewOutput): ReviewOutput {
         finding.body.length <= FINDING_BODY_MAX
           ? finding.body
           : `${finding.body.slice(0, FINDING_BODY_MAX - 1)}…`,
+      fingerprint_hint:
+        finding.fingerprint_hint !== undefined && finding.fingerprint_hint.length > FINDING_TITLE_MAX
+          ? `${finding.fingerprint_hint.slice(0, FINDING_TITLE_MAX - 1)}…`
+          : finding.fingerprint_hint,
     })),
   };
 }

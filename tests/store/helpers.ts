@@ -123,13 +123,20 @@ function wrapDb(db: Database): D1Like & { raw: Database } {
 }
 
 /**
+ * The test D1 double handle: the narrow D1 face plus the raw bun:sqlite
+ * handle for direct assertions. Named type so consumers do not reach
+ * through `ReturnType<typeof createMigratedTestD1>`.
+ */
+export type TestD1 = D1Like & { raw: Database };
+
+/**
  * Create a fresh in-memory D1-like database with the plan-07-era
  * review-store schema (0001 + 0002) applied. Each call returns an
  * independent database (tests must not share state). The underlying
  * bun:sqlite handle is exposed for direct assertions (e.g. counting rows)
  * via the `raw` property.
  */
-export function createTestD1(): D1Like & { raw: Database } {
+export function createTestD1(): TestD1 {
   const db = new Database(":memory:");
   applyMigration(db, BASE_MIGRATIONS);
   return wrapDb(db);
@@ -147,7 +154,7 @@ export function createTestD1(): D1Like & { raw: Database } {
  * for the consumer modelOverrides tests. Each call returns an independent
  * database.
  */
-export function createMigratedTestD1(): D1Like & { raw: Database } {
+export function createMigratedTestD1(): TestD1 {
   const db = new Database(":memory:");
   applyMigration(db, ALL_MIGRATIONS);
   return wrapDb(db);

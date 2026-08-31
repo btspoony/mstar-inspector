@@ -49,6 +49,7 @@ import {
   type PostOctokit,
 } from "../../src/pipeline/comment";
 import type { ReviewFinding, ReviewOutput } from "../../src/review/schema";
+import { computeFindingFingerprint } from "../../src/store/fingerprint";
 
 function finding(mergeClass: ReviewFinding["mergeClass"], title: string): ReviewFinding {
   return {
@@ -118,6 +119,19 @@ describe("renderFindings", () => {
 
   test("returns an empty string for no findings", () => {
     expect(renderFindings([])).toBe("");
+  });
+  test("marks a finding whose fingerprint appeared in the previous round as repeat, still listed (plan 21 T3)", () => {
+    const f = finding("should-fix", "Fractional expiry comparison");
+    const md = renderFindings([f], new Set([computeFindingFingerprint(f)]));
+    expect(md).toContain("**Fractional expiry comparison**");
+    expect(md).toContain("*(repeat)*");
+  });
+
+  test("does not mark findings whose fingerprint differs from the previous round", () => {
+    const f = finding("should-fix", "Fractional expiry comparison");
+    const other = finding("should-fix", "A different issue");
+    const md = renderFindings([f], new Set([computeFindingFingerprint(other)]));
+    expect(md).not.toContain("*(repeat)*");
   });
 });
 
@@ -194,6 +208,43 @@ describe("buildReviewBody", () => {
   test("no footer when nothing was omitted (B4)", () => {
     const body = buildReviewBody(output, 0);
     expect(body).not.toContain("more findings omitted");
+  });
+  test("tally counts exclude repeats when a previous-round fingerprint set is provided (AL-21-2)", () => {
+    const repeat = finding("should-fix", "Fractional expiry comparison");
+    const fresh = finding("should-fix", "Fresh issue");
+    const body = buildReviewBody(
+      {
+        ...output,
+        findings: [repeat, fresh],
+        tally: {
+          verdict: "needs fixes",
+          scorePct: 45,
+          tally: { mustFix: 0, shouldFix: 2, nit: 0, unverified: 1 },
+          chatHeader: "unused here",
+        },
+      },
+      0,
+      new Set([computeFindingFingerprint(repeat)]),
+    );
+    // should-fix 2 → 1 (the repeat is still listed but no longer re-voted);
+    // unverified keeps the envelope value (fingerprint-less list).
+    expect(body).toContain("**Tally:** 🔴 must-fix 0 · 🟠 should-fix 1 · 🔵 nit 0 · ❓ unverified 1");
+    expect(body).toContain("*(repeat)*");
+  });
+
+  test("first round (no previous fingerprints) keeps the envelope tally verbatim, no repeat markers", () => {
+    const body = buildReviewBody({
+      ...output,
+      findings: [finding("should-fix", "Fractional expiry comparison")],
+      tally: {
+        verdict: "needs fixes",
+        scorePct: 45,
+        tally: { mustFix: 0, shouldFix: 2, nit: 1, unverified: 1 },
+        chatHeader: "unused here",
+      },
+    });
+    expect(body).toContain("**Tally:** 🔴 must-fix 0 · 🟠 should-fix 2 · 🔵 nit 1 · ❓ unverified 1");
+    expect(body).not.toContain("*(repeat)*");
   });
 });
 
@@ -306,6 +357,19 @@ describe("review comment upsert (T5)", () => {
     test("omitted-findings footer still renders after the review body", () => {
       const body = buildUpsertBody(output, 10, 1, "abc1234");
       expect(body.endsWith("\n\n*(+10 more findings omitted)*")).toBe(true);
+    });
+    test("marker + round header structure is unchanged when previous fingerprints are provided (D4 lock)", () => {
+      const body = buildUpsertBody(
+        output,
+        0,
+        3,
+        "0123456789abcdef0123456789abcdef01234567",
+        new Set(["deadbeefdeadbeef"]),
+      );
+      const lines = body.split("\n");
+      expect(lines[0]).toBe("<!-- mstar-inspector:review:v1 round=3 -->");
+      expect(lines[1]).toBe("第 3 次 review · commit 0123456");
+      expect(parseReviewRound(body)).toBe(3);
     });
   });
 });
@@ -431,6 +495,30 @@ describe("postReview wiring (mock octokit, SG-001)", () => {
       { id: 7, body: "<!-- mstar-inspector:review:v1 round=2 -->\nRound 2", user: { type: "Bot" } },
     ]);
     await expect(postReviewWithOctokit(update.octokit, input)).resolves.toBe(3);
+  });
+  test("previousFingerprints flow into the assembled body (repeat marker + recomputed tally)", async () => {
+    const repeat = finding("should-fix", "Fractional expiry comparison");
+    const fresh = finding("should-fix", "Fresh issue");
+    const { calls, octokit } = mockOctok([]);
+    await postReviewWithOctokit(octokit, {
+      ...input,
+      output: {
+        ...output,
+        verdict: "needs fixes",
+        findings: [repeat, fresh],
+        tally: {
+          verdict: "needs fixes",
+          scorePct: 45,
+          tally: { mustFix: 0, shouldFix: 2, nit: 0, unverified: 1 },
+          chatHeader: "unused here",
+        },
+      },
+      previousFingerprints: new Set([computeFindingFingerprint(repeat)]),
+    });
+    const body = String(calls.createParams!.body);
+    expect(body).toMatch(/^<!-- mstar-inspector:review:v1 round=1 -->/);
+    expect(body).toContain("*(repeat)*");
+    expect(body).toContain("**Tally:** 🔴 must-fix 0 · 🟠 should-fix 1 · 🔵 nit 0 · ❓ unverified 1");
   });
 
   test("blocked and ship it both post with NO review event, never REQUEST_CHANGES/APPROVE (mapping spec §2)", async () => {
