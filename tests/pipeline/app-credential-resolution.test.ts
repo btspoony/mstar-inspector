@@ -151,11 +151,10 @@ const legacyCommenter: ReviewCommenter = {
   postDegraded: mock(async () => {
     legacyCalls.push({ op: "degrade" });
   }),
-  // Bugbot degraded-comment lifecycle: no stale degraded comment exists on
-  // the success path in these flows → the delete scan finds nothing.
-  deleteDegradedComment: mock(async () => {
-    throw new Error("unexpected: no stale degraded comment in these flows");
-  }),
+  // Bugbot degraded-comment lifecycle: the success path runs the delete
+  // scan (no stale comment → the real implementation finds nothing); the
+  // double is a no-op so the flow exercises the real call.
+  deleteDegradedComment: mock(async () => {}),
   // Plan 18 T3 line comments: VALID_OUTPUT has no findings → the base filter
   // is empty → these are never called (byte-compat).
   fetchPrDiff: mock(async () => {
@@ -182,11 +181,10 @@ const appCommenterFactory = mock((cred: CommenterEnv): ReviewCommenter => {
     postDegraded: mock(async () => {
       appCalls.push({ instance, call: { op: "degrade" } });
     }),
-    // Bugbot degraded-comment lifecycle: no stale degraded comment exists on
-    // the success path in these flows → the delete scan finds nothing.
-    deleteDegradedComment: mock(async () => {
-      throw new Error("unexpected: no stale degraded comment in these flows");
-    }),
+    // Bugbot degraded-comment lifecycle: the success path runs the delete
+    // scan (no stale comment → the real implementation finds nothing); the
+    // double is a no-op so the flow exercises the real call.
+    deleteDegradedComment: mock(async () => {}),
     // Plan 18 T3 line comments: VALID_OUTPUT has no findings → never called.
     fetchPrDiff: mock(async () => {
       throw new Error("unexpected: no qualifying findings → no diff prefetch");

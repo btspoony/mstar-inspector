@@ -985,9 +985,11 @@ async function processMessage(payload: ReviewJobPayload, deps: ProcessDeps): Pro
   // records stage="parse" directly and acks without reaching the catch.
   let failureStage: FailureStage = "pipeline";
   // SEC-01 exact-value defense: the session's ACTUAL secret values (runner
-  // env provider keys + the minted installation token), set once the runner
-  // env is assembled. Hoisted so the catch site's best-effort failure row
-  // can exact-redact the error detail too (SEC-03).
+  // env provider keys + the minted installation token). Seeded with the
+  // minted token right after mint (a pre-runner catch still exact-redacts
+  // it), then replaced with the full session values once the runner env is
+  // assembled. Hoisted so the catch site's best-effort failure row can
+  // exact-redact the error detail too (SEC-03).
   let secretValues: string[] = [];
 
   try {
@@ -1055,6 +1057,10 @@ async function processMessage(payload: ReviewJobPayload, deps: ProcessDeps): Pro
     }
     failureStage = "pipeline";
     const token = await commenter.getInstallationToken(payload.installation_id);
+    // SEC-01: seed the exact-value list with the minted token immediately —
+    // a failure before the runner env is assembled (clone/diff/input steps)
+    // still exact-redacts the token in the catch path.
+    secretValues = [token];
     failureStage = "sandbox";
     const cmds = buildGitOpsCommands({
       owner: payload.owner,
@@ -1216,7 +1222,7 @@ async function processMessage(payload: ReviewJobPayload, deps: ProcessDeps): Pro
     // SEC-01 exact-value defense: the session's ACTUAL secret values
     // (runner env provider keys + the minted installation token) — shared
     // by the degrade path and the success path below.
-    const secretValues = sessionSecretValues(runnerEnv, token);
+    secretValues = sessionSecretValues(runnerEnv, token);
 
     // AL-6 stage window: post-runner steps (parse has its own branch; the
     // post/KV/put orchestration is worker-side) are "pipeline" again.

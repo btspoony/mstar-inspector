@@ -1708,6 +1708,42 @@ describe("degraded-comment lifecycle (Bugbot finding)", () => {
     // The ok path resolves silently (queue auto-ack) — nothing retried.
     expect(messageRetryCalls).toHaveLength(0);
   });
+
+  test("stale degraded comment delete failure → warn, review stands, never throws", async () => {
+    reset();
+    runnerStdout = JSON.stringify(VALID_OUTPUT);
+    deleteDegradedError = new Error("delete 500");
+    const db = createMigratedTestD1();
+    const consumer = createReviewConsumer(makeEnv({ DB: db as never }), testLog, testOverrides);
+
+    await consumer(makeBatch(makePayload()));
+
+    // The delete failure is a structured warn — the review flow continues
+    // (line comments + KV done + D1 row all land) and nothing retries.
+    const warn = logLines.find((l) => l.level === "warn" && l.msg.includes("stale degraded comment delete failed"));
+    expect(warn).toBeDefined();
+    expect(warn!.msg).toContain("delete 500");
+    expect(commenterCalls.map((c) => c.op)).toEqual(["token", "post", "delete-degraded", "fetch-diff", "line-comments"]);
+    expect(reviewCount(db)).toBe(1);
+    expect(kvPuts).toHaveLength(1);
+    expect(messageRetryCalls).toHaveLength(0);
+    expect(destroyCalls).toBe(1);
+  });
+});
+
+describe("line-comments round pin (plan 18 Task 3 / AL-3)", () => {
+  test("the line-comments round pins to the round the overall upsert returned", async () => {
+    reset();
+    runnerStdout = JSON.stringify(VALID_OUTPUT);
+    postRound = 4;
+    const db = createMigratedTestD1();
+    const consumer = createReviewConsumer(makeEnv({ DB: db as never }), testLog, testOverrides);
+
+    await consumer(makeBatch(makePayload()));
+
+    const lineInput = commenterCalls.find((c) => c.op === "line-comments")!.args[0] as { round: number };
+    expect(lineInput.round).toBe(4);
+  });
 });
 
 describe("SEC-01 exact-value redaction through the consumer", () => {
