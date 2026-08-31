@@ -54,6 +54,17 @@ export const CUSTOM_PROVIDER_ENV_PREFIX = "CUSTOM_";
 export const CUSTOM_PROVIDER_ENV_SUFFIX = "_API_KEY";
 
 /**
+ * In-image base provider ids (QC wave-1 W-1, bidirectional anchor): the
+ * dashboard mirrors the ids THIS review-side surface's base models.yml
+ * declares (sandbox-image/omp-models.yml, read via
+ * src/review/models-synthesis.ts BASE_MODELS_YAML_PATH — `ark-plan` today)
+ * as src/dashboard/app-config-store.ts `IN_IMAGE_BASE_PROVIDER_IDS` and
+ * rejects custom declarations colliding with them (Q2 keeps the mirror in
+ * the dashboard — zero review imports there); tests/worker/app-config.test.ts
+ * parity-locks the mirror against the base file.
+ */
+
+/**
  * Env var name for a custom-provider API key (plan 23 Task 3, AL-23-1): a
  * total function — any id maps to a syntactically valid env var name. The
  * queue consumer injects the decrypted key under this name and the runner's

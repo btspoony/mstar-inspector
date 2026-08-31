@@ -31,6 +31,8 @@ import { createTestD1 } from "../store/helpers";
 import { createAppsStore, type GithubAppRow } from "../../src/dashboard/apps-store";
 import {
   CUSTOM_PROVIDER_API_IDS,
+  IN_IMAGE_BASE_PROVIDER_IDS,
+  MAX_CUSTOM_PROVIDER_COUNT,
   InvalidCustomProviderError,
   InvalidModelSelectorError,
   MAX_MODEL_SELECTOR_LENGTH,
@@ -931,6 +933,52 @@ describe("app-config store (createAppConfigStore) — custom providers (plan 23 
     await expect(configStore(db).upsertCustomProvider(app.id, CUSTOM, "k".repeat(4097))).rejects.toThrow(ProviderKeyTooLongError);
     expect(rawCount(db, "app_custom_providers")).toBe(0);
   });
+
+  // QC wave-1 (seat3 W-1): the runner's base-wins merge skips a custom id
+  // colliding with the IN-IMAGE base models.yml (sandbox-image/omp-models.yml
+  // declares ark-plan) while the consumer STILL injects its key — the
+  // declaration is silently dead on every review, so the backstop refuses it.
+  test("store backstop: an in-image base provider id (ark-plan) throws InvalidCustomProviderError before any write", async () => {
+    const { db, app } = await seededWorld();
+    await expect(
+      configStore(db).upsertCustomProvider(
+        app.id,
+        { ...CUSTOM, provider_id: "ark-plan", base_url: "https://evil.example.com/" },
+        PLAIN_CUSTOM_KEY,
+      ),
+    ).rejects.toThrow(InvalidCustomProviderError);
+    expect(rawCount(db, "app_custom_providers")).toBe(0);
+  });
+
+  // QC wave-1 (seat3 W-2): every other AL-23-1/AL-23-2 input dimension is
+  // bounded; the DECLARATION COUNT per App is the missing one (exec env +
+  // runner input grow without bound). The cap is growth-only: updating an
+  // existing declaration never counts against it.
+  test("store backstop: at MAX_CUSTOM_PROVIDER_COUNT a NEW id throws; updating an existing id and another App are unaffected", async () => {
+    const { db, app } = await seededWorld();
+    const store = configStore(db);
+    for (let i = 1; i <= MAX_CUSTOM_PROVIDER_COUNT; i++) {
+      await store.upsertCustomProvider(app.id, { ...CUSTOM, provider_id: `prov-${i}` }, PLAIN_CUSTOM_KEY);
+    }
+    expect(rawCount(db, "app_custom_providers")).toBe(MAX_CUSTOM_PROVIDER_COUNT);
+    // Growth past the cap is refused with zero writes.
+    await expect(
+      store.upsertCustomProvider(app.id, { ...CUSTOM, provider_id: "prov-new" }, PLAIN_CUSTOM_KEY),
+    ).rejects.toThrow(InvalidCustomProviderError);
+    expect(rawCount(db, "app_custom_providers")).toBe(MAX_CUSTOM_PROVIDER_COUNT);
+    // Re-declaring an EXISTING id is an update, not growth — allowed.
+    await expect(
+      store.upsertCustomProvider(app.id, { ...CUSTOM, provider_id: "prov-1", model_ids: ["fresh-model"] }, PLAIN_CUSTOM_KEY),
+    ).resolves.toBeUndefined();
+    expect(rawCount(db, "app_custom_providers")).toBe(MAX_CUSTOM_PROVIDER_COUNT);
+    // The cap is per-App: a different App starts from zero.
+    const other = await seededWorld();
+    await expect(
+      configStore(other.db).upsertCustomProvider(other.app.id, { ...CUSTOM, provider_id: "prov-1" }, PLAIN_CUSTOM_KEY),
+    ).resolves.toBeUndefined();
+    expect(rawCount(other.db, "app_custom_providers")).toBe(1);
+  });
+
   test("unknown app_id → FK violation on insert (fail-loud, same as every write here)", async () => {
     const db = createAppConfigD1();
     await expect(
@@ -1014,6 +1062,19 @@ describe("duplication locks", () => {
     // The mirror is exactly the quick seat followed by the deep seats.
     expect([...MODEL_ROLE_IDS]).toEqual([quickSeat!, ...(deepSeats ?? [])]);
     expect(MODEL_ROLE_IDS).toHaveLength(4); // spec § B6 语义锁: exactly the 4 audit seats
+  });
+
+  test("IN_IMAGE_BASE_PROVIDER_IDS mirrors the in-image base models.yml provider ids (plan 23 QC W-1 parity lock)", () => {
+    // SSOT: sandbox-image/omp-models.yml — installed in the runner image as
+    // /opt/omp-agent/models.yml (src/review/models-synthesis.ts
+    // BASE_MODELS_YAML_PATH), the base the Task 3 merge preserves verbatim.
+    // A custom declaration colliding with one of these ids is skipped by the
+    // base-wins merge (silently dead if the dashboard allowed it), so the
+    // mirror MUST track the file exactly (the PROVIDER_IDS lock pattern).
+    const baseYaml = readFileSync(join(import.meta.dir, "../../sandbox-image/omp-models.yml"), "utf8");
+    const baseIds = [...baseYaml.matchAll(/^  ([A-Za-z0-9_-]+):\s*(?:#.*)?$/gm)].map((m) => m[1]!);
+    expect(baseIds.length).toBeGreaterThan(0); // a base with no providers would make the mirror vacuous
+    expect([...IN_IMAGE_BASE_PROVIDER_IDS]).toEqual(baseIds);
   });
 });
 
@@ -1686,6 +1747,7 @@ describe("POST /dashboard/apps/:slug/settings — custom providers (op=add-custo
       { patch: { provider_id: "-lead" }, label: "leading hyphen" },
       { patch: { provider_id: "x".repeat(65) }, label: "id over 64 chars" },
       { patch: { provider_id: "anthropic" }, label: "built-in provider id collision" },
+      { patch: { provider_id: "ark-plan" }, label: "in-image base provider id collision (QC W-1)" },
       { patch: { base_url: "http://insecure.example.com" }, label: "http baseUrl" },
       { patch: { base_url: `https://example.com/${"x".repeat(2049)}` }, label: "baseUrl over 2048 chars" },
       { patch: { api: "google-vertex" }, label: "api outside the AL-23-1 enum" },
@@ -1700,6 +1762,39 @@ describe("POST /dashboard/apps/:slug/settings — custom providers (op=add-custo
       expect(res.status, label).toBe(400);
     }
     expect(rawCount(db, "app_custom_providers")).toBe(0);
+  });
+
+  test("400: a NEW declaration beyond the 8-provider cap → 400 re-render, zero writes; filling the cap and updating an existing id stay allowed (QC W-2)", async () => {
+    const { db, app } = await seededWorld();
+    const store = configStore(db);
+    // A local declaration fixture (the store describe's CUSTOM is scoped
+    // there; the route describe carries CUSTOM_FORM instead).
+    const decl = (providerId: string): AppCustomProvider => ({
+      provider_id: providerId,
+      base_url: "https://ark.cn-beijing.volces.com/api/v3",
+      api: "openai-completions",
+      model_ids: ["deepseek-v4-flash"],
+    });
+    // The bound is inclusive: with 7 declared, the 8th NEW id is allowed.
+    for (let i = 1; i < MAX_CUSTOM_PROVIDER_COUNT; i++) {
+      await store.upsertCustomProvider(app.id, decl(`prov-${i}`), "sk-custom-ark-9988");
+    }
+    const fill = await postForm(SETTINGS, await mallory(), makeEnv(db), { ...CUSTOM_FORM, provider_id: "prov-8" });
+    expect(fill.status).toBe(200);
+    expect(rawCount(db, "app_custom_providers")).toBe(MAX_CUSTOM_PROVIDER_COUNT);
+    // A 9th NEW id → 400 with a cap message, zero writes.
+    const over = await postForm(SETTINGS, await mallory(), makeEnv(db), { ...CUSTOM_FORM, provider_id: "prov-9" });
+    expect(over.status).toBe(400);
+    expect(await over.text()).toContain("custom providers");
+    expect(rawCount(db, "app_custom_providers")).toBe(MAX_CUSTOM_PROVIDER_COUNT);
+    // Updating an EXISTING declaration at the cap stays allowed (no growth).
+    const update = await postForm(SETTINGS, await mallory(), makeEnv(db), {
+      ...CUSTOM_FORM,
+      provider_id: "prov-1",
+      model_ids: "fresh-model",
+    });
+    expect(update.status).toBe(200);
+    expect(rawCount(db, "app_custom_providers")).toBe(MAX_CUSTOM_PROVIDER_COUNT);
   });
 
   test("remove-custom-provider deletes the row; an unknown id is a tolerant no-op", async () => {

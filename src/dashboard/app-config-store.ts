@@ -50,9 +50,10 @@
  *     400 first — the guard here is the backstop for direct callers).
  *   - removeProviderKey returns whether a row was deleted (an unconfigured
  *     provider is an idempotent no-op, like setAppStatus).
- *   - listProviderKeys is the settings-page face: provider + masked tail
- *     only, provider-ascending; a key of ≤4 characters reveals NOTHING
- *     (the mask must never render a whole key).
+ *   - listProviderKeys is the settings-page face: provider + masked tail +
+ *     last-update time (migration 0012; NULL → the view's em dash),
+ *     provider-ascending; a key of ≤4 characters reveals NOTHING (the mask
+ *     must never render a whole key).
  *   - setModelChain(null) — or any BLANK chain (empty / whitespace-only,
  *     plan 15: aligned with the route's 空 = 清除) — REMOVES the row (absent
  *     = unset = global fallback, Clarify #2: 空 = 全局); a chain with content
@@ -196,6 +197,26 @@ export const PROVIDER_IDS: readonly string[] = Object.freeze([
 ]);
 
 /**
+ * The in-image base provider ids (plan 23 QC wave-1 W-1) — provider ids the
+ * review runner's base models.yml ALREADY declares:
+ * `sandbox-image/omp-models.yml`, installed in the image as
+ * /opt/omp-agent/models.yml (src/review/models-synthesis.ts
+ * BASE_MODELS_YAML_PATH) and preserved verbatim by the Task 3 merge. In the
+ * image today that is exactly `ark-plan` (the M0 ark provider, keyed by
+ * ARK_API_KEY). A custom declaration colliding with one of these ids would be
+ * silently dead on EVERY review (the base-wins merge skips it while the
+ * consumer still injects its key under the CUSTOM_<ID>_API_KEY env name), so
+ * it is rejected here like the PROVIDER_IDS built-ins above. Declared
+ * locally, NOT imported: dashboard modules must not import review code
+ * (architect decision Q2, src/dashboard/index.ts header) — the literal
+ * mirrors the review contract module src/review/runtime.ts (next to
+ * customProviderEnvName) and the base file itself, and is parity-locked by
+ * tests/worker/app-config.test.ts against sandbox-image/omp-models.yml (the
+ * PROVIDER_IDS lock pattern).
+ */
+export const IN_IMAGE_BASE_PROVIDER_IDS: readonly string[] = Object.freeze(["ark-plan"]);
+
+/**
  * The per-role model vocabulary (plan 17 B6, spec § B6 语义锁) — EXACTLY the
  * 4 audit-seat agent names the runner dispatches: `mstar-review-seat` is the
  * quick/default seat (the agent definition installed from
@@ -263,6 +284,16 @@ export const CUSTOM_PROVIDER_ID_PATTERN = /^[a-z0-9][a-z0-9-]{0,63}$/;
 export const MAX_CUSTOM_PROVIDER_BASE_URL_LENGTH = 2048;
 export const MAX_CUSTOM_PROVIDER_MODEL_IDS = 32;
 export const MAX_CUSTOM_PROVIDER_MODEL_ID_LENGTH = 128;
+/**
+ * Declarations per App bound (plan 23 QC wave-1 W-2): the last AL-23-2 input
+ * dimension left unbounded. Every declaration rides the container exec env
+ * (decrypted key, ≤4096 chars each) and the runner input JSON, so an App
+ * accumulating declarations grows both without limit. Growth-only: updating
+ * an already-declared provider id never counts against the cap (the store
+ * and the route both allow it at the cap — same spirit as the inclusive
+ * model_ids bound).
+ */
+export const MAX_CUSTOM_PROVIDER_COUNT = 8;
 
 /**
  * Model selector/chain input bound (AL-23-2 verdict, plan 23 Global
@@ -275,11 +306,13 @@ export const MAX_MODEL_SELECTOR_LENGTH = 400;
 
 /**
  * Declaration-shape error (plan 23 T2): an upsertCustomProvider call named
- * an id outside the `[a-z0-9][a-z0-9-]{0,63}` grammar, a non-https or
- * over-length base URL, an api outside the AL-23-1 three-form enum, an
- * empty / over-long / over-count model_ids list, or an empty key. The
- * settings route re-renders 400 first; this typed throw is the backstop
- * for direct callers (the UnknownModelRoleError convention).
+ * an id outside the `[a-z0-9][a-z0-9-]{0,63}` grammar, an id colliding with
+ * a built-in (PROVIDER_IDS) or in-image base provider (IN_IMAGE_BASE_PROVIDER_IDS,
+ * QC wave-1 W-1), a non-https or over-length base URL, an api outside the
+ * AL-23-1 three-form enum, an empty / over-long / over-count model_ids list,
+ * an empty key, or a NEW declaration at the MAX_CUSTOM_PROVIDER_COUNT cap
+ * (QC wave-1 W-2). The settings route re-renders 400 first; this typed throw
+ * is the backstop for direct callers (the UnknownModelRoleError convention).
  */
 export class InvalidCustomProviderError extends Error {
   constructor(message: string) {
@@ -368,6 +401,14 @@ function assertCustomProvider(decl: AppCustomProvider, plainKey: string): void {
   if (PROVIDER_IDS.includes(decl.provider_id)) {
     throw new InvalidCustomProviderError(
       `custom provider id ${JSON.stringify(decl.provider_id)} collides with a built-in provider id`,
+    );
+  }
+  // QC wave-1 W-1: an id the in-image base models.yml already declares
+  // (ark-plan) would be skipped base-wins at synthesis — silently dead on
+  // every review — so it is rejected exactly like a built-in collision.
+  if (IN_IMAGE_BASE_PROVIDER_IDS.includes(decl.provider_id)) {
+    throw new InvalidCustomProviderError(
+      `custom provider id ${JSON.stringify(decl.provider_id)} collides with an in-image base provider id`,
     );
   }
   if (!/^https:\/\//.test(decl.base_url)) {
@@ -747,12 +788,35 @@ export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | un
      * TEXT JSON array (AL-23-1 DDL). An invalid declaration throws
      * InvalidCustomProviderError / ProviderKeyTooLongError before any
      * crypto or write (the route answers 400 first; this is the backstop).
+     * The declaration-count bound (MAX_CUSTOM_PROVIDER_COUNT, QC wave-1 W-2)
+     * is growth-only: a NEW id at the cap throws before any crypto or write;
+     * re-declaring an EXISTING id (an update, not growth) always proceeds.
      * The upsert maintains the row's write time from ONE clock read (the
      * 0012 T1 convention): a fresh insert writes updated_at == created_at;
      * re-declaring moves both forward.
      */
     async upsertCustomProvider(appId: string, decl: AppCustomProvider, plainKey: string): Promise<void> {
       assertCustomProvider(decl, plainKey);
+      // Growth-only cap: only a provider id with NO row yet can push the App
+      // past MAX_CUSTOM_PROVIDER_COUNT declarations (an upsert of an existing
+      // id replaces the row in place — no count change). Two SELECTs on the
+      // new-declaration path, zero on the update path; small next to the
+      // encrypt (accepted — same posture as the consumer's no-cache re-reads).
+      const existing = await db
+        .prepare(`SELECT provider_id FROM app_custom_providers WHERE app_id = ? AND provider_id = ?`)
+        .bind(appId, decl.provider_id)
+        .first<{ provider_id: string }>();
+      if (existing === null) {
+        const countRow = await db
+          .prepare(`SELECT COUNT(*) AS n FROM app_custom_providers WHERE app_id = ?`)
+          .bind(appId)
+          .first<{ n: number }>();
+        if ((countRow?.n ?? 0) >= MAX_CUSTOM_PROVIDER_COUNT) {
+          throw new InvalidCustomProviderError(
+            `App ${appId} already has the maximum of ${MAX_CUSTOM_PROVIDER_COUNT} custom provider declarations`,
+          );
+        }
+      }
       const keyEnc = await box.encryptSecret(plainKey, customProviderAad(appId, decl.provider_id));
       await db
         .prepare(

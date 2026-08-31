@@ -68,7 +68,10 @@ function providerBlock(decl: CustomProviderDeclaration): string {
   const lines = [`  ${yamlQuote(decl.provider_id)}:`];
   lines.push(`    baseUrl: ${yamlQuote(decl.base_url)}`);
   lines.push(`    apiKey: ${customProviderEnvName(decl.provider_id)}`);
-  lines.push(`    api: ${decl.api}`);
+  // The api enum value is quoted like every other user-derived scalar (QC
+  // wave-1 S-003): the runner input is the in-image trust edge, and a hostile
+  // `api` carrying a newline would otherwise break the YAML shape.
+  lines.push(`    api: ${yamlQuote(decl.api)}`);
   lines.push("    auth: apiKey");
   lines.push("    models:");
   for (const id of decl.model_ids) {

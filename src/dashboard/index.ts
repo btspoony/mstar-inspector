@@ -58,7 +58,9 @@ import { SecretboxKeyError, createSecretbox } from "./secretbox";
 import {
   CUSTOM_PROVIDER_API_IDS,
   CUSTOM_PROVIDER_ID_PATTERN,
+  IN_IMAGE_BASE_PROVIDER_IDS,
   MAX_CUSTOM_PROVIDER_BASE_URL_LENGTH,
+  MAX_CUSTOM_PROVIDER_COUNT,
   MAX_CUSTOM_PROVIDER_MODEL_ID_LENGTH,
   MAX_CUSTOM_PROVIDER_MODEL_IDS,
   MAX_MODEL_SELECTOR_LENGTH,
@@ -1172,10 +1174,13 @@ dashboardApp.post("/apps/:slug/settings", async (c) => {
     // AL-23-1/AL-23-2 bound is checked here (400 re-render, zero writes —
     // the store re-validates as the backstop): provider id grammar
     // `[a-z0-9][a-z0-9-]{0,63}` (the env-name mapping the Task 3 consumer
-    // injects), baseUrl https-only ≤2048, api one of the three-form enum,
-    // model_ids 1..32 entries × ≤128 chars, key required and ≤ the
-    // existing 4096 cap. The key is encrypted inside the store and never
-    // echoed back.
+    // injects), no collision with a built-in OR in-image base provider id
+    // (QC wave-1 W-1 — ark-plan would be silently dead at synthesis), at
+    // most MAX_CUSTOM_PROVIDER_COUNT declarations per App (QC wave-1 W-2,
+    // growth-only — updating an existing id always proceeds), baseUrl
+    // https-only ≤2048, api one of the three-form enum, model_ids 1..32
+    // entries × ≤128 chars, key required and ≤ the existing 4096 cap. The
+    // key is encrypted inside the store and never echoed back.
     const providerId = typeof form.provider_id === "string" ? form.provider_id.trim() : "";
     const baseUrl = typeof form.base_url === "string" ? form.base_url.trim() : "";
     const api = typeof form.api === "string" ? form.api.trim() : "";
@@ -1217,6 +1222,45 @@ dashboardApp.post("/apps/:slug/settings", async (c) => {
         {
           kind: "error",
           message: `${providerId} is a built-in provider — custom providers must use a new id. Nothing was stored.`,
+        },
+        400,
+      );
+    }
+    // QC wave-1 W-1: the in-image base models.yml (sandbox-image/omp-models.yml)
+    // already declares this id — the base-wins merge would skip the custom
+    // block on every review while its key still got injected, so the
+    // declaration is refused up front (mirror of IN_IMAGE_BASE_PROVIDER_IDS).
+    if (IN_IMAGE_BASE_PROVIDER_IDS.includes(providerId)) {
+      return settingsResponse(
+        c,
+        gate.session,
+        store,
+        apps,
+        gate.app,
+        {
+          kind: "error",
+          message: `${providerId} is already provided by the review environment's base configuration — custom providers must use a new id. Nothing was stored.`,
+        },
+        400,
+      );
+    }
+    // QC wave-1 W-2: declarations per App are capped (growth-only — an
+    // update of an already-declared id never counts against the cap). The
+    // store re-checks the same bound as its backstop.
+    const declaredCustomProviders = await store.listCustomProviders(gate.app.id);
+    if (
+      !declaredCustomProviders.some((p) => p.provider_id === providerId) &&
+      declaredCustomProviders.length >= MAX_CUSTOM_PROVIDER_COUNT
+    ) {
+      return settingsResponse(
+        c,
+        gate.session,
+        store,
+        apps,
+        gate.app,
+        {
+          kind: "error",
+          message: `This App already has the maximum of ${MAX_CUSTOM_PROVIDER_COUNT} custom providers — remove one before declaring another (updating an existing declaration is always allowed). Nothing was stored.`,
         },
         400,
       );

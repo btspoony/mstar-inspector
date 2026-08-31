@@ -707,6 +707,10 @@ async function resolveModelOverrides(
  * non-deleted there) and runs BEFORE the in-flight guard so a resolution
  * failure has zero side effects. The set is re-read every message (no
  * cache) so a dashboard declaration update applies to the very next review.
+ * The per-attempt cost — one extra SELECT plus N AES-GCM decryptions, paid
+ * even on guard-held/deduped attempts — is accepted by design (QC wave-1
+ * S-001): small next to clone/diff, and it is what makes declaration updates
+ * apply to the very next review instead of a freshness window.
  * A read/decrypt failure rethrows with the app-id-prefixed context wrapper
  * — an undecryptable envelope (tampered row, AAD mismatch) fails CLOSED,
  * never a silent skip (the getAppConfig convention). Decrypted keys live

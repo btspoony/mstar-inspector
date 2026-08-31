@@ -10,8 +10,8 @@
  *     verbatim in the synthesized text;
  *   - custom provider blocks carry baseUrl + `apiKey: CUSTOM_<ID>_API_KEY`
  *     (env-var-name reference form) + api + auth + the declared model ids;
- *   - provider KEYS are double-quoted (YAML 1.1 would parse bare `on:`/`yes:`/
- *     `true:` keys as booleans — a strict parser then rejects the map);
+ *   - provider KEYS and the api value are double-quoted (yamlQuote — every
+ *     user-derived scalar carries the same defensive quoting);
  *   - ZERO key literals: the fixture secret never appears in the text (the
  *     key rides ONLY the exec env, never the declaration shape);
  *   - base provider ids win on collision (a custom id shadowing a base
@@ -81,7 +81,7 @@ describe("synthesizeModelsYaml (plan 23 Task 3, AL-23-1 merged-complete file)", 
     expect(yaml).toContain('"my-provider":');
     expect(yaml).toContain(`baseUrl: "${CUSTOM.base_url}"`);
     expect(yaml).toContain("apiKey: CUSTOM_MY_PROVIDER_API_KEY");
-    expect(yaml).toContain("api: openai-completions");
+    expect(yaml).toContain('api: "openai-completions"');
     expect(yaml).toContain("auth: apiKey");
     expect(yaml).toContain(`- id: "my-model-1"`);
     expect(yaml).toContain(`- id: "my-model-2"`);
@@ -104,7 +104,7 @@ describe("synthesizeModelsYaml (plan 23 Task 3, AL-23-1 merged-complete file)", 
     expect(yaml.indexOf('"my-provider":')).toBeLessThan(yaml.indexOf('"second-one":'));
     expect(yaml).toContain("apiKey: CUSTOM_MY_PROVIDER_API_KEY");
     expect(yaml).toContain("apiKey: CUSTOM_SECOND_ONE_API_KEY");
-    expect(yaml).toContain("api: anthropic-messages");
+    expect(yaml).toContain('api: "anthropic-messages"'); // the second custom block, quoted form
     expect(yaml).not.toContain(FIXTURE_KEY);
   });
 
@@ -163,6 +163,24 @@ describe("synthesizeModelsYaml (plan 23 Task 3, AL-23-1 merged-complete file)", 
     expect(yaml).toContain("stuff: true");
     expect(yaml.indexOf('"my-provider":')).toBeLessThan(yaml.indexOf("other:"));
     expect(yaml.indexOf('"my-provider":')).toBeGreaterThan(yaml.indexOf("deepseek-v4-flash"));
+  });
+
+  test("the custom api value is quoted via yamlQuote — even when it equals the base block's literal (QC wave-1 S-003 pin)", () => {
+    const sameApiAsBase: CustomProviderDeclaration = {
+      ...CUSTOM,
+      provider_id: "ark-style-mirror",
+      api: "anthropic-messages", // the SAME literal the base ark-plan block carries bare
+    };
+    const yaml = synthesizeModelsYaml(BASE_YAML, [sameApiAsBase]);
+    // The custom block emits the QUOTED form (yamlQuote, like baseUrl and
+    // model ids) — a raw `api: ${decl.api}` splice would be the one
+    // user-derived scalar escaping the file's defensive posture.
+    expect(yaml).toContain('    api: "anthropic-messages"');
+    // The base ark-plan block stays BARE — the merge never rewrites the base.
+    expect(yaml).toContain("    api: anthropic-messages");
+    // Exactly one quoted and one bare api line: the two forms never blur.
+    expect(yaml.match(/^    api: "anthropic-messages"$/gm)).toHaveLength(1);
+    expect(yaml.match(/^    api: anthropic-messages$/gm)).toHaveLength(1);
   });
 
   test("quoted values with YAML-special characters are escaped, not emitted raw", () => {

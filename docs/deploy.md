@@ -27,7 +27,7 @@ exist before the first deploy:
   `sandbox-image/Dockerfile` at deploy time (`image_build_context: "."`,
   `instance_type: lite`, `max_instances: 1`).
 
-### D1 migrations (0001–0010, forward-only)
+### D1 migrations (0001–0013, forward-only)
 
 ```bash
 wrangler d1 migrations apply mstar-inspector-db --remote   # production
@@ -46,6 +46,8 @@ wrangler d1 migrations apply mstar-inspector-db            # local dev
 | `0008_github_apps_ops` | per-App ops columns (`review_enabled` pause switch) |
 | `0009_app_model_roles` | per-App per-role model overrides (plan 17) |
 | `0010_review_failures` | all-stage failure table (plan 18) — the cron sweep's signal |
+| `0011_webhook_deliveries` | per-App webhook delivery log (plan 20) |
+| `0012_custom_providers_and_key_updated_at` | per-App custom provider declarations + provider-key `updated_at` (plan 23) |
 
 Migrations are **forward-only** (0002 precedent): never hand-edit an applied
 migration; add the next file.
