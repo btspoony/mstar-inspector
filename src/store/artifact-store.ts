@@ -55,6 +55,7 @@ import {
 } from "@mstar-harness/engine";
 import type { IdempotencyKey } from "../contracts/idem";
 import type { D1Like, ReviewRow } from "./types";
+import { computeFindingFingerprint } from "./fingerprint";
 
 /** Schema id accepted by `put` / carried by every persisted review doc. */
 export const REVIEW_SCHEMA = "mstar.review/v1" as const;
@@ -292,7 +293,10 @@ export function createArtifactStore(db: D1Like): D1ArtifactStore {
             finding.line_end ?? null,
             finding.title,
             finding.body,
-            finding.fingerprint_hint ?? null,
+            // Plan 21 (AL-21-1): the persist path is the single fingerprint
+            // write point — a non-blank hint is returned verbatim by the
+            // pure function; otherwise the normalized FNV-1a fingerprint.
+            computeFindingFingerprint(finding),
             reviewId,
           ),
       );

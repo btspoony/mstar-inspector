@@ -26,13 +26,14 @@
  *     NULL) → undefined
  */
 import { describe, expect, test } from "bun:test";
-import type { MstarReviewV1 } from "@mstar-harness/engine";
+import type { MstarReviewFinding, MstarReviewV1 } from "@mstar-harness/engine";
 import {
   createArtifactStore,
   parseIdemKey,
   REVIEW_SKILL_VERSION,
   type ReviewArtifactDoc,
 } from "../../src/store/artifact-store";
+import { computeFindingFingerprint } from "../../src/store/fingerprint";
 import { idemKey } from "../../src/contracts/idem";
 import { createMigratedTestD1 } from "./helpers";
 import type { ReviewRow } from "../../src/store/types";
@@ -128,6 +129,88 @@ describe("createArtifactStore().put", () => {
       fingerprint: "fp-1",
       status: "open", // column default
     });
+  });
+
+  test("writes the normalized computed fingerprint for findings without a hint (plan 21 T2)", async () => {
+    const db = createMigratedTestD1();
+    const store = createArtifactStore(db);
+    const findings: MstarReviewFinding[] = [
+      {
+        mergeClass: "should-fix",
+        category: "logic",
+        file_path: "src/a.ts",
+        line_start: 15,
+        line_end: 16,
+        title: "Null deref risk",
+        body: "b1",
+      },
+      // no path / no line → repo-level "noline" dimension (still a fingerprint)
+      { mergeClass: "nit", title: "Docs typo", body: "b2" },
+    ];
+
+    await store.put(reviewDoc({ payload: payload({ findings }) }));
+
+    const rows = db.raw.query("SELECT title, fingerprint FROM findings ORDER BY rowid").all() as Array<{
+      title: string;
+      fingerprint: string | null;
+    }>;
+    expect(rows).toHaveLength(2);
+    for (const [i, finding] of findings.entries()) {
+      // Same input reproduces the function's value — every v1 put row is
+      // non-NULL and deterministically derived (AC-21b).
+      expect(rows[i]!.fingerprint).not.toBeNull();
+      expect(rows[i]!.fingerprint).toBe(computeFindingFingerprint(finding));
+    }
+  });
+
+  test("hint findings keep the hint verbatim, even when the normalized value would differ (plan 21 T2)", async () => {
+    const db = createMigratedTestD1();
+    const store = createArtifactStore(db);
+    const findings: MstarReviewFinding[] = [
+      { mergeClass: "should-fix", title: "Titled", body: "b", fingerprint_hint: "legacy-hint-42" },
+    ];
+
+    await store.put(reviewDoc({ payload: payload({ findings }) }));
+
+    const row = db.raw.query("SELECT fingerprint FROM findings").get() as { fingerprint: string | null };
+    expect(row.fingerprint).toBe("legacy-hint-42");
+    // passthrough pin: dropping the hint would compute a DIFFERENT value, so
+    // a literal match alone could hide a recompute regression.
+    expect(row.fingerprint).not.toBe(
+      computeFindingFingerprint({ mergeClass: "should-fix", title: "Titled" }),
+    );
+  });
+
+  test("era semantics: put never backfills historical NULL fingerprints (plan 21)", async () => {
+    const db = createMigratedTestD1();
+    const store = createArtifactStore(db);
+    // Simulate a pre-fingerprint era review row (envelope NULL = M1-era) with
+    // a NULL-fingerprint finding — the shape put() wrote before plan 21.
+    const oldReviewId = crypto.randomUUID();
+    db.raw
+      .prepare(
+        `INSERT INTO reviews (id, installation_id, owner, repo, pr_number, head_sha, verdict, summary_md, skill_version, envelope)
+         VALUES (?, 123, 'acme', 'widgets', 42, ?, 'needs fixes', 'old', 'mstar.review/v1', NULL)`,
+      )
+      .run(oldReviewId, "e".repeat(40));
+    db.raw
+      .prepare(
+        `INSERT INTO findings (id, review_id, severity, file_path, line_start, title, body, fingerprint)
+         VALUES (?, ?, 'should-fix', 'src/old.ts', 1, 'Old era', 'ob', NULL)`,
+      )
+      .run(crypto.randomUUID(), oldReviewId);
+
+    // A NEW v1 put for a different sha must not touch the era row.
+    await store.put(reviewDoc());
+
+    const eraRow = db.raw
+      .query("SELECT fingerprint FROM findings WHERE review_id = ?")
+      .get(oldReviewId) as { fingerprint: string | null };
+    expect(eraRow.fingerprint).toBeNull();
+    const newRow = db.raw
+      .query("SELECT fingerprint FROM findings WHERE review_id != ?")
+      .get(oldReviewId) as { fingerprint: string | null };
+    expect(newRow.fingerprint).not.toBeNull();
   });
 
   test("per-App put persists app_id; a put without appId keeps app_id NULL (QC F-001 / Clarify #3: NULL = legacy)", async () => {
