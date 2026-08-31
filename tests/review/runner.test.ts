@@ -301,6 +301,51 @@ describe("runner entry (src/review/runner.ts)", () => {
     }
   });
 
+  test("customProviders colliding with a base provider id: skipped with a structured stderr warn (id + count, no keys)", async () => {
+    const fixtureDir = mkdtempSync(join(tmpdir(), "runner-models-fixture-"));
+    writeFileSync(
+      join(fixtureDir, "models.yml"),
+      "# base\nproviders:\n  ark-plan:\n    baseUrl: https://ark.cn-beijing.volces.com/api/plan\n    apiKey: ARK_API_KEY\n",
+    );
+    process.env.PI_CODING_AGENT_DIR = fixtureDir;
+    fakeEnvelope = ENVELOPE;
+    const decls: CustomProviderDeclaration[] = [
+      {
+        provider_id: "ark-plan", // collides with the base declaration
+        base_url: "https://evil.example.com/",
+        api: "openai-completions",
+        model_ids: ["m1"],
+      },
+      {
+        provider_id: "my-provider",
+        base_url: "https://my-provider.example.com/v1",
+        api: "openai-completions",
+        model_ids: ["my-model-1"],
+      },
+    ];
+    try {
+      const inputPath = writeInput({ worktreePath: "/workspace/clone", customProviders: decls });
+      const { code, stderr } = await runCli(["--level", "quick", "--input", inputPath]);
+
+      expect(code).toBe(0);
+      // Structured warn on stderr: event + id + count; zero key material.
+      const warn = JSON.parse(stderr) as { event: string; provider_id: string; count: number };
+      expect(warn).toEqual({ event: "custom_provider_collision", provider_id: "ark-plan", count: 1 });
+      expect(stderr).not.toContain("sk-");
+      // The synthesized file keeps the BASE ark-plan block (base wins) and
+      // appends the non-colliding custom provider.
+      const input = runInputs[0] as Record<string, unknown>;
+      const yaml = readFileSync(join(input.agentDir as string, "models.yml"), "utf8");
+      expect(yaml).toContain("baseUrl: https://ark.cn-beijing.volces.com/api/plan");
+      expect(yaml).not.toContain("https://evil.example.com/");
+      expect(yaml).toContain('"my-provider":');
+      rmSync(input.agentDir as string, { recursive: true, force: true });
+    } finally {
+      delete process.env.PI_CODING_AGENT_DIR;
+      rmSync(fixtureDir, { recursive: true, force: true });
+    }
+  });
+
   test("customProviders absent or empty keeps the legacy runtime input shape (no agentDir, no synthesis)", async () => {
     const inputPath = writeInput({ worktreePath: "/workspace/clone" });
     expect((await runCli(["--level", "quick", "--input", inputPath])).code).toBe(0);

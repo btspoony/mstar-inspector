@@ -997,8 +997,11 @@ describe("custom provider env injection + runner input threading (plan 23 Task 3
     const appConsumer = createReviewConsumer(makeEnv({ DB: appDb as never }), testLog, testOverrides);
     await appConsumer(makeBatch(makePayload({ pr_number: 42, appRef: { kind: "app", appId: appX.id } })));
     const [appInput] = runnerInputs();
+    // Snapshot the app env BEFORE the legacy run (cloned, so later mutations
+    // of the recorded object cannot alias the comparison).
+    const [appEnv] = runnerEnvs();
     expect(Object.keys(appInput!)).toEqual(["worktreePath", "reconFacts"]);
-    expect(JSON.stringify(runnerEnvs()[0])).not.toContain("CUSTOM_");
+    expect(JSON.stringify(appEnv)).not.toContain("CUSTOM_");
 
     reset();
     const legacyConsumer = createReviewConsumer(makeEnv({ DB: createMigratedTestD1() as never }), testLog, testOverrides);
@@ -1006,7 +1009,9 @@ describe("custom provider env injection + runner input threading (plan 23 Task 3
     const [legacyInput] = runnerInputs();
     expect(Object.keys(legacyInput!)).toEqual(["worktreePath", "reconFacts"]);
     expect(JSON.stringify(appInput)).toBe(JSON.stringify(legacyInput));
-    expect(runnerEnvs()[0]).toEqual(runnerEnvs()[0]); // shape-identical (fresh env per review)
+    // Real before/after equality: the app env (no custom rows) is byte-identical
+    // to the legacy env — compared as a cloned snapshot, never self-referential.
+    expect(structuredClone(appEnv)).toEqual(runnerEnvs()[0]);
   });
 
   test("explicit legacy marker {kind:'legacy'}: no custom env injection, field omitted", async () => {

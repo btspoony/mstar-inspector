@@ -10,10 +10,13 @@
  *     verbatim in the synthesized text;
  *   - custom provider blocks carry baseUrl + `apiKey: CUSTOM_<ID>_API_KEY`
  *     (env-var-name reference form) + api + auth + the declared model ids;
+ *   - provider KEYS are double-quoted (YAML 1.1 would parse bare `on:`/`yes:`/
+ *     `true:` keys as booleans — a strict parser then rejects the map);
  *   - ZERO key literals: the fixture secret never appears in the text (the
  *     key rides ONLY the exec env, never the declaration shape);
  *   - base provider ids win on collision (a custom id shadowing a base
- *     provider is skipped — the store already rejects the 18 built-ins);
+ *     provider is skipped — the store already rejects the 18 built-ins) and
+ *     every skip is reported through the onCollision callback (never silent);
  *   - no declarations → no synthesis (agentDir omitted = today's behavior);
  *   - the write helper targets /tmp/omp-agent-<uuid>/models.yml and reads
  *     the base from $PI_CODING_AGENT_DIR/models.yml (mirror of the SDK's
@@ -73,9 +76,9 @@ describe("synthesizeModelsYaml (plan 23 Task 3, AL-23-1 merged-complete file)", 
     expect(yaml).toContain("api: anthropic-messages");
     expect(yaml).toContain("auth: apiKey");
     expect(yaml).toContain("id: deepseek-v4-flash");
-    // Custom provider block: id, baseUrl, env-var-name reference, api, auth,
-    // declared model ids.
-    expect(yaml).toContain("my-provider:");
+    // Custom provider block: quoted id key, baseUrl, env-var-name reference,
+    // api, auth, declared model ids.
+    expect(yaml).toContain('"my-provider":');
     expect(yaml).toContain(`baseUrl: "${CUSTOM.base_url}"`);
     expect(yaml).toContain("apiKey: CUSTOM_MY_PROVIDER_API_KEY");
     expect(yaml).toContain("api: openai-completions");
@@ -98,7 +101,7 @@ describe("synthesizeModelsYaml (plan 23 Task 3, AL-23-1 merged-complete file)", 
       model_ids: ["b-model"],
     };
     const yaml = synthesizeModelsYaml(BASE_YAML, [CUSTOM, second]);
-    expect(yaml.indexOf("my-provider:")).toBeLessThan(yaml.indexOf("second-one:"));
+    expect(yaml.indexOf('"my-provider":')).toBeLessThan(yaml.indexOf('"second-one":'));
     expect(yaml).toContain("apiKey: CUSTOM_MY_PROVIDER_API_KEY");
     expect(yaml).toContain("apiKey: CUSTOM_SECOND_ONE_API_KEY");
     expect(yaml).toContain("api: anthropic-messages");
@@ -118,6 +121,36 @@ describe("synthesizeModelsYaml (plan 23 Task 3, AL-23-1 merged-complete file)", 
     expect(yaml).not.toContain("https://evil.example.com/");
     expect(yaml).toContain("baseUrl: https://ark.cn-beijing.volces.com/api/plan");
   });
+  test("colliding custom ids are reported through onCollision (base wins, never silent)", () => {
+    const clash: CustomProviderDeclaration = {
+      ...CUSTOM,
+      provider_id: "ark-plan",
+      base_url: "https://evil.example.com/",
+    };
+    const collisions: string[] = [];
+    const yaml = synthesizeModelsYaml(BASE_YAML, [clash, CUSTOM], (id) => collisions.push(id));
+    // The skip is reported (id only — zero key material) and the merge still
+    // keeps the BASE ark-plan block while appending the non-colliding custom.
+    expect(collisions).toEqual(["ark-plan"]);
+    expect(yaml.match(/^  ark-plan:/gm)).toHaveLength(1);
+    expect(yaml).not.toContain("https://evil.example.com/");
+    expect(yaml).toContain('"my-provider":');
+  });
+
+  test("YAML 1.1 boolean-like provider ids are quoted — `on` parses as a string key, never a boolean", () => {
+    const pin: CustomProviderDeclaration = {
+      ...CUSTOM,
+      provider_id: "on",
+      model_ids: ["pin-model"],
+    };
+    const yaml = synthesizeModelsYaml(BASE_YAML, [pin]);
+    // The key is double-quoted (a bare `on:` would parse as boolean true in
+    // YAML 1.1 — a strict parser then rejects the providers map shape).
+    expect(yaml).toContain('  "on":');
+    expect(yaml).not.toMatch(/^  on:/m);
+    expect(yaml).toContain("apiKey: CUSTOM_ON_API_KEY");
+    expect(yaml).toContain(`- id: "pin-model"`);
+  });
 
   test("a base file without a top-level providers map fails loud (never a partial merge)", () => {
     expect(() => synthesizeModelsYaml("# no providers here\nother: 1\n", [CUSTOM])).toThrow(/providers/);
@@ -128,8 +161,8 @@ describe("synthesizeModelsYaml (plan 23 Task 3, AL-23-1 merged-complete file)", 
     const yaml = synthesizeModelsYaml(baseWithTail, [CUSTOM]);
     expect(yaml).toContain("other:");
     expect(yaml).toContain("stuff: true");
-    expect(yaml.indexOf("my-provider:")).toBeLessThan(yaml.indexOf("other:"));
-    expect(yaml.indexOf("my-provider:")).toBeGreaterThan(yaml.indexOf("deepseek-v4-flash"));
+    expect(yaml.indexOf('"my-provider":')).toBeLessThan(yaml.indexOf("other:"));
+    expect(yaml.indexOf('"my-provider":')).toBeGreaterThan(yaml.indexOf("deepseek-v4-flash"));
   });
 
   test("quoted values with YAML-special characters are escaped, not emitted raw", () => {

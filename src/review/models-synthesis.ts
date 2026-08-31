@@ -25,8 +25,7 @@
 
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { customProviderEnvName } from "../pipeline/providers";
-import type { CustomProviderDeclaration } from "./runtime";
+import { customProviderEnvName, type CustomProviderDeclaration } from "./runtime";
 
 /** In-image base models.yml (sandbox-image Dockerfile COPY target). */
 export const BASE_MODELS_YAML_PATH = "/opt/omp-agent/models.yml";
@@ -63,7 +62,10 @@ function yamlQuote(value: string): string {
 
 /** One custom provider block, 2-space-indented under `providers:`. */
 function providerBlock(decl: CustomProviderDeclaration): string {
-  const lines = [`  ${decl.provider_id}:`];
+  // The provider KEY is double-quoted too: YAML 1.1 parses bare `on:`/`yes:`/
+  // `true:` keys as booleans, which a strict parser then rejects inside the
+  // providers map (values are already quoted via yamlQuote).
+  const lines = [`  ${yamlQuote(decl.provider_id)}:`];
   lines.push(`    baseUrl: ${yamlQuote(decl.base_url)}`);
   lines.push(`    apiKey: ${customProviderEnvName(decl.provider_id)}`);
   lines.push(`    api: ${decl.api}`);
@@ -83,12 +85,14 @@ function providerBlock(decl: CustomProviderDeclaration): string {
  * merge — the base file is repo-owned (sandbox-image/omp-models.yml), so its
  * top-level shape is fixed; a base WITHOUT a top-level `providers:` map is a
  * deployment bug and fails loud (never a partial merge). Colliding custom
- * ids are skipped (base wins, AL-23-1); no declarations → base text
- * unchanged (byte-identical).
+ * ids are skipped (base wins, AL-23-1) and reported through `onCollision`
+ * (the runner emits a structured warn — a colliding declaration is never
+ * silently dead); no declarations → base text unchanged (byte-identical).
  */
 export function synthesizeModelsYaml(
   baseYaml: string,
   customProviders: readonly CustomProviderDeclaration[],
+  onCollision?: (providerId: string) => void,
 ): string {
   const lines = baseYaml.split("\n");
   const providersIndex = lines.findIndex((line) => /^providers:\s*(?:#.*)?$/.test(line));
@@ -121,7 +125,10 @@ export function synthesizeModelsYaml(
 
   const blocks: string[] = [];
   for (const decl of customProviders) {
-    if (baseProviderIds.has(decl.provider_id)) continue; // base wins (AL-23-1)
+    if (baseProviderIds.has(decl.provider_id)) {
+      onCollision?.(decl.provider_id); // base wins (AL-23-1) — never silent
+      continue;
+    }
     blocks.push(providerBlock(decl));
   }
   if (blocks.length === 0) return baseYaml;
@@ -146,6 +153,7 @@ export function synthesizeModelsYaml(
 export async function writePerReviewModelsYaml(
   customProviders: readonly CustomProviderDeclaration[],
   basePath = resolveModelsBasePath(),
+  onCollision?: (providerId: string) => void,
 ): Promise<string> {
   if (customProviders.length === 0) {
     throw new Error("writePerReviewModelsYaml requires at least one custom-provider declaration");
@@ -153,6 +161,6 @@ export async function writePerReviewModelsYaml(
   const baseYaml = await readFile(basePath, "utf8");
   const dir = join("/tmp", `omp-agent-${crypto.randomUUID()}`);
   await mkdir(dir, { recursive: true });
-  await writeFile(join(dir, MODELS_YAML_NAME), synthesizeModelsYaml(baseYaml, customProviders));
+  await writeFile(join(dir, MODELS_YAML_NAME), synthesizeModelsYaml(baseYaml, customProviders, onCollision));
   return dir;
 }

@@ -76,21 +76,14 @@ export function pickProviderKeys(env: Record<string, unknown>): Record<string, s
   return picked;
 }
 /**
- * AL-23-1 env-name contract fragments for custom-provider API keys. The full
- * mapping is CUSTOM_<UPPER_SNAKE(provider_id)>_API_KEY — provider ids are
- * store-enforced `[a-z0-9][a-z0-9-]{0,63}` (hyphen → underscore, uppercased).
+ * AL-23-1 custom-provider env-name contract — re-exported from
+ * src/review/runtime.ts (the single source of truth): the sandbox image
+ * COPYs only src/review (sandbox-image/Dockerfile:88), so the helper must
+ * live in-image next to CustomProviderDeclaration; the Worker-side SSOT
+ * stays single-source through this re-export (zero duplicated literals).
  */
-export const CUSTOM_PROVIDER_ENV_PREFIX = "CUSTOM_";
-export const CUSTOM_PROVIDER_ENV_SUFFIX = "_API_KEY";
-
-/**
- * Env var name for a custom-provider API key (plan 23 Task 3, AL-23-1): a
- * total function — any id maps to a syntactically valid env var name. The
- * queue consumer injects the decrypted key under this name and the runner's
- * synthesized per-review models.yml references the SAME name (`apiKey:
- * CUSTOM_<ID>_API_KEY` — omp resolves env first, literal fallback, so the
- * consumer-side injection closes the "declaration ⇒ key ⇒ env" loop).
- */
-export function customProviderEnvName(providerId: string): string {
-  return `${CUSTOM_PROVIDER_ENV_PREFIX}${providerId.toUpperCase().replace(/-/g, "_")}${CUSTOM_PROVIDER_ENV_SUFFIX}`;
-}
+export {
+  CUSTOM_PROVIDER_ENV_PREFIX,
+  CUSTOM_PROVIDER_ENV_SUFFIX,
+  customProviderEnvName,
+} from "../review/runtime";

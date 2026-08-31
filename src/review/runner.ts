@@ -9,14 +9,27 @@
  * Contract:
  *   - `--level` is the review tier (quick | default | deep); anything else is a
  *     usage error (the runtime itself rejects unknown levels as well);
- *    - `customProviders` (plan 23 Task 3) is an optional array of keyless
- *      declarations `{ provider_id, base_url, api, model_ids }`; when present
- *      and non-empty the runner synthesizes a COMPLETE per-review models.yml
- *      (/tmp/omp-agent-<uuid>/models.yml from the in-image base) with every
- *      custom key as a CUSTOM_<ID>_API_KEY env-name reference (the consumer
- *      injects the decrypted values into the exec env) and rides that
- *      directory as the runtime `agentDir` — absent/empty = the legacy
- *      in-image models.yml, byte-identical behavior;
+ *   - `--input <json-file>` carries the review job as JSON with ALL-OPTIONAL
+ *     fields (absent = the legacy default, byte-identical behavior):
+ *       - `worktreePath` (string) — the in-container PR clone path; defaults
+ *         to the process cwd;
+ *       - `reconFacts` (string[]) — per-seat recon facts (owner/repo#pr, head
+ *         sha, diff stats, file scope); defaults to [];
+ *       - `modelOverrides` (Record<string, string>) — per-agent selector
+ *         chains (plan 17 B6); shape-guarded here, the role vocabulary and
+ *         selector grammar live dashboard-side; absent = the legacy runtime
+ *         input shape;
+ *       - `customProviders` (plan 23 Task 3) — an optional array of keyless
+ *         declarations `{ provider_id, base_url, api, model_ids }`; when
+ *         present and non-empty the runner synthesizes a COMPLETE per-review
+ *         models.yml (/tmp/omp-agent-<uuid>/models.yml from the in-image
+ *         base) with every custom key as a CUSTOM_<ID>_API_KEY env-name
+ *         reference (the consumer injects the decrypted values into the exec
+ *         env) and rides that directory as the runtime `agentDir`; a
+ *         declaration whose id collides with a base provider is skipped
+ *         (base wins, AL-23-1) with a structured stderr warn (id + count, no
+ *         keys) — absent/empty = the legacy in-image models.yml,
+ *         byte-identical behavior;
  *   - stdout carries ONLY the mstar.review/v1 envelope JSON (validated by
  *     validateMstarReviewV1 inside the runtime); all diagnostics to stderr;
  *   - exit codes: 0 success, 1 runtime/I-O failure, 2 usage error. There is
@@ -180,10 +193,25 @@ export async function main(argv: string[], runtime: AgentRuntime = ompAgentRunti
     // from the in-image base) and ride the directory as `agentDir` — the SDK
     // reads <agentDir>/models.yml instead of the in-image default. Absent or
     // empty declarations = no synthesis, no agentDir (legacy byte-identical).
+    const skippedCollisions: string[] = [];
     const agentDir =
       json.customProviders !== undefined && json.customProviders.length > 0
-        ? await writePerReviewModelsYaml(json.customProviders)
+        ? await writePerReviewModelsYaml(json.customProviders, undefined, (providerId) => {
+            skippedCollisions.push(providerId);
+          })
         : undefined;
+    // A custom id colliding with a base declaration is skipped (base wins,
+    // AL-23-1) — never silent: one structured stderr warn per colliding id
+    // (id + total count; zero key material).
+    for (const providerId of skippedCollisions) {
+      console.error(
+        JSON.stringify({
+          event: "custom_provider_collision",
+          provider_id: providerId,
+          count: skippedCollisions.length,
+        }),
+      );
+    }
     input = {
       level,
       worktreePath: json.worktreePath ?? process.cwd(),
