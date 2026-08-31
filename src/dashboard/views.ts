@@ -52,14 +52,14 @@ function relativeTime(value: string | null): string {
 }
 /**
  * Delivery-outcome badge (plan 20 Task 2, AL-20-2): the producer vocabulary
- * is ok | paused | ignored | rejected — rejected and paused are the
- * attention states (amber-700 .note token, the same token the list uses for
- * the disabled/paused badges), ok and ignored are healthy (gray .status).
- * The outcome text is escaped — it is a stored string, and the brief pins
- * escapeHtml on every user-influenced string.
+ * is ok | paused | ignored | rejected — rejected is the ONLY attention
+ * state (amber-700 .note token, the same token the list uses for the
+ * disabled/paused badges); ok, paused, and ignored are healthy (gray
+ * .status). The outcome text is escaped — it is a stored string, and the
+ * brief pins escapeHtml on every user-influenced string.
  */
 function deliveryOutcomeBadge(outcome: DeliveryOutcome): string {
-  return outcome === "rejected" || outcome === "paused"
+  return outcome === "rejected"
     ? `<span class="note">${escapeHtml(outcome)}</span>`
     : `<span class="status">${escapeHtml(outcome)}</span>`;
 }
@@ -823,7 +823,7 @@ export function appSettingsPage(
       </ul>`;
   const deliveriesSection = `<section class="enabled">
       <h2>Recent deliveries</h2>
-      <p class="status">The last 5 verified webhook deliveries for this App — newest first.</p>
+      <p class="status">The last 5 webhook deliveries for this App — newest first.</p>
       ${deliveryList}
     </section>`;
   // Role models editor (plan 17, spec § IA + § DESIGN.md 意图): one text row

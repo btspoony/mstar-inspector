@@ -23,7 +23,7 @@ import { join } from "node:path";
 import worker from "../../src/worker/index";
 import { createSecretbox } from "../../src/dashboard/secretbox";
 import type { Env } from "../../src/worker/env";
-import { createAppsStore, type DeliveryOutcome, type GithubAppRow } from "../../src/dashboard/apps-store";
+import { createAppsStore, type GithubAppRow } from "../../src/dashboard/apps-store";
 import { SESSION_COOKIE, createSessionValue } from "../../src/dashboard/session";
 import { createUser, type DashboardD1 } from "../../src/dashboard/users";
 import { createTestD1 } from "../store/helpers";
@@ -611,6 +611,17 @@ describe("Apps list health column + settings recent deliveries (plan 20 Task 2)"
     expect(body).toContain("delivery never");
   });
 
+  test("list health column: a paused delivery renders the healthy .status badge, not .note (I-1)", async () => {
+    const db = await seededWorld();
+    const apps = createAppsStore(db);
+    const app = (await apps.listApps()).find((a) => a.slug === "mstar-inspector-mallory")!;
+    await apps.recordDelivery({ appId: app.id, eventName: "pull_request", outcome: "paused", statusCode: null });
+    const res = await get("/dashboard/apps", `${SESSION_COOKIE}=${await sessionCookie("hubot")}`, makeEnv(db));
+    const body = await res.text();
+    expect(body).toContain('<span class="status">paused</span>');
+    expect(body).not.toContain('<span class="note">paused</span>');
+  });
+
   test("settings recent deliveries: empty state renders", async () => {
     const db = await seededWorld();
     const res = await get(SETTINGS, await ownerCookie(), makeEnv(db));
@@ -648,6 +659,17 @@ describe("Apps list health column + settings recent deliveries (plan 20 Task 2)"
     expect(body.indexOf("ping")).toBeLessThan(body.indexOf("pull_request-6"));
     expect(body).toContain('<span class="status">ok</span>');
     expect(body).toContain('<span class="status">ignored</span>');
+  });
+
+  test("settings recent deliveries: a paused delivery renders the healthy .status badge, not .note (I-1)", async () => {
+    const db = await seededWorld();
+    const apps = createAppsStore(db);
+    const app = (await apps.listApps()).find((a) => a.slug === "mstar-inspector-mallory")!;
+    await apps.recordDelivery({ appId: app.id, eventName: "pull_request", outcome: "paused", statusCode: null });
+    const res = await get(SETTINGS, await ownerCookie(), makeEnv(db));
+    const body = await res.text();
+    expect(body).toContain('<span class="status">paused</span>');
+    expect(body).not.toContain('<span class="note">paused</span>');
   });
 
   test("settings recent deliveries: the N=5 bound cuts the 6th-newest row", async () => {
