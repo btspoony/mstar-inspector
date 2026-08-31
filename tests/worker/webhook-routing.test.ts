@@ -1,12 +1,12 @@
 /**
  * Per-App webhook routing tests (plan 13 Task 2, spec § Multi-App 契约).
  *
- * `POST /webhook/:appSlug` — shared pre-order with the legacy face:
+ * `POST /webhook/:appSlug` — the ONLY HTTP review entry (plan 24 Task 1:
+ * the legacy bare `/webhook` face is retired):
  * body-size cap (413) → REVIEW_ENABLED kill-switch (2xx ignore) → slug
  * lookup (active, not deleted) → signature verify with THAT App's decrypted
- * webhook secret. The route attaches `appRef { kind: "app", appId }` after
- * classification (lock L3); the legacy `POST /webhook` attaches an explicit
- * `{ kind: "legacy" }`.
+ * webhook secret. The route attaches `appRef: { appId }` after
+ * classification (lock L3).
  *
  * Isolation (AC-B5-isolation): App X's route verifies ONLY X's secret — a
  * sibling App's signature is a 401 with zero enqueue. Unknown slug /
@@ -147,7 +147,7 @@ const PR_PAYLOAD = {
 };
 
 describe("POST /webhook/:appSlug (per-App routing)", () => {
-  test("valid signature with the App's own secret → 200 accepted, enqueued with appRef {kind:'app', appId}", async () => {
+  test("valid signature with the App's own secret → 200 accepted, enqueued with appRef {appId}", async () => {
     const db = createMigratedD1();
     const appRow = await seedApp(db, { slug: "app-x", secret: "secret-x" });
     const { queue, sent } = makeQueue();
@@ -172,7 +172,7 @@ describe("POST /webhook/:appSlug (per-App routing)", () => {
       head_sha: "abc123",
       action: "opened",
       triggered_by: "pull_request",
-      appRef: { kind: "app", appId: appRow.id },
+      appRef: { appId: appRow.id },
     });
   });
 
@@ -404,7 +404,7 @@ describe("POST /webhook/:appSlug (per-App routing)", () => {
       head_sha: null,
       action: "created",
       triggered_by: "review_command",
-      appRef: { kind: "app", appId: appRow.id },
+      appRef: { appId: appRow.id },
     });
   });
 
@@ -572,103 +572,6 @@ describe("installations upsert wiring (plan 13 Task 4)", () => {
     expect(logged).toContain("installation_upsert_failed");
     // The failed bookkeeping write left no row.
     expect((db.raw.query("SELECT COUNT(*) AS n FROM app_installations").get() as { n: number }).n).toBe(0);
-  });
-});
-
-describe("POST /webhook (legacy face, lock L3 regression)", () => {
-  test("still verifies with WEBHOOK_SECRET and attaches an EXPLICIT appRef {kind:'legacy'}", async () => {
-    const db = createMigratedD1(); // unused by the legacy face — present for env shape parity
-    const { queue, sent } = makeQueue();
-    const env = makeEnv(db, { REVIEW_QUEUE: queue as never });
-    const body = JSON.stringify(PR_PAYLOAD);
-
-    const res = await postWebhook(
-      "/webhook",
-      body,
-      { "x-hub-signature-256": await signatureFor(LEGACY_SECRET, body), "x-github-event": "pull_request" },
-      env,
-    );
-
-    expect(res.status).toBe(200);
-    expect(await res.text()).toBe("accepted");
-    expect(sent).toHaveLength(1);
-    expect(sent[0]).toMatchObject({
-      installation_id: 123,
-      owner: "test-owner",
-      repo: "test-repo",
-      pr_number: 42,
-      head_sha: "abc123",
-      triggered_by: "pull_request",
-      appRef: { kind: "legacy" },
-    });
-    // Never an App identity on the legacy face.
-    expect((sent[0]!.appRef as { kind: string }).kind).toBe("legacy");
-  });
-
-  test("legacy face never touches app_installations (Task 4: no app row to attach)", async () => {
-    const db = createMigratedD1();
-    const { queue, sent } = makeQueue();
-    const env = makeEnv(db, { REVIEW_QUEUE: queue as never });
-    const body = JSON.stringify(PR_PAYLOAD);
-
-    const res = await postWebhook(
-      "/webhook",
-      body,
-      { "x-hub-signature-256": await signatureFor(LEGACY_SECRET, body), "x-github-event": "pull_request" },
-      env,
-    );
-
-    // The delivery itself succeeds — but no installation row is written:
-    // upsert wiring is per-App-route only (plan Scope line applies to new Apps).
-    expect(res.status).toBe(200);
-    expect(sent).toHaveLength(1);
-    expect((db.raw.query("SELECT COUNT(*) AS n FROM app_installations").get() as { n: number }).n).toBe(0);
-  });
-
-  test("legacy signature verification unchanged: bad signature → 401", async () => {
-    const db = createMigratedD1();
-    const { queue, sent } = makeQueue();
-    const env = makeEnv(db, { REVIEW_QUEUE: queue as never });
-    const body = JSON.stringify(PR_PAYLOAD);
-
-    const res = await postWebhook(
-      "/webhook",
-      body,
-      { "x-hub-signature-256": "sha256=deadbeef", "x-github-event": "pull_request" },
-      env,
-    );
-
-    expect(res.status).toBe(401);
-    expect(sent).toHaveLength(0);
-  });
-
-  test("legacy-face 413 warn carries the real stage label (plan 15: no literal 'unknown')", async () => {
-    const db = createMigratedD1();
-    const env = makeEnv(db);
-
-    const warn = mock((_msg: unknown) => {});
-    const origWarn = console.warn;
-    console.warn = warn;
-    let res: Response;
-    try {
-      res = await postWebhook(
-        "/webhook",
-        "",
-        { "content-length": String(1_000_001), "x-github-event": "pull_request" },
-        env,
-      );
-    } finally {
-      console.warn = origWarn;
-    }
-
-    expect(res.status).toBe(413);
-    const line = warn.mock.calls.map((call) => String(call[0])).find((s) => s.includes("webhook_body_too_large"));
-    expect(line).toBeDefined();
-    const fields = JSON.parse(line!) as { event: string; reason: string; detail: string };
-    expect(fields.event).toBe("webhook_body_too_large");
-    expect(fields.event).not.toBe("unknown");
-    expect(fields.reason).toBe("webhook_body_too_large");
-    expect(fields.detail).toContain("content_length=");
   });
 });
 
@@ -903,25 +806,4 @@ describe("verifier cache — rotation + cacheKey isolation (plan 15 L1)", () => 
     expect(staleQueue.sent).toHaveLength(0);
   });
 
-  test("legacy and per-App verifier entries are isolated (\"legacy\" vs row-id cacheKeys)", async () => {
-    const db = createMigratedD1();
-    await seedApp(db, { slug: "app-x", secret: "secret-x" });
-    const body = JSON.stringify(PR_PAYLOAD);
-
-    // Warm the legacy entry first; the per-App route must still verify ITS
-    // OWN secret afterwards (a different cacheKey → a different entry — the
-    // pre-plan-15 single-secret-keyed cache would have collided here only
-    // on equal secrets; the point is the two keys never cross).
-    const legacyQueue = makeQueue();
-    const legacyEnv = makeEnv(db, { REVIEW_QUEUE: legacyQueue.queue as never });
-    const legacy = await postWebhook("/webhook", body, await sigHeaders(LEGACY_SECRET, body), legacyEnv);
-    expect(legacy.status).toBe(200);
-    expect(legacyQueue.sent).toHaveLength(1);
-
-    const perAppQueue = makeQueue();
-    const perAppEnv = makeEnv(db, { REVIEW_QUEUE: perAppQueue.queue as never });
-    const perApp = await postWebhook("/webhook/app-x", body, await sigHeaders("secret-x", body), perAppEnv);
-    expect(perApp.status).toBe(200);
-    expect(perAppQueue.sent).toHaveLength(1);
-  });
 });

@@ -3,9 +3,8 @@
  *
  * The consumer resolves the commenter from `payload.appRef` BEFORE the
  * in-flight guard / sandbox (fail fast, zero side effects on failure):
- *   - absent (old in-flight messages) or `{ kind: "legacy" }` → the env-App
- *     singleton, byte-identical legacy behavior;
- *   - `{ kind: "app", appId }` → D1 `github_apps` row (re-read per message:
+ *   - `{ appId }` (required — plan 24 Task 1: single shape) → D1
+ *     `github_apps` row (re-read per message:
  *     active, not soft-deleted) → PEM decrypted in memory (secretbox, AAD
  *     `github_apps.private_key_enc:<id>`) → `createAppCommenter(...)`
  *     cached per appId in a Map — token mint AND postReview come from the
@@ -252,6 +251,9 @@ function makePayload(overrides: Partial<ReviewJobPayload> = {}): ReviewJobPayloa
     head_sha: SHA,
     action: "opened",
     triggered_by: "pull_request",
+    // Required single shape (plan 24 Task 1) — every test overrides it with
+    // a seeded App id; the default is type-only (never resolved).
+    appRef: { appId: "00000000-0000-0000-0000-000000000000" },
     ...overrides,
   };
 }
@@ -292,44 +294,14 @@ function reset(): void {
 }
 
 describe("consumer appRef resolution (plan 13 Task 2, lock L4)", () => {
-  test("appRef absent (old in-flight message) → legacy env commenter, no App resolution", async () => {
-    reset();
-    const db = createMigratedD1();
-    const consumer = createReviewConsumer(makeEnv({ DB: db as never }), testLog, testOverrides);
-
-    await consumer(makeBatch(makePayload())); // no appRef field at all
-
-    expect(legacyCalls.map((c) => c.op)).toEqual(["token", "post"]);
-    expect(factoryCreds).toHaveLength(0);
-    expect(appCalls).toHaveLength(0);
-    expect(kvPuts).toEqual([{ key: `idem:123:acme/widgets:42:${SHA}`, value: "done" }]);
-    // Legacy rows keep app_id NULL (QC F-001 / Clarify #3: NULL = legacy).
-    const row = db.raw.query("SELECT app_id FROM reviews").get() as { app_id: string | null };
-    expect(row.app_id).toBeNull();
-  });
-
-  test("appRef {kind:'legacy'} → legacy env commenter", async () => {
-    reset();
-    const db = createMigratedD1();
-    const consumer = createReviewConsumer(makeEnv({ DB: db as never }), testLog, testOverrides);
-
-    await consumer(makeBatch(makePayload({ appRef: { kind: "legacy" } })));
-
-    expect(legacyCalls.map((c) => c.op)).toEqual(["token", "post"]);
-    expect(factoryCreds).toHaveLength(0);
-    // Explicit-legacy rows keep app_id NULL too (QC F-001).
-    const row = db.raw.query("SELECT app_id FROM reviews").get() as { app_id: string | null };
-    expect(row.app_id).toBeNull();
-  });
-
-  test("appRef {kind:'app'} → authenticates with THAT App's decrypted PEM (sibling isolation)", async () => {
+  test("appRef {appId} → authenticates with THAT App's decrypted PEM (sibling isolation)", async () => {
     reset();
     const db = createMigratedD1();
     const appX = await seedApp(db, { slug: "app-x", githubAppId: 111222, pem: PEM_X });
     await seedApp(db, { slug: "app-y", githubAppId: 333444, pem: PEM_Y }); // sibling, never used
     const consumer = createReviewConsumer(makeEnv({ DB: db as never }), testLog, testOverrides);
 
-    await consumer(makeBatch(makePayload({ appRef: { kind: "app", appId: appX.id } })));
+    await consumer(makeBatch(makePayload({ appRef: { appId: appX.id } })));
 
     // Exactly one App instance, built from X's DECRYPTED PEM + X's github_app_id.
     expect(factoryCreds).toHaveLength(1);
@@ -359,8 +331,8 @@ describe("consumer appRef resolution (plan 13 Task 2, lock L4)", () => {
 
     await consumer(
       makeBatch(
-        makePayload({ pr_number: 42, appRef: { kind: "app", appId: appX.id } }),
-        makePayload({ pr_number: 43, appRef: { kind: "app", appId: appX.id } }),
+        makePayload({ pr_number: 42, appRef: { appId: appX.id } }),
+        makePayload({ pr_number: 43, appRef: { appId: appX.id } }),
       ),
     );
 
@@ -377,7 +349,7 @@ describe("consumer appRef resolution (plan 13 Task 2, lock L4)", () => {
     await createAppsStore(db).setAppStatus(appX.id, "disabled");
     const consumer = createReviewConsumer(makeEnv({ DB: db as never }), testLog, testOverrides);
 
-    await expect(consumer(makeBatch(makePayload({ appRef: { kind: "app", appId: appX.id } })))).rejects.toThrow(
+    await expect(consumer(makeBatch(makePayload({ appRef: { appId: appX.id } })))).rejects.toThrow(
       /per-App credential resolution failed: app .* is disabled/,
     );
 
@@ -399,7 +371,7 @@ describe("consumer appRef resolution (plan 13 Task 2, lock L4)", () => {
     await createAppsStore(db).softDeleteApp(appX.id);
     const consumer = createReviewConsumer(makeEnv({ DB: db as never }), testLog, testOverrides);
 
-    await expect(consumer(makeBatch(makePayload({ appRef: { kind: "app", appId: appX.id } })))).rejects.toThrow(
+    await expect(consumer(makeBatch(makePayload({ appRef: { appId: appX.id } })))).rejects.toThrow(
       /per-App credential resolution failed: app .* is soft-deleted/,
     );
 
@@ -413,7 +385,7 @@ describe("consumer appRef resolution (plan 13 Task 2, lock L4)", () => {
     const consumer = createReviewConsumer(makeEnv({ DB: db as never }), testLog, testOverrides);
 
     await expect(
-      consumer(makeBatch(makePayload({ appRef: { kind: "app", appId: "no-such-app" } }))),
+      consumer(makeBatch(makePayload({ appRef: { appId: "no-such-app" } }))),
     ).rejects.toThrow(/per-App credential resolution failed: app no-such-app not found/);
 
     expect(factoryCreds).toHaveLength(0);
@@ -426,7 +398,7 @@ describe("consumer appRef resolution (plan 13 Task 2, lock L4)", () => {
     const appX = await seedApp(db, { slug: "app-x", githubAppId: 111222, pem: PEM_X, wrongAad: true });
     const consumer = createReviewConsumer(makeEnv({ DB: db as never }), testLog, testOverrides);
 
-    await expect(consumer(makeBatch(makePayload({ appRef: { kind: "app", appId: appX.id } })))).rejects.toThrow(
+    await expect(consumer(makeBatch(makePayload({ appRef: { appId: appX.id } })))).rejects.toThrow(
       /secretbox: decrypt failed/,
     );
 
@@ -435,7 +407,7 @@ describe("consumer appRef resolution (plan 13 Task 2, lock L4)", () => {
     expect(sandboxCalls).toHaveLength(0);
   });
 
-  test("DASHBOARD_ENCRYPTION_KEY missing → per-App fails closed (SecretboxKeyError); legacy path unaffected", async () => {
+  test("DASHBOARD_ENCRYPTION_KEY missing → per-App fails closed (SecretboxKeyError)", async () => {
     reset();
     const db = createMigratedD1();
     const appX = await seedApp(db, { slug: "app-x", githubAppId: 111222, pem: PEM_X });
@@ -445,18 +417,12 @@ describe("consumer appRef resolution (plan 13 Task 2, lock L4)", () => {
       testOverrides,
     );
 
-    await expect(consumer(makeBatch(makePayload({ appRef: { kind: "app", appId: appX.id } })))).rejects.toThrow(
+    await expect(consumer(makeBatch(makePayload({ appRef: { appId: appX.id } })))).rejects.toThrow(
       /DASHBOARD_ENCRYPTION_KEY is not set/,
     );
 
     expect(factoryCreds).toHaveLength(0);
     expect(sandboxCalls).toHaveLength(0);
-
-    // The legacy path on the SAME consumer env is unaffected (regression).
-    reset();
-    await consumer(makeBatch(makePayload()));
-    expect(legacyCalls.map((c) => c.op)).toEqual(["token", "post"]);
-    expect(factoryCreds).toHaveLength(0);
   });
 
   test("L4 same-instance pin: token mint and postReview come from the ONE per-App instance per message", async () => {
@@ -465,7 +431,7 @@ describe("consumer appRef resolution (plan 13 Task 2, lock L4)", () => {
     const appX = await seedApp(db, { slug: "app-x", githubAppId: 111222, pem: PEM_X });
     const consumer = createReviewConsumer(makeEnv({ DB: db as never }), testLog, testOverrides);
 
-    await consumer(makeBatch(makePayload({ appRef: { kind: "app", appId: appX.id } })));
+    await consumer(makeBatch(makePayload({ appRef: { appId: appX.id } })));
 
     // One factory invocation per message (cache hit would skip it), and the
     // message's token + post both hit the instance the factory returned.
@@ -486,8 +452,8 @@ describe("appCommenters fingerprint cache (plan 15 hardening item 1, architect l
     const appX = await seedApp(db, { slug: "app-x", githubAppId: 111222, pem: PEM_X });
     const consumer = createReviewConsumer(makeEnv({ DB: db as never }), testLog, testOverrides);
 
-    await consumer(makeBatch(makePayload({ pr_number: 42, appRef: { kind: "app", appId: appX.id } })));
-    await consumer(makeBatch(makePayload({ pr_number: 43, appRef: { kind: "app", appId: appX.id } })));
+    await consumer(makeBatch(makePayload({ pr_number: 42, appRef: { appId: appX.id } })));
+    await consumer(makeBatch(makePayload({ pr_number: 43, appRef: { appId: appX.id } })));
 
     // One factory invocation total; BOTH messages were served by that one
     // instance (identity via the factory's instance numbers).
@@ -506,7 +472,7 @@ describe("appCommenters fingerprint cache (plan 15 hardening item 1, architect l
     const appX = await seedApp(db, { slug: "app-x", githubAppId: 111222, pem: PEM_X });
     const consumer = createReviewConsumer(makeEnv({ DB: db as never }), testLog, testOverrides);
 
-    await consumer(makeBatch(makePayload({ pr_number: 42, appRef: { kind: "app", appId: appX.id } })));
+    await consumer(makeBatch(makePayload({ pr_number: 42, appRef: { appId: appX.id } })));
 
     // Rotation: a NEW envelope for a NEW PEM on the SAME row — the dashboard
     // re-save path (AES-GCM random IV → a fresh envelope string).
@@ -515,7 +481,7 @@ describe("appCommenters fingerprint cache (plan 15 hardening item 1, architect l
       .prepare("UPDATE github_apps SET private_key_enc = ? WHERE id = ?")
       .run(await box.encryptSecret(PEM_Y, keyAad(appX.id)), appX.id);
 
-    await consumer(makeBatch(makePayload({ pr_number: 43, appRef: { kind: "app", appId: appX.id } })));
+    await consumer(makeBatch(makePayload({ pr_number: 43, appRef: { appId: appX.id } })));
 
     expect(factoryCreds).toHaveLength(2);
     expect(factoryCreds[0]!.cred).toEqual({ APP_ID: "111222", PRIVATE_KEY: PEM_X });
@@ -530,19 +496,19 @@ describe("appCommenters fingerprint cache (plan 15 hardening item 1, architect l
     const appX = await seedApp(db, { slug: "app-x", githubAppId: 111222, pem: PEM_X });
     const consumer = createReviewConsumer(makeEnv({ DB: db as never }), testLog, testOverrides);
 
-    await consumer(makeBatch(makePayload({ pr_number: 42, appRef: { kind: "app", appId: appX.id } })));
+    await consumer(makeBatch(makePayload({ pr_number: 42, appRef: { appId: appX.id } })));
 
     const box = createSecretbox(TEST_KEY);
     db.raw
       .prepare("UPDATE github_apps SET private_key_enc = ? WHERE id = ?")
       .run(await box.encryptSecret(PEM_X, keyAad(appX.id)), appX.id);
 
-    await consumer(makeBatch(makePayload({ pr_number: 43, appRef: { kind: "app", appId: appX.id } })));
+    await consumer(makeBatch(makePayload({ pr_number: 43, appRef: { appId: appX.id } })));
     expect(factoryCreds).toHaveLength(2); // rebuilt — envelope string changed
     expect(factoryCreds[1]!.cred).toEqual(factoryCreds[0]!.cred); // same PEM, no rotation
 
     // The rebuilt entry is cached again: a third message does not rebuild.
-    await consumer(makeBatch(makePayload({ pr_number: 44, appRef: { kind: "app", appId: appX.id } })));
+    await consumer(makeBatch(makePayload({ pr_number: 44, appRef: { appId: appX.id } })));
     expect(factoryCreds).toHaveLength(2);
   });
 
@@ -551,14 +517,14 @@ describe("appCommenters fingerprint cache (plan 15 hardening item 1, architect l
     const db = createMigratedD1();
     const appX = await seedApp(db, { slug: "app-x", githubAppId: 111222, pem: PEM_X });
     const consumer = createReviewConsumer(makeEnv({ DB: db as never }), testLog, testOverrides);
-    await consumer(makeBatch(makePayload({ pr_number: 42, appRef: { kind: "app", appId: appX.id } })));
+    await consumer(makeBatch(makePayload({ pr_number: 42, appRef: { appId: appX.id } })));
     expect(factoryCreds).toHaveLength(1);
 
     // Disable → the unchanged throw path (retry/DLQ) AND the eviction.
     const store = createAppsStore(db);
     await store.setAppStatus(appX.id, "disabled");
     await expect(
-      consumer(makeBatch(makePayload({ pr_number: 43, appRef: { kind: "app", appId: appX.id } }))),
+      consumer(makeBatch(makePayload({ pr_number: 43, appRef: { appId: appX.id } }))),
     ).rejects.toThrow(/per-App credential resolution failed: app .* is disabled/);
     expect(factoryCreds).toHaveLength(1); // no rebuild on the failure path
 
@@ -566,7 +532,7 @@ describe("appCommenters fingerprint cache (plan 15 hardening item 1, architect l
     // fingerprint hit would reuse instance 1 — a second factory call proves
     // the disabled gate evicted the entry.
     await store.setAppStatus(appX.id, "active");
-    await consumer(makeBatch(makePayload({ pr_number: 44, appRef: { kind: "app", appId: appX.id } })));
+    await consumer(makeBatch(makePayload({ pr_number: 44, appRef: { appId: appX.id } })));
     expect(factoryCreds).toHaveLength(2);
     expect(factoryCreds[1]!.cred).toEqual({ APP_ID: "111222", PRIVATE_KEY: PEM_X });
     expect(appCalls.at(-1)!.instance).toBe(factoryCreds[1]!.instance);
@@ -577,19 +543,19 @@ describe("appCommenters fingerprint cache (plan 15 hardening item 1, architect l
     const db = createMigratedD1();
     const appX = await seedApp(db, { slug: "app-x", githubAppId: 111222, pem: PEM_X });
     const consumer = createReviewConsumer(makeEnv({ DB: db as never }), testLog, testOverrides);
-    await consumer(makeBatch(makePayload({ pr_number: 42, appRef: { kind: "app", appId: appX.id } })));
+    await consumer(makeBatch(makePayload({ pr_number: 42, appRef: { appId: appX.id } })));
     expect(factoryCreds).toHaveLength(1);
 
     await createAppsStore(db).softDeleteApp(appX.id);
     await expect(
-      consumer(makeBatch(makePayload({ pr_number: 43, appRef: { kind: "app", appId: appX.id } }))),
+      consumer(makeBatch(makePayload({ pr_number: 43, appRef: { appId: appX.id } }))),
     ).rejects.toThrow(/per-App credential resolution failed: app .* is soft-deleted/);
 
     // Production never un-deletes; the probe restores the row via direct SQL
     // purely to make the eviction OBSERVABLE: the envelope is unchanged, so
     // a surviving entry would fingerprint-hit and reuse instance 1.
     db.raw.prepare("UPDATE github_apps SET deleted_at = NULL, status = 'active' WHERE id = ?").run(appX.id);
-    await consumer(makeBatch(makePayload({ pr_number: 44, appRef: { kind: "app", appId: appX.id } })));
+    await consumer(makeBatch(makePayload({ pr_number: 44, appRef: { appId: appX.id } })));
     expect(factoryCreds).toHaveLength(2);
     expect(appCalls.at(-1)!.instance).toBe(factoryCreds[1]!.instance);
   });
@@ -603,7 +569,7 @@ describe("appCommenters fingerprint cache (plan 15 hardening item 1, architect l
     await createAppConfigStore(db, TEST_KEY).setProviderKey(appX.id, "not-a-provider", "sk-rogue-SECRET");
     const consumer = createReviewConsumer(makeEnv({ DB: db as never }), testLog, testOverrides);
 
-    await consumer(makeBatch(makePayload({ appRef: { kind: "app", appId: appX.id } })));
+    await consumer(makeBatch(makePayload({ appRef: { appId: appX.id } })));
 
     const warn = logLines.find((l) => l.level === "warn" && l.fields.provider === "not-a-provider");
     expect(warn).toBeDefined();
@@ -624,7 +590,7 @@ describe("per-App pause ack-skip (plan 16, architect lock L4)", () => {
     await createAppsStore(db).setReviewEnabled(appX.id, false);
     const consumer = createReviewConsumer(makeEnv({ DB: db as never }), testLog, testOverrides);
 
-    await consumer(makeBatch(makePayload({ appRef: { kind: "app", appId: appX.id } })));
+    await consumer(makeBatch(makePayload({ appRef: { appId: appX.id } })));
 
     // Acked DIRECTLY by the queue handler — never retried, never DLQed (a
     // pause is intentional; a throw would be the wrong semantics).
@@ -661,7 +627,7 @@ describe("per-App pause ack-skip (plan 16, architect lock L4)", () => {
     await store.setAppStatus(appX.id, "disabled"); // …but disabled wins
     const consumer = createReviewConsumer(makeEnv({ DB: db as never }), testLog, testOverrides);
 
-    await expect(consumer(makeBatch(makePayload({ appRef: { kind: "app", appId: appX.id } })))).rejects.toThrow(
+    await expect(consumer(makeBatch(makePayload({ appRef: { appId: appX.id } })))).rejects.toThrow(
       /per-App credential resolution failed: app .* is disabled/,
     );
 
@@ -680,12 +646,12 @@ describe("per-App pause ack-skip (plan 16, architect lock L4)", () => {
     const store = createAppsStore(db);
     const consumer = createReviewConsumer(makeEnv({ DB: db as never }), testLog, testOverrides);
 
-    await consumer(makeBatch(makePayload({ pr_number: 42, appRef: { kind: "app", appId: appX.id } })));
+    await consumer(makeBatch(makePayload({ pr_number: 42, appRef: { appId: appX.id } })));
     expect(factoryCreds).toHaveLength(1);
 
     // Pause → ack-skip; the cache is untouched (no rebuild, no eviction).
     await store.setReviewEnabled(appX.id, false);
-    await consumer(makeBatch(makePayload({ pr_number: 43, appRef: { kind: "app", appId: appX.id } })));
+    await consumer(makeBatch(makePayload({ pr_number: 43, appRef: { appId: appX.id } })));
     expect(ackIds).toEqual(["m0"]); // batch-local message ids restart at m0
     expect(factoryCreds).toHaveLength(1);
 
@@ -693,7 +659,7 @@ describe("per-App pause ack-skip (plan 16, architect lock L4)", () => {
     // by the SAME warm instance (the plan-15 fingerprint ignores
     // review_enabled writes).
     await store.setReviewEnabled(appX.id, true);
-    await consumer(makeBatch(makePayload({ pr_number: 44, appRef: { kind: "app", appId: appX.id } })));
+    await consumer(makeBatch(makePayload({ pr_number: 44, appRef: { appId: appX.id } })));
     expect(factoryCreds).toHaveLength(1);
     expect(appCalls.filter((c) => c.call.op === "post")).toHaveLength(2); // PRs 42 + 44
     expect(appCalls.at(-1)!.instance).toBe(factoryCreds[0]!.instance);
@@ -704,7 +670,7 @@ describe("per-App pause ack-skip (plan 16, architect lock L4)", () => {
     const db = createMigratedD1();
     const appX = await seedApp(db, { slug: "app-x", githubAppId: 111222, pem: PEM_X });
     const consumer = createReviewConsumer(makeEnv({ DB: db as never }), testLog, testOverrides);
-    await consumer(makeBatch(makePayload({ pr_number: 42, appRef: { kind: "app", appId: appX.id } })));
+    await consumer(makeBatch(makePayload({ pr_number: 42, appRef: { appId: appX.id } })));
     expect(factoryCreds).toHaveLength(1);
 
     // Capture the row, then hard-delete it (the not-found gate also guards
@@ -727,7 +693,7 @@ describe("per-App pause ack-skip (plan 16, architect lock L4)", () => {
     db.raw.prepare("DELETE FROM reviews WHERE app_id = ?").run(appX.id);
     db.raw.prepare("DELETE FROM github_apps WHERE id = ?").run(appX.id);
     await expect(
-      consumer(makeBatch(makePayload({ pr_number: 43, appRef: { kind: "app", appId: appX.id } }))),
+      consumer(makeBatch(makePayload({ pr_number: 43, appRef: { appId: appX.id } }))),
     ).rejects.toThrow(/per-App credential resolution failed: app .* not found/);
     expect(factoryCreds).toHaveLength(1); // no rebuild on the failure path
 
@@ -741,7 +707,7 @@ describe("per-App pause ack-skip (plan 16, architect lock L4)", () => {
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(row.id, row.slug, row.github_app_id, row.name, row.private_key_enc, row.webhook_secret_enc, row.created_by, row.status, row.deleted_at, row.created_at, row.updated_at);
-    await consumer(makeBatch(makePayload({ pr_number: 44, appRef: { kind: "app", appId: appX.id } })));
+    await consumer(makeBatch(makePayload({ pr_number: 44, appRef: { appId: appX.id } })));
     expect(factoryCreds).toHaveLength(2);
     expect(factoryCreds[1]!.cred).toEqual({ APP_ID: "111222", PRIVATE_KEY: PEM_X });
     expect(appCalls.at(-1)!.instance).toBe(factoryCreds[1]!.instance);

@@ -484,9 +484,9 @@ function toBaseFields(payload: ReviewJobPayload): ConsumerLogFields {
     repo: payload.repo,
     pr_number: payload.pr_number,
     head_sha: payload.head_sha,
-    // Per-App jobs carry the appId reference in every structured log line
-    // (an id, never a credential — lock L4).
-    ...(payload.appRef?.kind === "app" ? { app_id: payload.appRef.appId } : {}),
+    // Every job carries the appId reference in every structured log line
+    // (an id, never a credential — lock L4; plan 24: appRef is required).
+    app_id: payload.appRef.appId,
   };
 }
 
@@ -503,23 +503,21 @@ type CommenterResolution = { kind: "ok"; commenter: ReviewCommenter } | { kind: 
 
 /**
  * Resolve the commenter for one message (plan 13 Task 2, architect lock L4
- * — consumer-side credential resolution):
+ * — consumer-side credential resolution; plan 24 Task 1: single path —
+ * `appRef.appId` is required, the env-App legacy branch is retired):
  *
- * - legacy (appRef absent — old in-flight messages — or `{ kind: "legacy" }`)
- *   → the env-App singleton commenter, byte-identical to the pre-multi-App
- *   behavior.
- * - `{ kind: "app", appId }` → the `github_apps` row via D1 (re-read per
- *   message) gated in order: missing row / soft-deleted / disabled THROWS
- *   (unchanged retry→DLQ semantics; the failed gate EVICTS the cached
- *   instance) → PAUSED (`review_enabled = 0`, plan 16 lock L4) returns the
- *   DISTINCT `paused` outcome AFTER those gates, leaving any cached
- *   instance in place (resume reuses the warm instance — the plan-15
- *   fingerprint ignores review_enabled) → the row's PEM decrypted in memory
- *   (secretbox, AAD `github_apps.private_key_enc:<id>`) →
- *   `createAppCommenter({ APP_ID: String(github_app_id), PRIVATE_KEY })`,
- *   cached per appId in `deps.appCommenters` with the row's credential
- *   fingerprint (plan 15 L1: `github_app_id` + `private_key_enc` envelope
- *   exact-string match — reuse on match, rebuild + replace on rotation).
+ * The `github_apps` row via D1 (re-read per message),
+ * gated in order: missing row / soft-deleted / disabled THROWS
+ * (unchanged retry→DLQ semantics; the failed gate EVICTS the cached
+ * instance) → PAUSED (`review_enabled = 0`, plan 16 lock L4) returns the
+ * DISTINCT `paused` outcome AFTER those gates, leaving any cached
+ * instance in place (resume reuses the warm instance — the plan-15
+ * fingerprint ignores review_enabled) → the row's PEM decrypted in memory
+ * (secretbox, AAD `github_apps.private_key_enc:<id>`) →
+ * `createAppCommenter({ APP_ID: String(github_app_id), PRIVATE_KEY })`,
+ * cached per appId in `deps.appCommenters` with the row's credential
+ * fingerprint (plan 15 L1: `github_app_id` + `private_key_enc` envelope
+ * exact-string match — reuse on match, rebuild + replace on rotation).
  *
  * Any unresolvable state — missing row, disabled, soft-deleted, missing
  * DASHBOARD_ENCRYPTION_KEY (SecretboxKeyError), tampered envelope — THROWS:
@@ -529,9 +527,6 @@ type CommenterResolution = { kind: "ok"; commenter: ReviewCommenter } | { kind: 
  */
 async function resolveCommenter(payload: ReviewJobPayload, deps: ProcessDeps): Promise<CommenterResolution> {
   const appRef = payload.appRef;
-  if (appRef === undefined || appRef.kind === "legacy") {
-    return { kind: "ok", commenter: deps.commenter };
-  }
   const row = await createAppsStore(deps.env.DB).getAppById(appRef.appId);
   if (row === null) {
     deps.appCommenters.delete(appRef.appId);
@@ -627,10 +622,9 @@ export type RunnerAppConfig = {
 };
 
 /**
- * Resolve the per-App AI config for one message (plan 14 Task 3). Legacy
- * (appRef absent — old in-flight messages — or `{ kind: "legacy" }`) →
- * `undefined`: the caller assembles the runner env exactly as before. 
- * `{ kind: "app", appId }` → ONE `getAppConfig` read per message (all
+ * Resolve the per-App AI config for one message (plan 14 Task 3; plan 24
+ * Task 1: single path — `appRef.appId` is required).
+ * ONE `getAppConfig` read per message (all
  * provider keys + the model chain in a single store call — never per key),
  * decrypted in memory. The read hangs off the same appRef resolution as
  * `resolveCommenter` (the App row is already proven present, active and
@@ -648,9 +642,6 @@ export type RunnerAppConfig = {
  */
 async function resolveAppConfig(payload: ReviewJobPayload, deps: ProcessDeps): Promise<RunnerAppConfig | undefined> {
   const appRef = payload.appRef;
-  if (appRef === undefined || appRef.kind === "legacy") {
-    return undefined;
-  }
   try {
     const cfg = await createAppConfigStore(
       deps.env.DB,
@@ -667,11 +658,9 @@ async function resolveAppConfig(payload: ReviewJobPayload, deps: ProcessDeps): P
  * Resolve the App's per-role model overrides for one message (plan 17 B6
  * Task 1): role → verbatim selector chain via the decrypt-free
  * `getAppModelRoles` read (a model selector is configuration, not a secret —
- * no secretbox). Only `{ kind: "app" }` messages carry the map: legacy
- * (appRef absent — old in-flight messages — or `{ kind: "legacy" }`) →
- * `undefined`, and an App with NO (or an all-cleared) role map → `undefined`
- * — in both cases the runner input JSON serializes byte-identically to
- * today's (plan Global Constraints: absent/empty map = unchanged runner
+ * no secretbox). An App with NO (or an all-cleared) role map → `undefined`
+ * — the runner input JSON omits the field, byte-identical to a no-map run
+ * (plan Global Constraints: empty map = unchanged runner
  * behavior). Hangs off the same appRef resolution as `resolveAppConfig` (the
  * App row is already proven present, active and non-deleted there) and runs
  * BEFORE the in-flight guard so a resolution failure has zero side effects.
@@ -685,9 +674,6 @@ async function resolveModelOverrides(
   deps: ProcessDeps,
 ): Promise<Record<string, string> | undefined> {
   const appRef = payload.appRef;
-  if (appRef === undefined || appRef.kind === "legacy") {
-    return undefined;
-  }
   try {
     const roles = await createAppConfigStore(
       deps.env.DB,
@@ -704,15 +690,14 @@ async function resolveModelOverrides(
  * Task 3, AL-23-1): the DECRYPTING `getCustomProvidersForConsumer` read
  * (every declaration plus its key, provider_id-ascending) via
  * createAppConfigStore — the getAppConfig analogue for app_custom_providers.
- * Only `{ kind: "app" }` messages carry declarations: legacy (appRef absent
- * or `{ kind: "legacy" }`) → `undefined`, and an App with NO declarations →
- * `undefined` — in both cases the runner input JSON serializes
- * byte-identically to today's (plan Global Constraints: absent/empty = the
- * legacy runner behavior). Hangs off the same appRef resolution as
- * `resolveAppConfig` (the App row is already proven present, active and
- * non-deleted there) and runs BEFORE the in-flight guard so a resolution
- * failure has zero side effects. The set is re-read every message (no
- * cache) so a dashboard declaration update applies to the very next review.
+ * An App with NO declarations → `undefined` — the runner input JSON
+ * serializes byte-identically to a no-declaration run (plan Global
+ * Constraints: empty = unchanged runner behavior). Hangs off the same
+ * appRef resolution as `resolveAppConfig` (the App row is already proven
+ * present, active and non-deleted there) and runs BEFORE the in-flight
+ * guard so a resolution failure has zero side effects. The set is re-read
+ * every message (no cache) so a dashboard declaration update applies to
+ * the very next review.
  * The per-attempt cost — one extra SELECT plus N AES-GCM decryptions, paid
  * even on guard-held/deduped attempts — is accepted by design (QC wave-1
  * S-001): small next to clone/diff, and it is what makes declaration updates
@@ -728,9 +713,6 @@ async function resolveCustomProviders(
   deps: ProcessDeps,
 ): Promise<CustomProviderConsumerConfig[] | undefined> {
   const appRef = payload.appRef;
-  if (appRef === undefined || appRef.kind === "legacy") {
-    return undefined;
-  }
   try {
     const providers = await createAppConfigStore(
       deps.env.DB,
@@ -1141,15 +1123,14 @@ async function processMessage(payload: ReviewJobPayload, deps: ProcessDeps): Pro
     // the commenter — one getAppConfig read per message, before the
     // guard/sandbox so an unresolvable config (undecryptable key envelope,
     // missing DASHBOARD_ENCRYPTION_KEY) fails closed with zero side effects.
-    // Legacy → undefined → the byte-identical pre-plan-14 env assembly.
     const appCfg = await resolveAppConfig(payload, deps);
     // Per-role model overrides (plan 17 B6): rides the SAME appRef gate,
-    // before the guard like the config above. undefined (legacy / empty map)
+    // before the guard like the config above. undefined (empty map)
     // → the runner input JSON below stays byte-identical.
     const modelOverrides = await resolveModelOverrides(payload, deps);
     // Custom-provider declarations (plan 23 Task 3): hangs off the SAME
     // appRef gate, before the guard like the config/overrides above —
-    // undefined (legacy / no declarations) → the runner input JSON stays
+    // undefined (no declarations) → the runner input JSON stays
     // byte-identical and no CUSTOM_* env is injected. The decrypt face is
     // fail-loud (tamper never swallowed): a broken envelope throws here
     // with zero side effects, never a silently-skipped provider.
@@ -1591,16 +1572,16 @@ async function processMessage(payload: ReviewJobPayload, deps: ProcessDeps): Pro
     // put failure AFTER a successful post is a warn + ack, never a rethrow
     // (B3): the comment is out, retrying would re-post it. The missing D1
     // row is acceptable (KV done marks completion) and alerted. Per-App
-    // attribution (plan 13 Done criterion, QC F-001): the resolved appRef's
-    // appId rides the put into `reviews.app_id`; legacy messages (appRef
-    // absent or `{ kind: "legacy" }`) omit it → the row keeps app_id NULL.
+    // attribution (plan 13 Done criterion, QC F-001; plan 24: required):
+    // the appRef's appId rides the put into `reviews.app_id` — every new
+    // row is attributed; `app_id` NULL survives only on pre-plan-24 rows.
     try {
       await deps.store.put({
         kind: "review",
         key: idemKey(key),
         schema: "mstar.review/v1",
         payload: output,
-        ...(payload.appRef?.kind === "app" ? { appId: payload.appRef.appId } : {}),
+        appId: payload.appRef.appId,
         // Version records (plan 18 Task 1, architect AL-2): `model` = the
         // head selector of the SAME effective chain the runner exec env
         // carried (single-sourced via effectiveModelChain — no re-resolution

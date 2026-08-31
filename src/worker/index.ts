@@ -7,12 +7,11 @@
  *
  * Routes:
  * - GET /healthz → 200 {"ok":true}
- * - POST /webhook → verified GitHub webhook → classify → enqueue (legacy
- *   env-App face; attaches an explicit `{ kind: "legacy" }` appRef, lock L3)
- * - POST /webhook/:appSlug → per-App webhook face (plan 13 Task 2): slug →
- *   github_apps row (active, not deleted) → that App's decrypted webhook
- *   secret verifies the signature → classify → enqueue with
- *   `{ kind: "app", appId }` (spec § Multi-App 契约, locks L3/L4); the
+ * - POST /webhook/:appSlug → per-App webhook face (plan 13 Task 2; plan 24
+ *   Task 1: the ONLY HTTP review entry — the legacy bare `/webhook` face is
+ *   retired): slug → github_apps row (active, not deleted) → that App's
+ *   decrypted webhook secret verifies the signature → classify → enqueue
+ *   with `appRef: { appId }` (spec § Multi-App 契约, locks L3/L4); the
  *   classified payload's installation_id touches `app_installations`
  *   (fire-and-forget relative to the enqueue, plan 13 Task 4)
  * - /dashboard/* → GitHub OAuth login + signed-cookie session shell (08 B0)
@@ -78,56 +77,17 @@ app.get("/healthz", (c) => c.json({ ok: true }));
 // module never imports pipeline/store/review (architect decision Q2).
 app.route("/dashboard", dashboardApp);
 
-app.post("/webhook", async (c) => {
-  const secret = c.env.WEBHOOK_SECRET;
-  // Body-size cap checked BEFORE buffering the body (B6): an oversized
-  // payload is rejected with 413 before any signature work or body read.
-  // Plan 15 log hygiene: the legacy face uses the same structured stage
-  // warn as the per-App face — a real stage label, never "unknown".
-  const contentLength = Number(c.req.header("content-length") ?? "0");
-  if (contentLength > WEBHOOK_BODY_LIMIT) {
-    webhookWarn(
-      "webhook_body_too_large",
-      `content_length=${contentLength}`,
-      "webhook rejected with 413 — body exceeds size limit",
-    );
-    return c.text("payload too large", 413);
-  }
-  const rawBody = await c.req.text();
-  const signature = c.req.header("x-hub-signature-256") ?? null;
-  const eventName = c.req.header("x-github-event") ?? null;
-
-  // T4 kill-switch: reviews run ONLY when REVIEW_ENABLED is exactly "true"
-  // (fail-closed — unset/any other value → every webhook is ignored, 2xx).
-  const reviewEnabled = c.env.REVIEW_ENABLED === "true";
-  // Plan 15 (architect lock L1): the legacy face memoizes its verifier under
-  // the dedicated "legacy" cacheKey — isolated from every per-App row id.
-  const outcome = await classifyWebhook(secret, rawBody, signature, eventName, defaultLog, reviewEnabled, "legacy");
-
-  if (outcome.kind === "reject") {
-    return c.text(outcome.reason, outcome.status);
-  }
-  if (outcome.kind === "ignore") {
-    return c.text("ignored", 200);
-  }
-  // Idempotency pre-check (non-null head_sha only) + REVIEW_QUEUE.send.
-  // KV failure → conservative pass (enqueue anyway, D1 fallback).
-  // Lock L3: the legacy face attaches an EXPLICIT `{ kind: "legacy" }` — no
-  // "absent = legacy" dual convention on the producer side.
-  await handleReviewJob({ ...outcome.payload, appRef: { kind: "legacy" } }, { env: c.env, log: defaultLog });
-  return c.text("accepted", 200);
-});
-
 /**
- * Per-App webhook face (plan 13 Task 2, spec § Multi-App 契约). Shared
- * pre-order with the legacy route: body-size cap (413) → REVIEW_ENABLED
+ * Per-App webhook face (plan 13 Task 2, spec § Multi-App 契约; plan 24
+ * Task 1: the ONLY HTTP review entry — the legacy bare `/webhook` face is
+ * retired). Pre-order: body-size cap (413) → REVIEW_ENABLED
  * kill-switch (non-"true" → 2xx ignore, zero side effects; deployment-level
  * global switch, not per-App) → DB-unbound guard (500 fail-closed — the
  * dashboard-dependency convention) → slug lookup → signature verify. The
  * slug locates the `github_apps` row (active, not deleted) whose DECRYPTED
  * webhook secret parameterizes the same `classifyWebhook` classifier
  * (secret-parameterized only — the classifier never sees the App
- * identity); the route handler attaches `appRef { kind: "app", appId }`
+ * identity); the route handler attaches `appRef: { appId }`
  * after classification, before `REVIEW_QUEUE.send` (lock L3).
  * Unknown slug / disabled / soft-deleted → 404, zero enqueue. Any webhook
  * secret decrypt failure (missing DASHBOARD_ENCRYPTION_KEY, tampered
@@ -316,7 +276,7 @@ app.post("/webhook/:appSlug", async (c) => {
   // Lock L3: the App identity is attached at the route handler — after
   // classification, before the queue send. The queue message carries the
   // appId reference only (lock L4: the PEM never leaves the consumer).
-  await handleReviewJob({ ...outcome.payload, appRef: { kind: "app", appId: row.id } }, {
+  await handleReviewJob({ ...outcome.payload, appRef: { appId: row.id } }, {
     env: c.env,
     log: defaultLog,
   });

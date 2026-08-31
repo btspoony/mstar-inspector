@@ -15,7 +15,6 @@
  * (rotation) rebuilds + replaces the entry.
  */
 import { describe, expect, mock, test } from "bun:test";
-import worker from "../../src/worker/index";
 import { classifyWebhook, getWebhooks, verifySignature } from "../../src/worker/webhooks";
 import type { Env } from "../../src/worker/env";
 
@@ -95,20 +94,6 @@ describe("classifyWebhook — malformed signatures fail closed with 401 (F-001)"
   test("non-sha256 prefix is rejected with 401", async () => {
     const outcome = await classifyWebhook(SECRET, "{}", "md5=deadbeef", "pull_request");
     expect(outcome).toEqual({ kind: "reject", status: 401, reason: "signature verification failed" });
-  });
-});
-
-describe("worker fetch entry — malformed signature maps to 401 (F-001)", () => {
-  test("malformed signature returns 401 at the HTTP boundary", async () => {
-    const res = await worker.fetch(
-      new Request("https://worker.local/webhook", {
-        method: "POST",
-        headers: { "x-hub-signature-256": "sha256=zz", "x-github-event": "pull_request" },
-        body: "{}",
-      }),
-      makeEnv(),
-    );
-    expect(res.status).toBe(401);
   });
 });
 

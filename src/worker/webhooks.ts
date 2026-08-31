@@ -96,10 +96,17 @@ export async function verifySignature(
   }
 }
 
+/**
+ * Classifier outcome. The `job` payload NEVER carries `appRef` (plan 24 Task
+ * 1, AL-24-2/4): the classifier is secret-parameterized only and never sees
+ * the App identity — the ONLY production attach point is the per-App
+ * `POST /webhook/:appSlug` route, which adds `appRef: { appId }` after
+ * classification, before enqueue.
+ */
 export type WebhookOutcome =
   | { kind: "reject"; status: 400 | 401 | 500; reason: string }
   | { kind: "ignore"; reason: string }
-  | { kind: "job"; payload: ReviewJobPayload };
+  | { kind: "job"; payload: Omit<ReviewJobPayload, "appRef"> };
 
 /** Minimal webhook payload shapes — only the fields the gateway consumes. */
 const installationSchema = z.object({ id: z.number() }).nullable().optional();

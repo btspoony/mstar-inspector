@@ -1548,18 +1548,18 @@ describe("existing routes unaffected", () => {
     expect(await res.json()).toEqual({ ok: true });
   });
 
-  test("POST /webhook with a bad signature still returns 401 (dashboard mount does not intercept it)", async () => {
+  test("bare POST /webhook is 404 — the legacy face is retired and the dashboard mount does not intercept it", async () => {
     const res = await worker.fetch(
       new Request("https://worker.local/webhook", {
         method: "POST",
         headers: { "x-hub-signature-256": "sha256=deadbeef", "x-github-event": "pull_request" },
         body: "{}",
       }),
-      // REVIEW_ENABLED "true" so the kill-switch ignore path does not mask
-      // signature verification (classifyWebhook checks the switch first).
       makeEnv({ REVIEW_ENABLED: "true" }),
     );
-    expect(res.status).toBe(401);
+    // No bare route exists (plan 24 Task 1) — Hono's default 404, zero
+    // enqueue; the dashboard mount never intercepts it either.
+    expect(res.status).toBe(404);
   });
 });
 

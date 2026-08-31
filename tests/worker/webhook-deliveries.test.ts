@@ -667,26 +667,6 @@ describe("per-App webhook face — best-effort delivery recording (plan 20)", ()
     expect(fields.event).toBe("delivery_record_failed");
   });
 
-  test("legacy face records NOTHING (AL-20-1: legacy 不落行)", async () => {
-    const db = createMigratedD1();
-    const { queue, sent } = makeQueue();
-    const env = makeEnv(db, { REVIEW_QUEUE: queue as never });
-    const body = JSON.stringify(PR_PAYLOAD);
-
-    const res = await postWebhook(
-      "/webhook",
-      body,
-      { "x-hub-signature-256": await signatureFor(LEGACY_SECRET, body), "x-github-event": "pull_request" },
-      env,
-    );
-
-    expect(res.status).toBe(200);
-    expect(await res.text()).toBe("accepted");
-    expect(sent).toHaveLength(1);
-    const count = db.raw.query("SELECT COUNT(*) AS n FROM webhook_deliveries").get() as { n: number };
-    expect(count.n).toBe(0);
-  });
-
   test("pre-classify failures record NOTHING: kill-switch → 2xx ignored, unknown slug → 404", async () => {
     const db = createMigratedD1();
     await seedApp(db, { slug: "app-x", secret: "secret-x" });

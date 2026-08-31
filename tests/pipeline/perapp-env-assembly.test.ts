@@ -14,19 +14,16 @@
  *     unset; a padded chain with content forwards VERBATIM);
  *   - every injected key logs `key_source: app|global` (the source, never the
  *     key) and the assembly logs `config_source: app|fallback`;
- *   - legacy (appRef absent / `{ kind: "legacy" }`) → `appCfg` undefined →
- *     byte-identical pre-plan-14 env, no assembly logs;
  *   - the assembly builds a FRESH env object per review (no shared mutable
  *     env) — cross-App leakage is structurally impossible (full-object pins);
  *   - an UNREADABLE App key (tampered envelope / missing master key) fails
  *     closed BEFORE guard/sandbox — never a silent fallback to global keys.
  *
- * Runner-input threading (plan 17 Task 1): for `{kind:"app"}` messages the
- * consumer resolves the App's per-role selector map (decrypt-free
- * `getAppModelRoles`) into the runner input JSON's OPTIONAL `modelOverrides`
- * field; legacy/absent appRef and empty maps omit the field entirely
- * (byte-identical payload). The runner-side guard/type extension is plan 17
- * Task 2's.
+ * Runner-input threading (plan 17 Task 1): the consumer resolves the App's
+ * per-role selector map (decrypt-free `getAppModelRoles`) into the runner
+ * input JSON's OPTIONAL `modelOverrides` field; empty maps omit the field
+ * entirely (byte-identical payload). The runner-side guard/type extension
+ * is plan 17 Task 2's.
  *
  * Same technique as tests/pipeline/consumer.test.ts: sandbox + commenters
  * injected via createReviewConsumer overrides (no process-wide relative-path
@@ -237,6 +234,9 @@ function makePayload(overrides: Partial<ReviewJobPayload> = {}): ReviewJobPayloa
     head_sha: SHA,
     action: "opened",
     triggered_by: "pull_request",
+    // Required single shape (plan 24 Task 1) — every test overrides it with
+    // a seeded App id; the default is type-only (never resolved).
+    appRef: { appId: "00000000-0000-0000-0000-000000000000" },
     ...overrides,
   };
 }
@@ -306,7 +306,7 @@ describe("per-App runner env assembly (plan 14 Task 3, spec § Per-App BYOK)", (
       testOverrides,
     );
 
-    await consumer(makeBatch(makePayload({ appRef: { kind: "app", appId: appX.id } })));
+    await consumer(makeBatch(makePayload({ appRef: { appId: appX.id } })));
 
     const env = runnerEnvs()[0]!;
     expect(env.ANTHROPIC_API_KEY).toBe("sk-app-x-SECRET"); // the App's key wins
@@ -336,7 +336,7 @@ describe("per-App runner env assembly (plan 14 Task 3, spec § Per-App BYOK)", (
       testOverrides,
     );
 
-    await consumer(makeBatch(makePayload({ appRef: { kind: "app", appId: appX.id } })));
+    await consumer(makeBatch(makePayload({ appRef: { appId: appX.id } })));
 
     const env = runnerEnvs()[0]!;
     expect(env.GEMINI_API_KEY).toBe("sk-app-x-gemini");
@@ -363,7 +363,7 @@ describe("per-App runner env assembly (plan 14 Task 3, spec § Per-App BYOK)", (
       testOverrides,
     );
 
-    await consumer(makeBatch(makePayload({ appRef: { kind: "app", appId: appX.id } })));
+    await consumer(makeBatch(makePayload({ appRef: { appId: appX.id } })));
 
     const env = runnerEnvs()[0]!;
     expect(env.ANTHROPIC_API_KEY).toBe("sk-app-x-SECRET");
@@ -379,6 +379,7 @@ describe("per-App runner env assembly (plan 14 Task 3, spec § Per-App BYOK)", (
     reset();
     const db = createMigratedTestD1();
     const appX = await seedApp(db, "app-x"); // github_apps row, NO config rows
+    const appY = await seedApp(db, "app-y"); // ditto — zero-config Apps converge
     const envOverrides = {
       DB: db as never,
       ANTHROPIC_API_KEY: "sk-global-anthropic-SECRET",
@@ -387,71 +388,21 @@ describe("per-App runner env assembly (plan 14 Task 3, spec § Per-App BYOK)", (
     };
     const consumer = createReviewConsumer(makeEnv(envOverrides), testLog, testOverrides);
 
-    // Same consumer, same env: one per-App message, then one legacy message.
+    // Same consumer, same env: two zero-config per-App messages.
     await consumer(
       makeBatch(
-        makePayload({ pr_number: 42, appRef: { kind: "app", appId: appX.id } }),
-        makePayload({ pr_number: 43 }), // legacy
+        makePayload({ pr_number: 42, appRef: { appId: appX.id } }),
+        makePayload({ pr_number: 43, appRef: { appId: appY.id } }),
       ),
     );
 
-    const [appEnv, legacyEnv] = runnerEnvs();
-    expect(appEnv).toEqual(legacyEnv);
+    const [xEnv, yEnv] = runnerEnvs();
+    expect(xEnv).toEqual(yEnv);
     const cfgLine = logLines.find((l) => l.fields.config_source !== undefined);
     expect(cfgLine?.fields.config_source).toBe("fallback");
     // The fallback keys are still logged with their (global) source.
     const sources = Object.fromEntries(keySourceLines().map((l) => [l.fields.provider, l.fields.key_source]));
     expect(sources).toEqual({ anthropic: "global", openai: "global" });
-  });
-
-  test("legacy: appRef absent → byte-identical pre-plan-14 env, NO assembly logs", async () => {
-    reset();
-    const db = createMigratedTestD1();
-    const consumer = createReviewConsumer(
-      makeEnv({
-        DB: db as never,
-        ANTHROPIC_API_KEY: "sk-global-anthropic-SECRET",
-        MISTRAL_API_KEY: "", // empty → never forwarded
-        OMP_REVIEW_MODEL: "ark-plan/global-chain",
-      }),
-      testLog,
-      testOverrides,
-    );
-
-    await consumer(makeBatch(makePayload())); // no appRef field
-
-    expect(runnerEnvs()[0]).toEqual({
-      ARK_API_KEY: "ark-key",
-      HARNESS_PLUGIN_ROOT: "/opt/mstar-harness",
-      PI_CODING_AGENT_DIR: "/opt/omp-agent",
-      OMP_REVIEW_MODEL: "ark-plan/global-chain",
-      ANTHROPIC_API_KEY: "sk-global-anthropic-SECRET",
-    });
-    expect(keySourceLines()).toHaveLength(0);
-    expect(logLines.some((l) => l.fields.config_source !== undefined)).toBe(false);
-    expect(legacyCalls).toEqual(["token", "post"]);
-    expect(appCalls).toHaveLength(0);
-  });
-
-  test("legacy: appRef {kind:'legacy'} → identical to absent (explicit legacy marker)", async () => {
-    reset();
-    const db = createMigratedTestD1();
-    const consumer = createReviewConsumer(
-      makeEnv({ DB: db as never, ANTHROPIC_API_KEY: "sk-global-anthropic-SECRET" }),
-      testLog,
-      testOverrides,
-    );
-
-    await consumer(makeBatch(makePayload({ appRef: { kind: "legacy" } })));
-
-    expect(runnerEnvs()[0]).toEqual({
-      ARK_API_KEY: "ark-key",
-      HARNESS_PLUGIN_ROOT: "/opt/mstar-harness",
-      PI_CODING_AGENT_DIR: "/opt/omp-agent",
-      ANTHROPIC_API_KEY: "sk-global-anthropic-SECRET",
-    });
-    expect(keySourceLines()).toHaveLength(0);
-    expect(legacyCalls).toEqual(["token", "post"]);
   });
 
   test("model chain: the App's chain overrides OMP_REVIEW_MODEL; unset falls back to the global chain", async () => {
@@ -472,9 +423,9 @@ describe("per-App runner env assembly (plan 14 Task 3, spec § Per-App BYOK)", (
 
     await consumer(
       makeBatch(
-        makePayload({ pr_number: 42, appRef: { kind: "app", appId: appX.id } }),
-        makePayload({ pr_number: 43, appRef: { kind: "app", appId: appY.id } }),
-        makePayload({ pr_number: 44, appRef: { kind: "app", appId: appZ.id } }), // no row → null chain
+        makePayload({ pr_number: 42, appRef: { appId: appX.id } }),
+        makePayload({ pr_number: 43, appRef: { appId: appY.id } }),
+        makePayload({ pr_number: 44, appRef: { appId: appZ.id } }), // no row → null chain
       ),
     );
 
@@ -518,8 +469,8 @@ describe("per-App runner env assembly (plan 14 Task 3, spec § Per-App BYOK)", (
 
     await consumer(
       makeBatch(
-        makePayload({ pr_number: 42, appRef: { kind: "app", appId: appX.id } }),
-        makePayload({ pr_number: 43, appRef: { kind: "app", appId: appY.id } }),
+        makePayload({ pr_number: 42, appRef: { appId: appX.id } }),
+        makePayload({ pr_number: 43, appRef: { appId: appY.id } }),
       ),
     );
 
@@ -550,9 +501,8 @@ describe("per-App runner env assembly (plan 14 Task 3, spec § Per-App BYOK)", (
 
     await consumer(
       makeBatch(
-        makePayload({ pr_number: 42, appRef: { kind: "app", appId: appX.id } }),
-        makePayload({ pr_number: 43, appRef: { kind: "app", appId: appY.id } }),
-        makePayload({ pr_number: 44 }), // legacy — no appRef
+        makePayload({ pr_number: 42, appRef: { appId: appX.id } }),
+        makePayload({ pr_number: 43, appRef: { appId: appY.id } }),
       ),
     );
 
@@ -564,8 +514,6 @@ describe("per-App runner env assembly (plan 14 Task 3, spec § Per-App BYOK)", (
       { pr_number: 42, model: "openai/gpt-app", provider: null },
       // No App chain → the global OMP_REVIEW_MODEL chain's head.
       { pr_number: 43, model: "ark-plan/global-chain", provider: null },
-      // Legacy path: the same env chain's head; provider NULL here too.
-      { pr_number: 44, model: "ark-plan/global-chain", provider: null },
     ]);
   });
 
@@ -575,7 +523,7 @@ describe("per-App runner env assembly (plan 14 Task 3, spec § Per-App BYOK)", (
     const appX = await seedApp(db, "app-x");
     const consumer = createReviewConsumer(makeEnv({ DB: db as never }), testLog, testOverrides);
 
-    await consumer(makeBatch(makePayload({ appRef: { kind: "app", appId: appX.id } })));
+    await consumer(makeBatch(makePayload({ appRef: { appId: appX.id } })));
 
     const row = db.raw.query("SELECT model, provider FROM reviews").get() as {
       model: string | null;
@@ -600,9 +548,9 @@ describe("per-App runner env assembly (plan 14 Task 3, spec § Per-App BYOK)", (
     // review with no shared mutable state between messages.
     await consumer(
       makeBatch(
-        makePayload({ pr_number: 42, appRef: { kind: "app", appId: appX.id } }),
-        makePayload({ pr_number: 43, appRef: { kind: "app", appId: appY.id } }),
-        makePayload({ pr_number: 44, appRef: { kind: "app", appId: appX.id } }),
+        makePayload({ pr_number: 42, appRef: { appId: appX.id } }),
+        makePayload({ pr_number: 43, appRef: { appId: appY.id } }),
+        makePayload({ pr_number: 44, appRef: { appId: appX.id } }),
       ),
     );
 
@@ -649,7 +597,7 @@ describe("per-App runner env assembly (plan 14 Task 3, spec § Per-App BYOK)", (
       testOverrides,
     );
 
-    await consumer(makeBatch(makePayload({ appRef: { kind: "app", appId: appX.id } })));
+    await consumer(makeBatch(makePayload({ appRef: { appId: appX.id } })));
 
     // The assembly lines EXIST (the assertion is not vacuous)…
     const sources = Object.fromEntries(keySourceLines().map((l) => [l.fields.provider, l.fields.key_source]));
@@ -677,7 +625,7 @@ describe("per-App runner env assembly (plan 14 Task 3, spec § Per-App BYOK)", (
 
     // The global key EXISTS — the review must still fail, not fall back to it.
     await expect(
-      consumer(makeBatch(makePayload({ appRef: { kind: "app", appId: appX.id } }))),
+      consumer(makeBatch(makePayload({ appRef: { appId: appX.id } }))),
     ).rejects.toThrow(/per-App config resolution failed/);
 
     expect(sandboxCalls).toHaveLength(0); // no clone, no runner
@@ -708,7 +656,7 @@ describe("per-App runner env assembly (plan 14 Task 3, spec § Per-App BYOK)", (
     // global one. (The config-face decrypt failure alone is pinned by the
     // tamper test above.)
     await expect(
-      consumer(makeBatch(makePayload({ appRef: { kind: "app", appId: appY.id } }))),
+      consumer(makeBatch(makePayload({ appRef: { appId: appY.id } }))),
     ).rejects.toThrow(/DASHBOARD_ENCRYPTION_KEY is not set/);
     expect(sandboxCalls).toHaveLength(0);
     expect(kvGuardPuts).toHaveLength(0);
@@ -723,12 +671,12 @@ describe("per-App runner env assembly (plan 14 Task 3, spec § Per-App BYOK)", (
     await store.setProviderKey(appX.id, "anthropic", "sk-v1-SECRET");
     const consumer = createReviewConsumer(makeEnv({ DB: db as never }), testLog, testOverrides);
 
-    await consumer(makeBatch(makePayload({ pr_number: 42, appRef: { kind: "app", appId: appX.id } })));
+    await consumer(makeBatch(makePayload({ pr_number: 42, appRef: { appId: appX.id } })));
     expect(runnerEnvs()[0]?.ANTHROPIC_API_KEY).toBe("sk-v1-SECRET");
 
     // Rotate the key in the dashboard (upsert) — no redeploy, no cache.
     await store.setProviderKey(appX.id, "anthropic", "sk-v2-SECRET");
-    await consumer(makeBatch(makePayload({ pr_number: 43, appRef: { kind: "app", appId: appX.id } })));
+    await consumer(makeBatch(makePayload({ pr_number: 43, appRef: { appId: appX.id } })));
     expect(runnerEnvs()[1]?.ANTHROPIC_API_KEY).toBe("sk-v2-SECRET");
     expect(JSON.stringify(runnerEnvs()[1])).not.toContain("sk-v1-SECRET");
   });
@@ -742,7 +690,7 @@ describe("per-App runner env assembly (plan 14 Task 3, spec § Per-App BYOK)", (
     await createAppConfigStore(db, TEST_KEY).setProviderKey(appX.id, "not-a-provider", "sk-rogue-SECRET");
     const consumer = createReviewConsumer(makeEnv({ DB: db as never }), testLog, testOverrides);
 
-    await consumer(makeBatch(makePayload({ appRef: { kind: "app", appId: appX.id } })));
+    await consumer(makeBatch(makePayload({ appRef: { appId: appX.id } })));
 
     expect(runnerEnvs()[0]).toEqual({
       ARK_API_KEY: "ark-key",
@@ -769,7 +717,7 @@ describe("per-App runner env assembly (plan 14 Task 3, spec § Per-App BYOK)", (
       testOverrides,
     );
 
-    await consumer(makeBatch(makePayload({ appRef: { kind: "app", appId: appX.id } })));
+    await consumer(makeBatch(makePayload({ appRef: { appId: appX.id } })));
 
     const env = runnerEnvs()[0]!;
     expect(env.ANTHROPIC_API_KEY).toBe("sk-global-anthropic-SECRET");
@@ -790,7 +738,7 @@ describe("runner input modelOverrides threading (plan 17 Task 1)", () => {
     await store.setModelRole(appX.id, "code-reviewer", "openai/gpt-5:thinking, anthropic/claude-x");
     const consumer = createReviewConsumer(makeEnv({ DB: db as never }), testLog, testOverrides);
 
-    await consumer(makeBatch(makePayload({ appRef: { kind: "app", appId: appX.id } })));
+    await consumer(makeBatch(makePayload({ appRef: { appId: appX.id } })));
 
     const input = runnerInputs()[0]!;
     expect(input.modelOverrides).toEqual({
@@ -801,36 +749,16 @@ describe("runner input modelOverrides threading (plan 17 Task 1)", () => {
     expect(Object.keys(input)).toEqual(["worktreePath", "reconFacts", "modelOverrides"]);
   });
 
-  test("app message with NO role map: input JSON BYTE-IDENTICAL to the legacy payload (field omitted)", async () => {
+  test("app message with NO role map: input JSON omits the field entirely (no-map run)", async () => {
     reset();
     const appDb = createMigratedTestD1();
     const appX = await seedApp(appDb, "app-x"); // github_apps row, NO role rows
     const appConsumer = createReviewConsumer(makeEnv({ DB: appDb as never }), testLog, testOverrides);
-    await appConsumer(makeBatch(makePayload({ pr_number: 42, appRef: { kind: "app", appId: appX.id } })));
+    await appConsumer(makeBatch(makePayload({ pr_number: 42, appRef: { appId: appX.id } })));
     const [appInput] = runnerInputs();
+    // No role map → the runner input JSON omits the field entirely
+    // (byte-identical to a no-map run).
     expect(Object.keys(appInput!)).toEqual(["worktreePath", "reconFacts"]);
-
-    // The same PR identity through the legacy path (appRef absent, fresh DB so
-    // the app run's artifact row cannot dedup it away): the decoded input
-    // documents must be byte-identical — absent map ⇒ absent field.
-    reset();
-    const legacyConsumer = createReviewConsumer(makeEnv({ DB: createMigratedTestD1() as never }), testLog, testOverrides);
-    await legacyConsumer(makeBatch(makePayload({ pr_number: 42 })));
-    const [legacyInput] = runnerInputs();
-    expect(Object.keys(legacyInput!)).toEqual(["worktreePath", "reconFacts"]);
-    expect(JSON.stringify(appInput)).toBe(JSON.stringify(legacyInput));
-  });
-
-  test("explicit legacy marker {kind:'legacy'}: field omitted", async () => {
-    reset();
-    const db = createMigratedTestD1();
-    const consumer = createReviewConsumer(makeEnv({ DB: db as never }), testLog, testOverrides);
-
-    await consumer(makeBatch(makePayload({ appRef: { kind: "legacy" } })));
-
-    const input = runnerInputs()[0]!;
-    expect(Object.keys(input)).toEqual(["worktreePath", "reconFacts"]);
-    expect(input.modelOverrides).toBeUndefined();
   });
 
   test("an all-cleared role map resolves to NO field (empty map = current behavior)", async () => {
@@ -842,7 +770,7 @@ describe("runner input modelOverrides threading (plan 17 Task 1)", () => {
     await store.setModelRole(appX.id, "mstar-review-seat", ""); // cleared → empty map
     const consumer = createReviewConsumer(makeEnv({ DB: db as never }), testLog, testOverrides);
 
-    await consumer(makeBatch(makePayload({ appRef: { kind: "app", appId: appX.id } })));
+    await consumer(makeBatch(makePayload({ appRef: { appId: appX.id } })));
 
     const input = runnerInputs()[0]!;
     expect(Object.keys(input)).toEqual(["worktreePath", "reconFacts"]);
@@ -857,9 +785,9 @@ describe("runner input modelOverrides threading (plan 17 Task 1)", () => {
     await store.setModelRole(appX.id, "code-reviewer", "openai/v1");
     const consumer = createReviewConsumer(makeEnv({ DB: db as never }), testLog, testOverrides);
 
-    await consumer(makeBatch(makePayload({ pr_number: 42, appRef: { kind: "app", appId: appX.id } })));
+    await consumer(makeBatch(makePayload({ pr_number: 42, appRef: { appId: appX.id } })));
     await store.setModelRole(appX.id, "code-reviewer", "openai/v2");
-    await consumer(makeBatch(makePayload({ pr_number: 43, appRef: { kind: "app", appId: appX.id } })));
+    await consumer(makeBatch(makePayload({ pr_number: 43, appRef: { appId: appX.id } })));
 
     const [first, second] = runnerInputs();
     expect(first!.modelOverrides).toEqual({ "code-reviewer": "openai/v1" });
@@ -886,7 +814,7 @@ describe("runner input modelOverrides threading (plan 17 Task 1)", () => {
     const consumer = createReviewConsumer(makeEnv({ DB: failingDb as never }), testLog, testOverrides);
 
     await expect(
-      consumer(makeBatch(makePayload({ appRef: { kind: "app", appId: appX.id } }))),
+      consumer(makeBatch(makePayload({ appRef: { appId: appX.id } }))),
     ).rejects.toThrow(`per-App model-role resolution failed: app ${appX.id}: roles read boom`);
 
     // Zero side effects: no sandbox, no input write, no guard acquisition
@@ -929,7 +857,7 @@ describe("custom provider env injection + runner input threading (plan 23 Task 3
     );
     const consumer = createReviewConsumer(makeEnv({ DB: db as never }), testLog, testOverrides);
 
-    await consumer(makeBatch(makePayload({ appRef: { kind: "app", appId: appX.id } })));
+    await consumer(makeBatch(makePayload({ appRef: { appId: appX.id } })));
 
     // Env injection: decrypted keys under the mapped env names.
     const env = runnerEnvs()[0]!;
@@ -977,7 +905,7 @@ describe("custom provider env injection + runner input threading (plan 23 Task 3
     );
     const consumer = createReviewConsumer(makeEnv({ DB: db as never }), testLog, testOverrides);
 
-    await consumer(makeBatch(makePayload({ appRef: { kind: "app", appId: appX.id } })));
+    await consumer(makeBatch(makePayload({ appRef: { appId: appX.id } })));
 
     const customLines = keySourceLines().filter((l) => l.fields.key_source === "custom");
     expect(customLines).toHaveLength(1);
@@ -990,40 +918,18 @@ describe("custom provider env injection + runner input threading (plan 23 Task 3
     }
   });
 
-  test("app with NO custom providers: input JSON + env BYTE-IDENTICAL to the pre-plan-23 payload", async () => {
+  test("app with NO custom providers: input JSON + env carry no custom-provider surface (byte-identical to a no-declaration run)", async () => {
     reset();
     const appDb = createMigratedTestD1();
     const appX = await seedApp(appDb, "app-x"); // github_apps row, NO custom rows
     const appConsumer = createReviewConsumer(makeEnv({ DB: appDb as never }), testLog, testOverrides);
-    await appConsumer(makeBatch(makePayload({ pr_number: 42, appRef: { kind: "app", appId: appX.id } })));
+    await appConsumer(makeBatch(makePayload({ pr_number: 42, appRef: { appId: appX.id } })));
     const [appInput] = runnerInputs();
-    // Snapshot the app env BEFORE the legacy run (cloned, so later mutations
-    // of the recorded object cannot alias the comparison).
     const [appEnv] = runnerEnvs();
+    // No declarations → the runner input JSON omits the field entirely and
+    // no CUSTOM_* env name is injected (plan 23 byte-compat pin).
     expect(Object.keys(appInput!)).toEqual(["worktreePath", "reconFacts"]);
     expect(JSON.stringify(appEnv)).not.toContain("CUSTOM_");
-
-    reset();
-    const legacyConsumer = createReviewConsumer(makeEnv({ DB: createMigratedTestD1() as never }), testLog, testOverrides);
-    await legacyConsumer(makeBatch(makePayload({ pr_number: 42 })));
-    const [legacyInput] = runnerInputs();
-    expect(Object.keys(legacyInput!)).toEqual(["worktreePath", "reconFacts"]);
-    expect(JSON.stringify(appInput)).toBe(JSON.stringify(legacyInput));
-    // Real before/after equality: the app env (no custom rows) is byte-identical
-    // to the legacy env — compared as a cloned snapshot, never self-referential.
-    expect(structuredClone(appEnv)).toEqual(runnerEnvs()[0]);
-  });
-
-  test("explicit legacy marker {kind:'legacy'}: no custom env injection, field omitted", async () => {
-    reset();
-    const db = createMigratedTestD1();
-    const consumer = createReviewConsumer(makeEnv({ DB: db as never }), testLog, testOverrides);
-
-    await consumer(makeBatch(makePayload({ appRef: { kind: "legacy" } })));
-
-    const input = runnerInputs()[0]!;
-    expect(Object.keys(input)).toEqual(["worktreePath", "reconFacts"]);
-    expect(JSON.stringify(runnerEnvs()[0])).not.toContain("CUSTOM_");
   });
 
   test("custom providers are re-read per message: a dashboard declaration update applies to the very next review", async () => {
@@ -1038,13 +944,13 @@ describe("custom provider env injection + runner input threading (plan 23 Task 3
     );
     const consumer = createReviewConsumer(makeEnv({ DB: db as never }), testLog, testOverrides);
 
-    await consumer(makeBatch(makePayload({ pr_number: 42, appRef: { kind: "app", appId: appX.id } })));
+    await consumer(makeBatch(makePayload({ pr_number: 42, appRef: { appId: appX.id } })));
     await store.upsertCustomProvider(
       appX.id,
       { provider_id: "my-provider", base_url: "https://two.example.com/v1", api: "openai-completions", model_ids: ["m2"] },
       "sk-custom-fixture-BBB",
     );
-    await consumer(makeBatch(makePayload({ pr_number: 43, appRef: { kind: "app", appId: appX.id } })));
+    await consumer(makeBatch(makePayload({ pr_number: 43, appRef: { appId: appX.id } })));
 
     const [first, second] = runnerInputs();
     expect((first!.customProviders as Array<{ base_url: string; model_ids: string[] }>)[0]!.base_url).toBe(
@@ -1072,7 +978,7 @@ describe("custom provider env injection + runner input threading (plan 23 Task 3
     const consumer = createReviewConsumer(makeEnv({ DB: db as never }), testLog, testOverrides);
 
     await expect(
-      consumer(makeBatch(makePayload({ appRef: { kind: "app", appId: appX.id } }))),
+      consumer(makeBatch(makePayload({ appRef: { appId: appX.id } }))),
     ).rejects.toThrow(`per-App custom-provider resolution failed: app ${appX.id}`);
 
     expect(sandboxCalls).toHaveLength(0);
