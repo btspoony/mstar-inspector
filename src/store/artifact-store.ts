@@ -343,3 +343,34 @@ export function createArtifactStore(db: D1Like): D1ArtifactStore {
     },
   };
 }
+/**
+ * Previous-round fingerprint set for cross-round repeat dedup (plan 21
+ * Task 3, AL-21-2): the latest v1 review row for the same
+ * (installation_id, owner, repo, pr_number) — `envelope IS NOT NULL` era
+ * gate, ORDER BY reviewed_at DESC, id DESC LIMIT 1 — then that row's
+ * findings' non-NULL fingerprints. NO head_sha exclusion: the consumer
+ * assembles BEFORE the current sha row exists (post → put order), so a
+ * same-sha re-review reads its own previous row = all-repeat semantics
+ * (documented in AL-21-2). Returns an empty set when no v1 review exists
+ * (first round) or the latest row has no fingerprint-bearing findings.
+ * Callers treat a throw as first-round semantics (never blocks the review).
+ */
+export async function previousRoundFingerprints(
+  db: D1Like,
+  key: { installation_id: number; owner: string; repo: string; pr_number: number },
+): Promise<ReadonlySet<string>> {
+  const review = await db
+    .prepare(
+      `SELECT id FROM reviews
+       WHERE installation_id = ? AND owner = ? AND repo = ? AND pr_number = ? AND envelope IS NOT NULL
+       ORDER BY reviewed_at DESC, id DESC LIMIT 1`,
+    )
+    .bind(key.installation_id, key.owner, key.repo, key.pr_number)
+    .first<{ id: string }>();
+  if (review === null) return new Set();
+  const rows = await db
+    .prepare(`SELECT fingerprint FROM findings WHERE review_id = ? AND fingerprint IS NOT NULL`)
+    .bind(review.id)
+    .all<{ fingerprint: string }>();
+  return new Set(rows.results.map((row) => row.fingerprint));
+}

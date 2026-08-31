@@ -60,6 +60,7 @@ import { parseReviewOutput, capFindings, clampFindingSizes } from "../review/sch
 import { isReviewLevel, REVIEW_LEVELS, type ReviewLevel } from "../review/runtime";
 import { redactExactSecrets, redactReviewOutput, redactReviewOutputExact, redactSecrets } from "./redact";
 import { createArtifactStore, type D1ArtifactStore } from "../store/artifact-store";
+import { previousRoundFingerprints } from "../store/artifact-store";
 import { createFailureStore, type FailureStage, type FailureStore } from "../store/failure-store";
 import { getSandbox, type ReviewSandbox } from "./sandbox";
 import { buildGitOpsCommands, writeJsonCommand } from "./gitops";
@@ -1311,6 +1312,24 @@ async function processMessage(payload: ReviewJobPayload, deps: ProcessDeps): Pro
       clampFindingSizes(redactReviewOutputExact(redactReviewOutput(parsed.output), secretValues)),
     );
     const output = capped.output;
+    // 10a. Plan 21 Task 3 (AL-21-2): cross-round repeat dedup — read the
+    // previous round's fingerprint set BEFORE the post (the current sha row
+    // does not exist yet at this point; post → put order). Query failure or
+    // no previous round = first-round semantics: log a structured warn and
+    // continue — dedup is display-layer, never a review blocker.
+    let previousFingerprints: ReadonlySet<string> | undefined;
+    try {
+      const set = await previousRoundFingerprints(deps.env.DB, {
+        installation_id: payload.installation_id,
+        owner: payload.owner,
+        repo: payload.repo,
+        pr_number: payload.pr_number,
+      });
+      previousFingerprints = set.size > 0 ? set : undefined;
+    } catch (err) {
+      const detail = err instanceof Error ? err.message : String(err);
+      deps.log.warn(fields, `previous-round fingerprint query failed — treating as first round: ${detail}`);
+    }
 
     // 11. Upsert the overall review comment FIRST (the user-facing
     // deliverable must not be lost to a later store failure), then persist.
@@ -1327,6 +1346,7 @@ async function processMessage(payload: ReviewJobPayload, deps: ProcessDeps): Pro
       headSha,
       output,
       omittedFindings: capped.omitted,
+      previousFingerprints,
     });
 
     // 11a. KV done-state fence (BUG-01): written immediately after the

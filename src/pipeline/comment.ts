@@ -75,6 +75,7 @@ import { Octokit } from "@octokit/rest";
 import { MERGE_CLASSES, REVIEW_EMOJI } from "@mstar-harness/engine";
 import { FINDING_BODY_MAX, type ReviewFinding, type ReviewOutput } from "../review/schema";
 import { redactSecrets } from "./redact";
+import { computeFindingFingerprint } from "../store/fingerprint";
 
 /** summary_md budget for the overall review body (plan Task 3). */
 export const SUMMARY_MD_LIMIT = 8000;
@@ -99,8 +100,13 @@ export function truncateSummary(md: string, limit: number = SUMMARY_MD_LIMIT): s
  * emitted verbatim when present; location is `file_path[:line_start]` or
  * "repo-wide" when the finding is not file-scoped. Empty findings → empty
  * string (no section).
+ *
+ * Plan 21 Task 3 (AL-21-2): when a previous-round fingerprint set is
+ * provided, a finding whose fingerprint appeared in the previous round is
+ * marked `*(repeat)*` — still listed, but excluded from the tally's new
+ * counts (display-layer semantics; envelope/persist untouched).
  */
-export function renderFindings(findings: ReviewFinding[]): string {
+export function renderFindings(findings: ReviewFinding[], previousFingerprints?: ReadonlySet<string>): string {
   if (findings.length === 0) return "";
   const sections = MERGE_CLASSES.map((mergeClass) => {
     const inClass = findings.filter((finding) => finding.mergeClass === mergeClass);
@@ -111,17 +117,43 @@ export function renderFindings(findings: ReviewFinding[]): string {
         : "repo-wide";
       const body = finding.body ? `\n\n${finding.body}` : "";
       const category = finding.category !== undefined ? ` (${finding.category})` : "";
-      return `${index + 1}. **${finding.title}**${category} — ${location}${body}`;
+      const repeat =
+        previousFingerprints !== undefined && previousFingerprints.has(computeFindingFingerprint(finding))
+          ? " *(repeat)*"
+          : "";
+      return `${index + 1}. **${finding.title}**${category} — ${location}${repeat}${body}`;
     });
     return `### ${REVIEW_EMOJI[mergeClass]} ${mergeClass}\n\n${items.join("\n\n")}`;
   }).filter((section) => section !== null);
   return `## Findings\n\n${sections.join("\n\n")}`;
 }
 
-/** Tally line from the envelope's PrTallyResult; empty when absent (§3). */
-function renderTally(tally: ReviewOutput["tally"]): string {
+/**
+ * Tally line from the envelope's PrTallyResult; empty when absent (§3).
+ * Plan 21 Task 3 (AL-21-2): with a non-empty previous-round fingerprint
+ * set, each class count is recomputed as the number of NON-repeat findings
+ * in the rendered (capped) array — repeats are still listed but no longer
+ * re-voted. unverified is a fingerprint-less independent list and keeps the
+ * envelope value; verdict/scorePct are never rendered here.
+ */
+function renderTally(
+  tally: ReviewOutput["tally"],
+  findings: ReviewFinding[],
+  previousFingerprints?: ReadonlySet<string>,
+): string {
   if (tally === undefined) return "";
   const { mustFix, shouldFix, nit, unverified } = tally.tally;
+  if (previousFingerprints !== undefined && previousFingerprints.size > 0) {
+    const countNew = (mergeClass: string) =>
+      findings.filter(
+        (finding) => finding.mergeClass === mergeClass && !previousFingerprints.has(computeFindingFingerprint(finding)),
+      ).length;
+    return (
+      `**Tally:** ${REVIEW_EMOJI["must-fix"]} must-fix ${countNew("must-fix")} · ` +
+      `${REVIEW_EMOJI["should-fix"]} should-fix ${countNew("should-fix")} · ` +
+      `${REVIEW_EMOJI.nit} nit ${countNew("nit")} · ${REVIEW_EMOJI.unverified} unverified ${unverified}`
+    );
+  }
   return (
     `**Tally:** ${REVIEW_EMOJI["must-fix"]} must-fix ${mustFix} · ` +
     `${REVIEW_EMOJI["should-fix"]} should-fix ${shouldFix} · ` +
@@ -136,12 +168,21 @@ function renderTally(tally: ReviewOutput["tally"]): string {
  * qc3 F-304 — the API never sees an over-limit body). `omittedFindings` is
  * the count of findings dropped by the consumer's merge-class cap (B4) —
  * the footer tells readers the review is a Top-N subset.
+ *
+ * Plan 21 Task 3 (AL-21-2): `previousFingerprints` is the repeat-dedup data
+ * channel — assembly INPUT only (the consumer queries the store; this module
+ * never does). Publication structure (marker/header/line comments) is
+ * untouched.
  */
-export function buildReviewBody(output: ReviewOutput, omittedFindings = 0): string {
+export function buildReviewBody(
+  output: ReviewOutput,
+  omittedFindings = 0,
+  previousFingerprints?: ReadonlySet<string>,
+): string {
   const verdict = `**Verdict: ${output.verdict}**`;
-  const tally = renderTally(output.tally);
+  const tally = renderTally(output.tally, output.findings, previousFingerprints);
   const summary = truncateSummary(output.summary_md);
-  const findings = renderFindings(output.findings);
+  const findings = renderFindings(output.findings, previousFingerprints);
   const head = tally ? `${verdict}\n\n${tally}` : verdict;
   const body = findings ? `${head}\n\n${summary}\n\n${findings}` : `${head}\n\n${summary}`;
   const full = omittedFindings > 0 ? `${body}\n\n*(+${omittedFindings} more findings omitted)*` : body;
@@ -221,16 +262,19 @@ export function planUpsert(comments: ReviewComment[], excludeIds?: ReadonlySet<n
 /**
  * Assemble the upsert body: hidden marker line (round), the「第 N 次 review ·
  * commit <short sha>」header, then the existing buildReviewBody rendering.
+ * Plan 21 Task 3 (AL-21-2): `previousFingerprints` is the repeat-dedup
+ * assembly input (marker/header structure untouched — D4 lock).
  */
 export function buildUpsertBody(
   output: ReviewOutput,
   omittedFindings: number,
   round: number,
   headSha: string,
+  previousFingerprints?: ReadonlySet<string>,
 ): string {
   const marker = `<!-- mstar-inspector:review:v1 round=${round} -->`;
   const header = `第 ${round} 次 review · commit ${headSha.slice(0, 7)}`;
-  return `${marker}\n${header}\n\n${buildReviewBody(output, omittedFindings)}`;
+  return `${marker}\n${header}\n\n${buildReviewBody(output, omittedFindings, previousFingerprints)}`;
 }
 // ---------------------------------------------------------------------------
 // Degraded comment chain (plan 18 Task 2 / architect AL-1): the parse-fail
@@ -492,6 +536,13 @@ export type PostReviewInput = {
   output: ReviewOutput;
   /** Findings dropped by the merge-class cap (B4) — rendered as a body footer. */
   omittedFindings?: number;
+  /**
+   * Previous-round fingerprint set (plan 21 Task 3 / AL-21-2): the consumer
+   * queries it BEFORE the post (the current sha row does not exist yet) and
+   * passes it here — assembly INPUT only. Findings whose fingerprint is in
+   * the set are marked repeat and excluded from the tally's new counts.
+   */
+  previousFingerprints?: ReadonlySet<string>;
 };
 
 export type ReviewCommenter = {
@@ -681,7 +732,8 @@ export async function postReviewWithOctokit(octokit: PostOctokit, input: PostRev
     octokit,
     input,
     planUpsert,
-    (round) => buildUpsertBody(input.output, input.omittedFindings ?? 0, round, input.headSha),
+    (round) =>
+      buildUpsertBody(input.output, input.omittedFindings ?? 0, round, input.headSha, input.previousFingerprints),
     "review",
   );
 }

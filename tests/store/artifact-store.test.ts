@@ -34,6 +34,7 @@ import {
   type ReviewArtifactDoc,
 } from "../../src/store/artifact-store";
 import { computeFindingFingerprint } from "../../src/store/fingerprint";
+import { previousRoundFingerprints } from "../../src/store/artifact-store";
 import { idemKey } from "../../src/contracts/idem";
 import { createMigratedTestD1 } from "./helpers";
 import type { ReviewRow } from "../../src/store/types";
@@ -498,5 +499,78 @@ describe("parseIdemKey", () => {
     expect(() => parseIdemKey(idemKey({ ...KEY_TUPLE, head_sha: "" }))).toThrow(
       /head_sha must be a non-empty string/,
     );
+  });
+});
+describe("previousRoundFingerprints", () => {
+  const PR_KEY = { installation_id: 123, owner: "acme", repo: "widgets", pr_number: 42 };
+
+  test("empty set when no v1 review exists for the PR (first round)", async () => {
+    const db = createMigratedTestD1();
+    const store = createArtifactStore(db);
+    await store.put({ kind: "review", key: KEY, schema: "mstar.review/v1", payload: payload() });
+    const set = await previousRoundFingerprints(db, { ...PR_KEY, pr_number: 99 });
+    expect(set.size).toBe(0);
+  });
+
+  test("returns the latest v1 review row's non-NULL fingerprints, no head_sha exclusion (AL-21-2)", async () => {
+    const db = createMigratedTestD1();
+    const store = createArtifactStore(db);
+    const older = payload({
+      findings: [
+        { mergeClass: "should-fix", file_path: "src/a.ts", line_start: 1, title: "Older issue", body: "b" },
+      ],
+    });
+    const newer = payload({
+      findings: [
+        { mergeClass: "must-fix", file_path: "src/b.ts", line_start: 5, title: "Newer issue", body: "b" },
+      ],
+    });
+    await store.put({
+      kind: "review",
+      key: idemKey({ ...KEY_TUPLE, head_sha: "a".repeat(40) }),
+      schema: "mstar.review/v1",
+      payload: older,
+    });
+    await store.put({
+      kind: "review",
+      key: idemKey({ ...KEY_TUPLE, head_sha: "b".repeat(40) }),
+      schema: "mstar.review/v1",
+      payload: newer,
+    });
+    const set = await previousRoundFingerprints(db, PR_KEY);
+    expect(set).toEqual(new Set([computeFindingFingerprint(newer.findings[0]!)]));
+  });
+
+  test("skips M1-era rows (envelope NULL) even when they are the latest", async () => {
+    const db = createMigratedTestD1();
+    const store = createArtifactStore(db);
+    await store.put({ kind: "review", key: KEY, schema: "mstar.review/v1", payload: payload() });
+    // Raw-insert an M1-era row (envelope NULL) with a later reviewed_at —
+    // the era gate (envelope IS NOT NULL) must exclude it.
+    db.raw
+      .query(
+        `INSERT INTO reviews (id, installation_id, owner, repo, pr_number, head_sha, reviewed_at, verdict, summary_md, raw_output)
+         VALUES ('m1-row', 123, 'acme', 'widgets', 42, 'm1sha', '2099-01-01 00:00:00', 'approve', 'm1', 'raw')`,
+      )
+      .run();
+    const set = await previousRoundFingerprints(db, PR_KEY);
+    expect(set).toEqual(new Set([computeFindingFingerprint(payload().findings[0]!)]));
+  });
+
+  test("excludes NULL fingerprints from the latest row's set", async () => {
+    const db = createMigratedTestD1();
+    const store = createArtifactStore(db);
+    await store.put({ kind: "review", key: KEY, schema: "mstar.review/v1", payload: payload() });
+    const row = db.raw.query("SELECT id FROM reviews").get() as { id: string };
+    // Raw-insert a finding with a NULL fingerprint under the same review.
+    db.raw
+      .query(
+        `INSERT INTO findings (id, review_id, severity, title, body, fingerprint)
+         VALUES ('null-fp', ?, 'nit', 'No fingerprint', 'b', NULL)`,
+      )
+      .run(row.id);
+    const set = await previousRoundFingerprints(db, PR_KEY);
+    expect(set).toEqual(new Set([computeFindingFingerprint(payload().findings[0]!)]));
+    expect(set.size).toBe(1);
   });
 });
