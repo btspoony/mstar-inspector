@@ -85,10 +85,12 @@ import {
 import {
   appSettingsPage,
   appsPage,
+  badRequestPage,
   dashboardPage,
   deniedPage,
   errorPage,
   forbiddenPage,
+  insightsPage,
   manifestConfirmPage,
   manifestErrorPage,
   manifestStartPage,
@@ -97,6 +99,7 @@ import {
   removedPage,
   type PageNotice,
 } from "./views";
+import { clampWindow, createInsightsStore } from "./insights-store";
 
 export const dashboardApp = new Hono<{ Bindings: Env }>();
 
@@ -1526,6 +1529,108 @@ dashboardApp.get("/", async (c) => {
   const db = dashboardD1(c.env);
   const member = db ? await getUserByLogin(db, session.login) : null;
   return c.html(dashboardPage(session, member?.role === "admin"));
+});
+// --- Plan 22 T2: Review Health insights summary API -------------------------
+//
+// JSON read face for the insights aggregation (src/dashboard/insights-store.ts
+// — the T1 module-boundary leaf, zero store/pipeline/review imports, AL-22-1
+// candidate A). The mount-level guard above has already verified membership
+// on every /dashboard route, so this handler adds ZERO auth code (AL-22-1):
+// it only parses the two query params and serializes the store result.
+//   - window: pure integer days, default 30. Non-integer (incl. negative and
+//     empty) → 400 (AL-22-1: malformed 400). Values > 90 are NOT rejected —
+//     the single clamp point caps them at 90, and the response echoes the
+//     EFFECTIVE window so clients see what the aggregation actually used.
+//   - repo: optional owner/repo filter, malformed → 400.
+// Response = the store return plus the two echoed params (snake_case keys).
+const INSIGHTS_REPO_PATTERN = /^[^/\s]+\/[^/\s]+$/;
+
+/**
+ * Shared query-param parse for BOTH insights faces (QC W-C): window
+ * (integer days, default 30) + optional repo owner/repo filter. Returns the
+ * parsed values or the 400 reason; each route keeps its own 400 shape (JSON
+ * error body vs HTML notice page). The >90 clamp stays in the store — the
+ * single clamp point — and both routes echo the EFFECTIVE window.
+ */
+type InsightsParams =
+  | { ok: true; windowDays: number; repoFilter?: { owner: string; repo: string }; rawRepo?: string }
+  | { ok: false; reason: string };
+
+function parseInsightsParams(query: { window?: string; repo?: string }): InsightsParams {
+  let windowDays = 30;
+  const rawWindow = query.window;
+  if (rawWindow !== undefined) {
+    if (!/^\d+$/.test(rawWindow)) {
+      return { ok: false, reason: "window must be a non-negative integer number of days" };
+    }
+    windowDays = Number(rawWindow);
+  }
+
+  let repoFilter: { owner: string; repo: string } | undefined;
+  let rawRepo: string | undefined;
+  const rawRepoParam = query.repo;
+  if (rawRepoParam !== undefined) {
+    if (!INSIGHTS_REPO_PATTERN.test(rawRepoParam)) {
+      return { ok: false, reason: "repo must be owner/repo" };
+    }
+    rawRepo = rawRepoParam;
+    const slash = rawRepoParam.indexOf("/");
+    repoFilter = { owner: rawRepoParam.slice(0, slash), repo: rawRepoParam.slice(slash + 1) };
+  }
+
+  return { ok: true, windowDays, repoFilter, rawRepo };
+}
+
+dashboardApp.get("/api/insights/summary", async (c) => {
+  const db = dashboardD1(c.env);
+  if (!db) return c.text("dashboard storage is not configured", 500);
+
+  const params = parseInsightsParams({ window: c.req.query("window"), repo: c.req.query("repo") });
+  if (!params.ok) return c.json({ error: params.reason }, 400);
+
+  const insights = await createInsightsStore(db, { windowDays: params.windowDays, repo: params.repoFilter });
+  return c.json({
+    window_days: clampWindow(params.windowDays),
+    ...(params.repoFilter !== undefined ? { repo: params.rawRepo } : {}),
+    reviews_total: insights.reviewsTotal,
+    findings_by_severity: insights.findingsBySeverity,
+    findings_by_category: insights.findingsByCategory,
+    verdict_distribution: insights.verdictDistribution,
+    weekly_trend: insights.weeklyTrend,
+    recurring_top: insights.recurringTop,
+  });
+});
+
+// --- Plan 22 T3: Review Health insights HTML panel --------------------------
+//
+// The member-visible HTML face of the SAME store aggregation as the JSON
+// API above (one store call, two faces). The mount-level guard has already
+// verified membership, so this handler adds ZERO auth code (AL-22-1); the
+// session is re-read for the shellHeader (same route-local pattern as the
+// "/" shell — no session redirect here, the guard owns it). Query-param
+// contract mirrors the T2 route exactly via the shared parseInsightsParams:
+// window (integer days, default 30, >90 clamped to 90 with the EFFECTIVE
+// value echoed) and optional repo owner/repo filter — malformed → 400 as a
+// plain bad-request notice (badRequestPage, QC W-B — never the OAuth
+// errorPage; the JSON face's 400 shape is API-only).
+dashboardApp.get("/insights", async (c) => {
+  const sessionSecret = c.env.DASHBOARD_SESSION_SECRET;
+  if (!sessionSecret) return c.text("dashboard OAuth is not configured", 500);
+  // The mount-level guard has already verified the session (AL-22-1: zero
+  // auth code); this re-read only feeds shellHeader — same route-local
+  // pattern as the "/" shell.
+  const session = (await readSessionValue(getCookie(c, SESSION_COOKIE), sessionSecret))!;
+
+  const db = dashboardD1(c.env);
+  if (!db) return c.text("dashboard storage is not configured", 500);
+
+  const params = parseInsightsParams({ window: c.req.query("window"), repo: c.req.query("repo") });
+  if (!params.ok) return c.html(badRequestPage(params.reason), 400);
+
+  const insights = await createInsightsStore(db, { windowDays: params.windowDays, repo: params.repoFilter });
+  return c.html(
+    insightsPage(session, insights, { windowDays: clampWindow(params.windowDays), repo: params.rawRepo }),
+  );
 });
 
 // Placeholder actions (IA routing table): every POST under /dashboard that is
