@@ -15,10 +15,13 @@
  *   a sliding window; null/undefined OR non-positive line_start → "noline"
  *   (file+title dimension; S-2 — a ≤0 line is not a real location)
  * - `body` / `line_end` / `category` / `mergeClass` NEVER enter the hash
- * - `fingerprint_hint` (non-blank, non-marker) wins verbatim — legacy
+ * - `fingerprint_hint` (non-blank, marker-free) wins verbatim — legacy
  *   passthrough preserved (Global Constraint "fingerprint_hint 优先"); a
- *   blank or `[REDACTED]`-marker hint falls back to the normalized path
- *   (W-1, qc2 F-001 — the marker is never identity)
+ *   blank hint or one CONTAINING the `[REDACTED]` marker falls back to the
+ *   normalized path (W-1, qc2 F-001 + Bugbot wave-1 — the marker is never
+ *   identity, embedded or exact: redaction replaces only the secret span,
+ *   so "sk-abc prod" → "[REDACTED] prod" would otherwise collapse distinct
+ *   findings sharing a suffix/prefix)
  *
  * This is a LEAF pure function: no imports, no IO, no clock — the same
  * output in Bun tests and workerd production. FNV-1a 64-bit is a two-word
@@ -46,11 +49,13 @@ export type FindingFingerprintInput = {
 const TRAILING_PUNCTUATION = /[.,;:!?'"。，；：！？、…”’」』）】》〉]+$/;
 /**
  * The redaction marker `redactSecrets` substitutes for every secret-shaped
- * span (src/pipeline/redact.ts `REDACTED`). A hint equal to it must never be
- * persisted or matched as identity — every secret-bearing finding would
- * otherwise collapse into one false repeat. Kept as a literal here: this
- * module is a zero-import leaf (AL-21-1), so the constant is mirrored with a
- * sync comment instead of imported.
+ * span (src/pipeline/redact.ts `REDACTED`). A hint that is blank or CONTAINS
+ * the marker must never be persisted or matched as identity — redaction
+ * replaces only the secret span, so an embedded marker ("[REDACTED] prod")
+ * would otherwise collapse distinct findings sharing a suffix/prefix into
+ * one false repeat. Kept as a literal here: this module is a zero-import
+ * leaf (AL-21-1), so the constant is mirrored with a sync comment instead
+ * of imported.
  */
 const REDACTION_MARKER = "[REDACTED]";
 
@@ -97,16 +102,17 @@ function normalizeTitle(title: string): string {
 }
 
 /**
- * Deterministic finding fingerprint: a non-blank `fingerprint_hint` that is
- * NOT the redaction marker is returned verbatim (legacy passthrough);
- * otherwise FNV-1a 64 over the normalized composite `path \0 bucket \0 title`
- * (W-1 — a blank or `[REDACTED]` hint falls back so the marker is never
- * identity). Synchronous pure function — safe to call inside the persist
- * path's synchronous `.map()` (AL-21-1).
+ * Deterministic finding fingerprint: a non-blank `fingerprint_hint` that
+ * does NOT contain the redaction marker is returned verbatim (legacy
+ * passthrough); otherwise FNV-1a 64 over the normalized composite
+ * `path \0 bucket \0 title` (W-1 + Bugbot wave-1 — a blank or marker-bearing
+ * hint falls back so the marker is never identity, embedded or exact).
+ * Synchronous pure function — safe to call inside the persist path's
+ * synchronous `.map()` (AL-21-1).
  */
 export function computeFindingFingerprint(f: FindingFingerprintInput): string {
   const hint = f.fingerprint_hint;
-  if (hint != null && hint.trim() !== "" && hint !== REDACTION_MARKER) {
+  if (hint != null && hint.trim() !== "" && !hint.includes(REDACTION_MARKER)) {
     return hint;
   }
   // normPath: `\` → `/`, no case folding; null/undefined file_path → "" (repo-level dimension).

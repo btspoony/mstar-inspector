@@ -34,6 +34,13 @@
  * (its consumer slices as needed); the parity test uses a shared fixture
  * with one group, so the LIMIT does not break the lock.
  *
+ * Era gate (Bugbot wave-1): every aggregation filters
+ * `reviews.envelope IS NOT NULL` — the migration-0002 lock
+ * (`envelope IS NOT NULL` ⇔ v1 row). M1-era rows (critical|warning|
+ * suggestion|info severity, comment|request_changes|approve verdict) must
+ * never mix into the v1 merge-class vocab; the gate is applied once in the
+ * shared WHERE and therefore covers all six aggregations.
+ *
  * Determinism: every aggregation orders by count DESC then key ASC (NULL
  * keys sort first in SQLite ASC — findingsByCategory surfaces NULL
  * categories as `category: null`), weeklyTrend by week_start ASC,
@@ -109,6 +116,12 @@ export async function createInsightsStore(db: InsightsD1, opts: InsightsWindow =
   }
   where.push("r.reviewed_at >= datetime('now', '-' || ? || ' days')");
   binds.push(windowDays);
+  // Era gate (migration 0002 lock): `reviews.envelope IS NOT NULL` ⇔ v1 row.
+  // M1-era rows (old severity/verdict vocab) must never mix into the v1
+  // merge-class aggregations — the gate applies to EVERY query below
+  // (reviewsTotal, findingsBySeverity/Category, verdictDistribution,
+  // weeklyTrend, recurringTop).
+  where.push("r.envelope IS NOT NULL");
   const whereSql = where.join(" AND ");
 
   const [total, severities, categories, verdicts, trend, recurring] = await Promise.all([

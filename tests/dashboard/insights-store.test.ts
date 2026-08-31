@@ -79,14 +79,16 @@ function insertReview(
     reviewedAt: string;
     verdict: string;
     findings: SeedFinding[];
+    /** v1 rows carry the envelope; M1-era rows pass null (era-gate tests). */
+    envelope?: string | null;
   },
 ): void {
   db.raw
     .query(
       `INSERT INTO reviews (id, installation_id, owner, repo, pr_number, head_sha, reviewed_at, verdict, summary_md, envelope)
-       VALUES (?, 123, ?, ?, ?, 'sha', ?, ?, 's', '{}')`,
+       VALUES (?, 123, ?, ?, ?, 'sha', ?, ?, 's', ?)`,
     )
-    .run(opts.id, opts.owner, opts.repo, opts.pr_number, opts.reviewedAt, opts.verdict);
+    .run(opts.id, opts.owner, opts.repo, opts.pr_number, opts.reviewedAt, opts.verdict, opts.envelope === undefined ? "{}" : opts.envelope);
   for (const f of opts.findings) {
     db.raw
       .query(
@@ -141,6 +143,21 @@ function seedFixture(db: TestD1): void {
     verdict: "needs fixes",
     findings: [{ id: "f-c1", severity: "should-fix", category: null, title: "Null deref risk", fingerprint: FP_X }],
   });
+  // M1-era row (Bugbot wave-1): envelope NULL + old vocab (critical/comment)
+  // — must be excluded from EVERY aggregate by the era gate
+  // (`envelope IS NOT NULL` ⇔ v1 row, migration 0002), not by the window or
+  // repo filter. NULL fingerprint keeps the recurrence parity lock with
+  // store.recurrenceByFingerprint intact (both sides exclude it).
+  insertReview(db, {
+    id: "r-m1",
+    owner: "acme",
+    repo: "widgets",
+    pr_number: 4,
+    reviewedAt: reviewedAt(2),
+    verdict: "comment",
+    envelope: null,
+    findings: [{ id: "f-m1", severity: "critical", category: "security", title: "Old era finding", fingerprint: null }],
+  });
 }
 
 describe("createInsightsStore", () => {
@@ -166,6 +183,30 @@ describe("createInsightsStore", () => {
     expect(insights.verdictDistribution).toEqual([
       { verdict: "needs fixes", count: 2 },
       { verdict: "approved", count: 1 },
+    ]);
+  });
+
+  test("M1-era rows (envelope NULL, old vocab) are excluded from every aggregate (era gate)", async () => {
+    const db = createMigratedTestD1();
+    seedFixture(db);
+
+    const insights = await createInsightsStore(db);
+
+    // Old-vocab severity/verdict/category never surface in any aggregate.
+    expect(insights.findingsBySeverity.some((s) => s.severity === "critical")).toBe(false);
+    expect(insights.verdictDistribution.some((v) => v.verdict === "comment")).toBe(false);
+    expect(insights.findingsByCategory.some((c) => c.category === "security")).toBe(false);
+    // The M1 review sits in the SAME week as r-a (reviewedAt(2) vs (1)) —
+    // the era gate, not the window, is what keeps it out of weeklyTrend.
+    expect(mondayOf(reviewedAt(2))).toBe(mondayOf(reviewedAt(1)));
+    expect(insights.weeklyTrend.find((w) => w.week_start === mondayOf(reviewedAt(1)))).toEqual({
+      week_start: mondayOf(reviewedAt(1)),
+      reviews: 1,
+      findings: 2,
+    });
+    // NULL fingerprint + envelope NULL → never in recurringTop.
+    expect(insights.recurringTop).toEqual([
+      { fingerprint: FP_X, title_sample: "Null deref risk", count: 3, repos: ["acme/widgets", "other/lib"] },
     ]);
   });
 

@@ -43,8 +43,8 @@ function seedInsightsReview(
 ): void {
   db.raw
     .query(
-      `INSERT INTO reviews (id, installation_id, owner, repo, pr_number, head_sha, reviewed_at, verdict, summary_md)
-       VALUES (?, 123, ?, ?, ?, 'sha', ?, ?, 's')`,
+      `INSERT INTO reviews (id, installation_id, owner, repo, pr_number, head_sha, reviewed_at, verdict, summary_md, envelope)
+       VALUES (?, 123, ?, ?, ?, 'sha', ?, ?, 's', '{}')`,
     )
     .run(opts.id, opts.owner, opts.repo, opts.pr_number, opts.reviewedAt, opts.verdict);
   const insertFinding = db.raw.query(
