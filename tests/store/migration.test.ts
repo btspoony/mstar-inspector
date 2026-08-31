@@ -580,3 +580,60 @@ describe("migrations/0013_findings_review_id_index.sql", () => {
     expect(plan.some((p) => p.detail.includes("USING INDEX idx_findings_review_id"))).toBe(true);
   });
 });
+describe("migrations/0014_idx_reviews_reviewed_at.sql", () => {
+  /** Apply one migration file verbatim (filename order = wrangler order). */
+  function applyMigrationFile(db: TestD1, name: string): void {
+    db.raw.exec(readFileSync(join(MIGRATIONS_DIR, name), "utf8"));
+  }
+
+  test("applies cleanly over a seeded production-shaped DB (0001–0013 with live rows)", () => {
+    const db = createTestD1();
+    insertReview(db); // a live review predates the CREATE INDEX
+    for (const name of [
+      "0003_dashboard_users.sql",
+      "0004_github_apps.sql",
+      "0005_reviews_app_id.sql",
+      "0006_app_provider_config.sql",
+      "0007_reviews_app_id_index.sql",
+      "0008_github_apps_ops.sql",
+      "0009_app_model_roles.sql",
+      "0010_review_failures.sql",
+      "0013_findings_review_id_index.sql",
+    ]) {
+      applyMigrationFile(db, name);
+    }
+
+    // Metadata-only CREATE INDEX builds over the live rows without rewriting.
+    expect(() => applyMigrationFile(db, "0014_idx_reviews_reviewed_at.sql")).not.toThrow();
+    const reviewCount = db.raw.query("SELECT COUNT(*) AS n FROM reviews").get() as { n: number };
+    expect(reviewCount.n).toBe(1);
+  });
+
+  test("creates idx_reviews_reviewed_at ON reviews(reviewed_at) (fully migrated schema)", () => {
+    const db = createMigratedTestD1();
+    const index = db.raw
+      .query("SELECT tbl_name FROM sqlite_master WHERE type = 'index' AND name = 'idx_reviews_reviewed_at'")
+      .get() as { tbl_name: string } | null;
+    expect(index).not.toBeNull();
+    expect(index!.tbl_name).toBe("reviews");
+    const columns = db.raw.query("PRAGMA index_info(idx_reviews_reviewed_at)").all() as Array<{ name: string }>;
+    expect(columns.map((c) => c.name)).toEqual(["reviewed_at"]);
+  });
+
+  test("the insights window predicate seeks the index (EXPLAIN QUERY PLAN)", () => {
+    // The plan-22 window predicate `reviewed_at >= datetime('now', …)` is a
+    // range probe — with 0014 the planner seeks the window slice instead of
+    // full-scanning reviews. Recorded for the record (plan convention);
+    // planner choice is a runtime fact (AL-21-2 caveat applies to GROUP-BY
+    // plans, not this single-column range seek).
+    const db = createMigratedTestD1();
+    const plan = db.raw
+      .query(
+        "EXPLAIN QUERY PLAN SELECT COUNT(*) AS total FROM reviews r WHERE r.reviewed_at >= datetime('now', '-' || ? || ' days')",
+      )
+      .all(30) as Array<{ detail: string }>;
+    console.log("EXPLAIN QUERY PLAN (insights window predicate):");
+    for (const p of plan) console.log(`  ${p.detail}`);
+    expect(plan.some((p) => p.detail.includes("idx_reviews_reviewed_at"))).toBe(true);
+  });
+});

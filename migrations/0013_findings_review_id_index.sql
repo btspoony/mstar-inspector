@@ -11,7 +11,9 @@
 -- Metadata-only: CREATE INDEX builds the secondary structure without
 -- rewriting the table, so it is safe to apply over a live production DB with
 -- existing rows. Must apply AFTER 0001 (the indexed column must exist).
--- 0011/0012 were cancelled by plan 21 QC — this number is free.
+-- 0011 (plan 20 webhook deliveries) and 0012 (plan 23 custom providers)
+-- apply before this file in filename order post-merge; 0013 and 0014 are
+-- plan 22 — all present post-merge.
 --
 -- Append-only: nothing here rewrites rows or drops data.
 

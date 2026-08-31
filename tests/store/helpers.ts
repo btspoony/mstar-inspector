@@ -10,18 +10,18 @@
  *   i.e. production BEFORE plan 13. Kept for fixtures that exercise the
  *   append-only ALTER sequence itself (tests/worker/apps-store.test.ts
  *   seeds rows, THEN applies 0004/0005).
- * - `createMigratedTestD1()` — the full current shape (0001 → 0013 in
+ * - `createMigratedTestD1()` — the full current shape (0001 → 0014 in
  *   filename order: 0003 dashboard users, 0004 github_apps +
  *   app_installations, 0005 reviews.app_id, 0006 app_provider_keys +
  *   app_model_config, 0007 idx_reviews_app_id, 0008 github_apps
  *   review_enabled + last_webhook_at, 0009 app_model_roles, 0010
- *   review_failures, 0013 idx_findings_review_id — 0011/0012 cancelled by
- *   plan 21 QC), i.e. what
- *   binds `reviews.app_id` (plan 13, QC fix wave 1 F-001), so every test
- *   exercising the REAL store.put against production-shaped data runs on this
- *   one — and plan-14 fixtures get the per-App config tables without
- *   re-applying migrations by hand.
- *
+ *   review_failures, 0011 webhook deliveries (plan 20), 0012 custom
+ *   providers (plan 23), 0013 idx_findings_review_id, 0014
+ *   idx_reviews_reviewed_at (plan 22) — 0011/0012 arrive via the
+ *   integration merge), i.e. the schema that binds `reviews.app_id` (plan
+ *   13, QC fix wave 1 F-001), so every test exercising the REAL store.put
+ *   against production-shaped data runs on this one — and plan-14 fixtures
+ *   get the per-App config tables without re-applying migrations by hand.
  * bun:sqlite and D1 are both SQLite, so UNIQUE/ON CONFLICT semantics match;
  * if a divergence ever shows up against real D1, the remote apply is
  * authoritative and this helper must be updated (plan Clarify 5).
@@ -46,6 +46,7 @@ const ALL_MIGRATIONS = [
   "0009_app_model_roles.sql",
   "0010_review_failures.sql",
   "0013_findings_review_id_index.sql",
+  "0014_idx_reviews_reviewed_at.sql",
 ];
 
 /** Execute the migration DDL on a fresh in-memory database. */

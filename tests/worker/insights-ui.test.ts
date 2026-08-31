@@ -15,28 +15,10 @@ import { describe, expect, test } from "bun:test";
 import worker from "../../src/worker/index";
 import type { Env } from "../../src/worker/env";
 import { SESSION_COOKIE, createSessionValue } from "../../src/dashboard/session";
+import { reviewedAt, mondayOf } from "../../src/dashboard/insights-dates";
 import { createMigratedTestD1, type TestD1 } from "../store/helpers";
 
 const SESSION_SECRET = "test-dashboard-session-secret-32-bytes!";
-
-/** UTC datetime string N days before now, hour forced to 12:00 UTC. */
-function insightsReviewedAt(daysAgo: number): string {
-  const d = new Date(Date.now() - daysAgo * 86_400_000);
-  d.setUTCHours(12, 0, 0, 0);
-  return d.toISOString().slice(0, 19).replace("T", " ");
-}
-
-/**
- * Monday-anchored week start (UTC, YYYY-MM-DD) — a JS mirror of the
- * store's SQL bucketing expression, so expected values come from the SAME
- * seeded timestamps (no clock race on which bucket a timestamp lands in).
- */
-function insightsMondayOf(dt: string): string {
-  const [y, m, d] = dt.split(" ")[0]!.split("-").map(Number);
-  const dow = new Date(Date.UTC(y!, m! - 1, d!)).getUTCDay();
-  const daysToMonday = (dow + 6) % 7;
-  return new Date(Date.UTC(y!, m! - 1, d! - daysToMonday)).toISOString().slice(0, 10);
-}
 
 type InsightsFixtureFinding = {
   id: string;
@@ -118,7 +100,7 @@ function insightsFixtureEnv(): Env {
     owner: "acme",
     repo: "widgets",
     pr_number: 1,
-    reviewedAt: insightsReviewedAt(25),
+    reviewedAt: reviewedAt(25),
     verdict: "comment",
     findings: [
       { id: "f-a1", severity: "must-fix", category: "logic", title: "Null deref risk", fingerprint: "fp-x" },
@@ -130,7 +112,7 @@ function insightsFixtureEnv(): Env {
     owner: "acme",
     repo: "widgets",
     pr_number: 2,
-    reviewedAt: insightsReviewedAt(15),
+    reviewedAt: reviewedAt(15),
     verdict: "approve",
     findings: [
       { id: "f-b1", severity: "must-fix", category: "logic", title: "Null deref risk", fingerprint: "fp-x" },
@@ -141,7 +123,7 @@ function insightsFixtureEnv(): Env {
     owner: "globex",
     repo: "gadgets",
     pr_number: 3,
-    reviewedAt: insightsReviewedAt(5),
+    reviewedAt: reviewedAt(5),
     verdict: "request changes",
     findings: [
       { id: "f-c1", severity: "should-fix", category: "security", title: "Injection", fingerprint: "fp-z" },
@@ -152,7 +134,7 @@ function insightsFixtureEnv(): Env {
     owner: "acme",
     repo: "widgets",
     pr_number: 4,
-    reviewedAt: insightsReviewedAt(60),
+    reviewedAt: reviewedAt(60),
     verdict: "approve",
     findings: [],
   });
@@ -224,9 +206,9 @@ describe("GET /dashboard/insights (plan 22 Task 3, HTML panel)", () => {
     expect(body).toContain("<strong>security</strong>");
 
     // Weekly trend: three Monday-anchored week rows with review/finding counts.
-    const weekA = insightsMondayOf(insightsReviewedAt(25));
-    const weekB = insightsMondayOf(insightsReviewedAt(15));
-    const weekC = insightsMondayOf(insightsReviewedAt(5));
+    const weekA = mondayOf(reviewedAt(25));
+    const weekB = mondayOf(reviewedAt(15));
+    const weekC = mondayOf(reviewedAt(5));
     expect(new Set([weekA, weekB, weekC]).size).toBe(3);
     expect(body).toContain(`<strong>${weekA}</strong>`);
     expect(body).toContain(`<strong>${weekB}</strong>`);
@@ -285,7 +267,13 @@ describe("GET /dashboard/insights (plan 22 Task 3, HTML panel)", () => {
       const res = await get(`/dashboard/insights?${query}`, cookie, insightsFixtureEnv());
       expect(res.status, `?${query}`).toBe(400);
       const body = await res.text();
+      // W-B: the 400 is a plain bad-request notice — NEVER the OAuth
+      // errorPage ("Sign-in failed" / "Sign-in error" copy is for the
+      // login flow; the visitor here IS authenticated).
       expect(body, `?${query}`).toContain("banner");
+      expect(body, `?${query}`).not.toContain("Sign-in failed");
+      expect(body, `?${query}`).not.toContain("Sign-in error");
+      expect(body, `?${query}`).not.toContain("No session was created");
     }
   });
 
@@ -299,7 +287,7 @@ describe("GET /dashboard/insights (plan 22 Task 3, HTML panel)", () => {
       owner: "acme&co",
       repo: "widgets",
       pr_number: 9,
-      reviewedAt: insightsReviewedAt(2),
+      reviewedAt: reviewedAt(2),
       verdict: "comment",
       findings: [
         { id: "f-e1", severity: "must-fix", category: "logic", title: "<img src=x onerror=alert(1)>", fingerprint: "fp-e" },
@@ -310,7 +298,7 @@ describe("GET /dashboard/insights (plan 22 Task 3, HTML panel)", () => {
       owner: "acme&co",
       repo: "widgets",
       pr_number: 10,
-      reviewedAt: insightsReviewedAt(1),
+      reviewedAt: reviewedAt(1),
       verdict: "comment",
       findings: [
         { id: "f-e2", severity: "must-fix", category: "logic", title: "<img src=x onerror=alert(1)>", fingerprint: "fp-e" },

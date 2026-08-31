@@ -22,11 +22,15 @@
  * Fixtures seed through raw INSERTs (explicit reviewed_at control — the
  * window and week-bucket tests need timestamps, which store.put's
  * datetime('now') default cannot provide). The bun:sqlite double applies
- * migrations 0001..0013 (tests/store/helpers.ts — the full current shape;
- * 0011/0012 do not exist in this branch).
+ * migrations 0001..0014 (tests/store/helpers.ts — the full current shape;
+ * 0011/0012 arrive via the integration merge). The shared date helpers
+ * (reviewedAt / mondayOf) live in src/dashboard/insights-dates.ts — the
+ * single copy used by the store test, the T2 route test, and the T3 UI test
+ * (plan 22 QC W-C).
  */
 import { describe, expect, test } from "bun:test";
 import { createInsightsStore } from "../../src/dashboard/insights-store";
+import { reviewedAt, mondayOf } from "../../src/dashboard/insights-dates";
 import { computeFindingFingerprint } from "../../src/store/fingerprint";
 import { recurrenceByFingerprint } from "../../src/store/artifact-store";
 import { createMigratedTestD1, type TestD1 } from "../store/helpers";
@@ -55,29 +59,6 @@ const FP_Z = computeFindingFingerprint({
   line_start: 1,
   title: "Trailing space",
 });
-
-/**
- * UTC datetime string N days before now, hour forced to 12:00 UTC — the
- * same `YYYY-MM-DD HH:MM:SS` format SQLite datetime('now') writes. The
- * fixed hour keeps the date part stable across the test's runtime.
- */
-function reviewedAt(daysAgo: number): string {
-  const d = new Date(Date.now() - daysAgo * 86_400_000);
-  d.setUTCHours(12, 0, 0, 0);
-  return d.toISOString().slice(0, 19).replace("T", " ");
-}
-
-/**
- * Monday-anchored week start (UTC, YYYY-MM-DD) for a SQLite datetime
- * string — a JS mirror of the store's bucketing expression, so expected
- * values are computed from the SAME seeded timestamps (no clock race).
- */
-function mondayOf(dt: string): string {
-  const [y, m, d] = dt.split(" ")[0]!.split("-").map(Number);
-  const dow = new Date(Date.UTC(y!, m! - 1, d!)).getUTCDay();
-  const daysToMonday = (dow + 6) % 7;
-  return new Date(Date.UTC(y!, m! - 1, d! - daysToMonday)).toISOString().slice(0, 10);
-}
 
 type SeedFinding = {
   id: string;
@@ -358,5 +339,86 @@ describe("createInsightsStore", () => {
       repo: { owner: "acme", repo: "widgets" },
     });
     expect(filtered.recurringTop).toEqual(filteredStoreRows);
+  });
+  test("recurringTop is bounded: 15 qualifying fingerprints → exactly the top 10 (W-E)", async () => {
+    const db = createMigratedTestD1();
+    // 15 distinct fingerprints with counts 15..2 — the top 10 by count DESC
+    // (fp-01..fp-10) must be returned; fp-11..fp-15 are cut by LIMIT 10.
+    const counts = [15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 2];
+    let seq = 0;
+    counts.forEach((count, i) => {
+      const fp = `fp-${String(i + 1).padStart(2, "0")}`;
+      for (let k = 0; k < count; k++) {
+        seq += 1;
+        insertReview(db, {
+          id: `r-${String(seq).padStart(3, "0")}`,
+          owner: "acme",
+          repo: "widgets",
+          pr_number: seq,
+          reviewedAt: reviewedAt(1),
+          verdict: "needs fixes",
+          findings: [
+            {
+              id: `f-${String(seq).padStart(3, "0")}`,
+              severity: "must-fix",
+              category: "logic",
+              title: `Recurring ${fp}`,
+              fingerprint: fp,
+            },
+          ],
+        });
+      }
+    });
+
+    const insights = await createInsightsStore(db);
+    expect(insights.recurringTop).toHaveLength(10);
+    expect(insights.recurringTop.map((g) => g.fingerprint)).toEqual(
+      Array.from({ length: 10 }, (_, i) => `fp-${String(i + 1).padStart(2, "0")}`),
+    );
+    expect(insights.recurringTop[0]).toEqual({
+      fingerprint: "fp-01",
+      title_sample: "Recurring fp-01",
+      count: 15,
+      repos: ["acme/widgets"],
+    });
+    expect(insights.recurringTop[9]).toEqual({
+      fingerprint: "fp-10",
+      title_sample: "Recurring fp-10",
+      count: 6,
+      repos: ["acme/widgets"],
+    });
+  });
+
+  test("weeklyTrend Monday anchor pinned to concrete UTC dates (S-1)", async () => {
+    const db = createMigratedTestD1();
+    // Hard-coded boundary pin (no JS mirror involved): the last second of
+    // Sunday 2026-09-06 23:59:59 UTC lands in the week starting Monday
+    // 2026-08-31, and the first second of Monday 2026-09-07 00:00:00 UTC
+    // starts the NEXT week (2026-09-07) — a shared off-by-one in the SQL
+    // expression AND its JS mirror would both pass a mirror-only test.
+    insertReview(db, {
+      id: "r-sun",
+      owner: "acme",
+      repo: "widgets",
+      pr_number: 1,
+      reviewedAt: "2026-09-06 23:59:59",
+      verdict: "needs fixes",
+      findings: [{ id: "f-sun", severity: "must-fix", category: "logic", title: "Null deref risk", fingerprint: FP_X }],
+    });
+    insertReview(db, {
+      id: "r-mon",
+      owner: "acme",
+      repo: "widgets",
+      pr_number: 2,
+      reviewedAt: "2026-09-07 00:00:00",
+      verdict: "needs fixes",
+      findings: [{ id: "f-mon", severity: "must-fix", category: "logic", title: "Null deref risk", fingerprint: FP_X }],
+    });
+
+    const insights = await createInsightsStore(db);
+    expect(insights.weeklyTrend).toEqual([
+      { week_start: "2026-08-31", reviews: 1, findings: 1 },
+      { week_start: "2026-09-07", reviews: 1, findings: 1 },
+    ]);
   });
 });

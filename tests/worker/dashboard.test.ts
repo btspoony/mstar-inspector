@@ -58,6 +58,7 @@ import { createSecretbox } from "../../src/dashboard/secretbox";
 import { createAppsStore } from "../../src/dashboard/apps-store";
 import { normalizePrivateKey } from "../../src/dashboard/private-key";
 import { normalizePrivateKey as pipelineNormalizePrivateKey } from "../../src/pipeline/comment";
+import { reviewedAt, mondayOf } from "../../src/dashboard/insights-dates";
 
 const SESSION_SECRET = "test-dashboard-session-secret-32-bytes!";
 const CLIENT_ID = "oauth-client-id";
@@ -2377,25 +2378,6 @@ describe("members page (plan 12 T3, admin-only)", () => {
 // new auth code); these tests pin that regression plus the query-param
 // contract (window parse + clamp echo, repo filter) against a fixture D1.
 
-/** UTC datetime string N days before now, hour forced to 12:00 UTC. */
-function insightsReviewedAt(daysAgo: number): string {
-  const d = new Date(Date.now() - daysAgo * 86_400_000);
-  d.setUTCHours(12, 0, 0, 0);
-  return d.toISOString().slice(0, 19).replace("T", " ");
-}
-
-/**
- * Monday-anchored week start (UTC, YYYY-MM-DD) — a JS mirror of the store's
- * SQL bucketing expression, so expected values come from the SAME seeded
- * timestamps (no clock race on which bucket a timestamp lands in).
- */
-function insightsMondayOf(dt: string): string {
-  const [y, m, d] = dt.split(" ")[0]!.split("-").map(Number);
-  const dow = new Date(Date.UTC(y!, m! - 1, d!)).getUTCDay();
-  const daysToMonday = (dow + 6) % 7;
-  return new Date(Date.UTC(y!, m! - 1, d! - daysToMonday)).toISOString().slice(0, 10);
-}
-
 type InsightsFixtureFinding = {
   id: string;
   severity: string;
@@ -2459,7 +2441,7 @@ function insightsFixtureEnv(): Env {
     owner: "acme",
     repo: "widgets",
     pr_number: 1,
-    reviewedAt: insightsReviewedAt(25),
+    reviewedAt: reviewedAt(25),
     verdict: "comment",
     findings: [
       { id: "f-a1", severity: "must-fix", category: "logic", title: "Null deref risk", fingerprint: "fp-x" },
@@ -2471,7 +2453,7 @@ function insightsFixtureEnv(): Env {
     owner: "acme",
     repo: "widgets",
     pr_number: 2,
-    reviewedAt: insightsReviewedAt(15),
+    reviewedAt: reviewedAt(15),
     verdict: "approve",
     findings: [
       { id: "f-b1", severity: "must-fix", category: "logic", title: "Null deref risk", fingerprint: "fp-x" },
@@ -2482,7 +2464,7 @@ function insightsFixtureEnv(): Env {
     owner: "globex",
     repo: "gadgets",
     pr_number: 3,
-    reviewedAt: insightsReviewedAt(5),
+    reviewedAt: reviewedAt(5),
     verdict: "request changes",
     findings: [
       { id: "f-c1", severity: "should-fix", category: "security", title: "Injection", fingerprint: "fp-z" },
@@ -2493,7 +2475,7 @@ function insightsFixtureEnv(): Env {
     owner: "acme",
     repo: "widgets",
     pr_number: 4,
-    reviewedAt: insightsReviewedAt(60),
+    reviewedAt: reviewedAt(60),
     verdict: "approve",
     findings: [],
   });
@@ -2581,9 +2563,9 @@ describe("/dashboard/api/insights/summary (plan 22 Task 2)", () => {
     ]);
     // The three in-window reviews are 10 days apart → always three distinct
     // Monday-anchored weeks; buckets ascend oldest → newest.
-    const weekA = insightsMondayOf(insightsReviewedAt(25));
-    const weekB = insightsMondayOf(insightsReviewedAt(15));
-    const weekC = insightsMondayOf(insightsReviewedAt(5));
+    const weekA = mondayOf(reviewedAt(25));
+    const weekB = mondayOf(reviewedAt(15));
+    const weekC = mondayOf(reviewedAt(5));
     expect(new Set([weekA, weekB, weekC]).size).toBe(3);
     expect(body.weekly_trend).toEqual([
       { week_start: weekA, reviews: 1, findings: 2 },

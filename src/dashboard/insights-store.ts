@@ -28,13 +28,11 @@
  *   distinct reviews in the bucket, `findings` counts their findings (a
  *   review with zero findings still contributes 1 to `reviews` — LEFT JOIN).
  *
- * Recurring top (AL-22-1 candidate A): the plan-21 recurrence semantics
- * are INLINED here (count >= 2 distinct reviews, NULL fingerprints excluded
- * — the era gate, AC-21c) rather than imported, because dashboard modules
- * must not import store code. BIDIRECTIONAL ANCHOR: this SQL is a mirror of
- * `recurrenceByFingerprint` in src/store/artifact-store.ts — any semantic
- * change to one MUST be mirrored in the other, and the parity test
- * (tests/dashboard/insights-store.test.ts) locks them together.
+ * Bounded top (QC W-E): the insights face adds `LIMIT 10` — "top" is a
+ * bounded list by product definition, and the bound caps the JSON payload
+ * and the panel's rendered rows. `recurrenceByFingerprint` stays unbounded
+ * (its consumer slices as needed); the parity test uses a shared fixture
+ * with one group, so the LIMIT does not break the lock.
  *
  * Determinism: every aggregation orders by count DESC then key ASC (NULL
  * keys sort first in SQLite ASC — findingsByCategory surfaces NULL
@@ -170,16 +168,17 @@ export async function createInsightsStore(db: InsightsD1, opts: InsightsWindow =
     db
       .prepare(
         `SELECT
-           f.fingerprint AS fingerprint,
-           MIN(f.title) AS title_sample,
-           COUNT(DISTINCT f.review_id) AS count,
-           GROUP_CONCAT(DISTINCT r.owner || '/' || r.repo) AS repos_csv
-         FROM findings f
-         JOIN reviews r ON r.id = f.review_id
-         WHERE f.fingerprint IS NOT NULL AND ${whereSql}
-         GROUP BY f.fingerprint
-         HAVING COUNT(DISTINCT f.review_id) >= 2
-         ORDER BY count DESC, f.fingerprint ASC`,
+          f.fingerprint AS fingerprint,
+          MIN(f.title) AS title_sample,
+          COUNT(DISTINCT f.review_id) AS count,
+          GROUP_CONCAT(DISTINCT r.owner || '/' || r.repo) AS repos_csv
+        FROM findings f
+        JOIN reviews r ON r.id = f.review_id
+        WHERE f.fingerprint IS NOT NULL AND ${whereSql}
+        GROUP BY f.fingerprint
+        HAVING COUNT(DISTINCT f.review_id) >= 2
+        ORDER BY count DESC, f.fingerprint ASC
+        LIMIT 10`,
       )
       .bind(...binds)
       .all<{ fingerprint: string; title_sample: string; count: number; repos_csv: string | null }>(),

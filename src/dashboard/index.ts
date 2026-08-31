@@ -77,6 +77,7 @@ import {
 import {
   appSettingsPage,
   appsPage,
+  badRequestPage,
   dashboardPage,
   deniedPage,
   errorPage,
@@ -1164,33 +1165,53 @@ dashboardApp.get("/", async (c) => {
 // Response = the store return plus the two echoed params (snake_case keys).
 const INSIGHTS_REPO_PATTERN = /^[^/\s]+\/[^/\s]+$/;
 
-dashboardApp.get("/api/insights/summary", async (c) => {
-  const db = dashboardD1(c.env);
-  if (!db) return c.text("dashboard storage is not configured", 500);
+/**
+ * Shared query-param parse for BOTH insights faces (QC W-C): window
+ * (integer days, default 30) + optional repo owner/repo filter. Returns the
+ * parsed values or the 400 reason; each route keeps its own 400 shape (JSON
+ * error body vs HTML notice page). The >90 clamp stays in the store — the
+ * single clamp point — and both routes echo the EFFECTIVE window.
+ */
+type InsightsParams =
+  | { ok: true; windowDays: number; repoFilter?: { owner: string; repo: string }; rawRepo?: string }
+  | { ok: false; reason: string };
 
+function parseInsightsParams(query: { window?: string; repo?: string }): InsightsParams {
   let windowDays = 30;
-  const rawWindow = c.req.query("window");
+  const rawWindow = query.window;
   if (rawWindow !== undefined) {
     if (!/^\d+$/.test(rawWindow)) {
-      return c.json({ error: "window must be a non-negative integer number of days" }, 400);
+      return { ok: false, reason: "window must be a non-negative integer number of days" };
     }
     windowDays = Number(rawWindow);
   }
 
   let repoFilter: { owner: string; repo: string } | undefined;
-  const rawRepo = c.req.query("repo");
-  if (rawRepo !== undefined) {
-    if (!INSIGHTS_REPO_PATTERN.test(rawRepo)) {
-      return c.json({ error: "repo must be owner/repo" }, 400);
+  let rawRepo: string | undefined;
+  const rawRepoParam = query.repo;
+  if (rawRepoParam !== undefined) {
+    if (!INSIGHTS_REPO_PATTERN.test(rawRepoParam)) {
+      return { ok: false, reason: "repo must be owner/repo" };
     }
-    const slash = rawRepo.indexOf("/");
-    repoFilter = { owner: rawRepo.slice(0, slash), repo: rawRepo.slice(slash + 1) };
+    rawRepo = rawRepoParam;
+    const slash = rawRepoParam.indexOf("/");
+    repoFilter = { owner: rawRepoParam.slice(0, slash), repo: rawRepoParam.slice(slash + 1) };
   }
 
-  const insights = await createInsightsStore(db, { windowDays, repo: repoFilter });
+  return { ok: true, windowDays, repoFilter, rawRepo };
+}
+
+dashboardApp.get("/api/insights/summary", async (c) => {
+  const db = dashboardD1(c.env);
+  if (!db) return c.text("dashboard storage is not configured", 500);
+
+  const params = parseInsightsParams({ window: c.req.query("window"), repo: c.req.query("repo") });
+  if (!params.ok) return c.json({ error: params.reason }, 400);
+
+  const insights = await createInsightsStore(db, { windowDays: params.windowDays, repo: params.repoFilter });
   return c.json({
-    window_days: clampWindow(windowDays),
-    ...(repoFilter !== undefined ? { repo: rawRepo } : {}),
+    window_days: clampWindow(params.windowDays),
+    ...(params.repoFilter !== undefined ? { repo: params.rawRepo } : {}),
     reviews_total: insights.reviewsTotal,
     findings_by_severity: insights.findingsBySeverity,
     findings_by_category: insights.findingsByCategory,
@@ -1206,43 +1227,29 @@ dashboardApp.get("/api/insights/summary", async (c) => {
 // API above (one store call, two faces). The mount-level guard has already
 // verified membership, so this handler adds ZERO auth code (AL-22-1); the
 // session is re-read for the shellHeader (same route-local pattern as the
-// "/" shell). Query-param contract mirrors the T2 route exactly: window
-// (integer days, default 30, >90 clamped to 90 with the EFFECTIVE value
-// echoed) and optional repo owner/repo filter — malformed → 400, rendered
-// as the standard error page (the JSON face's 400 shape is API-only).
+// "/" shell — no session redirect here, the guard owns it). Query-param
+// contract mirrors the T2 route exactly via the shared parseInsightsParams:
+// window (integer days, default 30, >90 clamped to 90 with the EFFECTIVE
+// value echoed) and optional repo owner/repo filter — malformed → 400 as a
+// plain bad-request notice (badRequestPage, QC W-B — never the OAuth
+// errorPage; the JSON face's 400 shape is API-only).
 dashboardApp.get("/insights", async (c) => {
   const sessionSecret = c.env.DASHBOARD_SESSION_SECRET;
   if (!sessionSecret) return c.text("dashboard OAuth is not configured", 500);
-  const session = await readSessionValue(getCookie(c, SESSION_COOKIE), sessionSecret);
-  if (!session) return c.redirect("/dashboard/login", 302);
+  // The mount-level guard has already verified the session (AL-22-1: zero
+  // auth code); this re-read only feeds shellHeader — same route-local
+  // pattern as the "/" shell.
+  const session = (await readSessionValue(getCookie(c, SESSION_COOKIE), sessionSecret))!;
 
   const db = dashboardD1(c.env);
   if (!db) return c.text("dashboard storage is not configured", 500);
 
-  let windowDays = 30;
-  const rawWindow = c.req.query("window");
-  if (rawWindow !== undefined) {
-    if (!/^\d+$/.test(rawWindow)) {
-      return c.html(errorPage("window must be a non-negative integer number of days"), 400);
-    }
-    windowDays = Number(rawWindow);
-  }
+  const params = parseInsightsParams({ window: c.req.query("window"), repo: c.req.query("repo") });
+  if (!params.ok) return c.html(badRequestPage(params.reason), 400);
 
-  let repoFilter: { owner: string; repo: string } | undefined;
-  let rawRepo: string | undefined;
-  const rawRepoParam = c.req.query("repo");
-  if (rawRepoParam !== undefined) {
-    if (!INSIGHTS_REPO_PATTERN.test(rawRepoParam)) {
-      return c.html(errorPage("repo must be owner/repo"), 400);
-    }
-    rawRepo = rawRepoParam;
-    const slash = rawRepoParam.indexOf("/");
-    repoFilter = { owner: rawRepoParam.slice(0, slash), repo: rawRepoParam.slice(slash + 1) };
-  }
-
-  const insights = await createInsightsStore(db, { windowDays, repo: repoFilter });
+  const insights = await createInsightsStore(db, { windowDays: params.windowDays, repo: params.repoFilter });
   return c.html(
-    insightsPage(session, insights, { windowDays: clampWindow(windowDays), repo: rawRepo }),
+    insightsPage(session, insights, { windowDays: clampWindow(params.windowDays), repo: params.rawRepo }),
   );
 });
 

@@ -839,6 +839,22 @@ export function errorPage(message: string): string {
   </main>`,
   );
 }
+/**
+ * Input-validation 400 surface (plan 22 QC W-B): a minimal notice page for
+ * malformed query params on authenticated member pages — deliberately NOT
+ * the OAuth errorPage (no "Sign-in failed" / "Sign-in error" copy; the
+ * visitor here IS signed in, they just typed a bad ?window= / ?repo=).
+ */
+export function badRequestPage(message: string): string {
+  return page(
+    "Bad request",
+    `<main>
+    <div class="banner" role="alert">
+      <strong>Bad request.</strong> ${escapeHtml(message)}
+    </div>
+  </main>`,
+  );
+}
 
 /**
  * Review Health insights panel (plan 22 Task 3, spec § M4b + § DESIGN.md
