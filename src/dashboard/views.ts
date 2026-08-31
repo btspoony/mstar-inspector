@@ -716,8 +716,10 @@ export function appSettingsPage(
    * Plan 20 recent-deliveries panel data (AL-20-2): the App's last N
    * webhook_deliveries rows, newest first (the route reads
    * listRecentDeliveries(appId, 5)). Appended at the END of the signature —
-   * the plan-23 track appends its own parameter after this one; the PM
-   * reconciles the single shared line at merge.
+   * plan 23 (feat/23-dashboard-consolidation) appends its own parameter at
+   * the SAME position on its branch; the PM reconciles this single
+   * signature line (and the one settingsResponse call site) at the plan-23
+   * merge — one of the two appends is rewritten during that merge.
    */
   deliveries: WebhookDeliveryRow[] = [],
 ): string {
@@ -805,13 +807,15 @@ export function appSettingsPage(
   // webhook_deliveries rows, newest first — time / event name / outcome /
   // status_code per row, reusing the .keys list rhythm (no new tokens, no
   // JS). Event names are the x-github-event header (user-influenced) →
-  // escaped; a NULL event name renders the "unknown event" placeholder; a
-  // NULL status_code (every non-rejected outcome stores NULL) renders "—".
+  // escaped; a NULL event name renders the "unknown event" placeholder;
+  // status_code goes through escapeHtml too (SQLite INTEGER affinity can
+  // store a non-numeric TEXT from a future caller); a NULL status_code
+  // (every non-rejected outcome stores NULL) renders "—".
   const deliveryRows = deliveries
     .map(
       (d) => `<li>
         <strong>${escapeHtml(d.event_name ?? "unknown event")}</strong>
-        <span class="meta">${relativeTime(d.created_at)} · ${deliveryOutcomeBadge(d.outcome)} · status <span class="id">${d.status_code ?? "—"}</span></span>
+        <span class="meta">${relativeTime(d.created_at)} · ${deliveryOutcomeBadge(d.outcome)} · status <span class="id">${escapeHtml(d.status_code === null ? "—" : String(d.status_code))}</span></span>
       </li>`,
     )
     .join("\n");

@@ -713,4 +713,23 @@ describe("Apps list health column + settings recent deliveries (plan 20 Task 2)"
     expect(body).not.toContain("<script>");
     expect(body).toContain("&lt;script&gt;alert(1)&lt;/script&gt;");
   });
+  test("settings recent deliveries: status_code renders through escapeHtml (seat2 hygiene pin)", async () => {
+    const db = await seededWorld();
+    const apps = createAppsStore(db);
+    const app = (await apps.listApps()).find((a) => a.slug === "mstar-inspector-mallory")!;
+    // The typed writer stores numbers only, but SQLite INTEGER affinity is
+    // lossy-tolerant: a future caller binding a non-numeric TEXT would be
+    // stored verbatim and could render raw. The render must escape
+    // status_code like every other delivery field (raw INSERT simulates
+    // that future caller — the same shape as the <script> event-name pin).
+    db.raw
+      .prepare(
+        "INSERT INTO webhook_deliveries (id, app_id, event_name, outcome, status_code) VALUES (?, ?, ?, ?, ?)",
+      )
+      .run(crypto.randomUUID(), app.id, "pull_request", "rejected", "<script>alert(1)</script>");
+    const res = await get(SETTINGS, await ownerCookie(), makeEnv(db));
+    const body = await res.text();
+    expect(body).not.toContain("<script>");
+    expect(body).toContain('status <span class="id">&lt;script&gt;alert(1)&lt;/script&gt;</span>');
+  });
 });

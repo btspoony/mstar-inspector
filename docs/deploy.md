@@ -220,6 +220,10 @@ Prerequisites: dashboard OAuth (`GITHUB_OAUTH_CLIENT_ID` /
    wrangler d1 execute mstar-inspector-db --remote --command \
      "SELECT id, slug, name, status, created_by, created_at FROM github_apps ORDER BY created_at DESC LIMIT 1"
    ```
+   Healthy — exactly one row (the App just committed; the query caps at
+   `LIMIT 1`). Zero rows means the manifest commit produced no App (the
+   confirm form was not submitted, or the missing/malformed
+   `DASHBOARD_ENCRYPTION_KEY` 500 held) — re-check step 3.
    The Apps list now shows the new App with `delivery never` (no
    `webhook_deliveries` rows yet — the healthy pre-traffic state). The
    settings page (`/dashboard/apps/<slug>/settings`) is where the model
@@ -289,7 +293,11 @@ runner evidence, not the column.
    wrangler d1 execute mstar-inspector-db --remote --command \
      "SELECT outcome, event_name, status_code, created_at FROM webhook_deliveries WHERE app_id = '<app-id>' ORDER BY created_at DESC LIMIT 1"
    ```
-   `outcome` must be `ok` (the delivery that triggered the review).
+   `outcome` must be `ok` — the ok row records the webhook ACCEPTED
+   (classification, written before the enqueue); the review outcome
+   follows via the queue. A failed enqueue leaves this ok row until
+   GitHub's retry re-records a fresh one — that retry's row is the
+   authoritative delivery.
 
 ### 5. Rollback (multi-App)
 

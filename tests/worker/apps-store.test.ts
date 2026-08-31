@@ -454,4 +454,51 @@ describe("apps-store delivery read faces (plan 20 Task 2 consumption)", () => {
     expect(recent.map((r) => r.outcome)).toEqual(["rejected", "ignored"]);
     expect(recent[0]!.created_at >= recent[1]!.created_at).toBe(true);
   });
+
+  test("deliverySummaries batches latest row + 24h rejected count per app in ONE call (QC W-1), incl. zero-delivery apps", async () => {
+    const db = createDeliveryD1();
+    const appA = await seedApp(db);
+    const appB = await seedApp(db, { slug: "app-b", githubAppId: 123457 });
+    const appC = await seedApp(db, { slug: "app-c", githubAppId: 123458 }); // zero deliveries
+    const s = store(db);
+    // appA: latest = rejected (in-window) after an ok + an ignored.
+    await s.recordDelivery({ appId: appA.id, eventName: "ping", outcome: "ignored", statusCode: null });
+    await s.recordDelivery({ appId: appA.id, eventName: "pull_request", outcome: "ok", statusCode: null });
+    await s.recordDelivery({ appId: appA.id, eventName: "pull_request", outcome: "rejected", statusCode: 401 });
+    // appB: latest = ok; its one rejected row is aged OUT of the 24h window.
+    await s.recordDelivery({ appId: appB.id, eventName: "pull_request", outcome: "rejected", statusCode: 500 });
+    await s.recordDelivery({ appId: appB.id, eventName: "pull_request", outcome: "ok", statusCode: null });
+    db.raw
+      .prepare(
+        `UPDATE webhook_deliveries SET created_at = datetime('now', '-25 hours')
+         WHERE app_id = ? AND outcome = 'rejected'`,
+      )
+      .run(appB.id);
+
+    const summaries = await s.deliverySummaries([appA.id, appB.id, appC.id]);
+
+    expect(Object.keys(summaries).sort()).toEqual([appA.id, appB.id, appC.id].sort());
+    expect(summaries[appA.id]).toMatchObject({
+      latest: { event_name: "pull_request", outcome: "rejected", status_code: 401 },
+      rejected24h: 1,
+    });
+    expect(summaries[appB.id]).toMatchObject({
+      latest: { event_name: "pull_request", outcome: "ok", status_code: null },
+      rejected24h: 0, // the rejected row is 25h old — outside the window
+    });
+    expect(summaries[appC.id]).toEqual({ latest: null, rejected24h: 0 });
+  });
+
+  test("deliverySummaries returns ONLY the requested apps; an empty list is an empty map", async () => {
+    const db = createDeliveryD1();
+    const appA = await seedApp(db);
+    await seedApp(db, { slug: "app-b", githubAppId: 123459 }); // appB — never requested
+    const s = store(db);
+    await s.recordDelivery({ appId: appA.id, eventName: "ping", outcome: "ok", statusCode: null });
+
+    expect(await s.deliverySummaries([appA.id])).toEqual(
+      expect.objectContaining({ [appA.id]: { latest: expect.objectContaining({ outcome: "ok" }), rejected24h: 0 } }),
+    );
+    expect(Object.keys(await s.deliverySummaries([]))).toEqual([]);
+  });
 });

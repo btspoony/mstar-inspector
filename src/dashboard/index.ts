@@ -681,19 +681,27 @@ async function requireMember(c: Context<{ Bindings: Env }>): Promise<
 function canManageApp(user: DashboardUserRow, app: GithubAppRow): boolean {
   return user.role === "admin" || app.created_by.toLowerCase() === user.github_login.toLowerCase();
 }
+
 /**
  * The Apps list with the plan-20 health column data (AL-20-2): every row
  * carries its deliverySummary (the App's LATEST webhook_deliveries row +
  * the 24h rejected count). The health column reads webhook_deliveries —
  * NOT the github_apps.last_webhook_at column, which stays the L5 "last
  * verified delivery" stamp (display-only, no computed health).
+ *
+ * The summaries come from the store's BATCHED deliverySummaries face
+ * (plan 20 QC wave 1, W-1): exactly TWO D1 statements for any N instead
+ * of the per-App 2N fan-out — this helper runs on every POST re-render
+ * (three action paths plus the bare GET), so the statement count must not
+ * scale with the App count.
  */
 async function appsListWithHealth(
   db: DashboardDb,
 ): Promise<Array<GithubAppRow & { health: DeliverySummary }>> {
   const apps = createAppsStore(db);
   const rows = await apps.listApps();
-  return Promise.all(rows.map(async (app) => ({ ...app, health: await apps.deliverySummary(app.id) })));
+  const summaries = await apps.deliverySummaries(rows.map((app) => app.id));
+  return rows.map((app) => ({ ...app, health: summaries[app.id]! }));
 }
 
 dashboardApp.get("/apps", async (c) => {

@@ -24,13 +24,31 @@ import { defaultSweepLog, runSweep } from "./sweep";
 import { redactSecrets } from "../pipeline/redact";
 import type { ReviewJobPayload } from "../contracts/review-job";
 import type { PipelineEnv } from "../pipeline/consumer";
-import { classifyWebhook, WEBHOOK_BODY_LIMIT } from "./webhooks";
+import { classifyWebhook, WEBHOOK_BODY_LIMIT, type WebhookOutcome } from "./webhooks";
 import { defaultLog, handleReviewJob } from "./handlers";
-import { createAppsStore } from "../dashboard/apps-store";
+import { createAppsStore, type DeliveryOutcome } from "../dashboard/apps-store";
 import { createSecretbox } from "../dashboard/secretbox";
 import { dashboardApp } from "../dashboard/index";
 
 const app = new Hono<{ Bindings: Env }>();
+/**
+ * Classifier outcome → delivery-record outcome (plan 20 QC wave 1, S-2):
+ * the pure mapping the per-App route applies immediately after
+ * classifyWebhook — reject → rejected / ignore → ignored / job → paused
+ * when the App's review switch is off, else ok. Extracted from the inline
+ * ternary so a future outcome (e.g. AL-21's `hold`) extends one function
+ * instead of every call site; unit-tested in
+ * tests/worker/webhook-deliveries.test.ts. `reviewEnabled` is the App
+ * row's review_enabled flag (0 = the producer-side pause gate).
+ */
+export function deliveryOutcomeFromWebhook(
+  outcome: { kind: WebhookOutcome["kind"] },
+  reviewEnabled: number,
+): DeliveryOutcome {
+  if (outcome.kind === "reject") return "rejected";
+  if (outcome.kind === "ignore") return "ignored";
+  return reviewEnabled === 0 ? "paused" : "ok";
+}
 
 /**
  * Structured warn for the webhook faces' rejection/bookkeeping paths (plan
@@ -234,18 +252,10 @@ app.post("/webhook/:appSlug", async (c) => {
   // last_webhook_at touch: a store failure logs a structured warn and never
   // changes the response or the enqueue.
   try {
-    const deliveryOutcome =
-      outcome.kind === "reject"
-        ? "rejected"
-        : outcome.kind === "ignore"
-          ? "ignored"
-          : row.review_enabled === 0
-            ? "paused"
-            : "ok";
     await appsStore.recordDelivery({
       appId: row.id,
       eventName,
-      outcome: deliveryOutcome,
+      outcome: deliveryOutcomeFromWebhook(outcome, row.review_enabled),
       statusCode: outcome.kind === "reject" ? outcome.status : null,
     });
   } catch (err) {

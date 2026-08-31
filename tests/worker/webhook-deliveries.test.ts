@@ -25,7 +25,7 @@ import { describe, expect, mock, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { Webhooks } from "@octokit/webhooks";
-import worker from "../../src/worker/index";
+import worker, { deliveryOutcomeFromWebhook } from "../../src/worker/index";
 import type { Env } from "../../src/worker/env";
 import { createSecretbox } from "../../src/dashboard/secretbox";
 import { createAppsStore, DELIVERY_OUTCOMES } from "../../src/dashboard/apps-store";
@@ -297,6 +297,29 @@ describe("apps-store delivery face (recordDelivery / deliverySummary / listRecen
     expect(recent[0]!.created_at >= recent[4]!.created_at).toBe(true); // newest first
     expect(await store.listRecentDeliveries("no-such-app", 5)).toEqual([]);
   });
+
+  test("recordDelivery caps event_name at 64 chars at persist time (seat2 hygiene pin)", async () => {
+    const db = createMigratedTestD1();
+    seedAppRow(db);
+    const store = createAppsStore(db);
+
+    // The x-github-event header is attacker-influenced on the
+    // unauthenticated reject path — the persisted value must be bounded.
+    await store.recordDelivery({
+      appId: "app-1",
+      eventName: "x".repeat(200),
+      outcome: "ok",
+      statusCode: null,
+    });
+    await store.recordDelivery({ appId: "app-1", eventName: null, outcome: "ignored", statusCode: null });
+
+    const rows = db.raw
+      .query("SELECT event_name FROM webhook_deliveries ORDER BY rowid")
+      .all() as Array<{ event_name: string | null }>;
+    expect(rows).toHaveLength(2);
+    expect(rows[0]!.event_name).toBe("x".repeat(64));
+    expect(rows[1]!.event_name).toBeNull(); // NULL (absent header) passes through untouched
+  });
 });
 
 describe("per-App webhook face — best-effort delivery recording (plan 20)", () => {
@@ -526,6 +549,124 @@ describe("per-App webhook face — best-effort delivery recording (plan 20)", ()
     expect(fields.event).toBe("delivery_record_failed");
   });
 
+  /**
+   * Race injection (QC S-1): patch the D1 double so the FIRST
+   * webhook_deliveries INSERT runs a parent-row mutation immediately
+   * before it — the delete that can land between the route's slug lookup
+   * and recordDelivery.
+   */
+  function raceParentMutation(
+    db: ReturnType<typeof createTestD1>,
+    appId: string,
+    mutation: "soft-delete" | "hard-delete",
+  ): void {
+    const originalPrepare = db.prepare.bind(db);
+    let injected = false;
+    const patched = ((query: string) => {
+      const stmt = originalPrepare(query);
+      if (!injected && query.includes("INSERT INTO webhook_deliveries")) {
+        injected = true;
+        const originalRun = stmt.run.bind(stmt);
+        stmt.run = (async () => {
+          if (mutation === "soft-delete") {
+            db.raw
+              .prepare(
+                "UPDATE github_apps SET deleted_at = datetime('now'), updated_at = datetime('now') WHERE id = ?",
+              )
+              .run(appId);
+          } else {
+            db.raw.prepare("DELETE FROM github_apps WHERE id = ?").run(appId);
+          }
+          return originalRun();
+        }) as typeof stmt.run;
+      }
+      return stmt;
+    }) as typeof db.prepare;
+    db.prepare = patched;
+  }
+
+  test("best-effort: parent SOFT-deleted between classify and insert still records — FK NO ACTION holds (the soft-delete is an UPDATE, the parent row exists) and the response is unchanged", async () => {
+    const db = createMigratedD1();
+    const appRow = await seedApp(db, { slug: "app-x", secret: "secret-x" });
+    raceParentMutation(db, appRow.id, "soft-delete");
+    const { queue, sent } = makeQueue();
+    const env = makeEnv(db, { REVIEW_QUEUE: queue as never });
+    const body = JSON.stringify(PR_PAYLOAD);
+
+    const res = await postWebhook("/webhook/app-x", body, await sigHeaders("secret-x", body), env);
+
+    expect(res.status).toBe(200);
+    expect(await res.text()).toBe("accepted");
+    expect(sent).toHaveLength(1); // the enqueue is unaffected
+    expect(deliveriesFor(db, appRow.id)).toEqual([
+      { event_name: "pull_request", outcome: "ok", status_code: null },
+    ]); // the historical row still lands
+    const app = db.raw
+      .query("SELECT deleted_at FROM github_apps WHERE id = ?")
+      .get(appRow.id) as { deleted_at: string | null };
+    expect(app.deleted_at).not.toBeNull(); // the race really happened
+  });
+
+  test("best-effort: parent HARD-deleted between classify and insert → FK insert throws → delivery_record_failed warn + response unchanged", async () => {
+    const db = createMigratedD1();
+    const appRow = await seedApp(db, { slug: "app-x", secret: "secret-x" });
+    raceParentMutation(db, appRow.id, "hard-delete");
+    const { queue, sent } = makeQueue();
+    const env = makeEnv(db, { REVIEW_QUEUE: queue as never });
+    const body = JSON.stringify(PR_PAYLOAD);
+
+    const warn = mock((_msg: unknown) => {});
+    const origWarn = console.warn;
+    console.warn = warn;
+    let res: Response;
+    try {
+      res = await postWebhook("/webhook/app-x", body, await sigHeaders("secret-x", body), env);
+    } finally {
+      console.warn = origWarn;
+    }
+
+    expect(res.status).toBe(200);
+    expect(await res.text()).toBe("accepted");
+    expect(sent).toHaveLength(1); // the enqueue is unaffected
+    expect(deliveriesFor(db, appRow.id)).toEqual([]); // zero rows written
+    const line = warn.mock.calls.map((call) => String(call[0])).find((s) => s.includes("delivery_record_failed"));
+    expect(line).toBeDefined();
+    const fields = JSON.parse(line!) as { event: string };
+    expect(fields.event).toBe("delivery_record_failed");
+  });
+
+  test("best-effort: a store failure on a REJECTED record still returns the classifier's status (401), never a 500", async () => {
+    // No 0011 in this fixture — the INSERT hits "no such table".
+    const db = createMigratedD1(false);
+    await seedApp(db, { slug: "app-x", secret: "secret-x" });
+    const { queue, sent } = makeQueue();
+    const env = makeEnv(db, { REVIEW_QUEUE: queue as never });
+    const body = JSON.stringify(PR_PAYLOAD);
+
+    const warn = mock((_msg: unknown) => {});
+    const origWarn = console.warn;
+    console.warn = warn;
+    let res: Response;
+    try {
+      res = await postWebhook(
+        "/webhook/app-x",
+        body,
+        { "x-hub-signature-256": await signatureFor("wrong-secret", body), "x-github-event": "pull_request" },
+        env,
+      );
+    } finally {
+      console.warn = origWarn;
+    }
+
+    expect(res.status).toBe(401); // the classifier's status — never a 500
+    expect(await res.text()).toBe("signature verification failed");
+    expect(sent).toHaveLength(0);
+    const line = warn.mock.calls.map((call) => String(call[0])).find((s) => s.includes("delivery_record_failed"));
+    expect(line).toBeDefined();
+    const fields = JSON.parse(line!) as { event: string };
+    expect(fields.event).toBe("delivery_record_failed");
+  });
+
   test("legacy face records NOTHING (AL-20-1: legacy 不落行)", async () => {
     const db = createMigratedD1();
     const { queue, sent } = makeQueue();
@@ -571,5 +712,14 @@ describe("per-App webhook face — best-effort delivery recording (plan 20)", ()
     expect(sent).toHaveLength(0);
     const count = db.raw.query("SELECT COUNT(*) AS n FROM webhook_deliveries").get() as { n: number };
     expect(count.n).toBe(0);
+  });
+});
+
+describe("deliveryOutcomeFromWebhook (classifier outcome → delivery outcome, QC S-2)", () => {
+  test("maps reject → rejected / ignore → ignored / job → paused when the App's review switch is off, else ok", () => {
+    expect(deliveryOutcomeFromWebhook({ kind: "reject" }, 1)).toBe("rejected");
+    expect(deliveryOutcomeFromWebhook({ kind: "ignore" }, 1)).toBe("ignored");
+    expect(deliveryOutcomeFromWebhook({ kind: "job" }, 0)).toBe("paused");
+    expect(deliveryOutcomeFromWebhook({ kind: "job" }, 1)).toBe("ok");
   });
 });
