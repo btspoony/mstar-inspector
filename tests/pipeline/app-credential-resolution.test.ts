@@ -131,7 +131,7 @@ mock.module("@cloudflare/sandbox", () => ({
 
 // --- commenter fakes --------------------------------------------------------
 
-type CommenterCall = { op: "token" | "post"; installationId?: number };
+type CommenterCall = { op: "token" | "post" | "degrade"; installationId?: number };
 /** Calls grouped by instance — same-instance assertions key off this. */
 const legacyCalls: CommenterCall[] = [];
 const appCalls: Array<{ instance: number; call: CommenterCall }> = [];
@@ -146,6 +146,22 @@ const legacyCommenter: ReviewCommenter = {
   }),
   postReview: mock(async () => {
     legacyCalls.push({ op: "post" });
+    return 1;
+  }),
+  postDegraded: mock(async () => {
+    legacyCalls.push({ op: "degrade" });
+  }),
+  // Bugbot degraded-comment lifecycle: the success path runs the delete
+  // scan (no stale comment → the real implementation finds nothing); the
+  // double is a no-op outcome so the flow exercises the real call.
+  deleteDegradedComment: mock(async () => ({ deleted: 0, skipped: 0, errors: [] })),
+  // Plan 18 T3 line comments: VALID_OUTPUT has no findings → the base filter
+  // is empty → these are never called (byte-compat).
+  fetchPrDiff: mock(async () => {
+    throw new Error("unexpected: no qualifying findings → no diff prefetch");
+  }),
+  postLineComments: mock(async () => {
+    throw new Error("unexpected: no qualifying findings → no line comments");
   }),
 };
 
@@ -160,6 +176,21 @@ const appCommenterFactory = mock((cred: CommenterEnv): ReviewCommenter => {
     }),
     postReview: mock(async () => {
       appCalls.push({ instance, call: { op: "post" } });
+      return 1;
+    }),
+    postDegraded: mock(async () => {
+      appCalls.push({ instance, call: { op: "degrade" } });
+    }),
+    // Bugbot degraded-comment lifecycle: the success path runs the delete
+    // scan (no stale comment → the real implementation finds nothing); the
+    // double is a no-op outcome so the flow exercises the real call.
+    deleteDegradedComment: mock(async () => ({ deleted: 0, skipped: 0, errors: [] })),
+    // Plan 18 T3 line comments: VALID_OUTPUT has no findings → never called.
+    fetchPrDiff: mock(async () => {
+      throw new Error("unexpected: no qualifying findings → no diff prefetch");
+    }),
+    postLineComments: mock(async () => {
+      throw new Error("unexpected: no qualifying findings → no line comments");
     }),
   };
 });

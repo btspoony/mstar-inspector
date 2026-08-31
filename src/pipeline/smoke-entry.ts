@@ -13,17 +13,20 @@
  *                          (token injected via git env config, never in the
  *                          command string). Returns JSON evidence, no secrets.
  *   GET /smoke-review    → T2: clone the real PR head (btspoony/todo-bots#1),
- *                          write the unified diff to a file, exec the in-image
- *                          runner (src/review/runner.ts) with
- *                          HARNESS_PLUGIN_ROOT=/opt/mstar-harness and
+ *                          write the runner --input JSON (reconFacts: PR fact
+ *                          + checked-out head sha + numstat universe — the
+ *                          same shape src/pipeline/consumer.ts writes), exec
+ *                          the in-image runner (src/review/runner.ts) on its
+ *                          current `--level quick --input <file>` CLI with
  *                          ARK_API_KEY via exec env, parse the stdout with
  *                          parseReviewOutput, then destroy. The model key is
  *                          never baked into the image and never echoed in the
  *                          response (only a pass/fail + review shape).
  */
 
+import { runnerCommand, writeJsonCommand } from "./gitops";
+import { getSandbox, Sandbox, type ReviewSandbox, type SandboxBinding } from "./sandbox";
 import { parseReviewOutput } from "../review/schema";
-import { getSandbox, Sandbox, type SandboxBinding } from "./sandbox";
 
 export { Sandbox };
 
@@ -38,10 +41,13 @@ type SmokeEnv = {
 const GH_REPO = "btspoony/todo-bots";
 const GH_PR = "1";
 const CLONE_DIR = "/workspace/repo";
-const DIFF_PATH = "/workspace/pr.diff";
+/** Runner --input JSON path (same constant as the production consumer). */
+const INPUT_PATH = "/workspace/review-input.json";
 /** In-image runner path (Dockerfile v2: WORKDIR /opt/runner, COPY src/review). */
 const RUNNER_PATH = "/opt/runner/src/review/runner.ts";
 const HARNESS_ROOT = "/opt/mstar-harness";
+/** Image-provisioned omp agent dir (models.yml) — same value as the Dockerfile ENV. */
+const OMP_AGENT_DIR = "/opt/omp-agent";
 
 export default {
   async fetch(request: Request, env: SmokeEnv): Promise<Response> {
@@ -158,7 +164,6 @@ async function runReviewSmoke(env: SmokeEnv): Promise<Response> {
         `git clone --depth 1 --branch mstar-inspector-seed https://github.com/${GH_REPO}.git ${CLONE_DIR}`,
         `cd ${CLONE_DIR}`,
         "git fetch --depth 1 origin main",
-        `git diff FETCH_HEAD HEAD > ${DIFF_PATH}`,
       ].join(" && "),
     );
     if (clone.exitCode !== 0) {
@@ -170,25 +175,7 @@ async function runReviewSmoke(env: SmokeEnv): Promise<Response> {
         latencyMs: Date.now() - startedAt,
       };
     } else {
-      // 2. Run the in-image review runner. cwd = clone dir; the model key is
-      // injected via exec env only (never baked into the image).
-      const run = await sandbox.exec(`bun run ${RUNNER_PATH} --diff ${DIFF_PATH}`, {
-        cwd: CLONE_DIR,
-        env: { HARNESS_PLUGIN_ROOT: HARNESS_ROOT, ARK_API_KEY: env.ARK_API_KEY },
-      });
-      const parsed = parseReviewOutput(run.stdout);
-      result = {
-        ok: run.exitCode === 0 && parsed.ok,
-        step: "runner",
-        runnerExitCode: run.exitCode,
-        stdoutBytes: run.stdout.length,
-        parseOk: parsed.ok,
-        mode: parsed.ok ? "structured" : undefined,
-        verdict: parsed.ok ? parsed.output.verdict : undefined,
-        findingsCount: parsed.ok ? parsed.output.findings.length : undefined,
-        summaryBytes: parsed.ok ? parsed.output.summary_md.length : undefined,
-        latencyMs: Date.now() - startedAt,
-      };
+      result = await execInImageReview(sandbox, env.ARK_API_KEY, startedAt);
     }
   } catch (error) {
     result = {
@@ -209,4 +196,74 @@ async function runReviewSmoke(env: SmokeEnv): Promise<Response> {
   }
 
   return Response.json(result, { status: result.ok ? 200 : 500 });
+}
+
+/**
+ * Steps 2–4 of the review smoke: recon facts → runner input JSON → exec the
+ * in-image review runner. The runner input is the same shape the production
+ * consumer writes (src/pipeline/consumer.ts): PR fact + checked-out head sha
+ * + the numstat universe, base64-transported so the JSON never touches shell
+ * interpolation. The model key is injected via exec env only (never baked
+ * into the image).
+ */
+async function execInImageReview(
+  sandbox: ReviewSandbox,
+  arkApiKey: string,
+  startedAt: number,
+): Promise<Record<string, unknown>> {
+  const recon = await sandbox.exec(
+    `cd ${CLONE_DIR} && git rev-parse HEAD && git diff --numstat FETCH_HEAD HEAD`,
+  );
+  if (recon.exitCode !== 0) {
+    return {
+      ok: false,
+      step: "recon",
+      exitCode: recon.exitCode,
+      stdoutBytes: recon.stdout.length,
+      latencyMs: Date.now() - startedAt,
+    };
+  }
+  const [headSha, ...numstat] = recon.stdout
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((line) => line !== "");
+  const inputB64 = Buffer.from(
+    JSON.stringify({
+      worktreePath: CLONE_DIR,
+      reconFacts: [`${GH_REPO}#${GH_PR}`, `head ${headSha}`, ...numstat],
+    }),
+    "utf8",
+  ).toString("base64");
+  const writeInput = await sandbox.exec(writeJsonCommand(INPUT_PATH, inputB64));
+  if (writeInput.exitCode !== 0) {
+    return {
+      ok: false,
+      step: "input-write",
+      exitCode: writeInput.exitCode,
+      latencyMs: Date.now() - startedAt,
+    };
+  }
+
+  const run = await sandbox.exec(runnerCommand(RUNNER_PATH, "quick", INPUT_PATH), {
+    cwd: CLONE_DIR,
+    env: {
+      HARNESS_PLUGIN_ROOT: HARNESS_ROOT,
+      PI_CODING_AGENT_DIR: OMP_AGENT_DIR,
+      ARK_API_KEY: arkApiKey,
+    },
+  });
+  const parsed = parseReviewOutput(run.stdout);
+  return {
+    ok: run.exitCode === 0 && parsed.ok,
+    step: "runner",
+    level: "quick",
+    runnerExitCode: run.exitCode,
+    stdoutBytes: run.stdout.length,
+    parseOk: parsed.ok,
+    mode: parsed.ok ? "structured" : undefined,
+    verdict: parsed.ok ? parsed.output.verdict : undefined,
+    findingsCount: parsed.ok ? parsed.output.findings.length : undefined,
+    summaryBytes: parsed.ok ? parsed.output.summary_md.length : undefined,
+    latencyMs: Date.now() - startedAt,
+  };
 }

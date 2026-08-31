@@ -1,6 +1,9 @@
 /**
  * Worker entry — Hono app exported as the module `fetch` handler (no listen).
- * 06 appends the queue wiring here (worker → pipeline, the only legal edge).
+ * 06 appends the queue wiring here (worker → pipeline, the only legal edge);
+ * 19 T1 appends the cron `scheduled` wiring (worker → store read-only sweep,
+ * AL-6 — the sweep statically imports nothing workerd-only, so the Bun test
+ * runner keeps importing this module without SDK mocks).
  *
  * Routes:
  * - GET /healthz → 200 {"ok":true}
@@ -15,8 +18,10 @@
  * - /dashboard/* → GitHub OAuth login + signed-cookie session shell (08 B0)
  */
 import { Hono } from "hono";
-import type { MessageBatch } from "@cloudflare/workers-types";
-import type { Env } from "./env";
+import type { ExecutionContext, MessageBatch, ScheduledController } from "@cloudflare/workers-types";
+import type { Env, ScheduledEnv } from "./env";
+import { defaultSweepLog, runSweep } from "./sweep";
+import { redactSecrets } from "../pipeline/redact";
 import type { ReviewJobPayload } from "../contracts/review-job";
 import type { PipelineEnv } from "../pipeline/consumer";
 import { classifyWebhook, WEBHOOK_BODY_LIMIT } from "./webhooks";
@@ -279,5 +284,34 @@ export default {
   async queue(batch: MessageBatch<ReviewJobPayload>, env: Env & PipelineEnv): Promise<void> {
     const { createReviewConsumer } = await import("../pipeline/consumer");
     await createReviewConsumer(env)(batch);
+  },
+  // 19 T1 cron wiring (AL-6): the trailing-24h `review_failures` sweep. The
+  // WHOLE sweep is try/caught — a sweep failure must never throw out of
+  // `scheduled` (a throwing cron handler just retries into alert noise). The
+  // sweep reads D1 only: no queue/KV mutation from this face (ScheduledEnv
+  // deliberately omits those bindings). The handler awaits the sweep
+  // directly, so no ctx.waitUntil is needed.
+  async scheduled(_controller: ScheduledController, env: ScheduledEnv, _ctx: ExecutionContext): Promise<void> {
+    try {
+      if (!env.DB) {
+        defaultSweepLog.warn(
+          { event: "ops_sweep_db_unbound", detail: "DB binding missing — sweep skipped" },
+          "ops sweep skipped",
+        );
+        return;
+      }
+      await runSweep(env.DB, { alertUrl: env.ALERT_WEBHOOK_URL });
+    } catch (error) {
+      // SEC-03: the sweep-failure detail is redacted before the warn line —
+      // an infra error can interpolate a secret-shaped value
+      // (defense-in-depth; clean strings pass through unchanged).
+      defaultSweepLog.warn(
+        {
+          event: "ops_sweep_failed",
+          detail: redactSecrets(error instanceof Error ? error.message : String(error)),
+        },
+        "ops sweep failed",
+      );
+    }
   },
 };

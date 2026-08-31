@@ -8,6 +8,24 @@
 # runtime (compass contracts D). The omp models.yml references the ARK_API_KEY
 # env var NAME — the key value itself is never in the image.
 #
+# Outbound egress (architect verdict AL-4, plan 19 T2 — DOCUMENTED, NOT
+# enforced): a REAL egress control surface exists but is deliberately NOT
+# activated. @cloudflare/sandbox 0.12.8's pinned dependency
+# @cloudflare/containers 0.3.7 (bun.lock) ships an egress face on the
+# `Container` superclass the Sandbox DO extends: `allowedHosts` (non-empty =
+# allowlist gate, a miss fails the request with HTTP 520), `deniedHosts`,
+# `enableInternet` (default true), `interceptHttps` (default false; requires
+# the container to trust the Cloudflare CA — unverified on this base image),
+# enforced in `ContainerProxy.fetch`. Activation is deferred: the host
+# inventory has no SSOT in this repo (18 built-in provider API hosts resolve
+# in omp's registry, outside the repo; the ark custom host is pinned in
+# sandbox-image/omp-models.yml), per-App BYOK keeps the provider set open,
+# and a missing host fails CLOSED (520 → review failure → DLQ) — a worse
+# failure mode than the documented de-facto boundary. See docs/deploy.md
+# § Network egress for the de-facto allowlist and the activation prerequisite
+# (provider-host SSOT + staging verification). No fake controls are installed
+# here — documentation only.
+#
 # T2 additions over T1:
 #   - mstar-harness plugin preinstalled at a pinned ref (build-time clone);
 #   - omp agent config (models.yml) for the ark-plan provider;

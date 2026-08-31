@@ -12,6 +12,8 @@
  *   - per-App attribution (plan 13 QC F-001): an appId on the put doc lands
  *     in reviews.app_id (FK-valid); a put without one keeps app_id NULL;
  *     an unknown appId is FK-rejected with zero rows written
+ *   - version records (plan 18 Task 1): a put carrying `model`/`provider`
+ *     lands them in the columns; omitted fields persist NULL (byte-compat)
  *   - second put for the same sha resolves idempotently — still 1 review
  *     row, no duplicate findings, the first-written row is NOT overwritten
  *     (declared deviation from FsStore overwrite semantics)
@@ -98,6 +100,11 @@ describe("createArtifactStore().put", () => {
     expect(JSON.parse(row.envelope!)).toEqual(payload());
     expect(row.raw_output).toBeNull();
 
+    // Version records (plan 18 Task 1): omitted put-input fields persist
+    // NULL — byte-compat for pre-plan-18 callers.
+    expect(row.model).toBeNull();
+    expect(row.provider).toBeNull();
+
     const finding = db.raw.query("SELECT * FROM findings").get() as {
       severity: string;
       category: string;
@@ -140,6 +147,41 @@ describe("createArtifactStore().put", () => {
       app_id: string | null;
     };
     expect(legacy.app_id).toBeNull();
+  });
+
+  test("version records: a put carrying model/provider persists them; explicit nulls stay NULL (plan 18 Task 1)", async () => {
+    const db = createMigratedTestD1();
+    const store = createArtifactStore(db);
+
+    await store.put(reviewDoc({ model: "ark-plan/deepseek-v4-flash", provider: null }));
+    await store.put(
+      reviewDoc({ key: idemKey({ ...KEY_TUPLE, head_sha: "f".repeat(40) }), model: null }),
+    );
+    // Positive provider pin (M1 / qc1 S2): the `?? null` bind must not be a
+    // hardcoded null — a non-null provider round-trips verbatim.
+    await store.put(
+      reviewDoc({
+        key: idemKey({ ...KEY_TUPLE, head_sha: "e".repeat(40) }),
+        provider: "openrouter",
+      }),
+    );
+
+    const withModel = db.raw.query("SELECT model, provider FROM reviews WHERE head_sha = ?").get(SHA) as {
+      model: string | null;
+      provider: string | null;
+    };
+    expect(withModel.model).toBe("ark-plan/deepseek-v4-flash");
+    expect(withModel.provider).toBeNull();
+    const explicitNull = db.raw
+      .query("SELECT model, provider FROM reviews WHERE head_sha = ?")
+      .get("f".repeat(40)) as { model: string | null; provider: string | null };
+    expect(explicitNull.model).toBeNull();
+    expect(explicitNull.provider).toBeNull();
+    const withProvider = db.raw
+      .query("SELECT model, provider FROM reviews WHERE head_sha = ?")
+      .get("e".repeat(40)) as { model: string | null; provider: string | null };
+    expect(withProvider.model).toBeNull();
+    expect(withProvider.provider).toBe("openrouter");
   });
 
   test("an appId with no github_apps row is FK-rejected with zero rows written", async () => {

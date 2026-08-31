@@ -33,10 +33,31 @@
       {
         "queue": "review-queue",
         "max_batch_size": 1,
+        // 19 T1 (architect verdict AL-5 — protective fix, NOT explicitizing
+        // current behavior): UNSET max_concurrency = the platform
+        // auto-scales consumer concurrency by backlog (wrangler 4.125.0
+        // schema); today's serial processing is a low-traffic accident.
+        // >1 buys zero parallelism here — every attempt acquires a UNIQUE
+        // sandbox id (src/pipeline/consumer.ts) against `max_instances: 1`,
+        // so concurrent invocations block on container acquisition
+        // (instanceGetTimeoutMS can time out → retry storm → DLQ) and deep
+        // reviews (14 min in-flight) flirt with the 15-min consumer
+        // wall-clock cap. Pinned at 1; deliberately NOT env-configurable —
+        // raising concurrency requires raising max_instances first (a
+        // future explicit decision).
+        "max_concurrency": 1,
         "max_retries": 3,
         "dead_letter_queue": "review-dlq"
       }
     ]
+  },
+  // 19 T1 (architect verdict AL-6): cron failure sweep every 15 min —
+  // src/worker/sweep.ts counts review_failures over the trailing 24h (all
+  // stages) and alerts past threshold via structured log + optional
+  // ALERT_WEBHOOK_URL POST. Read-only: the scheduled handler never mutates
+  // queue/KV/D1.
+  "triggers": {
+    "crons": ["*/15 * * * *"]
   },
   // 05: D1 Central Review Store (binding DB enters the 06 PipelineEnv, not the
   // fetch-face Env — src/worker/env.ts stays untouched).
