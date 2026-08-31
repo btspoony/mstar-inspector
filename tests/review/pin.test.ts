@@ -14,22 +14,24 @@ import { join } from "node:path";
 
 import { PLUGIN_ROOT_FIXTURE } from "./plugin-root-fixture";
 
-/** Harness 3.5.0 git ref fetched into the sandbox image (plan 07 Scope). */
-const HARNESS_350_REF = "f1b60df0b3b2e29b9a904edb4077e52cf6d7ca66";
-/** Superseded pre-3.5.0 ref that must no longer appear in the Dockerfile. */
+/** Harness 3.5.1 git ref fetched into the sandbox image (plan 25 Task 1). */
+const HARNESS_351_REF = "bde437075aeefd4cdb4e87060c6c44149968c3b0";
+/** Superseded pre-3.5.1 refs that must no longer appear in the Dockerfile. */
 const SUPERSEDED_REF = "c188934c807184f416656a80ca50adb61ccbd525";
+const SUPERSEDED_350_REF = "f1b60df0b3b2e29b9a904edb4077e52cf6d7ca66";
 
 const REPO_ROOT = join(import.meta.dir, "..", "..");
 
 describe("sandbox image harness pin", () => {
   const dockerfile = readFileSync(join(REPO_ROOT, "sandbox-image", "Dockerfile"), "utf8");
 
-  test("Dockerfile fetches the 3.5.0 harness commit", () => {
-    expect(dockerfile).toContain(`fetch --depth 1 origin ${HARNESS_350_REF}`);
+  test("Dockerfile fetches the 3.5.1 harness commit", () => {
+    expect(dockerfile).toContain(`fetch --depth 1 origin ${HARNESS_351_REF}`);
   });
 
   test("Dockerfile no longer references the superseded ref", () => {
     expect(dockerfile).not.toContain(SUPERSEDED_REF);
+    expect(dockerfile).not.toContain(SUPERSEDED_350_REF);
   });
 });
 
@@ -38,8 +40,8 @@ describe("engine dependency pin", () => {
     dependencies: Record<string, string>;
   };
 
-  test("@mstar-harness/engine is pinned to exact 3.5.0 (no range prefix)", () => {
-    expect(pkg.dependencies["@mstar-harness/engine"]).toBe("3.5.0");
+  test("@mstar-harness/engine is pinned to exact 3.5.1 (no range prefix)", () => {
+    expect(pkg.dependencies["@mstar-harness/engine"]).toBe("3.5.1");
   });
 });
 

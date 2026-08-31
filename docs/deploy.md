@@ -454,15 +454,15 @@ controls are installed (the Dockerfile carries the documentation block only).
 
 ## Image pins and digest record
 
-Four pins — re-verified this iteration, **no bump** (plan 19 constraint;
-upgrading any pin is a future iteration's explicit decision):
+Four pins — mstar-harness bumped to **3.5.1** this iteration (plan 25 Task 1,
+the explicit upgrade decision); base image / Bun / gh re-verified, no bump:
 
 | Pin | Value | Where |
 |---|---|---|
 | base image | `docker.io/cloudflare/sandbox:0.12.8` | `sandbox-image/Dockerfile` FROM |
 | Bun | `1.4.0` | `sandbox-image/Dockerfile` |
 | gh CLI | `2.98.0` | `sandbox-image/Dockerfile` |
-| mstar-harness | `f1b60df0b3b2e29b9a904edb4077e52cf6d7ca66` (3.5.0) | `sandbox-image/Dockerfile` |
+| mstar-harness | `bde437075aeefd4cdb4e87060c6c44149968c3b0` (3.5.1) | `sandbox-image/Dockerfile` |
 
 **In-image DEFAULT model selector: `ark-plan/deepseek-v4-flash`** (pins:
 `src/review/runtime-omp.ts` `DEFAULT_MODEL_PATTERN` +
