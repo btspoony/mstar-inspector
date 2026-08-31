@@ -647,7 +647,9 @@ const MODEL_ROLE_HINTS: Record<string, string> = {
  * fallback spelled out (a whitespace-only save clears with a success notice —
  * the copy says so). The hint copy is replace-aware ("replaces its stored
  * key") because the store upserts and bumps the row timestamp on re-set —
- * storage recency is never labeled "created". Status/hints reuse the gray
+ * storage recency is never labeled "created". Plan 23: each masked row also
+ * shows its last-update time (migration 0012) — a pre-existing row (NULL)
+ * renders an em dash until the key is re-set. Status/hints reuse the gray
  * (.status) / amber-700 (.note) tokens — no new tokens, no Level 2. Every
  * user-controlled string (slug, provider, masked tail, chain) is escaped.
  *
@@ -690,9 +692,14 @@ export function appSettingsPage(
       const tail = k.last4
         ? `key ending <code class="id">${escapeHtml(k.last4)}</code>`
         : "key too short to show a tail";
+      // Plan 23 T1 (migration 0012): each masked row shows its last-update
+      // time. NULL (a row written before 0012) reads as an em dash until the
+      // key is re-set; relativeTime turns any other value into a constant
+      // phrase, so no raw timestamp can ever reach the HTML.
+      const updated = k.updated_at === null ? "&mdash;" : relativeTime(k.updated_at);
       return `<li>
         <strong>${escapeHtml(k.provider)}</strong>
-        <span class="meta">${tail}</span>
+        <span class="meta">${tail} · updated ${updated}</span>
         <form method="post" action="${base}/key/delete">
           <input type="hidden" name="provider" value="${escapeHtml(k.provider)}">
           <button type="submit" class="danger">Remove</button>

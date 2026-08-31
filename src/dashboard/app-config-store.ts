@@ -75,6 +75,8 @@ export type AppProviderKeyRow = {
   /** secretbox envelope of the provider API key — opaque here (lock L1). */
   key_enc: string;
   created_at: string;
+  /** Last write time (migration 0012); NULL for rows written before 0012. */
+  updated_at: string | null;
 };
 
 /** A row of `app_model_config` (migration 0006). Absent row = chain unset. */
@@ -253,6 +255,8 @@ export type MaskedProviderKey = {
   provider: string;
   /** Last 4 plaintext characters; "" when the key is too short to mask safely. */
   last4: string;
+  /** Last write time (migration 0012); NULL = pre-0012 row (em dash in the view). */
+  updated_at: string | null;
 };
 
 /** The decrypted per-App configuration (the plan-14 Task 3 consumer face). */
@@ -372,6 +376,9 @@ export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | un
      * plaintext is never persisted, logged, or returned. A key longer than
      * MAX_PROVIDER_KEY_LENGTH throws ProviderKeyTooLongError before any
      * crypto or write (the route answers 400 first; this is the backstop).
+     * The upsert maintains the row's write time (migration 0012): a fresh
+     * insert writes updated_at == created_at from ONE clock read; re-setting
+     * moves both forward.
      */
     async setProviderKey(appId: string, provider: string, plainKey: string): Promise<void> {
       if (plainKey.length > MAX_PROVIDER_KEY_LENGTH) {
@@ -380,11 +387,17 @@ export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | un
       const keyEnc = await box.encryptSecret(plainKey, providerKeyAad(appId, provider));
       await db
         .prepare(
-          `INSERT INTO app_provider_keys (app_id, provider, key_enc, created_at)
-           VALUES (?, ?, ?, datetime('now'))
+          // One clock read for BOTH timestamps (migration 0012): a fresh insert
+          // guarantees updated_at == created_at deterministically (SQLite cannot
+          // alias a VALUES expression, so the CTE holds the single read); the
+          // upsert moves both forward on re-set (today's created_at semantics).
+          `WITH now AS (SELECT datetime('now') AS ts)
+           INSERT INTO app_provider_keys (app_id, provider, key_enc, created_at, updated_at)
+           VALUES (?, ?, ?, (SELECT ts FROM now), (SELECT ts FROM now))
            ON CONFLICT (app_id, provider) DO UPDATE SET
              key_enc = excluded.key_enc,
-             created_at = datetime('now')`,
+             created_at = (SELECT ts FROM now),
+             updated_at = (SELECT ts FROM now)`,
         )
         .bind(appId, provider, keyEnc)
         .run();
@@ -405,9 +418,10 @@ export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | un
 
     /**
      * Masked key list for the settings page: decrypts each row in memory and
-     * reduces it to provider + last-4 (≤4-char keys reveal nothing). The
-     * plaintext NEVER appears in the return value — and because this is the
-     * only list face, it cannot leak into HTML either.
+     * reduces it to provider + last-4 + last-update time (migration 0012;
+     * NULL for rows written before 0012 — the view's em dash placeholder).
+     * The plaintext NEVER appears in the return value — and because this is
+     * the only list face, it cannot leak into HTML either.
      */
     async listProviderKeys(appId: string): Promise<MaskedProviderKey[]> {
       const res = await db
@@ -417,7 +431,7 @@ export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | un
       const masked: MaskedProviderKey[] = [];
       for (const row of res.results) {
         const plain = await box.decryptSecret(row.key_enc, providerKeyAad(row.app_id, row.provider));
-        masked.push({ provider: row.provider, last4: maskTail(plain) });
+        masked.push({ provider: row.provider, last4: maskTail(plain), updated_at: row.updated_at });
       }
       return masked;
     },

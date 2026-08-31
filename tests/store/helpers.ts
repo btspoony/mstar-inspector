@@ -10,12 +10,13 @@
  *   i.e. production BEFORE plan 13. Kept for fixtures that exercise the
  *   append-only ALTER sequence itself (tests/worker/apps-store.test.ts
  *   seeds rows, THEN applies 0004/0005).
- * - `createMigratedTestD1()` — the full current shape (0001 → 0010 in
+ * - `createMigratedTestD1()` — the full current shape (0001 → 0012 in
  *   filename order: 0003 dashboard users, 0004 github_apps +
  *   app_installations, 0005 reviews.app_id, 0006 app_provider_keys +
  *   app_model_config, 0007 idx_reviews_app_id, 0008 github_apps
  *   review_enabled + last_webhook_at, 0009 app_model_roles, 0010
- *   review_failures), i.e. what
+ *   review_failures, 0012 app_provider_keys.updated_at; 0011 is plan 20's
+ *   migration and may not exist yet), i.e. what
  *   `wrangler d1 migrations apply` produces today. The store adapter's INSERT
  *   binds `reviews.app_id` (plan 13, QC fix wave 1 F-001), so every test
  *   exercising the REAL store.put against production-shaped data runs on this
@@ -45,6 +46,7 @@ const ALL_MIGRATIONS = [
   "0008_github_apps_ops.sql",
   "0009_app_model_roles.sql",
   "0010_review_failures.sql",
+  "0012_custom_providers_and_key_updated_at.sql",
 ];
 
 /** Execute the migration DDL on a fresh in-memory database. */

@@ -53,6 +53,8 @@ const TEST_KEY = Buffer.alloc(32, 11).toString("base64");
 const SESSION_SECRET = "test-dashboard-session-secret-32-bytes!";
 const PLAIN_ANTHROPIC_KEY = "sk-ant-mallory-verysecret-9988";
 const PLAIN_CHAIN = "ark-plan/deepseek-v4-flash, openai/gpt-5:thinking";
+/** SQLite datetime('now') format the store writes (UTC "YYYY-MM-DD HH:MM:SS"). */
+const SQLITE_TS_RE = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/;
 
 // --- fixtures ---
 
@@ -110,6 +112,7 @@ function createAppConfigD1(): ReturnType<typeof createTestD1> {
   applyMigration(db, "0006_app_provider_config.sql");
   applyMigration(db, "0008_github_apps_ops.sql");
   applyMigration(db, "0009_app_model_roles.sql");
+  applyMigration(db, "0012_custom_providers_and_key_updated_at.sql");
   return db;
 }
 
@@ -309,6 +312,39 @@ describe("migration 0006_app_provider_config.sql (on a seeded production-shaped 
   });
 });
 
+// --- migration 0012 (plan 23 T1: app_provider_keys.updated_at) ---
+
+describe("migration 0012_custom_providers_and_key_updated_at.sql (plan 23 T1)", () => {
+  test("applies cleanly after 0006; pre-existing key rows keep created_at and carry NULL updated_at until the key is re-set", async () => {
+    const db = createPopulatedPre0006D1();
+    const app = await seedApp(db, { slug: "a", createdBy: "mallory" });
+    applyMigration(db, "0006_app_provider_config.sql");
+    // A key row written BEFORE 0012 (the pre-migration column set).
+    rawRun(
+      db,
+      `INSERT INTO app_provider_keys (app_id, provider, key_enc, created_at)
+       VALUES (?, 'anthropic', 'v1.primary.aXZpdi.Y3Q=', '2026-01-01 00:00:00')`,
+      app.id,
+    );
+    expect(() => applyMigration(db, "0012_custom_providers_and_key_updated_at.sql")).not.toThrow();
+    let row = db.raw.query("SELECT created_at, updated_at FROM app_provider_keys").get() as {
+      created_at: string;
+      updated_at: string | null;
+    };
+    expect(row.created_at).toBe("2026-01-01 00:00:00"); // untouched by the ALTER
+    expect(row.updated_at).toBeNull(); // the 存量行 placeholder source
+    // The store's re-set fills updated_at from the SAME clock read as
+    // created_at — a legacy row becomes current.
+    await configStore(db).setProviderKey(app.id, "anthropic", PLAIN_ANTHROPIC_KEY);
+    row = db.raw.query("SELECT created_at, updated_at FROM app_provider_keys").get() as {
+      created_at: string;
+      updated_at: string;
+    };
+    expect(row.updated_at).toMatch(SQLITE_TS_RE);
+    expect(row.updated_at).toBe(row.created_at);
+  });
+});
+
 // --- store: provider keys ---
 
 describe("app-config store (createAppConfigStore) — provider keys", () => {
@@ -357,7 +393,7 @@ describe("app-config store (createAppConfigStore) — provider keys", () => {
     await store.setProviderKey(app.id, "anthropic", "sk-second-key-bbbb");
     expect(rawCount(db, "app_provider_keys")).toBe(1);
     const list = await store.listProviderKeys(app.id);
-    expect(list).toEqual([{ provider: "anthropic", last4: "bbbb" }]);
+    expect(list).toEqual([{ provider: "anthropic", last4: "bbbb", updated_at: expect.any(String) }]);
   });
 
   test("listProviderKeys masks to provider + last-4 only — plaintext never returns", async () => {
@@ -369,8 +405,8 @@ describe("app-config store (createAppConfigStore) — provider keys", () => {
     const list = await store.listProviderKeys(app.id);
     // Provider-ascending; ONLY the masked tail of each key.
     expect(list).toEqual([
-      { provider: "anthropic", last4: "9988" },
-      { provider: "openai", last4: "7777" },
+      { provider: "anthropic", last4: "9988", updated_at: expect.any(String) },
+      { provider: "openai", last4: "7777", updated_at: expect.any(String) },
     ]);
     expect(JSON.stringify(list)).not.toContain(PLAIN_ANTHROPIC_KEY);
     expect(JSON.stringify(list)).not.toContain("sk-openai-key-7777");
@@ -384,8 +420,8 @@ describe("app-config store (createAppConfigStore) — provider keys", () => {
     await store.setProviderKey(app.id, "kilo", "xyz");
     const list = await store.listProviderKeys(app.id);
     expect(list).toEqual([
-      { provider: "groq", last4: "" },
-      { provider: "kilo", last4: "" },
+      { provider: "groq", last4: "", updated_at: expect.any(String) },
+      { provider: "kilo", last4: "", updated_at: expect.any(String) },
     ]);
     expect(JSON.stringify(list)).not.toContain("abcd");
     expect(JSON.stringify(list)).not.toContain("xyz");
@@ -418,7 +454,58 @@ describe("app-config store (createAppConfigStore) — provider keys", () => {
     expect(serialized).not.toContain("sk-y-openai-key-3333");
     // The masked list is scoped the same way.
     const listX = await store.listProviderKeys(x.id);
-    expect(listX).toEqual([{ provider: "anthropic", last4: "1111" }]);
+    expect(listX).toEqual([{ provider: "anthropic", last4: "1111", updated_at: expect.any(String) }]);
+  });
+
+  test("fresh insert: updated_at == created_at — one clock read for both (migration 0012)", async () => {
+    const db = createAppConfigD1();
+    const app = await seedApp(db, { slug: "a", createdBy: "mallory" });
+    await configStore(db).setProviderKey(app.id, "anthropic", PLAIN_ANTHROPIC_KEY);
+    const row = db.raw.query("SELECT created_at, updated_at FROM app_provider_keys").get() as {
+      created_at: string;
+      updated_at: string;
+    };
+    expect(row.updated_at).toMatch(SQLITE_TS_RE);
+    expect(row.updated_at).toBe(row.created_at);
+  });
+
+  test("re-set bumps updated_at forward (the upsert writes a fresh clock on conflict)", async () => {
+    const db = createAppConfigD1();
+    const app = await seedApp(db, { slug: "a", createdBy: "mallory" });
+    const store = configStore(db);
+    await store.setProviderKey(app.id, "anthropic", "sk-v1-aaaa");
+    // Backdate the row so the second write's clock is observably LATER.
+    rawRun(
+      db,
+      "UPDATE app_provider_keys SET created_at = '2026-01-01 00:00:00', updated_at = '2026-01-01 00:00:00' WHERE app_id = ? AND provider = 'anthropic'",
+      app.id,
+    );
+    await store.setProviderKey(app.id, "anthropic", "sk-v2-bbbb");
+    const row = db.raw.query("SELECT created_at, updated_at FROM app_provider_keys").get() as {
+      created_at: string;
+      updated_at: string;
+    };
+    expect(row.updated_at).toMatch(SQLITE_TS_RE);
+    expect(row.updated_at).toBe(row.created_at); // conflict path: same single-clock read
+    expect(row.updated_at > "2026-01-01 00:00:00").toBe(true); // same-format string compare
+    // The masked list reflects the moved timestamp.
+    const list = await store.listProviderKeys(app.id);
+    expect(list).toEqual([{ provider: "anthropic", last4: "bbbb", updated_at: row.updated_at }]);
+  });
+
+  test("listProviderKeys returns updated_at per row; a pre-0012 row reads NULL until re-set", async () => {
+    const db = createAppConfigD1();
+    const app = await seedApp(db, { slug: "a", createdBy: "mallory" });
+    const store = configStore(db);
+    await store.setProviderKey(app.id, "anthropic", PLAIN_ANTHROPIC_KEY);
+    await store.setProviderKey(app.id, "kilo", "sk-kilo-key-1234");
+    // The legacy shape: a pre-0012 row whose updated_at is NULL.
+    rawRun(db, "UPDATE app_provider_keys SET updated_at = NULL WHERE provider = 'kilo'");
+    const list = await store.listProviderKeys(app.id);
+    expect(list).toHaveLength(2);
+    // provider-ascending: anthropic (current) then kilo (legacy placeholder).
+    expect(list[0]).toEqual({ provider: "anthropic", last4: "9988", updated_at: expect.stringMatching(SQLITE_TS_RE) });
+    expect(list[1]).toEqual({ provider: "kilo", last4: "1234", updated_at: null });
   });
 
   test("setProviderKey accepts a key of exactly 4096 characters (the bound is inclusive)", async () => {
@@ -776,6 +863,9 @@ describe("GET /dashboard/apps/:slug/settings", () => {
     // Masked list (provider + last-4) and the chain prefilled verbatim.
     expect(body).toContain("<strong>anthropic</strong>");
     expect(body).toContain(`key ending <code class="id">9988</code>`);
+    // Plan 23 T1 (migration 0012): the row also shows its last-update time —
+    // a freshly stored key reads "just now".
+    expect(body).toContain(`key ending <code class="id">9988</code> · updated just now`);
     expect(body).toContain(`value="${PLAIN_CHAIN}"`);
     // The zero-JS forms: add-key + save-chain on the pinned POST path, and
     // the per-key delete action path.
@@ -785,6 +875,41 @@ describe("GET /dashboard/apps/:slug/settings", () => {
     // NO full key material anywhere in the HTML.
     expect(body).not.toContain(PLAIN_ANTHROPIC_KEY);
     expect(body).not.toContain("key_enc");
+  });
+
+  test("plan 23 T1: a freshly stored key renders its last-update time in the masked row", async () => {
+    const { db, app } = await seededWorld();
+    await configStore(db).setProviderKey(app.id, "anthropic", PLAIN_ANTHROPIC_KEY);
+    const res = await get(SETTINGS, `${SESSION_COOKIE}=${await sessionCookie("mallory")}`, makeEnv(db));
+    expect(res.status).toBe(200);
+    const body = await res.text();
+    expect(body).toContain(`key ending <code class="id">9988</code> · updated just now`);
+  });
+
+  test("plan 23 T1: a pre-0012 row (NULL updated_at) renders an em dash placeholder", async () => {
+    const { db, app } = await seededWorld();
+    await configStore(db).setProviderKey(app.id, "anthropic", PLAIN_ANTHROPIC_KEY);
+    rawRun(db, "UPDATE app_provider_keys SET updated_at = NULL WHERE app_id = ? AND provider = 'anthropic'", app.id);
+    const res = await get(SETTINGS, `${SESSION_COOKIE}=${await sessionCookie("mallory")}`, makeEnv(db));
+    expect(res.status).toBe(200);
+    const body = await res.text();
+    expect(body).toContain(`key ending <code class="id">9988</code> · updated &mdash;`);
+  });
+
+  test("plan 23 T1: a hostile updated_at never renders raw — the meta degrades to the safe 'unknown' phrase", async () => {
+    const { db, app } = await seededWorld();
+    await configStore(db).setProviderKey(app.id, "anthropic", PLAIN_ANTHROPIC_KEY);
+    rawRun(
+      db,
+      "UPDATE app_provider_keys SET updated_at = '<img src=x onerror=alert(1)>' WHERE app_id = ? AND provider = 'anthropic'",
+      app.id,
+    );
+    const res = await get(SETTINGS, `${SESSION_COOKIE}=${await sessionCookie("mallory")}`, makeEnv(db));
+    expect(res.status).toBe(200);
+    const body = await res.text();
+    expect(body).not.toContain("<img");
+    expect(body).not.toContain("onerror=alert(1)>");
+    expect(body).toContain(`key ending <code class="id">9988</code> · updated unknown`);
   });
 
   test("non-owner member → 403; the owner of a DIFFERENT app → 403 (per-App scope)", async () => {

@@ -1,0 +1,22 @@
+-- 0012_custom_providers_and_key_updated_at.sql — provider-key updated_at
+-- (plan 23 Task 1) + custom-provider declarations (plan 23 Task 2).
+--
+-- SECTION 1 (plan 23 Task 1 — THIS FILE's committed content): the
+-- app_provider_keys.updated_at column — polish #6 "masked key last-updated"
+-- (iteration spec v0.8 §2.4 item 3 / AC-23c). The store's setProviderKey
+-- upsert maintains it on every write (fresh insert: updated_at == created_at
+-- moment; re-set: bumped to now), listProviderKeys returns it, and the
+-- settings page shows it. Rows written BEFORE this migration carry NULL —
+-- the settings page renders an em dash placeholder for those until the key
+-- is re-set.
+--
+-- SECTION 2 (plan 23 Task 2 — appended by the T2 dispatch, NOT in this
+-- commit): the app_custom_providers table (per-App custom provider
+-- declarations, AL-23-1 DDL). Task 2 extends this same file so the two
+-- changes ship in ONE migration (0012) on the production DB.
+--
+-- Append-only: the ALTER adds one nullable column, touches no existing
+-- data. Forward-only (SQLite has no down). No FK change — app_provider_keys
+-- is untouched structurally beyond the new column.
+
+ALTER TABLE app_provider_keys ADD COLUMN updated_at TEXT;
