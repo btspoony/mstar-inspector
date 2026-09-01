@@ -138,6 +138,15 @@ configured as a **variable** — the workflow reads it from
 cross-check); a missing value fails the step red (see § Local tooling for the
 stale-account trap this guards).
 
+**Token permissions** — the `CLOUDFLARE_API_TOKEN` must be an **Account API
+Token** scoped to the deploy account (`f68fcd78e7c5c10f0466788bb9e85b8e`)
+with at least: **D1 → Edit** (migrations apply), **Workers Scripts → Edit**
+(`wrangler deploy` + `secret bulk`), **Workers Containers → Edit**
+(`containers list` digest extraction). A token that passes `wrangler whoami`
+but lacks D1 access fails the migration step with
+`The given account is not valid or is not authorized to access this service
+[code: 7403]` — the account id is correct; the token's permissions are not.
+
 Provider API keys and the review model chain are **not** Worker env — they
 live per App in D1 (`app_provider_keys` / `app_model_config`, migration
 0006), configured on each App's dashboard Settings page and injected into the
