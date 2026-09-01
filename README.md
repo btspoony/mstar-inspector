@@ -1,6 +1,8 @@
 <div align="center">
 
-<img src="assets/logo.svg" alt="mstar-inspector" width="96">
+<img src="assets/logo.svg" alt="Morning Star Inspector" width="96">
+
+# [Morning Star Inspector](https://github.com/btspoony/mstar-inspector)
 
 A self-hosted GitHub App for automated PR reviews and bug detection,
 driven by pluggable coding-agent runtimes.
