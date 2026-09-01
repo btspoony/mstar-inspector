@@ -22,9 +22,10 @@ Merging to `main` triggers the **Deploy** workflow
   manual `workflow_dispatch` (emergency channel, not subject to the path
   filter). Deploys are serialized (`concurrency` group, no cancel-in-progress).
 - **Sequence** — `test` job (typecheck + unit tests, mirrors `ci.yml`) →
-  `deploy` job: account verification → D1 migrations (`--remote`) → secrets
-  injection → `wrangler deploy` → post-deploy smoke (healthz / cron / digest) →
-  digest write-back to § Image pins and digest record.
+  `deploy` job: account verification → secrets injection (`wrangler secret
+  bulk`, required + optional alert) → D1 migrations (`--remote`) →
+  `wrangler deploy` → post-deploy smoke (healthz / cron / digest) → digest
+  write-back to § Image pins and digest record.
 - **Failure semantics** — any step failure turns the run red and **stops**
   (no automatic rollback): D1 migrations are forward-only, so a rollback after
   they applied would be a schema mismatch. A red run means a human intervenes
@@ -102,6 +103,14 @@ value fails the run red — `wrangler secret bulk` treats a JSON `null` as a
 secret **deletion**, so empty values must never reach it). `ALERT_WEBHOOK_URL`
 is optional: when the GitHub Secret is absent the workflow skips writing it
 and the Worker falls back to log-only alerting (§ Ops config).
+
+**CI credentials (GitHub Secrets, not Worker secrets)** — the workflow
+authenticates wrangler with two GitHub Secrets that are never injected into
+the Worker: `CLOUDFLARE_API_TOKEN` (wrangler auth) and
+`CLOUDFLARE_ACCOUNT_ID` (the deploy account id,
+`f68fcd78e7c5c10f0466788bb9e85b8e`). Set the `CLOUDFLARE_ACCOUNT_ID` GitHub
+Secret to the same value as the repo variable below — the
+account-verification step compares the two and fails red on mismatch.
 
 **Repo variables** — the workflow also reads the repo variable
 `CLOUDFLARE_ACCOUNT_ID` (the deploy account id, `f68fcd78e7c5c10f0466788bb9e85b8e`)
@@ -208,7 +217,7 @@ only via `wrangler deploy`).
 ## Deploy steps (manual reference)
 
 > The automated path (§ Automated deploy) runs the same sequence in CI —
-> typecheck/test → D1 migrations → secrets → `wrangler deploy` → smoke →
+> typecheck/test → secrets → D1 migrations → `wrangler deploy` → smoke →
 > digest record. The steps below are the manual equivalent, kept as reference
 > for local runs and for recovering from a failed automated deploy.
 
@@ -277,11 +286,11 @@ docker run --rm --entrypoint /opt/verify-synthesis.sh <image>
 ## Post-deploy smoke
 
 > The Deploy workflow runs the automated smoke on every deploy: healthz
-> (3 retries × 5s), cron registration (grep of the deploy log for
+> (3 attempts, 5s apart), cron registration (grep of the deploy log for
 > `schedule: */15 * * * *`), and image-digest extraction (live container
 > state). Any failure turns the run red and stops. The manual checks below
-> are the reference equivalent — for local runs and for investigating a red
-> run.
+> are extra / local investigation steps, not the workflow smoke — for local
+> runs and for investigating a red run.
 
 1. **Cron trigger registered** — the `wrangler deploy` output lists the cron
    trigger `*/15 * * * *` (also visible in the dashboard under Workers →

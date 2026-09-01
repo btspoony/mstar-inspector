@@ -33,16 +33,16 @@ GitHub webhook → POST /webhook/:appSlug (verify + classify) → Queue → Cons
 
 ## Quick start
 
-> Prerequisites: a [Cloudflare](https://developers.cloudflare.com/workers/) account (Workers + D1 + Queues), a GitHub account, and [Bun](https://bun.sh) ≥ 1.3.14 locally. The full runbook — including Cloudflare resource setup and D1 migrations — lives in [`docs/deploy.md`](docs/deploy.md).
+> Prerequisites: a [Cloudflare](https://developers.cloudflare.com/workers/) account (Workers + D1 + Queues), a GitHub account, and [Bun](https://bun.sh) ≥ 1.3.14 locally. The deploy docs — including Cloudflare resource setup and D1 migrations — live in [`docs/deploy.md`](docs/deploy.md).
 
-1. **Deploy the Worker** — merging to `main` deploys automatically via the [Deploy workflow](.github/workflows/deploy.yml) (D1 migrations → secrets → `wrangler deploy` → smoke → digest record). For a manual/local deploy:
+1. **Deploy the Worker** — merging to `main` deploys automatically via the [Deploy workflow](.github/workflows/deploy.yml) (secrets → D1 migrations → `wrangler deploy` → smoke → digest record). For a manual/local deploy:
 
    ```bash
    bun install
    wrangler deploy        # apply D1 migrations and deploy; details in docs/deploy.md
    ```
 
-2. **Set the dashboard secrets** (three; no review credentials live at Worker level) — as **GitHub Secrets** (Settings → Secrets and variables → Actions), which the Deploy workflow injects into the Worker on every deploy:
+2. **Set the dashboard secrets** (four; no review credentials live at Worker level) — as **GitHub Secrets** (Settings → Secrets and variables → Actions), which the Deploy workflow injects into the Worker on every deploy:
 
    ```bash
    # generate values locally, then add them as GitHub Secrets:
@@ -89,7 +89,7 @@ Everything a review needs is configured **per App** on the dashboard Settings pa
 ## Operations
 
 - **Kill-switch**: reviews run only when the Worker var `REVIEW_ENABLED` is exactly `"true"`. Unset or any other value → every webhook is acknowledged and ignored, nothing is enqueued. Ship unset until you are ready.
-- **Deploys are automated**: merging to `main` runs the [Deploy workflow](.github/workflows/deploy.yml) — D1 migrations, secrets injection, `wrangler deploy`, post-deploy smoke, and the image-digest record. A failed run stops red (no auto-rollback); see [`docs/deploy.md`](docs/deploy.md) for failure semantics and the manual rollback path.
+- **Deploys are automated**: merging to `main` runs the [Deploy workflow](.github/workflows/deploy.yml) — secrets injection, D1 migrations, `wrangler deploy`, post-deploy smoke, and the image-digest record. A failed run stops red (no auto-rollback); see [`docs/deploy.md`](docs/deploy.md) for failure semantics and the manual rollback path.
 - **Secrets inventory, deploy steps, rollback, and the full Multi-App go-live checklist** → [`docs/deploy.md`](docs/deploy.md).
 
 ## Local development
