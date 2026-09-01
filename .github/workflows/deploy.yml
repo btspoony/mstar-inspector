@@ -76,5 +76,36 @@ jobs:
         if: env.ALERT_WEBHOOK_URL != ''
         run: "jq -n '{ALERT_WEBHOOK_URL: env.ALERT_WEBHOOK_URL}' | bunx wrangler secret bulk"
 
-      # (T3) D1 迁移 --remote + wrangler deploy + post-deploy smoke（healthz / cron / digest 提取）
+      - name: Apply D1 migrations (remote)
+        run: bunx wrangler d1 migrations apply mstar-inspector-db --remote
+
+      - name: Deploy Worker
+        run: |
+          bunx wrangler deploy 2>&1 | tee deploy.log
+          grep -oE 'Current Version ID: .+' deploy.log | tail -1 | cut -d' ' -f4 > version_id.txt
+
+      - name: "Smoke: healthz"
+        run: |
+          ok=0
+          for _ in 1 2 3; do
+            if curl -sf https://mstar-inspector.42ch.dev/healthz >/dev/null; then
+              ok=1
+              break
+            fi
+            sleep 5
+          done
+          test "$ok" = 1
+
+      - name: "Smoke: cron registration"
+        run: 'grep -F "schedule: */15 * * * *" deploy.log'
+
+      - name: "Smoke: image digest"
+        run: |
+          bunx wrangler containers list --json \
+            | jq -r '.[] | select(.name == "mstar-inspector-sandbox") | .image' \
+            | grep -oE 'sha256:[0-9a-f]{64}' > image_digest.txt
+          test -s image_digest.txt
+          # 备源（首次实跑若 .name 与预期不符，以部署日志锚定行兜底）：
+          # grep -oE "registry\.cloudflare\.com/${CLOUDFLARE_ACCOUNT_ID}/mstar-inspector-sandbox@sha256:[0-9a-f]{64}" deploy.log
+
       # (T4) digest 写回 docs/deploy.md（git commit + push；paths-ignore 防递归）
