@@ -970,6 +970,18 @@ export function buildRunnerEnv(
 }
 
 /**
+ * Exec-env names that are configuration/paths, not credentials — the
+ * exact-redact skip list (qc1 S-3): the model chain (OMP_REVIEW_MODEL) and
+ * the two compile-time image paths. A future redaction-policy change
+ * (e.g. redacting the chain string) edits this single list.
+ */
+const RUNNER_EXEC_ENV_PASSTHROUGH_NAMES: readonly string[] = [
+  "OMP_REVIEW_MODEL",
+  "HARNESS_PLUGIN_ROOT",
+  "PI_CODING_AGENT_DIR",
+];
+
+/**
  * The ACTUAL secret values one review session used (SEC-01 exact-value
  * defense): every credential-shaped value the runner env carried — the App's
  * provider-key entries (BYOK keys incl. ARK_API_KEY, all injected from the
@@ -983,7 +995,7 @@ export function buildRunnerEnv(
 function sessionSecretValues(runnerEnv: Record<string, string>, token: string): string[] {
   const values: string[] = [token];
   for (const [name, value] of Object.entries(runnerEnv)) {
-    if (name === "OMP_REVIEW_MODEL" || name === "HARNESS_PLUGIN_ROOT" || name === "PI_CODING_AGENT_DIR") {
+    if (RUNNER_EXEC_ENV_PASSTHROUGH_NAMES.includes(name)) {
       continue; // configuration/paths, not credentials
     }
     if (value !== "") values.push(value);

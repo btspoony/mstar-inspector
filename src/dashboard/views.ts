@@ -950,7 +950,7 @@ export function appSettingsPage(
     <section class="enabled">
       <h2>Model chain</h2>
       <p>Comma-separated model selectors for this App&apos;s reviews — the deployment&apos;s global chain knob was retired; this App&apos;s chain is the only chain its reviews use.</p>
-      <p class="note">Saving an empty chain clears it — reviews then fail closed until the chain and the required provider keys are configured (the BYOK/chain status above is the fail-closed visibility entry).</p>
+      <p class="note">Saving an empty chain clears it — reviews then fail closed with <code>per-App config incomplete: app &lt;id&gt;: missing model chain</code> (or <code>provider &lt;id&gt; has no configured key</code>) until the chain and the required provider keys are configured — the BYOK/chain status above is the fail-closed visibility entry, and failing reviews record <code>stage='pipeline'</code> rows in the <code>review_failures</code> table.</p>
       <form method="post" action="${base}">
         <input type="hidden" name="op" value="save-chain">
         <label class="field">Model chain

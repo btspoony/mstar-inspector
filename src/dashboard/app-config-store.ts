@@ -693,7 +693,8 @@ export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | un
      * ≥1 selector), or clear it: `null` AND any blank chain (empty or
      * whitespace-only — the route's 空 = 清除 semantics, plan 15 alignment)
      * REMOVE the row (absent = unset; a chain-less App's reviews fail closed
-     * in the consumer — plan 24 Task 6; no deployment-level fallback exists).
+     * in the consumer with `per-App config incomplete: app <id>: missing model
+     * chain` — plan 24 Task 6; no deployment-level fallback exists).
      * A chain with content upserts verbatim, interior/trailing whitespace
      * included.
      */

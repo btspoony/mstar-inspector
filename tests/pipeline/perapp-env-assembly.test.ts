@@ -917,6 +917,44 @@ describe("custom provider env injection + runner input threading (plan 23 Task 3
     expect(serialized).not.toContain("sk-custom-fixture");
   });
 
+  test("chain referencing a custom provider id passes the fail-closed gate and injects CUSTOM_<ID>_API_KEY (qc3 F-001 — neededEnvName custom branch)", async () => {
+    reset();
+    const db = createMigratedTestD1();
+    const appX = await seedApp(db, "app-x");
+    // The chain references the custom provider id directly — the gate's
+    // neededEnvName third branch (neither a PROVIDERS allowlisted id nor an
+    // IN_IMAGE_BASE_PROVIDER_IDS member) resolves it to
+    // CUSTOM_MY_PROVIDER_API_KEY, the same env name buildRunnerEnv injects.
+    await configureApp(db, appX.id, "my-provider/model-1");
+    const store = createAppConfigStore(db, TEST_KEY);
+    await store.upsertCustomProvider(
+      appX.id,
+      {
+        provider_id: "my-provider",
+        base_url: "https://my-provider.example.com/v1",
+        api: "openai-completions",
+        model_ids: ["model-1"],
+      },
+      "sk-custom-fixture-AAA",
+    );
+    const consumer = createReviewConsumer(makeEnv({ DB: db as never }), testLog, testOverrides);
+
+    // The gate passes (the custom declaration supplies the key) and the review
+    // completes — the key reaches the runner env under the SAME env name the
+    // synthesized models.yml references (AL-23-1 loop).
+    await consumer(makeBatch(makePayload({ appRef: { appId: appX.id } })));
+
+    const env = runnerEnvs()[0]!;
+    expect(env.CUSTOM_MY_PROVIDER_API_KEY).toBe("sk-custom-fixture-AAA");
+    expect(env.OMP_REVIEW_MODEL).toBe("my-provider/model-1");
+    expect(appCalls).toEqual(["token", "post"]); // the review completed
+    // key_source: custom for the declaration (id + env name, never the key).
+    const customLines = keySourceLines().filter((l) => l.fields.key_source === "custom");
+    expect(customLines).toHaveLength(1);
+    expect(customLines[0]!.fields.provider).toBe("my-provider");
+    expect(customLines[0]!.msg).toContain("CUSTOM_MY_PROVIDER_API_KEY");
+  });
+
   test("custom providers: keys never reach logs — key_source: custom lines carry ids and env names only", async () => {
     reset();
     const db = createMigratedTestD1();

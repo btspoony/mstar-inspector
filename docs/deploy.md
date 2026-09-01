@@ -447,8 +447,10 @@ Evidence: iteration spec `.mstar/iterations/v0.7/specs/m3-production-grade.md`
 It is deliberately NOT activated. Reasons (AL-4):
 
 - The host inventory has no SSOT in this repo: the 18 built-in provider API
-  hosts resolve in omp's registry (outside the repo); only the ark custom
-  host is pinned in-repo (`sandbox-image/omp-models.yml`).
+  hosts resolve in omp's runtime registry (outside the repo — the omp SDK
+  registry, NOT the Worker-side `PROVIDERS` allowlist, which is a separate
+  19-entry list since plan 24 Task 6 added `ark`); only the ark custom host
+  is pinned in-repo (`sandbox-image/omp-models.yml`).
 - Per-App BYOK keeps the provider set open — the host set is a product
   surface, not a constant.
 - A missing host fails CLOSED (520 → review failure → retry → DLQ) — a worse
@@ -469,9 +471,10 @@ controls are installed (the Dockerfile carries the documentation block only).
   - `github.com` / `api.github.com` — git clone/fetch of the PR head (token
     via scoped extraheader exec env) and gh CLI.
   - Provider API hosts by active provider config — the 18 built-in provider
-    hosts resolve in omp's registry (omp SDK 18.0.4, outside this repo); the
-    ark custom host `ark.cn-beijing.volces.com` is pinned in
-    `sandbox-image/omp-models.yml`.
+    hosts resolve in omp's runtime registry (omp SDK 18.0.4, outside this
+    repo — NOT the Worker-side `PROVIDERS` allowlist, which is a separate
+    19-entry list since plan 24 Task 6 added `ark`); the ark custom host
+    `ark.cn-beijing.volces.com` is pinned in `sandbox-image/omp-models.yml`.
 - **Runner tool whitelist:** the in-image review session restricts agent
   tools to read-only `read` / `grep` / `glob`
   (`src/review/runtime-omp.ts` `REVIEW_TOOL_NAMES`) — no write/exec tool

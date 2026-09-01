@@ -1027,6 +1027,9 @@ describe("app-config store (createAppConfigStore) — custom providers (plan 23 
 // --- duplication locks (Q2: dashboard may not import pipeline/review) ---
 
 describe("duplication locks", () => {
+  // PROVIDER_IDS — sync with PROVIDERS in src/pipeline/providers.ts. Drift
+  // breaks the locked 19-id set below (a future provider PR must update BOTH
+  // the pipeline allowlist and this dashboard mirror).
   test("PROVIDER_IDS mirrors the pipeline PROVIDERS key sequence exactly", () => {
     expect([...PROVIDER_IDS]).toEqual(Object.keys(PROVIDERS));
     // 19 ids: the 18 built-in omp providers + `ark` (plan 24 Task 6 /
