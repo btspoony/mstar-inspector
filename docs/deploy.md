@@ -89,14 +89,34 @@ Worker secrets are managed as **GitHub Secrets** — the Deploy workflow
 injects them into the Worker via `wrangler secret bulk` on every deploy
 (no manual `wrangler secret put` on the primary path). `.dev.vars` is for
 local `wrangler dev` only; never put secrets in git (full per-key notes in
-`.env.example`):
+`.env.example`). GitHub does not allow secret names starting with `GITHUB_`
+(that prefix is reserved for GitHub's own env), so the **GitHub-side** names
+drop the prefix, while the **Worker-side** names (the keys `wrangler secret
+bulk` writes, and what `src/worker/env.ts` reads) stay unchanged:
 
-| Name | Required | Purpose |
-|---|---|---|
-| `GITHUB_OAUTH_CLIENT_ID` / `GITHUB_OAUTH_CLIENT_SECRET` | dashboard | user OAuth login (distinct from the review App) |
-| `DASHBOARD_SESSION_SECRET` | dashboard | session-cookie HMAC key |
-| `DASHBOARD_ENCRYPTION_KEY` | multi-App | AES-256-GCM master key for D1-stored App credentials |
-| `ALERT_WEBHOOK_URL` | no — **NEW (plan 19)** | ops sweep alert webhook; unset = log-only alerting (§ Ops config) |
+| GitHub secret name (create in staging env) | Worker secret name (bulk key — unchanged) | Required | Purpose |
+|---|---|---|---|
+| `OAUTH_CLIENT_ID` | `GITHUB_OAUTH_CLIENT_ID` | dashboard | user OAuth login (distinct from the review App) |
+| `OAUTH_CLIENT_SECRET` | `GITHUB_OAUTH_CLIENT_SECRET` | dashboard | user OAuth login App secret |
+| `DASHBOARD_SESSION_SECRET` | `DASHBOARD_SESSION_SECRET` | dashboard | session-cookie HMAC key |
+| `DASHBOARD_ENCRYPTION_KEY` | `DASHBOARD_ENCRYPTION_KEY` | multi-App | AES-256-GCM master key for D1-stored App credentials |
+| `ALERT_WEBHOOK_URL` | `ALERT_WEBHOOK_URL` | no — **NEW (plan 19)** | ops sweep alert webhook; unset = log-only alerting (§ Ops config) |
+
+The Deploy workflow maps `secrets.OAUTH_CLIENT_ID` →
+`env.OAUTH_CLIENT_ID` → `GITHUB_OAUTH_CLIENT_ID` in the bulk payload (same
+for `OAUTH_CLIENT_SECRET` → `GITHUB_OAUTH_CLIENT_SECRET`); the values reach
+the Worker under the unchanged `GITHUB_` names.
+
+**Environment scoping** — the Deploy workflow's `deploy` job targets the
+**`staging` environment** (`environment: staging` on the job), so secrets
+resolved for it are the **staging environment** secrets (environment-level
+secrets override repository-level ones). Configure them under
+Settings → Environments → `staging` → **Secrets** (and
+Settings → Environments → `staging` → **Variables** — `CLOUDFLARE_ACCOUNT_ID`
+is a good environment variable candidate, though it is also read from a repo
+variable / secret per the CI-credentials note below). Repository-level
+secrets keep working as the fallback for any name not set at the environment
+level.
 
 The four required secrets are asserted non-empty in the workflow (a missing
 value fails the run red — `wrangler secret bulk` treats a JSON `null` as a
@@ -369,8 +389,8 @@ either key for the other duty (rotation stays decoupled).
 
 ### 2. Register an App from the dashboard
 
-Prerequisites: dashboard OAuth (`GITHUB_OAUTH_CLIENT_ID` /
-`GITHUB_OAUTH_CLIENT_SECRET`), `DASHBOARD_SESSION_SECRET`, an admin login
+Prerequisites: dashboard OAuth (`OAUTH_CLIENT_ID` /
+`OAUTH_CLIENT_SECRET`), `DASHBOARD_SESSION_SECRET`, an admin login
 (`ADMIN_LOGINS` bootstrap or the first-login fallback),
 `DASHBOARD_ENCRYPTION_KEY` set, and D1 migrations 0001–0011 applied.
 

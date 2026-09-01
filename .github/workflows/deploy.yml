@@ -37,11 +37,12 @@ jobs:
     if: github.ref == 'refs/heads/main'
     permissions: { contents: write }
     runs-on: ubuntu-latest
+    environment: staging
     env:
       CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
       CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-      GITHUB_OAUTH_CLIENT_ID: ${{ secrets.GITHUB_OAUTH_CLIENT_ID }}
-      GITHUB_OAUTH_CLIENT_SECRET: ${{ secrets.GITHUB_OAUTH_CLIENT_SECRET }}
+      OAUTH_CLIENT_ID: ${{ secrets.OAUTH_CLIENT_ID }}
+      OAUTH_CLIENT_SECRET: ${{ secrets.OAUTH_CLIENT_SECRET }}
       DASHBOARD_SESSION_SECRET: ${{ secrets.DASHBOARD_SESSION_SECRET }}
       DASHBOARD_ENCRYPTION_KEY: ${{ secrets.DASHBOARD_ENCRYPTION_KEY }}
       ALERT_WEBHOOK_URL: ${{ secrets.ALERT_WEBHOOK_URL }}
@@ -67,10 +68,10 @@ jobs:
 
       - name: Write required secrets
         run: |
-          : "${GITHUB_OAUTH_CLIENT_ID:?required}" "${GITHUB_OAUTH_CLIENT_SECRET:?required}" \
+          : "${OAUTH_CLIENT_ID:?required}" "${OAUTH_CLIENT_SECRET:?required}" \
             "${DASHBOARD_SESSION_SECRET:?required}" "${DASHBOARD_ENCRYPTION_KEY:?required}"
-          jq -n '{GITHUB_OAUTH_CLIENT_ID: env.GITHUB_OAUTH_CLIENT_ID,
-                  GITHUB_OAUTH_CLIENT_SECRET: env.GITHUB_OAUTH_CLIENT_SECRET,
+          jq -n '{GITHUB_OAUTH_CLIENT_ID: env.OAUTH_CLIENT_ID,
+                  GITHUB_OAUTH_CLIENT_SECRET: env.OAUTH_CLIENT_SECRET,
                   DASHBOARD_SESSION_SECRET: env.DASHBOARD_SESSION_SECRET,
                   DASHBOARD_ENCRYPTION_KEY: env.DASHBOARD_ENCRYPTION_KEY}' \
             | bunx wrangler secret bulk

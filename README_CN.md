@@ -48,8 +48,11 @@ GitHub webhook → POST /webhook/:appSlug（验签 + 分类）→ Queue → Cons
    # 本地生成值，然后添加为 GitHub Secrets：
    openssl rand -base64 32    # DASHBOARD_ENCRYPTION_KEY —— 加密 D1 中的 per-App 凭据
    openssl rand -base64 32    # DASHBOARD_SESSION_SECRET —— 会话 cookie HMAC key
-   # GITHUB_OAUTH_CLIENT_ID / GITHUB_OAUTH_CLIENT_SECRET —— 一个 GitHub OAuth App，
+   # OAUTH_CLIENT_ID / OAUTH_CLIENT_SECRET —— 一个 GitHub OAuth App，
    # 回调地址为 {origin}/dashboard/oauth/callback
+   # （GitHub 保留 GITHUB_ 前缀给自身，secret 名不得以它开头，故 GitHub 侧
+   #   名去掉前缀；Deploy workflow 的 bulk 映射仍以 GITHUB_OAUTH_CLIENT_ID /
+   #   GITHUB_OAUTH_CLIENT_SECRET 写入 Worker）
    ```
 
 3. **登录并注册 GitHub App** —— 访问 `https://<your-worker>/dashboard`，用 GitHub 登录，走 **Register App**

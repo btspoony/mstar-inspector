@@ -48,8 +48,11 @@ GitHub webhook → POST /webhook/:appSlug (verify + classify) → Queue → Cons
    # generate values locally, then add them as GitHub Secrets:
    openssl rand -base64 32    # DASHBOARD_ENCRYPTION_KEY — encrypts per-App credentials in D1
    openssl rand -base64 32    # DASHBOARD_SESSION_SECRET — session-cookie HMAC key
-   # GITHUB_OAUTH_CLIENT_ID / GITHUB_OAUTH_CLIENT_SECRET — a GitHub OAuth App
+   # OAUTH_CLIENT_ID / OAUTH_CLIENT_SECRET — a GitHub OAuth App
    # whose callback is {origin}/dashboard/oauth/callback
+   # (GitHub forbids the GITHUB_ prefix on secret names, so the GitHub-side
+   #  names drop it; the Worker still receives GITHUB_OAUTH_CLIENT_ID /
+   #  GITHUB_OAUTH_CLIENT_SECRET via the Deploy workflow's bulk mapping)
    ```
 
 3. **Sign in and register a GitHub App** — visit `https://<your-worker>/dashboard`, sign in with GitHub, and follow the **Register App** manifest flow. It creates the GitHub App on your account with a per-App webhook URL of the form `{origin}/webhook/<slug>`, stores the PEM and webhook secret encrypted in D1, and shows you the exact webhook URL to set.
