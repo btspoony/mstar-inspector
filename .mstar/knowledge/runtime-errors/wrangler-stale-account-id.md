@@ -50,7 +50,7 @@ env -u CLOUDFLARE_ACCOUNT_ID npx wrangler d1 execute DB --remote --command "SELE
 # or: unset CLOUDFLARE_ACCOUNT_ID
 ```
 
-Then fix the source: remove `CLOUDFLARE_ACCOUNT_ID` from the shell profile / `.env*` files that export it, or set it to the account that owns the live Worker (the stale value `9dee30da…` in the example belonged to a previous org).
+Then fix the source: remove `CLOUDFLARE_ACCOUNT_ID` from the shell profile / `.env*` files that export it, or set it to the owning account (this repo's live Worker lives under the Bohao account, `f68fcd78…`; the stale value `9dee30da…` belonged to a previous org).
 
 ## Why This Works
 

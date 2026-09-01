@@ -15,8 +15,8 @@
  *
  * Usage: bun run scripts/sandbox-smoke.ts
  * Env:  SMOKE_APP_ID, SMOKE_PRIVATE_KEY (inline PEM or path),
- *       INSTALLATION_ID, GH_REPO (owner/repo), GH_PR (PR number),
- *       SMOKE_ROUTE (default /smoke), ARK_API_KEY (required
+ *       INSTALLATION_ID (default 156621513), GH_REPO (default btspoony/todo-bots),
+ *       GH_PR (default 1), SMOKE_ROUTE (default /smoke), ARK_API_KEY (required
  *       when SMOKE_ROUTE=/smoke-review).
  *
  * The token and model key are held only in this process's memory and passed to
@@ -37,16 +37,12 @@ if (!SMOKE_APP_ID || !SMOKE_PRIVATE_KEY) {
   process.exit(2);
 }
 
-const INSTALLATION_ID = Number(Bun.env.INSTALLATION_ID);
-const GH_REPO = Bun.env.GH_REPO;
-const GH_PR = Bun.env.GH_PR;
+const INSTALLATION_ID = Number(Bun.env.INSTALLATION_ID ?? "156621513");
+const GH_REPO = Bun.env.GH_REPO ?? "btspoony/todo-bots";
+const GH_PR = Bun.env.GH_PR ?? "1";
 const SMOKE_ROUTE = Bun.env.SMOKE_ROUTE ?? "/smoke";
 const ARK_API_KEY = Bun.env.ARK_API_KEY;
 
-if (!INSTALLATION_ID || !GH_REPO || !GH_PR) {
-  console.error("sandbox-smoke: INSTALLATION_ID, GH_REPO, and GH_PR env vars are required");
-  process.exit(2);
-}
 if (SMOKE_ROUTE === "/smoke-review" && !ARK_API_KEY) {
   console.error("sandbox-smoke: ARK_API_KEY env var is required for SMOKE_ROUTE=/smoke-review");
   process.exit(2);
@@ -87,7 +83,7 @@ const token = await mintInstallationToken();
 console.log("TOKEN_MINTED=yes");
 
 const port = 8791;
-const varFlags = [`GH_TOKEN:${token}`, `GH_REPO:${GH_REPO}`, `GH_PR:${GH_PR}`];
+const varFlags = [`GH_TOKEN:${token}`];
 if (ARK_API_KEY) {
   varFlags.push(`ARK_API_KEY:${ARK_API_KEY}`);
 }
