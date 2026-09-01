@@ -94,15 +94,15 @@ local `wrangler dev` only; never put secrets in git (full per-key notes in
 drop the prefix, while the **Worker-side** names (the keys `wrangler secret
 bulk` writes, and what `src/worker/env.ts` reads) stay unchanged:
 
-| GitHub secret name (create in staging env) | Worker secret name (bulk key — unchanged) | Required | Purpose |
-|---|---|---|---|
-| `OAUTH_CLIENT_ID` | `GITHUB_OAUTH_CLIENT_ID` | dashboard | user OAuth login (distinct from the review App) |
-| `OAUTH_CLIENT_SECRET` | `GITHUB_OAUTH_CLIENT_SECRET` | dashboard | user OAuth login App secret |
-| `DASHBOARD_SESSION_SECRET` | `DASHBOARD_SESSION_SECRET` | dashboard | session-cookie HMAC key |
-| `DASHBOARD_ENCRYPTION_KEY` | `DASHBOARD_ENCRYPTION_KEY` | multi-App | AES-256-GCM master key for D1-stored App credentials |
-| `ALERT_WEBHOOK_URL` | `ALERT_WEBHOOK_URL` | no — **NEW (plan 19)** | ops sweep alert webhook; unset = log-only alerting (§ Ops config) |
+| GitHub name (create in staging env) | Worker secret name (bulk key — unchanged) | Kind | Required | Purpose |
+|---|---|---|---|---|
+| `OAUTH_CLIENT_ID` | `GITHUB_OAUTH_CLIENT_ID` | **variable** (not sensitive) | dashboard | user OAuth login (distinct from the review App) |
+| `OAUTH_CLIENT_SECRET` | `GITHUB_OAUTH_CLIENT_SECRET` | secret | dashboard | user OAuth login App secret |
+| `DASHBOARD_SESSION_SECRET` | `DASHBOARD_SESSION_SECRET` | secret | dashboard | session-cookie HMAC key |
+| `DASHBOARD_ENCRYPTION_KEY` | `DASHBOARD_ENCRYPTION_KEY` | secret | multi-App | AES-256-GCM master key for D1-stored App credentials |
+| `ALERT_WEBHOOK_URL` | `ALERT_WEBHOOK_URL` | secret | no — **NEW (plan 19)** | ops sweep alert webhook; unset = log-only alerting (§ Ops config) |
 
-The Deploy workflow maps `secrets.OAUTH_CLIENT_ID` →
+The Deploy workflow maps `vars.OAUTH_CLIENT_ID` →
 `env.OAUTH_CLIENT_ID` → `GITHUB_OAUTH_CLIENT_ID` in the bulk payload (same
 for `OAUTH_CLIENT_SECRET` → `GITHUB_OAUTH_CLIENT_SECRET`); the values reach
 the Worker under the unchanged `GITHUB_` names.
@@ -110,7 +110,8 @@ the Worker under the unchanged `GITHUB_` names.
 **Environment scoping** — the Deploy workflow's `deploy` job targets the
 **`staging` environment** (`environment: staging` on the job), so secrets
 resolved for it are the **staging environment** secrets (environment-level
-secrets override repository-level ones). Configure them under
+secrets override repository-level ones). `OAUTH_CLIENT_ID` is a **variable**
+(environment-level variables override repository-level ones). Configure them under
 Settings → Environments → `staging` → **Secrets** (and
 Settings → Environments → `staging` → **Variables** — `CLOUDFLARE_ACCOUNT_ID`
 is a good environment variable candidate, though it is also read from a repo

@@ -42,17 +42,18 @@ GitHub webhook → POST /webhook/:appSlug（验签 + 分类）→ Queue → Cons
    wrangler deploy        # 应用 D1 迁移并部署；细节见 docs/deploy.md
    ```
 
-2. **设置 dashboard 密钥**（四个；审查凭据不放在 Worker 层）—— 作为 **GitHub Secrets**（Settings → Secrets and variables → Actions）配置，Deploy workflow 在每次部署时注入 Worker：
+2. **设置 dashboard 密钥**（四个；审查凭据不放在 Worker 层）—— 在 **staging environment**（Settings → Environments → `staging` → Secrets）配置，Deploy workflow 在每次部署时注入 Worker：
 
    ```bash
-   # 本地生成值，然后添加为 GitHub Secrets：
+   # 本地生成值，然后添加到 staging environment：
    openssl rand -base64 32    # DASHBOARD_ENCRYPTION_KEY —— 加密 D1 中的 per-App 凭据
    openssl rand -base64 32    # DASHBOARD_SESSION_SECRET —— 会话 cookie HMAC key
    # OAUTH_CLIENT_ID / OAUTH_CLIENT_SECRET —— 一个 GitHub OAuth App，
    # 回调地址为 {origin}/dashboard/oauth/callback
    # （GitHub 保留 GITHUB_ 前缀给自身，secret 名不得以它开头，故 GitHub 侧
    #   名去掉前缀；Deploy workflow 的 bulk 映射仍以 GITHUB_OAUTH_CLIENT_ID /
-   #   GITHUB_OAUTH_CLIENT_SECRET 写入 Worker）
+   #   GITHUB_OAUTH_CLIENT_SECRET 写入 Worker。
+   #   OAUTH_CLIENT_ID 是 variable —— client id 非敏感；OAUTH_CLIENT_SECRET 是 secret）
    ```
 
 3. **登录并注册 GitHub App** —— 访问 `https://<your-worker>/dashboard`，用 GitHub 登录，走 **Register App**
