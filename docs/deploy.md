@@ -41,7 +41,7 @@ wrangler d1 migrations apply mstar-inspector-db            # local dev
 | `0002_mstar_review_v1` | mstar.review/v1 envelope columns (era lock: `envelope IS NOT NULL` ⇔ v1 row) |
 | `0003_dashboard_users` | dashboard membership |
 | `0004_github_apps` | multi-App registry (secretbox-encrypted App credentials) |
-| `0005_reviews_app_id` | `reviews.app_id` attribution (NULL = legacy global App) |
+| `0005_reviews_app_id` | `reviews.app_id` attribution (NULL = historical rows from the retired global App — archaeology: the legacy env-App face was deleted in plan 24) |
 | `0006_app_provider_config` | per-App BYOK provider keys + model chain |
 | `0007_reviews_app_id_index` | index on `reviews.app_id` |
 | `0008_github_apps_ops` | per-App ops columns (`review_enabled` pause switch) |
@@ -54,6 +54,7 @@ wrangler d1 migrations apply mstar-inspector-db            # local dev
 
 Migrations are **forward-only** (0002 precedent): never hand-edit an applied
 migration; add the next file.
+Note: migration 0006's `app_model_config` comment ("NULL / absent row = unset → falls back to the global OMP_REVIEW_MODEL") is superseded by plan 24 AL-24-5 — chain-less Apps fail closed, no global chain since v0.9.
 
 ### Secrets and vars inventory
 
@@ -62,15 +63,18 @@ never in git (full per-key notes in `.env.example`):
 
 | Name | Required | Purpose |
 |---|---|---|
-| `APP_ID` | yes | GitHub App ID (numeric) |
-| `PRIVATE_KEY` | yes | GitHub App private key PEM (PKCS#1 or PKCS#8) |
-| `WEBHOOK_SECRET` | yes | webhook HMAC secret (fail-closed when empty/`"development"`) |
 | `GITHUB_OAUTH_CLIENT_ID` / `GITHUB_OAUTH_CLIENT_SECRET` | dashboard | user OAuth login (distinct from the review App) |
 | `DASHBOARD_SESSION_SECRET` | dashboard | session-cookie HMAC key |
 | `DASHBOARD_ENCRYPTION_KEY` | multi-App | AES-256-GCM master key for D1-stored App credentials |
-| `OMP_MODEL_KEY` | review | ark-plan provider key; forwarded into the container as `ARK_API_KEY` |
 | `ALERT_WEBHOOK_URL` | no — **NEW (plan 19)** | ops sweep alert webhook; unset = log-only alerting (§ Ops config) |
-| 18 built-in provider keys | no | fallback provider auth — `bun run keys` sets them on the Worker (see README § Setting provider keys) |
+
+Provider API keys and the review model chain are **not** Worker env — they
+live per App in D1 (`app_provider_keys` / `app_model_config`, migration
+0006), configured on each App's dashboard Settings page and injected into the
+review container from the App's config only (AL-24-5 / plan 24 Task 6: the
+`OMP_MODEL_KEY` / `OMP_REVIEW_MODEL` / `bun run keys` Worker-secret surface
+was retired with the global fallback — an App missing its chain or a chain
+provider's key fails its reviews closed).
 
 Plain vars — `wrangler.jsonc` `vars` or the dashboard's Worker variable
 settings; redeploy to change:
@@ -79,7 +83,6 @@ settings; redeploy to change:
 |---|---|---|
 | `REVIEW_ENABLED` | **off** | fail-closed kill-switch; exactly `"true"` enables reviews |
 | `ADMIN_LOGINS` | unset | comma-separated GitHub logins bootstrapped as dashboard admin |
-| `OMP_REVIEW_MODEL` | unset | global model chain override (first selector = primary; unset = in-image default, § Image pins) |
 
 GitHub App setup (permissions, webhook events, installation):
 `.mstar/iterations/v0.2/guides/github-app-runbook.md`.
@@ -164,14 +167,24 @@ smoke → record the digest.
 
 1. `bun install`
 2. `bun run typecheck && bun test` — both must exit 0.
+
+### Sandbox smoke
+
 3. Local sandbox smoke — builds the image and exercises the real sandbox path
    via `wrangler dev` (config `wrangler.smoke.jsonc`, entry
-   `src/pipeline/smoke-entry.ts`; requires `APP_ID` + `PRIVATE_KEY` in the
-   shell env for the installation-token mint):
+   `src/pipeline/smoke-entry.ts`). The orchestrator reads **shell env only**
+   (never Worker secrets, never D1): `SMOKE_APP_ID` + `SMOKE_PRIVATE_KEY`
+   (inline PEM or `~`-relative/absolute path — the local orchestrator's
+   dual form, resolved by scripts/sandbox-smoke.ts) for the
+   installation-token mint, plus the optional
+   `INSTALLATION_ID` (default 156621513), `GH_REPO` (default
+   btspoony/todo-bots), `GH_PR` (default 1), `SMOKE_ROUTE` (default `/smoke`),
+   and `ARK_API_KEY` (required when `SMOKE_ROUTE=/smoke-review`):
    ```bash
-   bun run scripts/sandbox-smoke.ts
+   SMOKE_APP_ID=… SMOKE_PRIVATE_KEY=… bun run scripts/sandbox-smoke.ts
    # /smoke: getSandbox → exec gh pr diff → destroy
-   SMOKE_ROUTE=/smoke-review ARK_API_KEY=… bun run scripts/sandbox-smoke.ts
+   SMOKE_APP_ID=… SMOKE_PRIVATE_KEY=… SMOKE_ROUTE=/smoke-review ARK_API_KEY=… \
+     bun run scripts/sandbox-smoke.ts
    # /smoke-review: full in-image runner (clone + omp review + parse) → destroy
    ```
 4. `wrangler deploy` — deploys the Worker (webhook face + queue consumer +
@@ -186,6 +199,26 @@ smoke → record the digest.
    Compare the live Worker version and the container image digest with the
    record in § Image pins and digest record; update the record on EVERY
    deploy (a stale record makes the "which image is live" audit wrong).
+
+### Sandbox image — U-001 synthesis verification (plan 25 Task 2)
+
+The image ships `/opt/verify-synthesis.sh` (repo `sandbox-image/verify-synthesis.sh`,
+COPY'd into the digest — plan 25 AL-25-3). It replays the U-001 evidence on
+ANY image build: custom-provider models.yml synthesis through the runner's
+real `writePerReviewModelsYaml` (keyless declaration `u001-verify` /
+`https://example.invalid/v1` / `verify-model`), omp SDK `ModelRegistry`
+resolution of the synthesized file, and a minimal `createAgentSession` on the
+synthesized `agentDir`. Load-level only — no provider call, no network, zero
+secrets; idempotent (`/tmp/omp-agent-<uuid>` only, cleaned up). Not a build
+gate; run manually after a build/deploy:
+
+```bash
+docker run --rm --entrypoint /opt/verify-synthesis.sh <image>
+# expect U001_VERIFY=pass and exit 0 (KEY=VALUE evidence lines per layer)
+# --entrypoint is required — the sandbox default entrypoint is long-lived
+# (it keeps the server alive after the user command) and would never
+# surface this one-shot script's exit code.
+```
 
 ## Post-deploy smoke
 
@@ -241,7 +274,7 @@ missing, non-base64, or wrong-length value throws `SecretboxKeyError` on
 first use). Encryption-dependent dashboard routes (manifest commit, App
 settings) fail **closed with 5xx** when it is missing or malformed — the
 hold is kept and nothing is stored, so fixing the env makes the retry
-succeed. The legacy env-secret App path is unaffected.
+succeed.
 
 ```bash
 # Generate: base64 of exactly 32 random bytes
@@ -251,11 +284,10 @@ openssl rand -base64 32
 wrangler secret put DASHBOARD_ENCRYPTION_KEY
 ```
 
-There is no `bun run keys` entry for this key — that script manages the 18
-built-in provider keys only (`scripts/provider-keys.ts`); the encryption key
-is a plain `wrangler secret put`. It is independent of
-`DASHBOARD_SESSION_SECRET` (session HMAC) — never reuse either key for the
-other duty (rotation stays decoupled).
+This key is a plain `wrangler secret put` (no key script — the
+`bun run keys` worker-secret face was retired in plan 24; provider keys are
+per-App now). It is independent of `DASHBOARD_SESSION_SECRET` (session HMAC)
+— never reuse either key for the other duty (rotation stays decoupled).
 
 ### 2. Register an App from the dashboard
 
@@ -302,8 +334,7 @@ Prerequisites: dashboard OAuth (`GITHUB_OAUTH_CLIENT_ID` /
 
 A freshly manifest-registered App needs no repoint — the flow already set
 the per-App webhook URL on GitHub. Repointing applies when an App was
-created with a different URL (e.g. the legacy `/webhook` face) or the
-Worker host changed:
+created with a different URL or the Worker host changed:
 
 1. Open the GitHub App settings page
    (`https://github.com/settings/apps/<app-name>`).
@@ -317,15 +348,15 @@ or when deliveries look dead):
 | Check | Where | Healthy state |
 |---|---|---|
 | Kill-switch | Worker env var `REVIEW_ENABLED` | `"true"` — check FIRST: the kill-switch return precedes classification and delivery recording, so a zero-rows state can mean kill-switch rather than GitHub-side delivery death |
-| Webhook URL | GitHub App settings → Webhook | `https://<worker-host>/webhook/<slug>` — the per-App route, NOT the legacy `/webhook` |
+| Webhook URL | GitHub App settings → Webhook | `https://<worker-host>/webhook/<slug>` — the per-App route |
 | Webhook secret | GitHub App settings → Webhook | A secret is set (masked). The manifest flow's GitHub-generated secret is stored encrypted in the dashboard; changing it on GitHub without updating the dashboard breaks signature verification → `rejected` (401) deliveries |
 | Active | GitHub App settings → Webhook | The **Active** checkbox is on and the App is not suspended; the dashboard row's status is `active` (a disabled row 404s the per-App route) |
 | Delivery health | Dashboard Apps list health column + settings recent-deliveries panel | Recent rows show `ok` / `ignored` / `paused` outcomes; NO `N rejected in 24h` badge; the latest row's relative time is recent |
 
 The dashboard face is the ground truth: every VERIFIED per-App delivery
 lands a `webhook_deliveries` row (best-effort, `src/worker/index.ts` per-App
-face — `ok` / `paused` / `ignored` / `rejected`; the legacy `/webhook` face
-records nothing by design, AL-20-1). A `rejected` row with 401 = signature
+face — `ok` / `paused` / `ignored` / `rejected`; the retired legacy face
+recorded nothing by design, AL-20-1 — archaeology). A `rejected` row with 401 = signature
 mismatch (secret drift); 400 = malformed payload; 500 = the App's stored
 secret is missing/empty/default. Pre-classify failures (unknown/disabled
 slug, decrypt failure) record NO row — they surface in the Worker logs, not
@@ -337,9 +368,15 @@ first, per the checklist above).
 
 The R1 pin proves the per-App model configuration reaches the review and is
 recorded. `reviews.model` records the **effective BASE chain head** — the
-first selector of the App's stored model chain, falling back to
-`OMP_REVIEW_MODEL`, then NULL = the in-image default
-(`src/pipeline/consumer.ts` `effectiveModelChain` + `chainHeadSelector`).
+first selector of the App's stored model chain. AL-24-5 (plan 24 Task 6):
+there is no deployment-level chain to fall back to — an App with no chain
+fails its reviews closed (structured `review_failures` row, `stage=pipeline`,
+retry → DLQ), so a successful review ALWAYS has a non-NULL `model` (NULL
+survives only on pre-plan-24 historical rows — AL-24-4; see
+`src/pipeline/consumer.ts` `assertAppConfigComplete`/`effectiveModelChain` +
+`chainHeadSelector`). The same gate checks every per-role override selector
+chain: an override referencing a provider with no configured key fails
+closed the same way (Bugbot 7aaf18f4).
 Per-role overrides (`app_model_roles`, migration 0009) are deliberately NOT
 column-reflected — pin those with the completed review + `wrangler tail`
 runner evidence, not the column.
@@ -372,14 +409,10 @@ runner evidence, not the column.
 
 ### 5. Rollback (multi-App)
 
-- **Webhook repoint back** — point the GitHub App's Webhook URL back to the
-  legacy face `https://<worker-host>/webhook` (verified by the global
-  `WEBHOOK_SECRET` env secret). The legacy face keeps reviewing with the
-  deployment-level App; it records no `webhook_deliveries` rows (AL-20-1)
-  and has no dashboard consumer.
-- **Worker rollback** — `wrangler rollback` (or check out the previous
-  commit and `wrangler deploy`); restores Worker code + cron triggers +
-  consumer config. The container image follows the checked-out Dockerfile.
+Rollback is `wrangler rollback` (see § Rollback below) — there is no legacy
+face to repoint to; the per-App webhook URL on GitHub is unchanged by a
+Worker rollback.
+
 - **D1 is forward-only** — never reverse migration 0011 on rollback; new
   code tolerates the prior schema (0002 precedent), roll back code only.
 - **Secrets untouched** — rollback does not remove
@@ -417,8 +450,10 @@ Evidence: iteration spec `.mstar/iterations/v0.7/specs/m3-production-grade.md`
 It is deliberately NOT activated. Reasons (AL-4):
 
 - The host inventory has no SSOT in this repo: the 18 built-in provider API
-  hosts resolve in omp's registry (outside the repo); only the ark custom
-  host is pinned in-repo (`sandbox-image/omp-models.yml`).
+  hosts resolve in omp's runtime registry (outside the repo — the omp SDK
+  registry, NOT the Worker-side `PROVIDERS` allowlist, which is a separate
+  19-entry list since plan 24 Task 6 added `ark`); only the ark custom host
+  is pinned in-repo (`sandbox-image/omp-models.yml`).
 - Per-App BYOK keeps the provider set open — the host set is a product
   surface, not a constant.
 - A missing host fails CLOSED (520 → review failure → retry → DLQ) — a worse
@@ -439,9 +474,10 @@ controls are installed (the Dockerfile carries the documentation block only).
   - `github.com` / `api.github.com` — git clone/fetch of the PR head (token
     via scoped extraheader exec env) and gh CLI.
   - Provider API hosts by active provider config — the 18 built-in provider
-    hosts resolve in omp's registry (omp SDK 18.0.4, outside this repo); the
-    ark custom host `ark.cn-beijing.volces.com` is pinned in
-    `sandbox-image/omp-models.yml`.
+    hosts resolve in omp's runtime registry (omp SDK 18.0.4, outside this
+    repo — NOT the Worker-side `PROVIDERS` allowlist, which is a separate
+    19-entry list since plan 24 Task 6 added `ark`); the ark custom host
+    `ark.cn-beijing.volces.com` is pinned in `sandbox-image/omp-models.yml`.
 - **Runner tool whitelist:** the in-image review session restricts agent
   tools to read-only `read` / `grep` / `glob`
   (`src/review/runtime-omp.ts` `REVIEW_TOOL_NAMES`) — no write/exec tool
@@ -452,23 +488,26 @@ controls are installed (the Dockerfile carries the documentation block only).
 
 ## Image pins and digest record
 
-Four pins — re-verified this iteration, **no bump** (plan 19 constraint;
-upgrading any pin is a future iteration's explicit decision):
+Four pins — mstar-harness bumped to **3.5.1** this iteration (plan 25 Task 1,
+the explicit upgrade decision); base image / Bun / gh re-verified, no bump:
 
 | Pin | Value | Where |
 |---|---|---|
 | base image | `docker.io/cloudflare/sandbox:0.12.8` | `sandbox-image/Dockerfile` FROM |
 | Bun | `1.4.0` | `sandbox-image/Dockerfile` |
 | gh CLI | `2.98.0` | `sandbox-image/Dockerfile` |
-| mstar-harness | `f1b60df0b3b2e29b9a904edb4077e52cf6d7ca66` (3.5.0) | `sandbox-image/Dockerfile` |
+| mstar-harness | `bde437075aeefd4cdb4e87060c6c44149968c3b0` (3.5.1) | `sandbox-image/Dockerfile` |
 
 **In-image DEFAULT model selector: `ark-plan/deepseek-v4-flash`** (pins:
 `src/review/runtime-omp.ts` `DEFAULT_MODEL_PATTERN` +
 `sandbox-image/omp-models.yml`). This line is the record for architect
-verdict AL-2: when neither the App's `modelChain` nor `OMP_REVIEW_MODEL` is
-set, the runner falls back to this selector and the Worker records
-`reviews.model = NULL` rather than duplicating the constant — audits resolve
-NULL against THIS line.
+verdict AL-2: with the zero-global-fallback cutover (AL-24-5 / plan 24 Task
+6) the App's `modelChain` is the only chain source — a chain-less App is
+fail-closed by the consumer and the runner's default is reachable only via a
+direct/manual in-image runner call (the in-image scaffold, not the Worker
+path). On the production path the Worker never records NULL (the column
+stays nullable for historical rows, AL-24-4); local manual runs resolve the
+in-image default against THIS line.
 
 Deployed image record (executed plan 19 T3, 2026-08-31 UTC):
 

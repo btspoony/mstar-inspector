@@ -1,7 +1,7 @@
 ---
 module: dashboard / multi-App platform (B4+B5+B2 contract)
 date: 2026-08-29
-last_updated: 2026-08-30
+last_updated: 2026-09-01
 problem_type: best_practice
 category: best-practices
 severity: medium
@@ -30,8 +30,8 @@ v0.5 turned the single-App dashboard into a platform: invite-only members, N aud
   - `reviews.app_id` (NULL = legacy global App); findings join via `review_id`.
   - `app_provider_keys(app_id, provider, key_enc, PK(app_id, provider))`; `app_model_config(app_id PK, model_chain)`.
 - **Crypto**: AES-256-GCM envelope via `secretbox`, master key `DASHBOARD_ENCRYPTION_KEY`, AAD rowKey = row PK (composite for provider keys) — see `d1-secretbox-credential-envelope.md`.
-- **Webhook routing**: legacy `POST /webhook` (Worker-secrets App, untouched) + per-App `POST /webhook/:appSlug` (resolve slug → verify with that App's secret); queue messages carry optional `appRef` (absent = legacy).
-- **Consumer**: per-App Octokit instance cache + per-message app-row re-read; `buildRunnerEnv(env, appCfg)` — App provider keys win, global env keys are the per-provider fallback (`key_source: app|global`), App `model_chain` overrides `OMP_REVIEW_MODEL`, `OMP_MODEL_KEY → ARK_API_KEY` stays global; fail-closed on tampered/missing key material.
+- **Webhook routing**: per-App `POST /webhook/:appSlug` is the ONLY entry (resolve slug → verify with that App's secret) — the legacy bare `POST /webhook` face was retired in v0.9 (route deleted); queue messages always carry `appRef` (required — plan 24 single shape).
+- **Consumer**: per-App Octokit instance cache + per-message app-row re-read; `buildRunnerEnv(appCfg, …)` takes NO env argument — keys and the model chain come exclusively from the App's per-App config (`key_source` ∈ `app|custom` only, no global fallback since v0.9 / AL-24-5), and a missing/tampered key or chain fails that App's reviews closed at `assertAppConfigComplete` (F-001 channel) — see `perapp-zero-global-fallback.md`.
 - **Manifest flow**: writes D1 (secrets-bulk retired; CLOUDFLARE_* env gone); slug minted at start, carried via signed state; webhook URL `{origin}/webhook/{slug}`.
 - **Known accepted trade-offs** (do not re-litigate without a decision): resolution-before-done-check → DLQ noise on disabled-App redelivery; secret-keyed caches without eviction (rotation = non-goal until B3+); no `reviews.app_id` index yet; one undecryptable key row fails that App's reviews closed.
 

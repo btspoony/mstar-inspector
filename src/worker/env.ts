@@ -10,9 +10,6 @@ import type { D1Database, KVNamespace, Queue } from "@cloudflare/workers-types";
 import type { ReviewJobPayload } from "../contracts/review-job";
 
 export type Env = {
-  APP_ID: string;
-  PRIVATE_KEY: string;
-  WEBHOOK_SECRET: string;
   REVIEW_QUEUE: Queue<ReviewJobPayload>;
   IDEMPOTENCY_KV: KVNamespace;
   /**
@@ -33,8 +30,9 @@ export type Env = {
   REVIEW_ENABLED?: string;
   /**
    * Dashboard (plan 08 B0) GitHub OAuth App credentials — user-to-server
-   * login, DISTINCT from the review GitHub App above
-   * (.mstar/iterations/v0.3/guides/oauth-vs-github-app.md). Unset →
+   * login, DISTINCT from the review GitHub App (whose Worker-env secrets
+   * were retired in plan 24 — per-App credentials now live encrypted in
+   * D1) (.mstar/iterations/v0.3/guides/oauth-vs-github-app.md). Unset →
    * /dashboard routes fail closed.
    */
   GITHUB_OAUTH_CLIENT_ID?: string;
@@ -50,9 +48,9 @@ export type Env = {
    * random bytes (AES-256-GCM secretbox, src/dashboard/secretbox.ts) —
    * encrypts github_apps credentials (PEM / webhook secret; plan 14 adds
    * per-App provider keys). Missing / malformed → SecretboxKeyError and the
-   * encryption-dependent dashboard routes fail closed with 5xx; the legacy
-   * env-secret App path is unaffected. Never reuse DASHBOARD_SESSION_SECRET
-   * — rotation decoupled. wrangler secret / .dev.vars only — never in git.
+   * encryption-dependent dashboard routes fail closed with 5xx. Never
+   * reuse DASHBOARD_SESSION_SECRET — rotation decoupled. wrangler secret /
+   * .dev.vars only — never in git.
    */
   DASHBOARD_ENCRYPTION_KEY?: string;
   /**

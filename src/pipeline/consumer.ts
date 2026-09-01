@@ -6,12 +6,15 @@
  * extraheader env) → `git rev-parse HEAD` for the AUTHORITATIVE sha →
  * dedup by that sha (hit → ack) → diff → numstat (the seat-partition
  * universe) → write the runner `--input` JSON (reconFacts, plus the per-App
- * `modelOverrides` role map for app-path messages — plan 17 B6; legacy /
- * unmapped App = byte-identical payload) → exec the
+ * `modelOverrides` role map — plan 17 B6; no-map App = byte-identical
+ * payload) → exec the
  * in-image runner `--level <quick|default|deep>` (exec env =
  * ARK_API_KEY/PI_CODING_AGENT_DIR/HARNESS_PLUGIN_ROOT + OMP_REVIEW_MODEL and
- * configured provider keys — per-App messages assemble BYOK keys/model chain
- * with global-env fallback, plan 14 B2; GH_TOKEN rides ONLY the git/gh step
+ * configured provider keys — every key and the model chain come ONLY from
+ * the App's own per-App config (AL-24-5 zero global fallback: an App missing
+ * its model chain or a chain provider's key fails closed after App
+ * resolution via the F-001 channel — review failed log + review_failures
+ * row + rethrow → retry×3 → DLQ); GH_TOKEN rides ONLY the git/gh step
  * envs) → parse
  * the mstar.review/v1 envelope → post the overall review comment FIRST →
  * store.put (idempotent — the UNIQUE first-written row wins) → KV
@@ -58,7 +61,7 @@ import type { ReviewJobPayload } from "../contracts/review-job";
 import { idemKey, IDEMPOTENCY_SECONDS, type IdempotencyKey } from "../contracts/idem";
 import { parseReviewOutput, capFindings, clampFindingSizes } from "../review/schema";
 import { isReviewLevel, REVIEW_LEVELS, type CustomProviderDeclaration, type ReviewLevel } from "../review/runtime";
-import { PROVIDERS, pickProviderKeys, providerEnvName, customProviderEnvName } from "./providers";
+import { PROVIDERS, providerEnvName, customProviderEnvName } from "./providers";
 import { redactExactSecrets, redactReviewOutput, redactReviewOutputExact, redactSecrets } from "./redact";
 import { createArtifactStore, previousRoundFingerprints, type D1ArtifactStore } from "../store/artifact-store";
 import { createFailureStore, type FailureStage, type FailureStore } from "../store/failure-store";
@@ -79,31 +82,23 @@ import { createSecretbox } from "../dashboard/secretbox";
 // Per-App AI-config resolution (plan 14 Task 3): the same sanctioned reader
 // edge — app-config-store reads app_provider_keys / app_model_config and
 // decrypts keys via secretbox (itself a zero-dependency leaf, lock L1).
-import { createAppConfigStore, type CustomProviderConsumerConfig } from "../dashboard/app-config-store";
+import {
+  createAppConfigStore,
+  IN_IMAGE_BASE_PROVIDER_IDS,
+  type CustomProviderConsumerConfig,
+} from "../dashboard/app-config-store";
 
 export type PipelineEnv = {
-  APP_ID: string;
-  PRIVATE_KEY: string;
-  OMP_MODEL_KEY: string; // omp model key; injected into the container as ARK_API_KEY
   DB: D1Database;
   IDEMPOTENCY_KV: KVNamespace;
   SANDBOX: unknown; // binding shape = DurableObjectNamespace<Sandbox> (T1-pinned)
-  /**
-   * omp review model chain (postdeploy feedback T2 / bugbot BB-1): the
-   * comma-separated selector list is forwarded into the runner exec env as
-   * OMP_REVIEW_MODEL so the container's session uses the configured primary
-   * model + fallback chain. Unset/empty → in-image default
-   * (ark-plan/deepseek-v4-flash, no fallback chain).
-   */
-  OMP_REVIEW_MODEL?: string;
   /**
    * Envelope master key for the per-App credential resolution (plan 13 Task
    * 2, lock L4): base64 of exactly 32 bytes (the same DASHBOARD_ENCRYPTION_KEY
    * Worker secret the dashboard write face uses, src/dashboard/secretbox.ts).
    * Missing / malformed → SecretboxKeyError → per-App resolution fails
    * closed (structured error + the existing retry/DLQ semantics, zero GitHub
-   * writes); the legacy env-App path is unaffected. This face reads the key
-   * only — the consumer never encrypts.
+   * writes). This face reads the key only — the consumer never encrypts.
    */
   DASHBOARD_ENCRYPTION_KEY?: string;
   /**
@@ -116,30 +111,14 @@ export type PipelineEnv = {
    */
   REVIEW_LEVEL?: string;
   /**
-   * omp built-in provider API keys (bugbot BB-2): set on the deployed Worker
-   * with `bun run keys` → `wrangler secret put` (scripts/provider-keys.ts,
-   * mapping SSOT = src/pipeline/providers.ts). The consumer forwards every
-   * present-and-non-empty key into the runner exec env (allowlist = the
-   * PROVIDERS mapping only — arbitrary Worker env is never forwarded).
+   * AL-24-5 (zero global fallback): provider keys and the model chain NEVER
+   * come from the Worker env — OMP_MODEL_KEY / OMP_REVIEW_MODEL / the 18
+   * per-provider key fields were retired. Every key and the chain resolve
+   * from the App's own per-App config (resolveAppConfig keys map +
+   * modelChain, custom declarations); an App missing either fails closed
+   * (assertAppConfigComplete → F-001 channel). The only remaining
+   * deployment-level knobs are the fail-closed kill-switch and tier above.
    */
-  ANTHROPIC_API_KEY?: string;
-  OPENAI_API_KEY?: string;
-  GEMINI_API_KEY?: string;
-  COPILOT_GITHUB_TOKEN?: string;
-  AZURE_OPENAI_API_KEY?: string;
-  GROQ_API_KEY?: string;
-  CEREBRAS_API_KEY?: string;
-  XAI_API_KEY?: string;
-  OPENROUTER_API_KEY?: string;
-  KILO_API_KEY?: string;
-  MISTRAL_API_KEY?: string;
-  ZAI_API_KEY?: string;
-  UMANS_AI_CODING_PLAN_API_KEY?: string;
-  MINIMAX_API_KEY?: string;
-  OPENCODE_API_KEY?: string;
-  CURSOR_ACCESS_TOKEN?: string;
-  AI_GATEWAY_API_KEY?: string;
-  WAFER_SERVERLESS_API_KEY?: string;
 };
 
 /** In-image paths (Dockerfile v2 / T2 smoke — single source of truth). */
@@ -228,17 +207,19 @@ export type ConsumerLogFields = {
   provider?: string;
   /**
    * Which source supplied `provider`'s key for the runner env: the App's own
-   * config ("app"), the global Worker env ("global" — the spec fallback), or
-   * a custom-provider declaration keyed by provider id ("custom" — plan 23
-   * Task 3, AL-23-1).
+   * per-App BYOK config ("app") or a custom-provider declaration keyed by
+   * provider id ("custom" — plan 23 Task 3, AL-23-1). AL-24-5: the former
+   * "global" source was retired with the zero-global-fallback cutover —
+   * there is no Worker-env key to fall back to (plan 24 Task 6).
    */
-  key_source?: "app" | "global" | "custom";
+  key_source?: "app" | "custom";
   /**
-   * Whether a per-App message's runner env drew on the App's own config
-   * ("app": ≥1 App key or an App model chain) or fell back to the global env
-   * wholesale ("fallback": zero App keys + no App model chain).
+   * The runner env's config source for a per-App message: ALWAYS "app" —
+   * keys and the model chain come only from the App's own config
+   * (AL-24-5 zero global fallback; the "fallback" variant was retired with
+   * the global env surface in plan 24 Task 6).
    */
-  config_source?: "app" | "fallback";
+  config_source?: "app";
   /**
    * Plan 18 Task 3 (AL-3): the line-comments createReview FAILED after the
    * overall comment landed (residual 422 position validation or any other
@@ -442,11 +423,9 @@ type ProcessDeps = {
    * never masks the ack or the rethrow).
    */
   failureStore: FailureStore;
-  commenter: ReviewCommenter;
   /**
    * Per-App commenter instance cache keyed by appId (plan 13 Task 2, lock
-   * L4; plan 15 hardening item 1 / architect lock L1), beside the legacy
-   * env singleton above. Entry = `{ commenter, fingerprint }` where the
+   * L4; plan 15 hardening item 1 / architect lock L1). Entry = `{ commenter, fingerprint }` where the
    * fingerprint is the EXACT string pair `github_app_id` +
    * `private_key_enc` (the envelope as stored) from the per-message row the
    * resolver already re-reads: a fingerprint match reuses the instance
@@ -474,8 +453,13 @@ type ProcessDeps = {
   getSandbox: (binding: unknown, id: string) => Promise<ReviewSandbox>;
 };
 
-/** Structured base fields derived from the job payload (no sandbox/sha yet). */
-function toBaseFields(payload: ReviewJobPayload): ConsumerLogFields {
+/**
+ * The job's PR identity, derivable WITHOUT appRef — the AL-24-4 in-flight
+ * legacy message (absent appRef) throws in toBaseFields, but the structured
+ * failure channel still carries these (only app_id needed the deref, and
+ * ConsumerLogFields requires the base identity).
+ */
+function payloadIdentityFields(payload: ReviewJobPayload): ConsumerLogFields {
   return {
     event: payload.triggered_by === "pull_request" ? "pull_request" : "review_command",
     action: payload.action,
@@ -484,9 +468,16 @@ function toBaseFields(payload: ReviewJobPayload): ConsumerLogFields {
     repo: payload.repo,
     pr_number: payload.pr_number,
     head_sha: payload.head_sha,
-    // Per-App jobs carry the appId reference in every structured log line
-    // (an id, never a credential — lock L4).
-    ...(payload.appRef?.kind === "app" ? { app_id: payload.appRef.appId } : {}),
+  };
+}
+
+/** Structured base fields derived from the job payload (no sandbox/sha yet). */
+function toBaseFields(payload: ReviewJobPayload): ConsumerLogFields {
+  return {
+    ...payloadIdentityFields(payload),
+    // Every job carries the appId reference in every structured log line
+    // (an id, never a credential — lock L4; plan 24: appRef is required).
+    app_id: payload.appRef.appId,
   };
 }
 
@@ -503,23 +494,21 @@ type CommenterResolution = { kind: "ok"; commenter: ReviewCommenter } | { kind: 
 
 /**
  * Resolve the commenter for one message (plan 13 Task 2, architect lock L4
- * — consumer-side credential resolution):
+ * — consumer-side credential resolution; plan 24 Task 1: single path —
+ * `appRef.appId` is required, the env-App legacy branch is retired):
  *
- * - legacy (appRef absent — old in-flight messages — or `{ kind: "legacy" }`)
- *   → the env-App singleton commenter, byte-identical to the pre-multi-App
- *   behavior.
- * - `{ kind: "app", appId }` → the `github_apps` row via D1 (re-read per
- *   message) gated in order: missing row / soft-deleted / disabled THROWS
- *   (unchanged retry→DLQ semantics; the failed gate EVICTS the cached
- *   instance) → PAUSED (`review_enabled = 0`, plan 16 lock L4) returns the
- *   DISTINCT `paused` outcome AFTER those gates, leaving any cached
- *   instance in place (resume reuses the warm instance — the plan-15
- *   fingerprint ignores review_enabled) → the row's PEM decrypted in memory
- *   (secretbox, AAD `github_apps.private_key_enc:<id>`) →
- *   `createAppCommenter({ APP_ID: String(github_app_id), PRIVATE_KEY })`,
- *   cached per appId in `deps.appCommenters` with the row's credential
- *   fingerprint (plan 15 L1: `github_app_id` + `private_key_enc` envelope
- *   exact-string match — reuse on match, rebuild + replace on rotation).
+ * The `github_apps` row via D1 (re-read per message),
+ * gated in order: missing row / soft-deleted / disabled THROWS
+ * (unchanged retry→DLQ semantics; the failed gate EVICTS the cached
+ * instance) → PAUSED (`review_enabled = 0`, plan 16 lock L4) returns the
+ * DISTINCT `paused` outcome AFTER those gates, leaving any cached
+ * instance in place (resume reuses the warm instance — the plan-15
+ * fingerprint ignores review_enabled) → the row's PEM decrypted in memory
+ * (secretbox, AAD `github_apps.private_key_enc:<id>`) →
+ * `createAppCommenter({ APP_ID: String(github_app_id), PRIVATE_KEY })`,
+ * cached per appId in `deps.appCommenters` with the row's credential
+ * fingerprint (plan 15 L1: `github_app_id` + `private_key_enc` envelope
+ * exact-string match — reuse on match, rebuild + replace on rotation).
  *
  * Any unresolvable state — missing row, disabled, soft-deleted, missing
  * DASHBOARD_ENCRYPTION_KEY (SecretboxKeyError), tampered envelope — THROWS:
@@ -529,9 +518,6 @@ type CommenterResolution = { kind: "ok"; commenter: ReviewCommenter } | { kind: 
  */
 async function resolveCommenter(payload: ReviewJobPayload, deps: ProcessDeps): Promise<CommenterResolution> {
   const appRef = payload.appRef;
-  if (appRef === undefined || appRef.kind === "legacy") {
-    return { kind: "ok", commenter: deps.commenter };
-  }
   const row = await createAppsStore(deps.env.DB).getAppById(appRef.appId);
   if (row === null) {
     deps.appCommenters.delete(appRef.appId);
@@ -617,9 +603,11 @@ function toBase64Utf8(text: string): string {
  * `getAppConfig` decrypt face of src/dashboard/app-config-store.ts narrowed
  * to what assembly consumes. `keys` maps provider id → DECRYPTED plaintext
  * key (only providers with a stored row appear); `modelChain` is the verbatim
- * stored selector chain, null / "" / whitespace-only = unset (global
- * OMP_REVIEW_MODEL wins — any falsy or blank chain is treated as unset,
- * plan 15 input bounds).
+ * stored selector chain. AL-24-5 zero global fallback: a missing/blank chain
+ * or a chain provider without a key in THIS App's own config (BYOK allowlist
+ * key or custom declaration) fails closed — assertAppConfigComplete throws
+ * and the review never runs (F-001 channel); there is NO deployment-level
+ * chain or key to fall back to (plan 15 input bounds: falsy/blank = unset).
  */
 export type RunnerAppConfig = {
   keys: Record<string, string>;
@@ -627,10 +615,9 @@ export type RunnerAppConfig = {
 };
 
 /**
- * Resolve the per-App AI config for one message (plan 14 Task 3). Legacy
- * (appRef absent — old in-flight messages — or `{ kind: "legacy" }`) →
- * `undefined`: the caller assembles the runner env exactly as before. 
- * `{ kind: "app", appId }` → ONE `getAppConfig` read per message (all
+ * Resolve the per-App AI config for one message (plan 14 Task 3; plan 24
+ * Task 1: single path — `appRef.appId` is required).
+ * ONE `getAppConfig` read per message (all
  * provider keys + the model chain in a single store call — never per key),
  * decrypted in memory. The read hangs off the same appRef resolution as
  * `resolveCommenter` (the App row is already proven present, active and
@@ -640,17 +627,15 @@ export type RunnerAppConfig = {
  *
  * Failure = fail closed: an undecryptable envelope (tampered row, AAD
  * mismatch) or a missing/malformed DASHBOARD_ENCRYPTION_KEY throws — the
- * structured error log + rethrow keep the existing retry/DLQ semantics. The
- * review never silently proceeds on global keys: with the App's own key
- * unreadable, falling back would spend the WRONG account's quota. Decrypted
- * keys live only in this call's memory and the assembled exec env — never
+ * structured error log + rethrow keep the existing retry/DLQ semantics.
+ * AL-24-5: there are no global keys to fall back to — the App's own keys are
+ * the ONLY source, and assertAppConfigComplete (run right after this call)
+ * fail-closes any chain provider without a configured key. Decrypted keys
+ * live only in this call's memory and the assembled exec env — never
  * logged, never in queue payloads or errors.
  */
-async function resolveAppConfig(payload: ReviewJobPayload, deps: ProcessDeps): Promise<RunnerAppConfig | undefined> {
+async function resolveAppConfig(payload: ReviewJobPayload, deps: ProcessDeps): Promise<RunnerAppConfig> {
   const appRef = payload.appRef;
-  if (appRef === undefined || appRef.kind === "legacy") {
-    return undefined;
-  }
   try {
     const cfg = await createAppConfigStore(
       deps.env.DB,
@@ -667,11 +652,9 @@ async function resolveAppConfig(payload: ReviewJobPayload, deps: ProcessDeps): P
  * Resolve the App's per-role model overrides for one message (plan 17 B6
  * Task 1): role → verbatim selector chain via the decrypt-free
  * `getAppModelRoles` read (a model selector is configuration, not a secret —
- * no secretbox). Only `{ kind: "app" }` messages carry the map: legacy
- * (appRef absent — old in-flight messages — or `{ kind: "legacy" }`) →
- * `undefined`, and an App with NO (or an all-cleared) role map → `undefined`
- * — in both cases the runner input JSON serializes byte-identically to
- * today's (plan Global Constraints: absent/empty map = unchanged runner
+ * no secretbox). An App with NO (or an all-cleared) role map → `undefined`
+ * — the runner input JSON omits the field, byte-identical to a no-map run
+ * (plan Global Constraints: empty map = unchanged runner
  * behavior). Hangs off the same appRef resolution as `resolveAppConfig` (the
  * App row is already proven present, active and non-deleted there) and runs
  * BEFORE the in-flight guard so a resolution failure has zero side effects.
@@ -685,9 +668,6 @@ async function resolveModelOverrides(
   deps: ProcessDeps,
 ): Promise<Record<string, string> | undefined> {
   const appRef = payload.appRef;
-  if (appRef === undefined || appRef.kind === "legacy") {
-    return undefined;
-  }
   try {
     const roles = await createAppConfigStore(
       deps.env.DB,
@@ -704,15 +684,14 @@ async function resolveModelOverrides(
  * Task 3, AL-23-1): the DECRYPTING `getCustomProvidersForConsumer` read
  * (every declaration plus its key, provider_id-ascending) via
  * createAppConfigStore — the getAppConfig analogue for app_custom_providers.
- * Only `{ kind: "app" }` messages carry declarations: legacy (appRef absent
- * or `{ kind: "legacy" }`) → `undefined`, and an App with NO declarations →
- * `undefined` — in both cases the runner input JSON serializes
- * byte-identically to today's (plan Global Constraints: absent/empty = the
- * legacy runner behavior). Hangs off the same appRef resolution as
- * `resolveAppConfig` (the App row is already proven present, active and
- * non-deleted there) and runs BEFORE the in-flight guard so a resolution
- * failure has zero side effects. The set is re-read every message (no
- * cache) so a dashboard declaration update applies to the very next review.
+ * An App with NO declarations → `undefined` — the runner input JSON
+ * serializes byte-identically to a no-declaration run (plan Global
+ * Constraints: empty = unchanged runner behavior). Hangs off the same
+ * appRef resolution as `resolveAppConfig` (the App row is already proven
+ * present, active and non-deleted there) and runs BEFORE the in-flight
+ * guard so a resolution failure has zero side effects. The set is re-read
+ * every message (no cache) so a dashboard declaration update applies to
+ * the very next review.
  * The per-attempt cost — one extra SELECT plus N AES-GCM decryptions, paid
  * even on guard-held/deduped attempts — is accepted by design (QC wave-1
  * S-001): small next to clone/diff, and it is what makes declaration updates
@@ -728,9 +707,6 @@ async function resolveCustomProviders(
   deps: ProcessDeps,
 ): Promise<CustomProviderConsumerConfig[] | undefined> {
   const appRef = payload.appRef;
-  if (appRef === undefined || appRef.kind === "legacy") {
-    return undefined;
-  }
   try {
     const providers = await createAppConfigStore(
       deps.env.DB,
@@ -760,39 +736,39 @@ function toRunnerCustomProvider(provider: CustomProviderConsumerConfig): CustomP
 
 /**
  * The effective model selector chain for one message (plan 18 Task 1,
- * architect AL-2) plus WHERE it came from. Precedence: the App's verbatim
- * non-blank chain wins (any falsy or whitespace-only chain = unset, plan 15
- * input bounds); otherwise the global `env.OMP_REVIEW_MODEL`; both unset →
- * `chain: undefined` (the in-image default runs). `fromApp` is the
- * config_source predicate — a chain that comes from the global env is NOT
- * an App contribution, only the App's own stored chain is. This is THE
- * chain-precedence single source — used by BOTH `buildRunnerEnv` (step 3)
- * and the version-record put below, so the recorded model can never drift
- * from the chain the runner actually saw (the chain rides the exec env,
- * never the runner input JSON).
+ * architect AL-2) plus WHERE it came from. AL-24-5 zero global fallback: the
+ * App's verbatim non-blank chain is the ONLY source — the global
+ * `env.OMP_REVIEW_MODEL` branch was retired with the PipelineEnv field.
+ * A falsy/whitespace-only chain = unset (plan 15 input bounds) →
+ * `chain: undefined` (unreachable on the production path: the fail-closed
+ * assertAppConfigComplete gate rejects a chain-less App before the
+ * runner/put steps; the undefined shape survives only for direct unit calls
+ * to this single-point parser). `fromApp` is always true — an App chain is
+ * the only contributor left. This is THE chain single source — used by BOTH
+ * `buildRunnerEnv` (step 3) and the version-record put below, so the
+ * recorded model can never drift from the chain the runner actually saw
+ * (the chain rides the exec env, never the runner input JSON).
  */
 export function effectiveModelChain(
   appCfg: RunnerAppConfig | undefined,
-  env: PipelineEnv,
 ): { chain: string | undefined; fromApp: boolean } {
   const appChain =
     typeof appCfg?.modelChain === "string" && appCfg.modelChain.trim() !== ""
       ? appCfg.modelChain
       : undefined;
   if (appChain !== undefined) return { chain: appChain, fromApp: true };
-  if (env.OMP_REVIEW_MODEL !== undefined && env.OMP_REVIEW_MODEL !== "") {
-    return { chain: env.OMP_REVIEW_MODEL, fromApp: false };
-  }
-  return { chain: undefined, fromApp: false };
+  return { chain: undefined, fromApp: true };
 }
 
 /**
  * The head (primary) selector of an effective chain — the version record
  * written to `reviews.model` (plan 18 Task 1). Comma-separated, trimmed,
  * empty segments dropped (the same grammar as the runner-side selector
- * parse). No chain → NULL: the in-image default ran, and the default
- * selector is NEVER hardcoded worker-side (plan 19's runbook records it
- * next to the image digest).
+ * parse). No chain → NULL — reachable only from direct unit calls: on the
+ * production path assertAppConfigComplete fail-closes any App whose chain
+ * is missing or parses to zero selectors (AL-24-5), so a successful put
+ * never records NULL (the in-image DEFAULT_MODEL_PATTERN scaffold is
+ * unreachable from the consumer).
  */
 function chainHeadSelector(chain: string | undefined): string | null {
   if (chain === undefined) return null;
@@ -804,25 +780,139 @@ function chainHeadSelector(chain: string | undefined): string | null {
 }
 
 /**
- * Build the in-image runner exec env (step 8): the provider key + harness
- * paths (compass D — secrets never baked into the image), the OMP_REVIEW_MODEL
- * chain when set (bugbot BB-1), and every known provider key that is
- * present-and-non-empty on the Worker env (bugbot BB-2). Forwarding is an
- * ALLOWLIST — only the src/pipeline/providers.ts PROVIDERS keys are read;
- * arbitrary Worker env never reaches the container.
+ * Fail-closed per-App configuration gate (plan 24 Task 6 / AL-24-5 — zero
+ * global fallback): the App's modelChain is the ONLY chain source and every
+ * provider on the chain must have a key source in the App's OWN config — a
+ * BYOK allowlist key (app_provider_keys, provider id → env name via the
+ * PROVIDERS mapping, now including `ark` → ARK_API_KEY for the in-image
+ * ark-plan base provider) or a custom declaration with a non-blank key
+ * (CUSTOM_<ID>_API_KEY). The SAME key-source requirement applies to every
+ * selector of every per-role override chain (Bugbot 7aaf18f4): a role
+ * override referencing a provider with no configured key must fail closed
+ * here, never after the runner clones/starts (the F-001 channel is the
+ * fail boundary either way). Missing/blank chain or a chain provider with
+ * no key source throws; the error flows through the F-001 structured channel
+ * (review failed log + review_failures stage="pipeline" row + rethrow →
+ * retry×3 → DLQ) — NO webhook-face reject, NO pause state, NO runtime guard
+ * beyond this channel (AL-24-5 verdict 3). The check runs AFTER App
+ * resolution and BEFORE the in-flight guard/sandbox, so a misconfigured App
+ * fails with zero side effects.
+ */
+function assertAppConfigComplete(
+  appCfg: RunnerAppConfig,
+  customProviders: readonly CustomProviderConsumerConfig[] | undefined,
+  modelOverrides: Record<string, string> | undefined,
+  appId: string,
+): void {
+  const chain = appCfg.modelChain === null ? "" : appCfg.modelChain.trim();
+  // AL-24-5 fail-closed: a chain must contain at least one non-empty
+  // comma-separated selector. `","` / `" , "` / `",,,"` are all "missing" —
+  // the runner's parseModelSelectors would yield [] and fall back to the
+  // in-image DEFAULT_MODEL_PATTERN scaffold (which must stay unreachable
+  // from the consumer), and chainHeadSelector would record NULL on a
+  // successful put (Interfaces: success never NULL).
+  const hasSelector = chain.split(",").some((segment) => segment.trim() !== "");
+  if (!hasSelector) {
+    throw new Error(`per-App config incomplete: app ${appId}: missing model chain`);
+  }
+  // The env names the App's OWN config can supply: allowlisted BYOK keys
+  // (provider id → envName — non-blank values only) + custom declarations.
+  const availableEnvNames = new Set<string>();
+  for (const [provider, plainKey] of Object.entries(appCfg.keys)) {
+    if (plainKey.trim() === "") continue;
+    const envName = providerEnvName(provider);
+    if (envName !== undefined) availableEnvNames.add(envName);
+  }
+  for (const decl of customProviders ?? []) {
+    if (decl.api_key.trim() === "") continue;
+    availableEnvNames.add(customProviderEnvName(decl.provider_id));
+  }
+  // The env name a chain provider's key must arrive under — the same chain
+  // grammar as the runner's parseModelSelectors (comma-separated selectors,
+  // provider = the segment before the first `/`): an allowlisted id → its
+  // mapped env name; an in-image base provider (IN_IMAGE_BASE_PROVIDER_IDS,
+  // today exactly `ark-plan` per sandbox-image/omp-models.yml, whose
+  // `apiKey:` reference is ARK_API_KEY) → the `ark` BYOK entry's env name;
+  // anything else → a custom provider's CUSTOM_<ID>_API_KEY env name.
+  const neededEnvName = (provider: string): string => {
+    const allowlisted = providerEnvName(provider);
+    if (allowlisted !== undefined) return allowlisted;
+    if (IN_IMAGE_BASE_PROVIDER_IDS.includes(provider)) {
+      return PROVIDERS["ark"]!.envName;
+    }
+    return customProviderEnvName(provider);
+  };
+  // Every chain that must resolve to configured keys: the App's modelChain
+  // plus each per-role override's selector chain (Bugbot 7aaf18f4 — the
+  // app_model_roles selectors reach the runner as the `modelOverrides`
+  // input field, so they carry the same fail-closed requirement). Both use
+  // the runner's parseModelSelectors grammar (comma-separated, trimmed,
+  // empty segments dropped; provider = the segment before the first `/`;
+  // a selector whose shape yields no provider is left to the runner exactly
+  // as the chain path does today — no new fail is invented here).
+  // Each override chain must ALSO pass the same zero-selector check as the
+  // base chain below (PR #11 review BUG-01): a role chain that trims to a
+  // raw `,` / `,,,` / whitespace would otherwise slip past the gate, reach
+  // the runner as present-but-empty (runner-side `trim() !== ""` counts it
+  // as present), and either run the in-image DEFAULT_MODEL_PATTERN scaffold
+  // (with the ark key) or fail at stage=runner AFTER side effects.
+  const chains: Array<{ role: string | null; chain: string }> = [
+    { role: null, chain },
+    ...(modelOverrides === undefined
+      ? []
+      : Object.entries(modelOverrides).map(([role, overrideChain]) => ({
+          role,
+          chain: overrideChain.trim(),
+        }))),
+  ];
+  for (const { role, chain: candidateChain } of chains) {
+    if (role !== null) {
+      const overrideHasSelector = candidateChain
+        .split(",")
+        .some((segment) => segment.trim() !== "");
+      if (!overrideHasSelector) {
+        throw new Error(
+          `per-App config incomplete: app ${appId}: role override \`${role}\`: missing model chain`,
+        );
+      }
+    }
+    for (const segment of candidateChain.split(",")) {
+      const selector = segment.trim();
+      if (selector === "") continue; // the runner drops empty segments too
+      const provider = selector.split("/")[0]!.trim();
+      if (!availableEnvNames.has(neededEnvName(provider))) {
+        const where = role === null ? "" : `role override \`${role}\` `;
+        throw new Error(
+          `per-App config incomplete: app ${appId}: ${where}provider ${provider} has no configured key`,
+        );
+      }
+    }
+  }
+}
+
+/**
+ * Build the in-image runner exec env (step 8): the harness paths (compass D
+ * — secrets never baked into the image) plus the provider keys and the model
+ * chain, which come from the App's per-App config ONLY (AL-24-5 — zero
+ * global fallback: the OMP_MODEL_KEY / global OMP_REVIEW_MODEL /
+ * per-provider Worker-secret forwarding surface is retired; there is no
+ * Worker-env key to pick up).
  *
- * Per-App assembly (plan 14 B2, `appCfg` present — per-App messages only):
- * the App's own key wins per provider, injected under the PROVIDERS-mapped
- * env name (skipped when empty/whitespace; a provider id outside the
- * allowlist is skipped with a structured warn — plan 15 log hygiene — that
- * carries the id + app_id, never key material); every provider the App did
- * NOT configure falls back to the global env key (spec fallback chain — a
- * zero-config App keeps working); an App model chain overrides
- * OMP_REVIEW_MODEL. Every injected key is logged
- * with `key_source: app|global` (the source, never the key), and the assembly
- * logs `config_source: app|fallback`. The function builds a FRESH object per
- * call and never mutates its inputs or any module-level record, so key
- * material cannot leak across Apps structurally.
+ * Per-App assembly (plan 14 B2 — per-App messages only): every App-stored
+ * key is injected under its PROVIDERS-mapped env name (skipped when
+ * empty/whitespace; a provider id outside the allowlist is skipped with a
+ * structured warn — plan 15 log hygiene — that carries the id + app_id,
+ * never key material). The `ark` entry maps the in-image ark-plan base
+ * provider's ARK_API_KEY, so the ark key rides the SAME per-App keys map as
+ * every other provider. The App's verbatim modelChain becomes the exec env
+ * OMP_REVIEW_MODEL (the runner's only chain channel — transport unchanged,
+ * plan 24 Interfaces); assertAppConfigComplete has already fail-closed any
+ * App whose chain provider lacks a key, so a chain reaching this point is
+ * complete. Every injected key is logged with `key_source: app|custom` (the
+ * source, never the key), and the assembly logs `config_source: "app"` (the
+ * only remaining source). The function builds a FRESH object per call and
+ * never mutates its inputs or any module-level record, so key material
+ * cannot leak across Apps structurally.
  *
  * Custom-provider keys (plan 23 Task 3, `customProviders` — the DECRYPTED
  * getCustomProvidersForConsumer configs, per-App messages only): each key is
@@ -835,37 +925,25 @@ function chainHeadSelector(chain: string | undefined): string | null {
  * models.yml reference then dangles and the provider auth fails LOUD at call
  * time, never a junk key. Every custom injection logs `key_source: "custom"`
  * with the id + env name, NEVER the key.
- *
- * Legacy (`appCfg` undefined) is byte-identical to the pre-plan-14 assembly
- * and logs nothing (pinned by tests/pipeline/consumer.test.ts).
  */
 export function buildRunnerEnv(
-  env: PipelineEnv,
-  appCfg?: RunnerAppConfig,
+  appCfg: RunnerAppConfig,
   log?: ConsumerLog,
   fields?: ConsumerLogFields,
   customProviders?: readonly CustomProviderConsumerConfig[],
 ): Record<string, string> {
   const runnerEnv: Record<string, string> = {
-    ARK_API_KEY: env.OMP_MODEL_KEY,
     HARNESS_PLUGIN_ROOT: HARNESS_ROOT,
     PI_CODING_AGENT_DIR: OMP_AGENT_DIR,
   };
-  if (env.OMP_REVIEW_MODEL !== undefined && env.OMP_REVIEW_MODEL !== "") {
-    runnerEnv.OMP_REVIEW_MODEL = env.OMP_REVIEW_MODEL;
-  }
-  if (appCfg === undefined) {
-    Object.assign(runnerEnv, pickProviderKeys(env as Record<string, unknown>));
-    return runnerEnv;
-  }
   // Log only when the caller supplied BOTH the sink and the identity fields
   // (the consumer flow does; direct unit calls may omit them).
   const emit = log !== undefined && fields !== undefined;
-  // 1. The App's own keys, mapped through the PROVIDERS allowlist. A provider
-  //    id without a mapping has no env name — it is never injected, and the
-  //    skip is no longer silent (plan 15 log hygiene 硬化项 3): the rogue id
-  //    rides a structured warn (an id + app_id, NEVER key material) so the
-  //    operator can see a stored credential going unused.
+  // 1. The App's own BYOK keys, mapped through the PROVIDERS allowlist. A
+  //    provider id without a mapping has no env name — it is never injected,
+  //    and the skip is no longer silent (plan 15 log hygiene 硬化项 3): the
+  //    rogue id rides a structured warn (an id + app_id, NEVER key material)
+  //    so the operator can see a stored credential going unused.
   let appKeys = 0;
   for (const [provider, plainKey] of Object.entries(appCfg.keys)) {
     const envName = providerEnvName(provider);
@@ -885,28 +963,11 @@ export function buildRunnerEnv(
       log.info({ ...fields, provider, key_source: "app" }, `provider key from App config: ${envName}`);
     }
   }
-  // 2. Global fallback per provider (spec Per-App BYOK): every allowlisted
-  //    provider the App did not configure falls back to the global env key.
-  const globalKeys = pickProviderKeys(env as Record<string, unknown>);
-  let globalCount = 0;
-  for (const [provider, info] of Object.entries(PROVIDERS)) {
-    if (runnerEnv[info.envName] !== undefined) continue; // the App's own key won
-    const value = globalKeys[info.envName];
-    if (value === undefined) continue; // no global key either
-    runnerEnv[info.envName] = value;
-    globalCount += 1;
-    if (emit) {
-      log.info(
-        { ...fields, provider, key_source: "global" },
-        `provider key from global env (not configured on the App): ${info.envName}`,
-      );
-    }
-  }
-  // 2b. Custom-provider keys (plan 23 Task 3, AL-23-1): each declaration's
-  //     decrypted key under CUSTOM_<UPPER_SNAKE(provider_id)>_API_KEY — the
-  //     env name the synthesized models.yml references. Only per-App
-  //     messages carry declarations (resolveCustomProviders gates legacy).
-  //     key_source: "custom" logs the id + env name, NEVER the key.
+  // 2. Custom-provider keys (plan 23 Task 3, AL-23-1): each declaration's
+  //    decrypted key under CUSTOM_<UPPER_SNAKE(provider_id)>_API_KEY — the
+  //    env name the synthesized models.yml references. Only per-App
+  //    messages carry declarations (resolveCustomProviders).
+  //    key_source: "custom" logs the id + env name, NEVER the key.
   if (customProviders !== undefined && customProviders.length > 0) {
     for (const decl of customProviders) {
       const envName = customProviderEnvName(decl.provider_id);
@@ -928,45 +989,56 @@ export function buildRunnerEnv(
       }
     }
   }
-  // 3. Model chain: the App's verbatim chain overrides OMP_REVIEW_MODEL; any
-  //    falsy or BLANK chain (null / "" / whitespace-only — plan 15 input
-  //    bounds: a direct-DB write can store a blank chain the routes would
-  //    have normalized) is unset → the global chain stays untouched. A chain
-  //    with content forwards verbatim — the guard only decides unset-vs-set.
-  //    The precedence lives in effectiveModelChain (plan 18 Task 1: ONE
-  //    resolution shared with the version-record put; re-resolving the env
-  //    chain here to the same value is a harmless no-op overwrite).
-  //    config_source stays keyed to the App's OWN chain (fromApp) — a
-  //    global-env chain is not an App contribution (plan 14 pin).
-  const { chain, fromApp: appChainSet } = effectiveModelChain(appCfg, env);
+  // 3. Model chain: the App's verbatim chain forwards VERBATIM (the guard
+  //    only decides unset-vs-set; it never mutates the value; the runner-side
+  //    selector parse trims segments). A blank chain cannot reach production
+  //    — assertAppConfigComplete fails the message before the guard — but
+  //    direct unit calls keep the unset→omit guard (the in-image runner then
+  //    falls back to its DEFAULT_MODEL_PATTERN scaffold). The precedence
+  //    lives in effectiveModelChain (plan 18 Task 1: ONE resolution shared
+  //    with the version-record put — no re-resolution split-brain).
+  const { chain } = effectiveModelChain(appCfg);
   if (chain !== undefined) {
     runnerEnv.OMP_REVIEW_MODEL = chain;
   }
   if (emit) {
+    const customCount = customProviders?.length ?? 0;
     log.info(
-      { ...fields, config_source: appKeys > 0 || appChainSet ? "app" : "fallback" },
-      `per-App env assembly: ${appKeys} provider key(s) from App config, ${globalCount} global fallback` +
-        `${appChainSet ? ", model chain from App config" : ""}`,
+      { ...fields, config_source: "app" },
+      `per-App env assembly: ${appKeys} provider key(s) from App config, ${customCount} custom` +
+        `${chain !== undefined ? ", model chain from App config" : ""}`,
     );
   }
   return runnerEnv;
 }
 
 /**
+ * Exec-env names that are configuration/paths, not credentials — the
+ * exact-redact skip list (qc1 S-3): the model chain (OMP_REVIEW_MODEL) and
+ * the two compile-time image paths. A future redaction-policy change
+ * (e.g. redacting the chain string) edits this single list.
+ */
+const RUNNER_EXEC_ENV_PASSTHROUGH_NAMES: readonly string[] = [
+  "OMP_REVIEW_MODEL",
+  "HARNESS_PLUGIN_ROOT",
+  "PI_CODING_AGENT_DIR",
+];
+
+/**
  * The ACTUAL secret values one review session used (SEC-01 exact-value
- * defense): every credential-shaped value the runner env carried — the
- * provider-key entries (the allowlist-picked global keys + the App's own
- * BYOK keys, both forwarded via buildRunnerEnv) and the ARK_API_KEY source
- * value — plus the installation token minted for the session. These are the
- * values a prompt-injected model could echo verbatim; redactExactSecrets
- * removes them even when they evade every shape pattern. The list is
- * derived from the SAME buildRunnerEnv result the runner exec used (no
- * re-resolution split-brain) and the token minted above.
+ * defense): every credential-shaped value the runner env carried — the App's
+ * provider-key entries (BYOK keys incl. ARK_API_KEY, all injected from the
+ * per-App keys map via buildRunnerEnv — AL-24-5: there are no global keys;
+ * the exact-redact mechanism is unchanged) — plus the installation token
+ * minted for the session. These are the values a prompt-injected model could
+ * echo verbatim; redactExactSecrets removes them even when they evade every
+ * shape pattern. The list is derived from the SAME buildRunnerEnv result the
+ * runner exec used (no re-resolution split-brain) and the token minted above.
  */
 function sessionSecretValues(runnerEnv: Record<string, string>, token: string): string[] {
   const values: string[] = [token];
   for (const [name, value] of Object.entries(runnerEnv)) {
-    if (name === "OMP_REVIEW_MODEL" || name === "HARNESS_PLUGIN_ROOT" || name === "PI_CODING_AGENT_DIR") {
+    if (RUNNER_EXEC_ENV_PASSTHROUGH_NAMES.includes(name)) {
       continue; // configuration/paths, not credentials
     }
     if (value !== "") values.push(value);
@@ -998,27 +1070,26 @@ async function kvDoneHit(
 }
 /**
  * Test seam for createReviewConsumer: additive overrides for the process
- * dependencies (store / commenter / per-App commenter factory / getSandbox).
- * The plan contract `createReviewConsumer(env)` is unchanged — every field
- * defaults to the production implementation when omitted.
+ * dependencies (store / failureStore / per-App commenter factory /
+ * getSandbox). The plan contract `createReviewConsumer(env)` is unchanged
+ * — every field defaults to the production implementation when omitted.
  */
 type ConsumerOverrides = Partial<
-  Pick<ProcessDeps, "store" | "failureStore" | "commenter" | "createAppCommenter" | "getSandbox">
+  Pick<ProcessDeps, "store" | "failureStore" | "createAppCommenter" | "getSandbox">
 >;
 
 /**
  * Create the queue consumer. The store and commenters are created once per
- * consumer instance (the legacy env-App commenter memoizes the app-auth
- * installation-token cache across messages; per-App instances live in the
- * appCommenters Map — one per appId, plan 13 Task 2 lock L4). Each message
+ * consumer instance (per-App commenter instances live in the appCommenters
+ * Map — one per appId, plan 13 Task 2 lock L4). Each message
  * gets its own sandbox, destroyed in finally; failures rethrow so the queue
  * retries and eventually DLQs.
  *
  * `log` is injectable for tests (default: structured JSON lines). `overrides`
- * lets tests substitute the store / commenter / per-App commenter factory /
- * sandbox factory without process-wide mock.module (bun's relative-path
- * mock.module leaks across test files sharing a worker — CI run
- * 32946710695).
+ * lets tests substitute the store / failureStore / per-App commenter
+ * factory / sandbox factory without process-wide mock.module (bun's
+ * relative-path mock.module leaks across test files sharing a worker — CI
+ * run 32946710695).
  */
 export function createReviewConsumer(
   env: PipelineEnv,
@@ -1029,7 +1100,6 @@ export function createReviewConsumer(
     env,
     store: overrides.store ?? createArtifactStore(env.DB),
     failureStore: overrides.failureStore ?? createFailureStore(env.DB),
-    commenter: overrides.commenter ?? createReviewCommenter(env),
     appCommenters: new Map(),
     createAppCommenter: overrides.createAppCommenter ?? createReviewCommenter,
     getSandbox: overrides.getSandbox ?? ((binding, id) => getSandbox(binding, id)),
@@ -1061,7 +1131,6 @@ export function createReviewConsumer(
 }
 
 async function processMessage(payload: ReviewJobPayload, deps: ProcessDeps): Promise<ProcessOutcome> {
-  const baseFields = toBaseFields(payload);
   // Unique per attempt (plan Clarify #11): a destroyed sandbox's id is never
   // reused — attach-after-destroy behavior is unknown, uniqueness wins.
   const sandboxId = `review-${crypto.randomUUID()}`;
@@ -1105,14 +1174,22 @@ async function processMessage(payload: ReviewJobPayload, deps: ProcessDeps): Pro
   // assembled. Hoisted so the catch site's best-effort failure row can
   // exact-redact the error detail too (SEC-03).
   let secretValues: string[] = [];
+  // F-001 (plan 24 QC wave 1): toBaseFields derefs payload.appRef.appId, so
+  // an in-flight pre-deploy message (absent appRef — AL-24-4 accepts the
+  // TypeError) must throw INSIDE the try: it then flows through the
+  // established structured channel (review failed: log + AL-6
+  // review_failures row + rethrow). Pure relocation — no runtime guard
+  // (AL-24-4 forbids one).
+  let baseFields: ConsumerLogFields | undefined;
 
   try {
+    baseFields = toBaseFields(payload);
     // Review tier (AC-S7-level): resolved BEFORE any sandbox/KV step so a
     // misconfigured REVIEW_LEVEL fails loud (structured log + rethrow)
     // without touching the in-flight guard.
     level = resolveReviewLevel(deps.env.REVIEW_LEVEL);
     // Credential resolution FIRST (plan 13 Task 2, lock L4 — consumer-side),
-    // before the guard/sandbox: legacy → env singleton; app → D1 row gated
+    // before the guard/sandbox: app → D1 row gated
     // missing/deleted/disabled (throw → retry/DLQ, byte-identical) then
     // PAUSED (plan 16 lock L4: DISTINCT typed outcome, below) → decrypted
     // PEM → per-App commenter instance (cached per appId). An unresolvable
@@ -1141,19 +1218,30 @@ async function processMessage(payload: ReviewJobPayload, deps: ProcessDeps): Pro
     // the commenter — one getAppConfig read per message, before the
     // guard/sandbox so an unresolvable config (undecryptable key envelope,
     // missing DASHBOARD_ENCRYPTION_KEY) fails closed with zero side effects.
-    // Legacy → undefined → the byte-identical pre-plan-14 env assembly.
     const appCfg = await resolveAppConfig(payload, deps);
     // Per-role model overrides (plan 17 B6): rides the SAME appRef gate,
-    // before the guard like the config above. undefined (legacy / empty map)
+    // before the guard like the config above. undefined (empty map)
     // → the runner input JSON below stays byte-identical.
     const modelOverrides = await resolveModelOverrides(payload, deps);
     // Custom-provider declarations (plan 23 Task 3): hangs off the SAME
     // appRef gate, before the guard like the config/overrides above —
-    // undefined (legacy / no declarations) → the runner input JSON stays
+    // undefined (no declarations) → the runner input JSON stays
     // byte-identical and no CUSTOM_* env is injected. The decrypt face is
     // fail-loud (tamper never swallowed): a broken envelope throws here
     // with zero side effects, never a silently-skipped provider.
     const customProviders = await resolveCustomProviders(payload, deps);
+    // AL-24-5 fail-closed gate (plan 24 Task 6): after App resolution,
+    // BEFORE the in-flight guard / sandbox. The App's modelChain is the ONLY
+    // chain source and every chain provider must have a key in the App's OWN
+    // config (BYOK allowlist key — incl. `ark` for the ark-plan base
+    // provider — or a custom declaration); the SAME requirement now covers
+    // every per-role override selector chain (Bugbot 7aaf18f4). A
+    // misconfigured App throws here
+    // and flows through the F-001 structured channel (error log +
+    // review_failures stage="pipeline" row + rethrow → retry×3 → DLQ) with
+    // ZERO side effects — no webhook-face reject, no pause state, no runtime
+    // guard beyond this channel (AL-24-5 verdict 3).
+    assertAppConfigComplete(appCfg, customProviders, modelOverrides, payload.appRef.appId);
     // 0. In-flight guard (WF-002 / bugbot BB-3): when another review is
     // already running for this PR, return the DISTINCT guard-held outcome —
     // NOT a throw. The consumer schedules a per-message delayed retry
@@ -1291,15 +1379,15 @@ async function processMessage(payload: ReviewJobPayload, deps: ProcessDeps): Pro
       ...numstatLines,
     ];
     // Plan 17 B6: the App's per-role model overrides ride as an OPTIONAL
-    // input field, included ONLY when a role map resolved above — legacy /
-    // unmapped messages serialize byte-identically to the pre-plan-17 payload
+    // input field, included ONLY when a role map resolved above — no-map
+    // messages serialize byte-identically to the pre-plan-17 payload
     // (the runner-side guard + type extension are plan 17 Task 2's).
     // Plan 23 T3: the App's custom-provider declarations ride as an OPTIONAL
     // input field — keyless (toRunnerCustomProvider strips the decrypted
     // key; keys reach the container ONLY via the exec env) — included ONLY
-    // when declarations resolved above. Legacy / no-declaration messages
-    // serialize byte-identically to the pre-plan-23 payload (the runner-side
-    // guard + synthesis are plan 23 Task 3's).
+    // when declarations resolved above. No-declaration messages serialize
+    // byte-identically to the pre-plan-23 payload (the runner-side guard +
+    // synthesis are plan 23 Task 3's).
     const runnerInput = {
       worktreePath: CLONE_DIR,
       reconFacts,
@@ -1316,11 +1404,10 @@ async function processMessage(payload: ReviewJobPayload, deps: ProcessDeps): Pro
       throw new Error(`runner input write failed: exit ${writeInput.exitCode}`);
     }
 
-    // 8. In-image runner: cwd = clone dir; provider key + harness paths +
-    // OMP_REVIEW_MODEL chain + configured provider keys via exec env
-    // (buildRunnerEnv — compass D, BB-1, BB-2; per-App messages assemble the
-    // App's BYOK keys/model chain with global-env fallback and key_source
-    // logging, plan 14 B2; secrets never baked into the image, never in
+    // 8. In-image runner: cwd = clone dir; harness paths + the App's own
+    // provider keys and model chain via exec env (buildRunnerEnv — compass
+    // D, AL-24-5: per-App BYOK only, zero global fallback; key_source
+    // app|custom logging; secrets never baked into the image, never in
     // logs). The runtime runner has NO summary-degrade path: exit 0 ⇒ stdout
     // is the engine-validated mstar.review/v1 envelope.
     // AL-6 stage window: the review run itself — a non-zero exit or an exec
@@ -1331,7 +1418,7 @@ async function processMessage(payload: ReviewJobPayload, deps: ProcessDeps): Pro
     // is captured here (single source — no re-resolution split-brain) so
     // the session's actual secret values can be exact-redacted from any
     // model-echoed output below.
-    const runnerEnv = buildRunnerEnv(deps.env, appCfg, deps.log, fields, customProviders);
+    const runnerEnv = buildRunnerEnv(appCfg, deps.log, fields, customProviders);
     const run = await sandbox.exec(cmds.runner, {
       cwd: CLONE_DIR,
       env: runnerEnv,
@@ -1591,24 +1678,26 @@ async function processMessage(payload: ReviewJobPayload, deps: ProcessDeps): Pro
     // put failure AFTER a successful post is a warn + ack, never a rethrow
     // (B3): the comment is out, retrying would re-post it. The missing D1
     // row is acceptable (KV done marks completion) and alerted. Per-App
-    // attribution (plan 13 Done criterion, QC F-001): the resolved appRef's
-    // appId rides the put into `reviews.app_id`; legacy messages (appRef
-    // absent or `{ kind: "legacy" }`) omit it → the row keeps app_id NULL.
+    // attribution (plan 13 Done criterion, QC F-001; plan 24: required):
+    // the appRef's appId rides the put into `reviews.app_id` — every new
+    // row is attributed; `app_id` NULL survives only on pre-plan-24 rows.
     try {
       await deps.store.put({
         kind: "review",
         key: idemKey(key),
         schema: "mstar.review/v1",
         payload: output,
-        ...(payload.appRef?.kind === "app" ? { appId: payload.appRef.appId } : {}),
+        appId: payload.appRef.appId,
         // Version records (plan 18 Task 1, architect AL-2): `model` = the
         // head selector of the SAME effective chain the runner exec env
         // carried (single-sourced via effectiveModelChain — no re-resolution
-        // split-brain; both unset → NULL = the in-image default ran).
-        // `provider` is NULL on BOTH paths: RunnerAppConfig carries a
-        // multi-provider key set, not one provider — never invent a mapping.
-        // Plan-17 modelOverrides are NOT reflected in the columns.
-        model: chainHeadSelector(effectiveModelChain(appCfg, deps.env).chain),
+        // split-brain). AL-24-5: the fail-closed gate guarantees the App's
+        // chain is present on every success, so `model` is never NULL on a
+        // new row (the column stays nullable only for pre-plan-24 historical
+        // rows — AL-24-4). `provider` is NULL on BOTH paths: RunnerAppConfig
+        // carries a multi-provider key set, not one provider — never invent
+        // a mapping. Plan-17 modelOverrides are NOT reflected in the columns.
+        model: chainHeadSelector(effectiveModelChain(appCfg).chain),
         provider: null,
       });
     } catch (err) {
@@ -1626,7 +1715,7 @@ async function processMessage(payload: ReviewJobPayload, deps: ProcessDeps): Pro
     const detail = err instanceof Error ? err.message : String(err);
     deps.log.error(
       {
-        ...(fields ?? { ...baseFields, sandbox_id: sandboxId }),
+        ...(fields ?? { ...(baseFields ?? payloadIdentityFields(payload)), sandbox_id: sandboxId }),
         // d5-budget AC-S10-logs: the failure line carries the level's budget
         // once known (post-step-3 `fields` already has it; this spread covers
         // the pre-checkout fallback) and the runner's elapsed wall-clock once
@@ -1668,7 +1757,7 @@ async function processMessage(payload: ReviewJobPayload, deps: ProcessDeps): Pro
     } catch (recordErr) {
       const recordDetail = recordErr instanceof Error ? recordErr.message : String(recordErr);
       deps.log.warn(
-        fields ?? { ...baseFields, sandbox_id: sandboxId },
+        fields ?? { ...(baseFields ?? payloadIdentityFields(payload)), sandbox_id: sandboxId },
         `review_failures insert failed (rethrow unchanged): ${recordDetail}`,
       );
     }
@@ -1678,7 +1767,10 @@ async function processMessage(payload: ReviewJobPayload, deps: ProcessDeps): Pro
     // put attempted) OR failed — either way the next attempt may proceed.
     // releaseReviewGuard never throws (KV failure → warn; TTL expires it).
     if (guardHeld && level !== undefined) {
-      await releaseReviewGuard(deps.env.IDEMPOTENCY_KV, guardKey, level, fields ?? baseFields, deps.log);
+      // The guard is acquired only after baseFields resolves (try statement
+      // 1), so the payload fallback below is unreachable on this path — it
+      // only exists to keep the ConsumerLogFields type total.
+      await releaseReviewGuard(deps.env.IDEMPOTENCY_KV, guardKey, level, fields ?? baseFields ?? payloadIdentityFields(payload), deps.log);
     }
     if (sandbox !== null) {
       try {
@@ -1686,7 +1778,7 @@ async function processMessage(payload: ReviewJobPayload, deps: ProcessDeps): Pro
       } catch (err) {
         const detail = err instanceof Error ? err.message : String(err);
         deps.log.warn(
-          { ...(fields ?? baseFields), sandbox_id: sandboxId },
+          { ...(fields ?? baseFields ?? payloadIdentityFields(payload)), sandbox_id: sandboxId },
           `sandbox destroy failed: ${detail}`,
         );
       }

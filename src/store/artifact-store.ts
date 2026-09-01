@@ -33,12 +33,13 @@
  * bun:sqlite test double and a real `D1Database` both satisfy it
  * structurally (plan Clarify 5).
  *
- * Per-App attribution (plan 13, migration 0005): the put doc carries an
- * OPTIONAL caller-supplied `appId` — the resolved `appRef`'s id for per-App
- * messages — which is bound into `reviews.app_id`. Legacy messages (appRef
- * absent or `{ kind: "legacy" }`) omit it and the row keeps `app_id` NULL
- * (Clarify #3: NULL = legacy). The column's FK to `github_apps(id)` makes an
- * unknown appId a loud batch failure, never a silent mis-attribution.
+ * Per-App attribution (plan 13, migration 0005; plan 24 Task 1: REQUIRED):
+ * the put doc carries the caller-supplied `appId` — the resolved `appRef`'s
+ * id — which is bound into `reviews.app_id`. Every new write is attributed;
+ * `app_id` NULL survives only on pre-plan-24 historical rows (the column
+ * stays nullable, zero DDL — AL-24-4). The column's FK to `github_apps(id)`
+ * makes an unknown appId a loud batch failure, never a silent
+ * mis-attribution.
  *
  * Version records (plan 18 Task 1): the put doc may carry the review's
  * `model` (the effective model chain's head selector, consumer-resolved)
@@ -64,7 +65,7 @@ export const REVIEW_SCHEMA = "mstar.review/v1" as const;
  * `reviews.skill_version` for every v1 row (write caliber, spec § 新行写入
  * 口径): the pinned engine version + harness image commit.
  */
-export const REVIEW_SKILL_VERSION = "3.5.0+f1b60df0";
+export const REVIEW_SKILL_VERSION = "3.5.1+bde43707";
 
 /** Number of `:`-separated segments in an `idemKey()` string. */
 const IDEM_KEY_PARTS = 5;
@@ -142,24 +143,31 @@ function assertTargetAgrees(key: IdempotencyKey, payload: MstarReviewV1): void {
 
 /**
  * The review put input: the engine `ArtifactDoc` plus the caller-supplied
- * per-App attribution (plan 13, QC fix wave 1 F-001) and the plan-18
- * version records (`model` / `provider`). A structural superset
- * of the engine contract — the engine package is unchanged; the consumer is
- * the only production caller and passes `appId` for per-App messages only
- * (legacy/absent appRef omits it → the row keeps `app_id` NULL).
+ * per-App attribution (plan 13, QC fix wave 1 F-001; plan 24 Task 1:
+ * REQUIRED) and the plan-18 version records (`model` / `provider`). A
+ * structural superset of the engine contract — the engine package is
+ * unchanged; the consumer is the only production caller and always passes
+ * `appId` (the new contract's single shape).
  */
 export type ReviewArtifactDoc = ArtifactDoc & {
   /**
-   * `github_apps.id` the review belongs to (per-App jobs). Optional —
-   * absent/NULL means a legacy (env-App) review. Never a credential.
+   * `github_apps.id` the review belongs to. REQUIRED on every new write
+   * (plan 24 Task 1, AL-24-4): the type-level guarantee that no new row is
+   * unattributed — `app_id` NULL survives only on pre-plan-24 historical
+   * rows. Never a credential.
    */
-  appId?: string;
+  appId: string;
   /**
-   * Version record (plan 18 Task 1): the effective model chain's HEAD
-   * selector the review ran with, resolved consumer-side via
-   * `effectiveModelChain` (single-sourced with `buildRunnerEnv`). Optional;
-   * absent/NULL = unset (the in-image default ran — the default selector is
-   * recorded in plan 19's runbook, never hardcoded worker-side).
+   * Version record (plan 18 Task 1): the HEAD (primary) selector of the
+   * effective chain the review ran with — `chainHeadSelector` (consumer.ts)
+   * on the `effectiveModelChain` result (comma-separated, trimmed, empty
+   * segments dropped; single-sourced with `buildRunnerEnv`). Omitted/NULL
+   * is historical rows (pre-AL-24-5) or direct unit callers only: on the
+   * production path `assertAppConfigComplete` fail-closes any App whose
+   * chain is missing or parses to zero selectors, so a successful put never
+   * records NULL and the in-image DEFAULT_MODEL_PATTERN scaffold is
+   * unreachable from the consumer. Column stays nullable for the historical
+   * rows.
    */
   model?: string | null;
   /**
@@ -173,7 +181,7 @@ export type ReviewArtifactDoc = ArtifactDoc & {
 /** The D1 store face: the engine `ArtifactStore` plus the consumer's pre-check. */
 export type D1ArtifactStore = ArtifactStore & {
   /**
-   * Widened put input (see `ReviewArtifactDoc`): the optional `appId` rides
+   * Widened put input (see `ReviewArtifactDoc`): the REQUIRED `appId` rides
    * the doc into `reviews.app_id`; the optional `model` / `provider`
    * version records (plan 18 Task 1) ride into `reviews.model` /
    * `reviews.provider` (absent/NULL = unset).
@@ -234,10 +242,11 @@ export function createArtifactStore(db: D1Like): D1ArtifactStore {
       assertTargetAgrees(key, payload);
 
       const reviewId = crypto.randomUUID();
-      // app_id: the caller-supplied per-App attribution (NULL for legacy —
-      // Clarify #3: NULL = legacy). `?? null` because D1 .bind() rejects
-      // undefined; the FK to github_apps(id) rejects an unknown appId loud.
-      const appId = doc.appId ?? null;
+      // app_id: the REQUIRED caller-supplied per-App attribution (plan 24
+      // Task 1 — every new row is attributed; NULL survives only on
+      // pre-plan-24 historical rows). The FK to github_apps(id) rejects an
+      // unknown appId loud.
+      const appId = doc.appId;
       const reviewStmt = db
         .prepare(
           `INSERT INTO reviews (id, installation_id, owner, repo, pr_number, head_sha, verdict, summary_md, skill_version, envelope, app_id, model, provider)

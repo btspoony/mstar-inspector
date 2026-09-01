@@ -7,15 +7,14 @@
   "scripts": {
     "test": "bun test",
     "typecheck": "tsc --noEmit",
-    "review": "bun run src/review/runner.ts",
-    "keys": "bun run scripts/provider-keys.ts"
+    "review": "bun run src/review/runner.ts"
   },
   "engines": {
     "bun": ">=1.3.14"
   },
   "dependencies": {
     "@cloudflare/sandbox": "0.12.8",
-    "@mstar-harness/engine": "3.5.0",
+    "@mstar-harness/engine": "3.5.1",
     "@octokit/auth-app": "8.3.0",
     "@octokit/rest": "22.0.1",
     "@octokit/webhooks": "14.2.0",

@@ -15,7 +15,6 @@
  * (rotation) rebuilds + replaces the entry.
  */
 import { describe, expect, mock, test } from "bun:test";
-import worker from "../../src/worker/index";
 import { classifyWebhook, getWebhooks, verifySignature } from "../../src/worker/webhooks";
 import type { Env } from "../../src/worker/env";
 
@@ -28,9 +27,6 @@ const workerdVerify = async (): Promise<boolean> => {
 
 function makeEnv(overrides: Partial<Env> = {}): Env {
   return {
-    APP_ID: "123",
-    PRIVATE_KEY: "private-key",
-    WEBHOOK_SECRET: SECRET,
     REVIEW_QUEUE: { send: async () => {} } as unknown as Env["REVIEW_QUEUE"],
     IDEMPOTENCY_KV: {
       get: async () => null,
@@ -98,20 +94,6 @@ describe("classifyWebhook — malformed signatures fail closed with 401 (F-001)"
   });
 });
 
-describe("worker fetch entry — malformed signature maps to 401 (F-001)", () => {
-  test("malformed signature returns 401 at the HTTP boundary", async () => {
-    const res = await worker.fetch(
-      new Request("https://worker.local/webhook", {
-        method: "POST",
-        headers: { "x-hub-signature-256": "sha256=zz", "x-github-event": "pull_request" },
-        body: "{}",
-      }),
-      makeEnv(),
-    );
-    expect(res.status).toBe(401);
-  });
-});
-
 describe("module-level verifier cache (F-005 + plan 15 L1)", () => {
   test("getWebhooks returns the same instance across calls for one cacheKey", () => {
     const first = getWebhooks("workerd-test-key", SECRET);
@@ -119,12 +101,12 @@ describe("module-level verifier cache (F-005 + plan 15 L1)", () => {
     expect(second).toBe(first);
   });
 
-  test("distinct cacheKeys never share an instance (legacy / appId isolation)", () => {
-    const legacy = getWebhooks("legacy", SECRET);
+  test("distinct cacheKeys never share an instance (per-App row-id isolation)", () => {
+    const second = getWebhooks("another-app-row-id", SECRET);
     const perApp = getWebhooks("some-app-row-id", SECRET);
-    expect(perApp).not.toBe(legacy);
+    expect(perApp).not.toBe(second);
     // Same key again → the memoized instance (not a third one).
-    expect(getWebhooks("legacy", SECRET)).toBe(legacy);
+    expect(getWebhooks("another-app-row-id", SECRET)).toBe(second);
   });
 
   test("secret mismatch on the same cacheKey → rebuild + REPLACE (rotation evicts the old entry exactly)", () => {
