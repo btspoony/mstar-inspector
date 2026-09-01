@@ -42,14 +42,19 @@ GitHub webhook → POST /webhook/:appSlug (verify + classify) → Queue → Cons
    wrangler deploy        # apply D1 migrations and deploy; details in docs/deploy.md
    ```
 
-2. **Set the dashboard secrets** (four; no review credentials live at Worker level) — as **GitHub Secrets** (Settings → Secrets and variables → Actions), which the Deploy workflow injects into the Worker on every deploy:
+2. **Set the dashboard secrets** (four; no review credentials live at Worker level) — as **GitHub Secrets** (Settings → Environments → `staging` → Secrets), which the Deploy workflow injects into the Worker on every deploy:
 
    ```bash
-   # generate values locally, then add them as GitHub Secrets:
+   # generate values locally, then add them under the staging environment:
    openssl rand -base64 32    # DASHBOARD_ENCRYPTION_KEY — encrypts per-App credentials in D1
    openssl rand -base64 32    # DASHBOARD_SESSION_SECRET — session-cookie HMAC key
-   # GITHUB_OAUTH_CLIENT_ID / GITHUB_OAUTH_CLIENT_SECRET — a GitHub OAuth App
+   # OAUTH_CLIENT_ID / OAUTH_CLIENT_SECRET — a GitHub OAuth App
    # whose callback is {origin}/dashboard/oauth/callback
+   # (GitHub forbids the GITHUB_ prefix on secret names, so the GitHub-side
+   #  names drop it; the Worker still receives GITHUB_OAUTH_CLIENT_ID /
+   #  GITHUB_OAUTH_CLIENT_SECRET via the Deploy workflow's bulk mapping.
+   #  OAUTH_CLIENT_ID is a variable — client id is not sensitive;
+   #  OAUTH_CLIENT_SECRET is a secret.)
    ```
 
 3. **Sign in and register a GitHub App** — visit `https://<your-worker>/dashboard`, sign in with GitHub, and follow the **Register App** manifest flow. It creates the GitHub App on your account with a per-App webhook URL of the form `{origin}/webhook/<slug>`, stores the PEM and webhook secret encrypted in D1, and shows you the exact webhook URL to set.
