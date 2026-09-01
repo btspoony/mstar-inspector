@@ -99,6 +99,13 @@ async function seedApp(db: ReturnType<typeof createTestD1>, opts: SeedOptions): 
        VALUES (?, ?, ?, ?, ?, ?, 'tester', 'active', NULL, datetime('now'), datetime('now'))`,
     )
     .run(id, opts.slug, opts.githubAppId, opts.slug, privateKeyEnc, webhookSecretEnc);
+  // AL-24-5 (plan 24 Task 6): every seeded App gets its AI-config health
+  // baseline — a model chain + the `ark` BYOK key its chain needs — so the
+  // fail-closed gate in the consumer passes on the success-path tests (this
+  // file pins credential resolution, not config completeness).
+  const configStore = createAppConfigStore(db, TEST_KEY);
+  await configStore.setModelChain(id, "ark-plan/deepseek-v4-flash");
+  await configStore.setProviderKey(id, "ark", "ark-key");
   return { id };
 }
 
@@ -203,7 +210,6 @@ const kv = {
 
 function makeEnv(overrides: Partial<PipelineEnv> = {}): PipelineEnv {
   return {
-    OMP_MODEL_KEY: "ark-key",
     DB: createTestD1() as never,
     IDEMPOTENCY_KV: kv as never,
     SANDBOX: {} as never,
@@ -655,7 +661,11 @@ describe("per-App pause ack-skip (plan 16, architect lock L4)", () => {
       created_at: string;
       updated_at: string;
     };
+    // The seeded per-App config rows share the FK (0006: NO ACTION) — clear
+    // them first so the hard DELETE can proceed; re-seed them on re-insert.
     db.raw.prepare("DELETE FROM reviews WHERE app_id = ?").run(appX.id);
+    db.raw.prepare("DELETE FROM app_model_config WHERE app_id = ?").run(appX.id);
+    db.raw.prepare("DELETE FROM app_provider_keys WHERE app_id = ?").run(appX.id);
     db.raw.prepare("DELETE FROM github_apps WHERE id = ?").run(appX.id);
     await expect(
       consumer(makeBatch(makePayload({ pr_number: 43, appRef: { appId: appX.id } }))),
@@ -672,6 +682,10 @@ describe("per-App pause ack-skip (plan 16, architect lock L4)", () => {
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(row.id, row.slug, row.github_app_id, row.name, row.private_key_enc, row.webhook_secret_enc, row.created_by, row.status, row.deleted_at, row.created_at, row.updated_at);
+    // Re-seed the per-App AI config so the fail-closed gate passes again.
+    const configStore = createAppConfigStore(db, TEST_KEY);
+    await configStore.setModelChain(row.id, "ark-plan/deepseek-v4-flash");
+    await configStore.setProviderKey(row.id, "ark", "ark-key");
     await consumer(makeBatch(makePayload({ pr_number: 44, appRef: { appId: appX.id } })));
     expect(factoryCreds).toHaveLength(2);
     expect(factoryCreds[1]!.cred).toEqual({ APP_ID: "111222", PRIVATE_KEY: PEM_X });

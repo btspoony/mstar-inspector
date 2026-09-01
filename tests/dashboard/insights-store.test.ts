@@ -153,7 +153,10 @@ function seedFixture(db: TestD1): void {
     owner: "acme",
     repo: "widgets",
     pr_number: 4,
-    reviewedAt: reviewedAt(2),
+    // Same timestamp as r-a: the era gate (not the week window) is what
+    // excludes the row — reviewedAt(1) is deterministic across calendar
+    // weeks, where -1/-2 days can straddle the Monday boundary.
+    reviewedAt: reviewedAt(1),
     verdict: "comment",
     envelope: null,
     findings: [{ id: "f-m1", severity: "critical", category: "security", title: "Old era finding", fingerprint: null }],
@@ -196,9 +199,10 @@ describe("createInsightsStore", () => {
     expect(insights.findingsBySeverity.some((s) => s.severity === "critical")).toBe(false);
     expect(insights.verdictDistribution.some((v) => v.verdict === "comment")).toBe(false);
     expect(insights.findingsByCategory.some((c) => c.category === "security")).toBe(false);
-    // The M1 review sits in the SAME week as r-a (reviewedAt(2) vs (1)) —
-    // the era gate, not the window, is what keeps it out of weeklyTrend.
-    expect(mondayOf(reviewedAt(2))).toBe(mondayOf(reviewedAt(1)));
+    // The M1 review shares r-a's timestamp — the era gate, not the window,
+    // is what keeps it out of weeklyTrend: the week containing that
+    // timestamp shows ONLY r-a's counts (reviews: 1, findings: 2), never
+    // r-m1's (which would make it reviews: 2, findings: 3).
     expect(insights.weeklyTrend.find((w) => w.week_start === mondayOf(reviewedAt(1)))).toEqual({
       week_start: mondayOf(reviewedAt(1)),
       reviews: 1,

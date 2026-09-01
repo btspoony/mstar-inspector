@@ -581,7 +581,7 @@ describe("app-config store (createAppConfigStore) — model chain + getAppConfig
     expect(await store.getModelChain(app.id)).toBe("second/model");
   });
 
-  test("setModelChain(null) REMOVES the row (absent = unset = global fallback)", async () => {
+  test("setModelChain(null) REMOVES the row (absent = unset; such an App's reviews fail closed — AL-24-5)", async () => {
     const db = createAppConfigD1();
     const app = await seedApp(db, { slug: "a", createdBy: "mallory" });
     const store = configStore(db);
@@ -593,7 +593,7 @@ describe("app-config store (createAppConfigStore) — model chain + getAppConfig
     await expect(store.setModelChain(app.id, null)).resolves.toBeUndefined();
   });
 
-  test("setModelChain(\"\") CLEARS the row — same path as null (plan 15: empty = fallback)", async () => {
+  test("setModelChain(\"\") CLEARS the row — same path as null (plan 15: empty = unset = fail closed)", async () => {
     const db = createAppConfigD1();
     const app = await seedApp(db, { slug: "a", createdBy: "mallory" });
     const store = configStore(db);
@@ -827,7 +827,9 @@ describe("app-config store (createAppConfigStore) — model roles (plan 17 T1)",
 
 describe("app-config store (createAppConfigStore) — custom providers (plan 23 T2)", () => {
   const CUSTOM: AppCustomProvider = {
-    provider_id: "ark",
+    // NOT a built-in: "ark" is a PROVIDER_IDS member since plan 24 Task 6
+    // (AL-24-5), so a custom declaration must use a free id.
+    provider_id: "my-custom",
     base_url: "https://ark.cn-beijing.volces.com/api/v3",
     api: "openai-completions",
     model_ids: ["deepseek-v4-flash", "deepseek-r1"],
@@ -1025,9 +1027,15 @@ describe("app-config store (createAppConfigStore) — custom providers (plan 23 
 // --- duplication locks (Q2: dashboard may not import pipeline/review) ---
 
 describe("duplication locks", () => {
+  // PROVIDER_IDS — sync with PROVIDERS in src/pipeline/providers.ts. Drift
+  // breaks the locked 19-id set below (a future provider PR must update BOTH
+  // the pipeline allowlist and this dashboard mirror).
   test("PROVIDER_IDS mirrors the pipeline PROVIDERS key sequence exactly", () => {
     expect([...PROVIDER_IDS]).toEqual(Object.keys(PROVIDERS));
-    expect(PROVIDER_IDS).toHaveLength(18); // plan Scope: value domain locked to the 18 ids
+    // 19 ids: the 18 built-in omp providers + `ark` (plan 24 Task 6 /
+    // AL-24-5 — the in-image ark-plan base provider's ARK_API_KEY rides the
+    // per-App BYOK keys map under this id).
+    expect(PROVIDER_IDS).toHaveLength(19);
   });
 
   test("parseModelChain behaves exactly like the runtime-omp parseModelSelectors", () => {
@@ -1343,7 +1351,7 @@ describe("POST /dashboard/apps/:slug/settings — save-chain (op=save-chain)", (
     expect(row.model_chain).toBe(PLAIN_CHAIN);
   });
 
-  test("empty chain CLEARS the config (global fallback); a second save replaces", async () => {
+  test("empty chain CLEARS the config (reviews then fail closed — AL-24-5); a second save replaces", async () => {
     const { db, app } = await seededWorld();
     const cookie = `${SESSION_COOKIE}=${await sessionCookie("mallory")}`;
     const env = makeEnv(db);
@@ -1720,7 +1728,7 @@ describe("POST /dashboard/apps/:slug/settings/key/delete (delete-key route)", ()
 describe("POST /dashboard/apps/:slug/settings — custom providers (op=add-custom-provider / remove-custom-provider, plan 23 T2)", () => {
   const CUSTOM_FORM: Record<string, string> = {
     op: "add-custom-provider",
-    provider_id: "ark",
+    provider_id: "my-custom",
     base_url: "https://ark.cn-beijing.volces.com/api/v3",
     api: "openai-completions",
     model_ids: "deepseek-v4-flash, deepseek-r1",
@@ -1734,10 +1742,10 @@ describe("POST /dashboard/apps/:slug/settings — custom providers (op=add-custo
     expect(res.status).toBe(200);
     const body = await res.text();
     expect(body).toContain("Custom providers");
-    expect(body).toContain("<strong>ark</strong>");
+    expect(body).toContain("<strong>my-custom</strong>");
     expect(body).toContain("deepseek-v4-flash");
     const row = db.raw
-      .query("SELECT api_key_enc FROM app_custom_providers WHERE app_id = ? AND provider_id = 'ark'")
+      .query("SELECT api_key_enc FROM app_custom_providers WHERE app_id = ? AND provider_id = 'my-custom'")
       .get(app.id) as { api_key_enc: string };
     expect(row.api_key_enc).toMatch(/^v1\.primary\./);
     expect(row.api_key_enc).not.toContain("sk-custom-ark-9988");
@@ -1867,7 +1875,7 @@ describe("POST /dashboard/apps/:slug/settings — custom providers (op=add-custo
     await postForm(SETTINGS, await mallory(), makeEnv(db), CUSTOM_FORM);
     const res = await postForm(SETTINGS, await mallory(), makeEnv(db), {
       op: "remove-custom-provider",
-      provider_id: "ark",
+      provider_id: "my-custom",
     });
     expect(res.status).toBe(200);
     expect(rawCount(db, "app_custom_providers")).toBe(0);
@@ -1915,7 +1923,7 @@ describe("settings view DESIGN mapping (plan 14 T2)", () => {
     expect(body).toContain('<button type="submit" class="danger">Remove</button>');
   });
 
-  test("add-key form: password input; provider select offers EXACTLY the 18-id allowlist", async () => {
+  test("add-key form: password input; provider select offers EXACTLY the PROVIDER_IDS allowlist (19 ids incl. ark)", async () => {
     const body = await getSettingsPage("mallory");
     // autocomplete=new-password: the pasted provider API key is a new secret
     // per submit — never a saved dashboard login for password managers.
@@ -1933,9 +1941,10 @@ describe("settings view DESIGN mapping (plan 14 T2)", () => {
     expect(options).toEqual([...PROVIDER_IDS]);
   });
 
-  test("model chain copy states the empty = deployment-default fallback explicitly (whitespace-only save clears)", async () => {
+  test("model chain copy states the empty chain = fail closed explicitly (no deployment-level fallback, AL-24-5)", async () => {
     const body = await getSettingsPage("mallory");
-    expect(body).toContain("fall back to the deployment default");
+    expect(body).toContain("fail closed");
+    expect(body).toContain("until the chain and the required provider keys are configured");
   });
 
   test("a key of ≤4 characters renders the no-tail copy — the mask never reveals a whole key", async () => {
@@ -1997,7 +2006,7 @@ describe("settings view — custom providers section (plan 23 T2)", () => {
     await configStore(db).upsertCustomProvider(
       app.id,
       {
-        provider_id: "ark",
+        provider_id: "my-custom",
         base_url: 'https://evil.example.com/?q="><script>alert(1)</script>',
         api: "openai-completions",
         model_ids: ['"><img src=x onerror=alert(1)>'],
@@ -2016,7 +2025,7 @@ describe("settings view — custom providers section (plan 23 T2)", () => {
     const { db, app } = await seededWorld();
     await configStore(db).upsertCustomProvider(
       app.id,
-      { provider_id: "ark", base_url: "https://ark.example.com", api: "openai-completions", model_ids: ["deepseek-v4-flash"] },
+      { provider_id: "my-custom", base_url: "https://ark.example.com", api: "openai-completions", model_ids: ["deepseek-v4-flash"] },
       "sk-custom-ark-9988",
     );
     // Same db as the stored declaration — getSettingsPage builds a FRESH
@@ -2024,7 +2033,7 @@ describe("settings view — custom providers section (plan 23 T2)", () => {
     const res = await get(SETTINGS, `${SESSION_COOKIE}=${await sessionCookie("mallory")}`, makeEnv(db));
     const body = await res.text();
     expect(body).toContain('<input type="hidden" name="op" value="remove-custom-provider">');
-    expect(body).toContain('<input type="hidden" name="provider_id" value="ark">');
+    expect(body).toContain('<input type="hidden" name="provider_id" value="my-custom">');
   });
 });
 

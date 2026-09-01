@@ -65,9 +65,15 @@ never in git (full per-key notes in `.env.example`):
 | `GITHUB_OAUTH_CLIENT_ID` / `GITHUB_OAUTH_CLIENT_SECRET` | dashboard | user OAuth login (distinct from the review App) |
 | `DASHBOARD_SESSION_SECRET` | dashboard | session-cookie HMAC key |
 | `DASHBOARD_ENCRYPTION_KEY` | multi-App | AES-256-GCM master key for D1-stored App credentials |
-| `OMP_MODEL_KEY` | review | ark-plan provider key; forwarded into the container as `ARK_API_KEY` |
 | `ALERT_WEBHOOK_URL` | no — **NEW (plan 19)** | ops sweep alert webhook; unset = log-only alerting (§ Ops config) |
-| 18 built-in provider keys | no | fallback provider auth — `bun run keys` sets them on the Worker (see README § Setting provider keys) |
+
+Provider API keys and the review model chain are **not** Worker env — they
+live per App in D1 (`app_provider_keys` / `app_model_config`, migration
+0006), configured on each App's dashboard Settings page and injected into the
+review container from the App's config only (AL-24-5 / plan 24 Task 6: the
+`OMP_MODEL_KEY` / `OMP_REVIEW_MODEL` / `bun run keys` Worker-secret surface
+was retired with the global fallback — an App missing its chain or a chain
+provider's key fails its reviews closed).
 
 Plain vars — `wrangler.jsonc` `vars` or the dashboard's Worker variable
 settings; redeploy to change:
@@ -76,7 +82,6 @@ settings; redeploy to change:
 |---|---|---|
 | `REVIEW_ENABLED` | **off** | fail-closed kill-switch; exactly `"true"` enables reviews |
 | `ADMIN_LOGINS` | unset | comma-separated GitHub logins bootstrapped as dashboard admin |
-| `OMP_REVIEW_MODEL` | unset | global model chain override (first selector = primary; unset = in-image default, § Image pins) |
 
 GitHub App setup (permissions, webhook events, installation):
 `.mstar/iterations/v0.2/guides/github-app-runbook.md`.
@@ -278,11 +283,10 @@ openssl rand -base64 32
 wrangler secret put DASHBOARD_ENCRYPTION_KEY
 ```
 
-There is no `bun run keys` entry for this key — that script manages the 18
-built-in provider keys only (`scripts/provider-keys.ts`); the encryption key
-is a plain `wrangler secret put`. It is independent of
-`DASHBOARD_SESSION_SECRET` (session HMAC) — never reuse either key for the
-other duty (rotation stays decoupled).
+This key is a plain `wrangler secret put` (no key script — the
+`bun run keys` worker-secret face was retired in plan 24; provider keys are
+per-App now). It is independent of `DASHBOARD_SESSION_SECRET` (session HMAC)
+— never reuse either key for the other duty (rotation stays decoupled).
 
 ### 2. Register an App from the dashboard
 
@@ -363,9 +367,13 @@ first, per the checklist above).
 
 The R1 pin proves the per-App model configuration reaches the review and is
 recorded. `reviews.model` records the **effective BASE chain head** — the
-first selector of the App's stored model chain, falling back to
-`OMP_REVIEW_MODEL`, then NULL = the in-image default
-(`src/pipeline/consumer.ts` `effectiveModelChain` + `chainHeadSelector`).
+first selector of the App's stored model chain. AL-24-5 (plan 24 Task 6):
+there is no deployment-level chain to fall back to — an App with no chain
+fails its reviews closed (structured `review_failures` row, `stage=pipeline`,
+retry → DLQ), so a successful review ALWAYS has a non-NULL `model` (NULL
+survives only on pre-plan-24 historical rows — AL-24-4; see
+`src/pipeline/consumer.ts` `assertAppConfigComplete`/`effectiveModelChain` +
+`chainHeadSelector`).
 Per-role overrides (`app_model_roles`, migration 0009) are deliberately NOT
 column-reflected — pin those with the completed review + `wrangler tail`
 runner evidence, not the column.
@@ -439,8 +447,10 @@ Evidence: iteration spec `.mstar/iterations/v0.7/specs/m3-production-grade.md`
 It is deliberately NOT activated. Reasons (AL-4):
 
 - The host inventory has no SSOT in this repo: the 18 built-in provider API
-  hosts resolve in omp's registry (outside the repo); only the ark custom
-  host is pinned in-repo (`sandbox-image/omp-models.yml`).
+  hosts resolve in omp's runtime registry (outside the repo — the omp SDK
+  registry, NOT the Worker-side `PROVIDERS` allowlist, which is a separate
+  19-entry list since plan 24 Task 6 added `ark`); only the ark custom host
+  is pinned in-repo (`sandbox-image/omp-models.yml`).
 - Per-App BYOK keeps the provider set open — the host set is a product
   surface, not a constant.
 - A missing host fails CLOSED (520 → review failure → retry → DLQ) — a worse
@@ -461,9 +471,10 @@ controls are installed (the Dockerfile carries the documentation block only).
   - `github.com` / `api.github.com` — git clone/fetch of the PR head (token
     via scoped extraheader exec env) and gh CLI.
   - Provider API hosts by active provider config — the 18 built-in provider
-    hosts resolve in omp's registry (omp SDK 18.0.4, outside this repo); the
-    ark custom host `ark.cn-beijing.volces.com` is pinned in
-    `sandbox-image/omp-models.yml`.
+    hosts resolve in omp's runtime registry (omp SDK 18.0.4, outside this
+    repo — NOT the Worker-side `PROVIDERS` allowlist, which is a separate
+    19-entry list since plan 24 Task 6 added `ark`); the ark custom host
+    `ark.cn-beijing.volces.com` is pinned in `sandbox-image/omp-models.yml`.
 - **Runner tool whitelist:** the in-image review session restricts agent
   tools to read-only `read` / `grep` / `glob`
   (`src/review/runtime-omp.ts` `REVIEW_TOOL_NAMES`) — no write/exec tool
@@ -487,10 +498,13 @@ the explicit upgrade decision); base image / Bun / gh re-verified, no bump:
 **In-image DEFAULT model selector: `ark-plan/deepseek-v4-flash`** (pins:
 `src/review/runtime-omp.ts` `DEFAULT_MODEL_PATTERN` +
 `sandbox-image/omp-models.yml`). This line is the record for architect
-verdict AL-2: when neither the App's `modelChain` nor `OMP_REVIEW_MODEL` is
-set, the runner falls back to this selector and the Worker records
-`reviews.model = NULL` rather than duplicating the constant — audits resolve
-NULL against THIS line.
+verdict AL-2: with the zero-global-fallback cutover (AL-24-5 / plan 24 Task
+6) the App's `modelChain` is the only chain source — a chain-less App is
+fail-closed by the consumer and the runner's default is reachable only via a
+direct/manual in-image runner call (the in-image scaffold, not the Worker
+path). On the production path the Worker never records NULL (the column
+stays nullable for historical rows, AL-24-4); local manual runs resolve the
+in-image default against THIS line.
 
 Deployed image record (executed plan 19 T3, 2026-08-31 UTC):
 

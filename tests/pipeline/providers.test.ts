@@ -1,45 +1,14 @@
 /**
- * Shared provider mapping tests (bugbot BB-2): the allowlist picker the
- * queue consumer uses to forward provider keys into the review container.
+ * Shared provider mapping tests (bugbot BB-2 → AL-24-5): the allowlist that
+ * maps per-App BYOK provider ids to the env var names injected into the
+ * review container. The global-env picker (`pickProviderKeys`) was retired
+ * with the zero-global-fallback cutover (plan 24 Task 6): keys come only
+ * from the App's per-App config, so there is nothing to pick from a
+ * worker-env-shaped record anymore.
  */
 
 import { describe, expect, test } from "bun:test";
-import { pickProviderKeys, PROVIDERS, PROVIDER_ENV_NAMES, providerEnvName , customProviderEnvName, CUSTOM_PROVIDER_ENV_PREFIX, CUSTOM_PROVIDER_ENV_SUFFIX } from "../../src/pipeline/providers";
-
-describe("pickProviderKeys (BB-2 allowlist)", () => {
-  test("forwards only known keys that are present AND non-empty", () => {
-    expect(
-      pickProviderKeys({
-        ANTHROPIC_API_KEY: "sk-ant-1",
-        OPENAI_API_KEY: "",
-        GEMINI_API_KEY: undefined,
-        COPILOT_GITHUB_TOKEN: "copilot-token",
-        MISTRAL_API_KEY: " ",
-      }),
-    ).toEqual({
-      ANTHROPIC_API_KEY: "sk-ant-1",
-      COPILOT_GITHUB_TOKEN: "copilot-token",
-    });
-  });
-
-  test("never forwards keys outside the PROVIDERS allowlist", () => {
-    expect(
-      pickProviderKeys({
-        ARBITRARY_SECRET: "leak",
-        ARK_API_KEY: "ark-key", // NOT a built-in provider key (custom baseUrl provider)
-        ANTHROPIC_OAUTH_TOKEN: "oauth", // deliberately absent (different auth mechanism)
-      }),
-    ).toEqual({});
-  });
-
-  test("every PROVIDER env name is picked through the allowlist", () => {
-    const env: Record<string, string> = {};
-    for (const name of PROVIDER_ENV_NAMES) env[name] = `v-${name}`;
-    const picked = pickProviderKeys(env);
-    expect(Object.keys(picked).sort()).toEqual([...PROVIDER_ENV_NAMES].sort());
-    for (const name of PROVIDER_ENV_NAMES) expect(picked[name]).toBe(`v-${name}`);
-  });
-});
+import { PROVIDERS, PROVIDER_ENV_NAMES, providerEnvName, customProviderEnvName, CUSTOM_PROVIDER_ENV_PREFIX, CUSTOM_PROVIDER_ENV_SUFFIX } from "../../src/pipeline/providers";
 
 describe("shared provider mapping", () => {
   test("PROVIDER_ENV_NAMES is the frozen env-name snapshot of PROVIDERS", () => {
@@ -51,6 +20,14 @@ describe("shared provider mapping", () => {
     expect(providerEnvName("anthropic")).toBe("ANTHROPIC_API_KEY");
     expect(providerEnvName("openrouter")).toBe("OPENROUTER_API_KEY");
     expect(providerEnvName("not-a-provider")).toBeUndefined();
+  });
+
+  test("ark maps to ARK_API_KEY — the in-image ark-plan base provider's key env (AL-24-5)", () => {
+    expect(PROVIDERS["ark"]).toEqual({ envName: "ARK_API_KEY", label: "Ark" });
+    expect(providerEnvName("ark")).toBe("ARK_API_KEY");
+    // The provider set is the SSOT the dashboard PROVIDER_IDS mirror locks
+    // against (tests/worker/app-config.test.ts parity lock).
+    expect(Object.keys(PROVIDERS)).toHaveLength(19);
   });
 });
 describe("customProviderEnvName (plan 23 Task 3, AL-23-1)", () => {
