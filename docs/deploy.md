@@ -373,7 +373,9 @@ fails its reviews closed (structured `review_failures` row, `stage=pipeline`,
 retry → DLQ), so a successful review ALWAYS has a non-NULL `model` (NULL
 survives only on pre-plan-24 historical rows — AL-24-4; see
 `src/pipeline/consumer.ts` `assertAppConfigComplete`/`effectiveModelChain` +
-`chainHeadSelector`).
+`chainHeadSelector`). The same gate checks every per-role override selector
+chain: an override referencing a provider with no configured key fails
+closed the same way (Bugbot 7aaf18f4).
 Per-role overrides (`app_model_roles`, migration 0009) are deliberately NOT
 column-reflected — pin those with the completed review + `wrangler tail`
 runner evidence, not the column.

@@ -786,8 +786,12 @@ function chainHeadSelector(chain: string | undefined): string | null {
  * BYOK allowlist key (app_provider_keys, provider id → env name via the
  * PROVIDERS mapping, now including `ark` → ARK_API_KEY for the in-image
  * ark-plan base provider) or a custom declaration with a non-blank key
- * (CUSTOM_<ID>_API_KEY). Missing/blank chain or a chain provider with no
- * key source throws; the error flows through the F-001 structured channel
+ * (CUSTOM_<ID>_API_KEY). The SAME key-source requirement applies to every
+ * selector of every per-role override chain (Bugbot 7aaf18f4): a role
+ * override referencing a provider with no configured key must fail closed
+ * here, never after the runner clones/starts (the F-001 channel is the
+ * fail boundary either way). Missing/blank chain or a chain provider with
+ * no key source throws; the error flows through the F-001 structured channel
  * (review failed log + review_failures stage="pipeline" row + rethrow →
  * retry×3 → DLQ) — NO webhook-face reject, NO pause state, NO runtime guard
  * beyond this channel (AL-24-5 verdict 3). The check runs AFTER App
@@ -797,6 +801,7 @@ function chainHeadSelector(chain: string | undefined): string | null {
 function assertAppConfigComplete(
   appCfg: RunnerAppConfig,
   customProviders: readonly CustomProviderConsumerConfig[] | undefined,
+  modelOverrides: Record<string, string> | undefined,
   appId: string,
 ): void {
   const chain = appCfg.modelChain === null ? "" : appCfg.modelChain.trim();
@@ -837,12 +842,34 @@ function assertAppConfigComplete(
     }
     return customProviderEnvName(provider);
   };
-  for (const segment of chain.split(",")) {
-    const selector = segment.trim();
-    if (selector === "") continue; // the runner drops empty segments too
-    const provider = selector.split("/")[0]!.trim();
-    if (!availableEnvNames.has(neededEnvName(provider))) {
-      throw new Error(`per-App config incomplete: app ${appId}: provider ${provider} has no configured key`);
+  // Every chain that must resolve to configured keys: the App's modelChain
+  // plus each per-role override's selector chain (Bugbot 7aaf18f4 — the
+  // app_model_roles selectors reach the runner as the `modelOverrides`
+  // input field, so they carry the same fail-closed requirement). Both use
+  // the runner's parseModelSelectors grammar (comma-separated, trimmed,
+  // empty segments dropped; provider = the segment before the first `/`;
+  // a selector whose shape yields no provider is left to the runner exactly
+  // as the chain path does today — no new fail is invented here).
+  const chains: Array<{ role: string | null; chain: string }> = [
+    { role: null, chain },
+    ...(modelOverrides === undefined
+      ? []
+      : Object.entries(modelOverrides).map(([role, overrideChain]) => ({
+          role,
+          chain: overrideChain.trim(),
+        }))),
+  ];
+  for (const { role, chain: candidateChain } of chains) {
+    for (const segment of candidateChain.split(",")) {
+      const selector = segment.trim();
+      if (selector === "") continue; // the runner drops empty segments too
+      const provider = selector.split("/")[0]!.trim();
+      if (!availableEnvNames.has(neededEnvName(provider))) {
+        const where = role === null ? "" : `role override \`${role}\` `;
+        throw new Error(
+          `per-App config incomplete: app ${appId}: ${where}provider ${provider} has no configured key`,
+        );
+      }
     }
   }
 }
@@ -1191,12 +1218,14 @@ async function processMessage(payload: ReviewJobPayload, deps: ProcessDeps): Pro
     // BEFORE the in-flight guard / sandbox. The App's modelChain is the ONLY
     // chain source and every chain provider must have a key in the App's OWN
     // config (BYOK allowlist key — incl. `ark` for the ark-plan base
-    // provider — or a custom declaration). A misconfigured App throws here
+    // provider — or a custom declaration); the SAME requirement now covers
+    // every per-role override selector chain (Bugbot 7aaf18f4). A
+    // misconfigured App throws here
     // and flows through the F-001 structured channel (error log +
     // review_failures stage="pipeline" row + rethrow → retry×3 → DLQ) with
     // ZERO side effects — no webhook-face reject, no pause state, no runtime
     // guard beyond this channel (AL-24-5 verdict 3).
-    assertAppConfigComplete(appCfg, customProviders, payload.appRef.appId);
+    assertAppConfigComplete(appCfg, customProviders, modelOverrides, payload.appRef.appId);
     // 0. In-flight guard (WF-002 / bugbot BB-3): when another review is
     // already running for this PR, return the DISTINCT guard-held outcome —
     // NOT a throw. The consumer schedules a per-message delayed retry

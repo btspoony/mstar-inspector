@@ -762,6 +762,13 @@ describe("runner input modelOverrides threading (plan 17 Task 1)", () => {
     reset();
     const db = createMigratedTestD1();
     const appX = await seedApp(db, "app-x");
+    // The override chains reference openai/anthropic (allowed-list providers)
+    // — the Bugbot-7aaf18f4 gate requires a key for every override provider,
+    // so configure them alongside the ark baseline.
+    await configureApp(db, appX.id, "ark-plan/deepseek-v4-flash", {
+      openai: "sk-x-openai",
+      anthropic: "sk-x-anthropic",
+    });
     const store = createAppConfigStore(db, TEST_KEY);
     await store.setModelRole(appX.id, "mstar-review-seat", "ark-plan/deepseek-v4-flash:high");
     await store.setModelRole(appX.id, "code-reviewer", "openai/gpt-5:thinking, anthropic/claude-x");
@@ -810,6 +817,9 @@ describe("runner input modelOverrides threading (plan 17 Task 1)", () => {
     reset();
     const db = createMigratedTestD1();
     const appX = await seedApp(db, "app-x");
+    // The override references the openai provider — its key must exist for
+    // the fail-closed gate (Bugbot 7aaf18f4).
+    await configureApp(db, appX.id, "ark-plan/deepseek-v4-flash", { openai: "sk-x-openai" });
     const store = createAppConfigStore(db, TEST_KEY);
     await store.setModelRole(appX.id, "code-reviewer", "openai/v1");
     const consumer = createReviewConsumer(makeEnv({ DB: db as never }), testLog, testOverrides);
@@ -858,6 +868,104 @@ describe("runner input modelOverrides threading (plan 17 Task 1)", () => {
     expect(errLine!.fields.app_id).toBe(appX.id);
   });
 });
+// --- per-role override provider key gate (Bugbot 7aaf18f4) ---
+
+describe("per-role override provider key gate (Bugbot 7aaf18f4)", () => {
+  test("role override referencing a provider with no key → fail closed via the gate, healthy sibling completes (stage=pipeline row)", async () => {
+    reset();
+    const db = createMigratedTestD1();
+    // Healthy sibling: valid base chain + its own keys.
+    const healthy = await seedApp(db, "healthy");
+    await configureApp(db, healthy.id, "openai/gpt-app", { openai: "sk-healthy-openai" });
+    // The misconfigured App: a VALID base chain (openai key present), but its
+    // per-role override chain references anthropic — a provider with NO key
+    // in THIS App's config. Only the override gate catches this: pre-fix the
+    // message passed assertAppConfigComplete, cloned, and failed at the
+    // runner (stage=runner) instead of failing closed here with zero side
+    // effects.
+    const badOverride = await seedApp(db, "bad-override");
+    await configureApp(db, badOverride.id, "openai/gpt-app", { openai: "sk-bo-openai" });
+    const store = createAppConfigStore(db, TEST_KEY);
+    await store.setModelRole(badOverride.id, "code-reviewer", "anthropic/claude-x");
+    const consumer = createReviewConsumer(makeEnv({ DB: db as never }), testLog, testOverrides);
+
+    await expect(
+      consumer(
+        makeBatch(
+          makePayload({ pr_number: 42, appRef: { appId: healthy.id } }),
+          makePayload({ pr_number: 43, appRef: { appId: badOverride.id } }),
+        ),
+      ),
+    ).rejects.toThrow(
+      /per-App config incomplete: app .*role override `code-reviewer` provider anthropic has no configured key/,
+    );
+
+    // The healthy sibling completed with ITS OWN keys + chain.
+    const env = runnerEnvs()[0]!;
+    expect(env.OPENAI_API_KEY).toBe("sk-healthy-openai");
+    expect(appCalls).toEqual(["token", "post"]); // only the healthy sibling reviewed
+    // The misconfigured sibling failed structurally through the F-001
+    // channel: one review_failures row at stage=pipeline (payload sha) plus
+    // the structured error log — zero sandbox/guard/GitHub side effects.
+    const rows = db.raw
+      .query("SELECT stage, error, head_sha FROM review_failures ORDER BY rowid")
+      .all() as Array<{ stage: string; error: string; head_sha: string }>;
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.stage).toBe("pipeline");
+    expect(rows[0]!.error).toContain("role override `code-reviewer` provider anthropic has no configured key");
+    expect(rows[0]!.head_sha).toBe(SHA);
+    const errLine = logLines.find((l) => l.level === "error");
+    expect(errLine).toBeDefined();
+    expect(errLine!.fields.app_id).toBe(badOverride.id);
+    expect(errLine!.msg).toContain("role override `code-reviewer` provider anthropic has no configured key");
+  });
+
+  test("role override whose provider HAS an allowlisted key → gate passes, override reaches the runner input", async () => {
+    reset();
+    const db = createMigratedTestD1();
+    const appX = await seedApp(db, "app-x");
+    await configureApp(db, appX.id, "openai/gpt-app", { openai: "sk-x-openai" });
+    const store = createAppConfigStore(db, TEST_KEY);
+    await store.setModelRole(appX.id, "code-reviewer", "openai/gpt-5:thinking, openai/gpt-5-mini");
+    const consumer = createReviewConsumer(makeEnv({ DB: db as never }), testLog, testOverrides);
+
+    await consumer(makeBatch(makePayload({ appRef: { appId: appX.id } })));
+
+    // The override passed the gate and reaches the runner input verbatim;
+    // the app key rides the exec env under the mapped env name.
+    const input = runnerInputs()[0]!;
+    expect(input.modelOverrides).toEqual({ "code-reviewer": "openai/gpt-5:thinking, openai/gpt-5-mini" });
+    expect(runnerEnvs()[0]!.OPENAI_API_KEY).toBe("sk-x-openai");
+    expect(appCalls).toEqual(["token", "post"]);
+  });
+
+  test("role override referencing a CUSTOM provider declaration (with key) → gate passes, override reaches the runner input", async () => {
+    reset();
+    const db = createMigratedTestD1();
+    const appX = await seedApp(db, "app-x");
+    await configureApp(db, appX.id, "openai/gpt-app", { openai: "sk-x-openai" });
+    const store = createAppConfigStore(db, TEST_KEY);
+    await store.upsertCustomProvider(
+      appX.id,
+      {
+        provider_id: "my-provider",
+        base_url: "https://my-provider.example.com/v1",
+        api: "openai-completions",
+        model_ids: ["m1"],
+      },
+      "sk-custom-fixture-AAA",
+    );
+    await store.setModelRole(appX.id, "frontend-dev", "my-provider/m1");
+    const consumer = createReviewConsumer(makeEnv({ DB: db as never }), testLog, testOverrides);
+
+    await consumer(makeBatch(makePayload({ appRef: { appId: appX.id } })));
+
+    const input = runnerInputs()[0]!;
+    expect(input.modelOverrides).toEqual({ "frontend-dev": "my-provider/m1" });
+    expect(appCalls).toEqual(["token", "post"]);
+  });
+});
+
 describe("custom provider env injection + runner input threading (plan 23 Task 3, AL-23-1)", () => {
   test("app with custom providers: env carries CUSTOM_<ID>_API_KEY values, input JSON carries keyless declarations", async () => {
     reset();
