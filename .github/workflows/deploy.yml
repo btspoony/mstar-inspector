@@ -111,6 +111,7 @@ jobs:
       - name: Record image digest in docs/deploy.md
         run: |
           set -euo pipefail
+          DIGEST=$(cat image_digest.txt); VERSION=$(cat version_id.txt); DATE=$(date -u +%F)
           export DIGEST VERSION DATE   # python3 heredoc reads os.environ
           python3 - <<'EOF'
           import pathlib, os
