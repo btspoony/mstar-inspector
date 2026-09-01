@@ -127,19 +127,15 @@ Worker; when it is absent the workflow **deletes** it from the Worker (a
 previously set webhook does not linger) and the Worker falls back to log-only
 alerting (§ Ops config).
 
-**CI credentials (GitHub Secrets, not Worker secrets)** — the workflow
-authenticates wrangler with two GitHub Secrets that are never injected into
-the Worker: `CLOUDFLARE_API_TOKEN` (wrangler auth) and
-`CLOUDFLARE_ACCOUNT_ID` (the deploy account id,
-`f68fcd78e7c5c10f0466788bb9e85b8e`). Set the `CLOUDFLARE_ACCOUNT_ID` GitHub
-Secret to the same value as the repo variable below — the
-account-verification step compares the two and fails red on mismatch.
-
-**Repo variables** — the workflow also reads the repo variable
-`CLOUDFLARE_ACCOUNT_ID` (the deploy account id, `f68fcd78e7c5c10f0466788bb9e85b8e`)
-to verify the CI account before deploying; configure it under
-Settings → Secrets and variables → Actions → Variables. A missing or stale
-value fails the account-verification step red (see § Local tooling for the
+**CI credentials** — the workflow authenticates wrangler with one GitHub
+**Secret** that is never injected into the Worker: `CLOUDFLARE_API_TOKEN`
+(wrangler auth). The deploy account id `CLOUDFLARE_ACCOUNT_ID`
+(`f68fcd78e7c5c10f0466788bb9e85b8e`) is **public** (not a credential) and is
+configured as a **variable** — the workflow reads it from
+`vars.CLOUDFLARE_ACCOUNT_ID` (repo variable, or an environment variable under
+`staging`). The account-verification step asserts it non-empty and runs
+`wrangler whoami` (the run log shows the authenticated account for manual
+cross-check); a missing value fails the step red (see § Local tooling for the
 stale-account trap this guards).
 
 Provider API keys and the review model chain are **not** Worker env — they

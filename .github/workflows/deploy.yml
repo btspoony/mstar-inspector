@@ -40,7 +40,7 @@ jobs:
     environment: staging
     env:
       CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}   # account id is public — configured as a variable
       OAUTH_CLIENT_ID: ${{ vars.OAUTH_CLIENT_ID }}   # client id is not sensitive — configured as a variable
       OAUTH_CLIENT_SECRET: ${{ secrets.OAUTH_CLIENT_SECRET }}
       DASHBOARD_SESSION_SECRET: ${{ secrets.DASHBOARD_SESSION_SECRET }}
@@ -62,9 +62,8 @@ jobs:
 
       - name: Verify Cloudflare account
         run: |
-          test -n "${{ vars.CLOUDFLARE_ACCOUNT_ID }}"   # repo var must declare the deploy account
-          test "$CLOUDFLARE_ACCOUNT_ID" = "${{ vars.CLOUDFLARE_ACCOUNT_ID }}"   # stale env 即 trap
-          bunx wrangler whoami    # token/账户名佐证，输出进 run log
+          test -n "$CLOUDFLARE_ACCOUNT_ID"   # account id is a variable — must be configured
+          bunx wrangler whoami    # token/账户名佐证，输出进 run log（人工核对账户）
 
       - name: Write required secrets
         run: |
