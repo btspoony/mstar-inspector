@@ -35,7 +35,7 @@ jobs:
   deploy:
     needs: test
     if: github.ref == 'refs/heads/main'
-    permissions: { contents: write }
+    permissions: { contents: read, actions: write }   # actions: write — gh variable set (DOCS-01 baseline); no git push anymore
     runs-on: ubuntu-latest
     environment: staging
     env:
@@ -117,31 +117,21 @@ jobs:
           # 备源（首次实跑若 .name 与预期不符，以部署日志锚定行兜底）：
           # grep -oE "registry\.cloudflare\.com/${CLOUDFLARE_ACCOUNT_ID}/mstar-inspector-sandbox@sha256:[0-9a-f]{64}" deploy.log
 
-      - name: Record image digest in docs/deploy.md
+      - name: Upload deploy evidence artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: deploy-evidence
+          path: |
+            deploy.log
+            version_id.txt
+            image_digest.txt
+          if-no-files-found: error
+        if: always()   # keep per-run evidence even when a later step fails
+
+      - name: Record live image digest (DOCS-01 baseline)
         run: |
           set -euo pipefail
-          git fetch origin main && git merge --no-edit origin/main   # 先合并：串行部署保证 delta 仅先前 record commit（docs-only）；此时工作树干净，merge 不会因本地改动 abort
-          DIGEST=$(cat image_digest.txt); VERSION=$(cat version_id.txt); DATE=$(date -u +%F)
-          export DIGEST VERSION DATE   # python3 heredoc reads os.environ
-          python3 - <<'EOF'
-          import pathlib, os, sys
-          p = pathlib.Path("docs/deploy.md"); text = p.read_text()
-          start_marker, end_marker = "<!-- deploy-record:start -->", "<!-- deploy-record:end -->"
-          if start_marker not in text or end_marker not in text:
-              sys.exit("deploy-record markers missing in docs/deploy.md; cannot write record — restore the markers and re-run")
-          start, end = text.index(start_marker), text.index(end_marker)
-          block = (f"- Image digest: `{os.environ['DIGEST']}`"
-                   f"（registry.cloudflare.com/f68fcd78e7c5c10f0466788bb9e85b8e/mstar-inspector-sandbox）\n"
-                   f"- Deploy date: {os.environ['DATE']}（Worker version `{os.environ['VERSION']}` — "
-                   f"Actions run {os.environ['GITHUB_SERVER_URL']}/{os.environ['GITHUB_REPOSITORY']}/actions/runs/{os.environ['GITHUB_RUN_ID']}）\n")
-          p.write_text(text[:start+len(start_marker)] + "\n" + block + text[end:])
-          EOF
-          git diff --quiet -- docs/deploy.md && { echo "record unchanged"; exit 0; }
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add docs/deploy.md
-          git commit -m "chore(deploy): record image digest ${DIGEST:7:12}"
-          if ! git push origin main; then
-            echo "::error::Deploy succeeded but digest record push failed; paste the digest into docs/deploy.md manually per § Image pins and digest record"
-            exit 1
-          fi
+          DIGEST=$(cat image_digest.txt); VERSION=$(cat version_id.txt)
+          gh variable set LIVE_IMAGE_DIGEST --body "$DIGEST"
+          gh variable set LIVE_WORKER_VERSION --body "$VERSION"
+          echo "::notice::DOCS-01 baseline recorded: digest=$DIGEST version=$VERSION (compare against 'wrangler containers list' live state)"
