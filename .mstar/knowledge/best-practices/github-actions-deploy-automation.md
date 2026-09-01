@@ -57,6 +57,7 @@ mstar-inspector 的 live 部署从手动 runbook（`docs/deploy.md`：D1 migrati
 
 - **digest 是操作状态，不是文档**——2026-09-01 修订：不再写回 `docs/deploy.md`（分支保护 `pull_request` 规则拒绝 bot 直接 push，且每次部署一个 doc PR 是噪音）。
 - 部署后写入 GitHub Actions **variables**：`LIVE_IMAGE_DIGEST`（`@sha256:…`）+ `LIVE_WORKER_VERSION`（`Current Version ID`）——`gh variable set`（deploy job 需 `actions: write` 权限；不再需要 `contents: write`）。
+- **gh CLI 在 Actions 里不会自动注入 GITHUB_TOKEN**——必须显式 `env: GH_TOKEN: ${{ github.token }}`，否则 `gh variable set` 报 "To use GitHub CLI in a GitHub Actions workflow, set the GH_TOKEN environment variable"（Bugbot #18 抓到，实跑复现）。
 - 当次证据：`deploy.log` / `version_id.txt` / `image_digest.txt` 上传为 `deploy-evidence` artifact（`actions/upload-artifact@v4`，`if: always()` 保留失败现场）。
 - **live 真相 = `wrangler containers list --json`**（CF 实时状态）；variables 是部署时基线，DOCS-01 漂移检查 = 实时值 vs 基线。
 - `paths-ignore` 保留（doc-only push 无需重部署），但不再承担防递归职责。

@@ -129,6 +129,8 @@ jobs:
         if: always()   # keep per-run evidence even when a later step fails
 
       - name: Record live image digest (DOCS-01 baseline)
+        env:
+          GH_TOKEN: ${{ github.token }}   # gh CLI does not auto-inject GITHUB_TOKEN — must pass explicitly (Bugbot #18)
         run: |
           set -euo pipefail
           DIGEST=$(cat image_digest.txt); VERSION=$(cat version_id.txt)
