@@ -1,8 +1,10 @@
 <div align="center">
 
-<img src="assets/logo.svg" alt="mstar-inspector" width="96">
+<img src="assets/logo.svg" alt="Morning Star Inspector" width="96">
 
-自托管 GitHub App：面向自动化 PR 审查与 bug 检测，由可插拔的 coding-agent runtime 驱动。
+# [Morning Star Inspector](https://github.com/btspoony/mstar-inspector)
+
+ 用于自动化 PR 审查的自托管 GitHub App
 
 [English](README.md) / 中文
 
@@ -11,6 +13,7 @@
 [![Last commit](https://img.shields.io/github/last-commit/btspoony/mstar-inspector?color=c4f042&labelColor=black&style=flat-square)](https://github.com/btspoony/mstar-inspector/commits/main)
 
 </div>
+
 **mstar-inspector** 是一个自托管的 GitHub App：PR 一旦打开或更新，即刻触发云端自动审查。每次审查作为真实的
 多席位 coding-agent 会话运行在隔离的 Cloudflare Sandbox 容器中，结果以单条 upsert 评论回到 PR，结构化
 findings 落入 D1 供后续分析。
