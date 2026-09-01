@@ -509,8 +509,9 @@ path). On the production path the Worker never records NULL (the column
 stays nullable for historical rows, AL-24-4); local manual runs resolve the
 in-image default against THIS line.
 
-Deployed image record (executed plan 19 T3, 2026-08-31 UTC):
+Deployed image record:
 
+<!-- deploy-record:start -->
 - Image digest: `sha256:09724a204ef38dab02b88a6537bdd3f051997ac144f0aeff7d5901d9d75aa57d`
   (registry.cloudflare.com/f68fcd78e7c5c10f0466788bb9e85b8e/mstar-inspector-sandbox;
   replaces `sha256:4dae83cd…ccad2ada`)
@@ -519,6 +520,7 @@ Deployed image record (executed plan 19 T3, 2026-08-31 UTC):
   e2e review on btspoony/todo-bots#1 landed with in-image runner
   `skill_version 3.5.0+f1b60df0`, `reviews.envelope` written, `reviews.model
   = NULL` → the default selector above)
+<!-- deploy-record:end -->
 
 ## Ops config (plan 19 T1)
 

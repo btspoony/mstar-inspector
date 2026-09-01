@@ -108,4 +108,24 @@ jobs:
           # 备源（首次实跑若 .name 与预期不符，以部署日志锚定行兜底）：
           # grep -oE "registry\.cloudflare\.com/${CLOUDFLARE_ACCOUNT_ID}/mstar-inspector-sandbox@sha256:[0-9a-f]{64}" deploy.log
 
-      # (T4) digest 写回 docs/deploy.md（git commit + push；paths-ignore 防递归）
+      - name: Record image digest in docs/deploy.md
+        run: |
+          set -euo pipefail
+          export DIGEST VERSION DATE   # python3 heredoc reads os.environ
+          python3 - <<'EOF'
+          import pathlib, os
+          p = pathlib.Path("docs/deploy.md"); text = p.read_text()
+          start, end = text.index("<!-- deploy-record:start -->"), text.index("<!-- deploy-record:end -->")
+          block = (f"- Image digest: `{os.environ['DIGEST']}`"
+                   f"（registry.cloudflare.com/f68fcd78e7c5c10f0466788bb9e85b8e/mstar-inspector-sandbox）\n"
+                   f"- Deploy date: {os.environ['DATE']}（Worker version `{os.environ['VERSION']}` — "
+                   f"Actions run {os.environ['GITHUB_SERVER_URL']}/{os.environ['GITHUB_REPOSITORY']}/actions/runs/{os.environ['GITHUB_RUN_ID']}）\n")
+          p.write_text(text[:start+len("<!-- deploy-record:start -->")] + "\n" + block + text[end:])
+          EOF
+          git fetch origin main && git merge --no-edit origin/main   # 串行部署保证 delta 仅先前 record commit（docs-only）；保证 push 快进
+          git diff --quiet -- docs/deploy.md && { echo "record unchanged"; exit 0; }
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add docs/deploy.md
+          git commit -m "chore(deploy): record image digest ${DIGEST:7:12}"
+          git push origin main
