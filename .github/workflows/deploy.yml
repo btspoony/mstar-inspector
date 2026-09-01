@@ -3,7 +3,7 @@ name: Deploy
 on:
   push:
     branches: [main]
-    paths-ignore: ['docs/**', '.mstar/**', '*.md', 'LICENSE']
+    paths-ignore: ['docs/**', '.mstar/**', '*.md', 'LICENSE', '.env.example']
   workflow_dispatch: {}
 
 concurrency:
@@ -34,6 +34,7 @@ jobs:
 
   deploy:
     needs: test
+    if: github.ref == 'refs/heads/main'
     permissions: { contents: write }
     runs-on: ubuntu-latest
     env:
@@ -76,13 +77,19 @@ jobs:
         if: env.ALERT_WEBHOOK_URL != ''
         run: "jq -n '{ALERT_WEBHOOK_URL: env.ALERT_WEBHOOK_URL}' | bunx wrangler secret bulk"
 
+      - name: Remove ALERT_WEBHOOK_URL secret (unset = log-only)
+        if: env.ALERT_WEBHOOK_URL == ''
+        run: "jq -n '{ALERT_WEBHOOK_URL: null}' | bunx wrangler secret bulk"
+
       - name: Apply D1 migrations (remote)
         run: bunx wrangler d1 migrations apply mstar-inspector-db --remote
 
       - name: Deploy Worker
+        shell: bash
         run: |
           bunx wrangler deploy 2>&1 | tee deploy.log
           grep -oE 'Current Version ID: .+' deploy.log | tail -1 | cut -d' ' -f4 > version_id.txt
+          test -s version_id.txt
 
       - name: "Smoke: healthz"
         run: |
@@ -111,22 +118,28 @@ jobs:
       - name: Record image digest in docs/deploy.md
         run: |
           set -euo pipefail
+          git fetch origin main && git merge --no-edit origin/main   # 先合并：串行部署保证 delta 仅先前 record commit（docs-only）；此时工作树干净，merge 不会因本地改动 abort
           DIGEST=$(cat image_digest.txt); VERSION=$(cat version_id.txt); DATE=$(date -u +%F)
           export DIGEST VERSION DATE   # python3 heredoc reads os.environ
           python3 - <<'EOF'
-          import pathlib, os
+          import pathlib, os, sys
           p = pathlib.Path("docs/deploy.md"); text = p.read_text()
-          start, end = text.index("<!-- deploy-record:start -->"), text.index("<!-- deploy-record:end -->")
+          start_marker, end_marker = "<!-- deploy-record:start -->", "<!-- deploy-record:end -->"
+          if start_marker not in text or end_marker not in text:
+              sys.exit("deploy-record markers missing in docs/deploy.md; cannot write record — restore the markers and re-run")
+          start, end = text.index(start_marker), text.index(end_marker)
           block = (f"- Image digest: `{os.environ['DIGEST']}`"
                    f"（registry.cloudflare.com/f68fcd78e7c5c10f0466788bb9e85b8e/mstar-inspector-sandbox）\n"
                    f"- Deploy date: {os.environ['DATE']}（Worker version `{os.environ['VERSION']}` — "
                    f"Actions run {os.environ['GITHUB_SERVER_URL']}/{os.environ['GITHUB_REPOSITORY']}/actions/runs/{os.environ['GITHUB_RUN_ID']}）\n")
-          p.write_text(text[:start+len("<!-- deploy-record:start -->")] + "\n" + block + text[end:])
+          p.write_text(text[:start+len(start_marker)] + "\n" + block + text[end:])
           EOF
-          git fetch origin main && git merge --no-edit origin/main   # 串行部署保证 delta 仅先前 record commit（docs-only）；保证 push 快进
           git diff --quiet -- docs/deploy.md && { echo "record unchanged"; exit 0; }
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add docs/deploy.md
           git commit -m "chore(deploy): record image digest ${DIGEST:7:12}"
-          git push origin main
+          if ! git push origin main; then
+            echo "::error::Deploy succeeded but digest record push failed; paste the digest into docs/deploy.md manually per § Image pins and digest record"
+            exit 1
+          fi

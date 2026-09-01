@@ -101,8 +101,10 @@ local `wrangler dev` only; never put secrets in git (full per-key notes in
 The four required secrets are asserted non-empty in the workflow (a missing
 value fails the run red — `wrangler secret bulk` treats a JSON `null` as a
 secret **deletion**, so empty values must never reach it). `ALERT_WEBHOOK_URL`
-is optional: when the GitHub Secret is absent the workflow skips writing it
-and the Worker falls back to log-only alerting (§ Ops config).
+is optional: when the GitHub Secret is set the workflow writes it to the
+Worker; when it is absent the workflow **deletes** it from the Worker (a
+previously set webhook does not linger) and the Worker falls back to log-only
+alerting (§ Ops config).
 
 **CI credentials (GitHub Secrets, not Worker secrets)** — the workflow
 authenticates wrangler with two GitHub Secrets that are never injected into
@@ -647,7 +649,9 @@ Deployed image record:
 
 - `ALERT_WEBHOOK_URL` (NEW, optional, secret class): generic alert webhook
   for the sweep — set as a GitHub Secret (the Deploy workflow writes it to
-  the Worker only when set; `.dev.vars` locally). Unset = log-only alerting.
+  the Worker when set and deletes it when unset, so removing the GitHub
+  Secret returns the Worker to log-only alerting; `.dev.vars` locally).
+  Unset = log-only alerting.
 
 ## Maintenance (DEBT-01)
 
