@@ -175,9 +175,11 @@ GitHub App setup (permissions, webhook events, installation):
   unset CLOUDFLARE_ACCOUNT_ID   # or export the id above
   ```
 
-  In CI the Deploy workflow guards the same trap: it reads the repo variable
-  `CLOUDFLARE_ACCOUNT_ID` (see § Secrets and vars inventory) and fails the
-  account-verification step if the env value does not match it.
+  In CI the Deploy workflow guards the same trap: the account-verification
+  step asserts the `CLOUDFLARE_ACCOUNT_ID` variable (see § Secrets and vars
+  inventory) is non-empty and runs `wrangler whoami` — the run log shows the
+  authenticated account for manual cross-check against
+  `f68fcd78e7c5c10f0466788bb9e85b8e`.
 
 ## Domains and previews (2026-08-31 record)
 
