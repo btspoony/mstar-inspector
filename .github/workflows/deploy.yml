@@ -58,9 +58,23 @@ jobs:
 
       - name: Verify Cloudflare account
         run: |
-          test "$CLOUDFLARE_ACCOUNT_ID" = "f68fcd78e7c5c10f0466788bb9e85b8e"   # stale env 即 trap
+          test -n "${{ vars.CLOUDFLARE_ACCOUNT_ID }}"   # repo var must declare the deploy account
+          test "$CLOUDFLARE_ACCOUNT_ID" = "${{ vars.CLOUDFLARE_ACCOUNT_ID }}"   # stale env 即 trap
           bunx wrangler whoami    # token/账户名佐证，输出进 run log
 
-      # (T2) secrets 注入：wrangler secret bulk 四件套 + ALERT_WEBHOOK_URL 条件步
+      - name: Write required secrets
+        run: |
+          : "${GITHUB_OAUTH_CLIENT_ID:?required}" "${GITHUB_OAUTH_CLIENT_SECRET:?required}" \
+            "${DASHBOARD_SESSION_SECRET:?required}" "${DASHBOARD_ENCRYPTION_KEY:?required}"
+          jq -n '{GITHUB_OAUTH_CLIENT_ID: env.GITHUB_OAUTH_CLIENT_ID,
+                  GITHUB_OAUTH_CLIENT_SECRET: env.GITHUB_OAUTH_CLIENT_SECRET,
+                  DASHBOARD_SESSION_SECRET: env.DASHBOARD_SESSION_SECRET,
+                  DASHBOARD_ENCRYPTION_KEY: env.DASHBOARD_ENCRYPTION_KEY}' \
+            | bunx wrangler secret bulk
+
+      - name: Write optional ALERT_WEBHOOK_URL secret
+        if: env.ALERT_WEBHOOK_URL != ''
+        run: "jq -n '{ALERT_WEBHOOK_URL: env.ALERT_WEBHOOK_URL}' | bunx wrangler secret bulk"
+
       # (T3) D1 迁移 --remote + wrangler deploy + post-deploy smoke（healthz / cron / digest 提取）
       # (T4) digest 写回 docs/deploy.md（git commit + push；paths-ignore 防递归）

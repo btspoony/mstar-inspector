@@ -97,12 +97,13 @@ GitHub App setup (permissions, webhook events, installation):
   Account-id trap (hit live 2026-08-31): a stale `CLOUDFLARE_ACCOUNT_ID`
   exported in the shell (from another account/project) makes wrangler target
   the WRONG account → `Authentication error [code 10000]` on every API call
-  (even `deployments list`). The correct account for this repo is
-  `f68fcd78e7c5c10f0466788bb9e85b8e` (Bohao's Account). `wrangler whoami`
-  prints the OAuth account but does NOT override the env var — unset it:
+  (even `deployments list`). The correct account for this repo is the one
+  owning the live Worker (declared as the `CLOUDFLARE_ACCOUNT_ID` GitHub
+  Actions variable). `wrangler whoami` prints the OAuth account but does NOT
+  override the env var — unset it:
 
   ```bash
-  unset CLOUDFLARE_ACCOUNT_ID   # or export the id above
+  unset CLOUDFLARE_ACCOUNT_ID   # or export the owning account id
   ```
 
 ## Domains and previews (2026-08-31 record)
@@ -111,8 +112,8 @@ Production URL: `https://mstar-inspector.42ch.dev` — a Workers **Custom
 Domain** (Cloudflare API/dashboard-attached, NOT declared in
 `wrangler.jsonc`; `wrangler deploy` leaves such attachments untouched). The
 Worker also serves its default
-`https://mstar-inspector.silent-dew-2478.workers.dev` (account subdomain
-`silent-dew-2478`).
+`https://mstar-inspector.<account-subdomain>.workers.dev` (the account
+subdomain is account-specific).
 
 A second custom domain `staging-inspector.42ch.dev` was briefly attached to
 the SAME production script (a production alias, not a staging environment).
@@ -129,7 +130,7 @@ runs through the flows below instead of a staging domain.
 Object (container binding) — Cloudflare does NOT generate preview URLs for
 Workers implementing a DO (docs: Preview URLs → Limitations; verified live:
 every version row reports `has_preview:false` and versioned
-`<prefix>-mstar-inspector.silent-dew-2478.workers.dev` hosts 404). The
+`<prefix>-mstar-inspector.<account-subdomain>.workers.dev` hosts 404). The
 flows that DO work:
 
 1. **Version upload without deploy (verification via gradual rollout).**
@@ -176,10 +177,10 @@ smoke → record the digest.
    (never Worker secrets, never D1): `SMOKE_APP_ID` + `SMOKE_PRIVATE_KEY`
    (inline PEM or `~`-relative/absolute path — the local orchestrator's
    dual form, resolved by scripts/sandbox-smoke.ts) for the
-   installation-token mint, plus the optional
-   `INSTALLATION_ID` (default 156621513), `GH_REPO` (default
-   btspoony/todo-bots), `GH_PR` (default 1), `SMOKE_ROUTE` (default `/smoke`),
-   and `ARK_API_KEY` (required when `SMOKE_ROUTE=/smoke-review`):
+   installation-token mint, plus the required
+   `INSTALLATION_ID`, `GH_REPO` (owner/repo), `GH_PR` (PR number),
+   `SMOKE_ROUTE` (default `/smoke`), and `ARK_API_KEY` (required when
+   `SMOKE_ROUTE=/smoke-review`):
    ```bash
    SMOKE_APP_ID=… SMOKE_PRIVATE_KEY=… bun run scripts/sandbox-smoke.ts
    # /smoke: getSandbox → exec gh pr diff → destroy
@@ -512,11 +513,11 @@ in-image default against THIS line.
 Deployed image record (executed plan 19 T3, 2026-08-31 UTC):
 
 - Image digest: `sha256:09724a204ef38dab02b88a6537bdd3f051997ac144f0aeff7d5901d9d75aa57d`
-  (registry.cloudflare.com/f68fcd78e7c5c10f0466788bb9e85b8e/mstar-inspector-sandbox;
+  (registry.cloudflare.com/<account-id>/mstar-inspector-sandbox;
   replaces `sha256:4dae83cd…ccad2ada`)
 - Deploy date: 2026-08-31 (Worker version `62c18d0a` — the digest-carrying
   deploy; post-deploy smoke PASS: cron registered, D1 0001–0010 complete,
-  e2e review on btspoony/todo-bots#1 landed with in-image runner
+  e2e review on the seed PR landed with in-image runner
   `skill_version 3.5.0+f1b60df0`, `reviews.envelope` written, `reviews.model
   = NULL` → the default selector above)
 

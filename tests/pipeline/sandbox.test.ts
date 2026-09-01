@@ -54,7 +54,7 @@ describe("getSandbox", () => {
     execResult = { success: true, exitCode: 0, stdout: "diff --git a/x b/x\n", stderr: "review mode: structured\n" };
     const sandbox: ReviewSandbox = await getSandbox(binding, "smoke-abc");
 
-    const result = await sandbox.exec("gh pr diff 1 --repo btspoony/todo-bots", {
+    const result = await sandbox.exec("gh pr diff 1 --repo example-org/example-repo", {
       env: { GH_TOKEN: "tok" },
       cwd: "/workspace/repo",
       timeout: 120_000,
@@ -62,7 +62,7 @@ describe("getSandbox", () => {
 
     expect(execCalls).toEqual([
       {
-        cmd: "gh pr diff 1 --repo btspoony/todo-bots",
+        cmd: "gh pr diff 1 --repo example-org/example-repo",
         opts: { env: { GH_TOKEN: "tok" }, cwd: "/workspace/repo", timeout: 120_000 },
       },
     ]);

@@ -12,7 +12,7 @@
  *                          destroy. Path 2 falls back to a git clone + diff
  *                          (token injected via git env config, never in the
  *                          command string). Returns JSON evidence, no secrets.
- *   GET /smoke-review    → T2: clone the real PR head (btspoony/todo-bots#1),
+ *   GET /smoke-review    → T2: clone the real PR head (GH_REPO#GH_PR),
  *                          write the runner --input JSON (reconFacts: PR fact
  *                          + checked-out head sha + numstat universe — the
  *                          same shape src/pipeline/consumer.ts writes), exec
@@ -34,12 +34,13 @@ type SmokeEnv = {
   SANDBOX: SandboxBinding;
   /** Installation token minted by the orchestrator (scripts/sandbox-smoke.ts). */
   GH_TOKEN: string;
+  /** Seed PR target (owner/repo + number) — passed by the orchestrator, never hardcoded. */
+  GH_REPO: string;
+  GH_PR: string;
   /** omp model key for the ark-plan provider (T2 runner smoke; injected per exec). */
   ARK_API_KEY?: string;
 };
 
-const GH_REPO = "btspoony/todo-bots";
-const GH_PR = "1";
 const CLONE_DIR = "/workspace/repo";
 /** Runner --input JSON path (same constant as the production consumer). */
 const INPUT_PATH = "/workspace/review-input.json";
@@ -67,7 +68,7 @@ export default {
     let result: Record<string, unknown>;
     try {
       // Path 1 (primary hypothesis): gh CLI with GH_TOKEN env injection.
-      const gh = await sandbox.exec(`gh pr diff ${GH_PR} --repo ${GH_REPO}`, {
+      const gh = await sandbox.exec(`gh pr diff ${env.GH_PR} --repo ${env.GH_REPO}`, {
         env: { GH_TOKEN: env.GH_TOKEN },
       });
       if (gh.exitCode === 0 && gh.stdout.trim().length > 0) {
@@ -84,7 +85,7 @@ export default {
         // base. Token injected via git env config (never in the command string).
         const git = await sandbox.exec(
           [
-            `git clone --depth 1 --branch mstar-inspector-seed https://github.com/${GH_REPO}.git ${CLONE_DIR}`,
+            `git clone --depth 1 --branch mstar-inspector-seed https://github.com/${env.GH_REPO}.git ${CLONE_DIR}`,
             `cd ${CLONE_DIR}`,
             "git fetch --depth 1 origin main",
             "git diff FETCH_HEAD HEAD",
@@ -143,7 +144,7 @@ export default {
 
 /**
  * T2 runner falsification: real SDK, real model key (ARK_API_KEY via exec env),
- * real PR clone (btspoony/todo-bots#1). The runner inside the image reads the
+ * real PR clone (GH_REPO#GH_PR). The runner inside the image reads the
  * diff file, runs the omp review session, and prints ONLY the ReviewOutput JSON
  * to stdout. We parse that stdout with parseReviewOutput and return the verdict
  * shape — never the key, never the raw model text.
@@ -161,7 +162,7 @@ async function runReviewSmoke(env: SmokeEnv): Promise<Response> {
     const clone = await sandbox.exec(
       [
         `rm -rf ${CLONE_DIR}`,
-        `git clone --depth 1 --branch mstar-inspector-seed https://github.com/${GH_REPO}.git ${CLONE_DIR}`,
+        `git clone --depth 1 --branch mstar-inspector-seed https://github.com/${env.GH_REPO}.git ${CLONE_DIR}`,
         `cd ${CLONE_DIR}`,
         "git fetch --depth 1 origin main",
       ].join(" && "),
@@ -175,7 +176,7 @@ async function runReviewSmoke(env: SmokeEnv): Promise<Response> {
         latencyMs: Date.now() - startedAt,
       };
     } else {
-      result = await execInImageReview(sandbox, env.ARK_API_KEY, startedAt);
+      result = await execInImageReview(sandbox, env.ARK_API_KEY, env.GH_REPO, env.GH_PR, startedAt);
     }
   } catch (error) {
     result = {
@@ -209,6 +210,8 @@ async function runReviewSmoke(env: SmokeEnv): Promise<Response> {
 async function execInImageReview(
   sandbox: ReviewSandbox,
   arkApiKey: string,
+  ghRepo: string,
+  ghPr: string,
   startedAt: number,
 ): Promise<Record<string, unknown>> {
   const recon = await sandbox.exec(
@@ -230,7 +233,7 @@ async function execInImageReview(
   const inputB64 = Buffer.from(
     JSON.stringify({
       worktreePath: CLONE_DIR,
-      reconFacts: [`${GH_REPO}#${GH_PR}`, `head ${headSha}`, ...numstat],
+      reconFacts: [`${ghRepo}#${ghPr}`, `head ${headSha}`, ...numstat],
     }),
     "utf8",
   ).toString("base64");
