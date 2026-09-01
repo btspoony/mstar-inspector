@@ -18,9 +18,10 @@ the result as a single upserted comment on the PR.
 
 There are no Worker-level GitHub App secrets: each App's credentials (private
 key + webhook secret) are stored encrypted in D1 and resolved per slug at
-request time. The full secrets inventory (dashboard OAuth, session, D1
-encryption key, model key, alert webhook, provider keys) lives in
-`docs/deploy.md` § Secrets and vars inventory.
+request time. The full Worker-secrets inventory (dashboard OAuth, session, D1
+encryption key, alert webhook) lives in `docs/deploy.md` § Secrets and vars
+inventory — provider keys and the model chain are NOT Worker secrets (they
+are per-App; see below).
 
 ### Worker settings (plain vars / `wrangler.jsonc` `vars`)
 

@@ -764,9 +764,11 @@ export function effectiveModelChain(
  * The head (primary) selector of an effective chain — the version record
  * written to `reviews.model` (plan 18 Task 1). Comma-separated, trimmed,
  * empty segments dropped (the same grammar as the runner-side selector
- * parse). No chain → NULL: the in-image default ran, and the default
- * selector is NEVER hardcoded worker-side (plan 19's runbook records it
- * next to the image digest).
+ * parse). No chain → NULL — reachable only from direct unit calls: on the
+ * production path assertAppConfigComplete fail-closes any App whose chain
+ * is missing or parses to zero selectors (AL-24-5), so a successful put
+ * never records NULL (the in-image DEFAULT_MODEL_PATTERN scaffold is
+ * unreachable from the consumer).
  */
 function chainHeadSelector(chain: string | undefined): string | null {
   if (chain === undefined) return null;
@@ -798,7 +800,14 @@ function assertAppConfigComplete(
   appId: string,
 ): void {
   const chain = appCfg.modelChain === null ? "" : appCfg.modelChain.trim();
-  if (chain === "") {
+  // AL-24-5 fail-closed: a chain must contain at least one non-empty
+  // comma-separated selector. `","` / `" , "` / `",,,"` are all "missing" —
+  // the runner's parseModelSelectors would yield [] and fall back to the
+  // in-image DEFAULT_MODEL_PATTERN scaffold (which must stay unreachable
+  // from the consumer), and chainHeadSelector would record NULL on a
+  // successful put (Interfaces: success never NULL).
+  const hasSelector = chain.split(",").some((segment) => segment.trim() !== "");
+  if (!hasSelector) {
     throw new Error(`per-App config incomplete: app ${appId}: missing model chain`);
   }
   // The env names the App's OWN config can supply: allowlisted BYOK keys

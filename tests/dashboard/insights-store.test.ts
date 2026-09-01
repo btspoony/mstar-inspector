@@ -200,8 +200,9 @@ describe("createInsightsStore", () => {
     expect(insights.verdictDistribution.some((v) => v.verdict === "comment")).toBe(false);
     expect(insights.findingsByCategory.some((c) => c.category === "security")).toBe(false);
     // The M1 review shares r-a's timestamp — the era gate, not the window,
-    // is what keeps it out of weeklyTrend.
-    expect(mondayOf(reviewedAt(1))).toBe(mondayOf(reviewedAt(1)));
+    // is what keeps it out of weeklyTrend: the week containing that
+    // timestamp shows ONLY r-a's counts (reviews: 1, findings: 2), never
+    // r-m1's (which would make it reviews: 2, findings: 3).
     expect(insights.weeklyTrend.find((w) => w.week_start === mondayOf(reviewedAt(1)))).toEqual({
       week_start: mondayOf(reviewedAt(1)),
       reviews: 1,
