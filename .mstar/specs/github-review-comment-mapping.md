@@ -40,7 +40,7 @@ v0.3 发表面允许二者之一（architect 锁实现，产品只锁结果）�
 - 正文结构对齐 `/amazing-pr-review` Stage 3 报告：verdict 行、tally（must-fix / should-fix / nit / unverified）、findings 按 merge class 列出。
 - Verdict **原文**写入正文（`ship it` / `needs fixes` / `blocked`），不得再写成 M1 `approve` / `comment`。
 - Findings 的 class 原文写入（`must-fix` 等），不得改写成 M1 severity。
-- 仍只发**整体**评论；**零** line-level review comments（roadmap M3，本契约不开放）。
+- 整体评论仍是每轮发表 SSOT；line-level comments 已由 v0.7（plan 18）交付——锚定契约见 knowledge `github-pr-review-line-comments.md`（本文件不重复其细节）。
 - `summary_md` 截断上限沿 M1：8000 字符。
 - 模型正文进 GitHub / D1 前仍须 redact（SEC-02 不变）。
 
@@ -57,5 +57,5 @@ v0.3 发表面允许二者之一（architect 锁实现，产品只锁结果）�
 
 - 不把 GitHub `APPROVE` 当 `ship it` 的自动化合并许可。
 - 不发 `REQUEST_CHANGES`。
-- 不在本契约引入 line comments / Check Run。
-- 不打开现网 `REVIEW_ENABLED`（ops residual R2）。
+- 不在本契约引入 Check Run（line comments 已交付，见 §3 与 knowledge `github-pr-review-line-comments.md`）。
+- 不打开现网 `REVIEW_ENABLED`（`2026-08-26-postdeploy-feedback` R2：kill-switch ships OFF）。

@@ -35,20 +35,21 @@ GitHub webhook → POST /webhook/:appSlug（验签 + 分类）→ Queue → Cons
 > [Bun](https://bun.sh) ≥ 1.3.14。完整 runbook——含 Cloudflare 资源初始化与 D1 迁移——见
 > [`docs/deploy.md`](docs/deploy.md)。
 
-1. **部署 Worker**
+1. **部署 Worker** —— 合并到 `main` 即通过 [Deploy workflow](.github/workflows/deploy.yml) 自动部署（secrets 注入 → D1 迁移 → `wrangler deploy` → 冒烟 → digest 记录）。手工/本地部署：
 
    ```bash
    bun install
    wrangler deploy        # 应用 D1 迁移并部署；细节见 docs/deploy.md
    ```
 
-2. **设置 dashboard 密钥**（三个；审查凭据不放在 Worker 层）：
+2. **设置 dashboard 密钥**（四个；审查凭据不放在 Worker 层）—— 作为 **GitHub Secrets**（Settings → Secrets and variables → Actions）配置，Deploy workflow 在每次部署时注入 Worker：
 
    ```bash
-   wrangler secret put DASHBOARD_ENCRYPTION_KEY     # openssl rand -base64 32 —— 加密 D1 中的 per-App 凭据
-   wrangler secret put DASHBOARD_SESSION_SECRET     # openssl rand -base64 32 —— 会话 cookie HMAC key
-   wrangler secret put GITHUB_OAUTH_CLIENT_ID       # 一个 GitHub OAuth App，回调地址为 {origin}/dashboard/oauth/callback
-   wrangler secret put GITHUB_OAUTH_CLIENT_SECRET
+   # 本地生成值，然后添加为 GitHub Secrets：
+   openssl rand -base64 32    # DASHBOARD_ENCRYPTION_KEY —— 加密 D1 中的 per-App 凭据
+   openssl rand -base64 32    # DASHBOARD_SESSION_SECRET —— 会话 cookie HMAC key
+   # GITHUB_OAUTH_CLIENT_ID / GITHUB_OAUTH_CLIENT_SECRET —— 一个 GitHub OAuth App，
+   # 回调地址为 {origin}/dashboard/oauth/callback
    ```
 
 3. **登录并注册 GitHub App** —— 访问 `https://<your-worker>/dashboard`，用 GitHub 登录，走 **Register App**
@@ -59,11 +60,7 @@ GitHub webhook → POST /webhook/:appSlug（验签 + 分类）→ Queue → Cons
 4. **配置 App** —— 在该 App 的 dashboard Settings 页添加审查模型所需的 provider API key（BYOK，加密落
    D1）和模型链。缺这些的 App 审查会 fail-closed——见 [Per-App 配置](#per-app-配置)。
 
-5. **开启审查并提交 PR** —— 打开 kill-switch，在安装了该 App 的仓库里开一个（或更新一个）PR：
-
-   ```bash
-   wrangler secret put REVIEW_ENABLED   # 精确设置为 "true"
-   ```
+5. **开启审查并提交 PR** —— 打开 kill-switch（Worker 变量 `REVIEW_ENABLED` 精确设置为 `"true"`），在安装了该 App 的仓库里开一个（或更新一个）PR：
 
    审查在 sandbox 容器内运行，结果以单条评论出现在 PR 上（upsert——force-push 不会产生评论刷屏）。
 
@@ -100,6 +97,9 @@ GitHub webhook → POST /webhook/:appSlug（验签 + 分类）→ Queue → Cons
 
 - **Kill-switch**：仅当 Worker 变量 `REVIEW_ENABLED` 精确为 `"true"` 时审查才会运行。未设置或任何其他值 →
   所有 webhook 被 2xx 确认后忽略，零入队。上线前保持未设置。
+- **部署已自动化**：合并到 `main` 即运行 [Deploy workflow](.github/workflows/deploy.yml) —— secrets 注入、D1 迁移、
+  `wrangler deploy`、部署后冒烟与 image digest 记录。失败即标红停止（无自动回滚）；失败语义与手工回滚路径见
+  [`docs/deploy.md`](docs/deploy.md)。
 - **Secrets 清单、部署步骤、回滚、完整 Multi-App go-live checklist** → [`docs/deploy.md`](docs/deploy.md)。
 
 ## 本地开发

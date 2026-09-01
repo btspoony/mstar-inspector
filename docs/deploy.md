@@ -1,10 +1,37 @@
-# Deploy runbook — mstar-inspector
+# Deploy — mstar-inspector
 
+> **Primary path: automation.** Merging to `main` deploys automatically via
+> [`.github/workflows/deploy.yml`](../.github/workflows/deploy.yml): D1
+> migrations, secrets injection, `wrangler deploy`, post-deploy smoke, and the
+> image-digest record all run in CI. The manual runbook below is retained as
+> reference / rollback material.
+>
 > Plan 19 status: T1 landed the ops-config surfaces (queue concurrency cap +
 > cron failure sweep + optional alert webhook — SSOT in § Ops config below);
 > T2 (this document) completed the full runbook; T3 executes it and fills the
 > deployed image digest + deploy date in § Image pins and digest record.
 > 2026-08-31: domains/preview surface added (§ Domains and previews).
+
+## Automated deploy (primary path)
+
+Merging to `main` triggers the **Deploy** workflow
+([`.github/workflows/deploy.yml`](../.github/workflows/deploy.yml)):
+
+- **Triggers** — `push` to `main` (skipped for `docs/**`, `.mstar/**`, `*.md`,
+  `LICENSE` — the digest-record commit is docs-only and must not redeploy) and
+  manual `workflow_dispatch` (emergency channel, not subject to the path
+  filter). Deploys are serialized (`concurrency` group, no cancel-in-progress).
+- **Sequence** — `test` job (typecheck + unit tests, mirrors `ci.yml`) →
+  `deploy` job: account verification → secrets injection (`wrangler secret
+  bulk`, required + optional alert) → D1 migrations (`--remote`) →
+  `wrangler deploy` → post-deploy smoke (healthz / cron / digest) → digest
+  write-back to § Image pins and digest record.
+- **Failure semantics** — any step failure turns the run red and **stops**
+  (no automatic rollback): D1 migrations are forward-only, so a rollback after
+  they applied would be a schema mismatch. A red run means a human intervenes
+  (see § Rollback); a deploy that succeeded but failed to record its digest is
+  also red — the digest is then pasted manually (see § Image pins and digest
+  record).
 
 ## Prerequisites
 
@@ -58,8 +85,11 @@ Note: migration 0006's `app_model_config` comment ("NULL / absent row = unset �
 
 ### Secrets and vars inventory
 
-Secrets — `wrangler secret put <NAME>`; `.dev.vars` for local `wrangler dev`;
-never in git (full per-key notes in `.env.example`):
+Worker secrets are managed as **GitHub Secrets** — the Deploy workflow
+injects them into the Worker via `wrangler secret bulk` on every deploy
+(no manual `wrangler secret put` on the primary path). `.dev.vars` is for
+local `wrangler dev` only; never put secrets in git (full per-key notes in
+`.env.example`):
 
 | Name | Required | Purpose |
 |---|---|---|
@@ -67,6 +97,29 @@ never in git (full per-key notes in `.env.example`):
 | `DASHBOARD_SESSION_SECRET` | dashboard | session-cookie HMAC key |
 | `DASHBOARD_ENCRYPTION_KEY` | multi-App | AES-256-GCM master key for D1-stored App credentials |
 | `ALERT_WEBHOOK_URL` | no — **NEW (plan 19)** | ops sweep alert webhook; unset = log-only alerting (§ Ops config) |
+
+The four required secrets are asserted non-empty in the workflow (a missing
+value fails the run red — `wrangler secret bulk` treats a JSON `null` as a
+secret **deletion**, so empty values must never reach it). `ALERT_WEBHOOK_URL`
+is optional: when the GitHub Secret is set the workflow writes it to the
+Worker; when it is absent the workflow **deletes** it from the Worker (a
+previously set webhook does not linger) and the Worker falls back to log-only
+alerting (§ Ops config).
+
+**CI credentials (GitHub Secrets, not Worker secrets)** — the workflow
+authenticates wrangler with two GitHub Secrets that are never injected into
+the Worker: `CLOUDFLARE_API_TOKEN` (wrangler auth) and
+`CLOUDFLARE_ACCOUNT_ID` (the deploy account id,
+`f68fcd78e7c5c10f0466788bb9e85b8e`). Set the `CLOUDFLARE_ACCOUNT_ID` GitHub
+Secret to the same value as the repo variable below — the
+account-verification step compares the two and fails red on mismatch.
+
+**Repo variables** — the workflow also reads the repo variable
+`CLOUDFLARE_ACCOUNT_ID` (the deploy account id, `f68fcd78e7c5c10f0466788bb9e85b8e`)
+to verify the CI account before deploying; configure it under
+Settings → Secrets and variables → Actions → Variables. A missing or stale
+value fails the account-verification step red (see § Local tooling for the
+stale-account trap this guards).
 
 Provider API keys and the review model chain are **not** Worker env — they
 live per App in D1 (`app_provider_keys` / `app_model_config`, migration
@@ -104,6 +157,10 @@ GitHub App setup (permissions, webhook events, installation):
   ```bash
   unset CLOUDFLARE_ACCOUNT_ID   # or export the id above
   ```
+
+  In CI the Deploy workflow guards the same trap: it reads the repo variable
+  `CLOUDFLARE_ACCOUNT_ID` (see § Secrets and vars inventory) and fails the
+  account-verification step if the env value does not match it.
 
 ## Domains and previews (2026-08-31 record)
 
@@ -159,7 +216,12 @@ override still boots the container; keep DO-class lifecycle changes out of
 verified versions (uploads with lifecycle changes are rejected; deploy them
 only via `wrangler deploy`).
 
-## Deploy steps (ordered)
+## Deploy steps (manual reference)
+
+> The automated path (§ Automated deploy) runs the same sequence in CI —
+> typecheck/test → secrets → D1 migrations → `wrangler deploy` → smoke →
+> digest record. The steps below are the manual equivalent, kept as reference
+> for local runs and for recovering from a failed automated deploy.
 
 Order lock (plan Clarify #5): code merge → `wrangler deploy` (the container
 image auto-rebuilds when the Dockerfile/build context changed) → post-deploy
@@ -191,6 +253,9 @@ smoke → record the digest.
    cron trigger) and rebuilds/pushes the container image when the build
    context changed. **Copy the image digest from the deploy output.**
 5. Record the digest + deploy date in § Image pins and digest record below.
+   On the automated path the workflow writes this record itself; the manual
+   paste below is the fallback when the write-back step failed (the run is
+   red — see § Automated deploy failure semantics).
    **Digest drift check (DOCS-01):** after every deploy, verify the live
    version + image against the recorded line —
    ```bash
@@ -221,6 +286,13 @@ docker run --rm --entrypoint /opt/verify-synthesis.sh <image>
 ```
 
 ## Post-deploy smoke
+
+> The Deploy workflow runs the automated smoke on every deploy: healthz
+> (3 attempts, 5s apart), cron registration (grep of the deploy log for
+> `schedule: */15 * * * *`), and image-digest extraction (live container
+> state). Any failure turns the run red and stops. The manual checks below
+> are extra / local investigation steps, not the workflow smoke — for local
+> runs and for investigating a red run.
 
 1. **Cron trigger registered** — the `wrangler deploy` output lists the cron
    trigger `*/15 * * * *` (also visible in the dashboard under Workers →
@@ -279,15 +351,21 @@ succeed.
 ```bash
 # Generate: base64 of exactly 32 random bytes
 openssl rand -base64 32
+```
 
-# Set on the deployed Worker (never in git; .dev.vars for local wrangler dev)
+Set it as a **GitHub Secret** (`DASHBOARD_ENCRYPTION_KEY`) — the Deploy
+workflow injects it on the next deploy (never in git; `.dev.vars` for local
+`wrangler dev`). The manual `wrangler secret put` below is the local/fallback
+form:
+
+```bash
 wrangler secret put DASHBOARD_ENCRYPTION_KEY
 ```
 
-This key is a plain `wrangler secret put` (no key script — the
-`bun run keys` worker-secret face was retired in plan 24; provider keys are
-per-App now). It is independent of `DASHBOARD_SESSION_SECRET` (session HMAC)
-— never reuse either key for the other duty (rotation stays decoupled).
+This key is a plain Worker secret (no key script — the `bun run keys`
+worker-secret face was retired in plan 24; provider keys are per-App now).
+It is independent of `DASHBOARD_SESSION_SECRET` (session HMAC) — never reuse
+either key for the other duty (rotation stays decoupled).
 
 ### 2. Register an App from the dashboard
 
@@ -422,13 +500,19 @@ Worker rollback.
 
 ## Rollback
 
+> Rollback is a **manual human action** — the Deploy workflow never rolls
+> back automatically. A failed deploy stops red; the operator investigates
+> and, if needed, rolls back by hand.
+
 - Worker code/config: redeploy the previous version — `wrangler rollback`
   (or check out the previous commit and `wrangler deploy`). Rollback restores
   Worker code + cron triggers + consumer config; the container image follows
   the checked-out Dockerfile.
 - D1 migrations are **forward-only**: never reverse a migration on rollback
   (0002 precedent — new code tolerates the prior schema; roll back code
-  only).
+  only). Because migrations apply before deploy in the automated path, a
+  failed run may have already applied them — roll back code only, never the
+  schema.
 - Secrets/vars are untouched by rollback — rotate explicitly when the
   rollback is security-motivated.
 
@@ -509,8 +593,16 @@ path). On the production path the Worker never records NULL (the column
 stays nullable for historical rows, AL-24-4); local manual runs resolve the
 in-image default against THIS line.
 
-Deployed image record (executed plan 19 T3, 2026-08-31 UTC):
+Deployed image record:
 
+> The block below is **machine-managed**: the Deploy workflow rewrites it on
+> every successful deploy (digest + date + version + Actions run link). Do
+> not hand-edit inside the markers. If the write-back step failed (the run is
+> red — see § Automated deploy), paste the digest manually here as the
+> fallback: copy the image digest from the deploy output (or
+> `wrangler containers list --json`) and update the date/version lines.
+
+<!-- deploy-record:start -->
 - Image digest: `sha256:09724a204ef38dab02b88a6537bdd3f051997ac144f0aeff7d5901d9d75aa57d`
   (registry.cloudflare.com/f68fcd78e7c5c10f0466788bb9e85b8e/mstar-inspector-sandbox;
   replaces `sha256:4dae83cd…ccad2ada`)
@@ -519,6 +611,7 @@ Deployed image record (executed plan 19 T3, 2026-08-31 UTC):
   e2e review on btspoony/todo-bots#1 landed with in-image runner
   `skill_version 3.5.0+f1b60df0`, `reviews.envelope` written, `reviews.model
   = NULL` → the default selector above)
+<!-- deploy-record:end -->
 
 ## Ops config (plan 19 T1)
 
@@ -555,8 +648,10 @@ Deployed image record (executed plan 19 T3, 2026-08-31 UTC):
 ### Secrets inventory delta
 
 - `ALERT_WEBHOOK_URL` (NEW, optional, secret class): generic alert webhook
-  for the sweep — set via `wrangler secret put ALERT_WEBHOOK_URL`
-  (`.dev.vars` locally). Unset = log-only alerting.
+  for the sweep — set as a GitHub Secret (the Deploy workflow writes it to
+  the Worker when set and deletes it when unset, so removing the GitHub
+  Secret returns the Worker to log-only alerting; `.dev.vars` locally).
+  Unset = log-only alerting.
 
 ## Maintenance (DEBT-01)
 

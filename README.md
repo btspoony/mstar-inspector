@@ -33,33 +33,30 @@ GitHub webhook → POST /webhook/:appSlug (verify + classify) → Queue → Cons
 
 ## Quick start
 
-> Prerequisites: a [Cloudflare](https://developers.cloudflare.com/workers/) account (Workers + D1 + Queues), a GitHub account, and [Bun](https://bun.sh) ≥ 1.3.14 locally. The full runbook — including Cloudflare resource setup and D1 migrations — lives in [`docs/deploy.md`](docs/deploy.md).
+> Prerequisites: a [Cloudflare](https://developers.cloudflare.com/workers/) account (Workers + D1 + Queues), a GitHub account, and [Bun](https://bun.sh) ≥ 1.3.14 locally. The deploy docs — including Cloudflare resource setup and D1 migrations — live in [`docs/deploy.md`](docs/deploy.md).
 
-1. **Deploy the Worker**
+1. **Deploy the Worker** — merging to `main` deploys automatically via the [Deploy workflow](.github/workflows/deploy.yml) (secrets → D1 migrations → `wrangler deploy` → smoke → digest record). For a manual/local deploy:
 
    ```bash
    bun install
    wrangler deploy        # apply D1 migrations and deploy; details in docs/deploy.md
    ```
 
-2. **Set the dashboard secrets** (three; no review credentials live at Worker level):
+2. **Set the dashboard secrets** (four; no review credentials live at Worker level) — as **GitHub Secrets** (Settings → Secrets and variables → Actions), which the Deploy workflow injects into the Worker on every deploy:
 
    ```bash
-   wrangler secret put DASHBOARD_ENCRYPTION_KEY     # openssl rand -base64 32 — encrypts per-App credentials in D1
-   wrangler secret put DASHBOARD_SESSION_SECRET     # openssl rand -base64 32 — session-cookie HMAC key
-   wrangler secret put GITHUB_OAUTH_CLIENT_ID       # a GitHub OAuth App whose callback is {origin}/dashboard/oauth/callback
-   wrangler secret put GITHUB_OAUTH_CLIENT_SECRET
+   # generate values locally, then add them as GitHub Secrets:
+   openssl rand -base64 32    # DASHBOARD_ENCRYPTION_KEY — encrypts per-App credentials in D1
+   openssl rand -base64 32    # DASHBOARD_SESSION_SECRET — session-cookie HMAC key
+   # GITHUB_OAUTH_CLIENT_ID / GITHUB_OAUTH_CLIENT_SECRET — a GitHub OAuth App
+   # whose callback is {origin}/dashboard/oauth/callback
    ```
 
 3. **Sign in and register a GitHub App** — visit `https://<your-worker>/dashboard`, sign in with GitHub, and follow the **Register App** manifest flow. It creates the GitHub App on your account with a per-App webhook URL of the form `{origin}/webhook/<slug>`, stores the PEM and webhook secret encrypted in D1, and shows you the exact webhook URL to set.
 
 4. **Configure the App** — on the dashboard Settings page for the App, add the provider API key(s) the review model needs (BYOK, encrypted in D1) and a model chain. An App without these fails its reviews closed — see [Per-App configuration](#per-app-configuration).
 
-5. **Enable reviews and open a PR** — flip the kill-switch, then open or update a PR in a repo where the App is installed:
-
-   ```bash
-   wrangler secret put REVIEW_ENABLED   # set to exactly "true"
-   ```
+5. **Enable reviews and open a PR** — flip the kill-switch (Worker var `REVIEW_ENABLED` set to exactly `"true"`), then open or update a PR in a repo where the App is installed.
 
    The review runs in a sandbox container and its result appears as one comment on the PR (upserted — no comment spam across force-pushes).
 
@@ -92,6 +89,7 @@ Everything a review needs is configured **per App** on the dashboard Settings pa
 ## Operations
 
 - **Kill-switch**: reviews run only when the Worker var `REVIEW_ENABLED` is exactly `"true"`. Unset or any other value → every webhook is acknowledged and ignored, nothing is enqueued. Ship unset until you are ready.
+- **Deploys are automated**: merging to `main` runs the [Deploy workflow](.github/workflows/deploy.yml) — secrets injection, D1 migrations, `wrangler deploy`, post-deploy smoke, and the image-digest record. A failed run stops red (no auto-rollback); see [`docs/deploy.md`](docs/deploy.md) for failure semantics and the manual rollback path.
 - **Secrets inventory, deploy steps, rollback, and the full Multi-App go-live checklist** → [`docs/deploy.md`](docs/deploy.md).
 
 ## Local development
@@ -110,7 +108,7 @@ bun test
 
 | Document | What it covers |
 |----------|----------------|
-| [`docs/deploy.md`](docs/deploy.md) | Full deploy runbook: Cloudflare resources, D1 migrations, secrets inventory, deploy steps, Multi-App go-live checklist, rollback |
+| [`docs/deploy.md`](docs/deploy.md) | Deploy docs: automated-deploy primary path (workflow triggers + failure semantics), Cloudflare resources, D1 migrations, secrets inventory, manual reference steps, Multi-App go-live checklist, rollback |
 
 ## License
 
