@@ -4,8 +4,7 @@
 
 # [Morning Star Inspector](https://github.com/btspoony/mstar-inspector)
 
-A self-hosted GitHub App for automated PR reviews and bug detection,
-driven by pluggable coding-agent runtimes.
+Self-hosted GitHub App for automated PR reviews
 
 English / [中文](README_CN.md)
 
