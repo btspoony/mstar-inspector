@@ -53,13 +53,13 @@ mstar-inspector 的 live 部署从手动 runbook（`docs/deploy.md`：D1 migrati
 - cron 注册：**grep deploy 输出** `schedule: */15 * * * *` 行（wrangler 4.125.0 在 cron PUT 成功后打印于 `Deployed … triggers` 块；`wrangler deployments list` 无 cron 面、`wrangler triggers` 仅实验性 deploy 子命令——均不可用）。
 - digest 提取：主源 = `wrangler containers list --json` jq 取 `mstar-inspector-sandbox` 应用 image 的 `@sha256:<64hex>`（container app name = `<worker>-<class>` 小写，wrangler 默认生成；live 状态对「镜像未重建」也准确）；备源 = deploy.log 锚定 `registry.cloudflare.com/<account>/<worker>-<class>@sha256:...` 行。
 
-### Digest 写回（DOCS-01 自动化）
+### Digest 记录（DOCS-01 基线）
 
-- `docs/deploy.md` 用机器管理块：`<!-- deploy-record:start/end -->`，块内容由 workflow 重生成（日期 + Worker version + digest + Actions run URL）。
-- **merge 顺序**：`git fetch origin main && git merge --no-edit origin/main` 必须在 python 改写 docs/deploy.md **之前**——先 dirty 再 merge 会在 main 上恰有 docs-only push 时 abort（「local changes would be overwritten」，QC2/QC3 F-001）。
-- 幂等：`git diff --quiet -- docs/deploy.md` 无变化则短路退出。
-- **防递归**：push 触发 `paths-ignore: ['docs/**', '.mstar/**', '*.md', 'LICENSE', '.env.example']`（content-based，判「改了什么」而非「谁改的」——actor 检查会误杀未来合法 bot 代码提交）。注意 `*.md` 只匹配根目录（GitHub 模式 `*` 不跨 `/`）。
-- 写回失败 = job 红（诚实信号：部署成功但记录未写 = 自动化不完整）；手工 digest 粘贴保留为兜底。
+- **digest 是操作状态，不是文档**——2026-09-01 修订：不再写回 `docs/deploy.md`（分支保护 `pull_request` 规则拒绝 bot 直接 push，且每次部署一个 doc PR 是噪音）。
+- 部署后写入 GitHub Actions **variables**：`LIVE_IMAGE_DIGEST`（`@sha256:…`）+ `LIVE_WORKER_VERSION`（`Current Version ID`）——`gh variable set`（deploy job 需 `actions: write` 权限；不再需要 `contents: write`）。
+- 当次证据：`deploy.log` / `version_id.txt` / `image_digest.txt` 上传为 `deploy-evidence` artifact（`actions/upload-artifact@v4`，`if: always()` 保留失败现场）。
+- **live 真相 = `wrangler containers list --json`**（CF 实时状态）；variables 是部署时基线，DOCS-01 漂移检查 = 实时值 vs 基线。
+- `paths-ignore` 保留（doc-only push 无需重部署），但不再承担防递归职责。
 
 ## Why This Matters
 

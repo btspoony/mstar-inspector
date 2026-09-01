@@ -18,20 +18,22 @@ Merging to `main` triggers the **Deploy** workflow
 ([`.github/workflows/deploy.yml`](../.github/workflows/deploy.yml)):
 
 - **Triggers** — `push` to `main` (skipped for `docs/**`, `.mstar/**`, `*.md`,
-  `LICENSE` — the digest-record commit is docs-only and must not redeploy) and
-  manual `workflow_dispatch` (emergency channel, not subject to the path
-  filter). Deploys are serialized (`concurrency` group, no cancel-in-progress).
+  `LICENSE` — doc-only pushes need no redeploy) and manual `workflow_dispatch`
+  (emergency channel, not subject to the path filter). Deploys are serialized
+  (`concurrency` group, no cancel-in-progress).
 - **Sequence** — `test` job (typecheck + unit tests, mirrors `ci.yml`) →
   `deploy` job: account verification → secrets injection (`wrangler secret
   bulk`, required + optional alert) → D1 migrations (`--remote`) →
   `wrangler deploy` → post-deploy smoke (healthz / cron / digest) → digest
-  write-back to § Image pins and digest record.
+  recorded as GitHub Actions variables (`LIVE_IMAGE_DIGEST` /
+  `LIVE_WORKER_VERSION`) + `deploy-evidence` artifacts (§ Image pins and
+  digest record).
 - **Failure semantics** — any step failure turns the run red and **stops**
   (no automatic rollback): D1 migrations are forward-only, so a rollback after
   they applied would be a schema mismatch. A red run means a human intervenes
-  (see § Rollback); a deploy that succeeded but failed to record its digest is
-  also red — the digest is then pasted manually (see § Image pins and digest
-  record).
+  (see § Rollback); a deploy that succeeded but failed to record its digest
+  baseline is also red — the digest is recoverable from the run's
+  `deploy-evidence` artifact (see § Image pins and digest record).
 
 ## Prerequisites
 
@@ -280,18 +282,20 @@ smoke → record the digest.
 4. `wrangler deploy` — deploys the Worker (webhook face + queue consumer +
    cron trigger) and rebuilds/pushes the container image when the build
    context changed. **Copy the image digest from the deploy output.**
-5. Record the digest + deploy date in § Image pins and digest record below.
-   On the automated path the workflow writes this record itself; the manual
-   paste below is the fallback when the write-back step failed (the run is
-   red — see § Automated deploy failure semantics).
+5. Record the digest baseline — on the automated path the workflow sets the
+   GitHub Actions variables `LIVE_IMAGE_DIGEST` / `LIVE_WORKER_VERSION` and
+   uploads `deploy-evidence` artifacts; the manual equivalent is to note the
+   digest from the deploy output (or `wrangler containers list --json`).
    **Digest drift check (DOCS-01):** after every deploy, verify the live
-   version + image against the recorded line —
+   version + image against the recorded baseline —
    ```bash
    wrangler deployments list   # or: wrangler versions list
+   wrangler containers list --json   # live image digest
    ```
-   Compare the live Worker version and the container image digest with the
-   record in § Image pins and digest record; update the record on EVERY
-   deploy (a stale record makes the "which image is live" audit wrong).
+   Compare the live Worker version and the container image digest with
+   `LIVE_IMAGE_DIGEST` / `LIVE_WORKER_VERSION` (or the § Image pins and
+   digest record line); a stale baseline makes the "which image is live"
+   audit wrong.
 
 ### Sandbox image — U-001 synthesis verification (plan 25 Task 2)
 
@@ -621,25 +625,23 @@ path). On the production path the Worker never records NULL (the column
 stays nullable for historical rows, AL-24-4); local manual runs resolve the
 in-image default against THIS line.
 
-Deployed image record:
+Deployed image record (DOCS-01 baseline):
 
-> The block below is **machine-managed**: the Deploy workflow rewrites it on
-> every successful deploy (digest + date + version + Actions run link). Do
-> not hand-edit inside the markers. If the write-back step failed (the run is
-> red — see § Automated deploy), paste the digest manually here as the
-> fallback: copy the image digest from the deploy output (or
-> `wrangler containers list --json`) and update the date/version lines.
-
-<!-- deploy-record:start -->
-- Image digest: `sha256:09724a204ef38dab02b88a6537bdd3f051997ac144f0aeff7d5901d9d75aa57d`
-  (registry.cloudflare.com/f68fcd78e7c5c10f0466788bb9e85b8e/mstar-inspector-sandbox;
-  replaces `sha256:4dae83cd…ccad2ada`)
-- Deploy date: 2026-08-31 (Worker version `62c18d0a` — the digest-carrying
-  deploy; post-deploy smoke PASS: cron registered, D1 0001–0010 complete,
-  e2e review on btspoony/todo-bots#1 landed with in-image runner
-  `skill_version 3.5.0+f1b60df0`, `reviews.envelope` written, `reviews.model
-  = NULL` → the default selector above)
-<!-- deploy-record:end -->
+> The live image digest is **operational state**, not documentation — the
+> Deploy workflow records it as GitHub Actions **variables** after every
+> successful deploy (no git write, no PR noise):
+>
+> - `LIVE_IMAGE_DIGEST` — the `@sha256:…` digest of the deployed
+>   `mstar-inspector-sandbox` container image
+> - `LIVE_WORKER_VERSION` — the `Current Version ID` of the deployed Worker
+>
+> Per-run evidence (deploy.log / version_id.txt / image_digest.txt) is
+> uploaded as the `deploy-evidence` Actions artifact. The **live truth** is
+> `wrangler containers list --json` (Cloudflare state); the variables are the
+> deploy-time baseline for the DOCS-01 drift check — compare the live image
+> against `LIVE_IMAGE_DIGEST` after any deploy. Historical record (2026-08-31
+> manual deploy): digest `sha256:09724a204ef38dab02b88a6537bdd3f051997ac144f0aeff7d5901d9d75aa57d`,
+> Worker version `62c18d0a`.
 
 ## Ops config (plan 19 T1)
 
