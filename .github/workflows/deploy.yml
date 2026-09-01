@@ -35,7 +35,7 @@ jobs:
   deploy:
     needs: test
     if: github.ref == 'refs/heads/main'
-    permissions: { contents: read, actions: write }   # actions: write — gh variable set (DOCS-01 baseline); no git push anymore
+    permissions: { contents: read }   # no git push / API writes — digest recorded in run summary + artifacts
     runs-on: ubuntu-latest
     environment: staging
     env:
@@ -129,11 +129,14 @@ jobs:
         if: always()   # keep per-run evidence even when a later step fails
 
       - name: Record live image digest (DOCS-01 baseline)
-        env:
-          GH_TOKEN: ${{ github.token }}   # gh CLI does not auto-inject GITHUB_TOKEN — must pass explicitly (Bugbot #18)
         run: |
           set -euo pipefail
           DIGEST=$(cat image_digest.txt); VERSION=$(cat version_id.txt)
-          gh variable set LIVE_IMAGE_DIGEST --body "$DIGEST"
-          gh variable set LIVE_WORKER_VERSION --body "$VERSION"
-          echo "::notice::DOCS-01 baseline recorded: digest=$DIGEST version=$VERSION (compare against 'wrangler containers list' live state)"
+          {
+            echo "## Deploy evidence (DOCS-01 baseline)"
+            echo "- Image digest: \`$DIGEST\`"
+            echo "- Worker version: \`$VERSION\`"
+            echo "- Actions run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+            echo "- Live truth: \`wrangler containers list --json\` (compare for drift)"
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "::notice::DOCS-01 baseline: digest=$DIGEST version=$VERSION (run summary + deploy-evidence artifact)"

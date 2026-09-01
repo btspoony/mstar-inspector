@@ -628,19 +628,16 @@ in-image default against THIS line.
 Deployed image record (DOCS-01 baseline):
 
 > The live image digest is **operational state**, not documentation — the
-> Deploy workflow records it as GitHub Actions **variables** after every
-> successful deploy (no git write, no PR noise):
->
-> - `LIVE_IMAGE_DIGEST` — the `@sha256:…` digest of the deployed
->   `mstar-inspector-sandbox` container image
-> - `LIVE_WORKER_VERSION` — the `Current Version ID` of the deployed Worker
->
-> Per-run evidence (deploy.log / version_id.txt / image_digest.txt) is
-> uploaded as the `deploy-evidence` Actions artifact. The **live truth** is
-> `wrangler containers list --json` (Cloudflare state); the variables are the
-> deploy-time baseline for the DOCS-01 drift check — compare the live image
-> against `LIVE_IMAGE_DIGEST` after any deploy. Historical record (2026-08-31
-> manual deploy): digest `sha256:09724a204ef38dab02b88a6537bdd3f051997ac144f0aeff7d5901d9d75aa57d`,
+> Deploy workflow records it in the **run summary** (`$GITHUB_STEP_SUMMARY`:
+> digest + Worker version + Actions run link) after every successful deploy,
+> and uploads per-run evidence (deploy.log / version_id.txt /
+> image_digest.txt) as the `deploy-evidence` Actions artifact. The GitHub
+> **Environments → staging** page shows the deployment history (commit,
+> actor, timestamp). The **live truth** is `wrangler containers list --json`
+> (Cloudflare state); the run summary is the deploy-time baseline for the
+> DOCS-01 drift check — compare the live image against the latest run's
+> digest after any deploy. Historical record (2026-08-31 manual deploy):
+> digest `sha256:09724a204ef38dab02b88a6537bdd3f051997ac144f0aeff7d5901d9d75aa57d`,
 > Worker version `62c18d0a`.
 
 ## Ops config (plan 19 T1)
