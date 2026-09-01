@@ -315,7 +315,7 @@ function githubAppSection(): string {
 function modelKeysSection(): string {
   return `<section class="enabled">
     <h2>Model keys</h2>
-    <p>Provider keys and model chains are configured per App — each App's Settings manages its own keys, with the deployment's global keys as the fallback when an App has none.</p>
+    <p>Provider keys and model chains are configured per App — each App's Settings manages its own keys; an App without the keys its chain needs fails closed (per-App only, no deployment-level fallback — plan 24).</p>
     <p><a href="/dashboard/apps">Open the Apps list</a> to reach Settings on an App you manage.</p>
   </section>`;
 }
@@ -760,7 +760,7 @@ export function appSettingsPage(
     .join("\n");
   const emptyList =
     maskedKeys.length === 0
-      ? `<p class="status">No provider keys stored for this App — its reviews fall back to the deployment&apos;s global keys.</p>`
+      ? `<p class="status">No provider keys stored for this App — reviews fail closed until keys are configured (per-App BYOK only, plan 24).</p>`
       : `<ul class="keys">
       ${rows}
       </ul>`;
@@ -949,8 +949,8 @@ export function appSettingsPage(
     </section>
     <section class="enabled">
       <h2>Model chain</h2>
-      <p>Comma-separated model selectors for this App&apos;s reviews — same syntax as the deployment&apos;s OMP_REVIEW_MODEL.</p>
-      <p class="note">Saving an empty chain clears it — reviews fall back to the deployment default (the global OMP_REVIEW_MODEL).</p>
+      <p>Comma-separated model selectors for this App&apos;s reviews — the deployment&apos;s global chain knob was retired; this App&apos;s chain is the only chain its reviews use.</p>
+      <p class="note">Saving an empty chain clears it — reviews then fail closed until the chain and the required provider keys are configured (the BYOK/chain status above is the fail-closed visibility entry).</p>
       <form method="post" action="${base}">
         <input type="hidden" name="op" value="save-chain">
         <label class="field">Model chain

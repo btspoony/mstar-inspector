@@ -974,10 +974,12 @@ dashboardApp.get("/apps/:slug/settings", async (c) => {
  * of at most MAX_PROVIDER_KEY_LENGTH characters (plan 15 input bounds — an
  * oversized key is a 400 re-render with zero writes; the store guard beneath
  * is the backstop), then the store encrypts inside. save-chain = empty →
- * clear (global fallback), otherwise ≥1 comma-separated selector required and
- * the chain is stored VERBATIM (a `:thinking`-style suffix is legal omp
- * syntax; full selector validation stays omp-side). save-roles (plan 17 T3)
- * = the Role models editor's full map — one `role_<role>` field per audit
+ * clear the chain (an unconfigured chain fails that App's reviews closed in
+ * the consumer — plan 24 Task 6 / AL-24-5: no deployment-level chain exists
+ * to fall back to), otherwise ≥1 comma-separated selector required and the
+ * chain is stored VERBATIM (a `:thinking`-style suffix is legal omp syntax;
+ * full selector validation stays omp-side). save-roles (plan 17 T3) = the
+ * Role models editor's full map — one `role_<role>` field per audit
  * seat, blanks = cleared, saved through the validate-all-first setModelRoles
  * (zero partial writes on any validation failure). add-custom-provider /
  * remove-custom-provider (plan 23 T2) = the custom-provider declarations
@@ -1076,7 +1078,7 @@ dashboardApp.post("/apps/:slug/settings", async (c) => {
         await store.setModelChain(gate.app.id, null);
         return settingsResponse(c, gate.session, store, apps, gate.app, {
           kind: "success",
-          message: `Cleared the model chain for ${gate.app.slug} — reviews fall back to the deployment default.`,
+          message: `Cleared the model chain for ${gate.app.slug} — reviews fail closed until a chain + provider keys are configured (per-App only, plan 24).`,
         });
       }
       if (raw.length > MAX_MODEL_SELECTOR_LENGTH) {

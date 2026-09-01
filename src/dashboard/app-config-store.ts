@@ -56,13 +56,17 @@
  *     must never render a whole key).
  *   - setModelChain(null) — or any BLANK chain (empty / whitespace-only,
  *     plan 15: aligned with the route's 空 = 清除) — REMOVES the row (absent
- *     = unset = global fallback, Clarify #2: 空 = 全局); a chain with content
+ *     = unset; AL-24-5: a chain-less App's reviews FAIL CLOSED — the consumer
+ *     rejects the message with a structured failure (plan 24 Task 6); there
+ *     is no deployment-level chain to fall back to). A chain with content
  *     upserts verbatim. Read it back with getModelChain (the settings route
  *     prefills the editor from it WITHOUT decrypting any key material).
  *   - getAppConfig decrypts for the consumer face: an App with no config
- *     yields an EMPTY keys map and a null chain (zero-config compatibility —
- *     the consumer falls back to global env), and an undecryptable row is a
- *     loud throw (tamper/misconfiguration is never swallowed).
+ *     yields an EMPTY keys map and a null chain (a chain referring to a
+ *     provider without a key is rejected fail-closed by the consumer's
+ *     assertAppConfigComplete — plan 24 Task 6; zero-config is NOT a valid
+ *     review state anymore), and an undecryptable row is a loud throw
+ *     (tamper/misconfiguration is never swallowed).
  *   - Custom providers (plan 23 T2, migration 0012): upsertCustomProvider /
  *     removeCustomProvider / listCustomProviders manage per-App declarations
  *     of NON-built-in model providers (base URL + AL-23-1 api enum + model
@@ -93,7 +97,7 @@ export type AppProviderKeyRow = {
 /** A row of `app_model_config` (migration 0006). Absent row = chain unset. */
 export type AppModelConfigRow = {
   app_id: string;
-  /** Verbatim comma-separated selector chain; NULL = unset (global fallback). */
+  /** Verbatim comma-separated selector chain; NULL = unset (such an App's reviews fail closed — plan 24 Task 6). */
   model_chain: string | null;
   updated_at: string;
 };
@@ -168,12 +172,13 @@ export type CustomProviderConsumerConfig = {
 
 /**
  * The provider id allowlist — the keys of the `PROVIDERS` mapping in
- * src/pipeline/providers.ts (18 built-in omp providers, same order). Declared
- * locally, NOT imported: dashboard modules must not import pipeline code
- * (architect decision Q2, src/dashboard/index.ts header). The copy is locked
- * in sync by tests/worker/app-config.test.ts (id-sequence equality against
- * the pipeline mapping — the same coverage-lock pattern as
- * tests/scripts/provider-keys).
+ * src/pipeline/providers.ts (19 provider ids incl. `ark`, same order — plan
+ * 24 Task 6 / AL-24-5 added `ark` so the in-image ark-plan base provider's
+ * ARK_API_KEY rides the per-App BYOK keys map like every other provider).
+ * Declared locally, NOT imported: dashboard modules must not import pipeline
+ * code (architect decision Q2, src/dashboard/index.ts header). The copy is
+ * locked in sync by tests/worker/app-config.test.ts (id-sequence equality
+ * against the pipeline mapping — the coverage-lock pattern).
  */
 export const PROVIDER_IDS: readonly string[] = Object.freeze([
   "anthropic",
@@ -194,6 +199,7 @@ export const PROVIDER_IDS: readonly string[] = Object.freeze([
   "cursor",
   "ai-gateway",
   "wafer-serverless",
+  "ark",
 ]);
 
 /**
@@ -510,7 +516,7 @@ export type AppConfig = {
   appId: string;
   /** provider id → decrypted key; only providers with a stored key appear. */
   keys: Record<string, string>;
-  /** Verbatim stored chain; null = unset (the consumer falls back to OMP_REVIEW_MODEL). */
+  /** Verbatim stored chain; null = unset (missing/empty = that App's reviews fail closed — plan 24 Task 6 / AL-24-5). */
   modelChain: string | null;
 };
 
@@ -686,8 +692,10 @@ export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | un
      * Store the App's model chain VERBATIM (the route has already validated
      * ≥1 selector), or clear it: `null` AND any blank chain (empty or
      * whitespace-only — the route's 空 = 清除 semantics, plan 15 alignment)
-     * REMOVE the row (absent = unset = global fallback). A chain with content
-     * upserts verbatim, interior/trailing whitespace included.
+     * REMOVE the row (absent = unset; a chain-less App's reviews fail closed
+     * in the consumer — plan 24 Task 6; no deployment-level fallback exists).
+     * A chain with content upserts verbatim, interior/trailing whitespace
+     * included.
      */
     async setModelChain(appId: string, chain: string | null): Promise<void> {
       if (chain === null || chain.trim() === "") {

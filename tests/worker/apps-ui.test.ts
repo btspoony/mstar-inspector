@@ -821,7 +821,9 @@ describe("App settings — custom providers (plan 23 T2)", () => {
     await store(db).upsertCustomProvider(
       app.id,
       {
-        provider_id: "ark",
+        // NOT a built-in id: "ark" joined PROVIDER_IDS in plan 24 Task 6
+        // (AL-24-5), so a custom declaration must use a free id.
+        provider_id: "my-custom",
         base_url: 'https://evil.example.com/?q="><script>alert(1)</script>',
         api: "openai-completions",
         model_ids: ['"><img src=x onerror=alert(1)>'],

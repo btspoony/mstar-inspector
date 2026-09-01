@@ -49,6 +49,7 @@ import { createMigratedTestD1, type TestD1 } from "../store/helpers";
 import { REDACTED } from "../../src/pipeline/redact";
 import type { ReviewCommenter } from "../../src/pipeline/comment";
 import { createSecretbox } from "../../src/dashboard/secretbox";
+import { createAppConfigStore } from "../../src/dashboard/app-config-store";
 
 const VALID_OUTPUT: ReviewOutput = {
   schema: "mstar.review/v1",
@@ -90,6 +91,12 @@ const TEST_APP_WEBHOOK_SECRET_ENC = await createSecretbox(TEST_KEY).encryptSecre
  * Fully-migrated D1 with the default App row seeded — the consumer's
  * per-App credential resolution needs a real active row on every message
  * (plan 24 Task 1: appRef is required, the env-App branch is retired).
+ * AL-24-5 (plan 24 Task 6): the App is also given its AI-config health
+ * baseline — a model chain (`ark-plan/deepseek-v4-flash`, the in-image
+ * base provider) + the `ark` BYOK key (ARK_API_KEY) whose env the chain's
+ * provider reads — so a zero-extra-env message passes the fail-closed gate
+ * and every success-path test sees ARK_API_KEY + OMP_REVIEW_MODEL from the
+ * App config (no Worker-env OMP_MODEL_KEY / OMP_REVIEW_MODEL exists).
  */
 function createSeededTestD1(): TestD1 {
   const db = createMigratedTestD1();
@@ -101,7 +108,29 @@ function createSeededTestD1(): TestD1 {
        VALUES (?, 'consumer-test-app', 424242, 'consumer-test-app', ?, ?, 'tester', 'active', NULL, datetime('now'), datetime('now'))`,
     )
     .run(TEST_APP_ID, TEST_APP_PRIVATE_KEY_ENC, TEST_APP_WEBHOOK_SECRET_ENC);
+  // The default App's per-App AI config (AL-24-5 health baseline).
+  seedAppConfig(db, TEST_APP_ID);
   return db;
+}
+
+/**
+ * Seed one App's per-App AI config through the REAL store (composite-PK AAD
+ * path): model chain + provider keys. Default = the ark-plan base chain with
+ * the `ark` BYOK key; `extraKeys` adds per-App keys for chains that need
+ * more providers.
+ */
+async function seedAppConfig(
+  db: TestD1,
+  appId: string,
+  modelChain = "ark-plan/deepseek-v4-flash",
+  extraKeys: Record<string, string> = {},
+): Promise<void> {
+  const store = createAppConfigStore(db, TEST_KEY);
+  await store.setModelChain(appId, modelChain);
+  await store.setProviderKey(appId, "ark", "ark-key");
+  for (const [provider, key] of Object.entries(extraKeys)) {
+    await store.setProviderKey(appId, provider, key);
+  }
 }
 
 // --- sandbox fake (injected via createReviewConsumer overrides) -------------
@@ -298,7 +327,6 @@ const kv = {
 
 function makeEnv(overrides: Partial<PipelineEnv> = {}): PipelineEnv {
   return {
-    OMP_MODEL_KEY: "ark-key",
     DB: createSeededTestD1() as never,
     IDEMPOTENCY_KV: kv as never,
     SANDBOX: {} as never,
@@ -475,6 +503,7 @@ describe("createReviewConsumer", () => {
         ARK_API_KEY: "ark-key",
         HARNESS_PLUGIN_ROOT: "/opt/mstar-harness",
         PI_CODING_AGENT_DIR: "/opt/omp-agent",
+        OMP_REVIEW_MODEL: "ark-plan/deepseek-v4-flash",
       },
       timeout: 600_000,
     });
@@ -518,10 +547,10 @@ describe("createReviewConsumer", () => {
     // required — every new row is attributed; app_id NULL survives only on
     // pre-plan-24 historical rows).
     expect(row.app_id).toBe(TEST_APP_ID);
-    // Version records (plan 18 Task 1): no OMP_REVIEW_MODEL on the env →
-    // model NULL (the in-image default ran — never hardcoded worker-side);
-    // provider is NULL on BOTH paths (architect AL-2).
-    expect(row.model).toBeNull();
+    // Version records (plan 18 Task 1, AL-24-5): the seed App's own chain is
+    // the only chain source — `model` records its head selector (never NULL
+    // on a new row); `provider` is NULL on BOTH paths (architect AL-2).
+    expect(row.model).toBe("ark-plan/deepseek-v4-flash");
     expect(row.provider).toBeNull();
     const findings = db.raw.query("SELECT COUNT(*) AS n FROM findings").get() as { n: number };
     expect(findings.n).toBe(1);
@@ -1365,18 +1394,15 @@ describe("createReviewConsumer", () => {
     expect(destroyCalls).toBe(1);
   });
 
-  test("BB-1: OMP_REVIEW_MODEL set on PipelineEnv → forwarded into the runner exec env", async () => {
+  test("BB-1: the App's modelChain is forwarded verbatim into the runner exec env (per-App only, AL-24-5)", async () => {
     reset();
     runnerStdout = JSON.stringify(VALID_OUTPUT);
     const db = createSeededTestD1();
-    const consumer = createReviewConsumer(
-      makeEnv({
-        DB: db as never,
-        OMP_REVIEW_MODEL: "ark-plan/deepseek-v4-flash,openrouter/anthropic/claude-sonnet-4",
-      }),
-      undefined,
-      testOverrides,
-    );
+    // The chain's openrouter provider needs its per-App key (fail-closed gate).
+    await seedAppConfig(db, TEST_APP_ID, "ark-plan/deepseek-v4-flash,openrouter/anthropic/claude-sonnet-4", {
+      openrouter: "sk-or-app",
+    });
+    const consumer = createReviewConsumer(makeEnv({ DB: db as never }), undefined, testOverrides);
 
     await consumer(makeBatch(makePayload()));
 
@@ -1388,11 +1414,12 @@ describe("createReviewConsumer", () => {
         HARNESS_PLUGIN_ROOT: "/opt/mstar-harness",
         PI_CODING_AGENT_DIR: "/opt/omp-agent",
         OMP_REVIEW_MODEL: "ark-plan/deepseek-v4-flash,openrouter/anthropic/claude-sonnet-4",
+        OPENROUTER_API_KEY: "sk-or-app",
       },
       timeout: 600_000,
     });
-    // Version record (plan 18 Task 1, legacy path): the row records the
-    // chain's HEAD selector; provider stays NULL.
+    // Version record (plan 18 Task 1): the row records the App chain's HEAD
+    // selector; provider stays NULL.
     const versionRow = db.raw.query("SELECT model, provider FROM reviews").get() as {
       model: string | null;
       provider: string | null;
@@ -1401,45 +1428,42 @@ describe("createReviewConsumer", () => {
     expect(versionRow.provider).toBeNull();
   });
 
-  test("BB-1: OMP_REVIEW_MODEL unset/empty → omitted from the runner exec env (in-image default)", async () => {
+  test("BB-1: an App with NO modelChain fails closed — no in-image default run, structured channel (AL-24-5)", async () => {
     reset();
     runnerStdout = JSON.stringify(VALID_OUTPUT);
     const db = createSeededTestD1();
-    const consumer = createReviewConsumer(
-      makeEnv({ DB: db as never, OMP_REVIEW_MODEL: "" }),
-      undefined,
-      testOverrides,
+    // Clear the seeded chain (setModelChain("") removes the row — plan 15).
+    await createAppConfigStore(db, TEST_KEY).setModelChain(TEST_APP_ID, "");
+    const consumer = createReviewConsumer(makeEnv({ DB: db as never }), testLog, testOverrides);
+
+    await expect(consumer(makeBatch(makePayload()))).rejects.toThrow(
+      /per-App config incomplete: app .*missing model chain/,
     );
 
-    await consumer(makeBatch(makePayload()));
-
-    const runnerEnv = runnerExecEnv();
-    expect(runnerEnv.OMP_REVIEW_MODEL).toBeUndefined();
-    // Version record (plan 18 Task 1): an empty chain = unset → model NULL
-    // (the in-image default ran).
-    expect(
-      (db.raw.query("SELECT model FROM reviews").get() as { model: string | null }).model,
-    ).toBeNull();
-    // And an entirely unset chain on makeEnv also stays absent.
-    expect(Object.keys(runnerEnv).sort()).toEqual(
-      ["ARK_API_KEY", "HARNESS_PLUGIN_ROOT", "PI_CODING_AGENT_DIR"].sort(),
-    );
+    // F-001 channel: no runner exec, no review row, stage=pipeline failure
+    // row, rethrow (retry → DLQ). The in-image default never runs.
+    expect(sandboxCalls.some((c) => c.cmd.includes("bun run"))).toBe(false);
+    expect(reviewCount(db)).toBe(0);
+    expect(failureRows(db)).toHaveLength(1);
+    expect(failureRows(db)[0]).toMatchObject({ stage: "pipeline" });
+    expect(String(failureRows(db)[0]!.error)).toContain("missing model chain");
+    expect(destroyCalls).toBe(0);
   });
 
-  test("BB-2: known provider keys present-and-non-empty on PipelineEnv → forwarded into the runner exec env", async () => {
+  test("BB-2: the App's stored keys are forwarded under their PROVIDERS env names; blank rows never inject (per-App BYOK)", async () => {
     reset();
     runnerStdout = JSON.stringify(VALID_OUTPUT);
     const db = createSeededTestD1();
-    const consumer = createReviewConsumer(
-      makeEnv({
-        DB: db as never,
-        ANTHROPIC_API_KEY: "sk-ant-test",
-        OPENROUTER_API_KEY: "sk-or-test",
-        MISTRAL_API_KEY: "", // empty → not forwarded
-      }),
-      undefined,
-      testOverrides,
-    );
+    // A chain needing openai + groq; anthropic/openrouter key rows ride along
+    // under their allowlisted env names; an empty mistral row never injects.
+    await seedAppConfig(db, TEST_APP_ID, "openai/gpt-app,groq/query", {
+      anthropic: "sk-ant-test",
+      openrouter: "sk-or-test",
+      openai: "sk-openai-x",
+      groq: "sk-groq-x",
+    });
+    await createAppConfigStore(db, TEST_KEY).setProviderKey(TEST_APP_ID, "mistral", " ");
+    const consumer = createReviewConsumer(makeEnv({ DB: db as never }), undefined, testOverrides);
 
     await consumer(makeBatch(makePayload()));
 
@@ -1448,30 +1472,38 @@ describe("createReviewConsumer", () => {
       ARK_API_KEY: "ark-key",
       ANTHROPIC_API_KEY: "sk-ant-test",
       OPENROUTER_API_KEY: "sk-or-test",
+      OPENAI_API_KEY: "sk-openai-x",
     });
     expect(runnerEnv.MISTRAL_API_KEY).toBeUndefined();
   });
 
-  test("BB-2: absent provider keys omitted; non-provider env is NEVER forwarded (allowlist)", async () => {
+  test("BB-2: only App-config keys reach the container — arbitrary env is NEVER forwarded (allowlist)", async () => {
     reset();
     runnerStdout = JSON.stringify(VALID_OUTPUT);
     const db = createSeededTestD1();
-    // A var that is NOT in the PROVIDERS allowlist sits on the Worker env —
-    // it must never leak into the container.
-    const env = makeEnv({ DB: db as never, GEMINI_API_KEY: "gem-test" }) as PipelineEnv & Record<string, string>;
+    await seedAppConfig(db, TEST_APP_ID, "openai/gpt-app", { gemini: "gem-test", openai: "sk-openai-x" });
+    // Vars that are NOT in the PROVIDERS allowlist sit on the Worker env —
+    // they must never leak into the container. GEMINI_API_KEY on the env is
+    // a stale duplicate of the App-stored key (AL-24-5: env is never read).
+    const env = makeEnv({ DB: db as never }) as PipelineEnv & Record<string, string>;
     env.SOME_ARBITRARY_SECRET = "must-not-leak";
+    env.GEMINI_API_KEY = "env-gemini-not-app";
     const consumer = createReviewConsumer(env, testLog, testOverrides);
 
     await consumer(makeBatch(makePayload()));
 
     const runnerEnv = runnerExecEnv();
+    // The gemini key comes from the APP config, never the env duplicate.
     expect(runnerEnv).toEqual({
       ARK_API_KEY: "ark-key",
       HARNESS_PLUGIN_ROOT: "/opt/mstar-harness",
       PI_CODING_AGENT_DIR: "/opt/omp-agent",
+      OMP_REVIEW_MODEL: "openai/gpt-app",
       GEMINI_API_KEY: "gem-test",
+      OPENAI_API_KEY: "sk-openai-x",
     });
     expect(Object.values(runnerEnv)).not.toContain("must-not-leak");
+    expect(Object.values(runnerEnv)).not.toContain("env-gemini-not-app");
   });
 
   test("guard held on attempt 1 → per-message delayed retry (60s), no throw, no post/insert (BB-3)", async () => {
@@ -1869,11 +1901,10 @@ describe("SEC-01 exact-value redaction through the consumer", () => {
       ],
     });
     const db = createSeededTestD1();
-    const consumer = createReviewConsumer(
-      makeEnv({ DB: db as never, GEMINI_API_KEY: uuidKey }),
-      testLog,
-      testOverrides,
-    );
+    // The UUID key rides the App's per-App config (per-App BYOK, AL-24-5) —
+    // the exact-redact pass must pull it from the assembled runner env.
+    await seedAppConfig(db, TEST_APP_ID, "openai/gpt-app", { gemini: uuidKey, openai: "sk-openai-x" });
+    const consumer = createReviewConsumer(makeEnv({ DB: db as never }), testLog, testOverrides);
 
     await consumer(makeBatch(makePayload()));
 
