@@ -25,8 +25,7 @@ Merging to `main` triggers the **Deploy** workflow
   `deploy` job: account verification → secrets injection (`wrangler secret
   bulk`, required + optional alert) → D1 migrations (`--remote`) →
   `wrangler deploy` → post-deploy smoke (healthz / cron / digest) → digest
-  recorded as GitHub Actions variables (`LIVE_IMAGE_DIGEST` /
-  `LIVE_WORKER_VERSION`) + `deploy-evidence` artifacts (§ Image pins and
+  recorded in the run summary + `deploy-evidence` artifacts (§ Image pins and
   digest record).
 - **Failure semantics** — any step failure turns the run red and **stops**
   (no automatic rollback): D1 migrations are forward-only, so a rollback after
@@ -282,20 +281,20 @@ smoke → record the digest.
 4. `wrangler deploy` — deploys the Worker (webhook face + queue consumer +
    cron trigger) and rebuilds/pushes the container image when the build
    context changed. **Copy the image digest from the deploy output.**
-5. Record the digest baseline — on the automated path the workflow sets the
-   GitHub Actions variables `LIVE_IMAGE_DIGEST` / `LIVE_WORKER_VERSION` and
-   uploads `deploy-evidence` artifacts; the manual equivalent is to note the
-   digest from the deploy output (or `wrangler containers list --json`).
+5. Record the digest baseline — on the automated path the workflow writes it
+   to the run summary (`$GITHUB_STEP_SUMMARY`) and uploads `deploy-evidence`
+   artifacts; the manual equivalent is to note the digest from the deploy
+   output (or `wrangler containers list --json`).
    **Digest drift check (DOCS-01):** after every deploy, verify the live
    version + image against the recorded baseline —
    ```bash
    wrangler deployments list   # or: wrangler versions list
    wrangler containers list --json   # live image digest
    ```
-   Compare the live Worker version and the container image digest with
-   `LIVE_IMAGE_DIGEST` / `LIVE_WORKER_VERSION` (or the § Image pins and
-   digest record line); a stale baseline makes the "which image is live"
-   audit wrong.
+   The **baseline** is the latest successful run's summary / `deploy-evidence`
+   artifact (see § Image pins and digest record); the **live truth** is
+   `wrangler containers list --json` — a stale baseline makes the "which
+   image is live" audit wrong.
 
 ### Sandbox image — U-001 synthesis verification (plan 25 Task 2)
 
