@@ -48,6 +48,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # Bugbot #14: digest write-back merges origin/main — shallow clone has no merge base
 
       - name: Setup Bun
         uses: oven-sh/setup-bun@v2

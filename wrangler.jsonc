@@ -6,6 +6,9 @@
   "compatibility_date": "2026-08-20",
   // 06: nodejs_compat required by the Sandbox container binding (T1-verified).
   "compatibility_flags": ["nodejs_compat"],
+  // Bugbot #14: keep dashboard-managed plaintext vars (REVIEW_ENABLED, ADMIN_LOGINS)
+  // across automated `wrangler deploy` — without keep_vars, deploy wipes them.
+  "keep_vars": true,
   "kv_namespaces": [
     {
       "binding": "IDEMPOTENCY_KV",
