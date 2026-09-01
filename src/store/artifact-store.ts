@@ -158,11 +158,16 @@ export type ReviewArtifactDoc = ArtifactDoc & {
    */
   appId: string;
   /**
-   * Version record (plan 18 Task 1): the effective model chain's HEAD
-   * selector the review ran with, resolved consumer-side via
-   * `effectiveModelChain` (single-sourced with `buildRunnerEnv`). Optional;
-   * absent/NULL = unset (the in-image default ran — the default selector is
-   * recorded in plan 19's runbook, never hardcoded worker-side).
+   * Version record (plan 18 Task 1): the HEAD (primary) selector of the
+   * effective chain the review ran with — `chainHeadSelector` (consumer.ts)
+   * on the `effectiveModelChain` result (comma-separated, trimmed, empty
+   * segments dropped; single-sourced with `buildRunnerEnv`). Omitted/NULL
+   * is historical rows (pre-AL-24-5) or direct unit callers only: on the
+   * production path `assertAppConfigComplete` fail-closes any App whose
+   * chain is missing or parses to zero selectors, so a successful put never
+   * records NULL and the in-image DEFAULT_MODEL_PATTERN scaffold is
+   * unreachable from the consumer. Column stays nullable for the historical
+   * rows.
    */
   model?: string | null;
   /**

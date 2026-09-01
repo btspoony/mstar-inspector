@@ -1521,6 +1521,87 @@ describe("createReviewConsumer", () => {
     expect(String(failureRows(db)[0]!.error)).toContain("missing model chain");
   });
 
+  test("BB-1: a comma-only ROLE OVERRIDE chain (',' — zero selectors) fails closed — structured channel, sibling completes (PR #11 BUG-01)", async () => {
+    reset();
+    runnerStdout = JSON.stringify(VALID_OUTPUT);
+    const db = await createSeededTestD1();
+    // A second App with a HEALTHY base chain (passes the base gate) but a
+    // raw `,` role-override row inserted DIRECTLY into app_model_roles. The
+    // dashboard store rejects this shape (assertModelRoleEntry →
+    // InvalidModelSelectorError), so only a direct-D1 write can land it; the
+    // consumer gate is the backstop and must treat it as "missing model
+    // chain" — the runner's parseModelSelectors would yield [] for the
+    // override, and the runner-side `trim() !== ""` presence check would
+    // otherwise count it as an override and run the in-image
+    // DEFAULT_MODEL_PATTERN scaffold (with the ark key) or fail at
+    // stage=runner after side effects.
+    const overrideAppId = "33333333-4444-5555-6666-777777777777";
+    const box = createSecretbox(TEST_KEY);
+    db.raw
+      .prepare(
+        `INSERT INTO github_apps
+           (id, slug, github_app_id, name, private_key_enc, webhook_secret_enc,
+            created_by, status, deleted_at, created_at, updated_at)
+         VALUES (?, 'comma-override-app', 424244, 'comma-override-app', ?, ?, 'tester', 'active', NULL, datetime('now'), datetime('now'))`,
+      )
+      .run(
+        overrideAppId,
+        await box.encryptSecret(TEST_APP_PEM, `github_apps.private_key_enc:${overrideAppId}`),
+        await box.encryptSecret(
+          "whsec-override-app",
+          `github_apps.webhook_secret_enc:${overrideAppId}`,
+        ),
+      );
+    await seedAppConfig(db, overrideAppId); // healthy base chain + ark key
+    db.raw
+      .prepare(`INSERT INTO app_model_roles (app_id, role, selector) VALUES (?, ?, ?)`)
+      .run(overrideAppId, "code-reviewer", ",");
+    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
+
+    // Healthy sibling FIRST (completes), comma-override message second
+    // (throws inside the try → structured channel → rethrow).
+    const batch = {
+      queue: "review-queue",
+      messages: [
+        {
+          id: "m-healthy",
+          timestamp: new Date(),
+          attempts: 1,
+          body: makePayload(),
+          retry: () => {},
+          ack: () => {},
+        },
+        {
+          id: "m-override",
+          timestamp: new Date(),
+          attempts: 1,
+          body: makePayload({ appRef: { appId: overrideAppId } }),
+          retry: () => {},
+          ack: () => {},
+        },
+      ],
+    } as unknown as MessageBatch<ReviewJobPayload>;
+
+    await expect(consumer(batch)).rejects.toThrow(
+      /per-App config incomplete: app .*role override `code-reviewer`: missing model chain/,
+    );
+
+    // The healthy sibling completed before the comma-override message threw.
+    expect(commenterCalls.filter((c) => c.op === "post")).toHaveLength(1);
+    expect(reviewCount(db)).toBe(1);
+    expect(destroyCalls).toBe(1);
+    // Structured channel: error log + stage=pipeline failure row; the
+    // failing message never reached the sandbox.
+    const errLine = logLines.find((l) => l.level === "error" && l.msg.startsWith("review failed:"));
+    expect(errLine).toBeDefined();
+    expect(errLine!.msg).toContain("role override `code-reviewer`: missing model chain");
+    expect(failureRows(db)).toHaveLength(1);
+    expect(failureRows(db)[0]).toMatchObject({ stage: "pipeline" });
+    expect(String(failureRows(db)[0]!.error)).toContain(
+      "role override `code-reviewer`: missing model chain",
+    );
+  });
+
   test("BB-2: the App's stored keys are forwarded under their PROVIDERS env names; blank rows never inject (per-App BYOK)", async () => {
     reset();
     runnerStdout = JSON.stringify(VALID_OUTPUT);

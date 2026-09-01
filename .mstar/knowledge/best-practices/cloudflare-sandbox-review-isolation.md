@@ -7,7 +7,7 @@ severity: medium
 date: 2026-08-26
 status: active
 created_at: 2026-08-26
-last_updated: 2026-08-31
+last_updated: 2026-09-01
 source_plan: 06-sandbox-review-pipeline
 iteration: v0.2
 verified: true
@@ -34,7 +34,7 @@ mstar-inspector 在 Cloudflare Workers 上编排每 PR 隔离的代码审查：Q
 - clone / `gh pr view` / `gh pr diff` 是 **Worker→exec 的受信任编排**，不是 agent 工具。
 - `gh` 认证：`GH_TOKEN` 经 `exec` 的 `env` 注入（实测 `gh pr diff` 对真实 PR 返回非空 diff）；**密钥不进镜像**（含 build args）。
 - 每消息一个 sandbox，id 用 `randomUUID()`（per-attempt 唯一），`finally` 中 `destroy()`；禁止跨消息复用。
-- 容器内 omp：`HARNESS_PLUGIN_ROOT` 指向镜像预装根（env 注入）；模型 key 经 exec env（`OMP_MODEL_KEY` → 容器内 `ARK_API_KEY` 单一映射点）。
+- 容器内 omp：`HARNESS_PLUGIN_ROOT` 指向镜像预装根（env 注入）；模型 key 仅来自 per-App BYOK：`resolveAppConfig` 产出的 keys 经 PROVIDERS 注册表映射注入（`ark` → `ARK_API_KEY`），`key_source` ∈ `app|custom`（`buildRunnerEnv` 装配，无 env 参数）——全局 `OMP_MODEL_KEY` 单一映射点已随 v0.9 / AL-24-5 退役（零全局回退，见 `perapp-zero-global-fallback.md`）。
 
 ### 网络出站控制面（v0.7 / plan 19, AL-4 核实）
 

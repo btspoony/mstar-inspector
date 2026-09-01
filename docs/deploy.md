@@ -54,6 +54,7 @@ wrangler d1 migrations apply mstar-inspector-db            # local dev
 
 Migrations are **forward-only** (0002 precedent): never hand-edit an applied
 migration; add the next file.
+Note: migration 0006's `app_model_config` comment ("NULL / absent row = unset → falls back to the global OMP_REVIEW_MODEL") is superseded by plan 24 AL-24-5 — chain-less Apps fail closed, no global chain since v0.9.
 
 ### Secrets and vars inventory
 

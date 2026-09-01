@@ -850,6 +850,12 @@ function assertAppConfigComplete(
   // empty segments dropped; provider = the segment before the first `/`;
   // a selector whose shape yields no provider is left to the runner exactly
   // as the chain path does today — no new fail is invented here).
+  // Each override chain must ALSO pass the same zero-selector check as the
+  // base chain below (PR #11 review BUG-01): a role chain that trims to a
+  // raw `,` / `,,,` / whitespace would otherwise slip past the gate, reach
+  // the runner as present-but-empty (runner-side `trim() !== ""` counts it
+  // as present), and either run the in-image DEFAULT_MODEL_PATTERN scaffold
+  // (with the ark key) or fail at stage=runner AFTER side effects.
   const chains: Array<{ role: string | null; chain: string }> = [
     { role: null, chain },
     ...(modelOverrides === undefined
@@ -860,6 +866,16 @@ function assertAppConfigComplete(
         }))),
   ];
   for (const { role, chain: candidateChain } of chains) {
+    if (role !== null) {
+      const overrideHasSelector = candidateChain
+        .split(",")
+        .some((segment) => segment.trim() !== "");
+      if (!overrideHasSelector) {
+        throw new Error(
+          `per-App config incomplete: app ${appId}: role override \`${role}\`: missing model chain`,
+        );
+      }
+    }
     for (const segment of candidateChain.split(",")) {
       const selector = segment.trim();
       if (selector === "") continue; // the runner drops empty segments too
