@@ -58,6 +58,7 @@ describe("SPA dispatch (plan 29 T3)", () => {
 
   test("each enumerated page GET hits ASSETS", async () => {
     const pages = [
+      "/dashboard",
       "/dashboard/insights",
       "/dashboard/members",
       "/dashboard/apps",
@@ -90,9 +91,17 @@ describe("SPA dispatch (plan 29 T3)", () => {
     expect(calls.filter((c) => c.pathname === "/index.html")).toEqual([]);
   });
 
-  test("GET /dashboard (legacy home) is not an SPA page", async () => {
+  test("GET /dashboard HTML navigation is served by SPA dispatch", async () => {
     const { env, calls } = makeEnv();
-    await worker.fetch(htmlGetRequest("/dashboard"), env);
+    const res = await worker.fetch(htmlGetRequest("/dashboard"), env);
+    expect(res.status).toBe(200);
+    expect(calls).toEqual([{ method: "GET", pathname: "/index.html" }]);
+    expect(await res.text()).toContain("window.__BOOT__=");
+  });
+
+  test("GET /dashboard without Accept: text/html stays on legacy", async () => {
+    const { env, calls } = makeEnv();
+    await worker.fetch(new Request("https://worker.local/dashboard"), env);
     expect(calls).toEqual([]);
   });
 
