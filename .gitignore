@@ -137,3 +137,6 @@ node_modules
 .void
 .wrangler
 .DS_Store
+
+# T0 spike scratch app (plan 28) — one-time Void verification, never committed
+void-spike/
