@@ -23,7 +23,7 @@
  * review-side seat vocabulary (plan 17 B6), all asserted against the
  * originals here.
  */
-import { describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import worker from "../../src/worker/index";
@@ -1120,6 +1120,20 @@ describe("GET /dashboard/apps/:slug/settings (plan 29 T6: SPA-owned)", () => {
 });
 
 describe("POST /dashboard/apps/:slug/settings — add-key (op=add-key)", () => {
+  let fetchSpy: ReturnType<typeof spyOn>;
+  beforeEach(() => {
+    fetchSpy = spyOn(globalThis, "fetch").mockImplementation(
+      (async () =>
+        new Response(JSON.stringify({ data: [{ id: "claude-sonnet-4-6" }] }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        })) as unknown as typeof fetch,
+    );
+  });
+  afterEach(() => {
+    fetchSpy.mockRestore();
+  });
+
   test("owner stores a key: encrypted row lands, plain-text 200, never the plaintext", async () => {
     const { db, app } = await seededWorld();
     const cookie = `${SESSION_COOKIE}=${await sessionCookie("mallory")}`;
@@ -1587,6 +1601,14 @@ describe("POST /dashboard/apps/:slug/settings/key/delete (delete-key route)", ()
 // --- plan 23 T2: custom provider declarations (settings ops) ---
 
 describe("POST /dashboard/apps/:slug/settings — custom providers (op=add-custom-provider / remove-custom-provider, plan 23 T2)", () => {
+  let fetchSpy: ReturnType<typeof spyOn>;
+  beforeEach(() => {
+    fetchSpy = spyOn(globalThis, "fetch").mockImplementation((async () => new Response("{}", { status: 200 })) as unknown as typeof fetch);
+  });
+  afterEach(() => {
+    fetchSpy.mockRestore();
+  });
+
   const CUSTOM_FORM: Record<string, string> = {
     op: "add-custom-provider",
     provider_id: "my-custom",
