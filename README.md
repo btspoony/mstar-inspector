@@ -61,7 +61,7 @@ GitHub webhook → POST /webhook/:appSlug (verify + classify) → Queue → Cons
 
 4. **Configure the App** — on the dashboard Settings page for the App, add the provider API key(s) the review model needs (BYOK, encrypted in D1) and a model chain. An App without these fails its reviews closed — see [Per-App configuration](#per-app-configuration).
 
-5. **Enable reviews and open a PR** — flip the kill-switch (Worker var `REVIEW_ENABLED` set to exactly `"true"`), then open or update a PR in a repo where the App is installed.
+5. **Enable reviews and open a PR** — reviews are on per App by default (the dashboard Pause/Resume switch is the control; the Worker var `REVIEW_ENABLED` is an emergency brake that stops ALL reviews only when set to exactly `"false"`), then open or update a PR in a repo where the App is installed.
 
    The review runs in a sandbox container and its result appears as one comment on the PR (upserted — no comment spam across force-pushes).
 
@@ -93,7 +93,7 @@ Everything a review needs is configured **per App** on the dashboard Settings pa
 
 ## Operations
 
-- **Kill-switch**: reviews run only when the Worker var `REVIEW_ENABLED` is exactly `"true"`. Unset or any other value → every webhook is acknowledged and ignored, nothing is enqueued. Ship unset until you are ready.
+- **Emergency brake**: per-App `review_enabled` (dashboard Pause/Resume) is the primary review control. The Worker var `REVIEW_ENABLED` stops ALL reviews platform-wide only when set to exactly `"false"` (case-sensitive, untrimmed); unset / `""` / `"true"` / other → per-App governs. Leave it unset.
 - **Deploys are automated**: merging to `main` runs the [Deploy workflow](.github/workflows/deploy.yml) — secrets injection, D1 migrations, `wrangler deploy`, post-deploy smoke, and the image-digest record. A failed run stops red (no auto-rollback); see [`docs/deploy.md`](docs/deploy.md) for failure semantics and the manual rollback path.
 - **Secrets inventory, deploy steps, rollback, and the full Multi-App go-live checklist** → [`docs/deploy.md`](docs/deploy.md).
 

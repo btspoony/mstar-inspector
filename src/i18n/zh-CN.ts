@@ -205,7 +205,7 @@ export const zhCN: Dictionary = {
     selectProvider: "选择 provider…",
     modelChain: "模型链",
     modelChainCopy:
-      "此 App 审查使用的逗号分隔模型选择器 — 部署级全局链旋钮已退役；此 App 的模型链是其审查使用的唯一链。",
+      "从此 App 已验证的 provider 中选择审查所用模型 — 部署级全局链旋钮已退役；此 App 的模型链是其审查使用的唯一链。",
     modelChainNote:
       "保存空链会将其清空 — 审查随后失败关闭（缺少模型链或 provider 密钥），直到配置好模型链和所需 provider 密钥。",
     modelChainField: "模型链",
@@ -222,7 +222,7 @@ export const zhCN: Dictionary = {
     selectApi: "选择 API…",
     roleModels: "角色模型",
     roleModelsCopy:
-      "此 App 审查的可选按席位模型覆盖 — 每个审查角色运行在自己的逗号分隔选择器链上（:thinking 后缀会原样透传）。",
+      "此 App 审查的可选按席位模型覆盖 — 每个审查角色从同一份已验证模型列表中选择（:thinking 后缀会原样透传）。",
     emptyUsesAppChain: "留空 = 使用 App 模型链。",
     roleHintReviewSeat: "快速 + 默认审查席位",
     roleHintDeep: "深度审查席位",
@@ -244,6 +244,21 @@ export const zhCN: Dictionary = {
     noDeliveries: "还没有投递。",
     unknownEvent: "未知事件",
     status: "状态 {code}",
+    useAppChain: "使用 App 模型链",
+    addToChain: "加入模型链",
+    noAutoDiscovery: "此 provider 不列出模型 — 请从其他已验证 provider 中选择。",
+    noVerifiedModels: "验证 provider 密钥后即可填充模型选项。",
+    chainEmpty: "模型链中还没有模型。",
+    pickModel: "选择模型…",
+    keyVerified: "密钥已验证 — 模型已缓存。",
+    verify: {
+      invalid_key: "该 API 密钥被 provider 拒绝 — 未存储任何内容。",
+      unreachable: "无法连接 provider — 未存储任何内容。",
+      unexpected: "provider 返回了意外响应 — 未存储任何内容。",
+    },
+    membership: {
+      not_in_verified_models: "选择器 {selector} 不在此 App 的已验证模型中。",
+    },
   },
   manifest: {
     title: "创建 GitHub App",
@@ -263,15 +278,15 @@ export const zhCN: Dictionary = {
       create: "创建 App",
       cancel: "取消",
     },
-    success: {
+    onboarding: {
       title: "GitHub App 已连接",
       heading: "GitHub App 已连接",
-      stored: "GitHub App {appName}（id {id}）已为此部署存储。",
+      connected: "GitHub App {appName}（id {id}）已连接到此部署。",
       slug: "Slug：{slug}",
       webhookUrl: "Webhook URL：{webhookUrl}",
-      reviewsNote: "安装此 App 的仓库中的拉取请求，在 App 未暂停时由此 Worker 审查。",
-      viewApps: "查看应用",
-      backToDashboard: "返回 /dashboard",
+      nextStep: "下一步：打开设置并配置 provider — 验证 provider key 并选择模型后，此 App 的审查才会开始。",
+      openSettings: "打开设置",
+      dashboard: "返回 /dashboard",
     },
     error: {
       title: "GitHub App 设置",

@@ -3,10 +3,11 @@
  *
  * `POST /webhook/:appSlug` — the ONLY HTTP review entry (plan 24 Task 1:
  * the legacy bare `/webhook` face is retired):
- * body-size cap (413) → REVIEW_ENABLED kill-switch (2xx ignore) → slug
- * lookup (active, not deleted) → signature verify with THAT App's decrypted
- * webhook secret. The route attaches `appRef: { appId }` after
- * classification (lock L3).
+ * body-size cap (413) → REVIEW_ENABLED emergency brake (exact "false" →
+ * 2xx ignore; plan 31 AC4a — per-App `review_enabled` is the primary
+ * control) → slug lookup (active, not deleted) → signature verify with THAT
+ * App's decrypted webhook secret. The route attaches `appRef: { appId }`
+ * after classification (lock L3).
  *
  * Isolation (AC-B5-isolation): App X's route verifies ONLY X's secret — a
  * sibling App's signature is a 401 with zero enqueue. Unknown slug /
@@ -256,11 +257,11 @@ describe("POST /webhook/:appSlug (per-App routing)", () => {
     expect(sent).toHaveLength(0);
   });
 
-  test("REVIEW_ENABLED kill-switch precedes the slug lookup → 200 ignored, zero enqueue (spec ordering)", async () => {
+  test("REVIEW_ENABLED emergency brake (exact 'false') precedes the slug lookup → 200 ignored, zero enqueue (spec ordering)", async () => {
     const db = createMigratedD1();
     await seedApp(db, { slug: "app-x", secret: "secret-x" });
     const { queue, sent } = makeQueue();
-    const env = makeEnv(db, { REVIEW_QUEUE: queue as never, REVIEW_ENABLED: undefined });
+    const env = makeEnv(db, { REVIEW_QUEUE: queue as never, REVIEW_ENABLED: "false" });
     const body = JSON.stringify(PR_PAYLOAD);
 
     const res = await postWebhook(
@@ -412,6 +413,161 @@ describe("POST /webhook/:appSlug (per-App routing)", () => {
     expect(sent).toHaveLength(1); // the retry hit the claimed idempotency key
     const key = `idem:123:test-owner/test-repo:42:abc123`;
     expect(store.get(key)).toBe("1");
+  });
+});
+
+describe("REVIEW_ENABLED semantic matrix (plan 31 AC4a — per-App governs; env is an emergency brake)", () => {
+  function appOps(
+    db: ReturnType<typeof createTestD1>,
+    id: string,
+  ): { review_enabled: number; last_webhook_at: string | null } {
+    return db.raw
+      .query("SELECT review_enabled, last_webhook_at FROM github_apps WHERE id = ?")
+      .get(id) as { review_enabled: number; last_webhook_at: string | null };
+  }
+
+  /** POST a signed PR webhook, capturing the structured warn/info lines. */
+  async function deliver(
+    db: ReturnType<typeof createTestD1>,
+    env: RouteEnv,
+  ): Promise<{ res: Response; warns: string[]; infos: string[] }> {
+    const body = JSON.stringify(PR_PAYLOAD);
+    const warn = mock((_msg: unknown) => {});
+    const info = mock((_msg: unknown) => {});
+    const origWarn = console.warn;
+    const origLog = console.log;
+    console.warn = warn;
+    console.log = info;
+    let res: Response;
+    try {
+      res = await postWebhook("/webhook/app-x", body, await sigHeaders("secret-x", body), env);
+    } finally {
+      console.warn = origWarn;
+      console.log = origLog;
+    }
+    return {
+      res,
+      warns: warn.mock.calls.map((call) => String(call[0])),
+      infos: info.mock.calls.map((call) => String(call[0])),
+    };
+  }
+
+  test("unset env + review_enabled=1 → enqueued (accepted)", async () => {
+    const db = createMigratedD1();
+    const appRow = await seedApp(db, { slug: "app-x", secret: "secret-x" });
+    const { queue, sent } = makeQueue();
+    const env = makeEnv(db, { REVIEW_QUEUE: queue as never, REVIEW_ENABLED: undefined });
+    const { res } = await deliver(db, env);
+    expect(res.status).toBe(200);
+    expect(await res.text()).toBe("accepted");
+    expect(sent).toHaveLength(1);
+    expect(appOps(db, appRow.id).last_webhook_at).not.toBeNull();
+  });
+
+  test("unset env + review_enabled=0 → 2xx ignored, review_paused, last_webhook_at touched", async () => {
+    const db = createMigratedD1();
+    const appRow = await seedApp(db, { slug: "app-x", secret: "secret-x" });
+    await createAppsStore(db).setReviewEnabled(appRow.id, false);
+    const { queue, sent } = makeQueue();
+    const env = makeEnv(db, { REVIEW_QUEUE: queue as never, REVIEW_ENABLED: undefined });
+    const { res, infos } = await deliver(db, env);
+    expect(res.status).toBe(200);
+    expect(await res.text()).toBe("ignored");
+    expect(sent).toHaveLength(0);
+    expect(appOps(db, appRow.id).last_webhook_at).not.toBeNull();
+    const line = infos.find((s) => s.includes("review_paused"));
+    expect(line).toBeDefined();
+    const fields = JSON.parse(line!) as { event: string; reason: string };
+    expect(fields).toMatchObject({ event: "review_paused", reason: "review_paused" });
+  });
+
+  test('env "" + review_enabled=1 → enqueued (empty string is not the brake)', async () => {
+    const db = createMigratedD1();
+    await seedApp(db, { slug: "app-x", secret: "secret-x" });
+    const { queue, sent } = makeQueue();
+    const env = makeEnv(db, { REVIEW_QUEUE: queue as never, REVIEW_ENABLED: "" });
+    const { res } = await deliver(db, env);
+    expect(res.status).toBe(200);
+    expect(await res.text()).toBe("accepted");
+    expect(sent).toHaveLength(1);
+  });
+
+  test('env "true" + review_enabled=1 → enqueued', async () => {
+    const db = createMigratedD1();
+    await seedApp(db, { slug: "app-x", secret: "secret-x" });
+    const { queue, sent } = makeQueue();
+    const env = makeEnv(db, { REVIEW_QUEUE: queue as never, REVIEW_ENABLED: "true" });
+    const { res } = await deliver(db, env);
+    expect(res.status).toBe(200);
+    expect(await res.text()).toBe("accepted");
+    expect(sent).toHaveLength(1);
+  });
+
+  test('env "TRUE" + review_enabled=1 → enqueued (case-sensitive: not the brake)', async () => {
+    const db = createMigratedD1();
+    await seedApp(db, { slug: "app-x", secret: "secret-x" });
+    const { queue, sent } = makeQueue();
+    const env = makeEnv(db, { REVIEW_QUEUE: queue as never, REVIEW_ENABLED: "TRUE" });
+    const { res } = await deliver(db, env);
+    expect(res.status).toBe(200);
+    expect(await res.text()).toBe("accepted");
+    expect(sent).toHaveLength(1);
+  });
+
+  test('env exactly "false" + review_enabled=1 → 2xx ignored, review_disabled_kill_switch, no enqueue, no touch', async () => {
+    const db = createMigratedD1();
+    const appRow = await seedApp(db, { slug: "app-x", secret: "secret-x" });
+    const { queue, sent } = makeQueue();
+    const env = makeEnv(db, { REVIEW_QUEUE: queue as never, REVIEW_ENABLED: "false" });
+    const { res, warns } = await deliver(db, env);
+    expect(res.status).toBe(200);
+    expect(await res.text()).toBe("ignored");
+    expect(sent).toHaveLength(0);
+    expect(appOps(db, appRow.id).last_webhook_at).toBeNull();
+    const line = warns.find((s) => s.includes("review_disabled_kill_switch"));
+    expect(line).toBeDefined();
+    const fields = JSON.parse(line!) as { event: string; reason: string };
+    expect(fields).toMatchObject({ event: "review_disabled_kill_switch", reason: "review_disabled_kill_switch" });
+  });
+
+  test('env exactly "false" + review_enabled=0 → same as above (the brake wins over per-App pause)', async () => {
+    const db = createMigratedD1();
+    const appRow = await seedApp(db, { slug: "app-x", secret: "secret-x" });
+    await createAppsStore(db).setReviewEnabled(appRow.id, false);
+    const { queue, sent } = makeQueue();
+    const env = makeEnv(db, { REVIEW_QUEUE: queue as never, REVIEW_ENABLED: "false" });
+    const { res, warns, infos } = await deliver(db, env);
+    expect(res.status).toBe(200);
+    expect(await res.text()).toBe("ignored");
+    expect(sent).toHaveLength(0);
+    expect(appOps(db, appRow.id).last_webhook_at).toBeNull();
+    const line = warns.find((s) => s.includes("review_disabled_kill_switch"));
+    expect(line).toBeDefined();
+    // The per-App pause line must NOT ride the info channel — the brake
+    // returned before the slug lookup, so review_paused never fires.
+    expect(infos.some((s) => s.includes("review_paused"))).toBe(false);
+  });
+
+  test('env "false " + review_enabled=1 → enqueued (no trim)', async () => {
+    const db = createMigratedD1();
+    await seedApp(db, { slug: "app-x", secret: "secret-x" });
+    const { queue, sent } = makeQueue();
+    const env = makeEnv(db, { REVIEW_QUEUE: queue as never, REVIEW_ENABLED: "false " });
+    const { res } = await deliver(db, env);
+    expect(res.status).toBe(200);
+    expect(await res.text()).toBe("accepted");
+    expect(sent).toHaveLength(1);
+  });
+
+  test('env "False" + review_enabled=1 → enqueued (case-sensitive: not the brake)', async () => {
+    const db = createMigratedD1();
+    await seedApp(db, { slug: "app-x", secret: "secret-x" });
+    const { queue, sent } = makeQueue();
+    const env = makeEnv(db, { REVIEW_QUEUE: queue as never, REVIEW_ENABLED: "False" });
+    const { res } = await deliver(db, env);
+    expect(res.status).toBe(200);
+    expect(await res.text()).toBe("accepted");
+    expect(sent).toHaveLength(1);
   });
 });
 
@@ -655,11 +811,11 @@ describe("per-App pause gate + last_webhook_at (plan 16, spec 语义锁 B3 / L5)
     expect(appOps(db, appRow.id).last_webhook_at).toBeNull();
   });
 
-  test("pre-verify kill-switch return never touches last_webhook_at", async () => {
+  test("pre-verify emergency-brake return never touches last_webhook_at", async () => {
     const db = createMigratedD1();
     const appRow = await seedApp(db, { slug: "app-x", secret: "secret-x" });
     const { queue, sent } = makeQueue();
-    const env = makeEnv(db, { REVIEW_QUEUE: queue as never, REVIEW_ENABLED: undefined });
+    const env = makeEnv(db, { REVIEW_QUEUE: queue as never, REVIEW_ENABLED: "false" });
     const body = JSON.stringify(PR_PAYLOAD);
 
     const res = await postWebhook("/webhook/app-x", body, await sigHeaders("secret-x", body), env);

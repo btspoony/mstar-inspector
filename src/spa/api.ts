@@ -33,8 +33,8 @@ export async function fetchJson(url: string): Promise<unknown> {
   return await res.json();
 }
 
-/** POST an existing pinned HTML form path; 4xx stays in-SPA so we can refetch. */
-export async function postForm(url: string, body: Record<string, string>): Promise<{ status: number }> {
+/** POST an existing pinned HTML form path; 4xx stays in-SPA so we can refetch. Body text is returned so JSON verify-key 400s can surface their `reason`. */
+export async function postForm(url: string, body: Record<string, string>): Promise<{ status: number; body: string }> {
   const res = await fetch(url, {
     method: "POST",
     credentials: "same-origin",
@@ -50,6 +50,6 @@ export async function postForm(url: string, body: Record<string, string>): Promi
     if (location) window.location.replace(location);
     throw new ApiError(res.status, "");
   }
-  return { status: res.status };
+  return { status: res.status, body: await res.text() };
 }
 

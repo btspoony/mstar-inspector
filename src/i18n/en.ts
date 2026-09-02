@@ -221,7 +221,7 @@ export const en = {
     selectProvider: "Select a provider…",
     modelChain: "Model chain",
     modelChainCopy:
-      "Comma-separated model selectors for this App's reviews — the deployment's global chain knob was retired; this App's chain is the only chain its reviews use.",
+      "Select models from this App's verified providers for its reviews — the deployment's global chain knob was retired; this App's chain is the only chain its reviews use.",
     modelChainNote:
       "Saving an empty chain clears it — reviews then fail closed with per-App config incomplete (missing model chain or provider key) until the chain and the required provider keys are configured.",
     modelChainField: "Model chain",
@@ -238,7 +238,7 @@ export const en = {
     selectApi: "Select an API…",
     roleModels: "Role models",
     roleModelsCopy:
-      "Optional per-seat model overrides for this App's reviews — each audit role runs on its own comma-separated selector chain (a :thinking suffix passes through).",
+      "Optional per-seat model overrides for this App's reviews — each audit role picks from the same verified-model list (a :thinking suffix passes through).",
     emptyUsesAppChain: "Empty = use the App model chain.",
     roleHintReviewSeat: "quick + default review seats",
     roleHintDeep: "deep review seat",
@@ -261,6 +261,21 @@ export const en = {
     noDeliveries: "No deliveries yet.",
     unknownEvent: "unknown event",
     status: "status {code}",
+    useAppChain: "Use App model chain",
+    addToChain: "Add to chain",
+    noAutoDiscovery: "This provider does not list models — pick from another verified provider.",
+    noVerifiedModels: "Verify a provider key to populate model options.",
+    chainEmpty: "No models in the chain yet.",
+    pickModel: "Select a model…",
+    keyVerified: "Key verified — models cached.",
+    verify: {
+      invalid_key: "That API key was rejected by the provider — nothing was stored.",
+      unreachable: "The provider could not be reached — nothing was stored.",
+      unexpected: "The provider returned an unexpected response — nothing was stored.",
+    },
+    membership: {
+      not_in_verified_models: "Selector {selector} is not in this App's verified models.",
+    },
   },
   manifest: {
     title: "Create GitHub App",
@@ -281,16 +296,16 @@ export const en = {
       create: "Create App",
       cancel: "Cancel",
     },
-    success: {
+    onboarding: {
       title: "GitHub App connected",
       heading: "GitHub App connected",
-      stored: "GitHub App {appName} (id {id}) is stored for this deployment.",
+      connected: "GitHub App {appName} (id {id}) is connected to this deployment.",
       slug: "Slug: {slug}",
       webhookUrl: "Webhook URL: {webhookUrl}",
-      reviewsNote:
-        "Pull requests in repos where this App is installed are reviewed by this Worker while the App is not paused.",
-      viewApps: "View Apps",
-      backToDashboard: "Back to /dashboard",
+      nextStep:
+        "Next: open Settings and configure a provider — reviews begin once this App's provider key is verified and its models are picked.",
+      openSettings: "Open Settings",
+      dashboard: "Back to /dashboard",
     },
     error: {
       title: "GitHub App setup",

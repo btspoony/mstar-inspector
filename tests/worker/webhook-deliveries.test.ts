@@ -670,8 +670,9 @@ describe("per-App webhook face — best-effort delivery recording (plan 20)", ()
     const { queue, sent } = makeQueue();
     const body = JSON.stringify(PR_PAYLOAD);
 
-    // Kill-switch (REVIEW_ENABLED unset) returns before the slug lookup.
-    const envKill = makeEnv(db, { REVIEW_QUEUE: queue as never, REVIEW_ENABLED: undefined });
+    // Emergency brake (REVIEW_ENABLED exactly "false" — plan 31 AC4a) returns
+    // before the slug lookup.
+    const envKill = makeEnv(db, { REVIEW_QUEUE: queue as never, REVIEW_ENABLED: "false" });
     const resKill = await postWebhook("/webhook/app-x", body, await sigHeaders("secret-x", body), envKill);
     expect(resKill.status).toBe(200);
     expect(await resKill.text()).toBe("ignored");

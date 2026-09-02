@@ -190,14 +190,14 @@ describe("warn event labels (plan 15 log hygiene 硬化项 3)", () => {
     const log = makeLog();
     classifyEvent("pull_request", pullRequestBody("opened"), log, false);
     const [fields] = log.warn.mock.calls[0] ?? [];
-    expect(fields).toMatchObject({ event: "pull_request", reason: "review_disabled" });
+    expect(fields).toMatchObject({ event: "pull_request", reason: "review_disabled_kill_switch" });
   });
 
-  test("kill-switch warn with absent event header → event = review_disabled", () => {
+  test("kill-switch warn with absent event header → event = review_disabled_kill_switch", () => {
     const log = makeLog();
     classifyEvent(null, pullRequestBody("opened"), log, false);
     const [fields] = log.warn.mock.calls[0] ?? [];
-    expect(fields).toMatchObject({ event: "review_disabled", reason: "review_disabled" });
+    expect(fields).toMatchObject({ event: "review_disabled_kill_switch", reason: "review_disabled_kill_switch" });
   });
 
   test("verifySignature throw warn: real event when threaded, stage label otherwise", async () => {
@@ -362,12 +362,12 @@ describe("classifyEvent — everything else", () => {
     expect(outcome).toEqual({ kind: "reject", status: 400, reason: "invalid JSON body" });
   });
 });
-describe("REVIEW_ENABLED kill-switch (T4) — fail-closed", () => {
+describe("REVIEW_ENABLED emergency brake (plan 31 AC4a)", () => {
   test("classifyEvent with reviews disabled ignores even a whitelisted event", () => {
     const outcome = classifyEvent("pull_request", pullRequestBody("opened"), undefined, false);
     expect(outcome).toEqual({
       kind: "ignore",
-      reason: "reviews disabled by the REVIEW_ENABLED kill-switch",
+      reason: "reviews stopped by the REVIEW_ENABLED emergency brake",
     });
   });
 
@@ -376,24 +376,24 @@ describe("REVIEW_ENABLED kill-switch (T4) — fail-closed", () => {
     expect(outcome.kind).toBe("ignore");
   });
 
-  test("classifyEvent with reviews disabled logs a structured review_disabled warning", () => {
+  test("classifyEvent with reviews disabled logs a structured review_disabled_kill_switch warning", () => {
     const log = makeLog();
     const outcome = classifyEvent("pull_request", pullRequestBody("opened"), log, false);
     expect(outcome.kind).toBe("ignore");
     expect(log.warn).toHaveBeenCalledTimes(1);
     const [fields, msg] = log.warn.mock.calls[0] ?? [];
-    expect(fields).toMatchObject({ event: "pull_request", reason: "review_disabled" });
-    expect(msg).toContain("kill-switch");
+    expect(fields).toMatchObject({ event: "pull_request", reason: "review_disabled_kill_switch" });
+    expect(msg).toContain("emergency brake");
   });
 
   test("classifyWebhook with reviews disabled ignores before any signature work", async () => {
     const log = makeLog();
-    // Even a bad signature is ignored (2xx) — the kill-switch short-circuits
+    // Even a bad signature is ignored (2xx) — the emergency brake short-circuits
     // before verification, so a disabled worker never rejects/retries.
     const outcome = await classifyWebhook(SECRET, "{}", "sha256=deadbeef", "pull_request", log, false);
     expect(outcome).toEqual({
       kind: "ignore",
-      reason: "reviews disabled by the REVIEW_ENABLED kill-switch",
+      reason: "reviews stopped by the REVIEW_ENABLED emergency brake",
     });
     expect(log.warn).toHaveBeenCalledTimes(1);
   });

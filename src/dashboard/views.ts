@@ -237,7 +237,7 @@ button[disabled] {
   background: var(--notice-warn-bg);
   color: var(--notice-warn-fg);
 }
-button.primary, button.danger, button.secondary {
+a.primary, button.primary, button.danger, button.secondary {
   appearance: none;
   display: inline-flex;
   align-items: center;
@@ -251,12 +251,13 @@ button.primary, button.danger, button.secondary {
   font-weight: var(--typo-button-14-weight);
   line-height: var(--typo-button-14-line);
   cursor: pointer;
+  text-decoration: none;
 }
-button.primary:focus-visible, button.danger:focus-visible, button.secondary:focus-visible, a.cancel:focus-visible {
+a.primary:focus-visible, button.primary:focus-visible, button.danger:focus-visible, button.secondary:focus-visible, a.cancel:focus-visible {
   outline: none;
   box-shadow: var(--focus-ring);
 }
-button.primary { background: var(--button-primary-bg); border-color: var(--button-primary-bg); color: var(--button-primary-fg); }
+a.primary, button.primary { background: var(--button-primary-bg); border-color: var(--button-primary-bg); color: var(--button-primary-fg); }
 button.danger { background: var(--button-danger-bg); border-color: var(--button-danger-bg); color: var(--button-danger-fg); }
 label.checkbox { display: block; margin: var(--spacing-4) 0; }
 .id { font-variant-numeric: tabular-nums; font-family: var(--font-mono); }
@@ -438,29 +439,30 @@ export function manifestConfirmPage(
 }
 
 /**
- * App summary success surface (B5 T3, spec § User-visible behavior 3):
- * slug, webhook URL, numeric App id — tabular-nums id, NO success green.
- * PEM / webhook_secret NEVER appear here.
+ * App onboarding surface (plan 31 T5, AC4b) — the post-commit landing page:
+ * App name, numeric id, slug, webhook URL, and the provider-first next-step
+ * CTA into Settings. Same summary discipline as the confirm gate: tabular
+ * id, no success green. PEM / webhook_secret NEVER appear here.
  */
-export function manifestSuccessPage(
+export function manifestOnboardingPage(
   user: { login: string; name?: string },
   app: { id: number; name: string; slug: string; webhookUrl: string },
   locale: Locale = "en",
 ): string {
-  const stored = t(locale, "manifest.success.stored", {
+  const connected = t(locale, "manifest.onboarding.connected", {
     appName: `<strong>${escapeHtml(app.name)}</strong>`,
     id: `<span class="id">${app.id}</span>`,
   });
   return page(
-    t(locale, "manifest.success.title"),
+    t(locale, "manifest.onboarding.title"),
     `${shellHeader(user, false, locale)}
   <main>
     <section class="enabled">
-      <h2>${escapeHtml(t(locale, "manifest.success.heading"))}</h2>
-      <p>${stored}</p>
-      <p class="status">${escapeHtml(t(locale, "manifest.success.slug", { slug: app.slug }))}<br>${escapeHtml(t(locale, "manifest.success.webhookUrl", { webhookUrl: app.webhookUrl }))}</p>
-      <p class="status">${escapeHtml(t(locale, "manifest.success.reviewsNote"))}</p>
-      <p><a href="/dashboard">${escapeHtml(t(locale, "manifest.success.viewApps"))}</a> · <a href="/dashboard">${escapeHtml(t(locale, "manifest.success.backToDashboard"))}</a></p>
+      <h2>${escapeHtml(t(locale, "manifest.onboarding.heading"))}</h2>
+      <p>${connected}</p>
+      <p class="status">${escapeHtml(t(locale, "manifest.onboarding.slug", { slug: app.slug }))}<br>${escapeHtml(t(locale, "manifest.onboarding.webhookUrl", { webhookUrl: app.webhookUrl }))}</p>
+      <p class="note">${escapeHtml(t(locale, "manifest.onboarding.nextStep"))}</p>
+      <p><a class="primary" href="/dashboard/apps/${escapeHtml(app.slug)}/settings">${escapeHtml(t(locale, "manifest.onboarding.openSettings"))}</a> · <a href="/dashboard">${escapeHtml(t(locale, "manifest.onboarding.dashboard"))}</a></p>
     </section>
   </main>`,
     locale,

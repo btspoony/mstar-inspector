@@ -23,7 +23,7 @@
  * review-side seat vocabulary (plan 17 B6), all asserted against the
  * originals here.
  */
-import { describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import worker from "../../src/worker/index";
@@ -113,7 +113,9 @@ function createPopulatedPre0006D1(): ReturnType<typeof createTestD1> {
  * install-health panel from github_apps.review_enabled / last_webhook_at and
  * app_installations; plan 17: the role-models store tests need
  * app_model_roles — so the route tests run on the production shape; the 0007
- * index skip stays, harmless for these tables).
+ * index skip stays, harmless for these tables). 0015 too (plan 31): the
+ * store's setProviderKey upsert now writes the verified_* columns, so every
+ * config-store test must run on the 0015-shaped schema.
  */
 function createAppConfigD1(): ReturnType<typeof createTestD1> {
   const db = createPopulatedPre0006D1();
@@ -125,6 +127,7 @@ function createAppConfigD1(): ReturnType<typeof createTestD1> {
   // the table or every settings route 500s.
   applyMigration(db, "0011_webhook_deliveries.sql");
   applyMigration(db, "0012_custom_providers_and_key_updated_at.sql");
+  applyMigration(db, "0015_provider_verification.sql");
   return db;
 }
 
@@ -338,6 +341,10 @@ describe("migration 0012_custom_providers_and_key_updated_at.sql (plan 23 T1)", 
       app.id,
     );
     expect(() => applyMigration(db, "0012_custom_providers_and_key_updated_at.sql")).not.toThrow();
+    // 0015 next (the real sequence for these tables): the store's
+    // setProviderKey upsert now writes the verified_* columns, so the
+    // re-set below must run on the 0015-shaped schema.
+    applyMigration(db, "0015_provider_verification.sql");
     let row = db.raw.query("SELECT created_at, updated_at FROM app_provider_keys").get() as {
       created_at: string;
       updated_at: string | null;
@@ -1113,6 +1120,20 @@ describe("GET /dashboard/apps/:slug/settings (plan 29 T6: SPA-owned)", () => {
 });
 
 describe("POST /dashboard/apps/:slug/settings — add-key (op=add-key)", () => {
+  let fetchSpy: ReturnType<typeof spyOn>;
+  beforeEach(() => {
+    fetchSpy = spyOn(globalThis, "fetch").mockImplementation(
+      (async () =>
+        new Response(JSON.stringify({ data: [{ id: "claude-sonnet-4-6" }] }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        })) as unknown as typeof fetch,
+    );
+  });
+  afterEach(() => {
+    fetchSpy.mockRestore();
+  });
+
   test("owner stores a key: encrypted row lands, plain-text 200, never the plaintext", async () => {
     const { db, app } = await seededWorld();
     const cookie = `${SESSION_COOKIE}=${await sessionCookie("mallory")}`;
@@ -1580,6 +1601,14 @@ describe("POST /dashboard/apps/:slug/settings/key/delete (delete-key route)", ()
 // --- plan 23 T2: custom provider declarations (settings ops) ---
 
 describe("POST /dashboard/apps/:slug/settings — custom providers (op=add-custom-provider / remove-custom-provider, plan 23 T2)", () => {
+  let fetchSpy: ReturnType<typeof spyOn>;
+  beforeEach(() => {
+    fetchSpy = spyOn(globalThis, "fetch").mockImplementation((async () => new Response("{}", { status: 200 })) as unknown as typeof fetch);
+  });
+  afterEach(() => {
+    fetchSpy.mockRestore();
+  });
+
   const CUSTOM_FORM: Record<string, string> = {
     op: "add-custom-provider",
     provider_id: "my-custom",

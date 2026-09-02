@@ -1159,32 +1159,159 @@ describe("/dashboard manifest routes (plan 11 Task 1)", () => {
     expect(entry.reason).toBe("missing_code");
   });
 
-  test("callback success → conversion exchanged, hold cookie set (with the state slug), HTML carries no secrets", async () => {
+  test("callback success → conversion exchanged, App auto-committed, 302 to onboarding, hold burned, no secrets (plan 31 T5)", async () => {
+    // The callback now runs the commit itself (AC4b — no second click), so
+    // it needs the commit-shaped env: encryption key + D1.
+    const env = makeEnv({ DASHBOARD_ENCRYPTION_KEY: TEST_ENCRYPTION_KEY });
     const { session, state } = await startManifest();
-    let seenUrl = "";
+    const calls: string[] = [];
     let seenHeaders: Record<string, string> = {};
     globalThis.fetch = (async (url: unknown, init?: RequestInit) => {
-      seenUrl = String(url);
+      calls.push(String(url));
+      if (String(url) !== "https://api.github.com/app-manifests/manifest-code/conversions") {
+        throw new Error(`unexpected upstream: ${String(url)}`);
+      }
       seenHeaders = { ...((init?.headers ?? {}) as Record<string, string>) };
       return new Response(JSON.stringify(CONVERSION), { status: 201 });
     }) as typeof fetch;
     const res = await worker.fetch(
       callbackRequest(session, state, `code=manifest-code&state=${state}`),
-      makeEnv(),
+      env,
     );
-    expect(res.status).toBe(200);
+    // One conversion fetch, nothing else — the auto-commit writes locally.
+    expect(calls).toEqual(["https://api.github.com/app-manifests/manifest-code/conversions"]);
     // Conversion per Global Constraints (spec L9).
-    expect(seenUrl).toBe("https://api.github.com/app-manifests/manifest-code/conversions");
     expect(seenHeaders.Accept).toBe("application/vnd.github+json");
     expect(seenHeaders["X-GitHub-Api-Version"]).toBe("2022-11-28");
     expect(seenHeaders.Authorization).toBeUndefined();
+    // Success lands on the App's onboarding page — no confirm click required.
+    expect(res.status).toBe(302);
+    expect(res.headers.get("Location")).toBe("/dashboard/apps/mstar-inspector-octocat/onboarding");
     const cookies = res.headers.getSetCookie();
     // State cookie single-use: expired on the callback.
     expect(
       cookies.some((c) => c.startsWith(`${MANIFEST_STATE_COOKIE}=;`) && c.includes("Max-Age=0")),
     ).toBe(true);
-    // Hold cookie: __Host- attribute set, Max-Age 600, value < 4096B.
-    const holdCookie = cookies.find((c) => c.startsWith(`${MANIFEST_HOLD_COOKIE}=`)) ?? "";
+    // The auto-commit success BURNS the hold — no parked hold cookie.
+    expect(
+      cookies.some((c) => c.startsWith(`${MANIFEST_HOLD_COOKIE}=;`) && c.includes("Max-Age=0")),
+    ).toBe(true);
+    expect(cookies.some((c) => c.startsWith(`${MANIFEST_HOLD_COOKIE}=`) && !c.includes("Max-Age=0"))).toBe(false);
+    // Exactly one encrypted github_apps row with the state-carried slug.
+    const rows = dbOf(env).raw.query("SELECT slug, github_app_id, created_by FROM github_apps").all() as Array<{
+      slug: string;
+      github_app_id: number;
+      created_by: string;
+    }>;
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.slug).toBe("mstar-inspector-octocat");
+    expect(rows[0]!.github_app_id).toBe(CONVERSION.id);
+    expect(rows[0]!.created_by).toBe("octocat");
+    // Landing page: name / id / slug / webhook URL + the Settings CTA, never
+    // secrets, never REVIEW_ENABLED.
+    const landing = await worker.fetch(
+      dashboardRequest("/dashboard/apps/mstar-inspector-octocat/onboarding", `${SESSION_COOKIE}=${session}`),
+      env,
+    );
+    expect(landing.status).toBe(200);
+    const body = await landing.text();
+    expect(body).toContain(`<span class="id">${CONVERSION.id}</span>`);
+    expect(body).toContain(CONVERSION.name);
+    expect(body).toContain("https://worker.local/webhook/mstar-inspector-octocat");
+    expect(body).toContain('href="/dashboard/apps/mstar-inspector-octocat/settings"');
+    expect(body).toContain(">Open Settings</a>");
+    expect(body).not.toContain("BEGIN");
+    expect(body).not.toContain(FAKE_PEM);
+    expect(body).not.toContain(FAKE_WEBHOOK_SECRET);
+    expect(body).not.toContain("REVIEW_ENABLED");
+    // The retired overwrite-confirm semantics stay gone.
+    expect(body).not.toContain("overwrite");
+    expect(body).not.toContain("APP_ID");
+    expect(body).not.toContain('class="danger"');
+  });
+
+  test("callback auto-commit already-connected (github_app_id taken) → 409 error page, hold burned, zero new rows (plan 31 T5)", async () => {
+    const env = makeEnv({ DASHBOARD_ENCRYPTION_KEY: TEST_ENCRYPTION_KEY });
+    // The same GitHub App is already connected on this deployment.
+    await envDb(env).createApp({
+      id: crypto.randomUUID(),
+      slug: "mstar-inspector-earlier",
+      githubAppId: CONVERSION.id,
+      name: "earlier",
+      privateKeyEnc: "v1.primary.aXZpdi.cHJldGV4dA==",
+      webhookSecretEnc: "v1.primary.aXZpdi.cHJldGV4dA==",
+      createdBy: "someone-else",
+    });
+    const { session, state } = await startManifest();
+    globalThis.fetch = (async () => new Response(JSON.stringify(CONVERSION), { status: 201 })) as unknown as typeof fetch;
+    const warns = spyOnWarn();
+    const res = await worker.fetch(
+      callbackRequest(session, state, `code=manifest-code&state=${state}`),
+      env,
+    );
+    expect(res.status).toBe(409);
+    // Non-retryable conflict: the hold is burned (expired cookie emitted).
+    expect(
+      res.headers.getSetCookie().some((c) => c.startsWith(`${MANIFEST_HOLD_COOKIE}=;`) && c.includes("Max-Age=0")),
+    ).toBe(true);
+    expect(appRowCount(env)).toBe(1); // only the pre-existing row
+    const body = await res.text();
+    expect(body).toContain("already connected");
+    expect(body).not.toContain("BEGIN");
+    expect(body).not.toContain(FAKE_WEBHOOK_SECRET);
+    const entry = JSON.parse(warns[0] ?? "") as Record<string, unknown>;
+    expect(entry.stage).toBe("commit");
+    expect(entry.reason).toBe("github_app_id_conflict");
+  });
+
+  test("callback auto-commit slug race → 409 error page, hold burned, zero rows for the held App (plan 31 T5)", async () => {
+    const env = makeEnv({ DASHBOARD_ENCRYPTION_KEY: TEST_ENCRYPTION_KEY });
+    // Hold carries the base slug, but the slug got claimed before the write.
+    await envDb(env).createApp({
+      id: crypto.randomUUID(),
+      slug: "mstar-inspector-octocat",
+      githubAppId: 999,
+      name: "raced",
+      privateKeyEnc: "v1.primary.aXZpdi.cHJldGV4dA==",
+      webhookSecretEnc: "v1.primary.aXZpdi.cHJldGV4dA==",
+      createdBy: "someone-else",
+    });
+    const { session, state } = await startManifest();
+    globalThis.fetch = (async () => new Response(JSON.stringify(CONVERSION), { status: 201 })) as unknown as typeof fetch;
+    const res = await worker.fetch(
+      callbackRequest(session, state, `code=manifest-code&state=${state}`),
+      env,
+    );
+    expect(res.status).toBe(409);
+    expect(
+      res.headers.getSetCookie().some((c) => c.startsWith(`${MANIFEST_HOLD_COOKIE}=;`) && c.includes("Max-Age=0")),
+    ).toBe(true);
+    const rows = dbOf(env).raw.query("SELECT slug FROM github_apps WHERE github_app_id = ?").all(CONVERSION.id) as Array<{ slug: string }>;
+    expect(rows).toHaveLength(0);
+    const body = await res.text();
+    expect(body).toContain("not connected");
+    expect(body).not.toContain("BEGIN");
+  });
+
+  test("callback retryable 500 (missing encryption key) → resumable page, hold cookie parked, confirm gate reachable (plan 31 T5)", async () => {
+    // No DASHBOARD_ENCRYPTION_KEY → the inline commit fails closed at
+    // encryption: 500, zero rows, and the hold lands in a cookie so the
+    // operator can resume from the confirm page.
+    const env = makeEnv();
+    const { session, state } = await startManifest();
+    globalThis.fetch = (async () => new Response(JSON.stringify(CONVERSION), { status: 201 })) as unknown as typeof fetch;
+    const res = await worker.fetch(
+      callbackRequest(session, state, `code=manifest-code&state=${state}`),
+      env,
+    );
+    expect(res.status).toBe(500);
+    expect(appRowCount(env)).toBe(0);
+    const body = await res.text();
+    expect(body).not.toContain("BEGIN");
+    expect(body).not.toContain(FAKE_WEBHOOK_SECRET);
+    // Hold cookie: __Host- attribute set, Max-Age 600, value < 4096B, and
+    // it round-trips to the converted credentials + the state-carried slug.
+    const holdCookie = res.headers.getSetCookie().find((c) => c.startsWith(`${MANIFEST_HOLD_COOKIE}=`)) ?? "";
     expect(holdCookie).toContain("HttpOnly");
     expect(holdCookie).toContain("Secure");
     expect(holdCookie).toContain("SameSite=Lax");
@@ -1194,8 +1321,6 @@ describe("/dashboard manifest routes (plan 11 Task 1)", () => {
     const holdValue = (holdCookie.split(";")[0] ?? "").slice(MANIFEST_HOLD_COOKIE.length + 1);
     expect(holdValue.length).toBeGreaterThan(0);
     expect(holdValue.length).toBeLessThan(4096);
-    // Hold round-trips to the converted credentials + the state-carried slug
-    // for the T3 commit gate.
     const payload = await readHoldValue(holdValue, SESSION_SECRET);
     expect(payload?.id).toBe(CONVERSION.id);
     expect(payload?.name).toBe(CONVERSION.name);
@@ -1203,22 +1328,50 @@ describe("/dashboard manifest routes (plan 11 Task 1)", () => {
     expect(payload?.slug).toBe("mstar-inspector-octocat");
     expect(payload?.pem).toBe(CONVERSION.pem);
     expect(payload?.webhook_secret).toBe(CONVERSION.webhook_secret);
-    // AC-S11-html / B5: the summary HTML never carries PEM or webhook_secret;
-    // it shows the slug + webhook URL instead of the retired overwrite gate.
-    const body = await res.text();
-    expect(body).not.toContain("BEGIN");
-    expect(body).not.toContain(FAKE_PEM);
-    expect(body).not.toContain(FAKE_WEBHOOK_SECRET);
-    expect(body).toContain(`<span class="id">${CONVERSION.id}</span>`);
-    expect(body).toContain("mstar-inspector-octocat");
-    expect(body).toContain("https://worker.local/webhook/mstar-inspector-octocat");
-    expect(body).toContain('action="/dashboard/manifest/commit"');
-    expect(body).toContain(">Create App</button>");
-    expect(body).not.toContain("REVIEW_ENABLED");
-    // B5: the overwrite-confirm semantics are gone (nothing shared changes).
-    expect(body).not.toContain("overwrite");
-    expect(body).not.toContain("APP_ID");
-    expect(body).not.toContain('class="danger"');
+    // The resumable error page links to the confirm gate...
+    expect(body).toContain('href="/dashboard/manifest/confirm"');
+    // ...and the confirm gate re-renders with the parked hold.
+    const resumed = await worker.fetch(
+      dashboardRequest(
+        "/dashboard/manifest/confirm",
+        `${SESSION_COOKIE}=${session}; ${MANIFEST_HOLD_COOKIE}=${holdValue}`,
+      ),
+      env,
+    );
+    expect(resumed.status).toBe(200);
+    const resumedBody = await resumed.text();
+    expect(resumedBody).toContain('action="/dashboard/manifest/commit"');
+    expect(resumedBody).not.toContain(FAKE_PEM);
+    expect(resumedBody).not.toContain(FAKE_WEBHOOK_SECRET);
+  });
+
+  test("callback retryable 500 (github_apps missing) → hold parked, confirm gate reachable (plan 31 T5)", async () => {
+    // through=3: a pre-plan-13 DB (users only — no github_apps table). The
+    // guard passes (membership reads users), the inline commit fails on the
+    // missing table: retryable, hold parked for the resume path.
+    const env = {
+      ...baseEnv({ DASHBOARD_ENCRYPTION_KEY: TEST_ENCRYPTION_KEY }),
+      DB: seededDashboardD1(3),
+    } as unknown as Env;
+    const { session, state } = await startManifest();
+    globalThis.fetch = (async () => new Response(JSON.stringify(CONVERSION), { status: 201 })) as unknown as typeof fetch;
+    const res = await worker.fetch(
+      callbackRequest(session, state, `code=manifest-code&state=${state}`),
+      env,
+    );
+    expect(res.status).toBe(500);
+    const holdCookie = res.headers.getSetCookie().find((c) => c.startsWith(`${MANIFEST_HOLD_COOKIE}=`)) ?? "";
+    expect(holdCookie).toBeTruthy();
+    const holdValue = (holdCookie.split(";")[0] ?? "").slice(MANIFEST_HOLD_COOKIE.length + 1);
+    const resumed = await worker.fetch(
+      dashboardRequest(
+        "/dashboard/manifest/confirm",
+        `${SESSION_COOKIE}=${session}; ${MANIFEST_HOLD_COOKIE}=${holdValue}`,
+      ),
+      env,
+    );
+    expect(resumed.status).toBe(200);
+    expect(await resumed.text()).toContain('action="/dashboard/manifest/commit"');
   });
 
   test("conversion failure → 502, no hold cookie, HTML carries no secrets", async () => {
@@ -1543,7 +1696,7 @@ describe("/dashboard manifest commit (plan 13 B5 T3: manifest → D1, zero CF AP
     expect(rec.urls).toHaveLength(0);
   });
 
-  test("e2e start→callback→commit: encrypted github_apps row, PEM verbatim (L1), AAD rowKey = row PK, summary slug/webhook URL/id, ZERO api.cloudflare.com calls, no secrets in HTML", async () => {
+  test("e2e start→callback AUTO-COMMIT (plan 31 T5): encrypted github_apps row, PEM verbatim (L1), AAD rowKey = row PK, onboarding shows slug/webhook URL/id, ZERO api.cloudflare.com calls, no secrets in HTML", async () => {
     const rec = stubGitHubConversionOnly();
     const env = commitEnv();
     const session = await createSessionValue("octocat", null, SESSION_SECRET);
@@ -1559,7 +1712,8 @@ describe("/dashboard manifest commit (plan 13 B5 T3: manifest → D1, zero CF AP
     const stateCookie =
       start.headers.getSetCookie().find((c) => c.startsWith(`${MANIFEST_STATE_COOKIE}=`)) ?? "";
     const state = (stateCookie.split(";")[0] ?? "").slice(MANIFEST_STATE_COOKIE.length + 1);
-    // 2. callback: the GitHub conversion runs; hold carries the slug.
+    // 2. callback: conversion + the write happen in THIS request — the exact
+    // one upstream call of the whole flow.
     const callback = await worker.fetch(
       dashboardRequest(
         `/dashboard/manifest/callback?code=manifest-code&state=${state}`,
@@ -1567,28 +1721,15 @@ describe("/dashboard manifest commit (plan 13 B5 T3: manifest → D1, zero CF AP
       ),
       env,
     );
-    expect(callback.status).toBe(200);
-    const holdCookie =
-      callback.headers.getSetCookie().find((c) => c.startsWith(`${MANIFEST_HOLD_COOKIE}=`)) ?? "";
-    const holdValue = (holdCookie.split(";")[0] ?? "").slice(MANIFEST_HOLD_COOKIE.length + 1);
-    // 3. commit: write the D1 row — zero upstream calls on this phase.
-    const githubCallsBefore = rec.urls.length;
-    const committed = await worker.fetch(
-      new Request("https://worker.local/dashboard/manifest/commit", {
-        method: "POST",
-        headers: { Cookie: `${SESSION_COOKIE}=${session}; ${MANIFEST_HOLD_COOKIE}=${holdValue}` },
-      }),
-      env,
-    );
-    expect(committed.status).toBe(200);
-    expect(rec.urls.length).toBe(githubCallsBefore); // commit phase: ZERO fetch
+    expect(callback.status).toBe(302);
+    expect(callback.headers.get("Location")).toBe("/dashboard/apps/mstar-inspector-octocat/onboarding");
     // AC-B5-nocf: no api.cloudflare.com anywhere in the whole flow.
     for (const url of rec.urls) expect(url).not.toContain("api.cloudflare.com");
     expect(rec.urls).toEqual([
       "https://api.github.com/app-manifests/manifest-code/conversions",
     ]);
-    // Hold burned on success.
-    expectHoldExpired(committed);
+    // Hold burned on success (single-success semantics preserved).
+    expectHoldExpired(callback);
     // The row: exactly one, slug = the state-carried slug, encrypted columns.
     const db = dbOf(env);
     const rows = db.raw.query("SELECT * FROM github_apps").all() as Array<{
@@ -1629,14 +1770,60 @@ describe("/dashboard manifest commit (plan 13 B5 T3: manifest → D1, zero CF AP
     );
     expect(decryptedPem.startsWith("-----BEGIN RSA PRIVATE KEY-----")).toBe(true);
     expect(decryptedPem).not.toBe(normalizePrivateKey(FAKE_PEM));
-    // Summary HTML: slug + webhook URL + numeric id; never the secrets.
-    const html = await committed.text();
+    // Landing HTML: slug + webhook URL + numeric id; never the secrets.
+    const landing = await worker.fetch(
+      dashboardRequest("/dashboard/apps/mstar-inspector-octocat/onboarding", `${SESSION_COOKIE}=${session}`),
+      env,
+    );
+    expect(landing.status).toBe(200);
+    const html = await landing.text();
     expect(html).toContain("mstar-inspector-octocat");
     expect(html).toContain("https://worker.local/webhook/mstar-inspector-octocat");
     expect(html).toContain(`<span class="id">${CONVERSION.id}</span>`);
     expect(html).not.toContain("BEGIN");
     expect(html).not.toContain(FAKE_PEM);
     expect(html).not.toContain(FAKE_WEBHOOK_SECRET);
+  });
+
+  test("POST /manifest/commit stays an idempotent-recovery path: after a retryable callback 500, the SAME hold resubmits → 302 onboarding + one row (plan 31 T5)", async () => {
+    // 1. Callback with a key-less env: the auto-commit fails at encryption and
+    // parks the hold cookie (500, zero rows). The signed state carries the
+    // slug exactly as /manifest/start would have minted it.
+    const brokeEnv = makeEnv();
+    const session = await createSessionValue("octocat", null, SESSION_SECRET);
+    const state = await createManifestStateValue(SESSION_SECRET, "mstar-inspector-octocat");
+    globalThis.fetch = (async () => new Response(JSON.stringify(CONVERSION), { status: 201 })) as unknown as typeof fetch;
+    const failed = await worker.fetch(
+      dashboardRequest(
+        `/dashboard/manifest/callback?code=manifest-code&state=${state}`,
+        `${SESSION_COOKIE}=${session}; ${MANIFEST_STATE_COOKIE}=${state}`,
+      ),
+      brokeEnv,
+    );
+    expect(failed.status).toBe(500);
+    const holdCookie =
+      failed.headers.getSetCookie().find((c) => c.startsWith(`${MANIFEST_HOLD_COOKIE}=`)) ?? "";
+    const holdValue = (holdCookie.split(";")[0] ?? "").slice(MANIFEST_HOLD_COOKIE.length + 1);
+    expect(holdValue.length).toBeGreaterThan(0);
+    // 2. Operator fixes the deployment (key present) and resubmits through
+    // the pinned POST — the direct /manifest/commit route (recovery path).
+    const env = commitEnv();
+    const committed = await doCommit({
+      env: { ...env, DB: dbOf(brokeEnv) } as unknown as Env,
+      holdValue,
+    });
+    expect(committed.status).toBe(302);
+    expect(committed.headers.get("Location")).toBe("/dashboard/apps/mstar-inspector-octocat/onboarding");
+    expectHoldExpired(committed);
+    const rows = dbOf(brokeEnv).raw.query("SELECT slug FROM github_apps WHERE github_app_id = ?").all(CONVERSION.id) as Array<{ slug: string }>;
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.slug).toBe("mstar-inspector-octocat");
+    // 3. Replaying the same hold after success is the already-connected 409
+    // (the row is single-write): zero NEW rows, matching the long-standing
+    // "already connected" conflict semantics — never a double-write.
+    const replay = await doCommit({ env: { ...env, DB: dbOf(brokeEnv) } as unknown as Env, holdValue });
+    expect(replay.status).toBe(409);
+    expect(appRowCount({ ...env, DB: dbOf(brokeEnv) } as unknown as Env)).toBe(1);
   });
 
   test("slug collision at start: the taken base slug is pre-resolved with a suffix and the row lands on the SAME slug (webhook URL displayed matches route)", async () => {
@@ -1673,7 +1860,8 @@ describe("/dashboard manifest commit (plan 13 B5 T3: manifest → D1, zero CF AP
     const startUrl = manifest.hook_attributes.url;
     expect(startUrl).not.toBe("https://worker.local/webhook/mstar-inspector-octocat");
     expect(startUrl.startsWith("https://worker.local/webhook/mstar-inspector-octocat-")).toBe(true);
-    // Drive callback + commit with the state that carries the suffixed slug.
+    // The auto-commit reads the suffixed slug from the state and lands on
+    // the suffixed onboarding URL.
     const stateCookie =
       start.headers.getSetCookie().find((c) => c.startsWith(`${MANIFEST_STATE_COOKIE}=`)) ?? "";
     const state = (stateCookie.split(";")[0] ?? "").slice(MANIFEST_STATE_COOKIE.length + 1);
@@ -1685,16 +1873,17 @@ describe("/dashboard manifest commit (plan 13 B5 T3: manifest → D1, zero CF AP
       ),
       env,
     );
-    const holdCookie =
-      callback.headers.getSetCookie().find((c) => c.startsWith(`${MANIFEST_HOLD_COOKIE}=`)) ?? "";
-    const holdValue = (holdCookie.split(";")[0] ?? "").slice(MANIFEST_HOLD_COOKIE.length + 1);
-    const committed = await doCommit({ env, holdValue });
-    expect(committed.status).toBe(200);
+    expect(callback.status).toBe(302);
     const rows = db.raw.query("SELECT slug, github_app_id FROM github_apps WHERE github_app_id = ?").all(CONVERSION.id) as Array<{ slug: string; github_app_id: number }>;
     expect(rows).toHaveLength(1);
     // The committed slug equals the URL the manifest registered with GitHub.
     expect(`https://worker.local/webhook/${rows[0]!.slug}`).toBe(startUrl);
-    const html = await committed.text();
+    const landing = await worker.fetch(
+      dashboardRequest(`/dashboard/apps/${rows[0]!.slug}/onboarding`, `${SESSION_COOKIE}=${session}`),
+      env,
+    );
+    expect(landing.status).toBe(200);
+    const html = await landing.text();
     expect(html).toContain(rows[0]!.slug);
     expect(html).toContain(startUrl);
   });
@@ -1776,16 +1965,28 @@ describe("/dashboard manifest commit (plan 13 B5 T3: manifest → D1, zero CF AP
     expectHoldKept(res);
   });
 
-  test("Accept-Language zh renders the success page in zh_CN (plan 29 T7)", async () => {
+  test("Accept-Language zh renders the onboarding page after a successful commit (plan 31 T5)", async () => {
     stubFetchRecording();
+    const session = await createSessionValue("octocat", null, SESSION_SECRET);
+    const env = commitEnv();
     const res = await doCommit({
+      env,
       holdValue: await freshHold(),
       extraHeaders: { "Accept-Language": "zh-CN,zh;q=0.9" },
     });
-    expect(res.status).toBe(200);
-    const body = await res.text();
+    expect(res.status).toBe(302);
+    expect(res.headers.get("Location")).toBe("/dashboard/apps/mstar-inspector-octocat/onboarding");
+    const landing = await worker.fetch(
+      new Request("https://worker.local/dashboard/apps/mstar-inspector-octocat/onboarding", {
+        headers: { Cookie: `${SESSION_COOKIE}=${session}`, "Accept-Language": "zh-CN,zh;q=0.9" },
+      }),
+      env,
+    );
+    expect(landing.status).toBe(200);
+    const body = await landing.text();
     expect(body).toContain('lang="zh-CN"');
     expect(body).toContain("GitHub App 已连接");
+    expect(body).toContain("下一步：打开设置并配置 provider");
     expect(body).not.toContain("GitHub App connected");
     expect(body).not.toContain("REVIEW_ENABLED");
   });
@@ -1980,6 +2181,114 @@ function envDb(env: Env) {
 function makeDbEnv(db: DashboardD1, overrides: Partial<Env> = {}): Env {
   return { ...baseEnv(overrides), DB: db } as Env;
 }
+
+describe("GET /dashboard/apps/:slug/onboarding (plan 31 T5, AC4b)", () => {
+  const origFetch = globalThis.fetch;
+  afterEach(() => {
+    globalThis.fetch = origFetch;
+  });
+
+  function seedApp(env: Env, overrides: Partial<{ slug: string; githubAppId: number; name: string; createdBy: string; deletedAt: string | null }> = {}) {
+    return envDb(env).createApp({
+      id: crypto.randomUUID(),
+      slug: overrides.slug ?? "mstar-inspector-octocat",
+      githubAppId: overrides.githubAppId ?? CONVERSION.id,
+      name: overrides.name ?? CONVERSION.name,
+      privateKeyEnc: "v1.primary.aXZpdi.cHJldGV4dA==",
+      webhookSecretEnc: "v1.primary.aXZpdi.cHJldGV4dA==",
+      createdBy: overrides.createdBy ?? "octocat",
+    }).then(async (row) => {
+      if (!overrides.deletedAt) return row;
+      await dbOf(env).raw
+        .prepare(`UPDATE github_apps SET deleted_at = ? WHERE id = ?`)
+        .run(overrides.deletedAt, row.id);
+      return row;
+    });
+  }
+
+  function onboardingRequest(slug: string, login = "octocat"): Promise<Request> {
+    return createSessionValue(login, null, SESSION_SECRET).then((session) =>
+      dashboardRequest(`/dashboard/apps/${slug}/onboarding`, `${SESSION_COOKIE}=${session}`),
+    );
+  }
+
+  test("no session → 302 to login", async () => {
+    const res = await worker.fetch(
+      dashboardRequest("/dashboard/apps/mstar-inspector-octocat/onboarding"),
+      makeEnv(),
+    );
+    expect(res.status).toBe(302);
+    expect(res.headers.get("Location")).toBe("/dashboard/login");
+  });
+
+  test("unknown slug → 404 (settings-family unknown-app shape)", async () => {
+    const res = await worker.fetch(await onboardingRequest("no-such-app"), makeEnv());
+    expect(res.status).toBe(404);
+  });
+
+  test("soft-deleted App → 404", async () => {
+    const env = makeEnv();
+    await seedApp(env, { deletedAt: new Date().toISOString() });
+    const res = await worker.fetch(await onboardingRequest("mstar-inspector-octocat"), env);
+    expect(res.status).toBe(404);
+  });
+
+  test("member without manage (not the creator, not admin) → 403 forbidden page", async () => {
+    const env = makeEnv();
+    await seedApp(env, { createdBy: "someone-else" });
+    const res = await worker.fetch(await onboardingRequest("mstar-inspector-octocat", "mallory"), env);
+    expect(res.status).toBe(403);
+    const body = await res.text();
+    expect(body).not.toContain(CONVERSION.name);
+    expect(body).not.toContain(FAKE_PEM);
+  });
+
+  test("creator (member role) → 200 with name / id / slug / webhook URL + Settings CTA, no secrets", async () => {
+    const env = makeEnv();
+    const row = await seedApp(env, { createdBy: "octocat-with-a-long-login" });
+    const res = await worker.fetch(await onboardingRequest(row.slug, "octocat-with-a-long-login"), env);
+    expect(res.status).toBe(200);
+    const body = await res.text();
+    expect(body).toContain("mstar-inspector-octocat");
+    expect(body).toContain(`<span class="id">${CONVERSION.id}</span>`);
+    expect(body).toContain(`https://worker.local/webhook/${row.slug}`);
+    expect(body).toContain(`href="/dashboard/apps/${row.slug}/settings"`);
+    expect(body).toContain(">Open Settings</a>");
+    expect(body).toContain("Next: open Settings and configure a provider");
+    expect(body).not.toContain("BEGIN");
+    expect(body).not.toContain(FAKE_PEM);
+    expect(body).not.toContain(FAKE_WEBHOOK_SECRET);
+    expect(body).not.toContain("REVIEW_ENABLED");
+  });
+
+  test("admin views any App's onboarding page", async () => {
+    const env = makeEnv();
+    await seedApp(env, { createdBy: "someone-else" });
+    const res = await worker.fetch(await onboardingRequest("mstar-inspector-octocat"), env);
+    expect(res.status).toBe(200);
+    expect(await res.text()).toContain('href="/dashboard/apps/mstar-inspector-octocat/settings"');
+  });
+
+  test("Accept-Language zh renders the onboarding page in zh_CN (plan 31 T5)", async () => {
+    const env = makeEnv();
+    await seedApp(env);
+    const session = await createSessionValue("octocat", null, SESSION_SECRET);
+    const zh = await worker.fetch(
+      new Request("https://worker.local/dashboard/apps/mstar-inspector-octocat/onboarding", {
+        headers: { Cookie: `${SESSION_COOKIE}=${session}`, "Accept-Language": "zh-CN,zh;q=0.9" },
+      }),
+      env,
+    );
+    expect(zh.status).toBe(200);
+    const body = await zh.text();
+    expect(body).toContain('lang="zh-CN"');
+    expect(body).toContain("GitHub App 已连接");
+    expect(body).toContain("打开设置");
+    expect(body).not.toContain("GitHub App connected");
+    expect(body).not.toContain("Open Settings");
+    expect(body).not.toContain("REVIEW_ENABLED");
+  });
+});
 
 describe("migrations/0003_dashboard_users.sql (plan 12 T1)", () => {
   test("creates the users table per spec § Data model — no status column (removal = delete row)", () => {

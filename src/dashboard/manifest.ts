@@ -281,17 +281,17 @@ async function holdKey(secret: string): Promise<CryptoKey> {
 }
 
 /**
- * `base64url(12B IV ‖ AES-256-GCM ciphertext‖16B tag)`. RSA-2048 PEM ≈ 1.7KB
- * → serialized value ≈ 2.4KB, under the 4096B single-cookie budget.
+ * Build the plaintext hold payload (plan 31 T5: the callback auto-commit
+ * consumes the payload directly while ALSO minting the cookie string, so
+ * the payload construction is shared instead of built twice).
  */
-export async function createHoldValue(
+export function buildHoldPayload(
   conversion: ManifestConversion,
   login: string,
-  secret: string,
   slug: string,
   nowMs = Date.now(),
-): Promise<string> {
-  const payload: ManifestHoldPayload = {
+): ManifestHoldPayload {
+  return {
     id: conversion.id,
     name: conversion.name,
     login,
@@ -300,6 +300,13 @@ export async function createHoldValue(
     webhook_secret: conversion.webhook_secret,
     exp: Math.floor(nowMs / 1000) + MANIFEST_HOLD_MAX_AGE_SEC,
   };
+}
+
+/**
+ * `base64url(12B IV ‖ AES-256-GCM ciphertext‖16B tag)`. RSA-2048 PEM ≈ 1.7KB
+ * → serialized value ≈ 2.4KB, under the 4096B single-cookie budget.
+ */
+export async function encryptHoldValue(payload: ManifestHoldPayload, secret: string): Promise<string> {
   const iv = crypto.getRandomValues(new Uint8Array(12));
   const key = await holdKey(secret);
   const ciphertext = new Uint8Array(
@@ -309,6 +316,17 @@ export async function createHoldValue(
   value.set(iv, 0);
   value.set(ciphertext, iv.length);
   return base64urlEncode(value);
+}
+
+/** Cookie string for a fresh conversion (signature kept for tests/callers). */
+export async function createHoldValue(
+  conversion: ManifestConversion,
+  login: string,
+  secret: string,
+  slug: string,
+  nowMs = Date.now(),
+): Promise<string> {
+  return encryptHoldValue(buildHoldPayload(conversion, login, slug, nowMs), secret);
 }
 
 /** Decrypts + shape/expiry check; anything off → null (treat as flow expired). */
