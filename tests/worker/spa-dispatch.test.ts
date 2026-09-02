@@ -13,6 +13,27 @@ import { SPA_INDEX_HTML, htmlGetRequest } from "../helpers/spa";
 const SESSION_SECRET = "test-dashboard-session-secret-32-bytes!";
 type AssetCall = { method: string; pathname: string };
 
+/**
+ * Users-store D1 double for the W-001 shell membership gate: returns a row
+ * for any login (the tests here only distinguish session-present from
+ * session-absent; the removed-member denial is pinned in dashboard.test.ts).
+ */
+function memberDbStub(): Env["DB"] {
+  return {
+    prepare: () => ({
+      bind: () => ({
+        first: async () => ({
+          id: "u-test",
+          github_login: "octocat",
+          role: "admin",
+          created_at: new Date().toISOString(),
+          invited_by: null,
+        }),
+      }),
+    }),
+  } as unknown as Env["DB"];
+}
+
 function stubAssets(
   files: Record<string, string>,
   calls: AssetCall[],
@@ -96,6 +117,9 @@ describe("SPA dispatch (plan 29 T3)", () => {
     expect(res.status).toBe(200);
     expect(calls).toEqual([{ method: "GET", pathname: "/index.html" }]);
     expect(await res.text()).toContain("window.__BOOT__=");
+    // Plan 30 QC S-001: the boot-injected document carries identity (login/
+    // role) — explicitly uncacheable.
+    expect(res.headers.get("cache-control")).toBe("private, no-store");
   });
 
   test("GET /dashboard is the SPA workbench for every Accept variant (plan 30 T4)", async () => {
@@ -177,14 +201,32 @@ describe("SPA dispatch (plan 29 T3)", () => {
   });
 
   test("boot script carries login from the session cookie", async () => {
-    const { env } = makeEnv();
+    // Plan 30 W-001: a session-bearing shell request re-reads membership
+    // through D1 — bind the users store so the boot's login/name resolve
+    // past the gate (role comes from the same single lookup).
+    const { env } = makeEnv({ DB: memberDbStub() });
     const session = await createSessionValue("octocat", "The Octocat", SESSION_SECRET);
     const res = await worker.fetch(
       htmlGetRequest("/dashboard/login", { Cookie: `${SESSION_COOKIE}=${session}` }),
       env,
     );
+    expect(res.status).toBe(200);
     const body = await res.text();
     expect(body).toContain('"login":"octocat"');
     expect(body).toContain('"name":"The Octocat"');
+    expect(body).toContain('"role":"admin"');
+  });
+
+  test("session on the shell path fails closed when D1 is unbound (500, plan 30 W-001)", async () => {
+    // Mirrors the guard: a session whose membership cannot be verified (no
+    // users-store binding) must never receive the shell — 500, not a leak.
+    const { env } = makeEnv({ DB: undefined });
+    const session = await createSessionValue("octocat", null, SESSION_SECRET);
+    const res = await worker.fetch(
+      htmlGetRequest("/dashboard", { Cookie: `${SESSION_COOKIE}=${session}` }),
+      env,
+    );
+    expect(res.status).toBe(500);
+    expect(await res.text()).toContain("dashboard storage is not configured");
   });
 });

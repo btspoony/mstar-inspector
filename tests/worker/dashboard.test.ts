@@ -2310,11 +2310,24 @@ describe("per-request allowlist guard (plan 12 T2, spec § AuthZ + lock L5)", ()
       networkCalls++;
       throw new Error("no network may run behind the guard");
     }) as unknown as typeof fetch;
-    const env = await removedMemberEnv();
+    // Plan 30 W-001: production ALWAYS binds ASSETS, so GET /dashboard hits
+    // spa-dispatch's own membership gate before the guard — the plan-12 403
+    // contract is preserved there (PM decision), not only via the legacy
+    // fall-through. Bind ASSETS so this test models production.
+    const env = withSpaAssets(await removedMemberEnv());
     const cookie = `${SESSION_COOKIE}=${await mallorySession()}`;
-    // GET shell (B0)
-    const shell = await worker.fetch(dashboardRequest("/dashboard", cookie), env);
-    expect(shell.status).toBe(403);
+    // GET shell (B0) — any Accept variant takes the shell path on /dashboard.
+    for (const accept of [undefined, "application/json"]) {
+      const headers: Record<string, string> = { Cookie: cookie };
+      if (accept) headers.Accept = accept;
+      const shell = await worker.fetch(new Request("https://worker.local/dashboard", { headers }), env);
+      expect(shell.status, accept ?? "no Accept").toBe(403);
+      const body = await shell.text();
+      // Removed-member page (not the shell): no identity header, no sections.
+      expect(body).toContain("Your dashboard access was removed. Ask an admin to re-invite mallory.");
+      expect(body).not.toContain("Signed in as");
+      expect(body).not.toContain('action="/dashboard/manifest/start"');
+    }
     // POST manifest start (B1)
     const start = await worker.fetch(
       new Request("https://worker.local/dashboard/manifest/start", {
@@ -2349,11 +2362,6 @@ describe("per-request allowlist guard (plan 12 T2, spec § AuthZ + lock L5)", ()
     );
     expect(future.status).toBe(403);
     expect(networkCalls).toBe(0);
-    const body = await shell.text();
-    // Removed-member page (not the shell): no identity header, no sections.
-    expect(body).toContain("Your dashboard access was removed. Ask an admin to re-invite mallory.");
-    expect(body).not.toContain("Signed in as");
-    expect(body).not.toContain('action="/dashboard/manifest/start"');
   });
 
   test("removed member CAN log out: logout is session-gated, not membership-gated (qc2 F-002)", async () => {
@@ -2406,6 +2414,9 @@ describe("per-request allowlist guard (plan 12 T2, spec § AuthZ + lock L5)", ()
     const shellBody = await shell.text();
     expect(shellBody).toContain("window.__BOOT__=");
     expect(shellBody).toContain('"login":"octocat"');
+    // Plan 30 W-001: the shell gate's shared D1 lookup still resolves the
+    // role for valid members (octocat is the seeded admin).
+    expect(shellBody).toContain('"role":"admin"');
     const start = await worker.fetch(
       new Request("https://worker.local/dashboard/manifest/start", {
         method: "POST",
@@ -2446,15 +2457,18 @@ describe("per-request allowlist guard (plan 12 T2, spec § AuthZ + lock L5)", ()
   });
 
   test("removed-member denial logs a structured not_a_member warning (login only, no secrets)", async () => {
+    // Plan 30 W-001: ASSETS is always bound in production, so the shell-path
+    // denial fires in spa-dispatch's membership gate (stage spa_dispatch), not
+    // the legacy guard — the structured event is identical otherwise.
     const warns = spyOnWarn();
     await worker.fetch(
       dashboardRequest("/dashboard", `${SESSION_COOKIE}=${await mallorySession()}`),
-      await removedMemberEnv(),
+      withSpaAssets(await removedMemberEnv()),
     );
     expect(warns).toHaveLength(1);
     const entry = JSON.parse(warns[0] ?? "") as Record<string, unknown>;
     expect(entry.event).toBe("dashboard_access");
-    expect(entry.stage).toBe("guard");
+    expect(entry.stage).toBe("spa_dispatch");
     expect(entry.reason).toBe("not_a_member");
     expect(entry.login).toBe("mallory");
   });
@@ -2659,8 +2673,13 @@ describe("members page (plan 12 T3, admin-only)", () => {
     expect(await res.text()).toBe("ok");
     expect(await getUserByLogin(db, "mallory")).toBeNull();
     // Done criterion: a removed member cannot reach any /dashboard/** route
-    // with the still-valid session cookie — the T2 guard fails it closed.
-    const shell = await worker.fetch(dashboardRequest("/dashboard", staleCookie), makeDbEnv(db));
+    // with the still-valid session cookie. Plan 30 W-001: production always
+    // binds ASSETS, so the shell path is denied by spa-dispatch's membership
+    // gate — bind ASSETS to model production, not the legacy fall-through.
+    const shell = await worker.fetch(
+      dashboardRequest("/dashboard", staleCookie),
+      withSpaAssets(makeDbEnv(db)),
+    );
     expect(shell.status).toBe(403);
   });
 
