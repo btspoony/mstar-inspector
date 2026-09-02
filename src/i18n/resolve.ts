@@ -4,8 +4,11 @@
  * Decision chain (spec §3, architect-locked — NO locale middleware):
  *   1. cookie `mstar_locale` — valid ids only (`en` | `zh_CN`); any other
  *      value is ignored, never an error.
- *   2. `Accept-Language` — the FIRST language tag with a `zh` prefix
- *      (case-insensitive) → zh_CN.
+ *   2. `Accept-Language` — only the FIRST listed tag is inspected: a
+ *      case-insensitive `zh` prefix → zh_CN. No q-value parsing: browsers
+ *      order tags by stated preference, so honoring any later `zh;q=…`
+ *      tag would mis-locale an en-primary bilingual browser
+ *      (e.g. `en-US,zh-CN;q=0.8` correctly stays English).
  *   3. fallback → en.
  *
  * `resolveLocale(request)` is a pure function with exactly two call sites

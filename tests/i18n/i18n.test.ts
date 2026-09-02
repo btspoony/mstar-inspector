@@ -111,6 +111,11 @@ describe("resolveLocale decision matrix (plan 29 T2)", () => {
     { name: "no cookie + no AL → en", expected: "en" },
     // case-insensitive zh prefix
     { name: "no cookie + AL ZH-CN uppercase → zh_CN", acceptLanguage: "ZH-CN,zh;q=0.9", expected: "zh_CN" },
+    // first-tag-only, no q-value parsing: a later zh tag must NOT override an en primary
+    { name: "no cookie + AL en-first with later zh → en", acceptLanguage: "en-US,en;q=0.9,zh-CN;q=0.8", expected: "en" },
+    // bare / underscore tags resolve the same as scripted zh-CN
+    { name: "no cookie + AL bare zh → zh_CN", acceptLanguage: "zh", expected: "zh_CN" },
+    { name: "no cookie + AL zh_CN underscore → zh_CN", acceptLanguage: "zh_CN", expected: "zh_CN" },
   ];
 
   for (const c of cases) {

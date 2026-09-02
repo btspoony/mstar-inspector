@@ -604,7 +604,7 @@ describe("/dashboard/locale (plan 29 T2)", () => {
   const sessionCookie = async () =>
     `${SESSION_COOKIE}=${await createSessionValue("octocat", null, SESSION_SECRET)}`;
 
-  test("POST valid form locale → 302 to Referer + mstar_locale Set-Cookie", async () => {
+  test("POST valid form locale → 302 to sanitized Referer path + mstar_locale Set-Cookie", async () => {
     const res = await worker.fetch(
       new Request("https://worker.local/dashboard/locale", {
         method: "POST",
@@ -618,13 +618,69 @@ describe("/dashboard/locale (plan 29 T2)", () => {
       makeEnv(),
     );
     expect(res.status).toBe(302);
-    expect(res.headers.get("Location")).toBe("https://worker.local/dashboard/insights");
+    // same-origin absolute Referer is sanitized to its path+query — never echoed as a URL
+    expect(res.headers.get("Location")).toBe("/dashboard/insights");
     const setCookie = res.headers.getSetCookie();
     expect(setCookie).toHaveLength(1);
     expect(setCookie[0]).toContain(`${LOCALE_COOKIE}=zh_CN`);
     expect(setCookie[0]).toContain("HttpOnly");
+    expect(setCookie[0]).toContain("Secure");
     expect(setCookie[0]).toContain("SameSite=Lax");
     expect(setCookie[0]).toContain("Path=/dashboard");
+  });
+
+  test("POST with off-origin absolute Referer → 302 to /dashboard (no open redirect), cookie set", async () => {
+    const res = await worker.fetch(
+      new Request("https://worker.local/dashboard/locale", {
+        method: "POST",
+        headers: {
+          Cookie: await sessionCookie(),
+          "Content-Type": "application/x-www-form-urlencoded",
+          Referer: "https://evil.example/phish",
+        },
+        body: "locale=zh_CN",
+      }),
+      makeEnv(),
+    );
+    expect(res.status).toBe(302);
+    expect(res.headers.get("Location")).toBe("/dashboard");
+    expect(res.headers.getSetCookie()).toHaveLength(1);
+  });
+
+  test("POST with protocol-relative Referer → 302 to /dashboard (no open redirect), cookie set", async () => {
+    const res = await worker.fetch(
+      new Request("https://worker.local/dashboard/locale", {
+        method: "POST",
+        headers: {
+          Cookie: await sessionCookie(),
+          "Content-Type": "application/x-www-form-urlencoded",
+          Referer: "//evil.example/phish",
+        },
+        body: "locale=zh_CN",
+      }),
+      makeEnv(),
+    );
+    expect(res.status).toBe(302);
+    expect(res.headers.get("Location")).toBe("/dashboard");
+    expect(res.headers.getSetCookie()).toHaveLength(1);
+  });
+
+  test("POST with empty-string Referer → 302 to /dashboard (treated as missing), cookie set", async () => {
+    const res = await worker.fetch(
+      new Request("https://worker.local/dashboard/locale", {
+        method: "POST",
+        headers: {
+          Cookie: await sessionCookie(),
+          "Content-Type": "application/x-www-form-urlencoded",
+          Referer: "",
+        },
+        body: "locale=zh_CN",
+      }),
+      makeEnv(),
+    );
+    expect(res.status).toBe(302);
+    expect(res.headers.get("Location")).toBe("/dashboard");
+    expect(res.headers.getSetCookie()).toHaveLength(1);
   });
 
   test("POST valid JSON locale without Referer → 302 to /dashboard + Set-Cookie", async () => {

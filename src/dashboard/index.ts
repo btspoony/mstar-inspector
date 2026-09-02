@@ -294,10 +294,33 @@ dashboardApp.get("/logout", (c) => {
 // JSON or form-encoded `{ locale }`; valid ids are the two Locale values.
 // Writes the mstar_locale cookie (HttpOnly, SameSite=Lax, Path=/dashboard
 // — the session.ts attribute set scoped to the dashboard) and 302s back to
-// the Referer (missing → /dashboard). Invalid locale → 400, no cookie.
-// Sits behind the mount-level guard like every other POST: the toggle only
-// renders in the signed-in navbar. (If Task 4's login page needs a
-// pre-session switcher, add /dashboard/locale to GUARD_EXEMPT_PATHS.)
+// a Referer-derived target sanitized by safeLocaleRedirect (anything
+// off-origin, protocol-relative, empty, or missing → /dashboard). Invalid
+// locale → 400, no cookie. Sits behind the mount-level guard like every
+// other POST: the toggle only renders in the signed-in navbar. (If Task 4's
+// login page needs a pre-session switcher, add /dashboard/locale to
+// GUARD_EXEMPT_PATHS.)
+
+/**
+ * Safe 302 target for the locale toggle. The Referer header is
+ * attacker-influenced (open-redirect surface): accept ONLY a root-relative
+ * path that does not start with `//`, or a same-origin absolute URL
+ * (stripped to path+query). Any other value — off-origin URL,
+ * protocol-relative `//host`, empty string, junk — falls back to
+ * /dashboard. Never echoes an absolute or protocol-relative URL.
+ */
+function safeLocaleRedirect(referer: string | null | undefined, origin: string): string {
+  if (referer) {
+    if (referer.startsWith("/") && !referer.startsWith("//")) return referer;
+    try {
+      const url = new URL(referer, origin);
+      if (url.origin === origin) return `${url.pathname}${url.search}`;
+    } catch {
+      // unparseable referer → /dashboard
+    }
+  }
+  return "/dashboard";
+}
 
 /** JSON or form body `{ locale }` → valid Locale, or null (invalid/malformed). */
 async function readLocaleFromBody(c: Context<{ Bindings: Env }>): Promise<Locale | null> {
@@ -318,8 +341,8 @@ dashboardApp.post("/locale", async (c) => {
   const locale = await readLocaleFromBody(c);
   if (!locale) return c.text("invalid locale", 400);
   c.header("Set-Cookie", serializeLocaleCookie(locale));
-  const referer = c.req.header("Referer");
-  return c.redirect(referer ?? "/dashboard", 302);
+  const location = safeLocaleRedirect(c.req.header("Referer"), new URL(c.req.raw.url).origin);
+  return c.redirect(location, 302);
 });
 
 // --- B1 Task 1: GitHub App Manifest start + callback (no secret write) ---
