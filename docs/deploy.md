@@ -161,8 +161,25 @@ settings; redeploy to change:
 
 | Name | Default | Purpose |
 |---|---|---|
-| `REVIEW_ENABLED` | **off** | fail-closed kill-switch; exactly `"true"` enables reviews |
+| `REVIEW_ENABLED` | unset | **emergency brake only** (plan 31): per-App `github_apps.review_enabled` is the primary review control; only the exact `"false"` (case-sensitive, untrimmed) stops ALL reviews — unset / `""` / `"true"` / `"TRUE"` / other → per-App governs |
 | `ADMIN_LOGINS` | unset | comma-separated GitHub logins bootstrapped as dashboard admin |
+
+> **Plan 31 cutover checklist (上线即生效 — run BEFORE any deploy containing
+> plan 31; the semantic inversion takes effect the moment the Worker lands):**
+>
+> 1. `wrangler d1 execute mstar-inspector-db --remote --command "SELECT slug, status, review_enabled FROM github_apps WHERE deleted_at IS NULL;"`
+> 2. Confirm each App's state matches operational intent: a `review_enabled=1`
+>    App will **immediately review for real** on a live Worker with unset
+>    `REVIEW_ENABLED`; any App that must not review yet must be paused
+>    (`review_enabled=0`) or disabled first.
+> 3. Confirm the live Worker env: set `REVIEW_ENABLED=false` only for an
+>    emergency all-stop; otherwise leave it unset. The old `.env.example`
+>    empty value no longer means "everything off" after this deploy.
+> 4. Post-deploy spot check: an installed App with `review_enabled=1` opening /
+>    updating a PR should enqueue; a paused App still answers 2xx with zero
+>    enqueue.
+> 5. Spot-check the dashboard: no `REVIEW_ENABLED` copy on any page; the
+>    Pause/Resume switch is the only review control.
 
 GitHub App setup (permissions, webhook events, installation):
 `.mstar/iterations/v0.2/guides/github-app-runbook.md`.

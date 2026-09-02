@@ -64,7 +64,7 @@ GitHub webhook → POST /webhook/:appSlug（验签 + 分类）→ Queue → Cons
 4. **配置 App** —— 在该 App 的 dashboard Settings 页添加审查模型所需的 provider API key（BYOK，加密落
    D1）和模型链。缺这些的 App 审查会 fail-closed——见 [Per-App 配置](#per-app-配置)。
 
-5. **开启审查并提交 PR** —— 打开 kill-switch（Worker 变量 `REVIEW_ENABLED` 精确设置为 `"true"`），在安装了该 App 的仓库里开一个（或更新一个）PR：
+5. **开启审查并提交 PR** —— 审查默认按 App 开启（dashboard 的 Pause/Resume 是唯一开关；Worker 变量 `REVIEW_ENABLED` 仅作紧急总闸，只有精确设置为 `"false"` 才全平台停审），在安装了该 App 的仓库里开一个（或更新一个）PR：
 
    审查在 sandbox 容器内运行，结果以单条评论出现在 PR 上（upsert——force-push 不会产生评论刷屏）。
 
@@ -99,8 +99,8 @@ GitHub webhook → POST /webhook/:appSlug（验签 + 分类）→ Queue → Cons
 
 ## 运维
 
-- **Kill-switch**：仅当 Worker 变量 `REVIEW_ENABLED` 精确为 `"true"` 时审查才会运行。未设置或任何其他值 →
-  所有 webhook 被 2xx 确认后忽略，零入队。上线前保持未设置。
+- **紧急总闸**：per-App `review_enabled`（dashboard 的 Pause/Resume）是审查主控。Worker 变量 `REVIEW_ENABLED`
+  仅当精确为 `"false"`（大小写敏感、不 trim）时才全平台停审；未设置 / `""` / `"true"` / 其它值 → 由 per-App 决定。保持未设置。
 - **部署已自动化**：合并到 `main` 即运行 [Deploy workflow](.github/workflows/deploy.yml) —— secrets 注入、D1 迁移、
   `wrangler deploy`、部署后冒烟与 image digest 记录。失败即标红停止（无自动回滚）；失败语义与手工回滚路径见
   [`docs/deploy.md`](docs/deploy.md)。
