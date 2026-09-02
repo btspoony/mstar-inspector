@@ -85,21 +85,15 @@ import {
   type DashboardUserRow,
 } from "./users";
 import {
-  appSettingsPage,
-  appsPage,
-  badRequestPage,
   dashboardPage,
   deniedPage,
   errorPage,
   forbiddenPage,
-  insightsPage,
   manifestConfirmPage,
   manifestErrorPage,
   manifestStartPage,
   manifestSuccessPage,
-  membersPage,
   removedPage,
-  type PageNotice,
 } from "./views";
 import { clampWindow, createInsightsStore } from "./insights-store";
 import { isLocale, resolveLocale, serializeLocaleCookie, t, type Locale } from "../i18n";
@@ -639,13 +633,7 @@ async function requireAdmin(c: Context<{ Bindings: Env }>): Promise<AdminGate> {
   return { ok: true, session, db, admin };
 }
 
-dashboardApp.get("/members", async (c) => {
-  const gate = await requireAdmin(c);
-  if (!gate.ok) return gate.response;
-  return c.html(membersPage(gate.session, await listUsers(gate.db)));
-});
-
-/** SPA JSON face — same requireAdmin gate and listUsers assembly as GET /members. */
+/** SPA JSON face — same requireAdmin gate and listUsers assembly as the retired GET /members. */
 dashboardApp.get("/api/members", async (c) => {
   const gate = await requireAdmin(c);
   if (!gate.ok) return gate.response;
@@ -660,49 +648,30 @@ dashboardApp.get("/api/members", async (c) => {
   });
 });
 
+// Plan 29 T6: the members page is SPA-owned; these pinned POSTs answer the
+// SPA's postForm (2xx → refetch + client notice; 4xx → client error notice)
+// with plain-text bodies — the re-rendered HTML page is retired.
 dashboardApp.post("/members/invite", async (c) => {
   const gate = await requireAdmin(c);
   if (!gate.ok) return gate.response;
   const form = await c.req.parseBody();
   const login = typeof form.login === "string" ? form.login.trim() : "";
   if (login.length === 0) {
-    return c.html(
-      membersPage(gate.session, await listUsers(gate.db), {
-        kind: "error",
-        message: "Enter a GitHub login to invite.",
-      }),
-      400,
-    );
+    return c.text("Enter a GitHub login to invite.", 400);
   }
   // F-003: reject values outside the GitHub login syntax before any read or
   // write — they would persist as rows that no real login can ever claim.
   if (!GITHUB_LOGIN_PATTERN.test(login)) {
-    return c.html(
-      membersPage(gate.session, await listUsers(gate.db), {
-        kind: "error",
-        message: `${login} is not a valid GitHub login — use 1–39 letters, digits, or hyphens.`,
-      }),
-      400,
-    );
+    return c.text(`${login} is not a valid GitHub login — use 1–39 letters, digits, or hyphens.`, 400);
   }
   // T1 review pin (Minor 2): resolve the login case-insensitively BEFORE any
   // createUser call — the DDL UNIQUE is BINARY-collated, so ON CONFLICT alone
   // misses case variants ("OctoCat" vs "octocat") and would mint a second row.
   if (await getUserByLogin(gate.db, login)) {
-    return c.html(
-      membersPage(gate.session, await listUsers(gate.db), {
-        kind: "warn",
-        message: `${login} is already a member — nothing changed.`,
-      }),
-    );
+    return c.text("ok"); // already a member — idempotent no-op
   }
   await createUser(gate.db, { login, role: "member", invitedBy: gate.admin.github_login });
-  return c.html(
-    membersPage(gate.session, await listUsers(gate.db), {
-      kind: "success",
-      message: `Invited ${login} — they can sign in with GitHub now.`,
-    }),
-  );
+  return c.text("ok");
 });
 
 dashboardApp.post("/members/remove", async (c) => {
@@ -713,20 +682,11 @@ dashboardApp.post("/members/remove", async (c) => {
   const members = await listUsers(gate.db);
   const target = members.find((m) => m.id === userId);
   if (!target) {
-    return c.html(
-      membersPage(gate.session, members, {
-        kind: "error",
-        message: "Unknown member — nothing was removed, try again.",
-      }),
-      400,
-    );
+    return c.text("Unknown member — nothing was removed, try again.", 400);
   }
   // Refuse self-removal: an admin must not be able to lock themselves out.
   if (target.github_login.toLowerCase() === gate.admin.github_login.toLowerCase()) {
-    return c.html(
-      membersPage(gate.session, members, { kind: "error", message: "You cannot remove yourself." }),
-      400,
-    );
+    return c.text("You cannot remove yourself.", 400);
   }
   // Refuse removing an admin while they are the last one (removal = row
   // delete, so this is the deployment's only admin-lockout guard). This
@@ -734,32 +694,15 @@ dashboardApp.post("/members/remove", async (c) => {
   // conditional DELETE below, which closes the read-check-delete TOCTOU
   // (qc1): two concurrent removes of the last two admins cannot both land.
   if (target.role === "admin" && (await countAdmins(gate.db)) === 1) {
-    return c.html(
-      membersPage(gate.session, members, {
-        kind: "error",
-        message: "The last admin cannot be removed.",
-      }),
-      400,
-    );
+    return c.text("The last admin cannot be removed.", 400);
   }
   if (!(await deleteUserUnlessLastAdmin(gate.db, target.id))) {
     // Lost a race (the row vanished or just became the last admin between
-    // the reads above and this delete): re-render with a retry notice —
+    // the reads above and this delete): 400 with a retry message —
     // zero partial state either way.
-    return c.html(
-      membersPage(gate.session, await listUsers(gate.db), {
-        kind: "error",
-        message: `Could not remove ${target.github_login} — the member list just changed, try again.`,
-      }),
-      400,
-    );
+    return c.text(`Could not remove ${target.github_login} — the member list just changed, try again.`, 400);
   }
-  return c.html(
-    membersPage(gate.session, await listUsers(gate.db), {
-      kind: "success",
-      message: `Removed ${target.github_login}.`,
-    }),
-  );
+  return c.text("ok");
 });
 
 // --- Plan 13 B5 T3: Apps list + per-App management (spec § Multi-App 契约,
@@ -818,18 +761,7 @@ async function appsListWithHealth(
   return rows.map((app) => ({ ...app, health: summaries[app.id]! }));
 }
 
-dashboardApp.get("/apps", async (c) => {
-  const gate = await requireMember(c);
-  if (!gate.ok) return gate.response;
-  return c.html(
-    appsPage(gate.session, await appsListWithHealth(gate.db), {
-      login: gate.user.github_login,
-      role: gate.user.role,
-    }),
-  );
-});
-
-/** SPA JSON face — same requireMember gate and appsListWithHealth assembly as GET /apps. Encrypted columns and row PKs stay off the payload. */
+/** SPA JSON face — same requireMember gate and appsListWithHealth assembly as the retired GET /apps. Encrypted columns and row PKs stay off the payload. */
 dashboardApp.get("/api/apps", async (c) => {
   const gate = await requireMember(c);
   if (!gate.ok) return gate.response;
@@ -860,15 +792,10 @@ dashboardApp.get("/api/apps", async (c) => {
 /**
  * One handler for the three pinned action routes. Unknown and soft-deleted
  * apps are equally invisible (the list never shows them) → 404, zero writes.
- * The store write returns whether a row changed; the warn notice below
- * covers BOTH the idempotent no-op (the row was already in the target
- * state — "was already X — nothing changed") and the lost race (the row
- * was soft-deleted between the read and the write) — either way the list
- * re-renders with a warn, zero partial state. Note a same-value status
- * write still counts as changed (the UPDATE churns updated_at), so for
- * status toggles the no-op copy is effectively the lost-race path;
- * appReviewAction instead short-circuits its idempotent no-op before the
- * store write.
+ * Plan 29 T6: the Apps list is SPA-owned, so the response is a plain 2xx the
+ * SPA's postForm treats as success (it refetches the JSON face); the
+ * re-rendered HTML page is retired. The store write still happens exactly
+ * once; the `changed` result only shaped the retired notice copy.
  */
 async function appStatusAction(
   c: Context<{ Bindings: Env }>,
@@ -880,18 +807,12 @@ async function appStatusAction(
   const app = await apps.getAppBySlug(c.req.param("slug") ?? "");
   if (!app || app.deleted_at !== null) return c.text("unknown app", 404);
   if (!canManageApp(gate.user, app)) return c.html(forbiddenPage(gate.session.login, requestLocale(c)), 403);
-  const changed =
-    action === "delete" ? await apps.softDeleteApp(app.id) : await apps.setAppStatus(app.id, action === "disable" ? "disabled" : "active");
-  const verb = action === "delete" ? "Deleted" : action === "disable" ? "Disabled" : "Enabled";
-  const notice: PageNotice = changed
-    ? { kind: "success", message: `${verb} ${app.slug}.` }
-    : { kind: "warn", message: `${app.slug} was already ${action === "enable" ? "enabled" : `${action}d`} — nothing changed.` };
-  return c.html(
-    appsPage(gate.session, await appsListWithHealth(gate.db), {
-      login: gate.user.github_login,
-      role: gate.user.role,
-    }, notice),
-  );
+  if (action === "delete") {
+    await apps.softDeleteApp(app.id);
+  } else {
+    await apps.setAppStatus(app.id, action === "disable" ? "disabled" : "active");
+  }
+  return c.text("ok");
 }
 
 dashboardApp.post("/apps/:slug/disable", (c) => appStatusAction(c, "disable"));
@@ -915,10 +836,11 @@ dashboardApp.post("/apps/:slug/delete", (c) => appStatusAction(c, "delete"));
 /**
  * One handler for the two pinned review-action routes. The idempotent no-op
  * case is short-circuited BEFORE the store write — pausing a paused App /
- * resuming an active one re-renders with a warn notice and never touches
- * the row (setReviewEnabled would count a same-value UPDATE as changed and
- * would churn updated_at, the operator-mutation timestamp). Grammar pinned:
- * "already paused" / "already active".
+ * resuming an active one never touches the row (setReviewEnabled would
+ * count a same-value UPDATE as changed and would churn updated_at, the
+ * operator-mutation timestamp). Plan 29 T6: the response is a plain 2xx the
+ * SPA's postForm treats as success (it refetches the JSON face); the
+ * re-rendered HTML page is retired.
  */
 async function appReviewAction(
   c: Context<{ Bindings: Env }>,
@@ -931,27 +853,9 @@ async function appReviewAction(
   if (!app || app.deleted_at !== null) return c.text("unknown app", 404);
   if (!canManageApp(gate.user, app)) return c.html(forbiddenPage(gate.session.login, requestLocale(c)), 403);
   const paused = app.review_enabled === 0;
-  let notice: PageNotice;
-  if (action === "pause" ? paused : !paused) {
-    notice = {
-      kind: "warn",
-      message: `${app.slug} was already ${paused ? "paused" : "active"} — nothing changed.`,
-    };
-  } else if (await apps.setReviewEnabled(app.id, action === "resume")) {
-    notice = {
-      kind: "success",
-      message: `${action === "pause" ? "Paused" : "Resumed"} ${app.slug}.`,
-    };
-  } else {
-    // Lost a race: the row was soft-deleted between the read and the write.
-    notice = { kind: "warn", message: `${app.slug} was just removed — nothing changed.` };
-  }
-  return c.html(
-    appsPage(gate.session, await appsListWithHealth(gate.db), {
-      login: gate.user.github_login,
-      role: gate.user.role,
-    }, notice),
-  );
+  if (action === "pause" ? paused : !paused) return c.text("ok"); // idempotent no-op — never touch the row
+  await apps.setReviewEnabled(app.id, action === "resume");
+  return c.text("ok");
 }
 
 dashboardApp.post("/apps/:slug/pause", (c) => appReviewAction(c, "pause"));
@@ -973,9 +877,9 @@ dashboardApp.post("/apps/:slug/resume", (c) => appReviewAction(c, "resume"));
 // Encryption-dependent reads AND writes: masking needs plaintext (the last-4
 // tail), so a missing/malformed DASHBOARD_ENCRYPTION_KEY fails the whole
 // family closed with 5xx (spec § Crypto envelope) — never a partial page,
-// never a stored key. Rendering = the DESIGN-token appSettingsPage view in
-// src/dashboard/views.ts (plan 14 T2 — single column, masked list, no new
-// tokens); the T1 temporary placeholder render is gone.
+// never a stored key. Plan 29 T6: the settings page is SPA-owned (the JSON
+// face below serves the SPA); the DESIGN-token appSettingsPage view in
+// src/dashboard/views.ts is retired.
 
 type AppSettingsGate =
   | { ok: true; session: SessionPayload; db: DashboardDb; app: GithubAppRow }
@@ -1018,85 +922,28 @@ function logSettingsFailure(stage: string, appId: string, err: unknown): void {
   );
 }
 
-/** 500 fail-closed notice: key misconfiguration vs storage rejection (commit-route copy style). */
-function settingsFailureNotice(err: unknown): PageNotice {
+/** 500 fail-closed message: key misconfiguration vs storage rejection (commit-route copy style). */
+function settingsFailureNotice(err: unknown): string {
   return err instanceof SecretboxKeyError
-    ? {
-        kind: "error",
-        message:
-          "This deployment has no valid DASHBOARD_ENCRYPTION_KEY for its stored keys — ask the operator to configure it, then resubmit.",
-      }
-    : {
-        kind: "error",
-        message: "The dashboard database rejected the change — nothing was stored. You can resubmit.",
-      };
+    ? "This deployment has no valid DASHBOARD_ENCRYPTION_KEY for its stored keys — ask the operator to configure it, then resubmit."
+    : "The dashboard database rejected the change — nothing was stored. You can resubmit.";
 }
 
 /**
- * Re-read the settings state and render the DESIGN-token view (plan 14 T2:
- * src/dashboard/views.ts appSettingsPage) — every route's response body. The
- * masked key list is the only key face, so no route here can leak key
- * material into HTML; a decrypt failure on re-read is the 500 fail-closed.
- * Plan 16: the install-health panel data (installations, review_enabled,
- * last_webhook_at) is read fresh on every render too, so every re-render —
- * including POST re-renders — reflects the current pause/health state.
- * Plan 17: the role map (app_model_roles) rides the same fresh read for the
- * Role models editor — a 400 re-render shows the STORED map (an invalid
- * submission is never echoed back as if it had been kept).
+ * Plain-text settings POST response (plan 29 T6: the settings page is
+ * SPA-owned and read-only today — plan 31 wires the forms; the pinned POST
+ * paths keep their full validation and mutation, and answer the SPA's
+ * postForm contract: 2xx → refetch the JSON face, 4xx/5xx → client error).
  */
-async function settingsResponse(
+function settingsPostResponse(
   c: Context<{ Bindings: Env }>,
-  session: SessionPayload,
-  store: AppConfigStore,
-  apps: ReturnType<typeof createAppsStore>,
-  app: GithubAppRow,
-  notice?: PageNotice,
+  message: string,
   status: 200 | 400 | 500 = 200,
-): Promise<Response> {
-  try {
-    const maskedKeys = await store.listProviderKeys(app.id);
-    const modelChain = await store.getModelChain(app.id);
-    const modelRoles = await store.getAppModelRoles(app.id);
-    const customProviders = await store.listCustomProviders(app.id);
-    const installations = await apps.listInstallations(app.id);
-    // Plan 20 Task 2: the recent-deliveries panel data (AL-20-2) — the
-    // App's last 5 webhook_deliveries rows, read fresh on every render so
-    // POST re-renders reflect the latest deliveries too.
-    const deliveries = await apps.listRecentDeliveries(app.id, 5);
-    return c.html(
-      appSettingsPage(
-        session,
-        {
-          slug: app.slug,
-          status: app.status,
-          reviewEnabled: app.review_enabled !== 0,
-          lastWebhookAt: app.last_webhook_at ?? null,
-        },
-        maskedKeys,
-        modelChain,
-        modelRoles,
-        installations,
-        notice,
-        deliveries,
-        customProviders,
-      ),
-      status,
-    );
-  } catch (err) {
-    logSettingsFailure("render", app.id, err);
-    return c.text("the app settings could not be read from encrypted storage", 500);
-  }
+): Response {
+  return c.text(message, status);
 }
 
-dashboardApp.get("/apps/:slug/settings", async (c) => {
-  const gate = await requireAppSettings(c);
-  if (!gate.ok) return gate.response;
-  const store = createAppConfigStore(gate.db, c.env.DASHBOARD_ENCRYPTION_KEY);
-  const apps = createAppsStore(gate.db);
-  return settingsResponse(c, gate.session, store, apps, gate.app);
-});
-
-/** SPA JSON face — same requireAppSettings gate and settingsResponse reads. */
+/** SPA JSON face — same requireAppSettings gate and the settings reads the retired HTML GET used. */
 dashboardApp.get("/api/apps/:slug/settings", async (c) => {
   const gate = await requireAppSettings(c);
   if (!gate.ok) return gate.response;
@@ -1142,7 +989,7 @@ dashboardApp.get("/api/apps/:slug/settings", async (c) => {
  * by the forms' hidden `op` field. add-key = provider allowlist (400 on any
  * other id — the allowlist is the plan's Global Constraint) + non-empty key
  * of at most MAX_PROVIDER_KEY_LENGTH characters (plan 15 input bounds — an
- * oversized key is a 400 re-render with zero writes; the store guard beneath
+ * oversized key is a 400 with zero writes; the store guard beneath
  * is the backstop), then the store encrypts inside. save-chain = empty →
  * clear the chain (an unconfigured chain fails that App's reviews closed in
  * the consumer — plan 24 Task 6 / AL-24-5: no deployment-level chain exists
@@ -1155,9 +1002,10 @@ dashboardApp.get("/api/apps/:slug/settings", async (c) => {
  * remove-custom-provider (plan 23 T2) = the custom-provider declarations
  * section: every AL-23-1/AL-23-2 bound (id grammar, https-only baseUrl,
  * three-form api enum, model_ids 1..32 × ≤128, key required ≤4096) is a 400
- * re-render with zero writes; the key is encrypted inside the store and
- * never echoed. Validation failures re-render the page at 400 with zero
- * writes — never a plain-text body (the plan-14 T1 review lesson).
+ * with zero writes; the key is encrypted inside the store and
+ * never echoed. Plan 29 T6: the settings page is SPA-owned, so every
+ * response is plain text (settingsPostResponse) — 2xx = the SPA refetches
+ * the JSON face, 4xx/5xx = the reason; the re-rendered HTML page is retired.
  */
 dashboardApp.post("/apps/:slug/settings", async (c) => {
   const gate = await requireAppSettings(c);
@@ -1170,49 +1018,25 @@ dashboardApp.post("/apps/:slug/settings", async (c) => {
   const form = await c.req.parseBody({ all: true });
   const op = typeof form.op === "string" ? form.op : "";
   const store = createAppConfigStore(gate.db, c.env.DASHBOARD_ENCRYPTION_KEY);
-  const apps = createAppsStore(gate.db);
   if (op === "add-key") {
     const provider = typeof form.provider === "string" ? form.provider.trim() : "";
     const plainKey = typeof form.key === "string" ? form.key.trim() : "";
     if (!PROVIDER_IDS.includes(provider)) {
-      return settingsResponse(
+      return settingsPostResponse(
         c,
-        gate.session,
-        store,
-        apps,
-        gate.app,
-        {
-          kind: "error",
-          message:
-            provider === ""
-              ? "Pick a provider for the key."
-              : `${provider} is not a supported provider — pick one from the list.`,
-        },
+        provider === ""
+          ? "Pick a provider for the key."
+          : `${provider} is not a supported provider — pick one from the list.`,
         400,
       );
     }
     if (plainKey === "") {
-      return settingsResponse(
-        c,
-        gate.session,
-        store,
-        apps,
-        gate.app,
-        { kind: "error", message: "Enter an API key to store." },
-        400,
-      );
+      return settingsPostResponse(c, "Enter an API key to store.", 400);
     }
     if (plainKey.length > MAX_PROVIDER_KEY_LENGTH) {
-      return settingsResponse(
+      return settingsPostResponse(
         c,
-        gate.session,
-        store,
-        apps,
-        gate.app,
-        {
-          kind: "error",
-          message: `That API key is too long (${plainKey.length} characters) — keys are limited to ${MAX_PROVIDER_KEY_LENGTH} characters. Nothing was stored.`,
-        },
+        `That API key is too long (${plainKey.length} characters) — keys are limited to ${MAX_PROVIDER_KEY_LENGTH} characters. Nothing was stored.`,
         400,
       );
     }
@@ -1220,25 +1044,21 @@ dashboardApp.post("/apps/:slug/settings", async (c) => {
       await store.setProviderKey(gate.app.id, provider, plainKey);
     } catch (err) {
       logSettingsFailure("add_key", gate.app.id, err);
-      return settingsResponse(c, gate.session, store, apps, gate.app, settingsFailureNotice(err), 500);
+      return settingsPostResponse(c, settingsFailureNotice(err), 500);
     }
-    return settingsResponse(c, gate.session, store, apps, gate.app, {
-      kind: "success",
-      message: `Stored the ${provider} key for ${gate.app.slug} — it is only ever shown masked.`,
-    });
+    return settingsPostResponse(
+      c,
+      `Stored the ${provider} key for ${gate.app.slug} — it is only ever shown masked.`,
+    );
   }
   if (op === "save-chain") {
     // AL-23-2: a duplicate model_chain field (parseBody all:true aggregates
     // it into an array) must be rejected — never treated as the empty-clear
     // path, which would silently wipe the stored chain.
     if (Array.isArray(form.model_chain)) {
-      return settingsResponse(
+      return settingsPostResponse(
         c,
-        gate.session,
-        store,
-        apps,
-        gate.app,
-        { kind: "error", message: "The model chain field was submitted more than once — resubmit the form. Nothing was saved." },
+        "The model chain field was submitted more than once — resubmit the form. Nothing was saved.",
         400,
       );
     }
@@ -1246,45 +1066,27 @@ dashboardApp.post("/apps/:slug/settings", async (c) => {
     try {
       if (raw.trim() === "") {
         await store.setModelChain(gate.app.id, null);
-        return settingsResponse(c, gate.session, store, apps, gate.app, {
-          kind: "success",
-          message: `Cleared the model chain for ${gate.app.slug} — reviews fail closed until a chain + provider keys are configured (per-App only, plan 24).`,
-        });
+        return settingsPostResponse(
+          c,
+          `Cleared the model chain for ${gate.app.slug} — reviews fail closed until a chain + provider keys are configured (per-App only, plan 24).`,
+        );
       }
       if (raw.length > MAX_MODEL_SELECTOR_LENGTH) {
-        return settingsResponse(
+        return settingsPostResponse(
           c,
-          gate.session,
-          store,
-          apps,
-          gate.app,
-          {
-            kind: "error",
-            message: `That model chain is too long (${raw.length} characters) — limited to ${MAX_MODEL_SELECTOR_LENGTH}. Nothing was saved.`,
-          },
+          `That model chain is too long (${raw.length} characters) — limited to ${MAX_MODEL_SELECTOR_LENGTH}. Nothing was saved.`,
           400,
         );
       }
       if (parseModelChain(raw).length === 0) {
-        return settingsResponse(
-          c,
-          gate.session,
-          store,
-          apps,
-          gate.app,
-          { kind: "error", message: "Enter at least one comma-separated model selector." },
-          400,
-        );
+        return settingsPostResponse(c, "Enter at least one comma-separated model selector.", 400);
       }
       await store.setModelChain(gate.app.id, raw);
     } catch (err) {
       logSettingsFailure("save_chain", gate.app.id, err);
-      return settingsResponse(c, gate.session, store, apps, gate.app, settingsFailureNotice(err), 500);
+      return settingsPostResponse(c, settingsFailureNotice(err), 500);
     }
-    return settingsResponse(c, gate.session, store, apps, gate.app, {
-      kind: "success",
-      message: `Saved the model chain for ${gate.app.slug}.`,
-    });
+    return settingsPostResponse(c, `Saved the model chain for ${gate.app.slug}.`);
   }
   if (op === "save-roles") {
     // Plan 17 T3: the Role models editor posts one `role_<role>` field per
@@ -1293,83 +1095,46 @@ dashboardApp.post("/apps/:slug/settings", async (c) => {
     // setModelRole 空 = 清除 convention), content = verbatim upsert, all
     // through the validate-all-first setModelRoles bulk face. Any
     // `role_`-prefixed field naming a role outside MODEL_ROLE_IDS is client
-    // tampering → 400 re-render, zero writes; a save with NO role fields at
+    // tampering → 400, zero writes; a save with NO role fields at
     // all is equally malformed (it could not come from this page, and an
     // empty map must never masquerade as a successful save).
     const selectors: Record<string, string> = {};
     for (const [field, value] of Object.entries(form)) {
       if (!field.startsWith("role_")) continue;
       // AL-23-2: with parseBody({ all: true }) a duplicate role_* field
-      // arrives as an ARRAY — explicit 400 rejection (re-render + zero
+      // arrives as an ARRAY — explicit 400 rejection (zero
       // writes), never the silent last-wins the default parseBody had.
       if (Array.isArray(value)) {
-        return settingsResponse(
+        return settingsPostResponse(
           c,
-          gate.session,
-          store,
-          apps,
-          gate.app,
-          {
-            kind: "error",
-            message: `The ${field} field was submitted more than once — resubmit the Role models form with one value per role. Nothing was saved.`,
-          },
+          `The ${field} field was submitted more than once — resubmit the Role models form with one value per role. Nothing was saved.`,
           400,
         );
       }
       if (typeof value !== "string") continue;
       const role = field.slice("role_".length);
       if (!MODEL_ROLE_IDS.includes(role)) {
-        return settingsResponse(
-          c,
-          gate.session,
-          store,
-          apps,
-          gate.app,
-          { kind: "error", message: `${role} is not a known review role — nothing was saved.` },
-          400,
-        );
+        return settingsPostResponse(c, `${role} is not a known review role — nothing was saved.`, 400);
       }
       selectors[role] = value;
     }
     if (Object.keys(selectors).length === 0) {
-      return settingsResponse(
-        c,
-        gate.session,
-        store,
-        apps,
-        gate.app,
-        { kind: "error", message: "No role selectors were submitted — resubmit the Role models form." },
-        400,
-      );
+      return settingsPostResponse(c, "No role selectors were submitted — resubmit the Role models form.", 400);
     }
     // Selector grammar, role-named for the 4-row form (the same parseModelChain
     // mirror the save-chain op 400s against); blank stays legal = clear.
     for (const [role, selector] of Object.entries(selectors)) {
       if (selector.length > MAX_MODEL_SELECTOR_LENGTH) {
-        return settingsResponse(
+        return settingsPostResponse(
           c,
-          gate.session,
-          store,
-          apps,
-          gate.app,
-          {
-            kind: "error",
-            message: `The ${role} selector is too long (${selector.length} characters) — limited to ${MAX_MODEL_SELECTOR_LENGTH}. Nothing was saved.`,
-          },
+          `The ${role} selector is too long (${selector.length} characters) — limited to ${MAX_MODEL_SELECTOR_LENGTH}. Nothing was saved.`,
           400,
         );
       }
       if (selector.trim() !== "" && parseModelChain(selector).length === 0) {
-        return settingsResponse(
+        return settingsPostResponse(
           c,
-          gate.session,
-          store,
-          apps,
-          gate.app,
-          {
-            kind: "error",
-            message: `The ${role} selector needs at least one comma-separated model selector — or leave it empty to use the App model chain. Nothing was saved.`,
-          },
+          `The ${role} selector needs at least one comma-separated model selector — or leave it empty to use the App model chain. Nothing was saved.`,
           400,
         );
       }
@@ -1378,16 +1143,13 @@ dashboardApp.post("/apps/:slug/settings", async (c) => {
       await store.setModelRoles(gate.app.id, selectors);
     } catch (err) {
       logSettingsFailure("save_roles", gate.app.id, err);
-      return settingsResponse(c, gate.session, store, apps, gate.app, settingsFailureNotice(err), 500);
+      return settingsPostResponse(c, settingsFailureNotice(err), 500);
     }
-    return settingsResponse(c, gate.session, store, apps, gate.app, {
-      kind: "success",
-      message: `Saved the role models for ${gate.app.slug}.`,
-    });
+    return settingsPostResponse(c, `Saved the role models for ${gate.app.slug}.`);
   }
   if (op === "add-custom-provider") {
     // Plan 23 T2: declare a NON-built-in model provider for the App. Every
-    // AL-23-1/AL-23-2 bound is checked here (400 re-render, zero writes —
+    // AL-23-1/AL-23-2 bound is checked here (400, zero writes —
     // the store re-validates as the backstop): provider id grammar
     // `[a-z0-9][a-z0-9-]{0,63}` (the env-name mapping the Task 3 consumer
     // injects), no collision with a built-in OR in-image base provider id
@@ -1403,42 +1165,19 @@ dashboardApp.post("/apps/:slug/settings", async (c) => {
     const modelIds = parseModelChain(typeof form.model_ids === "string" ? form.model_ids : "");
     const plainKey = typeof form.key === "string" ? form.key.trim() : "";
     if (providerId === "") {
-      return settingsResponse(
-        c,
-        gate.session,
-        store,
-        apps,
-        gate.app,
-        { kind: "error", message: "Enter a provider id for the custom provider." },
-        400,
-      );
+      return settingsPostResponse(c, "Enter a provider id for the custom provider.", 400);
     }
     if (!CUSTOM_PROVIDER_ID_PATTERN.test(providerId)) {
-      return settingsResponse(
+      return settingsPostResponse(
         c,
-        gate.session,
-        store,
-        apps,
-        gate.app,
-        {
-          kind: "error",
-          message:
-            "Provider ids are lowercase letters, digits, and hyphens — 1 to 64 characters, starting with a letter or digit. Nothing was stored.",
-        },
+        "Provider ids are lowercase letters, digits, and hyphens — 1 to 64 characters, starting with a letter or digit. Nothing was stored.",
         400,
       );
     }
     if (PROVIDER_IDS.includes(providerId)) {
-      return settingsResponse(
+      return settingsPostResponse(
         c,
-        gate.session,
-        store,
-        apps,
-        gate.app,
-        {
-          kind: "error",
-          message: `${providerId} is a built-in provider — custom providers must use a new id. Nothing was stored.`,
-        },
+        `${providerId} is a built-in provider — custom providers must use a new id. Nothing was stored.`,
         400,
       );
     }
@@ -1447,16 +1186,9 @@ dashboardApp.post("/apps/:slug/settings", async (c) => {
     // block on every review while its key still got injected, so the
     // declaration is refused up front (mirror of IN_IMAGE_BASE_PROVIDER_IDS).
     if (IN_IMAGE_BASE_PROVIDER_IDS.includes(providerId)) {
-      return settingsResponse(
+      return settingsPostResponse(
         c,
-        gate.session,
-        store,
-        apps,
-        gate.app,
-        {
-          kind: "error",
-          message: `${providerId} is already provided by the review environment's base configuration — custom providers must use a new id. Nothing was stored.`,
-        },
+        `${providerId} is already provided by the review environment's base configuration — custom providers must use a new id. Nothing was stored.`,
         400,
       );
     }
@@ -1468,141 +1200,59 @@ dashboardApp.post("/apps/:slug/settings", async (c) => {
       !declaredCustomProviders.some((p) => p.provider_id === providerId) &&
       declaredCustomProviders.length >= MAX_CUSTOM_PROVIDER_COUNT
     ) {
-      return settingsResponse(
+      return settingsPostResponse(
         c,
-        gate.session,
-        store,
-        apps,
-        gate.app,
-        {
-          kind: "error",
-          message: `This App already has the maximum of ${MAX_CUSTOM_PROVIDER_COUNT} custom providers — remove one before declaring another (updating an existing declaration is always allowed). Nothing was stored.`,
-        },
+        `This App already has the maximum of ${MAX_CUSTOM_PROVIDER_COUNT} custom providers — remove one before declaring another (updating an existing declaration is always allowed). Nothing was stored.`,
         400,
       );
     }
     if (baseUrl === "") {
-      return settingsResponse(
-        c,
-        gate.session,
-        store,
-        apps,
-        gate.app,
-        { kind: "error", message: "Enter the provider's base URL." },
-        400,
-      );
+      return settingsPostResponse(c, "Enter the provider's base URL.", 400);
     }
     if (!isValidCustomProviderBaseUrl(baseUrl)) {
-      return settingsResponse(
-        c,
-        gate.session,
-        store,
-        apps,
-        gate.app,
-        { kind: "error", message: "The base URL must be a valid https URL with a host — nothing was stored." },
-        400,
-      );
+      return settingsPostResponse(c, "The base URL must be a valid https URL with a host — nothing was stored.", 400);
     }
     if (baseUrl.length > MAX_CUSTOM_PROVIDER_BASE_URL_LENGTH) {
-      return settingsResponse(
+      return settingsPostResponse(
         c,
-        gate.session,
-        store,
-        apps,
-        gate.app,
-        {
-          kind: "error",
-          message: `That base URL is too long (${baseUrl.length} characters) — limited to ${MAX_CUSTOM_PROVIDER_BASE_URL_LENGTH}. Nothing was stored.`,
-        },
+        `That base URL is too long (${baseUrl.length} characters) — limited to ${MAX_CUSTOM_PROVIDER_BASE_URL_LENGTH}. Nothing was stored.`,
         400,
       );
     }
     if (api === "") {
-      return settingsResponse(
-        c,
-        gate.session,
-        store,
-        apps,
-        gate.app,
-        { kind: "error", message: "Pick an API protocol for the custom provider." },
-        400,
-      );
+      return settingsPostResponse(c, "Pick an API protocol for the custom provider.", 400);
     }
     if (!CUSTOM_PROVIDER_API_IDS.includes(api as (typeof CUSTOM_PROVIDER_API_IDS)[number])) {
-      return settingsResponse(
+      return settingsPostResponse(
         c,
-        gate.session,
-        store,
-        apps,
-        gate.app,
-        {
-          kind: "error",
-          message: `${api} is not a supported API protocol — pick one from the list. Nothing was stored.`,
-        },
+        `${api} is not a supported API protocol — pick one from the list. Nothing was stored.`,
         400,
       );
     }
     if (modelIds.length === 0) {
-      return settingsResponse(
-        c,
-        gate.session,
-        store,
-        apps,
-        gate.app,
-        { kind: "error", message: "Enter at least one model id for the custom provider." },
-        400,
-      );
+      return settingsPostResponse(c, "Enter at least one model id for the custom provider.", 400);
     }
     if (modelIds.length > MAX_CUSTOM_PROVIDER_MODEL_IDS) {
-      return settingsResponse(
+      return settingsPostResponse(
         c,
-        gate.session,
-        store,
-        apps,
-        gate.app,
-        {
-          kind: "error",
-          message: `Too many model ids (${modelIds.length}) — at most ${MAX_CUSTOM_PROVIDER_MODEL_IDS}. Nothing was stored.`,
-        },
+        `Too many model ids (${modelIds.length}) — at most ${MAX_CUSTOM_PROVIDER_MODEL_IDS}. Nothing was stored.`,
         400,
       );
     }
     if (modelIds.some((id) => id.length > MAX_CUSTOM_PROVIDER_MODEL_ID_LENGTH)) {
-      return settingsResponse(
+      return settingsPostResponse(
         c,
-        gate.session,
-        store,
-        apps,
-        gate.app,
-        {
-          kind: "error",
-          message: `Model ids are limited to ${MAX_CUSTOM_PROVIDER_MODEL_ID_LENGTH} characters each. Nothing was stored.`,
-        },
+        `Model ids are limited to ${MAX_CUSTOM_PROVIDER_MODEL_ID_LENGTH} characters each. Nothing was stored.`,
         400,
       );
     }
     if (plainKey === "") {
-      return settingsResponse(
-        c,
-        gate.session,
-        store,
-        apps,
-        gate.app,
-        { kind: "error", message: "Enter an API key to store." },
-        400,
-      );
+      return settingsPostResponse(c, "Enter an API key to store.", 400);
     }
     if (plainKey.length > MAX_PROVIDER_KEY_LENGTH) {
-      return settingsResponse(
+      return settingsPostResponse(
         c,
-        gate.session,
-        store,
-        apps,
-        gate.app,
-        {
-          kind: "error",
-          message: `That API key is too long (${plainKey.length} characters) — keys are limited to ${MAX_PROVIDER_KEY_LENGTH} characters. Nothing was stored.`,
-        },
+        `That API key is too long (${plainKey.length} characters) — keys are limited to ${MAX_PROVIDER_KEY_LENGTH} characters. Nothing was stored.`,
         400,
       );
     }
@@ -1618,14 +1268,14 @@ dashboardApp.post("/apps/:slug/settings", async (c) => {
       // throw InvalidCustomProviderError AFTER the route pre-check passed
       // (a concurrent save won the last slot) — that is a 400, not a 500.
       if (err instanceof InvalidCustomProviderError) {
-        return settingsResponse(c, gate.session, store, apps, gate.app, { kind: "error", message: err.message }, 400);
+        return settingsPostResponse(c, err.message, 400);
       }
-      return settingsResponse(c, gate.session, store, apps, gate.app, settingsFailureNotice(err), 500);
+      return settingsPostResponse(c, settingsFailureNotice(err), 500);
     }
-    return settingsResponse(c, gate.session, store, apps, gate.app, {
-      kind: "success",
-      message: `Declared custom provider ${providerId} for ${gate.app.slug} — its key is stored encrypted and injected by environment variable name.`,
-    });
+    return settingsPostResponse(
+      c,
+      `Declared custom provider ${providerId} for ${gate.app.slug} — its key is stored encrypted and injected by environment variable name.`,
+    );
   }
   if (op === "remove-custom-provider") {
     const providerId = typeof form.provider_id === "string" ? form.provider_id.trim() : "";
@@ -1634,29 +1284,20 @@ dashboardApp.post("/apps/:slug/settings", async (c) => {
       removed = await store.removeCustomProvider(gate.app.id, providerId);
     } catch (err) {
       logSettingsFailure("remove_custom_provider", gate.app.id, err);
-      return settingsResponse(c, gate.session, store, apps, gate.app, settingsFailureNotice(err), 500);
+      return settingsPostResponse(c, settingsFailureNotice(err), 500);
     }
     // Tolerant no-op (the id grammar already bounds what can ever be
-    // stored): an unknown provider id simply has no row — a warn, not a 400.
-    const notice: PageNotice = removed
-      ? { kind: "success", message: `Removed the custom provider ${providerId} from ${gate.app.slug}.` }
-      : {
-          kind: "warn",
-          message: `No custom provider ${providerId === "" ? "(unspecified)" : providerId} on ${gate.app.slug} — nothing changed.`,
-        };
-    return settingsResponse(c, gate.session, store, apps, gate.app, notice);
+    // stored): an unknown provider id simply has no row — a 2xx, not a 400.
+    return settingsPostResponse(
+      c,
+      removed
+        ? `Removed the custom provider ${providerId} from ${gate.app.slug}.`
+        : `No custom provider ${providerId === "" ? "(unspecified)" : providerId} on ${gate.app.slug} — nothing changed.`,
+    );
   }
   // T2 review fold (T1 minor): an unknown op is a validation failure like any
-  // other — re-render the HTML page at 400 instead of a plain-text body.
-  return settingsResponse(
-    c,
-    gate.session,
-    store,
-    apps,
-    gate.app,
-    { kind: "error", message: "Unknown settings operation — resubmit one of this page's forms." },
-    400,
-  );
+  // other — 400 with the reason.
+  return settingsPostResponse(c, "Unknown settings operation — resubmit one of this page's forms.", 400);
 });
 
 dashboardApp.post("/apps/:slug/settings/key/delete", async (c) => {
@@ -1665,23 +1306,21 @@ dashboardApp.post("/apps/:slug/settings/key/delete", async (c) => {
   const form = await c.req.parseBody();
   const provider = typeof form.provider === "string" ? form.provider.trim() : "";
   const store = createAppConfigStore(gate.db, c.env.DASHBOARD_ENCRYPTION_KEY);
-  const apps = createAppsStore(gate.db);
   let removed: boolean;
   try {
     removed = await store.removeProviderKey(gate.app.id, provider);
   } catch (err) {
     logSettingsFailure("remove_key", gate.app.id, err);
-    return settingsResponse(c, gate.session, store, apps, gate.app, settingsFailureNotice(err), 500);
+    return settingsPostResponse(c, settingsFailureNotice(err), 500);
   }
   // Tolerant no-op (the allowlist already bounds what can ever be stored):
-  // an unknown provider simply has no row — a warn, not a 400.
-  const notice: PageNotice = removed
-    ? { kind: "success", message: `Removed the stored ${provider} key for ${gate.app.slug}.` }
-    : {
-        kind: "warn",
-        message: `No stored ${provider === "" ? "(unspecified)" : provider} key on ${gate.app.slug} — nothing changed.`,
-      };
-  return settingsResponse(c, gate.session, store, apps, gate.app, notice);
+  // an unknown provider simply has no row — a 2xx, not a 400.
+  return settingsPostResponse(
+    c,
+    removed
+      ? `Removed the stored ${provider} key for ${gate.app.slug}.`
+      : `No stored ${provider === "" ? "(unspecified)" : provider} key on ${gate.app.slug} — nothing changed.`,
+  );
 });
 
 dashboardApp.get("/", async (c) => {
@@ -1785,37 +1424,9 @@ dashboardApp.get("/api/insights/summary", async (c) => {
   });
 });
 
-// --- Plan 22 T3: Review Health insights HTML panel --------------------------
-//
-// The member-visible HTML face of the SAME store aggregation as the JSON
-// API above (one store call, two faces). The mount-level guard has already
-// verified membership, so this handler adds ZERO auth code (AL-22-1); the
-// session is re-read for the shellHeader (same route-local pattern as the
-// "/" shell — no session redirect here, the guard owns it). Query-param
-// contract mirrors the T2 route exactly via the shared parseInsightsParams:
-// window (integer days, default 30, >90 clamped to 90 with the EFFECTIVE
-// value echoed) and optional repo owner/repo filter — malformed → 400 as a
-// plain bad-request notice (badRequestPage, QC W-B — never the OAuth
-// errorPage; the JSON face's 400 shape is API-only).
-dashboardApp.get("/insights", async (c) => {
-  const sessionSecret = c.env.DASHBOARD_SESSION_SECRET;
-  if (!sessionSecret) return c.text("dashboard OAuth is not configured", 500);
-  // The mount-level guard has already verified the session (AL-22-1: zero
-  // auth code); this re-read only feeds shellHeader — same route-local
-  // pattern as the "/" shell.
-  const session = (await readSessionValue(getCookie(c, SESSION_COOKIE), sessionSecret))!;
-
-  const db = dashboardD1(c.env);
-  if (!db) return c.text("dashboard storage is not configured", 500);
-
-  const params = parseInsightsParams({ window: c.req.query("window"), repo: c.req.query("repo") });
-  if (!params.ok) return c.html(badRequestPage(params.reason, requestLocale(c)), 400);
-
-  const insights = await createInsightsStore(db, { windowDays: params.windowDays, repo: params.repoFilter });
-  return c.html(
-    insightsPage(session, insights, { windowDays: clampWindow(params.windowDays), repo: params.rawRepo }),
-  );
-});
+// Plan 29 T6: the insights HTML panel is retired — /dashboard/insights is
+// SPA-owned (spa-dispatch serves the shell; the SPA reads the JSON face
+// above). The legacy GET handler is gone.
 
 // Placeholder actions (IA routing table): every POST under /dashboard that is
 // not a wired route above is a placeholder submit and must never succeed —
