@@ -117,6 +117,58 @@ describe("POST mutation Accept routing (plan 29 QC W-2)", () => {
     expect(await res.text()).toBe("ok");
   });
 
+  test("HTML-nav pause from settings Referer redirects to the SPA settings URL", async () => {
+    const db = createD1();
+    await seed(db);
+    const env = makeEnv(db);
+    const res = await postMutation("/dashboard/apps/demo-app/pause", env, await cookie("octocat"), {
+      Accept: "text/html",
+      Referer: "https://worker.local/dashboard/apps/demo-app/settings",
+    });
+    expect(res.status).toBe(302);
+    expect(res.headers.get("Location")).toBe("/dashboard/apps/demo-app/settings");
+  });
+
+  test("HTML-nav resume from settings Referer redirects to the SPA settings URL", async () => {
+    const db = createD1();
+    await seed(db);
+    const env = makeEnv(db);
+    const cookieHeader = await cookie("octocat");
+    const paused = await postMutation("/dashboard/apps/demo-app/pause", env, cookieHeader);
+    expect(paused.status).toBe(200);
+    const res = await postMutation("/dashboard/apps/demo-app/resume", env, cookieHeader, {
+      Accept: "text/html",
+      Referer: "https://worker.local/dashboard/apps/demo-app/settings",
+    });
+    expect(res.status).toBe(302);
+    expect(res.headers.get("Location")).toBe("/dashboard/apps/demo-app/settings");
+  });
+
+  test("HTML-nav pause with apps-list Referer redirects to /dashboard", async () => {
+    const db = createD1();
+    await seed(db);
+    const env = makeEnv(db);
+    const res = await postMutation("/dashboard/apps/demo-app/pause", env, await cookie("octocat"), {
+      Accept: "text/html",
+      Referer: "https://worker.local/dashboard/apps",
+    });
+    expect(res.status).toBe(302);
+    expect(res.headers.get("Location")).toBe("/dashboard");
+  });
+
+  test("SPA fetch pause with settings Referer keeps plain-text", async () => {
+    const db = createD1();
+    await seed(db);
+    const env = makeEnv(db);
+    const res = await postMutation("/dashboard/apps/demo-app/pause", env, await cookie("octocat"), {
+      Accept: "text/html",
+      Referer: "https://worker.local/dashboard/apps/demo-app/settings",
+      [SPA_POST_FORM_HEADER]: SPA_POST_FORM_VALUE,
+    });
+    expect(res.status).toBe(200);
+    expect(await res.text()).toBe("ok");
+  });
+
   test("settings POST with Accept: text/html redirects to the SPA settings URL", async () => {
     const db = createD1();
     await seed(db);

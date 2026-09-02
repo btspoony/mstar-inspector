@@ -857,13 +857,28 @@ dashboardApp.post("/apps/:slug/delete", (c) => appStatusAction(c, "delete"));
 // the JSON face rather than re-rendering HTML.
 
 /**
+ * HTML-nav 302 target for pause/resume. Settings is the only native-form
+ * caller (`<form method="post">` on the Review card); Apps-list uses fetch
+ * `postForm`. Origin is a sanitized Referer pathname — never echoed as
+ * Location. Settings-origin → `/dashboard/apps/:slug/settings` (DB slug);
+ * anything else (apps list, missing/off-origin Referer) → `/dashboard`.
+ */
+function reviewActionRedirect(c: Context<{ Bindings: Env }>, slug: string): string {
+  const settingsPath = `/dashboard/apps/${slug}/settings`;
+  const origin = new URL(c.req.raw.url).origin;
+  const refererPath = new URL(safeLocaleRedirect(c.req.header("Referer"), origin), origin).pathname;
+  return refererPath === settingsPath ? settingsPath : DASHBOARD_SHELL_REDIRECT;
+}
+
+/**
  * One handler for the two pinned review-action routes. The idempotent no-op
  * case is short-circuited BEFORE the store write — pausing a paused App /
  * resuming an active one never touches the row (setReviewEnabled would
  * count a same-value UPDATE as changed and would churn updated_at, the
  * operator-mutation timestamp). Plan 29 T6: the response is a plain 2xx the
  * SPA's postForm treats as success (it refetches the JSON face); the
- * re-rendered HTML page is retired.
+ * re-rendered HTML page is retired. Plan 29 QC round 2: HTML-nav 302 target
+ * depends on origin (settings vs apps list); fetch is unchanged.
  */
 async function appReviewAction(
   c: Context<{ Bindings: Env }>,
@@ -875,10 +890,11 @@ async function appReviewAction(
   const app = await apps.getAppBySlug(c.req.param("slug") ?? "");
   if (!app || app.deleted_at !== null) return pinnedPostMutationResponse(c, DASHBOARD_SHELL_REDIRECT, "unknown app", 404);
   if (!canManageApp(gate.user, app)) return c.html(forbiddenPage(gate.session.login, requestLocale(c)), 403);
+  const htmlRedirect = reviewActionRedirect(c, app.slug);
   const paused = app.review_enabled === 0;
-  if (action === "pause" ? paused : !paused) return pinnedPostMutationResponse(c, DASHBOARD_SHELL_REDIRECT, "ok"); // idempotent no-op — never touch the row
+  if (action === "pause" ? paused : !paused) return pinnedPostMutationResponse(c, htmlRedirect, "ok"); // idempotent no-op — never touch the row
   await apps.setReviewEnabled(app.id, action === "resume");
-  return pinnedPostMutationResponse(c, DASHBOARD_SHELL_REDIRECT, "ok");
+  return pinnedPostMutationResponse(c, htmlRedirect, "ok");
 }
 
 dashboardApp.post("/apps/:slug/pause", (c) => appReviewAction(c, "pause"));
