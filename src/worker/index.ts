@@ -6,6 +6,8 @@
  * runner keeps importing this module without SDK mocks).
  *
  * Routes:
+ * - GET/HEAD /dashboard* trailing slash → 301 (src/worker/redirects.ts)
+ * - GET/HEAD enumerated SPA pages with Accept text/html → ASSETS index.html
  * - GET /healthz → 200 {"ok":true}
  * - POST /webhook/:appSlug → per-App webhook face (plan 13 Task 2; plan 24
  *   Task 1: the ONLY HTTP review entry — the legacy bare `/webhook` face is
@@ -28,8 +30,15 @@ import { defaultLog, handleReviewJob } from "./handlers";
 import { createAppsStore, type DeliveryOutcome } from "../dashboard/apps-store";
 import { createSecretbox } from "../dashboard/secretbox";
 import { dashboardApp } from "../dashboard/index";
+import { trailingSlashRedirect } from "./redirects";
+import { spaDispatch } from "./spa-dispatch";
 
 const app = new Hono<{ Bindings: Env }>();
+// Plan 29 T3: trailing-slash 301 then SPA HTML dispatch. Both run BEFORE
+// the dashboard membership guard (mounted inside dashboardApp) so POST
+// family, OAuth, and APIs still fall through unchanged.
+app.use("*", trailingSlashRedirect());
+app.use("*", spaDispatch());
 /**
  * Classifier outcome → delivery-record outcome (plan 20 QC wave 1, S-2):
  * the pure mapping the per-App route applies immediately after

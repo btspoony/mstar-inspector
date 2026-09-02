@@ -6,12 +6,20 @@
  * module, whose unbound-D1 premises fail closed — the per-App webhook route
  * guards it the same way (500 fail-closed when unbound).
  */
-import type { D1Database, KVNamespace, Queue } from "@cloudflare/workers-types";
+import type { D1Database, Fetcher, KVNamespace, Queue } from "@cloudflare/workers-types";
 import type { ReviewJobPayload } from "../contracts/review-job";
 
 export type Env = {
   REVIEW_QUEUE: Queue<ReviewJobPayload>;
   IDEMPOTENCY_KV: KVNamespace;
+  /**
+   * Vite SPA assets (plan 29 T3): wrangler `assets` binding, directory
+   * `dist/spa`. Optional on the type so Bun fetch-path tests that omit it
+   * fall through to the legacy Hono app; production wrangler.jsonc always
+   * binds it. `run_worker_first` means the Worker must `ASSETS.fetch()`
+   * enumerated SPA pages and `/assets/*` itself.
+   */
+  ASSETS?: Fetcher;
   /**
    * D1 binding (plan 13 T4): the per-App webhook face (`POST
    * /webhook/:appSlug`) reads the `github_apps` row for its slug and touches

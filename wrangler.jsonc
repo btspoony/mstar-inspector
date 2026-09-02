@@ -118,5 +118,14 @@
       "head_sampling_rate": 1,
       "persist": true
     }
+  },
+  // Plan 29 T3: Vite SPA assets. run_worker_first keeps the Worker as the
+  // routing face (SPA_PAGES GET+HTML → index.html; /assets/ files;
+  // everything else → legacy Hono). Do NOT set not_found_handling to
+  // single-page-application — that would swallow legacy 404s.
+  "assets": {
+    "directory": "dist/spa",
+    "binding": "ASSETS",
+    "run_worker_first": true
   }
 }
