@@ -43,15 +43,17 @@ import {
   MANIFEST_STATE_COOKIE,
   MANIFEST_STATE_MAX_AGE_SEC,
   buildAppSlug,
+  buildHoldPayload,
   buildManifest,
   buildManifestCreateUrl,
-  createHoldValue,
   createManifestStateValue,
+  encryptHoldValue,
   exchangeManifestCode,
   logManifestFailure,
   randomSlugSuffix,
   readHoldValue,
   readManifestStateValue,
+  type ManifestHoldPayload,
 } from "./manifest";
 import { createAppsStore, type DeliverySummary, type GithubAppRow } from "./apps-store";
 import { SecretboxKeyError, createSecretbox } from "./secretbox";
@@ -92,8 +94,8 @@ import {
   forbiddenPage,
   manifestConfirmPage,
   manifestErrorPage,
+  manifestOnboardingPage,
   manifestStartPage,
-  manifestSuccessPage,
   removedPage,
 } from "./views";
 import { clampWindow, createInsightsStore } from "./insights-store";
@@ -419,10 +421,14 @@ dashboardApp.post("/manifest/start", async (c) => {
 
 // Callback: GitHub redirects here with ?code=…&state=…. Bad/missing state →
 // 4xx with ZERO secret-API calls (the conversion fetch never runs). On
-// success the code is exchanged and the credentials plus the state-carried
-// slug are parked in the encrypted, single-use hold cookie for the T3
-// commit gate — the response HTML carries the App id/name/slug/webhook URL
-// only, never PEM or webhook_secret.
+// success the code is exchanged and — plan 31 AC4b — the App is committed
+// immediately (no second click): the shared commit path (commitManifestApp,
+// the same write the POST /manifest/commit recovery route uses) encrypts
+// the credentials with DASHBOARD_ENCRYPTION_KEY and writes one github_apps
+// row. Success → 302 to the App's onboarding page; non-retryable conflicts
+// (409) burn the hold like the commit route; retryable outcomes (500) park
+// the hold cookie so /manifest/confirm stays the resume path. The response
+// never carries PEM or webhook_secret.
 dashboardApp.get("/manifest/callback", async (c) => {
   const secrets = dashboardSecrets(c.env);
   if (!secrets) return c.text("dashboard OAuth is not configured", 500);
@@ -451,41 +457,68 @@ dashboardApp.get("/manifest/callback", async (c) => {
   if (!conversion) {
     return c.html(manifestErrorPage(t(requestLocale(c), "manifest.error.codeRejected"), false, requestLocale(c)), 502);
   }
-  const hold = await createHoldValue(conversion, session.login, secrets.sessionSecret, state.slug);
-  c.header("Set-Cookie", serializeCookie(MANIFEST_HOLD_COOKIE, hold, MANIFEST_HOLD_MAX_AGE_SEC), {
-    append: true,
+  const locale = requestLocale(c);
+  // The payload feeds the shared commit path; the cookie string is parked on
+  // retryable outcomes so /manifest/confirm can resume.
+  const holdPayload = buildHoldPayload(conversion, session.login, state.slug);
+  const hold = await encryptHoldValue(holdPayload, secrets.sessionSecret);
+  const outcome = await commitManifestApp({
+    db: dashboardD1(c.env),
+    encryptionKey: c.env.DASHBOARD_ENCRYPTION_KEY,
+    hold: holdPayload,
+    login: session.login,
   });
-  const origin = new URL(c.req.url).origin;
-  return c.html(
-    manifestConfirmPage(
-      session,
-      {
-        id: conversion.id,
-        name: conversion.name,
-        slug: state.slug,
-        webhookUrl: `${origin}/webhook/${state.slug}`,
-      },
-      requestLocale(c),
-    ),
-  );
+  // Retryable outcomes (db_unbound / encrypt_failed / db_rejected) keep the
+  // hold: park the cookie so the operator can resume via /manifest/confirm.
+  const parkHold = () =>
+    c.header("Set-Cookie", serializeCookie(MANIFEST_HOLD_COOKIE, hold, MANIFEST_HOLD_MAX_AGE_SEC), {
+      append: true,
+    });
+  // Every burn/park header APPENDS: the state-cookie expiry from the top of
+  // the handler must reach the browser beside it (Hono replaces same-name
+  // headers unless `append: true`).
+  switch (outcome.kind) {
+    case "success": {
+      c.header("Set-Cookie", expireCookie(MANIFEST_HOLD_COOKIE), { append: true });
+      return c.redirect(`/dashboard/apps/${outcome.row.slug}/onboarding`, 302);
+    }
+    case "login_mismatch": {
+      // Unreachable here (the hold is minted for this session) — same burn
+      // semantics as the commit route for the shared contract.
+      c.header("Set-Cookie", expireCookie(MANIFEST_HOLD_COOKIE), { append: true });
+      return c.html(manifestErrorPage(t(locale, "manifest.error.loginMismatch"), false, locale), 403);
+    }
+    case "db_unbound":
+      parkHold();
+      return c.text("dashboard storage is not configured", 500);
+    case "encrypt_failed":
+      parkHold();
+      return c.html(manifestErrorPage(t(locale, "manifest.error.noEncryptionKey"), true, locale), 500);
+    case "slug_conflict":
+      c.header("Set-Cookie", expireCookie(MANIFEST_HOLD_COOKIE), { append: true });
+      return c.html(manifestErrorPage(t(locale, "manifest.error.slugConflict"), false, locale), 409);
+    case "already_connected":
+      c.header("Set-Cookie", expireCookie(MANIFEST_HOLD_COOKIE), { append: true });
+      return c.html(manifestErrorPage(t(locale, "manifest.error.alreadyConnected"), false, locale), 409);
+    case "db_rejected":
+      parkHold();
+      return c.html(manifestErrorPage(t(locale, "manifest.error.dbRejected"), true, locale), 500);
+  }
 });
 
 // Commit (B5 Task 3, spec § Multi-App 契约 — replaces the B1 Cloudflare
 // secrets-bulk write; `confirm=overwrite` is gone because nothing shared is
-// overwritten). The hold cookie is bound to the committing session
-// (`hold.login === session.login`, else 403, zero writes) and survives
-// RETRYABLE outcomes (500 encrypt/DB failures, 502 conversion retries) so
-// the operator can retry without creating a second GitHub App; it is burned
-// on success, login mismatch, undecryptable/expired hold, the non-retryable
+// overwritten). The hold cookie is bound to the committing session and
+// survives RETRYABLE outcomes (500 encrypt/DB failures) so the operator can
+// retry without creating a second GitHub App; it is burned on success,
+// login mismatch, undecryptable/expired hold, the non-retryable
 // already-connected conflict, and the non-retryable slug-conflict race (the
 // manifest already registered the webhook URL — remapping would desync it).
 // Missing/undecryptable/expired hold = flow expired → 302 back to the start,
-// zero writes. On submit, the PEM and webhook secret are encrypted with the
-// DASHBOARD_ENCRYPTION_KEY
-// master key (AAD rowKey = the row PK — caller-supplied id, T1 review pin)
-// and ONE github_apps row is written. Missing/malformed key → 500
-// fail-closed, hold kept (spec § Crypto envelope). Zero Cloudflare API
-// calls from this route.
+// zero writes. Plan 31 T5: the write is delegated to commitManifestApp — the
+// SAME path the callback auto-commit runs — so a native resubmit after a
+// retryable callback failure is an idempotent recovery resubmit, and success
+// lands on the same onboarding page as the auto-commit.
 dashboardApp.post("/manifest/commit", async (c) => {
   const secrets = dashboardSecrets(c.env);
   if (!secrets) return c.text("dashboard OAuth is not configured", 500);
@@ -498,25 +531,84 @@ dashboardApp.post("/manifest/commit", async (c) => {
     c.header("Set-Cookie", expireCookie(MANIFEST_HOLD_COOKIE));
     return c.redirect("/dashboard", 302);
   }
-  if (hold.login !== session.login) {
-    // The hold is bound to the login that ran the callback: a different
-    // operator must restart the flow (zero writes, hold burned).
-    logManifestFailure("commit", "login_mismatch");
-    c.header("Set-Cookie", expireCookie(MANIFEST_HOLD_COOKIE));
-    return c.html(
-      manifestErrorPage(t(requestLocale(c), "manifest.error.loginMismatch"), false, requestLocale(c)),
-      403,
-    );
+  const locale = requestLocale(c);
+  const outcome = await commitManifestApp({
+    db: dashboardD1(c.env),
+    encryptionKey: c.env.DASHBOARD_ENCRYPTION_KEY,
+    hold,
+    login: session.login,
+  });
+  switch (outcome.kind) {
+    case "success": {
+      // Success: the hold is single-success — burned now that the row exists;
+      // the operator lands on the App's onboarding page.
+      c.header("Set-Cookie", expireCookie(MANIFEST_HOLD_COOKIE));
+      return c.redirect(`/dashboard/apps/${outcome.row.slug}/onboarding`, 302);
+    }
+    case "login_mismatch": {
+      // The hold is bound to the login that ran the callback: a different
+      // operator must restart the flow (zero writes, hold burned).
+      c.header("Set-Cookie", expireCookie(MANIFEST_HOLD_COOKIE));
+      return c.html(manifestErrorPage(t(locale, "manifest.error.loginMismatch"), false, locale), 403);
+    }
+    case "db_unbound":
+      return c.text("dashboard storage is not configured", 500);
+    case "encrypt_failed":
+      return c.html(manifestErrorPage(t(locale, "manifest.error.noEncryptionKey"), true, locale), 500);
+    case "slug_conflict":
+      c.header("Set-Cookie", expireCookie(MANIFEST_HOLD_COOKIE));
+      return c.html(manifestErrorPage(t(locale, "manifest.error.slugConflict"), false, locale), 409);
+    case "already_connected":
+      c.header("Set-Cookie", expireCookie(MANIFEST_HOLD_COOKIE));
+      return c.html(manifestErrorPage(t(locale, "manifest.error.alreadyConnected"), false, locale), 409);
+    case "db_rejected":
+      return c.html(manifestErrorPage(t(locale, "manifest.error.dbRejected"), true, locale), 500);
   }
-  const db = dashboardD1(c.env);
-  if (!db) return c.text("dashboard storage is not configured", 500);
+});
+
+// --- Plan 31 T5: shared manifest commit (callback auto-commit + POST
+// /manifest/commit recovery run the same write path, spec § 5) ---
+
+type ManifestCommitOutcome =
+  | { kind: "success"; row: GithubAppRow }
+  | { kind: "login_mismatch" }
+  | { kind: "db_unbound" }
+  | { kind: "encrypt_failed" }
+  | { kind: "slug_conflict" }
+  | { kind: "already_connected" }
+  | { kind: "db_rejected" };
+
+/**
+ * The manifest commit body, shared by the callback auto-commit (AC4b — no
+ * second click) and the POST /manifest/commit recovery route. The decrypted
+ * hold payload + the acting session login are passed in; the hold's login
+ * binding is re-checked here on EVERY call. Outcomes mirror the route's long-standing
+ * semantics: success = ONE github_apps row (secretbox AAD rowKey = the
+ * caller-generated row PK, decided BEFORE encryption — T1 review pin);
+ * login_mismatch / slug_conflict / already_connected = non-retryable (the
+ * caller burns the hold); db_unbound / encrypt_failed / db_rejected =
+ * retryable (the caller keeps the hold so /manifest/confirm can resume).
+ * Zero upstream calls: encryption + a local D1 write only.
+ */
+async function commitManifestApp(args: {
+  db: DashboardDb | null;
+  encryptionKey: string | undefined;
+  hold: ManifestHoldPayload;
+  login: string;
+}): Promise<ManifestCommitOutcome> {
+  const { db, encryptionKey, hold, login } = args;
+  if (hold.login !== login) {
+    logManifestFailure("commit", "login_mismatch");
+    return { kind: "login_mismatch" };
+  }
+  if (!db) return { kind: "db_unbound" };
   // T1 review pin: the row id exists BEFORE encryption so the secretbox AAD
   // rowKey (github_apps.<column>:<id>) equals the row's primary key.
   const appId = crypto.randomUUID();
   let privateKeyEnc: string;
   let webhookSecretEnc: string;
   try {
-    const box = createSecretbox(c.env.DASHBOARD_ENCRYPTION_KEY);
+    const box = createSecretbox(encryptionKey);
     privateKeyEnc = await box.encryptSecret(hold.pem, `github_apps.private_key_enc:${appId}`);
     webhookSecretEnc = await box.encryptSecret(
       hold.webhook_secret,
@@ -530,10 +622,7 @@ dashboardApp.post("/manifest/commit", async (c) => {
       error_type: errorTypeName(err),
       key_error: err instanceof SecretboxKeyError,
     });
-    return c.html(
-      manifestErrorPage(t(requestLocale(c), "manifest.error.noEncryptionKey"), true, requestLocale(c)),
-      500,
-    );
+    return { kind: "encrypt_failed" };
   }
   // Slug: pre-resolved at start and carried through the hold. A commit-time
   // UNIQUE conflict means the slug was taken between start and commit — the
@@ -551,22 +640,9 @@ dashboardApp.post("/manifest/commit", async (c) => {
       name: hold.name,
       privateKeyEnc,
       webhookSecretEnc,
-      createdBy: session.login,
+      createdBy: login,
     });
-    // Success: the hold is single-success — burned now that the row exists.
-    c.header("Set-Cookie", expireCookie(MANIFEST_HOLD_COOKIE));
-    return c.html(
-      manifestSuccessPage(
-        session,
-        {
-          id: row.github_app_id,
-          name: row.name,
-          slug: row.slug,
-          webhookUrl: `${new URL(c.req.url).origin}/webhook/${row.slug}`,
-        },
-        requestLocale(c),
-      ),
-    );
+    return { kind: "success", row };
   } catch (err) {
     if (isAppsUniqueViolation(err, "slug")) {
       // The GitHub App WAS created on GitHub, but its webhook slug was
@@ -574,29 +650,18 @@ dashboardApp.post("/manifest/commit", async (c) => {
       // slug would advertise a URL GitHub never posts to — burn the hold
       // and make the operator start a fresh creation flow.
       logManifestFailure("commit", "slug_conflict", { slug: hold.slug });
-      c.header("Set-Cookie", expireCookie(MANIFEST_HOLD_COOKIE));
-      return c.html(
-        manifestErrorPage(t(requestLocale(c), "manifest.error.slugConflict"), false, requestLocale(c)),
-        409,
-      );
+      return { kind: "slug_conflict" };
     }
     if (isAppsUniqueViolation(err, "github_app_id")) {
       // The same GitHub App is already connected — retrying cannot help.
       logManifestFailure("commit", "github_app_id_conflict", { github_app_id: hold.id });
-      c.header("Set-Cookie", expireCookie(MANIFEST_HOLD_COOKIE));
-      return c.html(
-        manifestErrorPage(t(requestLocale(c), "manifest.error.alreadyConnected"), false, requestLocale(c)),
-        409,
-      );
+      return { kind: "already_connected" };
     }
     // Retryable (missing migrations, transient D1 failure, …): hold kept.
     logManifestFailure("commit", "db_error", { error_type: errorTypeName(err) });
-    return c.html(
-      manifestErrorPage(t(requestLocale(c), "manifest.error.dbRejected"), true, requestLocale(c)),
-      500,
-    );
+    return { kind: "db_rejected" };
   }
-});
+}
 
 // Confirm resume (Bugbot: the hold survives retryable commit outcomes, so a
 // refresh / error-page link must re-render the confirm gate, not a dead
@@ -618,6 +683,41 @@ dashboardApp.get("/manifest/confirm", async (c) => {
         name: hold.name,
         slug: hold.slug,
         webhookUrl: `${new URL(c.req.url).origin}/webhook/${hold.slug}`,
+      },
+      requestLocale(c),
+    ),
+  );
+});
+
+// --- Plan 31 T5: post-commit onboarding page (AC4b) ---
+//
+// The landing page after a successful manifest commit: App name / GitHub
+// id / slug / webhook URL + the provider-first next-step CTA into Settings.
+// Authorization = the same membership + owner-or-admin rule as the settings
+// family (plan Interfaces: "membership + manage 规则与 settings 相同"); the
+// settings family's DASHBOARD_ENCRYPTION_KEY fail-closed is NOT inherited —
+// this page reads plaintext columns only. Unknown / soft-deleted App =
+// the settings-family 404 shape. Rendered by the SSR manifest page family
+// (no chrome beyond shellHeader), so no SPA shell is served.
+dashboardApp.get("/apps/:slug/onboarding", async (c) => {
+  const member = await requireMember(c);
+  if (!member.ok) return member.response;
+  const app = await createAppsStore(member.db).getAppBySlug(c.req.param("slug") ?? "");
+  if (!app || app.deleted_at !== null) {
+    return pinnedPostMutationResponse(c, DASHBOARD_SHELL_REDIRECT, "unknown app", 404);
+  }
+  if (!canManageApp(member.user, app)) {
+    return c.html(forbiddenPage(member.session.login, requestLocale(c)), 403);
+  }
+  const origin = new URL(c.req.url).origin;
+  return c.html(
+    manifestOnboardingPage(
+      member.session,
+      {
+        id: app.github_app_id,
+        name: app.name,
+        slug: app.slug,
+        webhookUrl: `${origin}/webhook/${app.slug}`,
       },
       requestLocale(c),
     ),

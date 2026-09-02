@@ -278,15 +278,15 @@ export const zhCN: Dictionary = {
       create: "创建 App",
       cancel: "取消",
     },
-    success: {
+    onboarding: {
       title: "GitHub App 已连接",
       heading: "GitHub App 已连接",
-      stored: "GitHub App {appName}（id {id}）已为此部署存储。",
+      connected: "GitHub App {appName}（id {id}）已连接到此部署。",
       slug: "Slug：{slug}",
       webhookUrl: "Webhook URL：{webhookUrl}",
-      reviewsNote: "安装此 App 的仓库中的拉取请求，在 App 未暂停时由此 Worker 审查。",
-      viewApps: "查看应用",
-      backToDashboard: "返回 /dashboard",
+      nextStep: "下一步：打开设置并配置 provider — 验证 provider key 并选择模型后，此 App 的审查才会开始。",
+      openSettings: "打开设置",
+      dashboard: "返回 /dashboard",
     },
     error: {
       title: "GitHub App 设置",

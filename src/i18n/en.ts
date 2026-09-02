@@ -296,16 +296,16 @@ export const en = {
       create: "Create App",
       cancel: "Cancel",
     },
-    success: {
+    onboarding: {
       title: "GitHub App connected",
       heading: "GitHub App connected",
-      stored: "GitHub App {appName} (id {id}) is stored for this deployment.",
+      connected: "GitHub App {appName} (id {id}) is connected to this deployment.",
       slug: "Slug: {slug}",
       webhookUrl: "Webhook URL: {webhookUrl}",
-      reviewsNote:
-        "Pull requests in repos where this App is installed are reviewed by this Worker while the App is not paused.",
-      viewApps: "View Apps",
-      backToDashboard: "Back to /dashboard",
+      nextStep:
+        "Next: open Settings and configure a provider — reviews begin once this App's provider key is verified and its models are picked.",
+      openSettings: "Open Settings",
+      dashboard: "Back to /dashboard",
     },
     error: {
       title: "GitHub App setup",
