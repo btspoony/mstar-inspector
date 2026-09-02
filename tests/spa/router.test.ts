@@ -6,8 +6,8 @@ import { matchRoute } from "../../src/spa/router";
 import { SPA_PAGES, isSpaAssetPath, matchSpaRoute, wantsHtml } from "../../src/spa/routes";
 
 describe("SPA_PAGES enum (plan 30 T1)", () => {
-  test("includes the home workbench plus plan 29 resident pages", () => {
-    expect([...SPA_PAGES]).toEqual(["home", "insights", "members", "apps", "login", "settings"]);
+  test("includes the home workbench plus plan 29 resident pages (apps retired, plan 30 T4)", () => {
+    expect([...SPA_PAGES]).toEqual(["home", "insights", "members", "login", "settings"]);
   });
 });
 
@@ -22,7 +22,6 @@ describe("matchSpaRoute (plan 29 T3)", () => {
       page: "members",
       pathname: "/dashboard/members",
     });
-    expect(matchSpaRoute("/dashboard/apps")).toEqual({ page: "apps", pathname: "/dashboard/apps" });
     expect(matchSpaRoute("/dashboard/login")).toEqual({ page: "login", pathname: "/dashboard/login" });
   });
 
@@ -40,6 +39,7 @@ describe("matchSpaRoute (plan 29 T3)", () => {
   });
 
   test("does not match nested extras or the apps 301-alias target", () => {
+    expect(matchSpaRoute("/dashboard/apps")).toBeNull();
     expect(matchSpaRoute("/dashboard/apps/acme")).toBeNull();
     expect(matchSpaRoute("/dashboard/apps/acme/settings/key/delete")).toBeNull();
     expect(matchSpaRoute("/dashboard/api/insights/summary")).toBeNull();

@@ -353,81 +353,69 @@ describe("fetchGitHubUser (oauth.ts, stubbed fetch)", () => {
 });
 
 describe("/dashboard routes", () => {
-  test("GET /dashboard without cookie → 302 to /dashboard/login", async () => {
-    const res = await worker.fetch(dashboardRequest("/dashboard"), makeEnv());
-    expect(res.status).toBe(302);
-    expect(res.headers.get("Location")).toBe("/dashboard/login");
+  test("GET /dashboard without a session is served the SPA shell (boot login null)", async () => {
+    const res = await worker.fetch(dashboardRequest("/dashboard"), withSpaAssets(makeEnv()));
+    expect(res.status).toBe(200);
+    const body = await res.text();
+    expect(body).toContain("window.__BOOT__=");
+    expect(body).toContain('"login":null');
   });
 
-  test("GET /dashboard with a valid session cookie → 200 shell", async () => {
+  test("GET /dashboard with a valid session cookie → 200 SPA shell (boot-injected)", async () => {
     const session = await createSessionValue("octocat", null, SESSION_SECRET);
     const res = await worker.fetch(
       dashboardRequest("/dashboard", `${SESSION_COOKIE}=${session}`),
-      makeEnv(),
+      withSpaAssets(makeEnv()),
     );
     expect(res.status).toBe(200);
     const body = await res.text();
-    expect(body).toContain("Signed in as octocat");
-    // qc1/qc2 F-001: octocat is an admin (default seed) — the shell header
-    // carries the Members entry next to Logout.
-    expect(body).toContain('href="/dashboard/members"');
-    expect(body).toContain(">Members</a>");
-    expect(body).toContain('href="/dashboard/logout"');
-    expect(body).toContain(">Logout</a>");
+    expect(body).toContain("window.__BOOT__=");
+    expect(body).toContain('"login":"octocat"');
+    // qc1/qc2 F-001: octocat is an admin (default seed) — the boot carries
+    // the admin role so the SPA renders the Members entry.
+    expect(body).toContain('"role":"admin"');
+    // The legacy three-card home is retired (plan 30 T4): no SSR sections,
+    // no manifest start form, no REVIEW_ENABLED copy.
+    expect(body).not.toContain("Model keys");
+    expect(body).not.toContain("Not in this iteration (B3).");
+    expect(body).not.toContain('action="/dashboard/manifest/start"');
     expect(body).not.toContain("REVIEW_ENABLED");
-    // B1: the GitHub App section is live — a submit to the manifest start
-    // route, not a disabled placeholder button.
-    expect(body).toContain('action="/dashboard/manifest/start"');
-    expect(body).toContain('<button type="submit" class="primary">Create GitHub App</button>');
-    // B2 delivered: the Model keys card is a live per-App entry point — the
-    // copy states keys/models are configured per App and it links to the
-    // Apps list, where members reach Settings on manageable Apps.
-    expect(body).toContain("configured per App");
-    expect(body).toContain('<a href="/dashboard/apps">Open the Apps list</a>');
-    // The Review card (B3) stays an inert placeholder (AC-S11-placeholders).
-    expect(body).toContain("Not in this iteration (B3).");
-    expect(body).toContain('aria-disabled="true"');
-    expect(body).not.toContain("Not in B0");
   });
 
-  test("document title is Dashboard — Morning Star Inspector (nav.brand, plan 29 T7)", async () => {
-    const session = await createSessionValue("octocat", null, SESSION_SECRET);
-    const res = await worker.fetch(
-      dashboardRequest("/dashboard", `${SESSION_COOKIE}=${session}`),
-      makeEnv(),
-    );
-    expect(res.status).toBe(200);
-    const body = await res.text();
-    expect(body).toContain("<title>Dashboard — Morning Star Inspector</title>");
-    expect(body).not.toContain("<title>mstar-inspector");
-    expect(body).not.toContain("mstar-inspector</title>");
+  test("the SPA home document title is the SPA index title (plan 30 T4)", async () => {
+    const indexHtml = readFileSync(join(import.meta.dir, "../../src/spa/index.html"), "utf8");
+    expect(indexHtml).toContain("<title>Morning Star Inspector</title>");
+    expect(indexHtml).not.toContain("Dashboard —");
   });
 
-  test("Members entry is admin-aware: member shell renders no /dashboard/members reference (F-001)", async () => {
+  test("boot role is admin-aware: member sessions carry role member, not admin (F-001)", async () => {
     const admin = await worker.fetch(
       dashboardRequest("/dashboard", `${SESSION_COOKIE}=${await createSessionValue("octocat", null, SESSION_SECRET)}`),
-      makeEnv(),
+      withSpaAssets(makeEnv()),
     );
     expect(admin.status).toBe(200);
-    expect(await admin.text()).toContain('href="/dashboard/members"');
+    expect(await admin.text()).toContain('"role":"admin"');
     const member = await worker.fetch(
       dashboardRequest("/dashboard", `${SESSION_COOKIE}=${await createSessionValue("mallory", null, SESSION_SECRET)}`),
-      makeEnv(),
+      withSpaAssets(makeEnv()),
     );
     expect(member.status).toBe(200);
     const memberBody = await member.text();
-    expect(memberBody).toContain("Signed in as mallory");
-    expect(memberBody).not.toContain("/dashboard/members");
+    expect(memberBody).toContain('"login":"mallory"');
+    expect(memberBody).toContain('"role":"member"');
+    expect(memberBody).not.toContain('"role":"admin"');
   });
 
-  test("GET /dashboard with a tampered session cookie → 302 (treated as logged out)", async () => {
+  test("GET /dashboard with a tampered session cookie → 200 SPA shell, boot login null", async () => {
     const session = await createSessionValue("octocat", null, SESSION_SECRET);
     const res = await worker.fetch(
       dashboardRequest("/dashboard", `${SESSION_COOKIE}=${tamperSignature(session)}`),
-      makeEnv(),
+      withSpaAssets(makeEnv()),
     );
-    expect(res.status).toBe(302);
-    expect(res.headers.get("Location")).toBe("/dashboard/login");
+    expect(res.status).toBe(200);
+    const body = await res.text();
+    expect(body).toContain("window.__BOOT__=");
+    expect(body).toContain('"login":null');
   });
 
   test("GET /dashboard/login → 302 to GitHub authorize with signed state cookie", async () => {
@@ -571,7 +559,12 @@ describe("/dashboard routes", () => {
       GITHUB_OAUTH_CLIENT_SECRET: undefined,
       DASHBOARD_SESSION_SECRET: undefined,
     });
-    expect((await worker.fetch(dashboardRequest("/dashboard"), env)).status).toBe(500);
+    // The legacy SSR home is retired (plan 30 T4): /dashboard is the SPA
+    // shell (served without secrets, boot login null); the login/API routes
+    // behind it still fail closed.
+    const shell = await worker.fetch(dashboardRequest("/dashboard"), withSpaAssets(env));
+    expect(shell.status).toBe(200);
+    expect(await shell.text()).toContain('"login":null');
     expect((await worker.fetch(dashboardRequest("/dashboard/login"), env)).status).toBe(500);
   });
 
@@ -1266,9 +1259,12 @@ describe("/dashboard confirm resume (Bugbot: confirm step must be resumable)", (
     return dashboardRequest(path, cookies);
   }
 
-  test("GET /dashboard with a valid hold renders the confirm gate, never PEM/webhook_secret", async () => {
+  test("GET /dashboard/manifest/confirm with a valid hold renders the confirm gate, never PEM/webhook_secret", async () => {
     const session = await createSessionValue("octocat", null, SESSION_SECRET);
-    const res = await worker.fetch(resumeRequest("/dashboard", session, await freshHold()), makeEnv());
+    const res = await worker.fetch(
+      resumeRequest("/dashboard/manifest/confirm", session, await freshHold()),
+      makeEnv(),
+    );
     expect(res.status).toBe(200);
     const body = await res.text();
     expect(body).toContain('action="/dashboard/manifest/commit"');
@@ -1284,7 +1280,7 @@ describe("/dashboard confirm resume (Bugbot: confirm step must be resumable)", (
     expect(body).not.toContain('action="/dashboard/manifest/start"');
   });
 
-  test("after a retryable 500 (missing encryption key), GET /dashboard still shows the confirm gate", async () => {
+  test("after a retryable 500 (missing encryption key), the confirm route still shows the confirm gate", async () => {
     const session = await createSessionValue("octocat", null, SESSION_SECRET);
     const hold = await freshHold();
     const rejected = await worker.fetch(
@@ -1300,22 +1296,24 @@ describe("/dashboard confirm resume (Bugbot: confirm step must be resumable)", (
     expect(rejected.status).toBe(500);
     // The retryable error page links back to the confirm surface.
     expect(await rejected.text()).toContain('href="/dashboard/manifest/confirm"');
-    // Resume via the shell URL: the confirm gate comes back with the same hold.
-    const resumed = await worker.fetch(resumeRequest("/dashboard", session, hold), makeEnv());
+    // Resume via the confirm route: the gate comes back with the same hold.
+    const resumed = await worker.fetch(resumeRequest("/dashboard/manifest/confirm", session, hold), makeEnv());
     expect(resumed.status).toBe(200);
     const body = await resumed.text();
     expect(body).toContain('action="/dashboard/manifest/commit"');
     expect(body).toContain(`<span class="id">${CONVERSION.id}</span>`);
   });
 
-  test("hold bound to a different login → dashboard shell, no confirm, no secrets", async () => {
+  test("hold bound to a different login → 302 to the shell, no confirm, no secrets", async () => {
     const session = await createSessionValue("mallory", null, SESSION_SECRET);
-    const res = await worker.fetch(resumeRequest("/dashboard", session, await freshHold()), makeEnv());
-    expect(res.status).toBe(200);
-    const body = await res.text();
-    expect(body).toContain('action="/dashboard/manifest/start"');
-    expect(body).not.toContain("BEGIN");
-    expect(body).not.toContain(FAKE_WEBHOOK_SECRET);
+    const res = await worker.fetch(
+      resumeRequest("/dashboard/manifest/confirm", session, await freshHold()),
+      makeEnv(),
+    );
+    expect(res.status).toBe(302);
+    expect(res.headers.get("Location")).toBe("/dashboard");
+    expect(await res.text()).not.toContain("BEGIN");
+    expect(await res.text()).not.toContain(FAKE_WEBHOOK_SECRET);
   });
 
   test("GET /dashboard/manifest/confirm: valid hold → 200 confirm; no hold → 302 to the shell", async () => {
@@ -1808,27 +1806,21 @@ describe("/dashboard manifest commit (plan 13 B5 T3: manifest → D1, zero CF AP
   });
 });
 
-describe("/dashboard placeholder lock + DESIGN alignment (plan 11 Task 3)", () => {
+describe("/dashboard placeholder lock + legacy home retirement (plan 11 Task 3 + plan 30 T4)", () => {
   const origFetch = globalThis.fetch;
   afterEach(() => {
     globalThis.fetch = origFetch;
   });
 
-  test("GitHub App section is enabled: primary submit, not aria-disabled (AC-S11-design)", async () => {
-    const session = await createSessionValue("octocat", null, SESSION_SECRET);
-    const res = await worker.fetch(
-      dashboardRequest("/dashboard", `${SESSION_COOKIE}=${session}`),
-      makeEnv(),
-    );
-    expect(res.status).toBe(200);
-    const body = await res.text();
-    // Spec § DESIGN.md 意图: the enabled GitHub App section is NOT
-    // aria-disabled and its constructive primary (blue-700) is a live submit.
-    const appSection = body.split('<section class="enabled">')[1]?.split("</section>")[0] ?? "";
-    expect(appSection).toContain('action="/dashboard/manifest/start"');
-    expect(appSection).toContain('<button type="submit" class="primary">Create GitHub App</button>');
-    expect(appSection).not.toContain("aria-disabled");
-    expect(appSection).not.toContain("disabled");
+  test("legacy three-card home is retired: no dashboardPage/section code remains (plan 30 T4)", () => {
+    const views = readFileSync(join(import.meta.dir, "../../src/dashboard/views.ts"), "utf8");
+    for (const symbol of ["dashboardPage", "placeholderSection", "githubAppSection", "modelKeysSection"]) {
+      expect(views, symbol).not.toContain(symbol);
+    }
+    // The import line is gone from index.ts (the retirement comment may
+    // still name the symbol narratively).
+    const index = readFileSync(join(import.meta.dir, "../../src/dashboard/index.ts"), "utf8");
+    expect(index).not.toContain("dashboardPage,");
   });
 
   test("BYOK / Review placeholder POSTs → 405, zero fetch, zero env writes, no stale B0 copy", async () => {
@@ -2406,12 +2398,14 @@ describe("per-request allowlist guard (plan 12 T2, spec § AuthZ + lock L5)", ()
     expect(callback.status).toBe(400);
   });
 
-  test("member requests pass the guard and reach the routes unchanged (B0 shell + B1 manifest)", async () => {
+  test("member requests pass the guard and reach the routes unchanged (SPA shell + B1 manifest)", async () => {
     const env = makeEnv();
     const cookie = `${SESSION_COOKIE}=${await createSessionValue("octocat", null, SESSION_SECRET)}`;
-    const shell = await worker.fetch(dashboardRequest("/dashboard", cookie), env);
+    const shell = await worker.fetch(dashboardRequest("/dashboard", cookie), withSpaAssets(env));
     expect(shell.status).toBe(200);
-    expect(await shell.text()).toContain("Signed in as octocat");
+    const shellBody = await shell.text();
+    expect(shellBody).toContain("window.__BOOT__=");
+    expect(shellBody).toContain('"login":"octocat"');
     const start = await worker.fetch(
       new Request("https://worker.local/dashboard/manifest/start", {
         method: "POST",
@@ -2433,10 +2427,10 @@ describe("per-request allowlist guard (plan 12 T2, spec § AuthZ + lock L5)", ()
     const session = await createSessionValue("OctoCat", null, SESSION_SECRET);
     const res = await worker.fetch(
       dashboardRequest("/dashboard", `${SESSION_COOKIE}=${session}`),
-      makeEnv(),
+      withSpaAssets(makeEnv()),
     );
     expect(res.status).toBe(200);
-    expect(await res.text()).toContain("Signed in as OctoCat");
+    expect(await res.text()).toContain('"login":"OctoCat"');
   });
 
   test("guard fails closed when D1 is unbound: valid session → 500, route never runs", async () => {

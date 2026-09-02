@@ -69,9 +69,9 @@ describe("navbar model (plan 29 T3)", () => {
     expect(model.items.map((item) => item.label)).toEqual(["Apps", "Insights"]);
   });
 
-  test("Apps current is /dashboard and /dashboard/apps, not insights", () => {
+  test("Apps current is /dashboard and settings, not insights (apps page is a 301)", () => {
     expect(isNavCurrent("/dashboard", "/dashboard")).toBe(true);
-    expect(isNavCurrent("/dashboard", "/dashboard/apps")).toBe(true);
+    expect(isNavCurrent("/dashboard", "/dashboard/apps")).toBe(false);
     expect(isNavCurrent("/dashboard", "/dashboard/apps/acme/settings")).toBe(true);
     expect(isNavCurrent("/dashboard", "/dashboard/insights")).toBe(false);
     expect(isNavCurrent("/dashboard", "/dashboard/members")).toBe(false);
