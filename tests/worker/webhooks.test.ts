@@ -186,14 +186,14 @@ describe("warn event labels (plan 15 log hygiene 硬化项 3)", () => {
     expect(fields).toMatchObject({ event: "issue_comment", reason: "actor_not_allowed" });
   });
 
-  test("kill-switch warn on classifyEvent carries the real event when the header is present", () => {
+  test("emergency brake warn on classifyEvent carries the real event when the header is present", () => {
     const log = makeLog();
     classifyEvent("pull_request", pullRequestBody("opened"), log, false);
     const [fields] = log.warn.mock.calls[0] ?? [];
     expect(fields).toMatchObject({ event: "pull_request", reason: "review_disabled_kill_switch" });
   });
 
-  test("kill-switch warn with absent event header → event = review_disabled_kill_switch", () => {
+  test("emergency brake warn with absent event header → event = review_disabled_kill_switch", () => {
     const log = makeLog();
     classifyEvent(null, pullRequestBody("opened"), log, false);
     const [fields] = log.warn.mock.calls[0] ?? [];

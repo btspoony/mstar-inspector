@@ -76,6 +76,7 @@ export function SettingsPage({ boot, slug }: { boot: SpaBoot; slug: string }) {
 function verifyReasonMessage(locale: SpaBoot["locale"], reason: string): string {
   if (reason === "invalid_key") return t(locale, "settings.verify.invalid_key");
   if (reason === "unreachable") return t(locale, "settings.verify.unreachable");
+  if (reason === "unsupported_provider") return t(locale, "settings.verify.unsupported_provider");
   return t(locale, "settings.verify.unexpected");
 }
 
@@ -200,6 +201,7 @@ function SettingsView({
             </ul>
           )}
           <AddKeyForm locale={locale} providerIds={payload.provider_ids} onSubmit={submitVerify} />
+          <p className={styles.note}>{t(locale, "settings.unsupportedProvidersHint")}</p>
         </section>
 
         <ModelChainCard

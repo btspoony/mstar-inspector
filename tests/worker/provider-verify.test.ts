@@ -33,6 +33,7 @@ import {
 import {
   PROVIDER_VERIFY_ENDPOINTS,
   VERIFY_TIMEOUT_MS,
+  addKeyProviderIds,
   verifyProviderKey,
   type VerifyDeps,
 } from "../../src/dashboard/provider-verify";
@@ -219,6 +220,14 @@ describe("PROVIDER_VERIFY_ENDPOINTS parity lock", () => {
   test("is keyed exactly by PROVIDER_IDS (a new provider id must get an explicit verify entry)", () => {
     expect(Object.keys(PROVIDER_VERIFY_ENDPOINTS).sort()).toEqual([...PROVIDER_IDS].sort());
     expect(Object.keys(PROVIDER_VERIFY_ENDPOINTS)).toHaveLength(19);
+  });
+
+  test("addKeyProviderIds hides unsupported built-ins from the Add Key dropdown", () => {
+    const ids = addKeyProviderIds(PROVIDER_IDS);
+    expect(ids).not.toContain("azure-openai");
+    expect(ids).not.toContain("ai-gateway");
+    expect(ids).toContain("anthropic");
+    expect(ids.length).toBe(PROVIDER_IDS.length - 2);
   });
 
   test("every entry is a recognized spec kind (models | probe | unsupported)", () => {

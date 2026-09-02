@@ -92,16 +92,20 @@ export type ProviderVerifySpec =
  * | cerebras        | models   | https://api.cerebras.ai/v1/models (Bearer)      | confirmed, OpenAI shape |
  * | xai             | models   | https://api.x.ai/v1/models (Bearer)             | confirmed, OpenAI shape |
  * | openrouter      | models   | https://openrouter.ai/api/v1/models (Bearer)    | confirmed (docs show Bearer on GET /api/v1/models) |
- * | kilo            | probe    | POST https://api.kilo.ai/api/gateway/chat/completions (Bearer) | gateway model list is PUBLIC (docs: "no authentication required") — it cannot validate a key; probe = 1-token chat on the cheapest auto tier (kilo-auto/small). |
+ * | kilo            | probe    | POST https://api.kilo.ai/api/gateway/chat/completions (Bearer) | gateway model list is PUBLIC (docs: "no authentication required") — it cannot validate a key; probe = 1-token chat on the cheapest auto tier. |
  * | mistral         | models   | https://api.mistral.ai/v1/models (Bearer)       | confirmed, OpenAI shape |
- * | zai             | probe    | POST https://api.z.ai/api/paas/v4/chat/completions (Bearer) | no list-models endpoint in Z.AI docs (docs.z.ai/llms.txt); probe = 1-token chat, glm-5.3-flash |
- * | umans           | probe    | POST https://api.code.umans.ai/v1/chat/completions (Bearer) | docs describe the models endpoint as public → cannot validate a key; probe = 1-token chat, umans-flash |
+ * | zai             | probe    | POST https://api.z.ai/api/paas/v4/chat/completions (Bearer) | no list-models endpoint in Z.AI docs (docs.z.ai/llms.txt); probe = 1-token chat. |
+ * | umans           | probe    | POST https://api.code.umans.ai/v1/chat/completions (Bearer) | docs describe the models endpoint as public → cannot validate a key; probe = 1-token chat. |
  * | minimax         | models   | https://api.minimax.io/v1/models (Bearer)       | confirmed (platform.minimax.io list-models reference) |
  * | opencode        | models   | https://opencode.ai/zen/v1/models (Bearer)      | OpenCode Zen docs list the endpoint; auth presumed Bearer Zen key [INFERENCE] |
  * | cursor          | models   | GET https://api.cursor.com/v1/models (Bearer)   | Cloud Agents API (cursor.com/docs/api) exposes GET /v1/models — a 2xx list is cached (a real dropdown), 401 still maps to invalid_key; CURSOR_ACCESS_TOKEN rides the omp cursor provider (api2.cursor.sh proxy) at review time — a token rejected here but fine there should move this entry to the proxy surface [INFERENCE] |
  * | ai-gateway      | unsupported | —                                            | Cloudflare AI Gateway path needs account + gateway ids; key alone has no fixed host. |
  * | wafer-serverless| models   | https://pass.wafer.ai/v1/models (Bearer)        | OpenAI-compatible base from wafer docs (pass.wafer.ai/v1); /models is the standard discovery path [INFERENCE] |
  * | ark             | models   | https://ark.cn-beijing.volces.com/api/v3/models (Bearer) | OpenAI-compatible base confirmed (ark.cn-beijing.volces.com/api/v3); /models is the standard path — if Ark 404s it, move to probe [INFERENCE] |
+ *
+ * Probe model-id literals (`kilo-auto/small`, `glm-5.3-flash`, `umans-flash`)
+ * are pinned probe fixtures. A retired or renamed id makes that provider
+ * unverifiable until a redeploy updates this table.
  */
 export const PROVIDER_VERIFY_ENDPOINTS: Record<string, ProviderVerifySpec> = {
   anthropic: { kind: "models", url: "https://api.anthropic.com/v1/models", auth: "x-api-key", anthropicVersion: true },
@@ -148,6 +152,15 @@ export const PROVIDER_VERIFY_ENDPOINTS: Record<string, ProviderVerifySpec> = {
   "wafer-serverless": { kind: "models", url: "https://pass.wafer.ai/v1/models", auth: "bearer" },
   ark: { kind: "models", url: "https://ark.cn-beijing.volces.com/api/v3/models", auth: "bearer" },
 };
+
+/**
+ * Add Key dropdown source: hide providers whose verify spec is
+ * `unsupported` (azure-openai / ai-gateway). They stay in PROVIDER_IDS for
+ * legacy stored rows; the dashboard cannot verify a key with only the key.
+ */
+export function addKeyProviderIds(ids: readonly string[]): string[] {
+  return ids.filter((id) => PROVIDER_VERIFY_ENDPOINTS[id]?.kind !== "unsupported");
+}
 
 /** Authorization header shape per VerifyAuth. The key NEVER goes elsewhere
  *  (not in the URL — Gemini probes use the header for exactly this reason). */

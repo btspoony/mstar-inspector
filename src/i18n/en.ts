@@ -268,10 +268,14 @@ export const en = {
     chainEmpty: "No models in the chain yet.",
     pickModel: "Select a model…",
     keyVerified: "Key verified — models cached.",
+    unsupportedProvidersHint:
+      "Azure OpenAI and AI Gateway keys can't be verified here — manage them in the provider console.",
     verify: {
       invalid_key: "That API key was rejected by the provider — nothing was stored.",
       unreachable: "The provider could not be reached — nothing was stored.",
       unexpected: "The provider returned an unexpected response — nothing was stored.",
+      unsupported_provider:
+        "This provider can't be verified here — manage the key in the provider console. Nothing was stored.",
     },
     membership: {
       not_in_verified_models: "Selector {selector} is not in this App's verified models.",
@@ -325,6 +329,7 @@ export const en = {
         "Another App claimed this App's webhook slug while setup was in progress, so the GitHub App was created on GitHub but not connected to this deployment — no Worker data was stored. A manifest-created App cannot be connected twice: delete the just-created App on GitHub, then run a new app-creation flow from the dashboard.",
       alreadyConnected: "This GitHub App is already connected on this deployment — no changes were made.",
       dbRejected: "The App could not be stored — the dashboard database rejected the write. You can resubmit.",
+      dbUnbound: "Dashboard storage is not configured — the App could not be stored.",
     },
   },
   home: {

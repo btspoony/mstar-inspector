@@ -140,6 +140,9 @@ describe("GET /dashboard/api/apps/:slug/settings (plan 29 T4)", () => {
     expect(body.app.slug).toBe("mstar-inspector-mallory");
     expect(body.app.review_enabled).toBe(true);
     expect(body.provider_ids.length).toBeGreaterThan(0);
+    expect(body.provider_ids).not.toContain("azure-openai");
+    expect(body.provider_ids).not.toContain("ai-gateway");
+    expect(owner.headers.get("cache-control")).toBe("private, no-store");
 
     const other = await get("/dashboard/api/apps/mstar-inspector-mallory/settings", "hubot", env);
     expect(other.status).toBe(403);

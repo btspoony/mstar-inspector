@@ -251,10 +251,12 @@ export const zhCN: Dictionary = {
     chainEmpty: "模型链中还没有模型。",
     pickModel: "选择模型…",
     keyVerified: "密钥已验证 — 模型已缓存。",
+    unsupportedProvidersHint: "Azure OpenAI 和 AI Gateway 密钥无法在此验证 — 请在对应控制台管理。",
     verify: {
       invalid_key: "该 API 密钥被 provider 拒绝 — 未存储任何内容。",
       unreachable: "无法连接 provider — 未存储任何内容。",
       unexpected: "provider 返回了意外响应 — 未存储任何内容。",
+      unsupported_provider: "此 provider 无法在此验证 — 请在对应控制台管理密钥。未存储任何内容。",
     },
     membership: {
       not_in_verified_models: "选择器 {selector} 不在此 App 的已验证模型中。",
@@ -305,6 +307,7 @@ export const zhCN: Dictionary = {
         "设置进行期间另一个 App 占用了此 App 的 webhook slug，因此 GitHub 上已创建 App 但未连接到此部署 — 未写入任何 Worker 数据。Manifest 创建的 App 不能连接两次：请在 GitHub 上删除刚创建的 App，然后从控制台重新开始创建流程。",
       alreadyConnected: "此 GitHub App 已在此部署上连接 — 未做任何更改。",
       dbRejected: "无法存储该 App — 控制台数据库拒绝了写入。你可以重新提交。",
+      dbUnbound: "控制台存储未配置 — 无法存储该 App。",
     },
   },
   home: {
