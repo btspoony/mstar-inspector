@@ -221,7 +221,7 @@ export const en = {
     selectProvider: "Select a provider…",
     modelChain: "Model chain",
     modelChainCopy:
-      "Comma-separated model selectors for this App's reviews — the deployment's global chain knob was retired; this App's chain is the only chain its reviews use.",
+      "Select models from this App's verified providers for its reviews — the deployment's global chain knob was retired; this App's chain is the only chain its reviews use.",
     modelChainNote:
       "Saving an empty chain clears it — reviews then fail closed with per-App config incomplete (missing model chain or provider key) until the chain and the required provider keys are configured.",
     modelChainField: "Model chain",
@@ -238,7 +238,7 @@ export const en = {
     selectApi: "Select an API…",
     roleModels: "Role models",
     roleModelsCopy:
-      "Optional per-seat model overrides for this App's reviews — each audit role runs on its own comma-separated selector chain (a :thinking suffix passes through).",
+      "Optional per-seat model overrides for this App's reviews — each audit role picks from the same verified-model list (a :thinking suffix passes through).",
     emptyUsesAppChain: "Empty = use the App model chain.",
     roleHintReviewSeat: "quick + default review seats",
     roleHintDeep: "deep review seat",
@@ -272,6 +272,9 @@ export const en = {
       invalid_key: "That API key was rejected by the provider — nothing was stored.",
       unreachable: "The provider could not be reached — nothing was stored.",
       unexpected: "The provider returned an unexpected response — nothing was stored.",
+    },
+    membership: {
+      not_in_verified_models: "Selector {selector} is not in this App's verified models.",
     },
   },
   manifest: {

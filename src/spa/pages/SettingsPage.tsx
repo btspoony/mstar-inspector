@@ -79,6 +79,22 @@ function verifyReasonMessage(locale: SpaBoot["locale"], reason: string): string 
   return t(locale, "settings.verify.unexpected");
 }
 
+/** Membership 400s are JSON `{ code, message, selector }`; other settings 400s stay plaintext. */
+function settingsErrorMessage(locale: SpaBoot["locale"], body: string): string {
+  try {
+    const parsed = JSON.parse(body) as { code?: unknown; message?: unknown; selector?: unknown };
+    if (parsed.code === "not_in_verified_models" && typeof parsed.selector === "string") {
+      return t(locale, "settings.membership.not_in_verified_models", { selector: parsed.selector });
+    }
+    if (typeof parsed.message === "string" && parsed.message.trim()) {
+      return parsed.message.trim();
+    }
+  } catch {
+    /* plaintext 400 — surface the server copy */
+  }
+  return body.trim() || t(locale, "common.loadFailed");
+}
+
 function SettingsView({
   locale,
   payload,
@@ -101,7 +117,7 @@ function SettingsView({
   async function submitSettings(fields: Record<string, string>): Promise<void> {
     const { status, body } = await postForm(base, fields);
     if (status >= 400) {
-      onNotice({ kind: "error", message: body.trim() || t(locale, "common.loadFailed") });
+      onNotice({ kind: "error", message: settingsErrorMessage(locale, body) });
       await onReload();
       return;
     }

@@ -205,7 +205,7 @@ export const zhCN: Dictionary = {
     selectProvider: "选择 provider…",
     modelChain: "模型链",
     modelChainCopy:
-      "此 App 审查使用的逗号分隔模型选择器 — 部署级全局链旋钮已退役；此 App 的模型链是其审查使用的唯一链。",
+      "从此 App 已验证的 provider 中选择审查所用模型 — 部署级全局链旋钮已退役；此 App 的模型链是其审查使用的唯一链。",
     modelChainNote:
       "保存空链会将其清空 — 审查随后失败关闭（缺少模型链或 provider 密钥），直到配置好模型链和所需 provider 密钥。",
     modelChainField: "模型链",
@@ -222,7 +222,7 @@ export const zhCN: Dictionary = {
     selectApi: "选择 API…",
     roleModels: "角色模型",
     roleModelsCopy:
-      "此 App 审查的可选按席位模型覆盖 — 每个审查角色运行在自己的逗号分隔选择器链上（:thinking 后缀会原样透传）。",
+      "此 App 审查的可选按席位模型覆盖 — 每个审查角色从同一份已验证模型列表中选择（:thinking 后缀会原样透传）。",
     emptyUsesAppChain: "留空 = 使用 App 模型链。",
     roleHintReviewSeat: "快速 + 默认审查席位",
     roleHintDeep: "深度审查席位",
@@ -255,6 +255,9 @@ export const zhCN: Dictionary = {
       invalid_key: "该 API 密钥被 provider 拒绝 — 未存储任何内容。",
       unreachable: "无法连接 provider — 未存储任何内容。",
       unexpected: "provider 返回了意外响应 — 未存储任何内容。",
+    },
+    membership: {
+      not_in_verified_models: "选择器 {selector} 不在此 App 的已验证模型中。",
     },
   },
   manifest: {

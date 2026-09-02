@@ -999,6 +999,21 @@ function membershipFailCopy(selector: string): string {
   return `Selector ${selector} is not in this App's verified models.`;
 }
 
+const MEMBERSHIP_FAIL_CODE = "not_in_verified_models" as const;
+
+/** 400 for a membership miss: JSON `{ code, message, selector }` so the SPA maps `code` via t(); `message` keeps the English face for native posts. */
+function settingsMembershipFailResponse(
+  c: Context<{ Bindings: Env }>,
+  slug: string,
+  selector: string,
+): Response {
+  const message = membershipFailCopy(selector);
+  if (wantsHtmlFormNavigation(c)) {
+    return c.redirect(`/dashboard/apps/${slug}/settings`, 302);
+  }
+  return c.json({ code: MEMBERSHIP_FAIL_CODE, message, selector }, 400);
+}
+
 /** SPA JSON face — same requireAppSettings gate and the settings reads the retired HTML GET used. */
 dashboardApp.get("/api/apps/:slug/settings", async (c) => {
   const gate = await requireAppSettings(c);
@@ -1193,7 +1208,7 @@ dashboardApp.post("/apps/:slug/settings", async (c) => {
         await store.listCustomProviders(gate.app.id),
       );
       if (failing) {
-        return settingsPostResponse(c, gate.app.slug, membershipFailCopy(failing), 400);
+        return settingsMembershipFailResponse(c, gate.app.slug, failing);
       }
       await store.setModelChain(gate.app.id, raw);
     } catch (err) {
@@ -1254,7 +1269,7 @@ dashboardApp.post("/apps/:slug/settings", async (c) => {
         if (selector.trim() === "") continue;
         const failing = findFailingSelector(parseModelChain(selector), verified, custom);
         if (failing) {
-          return settingsPostResponse(c, gate.app.slug, membershipFailCopy(failing), 400);
+          return settingsMembershipFailResponse(c, gate.app.slug, failing);
         }
       }
       await store.setModelRoles(gate.app.id, selectors);

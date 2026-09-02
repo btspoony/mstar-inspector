@@ -83,5 +83,24 @@ describe("settings copy is dictionary-backed (plan 31 T4+T6)", () => {
     expect(t("zh_CN", "settings.useAppChain")).toBe("使用 App 模型链");
     expect(t("en", "settings.noAutoDiscovery")).toContain("does not list models");
     expect(t("zh_CN", "settings.noVerifiedModels")).toContain("验证");
+    expect(t("en", "settings.modelChainCopy")).not.toMatch(/comma-separated/i);
+    expect(t("en", "settings.roleModelsCopy")).not.toMatch(/comma-separated/i);
+    expect(t("en", "settings.modelChainCopy")).toContain("Select models");
+    expect(t("zh_CN", "settings.modelChainCopy")).toContain("已验证");
+    expect(t("en", "settings.membership.not_in_verified_models", { selector: "anthropic/nope" })).toContain(
+      "anthropic/nope",
+    );
+    expect(t("zh_CN", "settings.membership.not_in_verified_models", { selector: "anthropic/nope" })).toContain(
+      "anthropic/nope",
+    );
+    expect(t("zh_CN", "settings.membership.not_in_verified_models", { selector: "x" })).toContain("已验证");
+  });
+
+  test("SPA maps membership 400 code via t(), not English body prose", () => {
+    const source = readFileSync(join(import.meta.dir, "../../src/spa/pages/SettingsPage.tsx"), "utf8");
+    expect(source).toContain("settingsErrorMessage");
+    expect(source).toContain("not_in_verified_models");
+    expect(source).toContain("settings.membership.not_in_verified_models");
+    expect(source).toContain("message: settingsErrorMessage(locale, body)");
   });
 });

@@ -266,9 +266,12 @@ describe("POST save-chain / save-roles membership (plan 31 T4)", () => {
       model_chain: "anthropic/claude-opus-4-7",
     });
     expect(fail.status).toBe(400);
-    const failBody = await fail.text();
-    expect(failBody).toContain("anthropic/claude-opus-4-7");
-    expect(failBody).toContain("not in this App's verified models");
+    const failBody = await fail.json();
+    expect(failBody).toEqual({
+      code: "not_in_verified_models",
+      message: "Selector anthropic/claude-opus-4-7 is not in this App's verified models.",
+      selector: "anthropic/claude-opus-4-7",
+    });
     expect(await store.getModelChain(app.id)).toBe("anthropic/claude-sonnet-4-6:thinking");
   });
 
@@ -298,10 +301,15 @@ describe("POST save-chain / save-roles membership (plan 31 T4)", () => {
     );
     const env = makeEnv(db);
     const ok = await postForm(SETTINGS, "mallory", env, { op: "save-chain", model_chain: "my-custom/local-7b" });
+
     expect(ok.status).toBe(200);
     const fail = await postForm(SETTINGS, "mallory", env, { op: "save-chain", model_chain: "my-custom/nope" });
     expect(fail.status).toBe(400);
-    expect(await fail.text()).toContain("my-custom/nope");
+    expect(await fail.json()).toEqual({
+      code: "not_in_verified_models",
+      message: "Selector my-custom/nope is not in this App's verified models.",
+      selector: "my-custom/nope",
+    });
     expect((await store.getVerifiedModels(app.id)).some((row) => row.provider === "my-custom")).toBe(false);
   });
 
@@ -317,7 +325,11 @@ describe("POST save-chain / save-roles membership (plan 31 T4)", () => {
       "role_mstar-review-seat": "anthropic/nope",
     });
     expect(fail.status).toBe(400);
-    expect(await fail.text()).toContain("anthropic/nope");
+    expect(await fail.json()).toEqual({
+      code: "not_in_verified_models",
+      message: "Selector anthropic/nope is not in this App's verified models.",
+      selector: "anthropic/nope",
+    });
     const ok = await postForm(SETTINGS, "mallory", env, {
       op: "save-roles",
       ...roles,
@@ -330,6 +342,69 @@ describe("POST save-chain / save-roles membership (plan 31 T4)", () => {
     const clear = await postForm(SETTINGS, "mallory", env, { op: "save-roles", ...roles });
     expect(clear.status).toBe(200);
     expect(await store.getAppModelRoles(app.id)).toEqual({});
+  });
+});
+
+describe("POST /dashboard/apps/:slug/settings — pinned add-key / add-custom-provider verify (plan 31 T4)", () => {
+  let fetchSpy: ReturnType<typeof spyOn> | undefined;
+  afterEach(() => {
+    fetchSpy?.mockRestore();
+    fetchSpy = undefined;
+  });
+
+  test("add-key 401 from the provider → 400, zero rows stored", async () => {
+    const { db } = await seededWorld();
+    fetchSpy = mockStatus(401, { error: { message: "nope" } });
+    const res = await postForm(SETTINGS, "mallory", makeEnv(db), {
+      op: "add-key",
+      provider: "anthropic",
+      key: PLAIN_KEY,
+    });
+    expect(res.status).toBe(400);
+    const body = await res.text();
+    expect(body).toContain("rejected by the provider");
+    expect(body).not.toContain(PLAIN_KEY);
+    expect(db.raw.query("SELECT COUNT(*) AS n FROM app_provider_keys").get() as { n: number }).toEqual({ n: 0 });
+    expect(db.raw.query("SELECT COUNT(*) AS n FROM app_provider_models").get() as { n: number }).toEqual({ n: 0 });
+  });
+
+  test("add-key success still stores via saveVerifiedKey", async () => {
+    const { db, app } = await seededWorld();
+    fetchSpy = mockModelsOk(["claude-sonnet-4-6"]);
+    const res = await postForm(SETTINGS, "mallory", makeEnv(db), {
+      op: "add-key",
+      provider: "anthropic",
+      key: PLAIN_KEY,
+    });
+    expect(res.status).toBe(200);
+    const body = await res.text();
+    expect(body).toContain("Stored the anthropic key");
+    expect(body).not.toContain(PLAIN_KEY);
+    const store = createAppConfigStore(db, TEST_KEY);
+    const keys = await store.listProviderKeys(app.id);
+    expect(keys).toEqual([expect.objectContaining({ provider: "anthropic", last4: PLAIN_KEY.slice(-4) })]);
+    const cached = await store.getVerifiedModels(app.id);
+    expect(cached).toEqual([
+      expect.objectContaining({ provider: "anthropic", models: expect.arrayContaining(["claude-sonnet-4-6"]) }),
+    ]);
+  });
+
+  test("add-custom-provider 401 from the provider → 400, zero rows stored", async () => {
+    const { db } = await seededWorld();
+    fetchSpy = mockStatus(401, { error: { message: "nope" } });
+    const res = await postForm(SETTINGS, "mallory", makeEnv(db), {
+      op: "add-custom-provider",
+      provider_id: "my-custom",
+      base_url: "https://example.com/v1",
+      api: "openai-completions",
+      model_ids: "local-7b",
+      key: PLAIN_KEY,
+    });
+    expect(res.status).toBe(400);
+    const body = await res.text();
+    expect(body).toContain("rejected by the provider");
+    expect(body).not.toContain(PLAIN_KEY);
+    expect(db.raw.query("SELECT COUNT(*) AS n FROM app_custom_providers").get() as { n: number }).toEqual({ n: 0 });
   });
 });
 
