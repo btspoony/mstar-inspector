@@ -665,6 +665,44 @@ describe("/dashboard/locale (plan 29 T2)", () => {
     expect(res.headers.getSetCookie()).toHaveLength(1);
   });
 
+  test("POST with backslash-prefixed Referer (/\\evil.example) → 302 to /dashboard (no open redirect), cookie set", async () => {
+    const res = await worker.fetch(
+      new Request("https://worker.local/dashboard/locale", {
+        method: "POST",
+        headers: {
+          Cookie: await sessionCookie(),
+          "Content-Type": "application/x-www-form-urlencoded",
+          Referer: "/\\evil.example",
+        },
+        body: "locale=zh_CN",
+      }),
+      makeEnv(),
+    );
+    expect(res.status).toBe(302);
+    // WHATWG: /\/evil.example parses as https://evil.example/ (backslash → slash → authority)
+    expect(res.headers.get("Location")).toBe("/dashboard");
+    expect(res.headers.getSetCookie()).toHaveLength(1);
+  });
+
+  test("POST with same-origin absolute Referer containing backslash (https://worker.local/\\evil.example) → 302 to /dashboard (no open redirect), cookie set", async () => {
+    const res = await worker.fetch(
+      new Request("https://worker.local/dashboard/locale", {
+        method: "POST",
+        headers: {
+          Cookie: await sessionCookie(),
+          "Content-Type": "application/x-www-form-urlencoded",
+          Referer: "https://worker.local/\\evil.example",
+        },
+        body: "locale=zh_CN",
+      }),
+      makeEnv(),
+    );
+    expect(res.status).toBe(302);
+    // WHATWG: backslash in the path normalizes to /, yielding pathname //evil.example (protocol-relative)
+    expect(res.headers.get("Location")).toBe("/dashboard");
+    expect(res.headers.getSetCookie()).toHaveLength(1);
+  });
+
   test("POST with empty-string Referer → 302 to /dashboard (treated as missing), cookie set", async () => {
     const res = await worker.fetch(
       new Request("https://worker.local/dashboard/locale", {

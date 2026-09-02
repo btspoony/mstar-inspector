@@ -303,21 +303,26 @@ dashboardApp.get("/logout", (c) => {
 
 /**
  * Safe 302 target for the locale toggle. The Referer header is
- * attacker-influenced (open-redirect surface): accept ONLY a root-relative
- * path that does not start with `//`, or a same-origin absolute URL
- * (stripped to path+query). Any other value — off-origin URL,
- * protocol-relative `//host`, empty string, junk — falls back to
+ * attacker-influenced (open-redirect surface): EVERY non-empty value is
+ * parsed with `new URL(referer, origin)` — never echoed raw — and accepted
+ * only when the resolved origin equals the request origin AND the resulting
+ * pathname+search starts with `/` without a `//` prefix (a `//` pathname is
+ * protocol-relative, e.g. `https://origin/\evil.example` normalizes to
+ * `//evil.example`). Missing/empty Referer, off-origin URLs, protocol-
+ * relative `//host`, backslash-authority tricks (`/\evil.example` parses as
+ * `https://evil.example/`), and unparseable junk all fall back to
  * /dashboard. Never echoes an absolute or protocol-relative URL.
  */
 function safeLocaleRedirect(referer: string | null | undefined, origin: string): string {
-  if (referer) {
-    if (referer.startsWith("/") && !referer.startsWith("//")) return referer;
-    try {
-      const url = new URL(referer, origin);
-      if (url.origin === origin) return `${url.pathname}${url.search}`;
-    } catch {
-      // unparseable referer → /dashboard
+  if (!referer) return "/dashboard";
+  try {
+    const url = new URL(referer, origin);
+    if (url.origin === origin) {
+      const path = `${url.pathname}${url.search}`;
+      if (path.startsWith("/") && !path.startsWith("//")) return path;
     }
+  } catch {
+    // unparseable referer → /dashboard
   }
   return "/dashboard";
 }
