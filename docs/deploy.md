@@ -324,6 +324,10 @@ docker run --rm --entrypoint /opt/verify-synthesis.sh <image>
 > state). Any failure turns the run red and stops. The manual checks below
 > are extra / local investigation steps, not the workflow smoke — for local
 > runs and for investigating a red run.
+>
+> **URL permanence (plan 30):** `/dashboard/apps` — and `/dashboard/apps/` —
+> are permanently retired → 301 `/dashboard`; do not re-introduce the path
+> (browsers cache the 301).
 
 1. **Cron trigger registered** — the `wrangler deploy` output lists the cron
    trigger `*/15 * * * *` (also visible in the dashboard under Workers →

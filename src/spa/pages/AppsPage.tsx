@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { t } from "../../i18n";
 import { fetchJson, postForm } from "../api";
 import type { SpaBoot } from "../boot";
@@ -12,11 +12,17 @@ export function AppsPage({ boot }: { boot: SpaBoot }) {
   const [payload, setPayload] = useState<AppsPayload | null>(null);
   const [state, setState] = useState<"loading" | "ok" | "error">("loading");
   const [notice, setNotice] = useState<{ kind: NoticeKind; message: string } | null>(null);
+  // Plan 30 QC S-004: load() is shared by the mount effect AND the post-action
+  // reload (onAction), so the unmount-cancellation flag is a ref — a fetch
+  // landing after unmount (navigate away mid-load) must not setState. Mirrors
+  // InsightsSidebar's cancelled discipline.
+  const cancelledRef = useRef(false);
 
   async function load(): Promise<void> {
     setState("loading");
     try {
       const parsed = parseApps(await fetchJson("/dashboard/api/apps"));
+      if (cancelledRef.current) return;
       if (!parsed) {
         setState("error");
         return;
@@ -24,14 +30,18 @@ export function AppsPage({ boot }: { boot: SpaBoot }) {
       setPayload(parsed);
       setState("ok");
     } catch {
-      setState("error");
+      if (!cancelledRef.current) setState("error");
     }
   }
 
   useEffect(() => {
+    cancelledRef.current = false;
     void load();
     // initial load only
     // eslint-disable-next-line react-hooks/exhaustive-deps
+    return () => {
+      cancelledRef.current = true;
+    };
   }, []);
 
   return (
