@@ -361,7 +361,8 @@ docker run --rm --entrypoint /opt/verify-synthesis.sh <image>
    ```
    `review_failures` must be present and the count queryable.
 3. **End-to-end review (v0.6 `modelOverrides` pin)** — with
-   `REVIEW_ENABLED=true`, open or update a test PR on an installed repo and
+   `REVIEW_ENABLED` unset (or any value except the exact `"false"` — the
+   emergency brake), open or update a test PR on an installed repo and
    confirm the review comment lands. To pin per-role overrides end-to-end,
    first configure a role chain on the dashboard (`app_model_roles`, 0009)
    for the test App: the consumer materializes it into the runner input JSON
@@ -477,7 +478,7 @@ or when deliveries look dead):
 
 | Check | Where | Healthy state |
 |---|---|---|
-| Kill-switch | Worker env var `REVIEW_ENABLED` | `"true"` — check FIRST: the kill-switch return precedes classification and delivery recording, so a zero-rows state can mean kill-switch rather than GitHub-side delivery death |
+| Emergency brake | Worker env var `REVIEW_ENABLED` | unset — only the exact `"false"` (case-sensitive, untrimmed) stops ALL reviews; check per-App `review_enabled` first, brake second, but note the brake return precedes classification and delivery recording, so a zero-rows state can mean brake rather than GitHub-side delivery death |
 | Webhook URL | GitHub App settings → Webhook | `https://<worker-host>/webhook/<slug>` — the per-App route |
 | Webhook secret | GitHub App settings → Webhook | A secret is set (masked). The manifest flow's GitHub-generated secret is stored encrypted in the dashboard; changing it on GitHub without updating the dashboard breaks signature verification → `rejected` (401) deliveries |
 | Active | GitHub App settings → Webhook | The **Active** checkbox is on and the App is not suspended; the dashboard row's status is `active` (a disabled row 404s the per-App route) |
@@ -491,8 +492,10 @@ mismatch (secret drift); 400 = malformed payload; 500 = the App's stored
 secret is missing/empty/default. Pre-classify failures (unknown/disabled
 slug, decrypt failure) record NO row — they surface in the Worker logs, not
 the panel. No rows at all = GitHub is not posting (URL wrong, App suspended,
-the event never fired, or the kill-switch is off — confirm `REVIEW_ENABLED`
-first, per the checklist above).
+the event never fired, or the emergency brake is pulled — the exact
+`REVIEW_ENABLED=false`). Confirm the per-App row first (`review_enabled`
+matches operational intent and the App is active), the brake second, per
+the checklist above.
 
 ### 4. R1 pin: reviews.model vs configured chain head
 
@@ -514,8 +517,9 @@ runner evidence, not the column.
 1. **Configure the chain** — on the App's settings page, set **Model chain**
    to a distinctive chain, e.g. `ark-plan/deepseek-v4-flash, openai/gpt-5:thinking`
    and save. The head (the first selector) is what the column must show.
-2. **Real PR** — with `REVIEW_ENABLED=true`, open or update a PR on an
-   installed repo of that App.
+2. **Real PR** — with `REVIEW_ENABLED` unset (any value except the exact
+   `"false"` — the emergency brake), open or update a PR on an installed
+   repo of that App.
 3. **Assert the column** — the review lands and the row records the chain
    head:
    ```bash

@@ -362,7 +362,7 @@ describe("classifyEvent — everything else", () => {
     expect(outcome).toEqual({ kind: "reject", status: 400, reason: "invalid JSON body" });
   });
 });
-describe("REVIEW_ENABLED emergency brake (plan 31 AC4a) — fail-closed", () => {
+describe("REVIEW_ENABLED emergency brake (plan 31 AC4a)", () => {
   test("classifyEvent with reviews disabled ignores even a whitelisted event", () => {
     const outcome = classifyEvent("pull_request", pullRequestBody("opened"), undefined, false);
     expect(outcome).toEqual({

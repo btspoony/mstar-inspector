@@ -109,7 +109,7 @@ app.route("/dashboard", dashboardApp);
  * `last_webhook_at` is touched exactly once — after signature verification,
  * regardless of the subsequent enqueue outcome (job / ignore / paused; a
  * queue-send failure below still leaves the touch committed), before the
- * pause check. Reject paths and the pre-verify kill-switch return never
+ * pause check. Reject paths and the pre-verify emergency-brake return never
  * touch, so the column reads "last verified delivery" (NOT "last successful
  * enqueue") and is decoupled from the review switch. Then
  * `review_enabled=0` answers 2xx with ZERO enqueue (the webhook stays
@@ -229,7 +229,7 @@ app.post("/webhook/:appSlug", async (c) => {
   // after classification (before the reject return) so EVERY classified
   // outcome lands: reject → rejected (status_code = the classifier's
   // status), ignore → ignored, job + review_enabled=0 → paused, job → ok.
-  // The pre-classify failures (413 / kill-switch / db-guard / 404 /
+  // The pre-classify failures (413 / emergency-brake / db-guard / 404 /
   // decrypt 500) never reach this line and record nothing (the retired
   // legacy face recorded nothing by design — AL-20-1: legacy 不落行; app_id
   // is NOT NULL FK). Best-effort like the
@@ -255,7 +255,7 @@ app.post("/webhook/:appSlug", async (c) => {
   // non-reject), so this delivery is touched — after signature verification,
   // regardless of the subsequent enqueue outcome (job / ignore / paused; a
   // queue-send failure in handleReviewJob below still leaves this touch
-  // committed). The reject returns above and the pre-verify kill-switch
+  // committed). The reject returns above and the pre-verify emergency-brake
   // return never reach this line, so the column reads "last verified
   // delivery", NOT "last successful enqueue". Best-effort (same pattern as
   // the install upsert below): a failure logs a structured warn and never

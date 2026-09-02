@@ -31,9 +31,11 @@ export type Env = {
    */
   DB?: D1Database;
   /**
-   * Fail-closed kill-switch (postdeploy feedback T4): reviews run ONLY when
-   * this is exactly "true". Unset or any other value → every webhook is
-   * classified as `ignore` (HTTP 2xx, no queue enqueue). Default OFF.
+   * Emergency brake (plan 31 AC4a): the exact `"false"` (case-sensitive,
+   * untrimmed) stops ALL reviews — every webhook is classified as `ignore`
+   * (HTTP 2xx, no queue enqueue). Unset / `""` / `"true"` / any other value
+   * → per-App `github_apps.review_enabled` governs. Leave unset; the env
+   * var is not an enable flag.
    */
   REVIEW_ENABLED?: string;
   /**
