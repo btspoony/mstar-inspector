@@ -50,6 +50,9 @@ export const zhCN: Dictionary = {
       codeRejected: "GitHub 拒绝了授权码。",
       profileFailed: "无法读取你的 GitHub 资料。",
     },
+    loading: "加载中…",
+    loadFailed: "无法加载此页面。",
+    retry: "重试",
   },
   login: {
     title: "登录",
@@ -158,6 +161,10 @@ export const zhCN: Dictionary = {
     inviteButton: "邀请成员",
     remove: "移除",
     you: "你",
+    adminOnly: "此页面仅限控制台管理员访问。",
+    roleAdmin: "管理员",
+    roleMember: "成员",
+    empty: "还没有成员。",
   },
   insights: {
     title: "审查健康",
@@ -179,6 +186,11 @@ export const zhCN: Dictionary = {
     lastDay: "最近 {count} 天",
     lastDays: "最近 {count} 天",
     repo: "仓库 {repo}",
+    filterWindow: "窗口（天）",
+    filterRepo: "仓库（owner/repo）",
+    filterRepoPlaceholder: "owner/repo",
+    apply: "应用",
+    uncategorized: "未分类",
   },
   settings: {
     title: "应用设置",
@@ -216,6 +228,8 @@ export const zhCN: Dictionary = {
     roleModelsCopy:
       "此 App 审查的可选按席位模型覆盖 — 每个审查角色运行在自己的逗号分隔选择器链上（:thinking 后缀会原样透传）。",
     emptyUsesAppChain: "留空 = 使用 App 模型链。",
+    roleHintReviewSeat: "快速 + 默认审查席位",
+    roleHintDeep: "深度审查席位",
     saveRoleModels: "保存角色模型",
     review: "审查",
     reviewOn: "此 App 的拉取请求审查已开启。",

@@ -61,6 +61,9 @@ export const en = {
       codeRejected: "GitHub rejected the authorization code.",
       profileFailed: "Could not read your GitHub profile.",
     },
+    loading: "Loading…",
+    loadFailed: "Could not load this page.",
+    retry: "Retry",
   },
   login: {
     title: "Sign in",
@@ -173,6 +176,10 @@ export const en = {
     inviteButton: "Invite member",
     remove: "Remove",
     you: "you",
+    adminOnly: "This page is restricted to dashboard admins.",
+    roleAdmin: "admin",
+    roleMember: "member",
+    empty: "No members yet.",
   },
   insights: {
     title: "Review health",
@@ -194,6 +201,11 @@ export const en = {
     lastDay: "last {count} day",
     lastDays: "last {count} days",
     repo: "repo {repo}",
+    filterWindow: "Window (days)",
+    filterRepo: "Repo (owner/repo)",
+    filterRepoPlaceholder: "owner/repo",
+    apply: "Apply",
+    uncategorized: "uncategorized",
   },
   settings: {
     title: "App settings",
@@ -232,6 +244,8 @@ export const en = {
     roleModelsCopy:
       "Optional per-seat model overrides for this App's reviews — each audit role runs on its own comma-separated selector chain (a :thinking suffix passes through).",
     emptyUsesAppChain: "Empty = use the App model chain.",
+    roleHintReviewSeat: "quick + default review seats",
+    roleHintDeep: "deep review seat",
     saveRoleModels: "Save role models",
     review: "Review",
     reviewOn: "Reviews are on for this App's pull requests.",

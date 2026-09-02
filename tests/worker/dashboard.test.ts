@@ -439,6 +439,20 @@ describe("/dashboard routes", () => {
     expect(location.searchParams.get("state")).toBe(stateValue);
   });
 
+  test("POST /dashboard/login (SPA sign-in) → 302 to GitHub authorize", async () => {
+    const res = await worker.fetch(
+      new Request("https://worker.local/dashboard/login", {
+        method: "POST",
+        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      }),
+      makeEnv(),
+    );
+    expect(res.status).toBe(302);
+    const location = new URL(res.headers.get("Location") ?? "");
+    expect(location.origin).toBe("https://github.com");
+    expect(location.pathname).toBe("/login/oauth/authorize");
+  });
+
   test("GET /dashboard/login with a live session → 302 back to /dashboard", async () => {
     const session = await createSessionValue("octocat", null, SESSION_SECRET);
     const res = await worker.fetch(
@@ -772,18 +786,44 @@ describe("/dashboard/locale (plan 29 T2)", () => {
     expect(res.headers.getSetCookie()).toHaveLength(0);
   });
 
-  test("POST without a session → 302 to login (guard, route never runs)", async () => {
+  test("POST without a session (login-page toggle) → 302 back + mstar_locale Set-Cookie", async () => {
     const res = await worker.fetch(
       new Request("https://worker.local/dashboard/locale", {
         method: "POST",
-        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        headers: {
+          "Content-Type": "application/x-www-form-urlencoded",
+          Referer: "https://worker.local/dashboard/login",
+        },
         body: "locale=zh_CN",
       }),
       makeEnv(),
     );
     expect(res.status).toBe(302);
     expect(res.headers.get("Location")).toBe("/dashboard/login");
-    expect(res.headers.getSetCookie()).toHaveLength(0);
+    const setCookie = res.headers.getSetCookie();
+    expect(setCookie).toHaveLength(1);
+    expect(setCookie[0]).toContain(`${LOCALE_COOKIE}=zh_CN`);
+    expect(setCookie[0]).toContain("Path=/dashboard");
+  });
+
+  test("POST with a row-less session still sets mstar_locale (membership-exempt)", async () => {
+    const cookie = `${SESSION_COOKIE}=${await createSessionValue("stranger", null, SESSION_SECRET)}`;
+    const res = await worker.fetch(
+      new Request("https://worker.local/dashboard/locale", {
+        method: "POST",
+        headers: {
+          Cookie: cookie,
+          "Content-Type": "application/x-www-form-urlencoded",
+          Referer: "https://worker.local/dashboard/login",
+        },
+        body: "locale=en",
+      }),
+      makeEnv(),
+    );
+    expect(res.status).toBe(302);
+    expect(res.headers.get("Location")).toBe("/dashboard/login");
+    const setCookie = res.headers.getSetCookie();
+    expect(setCookie.some((v) => v.includes(`${LOCALE_COOKIE}=en`))).toBe(true);
   });
 });
 

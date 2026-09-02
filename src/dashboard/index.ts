@@ -102,9 +102,15 @@ import {
   type PageNotice,
 } from "./views";
 import { clampWindow, createInsightsStore } from "./insights-store";
-import { isLocale, serializeLocaleCookie, type Locale } from "../i18n";
+import { isLocale, resolveLocale, serializeLocaleCookie, t, type Locale } from "../i18n";
 
 export const dashboardApp = new Hono<{ Bindings: Env }>();
+
+
+function requestLocale(c: Context<{ Bindings: Env }>): Locale {
+  return resolveLocale(c.req.raw);
+}
+
 
 function dashboardSecrets(env: Env) {
   const clientId = env.GITHUB_OAUTH_CLIENT_ID;
@@ -192,12 +198,20 @@ dashboardApp.use("*", async (c, next) => {
   if (!sessionSecret) return c.text("dashboard OAuth is not configured", 500);
   const session = await readSessionValue(getCookie(c, SESSION_COOKIE), sessionSecret);
   // No session → the pre-guard behavior: 302 into the OAuth flow.
-  if (!session) return c.redirect("/dashboard/login", 302);
+  // POST /dashboard/locale is session-optional (plan 29 T4): the login-page
+  // language toggle must set mstar_locale without membership. Locale is not
+  // a privileged action — the route writes only the language cookie.
+  if (!session) {
+    if (c.req.path === "/dashboard/locale") return next();
+    return c.redirect("/dashboard/login", 302);
+  }
   // Logout needs no membership row (qc2 F-002): any VALID session may burn
   // its own cookies. The route itself touches no membership data, so this
   // sits before the D1 check — storage misconfiguration cannot trap a
   // stale cookie on the browser either.
-  if (c.req.path === "/dashboard/logout") return next();
+  // Locale follows the same L5 session-level exemption: a row-less (removed)
+  // session may still set language preference.
+  if (c.req.path === "/dashboard/logout" || c.req.path === "/dashboard/locale") return next();
   // Logged in → the only new check: an active user row (spec § AuthZ).
   // Fail closed on an unbound store, like every missing dashboard dependency.
   const db = dashboardD1(c.env);
@@ -214,12 +228,12 @@ dashboardApp.use("*", async (c, next) => {
         login: session.login,
       }),
     );
-    return c.html(removedPage(session.login), 403);
+    return c.html(removedPage(session.login, requestLocale(c)), 403);
   }
   return next();
 });
 
-dashboardApp.get("/login", async (c) => {
+async function startOAuthLogin(c: Context<{ Bindings: Env }>): Promise<Response> {
   const secrets = dashboardSecrets(c.env);
   if (!secrets) return c.text("dashboard OAuth is not configured", 500);
   // Already signed in → bounce back to the shell (IA routing table).
@@ -230,7 +244,13 @@ dashboardApp.get("/login", async (c) => {
   c.header("Set-Cookie", serializeCookie(OAUTH_STATE_COOKIE, state, OAUTH_STATE_MAX_AGE_SEC));
   const callbackUri = `${new URL(c.req.url).origin}/dashboard/oauth/callback`;
   return c.redirect(buildAuthorizeUrl(secrets.clientId, callbackUri, state), 302);
-});
+}
+
+// GET starts OAuth for non-HTML clients. SPA login (Accept: text/html) is
+// served by spa-dispatch; its "Sign in with GitHub" form POSTs here so the
+// browser does not loop on the SPA GET.
+dashboardApp.get("/login", startOAuthLogin);
+dashboardApp.post("/login", startOAuthLogin);
 
 dashboardApp.get("/oauth/callback", async (c) => {
   const secrets = dashboardSecrets(c.env);
@@ -244,21 +264,21 @@ dashboardApp.get("/oauth/callback", async (c) => {
   );
   if (!stateOk) {
     logOAuthFailure("state_verify", "state_mismatch");
-    return c.html(errorPage("Sign-in could not be verified (bad or expired state)."), 400);
+    return c.html(errorPage(t(requestLocale(c), "common.oauth.stateInvalid"), requestLocale(c)), 400);
   }
   const code = c.req.query("code");
   if (!code) {
     logOAuthFailure("callback", "missing_code");
-    return c.html(errorPage("GitHub did not return an authorization code."), 400);
+    return c.html(errorPage(t(requestLocale(c), "common.oauth.missingCode"), requestLocale(c)), 400);
   }
   const callbackUri = `${new URL(c.req.url).origin}/dashboard/oauth/callback`;
   const token = await exchangeCodeForToken(code, secrets.clientId, secrets.clientSecret, callbackUri);
   if (!token) {
-    return c.html(errorPage("GitHub rejected the authorization code."), 502);
+    return c.html(errorPage(t(requestLocale(c), "common.oauth.codeRejected"), requestLocale(c)), 502);
   }
   const user = await fetchGitHubUser(token);
   if (!user) {
-    return c.html(errorPage("Could not read your GitHub profile."), 502);
+    return c.html(errorPage(t(requestLocale(c), "common.oauth.profileFailed"), requestLocale(c)), 502);
   }
   // Plan 12 B4 T1: invite-only bootstrap decision (spec § AuthZ precedence:
   // row → ADMIN_LOGINS → empty-table fallback → deny) BEFORE any session is
@@ -271,7 +291,7 @@ dashboardApp.get("/oauth/callback", async (c) => {
   if (decision.outcome === "deny") {
     logOAuthFailure("bootstrap", "not_invited", { login: user.login });
     c.header("Set-Cookie", undefined);
-    return c.html(deniedPage(user.login), 403);
+    return c.html(deniedPage(user.login, requestLocale(c)), 403);
   }
   const session = await createSessionValue(user.login, user.name, secrets.sessionSecret);
   c.header("Set-Cookie", serializeCookie(SESSION_COOKIE, session, SESSION_MAX_AGE_SEC), {
@@ -296,10 +316,11 @@ dashboardApp.get("/logout", (c) => {
 // — the session.ts attribute set scoped to the dashboard) and 302s back to
 // a Referer-derived target sanitized by safeLocaleRedirect (anything
 // off-origin, protocol-relative, empty, or missing → /dashboard). Invalid
-// locale → 400, no cookie. Sits behind the mount-level guard like every
-// other POST: the toggle only renders in the signed-in navbar. (If Task 4's
-// login page needs a pre-session switcher, add /dashboard/locale to
-// GUARD_EXEMPT_PATHS.)
+// locale → 400, no cookie.
+// Plan 29 T4: the mount-level guard treats POST /dashboard/locale as
+// session-optional and membership-exempt (same L5 family as logout). A
+// logged-out login-page toggle and a row-less session may both set the
+// cookie. Every other /dashboard route stays membership-enforcing.
 
 /**
  * Safe 302 target for the locale toggle. The Referer header is
@@ -611,7 +632,7 @@ async function requireAdmin(c: Context<{ Bindings: Env }>): Promise<AdminGate> {
   // Fail closed: no row (removed between guard and here) or a plain member
   // is equally non-admin — the 403 view carries zero membership data.
   if (!admin || admin.role !== "admin") {
-    return { ok: false, response: c.html(forbiddenPage(session.login), 403) };
+    return { ok: false, response: c.html(forbiddenPage(session.login, requestLocale(c)), 403) };
   }
   return { ok: true, session, db, admin };
 }
@@ -620,6 +641,21 @@ dashboardApp.get("/members", async (c) => {
   const gate = await requireAdmin(c);
   if (!gate.ok) return gate.response;
   return c.html(membersPage(gate.session, await listUsers(gate.db)));
+});
+
+/** SPA JSON face — same requireAdmin gate and listUsers assembly as GET /members. */
+dashboardApp.get("/api/members", async (c) => {
+  const gate = await requireAdmin(c);
+  if (!gate.ok) return gate.response;
+  const members = await listUsers(gate.db);
+  return c.json({
+    members: members.map((m) => ({
+      id: m.id,
+      github_login: m.github_login,
+      role: m.role,
+      created_at: m.created_at,
+    })),
+  });
 });
 
 dashboardApp.post("/members/invite", async (c) => {
@@ -749,7 +785,7 @@ async function requireMember(c: Context<{ Bindings: Env }>): Promise<
   const user = await getUserByLogin(db, session.login);
   // Fail closed: no row (removed between guard and here) → 403, the 403 view
   // carries zero membership data.
-  if (!user) return { ok: false, response: c.html(forbiddenPage(session.login), 403) };
+  if (!user) return { ok: false, response: c.html(forbiddenPage(session.login, requestLocale(c)), 403) };
   return { ok: true, session, db, user };
 }
 
@@ -791,6 +827,34 @@ dashboardApp.get("/apps", async (c) => {
   );
 });
 
+/** SPA JSON face — same requireMember gate and appsListWithHealth assembly as GET /apps. Encrypted columns and row PKs stay off the payload. */
+dashboardApp.get("/api/apps", async (c) => {
+  const gate = await requireMember(c);
+  if (!gate.ok) return gate.response;
+  const rows = await appsListWithHealth(gate.db);
+  return c.json({
+    viewer: { login: gate.user.github_login, role: gate.user.role },
+    apps: rows.map((app) => ({
+      slug: app.slug,
+      github_app_id: app.github_app_id,
+      status: app.status,
+      review_enabled: app.review_enabled,
+      created_by: app.created_by,
+      health: {
+        latest: app.health.latest
+          ? {
+              event_name: app.health.latest.event_name,
+              outcome: app.health.latest.outcome,
+              status_code: app.health.latest.status_code,
+              created_at: app.health.latest.created_at,
+            }
+          : null,
+        rejected24h: app.health.rejected24h,
+      },
+    })),
+  });
+});
+
 /**
  * One handler for the three pinned action routes. Unknown and soft-deleted
  * apps are equally invisible (the list never shows them) → 404, zero writes.
@@ -813,7 +877,7 @@ async function appStatusAction(
   const apps = createAppsStore(gate.db);
   const app = await apps.getAppBySlug(c.req.param("slug") ?? "");
   if (!app || app.deleted_at !== null) return c.text("unknown app", 404);
-  if (!canManageApp(gate.user, app)) return c.html(forbiddenPage(gate.session.login), 403);
+  if (!canManageApp(gate.user, app)) return c.html(forbiddenPage(gate.session.login, requestLocale(c)), 403);
   const changed =
     action === "delete" ? await apps.softDeleteApp(app.id) : await apps.setAppStatus(app.id, action === "disable" ? "disabled" : "active");
   const verb = action === "delete" ? "Deleted" : action === "disable" ? "Disabled" : "Enabled";
@@ -863,7 +927,7 @@ async function appReviewAction(
   const apps = createAppsStore(gate.db);
   const app = await apps.getAppBySlug(c.req.param("slug") ?? "");
   if (!app || app.deleted_at !== null) return c.text("unknown app", 404);
-  if (!canManageApp(gate.user, app)) return c.html(forbiddenPage(gate.session.login), 403);
+  if (!canManageApp(gate.user, app)) return c.html(forbiddenPage(gate.session.login, requestLocale(c)), 403);
   const paused = app.review_enabled === 0;
   let notice: PageNotice;
   if (action === "pause" ? paused : !paused) {
@@ -922,7 +986,7 @@ async function requireAppSettings(c: Context<{ Bindings: Env }>): Promise<AppSet
   const app = await createAppsStore(member.db).getAppBySlug(c.req.param("slug") ?? "");
   if (!app || app.deleted_at !== null) return { ok: false, response: c.text("unknown app", 404) };
   if (!canManageApp(member.user, app)) {
-    return { ok: false, response: c.html(forbiddenPage(member.session.login), 403) };
+    return { ok: false, response: c.html(forbiddenPage(member.session.login, requestLocale(c)), 403) };
   }
   // The settings family is encryption-dependent end to end (masking needs
   // plaintext, adding a key encrypts): a missing master key fails EVERY
@@ -1028,6 +1092,47 @@ dashboardApp.get("/apps/:slug/settings", async (c) => {
   const store = createAppConfigStore(gate.db, c.env.DASHBOARD_ENCRYPTION_KEY);
   const apps = createAppsStore(gate.db);
   return settingsResponse(c, gate.session, store, apps, gate.app);
+});
+
+/** SPA JSON face — same requireAppSettings gate and settingsResponse reads. */
+dashboardApp.get("/api/apps/:slug/settings", async (c) => {
+  const gate = await requireAppSettings(c);
+  if (!gate.ok) return gate.response;
+  const store = createAppConfigStore(gate.db, c.env.DASHBOARD_ENCRYPTION_KEY);
+  const apps = createAppsStore(gate.db);
+  try {
+    const maskedKeys = await store.listProviderKeys(gate.app.id);
+    const modelChain = await store.getModelChain(gate.app.id);
+    const modelRoles = await store.getAppModelRoles(gate.app.id);
+    const customProviders = await store.listCustomProviders(gate.app.id);
+    const installations = await apps.listInstallations(gate.app.id);
+    const deliveries = await apps.listRecentDeliveries(gate.app.id, 5);
+    return c.json({
+      app: {
+        slug: gate.app.slug,
+        status: gate.app.status,
+        review_enabled: gate.app.review_enabled !== 0,
+        last_webhook_at: gate.app.last_webhook_at ?? null,
+      },
+      keys: maskedKeys,
+      model_chain: modelChain,
+      model_roles: modelRoles,
+      custom_providers: customProviders,
+      installations,
+      deliveries: deliveries.map((d) => ({
+        event_name: d.event_name,
+        outcome: d.outcome,
+        status_code: d.status_code,
+        created_at: d.created_at,
+      })),
+      provider_ids: PROVIDER_IDS,
+      model_role_ids: MODEL_ROLE_IDS,
+      custom_provider_api_ids: CUSTOM_PROVIDER_API_IDS,
+    });
+  } catch (err) {
+    logSettingsFailure("api_render", gate.app.id, err);
+    return c.text("the app settings could not be read from encrypted storage", 500);
+  }
 });
 
 /**
@@ -1698,7 +1803,7 @@ dashboardApp.get("/insights", async (c) => {
   if (!db) return c.text("dashboard storage is not configured", 500);
 
   const params = parseInsightsParams({ window: c.req.query("window"), repo: c.req.query("repo") });
-  if (!params.ok) return c.html(badRequestPage(params.reason), 400);
+  if (!params.ok) return c.html(badRequestPage(params.reason, requestLocale(c)), 400);
 
   const insights = await createInsightsStore(db, { windowDays: params.windowDays, repo: params.repoFilter });
   return c.html(

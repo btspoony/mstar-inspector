@@ -21,6 +21,7 @@ import type {
 } from "./apps-store";
 import type { DashboardUserRow } from "./users";
 import type { Insights } from "./insights-store";
+import { t, type Locale } from "../i18n";
 
 /** Escape GitHub-sourced user data before HTML interpolation (XSS guard). */
 export function escapeHtml(value: string): string {
@@ -458,11 +459,11 @@ export function manifestErrorPage(message: string, resumable = false): string {
  * Set-Cookie: no session, no state expiry, nothing. Red-700 banner, no
  * login link back (an unknown user has nothing to return to).
  */
-export function deniedPage(login: string): string {
+export function deniedPage(login: string, locale: Locale = "en"): string {
   return page(
-    "Access denied",
+    t(locale, "common.error.deniedTitle"),
     `<main>
-    <div class="banner" role="alert">This deployment is invite-only. Ask an admin to add ${escapeHtml(login)}.</div>
+    <div class="banner" role="alert">${t(locale, "common.error.deniedBody", { login: escapeHtml(login) })}</div>
   </main>`,
   );
 }
@@ -474,11 +475,11 @@ export function deniedPage(login: string): string {
  * column). Red-700 banner, no login link back — re-authenticating lands on
  * the OAuth callback bootstrap deny until an admin re-invites the login.
  */
-export function removedPage(login: string): string {
+export function removedPage(login: string, locale: Locale = "en"): string {
   return page(
-    "Access removed",
+    t(locale, "common.error.removedTitle"),
     `<main>
-    <div class="banner" role="alert">Your dashboard access was removed. Ask an admin to re-invite ${escapeHtml(login)}.</div>
+    <div class="banner" role="alert">${t(locale, "common.error.removedBody", { login: escapeHtml(login) })}</div>
   </main>`,
   );
 }
@@ -489,11 +490,15 @@ export function removedPage(login: string): string {
  * from deniedPage / removedPage: access exists, this page does not. Red-700
  * banner with a way back to the shell.
  */
-export function forbiddenPage(login: string): string {
+export function forbiddenPage(login: string, locale: Locale = "en"): string {
+  const body = t(locale, "common.error.forbiddenBody", { login: escapeHtml(login) }).replace(
+    "/dashboard",
+    '<a href="/dashboard">/dashboard</a>',
+  );
   return page(
-    "Forbidden",
+    t(locale, "common.error.forbiddenTitle"),
     `<main>
-    <div class="banner" role="alert">This page is restricted to dashboard admins. You are signed in as ${escapeHtml(login)} — back to <a href="/dashboard">/dashboard</a>.</div>
+    <div class="banner" role="alert">${body}</div>
   </main>`,
   );
 }
@@ -969,14 +974,15 @@ export function appSettingsPage(
 }
 
 /** OAuth failure surface: red-700 banner + what-to-do-next (DESIGN.md § State legibility). */
-export function errorPage(message: string): string {
+export function errorPage(message: string, locale: Locale = "en"): string {
+  const body = t(locale, "common.error.signInErrorBody", { message: escapeHtml(message) }).replace(
+    "/dashboard/login",
+    '<a href="/dashboard/login">/dashboard/login</a>',
+  );
   return page(
-    "Sign-in error",
+    t(locale, "common.error.signInErrorTitle"),
     `<main>
-    <div class="banner" role="alert">
-      <strong>Sign-in failed.</strong> ${escapeHtml(message)}
-      No session was created. Return to <a href="/dashboard/login">/dashboard/login</a> to try again.
-    </div>
+    <div class="banner" role="alert">${body}</div>
   </main>`,
   );
 }
@@ -986,12 +992,12 @@ export function errorPage(message: string): string {
  * the OAuth errorPage (no "Sign-in failed" / "Sign-in error" copy; the
  * visitor here IS signed in, they just typed a bad ?window= / ?repo=).
  */
-export function badRequestPage(message: string): string {
+export function badRequestPage(message: string, locale: Locale = "en"): string {
   return page(
-    "Bad request",
+    t(locale, "common.error.badRequestTitle"),
     `<main>
     <div class="banner" role="alert">
-      <strong>Bad request.</strong> ${escapeHtml(message)}
+      ${t(locale, "common.error.badRequestBody", { message: escapeHtml(message) })}
     </div>
   </main>`,
   );
