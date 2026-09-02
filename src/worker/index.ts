@@ -91,8 +91,9 @@ app.route("/dashboard", dashboardApp);
  * Per-App webhook face (plan 13 Task 2, spec § Multi-App 契约; plan 24
  * Task 1: the ONLY HTTP review entry — the legacy bare `/webhook` face is
  * retired). Pre-order: body-size cap (413) → REVIEW_ENABLED
- * kill-switch (non-"true" → 2xx ignore, zero side effects; deployment-level
- * global switch, not per-App) → DB-unbound guard (500 fail-closed — the
+ * emergency brake (exactly "false" → 2xx ignore, zero side effects;
+ * deployment-level brake only — per-App `github_apps.review_enabled` is the
+ * primary control, plan 31 AC4a) → DB-unbound guard (500 fail-closed — the
  * dashboard-dependency convention) → slug lookup → signature verify. The
  * slug locates the `github_apps` row (active, not deleted) whose DECRYPTED
  * webhook secret parameterizes the same `classifyWebhook` classifier
@@ -147,16 +148,20 @@ app.post("/webhook/:appSlug", async (c) => {
   const signature = c.req.header("x-hub-signature-256") ?? null;
   const eventName = c.req.header("x-github-event") ?? null;
 
-  // Kill-switch BEFORE the slug lookup (spec ordering; zero side effects —
-  // no D1 read when reviews are off). The flag is still passed to
-  // classifyWebhook below so the handler and classifier share the same
-  // computed REVIEW_ENABLED.
-  const reviewEnabled = c.env.REVIEW_ENABLED === "true";
+  // Emergency brake BEFORE the slug lookup (spec ordering; zero side effects
+  // — no D1 read when the brake is pulled). Plan 31 AC4a: the env is an
+  // emergency brake ONLY — per-App `github_apps.review_enabled` is the
+  // primary control, so the predicate is inverted to `!== "false"` (unset /
+  // "" / "true" / "TRUE" / anything else → per-App governs; only the exact,
+  // case-sensitive, untrimmed "false" stops all reviews). The flag is still
+  // passed to classifyWebhook below so the handler and classifier share the
+  // same computed REVIEW_ENABLED.
+  const reviewEnabled = c.env.REVIEW_ENABLED !== "false";
   if (!reviewEnabled) {
     webhookWarn(
-      "review_disabled",
-      "REVIEW_ENABLED is not 'true'",
-      "webhook ignored — reviews disabled by the REVIEW_ENABLED kill-switch",
+      "review_disabled_kill_switch",
+      "REVIEW_ENABLED is exactly 'false'",
+      "webhook ignored — reviews stopped by the REVIEW_ENABLED emergency brake",
     );
     return c.text("ignored", 200);
   }
