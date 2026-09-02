@@ -3,7 +3,7 @@ import { createRoot } from "react-dom/client";
 import "./styles/tokens.css";
 import { readBoot } from "./boot";
 import { Layout } from "./Layout";
-import { PageStub } from "./pages";
+import { DashboardPage } from "./pages";
 import { Router, usePathname } from "./router";
 
 function App() {
@@ -11,7 +11,7 @@ function App() {
   const pathname = usePathname();
   return (
     <Layout boot={boot} pathname={pathname}>
-      <Router>{(route) => <PageStub route={route} locale={boot.locale} />}</Router>
+      <Router>{(route) => <DashboardPage route={route} boot={boot} />}</Router>
     </Layout>
   );
 }

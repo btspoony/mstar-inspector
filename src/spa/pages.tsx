@@ -1,25 +1,26 @@
-import { t, type Locale } from "../i18n";
+import type { SpaBoot } from "./boot";
 import type { ClientRoute } from "./router";
+import { t } from "../i18n";
 import styles from "./Layout.module.css";
+import { AppsPage } from "./pages/AppsPage";
+import { InsightsPage } from "./pages/InsightsPage";
+import { LoginPage } from "./pages/LoginPage";
+import { MembersPage } from "./pages/MembersPage";
+import { SettingsPage } from "./pages/SettingsPage";
 
-export function PageStub({ route, locale }: { route: ClientRoute; locale: Locale }) {
-  const heading = headingFor(route, locale);
-  return <h1 className={styles.heading}>{heading}</h1>;
-}
-
-function headingFor(route: ClientRoute, locale: Locale): string {
+export function DashboardPage({ route, boot }: { route: ClientRoute; boot: SpaBoot }) {
   switch (route.page) {
     case "apps":
-      return t(locale, "apps.heading");
+      return <AppsPage boot={boot} />;
     case "insights":
-      return t(locale, "insights.heading");
+      return <InsightsPage boot={boot} />;
     case "members":
-      return t(locale, "members.heading");
+      return <MembersPage boot={boot} />;
     case "login":
-      return t(locale, "login.heading");
+      return <LoginPage boot={boot} />;
     case "settings":
-      return `${t(locale, "settings.title")} — ${route.slug}`;
+      return <SettingsPage boot={boot} slug={route.slug} />;
     default:
-      return t(locale, "nav.brand");
+      return <h1 className={styles.heading}>{t(boot.locale, "nav.brand")}</h1>;
   }
 }
