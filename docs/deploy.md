@@ -412,8 +412,8 @@ Prerequisites: dashboard OAuth (`OAUTH_CLIENT_ID` /
 1. **Admin login** — open `/dashboard/login` and complete the GitHub OAuth
    flow. The first login against an empty `dashboard_users` table becomes
    admin (or `ADMIN_LOGINS` bootstraps the listed logins).
-2. **Create GitHub App** — on the Apps page (`/dashboard/apps`) click
-   **Create GitHub App**. The dashboard mints the webhook slug
+2. **Create GitHub App** — on the dashboard workbench (`/dashboard`, the
+   Apps-first home) click **Create GitHub App**. The dashboard mints the webhook slug
    (`mstar-inspector-<login>`-derived, DB pre-resolved) and POSTs the App
    manifest to `https://github.com/settings/apps/new` — the manifest's
    webhook URL is the App's OWN route `{origin}/webhook/{slug}`
