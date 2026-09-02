@@ -5,12 +5,13 @@ import type { SpaBoot } from "../boot";
 import styles from "../pages.module.css";
 import { formatRelativeTime } from "../relative-time";
 import { canManageApp, isPaused, parseApps, type AppsPayload } from "./data";
-import { LoadFailedNotice, LoadingNotice } from "./PageNotice";
+import { LoadFailedNotice, LoadingNotice, PageNotice, type NoticeKind } from "./PageNotice";
 
 export function AppsPage({ boot }: { boot: SpaBoot }) {
   const locale = boot.locale;
   const [payload, setPayload] = useState<AppsPayload | null>(null);
   const [state, setState] = useState<"loading" | "ok" | "error">("loading");
+  const [notice, setNotice] = useState<{ kind: NoticeKind; message: string } | null>(null);
 
   async function load(): Promise<void> {
     setState("loading");
@@ -38,13 +39,26 @@ export function AppsPage({ boot }: { boot: SpaBoot }) {
       <h1 className={styles.heading}>{t(locale, "apps.heading")}</h1>
       {state === "loading" ? <LoadingNotice locale={locale} /> : null}
       {state === "error" ? <LoadFailedNotice locale={locale} /> : null}
-      {state === "ok" && payload ? <AppsList boot={boot} payload={payload} onAction={load} /> : null}
+      {notice ? <PageNotice kind={notice.kind} message={notice.message} /> : null}
+      {state === "ok" && payload ? (
+        <AppsList boot={boot} payload={payload} onAction={load} onNotice={setNotice} />
+      ) : null}
     </div>
   );
 }
 
-async function runAppAction(path: string, reload: () => Promise<void>): Promise<void> {
-  await postForm(path, {});
+async function runAppAction(
+  path: string,
+  reload: () => Promise<void>,
+  onError: (message: string) => void,
+  locale: SpaBoot["locale"],
+): Promise<void> {
+  const { status } = await postForm(path, {});
+  if (status >= 400) {
+    onError(t(locale, "common.loadFailed"));
+    await reload();
+    return;
+  }
   await reload();
 }
 
@@ -52,10 +66,12 @@ function AppsList({
   boot,
   payload,
   onAction,
+  onNotice,
 }: {
   boot: SpaBoot;
   payload: AppsPayload;
   onAction: () => Promise<void>;
+  onNotice: (notice: { kind: NoticeKind; message: string } | null) => void;
 }) {
   const locale = boot.locale;
   return (
@@ -100,7 +116,7 @@ function AppsList({
                       <button
                         className={`${styles.btnSecondary} ${styles.btnSmall}`}
                         type="button"
-                        onClick={() => void runAppAction(`/dashboard/apps/${app.slug}/resume`, onAction)}
+                        onClick={() => void runAppAction(`/dashboard/apps/${app.slug}/resume`, onAction, (m) => onNotice({ kind: "error", message: m }), locale)}
                       >
                         {t(locale, "apps.actions.resume")}
                       </button>
@@ -108,7 +124,7 @@ function AppsList({
                       <button
                         className={`${styles.btnSecondary} ${styles.btnSmall}`}
                         type="button"
-                        onClick={() => void runAppAction(`/dashboard/apps/${app.slug}/pause`, onAction)}
+                        onClick={() => void runAppAction(`/dashboard/apps/${app.slug}/pause`, onAction, (m) => onNotice({ kind: "error", message: m }), locale)}
                       >
                         {t(locale, "apps.actions.pause")}
                       </button>
@@ -118,7 +134,7 @@ function AppsList({
                     <button
                       className={`${styles.btnSecondary} ${styles.btnSmall}`}
                       type="button"
-                      onClick={() => void runAppAction(`/dashboard/apps/${app.slug}/disable`, onAction)}
+                      onClick={() => void runAppAction(`/dashboard/apps/${app.slug}/disable`, onAction, (m) => onNotice({ kind: "error", message: m }), locale)}
                     >
                       {t(locale, "apps.actions.disable")}
                     </button>
@@ -126,7 +142,7 @@ function AppsList({
                     <button
                       className={`${styles.btnSecondary} ${styles.btnSmall}`}
                       type="button"
-                      onClick={() => void runAppAction(`/dashboard/apps/${app.slug}/enable`, onAction)}
+                      onClick={() => void runAppAction(`/dashboard/apps/${app.slug}/enable`, onAction, (m) => onNotice({ kind: "error", message: m }), locale)}
                     >
                       {t(locale, "apps.actions.enable")}
                     </button>
@@ -134,7 +150,7 @@ function AppsList({
                   <button
                     className={`${styles.btnDanger} ${styles.btnSmall}`}
                     type="button"
-                    onClick={() => void runAppAction(`/dashboard/apps/${app.slug}/delete`, onAction)}
+                    onClick={() => void runAppAction(`/dashboard/apps/${app.slug}/delete`, onAction, (m) => onNotice({ kind: "error", message: m }), locale)}
                   >
                     {t(locale, "apps.actions.delete")}
                   </button>

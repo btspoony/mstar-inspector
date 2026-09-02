@@ -60,6 +60,9 @@ jobs:
       - name: Install dependencies
         run: bun install --frozen-lockfile
 
+      - name: Build SPA
+        run: bun run build:spa
+
       - name: Verify Cloudflare account
         run: |
           test -n "$CLOUDFLARE_ACCOUNT_ID"   # account id is a variable — must be configured

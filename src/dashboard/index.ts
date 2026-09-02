@@ -97,9 +97,34 @@ import {
 } from "./views";
 import { clampWindow, createInsightsStore } from "./insights-store";
 import { isLocale, resolveLocale, serializeLocaleCookie, t, type Locale } from "../i18n";
+import { wantsHtml } from "../spa/routes";
+import { SPA_POST_FORM_HEADER, SPA_POST_FORM_VALUE } from "../spa/post-form-headers";
 
 export const dashboardApp = new Hono<{ Bindings: Env }>();
 
+/** SPA shell entry for members/apps list mutations (plan 29 QC W-2). */
+const DASHBOARD_SHELL_REDIRECT = "/dashboard";
+
+function isSpaFetchPost(c: Context<{ Bindings: Env }>): boolean {
+  return c.req.header(SPA_POST_FORM_HEADER) === SPA_POST_FORM_VALUE;
+}
+
+/** Native `<form method="post">` navigation — not the SPA's fetch `postForm`. */
+function wantsHtmlFormNavigation(c: Context<{ Bindings: Env }>): boolean {
+  return wantsHtml(c.req.header("Accept") ?? null) && !isSpaFetchPost(c);
+}
+
+function pinnedPostMutationResponse(
+  c: Context<{ Bindings: Env }>,
+  redirectTo: string,
+  message: string,
+  status: 200 | 400 | 404 | 500 = 200,
+): Response {
+  if (wantsHtmlFormNavigation(c)) {
+    return c.redirect(redirectTo, 302);
+  }
+  return c.text(message, status);
+}
 
 function requestLocale(c: Context<{ Bindings: Env }>): Locale {
   return resolveLocale(c.req.raw);
@@ -657,21 +682,21 @@ dashboardApp.post("/members/invite", async (c) => {
   const form = await c.req.parseBody();
   const login = typeof form.login === "string" ? form.login.trim() : "";
   if (login.length === 0) {
-    return c.text("Enter a GitHub login to invite.", 400);
+    return pinnedPostMutationResponse(c, DASHBOARD_SHELL_REDIRECT, "Enter a GitHub login to invite.", 400);
   }
   // F-003: reject values outside the GitHub login syntax before any read or
   // write — they would persist as rows that no real login can ever claim.
   if (!GITHUB_LOGIN_PATTERN.test(login)) {
-    return c.text(`${login} is not a valid GitHub login — use 1–39 letters, digits, or hyphens.`, 400);
+    return pinnedPostMutationResponse(c, DASHBOARD_SHELL_REDIRECT, `${login} is not a valid GitHub login — use 1–39 letters, digits, or hyphens.`, 400);
   }
   // T1 review pin (Minor 2): resolve the login case-insensitively BEFORE any
   // createUser call — the DDL UNIQUE is BINARY-collated, so ON CONFLICT alone
   // misses case variants ("OctoCat" vs "octocat") and would mint a second row.
   if (await getUserByLogin(gate.db, login)) {
-    return c.text("ok"); // already a member — idempotent no-op
+    return pinnedPostMutationResponse(c, DASHBOARD_SHELL_REDIRECT, "ok"); // already a member — idempotent no-op
   }
   await createUser(gate.db, { login, role: "member", invitedBy: gate.admin.github_login });
-  return c.text("ok");
+  return pinnedPostMutationResponse(c, DASHBOARD_SHELL_REDIRECT, "ok");
 });
 
 dashboardApp.post("/members/remove", async (c) => {
@@ -682,11 +707,11 @@ dashboardApp.post("/members/remove", async (c) => {
   const members = await listUsers(gate.db);
   const target = members.find((m) => m.id === userId);
   if (!target) {
-    return c.text("Unknown member — nothing was removed, try again.", 400);
+    return pinnedPostMutationResponse(c, DASHBOARD_SHELL_REDIRECT, "Unknown member — nothing was removed, try again.", 400);
   }
   // Refuse self-removal: an admin must not be able to lock themselves out.
   if (target.github_login.toLowerCase() === gate.admin.github_login.toLowerCase()) {
-    return c.text("You cannot remove yourself.", 400);
+    return pinnedPostMutationResponse(c, DASHBOARD_SHELL_REDIRECT, "You cannot remove yourself.", 400);
   }
   // Refuse removing an admin while they are the last one (removal = row
   // delete, so this is the deployment's only admin-lockout guard). This
@@ -694,15 +719,15 @@ dashboardApp.post("/members/remove", async (c) => {
   // conditional DELETE below, which closes the read-check-delete TOCTOU
   // (qc1): two concurrent removes of the last two admins cannot both land.
   if (target.role === "admin" && (await countAdmins(gate.db)) === 1) {
-    return c.text("The last admin cannot be removed.", 400);
+    return pinnedPostMutationResponse(c, DASHBOARD_SHELL_REDIRECT, "The last admin cannot be removed.", 400);
   }
   if (!(await deleteUserUnlessLastAdmin(gate.db, target.id))) {
     // Lost a race (the row vanished or just became the last admin between
     // the reads above and this delete): 400 with a retry message —
     // zero partial state either way.
-    return c.text(`Could not remove ${target.github_login} — the member list just changed, try again.`, 400);
+    return pinnedPostMutationResponse(c, DASHBOARD_SHELL_REDIRECT, `Could not remove ${target.github_login} — the member list just changed, try again.`, 400);
   }
-  return c.text("ok");
+  return pinnedPostMutationResponse(c, DASHBOARD_SHELL_REDIRECT, "ok");
 });
 
 // --- Plan 13 B5 T3: Apps list + per-App management (spec § Multi-App 契约,
@@ -804,14 +829,14 @@ async function appStatusAction(
   if (!gate.ok) return gate.response;
   const apps = createAppsStore(gate.db);
   const app = await apps.getAppBySlug(c.req.param("slug") ?? "");
-  if (!app || app.deleted_at !== null) return c.text("unknown app", 404);
+  if (!app || app.deleted_at !== null) return pinnedPostMutationResponse(c, DASHBOARD_SHELL_REDIRECT, "unknown app", 404);
   if (!canManageApp(gate.user, app)) return c.html(forbiddenPage(gate.session.login, requestLocale(c)), 403);
   if (action === "delete") {
     await apps.softDeleteApp(app.id);
   } else {
     await apps.setAppStatus(app.id, action === "disable" ? "disabled" : "active");
   }
-  return c.text("ok");
+  return pinnedPostMutationResponse(c, DASHBOARD_SHELL_REDIRECT, "ok");
 }
 
 dashboardApp.post("/apps/:slug/disable", (c) => appStatusAction(c, "disable"));
@@ -832,13 +857,28 @@ dashboardApp.post("/apps/:slug/delete", (c) => appStatusAction(c, "delete"));
 // the JSON face rather than re-rendering HTML.
 
 /**
+ * HTML-nav 302 target for pause/resume. Settings is the only native-form
+ * caller (`<form method="post">` on the Review card); Apps-list uses fetch
+ * `postForm`. Origin is a sanitized Referer pathname — never echoed as
+ * Location. Settings-origin → `/dashboard/apps/:slug/settings` (DB slug);
+ * anything else (apps list, missing/off-origin Referer) → `/dashboard`.
+ */
+function reviewActionRedirect(c: Context<{ Bindings: Env }>, slug: string): string {
+  const settingsPath = `/dashboard/apps/${slug}/settings`;
+  const origin = new URL(c.req.raw.url).origin;
+  const refererPath = new URL(safeLocaleRedirect(c.req.header("Referer"), origin), origin).pathname;
+  return refererPath === settingsPath ? settingsPath : DASHBOARD_SHELL_REDIRECT;
+}
+
+/**
  * One handler for the two pinned review-action routes. The idempotent no-op
  * case is short-circuited BEFORE the store write — pausing a paused App /
  * resuming an active one never touches the row (setReviewEnabled would
  * count a same-value UPDATE as changed and would churn updated_at, the
  * operator-mutation timestamp). Plan 29 T6: the response is a plain 2xx the
  * SPA's postForm treats as success (it refetches the JSON face); the
- * re-rendered HTML page is retired.
+ * re-rendered HTML page is retired. Plan 29 QC round 2: HTML-nav 302 target
+ * depends on origin (settings vs apps list); fetch is unchanged.
  */
 async function appReviewAction(
   c: Context<{ Bindings: Env }>,
@@ -848,12 +888,13 @@ async function appReviewAction(
   if (!gate.ok) return gate.response;
   const apps = createAppsStore(gate.db);
   const app = await apps.getAppBySlug(c.req.param("slug") ?? "");
-  if (!app || app.deleted_at !== null) return c.text("unknown app", 404);
+  if (!app || app.deleted_at !== null) return pinnedPostMutationResponse(c, DASHBOARD_SHELL_REDIRECT, "unknown app", 404);
   if (!canManageApp(gate.user, app)) return c.html(forbiddenPage(gate.session.login, requestLocale(c)), 403);
+  const htmlRedirect = reviewActionRedirect(c, app.slug);
   const paused = app.review_enabled === 0;
-  if (action === "pause" ? paused : !paused) return c.text("ok"); // idempotent no-op — never touch the row
+  if (action === "pause" ? paused : !paused) return pinnedPostMutationResponse(c, htmlRedirect, "ok"); // idempotent no-op — never touch the row
   await apps.setReviewEnabled(app.id, action === "resume");
-  return c.text("ok");
+  return pinnedPostMutationResponse(c, htmlRedirect, "ok");
 }
 
 dashboardApp.post("/apps/:slug/pause", (c) => appReviewAction(c, "pause"));
@@ -888,7 +929,7 @@ async function requireAppSettings(c: Context<{ Bindings: Env }>): Promise<AppSet
   const member = await requireMember(c);
   if (!member.ok) return member;
   const app = await createAppsStore(member.db).getAppBySlug(c.req.param("slug") ?? "");
-  if (!app || app.deleted_at !== null) return { ok: false, response: c.text("unknown app", 404) };
+  if (!app || app.deleted_at !== null) return { ok: false, response: pinnedPostMutationResponse(c, DASHBOARD_SHELL_REDIRECT, "unknown app", 404) };
   if (!canManageApp(member.user, app)) {
     return { ok: false, response: c.html(forbiddenPage(member.session.login, requestLocale(c)), 403) };
   }
@@ -935,10 +976,11 @@ function settingsFailureNotice(err: unknown): string {
  */
 function settingsPostResponse(
   c: Context<{ Bindings: Env }>,
+  slug: string,
   message: string,
   status: 200 | 400 | 500 = 200,
 ): Response {
-  return c.text(message, status);
+  return pinnedPostMutationResponse(c, `/dashboard/apps/${slug}/settings`, message, status);
 }
 
 /** SPA JSON face — same requireAppSettings gate and the settings reads the retired HTML GET used. */
@@ -1022,6 +1064,7 @@ dashboardApp.post("/apps/:slug/settings", async (c) => {
     if (!PROVIDER_IDS.includes(provider)) {
       return settingsPostResponse(
         c,
+        gate.app.slug,
         provider === ""
           ? "Pick a provider for the key."
           : `${provider} is not a supported provider — pick one from the list.`,
@@ -1029,12 +1072,10 @@ dashboardApp.post("/apps/:slug/settings", async (c) => {
       );
     }
     if (plainKey === "") {
-      return settingsPostResponse(c, "Enter an API key to store.", 400);
+      return settingsPostResponse(c, gate.app.slug, "Enter an API key to store.", 400);
     }
     if (plainKey.length > MAX_PROVIDER_KEY_LENGTH) {
-      return settingsPostResponse(
-        c,
-        `That API key is too long (${plainKey.length} characters) — keys are limited to ${MAX_PROVIDER_KEY_LENGTH} characters. Nothing was stored.`,
+      return settingsPostResponse(c, gate.app.slug, `That API key is too long (${plainKey.length} characters) — keys are limited to ${MAX_PROVIDER_KEY_LENGTH} characters. Nothing was stored.`,
         400,
       );
     }
@@ -1042,11 +1083,9 @@ dashboardApp.post("/apps/:slug/settings", async (c) => {
       await store.setProviderKey(gate.app.id, provider, plainKey);
     } catch (err) {
       logSettingsFailure("add_key", gate.app.id, err);
-      return settingsPostResponse(c, settingsFailureNotice(err), 500);
+      return settingsPostResponse(c, gate.app.slug, settingsFailureNotice(err), 500);
     }
-    return settingsPostResponse(
-      c,
-      `Stored the ${provider} key for ${gate.app.slug} — it is only ever shown masked.`,
+    return settingsPostResponse(c, gate.app.slug, `Stored the ${provider} key for ${gate.app.slug} — it is only ever shown masked.`,
     );
   }
   if (op === "save-chain") {
@@ -1054,9 +1093,7 @@ dashboardApp.post("/apps/:slug/settings", async (c) => {
     // it into an array) must be rejected — never treated as the empty-clear
     // path, which would silently wipe the stored chain.
     if (Array.isArray(form.model_chain)) {
-      return settingsPostResponse(
-        c,
-        "The model chain field was submitted more than once — resubmit the form. Nothing was saved.",
+      return settingsPostResponse(c, gate.app.slug, "The model chain field was submitted more than once — resubmit the form. Nothing was saved.",
         400,
       );
     }
@@ -1064,27 +1101,23 @@ dashboardApp.post("/apps/:slug/settings", async (c) => {
     try {
       if (raw.trim() === "") {
         await store.setModelChain(gate.app.id, null);
-        return settingsPostResponse(
-          c,
-          `Cleared the model chain for ${gate.app.slug} — reviews fail closed until a chain + provider keys are configured (per-App only, plan 24).`,
+        return settingsPostResponse(c, gate.app.slug, `Cleared the model chain for ${gate.app.slug} — reviews fail closed until a chain + provider keys are configured (per-App only, plan 24).`,
         );
       }
       if (raw.length > MAX_MODEL_SELECTOR_LENGTH) {
-        return settingsPostResponse(
-          c,
-          `That model chain is too long (${raw.length} characters) — limited to ${MAX_MODEL_SELECTOR_LENGTH}. Nothing was saved.`,
+        return settingsPostResponse(c, gate.app.slug, `That model chain is too long (${raw.length} characters) — limited to ${MAX_MODEL_SELECTOR_LENGTH}. Nothing was saved.`,
           400,
         );
       }
       if (parseModelChain(raw).length === 0) {
-        return settingsPostResponse(c, "Enter at least one comma-separated model selector.", 400);
+        return settingsPostResponse(c, gate.app.slug, "Enter at least one comma-separated model selector.", 400);
       }
       await store.setModelChain(gate.app.id, raw);
     } catch (err) {
       logSettingsFailure("save_chain", gate.app.id, err);
-      return settingsPostResponse(c, settingsFailureNotice(err), 500);
+      return settingsPostResponse(c, gate.app.slug, settingsFailureNotice(err), 500);
     }
-    return settingsPostResponse(c, `Saved the model chain for ${gate.app.slug}.`);
+    return settingsPostResponse(c, gate.app.slug, `Saved the model chain for ${gate.app.slug}.`);
   }
   if (op === "save-roles") {
     // Plan 17 T3: the Role models editor posts one `role_<role>` field per
@@ -1103,36 +1136,30 @@ dashboardApp.post("/apps/:slug/settings", async (c) => {
       // arrives as an ARRAY — explicit 400 rejection (zero
       // writes), never the silent last-wins the default parseBody had.
       if (Array.isArray(value)) {
-        return settingsPostResponse(
-          c,
-          `The ${field} field was submitted more than once — resubmit the Role models form with one value per role. Nothing was saved.`,
+        return settingsPostResponse(c, gate.app.slug, `The ${field} field was submitted more than once — resubmit the Role models form with one value per role. Nothing was saved.`,
           400,
         );
       }
       if (typeof value !== "string") continue;
       const role = field.slice("role_".length);
       if (!MODEL_ROLE_IDS.includes(role)) {
-        return settingsPostResponse(c, `${role} is not a known review role — nothing was saved.`, 400);
+        return settingsPostResponse(c, gate.app.slug, `${role} is not a known review role — nothing was saved.`, 400);
       }
       selectors[role] = value;
     }
     if (Object.keys(selectors).length === 0) {
-      return settingsPostResponse(c, "No role selectors were submitted — resubmit the Role models form.", 400);
+      return settingsPostResponse(c, gate.app.slug, "No role selectors were submitted — resubmit the Role models form.", 400);
     }
     // Selector grammar, role-named for the 4-row form (the same parseModelChain
     // mirror the save-chain op 400s against); blank stays legal = clear.
     for (const [role, selector] of Object.entries(selectors)) {
       if (selector.length > MAX_MODEL_SELECTOR_LENGTH) {
-        return settingsPostResponse(
-          c,
-          `The ${role} selector is too long (${selector.length} characters) — limited to ${MAX_MODEL_SELECTOR_LENGTH}. Nothing was saved.`,
+        return settingsPostResponse(c, gate.app.slug, `The ${role} selector is too long (${selector.length} characters) — limited to ${MAX_MODEL_SELECTOR_LENGTH}. Nothing was saved.`,
           400,
         );
       }
       if (selector.trim() !== "" && parseModelChain(selector).length === 0) {
-        return settingsPostResponse(
-          c,
-          `The ${role} selector needs at least one comma-separated model selector — or leave it empty to use the App model chain. Nothing was saved.`,
+        return settingsPostResponse(c, gate.app.slug, `The ${role} selector needs at least one comma-separated model selector — or leave it empty to use the App model chain. Nothing was saved.`,
           400,
         );
       }
@@ -1141,9 +1168,9 @@ dashboardApp.post("/apps/:slug/settings", async (c) => {
       await store.setModelRoles(gate.app.id, selectors);
     } catch (err) {
       logSettingsFailure("save_roles", gate.app.id, err);
-      return settingsPostResponse(c, settingsFailureNotice(err), 500);
+      return settingsPostResponse(c, gate.app.slug, settingsFailureNotice(err), 500);
     }
-    return settingsPostResponse(c, `Saved the role models for ${gate.app.slug}.`);
+    return settingsPostResponse(c, gate.app.slug, `Saved the role models for ${gate.app.slug}.`);
   }
   if (op === "add-custom-provider") {
     // Plan 23 T2: declare a NON-built-in model provider for the App. Every
@@ -1163,19 +1190,15 @@ dashboardApp.post("/apps/:slug/settings", async (c) => {
     const modelIds = parseModelChain(typeof form.model_ids === "string" ? form.model_ids : "");
     const plainKey = typeof form.key === "string" ? form.key.trim() : "";
     if (providerId === "") {
-      return settingsPostResponse(c, "Enter a provider id for the custom provider.", 400);
+      return settingsPostResponse(c, gate.app.slug, "Enter a provider id for the custom provider.", 400);
     }
     if (!CUSTOM_PROVIDER_ID_PATTERN.test(providerId)) {
-      return settingsPostResponse(
-        c,
-        "Provider ids are lowercase letters, digits, and hyphens — 1 to 64 characters, starting with a letter or digit. Nothing was stored.",
+      return settingsPostResponse(c, gate.app.slug, "Provider ids are lowercase letters, digits, and hyphens — 1 to 64 characters, starting with a letter or digit. Nothing was stored.",
         400,
       );
     }
     if (PROVIDER_IDS.includes(providerId)) {
-      return settingsPostResponse(
-        c,
-        `${providerId} is a built-in provider — custom providers must use a new id. Nothing was stored.`,
+      return settingsPostResponse(c, gate.app.slug, `${providerId} is a built-in provider — custom providers must use a new id. Nothing was stored.`,
         400,
       );
     }
@@ -1184,9 +1207,7 @@ dashboardApp.post("/apps/:slug/settings", async (c) => {
     // block on every review while its key still got injected, so the
     // declaration is refused up front (mirror of IN_IMAGE_BASE_PROVIDER_IDS).
     if (IN_IMAGE_BASE_PROVIDER_IDS.includes(providerId)) {
-      return settingsPostResponse(
-        c,
-        `${providerId} is already provided by the review environment's base configuration — custom providers must use a new id. Nothing was stored.`,
+      return settingsPostResponse(c, gate.app.slug, `${providerId} is already provided by the review environment's base configuration — custom providers must use a new id. Nothing was stored.`,
         400,
       );
     }
@@ -1198,59 +1219,47 @@ dashboardApp.post("/apps/:slug/settings", async (c) => {
       !declaredCustomProviders.some((p) => p.provider_id === providerId) &&
       declaredCustomProviders.length >= MAX_CUSTOM_PROVIDER_COUNT
     ) {
-      return settingsPostResponse(
-        c,
-        `This App already has the maximum of ${MAX_CUSTOM_PROVIDER_COUNT} custom providers — remove one before declaring another (updating an existing declaration is always allowed). Nothing was stored.`,
+      return settingsPostResponse(c, gate.app.slug, `This App already has the maximum of ${MAX_CUSTOM_PROVIDER_COUNT} custom providers — remove one before declaring another (updating an existing declaration is always allowed). Nothing was stored.`,
         400,
       );
     }
     if (baseUrl === "") {
-      return settingsPostResponse(c, "Enter the provider's base URL.", 400);
+      return settingsPostResponse(c, gate.app.slug, "Enter the provider's base URL.", 400);
     }
     if (!isValidCustomProviderBaseUrl(baseUrl)) {
-      return settingsPostResponse(c, "The base URL must be a valid https URL with a host — nothing was stored.", 400);
+      return settingsPostResponse(c, gate.app.slug, "The base URL must be a valid https URL with a host — nothing was stored.", 400);
     }
     if (baseUrl.length > MAX_CUSTOM_PROVIDER_BASE_URL_LENGTH) {
-      return settingsPostResponse(
-        c,
-        `That base URL is too long (${baseUrl.length} characters) — limited to ${MAX_CUSTOM_PROVIDER_BASE_URL_LENGTH}. Nothing was stored.`,
+      return settingsPostResponse(c, gate.app.slug, `That base URL is too long (${baseUrl.length} characters) — limited to ${MAX_CUSTOM_PROVIDER_BASE_URL_LENGTH}. Nothing was stored.`,
         400,
       );
     }
     if (api === "") {
-      return settingsPostResponse(c, "Pick an API protocol for the custom provider.", 400);
+      return settingsPostResponse(c, gate.app.slug, "Pick an API protocol for the custom provider.", 400);
     }
     if (!CUSTOM_PROVIDER_API_IDS.includes(api as (typeof CUSTOM_PROVIDER_API_IDS)[number])) {
-      return settingsPostResponse(
-        c,
-        `${api} is not a supported API protocol — pick one from the list. Nothing was stored.`,
+      return settingsPostResponse(c, gate.app.slug, `${api} is not a supported API protocol — pick one from the list. Nothing was stored.`,
         400,
       );
     }
     if (modelIds.length === 0) {
-      return settingsPostResponse(c, "Enter at least one model id for the custom provider.", 400);
+      return settingsPostResponse(c, gate.app.slug, "Enter at least one model id for the custom provider.", 400);
     }
     if (modelIds.length > MAX_CUSTOM_PROVIDER_MODEL_IDS) {
-      return settingsPostResponse(
-        c,
-        `Too many model ids (${modelIds.length}) — at most ${MAX_CUSTOM_PROVIDER_MODEL_IDS}. Nothing was stored.`,
+      return settingsPostResponse(c, gate.app.slug, `Too many model ids (${modelIds.length}) — at most ${MAX_CUSTOM_PROVIDER_MODEL_IDS}. Nothing was stored.`,
         400,
       );
     }
     if (modelIds.some((id) => id.length > MAX_CUSTOM_PROVIDER_MODEL_ID_LENGTH)) {
-      return settingsPostResponse(
-        c,
-        `Model ids are limited to ${MAX_CUSTOM_PROVIDER_MODEL_ID_LENGTH} characters each. Nothing was stored.`,
+      return settingsPostResponse(c, gate.app.slug, `Model ids are limited to ${MAX_CUSTOM_PROVIDER_MODEL_ID_LENGTH} characters each. Nothing was stored.`,
         400,
       );
     }
     if (plainKey === "") {
-      return settingsPostResponse(c, "Enter an API key to store.", 400);
+      return settingsPostResponse(c, gate.app.slug, "Enter an API key to store.", 400);
     }
     if (plainKey.length > MAX_PROVIDER_KEY_LENGTH) {
-      return settingsPostResponse(
-        c,
-        `That API key is too long (${plainKey.length} characters) — keys are limited to ${MAX_PROVIDER_KEY_LENGTH} characters. Nothing was stored.`,
+      return settingsPostResponse(c, gate.app.slug, `That API key is too long (${plainKey.length} characters) — keys are limited to ${MAX_PROVIDER_KEY_LENGTH} characters. Nothing was stored.`,
         400,
       );
     }
@@ -1266,13 +1275,11 @@ dashboardApp.post("/apps/:slug/settings", async (c) => {
       // throw InvalidCustomProviderError AFTER the route pre-check passed
       // (a concurrent save won the last slot) — that is a 400, not a 500.
       if (err instanceof InvalidCustomProviderError) {
-        return settingsPostResponse(c, err.message, 400);
+        return settingsPostResponse(c, gate.app.slug, err.message, 400);
       }
-      return settingsPostResponse(c, settingsFailureNotice(err), 500);
+      return settingsPostResponse(c, gate.app.slug, settingsFailureNotice(err), 500);
     }
-    return settingsPostResponse(
-      c,
-      `Declared custom provider ${providerId} for ${gate.app.slug} — its key is stored encrypted and injected by environment variable name.`,
+    return settingsPostResponse(c, gate.app.slug, `Declared custom provider ${providerId} for ${gate.app.slug} — its key is stored encrypted and injected by environment variable name.`,
     );
   }
   if (op === "remove-custom-provider") {
@@ -1282,12 +1289,13 @@ dashboardApp.post("/apps/:slug/settings", async (c) => {
       removed = await store.removeCustomProvider(gate.app.id, providerId);
     } catch (err) {
       logSettingsFailure("remove_custom_provider", gate.app.id, err);
-      return settingsPostResponse(c, settingsFailureNotice(err), 500);
+      return settingsPostResponse(c, gate.app.slug, settingsFailureNotice(err), 500);
     }
     // Tolerant no-op (the id grammar already bounds what can ever be
     // stored): an unknown provider id simply has no row — a 2xx, not a 400.
     return settingsPostResponse(
       c,
+      gate.app.slug,
       removed
         ? `Removed the custom provider ${providerId} from ${gate.app.slug}.`
         : `No custom provider ${providerId === "" ? "(unspecified)" : providerId} on ${gate.app.slug} — nothing changed.`,
@@ -1295,7 +1303,7 @@ dashboardApp.post("/apps/:slug/settings", async (c) => {
   }
   // T2 review fold (T1 minor): an unknown op is a validation failure like any
   // other — 400 with the reason.
-  return settingsPostResponse(c, "Unknown settings operation — resubmit one of this page's forms.", 400);
+  return settingsPostResponse(c, gate.app.slug, "Unknown settings operation — resubmit one of this page's forms.", 400);
 });
 
 dashboardApp.post("/apps/:slug/settings/key/delete", async (c) => {
@@ -1309,12 +1317,13 @@ dashboardApp.post("/apps/:slug/settings/key/delete", async (c) => {
     removed = await store.removeProviderKey(gate.app.id, provider);
   } catch (err) {
     logSettingsFailure("remove_key", gate.app.id, err);
-    return settingsPostResponse(c, settingsFailureNotice(err), 500);
+    return settingsPostResponse(c, gate.app.slug, settingsFailureNotice(err), 500);
   }
   // Tolerant no-op (the allowlist already bounds what can ever be stored):
   // an unknown provider simply has no row — a 2xx, not a 400.
   return settingsPostResponse(
     c,
+    gate.app.slug,
     removed
       ? `Removed the stored ${provider} key for ${gate.app.slug}.`
       : `No stored ${provider === "" ? "(unspecified)" : provider} key on ${gate.app.slug} — nothing changed.`,

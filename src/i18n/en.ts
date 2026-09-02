@@ -52,8 +52,6 @@ export const en = {
       signInErrorTitle: "Sign-in error",
       signInErrorBody:
         "Sign-in failed. {message} No session was created. Return to /dashboard/login to try again.",
-      badRequestTitle: "Bad request",
-      badRequestBody: "Bad request. {message}",
     },
     oauth: {
       stateInvalid: "Sign-in could not be verified (bad or expired state).",
@@ -63,10 +61,8 @@ export const en = {
     },
     loading: "Loading…",
     loadFailed: "Could not load this page.",
-    retry: "Retry",
   },
   login: {
-    title: "Sign in",
     heading: "Sign in to Morning Star Inspector",
     description: "Use your GitHub account to access the console.",
     signIn: "Sign in with GitHub",
@@ -298,7 +294,6 @@ export const en = {
     },
     error: {
       title: "GitHub App setup",
-      failed: "GitHub App setup failed. {message} No Worker secrets were changed.",
       failedHeading: "GitHub App setup failed.",
       secretsUnchanged: "No Worker secrets were changed.",
       resumable: "Your GitHub App is still held for retry — return to the confirmation page to resubmit.",

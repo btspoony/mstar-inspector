@@ -21,10 +21,10 @@ Merging to `main` triggers the **Deploy** workflow
   `LICENSE` — doc-only pushes need no redeploy) and manual `workflow_dispatch`
   (emergency channel, not subject to the path filter). Deploys are serialized
   (`concurrency` group, no cancel-in-progress).
-- **Sequence** — `test` job (typecheck + unit tests, mirrors `ci.yml`) →
+- **Sequence** — `test` job (typecheck + `build:spa` + unit tests, mirrors `ci.yml`) →
   `deploy` job: account verification → secrets injection (`wrangler secret
   bulk`, required + optional alert) → D1 migrations (`--remote`) →
-  `wrangler deploy` → post-deploy smoke (healthz / cron / digest) → digest
+  `bun run build:spa` → `wrangler deploy` → post-deploy smoke (healthz / cron / digest) → digest
   recorded in the run summary + `deploy-evidence` artifacts (§ Image pins and
   digest record).
 - **Failure semantics** — any step failure turns the run red and **stops**
