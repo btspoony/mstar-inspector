@@ -159,12 +159,13 @@ describe("membership stays enforcing outside locale (plan 29 T4)", () => {
     expect(apps.status).toBe(403);
   });
 
-  test("forbidden members HTML follows mstar_locale", async () => {
+  test("forbidden members HTML follows mstar_locale (plan 29 T6: the HTML GET is SPA-owned, so the 403 face is the API route)", async () => {
     const env = makeEnv(await seededWorld());
     const res = await worker.fetch(
-      new Request("https://worker.local/dashboard/members", {
+      new Request("https://worker.local/dashboard/api/members", {
         headers: {
           Cookie: `${SESSION_COOKIE}=${await cookie("mallory")}; ${LOCALE_COOKIE}=zh_CN`,
+          Accept: "application/json",
         },
       }),
       env,
