@@ -79,6 +79,12 @@ describe("settings copy is dictionary-backed (plan 31 T4+T6)", () => {
     expect(t("zh_CN", "settings.verify.unreachable")).toContain("连接");
     expect(t("en", "settings.verify.unexpected")).toContain("unexpected");
     expect(t("zh_CN", "settings.verify.unexpected")).toContain("意外");
+    expect(t("en", "settings.verify.unsupported_provider")).toContain("can't be verified");
+    expect(t("zh_CN", "settings.verify.unsupported_provider")).toContain("无法");
+    expect(t("en", "settings.unsupportedProvidersHint")).toContain("Azure");
+    expect(t("zh_CN", "settings.unsupportedProvidersHint")).toContain("Azure");
+    expect(t("en", "manifest.error.dbUnbound")).toContain("storage");
+    expect(t("zh_CN", "manifest.error.dbUnbound")).toContain("存储");
     expect(t("en", "settings.useAppChain")).toBe("Use App model chain");
     expect(t("zh_CN", "settings.useAppChain")).toBe("使用 App 模型链");
     expect(t("en", "settings.noAutoDiscovery")).toContain("does not list models");
@@ -102,5 +108,12 @@ describe("settings copy is dictionary-backed (plan 31 T4+T6)", () => {
     expect(source).toContain("not_in_verified_models");
     expect(source).toContain("settings.membership.not_in_verified_models");
     expect(source).toContain("message: settingsErrorMessage(locale, body)");
+  });
+
+  test("SPA maps unsupported_provider via t() and shows the console-only hint", () => {
+    const source = readFileSync(join(import.meta.dir, "../../src/spa/pages/SettingsPage.tsx"), "utf8");
+    expect(source).toContain("settings.verify.unsupported_provider");
+    expect(source).toContain("settings.unsupportedProvidersHint");
+    expect(source).toContain("unsupported_provider");
   });
 });

@@ -11,6 +11,8 @@ import {
   MODEL_ROLE_IDS,
 } from "../../src/dashboard/app-config-store";
 import { composeModelOptions, findFailingSelector, selectorBase } from "../../src/dashboard/model-membership";
+import { addKeyProviderIds } from "../../src/dashboard/provider-verify";
+import { PROVIDER_IDS } from "../../src/dashboard/app-config-store";
 import { SESSION_COOKIE, createSessionValue } from "../../src/dashboard/session";
 import { createUser } from "../../src/dashboard/users";
 import type { Env } from "../../src/worker/env";
@@ -199,14 +201,14 @@ describe("POST /dashboard/api/apps/:slug/keys/verify (plan 31 T4)", () => {
     ]);
   });
 
-  test("unsupported built-in → 400 unexpected, nothing stored", async () => {
+  test("unsupported built-in → 400 unsupported_provider, nothing stored", async () => {
     const { db } = await seededWorld();
     fetchSpy = spyOn(globalThis, "fetch").mockImplementation((async () => {
       throw new Error("fetch must not be called for unsupported providers");
     }) as unknown as typeof fetch);
     const res = await postForm(VERIFY, "mallory", makeEnv(db), { provider: "azure-openai", key: PLAIN_KEY });
     expect(res.status).toBe(400);
-    expect(await res.json()).toEqual({ ok: false, reason: "unexpected" });
+    expect(await res.json()).toEqual({ ok: false, reason: "unsupported_provider" });
     expect(fetchSpy).not.toHaveBeenCalled();
     expect(db.raw.query("SELECT COUNT(*) AS n FROM app_provider_keys").get() as { n: number }).toEqual({ n: 0 });
   });
@@ -246,6 +248,7 @@ describe("GET /dashboard/api/apps/:slug/models (plan 31 T4)", () => {
     ]);
     expect(JSON.stringify(body)).not.toContain(PLAIN_KEY);
     expect(JSON.stringify(body)).not.toContain("sk-custom");
+    expect(res.headers.get("cache-control")).toBe("private, no-store");
   });
 });
 
@@ -389,6 +392,26 @@ describe("POST /dashboard/apps/:slug/settings — pinned add-key / add-custom-pr
     ]);
   });
 
+  test("add-key unsupported built-in → 400 unsupported_provider, zero rows stored", async () => {
+    const { db } = await seededWorld();
+    fetchSpy = spyOn(globalThis, "fetch").mockImplementation((async () => {
+      throw new Error("fetch must not be called for unsupported providers");
+    }) as unknown as typeof fetch);
+    const res = await postForm(SETTINGS, "mallory", makeEnv(db), {
+      op: "add-key",
+      provider: "azure-openai",
+      key: PLAIN_KEY,
+    });
+    expect(res.status).toBe(400);
+    expect(await res.json()).toEqual({
+      ok: false,
+      reason: "unsupported_provider",
+      message: "This provider can't be verified here — manage the key in the provider console. Nothing was stored.",
+    });
+    expect(fetchSpy).not.toHaveBeenCalled();
+    expect(db.raw.query("SELECT COUNT(*) AS n FROM app_provider_keys").get() as { n: number }).toEqual({ n: 0 });
+  });
+
   test("add-custom-provider 401 from the provider → 400, zero rows stored", async () => {
     const { db } = await seededWorld();
     fetchSpy = mockStatus(401, { error: { message: "nope" } });
@@ -415,9 +438,14 @@ describe("GET settings includes delivery_summary for the sidebar (plan 31 T6)", 
     expect(res.status).toBe(200);
     const body = (await res.json()) as {
       delivery_summary: { latest: null; rejected24h: number };
+      provider_ids: string[];
     };
     expect(body.delivery_summary).toEqual({ latest: null, rejected24h: 0 });
     expect(JSON.stringify(body)).not.toContain("key_enc");
     expect(JSON.stringify(body)).not.toContain("private_key");
+    expect(res.headers.get("cache-control")).toBe("private, no-store");
+    expect(body.provider_ids).not.toContain("azure-openai");
+    expect(body.provider_ids).not.toContain("ai-gateway");
+    expect(body.provider_ids).toEqual(addKeyProviderIds(PROVIDER_IDS));
   });
 });

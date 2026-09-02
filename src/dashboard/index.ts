@@ -77,7 +77,7 @@ import {
   type AppConfigStore,
 } from "./app-config-store";
 import { composeModelOptions, findFailingSelector } from "./model-membership";
-import { verifyProviderKey, type VerifyFailureReason } from "./provider-verify";
+import { addKeyProviderIds, verifyProviderKey, type VerifyFailureReason } from "./provider-verify";
 import {
   bootstrapDashboardAccess,
   countAdmins,
@@ -236,8 +236,16 @@ dashboardApp.use("*", async (c, next) => {
   if (c.req.path === "/dashboard/logout" || c.req.path === "/dashboard/locale") return next();
   // Logged in → the only new check: an active user row (spec § AuthZ).
   // Fail closed on an unbound store, like every missing dashboard dependency.
+  // Callback/confirm must still run so a retryable db_unbound can park the
+  // hold and serve the resumable confirm link (plan 31 QC F-005). Confirm
+  // itself is hold-cookie-only and does not read D1.
   const db = dashboardD1(c.env);
-  if (!db) return c.text("dashboard storage is not configured", 500);
+  if (!db) {
+    if (c.req.path === "/dashboard/manifest/callback" || c.req.path === "/dashboard/manifest/confirm") {
+      return next();
+    }
+    return c.text("dashboard storage is not configured", 500);
+  }
   const user = await getUserByLogin(db, session.login);
   if (!user) {
     // Same structured-log convention as logOAuthFailure / logManifestFailure;
@@ -490,7 +498,7 @@ dashboardApp.get("/manifest/callback", async (c) => {
     }
     case "db_unbound":
       parkHold();
-      return c.text("dashboard storage is not configured", 500);
+      return c.html(manifestErrorPage(t(locale, "manifest.error.dbUnbound"), true, locale), 500);
     case "encrypt_failed":
       parkHold();
       return c.html(manifestErrorPage(t(locale, "manifest.error.noEncryptionKey"), true, locale), 500);
@@ -1084,15 +1092,34 @@ function settingsPostResponse(
   return pinnedPostMutationResponse(c, `/dashboard/apps/${slug}/settings`, message, status);
 }
 
-function mapVerifyReason(reason: VerifyFailureReason): "invalid_key" | "unreachable" | "unexpected" {
-  if (reason === "invalid_key" || reason === "unreachable") return reason;
+function mapVerifyReason(
+  reason: VerifyFailureReason,
+): "invalid_key" | "unreachable" | "unexpected" | "unsupported_provider" {
+  if (reason === "invalid_key" || reason === "unreachable" || reason === "unsupported_provider") return reason;
   return "unexpected";
 }
 
 function verifyFailCopy(reason: ReturnType<typeof mapVerifyReason>): string {
   if (reason === "invalid_key") return "That API key was rejected by the provider — nothing was stored.";
   if (reason === "unreachable") return "The provider could not be reached — nothing was stored.";
+  if (reason === "unsupported_provider") {
+    return "This provider can't be verified here — manage the key in the provider console. Nothing was stored.";
+  }
   return "The provider returned an unexpected response — nothing was stored.";
+}
+
+/** 400 for a verify miss: JSON `{ ok, reason, message }` so the SPA maps `reason` via t(); `message` keeps the English face for native posts. */
+function settingsVerifyFailResponse(
+  c: Context<{ Bindings: Env }>,
+  slug: string,
+  reason: VerifyFailureReason,
+): Response {
+  const mapped = mapVerifyReason(reason);
+  const message = verifyFailCopy(mapped);
+  if (wantsHtmlFormNavigation(c)) {
+    return c.redirect(`/dashboard/apps/${slug}/settings`, 302);
+  }
+  return c.json({ ok: false, reason: mapped, message }, 400);
 }
 
 function membershipFailCopy(selector: string): string {
@@ -1128,6 +1155,7 @@ dashboardApp.get("/api/apps/:slug/settings", async (c) => {
     const installations = await apps.listInstallations(gate.app.id);
     const deliveries = await apps.listRecentDeliveries(gate.app.id, 5);
     const deliverySummary = await apps.deliverySummary(gate.app.id);
+    c.header("Cache-Control", "private, no-store");
     return c.json({
       app: {
         slug: gate.app.slug,
@@ -1157,7 +1185,7 @@ dashboardApp.get("/api/apps/:slug/settings", async (c) => {
           : null,
         rejected24h: deliverySummary.rejected24h,
       },
-      provider_ids: PROVIDER_IDS,
+      provider_ids: addKeyProviderIds(PROVIDER_IDS),
       model_role_ids: MODEL_ROLE_IDS,
       custom_provider_api_ids: CUSTOM_PROVIDER_API_IDS,
     });
@@ -1174,6 +1202,7 @@ dashboardApp.get("/api/apps/:slug/models", async (c) => {
   try {
     const verified = await store.getVerifiedModels(gate.app.id);
     const custom = await store.listCustomProviders(gate.app.id);
+    c.header("Cache-Control", "private, no-store");
     return c.json({ groups: composeModelOptions(verified, custom) });
   } catch (err) {
     logSettingsFailure("api_models", gate.app.id, err);
@@ -1183,8 +1212,8 @@ dashboardApp.get("/api/apps/:slug/models", async (c) => {
 
 /**
  * SPA add-key path (plan 31 T4): verify the as-typed key, then store. Failure
- * is 400 JSON with a structured reason (invalid_key / unreachable / unexpected)
- * and ZERO writes. The key is never logged or returned.
+ * is 400 JSON with a structured reason (invalid_key / unreachable / unexpected /
+ * unsupported_provider) and ZERO writes. The key is never logged or returned.
  */
 dashboardApp.post("/api/apps/:slug/keys/verify", async (c) => {
   const gate = await requireAppSettings(c);
@@ -1267,7 +1296,7 @@ dashboardApp.post("/apps/:slug/settings", async (c) => {
     try {
       const verified = await verifyProviderKey({ fetch: globalThis.fetch }, provider, plainKey);
       if (!verified.ok) {
-        return settingsPostResponse(c, gate.app.slug, verifyFailCopy(mapVerifyReason(verified.reason)), 400);
+        return settingsVerifyFailResponse(c, gate.app.slug, verified.reason);
       }
       await store.saveVerifiedKey(gate.app.id, provider, plainKey, verified.models);
     } catch (err) {
@@ -1482,7 +1511,7 @@ dashboardApp.post("/apps/:slug/settings", async (c) => {
         },
       );
       if (!verified.ok) {
-        return settingsPostResponse(c, gate.app.slug, verifyFailCopy(mapVerifyReason(verified.reason)), 400);
+        return settingsVerifyFailResponse(c, gate.app.slug, verified.reason);
       }
       await store.upsertCustomProvider(
         gate.app.id,

@@ -1345,6 +1345,45 @@ describe("/dashboard manifest routes (plan 11 Task 1)", () => {
     expect(resumedBody).not.toContain(FAKE_WEBHOOK_SECRET);
   });
 
+  test("callback retryable 500 (unbound D1) → resumable page, hold cookie parked, confirm gate reachable (plan 31 QC F-005)", async () => {
+    // Encryption is configured so this isolates db_unbound from encrypt_failed.
+    // The membership guard skips unbound-D1 fail-closed on callback/confirm so
+    // the hold can park and the confirm link stays reachable.
+    const env = baseEnv({ DASHBOARD_ENCRYPTION_KEY: TEST_ENCRYPTION_KEY });
+    const { session, state } = await startManifest();
+    globalThis.fetch = (async () => new Response(JSON.stringify(CONVERSION), { status: 201 })) as unknown as typeof fetch;
+    const res = await worker.fetch(
+      callbackRequest(session, state, `code=manifest-code&state=${state}`),
+      env,
+    );
+    expect(res.status).toBe(500);
+    const body = await res.text();
+    expect(body).toContain("Dashboard storage is not configured");
+    expect(body).toContain('href="/dashboard/manifest/confirm"');
+    expect(body).not.toContain("BEGIN");
+    expect(body).not.toContain(FAKE_WEBHOOK_SECRET);
+    const holdCookie = res.headers.getSetCookie().find((c) => c.startsWith(`${MANIFEST_HOLD_COOKIE}=`)) ?? "";
+    expect(holdCookie).toContain("HttpOnly");
+    expect(holdCookie).toContain("Max-Age=600");
+    const holdValue = (holdCookie.split(";")[0] ?? "").slice(MANIFEST_HOLD_COOKIE.length + 1);
+    expect(holdValue.length).toBeGreaterThan(0);
+    const payload = await readHoldValue(holdValue, SESSION_SECRET);
+    expect(payload?.id).toBe(CONVERSION.id);
+    expect(payload?.slug).toBe("mstar-inspector-octocat");
+    const resumed = await worker.fetch(
+      dashboardRequest(
+        "/dashboard/manifest/confirm",
+        `${SESSION_COOKIE}=${session}; ${MANIFEST_HOLD_COOKIE}=${holdValue}`,
+      ),
+      env,
+    );
+    expect(resumed.status).toBe(200);
+    const resumedBody = await resumed.text();
+    expect(resumedBody).toContain('action="/dashboard/manifest/commit"');
+    expect(resumedBody).not.toContain(FAKE_PEM);
+    expect(resumedBody).not.toContain(FAKE_WEBHOOK_SECRET);
+  });
+
   test("callback retryable 500 (github_apps missing) → hold parked, confirm gate reachable (plan 31 T5)", async () => {
     // through=3: a pre-plan-13 DB (users only — no github_apps table). The
     // guard passes (membership reads users), the inline commit fails on the
