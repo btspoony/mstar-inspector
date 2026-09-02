@@ -34,9 +34,10 @@ import { trailingSlashRedirect } from "./redirects";
 import { spaDispatch } from "./spa-dispatch";
 
 const app = new Hono<{ Bindings: Env }>();
-// Plan 29 T3: trailing-slash 301 then SPA HTML dispatch. Both run BEFORE
-// the dashboard membership guard (mounted inside dashboardApp) so POST
-// family, OAuth, and APIs still fall through unchanged.
+// Plan 29 T3 + plan 30 T4: `/dashboard*` GET/HEAD redirects (trailing
+// slash + the `/dashboard/apps` exact alias) then SPA dispatch. Both run
+// BEFORE the dashboard membership guard (mounted inside dashboardApp) so
+// POST family, OAuth, and APIs still fall through unchanged.
 app.use("*", trailingSlashRedirect());
 app.use("*", spaDispatch());
 /**

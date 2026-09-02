@@ -59,7 +59,11 @@ export function spaDispatch(): MiddlewareHandler<{ Bindings: Env }> {
     const assets = c.env.ASSETS;
     if (!assets) return next();
     const pathname = new URL(c.req.url).pathname;
-    if (matchSpaRoute(pathname) && wantsHtml(c.req.header("Accept") ?? null)) {
+    const accept = c.req.header("Accept") ?? null;
+    // `/dashboard` is the SPA workbench for EVERY Accept variant (plan 30
+    // T4: the legacy SSR home is retired). Other enumerated pages keep the
+    // HTML-navigation gate so API/test clients never get the shell.
+    if (pathname === "/dashboard" || (matchSpaRoute(pathname) && wantsHtml(accept))) {
       return serveSpaIndex(c);
     }
     // Direct /index.html hits the same boot-injected shell as enumerated pages.

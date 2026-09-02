@@ -1,9 +1,14 @@
 /**
- * Trailing-slash normalization for `/dashboard*` (plan 29 T3).
+ * `/dashboard*` GET/HEAD redirect normalization (plan 29 T3 + plan 30 T4).
  *
+ * Two rules, applied in order, at most one 301:
+ *   1. Trailing-slash strip: a path ending in `/` (other than `/dashboard`
+ *      itself) loses the slash.
+ *   2. Exact alias: the stripped path `/dashboard/apps` → `/dashboard`.
  * GET/HEAD only — a 301 would convert POST to GET and break pinned
- * settings/actions. `/dashboard/apps` exact-alias 301 is plan 30; this
- * module only strips a single trailing slash.
+ * settings/actions. The alias is an EXACT path match, so
+ * `/dashboard/apps/:slug/*` (settings, actions) is never caught, and
+ * `/dashboard/apps/` reaches `/dashboard` in one hop (no chained redirect).
  */
 import type { MiddlewareHandler } from "hono";
 
@@ -17,8 +22,11 @@ export function normalizeDashboardTrailingSlash(
 ): string | null {
   if (method !== "GET" && method !== "HEAD") return null;
   if (!pathname.startsWith("/dashboard")) return null;
-  if (pathname === "/dashboard" || !pathname.endsWith("/")) return null;
-  return `${pathname.slice(0, -1)}${search}`;
+  let target = pathname;
+  if (target !== "/dashboard" && target.endsWith("/")) target = target.slice(0, -1);
+  if (target === "/dashboard/apps") target = "/dashboard";
+  if (target === pathname) return null;
+  return `${target}${search}`;
 }
 
 export function trailingSlashRedirect(): MiddlewareHandler {

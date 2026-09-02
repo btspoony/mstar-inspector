@@ -33,11 +33,12 @@ export function accountDisplay(boot: Pick<SpaBoot, "login" | "name">): string | 
 
 /**
  * Apps href is `/dashboard`. Prefix-matching that path would mark every
- * dashboard page current. Settings stays under `/dashboard/apps/:slug`.
+ * dashboard page current. Settings stays under `/dashboard/apps/:slug`
+ * (the legacy `/dashboard/apps` page itself is a Worker 301, plan 30 T4).
  */
 export function isNavCurrent(href: string, pathname: string): boolean {
   if (href === "/dashboard") {
-    return pathname === "/dashboard" || pathname === "/dashboard/apps" || pathname.startsWith("/dashboard/apps/");
+    return pathname === "/dashboard" || pathname.startsWith("/dashboard/apps/");
   }
   return pathname === href || pathname.startsWith(`${href}/`);
 }

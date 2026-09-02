@@ -1,11 +1,12 @@
 /**
  * Enumerated SPA pages (plan 29 Interfaces `SPA_PAGES`, plan 30 home).
  *
- * `/dashboard` is the Apps-first workbench (plan 30 T1). `/dashboard/apps`
- * stays enumerated until Task 4's 301 alias. History fallback is this
+ * `/dashboard` is the Apps-first workbench (plan 30 T1); the legacy
+ * `/dashboard/apps` page is retired — the Worker 301s it to `/dashboard`
+ * (plan 30 T4), so it is NOT enumerated here. History fallback is this
  * matcher, not wrangler `not_found_handling`.
  */
-export const SPA_PAGES = ["home", "insights", "members", "apps", "login", "settings"] as const;
+export const SPA_PAGES = ["home", "insights", "members", "login", "settings"] as const;
 
 export type SpaPageId = (typeof SPA_PAGES)[number];
 
@@ -13,7 +14,6 @@ export type SpaRoute =
   | { page: "home"; pathname: "/dashboard" }
   | { page: "insights"; pathname: "/dashboard/insights" }
   | { page: "members"; pathname: "/dashboard/members" }
-  | { page: "apps"; pathname: "/dashboard/apps" }
   | { page: "login"; pathname: "/dashboard/login" }
   | { page: "settings"; pathname: string; slug: string };
 
@@ -27,8 +27,6 @@ export function matchSpaRoute(pathname: string): SpaRoute | null {
       return { page: "insights", pathname };
     case "/dashboard/members":
       return { page: "members", pathname };
-    case "/dashboard/apps":
-      return { page: "apps", pathname };
     case "/dashboard/login":
       return { page: "login", pathname };
     default: {

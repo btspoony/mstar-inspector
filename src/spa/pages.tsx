@@ -2,7 +2,6 @@ import type { SpaBoot } from "./boot";
 import type { ClientRoute } from "./router";
 import { t } from "../i18n";
 import styles from "./Layout.module.css";
-import { AppsPage } from "./pages/AppsPage";
 import { HomePage } from "./pages/Home";
 import { InsightsPage } from "./pages/InsightsPage";
 import { LoginPage } from "./pages/LoginPage";
@@ -13,8 +12,6 @@ export function DashboardPage({ route, boot }: { route: ClientRoute; boot: SpaBo
   switch (route.page) {
     case "home":
       return <HomePage boot={boot} />;
-    case "apps":
-      return <AppsPage boot={boot} />;
     case "insights":
       return <InsightsPage boot={boot} />;
     case "members":
