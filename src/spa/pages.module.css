@@ -248,3 +248,70 @@
   color: var(--gray-900);
   font-size: var(--typo-label-12-size);
 }
+
+.settingsLayout {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-6);
+}
+
+.settingsMain {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-6);
+}
+
+.settingsSidebar {
+  min-width: 0;
+  background: var(--sidebar-bg);
+  color: var(--sidebar-fg);
+  border: 1px solid var(--sidebar-border);
+  border-radius: var(--card-radius);
+  padding: var(--card-padding);
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-4);
+}
+
+.settingsSidebar h2 {
+  margin: 0;
+  font-size: var(--typo-heading-16-size);
+  font-weight: var(--typo-heading-16-weight);
+  line-height: var(--typo-heading-16-line);
+}
+
+.chainList {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--spacing-2);
+}
+
+.chainChip {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--spacing-2);
+  padding: var(--spacing-1) var(--spacing-2);
+  border: 1px solid var(--card-border);
+  border-radius: var(--rounded-sm);
+  font-family: var(--typo-mono-13-family);
+  font-size: var(--typo-mono-13-size);
+}
+
+.addRow {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: var(--spacing-2);
+}
+
+@media (min-width: 900px) {
+  .settingsLayout {
+    display: grid;
+    grid-template-columns: 2fr 1fr;
+    align-items: start;
+  }
+}

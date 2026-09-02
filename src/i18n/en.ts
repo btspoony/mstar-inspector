@@ -261,6 +261,18 @@ export const en = {
     noDeliveries: "No deliveries yet.",
     unknownEvent: "unknown event",
     status: "status {code}",
+    useAppChain: "Use App model chain",
+    addToChain: "Add to chain",
+    noAutoDiscovery: "This provider does not list models — pick from another verified provider.",
+    noVerifiedModels: "Verify a provider key to populate model options.",
+    chainEmpty: "No models in the chain yet.",
+    pickModel: "Select a model…",
+    keyVerified: "Key verified — models cached.",
+    verify: {
+      invalid_key: "That API key was rejected by the provider — nothing was stored.",
+      unreachable: "The provider could not be reached — nothing was stored.",
+      unexpected: "The provider returned an unexpected response — nothing was stored.",
+    },
   },
   manifest: {
     title: "Create GitHub App",

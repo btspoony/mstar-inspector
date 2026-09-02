@@ -244,6 +244,18 @@ export const zhCN: Dictionary = {
     noDeliveries: "还没有投递。",
     unknownEvent: "未知事件",
     status: "状态 {code}",
+    useAppChain: "使用 App 模型链",
+    addToChain: "加入模型链",
+    noAutoDiscovery: "此 provider 不列出模型 — 请从其他已验证 provider 中选择。",
+    noVerifiedModels: "验证 provider 密钥后即可填充模型选项。",
+    chainEmpty: "模型链中还没有模型。",
+    pickModel: "选择模型…",
+    keyVerified: "密钥已验证 — 模型已缓存。",
+    verify: {
+      invalid_key: "该 API 密钥被 provider 拒绝 — 未存储任何内容。",
+      unreachable: "无法连接 provider — 未存储任何内容。",
+      unexpected: "provider 返回了意外响应 — 未存储任何内容。",
+    },
   },
   manifest: {
     title: "创建 GitHub App",

@@ -61,7 +61,21 @@ export type SettingsPayload = {
   provider_ids: readonly string[];
   model_role_ids: readonly string[];
   custom_provider_api_ids: readonly string[];
+  delivery_summary?: {
+    latest: { event_name: string | null; outcome: string; status_code: number | null; created_at: string } | null;
+    rejected24h: number;
+  };
 };
+
+export type ModelOptionSource = "verified" | "probe" | "custom";
+
+export type ModelOptionGroup = {
+  provider: string;
+  source: ModelOptionSource;
+  selectors: string[];
+};
+
+export type ModelsPayload = { groups: ModelOptionGroup[] };
 
 export function canViewMembers(role: Role | null): boolean {
   return role === "admin";
@@ -140,6 +154,26 @@ export function parseSettings(data: unknown): SettingsPayload | null {
   if (!isStringArray(data.provider_ids) || !isStringArray(data.model_role_ids)) return null;
   if (!Array.isArray(data.custom_provider_api_ids) || !isStringArray(data.custom_provider_api_ids)) return null;
   return data as SettingsPayload;
+}
+
+export function parseModels(data: unknown): ModelsPayload | null {
+  if (!isRecord(data) || !Array.isArray(data.groups)) return null;
+  const groups: ModelOptionGroup[] = [];
+  for (const group of data.groups) {
+    if (!isRecord(group) || typeof group.provider !== "string") return null;
+    if (group.source !== "verified" && group.source !== "probe" && group.source !== "custom") return null;
+    if (!isStringArray(group.selectors)) return null;
+    groups.push({ provider: group.provider, source: group.source, selectors: group.selectors });
+  }
+  return { groups };
+}
+
+export function splitModelChain(raw: string | null | undefined): string[] {
+  if (!raw) return [];
+  return raw
+    .split(",")
+    .map((selector) => selector.trim())
+    .filter((selector) => selector.length > 0);
 }
 
 /** Same GitHub login grammar the invite route enforces. */
