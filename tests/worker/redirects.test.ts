@@ -62,6 +62,17 @@ describe("trailing-slash middleware mount (plan 29 T3)", () => {
     expect(location.search).toBe("?q=1");
   });
 
+  test("HEAD /dashboard/ returns 301 Location /dashboard", async () => {
+    const res = await worker.fetch(
+      new Request("https://worker.local/dashboard/?q=1", { method: "HEAD" }),
+      env(),
+    );
+    expect(res.status).toBe(301);
+    const location = new URL(res.headers.get("Location") ?? "", "https://worker.local");
+    expect(location.pathname).toBe("/dashboard");
+    expect(location.search).toBe("?q=1");
+  });
+
   test("POST /dashboard/ is not a 301", async () => {
     const res = await worker.fetch(
       new Request("https://worker.local/dashboard/", { method: "POST" }),

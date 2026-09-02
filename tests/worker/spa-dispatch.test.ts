@@ -127,6 +127,16 @@ describe("SPA dispatch (plan 29 T3)", () => {
     expect(calls).toEqual([{ method: "GET", pathname: "/assets/app.js" }]);
   });
 
+  test("GET /index.html injects window.__BOOT__", async () => {
+    const { env, calls } = makeEnv();
+    const res = await worker.fetch(new Request("https://worker.local/index.html"), env);
+    expect(res.status).toBe(200);
+    expect(calls).toEqual([{ method: "GET", pathname: "/index.html" }]);
+    const body = await res.text();
+    expect(body).toContain("window.__BOOT__=");
+    expect(body).not.toContain(SPA_BOOT_MARKER);
+  });
+
   test("webhook POST is untouched", async () => {
     const { env, calls } = makeEnv();
     await worker.fetch(
