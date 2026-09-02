@@ -1000,8 +1000,8 @@ export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | un
         const res = await db
           .prepare(
             `WITH now AS (SELECT datetime('now') AS ts)
-             INSERT INTO app_custom_providers (app_id, provider_id, base_url, api, model_ids, api_key_enc, created_at, updated_at)
-             SELECT ?, ?, ?, ?, ?, ?, (SELECT ts FROM now), (SELECT ts FROM now)
+             INSERT INTO app_custom_providers (app_id, provider_id, base_url, api, model_ids, api_key_enc, created_at, updated_at, verified_at, verified_status)
+             SELECT ?, ?, ?, ?, ?, ?, (SELECT ts FROM now), (SELECT ts FROM now), (SELECT ts FROM now), 'ok'
              WHERE (SELECT COUNT(*) FROM app_custom_providers WHERE app_id = ?) < ${MAX_CUSTOM_PROVIDER_COUNT}`,
           )
           .bind(appId, decl.provider_id, decl.base_url, decl.api, JSON.stringify(decl.model_ids), keyEnc, appId)
@@ -1014,15 +1014,17 @@ export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | un
       await db
         .prepare(
           `WITH now AS (SELECT datetime('now') AS ts)
-           INSERT INTO app_custom_providers (app_id, provider_id, base_url, api, model_ids, api_key_enc, created_at, updated_at)
-           VALUES (?, ?, ?, ?, ?, ?, (SELECT ts FROM now), (SELECT ts FROM now))
+           INSERT INTO app_custom_providers (app_id, provider_id, base_url, api, model_ids, api_key_enc, created_at, updated_at, verified_at, verified_status)
+           VALUES (?, ?, ?, ?, ?, ?, (SELECT ts FROM now), (SELECT ts FROM now), (SELECT ts FROM now), 'ok')
            ON CONFLICT (app_id, provider_id) DO UPDATE SET
              base_url = excluded.base_url,
              api = excluded.api,
              model_ids = excluded.model_ids,
              api_key_enc = excluded.api_key_enc,
              created_at = (SELECT ts FROM now),
-             updated_at = (SELECT ts FROM now)`,
+             updated_at = (SELECT ts FROM now),
+             verified_at = excluded.verified_at,
+             verified_status = excluded.verified_status`,
         )
         .bind(appId, decl.provider_id, decl.base_url, decl.api, JSON.stringify(decl.model_ids), keyEnc)
         .run();

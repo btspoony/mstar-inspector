@@ -74,6 +74,8 @@ import {
   type AppConfigBatchFace,
   type AppConfigStore,
 } from "./app-config-store";
+import { composeModelOptions, findFailingSelector } from "./model-membership";
+import { verifyProviderKey, type VerifyFailureReason } from "./provider-verify";
 import {
   bootstrapDashboardAccess,
   countAdmins,
@@ -982,6 +984,21 @@ function settingsPostResponse(
   return pinnedPostMutationResponse(c, `/dashboard/apps/${slug}/settings`, message, status);
 }
 
+function mapVerifyReason(reason: VerifyFailureReason): "invalid_key" | "unreachable" | "unexpected" {
+  if (reason === "invalid_key" || reason === "unreachable") return reason;
+  return "unexpected";
+}
+
+function verifyFailCopy(reason: ReturnType<typeof mapVerifyReason>): string {
+  if (reason === "invalid_key") return "That API key was rejected by the provider — nothing was stored.";
+  if (reason === "unreachable") return "The provider could not be reached — nothing was stored.";
+  return "The provider returned an unexpected response — nothing was stored.";
+}
+
+function membershipFailCopy(selector: string): string {
+  return `Selector ${selector} is not in this App's verified models.`;
+}
+
 /** SPA JSON face — same requireAppSettings gate and the settings reads the retired HTML GET used. */
 dashboardApp.get("/api/apps/:slug/settings", async (c) => {
   const gate = await requireAppSettings(c);
@@ -995,6 +1012,7 @@ dashboardApp.get("/api/apps/:slug/settings", async (c) => {
     const customProviders = await store.listCustomProviders(gate.app.id);
     const installations = await apps.listInstallations(gate.app.id);
     const deliveries = await apps.listRecentDeliveries(gate.app.id, 5);
+    const deliverySummary = await apps.deliverySummary(gate.app.id);
     return c.json({
       app: {
         slug: gate.app.slug,
@@ -1013,6 +1031,17 @@ dashboardApp.get("/api/apps/:slug/settings", async (c) => {
         status_code: d.status_code,
         created_at: d.created_at,
       })),
+      delivery_summary: {
+        latest: deliverySummary.latest
+          ? {
+              event_name: deliverySummary.latest.event_name,
+              outcome: deliverySummary.latest.outcome,
+              status_code: deliverySummary.latest.status_code,
+              created_at: deliverySummary.latest.created_at,
+            }
+          : null,
+        rejected24h: deliverySummary.rejected24h,
+      },
       provider_ids: PROVIDER_IDS,
       model_role_ids: MODEL_ROLE_IDS,
       custom_provider_api_ids: CUSTOM_PROVIDER_API_IDS,
@@ -1020,6 +1049,48 @@ dashboardApp.get("/api/apps/:slug/settings", async (c) => {
   } catch (err) {
     logSettingsFailure("api_render", gate.app.id, err);
     return c.text("the app settings could not be read from encrypted storage", 500);
+  }
+});
+
+dashboardApp.get("/api/apps/:slug/models", async (c) => {
+  const gate = await requireAppSettings(c);
+  if (!gate.ok) return gate.response;
+  const store = createAppConfigStore(gate.db, c.env.DASHBOARD_ENCRYPTION_KEY);
+  try {
+    const verified = await store.getVerifiedModels(gate.app.id);
+    const custom = await store.listCustomProviders(gate.app.id);
+    return c.json({ groups: composeModelOptions(verified, custom) });
+  } catch (err) {
+    logSettingsFailure("api_models", gate.app.id, err);
+    return c.text("the app models could not be read", 500);
+  }
+});
+
+/**
+ * SPA add-key path (plan 31 T4): verify the as-typed key, then store. Failure
+ * is 400 JSON with a structured reason (invalid_key / unreachable / unexpected)
+ * and ZERO writes. The key is never logged or returned.
+ */
+dashboardApp.post("/api/apps/:slug/keys/verify", async (c) => {
+  const gate = await requireAppSettings(c);
+  if (!gate.ok) return gate.response;
+  const form = await c.req.parseBody();
+  const provider = typeof form.provider === "string" ? form.provider.trim() : "";
+  const plainKey = typeof form.key === "string" ? form.key.trim() : "";
+  if (!PROVIDER_IDS.includes(provider) || plainKey === "" || plainKey.length > MAX_PROVIDER_KEY_LENGTH) {
+    return c.json({ ok: false, reason: "unexpected" as const }, 400);
+  }
+  const store = createAppConfigStore(gate.db, c.env.DASHBOARD_ENCRYPTION_KEY);
+  try {
+    const verified = await verifyProviderKey({ fetch: globalThis.fetch }, provider, plainKey);
+    if (!verified.ok) {
+      return c.json({ ok: false, reason: mapVerifyReason(verified.reason) }, 400);
+    }
+    await store.saveVerifiedKey(gate.app.id, provider, plainKey, verified.models);
+    return c.json({ ok: true, provider, models: verified.models });
+  } catch (err) {
+    logSettingsFailure("verify_key", gate.app.id, err);
+    return c.json({ ok: false, reason: "unexpected" as const }, 500);
   }
 });
 
@@ -1079,7 +1150,11 @@ dashboardApp.post("/apps/:slug/settings", async (c) => {
       );
     }
     try {
-      await store.setProviderKey(gate.app.id, provider, plainKey);
+      const verified = await verifyProviderKey({ fetch: globalThis.fetch }, provider, plainKey);
+      if (!verified.ok) {
+        return settingsPostResponse(c, gate.app.slug, verifyFailCopy(mapVerifyReason(verified.reason)), 400);
+      }
+      await store.saveVerifiedKey(gate.app.id, provider, plainKey, verified.models);
     } catch (err) {
       logSettingsFailure("add_key", gate.app.id, err);
       return settingsPostResponse(c, gate.app.slug, settingsFailureNotice(err), 500);
@@ -1108,8 +1183,17 @@ dashboardApp.post("/apps/:slug/settings", async (c) => {
           400,
         );
       }
-      if (parseModelChain(raw).length === 0) {
+      const selectors = parseModelChain(raw);
+      if (selectors.length === 0) {
         return settingsPostResponse(c, gate.app.slug, "Enter at least one comma-separated model selector.", 400);
+      }
+      const failing = findFailingSelector(
+        selectors,
+        await store.getVerifiedModels(gate.app.id),
+        await store.listCustomProviders(gate.app.id),
+      );
+      if (failing) {
+        return settingsPostResponse(c, gate.app.slug, membershipFailCopy(failing), 400);
       }
       await store.setModelChain(gate.app.id, raw);
     } catch (err) {
@@ -1164,6 +1248,15 @@ dashboardApp.post("/apps/:slug/settings", async (c) => {
       }
     }
     try {
+      const verified = await store.getVerifiedModels(gate.app.id);
+      const custom = await store.listCustomProviders(gate.app.id);
+      for (const selector of Object.values(selectors)) {
+        if (selector.trim() === "") continue;
+        const failing = findFailingSelector(parseModelChain(selector), verified, custom);
+        if (failing) {
+          return settingsPostResponse(c, gate.app.slug, membershipFailCopy(failing), 400);
+        }
+      }
       await store.setModelRoles(gate.app.id, selectors);
     } catch (err) {
       logSettingsFailure("save_roles", gate.app.id, err);
@@ -1263,6 +1356,19 @@ dashboardApp.post("/apps/:slug/settings", async (c) => {
       );
     }
     try {
+      const verified = await verifyProviderKey(
+        { fetch: globalThis.fetch },
+        providerId,
+        plainKey,
+        {
+          baseUrl,
+          api: api as (typeof CUSTOM_PROVIDER_API_IDS)[number],
+          modelIds,
+        },
+      );
+      if (!verified.ok) {
+        return settingsPostResponse(c, gate.app.slug, verifyFailCopy(mapVerifyReason(verified.reason)), 400);
+      }
       await store.upsertCustomProvider(
         gate.app.id,
         { provider_id: providerId, base_url: baseUrl, api: api as (typeof CUSTOM_PROVIDER_API_IDS)[number], model_ids: modelIds },
