@@ -338,26 +338,12 @@ ${STYLE}
 </html>`;
 }
 
-function placeholderSection(
-  title: string,
-  description: string,
-  status: string,
-  action: string,
-  extra = "",
-): string {
-  return `<section aria-disabled="true">
-    <h2>${title}</h2>
-    <p>${description}</p>
-    <p class="status">${status}</p>
-    ${extra}
-    <button type="button" disabled aria-disabled="true">${action}</button>
-  </section>`;
-}
-
 /**
  * Flow-page chrome: product name + GitHub identity + Logout, restyled to
  * the SPA navbar tokens. Manifest pages never pass `adminNav` (Members
  * stays on the dashboard shell only). No language toggle — current IA.
+ * Apps points at the workbench itself (`/dashboard`, plan 30 T4 — the
+ * legacy `/dashboard/apps` page is a 301 alias).
  */
 function shellHeader(
   user: { login: string; name?: string },
@@ -371,63 +357,13 @@ function shellHeader(
   return `<header>
     <h1><a href="/dashboard">${escapeHtml(t(locale, "nav.brand"))}</a></h1>
     <span class="user">
-      <a href="/dashboard/apps">${escapeHtml(t(locale, "nav.apps"))}</a>
+      <a href="/dashboard">${escapeHtml(t(locale, "nav.apps"))}</a>
       <a href="/dashboard/insights">${escapeHtml(t(locale, "nav.insights"))}</a>
       ${members}
       <span>${escapeHtml(t(locale, "nav.signedInAs", { name: display }))}</span>
       <a href="/dashboard/logout">${escapeHtml(t(locale, "nav.logout"))}</a>
     </span>
   </header>`;
-}
-
-/** B1: GitHub App section is live — primary constructive action (blue-700). */
-function githubAppSection(): string {
-  return `<section class="enabled">
-    <h2>GitHub App</h2>
-    <p>Create the review GitHub App in your GitHub account via the Manifest flow — no local wrangler secret put.</p>
-    <form method="post" action="/dashboard/manifest/start">
-      <button type="submit" class="primary">Create GitHub App</button>
-    </form>
-  </section>`;
-}
-
-/**
- * B2 delivered: Model keys are per-App, so this shell card is an entry point,
- * not a placeholder — the copy states keys/models are configured per App and
- * links to the Apps list, where members reach Settings on the Apps they
- * manage.
- */
-function modelKeysSection(): string {
-  return `<section class="enabled">
-    <h2>Model keys</h2>
-    <p>Provider keys and model chains are configured per App — each App's Settings manages its own keys; an App without the keys its chain needs fails closed (per-App only, no deployment-level fallback — plan 24).</p>
-    <p><a href="/dashboard/apps">Open the Apps list</a> to reach Settings on an App you manage.</p>
-  </section>`;
-}
-
-/**
- * Logged-in shell: header + sections (B1: GitHub App live; B2: per-App
- * Model keys entry point; Review stays a placeholder). T5 removes the
- * REVIEW_ENABLED sentence — per-App pause is the only switch named.
- */
-export function dashboardPage(user: { login: string; name?: string }, isAdmin = false): string {
-  return page(
-    "Dashboard",
-    `${shellHeader(user, isAdmin)}
-  <main>
-    <div class="sections">
-      ${githubAppSection()}
-      ${modelKeysSection()}
-      ${placeholderSection(
-        "Review",
-        "Reviews are controlled per App — pause an App to stop its reviews.",
-        "Not in this iteration (B3).",
-        "Enable reviews",
-        '<p class="note">Pause an App from its Settings to stop reviews for that App.</p>',
-      )}
-    </div>
-  </main>`,
-  );
 }
 
 /**
@@ -524,7 +460,7 @@ export function manifestSuccessPage(
       <p>${stored}</p>
       <p class="status">${escapeHtml(t(locale, "manifest.success.slug", { slug: app.slug }))}<br>${escapeHtml(t(locale, "manifest.success.webhookUrl", { webhookUrl: app.webhookUrl }))}</p>
       <p class="status">${escapeHtml(t(locale, "manifest.success.reviewsNote"))}</p>
-      <p><a href="/dashboard/apps">${escapeHtml(t(locale, "manifest.success.viewApps"))}</a> · <a href="/dashboard">${escapeHtml(t(locale, "manifest.success.backToDashboard"))}</a></p>
+      <p><a href="/dashboard">${escapeHtml(t(locale, "manifest.success.viewApps"))}</a> · <a href="/dashboard">${escapeHtml(t(locale, "manifest.success.backToDashboard"))}</a></p>
     </section>
   </main>`,
     locale,

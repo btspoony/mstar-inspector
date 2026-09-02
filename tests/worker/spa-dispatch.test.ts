@@ -58,9 +58,9 @@ describe("SPA dispatch (plan 29 T3)", () => {
 
   test("each enumerated page GET hits ASSETS", async () => {
     const pages = [
+      "/dashboard",
       "/dashboard/insights",
       "/dashboard/members",
-      "/dashboard/apps",
       "/dashboard/login",
       "/dashboard/apps/acme/settings",
     ];
@@ -90,10 +90,24 @@ describe("SPA dispatch (plan 29 T3)", () => {
     expect(calls.filter((c) => c.pathname === "/index.html")).toEqual([]);
   });
 
-  test("GET /dashboard (legacy home) is not an SPA page", async () => {
+  test("GET /dashboard HTML navigation is served by SPA dispatch", async () => {
     const { env, calls } = makeEnv();
-    await worker.fetch(htmlGetRequest("/dashboard"), env);
-    expect(calls).toEqual([]);
+    const res = await worker.fetch(htmlGetRequest("/dashboard"), env);
+    expect(res.status).toBe(200);
+    expect(calls).toEqual([{ method: "GET", pathname: "/index.html" }]);
+    expect(await res.text()).toContain("window.__BOOT__=");
+  });
+
+  test("GET /dashboard is the SPA workbench for every Accept variant (plan 30 T4)", async () => {
+    for (const accept of [undefined, "*/*", "application/json", "text/html"]) {
+      const { env, calls } = makeEnv();
+      const headers: Record<string, string> = {};
+      if (accept) headers.Accept = accept;
+      const res = await worker.fetch(new Request("https://worker.local/dashboard", { headers }), env);
+      expect(res.status, accept ?? "no Accept").toBe(200);
+      expect(calls, accept ?? "no Accept").toEqual([{ method: "GET", pathname: "/index.html" }]);
+      expect(await res.text(), accept ?? "no Accept").toContain("window.__BOOT__=");
+    }
   });
 
   test("Accept: application/json stays on legacy", async () => {
@@ -143,7 +157,7 @@ describe("SPA dispatch (plan 29 T3)", () => {
   test("boot script carries locale from the mstar_locale cookie", async () => {
     const { env } = makeEnv();
     const res = await worker.fetch(
-      htmlGetRequest("/dashboard/apps", { Cookie: `${LOCALE_COOKIE}=zh_CN` }),
+      htmlGetRequest("/dashboard", { Cookie: `${LOCALE_COOKIE}=zh_CN` }),
       env,
     );
     const body = await res.text();

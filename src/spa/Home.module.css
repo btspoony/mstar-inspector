@@ -1,0 +1,58 @@
+/*
+ * Home workbench layout (plan 30 T1).
+ * Mobile stacks; desktop ≥900px (DESIGN.md `lg`) is 2fr list + 1fr sidebar.
+ */
+.home {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-6);
+}
+
+.main {
+  min-width: 0;
+}
+
+.sidebar {
+  min-width: 0;
+  background: var(--sidebar-bg);
+  color: var(--sidebar-fg);
+  border: 1px solid var(--sidebar-border);
+  border-radius: var(--card-radius);
+  padding: var(--card-padding);
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-4);
+}
+
+.sidebar h2 {
+  margin: 0;
+  font-size: var(--typo-heading-16-size);
+  font-weight: var(--typo-heading-16-weight);
+  line-height: var(--typo-heading-16-line);
+}
+
+.textLink {
+  color: var(--blue-700);
+  font-size: var(--typo-copy-14-size);
+  line-height: var(--typo-copy-14-line);
+  text-decoration: none;
+  align-self: flex-start;
+}
+
+.textLink:hover {
+  text-decoration: underline;
+}
+
+.textLink:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+  border-radius: var(--rounded-sm);
+}
+
+@media (min-width: 900px) {
+  .home {
+    display: grid;
+    grid-template-columns: 2fr 1fr;
+    align-items: start;
+  }
+}

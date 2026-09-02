@@ -85,7 +85,6 @@ import {
   type DashboardUserRow,
 } from "./users";
 import {
-  dashboardPage,
   deniedPage,
   errorPage,
   forbiddenPage,
@@ -1330,36 +1329,11 @@ dashboardApp.post("/apps/:slug/settings/key/delete", async (c) => {
   );
 });
 
-dashboardApp.get("/", async (c) => {
-  const sessionSecret = c.env.DASHBOARD_SESSION_SECRET;
-  if (!sessionSecret) return c.text("dashboard OAuth is not configured", 500);
-  const session = await readSessionValue(getCookie(c, SESSION_COOKIE), sessionSecret);
-  if (!session) return c.redirect("/dashboard/login", 302);
-  // A parked manifest hold resumes the confirm gate in place of the shell
-  // (same rule as GET /dashboard/manifest/confirm).
-  const hold = await readHoldValue(getCookie(c, MANIFEST_HOLD_COOKIE), sessionSecret);
-  if (hold && hold.login === session.login) {
-    return c.html(
-      manifestConfirmPage(
-        session,
-        {
-          id: hold.id,
-          name: hold.name,
-          slug: hold.slug,
-          webhookUrl: `${new URL(c.req.url).origin}/webhook/${hold.slug}`,
-        },
-        requestLocale(c),
-      ),
-    );
-  }
-  // Members entry is admin-aware (qc1/qc2 F-001): the guard already resolved
-  // the row; re-read it here (same route-local read pattern as the manifest
-  // routes) to learn the role. A row removed between guard and render simply
-  // renders without the entry — the next request 403s at the guard.
-  const db = dashboardD1(c.env);
-  const member = db ? await getUserByLogin(db, session.login) : null;
-  return c.html(dashboardPage(session, member?.role === "admin"));
-});
+// Plan 30 T4: the legacy SSR home (`dashboardApp.get("/")` →
+// dashboardPage) is retired. GET /dashboard — every Accept variant — is the
+// SPA workbench, served by spa-dispatch before this app is reached. The
+// manifest-hold resume gate lives on its dedicated route
+// /dashboard/manifest/confirm (the retryable-error page links there).
 // --- Plan 22 T2: Review Health insights summary API -------------------------
 //
 // JSON read face for the insights aggregation (src/dashboard/insights-store.ts

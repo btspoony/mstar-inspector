@@ -292,4 +292,10 @@ export const zhCN: Dictionary = {
       dbRejected: "无法存储该 App — 控制台数据库拒绝了写入。你可以重新提交。",
     },
   },
+  home: {
+    insightsHeading: "总体洞察",
+    viewFull: "查看完整洞察 →",
+    trendHint: "最近一周 {week}：{reviews} · {findings}",
+    noTrend: "此窗口内暂无近期趋势。",
+  },
 };

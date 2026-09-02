@@ -312,6 +312,12 @@ export const en = {
       dbRejected: "The App could not be stored — the dashboard database rejected the write. You can resubmit.",
     },
   },
+  home: {
+    insightsHeading: "Overall insights",
+    viewFull: "View full insights →",
+    trendHint: "Latest week {week}: {reviews} · {findings}",
+    noTrend: "No recent trend in this window.",
+  },
 };
 
 /** The dictionary shape — derived from en, the source of truth. */

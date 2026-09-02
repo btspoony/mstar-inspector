@@ -2,7 +2,7 @@
  * Plan 29 T3: navbar model per role/locale (no DOM runner in this stack).
  */
 import { describe, expect, test } from "bun:test";
-import { accountDisplay, buildNavbarModel, otherLocale, visibleNavItems } from "../../src/spa/navbar";
+import { accountDisplay, buildNavbarModel, isNavCurrent, otherLocale, visibleNavItems } from "../../src/spa/navbar";
 import { NAV_ITEMS, t } from "../../src/i18n";
 import { injectSpaBoot, SPA_BOOT_MARKER, type SpaBoot } from "../../src/spa/boot";
 
@@ -12,7 +12,7 @@ const admin: SpaBoot = { locale: "zh_CN", login: "octocat", name: "The Octocat",
 describe("navbar model (plan 29 T3)", () => {
   test("nav order is Apps → Insights → Members", () => {
     expect(NAV_ITEMS.map((item) => item.href)).toEqual([
-      "/dashboard/apps",
+      "/dashboard",
       "/dashboard/insights",
       "/dashboard/members",
     ]);
@@ -20,7 +20,7 @@ describe("navbar model (plan 29 T3)", () => {
 
   test("member does not see Members", () => {
     expect(visibleNavItems("member").map((item) => item.href)).toEqual([
-      "/dashboard/apps",
+      "/dashboard",
       "/dashboard/insights",
     ]);
     const model = buildNavbarModel(member, "/dashboard/insights");
@@ -31,7 +31,7 @@ describe("navbar model (plan 29 T3)", () => {
   test("admin sees Members between Insights and the language toggle", () => {
     const model = buildNavbarModel(admin, "/dashboard/members");
     expect(model.items.map((item) => item.href)).toEqual([
-      "/dashboard/apps",
+      "/dashboard",
       "/dashboard/insights",
       "/dashboard/members",
     ]);
@@ -67,6 +67,18 @@ describe("navbar model (plan 29 T3)", () => {
     );
     expect(model.accountLabel).toBeNull();
     expect(model.items.map((item) => item.label)).toEqual(["Apps", "Insights"]);
+  });
+
+  test("Apps current is /dashboard and settings, not insights (apps page is a 301)", () => {
+    expect(isNavCurrent("/dashboard", "/dashboard")).toBe(true);
+    expect(isNavCurrent("/dashboard", "/dashboard/apps")).toBe(false);
+    expect(isNavCurrent("/dashboard", "/dashboard/apps/acme/settings")).toBe(true);
+    expect(isNavCurrent("/dashboard", "/dashboard/insights")).toBe(false);
+    expect(isNavCurrent("/dashboard", "/dashboard/members")).toBe(false);
+    expect(isNavCurrent("/dashboard", "/dashboard/login")).toBe(false);
+    const home = buildNavbarModel(member, "/dashboard");
+    expect(home.items.find((item) => item.href === "/dashboard")?.current).toBe(true);
+    expect(home.items.find((item) => item.href === "/dashboard/insights")?.current).toBe(false);
   });
 });
 

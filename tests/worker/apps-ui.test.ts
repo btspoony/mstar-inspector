@@ -150,30 +150,30 @@ function reviewEnabled(db: ReturnType<typeof createAppsUiD1>, slug: string): num
   return row?.review_enabled ?? null;
 }
 
-describe("GET /dashboard/apps (plan 29 T6: SPA-owned)", () => {
-  test("HTML navigation GET is served by SPA dispatch (boot-injected index)", async () => {
+describe("GET /dashboard/apps (plan 30 T4: 301 alias to the workbench)", () => {
+  test("HTML navigation GET is 301'd to /dashboard (alias)", async () => {
     const db = await seededWorld();
     const res = await htmlGet("/dashboard/apps", `${SESSION_COOKIE}=${await sessionCookie("hubot")}`, withSpaAssets(makeEnv(db)));
-    expect(res.status).toBe(200);
-    const body = await res.text();
-    expect(body).toContain("window.__BOOT__=");
-    expect(body).not.toContain(SPA_BOOT_MARKER);
+    expect(res.status).toBe(301);
+    expect(res.headers.get("Location")).toBe("/dashboard");
   });
 
-  test("the legacy SSR handler is gone: a non-HTML GET falls through to the legacy app (guard 302, never the old HTML)", async () => {
+  test("a non-HTML GET is 301'd to /dashboard too (alias runs before the legacy app)", async () => {
     const db = await seededWorld();
     const res = await get("/dashboard/apps", "", makeEnv(db));
-    expect(res.status).toBe(302);
-    expect(res.headers.get("Location")).toBe("/dashboard/login");
+    expect(res.status).toBe(301);
+    expect(res.headers.get("Location")).toBe("/dashboard");
   });
 
-  test("the shell header still gains the member-visible Apps entry (non-admin shell stays Members-free)", async () => {
+  test("GET /dashboard with a member session → SPA boot role member (no admin)", async () => {
     const db = await seededWorld();
-    const shell = await get("/dashboard", `${SESSION_COOKIE}=${await sessionCookie("hubot")}`, makeEnv(db));
+    const shell = await get("/dashboard", `${SESSION_COOKIE}=${await sessionCookie("hubot")}`, withSpaAssets(makeEnv(db)));
     expect(shell.status).toBe(200);
     const body = await shell.text();
-    expect(body).toContain('<a href="/dashboard/apps">Apps</a>');
-    expect(body).not.toContain("/dashboard/members");
+    expect(body).toContain("window.__BOOT__=");
+    expect(body).toContain('"login":"hubot"');
+    expect(body).toContain('"role":"member"');
+    expect(body).not.toContain('"role":"admin"');
   });
 });
 

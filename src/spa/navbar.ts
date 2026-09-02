@@ -31,13 +31,25 @@ export function accountDisplay(boot: Pick<SpaBoot, "login" | "name">): string | 
   return boot.login;
 }
 
+/**
+ * Apps href is `/dashboard`. Prefix-matching that path would mark every
+ * dashboard page current. Settings stays under `/dashboard/apps/:slug`
+ * (the legacy `/dashboard/apps` page itself is a Worker 301, plan 30 T4).
+ */
+export function isNavCurrent(href: string, pathname: string): boolean {
+  if (href === "/dashboard") {
+    return pathname === "/dashboard" || pathname.startsWith("/dashboard/apps/");
+  }
+  return pathname === href || pathname.startsWith(`${href}/`);
+}
+
 export function buildNavbarModel(boot: SpaBoot, pathname: string): NavbarModel {
   return {
     brand: t(boot.locale, "nav.brand"),
     items: visibleNavItems(boot.role).map((item) => ({
       href: item.href,
       label: t(boot.locale, item.labelKey),
-      current: pathname === item.href || pathname.startsWith(`${item.href}/`),
+      current: isNavCurrent(item.href, pathname),
     })),
     languageLabel: t(boot.locale, "nav.language"),
     languageTarget: otherLocale(boot.locale),

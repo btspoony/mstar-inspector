@@ -91,6 +91,12 @@
   margin-left: auto;
 }
 
+.cardHeader {
+  display: flex;
+  justify-content: flex-end;
+  align-items: center;
+}
+
 .form {
   display: flex;
   flex-direction: column;
