@@ -7,32 +7,17 @@
  * through to the legacy app's membership guard).
  */
 import { describe, expect, test } from "bun:test";
-import type { Fetcher } from "@cloudflare/workers-types";
 import worker from "../../src/worker/index";
 import type { Env } from "../../src/worker/env";
-import { SPA_BOOT_MARKER } from "../../src/spa/boot";
-
-const INDEX_HTML = `<!doctype html><html><head>${SPA_BOOT_MARKER}</head><body>spa</body></html>`;
-
-function stubAssets(): Fetcher {
-  return {
-    fetch: async (input: Request | URL | string) => {
-      const request = input instanceof Request ? input : new Request(String(input));
-      const pathname = new URL(request.url).pathname;
-      if (pathname !== "/index.html") return new Response("missing", { status: 404 });
-      return new Response(INDEX_HTML, { headers: { "content-type": "text/html; charset=utf-8" } });
-    },
-  } as unknown as Fetcher;
-}
+import { SPA_BOOT_MARKER, withSpaAssets } from "../helpers/spa";
 
 function makeEnv(overrides: Partial<Env> = {}): Env {
-  return {
+  return withSpaAssets({
     REVIEW_QUEUE: { send: async () => {} } as unknown as Env["REVIEW_QUEUE"],
     IDEMPOTENCY_KV: { get: async () => null, put: async () => {} } as unknown as Env["IDEMPOTENCY_KV"],
-    ASSETS: stubAssets(),
     DASHBOARD_SESSION_SECRET: "test-dashboard-session-secret-32-bytes!",
     ...overrides,
-  } as Env;
+  } as Env);
 }
 
 describe("GET /dashboard/insights (plan 29 T6: SPA-owned)", () => {

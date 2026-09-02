@@ -20,7 +20,7 @@ export const zhCN: Dictionary = {
     signedInAs: "已登录：{name}",
   },
   common: {
-    pageTitle: "{page} — mstar-inspector",
+    pageTitle: "{page} — {brand}",
     time: {
       justNow: "刚刚",
       minuteAgo: "{count} 分钟前",

@@ -748,9 +748,8 @@ function canManageApp(user: DashboardUserRow, app: GithubAppRow): boolean {
  *
  * The summaries come from the store's BATCHED deliverySummaries face
  * (plan 20 QC wave 1, W-1): exactly TWO D1 statements for any N instead
- * of the per-App 2N fan-out — this helper runs on every POST re-render
- * (three action paths plus the bare GET), so the statement count must not
- * scale with the App count.
+ * of the per-App 2N fan-out — this helper runs on GET /api/apps (the SPA
+ * JSON face), so the statement count must not scale with the App count.
  */
 async function appsListWithHealth(
   db: DashboardDb,
@@ -829,9 +828,8 @@ dashboardApp.post("/apps/:slug/delete", (c) => appStatusAction(c, "delete"));
 // soft-deleted apps are equally invisible (→ 404, zero writes), then
 // creator-or-admin (→ 403 forbiddenPage, zero writes). Confirm-free and
 // reversible (pause ≠ disable — the webhook face stays healthy while
-// paused); the response re-renders the Apps list with a notice, so the
-// state change is visible immediately (the settings page reads the row
-// fresh on every GET).
+// paused). Plan 29 T6: the response is plain 200 "ok"; the SPA refetches
+// the JSON face rather than re-rendering HTML.
 
 /**
  * One handler for the two pinned review-action routes. The idempotent no-op
@@ -1369,11 +1367,12 @@ dashboardApp.get("/", async (c) => {
 const INSIGHTS_REPO_PATTERN = /^[^/\s]+\/[^/\s]+$/;
 
 /**
- * Shared query-param parse for BOTH insights faces (QC W-C): window
- * (integer days, default 30) + optional repo owner/repo filter. Returns the
- * parsed values or the 400 reason; each route keeps its own 400 shape (JSON
- * error body vs HTML notice page). The >90 clamp stays in the store — the
- * single clamp point — and both routes echo the EFFECTIVE window.
+ * Query-param parse for the insights JSON face (QC W-C): window (integer
+ * days, default 30) + optional repo owner/repo filter. Returns the parsed
+ * values or the 400 reason; the route answers 400 with a JSON error body
+ * (the HTML notice page retired with GET /insights in plan 29 T6). The
+ * >90 clamp stays in the store — the single clamp point — and the route
+ * echoes the EFFECTIVE window.
  */
 type InsightsParams =
   | { ok: true; windowDays: number; repoFilter?: { owner: string; repo: string }; rawRepo?: string }

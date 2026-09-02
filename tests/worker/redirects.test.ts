@@ -51,6 +51,31 @@ describe("normalizeDashboardTrailingSlash (plan 29 T3)", () => {
   test("does not 301 /dashboard/apps as a path alias (plan 30)", () => {
     expect(normalizeDashboardTrailingSlash("GET", "/dashboard/apps")).toBeNull();
   });
+
+  test("trailing slash on every SPA_PAGES path strips in one hop", () => {
+    const spaTrailing = [
+      "/dashboard/insights/",
+      "/dashboard/members/",
+      "/dashboard/apps/",
+      "/dashboard/login/",
+      "/dashboard/apps/acme/settings/",
+    ];
+    for (const path of spaTrailing) {
+      expect(normalizeDashboardTrailingSlash("GET", path), path).toBe(path.slice(0, -1));
+      expect(normalizeDashboardTrailingSlash("HEAD", path), `HEAD ${path}`).toBe(path.slice(0, -1));
+    }
+  });
+
+  test("webhook, unslashed API, and POST never 301", () => {
+    expect(normalizeDashboardTrailingSlash("GET", "/webhook/acme/")).toBeNull();
+    expect(normalizeDashboardTrailingSlash("GET", "/dashboard/api/apps")).toBeNull();
+    expect(normalizeDashboardTrailingSlash("POST", "/dashboard/insights/")).toBeNull();
+    expect(normalizeDashboardTrailingSlash("POST", "/dashboard/login/")).toBeNull();
+  });
+
+  test("GET /dashboard/api/apps/ is a /dashboard* GET so it 301s (current spec)", () => {
+    expect(normalizeDashboardTrailingSlash("GET", "/dashboard/api/apps/")).toBe("/dashboard/api/apps");
+  });
 });
 
 describe("trailing-slash middleware mount (plan 29 T3)", () => {
@@ -79,5 +104,47 @@ describe("trailing-slash middleware mount (plan 29 T3)", () => {
       env(),
     );
     expect(res.status).not.toBe(301);
+  });
+
+  test("GET trailing slash on every SPA_PAGES path returns 301 Location without the slash", async () => {
+    const spaTrailing = [
+      "/dashboard/insights/",
+      "/dashboard/members/",
+      "/dashboard/apps/",
+      "/dashboard/login/",
+      "/dashboard/apps/acme/settings/",
+    ];
+    for (const path of spaTrailing) {
+      const res = await worker.fetch(new Request(`https://worker.local${path}?q=1`), env());
+      expect(res.status, path).toBe(301);
+      const location = new URL(res.headers.get("Location") ?? "", "https://worker.local");
+      expect(location.pathname, path).toBe(path.slice(0, -1));
+      expect(location.search, path).toBe("?q=1");
+    }
+  });
+
+  test("GET /webhook/acme/ is not a 301", async () => {
+    const res = await worker.fetch(new Request("https://worker.local/webhook/acme/"), env());
+    expect(res.status).not.toBe(301);
+  });
+
+  test("POST /dashboard/apps/ is not a 301", async () => {
+    const res = await worker.fetch(
+      new Request("https://worker.local/dashboard/apps/", { method: "POST" }),
+      env(),
+    );
+    expect(res.status).not.toBe(301);
+  });
+
+  test("GET /dashboard/api/apps (no slash) is not a 301", async () => {
+    const res = await worker.fetch(new Request("https://worker.local/dashboard/api/apps"), env());
+    expect(res.status).not.toBe(301);
+  });
+
+  test("GET /dashboard/api/apps/ is a /dashboard* GET so it 301s (current spec)", async () => {
+    const res = await worker.fetch(new Request("https://worker.local/dashboard/api/apps/"), env());
+    expect(res.status).toBe(301);
+    const location = new URL(res.headers.get("Location") ?? "", "https://worker.local");
+    expect(location.pathname).toBe("/dashboard/api/apps");
   });
 });

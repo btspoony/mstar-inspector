@@ -8,7 +8,7 @@
 import { t, type Locale } from "../i18n";
 
 /** Escape GitHub-sourced user data before HTML interpolation (XSS guard). */
-export function escapeHtml(value: string): string {
+function escapeHtml(value: string): string {
   return value
     .replaceAll("&", "&amp;")
     .replaceAll("<", "&lt;")
@@ -331,7 +331,7 @@ function page(title: string, body: string, locale: Locale = "en"): string {
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>${escapeHtml(t(locale, "common.pageTitle", { page: title }))}</title>
+<title>${escapeHtml(t(locale, "common.pageTitle", { page: title, brand: t(locale, "nav.brand") }))}</title>
 ${STYLE}
 </head>
 <body>${body}</body>

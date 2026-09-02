@@ -29,7 +29,7 @@ export const en = {
     signedInAs: "Signed in as {name}",
   },
   common: {
-    pageTitle: "{page} — mstar-inspector",
+    pageTitle: "{page} — {brand}",
     time: {
       justNow: "just now",
       minuteAgo: "{count} minute ago",

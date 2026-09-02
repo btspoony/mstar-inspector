@@ -3,7 +3,7 @@
  */
 import { describe, expect, test } from "bun:test";
 import { accountDisplay, buildNavbarModel, otherLocale, visibleNavItems } from "../../src/spa/navbar";
-import { NAV_ITEMS } from "../../src/i18n";
+import { NAV_ITEMS, t } from "../../src/i18n";
 import { injectSpaBoot, SPA_BOOT_MARKER, type SpaBoot } from "../../src/spa/boot";
 
 const member: SpaBoot = { locale: "en", login: "mallory", name: "Mallory", role: "member" };
@@ -38,6 +38,12 @@ describe("navbar model (plan 29 T3)", () => {
     expect(model.items.map((item) => item.label)).toEqual(["应用", "洞察", "成员"]);
     expect(model.languageLabel).toBe("EN");
     expect(model.languageTarget).toBe("en");
+  });
+
+  test("brand is t(locale, nav.brand)", () => {
+    expect(buildNavbarModel(member, "/dashboard/apps").brand).toBe(t("en", "nav.brand"));
+    expect(buildNavbarModel(admin, "/dashboard/members").brand).toBe(t("zh_CN", "nav.brand"));
+    expect(buildNavbarModel(member, "/dashboard/apps").brand).toBe("Morning Star Inspector");
   });
 
   test("language toggle targets the other locale", () => {

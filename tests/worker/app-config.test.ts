@@ -53,7 +53,7 @@ import { SESSION_COOKIE, createSessionValue } from "../../src/dashboard/session"
 import { createUser, type DashboardD1 } from "../../src/dashboard/users";
 import type { Env } from "../../src/worker/env";
 import type { D1StatementLike } from "../../src/store/types";
-import { SPA_BOOT_MARKER } from "../../src/spa/boot";
+import { SPA_BOOT_MARKER, htmlGet, withSpaAssets } from "../helpers/spa";
 
 const MIGRATIONS_DIR = join(import.meta.dir, "../../migrations");
 /** base64 of exactly 32 bytes — the secretbox master-key requirement. */
@@ -217,33 +217,7 @@ async function postForm(
   );
 }
 
-// Plan 29 T6: the settings page is SPA-owned — HTML GETs are served by
-// spa-dispatch (ASSETS index + boot), the legacy SSR handler is gone. The
-// data contract lives on GET /api/apps/:slug/settings (spa-page-apis).
-const INDEX_HTML = `<!doctype html><html><head>${SPA_BOOT_MARKER}</head><body>spa</body></html>`;
-
-function spaEnv(db: unknown): Env {
-  return {
-    ...makeEnv(db),
-    ASSETS: {
-      fetch: async (input: Request | URL | string) => {
-        const request = input instanceof Request ? input : new Request(String(input));
-        const pathname = new URL(request.url).pathname;
-        if (pathname !== "/index.html") return new Response("missing", { status: 404 });
-        return new Response(INDEX_HTML, { headers: { "content-type": "text/html; charset=utf-8" } });
-      },
-    } as unknown as Env["ASSETS"],
-  } as Env;
-}
-
-async function htmlGet(path: string, cookie: string, env: Env): Promise<Response> {
-  return await worker.fetch(
-    new Request(`https://worker.local${path}`, {
-      headers: { Accept: "text/html", ...(cookie ? { Cookie: cookie } : {}) },
-    }),
-    env,
-  );
-}
+// Plan 29 T6/T7: settings HTML GET is SPA-owned (shared spa helper).
 
 const SETTINGS = "/dashboard/apps/mallorys-app/settings";
 
@@ -1123,7 +1097,7 @@ describe("duplication locks", () => {
 describe("GET /dashboard/apps/:slug/settings (plan 29 T6: SPA-owned)", () => {
   test("HTML navigation GET is served by SPA dispatch (boot-injected index)", async () => {
     const { db } = await seededWorld();
-    const res = await htmlGet(SETTINGS, `${SESSION_COOKIE}=${await sessionCookie("mallory")}`, spaEnv(db));
+    const res = await htmlGet(SETTINGS, `${SESSION_COOKIE}=${await sessionCookie("mallory")}`, withSpaAssets(makeEnv(db)));
     expect(res.status).toBe(200);
     const body = await res.text();
     expect(body).toContain("window.__BOOT__=");

@@ -20,7 +20,6 @@
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import type { Fetcher } from "@cloudflare/workers-types";
 import worker from "../../src/worker/index";
 import { createSecretbox } from "../../src/dashboard/secretbox";
 import type { Env } from "../../src/worker/env";
@@ -28,7 +27,7 @@ import { createAppsStore, type GithubAppRow } from "../../src/dashboard/apps-sto
 import { SESSION_COOKIE, createSessionValue } from "../../src/dashboard/session";
 import { createUser, type DashboardD1 } from "../../src/dashboard/users";
 import { createTestD1 } from "../store/helpers";
-import { SPA_BOOT_MARKER } from "../../src/spa/boot";
+import { SPA_BOOT_MARKER, htmlGet, withSpaAssets } from "../helpers/spa";
 
 const SESSION_SECRET = "test-dashboard-session-secret-32-bytes!";
 const MIGRATIONS_DIR = join(import.meta.dir, "../../migrations");
@@ -127,33 +126,7 @@ async function get(path: string, cookie: string, env: Env): Promise<Response> {
   return await worker.fetch(new Request(`https://worker.local${path}`, { headers: { Cookie: cookie } }), env);
 }
 
-// Plan 29 T6: the apps list and settings pages are SPA-owned — HTML GETs are
-// served by spa-dispatch (ASSETS index + boot), the legacy SSR handlers are
-// gone. The data contracts live on the JSON faces (spa-page-apis.test.ts).
-const INDEX_HTML = `<!doctype html><html><head>${SPA_BOOT_MARKER}</head><body>spa</body></html>`;
-
-function spaEnv(db: unknown): Env {
-  return {
-    ...makeEnv(db),
-    ASSETS: {
-      fetch: async (input: Request | URL | string) => {
-        const request = input instanceof Request ? input : new Request(String(input));
-        const pathname = new URL(request.url).pathname;
-        if (pathname !== "/index.html") return new Response("missing", { status: 404 });
-        return new Response(INDEX_HTML, { headers: { "content-type": "text/html; charset=utf-8" } });
-      },
-    } as unknown as Fetcher,
-  } as Env;
-}
-
-async function htmlGet(path: string, cookie: string, env: Env): Promise<Response> {
-  return await worker.fetch(
-    new Request(`https://worker.local${path}`, {
-      headers: { Accept: "text/html", ...(cookie ? { Cookie: cookie } : {}) },
-    }),
-    env,
-  );
-}
+// Plan 29 T6/T7: apps/settings HTML GETs are SPA-owned (shared spa helper).
 
 async function post(path: string, cookie: string, env: Env): Promise<Response> {
   return await worker.fetch(
@@ -180,7 +153,7 @@ function reviewEnabled(db: ReturnType<typeof createAppsUiD1>, slug: string): num
 describe("GET /dashboard/apps (plan 29 T6: SPA-owned)", () => {
   test("HTML navigation GET is served by SPA dispatch (boot-injected index)", async () => {
     const db = await seededWorld();
-    const res = await htmlGet("/dashboard/apps", `${SESSION_COOKIE}=${await sessionCookie("hubot")}`, spaEnv(db));
+    const res = await htmlGet("/dashboard/apps", `${SESSION_COOKIE}=${await sessionCookie("hubot")}`, withSpaAssets(makeEnv(db)));
     expect(res.status).toBe(200);
     const body = await res.text();
     expect(body).toContain("window.__BOOT__=");
@@ -421,7 +394,7 @@ describe("GET /dashboard/apps/:slug/settings (plan 29 T6: SPA-owned)", () => {
 
   test("HTML navigation GET is served by SPA dispatch (boot-injected index)", async () => {
     const db = await seededWorld();
-    const res = await htmlGet(SETTINGS, await ownerCookie(), spaEnv(db));
+    const res = await htmlGet(SETTINGS, await ownerCookie(), withSpaAssets(makeEnv(db)));
     expect(res.status).toBe(200);
     const body = await res.text();
     expect(body).toContain("window.__BOOT__=");

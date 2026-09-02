@@ -8,10 +8,9 @@ import type { Env } from "../../src/worker/env";
 import { createSessionValue, SESSION_COOKIE } from "../../src/dashboard/session";
 import { LOCALE_COOKIE } from "../../src/i18n";
 import { SPA_BOOT_MARKER } from "../../src/spa/boot";
+import { SPA_INDEX_HTML, htmlGetRequest } from "../helpers/spa";
 
 const SESSION_SECRET = "test-dashboard-session-secret-32-bytes!";
-const INDEX_HTML = `<!doctype html><html><head>${SPA_BOOT_MARKER}</head><body>spa</body></html>`;
-
 type AssetCall = { method: string; pathname: string };
 
 function stubAssets(
@@ -38,23 +37,18 @@ function makeEnv(overrides: Partial<Env> = {}): { env: Env; calls: AssetCall[] }
       get: async () => null,
       put: async () => {},
     } as unknown as Env["IDEMPOTENCY_KV"],
-    ASSETS: stubAssets({ "/index.html": INDEX_HTML, "/assets/app.js": "js" }, calls),
+    ASSETS: stubAssets({ "/index.html": SPA_INDEX_HTML, "/assets/app.js": "js" }, calls),
     DASHBOARD_SESSION_SECRET: SESSION_SECRET,
     ...overrides,
   };
   return { env, calls };
 }
 
-function htmlGet(path: string, extra?: Record<string, string>): Request {
-  return new Request(`https://worker.local${path}`, {
-    headers: { Accept: "text/html", ...extra },
-  });
-}
 
 describe("SPA dispatch (plan 29 T3)", () => {
   test("SPA page GET with Accept: text/html fetches /index.html", async () => {
     const { env, calls } = makeEnv();
-    const res = await worker.fetch(htmlGet("/dashboard/insights"), env);
+    const res = await worker.fetch(htmlGetRequest("/dashboard/insights"), env);
     expect(res.status).toBe(200);
     expect(calls).toEqual([{ method: "GET", pathname: "/index.html" }]);
     const body = await res.text();
@@ -72,7 +66,7 @@ describe("SPA dispatch (plan 29 T3)", () => {
     ];
     for (const path of pages) {
       const { env, calls } = makeEnv();
-      const res = await worker.fetch(htmlGet(path), env);
+      const res = await worker.fetch(htmlGetRequest(path), env);
       expect(res.status, path).toBe(200);
       expect(calls, path).toEqual([{ method: "GET", pathname: "/index.html" }]);
     }
@@ -92,13 +86,13 @@ describe("SPA dispatch (plan 29 T3)", () => {
 
   test("non-page GET does not call ASSETS for index.html", async () => {
     const { env, calls } = makeEnv();
-    await worker.fetch(htmlGet("/dashboard/manifest/callback"), env);
+    await worker.fetch(htmlGetRequest("/dashboard/manifest/callback"), env);
     expect(calls.filter((c) => c.pathname === "/index.html")).toEqual([]);
   });
 
   test("GET /dashboard (legacy home) is not an SPA page", async () => {
     const { env, calls } = makeEnv();
-    await worker.fetch(htmlGet("/dashboard"), env);
+    await worker.fetch(htmlGetRequest("/dashboard"), env);
     expect(calls).toEqual([]);
   });
 
@@ -149,18 +143,30 @@ describe("SPA dispatch (plan 29 T3)", () => {
   test("boot script carries locale from the mstar_locale cookie", async () => {
     const { env } = makeEnv();
     const res = await worker.fetch(
-      htmlGet("/dashboard/apps", { Cookie: `${LOCALE_COOKIE}=zh_CN` }),
+      htmlGetRequest("/dashboard/apps", { Cookie: `${LOCALE_COOKIE}=zh_CN` }),
       env,
     );
     const body = await res.text();
     expect(body).toContain('"locale":"zh_CN"');
   });
 
+  test("login HTML GET with Accept-Language zh injects locale zh_CN in boot (plan 29 T7)", async () => {
+    const { env } = makeEnv();
+    const res = await worker.fetch(
+      htmlGetRequest("/dashboard/login", { "Accept-Language": "zh-CN,zh;q=0.9" }),
+      env,
+    );
+    expect(res.status).toBe(200);
+    const body = await res.text();
+    expect(body).toContain('"locale":"zh_CN"');
+    expect(body).toContain("window.__BOOT__=");
+  });
+
   test("boot script carries login from the session cookie", async () => {
     const { env } = makeEnv();
     const session = await createSessionValue("octocat", "The Octocat", SESSION_SECRET);
     const res = await worker.fetch(
-      htmlGet("/dashboard/login", { Cookie: `${SESSION_COOKIE}=${session}` }),
+      htmlGetRequest("/dashboard/login", { Cookie: `${SESSION_COOKIE}=${session}` }),
       env,
     );
     const body = await res.text();

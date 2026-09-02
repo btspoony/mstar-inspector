@@ -60,7 +60,7 @@ import { normalizePrivateKey } from "../../src/dashboard/private-key";
 import { normalizePrivateKey as pipelineNormalizePrivateKey } from "../../src/pipeline/comment";
 import { reviewedAt, mondayOf } from "../../src/dashboard/insights-dates";
 import { LOCALE_COOKIE } from "../../src/i18n";
-import { SPA_BOOT_MARKER } from "../../src/spa/boot";
+import { SPA_BOOT_MARKER, htmlGet, withSpaAssets } from "../helpers/spa";
 
 const SESSION_SECRET = "test-dashboard-session-secret-32-bytes!";
 const CLIENT_ID = "oauth-client-id";
@@ -388,6 +388,19 @@ describe("/dashboard routes", () => {
     expect(body).toContain("Not in this iteration (B3).");
     expect(body).toContain('aria-disabled="true"');
     expect(body).not.toContain("Not in B0");
+  });
+
+  test("document title is Dashboard — Morning Star Inspector (nav.brand, plan 29 T7)", async () => {
+    const session = await createSessionValue("octocat", null, SESSION_SECRET);
+    const res = await worker.fetch(
+      dashboardRequest("/dashboard", `${SESSION_COOKIE}=${session}`),
+      makeEnv(),
+    );
+    expect(res.status).toBe(200);
+    const body = await res.text();
+    expect(body).toContain("<title>Dashboard — Morning Star Inspector</title>");
+    expect(body).not.toContain("<title>mstar-inspector");
+    expect(body).not.toContain("mstar-inspector</title>");
   });
 
   test("Members entry is admin-aware: member shell renders no /dashboard/members reference (F-001)", async () => {
@@ -1320,6 +1333,26 @@ describe("/dashboard confirm resume (Bugbot: confirm step must be resumable)", (
     expect(noHold.status).toBe(302);
     expect(noHold.headers.get("Location")).toBe("/dashboard");
   });
+
+  test("Accept-Language zh renders the confirm page in zh_CN (plan 29 T7)", async () => {
+    const session = await createSessionValue("octocat", null, SESSION_SECRET);
+    const hold = await freshHold();
+    const res = await worker.fetch(
+      new Request("https://worker.local/dashboard/manifest/confirm", {
+        headers: {
+          Cookie: `${SESSION_COOKIE}=${session}; ${MANIFEST_HOLD_COOKIE}=${hold}`,
+          "Accept-Language": "zh-CN,zh;q=0.9",
+        },
+      }),
+      makeEnv(),
+    );
+    expect(res.status).toBe(200);
+    const body = await res.text();
+    expect(body).toContain('lang="zh-CN"');
+    expect(body).toContain("创建 App");
+    expect(body).not.toContain("Create App");
+    expect(body).not.toContain("REVIEW_ENABLED");
+  });
 });
 
 describe("dashboard private-key normalization (private-key.ts)", () => {
@@ -1401,6 +1434,7 @@ describe("/dashboard manifest commit (plan 13 B5 T3: manifest → D1, zero CF AP
     withSession?: boolean;
     sessionLogin?: string;
     holdValue?: string | null;
+    extraHeaders?: Record<string, string>;
   }): Promise<Response> {
     const cookies: string[] = [];
     if (args.withSession ?? true) {
@@ -1412,7 +1446,7 @@ describe("/dashboard manifest commit (plan 13 B5 T3: manifest → D1, zero CF AP
     return worker.fetch(
       new Request("https://worker.local/dashboard/manifest/commit", {
         method: "POST",
-        headers: { Cookie: cookies.join("; ") },
+        headers: { Cookie: cookies.join("; "), ...args.extraHeaders },
       }),
       args.env ?? commitEnv(),
     );
@@ -1742,6 +1776,35 @@ describe("/dashboard manifest commit (plan 13 B5 T3: manifest → D1, zero CF AP
     expect(res.headers.get("Location")).toBe("/dashboard/login");
     expect(rec.urls).toHaveLength(0);
     expectHoldKept(res);
+  });
+
+  test("Accept-Language zh renders the success page in zh_CN (plan 29 T7)", async () => {
+    stubFetchRecording();
+    const res = await doCommit({
+      holdValue: await freshHold(),
+      extraHeaders: { "Accept-Language": "zh-CN,zh;q=0.9" },
+    });
+    expect(res.status).toBe(200);
+    const body = await res.text();
+    expect(body).toContain('lang="zh-CN"');
+    expect(body).toContain("GitHub App 已连接");
+    expect(body).not.toContain("GitHub App connected");
+    expect(body).not.toContain("REVIEW_ENABLED");
+  });
+
+  test("Accept-Language zh renders the retryable commit error in zh_CN (plan 29 T7)", async () => {
+    stubFetchRecording();
+    const res = await doCommit({
+      env: commitEnv({ DASHBOARD_ENCRYPTION_KEY: undefined }),
+      holdValue: await freshHold(),
+      extraHeaders: { "Accept-Language": "zh-CN,zh;q=0.9" },
+    });
+    expect(res.status).toBe(500);
+    const body = await res.text();
+    expect(body).toContain('lang="zh-CN"');
+    expect(body).toContain("GitHub App 设置失败");
+    expect(body).not.toContain("GitHub App setup failed");
+    expect(body).not.toContain("REVIEW_ENABLED");
   });
 });
 
@@ -2411,30 +2474,7 @@ describe("members page (plan 12 T3, admin-only)", () => {
   const memberCookie = async () =>
     `${SESSION_COOKIE}=${await createSessionValue("mallory", null, SESSION_SECRET)}`;
 
-  // Plan 29 T6: /dashboard/members is SPA-owned — the HTML GET is served by
-  // spa-dispatch (ASSETS index + boot), the legacy SSR handler is gone.
-  const INDEX_HTML = `<!doctype html><html><head>${SPA_BOOT_MARKER}</head><body>spa</body></html>`;
-  function spaEnv(db: DashboardD1): Env {
-    return {
-      ...makeDbEnv(db),
-      ASSETS: {
-        fetch: async (input: Request | URL | string) => {
-          const request = input instanceof Request ? input : new Request(String(input));
-          const pathname = new URL(request.url).pathname;
-          if (pathname !== "/index.html") return new Response("missing", { status: 404 });
-          return new Response(INDEX_HTML, { headers: { "content-type": "text/html; charset=utf-8" } });
-        },
-      } as unknown as Env["ASSETS"],
-    } as Env;
-  }
-  async function membersHtmlGet(cookie: string, env: Env): Promise<Response> {
-    return await worker.fetch(
-      new Request("https://worker.local/dashboard/members", {
-        headers: { Accept: "text/html", ...(cookie ? { Cookie: cookie } : {}) },
-      }),
-      env,
-    );
-  }
+  // Plan 29 T6/T7: /dashboard/members is SPA-owned (shared spa helper).
 
   async function membersGet(cookie: string, env?: Env): Promise<Response> {
     return await worker.fetch(dashboardRequest("/dashboard/members", cookie), env ?? makeEnv());
@@ -2460,7 +2500,7 @@ describe("members page (plan 12 T3, admin-only)", () => {
     const db = createDashboardTestD1();
     await createUser(db, { login: "octocat", role: "admin" });
     // HTML navigation GET → SPA index (the SPA guards members client-side).
-    const get = await membersHtmlGet("", spaEnv(db));
+    const get = await htmlGet("/dashboard/members", "", withSpaAssets(makeDbEnv(db)));
     expect(get.status).toBe(200);
     expect(await get.text()).toContain("window.__BOOT__=");
     const post = await membersPost("invite", "", "login=hubot", makeDbEnv(db));
@@ -2468,10 +2508,17 @@ describe("members page (plan 12 T3, admin-only)", () => {
     expect(post.headers.get("Location")).toBe("/dashboard/login");
   });
 
+  test("the legacy SSR handler is gone: a non-HTML GET falls through to the legacy app (guard 302)", async () => {
+    const db = createDashboardTestD1();
+    const res = await membersGet("", makeDbEnv(db));
+    expect(res.status).toBe(302);
+    expect(res.headers.get("Location")).toBe("/dashboard/login");
+  });
+
   test("admin HTML GET → 200 SPA index (the members data contract lives on GET /api/members)", async () => {
     const db = createDashboardTestD1();
     await createUser(db, { login: "octocat", role: "admin" });
-    const res = await membersHtmlGet(await adminCookie(), spaEnv(db));
+    const res = await htmlGet("/dashboard/members", await adminCookie(), withSpaAssets(makeDbEnv(db)));
     expect(res.status).toBe(200);
     const body = await res.text();
     expect(body).toContain("window.__BOOT__=");
@@ -2482,7 +2529,7 @@ describe("members page (plan 12 T3, admin-only)", () => {
     const db = createDashboardTestD1();
     await createUser(db, { login: "octocat", role: "admin" });
     await createUser(db, { login: "mallory", role: "member" });
-    const res = await membersHtmlGet(await memberCookie(), spaEnv(db));
+    const res = await htmlGet("/dashboard/members", await memberCookie(), withSpaAssets(makeDbEnv(db)));
     expect(res.status).toBe(200);
     expect(await res.text()).toContain("window.__BOOT__=");
   });

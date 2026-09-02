@@ -4,9 +4,11 @@
  *
  * The zh-CN type-level parity (missing key = compile error) is enforced by
  * `zhCN: Dictionary` in src/i18n/zh-CN.ts — this file adds the runtime
- * key-set equality check and the behavior tests.
+ * bidirectional keyof walk and the behavior tests.
  */
 import { describe, expect, test } from "bun:test";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { en, type Dictionary } from "../../src/i18n/en";
 import { zhCN } from "../../src/i18n/zh-CN";
 import { LOCALE_COOKIE, LOCALES, resolveLocale, serializeLocaleCookie, type Locale } from "../../src/i18n/resolve";
@@ -36,8 +38,18 @@ describe("dictionary parity (plan 29 T2)", () => {
     expect(zh).toBeDefined();
   });
 
-  test("en and zh-CN have identical runtime key sets", () => {
-    expect(collectKeys(zhCN).sort()).toEqual(collectKeys(en).sort());
+  test("every en leaf exists in zh-CN (runtime keyof walk)", () => {
+    const zhKeys = new Set(collectKeys(zhCN));
+    for (const key of collectKeys(en)) {
+      expect(zhKeys.has(key), `zh-CN missing ${key}`).toBe(true);
+    }
+  });
+
+  test("every zh-CN leaf exists in en (runtime keyof walk)", () => {
+    const enKeys = new Set(collectKeys(en));
+    for (const key of collectKeys(zhCN)) {
+      expect(enKeys.has(key), `en missing ${key}`).toBe(true);
+    }
   });
 
   test("every dictionary value is a plain string (no nested non-leaf values)", () => {
@@ -113,6 +125,8 @@ describe("resolveLocale decision matrix (plan 29 T2)", () => {
     { name: "no cookie + AL ZH-CN uppercase → zh_CN", acceptLanguage: "ZH-CN,zh;q=0.9", expected: "zh_CN" },
     // first-tag-only, no q-value parsing: a later zh tag must NOT override an en primary
     { name: "no cookie + AL en-first with later zh → en", acceptLanguage: "en-US,en;q=0.9,zh-CN;q=0.8", expected: "en" },
+    // Inverse: a low-q zh first tag still wins — q-values are ignored.
+    { name: "no cookie + AL low-q zh first still wins (no q-value parsing)", acceptLanguage: "zh-CN;q=0.1,en;q=1.0", expected: "zh_CN" },
     // bare / underscore tags resolve the same as scripted zh-CN
     { name: "no cookie + AL bare zh → zh_CN", acceptLanguage: "zh", expected: "zh_CN" },
     { name: "no cookie + AL zh_CN underscore → zh_CN", acceptLanguage: "zh_CN", expected: "zh_CN" },
@@ -133,6 +147,19 @@ describe("resolveLocale decision matrix (plan 29 T2)", () => {
       "Accept-Language": "en-US,en;q=0.9",
     });
     expect(resolveLocale(req)).toBe("zh_CN");
+  });
+
+  test("first-tag-only: q-values are not parsed (zh;q=0.1 beats later en;q=1.0)", () => {
+    // Rationale lives on resolveLocale: browsers already order tags by
+    // preference, so honoring a later high-q tag would mis-locale an
+    // en-primary bilingual browser. The first listed tag wins even when
+    // its q-value is lower than a later tag's.
+    expect(
+      resolveLocale(requestWith({ "Accept-Language": "zh-CN;q=0.1,en;q=1.0" })),
+    ).toBe("zh_CN");
+    expect(
+      resolveLocale(requestWith({ "Accept-Language": "en-US,en;q=0.9,zh-CN;q=0.8" })),
+    ).toBe("en");
   });
 });
 
@@ -165,5 +192,49 @@ describe("shared navbar contract (plan 29 T2)", () => {
         expect(label.length).toBeGreaterThan(0);
       }
     }
+  });
+});
+
+describe("document title + login copy (plan 29 T7)", () => {
+  test("common.pageTitle interpolates nav.brand, never the mstar-inspector slug", () => {
+    expect(t("en", "nav.brand")).toBe("Morning Star Inspector");
+    expect(t("zh_CN", "nav.brand")).toBe("Morning Star Inspector");
+    expect(t("en", "common.pageTitle", { page: "Dashboard", brand: t("en", "nav.brand") })).toBe(
+      "Dashboard — Morning Star Inspector",
+    );
+    expect(t("zh_CN", "common.pageTitle", { page: "Dashboard", brand: t("zh_CN", "nav.brand") })).toBe(
+      "Dashboard — Morning Star Inspector",
+    );
+    expect(t("en", "common.pageTitle", { page: "Dashboard", brand: t("en", "nav.brand") })).not.toContain(
+      "mstar-inspector",
+    );
+  });
+
+  test("login-page zh copy is the dictionary source for the SPA", () => {
+    expect(t("zh_CN", "login.heading")).toBe("登录 Morning Star Inspector");
+    expect(t("zh_CN", "login.signIn")).toBe("使用 GitHub 登录");
+    expect(t("en", "login.heading")).toBe("Sign in to Morning Star Inspector");
+    expect(t("en", "login.signIn")).toBe("Sign in with GitHub");
+  });
+});
+
+describe("REVIEW_ENABLED user copy is absent on restyled surfaces (plan 29 T7)", () => {
+  test("no dictionary leaf contains REVIEW_ENABLED", () => {
+    for (const locale of LOCALES) {
+      for (const key of collectKeys(dictionaries[locale])) {
+        const value = t(locale, key as DictionaryKey);
+        expect(value, `${locale} ${key}`).not.toContain("REVIEW_ENABLED");
+      }
+    }
+  });
+
+  test("SPA tsx/ts sources on the restyled surface do not contain REVIEW_ENABLED", () => {
+    const spaRoot = join(import.meta.dir, "../../src/spa");
+    const hits: string[] = [];
+    for (const file of new Bun.Glob("**/*.{ts,tsx}").scanSync({ cwd: spaRoot })) {
+      const text = readFileSync(join(spaRoot, file), "utf8");
+      if (text.includes("REVIEW_ENABLED")) hits.push(file);
+    }
+    expect(hits).toEqual([]);
   });
 });
