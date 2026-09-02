@@ -62,6 +62,23 @@ async function runAppAction(
   await reload();
 }
 
+function CreateAppButton({
+  locale,
+  variant,
+}: {
+  locale: SpaBoot["locale"];
+  variant: "primary" | "secondary";
+}) {
+  const className = variant === "primary" ? styles.btnPrimary : styles.btnSecondary;
+  return (
+    <form method="post" action="/dashboard/manifest/start">
+      <button className={className} type="submit">
+        {t(locale, "apps.create")}
+      </button>
+    </form>
+  );
+}
+
 function AppsList({
   boot,
   payload,
@@ -74,9 +91,19 @@ function AppsList({
   onNotice: (notice: { kind: NoticeKind; message: string } | null) => void;
 }) {
   const locale = boot.locale;
+  if (payload.apps.length === 0) {
+    return (
+      <section className={styles.card}>
+        <p className={styles.status}>{t(locale, "apps.empty")}</p>
+        <CreateAppButton locale={locale} variant="primary" />
+      </section>
+    );
+  }
   return (
     <section className={styles.card}>
-      {payload.apps.length === 0 ? <p className={styles.status}>{t(locale, "apps.empty")}</p> : null}
+      <div className={styles.cardHeader}>
+        <CreateAppButton locale={locale} variant="secondary" />
+      </div>
       <ul className={styles.list}>
         {payload.apps.map((app) => {
           const manageable = canManageApp(payload.viewer, app);
@@ -160,11 +187,6 @@ function AppsList({
           );
         })}
       </ul>
-      <form method="post" action="/dashboard/manifest/start">
-        <button className={styles.btnPrimary} type="submit">
-          {t(locale, "apps.create")}
-        </button>
-      </form>
     </section>
   );
 }
