@@ -49,13 +49,13 @@ async function loadFrontmatter(): Promise<DesignFrontmatter> {
   const md = await Bun.file(DESIGN).text();
   const match = md.match(/^---\n([\s\S]*?)\n---\n/);
   if (!match) throw new Error("DESIGN.md is missing YAML frontmatter");
-  return Bun.YAML.parse(match[1]) as DesignFrontmatter;
+  return Bun.YAML.parse(match[1]!) as DesignFrontmatter;
 }
 
 function cssCustomProperties(block: string): Record<string, string> {
   const out: Record<string, string> = {};
   for (const m of block.matchAll(/--([a-z0-9-]+):\s*([^;]+);/g)) {
-    out[m[1]] = m[2].trim();
+    out[m[1]!] = m[2]!.trim();
   }
   return out;
 }
@@ -108,7 +108,7 @@ describe("DESIGN.md L2 dual-theme tokens", () => {
     expect(fm.typography["button-14"]).toBeDefined();
     for (const token of ["heading-24", "heading-16", "copy-16", "copy-14", "label-14", "button-14"]) {
       for (const field of TYPO_FIELDS) {
-        expect(fm.typography[token][field]).toBeDefined();
+        expect(fm.typography[token]?.[field]).toBeDefined();
       }
     }
 

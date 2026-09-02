@@ -59,6 +59,7 @@ import { createAppsStore } from "../../src/dashboard/apps-store";
 import { normalizePrivateKey } from "../../src/dashboard/private-key";
 import { normalizePrivateKey as pipelineNormalizePrivateKey } from "../../src/pipeline/comment";
 import { reviewedAt, mondayOf } from "../../src/dashboard/insights-dates";
+import { LOCALE_COOKIE } from "../../src/i18n";
 
 const SESSION_SECRET = "test-dashboard-session-secret-32-bytes!";
 const CLIENT_ID = "oauth-client-id";
@@ -596,6 +597,99 @@ describe("/dashboard routes", () => {
       makeEnv({ DASHBOARD_SESSION_SECRET: undefined }),
     );
     expect(res.status).toBe(500);
+  });
+});
+
+describe("/dashboard/locale (plan 29 T2)", () => {
+  const sessionCookie = async () =>
+    `${SESSION_COOKIE}=${await createSessionValue("octocat", null, SESSION_SECRET)}`;
+
+  test("POST valid form locale → 302 to Referer + mstar_locale Set-Cookie", async () => {
+    const res = await worker.fetch(
+      new Request("https://worker.local/dashboard/locale", {
+        method: "POST",
+        headers: {
+          Cookie: await sessionCookie(),
+          "Content-Type": "application/x-www-form-urlencoded",
+          Referer: "https://worker.local/dashboard/insights",
+        },
+        body: "locale=zh_CN",
+      }),
+      makeEnv(),
+    );
+    expect(res.status).toBe(302);
+    expect(res.headers.get("Location")).toBe("https://worker.local/dashboard/insights");
+    const setCookie = res.headers.getSetCookie();
+    expect(setCookie).toHaveLength(1);
+    expect(setCookie[0]).toContain(`${LOCALE_COOKIE}=zh_CN`);
+    expect(setCookie[0]).toContain("HttpOnly");
+    expect(setCookie[0]).toContain("SameSite=Lax");
+    expect(setCookie[0]).toContain("Path=/dashboard");
+  });
+
+  test("POST valid JSON locale without Referer → 302 to /dashboard + Set-Cookie", async () => {
+    const res = await worker.fetch(
+      new Request("https://worker.local/dashboard/locale", {
+        method: "POST",
+        headers: {
+          Cookie: await sessionCookie(),
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ locale: "en" }),
+      }),
+      makeEnv(),
+    );
+    expect(res.status).toBe(302);
+    expect(res.headers.get("Location")).toBe("/dashboard");
+    const setCookie = res.headers.getSetCookie();
+    expect(setCookie).toHaveLength(1);
+    expect(setCookie[0]).toContain(`${LOCALE_COOKIE}=en`);
+  });
+
+  test("POST invalid locale → 400, no Set-Cookie", async () => {
+    const res = await worker.fetch(
+      new Request("https://worker.local/dashboard/locale", {
+        method: "POST",
+        headers: {
+          Cookie: await sessionCookie(),
+          "Content-Type": "application/x-www-form-urlencoded",
+        },
+        body: "locale=fr",
+      }),
+      makeEnv(),
+    );
+    expect(res.status).toBe(400);
+    expect(res.headers.getSetCookie()).toHaveLength(0);
+  });
+
+  test("POST malformed JSON → 400, no Set-Cookie", async () => {
+    const res = await worker.fetch(
+      new Request("https://worker.local/dashboard/locale", {
+        method: "POST",
+        headers: {
+          Cookie: await sessionCookie(),
+          "Content-Type": "application/json",
+        },
+        body: "{not json",
+      }),
+      makeEnv(),
+    );
+    expect(res.status).toBe(400);
+    expect(res.headers.getSetCookie()).toHaveLength(0);
+  });
+
+  test("POST without a session → 302 to login (guard, route never runs)", async () => {
+    const res = await worker.fetch(
+      new Request("https://worker.local/dashboard/locale", {
+        method: "POST",
+        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        body: "locale=zh_CN",
+      }),
+      makeEnv(),
+    );
+    expect(res.status).toBe(302);
+    expect(res.headers.get("Location")).toBe("/dashboard/login");
+    expect(res.headers.getSetCookie()).toHaveLength(0);
   });
 });
 

@@ -102,6 +102,7 @@ import {
   type PageNotice,
 } from "./views";
 import { clampWindow, createInsightsStore } from "./insights-store";
+import { isLocale, serializeLocaleCookie, type Locale } from "../i18n";
 
 export const dashboardApp = new Hono<{ Bindings: Env }>();
 
@@ -285,6 +286,40 @@ dashboardApp.get("/logout", (c) => {
   c.header("Set-Cookie", expireCookie(MANIFEST_HOLD_COOKIE), { append: true });
   c.header("Set-Cookie", expireCookie(MANIFEST_STATE_COOKIE), { append: true });
   return c.redirect("/dashboard/login", 302);
+});
+
+// --- Plan 29 T2: locale preference (i18n) ---
+//
+// POST /dashboard/locale — the navbar [EN/中文] toggle target. Body is
+// JSON or form-encoded `{ locale }`; valid ids are the two Locale values.
+// Writes the mstar_locale cookie (HttpOnly, SameSite=Lax, Path=/dashboard
+// — the session.ts attribute set scoped to the dashboard) and 302s back to
+// the Referer (missing → /dashboard). Invalid locale → 400, no cookie.
+// Sits behind the mount-level guard like every other POST: the toggle only
+// renders in the signed-in navbar. (If Task 4's login page needs a
+// pre-session switcher, add /dashboard/locale to GUARD_EXEMPT_PATHS.)
+
+/** JSON or form body `{ locale }` → valid Locale, or null (invalid/malformed). */
+async function readLocaleFromBody(c: Context<{ Bindings: Env }>): Promise<Locale | null> {
+  const contentType = c.req.header("Content-Type") ?? "";
+  try {
+    if (contentType.includes("application/json")) {
+      const body = (await c.req.json()) as { locale?: unknown };
+      return isLocale(body.locale) ? body.locale : null;
+    }
+    const form = await c.req.parseBody();
+    return isLocale(form.locale) ? form.locale : null;
+  } catch {
+    return null;
+  }
+}
+
+dashboardApp.post("/locale", async (c) => {
+  const locale = await readLocaleFromBody(c);
+  if (!locale) return c.text("invalid locale", 400);
+  c.header("Set-Cookie", serializeLocaleCookie(locale));
+  const referer = c.req.header("Referer");
+  return c.redirect(referer ?? "/dashboard", 302);
 });
 
 // --- B1 Task 1: GitHub App Manifest start + callback (no secret write) ---
