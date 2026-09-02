@@ -1046,6 +1046,30 @@ describe("/dashboard manifest routes (plan 11 Task 1)", () => {
       issues: "write",
     });
   });
+  test("Accept-Language zh renders the start page in zh_CN (plan 29 T5)", async () => {
+    const session = await createSessionValue("octocat", null, SESSION_SECRET);
+    const res = await worker.fetch(
+      new Request("https://worker.local/dashboard/manifest/start", {
+        method: "POST",
+        headers: {
+          Cookie: `${SESSION_COOKIE}=${session}`,
+          "Accept-Language": "zh-CN,zh;q=0.9",
+        },
+      }),
+      makeEnv(),
+    );
+    expect(res.status).toBe(200);
+    const body = await res.text();
+    expect(body).toContain('lang="zh-CN"');
+    expect(body).toContain("在 GitHub 上继续");
+    expect(body).toContain("创建 GitHub App");
+    expect(body).toContain('method="post"');
+    expect(body).toContain("https://github.com/settings/apps/new");
+    expect(body).toContain('name="manifest"');
+    expect(body).not.toContain("REVIEW_ENABLED");
+    expect(body).not.toContain("Continue on GitHub");
+  });
+
   test("long login: manifest name is capped at 34 chars and the start page shows the truncated name", async () => {
     const { body, manifest } = await startManifest("octocat-with-a-long-login");
     const name = manifest.name as string;
