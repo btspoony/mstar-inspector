@@ -1,0 +1,389 @@
+/*
+ * DESIGN.md L2 token layer (plan 29 Task 1).
+ *
+ * Contract:
+ *   - :root = themes.dark (console default)
+ *   - @media (prefers-color-scheme: light) = themes.light
+ *   - No data-theme attribute switcher (plan lock: no navbar theme control)
+ *   - CSS variable names match DESIGN.md color token names so existing
+ *     --background-100 / --gray-1000 / --blue-700 (views.ts STYLE) stay valid
+ *     for pages that later import this file.
+ *
+ * Task 3+ SPA layout consumes this module. Do not build components here.
+ */
+
+:root {
+  color-scheme: dark;
+
+  /* colors — themes.dark (SSOT: DESIGN.md colors: / themes.dark.colors) */
+  --background-100: #09090b;
+  --background-200: #18181b;
+  --background-300: #27272a;
+  --gray-100: #18181b;
+  --gray-200: #1f1f23;
+  --gray-300: #27272a;
+  --gray-400: #3f3f46;
+  --gray-500: #52525b;
+  --gray-600: #71717a;
+  --gray-700: #8b8b94;
+  --gray-800: #d4d4d8;
+  --gray-900: #b0b0b8;
+  --gray-1000: #f4f4f5;
+  --gray-alpha-100: #ffffff12;
+  --gray-alpha-200: #ffffff17;
+  --gray-alpha-300: #ffffff21;
+  --gray-alpha-400: #ffffff2e;
+  --gray-alpha-500: #ffffff3d;
+  --gray-alpha-600: #ffffff5c;
+  --gray-alpha-700: #ffffff8a;
+  --gray-alpha-800: #ffffffa3;
+  --gray-alpha-900: #ffffffc4;
+  --gray-alpha-1000: #ffffffe8;
+  --blue-100: #0c1a2e;
+  --blue-200: #0f2744;
+  --blue-300: #163a5f;
+  --blue-400: #1e4d7a;
+  --blue-500: #2563a8;
+  --blue-600: #3b82f6;
+  --blue-700: #4ea1ff;
+  --blue-800: #7ab8ff;
+  --blue-900: #93c5fd;
+  --blue-1000: #dbeafe;
+  --red-100: #2a1215;
+  --red-200: #3b1219;
+  --red-300: #4c1d24;
+  --red-400: #7f1d1d;
+  --red-500: #991b1b;
+  --red-600: #dc2626;
+  --red-700: #f87171;
+  --red-800: #fca5a5;
+  --red-900: #fecaca;
+  --red-1000: #fee2e2;
+  --amber-100: #27190a;
+  --amber-200: #3b250c;
+  --amber-300: #4c2f0c;
+  --amber-400: #78350f;
+  --amber-500: #92400e;
+  --amber-600: #d97706;
+  --amber-700: #fbbf24;
+  --amber-800: #fcd34d;
+  --amber-900: #fde68a;
+  --amber-1000: #fef3c7;
+  --green-100: #052e16;
+  --green-200: #0a3d1e;
+  --green-300: #14532d;
+  --green-400: #166534;
+  --green-500: #15803d;
+  --green-600: #22c55e;
+  --green-700: #4ade80;
+  --green-800: #86efac;
+  --green-900: #bbf7d0;
+  --green-1000: #dcfce7;
+  --teal-100: #042f2e;
+  --teal-200: #0a3d3b;
+  --teal-300: #115e59;
+  --teal-400: #0f766e;
+  --teal-500: #0d9488;
+  --teal-600: #14b8a6;
+  --teal-700: #2dd4bf;
+  --teal-800: #5eead4;
+  --teal-900: #99f6e4;
+  --teal-1000: #ccfbf1;
+  --purple-100: #2e1065;
+  --purple-200: #3b0764;
+  --purple-300: #4c1d95;
+  --purple-400: #6b21a8;
+  --purple-500: #7e22ce;
+  --purple-600: #9333ea;
+  --purple-700: #c084fc;
+  --purple-800: #d8b4fe;
+  --purple-900: #e9d5ff;
+  --purple-1000: #f3e8ff;
+  --pink-100: #500724;
+  --pink-200: #6b0f31;
+  --pink-300: #9d174d;
+  --pink-400: #9d174d;
+  --pink-500: #be185d;
+  --pink-600: #db2777;
+  --pink-700: #f472b6;
+  --pink-800: #f9a8d4;
+  --pink-900: #fbcfe8;
+  --pink-1000: #fce7f3;
+
+  /* typography primitives */
+  --font-sans: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+  --font-mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+
+  --typo-heading-32-family: var(--font-sans);
+  --typo-heading-32-size: 32px;
+  --typo-heading-32-weight: 600;
+  --typo-heading-32-line: 1.2;
+  --typo-heading-32-tracking: -0.02em;
+
+  --typo-heading-24-family: var(--font-sans);
+  --typo-heading-24-size: 24px;
+  --typo-heading-24-weight: 600;
+  --typo-heading-24-line: 1.25;
+  --typo-heading-24-tracking: -0.01em;
+
+  --typo-heading-20-family: var(--font-sans);
+  --typo-heading-20-size: 20px;
+  --typo-heading-20-weight: 600;
+  --typo-heading-20-line: 1.3;
+  --typo-heading-20-tracking: -0.01em;
+
+  --typo-heading-16-family: var(--font-sans);
+  --typo-heading-16-size: 16px;
+  --typo-heading-16-weight: 600;
+  --typo-heading-16-line: 1.4;
+  --typo-heading-16-tracking: 0;
+
+  --typo-label-14-family: var(--font-sans);
+  --typo-label-14-size: 14px;
+  --typo-label-14-weight: 500;
+  --typo-label-14-line: 1.4;
+  --typo-label-14-tracking: 0;
+
+  --typo-label-12-family: var(--font-sans);
+  --typo-label-12-size: 12px;
+  --typo-label-12-weight: 500;
+  --typo-label-12-line: 1.4;
+  --typo-label-12-tracking: 0.01em;
+
+  --typo-copy-16-family: var(--font-sans);
+  --typo-copy-16-size: 16px;
+  --typo-copy-16-weight: 400;
+  --typo-copy-16-line: 1.6;
+  --typo-copy-16-tracking: 0;
+
+  --typo-copy-14-family: var(--font-sans);
+  --typo-copy-14-size: 14px;
+  --typo-copy-14-weight: 400;
+  --typo-copy-14-line: 1.55;
+  --typo-copy-14-tracking: 0;
+
+  --typo-button-14-family: var(--font-sans);
+  --typo-button-14-size: 14px;
+  --typo-button-14-weight: 500;
+  --typo-button-14-line: 1.4;
+  --typo-button-14-tracking: 0;
+
+  --typo-button-12-family: var(--font-sans);
+  --typo-button-12-size: 12px;
+  --typo-button-12-weight: 500;
+  --typo-button-12-line: 1.4;
+  --typo-button-12-tracking: 0;
+
+  --typo-mono-13-family: var(--font-mono);
+  --typo-mono-13-size: 13px;
+  --typo-mono-13-weight: 400;
+  --typo-mono-13-line: 1.5;
+  --typo-mono-13-tracking: 0;
+
+  /* spacing */
+  --spacing-base: 4px;
+  --spacing-1: 4px;
+  --spacing-2: 8px;
+  --spacing-3: 12px;
+  --spacing-4: 16px;
+  --spacing-6: 24px;
+  --spacing-8: 32px;
+  --spacing-10: 40px;
+  --spacing-16: 64px;
+  --spacing-24: 96px;
+
+  /* rounded */
+  --rounded-sm: 6px;
+  --rounded-md: 12px;
+  --rounded-lg: 16px;
+  --rounded-full: 9999px;
+
+  /* breakpoints (min-width) — documented in DESIGN.md; not applied here */
+  --breakpoint-sm: 640px;
+  --breakpoint-md: 768px;
+  --breakpoint-lg: 900px;
+  --breakpoint-xl: 1280px;
+
+  /* components — reference color vars so they follow the active theme */
+  --button-primary-bg: var(--blue-700);
+  --button-primary-fg: var(--background-100);
+  --button-primary-height: 40px;
+  --button-primary-padding: 0 12px;
+  --button-primary-radius: var(--rounded-sm);
+
+  --button-secondary-bg: var(--background-200);
+  --button-secondary-fg: var(--gray-1000);
+  --button-secondary-border: var(--gray-400);
+  --button-secondary-height: 40px;
+  --button-secondary-padding: 0 12px;
+  --button-secondary-radius: var(--rounded-sm);
+
+  --button-danger-bg: var(--red-700);
+  --button-danger-fg: var(--background-100);
+  --button-danger-height: 40px;
+  --button-danger-padding: 0 12px;
+  --button-danger-radius: var(--rounded-sm);
+
+  --button-disabled-bg: var(--gray-100);
+  --button-disabled-fg: var(--gray-700);
+  --button-disabled-border: var(--gray-400);
+  --button-disabled-height: 40px;
+  --button-disabled-padding: 0 12px;
+  --button-disabled-radius: var(--rounded-sm);
+
+  --button-small-height: 32px;
+  --button-small-padding: 0 8px;
+  --button-small-radius: var(--rounded-sm);
+
+  --input-bg: var(--background-100);
+  --input-fg: var(--gray-1000);
+  --input-border: var(--gray-400);
+  --input-height: 40px;
+  --input-padding: 0 12px;
+  --input-radius: var(--rounded-sm);
+
+  --card-bg: var(--background-200);
+  --card-fg: var(--gray-1000);
+  --card-border: var(--gray-alpha-400);
+  --card-radius: var(--rounded-md);
+  --card-padding: 24px;
+
+  --badge-bg: var(--gray-200);
+  --badge-fg: var(--gray-900);
+  --badge-radius: var(--rounded-full);
+  --badge-padding: 2px 8px;
+  --badge-height: 20px;
+
+  --badge-success-bg: var(--green-100);
+  --badge-success-fg: var(--green-800);
+  --badge-warn-bg: var(--amber-100);
+  --badge-warn-fg: var(--amber-800);
+  --badge-error-bg: var(--red-100);
+  --badge-error-fg: var(--red-800);
+
+  --table-bg: var(--background-100);
+  --table-fg: var(--gray-1000);
+  --table-border: var(--gray-alpha-400);
+  --table-header-bg: var(--background-200);
+  --table-row-hover: var(--gray-100);
+
+  --sidebar-bg: var(--background-200);
+  --sidebar-fg: var(--gray-1000);
+  --sidebar-muted: var(--gray-900);
+  --sidebar-border: var(--gray-alpha-400);
+  --sidebar-active-bg: var(--background-300);
+  --sidebar-active-fg: var(--gray-1000);
+
+  --notice-success-bg: var(--green-100);
+  --notice-success-fg: var(--green-900);
+  --notice-success-border: var(--green-400);
+  --notice-warn-bg: var(--amber-100);
+  --notice-warn-fg: var(--amber-900);
+  --notice-warn-border: var(--amber-400);
+  --notice-error-bg: var(--red-100);
+  --notice-error-fg: var(--red-900);
+  --notice-error-border: var(--red-400);
+
+  --focus-ring: 0 0 0 2px var(--background-100), 0 0 0 4px var(--blue-700);
+}
+
+@media (prefers-color-scheme: light) {
+  :root {
+    color-scheme: light;
+
+    /* colors — themes.light (keeps L1 hex values for background-100/200, gray-900/1000, blue-700, red-700, amber-700) */
+    --background-100: #ffffff;
+    --background-200: #f4f4f5;
+    --background-300: #e4e4e7;
+    --gray-100: #fafafa;
+    --gray-200: #f4f4f5;
+    --gray-300: #e4e4e7;
+    --gray-400: #d4d4d8;
+    --gray-500: #a1a1aa;
+    --gray-600: #71717a;
+    --gray-700: #52525b;
+    --gray-800: #3f3f46;
+    --gray-900: #3d3d3d;
+    --gray-1000: #111111;
+    --gray-alpha-100: #0000000d;
+    --gray-alpha-200: #00000014;
+    --gray-alpha-300: #0000001a;
+    --gray-alpha-400: #00000024;
+    --gray-alpha-500: #00000036;
+    --gray-alpha-600: #00000052;
+    --gray-alpha-700: #00000073;
+    --gray-alpha-800: #0000008f;
+    --gray-alpha-900: #000000b8;
+    --gray-alpha-1000: #000000e6;
+    --blue-100: #eff6ff;
+    --blue-200: #dbeafe;
+    --blue-300: #bfdbfe;
+    --blue-400: #93c5fd;
+    --blue-500: #60a5fa;
+    --blue-600: #3b82f6;
+    --blue-700: #0066cc;
+    --blue-800: #0052a3;
+    --blue-900: #1e4a7a;
+    --blue-1000: #0c1a2e;
+    --red-100: #fef2f2;
+    --red-200: #fee2e2;
+    --red-300: #fecaca;
+    --red-400: #fca5a5;
+    --red-500: #f87171;
+    --red-600: #ef4444;
+    --red-700: #b91c1c;
+    --red-800: #991b1b;
+    --red-900: #7f1d1d;
+    --red-1000: #450a0a;
+    --amber-100: #fffbeb;
+    --amber-200: #fef3c7;
+    --amber-300: #fde68a;
+    --amber-400: #fcd34d;
+    --amber-500: #fbbf24;
+    --amber-600: #d97706;
+    --amber-700: #b45309;
+    --amber-800: #92400e;
+    --amber-900: #78350f;
+    --amber-1000: #451a03;
+    --green-100: #f0fdf4;
+    --green-200: #dcfce7;
+    --green-300: #bbf7d0;
+    --green-400: #86efac;
+    --green-500: #4ade80;
+    --green-600: #22c55e;
+    --green-700: #16a34a;
+    --green-800: #15803d;
+    --green-900: #166534;
+    --green-1000: #052e16;
+    --teal-100: #f0fdfa;
+    --teal-200: #ccfbf1;
+    --teal-300: #99f6e4;
+    --teal-400: #5eead4;
+    --teal-500: #2dd4bf;
+    --teal-600: #14b8a6;
+    --teal-700: #0d9488;
+    --teal-800: #0f766e;
+    --teal-900: #115e59;
+    --teal-1000: #042f2e;
+    --purple-100: #faf5ff;
+    --purple-200: #f3e8ff;
+    --purple-300: #e9d5ff;
+    --purple-400: #d8b4fe;
+    --purple-500: #c084fc;
+    --purple-600: #a855f7;
+    --purple-700: #9333ea;
+    --purple-800: #7e22ce;
+    --purple-900: #6b21a8;
+    --purple-1000: #3b0764;
+    --pink-100: #fdf2f8;
+    --pink-200: #fce7f3;
+    --pink-300: #fbcfe8;
+    --pink-400: #f9a8d4;
+    --pink-500: #f472b6;
+    --pink-600: #ec4899;
+    --pink-700: #db2777;
+    --pink-800: #be185d;
+    --pink-900: #9d174d;
+    --pink-1000: #500724;
+  }
+}
