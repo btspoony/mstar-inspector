@@ -308,17 +308,18 @@ export function parseModelChain(raw: string | undefined): string[] {
     .filter((selector) => selector.length > 0);
 }
 /**
- * Parse the stored TEXT JSON array of model ids (AL-23-1 DDL) — fail-loud
- * on anything that is not a JSON array of strings (the getAppConfig tamper
- * convention): a malformed row throws in the store, never deferring to a
- * caller's `.join` on a non-array.
+ * Parse a stored TEXT JSON array of model ids — either column that stores
+ * one (app_custom_providers.model_ids, AL-23-1 DDL, or
+ * app_provider_models.models_json, migration 0015) — fail-loud on anything
+ * that is not a JSON array of strings (the getAppConfig tamper convention):
+ * a malformed row throws in the store, never deferring to a caller's
+ * `.join` on a non-array. `source` names the exact table.column in the
+ * error so a tampered row is attributable.
  */
-function parseCustomProviderModelIds(raw: string): string[] {
+function parseModelIdsJson(raw: string, source: string): string[] {
   const parsed: unknown = JSON.parse(raw);
   if (!Array.isArray(parsed) || !parsed.every((id) => typeof id === "string")) {
-    throw new Error(
-      `app-config-store: app_custom_providers.model_ids is not a JSON array of strings: ${JSON.stringify(raw)}`,
-    );
+    throw new Error(`app-config-store: ${source} is not a JSON array of strings: ${JSON.stringify(raw)}`);
   }
   return parsed;
 }
@@ -681,7 +682,13 @@ export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | un
      * crypto or write (the route answers 400 first; this is the backstop).
      * The upsert maintains the row's write time (migration 0012): a fresh
      * insert writes updated_at == created_at from ONE clock read; re-setting
-     * moves both forward.
+     * moves both forward. Overwriting a previously verified row with a NEW
+     * key also resets verified_at/verified_status to NULL (migration 0015) —
+     * verification belongs to the (provider, key) pair, not the row; the new
+     * key has not been verified until saveVerifiedKey runs again. (The
+     * save-then-verify flow uses saveVerifiedKey; setProviderKey is the
+     * legacy unverified path and any leftover caller must not inherit a
+     * stale verified_status.)
      */
     async setProviderKey(appId: string, provider: string, plainKey: string): Promise<void> {
       if (plainKey.length > MAX_PROVIDER_KEY_LENGTH) {
@@ -700,7 +707,9 @@ export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | un
            ON CONFLICT (app_id, provider) DO UPDATE SET
              key_enc = excluded.key_enc,
              created_at = (SELECT ts FROM now),
-             updated_at = (SELECT ts FROM now)`,
+             updated_at = (SELECT ts FROM now),
+             verified_at = NULL,
+             verified_status = NULL`,
         )
         .bind(appId, provider, keyEnc)
         .run();
@@ -759,16 +768,25 @@ export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | un
     },
 
     /**
-     * Delete one provider key row. Returns whether THIS call removed a row
-     * (an unconfigured provider — or any provider the allowlist could never
-     * have stored — is a no-op returning false).
+     * Delete one provider key row — and the App's verified-model cache row
+     * for the same provider, in ONE atomic batch (a removed key must not
+     * linger as "verified" in the settings dropdown; saveVerifiedKey writes
+     * both rows transactionally, so removal is transactional too). The cache
+     * row lives under the SELECTOR-FACING provider key — modelCacheProviderKey
+     * maps an `ark` BYOK key to its "ark-plan" cache row (spec §6.1), so
+     * `removeProviderKey(appId, "ark")` deletes that row as well. Returns
+     * whether THIS call removed the key row (an unconfigured provider — or
+     * any provider the allowlist could never have stored — is a no-op
+     * returning false).
      */
     async removeProviderKey(appId: string, provider: string): Promise<boolean> {
-      const res = await db
-        .prepare(`DELETE FROM app_provider_keys WHERE app_id = ? AND provider = ?`)
-        .bind(appId, provider)
-        .run();
-      return res.meta.changes > 0;
+      const res = await db.batch([
+        db.prepare(`DELETE FROM app_provider_keys WHERE app_id = ? AND provider = ?`).bind(appId, provider),
+        db
+          .prepare(`DELETE FROM app_provider_models WHERE app_id = ? AND provider = ?`)
+          .bind(appId, modelCacheProviderKey(provider)),
+      ]);
+      return res[0]!.meta.changes > 0;
     },
 
     /**
@@ -859,7 +877,7 @@ export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | un
         .all<AppProviderModelsRow>();
       return res.results.map((row) => ({
         provider: row.provider,
-        models: parseCustomProviderModelIds(row.models_json),
+        models: parseModelIdsJson(row.models_json, "app_provider_models.models_json"),
         fetched_at: row.fetched_at,
       }));
     },
@@ -1040,7 +1058,7 @@ export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | un
         provider_id: row.provider_id,
         base_url: row.base_url,
         api: row.api as CustomProviderApi,
-        model_ids: parseCustomProviderModelIds(row.model_ids),
+        model_ids: parseModelIdsJson(row.model_ids, "app_custom_providers.model_ids"),
       }));
     },
     /**
@@ -1062,7 +1080,7 @@ export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | un
           provider_id: row.provider_id,
           base_url: row.base_url,
           api: row.api as CustomProviderApi,
-          model_ids: parseCustomProviderModelIds(row.model_ids),
+          model_ids: parseModelIdsJson(row.model_ids, "app_custom_providers.model_ids"),
           api_key: await box.decryptSecret(row.api_key_enc, customProviderAad(row.app_id, row.provider_id)),
         });
       }

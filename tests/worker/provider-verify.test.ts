@@ -363,6 +363,25 @@ describe("verifyProviderKey — built-in providers (mocked fetch)", () => {
     });
   });
 
+  test("cursor: GET /v1/models is a MODELS endpoint — a 2xx list is parsed and cached (not discarded as probe-only)", async () => {
+    const calls: FetchCall[] = [];
+    const result = await verifyProviderKey(
+      { fetch: mockFetch(json(200, { data: [{ id: "cursor-fast" }, { id: "cursor-premium" }] }), calls) },
+      "cursor",
+      PLAIN_KEY,
+    );
+    expect(result).toEqual({ ok: true, models: ["cursor-fast", "cursor-premium"] });
+    const call = calls[0]!;
+    expect(call.url).toBe("https://api.cursor.com/v1/models");
+    expect(call.method).toBe("GET");
+    expect(call.headers).toEqual({ authorization: `Bearer ${PLAIN_KEY}` });
+  });
+
+  test("cursor: 401 still maps to invalid_key (token rejected)", async () => {
+    const result = await verifyProviderKey({ fetch: mockFetch(json(401, {})) }, "cursor", PLAIN_KEY);
+    expect(result).toEqual({ ok: false, reason: "invalid_key" });
+  });
+
   test("unsupported provider (azure-openai) → unsupported_provider and fetch is NEVER called", async () => {
     let fetchCalls = 0;
     const deps: VerifyDeps = {
@@ -391,7 +410,7 @@ describe("verifyProviderKey — custom providers (mocked fetch)", () => {
     modelIds: ["my-model-a", "my-model-b"],
   };
 
-  test("openai-completions happy path: Bearer probe on {baseUrl}/v1/models, parses data[].id", async () => {
+  test("openai-completions happy path: Bearer probe on {baseUrl}/v1/models; 2xx echoes the DECLARED model_ids — even when the body carries a parseable vendor list (spec §6.1 回显, 无抓取)", async () => {
     const calls: FetchCall[] = [];
     const result = await verifyProviderKey(
       { fetch: mockFetch(json(200, { data: [{ id: "vendor-model-1" }] }), calls) },
@@ -399,7 +418,7 @@ describe("verifyProviderKey — custom providers (mocked fetch)", () => {
       PLAIN_KEY,
       CUSTOM,
     );
-    expect(result).toEqual({ ok: true, models: ["vendor-model-1"] });
+    expect(result).toEqual({ ok: true, models: ["my-model-a", "my-model-b"] });
     const call = calls[0]!;
     expect(call.url).toBe("https://custom.example.com/v1/models");
     expect(call.headers).toEqual({ authorization: `Bearer ${PLAIN_KEY}` });
@@ -457,7 +476,7 @@ describe("verifyProviderKey — custom providers (mocked fetch)", () => {
     expect(result).toEqual({ ok: false, reason: "invalid_key" });
   });
 
-  test("anthropic-messages custom provider probes with x-api-key + anthropic-version", async () => {
+  test("anthropic-messages custom provider probes with x-api-key + anthropic-version and echoes the DECLARED model_ids", async () => {
     const calls: FetchCall[] = [];
     const result = await verifyProviderKey(
       { fetch: mockFetch(json(200, { data: [{ id: "claude-model" }] }), calls) },
@@ -465,7 +484,7 @@ describe("verifyProviderKey — custom providers (mocked fetch)", () => {
       PLAIN_KEY,
       { ...CUSTOM, api: "anthropic-messages" },
     );
-    expect(result).toEqual({ ok: true, models: ["claude-model"] });
+    expect(result).toEqual({ ok: true, models: CUSTOM.modelIds });
     expect(calls[0]!.headers).toEqual({ "x-api-key": PLAIN_KEY, "anthropic-version": "2023-06-01" });
   });
 
@@ -523,6 +542,72 @@ describe("store wiring — saveVerifiedKey + getVerifiedModels", () => {
       .query("SELECT provider, models_json FROM app_provider_models WHERE app_id = ?")
       .all(app.id) as Array<{ provider: string; models_json: string }>;
     expect(cacheRow).toEqual([{ provider: "ark-plan", models_json: JSON.stringify(["doubao-seed-2-1-pro"]) }]);
+  });
+
+  test("removeProviderKey deletes the verified-model cache row with the key (save → remove → getVerifiedModels empty)", async () => {
+    const db = createMigratedTestD1();
+    const app = await seedApp(db, "remove-app");
+    const store = configStore(db);
+    await store.saveVerifiedKey(app.id, "anthropic", PLAIN_KEY, ["claude-sonnet-4-6"]);
+    expect(await store.getVerifiedModels(app.id)).toHaveLength(1);
+    expect(await store.removeProviderKey(app.id, "anthropic")).toBe(true);
+    expect(await store.getVerifiedModels(app.id)).toEqual([]);
+    const cacheCount = db.raw
+      .query("SELECT COUNT(*) AS n FROM app_provider_models WHERE app_id = ?")
+      .get(app.id) as { n: number };
+    expect(cacheCount.n).toBe(0);
+  });
+
+  test("removeProviderKey('ark') deletes the ark-plan cache row (modelCacheProviderKey normalization)", async () => {
+    const db = createMigratedTestD1();
+    const app = await seedApp(db, "remove-ark-app");
+    const store = configStore(db);
+    await store.saveVerifiedKey(app.id, "ark", PLAIN_KEY, ["doubao-seed-2-1-pro"]);
+    expect((await store.getVerifiedModels(app.id)).map((c) => c.provider)).toEqual(["ark-plan"]);
+    expect(await store.removeProviderKey(app.id, "ark")).toBe(true);
+    expect(await store.getVerifiedModels(app.id)).toEqual([]);
+    const cacheCount = db.raw
+      .query("SELECT COUNT(*) AS n FROM app_provider_models WHERE app_id = ?")
+      .get(app.id) as { n: number };
+    expect(cacheCount.n).toBe(0);
+    const keyCount = db.raw
+      .query("SELECT COUNT(*) AS n FROM app_provider_keys WHERE app_id = ?")
+      .get(app.id) as { n: number };
+    expect(keyCount.n).toBe(0);
+  });
+
+  test("setProviderKey overwriting a verified row resets verified_* to NULL (verification belongs to the (provider, key) pair)", async () => {
+    const db = createMigratedTestD1();
+    const app = await seedApp(db, "overwrite-app");
+    const store = configStore(db);
+    await store.saveVerifiedKey(app.id, "openai", PLAIN_KEY, ["gpt-5"]);
+    let row = db.raw
+      .query("SELECT verified_at, verified_status FROM app_provider_keys WHERE app_id = ?")
+      .get(app.id) as { verified_at: string | null; verified_status: string | null };
+    expect(row.verified_status).toBe("ok");
+    await store.setProviderKey(app.id, "openai", "sk-overwrite-key-7777");
+    const after = db.raw
+      .query("SELECT verified_at, verified_status, key_enc FROM app_provider_keys WHERE app_id = ?")
+      .get(app.id) as { verified_at: string | null; verified_status: string | null; key_enc: string };
+    expect(after.verified_at).toBeNull();
+    expect(after.verified_status).toBeNull();
+    // The unverified overwrite replaced the verified envelope (AAD round-trip).
+    await expect(
+      createSecretbox(TEST_KEY).decryptSecret(after.key_enc, `app_provider_keys.key_enc:${app.id}:openai`),
+    ).resolves.toBe("sk-overwrite-key-7777");
+  });
+
+  test("getVerifiedModels fails loud on a malformed app_provider_models row, citing app_provider_models.models_json (not app_custom_providers.model_ids)", async () => {
+    const db = createMigratedTestD1();
+    const app = await seedApp(db, "malformed-cache-app");
+    const store = configStore(db);
+    await store.saveVerifiedKey(app.id, "openai", PLAIN_KEY, ["gpt-5"]);
+    db.raw
+      .prepare("UPDATE app_provider_models SET models_json = ? WHERE app_id = ? AND provider = ?")
+      .run("null", app.id, "openai");
+    await expect(store.getVerifiedModels(app.id)).rejects.toThrow(
+      /app_provider_models\.models_json is not a JSON array of strings/,
+    );
   });
 
   test("re-save upserts both rows (no duplicates) and refreshes the cached models", async () => {

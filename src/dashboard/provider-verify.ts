@@ -98,7 +98,7 @@ export type ProviderVerifySpec =
  * | umans           | probe    | POST https://api.code.umans.ai/v1/chat/completions (Bearer) | docs describe the models endpoint as public → cannot validate a key; probe = 1-token chat, umans-flash |
  * | minimax         | models   | https://api.minimax.io/v1/models (Bearer)       | confirmed (platform.minimax.io list-models reference) |
  * | opencode        | models   | https://opencode.ai/zen/v1/models (Bearer)      | OpenCode Zen docs list the endpoint; auth presumed Bearer Zen key [INFERENCE] |
- * | cursor          | probe    | GET https://api.cursor.com/v1/models (Bearer)   | Cloud Agents API (cursor.com/docs/api) exposes GET /v1/models; CURSOR_ACCESS_TOKEN rides the omp cursor provider (api2.cursor.sh proxy) at review time — a token rejected here but fine there should move this entry to the proxy surface [INFERENCE] |
+ * | cursor          | models   | GET https://api.cursor.com/v1/models (Bearer)   | Cloud Agents API (cursor.com/docs/api) exposes GET /v1/models — a 2xx list is cached (a real dropdown), 401 still maps to invalid_key; CURSOR_ACCESS_TOKEN rides the omp cursor provider (api2.cursor.sh proxy) at review time — a token rejected here but fine there should move this entry to the proxy surface [INFERENCE] |
  * | ai-gateway      | unsupported | —                                            | Cloudflare AI Gateway path needs account + gateway ids; key alone has no fixed host. |
  * | wafer-serverless| models   | https://pass.wafer.ai/v1/models (Bearer)        | OpenAI-compatible base from wafer docs (pass.wafer.ai/v1); /models is the standard discovery path [INFERENCE] |
  * | ark             | models   | https://ark.cn-beijing.volces.com/api/v3/models (Bearer) | OpenAI-compatible base confirmed (ark.cn-beijing.volces.com/api/v3); /models is the standard path — if Ark 404s it, move to probe [INFERENCE] |
@@ -140,7 +140,7 @@ export const PROVIDER_VERIFY_ENDPOINTS: Record<string, ProviderVerifySpec> = {
   },
   minimax: { kind: "models", url: "https://api.minimax.io/v1/models", auth: "bearer" },
   opencode: { kind: "models", url: "https://opencode.ai/zen/v1/models", auth: "bearer" },
-  cursor: { kind: "probe", method: "GET", url: "https://api.cursor.com/v1/models", auth: "bearer" },
+  cursor: { kind: "models", url: "https://api.cursor.com/v1/models", auth: "bearer" },
   "ai-gateway": {
     kind: "unsupported",
     note: "Cloudflare AI Gateway path needs account + gateway ids; the key alone has no fixed host",
@@ -296,9 +296,10 @@ function customModelsUrl(baseUrl: string): string {
  * URL's models endpoint with the protocol-appropriate auth for the declared
  * `api` form (anthropic-messages → x-api-key + anthropic-version; both
  * openai-* forms → Bearer — the "declared api protocol equivalent" of the
- * assignment's probe rule). 401/403 → invalid_key; 2xx parses the model list
- * with the declared model_ids as fallback (the plan's §6.1 echo contract —
- * the vocabulary IS the declaration, 无抓取); every other non-2xx →
+ * assignment's probe rule). 401/403 → invalid_key; ANY 2xx → ok with models
+ * = the declared modelIds, verbatim (the plan's §6.1 echo contract: 成功时
+ * models = 声明 modelIds 回显，无抓取 — the vocabulary IS the declaration;
+ * the response body is never scraped); every other non-2xx →
  * unexpected_response; transport failures → unreachable. Custom providers
  * never write app_provider_models rows — their dropdown source is the
  * declared model_ids, returned here for callers to display.
@@ -327,21 +328,6 @@ async function verifyCustomProvider(
   }
   if (!res.ok) {
     return { ok: false, reason: "unexpected_response" };
-  }
-  let body: unknown;
-  try {
-    body = await res.json();
-  } catch {
-    // 2xx but no JSON: the custom surface accepted the key without exposing
-    // a model list — the probe succeeded, vocabulary is the declaration.
-    return { ok: true, models: custom.modelIds };
-  }
-  const parsed = parseModelList(body);
-  // spec §6.1: 成功时 models = 声明 modelIds 回显（无抓取）。A parseable list
-  // wins when present (the assignment's "2xx parse models array with
-  // fallbacks"); otherwise/empty the declared vocabulary is echoed.
-  if (parsed !== null && parsed.length > 0) {
-    return { ok: true, models: parsed };
   }
   return { ok: true, models: custom.modelIds };
 }

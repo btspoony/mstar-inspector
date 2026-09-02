@@ -113,7 +113,9 @@ function createPopulatedPre0006D1(): ReturnType<typeof createTestD1> {
  * install-health panel from github_apps.review_enabled / last_webhook_at and
  * app_installations; plan 17: the role-models store tests need
  * app_model_roles — so the route tests run on the production shape; the 0007
- * index skip stays, harmless for these tables).
+ * index skip stays, harmless for these tables). 0015 too (plan 31): the
+ * store's setProviderKey upsert now writes the verified_* columns, so every
+ * config-store test must run on the 0015-shaped schema.
  */
 function createAppConfigD1(): ReturnType<typeof createTestD1> {
   const db = createPopulatedPre0006D1();
@@ -125,6 +127,7 @@ function createAppConfigD1(): ReturnType<typeof createTestD1> {
   // the table or every settings route 500s.
   applyMigration(db, "0011_webhook_deliveries.sql");
   applyMigration(db, "0012_custom_providers_and_key_updated_at.sql");
+  applyMigration(db, "0015_provider_verification.sql");
   return db;
 }
 
@@ -338,6 +341,10 @@ describe("migration 0012_custom_providers_and_key_updated_at.sql (plan 23 T1)", 
       app.id,
     );
     expect(() => applyMigration(db, "0012_custom_providers_and_key_updated_at.sql")).not.toThrow();
+    // 0015 next (the real sequence for these tables): the store's
+    // setProviderKey upsert now writes the verified_* columns, so the
+    // re-set below must run on the 0015-shaped schema.
+    applyMigration(db, "0015_provider_verification.sql");
     let row = db.raw.query("SELECT created_at, updated_at FROM app_provider_keys").get() as {
       created_at: string;
       updated_at: string | null;
