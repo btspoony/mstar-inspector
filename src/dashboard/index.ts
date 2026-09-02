@@ -85,25 +85,26 @@ import {
   type DashboardUserRow,
 } from "./users";
 import {
-  appSettingsPage,
-  appsPage,
-  badRequestPage,
   dashboardPage,
   deniedPage,
   errorPage,
   forbiddenPage,
-  insightsPage,
   manifestConfirmPage,
   manifestErrorPage,
   manifestStartPage,
   manifestSuccessPage,
-  membersPage,
   removedPage,
-  type PageNotice,
 } from "./views";
 import { clampWindow, createInsightsStore } from "./insights-store";
+import { isLocale, resolveLocale, serializeLocaleCookie, t, type Locale } from "../i18n";
 
 export const dashboardApp = new Hono<{ Bindings: Env }>();
+
+
+function requestLocale(c: Context<{ Bindings: Env }>): Locale {
+  return resolveLocale(c.req.raw);
+}
+
 
 function dashboardSecrets(env: Env) {
   const clientId = env.GITHUB_OAUTH_CLIENT_ID;
@@ -191,12 +192,20 @@ dashboardApp.use("*", async (c, next) => {
   if (!sessionSecret) return c.text("dashboard OAuth is not configured", 500);
   const session = await readSessionValue(getCookie(c, SESSION_COOKIE), sessionSecret);
   // No session → the pre-guard behavior: 302 into the OAuth flow.
-  if (!session) return c.redirect("/dashboard/login", 302);
+  // POST /dashboard/locale is session-optional (plan 29 T4): the login-page
+  // language toggle must set mstar_locale without membership. Locale is not
+  // a privileged action — the route writes only the language cookie.
+  if (!session) {
+    if (c.req.path === "/dashboard/locale") return next();
+    return c.redirect("/dashboard/login", 302);
+  }
   // Logout needs no membership row (qc2 F-002): any VALID session may burn
   // its own cookies. The route itself touches no membership data, so this
   // sits before the D1 check — storage misconfiguration cannot trap a
   // stale cookie on the browser either.
-  if (c.req.path === "/dashboard/logout") return next();
+  // Locale follows the same L5 session-level exemption: a row-less (removed)
+  // session may still set language preference.
+  if (c.req.path === "/dashboard/logout" || c.req.path === "/dashboard/locale") return next();
   // Logged in → the only new check: an active user row (spec § AuthZ).
   // Fail closed on an unbound store, like every missing dashboard dependency.
   const db = dashboardD1(c.env);
@@ -213,12 +222,12 @@ dashboardApp.use("*", async (c, next) => {
         login: session.login,
       }),
     );
-    return c.html(removedPage(session.login), 403);
+    return c.html(removedPage(session.login, requestLocale(c)), 403);
   }
   return next();
 });
 
-dashboardApp.get("/login", async (c) => {
+async function startOAuthLogin(c: Context<{ Bindings: Env }>): Promise<Response> {
   const secrets = dashboardSecrets(c.env);
   if (!secrets) return c.text("dashboard OAuth is not configured", 500);
   // Already signed in → bounce back to the shell (IA routing table).
@@ -229,7 +238,13 @@ dashboardApp.get("/login", async (c) => {
   c.header("Set-Cookie", serializeCookie(OAUTH_STATE_COOKIE, state, OAUTH_STATE_MAX_AGE_SEC));
   const callbackUri = `${new URL(c.req.url).origin}/dashboard/oauth/callback`;
   return c.redirect(buildAuthorizeUrl(secrets.clientId, callbackUri, state), 302);
-});
+}
+
+// GET starts OAuth for non-HTML clients. SPA login (Accept: text/html) is
+// served by spa-dispatch; its "Sign in with GitHub" form POSTs here so the
+// browser does not loop on the SPA GET.
+dashboardApp.get("/login", startOAuthLogin);
+dashboardApp.post("/login", startOAuthLogin);
 
 dashboardApp.get("/oauth/callback", async (c) => {
   const secrets = dashboardSecrets(c.env);
@@ -243,21 +258,21 @@ dashboardApp.get("/oauth/callback", async (c) => {
   );
   if (!stateOk) {
     logOAuthFailure("state_verify", "state_mismatch");
-    return c.html(errorPage("Sign-in could not be verified (bad or expired state)."), 400);
+    return c.html(errorPage(t(requestLocale(c), "common.oauth.stateInvalid"), requestLocale(c)), 400);
   }
   const code = c.req.query("code");
   if (!code) {
     logOAuthFailure("callback", "missing_code");
-    return c.html(errorPage("GitHub did not return an authorization code."), 400);
+    return c.html(errorPage(t(requestLocale(c), "common.oauth.missingCode"), requestLocale(c)), 400);
   }
   const callbackUri = `${new URL(c.req.url).origin}/dashboard/oauth/callback`;
   const token = await exchangeCodeForToken(code, secrets.clientId, secrets.clientSecret, callbackUri);
   if (!token) {
-    return c.html(errorPage("GitHub rejected the authorization code."), 502);
+    return c.html(errorPage(t(requestLocale(c), "common.oauth.codeRejected"), requestLocale(c)), 502);
   }
   const user = await fetchGitHubUser(token);
   if (!user) {
-    return c.html(errorPage("Could not read your GitHub profile."), 502);
+    return c.html(errorPage(t(requestLocale(c), "common.oauth.profileFailed"), requestLocale(c)), 502);
   }
   // Plan 12 B4 T1: invite-only bootstrap decision (spec § AuthZ precedence:
   // row → ADMIN_LOGINS → empty-table fallback → deny) BEFORE any session is
@@ -270,7 +285,7 @@ dashboardApp.get("/oauth/callback", async (c) => {
   if (decision.outcome === "deny") {
     logOAuthFailure("bootstrap", "not_invited", { login: user.login });
     c.header("Set-Cookie", undefined);
-    return c.html(deniedPage(user.login), 403);
+    return c.html(deniedPage(user.login, requestLocale(c)), 403);
   }
   const session = await createSessionValue(user.login, user.name, secrets.sessionSecret);
   c.header("Set-Cookie", serializeCookie(SESSION_COOKIE, session, SESSION_MAX_AGE_SEC), {
@@ -285,6 +300,69 @@ dashboardApp.get("/logout", (c) => {
   c.header("Set-Cookie", expireCookie(MANIFEST_HOLD_COOKIE), { append: true });
   c.header("Set-Cookie", expireCookie(MANIFEST_STATE_COOKIE), { append: true });
   return c.redirect("/dashboard/login", 302);
+});
+
+// --- Plan 29 T2: locale preference (i18n) ---
+//
+// POST /dashboard/locale — the navbar [EN/中文] toggle target. Body is
+// JSON or form-encoded `{ locale }`; valid ids are the two Locale values.
+// Writes the mstar_locale cookie (HttpOnly, SameSite=Lax, Path=/dashboard
+// — the session.ts attribute set scoped to the dashboard) and 302s back to
+// a Referer-derived target sanitized by safeLocaleRedirect (anything
+// off-origin, protocol-relative, empty, or missing → /dashboard). Invalid
+// locale → 400, no cookie.
+// Plan 29 T4: the mount-level guard treats POST /dashboard/locale as
+// session-optional and membership-exempt (same L5 family as logout). A
+// logged-out login-page toggle and a row-less session may both set the
+// cookie. Every other /dashboard route stays membership-enforcing.
+
+/**
+ * Safe 302 target for the locale toggle. The Referer header is
+ * attacker-influenced (open-redirect surface): EVERY non-empty value is
+ * parsed with `new URL(referer, origin)` — never echoed raw — and accepted
+ * only when the resolved origin equals the request origin AND the resulting
+ * pathname+search starts with `/` without a `//` prefix (a `//` pathname is
+ * protocol-relative, e.g. `https://origin/\evil.example` normalizes to
+ * `//evil.example`). Missing/empty Referer, off-origin URLs, protocol-
+ * relative `//host`, backslash-authority tricks (`/\evil.example` parses as
+ * `https://evil.example/`), and unparseable junk all fall back to
+ * /dashboard. Never echoes an absolute or protocol-relative URL.
+ */
+function safeLocaleRedirect(referer: string | null | undefined, origin: string): string {
+  if (!referer) return "/dashboard";
+  try {
+    const url = new URL(referer, origin);
+    if (url.origin === origin) {
+      const path = `${url.pathname}${url.search}`;
+      if (path.startsWith("/") && !path.startsWith("//")) return path;
+    }
+  } catch {
+    // unparseable referer → /dashboard
+  }
+  return "/dashboard";
+}
+
+/** JSON or form body `{ locale }` → valid Locale, or null (invalid/malformed). */
+async function readLocaleFromBody(c: Context<{ Bindings: Env }>): Promise<Locale | null> {
+  const contentType = c.req.header("Content-Type") ?? "";
+  try {
+    if (contentType.includes("application/json")) {
+      const body = (await c.req.json()) as { locale?: unknown };
+      return isLocale(body.locale) ? body.locale : null;
+    }
+    const form = await c.req.parseBody();
+    return isLocale(form.locale) ? form.locale : null;
+  } catch {
+    return null;
+  }
+}
+
+dashboardApp.post("/locale", async (c) => {
+  const locale = await readLocaleFromBody(c);
+  if (!locale) return c.text("invalid locale", 400);
+  c.header("Set-Cookie", serializeLocaleCookie(locale));
+  const location = safeLocaleRedirect(c.req.header("Referer"), new URL(c.req.raw.url).origin);
+  return c.redirect(location, 302);
 });
 
 // --- B1 Task 1: GitHub App Manifest start + callback (no secret write) ---
@@ -308,7 +386,9 @@ dashboardApp.post("/manifest/start", async (c) => {
   const state = await createManifestStateValue(secrets.sessionSecret, slug);
   c.header("Set-Cookie", serializeCookie(MANIFEST_STATE_COOKIE, state, MANIFEST_STATE_MAX_AGE_SEC));
   const manifest = buildManifest(new URL(c.req.url).origin, session.login, slug);
-  return c.html(manifestStartPage(session, manifest.name, JSON.stringify(manifest), buildManifestCreateUrl(state)));
+  return c.html(
+    manifestStartPage(session, manifest.name, JSON.stringify(manifest), buildManifestCreateUrl(state), requestLocale(c)),
+  );
 });
 
 // Callback: GitHub redirects here with ?code=…&state=…. Bad/missing state →
@@ -332,18 +412,18 @@ dashboardApp.get("/manifest/callback", async (c) => {
   if (!state) {
     logManifestFailure("state_verify", "state_mismatch");
     return c.html(
-      manifestErrorPage("The app-creation flow could not be verified (bad or expired state)."),
+      manifestErrorPage(t(requestLocale(c), "manifest.error.stateMismatch"), false, requestLocale(c)),
       400,
     );
   }
   const code = c.req.query("code");
   if (!code) {
     logManifestFailure("callback", "missing_code");
-    return c.html(manifestErrorPage("GitHub did not return an app-manifest code."), 400);
+    return c.html(manifestErrorPage(t(requestLocale(c), "manifest.error.missingCode"), false, requestLocale(c)), 400);
   }
   const conversion = await exchangeManifestCode(code);
   if (!conversion) {
-    return c.html(manifestErrorPage("GitHub rejected the app-manifest code."), 502);
+    return c.html(manifestErrorPage(t(requestLocale(c), "manifest.error.codeRejected"), false, requestLocale(c)), 502);
   }
   const hold = await createHoldValue(conversion, session.login, secrets.sessionSecret, state.slug);
   c.header("Set-Cookie", serializeCookie(MANIFEST_HOLD_COOKIE, hold, MANIFEST_HOLD_MAX_AGE_SEC), {
@@ -351,12 +431,16 @@ dashboardApp.get("/manifest/callback", async (c) => {
   });
   const origin = new URL(c.req.url).origin;
   return c.html(
-    manifestConfirmPage(session, {
-      id: conversion.id,
-      name: conversion.name,
-      slug: state.slug,
-      webhookUrl: `${origin}/webhook/${state.slug}`,
-    }),
+    manifestConfirmPage(
+      session,
+      {
+        id: conversion.id,
+        name: conversion.name,
+        slug: state.slug,
+        webhookUrl: `${origin}/webhook/${state.slug}`,
+      },
+      requestLocale(c),
+    ),
   );
 });
 
@@ -394,9 +478,7 @@ dashboardApp.post("/manifest/commit", async (c) => {
     logManifestFailure("commit", "login_mismatch");
     c.header("Set-Cookie", expireCookie(MANIFEST_HOLD_COOKIE));
     return c.html(
-      manifestErrorPage(
-        "This confirmation belongs to a different GitHub login — sign back in and restart the app-creation flow.",
-      ),
+      manifestErrorPage(t(requestLocale(c), "manifest.error.loginMismatch"), false, requestLocale(c)),
       403,
     );
   }
@@ -423,10 +505,7 @@ dashboardApp.post("/manifest/commit", async (c) => {
       key_error: err instanceof SecretboxKeyError,
     });
     return c.html(
-      manifestErrorPage(
-        "This deployment has no valid DASHBOARD_ENCRYPTION_KEY to store App credentials with — ask the operator to configure it, then resubmit.",
-        true,
-      ),
+      manifestErrorPage(t(requestLocale(c), "manifest.error.noEncryptionKey"), true, requestLocale(c)),
       500,
     );
   }
@@ -451,12 +530,16 @@ dashboardApp.post("/manifest/commit", async (c) => {
     // Success: the hold is single-success — burned now that the row exists.
     c.header("Set-Cookie", expireCookie(MANIFEST_HOLD_COOKIE));
     return c.html(
-      manifestSuccessPage(session, {
-        id: row.github_app_id,
-        name: row.name,
-        slug: row.slug,
-        webhookUrl: `${new URL(c.req.url).origin}/webhook/${row.slug}`,
-      }),
+      manifestSuccessPage(
+        session,
+        {
+          id: row.github_app_id,
+          name: row.name,
+          slug: row.slug,
+          webhookUrl: `${new URL(c.req.url).origin}/webhook/${row.slug}`,
+        },
+        requestLocale(c),
+      ),
     );
   } catch (err) {
     if (isAppsUniqueViolation(err, "slug")) {
@@ -467,9 +550,7 @@ dashboardApp.post("/manifest/commit", async (c) => {
       logManifestFailure("commit", "slug_conflict", { slug: hold.slug });
       c.header("Set-Cookie", expireCookie(MANIFEST_HOLD_COOKIE));
       return c.html(
-        manifestErrorPage(
-          "Another App claimed this App's webhook slug while setup was in progress, so the GitHub App was created on GitHub but not connected to this deployment — no Worker data was stored. A manifest-created App cannot be connected twice: delete the just-created App on GitHub, then run a new app-creation flow from the dashboard.",
-        ),
+        manifestErrorPage(t(requestLocale(c), "manifest.error.slugConflict"), false, requestLocale(c)),
         409,
       );
     }
@@ -478,19 +559,14 @@ dashboardApp.post("/manifest/commit", async (c) => {
       logManifestFailure("commit", "github_app_id_conflict", { github_app_id: hold.id });
       c.header("Set-Cookie", expireCookie(MANIFEST_HOLD_COOKIE));
       return c.html(
-        manifestErrorPage(
-          "This GitHub App is already connected on this deployment — no changes were made.",
-        ),
+        manifestErrorPage(t(requestLocale(c), "manifest.error.alreadyConnected"), false, requestLocale(c)),
         409,
       );
     }
     // Retryable (missing migrations, transient D1 failure, …): hold kept.
     logManifestFailure("commit", "db_error", { error_type: errorTypeName(err) });
     return c.html(
-      manifestErrorPage(
-        "The App could not be stored — the dashboard database rejected the write. You can resubmit.",
-        true,
-      ),
+      manifestErrorPage(t(requestLocale(c), "manifest.error.dbRejected"), true, requestLocale(c)),
       500,
     );
   }
@@ -509,12 +585,16 @@ dashboardApp.get("/manifest/confirm", async (c) => {
   const hold = await readHoldValue(getCookie(c, MANIFEST_HOLD_COOKIE), secrets.sessionSecret);
   if (!hold || hold.login !== session.login) return c.redirect("/dashboard", 302);
   return c.html(
-    manifestConfirmPage(session, {
-      id: hold.id,
-      name: hold.name,
-      slug: hold.slug,
-      webhookUrl: `${new URL(c.req.url).origin}/webhook/${hold.slug}`,
-    }),
+    manifestConfirmPage(
+      session,
+      {
+        id: hold.id,
+        name: hold.name,
+        slug: hold.slug,
+        webhookUrl: `${new URL(c.req.url).origin}/webhook/${hold.slug}`,
+      },
+      requestLocale(c),
+    ),
   );
 });
 
@@ -548,60 +628,50 @@ async function requireAdmin(c: Context<{ Bindings: Env }>): Promise<AdminGate> {
   // Fail closed: no row (removed between guard and here) or a plain member
   // is equally non-admin — the 403 view carries zero membership data.
   if (!admin || admin.role !== "admin") {
-    return { ok: false, response: c.html(forbiddenPage(session.login), 403) };
+    return { ok: false, response: c.html(forbiddenPage(session.login, requestLocale(c)), 403) };
   }
   return { ok: true, session, db, admin };
 }
 
-dashboardApp.get("/members", async (c) => {
+/** SPA JSON face — same requireAdmin gate and listUsers assembly as the retired GET /members. */
+dashboardApp.get("/api/members", async (c) => {
   const gate = await requireAdmin(c);
   if (!gate.ok) return gate.response;
-  return c.html(membersPage(gate.session, await listUsers(gate.db)));
+  const members = await listUsers(gate.db);
+  return c.json({
+    members: members.map((m) => ({
+      id: m.id,
+      github_login: m.github_login,
+      role: m.role,
+      created_at: m.created_at,
+    })),
+  });
 });
 
+// Plan 29 T6: the members page is SPA-owned; these pinned POSTs answer the
+// SPA's postForm (2xx → refetch + client notice; 4xx → client error notice)
+// with plain-text bodies — the re-rendered HTML page is retired.
 dashboardApp.post("/members/invite", async (c) => {
   const gate = await requireAdmin(c);
   if (!gate.ok) return gate.response;
   const form = await c.req.parseBody();
   const login = typeof form.login === "string" ? form.login.trim() : "";
   if (login.length === 0) {
-    return c.html(
-      membersPage(gate.session, await listUsers(gate.db), {
-        kind: "error",
-        message: "Enter a GitHub login to invite.",
-      }),
-      400,
-    );
+    return c.text("Enter a GitHub login to invite.", 400);
   }
   // F-003: reject values outside the GitHub login syntax before any read or
   // write — they would persist as rows that no real login can ever claim.
   if (!GITHUB_LOGIN_PATTERN.test(login)) {
-    return c.html(
-      membersPage(gate.session, await listUsers(gate.db), {
-        kind: "error",
-        message: `${login} is not a valid GitHub login — use 1–39 letters, digits, or hyphens.`,
-      }),
-      400,
-    );
+    return c.text(`${login} is not a valid GitHub login — use 1–39 letters, digits, or hyphens.`, 400);
   }
   // T1 review pin (Minor 2): resolve the login case-insensitively BEFORE any
   // createUser call — the DDL UNIQUE is BINARY-collated, so ON CONFLICT alone
   // misses case variants ("OctoCat" vs "octocat") and would mint a second row.
   if (await getUserByLogin(gate.db, login)) {
-    return c.html(
-      membersPage(gate.session, await listUsers(gate.db), {
-        kind: "warn",
-        message: `${login} is already a member — nothing changed.`,
-      }),
-    );
+    return c.text("ok"); // already a member — idempotent no-op
   }
   await createUser(gate.db, { login, role: "member", invitedBy: gate.admin.github_login });
-  return c.html(
-    membersPage(gate.session, await listUsers(gate.db), {
-      kind: "success",
-      message: `Invited ${login} — they can sign in with GitHub now.`,
-    }),
-  );
+  return c.text("ok");
 });
 
 dashboardApp.post("/members/remove", async (c) => {
@@ -612,20 +682,11 @@ dashboardApp.post("/members/remove", async (c) => {
   const members = await listUsers(gate.db);
   const target = members.find((m) => m.id === userId);
   if (!target) {
-    return c.html(
-      membersPage(gate.session, members, {
-        kind: "error",
-        message: "Unknown member — nothing was removed, try again.",
-      }),
-      400,
-    );
+    return c.text("Unknown member — nothing was removed, try again.", 400);
   }
   // Refuse self-removal: an admin must not be able to lock themselves out.
   if (target.github_login.toLowerCase() === gate.admin.github_login.toLowerCase()) {
-    return c.html(
-      membersPage(gate.session, members, { kind: "error", message: "You cannot remove yourself." }),
-      400,
-    );
+    return c.text("You cannot remove yourself.", 400);
   }
   // Refuse removing an admin while they are the last one (removal = row
   // delete, so this is the deployment's only admin-lockout guard). This
@@ -633,32 +694,15 @@ dashboardApp.post("/members/remove", async (c) => {
   // conditional DELETE below, which closes the read-check-delete TOCTOU
   // (qc1): two concurrent removes of the last two admins cannot both land.
   if (target.role === "admin" && (await countAdmins(gate.db)) === 1) {
-    return c.html(
-      membersPage(gate.session, members, {
-        kind: "error",
-        message: "The last admin cannot be removed.",
-      }),
-      400,
-    );
+    return c.text("The last admin cannot be removed.", 400);
   }
   if (!(await deleteUserUnlessLastAdmin(gate.db, target.id))) {
     // Lost a race (the row vanished or just became the last admin between
-    // the reads above and this delete): re-render with a retry notice —
+    // the reads above and this delete): 400 with a retry message —
     // zero partial state either way.
-    return c.html(
-      membersPage(gate.session, await listUsers(gate.db), {
-        kind: "error",
-        message: `Could not remove ${target.github_login} — the member list just changed, try again.`,
-      }),
-      400,
-    );
+    return c.text(`Could not remove ${target.github_login} — the member list just changed, try again.`, 400);
   }
-  return c.html(
-    membersPage(gate.session, await listUsers(gate.db), {
-      kind: "success",
-      message: `Removed ${target.github_login}.`,
-    }),
-  );
+  return c.text("ok");
 });
 
 // --- Plan 13 B5 T3: Apps list + per-App management (spec § Multi-App 契约,
@@ -686,7 +730,7 @@ async function requireMember(c: Context<{ Bindings: Env }>): Promise<
   const user = await getUserByLogin(db, session.login);
   // Fail closed: no row (removed between guard and here) → 403, the 403 view
   // carries zero membership data.
-  if (!user) return { ok: false, response: c.html(forbiddenPage(session.login), 403) };
+  if (!user) return { ok: false, response: c.html(forbiddenPage(session.login, requestLocale(c)), 403) };
   return { ok: true, session, db, user };
 }
 
@@ -704,9 +748,8 @@ function canManageApp(user: DashboardUserRow, app: GithubAppRow): boolean {
  *
  * The summaries come from the store's BATCHED deliverySummaries face
  * (plan 20 QC wave 1, W-1): exactly TWO D1 statements for any N instead
- * of the per-App 2N fan-out — this helper runs on every POST re-render
- * (three action paths plus the bare GET), so the statement count must not
- * scale with the App count.
+ * of the per-App 2N fan-out — this helper runs on GET /api/apps (the SPA
+ * JSON face), so the statement count must not scale with the App count.
  */
 async function appsListWithHealth(
   db: DashboardDb,
@@ -717,29 +760,41 @@ async function appsListWithHealth(
   return rows.map((app) => ({ ...app, health: summaries[app.id]! }));
 }
 
-dashboardApp.get("/apps", async (c) => {
+/** SPA JSON face — same requireMember gate and appsListWithHealth assembly as the retired GET /apps. Encrypted columns and row PKs stay off the payload. */
+dashboardApp.get("/api/apps", async (c) => {
   const gate = await requireMember(c);
   if (!gate.ok) return gate.response;
-  return c.html(
-    appsPage(gate.session, await appsListWithHealth(gate.db), {
-      login: gate.user.github_login,
-      role: gate.user.role,
-    }),
-  );
+  const rows = await appsListWithHealth(gate.db);
+  return c.json({
+    viewer: { login: gate.user.github_login, role: gate.user.role },
+    apps: rows.map((app) => ({
+      slug: app.slug,
+      github_app_id: app.github_app_id,
+      status: app.status,
+      review_enabled: app.review_enabled,
+      created_by: app.created_by,
+      health: {
+        latest: app.health.latest
+          ? {
+              event_name: app.health.latest.event_name,
+              outcome: app.health.latest.outcome,
+              status_code: app.health.latest.status_code,
+              created_at: app.health.latest.created_at,
+            }
+          : null,
+        rejected24h: app.health.rejected24h,
+      },
+    })),
+  });
 });
 
 /**
  * One handler for the three pinned action routes. Unknown and soft-deleted
  * apps are equally invisible (the list never shows them) → 404, zero writes.
- * The store write returns whether a row changed; the warn notice below
- * covers BOTH the idempotent no-op (the row was already in the target
- * state — "was already X — nothing changed") and the lost race (the row
- * was soft-deleted between the read and the write) — either way the list
- * re-renders with a warn, zero partial state. Note a same-value status
- * write still counts as changed (the UPDATE churns updated_at), so for
- * status toggles the no-op copy is effectively the lost-race path;
- * appReviewAction instead short-circuits its idempotent no-op before the
- * store write.
+ * Plan 29 T6: the Apps list is SPA-owned, so the response is a plain 2xx the
+ * SPA's postForm treats as success (it refetches the JSON face); the
+ * re-rendered HTML page is retired. The store write still happens exactly
+ * once; the `changed` result only shaped the retired notice copy.
  */
 async function appStatusAction(
   c: Context<{ Bindings: Env }>,
@@ -750,19 +805,13 @@ async function appStatusAction(
   const apps = createAppsStore(gate.db);
   const app = await apps.getAppBySlug(c.req.param("slug") ?? "");
   if (!app || app.deleted_at !== null) return c.text("unknown app", 404);
-  if (!canManageApp(gate.user, app)) return c.html(forbiddenPage(gate.session.login), 403);
-  const changed =
-    action === "delete" ? await apps.softDeleteApp(app.id) : await apps.setAppStatus(app.id, action === "disable" ? "disabled" : "active");
-  const verb = action === "delete" ? "Deleted" : action === "disable" ? "Disabled" : "Enabled";
-  const notice: PageNotice = changed
-    ? { kind: "success", message: `${verb} ${app.slug}.` }
-    : { kind: "warn", message: `${app.slug} was already ${action === "enable" ? "enabled" : `${action}d`} — nothing changed.` };
-  return c.html(
-    appsPage(gate.session, await appsListWithHealth(gate.db), {
-      login: gate.user.github_login,
-      role: gate.user.role,
-    }, notice),
-  );
+  if (!canManageApp(gate.user, app)) return c.html(forbiddenPage(gate.session.login, requestLocale(c)), 403);
+  if (action === "delete") {
+    await apps.softDeleteApp(app.id);
+  } else {
+    await apps.setAppStatus(app.id, action === "disable" ? "disabled" : "active");
+  }
+  return c.text("ok");
 }
 
 dashboardApp.post("/apps/:slug/disable", (c) => appStatusAction(c, "disable"));
@@ -779,17 +828,17 @@ dashboardApp.post("/apps/:slug/delete", (c) => appStatusAction(c, "delete"));
 // soft-deleted apps are equally invisible (→ 404, zero writes), then
 // creator-or-admin (→ 403 forbiddenPage, zero writes). Confirm-free and
 // reversible (pause ≠ disable — the webhook face stays healthy while
-// paused); the response re-renders the Apps list with a notice, so the
-// state change is visible immediately (the settings page reads the row
-// fresh on every GET).
+// paused). Plan 29 T6: the response is plain 200 "ok"; the SPA refetches
+// the JSON face rather than re-rendering HTML.
 
 /**
  * One handler for the two pinned review-action routes. The idempotent no-op
  * case is short-circuited BEFORE the store write — pausing a paused App /
- * resuming an active one re-renders with a warn notice and never touches
- * the row (setReviewEnabled would count a same-value UPDATE as changed and
- * would churn updated_at, the operator-mutation timestamp). Grammar pinned:
- * "already paused" / "already active".
+ * resuming an active one never touches the row (setReviewEnabled would
+ * count a same-value UPDATE as changed and would churn updated_at, the
+ * operator-mutation timestamp). Plan 29 T6: the response is a plain 2xx the
+ * SPA's postForm treats as success (it refetches the JSON face); the
+ * re-rendered HTML page is retired.
  */
 async function appReviewAction(
   c: Context<{ Bindings: Env }>,
@@ -800,29 +849,11 @@ async function appReviewAction(
   const apps = createAppsStore(gate.db);
   const app = await apps.getAppBySlug(c.req.param("slug") ?? "");
   if (!app || app.deleted_at !== null) return c.text("unknown app", 404);
-  if (!canManageApp(gate.user, app)) return c.html(forbiddenPage(gate.session.login), 403);
+  if (!canManageApp(gate.user, app)) return c.html(forbiddenPage(gate.session.login, requestLocale(c)), 403);
   const paused = app.review_enabled === 0;
-  let notice: PageNotice;
-  if (action === "pause" ? paused : !paused) {
-    notice = {
-      kind: "warn",
-      message: `${app.slug} was already ${paused ? "paused" : "active"} — nothing changed.`,
-    };
-  } else if (await apps.setReviewEnabled(app.id, action === "resume")) {
-    notice = {
-      kind: "success",
-      message: `${action === "pause" ? "Paused" : "Resumed"} ${app.slug}.`,
-    };
-  } else {
-    // Lost a race: the row was soft-deleted between the read and the write.
-    notice = { kind: "warn", message: `${app.slug} was just removed — nothing changed.` };
-  }
-  return c.html(
-    appsPage(gate.session, await appsListWithHealth(gate.db), {
-      login: gate.user.github_login,
-      role: gate.user.role,
-    }, notice),
-  );
+  if (action === "pause" ? paused : !paused) return c.text("ok"); // idempotent no-op — never touch the row
+  await apps.setReviewEnabled(app.id, action === "resume");
+  return c.text("ok");
 }
 
 dashboardApp.post("/apps/:slug/pause", (c) => appReviewAction(c, "pause"));
@@ -844,9 +875,9 @@ dashboardApp.post("/apps/:slug/resume", (c) => appReviewAction(c, "resume"));
 // Encryption-dependent reads AND writes: masking needs plaintext (the last-4
 // tail), so a missing/malformed DASHBOARD_ENCRYPTION_KEY fails the whole
 // family closed with 5xx (spec § Crypto envelope) — never a partial page,
-// never a stored key. Rendering = the DESIGN-token appSettingsPage view in
-// src/dashboard/views.ts (plan 14 T2 — single column, masked list, no new
-// tokens); the T1 temporary placeholder render is gone.
+// never a stored key. Plan 29 T6: the settings page is SPA-owned (the JSON
+// face below serves the SPA); the DESIGN-token appSettingsPage view in
+// src/dashboard/views.ts is retired.
 
 type AppSettingsGate =
   | { ok: true; session: SessionPayload; db: DashboardDb; app: GithubAppRow }
@@ -859,7 +890,7 @@ async function requireAppSettings(c: Context<{ Bindings: Env }>): Promise<AppSet
   const app = await createAppsStore(member.db).getAppBySlug(c.req.param("slug") ?? "");
   if (!app || app.deleted_at !== null) return { ok: false, response: c.text("unknown app", 404) };
   if (!canManageApp(member.user, app)) {
-    return { ok: false, response: c.html(forbiddenPage(member.session.login), 403) };
+    return { ok: false, response: c.html(forbiddenPage(member.session.login, requestLocale(c)), 403) };
   }
   // The settings family is encryption-dependent end to end (masking needs
   // plaintext, adding a key encrypts): a missing master key fails EVERY
@@ -889,82 +920,66 @@ function logSettingsFailure(stage: string, appId: string, err: unknown): void {
   );
 }
 
-/** 500 fail-closed notice: key misconfiguration vs storage rejection (commit-route copy style). */
-function settingsFailureNotice(err: unknown): PageNotice {
+/** 500 fail-closed message: key misconfiguration vs storage rejection (commit-route copy style). */
+function settingsFailureNotice(err: unknown): string {
   return err instanceof SecretboxKeyError
-    ? {
-        kind: "error",
-        message:
-          "This deployment has no valid DASHBOARD_ENCRYPTION_KEY for its stored keys — ask the operator to configure it, then resubmit.",
-      }
-    : {
-        kind: "error",
-        message: "The dashboard database rejected the change — nothing was stored. You can resubmit.",
-      };
+    ? "This deployment has no valid DASHBOARD_ENCRYPTION_KEY for its stored keys — ask the operator to configure it, then resubmit."
+    : "The dashboard database rejected the change — nothing was stored. You can resubmit.";
 }
 
 /**
- * Re-read the settings state and render the DESIGN-token view (plan 14 T2:
- * src/dashboard/views.ts appSettingsPage) — every route's response body. The
- * masked key list is the only key face, so no route here can leak key
- * material into HTML; a decrypt failure on re-read is the 500 fail-closed.
- * Plan 16: the install-health panel data (installations, review_enabled,
- * last_webhook_at) is read fresh on every render too, so every re-render —
- * including POST re-renders — reflects the current pause/health state.
- * Plan 17: the role map (app_model_roles) rides the same fresh read for the
- * Role models editor — a 400 re-render shows the STORED map (an invalid
- * submission is never echoed back as if it had been kept).
+ * Plain-text settings POST response (plan 29 T6: the settings page is
+ * SPA-owned and read-only today — plan 31 wires the forms; the pinned POST
+ * paths keep their full validation and mutation, and answer the SPA's
+ * postForm contract: 2xx → refetch the JSON face, 4xx/5xx → client error).
  */
-async function settingsResponse(
+function settingsPostResponse(
   c: Context<{ Bindings: Env }>,
-  session: SessionPayload,
-  store: AppConfigStore,
-  apps: ReturnType<typeof createAppsStore>,
-  app: GithubAppRow,
-  notice?: PageNotice,
+  message: string,
   status: 200 | 400 | 500 = 200,
-): Promise<Response> {
-  try {
-    const maskedKeys = await store.listProviderKeys(app.id);
-    const modelChain = await store.getModelChain(app.id);
-    const modelRoles = await store.getAppModelRoles(app.id);
-    const customProviders = await store.listCustomProviders(app.id);
-    const installations = await apps.listInstallations(app.id);
-    // Plan 20 Task 2: the recent-deliveries panel data (AL-20-2) — the
-    // App's last 5 webhook_deliveries rows, read fresh on every render so
-    // POST re-renders reflect the latest deliveries too.
-    const deliveries = await apps.listRecentDeliveries(app.id, 5);
-    return c.html(
-      appSettingsPage(
-        session,
-        {
-          slug: app.slug,
-          status: app.status,
-          reviewEnabled: app.review_enabled !== 0,
-          lastWebhookAt: app.last_webhook_at ?? null,
-        },
-        maskedKeys,
-        modelChain,
-        modelRoles,
-        installations,
-        notice,
-        deliveries,
-        customProviders,
-      ),
-      status,
-    );
-  } catch (err) {
-    logSettingsFailure("render", app.id, err);
-    return c.text("the app settings could not be read from encrypted storage", 500);
-  }
+): Response {
+  return c.text(message, status);
 }
 
-dashboardApp.get("/apps/:slug/settings", async (c) => {
+/** SPA JSON face — same requireAppSettings gate and the settings reads the retired HTML GET used. */
+dashboardApp.get("/api/apps/:slug/settings", async (c) => {
   const gate = await requireAppSettings(c);
   if (!gate.ok) return gate.response;
   const store = createAppConfigStore(gate.db, c.env.DASHBOARD_ENCRYPTION_KEY);
   const apps = createAppsStore(gate.db);
-  return settingsResponse(c, gate.session, store, apps, gate.app);
+  try {
+    const maskedKeys = await store.listProviderKeys(gate.app.id);
+    const modelChain = await store.getModelChain(gate.app.id);
+    const modelRoles = await store.getAppModelRoles(gate.app.id);
+    const customProviders = await store.listCustomProviders(gate.app.id);
+    const installations = await apps.listInstallations(gate.app.id);
+    const deliveries = await apps.listRecentDeliveries(gate.app.id, 5);
+    return c.json({
+      app: {
+        slug: gate.app.slug,
+        status: gate.app.status,
+        review_enabled: gate.app.review_enabled !== 0,
+        last_webhook_at: gate.app.last_webhook_at ?? null,
+      },
+      keys: maskedKeys,
+      model_chain: modelChain,
+      model_roles: modelRoles,
+      custom_providers: customProviders,
+      installations,
+      deliveries: deliveries.map((d) => ({
+        event_name: d.event_name,
+        outcome: d.outcome,
+        status_code: d.status_code,
+        created_at: d.created_at,
+      })),
+      provider_ids: PROVIDER_IDS,
+      model_role_ids: MODEL_ROLE_IDS,
+      custom_provider_api_ids: CUSTOM_PROVIDER_API_IDS,
+    });
+  } catch (err) {
+    logSettingsFailure("api_render", gate.app.id, err);
+    return c.text("the app settings could not be read from encrypted storage", 500);
+  }
 });
 
 /**
@@ -972,7 +987,7 @@ dashboardApp.get("/apps/:slug/settings", async (c) => {
  * by the forms' hidden `op` field. add-key = provider allowlist (400 on any
  * other id — the allowlist is the plan's Global Constraint) + non-empty key
  * of at most MAX_PROVIDER_KEY_LENGTH characters (plan 15 input bounds — an
- * oversized key is a 400 re-render with zero writes; the store guard beneath
+ * oversized key is a 400 with zero writes; the store guard beneath
  * is the backstop), then the store encrypts inside. save-chain = empty →
  * clear the chain (an unconfigured chain fails that App's reviews closed in
  * the consumer — plan 24 Task 6 / AL-24-5: no deployment-level chain exists
@@ -985,9 +1000,10 @@ dashboardApp.get("/apps/:slug/settings", async (c) => {
  * remove-custom-provider (plan 23 T2) = the custom-provider declarations
  * section: every AL-23-1/AL-23-2 bound (id grammar, https-only baseUrl,
  * three-form api enum, model_ids 1..32 × ≤128, key required ≤4096) is a 400
- * re-render with zero writes; the key is encrypted inside the store and
- * never echoed. Validation failures re-render the page at 400 with zero
- * writes — never a plain-text body (the plan-14 T1 review lesson).
+ * with zero writes; the key is encrypted inside the store and
+ * never echoed. Plan 29 T6: the settings page is SPA-owned, so every
+ * response is plain text (settingsPostResponse) — 2xx = the SPA refetches
+ * the JSON face, 4xx/5xx = the reason; the re-rendered HTML page is retired.
  */
 dashboardApp.post("/apps/:slug/settings", async (c) => {
   const gate = await requireAppSettings(c);
@@ -1000,49 +1016,25 @@ dashboardApp.post("/apps/:slug/settings", async (c) => {
   const form = await c.req.parseBody({ all: true });
   const op = typeof form.op === "string" ? form.op : "";
   const store = createAppConfigStore(gate.db, c.env.DASHBOARD_ENCRYPTION_KEY);
-  const apps = createAppsStore(gate.db);
   if (op === "add-key") {
     const provider = typeof form.provider === "string" ? form.provider.trim() : "";
     const plainKey = typeof form.key === "string" ? form.key.trim() : "";
     if (!PROVIDER_IDS.includes(provider)) {
-      return settingsResponse(
+      return settingsPostResponse(
         c,
-        gate.session,
-        store,
-        apps,
-        gate.app,
-        {
-          kind: "error",
-          message:
-            provider === ""
-              ? "Pick a provider for the key."
-              : `${provider} is not a supported provider — pick one from the list.`,
-        },
+        provider === ""
+          ? "Pick a provider for the key."
+          : `${provider} is not a supported provider — pick one from the list.`,
         400,
       );
     }
     if (plainKey === "") {
-      return settingsResponse(
-        c,
-        gate.session,
-        store,
-        apps,
-        gate.app,
-        { kind: "error", message: "Enter an API key to store." },
-        400,
-      );
+      return settingsPostResponse(c, "Enter an API key to store.", 400);
     }
     if (plainKey.length > MAX_PROVIDER_KEY_LENGTH) {
-      return settingsResponse(
+      return settingsPostResponse(
         c,
-        gate.session,
-        store,
-        apps,
-        gate.app,
-        {
-          kind: "error",
-          message: `That API key is too long (${plainKey.length} characters) — keys are limited to ${MAX_PROVIDER_KEY_LENGTH} characters. Nothing was stored.`,
-        },
+        `That API key is too long (${plainKey.length} characters) — keys are limited to ${MAX_PROVIDER_KEY_LENGTH} characters. Nothing was stored.`,
         400,
       );
     }
@@ -1050,25 +1042,21 @@ dashboardApp.post("/apps/:slug/settings", async (c) => {
       await store.setProviderKey(gate.app.id, provider, plainKey);
     } catch (err) {
       logSettingsFailure("add_key", gate.app.id, err);
-      return settingsResponse(c, gate.session, store, apps, gate.app, settingsFailureNotice(err), 500);
+      return settingsPostResponse(c, settingsFailureNotice(err), 500);
     }
-    return settingsResponse(c, gate.session, store, apps, gate.app, {
-      kind: "success",
-      message: `Stored the ${provider} key for ${gate.app.slug} — it is only ever shown masked.`,
-    });
+    return settingsPostResponse(
+      c,
+      `Stored the ${provider} key for ${gate.app.slug} — it is only ever shown masked.`,
+    );
   }
   if (op === "save-chain") {
     // AL-23-2: a duplicate model_chain field (parseBody all:true aggregates
     // it into an array) must be rejected — never treated as the empty-clear
     // path, which would silently wipe the stored chain.
     if (Array.isArray(form.model_chain)) {
-      return settingsResponse(
+      return settingsPostResponse(
         c,
-        gate.session,
-        store,
-        apps,
-        gate.app,
-        { kind: "error", message: "The model chain field was submitted more than once — resubmit the form. Nothing was saved." },
+        "The model chain field was submitted more than once — resubmit the form. Nothing was saved.",
         400,
       );
     }
@@ -1076,45 +1064,27 @@ dashboardApp.post("/apps/:slug/settings", async (c) => {
     try {
       if (raw.trim() === "") {
         await store.setModelChain(gate.app.id, null);
-        return settingsResponse(c, gate.session, store, apps, gate.app, {
-          kind: "success",
-          message: `Cleared the model chain for ${gate.app.slug} — reviews fail closed until a chain + provider keys are configured (per-App only, plan 24).`,
-        });
+        return settingsPostResponse(
+          c,
+          `Cleared the model chain for ${gate.app.slug} — reviews fail closed until a chain + provider keys are configured (per-App only, plan 24).`,
+        );
       }
       if (raw.length > MAX_MODEL_SELECTOR_LENGTH) {
-        return settingsResponse(
+        return settingsPostResponse(
           c,
-          gate.session,
-          store,
-          apps,
-          gate.app,
-          {
-            kind: "error",
-            message: `That model chain is too long (${raw.length} characters) — limited to ${MAX_MODEL_SELECTOR_LENGTH}. Nothing was saved.`,
-          },
+          `That model chain is too long (${raw.length} characters) — limited to ${MAX_MODEL_SELECTOR_LENGTH}. Nothing was saved.`,
           400,
         );
       }
       if (parseModelChain(raw).length === 0) {
-        return settingsResponse(
-          c,
-          gate.session,
-          store,
-          apps,
-          gate.app,
-          { kind: "error", message: "Enter at least one comma-separated model selector." },
-          400,
-        );
+        return settingsPostResponse(c, "Enter at least one comma-separated model selector.", 400);
       }
       await store.setModelChain(gate.app.id, raw);
     } catch (err) {
       logSettingsFailure("save_chain", gate.app.id, err);
-      return settingsResponse(c, gate.session, store, apps, gate.app, settingsFailureNotice(err), 500);
+      return settingsPostResponse(c, settingsFailureNotice(err), 500);
     }
-    return settingsResponse(c, gate.session, store, apps, gate.app, {
-      kind: "success",
-      message: `Saved the model chain for ${gate.app.slug}.`,
-    });
+    return settingsPostResponse(c, `Saved the model chain for ${gate.app.slug}.`);
   }
   if (op === "save-roles") {
     // Plan 17 T3: the Role models editor posts one `role_<role>` field per
@@ -1123,83 +1093,46 @@ dashboardApp.post("/apps/:slug/settings", async (c) => {
     // setModelRole 空 = 清除 convention), content = verbatim upsert, all
     // through the validate-all-first setModelRoles bulk face. Any
     // `role_`-prefixed field naming a role outside MODEL_ROLE_IDS is client
-    // tampering → 400 re-render, zero writes; a save with NO role fields at
+    // tampering → 400, zero writes; a save with NO role fields at
     // all is equally malformed (it could not come from this page, and an
     // empty map must never masquerade as a successful save).
     const selectors: Record<string, string> = {};
     for (const [field, value] of Object.entries(form)) {
       if (!field.startsWith("role_")) continue;
       // AL-23-2: with parseBody({ all: true }) a duplicate role_* field
-      // arrives as an ARRAY — explicit 400 rejection (re-render + zero
+      // arrives as an ARRAY — explicit 400 rejection (zero
       // writes), never the silent last-wins the default parseBody had.
       if (Array.isArray(value)) {
-        return settingsResponse(
+        return settingsPostResponse(
           c,
-          gate.session,
-          store,
-          apps,
-          gate.app,
-          {
-            kind: "error",
-            message: `The ${field} field was submitted more than once — resubmit the Role models form with one value per role. Nothing was saved.`,
-          },
+          `The ${field} field was submitted more than once — resubmit the Role models form with one value per role. Nothing was saved.`,
           400,
         );
       }
       if (typeof value !== "string") continue;
       const role = field.slice("role_".length);
       if (!MODEL_ROLE_IDS.includes(role)) {
-        return settingsResponse(
-          c,
-          gate.session,
-          store,
-          apps,
-          gate.app,
-          { kind: "error", message: `${role} is not a known review role — nothing was saved.` },
-          400,
-        );
+        return settingsPostResponse(c, `${role} is not a known review role — nothing was saved.`, 400);
       }
       selectors[role] = value;
     }
     if (Object.keys(selectors).length === 0) {
-      return settingsResponse(
-        c,
-        gate.session,
-        store,
-        apps,
-        gate.app,
-        { kind: "error", message: "No role selectors were submitted — resubmit the Role models form." },
-        400,
-      );
+      return settingsPostResponse(c, "No role selectors were submitted — resubmit the Role models form.", 400);
     }
     // Selector grammar, role-named for the 4-row form (the same parseModelChain
     // mirror the save-chain op 400s against); blank stays legal = clear.
     for (const [role, selector] of Object.entries(selectors)) {
       if (selector.length > MAX_MODEL_SELECTOR_LENGTH) {
-        return settingsResponse(
+        return settingsPostResponse(
           c,
-          gate.session,
-          store,
-          apps,
-          gate.app,
-          {
-            kind: "error",
-            message: `The ${role} selector is too long (${selector.length} characters) — limited to ${MAX_MODEL_SELECTOR_LENGTH}. Nothing was saved.`,
-          },
+          `The ${role} selector is too long (${selector.length} characters) — limited to ${MAX_MODEL_SELECTOR_LENGTH}. Nothing was saved.`,
           400,
         );
       }
       if (selector.trim() !== "" && parseModelChain(selector).length === 0) {
-        return settingsResponse(
+        return settingsPostResponse(
           c,
-          gate.session,
-          store,
-          apps,
-          gate.app,
-          {
-            kind: "error",
-            message: `The ${role} selector needs at least one comma-separated model selector — or leave it empty to use the App model chain. Nothing was saved.`,
-          },
+          `The ${role} selector needs at least one comma-separated model selector — or leave it empty to use the App model chain. Nothing was saved.`,
           400,
         );
       }
@@ -1208,16 +1141,13 @@ dashboardApp.post("/apps/:slug/settings", async (c) => {
       await store.setModelRoles(gate.app.id, selectors);
     } catch (err) {
       logSettingsFailure("save_roles", gate.app.id, err);
-      return settingsResponse(c, gate.session, store, apps, gate.app, settingsFailureNotice(err), 500);
+      return settingsPostResponse(c, settingsFailureNotice(err), 500);
     }
-    return settingsResponse(c, gate.session, store, apps, gate.app, {
-      kind: "success",
-      message: `Saved the role models for ${gate.app.slug}.`,
-    });
+    return settingsPostResponse(c, `Saved the role models for ${gate.app.slug}.`);
   }
   if (op === "add-custom-provider") {
     // Plan 23 T2: declare a NON-built-in model provider for the App. Every
-    // AL-23-1/AL-23-2 bound is checked here (400 re-render, zero writes —
+    // AL-23-1/AL-23-2 bound is checked here (400, zero writes —
     // the store re-validates as the backstop): provider id grammar
     // `[a-z0-9][a-z0-9-]{0,63}` (the env-name mapping the Task 3 consumer
     // injects), no collision with a built-in OR in-image base provider id
@@ -1233,42 +1163,19 @@ dashboardApp.post("/apps/:slug/settings", async (c) => {
     const modelIds = parseModelChain(typeof form.model_ids === "string" ? form.model_ids : "");
     const plainKey = typeof form.key === "string" ? form.key.trim() : "";
     if (providerId === "") {
-      return settingsResponse(
-        c,
-        gate.session,
-        store,
-        apps,
-        gate.app,
-        { kind: "error", message: "Enter a provider id for the custom provider." },
-        400,
-      );
+      return settingsPostResponse(c, "Enter a provider id for the custom provider.", 400);
     }
     if (!CUSTOM_PROVIDER_ID_PATTERN.test(providerId)) {
-      return settingsResponse(
+      return settingsPostResponse(
         c,
-        gate.session,
-        store,
-        apps,
-        gate.app,
-        {
-          kind: "error",
-          message:
-            "Provider ids are lowercase letters, digits, and hyphens — 1 to 64 characters, starting with a letter or digit. Nothing was stored.",
-        },
+        "Provider ids are lowercase letters, digits, and hyphens — 1 to 64 characters, starting with a letter or digit. Nothing was stored.",
         400,
       );
     }
     if (PROVIDER_IDS.includes(providerId)) {
-      return settingsResponse(
+      return settingsPostResponse(
         c,
-        gate.session,
-        store,
-        apps,
-        gate.app,
-        {
-          kind: "error",
-          message: `${providerId} is a built-in provider — custom providers must use a new id. Nothing was stored.`,
-        },
+        `${providerId} is a built-in provider — custom providers must use a new id. Nothing was stored.`,
         400,
       );
     }
@@ -1277,16 +1184,9 @@ dashboardApp.post("/apps/:slug/settings", async (c) => {
     // block on every review while its key still got injected, so the
     // declaration is refused up front (mirror of IN_IMAGE_BASE_PROVIDER_IDS).
     if (IN_IMAGE_BASE_PROVIDER_IDS.includes(providerId)) {
-      return settingsResponse(
+      return settingsPostResponse(
         c,
-        gate.session,
-        store,
-        apps,
-        gate.app,
-        {
-          kind: "error",
-          message: `${providerId} is already provided by the review environment's base configuration — custom providers must use a new id. Nothing was stored.`,
-        },
+        `${providerId} is already provided by the review environment's base configuration — custom providers must use a new id. Nothing was stored.`,
         400,
       );
     }
@@ -1298,141 +1198,59 @@ dashboardApp.post("/apps/:slug/settings", async (c) => {
       !declaredCustomProviders.some((p) => p.provider_id === providerId) &&
       declaredCustomProviders.length >= MAX_CUSTOM_PROVIDER_COUNT
     ) {
-      return settingsResponse(
+      return settingsPostResponse(
         c,
-        gate.session,
-        store,
-        apps,
-        gate.app,
-        {
-          kind: "error",
-          message: `This App already has the maximum of ${MAX_CUSTOM_PROVIDER_COUNT} custom providers — remove one before declaring another (updating an existing declaration is always allowed). Nothing was stored.`,
-        },
+        `This App already has the maximum of ${MAX_CUSTOM_PROVIDER_COUNT} custom providers — remove one before declaring another (updating an existing declaration is always allowed). Nothing was stored.`,
         400,
       );
     }
     if (baseUrl === "") {
-      return settingsResponse(
-        c,
-        gate.session,
-        store,
-        apps,
-        gate.app,
-        { kind: "error", message: "Enter the provider's base URL." },
-        400,
-      );
+      return settingsPostResponse(c, "Enter the provider's base URL.", 400);
     }
     if (!isValidCustomProviderBaseUrl(baseUrl)) {
-      return settingsResponse(
-        c,
-        gate.session,
-        store,
-        apps,
-        gate.app,
-        { kind: "error", message: "The base URL must be a valid https URL with a host — nothing was stored." },
-        400,
-      );
+      return settingsPostResponse(c, "The base URL must be a valid https URL with a host — nothing was stored.", 400);
     }
     if (baseUrl.length > MAX_CUSTOM_PROVIDER_BASE_URL_LENGTH) {
-      return settingsResponse(
+      return settingsPostResponse(
         c,
-        gate.session,
-        store,
-        apps,
-        gate.app,
-        {
-          kind: "error",
-          message: `That base URL is too long (${baseUrl.length} characters) — limited to ${MAX_CUSTOM_PROVIDER_BASE_URL_LENGTH}. Nothing was stored.`,
-        },
+        `That base URL is too long (${baseUrl.length} characters) — limited to ${MAX_CUSTOM_PROVIDER_BASE_URL_LENGTH}. Nothing was stored.`,
         400,
       );
     }
     if (api === "") {
-      return settingsResponse(
-        c,
-        gate.session,
-        store,
-        apps,
-        gate.app,
-        { kind: "error", message: "Pick an API protocol for the custom provider." },
-        400,
-      );
+      return settingsPostResponse(c, "Pick an API protocol for the custom provider.", 400);
     }
     if (!CUSTOM_PROVIDER_API_IDS.includes(api as (typeof CUSTOM_PROVIDER_API_IDS)[number])) {
-      return settingsResponse(
+      return settingsPostResponse(
         c,
-        gate.session,
-        store,
-        apps,
-        gate.app,
-        {
-          kind: "error",
-          message: `${api} is not a supported API protocol — pick one from the list. Nothing was stored.`,
-        },
+        `${api} is not a supported API protocol — pick one from the list. Nothing was stored.`,
         400,
       );
     }
     if (modelIds.length === 0) {
-      return settingsResponse(
-        c,
-        gate.session,
-        store,
-        apps,
-        gate.app,
-        { kind: "error", message: "Enter at least one model id for the custom provider." },
-        400,
-      );
+      return settingsPostResponse(c, "Enter at least one model id for the custom provider.", 400);
     }
     if (modelIds.length > MAX_CUSTOM_PROVIDER_MODEL_IDS) {
-      return settingsResponse(
+      return settingsPostResponse(
         c,
-        gate.session,
-        store,
-        apps,
-        gate.app,
-        {
-          kind: "error",
-          message: `Too many model ids (${modelIds.length}) — at most ${MAX_CUSTOM_PROVIDER_MODEL_IDS}. Nothing was stored.`,
-        },
+        `Too many model ids (${modelIds.length}) — at most ${MAX_CUSTOM_PROVIDER_MODEL_IDS}. Nothing was stored.`,
         400,
       );
     }
     if (modelIds.some((id) => id.length > MAX_CUSTOM_PROVIDER_MODEL_ID_LENGTH)) {
-      return settingsResponse(
+      return settingsPostResponse(
         c,
-        gate.session,
-        store,
-        apps,
-        gate.app,
-        {
-          kind: "error",
-          message: `Model ids are limited to ${MAX_CUSTOM_PROVIDER_MODEL_ID_LENGTH} characters each. Nothing was stored.`,
-        },
+        `Model ids are limited to ${MAX_CUSTOM_PROVIDER_MODEL_ID_LENGTH} characters each. Nothing was stored.`,
         400,
       );
     }
     if (plainKey === "") {
-      return settingsResponse(
-        c,
-        gate.session,
-        store,
-        apps,
-        gate.app,
-        { kind: "error", message: "Enter an API key to store." },
-        400,
-      );
+      return settingsPostResponse(c, "Enter an API key to store.", 400);
     }
     if (plainKey.length > MAX_PROVIDER_KEY_LENGTH) {
-      return settingsResponse(
+      return settingsPostResponse(
         c,
-        gate.session,
-        store,
-        apps,
-        gate.app,
-        {
-          kind: "error",
-          message: `That API key is too long (${plainKey.length} characters) — keys are limited to ${MAX_PROVIDER_KEY_LENGTH} characters. Nothing was stored.`,
-        },
+        `That API key is too long (${plainKey.length} characters) — keys are limited to ${MAX_PROVIDER_KEY_LENGTH} characters. Nothing was stored.`,
         400,
       );
     }
@@ -1448,14 +1266,14 @@ dashboardApp.post("/apps/:slug/settings", async (c) => {
       // throw InvalidCustomProviderError AFTER the route pre-check passed
       // (a concurrent save won the last slot) — that is a 400, not a 500.
       if (err instanceof InvalidCustomProviderError) {
-        return settingsResponse(c, gate.session, store, apps, gate.app, { kind: "error", message: err.message }, 400);
+        return settingsPostResponse(c, err.message, 400);
       }
-      return settingsResponse(c, gate.session, store, apps, gate.app, settingsFailureNotice(err), 500);
+      return settingsPostResponse(c, settingsFailureNotice(err), 500);
     }
-    return settingsResponse(c, gate.session, store, apps, gate.app, {
-      kind: "success",
-      message: `Declared custom provider ${providerId} for ${gate.app.slug} — its key is stored encrypted and injected by environment variable name.`,
-    });
+    return settingsPostResponse(
+      c,
+      `Declared custom provider ${providerId} for ${gate.app.slug} — its key is stored encrypted and injected by environment variable name.`,
+    );
   }
   if (op === "remove-custom-provider") {
     const providerId = typeof form.provider_id === "string" ? form.provider_id.trim() : "";
@@ -1464,29 +1282,20 @@ dashboardApp.post("/apps/:slug/settings", async (c) => {
       removed = await store.removeCustomProvider(gate.app.id, providerId);
     } catch (err) {
       logSettingsFailure("remove_custom_provider", gate.app.id, err);
-      return settingsResponse(c, gate.session, store, apps, gate.app, settingsFailureNotice(err), 500);
+      return settingsPostResponse(c, settingsFailureNotice(err), 500);
     }
     // Tolerant no-op (the id grammar already bounds what can ever be
-    // stored): an unknown provider id simply has no row — a warn, not a 400.
-    const notice: PageNotice = removed
-      ? { kind: "success", message: `Removed the custom provider ${providerId} from ${gate.app.slug}.` }
-      : {
-          kind: "warn",
-          message: `No custom provider ${providerId === "" ? "(unspecified)" : providerId} on ${gate.app.slug} — nothing changed.`,
-        };
-    return settingsResponse(c, gate.session, store, apps, gate.app, notice);
+    // stored): an unknown provider id simply has no row — a 2xx, not a 400.
+    return settingsPostResponse(
+      c,
+      removed
+        ? `Removed the custom provider ${providerId} from ${gate.app.slug}.`
+        : `No custom provider ${providerId === "" ? "(unspecified)" : providerId} on ${gate.app.slug} — nothing changed.`,
+    );
   }
   // T2 review fold (T1 minor): an unknown op is a validation failure like any
-  // other — re-render the HTML page at 400 instead of a plain-text body.
-  return settingsResponse(
-    c,
-    gate.session,
-    store,
-    apps,
-    gate.app,
-    { kind: "error", message: "Unknown settings operation — resubmit one of this page's forms." },
-    400,
-  );
+  // other — 400 with the reason.
+  return settingsPostResponse(c, "Unknown settings operation — resubmit one of this page's forms.", 400);
 });
 
 dashboardApp.post("/apps/:slug/settings/key/delete", async (c) => {
@@ -1495,23 +1304,21 @@ dashboardApp.post("/apps/:slug/settings/key/delete", async (c) => {
   const form = await c.req.parseBody();
   const provider = typeof form.provider === "string" ? form.provider.trim() : "";
   const store = createAppConfigStore(gate.db, c.env.DASHBOARD_ENCRYPTION_KEY);
-  const apps = createAppsStore(gate.db);
   let removed: boolean;
   try {
     removed = await store.removeProviderKey(gate.app.id, provider);
   } catch (err) {
     logSettingsFailure("remove_key", gate.app.id, err);
-    return settingsResponse(c, gate.session, store, apps, gate.app, settingsFailureNotice(err), 500);
+    return settingsPostResponse(c, settingsFailureNotice(err), 500);
   }
   // Tolerant no-op (the allowlist already bounds what can ever be stored):
-  // an unknown provider simply has no row — a warn, not a 400.
-  const notice: PageNotice = removed
-    ? { kind: "success", message: `Removed the stored ${provider} key for ${gate.app.slug}.` }
-    : {
-        kind: "warn",
-        message: `No stored ${provider === "" ? "(unspecified)" : provider} key on ${gate.app.slug} — nothing changed.`,
-      };
-  return settingsResponse(c, gate.session, store, apps, gate.app, notice);
+  // an unknown provider simply has no row — a 2xx, not a 400.
+  return settingsPostResponse(
+    c,
+    removed
+      ? `Removed the stored ${provider} key for ${gate.app.slug}.`
+      : `No stored ${provider === "" ? "(unspecified)" : provider} key on ${gate.app.slug} — nothing changed.`,
+  );
 });
 
 dashboardApp.get("/", async (c) => {
@@ -1524,12 +1331,16 @@ dashboardApp.get("/", async (c) => {
   const hold = await readHoldValue(getCookie(c, MANIFEST_HOLD_COOKIE), sessionSecret);
   if (hold && hold.login === session.login) {
     return c.html(
-      manifestConfirmPage(session, {
-        id: hold.id,
-        name: hold.name,
-        slug: hold.slug,
-        webhookUrl: `${new URL(c.req.url).origin}/webhook/${hold.slug}`,
-      }),
+      manifestConfirmPage(
+        session,
+        {
+          id: hold.id,
+          name: hold.name,
+          slug: hold.slug,
+          webhookUrl: `${new URL(c.req.url).origin}/webhook/${hold.slug}`,
+        },
+        requestLocale(c),
+      ),
     );
   }
   // Members entry is admin-aware (qc1/qc2 F-001): the guard already resolved
@@ -1556,11 +1367,12 @@ dashboardApp.get("/", async (c) => {
 const INSIGHTS_REPO_PATTERN = /^[^/\s]+\/[^/\s]+$/;
 
 /**
- * Shared query-param parse for BOTH insights faces (QC W-C): window
- * (integer days, default 30) + optional repo owner/repo filter. Returns the
- * parsed values or the 400 reason; each route keeps its own 400 shape (JSON
- * error body vs HTML notice page). The >90 clamp stays in the store — the
- * single clamp point — and both routes echo the EFFECTIVE window.
+ * Query-param parse for the insights JSON face (QC W-C): window (integer
+ * days, default 30) + optional repo owner/repo filter. Returns the parsed
+ * values or the 400 reason; the route answers 400 with a JSON error body
+ * (the HTML notice page retired with GET /insights in plan 29 T6). The
+ * >90 clamp stays in the store — the single clamp point — and the route
+ * echoes the EFFECTIVE window.
  */
 type InsightsParams =
   | { ok: true; windowDays: number; repoFilter?: { owner: string; repo: string }; rawRepo?: string }
@@ -1611,37 +1423,9 @@ dashboardApp.get("/api/insights/summary", async (c) => {
   });
 });
 
-// --- Plan 22 T3: Review Health insights HTML panel --------------------------
-//
-// The member-visible HTML face of the SAME store aggregation as the JSON
-// API above (one store call, two faces). The mount-level guard has already
-// verified membership, so this handler adds ZERO auth code (AL-22-1); the
-// session is re-read for the shellHeader (same route-local pattern as the
-// "/" shell — no session redirect here, the guard owns it). Query-param
-// contract mirrors the T2 route exactly via the shared parseInsightsParams:
-// window (integer days, default 30, >90 clamped to 90 with the EFFECTIVE
-// value echoed) and optional repo owner/repo filter — malformed → 400 as a
-// plain bad-request notice (badRequestPage, QC W-B — never the OAuth
-// errorPage; the JSON face's 400 shape is API-only).
-dashboardApp.get("/insights", async (c) => {
-  const sessionSecret = c.env.DASHBOARD_SESSION_SECRET;
-  if (!sessionSecret) return c.text("dashboard OAuth is not configured", 500);
-  // The mount-level guard has already verified the session (AL-22-1: zero
-  // auth code); this re-read only feeds shellHeader — same route-local
-  // pattern as the "/" shell.
-  const session = (await readSessionValue(getCookie(c, SESSION_COOKIE), sessionSecret))!;
-
-  const db = dashboardD1(c.env);
-  if (!db) return c.text("dashboard storage is not configured", 500);
-
-  const params = parseInsightsParams({ window: c.req.query("window"), repo: c.req.query("repo") });
-  if (!params.ok) return c.html(badRequestPage(params.reason), 400);
-
-  const insights = await createInsightsStore(db, { windowDays: params.windowDays, repo: params.repoFilter });
-  return c.html(
-    insightsPage(session, insights, { windowDays: clampWindow(params.windowDays), repo: params.rawRepo }),
-  );
-});
+// Plan 29 T6: the insights HTML panel is retired — /dashboard/insights is
+// SPA-owned (spa-dispatch serves the shell; the SPA reads the JSON face
+// above). The legacy GET handler is gone.
 
 // Placeholder actions (IA routing table): every POST under /dashboard that is
 // not a wired route above is a placeholder submit and must never succeed —

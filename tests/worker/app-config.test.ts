@@ -53,6 +53,7 @@ import { SESSION_COOKIE, createSessionValue } from "../../src/dashboard/session"
 import { createUser, type DashboardD1 } from "../../src/dashboard/users";
 import type { Env } from "../../src/worker/env";
 import type { D1StatementLike } from "../../src/store/types";
+import { SPA_BOOT_MARKER, htmlGet, withSpaAssets } from "../helpers/spa";
 
 const MIGRATIONS_DIR = join(import.meta.dir, "../../migrations");
 /** base64 of exactly 32 bytes — the secretbox master-key requirement. */
@@ -215,6 +216,8 @@ async function postForm(
     env,
   );
 }
+
+// Plan 29 T6/T7: settings HTML GET is SPA-owned (shared spa helper).
 
 const SETTINGS = "/dashboard/apps/mallorys-app/settings";
 
@@ -1091,120 +1094,26 @@ describe("duplication locks", () => {
 
 // --- routes ---
 
-describe("GET /dashboard/apps/:slug/settings", () => {
-  test("guard covers the family: no session → 302 to login (GET and POST)", async () => {
+describe("GET /dashboard/apps/:slug/settings (plan 29 T6: SPA-owned)", () => {
+  test("HTML navigation GET is served by SPA dispatch (boot-injected index)", async () => {
     const { db } = await seededWorld();
-    const getRes = await get(SETTINGS, "", makeEnv(db));
-    expect(getRes.status).toBe(302);
-    expect(getRes.headers.get("Location")).toBe("/dashboard/login");
-    const postRes = await postForm(SETTINGS, "", makeEnv(db), { op: "add-key" });
-    expect(postRes.status).toBe(302);
-    expect(postRes.headers.get("Location")).toBe("/dashboard/login");
-  });
-
-  test("owner sees the masked list + chain editor — never plaintext key material", async () => {
-    const { db, app } = await seededWorld();
-    const store = configStore(db);
-    await store.setProviderKey(app.id, "anthropic", PLAIN_ANTHROPIC_KEY);
-    await store.setModelChain(app.id, PLAIN_CHAIN);
-    const res = await get(SETTINGS, `${SESSION_COOKIE}=${await sessionCookie("mallory")}`, makeEnv(db));
+    const res = await htmlGet(SETTINGS, `${SESSION_COOKIE}=${await sessionCookie("mallory")}`, withSpaAssets(makeEnv(db)));
     expect(res.status).toBe(200);
     const body = await res.text();
-    // Masked list (provider + last-4) and the chain prefilled verbatim.
-    expect(body).toContain("<strong>anthropic</strong>");
-    expect(body).toContain(`key ending <code class="id">9988</code>`);
-    // Plan 23 T1 (migration 0012): the row also shows its last-update time —
-    // a freshly stored key reads "just now".
-    expect(body).toContain(`key ending <code class="id">9988</code> · updated just now`);
-    expect(body).toContain(`value="${PLAIN_CHAIN}"`);
-    // The zero-JS forms: add-key + save-chain on the pinned POST path, and
-    // the per-key delete action path.
-    expect(body).toContain('name="op" value="add-key"');
-    expect(body).toContain('name="op" value="save-chain"');
-    expect(body).toContain(`action="${SETTINGS}/key/delete"`);
-    // NO full key material anywhere in the HTML.
-    expect(body).not.toContain(PLAIN_ANTHROPIC_KEY);
-    expect(body).not.toContain("key_enc");
+    expect(body).toContain("window.__BOOT__=");
+    expect(body).not.toContain(SPA_BOOT_MARKER);
   });
 
-  test("plan 23 T1: a freshly stored key renders its last-update time in the masked row", async () => {
-    const { db, app } = await seededWorld();
-    await configStore(db).setProviderKey(app.id, "anthropic", PLAIN_ANTHROPIC_KEY);
-    const res = await get(SETTINGS, `${SESSION_COOKIE}=${await sessionCookie("mallory")}`, makeEnv(db));
-    expect(res.status).toBe(200);
-    const body = await res.text();
-    expect(body).toContain(`key ending <code class="id">9988</code> · updated just now`);
-  });
-
-  test("plan 23 T1: a pre-0012 row (NULL updated_at) renders an em dash placeholder", async () => {
-    const { db, app } = await seededWorld();
-    await configStore(db).setProviderKey(app.id, "anthropic", PLAIN_ANTHROPIC_KEY);
-    rawRun(db, "UPDATE app_provider_keys SET updated_at = NULL WHERE app_id = ? AND provider = 'anthropic'", app.id);
-    const res = await get(SETTINGS, `${SESSION_COOKIE}=${await sessionCookie("mallory")}`, makeEnv(db));
-    expect(res.status).toBe(200);
-    const body = await res.text();
-    expect(body).toContain(`key ending <code class="id">9988</code> · updated &mdash;`);
-  });
-
-  test("plan 23 T1: a hostile updated_at never renders raw — the meta degrades to the safe 'unknown' phrase", async () => {
-    const { db, app } = await seededWorld();
-    await configStore(db).setProviderKey(app.id, "anthropic", PLAIN_ANTHROPIC_KEY);
-    rawRun(
-      db,
-      "UPDATE app_provider_keys SET updated_at = '<img src=x onerror=alert(1)>' WHERE app_id = ? AND provider = 'anthropic'",
-      app.id,
-    );
-    const res = await get(SETTINGS, `${SESSION_COOKIE}=${await sessionCookie("mallory")}`, makeEnv(db));
-    expect(res.status).toBe(200);
-    const body = await res.text();
-    expect(body).not.toContain("<img");
-    expect(body).not.toContain("onerror=alert(1)>");
-    expect(body).toContain(`key ending <code class="id">9988</code> · updated unknown`);
-  });
-
-  test("non-owner member → 403; the owner of a DIFFERENT app → 403 (per-App scope)", async () => {
+  test("the legacy SSR handler is gone: a non-HTML GET falls through to the legacy app (guard 302, never the old HTML)", async () => {
     const { db } = await seededWorld();
-    for (const login of ["hubot", "ada"]) {
-      const res = await get(SETTINGS, `${SESSION_COOKIE}=${await sessionCookie(login)}`, makeEnv(db));
-      expect(res.status).toBe(403);
-      expect(await res.text()).toContain("restricted to dashboard admins");
-    }
-  });
-
-  test("admin (non-creator) may read the settings — owner-or-admin", async () => {
-    const { db } = await seededWorld();
-    const res = await get(SETTINGS, `${SESSION_COOKIE}=${await sessionCookie("octocat")}`, makeEnv(db));
-    expect(res.status).toBe(200);
-  });
-
-  test("unknown slug → 404; soft-deleted app → 404", async () => {
-    const { db, app } = await seededWorld();
-    const missing = await get(
-      "/dashboard/apps/no-such-app/settings",
-      `${SESSION_COOKIE}=${await sessionCookie("mallory")}`,
-      makeEnv(db),
-    );
-    expect(missing.status).toBe(404);
-    await createAppsStore(db).softDeleteApp(app.id);
-    const deleted = await get(SETTINGS, `${SESSION_COOKIE}=${await sessionCookie("mallory")}`, makeEnv(db));
-    expect(deleted.status).toBe(404);
-  });
-
-  test("missing DASHBOARD_ENCRYPTION_KEY → 500 fail-closed, no page rendered", async () => {
-    const { db, app } = await seededWorld();
-    await configStore(db).setProviderKey(app.id, "anthropic", PLAIN_ANTHROPIC_KEY);
-    const res = await get(
-      SETTINGS,
-      `${SESSION_COOKIE}=${await sessionCookie("mallory")}`,
-      makeEnv(db, { DASHBOARD_ENCRYPTION_KEY: undefined }),
-    );
-    expect(res.status).toBe(500);
-    expect(await res.text()).not.toContain("9988");
+    const res = await get(SETTINGS, "", makeEnv(db));
+    expect(res.status).toBe(302);
+    expect(res.headers.get("Location")).toBe("/dashboard/login");
   });
 });
 
 describe("POST /dashboard/apps/:slug/settings — add-key (op=add-key)", () => {
-  test("owner stores a key: encrypted row lands, notice confirms, HTML shows only the mask", async () => {
+  test("owner stores a key: encrypted row lands, plain-text 200, never the plaintext", async () => {
     const { db, app } = await seededWorld();
     const cookie = `${SESSION_COOKIE}=${await sessionCookie("mallory")}`;
     const res = await postForm(SETTINGS, cookie, makeEnv(db), {
@@ -1219,8 +1128,7 @@ describe("POST /dashboard/apps/:slug/settings — add-key (op=add-key)", () => {
       .query("SELECT key_enc FROM app_provider_keys WHERE app_id = ? AND provider = 'anthropic'")
       .get(app.id) as { key_enc: string };
     expect(row.key_enc).toMatch(/^v1\.primary\./);
-    // The response re-renders the page: masked tail only, never the plaintext.
-    expect(body).toContain(`key ending <code class="id">9988</code>`);
+    // The plain-text response never echoes the key material.
     expect(body).not.toContain(PLAIN_ANTHROPIC_KEY);
   });
 
@@ -1237,7 +1145,7 @@ describe("POST /dashboard/apps/:slug/settings — add-key (op=add-key)", () => {
     expect(rawCount(db, "app_provider_keys")).toBe(0);
   });
 
-  test("empty provider (untouched placeholder) → 400 re-render, zero rows written", async () => {
+  test("empty provider (untouched placeholder) → 400, zero rows written", async () => {
     const { db } = await seededWorld();
     const cookie = `${SESSION_COOKIE}=${await sessionCookie("mallory")}`;
     const res = await postForm(SETTINGS, cookie, makeEnv(db), {
@@ -1246,10 +1154,7 @@ describe("POST /dashboard/apps/:slug/settings — add-key (op=add-key)", () => {
       key: PLAIN_ANTHROPIC_KEY,
     });
     expect(res.status).toBe(400);
-    const body = await res.text();
-    expect(body).toContain("Pick a provider for the key.");
-    // 400 is the full page re-render — the user can retry inline.
-    expect(body).toContain('name="op" value="add-key"');
+    expect(await res.text()).toContain("Pick a provider for the key.");
     expect(rawCount(db, "app_provider_keys")).toBe(0);
   });
 
@@ -1268,7 +1173,7 @@ describe("POST /dashboard/apps/:slug/settings — add-key (op=add-key)", () => {
     expect(rawCount(db, "app_provider_keys")).toBe(0);
   });
 
-  test("key over 4096 characters → 400 full-page re-render, zero rows written (plan 15 input bounds)", async () => {
+  test("key over 4096 characters → 400, zero rows written (plan 15 input bounds)", async () => {
     const { db } = await seededWorld();
     const cookie = `${SESSION_COOKIE}=${await sessionCookie("mallory")}`;
     const res = await postForm(SETTINGS, cookie, makeEnv(db), {
@@ -1277,10 +1182,7 @@ describe("POST /dashboard/apps/:slug/settings — add-key (op=add-key)", () => {
       key: "k".repeat(MAX_PROVIDER_KEY_LENGTH + 1),
     });
     expect(res.status).toBe(400);
-    const body = await res.text();
-    expect(body).toContain("limited to 4096 characters");
-    // 400 is the full page re-render — the user can retry inline.
-    expect(body).toContain('name="op" value="add-key"');
+    expect(await res.text()).toContain("limited to 4096 characters");
     expect(rawCount(db, "app_provider_keys")).toBe(0);
   });
 
@@ -1375,7 +1277,7 @@ describe("POST /dashboard/apps/:slug/settings — save-chain (op=save-chain)", (
     expect(rawCount(db, "app_model_config")).toBe(0);
   });
 
-  test("chain over 400 chars → 400 re-render, zero rows written (AL-23-2 selector/chain cap)", async () => {
+  test("chain over 400 chars → 400, zero rows written (AL-23-2 selector/chain cap)", async () => {
     const { db } = await seededWorld();
     const cookie = `${SESSION_COOKIE}=${await sessionCookie("mallory")}`;
     const res = await postForm(SETTINGS, cookie, makeEnv(db), {
@@ -1383,9 +1285,7 @@ describe("POST /dashboard/apps/:slug/settings — save-chain (op=save-chain)", (
       model_chain: "a".repeat(MAX_MODEL_SELECTOR_LENGTH + 1),
     });
     expect(res.status).toBe(400);
-    const body = await res.text();
-    expect(body).toContain("<!doctype html>");
-    expect(body).toContain(`limited to ${MAX_MODEL_SELECTOR_LENGTH}`);
+    expect(await res.text()).toContain(`limited to ${MAX_MODEL_SELECTOR_LENGTH}`);
     expect(rawCount(db, "app_model_config")).toBe(0);
   });
 
@@ -1400,7 +1300,7 @@ describe("POST /dashboard/apps/:slug/settings — save-chain (op=save-chain)", (
     expect(await configStore(db).getModelChain(app.id)).toBe("a".repeat(MAX_MODEL_SELECTOR_LENGTH));
   });
 
-  test("a duplicate model_chain field → 400 re-render, zero rows written (never a silent clear)", async () => {
+  test("a duplicate model_chain field → 400, zero rows written (never a silent clear)", async () => {
     const { db, app } = await seededWorld();
     await configStore(db).setModelChain(app.id, "existing/model");
     const cookie = `${SESSION_COOKIE}=${await sessionCookie("mallory")}`;
@@ -1415,9 +1315,7 @@ describe("POST /dashboard/apps/:slug/settings — save-chain (op=save-chain)", (
       makeEnv(db),
     );
     expect(res.status).toBe(400);
-    const body = await res.text();
-    expect(body).toContain("<!doctype html>");
-    expect(body).toContain("submitted more than once");
+    expect(await res.text()).toContain("submitted more than once");
     // The stored chain is untouched — the duplicate was never a clear.
     expect(await configStore(db).getModelChain(app.id)).toBe("existing/model");
   });
@@ -1432,15 +1330,13 @@ describe("POST /dashboard/apps/:slug/settings — save-chain (op=save-chain)", (
     expect(rawCount(db, "app_model_config")).toBe(0);
   });
 
-  test("unknown op → 400 re-rendered as the HTML page (T2 fold: consistent with other validation failures)", async () => {
+  test("unknown op → 400 with the reason (consistent with other validation failures)", async () => {
     const { db } = await seededWorld();
     const res = await postForm(SETTINGS, `${SESSION_COOKIE}=${await sessionCookie("mallory")}`, makeEnv(db), {
       op: "something-else",
     });
     expect(res.status).toBe(400);
-    const body = await res.text();
-    expect(body).toContain("<!doctype html>");
-    expect(body).toContain("Unknown settings operation");
+    expect(await res.text()).toContain("Unknown settings operation");
   });
 });
 
@@ -1460,31 +1356,8 @@ function roleForm(
   return { ...fields, ...extra };
 }
 
-describe("Role models editor (plan 17 T3 — view + save-roles op)", () => {
-  test("GET renders the 4 seat rows prefilled from the stored map (unmapped = blank), one blue-700 save, empty = chain copy", async () => {
-    const { db, app } = await seededWorld();
-    await configStore(db).setModelRole(app.id, "code-reviewer", "openai/gpt-5:thinking");
-    const res = await get(SETTINGS, `${SESSION_COOKIE}=${await sessionCookie("mallory")}`, makeEnv(db));
-    expect(res.status).toBe(200);
-    const body = await res.text();
-    // The section: heading, copy, hidden op, single blue-700 save.
-    expect(body).toContain("<h2>Role models</h2>");
-    expect(body).toContain("Empty = use the App model chain.");
-    expect(body).toContain('name="op" value="save-roles"');
-    expect(body).toContain('<button type="submit" class="primary">Save role models</button>');
-    expect(body.match(/Save role models</g)).toHaveLength(1);
-    // The 4 rows, prefilled / blank exactly per the stored map.
-    expect(body).toContain('name="role_mstar-review-seat" value=""');
-    expect(body).toContain('name="role_code-reviewer" value="openai/gpt-5:thinking"');
-    expect(body).toContain('name="role_fullstack-dev" value=""');
-    expect(body).toContain('name="role_frontend-dev" value=""');
-    // Rows render in MODEL_ROLE_IDS order (the quick/default seat first).
-    const seat = body.indexOf('name="role_mstar-review-seat"');
-    expect(seat).toBeGreaterThanOrEqual(0);
-    expect(body.indexOf('name="role_code-reviewer"')).toBeGreaterThan(seat);
-  });
-
-  test("owner saves the map: stored VERBATIM (:thinking suffix and padding kept), success notice, editor re-rendered", async () => {
+describe("Role models editor (plan 17 T3 — save-roles op)", () => {
+  test("owner saves the map: stored VERBATIM (:thinking suffix and padding kept), plain-text 200", async () => {
     const { db, app } = await seededWorld();
     const padded = "  openai/gpt-5 , anthropic/claude-x  ";
     const res = await postForm(
@@ -1497,9 +1370,7 @@ describe("Role models editor (plan 17 T3 — view + save-roles op)", () => {
       }),
     );
     expect(res.status).toBe(200);
-    const body = await res.text();
-    expect(body).toContain("Saved the role models for mallorys-app");
-    expect(body).toContain('name="op" value="save-roles"');
+    expect(await res.text()).toContain("Saved the role models for mallorys-app");
     expect(await configStore(db).getAppModelRoles(app.id)).toEqual({
       "mstar-review-seat": "ark-plan/deepseek-v4-flash:high",
       "code-reviewer": padded,
@@ -1524,7 +1395,7 @@ describe("Role models editor (plan 17 T3 — view + save-roles op)", () => {
     expect(await store.getAppModelRoles(app.id)).toEqual({ "mstar-review-seat": "new/model" });
   });
 
-  test("a D1 batch failure mid-save → 500 re-render, truthful 'nothing was stored' notice, ZERO rows changed (Phase 5, PR #7 review)", async () => {
+  test("a D1 batch failure mid-save → 500, truthful 'nothing was stored', ZERO rows changed (Phase 5, PR #7 review)", async () => {
     const { db, app } = await seededWorld();
     await configStore(db).setModelRole(app.id, "code-reviewer", "old/model");
     const failing = createBatchRejectingD1(db);
@@ -1535,12 +1406,9 @@ describe("Role models editor (plan 17 T3 — view + save-roles op)", () => {
       roleForm({ "mstar-review-seat": "new/model", "code-reviewer": "" }),
     );
     expect(res.status).toBe(500);
-    const body = await res.text();
     // With the atomic batch the pre-existing copy is now TRUE — a failed
     // save genuinely stored nothing.
-    expect(body).toContain("The dashboard database rejected the change — nothing was stored.");
-    // The 500 is the full page re-render showing the TRUE stored state.
-    expect(body).toContain('name="role_code-reviewer" value="old/model"');
+    expect(await res.text()).toContain("The dashboard database rejected the change — nothing was stored.");
     // Atomic: the store state is exactly as before the failed save.
     expect(await configStore(db).getAppModelRoles(app.id)).toEqual({ "code-reviewer": "old/model" });
     expect(rawCount(db, "app_model_roles")).toBe(1);
@@ -1562,7 +1430,7 @@ describe("Role models editor (plan 17 T3 — view + save-roles op)", () => {
     expect(await store.getAppModelRoles(app.id)).toEqual({});
   });
 
-  test("invalid selector grammar → 400 re-render naming the role, zero rows written (validate-all-first)", async () => {
+  test("invalid selector grammar → 400 naming the role, zero rows written (validate-all-first)", async () => {
     const { db, app } = await seededWorld();
     const store = configStore(db);
     await store.setModelRole(app.id, "code-reviewer", "old/model");
@@ -1576,14 +1444,14 @@ describe("Role models editor (plan 17 T3 — view + save-roles op)", () => {
       }),
     );
     expect(res.status).toBe(400);
-    const body = await res.text();
-    expect(body).toContain("<!doctype html>"); // HTML page, never a plain-text 400
-    expect(body).toContain("The code-reviewer selector needs at least one comma-separated model selector");
+    expect(await res.text()).toContain(
+      "The code-reviewer selector needs at least one comma-separated model selector",
+    );
     // Zero partial writes: the valid entry never landed, the old row is intact.
     expect(await store.getAppModelRoles(app.id)).toEqual({ "code-reviewer": "old/model" });
   });
 
-  test("a tampered role_<unknown> field → 400 re-render, zero rows written", async () => {
+  test("a tampered role_<unknown> field → 400, zero rows written", async () => {
     const { db, app } = await seededWorld();
     const res = await postForm(
       SETTINGS,
@@ -1592,12 +1460,10 @@ describe("Role models editor (plan 17 T3 — view + save-roles op)", () => {
       roleForm({ "code-reviewer": "openai/gpt-5" }, { role_root: "evil/model" }),
     );
     expect(res.status).toBe(400);
-    const body = await res.text();
-    expect(body).toContain("<!doctype html>");
-    expect(body).toContain("root is not a known review role");
+    expect(await res.text()).toContain("root is not a known review role");
     expect(rawCount(db, "app_model_roles")).toBe(0);
   });
-  test("a duplicate role_* field → 400 re-render, zero rows written (AL-23-2 explicit rejection)", async () => {
+  test("a duplicate role_* field → 400, zero rows written (AL-23-2 explicit rejection)", async () => {
     const { db, app } = await seededWorld();
     await configStore(db).setModelRole(app.id, "code-reviewer", "old/model");
     const cookie = `${SESSION_COOKIE}=${await sessionCookie("mallory")}`;
@@ -1612,15 +1478,13 @@ describe("Role models editor (plan 17 T3 — view + save-roles op)", () => {
       makeEnv(db),
     );
     expect(res.status).toBe(400);
-    const body = await res.text();
-    expect(body).toContain("<!doctype html>");
-    expect(body).toContain("submitted more than once");
+    expect(await res.text()).toContain("submitted more than once");
     // Zero writes: the pre-existing mapping survives untouched.
     expect(await configStore(db).getAppModelRoles(app.id)).toEqual({ "code-reviewer": "old/model" });
     expect(rawCount(db, "app_model_roles")).toBe(1);
   });
 
-  test("a role selector over 400 chars → 400 re-render, zero rows written (AL-23-2 selector cap)", async () => {
+  test("a role selector over 400 chars → 400, zero rows written (AL-23-2 selector cap)", async () => {
     const { db, app } = await seededWorld();
     await configStore(db).setModelRole(app.id, "code-reviewer", "old/model");
     const res = await postForm(
@@ -1630,9 +1494,7 @@ describe("Role models editor (plan 17 T3 — view + save-roles op)", () => {
       roleForm({ "code-reviewer": "a".repeat(MAX_MODEL_SELECTOR_LENGTH + 1) }),
     );
     expect(res.status).toBe(400);
-    const body = await res.text();
-    expect(body).toContain("<!doctype html>");
-    expect(body).toContain(`limited to ${MAX_MODEL_SELECTOR_LENGTH}`);
+    expect(await res.text()).toContain(`limited to ${MAX_MODEL_SELECTOR_LENGTH}`);
     // Zero partial writes: the valid entries never landed, the old row is intact.
     expect(await configStore(db).getAppModelRoles(app.id)).toEqual({ "code-reviewer": "old/model" });
   });
@@ -1669,14 +1531,6 @@ describe("Role models editor (plan 17 T3 — view + save-roles op)", () => {
     expect(rawCount(db, "app_model_roles")).toBe(1);
   });
 
-  test("a stored selector with HTML-special characters renders escaped in the role input (attribute context)", async () => {
-    const { db, app } = await seededWorld();
-    await configStore(db).setModelRole(app.id, "code-reviewer", '"><script>alert(1)</script>');
-    const res = await get(SETTINGS, `${SESSION_COOKIE}=${await sessionCookie("mallory")}`, makeEnv(db));
-    const body = await res.text();
-    expect(body).not.toContain("<script>");
-    expect(body).toContain(`name="role_code-reviewer" value="&quot;&gt;&lt;script&gt;alert(1)&lt;/script&gt;"`);
-  });
 });
 
 describe("POST /dashboard/apps/:slug/settings/key/delete (delete-key route)", () => {
@@ -1736,14 +1590,11 @@ describe("POST /dashboard/apps/:slug/settings — custom providers (op=add-custo
   };
   const mallory = async () => `${SESSION_COOKIE}=${await sessionCookie("mallory")}`;
 
-  test("add stores the declaration (key encrypted at rest) and re-renders the page with it listed", async () => {
+  test("add stores the declaration (key encrypted at rest), plain-text 200", async () => {
     const { db, app } = await seededWorld();
     const res = await postForm(SETTINGS, await mallory(), makeEnv(db), CUSTOM_FORM);
     expect(res.status).toBe(200);
-    const body = await res.text();
-    expect(body).toContain("Custom providers");
-    expect(body).toContain("<strong>my-custom</strong>");
-    expect(body).toContain("deepseek-v4-flash");
+    expect(await res.text()).toContain("Declared custom provider my-custom for mallorys-app");
     const row = db.raw
       .query("SELECT api_key_enc FROM app_custom_providers WHERE app_id = ? AND provider_id = 'my-custom'")
       .get(app.id) as { api_key_enc: string };
@@ -1895,158 +1746,5 @@ describe("POST /dashboard/apps/:slug/settings — custom providers (op=add-custo
     const admin = await postForm(SETTINGS, `${SESSION_COOKIE}=${await sessionCookie("octocat")}`, makeEnv(db), CUSTOM_FORM);
     expect(admin.status).toBe(200);
     expect(rawCount(db, "app_custom_providers")).toBe(1);
-  });
-});
-
-// --- plan 14 T2: the settings view (views.ts) + DESIGN mapping ---
-
-describe("settings view DESIGN mapping (plan 14 T2)", () => {
-  const getSettingsPage = async (login: string): Promise<string> => {
-    const { db } = await seededWorld();
-    const res = await get(SETTINGS, `${SESSION_COOKIE}=${await sessionCookie(login)}`, makeEnv(db));
-    expect(res.status).toBe(200);
-    return res.text();
-  };
-
-  test("single column; Add key / Save model chain are the blue-700 primary; per-key Remove is red-700 danger", async () => {
-    const { db, app } = await seededWorld();
-    await configStore(db).setProviderKey(app.id, "anthropic", PLAIN_ANTHROPIC_KEY);
-    const res = await get(SETTINGS, `${SESSION_COOKIE}=${await sessionCookie("mallory")}`, makeEnv(db));
-    expect(res.status).toBe(200);
-    const body = await res.text();
-    // Single column: the page never mounts the shell's lg 3-column grid.
-    expect(body).not.toContain('class="sections"');
-    // Constructive submits = the blue-700 primary class; destructive remove =
-    // the red-700 danger class (spec § DESIGN.md 意图, no new tokens).
-    expect(body).toContain('<button type="submit" class="primary">Add key</button>');
-    expect(body).toContain('<button type="submit" class="primary">Save model chain</button>');
-    expect(body).toContain('<button type="submit" class="danger">Remove</button>');
-  });
-
-  test("add-key form: password input; provider select offers EXACTLY the PROVIDER_IDS allowlist (19 ids incl. ark)", async () => {
-    const body = await getSettingsPage("mallory");
-    // autocomplete=new-password: the pasted provider API key is a new secret
-    // per submit — never a saved dashboard login for password managers.
-    expect(body).toContain('<input type="password" name="key" autocomplete="new-password"');
-    // The select leads with an empty disabled placeholder (preselected), so a
-    // forgetful submit sends provider="" — the route's 400 path — instead of
-    // silently picking the first allowlist id.
-    expect(body).toContain('<option value="" disabled selected>Select a provider…</option>');
-    // The select is the only place a provider id can enter — bound to the
-    // same allowlist the POST route 400s against. Scoped to the provider
-    // select: the plan-23 T2 custom-providers section adds its own api
-    // select to the page, so a whole-page option scan would pick those up.
-    const providerSelect = /<select name="provider">([\s\S]*?)<\/select>/.exec(body)?.[1] ?? "";
-    const options = [...providerSelect.matchAll(/<option value="([^"]+)">/g)].map((m) => m[1]);
-    expect(options).toEqual([...PROVIDER_IDS]);
-  });
-
-  test("model chain copy states the empty chain = fail closed explicitly (no deployment-level fallback, AL-24-5)", async () => {
-    const body = await getSettingsPage("mallory");
-    expect(body).toContain("fail closed");
-    expect(body).toContain("until the chain and the required provider keys are configured");
-  });
-
-  test("a key of ≤4 characters renders the no-tail copy — the mask never reveals a whole key", async () => {
-    const { db, app } = await seededWorld();
-    await configStore(db).setProviderKey(app.id, "groq", "abcd");
-    const res = await get(SETTINGS, `${SESSION_COOKIE}=${await sessionCookie("mallory")}`, makeEnv(db));
-    const body = await res.text();
-    expect(body).toContain("key too short to show a tail");
-    expect(body).not.toContain("abcd");
-  });
-
-  test("key-list hint is replace-aware (upsert bumps the row timestamp — recency is never labeled 'created')", async () => {
-    const body = await getSettingsPage("mallory");
-    expect(body).toContain("Re-adding a provider replaces its stored key");
-  });
-
-  test("user-controlled strings are escaped — a stored chain with HTML-special characters never renders raw", async () => {
-    const { db, app } = await seededWorld();
-    // The chain is stored VERBATIM (configuration, not a secret) — the view
-    // must escape it on the way out (attribute context).
-    await configStore(db).setModelChain(app.id, '"><script>alert(1)</script>');
-    const res = await get(SETTINGS, `${SESSION_COOKIE}=${await sessionCookie("mallory")}`, makeEnv(db));
-    const body = await res.text();
-    expect(body).not.toContain("<script>");
-    expect(body).toContain(`value="&quot;&gt;&lt;script&gt;alert(1)&lt;/script&gt;"`);
-  });
-});
-
-// --- plan 23 T2: the settings view custom-providers section ---
-
-describe("settings view — custom providers section (plan 23 T2)", () => {
-  const getSettingsPage = async (login: string): Promise<string> => {
-    const { db } = await seededWorld();
-    const res = await get(SETTINGS, `${SESSION_COOKIE}=${await sessionCookie(login)}`, makeEnv(db));
-    expect(res.status).toBe(200);
-    return res.text();
-  };
-
-  test("the section sits between Model chain and Role models; the add form has the api enum select and a password key input", async () => {
-    const body = await getSettingsPage("mallory");
-    const modelChain = body.indexOf("Model chain");
-    const custom = body.indexOf("Custom providers");
-    const roleModels = body.indexOf("Role models");
-    expect(modelChain).toBeGreaterThanOrEqual(0);
-    expect(custom).toBeGreaterThan(modelChain);
-    expect(roleModels).toBeGreaterThan(custom);
-    // The api select offers EXACTLY the AL-23-1 three-form enum (the empty
-    // disabled placeholder does not match the value regex — same discipline
-    // as the provider select).
-    const apiSelect = /<select name="api">([\s\S]*?)<\/select>/.exec(body)?.[1] ?? "";
-    const values = [...apiSelect.matchAll(/<option value="([^"]+)"/g)].map((m) => m[1]);
-    expect(values).toEqual([...CUSTOM_PROVIDER_API_IDS]);
-    // The key input reuses the password semantics of the provider-key form.
-    expect(body).toContain('<input type="password" name="key" autocomplete="new-password"');
-  });
-
-  test("a stored declaration renders with escaped user-controlled strings (base_url / model_ids)", async () => {
-    const { db, app } = await seededWorld();
-    await configStore(db).upsertCustomProvider(
-      app.id,
-      {
-        provider_id: "my-custom",
-        base_url: 'https://evil.example.com/?q="><script>alert(1)</script>',
-        api: "openai-completions",
-        model_ids: ['"><img src=x onerror=alert(1)>'],
-      },
-      "sk-custom-ark-9988",
-    );
-    const res = await get(SETTINGS, `${SESSION_COOKIE}=${await sessionCookie("mallory")}`, makeEnv(db));
-    const body = await res.text();
-    expect(body).not.toContain("<script>");
-    expect(body).not.toContain("<img");
-    expect(body).toContain("&lt;script&gt;alert(1)&lt;/script&gt;");
-    expect(body).toContain("&lt;img src=x onerror=alert(1)&gt;");
-  });
-
-  test("the remove form posts op=remove-custom-provider with the provider_id", async () => {
-    const { db, app } = await seededWorld();
-    await configStore(db).upsertCustomProvider(
-      app.id,
-      { provider_id: "my-custom", base_url: "https://ark.example.com", api: "openai-completions", model_ids: ["deepseek-v4-flash"] },
-      "sk-custom-ark-9988",
-    );
-    // Same db as the stored declaration — getSettingsPage builds a FRESH
-    // world, so the page must be fetched over the db that holds the row.
-    const res = await get(SETTINGS, `${SESSION_COOKIE}=${await sessionCookie("mallory")}`, makeEnv(db));
-    const body = await res.text();
-    expect(body).toContain('<input type="hidden" name="op" value="remove-custom-provider">');
-    expect(body).toContain('<input type="hidden" name="provider_id" value="my-custom">');
-  });
-});
-
-describe("Apps list → settings nav (plan 14 T2)", () => {
-  test("manageable Apps (owner / admin) get a Settings link; a non-owner sees none", async () => {
-    const { db } = await seededWorld();
-    const owner = await get("/dashboard/apps", `${SESSION_COOKIE}=${await sessionCookie("mallory")}`, makeEnv(db));
-    const ownerBody = await owner.text();
-    expect(ownerBody).toContain('href="/dashboard/apps/mallorys-app/settings"');
-    expect(ownerBody).not.toContain('href="/dashboard/apps/adas-app/settings"');
-    const admin = await get("/dashboard/apps", `${SESSION_COOKIE}=${await sessionCookie("octocat")}`, makeEnv(db));
-    const adminBody = await admin.text();
-    expect(adminBody).toContain('href="/dashboard/apps/mallorys-app/settings"');
-    expect(adminBody).toContain('href="/dashboard/apps/adas-app/settings"');
   });
 });

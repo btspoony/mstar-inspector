@@ -6,7 +6,8 @@
   "description": "GitHub App inspector gateway (Hono Worker on Cloudflare)",
   "scripts": {
     "test": "bun test",
-    "typecheck": "tsc --noEmit",
+    "typecheck": "tsc --noEmit && tsc --noEmit -p tsconfig.spa.json",
+    "build:spa": "vite build",
     "review": "bun run src/review/runner.ts"
   },
   "engines": {
@@ -20,12 +21,18 @@
     "@octokit/webhooks": "14.2.0",
     "@oh-my-pi/pi-coding-agent": "18.0.4",
     "hono": "4.13.4",
+    "react": "19.2.7",
+    "react-dom": "19.2.7",
     "zod": "4.4.3"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "5.20260825.1",
     "@types/bun": "1.4.0",
+    "@types/react": "19.2.18",
+    "@types/react-dom": "19.2.5",
+    "@vitejs/plugin-react": "6.1.1",
     "typescript": "5.9.3",
+    "vite": "8.2.2",
     "wrangler": "4.125.0"
   }
 }
