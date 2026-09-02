@@ -1,3 +1,5 @@
+import { SPA_POST_FORM_HEADER, SPA_POST_FORM_VALUE } from "./post-form-headers";
+
 /**
  * Same-origin JSON fetch for SPA pages (plan 29 T4).
  *
@@ -37,7 +39,10 @@ export async function postForm(url: string, body: Record<string, string>): Promi
     method: "POST",
     credentials: "same-origin",
     redirect: "manual",
-    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    headers: {
+      "Content-Type": "application/x-www-form-urlencoded",
+      [SPA_POST_FORM_HEADER]: SPA_POST_FORM_VALUE,
+    },
     body: new URLSearchParams(body),
   });
   if (res.status >= 300 && res.status < 400) {

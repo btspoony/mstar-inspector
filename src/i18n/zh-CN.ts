@@ -41,8 +41,6 @@ export const zhCN: Dictionary = {
       forbiddenBody: "此页面仅限控制台管理员访问。你当前以 {login} 登录 — 返回 /dashboard。",
       signInErrorTitle: "登录错误",
       signInErrorBody: "登录失败。{message} 未创建会话。请返回 /dashboard/login 重试。",
-      badRequestTitle: "请求无效",
-      badRequestBody: "请求无效。{message}",
     },
     oauth: {
       stateInvalid: "无法验证登录（状态无效或已过期）。",
@@ -52,10 +50,8 @@ export const zhCN: Dictionary = {
     },
     loading: "加载中…",
     loadFailed: "无法加载此页面。",
-    retry: "重试",
   },
   login: {
-    title: "登录",
     heading: "登录 Morning Star Inspector",
     description: "使用你的 GitHub 账号访问控制台。",
     signIn: "使用 GitHub 登录",
@@ -279,7 +275,6 @@ export const zhCN: Dictionary = {
     },
     error: {
       title: "GitHub App 设置",
-      failed: "GitHub App 设置失败。{message} 未更改任何 Worker 密钥。",
       failedHeading: "GitHub App 设置失败。",
       secretsUnchanged: "未更改任何 Worker 密钥。",
       resumable: "你的 GitHub App 仍保留用于重试 — 返回确认页面重新提交。",

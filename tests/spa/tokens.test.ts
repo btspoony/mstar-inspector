@@ -169,3 +169,41 @@ describe("src/spa/styles/tokens.css mapping", () => {
     expect(rootVars["typo-heading-24-size"]).toBe("24px");
   });
 });
+
+describe("SSR STYLE token parity (plan 29 QC)", () => {
+  function cssCustomPropertiesFromBlock(block: string): Record<string, string> {
+    const out: Record<string, string> = {};
+    for (const m of block.matchAll(/--([a-z0-9-]+):\s*([^;]+);/gi)) {
+      out[m[1]!] = m[2]!.trim();
+    }
+    return out;
+  }
+
+  test("shared hex tokens in tokens.css match src/dashboard/views.ts STYLE", async () => {
+    const css = await Bun.file(new URL("../../src/spa/styles/tokens.css", import.meta.url)).text();
+    const views = await Bun.file(new URL("../../src/dashboard/views.ts", import.meta.url)).text();
+    const styleStart = views.indexOf("const STYLE = `<style>");
+    const styleEnd = views.indexOf("`;", styleStart);
+    expect(styleStart).toBeGreaterThan(0);
+    const style = views.slice(styleStart, styleEnd);
+
+    const mediaAt = css.indexOf("@media (prefers-color-scheme: light) {");
+    const cssRoot = cssCustomPropertiesFromBlock(css.slice(0, mediaAt));
+    const cssLight = cssCustomPropertiesFromBlock(css.slice(mediaAt));
+    const ssrMediaAt = style.indexOf("@media (prefers-color-scheme: light) {");
+    const ssrRoot = cssCustomPropertiesFromBlock(style.slice(0, ssrMediaAt));
+    const ssrLight = cssCustomPropertiesFromBlock(style.slice(ssrMediaAt));
+
+    for (const [name, value] of Object.entries(ssrRoot)) {
+      if (/^#[0-9a-f]{3,8}$/i.test(value)) {
+        expect(cssRoot[name]).toBe(value);
+      }
+    }
+    for (const [name, value] of Object.entries(ssrLight)) {
+      if (/^#[0-9a-f]{3,8}$/i.test(value)) {
+        expect(cssLight[name]).toBe(value);
+      }
+    }
+  });
+});
+
