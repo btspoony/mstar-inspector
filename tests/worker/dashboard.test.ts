@@ -369,7 +369,11 @@ describe("/dashboard routes", () => {
     expect(body).toContain("Signed in as octocat");
     // qc1/qc2 F-001: octocat is an admin (default seed) — the shell header
     // carries the Members entry next to Logout.
-    expect(body).toContain(' · <a href="/dashboard/members">Members</a> · <a href="/dashboard/logout">Logout</a>');
+    expect(body).toContain('href="/dashboard/members"');
+    expect(body).toContain(">Members</a>");
+    expect(body).toContain('href="/dashboard/logout"');
+    expect(body).toContain(">Logout</a>");
+    expect(body).not.toContain("REVIEW_ENABLED");
     // B1: the GitHub App section is live — a submit to the manifest start
     // route, not a disabled placeholder button.
     expect(body).toContain('action="/dashboard/manifest/start"');
@@ -1179,6 +1183,7 @@ describe("/dashboard manifest routes (plan 11 Task 1)", () => {
     expect(body).toContain("https://worker.local/webhook/mstar-inspector-octocat");
     expect(body).toContain('action="/dashboard/manifest/commit"');
     expect(body).toContain(">Create App</button>");
+    expect(body).not.toContain("REVIEW_ENABLED");
     // B5: the overwrite-confirm semantics are gone (nothing shared changes).
     expect(body).not.toContain("overwrite");
     expect(body).not.toContain("APP_ID");

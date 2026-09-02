@@ -1,10 +1,9 @@
 /**
  * Zero-build SSR HTML for /dashboard (plan 08, architect decision Q8): TS
- * template strings + a single inline <style> block. The CSS custom
- * properties below are a static mapping of the repo-root DESIGN.md
- * frontmatter tokens (colors / typography / spacing / rounded / sm+lg
- * breakpoints) — DESIGN.md is the SSOT; update both when tokens change.
- * No client JS, no build chain, no new dependencies.
+ * template strings + a single inline <style> block. Plan 29 T5 ports the
+ * DESIGN.md L2 token subset from src/spa/styles/tokens.css into STYLE
+ * (dark default + prefers-color-scheme light). Manifest flow pages stay
+ * zero-JS SSR. No client JS, no build chain, no new dependencies.
  */
 import {
   CUSTOM_PROVIDER_API_IDS,
@@ -78,184 +77,320 @@ function deliveryOutcomeBadge(outcome: DeliveryOutcome): string {
 }
 
 const STYLE = `<style>
+/* Token subset ported from src/spa/styles/tokens.css (DESIGN.md L2 SSOT).
+   Dark is the console default; light follows prefers-color-scheme.
+   Do not diverge hex values from tokens.css — update both together. */
 :root {
-  /* DESIGN.md frontmatter (SSOT) → CSS custom properties */
-  --background-100: #ffffff;
-  --background-200: #f4f4f5;
-  --gray-1000: #111111;
-  --gray-900: #3d3d3d;
-  --blue-700: #0066cc;
-  --red-700: #b91c1c;
-  --amber-700: #b45309;
-  --rounded-sm: 6px;
+  color-scheme: dark;
+  --background-100: #09090b;
+  --background-200: #18181b;
+  --background-300: #27272a;
+  --gray-100: #18181b;
+  --gray-400: #3f3f46;
+  --gray-700: #8b8b94;
+  --gray-900: #b0b0b8;
+  --gray-1000: #f4f4f5;
+  --gray-alpha-400: #ffffff2e;
+  --blue-700: #4ea1ff;
+  --red-100: #2a1215;
+  --red-400: #7f1d1d;
+  --red-700: #f87171;
+  --red-900: #fecaca;
+  --amber-100: #27190a;
+  --amber-400: #78350f;
+  --amber-700: #fbbf24;
+  --amber-800: #fcd34d;
+  --amber-900: #fde68a;
   --font-sans: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+  --font-mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  --typo-heading-24-size: 24px;
+  --typo-heading-24-weight: 600;
+  --typo-heading-24-line: 1.25;
+  --typo-heading-24-tracking: -0.01em;
+  --typo-heading-16-size: 16px;
+  --typo-heading-16-weight: 600;
+  --typo-heading-16-line: 1.4;
+  --typo-copy-16-size: 16px;
+  --typo-copy-16-line: 1.6;
+  --typo-copy-14-size: 14px;
+  --typo-copy-14-line: 1.55;
+  --typo-button-14-size: 14px;
+  --typo-button-14-weight: 500;
+  --typo-button-14-line: 1.4;
+  --typo-button-12-size: 12px;
+  --typo-button-12-weight: 500;
+  --typo-label-12-size: 12px;
+  --typo-label-12-weight: 500;
+  --spacing-1: 4px;
+  --spacing-2: 8px;
+  --spacing-3: 12px;
+  --spacing-4: 16px;
+  --spacing-6: 24px;
+  --spacing-8: 32px;
+  --rounded-sm: 6px;
+  --rounded-md: 12px;
+  --button-primary-bg: var(--blue-700);
+  --button-primary-fg: var(--background-100);
+  --button-primary-height: 40px;
+  --button-primary-padding: 0 12px;
+  --button-primary-radius: var(--rounded-sm);
+  --button-secondary-bg: var(--background-200);
+  --button-secondary-fg: var(--gray-1000);
+  --button-secondary-border: var(--gray-400);
+  --button-danger-bg: var(--red-700);
+  --button-danger-fg: var(--background-100);
+  --button-disabled-bg: var(--gray-100);
+  --button-disabled-fg: var(--gray-700);
+  --button-disabled-border: var(--gray-400);
+  --button-small-height: 32px;
+  --button-small-padding: 0 8px;
+  --button-small-radius: var(--rounded-sm);
+  --card-bg: var(--background-200);
+  --card-fg: var(--gray-1000);
+  --card-border: var(--gray-alpha-400);
+  --card-radius: var(--rounded-md);
+  --card-padding: 24px;
+  --notice-error-bg: var(--red-100);
+  --notice-error-fg: var(--red-900);
+  --notice-error-border: var(--red-400);
+  --notice-warn-bg: var(--amber-100);
+  --notice-warn-fg: var(--amber-900);
+  --notice-warn-border: var(--amber-400);
+  --sidebar-active-bg: var(--background-300);
+  --focus-ring: 0 0 0 2px var(--background-100), 0 0 0 4px var(--blue-700);
+}
+@media (prefers-color-scheme: light) {
+  :root {
+    color-scheme: light;
+    --background-100: #ffffff;
+    --background-200: #f4f4f5;
+    --background-300: #e4e4e7;
+    --gray-100: #fafafa;
+    --gray-400: #d4d4d8;
+    --gray-700: #52525b;
+    --gray-900: #3d3d3d;
+    --gray-1000: #111111;
+    --gray-alpha-400: #00000024;
+    --blue-700: #0066cc;
+    --red-100: #fef2f2;
+    --red-400: #fca5a5;
+    --red-700: #b91c1c;
+    --red-900: #7f1d1d;
+    --amber-100: #fffbeb;
+    --amber-400: #fcd34d;
+    --amber-700: #b45309;
+    --amber-800: #92400e;
+    --amber-900: #78350f;
+  }
 }
 * { box-sizing: border-box; }
 body {
   margin: 0;
+  min-height: 100vh;
   background: var(--background-100);
   color: var(--gray-1000);
   font-family: var(--font-sans);
-  font-size: 16px; /* copy-16 */
-  line-height: 1.6;
+  font-size: var(--typo-copy-16-size);
+  line-height: var(--typo-copy-16-line);
 }
 header {
   display: flex;
-  align-items: baseline;
-  gap: 16px; /* spacing-4 */
-  padding: 24px; /* spacing-6 page gutter */
-  border-bottom: 1px solid var(--background-200);
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--spacing-4);
+  min-height: 56px;
+  padding: 0 var(--spacing-4);
+  background: var(--background-200);
+  border-bottom: 1px solid var(--gray-alpha-400);
 }
+header h1 {
+  margin: 0;
+  font-size: var(--typo-heading-16-size);
+  font-weight: var(--typo-heading-16-weight);
+  line-height: var(--typo-heading-16-line);
+  white-space: nowrap;
+}
+header h1 a {
+  color: var(--gray-1000);
+  text-decoration: none;
+}
+header h1 a:focus-visible { outline: none; box-shadow: var(--focus-ring); border-radius: var(--rounded-sm); }
+header .user {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: var(--spacing-1);
+  margin-left: auto;
+  color: var(--gray-900);
+  font-size: var(--typo-label-12-size);
+  font-weight: var(--typo-label-12-weight);
+}
+header .user a {
+  display: inline-flex;
+  align-items: center;
+  height: var(--button-small-height);
+  padding: var(--button-small-padding);
+  border-radius: var(--button-small-radius);
+  color: var(--gray-1000);
+  text-decoration: none;
+  font-size: var(--typo-button-12-size);
+  font-weight: var(--typo-button-12-weight);
+}
+header .user a:hover { background: var(--sidebar-active-bg); }
+header .user a:focus-visible { outline: none; box-shadow: var(--focus-ring); }
+header .user span { padding: 0 var(--spacing-2); color: var(--gray-900); white-space: nowrap; }
+.banner a { color: inherit; }
 h1 {
   margin: 0;
-  font-size: 24px; /* heading-24 */
-  font-weight: 600;
-  line-height: 1.25;
-  letter-spacing: -0.01em;
+  font-size: var(--typo-heading-24-size);
+  font-weight: var(--typo-heading-24-weight);
+  line-height: var(--typo-heading-24-line);
+  letter-spacing: var(--typo-heading-24-tracking);
 }
-header .user { margin-left: auto; color: var(--gray-900); font-size: 14px; } /* copy-14 */
-header a, .banner a { color: var(--blue-700); }
-main { max-width: 960px; margin: 0 auto; padding: 24px; } /* spacing-6 */
-.sections { display: grid; grid-template-columns: 1fr; gap: 32px; } /* spacing-8 between sections */
-@media (min-width: 900px) { /* breakpoint lg */
+main { max-width: 960px; margin: 0 auto; padding: var(--spacing-6) var(--spacing-4); }
+.sections { display: grid; grid-template-columns: 1fr; gap: var(--spacing-8); }
+@media (min-width: 900px) {
   .sections { grid-template-columns: repeat(3, 1fr); }
 }
 section {
-  background: var(--background-200); /* placeholder disabled fill */
-  border-radius: var(--rounded-sm);
-  padding: 24px; /* spacing-6 card padding */
+  background: var(--card-bg);
+  color: var(--card-fg);
+  border: 1px solid var(--card-border);
+  border-radius: var(--card-radius);
+  padding: var(--card-padding);
 }
-/* Enabled section (B1 GitHub App): background-100 fill + gray-900 1px border,
-   explicitly NOT aria-disabled (spec dashboard-b1-manifest.md § DESIGN intent). */
-section.enabled {
-  background: var(--background-100);
-  border: 1px solid var(--gray-900);
+section.enabled { background: var(--card-bg); border: 1px solid var(--card-border); }
+section form { margin-top: var(--spacing-4); }
+section h2 {
+  margin: 0 0 var(--spacing-2);
+  font-size: var(--typo-heading-16-size);
+  font-weight: var(--typo-heading-16-weight);
+  line-height: var(--typo-heading-16-line);
 }
-section form { margin-top: 16px; } /* spacing-4 */
-section h2 { margin: 0 0 8px; font-size: 16px; font-weight: 600; line-height: 1.4; } /* heading-16 */
-section p { margin: 0 0 8px; }
-.status { color: var(--gray-900); font-size: 14px; line-height: 1.55; } /* copy-14 */
-.note { color: var(--amber-700); font-size: 14px; }
-/* Placeholders must never read as a clickable primary action: no blue-700,
-   no pointer cursor (DESIGN.md § State legibility). */
+section p { margin: 0 0 var(--spacing-2); }
+.status { color: var(--gray-900); font-size: var(--typo-copy-14-size); line-height: var(--typo-copy-14-line); }
+.note { color: var(--amber-800); font-size: var(--typo-copy-14-size); }
 button[disabled] {
   appearance: none;
-  border: 1px solid var(--gray-900);
-  border-radius: var(--rounded-sm);
-  background: transparent;
-  color: var(--gray-900);
-  padding: 8px 12px; /* spacing-2 / spacing-3 control rhythm */
+  border: 1px solid var(--button-disabled-border);
+  border-radius: var(--button-primary-radius);
+  background: var(--button-disabled-bg);
+  color: var(--button-disabled-fg);
+  height: var(--button-primary-height);
+  padding: var(--button-primary-padding);
   font: inherit;
+  font-size: var(--typo-button-14-size);
+  font-weight: var(--typo-button-14-weight);
   cursor: default;
 }
 .banner {
-  border: 1px solid var(--red-700);
+  border: 1px solid var(--notice-error-border);
   border-radius: var(--rounded-sm);
-  color: var(--red-700);
-  padding: 16px; /* spacing-4 */
+  background: var(--notice-error-bg);
+  color: var(--notice-error-fg);
+  padding: var(--spacing-4);
 }
 .banner.warn {
-  border-color: var(--amber-700);
-  color: var(--amber-700);
+  border-color: var(--notice-warn-border);
+  background: var(--notice-warn-bg);
+  color: var(--notice-warn-fg);
 }
-/* Constructive primary (Login / Create GitHub App) = blue-700; destructive
-   submits (member Remove, App Delete) = red-700; reversible per-row App
-   actions = secondary gray. Native buttons, no client JS. */
-button.primary, button.danger {
+button.primary, button.danger, button.secondary {
   appearance: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   border: 1px solid transparent;
-  border-radius: var(--rounded-sm);
-  color: var(--background-100);
-  padding: 8px 12px; /* spacing-2 / spacing-3 control rhythm */
-  font: inherit;
+  border-radius: var(--button-primary-radius);
+  height: var(--button-primary-height);
+  padding: var(--button-primary-padding);
+  font-family: var(--font-sans);
+  font-size: var(--typo-button-14-size);
+  font-weight: var(--typo-button-14-weight);
+  line-height: var(--typo-button-14-line);
   cursor: pointer;
 }
-button.primary { background: var(--blue-700); border-color: var(--blue-700); }
-button.danger { background: var(--red-700); border-color: var(--red-700); }
-label.checkbox { display: block; margin: 16px 0; } /* spacing-4 */
-.id { font-variant-numeric: tabular-nums; }
-a.cancel { color: var(--gray-1000); margin-left: 12px; } /* spacing-3 */
-/* Members page (plan 12 B4 T3): single column, masked list (login + role +
-   created_at only), invite primary (blue-700), remove danger (red-700). */
-.members { list-style: none; margin: 16px 0 0; padding: 0; } /* spacing-4 */
+button.primary:focus-visible, button.danger:focus-visible, button.secondary:focus-visible, a.cancel:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+button.primary { background: var(--button-primary-bg); border-color: var(--button-primary-bg); color: var(--button-primary-fg); }
+button.danger { background: var(--button-danger-bg); border-color: var(--button-danger-bg); color: var(--button-danger-fg); }
+label.checkbox { display: block; margin: var(--spacing-4) 0; }
+.id { font-variant-numeric: tabular-nums; font-family: var(--font-mono); }
+a.cancel { color: var(--gray-1000); margin-left: var(--spacing-3); }
+.members { list-style: none; margin: var(--spacing-4) 0 0; padding: 0; }
 .members li {
   display: flex;
   align-items: center;
-  gap: 12px; /* spacing-3 */
-  padding: 8px 0; /* spacing-2 */
-  border-top: 1px solid var(--background-200);
+  gap: var(--spacing-3);
+  padding: var(--spacing-2) 0;
+  border-top: 1px solid var(--gray-alpha-400);
 }
-.members .meta, .members .you { color: var(--gray-900); font-size: 14px; } /* copy-14 */
+.members .meta, .members .you { color: var(--gray-900); font-size: var(--typo-copy-14-size); }
 .members .you { margin-left: auto; }
-.members form { margin: 0 0 0 auto; } /* inline remove control overrides the section form rhythm */
-/* Apps list (plan 13 B5 T3): same single-column rhythm as members; status
-   badge reuses the gray (.status) / amber (.note) tokens — plan 16 adds the
-   paused badge on the same amber token; per-row manage controls sit
-   right-aligned. button.secondary reuses the existing gray border token for
-   reversible actions (no new design token). */
-.apps { list-style: none; margin: 16px 0 0; padding: 0; } /* spacing-4 */
+.members form { margin: 0 0 0 auto; }
+.apps { list-style: none; margin: var(--spacing-4) 0 0; padding: 0; }
 .apps li {
   display: flex;
   align-items: center;
   flex-wrap: wrap;
-  gap: 12px; /* spacing-3 */
-  padding: 8px 0; /* spacing-2 */
-  border-top: 1px solid var(--background-200);
+  gap: var(--spacing-3);
+  padding: var(--spacing-2) 0;
+  border-top: 1px solid var(--gray-alpha-400);
 }
-.apps .meta { color: var(--gray-900); font-size: 14px; } /* copy-14 */
-.apps .controls { margin-left: auto; display: flex; gap: 8px; } /* spacing-2 */
+.apps .meta { color: var(--gray-900); font-size: var(--typo-copy-14-size); }
+.apps .controls { margin-left: auto; display: flex; gap: var(--spacing-2); }
 .apps form { margin: 0; }
-.apps .empty { margin-top: 16px; } /* spacing-4 */
-/* App settings key list (plan 14 B2 T2): the members/apps masked-list rhythm —
-   provider + masked tail only, per-row destructive Remove (red-700). Existing
-   tokens only (gray-900 meta, background-200 hairline) — no new tokens.
-   Plan 16's install-health panel reuses this rhythm verbatim for the
-   installations list (spec § DESIGN.md 意图: 表格复用 .keys 风格). */
-.keys { list-style: none; margin: 16px 0 0; padding: 0; } /* spacing-4 */
+.apps .empty { margin-top: var(--spacing-4); }
+.keys { list-style: none; margin: var(--spacing-4) 0 0; padding: 0; }
 .keys li {
   display: flex;
   align-items: center;
   flex-wrap: wrap;
-  gap: 12px; /* spacing-3 */
-  padding: 8px 0; /* spacing-2 */
-  border-top: 1px solid var(--background-200);
+  gap: var(--spacing-3);
+  padding: var(--spacing-2) 0;
+  border-top: 1px solid var(--gray-alpha-400);
 }
-.keys .meta { color: var(--gray-900); font-size: 14px; } /* copy-14 */
-.keys form { margin: 0 0 0 auto; } /* right-aligned remove control, same as .members */
+.keys .meta { color: var(--gray-900); font-size: var(--typo-copy-14-size); }
+.keys form { margin: 0 0 0 auto; }
 button.secondary {
-  appearance: none;
-  border: 1px solid var(--gray-900);
-  border-radius: var(--rounded-sm);
-  background: transparent;
-  color: var(--gray-1000);
-  padding: 8px 12px; /* spacing-2 / spacing-3 control rhythm */
-  font: inherit;
-  cursor: pointer;
+  background: var(--button-secondary-bg);
+  border-color: var(--button-secondary-border);
+  color: var(--button-secondary-fg);
 }
-label.field { display: block; margin: 16px 0 8px; } /* spacing-4 / spacing-2 */
+label.field { display: block; margin: var(--spacing-4) 0 var(--spacing-2); }
 label.field input, label.field select {
   display: block;
-  margin-top: 8px; /* spacing-2 */
-  border: 1px solid var(--gray-900);
+  margin-top: var(--spacing-2);
+  border: 1px solid var(--gray-400);
   border-radius: var(--rounded-sm);
-  padding: 8px 12px; /* spacing-2 / spacing-3 control rhythm */
+  padding: var(--spacing-2) var(--spacing-3);
   font: inherit;
   background: var(--background-100);
   color: var(--gray-1000);
 }
-/* Stacked single-column pages (App settings = two sections): the shell grid's
-   between-sections rhythm applies outside .sections too.
-   Page-local today — re-check this selector when adding pages with stacked sections. */
-main > section + section { margin-top: 32px; } /* spacing-8 */
+main > section + section { margin-top: var(--spacing-8); }
 </style>`;
 
-function page(title: string, body: string): string {
+function htmlLang(locale: Locale): string {
+  return locale === "zh_CN" ? "zh-CN" : "en";
+}
+
+function wrapPhraseAsLink(text: string, phrase: string, href: string): string {
+  const i = text.indexOf(phrase);
+  if (i === -1) return text;
+  return `${text.slice(0, i)}<a href="${href}">${phrase}</a>${text.slice(i + phrase.length)}`;
+}
+
+function page(title: string, body: string, locale: Locale = "en"): string {
   return `<!doctype html>
-<html lang="en">
+<html lang="${htmlLang(locale)}">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>${title} — mstar-inspector</title>
+<title>${escapeHtml(t(locale, "common.pageTitle", { page: title }))}</title>
 ${STYLE}
 </head>
 <body>${body}</body>
@@ -279,19 +414,28 @@ function placeholderSection(
 }
 
 /**
- * Page header (IA: product name, GitHub identity, Logout — unchanged).
- * `adminNav` adds the admin-only Members entry (qc1/qc2 F-001 — spec § IA
- * row 1 / plan Target State "Admin sees Members section"). The Apps entry is
- * member-visible (spec § Multi-App 契约: Apps 列表全员可见), so it renders
- * for everyone ahead of the Members link; only the shell passes `adminNav`,
- * so the link never appears mid-flow on manifest/members/apps pages.
+ * Flow-page chrome: product name + GitHub identity + Logout, restyled to
+ * the SPA navbar tokens. Manifest pages never pass `adminNav` (Members
+ * stays on the dashboard shell only). No language toggle — current IA.
  */
-function shellHeader(user: { login: string; name?: string }, adminNav = false): string {
+function shellHeader(
+  user: { login: string; name?: string },
+  adminNav = false,
+  locale: Locale = "en",
+): string {
   const display = user.name ? `${user.name} (${user.login})` : user.login;
-  const members = adminNav ? ` · <a href="/dashboard/members">Members</a>` : "";
+  const members = adminNav
+    ? `<a href="/dashboard/members">${escapeHtml(t(locale, "nav.members"))}</a>`
+    : "";
   return `<header>
-    <h1>mstar-inspector</h1>
-    <span class="user">Signed in as ${escapeHtml(display)} · <a href="/dashboard/apps">Apps</a> · <a href="/dashboard/insights">Insights</a>${members} · <a href="/dashboard/logout">Logout</a></span>
+    <h1><a href="/dashboard">${escapeHtml(t(locale, "nav.brand"))}</a></h1>
+    <span class="user">
+      <a href="/dashboard/apps">${escapeHtml(t(locale, "nav.apps"))}</a>
+      <a href="/dashboard/insights">${escapeHtml(t(locale, "nav.insights"))}</a>
+      ${members}
+      <span>${escapeHtml(t(locale, "nav.signedInAs", { name: display }))}</span>
+      <a href="/dashboard/logout">${escapeHtml(t(locale, "nav.logout"))}</a>
+    </span>
   </header>`;
 }
 
@@ -310,8 +454,7 @@ function githubAppSection(): string {
  * B2 delivered: Model keys are per-App, so this shell card is an entry point,
  * not a placeholder — the copy states keys/models are configured per App and
  * links to the Apps list, where members reach Settings on the Apps they
- * manage. Existing Level 1 tokens only: enabled-card fill + a plain body
- * link (same as the manifest success page) — no new CSS, no button.
+ * manage.
  */
 function modelKeysSection(): string {
   return `<section class="enabled">
@@ -323,9 +466,8 @@ function modelKeysSection(): string {
 
 /**
  * Logged-in shell: header + sections (B1: GitHub App live; B2: per-App
- * Model keys entry point; Review stays a placeholder). `isAdmin` renders the
- * Members entry in the header — plain Level 1 link (existing `header a`
- * token), no new CSS (qc1/qc2 F-001).
+ * Model keys entry point; Review stays a placeholder). T5 removes the
+ * REVIEW_ENABLED sentence — per-App pause is the only switch named.
  */
 export function dashboardPage(user: { login: string; name?: string }, isAdmin = false): string {
   return page(
@@ -337,10 +479,10 @@ export function dashboardPage(user: { login: string; name?: string }, isAdmin = 
       ${modelKeysSection()}
       ${placeholderSection(
         "Review",
-        "Turn cloud reviews on or off (REVIEW_ENABLED).",
+        "Reviews are controlled per App — pause an App to stop its reviews.",
         "Not in this iteration (B3).",
         "Enable reviews",
-        '<p class="note">Reviews stay fail-closed in production until enabled here (B3).</p>',
+        '<p class="note">Pause an App from its Settings to stop reviews for that App.</p>',
       )}
     </div>
   </main>`,
@@ -358,23 +500,23 @@ export function manifestStartPage(
   appName: string,
   manifestJson: string,
   createUrl: string,
+  locale: Locale = "en",
 ): string {
   return page(
-    "Create GitHub App",
-    `${shellHeader(user)}
+    t(locale, "manifest.title"),
+    `${shellHeader(user, false, locale)}
   <main>
     <section class="enabled">
-      <h2>Create GitHub App</h2>
-      <p>Continue to GitHub to register <strong>${escapeHtml(appName)}</strong>
-      with the review permissions and webhook for this Worker. GitHub shows the requested
-      permissions first — nothing is created until you confirm there.</p>
+      <h2>${escapeHtml(t(locale, "manifest.start.heading"))}</h2>
+      <p>${t(locale, "manifest.start.body", { appName: `<strong>${escapeHtml(appName)}</strong>` })}</p>
       <form method="post" action="${escapeHtml(createUrl)}">
         <input type="hidden" name="manifest" value="${escapeHtml(manifestJson)}">
-        <button type="submit" class="primary">Continue on GitHub</button>
-        <a class="cancel" href="/dashboard">Cancel</a>
+        <button type="submit" class="primary">${escapeHtml(t(locale, "manifest.start.continue"))}</button>
+        <a class="cancel" href="/dashboard">${escapeHtml(t(locale, "manifest.start.cancel"))}</a>
       </form>
     </section>
   </main>`,
+    locale,
   );
 }
 
@@ -382,73 +524,93 @@ export function manifestStartPage(
  * App summary confirm gate (B5 T3, spec § Multi-App 契约 — the B1
  * overwrite-confirm semantics are GONE: nothing shared is overwritten, the
  * commit writes a NEW github_apps row). Single column, read-only summary
- * (name, numeric id, slug, webhook URL), amber-700 note, blue-700 primary
- * submit. PEM / webhook_secret NEVER appear here.
+ * (name, numeric id, slug, webhook URL), amber note, primary submit.
+ * PEM / webhook_secret NEVER appear here.
  */
 export function manifestConfirmPage(
   user: { login: string; name?: string },
   app: { id: number; name: string; slug: string; webhookUrl: string },
+  locale: Locale = "en",
 ): string {
+  const ready = t(locale, "manifest.confirm.ready", {
+    appName: `<strong>${escapeHtml(app.name)}</strong>`,
+    id: `<span class="id">${app.id}</span>`,
+  });
+  const slugWebhook = t(locale, "manifest.confirm.slugWebhook", {
+    slug: `<strong>${escapeHtml(app.slug)}</strong>`,
+    webhookUrl: `<strong>${escapeHtml(app.webhookUrl)}</strong>`,
+  });
   return page(
-    "Create GitHub App",
-    `${shellHeader(user)}
+    t(locale, "manifest.title"),
+    `${shellHeader(user, false, locale)}
   <main>
     <section class="enabled">
-      <h2>Create GitHub App</h2>
-      <p>GitHub App <strong>${escapeHtml(app.name)}</strong> (id <span class="id">${app.id}</span>) is ready to connect.</p>
-      <p>It will be registered for this deployment as:</p>
-      <p class="status">Slug <strong>${escapeHtml(app.slug)}</strong> · webhook URL <strong>${escapeHtml(app.webhookUrl)}</strong></p>
-      <p class="note">Connecting delivers this App's pull_request and issue_comment webhooks to this Worker. Reviews stay fail-closed until the deployment's REVIEW_ENABLED kill-switch is turned on.</p>
+      <h2>${escapeHtml(t(locale, "manifest.confirm.heading"))}</h2>
+      <p>${ready}</p>
+      <p>${escapeHtml(t(locale, "manifest.confirm.registeredAs"))}</p>
+      <p class="status">${slugWebhook}</p>
+      <p class="note">${escapeHtml(t(locale, "manifest.confirm.note"))}</p>
       <form method="post" action="/dashboard/manifest/commit">
-        <button type="submit" class="primary">Create App</button>
-        <a class="cancel" href="/dashboard">Cancel</a>
+        <button type="submit" class="primary">${escapeHtml(t(locale, "manifest.confirm.create"))}</button>
+        <a class="cancel" href="/dashboard">${escapeHtml(t(locale, "manifest.confirm.cancel"))}</a>
       </form>
     </section>
   </main>`,
+    locale,
   );
 }
 
 /**
  * App summary success surface (B5 T3, spec § User-visible behavior 3):
- * slug, webhook URL, numeric App id — gray-1000 + copy-16, tabular-nums id,
- * NO success green (spec § DESIGN.md 意图). PEM / webhook_secret NEVER
- * appear here; the displayed webhook URL is the row's own route.
+ * slug, webhook URL, numeric App id — tabular-nums id, NO success green.
+ * PEM / webhook_secret NEVER appear here.
  */
 export function manifestSuccessPage(
   user: { login: string; name?: string },
   app: { id: number; name: string; slug: string; webhookUrl: string },
+  locale: Locale = "en",
 ): string {
+  const stored = t(locale, "manifest.success.stored", {
+    appName: `<strong>${escapeHtml(app.name)}</strong>`,
+    id: `<span class="id">${app.id}</span>`,
+  });
   return page(
-    "GitHub App connected",
-    `${shellHeader(user)}
+    t(locale, "manifest.success.title"),
+    `${shellHeader(user, false, locale)}
   <main>
     <section class="enabled">
-      <h2>GitHub App connected</h2>
-      <p>GitHub App <strong>${escapeHtml(app.name)}</strong> (id <span class="id">${app.id}</span>) is stored for this deployment.</p>
-      <p class="status">Slug: ${escapeHtml(app.slug)}<br>Webhook URL: ${escapeHtml(app.webhookUrl)}</p>
-      <p class="status">Pull requests in repos where this App is installed are reviewed by this Worker once REVIEW_ENABLED is on.</p>
-      <p><a href="/dashboard/apps">View Apps</a> · <a href="/dashboard">Back to /dashboard</a></p>
+      <h2>${escapeHtml(t(locale, "manifest.success.heading"))}</h2>
+      <p>${stored}</p>
+      <p class="status">${escapeHtml(t(locale, "manifest.success.slug", { slug: app.slug }))}<br>${escapeHtml(t(locale, "manifest.success.webhookUrl", { webhookUrl: app.webhookUrl }))}</p>
+      <p class="status">${escapeHtml(t(locale, "manifest.success.reviewsNote"))}</p>
+      <p><a href="/dashboard/apps">${escapeHtml(t(locale, "manifest.success.viewApps"))}</a> · <a href="/dashboard">${escapeHtml(t(locale, "manifest.success.backToDashboard"))}</a></p>
     </section>
   </main>`,
+    locale,
   );
 }
 
-/** Manifest failure surface: red-700 banner + what-to-do-next, never secrets. */
-export function manifestErrorPage(message: string, resumable = false): string {
+/** Manifest failure surface: error notice + what-to-do-next, never secrets. No chrome (current IA). */
+export function manifestErrorPage(message: string, resumable = false, locale: Locale = "en"): string {
   // Resumable failures (retryable commit outcomes: 400/500/502) keep the
   // hold cookie, so the what-to-do-next link goes back to the confirm gate,
   // not a shell with no confirm form.
   const next = resumable
-    ? `Your GitHub App is still held for retry — return to the <a href="/dashboard/manifest/confirm">confirmation page</a> to resubmit.`
-    : `Return to <a href="/dashboard">/dashboard</a> to try again.`;
+    ? wrapPhraseAsLink(
+        t(locale, "manifest.error.resumable"),
+        t(locale, "manifest.error.confirmPage"),
+        "/dashboard/manifest/confirm",
+      )
+    : wrapPhraseAsLink(t(locale, "manifest.error.retry"), "/dashboard", "/dashboard");
   return page(
-    "GitHub App setup",
+    t(locale, "manifest.error.title"),
     `<main>
     <div class="banner" role="alert">
-      <strong>GitHub App setup failed.</strong> ${escapeHtml(message)}
-      No Worker secrets were changed. ${next}
+      <strong>${escapeHtml(t(locale, "manifest.error.failedHeading"))}</strong> ${escapeHtml(message)}
+      ${escapeHtml(t(locale, "manifest.error.secretsUnchanged"))} ${next}
     </div>
   </main>`,
+    locale,
   );
 }
 
@@ -465,6 +627,7 @@ export function deniedPage(login: string, locale: Locale = "en"): string {
     `<main>
     <div class="banner" role="alert">${t(locale, "common.error.deniedBody", { login: escapeHtml(login) })}</div>
   </main>`,
+    locale,
   );
 }
 
@@ -481,6 +644,7 @@ export function removedPage(login: string, locale: Locale = "en"): string {
     `<main>
     <div class="banner" role="alert">${t(locale, "common.error.removedBody", { login: escapeHtml(login) })}</div>
   </main>`,
+    locale,
   );
 }
 
@@ -500,6 +664,7 @@ export function forbiddenPage(login: string, locale: Locale = "en"): string {
     `<main>
     <div class="banner" role="alert">${body}</div>
   </main>`,
+    locale,
   );
 }
 
@@ -984,6 +1149,7 @@ export function errorPage(message: string, locale: Locale = "en"): string {
     `<main>
     <div class="banner" role="alert">${body}</div>
   </main>`,
+    locale,
   );
 }
 /**
@@ -1000,6 +1166,7 @@ export function badRequestPage(message: string, locale: Locale = "en"): string {
       ${t(locale, "common.error.badRequestBody", { message: escapeHtml(message) })}
     </div>
   </main>`,
+    locale,
   );
 }
 

@@ -392,7 +392,9 @@ dashboardApp.post("/manifest/start", async (c) => {
   const state = await createManifestStateValue(secrets.sessionSecret, slug);
   c.header("Set-Cookie", serializeCookie(MANIFEST_STATE_COOKIE, state, MANIFEST_STATE_MAX_AGE_SEC));
   const manifest = buildManifest(new URL(c.req.url).origin, session.login, slug);
-  return c.html(manifestStartPage(session, manifest.name, JSON.stringify(manifest), buildManifestCreateUrl(state)));
+  return c.html(
+    manifestStartPage(session, manifest.name, JSON.stringify(manifest), buildManifestCreateUrl(state), requestLocale(c)),
+  );
 });
 
 // Callback: GitHub redirects here with ?code=…&state=…. Bad/missing state →
@@ -416,18 +418,18 @@ dashboardApp.get("/manifest/callback", async (c) => {
   if (!state) {
     logManifestFailure("state_verify", "state_mismatch");
     return c.html(
-      manifestErrorPage("The app-creation flow could not be verified (bad or expired state)."),
+      manifestErrorPage(t(requestLocale(c), "manifest.error.stateMismatch"), false, requestLocale(c)),
       400,
     );
   }
   const code = c.req.query("code");
   if (!code) {
     logManifestFailure("callback", "missing_code");
-    return c.html(manifestErrorPage("GitHub did not return an app-manifest code."), 400);
+    return c.html(manifestErrorPage(t(requestLocale(c), "manifest.error.missingCode"), false, requestLocale(c)), 400);
   }
   const conversion = await exchangeManifestCode(code);
   if (!conversion) {
-    return c.html(manifestErrorPage("GitHub rejected the app-manifest code."), 502);
+    return c.html(manifestErrorPage(t(requestLocale(c), "manifest.error.codeRejected"), false, requestLocale(c)), 502);
   }
   const hold = await createHoldValue(conversion, session.login, secrets.sessionSecret, state.slug);
   c.header("Set-Cookie", serializeCookie(MANIFEST_HOLD_COOKIE, hold, MANIFEST_HOLD_MAX_AGE_SEC), {
@@ -435,12 +437,16 @@ dashboardApp.get("/manifest/callback", async (c) => {
   });
   const origin = new URL(c.req.url).origin;
   return c.html(
-    manifestConfirmPage(session, {
-      id: conversion.id,
-      name: conversion.name,
-      slug: state.slug,
-      webhookUrl: `${origin}/webhook/${state.slug}`,
-    }),
+    manifestConfirmPage(
+      session,
+      {
+        id: conversion.id,
+        name: conversion.name,
+        slug: state.slug,
+        webhookUrl: `${origin}/webhook/${state.slug}`,
+      },
+      requestLocale(c),
+    ),
   );
 });
 
@@ -478,9 +484,7 @@ dashboardApp.post("/manifest/commit", async (c) => {
     logManifestFailure("commit", "login_mismatch");
     c.header("Set-Cookie", expireCookie(MANIFEST_HOLD_COOKIE));
     return c.html(
-      manifestErrorPage(
-        "This confirmation belongs to a different GitHub login — sign back in and restart the app-creation flow.",
-      ),
+      manifestErrorPage(t(requestLocale(c), "manifest.error.loginMismatch"), false, requestLocale(c)),
       403,
     );
   }
@@ -507,10 +511,7 @@ dashboardApp.post("/manifest/commit", async (c) => {
       key_error: err instanceof SecretboxKeyError,
     });
     return c.html(
-      manifestErrorPage(
-        "This deployment has no valid DASHBOARD_ENCRYPTION_KEY to store App credentials with — ask the operator to configure it, then resubmit.",
-        true,
-      ),
+      manifestErrorPage(t(requestLocale(c), "manifest.error.noEncryptionKey"), true, requestLocale(c)),
       500,
     );
   }
@@ -535,12 +536,16 @@ dashboardApp.post("/manifest/commit", async (c) => {
     // Success: the hold is single-success — burned now that the row exists.
     c.header("Set-Cookie", expireCookie(MANIFEST_HOLD_COOKIE));
     return c.html(
-      manifestSuccessPage(session, {
-        id: row.github_app_id,
-        name: row.name,
-        slug: row.slug,
-        webhookUrl: `${new URL(c.req.url).origin}/webhook/${row.slug}`,
-      }),
+      manifestSuccessPage(
+        session,
+        {
+          id: row.github_app_id,
+          name: row.name,
+          slug: row.slug,
+          webhookUrl: `${new URL(c.req.url).origin}/webhook/${row.slug}`,
+        },
+        requestLocale(c),
+      ),
     );
   } catch (err) {
     if (isAppsUniqueViolation(err, "slug")) {
@@ -551,9 +556,7 @@ dashboardApp.post("/manifest/commit", async (c) => {
       logManifestFailure("commit", "slug_conflict", { slug: hold.slug });
       c.header("Set-Cookie", expireCookie(MANIFEST_HOLD_COOKIE));
       return c.html(
-        manifestErrorPage(
-          "Another App claimed this App's webhook slug while setup was in progress, so the GitHub App was created on GitHub but not connected to this deployment — no Worker data was stored. A manifest-created App cannot be connected twice: delete the just-created App on GitHub, then run a new app-creation flow from the dashboard.",
-        ),
+        manifestErrorPage(t(requestLocale(c), "manifest.error.slugConflict"), false, requestLocale(c)),
         409,
       );
     }
@@ -562,19 +565,14 @@ dashboardApp.post("/manifest/commit", async (c) => {
       logManifestFailure("commit", "github_app_id_conflict", { github_app_id: hold.id });
       c.header("Set-Cookie", expireCookie(MANIFEST_HOLD_COOKIE));
       return c.html(
-        manifestErrorPage(
-          "This GitHub App is already connected on this deployment — no changes were made.",
-        ),
+        manifestErrorPage(t(requestLocale(c), "manifest.error.alreadyConnected"), false, requestLocale(c)),
         409,
       );
     }
     // Retryable (missing migrations, transient D1 failure, …): hold kept.
     logManifestFailure("commit", "db_error", { error_type: errorTypeName(err) });
     return c.html(
-      manifestErrorPage(
-        "The App could not be stored — the dashboard database rejected the write. You can resubmit.",
-        true,
-      ),
+      manifestErrorPage(t(requestLocale(c), "manifest.error.dbRejected"), true, requestLocale(c)),
       500,
     );
   }
@@ -593,12 +591,16 @@ dashboardApp.get("/manifest/confirm", async (c) => {
   const hold = await readHoldValue(getCookie(c, MANIFEST_HOLD_COOKIE), secrets.sessionSecret);
   if (!hold || hold.login !== session.login) return c.redirect("/dashboard", 302);
   return c.html(
-    manifestConfirmPage(session, {
-      id: hold.id,
-      name: hold.name,
-      slug: hold.slug,
-      webhookUrl: `${new URL(c.req.url).origin}/webhook/${hold.slug}`,
-    }),
+    manifestConfirmPage(
+      session,
+      {
+        id: hold.id,
+        name: hold.name,
+        slug: hold.slug,
+        webhookUrl: `${new URL(c.req.url).origin}/webhook/${hold.slug}`,
+      },
+      requestLocale(c),
+    ),
   );
 });
 
@@ -1692,12 +1694,16 @@ dashboardApp.get("/", async (c) => {
   const hold = await readHoldValue(getCookie(c, MANIFEST_HOLD_COOKIE), sessionSecret);
   if (hold && hold.login === session.login) {
     return c.html(
-      manifestConfirmPage(session, {
-        id: hold.id,
-        name: hold.name,
-        slug: hold.slug,
-        webhookUrl: `${new URL(c.req.url).origin}/webhook/${hold.slug}`,
-      }),
+      manifestConfirmPage(
+        session,
+        {
+          id: hold.id,
+          name: hold.name,
+          slug: hold.slug,
+          webhookUrl: `${new URL(c.req.url).origin}/webhook/${hold.slug}`,
+        },
+        requestLocale(c),
+      ),
     );
   }
   // Members entry is admin-aware (qc1/qc2 F-001): the guard already resolved

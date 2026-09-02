@@ -280,8 +280,21 @@ export const zhCN: Dictionary = {
     error: {
       title: "GitHub App 设置",
       failed: "GitHub App 设置失败。{message} 未更改任何 Worker 密钥。",
+      failedHeading: "GitHub App 设置失败。",
+      secretsUnchanged: "未更改任何 Worker 密钥。",
       resumable: "你的 GitHub App 仍保留用于重试 — 返回确认页面重新提交。",
+      confirmPage: "确认页面",
       retry: "返回 /dashboard 重试。",
+      stateMismatch: "无法验证创建流程（state 无效或已过期）。",
+      missingCode: "GitHub 未返回 app-manifest code。",
+      codeRejected: "GitHub 拒绝了该 app-manifest code。",
+      loginMismatch: "此确认属于另一个 GitHub 登录 — 请重新登录并从头开始创建流程。",
+      noEncryptionKey:
+        "此部署没有有效的 DASHBOARD_ENCRYPTION_KEY 来存储 App 凭据 — 请让运维配置后再提交。",
+      slugConflict:
+        "设置进行期间另一个 App 占用了此 App 的 webhook slug，因此 GitHub 上已创建 App 但未连接到此部署 — 未写入任何 Worker 数据。Manifest 创建的 App 不能连接两次：请在 GitHub 上删除刚创建的 App，然后从控制台重新开始创建流程。",
+      alreadyConnected: "此 GitHub App 已在此部署上连接 — 未做任何更改。",
+      dbRejected: "无法存储该 App — 控制台数据库拒绝了写入。你可以重新提交。",
     },
   },
 };

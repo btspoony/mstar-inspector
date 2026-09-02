@@ -299,8 +299,22 @@ export const en = {
     error: {
       title: "GitHub App setup",
       failed: "GitHub App setup failed. {message} No Worker secrets were changed.",
+      failedHeading: "GitHub App setup failed.",
+      secretsUnchanged: "No Worker secrets were changed.",
       resumable: "Your GitHub App is still held for retry — return to the confirmation page to resubmit.",
+      confirmPage: "confirmation page",
       retry: "Return to /dashboard to try again.",
+      stateMismatch: "The app-creation flow could not be verified (bad or expired state).",
+      missingCode: "GitHub did not return an app-manifest code.",
+      codeRejected: "GitHub rejected the app-manifest code.",
+      loginMismatch:
+        "This confirmation belongs to a different GitHub login — sign back in and restart the app-creation flow.",
+      noEncryptionKey:
+        "This deployment has no valid DASHBOARD_ENCRYPTION_KEY to store App credentials with — ask the operator to configure it, then resubmit.",
+      slugConflict:
+        "Another App claimed this App's webhook slug while setup was in progress, so the GitHub App was created on GitHub but not connected to this deployment — no Worker data was stored. A manifest-created App cannot be connected twice: delete the just-created App on GitHub, then run a new app-creation flow from the dashboard.",
+      alreadyConnected: "This GitHub App is already connected on this deployment — no changes were made.",
+      dbRejected: "The App could not be stored — the dashboard database rejected the write. You can resubmit.",
     },
   },
 };
