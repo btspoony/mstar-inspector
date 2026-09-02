@@ -97,5 +97,26 @@
       "new_sqlite_classes": ["Sandbox"],
       "tag": "v1"
     }
-  ]
+  ],
+  // Observability (dashboard-managed; matched to the live Worker via
+  // /workers/scripts/mstar-inspector/settings — verified 2026-09-02).
+  // Logs + Traces are the real controls, both enabled + persisted; the legacy
+  // top-level `enabled` is what the API returned (false) while the sub-toggles
+  // were already ON. Set to true here to reflect the actual state (user turned
+  // observability on); sub-toggles below carry the deployed detail 1:1.
+  "observability": {
+    "enabled": true,
+    "head_sampling_rate": 1,
+    "logs": {
+      "enabled": true,
+      "head_sampling_rate": 1,
+      "invocation_logs": true,
+      "persist": true
+    },
+    "traces": {
+      "enabled": true,
+      "head_sampling_rate": 1,
+      "persist": true
+    }
+  }
 }
