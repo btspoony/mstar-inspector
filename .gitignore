@@ -132,3 +132,8 @@ dist
 
 # Morning Star / iteration feature worktrees (local checkouts only)
 .worktrees/
+
+node_modules
+.void
+.wrangler
+.DS_Store
