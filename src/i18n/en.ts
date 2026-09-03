@@ -62,6 +62,7 @@ export const en = {
     },
     loading: "Loading…",
     loadFailed: "Could not load this page.",
+    cancel: "Cancel",
   },
   login: {
     heading: "Sign in to Morning Star Inspector",
@@ -73,6 +74,7 @@ export const en = {
     success: {
       invited: "Invited {login} — they can sign in with GitHub now.",
       removedMember: "Removed {login}.",
+      roleChanged: "{login} is now {role}.",
       appStatusChanged: "{verb} {slug}.",
       appPaused: "Paused {slug}.",
       appResumed: "Resumed {slug}.",
@@ -99,6 +101,8 @@ export const en = {
       unknownMember: "Unknown member — nothing was removed, try again.",
       cannotRemoveSelf: "You cannot remove yourself.",
       lastAdmin: "The last admin cannot be removed.",
+      inviteFailed: "Could not invite {login} — try again.",
+      roleChangeFailed: "Could not change {login}'s role — the member list just changed, try again.",
       removeFailed: "Could not remove {login} — the member list just changed, try again.",
       encryptionKeyMissing:
         "This deployment has no valid DASHBOARD_ENCRYPTION_KEY for its stored keys — ask the operator to configure it, then resubmit.",
@@ -168,9 +172,23 @@ export const en = {
   members: {
     title: "Members",
     heading: "Members",
+    inviteOnlyNotice: "Only the GitHub users listed here can sign in to this deployment.",
     inviteLabel: "Invite by GitHub login",
     invitePlaceholder: "e.g. octocat",
     inviteButton: "Invite member",
+    roleLabel: "Role",
+    tableLogin: "GitHub login",
+    tableJoined: "Joined",
+    tableActions: "Actions",
+    actionsMenuLabel: "Open actions for {login}",
+    makeAdmin: "Change to admin",
+    makeMember: "Change to member",
+    confirmRoleTitle: "Change {login}'s role?",
+    confirmRoleBody: "{login} will become {role}. The change takes effect immediately.",
+    confirmRoleButton: "Change role",
+    confirmRemoveTitle: "Remove {login}?",
+    confirmRemoveBody:
+      "{login} will no longer be able to sign in — their session stops working right away. Apps they created stay in place and remain manageable by admins.",
     remove: "Remove",
     you: "you",
     adminOnly: "This page is restricted to dashboard admins.",
