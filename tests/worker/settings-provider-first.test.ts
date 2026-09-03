@@ -11,7 +11,6 @@ import {
   MODEL_ROLE_IDS,
 } from "../../src/dashboard/app-config-store";
 import { composeModelOptions, findFailingSelector, selectorBase } from "../../src/dashboard/model-membership";
-import { addKeyProviderIds } from "../../src/dashboard/provider-verify";
 import { PROVIDER_IDS } from "../../src/dashboard/app-config-store";
 import { SESSION_COOKIE, createSessionValue } from "../../src/dashboard/session";
 import { createUser } from "../../src/dashboard/users";
@@ -536,14 +535,19 @@ describe("GET settings includes delivery_summary for the sidebar (plan 31 T6)", 
     expect(res.status).toBe(200);
     const body = (await res.json()) as {
       delivery_summary: { latest: null; rejected24h: number };
-      provider_ids: string[];
+      providers: Array<{ id: string; label: string; tier: string; verifiable: boolean }>;
     };
     expect(body.delivery_summary).toEqual({ latest: null, rejected24h: 0 });
     expect(JSON.stringify(body)).not.toContain("key_enc");
     expect(JSON.stringify(body)).not.toContain("private_key");
     expect(res.headers.get("cache-control")).toBe("private, no-store");
-    expect(body.provider_ids).not.toContain("azure-openai");
-    expect(body.provider_ids).not.toContain("ai-gateway");
-    expect(body.provider_ids).toEqual(addKeyProviderIds(PROVIDER_IDS));
+    // Plan 35 T4: the unified provider section face — every builtin (in
+    // PROVIDER_IDS order) + the template tier, with verifiable flags.
+    const byId = (id: string) => body.providers.find((p) => p.id === id);
+    expect(body.providers.filter((p) => p.tier === "builtin").map((p) => p.id)).toEqual([...PROVIDER_IDS]);
+    expect(byId("azure-openai")?.verifiable).toBe(false);
+    expect(byId("ai-gateway")?.verifiable).toBe(false);
+    expect(byId("anthropic")?.verifiable).toBe(true);
+    expect(byId("workers-ai")).toMatchObject({ tier: "template", label: "Cloudflare Workers AI", verifiable: true });
   });
 });

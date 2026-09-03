@@ -95,12 +95,14 @@ describe("home assembly (plan 30 T1)", () => {
     expect(source).toContain("home.viewFull");
   });
 
-  test("empty list is a large primary CTA; non-empty is a header secondary CTA", () => {
+  test("create CTA is always in the header; empty list has no ops controls", () => {
     const source = readFileSync(join(import.meta.dir, "../../src/spa/pages/AppsPage.tsx"), "utf8");
-    expect(source).toContain('variant="primary"');
-    expect(source).toContain('variant="secondary"');
     expect(source).toContain("payload.apps.length === 0");
-    expect(source).toContain("cardHeader");
+    expect(source).toContain("CreateAppButton");
+    expect(source).not.toContain("/pause");
+    expect(source).not.toContain("/disable");
+    expect(source).not.toContain("/delete");
+    expect(source).toContain("/dashboard/apps/${app.slug}/settings");
   });
 
   test("desktop ≥900px is 2fr + 1fr; mobile stacks", () => {

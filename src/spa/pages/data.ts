@@ -40,16 +40,38 @@ export type AppsPayload = {
   }>;
 };
 
+export type CatalogProvider = {
+  id: string;
+  label: string;
+  tier: "builtin" | "template";
+  base_url: string | null;
+  api: string | null;
+  models: string[];
+  verifiable: boolean;
+};
+
+export type ModelChainEntry = {
+  name: string;
+  chain: string;
+  is_default: boolean;
+  created_at: string;
+  updated_at: string;
+};
+
 export type SettingsPayload = {
+  can_manage: boolean;
   app: {
     slug: string;
+    github_app_id: number;
     status: string;
     review_enabled: boolean;
+    created_by: string;
     last_webhook_at: string | null;
   };
   keys: Array<{ provider: string; last4: string; updated_at: string | null }>;
   model_chain: string | null;
   model_roles: Record<string, string>;
+  model_chains: ModelChainEntry[];
   custom_providers: Array<{ provider_id: string; base_url: string; api: string; model_ids: string[] }>;
   installations: Array<{ installation_id: number; account_login: string | null; seen_at: string }>;
   deliveries: Array<{
@@ -58,7 +80,7 @@ export type SettingsPayload = {
     status_code: number | null;
     created_at: string;
   }>;
-  provider_ids: readonly string[];
+  providers: CatalogProvider[];
   model_role_ids: readonly string[];
   custom_provider_api_ids: readonly string[];
   delivery_summary?: {
@@ -148,11 +170,13 @@ export function parseApps(data: unknown): AppsPayload | null {
 
 export function parseSettings(data: unknown): SettingsPayload | null {
   if (!isRecord(data) || !isRecord(data.app) || !Array.isArray(data.keys)) return null;
+  if (typeof data.can_manage !== "boolean") return null;
   if (typeof data.app.slug !== "string" || typeof data.app.status !== "string") return null;
   if (typeof data.app.review_enabled !== "boolean") return null;
-  if (!Array.isArray(data.provider_ids) || !Array.isArray(data.model_role_ids)) return null;
-  if (!isStringArray(data.provider_ids) || !isStringArray(data.model_role_ids)) return null;
+  if (typeof data.app.created_by !== "string" || typeof data.app.github_app_id !== "number") return null;
+  if (!Array.isArray(data.model_role_ids) || !isStringArray(data.model_role_ids)) return null;
   if (!Array.isArray(data.custom_provider_api_ids) || !isStringArray(data.custom_provider_api_ids)) return null;
+  if (!Array.isArray(data.providers) || !Array.isArray(data.model_chains)) return null;
   return data as SettingsPayload;
 }
 

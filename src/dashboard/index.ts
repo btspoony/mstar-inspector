@@ -82,7 +82,7 @@ import {
   type AppConfigStore,
 } from "./app-config-store";
 import { composeModelOptions, findFailingSelector } from "./model-membership";
-import { addKeyProviderIds, verifyProviderKey, type VerifyFailureReason } from "./provider-verify";
+import { PROVIDER_VERIFY_ENDPOINTS, verifyProviderKey, type VerifyFailureReason } from "./provider-verify";
 import {
   bootstrapDashboardAccess,
   createUser,
@@ -1112,31 +1112,36 @@ dashboardApp.post("/apps/:slug/resume", (c) => appReviewAction(c, "resume"));
 // src/dashboard/views.ts is retired.
 
 type AppSettingsGate =
-  | { ok: true; session: SessionPayload; db: DashboardDb; app: GithubAppRow }
+  | { ok: true; session: SessionPayload; db: DashboardDb; app: GithubAppRow; user: DashboardUserRow }
   | { ok: false; response: Response };
 
-/** Route-local owner-or-admin gate shared by the settings route family. */
-async function requireAppSettings(c: Context<{ Bindings: Env }>): Promise<AppSettingsGate> {
+/**
+ * Plan 35 T4 (spec §2 read face): any member may load App detail (masked keys,
+ * health, deliveries). Encryption-dependent because masking needs plaintext —
+ * a missing master key still fails closed with 5xx.
+ */
+async function requireAppVisible(c: Context<{ Bindings: Env }>): Promise<AppSettingsGate> {
   const member = await requireMember(c);
   if (!member.ok) return member;
   const app = await createAppsStore(member.db).getAppBySlug(c.req.param("slug") ?? "");
   if (!app || app.deleted_at !== null) return { ok: false, response: pinnedPostMutationResponse(c, DASHBOARD_SHELL_REDIRECT, "unknown app", 404) };
-  if (!canManageApp(member.user, app)) {
-    return { ok: false, response: c.html(forbiddenPage(member.session.login, requestLocale(c)), 403) };
-  }
-  // The settings family is encryption-dependent end to end (masking needs
-  // plaintext, adding a key encrypts): a missing master key fails EVERY
-  // settings route closed with 5xx — the plan Global Constraint — rather
-  // than serving a page that could not round-trip key material. A key that
-  // is set but malformed surfaces the same way through the decrypt/encrypt
-  // failure paths below.
   if (!c.env.DASHBOARD_ENCRYPTION_KEY) {
     return {
       ok: false,
       response: c.text("the app settings need a configured DASHBOARD_ENCRYPTION_KEY", 500),
     };
   }
-  return { ok: true, session: member.session, db: member.db, app };
+  return { ok: true, session: member.session, db: member.db, app, user: member.user };
+}
+
+/** Route-local owner-or-admin gate shared by the settings WRITE family. */
+async function requireAppSettings(c: Context<{ Bindings: Env }>): Promise<AppSettingsGate> {
+  const gate = await requireAppVisible(c);
+  if (!gate.ok) return gate;
+  if (!canManageApp(gate.user, gate.app)) {
+    return { ok: false, response: c.html(forbiddenPage(gate.session.login, requestLocale(c)), 403) };
+  }
+  return gate;
 }
 
 /** Same structured-log convention as logOAuthFailure / logManifestFailure. */
@@ -1223,9 +1228,9 @@ function settingsMembershipFailResponse(
   return c.json({ code: MEMBERSHIP_FAIL_CODE, message, selector }, 400);
 }
 
-/** SPA JSON face — same requireAppSettings gate and the settings reads the retired HTML GET used. */
+/** SPA JSON face — plan 35 T4: any member may read App detail (spec §2); write ops stay behind requireAppSettings. */
 dashboardApp.get("/api/apps/:slug/settings", async (c) => {
-  const gate = await requireAppSettings(c);
+  const gate = await requireAppVisible(c);
   if (!gate.ok) return gate.response;
   const store = createAppConfigStore(gate.db, c.env.DASHBOARD_ENCRYPTION_KEY);
   const apps = createAppsStore(gate.db);
@@ -1240,10 +1245,13 @@ dashboardApp.get("/api/apps/:slug/settings", async (c) => {
     const deliverySummary = await apps.deliverySummary(gate.app.id);
     c.header("Cache-Control", "private, no-store");
     return c.json({
+      can_manage: canManageApp(gate.user, gate.app),
       app: {
         slug: gate.app.slug,
+        github_app_id: gate.app.github_app_id,
         status: gate.app.status,
         review_enabled: gate.app.review_enabled !== 0,
+        created_by: gate.app.created_by,
         last_webhook_at: gate.app.last_webhook_at ?? null,
       },
       keys: maskedKeys,
@@ -1272,7 +1280,38 @@ dashboardApp.get("/api/apps/:slug/settings", async (c) => {
           : null,
         rejected24h: deliverySummary.rejected24h,
       },
-      provider_ids: addKeyProviderIds(PROVIDER_IDS),
+      // Plan 35 T4 (spec §4.3): the unified provider section renders the WHOLE
+      // catalog from one face — builtin ids in PROVIDER_IDS order, then
+      // template-tier entries (workers-ai). `verifiable: false` marks the
+      // console-only providers (azure-openai / ai-gateway — the old
+      // addKeyProviderIds filter); the UI shows the hint instead of a key
+      // form. Templates verify via the custom probe, so always verifiable.
+      providers: [
+        ...PROVIDER_IDS.map((id) => {
+          const meta = PROVIDER_META[id];
+          if (!meta) throw new Error(`PROVIDER_META missing ${id}`);
+          return {
+            id,
+            label: meta.label,
+            tier: meta.tier,
+            base_url: meta.baseUrl,
+            api: meta.api,
+            models: [...meta.models],
+            verifiable: PROVIDER_VERIFY_ENDPOINTS[id]?.kind !== "unsupported",
+          };
+        }),
+        ...Object.entries(PROVIDER_META)
+          .filter(([id, meta]) => meta.tier === "template" && !PROVIDER_IDS.includes(id))
+          .map(([id, meta]) => ({
+            id,
+            label: meta.label,
+            tier: meta.tier,
+            base_url: meta.baseUrl,
+            api: meta.api,
+            models: [...meta.models],
+            verifiable: true,
+          })),
+      ],
       model_role_ids: MODEL_ROLE_IDS,
       custom_provider_api_ids: CUSTOM_PROVIDER_API_IDS,
     });

@@ -153,15 +153,6 @@ export const PROVIDER_VERIFY_ENDPOINTS: Record<string, ProviderVerifySpec> = {
   ark: { kind: "models", url: "https://ark.cn-beijing.volces.com/api/v3/models", auth: "bearer" },
 };
 
-/**
- * Add Key dropdown source: hide providers whose verify spec is
- * `unsupported` (azure-openai / ai-gateway). They stay in PROVIDER_IDS for
- * legacy stored rows; the dashboard cannot verify a key with only the key.
- */
-export function addKeyProviderIds(ids: readonly string[]): string[] {
-  return ids.filter((id) => PROVIDER_VERIFY_ENDPOINTS[id]?.kind !== "unsupported");
-}
-
 /** Authorization header shape per VerifyAuth. The key NEVER goes elsewhere
  *  (not in the URL — Gemini probes use the header for exactly this reason). */
 function authHeaders(auth: VerifyAuth, key: string): Record<string, string> {

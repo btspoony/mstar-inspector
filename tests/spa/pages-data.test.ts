@@ -80,25 +80,35 @@ describe("members/apps/settings parsers", () => {
     expect(parseApps({ apps: [] })).toBeNull();
   });
 
-  test("parseSettings requires boolean review_enabled and selector lists", () => {
+  test("parseSettings requires can_manage, created_by, providers, and chains", () => {
     const ok = parseSettings({
-      app: { slug: "demo", status: "active", review_enabled: true, last_webhook_at: null },
+      can_manage: true,
+      app: {
+        slug: "demo",
+        github_app_id: 1,
+        status: "active",
+        review_enabled: true,
+        created_by: "mallory",
+        last_webhook_at: null,
+      },
       keys: [],
       model_chain: null,
       model_roles: {},
+      model_chains: [],
       custom_providers: [],
       installations: [],
       deliveries: [],
-      provider_ids: ["openai"],
+      providers: [],
       model_role_ids: ["mstar-review-seat"],
       custom_provider_api_ids: ["openai-completions"],
     });
     expect(ok?.app.slug).toBe("demo");
+    expect(ok?.can_manage).toBe(true);
     expect(
       parseSettings({
         app: { slug: "demo", status: "active", review_enabled: 1, last_webhook_at: null },
         keys: [],
-        provider_ids: [],
+        providers: [],
         model_role_ids: [],
         custom_provider_api_ids: [],
       }),

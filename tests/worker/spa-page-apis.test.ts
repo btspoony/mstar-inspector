@@ -132,22 +132,29 @@ describe("GET /dashboard/api/apps (plan 29 T4)", () => {
 });
 
 describe("GET /dashboard/api/apps/:slug/settings (plan 29 T4)", () => {
-  test("creator 200; other member 403; unknown slug 404", async () => {
+  test("creator 200 can_manage; other member 200 can_manage false; unknown slug 404", async () => {
     const db = await seededWorld();
     const env = makeEnv(db);
 
     const owner = await get("/dashboard/api/apps/mstar-inspector-mallory/settings", "mallory", env);
     expect(owner.status).toBe(200);
-    const body = (await owner.json()) as { app: { slug: string; review_enabled: boolean }; provider_ids: string[] };
+    const body = (await owner.json()) as {
+      can_manage: boolean;
+      app: { slug: string; review_enabled: boolean; created_by: string };
+      providers: Array<{ id: string; verifiable: boolean }>;
+    };
     expect(body.app.slug).toBe("mstar-inspector-mallory");
     expect(body.app.review_enabled).toBe(true);
-    expect(body.provider_ids.length).toBeGreaterThan(0);
-    expect(body.provider_ids).not.toContain("azure-openai");
-    expect(body.provider_ids).not.toContain("ai-gateway");
+    expect(body.can_manage).toBe(true);
+    expect(body.providers.length).toBeGreaterThan(0);
+    expect(body.providers.some((p) => p.id === "azure-openai" && p.verifiable === false)).toBe(true);
+    expect(body.providers.some((p) => p.id === "workers-ai")).toBe(true);
     expect(owner.headers.get("cache-control")).toBe("private, no-store");
 
     const other = await get("/dashboard/api/apps/mstar-inspector-mallory/settings", "hubot", env);
-    expect(other.status).toBe(403);
+    expect(other.status).toBe(200);
+    const otherBody = (await other.json()) as { can_manage: boolean };
+    expect(otherBody.can_manage).toBe(false);
 
     const missing = await get("/dashboard/api/apps/no-such-app/settings", "octocat", env);
     expect(missing.status).toBe(404);
