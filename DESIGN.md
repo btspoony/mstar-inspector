@@ -741,6 +741,49 @@ Always include what happened + what to do next on error.
 SPA (Task 3+) consumes `tokens.css` only. Do not introduce a theme toggle.
 Legacy `views.ts` STYLE stays as-is until those pages migrate.
 
+
+## shadcn/ui mapping layer (plan 33)
+
+Tailwind v4 + shadcn/ui (New York) read **semantic** CSS variables from
+`src/spa/styles/shadcn-theme.css`. That file bridges shadcn names to the
+existing `tokens.css` custom properties (read-only). Tailwind utilities use
+`@theme inline` so classes like `bg-primary` resolve through the bridge.
+
+| shadcn variable | tokens.css / component source |
+|-----------------|--------------------------------|
+| `--background` | `--background-100` |
+| `--foreground` | `--gray-1000` |
+| `--card` / `--card-foreground` | `--card-bg` / `--card-fg` |
+| `--primary` / `--primary-foreground` | `--blue-700` / `--background-100` |
+| `--secondary` / `--secondary-foreground` | `--button-secondary-bg` / `--button-secondary-fg` |
+| `--muted` / `--muted-foreground` | `--gray-100` / `--gray-900` |
+| `--accent` / `--accent-foreground` | `--background-300` / `--gray-1000` |
+| `--destructive` / `--destructive-foreground` | `--red-700` / `--background-100` |
+| `--border` | `--gray-alpha-400` |
+| `--input` | `--input-border` |
+| `--ring` | `--blue-700` |
+| `--radius` | `--rounded-sm` |
+| `--sidebar` / `--sidebar-foreground` | `--sidebar-bg` / `--sidebar-fg` |
+| `--sidebar-accent` / `--sidebar-accent-foreground` | `--sidebar-active-bg` / `--sidebar-active-fg` |
+| `--color-sidebar-border` (Tailwind) | `--sidebar-border` (tokens only; not redefined in bridge) |
+
+Copy-in components (plan 33 T1c) live under `src/spa/components/ui/` with
+`components.json` aliases (`@/components` → `src/spa/components`,
+`@/lib/utils` → `src/spa/lib/utils.ts`). Radix primitives use pinned
+`@radix-ui/react-*` packages per plan Global Constraints.
+
+### Inspiration (awesome-design-md)
+
+Patterns borrowed at the token level (not pixel copies):
+
+- **Linear** — sidebar-first IA, low-chrome surfaces (`background-200` chrome),
+  single blue accent for constructive actions.
+- **Vercel** — developer-console typography (`mono-13` for ids), tight
+  `spacing-4` rhythm between groups, hairline borders via `gray-alpha-*`.
+- **Supabase** — table-forward density (`table` component tokens), semantic
+  reds/ambers for operational state without decorative gradients.
+
+
 <!-- LEVEL3_PLACEHOLDER: Elevation (card/popover/modal shadows), Motion
 (durations + easing + prefers-reduced-motion), Shapes usage table, Voice &
 Content, and DESIGN.dark.md dual-file parity if the project later splits

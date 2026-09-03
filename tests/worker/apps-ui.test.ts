@@ -150,19 +150,21 @@ function reviewEnabled(db: ReturnType<typeof createAppsUiD1>, slug: string): num
   return row?.review_enabled ?? null;
 }
 
-describe("GET /dashboard/apps (plan 30 T4: 301 alias to the workbench)", () => {
-  test("HTML navigation GET is 301'd to /dashboard (alias)", async () => {
+describe("GET /dashboard/apps (plan 33 T2: enumerated SPA route)", () => {
+  test("HTML navigation GET is served by SPA dispatch (boot-injected index)", async () => {
     const db = await seededWorld();
     const res = await htmlGet("/dashboard/apps", `${SESSION_COOKIE}=${await sessionCookie("hubot")}`, withSpaAssets(makeEnv(db)));
-    expect(res.status).toBe(301);
-    expect(res.headers.get("Location")).toBe("/dashboard");
+    expect(res.status).toBe(200);
+    const body = await res.text();
+    expect(body).toContain("window.__BOOT__=");
+    expect(body).toContain('"login":"hubot"');
+    expect(body).toContain('"role":"member"');
   });
 
-  test("a non-HTML GET is 301'd to /dashboard too (alias runs before the legacy app)", async () => {
+  test("a non-HTML GET without session is not a 301 alias", async () => {
     const db = await seededWorld();
     const res = await get("/dashboard/apps", "", makeEnv(db));
-    expect(res.status).toBe(301);
-    expect(res.headers.get("Location")).toBe("/dashboard");
+    expect(res.status).not.toBe(301);
   });
 
   test("GET /dashboard with a member session → SPA boot role member (no admin)", async () => {

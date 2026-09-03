@@ -144,7 +144,7 @@ describe("POST mutation Accept routing (plan 29 QC W-2)", () => {
     expect(res.headers.get("Location")).toBe("/dashboard/apps/demo-app/settings");
   });
 
-  test("HTML-nav pause with apps-list Referer redirects to /dashboard", async () => {
+  test("HTML-nav pause with apps-list Referer redirects to /dashboard/apps", async () => {
     const db = createD1();
     await seed(db);
     const env = makeEnv(db);
@@ -153,7 +153,7 @@ describe("POST mutation Accept routing (plan 29 QC W-2)", () => {
       Referer: "https://worker.local/dashboard/apps",
     });
     expect(res.status).toBe(302);
-    expect(res.headers.get("Location")).toBe("/dashboard");
+    expect(res.headers.get("Location")).toBe("/dashboard/apps");
   });
 
   test("SPA fetch pause with settings Referer keeps plain-text", async () => {
