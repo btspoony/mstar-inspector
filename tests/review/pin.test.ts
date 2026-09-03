@@ -15,6 +15,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 
 import { PLUGIN_ROOT_FIXTURE } from "./plugin-root-fixture";
+import { REVIEW_SKILL_VERSION } from "../../src/store/artifact-store";
 
 /** Harness 3.6.0 git ref fetched into the sandbox image (plan 32 Task 1). */
 const HARNESS_360_REF = "ad76f0c6600acd5040464248085ad7d22af93e9f";
@@ -37,6 +38,10 @@ describe("sandbox image harness pin", () => {
     expect(dockerfile).not.toContain(SUPERSEDED_REF);
     expect(dockerfile).not.toContain(SUPERSEDED_350_REF);
   });
+
+  test("Dockerfile comment records the tag v3.6.0 double-write", () => {
+    expect(dockerfile).toContain("tag v3.6.0");
+  });
 });
 
 describe("engine dependency pin", () => {
@@ -53,6 +58,25 @@ describe("engine dependency pin", () => {
     // The packages row names the resolved version verbatim; a ^/~ range would
     // surface as "@mstar-harness/engine@^3.6.0" and fail this anchor.
     expect(lockfile).toContain('"@mstar-harness/engine": ["@mstar-harness/engine@3.6.0"');
+    // The workspaces dependencies row (bun.lock:9) mirrors the package.json
+    // exact-version declaration; drift here would desync the workspace root
+    // from the resolved package.
+    expect(lockfile).toContain('"@mstar-harness/engine": "3.6.0"');
+  });
+});
+
+describe("review skill version pin", () => {
+  test("REVIEW_SKILL_VERSION carries the exact 3.6.0+ad76f0c6 value", () => {
+    expect(REVIEW_SKILL_VERSION).toBe("3.6.0+ad76f0c6");
+  });
+
+  test("REVIEW_SKILL_VERSION + suffix binds to the Dockerfile fetch sha prefix", () => {
+    const dockerfile = readFileSync(join(REPO_ROOT, "sandbox-image", "Dockerfile"), "utf8");
+    const fetchSha = dockerfile.match(/fetch --depth 1 origin ([0-9a-f]{40})/)?.[1];
+    expect(fetchSha).toBeDefined();
+    // The constant's "+" suffix is the short form of the Dockerfile fetch sha;
+    // drift between the two anchors (image ref vs D1 attribution) fails here.
+    expect(REVIEW_SKILL_VERSION.endsWith(`+${fetchSha!.slice(0, 8)}`)).toBe(true);
   });
 });
 
