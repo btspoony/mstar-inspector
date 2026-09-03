@@ -12,7 +12,11 @@
     "forceConsistentCasingInFileNames": true,
     "verbatimModuleSyntax": true,
     "noUncheckedIndexedAccess": true,
-    "types": ["vite/client", "bun"]
+    "types": ["vite/client", "bun"],
+    "baseUrl": ".",
+    "paths": {
+      "@/*": ["src/spa/*"]
+    }
   },
   "include": ["src/spa", "src/i18n", "tests/spa"]
 }

@@ -1,6 +1,7 @@
 import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 import "./styles/tokens.css";
+import "./styles/shadcn-theme.css";
 import { readBoot } from "./boot";
 import { Layout } from "./Layout";
 import { DashboardPage } from "./pages";
