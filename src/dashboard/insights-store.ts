@@ -70,7 +70,7 @@ export type RecurringGroup = {
   repos: string[];
 };
 
-/** The full insights aggregation shape (plan 22 Task 1 contract). */
+/** The full insights aggregation shape (plan 22 Task 1 + plan 36 T2). */
 export type Insights = {
   reviewsTotal: number;
   findingsBySeverity: SeverityCount[];
@@ -78,6 +78,12 @@ export type Insights = {
   verdictDistribution: VerdictCount[];
   weeklyTrend: WeekBucket[];
   recurringTop: RecurringGroup[];
+  /**
+   * Window-scoped distinct `owner/repo` values with at least one v1 review
+   * (plan 36 T2). Sorted ascending. Independent of `opts.repo` — the Select
+   * option set is always the full in-window set, never the filtered subset.
+   */
+  repos: string[];
 };
 
 /** Narrow D1 statement face, declared locally (dashboard leaf — zero imports). */
@@ -124,7 +130,7 @@ export async function createInsightsStore(db: InsightsD1, opts: InsightsWindow =
   where.push("r.envelope IS NOT NULL");
   const whereSql = where.join(" AND ");
 
-  const [total, severities, categories, verdicts, trend, recurring] = await Promise.all([
+  const [total, severities, categories, verdicts, trend, recurring, repoRows] = await Promise.all([
     db
       .prepare(`SELECT COUNT(*) AS total FROM reviews r WHERE ${whereSql}`)
       .bind(...binds)
@@ -195,6 +201,20 @@ export async function createInsightsStore(db: InsightsD1, opts: InsightsWindow =
       )
       .bind(...binds)
       .all<{ fingerprint: string; title_sample: string; count: number; repos_csv: string | null }>(),
+    // Plan 36 T2: window-scoped distinct repos for the records Select.
+    // Deliberately ignores opts.repo — the option set is the in-window
+    // universe, not the currently filtered subset. Era gate matches the
+    // other aggregations so M1-only repos never appear.
+    db
+      .prepare(
+        `SELECT DISTINCT r.owner || '/' || r.repo AS repo
+         FROM reviews r
+         WHERE r.reviewed_at >= datetime('now', '-' || ? || ' days')
+           AND r.envelope IS NOT NULL
+         ORDER BY repo ASC`,
+      )
+      .bind(windowDays)
+      .all<{ repo: string }>(),
   ]);
 
   return {
@@ -209,5 +229,6 @@ export async function createInsightsStore(db: InsightsD1, opts: InsightsWindow =
       count: row.count,
       repos: (row.repos_csv ?? "").split(",").filter((repoName) => repoName.length > 0).sort(),
     })),
+    repos: repoRows.results.map((row) => row.repo).filter((name) => name.length > 0),
   };
 }

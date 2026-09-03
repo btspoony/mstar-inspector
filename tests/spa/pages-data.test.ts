@@ -6,6 +6,10 @@ import { t } from "../../src/i18n";
 import {
   canManageApp,
   canViewMembers,
+  insightsRepoFromSelect,
+  insightsRepoOptions,
+  insightsRepoSelectValue,
+  INSIGHTS_REPO_ALL,
   insightsSummaryUrl,
   inviteLoginNoticeKey,
   isPaused,
@@ -49,6 +53,18 @@ describe("insights search wiring", () => {
     );
   });
 
+  test("repo Select maps 全部 ↔ empty filter and keeps out-of-set current values", () => {
+    expect(INSIGHTS_REPO_ALL).toBe("all");
+    expect(insightsRepoSelectValue("")).toBe("all");
+    expect(insightsRepoSelectValue("acme/web")).toBe("acme/web");
+    expect(insightsRepoFromSelect("all")).toBe("");
+    expect(insightsRepoFromSelect("acme/web")).toBe("acme/web");
+    expect(insightsRepoOptions([], "")).toEqual([]);
+    expect(insightsRepoOptions(["zeta/app", "acme/web"], "")).toEqual(["acme/web", "zeta/app"]);
+    expect(insightsRepoOptions(["acme/web"], "other/lib")).toEqual(["acme/web", "other/lib"]);
+    expect(insightsRepoOptions(["acme/web", "acme/web"], "acme/web")).toEqual(["acme/web"]);
+  });
+
   test("parseInsights accepts the JSON API shape and rejects junk", () => {
     const body = {
       window_days: 30,
@@ -58,9 +74,12 @@ describe("insights search wiring", () => {
       verdict_distribution: [],
       weekly_trend: [],
       recurring_top: [],
+      repos: [],
     };
     expect(parseInsights(body)?.reviews_total).toBe(0);
+    expect(parseInsights({ ...body, repos: ["acme/web"] })?.repos).toEqual(["acme/web"]);
     expect(parseInsights({ reviews_total: 0 })).toBeNull();
+    expect(parseInsights({ ...body, repos: undefined })).toBeNull();
   });
 });
 
@@ -177,7 +196,7 @@ describe("invite grammar + page copy (plan 29 T4)", () => {
     const keys = [
       "members.adminOnly",
       "members.roleAdmin",
-      "insights.filterWindow",
+      "insights.recordsHeading",
       "insights.uncategorized",
       "apps.status.paused",
       "login.signIn",

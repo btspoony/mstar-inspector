@@ -16,7 +16,31 @@ export type InsightsSummary = {
   verdict_distribution: Array<{ verdict: string; count: number }>;
   weekly_trend: Array<{ week_start: string; reviews: number; findings: number }>;
   recurring_top: Array<{ fingerprint: string; title_sample: string; count: number; repos: string[] }>;
+  /** Window-scoped distinct owner/repo values (plan 36 T2). Independent of `repo`. */
+  repos: string[];
 };
+
+/** Radix Select forbids empty-string item values — "all" maps to no repo filter. */
+export const INSIGHTS_REPO_ALL = "all";
+
+export function insightsRepoSelectValue(repo: string): string {
+  return repo === "" ? INSIGHTS_REPO_ALL : repo;
+}
+
+export function insightsRepoFromSelect(value: string): string {
+  return value === INSIGHTS_REPO_ALL ? "" : value;
+}
+
+/**
+ * Repo Select items (excluding 全部). Window-set repos plus the current
+ * filter when it is a legal deep-link value outside the set — applied, not
+ * swallowed. Sorted, de-duped.
+ */
+export function insightsRepoOptions(repos: readonly string[], current: string): string[] {
+  const set = new Set(repos.filter((repo) => repo.length > 0));
+  if (current !== "") set.add(current);
+  return [...set].sort();
+}
 
 export type MemberRow = {
   id: string;
@@ -149,6 +173,7 @@ export function parseInsights(data: unknown): InsightsSummary | null {
   if (!Array.isArray(data.verdict_distribution) || !Array.isArray(data.weekly_trend) || !Array.isArray(data.recurring_top)) {
     return null;
   }
+  if (!isStringArray(data.repos)) return null;
   return data as InsightsSummary;
 }
 

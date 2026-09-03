@@ -1978,6 +1978,7 @@ dashboardApp.get("/api/insights/summary", async (c) => {
     verdict_distribution: insights.verdictDistribution,
     weekly_trend: insights.weeklyTrend,
     recurring_top: insights.recurringTop,
+    repos: insights.repos,
   });
 });
 

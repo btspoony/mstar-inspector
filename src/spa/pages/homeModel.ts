@@ -19,9 +19,9 @@ export type HomeDimension = "severity" | "category";
 /**
  * Home window from the URL: the `window` param when it is one of
  * HOME_WINDOWS, else the default 30. Arbitrary integer windows stay legal
- * on the API (and on `/dashboard/insights` deep links), but the home
- * surface only offers the segmented set, so off-set values resolve to the
- * default instead of leaving the control without an active segment.
+ * on the API, but both the home surface and the records page only offer the
+ * segmented set, so off-set values resolve to the default instead of leaving
+ * the control without an active segment.
  */
 export function homeWindow(search: string): HomeWindow {
   const raw = parseInsightsSearch(search).window;

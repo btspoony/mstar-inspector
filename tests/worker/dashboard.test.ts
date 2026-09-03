@@ -3452,6 +3452,7 @@ describe("/dashboard/api/insights/summary (plan 22 Task 2)", () => {
       verdict_distribution: Array<{ verdict: string; count: number }>;
       weekly_trend: Array<{ week_start: string; reviews: number; findings: number }>;
       recurring_top: Array<{ fingerprint: string; title_sample: string; count: number; repos: string[] }>;
+      repos: string[];
     };
     // Exact key set: store return + the two echo params (snake_case API).
     expect(Object.keys(body).sort()).toEqual(
@@ -3463,6 +3464,7 @@ describe("/dashboard/api/insights/summary (plan 22 Task 2)", () => {
         "verdict_distribution",
         "weekly_trend",
         "recurring_top",
+        "repos",
       ].sort(),
     );
     expect(body.repo).toBeUndefined();
@@ -3497,6 +3499,7 @@ describe("/dashboard/api/insights/summary (plan 22 Task 2)", () => {
     expect(body.recurring_top).toEqual([
       { fingerprint: "fp-x", title_sample: "Null deref risk", count: 2, repos: ["acme/widgets"] },
     ]);
+    expect(body.repos).toEqual(["acme/widgets", "globex/gadgets"]);
   });
 
   test("window parse: non-integer, negative, and empty → 400; 0 is a legal day count", async () => {
@@ -3537,11 +3540,13 @@ describe("/dashboard/api/insights/summary (plan 22 Task 2)", () => {
       reviews_total: number;
       findings_by_severity: Array<{ severity: string; count: number }>;
       recurring_top: unknown[];
+      repos: string[];
     };
     expect(body.repo).toBe("globex/gadgets");
     expect(body.reviews_total).toBe(1);
     expect(body.findings_by_severity).toEqual([{ severity: "should-fix", count: 1 }]);
     expect(body.recurring_top).toEqual([]); // fp-z appears once → no recurrence
+    expect(body.repos).toEqual(["acme/widgets", "globex/gadgets"]);
   });
 
   test("repo parse: malformed owner/repo → 400 (no slash, extra slash, whitespace, empty parts)", async () => {

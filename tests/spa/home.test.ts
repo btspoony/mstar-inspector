@@ -29,6 +29,7 @@ const SUMMARY: InsightsSummary = {
     { week_start: "2026-08-24", reviews: 3, findings: 4 },
   ],
   recurring_top: [],
+  repos: [],
 };
 
 const home = readFileSync(join(import.meta.dir, "../../src/spa/pages/Home.tsx"), "utf8");
