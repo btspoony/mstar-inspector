@@ -80,11 +80,12 @@ import { composeModelOptions, findFailingSelector } from "./model-membership";
 import { addKeyProviderIds, verifyProviderKey, type VerifyFailureReason } from "./provider-verify";
 import {
   bootstrapDashboardAccess,
-  countAdmins,
   createUser,
   deleteUserUnlessLastAdmin,
+  DuplicateLoginError,
   getUserByLogin,
   listUsers,
+  updateUserRoleUnlessLastAdmin,
   type DashboardD1,
   type DashboardUserRow,
 } from "./users";
@@ -122,7 +123,7 @@ function pinnedPostMutationResponse(
   c: Context<{ Bindings: Env }>,
   redirectTo: string,
   message: string,
-  status: 200 | 400 | 404 | 500 = 200,
+  status: 200 | 400 | 404 | 409 | 500 = 200,
 ): Response {
   if (wantsHtmlFormNavigation(c)) {
     return c.redirect(redirectTo, 302);
@@ -798,6 +799,13 @@ dashboardApp.post("/members/invite", async (c) => {
   if (!gate.ok) return gate.response;
   const form = await c.req.parseBody();
   const login = typeof form.login === "string" ? form.login.trim() : "";
+  // Plan 34: the invite accepts an explicit role (default member — the
+  // pre-plan-34 behavior). Value domain = the 0003 CHECK ('admin'|'member');
+  // anything else is rejected here before any read or write.
+  const role = typeof form.role === "string" ? form.role : "member";
+  if (role !== "admin" && role !== "member") {
+    return pinnedPostMutationResponse(c, DASHBOARD_SHELL_REDIRECT, "Role must be admin or member.", 400);
+  }
   if (login.length === 0) {
     return pinnedPostMutationResponse(c, DASHBOARD_SHELL_REDIRECT, "Enter a GitHub login to invite.", 400);
   }
@@ -807,12 +815,24 @@ dashboardApp.post("/members/invite", async (c) => {
     return pinnedPostMutationResponse(c, DASHBOARD_SHELL_REDIRECT, `${login} is not a valid GitHub login — use 1–39 letters, digits, or hyphens.`, 400);
   }
   // T1 review pin (Minor 2): resolve the login case-insensitively BEFORE any
-  // createUser call — the DDL UNIQUE is BINARY-collated, so ON CONFLICT alone
-  // misses case variants ("OctoCat" vs "octocat") and would mint a second row.
+  // createUser call — the sequential duplicate path ("OctoCat" exists →
+  // invite "octocat") is an idempotent no-op here. The CONCURRENT window is
+  // closed by the migration 0016 NOCASE unique index: a case-variant insert
+  // that slips past this pre-read hits the index and createUser throws
+  // DuplicateLoginError → 409 duplicate-invite semantics (W-1).
   if (await getUserByLogin(gate.db, login)) {
     return pinnedPostMutationResponse(c, DASHBOARD_SHELL_REDIRECT, "ok"); // already a member — idempotent no-op
   }
-  await createUser(gate.db, { login, role: "member", invitedBy: gate.admin.github_login });
+  try {
+    await createUser(gate.db, { login, role, invitedBy: gate.admin.github_login });
+  } catch (err) {
+    if (err instanceof DuplicateLoginError) {
+      // Lost the concurrent case-variant race: the row exists now (the
+      // winner's invite created it) — 409, zero partial state.
+      return pinnedPostMutationResponse(c, DASHBOARD_SHELL_REDIRECT, "Already a member.", 409);
+    }
+    throw err;
+  }
   return pinnedPostMutationResponse(c, DASHBOARD_SHELL_REDIRECT, "ok");
 });
 
@@ -830,19 +850,66 @@ dashboardApp.post("/members/remove", async (c) => {
   if (target.github_login.toLowerCase() === gate.admin.github_login.toLowerCase()) {
     return pinnedPostMutationResponse(c, DASHBOARD_SHELL_REDIRECT, "You cannot remove yourself.", 400);
   }
-  // Refuse removing an admin while they are the last one (removal = row
-  // delete, so this is the deployment's only admin-lockout guard). This
-  // pre-check only shapes the message; the ENFORCEMENT is the single
-  // conditional DELETE below, which closes the read-check-delete TOCTOU
-  // (qc1): two concurrent removes of the last two admins cannot both land.
-  if (target.role === "admin" && (await countAdmins(gate.db)) === 1) {
-    return pinnedPostMutationResponse(c, DASHBOARD_SHELL_REDIRECT, "The last admin cannot be removed.", 400);
-  }
+  // The last-admin ENFORCEMENT is the single conditional DELETE below,
+  // which closes the read-check-delete TOCTOU (qc1): two concurrent
+  // removes of the last two admins cannot both land. (A route-level
+  // "last admin" pre-check would be unreachable — when countAdmins === 1
+  // the actor IS the sole admin and the self-removal refusal above fires
+  // first; qc3 S-003.)
   if (!(await deleteUserUnlessLastAdmin(gate.db, target.id))) {
     // Lost a race (the row vanished or just became the last admin between
     // the reads above and this delete): 400 with a retry message —
     // zero partial state either way.
     return pinnedPostMutationResponse(c, DASHBOARD_SHELL_REDIRECT, `Could not remove ${target.github_login} — the member list just changed, try again.`, 400);
+  }
+  return pinnedPostMutationResponse(c, DASHBOARD_SHELL_REDIRECT, "ok");
+});
+
+// Plan 34 T1: role change — same pinned-POST family as invite/remove
+// (spec §3: members family is pinned paths, NOT the settings op
+// discriminator). Same requireAdmin gate + form parse +
+// pinnedPostMutationResponse shape. The last-admin and self-demotion
+// refusals mirror the remove route; the ENFORCEMENT of the last-admin
+// invariant is the single conditional UPDATE in the store (closes the
+// read-check-update TOCTOU — two concurrent demotions of the last two
+// admins cannot both land).
+dashboardApp.post("/members/role", async (c) => {
+  const gate = await requireAdmin(c);
+  if (!gate.ok) return gate.response;
+  const form = await c.req.parseBody();
+  const userId = typeof form.userId === "string" ? form.userId : "";
+  const role = typeof form.role === "string" ? form.role : "";
+  // Value domain = the 0003 CHECK ('admin'|'member'); reject anything else
+  // before any read or write.
+  if (role !== "admin" && role !== "member") {
+    return pinnedPostMutationResponse(c, DASHBOARD_SHELL_REDIRECT, "Role must be admin or member.", 400);
+  }
+  const members = await listUsers(gate.db);
+  const target = members.find((m) => m.id === userId);
+  if (!target) {
+    return pinnedPostMutationResponse(c, DASHBOARD_SHELL_REDIRECT, "Unknown member — nothing was changed, try again.", 400);
+  }
+  // Refuse self role change (mirror of the self-removal ban): an admin
+  // must be demoted by another admin, and cannot promote themselves.
+  if (target.github_login.toLowerCase() === gate.admin.github_login.toLowerCase()) {
+    return pinnedPostMutationResponse(c, DASHBOARD_SHELL_REDIRECT, "You cannot change your own role.", 400);
+  }
+  // Same role → idempotent no-op (the store's conditional UPDATE would
+  // also report changes === 0, but the explicit no-op keeps the message
+  // honest for the common "already that role" case).
+  if (target.role === role) {
+    return pinnedPostMutationResponse(c, DASHBOARD_SHELL_REDIRECT, "ok");
+  }
+  // The last-admin ENFORCEMENT is the single conditional UPDATE below,
+  // which closes the read-check-update TOCTOU (deleteUserUnlessLastAdmin
+  // precedent, qc1). (A route-level "last admin" pre-check would be
+  // unreachable — when countAdmins === 1 the actor IS the sole admin and
+  // the self-change refusal above fires first; qc3 S-003.)
+  if (!(await updateUserRoleUnlessLastAdmin(gate.db, target.id, role))) {
+    // Lost a race (the row vanished or just became the last admin between
+    // the reads above and this update): 400 with a retry message —
+    // zero partial state either way.
+    return pinnedPostMutationResponse(c, DASHBOARD_SHELL_REDIRECT, `Could not change ${target.github_login}'s role — the member list just changed, try again.`, 400);
   }
   return pinnedPostMutationResponse(c, DASHBOARD_SHELL_REDIRECT, "ok");
 });

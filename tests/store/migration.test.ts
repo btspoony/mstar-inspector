@@ -637,3 +637,53 @@ describe("migrations/0014_idx_reviews_reviewed_at.sql", () => {
     expect(plan.some((p) => p.detail.includes("idx_reviews_reviewed_at"))).toBe(true);
   });
 });
+
+describe("migrations/0016_users_login_nocase_unique.sql (plan 34 QC W-1)", () => {
+  /** Apply one migration file verbatim (filename order = wrangler order). */
+  function applyMigrationFile(db: TestD1, name: string): void {
+    db.raw.exec(readFileSync(join(MIGRATIONS_DIR, name), "utf8"));
+  }
+
+  test("applies cleanly over a seeded production-shaped DB (0003 users with live rows)", () => {
+    const db = createTestD1();
+    applyMigrationFile(db, "0003_dashboard_users.sql");
+    db.raw
+      .prepare("INSERT INTO users (id, github_login, role, created_at) VALUES (?, ?, ?, ?)")
+      .run("u-1", "OctoCat", "admin", "2026-01-01T00:00:00.000Z");
+    // Metadata-only CREATE UNIQUE INDEX builds over the live rows without
+    // rewriting — the append-only 0003+ convention.
+    expect(() => applyMigrationFile(db, "0016_users_login_nocase_unique.sql")).not.toThrow();
+    const count = db.raw.query("SELECT COUNT(*) AS n FROM users").get() as { n: number };
+    expect(count.n).toBe(1);
+  });
+
+  test("NOCASE unique index rejects a case-variant second row (W-1)", () => {
+    const db = createTestD1();
+    applyMigrationFile(db, "0003_dashboard_users.sql");
+    applyMigrationFile(db, "0016_users_login_nocase_unique.sql");
+    db.raw
+      .prepare("INSERT INTO users (id, github_login, role, created_at) VALUES (?, ?, ?, ?)")
+      .run("u-1", "OctoCat", "admin", "2026-01-01T00:00:00.000Z");
+    // The 0003 BINARY UNIQUE does not fire across case variants — the 0016
+    // NOCASE index is what makes the second row impossible.
+    expect(() =>
+      db.raw
+        .prepare("INSERT INTO users (id, github_login, role, created_at) VALUES (?, ?, ?, ?)")
+        .run("u-2", "octocat", "member", "2026-01-01T00:00:00.000Z"),
+    ).toThrow(/UNIQUE constraint failed/);
+  });
+
+  test("exact-case duplicates are still rejected by the 0003 BINARY unique (index coexistence)", () => {
+    const db = createTestD1();
+    applyMigrationFile(db, "0003_dashboard_users.sql");
+    applyMigrationFile(db, "0016_users_login_nocase_unique.sql");
+    db.raw
+      .prepare("INSERT INTO users (id, github_login, role, created_at) VALUES (?, ?, ?, ?)")
+      .run("u-1", "octocat", "admin", "2026-01-01T00:00:00.000Z");
+    expect(() =>
+      db.raw
+        .prepare("INSERT INTO users (id, github_login, role, created_at) VALUES (?, ?, ?, ?)")
+        .run("u-2", "octocat", "member", "2026-01-01T00:00:00.000Z"),
+    ).toThrow(/UNIQUE constraint failed/);
+  });
+});

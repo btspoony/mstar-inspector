@@ -51,6 +51,7 @@ export const zhCN: Dictionary = {
     },
     loading: "加载中…",
     loadFailed: "无法加载此页面。",
+    cancel: "取消",
   },
   login: {
     heading: "登录 Morning Star Inspector",
@@ -62,6 +63,7 @@ export const zhCN: Dictionary = {
     success: {
       invited: "已邀请 {login} — 现在可以使用 GitHub 登录了。",
       removedMember: "已移除 {login}。",
+      roleChanged: "{login} 现在是{role}。",
       appStatusChanged: "{verb} {slug}。",
       appPaused: "已暂停 {slug}。",
       appResumed: "已恢复 {slug}。",
@@ -88,6 +90,8 @@ export const zhCN: Dictionary = {
       unknownMember: "未知成员 — 未移除任何内容，请重试。",
       cannotRemoveSelf: "你不能移除自己。",
       lastAdmin: "最后一个管理员不能被移除。",
+      inviteFailed: "无法邀请 {login} — 请重试。",
+      roleChangeFailed: "无法更改 {login} 的角色 — 成员列表刚刚发生变化，请重试。",
       removeFailed: "无法移除 {login} — 成员列表刚刚发生变化，请重试。",
       encryptionKeyMissing:
         "此部署没有有效的 DASHBOARD_ENCRYPTION_KEY 来解密已存储的密钥 — 请让运维配置后再重新提交。",
@@ -153,9 +157,23 @@ export const zhCN: Dictionary = {
   members: {
     title: "成员",
     heading: "成员",
+    inviteOnlyNotice: "仅列表中的 GitHub 用户可登录本平台。",
     inviteLabel: "按 GitHub 登录名邀请",
     invitePlaceholder: "例如 octocat",
     inviteButton: "邀请成员",
+    roleLabel: "角色",
+    tableLogin: "GitHub 登录名",
+    tableJoined: "加入时间",
+    tableActions: "操作",
+    actionsMenuLabel: "打开 {login} 的操作菜单",
+    makeAdmin: "改为管理员",
+    makeMember: "改为成员",
+    confirmRoleTitle: "更改 {login} 的角色？",
+    confirmRoleBody: "{login} 将成为{role}。更改立即生效。",
+    confirmRoleButton: "更改角色",
+    confirmRemoveTitle: "移除 {login}？",
+    confirmRemoveBody:
+      "{login} 将无法再登录 — 其会话立即失效。他们创建的 App 保留，管理员仍可管理。",
     remove: "移除",
     you: "你",
     adminOnly: "此页面仅限控制台管理员访问。",

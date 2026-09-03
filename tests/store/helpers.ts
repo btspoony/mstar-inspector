@@ -53,6 +53,7 @@ const ALL_MIGRATIONS = [
   "0013_findings_review_id_index.sql",
   "0014_idx_reviews_reviewed_at.sql",
   "0015_provider_verification.sql",
+  "0016_users_login_nocase_unique.sql",
 ];
 
 /** Execute the migration DDL on a fresh in-memory database. */
