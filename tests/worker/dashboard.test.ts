@@ -353,12 +353,10 @@ describe("fetchGitHubUser (oauth.ts, stubbed fetch)", () => {
 });
 
 describe("/dashboard routes", () => {
-  test("GET /dashboard without a session is served the SPA shell (boot login null)", async () => {
+  test("GET /dashboard without a session → 302 to login (plan 33 T3)", async () => {
     const res = await worker.fetch(dashboardRequest("/dashboard"), withSpaAssets(makeEnv()));
-    expect(res.status).toBe(200);
-    const body = await res.text();
-    expect(body).toContain("window.__BOOT__=");
-    expect(body).toContain('"login":null');
+    expect(res.status).toBe(302);
+    expect(res.headers.get("Location")).toBe("/dashboard/login");
   });
 
   test("GET /dashboard with a valid session cookie → 200 SPA shell (boot-injected)", async () => {
@@ -406,16 +404,14 @@ describe("/dashboard routes", () => {
     expect(memberBody).not.toContain('"role":"admin"');
   });
 
-  test("GET /dashboard with a tampered session cookie → 200 SPA shell, boot login null", async () => {
+  test("GET /dashboard with a tampered session cookie → 302 to login (treated as logged out)", async () => {
     const session = await createSessionValue("octocat", null, SESSION_SECRET);
     const res = await worker.fetch(
       dashboardRequest("/dashboard", `${SESSION_COOKIE}=${tamperSignature(session)}`),
       withSpaAssets(makeEnv()),
     );
-    expect(res.status).toBe(200);
-    const body = await res.text();
-    expect(body).toContain("window.__BOOT__=");
-    expect(body).toContain('"login":null');
+    expect(res.status).toBe(302);
+    expect(res.headers.get("Location")).toBe("/dashboard/login");
   });
 
   test("GET /dashboard/login → 302 to GitHub authorize with signed state cookie", async () => {
@@ -559,12 +555,12 @@ describe("/dashboard routes", () => {
       GITHUB_OAUTH_CLIENT_SECRET: undefined,
       DASHBOARD_SESSION_SECRET: undefined,
     });
-    // The legacy SSR home is retired (plan 30 T4): /dashboard is the SPA
-    // shell (served without secrets, boot login null); the login/API routes
-    // behind it still fail closed.
+    // Plan 33 T3: no session secret = no valid session → the shell path 302s
+    // to login (no null-boot flash); the login/API routes behind it still
+    // fail closed.
     const shell = await worker.fetch(dashboardRequest("/dashboard"), withSpaAssets(env));
-    expect(shell.status).toBe(200);
-    expect(await shell.text()).toContain('"login":null');
+    expect(shell.status).toBe(302);
+    expect(shell.headers.get("Location")).toBe("/dashboard/login");
     expect((await worker.fetch(dashboardRequest("/dashboard/login"), env)).status).toBe(500);
   });
 
@@ -2650,9 +2646,9 @@ describe("per-request allowlist guard (plan 12 T2, spec § AuthZ + lock L5)", ()
 
   const mallorySession = () => createSessionValue("mallory", null, SESSION_SECRET);
 
-  test("removed member with a valid cookie → 403 on every route family (shell, manifest start/confirm/commit, catch-all)", async () => {
-    // Zero network behind the guard: the 403 must short-circuit BEFORE the
-    // manifest conversion / Cloudflare secrets paths.
+  test("removed member with a valid cookie → 403 + expired session on API/fetch, 302 + expired session on HTML navigation (shell, manifest start/confirm/commit, catch-all)", async () => {
+    // Zero network behind the guard: the denial must short-circuit BEFORE
+    // the manifest conversion / Cloudflare secrets paths.
     let networkCalls = 0;
     globalThis.fetch = (async () => {
       networkCalls++;
@@ -2664,7 +2660,9 @@ describe("per-request allowlist guard (plan 12 T2, spec § AuthZ + lock L5)", ()
     // fall-through. Bind ASSETS so this test models production.
     const env = withSpaAssets(await removedMemberEnv());
     const cookie = `${SESSION_COOKIE}=${await mallorySession()}`;
-    // GET shell (B0) — any Accept variant takes the shell path on /dashboard.
+    // GET shell (B0) — non-HTML Accept variants keep the removedPage 403
+    // (plan 33 T3: a fetch must not silently follow a 302 into the HTML
+    // login page), each with the session cookie expired.
     for (const accept of [undefined, "application/json"]) {
       const headers: Record<string, string> = { Cookie: cookie };
       if (accept) headers.Accept = accept;
@@ -2675,8 +2673,22 @@ describe("per-request allowlist guard (plan 12 T2, spec § AuthZ + lock L5)", ()
       expect(body).toContain("Your dashboard access was removed. Ask an admin to re-invite mallory.");
       expect(body).not.toContain("Signed in as");
       expect(body).not.toContain('action="/dashboard/manifest/start"');
+      const setCookie = shell.headers.getSetCookie();
+      expect(setCookie, accept ?? "no Accept").toHaveLength(1);
+      expect(setCookie[0]).toContain(`${SESSION_COOKIE}=;`);
+      expect(setCookie[0]).toContain("Max-Age=0");
     }
-    // POST manifest start (B1)
+    // HTML navigation on the shell path → expire + 302 login (plan 33 T3).
+    const htmlShell = await worker.fetch(
+      new Request("https://worker.local/dashboard", {
+        headers: { Cookie: cookie, Accept: "text/html" },
+      }),
+      env,
+    );
+    expect(htmlShell.status).toBe(302);
+    expect(htmlShell.headers.get("Location")).toBe("/dashboard/login");
+    expect(htmlShell.headers.getSetCookie()).toHaveLength(1);
+    // POST manifest start (B1) — fetch → 403 + expired session
     const start = await worker.fetch(
       new Request("https://worker.local/dashboard/manifest/start", {
         method: "POST",
@@ -2685,9 +2697,11 @@ describe("per-request allowlist guard (plan 12 T2, spec § AuthZ + lock L5)", ()
       env,
     );
     expect(start.status).toBe(403);
-    // GET manifest confirm (B1 resume gate)
+    expect(start.headers.getSetCookie()).toHaveLength(1);
+    // GET manifest confirm (B1 resume gate) — non-HTML → 403 + expired session
     const confirm = await worker.fetch(dashboardRequest("/dashboard/manifest/confirm", cookie), env);
     expect(confirm.status).toBe(403);
+    expect(confirm.headers.getSetCookie()).toHaveLength(1);
     // POST manifest commit (B1 confirm gate) — guard fires before secret work
     // (no body: the commit route retired the confirm=overwrite requirement in
     // plan 13 T3, and the guard 403s before any handler logic anyway).
@@ -2699,6 +2713,7 @@ describe("per-request allowlist guard (plan 12 T2, spec § AuthZ + lock L5)", ()
       env,
     );
     expect(commit.status).toBe(403);
+    expect(commit.headers.getSetCookie()).toHaveLength(1);
     // POST catch-all placeholder — the single use("*") mount auto-covers
     // routes that do not exist yet (plan 13/14 will add /dashboard/* routes).
     const future = await worker.fetch(
@@ -2709,7 +2724,27 @@ describe("per-request allowlist guard (plan 12 T2, spec § AuthZ + lock L5)", ()
       env,
     );
     expect(future.status).toBe(403);
+    expect(future.headers.getSetCookie()).toHaveLength(1);
     expect(networkCalls).toBe(0);
+  });
+
+  test("removed member HTML navigation on a non-enumerated route → expire + 302 login (guard, plan 33 T3)", async () => {
+    // GET /dashboard/manifest/confirm is not an enumerated SPA page, so it
+    // falls through to the legacy guard — HTML navigation there must expire
+    // the session and 302 to login, not render the removedPage.
+    const env = withSpaAssets(await removedMemberEnv());
+    const res = await worker.fetch(
+      new Request("https://worker.local/dashboard/manifest/confirm", {
+        headers: { Cookie: `${SESSION_COOKIE}=${await mallorySession()}`, Accept: "text/html" },
+      }),
+      env,
+    );
+    expect(res.status).toBe(302);
+    expect(res.headers.get("Location")).toBe("/dashboard/login");
+    const setCookie = res.headers.getSetCookie();
+    expect(setCookie).toHaveLength(1);
+    expect(setCookie[0]).toContain(`${SESSION_COOKIE}=;`);
+    expect(setCookie[0]).toContain("Max-Age=0");
   });
 
   test("removed member CAN log out: logout is session-gated, not membership-gated (qc2 F-002)", async () => {
@@ -2852,13 +2887,14 @@ describe("members page (plan 12 T3, admin-only)", () => {
     );
   }
 
-  test("the pinned POSTs sit behind the guard: no session → 302 to login; the HTML GET is SPA-owned (plan 29 T6)", async () => {
+  test("the pinned POSTs sit behind the guard: no session → 302 to login; the HTML GET 302s too (plan 33 T3)", async () => {
     const db = createDashboardTestD1();
     await createUser(db, { login: "octocat", role: "admin" });
-    // HTML navigation GET → SPA index (the SPA guards members client-side).
+    // HTML navigation GET without a session → 302 login (plan 33 T3 — the
+    // old null-boot shell was the render-then-kick flash source).
     const get = await htmlGet("/dashboard/members", "", withSpaAssets(makeDbEnv(db)));
-    expect(get.status).toBe(200);
-    expect(await get.text()).toContain("window.__BOOT__=");
+    expect(get.status).toBe(302);
+    expect(get.headers.get("Location")).toBe("/dashboard/login");
     const post = await membersPost("invite", "", "login=hubot", makeDbEnv(db));
     expect(post.status).toBe(302);
     expect(post.headers.get("Location")).toBe("/dashboard/login");

@@ -34,6 +34,20 @@ function memberDbStub(): Env["DB"] {
   } as unknown as Env["DB"];
 }
 
+/**
+ * Users-store D1 double for the removed-member shell gate (plan 33 T3):
+ * `first()` returns no row, so any session login is treated as removed.
+ */
+function removedMemberDbStub(): Env["DB"] {
+  return {
+    prepare: () => ({
+      bind: () => ({
+        first: async () => null,
+      }),
+    }),
+  } as unknown as Env["DB"];
+}
+
 function stubAssets(
   files: Record<string, string>,
   calls: AssetCall[],
@@ -68,8 +82,12 @@ function makeEnv(overrides: Partial<Env> = {}): { env: Env; calls: AssetCall[] }
 
 describe("SPA dispatch (plan 29 T3)", () => {
   test("SPA page GET with Accept: text/html fetches /index.html", async () => {
-    const { env, calls } = makeEnv();
-    const res = await worker.fetch(htmlGetRequest("/dashboard/insights"), env);
+    const { env, calls } = makeEnv({ DB: memberDbStub() });
+    const session = await createSessionValue("octocat", null, SESSION_SECRET);
+    const res = await worker.fetch(
+      htmlGetRequest("/dashboard/insights", { Cookie: `${SESSION_COOKIE}=${session}` }),
+      env,
+    );
     expect(res.status).toBe(200);
     expect(calls).toEqual([{ method: "GET", pathname: "/index.html" }]);
     const body = await res.text();
@@ -77,7 +95,7 @@ describe("SPA dispatch (plan 29 T3)", () => {
     expect(body).not.toContain(SPA_BOOT_MARKER);
   });
 
-  test("each enumerated page GET hits ASSETS", async () => {
+  test("each enumerated page GET hits ASSETS (with a session)", async () => {
     const pages = [
       "/dashboard",
       "/dashboard/insights",
@@ -86,8 +104,12 @@ describe("SPA dispatch (plan 29 T3)", () => {
       "/dashboard/apps/acme/settings",
     ];
     for (const path of pages) {
-      const { env, calls } = makeEnv();
-      const res = await worker.fetch(htmlGetRequest(path), env);
+      const { env, calls } = makeEnv({ DB: memberDbStub() });
+      const session = await createSessionValue("octocat", null, SESSION_SECRET);
+      const res = await worker.fetch(
+        htmlGetRequest(path, { Cookie: `${SESSION_COOKIE}=${session}` }),
+        env,
+      );
       expect(res.status, path).toBe(200);
       expect(calls, path).toEqual([{ method: "GET", pathname: "/index.html" }]);
     }
@@ -112,8 +134,12 @@ describe("SPA dispatch (plan 29 T3)", () => {
   });
 
   test("GET /dashboard HTML navigation is served by SPA dispatch", async () => {
-    const { env, calls } = makeEnv();
-    const res = await worker.fetch(htmlGetRequest("/dashboard"), env);
+    const { env, calls } = makeEnv({ DB: memberDbStub() });
+    const session = await createSessionValue("octocat", null, SESSION_SECRET);
+    const res = await worker.fetch(
+      htmlGetRequest("/dashboard", { Cookie: `${SESSION_COOKIE}=${session}` }),
+      env,
+    );
     expect(res.status).toBe(200);
     expect(calls).toEqual([{ method: "GET", pathname: "/index.html" }]);
     expect(await res.text()).toContain("window.__BOOT__=");
@@ -124,8 +150,9 @@ describe("SPA dispatch (plan 29 T3)", () => {
 
   test("GET /dashboard is the SPA workbench for every Accept variant (plan 30 T4)", async () => {
     for (const accept of [undefined, "*/*", "application/json", "text/html"]) {
-      const { env, calls } = makeEnv();
-      const headers: Record<string, string> = {};
+      const { env, calls } = makeEnv({ DB: memberDbStub() });
+      const session = await createSessionValue("octocat", null, SESSION_SECRET);
+      const headers: Record<string, string> = { Cookie: `${SESSION_COOKIE}=${session}` };
       if (accept) headers.Accept = accept;
       const res = await worker.fetch(new Request("https://worker.local/dashboard", { headers }), env);
       expect(res.status, accept ?? "no Accept").toBe(200);
@@ -179,9 +206,11 @@ describe("SPA dispatch (plan 29 T3)", () => {
   });
 
   test("boot script carries locale from the mstar_locale cookie", async () => {
+    // The login page is exempt from the no-session redirect (plan 33 T3),
+    // so it is the session-less shell surface that still carries the boot.
     const { env } = makeEnv();
     const res = await worker.fetch(
-      htmlGetRequest("/dashboard", { Cookie: `${LOCALE_COOKIE}=zh_CN` }),
+      htmlGetRequest("/dashboard/login", { Cookie: `${LOCALE_COOKIE}=zh_CN` }),
       env,
     );
     const body = await res.text();
@@ -228,5 +257,98 @@ describe("SPA dispatch (plan 29 T3)", () => {
     );
     expect(res.status).toBe(500);
     expect(await res.text()).toContain("dashboard storage is not configured");
+  });
+
+  // --- plan 33 T3: auth redirect 全覆盖 (spec §1.3) ---
+
+  test("unauthenticated deep link HTML GET → 302 login, no ASSETS call", async () => {
+    const deepLinks = [
+      "/dashboard/apps",
+      "/dashboard/insights",
+      "/dashboard/members",
+      "/dashboard/apps/acme/settings",
+    ];
+    for (const path of deepLinks) {
+      const { env, calls } = makeEnv();
+      const res = await worker.fetch(htmlGetRequest(path), env);
+      expect(res.status, path).toBe(302);
+      expect(res.headers.get("Location"), path).toBe("/dashboard/login");
+      expect(calls, path).toEqual([]);
+    }
+  });
+
+  test("unauthenticated /dashboard 302s to login for every Accept variant", async () => {
+    for (const accept of [undefined, "*/*", "application/json", "text/html"]) {
+      const { env, calls } = makeEnv();
+      const headers: Record<string, string> = {};
+      if (accept) headers.Accept = accept;
+      const res = await worker.fetch(new Request("https://worker.local/dashboard", { headers }), env);
+      expect(res.status, accept ?? "no Accept").toBe(302);
+      expect(res.headers.get("Location"), accept ?? "no Accept").toBe("/dashboard/login");
+      expect(calls, accept ?? "no Accept").toEqual([]);
+    }
+  });
+
+  test("login page HTML GET without a session → 200 shell, no self-loop", async () => {
+    const { env, calls } = makeEnv();
+    const res = await worker.fetch(htmlGetRequest("/dashboard/login"), env);
+    expect(res.status).toBe(200);
+    expect(calls).toEqual([{ method: "GET", pathname: "/index.html" }]);
+    const body = await res.text();
+    expect(body).toContain("window.__BOOT__=");
+    expect(body).toContain('"login":null');
+  });
+
+  test("removed member HTML navigation → session cookie expired + 302 login", async () => {
+    const { env, calls } = makeEnv({ DB: removedMemberDbStub() });
+    const session = await createSessionValue("mallory", null, SESSION_SECRET);
+    const res = await worker.fetch(
+      htmlGetRequest("/dashboard", { Cookie: `${SESSION_COOKIE}=${session}` }),
+      env,
+    );
+    expect(res.status).toBe(302);
+    expect(res.headers.get("Location")).toBe("/dashboard/login");
+    const setCookie = res.headers.getSetCookie();
+    expect(setCookie).toHaveLength(1);
+    expect(setCookie[0]).toContain(`${SESSION_COOKIE}=;`);
+    expect(setCookie[0]).toContain("Max-Age=0");
+    expect(calls).toEqual([]);
+  });
+
+  test("removed member API/fetch → session cookie expired + 403 removedPage", async () => {
+    const { env, calls } = makeEnv({ DB: removedMemberDbStub() });
+    const session = await createSessionValue("mallory", null, SESSION_SECRET);
+    const res = await worker.fetch(
+      new Request("https://worker.local/dashboard", {
+        headers: { Cookie: `${SESSION_COOKIE}=${session}`, Accept: "application/json" },
+      }),
+      env,
+    );
+    expect(res.status).toBe(403);
+    const body = await res.text();
+    expect(body).toContain("Your dashboard access was removed");
+    const setCookie = res.headers.getSetCookie();
+    expect(setCookie).toHaveLength(1);
+    expect(setCookie[0]).toContain(`${SESSION_COOKIE}=;`);
+    expect(setCookie[0]).toContain("Max-Age=0");
+    expect(calls).toEqual([]);
+  });
+
+  test("removed member on the login page → null-boot shell + expired session, no self-loop", async () => {
+    const { env, calls } = makeEnv({ DB: removedMemberDbStub() });
+    const session = await createSessionValue("mallory", null, SESSION_SECRET);
+    const res = await worker.fetch(
+      htmlGetRequest("/dashboard/login", { Cookie: `${SESSION_COOKIE}=${session}` }),
+      env,
+    );
+    expect(res.status).toBe(200);
+    const body = await res.text();
+    expect(body).toContain("window.__BOOT__=");
+    expect(body).toContain('"login":null');
+    const setCookie = res.headers.getSetCookie();
+    expect(setCookie).toHaveLength(1);
+    expect(setCookie[0]).toContain(`${SESSION_COOKIE}=;`);
+    expect(setCookie[0]).toContain("Max-Age=0");
+    expect(calls).toEqual([{ method: "GET", pathname: "/index.html" }]);
   });
 });

@@ -9,22 +9,45 @@
 import { describe, expect, test } from "bun:test";
 import worker from "../../src/worker/index";
 import type { Env } from "../../src/worker/env";
+import { createSessionValue, SESSION_COOKIE } from "../../src/dashboard/session";
 import { SPA_BOOT_MARKER, withSpaAssets } from "../helpers/spa";
+
+const SESSION_SECRET = "test-dashboard-session-secret-32-bytes!";
+
+/** Users-store D1 double: any session login resolves to a member row. */
+function memberDbStub(): Env["DB"] {
+  return {
+    prepare: () => ({
+      bind: () => ({
+        first: async () => ({
+          id: "u-test",
+          github_login: "octocat",
+          role: "admin",
+          created_at: new Date().toISOString(),
+          invited_by: null,
+        }),
+      }),
+    }),
+  } as unknown as Env["DB"];
+}
 
 function makeEnv(overrides: Partial<Env> = {}): Env {
   return withSpaAssets({
     REVIEW_QUEUE: { send: async () => {} } as unknown as Env["REVIEW_QUEUE"],
     IDEMPOTENCY_KV: { get: async () => null, put: async () => {} } as unknown as Env["IDEMPOTENCY_KV"],
-    DASHBOARD_SESSION_SECRET: "test-dashboard-session-secret-32-bytes!",
+    DASHBOARD_SESSION_SECRET: SESSION_SECRET,
     ...overrides,
   } as Env);
 }
 
 describe("GET /dashboard/insights (plan 29 T6: SPA-owned)", () => {
   test("HTML navigation GET is served by SPA dispatch (boot-injected index)", async () => {
+    const session = await createSessionValue("octocat", null, SESSION_SECRET);
     const res = await worker.fetch(
-      new Request("https://worker.local/dashboard/insights", { headers: { Accept: "text/html" } }),
-      makeEnv(),
+      new Request("https://worker.local/dashboard/insights", {
+        headers: { Accept: "text/html", Cookie: `${SESSION_COOKIE}=${session}` },
+      }),
+      makeEnv({ DB: memberDbStub() }),
     );
     expect(res.status).toBe(200);
     const body = await res.text();

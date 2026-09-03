@@ -259,6 +259,13 @@ dashboardApp.use("*", async (c, next) => {
         login: session.login,
       }),
     );
+    // Plan 33 T3: actively invalidate the removed member's session. HTML
+    // navigation → expire + 302 login; API/fetch → expire + 403 (a fetch
+    // must not silently follow the 302 into the HTML login page).
+    c.header("Set-Cookie", expireCookie(SESSION_COOKIE));
+    if (wantsHtmlFormNavigation(c)) {
+      return c.redirect("/dashboard/login", 302);
+    }
     return c.html(removedPage(session.login, requestLocale(c)), 403);
   }
   return next();
