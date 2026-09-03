@@ -64,6 +64,7 @@ export function MembersPage({ boot }: { boot: SpaBoot }) {
 
   async function onInvite(event: FormEvent<HTMLFormElement>): Promise<void> {
     event.preventDefault();
+    if (busy) return; // in-flight guard — no double-submit (qc2/qc3 S-001)
     const key = inviteLoginNoticeKey(inviteLogin);
     if (key) {
       setNotice({ kind: "error", message: t(locale, key, { login: inviteLogin }) });
@@ -71,25 +72,34 @@ export function MembersPage({ boot }: { boot: SpaBoot }) {
     }
     const trimmed = inviteLogin.trim();
     const existed = members?.some((m) => m.github_login.toLowerCase() === trimmed.toLowerCase()) ?? false;
-    const { status } = await postForm("/dashboard/members/invite", { login: trimmed, role: inviteRole });
-    if (status >= 400) {
+    setBusy(true);
+    try {
+      const { status } = await postForm("/dashboard/members/invite", { login: trimmed, role: inviteRole });
+      if (status >= 400) {
+        setNotice({ kind: "error", message: t(locale, "notice.error.inviteFailed", { login: trimmed }) });
+        return;
+      }
+      await load();
+      setNotice({
+        kind: existed ? "warn" : "success",
+        message: t(locale, existed ? "notice.warn.alreadyMember" : "notice.success.invited", { login: trimmed }),
+      });
+      setInviteLogin("");
+    } catch {
+      // Network failure — postForm throws on fetch rejection (qc2/qc3 S-002).
       setNotice({ kind: "error", message: t(locale, "notice.error.inviteFailed", { login: trimmed }) });
-      return;
+    } finally {
+      setBusy(false);
     }
-    await load();
-    setNotice({
-      kind: existed ? "warn" : "success",
-      message: t(locale, existed ? "notice.warn.alreadyMember" : "notice.success.invited", { login: trimmed }),
-    });
-    setInviteLogin("");
   }
 
   async function onConfirmAction(): Promise<void> {
     if (!pending || busy) return;
+    const action = pending;
     setBusy(true);
     try {
-      if (pending.kind === "role") {
-        const { member, nextRole } = pending;
+      if (action.kind === "role") {
+        const { member, nextRole } = action;
         const { status } = await postForm("/dashboard/members/role", { userId: member.id, role: nextRole });
         setNotice(
           status >= 400
@@ -100,7 +110,7 @@ export function MembersPage({ boot }: { boot: SpaBoot }) {
               },
         );
       } else {
-        const { member } = pending;
+        const { member } = action;
         const { status } = await postForm("/dashboard/members/remove", { userId: member.id });
         setNotice(
           status >= 400
@@ -109,6 +119,16 @@ export function MembersPage({ boot }: { boot: SpaBoot }) {
         );
       }
       await load();
+    } catch {
+      // Network failure — postForm throws on fetch rejection (qc2/qc3 S-002).
+      setNotice({
+        kind: "error",
+        message: t(
+          locale,
+          action.kind === "role" ? "notice.error.roleChangeFailed" : "notice.error.removeFailed",
+          { login: action.member.github_login },
+        ),
+      });
     } finally {
       setBusy(false);
       setPending(null);
@@ -157,7 +177,9 @@ export function MembersPage({ boot }: { boot: SpaBoot }) {
                 </SelectContent>
               </Select>
             </div>
-            <Button type="submit">{t(locale, "members.inviteButton")}</Button>
+            <Button type="submit" disabled={busy}>
+              {t(locale, "members.inviteButton")}
+            </Button>
           </form>
           <div className="rounded-md border">
             <Table>

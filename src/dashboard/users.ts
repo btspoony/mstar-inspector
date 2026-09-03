@@ -93,10 +93,39 @@ export async function getUserByLogin(
 }
 
 /**
+ * Thrown by createUser when a concurrent case-variant row wins the insert
+ * (migration 0016 NOCASE unique index) — the invite route maps it to 409
+ * duplicate-invite semantics; bootstrap re-reads and allows.
+ */
+export class DuplicateLoginError extends Error {
+  constructor(login: string) {
+    super(`users: a row for ${JSON.stringify(login)} already exists (case-insensitive)`);
+    this.name = "DuplicateLoginError";
+  }
+}
+
+/** UNIQUE-constraint detection that tolerates bun:sqlite and D1 error shapes. */
+function isUniqueConstraintError(err: unknown): boolean {
+  if (err instanceof Error) {
+    if ("code" in err && typeof err.code === "string" && err.code.includes("UNIQUE")) return true;
+    return /UNIQUE constraint failed/i.test(err.message);
+  }
+  return false;
+}
+
+/**
  * Insert one membership row (caller-supplied UUID, like 0001 reviews.id).
  * Idempotent on an exact-case UNIQUE race: a concurrent callback that won
  * the insert has written THIS user's row — re-read and return it
  * (same first-written-row-wins convention as the D1 ArtifactStore put).
+ *
+ * A CASE-VARIANT race (migration 0016 NOCASE unique index — the 0003 BINARY
+ * UNIQUE does not fire across cases) is surfaced as DuplicateLoginError so
+ * the invite route can answer 409 instead of silently minting a dead second
+ * row (W-1): bun:sqlite absorbs the NOCASE-index conflict into `ON CONFLICT
+ * (github_login)` (changes === 0 → the case-variant re-read discriminator
+ * below throws); if D1 instead raises the constraint error, the catch maps
+ * it to the same typed error.
  */
 export async function createUser(
   db: DashboardD1,
@@ -109,20 +138,34 @@ export async function createUser(
     created_at: new Date().toISOString(),
     invited_by: user.invitedBy ?? null,
   };
-  const result = await db
-    .prepare(
-      `INSERT INTO users (id, github_login, role, created_at, invited_by)
-       VALUES (?, ?, ?, ?, ?)
-       ON CONFLICT (github_login) DO NOTHING`,
-    )
-    .bind(row.id, row.github_login, row.role, row.created_at, row.invited_by)
-    .run();
+  let result;
+  try {
+    result = await db
+      .prepare(
+        `INSERT INTO users (id, github_login, role, created_at, invited_by)
+         VALUES (?, ?, ?, ?, ?)
+         ON CONFLICT (github_login) DO NOTHING`,
+      )
+      .bind(row.id, row.github_login, row.role, row.created_at, row.invited_by)
+      .run();
+  } catch (err) {
+    if (isUniqueConstraintError(err)) throw new DuplicateLoginError(user.login);
+    throw err;
+  }
   if (result.meta.changes === 0) {
     const existing = await getUserByLogin(db, user.login);
     if (!existing) {
       throw new Error(
         `users: insert for ${JSON.stringify(user.login)} conflicted but no row was found`,
       );
+    }
+    if (existing.github_login !== user.login) {
+      // Case-variant conflict (migration 0016 NOCASE unique index): the row
+      // exists under a different casing. The 0003 BINARY UNIQUE does not
+      // fire across cases, so ON CONFLICT (github_login) absorbed the
+      // NOCASE-index conflict here — surface it as DuplicateLoginError so
+      // the invite route can answer 409 duplicate-invite semantics (W-1).
+      throw new DuplicateLoginError(user.login);
     }
     return existing;
   }
@@ -173,6 +216,16 @@ export async function deleteUserUnlessLastAdmin(db: DashboardD1, id: string): Pr
  * precedent, qc1): two concurrent demotions of the last two admins cannot
  * both land; the loser sees changes === 0. Returns true when the role
  * actually changed (setting the same role is a no-op, changes === 0).
+ *
+ * Atomicity basis (qc2/qc3 W-002): the guard subquery
+ * `(SELECT COUNT(*) FROM users WHERE role = 'admin')` is evaluated INSIDE
+ * the same statement as the write, and the statement is atomic — SQLite
+ * serializes concurrent writers on the write lock, and D1 runs each
+ * statement as its own serialized transaction (single-writer model), so
+ * the count cannot observe a half-applied concurrent demotion. The local
+ * bun:sqlite harness validates the SQL under serialization; the production
+ * guarantee is D1's write serialization — a platform behavior, not
+ * code-proven mutual exclusion (Needs L4/QA verification).
  */
 export async function updateUserRoleUnlessLastAdmin(
   db: DashboardD1,
@@ -213,6 +266,26 @@ export type BootstrapDecision =
   | { outcome: "deny" };
 
 /**
+ * createUser, but a concurrent case-variant row (migration 0016 NOCASE
+ * unique index) is re-read and returned — the OAuth callback must not 500
+ * when an admin's invite of a case-variant login lands mid-flight (the
+ * user IS a member; the invite created their row).
+ */
+async function createUserOrExisting(
+  db: DashboardD1,
+  user: { login: string; role: "admin" | "member"; invitedBy?: string | null },
+): Promise<{ row: DashboardUserRow; created: boolean }> {
+  try {
+    return { row: await createUser(db, user), created: true };
+  } catch (err) {
+    if (!(err instanceof DuplicateLoginError)) throw err;
+    const existing = await getUserByLogin(db, user.login);
+    if (!existing) throw err; // row vanished between conflict and re-read — surface the original error
+    return { row: existing, created: false };
+  }
+}
+
+/**
  * Decide membership for a GitHub-verified login at the OAuth callback.
  * Precedence (exact order, spec § AuthZ): row exists → allow; ADMIN_LOGINS
  * contains login → create admin; table empty && ADMIN_LOGINS unset →
@@ -228,10 +301,12 @@ export async function bootstrapDashboardAccess(
   if (existing) return { outcome: "allow", user: existing, created: false };
   const admins = parseAdminLogins(adminLogins);
   if (isAdminLogin(admins, login)) {
-    return { outcome: "allow", user: await createUser(db, { login, role: "admin" }), created: true };
+    const { row, created } = await createUserOrExisting(db, { login, role: "admin" });
+    return { outcome: "allow", user: row, created };
   }
   if (admins.length === 0 && (await countUsers(db)) === 0) {
-    return { outcome: "allow", user: await createUser(db, { login, role: "admin" }), created: true };
+    const { row, created } = await createUserOrExisting(db, { login, role: "admin" });
+    return { outcome: "allow", user: row, created };
   }
   return { outcome: "deny" };
 }

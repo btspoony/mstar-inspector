@@ -28,6 +28,7 @@ import {
   createUser,
   deleteUser,
   deleteUserUnlessLastAdmin,
+  DuplicateLoginError,
   getUserByLogin,
   listUsers,
   parseAdminLogins,
@@ -2138,6 +2139,7 @@ const DASHBOARD_MIGRATION_SEQUENCE = [
   "0003_dashboard_users.sql",
   "0004_github_apps.sql",
   "0005_reviews_app_id.sql",
+  "0016_users_login_nocase_unique.sql",
 ] as const;
 
 function createDashboardTestD1(
@@ -2408,6 +2410,17 @@ describe("dashboard users store (plan 12 T1, users.ts)", () => {
     const first = await createUser(db, { login: "octocat", role: "admin" });
     const raced = await createUser(db, { login: "octocat", role: "member", invitedBy: "someone" });
     expect(raced.id).toBe(first.id);
+    expect(userCount(db)).toBe(1);
+  });
+
+  test("createUser rejects a case-variant insert — the concurrent loser's 409 source (W-1, migration 0016)", async () => {
+    const db = createDashboardTestD1();
+    await createUser(db, { login: "Alice", role: "member" });
+    // Migration 0016 NOCASE unique index: a case-variant row cannot be
+    // inserted even when the 0003 BINARY UNIQUE does not fire. The store
+    // surfaces the conflict as DuplicateLoginError — the invite route maps
+    // it to 409 duplicate-invite semantics.
+    await expect(createUser(db, { login: "alice", role: "member" })).rejects.toThrow(DuplicateLoginError);
     expect(userCount(db)).toBe(1);
   });
 
@@ -2999,8 +3012,9 @@ describe("members page (plan 12 T3, admin-only)", () => {
   test("T1 pin (Minor 2): invite resolves case variants — existing login → idempotent no-op, NO second row", async () => {
     const db = createDashboardTestD1();
     await createUser(db, { login: "OctoCat", role: "admin" });
-    // The DDL UNIQUE is BINARY-collated: a direct createUser("octocat") would
-    // succeed and mint a second row — the NOCASE pre-read must catch it first.
+    // Sequential path: the NOCASE pre-read catches the case variant and
+    // answers the idempotent no-op. (The CONCURRENT window is closed by the
+    // migration 0016 NOCASE unique index — pinned by the W-1 race test.)
     const res = await membersPost("invite", await adminCookie(), "login=octocat", makeDbEnv(db));
     expect(res.status).toBe(200);
     expect(await res.text()).toBe("ok");
@@ -3226,6 +3240,48 @@ describe("members page (plan 12 T3, admin-only)", () => {
     expect(statuses[0]).toBe(200); // exactly one demotion lands
     expect(statuses[1]).toBeGreaterThanOrEqual(400); // the loser is refused
     expect(await countAdmins(db)).toBe(1);
+  });
+
+  test("concurrent case-variant invites: exactly one row, the loser is refused (W-1, migration 0016)", async () => {
+    const db = createDashboardTestD1();
+    await createUser(db, { login: "octocat", role: "admin" });
+    // Two admins invite the same GitHub identity in different cases at the
+    // same time. The NOCASE pre-read closes the sequential path; the 0016
+    // NOCASE unique index closes the concurrent window — exactly one row
+    // can land. The loser is either the sequential idempotent no-op (200 —
+    // on this single-connection harness its NOCASE pre-read serializes
+    // after the winner's commit) or the concurrent race refusal (409 — its
+    // insert hit the 0016 index; the DuplicateLoginError → 409 mapping is
+    // pinned by the store-level test above). Never a 5xx, never two rows.
+    const [a, b] = await Promise.all([
+      membersPost("invite", await adminCookie(), "login=Alice", makeDbEnv(db)),
+      membersPost("invite", await adminCookie(), "login=alice", makeDbEnv(db)),
+    ]);
+    const statuses = [a.status, b.status].sort((x, y) => x - y);
+    expect(statuses[0]).toBe(200); // exactly one invite lands
+    expect(statuses[1]).toBeGreaterThanOrEqual(200); // the loser is refused (200 no-op or 409 race)
+    expect(statuses[1]).toBeLessThan(500); // never a 5xx
+    expect(userCount(db)).toBe(2); // octocat + exactly one of Alice/alice
+    const invited = (await listUsers(db)).filter((m) => m.github_login.toLowerCase() === "alice");
+    expect(invited).toHaveLength(1);
+  });
+
+  test("demoted admin's old cookie → 403 on the members API (role change invalidates admin access immediately, QC S-001)", async () => {
+    const db = createDashboardTestD1();
+    await createUser(db, { login: "octocat", role: "admin" });
+    const ada = await createUser(db, { login: "ada", role: "admin" });
+    const staleAdminCookie = `${SESSION_COOKIE}=${await createSessionValue("ada", null, SESSION_SECRET)}`; // minted BEFORE the demotion
+    const res = await membersPost("role", await adminCookie(), `userId=${ada.id}&role=member`, makeDbEnv(db));
+    expect(res.status).toBe(200);
+    expect((await getUserByLogin(db, "ada"))?.role).toBe("member");
+    // The demoted admin's still-valid session cookie must not reach the
+    // members API — requireAdmin re-reads the row and fails closed (403),
+    // mirroring the remove-path cookie invalidation pin (:3088-3105).
+    const api = await worker.fetch(
+      dashboardRequest("/dashboard/api/members", staleAdminCookie),
+      withSpaAssets(makeDbEnv(db)),
+    );
+    expect(api.status).toBe(403);
   });
 
   test("T1 pin (Minor 1): ADMIN_LOGINS docs name the real var mechanism, not the nonexistent `wrangler vars put`", async () => {

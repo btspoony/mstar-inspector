@@ -80,9 +80,9 @@ import { composeModelOptions, findFailingSelector } from "./model-membership";
 import { addKeyProviderIds, verifyProviderKey, type VerifyFailureReason } from "./provider-verify";
 import {
   bootstrapDashboardAccess,
-  countAdmins,
   createUser,
   deleteUserUnlessLastAdmin,
+  DuplicateLoginError,
   getUserByLogin,
   listUsers,
   updateUserRoleUnlessLastAdmin,
@@ -123,7 +123,7 @@ function pinnedPostMutationResponse(
   c: Context<{ Bindings: Env }>,
   redirectTo: string,
   message: string,
-  status: 200 | 400 | 404 | 500 = 200,
+  status: 200 | 400 | 404 | 409 | 500 = 200,
 ): Response {
   if (wantsHtmlFormNavigation(c)) {
     return c.redirect(redirectTo, 302);
@@ -815,12 +815,24 @@ dashboardApp.post("/members/invite", async (c) => {
     return pinnedPostMutationResponse(c, DASHBOARD_SHELL_REDIRECT, `${login} is not a valid GitHub login — use 1–39 letters, digits, or hyphens.`, 400);
   }
   // T1 review pin (Minor 2): resolve the login case-insensitively BEFORE any
-  // createUser call — the DDL UNIQUE is BINARY-collated, so ON CONFLICT alone
-  // misses case variants ("OctoCat" vs "octocat") and would mint a second row.
+  // createUser call — the sequential duplicate path ("OctoCat" exists →
+  // invite "octocat") is an idempotent no-op here. The CONCURRENT window is
+  // closed by the migration 0016 NOCASE unique index: a case-variant insert
+  // that slips past this pre-read hits the index and createUser throws
+  // DuplicateLoginError → 409 duplicate-invite semantics (W-1).
   if (await getUserByLogin(gate.db, login)) {
     return pinnedPostMutationResponse(c, DASHBOARD_SHELL_REDIRECT, "ok"); // already a member — idempotent no-op
   }
-  await createUser(gate.db, { login, role, invitedBy: gate.admin.github_login });
+  try {
+    await createUser(gate.db, { login, role, invitedBy: gate.admin.github_login });
+  } catch (err) {
+    if (err instanceof DuplicateLoginError) {
+      // Lost the concurrent case-variant race: the row exists now (the
+      // winner's invite created it) — 409, zero partial state.
+      return pinnedPostMutationResponse(c, DASHBOARD_SHELL_REDIRECT, "Already a member.", 409);
+    }
+    throw err;
+  }
   return pinnedPostMutationResponse(c, DASHBOARD_SHELL_REDIRECT, "ok");
 });
 
@@ -838,14 +850,12 @@ dashboardApp.post("/members/remove", async (c) => {
   if (target.github_login.toLowerCase() === gate.admin.github_login.toLowerCase()) {
     return pinnedPostMutationResponse(c, DASHBOARD_SHELL_REDIRECT, "You cannot remove yourself.", 400);
   }
-  // Refuse removing an admin while they are the last one (removal = row
-  // delete, so this is the deployment's only admin-lockout guard). This
-  // pre-check only shapes the message; the ENFORCEMENT is the single
-  // conditional DELETE below, which closes the read-check-delete TOCTOU
-  // (qc1): two concurrent removes of the last two admins cannot both land.
-  if (target.role === "admin" && (await countAdmins(gate.db)) === 1) {
-    return pinnedPostMutationResponse(c, DASHBOARD_SHELL_REDIRECT, "The last admin cannot be removed.", 400);
-  }
+  // The last-admin ENFORCEMENT is the single conditional DELETE below,
+  // which closes the read-check-delete TOCTOU (qc1): two concurrent
+  // removes of the last two admins cannot both land. (A route-level
+  // "last admin" pre-check would be unreachable — when countAdmins === 1
+  // the actor IS the sole admin and the self-removal refusal above fires
+  // first; qc3 S-003.)
   if (!(await deleteUserUnlessLastAdmin(gate.db, target.id))) {
     // Lost a race (the row vanished or just became the last admin between
     // the reads above and this delete): 400 with a retry message —
@@ -890,13 +900,11 @@ dashboardApp.post("/members/role", async (c) => {
   if (target.role === role) {
     return pinnedPostMutationResponse(c, DASHBOARD_SHELL_REDIRECT, "ok");
   }
-  // Refuse demoting the last admin. This pre-check only shapes the
-  // message; the ENFORCEMENT is the single conditional UPDATE below,
+  // The last-admin ENFORCEMENT is the single conditional UPDATE below,
   // which closes the read-check-update TOCTOU (deleteUserUnlessLastAdmin
-  // precedent, qc1).
-  if (target.role === "admin" && role === "member" && (await countAdmins(gate.db)) === 1) {
-    return pinnedPostMutationResponse(c, DASHBOARD_SHELL_REDIRECT, "The last admin cannot be demoted.", 400);
-  }
+  // precedent, qc1). (A route-level "last admin" pre-check would be
+  // unreachable — when countAdmins === 1 the actor IS the sole admin and
+  // the self-change refusal above fires first; qc3 S-003.)
   if (!(await updateUserRoleUnlessLastAdmin(gate.db, target.id, role))) {
     // Lost a race (the row vanished or just became the last admin between
     // the reads above and this update): 400 with a retry message —

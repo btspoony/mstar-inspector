@@ -53,6 +53,14 @@ describe("members page shadcn rebuild (plan 34 T2)", () => {
     expect(source).toContain('pending.kind === "remove" ? "destructive" : "default"');
   });
 
+  test("invite submit is single-flight and network failures surface a notice (QC S-001/S-002)", () => {
+    expect(source).toContain('<Button type="submit" disabled={busy}>');
+    expect(source).toContain("} catch {");
+    expect(source).toContain('t(locale, "notice.error.inviteFailed", { login: trimmed })');
+    expect(source).toContain('t(locale, "notice.error.roleChangeFailed", { login: member.github_login })');
+    expect(source).toContain('t(locale, "notice.error.removeFailed", { login: member.github_login })');
+  });
+
   test("new copy interpolates in both locales", () => {
     const keys = [
       "common.cancel",
