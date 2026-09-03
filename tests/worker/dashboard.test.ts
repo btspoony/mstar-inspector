@@ -59,6 +59,8 @@ import { createAppsStore } from "../../src/dashboard/apps-store";
 import { normalizePrivateKey } from "../../src/dashboard/private-key";
 import { normalizePrivateKey as pipelineNormalizePrivateKey } from "../../src/pipeline/comment";
 import { reviewedAt, mondayOf } from "../../src/dashboard/insights-dates";
+import { LOCALE_COOKIE } from "../../src/i18n";
+import { SPA_BOOT_MARKER, htmlGet, withSpaAssets } from "../helpers/spa";
 
 const SESSION_SECRET = "test-dashboard-session-secret-32-bytes!";
 const CLIENT_ID = "oauth-client-id";
@@ -351,64 +353,69 @@ describe("fetchGitHubUser (oauth.ts, stubbed fetch)", () => {
 });
 
 describe("/dashboard routes", () => {
-  test("GET /dashboard without cookie → 302 to /dashboard/login", async () => {
-    const res = await worker.fetch(dashboardRequest("/dashboard"), makeEnv());
-    expect(res.status).toBe(302);
-    expect(res.headers.get("Location")).toBe("/dashboard/login");
+  test("GET /dashboard without a session is served the SPA shell (boot login null)", async () => {
+    const res = await worker.fetch(dashboardRequest("/dashboard"), withSpaAssets(makeEnv()));
+    expect(res.status).toBe(200);
+    const body = await res.text();
+    expect(body).toContain("window.__BOOT__=");
+    expect(body).toContain('"login":null');
   });
 
-  test("GET /dashboard with a valid session cookie → 200 shell", async () => {
+  test("GET /dashboard with a valid session cookie → 200 SPA shell (boot-injected)", async () => {
     const session = await createSessionValue("octocat", null, SESSION_SECRET);
     const res = await worker.fetch(
       dashboardRequest("/dashboard", `${SESSION_COOKIE}=${session}`),
-      makeEnv(),
+      withSpaAssets(makeEnv()),
     );
     expect(res.status).toBe(200);
     const body = await res.text();
-    expect(body).toContain("Signed in as octocat");
-    // qc1/qc2 F-001: octocat is an admin (default seed) — the shell header
-    // carries the Members entry next to Logout.
-    expect(body).toContain(' · <a href="/dashboard/members">Members</a> · <a href="/dashboard/logout">Logout</a>');
-    // B1: the GitHub App section is live — a submit to the manifest start
-    // route, not a disabled placeholder button.
-    expect(body).toContain('action="/dashboard/manifest/start"');
-    expect(body).toContain('<button type="submit" class="primary">Create GitHub App</button>');
-    // B2 delivered: the Model keys card is a live per-App entry point — the
-    // copy states keys/models are configured per App and it links to the
-    // Apps list, where members reach Settings on manageable Apps.
-    expect(body).toContain("configured per App");
-    expect(body).toContain('<a href="/dashboard/apps">Open the Apps list</a>');
-    // The Review card (B3) stays an inert placeholder (AC-S11-placeholders).
-    expect(body).toContain("Not in this iteration (B3).");
-    expect(body).toContain('aria-disabled="true"');
-    expect(body).not.toContain("Not in B0");
+    expect(body).toContain("window.__BOOT__=");
+    expect(body).toContain('"login":"octocat"');
+    // qc1/qc2 F-001: octocat is an admin (default seed) — the boot carries
+    // the admin role so the SPA renders the Members entry.
+    expect(body).toContain('"role":"admin"');
+    // The legacy three-card home is retired (plan 30 T4): no SSR sections,
+    // no manifest start form, no REVIEW_ENABLED copy.
+    expect(body).not.toContain("Model keys");
+    expect(body).not.toContain("Not in this iteration (B3).");
+    expect(body).not.toContain('action="/dashboard/manifest/start"');
+    expect(body).not.toContain("REVIEW_ENABLED");
   });
 
-  test("Members entry is admin-aware: member shell renders no /dashboard/members reference (F-001)", async () => {
+  test("the SPA home document title is the SPA index title (plan 30 T4)", async () => {
+    const indexHtml = readFileSync(join(import.meta.dir, "../../src/spa/index.html"), "utf8");
+    expect(indexHtml).toContain("<title>Morning Star Inspector</title>");
+    expect(indexHtml).not.toContain("Dashboard —");
+  });
+
+  test("boot role is admin-aware: member sessions carry role member, not admin (F-001)", async () => {
     const admin = await worker.fetch(
       dashboardRequest("/dashboard", `${SESSION_COOKIE}=${await createSessionValue("octocat", null, SESSION_SECRET)}`),
-      makeEnv(),
+      withSpaAssets(makeEnv()),
     );
     expect(admin.status).toBe(200);
-    expect(await admin.text()).toContain('href="/dashboard/members"');
+    expect(await admin.text()).toContain('"role":"admin"');
     const member = await worker.fetch(
       dashboardRequest("/dashboard", `${SESSION_COOKIE}=${await createSessionValue("mallory", null, SESSION_SECRET)}`),
-      makeEnv(),
+      withSpaAssets(makeEnv()),
     );
     expect(member.status).toBe(200);
     const memberBody = await member.text();
-    expect(memberBody).toContain("Signed in as mallory");
-    expect(memberBody).not.toContain("/dashboard/members");
+    expect(memberBody).toContain('"login":"mallory"');
+    expect(memberBody).toContain('"role":"member"');
+    expect(memberBody).not.toContain('"role":"admin"');
   });
 
-  test("GET /dashboard with a tampered session cookie → 302 (treated as logged out)", async () => {
+  test("GET /dashboard with a tampered session cookie → 200 SPA shell, boot login null", async () => {
     const session = await createSessionValue("octocat", null, SESSION_SECRET);
     const res = await worker.fetch(
       dashboardRequest("/dashboard", `${SESSION_COOKIE}=${tamperSignature(session)}`),
-      makeEnv(),
+      withSpaAssets(makeEnv()),
     );
-    expect(res.status).toBe(302);
-    expect(res.headers.get("Location")).toBe("/dashboard/login");
+    expect(res.status).toBe(200);
+    const body = await res.text();
+    expect(body).toContain("window.__BOOT__=");
+    expect(body).toContain('"login":null');
   });
 
   test("GET /dashboard/login → 302 to GitHub authorize with signed state cookie", async () => {
@@ -436,6 +443,20 @@ describe("/dashboard routes", () => {
     const cookiePair = cookie.split(";")[0] ?? "";
     const stateValue = cookiePair.slice(OAUTH_STATE_COOKIE.length + 1);
     expect(location.searchParams.get("state")).toBe(stateValue);
+  });
+
+  test("POST /dashboard/login (SPA sign-in) → 302 to GitHub authorize", async () => {
+    const res = await worker.fetch(
+      new Request("https://worker.local/dashboard/login", {
+        method: "POST",
+        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      }),
+      makeEnv(),
+    );
+    expect(res.status).toBe(302);
+    const location = new URL(res.headers.get("Location") ?? "");
+    expect(location.origin).toBe("https://github.com");
+    expect(location.pathname).toBe("/login/oauth/authorize");
   });
 
   test("GET /dashboard/login with a live session → 302 back to /dashboard", async () => {
@@ -538,7 +559,12 @@ describe("/dashboard routes", () => {
       GITHUB_OAUTH_CLIENT_SECRET: undefined,
       DASHBOARD_SESSION_SECRET: undefined,
     });
-    expect((await worker.fetch(dashboardRequest("/dashboard"), env)).status).toBe(500);
+    // The legacy SSR home is retired (plan 30 T4): /dashboard is the SPA
+    // shell (served without secrets, boot login null); the login/API routes
+    // behind it still fail closed.
+    const shell = await worker.fetch(dashboardRequest("/dashboard"), withSpaAssets(env));
+    expect(shell.status).toBe(200);
+    expect(await shell.text()).toContain('"login":null');
     expect((await worker.fetch(dashboardRequest("/dashboard/login"), env)).status).toBe(500);
   });
 
@@ -596,6 +622,219 @@ describe("/dashboard routes", () => {
       makeEnv({ DASHBOARD_SESSION_SECRET: undefined }),
     );
     expect(res.status).toBe(500);
+  });
+});
+
+describe("/dashboard/locale (plan 29 T2)", () => {
+  const sessionCookie = async () =>
+    `${SESSION_COOKIE}=${await createSessionValue("octocat", null, SESSION_SECRET)}`;
+
+  test("POST valid form locale → 302 to sanitized Referer path + mstar_locale Set-Cookie", async () => {
+    const res = await worker.fetch(
+      new Request("https://worker.local/dashboard/locale", {
+        method: "POST",
+        headers: {
+          Cookie: await sessionCookie(),
+          "Content-Type": "application/x-www-form-urlencoded",
+          Referer: "https://worker.local/dashboard/insights",
+        },
+        body: "locale=zh_CN",
+      }),
+      makeEnv(),
+    );
+    expect(res.status).toBe(302);
+    // same-origin absolute Referer is sanitized to its path+query — never echoed as a URL
+    expect(res.headers.get("Location")).toBe("/dashboard/insights");
+    const setCookie = res.headers.getSetCookie();
+    expect(setCookie).toHaveLength(1);
+    expect(setCookie[0]).toContain(`${LOCALE_COOKIE}=zh_CN`);
+    expect(setCookie[0]).toContain("HttpOnly");
+    expect(setCookie[0]).toContain("Secure");
+    expect(setCookie[0]).toContain("SameSite=Lax");
+    expect(setCookie[0]).toContain("Path=/dashboard");
+  });
+
+  test("POST with off-origin absolute Referer → 302 to /dashboard (no open redirect), cookie set", async () => {
+    const res = await worker.fetch(
+      new Request("https://worker.local/dashboard/locale", {
+        method: "POST",
+        headers: {
+          Cookie: await sessionCookie(),
+          "Content-Type": "application/x-www-form-urlencoded",
+          Referer: "https://evil.example/phish",
+        },
+        body: "locale=zh_CN",
+      }),
+      makeEnv(),
+    );
+    expect(res.status).toBe(302);
+    expect(res.headers.get("Location")).toBe("/dashboard");
+    expect(res.headers.getSetCookie()).toHaveLength(1);
+  });
+
+  test("POST with protocol-relative Referer → 302 to /dashboard (no open redirect), cookie set", async () => {
+    const res = await worker.fetch(
+      new Request("https://worker.local/dashboard/locale", {
+        method: "POST",
+        headers: {
+          Cookie: await sessionCookie(),
+          "Content-Type": "application/x-www-form-urlencoded",
+          Referer: "//evil.example/phish",
+        },
+        body: "locale=zh_CN",
+      }),
+      makeEnv(),
+    );
+    expect(res.status).toBe(302);
+    expect(res.headers.get("Location")).toBe("/dashboard");
+    expect(res.headers.getSetCookie()).toHaveLength(1);
+  });
+
+  test("POST with backslash-prefixed Referer (/\\evil.example) → 302 to /dashboard (no open redirect), cookie set", async () => {
+    const res = await worker.fetch(
+      new Request("https://worker.local/dashboard/locale", {
+        method: "POST",
+        headers: {
+          Cookie: await sessionCookie(),
+          "Content-Type": "application/x-www-form-urlencoded",
+          Referer: "/\\evil.example",
+        },
+        body: "locale=zh_CN",
+      }),
+      makeEnv(),
+    );
+    expect(res.status).toBe(302);
+    // WHATWG: /\/evil.example parses as https://evil.example/ (backslash → slash → authority)
+    expect(res.headers.get("Location")).toBe("/dashboard");
+    expect(res.headers.getSetCookie()).toHaveLength(1);
+  });
+
+  test("POST with same-origin absolute Referer containing backslash (https://worker.local/\\evil.example) → 302 to /dashboard (no open redirect), cookie set", async () => {
+    const res = await worker.fetch(
+      new Request("https://worker.local/dashboard/locale", {
+        method: "POST",
+        headers: {
+          Cookie: await sessionCookie(),
+          "Content-Type": "application/x-www-form-urlencoded",
+          Referer: "https://worker.local/\\evil.example",
+        },
+        body: "locale=zh_CN",
+      }),
+      makeEnv(),
+    );
+    expect(res.status).toBe(302);
+    // WHATWG: backslash in the path normalizes to /, yielding pathname //evil.example (protocol-relative)
+    expect(res.headers.get("Location")).toBe("/dashboard");
+    expect(res.headers.getSetCookie()).toHaveLength(1);
+  });
+
+  test("POST with empty-string Referer → 302 to /dashboard (treated as missing), cookie set", async () => {
+    const res = await worker.fetch(
+      new Request("https://worker.local/dashboard/locale", {
+        method: "POST",
+        headers: {
+          Cookie: await sessionCookie(),
+          "Content-Type": "application/x-www-form-urlencoded",
+          Referer: "",
+        },
+        body: "locale=zh_CN",
+      }),
+      makeEnv(),
+    );
+    expect(res.status).toBe(302);
+    expect(res.headers.get("Location")).toBe("/dashboard");
+    expect(res.headers.getSetCookie()).toHaveLength(1);
+  });
+
+  test("POST valid JSON locale without Referer → 302 to /dashboard + Set-Cookie", async () => {
+    const res = await worker.fetch(
+      new Request("https://worker.local/dashboard/locale", {
+        method: "POST",
+        headers: {
+          Cookie: await sessionCookie(),
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ locale: "en" }),
+      }),
+      makeEnv(),
+    );
+    expect(res.status).toBe(302);
+    expect(res.headers.get("Location")).toBe("/dashboard");
+    const setCookie = res.headers.getSetCookie();
+    expect(setCookie).toHaveLength(1);
+    expect(setCookie[0]).toContain(`${LOCALE_COOKIE}=en`);
+  });
+
+  test("POST invalid locale → 400, no Set-Cookie", async () => {
+    const res = await worker.fetch(
+      new Request("https://worker.local/dashboard/locale", {
+        method: "POST",
+        headers: {
+          Cookie: await sessionCookie(),
+          "Content-Type": "application/x-www-form-urlencoded",
+        },
+        body: "locale=fr",
+      }),
+      makeEnv(),
+    );
+    expect(res.status).toBe(400);
+    expect(res.headers.getSetCookie()).toHaveLength(0);
+  });
+
+  test("POST malformed JSON → 400, no Set-Cookie", async () => {
+    const res = await worker.fetch(
+      new Request("https://worker.local/dashboard/locale", {
+        method: "POST",
+        headers: {
+          Cookie: await sessionCookie(),
+          "Content-Type": "application/json",
+        },
+        body: "{not json",
+      }),
+      makeEnv(),
+    );
+    expect(res.status).toBe(400);
+    expect(res.headers.getSetCookie()).toHaveLength(0);
+  });
+
+  test("POST without a session (login-page toggle) → 302 back + mstar_locale Set-Cookie", async () => {
+    const res = await worker.fetch(
+      new Request("https://worker.local/dashboard/locale", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/x-www-form-urlencoded",
+          Referer: "https://worker.local/dashboard/login",
+        },
+        body: "locale=zh_CN",
+      }),
+      makeEnv(),
+    );
+    expect(res.status).toBe(302);
+    expect(res.headers.get("Location")).toBe("/dashboard/login");
+    const setCookie = res.headers.getSetCookie();
+    expect(setCookie).toHaveLength(1);
+    expect(setCookie[0]).toContain(`${LOCALE_COOKIE}=zh_CN`);
+    expect(setCookie[0]).toContain("Path=/dashboard");
+  });
+
+  test("POST with a row-less session still sets mstar_locale (membership-exempt)", async () => {
+    const cookie = `${SESSION_COOKIE}=${await createSessionValue("stranger", null, SESSION_SECRET)}`;
+    const res = await worker.fetch(
+      new Request("https://worker.local/dashboard/locale", {
+        method: "POST",
+        headers: {
+          Cookie: cookie,
+          "Content-Type": "application/x-www-form-urlencoded",
+          Referer: "https://worker.local/dashboard/login",
+        },
+        body: "locale=en",
+      }),
+      makeEnv(),
+    );
+    expect(res.status).toBe(302);
+    expect(res.headers.get("Location")).toBe("/dashboard/login");
+    const setCookie = res.headers.getSetCookie();
+    expect(setCookie.some((v) => v.includes(`${LOCALE_COOKIE}=en`))).toBe(true);
   });
 });
 
@@ -814,6 +1053,30 @@ describe("/dashboard manifest routes (plan 11 Task 1)", () => {
       issues: "write",
     });
   });
+  test("Accept-Language zh renders the start page in zh_CN (plan 29 T5)", async () => {
+    const session = await createSessionValue("octocat", null, SESSION_SECRET);
+    const res = await worker.fetch(
+      new Request("https://worker.local/dashboard/manifest/start", {
+        method: "POST",
+        headers: {
+          Cookie: `${SESSION_COOKIE}=${session}`,
+          "Accept-Language": "zh-CN,zh;q=0.9",
+        },
+      }),
+      makeEnv(),
+    );
+    expect(res.status).toBe(200);
+    const body = await res.text();
+    expect(body).toContain('lang="zh-CN"');
+    expect(body).toContain("在 GitHub 上继续");
+    expect(body).toContain("创建 GitHub App");
+    expect(body).toContain('method="post"');
+    expect(body).toContain("https://github.com/settings/apps/new");
+    expect(body).toContain('name="manifest"');
+    expect(body).not.toContain("REVIEW_ENABLED");
+    expect(body).not.toContain("Continue on GitHub");
+  });
+
   test("long login: manifest name is capped at 34 chars and the start page shows the truncated name", async () => {
     const { body, manifest } = await startManifest("octocat-with-a-long-login");
     const name = manifest.name as string;
@@ -896,32 +1159,159 @@ describe("/dashboard manifest routes (plan 11 Task 1)", () => {
     expect(entry.reason).toBe("missing_code");
   });
 
-  test("callback success → conversion exchanged, hold cookie set (with the state slug), HTML carries no secrets", async () => {
+  test("callback success → conversion exchanged, App auto-committed, 302 to onboarding, hold burned, no secrets (plan 31 T5)", async () => {
+    // The callback now runs the commit itself (AC4b — no second click), so
+    // it needs the commit-shaped env: encryption key + D1.
+    const env = makeEnv({ DASHBOARD_ENCRYPTION_KEY: TEST_ENCRYPTION_KEY });
     const { session, state } = await startManifest();
-    let seenUrl = "";
+    const calls: string[] = [];
     let seenHeaders: Record<string, string> = {};
     globalThis.fetch = (async (url: unknown, init?: RequestInit) => {
-      seenUrl = String(url);
+      calls.push(String(url));
+      if (String(url) !== "https://api.github.com/app-manifests/manifest-code/conversions") {
+        throw new Error(`unexpected upstream: ${String(url)}`);
+      }
       seenHeaders = { ...((init?.headers ?? {}) as Record<string, string>) };
       return new Response(JSON.stringify(CONVERSION), { status: 201 });
     }) as typeof fetch;
     const res = await worker.fetch(
       callbackRequest(session, state, `code=manifest-code&state=${state}`),
-      makeEnv(),
+      env,
     );
-    expect(res.status).toBe(200);
+    // One conversion fetch, nothing else — the auto-commit writes locally.
+    expect(calls).toEqual(["https://api.github.com/app-manifests/manifest-code/conversions"]);
     // Conversion per Global Constraints (spec L9).
-    expect(seenUrl).toBe("https://api.github.com/app-manifests/manifest-code/conversions");
     expect(seenHeaders.Accept).toBe("application/vnd.github+json");
     expect(seenHeaders["X-GitHub-Api-Version"]).toBe("2022-11-28");
     expect(seenHeaders.Authorization).toBeUndefined();
+    // Success lands on the App's onboarding page — no confirm click required.
+    expect(res.status).toBe(302);
+    expect(res.headers.get("Location")).toBe("/dashboard/apps/mstar-inspector-octocat/onboarding");
     const cookies = res.headers.getSetCookie();
     // State cookie single-use: expired on the callback.
     expect(
       cookies.some((c) => c.startsWith(`${MANIFEST_STATE_COOKIE}=;`) && c.includes("Max-Age=0")),
     ).toBe(true);
-    // Hold cookie: __Host- attribute set, Max-Age 600, value < 4096B.
-    const holdCookie = cookies.find((c) => c.startsWith(`${MANIFEST_HOLD_COOKIE}=`)) ?? "";
+    // The auto-commit success BURNS the hold — no parked hold cookie.
+    expect(
+      cookies.some((c) => c.startsWith(`${MANIFEST_HOLD_COOKIE}=;`) && c.includes("Max-Age=0")),
+    ).toBe(true);
+    expect(cookies.some((c) => c.startsWith(`${MANIFEST_HOLD_COOKIE}=`) && !c.includes("Max-Age=0"))).toBe(false);
+    // Exactly one encrypted github_apps row with the state-carried slug.
+    const rows = dbOf(env).raw.query("SELECT slug, github_app_id, created_by FROM github_apps").all() as Array<{
+      slug: string;
+      github_app_id: number;
+      created_by: string;
+    }>;
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.slug).toBe("mstar-inspector-octocat");
+    expect(rows[0]!.github_app_id).toBe(CONVERSION.id);
+    expect(rows[0]!.created_by).toBe("octocat");
+    // Landing page: name / id / slug / webhook URL + the Settings CTA, never
+    // secrets, never REVIEW_ENABLED.
+    const landing = await worker.fetch(
+      dashboardRequest("/dashboard/apps/mstar-inspector-octocat/onboarding", `${SESSION_COOKIE}=${session}`),
+      env,
+    );
+    expect(landing.status).toBe(200);
+    const body = await landing.text();
+    expect(body).toContain(`<span class="id">${CONVERSION.id}</span>`);
+    expect(body).toContain(CONVERSION.name);
+    expect(body).toContain("https://worker.local/webhook/mstar-inspector-octocat");
+    expect(body).toContain('href="/dashboard/apps/mstar-inspector-octocat/settings"');
+    expect(body).toContain(">Open Settings</a>");
+    expect(body).not.toContain("BEGIN");
+    expect(body).not.toContain(FAKE_PEM);
+    expect(body).not.toContain(FAKE_WEBHOOK_SECRET);
+    expect(body).not.toContain("REVIEW_ENABLED");
+    // The retired overwrite-confirm semantics stay gone.
+    expect(body).not.toContain("overwrite");
+    expect(body).not.toContain("APP_ID");
+    expect(body).not.toContain('class="danger"');
+  });
+
+  test("callback auto-commit already-connected (github_app_id taken) → 409 error page, hold burned, zero new rows (plan 31 T5)", async () => {
+    const env = makeEnv({ DASHBOARD_ENCRYPTION_KEY: TEST_ENCRYPTION_KEY });
+    // The same GitHub App is already connected on this deployment.
+    await envDb(env).createApp({
+      id: crypto.randomUUID(),
+      slug: "mstar-inspector-earlier",
+      githubAppId: CONVERSION.id,
+      name: "earlier",
+      privateKeyEnc: "v1.primary.aXZpdi.cHJldGV4dA==",
+      webhookSecretEnc: "v1.primary.aXZpdi.cHJldGV4dA==",
+      createdBy: "someone-else",
+    });
+    const { session, state } = await startManifest();
+    globalThis.fetch = (async () => new Response(JSON.stringify(CONVERSION), { status: 201 })) as unknown as typeof fetch;
+    const warns = spyOnWarn();
+    const res = await worker.fetch(
+      callbackRequest(session, state, `code=manifest-code&state=${state}`),
+      env,
+    );
+    expect(res.status).toBe(409);
+    // Non-retryable conflict: the hold is burned (expired cookie emitted).
+    expect(
+      res.headers.getSetCookie().some((c) => c.startsWith(`${MANIFEST_HOLD_COOKIE}=;`) && c.includes("Max-Age=0")),
+    ).toBe(true);
+    expect(appRowCount(env)).toBe(1); // only the pre-existing row
+    const body = await res.text();
+    expect(body).toContain("already connected");
+    expect(body).not.toContain("BEGIN");
+    expect(body).not.toContain(FAKE_WEBHOOK_SECRET);
+    const entry = JSON.parse(warns[0] ?? "") as Record<string, unknown>;
+    expect(entry.stage).toBe("commit");
+    expect(entry.reason).toBe("github_app_id_conflict");
+  });
+
+  test("callback auto-commit slug race → 409 error page, hold burned, zero rows for the held App (plan 31 T5)", async () => {
+    const env = makeEnv({ DASHBOARD_ENCRYPTION_KEY: TEST_ENCRYPTION_KEY });
+    // Hold carries the base slug, but the slug got claimed before the write.
+    await envDb(env).createApp({
+      id: crypto.randomUUID(),
+      slug: "mstar-inspector-octocat",
+      githubAppId: 999,
+      name: "raced",
+      privateKeyEnc: "v1.primary.aXZpdi.cHJldGV4dA==",
+      webhookSecretEnc: "v1.primary.aXZpdi.cHJldGV4dA==",
+      createdBy: "someone-else",
+    });
+    const { session, state } = await startManifest();
+    globalThis.fetch = (async () => new Response(JSON.stringify(CONVERSION), { status: 201 })) as unknown as typeof fetch;
+    const res = await worker.fetch(
+      callbackRequest(session, state, `code=manifest-code&state=${state}`),
+      env,
+    );
+    expect(res.status).toBe(409);
+    expect(
+      res.headers.getSetCookie().some((c) => c.startsWith(`${MANIFEST_HOLD_COOKIE}=;`) && c.includes("Max-Age=0")),
+    ).toBe(true);
+    const rows = dbOf(env).raw.query("SELECT slug FROM github_apps WHERE github_app_id = ?").all(CONVERSION.id) as Array<{ slug: string }>;
+    expect(rows).toHaveLength(0);
+    const body = await res.text();
+    expect(body).toContain("not connected");
+    expect(body).not.toContain("BEGIN");
+  });
+
+  test("callback retryable 500 (missing encryption key) → resumable page, hold cookie parked, confirm gate reachable (plan 31 T5)", async () => {
+    // No DASHBOARD_ENCRYPTION_KEY → the inline commit fails closed at
+    // encryption: 500, zero rows, and the hold lands in a cookie so the
+    // operator can resume from the confirm page.
+    const env = makeEnv();
+    const { session, state } = await startManifest();
+    globalThis.fetch = (async () => new Response(JSON.stringify(CONVERSION), { status: 201 })) as unknown as typeof fetch;
+    const res = await worker.fetch(
+      callbackRequest(session, state, `code=manifest-code&state=${state}`),
+      env,
+    );
+    expect(res.status).toBe(500);
+    expect(appRowCount(env)).toBe(0);
+    const body = await res.text();
+    expect(body).not.toContain("BEGIN");
+    expect(body).not.toContain(FAKE_WEBHOOK_SECRET);
+    // Hold cookie: __Host- attribute set, Max-Age 600, value < 4096B, and
+    // it round-trips to the converted credentials + the state-carried slug.
+    const holdCookie = res.headers.getSetCookie().find((c) => c.startsWith(`${MANIFEST_HOLD_COOKIE}=`)) ?? "";
     expect(holdCookie).toContain("HttpOnly");
     expect(holdCookie).toContain("Secure");
     expect(holdCookie).toContain("SameSite=Lax");
@@ -931,8 +1321,6 @@ describe("/dashboard manifest routes (plan 11 Task 1)", () => {
     const holdValue = (holdCookie.split(";")[0] ?? "").slice(MANIFEST_HOLD_COOKIE.length + 1);
     expect(holdValue.length).toBeGreaterThan(0);
     expect(holdValue.length).toBeLessThan(4096);
-    // Hold round-trips to the converted credentials + the state-carried slug
-    // for the T3 commit gate.
     const payload = await readHoldValue(holdValue, SESSION_SECRET);
     expect(payload?.id).toBe(CONVERSION.id);
     expect(payload?.name).toBe(CONVERSION.name);
@@ -940,21 +1328,89 @@ describe("/dashboard manifest routes (plan 11 Task 1)", () => {
     expect(payload?.slug).toBe("mstar-inspector-octocat");
     expect(payload?.pem).toBe(CONVERSION.pem);
     expect(payload?.webhook_secret).toBe(CONVERSION.webhook_secret);
-    // AC-S11-html / B5: the summary HTML never carries PEM or webhook_secret;
-    // it shows the slug + webhook URL instead of the retired overwrite gate.
+    // The resumable error page links to the confirm gate...
+    expect(body).toContain('href="/dashboard/manifest/confirm"');
+    // ...and the confirm gate re-renders with the parked hold.
+    const resumed = await worker.fetch(
+      dashboardRequest(
+        "/dashboard/manifest/confirm",
+        `${SESSION_COOKIE}=${session}; ${MANIFEST_HOLD_COOKIE}=${holdValue}`,
+      ),
+      env,
+    );
+    expect(resumed.status).toBe(200);
+    const resumedBody = await resumed.text();
+    expect(resumedBody).toContain('action="/dashboard/manifest/commit"');
+    expect(resumedBody).not.toContain(FAKE_PEM);
+    expect(resumedBody).not.toContain(FAKE_WEBHOOK_SECRET);
+  });
+
+  test("callback retryable 500 (unbound D1) → resumable page, hold cookie parked, confirm gate reachable (plan 31 QC F-005)", async () => {
+    // Encryption is configured so this isolates db_unbound from encrypt_failed.
+    // The membership guard skips unbound-D1 fail-closed on callback/confirm so
+    // the hold can park and the confirm link stays reachable.
+    const env = baseEnv({ DASHBOARD_ENCRYPTION_KEY: TEST_ENCRYPTION_KEY });
+    const { session, state } = await startManifest();
+    globalThis.fetch = (async () => new Response(JSON.stringify(CONVERSION), { status: 201 })) as unknown as typeof fetch;
+    const res = await worker.fetch(
+      callbackRequest(session, state, `code=manifest-code&state=${state}`),
+      env,
+    );
+    expect(res.status).toBe(500);
     const body = await res.text();
+    expect(body).toContain("Dashboard storage is not configured");
+    expect(body).toContain('href="/dashboard/manifest/confirm"');
     expect(body).not.toContain("BEGIN");
-    expect(body).not.toContain(FAKE_PEM);
     expect(body).not.toContain(FAKE_WEBHOOK_SECRET);
-    expect(body).toContain(`<span class="id">${CONVERSION.id}</span>`);
-    expect(body).toContain("mstar-inspector-octocat");
-    expect(body).toContain("https://worker.local/webhook/mstar-inspector-octocat");
-    expect(body).toContain('action="/dashboard/manifest/commit"');
-    expect(body).toContain(">Create App</button>");
-    // B5: the overwrite-confirm semantics are gone (nothing shared changes).
-    expect(body).not.toContain("overwrite");
-    expect(body).not.toContain("APP_ID");
-    expect(body).not.toContain('class="danger"');
+    const holdCookie = res.headers.getSetCookie().find((c) => c.startsWith(`${MANIFEST_HOLD_COOKIE}=`)) ?? "";
+    expect(holdCookie).toContain("HttpOnly");
+    expect(holdCookie).toContain("Max-Age=600");
+    const holdValue = (holdCookie.split(";")[0] ?? "").slice(MANIFEST_HOLD_COOKIE.length + 1);
+    expect(holdValue.length).toBeGreaterThan(0);
+    const payload = await readHoldValue(holdValue, SESSION_SECRET);
+    expect(payload?.id).toBe(CONVERSION.id);
+    expect(payload?.slug).toBe("mstar-inspector-octocat");
+    const resumed = await worker.fetch(
+      dashboardRequest(
+        "/dashboard/manifest/confirm",
+        `${SESSION_COOKIE}=${session}; ${MANIFEST_HOLD_COOKIE}=${holdValue}`,
+      ),
+      env,
+    );
+    expect(resumed.status).toBe(200);
+    const resumedBody = await resumed.text();
+    expect(resumedBody).toContain('action="/dashboard/manifest/commit"');
+    expect(resumedBody).not.toContain(FAKE_PEM);
+    expect(resumedBody).not.toContain(FAKE_WEBHOOK_SECRET);
+  });
+
+  test("callback retryable 500 (github_apps missing) → hold parked, confirm gate reachable (plan 31 T5)", async () => {
+    // through=3: a pre-plan-13 DB (users only — no github_apps table). The
+    // guard passes (membership reads users), the inline commit fails on the
+    // missing table: retryable, hold parked for the resume path.
+    const env = {
+      ...baseEnv({ DASHBOARD_ENCRYPTION_KEY: TEST_ENCRYPTION_KEY }),
+      DB: seededDashboardD1(3),
+    } as unknown as Env;
+    const { session, state } = await startManifest();
+    globalThis.fetch = (async () => new Response(JSON.stringify(CONVERSION), { status: 201 })) as unknown as typeof fetch;
+    const res = await worker.fetch(
+      callbackRequest(session, state, `code=manifest-code&state=${state}`),
+      env,
+    );
+    expect(res.status).toBe(500);
+    const holdCookie = res.headers.getSetCookie().find((c) => c.startsWith(`${MANIFEST_HOLD_COOKIE}=`)) ?? "";
+    expect(holdCookie).toBeTruthy();
+    const holdValue = (holdCookie.split(";")[0] ?? "").slice(MANIFEST_HOLD_COOKIE.length + 1);
+    const resumed = await worker.fetch(
+      dashboardRequest(
+        "/dashboard/manifest/confirm",
+        `${SESSION_COOKIE}=${session}; ${MANIFEST_HOLD_COOKIE}=${holdValue}`,
+      ),
+      env,
+    );
+    expect(resumed.status).toBe(200);
+    expect(await resumed.text()).toContain('action="/dashboard/manifest/commit"');
   });
 
   test("conversion failure → 502, no hold cookie, HTML carries no secrets", async () => {
@@ -995,9 +1451,12 @@ describe("/dashboard confirm resume (Bugbot: confirm step must be resumable)", (
     return dashboardRequest(path, cookies);
   }
 
-  test("GET /dashboard with a valid hold renders the confirm gate, never PEM/webhook_secret", async () => {
+  test("GET /dashboard/manifest/confirm with a valid hold renders the confirm gate, never PEM/webhook_secret", async () => {
     const session = await createSessionValue("octocat", null, SESSION_SECRET);
-    const res = await worker.fetch(resumeRequest("/dashboard", session, await freshHold()), makeEnv());
+    const res = await worker.fetch(
+      resumeRequest("/dashboard/manifest/confirm", session, await freshHold()),
+      makeEnv(),
+    );
     expect(res.status).toBe(200);
     const body = await res.text();
     expect(body).toContain('action="/dashboard/manifest/commit"');
@@ -1013,7 +1472,7 @@ describe("/dashboard confirm resume (Bugbot: confirm step must be resumable)", (
     expect(body).not.toContain('action="/dashboard/manifest/start"');
   });
 
-  test("after a retryable 500 (missing encryption key), GET /dashboard still shows the confirm gate", async () => {
+  test("after a retryable 500 (missing encryption key), the confirm route still shows the confirm gate", async () => {
     const session = await createSessionValue("octocat", null, SESSION_SECRET);
     const hold = await freshHold();
     const rejected = await worker.fetch(
@@ -1029,22 +1488,24 @@ describe("/dashboard confirm resume (Bugbot: confirm step must be resumable)", (
     expect(rejected.status).toBe(500);
     // The retryable error page links back to the confirm surface.
     expect(await rejected.text()).toContain('href="/dashboard/manifest/confirm"');
-    // Resume via the shell URL: the confirm gate comes back with the same hold.
-    const resumed = await worker.fetch(resumeRequest("/dashboard", session, hold), makeEnv());
+    // Resume via the confirm route: the gate comes back with the same hold.
+    const resumed = await worker.fetch(resumeRequest("/dashboard/manifest/confirm", session, hold), makeEnv());
     expect(resumed.status).toBe(200);
     const body = await resumed.text();
     expect(body).toContain('action="/dashboard/manifest/commit"');
     expect(body).toContain(`<span class="id">${CONVERSION.id}</span>`);
   });
 
-  test("hold bound to a different login → dashboard shell, no confirm, no secrets", async () => {
+  test("hold bound to a different login → 302 to the shell, no confirm, no secrets", async () => {
     const session = await createSessionValue("mallory", null, SESSION_SECRET);
-    const res = await worker.fetch(resumeRequest("/dashboard", session, await freshHold()), makeEnv());
-    expect(res.status).toBe(200);
-    const body = await res.text();
-    expect(body).toContain('action="/dashboard/manifest/start"');
-    expect(body).not.toContain("BEGIN");
-    expect(body).not.toContain(FAKE_WEBHOOK_SECRET);
+    const res = await worker.fetch(
+      resumeRequest("/dashboard/manifest/confirm", session, await freshHold()),
+      makeEnv(),
+    );
+    expect(res.status).toBe(302);
+    expect(res.headers.get("Location")).toBe("/dashboard");
+    expect(await res.text()).not.toContain("BEGIN");
+    expect(await res.text()).not.toContain(FAKE_WEBHOOK_SECRET);
   });
 
   test("GET /dashboard/manifest/confirm: valid hold → 200 confirm; no hold → 302 to the shell", async () => {
@@ -1061,6 +1522,26 @@ describe("/dashboard confirm resume (Bugbot: confirm step must be resumable)", (
     );
     expect(noHold.status).toBe(302);
     expect(noHold.headers.get("Location")).toBe("/dashboard");
+  });
+
+  test("Accept-Language zh renders the confirm page in zh_CN (plan 29 T7)", async () => {
+    const session = await createSessionValue("octocat", null, SESSION_SECRET);
+    const hold = await freshHold();
+    const res = await worker.fetch(
+      new Request("https://worker.local/dashboard/manifest/confirm", {
+        headers: {
+          Cookie: `${SESSION_COOKIE}=${session}; ${MANIFEST_HOLD_COOKIE}=${hold}`,
+          "Accept-Language": "zh-CN,zh;q=0.9",
+        },
+      }),
+      makeEnv(),
+    );
+    expect(res.status).toBe(200);
+    const body = await res.text();
+    expect(body).toContain('lang="zh-CN"');
+    expect(body).toContain("创建 App");
+    expect(body).not.toContain("Create App");
+    expect(body).not.toContain("REVIEW_ENABLED");
   });
 });
 
@@ -1143,6 +1624,7 @@ describe("/dashboard manifest commit (plan 13 B5 T3: manifest → D1, zero CF AP
     withSession?: boolean;
     sessionLogin?: string;
     holdValue?: string | null;
+    extraHeaders?: Record<string, string>;
   }): Promise<Response> {
     const cookies: string[] = [];
     if (args.withSession ?? true) {
@@ -1154,7 +1636,7 @@ describe("/dashboard manifest commit (plan 13 B5 T3: manifest → D1, zero CF AP
     return worker.fetch(
       new Request("https://worker.local/dashboard/manifest/commit", {
         method: "POST",
-        headers: { Cookie: cookies.join("; ") },
+        headers: { Cookie: cookies.join("; "), ...args.extraHeaders },
       }),
       args.env ?? commitEnv(),
     );
@@ -1253,7 +1735,7 @@ describe("/dashboard manifest commit (plan 13 B5 T3: manifest → D1, zero CF AP
     expect(rec.urls).toHaveLength(0);
   });
 
-  test("e2e start→callback→commit: encrypted github_apps row, PEM verbatim (L1), AAD rowKey = row PK, summary slug/webhook URL/id, ZERO api.cloudflare.com calls, no secrets in HTML", async () => {
+  test("e2e start→callback AUTO-COMMIT (plan 31 T5): encrypted github_apps row, PEM verbatim (L1), AAD rowKey = row PK, onboarding shows slug/webhook URL/id, ZERO api.cloudflare.com calls, no secrets in HTML", async () => {
     const rec = stubGitHubConversionOnly();
     const env = commitEnv();
     const session = await createSessionValue("octocat", null, SESSION_SECRET);
@@ -1269,7 +1751,8 @@ describe("/dashboard manifest commit (plan 13 B5 T3: manifest → D1, zero CF AP
     const stateCookie =
       start.headers.getSetCookie().find((c) => c.startsWith(`${MANIFEST_STATE_COOKIE}=`)) ?? "";
     const state = (stateCookie.split(";")[0] ?? "").slice(MANIFEST_STATE_COOKIE.length + 1);
-    // 2. callback: the GitHub conversion runs; hold carries the slug.
+    // 2. callback: conversion + the write happen in THIS request — the exact
+    // one upstream call of the whole flow.
     const callback = await worker.fetch(
       dashboardRequest(
         `/dashboard/manifest/callback?code=manifest-code&state=${state}`,
@@ -1277,28 +1760,15 @@ describe("/dashboard manifest commit (plan 13 B5 T3: manifest → D1, zero CF AP
       ),
       env,
     );
-    expect(callback.status).toBe(200);
-    const holdCookie =
-      callback.headers.getSetCookie().find((c) => c.startsWith(`${MANIFEST_HOLD_COOKIE}=`)) ?? "";
-    const holdValue = (holdCookie.split(";")[0] ?? "").slice(MANIFEST_HOLD_COOKIE.length + 1);
-    // 3. commit: write the D1 row — zero upstream calls on this phase.
-    const githubCallsBefore = rec.urls.length;
-    const committed = await worker.fetch(
-      new Request("https://worker.local/dashboard/manifest/commit", {
-        method: "POST",
-        headers: { Cookie: `${SESSION_COOKIE}=${session}; ${MANIFEST_HOLD_COOKIE}=${holdValue}` },
-      }),
-      env,
-    );
-    expect(committed.status).toBe(200);
-    expect(rec.urls.length).toBe(githubCallsBefore); // commit phase: ZERO fetch
+    expect(callback.status).toBe(302);
+    expect(callback.headers.get("Location")).toBe("/dashboard/apps/mstar-inspector-octocat/onboarding");
     // AC-B5-nocf: no api.cloudflare.com anywhere in the whole flow.
     for (const url of rec.urls) expect(url).not.toContain("api.cloudflare.com");
     expect(rec.urls).toEqual([
       "https://api.github.com/app-manifests/manifest-code/conversions",
     ]);
-    // Hold burned on success.
-    expectHoldExpired(committed);
+    // Hold burned on success (single-success semantics preserved).
+    expectHoldExpired(callback);
     // The row: exactly one, slug = the state-carried slug, encrypted columns.
     const db = dbOf(env);
     const rows = db.raw.query("SELECT * FROM github_apps").all() as Array<{
@@ -1339,14 +1809,60 @@ describe("/dashboard manifest commit (plan 13 B5 T3: manifest → D1, zero CF AP
     );
     expect(decryptedPem.startsWith("-----BEGIN RSA PRIVATE KEY-----")).toBe(true);
     expect(decryptedPem).not.toBe(normalizePrivateKey(FAKE_PEM));
-    // Summary HTML: slug + webhook URL + numeric id; never the secrets.
-    const html = await committed.text();
+    // Landing HTML: slug + webhook URL + numeric id; never the secrets.
+    const landing = await worker.fetch(
+      dashboardRequest("/dashboard/apps/mstar-inspector-octocat/onboarding", `${SESSION_COOKIE}=${session}`),
+      env,
+    );
+    expect(landing.status).toBe(200);
+    const html = await landing.text();
     expect(html).toContain("mstar-inspector-octocat");
     expect(html).toContain("https://worker.local/webhook/mstar-inspector-octocat");
     expect(html).toContain(`<span class="id">${CONVERSION.id}</span>`);
     expect(html).not.toContain("BEGIN");
     expect(html).not.toContain(FAKE_PEM);
     expect(html).not.toContain(FAKE_WEBHOOK_SECRET);
+  });
+
+  test("POST /manifest/commit stays an idempotent-recovery path: after a retryable callback 500, the SAME hold resubmits → 302 onboarding + one row (plan 31 T5)", async () => {
+    // 1. Callback with a key-less env: the auto-commit fails at encryption and
+    // parks the hold cookie (500, zero rows). The signed state carries the
+    // slug exactly as /manifest/start would have minted it.
+    const brokeEnv = makeEnv();
+    const session = await createSessionValue("octocat", null, SESSION_SECRET);
+    const state = await createManifestStateValue(SESSION_SECRET, "mstar-inspector-octocat");
+    globalThis.fetch = (async () => new Response(JSON.stringify(CONVERSION), { status: 201 })) as unknown as typeof fetch;
+    const failed = await worker.fetch(
+      dashboardRequest(
+        `/dashboard/manifest/callback?code=manifest-code&state=${state}`,
+        `${SESSION_COOKIE}=${session}; ${MANIFEST_STATE_COOKIE}=${state}`,
+      ),
+      brokeEnv,
+    );
+    expect(failed.status).toBe(500);
+    const holdCookie =
+      failed.headers.getSetCookie().find((c) => c.startsWith(`${MANIFEST_HOLD_COOKIE}=`)) ?? "";
+    const holdValue = (holdCookie.split(";")[0] ?? "").slice(MANIFEST_HOLD_COOKIE.length + 1);
+    expect(holdValue.length).toBeGreaterThan(0);
+    // 2. Operator fixes the deployment (key present) and resubmits through
+    // the pinned POST — the direct /manifest/commit route (recovery path).
+    const env = commitEnv();
+    const committed = await doCommit({
+      env: { ...env, DB: dbOf(brokeEnv) } as unknown as Env,
+      holdValue,
+    });
+    expect(committed.status).toBe(302);
+    expect(committed.headers.get("Location")).toBe("/dashboard/apps/mstar-inspector-octocat/onboarding");
+    expectHoldExpired(committed);
+    const rows = dbOf(brokeEnv).raw.query("SELECT slug FROM github_apps WHERE github_app_id = ?").all(CONVERSION.id) as Array<{ slug: string }>;
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.slug).toBe("mstar-inspector-octocat");
+    // 3. Replaying the same hold after success is the already-connected 409
+    // (the row is single-write): zero NEW rows, matching the long-standing
+    // "already connected" conflict semantics — never a double-write.
+    const replay = await doCommit({ env: { ...env, DB: dbOf(brokeEnv) } as unknown as Env, holdValue });
+    expect(replay.status).toBe(409);
+    expect(appRowCount({ ...env, DB: dbOf(brokeEnv) } as unknown as Env)).toBe(1);
   });
 
   test("slug collision at start: the taken base slug is pre-resolved with a suffix and the row lands on the SAME slug (webhook URL displayed matches route)", async () => {
@@ -1383,7 +1899,8 @@ describe("/dashboard manifest commit (plan 13 B5 T3: manifest → D1, zero CF AP
     const startUrl = manifest.hook_attributes.url;
     expect(startUrl).not.toBe("https://worker.local/webhook/mstar-inspector-octocat");
     expect(startUrl.startsWith("https://worker.local/webhook/mstar-inspector-octocat-")).toBe(true);
-    // Drive callback + commit with the state that carries the suffixed slug.
+    // The auto-commit reads the suffixed slug from the state and lands on
+    // the suffixed onboarding URL.
     const stateCookie =
       start.headers.getSetCookie().find((c) => c.startsWith(`${MANIFEST_STATE_COOKIE}=`)) ?? "";
     const state = (stateCookie.split(";")[0] ?? "").slice(MANIFEST_STATE_COOKIE.length + 1);
@@ -1395,16 +1912,17 @@ describe("/dashboard manifest commit (plan 13 B5 T3: manifest → D1, zero CF AP
       ),
       env,
     );
-    const holdCookie =
-      callback.headers.getSetCookie().find((c) => c.startsWith(`${MANIFEST_HOLD_COOKIE}=`)) ?? "";
-    const holdValue = (holdCookie.split(";")[0] ?? "").slice(MANIFEST_HOLD_COOKIE.length + 1);
-    const committed = await doCommit({ env, holdValue });
-    expect(committed.status).toBe(200);
+    expect(callback.status).toBe(302);
     const rows = db.raw.query("SELECT slug, github_app_id FROM github_apps WHERE github_app_id = ?").all(CONVERSION.id) as Array<{ slug: string; github_app_id: number }>;
     expect(rows).toHaveLength(1);
     // The committed slug equals the URL the manifest registered with GitHub.
     expect(`https://worker.local/webhook/${rows[0]!.slug}`).toBe(startUrl);
-    const html = await committed.text();
+    const landing = await worker.fetch(
+      dashboardRequest(`/dashboard/apps/${rows[0]!.slug}/onboarding`, `${SESSION_COOKIE}=${session}`),
+      env,
+    );
+    expect(landing.status).toBe(200);
+    const html = await landing.text();
     expect(html).toContain(rows[0]!.slug);
     expect(html).toContain(startUrl);
   });
@@ -1485,29 +2003,64 @@ describe("/dashboard manifest commit (plan 13 B5 T3: manifest → D1, zero CF AP
     expect(rec.urls).toHaveLength(0);
     expectHoldKept(res);
   });
+
+  test("Accept-Language zh renders the onboarding page after a successful commit (plan 31 T5)", async () => {
+    stubFetchRecording();
+    const session = await createSessionValue("octocat", null, SESSION_SECRET);
+    const env = commitEnv();
+    const res = await doCommit({
+      env,
+      holdValue: await freshHold(),
+      extraHeaders: { "Accept-Language": "zh-CN,zh;q=0.9" },
+    });
+    expect(res.status).toBe(302);
+    expect(res.headers.get("Location")).toBe("/dashboard/apps/mstar-inspector-octocat/onboarding");
+    const landing = await worker.fetch(
+      new Request("https://worker.local/dashboard/apps/mstar-inspector-octocat/onboarding", {
+        headers: { Cookie: `${SESSION_COOKIE}=${session}`, "Accept-Language": "zh-CN,zh;q=0.9" },
+      }),
+      env,
+    );
+    expect(landing.status).toBe(200);
+    const body = await landing.text();
+    expect(body).toContain('lang="zh-CN"');
+    expect(body).toContain("GitHub App 已连接");
+    expect(body).toContain("下一步：打开设置并配置 provider");
+    expect(body).not.toContain("GitHub App connected");
+    expect(body).not.toContain("REVIEW_ENABLED");
+  });
+
+  test("Accept-Language zh renders the retryable commit error in zh_CN (plan 29 T7)", async () => {
+    stubFetchRecording();
+    const res = await doCommit({
+      env: commitEnv({ DASHBOARD_ENCRYPTION_KEY: undefined }),
+      holdValue: await freshHold(),
+      extraHeaders: { "Accept-Language": "zh-CN,zh;q=0.9" },
+    });
+    expect(res.status).toBe(500);
+    const body = await res.text();
+    expect(body).toContain('lang="zh-CN"');
+    expect(body).toContain("GitHub App 设置失败");
+    expect(body).not.toContain("GitHub App setup failed");
+    expect(body).not.toContain("REVIEW_ENABLED");
+  });
 });
 
-describe("/dashboard placeholder lock + DESIGN alignment (plan 11 Task 3)", () => {
+describe("/dashboard placeholder lock + legacy home retirement (plan 11 Task 3 + plan 30 T4)", () => {
   const origFetch = globalThis.fetch;
   afterEach(() => {
     globalThis.fetch = origFetch;
   });
 
-  test("GitHub App section is enabled: primary submit, not aria-disabled (AC-S11-design)", async () => {
-    const session = await createSessionValue("octocat", null, SESSION_SECRET);
-    const res = await worker.fetch(
-      dashboardRequest("/dashboard", `${SESSION_COOKIE}=${session}`),
-      makeEnv(),
-    );
-    expect(res.status).toBe(200);
-    const body = await res.text();
-    // Spec § DESIGN.md 意图: the enabled GitHub App section is NOT
-    // aria-disabled and its constructive primary (blue-700) is a live submit.
-    const appSection = body.split('<section class="enabled">')[1]?.split("</section>")[0] ?? "";
-    expect(appSection).toContain('action="/dashboard/manifest/start"');
-    expect(appSection).toContain('<button type="submit" class="primary">Create GitHub App</button>');
-    expect(appSection).not.toContain("aria-disabled");
-    expect(appSection).not.toContain("disabled");
+  test("legacy three-card home is retired: no dashboardPage/section code remains (plan 30 T4)", () => {
+    const views = readFileSync(join(import.meta.dir, "../../src/dashboard/views.ts"), "utf8");
+    for (const symbol of ["dashboardPage", "placeholderSection", "githubAppSection", "modelKeysSection"]) {
+      expect(views, symbol).not.toContain(symbol);
+    }
+    // The import line is gone from index.ts (the retirement comment may
+    // still name the symbol narratively).
+    const index = readFileSync(join(import.meta.dir, "../../src/dashboard/index.ts"), "utf8");
+    expect(index).not.toContain("dashboardPage,");
   });
 
   test("BYOK / Review placeholder POSTs → 405, zero fetch, zero env writes, no stale B0 copy", async () => {
@@ -1667,6 +2220,114 @@ function envDb(env: Env) {
 function makeDbEnv(db: DashboardD1, overrides: Partial<Env> = {}): Env {
   return { ...baseEnv(overrides), DB: db } as Env;
 }
+
+describe("GET /dashboard/apps/:slug/onboarding (plan 31 T5, AC4b)", () => {
+  const origFetch = globalThis.fetch;
+  afterEach(() => {
+    globalThis.fetch = origFetch;
+  });
+
+  function seedApp(env: Env, overrides: Partial<{ slug: string; githubAppId: number; name: string; createdBy: string; deletedAt: string | null }> = {}) {
+    return envDb(env).createApp({
+      id: crypto.randomUUID(),
+      slug: overrides.slug ?? "mstar-inspector-octocat",
+      githubAppId: overrides.githubAppId ?? CONVERSION.id,
+      name: overrides.name ?? CONVERSION.name,
+      privateKeyEnc: "v1.primary.aXZpdi.cHJldGV4dA==",
+      webhookSecretEnc: "v1.primary.aXZpdi.cHJldGV4dA==",
+      createdBy: overrides.createdBy ?? "octocat",
+    }).then(async (row) => {
+      if (!overrides.deletedAt) return row;
+      await dbOf(env).raw
+        .prepare(`UPDATE github_apps SET deleted_at = ? WHERE id = ?`)
+        .run(overrides.deletedAt, row.id);
+      return row;
+    });
+  }
+
+  function onboardingRequest(slug: string, login = "octocat"): Promise<Request> {
+    return createSessionValue(login, null, SESSION_SECRET).then((session) =>
+      dashboardRequest(`/dashboard/apps/${slug}/onboarding`, `${SESSION_COOKIE}=${session}`),
+    );
+  }
+
+  test("no session → 302 to login", async () => {
+    const res = await worker.fetch(
+      dashboardRequest("/dashboard/apps/mstar-inspector-octocat/onboarding"),
+      makeEnv(),
+    );
+    expect(res.status).toBe(302);
+    expect(res.headers.get("Location")).toBe("/dashboard/login");
+  });
+
+  test("unknown slug → 404 (settings-family unknown-app shape)", async () => {
+    const res = await worker.fetch(await onboardingRequest("no-such-app"), makeEnv());
+    expect(res.status).toBe(404);
+  });
+
+  test("soft-deleted App → 404", async () => {
+    const env = makeEnv();
+    await seedApp(env, { deletedAt: new Date().toISOString() });
+    const res = await worker.fetch(await onboardingRequest("mstar-inspector-octocat"), env);
+    expect(res.status).toBe(404);
+  });
+
+  test("member without manage (not the creator, not admin) → 403 forbidden page", async () => {
+    const env = makeEnv();
+    await seedApp(env, { createdBy: "someone-else" });
+    const res = await worker.fetch(await onboardingRequest("mstar-inspector-octocat", "mallory"), env);
+    expect(res.status).toBe(403);
+    const body = await res.text();
+    expect(body).not.toContain(CONVERSION.name);
+    expect(body).not.toContain(FAKE_PEM);
+  });
+
+  test("creator (member role) → 200 with name / id / slug / webhook URL + Settings CTA, no secrets", async () => {
+    const env = makeEnv();
+    const row = await seedApp(env, { createdBy: "octocat-with-a-long-login" });
+    const res = await worker.fetch(await onboardingRequest(row.slug, "octocat-with-a-long-login"), env);
+    expect(res.status).toBe(200);
+    const body = await res.text();
+    expect(body).toContain("mstar-inspector-octocat");
+    expect(body).toContain(`<span class="id">${CONVERSION.id}</span>`);
+    expect(body).toContain(`https://worker.local/webhook/${row.slug}`);
+    expect(body).toContain(`href="/dashboard/apps/${row.slug}/settings"`);
+    expect(body).toContain(">Open Settings</a>");
+    expect(body).toContain("Next: open Settings and configure a provider");
+    expect(body).not.toContain("BEGIN");
+    expect(body).not.toContain(FAKE_PEM);
+    expect(body).not.toContain(FAKE_WEBHOOK_SECRET);
+    expect(body).not.toContain("REVIEW_ENABLED");
+  });
+
+  test("admin views any App's onboarding page", async () => {
+    const env = makeEnv();
+    await seedApp(env, { createdBy: "someone-else" });
+    const res = await worker.fetch(await onboardingRequest("mstar-inspector-octocat"), env);
+    expect(res.status).toBe(200);
+    expect(await res.text()).toContain('href="/dashboard/apps/mstar-inspector-octocat/settings"');
+  });
+
+  test("Accept-Language zh renders the onboarding page in zh_CN (plan 31 T5)", async () => {
+    const env = makeEnv();
+    await seedApp(env);
+    const session = await createSessionValue("octocat", null, SESSION_SECRET);
+    const zh = await worker.fetch(
+      new Request("https://worker.local/dashboard/apps/mstar-inspector-octocat/onboarding", {
+        headers: { Cookie: `${SESSION_COOKIE}=${session}`, "Accept-Language": "zh-CN,zh;q=0.9" },
+      }),
+      env,
+    );
+    expect(zh.status).toBe(200);
+    const body = await zh.text();
+    expect(body).toContain('lang="zh-CN"');
+    expect(body).toContain("GitHub App 已连接");
+    expect(body).toContain("打开设置");
+    expect(body).not.toContain("GitHub App connected");
+    expect(body).not.toContain("Open Settings");
+    expect(body).not.toContain("REVIEW_ENABLED");
+  });
+});
 
 describe("migrations/0003_dashboard_users.sql (plan 12 T1)", () => {
   test("creates the users table per spec § Data model — no status column (removal = delete row)", () => {
@@ -1997,11 +2658,24 @@ describe("per-request allowlist guard (plan 12 T2, spec § AuthZ + lock L5)", ()
       networkCalls++;
       throw new Error("no network may run behind the guard");
     }) as unknown as typeof fetch;
-    const env = await removedMemberEnv();
+    // Plan 30 W-001: production ALWAYS binds ASSETS, so GET /dashboard hits
+    // spa-dispatch's own membership gate before the guard — the plan-12 403
+    // contract is preserved there (PM decision), not only via the legacy
+    // fall-through. Bind ASSETS so this test models production.
+    const env = withSpaAssets(await removedMemberEnv());
     const cookie = `${SESSION_COOKIE}=${await mallorySession()}`;
-    // GET shell (B0)
-    const shell = await worker.fetch(dashboardRequest("/dashboard", cookie), env);
-    expect(shell.status).toBe(403);
+    // GET shell (B0) — any Accept variant takes the shell path on /dashboard.
+    for (const accept of [undefined, "application/json"]) {
+      const headers: Record<string, string> = { Cookie: cookie };
+      if (accept) headers.Accept = accept;
+      const shell = await worker.fetch(new Request("https://worker.local/dashboard", { headers }), env);
+      expect(shell.status, accept ?? "no Accept").toBe(403);
+      const body = await shell.text();
+      // Removed-member page (not the shell): no identity header, no sections.
+      expect(body).toContain("Your dashboard access was removed. Ask an admin to re-invite mallory.");
+      expect(body).not.toContain("Signed in as");
+      expect(body).not.toContain('action="/dashboard/manifest/start"');
+    }
     // POST manifest start (B1)
     const start = await worker.fetch(
       new Request("https://worker.local/dashboard/manifest/start", {
@@ -2036,11 +2710,6 @@ describe("per-request allowlist guard (plan 12 T2, spec § AuthZ + lock L5)", ()
     );
     expect(future.status).toBe(403);
     expect(networkCalls).toBe(0);
-    const body = await shell.text();
-    // Removed-member page (not the shell): no identity header, no sections.
-    expect(body).toContain("Your dashboard access was removed. Ask an admin to re-invite mallory.");
-    expect(body).not.toContain("Signed in as");
-    expect(body).not.toContain('action="/dashboard/manifest/start"');
   });
 
   test("removed member CAN log out: logout is session-gated, not membership-gated (qc2 F-002)", async () => {
@@ -2085,12 +2754,17 @@ describe("per-request allowlist guard (plan 12 T2, spec § AuthZ + lock L5)", ()
     expect(callback.status).toBe(400);
   });
 
-  test("member requests pass the guard and reach the routes unchanged (B0 shell + B1 manifest)", async () => {
+  test("member requests pass the guard and reach the routes unchanged (SPA shell + B1 manifest)", async () => {
     const env = makeEnv();
     const cookie = `${SESSION_COOKIE}=${await createSessionValue("octocat", null, SESSION_SECRET)}`;
-    const shell = await worker.fetch(dashboardRequest("/dashboard", cookie), env);
+    const shell = await worker.fetch(dashboardRequest("/dashboard", cookie), withSpaAssets(env));
     expect(shell.status).toBe(200);
-    expect(await shell.text()).toContain("Signed in as octocat");
+    const shellBody = await shell.text();
+    expect(shellBody).toContain("window.__BOOT__=");
+    expect(shellBody).toContain('"login":"octocat"');
+    // Plan 30 W-001: the shell gate's shared D1 lookup still resolves the
+    // role for valid members (octocat is the seeded admin).
+    expect(shellBody).toContain('"role":"admin"');
     const start = await worker.fetch(
       new Request("https://worker.local/dashboard/manifest/start", {
         method: "POST",
@@ -2112,10 +2786,10 @@ describe("per-request allowlist guard (plan 12 T2, spec § AuthZ + lock L5)", ()
     const session = await createSessionValue("OctoCat", null, SESSION_SECRET);
     const res = await worker.fetch(
       dashboardRequest("/dashboard", `${SESSION_COOKIE}=${session}`),
-      makeEnv(),
+      withSpaAssets(makeEnv()),
     );
     expect(res.status).toBe(200);
-    expect(await res.text()).toContain("Signed in as OctoCat");
+    expect(await res.text()).toContain('"login":"OctoCat"');
   });
 
   test("guard fails closed when D1 is unbound: valid session → 500, route never runs", async () => {
@@ -2131,15 +2805,18 @@ describe("per-request allowlist guard (plan 12 T2, spec § AuthZ + lock L5)", ()
   });
 
   test("removed-member denial logs a structured not_a_member warning (login only, no secrets)", async () => {
+    // Plan 30 W-001: ASSETS is always bound in production, so the shell-path
+    // denial fires in spa-dispatch's membership gate (stage spa_dispatch), not
+    // the legacy guard — the structured event is identical otherwise.
     const warns = spyOnWarn();
     await worker.fetch(
       dashboardRequest("/dashboard", `${SESSION_COOKIE}=${await mallorySession()}`),
-      await removedMemberEnv(),
+      withSpaAssets(await removedMemberEnv()),
     );
     expect(warns).toHaveLength(1);
     const entry = JSON.parse(warns[0] ?? "") as Record<string, unknown>;
     expect(entry.event).toBe("dashboard_access");
-    expect(entry.stage).toBe("guard");
+    expect(entry.stage).toBe("spa_dispatch");
     expect(entry.reason).toBe("not_a_member");
     expect(entry.login).toBe("mallory");
   });
@@ -2152,6 +2829,8 @@ describe("members page (plan 12 T3, admin-only)", () => {
     `${SESSION_COOKIE}=${await createSessionValue("octocat", null, SESSION_SECRET)}`;
   const memberCookie = async () =>
     `${SESSION_COOKIE}=${await createSessionValue("mallory", null, SESSION_SECRET)}`;
+
+  // Plan 29 T6/T7: /dashboard/members is SPA-owned (shared spa helper).
 
   async function membersGet(cookie: string, env?: Env): Promise<Response> {
     return await worker.fetch(dashboardRequest("/dashboard/members", cookie), env ?? makeEnv());
@@ -2173,58 +2852,42 @@ describe("members page (plan 12 T3, admin-only)", () => {
     );
   }
 
-  test("the new routes sit behind the guard: no session → 302 to login", async () => {
-    const get = await membersGet("");
-    expect(get.status).toBe(302);
-    expect(get.headers.get("Location")).toBe("/dashboard/login");
-    const post = await membersPost("invite", "", "login=hubot");
+  test("the pinned POSTs sit behind the guard: no session → 302 to login; the HTML GET is SPA-owned (plan 29 T6)", async () => {
+    const db = createDashboardTestD1();
+    await createUser(db, { login: "octocat", role: "admin" });
+    // HTML navigation GET → SPA index (the SPA guards members client-side).
+    const get = await htmlGet("/dashboard/members", "", withSpaAssets(makeDbEnv(db)));
+    expect(get.status).toBe(200);
+    expect(await get.text()).toContain("window.__BOOT__=");
+    const post = await membersPost("invite", "", "login=hubot", makeDbEnv(db));
     expect(post.status).toBe(302);
     expect(post.headers.get("Location")).toBe("/dashboard/login");
   });
 
-  test("admin GET → 200: single column, masked list (login + role + created_at only)", async () => {
+  test("the legacy SSR handler is gone: a non-HTML GET falls through to the legacy app (guard 302)", async () => {
     const db = createDashboardTestD1();
-    const admin = await createUser(db, { login: "octocat", role: "admin" });
-    const member = await createUser(db, { login: "hubot", role: "member", invitedBy: "secret-inviter" });
-    const res = await membersGet(await adminCookie(), makeDbEnv(db));
-    expect(res.status).toBe(200);
-    const body = await res.text();
-    // List shows logins, roles, and created_at.
-    expect(body).toContain("<strong>hubot</strong>");
-    expect(body).toContain('<span class="meta">admin · ');
-    expect(body).toContain('<span class="meta">member · ');
-    expect(body).toContain(member.created_at);
-    // Masked DISPLAY: logins, roles, and created_at only — no row ids, no
-    // invited_by. (The row id does ride the remove form's hidden userId
-    // control — POST /members/remove {userId} removes by row id, spec §
-    // AuthZ "remove 按列表行 id，避免 login 大小写歧义" — so strip those
-    // transport-only fields before asserting what the list shows.)
-    expect(body).toContain(`name="userId" value="${member.id}"`);
-    const visible = body.replace(/<input type="hidden" name="userId" value="[^"]*">/g, "");
-    expect(visible).not.toContain(admin.id);
-    expect(visible).not.toContain(member.id);
-    expect(visible).not.toContain("secret-inviter");
-    // Single column (B1 confirm-page rule): no 3-column sections grid.
-    expect(body).not.toContain('<div class="sections">');
-    // invite primary (blue-700) + remove danger (red-700), per spec §
-    // DESIGN.md 意图.
-    expect(body).toContain('action="/dashboard/members/invite"');
-    expect(body).toContain('<button type="submit" class="primary">Invite member</button>');
-    expect(body).toContain('class="danger">Remove</button>');
-    // The acting admin's own row never offers removal (the route refuses it).
-    expect(body).toContain('<span class="you">you</span>');
+    const res = await membersGet("", makeDbEnv(db));
+    expect(res.status).toBe(302);
+    expect(res.headers.get("Location")).toBe("/dashboard/login");
   });
 
-  test("non-admin member GET → 403 restricted view, no membership data", async () => {
+  test("admin HTML GET → 200 SPA index (the members data contract lives on GET /api/members)", async () => {
+    const db = createDashboardTestD1();
+    await createUser(db, { login: "octocat", role: "admin" });
+    const res = await htmlGet("/dashboard/members", await adminCookie(), withSpaAssets(makeDbEnv(db)));
+    expect(res.status).toBe(200);
+    const body = await res.text();
+    expect(body).toContain("window.__BOOT__=");
+    expect(body).not.toContain(SPA_BOOT_MARKER);
+  });
+
+  test("non-admin HTML GET → 200 SPA index (the 403 face is the API route, tested in spa-page-apis)", async () => {
     const db = createDashboardTestD1();
     await createUser(db, { login: "octocat", role: "admin" });
     await createUser(db, { login: "mallory", role: "member" });
-    const res = await membersGet(await memberCookie(), makeDbEnv(db));
-    expect(res.status).toBe(403);
-    const body = await res.text();
-    expect(body).toContain("restricted to dashboard admins");
-    expect(body).not.toContain("/dashboard/members/invite");
-    expect(body).not.toContain("/dashboard/members/remove");
+    const res = await htmlGet("/dashboard/members", await memberCookie(), withSpaAssets(makeDbEnv(db)));
+    expect(res.status).toBe(200);
+    expect(await res.text()).toContain("window.__BOOT__=");
   });
 
   test("non-admin POST invite → 403, zero mutations", async () => {
@@ -2247,45 +2910,41 @@ describe("members page (plan 12 T3, admin-only)", () => {
     expect((await getUserByLogin(db, "octocat"))?.id).toBe(admin.id);
   });
 
-  test("admin invite → 200 success notice, member row created with invitedBy (input trimmed)", async () => {
+  test("admin invite → 200, member row created with invitedBy (input trimmed)", async () => {
     const db = createDashboardTestD1();
     await createUser(db, { login: "octocat", role: "admin" });
     const res = await membersPost("invite", await adminCookie(), "login=%20%20hubot%20%20", makeDbEnv(db));
     expect(res.status).toBe(200);
-    expect(await res.text()).toContain("Invited hubot");
+    expect(await res.text()).toBe("ok");
     const row = await getUserByLogin(db, "hubot");
     expect(row?.role).toBe("member");
     expect(row?.invited_by).toBe("octocat");
     expect(userCount(db)).toBe(2);
   });
 
-  test("T1 pin (Minor 2): invite resolves case variants — existing login → no-op notice, NO second row", async () => {
+  test("T1 pin (Minor 2): invite resolves case variants — existing login → idempotent no-op, NO second row", async () => {
     const db = createDashboardTestD1();
     await createUser(db, { login: "OctoCat", role: "admin" });
     // The DDL UNIQUE is BINARY-collated: a direct createUser("octocat") would
     // succeed and mint a second row — the NOCASE pre-read must catch it first.
     const res = await membersPost("invite", await adminCookie(), "login=octocat", makeDbEnv(db));
     expect(res.status).toBe(200);
-    const body = await res.text();
-    expect(body).toContain("octocat is already a member — nothing changed.");
-    expect(body).not.toContain("Invited octocat");
+    expect(await res.text()).toBe("ok");
     expect(userCount(db)).toBe(1);
   });
 
-  test("invite empty / whitespace login → 400 re-render, zero rows", async () => {
+  test("invite empty / whitespace login → 400, zero rows", async () => {
     const db = createDashboardTestD1();
     await createUser(db, { login: "octocat", role: "admin" });
     for (const value of ["", "%20%20%20"]) {
       const res = await membersPost("invite", await adminCookie(), `login=${value}`, makeDbEnv(db));
       expect(res.status).toBe(400);
-      const body = await res.text();
-      expect(body).toContain("Enter a GitHub login");
-      expect(body).toContain('action="/dashboard/members/invite"');
+      expect(await res.text()).toContain("Enter a GitHub login");
     }
     expect(userCount(db)).toBe(1);
   });
 
-  test("invite invalid GitHub login syntax → 400 re-render, zero rows (qc1/qc2 F-003)", async () => {
+  test("invite invalid GitHub login syntax → 400, zero rows (qc1/qc2 F-003)", async () => {
     const db = createDashboardTestD1();
     await createUser(db, { login: "octocat", role: "admin" });
     // Spaces, symbols, >39 chars, non-ASCII — all can never match a real
@@ -2300,9 +2959,7 @@ describe("members page (plan 12 T3, admin-only)", () => {
     for (const value of invalid) {
       const res = await membersPost("invite", await adminCookie(), `login=${value}`, makeDbEnv(db));
       expect(res.status).toBe(400);
-      const body = await res.text();
-      expect(body).toContain("not a valid GitHub login");
-      expect(body).toContain('action="/dashboard/members/invite"');
+      expect(await res.text()).toContain("not a valid GitHub login");
     }
     expect(userCount(db)).toBe(1);
   });
@@ -2313,7 +2970,7 @@ describe("members page (plan 12 T3, admin-only)", () => {
     const long = "a".repeat(39);
     const res = await membersPost("invite", await adminCookie(), `login=${long}`, makeDbEnv(db));
     expect(res.status).toBe(200);
-    expect(await res.text()).toContain(`Invited ${long}`);
+    expect(await res.text()).toBe("ok");
     expect((await getUserByLogin(db, long))?.role).toBe("member");
   });
 
@@ -2333,7 +2990,7 @@ describe("members page (plan 12 T3, admin-only)", () => {
     const ada = await createUser(db, { login: "ada", role: "admin" });
     const ok = await membersPost("remove", await adminCookie(), `userId=${ada.id}`, makeDbEnv(db));
     expect(ok.status).toBe(200);
-    expect(await ok.text()).toContain("Removed ada.");
+    expect(await ok.text()).toBe("ok");
     expect(await countAdmins(db)).toBe(1);
     // Now octocat IS the last admin — removal must refuse, row intact.
     const octocat = await getUserByLogin(db, "octocat");
@@ -2354,18 +3011,23 @@ describe("members page (plan 12 T3, admin-only)", () => {
     expect(userCount(db)).toBe(2);
   });
 
-  test("remove member → 200 success, row gone; the removed member's old cookie then 403s everywhere", async () => {
+  test("remove member → 200, row gone; the removed member's old cookie then 403s everywhere", async () => {
     const db = createDashboardTestD1();
     await createUser(db, { login: "octocat", role: "admin" });
     const mallory = await createUser(db, { login: "mallory", role: "member" });
     const staleCookie = await memberCookie(); // minted BEFORE the removal
     const res = await membersPost("remove", await adminCookie(), `userId=${mallory.id}`, makeDbEnv(db));
     expect(res.status).toBe(200);
-    expect(await res.text()).toContain("Removed mallory.");
+    expect(await res.text()).toBe("ok");
     expect(await getUserByLogin(db, "mallory")).toBeNull();
     // Done criterion: a removed member cannot reach any /dashboard/** route
-    // with the still-valid session cookie — the T2 guard fails it closed.
-    const shell = await worker.fetch(dashboardRequest("/dashboard", staleCookie), makeDbEnv(db));
+    // with the still-valid session cookie. Plan 30 W-001: production always
+    // binds ASSETS, so the shell path is denied by spa-dispatch's membership
+    // gate — bind ASSETS to model production, not the legacy fall-through.
+    const shell = await worker.fetch(
+      dashboardRequest("/dashboard", staleCookie),
+      withSpaAssets(makeDbEnv(db)),
+    );
     expect(shell.status).toBe(403);
   });
 

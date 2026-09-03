@@ -6,6 +6,8 @@
  * runner keeps importing this module without SDK mocks).
  *
  * Routes:
+ * - GET/HEAD /dashboard* trailing slash → 301 (src/worker/redirects.ts)
+ * - GET/HEAD enumerated SPA pages with Accept text/html → ASSETS index.html
  * - GET /healthz → 200 {"ok":true}
  * - POST /webhook/:appSlug → per-App webhook face (plan 13 Task 2; plan 24
  *   Task 1: the ONLY HTTP review entry — the legacy bare `/webhook` face is
@@ -28,8 +30,16 @@ import { defaultLog, handleReviewJob } from "./handlers";
 import { createAppsStore, type DeliveryOutcome } from "../dashboard/apps-store";
 import { createSecretbox } from "../dashboard/secretbox";
 import { dashboardApp } from "../dashboard/index";
+import { trailingSlashRedirect } from "./redirects";
+import { spaDispatch } from "./spa-dispatch";
 
 const app = new Hono<{ Bindings: Env }>();
+// Plan 29 T3 + plan 30 T4: `/dashboard*` GET/HEAD redirects (trailing
+// slash + the `/dashboard/apps` exact alias) then SPA dispatch. Both run
+// BEFORE the dashboard membership guard (mounted inside dashboardApp) so
+// POST family, OAuth, and APIs still fall through unchanged.
+app.use("*", trailingSlashRedirect());
+app.use("*", spaDispatch());
 /**
  * Classifier outcome → delivery-record outcome (plan 20 QC wave 1, S-2):
  * the pure mapping the per-App route applies immediately after
@@ -81,8 +91,9 @@ app.route("/dashboard", dashboardApp);
  * Per-App webhook face (plan 13 Task 2, spec § Multi-App 契约; plan 24
  * Task 1: the ONLY HTTP review entry — the legacy bare `/webhook` face is
  * retired). Pre-order: body-size cap (413) → REVIEW_ENABLED
- * kill-switch (non-"true" → 2xx ignore, zero side effects; deployment-level
- * global switch, not per-App) → DB-unbound guard (500 fail-closed — the
+ * emergency brake (exactly "false" → 2xx ignore, zero side effects;
+ * deployment-level brake only — per-App `github_apps.review_enabled` is the
+ * primary control, plan 31 AC4a) → DB-unbound guard (500 fail-closed — the
  * dashboard-dependency convention) → slug lookup → signature verify. The
  * slug locates the `github_apps` row (active, not deleted) whose DECRYPTED
  * webhook secret parameterizes the same `classifyWebhook` classifier
@@ -98,7 +109,7 @@ app.route("/dashboard", dashboardApp);
  * `last_webhook_at` is touched exactly once — after signature verification,
  * regardless of the subsequent enqueue outcome (job / ignore / paused; a
  * queue-send failure below still leaves the touch committed), before the
- * pause check. Reject paths and the pre-verify kill-switch return never
+ * pause check. Reject paths and the pre-verify emergency-brake return never
  * touch, so the column reads "last verified delivery" (NOT "last successful
  * enqueue") and is decoupled from the review switch. Then
  * `review_enabled=0` answers 2xx with ZERO enqueue (the webhook stays
@@ -137,16 +148,20 @@ app.post("/webhook/:appSlug", async (c) => {
   const signature = c.req.header("x-hub-signature-256") ?? null;
   const eventName = c.req.header("x-github-event") ?? null;
 
-  // Kill-switch BEFORE the slug lookup (spec ordering; zero side effects —
-  // no D1 read when reviews are off). The flag is still passed to
-  // classifyWebhook below so the handler and classifier share the same
-  // computed REVIEW_ENABLED.
-  const reviewEnabled = c.env.REVIEW_ENABLED === "true";
+  // Emergency brake BEFORE the slug lookup (spec ordering; zero side effects
+  // — no D1 read when the brake is pulled). Plan 31 AC4a: the env is an
+  // emergency brake ONLY — per-App `github_apps.review_enabled` is the
+  // primary control, so the predicate is inverted to `!== "false"` (unset /
+  // "" / "true" / "TRUE" / anything else → per-App governs; only the exact,
+  // case-sensitive, untrimmed "false" stops all reviews). The flag is still
+  // passed to classifyWebhook below so the handler and classifier share the
+  // same computed REVIEW_ENABLED.
+  const reviewEnabled = c.env.REVIEW_ENABLED !== "false";
   if (!reviewEnabled) {
     webhookWarn(
-      "review_disabled",
-      "REVIEW_ENABLED is not 'true'",
-      "webhook ignored — reviews disabled by the REVIEW_ENABLED kill-switch",
+      "review_disabled_kill_switch",
+      "REVIEW_ENABLED is exactly 'false'",
+      "webhook ignored — reviews stopped by the REVIEW_ENABLED emergency brake",
     );
     return c.text("ignored", 200);
   }
@@ -214,7 +229,7 @@ app.post("/webhook/:appSlug", async (c) => {
   // after classification (before the reject return) so EVERY classified
   // outcome lands: reject → rejected (status_code = the classifier's
   // status), ignore → ignored, job + review_enabled=0 → paused, job → ok.
-  // The pre-classify failures (413 / kill-switch / db-guard / 404 /
+  // The pre-classify failures (413 / emergency-brake / db-guard / 404 /
   // decrypt 500) never reach this line and record nothing (the retired
   // legacy face recorded nothing by design — AL-20-1: legacy 不落行; app_id
   // is NOT NULL FK). Best-effort like the
@@ -240,7 +255,7 @@ app.post("/webhook/:appSlug", async (c) => {
   // non-reject), so this delivery is touched — after signature verification,
   // regardless of the subsequent enqueue outcome (job / ignore / paused; a
   // queue-send failure in handleReviewJob below still leaves this touch
-  // committed). The reject returns above and the pre-verify kill-switch
+  // committed). The reject returns above and the pre-verify emergency-brake
   // return never reach this line, so the column reads "last verified
   // delivery", NOT "last successful enqueue". Best-effort (same pattern as
   // the install upsert below): a failure logs a structured warn and never

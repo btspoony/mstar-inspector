@@ -92,6 +92,10 @@ export type AppProviderKeyRow = {
   created_at: string;
   /** Last write time (migration 0012); NULL for rows written before 0012. */
   updated_at: string | null;
+  /** Verification time (migration 0015); NULL = never verified. */
+  verified_at: string | null;
+  /** Verification outcome ('ok' | 'failed', store-enforced; migration 0015); NULL = never verified. */
+  verified_status: string | null;
 };
 
 /** A row of `app_model_config` (migration 0006). Absent row = chain unset. */
@@ -140,6 +144,10 @@ export type AppCustomProviderRow = {
   api_key_enc: string;
   created_at: string;
   updated_at: string;
+  /** Verification time (migration 0015); NULL = never verified. */
+  verified_at: string | null;
+  /** Verification outcome ('ok' | 'failed', store-enforced; migration 0015); NULL = never verified. */
+  verified_status: string | null;
 };
 
 /**
@@ -169,6 +177,49 @@ export type CustomProviderConsumerConfig = {
   model_ids: string[];
   api_key: string;
 };
+
+/**
+ * A row of `app_provider_models` (migration 0015, plan 31 T2): the per-App
+ * verified-model cache for BUILT-IN providers. `provider` is the
+ * SELECTOR-FACING key (spec §6.1) — `ark` BYOK keys verify under the BYOK id
+ * "ark" but their cache rows are written under "ark-plan" (the in-image base
+ * provider id the chain references). models_json is a TEXT JSON array of
+ * verified model ids — configuration, not a secret (0006 model_chain
+ * rationale). Custom providers write NO rows here (their vocabulary is the
+ * declared model_ids, 0012).
+ */
+export type AppProviderModelsRow = {
+  app_id: string;
+  provider: string;
+  models_json: string;
+  fetched_at: string;
+};
+
+/**
+ * One verified-model cache entry as the settings loader sees it (plan 31
+ * Interfaces — the dropdown source for selector literal grammar
+ * `provider/model`). `provider` is the selector-facing prefix of every
+ * option built from this row.
+ */
+export type VerifiedModels = {
+  /** Selector-facing provider key (the row's `provider` — "ark-plan" for a verified `ark` BYOK key). */
+  provider: string;
+  /** Verified model ids, exactly as cached at save time ([] = probe-only verification). */
+  models: string[];
+  /** Cache write time (SQLite datetime('now') UTC). */
+  fetched_at: string;
+};
+
+/**
+ * BYOK provider id → selector-facing `app_provider_models` cache key (spec
+ * §6.1): an `ark` BYOK key verifies under the BYOK vocabulary id "ark", but
+ * its cached model list must be written under "ark-plan" — the in-image base
+ * provider id that is the chain's selector prefix (IN_IMAGE_BASE_PROVIDER_IDS
+ * holds the same ids). Every other provider uses its own id unchanged.
+ */
+export function modelCacheProviderKey(provider: string): string {
+  return provider === "ark" ? "ark-plan" : provider;
+}
 
 /**
  * The provider id allowlist — the keys of the `PROVIDERS` mapping in
@@ -257,17 +308,18 @@ export function parseModelChain(raw: string | undefined): string[] {
     .filter((selector) => selector.length > 0);
 }
 /**
- * Parse the stored TEXT JSON array of model ids (AL-23-1 DDL) — fail-loud
- * on anything that is not a JSON array of strings (the getAppConfig tamper
- * convention): a malformed row throws in the store, never deferring to a
- * caller's `.join` on a non-array.
+ * Parse a stored TEXT JSON array of model ids — either column that stores
+ * one (app_custom_providers.model_ids, AL-23-1 DDL, or
+ * app_provider_models.models_json, migration 0015) — fail-loud on anything
+ * that is not a JSON array of strings (the getAppConfig tamper convention):
+ * a malformed row throws in the store, never deferring to a caller's
+ * `.join` on a non-array. `source` names the exact table.column in the
+ * error so a tampered row is attributable.
  */
-function parseCustomProviderModelIds(raw: string): string[] {
+function parseModelIdsJson(raw: string, source: string): string[] {
   const parsed: unknown = JSON.parse(raw);
   if (!Array.isArray(parsed) || !parsed.every((id) => typeof id === "string")) {
-    throw new Error(
-      `app-config-store: app_custom_providers.model_ids is not a JSON array of strings: ${JSON.stringify(raw)}`,
-    );
+    throw new Error(`app-config-store: ${source} is not a JSON array of strings: ${JSON.stringify(raw)}`);
   }
   return parsed;
 }
@@ -630,7 +682,13 @@ export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | un
      * crypto or write (the route answers 400 first; this is the backstop).
      * The upsert maintains the row's write time (migration 0012): a fresh
      * insert writes updated_at == created_at from ONE clock read; re-setting
-     * moves both forward.
+     * moves both forward. Overwriting a previously verified row with a NEW
+     * key also resets verified_at/verified_status to NULL (migration 0015) —
+     * verification belongs to the (provider, key) pair, not the row; the new
+     * key has not been verified until saveVerifiedKey runs again. (The
+     * save-then-verify flow uses saveVerifiedKey; setProviderKey is the
+     * legacy unverified path and any leftover caller must not inherit a
+     * stale verified_status.)
      */
     async setProviderKey(appId: string, provider: string, plainKey: string): Promise<void> {
       if (plainKey.length > MAX_PROVIDER_KEY_LENGTH) {
@@ -649,23 +707,86 @@ export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | un
            ON CONFLICT (app_id, provider) DO UPDATE SET
              key_enc = excluded.key_enc,
              created_at = (SELECT ts FROM now),
-             updated_at = (SELECT ts FROM now)`,
+             updated_at = (SELECT ts FROM now),
+             verified_at = NULL,
+             verified_status = NULL`,
         )
         .bind(appId, provider, keyEnc)
         .run();
     },
 
     /**
-     * Delete one provider key row. Returns whether THIS call removed a row
-     * (an unconfigured provider — or any provider the allowlist could never
-     * have stored — is a no-op returning false).
+     * Store one provider key AFTER successful verification (plan 31 T3): the
+     * verified analogue of setProviderKey — encrypts with the SAME
+     * composite-PK AAD, upserts the (app_id, provider) row with the
+     * verification bookkeeping (migration 0015: verified_at = now +
+     * verified_status = 'ok'), and upserts the App's verified-model cache row
+     * under the SELECTOR-FACING provider key (modelCacheProviderKey — an
+     * `ark` BYOK key caches under "ark-plan", spec §6.1) as ONE atomic
+     * db.batch (D1 batch is transactional; a mid-save failure rolls back both
+     * statements, so a verified key with no cache row is impossible).
+     * `models` may be [] (a provider that only got an auth-probe has an
+     * empty cache — that is the "probe-only" signal Task 4's member
+     * validation falls back to syntax-only on). Bounds/backstop contract
+     * identical to setProviderKey (a key longer than MAX_PROVIDER_KEY_LENGTH
+     * throws ProviderKeyTooLongError before any crypto or write; the callers
+     * that still write UNverified rows via setProviderKey keep compiling —
+     * Task 4 switches the save flow over; until then those rows stay
+     * verified_status NULL = legacy unverified).
+     */
+    async saveVerifiedKey(appId: string, provider: string, plainKey: string, models: string[]): Promise<void> {
+      if (plainKey.length > MAX_PROVIDER_KEY_LENGTH) {
+        throw new ProviderKeyTooLongError();
+      }
+      const keyEnc = await box.encryptSecret(plainKey, providerKeyAad(appId, provider));
+      // modelCacheProviderKey maps the BYOK id to the selector-facing cache
+      // key (ark → ark-plan) — the ONLY place that relationship is applied.
+      const cacheProvider = modelCacheProviderKey(provider);
+      // One clock read per statement pair (the 0012 T1 convention); the key
+      // upsert moves created_at/updated_at forward exactly like setProviderKey.
+      await db.batch([
+        db.prepare(
+          `WITH now AS (SELECT datetime('now') AS ts)
+           INSERT INTO app_provider_keys (app_id, provider, key_enc, created_at, updated_at, verified_at, verified_status)
+           VALUES (?, ?, ?, (SELECT ts FROM now), (SELECT ts FROM now), (SELECT ts FROM now), 'ok')
+           ON CONFLICT (app_id, provider) DO UPDATE SET
+             key_enc = excluded.key_enc,
+             created_at = (SELECT ts FROM now),
+             updated_at = (SELECT ts FROM now),
+             verified_at = excluded.verified_at,
+             verified_status = excluded.verified_status`,
+        ).bind(appId, provider, keyEnc),
+        db.prepare(
+          `WITH now AS (SELECT datetime('now') AS ts)
+           INSERT INTO app_provider_models (app_id, provider, models_json, fetched_at)
+           VALUES (?, ?, ?, (SELECT ts FROM now))
+           ON CONFLICT (app_id, provider) DO UPDATE SET
+             models_json = excluded.models_json,
+             fetched_at = (SELECT ts FROM now)`,
+        ).bind(appId, cacheProvider, JSON.stringify(models)),
+      ]);
+    },
+
+    /**
+     * Delete one provider key row — and the App's verified-model cache row
+     * for the same provider, in ONE atomic batch (a removed key must not
+     * linger as "verified" in the settings dropdown; saveVerifiedKey writes
+     * both rows transactionally, so removal is transactional too). The cache
+     * row lives under the SELECTOR-FACING provider key — modelCacheProviderKey
+     * maps an `ark` BYOK key to its "ark-plan" cache row (spec §6.1), so
+     * `removeProviderKey(appId, "ark")` deletes that row as well. Returns
+     * whether THIS call removed the key row (an unconfigured provider — or
+     * any provider the allowlist could never have stored — is a no-op
+     * returning false).
      */
     async removeProviderKey(appId: string, provider: string): Promise<boolean> {
-      const res = await db
-        .prepare(`DELETE FROM app_provider_keys WHERE app_id = ? AND provider = ?`)
-        .bind(appId, provider)
-        .run();
-      return res.meta.changes > 0;
+      const res = await db.batch([
+        db.prepare(`DELETE FROM app_provider_keys WHERE app_id = ? AND provider = ?`).bind(appId, provider),
+        db
+          .prepare(`DELETE FROM app_provider_models WHERE app_id = ? AND provider = ?`)
+          .bind(appId, modelCacheProviderKey(provider)),
+      ]);
+      return res[0]!.meta.changes > 0;
     },
 
     /**
@@ -736,6 +857,29 @@ export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | un
         keys[row.provider] = await box.decryptSecret(row.key_enc, providerKeyAad(row.app_id, row.provider));
       }
       return { appId, keys, modelChain: await readModelChain(appId) };
+    },
+
+    /**
+     * The App's verified-model cache (plan 31 Interfaces read face): every
+     * app_provider_models row for the App, provider-ascending — the settings
+     * loader's dropdown source (one cache row = one verified provider whose
+     * options render as selector literal grammar `provider/model`; the row's
+     * `provider` IS the selector prefix, "ark-plan" for a verified `ark`
+     * BYOK key). models_json parses fail-loud (the getAppConfig tamper
+     * convention): a malformed row throws in the store, never deferring to a
+     * caller. A provider absent here has never been verified through
+     * saveVerifiedKey (or its models were never cached).
+     */
+    async getVerifiedModels(appId: string): Promise<VerifiedModels[]> {
+      const res = await db
+        .prepare(`SELECT * FROM app_provider_models WHERE app_id = ? ORDER BY provider ASC`)
+        .bind(appId)
+        .all<AppProviderModelsRow>();
+      return res.results.map((row) => ({
+        provider: row.provider,
+        models: parseModelIdsJson(row.models_json, "app_provider_models.models_json"),
+        fetched_at: row.fetched_at,
+      }));
     },
 
     /**
@@ -856,8 +1000,8 @@ export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | un
         const res = await db
           .prepare(
             `WITH now AS (SELECT datetime('now') AS ts)
-             INSERT INTO app_custom_providers (app_id, provider_id, base_url, api, model_ids, api_key_enc, created_at, updated_at)
-             SELECT ?, ?, ?, ?, ?, ?, (SELECT ts FROM now), (SELECT ts FROM now)
+             INSERT INTO app_custom_providers (app_id, provider_id, base_url, api, model_ids, api_key_enc, created_at, updated_at, verified_at, verified_status)
+             SELECT ?, ?, ?, ?, ?, ?, (SELECT ts FROM now), (SELECT ts FROM now), (SELECT ts FROM now), 'ok'
              WHERE (SELECT COUNT(*) FROM app_custom_providers WHERE app_id = ?) < ${MAX_CUSTOM_PROVIDER_COUNT}`,
           )
           .bind(appId, decl.provider_id, decl.base_url, decl.api, JSON.stringify(decl.model_ids), keyEnc, appId)
@@ -870,15 +1014,17 @@ export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | un
       await db
         .prepare(
           `WITH now AS (SELECT datetime('now') AS ts)
-           INSERT INTO app_custom_providers (app_id, provider_id, base_url, api, model_ids, api_key_enc, created_at, updated_at)
-           VALUES (?, ?, ?, ?, ?, ?, (SELECT ts FROM now), (SELECT ts FROM now))
+           INSERT INTO app_custom_providers (app_id, provider_id, base_url, api, model_ids, api_key_enc, created_at, updated_at, verified_at, verified_status)
+           VALUES (?, ?, ?, ?, ?, ?, (SELECT ts FROM now), (SELECT ts FROM now), (SELECT ts FROM now), 'ok')
            ON CONFLICT (app_id, provider_id) DO UPDATE SET
              base_url = excluded.base_url,
              api = excluded.api,
              model_ids = excluded.model_ids,
              api_key_enc = excluded.api_key_enc,
              created_at = (SELECT ts FROM now),
-             updated_at = (SELECT ts FROM now)`,
+             updated_at = (SELECT ts FROM now),
+             verified_at = excluded.verified_at,
+             verified_status = excluded.verified_status`,
         )
         .bind(appId, decl.provider_id, decl.base_url, decl.api, JSON.stringify(decl.model_ids), keyEnc)
         .run();
@@ -914,7 +1060,7 @@ export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | un
         provider_id: row.provider_id,
         base_url: row.base_url,
         api: row.api as CustomProviderApi,
-        model_ids: parseCustomProviderModelIds(row.model_ids),
+        model_ids: parseModelIdsJson(row.model_ids, "app_custom_providers.model_ids"),
       }));
     },
     /**
@@ -936,7 +1082,7 @@ export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | un
           provider_id: row.provider_id,
           base_url: row.base_url,
           api: row.api as CustomProviderApi,
-          model_ids: parseCustomProviderModelIds(row.model_ids),
+          model_ids: parseModelIdsJson(row.model_ids, "app_custom_providers.model_ids"),
           api_key: await box.decryptSecret(row.api_key_enc, customProviderAad(row.app_id, row.provider_id)),
         });
       }

@@ -21,10 +21,10 @@ Merging to `main` triggers the **Deploy** workflow
   `LICENSE` — doc-only pushes need no redeploy) and manual `workflow_dispatch`
   (emergency channel, not subject to the path filter). Deploys are serialized
   (`concurrency` group, no cancel-in-progress).
-- **Sequence** — `test` job (typecheck + unit tests, mirrors `ci.yml`) →
+- **Sequence** — `test` job (typecheck + `build:spa` + unit tests, mirrors `ci.yml`) →
   `deploy` job: account verification → secrets injection (`wrangler secret
   bulk`, required + optional alert) → D1 migrations (`--remote`) →
-  `wrangler deploy` → post-deploy smoke (healthz / cron / digest) → digest
+  `bun run build:spa` → `wrangler deploy` → post-deploy smoke (healthz / cron / digest) → digest
   recorded in the run summary + `deploy-evidence` artifacts (§ Image pins and
   digest record).
 - **Failure semantics** — any step failure turns the run red and **stops**
@@ -56,7 +56,7 @@ exist before the first deploy:
   `sandbox-image/Dockerfile` at deploy time (`image_build_context: "."`,
   `instance_type: lite`, `max_instances: 1`).
 
-### D1 migrations (0001–0014, forward-only)
+### D1 migrations (0001–0015, forward-only)
 
 ```bash
 wrangler d1 migrations apply mstar-inspector-db --remote   # production
@@ -79,6 +79,7 @@ wrangler d1 migrations apply mstar-inspector-db            # local dev
 | `0012_custom_providers_and_key_updated_at` | per-App custom provider declarations + provider-key `updated_at` (plan 23) |
 | `0013_findings_review_id_index` | index on `findings.review_id` — insights/previous-round lookups (plan 22) |
 | `0014_idx_reviews_reviewed_at` | index on `reviews.reviewed_at` — insights window scans (plan 22) |
+| `0015_provider_verification` | per-App key `verified_at`/`verified_status` + `app_provider_models` cache (plan 31) |
 
 Migrations are **forward-only** (0002 precedent): never hand-edit an applied
 migration; add the next file.
@@ -161,8 +162,25 @@ settings; redeploy to change:
 
 | Name | Default | Purpose |
 |---|---|---|
-| `REVIEW_ENABLED` | **off** | fail-closed kill-switch; exactly `"true"` enables reviews |
+| `REVIEW_ENABLED` | unset | **emergency brake only** (plan 31): per-App `github_apps.review_enabled` is the primary review control; only the exact `"false"` (case-sensitive, untrimmed) stops ALL reviews — unset / `""` / `"true"` / `"TRUE"` / other → per-App governs |
 | `ADMIN_LOGINS` | unset | comma-separated GitHub logins bootstrapped as dashboard admin |
+
+> **Plan 31 cutover checklist (上线即生效 — run BEFORE any deploy containing
+> plan 31; the semantic inversion takes effect the moment the Worker lands):**
+>
+> 1. `wrangler d1 execute mstar-inspector-db --remote --command "SELECT slug, status, review_enabled FROM github_apps WHERE deleted_at IS NULL;"`
+> 2. Confirm each App's state matches operational intent: a `review_enabled=1`
+>    App will **immediately review for real** on a live Worker with unset
+>    `REVIEW_ENABLED`; any App that must not review yet must be paused
+>    (`review_enabled=0`) or disabled first.
+> 3. Confirm the live Worker env: set `REVIEW_ENABLED=false` only for an
+>    emergency all-stop; otherwise leave it unset. The old `.env.example`
+>    empty value no longer means "everything off" after this deploy.
+> 4. Post-deploy spot check: an installed App with `review_enabled=1` opening /
+>    updating a PR should enqueue; a paused App still answers 2xx with zero
+>    enqueue.
+> 5. Spot-check the dashboard: no `REVIEW_ENABLED` copy on any page; the
+>    Pause/Resume switch is the only review control.
 
 GitHub App setup (permissions, webhook events, installation):
 `.mstar/iterations/v0.2/guides/github-app-runbook.md`.
@@ -324,6 +342,10 @@ docker run --rm --entrypoint /opt/verify-synthesis.sh <image>
 > state). Any failure turns the run red and stops. The manual checks below
 > are extra / local investigation steps, not the workflow smoke — for local
 > runs and for investigating a red run.
+>
+> **URL permanence (plan 30):** `/dashboard/apps` — and `/dashboard/apps/` —
+> are permanently retired → 301 `/dashboard`; do not re-introduce the path
+> (browsers cache the 301).
 
 1. **Cron trigger registered** — the `wrangler deploy` output lists the cron
    trigger `*/15 * * * *` (also visible in the dashboard under Workers →
@@ -340,7 +362,8 @@ docker run --rm --entrypoint /opt/verify-synthesis.sh <image>
    ```
    `review_failures` must be present and the count queryable.
 3. **End-to-end review (v0.6 `modelOverrides` pin)** — with
-   `REVIEW_ENABLED=true`, open or update a test PR on an installed repo and
+   `REVIEW_ENABLED` unset (or any value except the exact `"false"` — the
+   emergency brake), open or update a test PR on an installed repo and
    confirm the review comment lands. To pin per-role overrides end-to-end,
    first configure a role chain on the dashboard (`app_model_roles`, 0009)
    for the test App: the consumer materializes it into the runner input JSON
@@ -408,8 +431,8 @@ Prerequisites: dashboard OAuth (`OAUTH_CLIENT_ID` /
 1. **Admin login** — open `/dashboard/login` and complete the GitHub OAuth
    flow. The first login against an empty `dashboard_users` table becomes
    admin (or `ADMIN_LOGINS` bootstraps the listed logins).
-2. **Create GitHub App** — on the Apps page (`/dashboard/apps`) click
-   **Create GitHub App**. The dashboard mints the webhook slug
+2. **Create GitHub App** — on the dashboard workbench (`/dashboard`, the
+   Apps-first home) click **Create GitHub App**. The dashboard mints the webhook slug
    (`mstar-inspector-<login>`-derived, DB pre-resolved) and POSTs the App
    manifest to `https://github.com/settings/apps/new` — the manifest's
    webhook URL is the App's OWN route `{origin}/webhook/{slug}`
@@ -456,7 +479,7 @@ or when deliveries look dead):
 
 | Check | Where | Healthy state |
 |---|---|---|
-| Kill-switch | Worker env var `REVIEW_ENABLED` | `"true"` — check FIRST: the kill-switch return precedes classification and delivery recording, so a zero-rows state can mean kill-switch rather than GitHub-side delivery death |
+| Emergency brake | Worker env var `REVIEW_ENABLED` | unset — only the exact `"false"` (case-sensitive, untrimmed) stops ALL reviews; check per-App `review_enabled` first, brake second, but note the brake return precedes classification and delivery recording, so a zero-rows state can mean brake rather than GitHub-side delivery death |
 | Webhook URL | GitHub App settings → Webhook | `https://<worker-host>/webhook/<slug>` — the per-App route |
 | Webhook secret | GitHub App settings → Webhook | A secret is set (masked). The manifest flow's GitHub-generated secret is stored encrypted in the dashboard; changing it on GitHub without updating the dashboard breaks signature verification → `rejected` (401) deliveries |
 | Active | GitHub App settings → Webhook | The **Active** checkbox is on and the App is not suspended; the dashboard row's status is `active` (a disabled row 404s the per-App route) |
@@ -470,8 +493,10 @@ mismatch (secret drift); 400 = malformed payload; 500 = the App's stored
 secret is missing/empty/default. Pre-classify failures (unknown/disabled
 slug, decrypt failure) record NO row — they surface in the Worker logs, not
 the panel. No rows at all = GitHub is not posting (URL wrong, App suspended,
-the event never fired, or the kill-switch is off — confirm `REVIEW_ENABLED`
-first, per the checklist above).
+the event never fired, or the emergency brake is pulled — the exact
+`REVIEW_ENABLED=false`). Confirm the per-App row first (`review_enabled`
+matches operational intent and the App is active), the brake second, per
+the checklist above.
 
 ### 4. R1 pin: reviews.model vs configured chain head
 
@@ -493,8 +518,9 @@ runner evidence, not the column.
 1. **Configure the chain** — on the App's settings page, set **Model chain**
    to a distinctive chain, e.g. `ark-plan/deepseek-v4-flash, openai/gpt-5:thinking`
    and save. The head (the first selector) is what the column must show.
-2. **Real PR** — with `REVIEW_ENABLED=true`, open or update a PR on an
-   installed repo of that App.
+2. **Real PR** — with `REVIEW_ENABLED` unset (any value except the exact
+   `"false"` — the emergency brake), open or update a PR on an installed
+   repo of that App.
 3. **Assert the column** — the review lands and the row records the chain
    head:
    ```bash
