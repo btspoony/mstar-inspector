@@ -16,7 +16,7 @@ import {
   type InsightsSearch,
   type InsightsSummary,
 } from "./data";
-import { HOME_WINDOWS, homeWindow, searchHref, verdictLine } from "./homeModel";
+import { HOME_WINDOWS, homeWindow, normalizeWindowSearch, searchHref, verdictLine } from "./homeModel";
 import { LoadFailedNotice, LoadingNotice } from "./PageNotice";
 
 /**
@@ -36,10 +36,22 @@ export function InsightsPage({ boot }: { boot: SpaBoot }) {
   const [data, setData] = useState<InsightsSummary | null>(null);
   const [state, setState] = useState<"loading" | "ok" | "error">("loading");
 
+  // Plan 36 QC F-002: an off-set legal window deep link (e.g. ?window=60)
+  // resolves to the default segment 30 — rewrite the URL on mount so the
+  // address bar reflects the applied filter (same contract as home).
+  useEffect(() => {
+    const normalized = normalizeWindowSearch(window.location.search);
+    if (normalized !== window.location.search) {
+      window.history.replaceState(null, "", `${window.location.pathname}${normalized}`);
+    }
+  }, []);
+
   useEffect(() => {
     let cancelled = false;
     setState("loading");
-    fetchJson(insightsSummaryUrl(search))
+    // include=repos: the records Select needs the window-scoped distinct
+    // repo set; the home surface does not (plan 36 QC F-001).
+    fetchJson(insightsSummaryUrl(search, true))
       .then((raw) => {
         if (cancelled) return;
         const parsed = parseInsights(raw);

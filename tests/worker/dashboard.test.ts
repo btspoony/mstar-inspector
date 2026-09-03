@@ -3499,7 +3499,9 @@ describe("/dashboard/api/insights/summary (plan 22 Task 2)", () => {
     expect(body.recurring_top).toEqual([
       { fingerprint: "fp-x", title_sample: "Null deref risk", count: 2, repos: ["acme/widgets"] },
     ]);
-    expect(body.repos).toEqual(["acme/widgets", "globex/gadgets"]);
+    // repos is opt-in (plan 36 QC F-001): without include=repos the
+    // aggregation is skipped and the field is empty.
+    expect(body.repos).toEqual([]);
   });
 
   test("window parse: non-integer, negative, and empty → 400; 0 is a legal day count", async () => {
@@ -3533,7 +3535,9 @@ describe("/dashboard/api/insights/summary (plan 22 Task 2)", () => {
   });
 
   test("repo filter: valid owner/repo echoed and forwarded; each aggregation restricted", async () => {
-    const res = await insightsGet("repo=globex/gadgets", await octocatCookie());
+    // include=repos so the opt-in aggregation runs and the independence
+    // assertion below is observable (plan 36 QC F-001).
+    const res = await insightsGet("repo=globex/gadgets&include=repos", await octocatCookie());
     expect(res.status).toBe(200);
     const body = (await res.json()) as {
       repo: string;
@@ -3546,6 +3550,7 @@ describe("/dashboard/api/insights/summary (plan 22 Task 2)", () => {
     expect(body.reviews_total).toBe(1);
     expect(body.findings_by_severity).toEqual([{ severity: "should-fix", count: 1 }]);
     expect(body.recurring_top).toEqual([]); // fp-z appears once → no recurrence
+    // The option set is the in-window universe, never the filtered subset.
     expect(body.repos).toEqual(["acme/widgets", "globex/gadgets"]);
   });
 
@@ -3555,6 +3560,34 @@ describe("/dashboard/api/insights/summary (plan 22 Task 2)", () => {
       const res = await insightsGet(`repo=${repo}`, cookie);
       expect(res.status, `repo=${repo}`).toBe(400);
       expect(((await res.json()) as { error?: string }).error, `repo=${repo}`).toContain("repo");
+    }
+  });
+
+  test("include=repos opt-in: aggregation runs only when requested; malformed include → 400 (plan 36 QC F-001)", async () => {
+    const cookie = await octocatCookie();
+
+    // Without include → repos is empty (aggregation skipped).
+    const plain = await insightsGet("", cookie);
+    const plainBody = (await plain.json()) as { repos: string[] };
+    expect(plainBody.repos).toEqual([]);
+
+    // include=repos → the window-scoped distinct set is populated.
+    const withRepos = await insightsGet("include=repos", cookie);
+    expect(withRepos.status).toBe(200);
+    const withReposBody = (await withRepos.json()) as { repos: string[] };
+    expect(withReposBody.repos).toEqual(["acme/widgets", "globex/gadgets"]);
+
+    // include=repos combines with window/repo params.
+    const combined = await insightsGet("window=90&repo=acme/widgets&include=repos", cookie);
+    expect(combined.status).toBe(200);
+    const combinedBody = (await combined.json()) as { repos: string[] };
+    expect(combinedBody.repos).toEqual(["acme/widgets", "globex/gadgets"]);
+
+    // Unknown / empty include values are malformed → 400.
+    for (const include of ["foo", "repos,foo", "repos,", ""]) {
+      const res = await insightsGet(`include=${include}`, cookie);
+      expect(res.status, `include=${include}`).toBe(400);
+      expect(((await res.json()) as { error?: string }).error, `include=${include}`).toContain("include");
     }
   });
 

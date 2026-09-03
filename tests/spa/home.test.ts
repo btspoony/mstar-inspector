@@ -9,7 +9,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { t } from "../../src/i18n";
 import { insightsSummaryUrl } from "../../src/spa/pages/data";
-import { HOME_WINDOWS, homeWindow, searchHref, verdictLine } from "../../src/spa/pages/homeModel";
+import { HOME_WINDOWS, homeWindow, normalizeWindowSearch, searchHref, verdictLine } from "../../src/spa/pages/homeModel";
 import type { InsightsSummary } from "../../src/spa/pages/data";
 
 const SUMMARY: InsightsSummary = {
@@ -74,6 +74,19 @@ describe("home segmented window model (plan 36 T1)", () => {
 
   test("verdict line comes from the store payload", () => {
     expect(verdictLine(SUMMARY)).toBe("comment 3 · approve 1");
+  });
+
+  test("normalizeWindowSearch rewrites off-set windows to the default segment (plan 36 QC F-002)", () => {
+    // Already a segment → unchanged (no URL rewrite needed).
+    expect(normalizeWindowSearch("")).toBe("");
+    expect(normalizeWindowSearch("?window=7")).toBe("?window=7");
+    expect(normalizeWindowSearch("?window=30")).toBe("?window=30");
+    expect(normalizeWindowSearch("?window=90&repo=acme/web")).toBe("?window=90&repo=acme/web");
+    // Off-set legal window → normalized to 30 (the default, omitted).
+    expect(normalizeWindowSearch("?window=60")).toBe("");
+    expect(normalizeWindowSearch("?window=14&repo=acme/web")).toBe("?repo=acme%2Fweb");
+    // Non-numeric window → same normalization path.
+    expect(normalizeWindowSearch("?window=abc")).toBe("");
   });
 });
 

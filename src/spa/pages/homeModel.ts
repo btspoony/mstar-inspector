@@ -21,11 +21,31 @@ export type HomeDimension = "severity" | "category";
  * HOME_WINDOWS, else the default 30. Arbitrary integer windows stay legal
  * on the API, but both the home surface and the records page only offer the
  * segmented set, so off-set values resolve to the default instead of leaving
- * the control without an active segment.
+ * the control without an active segment. The records page rewrites the URL
+ * on mount when an off-set value is normalized (plan 36 QC F-002), so the
+ * address bar reflects the applied filter.
  */
 export function homeWindow(search: string): HomeWindow {
   const raw = parseInsightsSearch(search).window;
   return (HOME_WINDOWS as readonly string[]).includes(raw) ? (raw as HomeWindow) : "30";
+}
+
+/**
+ * The search string with an off-set window normalized to the default
+ * segment (e.g. "?window=60" → "" since 30 is the default, or
+ * "?window=60&repo=acme/web" → "?repo=acme%2Fweb"). Returns the input
+ * unchanged when the window is already a segment. Used on mount to rewrite
+ * the URL so it reflects the applied filter (plan 36 QC F-002).
+ */
+export function normalizeWindowSearch(search: string): string {
+  const raw = parseInsightsSearch(search);
+  const window = homeWindow(search);
+  if (raw.window === window) return search;
+  const params = new URLSearchParams();
+  if (window !== "30") params.set("window", window);
+  if (raw.repo !== "") params.set("repo", raw.repo);
+  const query = params.toString();
+  return query === "" ? "" : `?${query}`;
 }
 
 export function searchHref(pathname: "/dashboard" | "/dashboard/insights", search: InsightsSearch): string {

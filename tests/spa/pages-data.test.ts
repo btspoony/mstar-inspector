@@ -53,6 +53,18 @@ describe("insights search wiring", () => {
     );
   });
 
+  test("summary URL requests the repos aggregation only when opted in (plan 36 QC F-001)", () => {
+    // Home surface: no include param.
+    expect(insightsSummaryUrl({ window: "7", repo: "" })).toBe("/dashboard/api/insights/summary?window=7");
+    // Records surface: include=repos appended.
+    expect(insightsSummaryUrl({ window: "7", repo: "acme/web" }, true)).toBe(
+      "/dashboard/api/insights/summary?window=7&repo=acme%2Fweb&include=repos",
+    );
+    expect(insightsSummaryUrl({ window: "30", repo: "" }, true)).toBe(
+      "/dashboard/api/insights/summary?include=repos",
+    );
+  });
+
   test("repo Select maps 全部 ↔ empty filter and keeps out-of-set current values", () => {
     expect(INSIGHTS_REPO_ALL).toBe("all");
     expect(insightsRepoSelectValue("")).toBe("all");
@@ -79,7 +91,11 @@ describe("insights search wiring", () => {
     expect(parseInsights(body)?.reviews_total).toBe(0);
     expect(parseInsights({ ...body, repos: ["acme/web"] })?.repos).toEqual(["acme/web"]);
     expect(parseInsights({ reviews_total: 0 })).toBeNull();
-    expect(parseInsights({ ...body, repos: undefined })).toBeNull();
+    // repos is opt-in (plan 36 QC F-001): missing is tolerated (defaults
+    // to undefined on the parsed shape), malformed is rejected.
+    expect(parseInsights({ ...body, repos: undefined })?.repos).toBeUndefined();
+    expect(parseInsights({ ...body, repos: "acme/web" })).toBeNull();
+    expect(parseInsights({ ...body, repos: [1, 2] })).toBeNull();
   });
 });
 

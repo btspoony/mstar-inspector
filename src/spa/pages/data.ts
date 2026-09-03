@@ -16,8 +16,12 @@ export type InsightsSummary = {
   verdict_distribution: Array<{ verdict: string; count: number }>;
   weekly_trend: Array<{ week_start: string; reviews: number; findings: number }>;
   recurring_top: Array<{ fingerprint: string; title_sample: string; count: number; repos: string[] }>;
-  /** Window-scoped distinct owner/repo values (plan 36 T2). Independent of `repo`. */
-  repos: string[];
+  /**
+   * Window-scoped distinct owner/repo values (plan 36 T2). Independent of
+   * `repo`. Absent on payloads that did not request `include=repos` (plan
+   * 36 QC F-001) — consumers default to [].
+   */
+  repos?: string[];
 };
 
 /** Radix Select forbids empty-string item values — "all" maps to no repo filter. */
@@ -151,10 +155,13 @@ export function parseInsightsSearch(search: string): InsightsSearch {
   return { window: params.get("window") ?? "30", repo: params.get("repo") ?? "" };
 }
 
-export function insightsSummaryUrl(search: InsightsSearch): string {
+export function insightsSummaryUrl(search: InsightsSearch, includeRepos = false): string {
   const params = new URLSearchParams();
   if (search.window !== "" && search.window !== "30") params.set("window", search.window);
   if (search.repo !== "") params.set("repo", search.repo);
+  // Opt-in repos aggregation (plan 36 QC F-001): only the records page
+  // requests it — the home surface must not pay the DISTINCT scan+sort.
+  if (includeRepos) params.set("include", "repos");
   const query = params.toString();
   return query === "" ? "/dashboard/api/insights/summary" : `/dashboard/api/insights/summary?${query}`;
 }
@@ -173,7 +180,10 @@ export function parseInsights(data: unknown): InsightsSummary | null {
   if (!Array.isArray(data.verdict_distribution) || !Array.isArray(data.weekly_trend) || !Array.isArray(data.recurring_top)) {
     return null;
   }
-  if (!isStringArray(data.repos)) return null;
+  // `repos` is opt-in (plan 36 QC F-001): absent on payloads that did not
+  // request include=repos (and on rolled-back Workers) — tolerate missing,
+  // reject malformed.
+  if (data.repos !== undefined && !isStringArray(data.repos)) return null;
   return data as InsightsSummary;
 }
 

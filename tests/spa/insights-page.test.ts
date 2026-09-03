@@ -39,6 +39,15 @@ describe("records page assembly (plan 36 T2)", () => {
     expect(page).toContain("bg-primary");
     expect(page).not.toMatch(/#[0-9a-fA-F]{3,8}\b/);
   });
+
+  test("records fetch opts into the repos aggregation; home does not (plan 36 QC F-001)", () => {
+    expect(page).toContain("insightsSummaryUrl(search, true)");
+  });
+
+  test("off-set window deep links are rewritten on mount (plan 36 QC F-002)", () => {
+    expect(page).toContain("normalizeWindowSearch");
+    expect(page).toContain("window.history.replaceState");
+  });
 });
 
 describe("records page copy (plan 36 T2 / AC9)", () => {
