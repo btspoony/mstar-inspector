@@ -687,3 +687,168 @@ describe("migrations/0016_users_login_nocase_unique.sql (plan 34 QC W-1)", () =>
     ).toThrow(/UNIQUE constraint failed/);
   });
 });
+
+describe("migrations/0017_app_model_chains.sql (plan 35 T2, spec §4.4)", () => {
+  /** Apply one migration file verbatim (filename order = wrangler order). */
+  function applyMigrationFile(db: TestD1, name: string): void {
+    db.raw.exec(readFileSync(join(MIGRATIONS_DIR, name), "utf8"));
+  }
+
+  /** Raw-insert one github_apps row (the 0004 column list is sufficient). */
+  function insertApp(db: TestD1, id: string, githubAppId = 1001): void {
+    db.raw
+      .prepare(
+        `INSERT INTO github_apps (id, slug, github_app_id, name, private_key_enc, webhook_secret_enc,
+           created_by, status, deleted_at, created_at, updated_at)
+         VALUES (?, ?, ?, ?, 'enc', 'enc', 'mallory', 'active', NULL,
+           datetime('now'), datetime('now'))`,
+      )
+      .run(id, id, githubAppId, id);
+  }
+
+  /** The pre-chains shape (0001–0016) with live app_model_config / app_model_roles rows. */
+  function createPreChainsDb(): TestD1 {
+    const db = createTestD1();
+    for (const name of [
+      "0003_dashboard_users.sql",
+      "0004_github_apps.sql",
+      "0005_reviews_app_id.sql",
+      "0006_app_provider_config.sql",
+      "0007_reviews_app_id_index.sql",
+      "0008_github_apps_ops.sql",
+      "0009_app_model_roles.sql",
+      "0010_review_failures.sql",
+      "0011_webhook_deliveries.sql",
+      "0012_custom_providers_and_key_updated_at.sql",
+      "0013_findings_review_id_index.sql",
+      "0014_idx_reviews_reviewed_at.sql",
+      "0015_provider_verification.sql",
+      "0016_users_login_nocase_unique.sql",
+    ]) {
+      applyMigrationFile(db, name);
+    }
+    return db;
+  }
+
+  test("applies cleanly over a seeded production-shaped DB (0001–0016 with live rows)", () => {
+    const db = createPreChainsDb();
+    insertApp(db, "app-1");
+    db.raw
+      .prepare(`INSERT INTO app_model_config (app_id, model_chain, updated_at) VALUES ('app-1', 'ark-plan/deepseek-v4-flash', datetime('now'))`)
+      .run();
+    db.raw
+      .prepare(`INSERT INTO app_model_roles (app_id, role, selector) VALUES ('app-1', 'code-reviewer', 'openai/gpt-5')`)
+      .run();
+    // Append-only CREATE TABLE + backfill DML over the live rows — nothing
+    // existing changes (the first INSERT…SELECT in the migration set).
+    expect(() => applyMigrationFile(db, "0017_app_model_chains.sql")).not.toThrow();
+    const count = db.raw.query("SELECT COUNT(*) AS n FROM reviews").get() as { n: number };
+    expect(count.n).toBe(0);
+  });
+
+  test("backfill: app_model_config non-NULL chain → the 'default' row (is_default=1); NULL/absent → no default row", () => {
+    const db = createPreChainsDb();
+    insertApp(db, "app-1");
+    insertApp(db, "app-2", 1002);
+    // app-1 has a chain; app-2 has a NULL chain row; app-3 has no row at all.
+    db.raw
+      .prepare(`INSERT INTO app_model_config (app_id, model_chain, updated_at) VALUES ('app-1', 'ark-plan/deepseek-v4-flash, openai/gpt-5:thinking', datetime('now'))`)
+      .run();
+    db.raw
+      .prepare(`INSERT INTO app_model_config (app_id, model_chain, updated_at) VALUES ('app-2', NULL, datetime('now'))`)
+      .run();
+    applyMigrationFile(db, "0017_app_model_chains.sql");
+    const rows = db.raw
+      .query("SELECT app_id, name, chain, is_default FROM app_model_chains ORDER BY app_id")
+      .all() as Array<{ app_id: string; name: string; chain: string; is_default: number }>;
+    // Exactly one default row, holding the verbatim chain (byte-identical).
+    expect(rows).toEqual([
+      { app_id: "app-1", name: "default", chain: "ark-plan/deepseek-v4-flash, openai/gpt-5:thinking", is_default: 1 },
+    ]);
+  });
+
+  test("backfill: every app_model_roles row → one 'seat-<role>' named chain + the seat reference row", () => {
+    const db = createPreChainsDb();
+    insertApp(db, "app-1");
+    db.raw
+      .prepare(`INSERT INTO app_model_config (app_id, model_chain, updated_at) VALUES ('app-1', 'ark-plan/deepseek-v4-flash', datetime('now'))`)
+      .run();
+    db.raw
+      .prepare(`INSERT INTO app_model_roles (app_id, role, selector) VALUES ('app-1', 'mstar-review-seat', 'ark-plan/deepseek-v4-flash:high')`)
+      .run();
+    db.raw
+      .prepare(`INSERT INTO app_model_roles (app_id, role, selector) VALUES ('app-1', 'code-reviewer', 'openai/gpt-5:thinking, anthropic/claude-x')`)
+      .run();
+    applyMigrationFile(db, "0017_app_model_chains.sql");
+    const chains = db.raw
+      .query("SELECT name, chain, is_default FROM app_model_chains WHERE app_id = 'app-1' ORDER BY name")
+      .all() as Array<{ name: string; chain: string; is_default: number }>;
+    expect(chains).toEqual([
+      { name: "default", chain: "ark-plan/deepseek-v4-flash", is_default: 1 },
+      { name: "seat-code-reviewer", chain: "openai/gpt-5:thinking, anthropic/claude-x", is_default: 0 },
+      { name: "seat-mstar-review-seat", chain: "ark-plan/deepseek-v4-flash:high", is_default: 0 },
+    ]);
+    const seats = db.raw
+      .query("SELECT role, chain_name FROM app_model_chain_seats WHERE app_id = 'app-1' ORDER BY role")
+      .all() as Array<{ role: string; chain_name: string }>;
+    expect(seats).toEqual([
+      { role: "code-reviewer", chain_name: "seat-code-reviewer" },
+      { role: "mstar-review-seat", chain_name: "seat-mstar-review-seat" },
+    ]);
+  });
+
+  test("app_model_chains: composite PK (app_id, name) rejects a duplicate pair; other apps may repeat the name", () => {
+    const db = createMigratedTestD1();
+    insertApp(db, "app-1");
+    insertApp(db, "app-2", 1002);
+    db.raw
+      .prepare(`INSERT INTO app_model_chains (app_id, name, chain, is_default, created_at, updated_at) VALUES ('app-1', 'fast', 'openai/gpt-5', 0, datetime('now'), datetime('now'))`)
+      .run();
+    expect(() =>
+      db.raw
+        .prepare(`INSERT INTO app_model_chains (app_id, name, chain, is_default, created_at, updated_at) VALUES ('app-1', 'fast', 'x/y', 0, datetime('now'), datetime('now'))`)
+        .run(),
+    ).toThrow(/UNIQUE constraint failed/);
+    // The same name under ANOTHER app is a distinct row (per-App chains).
+    db.raw
+      .prepare(`INSERT INTO app_model_chains (app_id, name, chain, is_default, created_at, updated_at) VALUES ('app-2', 'fast', 'x/y', 0, datetime('now'), datetime('now'))`)
+      .run();
+    const count = db.raw.query("SELECT COUNT(*) AS n FROM app_model_chains").get() as { n: number };
+    expect(count.n).toBe(2);
+  });
+
+  test("app_model_chain_seats: composite PK (app_id, role) rejects a duplicate pair; FK to github_apps enforced", () => {
+    const db = createMigratedTestD1();
+    insertApp(db, "app-1");
+    db.raw
+      .prepare(`INSERT INTO app_model_chains (app_id, name, chain, is_default, created_at, updated_at) VALUES ('app-1', 'fast', 'openai/gpt-5', 0, datetime('now'), datetime('now'))`)
+      .run();
+    db.raw
+      .prepare(`INSERT INTO app_model_chain_seats (app_id, role, chain_name) VALUES ('app-1', 'code-reviewer', 'fast')`)
+      .run();
+    expect(() =>
+      db.raw
+        .prepare(`INSERT INTO app_model_chain_seats (app_id, role, chain_name) VALUES ('app-1', 'code-reviewer', 'fast')`)
+        .run(),
+    ).toThrow(/UNIQUE constraint failed/);
+    expect(() =>
+      db.raw
+        .prepare(`INSERT INTO app_model_chain_seats (app_id, role, chain_name) VALUES ('no-such-app', 'code-reviewer', 'fast')`)
+        .run(),
+    ).toThrow(/FOREIGN KEY constraint failed/);
+  });
+
+  test("no ON DELETE: hard-deleting an app with chain rows is refused (soft-delete is the only removal path)", () => {
+    const db = createMigratedTestD1();
+    insertApp(db, "app-1");
+    db.raw
+      .prepare(`INSERT INTO app_model_chains (app_id, name, chain, is_default, created_at, updated_at) VALUES ('app-1', 'default', 'openai/gpt-5', 1, datetime('now'), datetime('now'))`)
+      .run();
+    db.raw
+      .prepare(`INSERT INTO app_model_chain_seats (app_id, role, chain_name) VALUES ('app-1', 'code-reviewer', 'default')`)
+      .run();
+    expect(() => db.raw.prepare("DELETE FROM github_apps WHERE id = 'app-1'").run()).toThrow(
+      /FOREIGN KEY constraint failed/,
+    );
+  });
+});

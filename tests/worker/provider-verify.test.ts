@@ -33,7 +33,6 @@ import {
 import {
   PROVIDER_VERIFY_ENDPOINTS,
   VERIFY_TIMEOUT_MS,
-  addKeyProviderIds,
   verifyProviderKey,
   type VerifyDeps,
 } from "../../src/dashboard/provider-verify";
@@ -222,12 +221,9 @@ describe("PROVIDER_VERIFY_ENDPOINTS parity lock", () => {
     expect(Object.keys(PROVIDER_VERIFY_ENDPOINTS)).toHaveLength(19);
   });
 
-  test("addKeyProviderIds hides unsupported built-ins from the Add Key dropdown", () => {
-    const ids = addKeyProviderIds(PROVIDER_IDS);
-    expect(ids).not.toContain("azure-openai");
-    expect(ids).not.toContain("ai-gateway");
-    expect(ids).toContain("anthropic");
-    expect(ids.length).toBe(PROVIDER_IDS.length - 2);
+  test("unsupported built-ins are exactly azure-openai + ai-gateway (the settings face's verifiable flag, plan 35 T4)", () => {
+    const unsupported = PROVIDER_IDS.filter((id) => PROVIDER_VERIFY_ENDPOINTS[id]?.kind === "unsupported");
+    expect(unsupported).toEqual(["azure-openai", "ai-gateway"]);
   });
 
   test("every entry is a recognized spec kind (models | probe | unsupported)", () => {

@@ -38,6 +38,8 @@
  */
 
 import { describe, expect, mock, test } from "bun:test";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import type { MessageBatch } from "@cloudflare/workers-types";
 import type { ReviewJobPayload } from "../../src/contracts/review-job";
 import type { ReviewOutput } from "../../src/review/schema";
@@ -45,7 +47,7 @@ import { FINDING_BODY_MAX, FINDING_TITLE_MAX } from "../../src/review/schema";
 import { createArtifactStore } from "../../src/store/artifact-store";
 import { computeFindingFingerprint } from "../../src/store/fingerprint";
 import { idemKey } from "../../src/contracts/idem";
-import { createMigratedTestD1, type TestD1 } from "../store/helpers";
+import { createMigratedTestD1, createTestD1, type TestD1 } from "../store/helpers";
 import { REDACTED } from "../../src/pipeline/redact";
 import type { ReviewCommenter } from "../../src/pipeline/comment";
 import { createSecretbox } from "../../src/dashboard/secretbox";
@@ -1526,15 +1528,15 @@ describe("createReviewConsumer", () => {
     runnerStdout = JSON.stringify(VALID_OUTPUT);
     const db = await createSeededTestD1();
     // A second App with a HEALTHY base chain (passes the base gate) but a
-    // raw `,` role-override row inserted DIRECTLY into app_model_roles. The
-    // dashboard store rejects this shape (assertModelRoleEntry →
-    // InvalidModelSelectorError), so only a direct-D1 write can land it; the
-    // consumer gate is the backstop and must treat it as "missing model
-    // chain" — the runner's parseModelSelectors would yield [] for the
-    // override, and the runner-side `trim() !== ""` presence check would
-    // otherwise count it as an override and run the in-image
-    // DEFAULT_MODEL_PATTERN scaffold (with the ark key) or fail at
-    // stage=runner after side effects.
+    // raw `,` override chain inserted DIRECTLY into app_model_chains with a
+    // seat reference row (the plan-35 shape). The dashboard store rejects
+    // this chain value (upsertModelChain → InvalidModelSelectorError), so
+    // only a direct-D1 write can land it; the consumer gate is the backstop
+    // and must treat it as "missing model chain" — the runner's
+    // parseModelSelectors would yield [] for the override, and the
+    // runner-side `trim() !== ""` presence check would otherwise count it
+    // as an override and run the in-image DEFAULT_MODEL_PATTERN scaffold
+    // (with the ark key) or fail at stage=runner after side effects.
     const overrideAppId = "33333333-4444-5555-6666-777777777777";
     const box = createSecretbox(TEST_KEY);
     db.raw
@@ -1554,8 +1556,14 @@ describe("createReviewConsumer", () => {
       );
     await seedAppConfig(db, overrideAppId); // healthy base chain + ark key
     db.raw
-      .prepare(`INSERT INTO app_model_roles (app_id, role, selector) VALUES (?, ?, ?)`)
-      .run(overrideAppId, "code-reviewer", ",");
+      .prepare(
+        `INSERT INTO app_model_chains (app_id, name, chain, is_default, created_at, updated_at)
+         VALUES (?, 'seat-code-reviewer', ',', 0, datetime('now'), datetime('now'))`,
+      )
+      .run(overrideAppId);
+    db.raw
+      .prepare(`INSERT INTO app_model_chain_seats (app_id, role, chain_name) VALUES (?, 'code-reviewer', 'seat-code-reviewer')`)
+      .run(overrideAppId);
     const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
 
     // Healthy sibling FIRST (completes), comma-override message second
@@ -1600,6 +1608,89 @@ describe("createReviewConsumer", () => {
     expect(String(failureRows(db)[0]!.error)).toContain(
       "role override `code-reviewer`: missing model chain",
     );
+  });
+
+  test("migration equivalence: a pre-chains App (0006/0009 shape) resolves byte-identically after 0017's backfill (plan 35 T2, spec §4.4)", async () => {
+    reset();
+    runnerStdout = JSON.stringify(VALID_OUTPUT);
+    // Pre-0017 DB: 0001–0016 in filename order (the chains migration NOT
+    // yet applied) — the wrangler state before plan 35 deploys.
+    const db = createTestD1();
+    for (const name of [
+      "0003_dashboard_users.sql",
+      "0004_github_apps.sql",
+      "0005_reviews_app_id.sql",
+      "0006_app_provider_config.sql",
+      "0007_reviews_app_id_index.sql",
+      "0008_github_apps_ops.sql",
+      "0009_app_model_roles.sql",
+      "0010_review_failures.sql",
+      "0011_webhook_deliveries.sql",
+      "0012_custom_providers_and_key_updated_at.sql",
+      "0013_findings_review_id_index.sql",
+      "0014_idx_reviews_reviewed_at.sql",
+      "0015_provider_verification.sql",
+      "0016_users_login_nocase_unique.sql",
+    ]) {
+      db.raw.exec(readFileSync(join(import.meta.dir, "../../migrations", name), "utf8"));
+    }
+    // Seed the pre-chains shape: github_apps + app_model_config chain +
+    // app_model_roles rows + the ark BYOK key (the fail-closed gate needs
+    // it). The chain and selectors are the byte-identical baseline.
+    const appId = "99999999-0000-1111-2222-333333333333";
+    const box = createSecretbox(TEST_KEY);
+    db.raw
+      .prepare(
+        `INSERT INTO github_apps
+           (id, slug, github_app_id, name, private_key_enc, webhook_secret_enc,
+            created_by, status, deleted_at, created_at, updated_at)
+         VALUES (?, 'legacy-app', 424299, 'legacy-app', ?, ?, 'tester', 'active', NULL, datetime('now'), datetime('now'))`,
+      )
+      .run(
+        appId,
+        await box.encryptSecret(TEST_APP_PEM, `github_apps.private_key_enc:${appId}`),
+        await box.encryptSecret("whsec-legacy-app", `github_apps.webhook_secret_enc:${appId}`),
+      );
+    const preChain = "ark-plan/deepseek-v4-flash";
+    const preOverrides = {
+      "mstar-review-seat": "ark-plan/deepseek-v4-flash:high",
+      "code-reviewer": "openai/gpt-5:thinking, anthropic/claude-x",
+    };
+    db.raw
+      .prepare(`INSERT INTO app_model_config (app_id, model_chain, updated_at) VALUES (?, ?, datetime('now'))`)
+      .run(appId, preChain);
+    db.raw
+      .prepare(`INSERT INTO app_model_roles (app_id, role, selector) VALUES (?, 'mstar-review-seat', ?)`)
+      .run(appId, preOverrides["mstar-review-seat"]);
+    db.raw
+      .prepare(`INSERT INTO app_model_roles (app_id, role, selector) VALUES (?, 'code-reviewer', ?)`)
+      .run(appId, preOverrides["code-reviewer"]);
+    const legacyStore = createAppConfigStore(db, TEST_KEY);
+    await legacyStore.setProviderKey(appId, "ark", "ark-key");
+    // The overrides reference openai/anthropic — the pre-migration App
+    // carried those keys too (the fail-closed gate requires them).
+    await legacyStore.setProviderKey(appId, "openai", "sk-legacy-openai");
+    await legacyStore.setProviderKey(appId, "anthropic", "sk-legacy-anthropic");
+    // Apply 0017 (the backfill) — the migration under test.
+    db.raw.exec(readFileSync(join(import.meta.dir, "../../migrations", "0017_app_model_chains.sql"), "utf8"));
+    // Post-migration resolution is byte-identical: the default row holds
+    // the chain verbatim; the seat-<role> chains + reference rows resolve
+    // to the same overrides map.
+    const store = createAppConfigStore(db, TEST_KEY);
+    expect(await store.getAppConfig(appId)).toEqual({
+      appId,
+      keys: { anthropic: "sk-legacy-anthropic", ark: "ark-key", openai: "sk-legacy-openai" },
+      modelChain: preChain,
+    });
+    expect(await store.getModelOverridesForConsumer(appId)).toEqual(preOverrides);
+    // And the full consumer flow: the runner input JSON carries the SAME
+    // modelOverrides map and the exec env the SAME chain — byte-identical
+    // runner input for the migrated App.
+    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
+    await consumer(makeBatch(makePayload({ appRef: { appId } })));
+    const input = JSON.parse(writtenInputJson!);
+    expect(input.modelOverrides).toEqual(preOverrides);
+    expect(runnerExecEnv().OMP_REVIEW_MODEL).toBe(preChain);
   });
 
   test("BB-2: the App's stored keys are forwarded under their PROVIDERS env names; blank rows never inject (per-App BYOK)", async () => {

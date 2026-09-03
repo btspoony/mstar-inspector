@@ -1,21 +1,19 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type MouseEvent } from "react";
 import { t } from "../../i18n";
-import { fetchJson, postForm } from "../api";
+import { Button } from "@/components/ui/button";
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
+import { fetchJson } from "../api";
 import type { SpaBoot } from "../boot";
-import styles from "../pages.module.css";
 import { formatRelativeTime } from "../relative-time";
-import { canManageApp, isPaused, parseApps, type AppsPayload } from "./data";
-import { LoadFailedNotice, LoadingNotice, PageNotice, type NoticeKind } from "./PageNotice";
+import { matchSpaRoute } from "../routes";
+import { navigate } from "../router";
+import { parseApps, type AppsPayload } from "./data";
+import { LoadFailedNotice, LoadingNotice } from "./PageNotice";
 
 export function AppsPage({ boot }: { boot: SpaBoot }) {
   const locale = boot.locale;
   const [payload, setPayload] = useState<AppsPayload | null>(null);
   const [state, setState] = useState<"loading" | "ok" | "error">("loading");
-  const [notice, setNotice] = useState<{ kind: NoticeKind; message: string } | null>(null);
-  // Plan 30 QC S-004: load() is shared by the mount effect AND the post-action
-  // reload (onAction), so the unmount-cancellation flag is a ref — a fetch
-  // landing after unmount (navigate away mid-load) must not setState. Mirrors
-  // InsightsSidebar's cancelled discipline.
   const cancelledRef = useRef(false);
 
   async function load(): Promise<void> {
@@ -37,166 +35,127 @@ export function AppsPage({ boot }: { boot: SpaBoot }) {
   useEffect(() => {
     cancelledRef.current = false;
     void load();
-    // initial load only
-    // eslint-disable-next-line react-hooks/exhaustive-deps
     return () => {
       cancelledRef.current = true;
     };
   }, []);
 
   return (
-    <div className={styles.page}>
-      <h1 className={styles.heading}>{t(locale, "apps.heading")}</h1>
+    <div className="flex flex-col gap-6">
+      <div className="flex flex-wrap items-end justify-between gap-3">
+        <h1 className="text-2xl font-semibold tracking-tight">{t(locale, "apps.heading")}</h1>
+        <CreateAppButton locale={locale} />
+      </div>
       {state === "loading" ? <LoadingNotice locale={locale} /> : null}
       {state === "error" ? <LoadFailedNotice locale={locale} /> : null}
-      {notice ? <PageNotice kind={notice.kind} message={notice.message} /> : null}
-      {state === "ok" && payload ? (
-        <AppsList boot={boot} payload={payload} onAction={load} onNotice={setNotice} />
-      ) : null}
+      {state === "ok" && payload ? <AppsList locale={locale} payload={payload} /> : null}
     </div>
   );
 }
 
-async function runAppAction(
-  path: string,
-  reload: () => Promise<void>,
-  onError: (message: string) => void,
-  locale: SpaBoot["locale"],
-): Promise<void> {
-  const { status } = await postForm(path, {});
-  if (status >= 400) {
-    onError(t(locale, "common.loadFailed"));
-    await reload();
-    return;
-  }
-  await reload();
-}
-
-function CreateAppButton({
-  locale,
-  variant,
-}: {
-  locale: SpaBoot["locale"];
-  variant: "primary" | "secondary";
-}) {
-  const className = variant === "primary" ? styles.btnPrimary : styles.btnSecondary;
+function CreateAppButton({ locale }: { locale: SpaBoot["locale"] }) {
   return (
     <form method="post" action="/dashboard/manifest/start">
-      <button className={className} type="submit">
-        {t(locale, "apps.create")}
-      </button>
+      <Button type="submit">{t(locale, "apps.create")}</Button>
     </form>
   );
 }
 
-function AppsList({
-  boot,
-  payload,
-  onAction,
-  onNotice,
-}: {
-  boot: SpaBoot;
-  payload: AppsPayload;
-  onAction: () => Promise<void>;
-  onNotice: (notice: { kind: NoticeKind; message: string } | null) => void;
-}) {
-  const locale = boot.locale;
+function spaClick(href: string, event: MouseEvent): void {
+  if (event.defaultPrevented) return;
+  if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+  if (!matchSpaRoute(href)) return;
+  event.preventDefault();
+  navigate(href);
+}
+
+function AppsList({ locale, payload }: { locale: SpaBoot["locale"]; payload: AppsPayload }) {
   if (payload.apps.length === 0) {
     return (
-      <section className={styles.card}>
-        <p className={styles.status}>{t(locale, "apps.empty")}</p>
-        <CreateAppButton locale={locale} variant="primary" />
-      </section>
+      <p className="text-sm text-muted-foreground">{t(locale, "apps.empty")}</p>
     );
   }
   return (
-    <section className={styles.card}>
-      <div className={styles.cardHeader}>
-        <CreateAppButton locale={locale} variant="secondary" />
-      </div>
-      <ul className={styles.list}>
-        {payload.apps.map((app) => {
-          const manageable = canManageApp(payload.viewer, app);
-          const paused = isPaused(app);
-          const badge =
-            app.status === "disabled" ? (
-              <span className={`${styles.badge} ${styles.badgeWarn}`}>{t(locale, "apps.status.disabled")}</span>
-            ) : paused ? (
-              <span className={`${styles.badge} ${styles.badgeWarn}`}>{t(locale, "apps.status.paused")}</span>
-            ) : (
-              <span className={styles.badge}>{t(locale, "apps.status.active")}</span>
-            );
-          const latest = app.health.latest;
-          return (
-            <li key={app.slug}>
-              <strong>{app.slug}</strong>
-              <span className={styles.meta}>
-                {t(locale, "apps.appId", { id: app.github_app_id })} · {t(locale, "apps.by", { login: app.created_by })}
-              </span>
-              {badge}
-              <span className={styles.meta}>
-                {latest
-                  ? t(locale, "apps.health.delivery", { time: formatRelativeTime(latest.created_at, locale) })
-                  : t(locale, "apps.health.deliveryNever")}
-                {latest ? ` ${latest.outcome}` : ""}
-                {app.health.rejected24h > 0
-                  ? ` · ${t(locale, "apps.health.rejected24h", { count: app.health.rejected24h })}`
-                  : ""}
-              </span>
-              {manageable ? (
-                <span className={styles.controls}>
-                  <a className={`${styles.btnSecondary} ${styles.btnSmall}`} href={`/dashboard/apps/${app.slug}/settings`}>
-                    {t(locale, "apps.settings")}
-                  </a>
-                  {app.status === "active" ? (
-                    paused ? (
-                      <button
-                        className={`${styles.btnSecondary} ${styles.btnSmall}`}
-                        type="button"
-                        onClick={() => void runAppAction(`/dashboard/apps/${app.slug}/resume`, onAction, (m) => onNotice({ kind: "error", message: m }), locale)}
-                      >
-                        {t(locale, "apps.actions.resume")}
-                      </button>
-                    ) : (
-                      <button
-                        className={`${styles.btnSecondary} ${styles.btnSmall}`}
-                        type="button"
-                        onClick={() => void runAppAction(`/dashboard/apps/${app.slug}/pause`, onAction, (m) => onNotice({ kind: "error", message: m }), locale)}
-                      >
-                        {t(locale, "apps.actions.pause")}
-                      </button>
-                    )
-                  ) : null}
-                  {app.status === "active" ? (
-                    <button
-                      className={`${styles.btnSecondary} ${styles.btnSmall}`}
-                      type="button"
-                      onClick={() => void runAppAction(`/dashboard/apps/${app.slug}/disable`, onAction, (m) => onNotice({ kind: "error", message: m }), locale)}
-                    >
-                      {t(locale, "apps.actions.disable")}
-                    </button>
-                  ) : (
-                    <button
-                      className={`${styles.btnSecondary} ${styles.btnSmall}`}
-                      type="button"
-                      onClick={() => void runAppAction(`/dashboard/apps/${app.slug}/enable`, onAction, (m) => onNotice({ kind: "error", message: m }), locale)}
-                    >
-                      {t(locale, "apps.actions.enable")}
-                    </button>
-                  )}
-                  <button
-                    className={`${styles.btnDanger} ${styles.btnSmall}`}
-                    type="button"
-                    onClick={() => void runAppAction(`/dashboard/apps/${app.slug}/delete`, onAction, (m) => onNotice({ kind: "error", message: m }), locale)}
+    <div className="rounded-md border">
+      <Table>
+        <TableHeader>
+          <TableRow>
+            <TableHead>{t(locale, "apps.tableName")}</TableHead>
+            <TableHead>{t(locale, "apps.tableStatus")}</TableHead>
+            <TableHead>{t(locale, "apps.tableHealth")}</TableHead>
+            <TableHead>{t(locale, "apps.tableCreator")}</TableHead>
+          </TableRow>
+        </TableHeader>
+        <TableBody>
+          {payload.apps.map((app) => {
+            const href = `/dashboard/apps/${app.slug}/settings`;
+            const latest = app.health.latest;
+            return (
+              <TableRow
+                key={app.slug}
+                className="cursor-pointer"
+                onClick={(event) => spaClick(href, event)}
+              >
+                <TableCell className="font-medium">
+                  <a
+                    className="text-foreground no-underline hover:underline"
+                    href={href}
+                    aria-label={t(locale, "apps.openAria", { slug: app.slug })}
+                    onClick={(event) => spaClick(href, event)}
                   >
-                    {t(locale, "apps.actions.delete")}
-                  </button>
-                </span>
-              ) : null}
-            </li>
-          );
-        })}
-      </ul>
-    </section>
+                    {app.slug}
+                  </a>
+                  <div className="text-xs text-muted-foreground tabular-nums">
+                    {t(locale, "apps.appId", { id: app.github_app_id })}
+                  </div>
+                </TableCell>
+                <TableCell>
+                  <StatusBadge locale={locale} status={app.status} reviewEnabled={app.review_enabled} />
+                </TableCell>
+                <TableCell className="text-muted-foreground">
+                  {latest
+                    ? t(locale, "apps.health.delivery", { time: formatRelativeTime(latest.created_at, locale) })
+                    : t(locale, "apps.health.deliveryNever")}
+                  {latest ? ` · ${latest.outcome}` : ""}
+                  {app.health.rejected24h > 0
+                    ? ` · ${t(locale, "apps.health.rejected24h", { count: app.health.rejected24h })}`
+                    : ""}
+                </TableCell>
+                <TableCell className="text-muted-foreground">{app.created_by}</TableCell>
+              </TableRow>
+            );
+          })}
+        </TableBody>
+      </Table>
+    </div>
   );
 }
+
+function StatusBadge({
+  locale,
+  status,
+  reviewEnabled,
+}: {
+  locale: SpaBoot["locale"];
+  status: string;
+  reviewEnabled: number | boolean;
+}) {
+  const enabled = typeof reviewEnabled === "boolean" ? reviewEnabled : reviewEnabled !== 0;
+  const paused = status === "active" && !enabled;
+  const kind = status === "disabled" ? "warn" : paused ? "warn" : "success";
+  const label =
+    status === "disabled"
+      ? t(locale, "apps.status.disabled")
+      : paused
+        ? t(locale, "apps.status.paused")
+        : t(locale, "apps.status.active");
+  const tone =
+    kind === "success"
+      ? "bg-[var(--badge-success-bg)] text-[var(--badge-success-fg)]"
+      : "bg-[var(--badge-warn-bg)] text-[var(--badge-warn-fg)]";
+  return (
+    <span className={`inline-flex h-5 items-center rounded-full px-2 text-xs font-medium ${tone}`}>{label}</span>
+  );
+}
+
+export { StatusBadge };

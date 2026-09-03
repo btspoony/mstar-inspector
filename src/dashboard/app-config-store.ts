@@ -1,8 +1,10 @@
 /**
  * D1 store for per-App AI configuration (plan 14 B2 Task 1): the
- * `app_provider_keys` BYOK keys + the `app_model_config` model chain. Spec
- * dashboard-multi-app-platform § Per-App BYOK + § Crypto envelope; migration
- * 0006 is the DDL single source.
+ * `app_provider_keys` BYOK keys + the model chains (plan 35 T2: the
+ * `app_model_chains` default + named chains and the `app_model_chain_seats`
+ * seat references, migration 0017). Spec dashboard-multi-app-platform
+ * § Per-App BYOK + § Crypto envelope; migration 0006 is the DDL single
+ * source for the key tables.
  *
  * Crypto (lock L1): setProviderKey encrypts INSIDE the store via
  * src/dashboard/secretbox.ts — plaintext keys arrive only as the method
@@ -29,18 +31,29 @@
  * face (types only, zero imports) — a real `D1Database`, the bun:sqlite test
  * double (tests/store/helpers.ts), and the store layer's `D1Like` all satisfy
  * it structurally (same pattern as apps-store.ts). Every write here is a
- * single statement EXCEPT setModelRoles (Phase 5 fix, PR #7 review): the
- * role editor's full-map save is ONE atomic `db.batch` — the only batch on
- * the face, added for multi-write atomicity, never for throughput.
+ * single statement EXCEPT the atomic multi-write faces (plan 35 T2, spec
+ * §4.4): setModelChain's default-row clear-then-set, setModelChainSeats'
+ * full-map save (the plan-17 role editor, now chain references), and
+ * removeModelChain's seat-reference cascade — each is ONE atomic
+ * `db.batch`, added for multi-write atomicity, never for throughput.
  *
- * Model roles (plan 17 B6): `app_model_roles` (migration 0009) maps each of
- * the 4 audit-seat agent names to its own selector chain per App. The role
- * vocabulary lives here as the MODEL_ROLE_IDS mirror (importing the runner
- * side via src/review is forbidden by the dashboard isolation — Q2), and the
- * selector grammar is validated with the parseModelChain mirror above; both
- * copies are parity-locked by tests/worker/app-config.test.ts. Roles are
- * decrypt-free (selectors are configuration, not secrets) and are consumed
- * by the pipeline consumer as the runner input `modelOverrides` field.
+ * Model chains (plan 35 T2, spec §4.4): `app_model_chains` (migration
+ * 0017) holds one row per (App, chain name) — the default chain row keeps
+ * the RESERVED name "default" (is_default = 1, at most one per App,
+ * enforced by the store in one batch), named chains are user-named
+ * selector chains (is_default = 0). `app_model_chain_seats` maps each of
+ * the 4 audit-seat agent names to a chain name; ABSENT row = the seat uses
+ * the default chain. The role vocabulary lives here as the MODEL_ROLE_IDS
+ * mirror (importing the runner side via src/review is forbidden by the
+ * dashboard isolation — Q2), and the selector grammar is validated with the
+ * parseModelChain mirror above; both copies are parity-locked by
+ * tests/worker/app-config.test.ts. Chains are decrypt-free (selectors are
+ * configuration, not secrets) and are consumed by the pipeline consumer as
+ * the runner input `modelOverrides` field (seats referencing the default
+ * chain — or with no reference row — are omitted; empty map → undefined).
+ * The pre-chains tables `app_model_config` / `app_model_roles` are
+ * write-retired / read-retired after migration 0017's backfill (rows
+ * retained, code no longer references them; no DROP).
  *
  * Semantics (the Task 2 UI + Task 3 consumer call sites rely on these):
  *   - setProviderKey upserts: re-setting a provider replaces the ciphertext
@@ -55,12 +68,25 @@
  *     provider-ascending; a key of ≤4 characters reveals NOTHING (the mask
  *     must never render a whole key).
  *   - setModelChain(null) — or any BLANK chain (empty / whitespace-only,
- *     plan 15: aligned with the route's 空 = 清除) — REMOVES the row (absent
- *     = unset; AL-24-5: a chain-less App's reviews FAIL CLOSED — the consumer
- *     rejects the message with a structured failure (plan 24 Task 6); there
- *     is no deployment-level chain to fall back to). A chain with content
- *     upserts verbatim. Read it back with getModelChain (the settings route
- *     prefills the editor from it WITHOUT decrypting any key material).
+ *     plan 15: aligned with the route's 空 = 清除) — REMOVES the default
+ *     chain row (absent = unset; AL-24-5: a chain-less App's reviews FAIL
+ *     CLOSED — the consumer rejects the message with a structured failure
+ *     (plan 24 Task 6); there is no deployment-level chain to fall back to).
+ *     A chain with content upserts the 'default' row VERBATIM with
+ *     is_default = 1 — the per-App is_default uniqueness is enforced in ONE
+ *     atomic db.batch (clear-old-set-new, spec §4.4). Read it back with
+ *     getModelChain (the settings route prefills the editor from it WITHOUT
+ *     decrypting any key material).
+ *   - Named chains (plan 35 T2): upsertModelChain / removeModelChain /
+ *     getModelChains manage user-named selector chains (is_default = 0;
+ *     the name "default" is reserved and rejected at route AND store
+ *     level). removeModelChain deletes the chain AND every seat reference
+ *     row pointing at it in ONE atomic batch (those seats fall back to the
+ *     default chain). Seats: setModelChainSeat / setModelChainSeats /
+ *     clearModelChainSeat / getModelChainSeats map a role to a chain name —
+ *     blank or "default" clears the reference row (absent = default chain);
+ *     getModelOverridesForConsumer resolves the runner-input map (seats
+ *     referencing the default chain or with no reference row are omitted).
  *   - getAppConfig decrypts for the consumer face: an App with no config
  *     yields an EMPTY keys map and a null chain (a chain referring to a
  *     provider without a key is rejected fail-closed by the consumer's
@@ -98,21 +124,32 @@ export type AppProviderKeyRow = {
   verified_status: string | null;
 };
 
-/** A row of `app_model_config` (migration 0006). Absent row = chain unset. */
-export type AppModelConfigRow = {
+/**
+ * A row of `app_model_chains` (migration 0017, plan 35 T2, spec §4.4).
+ * The default chain row keeps the RESERVED name "default" (is_default = 1);
+ * named chains are user-named selector chains (is_default = 0). is_default
+ * uniqueness per App is store-enforced in ONE atomic db.batch (no CHECK /
+ * partial unique index — app-family convention).
+ */
+export type AppModelChainRow = {
   app_id: string;
-  /** Verbatim comma-separated selector chain; NULL = unset (such an App's reviews fail closed — plan 24 Task 6). */
-  model_chain: string | null;
+  /** Chain name; "default" is the reserved default-row name. */
+  name: string;
+  /** Verbatim comma-separated selector chain — configuration, not a secret. */
+  chain: string;
+  /** 1 = the App's default chain (at most one per App); 0 = named chain. */
+  is_default: number;
+  created_at: string;
   updated_at: string;
 };
 
-/** A row of `app_model_roles` (migration 0009, plan 17). Absent row = the role is unmapped (chain behavior). */
-export type AppModelRoleRow = {
+/** A row of `app_model_chain_seats` (migration 0017, plan 35 T2, spec §4.4). Absent row = the seat uses the default chain. */
+export type AppModelChainSeatRow = {
   app_id: string;
   /** One of the MODEL_ROLE_IDS audit-seat agent names. */
   role: string;
-  /** Verbatim comma-separated selector chain — configuration, not a secret. */
-  selector: string;
+  /** The referenced chain name; the reserved "default" name is never stored (blank = default = absent row). */
+  chain_name: string;
 };
 /**
  * The custom-provider API protocol enum (AL-23-1 verdict): of the omp SDK
@@ -223,13 +260,14 @@ export function modelCacheProviderKey(provider: string): string {
 
 /**
  * The provider id allowlist — the keys of the `PROVIDERS` mapping in
- * src/pipeline/providers.ts (19 provider ids incl. `ark`, same order — plan
- * 24 Task 6 / AL-24-5 added `ark` so the in-image ark-plan base provider's
- * ARK_API_KEY rides the per-App BYOK keys map like every other provider).
- * Declared locally, NOT imported: dashboard modules must not import pipeline
- * code (architect decision Q2, src/dashboard/index.ts header). The copy is
- * locked in sync by tests/worker/app-config.test.ts (id-sequence equality
- * against the pipeline mapping — the coverage-lock pattern).
+ * src/pipeline/provider-catalog.ts (19 builtin-tier provider ids incl.
+ * `ark`, same order — plan 24 Task 6 / AL-24-5 added `ark` so the in-image
+ * ark-plan base provider's ARK_API_KEY rides the per-App BYOK keys map like
+ * every other provider). Declared locally, NOT imported: dashboard modules
+ * must not import pipeline code (architect decision Q2, src/dashboard/
+ * index.ts header). The copy is locked in sync by tests/worker/
+ * app-config.test.ts (id-sequence equality against the pipeline catalog's
+ * builtin tier — the coverage-lock pattern).
  */
 export const PROVIDER_IDS: readonly string[] = Object.freeze([
   "anthropic",
@@ -252,6 +290,64 @@ export const PROVIDER_IDS: readonly string[] = Object.freeze([
   "wafer-serverless",
   "ark",
 ]);
+
+/**
+ * The dashboard's catalog mirror (spec §5, plan 35 T3) — PROVIDER_IDS
+ * extended with the display metadata snapshot: every catalog entry (builtin
+ * AND template tier) as id → { label, tier, baseUrl, api, models, doc }.
+ * Declared locally, NOT imported (Q2 — dashboard modules never import
+ * pipeline code); the copy is parity-locked against
+ * src/pipeline/provider-catalog.ts by tests/worker/app-config.test.ts
+ * (key set, labels, tiers, baseUrl, api, models, doc — the PROVIDER_IDS
+ * lock pattern). `tier: "template"` entries are NOT runner-consumable
+ * env-name entries — the save flow materializes them through the existing
+ * custom-provider machinery (app_custom_providers) with `baseUrl`'s
+ * {account_id} placeholder substituted by the user's account id.
+ */
+export type ProviderMirrorEntry = {
+  /** Human-readable provider label (picker/table). */
+  label: string;
+  /** builtin = runner-consumable env-name entry; template = metadata + prefill only. */
+  tier: "builtin" | "template";
+  /** Default API base URL. Template entries carry a {account_id} placeholder. */
+  baseUrl: string | null;
+  /** Custom-provider API protocol to materialize a template with (template tier only). */
+  api: string | null;
+  /** Representative model ids (display/prefill metadata). */
+  models: readonly string[];
+  /** Provider docs URL. */
+  doc: string | null;
+};
+
+export const PROVIDER_META: Record<string, ProviderMirrorEntry> = {
+  anthropic: { label: "Anthropic", tier: "builtin", baseUrl: null, api: null, models: ["claude-fable-5", "claude-fable-5-1", "claude-haiku-4-5", "claude-haiku-4-5-20251001", "claude-opus-4-5"], doc: "https://docs.anthropic.com/en/docs/about-claude/models" },
+  openai: { label: "OpenAI", tier: "builtin", baseUrl: null, api: null, models: ["chatgpt-image-latest", "gpt-3.5-turbo", "gpt-4", "gpt-4-turbo", "gpt-4.1"], doc: "https://platform.openai.com/docs/models" },
+  gemini: { label: "Google Gemini", tier: "builtin", baseUrl: null, api: null, models: ["deep-research-max-preview-04-2026", "deep-research-preview-04-2026", "gemini-2.5-computer-use-preview-10-2025", "gemini-2.5-flash", "gemini-2.5-flash-image"], doc: "https://ai.google.dev/gemini-api/docs/models" },
+  copilot: { label: "GitHub Copilot", tier: "builtin", baseUrl: "https://api.githubcopilot.com", api: null, models: ["claude-fable-5", "claude-haiku-4.5", "claude-opus-4.5", "claude-opus-4.6", "claude-opus-4.7"], doc: "https://docs.github.com/en/copilot" },
+  "azure-openai": { label: "Azure OpenAI", tier: "builtin", baseUrl: null, api: null, models: ["claude-fable-5", "claude-fable-5-1", "claude-haiku-4-5", "claude-mythos-5", "claude-opus-4-1"], doc: "https://learn.microsoft.com/en-us/azure/ai-services/openai/concepts/models" },
+  groq: { label: "Groq", tier: "builtin", baseUrl: null, api: null, models: ["allam-2-7b", "canopylabs/orpheus-arabic-saudi", "canopylabs/orpheus-v1-english", "groq/compound", "groq/compound-mini"], doc: "https://console.groq.com/docs/models" },
+  cerebras: { label: "Cerebras", tier: "builtin", baseUrl: null, api: null, models: ["gemma-4-31b", "gpt-oss-120b"], doc: "https://inference-docs.cerebras.ai/models/overview" },
+  xai: { label: "xAI", tier: "builtin", baseUrl: null, api: null, models: ["grok-4.20-0309-non-reasoning", "grok-4.20-0309-reasoning", "grok-4.20-multi-agent-0309", "grok-4.3", "grok-4.5"], doc: "https://docs.x.ai/docs/models" },
+  openrouter: { label: "OpenRouter", tier: "builtin", baseUrl: "https://openrouter.ai/api/v1", api: null, models: ["aion-labs/aion-2.0", "aion-labs/aion-3.0", "aion-labs/aion-3.0-mini", "aion-labs/aion-rp-llama-3.1-8b", "amazon/nova-2-lite-v1"], doc: "https://openrouter.ai/models" },
+  kilo: { label: "Kilo", tier: "builtin", baseUrl: "https://api.kilo.ai/api/gateway", api: null, models: ["aion-labs/aion-2.0", "aion-labs/aion-3.0", "aion-labs/aion-3.0-mini", "aion-labs/aion-rp-llama-3.1-8b", "amazon/nova-2-lite-v1"], doc: "https://kilo.ai" },
+  mistral: { label: "Mistral", tier: "builtin", baseUrl: null, api: null, models: ["codestral-latest", "devstral-2512", "devstral-latest", "devstral-medium-2507", "devstral-medium-latest"], doc: "https://docs.mistral.ai/getting-started/models/" },
+  zai: { label: "Z.AI", tier: "builtin", baseUrl: "https://api.z.ai/api/paas/v4", api: null, models: ["glm-4.5", "glm-4.5-air", "glm-4.5-flash", "glm-4.5v", "glm-4.6"], doc: "https://docs.z.ai/guides/overview/pricing" },
+  umans: { label: "Umans AI Coding Plan", tier: "builtin", baseUrl: "https://api.code.umans.ai/v1", api: null, models: ["umans-coder", "umans-deepseek-v4-flash-0731", "umans-deepseek-v4-pro-0813", "umans-flash", "umans-glm-5.2"], doc: "https://app.umans.ai/offers/code/docs" },
+  minimax: { label: "MiniMax", tier: "builtin", baseUrl: "https://api.minimax.io/anthropic/v1", api: null, models: ["MiniMax-M2", "MiniMax-M2.1", "MiniMax-M2.5", "MiniMax-M2.5-highspeed", "MiniMax-M2.7"], doc: "https://platform.minimax.io/docs/guides/quickstart" },
+  opencode: { label: "OpenCode", tier: "builtin", baseUrl: "https://opencode.ai/zen/v1", api: null, models: ["big-pickle", "claude-3-5-haiku", "claude-fable-5", "claude-fable-5-1", "claude-haiku-4-5"], doc: "https://opencode.ai/docs/zen" },
+  cursor: { label: "Cursor", tier: "builtin", baseUrl: null, api: null, models: [], doc: "https://cursor.com/docs/api/overview" },
+  "ai-gateway": { label: "AI Gateway", tier: "builtin", baseUrl: null, api: null, models: ["alibaba/qwen3-max", "alibaba/qwen3.5-397b-a17b", "alibaba/qwen3.7-max", "alibaba/qwen3.7-plus", "alibaba/qwen3.8-max"], doc: "https://developers.cloudflare.com/ai-gateway/" },
+  "wafer-serverless": { label: "Wafer Serverless", tier: "builtin", baseUrl: "https://pass.wafer.ai/v1", api: null, models: ["GLM-5.1", "GLM-5.2", "Kimi-K2.6", "MiniMax-M3", "glm5.2-fast"], doc: "https://docs.wafer.ai/wafer-pass" },
+  ark: { label: "Ark", tier: "builtin", baseUrl: "https://ark.cn-beijing.volces.com/api/v3", api: null, models: ["deepseek-v4-flash-ga-260731", "deepseek-v4-pro-ga-260813", "doubao-seed-1-6-251015", "doubao-seed-1-6-flash-250828", "doubao-seed-1-6-vision-250815"], doc: "https://www.volcengine.com/docs/82379/1330310" },
+  "workers-ai": {
+    label: "Cloudflare Workers AI",
+    tier: "template",
+    baseUrl: "https://api.cloudflare.com/client/v4/accounts/{account_id}/ai/v1",
+    api: "openai-completions",
+    models: ["@cf/meta/llama-3.3-70b-instruct-fp8-fast", "@cf/meta/llama-4-scout-17b-16e-instruct", "@cf/qwen/qwen3-30b-a3b-fp8", "@cf/qwen/qwen2.5-coder-32b-instruct", "@cf/deepseek-ai/deepseek-v4-flash-0731", "@cf/deepseek-ai/deepseek-r1-distill-qwen-32b", "@cf/google/gemma-4-26b-a4b-it", "@cf/mistralai/mistral-small-3.1-24b-instruct"],
+    doc: "https://developers.cloudflare.com/workers-ai/models/",
+  },
+};
 
 /**
  * The in-image base provider ids (plan 23 QC wave-1 W-1) — provider ids the
@@ -354,6 +450,16 @@ export const MAX_CUSTOM_PROVIDER_MODEL_ID_LENGTH = 128;
 export const MAX_CUSTOM_PROVIDER_COUNT = 8;
 
 /**
+ * Cloudflare account id bound (plan 35 T3, spec §5 — the workers-ai
+ * template's base URL placeholder): Cloudflare account ids are 32 hex
+ * characters (the `{account_id}` slot of
+ * `https://api.cloudflare.com/client/v4/accounts/{account_id}/ai/v1`).
+ * The template materialization route rejects anything else before the
+ * substituted base URL is verified/stored.
+ */
+export const CLOUDFLARE_ACCOUNT_ID_PATTERN = /^[0-9a-f]{32}$/i;
+
+/**
  * Model selector/chain input bound (AL-23-2 verdict, plan 23 Global
  * Constraints): the save-chain `model_chain` and each save-roles role
  * selector are capped at 400 characters at the ROUTE (400 re-render, zero
@@ -361,6 +467,52 @@ export const MAX_CUSTOM_PROVIDER_COUNT = 8;
  * input bound, not a storage shape.
  */
 export const MAX_MODEL_SELECTOR_LENGTH = 400;
+
+/**
+ * The reserved default-chain row name (spec §4.4): the default chain row
+ * keeps this name; named chains must not use it (route AND store reject).
+ * A seat reference of "default" (or a blank reference) means "use the
+ * default chain" — the reference row is never stored for it.
+ */
+export const DEFAULT_CHAIN_NAME = "default";
+/**
+ * Named-chain name grammar (plan 35 T2, spec §4.4): the same
+ * `[a-z0-9][a-z0-9-]{0,63}` identifier shape as custom-provider ids (the
+ * established identifier convention in this module). The backfill's
+ * `seat-<role>` names fit it. "default" is excluded by the reserved-name
+ * check, not by the grammar.
+ */
+export const MODEL_CHAIN_NAME_PATTERN = /^[a-z0-9][a-z0-9-]{0,63}$/;
+export const MAX_MODEL_CHAIN_NAME_LENGTH = 64;
+
+/**
+ * Chain-name error (plan 35 T2): an upsertModelChain/removeModelChain call
+ * named the reserved "default" row or a name outside the
+ * MODEL_CHAIN_NAME_PATTERN grammar. The settings route re-renders 400
+ * first; this typed throw is the backstop for direct callers (the
+ * UnknownModelRoleError convention).
+ */
+export class InvalidModelChainNameError extends Error {
+  constructor(name: string) {
+    super(
+      `invalid model chain name ${JSON.stringify(name)}: 1–64 lowercase letters, digits or hyphens; "default" is reserved`,
+    );
+    this.name = "InvalidModelChainNameError";
+  }
+}
+
+/**
+ * Unknown-chain error (plan 35 T2): a setModelChainSeat/setModelChainSeats
+ * call referenced a chain name with no stored row for the App. The settings
+ * route re-renders 400 first; this typed throw is the backstop for direct
+ * callers (the UnknownModelRoleError convention).
+ */
+export class UnknownModelChainError extends Error {
+  constructor(name: string) {
+    super(`unknown model chain ${JSON.stringify(name)}`);
+    this.name = "UnknownModelChainError";
+  }
+}
 
 /**
  * Declaration-shape error (plan 23 T2): an upsertCustomProvider call named
@@ -394,11 +546,11 @@ export class ProviderKeyTooLongError extends Error {
 }
 
 /**
- * Role-vocabulary error (plan 17): a setModelRole/setModelRoles/clearModelRole
- * call named a role outside MODEL_ROLE_IDS. The settings route re-renders 400
- * first (plan 17 Task 3); this typed throw is the backstop for direct callers.
- * Same class convention as ProviderKeyTooLongError (name set for structured
- * logs).
+ * Role-vocabulary error (plan 17): a setModelChainSeat/setModelChainSeats/
+ * clearModelChainSeat call named a role outside MODEL_ROLE_IDS. The
+ * settings route re-renders 400 first (plan 17 Task 3); this typed throw
+ * is the backstop for direct callers. Same class convention as
+ * ProviderKeyTooLongError (name set for structured logs).
  */
 export class UnknownModelRoleError extends Error {
   constructor(role: string) {
@@ -534,15 +686,17 @@ function assertModelRole(role: string): void {
 }
 
 /**
- * Validate one (role, selector) entry (plan 17): the role must be on the
- * MODEL_ROLE_IDS vocabulary and a selector WITH content must parse to ≥1
- * comma-separated selector (the parseModelChain mirror). A BLANK selector is
- * legal by design — it clears the mapping.
+ * Named-chain name gate (plan 35 T2, spec §4.4): the reserved "default"
+ * row name and any name outside the MODEL_CHAIN_NAME_PATTERN grammar are
+ * rejected — the route answers 400 first; this is the backstop for direct
+ * callers.
  */
-function assertModelRoleEntry(role: string, selector: string): void {
-  assertModelRole(role);
-  if (selector.trim() !== "" && parseModelChain(selector).length === 0) {
-    throw new InvalidModelSelectorError(selector);
+function assertModelChainName(name: string): void {
+  if (name === DEFAULT_CHAIN_NAME) {
+    throw new InvalidModelChainNameError(name);
+  }
+  if (!MODEL_CHAIN_NAME_PATTERN.test(name)) {
+    throw new InvalidModelChainNameError(name);
   }
 }
 
@@ -572,6 +726,17 @@ export type AppConfig = {
   modelChain: string | null;
 };
 
+/** One chain as the settings face sees it (plan 35 T2, spec §4.4). */
+export type AppModelChain = {
+  name: string;
+  /** Verbatim comma-separated selector chain — configuration, not a secret. */
+  chain: string;
+  /** True for the App's default chain row (the reserved "default" name). */
+  is_default: boolean;
+  created_at: string;
+  updated_at: string;
+};
+
 /**
  * One statement's result inside a D1 `batch()` (order matches input).
  * Declared locally — same shape as src/store/types.ts `D1BatchResult`.
@@ -594,10 +759,11 @@ export type AppConfigBatchFace = {
 /**
  * Narrow D1 face, declared locally so this leaf module imports nothing
  * structural: prepare/bind/first/all/run for every single-statement write,
- * plus exactly ONE `batch` (the setModelRoles atomic full-map save — the
- * store never batches for any other purpose). A real `D1Database`, the
- * bun:sqlite test double (tests/store/helpers.ts) and the store layer's
- * `D1Like` all satisfy it structurally.
+ * plus `batch` for the atomic multi-write faces (plan 35 T2, spec §4.4):
+ * setModelChain's default-row clear-then-set, setModelChainSeats' full-map
+ * save, and removeModelChain's seat-reference cascade. A real
+ * `D1Database`, the bun:sqlite test double (tests/store/helpers.ts) and
+ * the store layer's `D1Like` all satisfy it structurally.
  */
 type AppConfigStatement = {
   bind(...values: unknown[]): AppConfigStatement;
@@ -622,55 +788,106 @@ export type AppConfigD1 = {
 export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | undefined) {
   const box = createSecretbox(encryptionKey);
 
+  /**
+   * The App's default chain value (spec §4.4): the 'default' row of
+   * app_model_chains, or null when no default row exists (absent = unset =
+   * that App's reviews fail closed — plan 24 Task 6 / AL-24-5).
+   */
   async function readModelChain(appId: string): Promise<string | null> {
     const row = await db
-      .prepare(`SELECT model_chain FROM app_model_config WHERE app_id = ?`)
-      .bind(appId)
-      .first<Pick<AppModelConfigRow, "model_chain">>();
-    return row?.model_chain ?? null;
+      .prepare(`SELECT chain FROM app_model_chains WHERE app_id = ? AND name = ?`)
+      .bind(appId, DEFAULT_CHAIN_NAME)
+      .first<Pick<AppModelChainRow, "chain">>();
+    return row?.chain ?? null;
   }
 
   /**
-   * The App's role → selector map, role-ascending for deterministic key
-   * order; only MAPPED roles appear (no row = unmapped = chain behavior).
+   * The App's seat → chain-name map, role-ascending for deterministic key
+   * order; only REFERENCED roles appear (no row = the seat uses the default
+   * chain — spec §4.4).
    */
-  async function readModelRoles(appId: string): Promise<Record<string, string>> {
+  async function readModelChainSeats(appId: string): Promise<Record<string, string>> {
     const res = await db
-      .prepare(`SELECT role, selector FROM app_model_roles WHERE app_id = ? ORDER BY role ASC`)
+      .prepare(`SELECT role, chain_name FROM app_model_chain_seats WHERE app_id = ? ORDER BY role ASC`)
       .bind(appId)
-      .all<Pick<AppModelRoleRow, "role" | "selector">>();
-    const roles: Record<string, string> = {};
+      .all<Pick<AppModelChainSeatRow, "role" | "chain_name">>();
+    const seats: Record<string, string> = {};
     for (const row of res.results) {
-      roles[row.role] = row.selector;
+      seats[row.role] = row.chain_name;
     }
-    return roles;
+    return seats;
   }
 
-  /** Prepared DELETE for one role's mapping row (run() or ride in a batch). */
-  function deleteModelRoleStatement(appId: string, role: string): AppConfigStatement {
-    return db.prepare(`DELETE FROM app_model_roles WHERE app_id = ? AND role = ?`).bind(appId, role);
+  /**
+   * The App's per-role model overrides for the consumer (plan 35 T2, spec
+   * §4.4): role → verbatim chain value, resolved through the seat → chain
+   * mapping. Seats with NO reference row (absent = default) and seats
+   * referencing the default chain are OMITTED — the runner input map only
+   * carries seats whose chain differs from the App default (byte-identical
+   * to the pre-chains app_model_roles semantics for migrated Apps). A seat
+   * referencing a chain with no row throws (fail-loud, the getAppConfig
+   * tamper convention — removeModelChain cleans references in the same
+   * batch, so a dangling reference is a direct-DB tamper).
+   */
+  async function readModelOverrides(appId: string): Promise<Record<string, string>> {
+    const seats = await db
+      .prepare(`SELECT role, chain_name FROM app_model_chain_seats WHERE app_id = ? ORDER BY role ASC`)
+      .bind(appId)
+      .all<Pick<AppModelChainSeatRow, "role" | "chain_name">>();
+    if (seats.results.length === 0) return {};
+    const chains = await db
+      .prepare(`SELECT name, chain FROM app_model_chains WHERE app_id = ?`)
+      .bind(appId)
+      .all<Pick<AppModelChainRow, "name" | "chain">>();
+    const chainByName = new Map(chains.results.map((row) => [row.name, row.chain]));
+    const overrides: Record<string, string> = {};
+    for (const seat of seats.results) {
+      if (seat.chain_name === DEFAULT_CHAIN_NAME) continue; // default-referenced seat omitted
+      const chain = chainByName.get(seat.chain_name);
+      if (chain === undefined) {
+        throw new Error(
+          `app-config-store: app ${appId}: seat ${seat.role} references missing chain ${JSON.stringify(seat.chain_name)}`,
+        );
+      }
+      overrides[seat.role] = chain;
+    }
+    return overrides;
   }
 
-  /** Prepared verbatim upsert of one role's selector (run() or ride in a batch). */
-  function upsertModelRoleStatement(appId: string, role: string, selector: string): AppConfigStatement {
+  /** Prepared DELETE for one seat's reference row (run() or ride in a batch). */
+  function deleteModelChainSeatStatement(appId: string, role: string): AppConfigStatement {
+    return db.prepare(`DELETE FROM app_model_chain_seats WHERE app_id = ? AND role = ?`).bind(appId, role);
+  }
+
+  /** Prepared upsert of one seat's chain reference (run() or ride in a batch). */
+  function upsertModelChainSeatStatement(appId: string, role: string, chainName: string): AppConfigStatement {
     return db
       .prepare(
-        `INSERT INTO app_model_roles (app_id, role, selector)
+        `INSERT INTO app_model_chain_seats (app_id, role, chain_name)
          VALUES (?, ?, ?)
          ON CONFLICT (app_id, role) DO UPDATE SET
-           selector = excluded.selector`,
+           chain_name = excluded.chain_name`,
       )
-      .bind(appId, role, selector);
+      .bind(appId, role, chainName);
   }
 
-  /** Delete one role's mapping row (idempotent — an unmapped role deletes nothing). */
-  async function deleteModelRole(appId: string, role: string): Promise<void> {
-    await deleteModelRoleStatement(appId, role).run();
+  /** Delete one seat's reference row (idempotent — an unmapped seat deletes nothing). */
+  async function deleteModelChainSeat(appId: string, role: string): Promise<void> {
+    await deleteModelChainSeatStatement(appId, role).run();
   }
 
-  /** Upsert one role's selector VERBATIM (one row per (app_id, role) composite PK). */
-  async function upsertModelRole(appId: string, role: string, selector: string): Promise<void> {
-    await upsertModelRoleStatement(appId, role, selector).run();
+  /** Upsert one seat's chain reference (one row per (app_id, role) composite PK). */
+  async function upsertModelChainSeat(appId: string, role: string, chainName: string): Promise<void> {
+    await upsertModelChainSeatStatement(appId, role, chainName).run();
+  }
+
+  /** Fail-loud existence gate for a seat's chain reference (the route 400s first). */
+  async function assertChainExists(appId: string, chainName: string): Promise<void> {
+    const row = await db
+      .prepare(`SELECT name FROM app_model_chains WHERE app_id = ? AND name = ?`)
+      .bind(appId, chainName)
+      .first<{ name: string }>();
+    if (!row) throw new UnknownModelChainError(chainName);
   }
 
   return {
@@ -810,30 +1027,43 @@ export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | un
     },
 
     /**
-     * Store the App's model chain VERBATIM (the route has already validated
-     * ≥1 selector), or clear it: `null` AND any blank chain (empty or
-     * whitespace-only — the route's 空 = 清除 semantics, plan 15 alignment)
-     * REMOVE the row (absent = unset; a chain-less App's reviews fail closed
-     * in the consumer with `per-App config incomplete: app <id>: missing model
-     * chain` — plan 24 Task 6; no deployment-level fallback exists).
-     * A chain with content upserts verbatim, interior/trailing whitespace
-     * included.
+     * Store the App's default model chain VERBATIM (the route has already
+     * validated ≥1 selector), or clear it: `null` AND any blank chain
+     * (empty or whitespace-only — the route's 空 = 清除 semantics, plan 15
+     * alignment) REMOVE the 'default' row (absent = unset; a chain-less
+     * App's reviews fail closed in the consumer with `per-App config
+     * incomplete: app <id>: missing model chain` — plan 24 Task 6; no
+     * deployment-level fallback exists). A chain with content upserts the
+     * 'default' row verbatim, interior/trailing whitespace included, with
+     * is_default = 1 — the per-App is_default uniqueness is enforced in ONE
+     * atomic db.batch (spec §4.4 clear-old-set-new): the batch first clears
+     * every is_default = 1 row for the App, then upserts the 'default' row,
+     * so exactly one default row exists after every write (a rogue
+     * direct-DB default row is swept).
      */
     async setModelChain(appId: string, chain: string | null): Promise<void> {
       if (chain === null || chain.trim() === "") {
-        await db.prepare(`DELETE FROM app_model_config WHERE app_id = ?`).bind(appId).run();
+        await db
+          .prepare(`DELETE FROM app_model_chains WHERE app_id = ? AND name = ?`)
+          .bind(appId, DEFAULT_CHAIN_NAME)
+          .run();
         return;
       }
-      await db
-        .prepare(
-          `INSERT INTO app_model_config (app_id, model_chain, updated_at)
-           VALUES (?, ?, datetime('now'))
-           ON CONFLICT (app_id) DO UPDATE SET
-             model_chain = excluded.model_chain,
-             updated_at = datetime('now')`,
-        )
-        .bind(appId, chain)
-        .run();
+      await db.batch([
+        db
+          .prepare(`UPDATE app_model_chains SET is_default = 0 WHERE app_id = ? AND is_default = 1`)
+          .bind(appId),
+        db
+          .prepare(
+            `INSERT INTO app_model_chains (app_id, name, chain, is_default, created_at, updated_at)
+             VALUES (?, ?, ?, 1, datetime('now'), datetime('now'))
+             ON CONFLICT (app_id, name) DO UPDATE SET
+               chain = excluded.chain,
+               is_default = 1,
+               updated_at = datetime('now')`,
+          )
+          .bind(appId, DEFAULT_CHAIN_NAME, chain),
+      ]);
     },
 
     /** The stored chain verbatim, or null when unset (no row). */
@@ -883,69 +1113,185 @@ export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | un
     },
 
     /**
-     * The App's per-role selector map (plan 17 B6): role → verbatim selector
-     * chain, only the MAPPED roles appear; an App with no mapped roles
-     * yields `{}` (= today's chain behavior). Decrypt-free by design — a
-     * model selector is configuration, not a secret (the 0006 model_chain
-     * rationale) — the pipeline consumer reads this per message to build the
-     * runner input `modelOverrides` field, so a dashboard role update
-     * applies to the very next review.
+     * The App's chains (settings face, plan 35 T2): every app_model_chains
+     * row, name-ascending ("default" sorts first). is_default is exposed as
+     * a boolean. Decrypt-free by design — a model selector is
+     * configuration, not a secret (the 0006 model_chain rationale).
      */
-    getAppModelRoles(appId: string): Promise<Record<string, string>> {
-      return readModelRoles(appId);
+    async getModelChains(appId: string): Promise<AppModelChain[]> {
+      const res = await db
+        .prepare(`SELECT * FROM app_model_chains WHERE app_id = ? ORDER BY name ASC`)
+        .bind(appId)
+        .all<AppModelChainRow>();
+      return res.results.map((row) => ({
+        name: row.name,
+        chain: row.chain,
+        is_default: row.is_default !== 0,
+        created_at: row.created_at,
+        updated_at: row.updated_at,
+      }));
     },
 
     /**
-     * Map (or replace) one role's selector VERBATIM, or clear the mapping: a
-     * BLANK selector (empty / whitespace-only — the setModelChain 空 = 清除
-     * convention) DELETES the row. Validation BEFORE any write: an
-     * off-vocabulary role throws UnknownModelRoleError and a content-bearing
-     * selector that parses to zero selectors throws InvalidModelSelectorError
-     * (the route re-renders 400 first; these are the backstop for direct
-     * callers). An unknown app_id fails the FK on insert (fail-loud, same as
-     * every write here); clearing an unmapped role is a quiet no-op.
+     * Create or replace one NAMED chain (plan 35 T2, spec §4.4): the name
+     * must pass assertModelChainName (the reserved "default" row name and
+     * any name outside the MODEL_CHAIN_NAME_PATTERN grammar are rejected —
+     * the route answers 400 first; this is the backstop) and the chain
+     * value must be a non-blank selector chain (a blank chain throws
+     * InvalidModelSelectorError — the route validates grammar/membership
+     * first). Named chains are never default: the upsert writes
+     * is_default = 0 on insert AND update, so a rogue direct-DB default
+     * flag on a named row is swept (only setModelChain writes is_default =
+     * 1, and only on the 'default' row).
      */
-    async setModelRole(appId: string, role: string, selector: string): Promise<void> {
-      assertModelRoleEntry(role, selector);
-      if (selector.trim() === "") {
-        await deleteModelRole(appId, role);
+    async upsertModelChain(appId: string, name: string, chain: string): Promise<void> {
+      assertModelChainName(name);
+      if (chain.trim() === "") {
+        throw new InvalidModelSelectorError(chain);
+      }
+      await db
+        .prepare(
+          `INSERT INTO app_model_chains (app_id, name, chain, is_default, created_at, updated_at)
+           VALUES (?, ?, ?, 0, datetime('now'), datetime('now'))
+           ON CONFLICT (app_id, name) DO UPDATE SET
+             chain = excluded.chain,
+             is_default = excluded.is_default,
+             updated_at = datetime('now')`,
+        )
+        .bind(appId, name, chain)
+        .run();
+    },
+
+    /**
+     * Delete one NAMED chain — and every seat reference row pointing at it,
+     * in ONE atomic batch (spec §4.4: a deleted chain's seats fall back to
+     * the default chain). The reserved 'default' row cannot be removed here
+     * (assertModelChainName rejects it — use setModelChain(null) to clear
+     * the default). Returns whether THIS call removed a chain row (an
+     * unknown name is an idempotent no-op returning false, mirroring
+     * removeProviderKey's tolerance).
+     */
+    async removeModelChain(appId: string, name: string): Promise<boolean> {
+      assertModelChainName(name);
+      const res = await db.batch([
+        db.prepare(`DELETE FROM app_model_chain_seats WHERE app_id = ? AND chain_name = ?`).bind(appId, name),
+        db.prepare(`DELETE FROM app_model_chains WHERE app_id = ? AND name = ?`).bind(appId, name),
+      ]);
+      return res[1]!.meta.changes > 0;
+    },
+
+    /**
+     * The App's seat → chain-name map (settings face, plan 35 T2): role →
+     * referenced chain name, only the REFERENCED roles appear; an App with
+     * no reference rows yields `{}` (= every seat uses the default chain).
+     * Decrypt-free by design — a chain reference is configuration, not a
+     * secret — the pipeline consumer reads the resolved map per message to
+     * build the runner input `modelOverrides` field, so a dashboard seat
+     * update applies to the very next review.
+     */
+    getModelChainSeats(appId: string): Promise<Record<string, string>> {
+      return readModelChainSeats(appId);
+    },
+
+    /**
+     * Map (or replace) one seat's chain reference, or clear it: a BLANK
+     * chain_name — or the reserved "default" name — DELETES the reference
+     * row (absent = default chain, spec §4.4). The name is canonicalized
+     * (whitespace-trimmed) BEFORE the clear/assert/upsert decisions, so a
+     * padded reference can never be stored — a dangling `"fast "` row
+     * would fail every consumer read for the App (F-001, QC wave).
+     * Validation BEFORE any write: an off-vocabulary role throws
+     * UnknownModelRoleError and a content-bearing chain_name that names no
+     * stored chain throws UnknownModelChainError (the route re-renders 400
+     * first; these are the backstop for direct callers). An unknown app_id
+     * fails the FK on insert (fail-loud, same as every write here);
+     * clearing an unmapped seat is a quiet no-op.
+     */
+    async setModelChainSeat(appId: string, role: string, chainName: string): Promise<void> {
+      assertModelRole(role);
+      const name = chainName.trim();
+      if (name === "" || name === DEFAULT_CHAIN_NAME) {
+        await deleteModelChainSeat(appId, role);
         return;
       }
-      await upsertModelRole(appId, role, selector);
+      await assertChainExists(appId, name);
+      await upsertModelChainSeat(appId, role, name);
     },
 
     /**
-     * Remove one role's mapping explicitly (idempotent — an unmapped role,
-     * like any role the vocabulary could never have stored, is a no-op
-     * returning nothing, mirroring removeProviderKey's tolerance).
+     * Remove one seat's chain reference explicitly (idempotent — an
+     * unmapped seat, like any role the vocabulary could never have stored,
+     * is a no-op returning nothing, mirroring removeProviderKey's
+     * tolerance).
      */
-    async clearModelRole(appId: string, role: string): Promise<void> {
+    async clearModelChainSeat(appId: string, role: string): Promise<void> {
       assertModelRole(role);
-      await deleteModelRole(appId, role);
+      await deleteModelChainSeat(appId, role);
     },
 
     /**
-     * Bulk face for the settings single-save (plan 17 Task 3's 4-row editor):
-     * validates EVERY (role, selector) entry BEFORE any write (one bad entry
-     * → typed throw, zero rows touched), then applies the whole map as ONE
-     * atomic `db.batch` (Phase 5 fix, PR #7 review) — blank = clear, content
-     * = verbatim upsert. D1 batch is transactional: a mid-save failure rolls
-     * back every statement, so a partially applied role map is impossible and
-     * the route's "nothing was stored" failure notice stays truthful. An
+     * Bulk face for the settings single-save (the plan-17 4-row editor,
+     * now chain references, plan 35 T2): validates EVERY (role, chain_name)
+     * entry BEFORE any write (one bad entry → typed throw, zero rows
+     * touched), then applies the whole map as ONE atomic `db.batch`.
+     * Each name is canonicalized (whitespace-trimmed) once: the
+     * validation set, the clear/upsert decision and the BIND all use the
+     * same trimmed value, so a padded reference (`"fast "`, `" default "`)
+     * either hits the real chain or clears — a dangling reference row is
+     * impossible through this face (F-001, QC wave; the route trims too,
+     * this is the backstop for direct callers). blank / "default" = clear
+     * (absent = default chain), content = trimmed chain name reference.
+     * D1 batch is transactional: a mid-save failure rolls back every
+     * statement, so a partially applied seat map is impossible and the
+     * route's "nothing was stored" failure notice stays truthful. An
      * empty map is a no-op (no batch is issued).
      */
-    async setModelRoles(appId: string, selectors: Record<string, string>): Promise<void> {
-      for (const [role, selector] of Object.entries(selectors)) {
-        assertModelRoleEntry(role, selector);
+    async setModelChainSeats(appId: string, refs: Record<string, string>): Promise<void> {
+      const entries = Object.entries(refs);
+      for (const [role] of entries) {
+        assertModelRole(role);
       }
-      const statements = Object.entries(selectors).map(([role, selector]) =>
-        selector.trim() === ""
-          ? deleteModelRoleStatement(appId, role)
-          : upsertModelRoleStatement(appId, role, selector),
-      );
+      const referenced = entries
+        .map(([, chainName]) => chainName.trim())
+        .filter((name) => name !== "" && name !== DEFAULT_CHAIN_NAME);
+      if (referenced.length > 0) {
+        const chains = await db
+          .prepare(`SELECT name FROM app_model_chains WHERE app_id = ?`)
+          .bind(appId)
+          .all<{ name: string }>();
+        const known = new Set(chains.results.map((row) => row.name));
+        for (const name of referenced) {
+          if (!known.has(name)) throw new UnknownModelChainError(name);
+        }
+      }
+      const statements = entries.map(([role, chainName]) => {
+        const name = chainName.trim();
+        return name === "" || name === DEFAULT_CHAIN_NAME
+          ? deleteModelChainSeatStatement(appId, role)
+          : upsertModelChainSeatStatement(appId, role, name);
+      });
       if (statements.length > 0) {
         await db.batch(statements);
       }
+    },
+
+    /**
+     * The App's per-role model overrides for the consumer (plan 35 T2, spec
+     * §4.4): role → verbatim chain value, resolved through the seat →
+     * chain mapping. Seats with NO reference row (absent = default) and
+     * seats referencing the default chain are OMITTED — the runner input
+     * map only carries seats whose chain differs from the App default
+     * (byte-identical to the pre-chains app_model_roles semantics for
+     * migrated Apps). An App with no overrides yields `{}` (= today's
+     * chain behavior; the consumer maps an empty map to `undefined`).
+     * Decrypt-free by design — a model selector is configuration, not a
+     * secret — the pipeline consumer reads this per message, so a
+     * dashboard seat update applies to the very next review. A seat
+     * referencing a chain with no row throws (fail-loud, the getAppConfig
+     * tamper convention).
+     */
+    getModelOverridesForConsumer(appId: string): Promise<Record<string, string>> {
+      return readModelOverrides(appId);
     },
     /**
      * Store (or replace) one custom-provider declaration for the App (plan

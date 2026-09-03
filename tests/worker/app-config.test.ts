@@ -18,10 +18,11 @@
  *
  * Duplication locks (architect decision Q2 forbids the dashboard from
  * importing pipeline/review code, so the copies must be pinned):
- * PROVIDER_IDS ≡ the pipeline PROVIDERS key sequence, parseModelChain ≡
- * the runtime-omp parseModelSelectors behavior, and MODEL_ROLE_IDS ≡ the
- * review-side seat vocabulary (plan 17 B6), all asserted against the
- * originals here.
+ * PROVIDER_IDS ≡ the pipeline catalog's builtin key sequence, PROVIDER_META
+ * ≡ the catalog's display metadata snapshot (plan 35 T3, spec §5),
+ * parseModelChain ≡ the runtime-omp parseModelSelectors behavior, and
+ * MODEL_ROLE_IDS ≡ the review-side seat vocabulary (plan 17 B6), all
+ * asserted against the originals here.
  */
 import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import { readFileSync } from "node:fs";
@@ -34,12 +35,15 @@ import {
   IN_IMAGE_BASE_PROVIDER_IDS,
   MAX_CUSTOM_PROVIDER_COUNT,
   InvalidCustomProviderError,
+  InvalidModelChainNameError,
   InvalidModelSelectorError,
   MAX_MODEL_SELECTOR_LENGTH,
   MAX_PROVIDER_KEY_LENGTH,
   MODEL_ROLE_IDS,
   PROVIDER_IDS,
+  PROVIDER_META,
   ProviderKeyTooLongError,
+  UnknownModelChainError,
   UnknownModelRoleError,
   createAppConfigStore,
   parseModelChain,
@@ -47,7 +51,7 @@ import {
   type AppCustomProvider,
 } from "../../src/dashboard/app-config-store";
 import { createSecretbox } from "../../src/dashboard/secretbox";
-import { PROVIDERS } from "../../src/pipeline/providers";
+import { PROVIDER_CATALOG, PROVIDERS } from "../../src/pipeline/provider-catalog";
 import { DEEP_SEAT_ROLES, parseModelSelectors } from "../../src/review/runtime-omp";
 import { SESSION_COOKIE, createSessionValue } from "../../src/dashboard/session";
 import { createUser, type DashboardD1 } from "../../src/dashboard/users";
@@ -128,6 +132,9 @@ function createAppConfigD1(): ReturnType<typeof createTestD1> {
   applyMigration(db, "0011_webhook_deliveries.sql");
   applyMigration(db, "0012_custom_providers_and_key_updated_at.sql");
   applyMigration(db, "0015_provider_verification.sql");
+  // 0017 (plan 35 T2): the chains store tests + the settings routes run on
+  // the chains shape (app_model_chains + app_model_chain_seats).
+  applyMigration(db, "0017_app_model_chains.sql");
   return db;
 }
 
@@ -385,6 +392,63 @@ describe("migration 0012_custom_providers_and_key_updated_at.sql (plan 23 T1)", 
   });
 });
 
+// --- migration 0017 (plan 35 T2: default + named chains + backfill DML) ---
+
+describe("migration 0017_app_model_chains.sql (plan 35 T2, spec §4.4)", () => {
+  test("applies cleanly over a seeded production-shaped DB; backfill DML migrates the pre-chains shape", async () => {
+    // A pre-0017 DB (0001–0016) with the pre-chains shape seeded RAW —
+    // exactly the wrangler order on a live deployment.
+    const db = createPopulatedPre0006D1();
+    for (const name of [
+      "0006_app_provider_config.sql",
+      "0008_github_apps_ops.sql",
+      "0009_app_model_roles.sql",
+      "0011_webhook_deliveries.sql",
+      "0012_custom_providers_and_key_updated_at.sql",
+      "0015_provider_verification.sql",
+      "0016_users_login_nocase_unique.sql",
+    ]) {
+      applyMigration(db, name);
+    }
+    const app = await seedApp(db, { slug: "a", createdBy: "mallory" });
+    rawRun(
+      db,
+      `INSERT INTO app_model_config (app_id, model_chain, updated_at) VALUES (?, ?, datetime('now'))`,
+      app.id,
+      PLAIN_CHAIN,
+    );
+    rawRun(
+      db,
+      `INSERT INTO app_model_roles (app_id, role, selector) VALUES (?, 'code-reviewer', 'openai/gpt-5:thinking')`,
+      app.id,
+    );
+    expect(() => applyMigration(db, "0017_app_model_chains.sql")).not.toThrow();
+    // The backfill produced the chains shape from the pre-chains rows:
+    // default row (verbatim chain) + seat-<role> named chain + seat ref.
+    const chains = db.raw
+      .query("SELECT name, chain, is_default FROM app_model_chains WHERE app_id = ? ORDER BY name")
+      .all(app.id) as Array<{ name: string; chain: string; is_default: number }>;
+    expect(chains).toEqual([
+      { name: "default", chain: PLAIN_CHAIN, is_default: 1 },
+      { name: "seat-code-reviewer", chain: "openai/gpt-5:thinking", is_default: 0 },
+    ]);
+    const seats = db.raw
+      .query("SELECT role, chain_name FROM app_model_chain_seats WHERE app_id = ?")
+      .all(app.id) as Array<{ role: string; chain_name: string }>;
+    expect(seats).toEqual([{ role: "code-reviewer", chain_name: "seat-code-reviewer" }]);
+  });
+
+  test("backfill: an app with NO app_model_config row gets NO default row (fail-closed semantics preserved)", async () => {
+    const db = createAppConfigD1();
+    const bare = await seedApp(db, { slug: "bare", createdBy: "mallory" });
+    const row = db.raw
+      .query("SELECT chain FROM app_model_chains WHERE app_id = ? AND name = 'default'")
+      .get(bare.id) as { chain: string } | null;
+    expect(row).toBeNull();
+    expect(await configStore(db).getModelChain(bare.id)).toBeNull();
+  });
+});
+
 // --- store: provider keys ---
 
 describe("app-config store (createAppConfigStore) — provider keys", () => {
@@ -573,11 +637,10 @@ describe("app-config store (createAppConfigStore) — model chain + getAppConfig
     const app = await seedApp(db, { slug: "a", createdBy: "mallory" });
     await configStore(db).setModelChain(app.id, PLAIN_CHAIN);
     expect(await configStore(db).getModelChain(app.id)).toBe(PLAIN_CHAIN);
-    const row = db.raw.query("SELECT model_chain, updated_at FROM app_model_config").get() as {
-      model_chain: string | null;
-      updated_at: string;
-    };
-    expect(row.model_chain).toBe(PLAIN_CHAIN); // plaintext by design — not a secret
+    const row = db.raw
+      .query("SELECT chain, updated_at FROM app_model_chains WHERE name = 'default'")
+      .get() as { chain: string | null; updated_at: string };
+    expect(row.chain).toBe(PLAIN_CHAIN); // plaintext by design — not a secret
     expect(row.updated_at).toMatch(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/);
   });
 
@@ -587,7 +650,7 @@ describe("app-config store (createAppConfigStore) — model chain + getAppConfig
     const store = configStore(db);
     await store.setModelChain(app.id, "first/model");
     await store.setModelChain(app.id, "second/model");
-    expect(rawCount(db, "app_model_config")).toBe(1);
+    expect(rawCount(db, "app_model_chains")).toBe(1);
     expect(await store.getModelChain(app.id)).toBe("second/model");
   });
 
@@ -597,7 +660,7 @@ describe("app-config store (createAppConfigStore) — model chain + getAppConfig
     const store = configStore(db);
     await store.setModelChain(app.id, "first/model");
     await store.setModelChain(app.id, null);
-    expect(rawCount(db, "app_model_config")).toBe(0);
+    expect(rawCount(db, "app_model_chains")).toBe(0);
     expect(await store.getModelChain(app.id)).toBeNull();
     // Clearing an app that never had a chain is a quiet no-op.
     await expect(store.setModelChain(app.id, null)).resolves.toBeUndefined();
@@ -609,7 +672,7 @@ describe("app-config store (createAppConfigStore) — model chain + getAppConfig
     const store = configStore(db);
     await store.setModelChain(app.id, "first/model");
     await store.setModelChain(app.id, "");
-    expect(rawCount(db, "app_model_config")).toBe(0);
+    expect(rawCount(db, "app_model_chains")).toBe(0);
     expect(await store.getModelChain(app.id)).toBeNull();
     // Clearing an app with no stored chain is a quiet no-op, like null.
     await expect(store.setModelChain(app.id, "")).resolves.toBeUndefined();
@@ -622,7 +685,7 @@ describe("app-config store (createAppConfigStore) — model chain + getAppConfig
     // Route semantics (空 = 清除, raw.trim() === "") aligned at the store: a
     // blank chain never lands as a row, whatever the caller passed.
     await store.setModelChain(app.id, "   ");
-    expect(rawCount(db, "app_model_config")).toBe(0);
+    expect(rawCount(db, "app_model_chains")).toBe(0);
     expect(await store.getModelChain(app.id)).toBeNull();
     // Interior/trailing whitespace in a chain WITH content is configuration —
     // stored exactly as given (the runner-side selector parse trims segments).
@@ -663,172 +726,310 @@ describe("app-config store (createAppConfigStore) — model chain + getAppConfig
   });
 });
 
-// --- store: model roles (plan 17 B6) ---
+// --- store: model chains + seats (plan 35 T2, spec §4.4) ---
 
-describe("app-config store (createAppConfigStore) — model roles (plan 17 T1)", () => {
-  test("setModelRole stores VERBATIM (:thinking suffix and padding untouched); getAppModelRoles reads it back", async () => {
+describe("app-config store (createAppConfigStore) — model chains + seats (plan 35 T2)", () => {
+  test("setModelChain stores the default row VERBATIM (:thinking suffix and padding untouched); getModelChain reads it back", async () => {
     const db = createAppConfigD1();
     const app = await seedApp(db, { slug: "a", createdBy: "mallory" });
     const store = configStore(db);
-    await store.setModelRole(app.id, "mstar-review-seat", "  ark-plan/deepseek-v4-flash:high ");
-    await store.setModelRole(app.id, "code-reviewer", "openai/gpt-5:thinking, anthropic/claude-x");
-    // Only the MAPPED roles appear; selectors come back exactly as stored.
-    expect(await store.getAppModelRoles(app.id)).toEqual({
-      "code-reviewer": "openai/gpt-5:thinking, anthropic/claude-x",
-      "mstar-review-seat": "  ark-plan/deepseek-v4-flash:high ",
-    });
-    const row = db.raw.query("SELECT app_id, role, selector FROM app_model_roles WHERE role = 'mstar-review-seat'").get() as {
-      app_id: string;
-      role: string;
-      selector: string;
-    };
-    expect(row.selector).toBe("  ark-plan/deepseek-v4-flash:high "); // plaintext by design — not a secret
+    await store.setModelChain(app.id, "  ark-plan/deepseek-v4-flash:high ");
+    expect(await store.getModelChain(app.id)).toBe("  ark-plan/deepseek-v4-flash:high ");
+    const row = db.raw
+      .query("SELECT app_id, name, chain, is_default FROM app_model_chains WHERE name = 'default'")
+      .get() as { app_id: string; name: string; chain: string; is_default: number };
+    expect(row.chain).toBe("  ark-plan/deepseek-v4-flash:high "); // plaintext by design — not a secret
+    expect(row.is_default).toBe(1);
     expect(row.app_id).toBe(app.id);
   });
 
-  test("setModelRole upserts: a second save replaces the selector (one row per (app_id, role))", async () => {
+  test("setModelChain upserts: a second save replaces the chain (one default row per app)", async () => {
     const db = createAppConfigD1();
     const app = await seedApp(db, { slug: "a", createdBy: "mallory" });
     const store = configStore(db);
-    await store.setModelRole(app.id, "fullstack-dev", "first/model");
-    await store.setModelRole(app.id, "fullstack-dev", "second/model");
-    expect(rawCount(db, "app_model_roles")).toBe(1);
-    expect(await store.getAppModelRoles(app.id)).toEqual({ "fullstack-dev": "second/model" });
+    await store.setModelChain(app.id, "first/model");
+    await store.setModelChain(app.id, "second/model");
+    expect(rawCount(db, "app_model_chains")).toBe(1);
+    expect(await store.getModelChain(app.id)).toBe("second/model");
   });
 
-  test('setModelRole(role, "") CLEARS the mapping; clearing an unmapped role is a quiet no-op', async () => {
+  test('setModelChain(null) CLEARS the default row; clearing an unset default is a quiet no-op', async () => {
     const db = createAppConfigD1();
     const app = await seedApp(db, { slug: "a", createdBy: "mallory" });
     const store = configStore(db);
-    await store.setModelRole(app.id, "frontend-dev", "first/model");
-    await store.setModelRole(app.id, "frontend-dev", "");
-    expect(rawCount(db, "app_model_roles")).toBe(0);
-    expect(await store.getAppModelRoles(app.id)).toEqual({});
-    // Clearing a role that never had a mapping resolves without error.
-    await expect(store.setModelRole(app.id, "frontend-dev", "")).resolves.toBeUndefined();
+    await store.setModelChain(app.id, "first/model");
+    await store.setModelChain(app.id, null);
+    expect(rawCount(db, "app_model_chains")).toBe(0);
+    expect(await store.getModelChain(app.id)).toBeNull();
+    // Clearing a default that never existed resolves without error.
+    await expect(store.setModelChain(app.id, "")).resolves.toBeUndefined();
   });
 
-  test("a whitespace-only selector is blank = clear; a padded real selector upserts VERBATIM", async () => {
+  test("a whitespace-only chain is blank = clear; a padded real chain upserts VERBATIM", async () => {
     const db = createAppConfigD1();
     const app = await seedApp(db, { slug: "a", createdBy: "mallory" });
     const store = configStore(db);
-    // The setModelChain 空 = 清除 convention aligned at the store: a blank
-    // selector never lands as a row, whatever the caller passed.
-    await store.setModelRole(app.id, "code-reviewer", "   ");
-    expect(rawCount(db, "app_model_roles")).toBe(0);
-    // Interior/trailing whitespace in a selector WITH content is
-    // configuration — stored exactly as given (the runner-side parse trims).
+    await store.setModelChain(app.id, "   ");
+    expect(rawCount(db, "app_model_chains")).toBe(0);
     const padded = "  openai/gpt-5 , anthropic/claude-x  ";
-    await store.setModelRole(app.id, "code-reviewer", padded);
-    expect(await store.getAppModelRoles(app.id)).toEqual({ "code-reviewer": padded });
+    await store.setModelChain(app.id, padded);
+    expect(await store.getModelChain(app.id)).toBe(padded);
   });
 
-  test("clearModelRole removes the row, then is an idempotent no-op like the blank-selector path", async () => {
+  test("is_default uniqueness is enforced in ONE batch (clear-old-set-new): a rogue direct-DB default row is swept", async () => {
     const db = createAppConfigD1();
     const app = await seedApp(db, { slug: "a", createdBy: "mallory" });
     const store = configStore(db);
-    await store.setModelRole(app.id, "code-reviewer", "openai/gpt-5");
-    await store.clearModelRole(app.id, "code-reviewer");
-    expect(rawCount(db, "app_model_roles")).toBe(0);
-    await expect(store.clearModelRole(app.id, "code-reviewer")).resolves.toBeUndefined();
-    await expect(store.clearModelRole(app.id, "never-stored-role-name")).rejects.toThrow(
-      UnknownModelRoleError,
+    await store.setModelChain(app.id, "first/model");
+    // A rogue is_default=1 row (a direct-DB write the store never made —
+    // the "race" shape the batch invariant must absorb).
+    rawRun(
+      db,
+      `INSERT INTO app_model_chains (app_id, name, chain, is_default, created_at, updated_at)
+       VALUES (?, 'rogue', 'x/y', 1, datetime('now'), datetime('now'))`,
+      app.id,
     );
+    await store.setModelChain(app.id, "second/model");
+    // Exactly ONE is_default=1 row after the write, and it is the 'default' row.
+    const defaults = db.raw
+      .query("SELECT name, chain FROM app_model_chains WHERE app_id = ? AND is_default = 1")
+      .all(app.id) as Array<{ name: string; chain: string }>;
+    expect(defaults).toEqual([{ name: "default", chain: "second/model" }]);
   });
 
-  test("off-vocabulary role → UnknownModelRoleError, zero rows written (setModelRole/clearModelRole/setModelRoles)", async () => {
+  test("upsertModelChain creates a named chain (is_default=0); getModelChains lists default first then named", async () => {
+    const db = createAppConfigD1();
+    const app = await seedApp(db, { slug: "a", createdBy: "mallory" });
+    const store = configStore(db);
+    await store.setModelChain(app.id, "ark-plan/deepseek-v4-flash");
+    await store.upsertModelChain(app.id, "fast", "openai/gpt-5:thinking");
+    await store.upsertModelChain(app.id, "cheap", "groq/llama-3-3");
+    const chains = await store.getModelChains(app.id);
+    expect(chains.map((c) => ({ name: c.name, chain: c.chain, is_default: c.is_default }))).toEqual([
+      { name: "cheap", chain: "groq/llama-3-3", is_default: false },
+      { name: "default", chain: "ark-plan/deepseek-v4-flash", is_default: true },
+      { name: "fast", chain: "openai/gpt-5:thinking", is_default: false },
+    ]);
+  });
+
+  test("upsertModelChain replaces an existing named chain; the reserved 'default' name is rejected (store backstop)", async () => {
+    const db = createAppConfigD1();
+    const app = await seedApp(db, { slug: "a", createdBy: "mallory" });
+    const store = configStore(db);
+    await store.upsertModelChain(app.id, "fast", "first/model");
+    await store.upsertModelChain(app.id, "fast", "second/model");
+    expect(rawCount(db, "app_model_chains")).toBe(1);
+    expect((await store.getModelChains(app.id))[0]!.chain).toBe("second/model");
+    for (const name of ["default", "Default", "UPPER", "has space", "-lead", "a".repeat(65)]) {
+      await expect(store.upsertModelChain(app.id, name, "x/y")).rejects.toThrow(InvalidModelChainNameError);
+    }
+    expect(rawCount(db, "app_model_chains")).toBe(1);
+  });
+
+  test("upsertModelChain with a blank chain → InvalidModelSelectorError, zero rows written", async () => {
+    const db = createAppConfigD1();
+    const app = await seedApp(db, { slug: "a", createdBy: "mallory" });
+    const store = configStore(db);
+    await expect(store.upsertModelChain(app.id, "fast", "   ")).rejects.toThrow(InvalidModelSelectorError);
+    expect(rawCount(db, "app_model_chains")).toBe(0);
+  });
+
+  test("removeModelChain deletes the named chain AND its seat references in ONE atomic batch (seats fall back to default)", async () => {
+    const db = createAppConfigD1();
+    const app = await seedApp(db, { slug: "a", createdBy: "mallory" });
+    const store = configStore(db);
+    await store.setModelChain(app.id, "ark-plan/deepseek-v4-flash");
+    await store.upsertModelChain(app.id, "fast", "openai/gpt-5");
+    await store.setModelChainSeat(app.id, "code-reviewer", "fast");
+    await store.setModelChainSeat(app.id, "frontend-dev", "fast");
+    expect(await store.removeModelChain(app.id, "fast")).toBe(true);
+    // The chain row is gone AND both reference rows are gone (absent = default).
+    expect(rawCount(db, "app_model_chains")).toBe(1); // only the default row
+    expect(rawCount(db, "app_model_chain_seats")).toBe(0);
+    expect(await store.getModelChainSeats(app.id)).toEqual({});
+    // Removing an unknown name is an idempotent no-op returning false.
+    expect(await store.removeModelChain(app.id, "nope")).toBe(false);
+    // The reserved 'default' row cannot be removed via this method.
+    await expect(store.removeModelChain(app.id, "default")).rejects.toThrow(InvalidModelChainNameError);
+  });
+
+  test("setModelChainSeat stores a chain reference; getModelChainSeats reads it back; blank/'default' clears (absent = default)", async () => {
+    const db = createAppConfigD1();
+    const app = await seedApp(db, { slug: "a", createdBy: "mallory" });
+    const store = configStore(db);
+    await store.upsertModelChain(app.id, "fast", "openai/gpt-5");
+    await store.setModelChainSeat(app.id, "code-reviewer", "fast");
+    expect(await store.getModelChainSeats(app.id)).toEqual({ "code-reviewer": "fast" });
+    // Blank clears the reference row (the seat uses the default chain).
+    await store.setModelChainSeat(app.id, "code-reviewer", "");
+    expect(rawCount(db, "app_model_chain_seats")).toBe(0);
+    expect(await store.getModelChainSeats(app.id)).toEqual({});
+    // The reserved "default" name also clears (never stored as a reference).
+    await store.setModelChainSeat(app.id, "code-reviewer", "fast");
+    await store.setModelChainSeat(app.id, "code-reviewer", "default");
+    expect(rawCount(db, "app_model_chain_seats")).toBe(0);
+    // Clearing a seat that never had a reference resolves without error.
+    await expect(store.setModelChainSeat(app.id, "code-reviewer", "")).resolves.toBeUndefined();
+  });
+
+  test("setModelChainSeat referencing a missing chain → UnknownModelChainError, zero rows written", async () => {
+    const db = createAppConfigD1();
+    const app = await seedApp(db, { slug: "a", createdBy: "mallory" });
+    const store = configStore(db);
+    await expect(store.setModelChainSeat(app.id, "code-reviewer", "no-such-chain")).rejects.toThrow(
+      UnknownModelChainError,
+    );
+    expect(rawCount(db, "app_model_chain_seats")).toBe(0);
+  });
+
+  test("off-vocabulary role → UnknownModelRoleError, zero rows written (setModelChainSeat/clearModelChainSeat/setModelChainSeats)", async () => {
     const db = createAppConfigD1();
     const app = await seedApp(db, { slug: "a", createdBy: "mallory" });
     const store = configStore(db);
     for (const role of ["reviewer", "smol", "mstar-review-seat "]) {
-      await expect(store.setModelRole(app.id, role, "openai/gpt-5")).rejects.toThrow(UnknownModelRoleError);
-      await expect(store.clearModelRole(app.id, role)).rejects.toThrow(UnknownModelRoleError);
-      await expect(store.setModelRoles(app.id, { [role]: "openai/gpt-5" })).rejects.toThrow(UnknownModelRoleError);
+      await expect(store.setModelChainSeat(app.id, role, "fast")).rejects.toThrow(UnknownModelRoleError);
+      await expect(store.clearModelChainSeat(app.id, role)).rejects.toThrow(UnknownModelRoleError);
+      await expect(store.setModelChainSeats(app.id, { [role]: "fast" })).rejects.toThrow(UnknownModelRoleError);
     }
     // Even a VALID role is rejected when it rides an invalid map entry.
     await expect(
-      store.setModelRoles(app.id, { "code-reviewer": "openai/gpt-5", reviewer: "openai/gpt-5" }),
+      store.setModelChainSeats(app.id, { "code-reviewer": "fast", reviewer: "fast" }),
     ).rejects.toThrow(UnknownModelRoleError);
-    expect(rawCount(db, "app_model_roles")).toBe(0);
+    expect(rawCount(db, "app_model_chain_seats")).toBe(0);
   });
 
-  test("content-bearing selector that parses to zero selectors → InvalidModelSelectorError, zero rows written", async () => {
+  test("setModelChainSeats saves the full map in one call; one bad entry fails BEFORE any write", async () => {
     const db = createAppConfigD1();
     const app = await seedApp(db, { slug: "a", createdBy: "mallory" });
     const store = configStore(db);
-    for (const selector of [",, ,", " , , ,"]) {
-      await expect(store.setModelRole(app.id, "code-reviewer", selector)).rejects.toThrow(
-        InvalidModelSelectorError,
-      );
-    }
-    expect(rawCount(db, "app_model_roles")).toBe(0);
-  });
-
-  test("setModelRoles saves the full map in one call; one bad entry fails BEFORE any write", async () => {
-    const db = createAppConfigD1();
-    const app = await seedApp(db, { slug: "a", createdBy: "mallory" });
-    const store = configStore(db);
-    // The settings single-save face (plan 17 T3): all four rows at once,
-    // blank entries clearing their role.
-    await store.setModelRole(app.id, "code-reviewer", "old/model");
-    await store.setModelRoles(app.id, {
-      "mstar-review-seat": "ark-plan/deepseek-v4-flash:high",
-      "code-reviewer": "", // cleared by the same save
-      "fullstack-dev": "openai/gpt-5",
+    await store.upsertModelChain(app.id, "fast", "openai/gpt-5");
+    await store.setModelChainSeat(app.id, "code-reviewer", "fast");
+    await store.setModelChainSeats(app.id, {
+      "mstar-review-seat": "fast",
+      "code-reviewer": "", // cleared by the same save (absent = default)
+      "fullstack-dev": "fast",
       "frontend-dev": "",
     });
-    expect(await store.getAppModelRoles(app.id)).toEqual({
-      "fullstack-dev": "openai/gpt-5",
-      "mstar-review-seat": "ark-plan/deepseek-v4-flash:high",
+    expect(await store.getModelChainSeats(app.id)).toEqual({
+      "fullstack-dev": "fast",
+      "mstar-review-seat": "fast",
     });
     // Validation is whole-map-first: the valid entry in this map must NOT
     // reach the DB — zero rows touched by the failed call.
     await expect(
-      store.setModelRoles(app.id, { "frontend-dev": "x/y", "code-reviewer": ",," }),
-    ).rejects.toThrow(InvalidModelSelectorError);
-    expect(rawCount(db, "app_model_roles")).toBe(2);
+      store.setModelChainSeats(app.id, { "frontend-dev": "fast", "code-reviewer": "no-such-chain" }),
+    ).rejects.toThrow(UnknownModelChainError);
+    expect(rawCount(db, "app_model_chain_seats")).toBe(2);
   });
 
-  test("setModelRoles is ONE atomic batch: a batch failure leaves ZERO rows changed (Phase 5, PR #7 review)", async () => {
+  test("F-001: seat references are canonicalized — padded names hit the real chain, never a dangling row (setModelChainSeat)", async () => {
     const db = createAppConfigD1();
     const app = await seedApp(db, { slug: "a", createdBy: "mallory" });
     const store = configStore(db);
-    await store.setModelRole(app.id, "code-reviewer", "old/model");
+    await store.upsertModelChain(app.id, "fast", "openai/gpt-5");
+    // A padded known name stores the TRIMMED reference (the consumer read
+    // must resolve it — no `references missing chain "fast "` failure).
+    await store.setModelChainSeat(app.id, "code-reviewer", "  fast  ");
+    expect(await store.getModelChainSeats(app.id)).toEqual({ "code-reviewer": "fast" });
+    expect(rawCount(db, "app_model_chain_seats")).toBe(1);
+    const chainName = db.raw
+      .query("SELECT chain_name FROM app_model_chain_seats WHERE app_id = ? AND role = ?")
+      .get(app.id, "code-reviewer") as { chain_name: string };
+    expect(chainName.chain_name).toBe("fast");
+    // A padded reference resolves instead of throwing (the fail-closed
+    // consumer read is the exact failure F-001 prevented).
+    await expect(store.getModelOverridesForConsumer(app.id)).resolves.toEqual({ "code-reviewer": "openai/gpt-5" });
+    // Padded "default" / whitespace-only clear the reference row.
+    await store.setModelChainSeat(app.id, "code-reviewer", "  default  ");
+    expect(rawCount(db, "app_model_chain_seats")).toBe(0);
+    await store.setModelChainSeat(app.id, "code-reviewer", "fast");
+    await store.setModelChainSeat(app.id, "code-reviewer", " \t ");
+    expect(rawCount(db, "app_model_chain_seats")).toBe(0);
+  });
+
+  test("F-001: bulk setModelChainSeats binds the trimmed name; a padded 'default' clears (zero dangling rows)", async () => {
+    const db = createAppConfigD1();
+    const app = await seedApp(db, { slug: "a", createdBy: "mallory" });
+    const store = configStore(db);
+    await store.upsertModelChain(app.id, "fast", "openai/gpt-5");
+    await store.setModelChainSeats(app.id, {
+      "code-reviewer": "fast ", // trailing space — must store "fast", not "fast "
+      "frontend-dev": "  default  ", // padded reserved name — clears
+    });
+    expect(await store.getModelChainSeats(app.id)).toEqual({ "code-reviewer": "fast" });
+    expect(rawCount(db, "app_model_chain_seats")).toBe(1);
+    await expect(store.getModelOverridesForConsumer(app.id)).resolves.toEqual({ "code-reviewer": "openai/gpt-5" });
+  });
+
+  test("setModelChainSeats is ONE atomic batch: a batch failure leaves ZERO rows changed (Phase 5, PR #7 review)", async () => {
+    const db = createAppConfigD1();
+    const app = await seedApp(db, { slug: "a", createdBy: "mallory" });
+    const store = configStore(db);
+    await store.upsertModelChain(app.id, "fast", "openai/gpt-5");
+    await store.setModelChainSeat(app.id, "code-reviewer", "fast");
     const failing = createBatchRejectingD1(db);
     await expect(
-      configStore(failing).setModelRoles(app.id, {
-        "mstar-review-seat": "new/model",
+      configStore(failing).setModelChainSeats(app.id, {
+        "mstar-review-seat": "fast",
         "code-reviewer": "", // blank = clear — must not land either
       }),
     ).rejects.toThrow(/simulated D1 batch failure/);
     // The whole map rides ONE batch — there is no sequential-apply path.
     expect(failing.batchCalls()).toBe(1);
     // Atomic: the pre-existing row is untouched — nothing half-applied.
-    expect(await configStore(db).getAppModelRoles(app.id)).toEqual({ "code-reviewer": "old/model" });
-    expect(rawCount(db, "app_model_roles")).toBe(1);
+    expect(await configStore(db).getModelChainSeats(app.id)).toEqual({ "code-reviewer": "fast" });
+    expect(rawCount(db, "app_model_chain_seats")).toBe(1);
   });
 
-  test("getAppModelRoles on an app with no roles is an EMPTY map (= the chain behavior)", async () => {
+  test("getModelOverridesForConsumer resolves seats → chain values; default-referenced and absent seats are omitted", async () => {
+    const db = createAppConfigD1();
+    const app = await seedApp(db, { slug: "a", createdBy: "mallory" });
+    const store = configStore(db);
+    await store.setModelChain(app.id, "ark-plan/deepseek-v4-flash");
+    await store.upsertModelChain(app.id, "fast", "openai/gpt-5:thinking, anthropic/claude-x");
+    await store.upsertModelChain(app.id, "cheap", "groq/llama-3-3");
+    // code-reviewer → named chain (in the map); mstar-review-seat → default
+    // chain (omitted); fullstack-dev → no reference row (omitted).
+    await store.setModelChainSeat(app.id, "code-reviewer", "fast");
+    await store.setModelChainSeat(app.id, "mstar-review-seat", "default");
+    expect(await store.getModelOverridesForConsumer(app.id)).toEqual({
+      "code-reviewer": "openai/gpt-5:thinking, anthropic/claude-x",
+    });
+    // A seat referencing a missing chain (direct-DB tamper) fails loud.
+    rawRun(
+      db,
+      `INSERT INTO app_model_chain_seats (app_id, role, chain_name) VALUES (?, 'frontend-dev', 'ghost')`,
+      app.id,
+    );
+    await expect(store.getModelOverridesForConsumer(app.id)).rejects.toThrow(/references missing chain/);
+  });
+
+  test("getModelChainSeats on an app with no references is an EMPTY map (= every seat uses the default chain)", async () => {
     const db = createAppConfigD1();
     const bare = await seedApp(db, { slug: "bare", createdBy: "mallory" });
-    expect(await configStore(db).getAppModelRoles(bare.id)).toEqual({});
+    expect(await configStore(db).getModelChainSeats(bare.id)).toEqual({});
+    expect(await configStore(db).getModelOverridesForConsumer(bare.id)).toEqual({});
   });
 
-  test("cross-App isolation: App X's role map never contains App Y's roles (full-object assert)", async () => {
+  test("cross-App isolation: App X's chains/seats never contain App Y's (full-object assert)", async () => {
     const db = createAppConfigD1();
     const x = await seedApp(db, { slug: "app-x", createdBy: "mallory" });
     const y = await seedApp(db, { slug: "app-y", createdBy: "ada", githubAppId: 1002 });
     const store = configStore(db);
-    await store.setModelRole(x.id, "code-reviewer", "openai/gpt-x");
-    await store.setModelRole(y.id, "mstar-review-seat", "anthropic/claude-y");
-    expect(await store.getAppModelRoles(x.id)).toEqual({ "code-reviewer": "openai/gpt-x" });
-    expect(await store.getAppModelRoles(y.id)).toEqual({ "mstar-review-seat": "anthropic/claude-y" });
+    await store.upsertModelChain(x.id, "fast", "openai/gpt-x");
+    await store.setModelChainSeat(x.id, "code-reviewer", "fast");
+    await store.upsertModelChain(y.id, "cheap", "anthropic/claude-y");
+    await store.setModelChainSeat(y.id, "mstar-review-seat", "cheap");
+    expect(await store.getModelChains(x.id)).toHaveLength(1);
+    expect(await store.getModelChainSeats(x.id)).toEqual({ "code-reviewer": "fast" });
+    expect(await store.getModelChainSeats(y.id)).toEqual({ "mstar-review-seat": "cheap" });
   });
 
   test("unknown app_id → FK violation on insert (fail-loud, same as every write here)", async () => {
     const db = createAppConfigD1();
+    // upsertModelChain's name gate passes, so the INSERT hits the FK.
     await expect(
-      configStore(db).setModelRole("no-such-app", "code-reviewer", "openai/gpt-5"),
+      configStore(db).upsertModelChain("no-such-app", "fast", "openai/gpt-5"),
     ).rejects.toThrow(/FOREIGN KEY constraint failed/);
   });
 });
@@ -1037,15 +1238,41 @@ describe("app-config store (createAppConfigStore) — custom providers (plan 23 
 // --- duplication locks (Q2: dashboard may not import pipeline/review) ---
 
 describe("duplication locks", () => {
-  // PROVIDER_IDS — sync with PROVIDERS in src/pipeline/providers.ts. Drift
-  // breaks the locked 19-id set below (a future provider PR must update BOTH
-  // the pipeline allowlist and this dashboard mirror).
-  test("PROVIDER_IDS mirrors the pipeline PROVIDERS key sequence exactly", () => {
+  // PROVIDER_IDS — sync with the builtin tier of the generated catalog
+  // (src/pipeline/provider-catalog.ts). Drift breaks the locked 19-id set
+  // below (a future provider PR must update BOTH the pipeline catalog and
+  // this dashboard mirror).
+  test("PROVIDER_IDS mirrors the pipeline catalog's builtin key sequence exactly", () => {
     expect([...PROVIDER_IDS]).toEqual(Object.keys(PROVIDERS));
     // 19 ids: the 18 built-in omp providers + `ark` (plan 24 Task 6 /
     // AL-24-5 — the in-image ark-plan base provider's ARK_API_KEY rides the
     // per-App BYOK keys map under this id).
     expect(PROVIDER_IDS).toHaveLength(19);
+  });
+
+  // PROVIDER_META (plan 35 T3, spec §5) — the dashboard's catalog mirror:
+  // every catalog entry (builtin AND template) with its display metadata
+  // snapshot. Drift breaks the lock below (a catalog regeneration must
+  // update this mirror in the same commit).
+  test("PROVIDER_META mirrors the pipeline catalog's display metadata exactly", () => {
+    const catalogMirror = Object.fromEntries(
+      Object.entries(PROVIDER_CATALOG).map(([id, entry]) => [
+        id,
+        {
+          label: entry.label,
+          tier: entry.tier,
+          baseUrl: entry.baseUrl,
+          api: entry.api,
+          models: [...entry.models],
+          doc: entry.doc,
+        },
+      ]),
+    );
+    expect(PROVIDER_META).toEqual(catalogMirror);
+    // The mirror carries the template tier too (workers-ai) — the provider
+    // list UI and the materialization route consume it.
+    expect(Object.keys(PROVIDER_META)).toHaveLength(20);
+    expect(PROVIDER_META["workers-ai"]!.tier).toBe("template");
   });
 
   test("parseModelChain behaves exactly like the runtime-omp parseModelSelectors", () => {
@@ -1269,9 +1496,9 @@ describe("POST /dashboard/apps/:slug/settings — save-chain (op=save-chain)", (
     expect(res.status).toBe(200);
     expect(await res.text()).toContain("Saved the model chain for mallorys-app");
     const row = db.raw
-      .query("SELECT model_chain FROM app_model_config WHERE app_id = ?")
-      .get(app.id) as { model_chain: string };
-    expect(row.model_chain).toBe(PLAIN_CHAIN);
+      .query("SELECT chain FROM app_model_chains WHERE app_id = ? AND name = 'default'")
+      .get(app.id) as { chain: string };
+    expect(row.chain).toBe(PLAIN_CHAIN);
   });
 
   test("empty chain CLEARS the config (reviews then fail closed — AL-24-5); a second save replaces", async () => {
@@ -1281,7 +1508,7 @@ describe("POST /dashboard/apps/:slug/settings — save-chain (op=save-chain)", (
     const clear = await postForm(SETTINGS, cookie, env, { op: "save-chain", model_chain: "" });
     expect(clear.status).toBe(200);
     expect(await clear.text()).toContain("Cleared the model chain for mallorys-app");
-    expect(rawCount(db, "app_model_config")).toBe(0);
+    expect(rawCount(db, "app_model_chains")).toBe(0);
     // Then a real save replaces…
     await postForm(SETTINGS, cookie, env, { op: "save-chain", model_chain: "first/model" });
     expect(await configStore(db).getModelChain(app.id)).toBe("first/model");
@@ -1295,7 +1522,7 @@ describe("POST /dashboard/apps/:slug/settings — save-chain (op=save-chain)", (
     const res = await postForm(SETTINGS, cookie, makeEnv(db), { op: "save-chain", model_chain: " , ," });
     expect(res.status).toBe(400);
     expect(await res.text()).toContain("at least one comma-separated model selector");
-    expect(rawCount(db, "app_model_config")).toBe(0);
+    expect(rawCount(db, "app_model_chains")).toBe(0);
   });
 
   test("chain over 400 chars → 400, zero rows written (AL-23-2 selector/chain cap)", async () => {
@@ -1307,7 +1534,7 @@ describe("POST /dashboard/apps/:slug/settings — save-chain (op=save-chain)", (
     });
     expect(res.status).toBe(400);
     expect(await res.text()).toContain(`limited to ${MAX_MODEL_SELECTOR_LENGTH}`);
-    expect(rawCount(db, "app_model_config")).toBe(0);
+    expect(rawCount(db, "app_model_chains")).toBe(0);
   });
 
   test("a chain of exactly 400 chars saves (the bound is inclusive)", async () => {
@@ -1348,7 +1575,7 @@ describe("POST /dashboard/apps/:slug/settings — save-chain (op=save-chain)", (
       model_chain: "ark-plan/deepseek-v4-flash",
     });
     expect(res.status).toBe(403);
-    expect(rawCount(db, "app_model_config")).toBe(0);
+    expect(rawCount(db, "app_model_chains")).toBe(0);
   });
 
   test("unknown op → 400 with the reason (consistent with other validation failures)", async () => {
@@ -1361,12 +1588,15 @@ describe("POST /dashboard/apps/:slug/settings — save-chain (op=save-chain)", (
   });
 });
 
-// --- plan 17 T3: the Role models editor (settings op save-roles) ---
+// --- plan 17 T3 editor, plan 35 T2 rework: the Role models editor (settings op save-roles) ---
 
 /**
  * The exact body the Role models editor posts: the hidden op plus one
- * role_<role> field per MODEL_ROLE_IDS seat (blank = clear), plus any
- * `extra` fields for the tampering cases.
+ * role_<role> field per MODEL_ROLE_IDS seat (blank = the seat uses the
+ * default chain), plus any `extra` fields for the tampering cases.
+ * F-002 (QC wave): the route now ENFORCES the full map — a partial
+ * submission is a 400 naming the absent roles, so helpers for success
+ * paths must always fill every seat.
  */
 function roleForm(
   values: Record<string, string>,
@@ -1377,68 +1607,76 @@ function roleForm(
   return { ...fields, ...extra };
 }
 
-describe("Role models editor (plan 17 T3 — save-roles op)", () => {
-  test("owner saves the map: stored VERBATIM (:thinking suffix and padding kept), plain-text 200", async () => {
+describe("Role models editor (plan 17 T3 — save-roles op, plan 35 T2 chain references)", () => {
+  test("owner saves the map: chain references stored, plain-text 200", async () => {
     const { db, app } = await seededWorld();
-    const padded = "  openai/gpt-5 , anthropic/claude-x  ";
+    const store = configStore(db);
+    await store.upsertModelChain(app.id, "seat-mstar-review-seat", "ark-plan/deepseek-v4-flash:high");
+    await store.upsertModelChain(app.id, "seat-code-reviewer", "  openai/gpt-5 , anthropic/claude-x  ");
     const res = await postForm(
       SETTINGS,
       `${SESSION_COOKIE}=${await sessionCookie("mallory")}`,
       makeEnv(db),
       roleForm({
-        "mstar-review-seat": "ark-plan/deepseek-v4-flash:high",
-        "code-reviewer": padded,
+        "mstar-review-seat": "seat-mstar-review-seat",
+        "code-reviewer": "seat-code-reviewer",
       }),
     );
     expect(res.status).toBe(200);
     expect(await res.text()).toContain("Saved the role models for mallorys-app");
-    expect(await configStore(db).getAppModelRoles(app.id)).toEqual({
-      "mstar-review-seat": "ark-plan/deepseek-v4-flash:high",
-      "code-reviewer": padded,
+    expect(await store.getModelChainSeats(app.id)).toEqual({
+      "mstar-review-seat": "seat-mstar-review-seat",
+      "code-reviewer": "seat-code-reviewer",
     });
   });
 
-  test("one save maps AND clears: blanks = cleared, content = upserted (full-map editor semantics)", async () => {
+  test("one save maps AND clears: blanks = the seat uses the default chain (full-map editor semantics)", async () => {
     const { db, app } = await seededWorld();
     const store = configStore(db);
-    await store.setModelRole(app.id, "code-reviewer", "old/model");
-    await store.setModelRole(app.id, "frontend-dev", "old-2/model");
+    await store.upsertModelChain(app.id, "seat-mstar-review-seat", "new/model");
+    await store.upsertModelChain(app.id, "seat-code-reviewer", "old/model");
+    await store.setModelChainSeat(app.id, "code-reviewer", "seat-code-reviewer");
+    await store.setModelChainSeat(app.id, "frontend-dev", "seat-code-reviewer");
     const res = await postForm(
       SETTINGS,
       `${SESSION_COOKIE}=${await sessionCookie("mallory")}`,
       makeEnv(db),
       roleForm({
-        "mstar-review-seat": "new/model",
+        "mstar-review-seat": "seat-mstar-review-seat",
         // code-reviewer / frontend-dev posted blank → cleared by the same save
       }),
     );
     expect(res.status).toBe(200);
-    expect(await store.getAppModelRoles(app.id)).toEqual({ "mstar-review-seat": "new/model" });
+    expect(await store.getModelChainSeats(app.id)).toEqual({ "mstar-review-seat": "seat-mstar-review-seat" });
   });
 
   test("a D1 batch failure mid-save → 500, truthful 'nothing was stored', ZERO rows changed (Phase 5, PR #7 review)", async () => {
     const { db, app } = await seededWorld();
-    await configStore(db).setModelRole(app.id, "code-reviewer", "old/model");
+    const store = configStore(db);
+    await store.upsertModelChain(app.id, "seat-mstar-review-seat", "new/model");
+    await store.upsertModelChain(app.id, "seat-code-reviewer", "old/model");
+    await store.setModelChainSeat(app.id, "code-reviewer", "seat-code-reviewer");
     const failing = createBatchRejectingD1(db);
     const res = await postForm(
       SETTINGS,
       `${SESSION_COOKIE}=${await sessionCookie("mallory")}`,
       makeEnv(failing),
-      roleForm({ "mstar-review-seat": "new/model", "code-reviewer": "" }),
+      roleForm({ "mstar-review-seat": "seat-mstar-review-seat", "code-reviewer": "" }),
     );
     expect(res.status).toBe(500);
     // With the atomic batch the pre-existing copy is now TRUE — a failed
     // save genuinely stored nothing.
     expect(await res.text()).toContain("The dashboard database rejected the change — nothing was stored.");
     // Atomic: the store state is exactly as before the failed save.
-    expect(await configStore(db).getAppModelRoles(app.id)).toEqual({ "code-reviewer": "old/model" });
-    expect(rawCount(db, "app_model_roles")).toBe(1);
+    expect(await store.getModelChainSeats(app.id)).toEqual({ "code-reviewer": "seat-code-reviewer" });
+    expect(rawCount(db, "app_model_chain_seats")).toBe(1);
   });
 
-  test("an all-blank save clears every mapping (empty = the App model chain)", async () => {
+  test("an all-blank save clears every reference (empty = every seat uses the default chain)", async () => {
     const { db, app } = await seededWorld();
     const store = configStore(db);
-    await store.setModelRole(app.id, "code-reviewer", "old/model");
+    await store.upsertModelChain(app.id, "seat-code-reviewer", "old/model");
+    await store.setModelChainSeat(app.id, "code-reviewer", "seat-code-reviewer");
     const res = await postForm(
       SETTINGS,
       `${SESSION_COOKIE}=${await sessionCookie("mallory")}`,
@@ -1447,29 +1685,54 @@ describe("Role models editor (plan 17 T3 — save-roles op)", () => {
     );
     expect(res.status).toBe(200);
     expect(await res.text()).toContain("Saved the role models for mallorys-app");
-    expect(rawCount(db, "app_model_roles")).toBe(0);
-    expect(await store.getAppModelRoles(app.id)).toEqual({});
+    expect(rawCount(db, "app_model_chain_seats")).toBe(0);
+    expect(await store.getModelChainSeats(app.id)).toEqual({});
   });
 
-  test("invalid selector grammar → 400 naming the role, zero rows written (validate-all-first)", async () => {
+  test("a chain reference naming a chain the App does not have → 400 naming the role, zero rows written (validate-all-first)", async () => {
     const { db, app } = await seededWorld();
     const store = configStore(db);
-    await store.setModelRole(app.id, "code-reviewer", "old/model");
+    await store.upsertModelChain(app.id, "seat-code-reviewer", "old/model");
+    await store.setModelChainSeat(app.id, "code-reviewer", "seat-code-reviewer");
     const res = await postForm(
       SETTINGS,
       `${SESSION_COOKIE}=${await sessionCookie("mallory")}`,
       makeEnv(db),
       roleForm({
-        "mstar-review-seat": "new/model",
-        "code-reviewer": " , ,",
+        "mstar-review-seat": "no-such-chain",
+        "code-reviewer": "",
       }),
     );
     expect(res.status).toBe(400);
     expect(await res.text()).toContain(
-      "The code-reviewer selector needs at least one comma-separated model selector",
+      "mstar-review-seat is not a known model chain",
     );
     // Zero partial writes: the valid entry never landed, the old row is intact.
-    expect(await store.getAppModelRoles(app.id)).toEqual({ "code-reviewer": "old/model" });
+    expect(await store.getModelChainSeats(app.id)).toEqual({ "code-reviewer": "seat-code-reviewer" });
+  });
+
+  test("F-001: a padded chain reference canonicalizes to the real chain — never a dangling row (bulk save path)", async () => {
+    const { db, app } = await seededWorld();
+    const store = configStore(db);
+    await store.upsertModelChain(app.id, "seat-code-reviewer", "openai/gpt-5");
+    // The route trims BEFORE bind: the known-chain check and the store
+    // upsert see the same name, so "seat-code-reviewer " stores
+    // "seat-code-reviewer" — the consumer read resolves instead of
+    // throwing the fail-closed "references missing chain" error.
+    const res = await postForm(
+      SETTINGS,
+      `${SESSION_COOKIE}=${await sessionCookie("mallory")}`,
+      makeEnv(db),
+      roleForm({ "code-reviewer": "seat-code-reviewer " }),
+    );
+    expect(res.status).toBe(200);
+    expect(await res.text()).toContain("Saved the role models for mallorys-app");
+    expect(await store.getModelChainSeats(app.id)).toEqual({ "code-reviewer": "seat-code-reviewer" });
+    const row = db.raw
+      .query("SELECT chain_name FROM app_model_chain_seats WHERE app_id = ? AND role = ?")
+      .get(app.id, "code-reviewer") as { chain_name: string };
+    expect(row.chain_name).toBe("seat-code-reviewer");
+    await expect(store.getModelOverridesForConsumer(app.id)).resolves.toEqual({ "code-reviewer": "openai/gpt-5" });
   });
 
   test("a tampered role_<unknown> field → 400, zero rows written", async () => {
@@ -1478,15 +1741,17 @@ describe("Role models editor (plan 17 T3 — save-roles op)", () => {
       SETTINGS,
       `${SESSION_COOKIE}=${await sessionCookie("mallory")}`,
       makeEnv(db),
-      roleForm({ "code-reviewer": "openai/gpt-5" }, { role_root: "evil/model" }),
+      roleForm({ "code-reviewer": "seat-code-reviewer" }, { role_root: "evil/model" }),
     );
     expect(res.status).toBe(400);
     expect(await res.text()).toContain("root is not a known review role");
-    expect(rawCount(db, "app_model_roles")).toBe(0);
+    expect(rawCount(db, "app_model_chain_seats")).toBe(0);
   });
   test("a duplicate role_* field → 400, zero rows written (AL-23-2 explicit rejection)", async () => {
     const { db, app } = await seededWorld();
-    await configStore(db).setModelRole(app.id, "code-reviewer", "old/model");
+    const store = configStore(db);
+    await store.upsertModelChain(app.id, "seat-code-reviewer", "old/model");
+    await store.setModelChainSeat(app.id, "code-reviewer", "seat-code-reviewer");
     const cookie = `${SESSION_COOKIE}=${await sessionCookie("mallory")}`;
     // parseBody({ all: true }) aggregates duplicate keys into an array — the
     // handler must reject the duplicate explicitly, never silently last-wins.
@@ -1494,64 +1759,183 @@ describe("Role models editor (plan 17 T3 — save-roles op)", () => {
       new Request(`https://worker.local${SETTINGS}`, {
         method: "POST",
         headers: { Cookie: cookie, "Content-Type": "application/x-www-form-urlencoded" },
-        body: "op=save-roles&role_code-reviewer=openai/gpt-5&role_code-reviewer=anthropic/claude-x",
+        body: "op=save-roles&role_code-reviewer=seat-code-reviewer&role_code-reviewer=seat-code-reviewer",
       }),
       makeEnv(db),
     );
     expect(res.status).toBe(400);
     expect(await res.text()).toContain("submitted more than once");
     // Zero writes: the pre-existing mapping survives untouched.
-    expect(await configStore(db).getAppModelRoles(app.id)).toEqual({ "code-reviewer": "old/model" });
-    expect(rawCount(db, "app_model_roles")).toBe(1);
-  });
-
-  test("a role selector over 400 chars → 400, zero rows written (AL-23-2 selector cap)", async () => {
-    const { db, app } = await seededWorld();
-    await configStore(db).setModelRole(app.id, "code-reviewer", "old/model");
-    const res = await postForm(
-      SETTINGS,
-      `${SESSION_COOKIE}=${await sessionCookie("mallory")}`,
-      makeEnv(db),
-      roleForm({ "code-reviewer": "a".repeat(MAX_MODEL_SELECTOR_LENGTH + 1) }),
-    );
-    expect(res.status).toBe(400);
-    expect(await res.text()).toContain(`limited to ${MAX_MODEL_SELECTOR_LENGTH}`);
-    // Zero partial writes: the valid entries never landed, the old row is intact.
-    expect(await configStore(db).getAppModelRoles(app.id)).toEqual({ "code-reviewer": "old/model" });
+    expect(await store.getModelChainSeats(app.id)).toEqual({ "code-reviewer": "seat-code-reviewer" });
+    expect(rawCount(db, "app_model_chain_seats")).toBe(1);
   });
 
   test("a save with NO role fields at all → 400 re-render, zero rows written (never a silent no-op)", async () => {
     const { db, app } = await seededWorld();
-    await configStore(db).setModelRole(app.id, "code-reviewer", "old/model");
+    const store = configStore(db);
+    await store.upsertModelChain(app.id, "seat-code-reviewer", "old/model");
+    await store.setModelChainSeat(app.id, "code-reviewer", "seat-code-reviewer");
     const res = await postForm(SETTINGS, `${SESSION_COOKIE}=${await sessionCookie("mallory")}`, makeEnv(db), {
       op: "save-roles",
     });
     expect(res.status).toBe(400);
-    expect(await res.text()).toContain("No role selectors were submitted");
+    expect(await res.text()).toContain("No role chain references were submitted");
     // The existing mapping survives — an empty map was never saved.
-    expect(await configStore(db).getAppModelRoles(app.id)).toEqual({ "code-reviewer": "old/model" });
+    expect(await store.getModelChainSeats(app.id)).toEqual({ "code-reviewer": "seat-code-reviewer" });
+  });
+
+  test("F-002: a PARTIAL map (missing seat keys) → 400 naming the absent roles, zero writes (full-map contract)", async () => {
+    const { db, app } = await seededWorld();
+    const store = configStore(db);
+    await store.upsertModelChain(app.id, "seat-code-reviewer", "old/model");
+    await store.setModelChainSeat(app.id, "code-reviewer", "seat-code-reviewer");
+    // Only ONE seat key is submitted — the other three are absent, and a
+    // strict-subset save would silently keep their stale reference rows.
+    const res = await postForm(
+      SETTINGS,
+      `${SESSION_COOKIE}=${await sessionCookie("mallory")}`,
+      makeEnv(db),
+      { op: "save-roles", "role_code-reviewer": "seat-code-reviewer" },
+    );
+    expect(res.status).toBe(400);
+    const body = await res.text();
+    // The error names exactly which seats are missing.
+    expect(body).toContain("mstar-review-seat");
+    expect(body).toContain("fullstack-dev");
+    expect(body).toContain("frontend-dev");
+    expect(body).not.toContain("code-reviewer role field is missing");
+    expect(body).toContain("role fields are missing");
+    // Zero writes: the pre-existing mapping is untouched.
+    expect(await store.getModelChainSeats(app.id)).toEqual({ "code-reviewer": "seat-code-reviewer" });
+    expect(rawCount(db, "app_model_chain_seats")).toBe(1);
   });
 
   test("non-owner member → 403, zero mutation; admin (non-creator) may save — owner-or-admin", async () => {
-    const { db } = await seededWorld();
+    const { db, app } = await seededWorld();
+    const store = configStore(db);
+    await store.upsertModelChain(app.id, "seat-code-reviewer", "openai/gpt-5");
     const res = await postForm(
       SETTINGS,
       `${SESSION_COOKIE}=${await sessionCookie("hubot")}`,
       makeEnv(db),
-      roleForm({ "code-reviewer": "openai/gpt-5" }),
+      roleForm({ "code-reviewer": "seat-code-reviewer" }),
     );
     expect(res.status).toBe(403);
-    expect(rawCount(db, "app_model_roles")).toBe(0);
+    expect(rawCount(db, "app_model_chain_seats")).toBe(0);
     const adminRes = await postForm(
       SETTINGS,
       `${SESSION_COOKIE}=${await sessionCookie("octocat")}`,
       makeEnv(db),
-      roleForm({ "code-reviewer": "openai/gpt-5" }),
+      roleForm({ "code-reviewer": "seat-code-reviewer" }),
     );
     expect(adminRes.status).toBe(200);
-    expect(rawCount(db, "app_model_roles")).toBe(1);
+    expect(rawCount(db, "app_model_chain_seats")).toBe(1);
   });
 
+});
+
+// --- plan 35 T2: named chains (settings ops add-chain / remove-chain) ---
+
+describe("POST /dashboard/apps/:slug/settings — named chains (op=add-chain / remove-chain, plan 35 T2)", () => {
+  test("owner adds a named chain: stored with is_default=0, plain-text 200", async () => {
+    const { db, app } = await seededWorld();
+    const res = await postForm(SETTINGS, `${SESSION_COOKIE}=${await sessionCookie("mallory")}`, makeEnv(db), {
+      op: "add-chain",
+      name: "fast",
+      chain: "openai/gpt-5:thinking",
+    });
+    expect(res.status).toBe(200);
+    expect(await res.text()).toContain("Saved the fast model chain for mallorys-app");
+    const chains = await configStore(db).getModelChains(app.id);
+    expect(chains).toEqual([
+      { name: "fast", chain: "openai/gpt-5:thinking", is_default: false, created_at: expect.any(String), updated_at: expect.any(String) },
+    ]);
+  });
+
+  test("add-chain replaces an existing named chain (upsert); the default row is untouched", async () => {
+    const { db, app } = await seededWorld();
+    const store = configStore(db);
+    await store.setModelChain(app.id, "ark-plan/deepseek-v4-flash");
+    const cookie = `${SESSION_COOKIE}=${await sessionCookie("mallory")}`;
+    const env = makeEnv(db);
+    await postForm(SETTINGS, cookie, env, { op: "add-chain", name: "fast", chain: "first/model" });
+    await postForm(SETTINGS, cookie, env, { op: "add-chain", name: "fast", chain: "second/model" });
+    const chains = await store.getModelChains(app.id);
+    expect(chains.find((c) => c.name === "fast")!.chain).toBe("second/model");
+    expect(chains.find((c) => c.name === "default")!.chain).toBe("ark-plan/deepseek-v4-flash");
+    expect(chains.find((c) => c.name === "default")!.is_default).toBe(true);
+  });
+
+  test("add-chain rejects the reserved 'default' name and bad grammar → 400, zero rows written", async () => {
+    const { db } = await seededWorld();
+    const cookie = `${SESSION_COOKIE}=${await sessionCookie("mallory")}`;
+    for (const name of ["default", "UPPER", "has space", "-lead"]) {
+      const res = await postForm(SETTINGS, cookie, makeEnv(db), { op: "add-chain", name, chain: "openai/gpt-5" });
+      expect(res.status, name).toBe(400);
+      expect(await res.text()).toContain("Chain names must be");
+    }
+    expect(rawCount(db, "app_model_chains")).toBe(0);
+  });
+
+  test("add-chain validates the selector chain like save-chain: garbage → 400, membership miss → 400, zero rows", async () => {
+    const { db, app } = await seededWorld();
+    const store = configStore(db);
+    await store.saveVerifiedKey(app.id, "anthropic", PLAIN_ANTHROPIC_KEY, ["claude-sonnet-4-6"]);
+    const cookie = `${SESSION_COOKIE}=${await sessionCookie("mallory")}`;
+    const env = makeEnv(db);
+    const garbage = await postForm(SETTINGS, cookie, env, { op: "add-chain", name: "fast", chain: " , ," });
+    expect(garbage.status).toBe(400);
+    expect(await garbage.text()).toContain("at least one comma-separated model selector");
+    const membership = await postForm(SETTINGS, cookie, env, { op: "add-chain", name: "fast", chain: "anthropic/nope" });
+    expect(membership.status).toBe(400);
+    expect(await membership.json()).toEqual({
+      code: "not_in_verified_models",
+      message: "Selector anthropic/nope is not in this App's verified models.",
+      selector: "anthropic/nope",
+    });
+    expect(rawCount(db, "app_model_chains")).toBe(0);
+  });
+
+  test("remove-chain deletes the named chain AND its seat references (seats fall back to default)", async () => {
+    const { db, app } = await seededWorld();
+    const store = configStore(db);
+    await store.setModelChain(app.id, "ark-plan/deepseek-v4-flash");
+    await store.upsertModelChain(app.id, "fast", "openai/gpt-5");
+    await store.setModelChainSeat(app.id, "code-reviewer", "fast");
+    const res = await postForm(SETTINGS, `${SESSION_COOKIE}=${await sessionCookie("mallory")}`, makeEnv(db), {
+      op: "remove-chain",
+      name: "fast",
+    });
+    expect(res.status).toBe(200);
+    expect(await res.text()).toContain("Removed the fast model chain for mallorys-app");
+    expect(rawCount(db, "app_model_chains")).toBe(1); // only the default row
+    expect(rawCount(db, "app_model_chain_seats")).toBe(0);
+  });
+
+  test("remove-chain rejects the reserved 'default' name → 400, zero rows written", async () => {
+    const { db, app } = await seededWorld();
+    const store = configStore(db);
+    await store.setModelChain(app.id, "ark-plan/deepseek-v4-flash");
+    const res = await postForm(SETTINGS, `${SESSION_COOKIE}=${await sessionCookie("mallory")}`, makeEnv(db), {
+      op: "remove-chain",
+      name: "default",
+    });
+    expect(res.status).toBe(400);
+    expect(await res.text()).toContain("cannot be removed");
+    expect(rawCount(db, "app_model_chains")).toBe(1);
+    expect(await store.getModelChain(app.id)).toBe("ark-plan/deepseek-v4-flash");
+  });
+
+  test("non-owner member → 403, zero mutation (add-chain)", async () => {
+    const { db } = await seededWorld();
+    const res = await postForm(SETTINGS, `${SESSION_COOKIE}=${await sessionCookie("hubot")}`, makeEnv(db), {
+      op: "add-chain",
+      name: "fast",
+      chain: "openai/gpt-5",
+    });
+    expect(res.status).toBe(403);
+    expect(rawCount(db, "app_model_chains")).toBe(0);
+  });
 });
 
 describe("POST /dashboard/apps/:slug/settings/key/delete (delete-key route)", () => {
