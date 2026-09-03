@@ -166,6 +166,32 @@ export async function deleteUserUnlessLastAdmin(db: DashboardD1, id: string): Pr
   return result.meta.changes > 0;
 }
 
+/**
+ * Change a user's role UNLESS the row is the last remaining admin being
+ * demoted — ONE conditional statement, so the last-admin invariant does
+ * not ride a read-check-then-update window (deleteUserUnlessLastAdmin
+ * precedent, qc1): two concurrent demotions of the last two admins cannot
+ * both land; the loser sees changes === 0. Returns true when the role
+ * actually changed (setting the same role is a no-op, changes === 0).
+ */
+export async function updateUserRoleUnlessLastAdmin(
+  db: DashboardD1,
+  id: string,
+  role: "admin" | "member",
+): Promise<boolean> {
+  const result = await db
+    .prepare(
+      `UPDATE users
+       SET role = ?
+       WHERE id = ?
+         AND role <> ?
+         AND NOT (role = 'admin' AND ? = 'member' AND (SELECT COUNT(*) FROM users WHERE role = 'admin') <= 1)`,
+    )
+    .bind(role, id, role, role)
+    .run();
+  return result.meta.changes > 0;
+}
+
 /** Total membership — bootstrap rule 3 keys on the EMPTY table (any role). */
 export async function countUsers(db: DashboardD1): Promise<number> {
   const row = await db.prepare("SELECT COUNT(*) AS n FROM users").first<{ n: number }>();

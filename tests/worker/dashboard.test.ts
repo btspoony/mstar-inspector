@@ -31,6 +31,7 @@ import {
   getUserByLogin,
   listUsers,
   parseAdminLogins,
+  updateUserRoleUnlessLastAdmin,
   type DashboardD1,
   type DashboardD1Statement,
 } from "../../src/dashboard/users";
@@ -2443,6 +2444,43 @@ describe("dashboard users store (plan 12 T1, users.ts)", () => {
     expect(await deleteUserUnlessLastAdmin(db, "missing-id")).toBe(false);
   });
 
+  test("updateUserRoleUnlessLastAdmin: promotes members, demotes non-last admins, refuses the sole admin (plan 34 T1)", async () => {
+    const db = createDashboardTestD1();
+    const admin = await createUser(db, { login: "octocat", role: "admin" });
+    const member = await createUser(db, { login: "hubot", role: "member" });
+    // Member → admin promotion.
+    expect(await updateUserRoleUnlessLastAdmin(db, member.id, "admin")).toBe(true);
+    expect((await getUserByLogin(db, "hubot"))?.role).toBe("admin");
+    // With two admins, either row is demotable.
+    expect(await updateUserRoleUnlessLastAdmin(db, member.id, "member")).toBe(true);
+    expect(await countAdmins(db)).toBe(1);
+    expect((await getUserByLogin(db, "hubot"))?.role).toBe("member");
+    // Now octocat IS the sole admin — demotion must refuse, row intact.
+    expect(await updateUserRoleUnlessLastAdmin(db, admin.id, "member")).toBe(false);
+    expect((await getUserByLogin(db, "octocat"))?.role).toBe("admin");
+    expect(await countAdmins(db)).toBe(1);
+    // Missing id → false; same-role set → false (no-op, changes === 0).
+    expect(await updateUserRoleUnlessLastAdmin(db, "missing-id", "admin")).toBe(false);
+    expect(await updateUserRoleUnlessLastAdmin(db, admin.id, "admin")).toBe(false);
+    expect((await getUserByLogin(db, "octocat"))?.role).toBe("admin");
+  });
+
+  test("concurrent demotions of the last two admins cannot both land (TOCTOU closed by the single conditional UPDATE, plan 34 T1)", async () => {
+    const db = createDashboardTestD1();
+    const octocat = await createUser(db, { login: "octocat", role: "admin" });
+    const ada = await createUser(db, { login: "ada", role: "admin" });
+    // Interleaved demotions of the two admins: the single conditional
+    // UPDATE serializes the last-admin check with the write, so exactly
+    // one lands and the loser sees changes === 0 — no read-check-write
+    // window (deleteUserUnlessLastAdmin precedent, qc1).
+    const [a, b] = await Promise.all([
+      updateUserRoleUnlessLastAdmin(db, octocat.id, "member"),
+      updateUserRoleUnlessLastAdmin(db, ada.id, "member"),
+    ]);
+    expect([a, b].filter(Boolean)).toHaveLength(1);
+    expect(await countAdmins(db)).toBe(1);
+  });
+
   test("listUsers breaks created_at ties by github_login (deterministic order, qc1/qc3)", async () => {
     const db = createDashboardTestD1();
     const insert = db.raw.prepare(
@@ -3065,6 +3103,129 @@ describe("members page (plan 12 T3, admin-only)", () => {
       withSpaAssets(makeDbEnv(db)),
     );
     expect(shell.status).toBe(403);
+  });
+
+  test("non-admin POST role → 403, zero mutations (plan 34 T1)", async () => {
+    const db = createDashboardTestD1();
+    await createUser(db, { login: "octocat", role: "admin" });
+    const mallory = await createUser(db, { login: "mallory", role: "member" });
+    const res = await membersPost("role", await memberCookie(), `userId=${mallory.id}&role=admin`, makeDbEnv(db));
+    expect(res.status).toBe(403);
+    expect((await getUserByLogin(db, "mallory"))?.role).toBe("member");
+    expect(userCount(db)).toBe(2);
+  });
+
+  test("admin role change member → admin → 200, row updated (plan 34 T1)", async () => {
+    const db = createDashboardTestD1();
+    await createUser(db, { login: "octocat", role: "admin" });
+    const mallory = await createUser(db, { login: "mallory", role: "member" });
+    const res = await membersPost("role", await adminCookie(), `userId=${mallory.id}&role=admin`, makeDbEnv(db));
+    expect(res.status).toBe(200);
+    expect(await res.text()).toBe("ok");
+    expect((await getUserByLogin(db, "mallory"))?.role).toBe("admin");
+    expect(await countAdmins(db)).toBe(2);
+  });
+
+  test("admin role change admin → member succeeds while 2 admins exist; the remaining last admin cannot then be demoted (plan 34 T1)", async () => {
+    const db = createDashboardTestD1();
+    await createUser(db, { login: "octocat", role: "admin" });
+    const ada = await createUser(db, { login: "ada", role: "admin" });
+    const ok = await membersPost("role", await adminCookie(), `userId=${ada.id}&role=member`, makeDbEnv(db));
+    expect(ok.status).toBe(200);
+    expect(await ok.text()).toBe("ok");
+    expect(await countAdmins(db)).toBe(1);
+    // Now octocat IS the last admin — demotion must refuse, row intact.
+    // The actor is the only admin, so the self-demotion refusal fires
+    // (the "last admin" pre-check is unreachable at the route level: when
+    // countAdmins === 1 the actor IS the target — same shape as remove).
+    // The last-admin ENFORCEMENT itself is pinned by the store-level test
+    // and the concurrent race test below.
+    const octocat = await getUserByLogin(db, "octocat");
+    const refused = await membersPost("role", await adminCookie(), `userId=${octocat?.id}&role=member`, makeDbEnv(db));
+    expect(refused.status).toBe(400);
+    expect(await refused.text()).toContain("You cannot change your own role.");
+    expect((await getUserByLogin(db, "octocat"))?.role).toBe("admin");
+    expect(await countAdmins(db)).toBe(1);
+  });
+
+  test("self-demotion → 400, row intact (the only admin is always the actor, so this is also the last-admin case) (plan 34 T1)", async () => {
+    const db = createDashboardTestD1();
+    const admin = await createUser(db, { login: "octocat", role: "admin" });
+    const res = await membersPost("role", await adminCookie(), `userId=${admin.id}&role=member`, makeDbEnv(db));
+    expect(res.status).toBe(400);
+    expect(await res.text()).toContain("You cannot change your own role.");
+    expect((await getUserByLogin(db, "octocat"))?.role).toBe("admin");
+    expect(await countAdmins(db)).toBe(1);
+  });
+
+  test("role change unknown / blank userId → 400, rows intact (plan 34 T1)", async () => {
+    const db = createDashboardTestD1();
+    await createUser(db, { login: "octocat", role: "admin" });
+    await createUser(db, { login: "mallory", role: "member" });
+    for (const value of ["missing-id", ""]) {
+      const res = await membersPost("role", await adminCookie(), `userId=${value}&role=admin`, makeDbEnv(db));
+      expect(res.status).toBe(400);
+    }
+    expect(userCount(db)).toBe(2);
+  });
+
+  test("role change with a role outside the 0003 CHECK domain → 400, rows intact (plan 34 T1)", async () => {
+    const db = createDashboardTestD1();
+    await createUser(db, { login: "octocat", role: "admin" });
+    const mallory = await createUser(db, { login: "mallory", role: "member" });
+    for (const role of ["owner", "", "ADMIN"]) {
+      const res = await membersPost("role", await adminCookie(), `userId=${mallory.id}&role=${role}`, makeDbEnv(db));
+      expect(res.status).toBe(400);
+      expect(await res.text()).toContain("Role must be admin or member.");
+    }
+    expect((await getUserByLogin(db, "mallory"))?.role).toBe("member");
+    expect(userCount(db)).toBe(2);
+  });
+
+  test("invite with role=admin → 200, admin row created with invitedBy (plan 34 T1)", async () => {
+    const db = createDashboardTestD1();
+    await createUser(db, { login: "octocat", role: "admin" });
+    const res = await membersPost("invite", await adminCookie(), "login=ada&role=admin", makeDbEnv(db));
+    expect(res.status).toBe(200);
+    expect(await res.text()).toBe("ok");
+    const row = await getUserByLogin(db, "ada");
+    expect(row?.role).toBe("admin");
+    expect(row?.invited_by).toBe("octocat");
+    expect(await countAdmins(db)).toBe(2);
+  });
+
+  test("invite with a role outside the 0003 CHECK domain → 400, zero rows (plan 34 T1)", async () => {
+    const db = createDashboardTestD1();
+    await createUser(db, { login: "octocat", role: "admin" });
+    for (const role of ["owner", "ADMIN"]) {
+      const res = await membersPost("invite", await adminCookie(), `login=ada&role=${role}`, makeDbEnv(db));
+      expect(res.status).toBe(400);
+      expect(await res.text()).toContain("Role must be admin or member.");
+    }
+    expect(userCount(db)).toBe(1);
+    expect(await getUserByLogin(db, "ada")).toBeNull();
+  });
+
+  test("concurrent demotions of the last two admins: exactly one lands, the loser 400s (TOCTOU closed, plan 34 T1)", async () => {
+    const db = createDashboardTestD1();
+    const octocat = await createUser(db, { login: "octocat", role: "admin" });
+    const ada = await createUser(db, { login: "ada", role: "admin" });
+    const adaCookie = async () =>
+      `${SESSION_COOKIE}=${await createSessionValue("ada", null, SESSION_SECRET)}`;
+    // Two different admin actors demote each other concurrently. Both
+    // pre-checks can pass (2 admins), but the single conditional UPDATE
+    // serializes the last-admin check with the write — exactly one lands.
+    // The loser is refused either way: 403 when its actor was already
+    // demoted before requireAdmin re-read the row, or 400 when the
+    // pre-check / conditional UPDATE catches the race.
+    const [a, b] = await Promise.all([
+      membersPost("role", await adminCookie(), `userId=${ada.id}&role=member`, makeDbEnv(db)),
+      membersPost("role", await adaCookie(), `userId=${octocat.id}&role=member`, makeDbEnv(db)),
+    ]);
+    const statuses = [a.status, b.status].sort((x, y) => x - y);
+    expect(statuses[0]).toBe(200); // exactly one demotion lands
+    expect(statuses[1]).toBeGreaterThanOrEqual(400); // the loser is refused
+    expect(await countAdmins(db)).toBe(1);
   });
 
   test("T1 pin (Minor 1): ADMIN_LOGINS docs name the real var mechanism, not the nonexistent `wrangler vars put`", async () => {
