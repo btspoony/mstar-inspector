@@ -114,6 +114,55 @@ describe("members/apps/settings parsers", () => {
       }),
     ).toBeNull();
   });
+
+  test("parseSettings accepts the non-manager base+health shape (no settings zones)", () => {
+    // Plan 35 T4 review: can_manage=false payloads carry only app meta + health.
+    const readOnly = parseSettings({
+      can_manage: false,
+      app: {
+        slug: "demo",
+        github_app_id: 1,
+        status: "active",
+        review_enabled: true,
+        created_by: "mallory",
+        last_webhook_at: null,
+      },
+      installations: [],
+      deliveries: [],
+    });
+    expect(readOnly?.can_manage).toBe(false);
+    expect(readOnly && "keys" in readOnly).toBe(false);
+    // Missing health fields is a contract breach even for the slim shape.
+    expect(
+      parseSettings({
+        can_manage: false,
+        app: {
+          slug: "demo",
+          github_app_id: 1,
+          status: "active",
+          review_enabled: true,
+          created_by: "mallory",
+          last_webhook_at: null,
+        },
+      }),
+    ).toBeNull();
+    // can_manage=true without the settings zones is also a breach.
+    expect(
+      parseSettings({
+        can_manage: true,
+        app: {
+          slug: "demo",
+          github_app_id: 1,
+          status: "active",
+          review_enabled: true,
+          created_by: "mallory",
+          last_webhook_at: null,
+        },
+        installations: [],
+        deliveries: [],
+      }),
+    ).toBeNull();
+  });
 });
 
 describe("invite grammar + page copy (plan 29 T4)", () => {

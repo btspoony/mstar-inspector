@@ -30,6 +30,7 @@ import {
   splitModelChain,
   type CatalogProvider,
   type ModelOptionGroup,
+  type SettingsManagePayload,
   type SettingsPayload,
 } from "./data";
 import { StatusBadge } from "./AppsPage";
@@ -37,7 +38,9 @@ import { LoadFailedNotice, LoadingNotice, PageNotice, type NoticeKind } from "./
 
 type PendingAction =
   | { kind: "pause" | "resume" | "disable" | "enable" | "delete" }
-  | { kind: "remove-chain"; name: string };
+  | { kind: "remove-chain"; name: string }
+  | { kind: "remove-key"; provider: string }
+  | { kind: "remove-custom"; providerId: string };
 
 export function SettingsPage({ boot, slug }: { boot: SpaBoot; slug: string }) {
   const locale = boot.locale;
@@ -170,9 +173,13 @@ function SettingsView({
   }
 
   async function runPinned(path: string): Promise<void> {
-    const { status } = await postForm(path, {});
+    await runPinnedWithBody(path, {});
+  }
+
+  async function runPinnedWithBody(path: string, fields: Record<string, string>): Promise<void> {
+    const { status, body } = await postForm(path, fields);
     if (status >= 400) {
-      onNotice({ kind: "error", message: t(locale, "common.loadFailed") });
+      onNotice({ kind: "error", message: body.trim() || t(locale, "common.loadFailed") });
       await onReload();
       return;
     }
@@ -187,6 +194,12 @@ function SettingsView({
     try {
       if (action.kind === "remove-chain") {
         await submitSettings({ op: "remove-chain", name: action.name });
+      } else if (action.kind === "remove-custom") {
+        await submitSettings({ op: "remove-custom-provider", provider_id: action.providerId });
+      } else if (action.kind === "remove-key") {
+        await runPinnedWithBody(`/dashboard/apps/${app.slug}/settings/key/delete`, {
+          provider: action.provider,
+        });
       } else {
         await runPinned(`/dashboard/apps/${app.slug}/${action.kind}`);
       }
@@ -219,8 +232,7 @@ function SettingsView({
             payload={payload}
             onVerify={submitVerify}
             onSettings={submitSettings}
-            onReload={onReload}
-            onNotice={onNotice}
+            onPending={setPending}
           />
           <ChainsCard
             locale={locale}
@@ -277,6 +289,22 @@ function pendingConfirmCopy(
     return {
       title: t(locale, "settings.confirmRemoveChainTitle", { name: pending.name }),
       body: t(locale, "settings.confirmRemoveChainBody", { name: pending.name }),
+      action: t(locale, "settings.remove"),
+      destructive: true,
+    };
+  }
+  if (pending.kind === "remove-key") {
+    return {
+      title: t(locale, "settings.confirmRemoveKeyTitle", { provider: pending.provider }),
+      body: t(locale, "settings.confirmRemoveKeyBody", { provider: pending.provider }),
+      action: t(locale, "settings.remove"),
+      destructive: true,
+    };
+  }
+  if (pending.kind === "remove-custom") {
+    return {
+      title: t(locale, "settings.confirmRemoveCustomTitle", { provider: pending.providerId }),
+      body: t(locale, "settings.confirmRemoveCustomBody", { provider: pending.providerId }),
       action: t(locale, "settings.remove"),
       destructive: true,
     };
@@ -437,35 +465,21 @@ function ProvidersCard({
   payload,
   onVerify,
   onSettings,
-  onReload,
-  onNotice,
+  onPending,
 }: {
   locale: SpaBoot["locale"];
-  payload: SettingsPayload;
+  payload: SettingsManagePayload;
   onVerify: (fields: Record<string, string>) => Promise<void>;
   onSettings: (fields: Record<string, string>) => Promise<void>;
-  onReload: () => Promise<void>;
-  onNotice: (notice: { kind: NoticeKind; message: string } | null) => void;
+  onPending: (action: PendingAction) => void;
 }) {
   const [expanded, setExpanded] = useState<string | null>(null);
-  const keyByProvider: Record<string, SettingsPayload["keys"][number]> = {};
+  const keyByProvider: Record<string, SettingsManagePayload["keys"][number]> = {};
   for (const key of payload.keys) keyByProvider[key.provider] = key;
-  const customById: Record<string, SettingsPayload["custom_providers"][number]> = {};
+  const customById: Record<string, SettingsManagePayload["custom_providers"][number]> = {};
   for (const row of payload.custom_providers) customById[row.provider_id] = row;
   const catalogIds: Record<string, true> = {};
   for (const provider of payload.providers) catalogIds[provider.id] = true;
-
-  async function removeKey(provider: string): Promise<void> {
-    const { status, body } = await postForm(`/dashboard/apps/${payload.app.slug}/settings/key/delete`, {
-      provider,
-    });
-    if (status >= 400) {
-      onNotice({ kind: "error", message: body.trim() || t(locale, "common.loadFailed") });
-    } else {
-      onNotice(null);
-    }
-    await onReload();
-  }
 
   return (
     <Card>
@@ -485,7 +499,8 @@ function ProvidersCard({
             onToggle={() => setExpanded(expanded === provider.id ? null : provider.id)}
             onVerify={onVerify}
             onSettings={onSettings}
-            onRemoveKey={() => void removeKey(provider.id)}
+            onRemoveKey={() => onPending({ kind: "remove-key", provider: provider.id })}
+            onPending={onPending}
           />
         ))}
         <CustomExpand
@@ -509,7 +524,7 @@ function ProvidersCard({
                 type="button"
                 variant="destructive"
                 size="sm"
-                onClick={() => void onSettings({ op: "remove-custom-provider", provider_id: row.provider_id })}
+                onClick={() => onPending({ kind: "remove-custom", providerId: row.provider_id })}
               >
                 {t(locale, "settings.remove")}
               </Button>
@@ -530,16 +545,18 @@ function ProviderRow({
   onVerify,
   onSettings,
   onRemoveKey,
+  onPending,
 }: {
   locale: SpaBoot["locale"];
   provider: CatalogProvider;
-  storedKey: SettingsPayload["keys"][number] | undefined;
-  custom: SettingsPayload["custom_providers"][number] | undefined;
+  storedKey: SettingsManagePayload["keys"][number] | undefined;
+  custom: SettingsManagePayload["custom_providers"][number] | undefined;
   expanded: boolean;
   onToggle: () => void;
   onVerify: (fields: Record<string, string>) => Promise<void>;
   onSettings: (fields: Record<string, string>) => Promise<void>;
   onRemoveKey: () => void;
+  onPending: (action: PendingAction) => void;
 }) {
   const tierLabel = t(locale, provider.tier === "template" ? "settings.tierTemplate" : "settings.tierBuiltin");
   return (
@@ -563,6 +580,7 @@ function ProviderRow({
           onVerify={onVerify}
           onSettings={onSettings}
           onRemoveKey={onRemoveKey}
+          onPending={onPending}
         />
       ) : null}
     </div>
@@ -577,14 +595,16 @@ function ProviderExpand({
   onVerify,
   onSettings,
   onRemoveKey,
+  onPending,
 }: {
   locale: SpaBoot["locale"];
   provider: CatalogProvider;
-  storedKey: SettingsPayload["keys"][number] | undefined;
-  custom: SettingsPayload["custom_providers"][number] | undefined;
+  storedKey: SettingsManagePayload["keys"][number] | undefined;
+  custom: SettingsManagePayload["custom_providers"][number] | undefined;
   onVerify: (fields: Record<string, string>) => Promise<void>;
   onSettings: (fields: Record<string, string>) => Promise<void>;
   onRemoveKey: () => void;
+  onPending: (action: PendingAction) => void;
 }) {
   const [key, setKey] = useState("");
   const [accountId, setAccountId] = useState("");
@@ -636,7 +656,7 @@ function ProviderExpand({
             <Button
               type="button"
               variant="destructive"
-              onClick={() => void onSettings({ op: "remove-custom-provider", provider_id: provider.id })}
+              onClick={() => onPending({ kind: "remove-custom", providerId: provider.id })}
             >
               {t(locale, "settings.remove")}
             </Button>
@@ -697,7 +717,7 @@ function CustomExpand({
   onSettings,
 }: {
   locale: SpaBoot["locale"];
-  payload: SettingsPayload;
+  payload: SettingsManagePayload;
   expanded: boolean;
   onToggle: () => void;
   onSettings: (fields: Record<string, string>) => Promise<void>;
@@ -791,7 +811,7 @@ function ChainsCard({
   onRemoveChain,
 }: {
   locale: SpaBoot["locale"];
-  payload: SettingsPayload;
+  payload: SettingsManagePayload;
   groups: ModelOptionGroup[];
   onSettings: (fields: Record<string, string>) => Promise<void>;
   onRemoveChain: (name: string) => void;

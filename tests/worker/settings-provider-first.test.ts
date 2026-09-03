@@ -550,4 +550,28 @@ describe("GET settings includes delivery_summary for the sidebar (plan 31 T6)", 
     expect(byId("anthropic")?.verifiable).toBe(true);
     expect(byId("workers-ai")).toMatchObject({ tier: "template", label: "Cloudflare Workers AI", verifiable: true });
   });
+
+  test("other member GET is 200 with can_manage false and base+health only", async () => {
+    const { db } = await seededWorld();
+    const res = await getJson("/dashboard/api/apps/mallorys-app/settings", "hubot", makeEnv(db));
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      can_manage: boolean;
+      app: { slug: string };
+      keys?: unknown;
+      providers?: unknown;
+      model_chains?: unknown;
+      model_roles?: unknown;
+      custom_providers?: unknown;
+    };
+    expect(body.can_manage).toBe(false);
+    expect(body.app.slug).toBe("mallorys-app");
+    expect(body.keys).toBeUndefined();
+    expect(body.providers).toBeUndefined();
+    expect(body.model_chains).toBeUndefined();
+    expect(body.model_roles).toBeUndefined();
+    expect(body.custom_providers).toBeUndefined();
+    expect(JSON.stringify(body)).not.toContain("key_enc");
+    expect(res.headers.get("cache-control")).toBe("private, no-store");
+  });
 });

@@ -28,6 +28,19 @@ describe("settings layout (plan 35 T4)", () => {
     expect(source).not.toContain("settingsLayout");
     expect(source).not.toContain("settingsSidebar");
   });
+
+  test("destructive removes (key / custom provider) route through confirm dialogs like pause/delete", () => {
+    const source = readFileSync(join(import.meta.dir, "../../src/spa/pages/SettingsPage.tsx"), "utf8");
+    expect(source).toContain('kind: "remove-key"');
+    expect(source).toContain('kind: "remove-custom"');
+    expect(source).toContain("settings.confirmRemoveKeyTitle");
+    expect(source).toContain("settings.confirmRemoveCustomTitle");
+    expect(source).toContain("onPending={onPending}");
+    // No fire-and-forget destructive POSTs outside the dialog flow.
+    expect(source).not.toContain('onClick={() => void onSettings({ op: "remove-custom-provider"');
+    expect(t("en", "settings.confirmRemoveKeyTitle", { provider: "ark" })).toContain("ark");
+    expect(t("zh_CN", "settings.confirmRemoveCustomTitle", { provider: "acme" })).toContain("acme");
+  });
 });
 
 describe("settings dropdowns (plan 31 T4 / plan 35 T4)", () => {

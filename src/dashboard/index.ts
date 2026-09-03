@@ -1116,30 +1116,35 @@ type AppSettingsGate =
   | { ok: false; response: Response };
 
 /**
- * Plan 35 T4 (spec §2 read face): any member may load App detail (masked keys,
- * health, deliveries). Encryption-dependent because masking needs plaintext —
- * a missing master key still fails closed with 5xx.
+ * Plan 35 T4 (spec §2 read face): any member may load App detail basic盘 —
+ * app meta + health (installations / deliveries). The full settings payload
+ * (masked keys, chains, providers) stays creator-or-admin via the GET
+ * handler's canManageApp branch below; writes go through requireAppSettings.
  */
 async function requireAppVisible(c: Context<{ Bindings: Env }>): Promise<AppSettingsGate> {
   const member = await requireMember(c);
   if (!member.ok) return member;
   const app = await createAppsStore(member.db).getAppBySlug(c.req.param("slug") ?? "");
   if (!app || app.deleted_at !== null) return { ok: false, response: pinnedPostMutationResponse(c, DASHBOARD_SHELL_REDIRECT, "unknown app", 404) };
-  if (!c.env.DASHBOARD_ENCRYPTION_KEY) {
-    return {
-      ok: false,
-      response: c.text("the app settings need a configured DASHBOARD_ENCRYPTION_KEY", 500),
-    };
-  }
   return { ok: true, session: member.session, db: member.db, app, user: member.user };
 }
 
-/** Route-local owner-or-admin gate shared by the settings WRITE family. */
+/**
+ * Route-local owner-or-admin gate shared by the settings WRITE family.
+ * Encryption-dependent because masking needs plaintext — a missing master key
+ * still fails closed with 5xx (spec § Crypto envelope).
+ */
 async function requireAppSettings(c: Context<{ Bindings: Env }>): Promise<AppSettingsGate> {
   const gate = await requireAppVisible(c);
   if (!gate.ok) return gate;
   if (!canManageApp(gate.user, gate.app)) {
     return { ok: false, response: c.html(forbiddenPage(gate.session.login, requestLocale(c)), 403) };
+  }
+  if (!c.env.DASHBOARD_ENCRYPTION_KEY) {
+    return {
+      ok: false,
+      response: c.text("the app settings need a configured DASHBOARD_ENCRYPTION_KEY", 500),
+    };
   }
   return gate;
 }
@@ -1228,24 +1233,20 @@ function settingsMembershipFailResponse(
   return c.json({ code: MEMBERSHIP_FAIL_CODE, message, selector }, 400);
 }
 
-/** SPA JSON face — plan 35 T4: any member may read App detail (spec §2); write ops stay behind requireAppSettings. */
+/** SPA JSON face — plan 35 T4 (spec §2 read face): any member gets the
+ * base+health payload (app meta, installations, deliveries); the full
+ * settings payload (masked keys, chains, providers) is creator-or-admin only.
+ * `can_manage` tells the SPA which shape it got. Writes stay behind
+ * requireAppSettings. */
 dashboardApp.get("/api/apps/:slug/settings", async (c) => {
   const gate = await requireAppVisible(c);
   if (!gate.ok) return gate.response;
-  const store = createAppConfigStore(gate.db, c.env.DASHBOARD_ENCRYPTION_KEY);
   const apps = createAppsStore(gate.db);
   try {
-    const maskedKeys = await store.listProviderKeys(gate.app.id);
-    const modelChain = await store.getModelChain(gate.app.id);
-    const modelChainSeats = await store.getModelChainSeats(gate.app.id);
-    const modelChains = await store.getModelChains(gate.app.id);
-    const customProviders = await store.listCustomProviders(gate.app.id);
     const installations = await apps.listInstallations(gate.app.id);
     const deliveries = await apps.listRecentDeliveries(gate.app.id, 5);
     const deliverySummary = await apps.deliverySummary(gate.app.id);
-    c.header("Cache-Control", "private, no-store");
-    return c.json({
-      can_manage: canManageApp(gate.user, gate.app),
+    const base = {
       app: {
         slug: gate.app.slug,
         github_app_id: gate.app.github_app_id,
@@ -1254,14 +1255,6 @@ dashboardApp.get("/api/apps/:slug/settings", async (c) => {
         created_by: gate.app.created_by,
         last_webhook_at: gate.app.last_webhook_at ?? null,
       },
-      keys: maskedKeys,
-      model_chain: modelChain,
-      // Plan 35 T2 (spec §4.4): the role editor's data is now seat → chain
-      // reference (blank = default chain); the chains list carries every
-      // chain (default + named) for the chains management UI (T4).
-      model_roles: modelChainSeats,
-      model_chains: modelChains,
-      custom_providers: customProviders,
       installations,
       deliveries: deliveries.map((d) => ({
         event_name: d.event_name,
@@ -1280,6 +1273,31 @@ dashboardApp.get("/api/apps/:slug/settings", async (c) => {
           : null,
         rejected24h: deliverySummary.rejected24h,
       },
+    };
+    c.header("Cache-Control", "private, no-store");
+    if (!canManageApp(gate.user, gate.app)) {
+      return c.json({ can_manage: false, ...base });
+    }
+    if (!c.env.DASHBOARD_ENCRYPTION_KEY) {
+      return c.text("the app settings need a configured DASHBOARD_ENCRYPTION_KEY", 500);
+    }
+    const store = createAppConfigStore(gate.db, c.env.DASHBOARD_ENCRYPTION_KEY);
+    const maskedKeys = await store.listProviderKeys(gate.app.id);
+    const modelChain = await store.getModelChain(gate.app.id);
+    const modelChainSeats = await store.getModelChainSeats(gate.app.id);
+    const modelChains = await store.getModelChains(gate.app.id);
+    const customProviders = await store.listCustomProviders(gate.app.id);
+    return c.json({
+      can_manage: true,
+      ...base,
+      keys: maskedKeys,
+      model_chain: modelChain,
+      // Plan 35 T2 (spec §4.4): the role editor's data is now seat → chain
+      // reference (blank = default chain); the chains list carries every
+      // chain (default + named) for the chains management UI (T4).
+      model_roles: modelChainSeats,
+      model_chains: modelChains,
+      custom_providers: customProviders,
       // Plan 35 T4 (spec §4.3): the unified provider section renders the WHOLE
       // catalog from one face — builtin ids in PROVIDER_IDS order, then
       // template-tier entries (workers-ai). `verifiable: false` marks the

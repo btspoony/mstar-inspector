@@ -58,21 +58,16 @@ export type ModelChainEntry = {
   updated_at: string;
 };
 
-export type SettingsPayload = {
-  can_manage: boolean;
-  app: {
-    slug: string;
-    github_app_id: number;
-    status: string;
-    review_enabled: boolean;
-    created_by: string;
-    last_webhook_at: string | null;
-  };
-  keys: Array<{ provider: string; last4: string; updated_at: string | null }>;
-  model_chain: string | null;
-  model_roles: Record<string, string>;
-  model_chains: ModelChainEntry[];
-  custom_providers: Array<{ provider_id: string; base_url: string; api: string; model_ids: string[] }>;
+type SettingsAppMeta = {
+  slug: string;
+  github_app_id: number;
+  status: string;
+  review_enabled: boolean;
+  created_by: string;
+  last_webhook_at: string | null;
+};
+
+type SettingsHealth = {
   installations: Array<{ installation_id: number; account_login: string | null; seen_at: string }>;
   deliveries: Array<{
     event_name: string | null;
@@ -80,14 +75,30 @@ export type SettingsPayload = {
     status_code: number | null;
     created_at: string;
   }>;
-  providers: CatalogProvider[];
-  model_role_ids: readonly string[];
-  custom_provider_api_ids: readonly string[];
   delivery_summary?: {
     latest: { event_name: string | null; outcome: string; status_code: number | null; created_at: string } | null;
     rejected24h: number;
   };
 };
+
+/** Plan 35 T4 (spec §2): every member gets base+health only. */
+export type SettingsReadOnlyPayload = { can_manage: false; app: SettingsAppMeta } & SettingsHealth;
+
+/** Creator-or-admin adds the settings zones: keys, chains, providers. */
+export type SettingsManagePayload = {
+  can_manage: true;
+  app: SettingsAppMeta;
+  keys: Array<{ provider: string; last4: string; updated_at: string | null }>;
+  model_chain: string | null;
+  model_roles: Record<string, string>;
+  model_chains: ModelChainEntry[];
+  custom_providers: Array<{ provider_id: string; base_url: string; api: string; model_ids: string[] }>;
+  providers: CatalogProvider[];
+  model_role_ids: readonly string[];
+  custom_provider_api_ids: readonly string[];
+} & SettingsHealth;
+
+export type SettingsPayload = SettingsReadOnlyPayload | SettingsManagePayload;
 
 export type ModelOptionSource = "verified" | "probe" | "custom";
 
@@ -169,11 +180,14 @@ export function parseApps(data: unknown): AppsPayload | null {
 }
 
 export function parseSettings(data: unknown): SettingsPayload | null {
-  if (!isRecord(data) || !isRecord(data.app) || !Array.isArray(data.keys)) return null;
+  if (!isRecord(data) || !isRecord(data.app)) return null;
   if (typeof data.can_manage !== "boolean") return null;
   if (typeof data.app.slug !== "string" || typeof data.app.status !== "string") return null;
   if (typeof data.app.review_enabled !== "boolean") return null;
   if (typeof data.app.created_by !== "string" || typeof data.app.github_app_id !== "number") return null;
+  if (!Array.isArray(data.installations) || !Array.isArray(data.deliveries)) return null;
+  if (!data.can_manage) return data as SettingsPayload;
+  if (!Array.isArray(data.keys)) return null;
   if (!Array.isArray(data.model_role_ids) || !isStringArray(data.model_role_ids)) return null;
   if (!Array.isArray(data.custom_provider_api_ids) || !isStringArray(data.custom_provider_api_ids)) return null;
   if (!Array.isArray(data.providers) || !Array.isArray(data.model_chains)) return null;

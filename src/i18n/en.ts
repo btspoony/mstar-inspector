@@ -343,6 +343,10 @@ export const en = {
     confirmRemoveChainBody: "Seats using {name} fall back to the default chain.",
     noNamedChains: "No named chains yet.",
     consoleOnly: "This provider can't be verified here — manage the key in the provider console.",
+    confirmRemoveKeyTitle: "Remove the {provider} key?",
+    confirmRemoveKeyBody: "Selectors that need {provider} will fail until you verify a new key.",
+    confirmRemoveCustomTitle: "Remove provider {provider}?",
+    confirmRemoveCustomBody: "The provider and its stored key are removed. Chains referencing its models fail on save.",
   },
   manifest: {
     title: "Create GitHub App",

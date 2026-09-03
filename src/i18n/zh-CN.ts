@@ -324,6 +324,10 @@ export const zhCN: Dictionary = {
     confirmRemoveChainBody: "引用 {name} 的席位将回退到 default 链。",
     noNamedChains: "还没有命名链。",
     consoleOnly: "此 provider 无法在此验证 — 请在对应控制台管理密钥。",
+    confirmRemoveKeyTitle: "移除 {provider} 的密钥？",
+    confirmRemoveKeyBody: "依赖 {provider} 的选择器将失败，直到你重新验证新密钥。",
+    confirmRemoveCustomTitle: "移除 provider {provider}？",
+    confirmRemoveCustomBody: "该 provider 及其已存密钥将被移除。引用其模型的链在保存时会校验失败。",
   },
   manifest: {
     title: "创建 GitHub App",
