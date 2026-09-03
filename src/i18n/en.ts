@@ -20,6 +20,7 @@
 export const en = {
   nav: {
     brand: "Morning Star Inspector",
+    primary: "Primary navigation",
     apps: "Apps",
     insights: "Insights",
     members: "Members",

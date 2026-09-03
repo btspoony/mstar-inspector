@@ -1,19 +1,20 @@
 /**
- * Plan 29 T3: enumerated client router (pathname + params).
+ * Plan 29 T3 + plan 33 T2: enumerated client router (pathname + params).
  */
 import { describe, expect, test } from "bun:test";
 import { matchRoute } from "../../src/spa/router";
 import { SPA_PAGES, isSpaAssetPath, matchSpaRoute, wantsHtml } from "../../src/spa/routes";
 
-describe("SPA_PAGES enum (plan 30 T1)", () => {
-  test("includes the home workbench plus plan 29 resident pages (apps retired, plan 30 T4)", () => {
-    expect([...SPA_PAGES]).toEqual(["home", "insights", "members", "login", "settings"]);
+describe("SPA_PAGES enum (plan 33 T2)", () => {
+  test("includes home, apps, insights, members, login, settings", () => {
+    expect([...SPA_PAGES]).toEqual(["home", "apps", "insights", "members", "login", "settings"]);
   });
 });
 
-describe("matchSpaRoute (plan 29 T3)", () => {
+describe("matchSpaRoute (plan 29 T3 + plan 33 T2)", () => {
   test("matches exact enumerated paths", () => {
     expect(matchSpaRoute("/dashboard")).toEqual({ page: "home", pathname: "/dashboard" });
+    expect(matchSpaRoute("/dashboard/apps")).toEqual({ page: "apps", pathname: "/dashboard/apps" });
     expect(matchSpaRoute("/dashboard/insights")).toEqual({
       page: "insights",
       pathname: "/dashboard/insights",
@@ -33,13 +34,12 @@ describe("matchSpaRoute (plan 29 T3)", () => {
     });
   });
 
-  test("treats /dashboard as the SPA home workbench", () => {
+  test("treats /dashboard as the insights home shell", () => {
     expect(matchSpaRoute("/dashboard")).toEqual({ page: "home", pathname: "/dashboard" });
     expect(matchRoute("/dashboard")).toEqual({ page: "home", pathname: "/dashboard" });
   });
 
-  test("does not match nested extras or the apps 301-alias target", () => {
-    expect(matchSpaRoute("/dashboard/apps")).toBeNull();
+  test("does not match nested extras beyond settings", () => {
     expect(matchSpaRoute("/dashboard/apps/acme")).toBeNull();
     expect(matchSpaRoute("/dashboard/apps/acme/settings/key/delete")).toBeNull();
     expect(matchSpaRoute("/dashboard/api/insights/summary")).toBeNull();

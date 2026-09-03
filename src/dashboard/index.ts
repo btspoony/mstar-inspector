@@ -105,8 +105,9 @@ import { SPA_POST_FORM_HEADER, SPA_POST_FORM_VALUE } from "../spa/post-form-head
 
 export const dashboardApp = new Hono<{ Bindings: Env }>();
 
-/** SPA shell entry for members/apps list mutations (plan 29 QC W-2). */
+/** SPA shell entry for members/apps list mutations (plan 29 QC W-2, plan 33 apps route). */
 const DASHBOARD_SHELL_REDIRECT = "/dashboard";
+const APPS_LIST_REDIRECT = "/dashboard/apps";
 
 function isSpaFetchPost(c: Context<{ Bindings: Env }>): boolean {
   return c.req.header(SPA_POST_FORM_HEADER) === SPA_POST_FORM_VALUE;
@@ -970,13 +971,15 @@ dashboardApp.post("/apps/:slug/delete", (c) => appStatusAction(c, "delete"));
  * caller (`<form method="post">` on the Review card); Apps-list uses fetch
  * `postForm`. Origin is a sanitized Referer pathname — never echoed as
  * Location. Settings-origin → `/dashboard/apps/:slug/settings` (DB slug);
- * anything else (apps list, missing/off-origin Referer) → `/dashboard`.
+ * apps-list origin → `/dashboard/apps`; anything else → `/dashboard`.
  */
 function reviewActionRedirect(c: Context<{ Bindings: Env }>, slug: string): string {
   const settingsPath = `/dashboard/apps/${slug}/settings`;
   const origin = new URL(c.req.raw.url).origin;
   const refererPath = new URL(safeLocaleRedirect(c.req.header("Referer"), origin), origin).pathname;
-  return refererPath === settingsPath ? settingsPath : DASHBOARD_SHELL_REDIRECT;
+  if (refererPath === settingsPath) return settingsPath;
+  if (refererPath === APPS_LIST_REDIRECT) return APPS_LIST_REDIRECT;
+  return DASHBOARD_SHELL_REDIRECT;
 }
 
 /**

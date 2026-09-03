@@ -11,6 +11,7 @@ import type { Dictionary } from "./en";
 export const zhCN: Dictionary = {
   nav: {
     brand: "Morning Star Inspector",
+    primary: "主导航",
     apps: "应用",
     insights: "洞察",
     members: "成员",
