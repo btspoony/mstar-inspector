@@ -3,7 +3,8 @@
  *
  * The T1b audit confirmed every App write route — config (settings family:
  * add-key / save-chain / save-roles / add-custom-provider /
- * remove-custom-provider / key/delete / keys/verify) and ops
+ * add-template-provider / remove-custom-provider / key/delete / keys/verify,
+ * plus the plan 35 T2/T3 chain ops add-chain / remove-chain) and ops
  * (pause / resume / disable / enable / delete) — funnels through the SAME
  * creator-or-admin gate (`canManageApp`, src/dashboard/index.ts:947-949;
  * SPA mirror src/spa/pages/data.ts:84-86). This file locks that matrix as
@@ -12,9 +13,10 @@
  * every deny path (the guard fires before any validation or store write).
  *
  * The 200-side of the network-verifying routes (add-key / add-custom-provider
- * / keys/verify) is stubbed exactly like the existing per-route tests
- * (app-config.test.ts / settings-provider-first.test.ts); the deny side
- * asserts fetch is NEVER called.
+ * / add-template-provider / keys/verify) is stubbed exactly like the
+ * existing per-route tests (app-config.test.ts /
+ * settings-provider-first.test.ts); the deny side asserts fetch is NEVER
+ * called.
  */
 import { describe, expect, spyOn, test } from "bun:test";
 import worker from "../../src/worker/index";
@@ -124,7 +126,25 @@ const MATRIX_ROUTES: MatrixRoute[] = [
   // --- edit family: settings POST (config) ---
   { name: "settings add-key", path: SETTINGS, fields: { op: "add-key", provider: "anthropic", key: PLAIN_KEY }, verifies: true },
   { name: "settings save-chain (clear)", path: SETTINGS, fields: { op: "save-chain", model_chain: "" } },
-  { name: "settings save-roles (clear)", path: SETTINGS, fields: { op: "save-roles", "role_mstar-review-seat": "" } },
+  // QC wave (F-002): save-roles is a FULL-map save — every seat key is
+  // required (blanks = default chain), so the matrix must post all four.
+  {
+    name: "settings save-roles (clear)",
+    path: SETTINGS,
+    fields: {
+      op: "save-roles",
+      "role_mstar-review-seat": "",
+      "role_code-reviewer": "",
+      "role_fullstack-dev": "",
+      "role_frontend-dev": "",
+    },
+  },
+  // Plan 35 T2/T3 ops (QC wave, seat1): add-chain must also exercise the
+  // route's membership layer, so its selector names an unverified provider
+  // (syntax-only check passes); remove-chain then removes it again so the
+  // sweep's later routes see a clean chain table.
+  { name: "settings add-chain", path: SETTINGS, fields: { op: "add-chain", name: "matrix", chain: "matrix-7b/good" } },
+  { name: "settings remove-chain", path: SETTINGS, fields: { op: "remove-chain", name: "matrix" } },
   {
     name: "settings add-custom-provider",
     path: SETTINGS,
@@ -136,6 +156,12 @@ const MATRIX_ROUTES: MatrixRoute[] = [
       model_ids: "matrix-7b",
       key: PLAIN_KEY,
     },
+    verifies: true,
+  },
+  {
+    name: "settings add-template-provider",
+    path: SETTINGS,
+    fields: { op: "add-template-provider", template_id: "workers-ai", account_id: "1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d", key: PLAIN_KEY },
     verifies: true,
   },
   { name: "settings remove-custom-provider", path: SETTINGS, fields: { op: "remove-custom-provider", provider_id: "nope" } },

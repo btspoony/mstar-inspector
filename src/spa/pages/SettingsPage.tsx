@@ -140,15 +140,16 @@ function SettingsView({
   const [pending, setPending] = useState<PendingAction | null>(null);
   const [busy, setBusy] = useState(false);
 
-  async function submitSettings(fields: Record<string, string>): Promise<void> {
+  async function submitSettings(fields: Record<string, string>): Promise<boolean> {
     const { status, body } = await postForm(base, fields);
     if (status >= 400) {
       onNotice({ kind: "error", message: settingsErrorMessage(locale, body) });
       await onReload();
-      return;
+      return false;
     }
     onNotice(null);
     await onReload();
+    return true;
   }
 
   async function submitVerify(fields: Record<string, string>): Promise<void> {
@@ -470,7 +471,7 @@ function ProvidersCard({
   locale: SpaBoot["locale"];
   payload: SettingsManagePayload;
   onVerify: (fields: Record<string, string>) => Promise<void>;
-  onSettings: (fields: Record<string, string>) => Promise<void>;
+  onSettings: (fields: Record<string, string>) => Promise<boolean>;
   onPending: (action: PendingAction) => void;
 }) {
   const [expanded, setExpanded] = useState<string | null>(null);
@@ -554,7 +555,7 @@ function ProviderRow({
   expanded: boolean;
   onToggle: () => void;
   onVerify: (fields: Record<string, string>) => Promise<void>;
-  onSettings: (fields: Record<string, string>) => Promise<void>;
+  onSettings: (fields: Record<string, string>) => Promise<boolean>;
   onRemoveKey: () => void;
   onPending: (action: PendingAction) => void;
 }) {
@@ -602,7 +603,7 @@ function ProviderExpand({
   storedKey: SettingsManagePayload["keys"][number] | undefined;
   custom: SettingsManagePayload["custom_providers"][number] | undefined;
   onVerify: (fields: Record<string, string>) => Promise<void>;
-  onSettings: (fields: Record<string, string>) => Promise<void>;
+  onSettings: (fields: Record<string, string>) => Promise<boolean>;
   onRemoveKey: () => void;
   onPending: (action: PendingAction) => void;
 }) {
@@ -620,9 +621,13 @@ function ProviderExpand({
             template_id: provider.id,
             account_id: accountId,
             key,
-          }).then(() => {
-            setKey("");
-            setAccountId("");
+          }).then((ok) => {
+            // QC wave (seat3): a rejected save (400 keeps the notice) must
+            // NOT wipe the typed account id / key the user needs to fix.
+            if (ok) {
+              setKey("");
+              setAccountId("");
+            }
           });
         }}
       >
@@ -720,7 +725,7 @@ function CustomExpand({
   payload: SettingsManagePayload;
   expanded: boolean;
   onToggle: () => void;
-  onSettings: (fields: Record<string, string>) => Promise<void>;
+  onSettings: (fields: Record<string, string>) => Promise<boolean>;
 }) {
   const [providerId, setProviderId] = useState("");
   const [baseUrl, setBaseUrl] = useState("");
@@ -746,11 +751,15 @@ function CustomExpand({
               api,
               model_ids: modelIds,
               key,
-            }).then(() => {
-              setProviderId("");
-              setBaseUrl("");
-              setModelIds("");
-              setKey("");
+            }).then((ok) => {
+              // QC wave (seat3): a rejected save keeps the typed input for
+              // correction — only a successful save clears the form.
+              if (ok) {
+                setProviderId("");
+                setBaseUrl("");
+                setModelIds("");
+                setKey("");
+              }
             });
           }}
         >
@@ -813,7 +822,7 @@ function ChainsCard({
   locale: SpaBoot["locale"];
   payload: SettingsManagePayload;
   groups: ModelOptionGroup[];
-  onSettings: (fields: Record<string, string>) => Promise<void>;
+  onSettings: (fields: Record<string, string>) => Promise<boolean>;
   onRemoveChain: (name: string) => void;
 }) {
   const named = payload.model_chains.filter((chain) => !chain.is_default);
@@ -934,7 +943,7 @@ function NamedChainCreate({
   groups: ModelOptionGroup[];
   name: string;
   onName: (name: string) => void;
-  onSettings: (fields: Record<string, string>) => Promise<void>;
+  onSettings: (fields: Record<string, string>) => Promise<boolean>;
 }) {
   const [chain, setChain] = useState<string[]>([]);
   return (
@@ -955,9 +964,13 @@ function NamedChainCreate({
           stored={chain.join(", ")}
           onChainChange={setChain}
           onSave={(value) => {
-            void onSettings({ op: "add-chain", name, chain: value }).then(() => {
-              onName("");
-              setChain([]);
+            void onSettings({ op: "add-chain", name, chain: value }).then((ok) => {
+              // QC wave (seat3): a 400 keeps the typed name/chain for
+              // correction — only a successful save clears the form.
+              if (ok) {
+                onName("");
+                setChain([]);
+              }
             });
           }}
           saveLabel={t(locale, "settings.addNamedChain")}

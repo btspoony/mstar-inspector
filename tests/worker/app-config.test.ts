@@ -922,6 +922,45 @@ describe("app-config store (createAppConfigStore) — model chains + seats (plan
     expect(rawCount(db, "app_model_chain_seats")).toBe(2);
   });
 
+  test("F-001: seat references are canonicalized — padded names hit the real chain, never a dangling row (setModelChainSeat)", async () => {
+    const db = createAppConfigD1();
+    const app = await seedApp(db, { slug: "a", createdBy: "mallory" });
+    const store = configStore(db);
+    await store.upsertModelChain(app.id, "fast", "openai/gpt-5");
+    // A padded known name stores the TRIMMED reference (the consumer read
+    // must resolve it — no `references missing chain "fast "` failure).
+    await store.setModelChainSeat(app.id, "code-reviewer", "  fast  ");
+    expect(await store.getModelChainSeats(app.id)).toEqual({ "code-reviewer": "fast" });
+    expect(rawCount(db, "app_model_chain_seats")).toBe(1);
+    const chainName = db.raw
+      .query("SELECT chain_name FROM app_model_chain_seats WHERE app_id = ? AND role = ?")
+      .get(app.id, "code-reviewer") as { chain_name: string };
+    expect(chainName.chain_name).toBe("fast");
+    // A padded reference resolves instead of throwing (the fail-closed
+    // consumer read is the exact failure F-001 prevented).
+    await expect(store.getModelOverridesForConsumer(app.id)).resolves.toEqual({ "code-reviewer": "openai/gpt-5" });
+    // Padded "default" / whitespace-only clear the reference row.
+    await store.setModelChainSeat(app.id, "code-reviewer", "  default  ");
+    expect(rawCount(db, "app_model_chain_seats")).toBe(0);
+    await store.setModelChainSeat(app.id, "code-reviewer", "fast");
+    await store.setModelChainSeat(app.id, "code-reviewer", " \t ");
+    expect(rawCount(db, "app_model_chain_seats")).toBe(0);
+  });
+
+  test("F-001: bulk setModelChainSeats binds the trimmed name; a padded 'default' clears (zero dangling rows)", async () => {
+    const db = createAppConfigD1();
+    const app = await seedApp(db, { slug: "a", createdBy: "mallory" });
+    const store = configStore(db);
+    await store.upsertModelChain(app.id, "fast", "openai/gpt-5");
+    await store.setModelChainSeats(app.id, {
+      "code-reviewer": "fast ", // trailing space — must store "fast", not "fast "
+      "frontend-dev": "  default  ", // padded reserved name — clears
+    });
+    expect(await store.getModelChainSeats(app.id)).toEqual({ "code-reviewer": "fast" });
+    expect(rawCount(db, "app_model_chain_seats")).toBe(1);
+    await expect(store.getModelOverridesForConsumer(app.id)).resolves.toEqual({ "code-reviewer": "openai/gpt-5" });
+  });
+
   test("setModelChainSeats is ONE atomic batch: a batch failure leaves ZERO rows changed (Phase 5, PR #7 review)", async () => {
     const db = createAppConfigD1();
     const app = await seedApp(db, { slug: "a", createdBy: "mallory" });
@@ -1555,6 +1594,9 @@ describe("POST /dashboard/apps/:slug/settings — save-chain (op=save-chain)", (
  * The exact body the Role models editor posts: the hidden op plus one
  * role_<role> field per MODEL_ROLE_IDS seat (blank = the seat uses the
  * default chain), plus any `extra` fields for the tampering cases.
+ * F-002 (QC wave): the route now ENFORCES the full map — a partial
+ * submission is a 400 naming the absent roles, so helpers for success
+ * paths must always fill every seat.
  */
 function roleForm(
   values: Record<string, string>,
@@ -1669,6 +1711,30 @@ describe("Role models editor (plan 17 T3 — save-roles op, plan 35 T2 chain ref
     expect(await store.getModelChainSeats(app.id)).toEqual({ "code-reviewer": "seat-code-reviewer" });
   });
 
+  test("F-001: a padded chain reference canonicalizes to the real chain — never a dangling row (bulk save path)", async () => {
+    const { db, app } = await seededWorld();
+    const store = configStore(db);
+    await store.upsertModelChain(app.id, "seat-code-reviewer", "openai/gpt-5");
+    // The route trims BEFORE bind: the known-chain check and the store
+    // upsert see the same name, so "seat-code-reviewer " stores
+    // "seat-code-reviewer" — the consumer read resolves instead of
+    // throwing the fail-closed "references missing chain" error.
+    const res = await postForm(
+      SETTINGS,
+      `${SESSION_COOKIE}=${await sessionCookie("mallory")}`,
+      makeEnv(db),
+      roleForm({ "code-reviewer": "seat-code-reviewer " }),
+    );
+    expect(res.status).toBe(200);
+    expect(await res.text()).toContain("Saved the role models for mallorys-app");
+    expect(await store.getModelChainSeats(app.id)).toEqual({ "code-reviewer": "seat-code-reviewer" });
+    const row = db.raw
+      .query("SELECT chain_name FROM app_model_chain_seats WHERE app_id = ? AND role = ?")
+      .get(app.id, "code-reviewer") as { chain_name: string };
+    expect(row.chain_name).toBe("seat-code-reviewer");
+    await expect(store.getModelOverridesForConsumer(app.id)).resolves.toEqual({ "code-reviewer": "openai/gpt-5" });
+  });
+
   test("a tampered role_<unknown> field → 400, zero rows written", async () => {
     const { db, app } = await seededWorld();
     const res = await postForm(
@@ -1716,6 +1782,32 @@ describe("Role models editor (plan 17 T3 — save-roles op, plan 35 T2 chain ref
     expect(await res.text()).toContain("No role chain references were submitted");
     // The existing mapping survives — an empty map was never saved.
     expect(await store.getModelChainSeats(app.id)).toEqual({ "code-reviewer": "seat-code-reviewer" });
+  });
+
+  test("F-002: a PARTIAL map (missing seat keys) → 400 naming the absent roles, zero writes (full-map contract)", async () => {
+    const { db, app } = await seededWorld();
+    const store = configStore(db);
+    await store.upsertModelChain(app.id, "seat-code-reviewer", "old/model");
+    await store.setModelChainSeat(app.id, "code-reviewer", "seat-code-reviewer");
+    // Only ONE seat key is submitted — the other three are absent, and a
+    // strict-subset save would silently keep their stale reference rows.
+    const res = await postForm(
+      SETTINGS,
+      `${SESSION_COOKIE}=${await sessionCookie("mallory")}`,
+      makeEnv(db),
+      { op: "save-roles", "role_code-reviewer": "seat-code-reviewer" },
+    );
+    expect(res.status).toBe(400);
+    const body = await res.text();
+    // The error names exactly which seats are missing.
+    expect(body).toContain("mstar-review-seat");
+    expect(body).toContain("fullstack-dev");
+    expect(body).toContain("frontend-dev");
+    expect(body).not.toContain("code-reviewer role field is missing");
+    expect(body).toContain("role fields are missing");
+    // Zero writes: the pre-existing mapping is untouched.
+    expect(await store.getModelChainSeats(app.id)).toEqual({ "code-reviewer": "seat-code-reviewer" });
+    expect(rawCount(db, "app_model_chain_seats")).toBe(1);
   });
 
   test("non-owner member → 403, zero mutation; admin (non-creator) may save — owner-or-admin", async () => {

@@ -1196,22 +1196,26 @@ export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | un
     /**
      * Map (or replace) one seat's chain reference, or clear it: a BLANK
      * chain_name — or the reserved "default" name — DELETES the reference
-     * row (absent = default chain, spec §4.4). Validation BEFORE any
-     * write: an off-vocabulary role throws UnknownModelRoleError and a
-     * content-bearing chain_name that names no stored chain throws
-     * UnknownModelChainError (the route re-renders 400 first; these are
-     * the backstop for direct callers). An unknown app_id fails the FK on
-     * insert (fail-loud, same as every write here); clearing an unmapped
-     * seat is a quiet no-op.
+     * row (absent = default chain, spec §4.4). The name is canonicalized
+     * (whitespace-trimmed) BEFORE the clear/assert/upsert decisions, so a
+     * padded reference can never be stored — a dangling `"fast "` row
+     * would fail every consumer read for the App (F-001, QC wave).
+     * Validation BEFORE any write: an off-vocabulary role throws
+     * UnknownModelRoleError and a content-bearing chain_name that names no
+     * stored chain throws UnknownModelChainError (the route re-renders 400
+     * first; these are the backstop for direct callers). An unknown app_id
+     * fails the FK on insert (fail-loud, same as every write here);
+     * clearing an unmapped seat is a quiet no-op.
      */
     async setModelChainSeat(appId: string, role: string, chainName: string): Promise<void> {
       assertModelRole(role);
-      if (chainName.trim() === "" || chainName === DEFAULT_CHAIN_NAME) {
+      const name = chainName.trim();
+      if (name === "" || name === DEFAULT_CHAIN_NAME) {
         await deleteModelChainSeat(appId, role);
         return;
       }
-      await assertChainExists(appId, chainName);
-      await upsertModelChainSeat(appId, role, chainName);
+      await assertChainExists(appId, name);
+      await upsertModelChainSeat(appId, role, name);
     },
 
     /**
@@ -1229,12 +1233,18 @@ export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | un
      * Bulk face for the settings single-save (the plan-17 4-row editor,
      * now chain references, plan 35 T2): validates EVERY (role, chain_name)
      * entry BEFORE any write (one bad entry → typed throw, zero rows
-     * touched), then applies the whole map as ONE atomic `db.batch` —
-     * blank / "default" = clear (absent = default chain), content =
-     * verbatim chain reference. D1 batch is transactional: a mid-save
-     * failure rolls back every statement, so a partially applied seat map
-     * is impossible and the route's "nothing was stored" failure notice
-     * stays truthful. An empty map is a no-op (no batch is issued).
+     * touched), then applies the whole map as ONE atomic `db.batch`.
+     * Each name is canonicalized (whitespace-trimmed) once: the
+     * validation set, the clear/upsert decision and the BIND all use the
+     * same trimmed value, so a padded reference (`"fast "`, `" default "`)
+     * either hits the real chain or clears — a dangling reference row is
+     * impossible through this face (F-001, QC wave; the route trims too,
+     * this is the backstop for direct callers). blank / "default" = clear
+     * (absent = default chain), content = trimmed chain name reference.
+     * D1 batch is transactional: a mid-save failure rolls back every
+     * statement, so a partially applied seat map is impossible and the
+     * route's "nothing was stored" failure notice stays truthful. An
+     * empty map is a no-op (no batch is issued).
      */
     async setModelChainSeats(appId: string, refs: Record<string, string>): Promise<void> {
       const entries = Object.entries(refs);
@@ -1254,11 +1264,12 @@ export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | un
           if (!known.has(name)) throw new UnknownModelChainError(name);
         }
       }
-      const statements = entries.map(([role, chainName]) =>
-        chainName.trim() === "" || chainName === DEFAULT_CHAIN_NAME
+      const statements = entries.map(([role, chainName]) => {
+        const name = chainName.trim();
+        return name === "" || name === DEFAULT_CHAIN_NAME
           ? deleteModelChainSeatStatement(appId, role)
-          : upsertModelChainSeatStatement(appId, role, chainName),
-      );
+          : upsertModelChainSeatStatement(appId, role, name);
+      });
       if (statements.length > 0) {
         await db.batch(statements);
       }

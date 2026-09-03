@@ -1498,11 +1498,14 @@ dashboardApp.post("/apps/:slug/settings", async (c) => {
     return settingsPostResponse(c, gate.app.slug, `Saved the model chain for ${gate.app.slug}.`);
   }
   if (op === "save-roles") {
-    // Plan 17 T3 editor, plan 35 T2 rework (spec §4.4): the Role models
-    // editor posts one `role_<role>` field per audit seat (the page always
-    // renders all four rows, blank inputs included), so the submitted map
-    // is FULL — blanks = the seat uses the default chain (the reference row
-    // is cleared), content = a chain NAME reference, all through the
+    // Plan 17 T3 editor, plan 35 T2 rework (spec §4.4), F-002 (QC wave):
+    // the Role models editor posts one `role_<role>` field per audit seat
+    // (the page always renders all four rows, blank inputs included), so
+    // the submitted map is FULL — a save MISSING any seat key is a stale
+    // or tampered client (omitted seats would silently keep their old
+    // reference rows = drift) → 400 naming the absent roles, zero writes.
+    // Blanks = the seat uses the default chain (the reference row is
+    // cleared), content = a chain NAME reference, all through the
     // validate-all-first setModelChainSeats bulk face. Any `role_`-prefixed
     // field naming a role outside MODEL_ROLE_IDS is client tampering → 400,
     // zero writes; a save with NO role fields at all is equally malformed
@@ -1524,27 +1527,45 @@ dashboardApp.post("/apps/:slug/settings", async (c) => {
       if (!MODEL_ROLE_IDS.includes(role)) {
         return settingsPostResponse(c, gate.app.slug, `${role} is not a known review role — nothing was saved.`, 400);
       }
-      refs[role] = value;
+      // F-001 (QC): canonicalize BEFORE bind — the known-chain check below
+      // and the store's upsert must see the SAME trimmed name, or a crafted
+      // `"fast "` would pass validation and land a dangling reference row
+      // (the per-message consumer read then fails closed for every review
+      // of the App). The store re-canonicalizes as the backstop.
+      refs[role] = value.trim();
     }
-    if (Object.keys(refs).length === 0) {
+    // F-002 (QC): enforce the FULL-map contract — every MODEL_ROLE_IDS
+    // seat key must be present. All missing keeps the original "no role
+    // fields" guard; a strict subset names exactly what is absent.
+    const missingSeats = MODEL_ROLE_IDS.filter((role) => !(role in refs));
+    if (missingSeats.length === MODEL_ROLE_IDS.length) {
       return settingsPostResponse(c, gate.app.slug, "No role chain references were submitted — resubmit the Role models form.", 400);
     }
-    // Chain-name validation, role-named for the 4-row form: blank (or the
-    // reserved "default" name) = the seat uses the default chain; content
-    // must name a chain the App actually has (the store re-validates as
-    // the backstop). Zero writes on any failure.
-    const chains = await store.getModelChains(gate.app.id);
-    const knownChains = new Set(chains.map((chain) => chain.name));
-    for (const [role, chainName] of Object.entries(refs)) {
-      const name = chainName.trim();
-      if (name === "" || name === DEFAULT_CHAIN_NAME) continue;
-      if (!knownChains.has(name)) {
-        return settingsPostResponse(c, gate.app.slug, `${role} is not a known model chain — pick one from the list or leave it empty to use the default chain. Nothing was saved.`,
-          400,
-        );
-      }
+    if (missingSeats.length > 0) {
+      return settingsPostResponse(
+        c,
+        gate.app.slug,
+        `The ${missingSeats.join(", ")} role field${missingSeats.length === 1 ? " is" : "s are"} missing — the Role models form always saves every seat (blank = default chain). Nothing was saved.`,
+        400,
+      );
     }
     try {
+      // Chain-name validation, role-named for the 4-row form: blank (or the
+      // reserved "default" name) = the seat uses the default chain; content
+      // must name a chain the App actually has (the store re-validates as
+      // the backstop). Zero writes on any failure. The getModelChains read
+      // lives INSIDE the try so a D1 failure gets the same structured
+      // logSettingsFailure 500 as every other settings op (QC wave, seat3).
+      const chains = await store.getModelChains(gate.app.id);
+      const knownChains = new Set(chains.map((chain) => chain.name));
+      for (const [role, chainName] of Object.entries(refs)) {
+        if (chainName === "" || chainName === DEFAULT_CHAIN_NAME) continue;
+        if (!knownChains.has(chainName)) {
+          return settingsPostResponse(c, gate.app.slug, `${role} is not a known model chain — pick one from the list or leave it empty to use the default chain. Nothing was saved.`,
+            400,
+          );
+        }
+      }
       await store.setModelChainSeats(gate.app.id, refs);
     } catch (err) {
       logSettingsFailure("save_roles", gate.app.id, err);

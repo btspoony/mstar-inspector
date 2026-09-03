@@ -235,5 +235,11 @@ export {
 } from "../review/runtime";
 `;
 
+// QC wave (seat1): the dashboard keeps a hand-maintained display mirror of
+// this catalog — PROVIDER_META in src/dashboard/app-config-store.ts (Q2:
+// dashboard modules must not import pipeline code). Regenerating the catalog
+// REQUIRES updating that mirror in the SAME commit; the parity lock test
+// (tests/worker/app-config.test.ts "PROVIDER_META mirrors the pipeline
+// catalog's display metadata exactly") fails CI on any drift.
 await writeFile(OUT_PATH, moduleSource, "utf8");
 console.log(`wrote ${OUT_PATH} (${moduleSource.length} bytes)`);
