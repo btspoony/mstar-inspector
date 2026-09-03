@@ -18,10 +18,11 @@
  *
  * Duplication locks (architect decision Q2 forbids the dashboard from
  * importing pipeline/review code, so the copies must be pinned):
- * PROVIDER_IDS ≡ the pipeline PROVIDERS key sequence, parseModelChain ≡
- * the runtime-omp parseModelSelectors behavior, and MODEL_ROLE_IDS ≡ the
- * review-side seat vocabulary (plan 17 B6), all asserted against the
- * originals here.
+ * PROVIDER_IDS ≡ the pipeline catalog's builtin key sequence, PROVIDER_META
+ * ≡ the catalog's display metadata snapshot (plan 35 T3, spec §5),
+ * parseModelChain ≡ the runtime-omp parseModelSelectors behavior, and
+ * MODEL_ROLE_IDS ≡ the review-side seat vocabulary (plan 17 B6), all
+ * asserted against the originals here.
  */
 import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import { readFileSync } from "node:fs";
@@ -40,6 +41,7 @@ import {
   MAX_PROVIDER_KEY_LENGTH,
   MODEL_ROLE_IDS,
   PROVIDER_IDS,
+  PROVIDER_META,
   ProviderKeyTooLongError,
   UnknownModelChainError,
   UnknownModelRoleError,
@@ -49,7 +51,7 @@ import {
   type AppCustomProvider,
 } from "../../src/dashboard/app-config-store";
 import { createSecretbox } from "../../src/dashboard/secretbox";
-import { PROVIDERS } from "../../src/pipeline/providers";
+import { PROVIDER_CATALOG, PROVIDERS } from "../../src/pipeline/provider-catalog";
 import { DEEP_SEAT_ROLES, parseModelSelectors } from "../../src/review/runtime-omp";
 import { SESSION_COOKIE, createSessionValue } from "../../src/dashboard/session";
 import { createUser, type DashboardD1 } from "../../src/dashboard/users";
@@ -1197,15 +1199,41 @@ describe("app-config store (createAppConfigStore) — custom providers (plan 23 
 // --- duplication locks (Q2: dashboard may not import pipeline/review) ---
 
 describe("duplication locks", () => {
-  // PROVIDER_IDS — sync with PROVIDERS in src/pipeline/providers.ts. Drift
-  // breaks the locked 19-id set below (a future provider PR must update BOTH
-  // the pipeline allowlist and this dashboard mirror).
-  test("PROVIDER_IDS mirrors the pipeline PROVIDERS key sequence exactly", () => {
+  // PROVIDER_IDS — sync with the builtin tier of the generated catalog
+  // (src/pipeline/provider-catalog.ts). Drift breaks the locked 19-id set
+  // below (a future provider PR must update BOTH the pipeline catalog and
+  // this dashboard mirror).
+  test("PROVIDER_IDS mirrors the pipeline catalog's builtin key sequence exactly", () => {
     expect([...PROVIDER_IDS]).toEqual(Object.keys(PROVIDERS));
     // 19 ids: the 18 built-in omp providers + `ark` (plan 24 Task 6 /
     // AL-24-5 — the in-image ark-plan base provider's ARK_API_KEY rides the
     // per-App BYOK keys map under this id).
     expect(PROVIDER_IDS).toHaveLength(19);
+  });
+
+  // PROVIDER_META (plan 35 T3, spec §5) — the dashboard's catalog mirror:
+  // every catalog entry (builtin AND template) with its display metadata
+  // snapshot. Drift breaks the lock below (a catalog regeneration must
+  // update this mirror in the same commit).
+  test("PROVIDER_META mirrors the pipeline catalog's display metadata exactly", () => {
+    const catalogMirror = Object.fromEntries(
+      Object.entries(PROVIDER_CATALOG).map(([id, entry]) => [
+        id,
+        {
+          label: entry.label,
+          tier: entry.tier,
+          baseUrl: entry.baseUrl,
+          api: entry.api,
+          models: [...entry.models],
+          doc: entry.doc,
+        },
+      ]),
+    );
+    expect(PROVIDER_META).toEqual(catalogMirror);
+    // The mirror carries the template tier too (workers-ai) — the provider
+    // list UI and the materialization route consume it.
+    expect(Object.keys(PROVIDER_META)).toHaveLength(20);
+    expect(PROVIDER_META["workers-ai"]!.tier).toBe("template");
   });
 
   test("parseModelChain behaves exactly like the runtime-omp parseModelSelectors", () => {

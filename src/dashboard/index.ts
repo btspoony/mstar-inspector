@@ -58,6 +58,7 @@ import {
 import { createAppsStore, type DeliverySummary, type GithubAppRow } from "./apps-store";
 import { SecretboxKeyError, createSecretbox } from "./secretbox";
 import {
+  CLOUDFLARE_ACCOUNT_ID_PATTERN,
   CUSTOM_PROVIDER_API_IDS,
   CUSTOM_PROVIDER_ID_PATTERN,
   DEFAULT_CHAIN_NAME,
@@ -74,6 +75,7 @@ import {
   MODEL_CHAIN_NAME_PATTERN,
   MODEL_ROLE_IDS,
   PROVIDER_IDS,
+  PROVIDER_META,
   createAppConfigStore,
   parseModelChain,
   type AppConfigBatchFace,
@@ -1673,6 +1675,107 @@ dashboardApp.post("/apps/:slug/settings", async (c) => {
       return settingsPostResponse(c, gate.app.slug, settingsFailureNotice(err), 500);
     }
     return settingsPostResponse(c, gate.app.slug, `Declared custom provider ${providerId} for ${gate.app.slug} — its key is stored encrypted and injected by environment variable name.`,
+    );
+  }
+  if (op === "add-template-provider") {
+    // Plan 35 T3 (spec §5): materialize a template-tier catalog entry into
+    // the EXISTING custom-provider mechanism — zero models.yml / env
+    // injection / selector-grammar changes. Today exactly one template
+    // exists: "workers-ai" (Cloudflare Workers AI), whose OpenAI-compatible
+    // endpoint is scoped to the user's Cloudflare account id. The save flow
+    // substitutes {account_id} in the template's base URL, pins the
+    // template's api protocol, prefills model_ids from the template's
+    // representative models, and stores the key under
+    // CUSTOM_<UPPER_SNAKE(id)>_API_KEY via the same upsertCustomProvider
+    // path as add-custom-provider (verify-first, plan 31 custom probe —
+    // every bound below mirrors the add-custom-provider checks).
+    const templateId = typeof form.template_id === "string" ? form.template_id.trim() : "";
+    const accountId = typeof form.account_id === "string" ? form.account_id.trim() : "";
+    const plainKey = typeof form.key === "string" ? form.key.trim() : "";
+    const template = PROVIDER_META[templateId];
+    if (template === undefined || template.tier !== "template") {
+      return settingsPostResponse(c, gate.app.slug, "Unknown provider template — nothing was stored.", 400);
+    }
+    if (template.baseUrl === null || template.api === null) {
+      return settingsPostResponse(c, gate.app.slug, "This provider template is incomplete — nothing was stored.", 400);
+    }
+    if (accountId === "") {
+      return settingsPostResponse(c, gate.app.slug, "Enter your Cloudflare account id to complete the Workers AI base URL.", 400);
+    }
+    if (!CLOUDFLARE_ACCOUNT_ID_PATTERN.test(accountId)) {
+      return settingsPostResponse(c, gate.app.slug, "Cloudflare account ids are 32 hex characters — nothing was stored.", 400);
+    }
+    // The template id must not collide with a built-in or in-image base
+    // provider id (defensive — the catalog's template tier is disjoint from
+    // both today, but a future template must not silently shadow one).
+    if (PROVIDER_IDS.includes(templateId)) {
+      return settingsPostResponse(c, gate.app.slug, `${templateId} is a built-in provider — nothing was stored.`, 400);
+    }
+    if (IN_IMAGE_BASE_PROVIDER_IDS.includes(templateId)) {
+      return settingsPostResponse(c, gate.app.slug, `${templateId} is already provided by the review environment's base configuration — nothing was stored.`, 400);
+    }
+    const baseUrl = template.baseUrl.replace("{account_id}", accountId);
+    if (!isValidCustomProviderBaseUrl(baseUrl)) {
+      return settingsPostResponse(c, gate.app.slug, "The materialized base URL is not a valid https URL — nothing was stored.", 400);
+    }
+    if (baseUrl.length > MAX_CUSTOM_PROVIDER_BASE_URL_LENGTH) {
+      return settingsPostResponse(c, gate.app.slug, `That base URL is too long (${baseUrl.length} characters) — limited to ${MAX_CUSTOM_PROVIDER_BASE_URL_LENGTH}. Nothing was stored.`, 400);
+    }
+    if (!CUSTOM_PROVIDER_API_IDS.includes(template.api as (typeof CUSTOM_PROVIDER_API_IDS)[number])) {
+      return settingsPostResponse(c, gate.app.slug, `${template.api} is not a supported API protocol — nothing was stored.`, 400);
+    }
+    const modelIds = [...template.models];
+    if (modelIds.length === 0) {
+      return settingsPostResponse(c, gate.app.slug, "This provider template has no model ids — nothing was stored.", 400);
+    }
+    if (modelIds.length > MAX_CUSTOM_PROVIDER_MODEL_IDS) {
+      return settingsPostResponse(c, gate.app.slug, `Too many model ids (${modelIds.length}) — at most ${MAX_CUSTOM_PROVIDER_MODEL_IDS}. Nothing was stored.`, 400);
+    }
+    if (modelIds.some((id) => id.length > MAX_CUSTOM_PROVIDER_MODEL_ID_LENGTH)) {
+      return settingsPostResponse(c, gate.app.slug, `Model ids are limited to ${MAX_CUSTOM_PROVIDER_MODEL_ID_LENGTH} characters each. Nothing was stored.`, 400);
+    }
+    if (plainKey === "") {
+      return settingsPostResponse(c, gate.app.slug, "Enter an API key to store.", 400);
+    }
+    if (plainKey.length > MAX_PROVIDER_KEY_LENGTH) {
+      return settingsPostResponse(c, gate.app.slug, `That API key is too long (${plainKey.length} characters) — keys are limited to ${MAX_PROVIDER_KEY_LENGTH} characters. Nothing was stored.`, 400);
+    }
+    const declaredCustomProviders = await store.listCustomProviders(gate.app.id);
+    if (
+      !declaredCustomProviders.some((p) => p.provider_id === templateId) &&
+      declaredCustomProviders.length >= MAX_CUSTOM_PROVIDER_COUNT
+    ) {
+      return settingsPostResponse(c, gate.app.slug, `This App already has the maximum of ${MAX_CUSTOM_PROVIDER_COUNT} custom providers — remove one before materializing another (updating an existing declaration is always allowed). Nothing was stored.`,
+        400,
+      );
+    }
+    try {
+      const verified = await verifyProviderKey(
+        { fetch: globalThis.fetch },
+        templateId,
+        plainKey,
+        {
+          baseUrl,
+          api: template.api as (typeof CUSTOM_PROVIDER_API_IDS)[number],
+          modelIds,
+        },
+      );
+      if (!verified.ok) {
+        return settingsVerifyFailResponse(c, gate.app.slug, verified.reason);
+      }
+      await store.upsertCustomProvider(
+        gate.app.id,
+        { provider_id: templateId, base_url: baseUrl, api: template.api as (typeof CUSTOM_PROVIDER_API_IDS)[number], model_ids: modelIds },
+        plainKey,
+      );
+    } catch (err) {
+      logSettingsFailure("add_template_provider", gate.app.id, err);
+      if (err instanceof InvalidCustomProviderError) {
+        return settingsPostResponse(c, gate.app.slug, err.message, 400);
+      }
+      return settingsPostResponse(c, gate.app.slug, settingsFailureNotice(err), 500);
+    }
+    return settingsPostResponse(c, gate.app.slug, `Materialized the ${template.label} template as custom provider ${templateId} for ${gate.app.slug} — its key is stored encrypted and injected by environment variable name.`,
     );
   }
   if (op === "remove-custom-provider") {

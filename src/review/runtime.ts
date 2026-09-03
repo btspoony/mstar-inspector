@@ -47,8 +47,8 @@ export type CustomProviderDeclaration = {
  * Lives HERE (next to CustomProviderDeclaration) because the sandbox image
  * COPYs only src/review (sandbox-image/Dockerfile:88): the in-image runner
  * module graph must never import outside this directory. The Worker-side
- * SSOT stays single-source — src/pipeline/providers.ts re-exports these
- * (zero duplicated literals).
+ * SSOT stays single-source — src/pipeline/provider-catalog.ts re-exports
+ * these (zero duplicated literals).
  */
 export const CUSTOM_PROVIDER_ENV_PREFIX = "CUSTOM_";
 export const CUSTOM_PROVIDER_ENV_SUFFIX = "_API_KEY";
