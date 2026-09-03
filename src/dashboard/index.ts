@@ -1923,20 +1923,30 @@ dashboardApp.post("/apps/:slug/settings/key/delete", async (c) => {
 //   - repo: optional owner/repo filter, malformed → 400.
 // Response = the store return plus the two echoed params (snake_case keys).
 const INSIGHTS_REPO_PATTERN = /^[^/\s]+\/[^/\s]+$/;
+/** The only supported `include` extra (plan 36 QC F-001). */
+const INSIGHTS_INCLUDE_VALUES = ["repos"] as const;
 
 /**
  * Query-param parse for the insights JSON face (QC W-C): window (integer
- * days, default 30) + optional repo owner/repo filter. Returns the parsed
- * values or the 400 reason; the route answers 400 with a JSON error body
- * (the HTML notice page retired with GET /insights in plan 29 T6). The
- * >90 clamp stays in the store — the single clamp point — and the route
- * echoes the EFFECTIVE window.
+ * days, default 30) + optional repo owner/repo filter + optional
+ * comma-separated `include` extras (`repos` — the window-scoped distinct
+ * repo aggregation, opt-in so the home surface never pays for it). Returns
+ * the parsed values or the 400 reason; the route answers 400 with a JSON
+ * error body (the HTML notice page retired with GET /insights in plan 29
+ * T6). The >90 clamp stays in the store — the single clamp point — and the
+ * route echoes the EFFECTIVE window.
  */
 type InsightsParams =
-  | { ok: true; windowDays: number; repoFilter?: { owner: string; repo: string }; rawRepo?: string }
+  | {
+      ok: true;
+      windowDays: number;
+      repoFilter?: { owner: string; repo: string };
+      rawRepo?: string;
+      includeRepos: boolean;
+    }
   | { ok: false; reason: string };
 
-function parseInsightsParams(query: { window?: string; repo?: string }): InsightsParams {
+function parseInsightsParams(query: { window?: string; repo?: string; include?: string }): InsightsParams {
   let windowDays = 30;
   const rawWindow = query.window;
   if (rawWindow !== undefined) {
@@ -1958,17 +1968,35 @@ function parseInsightsParams(query: { window?: string; repo?: string }): Insight
     repoFilter = { owner: rawRepoParam.slice(0, slash), repo: rawRepoParam.slice(slash + 1) };
   }
 
-  return { ok: true, windowDays, repoFilter, rawRepo };
+  let includeRepos = false;
+  const rawInclude = query.include;
+  if (rawInclude !== undefined) {
+    const parts = rawInclude.split(",").map((part) => part.trim());
+    if (parts.length === 0 || parts.some((part) => !(INSIGHTS_INCLUDE_VALUES as readonly string[]).includes(part))) {
+      return { ok: false, reason: "include must be a comma-separated list of: repos" };
+    }
+    includeRepos = parts.includes("repos");
+  }
+
+  return { ok: true, windowDays, repoFilter, rawRepo, includeRepos };
 }
 
 dashboardApp.get("/api/insights/summary", async (c) => {
   const db = dashboardD1(c.env);
   if (!db) return c.text("dashboard storage is not configured", 500);
 
-  const params = parseInsightsParams({ window: c.req.query("window"), repo: c.req.query("repo") });
+  const params = parseInsightsParams({
+    window: c.req.query("window"),
+    repo: c.req.query("repo"),
+    include: c.req.query("include"),
+  });
   if (!params.ok) return c.json({ error: params.reason }, 400);
 
-  const insights = await createInsightsStore(db, { windowDays: params.windowDays, repo: params.repoFilter });
+  const insights = await createInsightsStore(db, {
+    windowDays: params.windowDays,
+    repo: params.repoFilter,
+    includeRepos: params.includeRepos,
+  });
   return c.json({
     window_days: clampWindow(params.windowDays),
     ...(params.repoFilter !== undefined ? { repo: params.rawRepo } : {}),
@@ -1978,6 +2006,7 @@ dashboardApp.get("/api/insights/summary", async (c) => {
     verdict_distribution: insights.verdictDistribution,
     weekly_trend: insights.weeklyTrend,
     recurring_top: insights.recurringTop,
+    repos: insights.repos,
   });
 });
 

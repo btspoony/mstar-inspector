@@ -206,10 +206,14 @@ export const zhCN: Dictionary = {
     lastDay: "最近 {count} 天",
     lastDays: "最近 {count} 天",
     repo: "仓库 {repo}",
-    filterWindow: "窗口（天）",
-    filterRepo: "仓库（owner/repo）",
-    filterRepoPlaceholder: "owner/repo",
-    apply: "应用",
+    windowSegment: "时间窗口",
+    daysShort: "{count} 天",
+    dimension: "发现细分维度",
+    dimSeverity: "严重程度",
+    dimCategory: "类别",
+    recordsHeading: "审查记录",
+    filterRepo: "仓库",
+    filterRepoAll: "全部",
     uncategorized: "未分类",
   },
   settings: {
@@ -379,8 +383,5 @@ export const zhCN: Dictionary = {
   },
   home: {
     insightsHeading: "总体洞察",
-    viewFull: "查看完整洞察 →",
-    trendHint: "最近一周 {week}：{reviews} · {findings}",
-    noTrend: "此窗口内暂无近期趋势。",
   },
 };

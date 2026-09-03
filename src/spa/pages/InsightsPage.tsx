@@ -1,21 +1,57 @@
-import { useEffect, useState, type FormEvent } from "react";
+import { useEffect, useState } from "react";
 import { t } from "../../i18n";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 import { fetchJson } from "../api";
 import type { SpaBoot } from "../boot";
-import styles from "../pages.module.css";
-import { insightsSummaryUrl, parseInsights, parseInsightsSearch, type InsightsSummary } from "./data";
+import {
+  INSIGHTS_REPO_ALL,
+  insightsRepoFromSelect,
+  insightsRepoOptions,
+  insightsRepoSelectValue,
+  insightsSummaryUrl,
+  parseInsights,
+  parseInsightsSearch,
+  type InsightsSearch,
+  type InsightsSummary,
+} from "./data";
+import { HOME_WINDOWS, homeWindow, normalizeWindowSearch, searchHref, verdictLine } from "./homeModel";
 import { LoadFailedNotice, LoadingNotice } from "./PageNotice";
 
+/**
+ * `/dashboard/insights` records page (plan 36 T2): review records with a
+ * segmented window (HOME_WINDOWS 7/30/90, same subset as home) and a shadcn
+ * Select repo filter (全部 + summary.repos). Free-text repo input retired.
+ * Data plane: existing `/dashboard/api/insights/summary` plus the read-only
+ * `repos` field (window-scoped distinct owner/repo, independent of `repo=`).
+ * URL `repo=` shape is unchanged — out-of-set legal values stay applied.
+ */
 export function InsightsPage({ boot }: { boot: SpaBoot }) {
   const locale = boot.locale;
-  const [search, setSearch] = useState(() => parseInsightsSearch(window.location.search));
+  const [search, setSearch] = useState<InsightsSearch>(() => ({
+    window: homeWindow(window.location.search),
+    repo: parseInsightsSearch(window.location.search).repo,
+  }));
   const [data, setData] = useState<InsightsSummary | null>(null);
   const [state, setState] = useState<"loading" | "ok" | "error">("loading");
+
+  // Plan 36 QC F-002: an off-set legal window deep link (e.g. ?window=60)
+  // resolves to the default segment 30 — rewrite the URL on mount so the
+  // address bar reflects the applied filter (same contract as home).
+  useEffect(() => {
+    const normalized = normalizeWindowSearch(window.location.search);
+    if (normalized !== window.location.search) {
+      window.history.replaceState(null, "", `${window.location.pathname}${normalized}`);
+    }
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
     setState("loading");
-    fetchJson(insightsSummaryUrl(search))
+    // include=repos: the records Select needs the window-scoped distinct
+    // repo set; the home surface does not (plan 36 QC F-001).
+    fetchJson(insightsSummaryUrl(search, true))
       .then((raw) => {
         if (cancelled) return;
         const parsed = parseInsights(raw);
@@ -34,145 +70,204 @@ export function InsightsPage({ boot }: { boot: SpaBoot }) {
     };
   }, [search.window, search.repo]);
 
-  function onSubmit(event: FormEvent<HTMLFormElement>): void {
-    event.preventDefault();
-    const form = new FormData(event.currentTarget);
-    const next = {
-      window: String(form.get("window") ?? "30"),
-      repo: String(form.get("repo") ?? "").trim(),
-    };
-    const params = new URLSearchParams();
-    if (next.window !== "30") params.set("window", next.window);
-    if (next.repo !== "") params.set("repo", next.repo);
-    const query = params.toString();
-    const href = query === "" ? "/dashboard/insights" : `/dashboard/insights?${query}`;
-    window.history.replaceState(null, "", href);
+  function commitSearch(next: InsightsSearch): void {
+    window.history.replaceState(null, "", searchHref("/dashboard/insights", next));
     setSearch(next);
   }
 
+  function onWindowChange(next: string): void {
+    // Radix fires "" when the active segment is re-clicked — keep the window.
+    if (!(HOME_WINDOWS as readonly string[]).includes(next)) return;
+    commitSearch({ window: next, repo: search.repo });
+  }
+
+  function onRepoChange(next: string): void {
+    if (next === "") return;
+    commitSearch({ window: search.window, repo: insightsRepoFromSelect(next) });
+  }
+
+  const repoChoices = insightsRepoOptions(data?.repos ?? [], search.repo);
+  const repoSelectDisabled = state === "ok" && repoChoices.length === 0;
+
   return (
-    <div className={styles.page}>
-      <h1 className={styles.heading}>{t(locale, "insights.heading")}</h1>
-      <form className={styles.filters} onSubmit={onSubmit}>
-        <label className={styles.field}>
-          {t(locale, "insights.filterWindow")}
-          <select name="window" defaultValue={search.window}>
-            <option value="7">7</option>
-            <option value="30">30</option>
-            <option value="90">90</option>
-          </select>
-        </label>
-        <label className={styles.field}>
-          {t(locale, "insights.filterRepo")}
-          <input name="repo" defaultValue={search.repo} placeholder={t(locale, "insights.filterRepoPlaceholder")} />
-        </label>
-        <button className={styles.btnPrimary} type="submit">
-          {t(locale, "insights.apply")}
-        </button>
-      </form>
+    <div className="flex flex-col gap-6">
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <h1 className="text-2xl font-semibold tracking-tight">{t(locale, "insights.recordsHeading")}</h1>
+        <div className="flex flex-wrap items-center gap-3">
+          <ToggleGroup
+            type="single"
+            variant="outline"
+            size="sm"
+            value={search.window}
+            onValueChange={onWindowChange}
+            aria-label={t(locale, "insights.windowSegment")}
+          >
+            {HOME_WINDOWS.map((days) => (
+              <ToggleGroupItem key={days} value={days}>
+                {t(locale, "insights.daysShort", { count: Number(days) })}
+              </ToggleGroupItem>
+            ))}
+          </ToggleGroup>
+          <Select
+            value={insightsRepoSelectValue(search.repo)}
+            onValueChange={onRepoChange}
+            disabled={repoSelectDisabled}
+          >
+            <SelectTrigger className="min-w-48" size="sm" aria-label={t(locale, "insights.filterRepo")}>
+              <SelectValue placeholder={t(locale, "insights.filterRepoAll")} />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value={INSIGHTS_REPO_ALL}>{t(locale, "insights.filterRepoAll")}</SelectItem>
+              {repoChoices.map((repo) => (
+                <SelectItem key={repo} value={repo}>
+                  {repo}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        </div>
+      </div>
       {state === "loading" ? <LoadingNotice locale={locale} /> : null}
       {state === "error" ? <LoadFailedNotice locale={locale} /> : null}
-      {state === "ok" && data ? <InsightsView locale={locale} data={data} /> : null}
+      {state === "ok" && data ? <InsightsRecordsView locale={locale} data={data} /> : null}
     </div>
   );
 }
 
-function InsightsView({ locale, data }: { locale: SpaBoot["locale"]; data: InsightsSummary }) {
+function InsightsRecordsView({ locale, data }: { locale: SpaBoot["locale"]; data: InsightsSummary }) {
   const windowLabel = t(locale, data.window_days === 1 ? "insights.lastDay" : "insights.lastDays", {
     count: data.window_days,
   });
   const repoLabel = data.repo ? ` · ${t(locale, "insights.repo", { repo: data.repo })}` : "";
   const empty = data.reviews_total === 0;
-  const maxSeverity = Math.max(1, ...data.findings_by_severity.map((s) => s.count));
-  const verdictLine = data.verdict_distribution.map((v) => `${v.verdict} ${v.count}`).join(" · ");
+  const maxSeverity = Math.max(1, ...data.findings_by_severity.map((row) => row.count));
 
   return (
     <>
-      <section className={styles.card}>
-        <h2>{t(locale, "insights.heading")}</h2>
-        <p className={styles.status}>{t(locale, "insights.window", { label: `${windowLabel}${repoLabel}` })}</p>
-        <p className={styles.status}>{t(locale, "insights.reviewsTotal", { count: data.reviews_total })}</p>
-        {empty ? (
-          <p className={styles.note}>{t(locale, "insights.noReviews")}</p>
-        ) : (
-          <p className={styles.status}>{t(locale, "insights.verdicts", { line: verdictLine })}</p>
-        )}
-      </section>
+      <Card>
+        <CardHeader>
+          <CardTitle>{t(locale, "insights.heading")}</CardTitle>
+        </CardHeader>
+        <CardContent className="flex flex-col gap-1 text-sm">
+          <p>{t(locale, "insights.window", { label: `${windowLabel}${repoLabel}` })}</p>
+          <p>{t(locale, "insights.reviewsTotal", { count: data.reviews_total })}</p>
+          {empty ? (
+            <p className="text-muted-foreground">{t(locale, "insights.noReviews")}</p>
+          ) : (
+            <p>{t(locale, "insights.verdicts", { line: verdictLine(data) })}</p>
+          )}
+        </CardContent>
+      </Card>
       {empty ? null : (
         <>
-          <section className={styles.card}>
-            <h2>{t(locale, "insights.findingsBySeverity")}</h2>
-            {data.findings_by_severity.length === 0 ? (
-              <p className={styles.status}>{t(locale, "insights.noFindings")}</p>
-            ) : (
-              <ul className={styles.list}>
-                {data.findings_by_severity.map((row) => (
-                  <li key={row.severity}>
-                    <strong>{row.severity}</strong>
-                    <span className={styles.meta}>
-                      {t(locale, row.count === 1 ? "insights.finding" : "insights.findings", { count: row.count })}
-                    </span>
-                    <span className={styles.bar} style={{ width: `${Math.round((row.count / maxSeverity) * 100)}%` }} />
-                  </li>
-                ))}
-              </ul>
-            )}
-          </section>
-          <section className={styles.card}>
-            <h2>{t(locale, "insights.findingsByCategory")}</h2>
-            {data.findings_by_category.length === 0 ? (
-              <p className={styles.status}>{t(locale, "insights.noFindings")}</p>
-            ) : (
-              <ul className={styles.list}>
-                {data.findings_by_category.map((row) => (
-                  <li key={row.category ?? "uncategorized"}>
-                    <strong>{row.category ?? t(locale, "insights.uncategorized")}</strong>
-                    <span className={styles.meta}>
-                      {t(locale, row.count === 1 ? "insights.finding" : "insights.findings", { count: row.count })}
-                    </span>
-                  </li>
-                ))}
-              </ul>
-            )}
-          </section>
-          <section className={styles.card}>
-            <h2>{t(locale, "insights.weeklyTrend")}</h2>
-            {data.weekly_trend.length === 0 ? (
-              <p className={styles.status}>{t(locale, "insights.noReviews")}</p>
-            ) : (
-              <ul className={styles.list}>
-                {data.weekly_trend.map((row) => (
-                  <li key={row.week_start}>
-                    <strong>{row.week_start}</strong>
-                    <span className={styles.meta}>
-                      {t(locale, row.reviews === 1 ? "insights.review" : "insights.reviews", { count: row.reviews })}
-                      {" · "}
-                      {t(locale, row.findings === 1 ? "insights.finding" : "insights.findings", { count: row.findings })}
-                    </span>
-                  </li>
-                ))}
-              </ul>
-            )}
-          </section>
-          <section className={styles.card}>
-            <h2>{t(locale, "insights.recurringFindings")}</h2>
-            {data.recurring_top.length === 0 ? (
-              <p className={styles.status}>{t(locale, "insights.noRecurring")}</p>
-            ) : (
-              <ul className={styles.list}>
-                {data.recurring_top.map((row) => (
-                  <li key={row.fingerprint}>
-                    <strong>{row.title_sample}</strong>
-                    <span className={styles.meta}>
-                      {t(locale, row.count === 1 ? "insights.review" : "insights.reviews", { count: row.count })}
-                      {" · "}
-                      {row.repos.join(", ")}
-                    </span>
-                  </li>
-                ))}
-              </ul>
-            )}
-          </section>
+          <Card>
+            <CardHeader>
+              <CardTitle>{t(locale, "insights.findingsBySeverity")}</CardTitle>
+            </CardHeader>
+            <CardContent>
+              {data.findings_by_severity.length === 0 ? (
+                <p className="text-sm text-muted-foreground">{t(locale, "insights.noFindings")}</p>
+              ) : (
+                <ul className="flex flex-col">
+                  {data.findings_by_severity.map((row) => (
+                    <li
+                      key={row.severity}
+                      className="flex flex-wrap items-center gap-x-3 gap-y-2 border-b border-border py-3 last:border-b-0 last:pb-0"
+                    >
+                      <strong className="text-sm font-medium">{row.severity}</strong>
+                      <span className="text-sm text-muted-foreground tabular-nums">
+                        {t(locale, row.count === 1 ? "insights.finding" : "insights.findings", { count: row.count })}
+                      </span>
+                      <span
+                        className="h-2 basis-full rounded-sm bg-primary"
+                        style={{ width: `${Math.round((row.count / maxSeverity) * 100)}%` }}
+                      />
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </CardContent>
+          </Card>
+          <Card>
+            <CardHeader>
+              <CardTitle>{t(locale, "insights.findingsByCategory")}</CardTitle>
+            </CardHeader>
+            <CardContent>
+              {data.findings_by_category.length === 0 ? (
+                <p className="text-sm text-muted-foreground">{t(locale, "insights.noFindings")}</p>
+              ) : (
+                <ul className="flex flex-col">
+                  {data.findings_by_category.map((row) => (
+                    <li
+                      key={row.category ?? "uncategorized"}
+                      className="flex flex-wrap items-center gap-x-3 gap-y-2 border-b border-border py-3 last:border-b-0 last:pb-0"
+                    >
+                      <strong className="text-sm font-medium">
+                        {row.category ?? t(locale, "insights.uncategorized")}
+                      </strong>
+                      <span className="text-sm text-muted-foreground tabular-nums">
+                        {t(locale, row.count === 1 ? "insights.finding" : "insights.findings", { count: row.count })}
+                      </span>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </CardContent>
+          </Card>
+          <Card>
+            <CardHeader>
+              <CardTitle>{t(locale, "insights.weeklyTrend")}</CardTitle>
+            </CardHeader>
+            <CardContent>
+              {data.weekly_trend.length === 0 ? (
+                <p className="text-sm text-muted-foreground">{t(locale, "insights.noReviews")}</p>
+              ) : (
+                <ul className="flex flex-col">
+                  {data.weekly_trend.map((row) => (
+                    <li
+                      key={row.week_start}
+                      className="flex flex-wrap items-center gap-x-3 gap-y-2 border-b border-border py-3 last:border-b-0 last:pb-0"
+                    >
+                      <strong className="text-sm font-medium tabular-nums">{row.week_start}</strong>
+                      <span className="text-sm text-muted-foreground tabular-nums">
+                        {t(locale, row.reviews === 1 ? "insights.review" : "insights.reviews", { count: row.reviews })}
+                        {" · "}
+                        {t(locale, row.findings === 1 ? "insights.finding" : "insights.findings", {
+                          count: row.findings,
+                        })}
+                      </span>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </CardContent>
+          </Card>
+          <Card>
+            <CardHeader>
+              <CardTitle>{t(locale, "insights.recurringFindings")}</CardTitle>
+            </CardHeader>
+            <CardContent>
+              {data.recurring_top.length === 0 ? (
+                <p className="text-sm text-muted-foreground">{t(locale, "insights.noRecurring")}</p>
+              ) : (
+                <ul className="flex flex-col">
+                  {data.recurring_top.map((row) => (
+                    <li
+                      key={row.fingerprint}
+                      className="flex flex-wrap items-center gap-x-3 gap-y-2 border-b border-border py-3 last:border-b-0 last:pb-0"
+                    >
+                      <strong className="text-sm font-medium">{row.title_sample}</strong>
+                      <span className="text-sm text-muted-foreground tabular-nums">
+                        {t(locale, row.count === 1 ? "insights.review" : "insights.reviews", { count: row.count })}
+                        {" · "}
+                        {row.repos.join(", ")}
+                      </span>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </CardContent>
+          </Card>
         </>
       )}
     </>

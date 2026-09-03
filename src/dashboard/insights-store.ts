@@ -52,6 +52,12 @@ export type InsightsWindow = {
   windowDays?: number;
   /** Restrict every aggregation to one owner/repo pair. */
   repo?: { owner: string; repo: string };
+  /**
+   * Opt-in window-scoped distinct `repos` aggregation (plan 36 QC F-001).
+   * Skipped (resolves to []) unless requested — the home surface never
+   * consumes it and must not pay the DISTINCT scan+sort.
+   */
+  includeRepos?: boolean;
 };
 
 /** One severity bucket of findingsBySeverity. */
@@ -70,7 +76,7 @@ export type RecurringGroup = {
   repos: string[];
 };
 
-/** The full insights aggregation shape (plan 22 Task 1 contract). */
+/** The full insights aggregation shape (plan 22 Task 1 + plan 36 T2). */
 export type Insights = {
   reviewsTotal: number;
   findingsBySeverity: SeverityCount[];
@@ -78,6 +84,12 @@ export type Insights = {
   verdictDistribution: VerdictCount[];
   weeklyTrend: WeekBucket[];
   recurringTop: RecurringGroup[];
+  /**
+   * Window-scoped distinct `owner/repo` values with at least one v1 review
+   * (plan 36 T2). Sorted ascending. Independent of `opts.repo` — the Select
+   * option set is always the full in-window set, never the filtered subset.
+   */
+  repos: string[];
 };
 
 /** Narrow D1 statement face, declared locally (dashboard leaf — zero imports). */
@@ -107,6 +119,15 @@ export function clampWindow(windowDays: number | undefined): number {
 export async function createInsightsStore(db: InsightsD1, opts: InsightsWindow = {}): Promise<Insights> {
   const windowDays = clampWindow(opts.windowDays);
   const repo = opts.repo;
+  const includeRepos = opts.includeRepos ?? false;
+
+  // Shared window + era-gate predicates — the single source of truth. The
+  // era gate (migration 0002 lock): `reviews.envelope IS NOT NULL` ⇔ v1 row;
+  // M1-era rows (old severity/verdict vocab) must never mix into the v1
+  // merge-class aggregations. The opt-in repos query reuses this
+  // (deliberately omitting only the repo filter) so the two cannot drift
+  // (plan 36 QC F-003).
+  const windowEraWhere = "r.reviewed_at >= datetime('now', '-' || ? || ' days') AND r.envelope IS NOT NULL";
 
   const where: string[] = [];
   const binds: unknown[] = [];
@@ -114,17 +135,29 @@ export async function createInsightsStore(db: InsightsD1, opts: InsightsWindow =
     where.push("r.owner = ?", "r.repo = ?");
     binds.push(repo.owner, repo.repo);
   }
-  where.push("r.reviewed_at >= datetime('now', '-' || ? || ' days')");
+  where.push(windowEraWhere);
   binds.push(windowDays);
-  // Era gate (migration 0002 lock): `reviews.envelope IS NOT NULL` ⇔ v1 row.
-  // M1-era rows (old severity/verdict vocab) must never mix into the v1
-  // merge-class aggregations — the gate applies to EVERY query below
-  // (reviewsTotal, findingsBySeverity/Category, verdictDistribution,
-  // weeklyTrend, recurringTop).
-  where.push("r.envelope IS NOT NULL");
   const whereSql = where.join(" AND ");
 
-  const [total, severities, categories, verdicts, trend, recurring] = await Promise.all([
+  // Plan 36 T2: window-scoped distinct repos for the records Select.
+  // Opt-in (plan 36 QC F-001) — skipped unless includeRepos, so the home
+  // surface never pays the DISTINCT scan+sort. Deliberately ignores
+  // opts.repo — the option set is the in-window universe, not the
+  // currently filtered subset. Shares windowEraWhere so the window + era
+  // gate predicates cannot drift from the other aggregations (F-003).
+  const repoQuery = includeRepos
+    ? db
+        .prepare(
+          `SELECT DISTINCT r.owner || '/' || r.repo AS repo
+           FROM reviews r
+           WHERE ${windowEraWhere}
+           ORDER BY repo ASC`,
+        )
+        .bind(windowDays)
+        .all<{ repo: string }>()
+    : Promise.resolve({ results: [] as { repo: string }[] });
+
+  const [total, severities, categories, verdicts, trend, recurring, repoRows] = await Promise.all([
     db
       .prepare(`SELECT COUNT(*) AS total FROM reviews r WHERE ${whereSql}`)
       .bind(...binds)
@@ -195,6 +228,7 @@ export async function createInsightsStore(db: InsightsD1, opts: InsightsWindow =
       )
       .bind(...binds)
       .all<{ fingerprint: string; title_sample: string; count: number; repos_csv: string | null }>(),
+    repoQuery,
   ]);
 
   return {
@@ -209,5 +243,6 @@ export async function createInsightsStore(db: InsightsD1, opts: InsightsWindow =
       count: row.count,
       repos: (row.repos_csv ?? "").split(",").filter((repoName) => repoName.length > 0).sort(),
     })),
+    repos: repoRows.results.map((row) => row.repo).filter((name) => name.length > 0),
   };
 }

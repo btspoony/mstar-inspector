@@ -330,6 +330,7 @@ describe("createInsightsStore", () => {
       verdictDistribution: [],
       weeklyTrend: [],
       recurringTop: [],
+      repos: [],
     });
   });
 
@@ -465,5 +466,50 @@ describe("createInsightsStore", () => {
       { week_start: "2026-08-31", reviews: 1, findings: 1 },
       { week_start: "2026-09-07", reviews: 1, findings: 1 },
     ]);
+  });
+
+  test("repos aggregation is opt-in: skipped ([]) without includeRepos, populated with it (plan 36 QC F-001)", async () => {
+    const db = createMigratedTestD1();
+    seedFixture(db);
+
+    const without = await createInsightsStore(db);
+    expect(without.repos).toEqual([]);
+
+    const withRepos = await createInsightsStore(db, { includeRepos: true });
+    expect(withRepos.repos).toEqual(["acme/widgets", "other/lib"]);
+  });
+
+  test("repos is the window-scoped distinct set, independent of the repo filter (plan 36 T2)", async () => {
+    const db = createMigratedTestD1();
+    seedFixture(db);
+    insertReview(db, {
+      id: "r-old",
+      owner: "old",
+      repo: "gone",
+      pr_number: 9,
+      reviewedAt: reviewedAt(100),
+      verdict: "needs fixes",
+      findings: [{ id: "f-old", severity: "must-fix", category: "logic", title: "Old", fingerprint: FP_X }],
+    });
+    insertReview(db, {
+      id: "r-m1-only",
+      owner: "era",
+      repo: "legacy",
+      pr_number: 10,
+      reviewedAt: reviewedAt(1),
+      verdict: "comment",
+      envelope: null,
+      findings: [{ id: "f-m1-only", severity: "critical", category: "security", title: "Old era", fingerprint: null }],
+    });
+
+    const all = await createInsightsStore(db, { includeRepos: true });
+    expect(all.repos).toEqual(["acme/widgets", "other/lib"]);
+
+    const filtered = await createInsightsStore(db, { repo: { owner: "acme", repo: "widgets" }, includeRepos: true });
+    expect(filtered.reviewsTotal).toBe(2);
+    expect(filtered.repos).toEqual(["acme/widgets", "other/lib"]);
+
+    const clamped = await createInsightsStore(db, { windowDays: 200, includeRepos: true });
+    expect(clamped.repos).toEqual(["acme/widgets", "other/lib"]);
   });
 });

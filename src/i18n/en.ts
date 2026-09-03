@@ -221,10 +221,14 @@ export const en = {
     lastDay: "last {count} day",
     lastDays: "last {count} days",
     repo: "repo {repo}",
-    filterWindow: "Window (days)",
-    filterRepo: "Repo (owner/repo)",
-    filterRepoPlaceholder: "owner/repo",
-    apply: "Apply",
+    windowSegment: "Time window",
+    daysShort: "{count}d",
+    dimension: "Findings breakdown dimension",
+    dimSeverity: "Severity",
+    dimCategory: "Category",
+    recordsHeading: "Review records",
+    filterRepo: "Repo",
+    filterRepoAll: "All",
     uncategorized: "uncategorized",
   },
   settings: {
@@ -401,9 +405,6 @@ export const en = {
   },
   home: {
     insightsHeading: "Overall insights",
-    viewFull: "View full insights →",
-    trendHint: "Latest week {week}: {reviews} · {findings}",
-    noTrend: "No recent trend in this window.",
   },
 };
 
