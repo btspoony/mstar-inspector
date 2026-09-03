@@ -193,7 +193,8 @@ describe("App write-route permission matrix (plan 35 T1b, spec §2)", () => {
         expect(rawCount(db, "app_provider_keys")).toBe(0);
         expect(rawCount(db, "app_provider_models")).toBe(0);
         expect(rawCount(db, "app_model_config")).toBe(0);
-        expect(rawCount(db, "app_model_roles")).toBe(0);
+        expect(rawCount(db, "app_model_chains")).toBe(0);
+        expect(rawCount(db, "app_model_chain_seats")).toBe(0);
         expect(rawCount(db, "app_custom_providers")).toBe(0);
       }
     });

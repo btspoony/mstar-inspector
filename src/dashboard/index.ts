@@ -60,6 +60,7 @@ import { SecretboxKeyError, createSecretbox } from "./secretbox";
 import {
   CUSTOM_PROVIDER_API_IDS,
   CUSTOM_PROVIDER_ID_PATTERN,
+  DEFAULT_CHAIN_NAME,
   InvalidCustomProviderError,
   IN_IMAGE_BASE_PROVIDER_IDS,
   isValidCustomProviderBaseUrl,
@@ -67,8 +68,10 @@ import {
   MAX_CUSTOM_PROVIDER_COUNT,
   MAX_CUSTOM_PROVIDER_MODEL_ID_LENGTH,
   MAX_CUSTOM_PROVIDER_MODEL_IDS,
+  MAX_MODEL_CHAIN_NAME_LENGTH,
   MAX_MODEL_SELECTOR_LENGTH,
   MAX_PROVIDER_KEY_LENGTH,
+  MODEL_CHAIN_NAME_PATTERN,
   MODEL_ROLE_IDS,
   PROVIDER_IDS,
   createAppConfigStore,
@@ -1227,7 +1230,8 @@ dashboardApp.get("/api/apps/:slug/settings", async (c) => {
   try {
     const maskedKeys = await store.listProviderKeys(gate.app.id);
     const modelChain = await store.getModelChain(gate.app.id);
-    const modelRoles = await store.getAppModelRoles(gate.app.id);
+    const modelChainSeats = await store.getModelChainSeats(gate.app.id);
+    const modelChains = await store.getModelChains(gate.app.id);
     const customProviders = await store.listCustomProviders(gate.app.id);
     const installations = await apps.listInstallations(gate.app.id);
     const deliveries = await apps.listRecentDeliveries(gate.app.id, 5);
@@ -1242,7 +1246,11 @@ dashboardApp.get("/api/apps/:slug/settings", async (c) => {
       },
       keys: maskedKeys,
       model_chain: modelChain,
-      model_roles: modelRoles,
+      // Plan 35 T2 (spec §4.4): the role editor's data is now seat → chain
+      // reference (blank = default chain); the chains list carries every
+      // chain (default + named) for the chains management UI (T4).
+      model_roles: modelChainSeats,
+      model_chains: modelChains,
       custom_providers: customProviders,
       installations,
       deliveries: deliveries.map((d) => ({
@@ -1316,27 +1324,34 @@ dashboardApp.post("/api/apps/:slug/keys/verify", async (c) => {
 });
 
 /**
- * The settings POST: three operations on the pinned action path, discriminated
+ * The settings POST: the operations on the pinned action path, discriminated
  * by the forms' hidden `op` field. add-key = provider allowlist (400 on any
  * other id — the allowlist is the plan's Global Constraint) + non-empty key
  * of at most MAX_PROVIDER_KEY_LENGTH characters (plan 15 input bounds — an
  * oversized key is a 400 with zero writes; the store guard beneath
  * is the backstop), then the store encrypts inside. save-chain = empty →
- * clear the chain (an unconfigured chain fails that App's reviews closed in
- * the consumer — plan 24 Task 6 / AL-24-5: no deployment-level chain exists
- * to fall back to), otherwise ≥1 comma-separated selector required and the
- * chain is stored VERBATIM (a `:thinking`-style suffix is legal omp syntax;
- * full selector validation stays omp-side). save-roles (plan 17 T3) = the
- * Role models editor's full map — one `role_<role>` field per audit
- * seat, blanks = cleared, saved through the validate-all-first setModelRoles
- * (zero partial writes on any validation failure). add-custom-provider /
- * remove-custom-provider (plan 23 T2) = the custom-provider declarations
- * section: every AL-23-1/AL-23-2 bound (id grammar, https-only baseUrl,
- * three-form api enum, model_ids 1..32 × ≤128, key required ≤4096) is a 400
- * with zero writes; the key is encrypted inside the store and
- * never echoed. Plan 29 T6: the settings page is SPA-owned, so every
- * response is plain text (settingsPostResponse) — 2xx = the SPA refetches
- * the JSON face, 4xx/5xx = the reason; the re-rendered HTML page is retired.
+ * clear the default chain (an unconfigured chain fails that App's reviews
+ * closed in the consumer — plan 24 Task 6 / AL-24-5: no deployment-level
+ * chain exists to fall back to), otherwise ≥1 comma-separated selector
+ * required and the chain is stored VERBATIM as the 'default' chain row
+ * (a `:thinking`-style suffix is legal omp syntax; full selector
+ * validation stays omp-side). save-roles (plan 17 T3, plan 35 T2 rework) =
+ * the Role models editor's full map — one `role_<role>` field per audit
+ * seat, blanks = the seat uses the default chain, content = a chain NAME
+ * reference, saved through the validate-all-first setModelChainSeats (zero
+ * partial writes on any validation failure). add-chain / remove-chain
+ * (plan 35 T2) = the named-chains management section: add-chain validates
+ * the name grammar (the reserved "default" is rejected) and the selector
+ * chain exactly like save-chain; remove-chain deletes the named chain and
+ * its seat references atomically (seats fall back to the default chain).
+ * add-custom-provider / remove-custom-provider (plan 23 T2) = the
+ * custom-provider declarations section: every AL-23-1/AL-23-2 bound (id
+ * grammar, https-only baseUrl, three-form api enum, model_ids 1..32 × ≤128,
+ * key required ≤4096) is a 400 with zero writes; the key is encrypted
+ * inside the store and never echoed. Plan 29 T6: the settings page is
+ * SPA-owned, so every response is plain text (settingsPostResponse) — 2xx
+ * = the SPA refetches the JSON face, 4xx/5xx = the reason; the re-rendered
+ * HTML page is retired.
  */
 dashboardApp.post("/apps/:slug/settings", async (c) => {
   const gate = await requireAppSettings(c);
@@ -1424,16 +1439,17 @@ dashboardApp.post("/apps/:slug/settings", async (c) => {
     return settingsPostResponse(c, gate.app.slug, `Saved the model chain for ${gate.app.slug}.`);
   }
   if (op === "save-roles") {
-    // Plan 17 T3: the Role models editor posts one `role_<role>` field per
-    // audit seat (the page always renders all four rows, blank inputs
-    // included), so the submitted map is FULL — blanks = cleared (the
-    // setModelRole 空 = 清除 convention), content = verbatim upsert, all
-    // through the validate-all-first setModelRoles bulk face. Any
-    // `role_`-prefixed field naming a role outside MODEL_ROLE_IDS is client
-    // tampering → 400, zero writes; a save with NO role fields at
-    // all is equally malformed (it could not come from this page, and an
-    // empty map must never masquerade as a successful save).
-    const selectors: Record<string, string> = {};
+    // Plan 17 T3 editor, plan 35 T2 rework (spec §4.4): the Role models
+    // editor posts one `role_<role>` field per audit seat (the page always
+    // renders all four rows, blank inputs included), so the submitted map
+    // is FULL — blanks = the seat uses the default chain (the reference row
+    // is cleared), content = a chain NAME reference, all through the
+    // validate-all-first setModelChainSeats bulk face. Any `role_`-prefixed
+    // field naming a role outside MODEL_ROLE_IDS is client tampering → 400,
+    // zero writes; a save with NO role fields at all is equally malformed
+    // (it could not come from this page, and an empty map must never
+    // masquerade as a successful save).
+    const refs: Record<string, string> = {};
     for (const [field, value] of Object.entries(form)) {
       if (!field.startsWith("role_")) continue;
       // AL-23-2: with parseBody({ all: true }) a duplicate role_* field
@@ -1449,41 +1465,92 @@ dashboardApp.post("/apps/:slug/settings", async (c) => {
       if (!MODEL_ROLE_IDS.includes(role)) {
         return settingsPostResponse(c, gate.app.slug, `${role} is not a known review role — nothing was saved.`, 400);
       }
-      selectors[role] = value;
+      refs[role] = value;
     }
-    if (Object.keys(selectors).length === 0) {
-      return settingsPostResponse(c, gate.app.slug, "No role selectors were submitted — resubmit the Role models form.", 400);
+    if (Object.keys(refs).length === 0) {
+      return settingsPostResponse(c, gate.app.slug, "No role chain references were submitted — resubmit the Role models form.", 400);
     }
-    // Selector grammar, role-named for the 4-row form (the same parseModelChain
-    // mirror the save-chain op 400s against); blank stays legal = clear.
-    for (const [role, selector] of Object.entries(selectors)) {
-      if (selector.length > MAX_MODEL_SELECTOR_LENGTH) {
-        return settingsPostResponse(c, gate.app.slug, `The ${role} selector is too long (${selector.length} characters) — limited to ${MAX_MODEL_SELECTOR_LENGTH}. Nothing was saved.`,
-          400,
-        );
-      }
-      if (selector.trim() !== "" && parseModelChain(selector).length === 0) {
-        return settingsPostResponse(c, gate.app.slug, `The ${role} selector needs at least one comma-separated model selector — or leave it empty to use the App model chain. Nothing was saved.`,
+    // Chain-name validation, role-named for the 4-row form: blank (or the
+    // reserved "default" name) = the seat uses the default chain; content
+    // must name a chain the App actually has (the store re-validates as
+    // the backstop). Zero writes on any failure.
+    const chains = await store.getModelChains(gate.app.id);
+    const knownChains = new Set(chains.map((chain) => chain.name));
+    for (const [role, chainName] of Object.entries(refs)) {
+      const name = chainName.trim();
+      if (name === "" || name === DEFAULT_CHAIN_NAME) continue;
+      if (!knownChains.has(name)) {
+        return settingsPostResponse(c, gate.app.slug, `${role} is not a known model chain — pick one from the list or leave it empty to use the default chain. Nothing was saved.`,
           400,
         );
       }
     }
     try {
-      const verified = await store.getVerifiedModels(gate.app.id);
-      const custom = await store.listCustomProviders(gate.app.id);
-      for (const selector of Object.values(selectors)) {
-        if (selector.trim() === "") continue;
-        const failing = findFailingSelector(parseModelChain(selector), verified, custom);
-        if (failing) {
-          return settingsMembershipFailResponse(c, gate.app.slug, failing);
-        }
-      }
-      await store.setModelRoles(gate.app.id, selectors);
+      await store.setModelChainSeats(gate.app.id, refs);
     } catch (err) {
       logSettingsFailure("save_roles", gate.app.id, err);
       return settingsPostResponse(c, gate.app.slug, settingsFailureNotice(err), 500);
     }
     return settingsPostResponse(c, gate.app.slug, `Saved the role models for ${gate.app.slug}.`);
+  }
+  if (op === "add-chain") {
+    // Plan 35 T2 (spec §4.4): create or replace one NAMED chain. The name
+    // must be a valid chain name (MODEL_CHAIN_NAME_PATTERN) and NOT the
+    // reserved "default"; the chain value is a selector chain validated
+    // exactly like save-chain (grammar + verified-models membership).
+    const name = typeof form.name === "string" ? form.name.trim() : "";
+    const chain = typeof form.chain === "string" ? form.chain : "";
+    if (name === "" || name === DEFAULT_CHAIN_NAME || !MODEL_CHAIN_NAME_PATTERN.test(name)) {
+      return settingsPostResponse(c, gate.app.slug, `Chain names must be 1–${MAX_MODEL_CHAIN_NAME_LENGTH} lowercase letters, digits or hyphens — and "default" is reserved. Nothing was saved.`,
+        400,
+      );
+    }
+    if (chain.trim() === "") {
+      return settingsPostResponse(c, gate.app.slug, "Enter a model chain for the named chain.", 400);
+    }
+    if (chain.length > MAX_MODEL_SELECTOR_LENGTH) {
+      return settingsPostResponse(c, gate.app.slug, `That model chain is too long (${chain.length} characters) — limited to ${MAX_MODEL_SELECTOR_LENGTH}. Nothing was saved.`,
+        400,
+      );
+    }
+    const selectors = parseModelChain(chain);
+    if (selectors.length === 0) {
+      return settingsPostResponse(c, gate.app.slug, "Enter at least one comma-separated model selector.", 400);
+    }
+    const failing = findFailingSelector(
+      selectors,
+      await store.getVerifiedModels(gate.app.id),
+      await store.listCustomProviders(gate.app.id),
+    );
+    if (failing) {
+      return settingsMembershipFailResponse(c, gate.app.slug, failing);
+    }
+    try {
+      await store.upsertModelChain(gate.app.id, name, chain);
+    } catch (err) {
+      logSettingsFailure("add_chain", gate.app.id, err);
+      return settingsPostResponse(c, gate.app.slug, settingsFailureNotice(err), 500);
+    }
+    return settingsPostResponse(c, gate.app.slug, `Saved the ${name} model chain for ${gate.app.slug}.`);
+  }
+  if (op === "remove-chain") {
+    // Plan 35 T2 (spec §4.4): delete one NAMED chain — seats referencing
+    // it fall back to the default chain (the store cleans the reference
+    // rows in the same atomic batch). The reserved "default" row cannot be
+    // removed here (clear it via save-chain instead).
+    const name = typeof form.name === "string" ? form.name.trim() : "";
+    if (name === "" || name === DEFAULT_CHAIN_NAME) {
+      return settingsPostResponse(c, gate.app.slug, `The "default" chain cannot be removed — clear it instead. Nothing was saved.`,
+        400,
+      );
+    }
+    try {
+      await store.removeModelChain(gate.app.id, name);
+    } catch (err) {
+      logSettingsFailure("remove_chain", gate.app.id, err);
+      return settingsPostResponse(c, gate.app.slug, settingsFailureNotice(err), 500);
+    }
+    return settingsPostResponse(c, gate.app.slug, `Removed the ${name} model chain for ${gate.app.slug} — seats using it fall back to the default chain.`);
   }
   if (op === "add-custom-provider") {
     // Plan 23 T2: declare a NON-built-in model provider for the App. Every

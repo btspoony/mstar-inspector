@@ -316,35 +316,31 @@ describe("POST save-chain / save-roles membership (plan 31 T4)", () => {
     expect((await store.getVerifiedModels(app.id)).some((row) => row.provider === "my-custom")).toBe(false);
   });
 
-  test("save-roles applies the same membership; blank still clears", async () => {
+  test("save-roles references chains (plan 35 T2): unknown chain 400s, blank still clears", async () => {
     const { db, app } = await seededWorld();
     const store = createAppConfigStore(db, TEST_KEY);
-    await store.saveVerifiedKey(app.id, "anthropic", PLAIN_KEY, ["claude-sonnet-4-6"]);
+    await store.upsertModelChain(app.id, "seat-mstar-review-seat", "anthropic/claude-sonnet-4-6:thinking");
     const env = makeEnv(db);
     const roles = Object.fromEntries(MODEL_ROLE_IDS.map((role) => [`role_${role}`, ""]));
     const fail = await postForm(SETTINGS, "mallory", env, {
       op: "save-roles",
       ...roles,
-      "role_mstar-review-seat": "anthropic/nope",
+      "role_mstar-review-seat": "no-such-chain",
     });
     expect(fail.status).toBe(400);
-    expect(await fail.json()).toEqual({
-      code: "not_in_verified_models",
-      message: "Selector anthropic/nope is not in this App's verified models.",
-      selector: "anthropic/nope",
-    });
+    expect(await fail.text()).toContain("mstar-review-seat is not a known model chain");
     const ok = await postForm(SETTINGS, "mallory", env, {
       op: "save-roles",
       ...roles,
-      "role_mstar-review-seat": "anthropic/claude-sonnet-4-6:thinking",
+      "role_mstar-review-seat": "seat-mstar-review-seat",
     });
     expect(ok.status).toBe(200);
-    expect(await store.getAppModelRoles(app.id)).toEqual({
-      "mstar-review-seat": "anthropic/claude-sonnet-4-6:thinking",
+    expect(await store.getModelChainSeats(app.id)).toEqual({
+      "mstar-review-seat": "seat-mstar-review-seat",
     });
     const clear = await postForm(SETTINGS, "mallory", env, { op: "save-roles", ...roles });
     expect(clear.status).toBe(200);
-    expect(await store.getAppModelRoles(app.id)).toEqual({});
+    expect(await store.getModelChainSeats(app.id)).toEqual({});
   });
 });
 

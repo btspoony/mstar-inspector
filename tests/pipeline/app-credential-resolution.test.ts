@@ -64,6 +64,8 @@ function createMigratedD1(): ReturnType<typeof createTestD1> {
   // it, so the fixture must carry the column.
   // 0015 (plan 31): the store's setProviderKey upsert now writes the
   // verified_* columns, so the fixture must carry them too.
+  // 0017 (plan 35 T2): the store's setModelChain now writes the default
+  // app_model_chains row, so the fixture must carry the chains tables.
   for (const name of [
     "0004_github_apps.sql",
     "0005_reviews_app_id.sql",
@@ -72,6 +74,7 @@ function createMigratedD1(): ReturnType<typeof createTestD1> {
     "0009_app_model_roles.sql",
     "0012_custom_providers_and_key_updated_at.sql",
     "0015_provider_verification.sql",
+    "0017_app_model_chains.sql",
   ]) {
     db.raw.exec(readFileSync(join(MIGRATIONS_DIR, name), "utf8"));
   }
@@ -668,6 +671,8 @@ describe("per-App pause ack-skip (plan 16, architect lock L4)", () => {
     // them first so the hard DELETE can proceed; re-seed them on re-insert.
     db.raw.prepare("DELETE FROM reviews WHERE app_id = ?").run(appX.id);
     db.raw.prepare("DELETE FROM app_model_config WHERE app_id = ?").run(appX.id);
+    db.raw.prepare("DELETE FROM app_model_chain_seats WHERE app_id = ?").run(appX.id);
+    db.raw.prepare("DELETE FROM app_model_chains WHERE app_id = ?").run(appX.id);
     db.raw.prepare("DELETE FROM app_provider_keys WHERE app_id = ?").run(appX.id);
     db.raw.prepare("DELETE FROM github_apps WHERE id = ?").run(appX.id);
     await expect(
