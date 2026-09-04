@@ -1,18 +1,18 @@
 /**
  * Plan 36 T2: `/dashboard/insights` is the review-records surface —
  * segmented window (HOME_WINDOWS) + shadcn Select repo filter.
- * No DOM runner — same source-scan contract as tests/spa/home.test.ts.
+ * No DOM runner — same source-scan contract as plan 29 SPA tests.
  */
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { t } from "../../src/i18n";
-import { HOME_WINDOWS } from "../../src/spa/pages/homeModel";
+import { HOME_WINDOWS } from "../../src/spa/pages/data";
 
 const page = readFileSync(join(import.meta.dir, "../../src/spa/pages/InsightsPage.tsx"), "utf8");
 
 describe("records page assembly (plan 36 T2)", () => {
-  test("window switch is the same HOME_WINDOWS ToggleGroup as home", () => {
+  test("window switch is the HOME_WINDOWS segmented ToggleGroup", () => {
     expect(HOME_WINDOWS).toEqual(["7", "30", "90"]);
     expect(page).toContain("@/components/ui/toggle-group");
     expect(page).toContain("HOME_WINDOWS");
@@ -40,7 +40,7 @@ describe("records page assembly (plan 36 T2)", () => {
     expect(page).not.toMatch(/#[0-9a-fA-F]{3,8}\b/);
   });
 
-  test("records fetch opts into the repos aggregation; home does not (plan 36 QC F-001)", () => {
+  test("records fetch opts into the repos aggregation (plan 36 QC F-001)", () => {
     expect(page).toContain("insightsSummaryUrl(search, true)");
   });
 

@@ -427,9 +427,6 @@ export const en = {
       dbUnbound: "Dashboard storage is not configured — the App could not be stored.",
     },
   },
-  home: {
-    insightsHeading: "Overall insights",
-  },
 };
 
 /** The dictionary shape — derived from en, the source of truth. */

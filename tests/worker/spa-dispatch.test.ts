@@ -98,6 +98,7 @@ describe("SPA dispatch (plan 29 T3)", () => {
   test("each enumerated page GET hits ASSETS (with a session)", async () => {
     const pages = [
       "/dashboard",
+      "/dashboard/apps",
       "/dashboard/insights",
       "/dashboard/members",
       "/dashboard/login",

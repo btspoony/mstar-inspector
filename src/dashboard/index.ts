@@ -1993,7 +1993,8 @@ const INSIGHTS_INCLUDE_VALUES = ["repos"] as const;
  * Query-param parse for the insights JSON face (QC W-C): window (integer
  * days, default 30) + optional repo owner/repo filter + optional
  * comma-separated `include` extras (`repos` — the window-scoped distinct
- * repo aggregation, opt-in so the home surface never pays for it). Returns
+ * repo aggregation, opt-in so only consumers that need it pay for it).
+ * Returns
  * the parsed values or the 400 reason; the route answers 400 with a JSON
  * error body (the HTML notice page retired with GET /insights in plan 29
  * T6). The >90 clamp stays in the store — the single clamp point — and the

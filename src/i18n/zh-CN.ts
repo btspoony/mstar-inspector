@@ -401,7 +401,4 @@ export const zhCN: Dictionary = {
       dbUnbound: "控制台存储未配置 — 无法存储该 App。",
     },
   },
-  home: {
-    insightsHeading: "总体洞察",
-  },
 };
