@@ -53,14 +53,20 @@ export function SettingsPage({ boot, slug }: { boot: SpaBoot; slug: string }) {
   const [notice, setNotice] = useState<{ kind: NoticeKind; message: string } | null>(null);
   const cancelledRef = useRef(false);
 
-  async function load(): Promise<void> {
-    setState("loading");
+  // Background reloads (op-triggered refreshes) keep the loaded card tree
+  // mounted: they must not flip state back to "loading" — that unmount would
+  // destroy Add Provider's open/selection state and every form's typed input
+  // (plan 38 QC fix wave 1, F-001). A failed background refresh surfaces the
+  // error through the notice channel instead of the page-level error state.
+  async function load({ background = false }: { background?: boolean } = {}): Promise<void> {
+    if (!background) setState("loading");
     try {
       const settingsRaw = await fetchJson(`/dashboard/api/apps/${encodeURIComponent(slug)}/settings`);
       if (cancelledRef.current) return;
       const parsed = parseSettings(settingsRaw);
       if (!parsed) {
-        setState("error");
+        if (background) setNotice({ kind: "error", message: t(locale, "common.loadFailed") });
+        else setState("error");
         return;
       }
       let nextGroups: ModelOptionGroup[] = [];
@@ -77,7 +83,10 @@ export function SettingsPage({ boot, slug }: { boot: SpaBoot; slug: string }) {
       setGroups(nextGroups);
       setState("ok");
     } catch {
-      if (!cancelledRef.current) setState("error");
+      if (!cancelledRef.current) {
+        if (background) setNotice({ kind: "error", message: t(locale, "common.loadFailed") });
+        else setState("error");
+      }
     }
   }
 
@@ -136,7 +145,7 @@ function SettingsView({
   payload: SettingsPayload;
   groups: ModelOptionGroup[];
   onNotice: (notice: { kind: NoticeKind; message: string } | null) => void;
-  onReload: () => Promise<void>;
+  onReload: (options?: { background?: boolean }) => Promise<void>;
 }) {
   const { app } = payload;
   const base = `/dashboard/apps/${app.slug}/settings`;
@@ -147,17 +156,19 @@ function SettingsView({
     const { status, body } = await postForm(base, fields);
     if (status >= 400) {
       onNotice({ kind: "error", message: settingsErrorMessage(locale, body) });
-      await onReload();
+      await onReload({ background: true });
       return false;
     }
     onNotice(null);
-    await onReload();
+    await onReload({ background: true });
     return true;
   }
 
-  // Plan 38: returns whether the key was verified AND stored, so the add
-  // form keeps the typed key for correction on a failed verify (the provider
-  // stays unconfigured) and only resets/closes on success.
+  // Plan 38: returns whether the key was verified AND stored. The refresh
+  // after the POST is a background reload (the card tree stays mounted), so a
+  // failed verify keeps the add panel open with the typed key for correction
+  // while the provider stays unconfigured; only success resets/closes the
+  // form via onDone.
   async function submitVerify(fields: Record<string, string>): Promise<boolean> {
     const { status, body } = await postForm(
       `/dashboard/api/apps/${encodeURIComponent(app.slug)}/keys/verify`,
@@ -172,11 +183,11 @@ function SettingsView({
         /* body is not JSON */
       }
       onNotice({ kind: "error", message: verifyReasonMessage(locale, reason) });
-      await onReload();
+      await onReload({ background: true });
       return false;
     }
     onNotice({ kind: "success", message: t(locale, "settings.keyVerified") });
-    await onReload();
+    await onReload({ background: true });
     return true;
   }
 
@@ -188,11 +199,11 @@ function SettingsView({
     const { status, body } = await postForm(path, fields);
     if (status >= 400) {
       onNotice({ kind: "error", message: body.trim() || t(locale, "common.loadFailed") });
-      await onReload();
+      await onReload({ background: true });
       return;
     }
     onNotice(null);
-    await onReload();
+    await onReload({ background: true });
   }
 
   async function onConfirm(): Promise<void> {
@@ -886,8 +897,10 @@ function ProviderConfigForm({
       onSubmit={(event) => {
         event.preventDefault();
         void onVerify({ provider: provider.id, key }).then((ok) => {
-          // A failed verify keeps the typed key for correction — the
-          // provider stays unconfigured and the structured reason is shown.
+          // The post-submit reload is background (the tree stays mounted), so
+          // a failed verify keeps the typed key for correction — the provider
+          // stays unconfigured and the structured reason is shown. Success
+          // closes/resets deliberately via onDone.
           if (ok) {
             setKey("");
             onDone();

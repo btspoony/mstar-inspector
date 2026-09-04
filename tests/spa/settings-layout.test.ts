@@ -185,10 +185,36 @@ describe("configured providers + catalog add flow (plan 38 T2)", () => {
     const source = readFileSync(join(import.meta.dir, "../../src/spa/pages/SettingsPage.tsx"), "utf8");
     expect(source).toContain("verifyReasonMessage(locale, reason)");
     // Forms reset and close only on success — a rejected submit keeps the
-    // typed input and the add selection while the reload restores state.
+    // typed input and the add selection while the background reload refreshes
+    // data in place.
     expect(source).toContain("if (ok) {");
-    expect(source).toContain("await onReload();");
+    expect(source).toContain("await onReload({ background: true })");
     expect(source).toContain("Promise<boolean>");
+  });
+
+  test("op-triggered reloads are background: the card tree stays mounted across a failed verify (QC fix wave 1 F-001)", () => {
+    const source = readFileSync(join(import.meta.dir, "../../src/spa/pages/SettingsPage.tsx"), "utf8");
+    // load() defaults to the foreground (loading-flash) behavior; only the
+    // background variant skips the "loading" flip.
+    expect(source).toContain("background = false");
+    expect(source).toContain('if (!background) setState("loading")');
+    // Initial mount loads in the foreground — genuine navigation keeps the
+    // loading state.
+    expect(source).toContain("void load()");
+    // Every op-triggered refresh is a background reload: no unmount, so the
+    // Add Provider panel (open + selection) and every form's typed input
+    // survive a failed verify.
+    expect(source).toContain("await onReload({ background: true })");
+    expect(source).not.toContain("await onReload()");
+    // A failed background refresh surfaces through the notice channel instead
+    // of the page-level error state — it must never unmount the tree either.
+    expect(source).toContain('message: t(locale, "common.loadFailed")');
+    // Success closes/resets deliberately: the onDone closure runs against the
+    // mounted instance.
+    expect(source).toContain("onDone();");
+    expect(source).toContain("setSelectedId(undefined)");
+    expect(source).toContain("setOpen(false)");
+    expect(source).toContain('setKey("")');
   });
 
   test("plan 38 add-flow copy is dictionary-backed in both locales", () => {
