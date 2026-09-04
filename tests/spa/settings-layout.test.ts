@@ -1,5 +1,5 @@
 /**
- * Plan 31 T4+T6: settings dropdowns, two-column layout, dictionary copy.
+ * Plan 31 T4+T6 + plan 35 T4: settings ops zone, unified providers, chains UI.
  * No DOM runner — same contract as plan 30 home tests.
  */
 import { describe, expect, test } from "bun:test";
@@ -9,42 +9,51 @@ import { t } from "../../src/i18n";
 import { composeModelOptions } from "../../src/dashboard/model-membership";
 import { parseModels, splitModelChain } from "../../src/spa/pages/data";
 
-describe("settings layout (plan 31 T6)", () => {
-  test("SettingsPage is a two-column layout with health/deliveries in the sidebar", () => {
+describe("settings layout (plan 35 T4)", () => {
+  test("SettingsPage folds ops + health into an authorized ops zone; providers and chains are shadcn", () => {
     const source = readFileSync(join(import.meta.dir, "../../src/spa/pages/SettingsPage.tsx"), "utf8");
-    expect(source).toContain("settingsLayout");
-    expect(source).toContain("settingsMain");
-    expect(source).toContain("settingsSidebar");
-    expect(source).toContain('aria-label={t(locale, "settings.installHealth")}');
-    expect(source).toContain("/pause");
-    expect(source).toContain("/resume");
+    expect(source).toContain("settings.ops");
+    expect(source).toContain("can_manage");
+    expect(source).toContain("${action.kind}");
+    expect(source).toContain('kind: "pause"');
+    expect(source).toContain('kind: "disable"');
+    expect(source).toContain('kind: "delete"');
     expect(source).toContain("settings.recentDeliveries");
-    expect(source).toContain("apps.status.active");
-    expect(source).toContain("apps.health.rejected24h");
+    expect(source).toContain("settings.providers");
+    expect(source).toContain("settings.customEntry");
+    expect(source).toContain("add-template-provider");
+    expect(source).toContain("add-chain");
+    expect(source).toContain("settings.useDefaultChain");
+    expect(source).toContain("settings.namedChains");
+    expect(source).not.toContain("settingsLayout");
+    expect(source).not.toContain("settingsSidebar");
   });
 
-  test("desktop ≥900px is 2fr + 1fr; mobile stacks (DESIGN.md lg)", () => {
-    const css = readFileSync(join(import.meta.dir, "../../src/spa/pages.module.css"), "utf8");
-    expect(css).toContain(".settingsLayout");
-    expect(css).toContain("flex-direction: column");
-    expect(css).toContain("@media (min-width: 900px)");
-    expect(css).toContain("grid-template-columns: 2fr 1fr");
-    expect(css).not.toMatch(/\.home\s*\{/);
+  test("destructive removes (key / custom provider) route through confirm dialogs like pause/delete", () => {
+    const source = readFileSync(join(import.meta.dir, "../../src/spa/pages/SettingsPage.tsx"), "utf8");
+    expect(source).toContain('kind: "remove-key"');
+    expect(source).toContain('kind: "remove-custom"');
+    expect(source).toContain("settings.confirmRemoveKeyTitle");
+    expect(source).toContain("settings.confirmRemoveCustomTitle");
+    expect(source).toContain("onPending={onPending}");
+    // No fire-and-forget destructive POSTs outside the dialog flow.
+    expect(source).not.toContain('onClick={() => void onSettings({ op: "remove-custom-provider"');
+    expect(t("en", "settings.confirmRemoveKeyTitle", { provider: "ark" })).toContain("ark");
+    expect(t("zh_CN", "settings.confirmRemoveCustomTitle", { provider: "acme" })).toContain("acme");
   });
 });
 
-describe("settings dropdowns (plan 31 T4)", () => {
+describe("settings dropdowns (plan 31 T4 / plan 35 T4)", () => {
   test("chain and role editors are dropdowns, not free-text; add-key posts the JSON verify route", () => {
     const source = readFileSync(join(import.meta.dir, "../../src/spa/pages/SettingsPage.tsx"), "utf8");
     expect(source).toContain("/keys/verify");
     expect(source).toContain("settings.addToChain");
-    expect(source).toContain("settings.useAppChain");
+    expect(source).toContain("settings.useDefaultChain");
     expect(source).toContain("settings.pickModel");
-    expect(source).toContain("<optgroup");
+    expect(source).toContain("SelectGroup");
     expect(source).not.toContain('type="text" name="model_chain"');
     expect(source).not.toContain("<input type=\"text\" name={`role_${role}`}");
-    expect(source).toContain("<select name={`role_${role}`}");
-    expect(source).toContain("/keys/verify");
+    expect(source).not.toContain("<select name={`role_${role}`}");
   });
 
   test("composeModelOptions prefixes the cache provider (including ark-plan) and custom ids", () => {
@@ -71,7 +80,7 @@ describe("settings dropdowns (plan 31 T4)", () => {
   });
 });
 
-describe("settings copy is dictionary-backed (plan 31 T4+T6)", () => {
+describe("settings copy is dictionary-backed (plan 31 T4+T6 / plan 35 T4)", () => {
   test("new keys exist in both locales", () => {
     expect(t("en", "settings.verify.invalid_key")).toContain("rejected");
     expect(t("zh_CN", "settings.verify.invalid_key")).toContain("拒绝");
@@ -81,25 +90,22 @@ describe("settings copy is dictionary-backed (plan 31 T4+T6)", () => {
     expect(t("zh_CN", "settings.verify.unexpected")).toContain("意外");
     expect(t("en", "settings.verify.unsupported_provider")).toContain("can't be verified");
     expect(t("zh_CN", "settings.verify.unsupported_provider")).toContain("无法");
-    expect(t("en", "settings.unsupportedProvidersHint")).toContain("Azure");
-    expect(t("zh_CN", "settings.unsupportedProvidersHint")).toContain("Azure");
+    expect(t("en", "settings.consoleOnly")).toContain("can't be verified");
+    expect(t("zh_CN", "settings.consoleOnly")).toContain("无法");
+    expect(t("en", "settings.ops")).toBe("Operations");
+    expect(t("zh_CN", "settings.ops")).toBe("运维");
+    expect(t("en", "settings.customEntry")).toBe("Custom");
+    expect(t("zh_CN", "settings.customEntry")).toBe("自定义");
+    expect(t("en", "settings.useDefaultChain")).toBe("Default chain");
+    expect(t("zh_CN", "settings.useDefaultChain")).toBe("Default 链");
     expect(t("en", "manifest.error.dbUnbound")).toContain("storage");
     expect(t("zh_CN", "manifest.error.dbUnbound")).toContain("存储");
-    expect(t("en", "settings.useAppChain")).toBe("Use App model chain");
-    expect(t("zh_CN", "settings.useAppChain")).toBe("使用 App 模型链");
-    expect(t("en", "settings.noAutoDiscovery")).toContain("does not list models");
-    expect(t("zh_CN", "settings.noVerifiedModels")).toContain("验证");
-    expect(t("en", "settings.modelChainCopy")).not.toMatch(/comma-separated/i);
-    expect(t("en", "settings.roleModelsCopy")).not.toMatch(/comma-separated/i);
-    expect(t("en", "settings.modelChainCopy")).toContain("Select models");
-    expect(t("zh_CN", "settings.modelChainCopy")).toContain("已验证");
     expect(t("en", "settings.membership.not_in_verified_models", { selector: "anthropic/nope" })).toContain(
       "anthropic/nope",
     );
     expect(t("zh_CN", "settings.membership.not_in_verified_models", { selector: "anthropic/nope" })).toContain(
       "anthropic/nope",
     );
-    expect(t("zh_CN", "settings.membership.not_in_verified_models", { selector: "x" })).toContain("已验证");
   });
 
   test("SPA maps membership 400 code via t(), not English body prose", () => {
@@ -113,7 +119,7 @@ describe("settings copy is dictionary-backed (plan 31 T4+T6)", () => {
   test("SPA maps unsupported_provider via t() and shows the console-only hint", () => {
     const source = readFileSync(join(import.meta.dir, "../../src/spa/pages/SettingsPage.tsx"), "utf8");
     expect(source).toContain("settings.verify.unsupported_provider");
-    expect(source).toContain("settings.unsupportedProvidersHint");
+    expect(source).toContain("settings.consoleOnly");
     expect(source).toContain("unsupported_provider");
   });
 });

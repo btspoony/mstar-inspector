@@ -1,7 +1,7 @@
 ---
 module: dashboard / SPA-shell-on-Worker dispatch + i18n + provider-first settings
 date: 2026-09-02
-last_updated: 2026-09-02
+last_updated: 2026-09-04
 problem_type: best_practice
 category: best-practices
 severity: medium
@@ -21,7 +21,7 @@ applies_when:
 - **Dispatch order** (`src/worker/index.ts`): `trailingSlashRedirect` (301, GET/HEAD only, `/dashboard*`) → `spaDispatch` → legacy `dashboardApp`. `SPA_PAGES` is an ENUMERATED set (home /dashboard, /insights, /members, /login, /apps/:slug/settings); anything not enumerated (POST family, /api/*, /webhook/*, /manifest/*) falls to legacy. NEVER use assets `not_found_handling` SPA fallback (it swallows legacy 404s).
 - **Shell is membership-gated** (plan-12 contract): `serveSpaIndex` re-reads membership (same users lookup as the guard; fail-closed 500 on DB-unbound) → removed member gets removedPage 403 any-Accept, valid member gets shell. Test envs MUST bind ASSETS or they silently test the fall-through, not production.
 - **POST duality**: SPA fetch posts carry `X-Mstar-Spa-Post: 1`; handlers branch on it — fetch → JSON/text, HTML-nav → 302 back to the SPA page (Referer sanitized via `new URL(referer, origin)` + origin equality + pathname `/`-not-`//`; never echo raw Referer — `/\evil` bypass).
-- **i18n**: `src/i18n/` — en.ts is the `Dictionary` source (zh-CN typed = keyof), `resolveLocale` = cookie `mstar_locale` → Accept-Language `zh*` (first-tag, no q-values, documented) → en. Server (SSR manifest pages + boot) and SPA both call it; no middleware.
+- **Auth redirect = server 302 primary (iter011 plan 33)**: `readShellAuth` no-session branch 302s any enumerated page route to `/dashboard/login` (no null-boot flash shell). Exemptions are explicit and minimal: `/dashboard/login` (no self-loop) + `/index.html` static; guard-side sets (`GUARD_EXEMPT_PATHS`, logout/locale, db-unbound manifest pair, `/assets/*`) unchanged. Removed-member duality at both landing points: session cookie expired per request; HTML nav → 302 login, API/fetch → 403 removedPage (fetch never silently follows the 302). SPA router fallback guard in `main.tsx` is the second line. OAuth bad-state, `__Host-` cookie semantics, and post-login landing `/dashboard` are unchanged.
 - **Boot injection**: Worker replaces `<!--SPA_BOOT-->` with `window.__BOOT__ = {locale, login, name, role}` (`<` escaped `\u003c`, no secrets); `Cache-Control: private, no-store` on boot-injected HTML and settings/models JSON routes.
 - **REVIEW_ENABLED (inverted, plan 31)**: emergency brake ONLY — `!== "false"` passes; per-App `github_apps.review_enabled` is the primary switch (paused = 2xx ignore + `review_paused`; brake = `review_disabled_kill_switch`). Never surface in dashboard UI. Pre-deploy checklist: SELECT slug, review_enabled (cutover is live-immediate).
 - **Provider-first settings** (per-App BYOK): add-key → server-side `verifyProviderKey` (list-models per provider; auth-probe fallback; 10s timeout; key never logged) → fail 400 + zero writes; success stores key (secretbox) + model cache (`app_provider_models`, PK(app_id, provider), ark→ark-plan alias via single `modelCacheProviderKey`). Chain/role selectors = dropdowns from verified cache only; server validates membership (`not_in_verified_models` code → i18n). Removing a key deletes its cache row in the same batch. Unsupported providers (azure-openai, ai-gateway — account-scoped hosts) are hidden + `unsupported_provider` reason.

@@ -16,7 +16,35 @@ export type InsightsSummary = {
   verdict_distribution: Array<{ verdict: string; count: number }>;
   weekly_trend: Array<{ week_start: string; reviews: number; findings: number }>;
   recurring_top: Array<{ fingerprint: string; title_sample: string; count: number; repos: string[] }>;
+  /**
+   * Window-scoped distinct owner/repo values (plan 36 T2). Independent of
+   * `repo`. Absent on payloads that did not request `include=repos` (plan
+   * 36 QC F-001) — consumers default to [].
+   */
+  repos?: string[];
 };
+
+/** Radix Select forbids empty-string item values — "all" maps to no repo filter. */
+export const INSIGHTS_REPO_ALL = "all";
+
+export function insightsRepoSelectValue(repo: string): string {
+  return repo === "" ? INSIGHTS_REPO_ALL : repo;
+}
+
+export function insightsRepoFromSelect(value: string): string {
+  return value === INSIGHTS_REPO_ALL ? "" : value;
+}
+
+/**
+ * Repo Select items (excluding 全部). Window-set repos plus the current
+ * filter when it is a legal deep-link value outside the set — applied, not
+ * swallowed. Sorted, de-duped.
+ */
+export function insightsRepoOptions(repos: readonly string[], current: string): string[] {
+  const set = new Set(repos.filter((repo) => repo.length > 0));
+  if (current !== "") set.add(current);
+  return [...set].sort();
+}
 
 export type MemberRow = {
   id: string;
@@ -40,17 +68,34 @@ export type AppsPayload = {
   }>;
 };
 
-export type SettingsPayload = {
-  app: {
-    slug: string;
-    status: string;
-    review_enabled: boolean;
-    last_webhook_at: string | null;
-  };
-  keys: Array<{ provider: string; last4: string; updated_at: string | null }>;
-  model_chain: string | null;
-  model_roles: Record<string, string>;
-  custom_providers: Array<{ provider_id: string; base_url: string; api: string; model_ids: string[] }>;
+export type CatalogProvider = {
+  id: string;
+  label: string;
+  tier: "builtin" | "template";
+  base_url: string | null;
+  api: string | null;
+  models: string[];
+  verifiable: boolean;
+};
+
+export type ModelChainEntry = {
+  name: string;
+  chain: string;
+  is_default: boolean;
+  created_at: string;
+  updated_at: string;
+};
+
+type SettingsAppMeta = {
+  slug: string;
+  github_app_id: number;
+  status: string;
+  review_enabled: boolean;
+  created_by: string;
+  last_webhook_at: string | null;
+};
+
+type SettingsHealth = {
   installations: Array<{ installation_id: number; account_login: string | null; seen_at: string }>;
   deliveries: Array<{
     event_name: string | null;
@@ -58,14 +103,30 @@ export type SettingsPayload = {
     status_code: number | null;
     created_at: string;
   }>;
-  provider_ids: readonly string[];
-  model_role_ids: readonly string[];
-  custom_provider_api_ids: readonly string[];
   delivery_summary?: {
     latest: { event_name: string | null; outcome: string; status_code: number | null; created_at: string } | null;
     rejected24h: number;
   };
 };
+
+/** Plan 35 T4 (spec §2): every member gets base+health only. */
+export type SettingsReadOnlyPayload = { can_manage: false; app: SettingsAppMeta } & SettingsHealth;
+
+/** Creator-or-admin adds the settings zones: keys, chains, providers. */
+export type SettingsManagePayload = {
+  can_manage: true;
+  app: SettingsAppMeta;
+  keys: Array<{ provider: string; last4: string; updated_at: string | null }>;
+  model_chain: string | null;
+  model_roles: Record<string, string>;
+  model_chains: ModelChainEntry[];
+  custom_providers: Array<{ provider_id: string; base_url: string; api: string; model_ids: string[] }>;
+  providers: CatalogProvider[];
+  model_role_ids: readonly string[];
+  custom_provider_api_ids: readonly string[];
+} & SettingsHealth;
+
+export type SettingsPayload = SettingsReadOnlyPayload | SettingsManagePayload;
 
 export type ModelOptionSource = "verified" | "probe" | "custom";
 
@@ -94,10 +155,13 @@ export function parseInsightsSearch(search: string): InsightsSearch {
   return { window: params.get("window") ?? "30", repo: params.get("repo") ?? "" };
 }
 
-export function insightsSummaryUrl(search: InsightsSearch): string {
+export function insightsSummaryUrl(search: InsightsSearch, includeRepos = false): string {
   const params = new URLSearchParams();
   if (search.window !== "" && search.window !== "30") params.set("window", search.window);
   if (search.repo !== "") params.set("repo", search.repo);
+  // Opt-in repos aggregation (plan 36 QC F-001): only the records page
+  // requests it — the home surface must not pay the DISTINCT scan+sort.
+  if (includeRepos) params.set("include", "repos");
   const query = params.toString();
   return query === "" ? "/dashboard/api/insights/summary" : `/dashboard/api/insights/summary?${query}`;
 }
@@ -116,6 +180,10 @@ export function parseInsights(data: unknown): InsightsSummary | null {
   if (!Array.isArray(data.verdict_distribution) || !Array.isArray(data.weekly_trend) || !Array.isArray(data.recurring_top)) {
     return null;
   }
+  // `repos` is opt-in (plan 36 QC F-001): absent on payloads that did not
+  // request include=repos (and on rolled-back Workers) — tolerate missing,
+  // reject malformed.
+  if (data.repos !== undefined && !isStringArray(data.repos)) return null;
   return data as InsightsSummary;
 }
 
@@ -147,12 +215,17 @@ export function parseApps(data: unknown): AppsPayload | null {
 }
 
 export function parseSettings(data: unknown): SettingsPayload | null {
-  if (!isRecord(data) || !isRecord(data.app) || !Array.isArray(data.keys)) return null;
+  if (!isRecord(data) || !isRecord(data.app)) return null;
+  if (typeof data.can_manage !== "boolean") return null;
   if (typeof data.app.slug !== "string" || typeof data.app.status !== "string") return null;
   if (typeof data.app.review_enabled !== "boolean") return null;
-  if (!Array.isArray(data.provider_ids) || !Array.isArray(data.model_role_ids)) return null;
-  if (!isStringArray(data.provider_ids) || !isStringArray(data.model_role_ids)) return null;
+  if (typeof data.app.created_by !== "string" || typeof data.app.github_app_id !== "number") return null;
+  if (!Array.isArray(data.installations) || !Array.isArray(data.deliveries)) return null;
+  if (!data.can_manage) return data as SettingsPayload;
+  if (!Array.isArray(data.keys)) return null;
+  if (!Array.isArray(data.model_role_ids) || !isStringArray(data.model_role_ids)) return null;
   if (!Array.isArray(data.custom_provider_api_ids) || !isStringArray(data.custom_provider_api_ids)) return null;
+  if (!Array.isArray(data.providers) || !Array.isArray(data.model_chains)) return null;
   return data as SettingsPayload;
 }
 

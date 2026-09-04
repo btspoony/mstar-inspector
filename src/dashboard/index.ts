@@ -58,8 +58,10 @@ import {
 import { createAppsStore, type DeliverySummary, type GithubAppRow } from "./apps-store";
 import { SecretboxKeyError, createSecretbox } from "./secretbox";
 import {
+  CLOUDFLARE_ACCOUNT_ID_PATTERN,
   CUSTOM_PROVIDER_API_IDS,
   CUSTOM_PROVIDER_ID_PATTERN,
+  DEFAULT_CHAIN_NAME,
   InvalidCustomProviderError,
   IN_IMAGE_BASE_PROVIDER_IDS,
   isValidCustomProviderBaseUrl,
@@ -67,24 +69,28 @@ import {
   MAX_CUSTOM_PROVIDER_COUNT,
   MAX_CUSTOM_PROVIDER_MODEL_ID_LENGTH,
   MAX_CUSTOM_PROVIDER_MODEL_IDS,
+  MAX_MODEL_CHAIN_NAME_LENGTH,
   MAX_MODEL_SELECTOR_LENGTH,
   MAX_PROVIDER_KEY_LENGTH,
+  MODEL_CHAIN_NAME_PATTERN,
   MODEL_ROLE_IDS,
   PROVIDER_IDS,
+  PROVIDER_META,
   createAppConfigStore,
   parseModelChain,
   type AppConfigBatchFace,
   type AppConfigStore,
 } from "./app-config-store";
 import { composeModelOptions, findFailingSelector } from "./model-membership";
-import { addKeyProviderIds, verifyProviderKey, type VerifyFailureReason } from "./provider-verify";
+import { PROVIDER_VERIFY_ENDPOINTS, verifyProviderKey, type VerifyFailureReason } from "./provider-verify";
 import {
   bootstrapDashboardAccess,
-  countAdmins,
   createUser,
   deleteUserUnlessLastAdmin,
+  DuplicateLoginError,
   getUserByLogin,
   listUsers,
+  updateUserRoleUnlessLastAdmin,
   type DashboardD1,
   type DashboardUserRow,
 } from "./users";
@@ -105,8 +111,9 @@ import { SPA_POST_FORM_HEADER, SPA_POST_FORM_VALUE } from "../spa/post-form-head
 
 export const dashboardApp = new Hono<{ Bindings: Env }>();
 
-/** SPA shell entry for members/apps list mutations (plan 29 QC W-2). */
+/** SPA shell entry for members/apps list mutations (plan 29 QC W-2, plan 33 apps route). */
 const DASHBOARD_SHELL_REDIRECT = "/dashboard";
+const APPS_LIST_REDIRECT = "/dashboard/apps";
 
 function isSpaFetchPost(c: Context<{ Bindings: Env }>): boolean {
   return c.req.header(SPA_POST_FORM_HEADER) === SPA_POST_FORM_VALUE;
@@ -121,7 +128,7 @@ function pinnedPostMutationResponse(
   c: Context<{ Bindings: Env }>,
   redirectTo: string,
   message: string,
-  status: 200 | 400 | 404 | 500 = 200,
+  status: 200 | 400 | 404 | 409 | 500 = 200,
 ): Response {
   if (wantsHtmlFormNavigation(c)) {
     return c.redirect(redirectTo, 302);
@@ -258,6 +265,13 @@ dashboardApp.use("*", async (c, next) => {
         login: session.login,
       }),
     );
+    // Plan 33 T3: actively invalidate the removed member's session. HTML
+    // navigation → expire + 302 login; API/fetch → expire + 403 (a fetch
+    // must not silently follow the 302 into the HTML login page).
+    c.header("Set-Cookie", expireCookie(SESSION_COOKIE));
+    if (wantsHtmlFormNavigation(c)) {
+      return c.redirect("/dashboard/login", 302);
+    }
     return c.html(removedPage(session.login, requestLocale(c)), 403);
   }
   return next();
@@ -790,6 +804,13 @@ dashboardApp.post("/members/invite", async (c) => {
   if (!gate.ok) return gate.response;
   const form = await c.req.parseBody();
   const login = typeof form.login === "string" ? form.login.trim() : "";
+  // Plan 34: the invite accepts an explicit role (default member — the
+  // pre-plan-34 behavior). Value domain = the 0003 CHECK ('admin'|'member');
+  // anything else is rejected here before any read or write.
+  const role = typeof form.role === "string" ? form.role : "member";
+  if (role !== "admin" && role !== "member") {
+    return pinnedPostMutationResponse(c, DASHBOARD_SHELL_REDIRECT, "Role must be admin or member.", 400);
+  }
   if (login.length === 0) {
     return pinnedPostMutationResponse(c, DASHBOARD_SHELL_REDIRECT, "Enter a GitHub login to invite.", 400);
   }
@@ -799,12 +820,24 @@ dashboardApp.post("/members/invite", async (c) => {
     return pinnedPostMutationResponse(c, DASHBOARD_SHELL_REDIRECT, `${login} is not a valid GitHub login — use 1–39 letters, digits, or hyphens.`, 400);
   }
   // T1 review pin (Minor 2): resolve the login case-insensitively BEFORE any
-  // createUser call — the DDL UNIQUE is BINARY-collated, so ON CONFLICT alone
-  // misses case variants ("OctoCat" vs "octocat") and would mint a second row.
+  // createUser call — the sequential duplicate path ("OctoCat" exists →
+  // invite "octocat") is an idempotent no-op here. The CONCURRENT window is
+  // closed by the migration 0016 NOCASE unique index: a case-variant insert
+  // that slips past this pre-read hits the index and createUser throws
+  // DuplicateLoginError → 409 duplicate-invite semantics (W-1).
   if (await getUserByLogin(gate.db, login)) {
     return pinnedPostMutationResponse(c, DASHBOARD_SHELL_REDIRECT, "ok"); // already a member — idempotent no-op
   }
-  await createUser(gate.db, { login, role: "member", invitedBy: gate.admin.github_login });
+  try {
+    await createUser(gate.db, { login, role, invitedBy: gate.admin.github_login });
+  } catch (err) {
+    if (err instanceof DuplicateLoginError) {
+      // Lost the concurrent case-variant race: the row exists now (the
+      // winner's invite created it) — 409, zero partial state.
+      return pinnedPostMutationResponse(c, DASHBOARD_SHELL_REDIRECT, "Already a member.", 409);
+    }
+    throw err;
+  }
   return pinnedPostMutationResponse(c, DASHBOARD_SHELL_REDIRECT, "ok");
 });
 
@@ -822,19 +855,66 @@ dashboardApp.post("/members/remove", async (c) => {
   if (target.github_login.toLowerCase() === gate.admin.github_login.toLowerCase()) {
     return pinnedPostMutationResponse(c, DASHBOARD_SHELL_REDIRECT, "You cannot remove yourself.", 400);
   }
-  // Refuse removing an admin while they are the last one (removal = row
-  // delete, so this is the deployment's only admin-lockout guard). This
-  // pre-check only shapes the message; the ENFORCEMENT is the single
-  // conditional DELETE below, which closes the read-check-delete TOCTOU
-  // (qc1): two concurrent removes of the last two admins cannot both land.
-  if (target.role === "admin" && (await countAdmins(gate.db)) === 1) {
-    return pinnedPostMutationResponse(c, DASHBOARD_SHELL_REDIRECT, "The last admin cannot be removed.", 400);
-  }
+  // The last-admin ENFORCEMENT is the single conditional DELETE below,
+  // which closes the read-check-delete TOCTOU (qc1): two concurrent
+  // removes of the last two admins cannot both land. (A route-level
+  // "last admin" pre-check would be unreachable — when countAdmins === 1
+  // the actor IS the sole admin and the self-removal refusal above fires
+  // first; qc3 S-003.)
   if (!(await deleteUserUnlessLastAdmin(gate.db, target.id))) {
     // Lost a race (the row vanished or just became the last admin between
     // the reads above and this delete): 400 with a retry message —
     // zero partial state either way.
     return pinnedPostMutationResponse(c, DASHBOARD_SHELL_REDIRECT, `Could not remove ${target.github_login} — the member list just changed, try again.`, 400);
+  }
+  return pinnedPostMutationResponse(c, DASHBOARD_SHELL_REDIRECT, "ok");
+});
+
+// Plan 34 T1: role change — same pinned-POST family as invite/remove
+// (spec §3: members family is pinned paths, NOT the settings op
+// discriminator). Same requireAdmin gate + form parse +
+// pinnedPostMutationResponse shape. The last-admin and self-demotion
+// refusals mirror the remove route; the ENFORCEMENT of the last-admin
+// invariant is the single conditional UPDATE in the store (closes the
+// read-check-update TOCTOU — two concurrent demotions of the last two
+// admins cannot both land).
+dashboardApp.post("/members/role", async (c) => {
+  const gate = await requireAdmin(c);
+  if (!gate.ok) return gate.response;
+  const form = await c.req.parseBody();
+  const userId = typeof form.userId === "string" ? form.userId : "";
+  const role = typeof form.role === "string" ? form.role : "";
+  // Value domain = the 0003 CHECK ('admin'|'member'); reject anything else
+  // before any read or write.
+  if (role !== "admin" && role !== "member") {
+    return pinnedPostMutationResponse(c, DASHBOARD_SHELL_REDIRECT, "Role must be admin or member.", 400);
+  }
+  const members = await listUsers(gate.db);
+  const target = members.find((m) => m.id === userId);
+  if (!target) {
+    return pinnedPostMutationResponse(c, DASHBOARD_SHELL_REDIRECT, "Unknown member — nothing was changed, try again.", 400);
+  }
+  // Refuse self role change (mirror of the self-removal ban): an admin
+  // must be demoted by another admin, and cannot promote themselves.
+  if (target.github_login.toLowerCase() === gate.admin.github_login.toLowerCase()) {
+    return pinnedPostMutationResponse(c, DASHBOARD_SHELL_REDIRECT, "You cannot change your own role.", 400);
+  }
+  // Same role → idempotent no-op (the store's conditional UPDATE would
+  // also report changes === 0, but the explicit no-op keeps the message
+  // honest for the common "already that role" case).
+  if (target.role === role) {
+    return pinnedPostMutationResponse(c, DASHBOARD_SHELL_REDIRECT, "ok");
+  }
+  // The last-admin ENFORCEMENT is the single conditional UPDATE below,
+  // which closes the read-check-update TOCTOU (deleteUserUnlessLastAdmin
+  // precedent, qc1). (A route-level "last admin" pre-check would be
+  // unreachable — when countAdmins === 1 the actor IS the sole admin and
+  // the self-change refusal above fires first; qc3 S-003.)
+  if (!(await updateUserRoleUnlessLastAdmin(gate.db, target.id, role))) {
+    // Lost a race (the row vanished or just became the last admin between
+    // the reads above and this update): 400 with a retry message —
+    // zero partial state either way.
+    return pinnedPostMutationResponse(c, DASHBOARD_SHELL_REDIRECT, `Could not change ${target.github_login}'s role — the member list just changed, try again.`, 400);
   }
   return pinnedPostMutationResponse(c, DASHBOARD_SHELL_REDIRECT, "ok");
 });
@@ -970,13 +1050,15 @@ dashboardApp.post("/apps/:slug/delete", (c) => appStatusAction(c, "delete"));
  * caller (`<form method="post">` on the Review card); Apps-list uses fetch
  * `postForm`. Origin is a sanitized Referer pathname — never echoed as
  * Location. Settings-origin → `/dashboard/apps/:slug/settings` (DB slug);
- * anything else (apps list, missing/off-origin Referer) → `/dashboard`.
+ * apps-list origin → `/dashboard/apps`; anything else → `/dashboard`.
  */
 function reviewActionRedirect(c: Context<{ Bindings: Env }>, slug: string): string {
   const settingsPath = `/dashboard/apps/${slug}/settings`;
   const origin = new URL(c.req.raw.url).origin;
   const refererPath = new URL(safeLocaleRedirect(c.req.header("Referer"), origin), origin).pathname;
-  return refererPath === settingsPath ? settingsPath : DASHBOARD_SHELL_REDIRECT;
+  if (refererPath === settingsPath) return settingsPath;
+  if (refererPath === APPS_LIST_REDIRECT) return APPS_LIST_REDIRECT;
+  return DASHBOARD_SHELL_REDIRECT;
 }
 
 /**
@@ -1030,31 +1112,41 @@ dashboardApp.post("/apps/:slug/resume", (c) => appReviewAction(c, "resume"));
 // src/dashboard/views.ts is retired.
 
 type AppSettingsGate =
-  | { ok: true; session: SessionPayload; db: DashboardDb; app: GithubAppRow }
+  | { ok: true; session: SessionPayload; db: DashboardDb; app: GithubAppRow; user: DashboardUserRow }
   | { ok: false; response: Response };
 
-/** Route-local owner-or-admin gate shared by the settings route family. */
-async function requireAppSettings(c: Context<{ Bindings: Env }>): Promise<AppSettingsGate> {
+/**
+ * Plan 35 T4 (spec §2 read face): any member may load App detail basic盘 —
+ * app meta + health (installations / deliveries). The full settings payload
+ * (masked keys, chains, providers) stays creator-or-admin via the GET
+ * handler's canManageApp branch below; writes go through requireAppSettings.
+ */
+async function requireAppVisible(c: Context<{ Bindings: Env }>): Promise<AppSettingsGate> {
   const member = await requireMember(c);
   if (!member.ok) return member;
   const app = await createAppsStore(member.db).getAppBySlug(c.req.param("slug") ?? "");
   if (!app || app.deleted_at !== null) return { ok: false, response: pinnedPostMutationResponse(c, DASHBOARD_SHELL_REDIRECT, "unknown app", 404) };
-  if (!canManageApp(member.user, app)) {
-    return { ok: false, response: c.html(forbiddenPage(member.session.login, requestLocale(c)), 403) };
+  return { ok: true, session: member.session, db: member.db, app, user: member.user };
+}
+
+/**
+ * Route-local owner-or-admin gate shared by the settings WRITE family.
+ * Encryption-dependent because masking needs plaintext — a missing master key
+ * still fails closed with 5xx (spec § Crypto envelope).
+ */
+async function requireAppSettings(c: Context<{ Bindings: Env }>): Promise<AppSettingsGate> {
+  const gate = await requireAppVisible(c);
+  if (!gate.ok) return gate;
+  if (!canManageApp(gate.user, gate.app)) {
+    return { ok: false, response: c.html(forbiddenPage(gate.session.login, requestLocale(c)), 403) };
   }
-  // The settings family is encryption-dependent end to end (masking needs
-  // plaintext, adding a key encrypts): a missing master key fails EVERY
-  // settings route closed with 5xx — the plan Global Constraint — rather
-  // than serving a page that could not round-trip key material. A key that
-  // is set but malformed surfaces the same way through the decrypt/encrypt
-  // failure paths below.
   if (!c.env.DASHBOARD_ENCRYPTION_KEY) {
     return {
       ok: false,
       response: c.text("the app settings need a configured DASHBOARD_ENCRYPTION_KEY", 500),
     };
   }
-  return { ok: true, session: member.session, db: member.db, app };
+  return gate;
 }
 
 /** Same structured-log convention as logOAuthFailure / logManifestFailure. */
@@ -1141,32 +1233,28 @@ function settingsMembershipFailResponse(
   return c.json({ code: MEMBERSHIP_FAIL_CODE, message, selector }, 400);
 }
 
-/** SPA JSON face — same requireAppSettings gate and the settings reads the retired HTML GET used. */
+/** SPA JSON face — plan 35 T4 (spec §2 read face): any member gets the
+ * base+health payload (app meta, installations, deliveries); the full
+ * settings payload (masked keys, chains, providers) is creator-or-admin only.
+ * `can_manage` tells the SPA which shape it got. Writes stay behind
+ * requireAppSettings. */
 dashboardApp.get("/api/apps/:slug/settings", async (c) => {
-  const gate = await requireAppSettings(c);
+  const gate = await requireAppVisible(c);
   if (!gate.ok) return gate.response;
-  const store = createAppConfigStore(gate.db, c.env.DASHBOARD_ENCRYPTION_KEY);
   const apps = createAppsStore(gate.db);
   try {
-    const maskedKeys = await store.listProviderKeys(gate.app.id);
-    const modelChain = await store.getModelChain(gate.app.id);
-    const modelRoles = await store.getAppModelRoles(gate.app.id);
-    const customProviders = await store.listCustomProviders(gate.app.id);
     const installations = await apps.listInstallations(gate.app.id);
     const deliveries = await apps.listRecentDeliveries(gate.app.id, 5);
     const deliverySummary = await apps.deliverySummary(gate.app.id);
-    c.header("Cache-Control", "private, no-store");
-    return c.json({
+    const base = {
       app: {
         slug: gate.app.slug,
+        github_app_id: gate.app.github_app_id,
         status: gate.app.status,
         review_enabled: gate.app.review_enabled !== 0,
+        created_by: gate.app.created_by,
         last_webhook_at: gate.app.last_webhook_at ?? null,
       },
-      keys: maskedKeys,
-      model_chain: modelChain,
-      model_roles: modelRoles,
-      custom_providers: customProviders,
       installations,
       deliveries: deliveries.map((d) => ({
         event_name: d.event_name,
@@ -1185,7 +1273,63 @@ dashboardApp.get("/api/apps/:slug/settings", async (c) => {
           : null,
         rejected24h: deliverySummary.rejected24h,
       },
-      provider_ids: addKeyProviderIds(PROVIDER_IDS),
+    };
+    c.header("Cache-Control", "private, no-store");
+    if (!canManageApp(gate.user, gate.app)) {
+      return c.json({ can_manage: false, ...base });
+    }
+    if (!c.env.DASHBOARD_ENCRYPTION_KEY) {
+      return c.text("the app settings need a configured DASHBOARD_ENCRYPTION_KEY", 500);
+    }
+    const store = createAppConfigStore(gate.db, c.env.DASHBOARD_ENCRYPTION_KEY);
+    const maskedKeys = await store.listProviderKeys(gate.app.id);
+    const modelChain = await store.getModelChain(gate.app.id);
+    const modelChainSeats = await store.getModelChainSeats(gate.app.id);
+    const modelChains = await store.getModelChains(gate.app.id);
+    const customProviders = await store.listCustomProviders(gate.app.id);
+    return c.json({
+      can_manage: true,
+      ...base,
+      keys: maskedKeys,
+      model_chain: modelChain,
+      // Plan 35 T2 (spec §4.4): the role editor's data is now seat → chain
+      // reference (blank = default chain); the chains list carries every
+      // chain (default + named) for the chains management UI (T4).
+      model_roles: modelChainSeats,
+      model_chains: modelChains,
+      custom_providers: customProviders,
+      // Plan 35 T4 (spec §4.3): the unified provider section renders the WHOLE
+      // catalog from one face — builtin ids in PROVIDER_IDS order, then
+      // template-tier entries (workers-ai). `verifiable: false` marks the
+      // console-only providers (azure-openai / ai-gateway — the old
+      // addKeyProviderIds filter); the UI shows the hint instead of a key
+      // form. Templates verify via the custom probe, so always verifiable.
+      providers: [
+        ...PROVIDER_IDS.map((id) => {
+          const meta = PROVIDER_META[id];
+          if (!meta) throw new Error(`PROVIDER_META missing ${id}`);
+          return {
+            id,
+            label: meta.label,
+            tier: meta.tier,
+            base_url: meta.baseUrl,
+            api: meta.api,
+            models: [...meta.models],
+            verifiable: PROVIDER_VERIFY_ENDPOINTS[id]?.kind !== "unsupported",
+          };
+        }),
+        ...Object.entries(PROVIDER_META)
+          .filter(([id, meta]) => meta.tier === "template" && !PROVIDER_IDS.includes(id))
+          .map(([id, meta]) => ({
+            id,
+            label: meta.label,
+            tier: meta.tier,
+            base_url: meta.baseUrl,
+            api: meta.api,
+            models: [...meta.models],
+            verifiable: true,
+          })),
+      ],
       model_role_ids: MODEL_ROLE_IDS,
       custom_provider_api_ids: CUSTOM_PROVIDER_API_IDS,
     });
@@ -1239,27 +1383,34 @@ dashboardApp.post("/api/apps/:slug/keys/verify", async (c) => {
 });
 
 /**
- * The settings POST: three operations on the pinned action path, discriminated
+ * The settings POST: the operations on the pinned action path, discriminated
  * by the forms' hidden `op` field. add-key = provider allowlist (400 on any
  * other id — the allowlist is the plan's Global Constraint) + non-empty key
  * of at most MAX_PROVIDER_KEY_LENGTH characters (plan 15 input bounds — an
  * oversized key is a 400 with zero writes; the store guard beneath
  * is the backstop), then the store encrypts inside. save-chain = empty →
- * clear the chain (an unconfigured chain fails that App's reviews closed in
- * the consumer — plan 24 Task 6 / AL-24-5: no deployment-level chain exists
- * to fall back to), otherwise ≥1 comma-separated selector required and the
- * chain is stored VERBATIM (a `:thinking`-style suffix is legal omp syntax;
- * full selector validation stays omp-side). save-roles (plan 17 T3) = the
- * Role models editor's full map — one `role_<role>` field per audit
- * seat, blanks = cleared, saved through the validate-all-first setModelRoles
- * (zero partial writes on any validation failure). add-custom-provider /
- * remove-custom-provider (plan 23 T2) = the custom-provider declarations
- * section: every AL-23-1/AL-23-2 bound (id grammar, https-only baseUrl,
- * three-form api enum, model_ids 1..32 × ≤128, key required ≤4096) is a 400
- * with zero writes; the key is encrypted inside the store and
- * never echoed. Plan 29 T6: the settings page is SPA-owned, so every
- * response is plain text (settingsPostResponse) — 2xx = the SPA refetches
- * the JSON face, 4xx/5xx = the reason; the re-rendered HTML page is retired.
+ * clear the default chain (an unconfigured chain fails that App's reviews
+ * closed in the consumer — plan 24 Task 6 / AL-24-5: no deployment-level
+ * chain exists to fall back to), otherwise ≥1 comma-separated selector
+ * required and the chain is stored VERBATIM as the 'default' chain row
+ * (a `:thinking`-style suffix is legal omp syntax; full selector
+ * validation stays omp-side). save-roles (plan 17 T3, plan 35 T2 rework) =
+ * the Role models editor's full map — one `role_<role>` field per audit
+ * seat, blanks = the seat uses the default chain, content = a chain NAME
+ * reference, saved through the validate-all-first setModelChainSeats (zero
+ * partial writes on any validation failure). add-chain / remove-chain
+ * (plan 35 T2) = the named-chains management section: add-chain validates
+ * the name grammar (the reserved "default" is rejected) and the selector
+ * chain exactly like save-chain; remove-chain deletes the named chain and
+ * its seat references atomically (seats fall back to the default chain).
+ * add-custom-provider / remove-custom-provider (plan 23 T2) = the
+ * custom-provider declarations section: every AL-23-1/AL-23-2 bound (id
+ * grammar, https-only baseUrl, three-form api enum, model_ids 1..32 × ≤128,
+ * key required ≤4096) is a 400 with zero writes; the key is encrypted
+ * inside the store and never echoed. Plan 29 T6: the settings page is
+ * SPA-owned, so every response is plain text (settingsPostResponse) — 2xx
+ * = the SPA refetches the JSON face, 4xx/5xx = the reason; the re-rendered
+ * HTML page is retired.
  */
 dashboardApp.post("/apps/:slug/settings", async (c) => {
   const gate = await requireAppSettings(c);
@@ -1347,16 +1498,20 @@ dashboardApp.post("/apps/:slug/settings", async (c) => {
     return settingsPostResponse(c, gate.app.slug, `Saved the model chain for ${gate.app.slug}.`);
   }
   if (op === "save-roles") {
-    // Plan 17 T3: the Role models editor posts one `role_<role>` field per
-    // audit seat (the page always renders all four rows, blank inputs
-    // included), so the submitted map is FULL — blanks = cleared (the
-    // setModelRole 空 = 清除 convention), content = verbatim upsert, all
-    // through the validate-all-first setModelRoles bulk face. Any
-    // `role_`-prefixed field naming a role outside MODEL_ROLE_IDS is client
-    // tampering → 400, zero writes; a save with NO role fields at
-    // all is equally malformed (it could not come from this page, and an
-    // empty map must never masquerade as a successful save).
-    const selectors: Record<string, string> = {};
+    // Plan 17 T3 editor, plan 35 T2 rework (spec §4.4), F-002 (QC wave):
+    // the Role models editor posts one `role_<role>` field per audit seat
+    // (the page always renders all four rows, blank inputs included), so
+    // the submitted map is FULL — a save MISSING any seat key is a stale
+    // or tampered client (omitted seats would silently keep their old
+    // reference rows = drift) → 400 naming the absent roles, zero writes.
+    // Blanks = the seat uses the default chain (the reference row is
+    // cleared), content = a chain NAME reference, all through the
+    // validate-all-first setModelChainSeats bulk face. Any `role_`-prefixed
+    // field naming a role outside MODEL_ROLE_IDS is client tampering → 400,
+    // zero writes; a save with NO role fields at all is equally malformed
+    // (it could not come from this page, and an empty map must never
+    // masquerade as a successful save).
+    const refs: Record<string, string> = {};
     for (const [field, value] of Object.entries(form)) {
       if (!field.startsWith("role_")) continue;
       // AL-23-2: with parseBody({ all: true }) a duplicate role_* field
@@ -1372,41 +1527,110 @@ dashboardApp.post("/apps/:slug/settings", async (c) => {
       if (!MODEL_ROLE_IDS.includes(role)) {
         return settingsPostResponse(c, gate.app.slug, `${role} is not a known review role — nothing was saved.`, 400);
       }
-      selectors[role] = value;
+      // F-001 (QC): canonicalize BEFORE bind — the known-chain check below
+      // and the store's upsert must see the SAME trimmed name, or a crafted
+      // `"fast "` would pass validation and land a dangling reference row
+      // (the per-message consumer read then fails closed for every review
+      // of the App). The store re-canonicalizes as the backstop.
+      refs[role] = value.trim();
     }
-    if (Object.keys(selectors).length === 0) {
-      return settingsPostResponse(c, gate.app.slug, "No role selectors were submitted — resubmit the Role models form.", 400);
+    // F-002 (QC): enforce the FULL-map contract — every MODEL_ROLE_IDS
+    // seat key must be present. All missing keeps the original "no role
+    // fields" guard; a strict subset names exactly what is absent.
+    const missingSeats = MODEL_ROLE_IDS.filter((role) => !(role in refs));
+    if (missingSeats.length === MODEL_ROLE_IDS.length) {
+      return settingsPostResponse(c, gate.app.slug, "No role chain references were submitted — resubmit the Role models form.", 400);
     }
-    // Selector grammar, role-named for the 4-row form (the same parseModelChain
-    // mirror the save-chain op 400s against); blank stays legal = clear.
-    for (const [role, selector] of Object.entries(selectors)) {
-      if (selector.length > MAX_MODEL_SELECTOR_LENGTH) {
-        return settingsPostResponse(c, gate.app.slug, `The ${role} selector is too long (${selector.length} characters) — limited to ${MAX_MODEL_SELECTOR_LENGTH}. Nothing was saved.`,
-          400,
-        );
-      }
-      if (selector.trim() !== "" && parseModelChain(selector).length === 0) {
-        return settingsPostResponse(c, gate.app.slug, `The ${role} selector needs at least one comma-separated model selector — or leave it empty to use the App model chain. Nothing was saved.`,
-          400,
-        );
-      }
+    if (missingSeats.length > 0) {
+      return settingsPostResponse(
+        c,
+        gate.app.slug,
+        `The ${missingSeats.join(", ")} role field${missingSeats.length === 1 ? " is" : "s are"} missing — the Role models form always saves every seat (blank = default chain). Nothing was saved.`,
+        400,
+      );
     }
     try {
-      const verified = await store.getVerifiedModels(gate.app.id);
-      const custom = await store.listCustomProviders(gate.app.id);
-      for (const selector of Object.values(selectors)) {
-        if (selector.trim() === "") continue;
-        const failing = findFailingSelector(parseModelChain(selector), verified, custom);
-        if (failing) {
-          return settingsMembershipFailResponse(c, gate.app.slug, failing);
+      // Chain-name validation, role-named for the 4-row form: blank (or the
+      // reserved "default" name) = the seat uses the default chain; content
+      // must name a chain the App actually has (the store re-validates as
+      // the backstop). Zero writes on any failure. The getModelChains read
+      // lives INSIDE the try so a D1 failure gets the same structured
+      // logSettingsFailure 500 as every other settings op (QC wave, seat3).
+      const chains = await store.getModelChains(gate.app.id);
+      const knownChains = new Set(chains.map((chain) => chain.name));
+      for (const [role, chainName] of Object.entries(refs)) {
+        if (chainName === "" || chainName === DEFAULT_CHAIN_NAME) continue;
+        if (!knownChains.has(chainName)) {
+          return settingsPostResponse(c, gate.app.slug, `${role} is not a known model chain — pick one from the list or leave it empty to use the default chain. Nothing was saved.`,
+            400,
+          );
         }
       }
-      await store.setModelRoles(gate.app.id, selectors);
+      await store.setModelChainSeats(gate.app.id, refs);
     } catch (err) {
       logSettingsFailure("save_roles", gate.app.id, err);
       return settingsPostResponse(c, gate.app.slug, settingsFailureNotice(err), 500);
     }
     return settingsPostResponse(c, gate.app.slug, `Saved the role models for ${gate.app.slug}.`);
+  }
+  if (op === "add-chain") {
+    // Plan 35 T2 (spec §4.4): create or replace one NAMED chain. The name
+    // must be a valid chain name (MODEL_CHAIN_NAME_PATTERN) and NOT the
+    // reserved "default"; the chain value is a selector chain validated
+    // exactly like save-chain (grammar + verified-models membership).
+    const name = typeof form.name === "string" ? form.name.trim() : "";
+    const chain = typeof form.chain === "string" ? form.chain : "";
+    if (name === "" || name === DEFAULT_CHAIN_NAME || !MODEL_CHAIN_NAME_PATTERN.test(name)) {
+      return settingsPostResponse(c, gate.app.slug, `Chain names must be 1–${MAX_MODEL_CHAIN_NAME_LENGTH} lowercase letters, digits or hyphens — and "default" is reserved. Nothing was saved.`,
+        400,
+      );
+    }
+    if (chain.trim() === "") {
+      return settingsPostResponse(c, gate.app.slug, "Enter a model chain for the named chain.", 400);
+    }
+    if (chain.length > MAX_MODEL_SELECTOR_LENGTH) {
+      return settingsPostResponse(c, gate.app.slug, `That model chain is too long (${chain.length} characters) — limited to ${MAX_MODEL_SELECTOR_LENGTH}. Nothing was saved.`,
+        400,
+      );
+    }
+    const selectors = parseModelChain(chain);
+    if (selectors.length === 0) {
+      return settingsPostResponse(c, gate.app.slug, "Enter at least one comma-separated model selector.", 400);
+    }
+    const failing = findFailingSelector(
+      selectors,
+      await store.getVerifiedModels(gate.app.id),
+      await store.listCustomProviders(gate.app.id),
+    );
+    if (failing) {
+      return settingsMembershipFailResponse(c, gate.app.slug, failing);
+    }
+    try {
+      await store.upsertModelChain(gate.app.id, name, chain);
+    } catch (err) {
+      logSettingsFailure("add_chain", gate.app.id, err);
+      return settingsPostResponse(c, gate.app.slug, settingsFailureNotice(err), 500);
+    }
+    return settingsPostResponse(c, gate.app.slug, `Saved the ${name} model chain for ${gate.app.slug}.`);
+  }
+  if (op === "remove-chain") {
+    // Plan 35 T2 (spec §4.4): delete one NAMED chain — seats referencing
+    // it fall back to the default chain (the store cleans the reference
+    // rows in the same atomic batch). The reserved "default" row cannot be
+    // removed here (clear it via save-chain instead).
+    const name = typeof form.name === "string" ? form.name.trim() : "";
+    if (name === "" || name === DEFAULT_CHAIN_NAME) {
+      return settingsPostResponse(c, gate.app.slug, `The "default" chain cannot be removed — clear it instead. Nothing was saved.`,
+        400,
+      );
+    }
+    try {
+      await store.removeModelChain(gate.app.id, name);
+    } catch (err) {
+      logSettingsFailure("remove_chain", gate.app.id, err);
+      return settingsPostResponse(c, gate.app.slug, settingsFailureNotice(err), 500);
+    }
+    return settingsPostResponse(c, gate.app.slug, `Removed the ${name} model chain for ${gate.app.slug} — seats using it fall back to the default chain.`);
   }
   if (op === "add-custom-provider") {
     // Plan 23 T2: declare a NON-built-in model provider for the App. Every
@@ -1531,6 +1755,107 @@ dashboardApp.post("/apps/:slug/settings", async (c) => {
     return settingsPostResponse(c, gate.app.slug, `Declared custom provider ${providerId} for ${gate.app.slug} — its key is stored encrypted and injected by environment variable name.`,
     );
   }
+  if (op === "add-template-provider") {
+    // Plan 35 T3 (spec §5): materialize a template-tier catalog entry into
+    // the EXISTING custom-provider mechanism — zero models.yml / env
+    // injection / selector-grammar changes. Today exactly one template
+    // exists: "workers-ai" (Cloudflare Workers AI), whose OpenAI-compatible
+    // endpoint is scoped to the user's Cloudflare account id. The save flow
+    // substitutes {account_id} in the template's base URL, pins the
+    // template's api protocol, prefills model_ids from the template's
+    // representative models, and stores the key under
+    // CUSTOM_<UPPER_SNAKE(id)>_API_KEY via the same upsertCustomProvider
+    // path as add-custom-provider (verify-first, plan 31 custom probe —
+    // every bound below mirrors the add-custom-provider checks).
+    const templateId = typeof form.template_id === "string" ? form.template_id.trim() : "";
+    const accountId = typeof form.account_id === "string" ? form.account_id.trim() : "";
+    const plainKey = typeof form.key === "string" ? form.key.trim() : "";
+    const template = PROVIDER_META[templateId];
+    if (template === undefined || template.tier !== "template") {
+      return settingsPostResponse(c, gate.app.slug, "Unknown provider template — nothing was stored.", 400);
+    }
+    if (template.baseUrl === null || template.api === null) {
+      return settingsPostResponse(c, gate.app.slug, "This provider template is incomplete — nothing was stored.", 400);
+    }
+    if (accountId === "") {
+      return settingsPostResponse(c, gate.app.slug, "Enter your Cloudflare account id to complete the Workers AI base URL.", 400);
+    }
+    if (!CLOUDFLARE_ACCOUNT_ID_PATTERN.test(accountId)) {
+      return settingsPostResponse(c, gate.app.slug, "Cloudflare account ids are 32 hex characters — nothing was stored.", 400);
+    }
+    // The template id must not collide with a built-in or in-image base
+    // provider id (defensive — the catalog's template tier is disjoint from
+    // both today, but a future template must not silently shadow one).
+    if (PROVIDER_IDS.includes(templateId)) {
+      return settingsPostResponse(c, gate.app.slug, `${templateId} is a built-in provider — nothing was stored.`, 400);
+    }
+    if (IN_IMAGE_BASE_PROVIDER_IDS.includes(templateId)) {
+      return settingsPostResponse(c, gate.app.slug, `${templateId} is already provided by the review environment's base configuration — nothing was stored.`, 400);
+    }
+    const baseUrl = template.baseUrl.replace("{account_id}", accountId);
+    if (!isValidCustomProviderBaseUrl(baseUrl)) {
+      return settingsPostResponse(c, gate.app.slug, "The materialized base URL is not a valid https URL — nothing was stored.", 400);
+    }
+    if (baseUrl.length > MAX_CUSTOM_PROVIDER_BASE_URL_LENGTH) {
+      return settingsPostResponse(c, gate.app.slug, `That base URL is too long (${baseUrl.length} characters) — limited to ${MAX_CUSTOM_PROVIDER_BASE_URL_LENGTH}. Nothing was stored.`, 400);
+    }
+    if (!CUSTOM_PROVIDER_API_IDS.includes(template.api as (typeof CUSTOM_PROVIDER_API_IDS)[number])) {
+      return settingsPostResponse(c, gate.app.slug, `${template.api} is not a supported API protocol — nothing was stored.`, 400);
+    }
+    const modelIds = [...template.models];
+    if (modelIds.length === 0) {
+      return settingsPostResponse(c, gate.app.slug, "This provider template has no model ids — nothing was stored.", 400);
+    }
+    if (modelIds.length > MAX_CUSTOM_PROVIDER_MODEL_IDS) {
+      return settingsPostResponse(c, gate.app.slug, `Too many model ids (${modelIds.length}) — at most ${MAX_CUSTOM_PROVIDER_MODEL_IDS}. Nothing was stored.`, 400);
+    }
+    if (modelIds.some((id) => id.length > MAX_CUSTOM_PROVIDER_MODEL_ID_LENGTH)) {
+      return settingsPostResponse(c, gate.app.slug, `Model ids are limited to ${MAX_CUSTOM_PROVIDER_MODEL_ID_LENGTH} characters each. Nothing was stored.`, 400);
+    }
+    if (plainKey === "") {
+      return settingsPostResponse(c, gate.app.slug, "Enter an API key to store.", 400);
+    }
+    if (plainKey.length > MAX_PROVIDER_KEY_LENGTH) {
+      return settingsPostResponse(c, gate.app.slug, `That API key is too long (${plainKey.length} characters) — keys are limited to ${MAX_PROVIDER_KEY_LENGTH} characters. Nothing was stored.`, 400);
+    }
+    const declaredCustomProviders = await store.listCustomProviders(gate.app.id);
+    if (
+      !declaredCustomProviders.some((p) => p.provider_id === templateId) &&
+      declaredCustomProviders.length >= MAX_CUSTOM_PROVIDER_COUNT
+    ) {
+      return settingsPostResponse(c, gate.app.slug, `This App already has the maximum of ${MAX_CUSTOM_PROVIDER_COUNT} custom providers — remove one before materializing another (updating an existing declaration is always allowed). Nothing was stored.`,
+        400,
+      );
+    }
+    try {
+      const verified = await verifyProviderKey(
+        { fetch: globalThis.fetch },
+        templateId,
+        plainKey,
+        {
+          baseUrl,
+          api: template.api as (typeof CUSTOM_PROVIDER_API_IDS)[number],
+          modelIds,
+        },
+      );
+      if (!verified.ok) {
+        return settingsVerifyFailResponse(c, gate.app.slug, verified.reason);
+      }
+      await store.upsertCustomProvider(
+        gate.app.id,
+        { provider_id: templateId, base_url: baseUrl, api: template.api as (typeof CUSTOM_PROVIDER_API_IDS)[number], model_ids: modelIds },
+        plainKey,
+      );
+    } catch (err) {
+      logSettingsFailure("add_template_provider", gate.app.id, err);
+      if (err instanceof InvalidCustomProviderError) {
+        return settingsPostResponse(c, gate.app.slug, err.message, 400);
+      }
+      return settingsPostResponse(c, gate.app.slug, settingsFailureNotice(err), 500);
+    }
+    return settingsPostResponse(c, gate.app.slug, `Materialized the ${template.label} template as custom provider ${templateId} for ${gate.app.slug} — its key is stored encrypted and injected by environment variable name.`,
+    );
+  }
   if (op === "remove-custom-provider") {
     const providerId = typeof form.provider_id === "string" ? form.provider_id.trim() : "";
     let removed: boolean;
@@ -1598,20 +1923,30 @@ dashboardApp.post("/apps/:slug/settings/key/delete", async (c) => {
 //   - repo: optional owner/repo filter, malformed → 400.
 // Response = the store return plus the two echoed params (snake_case keys).
 const INSIGHTS_REPO_PATTERN = /^[^/\s]+\/[^/\s]+$/;
+/** The only supported `include` extra (plan 36 QC F-001). */
+const INSIGHTS_INCLUDE_VALUES = ["repos"] as const;
 
 /**
  * Query-param parse for the insights JSON face (QC W-C): window (integer
- * days, default 30) + optional repo owner/repo filter. Returns the parsed
- * values or the 400 reason; the route answers 400 with a JSON error body
- * (the HTML notice page retired with GET /insights in plan 29 T6). The
- * >90 clamp stays in the store — the single clamp point — and the route
- * echoes the EFFECTIVE window.
+ * days, default 30) + optional repo owner/repo filter + optional
+ * comma-separated `include` extras (`repos` — the window-scoped distinct
+ * repo aggregation, opt-in so the home surface never pays for it). Returns
+ * the parsed values or the 400 reason; the route answers 400 with a JSON
+ * error body (the HTML notice page retired with GET /insights in plan 29
+ * T6). The >90 clamp stays in the store — the single clamp point — and the
+ * route echoes the EFFECTIVE window.
  */
 type InsightsParams =
-  | { ok: true; windowDays: number; repoFilter?: { owner: string; repo: string }; rawRepo?: string }
+  | {
+      ok: true;
+      windowDays: number;
+      repoFilter?: { owner: string; repo: string };
+      rawRepo?: string;
+      includeRepos: boolean;
+    }
   | { ok: false; reason: string };
 
-function parseInsightsParams(query: { window?: string; repo?: string }): InsightsParams {
+function parseInsightsParams(query: { window?: string; repo?: string; include?: string }): InsightsParams {
   let windowDays = 30;
   const rawWindow = query.window;
   if (rawWindow !== undefined) {
@@ -1633,17 +1968,35 @@ function parseInsightsParams(query: { window?: string; repo?: string }): Insight
     repoFilter = { owner: rawRepoParam.slice(0, slash), repo: rawRepoParam.slice(slash + 1) };
   }
 
-  return { ok: true, windowDays, repoFilter, rawRepo };
+  let includeRepos = false;
+  const rawInclude = query.include;
+  if (rawInclude !== undefined) {
+    const parts = rawInclude.split(",").map((part) => part.trim());
+    if (parts.length === 0 || parts.some((part) => !(INSIGHTS_INCLUDE_VALUES as readonly string[]).includes(part))) {
+      return { ok: false, reason: "include must be a comma-separated list of: repos" };
+    }
+    includeRepos = parts.includes("repos");
+  }
+
+  return { ok: true, windowDays, repoFilter, rawRepo, includeRepos };
 }
 
 dashboardApp.get("/api/insights/summary", async (c) => {
   const db = dashboardD1(c.env);
   if (!db) return c.text("dashboard storage is not configured", 500);
 
-  const params = parseInsightsParams({ window: c.req.query("window"), repo: c.req.query("repo") });
+  const params = parseInsightsParams({
+    window: c.req.query("window"),
+    repo: c.req.query("repo"),
+    include: c.req.query("include"),
+  });
   if (!params.ok) return c.json({ error: params.reason }, 400);
 
-  const insights = await createInsightsStore(db, { windowDays: params.windowDays, repo: params.repoFilter });
+  const insights = await createInsightsStore(db, {
+    windowDays: params.windowDays,
+    repo: params.repoFilter,
+    includeRepos: params.includeRepos,
+  });
   return c.json({
     window_days: clampWindow(params.windowDays),
     ...(params.repoFilter !== undefined ? { repo: params.rawRepo } : {}),
@@ -1653,6 +2006,7 @@ dashboardApp.get("/api/insights/summary", async (c) => {
     verdict_distribution: insights.verdictDistribution,
     weekly_trend: insights.weeklyTrend,
     recurring_top: insights.recurringTop,
+    repos: insights.repos,
   });
 });
 

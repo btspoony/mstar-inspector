@@ -38,6 +38,8 @@ function createDb(): ReturnType<typeof createTestD1> {
     "0009_app_model_roles.sql",
     "0011_webhook_deliveries.sql",
     "0012_custom_providers_and_key_updated_at.sql",
+    "0015_provider_verification.sql",
+    "0017_app_model_chains.sql",
   ]) {
     db.raw.exec(readFileSync(join(MIGRATIONS_DIR, name), "utf8"));
   }
@@ -130,25 +132,69 @@ describe("GET /dashboard/api/apps (plan 29 T4)", () => {
 });
 
 describe("GET /dashboard/api/apps/:slug/settings (plan 29 T4)", () => {
-  test("creator 200; other member 403; unknown slug 404", async () => {
+  test("creator 200 can_manage; other member 200 can_manage false; unknown slug 404", async () => {
     const db = await seededWorld();
     const env = makeEnv(db);
 
     const owner = await get("/dashboard/api/apps/mstar-inspector-mallory/settings", "mallory", env);
     expect(owner.status).toBe(200);
-    const body = (await owner.json()) as { app: { slug: string; review_enabled: boolean }; provider_ids: string[] };
+    const body = (await owner.json()) as {
+      can_manage: boolean;
+      app: { slug: string; review_enabled: boolean; created_by: string };
+      providers: Array<{ id: string; verifiable: boolean }>;
+    };
     expect(body.app.slug).toBe("mstar-inspector-mallory");
     expect(body.app.review_enabled).toBe(true);
-    expect(body.provider_ids.length).toBeGreaterThan(0);
-    expect(body.provider_ids).not.toContain("azure-openai");
-    expect(body.provider_ids).not.toContain("ai-gateway");
+    expect(body.can_manage).toBe(true);
+    expect(body.providers.length).toBeGreaterThan(0);
+    expect(body.providers.some((p) => p.id === "azure-openai" && p.verifiable === false)).toBe(true);
+    expect(body.providers.some((p) => p.id === "workers-ai")).toBe(true);
     expect(owner.headers.get("cache-control")).toBe("private, no-store");
 
     const other = await get("/dashboard/api/apps/mstar-inspector-mallory/settings", "hubot", env);
-    expect(other.status).toBe(403);
+    expect(other.status).toBe(200);
+    // Plan 35 T4 review: non-managers get base+health ONLY — no keys/chains/providers.
+    const otherBody = (await other.json()) as {
+      can_manage: boolean;
+      app: { slug: string };
+      installations: unknown[];
+      deliveries: unknown[];
+      keys?: unknown;
+      providers?: unknown;
+      model_chains?: unknown;
+      model_roles?: unknown;
+      custom_providers?: unknown;
+    };
+    expect(otherBody.can_manage).toBe(false);
+    expect(otherBody.app.slug).toBe("mstar-inspector-mallory");
+    expect(otherBody.installations).toEqual([]);
+    expect(otherBody.deliveries).toEqual([]);
+    expect(otherBody.keys).toBeUndefined();
+    expect(otherBody.providers).toBeUndefined();
+    expect(otherBody.model_chains).toBeUndefined();
+    expect(otherBody.model_roles).toBeUndefined();
+    expect(otherBody.custom_providers).toBeUndefined();
+    expect(other.headers.get("cache-control")).toBe("private, no-store");
 
     const missing = await get("/dashboard/api/apps/no-such-app/settings", "octocat", env);
     expect(missing.status).toBe(404);
+  });
+
+  test("non-manager POST to settings stays 403 (write family unchanged)", async () => {
+    const db = await seededWorld();
+    const env = makeEnv(db);
+    const res = await worker.fetch(
+      new Request("https://worker.local/dashboard/apps/mstar-inspector-mallory/settings", {
+        method: "POST",
+        headers: {
+          Cookie: `${SESSION_COOKIE}=${await cookie("hubot")}`,
+          "content-type": "application/x-www-form-urlencoded",
+        },
+        body: "op=save-chain&model_chain=ark-plan%2Fdeepseek-v4-flash",
+      }),
+      env,
+    );
+    expect(res.status).toBe(403);
   });
 });
 

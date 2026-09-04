@@ -11,7 +11,6 @@ import {
   MODEL_ROLE_IDS,
 } from "../../src/dashboard/app-config-store";
 import { composeModelOptions, findFailingSelector, selectorBase } from "../../src/dashboard/model-membership";
-import { addKeyProviderIds } from "../../src/dashboard/provider-verify";
 import { PROVIDER_IDS } from "../../src/dashboard/app-config-store";
 import { SESSION_COOKIE, createSessionValue } from "../../src/dashboard/session";
 import { createUser } from "../../src/dashboard/users";
@@ -316,35 +315,31 @@ describe("POST save-chain / save-roles membership (plan 31 T4)", () => {
     expect((await store.getVerifiedModels(app.id)).some((row) => row.provider === "my-custom")).toBe(false);
   });
 
-  test("save-roles applies the same membership; blank still clears", async () => {
+  test("save-roles references chains (plan 35 T2): unknown chain 400s, blank still clears", async () => {
     const { db, app } = await seededWorld();
     const store = createAppConfigStore(db, TEST_KEY);
-    await store.saveVerifiedKey(app.id, "anthropic", PLAIN_KEY, ["claude-sonnet-4-6"]);
+    await store.upsertModelChain(app.id, "seat-mstar-review-seat", "anthropic/claude-sonnet-4-6:thinking");
     const env = makeEnv(db);
     const roles = Object.fromEntries(MODEL_ROLE_IDS.map((role) => [`role_${role}`, ""]));
     const fail = await postForm(SETTINGS, "mallory", env, {
       op: "save-roles",
       ...roles,
-      "role_mstar-review-seat": "anthropic/nope",
+      "role_mstar-review-seat": "no-such-chain",
     });
     expect(fail.status).toBe(400);
-    expect(await fail.json()).toEqual({
-      code: "not_in_verified_models",
-      message: "Selector anthropic/nope is not in this App's verified models.",
-      selector: "anthropic/nope",
-    });
+    expect(await fail.text()).toContain("mstar-review-seat is not a known model chain");
     const ok = await postForm(SETTINGS, "mallory", env, {
       op: "save-roles",
       ...roles,
-      "role_mstar-review-seat": "anthropic/claude-sonnet-4-6:thinking",
+      "role_mstar-review-seat": "seat-mstar-review-seat",
     });
     expect(ok.status).toBe(200);
-    expect(await store.getAppModelRoles(app.id)).toEqual({
-      "mstar-review-seat": "anthropic/claude-sonnet-4-6:thinking",
+    expect(await store.getModelChainSeats(app.id)).toEqual({
+      "mstar-review-seat": "seat-mstar-review-seat",
     });
     const clear = await postForm(SETTINGS, "mallory", env, { op: "save-roles", ...roles });
     expect(clear.status).toBe(200);
-    expect(await store.getAppModelRoles(app.id)).toEqual({});
+    expect(await store.getModelChainSeats(app.id)).toEqual({});
   });
 });
 
@@ -431,6 +426,108 @@ describe("POST /dashboard/apps/:slug/settings — pinned add-key / add-custom-pr
   });
 });
 
+describe("POST /dashboard/apps/:slug/settings — add-template-provider materialization (plan 35 T3, spec §5)", () => {
+  let fetchSpy: ReturnType<typeof spyOn> | undefined;
+  afterEach(() => {
+    fetchSpy?.mockRestore();
+  });
+
+  const ACCOUNT_ID = "1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d";
+
+  test("workers-ai template materializes into a custom provider with the account-id-substituted base URL", async () => {
+    const { db, app } = await seededWorld();
+    fetchSpy = mockStatus(200, { data: [] });
+    const res = await postForm(SETTINGS, "mallory", makeEnv(db), {
+      op: "add-template-provider",
+      template_id: "workers-ai",
+      account_id: ACCOUNT_ID,
+      key: PLAIN_KEY,
+    });
+    expect(res.status).toBe(200);
+    const body = await res.text();
+    expect(body).toContain("Cloudflare Workers AI");
+    expect(body).not.toContain(PLAIN_KEY);
+    // The custom probe hit the materialized models endpoint (plan 31 custom
+    // probe path: {base}/models for a base already ending in /v1).
+    expect(fetchSpy).toHaveBeenCalledWith(
+      `https://api.cloudflare.com/client/v4/accounts/${ACCOUNT_ID}/ai/v1/models`,
+      expect.objectContaining({ method: "GET" }),
+    );
+    const store = createAppConfigStore(db, TEST_KEY);
+    const declared = await store.listCustomProviders(app.id);
+    expect(declared).toHaveLength(1);
+    expect(declared[0]!.provider_id).toBe("workers-ai");
+    expect(declared[0]!.base_url).toBe(`https://api.cloudflare.com/client/v4/accounts/${ACCOUNT_ID}/ai/v1`);
+    expect(declared[0]!.api).toBe("openai-completions");
+    // The prefill vocabulary is the template's representative models.
+    expect(declared[0]!.model_ids).toContain("@cf/meta/llama-3.3-70b-instruct-fp8-fast");
+    expect(declared[0]!.model_ids.length).toBeGreaterThan(0);
+  });
+
+  test("401 from the provider → 400, zero rows stored, key never echoed", async () => {
+    const { db } = await seededWorld();
+    fetchSpy = mockStatus(401, { error: { message: "nope" } });
+    const res = await postForm(SETTINGS, "mallory", makeEnv(db), {
+      op: "add-template-provider",
+      template_id: "workers-ai",
+      account_id: ACCOUNT_ID,
+      key: PLAIN_KEY,
+    });
+    expect(res.status).toBe(400);
+    const body = await res.text();
+    expect(body).toContain("rejected by the provider");
+    expect(body).not.toContain(PLAIN_KEY);
+    expect(db.raw.query("SELECT COUNT(*) AS n FROM app_custom_providers").get() as { n: number }).toEqual({ n: 0 });
+  });
+
+  test("malformed account id → 400 before any network call, zero rows stored", async () => {
+    const { db } = await seededWorld();
+    fetchSpy = spyOn(globalThis, "fetch").mockImplementation((async () => {
+      throw new Error("fetch must not be called for a malformed account id");
+    }) as unknown as typeof fetch);
+    const res = await postForm(SETTINGS, "mallory", makeEnv(db), {
+      op: "add-template-provider",
+      template_id: "workers-ai",
+      account_id: "not-a-32-hex-account-id",
+      key: PLAIN_KEY,
+    });
+    expect(res.status).toBe(400);
+    expect(await res.text()).toContain("32 hex characters");
+    expect(fetchSpy).not.toHaveBeenCalled();
+    expect(db.raw.query("SELECT COUNT(*) AS n FROM app_custom_providers").get() as { n: number }).toEqual({ n: 0 });
+  });
+
+  test("unknown template id → 400, zero rows stored", async () => {
+    const { db } = await seededWorld();
+    fetchSpy = spyOn(globalThis, "fetch").mockImplementation((async () => {
+      throw new Error("fetch must not be called for an unknown template");
+    }) as unknown as typeof fetch);
+    const res = await postForm(SETTINGS, "mallory", makeEnv(db), {
+      op: "add-template-provider",
+      template_id: "no-such-template",
+      account_id: ACCOUNT_ID,
+      key: PLAIN_KEY,
+    });
+    expect(res.status).toBe(400);
+    expect(await res.text()).toContain("Unknown provider template");
+    expect(fetchSpy).not.toHaveBeenCalled();
+    expect(db.raw.query("SELECT COUNT(*) AS n FROM app_custom_providers").get() as { n: number }).toEqual({ n: 0 });
+  });
+
+  test("non-creator member → 403 (creator-or-admin gate, spec §2)", async () => {
+    const { db } = await seededWorld();
+    fetchSpy = mockStatus(200, { data: [] });
+    const res = await postForm(SETTINGS, "hubot", makeEnv(db), {
+      op: "add-template-provider",
+      template_id: "workers-ai",
+      account_id: ACCOUNT_ID,
+      key: PLAIN_KEY,
+    });
+    expect(res.status).toBe(403);
+    expect(db.raw.query("SELECT COUNT(*) AS n FROM app_custom_providers").get() as { n: number }).toEqual({ n: 0 });
+  });
+});
+
 describe("GET settings includes delivery_summary for the sidebar (plan 31 T6)", () => {
   test("delivery_summary is present and never includes encrypted columns", async () => {
     const { db } = await seededWorld();
@@ -438,14 +535,43 @@ describe("GET settings includes delivery_summary for the sidebar (plan 31 T6)", 
     expect(res.status).toBe(200);
     const body = (await res.json()) as {
       delivery_summary: { latest: null; rejected24h: number };
-      provider_ids: string[];
+      providers: Array<{ id: string; label: string; tier: string; verifiable: boolean }>;
     };
     expect(body.delivery_summary).toEqual({ latest: null, rejected24h: 0 });
     expect(JSON.stringify(body)).not.toContain("key_enc");
     expect(JSON.stringify(body)).not.toContain("private_key");
     expect(res.headers.get("cache-control")).toBe("private, no-store");
-    expect(body.provider_ids).not.toContain("azure-openai");
-    expect(body.provider_ids).not.toContain("ai-gateway");
-    expect(body.provider_ids).toEqual(addKeyProviderIds(PROVIDER_IDS));
+    // Plan 35 T4: the unified provider section face — every builtin (in
+    // PROVIDER_IDS order) + the template tier, with verifiable flags.
+    const byId = (id: string) => body.providers.find((p) => p.id === id);
+    expect(body.providers.filter((p) => p.tier === "builtin").map((p) => p.id)).toEqual([...PROVIDER_IDS]);
+    expect(byId("azure-openai")?.verifiable).toBe(false);
+    expect(byId("ai-gateway")?.verifiable).toBe(false);
+    expect(byId("anthropic")?.verifiable).toBe(true);
+    expect(byId("workers-ai")).toMatchObject({ tier: "template", label: "Cloudflare Workers AI", verifiable: true });
+  });
+
+  test("other member GET is 200 with can_manage false and base+health only", async () => {
+    const { db } = await seededWorld();
+    const res = await getJson("/dashboard/api/apps/mallorys-app/settings", "hubot", makeEnv(db));
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      can_manage: boolean;
+      app: { slug: string };
+      keys?: unknown;
+      providers?: unknown;
+      model_chains?: unknown;
+      model_roles?: unknown;
+      custom_providers?: unknown;
+    };
+    expect(body.can_manage).toBe(false);
+    expect(body.app.slug).toBe("mallorys-app");
+    expect(body.keys).toBeUndefined();
+    expect(body.providers).toBeUndefined();
+    expect(body.model_chains).toBeUndefined();
+    expect(body.model_roles).toBeUndefined();
+    expect(body.custom_providers).toBeUndefined();
+    expect(JSON.stringify(body)).not.toContain("key_enc");
+    expect(res.headers.get("cache-control")).toBe("private, no-store");
   });
 });

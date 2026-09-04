@@ -117,6 +117,23 @@ async function configureApp(
 }
 
 /**
+ * Map one seat to a named chain holding the given selector (plan 35 T2,
+ * spec §4.4): the `seat-<role>` chain + the reference row — the same shape
+ * migration 0017's backfill produces for legacy app_model_roles rows.
+ */
+async function mapRole(
+  db: ReturnType<typeof createMigratedTestD1>,
+  appId: string,
+  role: string,
+  selector: string,
+): Promise<void> {
+  const store = createAppConfigStore(db, TEST_KEY);
+  const chainName = `seat-${role}`;
+  await store.upsertModelChain(appId, chainName, selector);
+  await store.setModelChainSeat(appId, role, chainName);
+}
+
+/**
  * Raw-insert a provider key row whose envelope is bound to the WRONG AAD —
  * the fail-closed tamper anchor (the decrypt must throw, never fall back).
  */
@@ -439,7 +456,7 @@ describe("per-App runner env assembly (plan 14 Task 3, spec § Per-App BYOK)", (
   test("blank chain via direct-DB write fails closed; a padded real chain forwards VERBATIM (plan 15 trim guard)", async () => {
     reset();
     const db = createMigratedTestD1();
-    // Unconfigured seeds: app_model_config is a singleton row per app, so
+    // Unconfigured seeds: the default chain row is a singleton per app, so
     // the raw direct-DB chain writes below must be the ONLY config rows.
     const appX = await seedApp(db, "app-x", { configured: false });
     const appY = await seedApp(db, "app-y", { configured: false });
@@ -448,15 +465,15 @@ describe("per-App runner env assembly (plan 14 Task 3, spec § Per-App BYOK)", (
     // the fail-closed + verbatim guards independent of store semantics.
     db.raw
       .prepare(
-        `INSERT INTO app_model_config (app_id, model_chain, updated_at)
-         VALUES (?, '   ', datetime('now'))`,
+        `INSERT INTO app_model_chains (app_id, name, chain, is_default, created_at, updated_at)
+         VALUES (?, 'default', '   ', 1, datetime('now'), datetime('now'))`,
       )
       .run(appX.id);
     const padded = "  openai/gpt-padded , anthropic/claude-padded  ";
     db.raw
       .prepare(
-        `INSERT INTO app_model_config (app_id, model_chain, updated_at)
-         VALUES (?, ?, datetime('now'))`,
+        `INSERT INTO app_model_chains (app_id, name, chain, is_default, created_at, updated_at)
+         VALUES (?, 'default', ?, 1, datetime('now'), datetime('now'))`,
       )
       .run(appY.id, padded);
     // Y's padded chain references openai/anthropic — provide their keys so
@@ -770,8 +787,8 @@ describe("runner input modelOverrides threading (plan 17 Task 1)", () => {
       anthropic: "sk-x-anthropic",
     });
     const store = createAppConfigStore(db, TEST_KEY);
-    await store.setModelRole(appX.id, "mstar-review-seat", "ark-plan/deepseek-v4-flash:high");
-    await store.setModelRole(appX.id, "code-reviewer", "openai/gpt-5:thinking, anthropic/claude-x");
+    await mapRole(db, appX.id, "mstar-review-seat", "ark-plan/deepseek-v4-flash:high");
+    await mapRole(db, appX.id, "code-reviewer", "openai/gpt-5:thinking, anthropic/claude-x");
     const consumer = createReviewConsumer(makeEnv({ DB: db as never }), testLog, testOverrides);
 
     await consumer(makeBatch(makePayload({ appRef: { appId: appX.id } })));
@@ -802,8 +819,8 @@ describe("runner input modelOverrides threading (plan 17 Task 1)", () => {
     const db = createMigratedTestD1();
     const appX = await seedApp(db, "app-x");
     const store = createAppConfigStore(db, TEST_KEY);
-    await store.setModelRole(appX.id, "mstar-review-seat", "first/model");
-    await store.setModelRole(appX.id, "mstar-review-seat", ""); // cleared → empty map
+    await mapRole(db, appX.id, "mstar-review-seat", "first/model");
+    await store.clearModelChainSeat(appX.id, "mstar-review-seat"); // cleared → empty map
     const consumer = createReviewConsumer(makeEnv({ DB: db as never }), testLog, testOverrides);
 
     await consumer(makeBatch(makePayload({ appRef: { appId: appX.id } })));
@@ -821,11 +838,11 @@ describe("runner input modelOverrides threading (plan 17 Task 1)", () => {
     // the fail-closed gate (Bugbot 7aaf18f4).
     await configureApp(db, appX.id, "ark-plan/deepseek-v4-flash", { openai: "sk-x-openai" });
     const store = createAppConfigStore(db, TEST_KEY);
-    await store.setModelRole(appX.id, "code-reviewer", "openai/v1");
+    await mapRole(db, appX.id, "code-reviewer", "openai/v1");
     const consumer = createReviewConsumer(makeEnv({ DB: db as never }), testLog, testOverrides);
 
     await consumer(makeBatch(makePayload({ pr_number: 42, appRef: { appId: appX.id } })));
-    await store.setModelRole(appX.id, "code-reviewer", "openai/v2");
+    await mapRole(db, appX.id, "code-reviewer", "openai/v2");
     await consumer(makeBatch(makePayload({ pr_number: 43, appRef: { appId: appX.id } })));
 
     const [first, second] = runnerInputs();
@@ -843,7 +860,7 @@ describe("runner input modelOverrides threading (plan 17 Task 1)", () => {
       get(target, prop, receiver) {
         if (prop === "prepare") {
           return (query: string) => {
-            if (query.includes("FROM app_model_roles")) throw new Error("roles read boom");
+            if (query.includes("FROM app_model_chain_seats")) throw new Error("roles read boom");
             return (target as typeof db).prepare(query);
           };
         }
@@ -886,7 +903,7 @@ describe("per-role override provider key gate (Bugbot 7aaf18f4)", () => {
     const badOverride = await seedApp(db, "bad-override");
     await configureApp(db, badOverride.id, "openai/gpt-app", { openai: "sk-bo-openai" });
     const store = createAppConfigStore(db, TEST_KEY);
-    await store.setModelRole(badOverride.id, "code-reviewer", "anthropic/claude-x");
+    await mapRole(db, badOverride.id, "code-reviewer", "anthropic/claude-x");
     const consumer = createReviewConsumer(makeEnv({ DB: db as never }), testLog, testOverrides);
 
     await expect(
@@ -926,7 +943,7 @@ describe("per-role override provider key gate (Bugbot 7aaf18f4)", () => {
     const appX = await seedApp(db, "app-x");
     await configureApp(db, appX.id, "openai/gpt-app", { openai: "sk-x-openai" });
     const store = createAppConfigStore(db, TEST_KEY);
-    await store.setModelRole(appX.id, "code-reviewer", "openai/gpt-5:thinking, openai/gpt-5-mini");
+    await mapRole(db, appX.id, "code-reviewer", "openai/gpt-5:thinking, openai/gpt-5-mini");
     const consumer = createReviewConsumer(makeEnv({ DB: db as never }), testLog, testOverrides);
 
     await consumer(makeBatch(makePayload({ appRef: { appId: appX.id } })));
@@ -955,7 +972,7 @@ describe("per-role override provider key gate (Bugbot 7aaf18f4)", () => {
       },
       "sk-custom-fixture-AAA",
     );
-    await store.setModelRole(appX.id, "frontend-dev", "my-provider/m1");
+    await mapRole(db, appX.id, "frontend-dev", "my-provider/m1");
     const consumer = createReviewConsumer(makeEnv({ DB: db as never }), testLog, testOverrides);
 
     await consumer(makeBatch(makePayload({ appRef: { appId: appX.id } })));

@@ -1,15 +1,19 @@
 /**
- * Pure navbar model (plan 29 T3). Layout renders this; tests cover role
- * and locale without a DOM runner.
+ * Pure shell models (plan 33 T2): sidebar carries page nav; navbar is slim
+ * (Lang + username + logout). Tested without a DOM runner.
  */
 import { NAV_ITEMS, t, type Locale } from "../i18n";
 import type { SpaBoot } from "./boot";
 
-export type NavbarItem = { href: string; label: string; current: boolean };
+export type ShellNavItem = { href: string; label: string; current: boolean };
+
+export type SidebarModel = {
+  brand: string;
+  navLabel: string;
+  items: ShellNavItem[];
+};
 
 export type NavbarModel = {
-  brand: string;
-  items: NavbarItem[];
   languageLabel: string;
   languageTarget: Locale;
   accountLabel: string | null;
@@ -32,25 +36,37 @@ export function accountDisplay(boot: Pick<SpaBoot, "login" | "name">): string | 
 }
 
 /**
- * Apps href is `/dashboard`. Prefix-matching that path would mark every
- * dashboard page current. Settings stays under `/dashboard/apps/:slug`
- * (the legacy `/dashboard/apps` page itself is a Worker 301, plan 30 T4).
+ * Apps → `/dashboard/apps` (+ settings under `/dashboard/apps/:slug`).
+ * Insights → `/dashboard/insights` and `/dashboard` (insights home, plan 33).
  */
 export function isNavCurrent(href: string, pathname: string): boolean {
-  if (href === "/dashboard") {
-    return pathname === "/dashboard" || pathname.startsWith("/dashboard/apps/");
+  if (href === "/dashboard/apps") {
+    return pathname === "/dashboard/apps" || pathname.startsWith("/dashboard/apps/");
+  }
+  if (href === "/dashboard/insights") {
+    return (
+      pathname === "/dashboard/insights" ||
+      pathname.startsWith("/dashboard/insights/") ||
+      pathname === "/dashboard"
+    );
   }
   return pathname === href || pathname.startsWith(`${href}/`);
 }
 
-export function buildNavbarModel(boot: SpaBoot, pathname: string): NavbarModel {
+export function buildSidebarModel(boot: SpaBoot, pathname: string): SidebarModel {
   return {
     brand: t(boot.locale, "nav.brand"),
+    navLabel: t(boot.locale, "nav.primary"),
     items: visibleNavItems(boot.role).map((item) => ({
       href: item.href,
       label: t(boot.locale, item.labelKey),
       current: isNavCurrent(item.href, pathname),
     })),
+  };
+}
+
+export function buildNavbarModel(boot: SpaBoot): NavbarModel {
+  return {
     languageLabel: t(boot.locale, "nav.language"),
     languageTarget: otherLocale(boot.locale),
     accountLabel: accountDisplay(boot),

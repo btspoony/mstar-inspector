@@ -26,7 +26,7 @@ describe("normalizeDashboardTrailingSlash (plan 29 T3)", () => {
   });
 
   test("normalizes nested /dashboard* trailing slashes", () => {
-    expect(normalizeDashboardTrailingSlash("GET", "/dashboard/apps/")).toBe("/dashboard");
+    expect(normalizeDashboardTrailingSlash("GET", "/dashboard/apps/")).toBe("/dashboard/apps");
     expect(normalizeDashboardTrailingSlash("HEAD", "/dashboard/insights/")).toBe("/dashboard/insights");
     expect(normalizeDashboardTrailingSlash("GET", "/dashboard/apps/acme/settings/")).toBe(
       "/dashboard/apps/acme/settings",
@@ -48,19 +48,19 @@ describe("normalizeDashboardTrailingSlash (plan 29 T3)", () => {
     expect(normalizeDashboardTrailingSlash("GET", "/webhook/acme/")).toBeNull();
   });
 
-  test("GET /dashboard/apps and /dashboard/apps/ alias to /dashboard in one hop (plan 30 T4)", () => {
-    expect(normalizeDashboardTrailingSlash("GET", "/dashboard/apps")).toBe("/dashboard");
-    expect(normalizeDashboardTrailingSlash("GET", "/dashboard/apps/")).toBe("/dashboard");
-    expect(normalizeDashboardTrailingSlash("HEAD", "/dashboard/apps")).toBe("/dashboard");
-    expect(normalizeDashboardTrailingSlash("HEAD", "/dashboard/apps/")).toBe("/dashboard");
+  test("GET /dashboard/apps passes through (plan 33 T2: enumerated SPA route)", () => {
+    expect(normalizeDashboardTrailingSlash("GET", "/dashboard/apps")).toBeNull();
+    expect(normalizeDashboardTrailingSlash("GET", "/dashboard/apps/")).toBe("/dashboard/apps");
+    expect(normalizeDashboardTrailingSlash("HEAD", "/dashboard/apps")).toBeNull();
+    expect(normalizeDashboardTrailingSlash("HEAD", "/dashboard/apps/")).toBe("/dashboard/apps");
   });
 
-  test("alias preserves the query string", () => {
-    expect(normalizeDashboardTrailingSlash("GET", "/dashboard/apps", "?q=1")).toBe("/dashboard?q=1");
-    expect(normalizeDashboardTrailingSlash("GET", "/dashboard/apps/", "?q=1")).toBe("/dashboard?q=1");
+  test("trailing slash on /dashboard/apps preserves the query string", () => {
+    expect(normalizeDashboardTrailingSlash("GET", "/dashboard/apps", "?q=1")).toBeNull();
+    expect(normalizeDashboardTrailingSlash("GET", "/dashboard/apps/", "?q=1")).toBe("/dashboard/apps?q=1");
   });
 
-  test("alias is exact: /dashboard/apps/:slug/* is never caught", () => {
+  test("/dashboard/apps/:slug/* is never aliased", () => {
     expect(normalizeDashboardTrailingSlash("GET", "/dashboard/apps/acme/settings")).toBeNull();
     expect(normalizeDashboardTrailingSlash("GET", "/dashboard/apps/acme/disable")).toBeNull();
     expect(normalizeDashboardTrailingSlash("GET", "/dashboard/apps/acme")).toBeNull();
@@ -154,33 +154,28 @@ describe("trailing-slash middleware mount (plan 29 T3)", () => {
     expect(res.status).not.toBe(301);
   });
 
-  test("GET /dashboard/apps returns 301 Location /dashboard (alias)", async () => {
+  test("GET /dashboard/apps is not a 301 (enumerated SPA route, plan 33 T2)", async () => {
     const res = await worker.fetch(new Request("https://worker.local/dashboard/apps?q=1"), env());
-    expect(res.status).toBe(301);
-    const location = new URL(res.headers.get("Location") ?? "", "https://worker.local");
-    expect(location.pathname).toBe("/dashboard");
-    expect(location.search).toBe("?q=1");
+    expect(res.status).not.toBe(301);
   });
 
-  test("GET /dashboard/apps/ returns 301 Location /dashboard in one hop (alias)", async () => {
+  test("GET /dashboard/apps/ returns 301 Location /dashboard/apps (trailing slash only)", async () => {
     const res = await worker.fetch(new Request("https://worker.local/dashboard/apps/?q=1"), env());
     expect(res.status).toBe(301);
     const location = new URL(res.headers.get("Location") ?? "", "https://worker.local");
-    expect(location.pathname).toBe("/dashboard");
+    expect(location.pathname).toBe("/dashboard/apps");
     expect(location.search).toBe("?q=1");
   });
 
-  test("HEAD /dashboard/apps returns 301 Location /dashboard (alias)", async () => {
+  test("HEAD /dashboard/apps is not a 301", async () => {
     const res = await worker.fetch(
       new Request("https://worker.local/dashboard/apps", { method: "HEAD" }),
       env(),
     );
-    expect(res.status).toBe(301);
-    const location = new URL(res.headers.get("Location") ?? "", "https://worker.local");
-    expect(location.pathname).toBe("/dashboard");
+    expect(res.status).not.toBe(301);
   });
 
-  test("GET /dashboard/apps/acme/settings is not aliased (exact match only)", async () => {
+  test("GET /dashboard/apps/acme/settings is not a 301", async () => {
     const res = await worker.fetch(new Request("https://worker.local/dashboard/apps/acme/settings"), env());
     expect(res.status).not.toBe(301);
   });

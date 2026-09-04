@@ -6,6 +6,10 @@ import { t } from "../../src/i18n";
 import {
   canManageApp,
   canViewMembers,
+  insightsRepoFromSelect,
+  insightsRepoOptions,
+  insightsRepoSelectValue,
+  INSIGHTS_REPO_ALL,
   insightsSummaryUrl,
   inviteLoginNoticeKey,
   isPaused,
@@ -49,6 +53,30 @@ describe("insights search wiring", () => {
     );
   });
 
+  test("summary URL requests the repos aggregation only when opted in (plan 36 QC F-001)", () => {
+    // Home surface: no include param.
+    expect(insightsSummaryUrl({ window: "7", repo: "" })).toBe("/dashboard/api/insights/summary?window=7");
+    // Records surface: include=repos appended.
+    expect(insightsSummaryUrl({ window: "7", repo: "acme/web" }, true)).toBe(
+      "/dashboard/api/insights/summary?window=7&repo=acme%2Fweb&include=repos",
+    );
+    expect(insightsSummaryUrl({ window: "30", repo: "" }, true)).toBe(
+      "/dashboard/api/insights/summary?include=repos",
+    );
+  });
+
+  test("repo Select maps 全部 ↔ empty filter and keeps out-of-set current values", () => {
+    expect(INSIGHTS_REPO_ALL).toBe("all");
+    expect(insightsRepoSelectValue("")).toBe("all");
+    expect(insightsRepoSelectValue("acme/web")).toBe("acme/web");
+    expect(insightsRepoFromSelect("all")).toBe("");
+    expect(insightsRepoFromSelect("acme/web")).toBe("acme/web");
+    expect(insightsRepoOptions([], "")).toEqual([]);
+    expect(insightsRepoOptions(["zeta/app", "acme/web"], "")).toEqual(["acme/web", "zeta/app"]);
+    expect(insightsRepoOptions(["acme/web"], "other/lib")).toEqual(["acme/web", "other/lib"]);
+    expect(insightsRepoOptions(["acme/web", "acme/web"], "acme/web")).toEqual(["acme/web"]);
+  });
+
   test("parseInsights accepts the JSON API shape and rejects junk", () => {
     const body = {
       window_days: 30,
@@ -58,9 +86,16 @@ describe("insights search wiring", () => {
       verdict_distribution: [],
       weekly_trend: [],
       recurring_top: [],
+      repos: [],
     };
     expect(parseInsights(body)?.reviews_total).toBe(0);
+    expect(parseInsights({ ...body, repos: ["acme/web"] })?.repos).toEqual(["acme/web"]);
     expect(parseInsights({ reviews_total: 0 })).toBeNull();
+    // repos is opt-in (plan 36 QC F-001): missing is tolerated (defaults
+    // to undefined on the parsed shape), malformed is rejected.
+    expect(parseInsights({ ...body, repos: undefined })?.repos).toBeUndefined();
+    expect(parseInsights({ ...body, repos: "acme/web" })).toBeNull();
+    expect(parseInsights({ ...body, repos: [1, 2] })).toBeNull();
   });
 });
 
@@ -80,27 +115,86 @@ describe("members/apps/settings parsers", () => {
     expect(parseApps({ apps: [] })).toBeNull();
   });
 
-  test("parseSettings requires boolean review_enabled and selector lists", () => {
+  test("parseSettings requires can_manage, created_by, providers, and chains", () => {
     const ok = parseSettings({
-      app: { slug: "demo", status: "active", review_enabled: true, last_webhook_at: null },
+      can_manage: true,
+      app: {
+        slug: "demo",
+        github_app_id: 1,
+        status: "active",
+        review_enabled: true,
+        created_by: "mallory",
+        last_webhook_at: null,
+      },
       keys: [],
       model_chain: null,
       model_roles: {},
+      model_chains: [],
       custom_providers: [],
       installations: [],
       deliveries: [],
-      provider_ids: ["openai"],
+      providers: [],
       model_role_ids: ["mstar-review-seat"],
       custom_provider_api_ids: ["openai-completions"],
     });
     expect(ok?.app.slug).toBe("demo");
+    expect(ok?.can_manage).toBe(true);
     expect(
       parseSettings({
         app: { slug: "demo", status: "active", review_enabled: 1, last_webhook_at: null },
         keys: [],
-        provider_ids: [],
+        providers: [],
         model_role_ids: [],
         custom_provider_api_ids: [],
+      }),
+    ).toBeNull();
+  });
+
+  test("parseSettings accepts the non-manager base+health shape (no settings zones)", () => {
+    // Plan 35 T4 review: can_manage=false payloads carry only app meta + health.
+    const readOnly = parseSettings({
+      can_manage: false,
+      app: {
+        slug: "demo",
+        github_app_id: 1,
+        status: "active",
+        review_enabled: true,
+        created_by: "mallory",
+        last_webhook_at: null,
+      },
+      installations: [],
+      deliveries: [],
+    });
+    expect(readOnly?.can_manage).toBe(false);
+    expect(readOnly && "keys" in readOnly).toBe(false);
+    // Missing health fields is a contract breach even for the slim shape.
+    expect(
+      parseSettings({
+        can_manage: false,
+        app: {
+          slug: "demo",
+          github_app_id: 1,
+          status: "active",
+          review_enabled: true,
+          created_by: "mallory",
+          last_webhook_at: null,
+        },
+      }),
+    ).toBeNull();
+    // can_manage=true without the settings zones is also a breach.
+    expect(
+      parseSettings({
+        can_manage: true,
+        app: {
+          slug: "demo",
+          github_app_id: 1,
+          status: "active",
+          review_enabled: true,
+          created_by: "mallory",
+          last_webhook_at: null,
+        },
+        installations: [],
+        deliveries: [],
       }),
     ).toBeNull();
   });
@@ -118,7 +212,7 @@ describe("invite grammar + page copy (plan 29 T4)", () => {
     const keys = [
       "members.adminOnly",
       "members.roleAdmin",
-      "insights.filterWindow",
+      "insights.recordsHeading",
       "insights.uncategorized",
       "apps.status.paused",
       "login.signIn",

@@ -61,7 +61,7 @@ import type { ReviewJobPayload } from "../contracts/review-job";
 import { idemKey, IDEMPOTENCY_SECONDS, type IdempotencyKey } from "../contracts/idem";
 import { parseReviewOutput, capFindings, clampFindingSizes } from "../review/schema";
 import { isReviewLevel, REVIEW_LEVELS, type CustomProviderDeclaration, type ReviewLevel } from "../review/runtime";
-import { PROVIDERS, providerEnvName, customProviderEnvName } from "./providers";
+import { PROVIDERS, providerEnvName, customProviderEnvName } from "./provider-catalog";
 import { redactExactSecrets, redactReviewOutput, redactReviewOutputExact, redactSecrets } from "./redact";
 import { createArtifactStore, previousRoundFingerprints, type D1ArtifactStore } from "../store/artifact-store";
 import { createFailureStore, type FailureStage, type FailureStore } from "../store/failure-store";
@@ -619,12 +619,14 @@ export type RunnerAppConfig = {
  * Task 1: single path — `appRef.appId` is required).
  * ONE `getAppConfig` read per message (all
  * provider keys + the model chain in a single store call — never per key),
- * decrypted in memory. The read hangs off the same appRef resolution as
+ * decrypted in memory. Plan 35 T2 (spec §4.4): the model chain is the
+ * App's DEFAULT chain row (app_model_chains name = 'default'); an App with
+ * no default row resolves modelChain = null (fail-closed, unchanged). The
+ * read hangs off the same appRef resolution as
  * `resolveCommenter` (the App row is already proven present, active and
  * non-deleted there) and runs BEFORE the in-flight guard so an unresolvable
  * config fails with zero side effects. Keys are re-read every message (no
  * cache) so a dashboard key update applies to the very next review.
- *
  * Failure = fail closed: an undecryptable envelope (tampered row, AAD
  * mismatch) or a missing/malformed DASHBOARD_ENCRYPTION_KEY throws — the
  * structured error log + rethrow keep the existing retry/DLQ semantics.
@@ -650,18 +652,22 @@ async function resolveAppConfig(payload: ReviewJobPayload, deps: ProcessDeps): P
 
 /**
  * Resolve the App's per-role model overrides for one message (plan 17 B6
- * Task 1): role → verbatim selector chain via the decrypt-free
- * `getAppModelRoles` read (a model selector is configuration, not a secret —
- * no secretbox). An App with NO (or an all-cleared) role map → `undefined`
- * — the runner input JSON omits the field, byte-identical to a no-map run
- * (plan Global Constraints: empty map = unchanged runner
- * behavior). Hangs off the same appRef resolution as `resolveAppConfig` (the
- * App row is already proven present, active and non-deleted there) and runs
- * BEFORE the in-flight guard so a resolution failure has zero side effects.
- * The map is re-read every message (no cache) so a dashboard role update
- * applies to the very next review. A roles-read failure rethrows with the
- * same app-id-prefixed context wrapper as `resolveAppConfig` (greppable
- * retry/DLQ triage).
+ * Task 1; plan 35 T2 rework, spec §4.4): role → verbatim chain value via
+ * the decrypt-free `getModelOverridesForConsumer` read (a model selector is
+ * configuration, not a secret — no secretbox). The seat → chain mapping
+ * resolves each referenced seat to its chain's value; seats with NO
+ * reference row (absent = default) and seats referencing the default chain
+ * are OMITTED, so the map only carries seats whose chain differs from the
+ * App default — byte-identical to the pre-chains app_model_roles semantics
+ * for migrated Apps. An App with NO overrides → `undefined` — the runner
+ * input JSON omits the field, byte-identical to a no-map run (plan Global
+ * Constraints: empty map = unchanged runner behavior). Hangs off the same
+ * appRef resolution as `resolveAppConfig` (the App row is already proven
+ * present, active and non-deleted there) and runs BEFORE the in-flight
+ * guard so a resolution failure has zero side effects. The map is re-read
+ * every message (no cache) so a dashboard seat update applies to the very
+ * next review. A resolution failure rethrows with the same app-id-prefixed
+ * context wrapper as `resolveAppConfig` (greppable retry/DLQ triage).
  */
 async function resolveModelOverrides(
   payload: ReviewJobPayload,
@@ -669,11 +675,11 @@ async function resolveModelOverrides(
 ): Promise<Record<string, string> | undefined> {
   const appRef = payload.appRef;
   try {
-    const roles = await createAppConfigStore(
+    const overrides = await createAppConfigStore(
       deps.env.DB,
       deps.env.DASHBOARD_ENCRYPTION_KEY,
-    ).getAppModelRoles(appRef.appId);
-    return Object.keys(roles).length > 0 ? roles : undefined;
+    ).getModelOverridesForConsumer(appRef.appId);
+    return Object.keys(overrides).length > 0 ? overrides : undefined;
   } catch (err) {
     const detail = err instanceof Error ? err.message : String(err);
     throw new Error(`per-App model-role resolution failed: app ${appRef.appId}: ${detail}`);

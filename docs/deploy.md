@@ -56,7 +56,7 @@ exist before the first deploy:
   `sandbox-image/Dockerfile` at deploy time (`image_build_context: "."`,
   `instance_type: lite`, `max_instances: 1`).
 
-### D1 migrations (0001–0015, forward-only)
+### D1 migrations (0001–0016, forward-only)
 
 ```bash
 wrangler d1 migrations apply mstar-inspector-db --remote   # production
@@ -80,6 +80,7 @@ wrangler d1 migrations apply mstar-inspector-db            # local dev
 | `0013_findings_review_id_index` | index on `findings.review_id` — insights/previous-round lookups (plan 22) |
 | `0014_idx_reviews_reviewed_at` | index on `reviews.reviewed_at` — insights window scans (plan 22) |
 | `0015_provider_verification` | per-App key `verified_at`/`verified_status` + `app_provider_models` cache (plan 31) |
+| `0016_users_login_nocase_unique` | NOCASE unique index on `users.github_login` — case-insensitive membership uniqueness (plan 34 QC W-1) |
 
 Migrations are **forward-only** (0002 precedent): never hand-edit an applied
 migration; add the next file.
@@ -629,7 +630,7 @@ controls are installed (the Dockerfile carries the documentation block only).
 
 ## Image pins and digest record
 
-Four pins — mstar-harness bumped to **3.5.1** this iteration (plan 25 Task 1,
+Four pins — mstar-harness bumped to **3.6.0** this iteration (plan 32 Task 1,
 the explicit upgrade decision); base image / Bun / gh re-verified, no bump:
 
 | Pin | Value | Where |
@@ -637,7 +638,7 @@ the explicit upgrade decision); base image / Bun / gh re-verified, no bump:
 | base image | `docker.io/cloudflare/sandbox:0.12.8` | `sandbox-image/Dockerfile` FROM |
 | Bun | `1.4.0` | `sandbox-image/Dockerfile` |
 | gh CLI | `2.98.0` | `sandbox-image/Dockerfile` |
-| mstar-harness | `bde437075aeefd4cdb4e87060c6c44149968c3b0` (3.5.1) | `sandbox-image/Dockerfile` |
+| mstar-harness | `ad76f0c6600acd5040464248085ad7d22af93e9f` (3.6.0) | `sandbox-image/Dockerfile` |
 
 **In-image DEFAULT model selector: `ark-plan/deepseek-v4-flash`** (pins:
 `src/review/runtime-omp.ts` `DEFAULT_MODEL_PATTERN` +
