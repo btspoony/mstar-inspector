@@ -157,6 +157,35 @@ export function activeChainTabId(tabs: readonly ChainTab[], selected: string | n
     : DEFAULT_CHAIN_NAME;
 }
 
+/**
+ * Seat select value (plan 39 T2), derived from the same tab model: an absent
+ * mapping, the empty string, and the reserved "default" name all mean the
+ * Default chain; a stored name that no current named tab offers (deleted
+ * chain, stale payload) renders as Default too — so the select never shows a
+ * missing chain and the op=save-roles form never submits an invalid
+ * reference (the route 400s on unknown names).
+ */
+export function seatSelectValue(tabs: readonly ChainTab[], stored: string | null | undefined): string {
+  if (stored === null || stored === undefined || stored === "") return DEFAULT_CHAIN_NAME;
+  return tabs.some((tab) => !tab.isDefault && tab.id === stored) ? stored : DEFAULT_CHAIN_NAME;
+}
+
+/**
+ * One coerced seat value per role id — the SeatsCard state seed and its
+ * post-reload re-derivation share this single derivation.
+ */
+export function seatRoleValues(
+  roleIds: readonly string[],
+  roles: Readonly<Record<string, string>>,
+  tabs: readonly ChainTab[],
+): Record<string, string> {
+  const next: Record<string, string> = {};
+  for (const role of roleIds) {
+    next[role] = seatSelectValue(tabs, roles[role]);
+  }
+  return next;
+}
+
 type SettingsAppMeta = {
   slug: string;
   github_app_id: number;

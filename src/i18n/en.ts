@@ -358,7 +358,8 @@ export const en = {
     addNamedChain: "Add named chain",
     defaultChain: "Default chain",
     seats: "Seat chains",
-    seatsCopy: "Each audit seat references a named chain. Blank uses the default chain.",
+    seatsCopy:
+      "Each audit seat runs on the Default chain or an explicit named chain — a seat whose named chain was removed falls back to Default.",
     useDefaultChain: "Default chain",
     confirmRemoveChainTitle: "Remove chain {name}?",
     confirmRemoveChainBody: "Seats using {name} fall back to the default chain.",

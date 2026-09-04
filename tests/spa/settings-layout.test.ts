@@ -7,7 +7,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { t } from "../../src/i18n";
 import { composeModelOptions } from "../../src/dashboard/model-membership";
-import { parseModels, splitModelChain } from "../../src/spa/pages/data";
+import { parseModels, modelChainTabs, seatRoleValues, seatSelectValue, splitModelChain } from "../../src/spa/pages/data";
 
 describe("settings layout (plan 35 T4)", () => {
   test("SettingsPage folds ops + health into an authorized ops zone; providers and chains are shadcn", () => {
@@ -322,5 +322,78 @@ describe("model chain tabs (plan 39 T1)", () => {
     expect(t("zh_CN", "settings.modelChainsCopy")).toContain("无法移除");
     expect(t("en", "settings.defaultChain")).toBe("Default chain");
     expect(t("zh_CN", "settings.defaultChain")).toBe("Default 链");
+  });
+});
+
+describe("seat assignment section (plan 39 T2)", () => {
+  test("seats are an independent titled card below chain management, not a section of the chains card", () => {
+    const source = readFileSync(join(import.meta.dir, "../../src/spa/pages/SettingsPage.tsx"), "utf8");
+    // SeatsCard is its own card component, rendered after ChainsCard for
+    // managers only (same authorization surface as chain editing).
+    expect(source).toContain("function SeatsCard");
+    expect(source.indexOf("function ChainsCard")).toBeLessThan(source.indexOf("function SeatsCard"));
+    expect(source.indexOf("<ChainsCard")).toBeLessThan(source.indexOf("<SeatsCard"));
+    // The chains card no longer carries any seat control or seat save.
+    const chainsBody = source.slice(source.indexOf("function ChainsCard"), source.indexOf("function SeatsCard"));
+    expect(chainsBody).not.toContain("settings.seats");
+    expect(chainsBody).not.toContain('op: "save-roles"');
+    // The seats card is titled and described through the dictionary.
+    const seatsBody = source.slice(source.indexOf("function SeatsCard"));
+    expect(seatsBody).toContain('t(locale, "settings.seats")');
+    expect(seatsBody).toContain('t(locale, "settings.seatsCopy")');
+  });
+
+  test("seat selects offer Default first, then current named tabs; values coerce before render and save", () => {
+    const source = readFileSync(join(import.meta.dir, "../../src/spa/pages/SettingsPage.tsx"), "utf8");
+    // Options derive from the same plan-39 tab model as the chain tabs.
+    expect(source).toContain("modelChainTabs(payload.model_chains)");
+    // Default is an explicit option (the reserved name, never a free-text
+    // value), and every rendered value passes seatSelectValue so a stale or
+    // deleted name renders as safe Default pending refresh.
+    expect(source).toContain("<SelectItem value={DEFAULT_CHAIN_NAME}>");
+    expect(source).toContain("value={seatSelectValue(tabs, seats[role])}");
+    // Full-map save semantics unchanged: op=save-roles with one role_<role>
+    // field per audit seat, each coerced so an invalid reference can never
+    // be submitted (the route 400s on unknown chain names).
+    expect(source).toContain('op: "save-roles"');
+    expect(source).toContain("fields[`role_${role}`] = seatSelectValue(tabs, seats[role])");
+    // The seat state re-derives from the payload after every reload.
+    expect(source).toContain("seatRoleValues(payload.model_role_ids, payload.model_roles");
+  });
+
+  test("seat values resolve against the current tab model: Default, named, and the delete cascade", () => {
+    const tabs = modelChainTabs([
+      { name: "deep", chain: "ark/deep", is_default: false, created_at: "t", updated_at: "t" },
+    ]);
+    // Absent mapping, empty, and the reserved name all resolve to Default.
+    expect(seatSelectValue(tabs, null)).toBe("default");
+    expect(seatSelectValue(tabs, undefined)).toBe("default");
+    expect(seatSelectValue(tabs, "")).toBe("default");
+    expect(seatSelectValue(tabs, "default")).toBe("default");
+    // A current named chain keeps its stored name.
+    expect(seatSelectValue(tabs, "deep")).toBe("deep");
+    // Deletion cascade: a stored name no tab offers falls back to Default —
+    // after the delete the refreshed tab model no longer lists it, so the
+    // form submits "default", never the invalid reference.
+    expect(seatSelectValue(modelChainTabs([]), "deep")).toBe("default");
+    // The role map derivation shared by the state seed and post-reload
+    // re-derivation coerces every seat through the same rule.
+    expect(
+      seatRoleValues(["mstar-review-seat", "deep-seat"], { "mstar-review-seat": "deep", "deep-seat": "" }, tabs),
+    ).toEqual({ "mstar-review-seat": "deep", "deep-seat": "default" });
+    expect(seatRoleValues(["mstar-review-seat"], { "mstar-review-seat": "deep" }, modelChainTabs([]))).toEqual({
+      "mstar-review-seat": "default",
+    });
+  });
+
+  test("seat section copy is dictionary-backed in both locales", () => {
+    expect(t("en", "settings.seats")).toBe("Seat chains");
+    expect(t("zh_CN", "settings.seats")).toBe("席位链");
+    expect(t("en", "settings.seatsCopy")).toContain("falls back to Default");
+    expect(t("zh_CN", "settings.seatsCopy")).toContain("回退到 Default");
+    expect(t("en", "settings.useDefaultChain")).toBe("Default chain");
+    expect(t("zh_CN", "settings.useDefaultChain")).toBe("Default 链");
+    expect(t("en", "settings.saveRoleModels")).toBe("Save seat chains");
+    expect(t("zh_CN", "settings.saveRoleModels")).toBe("保存席位链");
   });
 });

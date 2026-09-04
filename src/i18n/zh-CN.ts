@@ -336,7 +336,7 @@ export const zhCN: Dictionary = {
     addNamedChain: "添加命名链",
     defaultChain: "Default 链",
     seats: "席位链",
-    seatsCopy: "每个审查席位引用一条命名链。留空则使用 default 链。",
+    seatsCopy: "每个审查席位运行在 Default 链或显式选择的命名链上 — 其命名链被移除的席位会回退到 Default。",
     useDefaultChain: "Default 链",
     confirmRemoveChainTitle: "移除链 {name}？",
     confirmRemoveChainBody: "引用 {name} 的席位将回退到 default 链。",
