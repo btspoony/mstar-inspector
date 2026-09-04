@@ -17,9 +17,10 @@
  * never returns plaintext; keys never appear in route HTML.
  *
  * Duplication locks (architect decision Q2 forbids the dashboard from
- * importing pipeline/review code, so the copies must be pinned):
- * PROVIDER_IDS ≡ the pipeline catalog's builtin key sequence, PROVIDER_META
- * ≡ the catalog's display metadata snapshot (plan 35 T3, spec §5),
+ * importing pipeline/review code): PROVIDER_IDS ≡ the builtin id sequence
+ * (since plan 42 T1 a direct re-export of the generated contract, locked
+ * against both the contract and the pipeline face), PROVIDER_META ≡ the
+ * generated catalog (plan 35 T3, spec §5; full breadth since plan 42),
  * parseModelChain ≡ the runtime-omp parseModelSelectors behavior, and
  * MODEL_ROLE_IDS ≡ the review-side seat vocabulary (plan 17 B6), all
  * asserted against the originals here.
@@ -50,8 +51,9 @@ import {
   type AppCustomProvider,
 } from "../../src/dashboard/app-config-store";
 import { enabledSandboxImages, getSandboxImage, sandboxImageHostIds } from "../../src/contracts/sandbox-images";
+import { PROVIDER_CATALOG, PROVIDER_IDS_BUILTIN } from "../../src/contracts/provider-catalog.generated";
 import { createSecretbox } from "../../src/dashboard/secretbox";
-import { PROVIDER_CATALOG, PROVIDERS } from "../../src/pipeline/provider-catalog";
+import { PROVIDERS } from "../../src/pipeline/provider-catalog";
 import { DEEP_SEAT_ROLES, parseModelSelectors } from "../../src/review/runtime-omp";
 import { SESSION_COOKIE, createSessionValue } from "../../src/dashboard/session";
 import { createUser, type DashboardD1 } from "../../src/dashboard/users";
@@ -1243,40 +1245,33 @@ describe("app-config store (createAppConfigStore) — custom providers (plan 23 
 // --- duplication locks (Q2: dashboard may not import pipeline/review) ---
 
 describe("duplication locks", () => {
-  // PROVIDER_IDS — sync with the builtin tier of the generated catalog
-  // (src/pipeline/provider-catalog.ts). Drift breaks the locked 19-id set
-  // below (a future provider PR must update BOTH the pipeline catalog and
-  // this dashboard mirror).
+  // PROVIDER_IDS (plan 42 T1) — a direct re-export of the generated
+  // contract's builtin sequence (src/contracts/provider-catalog.generated.ts;
+  // dashboard → pipeline imports stay forbidden, so the mirror binds the
+  // CONTRACT, not the pipeline face). The locks below fail on any drift
+  // between the re-export, the contract, and the pipeline face's builtin
+  // tier (the runner-consumable 19 — never weakened).
   test("PROVIDER_IDS mirrors the pipeline catalog's builtin key sequence exactly", () => {
     expect([...PROVIDER_IDS]).toEqual(Object.keys(PROVIDERS));
+    expect([...PROVIDER_IDS]).toEqual([...PROVIDER_IDS_BUILTIN]);
     // 19 ids: the 18 built-in omp providers + `ark` (plan 24 Task 6 /
     // AL-24-5 — the in-image ark-plan base provider's ARK_API_KEY rides the
     // per-App BYOK keys map under this id).
     expect(PROVIDER_IDS).toHaveLength(19);
   });
 
-  // PROVIDER_META (plan 35 T3, spec §5) — the dashboard's catalog mirror:
-  // every catalog entry (builtin AND template) with its display metadata
-  // snapshot. Drift breaks the lock below (a catalog regeneration must
-  // update this mirror in the same commit).
+  // PROVIDER_META (plan 35 T3, spec §5; plan 42 T1 rewire) — the dashboard's
+  // catalog mirror: now the FULL generated catalog re-export (builtin AND
+  // template tier, breadth included) instead of a hand-maintained copy. The
+  // lock guards the re-export: PROVIDER_META must equal the generated
+  // PROVIDER_CATALOG (structurally — the mirror type ignores `envName`).
   test("PROVIDER_META mirrors the pipeline catalog's display metadata exactly", () => {
-    const catalogMirror = Object.fromEntries(
-      Object.entries(PROVIDER_CATALOG).map(([id, entry]) => [
-        id,
-        {
-          label: entry.label,
-          tier: entry.tier,
-          baseUrl: entry.baseUrl,
-          api: entry.api,
-          models: [...entry.models],
-          doc: entry.doc,
-        },
-      ]),
-    );
-    expect(PROVIDER_META).toEqual(catalogMirror);
-    // The mirror carries the template tier too (workers-ai) — the provider
-    // list UI and the materialization route consume it.
-    expect(Object.keys(PROVIDER_META)).toHaveLength(20);
+    expect(PROVIDER_META).toEqual(PROVIDER_CATALOG);
+    // The mirror carries the builtin tier (the 19) plus the full template
+    // tier (workers-ai + the snapshot breadth) — the provider list UI and
+    // the materialization route consume it.
+    expect(Object.keys(PROVIDER_META)).toHaveLength(214);
+    expect(Object.keys(PROVIDER_META).filter((id) => PROVIDER_META[id]!.tier === "builtin")).toHaveLength(19);
     expect(PROVIDER_META["workers-ai"]!.tier).toBe("template");
   });
 

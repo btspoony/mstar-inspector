@@ -577,6 +577,110 @@ describe("POST /dashboard/apps/:slug/settings — add-template-provider material
     expect(res.status).toBe(403);
     expect(db.raw.query("SELECT COUNT(*) AS n FROM app_custom_providers").get() as { n: number }).toEqual({ n: 0 });
   });
+
+  // --- plan 42 T1 breadth generalization (spec § Providers contract 1b) ---
+
+  test("a no-placeholder breadth template materializes WITHOUT an account id (catalog base URL prefill)", async () => {
+    const { db, app } = await seededWorld();
+    fetchSpy = mockStatus(200, { data: [] });
+    // `subconscious` is a snapshot breadth row: https base URL, no
+    // {account_id} placeholder. No account_id field is sent at all.
+    const res = await postForm(SETTINGS, "mallory", makeEnv(db), {
+      op: "add-template-provider",
+      template_id: "subconscious",
+      key: PLAIN_KEY,
+    });
+    expect(res.status).toBe(200);
+    expect(await res.text()).toContain("Subconscious");
+    // The probe hit the catalog-prefilled base URL (plan 31 custom probe
+    // path: {base}/models for a base already ending in /v1).
+    expect(fetchSpy).toHaveBeenCalledWith(
+      "https://api.subconscious.dev/v1/models",
+      expect.objectContaining({ method: "GET" }),
+    );
+    const store = createAppConfigStore(db, TEST_KEY);
+    const declared = await store.listCustomProviders(app.id);
+    expect(declared).toHaveLength(1);
+    expect(declared[0]!.provider_id).toBe("subconscious");
+    expect(declared[0]!.base_url).toBe("https://api.subconscious.dev/v1");
+    expect(declared[0]!.api).toBe("openai-completions");
+    // The prefill vocabulary is the breadth entry's snapshot model list.
+    expect(declared[0]!.model_ids).toEqual(["subconscious/glm-5.2", "subconscious/tim-qwen3.6-27b"]);
+  });
+
+  test("a base_url form override replaces the catalog prefill and materializes through the same validators", async () => {
+    const { db, app } = await seededWorld();
+    fetchSpy = mockStatus(200, { data: [] });
+    const res = await postForm(SETTINGS, "mallory", makeEnv(db), {
+      op: "add-template-provider",
+      template_id: "subconscious",
+      base_url: "https://gateway.example.com/v1",
+      key: PLAIN_KEY,
+    });
+    expect(res.status).toBe(200);
+    expect(fetchSpy).toHaveBeenCalledWith(
+      "https://gateway.example.com/v1/models",
+      expect.objectContaining({ method: "GET" }),
+    );
+    const store = createAppConfigStore(db, TEST_KEY);
+    const declared = await store.listCustomProviders(app.id);
+    expect(declared).toHaveLength(1);
+    expect(declared[0]!.base_url).toBe("https://gateway.example.com/v1");
+    expect(declared[0]!.api).toBe("openai-completions");
+  });
+
+  test("a non-https base_url override → 400 before any network call, zero rows stored", async () => {
+    const { db } = await seededWorld();
+    fetchSpy = spyOn(globalThis, "fetch").mockImplementation((async () => {
+      throw new Error("fetch must not be called for an invalid base URL");
+    }) as unknown as typeof fetch);
+    const res = await postForm(SETTINGS, "mallory", makeEnv(db), {
+      op: "add-template-provider",
+      template_id: "subconscious",
+      base_url: "http://insecure.example.com/v1",
+      key: PLAIN_KEY,
+    });
+    expect(res.status).toBe(400);
+    expect(await res.text()).toContain("not a valid https URL");
+    expect(fetchSpy).not.toHaveBeenCalled();
+    expect(db.raw.query("SELECT COUNT(*) AS n FROM app_custom_providers").get() as { n: number }).toEqual({ n: 0 });
+  });
+
+  test("a template with a null catalog base URL and no override → 400 incomplete, zero rows stored", async () => {
+    const { db } = await seededWorld();
+    fetchSpy = spyOn(globalThis, "fetch").mockImplementation((async () => {
+      throw new Error("fetch must not be called for an incomplete template");
+    }) as unknown as typeof fetch);
+    // `watsonx` is a snapshot breadth row whose `api` (base URL) is null —
+    // the "incomplete" 400 fires only when BOTH the catalog and the form
+    // base URL are absent.
+    const res = await postForm(SETTINGS, "mallory", makeEnv(db), {
+      op: "add-template-provider",
+      template_id: "watsonx",
+      key: PLAIN_KEY,
+    });
+    expect(res.status).toBe(400);
+    expect(await res.text()).toContain("incomplete");
+    expect(fetchSpy).not.toHaveBeenCalled();
+    expect(db.raw.query("SELECT COUNT(*) AS n FROM app_custom_providers").get() as { n: number }).toEqual({ n: 0 });
+  });
+
+  test("an {account_id}-templated override demands the account id (conditional demand follows the effective base URL)", async () => {
+    const { db } = await seededWorld();
+    fetchSpy = spyOn(globalThis, "fetch").mockImplementation((async () => {
+      throw new Error("fetch must not be called without an account id");
+    }) as unknown as typeof fetch);
+    const res = await postForm(SETTINGS, "mallory", makeEnv(db), {
+      op: "add-template-provider",
+      template_id: "subconscious",
+      base_url: "https://api.example.com/accounts/{account_id}/v1",
+      key: PLAIN_KEY,
+    });
+    expect(res.status).toBe(400);
+    expect(await res.text()).toContain("account id");
+    expect(fetchSpy).not.toHaveBeenCalled();
+    expect(db.raw.query("SELECT COUNT(*) AS n FROM app_custom_providers").get() as { n: number }).toEqual({ n: 0 });
+  });
 });
 
 describe("GET settings includes delivery_summary for the sidebar (plan 31 T6)", () => {

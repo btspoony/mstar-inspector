@@ -26,9 +26,10 @@
  *
  * Module boundary: dashboard-side leaf consumed by the dashboard routes and
  * (Task 3) the pipeline consumer — imports ONLY src/dashboard/secretbox.ts
- * (itself a zero-dependency leaf) and the zero-dependency sandbox-image
- * contract (src/contracts/sandbox-images.ts — the plan-37 registry, static
- * contract data, NOT pipeline/review code), so the dashboard ↛
+ * (itself a zero-dependency leaf) and the zero-dependency src/contracts/
+ * static contract data (src/contracts/sandbox-images.ts — the plan-37
+ * registry; src/contracts/provider-catalog.generated.ts — the plan-42
+ * generated catalog SSOT; both NOT pipeline/review code), so the dashboard ↛
  * pipeline/worker isolation stays intact. The `db` parameter is a
  * locally-declared narrow D1 face (types only, zero imports) — a real
  * `D1Database`, the bun:sqlite test double (tests/store/helpers.ts), and the
@@ -112,6 +113,7 @@
  */
 import { createSecretbox } from "./secretbox";
 import { sandboxImageHostIds } from "../contracts/sandbox-images";
+import { PROVIDER_CATALOG, PROVIDER_IDS_BUILTIN } from "../contracts/provider-catalog.generated";
 
 /** A row of `app_provider_keys` (D1 column names, snake_case; migration 0006). */
 export type AppProviderKeyRow = {
@@ -265,57 +267,35 @@ export function modelCacheProviderKey(provider: string): string {
 }
 
 /**
- * The provider id allowlist — the keys of the `PROVIDERS` mapping in
- * src/pipeline/provider-catalog.ts (19 builtin-tier provider ids incl.
- * `ark`, same order — plan 24 Task 6 / AL-24-5 added `ark` so the in-image
- * ark-plan base provider's ARK_API_KEY rides the per-App BYOK keys map like
- * every other provider). Declared locally, NOT imported: dashboard modules
- * must not import pipeline code (architect decision Q2, src/dashboard/
- * index.ts header). The copy is locked in sync by tests/worker/
- * app-config.test.ts (id-sequence equality against the pipeline catalog's
- * builtin tier — the coverage-lock pattern).
+ * The provider id allowlist — the builtin tier of the generated provider
+ * catalog (19 builtin-tier provider ids incl. `ark`, same order — plan 24
+ * Task 6 / AL-24-5 added `ark` so the in-image ark-plan base provider's
+ * ARK_API_KEY rides the per-App BYOK keys map like every other provider).
+ * Re-exported from the generated contract (plan 42 T1): the catalog SSOT
+ * lives in src/contracts/provider-catalog.generated.ts — a
+ * dashboard-importable pure-data module (Q2 forbids dashboard → pipeline
+ * imports, so the mirror is a re-export of the CONTRACT, not a hand copy).
  */
-export const PROVIDER_IDS: readonly string[] = Object.freeze([
-  "anthropic",
-  "openai",
-  "gemini",
-  "copilot",
-  "azure-openai",
-  "groq",
-  "cerebras",
-  "xai",
-  "openrouter",
-  "kilo",
-  "mistral",
-  "zai",
-  "umans",
-  "minimax",
-  "opencode",
-  "cursor",
-  "ai-gateway",
-  "wafer-serverless",
-  "ark",
-]);
+export const PROVIDER_IDS: readonly string[] = PROVIDER_IDS_BUILTIN;
 
 /**
- * The dashboard's catalog mirror (spec §5, plan 35 T3) — PROVIDER_IDS
- * extended with the display metadata snapshot: every catalog entry (builtin
- * AND template tier) as id → { label, tier, baseUrl, api, models, doc }.
- * Declared locally, NOT imported (Q2 — dashboard modules never import
- * pipeline code); the copy is parity-locked against
- * src/pipeline/provider-catalog.ts by tests/worker/app-config.test.ts
- * (key set, labels, tiers, baseUrl, api, models, doc — the PROVIDER_IDS
- * lock pattern). `tier: "template"` entries are NOT runner-consumable
- * env-name entries — the save flow materializes them through the existing
- * custom-provider machinery (app_custom_providers) with `baseUrl`'s
- * {account_id} placeholder substituted by the user's account id.
+ * The dashboard's catalog mirror (spec §5, plan 35 T3; plan 42 T1 rewire) —
+ * the FULL generated catalog (builtin AND template tier, ~214 rows) as
+ * id → { label, tier, baseUrl, api, models, doc }, re-exported from
+ * src/contracts/provider-catalog.generated.ts. The generated entry shape is
+ * structurally assignable to ProviderMirrorEntry (it additionally carries
+ * `envName`, which the mirror type ignores). `tier: "template"` entries are
+ * NOT runner-consumable env-name entries — the save flow materializes them
+ * through the existing custom-provider machinery (app_custom_providers),
+ * substituting a {account_id} base-URL placeholder when the entry's base
+ * URL carries one.
  */
 export type ProviderMirrorEntry = {
   /** Human-readable provider label (picker/table). */
   label: string;
   /** builtin = runner-consumable env-name entry; template = metadata + prefill only. */
   tier: "builtin" | "template";
-  /** Default API base URL. Template entries carry a {account_id} placeholder. */
+  /** Default API base URL. Template entries may carry a {account_id} placeholder. */
   baseUrl: string | null;
   /** Custom-provider API protocol to materialize a template with (template tier only). */
   api: string | null;
@@ -325,35 +305,7 @@ export type ProviderMirrorEntry = {
   doc: string | null;
 };
 
-export const PROVIDER_META: Record<string, ProviderMirrorEntry> = {
-  anthropic: { label: "Anthropic", tier: "builtin", baseUrl: null, api: null, models: ["claude-fable-5", "claude-fable-5-1", "claude-haiku-4-5", "claude-haiku-4-5-20251001", "claude-opus-4-5"], doc: "https://docs.anthropic.com/en/docs/about-claude/models" },
-  openai: { label: "OpenAI", tier: "builtin", baseUrl: null, api: null, models: ["chatgpt-image-latest", "gpt-3.5-turbo", "gpt-4", "gpt-4-turbo", "gpt-4.1"], doc: "https://platform.openai.com/docs/models" },
-  gemini: { label: "Google Gemini", tier: "builtin", baseUrl: null, api: null, models: ["deep-research-max-preview-04-2026", "deep-research-preview-04-2026", "gemini-2.5-computer-use-preview-10-2025", "gemini-2.5-flash", "gemini-2.5-flash-image"], doc: "https://ai.google.dev/gemini-api/docs/models" },
-  copilot: { label: "GitHub Copilot", tier: "builtin", baseUrl: "https://api.githubcopilot.com", api: null, models: ["claude-fable-5", "claude-haiku-4.5", "claude-opus-4.5", "claude-opus-4.6", "claude-opus-4.7"], doc: "https://docs.github.com/en/copilot" },
-  "azure-openai": { label: "Azure OpenAI", tier: "builtin", baseUrl: null, api: null, models: ["claude-fable-5", "claude-fable-5-1", "claude-haiku-4-5", "claude-mythos-5", "claude-opus-4-1"], doc: "https://learn.microsoft.com/en-us/azure/ai-services/openai/concepts/models" },
-  groq: { label: "Groq", tier: "builtin", baseUrl: null, api: null, models: ["allam-2-7b", "canopylabs/orpheus-arabic-saudi", "canopylabs/orpheus-v1-english", "groq/compound", "groq/compound-mini"], doc: "https://console.groq.com/docs/models" },
-  cerebras: { label: "Cerebras", tier: "builtin", baseUrl: null, api: null, models: ["gemma-4-31b", "gpt-oss-120b"], doc: "https://inference-docs.cerebras.ai/models/overview" },
-  xai: { label: "xAI", tier: "builtin", baseUrl: null, api: null, models: ["grok-4.20-0309-non-reasoning", "grok-4.20-0309-reasoning", "grok-4.20-multi-agent-0309", "grok-4.3", "grok-4.5"], doc: "https://docs.x.ai/docs/models" },
-  openrouter: { label: "OpenRouter", tier: "builtin", baseUrl: "https://openrouter.ai/api/v1", api: null, models: ["aion-labs/aion-2.0", "aion-labs/aion-3.0", "aion-labs/aion-3.0-mini", "aion-labs/aion-rp-llama-3.1-8b", "amazon/nova-2-lite-v1"], doc: "https://openrouter.ai/models" },
-  kilo: { label: "Kilo", tier: "builtin", baseUrl: "https://api.kilo.ai/api/gateway", api: null, models: ["aion-labs/aion-2.0", "aion-labs/aion-3.0", "aion-labs/aion-3.0-mini", "aion-labs/aion-rp-llama-3.1-8b", "amazon/nova-2-lite-v1"], doc: "https://kilo.ai" },
-  mistral: { label: "Mistral", tier: "builtin", baseUrl: null, api: null, models: ["codestral-latest", "devstral-2512", "devstral-latest", "devstral-medium-2507", "devstral-medium-latest"], doc: "https://docs.mistral.ai/getting-started/models/" },
-  zai: { label: "Z.AI", tier: "builtin", baseUrl: "https://api.z.ai/api/paas/v4", api: null, models: ["glm-4.5", "glm-4.5-air", "glm-4.5-flash", "glm-4.5v", "glm-4.6"], doc: "https://docs.z.ai/guides/overview/pricing" },
-  umans: { label: "Umans AI Coding Plan", tier: "builtin", baseUrl: "https://api.code.umans.ai/v1", api: null, models: ["umans-coder", "umans-deepseek-v4-flash-0731", "umans-deepseek-v4-pro-0813", "umans-flash", "umans-glm-5.2"], doc: "https://app.umans.ai/offers/code/docs" },
-  minimax: { label: "MiniMax", tier: "builtin", baseUrl: "https://api.minimax.io/anthropic/v1", api: null, models: ["MiniMax-M2", "MiniMax-M2.1", "MiniMax-M2.5", "MiniMax-M2.5-highspeed", "MiniMax-M2.7"], doc: "https://platform.minimax.io/docs/guides/quickstart" },
-  opencode: { label: "OpenCode", tier: "builtin", baseUrl: "https://opencode.ai/zen/v1", api: null, models: ["big-pickle", "claude-3-5-haiku", "claude-fable-5", "claude-fable-5-1", "claude-haiku-4-5"], doc: "https://opencode.ai/docs/zen" },
-  cursor: { label: "Cursor", tier: "builtin", baseUrl: null, api: null, models: [], doc: "https://cursor.com/docs/api/overview" },
-  "ai-gateway": { label: "AI Gateway", tier: "builtin", baseUrl: null, api: null, models: ["alibaba/qwen3-max", "alibaba/qwen3.5-397b-a17b", "alibaba/qwen3.7-max", "alibaba/qwen3.7-plus", "alibaba/qwen3.8-max"], doc: "https://developers.cloudflare.com/ai-gateway/" },
-  "wafer-serverless": { label: "Wafer Serverless", tier: "builtin", baseUrl: "https://pass.wafer.ai/v1", api: null, models: ["GLM-5.1", "GLM-5.2", "Kimi-K2.6", "MiniMax-M3", "glm5.2-fast"], doc: "https://docs.wafer.ai/wafer-pass" },
-  ark: { label: "Ark", tier: "builtin", baseUrl: "https://ark.cn-beijing.volces.com/api/v3", api: null, models: ["deepseek-v4-flash-ga-260731", "deepseek-v4-pro-ga-260813", "doubao-seed-1-6-251015", "doubao-seed-1-6-flash-250828", "doubao-seed-1-6-vision-250815"], doc: "https://www.volcengine.com/docs/82379/1330310" },
-  "workers-ai": {
-    label: "Cloudflare Workers AI",
-    tier: "template",
-    baseUrl: "https://api.cloudflare.com/client/v4/accounts/{account_id}/ai/v1",
-    api: "openai-completions",
-    models: ["@cf/meta/llama-3.3-70b-instruct-fp8-fast", "@cf/meta/llama-4-scout-17b-16e-instruct", "@cf/qwen/qwen3-30b-a3b-fp8", "@cf/qwen/qwen2.5-coder-32b-instruct", "@cf/deepseek-ai/deepseek-v4-flash-0731", "@cf/deepseek-ai/deepseek-r1-distill-qwen-32b", "@cf/google/gemma-4-26b-a4b-it", "@cf/mistralai/mistral-small-3.1-24b-instruct"],
-    doc: "https://developers.cloudflare.com/workers-ai/models/",
-  },
-};
+export const PROVIDER_META: Record<string, ProviderMirrorEntry> = PROVIDER_CATALOG;
 
 /**
  * The per-role model vocabulary (plan 17 B6, spec § B6 语义锁) — EXACTLY the
