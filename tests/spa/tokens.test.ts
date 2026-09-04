@@ -2,9 +2,10 @@
  * Plan 29 Task 1: DESIGN.md L2 dual-theme tokens ↔ src/spa/styles/tokens.css.
  *
  * Locked contract:
- *   - version 0.2.0, defaultTheme dark, prefers-color-scheme light
- *     (DESIGN.md frontmatter assertions pin the file as-is; Task 2 rewrites
- *     the theme keys together with the DESIGN.md edit)
+ *   - version 0.2.0, defaultTheme dark; the theme mechanism is the manual
+ *     data-theme override (navbar toggle) with the prefers-color-scheme
+ *     fallback — plan 41 T2 rewrites the frontmatter keys together with the
+ *     DESIGN.md body and pins the dated plan-29 supersede note
  *   - L1 token names kept; original light hexes live on themes.light
  *   - top-level colors: === themes.dark.colors
  *   - both theme palettes share the same key set
@@ -17,6 +18,11 @@ import { describe, expect, test } from "bun:test";
 
 const DESIGN = new URL("../../DESIGN.md", import.meta.url);
 const TOKENS_CSS = new URL("../../src/spa/styles/tokens.css", import.meta.url);
+
+/** Plan 41 theme mechanism — frontmatter top level and themes: stay equal. */
+const THEME_MECHANISM = "manual data-theme override (navbar toggle), prefers-color-scheme fallback";
+/** Dated user authorization reversing the plan-29 "no toggle" lock. */
+const SUPERSEDE_NOTE = "Supersedes the plan-29 lock (2026-09-04, user instruction, iteration 013)";
 
 const KEPT_LIGHT: Record<string, string> = {
   "background-100": "#ffffff",
@@ -34,6 +40,7 @@ const TYPO_FIELDS = ["fontFamily", "fontSize", "fontWeight", "lineHeight", "lett
 
 type DesignFrontmatter = {
   version: string;
+  description: string;
   defaultTheme: string;
   themeMechanism: string;
   colors: Record<string, string>;
@@ -90,9 +97,14 @@ describe("DESIGN.md L2 dual-theme tokens", () => {
     const fm = await loadFrontmatter();
     expect(fm.version).toBe("0.2.0");
     expect(fm.defaultTheme).toBe("dark");
-    expect(fm.themeMechanism).toBe("prefers-color-scheme");
+    // Plan 41 T2: manual data-theme override (navbar toggle) with the OS
+    // fallback — top-level keys and themes: keys move together.
+    expect(fm.themeMechanism).toBe(THEME_MECHANISM);
     expect(fm.themes.default).toBe("dark");
-    expect(fm.themes.mechanism).toBe("prefers-color-scheme");
+    expect(fm.themes.mechanism).toBe(THEME_MECHANISM);
+    // The description states the same contract and carries the supersede note.
+    expect(fm.description).toContain("navbar theme toggle");
+    expect(fm.description).toContain(SUPERSEDE_NOTE);
 
     for (const name of Object.keys(KEPT_LIGHT)) {
       expect(fm.colors[name]).toBeDefined();
@@ -199,6 +211,25 @@ describe("src/spa/styles/tokens.css mapping", () => {
     expect(rootVars["sidebar-bg"]).toBe("var(--background-200)");
     expect(rootVars["notice-error-fg"]).toBe("var(--red-900)");
     expect(rootVars["typo-heading-24-size"]).toBe("24px");
+  });
+});
+
+describe("DESIGN.md theme contract (plan 41 T2)", () => {
+  test("manual navbar-toggle override documented with the dated plan-29 supersede note", async () => {
+    const md = await Bun.file(DESIGN).text();
+    // The toggle contract: storage key + pre-paint application, in body prose.
+    expect(md).toContain('localStorage["mstar.dashboard.theme"]');
+    expect(md).toContain("documentElement.dataset.theme");
+    expect(md).toContain(SUPERSEDE_NOTE);
+    // Cascade description matches the plan 41 T1 tokens.css restructure.
+    expect(md).toContain(':root[data-theme="light"]');
+    expect(md).toContain(':root:not([data-theme="dark"])');
+    // The plan-29 lock wording is gone from every theme location.
+    expect(md).not.toContain("No independent theme toggle");
+    expect(md).not.toContain("navbar theme button");
+    expect(md).not.toContain("switcher");
+    expect(md).not.toContain("Do not introduce a theme toggle");
+    expect(md).not.toContain("locked, plan 29");
   });
 });
 
