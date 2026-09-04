@@ -21,13 +21,19 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { fetchJson, postForm } from "../api";
 import type { SpaBoot } from "../boot";
 import { formatRelativeTime } from "../relative-time";
 import {
+  activeChainTabId,
+  DEFAULT_CHAIN_NAME,
+  modelChainTabs,
   parseModels,
   parseSettings,
   providerFormKind,
+  seatRoleValues,
+  seatSelectValue,
   selectedCatalogProvider,
   splitModelChain,
   type CatalogProvider,
@@ -262,6 +268,7 @@ function SettingsView({
             onSettings={submitSettings}
             onRemoveChain={(name) => setPending({ kind: "remove-chain", name })}
           />
+          <SeatsCard locale={locale} payload={payload} onSettings={submitSettings} />
         </>
       ) : null}
 
@@ -346,7 +353,7 @@ function pendingConfirmCopy(
     disable: {
       title: t(locale, "settings.confirmDisableTitle", { slug }),
       body: t(locale, "settings.confirmDisableBody"),
-      action: t(locale, "apps.actions.disable"),
+      action: t(locale, "settings.confirmDisableAction"),
       destructive: true,
     },
     enable: {
@@ -539,7 +546,7 @@ function OpsCard({
             <p className="text-sm text-muted-foreground">{t(locale, "settings.disconnected")}</p>
           )}
           {app.status === "active" ? (
-            <Button type="button" variant="secondary" onClick={() => onPending({ kind: "disable" })}>
+            <Button type="button" variant="destructive-outline" onClick={() => onPending({ kind: "disable" })}>
               {t(locale, "apps.actions.disable")}
             </Button>
           ) : (
@@ -1039,108 +1046,153 @@ function ChainsCard({
   onSettings: (fields: Record<string, string>) => Promise<boolean>;
   onRemoveChain: (name: string) => void;
 }) {
-  const named = payload.model_chains.filter((chain) => !chain.is_default);
-  const roleHint = (role: string) =>
-    role === "mstar-review-seat" ? t(locale, "settings.roleHintReviewSeat") : t(locale, "settings.roleHintDeep");
-  const [seats, setSeats] = useState<Record<string, string>>(() => {
-    const next: Record<string, string> = {};
-    for (const role of payload.model_role_ids) {
-      const stored = payload.model_roles[role] ?? "";
-      next[role] = stored === "" ? "default" : stored;
-    }
-    return next;
-  });
   const [newName, setNewName] = useState("");
-
-  useEffect(() => {
-    const next: Record<string, string> = {};
-    for (const role of payload.model_role_ids) {
-      const stored = payload.model_roles[role] ?? "";
-      next[role] = stored === "" ? "default" : stored;
-    }
-    setSeats(next);
-  }, [payload.model_role_ids, payload.model_roles]);
+  // Plan 39: Default and named chains are peer tabs. The selection coerces
+  // through activeChainTabId so a delete or a stale payload lands on the
+  // non-removable Default tab instead of pointing at a removed chain.
+  const [selectedTab, setSelectedTab] = useState<string>(DEFAULT_CHAIN_NAME);
+  const tabs = modelChainTabs(payload.model_chains);
+  const namedTabs = tabs.filter((tab) => !tab.isDefault);
 
   return (
     <Card>
       <CardHeader>
-        <CardTitle>{t(locale, "settings.namedChains")}</CardTitle>
-        <CardDescription>{t(locale, "settings.namedChainsCopy")}</CardDescription>
+        <CardTitle>{t(locale, "settings.modelChains")}</CardTitle>
+        <CardDescription>{t(locale, "settings.modelChainsCopy")}</CardDescription>
       </CardHeader>
-      <CardContent className="flex flex-col gap-8">
-        <section className="flex flex-col gap-3">
-          <h3 className="text-sm font-medium">{t(locale, "settings.defaultChain")}</h3>
-          <ChainEditor
-            locale={locale}
-            groups={groups}
-            stored={payload.model_chain}
-            onSave={(chain) => void onSettings({ op: "save-chain", model_chain: chain })}
-          />
-        </section>
+      <CardContent className="flex flex-col gap-6">
+        <Tabs value={activeChainTabId(tabs, selectedTab)} onValueChange={setSelectedTab}>
+          <TabsList aria-label={t(locale, "settings.modelChains")}>
+            {tabs.map((tab) => (
+              <TabsTrigger key={tab.id} value={tab.id}>
+                {tab.isDefault ? t(locale, "settings.defaultChain") : tab.id}
+              </TabsTrigger>
+            ))}
+          </TabsList>
+          {/* forceMount keeps every editor mounted (as the pre-tab list did),
+              so switching tabs never silently drops in-progress edits. Radix
+              itself hides nothing once forceMount pins every panel to
+              present — inactive panels are hidden by the local TabsContent
+              wrapper's data-[state=inactive]:hidden class. */}
+          <TabsContent forceMount value={DEFAULT_CHAIN_NAME}>
+            <ChainEditor
+              locale={locale}
+              groups={groups}
+              stored={payload.model_chain}
+              onSave={(chain) => void onSettings({ op: "save-chain", model_chain: chain })}
+            />
+          </TabsContent>
+          {namedTabs.map((tab) => (
+            <TabsContent key={tab.id} forceMount value={tab.id}>
+              <div className="mb-2 flex items-center justify-between gap-2">
+                <span className="font-medium">{tab.id}</span>
+                <Button type="button" variant="destructive" size="sm" onClick={() => onRemoveChain(tab.id)}>
+                  {t(locale, "settings.remove")}
+                </Button>
+              </div>
+              <ChainEditor
+                locale={locale}
+                groups={groups}
+                stored={tab.chain}
+                onSave={(value) => void onSettings({ op: "add-chain", name: tab.id, chain: value })}
+              />
+            </TabsContent>
+          ))}
+        </Tabs>
 
         <section className="flex flex-col gap-3">
           <h3 className="text-sm font-medium">{t(locale, "settings.namedChains")}</h3>
-          {named.length === 0 ? (
+          {namedTabs.length === 0 ? (
             <p className="text-sm text-muted-foreground">{t(locale, "settings.noNamedChains")}</p>
-          ) : (
-            named.map((chain) => (
-              <div key={chain.name} className="rounded-md border p-3">
-                <div className="mb-2 flex items-center justify-between gap-2">
-                  <span className="font-medium">{chain.name}</span>
-                  <Button type="button" variant="destructive" size="sm" onClick={() => onRemoveChain(chain.name)}>
-                    {t(locale, "settings.remove")}
-                  </Button>
-                </div>
-                <ChainEditor
-                  locale={locale}
-                  groups={groups}
-                  stored={chain.chain}
-                  onSave={(value) => void onSettings({ op: "add-chain", name: chain.name, chain: value })}
-                />
-              </div>
-            ))
-          )}
-          <NamedChainCreate locale={locale} groups={groups} name={newName} onName={setNewName} onSettings={onSettings} />
+          ) : null}
+          <NamedChainCreate
+            locale={locale}
+            groups={groups}
+            name={newName}
+            onName={setNewName}
+            onSettings={onSettings}
+            onCreated={(created) => setSelectedTab(created)}
+          />
         </section>
+      </CardContent>
+    </Card>
+  );
+}
 
-        <section className="flex flex-col gap-3">
-          <h3 className="text-sm font-medium">{t(locale, "settings.seats")}</h3>
-          <p className="text-sm text-muted-foreground">{t(locale, "settings.seatsCopy")}</p>
-          <form
-            className="flex flex-col gap-3"
-            onSubmit={(event) => {
-              event.preventDefault();
-              const fields: Record<string, string> = { op: "save-roles" };
-              for (const role of payload.model_role_ids) {
-                fields[`role_${role}`] = seats[role] ?? "default";
-              }
-              void onSettings(fields);
-            }}
-          >
-            {payload.model_role_ids.map((role) => (
-              <label key={role} className="flex flex-col gap-1.5 text-sm font-medium">
-                {role} — {roleHint(role)}
-                <Select
-                  value={seats[role] ?? "default"}
-                  onValueChange={(value) => setSeats((current) => ({ ...current, [role]: value }))}
-                >
-                  <SelectTrigger>
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="default">{t(locale, "settings.useDefaultChain")}</SelectItem>
-                    {named.map((chain) => (
-                      <SelectItem key={chain.name} value={chain.name}>
-                        {chain.name}
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-              </label>
-            ))}
-            <Button type="submit">{t(locale, "settings.saveRoleModels")}</Button>
-          </form>
-        </section>
+/**
+ * Seats (plan 39 T2): the role → chain mapping is its own card below chain
+ * management, independent of the chain tabs. Every select offers Default
+ * first, then the current named chains from the same plan-39 tab model; a
+ * stored name that no longer resolves (deleted chain, stale payload) renders
+ * and saves as Default, so op=save-roles never submits an invalid reference.
+ * The save stays the route's full-map contract: one role_<role> field per
+ * audit seat, always all seats.
+ */
+function SeatsCard({
+  locale,
+  payload,
+  onSettings,
+}: {
+  locale: SpaBoot["locale"];
+  payload: SettingsManagePayload;
+  onSettings: (fields: Record<string, string>) => Promise<boolean>;
+}) {
+  const tabs = modelChainTabs(payload.model_chains);
+  const namedTabs = tabs.filter((tab) => !tab.isDefault);
+  const roleHint = (role: string) =>
+    role === "mstar-review-seat" ? t(locale, "settings.roleHintReviewSeat") : t(locale, "settings.roleHintDeep");
+  const [seats, setSeats] = useState<Record<string, string>>(() =>
+    seatRoleValues(payload.model_role_ids, payload.model_roles, modelChainTabs(payload.model_chains)),
+  );
+
+  // After every background reload (chain delete cascades included) the seat
+  // state re-derives from the payload; seatSelectValue keeps any reference
+  // the refreshed tab model no longer offers on the safe Default value.
+  useEffect(() => {
+    setSeats(seatRoleValues(payload.model_role_ids, payload.model_roles, modelChainTabs(payload.model_chains)));
+  }, [payload.model_role_ids, payload.model_roles, payload.model_chains]);
+
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle>{t(locale, "settings.seats")}</CardTitle>
+        <CardDescription>{t(locale, "settings.seatsCopy")}</CardDescription>
+      </CardHeader>
+      <CardContent>
+        <form
+          className="flex flex-col gap-3"
+          onSubmit={(event) => {
+            event.preventDefault();
+            const fields: Record<string, string> = { op: "save-roles" };
+            for (const role of payload.model_role_ids) {
+              fields[`role_${role}`] = seatSelectValue(tabs, seats[role]);
+            }
+            void onSettings(fields);
+          }}
+        >
+          {payload.model_role_ids.map((role) => (
+            <label key={role} className="flex flex-col gap-1.5 text-sm font-medium">
+              {role} — {roleHint(role)}
+              <Select
+                value={seatSelectValue(tabs, seats[role])}
+                onValueChange={(value) => setSeats((current) => ({ ...current, [role]: value }))}
+              >
+                <SelectTrigger>
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value={DEFAULT_CHAIN_NAME}>{t(locale, "settings.useDefaultChain")}</SelectItem>
+                  {namedTabs.map((tab) => (
+                    <SelectItem key={tab.id} value={tab.id}>
+                      {tab.id}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </label>
+          ))}
+          <Button type="submit">{t(locale, "settings.saveRoleModels")}</Button>
+        </form>
       </CardContent>
     </Card>
   );
@@ -1152,12 +1204,15 @@ function NamedChainCreate({
   name,
   onName,
   onSettings,
+  onCreated,
 }: {
   locale: SpaBoot["locale"];
   groups: ModelOptionGroup[];
   name: string;
   onName: (name: string) => void;
   onSettings: (fields: Record<string, string>) => Promise<boolean>;
+  /** Fired after a successful create (the reload has landed) so the new tab is selected. */
+  onCreated: (name: string) => void;
 }) {
   const [chain, setChain] = useState<string[]>([]);
   return (
@@ -1184,6 +1239,9 @@ function NamedChainCreate({
               if (ok) {
                 onName("");
                 setChain([]);
+                // Plan 39: the successful reload has landed, so the created
+                // chain's tab exists — select it.
+                onCreated(name);
               }
             });
           }}

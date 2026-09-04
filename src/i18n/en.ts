@@ -159,7 +159,7 @@ export const en = {
     actions: {
       pause: "Pause",
       resume: "Resume",
-      disable: "Disable",
+      disable: "Disable (reversible)",
       enable: "Enable",
       delete: "Delete",
     },
@@ -316,6 +316,7 @@ export const en = {
     confirmResumeBody: "This App will review pull requests again.",
     confirmDisableTitle: "Disable {slug}?",
     confirmDisableBody: "GitHub deliveries will get 404 until you enable it again.",
+    confirmDisableAction: "Disable",
     confirmEnableTitle: "Enable {slug}?",
     confirmEnableBody: "This App will accept webhook deliveries again.",
     confirmDeleteTitle: "Delete {slug}?",
@@ -349,15 +350,17 @@ export const en = {
     addTemplate: "Add {label}",
     tierBuiltin: "built-in",
     tierTemplate: "template",
+    modelChains: "Model chains",
+    modelChainsCopy:
+      "Default and named chains are peer tabs — edit each chain in its tab. The default chain is required and can't be removed; seats on a removed named chain fall back to the default.",
     namedChains: "Named chains",
-    namedChainsCopy:
-      "Each App has one default chain plus optional named chains. Audit seats pick a named chain or leave blank to use the default.",
     chainName: "Chain name",
     chainNamePlaceholder: "e.g. deep-review",
     addNamedChain: "Add named chain",
     defaultChain: "Default chain",
     seats: "Seat chains",
-    seatsCopy: "Each audit seat references a named chain. Blank uses the default chain.",
+    seatsCopy:
+      "Each audit seat runs on the Default chain or an explicit named chain — a seat whose named chain was removed falls back to Default.",
     useDefaultChain: "Default chain",
     confirmRemoveChainTitle: "Remove chain {name}?",
     confirmRemoveChainBody: "Seats using {name} fall back to the default chain.",

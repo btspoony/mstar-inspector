@@ -7,7 +7,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { t } from "../../src/i18n";
 import { composeModelOptions } from "../../src/dashboard/model-membership";
-import { parseModels, splitModelChain } from "../../src/spa/pages/data";
+import { parseModels, modelChainTabs, seatRoleValues, seatSelectValue, splitModelChain } from "../../src/spa/pages/data";
 
 describe("settings layout (plan 35 T4)", () => {
   test("SettingsPage folds ops + health into an authorized ops zone; providers and chains are shadcn", () => {
@@ -277,5 +277,208 @@ describe("catalog provenance + eligibility messaging (plan 38 T3)", () => {
     expect(t("zh_CN", "settings.eligibilityUnavailableShort", { image: "omp" })).toContain("omp");
     expect(t("en", "settings.addProviderCopy")).toContain("can't be saved");
     expect(t("zh_CN", "settings.addProviderCopy")).toContain("无法保存");
+  });
+});
+
+describe("model chain tabs (plan 39 T1)", () => {
+  test("Default and named chains are peer shadcn tabs with a coherent selected state", () => {
+    const source = readFileSync(join(import.meta.dir, "../../src/spa/pages/SettingsPage.tsx"), "utf8");
+    // The chain card is an accessible Radix tablist (roles + arrow-key nav via
+    // the existing shadcn Tabs primitives), not a stacked list.
+    expect(source).toContain("TabsList");
+    expect(source).toContain("TabsTrigger");
+    expect(source).toContain("TabsContent");
+    // Tab ids come from the pure plan-39 tab model; the selection coerces to a
+    // tab that exists so deletes/reloads land on Default.
+    expect(source).toContain("modelChainTabs(payload.model_chains)");
+    expect(source).toContain("activeChainTabId(tabs, selectedTab)");
+    // The Default tab saves through op=save-chain; named tabs update in place
+    // through op=add-chain — no rename op anywhere.
+    expect(source).toContain('op: "save-chain"');
+    expect(source).toContain('op: "add-chain", name: tab.id, chain: value');
+    // Only the named tabs' content offers remove, via the existing
+    // confirm-dialog flow (pendingConfirmCopy → op=remove-chain).
+    expect(source).toContain("onRemoveChain(tab.id)");
+    // A successful create selects the new tab after the reload lands.
+    expect(source).toContain("onCreated={(created) => setSelectedTab(created)}");
+    // Chain mutation ops stay as-is.
+    expect(source).toContain('op: "remove-chain"');
+    expect(source).toContain("settings.confirmRemoveChainTitle");
+  });
+
+  test("the Default tab never offers remove; add/create copy is dictionary-backed in both locales", () => {
+    const source = readFileSync(join(import.meta.dir, "../../src/spa/pages/SettingsPage.tsx"), "utf8");
+    const defaultContent = source.slice(
+      source.indexOf("<TabsContent forceMount value={DEFAULT_CHAIN_NAME}>"),
+      source.indexOf("{namedTabs.map((tab) => ("),
+    );
+    expect(defaultContent).toContain("op: \"save-chain\"");
+    expect(defaultContent).not.toContain("onRemoveChain");
+    expect(t("en", "settings.modelChains")).toBe("Model chains");
+    expect(t("zh_CN", "settings.modelChains")).toBe("模型链");
+    expect(t("en", "settings.modelChainsCopy")).toContain("tabs");
+    expect(t("en", "settings.modelChainsCopy")).toContain("can't be removed");
+    expect(t("zh_CN", "settings.modelChainsCopy")).toContain("标签页");
+    expect(t("zh_CN", "settings.modelChainsCopy")).toContain("无法移除");
+    expect(t("en", "settings.defaultChain")).toBe("Default chain");
+    expect(t("zh_CN", "settings.defaultChain")).toBe("Default 链");
+  });
+
+  test("forceMount panels stay mounted but inactive ones are visually hidden (keepMounted mechanism)", () => {
+    // With forceMount, Radix pins every panel to present and never applies
+    // its own hidden attribute — the local TabsContent wrapper's
+    // data-[state=inactive]:hidden class is what hides inactive editors
+    // while keeping them mounted for edit-state preservation.
+    const tabsSource = readFileSync(join(import.meta.dir, "../../src/spa/components/ui/tabs.tsx"), "utf8");
+    const contentWrapper = tabsSource.slice(tabsSource.indexOf("function TabsContent"));
+    expect(contentWrapper).toContain("data-[state=inactive]:hidden");
+    // The ChainsCard panels mount through that exact wrapper (forceMount on
+    // every TabsContent), so exactly one editor is visible per selected
+    // trigger.
+    const source = readFileSync(join(import.meta.dir, "../../src/spa/pages/SettingsPage.tsx"), "utf8");
+    expect(source).toContain('import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";');
+    const chainsBody = source.slice(source.indexOf("function ChainsCard"), source.indexOf("function SeatsCard"));
+    expect(chainsBody).toContain("<TabsContent forceMount value={DEFAULT_CHAIN_NAME}>");
+    expect(chainsBody).toContain('<TabsContent key={tab.id} forceMount value={tab.id}>');
+  });
+});
+
+describe("seat assignment section (plan 39 T2)", () => {
+  test("seats are an independent titled card below chain management, not a section of the chains card", () => {
+    const source = readFileSync(join(import.meta.dir, "../../src/spa/pages/SettingsPage.tsx"), "utf8");
+    // SeatsCard is its own card component, rendered after ChainsCard for
+    // managers only (same authorization surface as chain editing).
+    expect(source).toContain("function SeatsCard");
+    expect(source.indexOf("function ChainsCard")).toBeLessThan(source.indexOf("function SeatsCard"));
+    expect(source.indexOf("<ChainsCard")).toBeLessThan(source.indexOf("<SeatsCard"));
+    // The chains card no longer carries any seat control or seat save.
+    const chainsBody = source.slice(source.indexOf("function ChainsCard"), source.indexOf("function SeatsCard"));
+    expect(chainsBody).not.toContain("settings.seats");
+    expect(chainsBody).not.toContain('op: "save-roles"');
+    // The seats card is titled and described through the dictionary.
+    const seatsBody = source.slice(source.indexOf("function SeatsCard"));
+    expect(seatsBody).toContain('t(locale, "settings.seats")');
+    expect(seatsBody).toContain('t(locale, "settings.seatsCopy")');
+  });
+
+  test("seat selects offer Default first, then current named tabs; values coerce before render and save", () => {
+    const source = readFileSync(join(import.meta.dir, "../../src/spa/pages/SettingsPage.tsx"), "utf8");
+    // Options derive from the same plan-39 tab model as the chain tabs.
+    expect(source).toContain("modelChainTabs(payload.model_chains)");
+    // Default is an explicit option (the reserved name, never a free-text
+    // value), and every rendered value passes seatSelectValue so a stale or
+    // deleted name renders as safe Default pending refresh.
+    expect(source).toContain("<SelectItem value={DEFAULT_CHAIN_NAME}>");
+    expect(source).toContain("value={seatSelectValue(tabs, seats[role])}");
+    // Full-map save semantics unchanged: op=save-roles with one role_<role>
+    // field per audit seat, each coerced so an invalid reference can never
+    // be submitted (the route 400s on unknown chain names).
+    expect(source).toContain('op: "save-roles"');
+    expect(source).toContain("fields[`role_${role}`] = seatSelectValue(tabs, seats[role])");
+    // The seat state re-derives from the payload after every reload.
+    expect(source).toContain("seatRoleValues(payload.model_role_ids, payload.model_roles");
+  });
+
+  test("seat values resolve against the current tab model: Default, named, and the delete cascade", () => {
+    const tabs = modelChainTabs([
+      { name: "deep", chain: "ark/deep", is_default: false, created_at: "t", updated_at: "t" },
+    ]);
+    // Absent mapping, empty, and the reserved name all resolve to Default.
+    expect(seatSelectValue(tabs, null)).toBe("default");
+    expect(seatSelectValue(tabs, undefined)).toBe("default");
+    expect(seatSelectValue(tabs, "")).toBe("default");
+    expect(seatSelectValue(tabs, "default")).toBe("default");
+    // A current named chain keeps its stored name.
+    expect(seatSelectValue(tabs, "deep")).toBe("deep");
+    // Deletion cascade: a stored name no tab offers falls back to Default —
+    // after the delete the refreshed tab model no longer lists it, so the
+    // form submits "default", never the invalid reference.
+    expect(seatSelectValue(modelChainTabs([]), "deep")).toBe("default");
+    // The role map derivation shared by the state seed and post-reload
+    // re-derivation coerces every seat through the same rule.
+    expect(
+      seatRoleValues(["mstar-review-seat", "deep-seat"], { "mstar-review-seat": "deep", "deep-seat": "" }, tabs),
+    ).toEqual({ "mstar-review-seat": "deep", "deep-seat": "default" });
+    expect(seatRoleValues(["mstar-review-seat"], { "mstar-review-seat": "deep" }, modelChainTabs([]))).toEqual({
+      "mstar-review-seat": "default",
+    });
+  });
+
+  test("seat section copy is dictionary-backed in both locales", () => {
+    expect(t("en", "settings.seats")).toBe("Seat chains");
+    expect(t("zh_CN", "settings.seats")).toBe("席位链");
+    expect(t("en", "settings.seatsCopy")).toContain("falls back to Default");
+    expect(t("zh_CN", "settings.seatsCopy")).toContain("回退到 Default");
+    expect(t("en", "settings.useDefaultChain")).toBe("Default chain");
+    expect(t("zh_CN", "settings.useDefaultChain")).toBe("Default 链");
+    expect(t("en", "settings.saveRoleModels")).toBe("Save seat chains");
+    expect(t("zh_CN", "settings.saveRoleModels")).toBe("保存席位链");
+  });
+});
+
+describe("operational action hierarchy (plan 39 T3)", () => {
+  test("Disable is destructive-outline with reversible wording; Delete stays filled destructive behind its confirmation", () => {
+    const source = readFileSync(join(import.meta.dir, "../../src/spa/pages/SettingsPage.tsx"), "utf8");
+    // The ops zone renders Disable through the destructive-outline family —
+    // the red-outline variant is pinned to the disable action itself.
+    expect(source).toContain(
+      '<Button type="button" variant="destructive-outline" onClick={() => onPending({ kind: "disable" })}>',
+    );
+    // Delete remains the stronger filled destructive action, still routed
+    // through the pendingConfirmCopy dialog with its destructive confirm
+    // button.
+    expect(source).toContain(
+      '<Button type="button" variant="destructive" onClick={() => onPending({ kind: "delete" })}>',
+    );
+    expect(source).toContain('confirmCopy.destructive ? "destructive" : "default"');
+    // Pause and Enable keep the non-destructive secondary family (resume keeps
+    // the primary default) — nothing else in the ops zone went red.
+    expect(source).toContain('<Button type="button" variant="secondary" onClick={() => onPending({ kind: "pause" })}>');
+    expect(source).toContain('<Button type="button" variant="secondary" onClick={() => onPending({ kind: "enable" })}>');
+    // Resume stays on the cva default variant — exact-pinned as a Button with
+    // no variant attribute, so a regression to a destructive resume fails here.
+    expect(source).toContain('<Button type="button" onClick={() => onPending({ kind: "resume" })}>');
+    const opsBody = source.slice(source.indexOf("function OpsCard"), source.indexOf("function ProvidersCard"));
+    expect(opsBody).toContain('variant="destructive-outline"');
+    // The Disable confirm dialog's action button carries the plain verb; the
+    // "(reversible)" parenthetical stays on the ops trigger copy only.
+    expect(source).toContain('action: t(locale, "settings.confirmDisableAction")');
+    // Busy/disabled guards and the post-op background state refresh are
+    // unchanged on the dialog and op paths.
+    expect(source).toContain("if (!pending || busy) return;");
+    expect(source).toContain("disabled={busy}");
+    expect(source).toContain("await onReload({ background: true })");
+  });
+
+  test("the destructive-outline variant is tokenized on the shadcn Button: red border, no raw hex fork", () => {
+    const source = readFileSync(join(import.meta.dir, "../../src/spa/components/ui/button.tsx"), "utf8");
+    expect(source).toContain('"destructive-outline":');
+    // Border, label, and hover tint come from the destructive token (the
+    // DESIGN.md red scale via the shadcn theme bridge); the shared cva base
+    // supplies the 3px focus-visible ring — the variant only pins its color.
+    const variantBlock = source.slice(source.indexOf('"destructive-outline":'), source.indexOf("secondary:"));
+    expect(variantBlock).toContain("border-destructive");
+    expect(variantBlock).toContain("text-destructive");
+    // Dark-mode focus-ring parity with the filled destructive variant.
+    expect(variantBlock).toContain("dark:focus-visible:ring-destructive/40");
+    expect(variantBlock).not.toContain("#");
+  });
+
+  test("disable copy identifies reversibility in both locales; delete copy stays irreversible", () => {
+    expect(t("en", "apps.actions.disable")).toContain("reversible");
+    expect(t("zh_CN", "apps.actions.disable")).toContain("可恢复");
+    // The reversibility wording belongs to the ops trigger only — the confirm
+    // dialog's action button carries the plain verb in both locales.
+    expect(t("en", "settings.confirmDisableAction")).toBe("Disable");
+    expect(t("zh_CN", "settings.confirmDisableAction")).toBe("停用");
+    expect(t("en", "settings.confirmDisableAction")).not.toContain("reversible");
+    expect(t("zh_CN", "settings.confirmDisableAction")).not.toContain("可恢复");
+    expect(t("en", "settings.confirmDisableBody")).toContain("until you enable it again");
+    expect(t("zh_CN", "settings.confirmDisableBody")).toContain("再次启用");
+    // Delete keeps the explicit irreversible confirmation copy.
+    expect(t("en", "settings.confirmDeleteBody")).toContain("soft-delete");
+    expect(t("zh_CN", "settings.confirmDeleteBody")).toContain("软删除");
+    expect(t("en", "settings.confirmDeleteButton")).toBe("Delete App");
+    expect(t("zh_CN", "settings.confirmDeleteButton")).toBe("删除应用");
   });
 });
