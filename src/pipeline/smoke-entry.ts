@@ -15,7 +15,10 @@
  *   GET /smoke-review    → T2: clone the real PR head (btspoony/todo-bots#1),
  *                          write the runner --input JSON (reconFacts: PR fact
  *                          + checked-out head sha + numstat universe — the
- *                          same shape src/pipeline/consumer.ts writes), exec
+ *                          same shape src/pipeline/consumer.ts writes, plus
+ *                          the required capabilityHosts: the deployed omp
+ *                          image's hosts resolved from the same source-
+ *                          controlled registry the consumer uses), exec
  *                          the in-image runner (src/review/runner.ts) on its
  *                          current `--level quick --input <file>` CLI with
  *                          ARK_API_KEY via exec env, parse the stdout with
@@ -26,6 +29,7 @@
 
 import { runnerCommand, writeJsonCommand } from "./gitops";
 import { getSandbox, Sandbox, type ReviewSandbox, type SandboxBinding } from "./sandbox";
+import { DEFAULT_SANDBOX_IMAGE_ID, getSandboxImage } from "../contracts/sandbox-images";
 import { parseReviewOutput } from "../review/schema";
 
 export { Sandbox };
@@ -202,15 +206,23 @@ async function runReviewSmoke(env: SmokeEnv): Promise<Response> {
  * Steps 2–4 of the review smoke: recon facts → runner input JSON → exec the
  * in-image review runner. The runner input is the same shape the production
  * consumer writes (src/pipeline/consumer.ts): PR fact + checked-out head sha
- * + the numstat universe, base64-transported so the JSON never touches shell
- * interpolation. The model key is injected via exec env only (never baked
- * into the image).
+ * + the numstat universe + the required capabilityHosts, base64-transported
+ * so the JSON never touches shell interpolation. The model key is injected
+ * via exec env only (never baked into the image).
  */
 async function execInImageReview(
   sandbox: ReviewSandbox,
   arkApiKey: string,
   startedAt: number,
 ): Promise<Record<string, unknown>> {
+  // Plan 37: the runner input REQUIRES the capability hosts (the in-image
+  // synthesizer base — there is no baked models.yml to fall back to). The
+  // smoke exercises the deployed omp image, resolved through the SAME
+  // source-controlled registry the production consumer resolves with.
+  const sandboxImage = getSandboxImage(DEFAULT_SANDBOX_IMAGE_ID);
+  if (!sandboxImage) {
+    throw new Error(`sandbox image ${DEFAULT_SANDBOX_IMAGE_ID} is missing from the registry`);
+  }
   const recon = await sandbox.exec(
     `cd ${CLONE_DIR} && git rev-parse HEAD && git diff --numstat FETCH_HEAD HEAD`,
   );
@@ -231,6 +243,7 @@ async function execInImageReview(
     JSON.stringify({
       worktreePath: CLONE_DIR,
       reconFacts: [`${GH_REPO}#${GH_PR}`, `head ${headSha}`, ...numstat],
+      capabilityHosts: sandboxImage.hosts,
     }),
     "utf8",
   ).toString("base64");

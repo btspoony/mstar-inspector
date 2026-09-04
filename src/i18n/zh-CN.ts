@@ -332,6 +332,11 @@ export const zhCN: Dictionary = {
     confirmRemoveKeyBody: "依赖 {provider} 的选择器将失败，直到你重新验证新密钥。",
     confirmRemoveCustomTitle: "移除 provider {provider}？",
     confirmRemoveCustomBody: "该 provider 及其已存密钥将被移除。引用其模型的链在保存时会校验失败。",
+    runtimeImage: "运行时镜像",
+    runtimeImageCopy:
+      "执行此 App 审查的沙盒运行时镜像。审查在运行时读取模型配置 — 任何 App 特定配置都不会烘焙进镜像。",
+    runtimeImageValue: "此 App 的审查运行在 {id} 运行时镜像上。",
+    saveRuntimeImage: "保存运行时镜像",
   },
   manifest: {
     title: "创建 GitHub App",

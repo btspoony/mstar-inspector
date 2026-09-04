@@ -125,6 +125,7 @@ describe("members/apps/settings parsers", () => {
         review_enabled: true,
         created_by: "mallory",
         last_webhook_at: null,
+        sandbox_image_id: "omp",
       },
       keys: [],
       model_chain: null,
@@ -136,6 +137,7 @@ describe("members/apps/settings parsers", () => {
       providers: [],
       model_role_ids: ["mstar-review-seat"],
       custom_provider_api_ids: ["openai-completions"],
+      sandbox_images: [{ id: "omp", enabled: true }],
     });
     expect(ok?.app.slug).toBe("demo");
     expect(ok?.can_manage).toBe(true);
@@ -150,8 +152,48 @@ describe("members/apps/settings parsers", () => {
     ).toBeNull();
   });
 
+  test("parseSettings requires the sandbox image selection + selector choices (plan 37)", () => {
+    const manageBase = {
+      can_manage: true,
+      app: {
+        slug: "demo",
+        github_app_id: 1,
+        status: "active",
+        review_enabled: true,
+        created_by: "mallory",
+        last_webhook_at: null,
+        sandbox_image_id: "omp",
+      },
+      keys: [],
+      model_chain: null,
+      model_roles: {},
+      model_chains: [],
+      custom_providers: [],
+      installations: [],
+      deliveries: [],
+      providers: [],
+      model_role_ids: [],
+      custom_provider_api_ids: [],
+      sandbox_images: [{ id: "omp", enabled: true }],
+    };
+    // Missing sandbox_image_id (either face) is a contract breach.
+    const { sandbox_image_id: _dropped, ...appWithoutImage } = manageBase.app;
+    expect(parseSettings({ ...manageBase, app: appWithoutImage })).toBeNull();
+    // The manage face needs the enabled-entries selector list.
+    const { sandbox_images: _omitted, ...withoutImages } = manageBase;
+    expect(parseSettings(withoutImages)).toBeNull();
+    // Malformed rows (non-string id / non-boolean enabled) are rejected.
+    expect(parseSettings({ ...manageBase, sandbox_images: [{ id: 7, enabled: true }] })).toBeNull();
+    expect(parseSettings({ ...manageBase, sandbox_images: [{ id: "omp", enabled: "yes" }] })).toBeNull();
+    expect(parseSettings({ ...manageBase, sandbox_images: "omp" })).toBeNull();
+    // A well-formed list parses and keeps the rows verbatim.
+    const ok = parseSettings(manageBase);
+    expect(ok && ok.can_manage && ok.sandbox_images).toEqual([{ id: "omp", enabled: true }]);
+  });
+
   test("parseSettings accepts the non-manager base+health shape (no settings zones)", () => {
     // Plan 35 T4 review: can_manage=false payloads carry only app meta + health.
+    // Plan 37: the read-only face still carries the selected image id.
     const readOnly = parseSettings({
       can_manage: false,
       app: {
@@ -161,12 +203,15 @@ describe("members/apps/settings parsers", () => {
         review_enabled: true,
         created_by: "mallory",
         last_webhook_at: null,
+        sandbox_image_id: "omp",
       },
       installations: [],
       deliveries: [],
     });
     expect(readOnly?.can_manage).toBe(false);
+    expect(readOnly?.app.sandbox_image_id).toBe("omp");
     expect(readOnly && "keys" in readOnly).toBe(false);
+    expect(readOnly && "sandbox_images" in readOnly).toBe(false);
     // Missing health fields is a contract breach even for the slim shape.
     expect(
       parseSettings({
@@ -178,6 +223,7 @@ describe("members/apps/settings parsers", () => {
           review_enabled: true,
           created_by: "mallory",
           last_webhook_at: null,
+          sandbox_image_id: "omp",
         },
       }),
     ).toBeNull();
@@ -192,6 +238,7 @@ describe("members/apps/settings parsers", () => {
           review_enabled: true,
           created_by: "mallory",
           last_webhook_at: null,
+          sandbox_image_id: "omp",
         },
         installations: [],
         deliveries: [],

@@ -248,8 +248,8 @@ describe("PROVIDER_VERIFY_ENDPOINTS parity lock", () => {
     expect(modelCacheProviderKey("anthropic")).toBe("anthropic");
     // The selector-facing id is the omp registry entry's capability host id —
     // resolved through the host's catalogProviderId `ark` (plan 37: the host
-    // list moved from the baked omp-models.yml into
-    // src/contracts/sandbox-images.ts).
+    // list lives in src/contracts/sandbox-images.ts and is synthesized into
+    // every per-review models.yml).
     const arkHost = getSandboxImage("omp")!.hosts.find((host) => host.catalogProviderId === "ark");
     expect(arkHost).toBeDefined();
     expect(modelCacheProviderKey("ark")).toBe(arkHost!.id);

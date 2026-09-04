@@ -1,6 +1,7 @@
 # Keep the sandbox-image Docker build context (repo root) lean.
-# The Dockerfile only needs: package.json, bun.lock, src/review/, and
-# sandbox-image/ (Dockerfile + omp-models.yml). Everything heavy is excluded.
+# The Dockerfile (sandbox-image/omp/Dockerfile) only needs: package.json,
+# bun.lock, src/review/, and sandbox-image/verify-synthesis.sh. There is no
+# baked models.yml (plan 37). Everything heavy is excluded.
 
 node_modules
 .git

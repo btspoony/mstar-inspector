@@ -1324,7 +1324,7 @@ describe("duplication locks", () => {
     // refusal (and the consumer's neededEnvName mapping) rides on: omp is
     // the single enabled entry, and its capability host `ark-plan` resolves
     // its key through catalog id `ark` (ARK_API_KEY) — the same semantics
-    // the retired baked omp-models.yml carried.
+    // the synthesizer materializes into every per-review models.yml.
     expect(enabledSandboxImages().map((image) => image.id)).toEqual(["omp"]);
     expect(sandboxImageHostIds("omp")).toEqual(["ark-plan"]);
     expect(sandboxImageHostIds("no-such-image")).toEqual([]);

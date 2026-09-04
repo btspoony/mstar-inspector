@@ -53,7 +53,7 @@ exist before the first deploy:
   `7a737173-e202-430f-8b47-e087d5e885c4`, already in `wrangler.jsonc`) with
   migrations applied — see below.
 - Containers: no separate setup — the `Sandbox` DO class builds from
-  `sandbox-image/Dockerfile` at deploy time (`image_build_context: "."`,
+  `sandbox-image/omp/Dockerfile` at deploy time (`image_build_context: "."`,
   `instance_type: lite`, `max_instances: 1`).
 
 ### D1 migrations (0001–0016, forward-only)
@@ -319,9 +319,11 @@ smoke → record the digest.
 
 The image ships `/opt/verify-synthesis.sh` (repo `sandbox-image/verify-synthesis.sh`,
 COPY'd into the digest — plan 25 AL-25-3). It replays the U-001 evidence on
-ANY image build: custom-provider models.yml synthesis through the runner's
-real `writePerReviewModelsYaml` (keyless declaration `u001-verify` /
-`https://example.invalid/v1` / `verify-model`), omp SDK `ModelRegistry`
+ANY image build: per-review models.yml synthesis through the runner's
+real `writePerReviewModelsYaml` (the omp capability hosts — `ark-plan`
+synthesized without any baked file, plan 37 — plus the keyless custom
+declaration `u001-verify` / `https://example.invalid/v1` / `verify-model`),
+omp SDK `ModelRegistry`
 resolution of the synthesized file, and a minimal `createAgentSession` on the
 synthesized `agentDir`. Load-level only — no provider call, no network, zero
 secrets; idempotent (`/tmp/omp-agent-<uuid>` only, cleaned up). Not a build
@@ -594,8 +596,9 @@ It is deliberately NOT activated. Reasons (AL-4):
 - The host inventory has no SSOT in this repo: the 18 built-in provider API
   hosts resolve in omp's runtime registry (outside the repo — the omp SDK
   registry, NOT the Worker-side `PROVIDERS` allowlist, which is a separate
-  19-entry list since plan 24 Task 6 added `ark`); only the ark custom host
-  is pinned in-repo (`sandbox-image/omp-models.yml`).
+  19-entry list since plan 24 Task 6 added `ark`); the ark capability host is
+  declared in-repo in the omp registry entry
+  (`src/contracts/sandbox-images.ts`, synthesized at review time — plan 37).
 - Per-App BYOK keeps the provider set open — the host set is a product
   surface, not a constant.
 - A missing host fails CLOSED (520 → review failure → retry → DLQ) — a worse
@@ -618,8 +621,10 @@ controls are installed (the Dockerfile carries the documentation block only).
   - Provider API hosts by active provider config — the 18 built-in provider
     hosts resolve in omp's runtime registry (omp SDK 18.0.4, outside this
     repo — NOT the Worker-side `PROVIDERS` allowlist, which is a separate
-    19-entry list since plan 24 Task 6 added `ark`); the ark custom host
-    `ark.cn-beijing.volces.com` is pinned in `sandbox-image/omp-models.yml`.
+    19-entry list since plan 24 Task 6 added `ark`); the ark capability host
+    `ark.cn-beijing.volces.com` is declared in the omp registry entry
+    (`src/contracts/sandbox-images.ts`) and synthesized into every per-review
+    models.yml (plan 37 — no baked in-image file).
 - **Runner tool whitelist:** the in-image review session restricts agent
   tools to read-only `read` / `grep` / `glob`
   (`src/review/runtime-omp.ts` `REVIEW_TOOL_NAMES`) — no write/exec tool
@@ -635,14 +640,16 @@ the explicit upgrade decision); base image / Bun / gh re-verified, no bump:
 
 | Pin | Value | Where |
 |---|---|---|
-| base image | `docker.io/cloudflare/sandbox:0.12.8` | `sandbox-image/Dockerfile` FROM |
-| Bun | `1.4.0` | `sandbox-image/Dockerfile` |
-| gh CLI | `2.98.0` | `sandbox-image/Dockerfile` |
-| mstar-harness | `ad76f0c6600acd5040464248085ad7d22af93e9f` (3.6.0) | `sandbox-image/Dockerfile` |
+| base image | `docker.io/cloudflare/sandbox:0.12.8` | `sandbox-image/omp/Dockerfile` FROM |
+| Bun | `1.4.0` | `sandbox-image/omp/Dockerfile` |
+| gh CLI | `2.98.0` | `sandbox-image/omp/Dockerfile` |
+| mstar-harness | `ad76f0c6600acd5040464248085ad7d22af93e9f` (3.6.0) | `sandbox-image/omp/Dockerfile` |
 
 **In-image DEFAULT model selector: `ark-plan/deepseek-v4-flash`** (pins:
-`src/review/runtime-omp.ts` `DEFAULT_MODEL_PATTERN` +
-`sandbox-image/omp-models.yml`). This line is the record for architect
+`src/review/runtime-omp.ts` `DEFAULT_MODEL_PATTERN` + the omp registry entry's
+`ark-plan` capability host in `src/contracts/sandbox-images.ts`, synthesized
+into every per-review models.yml — plan 37 removed the baked file). This line
+is the record for architect
 verdict AL-2: with the zero-global-fallback cutover (AL-24-5 / plan 24 Task
 6) the App's `modelChain` is the only chain source — a chain-less App is
 fail-closed by the consumer and the runner's default is reachable only via a

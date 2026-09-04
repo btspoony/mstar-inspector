@@ -46,7 +46,7 @@ describe("module import matrix — omp SDK is container-only", () => {
 });
 // --- in-image module graph (plan 23 T3 regression) ---------------------------
 
-/** The sandbox image COPYs ONLY src/review (sandbox-image/Dockerfile:88). */
+/** The sandbox image COPYs ONLY src/review (sandbox-image/omp/Dockerfile:96). */
 const IN_IMAGE_FACE = "src/review";
 
 /**

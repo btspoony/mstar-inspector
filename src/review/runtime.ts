@@ -45,7 +45,7 @@ export type CustomProviderDeclaration = {
  * mapping is CUSTOM_<UPPER_SNAKE(provider_id)>_API_KEY — provider ids are
  * store-enforced `[a-z0-9][a-z0-9-]{0,63}` (hyphen → underscore, uppercased).
  * Lives HERE (next to CustomProviderDeclaration) because the sandbox image
- * COPYs only src/review (sandbox-image/Dockerfile:88): the in-image runner
+ * COPYs only src/review (sandbox-image/omp/Dockerfile:96): the in-image runner
  * module graph must never import outside this directory. The Worker-side
  * SSOT stays single-source — src/pipeline/provider-catalog.ts re-exports
  * these (zero duplicated literals).

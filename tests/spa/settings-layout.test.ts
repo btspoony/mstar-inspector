@@ -80,6 +80,34 @@ describe("settings dropdowns (plan 31 T4 / plan 35 T4)", () => {
   });
 });
 
+describe("runtime image selector (plan 37)", () => {
+  test("managers get a shadcn selector saved through op=save-sandbox-image; other members read-only", () => {
+    const source = readFileSync(join(import.meta.dir, "../../src/spa/pages/SettingsPage.tsx"), "utf8");
+    // The editor posts the plan-37 op with the selected registry id.
+    expect(source).toContain('op: "save-sandbox-image"');
+    expect(source).toContain("sandbox_image_id: selected");
+    // The choices come from the manage payload's enabled registry rows.
+    expect(source).toContain("payload.sandbox_images.map");
+    // shadcn Select (no native select), like the chain/seat editors.
+    expect(source).toContain("SelectTrigger");
+    expect(source).toContain("SelectItem");
+    // Read-only detail for non-managers, never the editor.
+    expect(source).toContain("settings.runtimeImageValue");
+    expect(source).toContain("payload.app.sandbox_image_id");
+  });
+
+  test("runtime image copy is dictionary-backed in both locales", () => {
+    expect(t("en", "settings.runtimeImage")).toBe("Runtime image");
+    expect(t("zh_CN", "settings.runtimeImage")).toBe("运行时镜像");
+    expect(t("en", "settings.runtimeImageCopy")).toContain("run time");
+    expect(t("zh_CN", "settings.runtimeImageCopy")).toContain("运行时");
+    expect(t("en", "settings.runtimeImageValue", { id: "omp" })).toContain("omp");
+    expect(t("zh_CN", "settings.runtimeImageValue", { id: "omp" })).toContain("omp");
+    expect(t("en", "settings.saveRuntimeImage")).toBe("Save runtime image");
+    expect(t("zh_CN", "settings.saveRuntimeImage")).toBe("保存运行时镜像");
+  });
+});
+
 describe("settings copy is dictionary-backed (plan 31 T4+T6 / plan 35 T4)", () => {
   test("new keys exist in both locales", () => {
     expect(t("en", "settings.verify.invalid_key")).toContain("rejected");
