@@ -61,7 +61,7 @@ import type { ReviewJobPayload } from "../contracts/review-job";
 import { idemKey, IDEMPOTENCY_SECONDS, type IdempotencyKey } from "../contracts/idem";
 import { parseReviewOutput, capFindings, clampFindingSizes } from "../review/schema";
 import { isReviewLevel, REVIEW_LEVELS, type CustomProviderDeclaration, type ReviewLevel } from "../review/runtime";
-import { PROVIDERS, providerEnvName, customProviderEnvName } from "./provider-catalog";
+import { providerEnvName, customProviderEnvName } from "./provider-catalog";
 import { redactExactSecrets, redactReviewOutput, redactReviewOutputExact, redactSecrets } from "./redact";
 import { createArtifactStore, previousRoundFingerprints, type D1ArtifactStore } from "../store/artifact-store";
 import { createFailureStore, type FailureStage, type FailureStore } from "../store/failure-store";
@@ -84,9 +84,9 @@ import { createSecretbox } from "../dashboard/secretbox";
 // decrypts keys via secretbox (itself a zero-dependency leaf, lock L1).
 import {
   createAppConfigStore,
-  IN_IMAGE_BASE_PROVIDER_IDS,
   type CustomProviderConsumerConfig,
 } from "../dashboard/app-config-store";
+import { DEFAULT_SANDBOX_IMAGE_ID, getSandboxImage } from "../contracts/sandbox-images";
 
 export type PipelineEnv = {
   DB: D1Database;
@@ -836,16 +836,24 @@ function assertAppConfigComplete(
   // The env name a chain provider's key must arrive under — the same chain
   // grammar as the runner's parseModelSelectors (comma-separated selectors,
   // provider = the segment before the first `/`): an allowlisted id → its
-  // mapped env name; an in-image base provider (IN_IMAGE_BASE_PROVIDER_IDS,
-  // today exactly `ark-plan` per sandbox-image/omp-models.yml, whose
-  // `apiKey:` reference is ARK_API_KEY) → the `ark` BYOK entry's env name;
+  // mapped env name; a capability host of the App's selected sandbox image
+  // (plan 37 registry, e.g. omp's `ark-plan`, whose apiKeyEnv ARK_API_KEY
+  // rides catalogProviderId `ark`) → that catalog entry's env name;
   // anything else → a custom provider's CUSTOM_<ID>_API_KEY env name.
+  // simplify: resolves the DEFAULT image until plan 37 Task 2 threads the
+  // App's resolved sandbox image through assertAppConfigComplete (plan 37
+  // Task 2 owns that wiring; the registry's only enabled entry is omp).
+  const hostEnvNames = new Map(
+    (getSandboxImage(DEFAULT_SANDBOX_IMAGE_ID)?.hosts ?? []).map((host) => [
+      host.id,
+      providerEnvName(host.catalogProviderId),
+    ]),
+  );
   const neededEnvName = (provider: string): string => {
     const allowlisted = providerEnvName(provider);
     if (allowlisted !== undefined) return allowlisted;
-    if (IN_IMAGE_BASE_PROVIDER_IDS.includes(provider)) {
-      return PROVIDERS["ark"]!.envName;
-    }
+    const hostEnv = hostEnvNames.get(provider);
+    if (hostEnv !== undefined) return hostEnv;
     return customProviderEnvName(provider);
   };
   // Every chain that must resolve to configured keys: the App's modelChain

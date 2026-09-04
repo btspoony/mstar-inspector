@@ -26,11 +26,14 @@
  *
  * Module boundary: dashboard-side leaf consumed by the dashboard routes and
  * (Task 3) the pipeline consumer — imports ONLY src/dashboard/secretbox.ts
- * (itself a zero-dependency leaf), so the dashboard ↛ pipeline/worker
- * isolation stays intact. The `db` parameter is a locally-declared narrow D1
- * face (types only, zero imports) — a real `D1Database`, the bun:sqlite test
- * double (tests/store/helpers.ts), and the store layer's `D1Like` all satisfy
- * it structurally (same pattern as apps-store.ts). Every write here is a
+ * (itself a zero-dependency leaf) and the zero-dependency sandbox-image
+ * contract (src/contracts/sandbox-images.ts — the plan-37 registry, static
+ * contract data, NOT pipeline/review code), so the dashboard ↛
+ * pipeline/worker isolation stays intact. The `db` parameter is a
+ * locally-declared narrow D1 face (types only, zero imports) — a real
+ * `D1Database`, the bun:sqlite test double (tests/store/helpers.ts), and the
+ * store layer's `D1Like` all satisfy it structurally (same pattern as
+ * apps-store.ts). Every write here is a
  * single statement EXCEPT the atomic multi-write faces (plan 35 T2, spec
  * §4.4): setModelChain's default-row clear-then-set, setModelChainSeats'
  * full-map save (the plan-17 role editor, now chain references), and
@@ -108,6 +111,7 @@
  *     app_id is a caller bug, never a silent no-op.
  */
 import { createSecretbox } from "./secretbox";
+import { sandboxImageHostIds } from "../contracts/sandbox-images";
 
 /** A row of `app_provider_keys` (D1 column names, snake_case; migration 0006). */
 export type AppProviderKeyRow = {
@@ -250,9 +254,11 @@ export type VerifiedModels = {
 /**
  * BYOK provider id → selector-facing `app_provider_models` cache key (spec
  * §6.1): an `ark` BYOK key verifies under the BYOK vocabulary id "ark", but
- * its cached model list must be written under "ark-plan" — the in-image base
- * provider id that is the chain's selector prefix (IN_IMAGE_BASE_PROVIDER_IDS
- * holds the same ids). Every other provider uses its own id unchanged.
+ * its cached model list must be written under "ark-plan" — the capability
+ * host id that is the chain's selector prefix (the App's selected sandbox
+ * image declares the same id as a registry capability host,
+ * src/contracts/sandbox-images.ts). Every other provider uses its own id
+ * unchanged.
  */
 export function modelCacheProviderKey(provider: string): string {
   return provider === "ark" ? "ark-plan" : provider;
@@ -348,26 +354,6 @@ export const PROVIDER_META: Record<string, ProviderMirrorEntry> = {
     doc: "https://developers.cloudflare.com/workers-ai/models/",
   },
 };
-
-/**
- * The in-image base provider ids (plan 23 QC wave-1 W-1) — provider ids the
- * review runner's base models.yml ALREADY declares:
- * `sandbox-image/omp-models.yml`, installed in the image as
- * /opt/omp-agent/models.yml (src/review/models-synthesis.ts
- * BASE_MODELS_YAML_PATH) and preserved verbatim by the Task 3 merge. In the
- * image today that is exactly `ark-plan` (the M0 ark provider, keyed by
- * ARK_API_KEY). A custom declaration colliding with one of these ids would be
- * silently dead on EVERY review (the base-wins merge skips it while the
- * consumer still injects its key under the CUSTOM_<ID>_API_KEY env name), so
- * it is rejected here like the PROVIDER_IDS built-ins above. Declared
- * locally, NOT imported: dashboard modules must not import review code
- * (architect decision Q2, src/dashboard/index.ts header) — the literal
- * mirrors the review contract module src/review/runtime.ts (next to
- * customProviderEnvName) and the base file itself, and is parity-locked by
- * tests/worker/app-config.test.ts against sandbox-image/omp-models.yml (the
- * PROVIDER_IDS lock pattern).
- */
-export const IN_IMAGE_BASE_PROVIDER_IDS: readonly string[] = Object.freeze(["ark-plan"]);
 
 /**
  * The per-role model vocabulary (plan 17 B6, spec § B6 语义锁) — EXACTLY the
@@ -517,8 +503,9 @@ export class UnknownModelChainError extends Error {
 /**
  * Declaration-shape error (plan 23 T2): an upsertCustomProvider call named
  * an id outside the `[a-z0-9][a-z0-9-]{0,63}` grammar, an id colliding with
- * a built-in (PROVIDER_IDS) or in-image base provider (IN_IMAGE_BASE_PROVIDER_IDS,
- * QC wave-1 W-1), a non-https or over-length base URL, an api outside the
+ * a built-in (PROVIDER_IDS) or with a capability host of the App's selected
+ * sandbox image (sandboxImageHostIds, plan 37 — QC wave-1 W-1's successor),
+ * a non-https or over-length base URL, an api outside the
  * AL-23-1 three-form enum, an empty / over-long / over-count model_ids list,
  * an empty key, or a NEW declaration at the MAX_CUSTOM_PROVIDER_COUNT cap
  * (QC wave-1 W-2). The settings route re-renders 400 first; this typed throw
@@ -599,6 +586,8 @@ function customProviderAad(appId: string, providerId: string): string {
  * verdicts, checked BEFORE any crypto or write — an invalid declaration
  * throws InvalidCustomProviderError (or ProviderKeyTooLongError for an
  * over-length key, the setProviderKey convention) and touches zero rows.
+ * `capabilityHostIds` are the selected sandbox image's registry host ids
+ * (plan 37) — passed in by upsertCustomProvider so this gate stays pure.
  * The settings route re-renders 400 first; this is the backstop for direct
  * callers.
  */
@@ -618,7 +607,7 @@ export function isValidCustomProviderBaseUrl(raw: string): boolean {
   }
 }
 
-function assertCustomProvider(decl: AppCustomProvider, plainKey: string): void {
+function assertCustomProvider(decl: AppCustomProvider, plainKey: string, capabilityHostIds: readonly string[]): void {
   if (!CUSTOM_PROVIDER_ID_PATTERN.test(decl.provider_id)) {
     throw new InvalidCustomProviderError(
       `invalid custom provider id ${JSON.stringify(decl.provider_id)} (expected [a-z0-9][a-z0-9-]{0,63})`,
@@ -629,12 +618,13 @@ function assertCustomProvider(decl: AppCustomProvider, plainKey: string): void {
       `custom provider id ${JSON.stringify(decl.provider_id)} collides with a built-in provider id`,
     );
   }
-  // QC wave-1 W-1: an id the in-image base models.yml already declares
-  // (ark-plan) would be skipped base-wins at synthesis — silently dead on
-  // every review — so it is rejected exactly like a built-in collision.
-  if (IN_IMAGE_BASE_PROVIDER_IDS.includes(decl.provider_id)) {
+  // Plan 37 (QC wave-1 W-1's successor): an id the App's SELECTED sandbox
+  // image already declares as a capability host (omp: ark-plan) would be
+  // skipped base-wins at synthesis — silently dead on every review — so it
+  // is rejected exactly like a built-in collision.
+  if (capabilityHostIds.includes(decl.provider_id)) {
     throw new InvalidCustomProviderError(
-      `custom provider id ${JSON.stringify(decl.provider_id)} collides with an in-image base provider id`,
+      `custom provider id ${JSON.stringify(decl.provider_id)} collides with a capability host of the App's sandbox image`,
     );
   }
   if (!isValidCustomProviderBaseUrl(decl.base_url)) {
@@ -787,6 +777,20 @@ export type AppConfigD1 = {
  */
 export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | undefined) {
   const box = createSecretbox(encryptionKey);
+
+  /**
+   * The App's stored sandbox image id (plan 37, migration 0018) — the
+   * custom-provider collision gate resolves the SELECTED image's capability
+   * hosts through it. Unknown app → null (no host ids to refuse with; the
+   * write itself fails the FK, the fail-loud convention).
+   */
+  async function readSandboxImageId(appId: string): Promise<string | null> {
+    const row = await db
+      .prepare(`SELECT sandbox_image_id FROM github_apps WHERE id = ?`)
+      .bind(appId)
+      .first<{ sandbox_image_id: string }>();
+    return row?.sandbox_image_id ?? null;
+  }
 
   /**
    * The App's default chain value (spec §4.4): the 'default' row of
@@ -1316,7 +1320,12 @@ export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | un
      * re-declaring moves both forward.
      */
     async upsertCustomProvider(appId: string, decl: AppCustomProvider, plainKey: string): Promise<void> {
-      assertCustomProvider(decl, plainKey);
+      // Plan 37: the collision vocabulary is the App's SELECTED image's
+      // capability host ids (omp: ark-plan) — resolved here so the backstop
+      // stays self-contained for direct callers (one read per declaration
+      // write, the same posture as the cap-count SELECT below).
+      const imageId = await readSandboxImageId(appId);
+      assertCustomProvider(decl, plainKey, sandboxImageHostIds(imageId ?? ""));
       // Growth-only cap: only a provider id with NO row yet can push the App
       // past MAX_CUSTOM_PROVIDER_COUNT declarations (an upsert of an existing
       // id replaces the row in place — no count change). Two SELECTs on the

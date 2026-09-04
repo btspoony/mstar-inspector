@@ -63,7 +63,6 @@ import {
   CUSTOM_PROVIDER_ID_PATTERN,
   DEFAULT_CHAIN_NAME,
   InvalidCustomProviderError,
-  IN_IMAGE_BASE_PROVIDER_IDS,
   isValidCustomProviderBaseUrl,
   MAX_CUSTOM_PROVIDER_BASE_URL_LENGTH,
   MAX_CUSTOM_PROVIDER_COUNT,
@@ -81,6 +80,7 @@ import {
   type AppConfigBatchFace,
   type AppConfigStore,
 } from "./app-config-store";
+import { enabledSandboxImages, getSandboxImage, sandboxImageHostIds } from "../contracts/sandbox-images";
 import { composeModelOptions, findFailingSelector } from "./model-membership";
 import { PROVIDER_VERIFY_ENDPOINTS, verifyProviderKey, type VerifyFailureReason } from "./provider-verify";
 import {
@@ -1254,6 +1254,10 @@ dashboardApp.get("/api/apps/:slug/settings", async (c) => {
         review_enabled: gate.app.review_enabled !== 0,
         created_by: gate.app.created_by,
         last_webhook_at: gate.app.last_webhook_at ?? null,
+        // Plan 37 (spec § Technical interfaces): the App's selected sandbox
+        // runtime image — read-only on BOTH faces (registry id only, never
+        // image-local configuration or secrets).
+        sandbox_image_id: gate.app.sandbox_image_id,
       },
       installations,
       deliveries: deliveries.map((d) => ({
@@ -1332,6 +1336,9 @@ dashboardApp.get("/api/apps/:slug/settings", async (c) => {
       ],
       model_role_ids: MODEL_ROLE_IDS,
       custom_provider_api_ids: CUSTOM_PROVIDER_API_IDS,
+      // Plan 37 (spec § Technical interfaces): the manage face's selector
+      // choices — enabled registry entries only, as { id, enabled } rows.
+      sandbox_images: enabledSandboxImages().map((image) => ({ id: image.id, enabled: image.enabled })),
     });
   } catch (err) {
     logSettingsFailure("api_render", gate.app.id, err);
@@ -1407,7 +1414,10 @@ dashboardApp.post("/api/apps/:slug/keys/verify", async (c) => {
  * custom-provider declarations section: every AL-23-1/AL-23-2 bound (id
  * grammar, https-only baseUrl, three-form api enum, model_ids 1..32 × ≤128,
  * key required ≤4096) is a 400 with zero writes; the key is encrypted
- * inside the store and never echoed. Plan 29 T6: the settings page is
+ * inside the store and never echoed. save-sandbox-image (plan 37) = the
+ * App's sandbox runtime-image selection: only ENABLED
+ * src/contracts/sandbox-images.ts registry ids are storable (unknown or
+ * disabled → 400, nothing stored). Plan 29 T6: the settings page is
  * SPA-owned, so every response is plain text (settingsPostResponse) — 2xx
  * = the SPA refetches the JSON face, 4xx/5xx = the reason; the re-rendered
  * HTML page is retired.
@@ -1662,11 +1672,12 @@ dashboardApp.post("/apps/:slug/settings", async (c) => {
         400,
       );
     }
-    // QC wave-1 W-1: the in-image base models.yml (sandbox-image/omp-models.yml)
-    // already declares this id — the base-wins merge would skip the custom
-    // block on every review while its key still got injected, so the
-    // declaration is refused up front (mirror of IN_IMAGE_BASE_PROVIDER_IDS).
-    if (IN_IMAGE_BASE_PROVIDER_IDS.includes(providerId)) {
+    // Plan 37 (QC wave-1 W-1's successor): an id the App's SELECTED sandbox
+    // image already declares as a capability host (omp: ark-plan) would be
+    // skipped by the base-wins synthesis merge on every review while its key
+    // still got injected, so the declaration is refused up front (the store's
+    // upsertCustomProvider re-checks against the same registry host ids).
+    if (sandboxImageHostIds(gate.app.sandbox_image_id).includes(providerId)) {
       return settingsPostResponse(c, gate.app.slug, `${providerId} is already provided by the review environment's base configuration — custom providers must use a new id. Nothing was stored.`,
         400,
       );
@@ -1783,13 +1794,14 @@ dashboardApp.post("/apps/:slug/settings", async (c) => {
     if (!CLOUDFLARE_ACCOUNT_ID_PATTERN.test(accountId)) {
       return settingsPostResponse(c, gate.app.slug, "Cloudflare account ids are 32 hex characters — nothing was stored.", 400);
     }
-    // The template id must not collide with a built-in or in-image base
-    // provider id (defensive — the catalog's template tier is disjoint from
-    // both today, but a future template must not silently shadow one).
+    // The template id must not collide with a built-in or with a capability
+    // host of the App's selected sandbox image (defensive — the catalog's
+    // template tier is disjoint from both today, but a future template must
+    // not silently shadow one).
     if (PROVIDER_IDS.includes(templateId)) {
       return settingsPostResponse(c, gate.app.slug, `${templateId} is a built-in provider — nothing was stored.`, 400);
     }
-    if (IN_IMAGE_BASE_PROVIDER_IDS.includes(templateId)) {
+    if (sandboxImageHostIds(gate.app.sandbox_image_id).includes(templateId)) {
       return settingsPostResponse(c, gate.app.slug, `${templateId} is already provided by the review environment's base configuration — nothing was stored.`, 400);
     }
     const baseUrl = template.baseUrl.replace("{account_id}", accountId);
@@ -1874,6 +1886,28 @@ dashboardApp.post("/apps/:slug/settings", async (c) => {
         ? `Removed the custom provider ${providerId} from ${gate.app.slug}.`
         : `No custom provider ${providerId === "" ? "(unspecified)" : providerId} on ${gate.app.slug} — nothing changed.`,
     );
+  }
+  if (op === "save-sandbox-image") {
+    // Plan 37 (spec § Technical interfaces): save the App's sandbox runtime
+    // image. Only ENABLED registry ids are storable — an unknown or disabled
+    // id is a 400 with zero writes (getSandboxImage distinguishes nothing
+    // user-visible here; both refuse identically). The store re-validates
+    // against the same registry as the backstop (setSandboxImage), refuses
+    // soft-deleted rows, and stamps updated_at (operator mutation). This
+    // whole POST family already runs behind requireAppSettings — the
+    // canManageApp (creator-or-admin) gate.
+    const imageId = typeof form.sandbox_image_id === "string" ? form.sandbox_image_id.trim() : "";
+    const image = getSandboxImage(imageId);
+    if (!image || !image.enabled) {
+      return settingsPostResponse(c, gate.app.slug, "Unknown or disabled sandbox image — nothing was stored.", 400);
+    }
+    try {
+      await createAppsStore(gate.db).setSandboxImage(gate.app.id, image.id);
+    } catch (err) {
+      logSettingsFailure("save_sandbox_image", gate.app.id, err);
+      return settingsPostResponse(c, gate.app.slug, settingsFailureNotice(err), 500);
+    }
+    return settingsPostResponse(c, gate.app.slug, `Saved the ${image.id} runtime image for ${gate.app.slug}.`);
   }
   // T2 review fold (T1 minor): an unknown op is a validation failure like any
   // other — 400 with the reason.
