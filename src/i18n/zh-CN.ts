@@ -341,7 +341,7 @@ export const zhCN: Dictionary = {
     modelChains: "模型链",
     modelChainsCopy:
       "Default 链与命名链是同级标签页 — 在各自的标签页中编辑链。Default 链是必需的且无法移除；移除命名链后，引用它的席位将回退到 default。",
-    namedChains: "命名模型链",
+    addChain: "新建链",
     chainName: "链名称",
     chainNamePlaceholder: "例如 deep-review",
     addNamedChain: "添加命名链",
@@ -351,7 +351,6 @@ export const zhCN: Dictionary = {
     useDefaultChain: "Default 链",
     confirmRemoveChainTitle: "移除链 {name}？",
     confirmRemoveChainBody: "引用 {name} 的席位将回退到 default 链。",
-    noNamedChains: "还没有命名链。",
     consoleOnly: "此 provider 无法在此验证 — 请在对应控制台管理密钥。",
     confirmRemoveKeyTitle: "移除 {provider} 的密钥？",
     confirmRemoveKeyBody: "依赖 {provider} 的选择器将失败，直到你重新验证新密钥。",

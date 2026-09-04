@@ -363,7 +363,7 @@ export const en = {
     modelChains: "Model chains",
     modelChainsCopy:
       "Default and named chains are peer tabs — edit each chain in its tab. The default chain is required and can't be removed; seats on a removed named chain fall back to the default.",
-    namedChains: "Named chains",
+    addChain: "Add chain",
     chainName: "Chain name",
     chainNamePlaceholder: "e.g. deep-review",
     addNamedChain: "Add named chain",
@@ -374,7 +374,6 @@ export const en = {
     useDefaultChain: "Default chain",
     confirmRemoveChainTitle: "Remove chain {name}?",
     confirmRemoveChainBody: "Seats using {name} fall back to the default chain.",
-    noNamedChains: "No named chains yet.",
     consoleOnly: "This provider can't be verified here — manage the key in the provider console.",
     confirmRemoveKeyTitle: "Remove the {provider} key?",
     confirmRemoveKeyBody: "Selectors that need {provider} will fail until you verify a new key.",
