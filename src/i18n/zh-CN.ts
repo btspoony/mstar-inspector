@@ -132,7 +132,7 @@ export const zhCN: Dictionary = {
     title: "应用",
     heading: "应用",
     create: "创建 GitHub App",
-    empty: "还没有 App — 在下方创建一个。",
+    empty: "还没有 App — 使用「创建 GitHub App」连接第一个。",
     settings: "设置",
     appId: "App id {id}",
     by: "创建者 {login}",
@@ -157,7 +157,7 @@ export const zhCN: Dictionary = {
     tableStatus: "状态",
     tableHealth: "健康",
     tableCreator: "创建者",
-    openAria: "打开 {slug}",
+    openAria: "打开 {slug} 设置",
   },
   members: {
     title: "成员",
@@ -218,6 +218,8 @@ export const zhCN: Dictionary = {
   },
   settings: {
     title: "应用设置",
+    backToApps: "返回应用",
+    changesSaved: "更改已保存。",
     providerKeys: "Provider 密钥",
     providerKeysCopy:
       "App {slug} 的密钥以加密方式存储并仅显示掩码 — 只显示最后 4 个字符。重新添加 provider 会替换其已存储的密钥。",
@@ -263,6 +265,7 @@ export const zhCN: Dictionary = {
     resumeReviews: "恢复审查",
     disconnected: "此 App 已断开连接 — 启用后即可审查。",
     installHealth: "安装健康",
+    installHealthCopy: "此 App 的 webhook 安装与最近投递。",
     lastWebhook: "最近 webhook：{time}",
     noInstallations: "还没有安装。",
     installation: "安装 {id}",

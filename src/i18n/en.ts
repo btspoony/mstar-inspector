@@ -147,7 +147,7 @@ export const en = {
     title: "Apps",
     heading: "Apps",
     create: "Create GitHub App",
-    empty: "No Apps yet — create one below.",
+    empty: "No Apps yet — Create GitHub App connects your first one.",
     settings: "Settings",
     appId: "App id {id}",
     by: "by {login}",
@@ -172,7 +172,7 @@ export const en = {
     tableStatus: "Status",
     tableHealth: "Health",
     tableCreator: "Creator",
-    openAria: "Open {slug}",
+    openAria: "Open {slug} settings",
   },
   members: {
     title: "Members",
@@ -233,6 +233,8 @@ export const en = {
   },
   settings: {
     title: "App settings",
+    backToApps: "Back to Apps",
+    changesSaved: "Changes saved.",
     providerKeys: "Provider keys",
     providerKeysCopy:
       "Keys for App {slug} are stored encrypted and shown masked — the last 4 characters only. Re-adding a provider replaces its stored key.",
@@ -280,6 +282,7 @@ export const en = {
     resumeReviews: "Resume reviews",
     disconnected: "This App is disconnected — enable it to review.",
     installHealth: "Install health",
+    installHealthCopy: "Webhook installations and the latest deliveries for this App.",
     lastWebhook: "Last webhook: {time}",
     noInstallations: "No installations yet.",
     installation: "installation {id}",

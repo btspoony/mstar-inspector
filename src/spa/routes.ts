@@ -25,8 +25,6 @@ export function matchSpaRoute(pathname: string): SpaRoute | null {
     case "/dashboard":
     case "/dashboard/apps":
       return { page: "apps", pathname };
-    case "/dashboard/apps":
-      return { page: "apps", pathname };
     case "/dashboard/insights":
       return { page: "insights", pathname };
     case "/dashboard/members":

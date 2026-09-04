@@ -6,13 +6,13 @@ import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 import { fetchJson } from "../api";
 import type { SpaBoot } from "../boot";
 import {
-  HOME_WINDOWS,
+  INSIGHTS_WINDOWS,
   INSIGHTS_REPO_ALL,
-  homeWindow,
   insightsRepoFromSelect,
   insightsRepoOptions,
   insightsRepoSelectValue,
   insightsSummaryUrl,
+  insightsWindow,
   normalizeWindowSearch,
   parseInsights,
   parseInsightsSearch,
@@ -25,7 +25,7 @@ import { LoadFailedNotice, LoadingNotice } from "./PageNotice";
 
 /**
  * `/dashboard/insights` records page (plan 36 T2): review records with a
- * segmented window (HOME_WINDOWS 7/30/90) and a shadcn
+ * segmented window (INSIGHTS_WINDOWS 7/30/90) and a shadcn
  * Select repo filter (全部 + summary.repos). Free-text repo input retired.
  * Data plane: existing `/dashboard/api/insights/summary` plus the read-only
  * `repos` field (window-scoped distinct owner/repo, independent of `repo=`).
@@ -34,7 +34,7 @@ import { LoadFailedNotice, LoadingNotice } from "./PageNotice";
 export function InsightsPage({ boot }: { boot: SpaBoot }) {
   const locale = boot.locale;
   const [search, setSearch] = useState<InsightsSearch>(() => ({
-    window: homeWindow(window.location.search),
+    window: insightsWindow(window.location.search),
     repo: parseInsightsSearch(window.location.search).repo,
   }));
   const [data, setData] = useState<InsightsSummary | null>(null);
@@ -81,7 +81,7 @@ export function InsightsPage({ boot }: { boot: SpaBoot }) {
 
   function onWindowChange(next: string): void {
     // Radix fires "" when the active segment is re-clicked — keep the window.
-    if (!(HOME_WINDOWS as readonly string[]).includes(next)) return;
+    if (!(INSIGHTS_WINDOWS as readonly string[]).includes(next)) return;
     commitSearch({ window: next, repo: search.repo });
   }
 
@@ -106,7 +106,7 @@ export function InsightsPage({ boot }: { boot: SpaBoot }) {
             onValueChange={onWindowChange}
             aria-label={t(locale, "insights.windowSegment")}
           >
-            {HOME_WINDOWS.map((days) => (
+            {INSIGHTS_WINDOWS.map((days) => (
               <ToggleGroupItem key={days} value={days}>
                 {t(locale, "insights.daysShort", { count: Number(days) })}
               </ToggleGroupItem>

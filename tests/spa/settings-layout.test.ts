@@ -482,3 +482,46 @@ describe("operational action hierarchy (plan 39 T3)", () => {
     expect(t("zh_CN", "settings.confirmDeleteButton")).toBe("删除应用");
   });
 });
+
+describe("App workflow boundaries (plan 40 T2)", () => {
+  test("App settings reads as one workflow with the Apps list: a visible path back", () => {
+    const source = readFileSync(join(import.meta.dir, "../../src/spa/pages/SettingsPage.tsx"), "utf8");
+    // The back link targets the enumerated Apps route (the /dashboard surface).
+    expect(source).toContain('href="/dashboard/apps"');
+    expect(source).toContain('t(locale, "settings.backToApps")');
+    expect(t("en", "settings.backToApps")).toBe("Back to Apps");
+    expect(t("zh_CN", "settings.backToApps")).toBe("返回应用");
+  });
+
+  test("successful configuration saves surface success feedback; failures keep the structured error", () => {
+    const source = readFileSync(join(import.meta.dir, "../../src/spa/pages/SettingsPage.tsx"), "utf8");
+    // Success is no longer silent: the notice channel reports a saved change.
+    expect(source).toContain('message: t(locale, "settings.changesSaved")');
+    expect(t("en", "settings.changesSaved")).toBe("Changes saved.");
+    expect(t("zh_CN", "settings.changesSaved")).toBe("更改已保存。");
+    // Failure feedback is unchanged: structured API errors through the notice.
+    expect(source).toContain("message: settingsErrorMessage(locale, body)");
+  });
+
+  test("configuration section headings are described and unlabeled selects are named", () => {
+    const source = readFileSync(join(import.meta.dir, "../../src/spa/pages/SettingsPage.tsx"), "utf8");
+    // Every section heading carries a description — install health included.
+    expect(source).toContain('t(locale, "settings.installHealthCopy")');
+    expect(t("en", "settings.installHealthCopy")).toContain("deliveries");
+    expect(t("zh_CN", "settings.installHealthCopy")).toContain("投递");
+    // Selects without a visible label get an accessible name (DESIGN.md L2
+    // label audit) — the runtime-image selector and the chain model picker.
+    expect(source).toContain('aria-label={t(locale, "settings.runtimeImage")}');
+    expect(source).toContain('aria-label={t(locale, "settings.modelChainField")}');
+  });
+
+  test("empty states stay honest: unconfigured provider and no named chains", () => {
+    const source = readFileSync(join(import.meta.dir, "../../src/spa/pages/SettingsPage.tsx"), "utf8");
+    expect(source).toContain("settings.noConfiguredProviders");
+    expect(source).toContain("settings.noNamedChains");
+    expect(t("en", "settings.noConfiguredProviders")).toContain("No providers configured yet");
+    expect(t("zh_CN", "settings.noConfiguredProviders")).toContain("尚未配置");
+    expect(t("en", "settings.noNamedChains")).toBe("No named chains yet.");
+    expect(t("zh_CN", "settings.noNamedChains")).toBe("还没有命名链。");
+  });
+});

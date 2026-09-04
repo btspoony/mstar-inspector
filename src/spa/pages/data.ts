@@ -297,22 +297,24 @@ export function parseInsights(data: unknown): InsightsSummary | null {
 /**
  * Segmented window options (days) for the insights window ToggleGroup — a
  * legal subset of the API window domain (`^\d+$`, store clamp ≤90), zero API
- * extension. (Lives here since plan 40 retired the home module.)
+ * extension. (Lives here since plan 40 retired the home module; the names
+ * say insights — these helpers serve only the records page.)
  */
-export const HOME_WINDOWS = ["7", "30", "90"] as const;
-export type HomeWindow = (typeof HOME_WINDOWS)[number];
+export const INSIGHTS_WINDOWS = ["7", "30", "90"] as const;
+export type InsightsWindow = (typeof INSIGHTS_WINDOWS)[number];
 
 /**
- * URL window → segment: the `window` param when it is one of HOME_WINDOWS,
- * else the default 30. Arbitrary integer windows stay legal on the API, but
- * the records page only offers the segmented set, so off-set values resolve
- * to the default instead of leaving the control without an active segment.
- * The page rewrites the URL on mount when an off-set value is normalized
- * (plan 36 QC F-002), so the address bar reflects the applied filter.
+ * URL window → segment: the `window` param when it is one of
+ * INSIGHTS_WINDOWS, else the default 30. Arbitrary integer windows stay
+ * legal on the API, but the records page only offers the segmented set, so
+ * off-set values resolve to the default instead of leaving the control
+ * without an active segment. The page rewrites the URL on mount when an
+ * off-set value is normalized (plan 36 QC F-002), so the address bar
+ * reflects the applied filter.
  */
-export function homeWindow(search: string): HomeWindow {
+export function insightsWindow(search: string): InsightsWindow {
   const raw = parseInsightsSearch(search).window;
-  return (HOME_WINDOWS as readonly string[]).includes(raw) ? (raw as HomeWindow) : "30";
+  return (INSIGHTS_WINDOWS as readonly string[]).includes(raw) ? (raw as InsightsWindow) : "30";
 }
 
 /**
@@ -324,7 +326,7 @@ export function homeWindow(search: string): HomeWindow {
  */
 export function normalizeWindowSearch(search: string): string {
   const raw = parseInsightsSearch(search);
-  const window = homeWindow(search);
+  const window = insightsWindow(search);
   if (raw.window === window) return search;
   const params = new URLSearchParams();
   if (window !== "30") params.set("window", window);
