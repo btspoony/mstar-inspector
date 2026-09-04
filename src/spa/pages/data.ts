@@ -68,6 +68,15 @@ export type AppsPayload = {
   }>;
 };
 
+/**
+ * Plan 38 (spec § Provider configuration contract): whether a catalog entry
+ * is usable by the App's SELECTED sandbox runtime image — `builtin` consumes
+ * it via env names, `template` needs custom-provider materialization,
+ * `unavailable` cannot run on that image at all. Judged server-side against
+ * `app.sandbox_image_id`, never inferred client-side.
+ */
+export type ProviderEligibility = "builtin" | "template" | "unavailable";
+
 export type CatalogProvider = {
   id: string;
   label: string;
@@ -76,7 +85,20 @@ export type CatalogProvider = {
   api: string | null;
   models: string[];
   verifiable: boolean;
+  /** Usability vs the App's selected runtime image (plan 38). */
+  eligibility: ProviderEligibility;
 };
+
+/**
+ * One row of the App's PERSISTED provider state (plan 38): a stored builtin
+ * key (masked tail only) or a saved custom-provider declaration. The `kind`
+ * discriminator keeps this shape disjoint from {@link CatalogProvider} — a
+ * catalog entry (id/label/tier/models, no `kind`) can never be mistaken for
+ * configured state, and no plaintext key ever appears here.
+ */
+export type ConfiguredProvider =
+  | { kind: "key"; provider: string; last4: string; updated_at: string | null }
+  | { kind: "custom"; provider_id: string; base_url: string; api: string; model_ids: string[] };
 
 export type ModelChainEntry = {
   name: string;
@@ -123,7 +145,10 @@ export type SettingsManagePayload = {
   model_roles: Record<string, string>;
   model_chains: ModelChainEntry[];
   custom_providers: Array<{ provider_id: string; base_url: string; api: string; model_ids: string[] }>;
-  providers: CatalogProvider[];
+  /** Plan 38: the App's persisted provider state ONLY — empty is the valid unconfigured case. */
+  configured_providers: ConfiguredProvider[];
+  /** Plan 38: discovery metadata + eligibility — never configured state. */
+  provider_catalog: CatalogProvider[];
   model_role_ids: readonly string[];
   custom_provider_api_ids: readonly string[];
   /** The selector's choices — enabled registry entries only (never yaml/secrets). */
@@ -218,6 +243,53 @@ export function parseApps(data: unknown): AppsPayload | null {
   return data as AppsPayload;
 }
 
+/**
+ * Row-level guard for the plan-38 configured list: every row must carry the
+ * `kind` discriminator, so a catalog-shaped entry (no `kind`) can never be
+ * parsed as configured state.
+ */
+function isConfiguredProviderList(value: unknown): value is ConfiguredProvider[] {
+  return (
+    Array.isArray(value) &&
+    value.every((row) => {
+      if (!isRecord(row)) return false;
+      if (row.kind === "key") {
+        return (
+          typeof row.provider === "string" &&
+          typeof row.last4 === "string" &&
+          (row.updated_at === null || typeof row.updated_at === "string")
+        );
+      }
+      if (row.kind === "custom") {
+        return (
+          typeof row.provider_id === "string" &&
+          typeof row.base_url === "string" &&
+          typeof row.api === "string" &&
+          isStringArray(row.model_ids)
+        );
+      }
+      return false;
+    })
+  );
+}
+
+/** Row-level guard for the plan-38 catalog: tier + eligibility are the load-bearing discriminators. */
+function isCatalogProviderList(value: unknown): value is CatalogProvider[] {
+  return (
+    Array.isArray(value) &&
+    value.every(
+      (row) =>
+        isRecord(row) &&
+        typeof row.id === "string" &&
+        typeof row.label === "string" &&
+        (row.tier === "builtin" || row.tier === "template") &&
+        (row.eligibility === "builtin" ||
+          row.eligibility === "template" ||
+          row.eligibility === "unavailable"),
+    )
+  );
+}
+
 export function parseSettings(data: unknown): SettingsPayload | null {
   if (!isRecord(data) || !isRecord(data.app)) return null;
   if (typeof data.can_manage !== "boolean") return null;
@@ -232,7 +304,13 @@ export function parseSettings(data: unknown): SettingsPayload | null {
   if (!Array.isArray(data.keys)) return null;
   if (!Array.isArray(data.model_role_ids) || !isStringArray(data.model_role_ids)) return null;
   if (!Array.isArray(data.custom_provider_api_ids) || !isStringArray(data.custom_provider_api_ids)) return null;
-  if (!Array.isArray(data.providers) || !Array.isArray(data.model_chains)) return null;
+  if (!Array.isArray(data.model_chains)) return null;
+  // Plan 38 clean cutover: the primary list is configured state and the
+  // catalog is discovery-only — BOTH are required and row-validated, so the
+  // old `providers` dump (or catalog rows masquerading as configured state)
+  // fails the parse instead of silently passing.
+  if (!isConfiguredProviderList(data.configured_providers)) return null;
+  if (!isCatalogProviderList(data.provider_catalog)) return null;
   // Plan 37 manage face: the selector choices — { id, enabled } rows only.
   if (!isSandboxImageList(data.sandbox_images)) return null;
   return data as SettingsPayload;

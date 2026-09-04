@@ -115,7 +115,7 @@ describe("members/apps/settings parsers", () => {
     expect(parseApps({ apps: [] })).toBeNull();
   });
 
-  test("parseSettings requires can_manage, created_by, providers, and chains", () => {
+  test("parseSettings requires can_manage, created_by, the plan-38 collections, and chains", () => {
     const ok = parseSettings({
       can_manage: true,
       app: {
@@ -134,7 +134,8 @@ describe("members/apps/settings parsers", () => {
       custom_providers: [],
       installations: [],
       deliveries: [],
-      providers: [],
+      configured_providers: [],
+      provider_catalog: [],
       model_role_ids: ["mstar-review-seat"],
       custom_provider_api_ids: ["openai-completions"],
       sandbox_images: [{ id: "omp", enabled: true }],
@@ -145,7 +146,8 @@ describe("members/apps/settings parsers", () => {
       parseSettings({
         app: { slug: "demo", status: "active", review_enabled: 1, last_webhook_at: null },
         keys: [],
-        providers: [],
+        configured_providers: [],
+        provider_catalog: [],
         model_role_ids: [],
         custom_provider_api_ids: [],
       }),
@@ -171,7 +173,8 @@ describe("members/apps/settings parsers", () => {
       custom_providers: [],
       installations: [],
       deliveries: [],
-      providers: [],
+      configured_providers: [],
+      provider_catalog: [],
       model_role_ids: [],
       custom_provider_api_ids: [],
       sandbox_images: [{ id: "omp", enabled: true }],
@@ -189,6 +192,96 @@ describe("members/apps/settings parsers", () => {
     // A well-formed list parses and keeps the rows verbatim.
     const ok = parseSettings(manageBase);
     expect(ok && ok.can_manage && ok.sandbox_images).toEqual([{ id: "omp", enabled: true }]);
+  });
+
+  test("parseSettings separates configured state from the catalog (plan 38)", () => {
+    const manageBase = {
+      can_manage: true,
+      app: {
+        slug: "demo",
+        github_app_id: 1,
+        status: "active",
+        review_enabled: true,
+        created_by: "mallory",
+        last_webhook_at: null,
+        sandbox_image_id: "omp",
+      },
+      keys: [],
+      model_chain: null,
+      model_roles: {},
+      model_chains: [],
+      custom_providers: [],
+      installations: [],
+      deliveries: [],
+      configured_providers: [],
+      provider_catalog: [],
+      model_role_ids: [],
+      custom_provider_api_ids: [],
+      sandbox_images: [{ id: "omp", enabled: true }],
+    };
+    const catalogRow = {
+      id: "anthropic",
+      label: "Anthropic",
+      tier: "builtin",
+      base_url: null,
+      api: null,
+      models: ["claude-fable-5"],
+      verifiable: true,
+      eligibility: "builtin",
+    };
+    // The required unconfigured-App case: EMPTY configured state + a
+    // non-empty catalog parses — a catalog dump is never configured state.
+    const unconfigured = parseSettings({
+      ...manageBase,
+      provider_catalog: [
+        catalogRow,
+        { ...catalogRow, id: "workers-ai", tier: "template", eligibility: "template" },
+      ],
+    });
+    expect(unconfigured && unconfigured.can_manage && unconfigured.configured_providers).toEqual([]);
+    expect(unconfigured && unconfigured.can_manage && unconfigured.provider_catalog).toHaveLength(2);
+    // Both plan-38 collections are REQUIRED (clean cutover — no legacy shape).
+    const { configured_providers: _droppedConfigured, ...withoutConfigured } = manageBase;
+    expect(parseSettings(withoutConfigured)).toBeNull();
+    const { provider_catalog: _droppedCatalog, ...withoutCatalog } = manageBase;
+    expect(parseSettings(withoutCatalog)).toBeNull();
+    // A catalog row without eligibility (the old dump shape) is rejected.
+    const { eligibility: _droppedEligibility, ...rowWithoutEligibility } = catalogRow;
+    expect(parseSettings({ ...manageBase, provider_catalog: [rowWithoutEligibility] })).toBeNull();
+    expect(parseSettings({ ...manageBase, provider_catalog: [{ ...catalogRow, eligibility: "maybe" }] })).toBeNull();
+    // A configured row without the `kind` discriminator (catalog-shaped) is rejected.
+    expect(parseSettings({ ...manageBase, configured_providers: [{ ...catalogRow }] })).toBeNull();
+    // Key rows need the masked tail (never plaintext) and a nullable timestamp.
+    expect(
+      parseSettings({
+        ...manageBase,
+        configured_providers: [{ kind: "key", provider: "anthropic", last4: "9988", updated_at: null }],
+      }),
+    ).not.toBeNull();
+    expect(
+      parseSettings({ ...manageBase, configured_providers: [{ kind: "key", provider: "anthropic" }] }),
+    ).toBeNull();
+    // Custom declaration rows need base_url/api and a string model list.
+    expect(
+      parseSettings({
+        ...manageBase,
+        configured_providers: [
+          { kind: "custom", provider_id: "my-custom", base_url: "https://example.com/v1", api: "openai-completions", model_ids: ["local-7b"] },
+        ],
+      }),
+    ).not.toBeNull();
+    expect(
+      parseSettings({
+        ...manageBase,
+        configured_providers: [
+          { kind: "custom", provider_id: "my-custom", base_url: "https://example.com/v1", api: "openai-completions", model_ids: "local-7b" },
+        ],
+      }),
+    ).toBeNull();
+    // Unknown kinds are rejected — the union is closed.
+    expect(
+      parseSettings({ ...manageBase, configured_providers: [{ kind: "template", provider_id: "workers-ai" }] }),
+    ).toBeNull();
   });
 
   test("parseSettings accepts the non-manager base+health shape (no settings zones)", () => {

@@ -558,7 +558,7 @@ function ProvidersCard({
   const customById: Record<string, SettingsManagePayload["custom_providers"][number]> = {};
   for (const row of payload.custom_providers) customById[row.provider_id] = row;
   const catalogIds: Record<string, true> = {};
-  for (const provider of payload.providers) catalogIds[provider.id] = true;
+  for (const provider of payload.provider_catalog) catalogIds[provider.id] = true;
 
   return (
     <Card>
@@ -567,7 +567,10 @@ function ProvidersCard({
         <CardDescription>{t(locale, "settings.providersCopy")}</CardDescription>
       </CardHeader>
       <CardContent className="flex flex-col gap-3">
-        {payload.providers.map((provider) => (
+        {/* Plan 38: this card still renders the catalog dump verbatim — the
+            configured-only re-render belongs to Task 2; the payload split
+            (configured_providers vs provider_catalog) already happened. */}
+        {payload.provider_catalog.map((provider) => (
           <ProviderRow
             key={provider.id}
             locale={locale}

@@ -1291,6 +1291,14 @@ dashboardApp.get("/api/apps/:slug/settings", async (c) => {
     const modelChainSeats = await store.getModelChainSeats(gate.app.id);
     const modelChains = await store.getModelChains(gate.app.id);
     const customProviders = await store.listCustomProviders(gate.app.id);
+    // Plan 38 (spec § Provider configuration contract): eligibility is judged
+    // against the App's SELECTED runtime image, never an inferred filter. The
+    // registry entry's runtime kind is the contract: an omp-selected App
+    // consumes builtin entries via env names and materializes templates
+    // through the custom-provider machinery; any other runtime would leave
+    // every row unavailable (zero such rows this iteration — omp is the only
+    // registry entry, and the persisted id is store-validated against it).
+    const ompRuntime = getSandboxImage(gate.app.sandbox_image_id)?.runtime === "omp";
     return c.json({
       can_manage: true,
       ...base,
@@ -1302,13 +1310,32 @@ dashboardApp.get("/api/apps/:slug/settings", async (c) => {
       model_roles: modelChainSeats,
       model_chains: modelChains,
       custom_providers: customProviders,
-      // Plan 35 T4 (spec §4.3): the unified provider section renders the WHOLE
-      // catalog from one face — builtin ids in PROVIDER_IDS order, then
-      // template-tier entries (workers-ai). `verifiable: false` marks the
-      // console-only providers (azure-openai / ai-gateway — the old
-      // addKeyProviderIds filter); the UI shows the hint instead of a key
-      // form. Templates verify via the custom probe, so always verifiable.
-      providers: [
+      // Plan 38 clean cutover: the App's PERSISTED provider state only — a
+      // stored key (masked tail) or a saved custom-provider declaration. No
+      // plaintext keys, and catalog rows never appear here; an empty array is
+      // the valid unconfigured-App state.
+      configured_providers: [
+        ...maskedKeys.map((key) => ({
+          kind: "key" as const,
+          provider: key.provider,
+          last4: key.last4,
+          updated_at: key.updated_at,
+        })),
+        ...customProviders.map((row) => ({
+          kind: "custom" as const,
+          provider_id: row.provider_id,
+          base_url: row.base_url,
+          api: row.api,
+          model_ids: [...row.model_ids],
+        })),
+      ],
+      // Plan 38: discovery metadata (the retired `providers` dump) plus
+      // eligibility vs the App's selected image. Builtin ids in PROVIDER_IDS
+      // order, then template-tier entries (workers-ai). `verifiable: false`
+      // marks the console-only providers (azure-openai / ai-gateway — the
+      // old addKeyProviderIds filter); templates verify via the custom probe,
+      // so always verifiable.
+      provider_catalog: [
         ...PROVIDER_IDS.map((id) => {
           const meta = PROVIDER_META[id];
           if (!meta) throw new Error(`PROVIDER_META missing ${id}`);
@@ -1320,6 +1347,7 @@ dashboardApp.get("/api/apps/:slug/settings", async (c) => {
             api: meta.api,
             models: [...meta.models],
             verifiable: PROVIDER_VERIFY_ENDPOINTS[id]?.kind !== "unsupported",
+            eligibility: ompRuntime ? meta.tier : "unavailable",
           };
         }),
         ...Object.entries(PROVIDER_META)
@@ -1332,6 +1360,7 @@ dashboardApp.get("/api/apps/:slug/settings", async (c) => {
             api: meta.api,
             models: [...meta.models],
             verifiable: true,
+            eligibility: ompRuntime ? meta.tier : "unavailable",
           })),
       ],
       model_role_ids: MODEL_ROLE_IDS,

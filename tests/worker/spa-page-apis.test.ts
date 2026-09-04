@@ -142,21 +142,36 @@ describe("GET /dashboard/api/apps/:slug/settings (plan 29 T4)", () => {
     const body = (await owner.json()) as {
       can_manage: boolean;
       app: { slug: string; review_enabled: boolean; created_by: string; sandbox_image_id: string };
-      providers: Array<{ id: string; verifiable: boolean }>;
+      configured_providers?: Array<{ kind: string }>;
+      provider_catalog?: Array<{ id: string; tier: string; verifiable: boolean; eligibility: string }>;
+      providers?: unknown;
       sandbox_images?: Array<{ id: string; enabled: boolean }>;
     };
     expect(body.app.slug).toBe("mstar-inspector-mallory");
     expect(body.app.review_enabled).toBe(true);
     expect(body.can_manage).toBe(true);
-    expect(body.providers.length).toBeGreaterThan(0);
-    expect(body.providers.some((p) => p.id === "azure-openai" && p.verifiable === false)).toBe(true);
-    expect(body.providers.some((p) => p.id === "workers-ai")).toBe(true);
+    // Plan 38 clean cutover: the old `providers` catalog dump is gone; the
+    // manage face splits persisted state from the discovery catalog.
+    expect(body.providers).toBeUndefined();
+    // Fresh world = the unconfigured-App case: persisted state is EMPTY while
+    // the catalog is fully populated.
+    expect(body.configured_providers).toEqual([]);
+    expect(body.provider_catalog!.length).toBeGreaterThan(0);
+    expect(
+      body.provider_catalog!.some(
+        (p) => p.id === "azure-openai" && p.verifiable === false && p.eligibility === "builtin",
+      ),
+    ).toBe(true);
+    expect(body.provider_catalog!.some((p) => p.id === "workers-ai" && p.eligibility === "template")).toBe(true);
+    // omp is the selected runtime image: zero rows are unavailable this
+    // iteration, and omp itself is NOT a catalog entry.
+    expect(body.provider_catalog!.some((p) => p.eligibility === "unavailable")).toBe(false);
     // Plan 37: the selected image id defaults to omp, and the manage face
     // carries the enabled-registry selector choices (ids only — never
-    // image-local yaml or secrets). omp is NOT a provider catalog entry.
+    // image-local yaml or secrets).
     expect(body.app.sandbox_image_id).toBe("omp");
     expect(body.sandbox_images).toEqual([{ id: "omp", enabled: true }]);
-    expect(body.providers.some((p) => p.id === "omp")).toBe(false);
+    expect(body.provider_catalog!.some((p) => p.id === "omp")).toBe(false);
     expect(owner.headers.get("cache-control")).toBe("private, no-store");
 
     const other = await get("/dashboard/api/apps/mstar-inspector-mallory/settings", "hubot", env);
@@ -168,6 +183,8 @@ describe("GET /dashboard/api/apps/:slug/settings (plan 29 T4)", () => {
       installations: unknown[];
       deliveries: unknown[];
       keys?: unknown;
+      configured_providers?: unknown;
+      provider_catalog?: unknown;
       providers?: unknown;
       model_chains?: unknown;
       model_roles?: unknown;
@@ -179,10 +196,11 @@ describe("GET /dashboard/api/apps/:slug/settings (plan 29 T4)", () => {
     expect(otherBody.installations).toEqual([]);
     expect(otherBody.deliveries).toEqual([]);
     // Plan 37: the read-only face keeps the selected image id but NOT the
-    // editor's choice list.
+    // editor's choice list. Plan 38: neither settings zone rides it.
     expect(otherBody.app.sandbox_image_id).toBe("omp");
     expect(otherBody.keys).toBeUndefined();
-    expect(otherBody.providers).toBeUndefined();
+    expect(otherBody.configured_providers).toBeUndefined();
+    expect(otherBody.provider_catalog).toBeUndefined();
     expect(otherBody.model_chains).toBeUndefined();
     expect(otherBody.model_roles).toBeUndefined();
     expect(otherBody.custom_providers).toBeUndefined();
