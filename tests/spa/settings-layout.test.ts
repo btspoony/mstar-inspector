@@ -1,6 +1,8 @@
 /**
  * Plan 31 T4+T6 + plan 35 T4: settings ops zone, unified providers, chains UI.
- * No DOM runner — same contract as plan 30 home tests.
+ * No DOM runner — source-scan pins over SettingsPage.tsx and its primitives
+ * plus pure data helpers (the plan 30 home suite that shared this style is
+ * retired).
  */
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
@@ -546,6 +548,13 @@ describe("notice channel (plan 40 T3 reviewer handoffs)", () => {
     );
     expect(deleteBranch).toContain('t(locale, "settings.deleteSuccess")');
     expect(deleteBranch).toContain("reload: false");
+    // Source pin (qc2 F-001): the property-form `reload: false` call site is
+    // the delete branch's alone — any other op copied onto it would silently
+    // lose its background reload and fail this count. (Two prose mentions of
+    // the flag — the runPinnedWithBody JSDoc and the branch comment — have
+    // prose tails, so only a real `reload: false }`/`reload: false,` object
+    // property matches.)
+    expect(source.match(/reload: false\s*[},]/g)?.length).toBe(1);
     expect(t("en", "settings.deleteSuccess")).toContain("deleted");
     expect(t("zh_CN", "settings.deleteSuccess")).toContain("已删除");
     // Configuration saves keep the generic saved notice.

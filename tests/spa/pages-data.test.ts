@@ -62,7 +62,7 @@ describe("insights search wiring", () => {
   });
 
   test("summary URL requests the repos aggregation only when opted in (plan 36 QC F-001)", () => {
-    // Home surface: no include param.
+    // Default summary read: no include param (only the records surface opts in).
     expect(insightsSummaryUrl({ window: "7", repo: "" })).toBe("/dashboard/api/insights/summary?window=7");
     // Records surface: include=repos appended.
     expect(insightsSummaryUrl({ window: "7", repo: "acme/web" }, true)).toBe(

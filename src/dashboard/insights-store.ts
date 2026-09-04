@@ -54,8 +54,9 @@ export type InsightsWindow = {
   repo?: { owner: string; repo: string };
   /**
    * Opt-in window-scoped distinct `repos` aggregation (plan 36 QC F-001).
-   * Skipped (resolves to []) unless requested — the home surface never
-   * consumes it and must not pay the DISTINCT scan+sort.
+   * Skipped (resolves to []) unless requested — only the insights records
+   * surface opts in (its repo Select); default summary reads must not pay
+   * the DISTINCT scan+sort.
    */
   includeRepos?: boolean;
 };
