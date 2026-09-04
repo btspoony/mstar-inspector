@@ -353,7 +353,7 @@ function pendingConfirmCopy(
     disable: {
       title: t(locale, "settings.confirmDisableTitle", { slug }),
       body: t(locale, "settings.confirmDisableBody"),
-      action: t(locale, "apps.actions.disable"),
+      action: t(locale, "settings.confirmDisableAction"),
       destructive: true,
     },
     enable: {
@@ -1070,8 +1070,10 @@ function ChainsCard({
             ))}
           </TabsList>
           {/* forceMount keeps every editor mounted (as the pre-tab list did),
-              so switching tabs never silently drops in-progress edits; Radix
-              hides inactive panels while the selected one stays interactive. */}
+              so switching tabs never silently drops in-progress edits. Radix
+              itself hides nothing once forceMount pins every panel to
+              present — inactive panels are hidden by the local TabsContent
+              wrapper's data-[state=inactive]:hidden class. */}
           <TabsContent forceMount value={DEFAULT_CHAIN_NAME}>
             <ChainEditor
               locale={locale}

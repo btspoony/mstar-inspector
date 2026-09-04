@@ -297,6 +297,7 @@ export const zhCN: Dictionary = {
     confirmResumeBody: "此 App 将再次审查拉取请求。",
     confirmDisableTitle: "停用 {slug}？",
     confirmDisableBody: "GitHub 投递将得到 404，直到你再次启用。",
+    confirmDisableAction: "停用",
     confirmEnableTitle: "启用 {slug}？",
     confirmEnableBody: "此 App 将再次接受 webhook 投递。",
     confirmDeleteTitle: "删除 {slug}？",

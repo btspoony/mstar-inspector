@@ -323,6 +323,24 @@ describe("model chain tabs (plan 39 T1)", () => {
     expect(t("en", "settings.defaultChain")).toBe("Default chain");
     expect(t("zh_CN", "settings.defaultChain")).toBe("Default 链");
   });
+
+  test("forceMount panels stay mounted but inactive ones are visually hidden (keepMounted mechanism)", () => {
+    // With forceMount, Radix pins every panel to present and never applies
+    // its own hidden attribute — the local TabsContent wrapper's
+    // data-[state=inactive]:hidden class is what hides inactive editors
+    // while keeping them mounted for edit-state preservation.
+    const tabsSource = readFileSync(join(import.meta.dir, "../../src/spa/components/ui/tabs.tsx"), "utf8");
+    const contentWrapper = tabsSource.slice(tabsSource.indexOf("function TabsContent"));
+    expect(contentWrapper).toContain("data-[state=inactive]:hidden");
+    // The ChainsCard panels mount through that exact wrapper (forceMount on
+    // every TabsContent), so exactly one editor is visible per selected
+    // trigger.
+    const source = readFileSync(join(import.meta.dir, "../../src/spa/pages/SettingsPage.tsx"), "utf8");
+    expect(source).toContain('import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";');
+    const chainsBody = source.slice(source.indexOf("function ChainsCard"), source.indexOf("function SeatsCard"));
+    expect(chainsBody).toContain("<TabsContent forceMount value={DEFAULT_CHAIN_NAME}>");
+    expect(chainsBody).toContain('<TabsContent key={tab.id} forceMount value={tab.id}>');
+  });
 });
 
 describe("seat assignment section (plan 39 T2)", () => {
@@ -417,8 +435,14 @@ describe("operational action hierarchy (plan 39 T3)", () => {
     // the primary default) — nothing else in the ops zone went red.
     expect(source).toContain('<Button type="button" variant="secondary" onClick={() => onPending({ kind: "pause" })}>');
     expect(source).toContain('<Button type="button" variant="secondary" onClick={() => onPending({ kind: "enable" })}>');
+    // Resume stays on the cva default variant — exact-pinned as a Button with
+    // no variant attribute, so a regression to a destructive resume fails here.
+    expect(source).toContain('<Button type="button" onClick={() => onPending({ kind: "resume" })}>');
     const opsBody = source.slice(source.indexOf("function OpsCard"), source.indexOf("function ProvidersCard"));
     expect(opsBody).toContain('variant="destructive-outline"');
+    // The Disable confirm dialog's action button carries the plain verb; the
+    // "(reversible)" parenthetical stays on the ops trigger copy only.
+    expect(source).toContain('action: t(locale, "settings.confirmDisableAction")');
     // Busy/disabled guards and the post-op background state refresh are
     // unchanged on the dialog and op paths.
     expect(source).toContain("if (!pending || busy) return;");
@@ -435,12 +459,20 @@ describe("operational action hierarchy (plan 39 T3)", () => {
     const variantBlock = source.slice(source.indexOf('"destructive-outline":'), source.indexOf("secondary:"));
     expect(variantBlock).toContain("border-destructive");
     expect(variantBlock).toContain("text-destructive");
+    // Dark-mode focus-ring parity with the filled destructive variant.
+    expect(variantBlock).toContain("dark:focus-visible:ring-destructive/40");
     expect(variantBlock).not.toContain("#");
   });
 
   test("disable copy identifies reversibility in both locales; delete copy stays irreversible", () => {
     expect(t("en", "apps.actions.disable")).toContain("reversible");
     expect(t("zh_CN", "apps.actions.disable")).toContain("可恢复");
+    // The reversibility wording belongs to the ops trigger only — the confirm
+    // dialog's action button carries the plain verb in both locales.
+    expect(t("en", "settings.confirmDisableAction")).toBe("Disable");
+    expect(t("zh_CN", "settings.confirmDisableAction")).toBe("停用");
+    expect(t("en", "settings.confirmDisableAction")).not.toContain("reversible");
+    expect(t("zh_CN", "settings.confirmDisableAction")).not.toContain("可恢复");
     expect(t("en", "settings.confirmDisableBody")).toContain("until you enable it again");
     expect(t("zh_CN", "settings.confirmDisableBody")).toContain("再次启用");
     // Delete keeps the explicit irreversible confirmation copy.

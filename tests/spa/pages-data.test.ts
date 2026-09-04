@@ -7,6 +7,7 @@ import {
   activeChainTabId,
   canManageApp,
   canViewMembers,
+  DEFAULT_CHAIN_NAME,
   insightsRepoFromSelect,
   insightsRepoOptions,
   insightsRepoSelectValue,
@@ -25,6 +26,7 @@ import {
   type CatalogProvider,
   type ModelChainEntry,
 } from "../../src/spa/pages/data";
+import { DEFAULT_CHAIN_NAME as STORE_DEFAULT_CHAIN_NAME } from "../../src/dashboard/app-config-store";
 
 describe("admin guard (plan 29 T4)", () => {
   test("only admin can view members", () => {
@@ -391,6 +393,16 @@ describe("model chain tab model (plan 39 T1)", () => {
     expect(activeChainTabId(tabs, "")).toBe("default");
     // Even with no named chains the Default tab is a valid selection.
     expect(activeChainTabId(modelChainTabs([]), "default")).toBe("default");
+  });
+
+  test("DEFAULT_CHAIN_NAME equals the store's reserved name (duplication lock)", () => {
+    // src/spa/pages/data.ts mirrors src/dashboard/app-config-store.ts across
+    // the bundle boundary (documented, deliberately not imported): the store
+    // rejects the reserved name as a named chain, so a one-sided rename here
+    // would silently break tab ids and seat coercion. Same duplication-lock
+    // convention as PROVIDER_META — drift fails this test.
+    expect(DEFAULT_CHAIN_NAME).toBe(STORE_DEFAULT_CHAIN_NAME);
+    expect(DEFAULT_CHAIN_NAME).toBe("default");
   });
 });
 

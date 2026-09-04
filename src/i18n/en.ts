@@ -316,6 +316,7 @@ export const en = {
     confirmResumeBody: "This App will review pull requests again.",
     confirmDisableTitle: "Disable {slug}?",
     confirmDisableBody: "GitHub deliveries will get 404 until you enable it again.",
+    confirmDisableAction: "Disable",
     confirmEnableTitle: "Enable {slug}?",
     confirmEnableBody: "This App will accept webhook deliveries again.",
     confirmDeleteTitle: "Delete {slug}?",
