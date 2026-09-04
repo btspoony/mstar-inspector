@@ -586,7 +586,8 @@ describe("GET settings includes delivery_summary for the sidebar (plan 31 T6)", 
     expect(res.status).toBe(200);
     const body = (await res.json()) as {
       delivery_summary: { latest: null; rejected24h: number };
-      providers: Array<{ id: string; label: string; tier: string; verifiable: boolean }>;
+      configured_providers?: Array<{ kind: string }>;
+      provider_catalog?: Array<{ id: string; label: string; tier: string; verifiable: boolean; eligibility: string }>;
       app: { sandbox_image_id: string };
       sandbox_images?: Array<{ id: string; enabled: boolean }>;
     };
@@ -598,14 +599,24 @@ describe("GET settings includes delivery_summary for the sidebar (plan 31 T6)", 
     expect(JSON.stringify(body)).not.toContain("key_enc");
     expect(JSON.stringify(body)).not.toContain("private_key");
     expect(res.headers.get("cache-control")).toBe("private, no-store");
-    // Plan 35 T4: the unified provider section face — every builtin (in
-    // PROVIDER_IDS order) + the template tier, with verifiable flags.
-    const byId = (id: string) => body.providers.find((p) => p.id === id);
-    expect(body.providers.filter((p) => p.tier === "builtin").map((p) => p.id)).toEqual([...PROVIDER_IDS]);
+    // Plan 38 clean cutover: a fresh App is the unconfigured case — empty
+    // configured state while the discovery catalog stays fully populated
+    // (builtin ids in PROVIDER_IDS order + the template tier, with
+    // verifiable flags and eligibility vs the selected omp image).
+    expect(body.configured_providers).toEqual([]);
+    const byId = (id: string) => body.provider_catalog!.find((p) => p.id === id);
+    expect(body.provider_catalog!.filter((p) => p.tier === "builtin").map((p) => p.id)).toEqual([...PROVIDER_IDS]);
     expect(byId("azure-openai")?.verifiable).toBe(false);
     expect(byId("ai-gateway")?.verifiable).toBe(false);
     expect(byId("anthropic")?.verifiable).toBe(true);
-    expect(byId("workers-ai")).toMatchObject({ tier: "template", label: "Cloudflare Workers AI", verifiable: true });
+    expect(byId("anthropic")?.eligibility).toBe("builtin");
+    expect(byId("workers-ai")).toMatchObject({
+      tier: "template",
+      label: "Cloudflare Workers AI",
+      verifiable: true,
+      eligibility: "template",
+    });
+    expect(body.provider_catalog!.some((p) => p.eligibility === "unavailable")).toBe(false);
   });
 
   test("other member GET is 200 with can_manage false and base+health only", async () => {
@@ -616,7 +627,8 @@ describe("GET settings includes delivery_summary for the sidebar (plan 31 T6)", 
       can_manage: boolean;
       app: { slug: string };
       keys?: unknown;
-      providers?: unknown;
+      configured_providers?: unknown;
+      provider_catalog?: unknown;
       model_chains?: unknown;
       model_roles?: unknown;
       custom_providers?: unknown;
@@ -624,11 +636,123 @@ describe("GET settings includes delivery_summary for the sidebar (plan 31 T6)", 
     expect(body.can_manage).toBe(false);
     expect(body.app.slug).toBe("mallorys-app");
     expect(body.keys).toBeUndefined();
-    expect(body.providers).toBeUndefined();
+    expect(body.configured_providers).toBeUndefined();
+    expect(body.provider_catalog).toBeUndefined();
     expect(body.model_chains).toBeUndefined();
     expect(body.model_roles).toBeUndefined();
     expect(body.custom_providers).toBeUndefined();
     expect(JSON.stringify(body)).not.toContain("key_enc");
     expect(res.headers.get("cache-control")).toBe("private, no-store");
+  });
+});
+
+describe("GET settings configured_providers vs provider_catalog (plan 38)", () => {
+  let fetchSpy: ReturnType<typeof spyOn> | undefined;
+  afterEach(() => {
+    fetchSpy?.mockRestore();
+    fetchSpy = undefined;
+  });
+
+  const ACCOUNT_ID = "1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d";
+
+  type ConfiguredRow = {
+    kind: string;
+    provider?: string;
+    last4?: string;
+    updated_at?: string | null;
+    provider_id?: string;
+    base_url?: string;
+    api?: string;
+    model_ids?: string[];
+  };
+
+  async function getConfigured(env: Env): Promise<{
+    configured_providers: ConfiguredRow[];
+    provider_catalog: Array<{ id: string; tier: string; eligibility: string }>;
+  }> {
+    const res = await getJson("/dashboard/api/apps/mallorys-app/settings", "mallory", env);
+    expect(res.status).toBe(200);
+    return (await res.json()) as {
+      configured_providers: ConfiguredRow[];
+      provider_catalog: Array<{ id: string; tier: string; eligibility: string }>;
+    };
+  }
+
+  test("a stored builtin key is configured state; catalog rows never are", async () => {
+    const { db } = await seededWorld();
+    fetchSpy = mockModelsOk(["claude-sonnet-4-6"]);
+    const stored = await postForm(SETTINGS, "mallory", makeEnv(db), {
+      op: "add-key",
+      provider: "anthropic",
+      key: PLAIN_KEY,
+    });
+    expect(stored.status).toBe(200);
+    const body = await getConfigured(makeEnv(db));
+    // The masked key row — masked tail only, never plaintext.
+    expect(body.configured_providers).toEqual([
+      { kind: "key", provider: "anthropic", last4: PLAIN_KEY.slice(-4), updated_at: expect.any(String) },
+    ]);
+    // The same id still lives in the catalog as DISCOVERY metadata: an
+    // anthropic catalog row exists, but nothing catalog-shaped leaked into
+    // the configured list (and vice versa).
+    expect(body.provider_catalog.some((p) => p.id === "anthropic" && p.eligibility === "builtin")).toBe(true);
+    expect(body.configured_providers.every((row) => row.kind === "key" || row.kind === "custom")).toBe(true);
+    expect(JSON.stringify(body)).not.toContain(PLAIN_KEY);
+    expect(JSON.stringify(body)).not.toContain("key_enc");
+  });
+
+  test("a materialized template (workers-ai) is a custom configured declaration", async () => {
+    const { db } = await seededWorld();
+    fetchSpy = mockStatus(200, { data: [] });
+    const stored = await postForm(SETTINGS, "mallory", makeEnv(db), {
+      op: "add-template-provider",
+      template_id: "workers-ai",
+      account_id: ACCOUNT_ID,
+      key: PLAIN_KEY,
+    });
+    expect(stored.status).toBe(200);
+    const body = await getConfigured(makeEnv(db));
+    expect(body.configured_providers).toEqual([
+      {
+        kind: "custom",
+        provider_id: "workers-ai",
+        base_url: `https://api.cloudflare.com/client/v4/accounts/${ACCOUNT_ID}/ai/v1`,
+        api: "openai-completions",
+        model_ids: expect.any(Array),
+      },
+    ]);
+    // The catalog entry stays template-tier discovery metadata.
+    expect(body.provider_catalog.find((p) => p.id === "workers-ai")).toMatchObject({
+      tier: "template",
+      eligibility: "template",
+    });
+    expect(JSON.stringify(body)).not.toContain(PLAIN_KEY);
+  });
+
+  test("a non-catalog custom declaration is configured state", async () => {
+    const { db } = await seededWorld();
+    fetchSpy = mockStatus(200, { data: [] });
+    const stored = await postForm(SETTINGS, "mallory", makeEnv(db), {
+      op: "add-custom-provider",
+      provider_id: "my-custom",
+      base_url: "https://example.com/v1",
+      api: "openai-completions",
+      model_ids: "local-7b",
+      key: PLAIN_KEY,
+    });
+    expect(stored.status).toBe(200);
+    const body = await getConfigured(makeEnv(db));
+    expect(body.configured_providers).toEqual([
+      {
+        kind: "custom",
+        provider_id: "my-custom",
+        base_url: "https://example.com/v1",
+        api: "openai-completions",
+        model_ids: ["local-7b"],
+      },
+    ]);
+    // "my-custom" is NOT a catalog id — only the configured row exists.
+    expect(body.provider_catalog.some((p) => p.id === "my-custom")).toBe(false);
+    expect(JSON.stringify(body)).not.toContain(PLAIN_KEY);
   });
 });

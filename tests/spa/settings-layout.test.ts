@@ -151,3 +151,131 @@ describe("settings copy is dictionary-backed (plan 31 T4+T6 / plan 35 T4)", () =
     expect(source).toContain("unsupported_provider");
   });
 });
+
+describe("configured providers + catalog add flow (plan 38 T2)", () => {
+  test("the providers card renders configured state only; the catalog is the Add Provider picker", () => {
+    const source = readFileSync(join(import.meta.dir, "../../src/spa/pages/SettingsPage.tsx"), "utf8");
+    // Primary list = configured state (kind rows), never the catalog dump.
+    expect(source).toContain("payload.configured_providers.map");
+    expect(source).not.toContain("payload.provider_catalog.map");
+    // Empty configured state is a valid UI with Add Provider as the path.
+    expect(source).toContain("settings.noConfiguredProviders");
+    // Masked status rides the configured key row.
+    expect(source).toContain("settings.keyEnding");
+    expect(source).toContain("settings.keyTooShort");
+  });
+
+  test("Add Provider: catalog selection drives the configuration form; custom path preserved", () => {
+    const source = readFileSync(join(import.meta.dir, "../../src/spa/pages/SettingsPage.tsx"), "utf8");
+    // Accessible toggle → catalog select → selected provider's form.
+    expect(source).toContain("settings.addProvider");
+    expect(source).toContain("aria-expanded={open}");
+    expect(source).toContain("selectedCatalogProvider");
+    expect(source).toContain("providerFormKind");
+    expect(source).toContain("settings.configureProvider");
+    // Built-in and template materialization paths, mutations unchanged.
+    expect(source).toContain("/keys/verify");
+    expect(source).toContain('op: "add-template-provider"');
+    // CustomExpand stays for ids NOT in the catalog.
+    expect(source).toContain("CustomExpand");
+    expect(source).toContain('op: "add-custom-provider"');
+  });
+
+  test("a failed verify keeps the provider unconfigured and surfaces the structured reason", () => {
+    const source = readFileSync(join(import.meta.dir, "../../src/spa/pages/SettingsPage.tsx"), "utf8");
+    expect(source).toContain("verifyReasonMessage(locale, reason)");
+    // Forms reset and close only on success — a rejected submit keeps the
+    // typed input and the add selection while the background reload refreshes
+    // data in place.
+    expect(source).toContain("if (ok) {");
+    expect(source).toContain("await onReload({ background: true })");
+    expect(source).toContain("Promise<boolean>");
+  });
+
+  test("op-triggered reloads are background: the card tree stays mounted across a failed verify (QC fix wave 1 F-001)", () => {
+    const source = readFileSync(join(import.meta.dir, "../../src/spa/pages/SettingsPage.tsx"), "utf8");
+    // load() defaults to the foreground (loading-flash) behavior; only the
+    // background variant skips the "loading" flip.
+    expect(source).toContain("background = false");
+    expect(source).toContain('if (!background) setState("loading")');
+    // Initial mount loads in the foreground — genuine navigation keeps the
+    // loading state.
+    expect(source).toContain("void load()");
+    // Every op-triggered refresh is a background reload: no unmount, so the
+    // Add Provider panel (open + selection) and every form's typed input
+    // survive a failed verify.
+    expect(source).toContain("await onReload({ background: true })");
+    expect(source).not.toContain("await onReload()");
+    // A failed background refresh surfaces through the notice channel instead
+    // of the page-level error state — it must never unmount the tree either.
+    expect(source).toContain('message: t(locale, "common.loadFailed")');
+    // Success closes/resets deliberately: the onDone closure runs against the
+    // mounted instance.
+    expect(source).toContain("onDone();");
+    expect(source).toContain("setSelectedId(undefined)");
+    expect(source).toContain("setOpen(false)");
+    expect(source).toContain('setKey("")');
+  });
+
+  test("plan 38 add-flow copy is dictionary-backed in both locales", () => {
+    expect(t("en", "settings.addProvider")).toBe("Add provider");
+    expect(t("zh_CN", "settings.addProvider")).toBe("添加提供方");
+    expect(t("en", "settings.providersCopy")).toContain("Add Provider");
+    expect(t("zh_CN", "settings.providersCopy")).toContain("添加提供方");
+    expect(t("en", "settings.noConfiguredProviders")).toContain("No providers configured yet");
+    expect(t("zh_CN", "settings.noConfiguredProviders")).toContain("尚未配置");
+    expect(t("en", "settings.catalogBuiltin")).toContain("Built-in");
+    expect(t("zh_CN", "settings.catalogBuiltin")).toContain("内置");
+    expect(t("en", "settings.catalogTemplate")).toContain("templates");
+    expect(t("zh_CN", "settings.catalogTemplate")).toContain("模板");
+    expect(t("en", "settings.configureProvider", { label: "Anthropic" })).toContain("Anthropic");
+    expect(t("zh_CN", "settings.configureProvider", { label: "Anthropic" })).toContain("Anthropic");
+  });
+});
+
+describe("catalog provenance + eligibility messaging (plan 38 T3)", () => {
+  test("Add Provider discloses provenance and per-entry eligibility vs the selected runtime image", () => {
+    const source = readFileSync(join(import.meta.dir, "../../src/spa/pages/SettingsPage.tsx"), "utf8");
+    // Provenance: the catalog is generated, pinned metadata — not a live query.
+    expect(source).toContain("settings.catalogProvenance");
+    // Eligibility is judged against the App's SELECTED image id, never inferred.
+    expect(source).toContain("payload.app.sandbox_image_id");
+    expect(source).toContain("settings.eligibilityBuiltin");
+    expect(source).toContain("settings.eligibilityTemplate");
+    expect(source).toContain("settings.eligibilityUnavailable");
+    // Unavailable rows keep their picker entry (marked), never hidden silently.
+    expect(source).toContain("settings.eligibilityUnavailableShort");
+  });
+
+  test("an unavailable entry gets an explanation instead of a form — nothing can save it silently", () => {
+    const source = readFileSync(join(import.meta.dir, "../../src/spa/pages/SettingsPage.tsx"), "utf8");
+    // The gate sits above ProviderConfigForm: unavailable → copy only, no submit path.
+    expect(source).toContain('selected.eligibility === "unavailable"');
+  });
+
+  test("the catalog picker uses the aria-labelledby precedent; custom configured rows show the catalog label", () => {
+    const source = readFileSync(join(import.meta.dir, "../../src/spa/pages/SettingsPage.tsx"), "utf8");
+    // MembersPage precedent: visible label span + aria-labelledby on the
+    // trigger — no wrapping <label> around the Radix Select.
+    expect(source).toContain('id="settings-catalog-provider-label"');
+    expect(source).toContain('aria-labelledby="settings-catalog-provider-label"');
+    // Template-materialized configured rows resolve the human label via the
+    // catalog map (same pattern as key rows), keeping the raw id in the detail.
+    expect(source).toContain("catalogById[row.provider_id]?.label");
+  });
+
+  test("plan 38 T3 copy is dictionary-backed in both locales", () => {
+    expect(t("en", "settings.catalogProvenance")).toContain("models.dev");
+    expect(t("zh_CN", "settings.catalogProvenance")).toContain("models.dev");
+    expect(t("en", "settings.eligibilityBuiltin", { image: "omp" })).toContain("omp");
+    expect(t("zh_CN", "settings.eligibilityBuiltin", { image: "omp" })).toContain("omp");
+    expect(t("en", "settings.eligibilityTemplate", { image: "omp" })).toContain("omp");
+    expect(t("zh_CN", "settings.eligibilityTemplate", { image: "omp" })).toContain("omp");
+    expect(t("en", "settings.eligibilityUnavailable", { image: "omp" })).toContain("omp");
+    expect(t("zh_CN", "settings.eligibilityUnavailable", { image: "omp" })).toContain("omp");
+    expect(t("en", "settings.eligibilityUnavailableShort", { image: "omp" })).toContain("omp");
+    expect(t("zh_CN", "settings.eligibilityUnavailableShort", { image: "omp" })).toContain("omp");
+    expect(t("en", "settings.addProviderCopy")).toContain("can't be saved");
+    expect(t("zh_CN", "settings.addProviderCopy")).toContain("无法保存");
+  });
+});

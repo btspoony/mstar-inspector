@@ -27,8 +27,11 @@ import { formatRelativeTime } from "../relative-time";
 import {
   parseModels,
   parseSettings,
+  providerFormKind,
+  selectedCatalogProvider,
   splitModelChain,
   type CatalogProvider,
+  type ConfiguredProvider,
   type ModelOptionGroup,
   type SettingsManagePayload,
   type SettingsPayload,
@@ -50,14 +53,20 @@ export function SettingsPage({ boot, slug }: { boot: SpaBoot; slug: string }) {
   const [notice, setNotice] = useState<{ kind: NoticeKind; message: string } | null>(null);
   const cancelledRef = useRef(false);
 
-  async function load(): Promise<void> {
-    setState("loading");
+  // Background reloads (op-triggered refreshes) keep the loaded card tree
+  // mounted: they must not flip state back to "loading" — that unmount would
+  // destroy Add Provider's open/selection state and every form's typed input
+  // (plan 38 QC fix wave 1, F-001). A failed background refresh surfaces the
+  // error through the notice channel instead of the page-level error state.
+  async function load({ background = false }: { background?: boolean } = {}): Promise<void> {
+    if (!background) setState("loading");
     try {
       const settingsRaw = await fetchJson(`/dashboard/api/apps/${encodeURIComponent(slug)}/settings`);
       if (cancelledRef.current) return;
       const parsed = parseSettings(settingsRaw);
       if (!parsed) {
-        setState("error");
+        if (background) setNotice({ kind: "error", message: t(locale, "common.loadFailed") });
+        else setState("error");
         return;
       }
       let nextGroups: ModelOptionGroup[] = [];
@@ -74,7 +83,10 @@ export function SettingsPage({ boot, slug }: { boot: SpaBoot; slug: string }) {
       setGroups(nextGroups);
       setState("ok");
     } catch {
-      if (!cancelledRef.current) setState("error");
+      if (!cancelledRef.current) {
+        if (background) setNotice({ kind: "error", message: t(locale, "common.loadFailed") });
+        else setState("error");
+      }
     }
   }
 
@@ -133,7 +145,7 @@ function SettingsView({
   payload: SettingsPayload;
   groups: ModelOptionGroup[];
   onNotice: (notice: { kind: NoticeKind; message: string } | null) => void;
-  onReload: () => Promise<void>;
+  onReload: (options?: { background?: boolean }) => Promise<void>;
 }) {
   const { app } = payload;
   const base = `/dashboard/apps/${app.slug}/settings`;
@@ -144,15 +156,20 @@ function SettingsView({
     const { status, body } = await postForm(base, fields);
     if (status >= 400) {
       onNotice({ kind: "error", message: settingsErrorMessage(locale, body) });
-      await onReload();
+      await onReload({ background: true });
       return false;
     }
     onNotice(null);
-    await onReload();
+    await onReload({ background: true });
     return true;
   }
 
-  async function submitVerify(fields: Record<string, string>): Promise<void> {
+  // Plan 38: returns whether the key was verified AND stored. The refresh
+  // after the POST is a background reload (the card tree stays mounted), so a
+  // failed verify keeps the add panel open with the typed key for correction
+  // while the provider stays unconfigured; only success resets/closes the
+  // form via onDone.
+  async function submitVerify(fields: Record<string, string>): Promise<boolean> {
     const { status, body } = await postForm(
       `/dashboard/api/apps/${encodeURIComponent(app.slug)}/keys/verify`,
       fields,
@@ -166,11 +183,12 @@ function SettingsView({
         /* body is not JSON */
       }
       onNotice({ kind: "error", message: verifyReasonMessage(locale, reason) });
-      await onReload();
-      return;
+      await onReload({ background: true });
+      return false;
     }
     onNotice({ kind: "success", message: t(locale, "settings.keyVerified") });
-    await onReload();
+    await onReload({ background: true });
+    return true;
   }
 
   async function runPinned(path: string): Promise<void> {
@@ -181,11 +199,11 @@ function SettingsView({
     const { status, body } = await postForm(path, fields);
     if (status >= 400) {
       onNotice({ kind: "error", message: body.trim() || t(locale, "common.loadFailed") });
-      await onReload();
+      await onReload({ background: true });
       return;
     }
     onNotice(null);
-    await onReload();
+    await onReload({ background: true });
   }
 
   async function onConfirm(): Promise<void> {
@@ -539,6 +557,13 @@ function OpsCard({
   );
 }
 
+/**
+ * Providers (plan 38): this card lists ONLY the App's configured providers —
+ * a stored key (masked tail) or a saved custom-provider declaration. Catalog
+ * entries are discovery metadata and appear solely inside the Add Provider
+ * picker, whose selection determines the configuration form; the non-catalog
+ * custom declaration path (CustomExpand) stays for ids outside the catalog.
+ */
 function ProvidersCard({
   locale,
   payload,
@@ -548,17 +573,13 @@ function ProvidersCard({
 }: {
   locale: SpaBoot["locale"];
   payload: SettingsManagePayload;
-  onVerify: (fields: Record<string, string>) => Promise<void>;
+  onVerify: (fields: Record<string, string>) => Promise<boolean>;
   onSettings: (fields: Record<string, string>) => Promise<boolean>;
   onPending: (action: PendingAction) => void;
 }) {
-  const [expanded, setExpanded] = useState<string | null>(null);
-  const keyByProvider: Record<string, SettingsManagePayload["keys"][number]> = {};
-  for (const key of payload.keys) keyByProvider[key.provider] = key;
-  const customById: Record<string, SettingsManagePayload["custom_providers"][number]> = {};
-  for (const row of payload.custom_providers) customById[row.provider_id] = row;
-  const catalogIds: Record<string, true> = {};
-  for (const provider of payload.providers) catalogIds[provider.id] = true;
+  const [customOpen, setCustomOpen] = useState(false);
+  const catalogById: Record<string, CatalogProvider> = {};
+  for (const provider of payload.provider_catalog) catalogById[provider.id] = provider;
 
   return (
     <Card>
@@ -567,131 +588,258 @@ function ProvidersCard({
         <CardDescription>{t(locale, "settings.providersCopy")}</CardDescription>
       </CardHeader>
       <CardContent className="flex flex-col gap-3">
-        {payload.providers.map((provider) => (
-          <ProviderRow
-            key={provider.id}
-            locale={locale}
-            provider={provider}
-            storedKey={keyByProvider[provider.id]}
-            custom={customById[provider.id]}
-            expanded={expanded === provider.id}
-            onToggle={() => setExpanded(expanded === provider.id ? null : provider.id)}
-            onVerify={onVerify}
-            onSettings={onSettings}
-            onRemoveKey={() => onPending({ kind: "remove-key", provider: provider.id })}
-            onPending={onPending}
-          />
-        ))}
+        {payload.configured_providers.length === 0 ? (
+          <p className="text-sm text-muted-foreground">{t(locale, "settings.noConfiguredProviders")}</p>
+        ) : (
+          payload.configured_providers.map((row) =>
+            row.kind === "key" ? (
+              <ConfiguredKeyRow
+                key={row.provider}
+                locale={locale}
+                row={row}
+                label={catalogById[row.provider]?.label ?? row.provider}
+                onPending={onPending}
+              />
+            ) : (
+              <ConfiguredCustomRow
+                key={row.provider_id}
+                locale={locale}
+                row={row}
+                label={catalogById[row.provider_id]?.label ?? row.provider_id}
+                onPending={onPending}
+              />
+            ),
+          )
+        )}
+        <AddProviderSection locale={locale} payload={payload} onVerify={onVerify} onSettings={onSettings} />
         <CustomExpand
           locale={locale}
           payload={payload}
-          expanded={expanded === "__custom__"}
-          onToggle={() => setExpanded(expanded === "__custom__" ? null : "__custom__")}
+          expanded={customOpen}
+          onToggle={() => setCustomOpen(!customOpen)}
           onSettings={onSettings}
         />
-        {payload.custom_providers
-          .filter((row) => catalogIds[row.provider_id] === undefined)
-          .map((row) => (
-            <div key={row.provider_id} className="flex flex-wrap items-center justify-between gap-2 rounded-md border p-3">
-              <div>
-                <div className="font-medium">{row.provider_id}</div>
-                <div className="text-sm text-muted-foreground">
-                  {row.base_url} · {row.api} · {row.model_ids.join(", ")}
-                </div>
-              </div>
-              <Button
-                type="button"
-                variant="destructive"
-                size="sm"
-                onClick={() => onPending({ kind: "remove-custom", providerId: row.provider_id })}
-              >
-                {t(locale, "settings.remove")}
-              </Button>
-            </div>
-          ))}
       </CardContent>
     </Card>
   );
 }
 
-function ProviderRow({
+function ConfiguredKeyRow({
   locale,
-  provider,
-  storedKey,
-  custom,
-  expanded,
-  onToggle,
-  onVerify,
-  onSettings,
-  onRemoveKey,
+  row,
+  label,
   onPending,
 }: {
   locale: SpaBoot["locale"];
-  provider: CatalogProvider;
-  storedKey: SettingsManagePayload["keys"][number] | undefined;
-  custom: SettingsManagePayload["custom_providers"][number] | undefined;
-  expanded: boolean;
-  onToggle: () => void;
-  onVerify: (fields: Record<string, string>) => Promise<void>;
-  onSettings: (fields: Record<string, string>) => Promise<boolean>;
-  onRemoveKey: () => void;
+  row: Extract<ConfiguredProvider, { kind: "key" }>;
+  label: string;
   onPending: (action: PendingAction) => void;
 }) {
-  const tierLabel = t(locale, provider.tier === "template" ? "settings.tierTemplate" : "settings.tierBuiltin");
   return (
-    <div className="rounded-md border p-3">
-      <button type="button" className="flex w-full flex-col items-start text-left" onClick={onToggle}>
-        <span className="font-medium">{provider.label}</span>
-        <span className="text-xs text-muted-foreground">
-          {provider.id} · {tierLabel}
-          {storedKey
-            ? ` · ${storedKey.last4 ? t(locale, "settings.keyEnding", { last4: storedKey.last4 }) : t(locale, "settings.keyTooShort")}`
+    <div className="flex flex-wrap items-center justify-between gap-2 rounded-md border p-3">
+      <div>
+        <div className="font-medium">{label}</div>
+        <div className="text-xs text-muted-foreground">
+          {row.provider} ·{" "}
+          {row.last4 ? t(locale, "settings.keyEnding", { last4: row.last4 }) : t(locale, "settings.keyTooShort")}
+          {row.updated_at
+            ? ` · ${t(locale, "settings.updated", { time: formatRelativeTime(row.updated_at, locale) })}`
             : ""}
-          {custom ? ` · ${custom.base_url}` : ""}
-        </span>
-      </button>
-      {expanded ? (
-        <ProviderExpand
-          locale={locale}
-          provider={provider}
-          storedKey={storedKey}
-          custom={custom}
-          onVerify={onVerify}
-          onSettings={onSettings}
-          onRemoveKey={onRemoveKey}
-          onPending={onPending}
-        />
+        </div>
+      </div>
+      <Button
+        type="button"
+        variant="destructive"
+        size="sm"
+        onClick={() => onPending({ kind: "remove-key", provider: row.provider })}
+      >
+        {t(locale, "settings.remove")}
+      </Button>
+    </div>
+  );
+}
+
+function ConfiguredCustomRow({
+  locale,
+  row,
+  label,
+  onPending,
+}: {
+  locale: SpaBoot["locale"];
+  row: Extract<ConfiguredProvider, { kind: "custom" }>;
+  label: string;
+  onPending: (action: PendingAction) => void;
+}) {
+  return (
+    <div className="flex flex-wrap items-center justify-between gap-2 rounded-md border p-3">
+      <div>
+        <div className="font-medium">{label}</div>
+        <div className="text-sm text-muted-foreground">
+          {row.provider_id} · {row.base_url} · {row.api} · {row.model_ids.join(", ")}
+        </div>
+      </div>
+      <Button
+        type="button"
+        variant="destructive"
+        size="sm"
+        onClick={() => onPending({ kind: "remove-custom", providerId: row.provider_id })}
+      >
+        {t(locale, "settings.remove")}
+      </Button>
+    </div>
+  );
+}
+
+/**
+ * Add Provider (plan 38): an accessible toggle revealing the catalog picker;
+ * the selected entry's id determines the configuration form rendered beneath
+ * it. Catalog provenance (pinned snapshot, static code) and per-entry runtime
+ * eligibility (builtin / template / unavailable vs the App's selected image)
+ * are disclosed in copy; an unavailable entry renders its explanation with no
+ * submit path. Only a successful submit closes the flow — a failed verify/add
+ * keeps the selection and typed input while the provider stays unconfigured.
+ */
+function AddProviderSection({
+  locale,
+  payload,
+  onVerify,
+  onSettings,
+}: {
+  locale: SpaBoot["locale"];
+  payload: SettingsManagePayload;
+  onVerify: (fields: Record<string, string>) => Promise<boolean>;
+  onSettings: (fields: Record<string, string>) => Promise<boolean>;
+}) {
+  const [open, setOpen] = useState(false);
+  const [selectedId, setSelectedId] = useState<string | undefined>(undefined);
+  const selected = selectedCatalogProvider(payload.provider_catalog, selectedId);
+  const imageId = payload.app.sandbox_image_id;
+  const keyByProvider: Record<string, SettingsManagePayload["keys"][number]> = {};
+  for (const key of payload.keys) keyByProvider[key.provider] = key;
+  const customById: Record<string, SettingsManagePayload["custom_providers"][number]> = {};
+  for (const row of payload.custom_providers) customById[row.provider_id] = row;
+
+  return (
+    <div className="flex flex-col gap-3">
+      <Button type="button" variant="secondary" aria-expanded={open} onClick={() => setOpen(!open)}>
+        {t(locale, "settings.addProvider")}
+      </Button>
+      {open ? (
+        <div className="flex flex-col gap-3 rounded-md border p-3">
+          <p className="text-sm text-muted-foreground">{t(locale, "settings.addProviderCopy")}</p>
+          <p className="text-xs text-muted-foreground">{t(locale, "settings.catalogProvenance")}</p>
+          <div className="flex max-w-xs flex-col gap-1.5">
+            <span className="text-sm font-medium" id="settings-catalog-provider-label">
+              {t(locale, "settings.provider")}
+            </span>
+            <Select value={selectedId} onValueChange={setSelectedId}>
+              <SelectTrigger aria-labelledby="settings-catalog-provider-label">
+                <SelectValue placeholder={t(locale, "settings.selectProvider")} />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectGroup>
+                  <SelectLabel>{t(locale, "settings.catalogBuiltin")}</SelectLabel>
+                  {payload.provider_catalog
+                    .filter((provider) => provider.tier === "builtin")
+                    .map((provider) => (
+                      <SelectItem key={provider.id} value={provider.id}>
+                        {provider.label}
+                        {provider.eligibility === "unavailable"
+                          ? ` — ${t(locale, "settings.eligibilityUnavailableShort", { image: imageId })}`
+                          : ""}
+                      </SelectItem>
+                    ))}
+                </SelectGroup>
+                <SelectGroup>
+                  <SelectLabel>{t(locale, "settings.catalogTemplate")}</SelectLabel>
+                  {payload.provider_catalog
+                    .filter((provider) => provider.tier === "template")
+                    .map((provider) => (
+                      <SelectItem key={provider.id} value={provider.id}>
+                        {provider.label}
+                        {provider.eligibility === "unavailable"
+                          ? ` — ${t(locale, "settings.eligibilityUnavailableShort", { image: imageId })}`
+                          : ""}
+                      </SelectItem>
+                    ))}
+                </SelectGroup>
+              </SelectContent>
+            </Select>
+          </div>
+          {selected ? (
+            <div className="flex flex-col gap-3">
+              <h4 className="text-sm font-medium">
+                {t(locale, "settings.configureProvider", { label: selected.label })}
+              </h4>
+              {selected.eligibility === "unavailable" ? (
+                // Runtime-ineligible rows stay selectable for discovery but get
+                // an explanation instead of a form — no submit path, so an
+                // unusable provider can never be saved silently (plan 38 T3).
+                <p className="text-sm text-muted-foreground">
+                  {t(locale, "settings.eligibilityUnavailable", { image: imageId })}
+                </p>
+              ) : (
+                <>
+                  <p className="text-sm text-muted-foreground">
+                    {selected.eligibility === "template"
+                      ? t(locale, "settings.eligibilityTemplate", { image: imageId })
+                      : t(locale, "settings.eligibilityBuiltin", { image: imageId })}
+                  </p>
+                  <ProviderConfigForm
+                    key={selected.id}
+                    locale={locale}
+                    provider={selected}
+                    storedKey={keyByProvider[selected.id]}
+                    custom={customById[selected.id]}
+                    onVerify={onVerify}
+                    onSettings={onSettings}
+                    onDone={() => {
+                      setSelectedId(undefined);
+                      setOpen(false);
+                    }}
+                  />
+                </>
+              )}
+            </div>
+          ) : null}
+        </div>
       ) : null}
     </div>
   );
 }
 
-function ProviderExpand({
+/**
+ * The selected catalog entry's configuration requirements (plan 38): template
+ * entries materialize through op=add-template-provider, verifiable builtins
+ * use the verify-first /keys/verify path, and console-only providers have no
+ * in-app form. Every form clears and closes only on success — a rejected
+ * submit surfaces the structured error and keeps the typed input.
+ */
+function ProviderConfigForm({
   locale,
   provider,
   storedKey,
   custom,
   onVerify,
   onSettings,
-  onRemoveKey,
-  onPending,
+  onDone,
 }: {
   locale: SpaBoot["locale"];
   provider: CatalogProvider;
   storedKey: SettingsManagePayload["keys"][number] | undefined;
   custom: SettingsManagePayload["custom_providers"][number] | undefined;
-  onVerify: (fields: Record<string, string>) => Promise<void>;
+  onVerify: (fields: Record<string, string>) => Promise<boolean>;
   onSettings: (fields: Record<string, string>) => Promise<boolean>;
-  onRemoveKey: () => void;
-  onPending: (action: PendingAction) => void;
+  onDone: () => void;
 }) {
   const [key, setKey] = useState("");
   const [accountId, setAccountId] = useState("");
+  const formKind = providerFormKind(provider);
 
-  if (provider.tier === "template") {
+  if (formKind === "template") {
     return (
       <form
-        className="mt-3 flex flex-col gap-3"
+        className="flex flex-col gap-3"
         onSubmit={(event) => {
           event.preventDefault();
           void onSettings({
@@ -700,11 +848,12 @@ function ProviderExpand({
             account_id: accountId,
             key,
           }).then((ok) => {
-            // QC wave (seat3): a rejected save (400 keeps the notice) must
-            // NOT wipe the typed account id / key the user needs to fix.
+            // A rejected save (400 keeps the notice) must NOT wipe the typed
+            // account id / key the user needs to fix (QC wave, seat3).
             if (ok) {
               setKey("");
               setAccountId("");
+              onDone();
             }
           });
         }}
@@ -733,43 +882,37 @@ function ProviderExpand({
             placeholder={t(locale, "settings.apiKeyPlaceholder")}
           />
         </label>
-        <div className="flex flex-wrap gap-2">
-          <Button type="submit">{t(locale, "settings.addTemplate", { label: provider.label })}</Button>
-          {custom ? (
-            <Button
-              type="button"
-              variant="destructive"
-              onClick={() => onPending({ kind: "remove-custom", providerId: provider.id })}
-            >
-              {t(locale, "settings.remove")}
-            </Button>
-          ) : null}
-        </div>
+        <Button type="submit">{t(locale, "settings.addTemplate", { label: provider.label })}</Button>
       </form>
     );
   }
 
-  if (!provider.verifiable) {
-    return (
-      <div className="mt-3 flex flex-col gap-2">
-        <p className="text-sm text-muted-foreground">{t(locale, "settings.consoleOnly")}</p>
-        {storedKey ? (
-          <Button type="button" variant="destructive" size="sm" onClick={onRemoveKey}>
-            {t(locale, "settings.remove")}
-          </Button>
-        ) : null}
-      </div>
-    );
+  if (formKind === "console") {
+    return <p className="text-sm text-muted-foreground">{t(locale, "settings.consoleOnly")}</p>;
   }
 
   return (
     <form
-      className="mt-3 flex flex-col gap-3"
+      className="flex flex-col gap-3"
       onSubmit={(event) => {
         event.preventDefault();
-        void onVerify({ provider: provider.id, key }).then(() => setKey(""));
+        void onVerify({ provider: provider.id, key }).then((ok) => {
+          // The post-submit reload is background (the tree stays mounted), so
+          // a failed verify keeps the typed key for correction — the provider
+          // stays unconfigured and the structured reason is shown. Success
+          // closes/resets deliberately via onDone.
+          if (ok) {
+            setKey("");
+            onDone();
+          }
+        });
       }}
     >
+      {storedKey ? (
+        <p className="text-sm text-muted-foreground">
+          {t(locale, "settings.keyEnding", { last4: storedKey.last4 })}
+        </p>
+      ) : null}
       <label className="flex flex-col gap-1.5 text-sm font-medium">
         {t(locale, "settings.apiKey")}
         <Input
@@ -780,14 +923,7 @@ function ProviderExpand({
           placeholder={t(locale, "settings.apiKeyPlaceholder")}
         />
       </label>
-      <div className="flex flex-wrap gap-2">
-        <Button type="submit">{t(locale, "settings.addKey")}</Button>
-        {storedKey ? (
-          <Button type="button" variant="destructive" onClick={onRemoveKey}>
-            {t(locale, "settings.remove")}
-          </Button>
-        ) : null}
-      </div>
+      <Button type="submit">{t(locale, "settings.addKey")}</Button>
     </form>
   );
 }
