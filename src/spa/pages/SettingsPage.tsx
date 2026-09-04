@@ -1,7 +1,8 @@
 import { useEffect, useRef, useState } from "react";
+import { Plus } from "lucide-react";
 import { t } from "../../i18n";
 import { Button } from "@/components/ui/button";
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import { Card, CardAction, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import {
   Dialog,
   DialogClose,
@@ -603,6 +604,11 @@ function OpsCard({
  * entries are discovery metadata and appear solely inside the Add Provider
  * picker, whose selection determines the configuration form; the non-catalog
  * custom declaration path (CustomExpand) stays for ids outside the catalog.
+ *
+ * Plan 42: the Add Provider entry is a labeled, bordered button in the card
+ * header (CardAction slot) — the catalog breadth made discoverability the
+ * point, so the flow opens from a control that reads as a control. The open
+ * panel is the card content's first row.
  */
 function ProvidersCard({
   locale,
@@ -617,6 +623,7 @@ function ProvidersCard({
   onSettings: (fields: Record<string, string>) => Promise<boolean>;
   onPending: (action: PendingAction) => void;
 }) {
+  const [addOpen, setAddOpen] = useState(false);
   const [customOpen, setCustomOpen] = useState(false);
   const catalogById: Record<string, CatalogProvider> = {};
   for (const provider of payload.provider_catalog) catalogById[provider.id] = provider;
@@ -626,8 +633,22 @@ function ProvidersCard({
       <CardHeader>
         <CardTitle>{t(locale, "settings.providers")}</CardTitle>
         <CardDescription>{t(locale, "settings.providersCopy")}</CardDescription>
+        <CardAction>
+          <Button type="button" variant="outline" size="sm" aria-expanded={addOpen} onClick={() => setAddOpen(!addOpen)}>
+            <Plus aria-hidden="true" />
+            {t(locale, "settings.addProvider")}
+          </Button>
+        </CardAction>
       </CardHeader>
       <CardContent className="flex flex-col gap-3">
+        <AddProviderSection
+          locale={locale}
+          payload={payload}
+          onVerify={onVerify}
+          onSettings={onSettings}
+          open={addOpen}
+          onOpenChange={setAddOpen}
+        />
         {payload.configured_providers.length === 0 ? (
           <p className="text-sm text-muted-foreground">{t(locale, "settings.noConfiguredProviders")}</p>
         ) : (
@@ -651,7 +672,6 @@ function ProvidersCard({
             ),
           )
         )}
-        <AddProviderSection locale={locale} payload={payload} onVerify={onVerify} onSettings={onSettings} />
         <CustomExpand
           locale={locale}
           payload={payload}
@@ -731,26 +751,34 @@ function ConfiguredCustomRow({
 }
 
 /**
- * Add Provider (plan 38): an accessible toggle revealing the catalog picker;
- * the selected entry's id determines the configuration form rendered beneath
- * it. Catalog provenance (pinned snapshot, static code) and per-entry runtime
- * eligibility (builtin / template / unavailable vs the App's selected image)
- * are disclosed in copy; an unavailable entry renders its explanation with no
- * submit path. Only a successful submit closes the flow — a failed verify/add
- * keeps the selection and typed input while the provider stays unconfigured.
+ * Add Provider (plan 38): the open panel beneath the card header's labeled
+ * disclosure button (plan 42 moved the button to the CardAction slot; the
+ * panel renders as the content's first row). The selected entry's id
+ * determines the configuration form rendered beneath the picker. Catalog
+ * provenance (the committed models.dev snapshot, static code) and per-entry
+ * runtime eligibility (builtin / template / unavailable vs the App's selected
+ * image) are disclosed in copy; an unavailable entry renders its explanation
+ * with no submit path. The picker groups builtin tier first, then template,
+ * and height-caps the list to an internal scroll so the snapshot breadth
+ * stays usable. Only a successful submit closes the flow — a failed
+ * verify/add keeps the selection and typed input while the provider stays
+ * unconfigured.
  */
 function AddProviderSection({
   locale,
   payload,
   onVerify,
   onSettings,
+  open,
+  onOpenChange,
 }: {
   locale: SpaBoot["locale"];
   payload: SettingsManagePayload;
   onVerify: (fields: Record<string, string>) => Promise<boolean>;
   onSettings: (fields: Record<string, string>) => Promise<boolean>;
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
 }) {
-  const [open, setOpen] = useState(false);
   const [selectedId, setSelectedId] = useState<string | undefined>(undefined);
   const selected = selectedCatalogProvider(payload.provider_catalog, selectedId);
   const imageId = payload.app.sandbox_image_id;
@@ -759,89 +787,85 @@ function AddProviderSection({
   const customById: Record<string, SettingsManagePayload["custom_providers"][number]> = {};
   for (const row of payload.custom_providers) customById[row.provider_id] = row;
 
+  if (!open) return null;
   return (
-    <div className="flex flex-col gap-3">
-      <Button type="button" variant="secondary" aria-expanded={open} onClick={() => setOpen(!open)}>
-        {t(locale, "settings.addProvider")}
-      </Button>
-      {open ? (
-        <div className="flex flex-col gap-3 rounded-md border p-3">
-          <p className="text-sm text-muted-foreground">{t(locale, "settings.addProviderCopy")}</p>
-          <p className="text-xs text-muted-foreground">{t(locale, "settings.catalogProvenance")}</p>
-          <div className="flex max-w-xs flex-col gap-1.5">
-            <span className="text-sm font-medium" id="settings-catalog-provider-label">
-              {t(locale, "settings.provider")}
-            </span>
-            <Select value={selectedId} onValueChange={setSelectedId}>
-              <SelectTrigger aria-labelledby="settings-catalog-provider-label">
-                <SelectValue placeholder={t(locale, "settings.selectProvider")} />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectGroup>
-                  <SelectLabel>{t(locale, "settings.catalogBuiltin")}</SelectLabel>
-                  {payload.provider_catalog
-                    .filter((provider) => provider.tier === "builtin")
-                    .map((provider) => (
-                      <SelectItem key={provider.id} value={provider.id}>
-                        {provider.label}
-                        {provider.eligibility === "unavailable"
-                          ? ` — ${t(locale, "settings.eligibilityUnavailableShort", { image: imageId })}`
-                          : ""}
-                      </SelectItem>
-                    ))}
-                </SelectGroup>
-                <SelectGroup>
-                  <SelectLabel>{t(locale, "settings.catalogTemplate")}</SelectLabel>
-                  {payload.provider_catalog
-                    .filter((provider) => provider.tier === "template")
-                    .map((provider) => (
-                      <SelectItem key={provider.id} value={provider.id}>
-                        {provider.label}
-                        {provider.eligibility === "unavailable"
-                          ? ` — ${t(locale, "settings.eligibilityUnavailableShort", { image: imageId })}`
-                          : ""}
-                      </SelectItem>
-                    ))}
-                </SelectGroup>
-              </SelectContent>
-            </Select>
-          </div>
-          {selected ? (
-            <div className="flex flex-col gap-3">
-              <h4 className="text-sm font-medium">
-                {t(locale, "settings.configureProvider", { label: selected.label })}
-              </h4>
-              {selected.eligibility === "unavailable" ? (
-                // Runtime-ineligible rows stay selectable for discovery but get
-                // an explanation instead of a form — no submit path, so an
-                // unusable provider can never be saved silently (plan 38 T3).
-                <p className="text-sm text-muted-foreground">
-                  {t(locale, "settings.eligibilityUnavailable", { image: imageId })}
-                </p>
-              ) : (
-                <>
-                  <p className="text-sm text-muted-foreground">
-                    {selected.eligibility === "template"
-                      ? t(locale, "settings.eligibilityTemplate", { image: imageId })
-                      : t(locale, "settings.eligibilityBuiltin", { image: imageId })}
-                  </p>
-                  <ProviderConfigForm
-                    key={selected.id}
-                    locale={locale}
-                    provider={selected}
-                    storedKey={keyByProvider[selected.id]}
-                    custom={customById[selected.id]}
-                    onVerify={onVerify}
-                    onSettings={onSettings}
-                    onDone={() => {
-                      setSelectedId(undefined);
-                      setOpen(false);
-                    }}
-                  />
-                </>
-              )}
-            </div>
-          ) : null}
+    <div className="flex flex-col gap-3 rounded-md border p-3">
+      <p className="text-sm text-muted-foreground">{t(locale, "settings.addProviderCopy")}</p>
+      <p className="text-xs text-muted-foreground">
+        {t(locale, "settings.catalogProvenance", { count: payload.provider_catalog.length })}
+      </p>
+      <div className="flex max-w-xs flex-col gap-1.5">
+        <span className="text-sm font-medium" id="settings-catalog-provider-label">
+          {t(locale, "settings.provider")}
+        </span>
+        <Select value={selectedId} onValueChange={setSelectedId}>
+          <SelectTrigger aria-labelledby="settings-catalog-provider-label">
+            <SelectValue placeholder={t(locale, "settings.selectProvider")} />
+          </SelectTrigger>
+          <SelectContent className="max-h-72">
+            <SelectGroup>
+              <SelectLabel>{t(locale, "settings.catalogBuiltin")}</SelectLabel>
+              {payload.provider_catalog
+                .filter((provider) => provider.tier === "builtin")
+                .map((provider) => (
+                  <SelectItem key={provider.id} value={provider.id}>
+                    {provider.label}
+                    {provider.eligibility === "unavailable"
+                      ? ` — ${t(locale, "settings.eligibilityUnavailableShort", { image: imageId })}`
+                      : ""}
+                  </SelectItem>
+                ))}
+            </SelectGroup>
+            <SelectGroup>
+              <SelectLabel>{t(locale, "settings.catalogTemplate")}</SelectLabel>
+              {payload.provider_catalog
+                .filter((provider) => provider.tier === "template")
+                .map((provider) => (
+                  <SelectItem key={provider.id} value={provider.id}>
+                    {provider.label}
+                    {provider.eligibility === "unavailable"
+                      ? ` — ${t(locale, "settings.eligibilityUnavailableShort", { image: imageId })}`
+                      : ""}
+                  </SelectItem>
+                ))}
+            </SelectGroup>
+          </SelectContent>
+        </Select>
+      </div>
+      {selected ? (
+        <div className="flex flex-col gap-3">
+          <h4 className="text-sm font-medium">
+            {t(locale, "settings.configureProvider", { label: selected.label })}
+          </h4>
+          {selected.eligibility === "unavailable" ? (
+            // Runtime-ineligible rows stay selectable for discovery but get
+            // an explanation instead of a form — no submit path, so an
+            // unusable provider can never be saved silently (plan 38 T3).
+            <p className="text-sm text-muted-foreground">
+              {t(locale, "settings.eligibilityUnavailable", { image: imageId })}
+            </p>
+          ) : (
+            <>
+              <p className="text-sm text-muted-foreground">
+                {selected.eligibility === "template"
+                  ? t(locale, "settings.eligibilityTemplate", { image: imageId })
+                  : t(locale, "settings.eligibilityBuiltin", { image: imageId })}
+              </p>
+              <ProviderConfigForm
+                key={selected.id}
+                locale={locale}
+                provider={selected}
+                storedKey={keyByProvider[selected.id]}
+                custom={customById[selected.id]}
+                onVerify={onVerify}
+                onSettings={onSettings}
+                onDone={() => {
+                  setSelectedId(undefined);
+                  onOpenChange(false);
+                }}
+              />
+            </>
+          )}
         </div>
       ) : null}
     </div>
@@ -854,6 +878,12 @@ function AddProviderSection({
  * use the verify-first /keys/verify path, and console-only providers have no
  * in-app form. Every form clears and closes only on success — a rejected
  * submit surfaces the structured error and keeps the typed input.
+ *
+ * Plan 42: the template form carries the base URL explicitly — prefilled from
+ * the catalog entry, editable as an override (required only when the entry's
+ * catalog base URL is null) — and the account-id field appears only when the
+ * effective base URL carries the {account_id} placeholder, mirroring the
+ * save flow's conditional demand (breadth rows are not all Workers-AI-shaped).
  */
 function ProviderConfigForm({
   locale,
@@ -874,9 +904,15 @@ function ProviderConfigForm({
 }) {
   const [key, setKey] = useState("");
   const [accountId, setAccountId] = useState("");
+  const [baseUrl, setBaseUrl] = useState(provider.base_url ?? "");
   const formKind = providerFormKind(provider);
 
   if (formKind === "template") {
+    // The effective base URL mirrors the save flow: the typed override when
+    // present, else the catalog prefill. The account-id field tracks its
+    // {account_id} placeholder, so an override can add or remove the demand.
+    const effectiveBaseUrl = baseUrl.trim() !== "" ? baseUrl.trim() : provider.base_url;
+    const needsAccountId = effectiveBaseUrl !== null && effectiveBaseUrl.includes("{account_id}");
     return (
       <form
         className="flex flex-col gap-3"
@@ -885,6 +921,7 @@ function ProviderConfigForm({
           void onSettings({
             op: "add-template-provider",
             template_id: provider.id,
+            base_url: baseUrl,
             account_id: accountId,
             key,
           }).then((ok) => {
@@ -893,6 +930,7 @@ function ProviderConfigForm({
             if (ok) {
               setKey("");
               setAccountId("");
+              setBaseUrl("");
               onDone();
             }
           });
@@ -904,14 +942,26 @@ function ProviderConfigForm({
           </p>
         ) : null}
         <label className="flex flex-col gap-1.5 text-sm font-medium">
-          {t(locale, "settings.accountId")}
+          {t(locale, "settings.baseUrl")}
           <Input
-            value={accountId}
-            onChange={(event) => setAccountId(event.target.value)}
-            placeholder={t(locale, "settings.accountIdPlaceholder")}
+            value={baseUrl}
+            onChange={(event) => setBaseUrl(event.target.value)}
+            placeholder="https://api.example.com/v1"
             autoComplete="off"
+            required={provider.base_url === null}
           />
         </label>
+        {needsAccountId ? (
+          <label className="flex flex-col gap-1.5 text-sm font-medium">
+            {t(locale, "settings.accountId")}
+            <Input
+              value={accountId}
+              onChange={(event) => setAccountId(event.target.value)}
+              placeholder={t(locale, "settings.accountIdPlaceholder")}
+              autoComplete="off"
+            />
+          </label>
+        ) : null}
         <label className="flex flex-col gap-1.5 text-sm font-medium">
           {t(locale, "settings.apiKey")}
           <Input

@@ -341,7 +341,7 @@ export const en = {
     addProviderCopy:
       "Pick a catalog provider — its configuration requirements appear once selected. Entries unusable on the App's runtime image are marked and can't be saved; providers outside the catalog use the custom declaration below.",
     catalogProvenance:
-      "Catalog metadata is generated from a pinned models.dev snapshot and compiled into the app — no provider is contacted until you submit a key for verification.",
+      "{count} providers from the committed models.dev snapshot, compiled into the app — no provider is contacted until you submit a key for verification.",
     catalogBuiltin: "Built-in providers",
     catalogTemplate: "Catalog templates",
     eligibilityBuiltin: "Works on the {image} runtime image — this provider runs as a built-in.",
@@ -355,7 +355,7 @@ export const en = {
     customEntryCopy: "Declare a non-built-in provider — id, base URL, model ids, and key.",
     expandCustom: "Add custom provider",
     collapseCustom: "Close custom form",
-    accountId: "Cloudflare account id",
+    accountId: "Account id",
     accountIdPlaceholder: "32 hex characters",
     addTemplate: "Add {label}",
     tierBuiltin: "built-in",
