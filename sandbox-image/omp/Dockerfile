@@ -5,8 +5,9 @@
 #
 # NO SECRETS (HARD): this image is built with no build args, no env values, no
 # credentials. Tokens/keys enter only via ReviewSandbox.exec env injection at
-# runtime (compass contracts D). The omp models.yml references the ARK_API_KEY
-# env var NAME — the key value itself is never in the image.
+# runtime (compass contracts D). Capability-host declarations (synthesized into
+# every per-review models.yml) reference env var NAMES only (e.g. ARK_API_KEY)
+# — no key value is ever in the image or its build context.
 #
 # Outbound egress (architect verdict AL-4, plan 19 T2 — DOCUMENTED, NOT
 # enforced): a REAL egress control surface exists but is deliberately NOT
@@ -18,17 +19,21 @@
 # the container to trust the Cloudflare CA — unverified on this base image),
 # enforced in `ContainerProxy.fetch`. Activation is deferred: the host
 # inventory has no SSOT in this repo (18 built-in provider API hosts resolve
-# in omp's registry, outside the repo; the ark custom host is pinned in
-# sandbox-image/omp-models.yml), per-App BYOK keeps the provider set open,
+# in omp's registry, outside the repo; the ark capability host is declared in
+# src/contracts/sandbox-images.ts — the omp registry entry, synthesized at
+# review time), per-App BYOK keeps the provider set open,
 # and a missing host fails CLOSED (520 → review failure → DLQ) — a worse
 # failure mode than the documented de-facto boundary. See docs/deploy.md
 # § Network egress for the de-facto allowlist and the activation prerequisite
 # (provider-host SSOT + staging verification). No fake controls are installed
 # here — documentation only.
 #
-# T2 additions over T1:
+# Runtime provisioning (plan 06 T2 + plan 37 T3 — generic omp runtime, NO App
+# model configuration):
 #   - mstar-harness plugin preinstalled at a pinned ref (build-time clone);
-#   - omp agent config (models.yml) for the ark-plan provider;
+#   - an EMPTY omp agent dir (PI_CODING_AGENT_DIR) — plan 37 deleted the baked
+#     in-image models.yml; the runner synthesizes the COMPLETE per-review
+#     models.yml (capability hosts + App custom providers) at execution time;
 #   - runner + omp SDK deps installed via `bun install --frozen-lockfile`.
 #
 # Build context: repo root (wrangler containers `image_build_context: "."`), so
@@ -66,12 +71,15 @@ RUN git init /opt/mstar-harness \
     && git -C /opt/mstar-harness checkout FETCH_HEAD \
     && rm -rf /opt/mstar-harness/.git
 
-# omp agent config: models.yml declares the ark-plan provider. The apiKey field
-# is the ENV VAR NAME (ARK_API_KEY) — the SDK resolves the value from the
-# process env at request time (config-value resolution: env first, literal
-# fallback). No secret material lives here.
+# omp agent dir: PI_CODING_AGENT_DIR points at an EMPTY directory (plan 37 —
+# no baked models.yml is an App-configuration artifact). The in-image runner
+# (src/review/runner.ts) synthesizes the COMPLETE per-review models.yml under
+# /tmp/omp-agent-<uuid>/ (capability hosts from the App's selected registry
+# entry, src/contracts/sandbox-images.ts, + App custom providers) and rides
+# that directory as the session agentDir. apiKey references are ENV VAR NAMES
+# (ARK_API_KEY / CUSTOM_<ID>_API_KEY) — the SDK resolves values from process
+# env at request time. No secret material and no App model config lives here.
 RUN mkdir -p /opt/omp-agent
-COPY sandbox-image/omp-models.yml /opt/omp-agent/models.yml
 ENV PI_CODING_AGENT_DIR=/opt/omp-agent
 
 # lockfile (omp SDK 18.0.4 = package.json). `--omit=optional` is NOT used:

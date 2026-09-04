@@ -36,18 +36,17 @@ export function accountDisplay(boot: Pick<SpaBoot, "login" | "name">): string | 
 }
 
 /**
- * Apps → `/dashboard/apps` (+ settings under `/dashboard/apps/:slug`).
- * Insights → `/dashboard/insights` and `/dashboard` (insights home, plan 33).
+ * Apps → `/dashboard`, `/dashboard/apps` (+ settings under
+ * `/dashboard/apps/:slug`) — the root lands on Apps, so the brand href and
+ * `/dashboard/apps` highlight the same entry (plan 40).
+ * Insights → `/dashboard/insights` only (the generic rule below).
  */
 export function isNavCurrent(href: string, pathname: string): boolean {
   if (href === "/dashboard/apps") {
-    return pathname === "/dashboard/apps" || pathname.startsWith("/dashboard/apps/");
-  }
-  if (href === "/dashboard/insights") {
     return (
-      pathname === "/dashboard/insights" ||
-      pathname.startsWith("/dashboard/insights/") ||
-      pathname === "/dashboard"
+      pathname === "/dashboard" ||
+      pathname === "/dashboard/apps" ||
+      pathname.startsWith("/dashboard/apps/")
     );
   }
   return pathname === href || pathname.startsWith(`${href}/`);

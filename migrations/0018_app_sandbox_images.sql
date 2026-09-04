@@ -1,0 +1,24 @@
+-- 0018_app_sandbox_images.sql — per-App sandbox runtime image (plan 37 Task 1,
+-- spec dashboard-sandbox-configuration § Runtime-image contract).
+--
+-- sandbox_image_id is the App's SELECTED runtime image — a stable id from the
+-- source-controlled registry src/contracts/sandbox-images.ts:
+--   'omp' = the only enabled entry this iteration. Every existing row
+--           materializes to it (ADD COLUMN DEFAULT), including soft-deleted
+--           rows (soft-delete keeps the row; it is not a removal), so no
+--           manager visit is needed after deploy (plan Global Constraints).
+-- TEXT NOT NULL DEFAULT 'omp' is legal D1/SQLite ADD COLUMN form (the 0008
+-- precedent: NOT NULL requires a non-NULL DEFAULT and there is no REFERENCES
+-- clause — the 0005 header's "FK columns need a NULL default" rule does not
+-- apply). NOT NULL rejects future NULLs; the DEFAULT covers inserts that
+-- omit the column.
+-- NO CHECK on the value domain (app-family convention: 0006/0009/0017 —
+-- value domains are store-enforced, never schema-encoded): only ENABLED
+-- registry ids are storable, enforced by apps-store.setSandboxImage against
+-- src/contracts/sandbox-images.ts with the settings route answering 400
+-- first.
+-- Metadata-only: one ADD COLUMN alters the schema without rewriting the
+-- table (0002/0005/0008 precedent) — safe to apply over a live production DB
+-- with existing rows. Must apply AFTER 0004 (the altered table must exist).
+
+ALTER TABLE github_apps ADD COLUMN sandbox_image_id TEXT NOT NULL DEFAULT 'omp';

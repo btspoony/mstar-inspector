@@ -44,6 +44,7 @@ import type { ReviewOutput } from "../../src/review/schema";
 import { createMigratedTestD1 } from "../store/helpers";
 import { createAppConfigStore } from "../../src/dashboard/app-config-store";
 import { createSecretbox } from "../../src/dashboard/secretbox";
+import { getSandboxImage } from "../../src/contracts/sandbox-images";
 import type { CommenterEnv, ReviewCommenter } from "../../src/pipeline/comment";
 import type { ConsumerLog, ConsumerLogFields, PipelineEnv } from "../../src/pipeline/consumer";
 
@@ -798,8 +799,9 @@ describe("runner input modelOverrides threading (plan 17 Task 1)", () => {
       "mstar-review-seat": "ark-plan/deepseek-v4-flash:high",
       "code-reviewer": "openai/gpt-5:thinking, anthropic/claude-x",
     });
-    // The field rides AFTER the pre-plan-17 shape (additive optional field).
-    expect(Object.keys(input)).toEqual(["worktreePath", "reconFacts", "modelOverrides"]);
+    // The field rides AFTER the pre-plan-17 shape (additive optional field),
+    // next to the plan 37 capability hosts (present on every run).
+    expect(Object.keys(input)).toEqual(["worktreePath", "reconFacts", "capabilityHosts", "modelOverrides"]);
   });
 
   test("app message with NO role map: input JSON omits the field entirely (no-map run)", async () => {
@@ -810,8 +812,8 @@ describe("runner input modelOverrides threading (plan 17 Task 1)", () => {
     await appConsumer(makeBatch(makePayload({ pr_number: 42, appRef: { appId: appX.id } })));
     const [appInput] = runnerInputs();
     // No role map → the runner input JSON omits the field entirely
-    // (byte-identical to a no-map run).
-    expect(Object.keys(appInput!)).toEqual(["worktreePath", "reconFacts"]);
+    // (byte-identical to a no-map run); plan 37 capability hosts ride always.
+    expect(Object.keys(appInput!)).toEqual(["worktreePath", "reconFacts", "capabilityHosts"]);
   });
 
   test("an all-cleared role map resolves to NO field (empty map = current behavior)", async () => {
@@ -826,7 +828,7 @@ describe("runner input modelOverrides threading (plan 17 Task 1)", () => {
     await consumer(makeBatch(makePayload({ appRef: { appId: appX.id } })));
 
     const input = runnerInputs()[0]!;
-    expect(Object.keys(input)).toEqual(["worktreePath", "reconFacts"]);
+    expect(Object.keys(input)).toEqual(["worktreePath", "reconFacts", "capabilityHosts"]);
     expect(input.modelOverrides).toBeUndefined();
   });
 
@@ -1036,8 +1038,9 @@ describe("custom provider env injection + runner input threading (plan 23 Task 3
         model_ids: ["b-model"],
       },
     ]);
-    // Additive optional field after the pre-plan-23 shape.
-    expect(Object.keys(input)).toEqual(["worktreePath", "reconFacts", "customProviders"]);
+    // Additive optional field after the pre-plan-23 shape — plus the plan 37
+    // capability hosts the consumer resolves and rides ALWAYS.
+    expect(Object.keys(input)).toEqual(["worktreePath", "reconFacts", "capabilityHosts", "customProviders"]);
     const serialized = JSON.stringify(input);
     expect(serialized).not.toContain("sk-custom-fixture");
   });
@@ -1047,8 +1050,8 @@ describe("custom provider env injection + runner input threading (plan 23 Task 3
     const db = createMigratedTestD1();
     const appX = await seedApp(db, "app-x");
     // The chain references the custom provider id directly — the gate's
-    // neededEnvName third branch (neither a PROVIDERS allowlisted id nor an
-    // IN_IMAGE_BASE_PROVIDER_IDS member) resolves it to
+    // neededEnvName third branch (neither a PROVIDERS allowlisted id nor a
+    // capability host of the App's resolved sandbox image) resolves it to
     // CUSTOM_MY_PROVIDER_API_KEY, the same env name buildRunnerEnv injects.
     await configureApp(db, appX.id, "my-provider/model-1");
     const store = createAppConfigStore(db, TEST_KEY);
@@ -1119,8 +1122,9 @@ describe("custom provider env injection + runner input threading (plan 23 Task 3
     const [appInput] = runnerInputs();
     const [appEnv] = runnerEnvs();
     // No declarations → the runner input JSON omits the field entirely and
-    // no CUSTOM_* env name is injected (plan 23 byte-compat pin).
-    expect(Object.keys(appInput!)).toEqual(["worktreePath", "reconFacts"]);
+    // no CUSTOM_* env name is injected (plan 23 byte-compat pin). The plan 37
+    // capability hosts ride ALWAYS (keyless registry data).
+    expect(Object.keys(appInput!)).toEqual(["worktreePath", "reconFacts", "capabilityHosts"]);
     expect(JSON.stringify(appEnv)).not.toContain("CUSTOM_");
   });
 
@@ -1179,5 +1183,89 @@ describe("custom provider env injection + runner input threading (plan 23 Task 3
     expect(errLine).toBeDefined();
     expect(errLine!.msg).toContain("per-App custom-provider resolution failed");
     expect(errLine!.fields.app_id).toBe(appX.id);
+  });
+});
+
+describe("sandbox image resolution at review execution (plan 37 Task 2)", () => {
+  test("defaulted omp App (zero-custom): the runner input carries the resolved image's capability hosts verbatim — ark-plan included", async () => {
+    reset();
+    const db = createMigratedTestD1();
+    // seedApp's raw insert omits sandbox_image_id → the 0018 DDL default
+    // backfills it to 'omp': exactly the post-migration state of every
+    // existing App (no settings visit).
+    const appX = await seedApp(db, "app-x");
+    const consumer = createReviewConsumer(makeEnv({ DB: db as never }), testLog, testOverrides);
+
+    await consumer(makeBatch(makePayload({ appRef: { appId: appX.id } })));
+
+    const input = runnerInputs()[0]!;
+    expect(input.capabilityHosts).toEqual(getSandboxImage("omp")!.hosts);
+    const hosts = input.capabilityHosts as Array<{ id: string; apiKeyEnv: string; baseUrl: string }>;
+    expect(hosts).toHaveLength(1);
+    expect(hosts[0]!.id).toBe("ark-plan");
+    expect(hosts[0]!.apiKeyEnv).toBe("ARK_API_KEY");
+    expect(hosts[0]!.baseUrl).toBe("https://ark.cn-beijing.volces.com/api/plan");
+    // The review completes (the ark-plan chain passed the gate through the
+    // resolved image's catalogProviderId mapping) and the input stays
+    // keyless — zero secret material.
+    expect(appCalls).toEqual(["token", "post"]);
+    expect(JSON.stringify(input)).not.toContain(ARK_KEY);
+  });
+
+  test("an unknown sandbox image id fails closed BEFORE guard/sandbox (structured, non-secret, stage=pipeline)", async () => {
+    reset();
+    const db = createMigratedTestD1();
+    const appX = await seedApp(db, "app-x");
+    // Bypass the store (the plan-37 threat model: a direct DB write or a
+    // registry contraction can hold an id the current registry rejects).
+    db.raw
+      .prepare(`UPDATE github_apps SET sandbox_image_id = 'retired-image' WHERE id = ?`)
+      .run(appX.id);
+    const consumer = createReviewConsumer(makeEnv({ DB: db as never }), testLog, testOverrides);
+
+    await expect(
+      consumer(makeBatch(makePayload({ appRef: { appId: appX.id } }))),
+    ).rejects.toThrow(
+      `per-App sandbox image resolution failed: app ${appX.id}: unknown sandbox image id "retired-image"`,
+    );
+
+    // Zero side effects: no container, no guard, no token, no GitHub write.
+    expect(sandboxCalls).toHaveLength(0);
+    expect(kvGuardPuts).toHaveLength(0);
+    expect(appCalls).toHaveLength(0);
+    const errLine = logLines.find((l) => l.level === "error");
+    expect(errLine).toBeDefined();
+    expect(errLine!.msg).toContain("per-App sandbox image resolution failed");
+    expect(errLine!.fields.app_id).toBe(appX.id);
+    // F-001 channel: stage=pipeline; the error names the id, never secrets.
+    const rows = db.raw.query("SELECT stage, error FROM review_failures").all() as Array<{ stage: string; error: string }>;
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.stage).toBe("pipeline");
+    expect(rows[0]!.error).toContain('unknown sandbox image id "retired-image"');
+    expect(rows[0]!.error).not.toContain(ARK_KEY);
+  });
+
+  test("the image id is re-read per message: a fixed id lets the next review run (unknown ids never start a sandbox)", async () => {
+    reset();
+    const db = createMigratedTestD1();
+    const appX = await seedApp(db, "app-x");
+    db.raw
+      .prepare(`UPDATE github_apps SET sandbox_image_id = 'no-such-image' WHERE id = ?`)
+      .run(appX.id);
+    const consumer = createReviewConsumer(makeEnv({ DB: db as never }), testLog, testOverrides);
+
+    await expect(
+      consumer(makeBatch(makePayload({ pr_number: 42, appRef: { appId: appX.id } }))),
+    ).rejects.toThrow(/unknown sandbox image id/);
+    expect(sandboxCalls).toHaveLength(0); // the bad-id message never started one
+
+    db.raw
+      .prepare(`UPDATE github_apps SET sandbox_image_id = 'omp' WHERE id = ?`)
+      .run(appX.id);
+    await consumer(makeBatch(makePayload({ pr_number: 43, appRef: { appId: appX.id } })));
+    // The valid-id message started exactly one sandbox and completed.
+    expect(sandboxCalls.length).toBeGreaterThan(0);
+    expect(runnerInputs()).toHaveLength(1);
+    expect(appCalls).toEqual(["token", "post"]);
   });
 });

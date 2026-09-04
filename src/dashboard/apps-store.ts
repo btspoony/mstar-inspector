@@ -11,7 +11,10 @@
  *
  * Module boundary (plan Global Constraints, lock L1): zero-dependency leaf
  * consumed by dashboard routes, the worker webhook face, and the pipeline
- * consumer. The `db` parameter is a locally-declared narrow D1 face (types
+ * consumer. Its one import is the zero-dependency sandbox-image contract
+ * (src/contracts/sandbox-images.ts — the plan-37 registry, not
+ * pipeline/review code), which bounds the sandbox_image_id value domain.
+ * The `db` parameter is a locally-declared narrow D1 face (types
  * only, zero imports) — a real `D1Database`, the bun:sqlite test double
  * (tests/store/helpers.ts), and the store layer's `D1Like` all satisfy it
  * structurally. Declared locally instead of importing `store/types` because
@@ -29,6 +32,13 @@
  *   - setReviewEnabled (plan 16, migration 0008) is the per-App pause
  *     switch: writes review_enabled + updated_at (an operator mutation) and
  *     refuses soft-deleted rows exactly like setAppStatus.
+ *   - setSandboxImage (plan 37, migration 0018) is the per-App sandbox
+ *     runtime-image selection: the id must be an ENABLED entry of the
+ *     sandbox-image registry (plain Error backstop, the recordDelivery
+ *     convention — the settings route 400s first), writes sandbox_image_id +
+ *     updated_at, and refuses soft-deleted rows exactly like setAppStatus.
+ *     createApp omits the column, so the migration 0018 DDL default seeds
+ *     'omp'.
  *   - touchLastWebhook (plan 16, migration 0008) writes ONLY
  *     last_webhook_at — never updated_at, which stays the operator-mutation
  *     timestamp (L5: the per-webhook frequency of this touch must not churn
@@ -61,6 +71,7 @@
  *     github_app_id, or (app_id, installation_id) pairs, and unknown app
  *     references are caller-visible errors, never swallowed.
  */
+import { getSandboxImage } from "../contracts/sandbox-images";
 
 /** A row of `github_apps` (D1 column names, snake_case; migration 0004). */
 export type GithubAppRow = {
@@ -81,6 +92,12 @@ export type GithubAppRow = {
   review_enabled: number;
   /** Last verified (2xx) webhook delivery (migration 0008); NULL = never. */
   last_webhook_at: string | null;
+  /**
+   * Selected sandbox runtime image (migration 0018): a registry id from
+   * src/contracts/sandbox-images.ts, default 'omp'. The value domain (only
+   * ENABLED registry entries) is store-enforced — no DDL CHECK.
+   */
+  sandbox_image_id: string;
   created_at: string;
   updated_at: string;
 };
@@ -266,7 +283,10 @@ export function createAppsStore(db: AppsStoreD1) {
     /**
      * Insert a new active app row (status 'active', deleted_at NULL) with
      * the CALLER-SUPPLIED id as the row PK (T1 review pin — the caller's
-     * secretbox AAD rowKey is this id). UNIQUE violations on slug
+     * secretbox AAD rowKey is this id). sandbox_image_id is omitted: the
+     * migration 0018 DDL default materializes every new row onto the
+     * registry's default image ('omp') — the store face for changing it is
+     * setSandboxImage. UNIQUE violations on slug
      * or github_app_id throw — the route layer pre-resolves the slug at
      * start, and a commit-time race burns the hold (409) instead of
      * remapping (the manifest registered the webhook URL with GitHub).
@@ -346,6 +366,34 @@ export function createAppsStore(db: AppsStoreD1) {
            WHERE id = ? AND deleted_at IS NULL`,
         )
         .bind(enabled ? 1 : 0, id)
+        .run();
+      return res.meta.changes > 0;
+    },
+
+    /**
+     * Select the App's sandbox runtime image (plan 37, migration 0018). The
+     * id must be an ENABLED entry of the src/contracts/sandbox-images.ts
+     * registry — anything else throws BEFORE any write (this is the
+     * store-enforced value domain the DDL deliberately leaves CHECK-less;
+     * the settings route answers 400 first, this is the backstop for direct
+     * callers). Writes sandbox_image_id + updated_at (an operator mutation,
+     * the setAppStatus convention) and refuses soft-deleted rows exactly
+     * like setAppStatus. Returns whether a row changed (false also covers
+     * unknown ids).
+     */
+    async setSandboxImage(id: string, imageId: string): Promise<boolean> {
+      const image = getSandboxImage(imageId);
+      if (!image || !image.enabled) {
+        throw new Error(
+          `apps-store: sandbox image ${JSON.stringify(imageId)} is not an enabled registry entry — zero rows written`,
+        );
+      }
+      const res = await db
+        .prepare(
+          `UPDATE github_apps SET sandbox_image_id = ?, updated_at = datetime('now')
+           WHERE id = ? AND deleted_at IS NULL`,
+        )
+        .bind(image.id, id)
         .run();
       return res.meta.changes > 0;
     },

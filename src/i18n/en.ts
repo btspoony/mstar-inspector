@@ -147,7 +147,7 @@ export const en = {
     title: "Apps",
     heading: "Apps",
     create: "Create GitHub App",
-    empty: "No Apps yet — create one below.",
+    empty: "No Apps yet — Create GitHub App connects your first one.",
     settings: "Settings",
     appId: "App id {id}",
     by: "by {login}",
@@ -159,7 +159,7 @@ export const en = {
     actions: {
       pause: "Pause",
       resume: "Resume",
-      disable: "Disable",
+      disable: "Disable (reversible)",
       enable: "Enable",
       delete: "Delete",
     },
@@ -172,7 +172,7 @@ export const en = {
     tableStatus: "Status",
     tableHealth: "Health",
     tableCreator: "Creator",
-    openAria: "Open {slug}",
+    openAria: "Open {slug} settings",
   },
   members: {
     title: "Members",
@@ -233,6 +233,8 @@ export const en = {
   },
   settings: {
     title: "App settings",
+    backToApps: "Back to Apps",
+    changesSaved: "Changes saved.",
     providerKeys: "Provider keys",
     providerKeysCopy:
       "Keys for App {slug} are stored encrypted and shown masked — the last 4 characters only. Re-adding a provider replaces its stored key.",
@@ -280,6 +282,7 @@ export const en = {
     resumeReviews: "Resume reviews",
     disconnected: "This App is disconnected — enable it to review.",
     installHealth: "Install health",
+    installHealthCopy: "Webhook installations and the latest deliveries for this App.",
     lastWebhook: "Last webhook: {time}",
     noInstallations: "No installations yet.",
     installation: "installation {id}",
@@ -316,14 +319,32 @@ export const en = {
     confirmResumeBody: "This App will review pull requests again.",
     confirmDisableTitle: "Disable {slug}?",
     confirmDisableBody: "GitHub deliveries will get 404 until you enable it again.",
+    confirmDisableAction: "Disable",
     confirmEnableTitle: "Enable {slug}?",
     confirmEnableBody: "This App will accept webhook deliveries again.",
     confirmDeleteTitle: "Delete {slug}?",
     confirmDeleteBody: "This is a soft-delete. The App disappears from the list; reviews fail closed.",
     confirmDeleteButton: "Delete App",
+    deleteSuccess: "App deleted. It has been removed from the Apps list.",
     providers: "Providers",
     providersCopy:
-      "Built-in providers, catalog templates, and custom declarations — one list. Custom expands in place. Keys are stored only after a successful verify.",
+      "The providers configured for this App — stored keys show masked, custom declarations show their base URL and models. Add Provider picks a catalog entry; keys are stored only after a successful verify.",
+    noConfiguredProviders:
+      "No providers configured yet — use Add Provider to configure one. Reviews fail closed until a provider key is verified.",
+    addProvider: "Add provider",
+    addProviderCopy:
+      "Pick a catalog provider — its configuration requirements appear once selected. Entries unusable on the App's runtime image are marked and can't be saved; providers outside the catalog use the custom declaration below.",
+    catalogProvenance:
+      "Catalog metadata is generated from a pinned models.dev snapshot and compiled into the app — no provider is contacted until you submit a key for verification.",
+    catalogBuiltin: "Built-in providers",
+    catalogTemplate: "Catalog templates",
+    eligibilityBuiltin: "Works on the {image} runtime image — this provider runs as a built-in.",
+    eligibilityTemplate:
+      "Works on the {image} runtime image after materialization — your account id and key are saved as a custom provider declaration.",
+    eligibilityUnavailable:
+      "Not usable on the {image} runtime image — the entry stays listed for discovery but cannot be configured for this App. Switch the App's runtime image or use a custom declaration instead.",
+    eligibilityUnavailableShort: "unavailable on {image}",
+    configureProvider: "Configure {label}",
     customEntry: "Custom",
     customEntryCopy: "Declare a non-built-in provider — id, base URL, model ids, and key.",
     expandCustom: "Add custom provider",
@@ -333,15 +354,17 @@ export const en = {
     addTemplate: "Add {label}",
     tierBuiltin: "built-in",
     tierTemplate: "template",
+    modelChains: "Model chains",
+    modelChainsCopy:
+      "Default and named chains are peer tabs — edit each chain in its tab. The default chain is required and can't be removed; seats on a removed named chain fall back to the default.",
     namedChains: "Named chains",
-    namedChainsCopy:
-      "Each App has one default chain plus optional named chains. Audit seats pick a named chain or leave blank to use the default.",
     chainName: "Chain name",
     chainNamePlaceholder: "e.g. deep-review",
     addNamedChain: "Add named chain",
     defaultChain: "Default chain",
     seats: "Seat chains",
-    seatsCopy: "Each audit seat references a named chain. Blank uses the default chain.",
+    seatsCopy:
+      "Each audit seat runs on the Default chain or an explicit named chain — a seat whose named chain was removed falls back to Default.",
     useDefaultChain: "Default chain",
     confirmRemoveChainTitle: "Remove chain {name}?",
     confirmRemoveChainBody: "Seats using {name} fall back to the default chain.",
@@ -351,6 +374,11 @@ export const en = {
     confirmRemoveKeyBody: "Selectors that need {provider} will fail until you verify a new key.",
     confirmRemoveCustomTitle: "Remove provider {provider}?",
     confirmRemoveCustomBody: "The provider and its stored key are removed. Chains referencing its models fail on save.",
+    runtimeImage: "Runtime image",
+    runtimeImageCopy:
+      "The sandbox runtime image that executes this App's reviews. Reviews read their model configuration at run time — nothing App-specific is baked into an image.",
+    runtimeImageValue: "This App's reviews run on the {id} runtime image.",
+    saveRuntimeImage: "Save runtime image",
   },
   manifest: {
     title: "Create GitHub App",
@@ -402,9 +430,6 @@ export const en = {
       dbRejected: "The App could not be stored — the dashboard database rejected the write. You can resubmit.",
       dbUnbound: "Dashboard storage is not configured — the App could not be stored.",
     },
-  },
-  home: {
-    insightsHeading: "Overall insights",
   },
 };
 

@@ -6,22 +6,26 @@ import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 import { fetchJson } from "../api";
 import type { SpaBoot } from "../boot";
 import {
+  INSIGHTS_WINDOWS,
   INSIGHTS_REPO_ALL,
   insightsRepoFromSelect,
   insightsRepoOptions,
   insightsRepoSelectValue,
   insightsSummaryUrl,
+  insightsWindow,
+  normalizeWindowSearch,
   parseInsights,
   parseInsightsSearch,
+  searchHref,
+  verdictLine,
   type InsightsSearch,
   type InsightsSummary,
 } from "./data";
-import { HOME_WINDOWS, homeWindow, normalizeWindowSearch, searchHref, verdictLine } from "./homeModel";
 import { LoadFailedNotice, LoadingNotice } from "./PageNotice";
 
 /**
  * `/dashboard/insights` records page (plan 36 T2): review records with a
- * segmented window (HOME_WINDOWS 7/30/90, same subset as home) and a shadcn
+ * segmented window (INSIGHTS_WINDOWS 7/30/90) and a shadcn
  * Select repo filter (全部 + summary.repos). Free-text repo input retired.
  * Data plane: existing `/dashboard/api/insights/summary` plus the read-only
  * `repos` field (window-scoped distinct owner/repo, independent of `repo=`).
@@ -30,7 +34,7 @@ import { LoadFailedNotice, LoadingNotice } from "./PageNotice";
 export function InsightsPage({ boot }: { boot: SpaBoot }) {
   const locale = boot.locale;
   const [search, setSearch] = useState<InsightsSearch>(() => ({
-    window: homeWindow(window.location.search),
+    window: insightsWindow(window.location.search),
     repo: parseInsightsSearch(window.location.search).repo,
   }));
   const [data, setData] = useState<InsightsSummary | null>(null);
@@ -38,7 +42,7 @@ export function InsightsPage({ boot }: { boot: SpaBoot }) {
 
   // Plan 36 QC F-002: an off-set legal window deep link (e.g. ?window=60)
   // resolves to the default segment 30 — rewrite the URL on mount so the
-  // address bar reflects the applied filter (same contract as home).
+  // address bar reflects the applied filter.
   useEffect(() => {
     const normalized = normalizeWindowSearch(window.location.search);
     if (normalized !== window.location.search) {
@@ -50,7 +54,7 @@ export function InsightsPage({ boot }: { boot: SpaBoot }) {
     let cancelled = false;
     setState("loading");
     // include=repos: the records Select needs the window-scoped distinct
-    // repo set; the home surface does not (plan 36 QC F-001).
+    // repo set (plan 36 QC F-001); default summary reads stay cheap.
     fetchJson(insightsSummaryUrl(search, true))
       .then((raw) => {
         if (cancelled) return;
@@ -77,7 +81,7 @@ export function InsightsPage({ boot }: { boot: SpaBoot }) {
 
   function onWindowChange(next: string): void {
     // Radix fires "" when the active segment is re-clicked — keep the window.
-    if (!(HOME_WINDOWS as readonly string[]).includes(next)) return;
+    if (!(INSIGHTS_WINDOWS as readonly string[]).includes(next)) return;
     commitSearch({ window: next, repo: search.repo });
   }
 
@@ -102,7 +106,7 @@ export function InsightsPage({ boot }: { boot: SpaBoot }) {
             onValueChange={onWindowChange}
             aria-label={t(locale, "insights.windowSegment")}
           >
-            {HOME_WINDOWS.map((days) => (
+            {INSIGHTS_WINDOWS.map((days) => (
               <ToggleGroupItem key={days} value={days}>
                 {t(locale, "insights.daysShort", { count: Number(days) })}
               </ToggleGroupItem>

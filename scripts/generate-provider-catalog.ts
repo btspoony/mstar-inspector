@@ -224,7 +224,7 @@ export const TEMPLATE_PROVIDERS: Record<string, ProviderCatalogEntry> = Object.f
 /**
  * AL-23-1 custom-provider env-name contract — re-exported from
  * src/review/runtime.ts (the single source of truth): the sandbox image
- * COPYs only src/review (sandbox-image/Dockerfile:88), so the helper must
+ * COPYs only src/review (sandbox-image/omp/Dockerfile:96), so the helper must
  * live in-image next to CustomProviderDeclaration; the Worker-side SSOT
  * stays single-source through this re-export (zero duplicated literals).
  */

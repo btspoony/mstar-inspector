@@ -45,7 +45,7 @@ export type CustomProviderDeclaration = {
  * mapping is CUSTOM_<UPPER_SNAKE(provider_id)>_API_KEY — provider ids are
  * store-enforced `[a-z0-9][a-z0-9-]{0,63}` (hyphen → underscore, uppercased).
  * Lives HERE (next to CustomProviderDeclaration) because the sandbox image
- * COPYs only src/review (sandbox-image/Dockerfile:88): the in-image runner
+ * COPYs only src/review (sandbox-image/omp/Dockerfile:96): the in-image runner
  * module graph must never import outside this directory. The Worker-side
  * SSOT stays single-source — src/pipeline/provider-catalog.ts re-exports
  * these (zero duplicated literals).
@@ -54,15 +54,46 @@ export const CUSTOM_PROVIDER_ENV_PREFIX = "CUSTOM_";
 export const CUSTOM_PROVIDER_ENV_SUFFIX = "_API_KEY";
 
 /**
- * In-image base provider ids (QC wave-1 W-1, bidirectional anchor): the
- * dashboard mirrors the ids THIS review-side surface's base models.yml
- * declares (sandbox-image/omp-models.yml, read via
- * src/review/models-synthesis.ts BASE_MODELS_YAML_PATH — `ark-plan` today)
- * as src/dashboard/app-config-store.ts `IN_IMAGE_BASE_PROVIDER_IDS` and
- * rejects custom declarations colliding with them (Q2 keeps the mirror in
- * the dashboard — zero review imports there); tests/worker/app-config.test.ts
- * parity-locks the mirror against the base file.
+ * One capability-host model the runtime synthesizer materializes into the
+ * per-review models.yml (plan 37 Task 2) — the same shape the source-controlled
+ * registry (src/contracts/sandbox-images.ts `SandboxImageHostModel`) carries.
  */
+export type CapabilityHostModel = {
+  id: string;
+  name: string;
+  reasoning: boolean;
+  /** Input modalities (omp: e.g. ["text"]). */
+  input: readonly string[];
+  contextWindow: number;
+  maxTokens: number;
+};
+
+/**
+ * One capability host of the App's selected sandbox image, as the runner input
+ * JSON carries it (plan 37 Task 2): the runner materializes these into the
+ * base of every synthesized per-review models.yml. KEYLESS static data —
+ * `apiKeyEnv` is the ENV VAR NAME the host's key resolves from at request
+ * time; host ids are runtime capabilities, NOT Providers catalog ids (omp's
+ * `ark-plan` resolves its key through catalogProviderId `ark` / ARK_API_KEY).
+ *
+ * Structurally mirrors the registry's `SandboxImageHost` (src/contracts/
+ * sandbox-images.ts): the consumer passes the resolved registry entry's hosts
+ * verbatim into the runner input. The mirror lives HERE (not an import)
+ * because the in-image runner module graph must stay inside src/review (the
+ * sandbox image COPYs only this directory — tests/review/runtime-boundary
+ * enforces it); the consumer-side contract import keeps the data single-sourced.
+ */
+export type CapabilityHost = {
+  /** Host id — the selector prefix (e.g. `ark-plan/deepseek-v4-flash`). */
+  id: string;
+  /** Providers/BYOK catalog id whose env name carries this host's key. */
+  catalogProviderId: string;
+  apiKeyEnv: string;
+  baseUrl: string;
+  api: string;
+  auth: string;
+  models: readonly CapabilityHostModel[];
+};
 
 /**
  * Env var name for a custom-provider API key (plan 23 Task 3, AL-23-1): a
@@ -97,13 +128,15 @@ export type AgentRuntimeRunInput = {
   modelOverrides?: Record<string, string>;
   /**
    * Directory holding the synthesized COMPLETE per-review models.yml (plan 23
-   * Task 3, AL-23-1): the runner synthesizes /tmp/omp-agent-<uuid>/models.yml
-   * from the image base when the input carries custom providers and rides the
-   * directory here; runtime-omp passes it to createAgentSession({ agentDir }).
-   * OPTIONAL — absent = today's session path reads the in-image base file
-   * (byte-identical behavior).
+   * Task 3, AL-23-1; plan 37 Task 2): the runner ALWAYS synthesizes
+   * /tmp/omp-agent-<uuid>/models.yml — capability hosts of the App's selected
+   * image as the base, custom-provider declarations merged in (capability ids
+   * win on collision) — and rides the directory here REQUIRED for every omp
+   * run; runtime-omp passes it to createAgentSession({ agentDir }). There is
+   * no baked in-image models.yml to fall back to (plan 37 deleted it): a run
+   * without a synthesized directory has no models.yml at all.
    */
-  agentDir?: string;
+  agentDir: string;
 };
 
 export interface AgentRuntime {

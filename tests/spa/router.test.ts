@@ -5,15 +5,15 @@ import { describe, expect, test } from "bun:test";
 import { matchRoute } from "../../src/spa/router";
 import { SPA_PAGES, isSpaAssetPath, matchSpaRoute, wantsHtml } from "../../src/spa/routes";
 
-describe("SPA_PAGES enum (plan 33 T2)", () => {
-  test("includes home, apps, insights, members, login, settings", () => {
-    expect([...SPA_PAGES]).toEqual(["home", "apps", "insights", "members", "login", "settings"]);
+describe("SPA_PAGES enum (plan 33 T2 + plan 40)", () => {
+  test("includes apps, insights, members, login, settings (home retired)", () => {
+    expect([...SPA_PAGES]).toEqual(["apps", "insights", "members", "login", "settings"]);
   });
 });
 
-describe("matchSpaRoute (plan 29 T3 + plan 33 T2)", () => {
+describe("matchSpaRoute (plan 29 T3 + plan 33 T2 + plan 40)", () => {
   test("matches exact enumerated paths", () => {
-    expect(matchSpaRoute("/dashboard")).toEqual({ page: "home", pathname: "/dashboard" });
+    expect(matchSpaRoute("/dashboard")).toEqual({ page: "apps", pathname: "/dashboard" });
     expect(matchSpaRoute("/dashboard/apps")).toEqual({ page: "apps", pathname: "/dashboard/apps" });
     expect(matchSpaRoute("/dashboard/insights")).toEqual({
       page: "insights",
@@ -34,9 +34,10 @@ describe("matchSpaRoute (plan 29 T3 + plan 33 T2)", () => {
     });
   });
 
-  test("treats /dashboard as the insights home shell", () => {
-    expect(matchSpaRoute("/dashboard")).toEqual({ page: "home", pathname: "/dashboard" });
-    expect(matchRoute("/dashboard")).toEqual({ page: "home", pathname: "/dashboard" });
+  test("/dashboard and /dashboard/apps resolve to the same Apps page (plan 40)", () => {
+    expect(matchSpaRoute("/dashboard")?.page).toBe("apps");
+    expect(matchSpaRoute("/dashboard/apps")?.page).toBe("apps");
+    expect(matchRoute("/dashboard")).toEqual({ page: "apps", pathname: "/dashboard" });
   });
 
   test("does not match nested extras beyond settings", () => {

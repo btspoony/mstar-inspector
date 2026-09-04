@@ -61,7 +61,13 @@ function CreateAppButton({ locale }: { locale: SpaBoot["locale"] }) {
   );
 }
 
-function spaClick(href: string, event: MouseEvent): void {
+/**
+ * Client-side navigation for in-app links (plan 40 T2): plain modifier- or
+ * middle-clicks keep the browser default (new tab / download); a matching
+ * SPA route is pushed through the hash-free router instead. Shared with the
+ * App settings page's back link.
+ */
+export function spaClick(href: string, event: MouseEvent): void {
   if (event.defaultPrevented) return;
   if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
   if (!matchSpaRoute(href)) return;
@@ -71,8 +77,12 @@ function spaClick(href: string, event: MouseEvent): void {
 
 function AppsList({ locale, payload }: { locale: SpaBoot["locale"]; payload: AppsPayload }) {
   if (payload.apps.length === 0) {
+    // Honest empty state in the list's own container — the only creation
+    // path is the Create GitHub App action in the page header.
     return (
-      <p className="text-sm text-muted-foreground">{t(locale, "apps.empty")}</p>
+      <div className="rounded-md border p-6">
+        <p className="text-sm text-muted-foreground">{t(locale, "apps.empty")}</p>
+      </div>
     );
   }
   return (
@@ -84,6 +94,7 @@ function AppsList({ locale, payload }: { locale: SpaBoot["locale"]; payload: App
             <TableHead>{t(locale, "apps.tableStatus")}</TableHead>
             <TableHead>{t(locale, "apps.tableHealth")}</TableHead>
             <TableHead>{t(locale, "apps.tableCreator")}</TableHead>
+            <TableHead className="text-right">{t(locale, "apps.settings")}</TableHead>
           </TableRow>
         </TableHeader>
         <TableBody>
@@ -122,6 +133,17 @@ function AppsList({ locale, payload }: { locale: SpaBoot["locale"]; payload: App
                     : ""}
                 </TableCell>
                 <TableCell className="text-muted-foreground">{app.created_by}</TableCell>
+                <TableCell className="text-right">
+                  {/* Visible destination: the row (and this link) open the
+                      App's settings — one workflow from list to detail. */}
+                  <a
+                    className="text-primary underline-offset-4 hover:underline"
+                    href={href}
+                    onClick={(event) => spaClick(href, event)}
+                  >
+                    {t(locale, "apps.settings")}
+                  </a>
+                </TableCell>
               </TableRow>
             );
           })}

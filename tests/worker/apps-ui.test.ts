@@ -20,6 +20,8 @@
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
+import { t } from "../../src/i18n";
+import { matchSpaRoute } from "../../src/spa/routes";
 import worker from "../../src/worker/index";
 import { createSecretbox } from "../../src/dashboard/secretbox";
 import type { Env } from "../../src/worker/env";
@@ -408,5 +410,49 @@ describe("GET /dashboard/apps/:slug/settings (plan 29 T6: SPA-owned)", () => {
     const res = await get(SETTINGS, "", makeEnv(db));
     expect(res.status).toBe(302);
     expect(res.headers.get("Location")).toBe("/dashboard/login");
+  });
+});
+
+describe("Apps list → App settings wayfinding (plan 40 T2)", () => {
+  const APPS_SOURCE = join(import.meta.dir, "../../src/spa/pages/AppsPage.tsx");
+
+  test("each App row carries the /dashboard/apps/:slug/settings deep link, and that route resolves as App settings", () => {
+    const source = readFileSync(APPS_SOURCE, "utf8");
+    // The link target is the same deep-linkable settings route as before.
+    expect(source).toContain("const href = `/dashboard/apps/${app.slug}/settings`;");
+    // The visible per-row destination label comes from the dictionary.
+    expect(source).toContain('{t(locale, "apps.settings")}');
+    expect(t("en", "apps.settings")).toBe("Settings");
+    expect(t("zh_CN", "apps.settings")).toBe("设置");
+    // User-visible route semantics: what the link emits is the settings
+    // surface the SPA matcher owns (slug captured, not a 404 stub).
+    expect(matchSpaRoute("/dashboard/apps/acme/settings")).toEqual({
+      page: "settings",
+      pathname: "/dashboard/apps/acme/settings",
+      slug: "acme",
+    });
+  });
+
+  test("the row link names its destination for assistive tech", () => {
+    const source = readFileSync(APPS_SOURCE, "utf8");
+    expect(source).toContain('aria-label={t(locale, "apps.openAria", { slug: app.slug })}');
+    expect(t("en", "apps.openAria", { slug: "acme" })).toBe("Open acme settings");
+    expect(t("zh_CN", "apps.openAria", { slug: "acme" })).toBe("打开 acme 设置");
+  });
+
+  test("the empty Apps state stays honest: no rows, creation is the only path", () => {
+    const source = readFileSync(APPS_SOURCE, "utf8");
+    expect(source).toContain('t(locale, "apps.empty")');
+    expect(t("en", "apps.empty")).toContain("No Apps yet");
+    expect(t("en", "apps.empty")).toContain("Create GitHub App");
+    expect(t("zh_CN", "apps.empty")).toContain("还没有 App");
+    // Creation remains the header's POST form into the manifest flow.
+    expect(source).toContain('action="/dashboard/manifest/start"');
+  });
+
+  test("loading and load-failure feedback stay on the shared notice channel", () => {
+    const source = readFileSync(APPS_SOURCE, "utf8");
+    expect(source).toContain("LoadingNotice locale={locale}");
+    expect(source).toContain("LoadFailedNotice locale={locale}");
   });
 });

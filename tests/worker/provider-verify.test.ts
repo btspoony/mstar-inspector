@@ -22,7 +22,6 @@ import { createMigratedTestD1, createTestD1, type TestD1 } from "../store/helper
 import { createAppsStore, type GithubAppRow } from "../../src/dashboard/apps-store";
 import { createSecretbox } from "../../src/dashboard/secretbox";
 import {
-  IN_IMAGE_BASE_PROVIDER_IDS,
   MAX_PROVIDER_KEY_LENGTH,
   PROVIDER_IDS,
   ProviderKeyTooLongError,
@@ -30,6 +29,7 @@ import {
   modelCacheProviderKey,
   type AppConfigD1,
 } from "../../src/dashboard/app-config-store";
+import { getSandboxImage } from "../../src/contracts/sandbox-images";
 import {
   PROVIDER_VERIFY_ENDPOINTS,
   VERIFY_TIMEOUT_MS,
@@ -246,8 +246,13 @@ describe("PROVIDER_VERIFY_ENDPOINTS parity lock", () => {
   test("modelCacheProviderKey maps ark → ark-plan (spec §6.1) and leaves others unchanged", () => {
     expect(modelCacheProviderKey("ark")).toBe("ark-plan");
     expect(modelCacheProviderKey("anthropic")).toBe("anthropic");
-    // The selector-facing id set is exactly the in-image base provider ids.
-    expect(modelCacheProviderKey("ark")).toBe(IN_IMAGE_BASE_PROVIDER_IDS[0]!);
+    // The selector-facing id is the omp registry entry's capability host id —
+    // resolved through the host's catalogProviderId `ark` (plan 37: the host
+    // list lives in src/contracts/sandbox-images.ts and is synthesized into
+    // every per-review models.yml).
+    const arkHost = getSandboxImage("omp")!.hosts.find((host) => host.catalogProviderId === "ark");
+    expect(arkHost).toBeDefined();
+    expect(modelCacheProviderKey("ark")).toBe(arkHost!.id);
   });
 });
 

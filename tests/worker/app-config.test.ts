@@ -32,7 +32,6 @@ import { createTestD1 } from "../store/helpers";
 import { createAppsStore, type GithubAppRow } from "../../src/dashboard/apps-store";
 import {
   CUSTOM_PROVIDER_API_IDS,
-  IN_IMAGE_BASE_PROVIDER_IDS,
   MAX_CUSTOM_PROVIDER_COUNT,
   InvalidCustomProviderError,
   InvalidModelChainNameError,
@@ -50,6 +49,7 @@ import {
   type AppConfigD1,
   type AppCustomProvider,
 } from "../../src/dashboard/app-config-store";
+import { enabledSandboxImages, getSandboxImage, sandboxImageHostIds } from "../../src/contracts/sandbox-images";
 import { createSecretbox } from "../../src/dashboard/secretbox";
 import { PROVIDER_CATALOG, PROVIDERS } from "../../src/pipeline/provider-catalog";
 import { DEEP_SEAT_ROLES, parseModelSelectors } from "../../src/review/runtime-omp";
@@ -135,6 +135,10 @@ function createAppConfigD1(): ReturnType<typeof createTestD1> {
   // 0017 (plan 35 T2): the chains store tests + the settings routes run on
   // the chains shape (app_model_chains + app_model_chain_seats).
   applyMigration(db, "0017_app_model_chains.sql");
+  // 0018 (plan 37): the settings routes + the sandbox-image selection run on
+  // the shape carrying github_apps.sandbox_image_id (the custom-provider
+  // collision backstop resolves the App's selected image through it).
+  applyMigration(db, "0018_app_sandbox_images.sql");
   return db;
 }
 
@@ -1150,11 +1154,12 @@ describe("app-config store (createAppConfigStore) — custom providers (plan 23 
     expect(rawCount(db, "app_custom_providers")).toBe(0);
   });
 
-  // QC wave-1 (seat3 W-1): the runner's base-wins merge skips a custom id
-  // colliding with the IN-IMAGE base models.yml (sandbox-image/omp-models.yml
-  // declares ark-plan) while the consumer STILL injects its key — the
-  // declaration is silently dead on every review, so the backstop refuses it.
-  test("store backstop: an in-image base provider id (ark-plan) throws InvalidCustomProviderError before any write", async () => {
+  // QC wave-1 (seat3 W-1), plan 37 rewording: the runner's base-wins merge
+  // skips a custom id colliding with a capability host of the App's SELECTED
+  // sandbox image (omp declares ark-plan) while the consumer STILL injects
+  // its key — the declaration is silently dead on every review, so the
+  // backstop refuses it (the App defaults to omp via migration 0018).
+  test("store backstop: a selected-image capability host id (ark-plan) throws InvalidCustomProviderError before any write", async () => {
     const { db, app } = await seededWorld();
     await expect(
       configStore(db).upsertCustomProvider(
@@ -1312,17 +1317,21 @@ describe("duplication locks", () => {
     expect(MODEL_ROLE_IDS).toHaveLength(4); // spec § B6 语义锁: exactly the 4 audit seats
   });
 
-  test("IN_IMAGE_BASE_PROVIDER_IDS mirrors the in-image base models.yml provider ids (plan 23 QC W-1 parity lock)", () => {
-    // SSOT: sandbox-image/omp-models.yml — installed in the runner image as
-    // /opt/omp-agent/models.yml (src/review/models-synthesis.ts
-    // BASE_MODELS_YAML_PATH), the base the Task 3 merge preserves verbatim.
-    // A custom declaration colliding with one of these ids is skipped by the
-    // base-wins merge (silently dead if the dashboard allowed it), so the
-    // mirror MUST track the file exactly (the PROVIDER_IDS lock pattern).
-    const baseYaml = readFileSync(join(import.meta.dir, "../../sandbox-image/omp-models.yml"), "utf8");
-    const baseIds = [...baseYaml.matchAll(/^  ([A-Za-z0-9_-]+):\s*(?:#.*)?$/gm)].map((m) => m[1]!);
-    expect(baseIds.length).toBeGreaterThan(0); // a base with no providers would make the mirror vacuous
-    expect([...IN_IMAGE_BASE_PROVIDER_IDS]).toEqual(baseIds);
+  test("the custom-id collision vocabulary is the selected image's registry host ids (plan 37, QC W-1 successor)", () => {
+    // The dashboard keeps NO local base-provider mirror: the refusal set is
+    // sandboxImageHostIds(app.sandbox_image_id) straight from the
+    // src/contracts/sandbox-images.ts registry. Lock the registry shape the
+    // refusal (and the consumer's neededEnvName mapping) rides on: omp is
+    // the single enabled entry, and its capability host `ark-plan` resolves
+    // its key through catalog id `ark` (ARK_API_KEY) — the same semantics
+    // the synthesizer materializes into every per-review models.yml.
+    expect(enabledSandboxImages().map((image) => image.id)).toEqual(["omp"]);
+    expect(sandboxImageHostIds("omp")).toEqual(["ark-plan"]);
+    expect(sandboxImageHostIds("no-such-image")).toEqual([]);
+    const arkHost = getSandboxImage("omp")!.hosts[0]!;
+    expect(arkHost).toMatchObject({ id: "ark-plan", catalogProviderId: "ark", apiKeyEnv: "ARK_API_KEY" });
+    expect(arkHost.baseUrl).toBe("https://ark.cn-beijing.volces.com/api/plan");
+    expect(arkHost.models.map((m) => m.id)).toEqual(["deepseek-v4-flash"]);
   });
 });
 
@@ -1343,6 +1352,93 @@ describe("GET /dashboard/apps/:slug/settings (plan 29 T6: SPA-owned)", () => {
     const res = await get(SETTINGS, "", makeEnv(db));
     expect(res.status).toBe(302);
     expect(res.headers.get("Location")).toBe("/dashboard/login");
+  });
+});
+
+describe("sandbox image selection (plan 37 T1: payload + op=save-sandbox-image)", () => {
+  const SETTINGS_API = "/dashboard/api/apps/mallorys-app/settings";
+
+  test("manage face: app.sandbox_image_id + sandbox_images ({ id, enabled } rows, enabled entries only)", async () => {
+    const { db } = await seededWorld();
+    const cookie = `${SESSION_COOKIE}=${await sessionCookie("mallory")}`;
+    const res = await get(SETTINGS_API, cookie, makeEnv(db));
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      can_manage: boolean;
+      app: { sandbox_image_id: string };
+      sandbox_images?: Array<{ id: string; enabled: boolean }>;
+    };
+    expect(body.can_manage).toBe(true);
+    // Both faces carry the read-only selection; the manage face adds the
+    // selector choices from the registry's enabled entries only.
+    expect(body.app.sandbox_image_id).toBe("omp");
+    expect(body.sandbox_images).toEqual([{ id: "omp", enabled: true }]);
+  });
+
+  test("non-manager face: sandbox_image_id is read-only visible; sandbox_images (the editor data) is absent", async () => {
+    const { db } = await seededWorld();
+    const cookie = `${SESSION_COOKIE}=${await sessionCookie("hubot")}`;
+    const res = await get(SETTINGS_API, cookie, makeEnv(db));
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      can_manage: boolean;
+      app: { sandbox_image_id: string };
+      sandbox_images?: unknown;
+    };
+    expect(body.can_manage).toBe(false);
+    expect(body.app.sandbox_image_id).toBe("omp");
+    expect(body.sandbox_images).toBeUndefined();
+  });
+
+  test("owner saves the enabled registry id: 200, value persisted, updated_at bumped", async () => {
+    const { db, app } = await seededWorld();
+    rawRun(db, "UPDATE github_apps SET sandbox_image_id = 'omp', updated_at = '2026-01-01 00:00:00' WHERE id = ?", app.id);
+    const cookie = `${SESSION_COOKIE}=${await sessionCookie("mallory")}`;
+    const res = await postForm(SETTINGS, cookie, makeEnv(db), {
+      op: "save-sandbox-image",
+      sandbox_image_id: "omp",
+    });
+    expect(res.status).toBe(200);
+    expect(await res.text()).toContain("Saved the omp runtime image for mallorys-app");
+    const row = db.raw
+      .query("SELECT sandbox_image_id, updated_at FROM github_apps WHERE id = ?")
+      .get(app.id) as { sandbox_image_id: string; updated_at: string };
+    expect(row.sandbox_image_id).toBe("omp");
+    expect(row.updated_at).not.toBe("2026-01-01 00:00:00");
+  });
+
+  test("unknown or blank id: 400 with zero writes (the store-enforced enabled-registry domain)", async () => {
+    const { db, app } = await seededWorld();
+    rawRun(db, "UPDATE github_apps SET updated_at = '2026-01-01 00:00:00' WHERE id = ?", app.id);
+    const cookie = `${SESSION_COOKIE}=${await sessionCookie("mallory")}`;
+    for (const imageId of ["not-a-registry-id", ""]) {
+      const res = await postForm(SETTINGS, cookie, makeEnv(db), {
+        op: "save-sandbox-image",
+        sandbox_image_id: imageId,
+      });
+      expect(res.status).toBe(400);
+      expect(await res.text()).toContain("Unknown or disabled sandbox image");
+    }
+    const row = db.raw
+      .query("SELECT sandbox_image_id, updated_at FROM github_apps WHERE id = ?")
+      .get(app.id) as { sandbox_image_id: string; updated_at: string };
+    expect(row.sandbox_image_id).toBe("omp"); // nothing stored
+    expect(row.updated_at).toBe("2026-01-01 00:00:00"); // no operator-mutation churn
+  });
+
+  test("non-manager (member, not creator) gets 403 and nothing is stored", async () => {
+    const { db, app } = await seededWorld();
+    const cookie = `${SESSION_COOKIE}=${await sessionCookie("ada")}`;
+    const res = await postForm(SETTINGS, cookie, makeEnv(db), {
+      op: "save-sandbox-image",
+      sandbox_image_id: "omp",
+    });
+    expect(res.status).toBe(403);
+    const row = db.raw
+      .query("SELECT sandbox_image_id, updated_at FROM github_apps WHERE id = ?")
+      .get(app.id) as { sandbox_image_id: string; updated_at: string };
+    expect(row.sandbox_image_id).toBe("omp");
+    expect(row.updated_at).toBe(app.updated_at); // ada's refused save touched nothing
   });
 });
 
