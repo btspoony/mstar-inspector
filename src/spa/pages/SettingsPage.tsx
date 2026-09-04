@@ -1130,6 +1130,9 @@ function ChainsCard({
   onRemoveChain: (name: string) => void;
 }) {
   const [newName, setNewName] = useState("");
+  // Plan 43: the add-chain entry is a strip-level disclosure — the toggle
+  // opens the create form directly beneath the tab strip.
+  const [createOpen, setCreateOpen] = useState(false);
   // Plan 39: Default and named chains are peer tabs. The selection coerces
   // through activeChainTabId so a delete or a stale payload lands on the
   // non-removable Default tab instead of pointing at a removed chain.
@@ -1145,13 +1148,43 @@ function ChainsCard({
       </CardHeader>
       <CardContent className="flex flex-col gap-6">
         <Tabs value={activeChainTabId(tabs, selectedTab)} onValueChange={setSelectedTab}>
-          <TabsList aria-label={t(locale, "settings.modelChains")}>
-            {tabs.map((tab) => (
-              <TabsTrigger key={tab.id} value={tab.id}>
-                {tab.isDefault ? t(locale, "settings.defaultChain") : tab.id}
-              </TabsTrigger>
-            ))}
-          </TabsList>
+          {/* Plan 43: the add-chain entry lives in the tab-strip row, so
+              adding a chain reads as a tab action instead of a detached form
+              below the card. The button is a TabsList SIBLING (never inside
+              the role=tablist) mirroring the plan-42 providers header entry:
+              outline control, plus glyph, localized label. */}
+          <div className="flex items-center gap-2">
+            <TabsList aria-label={t(locale, "settings.modelChains")}>
+              {tabs.map((tab) => (
+                <TabsTrigger key={tab.id} value={tab.id}>
+                  {tab.isDefault ? t(locale, "settings.defaultChain") : tab.id}
+                </TabsTrigger>
+              ))}
+            </TabsList>
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              aria-expanded={createOpen}
+              onClick={() => setCreateOpen(!createOpen)}
+            >
+              <Plus aria-hidden="true" />
+              {t(locale, "settings.addChain")}
+            </Button>
+          </div>
+          {/* The create form discloses beneath the strip with the plan-39
+              flow verbatim: op=add-chain, a 400 keeps the typed input, and a
+              successful create selects the new tab after the reload lands. */}
+          {createOpen ? (
+            <NamedChainCreate
+              locale={locale}
+              groups={groups}
+              name={newName}
+              onName={setNewName}
+              onSettings={onSettings}
+              onCreated={(created) => setSelectedTab(created)}
+            />
+          ) : null}
           {/* forceMount keeps every editor mounted (as the pre-tab list did),
               so switching tabs never silently drops in-progress edits. Radix
               itself hides nothing once forceMount pins every panel to
@@ -1182,21 +1215,6 @@ function ChainsCard({
             </TabsContent>
           ))}
         </Tabs>
-
-        <section className="flex flex-col gap-3">
-          <h3 className="text-sm font-medium">{t(locale, "settings.namedChains")}</h3>
-          {namedTabs.length === 0 ? (
-            <p className="text-sm text-muted-foreground">{t(locale, "settings.noNamedChains")}</p>
-          ) : null}
-          <NamedChainCreate
-            locale={locale}
-            groups={groups}
-            name={newName}
-            onName={setNewName}
-            onSettings={onSettings}
-            onCreated={(created) => setSelectedTab(created)}
-          />
-        </section>
       </CardContent>
     </Card>
   );

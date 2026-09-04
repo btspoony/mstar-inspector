@@ -26,7 +26,7 @@ describe("settings layout (plan 35 T4)", () => {
     expect(source).toContain("add-template-provider");
     expect(source).toContain("add-chain");
     expect(source).toContain("settings.useDefaultChain");
-    expect(source).toContain("settings.namedChains");
+    expect(source).toContain("settings.addChain");
     expect(source).not.toContain("settingsLayout");
     expect(source).not.toContain("settingsSidebar");
   });
@@ -420,6 +420,40 @@ describe("model chain tabs (plan 39 T1)", () => {
   });
 });
 
+describe("chain add affordance at the tab strip (plan 43 T1)", () => {
+  test("the add-chain entry is a labeled outline control beside the TabsList; the form discloses beneath the strip", () => {
+    const source = readFileSync(join(import.meta.dir, "../../src/spa/pages/SettingsPage.tsx"), "utf8");
+    const chainsBody = source.slice(source.indexOf("function ChainsCard"), source.indexOf("function SeatsCard"));
+    // The entry mirrors the plan-42 providers header pattern: outline button,
+    // plus glyph, localized label (icon-only is not acceptable), disclosure
+    // state pinned to the toggle — and it is a TabsList sibling in the strip
+    // row, never a trigger inside the role=tablist.
+    expect(chainsBody).toContain('variant="outline"');
+    expect(chainsBody).toContain("aria-expanded={createOpen}");
+    expect(chainsBody).toContain("<Plus");
+    expect(chainsBody).toContain('{t(locale, "settings.addChain")}');
+    // Placement: the create form renders at the strip level — after the
+    // TabsList row, before the Default panel — replacing the old detached
+    // section (heading + empty-state prose) that lived below the Tabs block.
+    const stripPos = chainsBody.indexOf('<TabsList aria-label={t(locale, "settings.modelChains")}>');
+    const formPos = chainsBody.indexOf("<NamedChainCreate");
+    const panelPos = chainsBody.indexOf("<TabsContent forceMount value={DEFAULT_CHAIN_NAME}>");
+    expect(stripPos).toBeGreaterThan(-1);
+    expect(formPos).toBeGreaterThan(stripPos);
+    expect(panelPos).toBeGreaterThan(formPos);
+    expect(chainsBody).not.toContain("settings.namedChains");
+    expect(chainsBody).not.toContain("settings.noNamedChains");
+    // The frozen plan-39 create flow rides along unchanged: same op, same
+    // created-tab selection after the reload lands.
+    expect(chainsBody).toContain("onCreated={(created) => setSelectedTab(created)}");
+  });
+
+  test("add-chain copy is dictionary-backed in both locales", () => {
+    expect(t("en", "settings.addChain")).toBe("Add chain");
+    expect(t("zh_CN", "settings.addChain")).toBe("新建链");
+  });
+});
+
 describe("seat assignment section (plan 39 T2)", () => {
   test("seats are an independent titled card below chain management, not a section of the chains card", () => {
     const source = readFileSync(join(import.meta.dir, "../../src/spa/pages/SettingsPage.tsx"), "utf8");
@@ -599,14 +633,11 @@ describe("App workflow boundaries (plan 40 T2)", () => {
     expect(source).toContain('aria-label={t(locale, "settings.modelChainField")}');
   });
 
-  test("empty states stay honest: unconfigured provider and no named chains", () => {
+  test("empty states stay honest: unconfigured provider", () => {
     const source = readFileSync(join(import.meta.dir, "../../src/spa/pages/SettingsPage.tsx"), "utf8");
     expect(source).toContain("settings.noConfiguredProviders");
-    expect(source).toContain("settings.noNamedChains");
     expect(t("en", "settings.noConfiguredProviders")).toContain("No providers configured yet");
     expect(t("zh_CN", "settings.noConfiguredProviders")).toContain("尚未配置");
-    expect(t("en", "settings.noNamedChains")).toBe("No named chains yet.");
-    expect(t("zh_CN", "settings.noNamedChains")).toBe("还没有命名链。");
   });
 });
 
