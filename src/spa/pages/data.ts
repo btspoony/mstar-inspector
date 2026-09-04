@@ -267,7 +267,7 @@ export function insightsSummaryUrl(search: InsightsSearch, includeRepos = false)
   if (search.window !== "" && search.window !== "30") params.set("window", search.window);
   if (search.repo !== "") params.set("repo", search.repo);
   // Opt-in repos aggregation (plan 36 QC F-001): only the records page
-  // requests it — the home surface must not pay the DISTINCT scan+sort.
+  // requests it, so default summary reads never pay the DISTINCT scan+sort.
   if (includeRepos) params.set("include", "repos");
   const query = params.toString();
   return query === "" ? "/dashboard/api/insights/summary" : `/dashboard/api/insights/summary?${query}`;
@@ -292,6 +292,61 @@ export function parseInsights(data: unknown): InsightsSummary | null {
   // reject malformed.
   if (data.repos !== undefined && !isStringArray(data.repos)) return null;
   return data as InsightsSummary;
+}
+
+/**
+ * Segmented window options (days) for the insights window ToggleGroup — a
+ * legal subset of the API window domain (`^\d+$`, store clamp ≤90), zero API
+ * extension. (Lives here since plan 40 retired the home module; the names
+ * say insights — these helpers serve only the records page.)
+ */
+export const INSIGHTS_WINDOWS = ["7", "30", "90"] as const;
+export type InsightsWindow = (typeof INSIGHTS_WINDOWS)[number];
+
+/**
+ * URL window → segment: the `window` param when it is one of
+ * INSIGHTS_WINDOWS, else the default 30. Arbitrary integer windows stay
+ * legal on the API, but the records page only offers the segmented set, so
+ * off-set values resolve to the default instead of leaving the control
+ * without an active segment. The page rewrites the URL on mount when an
+ * off-set value is normalized (plan 36 QC F-002), so the address bar
+ * reflects the applied filter.
+ */
+export function insightsWindow(search: string): InsightsWindow {
+  const raw = parseInsightsSearch(search).window;
+  return (INSIGHTS_WINDOWS as readonly string[]).includes(raw) ? (raw as InsightsWindow) : "30";
+}
+
+/**
+ * The search string with an off-set window normalized to the default
+ * segment (e.g. "?window=60" → "" since 30 is the default, or
+ * "?window=60&repo=acme/web" → "?repo=acme%2Fweb"). Returns the input
+ * unchanged when the window is already a segment. Used on mount to rewrite
+ * the URL so it reflects the applied filter (plan 36 QC F-002).
+ */
+export function normalizeWindowSearch(search: string): string {
+  const raw = parseInsightsSearch(search);
+  const window = insightsWindow(search);
+  if (raw.window === window) return search;
+  const params = new URLSearchParams();
+  if (window !== "30") params.set("window", window);
+  if (raw.repo !== "") params.set("repo", raw.repo);
+  const query = params.toString();
+  return query === "" ? "" : `?${query}`;
+}
+
+/** The records-page URL for an insights filter (default window/repo omitted). */
+export function searchHref(pathname: "/dashboard/insights", search: InsightsSearch): string {
+  const params = new URLSearchParams();
+  if (search.window !== "" && search.window !== "30") params.set("window", search.window);
+  if (search.repo !== "") params.set("repo", search.repo);
+  const query = params.toString();
+  return query === "" ? pathname : `${pathname}?${query}`;
+}
+
+/** One-line verdict distribution for the summary card. */
+export function verdictLine(data: InsightsSummary): string {
+  return data.verdict_distribution.map((row) => `${row.verdict} ${row.count}`).join(" · ");
 }
 
 export function parseMembers(data: unknown): MemberRow[] | null {

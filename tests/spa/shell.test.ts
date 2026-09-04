@@ -78,22 +78,22 @@ describe("shell models (plan 33 T2)", () => {
     expect(navbar.accountLabel).toBeNull();
   });
 
-  test("Apps current is /dashboard/apps and settings, not insights", () => {
+  test("Apps current is /dashboard, /dashboard/apps and settings, not insights (plan 40)", () => {
+    expect(isNavCurrent("/dashboard/apps", "/dashboard")).toBe(true);
     expect(isNavCurrent("/dashboard/apps", "/dashboard/apps")).toBe(true);
     expect(isNavCurrent("/dashboard/apps", "/dashboard/apps/acme/settings")).toBe(true);
-    expect(isNavCurrent("/dashboard/apps", "/dashboard")).toBe(false);
     expect(isNavCurrent("/dashboard/apps", "/dashboard/insights")).toBe(false);
     const apps = buildSidebarModel(member, "/dashboard/apps");
     expect(apps.items.find((item) => item.href === "/dashboard/apps")?.current).toBe(true);
     expect(apps.items.find((item) => item.href === "/dashboard/insights")?.current).toBe(false);
   });
 
-  test("Insights current includes /dashboard home", () => {
-    expect(isNavCurrent("/dashboard/insights", "/dashboard")).toBe(true);
+  test("root highlights Apps; Insights current is only /dashboard/insights (plan 40)", () => {
+    expect(isNavCurrent("/dashboard/insights", "/dashboard")).toBe(false);
     expect(isNavCurrent("/dashboard/insights", "/dashboard/insights")).toBe(true);
-    const home = buildSidebarModel(member, "/dashboard");
-    expect(home.items.find((item) => item.href === "/dashboard/insights")?.current).toBe(true);
-    expect(home.items.find((item) => item.href === "/dashboard/apps")?.current).toBe(false);
+    const root = buildSidebarModel(member, "/dashboard");
+    expect(root.items.find((item) => item.href === "/dashboard/apps")?.current).toBe(true);
+    expect(root.items.find((item) => item.href === "/dashboard/insights")?.current).toBe(false);
   });
 });
 

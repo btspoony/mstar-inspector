@@ -147,7 +147,7 @@ export const en = {
     title: "Apps",
     heading: "Apps",
     create: "Create GitHub App",
-    empty: "No Apps yet — create one below.",
+    empty: "No Apps yet — Create GitHub App connects your first one.",
     settings: "Settings",
     appId: "App id {id}",
     by: "by {login}",
@@ -172,7 +172,7 @@ export const en = {
     tableStatus: "Status",
     tableHealth: "Health",
     tableCreator: "Creator",
-    openAria: "Open {slug}",
+    openAria: "Open {slug} settings",
   },
   members: {
     title: "Members",
@@ -233,6 +233,8 @@ export const en = {
   },
   settings: {
     title: "App settings",
+    backToApps: "Back to Apps",
+    changesSaved: "Changes saved.",
     providerKeys: "Provider keys",
     providerKeysCopy:
       "Keys for App {slug} are stored encrypted and shown masked — the last 4 characters only. Re-adding a provider replaces its stored key.",
@@ -280,6 +282,7 @@ export const en = {
     resumeReviews: "Resume reviews",
     disconnected: "This App is disconnected — enable it to review.",
     installHealth: "Install health",
+    installHealthCopy: "Webhook installations and the latest deliveries for this App.",
     lastWebhook: "Last webhook: {time}",
     noInstallations: "No installations yet.",
     installation: "installation {id}",
@@ -322,6 +325,7 @@ export const en = {
     confirmDeleteTitle: "Delete {slug}?",
     confirmDeleteBody: "This is a soft-delete. The App disappears from the list; reviews fail closed.",
     confirmDeleteButton: "Delete App",
+    deleteSuccess: "App deleted. It has been removed from the Apps list.",
     providers: "Providers",
     providersCopy:
       "The providers configured for this App — stored keys show masked, custom declarations show their base URL and models. Add Provider picks a catalog entry; keys are stored only after a successful verify.",
@@ -426,9 +430,6 @@ export const en = {
       dbRejected: "The App could not be stored — the dashboard database rejected the write. You can resubmit.",
       dbUnbound: "Dashboard storage is not configured — the App could not be stored.",
     },
-  },
-  home: {
-    insightsHeading: "Overall insights",
   },
 };
 

@@ -1,6 +1,8 @@
 /**
  * Plan 31 T4+T6 + plan 35 T4: settings ops zone, unified providers, chains UI.
- * No DOM runner — same contract as plan 30 home tests.
+ * No DOM runner — source-scan pins over SettingsPage.tsx and its primitives
+ * plus pure data helpers (the plan 30 home suite that shared this style is
+ * retired).
  */
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
@@ -480,5 +482,82 @@ describe("operational action hierarchy (plan 39 T3)", () => {
     expect(t("zh_CN", "settings.confirmDeleteBody")).toContain("软删除");
     expect(t("en", "settings.confirmDeleteButton")).toBe("Delete App");
     expect(t("zh_CN", "settings.confirmDeleteButton")).toBe("删除应用");
+  });
+});
+
+describe("App workflow boundaries (plan 40 T2)", () => {
+  test("App settings reads as one workflow with the Apps list: a visible path back", () => {
+    const source = readFileSync(join(import.meta.dir, "../../src/spa/pages/SettingsPage.tsx"), "utf8");
+    // The back link targets the enumerated Apps route (the /dashboard surface).
+    expect(source).toContain('href="/dashboard/apps"');
+    expect(source).toContain('t(locale, "settings.backToApps")');
+    expect(t("en", "settings.backToApps")).toBe("Back to Apps");
+    expect(t("zh_CN", "settings.backToApps")).toBe("返回应用");
+  });
+
+  test("successful configuration saves surface success feedback; failures keep the structured error", () => {
+    const source = readFileSync(join(import.meta.dir, "../../src/spa/pages/SettingsPage.tsx"), "utf8");
+    // Success is no longer silent: the notice channel reports a saved change.
+    expect(source).toContain('successMessage ?? t(locale, "settings.changesSaved")');
+    expect(t("en", "settings.changesSaved")).toBe("Changes saved.");
+    expect(t("zh_CN", "settings.changesSaved")).toBe("更改已保存。");
+    // Failure feedback is unchanged: structured API errors through the notice.
+    expect(source).toContain("message: settingsErrorMessage(locale, body)");
+  });
+
+  test("configuration section headings are described and unlabeled selects are named", () => {
+    const source = readFileSync(join(import.meta.dir, "../../src/spa/pages/SettingsPage.tsx"), "utf8");
+    // Every section heading carries a description — install health included.
+    expect(source).toContain('t(locale, "settings.installHealthCopy")');
+    expect(t("en", "settings.installHealthCopy")).toContain("deliveries");
+    expect(t("zh_CN", "settings.installHealthCopy")).toContain("投递");
+    // Selects without a visible label get an accessible name (DESIGN.md L2
+    // label audit) — the runtime-image selector and the chain model picker.
+    expect(source).toContain('aria-label={t(locale, "settings.runtimeImage")}');
+    expect(source).toContain('aria-label={t(locale, "settings.modelChainField")}');
+  });
+
+  test("empty states stay honest: unconfigured provider and no named chains", () => {
+    const source = readFileSync(join(import.meta.dir, "../../src/spa/pages/SettingsPage.tsx"), "utf8");
+    expect(source).toContain("settings.noConfiguredProviders");
+    expect(source).toContain("settings.noNamedChains");
+    expect(t("en", "settings.noConfiguredProviders")).toContain("No providers configured yet");
+    expect(t("zh_CN", "settings.noConfiguredProviders")).toContain("尚未配置");
+    expect(t("en", "settings.noNamedChains")).toBe("No named chains yet.");
+    expect(t("zh_CN", "settings.noNamedChains")).toBe("还没有命名链。");
+  });
+});
+
+describe("notice channel (plan 40 T3 reviewer handoffs)", () => {
+  test("success and warn notices are announced via role=status; errors keep role=alert", () => {
+    const source = readFileSync(join(import.meta.dir, "../../src/spa/pages/PageNotice.tsx"), "utf8");
+    // WCAG 4.1.3: the "Changes saved." success notice must not be silent to
+    // assistive tech — non-error notices are polite live-region status, and
+    // errors keep the assertive alert.
+    expect(source).toContain('role={kind === "error" ? "alert" : "status"}');
+  });
+
+  test("a deleted App reports its own irreversible outcome, not the generic saved notice", () => {
+    const source = readFileSync(join(import.meta.dir, "../../src/spa/pages/SettingsPage.tsx"), "utf8");
+    // The delete branch pins the dedicated copy and skips the background
+    // reload — the soft-deleted App's settings GET is a guaranteed 404, so
+    // the generic path would overwrite the outcome with "Load failed."
+    const deleteBranch = source.slice(
+      source.indexOf('action.kind === "delete"'),
+      source.indexOf("const confirmCopy"),
+    );
+    expect(deleteBranch).toContain('t(locale, "settings.deleteSuccess")');
+    expect(deleteBranch).toContain("reload: false");
+    // Source pin (qc2 F-001): the property-form `reload: false` call site is
+    // the delete branch's alone — any other op copied onto it would silently
+    // lose its background reload and fail this count. (Two prose mentions of
+    // the flag — the runPinnedWithBody JSDoc and the branch comment — have
+    // prose tails, so only a real `reload: false }`/`reload: false,` object
+    // property matches.)
+    expect(source.match(/reload: false\s*[},]/g)?.length).toBe(1);
+    expect(t("en", "settings.deleteSuccess")).toContain("deleted");
+    expect(t("zh_CN", "settings.deleteSuccess")).toContain("已删除");
+    // Configuration saves keep the generic saved notice.
+    expect(source).toContain('successMessage ?? t(locale, "settings.changesSaved")');
   });
 });

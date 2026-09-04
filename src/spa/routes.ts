@@ -1,17 +1,18 @@
 /**
- * Enumerated SPA pages (plan 29 Interfaces `SPA_PAGES`, plan 30 home, plan 33 apps).
+ * Enumerated SPA pages (plan 29 Interfaces `SPA_PAGES`, plan 33 apps,
+ * plan 40 apps-default root).
  *
- * `/dashboard` is the insights home shell (plan 33/36); `/dashboard/apps` is
- * the Apps workbench (plan 33 retires the Worker 301 alias). History fallback
- * is this matcher, not wrangler `not_found_handling`.
+ * `/dashboard` and `/dashboard/apps` are one root-routing rule: both render
+ * the Apps workbench (plan 40 retires the insights home at the root; plan 33
+ * retired the Worker 301 alias). History fallback is this matcher, not
+ * wrangler `not_found_handling`.
  */
-export const SPA_PAGES = ["home", "apps", "insights", "members", "login", "settings"] as const;
+export const SPA_PAGES = ["apps", "insights", "members", "login", "settings"] as const;
 
 export type SpaPageId = (typeof SPA_PAGES)[number];
 
 export type SpaRoute =
-  | { page: "home"; pathname: "/dashboard" }
-  | { page: "apps"; pathname: "/dashboard/apps" }
+  | { page: "apps"; pathname: "/dashboard" | "/dashboard/apps" }
   | { page: "insights"; pathname: "/dashboard/insights" }
   | { page: "members"; pathname: "/dashboard/members" }
   | { page: "login"; pathname: "/dashboard/login" }
@@ -22,7 +23,6 @@ const SETTINGS_PATH = /^\/dashboard\/apps\/([^/]+)\/settings$/;
 export function matchSpaRoute(pathname: string): SpaRoute | null {
   switch (pathname) {
     case "/dashboard":
-      return { page: "home", pathname };
     case "/dashboard/apps":
       return { page: "apps", pathname };
     case "/dashboard/insights":

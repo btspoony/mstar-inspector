@@ -42,7 +42,7 @@ import {
   type SettingsManagePayload,
   type SettingsPayload,
 } from "./data";
-import { StatusBadge } from "./AppsPage";
+import { spaClick, StatusBadge } from "./AppsPage";
 import { LoadFailedNotice, LoadingNotice, PageNotice, type NoticeKind } from "./PageNotice";
 
 type PendingAction =
@@ -107,7 +107,18 @@ export function SettingsPage({ boot, slug }: { boot: SpaBoot; slug: string }) {
 
   return (
     <div className="flex flex-col gap-6">
-      <h1 className="text-2xl font-semibold tracking-tight">{t(locale, "settings.title")}</h1>
+      {/* Wayfinding (plan 40 T2): the App settings page reads as one workflow
+          with the Apps list — a visible path back to the list it came from. */}
+      <div className="flex flex-col gap-1">
+        <a
+          className="text-sm text-muted-foreground no-underline hover:text-foreground hover:underline"
+          href="/dashboard/apps"
+          onClick={(event) => spaClick("/dashboard/apps", event)}
+        >
+          {t(locale, "settings.backToApps")}
+        </a>
+        <h1 className="text-2xl font-semibold tracking-tight">{t(locale, "settings.title")}</h1>
+      </div>
       {state === "loading" ? <LoadingNotice locale={locale} /> : null}
       {state === "error" ? <LoadFailedNotice locale={locale} /> : null}
       {notice ? <PageNotice kind={notice.kind} message={notice.message} /> : null}
@@ -165,7 +176,7 @@ function SettingsView({
       await onReload({ background: true });
       return false;
     }
-    onNotice(null);
+    onNotice({ kind: "success", message: t(locale, "settings.changesSaved") });
     await onReload({ background: true });
     return true;
   }
@@ -201,15 +212,27 @@ function SettingsView({
     await runPinnedWithBody(path, {});
   }
 
-  async function runPinnedWithBody(path: string, fields: Record<string, string>): Promise<void> {
+  /**
+   * POST a pinned ops path and report the outcome through the notice channel.
+   * Options: `successMessage` differentiates an outcome the generic
+   * "Changes saved." would misrepresent; `reload: false` skips the background
+   * refetch when the follow-up settings GET is guaranteed to fail — a
+   * soft-deleted App is invisible to that route, so a delete's refetch would
+   * 404 and overwrite the outcome with "Load failed."
+   */
+  async function runPinnedWithBody(
+    path: string,
+    fields: Record<string, string>,
+    { successMessage, reload = true }: { successMessage?: string; reload?: boolean } = {},
+  ): Promise<void> {
     const { status, body } = await postForm(path, fields);
     if (status >= 400) {
       onNotice({ kind: "error", message: body.trim() || t(locale, "common.loadFailed") });
-      await onReload({ background: true });
+      if (reload) await onReload({ background: true });
       return;
     }
-    onNotice(null);
-    await onReload({ background: true });
+    onNotice({ kind: "success", message: successMessage ?? t(locale, "settings.changesSaved") });
+    if (reload) await onReload({ background: true });
   }
 
   async function onConfirm(): Promise<void> {
@@ -225,6 +248,15 @@ function SettingsView({
         await runPinnedWithBody(`/dashboard/apps/${app.slug}/settings/key/delete`, {
           provider: action.provider,
         });
+      } else if (action.kind === "delete") {
+        // Irreversible outcome with its own copy: "Changes saved." reads wrong
+        // after a delete, and the user stays on the deleted App's page.
+        // reload: false — the deleted App's settings GET is a guaranteed 404.
+        await runPinnedWithBody(
+          `/dashboard/apps/${app.slug}/delete`,
+          {},
+          { successMessage: t(locale, "settings.deleteSuccess"), reload: false },
+        );
       } else {
         await runPinned(`/dashboard/apps/${app.slug}/${action.kind}`);
       }
@@ -429,6 +461,7 @@ function HealthCard({ locale, payload }: { locale: SpaBoot["locale"]; payload: S
     <Card>
       <CardHeader>
         <CardTitle>{t(locale, "settings.installHealth")}</CardTitle>
+        <CardDescription>{t(locale, "settings.installHealthCopy")}</CardDescription>
       </CardHeader>
       <CardContent>
         <HealthBody locale={locale} payload={payload} />
@@ -491,7 +524,7 @@ function RuntimeImageEditor({
     <div className="flex flex-wrap items-center gap-2">
       <div className="min-w-64 max-w-xs">
         <Select value={selected} onValueChange={setSelected}>
-          <SelectTrigger>
+          <SelectTrigger aria-label={t(locale, "settings.runtimeImage")}>
             <SelectValue />
           </SelectTrigger>
           <SelectContent>
@@ -1306,7 +1339,7 @@ function ChainEditor({
         <div className="flex min-w-64 flex-1 flex-col gap-1.5">
           <span className="text-sm font-medium">{t(locale, "settings.modelChainField")}</span>
           <Select value={pick} onValueChange={setPick}>
-            <SelectTrigger>
+            <SelectTrigger aria-label={t(locale, "settings.modelChainField")}>
               <SelectValue placeholder={t(locale, "settings.pickModel")} />
             </SelectTrigger>
             <SelectContent>
