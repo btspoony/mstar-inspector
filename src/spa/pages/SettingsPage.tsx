@@ -226,6 +226,8 @@ function SettingsView({
         <HealthCard locale={locale} payload={payload} />
       )}
 
+      <RuntimeImageCard locale={locale} payload={payload} onSettings={submitSettings} />
+
       {payload.can_manage ? (
         <>
           <ProvidersCard
@@ -407,6 +409,82 @@ function HealthCard({ locale, payload }: { locale: SpaBoot["locale"]; payload: S
         <HealthBody locale={locale} payload={payload} />
       </CardContent>
     </Card>
+  );
+}
+
+/**
+ * Runtime image (plan 37): the App's sandbox runtime-image selection.
+ * Managers get the shadcn selector over the enabled registry entries (one
+ * `omp` option this iteration) and save through op=save-sandbox-image;
+ * other members get the read-only selected id. The payload carries registry
+ * ids only — never image-local configuration or secrets.
+ */
+function RuntimeImageCard({
+  locale,
+  payload,
+  onSettings,
+}: {
+  locale: SpaBoot["locale"];
+  payload: SettingsPayload;
+  onSettings: (fields: Record<string, string>) => Promise<boolean>;
+}) {
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle>{t(locale, "settings.runtimeImage")}</CardTitle>
+        <CardDescription>{t(locale, "settings.runtimeImageCopy")}</CardDescription>
+      </CardHeader>
+      <CardContent>
+        {payload.can_manage ? (
+          <RuntimeImageEditor locale={locale} payload={payload} onSettings={onSettings} />
+        ) : (
+          <p className="text-sm text-muted-foreground">
+            {t(locale, "settings.runtimeImageValue", { id: payload.app.sandbox_image_id })}
+          </p>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
+function RuntimeImageEditor({
+  locale,
+  payload,
+  onSettings,
+}: {
+  locale: SpaBoot["locale"];
+  payload: SettingsManagePayload;
+  onSettings: (fields: Record<string, string>) => Promise<boolean>;
+}) {
+  const [selected, setSelected] = useState(payload.app.sandbox_image_id);
+
+  useEffect(() => {
+    setSelected(payload.app.sandbox_image_id);
+  }, [payload.app.sandbox_image_id]);
+
+  return (
+    <div className="flex flex-wrap items-center gap-2">
+      <div className="min-w-64 max-w-xs">
+        <Select value={selected} onValueChange={setSelected}>
+          <SelectTrigger>
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            {payload.sandbox_images.map((image) => (
+              <SelectItem key={image.id} value={image.id}>
+                {image.id}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+      </div>
+      <Button
+        type="button"
+        onClick={() => void onSettings({ op: "save-sandbox-image", sandbox_image_id: selected })}
+      >
+        {t(locale, "settings.saveRuntimeImage")}
+      </Button>
+    </div>
   );
 }
 

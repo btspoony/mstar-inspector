@@ -343,6 +343,57 @@ describe("POST save-chain / save-roles membership (plan 31 T4)", () => {
   });
 });
 
+describe("POST save-sandbox-image (plan 37, spec § Technical interfaces)", () => {
+  test("creator saves an enabled registry id; the selection persists and rides the payload", async () => {
+    const { db, app } = await seededWorld();
+    const env = makeEnv(db);
+    const ok = await postForm(SETTINGS, "mallory", env, { op: "save-sandbox-image", sandbox_image_id: "omp" });
+    expect(ok.status).toBe(200);
+    expect(await ok.text()).toContain("Saved the omp runtime image");
+    expect(db.raw.query("SELECT sandbox_image_id FROM github_apps WHERE id = ?").get(app.id)).toEqual({
+      sandbox_image_id: "omp",
+    });
+    // The JSON face (not the SPA page path) reflects the saved selection.
+    const payload = await getJson("/dashboard/api/apps/mallorys-app/settings", "mallory", env);
+    const body = (await payload.json()) as {
+      app: { sandbox_image_id: string };
+      sandbox_images?: Array<{ id: string; enabled: boolean }>;
+    };
+    expect(body.app.sandbox_image_id).toBe("omp");
+    // The manage face's choices are enabled registry entries ONLY — never
+    // image-local configuration, yaml, or secrets, and omp is not a provider
+    // catalog entry.
+    expect(body.sandbox_images).toEqual([{ id: "omp", enabled: true }]);
+    expect(JSON.stringify(body)).not.toContain("models.yml");
+  });
+
+  test("unknown or disabled id → 400, nothing stored", async () => {
+    const { db, app } = await seededWorld();
+    const env = makeEnv(db);
+    for (const imageId of ["no-such-image", "", "ark-plan"]) {
+      const res = await postForm(SETTINGS, "mallory", env, { op: "save-sandbox-image", sandbox_image_id: imageId });
+      expect(res.status).toBe(400);
+      expect(await res.text()).toContain("Unknown or disabled sandbox image");
+    }
+    // The refusals store nothing: the row keeps the migration default.
+    expect(db.raw.query("SELECT sandbox_image_id FROM github_apps WHERE id = ?").get(app.id)).toEqual({
+      sandbox_image_id: "omp",
+    });
+  });
+
+  test("non-creator member → 403 (creator-or-admin gate), nothing stored", async () => {
+    const { db, app } = await seededWorld();
+    const res = await postForm(SETTINGS, "hubot", makeEnv(db), {
+      op: "save-sandbox-image",
+      sandbox_image_id: "omp",
+    });
+    expect(res.status).toBe(403);
+    expect(db.raw.query("SELECT sandbox_image_id FROM github_apps WHERE id = ?").get(app.id)).toEqual({
+      sandbox_image_id: "omp",
+    });
+  });
+});
+
 describe("POST /dashboard/apps/:slug/settings — pinned add-key / add-custom-provider verify (plan 31 T4)", () => {
   let fetchSpy: ReturnType<typeof spyOn> | undefined;
   afterEach(() => {
@@ -536,8 +587,14 @@ describe("GET settings includes delivery_summary for the sidebar (plan 31 T6)", 
     const body = (await res.json()) as {
       delivery_summary: { latest: null; rejected24h: number };
       providers: Array<{ id: string; label: string; tier: string; verifiable: boolean }>;
+      app: { sandbox_image_id: string };
+      sandbox_images?: Array<{ id: string; enabled: boolean }>;
     };
     expect(body.delivery_summary).toEqual({ latest: null, rejected24h: 0 });
+    // Plan 37 payload shape: the selected image id on the app meta + the
+    // enabled-registry selector choices on the manage face.
+    expect(body.app.sandbox_image_id).toBe("omp");
+    expect(body.sandbox_images).toEqual([{ id: "omp", enabled: true }]);
     expect(JSON.stringify(body)).not.toContain("key_enc");
     expect(JSON.stringify(body)).not.toContain("private_key");
     expect(res.headers.get("cache-control")).toBe("private, no-store");

@@ -262,11 +262,15 @@ const TWO_CLUSTER_FACTS = [
   "8\t1\tlib/c.ts",
 ];
 
+/** The synthesized per-review models dir (plan 37: REQUIRED on every run). */
+const AGENT_DIR = "/tmp/omp-agent-test";
+
 const BASE_INPUT = {
   level: "default" as const,
   worktreePath: TEST_WORKTREE,
   reconFacts: TWO_CLUSTER_FACTS,
   modelSelectors: ["ark-plan/deepseek-v4-flash", "ark-plan/backup-model"],
+  agentDir: AGENT_DIR,
 };
 
 /** The deep-tier input: same clone/facts/models, level deep. */
@@ -900,7 +904,7 @@ describe("ompAgentRuntime.runReview — envelope", () => {
     });
   });
 });
-describe("ompAgentRuntime.runReview — per-review agentDir threading (plan 23 Task 3, AL-23-1)", () => {
+describe("ompAgentRuntime.runReview — per-review agentDir threading (plan 23 Task 3, AL-23-1; plan 37 Task 2)", () => {
   test("quick/default: input.agentDir flows into createAgentSession options verbatim", async () => {
     seatResults = [{ data: seatPayload() }];
     await ompAgentRuntime.runReview({ ...BASE_INPUT, level: "quick", agentDir: "/tmp/omp-agent-abc" });
@@ -927,15 +931,13 @@ describe("ompAgentRuntime.runReview — per-review agentDir threading (plan 23 T
     expect(createdOptions[0]!.toolNames).toEqual(["read", "grep", "glob", "task"]);
   });
 
-  test("absent agentDir keeps today's options byte-for-byte (no agentDir key)", async () => {
+  test("agentDir is REQUIRED on every path — the options always carry it (plan 37: no baked models.yml fallback)", async () => {
     seatResults = [{ data: seatPayload() }];
     await ompAgentRuntime.runReview({ ...BASE_INPUT, level: "quick" });
-    const quick = JSON.stringify(createdOptions[0]);
-    expect(JSON.stringify(Object.keys(createdOptions[0]!))).not.toContain('"agentDir"');
+    expect(createdOptions[0]!.agentDir).toBe(AGENT_DIR);
 
-    createdOptions.length = 0;
-    seatResults = [{ data: seatPayload() }];
-    await ompAgentRuntime.runReview({ ...BASE_INPUT, level: "quick", agentDir: undefined });
-    expect(JSON.stringify(createdOptions[0])).toBe(quick);
+    parentYields = [deepEnvelope()];
+    await ompAgentRuntime.runReview(DEEP_INPUT);
+    expect(createdOptions[0]!.agentDir).toBe(AGENT_DIR);
   });
 });

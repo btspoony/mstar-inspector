@@ -351,6 +351,11 @@ export const en = {
     confirmRemoveKeyBody: "Selectors that need {provider} will fail until you verify a new key.",
     confirmRemoveCustomTitle: "Remove provider {provider}?",
     confirmRemoveCustomBody: "The provider and its stored key are removed. Chains referencing its models fail on save.",
+    runtimeImage: "Runtime image",
+    runtimeImageCopy:
+      "The sandbox runtime image that executes this App's reviews. Reviews read their model configuration at run time — nothing App-specific is baked into an image.",
+    runtimeImageValue: "This App's reviews run on the {id} runtime image.",
+    saveRuntimeImage: "Save runtime image",
   },
   manifest: {
     title: "Create GitHub App",

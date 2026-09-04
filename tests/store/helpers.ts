@@ -18,7 +18,9 @@
  *   review_failures, 0011 webhook_deliveries (plan 20), 0012 app_provider_keys
  *   updated_at + app_custom_providers (plan 23), 0013 idx_findings_review_id,
  *   0014 idx_reviews_reviewed_at (plan 22), 0015 provider verification
- *   columns + app_provider_models (plan 31)), i.e. what
+ *   columns + app_provider_models (plan 31), 0016 users.login_nocase UNIQUE
+ *   (plan 34), 0017 app_model_chains + seats (plan 35), 0018
+ *   github_apps.sandbox_image_id (plan 37)), i.e. what
  *   `wrangler d1 migrations apply` produces today. The store adapter's INSERT
  *   binds `reviews.app_id` (plan 13, QC fix wave 1 F-001), so every test
  *   exercising the REAL store.put against production-shaped data runs on this
@@ -55,6 +57,7 @@ const ALL_MIGRATIONS = [
   "0015_provider_verification.sql",
   "0016_users_login_nocase_unique.sql",
   "0017_app_model_chains.sql",
+  "0018_app_sandbox_images.sql",
 ];
 
 /** Execute the migration DDL on a fresh in-memory database. */

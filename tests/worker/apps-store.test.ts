@@ -423,6 +423,55 @@ describe("apps-store (createAppsStore)", () => {
     ).rejects.toThrow(/FOREIGN KEY constraint failed/);
   });
 });
+describe("apps-store sandbox image selection (plan 37, migration 0018)", () => {
+  /** createMigratedD1 (0004/0005) + the sandbox_image_id column. */
+  function createSandboxImageD1(): ReturnType<typeof createTestD1> {
+    const db = createMigratedD1();
+    applyMigration(db, "0018_app_sandbox_images.sql");
+    return db;
+  }
+
+  test("createApp materializes the migration 0018 default: sandbox_image_id 'omp'", async () => {
+    const db = createSandboxImageD1();
+    const app = await seedApp(db);
+    expect(app.sandbox_image_id).toBe("omp");
+  });
+
+  test("setSandboxImage stores an enabled registry id, bumps updated_at, and reports the change", async () => {
+    const db = createSandboxImageD1();
+    const app = await seedApp(db);
+    rawRun(db, "UPDATE github_apps SET updated_at = '2026-01-01 00:00:00' WHERE id = ?", app.id);
+    expect(await store(db).setSandboxImage(app.id, "omp")).toBe(true);
+    const row = (await store(db).getAppById(app.id))!;
+    expect(row.sandbox_image_id).toBe("omp");
+    expect(row.updated_at).not.toBe("2026-01-01 00:00:00");
+    // An unknown app id changed nothing (the setAppStatus convention).
+    expect(await store(db).setSandboxImage("no-such-id", "omp")).toBe(false);
+  });
+
+  test("setSandboxImage refuses a non-registry id BEFORE any write (the store-enforced value domain)", async () => {
+    const db = createSandboxImageD1();
+    const app = await seedApp(db);
+    await expect(store(db).setSandboxImage(app.id, "not-a-registry-id")).rejects.toThrow(
+      /not an enabled registry entry/,
+    );
+    await expect(store(db).setSandboxImage(app.id, "")).rejects.toThrow(/not an enabled registry entry/);
+    const row = (await store(db).getAppById(app.id))!;
+    expect(row.sandbox_image_id).toBe("omp"); // untouched — zero rows written
+  });
+
+  test("setSandboxImage refuses soft-deleted apps (a deleted app is never mutated)", async () => {
+    const db = createSandboxImageD1();
+    const app = await seedApp(db);
+    await store(db).softDeleteApp(app.id);
+    const deleted = (await store(db).getAppById(app.id))!;
+    expect(await store(db).setSandboxImage(app.id, "omp")).toBe(false);
+    const row = (await store(db).getAppById(app.id))!;
+    expect(row.deleted_at).not.toBeNull();
+    expect(row.updated_at).toBe(deleted.updated_at); // the refused write bumped nothing
+  });
+});
+
 describe("apps-store delivery read faces (plan 20 Task 2 consumption)", () => {
   /** The apps-store fixture + migration 0011 (the webhook_deliveries table). */
   function createDeliveryD1(): ReturnType<typeof createTestD1> {

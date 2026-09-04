@@ -93,6 +93,8 @@ type SettingsAppMeta = {
   review_enabled: boolean;
   created_by: string;
   last_webhook_at: string | null;
+  /** The App's selected sandbox runtime image (registry id — plan 37). */
+  sandbox_image_id: string;
 };
 
 type SettingsHealth = {
@@ -124,6 +126,8 @@ export type SettingsManagePayload = {
   providers: CatalogProvider[];
   model_role_ids: readonly string[];
   custom_provider_api_ids: readonly string[];
+  /** The selector's choices — enabled registry entries only (never yaml/secrets). */
+  sandbox_images: Array<{ id: string; enabled: boolean }>;
 } & SettingsHealth;
 
 export type SettingsPayload = SettingsReadOnlyPayload | SettingsManagePayload;
@@ -220,13 +224,25 @@ export function parseSettings(data: unknown): SettingsPayload | null {
   if (typeof data.app.slug !== "string" || typeof data.app.status !== "string") return null;
   if (typeof data.app.review_enabled !== "boolean") return null;
   if (typeof data.app.created_by !== "string" || typeof data.app.github_app_id !== "number") return null;
+  // Plan 37: the selected runtime-image id rides BOTH faces (registry id
+  // only — never image-local configuration or secrets).
+  if (typeof data.app.sandbox_image_id !== "string") return null;
   if (!Array.isArray(data.installations) || !Array.isArray(data.deliveries)) return null;
   if (!data.can_manage) return data as SettingsPayload;
   if (!Array.isArray(data.keys)) return null;
   if (!Array.isArray(data.model_role_ids) || !isStringArray(data.model_role_ids)) return null;
   if (!Array.isArray(data.custom_provider_api_ids) || !isStringArray(data.custom_provider_api_ids)) return null;
   if (!Array.isArray(data.providers) || !Array.isArray(data.model_chains)) return null;
+  // Plan 37 manage face: the selector choices — { id, enabled } rows only.
+  if (!isSandboxImageList(data.sandbox_images)) return null;
   return data as SettingsPayload;
+}
+
+function isSandboxImageList(value: unknown): value is Array<{ id: string; enabled: boolean }> {
+  return (
+    Array.isArray(value) &&
+    value.every((row) => isRecord(row) && typeof row.id === "string" && typeof row.enabled === "boolean")
+  );
 }
 
 export function parseModels(data: unknown): ModelsPayload | null {

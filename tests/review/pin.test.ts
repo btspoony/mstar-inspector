@@ -25,9 +25,11 @@ const SUPERSEDED_REF = "c188934c807184f416656a80ca50adb61ccbd525";
 const SUPERSEDED_350_REF = "f1b60df0b3b2e29b9a904edb4077e52cf6d7ca66";
 
 const REPO_ROOT = join(import.meta.dir, "..", "..");
+/** The runtime-specific Dockerfile location (plan 37: sandbox-image/omp/). */
+const OMP_DOCKERFILE = join(REPO_ROOT, "sandbox-image", "omp", "Dockerfile");
 
 describe("sandbox image harness pin", () => {
-  const dockerfile = readFileSync(join(REPO_ROOT, "sandbox-image", "Dockerfile"), "utf8");
+  const dockerfile = readFileSync(OMP_DOCKERFILE, "utf8");
 
   test("Dockerfile fetches the 3.6.0 harness commit", () => {
     expect(dockerfile).toContain(`fetch --depth 1 origin ${HARNESS_360_REF}`);
@@ -71,7 +73,7 @@ describe("review skill version pin", () => {
   });
 
   test("REVIEW_SKILL_VERSION + suffix binds to the Dockerfile fetch sha prefix", () => {
-    const dockerfile = readFileSync(join(REPO_ROOT, "sandbox-image", "Dockerfile"), "utf8");
+    const dockerfile = readFileSync(OMP_DOCKERFILE, "utf8");
     const fetchSha = dockerfile.match(/fetch --depth 1 origin ([0-9a-f]{40})/)?.[1];
     expect(fetchSha).toBeDefined();
     // The constant's "+" suffix is the short form of the Dockerfile fetch sha;

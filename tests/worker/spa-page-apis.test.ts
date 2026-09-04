@@ -40,6 +40,7 @@ function createDb(): ReturnType<typeof createTestD1> {
     "0012_custom_providers_and_key_updated_at.sql",
     "0015_provider_verification.sql",
     "0017_app_model_chains.sql",
+    "0018_app_sandbox_images.sql",
   ]) {
     db.raw.exec(readFileSync(join(MIGRATIONS_DIR, name), "utf8"));
   }
@@ -140,8 +141,9 @@ describe("GET /dashboard/api/apps/:slug/settings (plan 29 T4)", () => {
     expect(owner.status).toBe(200);
     const body = (await owner.json()) as {
       can_manage: boolean;
-      app: { slug: string; review_enabled: boolean; created_by: string };
+      app: { slug: string; review_enabled: boolean; created_by: string; sandbox_image_id: string };
       providers: Array<{ id: string; verifiable: boolean }>;
+      sandbox_images?: Array<{ id: string; enabled: boolean }>;
     };
     expect(body.app.slug).toBe("mstar-inspector-mallory");
     expect(body.app.review_enabled).toBe(true);
@@ -149,6 +151,12 @@ describe("GET /dashboard/api/apps/:slug/settings (plan 29 T4)", () => {
     expect(body.providers.length).toBeGreaterThan(0);
     expect(body.providers.some((p) => p.id === "azure-openai" && p.verifiable === false)).toBe(true);
     expect(body.providers.some((p) => p.id === "workers-ai")).toBe(true);
+    // Plan 37: the selected image id defaults to omp, and the manage face
+    // carries the enabled-registry selector choices (ids only — never
+    // image-local yaml or secrets). omp is NOT a provider catalog entry.
+    expect(body.app.sandbox_image_id).toBe("omp");
+    expect(body.sandbox_images).toEqual([{ id: "omp", enabled: true }]);
+    expect(body.providers.some((p) => p.id === "omp")).toBe(false);
     expect(owner.headers.get("cache-control")).toBe("private, no-store");
 
     const other = await get("/dashboard/api/apps/mstar-inspector-mallory/settings", "hubot", env);
@@ -156,7 +164,7 @@ describe("GET /dashboard/api/apps/:slug/settings (plan 29 T4)", () => {
     // Plan 35 T4 review: non-managers get base+health ONLY — no keys/chains/providers.
     const otherBody = (await other.json()) as {
       can_manage: boolean;
-      app: { slug: string };
+      app: { slug: string; sandbox_image_id: string };
       installations: unknown[];
       deliveries: unknown[];
       keys?: unknown;
@@ -164,16 +172,21 @@ describe("GET /dashboard/api/apps/:slug/settings (plan 29 T4)", () => {
       model_chains?: unknown;
       model_roles?: unknown;
       custom_providers?: unknown;
+      sandbox_images?: unknown;
     };
     expect(otherBody.can_manage).toBe(false);
     expect(otherBody.app.slug).toBe("mstar-inspector-mallory");
     expect(otherBody.installations).toEqual([]);
     expect(otherBody.deliveries).toEqual([]);
+    // Plan 37: the read-only face keeps the selected image id but NOT the
+    // editor's choice list.
+    expect(otherBody.app.sandbox_image_id).toBe("omp");
     expect(otherBody.keys).toBeUndefined();
     expect(otherBody.providers).toBeUndefined();
     expect(otherBody.model_chains).toBeUndefined();
     expect(otherBody.model_roles).toBeUndefined();
     expect(otherBody.custom_providers).toBeUndefined();
+    expect(otherBody.sandbox_images).toBeUndefined();
     expect(other.headers.get("cache-control")).toBe("private, no-store");
 
     const missing = await get("/dashboard/api/apps/no-such-app/settings", "octocat", env);

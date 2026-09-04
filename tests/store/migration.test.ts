@@ -852,3 +852,114 @@ describe("migrations/0017_app_model_chains.sql (plan 35 T2, spec §4.4)", () => 
     );
   });
 });
+
+describe("migrations/0018_app_sandbox_images.sql (plan 37 T1, spec § Runtime-image contract)", () => {
+  /** Apply one migration file verbatim (filename order = wrangler order). */
+  function applyMigrationFile(db: TestD1, name: string): void {
+    db.raw.exec(readFileSync(join(MIGRATIONS_DIR, name), "utf8"));
+  }
+
+  /** Raw-insert one github_apps row (the 0004 column list is sufficient). */
+  function insertApp(db: TestD1, id: string, opts: { githubAppId?: number; deleted?: boolean } = {}): void {
+    db.raw
+      .prepare(
+        `INSERT INTO github_apps (id, slug, github_app_id, name, private_key_enc, webhook_secret_enc,
+           created_by, status, deleted_at, created_at, updated_at)
+         VALUES (?, ?, ?, ?, 'enc', 'enc', 'mallory', 'active',
+           ${opts.deleted ? "datetime('now', '-1 hour')" : "NULL"},
+           datetime('now'), datetime('now'))`,
+      )
+      .run(id, id, opts.githubAppId ?? 1001, id);
+  }
+
+  /** The pre-0018 shape (0001–0017, filename order) — what production runs today. */
+  function createPre0018Db(): TestD1 {
+    const db = createTestD1();
+    for (const name of [
+      "0003_dashboard_users.sql",
+      "0004_github_apps.sql",
+      "0005_reviews_app_id.sql",
+      "0006_app_provider_config.sql",
+      "0007_reviews_app_id_index.sql",
+      "0008_github_apps_ops.sql",
+      "0009_app_model_roles.sql",
+      "0010_review_failures.sql",
+      "0011_webhook_deliveries.sql",
+      "0012_custom_providers_and_key_updated_at.sql",
+      "0013_findings_review_id_index.sql",
+      "0014_idx_reviews_reviewed_at.sql",
+      "0015_provider_verification.sql",
+      "0016_users_login_nocase_unique.sql",
+      "0017_app_model_chains.sql",
+    ]) {
+      applyMigrationFile(db, name);
+    }
+    return db;
+  }
+
+  test("applies cleanly over a seeded production-shaped DB (0001–0017 with live rows, incl. a soft-deleted app)", () => {
+    const db = createPre0018Db();
+    insertReview(db); // a live review predates the ALTER (wrangler order)
+    insertApp(db, "app-1");
+    insertApp(db, "app-gone", { githubAppId: 1002, deleted: true }); // soft-deleted rows backfill too
+    // Metadata-only ADD COLUMN alters the table without rewriting it (the
+    // 0008 precedent) — every live row survives untouched.
+    expect(() => applyMigrationFile(db, "0018_app_sandbox_images.sql")).not.toThrow();
+    const count = db.raw.query("SELECT COUNT(*) AS n FROM github_apps").get() as { n: number };
+    expect(count.n).toBe(2);
+  });
+
+  test("adds sandbox_image_id TEXT NOT NULL DEFAULT 'omp' to github_apps (the 0008 ADD COLUMN pattern)", () => {
+    const db = createMigratedTestD1();
+    const columns = db.raw.query("PRAGMA table_info(github_apps)").all() as Array<{
+      name: string;
+      type: string;
+      notnull: number;
+      dflt_value: string | null;
+    }>;
+    const col = columns.find((c) => c.name === "sandbox_image_id");
+    expect(col).toBeDefined();
+    expect(col!.type).toBe("TEXT");
+    expect(col!.notnull).toBe(1); // NOT NULL is legal with a non-NULL DEFAULT (0008 precedent)
+    expect(col!.dflt_value).toBe("'omp'");
+  });
+
+  test("backfill: every existing row — live AND soft-deleted — materializes to 'omp' without a manager visit", () => {
+    const db = createPre0018Db();
+    insertApp(db, "app-1");
+    insertApp(db, "app-gone", { githubAppId: 1002, deleted: true });
+    applyMigrationFile(db, "0018_app_sandbox_images.sql");
+    const rows = db.raw
+      .query("SELECT id, sandbox_image_id, deleted_at FROM github_apps ORDER BY id")
+      .all() as Array<{ id: string; sandbox_image_id: string; deleted_at: string | null }>;
+    expect(rows).toEqual([
+      { id: "app-1", sandbox_image_id: "omp", deleted_at: null },
+      { id: "app-gone", sandbox_image_id: "omp", deleted_at: expect.any(String) },
+    ]);
+  });
+
+  test("a row inserted without the column defaults to 'omp'; an explicit NULL is refused (NOT NULL)", () => {
+    const db = createMigratedTestD1();
+    insertApp(db, "app-1");
+    const row = db.raw
+      .query("SELECT sandbox_image_id FROM github_apps WHERE id = 'app-1'")
+      .get() as { sandbox_image_id: string };
+    expect(row.sandbox_image_id).toBe("omp");
+    expect(() =>
+      db.raw.prepare("INSERT INTO github_apps (id, slug, github_app_id, name, private_key_enc, webhook_secret_enc, created_by, status, sandbox_image_id, created_at, updated_at) VALUES ('app-null', 'app-null', 1002, 'app-null', 'enc', 'enc', 'mallory', 'active', NULL, datetime('now'), datetime('now'))").run(),
+    ).toThrow(/NOT NULL constraint failed/);
+    expect(() =>
+      db.raw.prepare("UPDATE github_apps SET sandbox_image_id = NULL WHERE id = 'app-1'").run(),
+    ).toThrow(/NOT NULL constraint failed/);
+  });
+
+  test("no CHECK: the value domain is store-enforced — a non-registry string stores at the schema level (0009 precedent)", () => {
+    const db = createMigratedTestD1();
+    insertApp(db, "app-1");
+    db.raw.prepare("UPDATE github_apps SET sandbox_image_id = 'not-a-registry-id' WHERE id = 'app-1'").run();
+    const row = db.raw
+      .query("SELECT sandbox_image_id FROM github_apps WHERE id = 'app-1'")
+      .get() as { sandbox_image_id: string };
+    expect(row.sandbox_image_id).toBe("not-a-registry-id");
+  });
+});
