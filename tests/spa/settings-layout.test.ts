@@ -151,3 +151,58 @@ describe("settings copy is dictionary-backed (plan 31 T4+T6 / plan 35 T4)", () =
     expect(source).toContain("unsupported_provider");
   });
 });
+
+describe("configured providers + catalog add flow (plan 38 T2)", () => {
+  test("the providers card renders configured state only; the catalog is the Add Provider picker", () => {
+    const source = readFileSync(join(import.meta.dir, "../../src/spa/pages/SettingsPage.tsx"), "utf8");
+    // Primary list = configured state (kind rows), never the catalog dump.
+    expect(source).toContain("payload.configured_providers.map");
+    expect(source).not.toContain("payload.provider_catalog.map");
+    // Empty configured state is a valid UI with Add Provider as the path.
+    expect(source).toContain("settings.noConfiguredProviders");
+    // Masked status rides the configured key row.
+    expect(source).toContain("settings.keyEnding");
+    expect(source).toContain("settings.keyTooShort");
+  });
+
+  test("Add Provider: catalog selection drives the configuration form; custom path preserved", () => {
+    const source = readFileSync(join(import.meta.dir, "../../src/spa/pages/SettingsPage.tsx"), "utf8");
+    // Accessible toggle → catalog select → selected provider's form.
+    expect(source).toContain("settings.addProvider");
+    expect(source).toContain("aria-expanded={open}");
+    expect(source).toContain("selectedCatalogProvider");
+    expect(source).toContain("providerFormKind");
+    expect(source).toContain("settings.configureProvider");
+    // Built-in and template materialization paths, mutations unchanged.
+    expect(source).toContain("/keys/verify");
+    expect(source).toContain('op: "add-template-provider"');
+    // CustomExpand stays for ids NOT in the catalog.
+    expect(source).toContain("CustomExpand");
+    expect(source).toContain('op: "add-custom-provider"');
+  });
+
+  test("a failed verify keeps the provider unconfigured and surfaces the structured reason", () => {
+    const source = readFileSync(join(import.meta.dir, "../../src/spa/pages/SettingsPage.tsx"), "utf8");
+    expect(source).toContain("verifyReasonMessage(locale, reason)");
+    // Forms reset and close only on success — a rejected submit keeps the
+    // typed input and the add selection while the reload restores state.
+    expect(source).toContain("if (ok) {");
+    expect(source).toContain("await onReload();");
+    expect(source).toContain("Promise<boolean>");
+  });
+
+  test("plan 38 add-flow copy is dictionary-backed in both locales", () => {
+    expect(t("en", "settings.addProvider")).toBe("Add provider");
+    expect(t("zh_CN", "settings.addProvider")).toBe("添加提供方");
+    expect(t("en", "settings.providersCopy")).toContain("Add Provider");
+    expect(t("zh_CN", "settings.providersCopy")).toContain("添加提供方");
+    expect(t("en", "settings.noConfiguredProviders")).toContain("No providers configured yet");
+    expect(t("zh_CN", "settings.noConfiguredProviders")).toContain("尚未配置");
+    expect(t("en", "settings.catalogBuiltin")).toContain("Built-in");
+    expect(t("zh_CN", "settings.catalogBuiltin")).toContain("内置");
+    expect(t("en", "settings.catalogTemplate")).toContain("templates");
+    expect(t("zh_CN", "settings.catalogTemplate")).toContain("模板");
+    expect(t("en", "settings.configureProvider", { label: "Anthropic" })).toContain("Anthropic");
+    expect(t("zh_CN", "settings.configureProvider", { label: "Anthropic" })).toContain("Anthropic");
+  });
+});

@@ -323,7 +323,15 @@ export const en = {
     confirmDeleteButton: "Delete App",
     providers: "Providers",
     providersCopy:
-      "Built-in providers, catalog templates, and custom declarations — one list. Custom expands in place. Keys are stored only after a successful verify.",
+      "The providers configured for this App — stored keys show masked, custom declarations show their base URL and models. Add Provider picks a catalog entry; keys are stored only after a successful verify.",
+    noConfiguredProviders:
+      "No providers configured yet — use Add Provider to configure one. Reviews fail closed until a provider key is verified.",
+    addProvider: "Add provider",
+    addProviderCopy:
+      "Pick a catalog provider — its configuration requirements appear once selected. Providers outside the catalog use the custom declaration below.",
+    catalogBuiltin: "Built-in providers",
+    catalogTemplate: "Catalog templates",
+    configureProvider: "Configure {label}",
     customEntry: "Custom",
     customEntryCopy: "Declare a non-built-in provider — id, base URL, model ids, and key.",
     expandCustom: "Add custom provider",

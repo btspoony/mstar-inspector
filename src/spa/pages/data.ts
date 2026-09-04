@@ -273,7 +273,12 @@ function isConfiguredProviderList(value: unknown): value is ConfiguredProvider[]
   );
 }
 
-/** Row-level guard for the plan-38 catalog: tier + eligibility are the load-bearing discriminators. */
+/**
+ * Row-level guard for the plan-38 catalog: tier + eligibility are the
+ * load-bearing discriminators, and the Add Provider UI renders/branches on
+ * `models` / `verifiable` / `base_url` / `api`, so a drifted row missing any
+ * of them fails the parse instead of breaking the page.
+ */
 function isCatalogProviderList(value: unknown): value is CatalogProvider[] {
   return (
     Array.isArray(value) &&
@@ -285,9 +290,37 @@ function isCatalogProviderList(value: unknown): value is CatalogProvider[] {
         (row.tier === "builtin" || row.tier === "template") &&
         (row.eligibility === "builtin" ||
           row.eligibility === "template" ||
-          row.eligibility === "unavailable"),
+          row.eligibility === "unavailable") &&
+        (row.base_url === null || typeof row.base_url === "string") &&
+        (row.api === null || typeof row.api === "string") &&
+        typeof row.verifiable === "boolean" &&
+        isStringArray(row.models),
     )
   );
+}
+
+/**
+ * Which configuration form a selected Add Provider entry requires (plan 38):
+ * `key` = verifiable builtin (verify-first `/keys/verify`), `template` =
+ * custom-provider materialization (`op=add-template-provider`), `console` =
+ * console-only provider with no in-app verify path.
+ */
+export type ProviderFormKind = "key" | "template" | "console";
+
+/** Resolves the Add Provider selection to its catalog entry (null = nothing picked / unknown id). */
+export function selectedCatalogProvider(
+  catalog: readonly CatalogProvider[],
+  selectedId: string | null | undefined,
+): CatalogProvider | null {
+  if (typeof selectedId !== "string" || selectedId === "") return null;
+  return catalog.find((provider) => provider.id === selectedId) ?? null;
+}
+
+/** The selected entry's configuration requirements — the form the add flow transitions to. */
+export function providerFormKind(provider: CatalogProvider): ProviderFormKind {
+  if (provider.tier === "template") return "template";
+  if (!provider.verifiable) return "console";
+  return "key";
 }
 
 export function parseSettings(data: unknown): SettingsPayload | null {
