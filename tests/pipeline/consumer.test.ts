@@ -52,6 +52,7 @@ import { REDACTED } from "../../src/pipeline/redact";
 import type { ReviewCommenter } from "../../src/pipeline/comment";
 import { createSecretbox } from "../../src/dashboard/secretbox";
 import { createAppConfigStore } from "../../src/dashboard/app-config-store";
+import { getSandboxImage } from "../../src/contracts/sandbox-images";
 
 const VALID_OUTPUT: ReviewOutput = {
   schema: "mstar.review/v1",
@@ -476,11 +477,13 @@ describe("createReviewConsumer", () => {
       ),
     ]);
     // The runner input JSON carries the reconFacts the runtime folds into
-    // the envelope target (owner/repo#pr + the AUTHORITATIVE checkout sha)
-    // plus the numstat seat-partition universe.
+    // the envelope target (owner/repo#pr + the AUTHORITATIVE checkout sha),
+    // the numstat seat-partition universe, and (plan 37) the App's resolved
+    // sandbox image's capability hosts — the in-image synthesis base.
     expect(JSON.parse(writtenInputJson!)).toEqual({
       worktreePath: "/workspace/repo",
       reconFacts: ["acme/widgets#42", `head ${SHA}`, "10\t2\tsrc/auth.ts", "5\t0\tdocs/readme.md"],
+      capabilityHosts: getSandboxImage("omp")!.hosts,
     });
     // Clone: git transport auth via scoped extraheader env (bugbot A1) — the
     // token lives in GIT_CONFIG_VALUE_0, never in the command string. Form is
@@ -1673,6 +1676,10 @@ describe("createReviewConsumer", () => {
     await legacyStore.setProviderKey(appId, "anthropic", "sk-legacy-anthropic");
     // Apply 0017 (the backfill) — the migration under test.
     db.raw.exec(readFileSync(join(import.meta.dir, "../../migrations", "0017_app_model_chains.sql"), "utf8"));
+    // 0018 (plan 37) ships with the consumer that resolves the App's sandbox
+    // image — the row backfills to the 'omp' default exactly like a real
+    // pre-37 App under this deployment pair.
+    db.raw.exec(readFileSync(join(import.meta.dir, "../../migrations", "0018_app_sandbox_images.sql"), "utf8"));
     // Post-migration resolution is byte-identical: the default row holds
     // the chain verbatim; the seat-<role> chains + reference rows resolve
     // to the same overrides map.

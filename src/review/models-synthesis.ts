@@ -1,34 +1,40 @@
 /**
- * Per-review omp models.yml synthesis (plan 23 Task 3, AL-23-1).
+ * Per-review omp models.yml synthesis (plan 23 Task 3, AL-23-1; plan 37
+ * Task 2 — capability-host base, always synthesize).
  *
  * omp 18.0.4 has NO include semantics: the SDK's ModelRegistry reads exactly
  * ONE models.yml — `path.join(getAgentDir(), "models.yml")` unless
- * `createAgentSession({ agentDir })` overrides the directory. An
- * "incremental fragment" is therefore impossible; a custom provider only
- * reaches the runtime through a COMPLETE synthesized per-review file:
+ * `createAgentSession({ agentDir })` overrides the directory. Since plan 37
+ * removed the baked in-image models.yml, EVERY omp review synthesizes its own
+ * COMPLETE per-review file:
  *
- *   1. read the image base (/opt/omp-agent/models.yml — Dockerfile COPY;
- *      resolveModelsBasePath mirrors getAgentDir(): $PI_CODING_AGENT_DIR
- *      first, absolute fallback);
- *   2. merge the declared custom-provider blocks under `providers:` — base
- *      provider ids WIN on collision, a custom id never shadows a base
- *      declaration (the store already rejects the 18 built-in ids);
+ *   1. generate the BASE from the App's selected image's CAPABILITY HOSTS
+ *      (the runner input carries the hosts the consumer resolved from
+ *      src/contracts/sandbox-images.ts — this module cannot import the
+ *      contract: the in-image runner module graph stays inside src/review,
+ *      tests/review/runtime-boundary);
+ *   2. merge the declared custom-provider blocks under `providers:` —
+ *      capability/base provider ids WIN on collision, a custom id never
+ *      shadows a capability declaration (the store already refuses
+ *      custom ids colliding with the selected image's host ids);
  *   3. write /tmp/omp-agent-<uuid>/models.yml and hand the directory to the
- *      runner input as `agentDir` (createAgentSession public option);
+ *      runner input as `agentDir` (createAgentSession public option).
  *
- * ZERO secret material: `apiKey:` is always the env-var-name reference form
- * CUSTOM_<UPPER_SNAKE(id)>_API_KEY (consumer injects the decrypted key under
- * that exact name); key literals never enter this module, the synthesized
- * text, or any log line. No environment mutation, no in-image file writes,
- * no PI_CODING_AGENT_DIR changes — each attempt owns its /tmp directory.
+ * ZERO secret material: `apiKey:` is always an env-var-name reference —
+ * the capability host's `apiKeyEnv` (e.g. ARK_API_KEY) or the
+ * CUSTOM_<UPPER_SNAKE(id)>_API_KEY form (consumer injects the decrypted key
+ * under that exact name); key literals never enter this module, the
+ * synthesized text, or any log line. No environment mutation, no in-image
+ * file reads or writes outside the per-review /tmp directory.
  */
 
-import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { customProviderEnvName, type CustomProviderDeclaration } from "./runtime";
-
-/** In-image base models.yml (sandbox-image Dockerfile COPY target). */
-export const BASE_MODELS_YAML_PATH = "/opt/omp-agent/models.yml";
+import {
+  customProviderEnvName,
+  type CapabilityHost,
+  type CustomProviderDeclaration,
+} from "./runtime";
 
 /** File name the SDK loads from the agentDir (model-registry single-file). */
 const MODELS_YAML_NAME = "models.yml";
@@ -39,16 +45,6 @@ const TOP_LEVEL_KEY_RE = /^[A-Za-z0-9_-]+:\s*(?:#.*)?$/;
 /** Provider-entry line under `providers:` (2-space indent). */
 const PROVIDER_KEY_RE = /^  ([A-Za-z0-9_-]+):\s*(?:#.*)?$/;
 
-/**
- * Mirror of the SDK's getAgentDir() models.yml resolution (AL-23-1): the
- * PI_CODING_AGENT_DIR override at CALL time (not module-load snapshot), else
- * the in-image absolute path. The runner reads the base file from here.
- */
-export function resolveModelsBasePath(env: Record<string, string | undefined> = process.env): string {
-  const agentDir = env.PI_CODING_AGENT_DIR;
-  return agentDir !== undefined && agentDir !== "" ? join(agentDir, MODELS_YAML_NAME) : BASE_MODELS_YAML_PATH;
-}
-
 /** Double-quoted YAML scalar with the standard escapes (safe for any value). */
 function yamlQuote(value: string): string {
   const escaped = value
@@ -58,6 +54,44 @@ function yamlQuote(value: string): string {
     .replace(/\r/g, "\\r")
     .replace(/\t/g, "\\t");
   return `"${escaped}"`;
+}
+
+/**
+ * One capability-host block, 2-space-indented under `providers:` — byte-shape
+ * identical to the baked in-image models.yml body this generator replaced
+ * (plan 37 equivalence: a defaulted App's synthesized file is
+ * runner-consumable-equivalent to the old base+custom merge). Registry values
+ * are source-controlled trusted scalars and emit BARE (like the old baked
+ * file); only user-derived custom blocks carry the defensive yamlQuote form.
+ */
+function capabilityHostBlock(host: CapabilityHost): string {
+  const lines = [`  ${host.id}:`];
+  lines.push(`    baseUrl: ${host.baseUrl}`);
+  lines.push(`    apiKey: ${host.apiKeyEnv}`);
+  lines.push(`    api: ${host.api}`);
+  lines.push(`    auth: ${host.auth}`);
+  lines.push("    models:");
+  for (const model of host.models) {
+    lines.push(`      - id: ${model.id}`);
+    lines.push(`        name: ${model.name}`);
+    lines.push(`        reasoning: ${model.reasoning}`);
+    lines.push(`        input: [${[...model.input].join(", ")}]`);
+    lines.push(`        contextWindow: ${model.contextWindow}`);
+    lines.push(`        maxTokens: ${model.maxTokens}`);
+  }
+  return lines.join("\n");
+}
+
+/**
+ * Generate the COMPLETE base models.yml from the selected image's capability
+ * hosts: a top-level `providers:` map with one entry per host, in host order.
+ * Deterministic bytes (pure function of the registry data). This is the base
+ * the custom-provider merge lands in — capability hosts are runtime
+ * capabilities of the image, never App configuration.
+ */
+export function capabilityHostsYaml(hosts: readonly CapabilityHost[]): string {
+  const blocks = hosts.map(capabilityHostBlock);
+  return ["providers:", ...blocks].join("\n") + "\n";
 }
 
 /** One custom provider block, 2-space-indented under `providers:`. */
@@ -85,12 +119,12 @@ function providerBlock(decl: CustomProviderDeclaration): string {
  * declaration set is preserved verbatim and the custom blocks land INSIDE
  * the `providers:` map (a second top-level `providers:` key would be a
  * duplicate-key error in the strict YAML parser). Deterministic line-based
- * merge — the base file is repo-owned (sandbox-image/omp-models.yml), so its
- * top-level shape is fixed; a base WITHOUT a top-level `providers:` map is a
- * deployment bug and fails loud (never a partial merge). Colliding custom
- * ids are skipped (base wins, AL-23-1) and reported through `onCollision`
- * (the runner emits a structured warn — a colliding declaration is never
- * silently dead); no declarations → base text unchanged (byte-identical).
+ * merge — the capability-host base has a fixed top-level shape; a base
+ * WITHOUT a top-level `providers:` map is a deployment bug and fails loud
+ * (never a partial merge). Colliding custom ids are skipped (capability/base
+ * wins, AL-23-1) and reported through `onCollision` (the runner emits a
+ * structured warn — a colliding declaration is never silently dead); no
+ * declarations → base text unchanged (byte-identical).
  */
 export function synthesizeModelsYaml(
   baseYaml: string,
@@ -147,23 +181,24 @@ export function synthesizeModelsYaml(
 }
 
 /**
- * Read the base models.yml, synthesize the COMPLETE per-review file under a
- * fresh /tmp/omp-agent-<uuid>/ directory and return that directory (the
- * `agentDir` the runner passes to createAgentSession). Fail-loud on any I/O
- * or merge problem — custom providers must never be silently dropped. The
- * /tmp directory belongs to the per-attempt container and dies with it.
- * Self-cleaning: a throw between mkdir and writeFile removes the dir before
- * rethrowing, so no exit path leaks /tmp/omp-agent-<uuid>.
+ * Synthesize the COMPLETE per-review models.yml under a fresh
+ * /tmp/omp-agent-<uuid>/ directory and return that directory (the `agentDir`
+ * the runner passes to createAgentSession). ALWAYS runs — plan 37 removed the
+ * baked in-image models.yml, so every omp review synthesizes its own:
+ * capability hosts are the base, `customProviders` (OPTIONAL — zero
+ * declarations yield the byte-identical capability base) merge under it.
+ * Fail-loud on any generation/merge/write problem — a review must never run
+ * against a partial or missing models.yml. The /tmp directory belongs to the
+ * per-attempt container and dies with it. Self-cleaning: a throw between
+ * mkdir and writeFile removes the dir before rethrowing, so no exit path
+ * leaks /tmp/omp-agent-<uuid>.
  */
 export async function writePerReviewModelsYaml(
-  customProviders: readonly CustomProviderDeclaration[],
-  basePath = resolveModelsBasePath(),
+  capabilityHosts: readonly CapabilityHost[],
+  customProviders: readonly CustomProviderDeclaration[] = [],
   onCollision?: (providerId: string) => void,
 ): Promise<string> {
-  if (customProviders.length === 0) {
-    throw new Error("writePerReviewModelsYaml requires at least one custom-provider declaration");
-  }
-  const baseYaml = await readFile(basePath, "utf8");
+  const baseYaml = capabilityHostsYaml(capabilityHosts);
   const dir = join("/tmp", `omp-agent-${crypto.randomUUID()}`);
   try {
     await mkdir(dir, { recursive: true });

@@ -1,13 +1,17 @@
 /**
  * Queue consumer — the review pipeline main flow (plan 06 Task 3).
  *
- * Flow (plan 07 Task 5 / compass S7): message → getSandbox (unique id per
- * attempt) → clone the PR head branch (git transport auth via scoped
- * extraheader env) → `git rev-parse HEAD` for the AUTHORITATIVE sha →
+ * Flow (plan 07 Task 5 / compass S7): message → resolve the App's sandbox
+ * image (plan 37: the stored github_apps.sandbox_image_id through the closed
+ * registry — unknown/disabled ids fail closed BEFORE the guard/sandbox) →
+ * getSandbox (unique id per attempt) → clone the PR head branch (git
+ * transport auth via scoped extraheader env) → `git rev-parse HEAD` for the
+ * AUTHORITATIVE sha →
  * dedup by that sha (hit → ack) → diff → numstat (the seat-partition
  * universe) → write the runner `--input` JSON (reconFacts, plus the per-App
  * `modelOverrides` role map — plan 17 B6; no-map App = byte-identical
- * payload) → exec the
+ * payload; plus the resolved image's capability hosts — plan 37 T2, the
+ * in-image synthesis base) → exec the
  * in-image runner `--level <quick|default|deep>` (exec env =
  * ARK_API_KEY/PI_CODING_AGENT_DIR/HARNESS_PLUGIN_ROOT + OMP_REVIEW_MODEL and
  * configured provider keys — every key and the model chain come ONLY from
@@ -86,7 +90,7 @@ import {
   createAppConfigStore,
   type CustomProviderConsumerConfig,
 } from "../dashboard/app-config-store";
-import { DEFAULT_SANDBOX_IMAGE_ID, getSandboxImage } from "../contracts/sandbox-images";
+import { getSandboxImage, type SandboxImageDefinition } from "../contracts/sandbox-images";
 
 export type PipelineEnv = {
   DB: D1Database;
@@ -726,6 +730,42 @@ async function resolveCustomProviders(
 }
 
 /**
+ * Resolve the App's sandbox image for one message (plan 37 Task 2): the
+ * `github_apps.sandbox_image_id` stored selection through the CLOSED
+ * source-controlled registry (`getSandboxImage`) — the ONE deliberate
+ * resolution interface between App storage and execution. Fails CLOSED with a
+ * structured, non-secret error (an id + app id, never secrets) when the saved
+ * id is unknown or not an enabled registry entry — an unknown id can only
+ * appear via a direct DB write or a registry contraction, and it must never
+ * start a sandbox. Runs BEFORE the in-flight guard / sandbox (zero side
+ * effects on failure, F-001 structured channel via the caller's catch) and
+ * BEFORE `assertAppConfigComplete`, which consumes the resolved hosts for its
+ * `neededEnvName` mapping; the definition's hosts also ride the runner input
+ * as the synthesis base (`capabilityHosts`). Re-read per message (no cache)
+ * so a dashboard image update applies to the very next review.
+ */
+async function resolveSandboxImage(payload: ReviewJobPayload, deps: ProcessDeps): Promise<SandboxImageDefinition> {
+  const appRef = payload.appRef;
+  try {
+    const row = await createAppsStore(deps.env.DB).getAppById(appRef.appId);
+    if (row === null) {
+      throw new Error("app not found");
+    }
+    const image = getSandboxImage(row.sandbox_image_id);
+    if (image === undefined) {
+      throw new Error(`unknown sandbox image id ${JSON.stringify(row.sandbox_image_id)}`);
+    }
+    if (!image.enabled) {
+      throw new Error(`sandbox image id ${JSON.stringify(row.sandbox_image_id)} is disabled`);
+    }
+    return image;
+  } catch (err) {
+    const detail = err instanceof Error ? err.message : String(err);
+    throw new Error(`per-App sandbox image resolution failed: app ${appRef.appId}: ${detail}`);
+  }
+}
+
+/**
  * The runner-input projection of one consumer config: the declaration with
  * the API key STRIPPED. Keys ride ONLY the container exec env under
  * CUSTOM_<UPPER_SNAKE(id)>_API_KEY — a key literal must never reach the
@@ -790,8 +830,8 @@ function chainHeadSelector(chain: string | undefined): string | null {
  * global fallback): the App's modelChain is the ONLY chain source and every
  * provider on the chain must have a key source in the App's OWN config — a
  * BYOK allowlist key (app_provider_keys, provider id → env name via the
- * PROVIDERS mapping, now including `ark` → ARK_API_KEY for the in-image
- * ark-plan base provider) or a custom declaration with a non-blank key
+ * PROVIDERS mapping, now including `ark` → ARK_API_KEY for the ark-plan
+ * capability host) or a custom declaration with a non-blank key
  * (CUSTOM_<ID>_API_KEY). The SAME key-source requirement applies to every
  * selector of every per-role override chain (Bugbot 7aaf18f4): a role
  * override referencing a provider with no configured key must fail closed
@@ -803,12 +843,19 @@ function chainHeadSelector(chain: string | undefined): string | null {
  * beyond this channel (AL-24-5 verdict 3). The check runs AFTER App
  * resolution and BEFORE the in-flight guard/sandbox, so a misconfigured App
  * fails with zero side effects.
+ *
+ * `sandboxImage` (plan 37 Task 2) is the App's resolved registry entry
+ * (resolveSandboxImage): a chain provider id that is one of its capability
+ * hosts (e.g. omp's `ark-plan`) maps to that host's catalog provider env
+ * name (`catalogProviderId` → PROVIDERS envName, ARK_API_KEY) — capability
+ * hosts are runtime capabilities of the selected image, not App config.
  */
 function assertAppConfigComplete(
   appCfg: RunnerAppConfig,
   customProviders: readonly CustomProviderConsumerConfig[] | undefined,
   modelOverrides: Record<string, string> | undefined,
   appId: string,
+  sandboxImage: SandboxImageDefinition,
 ): void {
   const chain = appCfg.modelChain === null ? "" : appCfg.modelChain.trim();
   // AL-24-5 fail-closed: a chain must contain at least one non-empty
@@ -836,18 +883,12 @@ function assertAppConfigComplete(
   // The env name a chain provider's key must arrive under — the same chain
   // grammar as the runner's parseModelSelectors (comma-separated selectors,
   // provider = the segment before the first `/`): an allowlisted id → its
-  // mapped env name; a capability host of the App's selected sandbox image
+  // mapped env name; a capability host of the App's RESOLVED sandbox image
   // (plan 37 registry, e.g. omp's `ark-plan`, whose apiKeyEnv ARK_API_KEY
   // rides catalogProviderId `ark`) → that catalog entry's env name;
   // anything else → a custom provider's CUSTOM_<ID>_API_KEY env name.
-  // simplify: resolves the DEFAULT image until plan 37 Task 2 threads the
-  // App's resolved sandbox image through assertAppConfigComplete (plan 37
-  // Task 2 owns that wiring; the registry's only enabled entry is omp).
   const hostEnvNames = new Map(
-    (getSandboxImage(DEFAULT_SANDBOX_IMAGE_ID)?.hosts ?? []).map((host) => [
-      host.id,
-      providerEnvName(host.catalogProviderId),
-    ]),
+    sandboxImage.hosts.map((host) => [host.id, providerEnvName(host.catalogProviderId)]),
   );
   const neededEnvName = (provider: string): string => {
     const allowlisted = providerEnvName(provider);
@@ -1244,6 +1285,14 @@ async function processMessage(payload: ReviewJobPayload, deps: ProcessDeps): Pro
     // fail-loud (tamper never swallowed): a broken envelope throws here
     // with zero side effects, never a silently-skipped provider.
     const customProviders = await resolveCustomProviders(payload, deps);
+    // The App's sandbox image (plan 37 Task 2): resolves the stored
+    // github_apps.sandbox_image_id through the CLOSED registry and fails
+    // closed (structured, non-secret error) on unknown/disabled ids —
+    // BEFORE the in-flight guard and sandbox creation, so an invalid id
+    // never starts a container. The resolved definition feeds the
+    // config gate below (capability-host env-name mapping) and the runner
+    // input (the synthesis base's capability hosts).
+    const sandboxImage = await resolveSandboxImage(payload, deps);
     // AL-24-5 fail-closed gate (plan 24 Task 6): after App resolution,
     // BEFORE the in-flight guard / sandbox. The App's modelChain is the ONLY
     // chain source and every chain provider must have a key in the App's OWN
@@ -1255,7 +1304,7 @@ async function processMessage(payload: ReviewJobPayload, deps: ProcessDeps): Pro
     // review_failures stage="pipeline" row + rethrow → retry×3 → DLQ) with
     // ZERO side effects — no webhook-face reject, no pause state, no runtime
     // guard beyond this channel (AL-24-5 verdict 3).
-    assertAppConfigComplete(appCfg, customProviders, modelOverrides, payload.appRef.appId);
+    assertAppConfigComplete(appCfg, customProviders, modelOverrides, payload.appRef.appId, sandboxImage);
     // 0. In-flight guard (WF-002 / bugbot BB-3): when another review is
     // already running for this PR, return the DISTINCT guard-held outcome —
     // NOT a throw. The consumer schedules a per-message delayed retry
@@ -1402,9 +1451,14 @@ async function processMessage(payload: ReviewJobPayload, deps: ProcessDeps): Pro
     // when declarations resolved above. No-declaration messages serialize
     // byte-identically to the pre-plan-23 payload (the runner-side guard +
     // synthesis are plan 23 Task 3's).
+    // Plan 37 T2: the resolved image's capability hosts ride ALWAYS (keyless
+    // registry data) — the in-image synthesizer's base (it cannot import the
+    // contract: the runner module graph stays inside src/review,
+    // tests/review/runtime-boundary).
     const runnerInput = {
       worktreePath: CLONE_DIR,
       reconFacts,
+      capabilityHosts: sandboxImage.hosts,
       ...(modelOverrides !== undefined ? { modelOverrides } : {}),
       ...(customProviders !== undefined
         ? { customProviders: customProviders.map(toRunnerCustomProvider) }

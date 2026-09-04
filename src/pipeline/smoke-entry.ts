@@ -46,7 +46,7 @@ const INPUT_PATH = "/workspace/review-input.json";
 /** In-image runner path (Dockerfile v2: WORKDIR /opt/runner, COPY src/review). */
 const RUNNER_PATH = "/opt/runner/src/review/runner.ts";
 const HARNESS_ROOT = "/opt/mstar-harness";
-/** Image-provisioned omp agent dir (models.yml) — same value as the Dockerfile ENV. */
+/** Image omp agent dir (PI_CODING_AGENT_DIR, empty — the runner synthesizes every models.yml; plan 37). */
 const OMP_AGENT_DIR = "/opt/omp-agent";
 
 export default {

@@ -66,6 +66,8 @@ function createMigratedD1(): ReturnType<typeof createTestD1> {
   // verified_* columns, so the fixture must carry them too.
   // 0017 (plan 35 T2): the store's setModelChain now writes the default
   // app_model_chains row, so the fixture must carry the chains tables.
+  // 0018 (plan 37): github_apps.sandbox_image_id — the consumer's per-message
+  // sandbox-image resolution reads it on EVERY app-path message.
   for (const name of [
     "0004_github_apps.sql",
     "0005_reviews_app_id.sql",
@@ -75,6 +77,7 @@ function createMigratedD1(): ReturnType<typeof createTestD1> {
     "0012_custom_providers_and_key_updated_at.sql",
     "0015_provider_verification.sql",
     "0017_app_model_chains.sql",
+    "0018_app_sandbox_images.sql",
   ]) {
     db.raw.exec(readFileSync(join(MIGRATIONS_DIR, name), "utf8"));
   }
