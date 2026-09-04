@@ -279,3 +279,48 @@ describe("catalog provenance + eligibility messaging (plan 38 T3)", () => {
     expect(t("zh_CN", "settings.addProviderCopy")).toContain("无法保存");
   });
 });
+
+describe("model chain tabs (plan 39 T1)", () => {
+  test("Default and named chains are peer shadcn tabs with a coherent selected state", () => {
+    const source = readFileSync(join(import.meta.dir, "../../src/spa/pages/SettingsPage.tsx"), "utf8");
+    // The chain card is an accessible Radix tablist (roles + arrow-key nav via
+    // the existing shadcn Tabs primitives), not a stacked list.
+    expect(source).toContain("TabsList");
+    expect(source).toContain("TabsTrigger");
+    expect(source).toContain("TabsContent");
+    // Tab ids come from the pure plan-39 tab model; the selection coerces to a
+    // tab that exists so deletes/reloads land on Default.
+    expect(source).toContain("modelChainTabs(payload.model_chains)");
+    expect(source).toContain("activeChainTabId(tabs, selectedTab)");
+    // The Default tab saves through op=save-chain; named tabs update in place
+    // through op=add-chain — no rename op anywhere.
+    expect(source).toContain('op: "save-chain"');
+    expect(source).toContain('op: "add-chain", name: tab.id, chain: value');
+    // Only the named tabs' content offers remove, via the existing
+    // confirm-dialog flow (pendingConfirmCopy → op=remove-chain).
+    expect(source).toContain("onRemoveChain(tab.id)");
+    // A successful create selects the new tab after the reload lands.
+    expect(source).toContain("onCreated={(created) => setSelectedTab(created)}");
+    // Chain mutation ops stay as-is.
+    expect(source).toContain('op: "remove-chain"');
+    expect(source).toContain("settings.confirmRemoveChainTitle");
+  });
+
+  test("the Default tab never offers remove; add/create copy is dictionary-backed in both locales", () => {
+    const source = readFileSync(join(import.meta.dir, "../../src/spa/pages/SettingsPage.tsx"), "utf8");
+    const defaultContent = source.slice(
+      source.indexOf("<TabsContent forceMount value={DEFAULT_CHAIN_NAME}>"),
+      source.indexOf("{namedTabs.map((tab) => ("),
+    );
+    expect(defaultContent).toContain("op: \"save-chain\"");
+    expect(defaultContent).not.toContain("onRemoveChain");
+    expect(t("en", "settings.modelChains")).toBe("Model chains");
+    expect(t("zh_CN", "settings.modelChains")).toBe("模型链");
+    expect(t("en", "settings.modelChainsCopy")).toContain("tabs");
+    expect(t("en", "settings.modelChainsCopy")).toContain("can't be removed");
+    expect(t("zh_CN", "settings.modelChainsCopy")).toContain("标签页");
+    expect(t("zh_CN", "settings.modelChainsCopy")).toContain("无法移除");
+    expect(t("en", "settings.defaultChain")).toBe("Default chain");
+    expect(t("zh_CN", "settings.defaultChain")).toBe("Default 链");
+  });
+});

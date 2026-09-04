@@ -4,6 +4,7 @@
 import { describe, expect, test } from "bun:test";
 import { t } from "../../src/i18n";
 import {
+  activeChainTabId,
   canManageApp,
   canViewMembers,
   insightsRepoFromSelect,
@@ -13,6 +14,7 @@ import {
   insightsSummaryUrl,
   inviteLoginNoticeKey,
   isPaused,
+  modelChainTabs,
   parseApps,
   parseInsights,
   parseInsightsSearch,
@@ -21,6 +23,7 @@ import {
   providerFormKind,
   selectedCatalogProvider,
   type CatalogProvider,
+  type ModelChainEntry,
 } from "../../src/spa/pages/data";
 
 describe("admin guard (plan 29 T4)", () => {
@@ -340,6 +343,54 @@ describe("members/apps/settings parsers", () => {
         deliveries: [],
       }),
     ).toBeNull();
+  });
+});
+
+describe("model chain tab model (plan 39 T1)", () => {
+  const entry = (name: string, chain: string): ModelChainEntry => ({
+    name,
+    chain,
+    is_default: name === "default",
+    created_at: "2026-09-04 00:00:00",
+    updated_at: "2026-09-04 00:00:00",
+  });
+
+  test("Default is always the first tab — even for an empty or default-less payload", () => {
+    // The empty list still yields the non-removable Default tab.
+    expect(modelChainTabs([])).toEqual([{ id: "default", isDefault: true, chain: null }]);
+    // Malformed/legacy ordering: named rows only — Default is synthesized first.
+    const tabs = modelChainTabs([entry("alpha", "a/one"), entry("beta", "b/one")]);
+    expect(tabs.map((tab) => tab.id)).toEqual(["default", "alpha", "beta"]);
+    expect(tabs[0]).toEqual({ id: "default", isDefault: true, chain: null });
+    expect(tabs.slice(1).every((tab) => !tab.isDefault)).toBe(true);
+  });
+
+  test("a payload row named 'default' collapses into the Default tab and never becomes a named tab", () => {
+    const tabs = modelChainTabs([entry("alpha", "a/one"), entry("default", "provider/model")]);
+    expect(tabs.map((tab) => tab.id)).toEqual(["default", "alpha"]);
+    // The Default tab's editor consumes the dedicated model_chain field, not the row.
+    expect(tabs[0]?.chain).toBeNull();
+    expect(tabs.some((tab) => tab.id === "default" && !tab.isDefault)).toBe(false);
+  });
+
+  test("named tab ids are the stored names; duplicate names collapse (first row wins)", () => {
+    const tabs = modelChainTabs([entry("alpha", "a/one"), entry("alpha", "a/two"), entry("beta", "b/one")]);
+    expect(tabs.filter((tab) => !tab.isDefault)).toEqual([
+      { id: "alpha", isDefault: false, chain: "a/one" },
+      { id: "beta", isDefault: false, chain: "b/one" },
+    ]);
+  });
+
+  test("activeChainTabId coerces a stale or unknown selection to the Default tab", () => {
+    const tabs = modelChainTabs([entry("alpha", "a/one")]);
+    expect(activeChainTabId(tabs, "alpha")).toBe("alpha");
+    // A deleted chain name (or a blank selection) falls back to Default.
+    expect(activeChainTabId(tabs, "removed-chain")).toBe("default");
+    expect(activeChainTabId(tabs, undefined)).toBe("default");
+    expect(activeChainTabId(tabs, null)).toBe("default");
+    expect(activeChainTabId(tabs, "")).toBe("default");
+    // Even with no named chains the Default tab is a valid selection.
+    expect(activeChainTabId(modelChainTabs([]), "default")).toBe("default");
   });
 });
 

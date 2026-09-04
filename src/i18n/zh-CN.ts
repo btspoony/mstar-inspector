@@ -327,9 +327,10 @@ export const zhCN: Dictionary = {
     addTemplate: "添加 {label}",
     tierBuiltin: "内置",
     tierTemplate: "模板",
+    modelChains: "模型链",
+    modelChainsCopy:
+      "Default 链与命名链是同级标签页 — 在各自的标签页中编辑链。Default 链是必需的且无法移除；移除命名链后，引用它的席位将回退到 default。",
     namedChains: "命名模型链",
-    namedChainsCopy:
-      "每个 App 有一条 default 链，加上可选命名链。审查席位引用命名链，留空则使用 default。",
     chainName: "链名称",
     chainNamePlaceholder: "例如 deep-review",
     addNamedChain: "添加命名链",

@@ -349,9 +349,10 @@ export const en = {
     addTemplate: "Add {label}",
     tierBuiltin: "built-in",
     tierTemplate: "template",
+    modelChains: "Model chains",
+    modelChainsCopy:
+      "Default and named chains are peer tabs — edit each chain in its tab. The default chain is required and can't be removed; seats on a removed named chain fall back to the default.",
     namedChains: "Named chains",
-    namedChainsCopy:
-      "Each App has one default chain plus optional named chains. Audit seats pick a named chain or leave blank to use the default.",
     chainName: "Chain name",
     chainNamePlaceholder: "e.g. deep-review",
     addNamedChain: "Add named chain",
