@@ -590,7 +590,13 @@ function ProvidersCard({
                 onPending={onPending}
               />
             ) : (
-              <ConfiguredCustomRow key={row.provider_id} locale={locale} row={row} onPending={onPending} />
+              <ConfiguredCustomRow
+                key={row.provider_id}
+                locale={locale}
+                row={row}
+                label={catalogById[row.provider_id]?.label ?? row.provider_id}
+                onPending={onPending}
+              />
             ),
           )
         )}
@@ -645,18 +651,20 @@ function ConfiguredKeyRow({
 function ConfiguredCustomRow({
   locale,
   row,
+  label,
   onPending,
 }: {
   locale: SpaBoot["locale"];
   row: Extract<ConfiguredProvider, { kind: "custom" }>;
+  label: string;
   onPending: (action: PendingAction) => void;
 }) {
   return (
     <div className="flex flex-wrap items-center justify-between gap-2 rounded-md border p-3">
       <div>
-        <div className="font-medium">{row.provider_id}</div>
+        <div className="font-medium">{label}</div>
         <div className="text-sm text-muted-foreground">
-          {row.base_url} · {row.api} · {row.model_ids.join(", ")}
+          {row.provider_id} · {row.base_url} · {row.api} · {row.model_ids.join(", ")}
         </div>
       </div>
       <Button
@@ -674,8 +682,11 @@ function ConfiguredCustomRow({
 /**
  * Add Provider (plan 38): an accessible toggle revealing the catalog picker;
  * the selected entry's id determines the configuration form rendered beneath
- * it. Only a successful submit closes the flow — a failed verify/add keeps
- * the selection and typed input while the provider stays unconfigured.
+ * it. Catalog provenance (pinned snapshot, static code) and per-entry runtime
+ * eligibility (builtin / template / unavailable vs the App's selected image)
+ * are disclosed in copy; an unavailable entry renders its explanation with no
+ * submit path. Only a successful submit closes the flow — a failed verify/add
+ * keeps the selection and typed input while the provider stays unconfigured.
  */
 function AddProviderSection({
   locale,
@@ -691,6 +702,7 @@ function AddProviderSection({
   const [open, setOpen] = useState(false);
   const [selectedId, setSelectedId] = useState<string | undefined>(undefined);
   const selected = selectedCatalogProvider(payload.provider_catalog, selectedId);
+  const imageId = payload.app.sandbox_image_id;
   const keyByProvider: Record<string, SettingsManagePayload["keys"][number]> = {};
   for (const key of payload.keys) keyByProvider[key.provider] = key;
   const customById: Record<string, SettingsManagePayload["custom_providers"][number]> = {};
@@ -704,10 +716,13 @@ function AddProviderSection({
       {open ? (
         <div className="flex flex-col gap-3 rounded-md border p-3">
           <p className="text-sm text-muted-foreground">{t(locale, "settings.addProviderCopy")}</p>
-          <label className="flex max-w-xs flex-col gap-1.5 text-sm font-medium">
-            {t(locale, "settings.provider")}
+          <p className="text-xs text-muted-foreground">{t(locale, "settings.catalogProvenance")}</p>
+          <div className="flex max-w-xs flex-col gap-1.5">
+            <span className="text-sm font-medium" id="settings-catalog-provider-label">
+              {t(locale, "settings.provider")}
+            </span>
             <Select value={selectedId} onValueChange={setSelectedId}>
-              <SelectTrigger>
+              <SelectTrigger aria-labelledby="settings-catalog-provider-label">
                 <SelectValue placeholder={t(locale, "settings.selectProvider")} />
               </SelectTrigger>
               <SelectContent>
@@ -718,6 +733,9 @@ function AddProviderSection({
                     .map((provider) => (
                       <SelectItem key={provider.id} value={provider.id}>
                         {provider.label}
+                        {provider.eligibility === "unavailable"
+                          ? ` — ${t(locale, "settings.eligibilityUnavailableShort", { image: imageId })}`
+                          : ""}
                       </SelectItem>
                     ))}
                 </SelectGroup>
@@ -728,30 +746,49 @@ function AddProviderSection({
                     .map((provider) => (
                       <SelectItem key={provider.id} value={provider.id}>
                         {provider.label}
+                        {provider.eligibility === "unavailable"
+                          ? ` — ${t(locale, "settings.eligibilityUnavailableShort", { image: imageId })}`
+                          : ""}
                       </SelectItem>
                     ))}
                 </SelectGroup>
               </SelectContent>
             </Select>
-          </label>
+          </div>
           {selected ? (
             <div className="flex flex-col gap-3">
               <h4 className="text-sm font-medium">
                 {t(locale, "settings.configureProvider", { label: selected.label })}
               </h4>
-              <ProviderConfigForm
-                key={selected.id}
-                locale={locale}
-                provider={selected}
-                storedKey={keyByProvider[selected.id]}
-                custom={customById[selected.id]}
-                onVerify={onVerify}
-                onSettings={onSettings}
-                onDone={() => {
-                  setSelectedId(undefined);
-                  setOpen(false);
-                }}
-              />
+              {selected.eligibility === "unavailable" ? (
+                // Runtime-ineligible rows stay selectable for discovery but get
+                // an explanation instead of a form — no submit path, so an
+                // unusable provider can never be saved silently (plan 38 T3).
+                <p className="text-sm text-muted-foreground">
+                  {t(locale, "settings.eligibilityUnavailable", { image: imageId })}
+                </p>
+              ) : (
+                <>
+                  <p className="text-sm text-muted-foreground">
+                    {selected.eligibility === "template"
+                      ? t(locale, "settings.eligibilityTemplate", { image: imageId })
+                      : t(locale, "settings.eligibilityBuiltin", { image: imageId })}
+                  </p>
+                  <ProviderConfigForm
+                    key={selected.id}
+                    locale={locale}
+                    provider={selected}
+                    storedKey={keyByProvider[selected.id]}
+                    custom={customById[selected.id]}
+                    onVerify={onVerify}
+                    onSettings={onSettings}
+                    onDone={() => {
+                      setSelectedId(undefined);
+                      setOpen(false);
+                    }}
+                  />
+                </>
+              )}
             </div>
           ) : null}
         </div>

@@ -307,9 +307,16 @@ export const zhCN: Dictionary = {
       "此 App 已配置的提供方 — 存储的密钥仅显示掩码尾号，自定义声明显示其 Base URL 与模型。添加提供方从目录选择开始；密钥仅在验证成功后存储。",
     noConfiguredProviders: "尚未配置任何提供方 — 请先添加一个提供方。在验证提供方密钥之前，审查将失败关闭。",
     addProvider: "添加提供方",
-    addProviderCopy: "选择一个目录提供方 — 选中后显示其配置要求。目录外的提供方请使用下方的自定义声明。",
+    addProviderCopy: "选择一个目录提供方 — 选中后显示其配置要求。在 App 运行时镜像上不可用的条目会被标记且无法保存；目录外的提供方请使用下方的自定义声明。",
+    catalogProvenance:
+      "目录元数据由固定的 models.dev 快照生成并编译进应用 — 在提交密钥验证之前不会联系任何提供方。",
     catalogBuiltin: "内置提供方",
     catalogTemplate: "目录模板",
+    eligibilityBuiltin: "可与 {image} 运行时镜像配合使用 — 该提供方作为内置提供方运行。",
+    eligibilityTemplate: "物化后可与 {image} 运行时镜像配合使用 — 账户 id 与密钥将保存为自定义提供方声明。",
+    eligibilityUnavailable:
+      "无法在 {image} 运行时镜像上使用 — 该条目仅为目录展示，无法为此 App 配置。可切换 App 的运行时镜像，或改用自定义声明。",
+    eligibilityUnavailableShort: "{image} 上不可用",
     configureProvider: "配置 {label}",
     customEntry: "自定义",
     customEntryCopy: "声明非内置 provider — id、Base URL、模型 id 与密钥。",

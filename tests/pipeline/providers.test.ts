@@ -11,6 +11,8 @@
  */
 
 import { describe, expect, test } from "bun:test";
+import { readFileSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 import {
   PROVIDER_CATALOG,
   PROVIDERS,
@@ -98,6 +100,55 @@ describe("provider catalog tiers (plan 35 T3, spec §5)", () => {
       if (entry.tier !== "builtin") continue;
       expect(entry.models.length, id).toBeGreaterThanOrEqual(0);
       expect(entry.doc, id).not.toBeNull();
+    }
+  });
+});
+
+describe("provider catalog provenance + determinism (plan 38 T3)", () => {
+  const repoRoot = join(import.meta.dir, "../..");
+  const catalogPath = join(repoRoot, "src/pipeline/provider-catalog.ts");
+  const generatorPath = join(repoRoot, "scripts/generate-provider-catalog.ts");
+  const snapshotPath = join(repoRoot, "scripts/provider-catalog/models.dev-2026-09-04.json");
+
+  test("the committed models.dev snapshot is present, parseable, and the generator's only input", () => {
+    const snapshot = JSON.parse(readFileSync(snapshotPath, "utf8")) as Record<string, unknown>;
+    expect(Object.keys(snapshot).length).toBeGreaterThan(0);
+    const generator = readFileSync(generatorPath, "utf8");
+    // The pin is the committed snapshot file — provenance is the vendored
+    // JSON, never a network source.
+    expect(generator).toContain("models.dev-2026-09-04.json");
+    // Zero authoring-time network: the generator reads only the snapshot.
+    expect(generator).not.toMatch(/\bfetch\s*\(/);
+  });
+
+  test("the generated module is static Worker/browser code — zero runtime fetch, snapshot pin disclosed", () => {
+    const source = readFileSync(catalogPath, "utf8");
+    expect(source).not.toMatch(/\bfetch\s*\(/);
+    // The provenance header names the pinned snapshot and the authoring path.
+    expect(source).toContain("models.dev-2026-09-04.json");
+    expect(source).toContain("DO NOT EDIT BY");
+  });
+
+  test("regeneration from the committed snapshot is byte-identical — deterministic generation, no hand edits", () => {
+    const before = readFileSync(catalogPath, "utf8");
+    for (let run = 0; run < 2; run++) {
+      const proc = Bun.spawnSync(["bun", "scripts/generate-provider-catalog.ts"], {
+        cwd: repoRoot,
+        stdout: "pipe",
+        stderr: "pipe",
+      });
+      expect(proc.exitCode, proc.stderr.toString()).toBe(0);
+    }
+    const after = readFileSync(catalogPath, "utf8");
+    try {
+      // Both runs reproduce the committed artifact exactly — the committed
+      // module stays the single source, generated, never hand-edited.
+      expect(after).toBe(before);
+    } finally {
+      // Keep the worktree clean even on a drift failure: restore the
+      // committed bytes so the diff a reviewer sees is the test's report,
+      // not a silently regenerated module.
+      if (after !== before) writeFileSync(catalogPath, before);
     }
   });
 });

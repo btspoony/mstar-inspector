@@ -328,9 +328,17 @@ export const en = {
       "No providers configured yet — use Add Provider to configure one. Reviews fail closed until a provider key is verified.",
     addProvider: "Add provider",
     addProviderCopy:
-      "Pick a catalog provider — its configuration requirements appear once selected. Providers outside the catalog use the custom declaration below.",
+      "Pick a catalog provider — its configuration requirements appear once selected. Entries unusable on the App's runtime image are marked and can't be saved; providers outside the catalog use the custom declaration below.",
+    catalogProvenance:
+      "Catalog metadata is generated from a pinned models.dev snapshot and compiled into the app — no provider is contacted until you submit a key for verification.",
     catalogBuiltin: "Built-in providers",
     catalogTemplate: "Catalog templates",
+    eligibilityBuiltin: "Works on the {image} runtime image — this provider runs as a built-in.",
+    eligibilityTemplate:
+      "Works on the {image} runtime image after materialization — your account id and key are saved as a custom provider declaration.",
+    eligibilityUnavailable:
+      "Not usable on the {image} runtime image — the entry stays listed for discovery but cannot be configured for this App. Switch the App's runtime image or use a custom declaration instead.",
+    eligibilityUnavailableShort: "unavailable on {image}",
     configureProvider: "Configure {label}",
     customEntry: "Custom",
     customEntryCopy: "Declare a non-built-in provider — id, base URL, model ids, and key.",

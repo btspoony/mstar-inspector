@@ -206,3 +206,50 @@ describe("configured providers + catalog add flow (plan 38 T2)", () => {
     expect(t("zh_CN", "settings.configureProvider", { label: "Anthropic" })).toContain("Anthropic");
   });
 });
+
+describe("catalog provenance + eligibility messaging (plan 38 T3)", () => {
+  test("Add Provider discloses provenance and per-entry eligibility vs the selected runtime image", () => {
+    const source = readFileSync(join(import.meta.dir, "../../src/spa/pages/SettingsPage.tsx"), "utf8");
+    // Provenance: the catalog is generated, pinned metadata — not a live query.
+    expect(source).toContain("settings.catalogProvenance");
+    // Eligibility is judged against the App's SELECTED image id, never inferred.
+    expect(source).toContain("payload.app.sandbox_image_id");
+    expect(source).toContain("settings.eligibilityBuiltin");
+    expect(source).toContain("settings.eligibilityTemplate");
+    expect(source).toContain("settings.eligibilityUnavailable");
+    // Unavailable rows keep their picker entry (marked), never hidden silently.
+    expect(source).toContain("settings.eligibilityUnavailableShort");
+  });
+
+  test("an unavailable entry gets an explanation instead of a form — nothing can save it silently", () => {
+    const source = readFileSync(join(import.meta.dir, "../../src/spa/pages/SettingsPage.tsx"), "utf8");
+    // The gate sits above ProviderConfigForm: unavailable → copy only, no submit path.
+    expect(source).toContain('selected.eligibility === "unavailable"');
+  });
+
+  test("the catalog picker uses the aria-labelledby precedent; custom configured rows show the catalog label", () => {
+    const source = readFileSync(join(import.meta.dir, "../../src/spa/pages/SettingsPage.tsx"), "utf8");
+    // MembersPage precedent: visible label span + aria-labelledby on the
+    // trigger — no wrapping <label> around the Radix Select.
+    expect(source).toContain('id="settings-catalog-provider-label"');
+    expect(source).toContain('aria-labelledby="settings-catalog-provider-label"');
+    // Template-materialized configured rows resolve the human label via the
+    // catalog map (same pattern as key rows), keeping the raw id in the detail.
+    expect(source).toContain("catalogById[row.provider_id]?.label");
+  });
+
+  test("plan 38 T3 copy is dictionary-backed in both locales", () => {
+    expect(t("en", "settings.catalogProvenance")).toContain("models.dev");
+    expect(t("zh_CN", "settings.catalogProvenance")).toContain("models.dev");
+    expect(t("en", "settings.eligibilityBuiltin", { image: "omp" })).toContain("omp");
+    expect(t("zh_CN", "settings.eligibilityBuiltin", { image: "omp" })).toContain("omp");
+    expect(t("en", "settings.eligibilityTemplate", { image: "omp" })).toContain("omp");
+    expect(t("zh_CN", "settings.eligibilityTemplate", { image: "omp" })).toContain("omp");
+    expect(t("en", "settings.eligibilityUnavailable", { image: "omp" })).toContain("omp");
+    expect(t("zh_CN", "settings.eligibilityUnavailable", { image: "omp" })).toContain("omp");
+    expect(t("en", "settings.eligibilityUnavailableShort", { image: "omp" })).toContain("omp");
+    expect(t("zh_CN", "settings.eligibilityUnavailableShort", { image: "omp" })).toContain("omp");
+    expect(t("en", "settings.addProviderCopy")).toContain("can't be saved");
+    expect(t("zh_CN", "settings.addProviderCopy")).toContain("无法保存");
+  });
+});
