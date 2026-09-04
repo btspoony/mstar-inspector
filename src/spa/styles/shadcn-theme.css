@@ -1,7 +1,7 @@
 /*
  * shadcn/ui theme bridge (plan 33 T1a).
  * Semantic CSS variables map to DESIGN.md / tokens.css names (tokens.css is read-only).
- * Theme follows prefers-color-scheme via tokens.css — no [data-theme] switcher.
+ * Theme resolves via tokens.css — light on :root[data-theme="light"] or OS light (:root:not([data-theme="dark"])); values flow through the var chain unchanged.
  */
 @import "tailwindcss";
 

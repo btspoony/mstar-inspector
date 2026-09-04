@@ -17,6 +17,12 @@ export const zhCN: Dictionary = {
     members: "成员",
     /** 目标语言的标签 — 切换按钮显示要切换到的语言（中文界面显示 EN）。 */
     language: "EN",
+    /** 主题切换（plan 41）：静态标签；状态与动作在 aria 文案中表达。 */
+    themeToggle: "深色/浅色模式切换",
+    /** {mode} = 当前生效主题，{target} = 点击后切换到的主题。 */
+    themeToggleAria: "当前显示模式：{mode}，点击切换为{target}",
+    themeDark: "深色",
+    themeLight: "浅色",
     logout: "退出登录",
     signedInAs: "已登录：{name}",
   },

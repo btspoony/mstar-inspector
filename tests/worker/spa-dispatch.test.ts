@@ -197,6 +197,31 @@ describe("SPA dispatch (plan 29 T3)", () => {
     expect(body).not.toContain(SPA_BOOT_MARKER);
   });
 
+  test("theme bootstrap precedes the injected boot and the bundle in the served shell (plan 41 T1)", async () => {
+    // serveSpaIndex fetches ASSETS /index.html verbatim and injects the boot
+    // at <!--SPA_BOOT--> — the prod document is the real shell source plus
+    // the injection, so serve the actual src/spa/index.html here to pin the
+    // no-flash ordering (theme applied before window.__BOOT__ and the module
+    // bundle can paint).
+    const shell = await Bun.file(new URL("../../src/spa/index.html", import.meta.url)).text();
+    const calls: AssetCall[] = [];
+    const { env } = makeEnv({ ASSETS: stubAssets({ "/index.html": shell }, calls) });
+    const res = await worker.fetch(htmlGetRequest("/dashboard/login"), env);
+    expect(res.status).toBe(200);
+    expect(calls).toEqual([{ method: "GET", pathname: "/index.html" }]);
+    const body = await res.text();
+    const bootstrapAt = body.indexOf('localStorage.getItem("mstar.dashboard.theme")');
+    const bootAt = body.indexOf("window.__BOOT__=");
+    expect(bootstrapAt).toBeGreaterThan(-1);
+    expect(bootAt).toBeGreaterThan(-1);
+    expect(bootstrapAt).toBeLessThan(bootAt);
+    expect(bootstrapAt).toBeLessThan(body.indexOf("./main.tsx"));
+    // Whitelist: only the exact stored values may set data-theme — anything
+    // else (corrupted/unreadable) must behave as unset.
+    expect(body).toContain('if (t === "light" || t === "dark")');
+    expect(body).not.toContain(SPA_BOOT_MARKER);
+  });
+
   test("webhook POST is untouched", async () => {
     const { env, calls } = makeEnv();
     await worker.fetch(

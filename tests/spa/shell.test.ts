@@ -2,6 +2,8 @@
  * Plan 33 T2: shell models per role/locale (no DOM runner in this stack).
  */
 import { describe, expect, test } from "bun:test";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import {
   accountDisplay,
   buildNavbarModel,
@@ -45,12 +47,14 @@ describe("shell models (plan 33 T2)", () => {
     expect(sidebar.items.map((item) => item.label)).toEqual(["应用", "洞察", "成员"]);
   });
 
-  test("navbar is slim: Lang + account + logout only", () => {
+  test("navbar is slim: theme + Lang + account + logout only", () => {
     const navbar = buildNavbarModel(admin);
     expect(navbar.languageLabel).toBe("EN");
     expect(navbar.languageTarget).toBe("en");
     expect(navbar.accountLabel).toBe("The Octocat (octocat)");
     expect(navbar.logoutLabel).toBe("退出登录");
+    // Plan 41: the theme toggle is pure client state rendered directly in
+    // Layout's header — the boot-derived navbar model gains no key.
     expect(Object.keys(navbar)).toEqual(["languageLabel", "languageTarget", "accountLabel", "logoutLabel"]);
   });
 
@@ -94,6 +98,43 @@ describe("shell models (plan 33 T2)", () => {
     const root = buildSidebarModel(member, "/dashboard");
     expect(root.items.find((item) => item.href === "/dashboard/apps")?.current).toBe(true);
     expect(root.items.find((item) => item.href === "/dashboard/insights")?.current).toBe(false);
+  });
+});
+
+describe("navbar theme toggle (plan 41 T2)", () => {
+  const layoutSource = () => readFileSync(join(import.meta.dir, "../../src/spa/Layout.tsx"), "utf8");
+  const shellSource = () => readFileSync(join(import.meta.dir, "../../src/spa/index.html"), "utf8");
+
+  test("slim navbar gains one theme toggle beside the locale form (client state only)", () => {
+    const source = layoutSource();
+    expect(source).toContain("THEME_STORAGE_KEY");
+    expect(source).toContain('aria-label={t(boot.locale, "nav.themeToggleAria"');
+    expect(source).toContain('{t(boot.locale, "nav.themeToggle")}');
+    expect(source).toContain('variant="ghost"');
+    expect(source).toContain("document.documentElement.dataset.theme");
+    // No reload — the flip is attribute + state only.
+    expect(source).not.toContain("reload");
+  });
+
+  test("toggle and pre-paint bootstrap agree on the storage key", () => {
+    const bootstrapKey = shellSource().match(/localStorage\.getItem\("([^"]+)"\)/)?.[1];
+    expect(bootstrapKey).toBe("mstar.dashboard.theme");
+    expect(layoutSource()).toContain(`"${bootstrapKey}"`);
+  });
+
+  test("toggle copy is complete in both locales (label + aria + toggled-state semantics)", () => {
+    expect(t("en", "nav.themeToggle")).toBe("Dark / light mode");
+    expect(t("zh_CN", "nav.themeToggle")).toBe("深色/浅色模式切换");
+    expect(t("en", "nav.themeToggleAria", { mode: "dark", target: "light" })).toBe(
+      "Display theme: dark. Activate to switch to light.",
+    );
+    expect(t("zh_CN", "nav.themeToggleAria", { mode: "深色", target: "浅色" })).toBe(
+      "当前显示模式：深色，点击切换为浅色",
+    );
+    expect(t("en", "nav.themeDark")).toBe("dark");
+    expect(t("en", "nav.themeLight")).toBe("light");
+    expect(t("zh_CN", "nav.themeDark")).toBe("深色");
+    expect(t("zh_CN", "nav.themeLight")).toBe("浅色");
   });
 });
 
