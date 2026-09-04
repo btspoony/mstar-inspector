@@ -212,15 +212,27 @@ function SettingsView({
     await runPinnedWithBody(path, {});
   }
 
-  async function runPinnedWithBody(path: string, fields: Record<string, string>): Promise<void> {
+  /**
+   * POST a pinned ops path and report the outcome through the notice channel.
+   * Options: `successMessage` differentiates an outcome the generic
+   * "Changes saved." would misrepresent; `reload: false` skips the background
+   * refetch when the follow-up settings GET is guaranteed to fail — a
+   * soft-deleted App is invisible to that route, so a delete's refetch would
+   * 404 and overwrite the outcome with "Load failed."
+   */
+  async function runPinnedWithBody(
+    path: string,
+    fields: Record<string, string>,
+    { successMessage, reload = true }: { successMessage?: string; reload?: boolean } = {},
+  ): Promise<void> {
     const { status, body } = await postForm(path, fields);
     if (status >= 400) {
       onNotice({ kind: "error", message: body.trim() || t(locale, "common.loadFailed") });
-      await onReload({ background: true });
+      if (reload) await onReload({ background: true });
       return;
     }
-    onNotice({ kind: "success", message: t(locale, "settings.changesSaved") });
-    await onReload({ background: true });
+    onNotice({ kind: "success", message: successMessage ?? t(locale, "settings.changesSaved") });
+    if (reload) await onReload({ background: true });
   }
 
   async function onConfirm(): Promise<void> {
@@ -236,6 +248,15 @@ function SettingsView({
         await runPinnedWithBody(`/dashboard/apps/${app.slug}/settings/key/delete`, {
           provider: action.provider,
         });
+      } else if (action.kind === "delete") {
+        // Irreversible outcome with its own copy: "Changes saved." reads wrong
+        // after a delete, and the user stays on the deleted App's page.
+        // reload: false — the deleted App's settings GET is a guaranteed 404.
+        await runPinnedWithBody(
+          `/dashboard/apps/${app.slug}/delete`,
+          {},
+          { successMessage: t(locale, "settings.deleteSuccess"), reload: false },
+        );
       } else {
         await runPinned(`/dashboard/apps/${app.slug}/${action.kind}`);
       }

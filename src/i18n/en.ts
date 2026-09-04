@@ -325,6 +325,7 @@ export const en = {
     confirmDeleteTitle: "Delete {slug}?",
     confirmDeleteBody: "This is a soft-delete. The App disappears from the list; reviews fail closed.",
     confirmDeleteButton: "Delete App",
+    deleteSuccess: "App deleted. It has been removed from the Apps list.",
     providers: "Providers",
     providersCopy:
       "The providers configured for this App — stored keys show masked, custom declarations show their base URL and models. Add Provider picks a catalog entry; keys are stored only after a successful verify.",

@@ -496,7 +496,7 @@ describe("App workflow boundaries (plan 40 T2)", () => {
   test("successful configuration saves surface success feedback; failures keep the structured error", () => {
     const source = readFileSync(join(import.meta.dir, "../../src/spa/pages/SettingsPage.tsx"), "utf8");
     // Success is no longer silent: the notice channel reports a saved change.
-    expect(source).toContain('message: t(locale, "settings.changesSaved")');
+    expect(source).toContain('successMessage ?? t(locale, "settings.changesSaved")');
     expect(t("en", "settings.changesSaved")).toBe("Changes saved.");
     expect(t("zh_CN", "settings.changesSaved")).toBe("更改已保存。");
     // Failure feedback is unchanged: structured API errors through the notice.
@@ -523,5 +523,32 @@ describe("App workflow boundaries (plan 40 T2)", () => {
     expect(t("zh_CN", "settings.noConfiguredProviders")).toContain("尚未配置");
     expect(t("en", "settings.noNamedChains")).toBe("No named chains yet.");
     expect(t("zh_CN", "settings.noNamedChains")).toBe("还没有命名链。");
+  });
+});
+
+describe("notice channel (plan 40 T3 reviewer handoffs)", () => {
+  test("success and warn notices are announced via role=status; errors keep role=alert", () => {
+    const source = readFileSync(join(import.meta.dir, "../../src/spa/pages/PageNotice.tsx"), "utf8");
+    // WCAG 4.1.3: the "Changes saved." success notice must not be silent to
+    // assistive tech — non-error notices are polite live-region status, and
+    // errors keep the assertive alert.
+    expect(source).toContain('role={kind === "error" ? "alert" : "status"}');
+  });
+
+  test("a deleted App reports its own irreversible outcome, not the generic saved notice", () => {
+    const source = readFileSync(join(import.meta.dir, "../../src/spa/pages/SettingsPage.tsx"), "utf8");
+    // The delete branch pins the dedicated copy and skips the background
+    // reload — the soft-deleted App's settings GET is a guaranteed 404, so
+    // the generic path would overwrite the outcome with "Load failed."
+    const deleteBranch = source.slice(
+      source.indexOf('action.kind === "delete"'),
+      source.indexOf("const confirmCopy"),
+    );
+    expect(deleteBranch).toContain('t(locale, "settings.deleteSuccess")');
+    expect(deleteBranch).toContain("reload: false");
+    expect(t("en", "settings.deleteSuccess")).toContain("deleted");
+    expect(t("zh_CN", "settings.deleteSuccess")).toContain("已删除");
+    // Configuration saves keep the generic saved notice.
+    expect(source).toContain('successMessage ?? t(locale, "settings.changesSaved")');
   });
 });

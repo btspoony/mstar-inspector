@@ -306,6 +306,7 @@ export const zhCN: Dictionary = {
     confirmDeleteTitle: "删除 {slug}？",
     confirmDeleteBody: "这是软删除。App 从列表消失；审查失败关闭。",
     confirmDeleteButton: "删除应用",
+    deleteSuccess: "App 已删除，已从应用列表中移除。",
     providers: "提供方",
     providersCopy:
       "此 App 已配置的提供方 — 存储的密钥仅显示掩码尾号，自定义声明显示其 Base URL 与模型。添加提供方从目录选择开始；密钥仅在验证成功后存储。",

@@ -12,8 +12,10 @@ export function PageNotice({
 }) {
   const className =
     kind === "error" ? `${styles.notice} ${styles.noticeError}` : kind === "warn" ? `${styles.notice} ${styles.noticeWarn}` : styles.notice;
+  // WCAG 4.1.3: errors announce assertively (role=alert); success and warn
+  // outcomes announce politely (role=status) instead of staying silent.
   return (
-    <p className={className} role={kind === "error" ? "alert" : undefined}>
+    <p className={className} role={kind === "error" ? "alert" : "status"}>
       {message}
     </p>
   );
