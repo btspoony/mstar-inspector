@@ -159,7 +159,7 @@ export const en = {
     actions: {
       pause: "Pause",
       resume: "Resume",
-      disable: "Disable",
+      disable: "Disable (reversible)",
       enable: "Enable",
       delete: "Delete",
     },

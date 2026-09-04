@@ -546,7 +546,7 @@ function OpsCard({
             <p className="text-sm text-muted-foreground">{t(locale, "settings.disconnected")}</p>
           )}
           {app.status === "active" ? (
-            <Button type="button" variant="secondary" onClick={() => onPending({ kind: "disable" })}>
+            <Button type="button" variant="destructive-outline" onClick={() => onPending({ kind: "disable" })}>
               {t(locale, "apps.actions.disable")}
             </Button>
           ) : (

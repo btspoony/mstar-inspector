@@ -144,7 +144,7 @@ export const zhCN: Dictionary = {
     actions: {
       pause: "暂停",
       resume: "恢复",
-      disable: "停用",
+      disable: "停用（可恢复）",
       enable: "启用",
       delete: "删除",
     },

@@ -397,3 +397,56 @@ describe("seat assignment section (plan 39 T2)", () => {
     expect(t("zh_CN", "settings.saveRoleModels")).toBe("保存席位链");
   });
 });
+
+describe("operational action hierarchy (plan 39 T3)", () => {
+  test("Disable is destructive-outline with reversible wording; Delete stays filled destructive behind its confirmation", () => {
+    const source = readFileSync(join(import.meta.dir, "../../src/spa/pages/SettingsPage.tsx"), "utf8");
+    // The ops zone renders Disable through the destructive-outline family —
+    // the red-outline variant is pinned to the disable action itself.
+    expect(source).toContain(
+      '<Button type="button" variant="destructive-outline" onClick={() => onPending({ kind: "disable" })}>',
+    );
+    // Delete remains the stronger filled destructive action, still routed
+    // through the pendingConfirmCopy dialog with its destructive confirm
+    // button.
+    expect(source).toContain(
+      '<Button type="button" variant="destructive" onClick={() => onPending({ kind: "delete" })}>',
+    );
+    expect(source).toContain('confirmCopy.destructive ? "destructive" : "default"');
+    // Pause and Enable keep the non-destructive secondary family (resume keeps
+    // the primary default) — nothing else in the ops zone went red.
+    expect(source).toContain('<Button type="button" variant="secondary" onClick={() => onPending({ kind: "pause" })}>');
+    expect(source).toContain('<Button type="button" variant="secondary" onClick={() => onPending({ kind: "enable" })}>');
+    const opsBody = source.slice(source.indexOf("function OpsCard"), source.indexOf("function ProvidersCard"));
+    expect(opsBody).toContain('variant="destructive-outline"');
+    // Busy/disabled guards and the post-op background state refresh are
+    // unchanged on the dialog and op paths.
+    expect(source).toContain("if (!pending || busy) return;");
+    expect(source).toContain("disabled={busy}");
+    expect(source).toContain("await onReload({ background: true })");
+  });
+
+  test("the destructive-outline variant is tokenized on the shadcn Button: red border, no raw hex fork", () => {
+    const source = readFileSync(join(import.meta.dir, "../../src/spa/components/ui/button.tsx"), "utf8");
+    expect(source).toContain('"destructive-outline":');
+    // Border, label, and hover tint come from the destructive token (the
+    // DESIGN.md red scale via the shadcn theme bridge); the shared cva base
+    // supplies the 3px focus-visible ring — the variant only pins its color.
+    const variantBlock = source.slice(source.indexOf('"destructive-outline":'), source.indexOf("secondary:"));
+    expect(variantBlock).toContain("border-destructive");
+    expect(variantBlock).toContain("text-destructive");
+    expect(variantBlock).not.toContain("#");
+  });
+
+  test("disable copy identifies reversibility in both locales; delete copy stays irreversible", () => {
+    expect(t("en", "apps.actions.disable")).toContain("reversible");
+    expect(t("zh_CN", "apps.actions.disable")).toContain("可恢复");
+    expect(t("en", "settings.confirmDisableBody")).toContain("until you enable it again");
+    expect(t("zh_CN", "settings.confirmDisableBody")).toContain("再次启用");
+    // Delete keeps the explicit irreversible confirmation copy.
+    expect(t("en", "settings.confirmDeleteBody")).toContain("soft-delete");
+    expect(t("zh_CN", "settings.confirmDeleteBody")).toContain("软删除");
+    expect(t("en", "settings.confirmDeleteButton")).toBe("Delete App");
+    expect(t("zh_CN", "settings.confirmDeleteButton")).toBe("删除应用");
+  });
+});
