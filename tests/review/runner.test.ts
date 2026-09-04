@@ -206,9 +206,11 @@ describe("runner entry (src/review/runner.ts)", () => {
   test("input shape violations → exit 1", async () => {
     for (const bad of [
       [1, 2, 3],
-      // plan 37: capabilityHosts is REQUIRED and shape-guarded.
+      // plan 37: capabilityHosts is REQUIRED and shape-guarded (QC fix wave 1:
+      // a non-empty base — there is no baked in-image models.yml to fall back to).
       {},
       { capabilityHosts: "not-an-array" },
+      { capabilityHosts: [] },
       { capabilityHosts: [42] },
       { capabilityHosts: [{}] },
       { capabilityHosts: [{ id: 42, catalogProviderId: "ark", apiKeyEnv: "ARK_API_KEY", baseUrl: "u", api: "a", auth: "apiKey" }] },
@@ -234,6 +236,23 @@ describe("runner entry (src/review/runner.ts)", () => {
     ]) {
       const inputPath = writeInput(bad);
       const { code, stdout } = await runCli(["--level", "quick", "--input", inputPath]);
+      expect(code).toBe(1);
+      expect(stdout).toBe("");
+    }
+  });
+
+  test("non-finite model numbers → exit 1 (QC fix wave 1: typeof alone admits ±Infinity)", async () => {
+    // JSON.stringify cannot carry NaN/±Infinity, so the non-finite path is
+    // exercised through raw JSON text: JSON.parse("1e999") === Infinity.
+    const rawCases = [
+      '{"capabilityHosts":[{"id":"h","catalogProviderId":"ark","apiKeyEnv":"K","baseUrl":"u","api":"a","auth":"apiKey","models":[{"id":"m","name":"M","reasoning":true,"input":["text"],"contextWindow":1e999,"maxTokens":2}]}]}',
+      '{"capabilityHosts":[{"id":"h","catalogProviderId":"ark","apiKeyEnv":"K","baseUrl":"u","api":"a","auth":"apiKey","models":[{"id":"m","name":"M","reasoning":true,"input":["text"],"contextWindow":1,"maxTokens":-1e999}]}]}',
+    ];
+    for (const raw of rawCases) {
+      const dir = mkdtempSync(join(tmpdir(), "runner-input-"));
+      const path = join(dir, "input.json");
+      writeFileSync(path, raw);
+      const { code, stdout } = await runCli(["--level", "quick", "--input", path]);
       expect(code).toBe(1);
       expect(stdout).toBe("");
     }

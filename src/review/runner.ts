@@ -111,6 +111,11 @@ function parseRunnerInput(parsed: unknown): RunnerInputJson {
   if (!Array.isArray(record.capabilityHosts)) {
     throw new Error("input JSON field `capabilityHosts` must be an array of capability hosts");
   }
+  // There is no baked in-image base: an empty array would synthesize a
+  // header-only models.yml (qc2 S2 / qc3 S-2) — reject it as a shape violation.
+  if (record.capabilityHosts.length === 0) {
+    throw new Error("input JSON field `capabilityHosts` must be a non-empty array of capability hosts");
+  }
   input.capabilityHosts = record.capabilityHosts.map((entry, index) => {
     if (entry === null || typeof entry !== "object" || Array.isArray(entry)) {
       throw new Error(`input JSON field \`capabilityHosts\`[${index}] must be an object`);
@@ -144,9 +149,14 @@ function parseRunnerInput(parsed: unknown): RunnerInputJson {
           `input JSON field \`capabilityHosts\`[${index}].models[${modelIndex}].input must be an array of strings`,
         );
       }
-      if (typeof m.contextWindow !== "number" || typeof m.maxTokens !== "number") {
+      if (
+        typeof m.contextWindow !== "number" ||
+        !Number.isFinite(m.contextWindow) ||
+        typeof m.maxTokens !== "number" ||
+        !Number.isFinite(m.maxTokens)
+      ) {
         throw new Error(
-          `input JSON field \`capabilityHosts\`[${index}].models[${modelIndex}].contextWindow/.maxTokens must be numbers`,
+          `input JSON field \`capabilityHosts\`[${index}].models[${modelIndex}].contextWindow/.maxTokens must be finite numbers`,
         );
       }
       return {

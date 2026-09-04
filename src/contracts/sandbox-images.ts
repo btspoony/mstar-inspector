@@ -16,7 +16,11 @@
  * (ARK_API_KEY), while the catalog/BYOK id stays `ark`.
  *
  * `omp` is the only entry this iteration and the only enabled one — a future
- * runtime ships its own Dockerfile, registry entry, and synthesizer. Lookup
+ * runtime ships its own Dockerfile, registry entry, and synthesizer. Enabling
+ * a second image or changing an image's container target re-opens the
+ * deploy-window skew contract (an old Worker against a newly built image
+ * fails transiently and self-heals via queue retry — qc2 S3 / qc3 S-4) and
+ * must re-validate it. Lookup
  * is CLOSED over these entries: unknown or disabled ids are rejected by the
  * callers (the dashboard store/route refuse to save them; execution resolves
  * and validates the persisted id before any sandbox is created).
@@ -40,6 +44,11 @@ export type SandboxImageHostModel = {
  * One capability host the image's synthesizer materializes into models.yml.
  * `apiKeyEnv` is the ENV VAR NAME the host's apiKey reference resolves from
  * process environment at request time — never a key value.
+ *
+ * Bare-YAML anchor (qc1 F-006): these registry-trusted scalars (host/model
+ * ids, baseUrl, …) are emitted as BARE YAML scalars to keep the omp base
+ * byte-identical to the retired baked file — a second registry entry must add
+ * quoting/validation (a YAML-1.1 boolean-like id such as `on` misparses bare).
  */
 export type SandboxImageHost = {
   /** Host id — the selector prefix (e.g. `ark-plan/deepseek-v4-flash`). */
