@@ -17,7 +17,7 @@ import { describe, expect, test } from "bun:test";
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 
-import { getSandboxImage } from "../../src/contracts/sandbox-images";
+import { enabledSandboxImages, getSandboxImage } from "../../src/contracts/sandbox-images";
 import type { SandboxImageHost, SandboxImageHostModel } from "../../src/contracts/sandbox-images";
 import type { CapabilityHost, CapabilityHostModel } from "../../src/review/runtime";
 
@@ -33,13 +33,20 @@ describe("registry build-definition parity (qc1 F-001)", () => {
     expect(OMP_IMAGE.wranglerImagePath).toBe(`./${OMP_IMAGE.dockerfilePath}`);
     // Both wrangler configs' containers[].image point at THAT path, with the
     // repo-root build context unchanged (the Dockerfile COPYs package.json +
-    // src/review from the repo root).
+    // src/review from the repo root). Collecting EVERY match (not just the
+    // first) pins the full set: a second, unregistered containers[].image
+    // entry fails the lock instead of hiding behind the first match.
+    const enabledPaths = new Set(enabledSandboxImages().map((entry) => entry.wranglerImagePath));
     for (const config of ["wrangler.jsonc", "wrangler.smoke.jsonc"]) {
       const text = readFileSync(join(REPO_ROOT, config), "utf8");
-      const image = /"image":\s*"([^"]+)"/.exec(text)?.[1];
-      expect(image).toBe(OMP_IMAGE.wranglerImagePath);
-      const buildContext = /"image_build_context":\s*"([^"]+)"/.exec(text)?.[1];
-      expect(buildContext).toBe(".");
+      // "image": does not overlap "image_build_context": (the closing quote
+      // of the key name differs), so each regex collects exactly its own key.
+      const images = new Set([...text.matchAll(/"image":\s*"([^"]+)"/g)].map((match) => match[1]));
+      expect(images).toEqual(enabledPaths);
+      const buildContexts = new Set(
+        [...text.matchAll(/"image_build_context":\s*"([^"]+)"/g)].map((match) => match[1]),
+      );
+      expect(buildContexts).toEqual(new Set(["."]));
     }
   });
 });

@@ -56,7 +56,7 @@ exist before the first deploy:
   `sandbox-image/omp/Dockerfile` at deploy time (`image_build_context: "."`,
   `instance_type: lite`, `max_instances: 1`).
 
-### D1 migrations (0001–0016, forward-only)
+### D1 migrations (0001–0018, forward-only)
 
 ```bash
 wrangler d1 migrations apply mstar-inspector-db --remote   # production
@@ -81,6 +81,8 @@ wrangler d1 migrations apply mstar-inspector-db            # local dev
 | `0014_idx_reviews_reviewed_at` | index on `reviews.reviewed_at` — insights window scans (plan 22) |
 | `0015_provider_verification` | per-App key `verified_at`/`verified_status` + `app_provider_models` cache (plan 31) |
 | `0016_users_login_nocase_unique` | NOCASE unique index on `users.github_login` — case-insensitive membership uniqueness (plan 34 QC W-1) |
+| `0017_app_model_chains` | default + named model chains (`app_model_chains` + `app_model_chain_seats`), backfilled from `app_model_config`/`app_model_roles` (plans 35/39) |
+| `0018_app_sandbox_images` | `github_apps.sandbox_image_id` NOT NULL DEFAULT 'omp' — backfills live AND soft-deleted rows, so no manager visit is needed after deploy (plan 37) |
 
 Migrations are **forward-only** (0002 precedent): never hand-edit an applied
 migration; add the next file.

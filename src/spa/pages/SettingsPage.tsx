@@ -1174,16 +1174,21 @@ function SeatsCard({
   const namedTabs = tabs.filter((tab) => !tab.isDefault);
   const roleHint = (role: string) =>
     role === "mstar-review-seat" ? t(locale, "settings.roleHintReviewSeat") : t(locale, "settings.roleHintDeep");
+  // Stable id-set key over the offered chain tabs: the re-derivation effect
+  // below keys on it so payload object identity churn alone never fires it.
+  const tabIdSetKey = tabs.map((tab) => tab.id).join();
   const [seats, setSeats] = useState<Record<string, string>>(() =>
-    seatRoleValues(payload.model_role_ids, payload.model_roles, modelChainTabs(payload.model_chains)),
+    seatRoleValues(payload.model_role_ids, payload.model_roles, tabs),
   );
 
-  // After every background reload (chain delete cascades included) the seat
-  // state re-derives from the payload; seatSelectValue keeps any reference
-  // the refreshed tab model no longer offers on the safe Default value.
+  // The seat state re-derives from the payload ONLY when the offered
+  // chain-tab set changes (tabIdSetKey dep — a chain delete cascade or
+  // create); unrelated-op background reloads keep unsaved seat picks. Stale
+  // references the offered set no longer contains still coerce to the safe
+  // Default value at render and save via seatSelectValue.
   useEffect(() => {
-    setSeats(seatRoleValues(payload.model_role_ids, payload.model_roles, modelChainTabs(payload.model_chains)));
-  }, [payload.model_role_ids, payload.model_roles, payload.model_chains]);
+    setSeats(seatRoleValues(payload.model_role_ids, payload.model_roles, tabs));
+  }, [tabIdSetKey]);
 
   return (
     <Card>

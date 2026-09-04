@@ -377,8 +377,15 @@ describe("seat assignment section (plan 39 T2)", () => {
     // be submitted (the route 400s on unknown chain names).
     expect(source).toContain('op: "save-roles"');
     expect(source).toContain("fields[`role_${role}`] = seatSelectValue(tabs, seats[role])");
-    // The seat state re-derives from the payload after every reload.
-    expect(source).toContain("seatRoleValues(payload.model_role_ids, payload.model_roles");
+    // The seat state re-derives from the payload ONLY when the offered
+    // chain-tab set changes (review fix): the SeatsCard effect dep is the
+    // tab-id-set key, not the raw payload identities — unrelated-op
+    // background reloads keep unsaved seat picks.
+    const seatsBody = source.slice(source.indexOf("function SeatsCard"));
+    expect(seatsBody).toContain("const tabIdSetKey = tabs.map((tab) => tab.id).join();");
+    expect(seatsBody).toContain("seatRoleValues(payload.model_role_ids, payload.model_roles, tabs)");
+    expect(seatsBody).toContain("}, [tabIdSetKey]);");
+    expect(seatsBody).not.toContain("[payload.model_role_ids, payload.model_roles, payload.model_chains]");
   });
 
   test("seat values resolve against the current tab model: Default, named, and the delete cascade", () => {
