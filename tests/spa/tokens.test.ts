@@ -3,11 +3,15 @@
  *
  * Locked contract:
  *   - version 0.2.0, defaultTheme dark, prefers-color-scheme light
+ *     (DESIGN.md frontmatter assertions pin the file as-is; Task 2 rewrites
+ *     the theme keys together with the DESIGN.md edit)
  *   - L1 token names kept; original light hexes live on themes.light
  *   - top-level colors: === themes.dark.colors
  *   - both theme palettes share the same key set
- *   - tokens.css :root maps dark values; light media query maps light values
- *   - no data-theme attribute selector (no theme toggle)
+ *   - tokens.css :root maps dark values; light applies via
+ *     :root[data-theme="light"] plus the prefers-color-scheme fallback on
+ *     :root:not([data-theme="dark"]) (plan 41 T1 — reverses the plan-29
+ *     "no data-theme attribute selector" lock)
  */
 import { describe, expect, test } from "bun:test";
 
@@ -58,6 +62,27 @@ function cssCustomProperties(block: string): Record<string, string> {
     out[m[1]!] = m[2]!.trim();
   }
   return out;
+}
+
+/**
+ * Extract a balanced `{ ... }` block by its opening token (selector or
+ * at-rule including the `{`). The open token must be the block form —
+ * comment mentions of the selector carry no brace and are skipped by
+ * the brace requirement.
+ */
+function extractBlock(css: string, openToken: string): string {
+  const at = css.indexOf(openToken);
+  if (at === -1) throw new Error(`block not found: ${openToken}`);
+  const open = at + openToken.length - 1;
+  let depth = 0;
+  for (let i = open; i < css.length; i++) {
+    if (css[i] === "{") depth++;
+    else if (css[i] === "}") {
+      depth -= 1;
+      if (depth === 0) return css.slice(open + 1, i);
+    }
+  }
+  throw new Error(`unbalanced block: ${openToken}`);
 }
 
 describe("DESIGN.md L2 dual-theme tokens", () => {
@@ -126,33 +151,40 @@ describe("DESIGN.md L2 dual-theme tokens", () => {
 });
 
 describe("src/spa/styles/tokens.css mapping", () => {
-  test("dark :root and light media query match DESIGN.md palettes", async () => {
+  test("dark :root, manual light attribute, and OS-light media fallback match DESIGN.md palettes", async () => {
     const fm = await loadFrontmatter();
     const css = await Bun.file(TOKENS_CSS).text();
-    expect(css).not.toMatch(/\[data-theme/);
 
-    const mediaAt = css.indexOf("@media (prefers-color-scheme: light) {");
-    expect(mediaAt).toBeGreaterThan(0);
-    const rootBlock = css.slice(0, mediaAt);
-    const lightBlock = css.slice(mediaAt);
-    expect(rootBlock).toContain("color-scheme: dark");
+    // Plan 41 T1: the data-theme cascade replaces the plan-29 "no attribute
+    // selector" lock — stored light wins over the OS; the OS-light fallback
+    // applies only while the stored value is not dark.
+    const darkBlock = extractBlock(css, ":root {");
+    const lightBlock = extractBlock(css, ':root[data-theme="light"] {');
+    const mediaBlock = extractBlock(css, "@media (prefers-color-scheme: light) {");
+    expect(mediaBlock).toContain(':root:not([data-theme="dark"])');
+
+    // color-scheme stays in sync per branch.
+    expect(darkBlock).toContain("color-scheme: dark");
     expect(lightBlock).toContain("color-scheme: light");
+    expect(mediaBlock).toContain("color-scheme: light");
 
-    const rootVars = cssCustomProperties(rootBlock);
+    const darkVars = cssCustomProperties(darkBlock);
     const lightVars = cssCustomProperties(lightBlock);
+    const mediaVars = cssCustomProperties(mediaBlock);
 
     for (const [name, value] of Object.entries(fm.themes.dark.colors)) {
-      expect(rootVars[name]).toBe(value);
+      expect(darkVars[name]).toBe(value);
     }
+    // Both light branches carry the full light palette (kept in sync).
     for (const [name, value] of Object.entries(fm.themes.light.colors)) {
       expect(lightVars[name]).toBe(value);
+      expect(mediaVars[name]).toBe(value);
     }
   });
 
   test("spacing, rounded, and component vars are present on :root", async () => {
     const css = await Bun.file(TOKENS_CSS).text();
-    const mediaAt = css.indexOf("@media (prefers-color-scheme: light) {");
-    const rootVars = cssCustomProperties(css.slice(0, mediaAt));
+    const rootVars = cssCustomProperties(extractBlock(css, ":root {"));
 
     expect(rootVars["spacing-base"]).toBe("4px");
     expect(rootVars["spacing-24"]).toBe("96px");
@@ -187,9 +219,8 @@ describe("SSR STYLE token parity (plan 29 QC)", () => {
     expect(styleStart).toBeGreaterThan(0);
     const style = views.slice(styleStart, styleEnd);
 
-    const mediaAt = css.indexOf("@media (prefers-color-scheme: light) {");
-    const cssRoot = cssCustomPropertiesFromBlock(css.slice(0, mediaAt));
-    const cssLight = cssCustomPropertiesFromBlock(css.slice(mediaAt));
+    const cssRoot = cssCustomPropertiesFromBlock(extractBlock(css, ":root {"));
+    const cssLight = cssCustomPropertiesFromBlock(extractBlock(css, ':root[data-theme="light"] {'));
     const ssrMediaAt = style.indexOf("@media (prefers-color-scheme: light) {");
     const ssrRoot = cssCustomPropertiesFromBlock(style.slice(0, ssrMediaAt));
     const ssrLight = cssCustomPropertiesFromBlock(style.slice(ssrMediaAt));
