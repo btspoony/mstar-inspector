@@ -1170,6 +1170,19 @@ function settingsFailureNotice(err: unknown): string {
 }
 
 /**
+ * Plan 46 T7: the App-selected-image eligibility gate — ONE derivation shared
+ * by the settings display face (provider_catalog eligibility stamping) and
+ * the add-key/verify POST prechecks, so the UI and the server-side precheck
+ * can never disagree. Fail-closed: an unknown image id yields an undefined
+ * runtime → not omp → every provider row unavailable / every provider
+ * ineligible. Deliberately mirrors the display predicate only — `enabled` is
+ * the save-sandbox-image route's value domain and stays outside this gate.
+ */
+function isOmpRuntimeImage(sandboxImageId: string): boolean {
+  return getSandboxImage(sandboxImageId)?.runtime === "omp";
+}
+
+/**
  * Plain-text settings POST response (plan 29 T6: the settings page is
  * SPA-owned and read-only today — plan 31 wires the forms; the pinned POST
  * paths keep their full validation and mutation, and answer the SPA's
@@ -1298,7 +1311,7 @@ dashboardApp.get("/api/apps/:slug/settings", async (c) => {
     // through the custom-provider machinery; any other runtime would leave
     // every row unavailable (zero such rows this iteration — omp is the only
     // registry entry, and the persisted id is store-validated against it).
-    const ompRuntime = getSandboxImage(gate.app.sandbox_image_id)?.runtime === "omp";
+    const ompRuntime = isOmpRuntimeImage(gate.app.sandbox_image_id);
     return c.json({
       can_manage: true,
       ...base,
@@ -1395,6 +1408,9 @@ dashboardApp.get("/api/apps/:slug/models", async (c) => {
  * SPA add-key path (plan 31 T4): verify the as-typed key, then store. Failure
  * is 400 JSON with a structured reason (invalid_key / unreachable / unexpected /
  * unsupported_provider) and ZERO writes. The key is never logged or returned.
+ * Plan 46 T7: an App whose selected runtime image is not omp (unknown id
+ * included — fail-closed) is refused with unsupported_provider before any
+ * probe, mirroring the display face's eligibility gate.
  */
 dashboardApp.post("/api/apps/:slug/keys/verify", async (c) => {
   const gate = await requireAppSettings(c);
@@ -1404,6 +1420,15 @@ dashboardApp.post("/api/apps/:slug/keys/verify", async (c) => {
   const plainKey = typeof form.key === "string" ? form.key.trim() : "";
   if (!PROVIDER_IDS.includes(provider) || plainKey === "" || plainKey.length > MAX_PROVIDER_KEY_LENGTH) {
     return c.json({ ok: false, reason: "unexpected" as const }, 400);
+  }
+  // Plan 46 T7 (fail-closed server-side precheck): the App's selected runtime
+  // image must carry an omp runtime for ANY provider key to be eligible —
+  // the same gate the settings display face stamps into provider_catalog
+  // (isOmpRuntimeImage). Unknown image id → not omp → 400. The precheck
+  // reuses the existing closed reason enum (no new value, no new shape);
+  // zero writes.
+  if (!isOmpRuntimeImage(gate.app.sandbox_image_id)) {
+    return c.json({ ok: false, reason: "unsupported_provider" as const }, 400);
   }
   const store = createAppConfigStore(gate.db, c.env.DASHBOARD_ENCRYPTION_KEY);
   try {
@@ -1422,7 +1447,11 @@ dashboardApp.post("/api/apps/:slug/keys/verify", async (c) => {
 /**
  * The settings POST: the operations on the pinned action path, discriminated
  * by the forms' hidden `op` field. add-key = provider allowlist (400 on any
- * other id — the allowlist is the plan's Global Constraint) + non-empty key
+ * other id — the allowlist is the plan's Global Constraint) + the
+ * selected-image eligibility precheck (plan 46 T7: a selected image whose
+ * runtime is not omp — unknown id included, fail-closed — is a 400 with zero
+ * writes, the same gate the display face stamps into provider_catalog) +
+ * non-empty key
  * of at most MAX_PROVIDER_KEY_LENGTH characters (plan 15 input bounds — an
  * oversized key is a 400 with zero writes; the store guard beneath
  * is the backstop), then the store encrypts inside. save-chain = empty →
@@ -1473,6 +1502,20 @@ dashboardApp.post("/apps/:slug/settings", async (c) => {
         provider === ""
           ? "Pick a provider for the key."
           : `${provider} is not a supported provider — pick one from the list.`,
+        400,
+      );
+    }
+    // Plan 46 T7 (fail-closed server-side precheck): the App's selected
+    // runtime image must carry an omp runtime for ANY provider key to be
+    // eligible — the same gate the settings display face stamps into
+    // provider_catalog (isOmpRuntimeImage). Unknown image id → not omp →
+    // 400, zero writes. Plain-text family (native/legacy surface only — the
+    // SPA's add-key path is verify-first via /keys/verify).
+    if (!isOmpRuntimeImage(gate.app.sandbox_image_id)) {
+      return settingsPostResponse(
+        c,
+        gate.app.slug,
+        `${provider} is not available under this App's selected runtime image (${gate.app.sandbox_image_id}) — nothing was stored.`,
         400,
       );
     }
