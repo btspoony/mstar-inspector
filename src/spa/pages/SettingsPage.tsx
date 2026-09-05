@@ -53,6 +53,27 @@ type PendingAction =
   | { kind: "remove-key"; provider: string }
   | { kind: "remove-custom"; providerId: string };
 
+/**
+ * Plan 44 T3: one op's outcome, resolved back to the card (or form cluster)
+ * that produced it. Op feedback never rides the page-level notice channel —
+ * that stays reserved for background-reload failures (plan 38). `warn` never
+ * applies to op outcomes, so the kind narrows to success/error.
+ */
+type OpNotice = { kind: "success" | "error"; message: string };
+
+/**
+ * A card's inline op-feedback region (plan 44 T3): the page banner's markup,
+ * roles (alert/status) and notice tokens rendered INSIDE the card next to the
+ * actions that produced the outcome. Regions are per action cluster, so the
+ * feedback sits where the user is looking. Clear rule (pinned): a region's
+ * content is replaced wholesale by the next op targeting that same region —
+ * no manual clears, no cross-card resets.
+ */
+function NoticeRegion({ notice }: { notice: OpNotice | null }) {
+  if (!notice) return null;
+  return <PageNotice kind={notice.kind} message={notice.message} />;
+}
+
 export function SettingsPage({ boot, slug }: { boot: SpaBoot; slug: string }) {
   const locale = boot.locale;
   const [payload, setPayload] = useState<SettingsPayload | null>(null);
@@ -125,7 +146,7 @@ export function SettingsPage({ boot, slug }: { boot: SpaBoot; slug: string }) {
       {state === "error" ? <LoadFailedNotice locale={locale} /> : null}
       {notice ? <PageNotice kind={notice.kind} message={notice.message} /> : null}
       {state === "ok" && payload ? (
-        <SettingsView locale={locale} payload={payload} groups={groups} onNotice={setNotice} onReload={load} />
+        <SettingsView locale={locale} payload={payload} groups={groups} onReload={load} />
       ) : null}
     </div>
   );
@@ -157,86 +178,82 @@ function SettingsView({
   locale,
   payload,
   groups,
-  onNotice,
   onReload,
 }: {
   locale: SpaBoot["locale"];
   payload: SettingsPayload;
   groups: ModelOptionGroup[];
-  onNotice: (notice: { kind: NoticeKind; message: string } | null) => void;
   onReload: (options?: { background?: boolean }) => Promise<void>;
 }) {
   const { app } = payload;
   const base = `/dashboard/apps/${app.slug}/settings`;
   const [pending, setPending] = useState<PendingAction | null>(null);
   const [busy, setBusy] = useState(false);
-
-  async function submitSettings(fields: Record<string, string>): Promise<boolean> {
-    const { status, body } = await postForm(base, fields);
-    if (status >= 400) {
-      onNotice({ kind: "error", message: settingsErrorMessage(locale, body) });
-      await onReload({ background: true });
-      return false;
-    }
-    onNotice({ kind: "success", message: t(locale, "settings.changesSaved") });
-    await onReload({ background: true });
-    return true;
-  }
+  // Plan 44 T3: dialog-confirmed ops report into the card that owns the
+  // action (one notice state per card region). Form-submit outcomes render
+  // through their own form-local regions instead and never pass through here.
+  const [opsNotice, setOpsNotice] = useState<OpNotice | null>(null);
+  const [providersNotice, setProvidersNotice] = useState<OpNotice | null>(null);
+  const [chainsNotice, setChainsNotice] = useState<OpNotice | null>(null);
 
   /**
-   * Plan 44 T2: the draft chain panel owns its create feedback. Unlike
-   * submitSettings (whose outcome rides the global top notice until Task 3
-   * generalizes per-card notices), a rejected create resolves with the error
-   * message for INLINE rendering inside the draft panel — the draft and the
-   * typed name/chain survive for correction. Success keeps the shared saved
-   * notice. Both paths refresh through the background reload (plan-38
-   * contract: the card tree stays mounted, so the draft panel's state is
-   * never touched by the reload).
+   * Resolve the op's outcome to the caller (plan 44 T3): the card/cluster that
+   * submitted the fields renders it in its own region. A network-level POST
+   * failure (postForm throws before an outcome exists) resolves the
+   * load-failed copy so no op stays silent; a redirect hop navigates away
+   * before this resolves.
    */
-  async function submitDraftChain(fields: Record<string, string>): Promise<string | null> {
-    const { status, body } = await postForm(base, fields);
-    if (status >= 400) {
+  async function submitSettings(fields: Record<string, string>): Promise<OpNotice> {
+    try {
+      const { status, body } = await postForm(base, fields);
+      const outcome: OpNotice =
+        status >= 400
+          ? { kind: "error", message: settingsErrorMessage(locale, body) }
+          : { kind: "success", message: t(locale, "settings.changesSaved") };
       await onReload({ background: true });
-      return settingsErrorMessage(locale, body);
+      return outcome;
+    } catch {
+      return { kind: "error", message: t(locale, "common.loadFailed") };
     }
-    onNotice({ kind: "success", message: t(locale, "settings.changesSaved") });
-    await onReload({ background: true });
-    return null;
   }
 
-  // Plan 38: returns whether the key was verified AND stored. The refresh
+  // Plan 38: resolves whether the key was verified AND stored. The refresh
   // after the POST is a background reload (the card tree stays mounted), so a
   // failed verify keeps the add panel open with the typed key for correction
   // while the provider stays unconfigured; only success resets/closes the
-  // form via onDone.
-  async function submitVerify(fields: Record<string, string>): Promise<boolean> {
-    const { status, body } = await postForm(
-      `/dashboard/api/apps/${encodeURIComponent(app.slug)}/keys/verify`,
-      fields,
-    );
-    if (status >= 400) {
-      let reason = "unexpected";
-      try {
-        const parsed = JSON.parse(body) as { reason?: string };
-        if (typeof parsed.reason === "string") reason = parsed.reason;
-      } catch {
-        /* body is not JSON */
+  // form via onDone. The structured reason rides the providers card's region.
+  async function submitVerify(fields: Record<string, string>): Promise<OpNotice> {
+    try {
+      const { status, body } = await postForm(
+        `/dashboard/api/apps/${encodeURIComponent(app.slug)}/keys/verify`,
+        fields,
+      );
+      if (status >= 400) {
+        let reason = "unexpected";
+        try {
+          const parsed = JSON.parse(body) as { reason?: string };
+          if (typeof parsed.reason === "string") reason = parsed.reason;
+        } catch {
+          /* body is not JSON */
+        }
+        const outcome: OpNotice = { kind: "error", message: verifyReasonMessage(locale, reason) };
+        await onReload({ background: true });
+        return outcome;
       }
-      onNotice({ kind: "error", message: verifyReasonMessage(locale, reason) });
+      const outcome: OpNotice = { kind: "success", message: t(locale, "settings.keyVerified") };
       await onReload({ background: true });
-      return false;
+      return outcome;
+    } catch {
+      return { kind: "error", message: t(locale, "common.loadFailed") };
     }
-    onNotice({ kind: "success", message: t(locale, "settings.keyVerified") });
-    await onReload({ background: true });
-    return true;
   }
 
-  async function runPinned(path: string): Promise<void> {
-    await runPinnedWithBody(path, {});
+  async function runPinned(path: string): Promise<OpNotice> {
+    return runPinnedWithBody(path, {});
   }
 
   /**
-   * POST a pinned ops path and report the outcome through the notice channel.
+   * POST a pinned ops path and resolve the outcome to the calling card.
    * Options: `successMessage` differentiates an outcome the generic
    * "Changes saved." would misrepresent; `reload: false` skips the background
    * refetch when the follow-up settings GET is guaranteed to fail — a
@@ -247,15 +264,18 @@ function SettingsView({
     path: string,
     fields: Record<string, string>,
     { successMessage, reload = true }: { successMessage?: string; reload?: boolean } = {},
-  ): Promise<void> {
-    const { status, body } = await postForm(path, fields);
-    if (status >= 400) {
-      onNotice({ kind: "error", message: body.trim() || t(locale, "common.loadFailed") });
+  ): Promise<OpNotice> {
+    try {
+      const { status, body } = await postForm(path, fields);
+      const outcome: OpNotice =
+        status >= 400
+          ? { kind: "error", message: body.trim() || t(locale, "common.loadFailed") }
+          : { kind: "success", message: successMessage ?? t(locale, "settings.changesSaved") };
       if (reload) await onReload({ background: true });
-      return;
+      return outcome;
+    } catch {
+      return { kind: "error", message: t(locale, "common.loadFailed") };
     }
-    onNotice({ kind: "success", message: successMessage ?? t(locale, "settings.changesSaved") });
-    if (reload) await onReload({ background: true });
   }
 
   async function onConfirm(): Promise<void> {
@@ -264,24 +284,28 @@ function SettingsView({
     setBusy(true);
     try {
       if (action.kind === "remove-chain") {
-        await submitSettings({ op: "remove-chain", name: action.name });
+        setChainsNotice(await submitSettings({ op: "remove-chain", name: action.name }));
       } else if (action.kind === "remove-custom") {
-        await submitSettings({ op: "remove-custom-provider", provider_id: action.providerId });
+        setProvidersNotice(await submitSettings({ op: "remove-custom-provider", provider_id: action.providerId }));
       } else if (action.kind === "remove-key") {
-        await runPinnedWithBody(`/dashboard/apps/${app.slug}/settings/key/delete`, {
-          provider: action.provider,
-        });
+        setProvidersNotice(
+          await runPinnedWithBody(`/dashboard/apps/${app.slug}/settings/key/delete`, {
+            provider: action.provider,
+          }),
+        );
       } else if (action.kind === "delete") {
         // Irreversible outcome with its own copy: "Changes saved." reads wrong
         // after a delete, and the user stays on the deleted App's page.
         // reload: false — the deleted App's settings GET is a guaranteed 404.
-        await runPinnedWithBody(
-          `/dashboard/apps/${app.slug}/delete`,
-          {},
-          { successMessage: t(locale, "settings.deleteSuccess"), reload: false },
+        setOpsNotice(
+          await runPinnedWithBody(
+            `/dashboard/apps/${app.slug}/delete`,
+            {},
+            { successMessage: t(locale, "settings.deleteSuccess"), reload: false },
+          ),
         );
       } else {
-        await runPinned(`/dashboard/apps/${app.slug}/${action.kind}`);
+        setOpsNotice(await runPinned(`/dashboard/apps/${app.slug}/${action.kind}`));
       }
     } finally {
       setBusy(false);
@@ -300,7 +324,7 @@ function SettingsView({
       </div>
 
       {payload.can_manage ? (
-        <OpsCard locale={locale} payload={payload} onPending={setPending} />
+        <OpsCard locale={locale} payload={payload} onPending={setPending} notice={opsNotice} />
       ) : (
         <HealthCard locale={locale} payload={payload} />
       )}
@@ -315,14 +339,17 @@ function SettingsView({
             onVerify={submitVerify}
             onSettings={submitSettings}
             onPending={setPending}
+            notice={providersNotice}
+            onOutcome={setProvidersNotice}
           />
           <ChainsCard
             locale={locale}
             payload={payload}
             groups={groups}
             onSettings={submitSettings}
-            onCreateChain={submitDraftChain}
             onRemoveChain={(name) => setPending({ kind: "remove-chain", name })}
+            notice={chainsNotice}
+            onOutcome={setChainsNotice}
           />
           <SeatsCard locale={locale} payload={payload} onSettings={submitSettings} />
         </>
@@ -508,7 +535,7 @@ function RuntimeImageCard({
 }: {
   locale: SpaBoot["locale"];
   payload: SettingsPayload;
-  onSettings: (fields: Record<string, string>) => Promise<boolean>;
+  onSettings: (fields: Record<string, string>) => Promise<OpNotice>;
 }) {
   return (
     <Card>
@@ -536,36 +563,49 @@ function RuntimeImageEditor({
 }: {
   locale: SpaBoot["locale"];
   payload: SettingsManagePayload;
-  onSettings: (fields: Record<string, string>) => Promise<boolean>;
+  onSettings: (fields: Record<string, string>) => Promise<OpNotice>;
 }) {
   const [selected, setSelected] = useState(payload.app.sandbox_image_id);
+  // Plan 44 T3: the save outcome renders in this card, next to the trigger —
+  // the busy guard keeps the save button disabled while its POST is in flight.
+  const [notice, setNotice] = useState<OpNotice | null>(null);
+  const [busy, setBusy] = useState(false);
 
   useEffect(() => {
     setSelected(payload.app.sandbox_image_id);
   }, [payload.app.sandbox_image_id]);
 
+  async function save(): Promise<void> {
+    setBusy(true);
+    try {
+      setNotice(await onSettings({ op: "save-sandbox-image", sandbox_image_id: selected }));
+    } finally {
+      setBusy(false);
+    }
+  }
+
   return (
-    <div className="flex flex-wrap items-center gap-2">
-      <div className="min-w-64 max-w-xs">
-        <Select value={selected} onValueChange={setSelected}>
-          <SelectTrigger aria-label={t(locale, "settings.runtimeImage")}>
-            <SelectValue />
-          </SelectTrigger>
-          <SelectContent>
-            {payload.sandbox_images.map((image) => (
-              <SelectItem key={image.id} value={image.id}>
-                {image.id}
-              </SelectItem>
-            ))}
-          </SelectContent>
-        </Select>
+    <div className="flex flex-col gap-3">
+      <div className="flex flex-wrap items-center gap-2">
+        <div className="min-w-64 max-w-xs">
+          <Select value={selected} onValueChange={setSelected}>
+            <SelectTrigger aria-label={t(locale, "settings.runtimeImage")}>
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              {payload.sandbox_images.map((image) => (
+                <SelectItem key={image.id} value={image.id}>
+                  {image.id}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        </div>
+        <Button type="button" disabled={busy} onClick={() => void save()}>
+          {t(locale, "settings.saveRuntimeImage")}
+        </Button>
       </div>
-      <Button
-        type="button"
-        onClick={() => void onSettings({ op: "save-sandbox-image", sandbox_image_id: selected })}
-      >
-        {t(locale, "settings.saveRuntimeImage")}
-      </Button>
+      <NoticeRegion notice={notice} />
     </div>
   );
 }
@@ -574,10 +614,13 @@ function OpsCard({
   locale,
   payload,
   onPending,
+  notice,
 }: {
   locale: SpaBoot["locale"];
   payload: SettingsPayload;
   onPending: (action: PendingAction) => void;
+  /** Plan 44 T3: the confirmed ops outcome (pause/resume/disable/enable/delete — delete carries its own copy). */
+  notice: OpNotice | null;
 }) {
   const { app } = payload;
   const paused = app.status === "active" && !app.review_enabled;
@@ -588,32 +631,35 @@ function OpsCard({
         <CardDescription>{t(locale, "settings.opsCopy")}</CardDescription>
       </CardHeader>
       <CardContent className="flex flex-col gap-6">
-        <div className="flex flex-wrap gap-2">
-          {app.status === "active" ? (
-            paused ? (
-              <Button type="button" onClick={() => onPending({ kind: "resume" })}>
-                {t(locale, "settings.resumeReviews")}
+        <div className="flex flex-col gap-3">
+          <div className="flex flex-wrap gap-2">
+            {app.status === "active" ? (
+              paused ? (
+                <Button type="button" onClick={() => onPending({ kind: "resume" })}>
+                  {t(locale, "settings.resumeReviews")}
+                </Button>
+              ) : (
+                <Button type="button" variant="secondary" onClick={() => onPending({ kind: "pause" })}>
+                  {t(locale, "settings.pauseReviews")}
+                </Button>
+              )
+            ) : (
+              <p className="text-sm text-muted-foreground">{t(locale, "settings.disconnected")}</p>
+            )}
+            {app.status === "active" ? (
+              <Button type="button" variant="destructive-outline" onClick={() => onPending({ kind: "disable" })}>
+                {t(locale, "apps.actions.disable")}
               </Button>
             ) : (
-              <Button type="button" variant="secondary" onClick={() => onPending({ kind: "pause" })}>
-                {t(locale, "settings.pauseReviews")}
+              <Button type="button" variant="secondary" onClick={() => onPending({ kind: "enable" })}>
+                {t(locale, "apps.actions.enable")}
               </Button>
-            )
-          ) : (
-            <p className="text-sm text-muted-foreground">{t(locale, "settings.disconnected")}</p>
-          )}
-          {app.status === "active" ? (
-            <Button type="button" variant="destructive-outline" onClick={() => onPending({ kind: "disable" })}>
-              {t(locale, "apps.actions.disable")}
+            )}
+            <Button type="button" variant="destructive" onClick={() => onPending({ kind: "delete" })}>
+              {t(locale, "apps.actions.delete")}
             </Button>
-          ) : (
-            <Button type="button" variant="secondary" onClick={() => onPending({ kind: "enable" })}>
-              {t(locale, "apps.actions.enable")}
-            </Button>
-          )}
-          <Button type="button" variant="destructive" onClick={() => onPending({ kind: "delete" })}>
-            {t(locale, "apps.actions.delete")}
-          </Button>
+          </div>
+          <NoticeRegion notice={notice} />
         </div>
         <HealthBody locale={locale} payload={payload} />
       </CardContent>
@@ -639,12 +685,18 @@ function ProvidersCard({
   onVerify,
   onSettings,
   onPending,
+  notice,
+  onOutcome,
 }: {
   locale: SpaBoot["locale"];
   payload: SettingsManagePayload;
-  onVerify: (fields: Record<string, string>) => Promise<boolean>;
-  onSettings: (fields: Record<string, string>) => Promise<boolean>;
+  onVerify: (fields: Record<string, string>) => Promise<OpNotice>;
+  onSettings: (fields: Record<string, string>) => Promise<OpNotice>;
   onPending: (action: PendingAction) => void;
+  /** Plan 44 T3: the dialog-confirmed removes' outcome (remove-key / remove-custom). */
+  notice: OpNotice | null;
+  /** Plan 44 T3: where the add-flow forms (verify / template) report their outcome. */
+  onOutcome: (notice: OpNotice) => void;
 }) {
   const [addOpen, setAddOpen] = useState(false);
   const [customOpen, setCustomOpen] = useState(false);
@@ -669,9 +721,14 @@ function ProvidersCard({
           payload={payload}
           onVerify={onVerify}
           onSettings={onSettings}
+          onOutcome={onOutcome}
           open={addOpen}
           onOpenChange={setAddOpen}
         />
+        {/* The card's region sits directly under the add panel: verify /
+            template outcomes stay next to their submit button while the panel
+            is open, and survive its success-close (unlike panel-local state). */}
+        <NoticeRegion notice={notice} />
         {payload.configured_providers.length === 0 ? (
           <p className="text-sm text-muted-foreground">{t(locale, "settings.noConfiguredProviders")}</p>
         ) : (
@@ -792,13 +849,15 @@ function AddProviderSection({
   payload,
   onVerify,
   onSettings,
+  onOutcome,
   open,
   onOpenChange,
 }: {
   locale: SpaBoot["locale"];
   payload: SettingsManagePayload;
-  onVerify: (fields: Record<string, string>) => Promise<boolean>;
-  onSettings: (fields: Record<string, string>) => Promise<boolean>;
+  onVerify: (fields: Record<string, string>) => Promise<OpNotice>;
+  onSettings: (fields: Record<string, string>) => Promise<OpNotice>;
+  onOutcome: (notice: OpNotice) => void;
   open: boolean;
   onOpenChange: (open: boolean) => void;
 }) {
@@ -882,6 +941,7 @@ function AddProviderSection({
                 custom={customById[selected.id]}
                 onVerify={onVerify}
                 onSettings={onSettings}
+                onOutcome={onOutcome}
                 onDone={() => {
                   setSelectedId(undefined);
                   onOpenChange(false);
@@ -915,20 +975,62 @@ function ProviderConfigForm({
   custom,
   onVerify,
   onSettings,
+  onOutcome,
   onDone,
 }: {
   locale: SpaBoot["locale"];
   provider: CatalogProvider;
   storedKey: SettingsManagePayload["keys"][number] | undefined;
   custom: SettingsManagePayload["custom_providers"][number] | undefined;
-  onVerify: (fields: Record<string, string>) => Promise<boolean>;
-  onSettings: (fields: Record<string, string>) => Promise<boolean>;
+  onVerify: (fields: Record<string, string>) => Promise<OpNotice>;
+  onSettings: (fields: Record<string, string>) => Promise<OpNotice>;
+  onOutcome: (notice: OpNotice) => void;
   onDone: () => void;
 }) {
   const [key, setKey] = useState("");
   const [accountId, setAccountId] = useState("");
   const [baseUrl, setBaseUrl] = useState(provider.base_url ?? "");
+  const [busy, setBusy] = useState(false);
   const formKind = providerFormKind(provider);
+
+  // Plan 44 T3: both add-flow forms report through the providers card's
+  // region (directly beneath this panel), so the outcome survives the
+  // success-close; a rejected submit keeps the typed input for correction.
+  async function submitTemplate(): Promise<void> {
+    setBusy(true);
+    try {
+      const outcome = await onSettings({
+        op: "add-template-provider",
+        template_id: provider.id,
+        base_url: baseUrl,
+        account_id: accountId,
+        key,
+      });
+      onOutcome(outcome);
+      if (outcome.kind === "success") {
+        setKey("");
+        setAccountId("");
+        setBaseUrl("");
+        onDone();
+      }
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function submitKey(): Promise<void> {
+    setBusy(true);
+    try {
+      const outcome = await onVerify({ provider: provider.id, key });
+      onOutcome(outcome);
+      if (outcome.kind === "success") {
+        setKey("");
+        onDone();
+      }
+    } finally {
+      setBusy(false);
+    }
+  }
 
   if (formKind === "template") {
     // The effective base URL mirrors the save flow: the typed override when
@@ -941,22 +1043,7 @@ function ProviderConfigForm({
         className="flex flex-col gap-3"
         onSubmit={(event) => {
           event.preventDefault();
-          void onSettings({
-            op: "add-template-provider",
-            template_id: provider.id,
-            base_url: baseUrl,
-            account_id: accountId,
-            key,
-          }).then((ok) => {
-            // A rejected save (400 keeps the notice) must NOT wipe the typed
-            // account id / key the user needs to fix (QC wave, seat3).
-            if (ok) {
-              setKey("");
-              setAccountId("");
-              setBaseUrl("");
-              onDone();
-            }
-          });
+          void submitTemplate();
         }}
       >
         {custom ? (
@@ -995,7 +1082,7 @@ function ProviderConfigForm({
             placeholder={t(locale, "settings.apiKeyPlaceholder")}
           />
         </label>
-        <Button type="submit">{t(locale, "settings.addTemplate", { label: provider.label })}</Button>
+        <Button type="submit" disabled={busy}>{t(locale, "settings.addTemplate", { label: provider.label })}</Button>
       </form>
     );
   }
@@ -1009,16 +1096,7 @@ function ProviderConfigForm({
       className="flex flex-col gap-3"
       onSubmit={(event) => {
         event.preventDefault();
-        void onVerify({ provider: provider.id, key }).then((ok) => {
-          // The post-submit reload is background (the tree stays mounted), so
-          // a failed verify keeps the typed key for correction — the provider
-          // stays unconfigured and the structured reason is shown. Success
-          // closes/resets deliberately via onDone.
-          if (ok) {
-            setKey("");
-            onDone();
-          }
-        });
+        void submitKey();
       }}
     >
       {storedKey ? (
@@ -1036,7 +1114,7 @@ function ProviderConfigForm({
           placeholder={t(locale, "settings.apiKeyPlaceholder")}
         />
       </label>
-      <Button type="submit">{t(locale, "settings.addKey")}</Button>
+      <Button type="submit" disabled={busy}>{t(locale, "settings.addKey")}</Button>
     </form>
   );
 }
@@ -1052,13 +1130,43 @@ function CustomExpand({
   payload: SettingsManagePayload;
   expanded: boolean;
   onToggle: () => void;
-  onSettings: (fields: Record<string, string>) => Promise<boolean>;
+  onSettings: (fields: Record<string, string>) => Promise<OpNotice>;
 }) {
   const [providerId, setProviderId] = useState("");
   const [baseUrl, setBaseUrl] = useState("");
   const [api, setApi] = useState(payload.custom_provider_api_ids[0] ?? "");
   const [modelIds, setModelIds] = useState("");
   const [key, setKey] = useState("");
+  // Plan 44 T3: the custom declaration's outcome renders inside its own form
+  // (this container stays mounted, unlike the add panel) — the card's region
+  // above the configured rows is too far from this form's submit button.
+  const [notice, setNotice] = useState<OpNotice | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  async function submit(): Promise<void> {
+    setBusy(true);
+    try {
+      const outcome = await onSettings({
+        op: "add-custom-provider",
+        provider_id: providerId,
+        base_url: baseUrl,
+        api,
+        model_ids: modelIds,
+        key,
+      });
+      setNotice(outcome);
+      // QC wave (seat3): a rejected save keeps the typed input for
+      // correction — only a successful save clears the form.
+      if (outcome.kind === "success") {
+        setProviderId("");
+        setBaseUrl("");
+        setModelIds("");
+        setKey("");
+      }
+    } finally {
+      setBusy(false);
+    }
+  }
 
   return (
     <div className="rounded-md border p-3">
@@ -1071,23 +1179,7 @@ function CustomExpand({
           className="mt-3 flex flex-col gap-3"
           onSubmit={(event) => {
             event.preventDefault();
-            void onSettings({
-              op: "add-custom-provider",
-              provider_id: providerId,
-              base_url: baseUrl,
-              api,
-              model_ids: modelIds,
-              key,
-            }).then((ok) => {
-              // QC wave (seat3): a rejected save keeps the typed input for
-              // correction — only a successful save clears the form.
-              if (ok) {
-                setProviderId("");
-                setBaseUrl("");
-                setModelIds("");
-                setKey("");
-              }
-            });
+            void submit();
           }}
         >
           <label className="flex flex-col gap-1.5 text-sm font-medium">
@@ -1132,7 +1224,8 @@ function CustomExpand({
               placeholder={t(locale, "settings.apiKeyPlaceholder")}
             />
           </label>
-          <Button type="submit">{t(locale, "settings.addCustomProvider")}</Button>
+          <Button type="submit" disabled={busy}>{t(locale, "settings.addCustomProvider")}</Button>
+          <NoticeRegion notice={notice} />
         </form>
       ) : null}
     </div>
@@ -1155,15 +1248,19 @@ function ChainsCard({
   payload,
   groups,
   onSettings,
-  onCreateChain,
   onRemoveChain,
+  notice,
+  onOutcome,
 }: {
   locale: SpaBoot["locale"];
   payload: SettingsManagePayload;
   groups: ModelOptionGroup[];
-  onSettings: (fields: Record<string, string>) => Promise<boolean>;
-  onCreateChain: (fields: Record<string, string>) => Promise<string | null>;
+  onSettings: (fields: Record<string, string>) => Promise<OpNotice>;
   onRemoveChain: (name: string) => void;
+  /** Plan 44 T3: the dialog-confirmed remove-chain outcome. */
+  notice: OpNotice | null;
+  /** Plan 44 T3: where the draft panel reports its success (the draft closes, so its panel cannot render it). */
+  onOutcome: (notice: OpNotice) => void;
 }) {
   // Plan 39: Default and named chains are peer tabs. The selection coerces
   // through activeChainTabId so a delete or a stale payload lands on the
@@ -1232,7 +1329,7 @@ function ChainsCard({
               locale={locale}
               groups={groups}
               stored={payload.model_chain}
-              onSave={(chain) => void onSettings({ op: "save-chain", model_chain: chain })}
+              onSave={(chain) => onSettings({ op: "save-chain", model_chain: chain })}
             />
           </TabsContent>
           {namedTabs.map((tab) => (
@@ -1247,7 +1344,7 @@ function ChainsCard({
                 locale={locale}
                 groups={groups}
                 stored={tab.chain}
-                onSave={(value) => void onSettings({ op: "add-chain", name: tab.id, chain: value })}
+                onSave={(value) => onSettings({ op: "add-chain", name: tab.id, chain: value })}
               />
             </TabsContent>
           ))}
@@ -1256,7 +1353,8 @@ function ChainsCard({
               <DraftChainPanel
                 locale={locale}
                 groups={groups}
-                onCreate={onCreateChain}
+                onCreate={onSettings}
+                onOutcome={onOutcome}
                 onDiscard={() => setDraftOpen(false)}
                 onCreated={(created) => {
                   // Success: the reload has already landed (the create
@@ -1270,6 +1368,10 @@ function ChainsCard({
             </TabsContent>
           ) : null}
         </Tabs>
+        {/* The card's region (plan 44 T3): the dialog-confirmed remove and the
+            draft's forwarded save success render here, below every tabpanel —
+            the editors themselves render their save outcomes in-panel. */}
+        <NoticeRegion notice={notice} />
       </CardContent>
     </Card>
   );
@@ -1291,7 +1393,7 @@ function SeatsCard({
 }: {
   locale: SpaBoot["locale"];
   payload: SettingsManagePayload;
-  onSettings: (fields: Record<string, string>) => Promise<boolean>;
+  onSettings: (fields: Record<string, string>) => Promise<OpNotice>;
 }) {
   const tabs = modelChainTabs(payload.model_chains);
   const namedTabs = tabs.filter((tab) => !tab.isDefault);
@@ -1313,6 +1415,23 @@ function SeatsCard({
     setSeats(seatRoleValues(payload.model_role_ids, payload.model_roles, tabs));
   }, [tabIdSetKey]);
 
+  // Plan 44 T3: the seat save reports in this card, under its own trigger.
+  const [notice, setNotice] = useState<OpNotice | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  async function submit(): Promise<void> {
+    setBusy(true);
+    try {
+      const fields: Record<string, string> = { op: "save-roles" };
+      for (const role of payload.model_role_ids) {
+        fields[`role_${role}`] = seatSelectValue(tabs, seats[role]);
+      }
+      setNotice(await onSettings(fields));
+    } finally {
+      setBusy(false);
+    }
+  }
+
   return (
     <Card>
       <CardHeader>
@@ -1324,11 +1443,7 @@ function SeatsCard({
           className="flex flex-col gap-3"
           onSubmit={(event) => {
             event.preventDefault();
-            const fields: Record<string, string> = { op: "save-roles" };
-            for (const role of payload.model_role_ids) {
-              fields[`role_${role}`] = seatSelectValue(tabs, seats[role]);
-            }
-            void onSettings(fields);
+            void submit();
           }}
         >
           {payload.model_role_ids.map((role) => (
@@ -1352,7 +1467,8 @@ function SeatsCard({
               </Select>
             </label>
           ))}
-          <Button type="submit">{t(locale, "settings.saveRoleModels")}</Button>
+          <Button type="submit" disabled={busy}>{t(locale, "settings.saveRoleModels")}</Button>
+          <NoticeRegion notice={notice} />
         </form>
       </CardContent>
     </Card>
@@ -1360,33 +1476,40 @@ function SeatsCard({
 }
 
 /**
- * The draft chain tab's panel (plan 44 T2): the full editor inside its own
- * tabpanel — the name field first, then the model builder (the components a
- * named chain's panel uses verbatim). 保存 posts the unchanged op=add-chain
- * with the entered name + built chain; a rejected create renders its error
- * INLINE (role=alert via PageNotice) and keeps the draft + typed input; only
- * success hands the trimmed stored name back so the real tab is selected.
- * 放弃 discards the draft without confirmation (documented; matches the
- * accepted disclosure-discard behavior) — the selection coerces through
- * activeChainTabId once the draft tab is gone.
+ * The draft chain tab's panel (plan 44 T2, unified with the T3 pattern): the
+ * full editor inside its own tabpanel — the name field first, then the model
+ * builder (the components a named chain's panel uses verbatim). 保存 posts
+ * the unchanged op=add-chain with the entered name + built chain; a rejected
+ * create renders its error INLINE through ChainEditor's own region
+ * (role=alert, inside this panel) and keeps the draft + typed input; only
+ * success hands the trimmed stored name back so the real tab is selected,
+ * forwarding the saved outcome to the card's region (the panel is about to
+ * unmount). 放弃 discards the draft without confirmation (documented;
+ * matches the accepted disclosure-discard behavior) — the selection coerces
+ * through activeChainTabId once the draft tab is gone. The busy gate covers
+ * both triggers while the create POST is in flight, so a discard can never
+ * race a resolving save into selecting the created tab.
  */
 function DraftChainPanel({
   locale,
   groups,
   onCreate,
+  onOutcome,
   onDiscard,
   onCreated,
 }: {
   locale: SpaBoot["locale"];
   groups: ModelOptionGroup[];
-  /** Resolves with the inline error message on failure, null on success. */
-  onCreate: (fields: Record<string, string>) => Promise<string | null>;
+  /** The shared settings POST (op=add-chain create); resolves the op outcome. */
+  onCreate: (fields: Record<string, string>) => Promise<OpNotice>;
+  /** Forwards the SUCCESS outcome to the chains card's region. */
+  onOutcome: (notice: OpNotice) => void;
   onDiscard: () => void;
   /** Fired after a successful create (the reload has landed) with the stored name. */
   onCreated: (name: string) => void;
 }) {
   const [name, setName] = useState("");
-  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
   return (
     <div className="flex flex-col gap-3">
       <label className="flex flex-col gap-1.5 text-sm font-medium">
@@ -1403,19 +1526,25 @@ function DraftChainPanel({
         groups={groups}
         stored={null}
         onSave={(value) => {
-          void onCreate({ op: "add-chain", name, chain: value }).then((failure) => {
-            // A 400 keeps the draft and the typed name/chain for correction —
-            // the failure renders inline instead of the top notice. The
-            // trimmed name is what the server stored (it trims before
-            // validating), so that is the real tab's id.
-            setError(failure);
-            if (failure === null) onCreated(name.trim());
-          });
+          setBusy(true);
+          return onCreate({ op: "add-chain", name, chain: value })
+            .then((outcome) => {
+              // The trimmed name is what the server stored (it trims before
+              // validating), so that is the real tab's id. Errors render
+              // through ChainEditor's region below the save button.
+              if (outcome.kind === "success") {
+                onOutcome(outcome);
+                onCreated(name.trim());
+              }
+              return outcome;
+            })
+            .finally(() => {
+              setBusy(false);
+            });
         }}
         saveLabel={t(locale, "settings.saveChain")}
       />
-      {error ? <PageNotice kind="error" message={error} /> : null}
-      <Button type="button" variant="ghost" className="self-start" onClick={onDiscard}>
+      <Button type="button" variant="ghost" className="self-start" disabled={busy} onClick={onDiscard}>
         {t(locale, "settings.discardChain")}
       </Button>
     </div>
@@ -1432,16 +1561,31 @@ function ChainEditor({
   locale: SpaBoot["locale"];
   groups: ModelOptionGroup[];
   stored: string | null;
-  onSave: (chain: string) => void;
+  /** Resolves the save outcome (plan 44 T3): rendered in this editor's region. */
+  onSave: (chain: string) => Promise<OpNotice>;
   saveLabel?: string;
 }) {
   const [chain, setChain] = useState(() => splitModelChain(stored));
   const [pick, setPick] = useState<string | undefined>(undefined);
+  // Plan 44 T3: each editor instance owns its region — a chain save's outcome
+  // renders inside its own tabpanel (the user-reported 400 case), never on
+  // the page top. The next save replaces the content (replace-on-submit).
+  const [notice, setNotice] = useState<OpNotice | null>(null);
+  const [busy, setBusy] = useState(false);
   const probeProviders = groups.filter((group) => group.source === "probe");
 
   useEffect(() => {
     setChain(splitModelChain(stored));
   }, [stored]);
+
+  async function save(): Promise<void> {
+    setBusy(true);
+    try {
+      setNotice(await onSave(chain.join(", ")));
+    } finally {
+      setBusy(false);
+    }
+  }
 
   return (
     <div className="flex flex-col gap-3">
@@ -1500,9 +1644,10 @@ function ChainEditor({
           {t(locale, "settings.addToChain")}
         </Button>
       </div>
-      <Button type="button" onClick={() => onSave(chain.join(", "))}>
+      <Button type="button" disabled={busy} onClick={() => void save()}>
         {saveLabel ?? t(locale, "settings.saveChain")}
       </Button>
+      <NoticeRegion notice={notice} />
     </div>
   );
 }

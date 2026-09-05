@@ -188,10 +188,11 @@ describe("configured providers + catalog add flow (plan 38 T2)", () => {
     expect(source).toContain("verifyReasonMessage(locale, reason)");
     // Forms reset and close only on success — a rejected submit keeps the
     // typed input and the add selection while the background reload refreshes
-    // data in place.
-    expect(source).toContain("if (ok) {");
+    // data in place (plan 44 T3: the outcome literal replaces the old
+    // boolean, and the success branch keys off the outcome kind).
+    expect(source).toContain('if (outcome.kind === "success") {');
     expect(source).toContain("await onReload({ background: true })");
-    expect(source).toContain("Promise<boolean>");
+    expect(source).toContain("Promise<OpNotice>");
   });
 
   test("op-triggered reloads are background: the card tree stays mounted across a failed verify (QC fix wave 1 F-001)", () => {
@@ -470,15 +471,20 @@ describe("chain draft peer tab (plan 44 T2)", () => {
     // call) with the shared 保存模型链 label semantics.
     expect(panelBody).toContain('op: "add-chain", name, chain: value');
     expect(panelBody).toContain('saveLabel={t(locale, "settings.saveChain")}');
-    // A rejected create renders INLINE (role=alert via PageNotice) and keeps
-    // the draft + typed input — only success hands the trimmed stored name
-    // back so the real tab is selected.
-    expect(panelBody).toContain("setError(failure)");
-    expect(panelBody).toContain('<PageNotice kind="error" message={error} />');
+    // Plan 44 T3 unification: a rejected create renders INLINE through
+    // ChainEditor's own region (inside this panel) and keeps the draft +
+    // typed input; success forwards the saved outcome to the card's region
+    // (the panel unmounts) and hands the trimmed stored name back so the
+    // real tab is selected.
+    expect(panelBody).toContain('outcome.kind === "success"');
+    expect(panelBody).toContain("onOutcome(outcome)");
     expect(panelBody).toContain("onCreated(name.trim())");
-    // 放弃 discards through a ghost button without confirmation.
+    // 放弃 discards through a ghost button without confirmation — gated by
+    // the same busy window as the save, so a discard can never race a
+    // resolving create into selecting the created tab.
     expect(panelBody).toContain('t(locale, "settings.discardChain")}');
     expect(panelBody).toContain('variant="ghost"');
+    expect(panelBody).toContain("disabled={busy}");
     // The draft panel mounts inside its own forceMount TabsContent; the
     // discard's only state effect is closing the draft — the selection then
     // coerces through activeChainTabId (plan-39 pin) back to Default.
@@ -661,11 +667,12 @@ describe("App workflow boundaries (plan 40 T2)", () => {
 
   test("successful configuration saves surface success feedback; failures keep the structured error", () => {
     const source = readFileSync(join(import.meta.dir, "../../src/spa/pages/SettingsPage.tsx"), "utf8");
-    // Success is no longer silent: the notice channel reports a saved change.
+    // Success is no longer silent — and since plan 44 T3 it is section-scoped:
+    // handlers resolve the saved outcome to the card that caused it.
     expect(source).toContain('successMessage ?? t(locale, "settings.changesSaved")');
     expect(t("en", "settings.changesSaved")).toBe("Changes saved.");
     expect(t("zh_CN", "settings.changesSaved")).toBe("更改已保存。");
-    // Failure feedback is unchanged: structured API errors through the notice.
+    // Failure feedback is unchanged: structured API errors resolve in-section.
     expect(source).toContain("message: settingsErrorMessage(locale, body)");
   });
 
@@ -720,5 +727,134 @@ describe("notice channel (plan 40 T3 reviewer handoffs)", () => {
     expect(t("zh_CN", "settings.deleteSuccess")).toContain("已删除");
     // Configuration saves keep the generic saved notice.
     expect(source).toContain('successMessage ?? t(locale, "settings.changesSaved")');
+  });
+});
+
+describe("section-scoped op feedback (plan 44 T3)", () => {
+  const settingsSource = () => readFileSync(join(import.meta.dir, "../../src/spa/pages/SettingsPage.tsx"), "utf8");
+
+  test("op outcomes resolve to the originating card; the top notice is page-level reload failure only", () => {
+    const source = settingsSource();
+    // Handlers RESOLVE the outcome (OpNotice) instead of pushing to the page
+    // channel — nothing outside load() writes the top notice anymore.
+    expect(source).not.toContain("onNotice");
+    expect(source).toContain("type OpNotice =");
+    expect(source).toContain("Promise<OpNotice>");
+    // The only top-notice writes left are load()'s two background-failure
+    // paths (parse failure + request failure) — the plan-38 page-level
+    // channel for background reloads. Ops never land there.
+    expect(source.match(/setNotice\(\{/g)?.length).toBe(2);
+    // Carry-over (Task 2 review): a network-level POST failure (postForm
+    // throws before an outcome exists) resolves the load-failed copy so the
+    // op's card still reports — no silent failure surface.
+    expect(source).toContain('return { kind: "error", message: t(locale, "common.loadFailed") };');
+    // The in-card copy is dictionary-backed in both locales.
+    expect(t("en", "common.loadFailed")).toContain("load");
+    expect(t("zh_CN", "common.loadFailed")).toContain("无法加载");
+  });
+
+  test("each card owns an inline notice region: runtime image, providers, chains, seats, ops", () => {
+    const source = settingsSource();
+    // The shared local region component wraps PageNotice, so every region
+    // inherits the banner's alert/status roles and notice tokens (WCAG
+    // 4.1.3 — pinned on PageNotice.tsx itself in the plan-40 describe).
+    expect(source).toContain("function NoticeRegion");
+    expect(source).toContain("return <PageNotice kind={notice.kind} message={notice.message} />;");
+    // Runtime image: region inside the editor, next to the save trigger.
+    const runtimeBody = source.slice(
+      source.indexOf("function RuntimeImageEditor"),
+      source.indexOf("function OpsCard"),
+    );
+    expect(runtimeBody).toContain("<NoticeRegion notice={notice} />");
+    // Ops zone: region directly under the pause/disable/delete button row.
+    const opsBody = source.slice(source.indexOf("function OpsCard"), source.indexOf("function ProvidersCard"));
+    expect(opsBody).toContain("<NoticeRegion notice={notice} />");
+    // Providers: region directly under the add panel (serves the verify /
+    // template forms and the dialog-confirmed removes), above the rows.
+    const providersBody = source.slice(
+      source.indexOf("function ProvidersCard"),
+      source.indexOf("function ConfiguredKeyRow"),
+    );
+    expect(providersBody).toContain("<NoticeRegion notice={notice} />");
+    // Chains: card region below every tabpanel (dialog removes + draft
+    // success) — the editors' own regions are pinned in the regression test.
+    const chainsBody = source.slice(source.indexOf("function ChainsCard"), source.indexOf("function SeatsCard"));
+    expect(chainsBody).toContain("<NoticeRegion notice={notice} />");
+    // Seats: region inside the seat form, under its save button.
+    const seatsBody = source.slice(source.indexOf("function SeatsCard"), source.indexOf("function DraftChainPanel"));
+    expect(seatsBody).toContain("<NoticeRegion notice={notice} />");
+  });
+
+  test("the chains 400 renders inside the chains card (user-reported regression pin)", () => {
+    const source = settingsSource();
+    // ChainEditor is shared by the Default tab, every named tab and the draft
+    // panel — each instance resolves its save outcome into its OWN region,
+    // inside the tabpanel, inside the chains card. A rejected save-chain /
+    // add-chain (e.g. the not_in_verified_models 400) can no longer surface
+    // on the page top.
+    const editorBody = source.slice(source.indexOf("function ChainEditor"));
+    expect(editorBody).toContain("setNotice(await onSave(chain.join(\", \")))");
+    expect(editorBody).toContain("<NoticeRegion notice={notice} />");
+    // The region renders after the save trigger — the feedback sits where the
+    // user is looking when the outcome lands.
+    const buttonPos = editorBody.indexOf('saveLabel ?? t(locale, "settings.saveChain")');
+    const regionPos = editorBody.indexOf("<NoticeRegion notice={notice} />");
+    expect(buttonPos).toBeGreaterThan(-1);
+    expect(regionPos).toBeGreaterThan(buttonPos);
+    // Every chain panel mounts through ChainEditor (Default shown here; the
+    // named-tab map and the draft panel reuse it in the same card).
+    const chainsBody = source.slice(source.indexOf("function ChainsCard"), source.indexOf("function SeatsCard"));
+    expect(chainsBody).toContain("<ChainEditor");
+    expect(chainsBody).toContain('onSave={(chain) => onSettings({ op: "save-chain", model_chain: chain })}');
+  });
+
+  test("dialog-confirmed ops report into the card that owns the action", () => {
+    const source = settingsSource();
+    // remove-chain → chains card; remove-key / remove-custom → providers
+    // card; pause/resume/disable/enable/delete (delete with its own copy) →
+    // ops zone. Each card renders its own notice state.
+    const confirmBody = source.slice(source.indexOf("async function onConfirm"), source.indexOf("const confirmCopy"));
+    expect(confirmBody).toContain('setChainsNotice(await submitSettings({ op: "remove-chain", name: action.name }))');
+    expect(confirmBody).toContain("setProvidersNotice(");
+    expect(confirmBody).toContain("setOpsNotice(");
+    expect(source).toContain("notice={opsNotice}");
+    expect(source).toContain("notice={providersNotice}");
+    expect(source).toContain("notice={chainsNotice}");
+    // The add-flow forms forward their outcome into the providers card's
+    // region; the draft panel forwards its SUCCESS into the chains card's
+    // region (its own panel unmounts on success).
+    expect(source).toContain("onOutcome={setProvidersNotice}");
+    expect(source).toContain("onOutcome={setChainsNotice}");
+  });
+
+  test("save triggers carry a busy guard; every op replaces its region (stale-error rule)", () => {
+    const source = settingsSource();
+    // One guard per form: the trigger disables while its own POST is in
+    // flight (the confirm dialog's pre-existing disabled={busy} guard stays).
+    const runtimeBody = source.slice(
+      source.indexOf("function RuntimeImageEditor"),
+      source.indexOf("function OpsCard"),
+    );
+    expect(runtimeBody).toContain("disabled={busy}");
+    const providerFormBody = source.slice(
+      source.indexOf("function ProviderConfigForm"),
+      source.indexOf("function CustomExpand"),
+    );
+    expect(providerFormBody).toContain("disabled={busy}");
+    const customBody = source.slice(
+      source.indexOf("function CustomExpand"),
+      source.indexOf("const DRAFT_CHAIN_TAB_ID"),
+    );
+    expect(customBody).toContain("disabled={busy}");
+    const editorBody = source.slice(source.indexOf("function ChainEditor"));
+    expect(editorBody).toContain("disabled={busy}");
+    const seatsBody = source.slice(source.indexOf("function SeatsCard"), source.indexOf("function DraftChainPanel"));
+    expect(seatsBody).toContain("disabled={busy}");
+    // Stale-error rule (pinned): a region's content is replaced wholesale by
+    // the next op targeting that same region — setters always receive the
+    // fresh outcome, no manual clears, no cross-card resets.
+    expect(source).toContain("setNotice(await onSettings({ op: \"save-sandbox-image\", sandbox_image_id: selected }))");
+    expect(source).toContain("setNotice(await onSave(chain.join(\", \")))");
+    expect(source).toContain("setNotice(await onSettings(fields))");
   });
 });
