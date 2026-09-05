@@ -17,8 +17,7 @@ export const zhCN: Dictionary = {
     members: "成员",
     /** 目标语言的标签 — 切换按钮显示要切换到的语言（中文界面显示 EN）。 */
     language: "EN",
-    /** 主题切换（plan 41）：静态标签；状态与动作在 aria 文案中表达。 */
-    themeToggle: "深色/浅色模式切换",
+    /** 主题切换（plan 41/44）：仅图标的按钮；状态与动作在 aria 文案中表达。 */
     /** {mode} = 当前生效主题，{target} = 点击后切换到的主题。 */
     themeToggleAria: "当前显示模式：{mode}，点击切换为{target}",
     themeDark: "深色",
@@ -344,7 +343,8 @@ export const zhCN: Dictionary = {
     addChain: "新建链",
     chainName: "链名称",
     chainNamePlaceholder: "例如 deep-review",
-    addNamedChain: "添加命名链",
+    draftChain: "新链",
+    discardChain: "放弃",
     defaultChain: "Default 链",
     seats: "席位链",
     seatsCopy: "每个审查席位运行在 Default 链或显式选择的命名链上 — 其命名链被移除的席位会回退到 Default。",
