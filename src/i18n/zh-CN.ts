@@ -107,6 +107,12 @@ export const zhCN: Dictionary = {
       delivery: "投递 {time}",
       deliveryNever: "从未投递",
       rejected24h: "24 小时内 {count} 次拒绝",
+      outcome: {
+        ok: "正常",
+        paused: "已暂停",
+        ignored: "已忽略",
+        rejected: "已拒绝",
+      },
     },
     tableName: "应用",
     tableStatus: "状态",

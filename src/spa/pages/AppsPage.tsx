@@ -4,6 +4,7 @@ import { Button } from "@/components/ui/button";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { fetchJson } from "../api";
 import type { SpaBoot } from "../boot";
+import { deliveryOutcomeLabel } from "../delivery-outcome";
 import { formatRelativeTime } from "../relative-time";
 import { spaClick } from "../spa-click";
 import { isPaused, parseApps, type AppsPayload } from "./data";
@@ -112,7 +113,7 @@ function AppsList({ locale, payload }: { locale: SpaBoot["locale"]; payload: App
                   {latest
                     ? t(locale, "apps.health.delivery", { time: formatRelativeTime(latest.created_at, locale) })
                     : t(locale, "apps.health.deliveryNever")}
-                  {latest ? ` · ${latest.outcome}` : ""}
+                  {latest ? ` · ${deliveryOutcomeLabel(latest.outcome, locale)}` : ""}
                   {app.health.rejected24h > 0
                     ? ` · ${t(locale, "apps.health.rejected24h", { count: app.health.rejected24h })}`
                     : ""}

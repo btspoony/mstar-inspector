@@ -119,6 +119,12 @@ export const en = {
       delivery: "delivery {time}",
       deliveryNever: "delivery never",
       rejected24h: "{count} rejected in 24h",
+      outcome: {
+        ok: "OK",
+        paused: "Paused",
+        ignored: "Ignored",
+        rejected: "Rejected",
+      },
     },
     tableName: "App",
     tableStatus: "Status",

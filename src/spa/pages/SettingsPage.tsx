@@ -25,6 +25,7 @@ import {
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { fetchJson, postForm } from "../api";
 import type { SpaBoot } from "../boot";
+import { deliveryOutcomeLabel } from "../delivery-outcome";
 import { formatRelativeTime } from "../relative-time";
 import { spaClick } from "../spa-click";
 import {
@@ -535,7 +536,8 @@ function HealthBody({ locale, payload }: { locale: SpaBoot["locale"]; payload: S
                 <span className="font-medium">{delivery.event_name ?? t(locale, "settings.unknownEvent")}</span>
                 <span className="text-muted-foreground">
                   {" "}
-                  · {formatRelativeTime(delivery.created_at, locale)} · {delivery.outcome} ·{" "}
+                  · {formatRelativeTime(delivery.created_at, locale)} ·{" "}
+                  {deliveryOutcomeLabel(delivery.outcome, locale)} ·{" "}
                   {t(locale, "settings.status", {
                     code: delivery.status_code === null ? "—" : String(delivery.status_code),
                   })}
