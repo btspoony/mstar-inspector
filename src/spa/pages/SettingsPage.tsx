@@ -38,6 +38,7 @@ import {
   selectedCatalogProvider,
   splitModelChain,
   type CatalogProvider,
+  type ChainTab,
   type ConfiguredProvider,
   type ModelOptionGroup,
   type SettingsManagePayload,
@@ -182,6 +183,27 @@ function SettingsView({
     return true;
   }
 
+  /**
+   * Plan 44 T2: the draft chain panel owns its create feedback. Unlike
+   * submitSettings (whose outcome rides the global top notice until Task 3
+   * generalizes per-card notices), a rejected create resolves with the error
+   * message for INLINE rendering inside the draft panel — the draft and the
+   * typed name/chain survive for correction. Success keeps the shared saved
+   * notice. Both paths refresh through the background reload (plan-38
+   * contract: the card tree stays mounted, so the draft panel's state is
+   * never touched by the reload).
+   */
+  async function submitDraftChain(fields: Record<string, string>): Promise<string | null> {
+    const { status, body } = await postForm(base, fields);
+    if (status >= 400) {
+      await onReload({ background: true });
+      return settingsErrorMessage(locale, body);
+    }
+    onNotice({ kind: "success", message: t(locale, "settings.changesSaved") });
+    await onReload({ background: true });
+    return null;
+  }
+
   // Plan 38: returns whether the key was verified AND stored. The refresh
   // after the POST is a background reload (the card tree stays mounted), so a
   // failed verify keeps the add panel open with the typed key for correction
@@ -299,6 +321,7 @@ function SettingsView({
             payload={payload}
             groups={groups}
             onSettings={submitSettings}
+            onCreateChain={submitDraftChain}
             onRemoveChain={(name) => setPending({ kind: "remove-chain", name })}
           />
           <SeatsCard locale={locale} payload={payload} onSettings={submitSettings} />
@@ -1116,29 +1139,59 @@ function CustomExpand({
   );
 }
 
+/**
+ * The draft tab's client-side id (plan 44 T2). A colon can never appear in a
+ * stored chain name (MODEL_CHAIN_NAME_PATTERN allows only lowercase letters,
+ * digits and hyphens), so the sentinel is collision-free with real tab ids.
+ * It never reaches the server — the draft saves under the ENTERED name
+ * through op=add-chain.
+ */
+const DRAFT_CHAIN_TAB_ID = ":draft";
+
+const DRAFT_CHAIN_TAB: ChainTab = { id: DRAFT_CHAIN_TAB_ID, isDefault: false, chain: null };
+
 function ChainsCard({
   locale,
   payload,
   groups,
   onSettings,
+  onCreateChain,
   onRemoveChain,
 }: {
   locale: SpaBoot["locale"];
   payload: SettingsManagePayload;
   groups: ModelOptionGroup[];
   onSettings: (fields: Record<string, string>) => Promise<boolean>;
+  onCreateChain: (fields: Record<string, string>) => Promise<string | null>;
   onRemoveChain: (name: string) => void;
 }) {
-  const [newName, setNewName] = useState("");
-  // Plan 43: the add-chain entry is a strip-level disclosure — the toggle
-  // opens the create form directly beneath the tab strip.
-  const [createOpen, setCreateOpen] = useState(false);
   // Plan 39: Default and named chains are peer tabs. The selection coerces
   // through activeChainTabId so a delete or a stale payload lands on the
   // non-removable Default tab instead of pointing at a removed chain.
   const [selectedTab, setSelectedTab] = useState<string>(DEFAULT_CHAIN_NAME);
-  const tabs = modelChainTabs(payload.model_chains);
-  const namedTabs = tabs.filter((tab) => !tab.isDefault);
+  // Plan 44 T2: `+ 新建链` opens a DRAFT peer tab instead of a disclosure —
+  // the create flow is itself a tab, edited in place like every other chain.
+  // One boolean of state, so a second draft can never exist while one lives.
+  const [draftOpen, setDraftOpen] = useState(false);
+  const storedTabs = modelChainTabs(payload.model_chains);
+  // The draft is a client-side UI element composed AFTER the last named tab
+  // (never before Default) — the payload model itself is never mutated.
+  // Composing it into `tabs` makes the draft selectable while it exists and
+  // lets activeChainTabId coerce the selection once it is gone: a discard
+  // lands on Default, and the post-save reload cannot resurrect the draft
+  // (draft state is component state, never payload-derived).
+  const draft = draftOpen ? DRAFT_CHAIN_TAB : null;
+  const tabs = draft ? [...storedTabs, draft] : storedTabs;
+  // Panels derive from the STORED tabs only — the draft panel renders
+  // separately below, so the composed list must never leak into it.
+  const namedTabs = storedTabs.filter((tab) => !tab.isDefault);
+
+  // + 新建链: open (or re-focus) the draft and auto-select it — the editor
+  // the click promises is the panel the user lands in.
+  function openDraft(): void {
+    setDraftOpen(true);
+    setSelectedTab(DRAFT_CHAIN_TAB_ID);
+  }
 
   return (
     <Card>
@@ -1148,43 +1201,27 @@ function ChainsCard({
       </CardHeader>
       <CardContent className="flex flex-col gap-6">
         <Tabs value={activeChainTabId(tabs, selectedTab)} onValueChange={setSelectedTab}>
-          {/* Plan 43: the add-chain entry lives in the tab-strip row, so
-              adding a chain reads as a tab action instead of a detached form
-              below the card. The button is a TabsList SIBLING (never inside
-              the role=tablist) mirroring the plan-42 providers header entry:
-              outline control, plus glyph, localized label. */}
+          {/* The add-chain entry keeps its plan-43 strip placement: a TabsList
+              SIBLING (never inside the role=tablist) — outline control, plus
+              glyph, localized label. Plan 44: the click no longer toggles a
+              disclosure form between strip and Default panel; it opens the
+              draft peer tab. */}
           <div className="flex items-center gap-2">
             <TabsList aria-label={t(locale, "settings.modelChains")}>
-              {tabs.map((tab) => (
+              {storedTabs.map((tab) => (
                 <TabsTrigger key={tab.id} value={tab.id}>
                   {tab.isDefault ? t(locale, "settings.defaultChain") : tab.id}
                 </TabsTrigger>
               ))}
+              {draft ? (
+                <TabsTrigger value={DRAFT_CHAIN_TAB_ID}>{t(locale, "settings.draftChain")}</TabsTrigger>
+              ) : null}
             </TabsList>
-            <Button
-              type="button"
-              variant="outline"
-              size="sm"
-              aria-expanded={createOpen}
-              onClick={() => setCreateOpen(!createOpen)}
-            >
+            <Button type="button" variant="outline" size="sm" onClick={openDraft}>
               <Plus aria-hidden="true" />
               {t(locale, "settings.addChain")}
             </Button>
           </div>
-          {/* The create form discloses beneath the strip with the plan-39
-              flow verbatim: op=add-chain, a 400 keeps the typed input, and a
-              successful create selects the new tab after the reload lands. */}
-          {createOpen ? (
-            <NamedChainCreate
-              locale={locale}
-              groups={groups}
-              name={newName}
-              onName={setNewName}
-              onSettings={onSettings}
-              onCreated={(created) => setSelectedTab(created)}
-            />
-          ) : null}
           {/* forceMount keeps every editor mounted (as the pre-tab list did),
               so switching tabs never silently drops in-progress edits. Radix
               itself hides nothing once forceMount pins every panel to
@@ -1214,6 +1251,24 @@ function ChainsCard({
               />
             </TabsContent>
           ))}
+          {draft ? (
+            <TabsContent forceMount value={DRAFT_CHAIN_TAB_ID}>
+              <DraftChainPanel
+                locale={locale}
+                groups={groups}
+                onCreate={onCreateChain}
+                onDiscard={() => setDraftOpen(false)}
+                onCreated={(created) => {
+                  // Success: the reload has already landed (the create
+                  // handler awaits it), so the stored-name tab exists — the
+                  // draft is removed and the real tab is selected. The draft
+                  // lives in component state, so no reload can resurrect it.
+                  setDraftOpen(false);
+                  setSelectedTab(created);
+                }}
+              />
+            </TabsContent>
+          ) : null}
         </Tabs>
       </CardContent>
     </Card>
@@ -1304,56 +1359,65 @@ function SeatsCard({
   );
 }
 
-function NamedChainCreate({
+/**
+ * The draft chain tab's panel (plan 44 T2): the full editor inside its own
+ * tabpanel — the name field first, then the model builder (the components a
+ * named chain's panel uses verbatim). 保存 posts the unchanged op=add-chain
+ * with the entered name + built chain; a rejected create renders its error
+ * INLINE (role=alert via PageNotice) and keeps the draft + typed input; only
+ * success hands the trimmed stored name back so the real tab is selected.
+ * 放弃 discards the draft without confirmation (documented; matches the
+ * accepted disclosure-discard behavior) — the selection coerces through
+ * activeChainTabId once the draft tab is gone.
+ */
+function DraftChainPanel({
   locale,
   groups,
-  name,
-  onName,
-  onSettings,
+  onCreate,
+  onDiscard,
   onCreated,
 }: {
   locale: SpaBoot["locale"];
   groups: ModelOptionGroup[];
-  name: string;
-  onName: (name: string) => void;
-  onSettings: (fields: Record<string, string>) => Promise<boolean>;
-  /** Fired after a successful create (the reload has landed) so the new tab is selected. */
+  /** Resolves with the inline error message on failure, null on success. */
+  onCreate: (fields: Record<string, string>) => Promise<string | null>;
+  onDiscard: () => void;
+  /** Fired after a successful create (the reload has landed) with the stored name. */
   onCreated: (name: string) => void;
 }) {
-  const [chain, setChain] = useState<string[]>([]);
+  const [name, setName] = useState("");
+  const [error, setError] = useState<string | null>(null);
   return (
-    <div className="rounded-md border p-3">
+    <div className="flex flex-col gap-3">
       <label className="flex flex-col gap-1.5 text-sm font-medium">
         {t(locale, "settings.chainName")}
         <Input
           value={name}
-          onChange={(event) => onName(event.target.value)}
+          onChange={(event) => setName(event.target.value)}
           placeholder={t(locale, "settings.chainNamePlaceholder")}
           autoComplete="off"
         />
       </label>
-      <div className="mt-3">
-        <ChainEditor
-          locale={locale}
-          groups={groups}
-          stored={chain.join(", ")}
-          onChainChange={setChain}
-          onSave={(value) => {
-            void onSettings({ op: "add-chain", name, chain: value }).then((ok) => {
-              // QC wave (seat3): a 400 keeps the typed name/chain for
-              // correction — only a successful save clears the form.
-              if (ok) {
-                onName("");
-                setChain([]);
-                // Plan 39: the successful reload has landed, so the created
-                // chain's tab exists — select it.
-                onCreated(name);
-              }
-            });
-          }}
-          saveLabel={t(locale, "settings.addNamedChain")}
-        />
-      </div>
+      <ChainEditor
+        locale={locale}
+        groups={groups}
+        stored={null}
+        onSave={(value) => {
+          void onCreate({ op: "add-chain", name, chain: value }).then((failure) => {
+            // A 400 keeps the draft and the typed name/chain for correction —
+            // the failure renders inline instead of the top notice. The
+            // trimmed name is what the server stored (it trims before
+            // validating), so that is the real tab's id.
+            setError(failure);
+            if (failure === null) onCreated(name.trim());
+          });
+        }}
+        saveLabel={t(locale, "settings.saveChain")}
+      />
+      {error ? <PageNotice kind="error" message={error} /> : null}
+      <Button type="button" variant="ghost" className="self-start" onClick={onDiscard}>
+        {t(locale, "settings.discardChain")}
+      </Button>
     </div>
   );
 }
@@ -1363,14 +1427,12 @@ function ChainEditor({
   groups,
   stored,
   onSave,
-  onChainChange,
   saveLabel,
 }: {
   locale: SpaBoot["locale"];
   groups: ModelOptionGroup[];
   stored: string | null;
   onSave: (chain: string) => void;
-  onChainChange?: (chain: string[]) => void;
   saveLabel?: string;
 }) {
   const [chain, setChain] = useState(() => splitModelChain(stored));
@@ -1380,11 +1442,6 @@ function ChainEditor({
   useEffect(() => {
     setChain(splitModelChain(stored));
   }, [stored]);
-
-  function update(next: string[]): void {
-    setChain(next);
-    onChainChange?.(next);
-  }
 
   return (
     <div className="flex flex-col gap-3">
@@ -1401,7 +1458,7 @@ function ChainEditor({
           {chain.map((selector, index) => (
             <li key={`${selector}-${index}`} className="flex items-center justify-between gap-2 rounded-md border px-3 py-2">
               <span className="font-mono text-sm">{selector}</span>
-              <Button type="button" variant="destructive" size="sm" onClick={() => update(chain.filter((_, i) => i !== index))}>
+              <Button type="button" variant="destructive" size="sm" onClick={() => setChain(chain.filter((_, i) => i !== index))}>
                 {t(locale, "settings.remove")}
               </Button>
             </li>
@@ -1436,7 +1493,7 @@ function ChainEditor({
           variant="secondary"
           onClick={() => {
             if (!pick) return;
-            update([...chain, pick]);
+            setChain([...chain, pick]);
             setPick(undefined);
           }}
         >

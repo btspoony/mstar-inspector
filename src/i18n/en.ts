@@ -365,7 +365,8 @@ export const en = {
     addChain: "Add chain",
     chainName: "Chain name",
     chainNamePlaceholder: "e.g. deep-review",
-    addNamedChain: "Add named chain",
+    draftChain: "New chain",
+    discardChain: "Discard",
     defaultChain: "Default chain",
     seats: "Seat chains",
     seatsCopy:

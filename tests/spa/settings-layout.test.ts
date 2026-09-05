@@ -376,8 +376,10 @@ describe("model chain tabs (plan 39 T1)", () => {
     // Only the named tabs' content offers remove, via the existing
     // confirm-dialog flow (pendingConfirmCopy → op=remove-chain).
     expect(source).toContain("onRemoveChain(tab.id)");
-    // A successful create selects the new tab after the reload lands.
-    expect(source).toContain("onCreated={(created) => setSelectedTab(created)}");
+    // Plan 44 T2: a successful create closes the draft and selects the real
+    // (stored-name) tab after the reload lands — the draft flow's success
+    // branch lives in the ChainsCard onCreated callback.
+    expect(source).toContain("setSelectedTab(created);");
     // Chain mutation ops stay as-is.
     expect(source).toContain('op: "remove-chain"');
     expect(source).toContain("settings.confirmRemoveChainTitle");
@@ -420,37 +422,83 @@ describe("model chain tabs (plan 39 T1)", () => {
   });
 });
 
-describe("chain add affordance at the tab strip (plan 43 T1)", () => {
-  test("the add-chain entry is a labeled outline control beside the TabsList; the form discloses beneath the strip", () => {
+describe("chain draft peer tab (plan 44 T2)", () => {
+  test("+ 新建链 opens a draft peer tab: after the named tabs, auto-selected, never two drafts", () => {
     const source = readFileSync(join(import.meta.dir, "../../src/spa/pages/SettingsPage.tsx"), "utf8");
     const chainsBody = source.slice(source.indexOf("function ChainsCard"), source.indexOf("function SeatsCard"));
-    // The entry mirrors the plan-42 providers header pattern: outline button,
-    // plus glyph, localized label (icon-only is not acceptable), disclosure
-    // state pinned to the toggle — and it is a TabsList sibling in the strip
-    // row, never a trigger inside the role=tablist.
+    // The entry mirrors the plan-43 strip placement: outline button, plus
+    // glyph, localized label (icon-only is not acceptable) — a TabsList
+    // SIBLING in the strip row, never a trigger inside the role=tablist.
     expect(chainsBody).toContain('variant="outline"');
-    expect(chainsBody).toContain("aria-expanded={createOpen}");
     expect(chainsBody).toContain("<Plus");
     expect(chainsBody).toContain('{t(locale, "settings.addChain")}');
-    // Placement: the create form renders at the strip level — after the
-    // TabsList row, before the Default panel — replacing the old detached
-    // section (heading + empty-state prose) that lived below the Tabs block.
-    const stripPos = chainsBody.indexOf('<TabsList aria-label={t(locale, "settings.modelChains")}>');
-    const formPos = chainsBody.indexOf("<NamedChainCreate");
-    const panelPos = chainsBody.indexOf("<TabsContent forceMount value={DEFAULT_CHAIN_NAME}>");
-    expect(stripPos).toBeGreaterThan(-1);
-    expect(formPos).toBeGreaterThan(stripPos);
-    expect(panelPos).toBeGreaterThan(formPos);
+    expect(chainsBody).toContain("onClick={openDraft}");
+    // Single-draft rule: one boolean of draft state, and the click only ever
+    // OPENS it (a second draft can never exist — clicking again re-selects
+    // the existing draft tab).
+    expect(chainsBody).toContain("const [draftOpen, setDraftOpen] = useState(false);");
+    const openDraftBody = chainsBody.slice(chainsBody.indexOf("function openDraft"), chainsBody.indexOf("return ("));
+    expect(openDraftBody).toContain("setDraftOpen(true);");
+    expect(openDraftBody).toContain("setSelectedTab(DRAFT_CHAIN_TAB_ID);");
+    // Appended AFTER the last named tab (never before Default): the draft
+    // joins the coercion list by spreading after the stored tabs, and its
+    // trigger renders after the stored-tabs map inside the TabsList.
+    expect(chainsBody).toContain("const tabs = draft ? [...storedTabs, draft] : storedTabs;");
+    const storedMapPos = chainsBody.indexOf("{storedTabs.map((tab) => (");
+    const draftTriggerPos = chainsBody.indexOf('{t(locale, "settings.draftChain")}');
+    expect(storedMapPos).toBeGreaterThan(-1);
+    expect(draftTriggerPos).toBeGreaterThan(storedMapPos);
+    // The old plan-43 disclosure between strip and Default panel is gone —
+    // Default's area never shows creation UI.
+    expect(chainsBody).not.toContain("createOpen");
+    expect(chainsBody).not.toContain("NamedChainCreate");
     expect(chainsBody).not.toContain("settings.namedChains");
     expect(chainsBody).not.toContain("settings.noNamedChains");
-    // The frozen plan-39 create flow rides along unchanged: same op, same
-    // created-tab selection after the reload lands.
-    expect(chainsBody).toContain("onCreated={(created) => setSelectedTab(created)}");
   });
 
-  test("add-chain copy is dictionary-backed in both locales", () => {
+  test("the draft panel is the editor: name field first, model builder, save/discard, inline failure", () => {
+    const source = readFileSync(join(import.meta.dir, "../../src/spa/pages/SettingsPage.tsx"), "utf8");
+    const panelBody = source.slice(source.indexOf("function DraftChainPanel"), source.indexOf("function ChainEditor"));
+    // The name field lives INSIDE the draft panel (first), reusing the
+    // chainName keys — Default's panel never shows creation UI.
+    expect(panelBody).toContain('t(locale, "settings.chainName")');
+    expect(panelBody).toContain('t(locale, "settings.chainNamePlaceholder")');
+    const namePos = panelBody.indexOf("settings.chainName");
+    const editorPos = panelBody.indexOf("<ChainEditor");
+    expect(editorPos).toBeGreaterThan(namePos);
+    // Save posts the frozen op=add-chain (entered name + built chain, one
+    // call) with the shared 保存模型链 label semantics.
+    expect(panelBody).toContain('op: "add-chain", name, chain: value');
+    expect(panelBody).toContain('saveLabel={t(locale, "settings.saveChain")}');
+    // A rejected create renders INLINE (role=alert via PageNotice) and keeps
+    // the draft + typed input — only success hands the trimmed stored name
+    // back so the real tab is selected.
+    expect(panelBody).toContain("setError(failure)");
+    expect(panelBody).toContain('<PageNotice kind="error" message={error} />');
+    expect(panelBody).toContain("onCreated(name.trim())");
+    // 放弃 discards through a ghost button without confirmation.
+    expect(panelBody).toContain('t(locale, "settings.discardChain")}');
+    expect(panelBody).toContain('variant="ghost"');
+    // The draft panel mounts inside its own forceMount TabsContent; the
+    // discard's only state effect is closing the draft — the selection then
+    // coerces through activeChainTabId (plan-39 pin) back to Default.
+    const chainsBody = source.slice(source.indexOf("function ChainsCard"), source.indexOf("function SeatsCard"));
+    expect(chainsBody).toContain("<TabsContent forceMount value={DRAFT_CHAIN_TAB_ID}>");
+    expect(chainsBody).toContain("onDiscard={() => setDraftOpen(false)}");
+    expect(chainsBody).toContain("setDraftOpen(false);");
+    expect(chainsBody).toContain("setSelectedTab(created);");
+  });
+
+  test("draft copy is dictionary-backed in both locales; the retired disclosure label is gone", () => {
     expect(t("en", "settings.addChain")).toBe("Add chain");
     expect(t("zh_CN", "settings.addChain")).toBe("新建链");
+    expect(t("en", "settings.draftChain")).toBe("New chain");
+    expect(t("zh_CN", "settings.draftChain")).toBe("新链");
+    expect(t("en", "settings.discardChain")).toBe("Discard");
+    expect(t("zh_CN", "settings.discardChain")).toBe("放弃");
+    // The name-field keys survive the move into the panel.
+    expect(t("en", "settings.chainName")).toBe("Chain name");
+    expect(t("zh_CN", "settings.chainName")).toBe("链名称");
   });
 });
 
