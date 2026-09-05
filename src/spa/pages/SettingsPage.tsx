@@ -204,17 +204,21 @@ function SettingsView({
    * before this resolves.
    */
   async function submitSettings(fields: Record<string, string>): Promise<OpNotice> {
+    let status: number;
+    let body: string;
+    // The catch guards only the POST — a background reload never rejects:
+    // load() catches its own failures into the page notice (plan 38).
     try {
-      const { status, body } = await postForm(base, fields);
-      const outcome: OpNotice =
-        status >= 400
-          ? { kind: "error", message: settingsErrorMessage(locale, body) }
-          : { kind: "success", message: t(locale, "settings.changesSaved") };
-      await onReload({ background: true });
-      return outcome;
+      ({ status, body } = await postForm(base, fields));
     } catch {
       return { kind: "error", message: t(locale, "common.loadFailed") };
     }
+    const outcome: OpNotice =
+      status >= 400
+        ? { kind: "error", message: settingsErrorMessage(locale, body) }
+        : { kind: "success", message: t(locale, "settings.changesSaved") };
+    await onReload({ background: true });
+    return outcome;
   }
 
   // Plan 38: resolves whether the key was verified AND stored. The refresh
@@ -223,29 +227,33 @@ function SettingsView({
   // while the provider stays unconfigured; only success resets/closes the
   // form via onDone. The structured reason rides the providers card's region.
   async function submitVerify(fields: Record<string, string>): Promise<OpNotice> {
+    let status: number;
+    let body: string;
+    // The catch guards only the verify POST — a background reload never
+    // rejects: load() catches its own failures into the page notice (plan 38).
     try {
-      const { status, body } = await postForm(
+      ({ status, body } = await postForm(
         `/dashboard/api/apps/${encodeURIComponent(app.slug)}/keys/verify`,
         fields,
-      );
-      if (status >= 400) {
-        let reason = "unexpected";
-        try {
-          const parsed = JSON.parse(body) as { reason?: string };
-          if (typeof parsed.reason === "string") reason = parsed.reason;
-        } catch {
-          /* body is not JSON */
-        }
-        const outcome: OpNotice = { kind: "error", message: verifyReasonMessage(locale, reason) };
-        await onReload({ background: true });
-        return outcome;
-      }
-      const outcome: OpNotice = { kind: "success", message: t(locale, "settings.keyVerified") };
-      await onReload({ background: true });
-      return outcome;
+      ));
     } catch {
       return { kind: "error", message: t(locale, "common.loadFailed") };
     }
+    if (status >= 400) {
+      let reason = "unexpected";
+      try {
+        const parsed = JSON.parse(body) as { reason?: string };
+        if (typeof parsed.reason === "string") reason = parsed.reason;
+      } catch {
+        /* body is not JSON */
+      }
+      const outcome: OpNotice = { kind: "error", message: verifyReasonMessage(locale, reason) };
+      await onReload({ background: true });
+      return outcome;
+    }
+    const outcome: OpNotice = { kind: "success", message: t(locale, "settings.keyVerified") };
+    await onReload({ background: true });
+    return outcome;
   }
 
   async function runPinned(path: string): Promise<OpNotice> {
@@ -265,17 +273,21 @@ function SettingsView({
     fields: Record<string, string>,
     { successMessage, reload = true }: { successMessage?: string; reload?: boolean } = {},
   ): Promise<OpNotice> {
+    let status: number;
+    let body: string;
+    // The catch guards only the POST — a background reload never rejects:
+    // load() catches its own failures into the page notice (plan 38).
     try {
-      const { status, body } = await postForm(path, fields);
-      const outcome: OpNotice =
-        status >= 400
-          ? { kind: "error", message: body.trim() || t(locale, "common.loadFailed") }
-          : { kind: "success", message: successMessage ?? t(locale, "settings.changesSaved") };
-      if (reload) await onReload({ background: true });
-      return outcome;
+      ({ status, body } = await postForm(path, fields));
     } catch {
       return { kind: "error", message: t(locale, "common.loadFailed") };
     }
+    const outcome: OpNotice =
+      status >= 400
+        ? { kind: "error", message: body.trim() || t(locale, "common.loadFailed") }
+        : { kind: "success", message: successMessage ?? t(locale, "settings.changesSaved") };
+    if (reload) await onReload({ background: true });
+    return outcome;
   }
 
   async function onConfirm(): Promise<void> {
@@ -1539,6 +1551,9 @@ function DraftChainPanel({
               return outcome;
             })
             .finally(() => {
+              // Success closes the draft tab (onCreated) and unmounts this
+              // panel, so on success this reset is a deliberate React 19
+              // setState-after-unmount no-op (plan 44 QC fix round, F-001).
               setBusy(false);
             });
         }}
