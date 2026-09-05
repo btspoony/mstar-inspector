@@ -82,9 +82,10 @@ describe("t() interpolation (plan 29 T2)", () => {
   });
 
   test("numeric params are stringified", () => {
-    expect(t("en", "notice.error.keyTooLong", { length: 200, max: 128 })).toBe(
-      "That API key is too long (200 characters) — keys are limited to 128 characters. Nothing was stored.",
-    );
+    // Fixture re-pointed in plan 46 T1: the old fixture notice.error.keyTooLong
+    // was an audit-dead key with no production consumer; common.time.minutesAgo
+    // exercises the same number→string substitution on a live key.
+    expect(t("en", "common.time.minutesAgo", { count: 200 })).toBe("200 minutes ago");
   });
 
   test("a missing param leaves the {placeholder} literal in place", () => {
