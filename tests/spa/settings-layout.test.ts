@@ -796,11 +796,19 @@ describe("section-scoped op feedback (plan 44 T3)", () => {
       source.indexOf("return true;"),
     );
     expect(loadSuccessPath).toContain("setNotice(null);");
-    // Carry-over (Task 2 review): a network-level POST failure (postForm
-    // throws before an outcome exists) resolves the load-failed copy so the
-    // op's card still reports — no silent failure surface.
-    expect(source).toContain('return { kind: "error", message: t(locale, "common.loadFailed") };');
+    // Carry-over (Task 2 review), refined by plan 45 T3 (audit F-09): a
+    // network-level POST failure (postForm throws before an outcome exists)
+    // resolves the dedicated save-failed copy so the op's card still reports
+    // — no silent failure surface, and a failed save no longer claims the
+    // page couldn't load. Exactly the three transport catches use it.
+    expect(source).toContain('message: t(locale, "common.saveFailed")');
+    expect(source.match(/t\(locale, "common\.saveFailed"\)/g)?.length).toBe(3);
+    // Page-level reload failures keep the load-failed copy: load()'s two
+    // background-failure paths and the draft create's reload-failure return.
+    expect(source).toContain('message: t(locale, "common.loadFailed")');
     // The in-card copy is dictionary-backed in both locales.
+    expect(t("en", "common.saveFailed")).toContain("save");
+    expect(t("zh_CN", "common.saveFailed")).toContain("保存");
     expect(t("en", "common.loadFailed")).toContain("load");
     expect(t("zh_CN", "common.loadFailed")).toContain("无法加载");
   });

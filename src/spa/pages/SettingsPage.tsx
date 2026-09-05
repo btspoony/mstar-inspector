@@ -211,7 +211,8 @@ function SettingsView({
    * Resolve the op's outcome to the caller (plan 44 T3): the card/cluster that
    * submitted the fields renders it in its own region. A network-level POST
    * failure (postForm throws before an outcome exists) resolves the
-   * load-failed copy so no op stays silent; a redirect hop navigates away
+   * save-failed copy (plan 45 T3: a failed save must not claim the page
+   * couldn't load) so no op stays silent; a redirect hop navigates away
    * before this resolves. The outcome also carries `reloaded` — whether the
    * awaited background refresh actually landed — which only the draft create
    * reads (POST success alone is not completion there); every other caller
@@ -225,7 +226,7 @@ function SettingsView({
     try {
       ({ status, body } = await postForm(base, fields));
     } catch {
-      return { kind: "error", message: t(locale, "common.loadFailed"), reloaded: false };
+      return { kind: "error", message: t(locale, "common.saveFailed"), reloaded: false };
     }
     const outcome: OpNotice =
       status >= 400
@@ -267,7 +268,7 @@ function SettingsView({
         fields,
       ));
     } catch {
-      return { kind: "error", message: t(locale, "common.loadFailed") };
+      return { kind: "error", message: t(locale, "common.saveFailed") };
     }
     if (status >= 400) {
       let reason = "unexpected";
@@ -310,7 +311,7 @@ function SettingsView({
     try {
       ({ status, body } = await postForm(path, fields));
     } catch {
-      return { kind: "error", message: t(locale, "common.loadFailed") };
+      return { kind: "error", message: t(locale, "common.saveFailed") };
     }
     const outcome: OpNotice =
       status >= 400

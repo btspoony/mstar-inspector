@@ -56,6 +56,7 @@ export const zhCN: Dictionary = {
     },
     loading: "加载中…",
     loadFailed: "无法加载此页面。",
+    saveFailed: "无法保存更改。",
     cancel: "取消",
   },
   login: {
