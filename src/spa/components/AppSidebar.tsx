@@ -1,4 +1,3 @@
-import type { MouseEvent } from "react";
 import { LayoutGrid, LineChart, Users } from "lucide-react";
 import {
   Sidebar,
@@ -10,23 +9,14 @@ import {
   SidebarMenuButton,
   SidebarMenuItem,
 } from "@/components/ui/sidebar";
-import { matchSpaRoute } from "../routes";
-import { navigate } from "../router";
 import type { SidebarModel } from "../shell";
+import { spaClick } from "../spa-click";
 
 const NAV_ICONS = {
   "/dashboard/apps": LayoutGrid,
   "/dashboard/insights": LineChart,
   "/dashboard/members": Users,
 } as const;
-
-function spaClick(href: string, event: MouseEvent<HTMLAnchorElement>): void {
-  if (event.defaultPrevented) return;
-  if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
-  if (!matchSpaRoute(href)) return;
-  event.preventDefault();
-  navigate(href);
-}
 
 function Logo() {
   return (

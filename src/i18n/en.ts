@@ -12,8 +12,9 @@
  *   - This is the single string table for the whole dashboard: plan 29
  *     Tasks 4/5 and plans 30/31 APPEND keys here — they never start a
  *     second table.
- *   - The `notice` slot mirrors the `PageNotice` type (kind × message) and
- *     every message the legacy routes construct today.
+ *   - The `notice` slot mirrors the `PageNotice` type (kind × message);
+ *     after the plan-46 dead-key purge it carries only the member-flow
+ *     messages (the retired SSR settings routes rendered plain text).
  *   - Manifest copy deliberately carries NO REVIEW_ENABLED user-facing
  *     sentence (plan 29 T5 removes it; per-App pause is the only switch).
  */
@@ -80,76 +81,22 @@ export const en = {
       invited: "Invited {login} — they can sign in with GitHub now.",
       removedMember: "Removed {login}.",
       roleChanged: "{login} is now {role}.",
-      appStatusChanged: "{verb} {slug}.",
-      appPaused: "Paused {slug}.",
-      appResumed: "Resumed {slug}.",
-      keyStored: "Stored the {provider} key for {slug} — it is only ever shown masked.",
-      chainCleared:
-        "Cleared the model chain for {slug} — reviews fail closed until a chain + provider keys are configured (per-App only).",
-      chainSaved: "Saved the model chain for {slug}.",
-      rolesSaved: "Saved the role models for {slug}.",
-      customProviderDeclared:
-        "Declared custom provider {providerId} for {slug} — its key is stored encrypted and injected by environment variable name.",
-      customProviderRemoved: "Removed the custom provider {providerId} from {slug}.",
-      keyRemoved: "Removed the stored {provider} key for {slug}.",
     },
     warn: {
       alreadyMember: "{login} is already a member — nothing changed.",
-      alreadyStatus: "{slug} was already {state} — nothing changed.",
-      justRemoved: "{slug} was just removed — nothing changed.",
-      noCustomProvider: "No custom provider {providerId} on {slug} — nothing changed.",
-      noStoredKey: "No stored {provider} key on {slug} — nothing changed.",
     },
     error: {
       enterLogin: "Enter a GitHub login to invite.",
       invalidLogin: "{login} is not a valid GitHub login — use 1–39 letters, digits, or hyphens.",
       unknownMember: "Unknown member — nothing was removed, try again.",
       cannotRemoveSelf: "You cannot remove yourself.",
-      lastAdmin: "The last admin cannot be removed.",
       inviteFailed: "Could not invite {login} — try again.",
       roleChangeFailed: "Could not change {login}'s role — the member list just changed, try again.",
       removeFailed: "Could not remove {login} — the member list just changed, try again.",
-      encryptionKeyMissing:
-        "This deployment has no valid DASHBOARD_ENCRYPTION_KEY for its stored keys — ask the operator to configure it, then resubmit.",
-      storageRejected: "The dashboard database rejected the change — nothing was stored. You can resubmit.",
-      pickProvider: "Pick a provider for the key.",
-      enterApiKey: "Enter an API key to store.",
-      keyTooLong:
-        "That API key is too long ({length} characters) — keys are limited to {max} characters. Nothing was stored.",
-      chainDuplicate: "The model chain field was submitted more than once — resubmit the form. Nothing was saved.",
-      chainTooLong: "That model chain is too long ({length} characters) — limited to {max}. Nothing was saved.",
       chainEmpty: "Enter at least one comma-separated model selector.",
-      roleFieldDuplicate:
-        "The {field} field was submitted more than once — resubmit the Role models form with one value per role. Nothing was saved.",
-      unknownRole: "{role} is not a known review role — nothing was saved.",
-      noRoleSelectors: "No role selectors were submitted — resubmit the Role models form.",
-      roleSelectorTooLong:
-        "The {role} selector is too long ({length} characters) — limited to {max}. Nothing was saved.",
-      roleSelectorEmpty:
-        "The {role} selector needs at least one comma-separated model selector — or leave it empty to use the App model chain. Nothing was saved.",
-      customProviderIdEmpty: "Enter a provider id for the custom provider.",
-      customProviderIdInvalid:
-        "Provider ids are lowercase letters, digits, and hyphens — 1 to 64 characters, starting with a letter or digit. Nothing was stored.",
-      customProviderBuiltin:
-        "{providerId} is a built-in provider — custom providers must use a new id. Nothing was stored.",
-      customProviderBaseConflict:
-        "{providerId} is already provided by the review environment's base configuration — custom providers must use a new id. Nothing was stored.",
-      customProviderMax:
-        "This App already has the maximum of {max} custom providers — remove one before declaring another (updating an existing declaration is always allowed). Nothing was stored.",
-      baseUrlEmpty: "Enter the provider's base URL.",
-      baseUrlInvalid: "The base URL must be a valid https URL with a host — nothing was stored.",
-      baseUrlTooLong:
-        "That base URL is too long ({length} characters) — limited to {max}. Nothing was stored.",
-      apiEmpty: "Pick an API protocol for the custom provider.",
-      apiInvalid: "{api} is not a supported API protocol — pick one from the list. Nothing was stored.",
-      modelIdsEmpty: "Enter at least one model id for the custom provider.",
-      modelIdsTooMany: "Too many model ids ({count}) — at most {max}. Nothing was stored.",
-      modelIdTooLong: "Model ids are limited to {max} characters each. Nothing was stored.",
-      unknownOp: "Unknown settings operation — resubmit one of this page's forms.",
     },
   },
   apps: {
-    title: "Apps",
     heading: "Apps",
     create: "Create GitHub App",
     empty: "No Apps yet — Create GitHub App connects your first one.",
@@ -180,7 +127,6 @@ export const en = {
     openAria: "Open {slug} settings",
   },
   members: {
-    title: "Members",
     heading: "Members",
     inviteOnlyNotice: "Only the GitHub users listed here can sign in to this deployment.",
     inviteLabel: "Invite by GitHub login",
@@ -207,7 +153,6 @@ export const en = {
     empty: "No members yet.",
   },
   insights: {
-    title: "Review health",
     heading: "Review health",
     window: "Window: {label}",
     reviewsTotal: "Reviews: {count}",
@@ -228,9 +173,6 @@ export const en = {
     repo: "repo {repo}",
     windowSegment: "Time window",
     daysShort: "{count}d",
-    dimension: "Findings breakdown dimension",
-    dimSeverity: "Severity",
-    dimCategory: "Category",
     recordsHeading: "Review records",
     filterRepo: "Repo",
     filterRepoAll: "All",
@@ -240,9 +182,6 @@ export const en = {
     title: "App settings",
     backToApps: "Back to Apps",
     changesSaved: "Changes saved.",
-    providerKeys: "Provider keys",
-    providerKeysCopy:
-      "Keys for App {slug} are stored encrypted and shown masked — the last 4 characters only. Re-adding a provider replaces its stored key.",
     addKey: "Add key",
     provider: "Provider",
     apiKey: "API key",
@@ -251,39 +190,19 @@ export const en = {
     keyTooShort: "key too short to show a tail",
     updated: "updated {time}",
     remove: "Remove",
-    noKeys:
-      "No provider keys stored for this App — reviews fail closed until keys are configured (per-App BYOK only).",
     selectProvider: "Select a provider…",
-    modelChain: "Model chain",
-    modelChainCopy:
-      "Select models from this App's verified providers for its reviews — the deployment's global chain knob was retired; this App's chain is the only chain its reviews use.",
-    modelChainNote:
-      "Saving an empty chain clears it — reviews then fail closed with per-App config incomplete (missing model chain or provider key) until the chain and the required provider keys are configured.",
     modelChainField: "Model chain",
     saveChain: "Save model chain",
-    customProviders: "Custom providers",
-    customProvidersCopy:
-      "Declare a non-built-in model provider for this App's reviews — the API key is stored encrypted and injected into the review runner by environment variable name, never as a literal.",
-    noCustomProviders: "No custom providers declared for this App — its reviews use the built-in providers.",
     providerId: "Provider id",
     baseUrl: "Base URL",
     api: "API",
     modelIds: "Model ids",
     addCustomProvider: "Add custom provider",
     selectApi: "Select an API…",
-    roleModels: "Role models",
-    roleModelsCopy:
-      "Optional per-seat model overrides for this App's reviews — each audit role picks from the same verified-model list (a :thinking suffix passes through).",
-    emptyUsesAppChain: "Empty = use the App model chain.",
     roleHintReviewSeat: "quick + default review seats",
     roleHintDeep: "deep review seat",
     saveRoleModels: "Save seat chains",
-    review: "Review",
-    reviewOn: "Reviews are on for this App's pull requests.",
     pauseReviews: "Pause reviews",
-    reviewPaused: "paused",
-    reviewPausedCopy:
-      "Webhooks stay connected — deliveries are answered and ignored, and nothing is reviewed until you resume.",
     resumeReviews: "Resume reviews",
     disconnected: "This App is disconnected — enable it to review.",
     installHealth: "Install health",
@@ -297,15 +216,12 @@ export const en = {
     noDeliveries: "No deliveries yet.",
     unknownEvent: "unknown event",
     status: "status {code}",
-    useAppChain: "Use App model chain",
     addToChain: "Add to chain",
     noAutoDiscovery: "This provider does not list models — pick from another verified provider.",
     noVerifiedModels: "Verify a provider key to populate model options.",
     chainEmpty: "No models in the chain yet.",
     pickModel: "Select a model…",
     keyVerified: "Key verified — models cached.",
-    unsupportedProvidersHint:
-      "Azure OpenAI and AI Gateway keys can't be verified here — manage them in the provider console.",
     verify: {
       invalid_key: "That API key was rejected by the provider — nothing was stored.",
       unreachable: "The provider could not be reached — nothing was stored.",
@@ -352,13 +268,9 @@ export const en = {
     configureProvider: "Configure {label}",
     customEntry: "Custom",
     customEntryCopy: "Declare a non-built-in provider — id, base URL, model ids, and key.",
-    expandCustom: "Add custom provider",
-    collapseCustom: "Close custom form",
     accountId: "Account id",
     accountIdPlaceholder: "32 hex characters",
     addTemplate: "Add {label}",
-    tierBuiltin: "built-in",
-    tierTemplate: "template",
     modelChains: "Model chains",
     modelChainsCopy:
       "Default and named chains are peer tabs — edit each chain in its tab. The default chain is required and can't be removed; seats on a removed named chain fall back to the default.",

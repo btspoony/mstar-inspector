@@ -457,6 +457,23 @@ describe("chain draft peer tab (plan 44 T2)", () => {
     expect(chainsBody).not.toContain("settings.noNamedChains");
   });
 
+  test("the add-chain control is a TabsList sibling: its source sits after the tablist close", () => {
+    const source = readFileSync(join(import.meta.dir, "../../src/spa/pages/SettingsPage.tsx"), "utf8");
+    const chainsBody = source.slice(source.indexOf("function ChainsCard"), source.indexOf("function SeatsCard"));
+    // Plan-43 strip-level contract, structurally pinned (plan 46 T6, audit
+    // F-10): the labels/props pins above cannot see WHERE the control sits —
+    // a regression nesting the add-chain button inside the role=tablist would
+    // still carry its outline variant, plus glyph, label and click handler
+    // (WAI-ARIA tablist children must be tabs, so a button inside breaks the
+    // tab semantics). Source-ordering pin: the control's onClick anchor must
+    // appear AFTER the `</TabsList>` close, so moving it inside the tablist
+    // flips the order and fails here.
+    const tabsListClosePos = chainsBody.indexOf("</TabsList>");
+    const addChainControlPos = chainsBody.indexOf("onClick={openDraft}");
+    expect(tabsListClosePos).toBeGreaterThan(-1);
+    expect(addChainControlPos).toBeGreaterThan(tabsListClosePos);
+  });
+
   test("the draft panel is the editor: name field first, model builder, save/discard, inline failure", () => {
     const source = readFileSync(join(import.meta.dir, "../../src/spa/pages/SettingsPage.tsx"), "utf8");
     const panelBody = source.slice(source.indexOf("function DraftChainPanel"), source.indexOf("function ChainEditor"));

@@ -26,9 +26,11 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { fetchJson, postForm } from "../api";
 import type { SpaBoot } from "../boot";
 import { formatRelativeTime } from "../relative-time";
+import { spaClick } from "../spa-click";
 import {
   activeChainTabId,
   DEFAULT_CHAIN_NAME,
+  isPaused,
   modelChainTabs,
   parseModels,
   parseSettings,
@@ -44,7 +46,7 @@ import {
   type SettingsManagePayload,
   type SettingsPayload,
 } from "./data";
-import { spaClick, StatusBadge } from "./AppsPage";
+import { StatusBadge } from "./AppsPage";
 import { LoadFailedNotice, LoadingNotice, PageNotice, type NoticeKind } from "./PageNotice";
 
 type PendingAction =
@@ -663,7 +665,7 @@ function OpsCard({
   notice: OpNotice | null;
 }) {
   const { app } = payload;
-  const paused = app.status === "active" && !app.review_enabled;
+  const paused = isPaused(app);
   return (
     <Card>
       <CardHeader>

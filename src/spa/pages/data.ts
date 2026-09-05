@@ -249,12 +249,16 @@ export function canViewMembers(role: Role | null): boolean {
   return role === "admin";
 }
 
-export function canManageApp(viewer: { login: string; role: Role }, app: { created_by: string }): boolean {
-  return viewer.role === "admin" || app.created_by.toLowerCase() === viewer.login.toLowerCase();
-}
-
-export function isPaused(app: { status: string; review_enabled: number }): boolean {
-  return app.status === "active" && app.review_enabled === 0;
+/**
+ * Paused = active but reviews switched off (plan 46 T4: one predicate for
+ * both faces). The two wire representations of `review_enabled` — raw
+ * integer on the apps list face (dashboard/index.ts), boolean on the
+ * settings face (`!== 0` coercion) — are normalized here, so AppsPage's
+ * StatusBadge and SettingsPage's OpsCard share one derivation.
+ */
+export function isPaused(app: { status: string; review_enabled: number | boolean }): boolean {
+  const enabled = typeof app.review_enabled === "boolean" ? app.review_enabled : app.review_enabled !== 0;
+  return app.status === "active" && !enabled;
 }
 
 export function parseInsightsSearch(search: string): InsightsSearch {

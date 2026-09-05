@@ -1,13 +1,12 @@
-import { useEffect, useRef, useState, type MouseEvent } from "react";
+import { useEffect, useRef, useState } from "react";
 import { t } from "../../i18n";
 import { Button } from "@/components/ui/button";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { fetchJson } from "../api";
 import type { SpaBoot } from "../boot";
 import { formatRelativeTime } from "../relative-time";
-import { matchSpaRoute } from "../routes";
-import { navigate } from "../router";
-import { parseApps, type AppsPayload } from "./data";
+import { spaClick } from "../spa-click";
+import { isPaused, parseApps, type AppsPayload } from "./data";
 import { LoadFailedNotice, LoadingNotice } from "./PageNotice";
 
 export function AppsPage({ boot }: { boot: SpaBoot }) {
@@ -59,20 +58,6 @@ function CreateAppButton({ locale }: { locale: SpaBoot["locale"] }) {
       <Button type="submit">{t(locale, "apps.create")}</Button>
     </form>
   );
-}
-
-/**
- * Client-side navigation for in-app links (plan 40 T2): plain modifier- or
- * middle-clicks keep the browser default (new tab / download); a matching
- * SPA route is pushed through the hash-free router instead. Shared with the
- * App settings page's back link.
- */
-export function spaClick(href: string, event: MouseEvent): void {
-  if (event.defaultPrevented) return;
-  if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
-  if (!matchSpaRoute(href)) return;
-  event.preventDefault();
-  navigate(href);
 }
 
 function AppsList({ locale, payload }: { locale: SpaBoot["locale"]; payload: AppsPayload }) {
@@ -162,8 +147,7 @@ function StatusBadge({
   status: string;
   reviewEnabled: number | boolean;
 }) {
-  const enabled = typeof reviewEnabled === "boolean" ? reviewEnabled : reviewEnabled !== 0;
-  const paused = status === "active" && !enabled;
+  const paused = isPaused({ status, review_enabled: reviewEnabled });
   const kind = status === "disabled" ? "warn" : paused ? "warn" : "success";
   const label =
     status === "disabled"
