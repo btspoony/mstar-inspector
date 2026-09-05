@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { Plus } from "lucide-react";
-import { t } from "../../i18n";
+import { isDictionaryKey, t, type DictionaryKey } from "../../i18n";
 import { Button } from "@/components/ui/button";
 import { Card, CardAction, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import {
@@ -172,7 +172,24 @@ function verifyReasonMessage(locale: SpaBoot["locale"], reason: string): string 
 
 function settingsErrorMessage(locale: SpaBoot["locale"], body: string): string {
   try {
-    const parsed = JSON.parse(body) as { code?: unknown; message?: unknown; selector?: unknown };
+    const parsed = JSON.parse(body) as {
+      key?: unknown;
+      params?: unknown;
+      code?: unknown;
+      message?: unknown;
+      selector?: unknown;
+    };
+    // Plan 45 T4: mapped 400s carry a machine-readable key plus the
+    // interpolation params — resolve it in the operator's locale. An unknown
+    // key (newer server, stale client) falls through to the English face
+    // below — fail-visible, never blank.
+    if (typeof parsed.key === "string" && isDictionaryKey(parsed.key)) {
+      const params =
+        typeof parsed.params === "object" && parsed.params !== null
+          ? (parsed.params as Record<string, string | number>)
+          : undefined;
+      return t(locale, parsed.key, params);
+    }
     if (parsed.code === "not_in_verified_models" && typeof parsed.selector === "string") {
       return t(locale, "settings.membership.not_in_verified_models", { selector: parsed.selector });
     }
@@ -272,13 +289,28 @@ function SettingsView({
     }
     if (status >= 400) {
       let reason = "unexpected";
+      // Plan 45 T4 (CARRY-2): the eligibility rejection additionally carries
+      // the keyed face — prefer the mapped key so the runtime-image cause
+      // renders in the operator's locale; reason-only 400s keep the
+      // existing verify copy.
+      let keyed: DictionaryKey | undefined;
+      let keyedParams: Record<string, string | number> | undefined;
       try {
-        const parsed = JSON.parse(body) as { reason?: string };
+        const parsed = JSON.parse(body) as { reason?: string; key?: unknown; params?: unknown };
         if (typeof parsed.reason === "string") reason = parsed.reason;
+        if (typeof parsed.key === "string" && isDictionaryKey(parsed.key)) {
+          keyed = parsed.key;
+          if (typeof parsed.params === "object" && parsed.params !== null) {
+            keyedParams = parsed.params as Record<string, string | number>;
+          }
+        }
       } catch {
         /* body is not JSON */
       }
-      const outcome: OpNotice = { kind: "error", message: verifyReasonMessage(locale, reason) };
+      const outcome: OpNotice = {
+        kind: "error",
+        message: keyed !== undefined ? t(locale, keyed, keyedParams) : verifyReasonMessage(locale, reason),
+      };
       await onReload({ background: true });
       return outcome;
     }
@@ -315,7 +347,10 @@ function SettingsView({
     }
     const outcome: OpNotice =
       status >= 400
-        ? { kind: "error", message: body.trim() || t(locale, "common.loadFailed") }
+        ? // Plan 45 T4: the pinned path resolves through the same resolver as
+          // the settings POST family — keyed JSON renders localized; raw
+          // text still displays (fail-visible, never blank).
+          { kind: "error", message: settingsErrorMessage(locale, body) }
         : { kind: "success", message: successMessage ?? t(locale, "settings.changesSaved") };
     if (reload) await onReload({ background: true });
     return outcome;

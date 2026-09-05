@@ -504,7 +504,17 @@ describe("Plan 46 T7: server-side eligibility precheck (fail-closed)", () => {
     }) as unknown as typeof fetch);
     const res = await postForm(VERIFY, "mallory", makeEnv(db), { provider: "anthropic", key: PLAIN_KEY });
     expect(res.status).toBe(400);
-    expect(await res.json()).toEqual({ ok: false, reason: "unsupported_provider" });
+    // Plan 45 T4 / CARRY-2: the closed `{ ok, reason }` family gains the
+    // optional keyed face — same key as the settings POST family's
+    // eligibility site, no new reason value.
+    expect(await res.json()).toEqual({
+      ok: false,
+      reason: "unsupported_provider",
+      key: "settings.error.providerUnavailableOnImage",
+      message:
+        "anthropic is not available under this App's selected runtime image (legacy-runtime) — nothing was stored.",
+      params: { provider: "anthropic", image: "legacy-runtime" },
+    });
     expect(fetchSpy).not.toHaveBeenCalled();
     expect(db.raw.query("SELECT COUNT(*) AS n FROM app_provider_keys").get() as { n: number }).toEqual({ n: 0 });
   });
