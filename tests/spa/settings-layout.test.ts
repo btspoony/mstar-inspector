@@ -495,6 +495,30 @@ describe("chain draft peer tab (plan 44 T2)", () => {
     expect(chainsBody).toContain("setSelectedTab(created);");
   });
 
+  test("a failed post-create reload keeps the draft open: the create resolves the load-failed error, not success", () => {
+    const source = readFileSync(join(import.meta.dir, "../../src/spa/pages/SettingsPage.tsx"), "utf8");
+    // Bugbot fix (plan 44): POST success alone is not completion — the chain
+    // is only usable once the awaited background reload lands it in the
+    // payload. createDraftChain demotes a POST success whose reload failed to
+    // the load-failed copy, so the panel's success branch (onOutcome +
+    // onCreated → draft closed, tab selected) is unreachable in that case and
+    // the typed content survives for a retry (op=add-chain is
+    // create-or-update-in-place, so re-saving the same name converges).
+    const wrapper = source.slice(
+      source.indexOf("async function createDraftChain"),
+      source.indexOf("async function submitVerify"),
+    );
+    expect(wrapper).toContain('outcome.kind === "success" && !outcome.reloaded');
+    expect(wrapper).toContain('return { kind: "error", message: t(locale, "common.loadFailed") };');
+    // The panel's onCreate is the reload-checked wrapper, not the raw shared
+    // POST — and the reload signal itself comes from load()'s resolved flag,
+    // carried through submitSettings' awaited background refresh.
+    const chainsBody = source.slice(source.indexOf("function ChainsCard"), source.indexOf("function SeatsCard"));
+    expect(chainsBody).toContain("onCreate={onCreateDraft}");
+    expect(source).toContain("const reloaded = await onReload({ background: true });");
+    expect(source).toContain("Promise<OpNotice & { reloaded: boolean }>");
+  });
+
   test("draft copy is dictionary-backed in both locales; the retired disclosure label is gone", () => {
     expect(t("en", "settings.addChain")).toBe("Add chain");
     expect(t("zh_CN", "settings.addChain")).toBe("新建链");
@@ -744,6 +768,17 @@ describe("section-scoped op feedback (plan 44 T3)", () => {
     // paths (parse failure + request failure) — the plan-38 page-level
     // channel for background reloads. Ops never land there.
     expect(source.match(/setNotice\(\{/g)?.length).toBe(2);
+    // Bugbot fix (plan 44): a successful load() — foreground or background —
+    // clears the page banner, so a recovered reload never leaves a stale
+    // "load failed" up. New shape: failure writes 2 + success clear 1, and
+    // the clear is pinned INSIDE load()'s success path (between the payload
+    // commit and its success return), not anywhere in the file.
+    expect(source.match(/setNotice\(null\)/g)?.length).toBe(1);
+    const loadSuccessPath = source.slice(
+      source.indexOf("setPayload(parsed);"),
+      source.indexOf("return true;"),
+    );
+    expect(loadSuccessPath).toContain("setNotice(null);");
     // Carry-over (Task 2 review): a network-level POST failure (postForm
     // throws before an outcome exists) resolves the load-failed copy so the
     // op's card still reports — no silent failure surface.

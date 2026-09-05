@@ -87,16 +87,18 @@ export function SettingsPage({ boot, slug }: { boot: SpaBoot; slug: string }) {
   // destroy Add Provider's open/selection state and every form's typed input
   // (plan 38 QC fix wave 1, F-001). A failed background refresh surfaces the
   // error through the notice channel instead of the page-level error state.
-  async function load({ background = false }: { background?: boolean } = {}): Promise<void> {
+  // Resolves whether a fresh payload landed, so callers can tell a completed
+  // refresh from a failed one (the draft create must not close on failure).
+  async function load({ background = false }: { background?: boolean } = {}): Promise<boolean> {
     if (!background) setState("loading");
     try {
       const settingsRaw = await fetchJson(`/dashboard/api/apps/${encodeURIComponent(slug)}/settings`);
-      if (cancelledRef.current) return;
+      if (cancelledRef.current) return false;
       const parsed = parseSettings(settingsRaw);
       if (!parsed) {
         if (background) setNotice({ kind: "error", message: t(locale, "common.loadFailed") });
         else setState("error");
-        return;
+        return false;
       }
       let nextGroups: ModelOptionGroup[] = [];
       if (parsed.can_manage) {
@@ -107,15 +109,21 @@ export function SettingsPage({ boot, slug }: { boot: SpaBoot; slug: string }) {
           nextGroups = [];
         }
       }
-      if (cancelledRef.current) return;
+      if (cancelledRef.current) return false;
       setPayload(parsed);
       setGroups(nextGroups);
       setState("ok");
+      // A healthy page has no page-level failure: any successful load —
+      // foreground or background — clears the banner a failed background
+      // reload left behind (plan 44 bugbot fix).
+      setNotice(null);
+      return true;
     } catch {
       if (!cancelledRef.current) {
         if (background) setNotice({ kind: "error", message: t(locale, "common.loadFailed") });
         else setState("error");
       }
+      return false;
     }
   }
 
@@ -183,7 +191,7 @@ function SettingsView({
   locale: SpaBoot["locale"];
   payload: SettingsPayload;
   groups: ModelOptionGroup[];
-  onReload: (options?: { background?: boolean }) => Promise<void>;
+  onReload: (options?: { background?: boolean }) => Promise<boolean>;
 }) {
   const { app } = payload;
   const base = `/dashboard/apps/${app.slug}/settings`;
@@ -201,9 +209,12 @@ function SettingsView({
    * submitted the fields renders it in its own region. A network-level POST
    * failure (postForm throws before an outcome exists) resolves the
    * load-failed copy so no op stays silent; a redirect hop navigates away
-   * before this resolves.
+   * before this resolves. The outcome also carries `reloaded` — whether the
+   * awaited background refresh actually landed — which only the draft create
+   * reads (POST success alone is not completion there); every other caller
+   * renders the plain OpNotice and ignores it.
    */
-  async function submitSettings(fields: Record<string, string>): Promise<OpNotice> {
+  async function submitSettings(fields: Record<string, string>): Promise<OpNotice & { reloaded: boolean }> {
     let status: number;
     let body: string;
     // The catch guards only the POST — a background reload never rejects:
@@ -211,13 +222,29 @@ function SettingsView({
     try {
       ({ status, body } = await postForm(base, fields));
     } catch {
-      return { kind: "error", message: t(locale, "common.loadFailed") };
+      return { kind: "error", message: t(locale, "common.loadFailed"), reloaded: false };
     }
     const outcome: OpNotice =
       status >= 400
         ? { kind: "error", message: settingsErrorMessage(locale, body) }
         : { kind: "success", message: t(locale, "settings.changesSaved") };
-    await onReload({ background: true });
+    const reloaded = await onReload({ background: true });
+    return { ...outcome, reloaded };
+  }
+
+  /**
+   * The draft create's completion check (plan 44 bugbot fix): POST success
+   * alone is not done — the chain is only usable once the awaited background
+   * reload lands it in the payload. A successful POST whose reload failed
+   * resolves the load-failed error instead of success, so the draft panel
+   * stays open with the typed content. Retry is safe: op=add-chain is
+   * create-or-update-in-place, so re-saving the same name converges.
+   */
+  async function createDraftChain(fields: Record<string, string>): Promise<OpNotice> {
+    const outcome = await submitSettings(fields);
+    if (outcome.kind === "success" && !outcome.reloaded) {
+      return { kind: "error", message: t(locale, "common.loadFailed") };
+    }
     return outcome;
   }
 
@@ -359,6 +386,7 @@ function SettingsView({
             payload={payload}
             groups={groups}
             onSettings={submitSettings}
+            onCreateDraft={createDraftChain}
             onRemoveChain={(name) => setPending({ kind: "remove-chain", name })}
             notice={chainsNotice}
             onOutcome={setChainsNotice}
@@ -1260,6 +1288,7 @@ function ChainsCard({
   payload,
   groups,
   onSettings,
+  onCreateDraft,
   onRemoveChain,
   notice,
   onOutcome,
@@ -1268,6 +1297,8 @@ function ChainsCard({
   payload: SettingsManagePayload;
   groups: ModelOptionGroup[];
   onSettings: (fields: Record<string, string>) => Promise<OpNotice>;
+  /** Plan 44 bugbot fix: the draft create — resolves an error when the awaited reload fails, so the panel keeps the draft open. */
+  onCreateDraft: (fields: Record<string, string>) => Promise<OpNotice>;
   onRemoveChain: (name: string) => void;
   /** Plan 44 T3: the dialog-confirmed remove-chain outcome. */
   notice: OpNotice | null;
@@ -1365,14 +1396,15 @@ function ChainsCard({
               <DraftChainPanel
                 locale={locale}
                 groups={groups}
-                onCreate={onSettings}
+                onCreate={onCreateDraft}
                 onOutcome={onOutcome}
                 onDiscard={() => setDraftOpen(false)}
                 onCreated={(created) => {
-                  // Success: the reload has already landed (the create
-                  // handler awaits it), so the stored-name tab exists — the
-                  // draft is removed and the real tab is selected. The draft
-                  // lives in component state, so no reload can resurrect it.
+                  // Success: the create handler awaited the reload and it
+                  // landed (createDraftChain resolves an error outcome
+                  // otherwise), so the stored-name tab exists — the draft is
+                  // removed and the real tab is selected. The draft lives in
+                  // component state, so no reload can resurrect it.
                   setDraftOpen(false);
                   setSelectedTab(created);
                 }}
@@ -1492,15 +1524,16 @@ function SeatsCard({
  * full editor inside its own tabpanel — the name field first, then the model
  * builder (the components a named chain's panel uses verbatim). 保存 posts
  * the unchanged op=add-chain with the entered name + built chain; a rejected
- * create renders its error INLINE through ChainEditor's own region
- * (role=alert, inside this panel) and keeps the draft + typed input; only
- * success hands the trimmed stored name back so the real tab is selected,
- * forwarding the saved outcome to the card's region (the panel is about to
- * unmount). 放弃 discards the draft without confirmation (documented;
- * matches the accepted disclosure-discard behavior) — the selection coerces
- * through activeChainTabId once the draft tab is gone. The busy gate covers
- * both triggers while the create POST is in flight, so a discard can never
- * race a resolving save into selecting the created tab.
+ * create — or a create whose awaited background reload failed (plan 44 bugbot
+ * fix) — renders its error INLINE through ChainEditor's own region (role=
+ * alert, inside this panel) and keeps the draft + typed input; only success
+ * (POST ok AND reload landed) hands the trimmed stored name back so the real
+ * tab is selected, forwarding the saved outcome to the card's region (the
+ * panel is about to unmount). 放弃 discards the draft without confirmation
+ * (documented; matches the accepted disclosure-discard behavior) — the
+ * selection coerces through activeChainTabId once the draft tab is gone. The
+ * busy gate covers both triggers while the create POST is in flight, so a
+ * discard can never race a resolving save into selecting the created tab.
  */
 function DraftChainPanel({
   locale,
@@ -1512,7 +1545,7 @@ function DraftChainPanel({
 }: {
   locale: SpaBoot["locale"];
   groups: ModelOptionGroup[];
-  /** The shared settings POST (op=add-chain create); resolves the op outcome. */
+  /** The draft create (op=add-chain); resolves an error when the awaited reload fails so the draft stays open. */
   onCreate: (fields: Record<string, string>) => Promise<OpNotice>;
   /** Forwards the SUCCESS outcome to the chains card's region. */
   onOutcome: (notice: OpNotice) => void;
@@ -1542,8 +1575,11 @@ function DraftChainPanel({
           return onCreate({ op: "add-chain", name, chain: value })
             .then((outcome) => {
               // The trimmed name is what the server stored (it trims before
-              // validating), so that is the real tab's id. Errors render
-              // through ChainEditor's region below the save button.
+              // validating), so that is the real tab's id. Success here
+              // already implies the awaited reload landed (onCreate resolves
+              // an error outcome otherwise); errors — including a POST that
+              // succeeded but whose reload failed — render through
+              // ChainEditor's region below the save button, draft intact.
               if (outcome.kind === "success") {
                 onOutcome(outcome);
                 onCreated(name.trim());
