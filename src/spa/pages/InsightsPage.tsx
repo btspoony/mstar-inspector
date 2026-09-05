@@ -183,7 +183,7 @@ function InsightsRecordsView({ locale, data }: { locale: SpaBoot["locale"]; data
                         {t(locale, row.count === 1 ? "insights.finding" : "insights.findings", { count: row.count })}
                       </span>
                       <span
-                        className="h-2 basis-full rounded-sm bg-primary"
+                        className="h-2 rounded-sm bg-primary"
                         style={{ width: `${Math.round((row.count / maxSeverity) * 100)}%` }}
                       />
                     </li>
