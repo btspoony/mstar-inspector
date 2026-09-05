@@ -26,6 +26,7 @@ import {
 } from "../../src/pipeline/provider-catalog";
 import { PROVIDER_IDS_BUILTIN } from "../../src/contracts/provider-catalog.generated";
 import { CUSTOM_PROVIDER_ID_PATTERN } from "../../src/dashboard/app-config-store";
+import { buildCatalog } from "../../scripts/generate-provider-catalog";
 
 describe("shared provider mapping", () => {
   test("PROVIDER_ENV_NAMES is the frozen env-name snapshot of PROVIDERS", () => {
@@ -269,5 +270,42 @@ describe("provider catalog provenance + determinism (plan 38 T3; plan 42 T1 re-t
       // not a silently regenerated module.
       if (after !== before) writeFileSync(contractPath, before);
     }
+  });
+});
+
+describe("generator breadth-collision guard (plan 46 T5; audit DEBT-46-05)", () => {
+  const repoRoot = join(import.meta.dir, "../..");
+  // The committed snapshot, seeded with a colliding breadth-eligible key per
+  // test case. buildCatalog is imported pure (the generator's read/write tail
+  // is gated behind import.meta.main) — no writer spawn, no file I/O.
+  const snapshot = JSON.parse(readFileSync(join(repoRoot, "scripts/provider-catalog/models.dev-2026-09-04.json"), "utf8")) as Record<
+    string,
+    { id: string; name: string; env: string[]; api: string | null; doc: string | null; model_ids: string[] }
+  >;
+  const seeded = (key: string, name: string) => ({
+    ...snapshot,
+    [key]: { id: key, name, env: [], api: null, doc: null, model_ids: ["fake-model"] },
+  });
+
+  test("a snapshot key colliding with a builtin id throws naming the key, the shadowed entry, and the remediation", () => {
+    // `gemini` is a builtin catalog id whose sourceKey is `google` — a
+    // refreshed snapshot carrying a `gemini` row survives rules (a)-(c) and
+    // reaches the breadth assignment (no collision exists in the committed
+    // snapshot; the collision is seeded here).
+    expect(() => buildCatalog(seeded("gemini", "Gemini Impersonator"))).toThrow(
+      'snapshot key "gemini" would overwrite the existing builtin entry "Google Gemini"',
+    );
+  });
+
+  test("a snapshot key colliding with the curated workers-ai template throws the same way", () => {
+    expect(() => buildCatalog(seeded("workers-ai", "Workers AI Impersonator"))).toThrow(
+      'snapshot key "workers-ai" would overwrite the existing template entry "Cloudflare Workers AI"',
+    );
+  });
+
+  test("the guard is unreachable with the committed snapshot (audit: no collision today)", () => {
+    const { catalog, audit } = buildCatalog(snapshot);
+    expect(Object.keys(catalog)).toHaveLength(214);
+    expect(audit.breadthCount).toBe(194);
   });
 });
