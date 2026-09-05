@@ -26,6 +26,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { fetchJson, postForm } from "../api";
 import type { SpaBoot } from "../boot";
 import { formatRelativeTime } from "../relative-time";
+import { spaClick } from "../spa-click";
 import {
   activeChainTabId,
   DEFAULT_CHAIN_NAME,
@@ -44,7 +45,7 @@ import {
   type SettingsManagePayload,
   type SettingsPayload,
 } from "./data";
-import { spaClick, StatusBadge } from "./AppsPage";
+import { StatusBadge } from "./AppsPage";
 import { LoadFailedNotice, LoadingNotice, PageNotice, type NoticeKind } from "./PageNotice";
 
 type PendingAction =
