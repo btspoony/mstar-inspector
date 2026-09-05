@@ -1,6 +1,7 @@
 ---
 module: dashboard / provider catalog (ai-sdk ecosystem + workers-ai template tier)
 date: 2026-09-04
+last_updated: 2026-09-04
 problem_type: best_practice
 category: best-practices
 severity: medium
@@ -17,10 +18,10 @@ The BYOK dashboard hand-maintained a 19-entry provider map (`src/pipeline/provid
 
 ## Guidance
 
-- **Generated static module, zero runtime network**: `scripts/generate-provider-catalog.ts` reads a vendored `models.dev-<date>.json` snapshot and emits `src/pipeline/provider-catalog.ts` (regen byte-identical). No ai-sdk runtime dependency — the ai-sdk ecosystem is the *metadata source*, not an execution layer; the runner remains omp + `models.yml`.
+- **Generated static module, zero runtime network**: `scripts/generate-provider-catalog.ts` reads a vendored `models.dev-<date>.json` snapshot and emits the generated contract `src/contracts/provider-catalog.generated.ts` (regen byte-identical; 013 plan 42 moved the SSOT from the pipeline module — full breadth, 214 rows: 19 builtin + 195 template incl. curated workers-ai; enumeration rules: 18 builtin-sourceKey exclusions + dedupe + id-regex skip-count). `src/pipeline/provider-catalog.ts` remains the hand-written pipeline face (`export *` from the contract + the `../review/runtime` re-export the consumer imports). No ai-sdk runtime dependency — the ai-sdk ecosystem is the *metadata source*, not an execution layer; the runner remains omp + `models.yml`.
 - **Two tiers**: `builtin` = runner-consumable entries (display name / default base URL / env key / representative models; keeps `providerEnvName` + `PROVIDER_ENV_NAMES` parity tests and plan-31 `PROVIDER_VERIFY_ENDPOINTS` green). `template` = providers that are **not** directly runner-consumable (omp has no built-in discovery for them) — they materialize through the existing `app_custom_providers` machinery instead.
 - **Workers AI = template**: OpenAI-compatible REST endpoint with account-id templated base URL + `CUSTOM_WORKERS_AI_API_KEY` env + the plan-31 custom-provider verify probe. Never a builtin-style env-name entry — the in-image base `models.yml` only knows its own providers, so a fake builtin entry would synthesize a models.yml the runner cannot authenticate.
-- **Mirror discipline**: the dashboard keeps a `PROVIDER_META` mirror (tier/verifiable flags) for UI; a parity test locks catalog ↔ mirror so a regen cannot silently desync the two faces.
+- **Mirror discipline**: the dashboard mirror (`PROVIDER_IDS` = builtin ids, `PROVIDER_META` = full catalog) re-exports the generated contract (structurally assigned), and parity tests lock the builtin set + generator id-regex grammar so a regen cannot silently desync the faces. Dashboard imports the `src/contracts` module, never the pipeline face (Q2 boundary).
 - **Secrets**: template materialization follows the existing verify-first custom-provider flow (key verified outbound before persist; secretbox envelope unchanged).
 
 ## Why This Matters

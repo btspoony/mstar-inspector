@@ -1331,10 +1331,11 @@ dashboardApp.get("/api/apps/:slug/settings", async (c) => {
       ],
       // Plan 38: discovery metadata (the retired `providers` dump) plus
       // eligibility vs the App's selected image. Builtin ids in PROVIDER_IDS
-      // order, then template-tier entries (workers-ai). `verifiable: false`
-      // marks the console-only providers (azure-openai / ai-gateway — the
-      // old addKeyProviderIds filter); templates verify via the custom probe,
-      // so always verifiable.
+      // order, then the template tier (the hand-curated workers-ai entry
+      // followed by the snapshot breadth — the catalog's own key order).
+      // `verifiable: false` marks the console-only providers (azure-openai /
+      // ai-gateway — the old addKeyProviderIds filter); templates verify via
+      // the custom probe, so always verifiable.
       provider_catalog: [
         ...PROVIDER_IDS.map((id) => {
           const meta = PROVIDER_META[id];
@@ -1796,32 +1797,44 @@ dashboardApp.post("/apps/:slug/settings", async (c) => {
     );
   }
   if (op === "add-template-provider") {
-    // Plan 35 T3 (spec §5): materialize a template-tier catalog entry into
-    // the EXISTING custom-provider mechanism — zero models.yml / env
-    // injection / selector-grammar changes. Today exactly one template
-    // exists: "workers-ai" (Cloudflare Workers AI), whose OpenAI-compatible
-    // endpoint is scoped to the user's Cloudflare account id. The save flow
-    // substitutes {account_id} in the template's base URL, pins the
-    // template's api protocol, prefills model_ids from the template's
-    // representative models, and stores the key under
+    // Plan 35 T3 (spec §5), generalized for catalog breadth (plan 42 T1,
+    // spec § Providers contract 1b): materialize a template-tier catalog
+    // entry into the EXISTING custom-provider mechanism — zero models.yml /
+    // env injection / selector-grammar changes. The base URL the template
+    // materializes with is the form's `base_url` override when provided,
+    // else the entry's catalog prefill; the account id is demanded only
+    // when the effective base URL carries the {account_id} placeholder
+    // (Workers-AI-shaped URLs) and is substituted into it. The save flow
+    // pins the template's api protocol, prefills model_ids from the
+    // template's representative models, and stores the key under
     // CUSTOM_<UPPER_SNAKE(id)>_API_KEY via the same upsertCustomProvider
     // path as add-custom-provider (verify-first, plan 31 custom probe —
     // every bound below mirrors the add-custom-provider checks).
     const templateId = typeof form.template_id === "string" ? form.template_id.trim() : "";
     const accountId = typeof form.account_id === "string" ? form.account_id.trim() : "";
+    const formBaseUrl = typeof form.base_url === "string" ? form.base_url.trim() : "";
     const plainKey = typeof form.key === "string" ? form.key.trim() : "";
     const template = PROVIDER_META[templateId];
     if (template === undefined || template.tier !== "template") {
       return settingsPostResponse(c, gate.app.slug, "Unknown provider template — nothing was stored.", 400);
     }
-    if (template.baseUrl === null || template.api === null) {
+    const baseUrlTemplate = formBaseUrl !== "" ? formBaseUrl : template.baseUrl;
+    if (baseUrlTemplate === null || baseUrlTemplate === "") {
+      // Only a template whose catalog base URL is absent AND whose form
+      // override is empty is unmaterializable (breadth rows may ship with a
+      // null snapshot base URL — the editable override covers them).
       return settingsPostResponse(c, gate.app.slug, "This provider template is incomplete — nothing was stored.", 400);
     }
-    if (accountId === "") {
-      return settingsPostResponse(c, gate.app.slug, "Enter your Cloudflare account id to complete the Workers AI base URL.", 400);
-    }
-    if (!CLOUDFLARE_ACCOUNT_ID_PATTERN.test(accountId)) {
-      return settingsPostResponse(c, gate.app.slug, "Cloudflare account ids are 32 hex characters — nothing was stored.", 400);
+    // The account id demand is conditional on the effective base URL's
+    // {account_id} placeholder — a no-placeholder template materializes
+    // without one.
+    if (baseUrlTemplate.includes("{account_id}")) {
+      if (accountId === "") {
+        return settingsPostResponse(c, gate.app.slug, "Enter your Cloudflare account id to complete the Workers AI base URL.", 400);
+      }
+      if (!CLOUDFLARE_ACCOUNT_ID_PATTERN.test(accountId)) {
+        return settingsPostResponse(c, gate.app.slug, "Cloudflare account ids are 32 hex characters — nothing was stored.", 400);
+      }
     }
     // The template id must not collide with a built-in or with a capability
     // host of the App's selected sandbox image (defensive — the catalog's
@@ -1833,7 +1846,7 @@ dashboardApp.post("/apps/:slug/settings", async (c) => {
     if (sandboxImageHostIds(gate.app.sandbox_image_id).includes(templateId)) {
       return settingsPostResponse(c, gate.app.slug, `${templateId} is already provided by the review environment's base configuration — nothing was stored.`, 400);
     }
-    const baseUrl = template.baseUrl.replace("{account_id}", accountId);
+    const baseUrl = baseUrlTemplate.replace("{account_id}", accountId);
     if (!isValidCustomProviderBaseUrl(baseUrl)) {
       return settingsPostResponse(c, gate.app.slug, "The materialized base URL is not a valid https URL — nothing was stored.", 400);
     }

@@ -1,6 +1,7 @@
 ---
 module: dashboard / visual foundation (shadcn + Tailwind v4 on Worker-served Vite SPA)
 date: 2026-09-04
+last_updated: 2026-09-04
 problem_type: best_practice
 category: best-practices
 severity: medium
@@ -17,7 +18,7 @@ The dashboard SPA (React 19 + Vite 8, served by the Worker from `build:spa` outp
 
 ## Guidance
 
-- **Bridge, don't replace**: existing `tokens.css` custom properties stay the source of truth; a `shadcn-theme.css` layer maps shadcn CSS variables (`--background`, `--foreground`, …) onto tokens via `@theme inline`. shadcn components then inherit the project palette. Dark is primary (`prefers-color-scheme`), light declared in parallel; `DESIGN.md` documents the mapping table (L2 completeness).
+- **Bridge, don't replace**: existing `tokens.css` custom properties stay the source of truth; a `shadcn-theme.css` layer maps shadcn CSS variables (`--background`, `--foreground`, …) onto tokens via `@theme inline`. shadcn components then inherit the project palette. Dark is primary; light applies via manual override — `:root[data-theme="light"]` wins over the `@media (prefers-color-scheme: light)` fallback that guards `:root:not([data-theme="dark"])` (013 plan 41 reversed the plan-29 no-toggle lock: a navbar toggle persists `localStorage["mstar.dashboard.theme"]`, applied pre-paint by an inline bootstrap in `src/spa/index.html` before `<!--SPA_BOOT-->`); `DESIGN.md` documents the mapping table (L2 completeness).
 - **Copy-in, exact-pinned**: shadcn components live in `src/spa/components/ui/` copied in via `scripts/copy-shadcn-ui.ts` (vendored registry snapshot; regen is byte-identical). Every new dep (`tailwindcss@4.x`, `@radix-ui/react-*`, `class-variance-authority`, `lucide-react`, …) pinned exact — no `^`/`~`.
 - **Dual-track transition is explicit**: CSS modules and Tailwind coexist during migration; new surfaces are Tailwind-token-only; legacy chrome modules get deleted with test locks (`existsSync === false` assertions) when their surface is reworked.
 - **Path aliases**: `components.json` + vite `@` resolve + `tsconfig.spa.json` paths must all target `src/spa` — keep the three in sync or imports break only at build.

@@ -26,7 +26,7 @@ describe("settings layout (plan 35 T4)", () => {
     expect(source).toContain("add-template-provider");
     expect(source).toContain("add-chain");
     expect(source).toContain("settings.useDefaultChain");
-    expect(source).toContain("settings.namedChains");
+    expect(source).toContain("settings.addChain");
     expect(source).not.toContain("settingsLayout");
     expect(source).not.toContain("settingsSidebar");
   });
@@ -169,9 +169,9 @@ describe("configured providers + catalog add flow (plan 38 T2)", () => {
 
   test("Add Provider: catalog selection drives the configuration form; custom path preserved", () => {
     const source = readFileSync(join(import.meta.dir, "../../src/spa/pages/SettingsPage.tsx"), "utf8");
-    // Accessible toggle → catalog select → selected provider's form.
+    // Header disclosure button (plan 42) → catalog select → selected provider's form.
     expect(source).toContain("settings.addProvider");
-    expect(source).toContain("aria-expanded={open}");
+    expect(source).toContain("aria-expanded={addOpen}");
     expect(source).toContain("selectedCatalogProvider");
     expect(source).toContain("providerFormKind");
     expect(source).toContain("settings.configureProvider");
@@ -215,15 +215,17 @@ describe("configured providers + catalog add flow (plan 38 T2)", () => {
     // mounted instance.
     expect(source).toContain("onDone();");
     expect(source).toContain("setSelectedId(undefined)");
-    expect(source).toContain("setOpen(false)");
+    expect(source).toContain("onOpenChange(false)");
     expect(source).toContain('setKey("")');
   });
 
   test("plan 38 add-flow copy is dictionary-backed in both locales", () => {
     expect(t("en", "settings.addProvider")).toBe("Add provider");
-    expect(t("zh_CN", "settings.addProvider")).toBe("添加提供方");
+    // Plan 42: the zh label keeps the English word "Provider" — the settled
+    // label the header button and every referencing copy line share.
+    expect(t("zh_CN", "settings.addProvider")).toBe("添加 Provider");
     expect(t("en", "settings.providersCopy")).toContain("Add Provider");
-    expect(t("zh_CN", "settings.providersCopy")).toContain("添加提供方");
+    expect(t("zh_CN", "settings.providersCopy")).toContain("添加 Provider");
     expect(t("en", "settings.noConfiguredProviders")).toContain("No providers configured yet");
     expect(t("zh_CN", "settings.noConfiguredProviders")).toContain("尚未配置");
     expect(t("en", "settings.catalogBuiltin")).toContain("Built-in");
@@ -267,8 +269,11 @@ describe("catalog provenance + eligibility messaging (plan 38 T3)", () => {
   });
 
   test("plan 38 T3 copy is dictionary-backed in both locales", () => {
-    expect(t("en", "settings.catalogProvenance")).toContain("models.dev");
-    expect(t("zh_CN", "settings.catalogProvenance")).toContain("models.dev");
+    // Provenance names the count + committed-snapshot source (plan 42 breadth).
+    expect(t("en", "settings.catalogProvenance", { count: 214 })).toContain("214");
+    expect(t("en", "settings.catalogProvenance", { count: 214 })).toContain("models.dev");
+    expect(t("zh_CN", "settings.catalogProvenance", { count: 214 })).toContain("214");
+    expect(t("zh_CN", "settings.catalogProvenance", { count: 214 })).toContain("models.dev");
     expect(t("en", "settings.eligibilityBuiltin", { image: "omp" })).toContain("omp");
     expect(t("zh_CN", "settings.eligibilityBuiltin", { image: "omp" })).toContain("omp");
     expect(t("en", "settings.eligibilityTemplate", { image: "omp" })).toContain("omp");
@@ -279,6 +284,76 @@ describe("catalog provenance + eligibility messaging (plan 38 T3)", () => {
     expect(t("zh_CN", "settings.eligibilityUnavailableShort", { image: "omp" })).toContain("omp");
     expect(t("en", "settings.addProviderCopy")).toContain("can't be saved");
     expect(t("zh_CN", "settings.addProviderCopy")).toContain("无法保存");
+  });
+});
+
+describe("add-entry visibility + picker usability at breadth (plan 42 T2)", () => {
+  test("the Add Provider entry is a labeled, bordered control in the Providers card header", () => {
+    const source = readFileSync(join(import.meta.dir, "../../src/spa/pages/SettingsPage.tsx"), "utf8");
+    // The entry lives in the card HEADER (CardAction slot) — visible without
+    // scrolling; icon-only is not acceptable, the localized label rides the
+    // button beside a plus glyph.
+    const body = source.slice(
+      source.indexOf("function ProvidersCard"),
+      source.indexOf("function AddProviderSection"),
+    );
+    expect(body).toContain("<CardAction>");
+    expect(body).toContain('variant="outline"');
+    expect(body).toContain("aria-expanded={addOpen}");
+    expect(body).toContain('{t(locale, "settings.addProvider")}');
+    expect(body).toContain("<Plus");
+    expect(body).toContain("onClick={() => setAddOpen(!addOpen)}");
+    // The open panel is the card content's FIRST row — inside CardContent,
+    // above the configured rows.
+    const contentPos = body.indexOf("<CardContent");
+    const panelPos = body.indexOf("<AddProviderSection");
+    const rowsPos = body.indexOf("payload.configured_providers.length === 0");
+    expect(contentPos).toBeGreaterThan(-1);
+    expect(panelPos).toBeGreaterThan(contentPos);
+    expect(rowsPos).toBeGreaterThan(panelPos);
+    // The panel is driven by the header button; success still closes it via
+    // the shared onOpenChange channel.
+    expect(body).toContain("open={addOpen}");
+    expect(body).toContain("onOpenChange={setAddOpen}");
+  });
+
+  test("the catalog picker groups builtin first, then template, height-capped to an internal scroll", () => {
+    const source = readFileSync(join(import.meta.dir, "../../src/spa/pages/SettingsPage.tsx"), "utf8");
+    // Grouping: the builtin SelectGroup precedes the template one.
+    const builtinPos = source.indexOf("settings.catalogBuiltin");
+    const templatePos = source.indexOf("settings.catalogTemplate");
+    expect(builtinPos).toBeGreaterThan(-1);
+    expect(templatePos).toBeGreaterThan(builtinPos);
+    // Breadth usability: the list is height-capped (internal scroll) on the
+    // existing Select primitive — no new component.
+    expect(source).toContain('<SelectContent className="max-h-72">');
+  });
+
+  test("the template form carries an editable prefilled base URL and a {account_id}-conditional account-id field", () => {
+    const source = readFileSync(join(import.meta.dir, "../../src/spa/pages/SettingsPage.tsx"), "utf8");
+    // The override field is prefilled from the catalog entry and posts the
+    // optional base_url override (empty string = use the catalog prefill).
+    expect(source).toContain("useState(provider.base_url ?? \"\")");
+    expect(source).toContain("base_url: baseUrl");
+    // Required only when the entry's catalog base URL is null — a prefilled
+    // entry may be saved as-is or overridden.
+    expect(source).toContain("required={provider.base_url === null}");
+    // The account-id demand tracks the EFFECTIVE base URL's {account_id}
+    // placeholder (typed override ?? catalog prefill), mirroring the save flow.
+    expect(source).toContain('effectiveBaseUrl.includes("{account_id}")');
+    expect(source).toContain("needsAccountId ? (");
+    // Success resets the typed base URL along with key/account id.
+    expect(source).toContain('setBaseUrl("")');
+  });
+
+  test("plan 42 copy is dictionary-backed in both locales; account id is no longer Cloudflare-worded", () => {
+    expect(t("en", "settings.accountId")).toBe("Account id");
+    expect(t("zh_CN", "settings.accountId")).toBe("账户 id");
+    expect(t("en", "settings.accountId")).not.toContain("Cloudflare");
+    expect(t("zh_CN", "settings.accountId")).not.toContain("Cloudflare");
+    // The provenance/count line interpolates the payload catalog length.
+    expect(t("en", "settings.catalogProvenance", { count: 214 })).toContain("214 providers");
+    expect(t("zh_CN", "settings.catalogProvenance", { count: 214 })).toContain("214 个提供方");
   });
 });
 
@@ -342,6 +417,40 @@ describe("model chain tabs (plan 39 T1)", () => {
     const chainsBody = source.slice(source.indexOf("function ChainsCard"), source.indexOf("function SeatsCard"));
     expect(chainsBody).toContain("<TabsContent forceMount value={DEFAULT_CHAIN_NAME}>");
     expect(chainsBody).toContain('<TabsContent key={tab.id} forceMount value={tab.id}>');
+  });
+});
+
+describe("chain add affordance at the tab strip (plan 43 T1)", () => {
+  test("the add-chain entry is a labeled outline control beside the TabsList; the form discloses beneath the strip", () => {
+    const source = readFileSync(join(import.meta.dir, "../../src/spa/pages/SettingsPage.tsx"), "utf8");
+    const chainsBody = source.slice(source.indexOf("function ChainsCard"), source.indexOf("function SeatsCard"));
+    // The entry mirrors the plan-42 providers header pattern: outline button,
+    // plus glyph, localized label (icon-only is not acceptable), disclosure
+    // state pinned to the toggle — and it is a TabsList sibling in the strip
+    // row, never a trigger inside the role=tablist.
+    expect(chainsBody).toContain('variant="outline"');
+    expect(chainsBody).toContain("aria-expanded={createOpen}");
+    expect(chainsBody).toContain("<Plus");
+    expect(chainsBody).toContain('{t(locale, "settings.addChain")}');
+    // Placement: the create form renders at the strip level — after the
+    // TabsList row, before the Default panel — replacing the old detached
+    // section (heading + empty-state prose) that lived below the Tabs block.
+    const stripPos = chainsBody.indexOf('<TabsList aria-label={t(locale, "settings.modelChains")}>');
+    const formPos = chainsBody.indexOf("<NamedChainCreate");
+    const panelPos = chainsBody.indexOf("<TabsContent forceMount value={DEFAULT_CHAIN_NAME}>");
+    expect(stripPos).toBeGreaterThan(-1);
+    expect(formPos).toBeGreaterThan(stripPos);
+    expect(panelPos).toBeGreaterThan(formPos);
+    expect(chainsBody).not.toContain("settings.namedChains");
+    expect(chainsBody).not.toContain("settings.noNamedChains");
+    // The frozen plan-39 create flow rides along unchanged: same op, same
+    // created-tab selection after the reload lands.
+    expect(chainsBody).toContain("onCreated={(created) => setSelectedTab(created)}");
+  });
+
+  test("add-chain copy is dictionary-backed in both locales", () => {
+    expect(t("en", "settings.addChain")).toBe("Add chain");
+    expect(t("zh_CN", "settings.addChain")).toBe("新建链");
   });
 });
 
@@ -524,14 +633,11 @@ describe("App workflow boundaries (plan 40 T2)", () => {
     expect(source).toContain('aria-label={t(locale, "settings.modelChainField")}');
   });
 
-  test("empty states stay honest: unconfigured provider and no named chains", () => {
+  test("empty states stay honest: unconfigured provider", () => {
     const source = readFileSync(join(import.meta.dir, "../../src/spa/pages/SettingsPage.tsx"), "utf8");
     expect(source).toContain("settings.noConfiguredProviders");
-    expect(source).toContain("settings.noNamedChains");
     expect(t("en", "settings.noConfiguredProviders")).toContain("No providers configured yet");
     expect(t("zh_CN", "settings.noConfiguredProviders")).toContain("尚未配置");
-    expect(t("en", "settings.noNamedChains")).toBe("No named chains yet.");
-    expect(t("zh_CN", "settings.noNamedChains")).toBe("还没有命名链。");
   });
 });
 

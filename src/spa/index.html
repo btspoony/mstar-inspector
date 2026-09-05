@@ -4,6 +4,15 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Morning Star Inspector</title>
+    <script>
+      // Pre-paint theme bootstrap (plan 41): apply the stored manual theme
+      // before first paint. Whitelist — unreadable or invalid values stay
+      // unset and follow prefers-color-scheme.
+      try {
+        const t = localStorage.getItem("mstar.dashboard.theme");
+        if (t === "light" || t === "dark") document.documentElement.dataset.theme = t;
+      } catch {}
+    </script>
     <!--SPA_BOOT-->
   </head>
   <body>

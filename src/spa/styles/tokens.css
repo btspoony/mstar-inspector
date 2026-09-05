@@ -1,10 +1,14 @@
 /*
- * DESIGN.md L2 token layer (plan 29 Task 1).
+ * DESIGN.md L2 token layer (plan 29 Task 1; cascade restructured plan 41 T1).
  *
  * Contract:
  *   - :root = themes.dark (console default)
- *   - @media (prefers-color-scheme: light) = themes.light
- *   - No data-theme attribute switcher (plan lock: no navbar theme control)
+ *   - :root[data-theme="light"] = themes.light (stored manual choice; set
+ *     pre-paint by the inline bootstrap in src/spa/index.html from
+ *     localStorage["mstar.dashboard.theme"])
+ *   - @media (prefers-color-scheme: light) :root:not([data-theme="dark"]) =
+ *     themes.light (OS fallback while no stored choice exists; a stored dark
+ *     value excludes this branch)
  *   - CSS variable names match DESIGN.md color token names so existing
  *     --background-100 / --gray-1000 / --blue-700 (views.ts STYLE) stay valid
  *     for pages that later import this file.
@@ -287,8 +291,109 @@
   --focus-ring: 0 0 0 2px var(--background-100), 0 0 0 4px var(--blue-700);
 }
 
+/* Stored manual choice — light tokens win over the OS preference. */
+:root[data-theme="light"] {
+  color-scheme: light;
+
+  /* colors — themes.light (keeps L1 hex values for background-100/200, gray-900/1000, blue-700, red-700, amber-700) */
+  --background-100: #ffffff;
+  --background-200: #f4f4f5;
+  --background-300: #e4e4e7;
+  --gray-100: #fafafa;
+  --gray-200: #f4f4f5;
+  --gray-300: #e4e4e7;
+  --gray-400: #d4d4d8;
+  --gray-500: #a1a1aa;
+  --gray-600: #71717a;
+  --gray-700: #52525b;
+  --gray-800: #3f3f46;
+  --gray-900: #3d3d3d;
+  --gray-1000: #111111;
+  --gray-alpha-100: #0000000d;
+  --gray-alpha-200: #00000014;
+  --gray-alpha-300: #0000001a;
+  --gray-alpha-400: #00000024;
+  --gray-alpha-500: #00000036;
+  --gray-alpha-600: #00000052;
+  --gray-alpha-700: #00000073;
+  --gray-alpha-800: #0000008f;
+  --gray-alpha-900: #000000b8;
+  --gray-alpha-1000: #000000e6;
+  --blue-100: #eff6ff;
+  --blue-200: #dbeafe;
+  --blue-300: #bfdbfe;
+  --blue-400: #93c5fd;
+  --blue-500: #60a5fa;
+  --blue-600: #3b82f6;
+  --blue-700: #0066cc;
+  --blue-800: #0052a3;
+  --blue-900: #1e4a7a;
+  --blue-1000: #0c1a2e;
+  --red-100: #fef2f2;
+  --red-200: #fee2e2;
+  --red-300: #fecaca;
+  --red-400: #fca5a5;
+  --red-500: #f87171;
+  --red-600: #ef4444;
+  --red-700: #b91c1c;
+  --red-800: #991b1b;
+  --red-900: #7f1d1d;
+  --red-1000: #450a0a;
+  --amber-100: #fffbeb;
+  --amber-200: #fef3c7;
+  --amber-300: #fde68a;
+  --amber-400: #fcd34d;
+  --amber-500: #fbbf24;
+  --amber-600: #d97706;
+  --amber-700: #b45309;
+  --amber-800: #92400e;
+  --amber-900: #78350f;
+  --amber-1000: #451a03;
+  --green-100: #f0fdf4;
+  --green-200: #dcfce7;
+  --green-300: #bbf7d0;
+  --green-400: #86efac;
+  --green-500: #4ade80;
+  --green-600: #22c55e;
+  --green-700: #16a34a;
+  --green-800: #15803d;
+  --green-900: #166534;
+  --green-1000: #052e16;
+  --teal-100: #f0fdfa;
+  --teal-200: #ccfbf1;
+  --teal-300: #99f6e4;
+  --teal-400: #5eead4;
+  --teal-500: #2dd4bf;
+  --teal-600: #14b8a6;
+  --teal-700: #0d9488;
+  --teal-800: #0f766e;
+  --teal-900: #115e59;
+  --teal-1000: #042f2e;
+  --purple-100: #faf5ff;
+  --purple-200: #f3e8ff;
+  --purple-300: #e9d5ff;
+  --purple-400: #d8b4fe;
+  --purple-500: #c084fc;
+  --purple-600: #a855f7;
+  --purple-700: #9333ea;
+  --purple-800: #7e22ce;
+  --purple-900: #6b21a8;
+  --purple-1000: #3b0764;
+  --pink-100: #fdf2f8;
+  --pink-200: #fce7f3;
+  --pink-300: #fbcfe8;
+  --pink-400: #f9a8d4;
+  --pink-500: #f472b6;
+  --pink-600: #ec4899;
+  --pink-700: #db2777;
+  --pink-800: #be185d;
+  --pink-900: #9d174d;
+  --pink-1000: #500724;
+}
+
+/* OS-light fallback — applies only while no stored dark choice exists. */
 @media (prefers-color-scheme: light) {
-  :root {
+  :root:not([data-theme="dark"]) {
     color-scheme: light;
 
     /* colors — themes.light (keeps L1 hex values for background-100/200, gray-900/1000, blue-700, red-700, amber-700) */

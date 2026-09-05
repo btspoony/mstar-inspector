@@ -1,13 +1,13 @@
 ---
 version: 0.2.0
 name: mstar-inspector Console
-description: "Functional ops-console design system for the mstar-inspector developer dashboard. High contrast, minimal decoration, state through color + copy. Dark is the default theme; light follows prefers-color-scheme. No independent theme toggle."
+description: "Functional ops-console design system for the mstar-inspector developer dashboard. High contrast, minimal decoration, state through color + copy. Dark is the default theme; light follows prefers-color-scheme until the navbar theme toggle stores a manual choice (localStorage mstar.dashboard.theme, light|dark) — the stored choice wins over the OS. Supersedes the plan-29 lock (2026-09-04, user instruction, iteration 013)."
 
 # Runtime default = dark. Top-level colors: matches themes.dark.colors so
 # {colors.X} component refs resolve to the console default. Light values
 # (including the original L1 hexes) live under themes.light.colors.
 defaultTheme: dark
-themeMechanism: prefers-color-scheme
+themeMechanism: "manual data-theme override (navbar toggle), prefers-color-scheme fallback"
 
 colors:
   # Background surfaces
@@ -125,8 +125,12 @@ colors:
 
 themes:
   default: dark
-  mechanism: prefers-color-scheme
-  # No [data-theme] switcher — light is OS preference only (plan 29 lock).
+  mechanism: "manual data-theme override (navbar toggle), prefers-color-scheme fallback"
+  # Manual theme contract (plan 41): the navbar toggle stores light|dark in
+  # localStorage["mstar.dashboard.theme"] and applies documentElement[data-theme]
+  # before first paint; a stored choice wins over prefers-color-scheme, unset
+  # follows the OS (dark console default when the OS expresses neither).
+  # Supersedes the plan-29 lock (2026-09-04, user instruction, iteration 013).
   dark:
     colors:
       # Background surfaces
@@ -569,13 +573,18 @@ decorative elements, state legible through color and copy rather than
 ornament. The audience is the operator who deployed the inspector — not a
 marketing surface.
 
-**Theme contract (locked, plan 29):** dark is the default console theme.
-Light is an automatic override via `prefers-color-scheme: light`. There is
-**no** navbar theme button and **no** `[data-theme]` switcher. Dual-theme
-values live in this file under `themes.dark` / `themes.light` (same token
-**names**, different values). Top-level `colors:` equals `themes.dark.colors`
-so `{colors.X}` component refs resolve to the runtime default. Implementation
-maps these names to CSS custom properties in `src/spa/styles/tokens.css`.
+**Theme contract (plan 41):** dark is the default console theme. With no
+stored choice, light is an automatic override via `prefers-color-scheme:
+light`. A manual **navbar theme toggle** stores `light` | `dark` in
+`localStorage["mstar.dashboard.theme"]` and applies
+`documentElement.dataset.theme` before first paint; the stored choice wins
+over the OS preference. Supersedes the plan-29 lock (2026-09-04, user instruction, iteration 013).
+Dual-theme values live in this file under `themes.dark` / `themes.light`
+(same token **names**, different values). Top-level `colors:` equals
+`themes.dark.colors` so `{colors.X}` component refs resolve to the runtime
+default. Implementation maps these names to CSS custom properties in
+`src/spa/styles/tokens.css` — light applies via `:root[data-theme="light"]`
+with the `prefers-color-scheme` fallback on `:root:not([data-theme="dark"])`.
 
 Existing Level 1 token **names** are unchanged (`background-100`,
 `background-200`, `gray-1000`, `gray-900`, `blue-700`, `red-700`,
@@ -732,13 +741,17 @@ Always include what happened + what to do next on error.
 | DESIGN.md | CSS (`src/spa/styles/tokens.css`) |
 |-----------|-------------------------------------|
 | `themes.dark.colors.X` | `:root { --X: … }` (default) |
-| `themes.light.colors.X` | `@media (prefers-color-scheme: light) { :root { --X: … } }` |
+| `themes.light.colors.X` | `:root[data-theme="light"] { --X: … }` + `@media (prefers-color-scheme: light) { :root:not([data-theme="dark"]) { --X: … } }` |
 | `spacing.N` | `--spacing-N` |
 | `rounded.K` | `--rounded-K` |
 | `typography.T` | `--typo-T-*` |
 | `components.C` | `--component-C-*` referencing color vars |
 
-SPA (Task 3+) consumes `tokens.css` only. Do not introduce a theme toggle.
+SPA (Task 3+) consumes `tokens.css` only. Theme switching is the manual
+navbar toggle (plan 41): it stores `light` | `dark` in
+`localStorage["mstar.dashboard.theme"]` and applies `data-theme` before
+first paint — a stored choice wins over `prefers-color-scheme`, unset
+follows the OS. Supersedes the plan-29 lock (2026-09-04, user instruction, iteration 013).
 Legacy `views.ts` STYLE stays as-is until those pages migrate.
 
 

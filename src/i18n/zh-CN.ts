@@ -17,6 +17,12 @@ export const zhCN: Dictionary = {
     members: "成员",
     /** 目标语言的标签 — 切换按钮显示要切换到的语言（中文界面显示 EN）。 */
     language: "EN",
+    /** 主题切换（plan 41）：静态标签；状态与动作在 aria 文案中表达。 */
+    themeToggle: "深色/浅色模式切换",
+    /** {mode} = 当前生效主题，{target} = 点击后切换到的主题。 */
+    themeToggleAria: "当前显示模式：{mode}，点击切换为{target}",
+    themeDark: "深色",
+    themeLight: "浅色",
     logout: "退出登录",
     signedInAs: "已登录：{name}",
   },
@@ -309,12 +315,12 @@ export const zhCN: Dictionary = {
     deleteSuccess: "App 已删除，已从应用列表中移除。",
     providers: "提供方",
     providersCopy:
-      "此 App 已配置的提供方 — 存储的密钥仅显示掩码尾号，自定义声明显示其 Base URL 与模型。添加提供方从目录选择开始；密钥仅在验证成功后存储。",
+      "此 App 已配置的提供方 — 存储的密钥仅显示掩码尾号，自定义声明显示其 Base URL 与模型。添加 Provider 从目录选择开始；密钥仅在验证成功后存储。",
     noConfiguredProviders: "尚未配置任何提供方 — 请先添加一个提供方。在验证提供方密钥之前，审查将失败关闭。",
-    addProvider: "添加提供方",
+    addProvider: "添加 Provider",
     addProviderCopy: "选择一个目录提供方 — 选中后显示其配置要求。在 App 运行时镜像上不可用的条目会被标记且无法保存；目录外的提供方请使用下方的自定义声明。",
     catalogProvenance:
-      "目录元数据由固定的 models.dev 快照生成并编译进应用 — 在提交密钥验证之前不会联系任何提供方。",
+      "{count} 个提供方，来自已提交的 models.dev 快照并编译进应用 — 在提交密钥验证之前不会联系任何提供方。",
     catalogBuiltin: "内置提供方",
     catalogTemplate: "目录模板",
     eligibilityBuiltin: "可与 {image} 运行时镜像配合使用 — 该提供方作为内置提供方运行。",
@@ -327,7 +333,7 @@ export const zhCN: Dictionary = {
     customEntryCopy: "声明非内置 provider — id、Base URL、模型 id 与密钥。",
     expandCustom: "添加自定义 provider",
     collapseCustom: "收起自定义表单",
-    accountId: "Cloudflare 账户 id",
+    accountId: "账户 id",
     accountIdPlaceholder: "32 位十六进制",
     addTemplate: "添加 {label}",
     tierBuiltin: "内置",
@@ -335,7 +341,7 @@ export const zhCN: Dictionary = {
     modelChains: "模型链",
     modelChainsCopy:
       "Default 链与命名链是同级标签页 — 在各自的标签页中编辑链。Default 链是必需的且无法移除；移除命名链后，引用它的席位将回退到 default。",
-    namedChains: "命名模型链",
+    addChain: "新建链",
     chainName: "链名称",
     chainNamePlaceholder: "例如 deep-review",
     addNamedChain: "添加命名链",
@@ -345,7 +351,6 @@ export const zhCN: Dictionary = {
     useDefaultChain: "Default 链",
     confirmRemoveChainTitle: "移除链 {name}？",
     confirmRemoveChainBody: "引用 {name} 的席位将回退到 default 链。",
-    noNamedChains: "还没有命名链。",
     consoleOnly: "此 provider 无法在此验证 — 请在对应控制台管理密钥。",
     confirmRemoveKeyTitle: "移除 {provider} 的密钥？",
     confirmRemoveKeyBody: "依赖 {provider} 的选择器将失败，直到你重新验证新密钥。",
