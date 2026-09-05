@@ -58,10 +58,6 @@ export function composeModelOptions(
   return groups;
 }
 
-export function flattenModelSelectors(groups: ModelOptionGroup[]): string[] {
-  return groups.flatMap((group) => group.selectors);
-}
-
 /**
  * Membership layer for save-chain / save-roles (spec §6.3). Syntax
  * (`parseModelChain`) is the caller's job. Per selector:

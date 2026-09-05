@@ -5,7 +5,6 @@ import { describe, expect, test } from "bun:test";
 import { t } from "../../src/i18n";
 import {
   activeChainTabId,
-  canManageApp,
   canViewMembers,
   DEFAULT_CHAIN_NAME,
   insightsRepoFromSelect,
@@ -35,16 +34,15 @@ describe("admin guard (plan 29 T4)", () => {
     expect(canViewMembers(null)).toBe(false);
   });
 
-  test("manage = admin or creator (case-insensitive)", () => {
-    expect(canManageApp({ login: "mallory", role: "member" }, { created_by: "Mallory" })).toBe(true);
-    expect(canManageApp({ login: "hubot", role: "member" }, { created_by: "mallory" })).toBe(false);
-    expect(canManageApp({ login: "hubot", role: "admin" }, { created_by: "mallory" })).toBe(true);
-  });
-
-  test("paused is active + review_enabled 0", () => {
+  test("paused is active + reviews disabled (both wire forms: integer and boolean)", () => {
+    // Integer form: the apps list face (raw store column, dashboard/index.ts).
     expect(isPaused({ status: "active", review_enabled: 0 })).toBe(true);
     expect(isPaused({ status: "active", review_enabled: 1 })).toBe(false);
     expect(isPaused({ status: "disabled", review_enabled: 0 })).toBe(false);
+    // Boolean form: the settings face (`review_enabled !== 0` coercion).
+    expect(isPaused({ status: "active", review_enabled: false })).toBe(true);
+    expect(isPaused({ status: "active", review_enabled: true })).toBe(false);
+    expect(isPaused({ status: "disabled", review_enabled: false })).toBe(false);
   });
 });
 

@@ -30,6 +30,7 @@ import { spaClick } from "../spa-click";
 import {
   activeChainTabId,
   DEFAULT_CHAIN_NAME,
+  isPaused,
   modelChainTabs,
   parseModels,
   parseSettings,
@@ -664,7 +665,7 @@ function OpsCard({
   notice: OpNotice | null;
 }) {
   const { app } = payload;
-  const paused = app.status === "active" && !app.review_enabled;
+  const paused = isPaused(app);
   return (
     <Card>
       <CardHeader>

@@ -6,7 +6,7 @@ import { fetchJson } from "../api";
 import type { SpaBoot } from "../boot";
 import { formatRelativeTime } from "../relative-time";
 import { spaClick } from "../spa-click";
-import { parseApps, type AppsPayload } from "./data";
+import { isPaused, parseApps, type AppsPayload } from "./data";
 import { LoadFailedNotice, LoadingNotice } from "./PageNotice";
 
 export function AppsPage({ boot }: { boot: SpaBoot }) {
@@ -147,8 +147,7 @@ function StatusBadge({
   status: string;
   reviewEnabled: number | boolean;
 }) {
-  const enabled = typeof reviewEnabled === "boolean" ? reviewEnabled : reviewEnabled !== 0;
-  const paused = status === "active" && !enabled;
+  const paused = isPaused({ status, review_enabled: reviewEnabled });
   const kind = status === "disabled" ? "warn" : paused ? "warn" : "success";
   const label =
     status === "disabled"
