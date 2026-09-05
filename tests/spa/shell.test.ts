@@ -109,11 +109,19 @@ describe("navbar theme toggle (plan 41 T2)", () => {
     const source = layoutSource();
     expect(source).toContain("THEME_STORAGE_KEY");
     expect(source).toContain('aria-label={t(boot.locale, "nav.themeToggleAria"');
-    expect(source).toContain('{t(boot.locale, "nav.themeToggle")}');
     expect(source).toContain('variant="ghost"');
     expect(source).toContain("document.documentElement.dataset.theme");
     // No reload — the flip is attribute + state only.
     expect(source).not.toContain("reload");
+  });
+
+  test("theme toggle is icon-only (plan 44 T1): current-mode lucide icon, no visible text label", () => {
+    const source = layoutSource();
+    expect(source).toContain('import { Moon, Sun } from "lucide-react"');
+    // The icon depicts the CURRENT mode: Moon in dark, Sun in light.
+    expect(source).toContain('{theme === "dark" ? <Moon aria-hidden="true" /> : <Sun aria-hidden="true" />}');
+    // The visible text label is gone — the aria-label carries the full semantics.
+    expect(source).not.toContain('{t(boot.locale, "nav.themeToggle")}');
   });
 
   test("toggle and pre-paint bootstrap agree on the storage key", () => {
@@ -122,9 +130,7 @@ describe("navbar theme toggle (plan 41 T2)", () => {
     expect(layoutSource()).toContain(`"${bootstrapKey}"`);
   });
 
-  test("toggle copy is complete in both locales (label + aria + toggled-state semantics)", () => {
-    expect(t("en", "nav.themeToggle")).toBe("Dark / light mode");
-    expect(t("zh_CN", "nav.themeToggle")).toBe("深色/浅色模式切换");
+  test("toggle copy is complete in both locales (aria + toggled-state semantics; the visible label key is retired, plan 44)", () => {
     expect(t("en", "nav.themeToggleAria", { mode: "dark", target: "light" })).toBe(
       "Display theme: dark. Activate to switch to light.",
     );

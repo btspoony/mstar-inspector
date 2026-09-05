@@ -3,6 +3,7 @@
  * slim navbar (theme + Lang + username + logout).
  */
 import { useState, type ReactNode } from "react";
+import { Moon, Sun } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { SidebarInset, SidebarProvider } from "@/components/ui/sidebar";
 import { t } from "../i18n";
@@ -63,7 +64,8 @@ function DashboardChrome({ boot, pathname, children }: LayoutProps) {
       <SidebarInset>
         <header className="flex h-14 shrink-0 items-center justify-end gap-2 border-b border-border bg-background px-4">
           <Button type="button" variant="ghost" size="sm" onClick={toggleTheme} aria-label={t(boot.locale, "nav.themeToggleAria", { mode: t(boot.locale, theme === "dark" ? "nav.themeDark" : "nav.themeLight"), target: t(boot.locale, theme === "dark" ? "nav.themeLight" : "nav.themeDark") })}>
-            {t(boot.locale, "nav.themeToggle")}
+            {/* Icon-only (plan 44): the icon depicts the CURRENT mode; the aria-label carries the action. */}
+            {theme === "dark" ? <Moon aria-hidden="true" /> : <Sun aria-hidden="true" />}
           </Button>
           <form className="m-0" method="post" action="/dashboard/locale">
             <input type="hidden" name="locale" value={navbar.languageTarget} />

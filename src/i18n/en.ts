@@ -26,8 +26,7 @@ export const en = {
     members: "Members",
     /** Label of the OTHER locale — the toggle target (en shows 中文, zh_CN shows EN). */
     language: "中文",
-    /** Theme toggle (plan 41): static label; state + action live in the aria copy. */
-    themeToggle: "Dark / light mode",
+    /** Theme toggle (plan 41/44): icon-only button; state + action live in the aria copy. */
     /** {mode} = current effective theme, {target} = the theme clicking switches to. */
     themeToggleAria: "Display theme: {mode}. Activate to switch to {target}.",
     themeDark: "dark",
