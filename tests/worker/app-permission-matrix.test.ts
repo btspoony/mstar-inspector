@@ -6,8 +6,8 @@
  * add-template-provider / remove-custom-provider / key/delete / keys/verify,
  * plus the plan 35 T2/T3 chain ops add-chain / remove-chain) and ops
  * (pause / resume / disable / enable / delete) — funnels through the SAME
- * creator-or-admin gate (`canManageApp`, src/dashboard/index.ts:947-949;
- * SPA mirror src/spa/pages/data.ts:84-86). This file locks that matrix as
+ * server-side creator-or-admin gate (`canManageApp`,
+ * src/dashboard/index.ts:952-954). This file locks that matrix as
  * ONE systematic sweep: creator / admin / other / other-creator × every
  * write route → 200/403, with zero mutation and zero outbound network on
  * every deny path (the guard fires before any validation or store write).

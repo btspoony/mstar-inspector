@@ -303,6 +303,19 @@ describe("generator breadth-collision guard (plan 46 T5; audit DEBT-46-05)", () 
     );
   });
 
+  test("a prototype-chain key (constructor) does not false-positive the guard and lands in the catalog", () => {
+    // `constructor` survives rules (a)-(c) and is an inherited
+    // Object.prototype property — an `in`-based guard would throw a
+    // collision that does not exist. The guard is own-property based, so
+    // the seeded key must pass through as an ordinary breadth template row.
+    const { catalog, audit } = buildCatalog(seeded("constructor", "Constructor Impersonator"));
+    const entry = catalog["constructor"] as { tier: string; label: string };
+    expect(Object.hasOwn(catalog, "constructor")).toBe(true);
+    expect(entry.tier).toBe("template");
+    expect(entry.label).toBe("Constructor Impersonator");
+    expect(audit.breadthCount).toBe(195); // 194 committed breadth rows + the seeded key
+  });
+
   test("the guard is unreachable with the committed snapshot (audit: no collision today)", () => {
     const { catalog, audit } = buildCatalog(snapshot);
     expect(Object.keys(catalog)).toHaveLength(214);

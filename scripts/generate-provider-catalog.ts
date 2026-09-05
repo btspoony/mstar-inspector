@@ -208,7 +208,10 @@ export function buildCatalog(
       audit.excludedSourceKeys.push(key);
       continue;
     }
-    if (TEMPLATE_DEDUPE_SNAPSHOT_KEYS[key] !== undefined) {
+    // Own-property lookup (see the collision guard below): a snapshot key
+    // named like an inherited Object.prototype property (e.g. `constructor`)
+    // must not match the dedupe table through the prototype chain.
+    if (Object.hasOwn(TEMPLATE_DEDUPE_SNAPSHOT_KEYS, key)) {
       audit.dedupedKeys.push(key);
       continue;
     }
@@ -219,7 +222,9 @@ export function buildCatalog(
     // Fail loud (audit DEBT-46-05): a snapshot key that survives rules
     // (a)-(c) but collides with a builtin id or the curated workers-ai
     // template must never silently overwrite the hand-maintained entry.
-    if (key in catalog) {
+    // Own-property check: prototype-chain names (e.g. `constructor`) are
+    // not collisions — `in` would false-positive on inherited properties.
+    if (Object.hasOwn(catalog, key)) {
       const shadowed = catalog[key] as { tier: string; label: string };
       throw new Error(
         `snapshot key ${JSON.stringify(key)} would overwrite the existing ${shadowed.tier} entry ${JSON.stringify(shadowed.label)} — extend the exclusion/dedupe tables in this generator or fix the snapshot`,

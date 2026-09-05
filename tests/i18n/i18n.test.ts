@@ -88,6 +88,19 @@ describe("t() interpolation (plan 29 T2)", () => {
     expect(t("en", "common.time.minutesAgo", { count: 200 })).toBe("200 minutes ago");
   });
 
+  test("two {placeholder} params are substituted in one value", () => {
+    // Two-param coverage restored (plan 46 fix wave 1): the numeric fixture
+    // above was re-pointed in plan 46 T1 to a one-param key (the old
+    // notice.error.keyTooLong was audit-dead). notice.success.roleChanged is
+    // a live two-param key — the MembersPage role-change notice.
+    expect(t("en", "notice.success.roleChanged", { login: "octocat", role: "admin" })).toBe(
+      "octocat is now admin.",
+    );
+    expect(t("zh_CN", "notice.success.roleChanged", { login: "octocat", role: "admin" })).toBe(
+      "octocat 现在是admin。",
+    );
+  });
+
   test("a missing param leaves the {placeholder} literal in place", () => {
     expect(t("en", "notice.success.invited")).toBe("Invited {login} — they can sign in with GitHub now.");
   });
