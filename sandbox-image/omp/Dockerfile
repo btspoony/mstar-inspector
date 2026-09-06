@@ -1,7 +1,8 @@
 # mstar-inspector review sandbox image (plan 06 Task 2, review-runner containerization).
 #
 # Version pinning (compass contracts E): base tag, Bun, gh, mstar-harness ref,
-# and the omp SDK (via package.json/bun.lock) are all pinned to exact versions.
+# the mstar-harness CLI, and the omp SDK (via package.json/bun.lock) are all
+# pinned to exact versions.
 #
 # NO SECRETS (HARD): this image is built with no build args, no env values, no
 # credentials. Tokens/keys enter only via ReviewSandbox.exec env injection at
@@ -71,13 +72,18 @@ RUN git init /opt/mstar-harness \
     && git -C /opt/mstar-harness checkout FETCH_HEAD \
     && rm -rf /opt/mstar-harness/.git
 
-# mstar-harness CLI preinstall (plan 47 Task 2): review-session model
-# toolcalls may invoke the `mstar` CLI — with the CLI absent the model falls
-# back to legacy (non-CLI) behavior. Exact pin `@mstar-harness/cli@3.6.2`:
-# image pinning discipline — the repo manifest `^3.6.2` exception does NOT
-# extend to the image. The CLI dist ships `#!/usr/bin/env bun` (verified) and
-# the Bun 1.4.0 installed above executes it directly, so no node is added.
-# The global bin dir is put on PATH so sandbox exec resolves the `mstar` shim.
+# mstar-harness CLI preinstall (plan 47 Task 2): CONTAINER-level availability
+# per user instruction (2026-09-06) — NOT a review-session mechanism. Review
+# sessions are restricted to read-only read/grep/glob
+# (src/review/runtime-omp.ts REVIEW_TOOL_NAMES), so review-session toolcalls
+# canNOT invoke the `mstar` CLI today; absent a wired invocation path, review
+# behavior is unchanged (legacy, non-CLI). Wiring a sanctioned session
+# toolcall path is a tracked follow-up (plan 47 roadmap) — no such mechanism
+# exists in this image. Exact pin `@mstar-harness/cli@3.6.2`: image pinning
+# discipline — the repo manifest `^3.6.2` exception does NOT extend to the
+# image. The CLI dist ships `#!/usr/bin/env bun` (verified) and the Bun 1.4.0
+# installed above executes it directly, so no node is added. The global bin
+# dir is put on PATH so sandbox exec resolves the `mstar` shim.
 RUN bun add --global @mstar-harness/cli@3.6.2
 ENV PATH="/root/.bun/bin:${PATH}"
 

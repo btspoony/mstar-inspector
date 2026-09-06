@@ -639,8 +639,13 @@ controls are installed (the Dockerfile carries the documentation block only).
 
 Five pins — mstar-harness bumped to **3.6.2** and the `mstar` CLI
 (`@mstar-harness/cli`) preinstalled this iteration (plan 47 Tasks 1–2, the
-explicit upgrade decision, superseding the plan 32 bump to 3.6.0); base
-image / Bun / gh re-verified, no bump:
+explicit upgrade decision, superseding the plan 32 bump to 3.6.0). The CLI
+preinstall is container-level only (`sandbox exec` resolves the `mstar`
+shim): review sessions stay restricted to the read-only `read` / `grep` /
+`glob` whitelist (Runner tool whitelist above), so the review-session model
+cannot invoke the CLI today — a sanctioned session toolcall path is a
+tracked follow-up (plan 47 roadmap), not a shipped mechanism. Base image /
+Bun / gh re-verified, no bump:
 
 | Pin | Value | Where |
 |---|---|---|

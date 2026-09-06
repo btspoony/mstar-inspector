@@ -15,8 +15,9 @@
  *
  * These tests fail if the harness image ref drifts off the 3.6.2 commit, if
  * the manifest range or the lockfile resolution drifts, if the image CLI
- * install drifts off the exact 3.6.2 pin or loses its PATH exposure, or if
- * the test fixture plugin root stops mirroring the pinned layout
+ * install drifts off the exact 3.6.2 pin, loses its PATH exposure, or
+ * desyncs from the `REVIEW_SKILL_VERSION` version prefix, or if the test
+ * fixture plugin root stops mirroring the pinned layout
  * (`commands/amazing-pr-review.md` + `skills/mstar-audit`).
  */
 
@@ -119,6 +120,17 @@ describe("review skill version pin", () => {
     // The constant's "+" suffix is the short form of the Dockerfile fetch sha;
     // drift between the two anchors (image ref vs D1 attribution) fails here.
     expect(REVIEW_SKILL_VERSION.endsWith(`+${fetchSha!.slice(0, 8)}`)).toBe(true);
+  });
+
+  test("REVIEW_SKILL_VERSION version prefix binds to the Dockerfile CLI pin", () => {
+    const dockerfile = readFileSync(OMP_DOCKERFILE, "utf8");
+    const versionPrefix = REVIEW_SKILL_VERSION.split("+")[0];
+    expect(versionPrefix).toBeDefined();
+    // The CLI exact pin and the D1 attribution anchor share the version
+    // component: a future bump that updates one but not the other (e.g. a
+    // fetch-sha + REVIEW_SKILL_VERSION bump leaving the image CLI at the old
+    // version) fails here — same drift net as the fetch-sha binding above.
+    expect(dockerfile).toContain(`@mstar-harness/cli@${versionPrefix!}`);
   });
 });
 
