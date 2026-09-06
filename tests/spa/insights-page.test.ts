@@ -4,6 +4,8 @@
  * Plan 40 T2: the behavioral pins for the records-page helpers (window
  * normalization, searchHref, verdictLine) were rehomed here after the
  * insights-home module retired — they now live in pages/data.ts.
+ * Plan 49 T2: the URL↔filter re-sync pins — after same-route navigation or
+ * history traversal the filter state re-derives from the location.
  * No DOM runner — same source-scan contract as plan 29 SPA tests.
  */
 import { describe, expect, test } from "bun:test";
@@ -14,12 +16,14 @@ import {
   INSIGHTS_WINDOWS,
   insightsWindow,
   normalizeWindowSearch,
+  parseInsightsSearch,
   searchHref,
   verdictLine,
   type InsightsSummary,
 } from "../../src/spa/pages/data";
 
 const page = readFileSync(join(import.meta.dir, "../../src/spa/pages/InsightsPage.tsx"), "utf8");
+const router = readFileSync(join(import.meta.dir, "../../src/spa/router.tsx"), "utf8");
 
 describe("records page assembly (plan 36 T2)", () => {
   test("window switch is the INSIGHTS_WINDOWS segmented ToggleGroup", () => {
@@ -67,6 +71,43 @@ describe("records page assembly (plan 36 T2)", () => {
   test("off-set window deep links are rewritten on mount (plan 36 QC F-002)", () => {
     expect(page).toContain("normalizeWindowSearch");
     expect(page).toContain("window.history.replaceState");
+  });
+});
+
+describe("records page URL↔filter re-sync (plan 49 T2 / F-15-02)", () => {
+  test("same-route navigation re-derives the filter from the now-bare location (synthetic popstate)", () => {
+    // Sidebar Insights click on a filtered view: navigate() pushes the bare
+    // path (query stripped) and then dispatches a synthetic popstate — the
+    // page must listen for it, or the URL and the applied filter diverge.
+    expect(router).toContain('window.history.pushState(null, "", href)');
+    expect(router).toContain('new PopStateEvent("popstate")');
+    expect(page).toContain('window.addEventListener("popstate"');
+    // The handler re-derives through the one shared location derivation —
+    // the same pinned-helper read that seeds the mount initializer (no
+    // forked parsing): bare location ⇒ default segment, filter reset.
+    expect(page).toContain("useState<InsightsSearch>(insightsSearchFromLocation)");
+    expect(page).toContain("setSearch(insightsSearchFromLocation())");
+    expect(page).toContain("window: insightsWindow(window.location.search)");
+    expect(page).toContain("repo: parseInsightsSearch(window.location.search).repo");
+  });
+
+  test("history back/forward re-derives the filter to match the entry's query (native popstate)", () => {
+    // Traversal fires popstate with the entry's ?window=/?repo= in place;
+    // the same listener re-derives so the controls match the address bar.
+    expect(page).toContain('window.addEventListener("popstate"');
+    expect(page).toContain('window.removeEventListener("popstate", onPop)');
+    // Derivation outcomes across both entry shapes (via the pinned helpers):
+    expect(insightsWindow("")).toBe("30");
+    expect(parseInsightsSearch("").repo).toBe("");
+    expect(insightsWindow("?window=7")).toBe("7");
+    const restored = parseInsightsSearch("?window=7&repo=acme/web");
+    expect(restored.window).toBe("7");
+    expect(restored.repo).toBe("acme/web");
+  });
+
+  test("in-page edits stay outside the listener — commitSearch is replaceState, no re-sync loop", () => {
+    expect(page).toContain("window.history.replaceState");
+    expect(page).not.toContain("dispatchEvent");
   });
 });
 

@@ -970,3 +970,29 @@ describe("settings header typography (plan 45 T7)", () => {
     expect(source).not.toContain("text-lg");
   });
 });
+
+describe("custom-provider disclosure state (plan 49 T3)", () => {
+  test("the CustomExpand toggle exposes aria-expanded wired to the disclosure state (audit F-15-03)", () => {
+    const source = readFileSync(join(import.meta.dir, "../../src/spa/pages/SettingsPage.tsx"), "utf8");
+    // Structural pin mirroring the AddProviderSection header-disclosure
+    // precedent (plan 42): the toggle carries aria-expanded bound to the
+    // component's open-state prop — same element, exact-string pinned, so a
+    // regression dropping the attribute (or binding it anywhere other than
+    // the disclosure toggle) fails here. Single-state disclosure semantics
+    // unchanged; the open/closed state is only made perceivable (WCAG 4.1.2).
+    const customBody = source.slice(
+      source.indexOf("function CustomExpand"),
+      source.indexOf("const DRAFT_CHAIN_TAB_ID"),
+    );
+    expect(customBody).toContain("onClick={onToggle} aria-expanded={expanded}");
+    // The attribute stays live end to end: ProvidersCard owns the customOpen
+    // disclosure state and hands it down as `expanded` / onToggle, so the
+    // attribute flips with the disclosure (mirrors the addOpen wiring pin).
+    const providersBody = source.slice(
+      source.indexOf("function ProvidersCard"),
+      source.indexOf("function ConfiguredKeyRow"),
+    );
+    expect(providersBody).toContain("expanded={customOpen}");
+    expect(providersBody).toContain("onToggle={() => setCustomOpen(!customOpen)}");
+  });
+});
