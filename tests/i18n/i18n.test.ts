@@ -82,8 +82,22 @@ describe("t() interpolation (plan 29 T2)", () => {
   });
 
   test("numeric params are stringified", () => {
-    expect(t("en", "notice.error.keyTooLong", { length: 200, max: 128 })).toBe(
-      "That API key is too long (200 characters) — keys are limited to 128 characters. Nothing was stored.",
+    // Fixture re-pointed in plan 46 T1: the old fixture notice.error.keyTooLong
+    // was an audit-dead key with no production consumer; common.time.minutesAgo
+    // exercises the same number→string substitution on a live key.
+    expect(t("en", "common.time.minutesAgo", { count: 200 })).toBe("200 minutes ago");
+  });
+
+  test("two {placeholder} params are substituted in one value", () => {
+    // Two-param coverage restored (plan 46 fix wave 1): the numeric fixture
+    // above was re-pointed in plan 46 T1 to a one-param key (the old
+    // notice.error.keyTooLong was audit-dead). notice.success.roleChanged is
+    // a live two-param key — the MembersPage role-change notice.
+    expect(t("en", "notice.success.roleChanged", { login: "octocat", role: "admin" })).toBe(
+      "octocat is now admin.",
+    );
+    expect(t("zh_CN", "notice.success.roleChanged", { login: "octocat", role: "admin" })).toBe(
+      "octocat 现在是admin。",
     );
   });
 

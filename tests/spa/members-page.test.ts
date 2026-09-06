@@ -2,6 +2,8 @@
  * Plan 34 T2: Members page rebuilt on shadcn Table + invite toolbox bar +
  * confirm dialogs. No DOM runner — same source-scan contract as
  * settings-layout.test.ts — plus dictionary interpolation in both locales.
+ * Plan 45 T5 / F-07: the Joined column renders through the shared
+ * relative-time helper, with the absolute stamp kept as a native tooltip.
  */
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
@@ -32,7 +34,14 @@ describe("members page shadcn rebuild (plan 34 T2)", () => {
     ]) {
       expect(source).toContain(`"${key}"`);
     }
-    expect(source).toContain("member.created_at");
+  });
+
+  test("joined column renders the shared relative-time helper (plan 45 T5 / F-07)", () => {
+    expect(source).toContain('from "../relative-time"');
+    // Same call shape as AppsPage / SettingsPage: value first, locale second.
+    expect(source).toContain("formatRelativeTime(member.created_at, locale)");
+    // The absolute stamp survives as the cell's native tooltip, not the visible text.
+    expect(source).toContain("title={member.created_at}");
   });
 
   test("invite posts login + role; role change and remove ride the pinned POST paths", () => {

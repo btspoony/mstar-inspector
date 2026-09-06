@@ -39,3 +39,18 @@ export function t(
     params[name] !== undefined ? String(params[name]) : match,
   );
 }
+
+/**
+ * True when `key` resolves to a dictionary string (plan 45 T4): the SPA
+ * validates server-emitted message keys before resolving them with `t()`,
+ * so an unknown key (newer server, stale client) falls through to the
+ * English `message` face instead of rendering the raw key.
+ */
+export function isDictionaryKey(key: string): key is DictionaryKey {
+  let node: unknown = en;
+  for (const part of key.split(".")) {
+    if (typeof node !== "object" || node === null) return false;
+    node = (node as Record<string, unknown>)[part];
+  }
+  return typeof node === "string";
+}

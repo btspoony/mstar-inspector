@@ -457,6 +457,23 @@ describe("chain draft peer tab (plan 44 T2)", () => {
     expect(chainsBody).not.toContain("settings.noNamedChains");
   });
 
+  test("the add-chain control is a TabsList sibling: its source sits after the tablist close", () => {
+    const source = readFileSync(join(import.meta.dir, "../../src/spa/pages/SettingsPage.tsx"), "utf8");
+    const chainsBody = source.slice(source.indexOf("function ChainsCard"), source.indexOf("function SeatsCard"));
+    // Plan-43 strip-level contract, structurally pinned (plan 46 T6, audit
+    // F-10): the labels/props pins above cannot see WHERE the control sits —
+    // a regression nesting the add-chain button inside the role=tablist would
+    // still carry its outline variant, plus glyph, label and click handler
+    // (WAI-ARIA tablist children must be tabs, so a button inside breaks the
+    // tab semantics). Source-ordering pin: the control's onClick anchor must
+    // appear AFTER the `</TabsList>` close, so moving it inside the tablist
+    // flips the order and fails here.
+    const tabsListClosePos = chainsBody.indexOf("</TabsList>");
+    const addChainControlPos = chainsBody.indexOf("onClick={openDraft}");
+    expect(tabsListClosePos).toBeGreaterThan(-1);
+    expect(addChainControlPos).toBeGreaterThan(tabsListClosePos);
+  });
+
   test("the draft panel is the editor: name field first, model builder, save/discard, inline failure", () => {
     const source = readFileSync(join(import.meta.dir, "../../src/spa/pages/SettingsPage.tsx"), "utf8");
     const panelBody = source.slice(source.indexOf("function DraftChainPanel"), source.indexOf("function ChainEditor"));
@@ -779,11 +796,19 @@ describe("section-scoped op feedback (plan 44 T3)", () => {
       source.indexOf("return true;"),
     );
     expect(loadSuccessPath).toContain("setNotice(null);");
-    // Carry-over (Task 2 review): a network-level POST failure (postForm
-    // throws before an outcome exists) resolves the load-failed copy so the
-    // op's card still reports — no silent failure surface.
-    expect(source).toContain('return { kind: "error", message: t(locale, "common.loadFailed") };');
+    // Carry-over (Task 2 review), refined by plan 45 T3 (audit F-09): a
+    // network-level POST failure (postForm throws before an outcome exists)
+    // resolves the dedicated save-failed copy so the op's card still reports
+    // — no silent failure surface, and a failed save no longer claims the
+    // page couldn't load. Exactly the three transport catches use it.
+    expect(source).toContain('message: t(locale, "common.saveFailed")');
+    expect(source.match(/t\(locale, "common\.saveFailed"\)/g)?.length).toBe(3);
+    // Page-level reload failures keep the load-failed copy: load()'s two
+    // background-failure paths and the draft create's reload-failure return.
+    expect(source).toContain('message: t(locale, "common.loadFailed")');
     // The in-card copy is dictionary-backed in both locales.
+    expect(t("en", "common.saveFailed")).toContain("save");
+    expect(t("zh_CN", "common.saveFailed")).toContain("保存");
     expect(t("en", "common.loadFailed")).toContain("load");
     expect(t("zh_CN", "common.loadFailed")).toContain("无法加载");
   });
@@ -804,8 +829,9 @@ describe("section-scoped op feedback (plan 44 T3)", () => {
     // Ops zone: region directly under the pause/disable/delete button row.
     const opsBody = source.slice(source.indexOf("function OpsCard"), source.indexOf("function ProvidersCard"));
     expect(opsBody).toContain("<NoticeRegion notice={notice} />");
-    // Providers: region directly under the add panel (serves the verify /
-    // template forms and the dialog-confirmed removes), above the rows.
+    // Providers: card region directly under the add panel serves the verify /
+    // template forms only — plan 45 T6 moved the dialog-confirmed removes to
+    // a row-local region (pinned in the F-08 test below).
     const providersBody = source.slice(
       source.indexOf("function ProvidersCard"),
       source.indexOf("function ConfiguredKeyRow"),
@@ -845,21 +871,57 @@ describe("section-scoped op feedback (plan 44 T3)", () => {
 
   test("dialog-confirmed ops report into the card that owns the action", () => {
     const source = settingsSource();
-    // remove-chain → chains card; remove-key / remove-custom → providers
-    // card; pause/resume/disable/enable/delete (delete with its own copy) →
-    // ops zone. Each card renders its own notice state.
+    // remove-chain → chains card; remove-key / remove-custom → the providers
+    // card's row-local outcome (plan 45 T6); pause/resume/disable/enable/
+    // delete (delete with its own copy) → ops zone. Each card renders its own
+    // notice state.
     const confirmBody = source.slice(source.indexOf("async function onConfirm"), source.indexOf("const confirmCopy"));
     expect(confirmBody).toContain('setChainsNotice(await submitSettings({ op: "remove-chain", name: action.name }))');
-    expect(confirmBody).toContain("setProvidersNotice(");
+    expect(confirmBody).toContain("setProvidersRemoveOutcome({");
     expect(confirmBody).toContain("setOpsNotice(");
     expect(source).toContain("notice={opsNotice}");
     expect(source).toContain("notice={providersNotice}");
     expect(source).toContain("notice={chainsNotice}");
+    // Plan 45 T6: the removes no longer write the card-level providers state —
+    // that region keeps only the add-flow (verify / template) outcomes.
+    expect(confirmBody).not.toContain("setProvidersNotice(");
     // The add-flow forms forward their outcome into the providers card's
     // region; the draft panel forwards its SUCCESS into the chains card's
     // region (its own panel unmounts on success).
     expect(source).toContain("onOutcome={setProvidersNotice}");
     expect(source).toContain("onOutcome={setChainsNotice}");
+  });
+
+  test("provider remove outcomes render row-locally at the removed row's position (plan 45 T6, audit UI-45-05)", () => {
+    const source = settingsSource();
+    // The outcome state carries the removed row's slot, captured in onConfirm
+    // from the PRE-POST payload: the awaited background reload (plan 38)
+    // drops the row from the payload before the outcome resolves, so the
+    // position must be remembered — the row unmounts with the fresh payload
+    // while the card (and the region it renders) stay mounted.
+    const confirmBody = source.slice(source.indexOf("async function onConfirm"), source.indexOf("const confirmCopy"));
+    expect(confirmBody).toContain("const configured = payload.can_manage ? payload.configured_providers : [];");
+    expect(confirmBody).toContain("configured.findIndex(");
+    expect(confirmBody).toContain("slot: slot >= 0 ? slot : configured.length");
+    // The card renders the outcome inside the rows list at that position —
+    // through the shared NoticeRegion, so the row-local region inherits the
+    // plan-44 roles (alert/status) and notice tokens.
+    const providersBody = source.slice(
+      source.indexOf("function ProvidersCard"),
+      source.indexOf("function ConfiguredKeyRow"),
+    );
+    expect(providersBody).toContain("removeOutcome: { notice: OpNotice; slot: number } | null");
+    expect(providersBody).toContain(
+      "{index === removeSlot && removeOutcome ? <NoticeRegion notice={removeOutcome.notice} /> : null}",
+    );
+    // Success takes the row's former slot; a failure leaves the row in place,
+    // so the region renders directly below it (the field-error position).
+    expect(providersBody).toContain(
+      'removeOutcome.notice.kind === "error" ? removeOutcome.slot + 1 : removeOutcome.slot',
+    );
+    // A removed last row's slot equals the list length — the trailing clamp
+    // keeps the outcome visible at the list's end instead of dropping it.
+    expect(providersBody).toContain("removeSlot >= payload.configured_providers.length");
   });
 
   test("save triggers carry a busy guard; every op replaces its region (stale-error rule)", () => {
@@ -891,5 +953,20 @@ describe("section-scoped op feedback (plan 44 T3)", () => {
     expect(source).toContain("setNotice(await onSettings({ op: \"save-sandbox-image\", sandbox_image_id: selected }))");
     expect(source).toContain("setNotice(await onSave(chain.join(\", \")))");
     expect(source).toContain("setNotice(await onSettings(fields))");
+  });
+});
+
+describe("settings header typography (plan 45 T7)", () => {
+  test("app-slug heading renders at the heading-20 scale step, not the off-scale 18px (audit UI-45-08)", () => {
+    const source = readFileSync(join(import.meta.dir, "../../src/spa/pages/SettingsPage.tsx"), "utf8");
+    // The slug is the selected-App panel title sitting under the page-level
+    // h1 (text-2xl = heading-24). DESIGN.md's heading scale is 32/24/20/16
+    // only, and heading-20 is the panel-title tier — heading-16 would demote
+    // the slug below the cards it titles. In code the scale step is the
+    // default Tailwind size utility (sibling panel title: LoginPage
+    // CardTitle text-xl).
+    expect(source).toContain('<h2 className="text-xl font-semibold">{app.slug}</h2>');
+    // The off-scale 18px class no longer appears anywhere on the page.
+    expect(source).not.toContain("text-lg");
   });
 });

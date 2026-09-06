@@ -477,6 +477,102 @@ describe("POST /dashboard/apps/:slug/settings — pinned add-key / add-custom-pr
   });
 });
 
+/** Synchronous parameterized write on the raw bun:sqlite handle (fixture-only). */
+function rawRun(
+  db: ReturnType<typeof createMigratedTestD1>,
+  sql: string,
+  ...params: (string | number | null)[]
+): void {
+  db.raw.prepare(sql).run(...params);
+}
+
+describe("Plan 46 T7: server-side eligibility precheck (fail-closed)", () => {
+  let fetchSpy: ReturnType<typeof spyOn> | undefined;
+  afterEach(() => {
+    fetchSpy?.mockRestore();
+    fetchSpy = undefined;
+  });
+
+  test("verify: non-omp selected image → 400 unsupported_provider, probe never called, nothing stored", async () => {
+    const { db, app } = await seededWorld();
+    // No second registry entry exists today, so the only representable
+    // non-omp state is a row pinned outside the registry — the fail-closed
+    // unknown-id branch the precheck must cover (store-validated in prod).
+    rawRun(db, "UPDATE github_apps SET sandbox_image_id = 'legacy-runtime' WHERE id = ?", app.id);
+    fetchSpy = spyOn(globalThis, "fetch").mockImplementation((async () => {
+      throw new Error("fetch must not be called for an ineligible App");
+    }) as unknown as typeof fetch);
+    const res = await postForm(VERIFY, "mallory", makeEnv(db), { provider: "anthropic", key: PLAIN_KEY });
+    expect(res.status).toBe(400);
+    // Plan 45 T4 / CARRY-2: the closed `{ ok, reason }` family gains the
+    // optional keyed face — same key as the settings POST family's
+    // eligibility site, no new reason value.
+    expect(await res.json()).toEqual({
+      ok: false,
+      reason: "unsupported_provider",
+      key: "settings.error.providerUnavailableOnImage",
+      message:
+        "anthropic is not available under this App's selected runtime image (legacy-runtime) — nothing was stored.",
+      params: { provider: "anthropic", image: "legacy-runtime" },
+    });
+    expect(fetchSpy).not.toHaveBeenCalled();
+    expect(db.raw.query("SELECT COUNT(*) AS n FROM app_provider_keys").get() as { n: number }).toEqual({ n: 0 });
+  });
+
+  test("verify: omp selected image → precheck passes, existing verify-first flow stores the key", async () => {
+    const { db, app } = await seededWorld();
+    rawRun(db, "UPDATE github_apps SET sandbox_image_id = 'omp' WHERE id = ?", app.id);
+    fetchSpy = mockModelsOk(["claude-sonnet-4-6"]);
+    const res = await postForm(VERIFY, "mallory", makeEnv(db), { provider: "anthropic", key: PLAIN_KEY });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { ok: boolean; provider: string };
+    expect(body.ok).toBe(true);
+    expect(body.provider).toBe("anthropic");
+    const store = createAppConfigStore(db, TEST_KEY);
+    expect(await store.listProviderKeys(app.id)).toEqual([
+      expect.objectContaining({ provider: "anthropic", last4: PLAIN_KEY.slice(-4) }),
+    ]);
+  });
+
+  test("add-key: non-omp selected image → 400 plain text naming provider + image, nothing stored", async () => {
+    const { db, app } = await seededWorld();
+    rawRun(db, "UPDATE github_apps SET sandbox_image_id = 'legacy-runtime' WHERE id = ?", app.id);
+    fetchSpy = spyOn(globalThis, "fetch").mockImplementation((async () => {
+      throw new Error("fetch must not be called for an ineligible App");
+    }) as unknown as typeof fetch);
+    const res = await postForm(SETTINGS, "mallory", makeEnv(db), {
+      op: "add-key",
+      provider: "anthropic",
+      key: PLAIN_KEY,
+    });
+    expect(res.status).toBe(400);
+    const body = await res.text();
+    expect(body).toContain("anthropic");
+    expect(body).toContain("legacy-runtime");
+    expect(body).toContain("nothing was stored");
+    expect(body).not.toContain(PLAIN_KEY);
+    expect(fetchSpy).not.toHaveBeenCalled();
+    expect(db.raw.query("SELECT COUNT(*) AS n FROM app_provider_keys").get() as { n: number }).toEqual({ n: 0 });
+  });
+
+  test("add-key: omp selected image → precheck passes, existing flow stores the key", async () => {
+    const { db, app } = await seededWorld();
+    rawRun(db, "UPDATE github_apps SET sandbox_image_id = 'omp' WHERE id = ?", app.id);
+    fetchSpy = mockModelsOk(["claude-sonnet-4-6"]);
+    const res = await postForm(SETTINGS, "mallory", makeEnv(db), {
+      op: "add-key",
+      provider: "anthropic",
+      key: PLAIN_KEY,
+    });
+    expect(res.status).toBe(200);
+    expect(await res.text()).toContain("Stored the anthropic key");
+    const store = createAppConfigStore(db, TEST_KEY);
+    expect(await store.listProviderKeys(app.id)).toEqual([
+      expect.objectContaining({ provider: "anthropic", last4: PLAIN_KEY.slice(-4) }),
+    ]);
+  });
+});
+
 describe("POST /dashboard/apps/:slug/settings — add-template-provider materialization (plan 35 T3, spec §5)", () => {
   let fetchSpy: ReturnType<typeof spyOn> | undefined;
   afterEach(() => {

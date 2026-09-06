@@ -160,3 +160,30 @@ describe("injectSpaBoot (plan 29 T3)", () => {
     expect(out).toContain("\\u003c/script>");
   });
 });
+
+describe("spaClick single-implementation source contract (plan 46 T2)", () => {
+  const spaRoot = join(import.meta.dir, "../../src/spa");
+
+  test("spaClick is defined exactly once — in src/spa/spa-click.ts", () => {
+    const moduleSource = readFileSync(join(spaRoot, "spa-click.ts"), "utf8");
+    expect(moduleSource).toContain("export function spaClick(");
+    // No other SPA file carries a spaClick definition (plan 46 T2
+    // consolidation — per-surface copies were replaced by the shared module).
+    const definitionsElsewhere: string[] = [];
+    for (const file of new Bun.Glob("**/*.{ts,tsx}").scanSync({ cwd: spaRoot })) {
+      if (file === "spa-click.ts") continue;
+      const text = readFileSync(join(spaRoot, file), "utf8");
+      if (/function spaClick\b|const spaClick\s*=/.test(text)) definitionsElsewhere.push(file);
+    }
+    expect(definitionsElsewhere).toEqual([]);
+  });
+
+  test("the three surfaces import the shared handler from the spa-click module", () => {
+    // Specifier as the surfaces actually use it: pages/ and components/ are
+    // one level under src/spa/, so all three import `../spa-click`.
+    for (const rel of ["pages/AppsPage.tsx", "pages/SettingsPage.tsx", "components/AppSidebar.tsx"]) {
+      const source = readFileSync(join(spaRoot, rel), "utf8");
+      expect(source, rel).toContain('import { spaClick } from "../spa-click"');
+    }
+  });
+});

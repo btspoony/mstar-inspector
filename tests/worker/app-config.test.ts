@@ -2168,7 +2168,7 @@ describe("POST /dashboard/apps/:slug/settings — custom providers (op=add-custo
     // The route pre-check reads listCustomProviders (7 rows → passes); the
     // store's atomic conditional INSERT then matches zero rows (a concurrent
     // save won the last slot) → InvalidCustomProviderError → the route must
-    // answer 400 with the cap message, never 500.
+    // answer 400 (the keyed rejection face since plan 45 T4), never 500.
     const sevenRows = Array.from({ length: 7 }, (_, i) => ({
       provider_id: `prov-${i + 1}`,
       base_url: "https://example.com/v1",
@@ -2222,7 +2222,13 @@ describe("POST /dashboard/apps/:slug/settings — custom providers (op=add-custo
       provider_id: "prov-9",
     });
     expect(res.status).toBe(400);
-    expect(await res.text()).toContain("custom provider cap (8) reached");
+    // Plan 45 T4: the keyed 400 face replaces the store's developer-facing
+    // err.message ("custom provider cap (8) reached") — the route pre-checks
+    // make the cap race the realistic backstop cause, and the operator copy
+    // now localizes. The PR #10 contract (400, never 500) is unchanged.
+    const raceBody = (await res.json()) as { key: string; message: string };
+    expect(raceBody.key).toBe("settings.error.customProviderDeclRejected");
+    expect(raceBody.message).toContain("The custom provider was rejected");
   });
 
   test("remove-custom-provider deletes the row; an unknown id is a tolerant no-op", async () => {

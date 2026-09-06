@@ -105,7 +105,7 @@ import {
   removedPage,
 } from "./views";
 import { clampWindow, createInsightsStore } from "./insights-store";
-import { isLocale, resolveLocale, serializeLocaleCookie, t, type Locale } from "../i18n";
+import { isLocale, resolveLocale, serializeLocaleCookie, t, type DictionaryKey, type Locale } from "../i18n";
 import { wantsHtml } from "../spa/routes";
 import { SPA_POST_FORM_HEADER, SPA_POST_FORM_VALUE } from "../spa/post-form-headers";
 
@@ -1170,18 +1170,109 @@ function settingsFailureNotice(err: unknown): string {
 }
 
 /**
+ * Plan 46 T7: the App-selected-image eligibility gate — ONE derivation shared
+ * by the settings display face (provider_catalog eligibility stamping) and
+ * the add-key/verify POST prechecks, so the UI and the server-side precheck
+ * can never disagree. Fail-closed: an unknown image id yields an undefined
+ * runtime → not omp → every provider row unavailable / every provider
+ * ineligible. Deliberately mirrors the display predicate only — `enabled` is
+ * the save-sandbox-image route's value domain and stays outside this gate.
+ */
+function isOmpRuntimeImage(sandboxImageId: string): boolean {
+  return getSandboxImage(sandboxImageId)?.runtime === "omp";
+}
+
+/**
  * Plain-text settings POST response (plan 29 T6: the settings page is
  * SPA-owned and read-only today — plan 31 wires the forms; the pinned POST
  * paths keep their full validation and mutation, and answer the SPA's
  * postForm contract: 2xx → refetch the JSON face, 4xx/5xx → client error).
+ * Plan 45 T4: the family's 400s moved to settings400Response (keyed JSON),
+ * so this helper now carries only the 2xx faces and the
+ * settingsFailureNotice 500s.
  */
 function settingsPostResponse(
   c: Context<{ Bindings: Env }>,
   slug: string,
   message: string,
-  status: 200 | 400 | 500 = 200,
+  status: 200 | 500 = 200,
 ): Response {
   return pinnedPostMutationResponse(c, `/dashboard/apps/${slug}/settings`, message, status);
+}
+
+/**
+ * Plan 45 T4 (audit UI-45-03): machine-readable 400 keys for the settings
+ * POST family — ONE inventory of the site→key mapping. Values are
+ * `settings.error.*` dictionary paths; settings400Response interpolates the
+ * English face from the same dictionary entry, so a mapped 400 body is
+ * `{ key, message, params? }` — `message` keeps the English face (the
+ * existing English-substring pins and any non-resolving consumer),
+ * `params` carries the interpolation data the SPA replays via t() in the
+ * operator's locale.
+ */
+const SETTINGS_400_KEYS = {
+  providerRequired: "settings.error.providerRequired",
+  providerUnknown: "settings.error.providerUnknown",
+  providerUnavailableOnImage: "settings.error.providerUnavailableOnImage",
+  apiKeyRequired: "settings.error.apiKeyRequired",
+  apiKeyTooLong: "settings.error.apiKeyTooLong",
+  chainFieldDuplicated: "settings.error.chainFieldDuplicated",
+  chainTooLong: "settings.error.chainTooLong",
+  chainEmpty: "settings.error.chainEmpty",
+  roleFieldDuplicated: "settings.error.roleFieldDuplicated",
+  roleUnknown: "settings.error.roleUnknown",
+  roleFieldsMissingAll: "settings.error.roleFieldsMissingAll",
+  roleFieldMissing: "settings.error.roleFieldMissing",
+  roleFieldsMissing: "settings.error.roleFieldsMissing",
+  roleChainUnknown: "settings.error.roleChainUnknown",
+  chainNameInvalid: "settings.error.chainNameInvalid",
+  chainValueRequired: "settings.error.chainValueRequired",
+  defaultChainRemoveProtected: "settings.error.defaultChainRemoveProtected",
+  providerIdRequired: "settings.error.providerIdRequired",
+  providerIdInvalid: "settings.error.providerIdInvalid",
+  providerIdBuiltin: "settings.error.providerIdBuiltin",
+  providerIdBaseConfig: "settings.error.providerIdBaseConfig",
+  customProviderMax: "settings.error.customProviderMax",
+  baseUrlRequired: "settings.error.baseUrlRequired",
+  baseUrlInvalid: "settings.error.baseUrlInvalid",
+  baseUrlTooLong: "settings.error.baseUrlTooLong",
+  apiProtocolRequired: "settings.error.apiProtocolRequired",
+  apiProtocolUnknown: "settings.error.apiProtocolUnknown",
+  modelIdsRequired: "settings.error.modelIdsRequired",
+  modelIdsTooMany: "settings.error.modelIdsTooMany",
+  modelIdTooLong: "settings.error.modelIdTooLong",
+  customProviderDeclRejected: "settings.error.customProviderDeclRejected",
+  templateUnknown: "settings.error.templateUnknown",
+  templateIncomplete: "settings.error.templateIncomplete",
+  accountIdRequired: "settings.error.accountIdRequired",
+  accountIdInvalid: "settings.error.accountIdInvalid",
+  templateIdBuiltin: "settings.error.templateIdBuiltin",
+  templateIdBaseConfig: "settings.error.templateIdBaseConfig",
+  materializedBaseUrlInvalid: "settings.error.materializedBaseUrlInvalid",
+  templateApiUnsupported: "settings.error.templateApiUnsupported",
+  templateNoModels: "settings.error.templateNoModels",
+  templateMaterializeMax: "settings.error.templateMaterializeMax",
+  sandboxImageUnknown: "settings.error.sandboxImageUnknown",
+  unknownOperation: "settings.error.unknownOperation",
+} as const satisfies Record<string, DictionaryKey>;
+
+/**
+ * Keyed 400 for the settings POST family (plan 45 T4): native `<form>`
+ * navigation keeps the plan-29 contract — 302 to the settings page, the
+ * body is never seen; the SPA's postForm fetch gets the keyed JSON face
+ * (`message` = the en dictionary face, so existing English-substring pins
+ * keep passing; `params` = the interpolation data for the SPA's t()).
+ */
+function settings400Response(
+  c: Context<{ Bindings: Env }>,
+  slug: string,
+  key: DictionaryKey,
+  params?: Record<string, string | number>,
+): Response {
+  if (wantsHtmlFormNavigation(c)) {
+    return c.redirect(`/dashboard/apps/${slug}/settings`, 302);
+  }
+  return c.json({ key, message: t("en", key, params), ...(params ? { params } : {}) }, 400);
 }
 
 function mapVerifyReason(
@@ -1298,7 +1389,7 @@ dashboardApp.get("/api/apps/:slug/settings", async (c) => {
     // through the custom-provider machinery; any other runtime would leave
     // every row unavailable (zero such rows this iteration — omp is the only
     // registry entry, and the persisted id is store-validated against it).
-    const ompRuntime = getSandboxImage(gate.app.sandbox_image_id)?.runtime === "omp";
+    const ompRuntime = isOmpRuntimeImage(gate.app.sandbox_image_id);
     return c.json({
       can_manage: true,
       ...base,
@@ -1395,6 +1486,9 @@ dashboardApp.get("/api/apps/:slug/models", async (c) => {
  * SPA add-key path (plan 31 T4): verify the as-typed key, then store. Failure
  * is 400 JSON with a structured reason (invalid_key / unreachable / unexpected /
  * unsupported_provider) and ZERO writes. The key is never logged or returned.
+ * Plan 46 T7: an App whose selected runtime image is not omp (unknown id
+ * included — fail-closed) is refused with unsupported_provider before any
+ * probe, mirroring the display face's eligibility gate.
  */
 dashboardApp.post("/api/apps/:slug/keys/verify", async (c) => {
   const gate = await requireAppSettings(c);
@@ -1404,6 +1498,28 @@ dashboardApp.post("/api/apps/:slug/keys/verify", async (c) => {
   const plainKey = typeof form.key === "string" ? form.key.trim() : "";
   if (!PROVIDER_IDS.includes(provider) || plainKey === "" || plainKey.length > MAX_PROVIDER_KEY_LENGTH) {
     return c.json({ ok: false, reason: "unexpected" as const }, 400);
+  }
+  // Plan 46 T7 (fail-closed server-side precheck): the App's selected runtime
+  // image must carry an omp runtime for ANY provider key to be eligible —
+  // the same gate the settings display face stamps into provider_catalog
+  // (isOmpRuntimeImage). Unknown image id → not omp → 400. The precheck
+  // reuses the existing closed reason enum (no new value; plan 45 T4 /
+  // CARRY-2 adds the optional keyed face so the SPA renders the
+  // runtime-image copy in the operator's locale); zero writes.
+  if (!isOmpRuntimeImage(gate.app.sandbox_image_id)) {
+    return c.json(
+      {
+        ok: false,
+        reason: "unsupported_provider" as const,
+        key: SETTINGS_400_KEYS.providerUnavailableOnImage,
+        message: t("en", SETTINGS_400_KEYS.providerUnavailableOnImage, {
+          provider,
+          image: gate.app.sandbox_image_id,
+        }),
+        params: { provider, image: gate.app.sandbox_image_id },
+      },
+      400,
+    );
   }
   const store = createAppConfigStore(gate.db, c.env.DASHBOARD_ENCRYPTION_KEY);
   try {
@@ -1422,7 +1538,11 @@ dashboardApp.post("/api/apps/:slug/keys/verify", async (c) => {
 /**
  * The settings POST: the operations on the pinned action path, discriminated
  * by the forms' hidden `op` field. add-key = provider allowlist (400 on any
- * other id — the allowlist is the plan's Global Constraint) + non-empty key
+ * other id — the allowlist is the plan's Global Constraint) + the
+ * selected-image eligibility precheck (plan 46 T7: a selected image whose
+ * runtime is not omp — unknown id included, fail-closed — is a 400 with zero
+ * writes, the same gate the display face stamps into provider_catalog) +
+ * non-empty key
  * of at most MAX_PROVIDER_KEY_LENGTH characters (plan 15 input bounds — an
  * oversized key is a 400 with zero writes; the store guard beneath
  * is the backstop), then the store encrypts inside. save-chain = empty →
@@ -1448,9 +1568,9 @@ dashboardApp.post("/api/apps/:slug/keys/verify", async (c) => {
  * App's sandbox runtime-image selection: only ENABLED
  * src/contracts/sandbox-images.ts registry ids are storable (unknown or
  * disabled → 400, nothing stored). Plan 29 T6: the settings page is
- * SPA-owned, so every response is plain text (settingsPostResponse) — 2xx
- * = the SPA refetches the JSON face, 4xx/5xx = the reason; the re-rendered
- * HTML page is retired.
+ * SPA-owned — 2xx = the SPA refetches the JSON face, 4xx/5xx = the reason
+ * (plan 45 T4: 400s are keyed JSON via settings400Response — native form
+ * posts keep the 302); the re-rendered HTML page is retired.
  */
 dashboardApp.post("/apps/:slug/settings", async (c) => {
   const gate = await requireAppSettings(c);
@@ -1467,22 +1587,30 @@ dashboardApp.post("/apps/:slug/settings", async (c) => {
     const provider = typeof form.provider === "string" ? form.provider.trim() : "";
     const plainKey = typeof form.key === "string" ? form.key.trim() : "";
     if (!PROVIDER_IDS.includes(provider)) {
-      return settingsPostResponse(
-        c,
-        gate.app.slug,
-        provider === ""
-          ? "Pick a provider for the key."
-          : `${provider} is not a supported provider — pick one from the list.`,
-        400,
-      );
+      return provider === ""
+        ? settings400Response(c, gate.app.slug, SETTINGS_400_KEYS.providerRequired)
+        : settings400Response(c, gate.app.slug, SETTINGS_400_KEYS.providerUnknown, { provider });
+    }
+    // Plan 46 T7 (fail-closed server-side precheck): the App's selected
+    // runtime image must carry an omp runtime for ANY provider key to be
+    // eligible — the same gate the settings display face stamps into
+    // provider_catalog (isOmpRuntimeImage). Unknown image id → not omp →
+    // 400, zero writes. Plain-text family (native/legacy surface only — the
+    // SPA's add-key path is verify-first via /keys/verify).
+    if (!isOmpRuntimeImage(gate.app.sandbox_image_id)) {
+      return settings400Response(c, gate.app.slug, SETTINGS_400_KEYS.providerUnavailableOnImage, {
+        provider,
+        image: gate.app.sandbox_image_id,
+      });
     }
     if (plainKey === "") {
-      return settingsPostResponse(c, gate.app.slug, "Enter an API key to store.", 400);
+      return settings400Response(c, gate.app.slug, SETTINGS_400_KEYS.apiKeyRequired);
     }
     if (plainKey.length > MAX_PROVIDER_KEY_LENGTH) {
-      return settingsPostResponse(c, gate.app.slug, `That API key is too long (${plainKey.length} characters) — keys are limited to ${MAX_PROVIDER_KEY_LENGTH} characters. Nothing was stored.`,
-        400,
-      );
+      return settings400Response(c, gate.app.slug, SETTINGS_400_KEYS.apiKeyTooLong, {
+        count: plainKey.length,
+        limit: MAX_PROVIDER_KEY_LENGTH,
+      });
     }
     try {
       const verified = await verifyProviderKey({ fetch: globalThis.fetch }, provider, plainKey);
@@ -1502,9 +1630,7 @@ dashboardApp.post("/apps/:slug/settings", async (c) => {
     // it into an array) must be rejected — never treated as the empty-clear
     // path, which would silently wipe the stored chain.
     if (Array.isArray(form.model_chain)) {
-      return settingsPostResponse(c, gate.app.slug, "The model chain field was submitted more than once — resubmit the form. Nothing was saved.",
-        400,
-      );
+      return settings400Response(c, gate.app.slug, SETTINGS_400_KEYS.chainFieldDuplicated);
     }
     const raw = typeof form.model_chain === "string" ? form.model_chain : "";
     try {
@@ -1514,13 +1640,14 @@ dashboardApp.post("/apps/:slug/settings", async (c) => {
         );
       }
       if (raw.length > MAX_MODEL_SELECTOR_LENGTH) {
-        return settingsPostResponse(c, gate.app.slug, `That model chain is too long (${raw.length} characters) — limited to ${MAX_MODEL_SELECTOR_LENGTH}. Nothing was saved.`,
-          400,
-        );
+        return settings400Response(c, gate.app.slug, SETTINGS_400_KEYS.chainTooLong, {
+          count: raw.length,
+          limit: MAX_MODEL_SELECTOR_LENGTH,
+        });
       }
       const selectors = parseModelChain(raw);
       if (selectors.length === 0) {
-        return settingsPostResponse(c, gate.app.slug, "Enter at least one comma-separated model selector.", 400);
+        return settings400Response(c, gate.app.slug, SETTINGS_400_KEYS.chainEmpty);
       }
       const failing = findFailingSelector(
         selectors,
@@ -1558,14 +1685,12 @@ dashboardApp.post("/apps/:slug/settings", async (c) => {
       // arrives as an ARRAY — explicit 400 rejection (zero
       // writes), never the silent last-wins the default parseBody had.
       if (Array.isArray(value)) {
-        return settingsPostResponse(c, gate.app.slug, `The ${field} field was submitted more than once — resubmit the Role models form with one value per role. Nothing was saved.`,
-          400,
-        );
+        return settings400Response(c, gate.app.slug, SETTINGS_400_KEYS.roleFieldDuplicated, { field });
       }
       if (typeof value !== "string") continue;
       const role = field.slice("role_".length);
       if (!MODEL_ROLE_IDS.includes(role)) {
-        return settingsPostResponse(c, gate.app.slug, `${role} is not a known review role — nothing was saved.`, 400);
+        return settings400Response(c, gate.app.slug, SETTINGS_400_KEYS.roleUnknown, { role });
       }
       // F-001 (QC): canonicalize BEFORE bind — the known-chain check below
       // and the store's upsert must see the SAME trimmed name, or a crafted
@@ -1579,14 +1704,14 @@ dashboardApp.post("/apps/:slug/settings", async (c) => {
     // fields" guard; a strict subset names exactly what is absent.
     const missingSeats = MODEL_ROLE_IDS.filter((role) => !(role in refs));
     if (missingSeats.length === MODEL_ROLE_IDS.length) {
-      return settingsPostResponse(c, gate.app.slug, "No role chain references were submitted — resubmit the Role models form.", 400);
+      return settings400Response(c, gate.app.slug, SETTINGS_400_KEYS.roleFieldsMissingAll);
     }
     if (missingSeats.length > 0) {
-      return settingsPostResponse(
+      return settings400Response(
         c,
         gate.app.slug,
-        `The ${missingSeats.join(", ")} role field${missingSeats.length === 1 ? " is" : "s are"} missing — the Role models form always saves every seat (blank = default chain). Nothing was saved.`,
-        400,
+        missingSeats.length === 1 ? SETTINGS_400_KEYS.roleFieldMissing : SETTINGS_400_KEYS.roleFieldsMissing,
+        { roles: missingSeats.join(", ") },
       );
     }
     try {
@@ -1601,9 +1726,7 @@ dashboardApp.post("/apps/:slug/settings", async (c) => {
       for (const [role, chainName] of Object.entries(refs)) {
         if (chainName === "" || chainName === DEFAULT_CHAIN_NAME) continue;
         if (!knownChains.has(chainName)) {
-          return settingsPostResponse(c, gate.app.slug, `${role} is not a known model chain — pick one from the list or leave it empty to use the default chain. Nothing was saved.`,
-            400,
-          );
+          return settings400Response(c, gate.app.slug, SETTINGS_400_KEYS.roleChainUnknown, { role });
         }
       }
       await store.setModelChainSeats(gate.app.id, refs);
@@ -1621,21 +1744,22 @@ dashboardApp.post("/apps/:slug/settings", async (c) => {
     const name = typeof form.name === "string" ? form.name.trim() : "";
     const chain = typeof form.chain === "string" ? form.chain : "";
     if (name === "" || name === DEFAULT_CHAIN_NAME || !MODEL_CHAIN_NAME_PATTERN.test(name)) {
-      return settingsPostResponse(c, gate.app.slug, `Chain names must be 1–${MAX_MODEL_CHAIN_NAME_LENGTH} lowercase letters, digits or hyphens — and "default" is reserved. Nothing was saved.`,
-        400,
-      );
+      return settings400Response(c, gate.app.slug, SETTINGS_400_KEYS.chainNameInvalid, {
+        limit: MAX_MODEL_CHAIN_NAME_LENGTH,
+      });
     }
     if (chain.trim() === "") {
-      return settingsPostResponse(c, gate.app.slug, "Enter a model chain for the named chain.", 400);
+      return settings400Response(c, gate.app.slug, SETTINGS_400_KEYS.chainValueRequired);
     }
     if (chain.length > MAX_MODEL_SELECTOR_LENGTH) {
-      return settingsPostResponse(c, gate.app.slug, `That model chain is too long (${chain.length} characters) — limited to ${MAX_MODEL_SELECTOR_LENGTH}. Nothing was saved.`,
-        400,
-      );
+      return settings400Response(c, gate.app.slug, SETTINGS_400_KEYS.chainTooLong, {
+        count: chain.length,
+        limit: MAX_MODEL_SELECTOR_LENGTH,
+      });
     }
     const selectors = parseModelChain(chain);
     if (selectors.length === 0) {
-      return settingsPostResponse(c, gate.app.slug, "Enter at least one comma-separated model selector.", 400);
+      return settings400Response(c, gate.app.slug, SETTINGS_400_KEYS.chainEmpty);
     }
     const failing = findFailingSelector(
       selectors,
@@ -1660,9 +1784,7 @@ dashboardApp.post("/apps/:slug/settings", async (c) => {
     // removed here (clear it via save-chain instead).
     const name = typeof form.name === "string" ? form.name.trim() : "";
     if (name === "" || name === DEFAULT_CHAIN_NAME) {
-      return settingsPostResponse(c, gate.app.slug, `The "default" chain cannot be removed — clear it instead. Nothing was saved.`,
-        400,
-      );
+      return settings400Response(c, gate.app.slug, SETTINGS_400_KEYS.defaultChainRemoveProtected);
     }
     try {
       await store.removeModelChain(gate.app.id, name);
@@ -1690,17 +1812,13 @@ dashboardApp.post("/apps/:slug/settings", async (c) => {
     const modelIds = parseModelChain(typeof form.model_ids === "string" ? form.model_ids : "");
     const plainKey = typeof form.key === "string" ? form.key.trim() : "";
     if (providerId === "") {
-      return settingsPostResponse(c, gate.app.slug, "Enter a provider id for the custom provider.", 400);
+      return settings400Response(c, gate.app.slug, SETTINGS_400_KEYS.providerIdRequired);
     }
     if (!CUSTOM_PROVIDER_ID_PATTERN.test(providerId)) {
-      return settingsPostResponse(c, gate.app.slug, "Provider ids are lowercase letters, digits, and hyphens — 1 to 64 characters, starting with a letter or digit. Nothing was stored.",
-        400,
-      );
+      return settings400Response(c, gate.app.slug, SETTINGS_400_KEYS.providerIdInvalid);
     }
     if (PROVIDER_IDS.includes(providerId)) {
-      return settingsPostResponse(c, gate.app.slug, `${providerId} is a built-in provider — custom providers must use a new id. Nothing was stored.`,
-        400,
-      );
+      return settings400Response(c, gate.app.slug, SETTINGS_400_KEYS.providerIdBuiltin, { provider: providerId });
     }
     // Plan 37 (QC wave-1 W-1's successor): an id the App's SELECTED sandbox
     // image already declares as a capability host (omp: ark-plan) would be
@@ -1708,9 +1826,7 @@ dashboardApp.post("/apps/:slug/settings", async (c) => {
     // still got injected, so the declaration is refused up front (the store's
     // upsertCustomProvider re-checks against the same registry host ids).
     if (sandboxImageHostIds(gate.app.sandbox_image_id).includes(providerId)) {
-      return settingsPostResponse(c, gate.app.slug, `${providerId} is already provided by the review environment's base configuration — custom providers must use a new id. Nothing was stored.`,
-        400,
-      );
+      return settings400Response(c, gate.app.slug, SETTINGS_400_KEYS.providerIdBaseConfig, { provider: providerId });
     }
     // QC wave-1 W-2: declarations per App are capped (growth-only — an
     // update of an already-declared id never counts against the cap). The
@@ -1720,49 +1836,50 @@ dashboardApp.post("/apps/:slug/settings", async (c) => {
       !declaredCustomProviders.some((p) => p.provider_id === providerId) &&
       declaredCustomProviders.length >= MAX_CUSTOM_PROVIDER_COUNT
     ) {
-      return settingsPostResponse(c, gate.app.slug, `This App already has the maximum of ${MAX_CUSTOM_PROVIDER_COUNT} custom providers — remove one before declaring another (updating an existing declaration is always allowed). Nothing was stored.`,
-        400,
-      );
+      return settings400Response(c, gate.app.slug, SETTINGS_400_KEYS.customProviderMax, {
+        limit: MAX_CUSTOM_PROVIDER_COUNT,
+      });
     }
     if (baseUrl === "") {
-      return settingsPostResponse(c, gate.app.slug, "Enter the provider's base URL.", 400);
+      return settings400Response(c, gate.app.slug, SETTINGS_400_KEYS.baseUrlRequired);
     }
     if (!isValidCustomProviderBaseUrl(baseUrl)) {
-      return settingsPostResponse(c, gate.app.slug, "The base URL must be a valid https URL with a host — nothing was stored.", 400);
+      return settings400Response(c, gate.app.slug, SETTINGS_400_KEYS.baseUrlInvalid);
     }
     if (baseUrl.length > MAX_CUSTOM_PROVIDER_BASE_URL_LENGTH) {
-      return settingsPostResponse(c, gate.app.slug, `That base URL is too long (${baseUrl.length} characters) — limited to ${MAX_CUSTOM_PROVIDER_BASE_URL_LENGTH}. Nothing was stored.`,
-        400,
-      );
+      return settings400Response(c, gate.app.slug, SETTINGS_400_KEYS.baseUrlTooLong, {
+        count: baseUrl.length,
+        limit: MAX_CUSTOM_PROVIDER_BASE_URL_LENGTH,
+      });
     }
     if (api === "") {
-      return settingsPostResponse(c, gate.app.slug, "Pick an API protocol for the custom provider.", 400);
+      return settings400Response(c, gate.app.slug, SETTINGS_400_KEYS.apiProtocolRequired);
     }
     if (!CUSTOM_PROVIDER_API_IDS.includes(api as (typeof CUSTOM_PROVIDER_API_IDS)[number])) {
-      return settingsPostResponse(c, gate.app.slug, `${api} is not a supported API protocol — pick one from the list. Nothing was stored.`,
-        400,
-      );
+      return settings400Response(c, gate.app.slug, SETTINGS_400_KEYS.apiProtocolUnknown, { api });
     }
     if (modelIds.length === 0) {
-      return settingsPostResponse(c, gate.app.slug, "Enter at least one model id for the custom provider.", 400);
+      return settings400Response(c, gate.app.slug, SETTINGS_400_KEYS.modelIdsRequired);
     }
     if (modelIds.length > MAX_CUSTOM_PROVIDER_MODEL_IDS) {
-      return settingsPostResponse(c, gate.app.slug, `Too many model ids (${modelIds.length}) — at most ${MAX_CUSTOM_PROVIDER_MODEL_IDS}. Nothing was stored.`,
-        400,
-      );
+      return settings400Response(c, gate.app.slug, SETTINGS_400_KEYS.modelIdsTooMany, {
+        count: modelIds.length,
+        limit: MAX_CUSTOM_PROVIDER_MODEL_IDS,
+      });
     }
     if (modelIds.some((id) => id.length > MAX_CUSTOM_PROVIDER_MODEL_ID_LENGTH)) {
-      return settingsPostResponse(c, gate.app.slug, `Model ids are limited to ${MAX_CUSTOM_PROVIDER_MODEL_ID_LENGTH} characters each. Nothing was stored.`,
-        400,
-      );
+      return settings400Response(c, gate.app.slug, SETTINGS_400_KEYS.modelIdTooLong, {
+        limit: MAX_CUSTOM_PROVIDER_MODEL_ID_LENGTH,
+      });
     }
     if (plainKey === "") {
-      return settingsPostResponse(c, gate.app.slug, "Enter an API key to store.", 400);
+      return settings400Response(c, gate.app.slug, SETTINGS_400_KEYS.apiKeyRequired);
     }
     if (plainKey.length > MAX_PROVIDER_KEY_LENGTH) {
-      return settingsPostResponse(c, gate.app.slug, `That API key is too long (${plainKey.length} characters) — keys are limited to ${MAX_PROVIDER_KEY_LENGTH} characters. Nothing was stored.`,
-        400,
-      );
+      return settings400Response(c, gate.app.slug, SETTINGS_400_KEYS.apiKeyTooLong, {
+        count: plainKey.length,
+        limit: MAX_PROVIDER_KEY_LENGTH,
+      });
     }
     try {
       const verified = await verifyProviderKey(
@@ -1789,7 +1906,7 @@ dashboardApp.post("/apps/:slug/settings", async (c) => {
       // throw InvalidCustomProviderError AFTER the route pre-check passed
       // (a concurrent save won the last slot) — that is a 400, not a 500.
       if (err instanceof InvalidCustomProviderError) {
-        return settingsPostResponse(c, gate.app.slug, err.message, 400);
+        return settings400Response(c, gate.app.slug, SETTINGS_400_KEYS.customProviderDeclRejected);
       }
       return settingsPostResponse(c, gate.app.slug, settingsFailureNotice(err), 500);
     }
@@ -1816,24 +1933,24 @@ dashboardApp.post("/apps/:slug/settings", async (c) => {
     const plainKey = typeof form.key === "string" ? form.key.trim() : "";
     const template = PROVIDER_META[templateId];
     if (template === undefined || template.tier !== "template") {
-      return settingsPostResponse(c, gate.app.slug, "Unknown provider template — nothing was stored.", 400);
+      return settings400Response(c, gate.app.slug, SETTINGS_400_KEYS.templateUnknown);
     }
     const baseUrlTemplate = formBaseUrl !== "" ? formBaseUrl : template.baseUrl;
     if (baseUrlTemplate === null || baseUrlTemplate === "") {
       // Only a template whose catalog base URL is absent AND whose form
       // override is empty is unmaterializable (breadth rows may ship with a
       // null snapshot base URL — the editable override covers them).
-      return settingsPostResponse(c, gate.app.slug, "This provider template is incomplete — nothing was stored.", 400);
+      return settings400Response(c, gate.app.slug, SETTINGS_400_KEYS.templateIncomplete);
     }
     // The account id demand is conditional on the effective base URL's
     // {account_id} placeholder — a no-placeholder template materializes
     // without one.
     if (baseUrlTemplate.includes("{account_id}")) {
       if (accountId === "") {
-        return settingsPostResponse(c, gate.app.slug, "Enter your Cloudflare account id to complete the Workers AI base URL.", 400);
+        return settings400Response(c, gate.app.slug, SETTINGS_400_KEYS.accountIdRequired);
       }
       if (!CLOUDFLARE_ACCOUNT_ID_PATTERN.test(accountId)) {
-        return settingsPostResponse(c, gate.app.slug, "Cloudflare account ids are 32 hex characters — nothing was stored.", 400);
+        return settings400Response(c, gate.app.slug, SETTINGS_400_KEYS.accountIdInvalid);
       }
     }
     // The template id must not collide with a built-in or with a capability
@@ -1841,45 +1958,60 @@ dashboardApp.post("/apps/:slug/settings", async (c) => {
     // template tier is disjoint from both today, but a future template must
     // not silently shadow one).
     if (PROVIDER_IDS.includes(templateId)) {
-      return settingsPostResponse(c, gate.app.slug, `${templateId} is a built-in provider — nothing was stored.`, 400);
+      return settings400Response(c, gate.app.slug, SETTINGS_400_KEYS.templateIdBuiltin, { template: templateId });
     }
     if (sandboxImageHostIds(gate.app.sandbox_image_id).includes(templateId)) {
-      return settingsPostResponse(c, gate.app.slug, `${templateId} is already provided by the review environment's base configuration — nothing was stored.`, 400);
+      return settings400Response(c, gate.app.slug, SETTINGS_400_KEYS.templateIdBaseConfig, { template: templateId });
     }
     const baseUrl = baseUrlTemplate.replace("{account_id}", accountId);
     if (!isValidCustomProviderBaseUrl(baseUrl)) {
-      return settingsPostResponse(c, gate.app.slug, "The materialized base URL is not a valid https URL — nothing was stored.", 400);
+      return settings400Response(c, gate.app.slug, SETTINGS_400_KEYS.materializedBaseUrlInvalid);
     }
     if (baseUrl.length > MAX_CUSTOM_PROVIDER_BASE_URL_LENGTH) {
-      return settingsPostResponse(c, gate.app.slug, `That base URL is too long (${baseUrl.length} characters) — limited to ${MAX_CUSTOM_PROVIDER_BASE_URL_LENGTH}. Nothing was stored.`, 400);
+      return settings400Response(c, gate.app.slug, SETTINGS_400_KEYS.baseUrlTooLong, {
+        count: baseUrl.length,
+        limit: MAX_CUSTOM_PROVIDER_BASE_URL_LENGTH,
+      });
     }
     if (!CUSTOM_PROVIDER_API_IDS.includes(template.api as (typeof CUSTOM_PROVIDER_API_IDS)[number])) {
-      return settingsPostResponse(c, gate.app.slug, `${template.api} is not a supported API protocol — nothing was stored.`, 400);
+      // template.api is `string | null` (catalog snapshot shape) — String()
+      // keeps the former `${template.api}` face for the null case verbatim.
+      return settings400Response(c, gate.app.slug, SETTINGS_400_KEYS.templateApiUnsupported, {
+        api: String(template.api),
+      });
     }
     const modelIds = [...template.models];
     if (modelIds.length === 0) {
-      return settingsPostResponse(c, gate.app.slug, "This provider template has no model ids — nothing was stored.", 400);
+      return settings400Response(c, gate.app.slug, SETTINGS_400_KEYS.templateNoModels);
     }
     if (modelIds.length > MAX_CUSTOM_PROVIDER_MODEL_IDS) {
-      return settingsPostResponse(c, gate.app.slug, `Too many model ids (${modelIds.length}) — at most ${MAX_CUSTOM_PROVIDER_MODEL_IDS}. Nothing was stored.`, 400);
+      return settings400Response(c, gate.app.slug, SETTINGS_400_KEYS.modelIdsTooMany, {
+        count: modelIds.length,
+        limit: MAX_CUSTOM_PROVIDER_MODEL_IDS,
+      });
     }
     if (modelIds.some((id) => id.length > MAX_CUSTOM_PROVIDER_MODEL_ID_LENGTH)) {
-      return settingsPostResponse(c, gate.app.slug, `Model ids are limited to ${MAX_CUSTOM_PROVIDER_MODEL_ID_LENGTH} characters each. Nothing was stored.`, 400);
+      return settings400Response(c, gate.app.slug, SETTINGS_400_KEYS.modelIdTooLong, {
+        limit: MAX_CUSTOM_PROVIDER_MODEL_ID_LENGTH,
+      });
     }
     if (plainKey === "") {
-      return settingsPostResponse(c, gate.app.slug, "Enter an API key to store.", 400);
+      return settings400Response(c, gate.app.slug, SETTINGS_400_KEYS.apiKeyRequired);
     }
     if (plainKey.length > MAX_PROVIDER_KEY_LENGTH) {
-      return settingsPostResponse(c, gate.app.slug, `That API key is too long (${plainKey.length} characters) — keys are limited to ${MAX_PROVIDER_KEY_LENGTH} characters. Nothing was stored.`, 400);
+      return settings400Response(c, gate.app.slug, SETTINGS_400_KEYS.apiKeyTooLong, {
+        count: plainKey.length,
+        limit: MAX_PROVIDER_KEY_LENGTH,
+      });
     }
     const declaredCustomProviders = await store.listCustomProviders(gate.app.id);
     if (
       !declaredCustomProviders.some((p) => p.provider_id === templateId) &&
       declaredCustomProviders.length >= MAX_CUSTOM_PROVIDER_COUNT
     ) {
-      return settingsPostResponse(c, gate.app.slug, `This App already has the maximum of ${MAX_CUSTOM_PROVIDER_COUNT} custom providers — remove one before materializing another (updating an existing declaration is always allowed). Nothing was stored.`,
-        400,
-      );
+      return settings400Response(c, gate.app.slug, SETTINGS_400_KEYS.templateMaterializeMax, {
+        limit: MAX_CUSTOM_PROVIDER_COUNT,
+      });
     }
     try {
       const verified = await verifyProviderKey(
@@ -1903,7 +2035,7 @@ dashboardApp.post("/apps/:slug/settings", async (c) => {
     } catch (err) {
       logSettingsFailure("add_template_provider", gate.app.id, err);
       if (err instanceof InvalidCustomProviderError) {
-        return settingsPostResponse(c, gate.app.slug, err.message, 400);
+        return settings400Response(c, gate.app.slug, SETTINGS_400_KEYS.customProviderDeclRejected);
       }
       return settingsPostResponse(c, gate.app.slug, settingsFailureNotice(err), 500);
     }
@@ -1941,7 +2073,7 @@ dashboardApp.post("/apps/:slug/settings", async (c) => {
     const imageId = typeof form.sandbox_image_id === "string" ? form.sandbox_image_id.trim() : "";
     const image = getSandboxImage(imageId);
     if (!image || !image.enabled) {
-      return settingsPostResponse(c, gate.app.slug, "Unknown or disabled sandbox image — nothing was stored.", 400);
+      return settings400Response(c, gate.app.slug, SETTINGS_400_KEYS.sandboxImageUnknown);
     }
     try {
       await createAppsStore(gate.db).setSandboxImage(gate.app.id, image.id);
@@ -1953,7 +2085,7 @@ dashboardApp.post("/apps/:slug/settings", async (c) => {
   }
   // T2 review fold (T1 minor): an unknown op is a validation failure like any
   // other — 400 with the reason.
-  return settingsPostResponse(c, gate.app.slug, "Unknown settings operation — resubmit one of this page's forms.", 400);
+  return settings400Response(c, gate.app.slug, SETTINGS_400_KEYS.unknownOperation);
 });
 
 dashboardApp.post("/apps/:slug/settings/key/delete", async (c) => {

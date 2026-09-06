@@ -17,5 +17,5 @@ export {
   serializeLocaleCookie,
   type Locale,
 } from "./resolve";
-export { dictionaries, t, type DictionaryKey } from "./t";
+export { dictionaries, isDictionaryKey, t, type DictionaryKey } from "./t";
 export { NAV_ITEMS, type NavItem } from "./nav";

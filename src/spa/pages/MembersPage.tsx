@@ -23,6 +23,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { fetchJson, postForm } from "../api";
 import type { SpaBoot } from "../boot";
+import { formatRelativeTime } from "../relative-time";
 import { canViewMembers, inviteLoginNoticeKey, parseMembers, type MemberRow, type Role } from "./data";
 import { LoadFailedNotice, LoadingNotice, PageNotice, type NoticeKind } from "./PageNotice";
 
@@ -217,7 +218,14 @@ export function MembersPage({ boot }: { boot: SpaBoot }) {
                           ) : null}
                         </TableCell>
                         <TableCell>{roleLabel(member.role)}</TableCell>
-                        <TableCell className="text-muted-foreground tabular-nums">{member.created_at}</TableCell>
+                        {/* Shared relative-time copy (F-07); the raw SQLite
+                            UTC stamp stays reachable as the native tooltip. */}
+                        <TableCell
+                          className="text-muted-foreground tabular-nums"
+                          title={member.created_at}
+                        >
+                          {formatRelativeTime(member.created_at, locale)}
+                        </TableCell>
                         <TableCell className="text-right">
                           {self ? null : (
                             <DropdownMenu>

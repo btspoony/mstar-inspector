@@ -163,7 +163,10 @@ type BreadthAudit = {
   breadthCount: number;
 };
 
-function buildCatalog(
+/** Pure catalog builder — exported so the collision guard is testable
+ *  (tests/pipeline/providers.test.ts) without file I/O or spawning the
+ *  writer; the authoring path below is the only caller with side effects. */
+export function buildCatalog(
   snapshot: Record<string, SnapshotProvider>,
 ): { catalog: Record<string, unknown>; audit: BreadthAudit } {
   const catalog: Record<string, unknown> = {};
@@ -205,13 +208,27 @@ function buildCatalog(
       audit.excludedSourceKeys.push(key);
       continue;
     }
-    if (TEMPLATE_DEDUPE_SNAPSHOT_KEYS[key] !== undefined) {
+    // Own-property lookup (see the collision guard below): a snapshot key
+    // named like an inherited Object.prototype property (e.g. `constructor`)
+    // must not match the dedupe table through the prototype chain.
+    if (Object.hasOwn(TEMPLATE_DEDUPE_SNAPSHOT_KEYS, key)) {
       audit.dedupedKeys.push(key);
       continue;
     }
     if (!CUSTOM_PROVIDER_ID_PATTERN.test(key)) {
       audit.idPatternFails.push(key);
       continue;
+    }
+    // Fail loud (audit DEBT-46-05): a snapshot key that survives rules
+    // (a)-(c) but collides with a builtin id or the curated workers-ai
+    // template must never silently overwrite the hand-maintained entry.
+    // Own-property check: prototype-chain names (e.g. `constructor`) are
+    // not collisions — `in` would false-positive on inherited properties.
+    if (Object.hasOwn(catalog, key)) {
+      const shadowed = catalog[key] as { tier: string; label: string };
+      throw new Error(
+        `snapshot key ${JSON.stringify(key)} would overwrite the existing ${shadowed.tier} entry ${JSON.stringify(shadowed.label)} — extend the exclusion/dedupe tables in this generator or fix the snapshot`,
+      );
     }
     catalog[key] = {
       label: source.name,
@@ -232,14 +249,18 @@ function buildCatalog(
   return { catalog, audit };
 }
 
-const snapshot = JSON.parse(await readFile(SNAPSHOT_PATH, "utf8")) as Record<string, SnapshotProvider>;
-const { catalog, audit } = buildCatalog(snapshot);
+async function main(): Promise<void> {
+  const snapshot = JSON.parse(await readFile(SNAPSHOT_PATH, "utf8")) as Record<string, SnapshotProvider>;
+  const { catalog, audit } = buildCatalog(snapshot);
 
-const catalogLiteral = JSON.stringify(catalog, null, 2);
-const builtinIdsLiteral = JSON.stringify(BUILTIN_ORDER.map((spec) => spec.id), null, 2);
-const wrapList = (items: string[]): string => (items.length === 0 ? "(none)" : items.join(", "));
+  const catalogLiteral = JSON.stringify(catalog, null, 2);
+  const builtinIdsLiteral = JSON.stringify(BUILTIN_ORDER.map((spec) => spec.id), null, 2);
+  const wrapList = (items: string[]): string => (items.length === 0 ? "(none)" : items.join(", "));
 
-const auditComment = ` * Breadth enumeration (deterministic, auditable — every excluded snapshot
+  // The auditComment/moduleSource template literals stay at column 0 — their
+  // line-leading whitespace is generated-file content, and the regeneration
+  // byte-identity lock (tests/pipeline/providers.test.ts) must not shift.
+  const auditComment = ` * Breadth enumeration (deterministic, auditable — every excluded snapshot
  * key names its rule; ${Object.keys(snapshot).length} snapshot keys → ${audit.breadthCount} breadth template entries):
  *   - rule (a) excluded as a builtin sourceKey (${audit.excludedSourceKeys.length} — no duplicate
  *     vendor rows beside the builtin tier): ${wrapList(audit.excludedSourceKeys)}
@@ -250,7 +271,7 @@ const auditComment = ` * Breadth enumeration (deterministic, auditable — every
  *   - models prefill cap: at most the first ${TEMPLATE_MODEL_PREFILL_CAP} model ids per provider
  *     (deterministic snapshot order — template prefill only)`;
 
-const moduleSource = `/**
+  const moduleSource = `/**
  * GENERATED FILE — provider catalog (plan 42 T1; originally plan 35 T3,
  * spec §5). DO NOT EDIT BY HAND — regenerate with
  * \`bun run scripts/generate-provider-catalog.ts\` and commit the result as
@@ -336,13 +357,22 @@ export const TEMPLATE_PROVIDERS: Record<string, ProviderCatalogEntry> = Object.f
 ) as Record<string, ProviderCatalogEntry>;
 `;
 
-// QC wave (seat1, plan 35): the parity locks (tests/worker/app-config.test.ts)
-// fail CI on drift between this contract and the dashboard mirror — the
-// mirror is now a direct re-export of this module (plan 42 T1), so the lock
-// guards the re-export instead of a hand-maintained copy.
-await writeFile(OUT_PATH, moduleSource, "utf8");
-console.log(
-  `wrote ${OUT_PATH} (${moduleSource.length} bytes): ` +
-    `${BUILTIN_ORDER.length} builtin + ${Object.keys(TEMPLATES).length} curated template + ${audit.breadthCount} breadth templates; ` +
-    `skips: ${audit.excludedSourceKeys.length} sourceKey / ${audit.dedupedKeys.length} dedupe / ${audit.idPatternFails.length} id-pattern`,
-);
+  // QC wave (seat1, plan 35): the parity locks (tests/worker/app-config.test.ts)
+  // fail CI on drift between this contract and the dashboard mirror — the
+  // mirror is now a direct re-export of this module (plan 42 T1), so the lock
+  // guards the re-export instead of a hand-maintained copy.
+  await writeFile(OUT_PATH, moduleSource, "utf8");
+  console.log(
+    `wrote ${OUT_PATH} (${moduleSource.length} bytes): ` +
+      `${BUILTIN_ORDER.length} builtin + ${Object.keys(TEMPLATES).length} curated template + ${audit.breadthCount} breadth templates; ` +
+      `skips: ${audit.excludedSourceKeys.length} sourceKey / ${audit.dedupedKeys.length} dedupe / ${audit.idPatternFails.length} id-pattern`,
+  );
+}
+
+// Authoring path: the read/write tail runs only when the script is executed
+// directly (`bun run scripts/generate-provider-catalog.ts`); importing the
+// module (the collision guard tests) gets the pure buildCatalog with zero
+// file I/O.
+if (import.meta.main) {
+  await main();
+}

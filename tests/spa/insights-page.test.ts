@@ -50,6 +50,16 @@ describe("records page assembly (plan 36 T2)", () => {
     expect(page).not.toMatch(/#[0-9a-fA-F]{3,8}\b/);
   });
 
+  test("severity bar encodes the share — inline width effective, no basis-full override (plan 45 T1 / F-01)", () => {
+    // F-01: `basis-full` compiles to flex-basis: 100% — the flex base size,
+    // so the browser never consulted the inline width and every bar rendered
+    // full-width. The bar must keep its proportional inline width and must
+    // not regain a flex-basis override.
+    expect(page).toContain("style={{ width:");
+    expect(page).toContain("Math.round((row.count / maxSeverity) * 100)");
+    expect(page).not.toContain("basis-full");
+  });
+
   test("records fetch opts into the repos aggregation (plan 36 QC F-001)", () => {
     expect(page).toContain("insightsSummaryUrl(search, true)");
   });
