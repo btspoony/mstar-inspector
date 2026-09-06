@@ -637,15 +637,23 @@ controls are installed (the Dockerfile carries the documentation block only).
 
 ## Image pins and digest record
 
-Four pins — mstar-harness bumped to **3.6.0** this iteration (plan 32 Task 1,
-the explicit upgrade decision); base image / Bun / gh re-verified, no bump:
+Five pins — mstar-harness bumped to **3.6.2** and the `mstar` CLI
+(`@mstar-harness/cli`) preinstalled this iteration (plan 47 Tasks 1–2, the
+explicit upgrade decision, superseding the plan 32 bump to 3.6.0). The CLI
+preinstall is container-level only (`sandbox exec` resolves the `mstar`
+shim): review sessions stay restricted to the read-only `read` / `grep` /
+`glob` whitelist (Runner tool whitelist above), so the review-session model
+cannot invoke the CLI today — a sanctioned session toolcall path is a
+tracked follow-up (plan 47 roadmap), not a shipped mechanism. Base image /
+Bun / gh re-verified, no bump:
 
 | Pin | Value | Where |
 |---|---|---|
 | base image | `docker.io/cloudflare/sandbox:0.12.8` | `sandbox-image/omp/Dockerfile` FROM |
 | Bun | `1.4.0` | `sandbox-image/omp/Dockerfile` |
 | gh CLI | `2.98.0` | `sandbox-image/omp/Dockerfile` |
-| mstar-harness | `ad76f0c6600acd5040464248085ad7d22af93e9f` (3.6.0) | `sandbox-image/omp/Dockerfile` |
+| mstar-harness | `3436ddcaf03ddec693dc7059395e9ccf92e5d005` (3.6.2) | `sandbox-image/omp/Dockerfile` |
+| mstar-harness CLI | `@mstar-harness/cli@3.6.2` | `sandbox-image/omp/Dockerfile` |
 
 **In-image DEFAULT model selector: `ark-plan/deepseek-v4-flash`** (pins:
 `src/review/runtime-omp.ts` `DEFAULT_MODEL_PATTERN` + the omp registry entry's
