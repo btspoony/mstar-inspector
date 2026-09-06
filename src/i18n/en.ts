@@ -68,6 +68,7 @@ export const en = {
     },
     loading: "Loading…",
     loadFailed: "Could not load this page.",
+    saveFailed: "Could not save your changes.",
     cancel: "Cancel",
   },
   login: {
@@ -119,6 +120,12 @@ export const en = {
       delivery: "delivery {time}",
       deliveryNever: "delivery never",
       rejected24h: "{count} rejected in 24h",
+      outcome: {
+        ok: "OK",
+        paused: "Paused",
+        ignored: "Ignored",
+        rejected: "Rejected",
+      },
     },
     tableName: "App",
     tableStatus: "Status",
@@ -231,6 +238,73 @@ export const en = {
     },
     membership: {
       not_in_verified_models: "Selector {selector} is not in this App's verified models.",
+    },
+    /**
+     * Plan 45 T4: machine-readable 400 faces for the settings POST family.
+     * The worker emits `{ key, message, params? }` — `message` is this en
+     * face (interpolated server-side, also the fallback when the SPA does
+     * not know the key); the SPA resolves `key` in the operator's locale.
+     * Faces match the route's former inline literals byte-for-byte except
+     * `customProviderDeclRejected` (the store-backstop 400, whose former
+     * face was the thrown error's developer text).
+     */
+    error: {
+      providerRequired: "Pick a provider for the key.",
+      providerUnknown: "{provider} is not a supported provider — pick one from the list.",
+      providerUnavailableOnImage:
+        "{provider} is not available under this App's selected runtime image ({image}) — nothing was stored.",
+      apiKeyRequired: "Enter an API key to store.",
+      apiKeyTooLong:
+        "That API key is too long ({count} characters) — keys are limited to {limit} characters. Nothing was stored.",
+      chainFieldDuplicated: "The model chain field was submitted more than once — resubmit the form. Nothing was saved.",
+      chainTooLong: "That model chain is too long ({count} characters) — limited to {limit} characters. Nothing was saved.",
+      chainEmpty: "Enter at least one comma-separated model selector.",
+      roleFieldDuplicated:
+        "The {field} field was submitted more than once — resubmit the Role models form with one value per role. Nothing was saved.",
+      roleUnknown: "{role} is not a known review role — nothing was saved.",
+      roleFieldsMissingAll: "No role chain references were submitted — resubmit the Role models form.",
+      roleFieldMissing:
+        "The {roles} role field is missing — the Role models form always saves every seat (blank = default chain). Nothing was saved.",
+      roleFieldsMissing:
+        "The {roles} role fields are missing — the Role models form always saves every seat (blank = default chain). Nothing was saved.",
+      roleChainUnknown:
+        "{role} is not a known model chain — pick one from the list or leave it empty to use the default chain. Nothing was saved.",
+      chainNameInvalid:
+        "Chain names must be 1–{limit} lowercase letters, digits or hyphens — and \"default\" is reserved. Nothing was saved.",
+      chainValueRequired: "Enter a model chain for the named chain.",
+      defaultChainRemoveProtected: "The \"default\" chain cannot be removed — clear it instead. Nothing was saved.",
+      providerIdRequired: "Enter a provider id for the custom provider.",
+      providerIdInvalid:
+        "Provider ids are lowercase letters, digits, and hyphens — 1 to 64 characters, starting with a letter or digit. Nothing was stored.",
+      providerIdBuiltin: "{provider} is a built-in provider — custom providers must use a new id. Nothing was stored.",
+      providerIdBaseConfig:
+        "{provider} is already provided by the review environment's base configuration — custom providers must use a new id. Nothing was stored.",
+      customProviderMax:
+        "This App already has the maximum of {limit} custom providers — remove one before declaring another (updating an existing declaration is always allowed). Nothing was stored.",
+      baseUrlRequired: "Enter the provider's base URL.",
+      baseUrlInvalid: "The base URL must be a valid https URL with a host — nothing was stored.",
+      baseUrlTooLong:
+        "That base URL is too long ({count} characters) — limited to {limit} characters. Nothing was stored.",
+      apiProtocolRequired: "Pick an API protocol for the custom provider.",
+      apiProtocolUnknown: "{api} is not a supported API protocol — pick one from the list. Nothing was stored.",
+      modelIdsRequired: "Enter at least one model id for the custom provider.",
+      modelIdsTooMany: "Too many model ids ({count}) — at most {limit}. Nothing was stored.",
+      modelIdTooLong: "Model ids are limited to {limit} characters each. Nothing was stored.",
+      customProviderDeclRejected: "The custom provider was rejected — nothing was stored.",
+      templateUnknown: "Unknown provider template — nothing was stored.",
+      templateIncomplete: "This provider template is incomplete — nothing was stored.",
+      accountIdRequired: "Enter your Cloudflare account id to complete the Workers AI base URL.",
+      accountIdInvalid: "Cloudflare account ids are 32 hex characters — nothing was stored.",
+      templateIdBuiltin: "{template} is a built-in provider — nothing was stored.",
+      templateIdBaseConfig:
+        "{template} is already provided by the review environment's base configuration — nothing was stored.",
+      materializedBaseUrlInvalid: "The materialized base URL is not a valid https URL — nothing was stored.",
+      templateApiUnsupported: "{api} is not a supported API protocol — nothing was stored.",
+      templateNoModels: "This provider template has no model ids — nothing was stored.",
+      templateMaterializeMax:
+        "This App already has the maximum of {limit} custom providers — remove one before materializing another (updating an existing declaration is always allowed). Nothing was stored.",
+      sandboxImageUnknown: "Unknown or disabled sandbox image — nothing was stored.",
+      unknownOperation: "Unknown settings operation — resubmit one of this page's forms.",
     },
     ops: "Operations",
     opsCopy: "Pause ignores deliveries with 2xx; disable answers 404; delete is a soft-delete — all fail closed.",
