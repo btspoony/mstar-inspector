@@ -24,19 +24,31 @@ import {
 import { LoadFailedNotice, LoadingNotice } from "./PageNotice";
 
 /**
+ * The filter state as the location states it — the one derivation shared by
+ * the mount initializer and the popstate re-sync (plan 49 F-15-02), built on
+ * the pinned helpers (off-set windows resolve to the default segment).
+ */
+function insightsSearchFromLocation(): InsightsSearch {
+  return {
+    window: insightsWindow(window.location.search),
+    repo: parseInsightsSearch(window.location.search).repo,
+  };
+}
+
+/**
  * `/dashboard/insights` records page (plan 36 T2): review records with a
  * segmented window (INSIGHTS_WINDOWS 7/30/90) and a shadcn
  * Select repo filter (全部 + summary.repos). Free-text repo input retired.
  * Data plane: existing `/dashboard/api/insights/summary` plus the read-only
  * `repos` field (window-scoped distinct owner/repo, independent of `repo=`).
  * URL `repo=` shape is unchanged — out-of-set legal values stay applied.
+ * Plan 49 F-15-02: after navigation the URL is the source of truth —
+ * popstate re-derives the filter from the location (see the listener below);
+ * in-page edits keep the reverse direction via commitSearch.
  */
 export function InsightsPage({ boot }: { boot: SpaBoot }) {
   const locale = boot.locale;
-  const [search, setSearch] = useState<InsightsSearch>(() => ({
-    window: insightsWindow(window.location.search),
-    repo: parseInsightsSearch(window.location.search).repo,
-  }));
+  const [search, setSearch] = useState<InsightsSearch>(insightsSearchFromLocation);
   const [data, setData] = useState<InsightsSummary | null>(null);
   const [state, setState] = useState<"loading" | "ok" | "error">("loading");
 
@@ -48,6 +60,20 @@ export function InsightsPage({ boot }: { boot: SpaBoot }) {
     if (normalized !== window.location.search) {
       window.history.replaceState(null, "", `${window.location.pathname}${normalized}`);
     }
+  }, []);
+
+  // Plan 49 F-15-02: navigation re-sync. `navigate()` pushStates then
+  // dispatches a synthetic popstate (router.tsx), so a same-route sidebar
+  // click on a filtered view lands here with the now-bare location — the
+  // filter resets along with the address bar. History back/forward fires a
+  // native popstate carrying the entry's ?window=/?repo= — the filter is
+  // restored to match. In-page edits go through commitSearch (replaceState —
+  // never popstate), so this listener cannot loop against them; mount init
+  // and the normalize rewrite above are untouched (registration only).
+  useEffect(() => {
+    const onPop = () => setSearch(insightsSearchFromLocation());
+    window.addEventListener("popstate", onPop);
+    return () => window.removeEventListener("popstate", onPop);
   }, []);
 
   useEffect(() => {
