@@ -77,12 +77,9 @@ export const zhCN: Dictionary = {
     error: {
       enterLogin: "请输入要邀请的 GitHub 登录名。",
       invalidLogin: "{login} 不是有效的 GitHub 登录名 — 请使用 1–39 个字母、数字或连字符。",
-      unknownMember: "未知成员 — 未移除任何内容，请重试。",
-      cannotRemoveSelf: "你不能移除自己。",
       inviteFailed: "无法邀请 {login} — 请重试。",
       roleChangeFailed: "无法更改 {login} 的角色 — 成员列表刚刚发生变化，请重试。",
       removeFailed: "无法移除 {login} — 成员列表刚刚发生变化，请重试。",
-      chainEmpty: "请输入至少一个逗号分隔的模型选择器。",
     },
   },
   apps: {
