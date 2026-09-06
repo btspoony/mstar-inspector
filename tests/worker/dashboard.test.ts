@@ -56,6 +56,16 @@ import {
   exchangeManifestCode,
   readHoldValue,
 } from "../../src/dashboard/manifest";
+import {
+  deniedPage,
+  errorPage,
+  forbiddenPage,
+  manifestConfirmPage,
+  manifestErrorPage,
+  manifestOnboardingPage,
+  manifestStartPage,
+  removedPage,
+} from "../../src/dashboard/views";
 import { createSecretbox } from "../../src/dashboard/secretbox";
 import { createAppsStore } from "../../src/dashboard/apps-store";
 import { normalizePrivateKey } from "../../src/dashboard/private-key";
@@ -2086,6 +2096,100 @@ describe("/dashboard placeholder lock + legacy home retirement (plan 11 Task 3 +
     // Worker env is untouched: REVIEW_ENABLED never flips on this path.
     expect(calls).toHaveLength(0);
     expect(env.REVIEW_ENABLED).toBe("false");
+  });
+});
+
+describe("SSR views honor the stored theme (plan 45 T8, F-13)", () => {
+  const readViews = () => readFileSync(join(import.meta.dir, "../../src/dashboard/views.ts"), "utf8");
+
+  /** Extract the balanced `{...}` block introduced by `openToken`. */
+  function blockAfter(source: string, openToken: string): string {
+    const at = source.indexOf(openToken);
+    expect(at, openToken).toBeGreaterThanOrEqual(0);
+    const open = source.indexOf("{", at);
+    let depth = 0;
+    for (let i = open; i < source.length; i++) {
+      if (source[i] === "{") depth++;
+      else if (source[i] === "}") {
+        depth--;
+        if (depth === 0) return source.slice(open + 1, i);
+      }
+    }
+    throw new Error(`unbalanced block: ${openToken}`);
+  }
+
+  test("STYLE carries a stored-light branch with the recorded light hexes (unchanged, no token migration)", () => {
+    const light = blockAfter(readViews(), ':root[data-theme="light"] {');
+    expect(light).toContain("color-scheme: light");
+    for (const hex of [
+      "--background-100: #ffffff",
+      "--background-200: #f4f4f5",
+      "--gray-100: #fafafa",
+      "--gray-400: #d4d4d8",
+      "--gray-700: #52525b",
+      "--gray-900: #3d3d3d",
+      "--gray-1000: #111111",
+      "--gray-alpha-400: #00000024",
+      "--blue-700: #0066cc",
+      "--red-700: #b91c1c",
+      "--amber-700: #b45309",
+    ]) {
+      expect(light, hex).toContain(hex);
+    }
+  });
+
+  test("OS-light fallback is guarded so a stored dark choice wins over OS light (plan-41 both-directions rule)", () => {
+    const views = readViews();
+    const media = blockAfter(views, "@media (prefers-color-scheme: light)");
+    // The inner selector is NOT a bare :root — a stored dark choice
+    // excludes this branch, exactly like tokens.css:394-396.
+    expect(media).toContain(':root:not([data-theme="dark"])');
+    expect(media).not.toContain(":root {");
+  });
+
+  test("explicit stored-dark branch is a no-op and dark stays the :root default", () => {
+    const dark = blockAfter(readViews(), ':root[data-theme="dark"] {');
+    expect(dark.trim()).toBe("");
+    const root = blockAfter(readViews(), ":root {");
+    expect(root).toContain("color-scheme: dark");
+    expect(root).toContain("--background-100: #09090b");
+  });
+
+  test("every SSR face inlines the pre-paint theme bootstrap before STYLE", () => {
+    const user = { login: "octocat", name: "Octo Cat" };
+    const app = {
+      id: 1234,
+      name: "mstar-inspector-octocat",
+      slug: "mstar-inspector-octocat",
+      webhookUrl: "https://worker.local/webhook/mstar-inspector-octocat",
+    };
+    const faces: [string, string][] = [
+      ["start", manifestStartPage(user, app.name, "{}", "https://github.com/settings/apps/new")],
+      ["confirm", manifestConfirmPage(user, app)],
+      ["onboarding", manifestOnboardingPage(user, app)],
+      ["manifest-error", manifestErrorPage("boom")],
+      ["manifest-error-resumable", manifestErrorPage("boom", true)],
+      ["denied", deniedPage("octocat")],
+      ["removed", removedPage("octocat")],
+      ["forbidden", forbiddenPage("octocat")],
+      ["error", errorPage("boom")],
+    ];
+    for (const [face, html] of faces) {
+      const scriptAt = html.indexOf("mstar.dashboard.theme");
+      const styleAt = html.indexOf("<style>");
+      expect(scriptAt, face).toBeGreaterThan(0);
+      expect(styleAt, face).toBeGreaterThan(0);
+      // The snippet sits in <head> before the stylesheet — the attribute is
+      // applied before first paint, per the plan-41 mechanism.
+      expect(scriptAt, face).toBeLessThan(styleAt);
+      for (const fragment of [
+        'localStorage.getItem("mstar.dashboard.theme")',
+        'if (theme === "light" || theme === "dark") document.documentElement.dataset.theme = theme;',
+        "catch {}",
+      ]) {
+        expect(html, `${face}: ${fragment}`).toContain(fragment);
+      }
+    }
   });
 });
 

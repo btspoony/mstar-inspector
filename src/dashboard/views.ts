@@ -2,8 +2,12 @@
  * Zero-build SSR HTML for /dashboard (plan 08, architect decision Q8): TS
  * template strings + a single inline <style> block. Plan 29 T5 ports the
  * DESIGN.md L2 token subset from src/spa/styles/tokens.css into STYLE
- * (dark default + prefers-color-scheme light). Manifest flow pages stay
- * zero-JS SSR. No client JS, no build chain, no new dependencies.
+ * (dark default + prefers-color-scheme light). Plan 45 T8: STYLE carries
+ * the plan-41 theme branches and page() inlines the pre-paint theme
+ * bootstrap, so the stored localStorage["mstar.dashboard.theme"] choice
+ * is honored before first paint. Manifest pages stay zero client runtime
+ * — pre-paint bootstrap snippet only; no bundle, no build chain, no new
+ * dependencies.
  */
 import { t, type Locale } from "../i18n";
 
@@ -19,8 +23,10 @@ function escapeHtml(value: string): string {
 
 const STYLE = `<style>
 /* Token subset ported from src/spa/styles/tokens.css (DESIGN.md L2 SSOT).
-   Dark is the console default; light follows prefers-color-scheme.
-   Do not diverge hex values from tokens.css — update both together. */
+   Dark is the console default; the pre-paint bootstrap in page() applies a
+   stored light/dark choice, which wins over the OS; otherwise light follows
+   prefers-color-scheme. Do not diverge hex values from tokens.css — update
+   both together. */
 :root {
   color-scheme: dark;
   --background-100: #09090b;
@@ -100,8 +106,9 @@ const STYLE = `<style>
   --sidebar-active-bg: var(--background-300);
   --focus-ring: 0 0 0 2px var(--background-100), 0 0 0 4px var(--blue-700);
 }
+/* OS-light fallback — applies only while no stored dark choice exists. */
 @media (prefers-color-scheme: light) {
-  :root {
+  :root:not([data-theme="dark"]) {
     color-scheme: light;
     --background-100: #ffffff;
     --background-200: #f4f4f5;
@@ -124,6 +131,34 @@ const STYLE = `<style>
     --amber-900: #78350f;
   }
 }
+/* Stored manual choice — light tokens win over the OS preference (plan 41
+   mechanism, applied pre-paint by the bootstrap in page()). Same recorded
+   hexes as the OS fallback above. */
+:root[data-theme="light"] {
+  color-scheme: light;
+  --background-100: #ffffff;
+  --background-200: #f4f4f5;
+  --background-300: #e4e4e7;
+  --gray-100: #fafafa;
+  --gray-400: #d4d4d8;
+  --gray-700: #52525b;
+  --gray-900: #3d3d3d;
+  --gray-1000: #111111;
+  --gray-alpha-400: #00000024;
+  --blue-700: #0066cc;
+  --red-100: #fef2f2;
+  --red-400: #fca5a5;
+  --red-700: #b91c1c;
+  --red-900: #7f1d1d;
+  --amber-100: #fffbeb;
+  --amber-400: #fcd34d;
+  --amber-700: #b45309;
+  --amber-800: #92400e;
+  --amber-900: #78350f;
+}
+/* Stored manual dark — dark is already the :root default, so the explicit
+   attribute is a documented no-op (every stored choice maps to a branch). */
+:root[data-theme="dark"] {}
 * { box-sizing: border-box; }
 body {
   margin: 0;
@@ -333,6 +368,15 @@ function page(title: string, body: string, locale: Locale = "en"): string {
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>${escapeHtml(t(locale, "common.pageTitle", { page: title, brand: t(locale, "nav.brand") }))}</title>
+<script>
+// Pre-paint theme bootstrap (plan 41 mechanism, SSR face plan 45 T8):
+// apply the stored manual theme before first paint. Whitelist — unreadable
+// or invalid values stay unset and follow prefers-color-scheme.
+try {
+  const theme = localStorage.getItem("mstar.dashboard.theme");
+  if (theme === "light" || theme === "dark") document.documentElement.dataset.theme = theme;
+} catch {}
+</script>
 ${STYLE}
 </head>
 <body>${body}</body>

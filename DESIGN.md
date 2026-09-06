@@ -589,9 +589,13 @@ with the `prefers-color-scheme` fallback on `:root:not([data-theme="dark"])`.
 Existing Level 1 token **names** are unchanged (`background-100`,
 `background-200`, `gray-1000`, `gray-900`, `blue-700`, `red-700`,
 `amber-700`). The original light hex values are preserved on
-`themes.light.colors` so mid-iteration SSR pages that still hardcode those
-light values in `src/dashboard/views.ts` remain visually consistent until
-Task 5 restyles them. Do not rename those tokens.
+`themes.light.colors` and remain the recorded values the SSR pages in
+`src/dashboard/views.ts` hardcode (no token migration): as of plan 45 T8
+their STYLE carries the plan-41 branches — stored-choice light, the OS
+fallback guarded by `:root:not([data-theme="dark"])`, and an explicit dark
+no-op — and `page()` inlines the pre-paint bootstrap, so the stored
+`localStorage["mstar.dashboard.theme"]` choice is honored on every SSR
+face. Do not rename those tokens.
 
 A separate `DESIGN.dark.md` is intentionally not used: the assignment stores
 both palettes in one file under `themes:`. Level 3 dual-file parity remains
@@ -674,7 +678,7 @@ on stacked pages; full-bleed shell + inner max-width on the SPA layout.
 | `lg` | 900px | Shell with sidebar + main; three-column section grids (kept from L1) |
 | `xl` | 1280px | Wide console; optional extra gutter |
 
-Manifest SSR views stay single column at every width until Task 5.
+Manifest SSR views stay single column at every width.
 
 ## Components
 
@@ -752,7 +756,13 @@ navbar toggle (plan 41): it stores `light` | `dark` in
 `localStorage["mstar.dashboard.theme"]` and applies `data-theme` before
 first paint — a stored choice wins over `prefers-color-scheme`, unset
 follows the OS. Supersedes the plan-29 lock (2026-09-04, user instruction, iteration 013).
-Legacy `views.ts` STYLE stays as-is until those pages migrate.
+Legacy `views.ts` STYLE keeps its own copied token subset with the same
+cascade — dark `:root` default, `:root[data-theme="light"]` for the stored
+choice, OS-light fallback guarded by `:root:not([data-theme="dark"])`,
+explicit dark no-op — and honors it via the pre-paint bootstrap snippet
+inlined in `page()` (plan 45 T8): SSR faces apply `data-theme` before
+first paint while staying zero client runtime (snippet only, no bundle).
+Recorded hex values unchanged; no token migration.
 
 
 ## shadcn/ui mapping layer (plan 33)
