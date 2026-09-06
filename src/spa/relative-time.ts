@@ -1,12 +1,19 @@
 /**
- * i18n relative time for store-generated SQLite UTC stamps
- * (`YYYY-MM-DD HH:MM:SS`) — same buckets as `views.ts` relativeTime.
+ * i18n relative time for the two UTC stamp formats the dashboard stores
+ * write, bucketed identically:
+ * - SQLite `YYYY-MM-DD HH:MM:SS` (datetime('now')) — review-store faces:
+ *   AppsPage latest-delivery, SettingsPage webhook/seen/delivery/updated.
+ * - ISO-8601 `YYYY-MM-DDTHH:MM:SS.sssZ` (Date#toISOString) — the users
+ *   store's member `created_at`, rendered by MembersPage.
  */
 import { t, type Locale } from "../i18n";
 
 export function formatRelativeTime(value: string | null, locale: Locale, nowMs = Date.now()): string {
   if (value === null) return t(locale, "common.time.never");
-  const m = /^(\d{4})-(\d{2})-(\d{2}) (\d{2}):(\d{2}):(\d{2})$/.exec(value);
+  const m =
+    /^(\d{4})-(\d{2})-(\d{2}) (\d{2}):(\d{2}):(\d{2})$/.exec(value) ??
+    // users store stamps come from `toISOString()` — UTC, milliseconds, `Z`.
+    /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})\.\d{3}Z$/.exec(value);
   if (!m) return t(locale, "common.time.unknown");
   const then = Date.UTC(
     Number(m[1]),

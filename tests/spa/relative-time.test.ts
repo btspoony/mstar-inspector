@@ -1,5 +1,7 @@
 /**
- * Plan 29 T4: i18n relative-time buckets (mirrors views.ts SQLite UTC stamps).
+ * i18n relative-time buckets for the two stamp formats the stores write:
+ * SQLite UTC stamps (review-store faces) and ISO-8601 member stamps
+ * (users store / MembersPage).
  */
 import { describe, expect, test } from "bun:test";
 import { formatRelativeTime } from "../../src/spa/relative-time";
@@ -10,6 +12,10 @@ function stamp(offsetMs: number): string {
   const d = new Date(NOW - offsetMs);
   const pad = (n: number) => String(n).padStart(2, "0");
   return `${d.getUTCFullYear()}-${pad(d.getUTCMonth() + 1)}-${pad(d.getUTCDate())} ${pad(d.getUTCHours())}:${pad(d.getUTCMinutes())}:${pad(d.getUTCSeconds())}`;
+}
+
+function isoStamp(offsetMs: number): string {
+  return new Date(NOW - offsetMs).toISOString();
 }
 
 describe("formatRelativeTime", () => {
@@ -30,5 +36,24 @@ describe("formatRelativeTime", () => {
   test("zh_CN uses dictionary copy", () => {
     expect(formatRelativeTime(stamp(10_000), "zh_CN", NOW)).toBe("刚刚");
     expect(formatRelativeTime(stamp(120_000), "zh_CN", NOW)).toBe("2 分钟前");
+  });
+});
+
+describe("formatRelativeTime — ISO-8601 member stamps", () => {
+  test("valid ISO stamps land in the same buckets as SQLite stamps", () => {
+    expect(formatRelativeTime(isoStamp(10_000), "en", NOW)).toBe("just now");
+    expect(formatRelativeTime(isoStamp(120_000), "en", NOW)).toBe("2 minutes ago");
+    expect(formatRelativeTime(isoStamp(3_600_000), "en", NOW)).toBe("1 hour ago");
+    expect(formatRelativeTime(isoStamp(86_400_000), "en", NOW)).toBe("1 day ago");
+    expect(formatRelativeTime(isoStamp(10_000), "zh_CN", NOW)).toBe("刚刚");
+    expect(formatRelativeTime(isoStamp(3_600_000), "zh_CN", NOW)).toBe("1 小时前");
+  });
+
+  test("invalid ISO strings are unknown; null stays never", () => {
+    expect(formatRelativeTime("2026-09-02T12:00:00Z", "en", NOW)).toBe("unknown"); // no millis
+    expect(formatRelativeTime("2026-09-02 12:00:00.000Z", "en", NOW)).toBe("unknown"); // space separator
+    expect(formatRelativeTime("2026-09-02T12:00:00.000+02:00", "en", NOW)).toBe("unknown"); // offset, not `Z`
+    expect(formatRelativeTime(null, "en", NOW)).toBe("never");
+    expect(formatRelativeTime(null, "zh_CN", NOW)).toBe("从未");
   });
 });
