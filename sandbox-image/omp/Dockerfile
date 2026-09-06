@@ -71,6 +71,16 @@ RUN git init /opt/mstar-harness \
     && git -C /opt/mstar-harness checkout FETCH_HEAD \
     && rm -rf /opt/mstar-harness/.git
 
+# mstar-harness CLI preinstall (plan 47 Task 2): review-session model
+# toolcalls may invoke the `mstar` CLI — with the CLI absent the model falls
+# back to legacy (non-CLI) behavior. Exact pin `@mstar-harness/cli@3.6.2`:
+# image pinning discipline — the repo manifest `^3.6.2` exception does NOT
+# extend to the image. The CLI dist ships `#!/usr/bin/env bun` (verified) and
+# the Bun 1.4.0 installed above executes it directly, so no node is added.
+# The global bin dir is put on PATH so sandbox exec resolves the `mstar` shim.
+RUN bun add --global @mstar-harness/cli@3.6.2
+ENV PATH="/root/.bun/bin:${PATH}"
+
 # omp agent dir: PI_CODING_AGENT_DIR points at an EMPTY directory (plan 37 —
 # no baked models.yml is an App-configuration artifact). The in-image runner
 # (src/review/runner.ts) synthesizes the COMPLETE per-review models.yml under
