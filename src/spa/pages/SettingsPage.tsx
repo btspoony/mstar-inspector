@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { Fragment, useEffect, useRef, useState } from "react";
 import { Plus } from "lucide-react";
 import { isDictionaryKey, t, type DictionaryKey } from "../../i18n";
 import { Button } from "@/components/ui/button";
@@ -68,9 +68,11 @@ type OpNotice = { kind: "success" | "error"; message: string };
  * A card's inline op-feedback region (plan 44 T3): the page banner's markup,
  * roles (alert/status) and notice tokens rendered INSIDE the card next to the
  * actions that produced the outcome. Regions are per action cluster, so the
- * feedback sits where the user is looking. Clear rule (pinned): a region's
- * content is replaced wholesale by the next op targeting that same region —
- * no manual clears, no cross-card resets.
+ * feedback sits where the user is looking. Plan 45 T6: a cluster's region may
+ * also sit inside the card's row list — the providers remove outcome renders
+ * at the removed row's position. Clear rule (pinned): a region's content is
+ * replaced wholesale by the next op targeting that same region — no manual
+ * clears, no cross-card resets.
  */
 function NoticeRegion({ notice }: { notice: OpNotice | null }) {
   if (!notice) return null;
@@ -220,9 +222,21 @@ function SettingsView({
   // Plan 44 T3: dialog-confirmed ops report into the card that owns the
   // action (one notice state per card region). Form-submit outcomes render
   // through their own form-local regions instead and never pass through here.
+  // Plan 45 T6: the providers card's state keeps only the add-flow (verify /
+  // template) outcomes — the dialog-confirmed removes moved to the row-local
+  // outcome below.
   const [opsNotice, setOpsNotice] = useState<OpNotice | null>(null);
   const [providersNotice, setProvidersNotice] = useState<OpNotice | null>(null);
   const [chainsNotice, setChainsNotice] = useState<OpNotice | null>(null);
+  // Plan 45 T6 (audit UI-45-05): remove-key / remove-custom outcome plus the
+  // removed row's position. The slot is captured from the pre-POST payload in
+  // onConfirm — the awaited background reload (plan 38) drops the row from
+  // the payload before the outcome resolves, so the position must be
+  // remembered for the card to render the feedback where the row was.
+  const [providersRemoveOutcome, setProvidersRemoveOutcome] = useState<{
+    notice: OpNotice;
+    slot: number;
+  } | null>(null);
 
   /**
    * Resolve the op's outcome to the caller (plan 44 T3): the card/cluster that
@@ -359,18 +373,35 @@ function SettingsView({
   async function onConfirm(): Promise<void> {
     if (!pending || busy) return;
     const action = pending;
+    // The remove actions originate solely from the manage face's
+    // ProvidersCard; the read-only face can never reach a confirm, so the
+    // empty fallback here is unreachable in practice.
+    const configured = payload.can_manage ? payload.configured_providers : [];
     setBusy(true);
     try {
       if (action.kind === "remove-chain") {
         setChainsNotice(await submitSettings({ op: "remove-chain", name: action.name }));
       } else if (action.kind === "remove-custom") {
-        setProvidersNotice(await submitSettings({ op: "remove-custom-provider", provider_id: action.providerId }));
+        // Plan 45 T6 (audit UI-45-05): the remove outcome renders row-locally,
+        // so it carries the row's position — captured from the pre-POST
+        // payload, because the awaited background reload (plan 38) drops the
+        // row before the outcome resolves. A dialog-confirmed row is always
+        // found; the length fallback keeps the outcome visible at the list's
+        // end instead of dropping it.
+        const slot = configured.findIndex((row) => row.kind === "custom" && row.provider_id === action.providerId);
+        setProvidersRemoveOutcome({
+          notice: await submitSettings({ op: "remove-custom-provider", provider_id: action.providerId }),
+          slot: slot >= 0 ? slot : configured.length,
+        });
       } else if (action.kind === "remove-key") {
-        setProvidersNotice(
-          await runPinnedWithBody(`/dashboard/apps/${app.slug}/settings/key/delete`, {
+        // Same position capture as remove-custom (see above).
+        const slot = configured.findIndex((row) => row.kind === "key" && row.provider === action.provider);
+        setProvidersRemoveOutcome({
+          notice: await runPinnedWithBody(`/dashboard/apps/${app.slug}/settings/key/delete`, {
             provider: action.provider,
           }),
-        );
+          slot: slot >= 0 ? slot : configured.length,
+        });
       } else if (action.kind === "delete") {
         // Irreversible outcome with its own copy: "Changes saved." reads wrong
         // after a delete, and the user stays on the deleted App's page.
@@ -418,6 +449,7 @@ function SettingsView({
             onSettings={submitSettings}
             onPending={setPending}
             notice={providersNotice}
+            removeOutcome={providersRemoveOutcome}
             onOutcome={setProvidersNotice}
           />
           <ChainsCard
@@ -766,6 +798,7 @@ function ProvidersCard({
   onSettings,
   onPending,
   notice,
+  removeOutcome,
   onOutcome,
 }: {
   locale: SpaBoot["locale"];
@@ -773,8 +806,10 @@ function ProvidersCard({
   onVerify: (fields: Record<string, string>) => Promise<OpNotice>;
   onSettings: (fields: Record<string, string>) => Promise<OpNotice>;
   onPending: (action: PendingAction) => void;
-  /** Plan 44 T3: the dialog-confirmed removes' outcome (remove-key / remove-custom). */
+  /** Plan 44 T3 / 45 T6: the add-flow (verify / template) outcomes — removes render row-local (below). */
   notice: OpNotice | null;
+  /** Plan 45 T6 (audit UI-45-05): the remove-key / remove-custom outcome, rendered at the removed row's position. */
+  removeOutcome: { notice: OpNotice; slot: number } | null;
   /** Plan 44 T3: where the add-flow forms (verify / template) report their outcome. */
   onOutcome: (notice: OpNotice) => void;
 }) {
@@ -782,6 +817,18 @@ function ProvidersCard({
   const [customOpen, setCustomOpen] = useState(false);
   const catalogById: Record<string, CatalogProvider> = {};
   for (const provider of payload.provider_catalog) catalogById[provider.id] = provider;
+  // Plan 45 T6 (audit UI-45-05): where the remove outcome renders inside the
+  // rows list. Success takes the row's former slot — the awaited reload has
+  // already dropped the row; a failure leaves the row in place, so the
+  // region renders directly below it (the field-error position). Clamped so
+  // a removed last row lands at the list's end, never out of bounds.
+  const removeSlot =
+    removeOutcome === null
+      ? -1
+      : Math.min(
+          removeOutcome.notice.kind === "error" ? removeOutcome.slot + 1 : removeOutcome.slot,
+          payload.configured_providers.length,
+        );
 
   return (
     <Card>
@@ -807,31 +854,43 @@ function ProvidersCard({
         />
         {/* The card's region sits directly under the add panel: verify /
             template outcomes stay next to their submit button while the panel
-            is open, and survive its success-close (unlike panel-local state). */}
+            is open, and survive its success-close (unlike panel-local state).
+            Plan 45 T6: the dialog-confirmed removes render row-locally below
+            instead — this region keeps only the add-flow outcomes. */}
         <NoticeRegion notice={notice} />
         {payload.configured_providers.length === 0 ? (
           <p className="text-sm text-muted-foreground">{t(locale, "settings.noConfiguredProviders")}</p>
         ) : (
-          payload.configured_providers.map((row) =>
-            row.kind === "key" ? (
-              <ConfiguredKeyRow
-                key={row.provider}
-                locale={locale}
-                row={row}
-                label={catalogById[row.provider]?.label ?? row.provider}
-                onPending={onPending}
-              />
-            ) : (
-              <ConfiguredCustomRow
-                key={row.provider_id}
-                locale={locale}
-                row={row}
-                label={catalogById[row.provider_id]?.label ?? row.provider_id}
-                onPending={onPending}
-              />
-            ),
-          )
+          payload.configured_providers.map((row, index) => (
+            <Fragment key={row.kind === "key" ? row.provider : row.provider_id}>
+              {/* Plan 45 T6 (audit UI-45-05): the remove outcome renders in
+                  the removed row's position — at catalog scale the feedback
+                  is visible without scrolling away from the Remove control
+                  that produced it. The shared NoticeRegion inherits the
+                  plan-44 roles (alert/status) and notice tokens. */}
+              {index === removeSlot && removeOutcome ? <NoticeRegion notice={removeOutcome.notice} /> : null}
+              {row.kind === "key" ? (
+                <ConfiguredKeyRow
+                  locale={locale}
+                  row={row}
+                  label={catalogById[row.provider]?.label ?? row.provider}
+                  onPending={onPending}
+                />
+              ) : (
+                <ConfiguredCustomRow
+                  locale={locale}
+                  row={row}
+                  label={catalogById[row.provider_id]?.label ?? row.provider_id}
+                  onPending={onPending}
+                />
+              )}
+            </Fragment>
+          ))
         )}
+        {/* Trailing clamp: a removed last row's slot equals the list length. */}
+        {removeOutcome && removeSlot >= payload.configured_providers.length ? (
+          <NoticeRegion notice={removeOutcome.notice} />
+        ) : null}
         <CustomExpand
           locale={locale}
           payload={payload}

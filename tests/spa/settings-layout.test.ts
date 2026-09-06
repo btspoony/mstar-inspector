@@ -829,8 +829,9 @@ describe("section-scoped op feedback (plan 44 T3)", () => {
     // Ops zone: region directly under the pause/disable/delete button row.
     const opsBody = source.slice(source.indexOf("function OpsCard"), source.indexOf("function ProvidersCard"));
     expect(opsBody).toContain("<NoticeRegion notice={notice} />");
-    // Providers: region directly under the add panel (serves the verify /
-    // template forms and the dialog-confirmed removes), above the rows.
+    // Providers: card region directly under the add panel serves the verify /
+    // template forms only — plan 45 T6 moved the dialog-confirmed removes to
+    // a row-local region (pinned in the F-08 test below).
     const providersBody = source.slice(
       source.indexOf("function ProvidersCard"),
       source.indexOf("function ConfiguredKeyRow"),
@@ -870,21 +871,57 @@ describe("section-scoped op feedback (plan 44 T3)", () => {
 
   test("dialog-confirmed ops report into the card that owns the action", () => {
     const source = settingsSource();
-    // remove-chain → chains card; remove-key / remove-custom → providers
-    // card; pause/resume/disable/enable/delete (delete with its own copy) →
-    // ops zone. Each card renders its own notice state.
+    // remove-chain → chains card; remove-key / remove-custom → the providers
+    // card's row-local outcome (plan 45 T6); pause/resume/disable/enable/
+    // delete (delete with its own copy) → ops zone. Each card renders its own
+    // notice state.
     const confirmBody = source.slice(source.indexOf("async function onConfirm"), source.indexOf("const confirmCopy"));
     expect(confirmBody).toContain('setChainsNotice(await submitSettings({ op: "remove-chain", name: action.name }))');
-    expect(confirmBody).toContain("setProvidersNotice(");
+    expect(confirmBody).toContain("setProvidersRemoveOutcome({");
     expect(confirmBody).toContain("setOpsNotice(");
     expect(source).toContain("notice={opsNotice}");
     expect(source).toContain("notice={providersNotice}");
     expect(source).toContain("notice={chainsNotice}");
+    // Plan 45 T6: the removes no longer write the card-level providers state —
+    // that region keeps only the add-flow (verify / template) outcomes.
+    expect(confirmBody).not.toContain("setProvidersNotice(");
     // The add-flow forms forward their outcome into the providers card's
     // region; the draft panel forwards its SUCCESS into the chains card's
     // region (its own panel unmounts on success).
     expect(source).toContain("onOutcome={setProvidersNotice}");
     expect(source).toContain("onOutcome={setChainsNotice}");
+  });
+
+  test("provider remove outcomes render row-locally at the removed row's position (plan 45 T6, audit UI-45-05)", () => {
+    const source = settingsSource();
+    // The outcome state carries the removed row's slot, captured in onConfirm
+    // from the PRE-POST payload: the awaited background reload (plan 38)
+    // drops the row from the payload before the outcome resolves, so the
+    // position must be remembered — the row unmounts with the fresh payload
+    // while the card (and the region it renders) stay mounted.
+    const confirmBody = source.slice(source.indexOf("async function onConfirm"), source.indexOf("const confirmCopy"));
+    expect(confirmBody).toContain("const configured = payload.can_manage ? payload.configured_providers : [];");
+    expect(confirmBody).toContain("configured.findIndex(");
+    expect(confirmBody).toContain("slot: slot >= 0 ? slot : configured.length");
+    // The card renders the outcome inside the rows list at that position —
+    // through the shared NoticeRegion, so the row-local region inherits the
+    // plan-44 roles (alert/status) and notice tokens.
+    const providersBody = source.slice(
+      source.indexOf("function ProvidersCard"),
+      source.indexOf("function ConfiguredKeyRow"),
+    );
+    expect(providersBody).toContain("removeOutcome: { notice: OpNotice; slot: number } | null");
+    expect(providersBody).toContain(
+      "{index === removeSlot && removeOutcome ? <NoticeRegion notice={removeOutcome.notice} /> : null}",
+    );
+    // Success takes the row's former slot; a failure leaves the row in place,
+    // so the region renders directly below it (the field-error position).
+    expect(providersBody).toContain(
+      'removeOutcome.notice.kind === "error" ? removeOutcome.slot + 1 : removeOutcome.slot',
+    );
+    // A removed last row's slot equals the list length — the trailing clamp
+    // keeps the outcome visible at the list's end instead of dropping it.
+    expect(providersBody).toContain("removeSlot >= payload.configured_providers.length");
   });
 
   test("save triggers carry a busy guard; every op replaces its region (stale-error rule)", () => {
