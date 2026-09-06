@@ -56,7 +56,7 @@ RUN curl -fsSL https://github.com/cli/cli/releases/download/v2.98.0/gh_2.98.0_li
     && chmod +x /usr/local/bin/gh \
     && rm -rf /tmp/gh_2.98.0_linux_amd64 /tmp/gh.tar.gz
 
-# mstar-harness plugin, pinned ref ad76f0c6600acd5040464248085ad7d22af93e9f (tag v3.6.0, plan 32 Task 1).
+# mstar-harness plugin, pinned ref 3436ddcaf03ddec693dc7059395e9ccf92e5d005 (tag v3.6.2, plan 47 Task 1).
 # Choice: build-time shallow clone (NOT a git submodule, NOT COPY):
 #   - the harness is a separate PUBLIC repo — a submodule would couple this
 #     repo's git metadata to it and require submodule state inside the build
@@ -67,7 +67,7 @@ RUN curl -fsSL https://github.com/cli/cli/releases/download/v2.98.0/gh_2.98.0_li
 # .git is removed after checkout to keep the image lean.
 RUN git init /opt/mstar-harness \
     && git -C /opt/mstar-harness remote add origin https://github.com/btspoony/mstar-harness.git \
-    && git -C /opt/mstar-harness fetch --depth 1 origin ad76f0c6600acd5040464248085ad7d22af93e9f \
+    && git -C /opt/mstar-harness fetch --depth 1 origin 3436ddcaf03ddec693dc7059395e9ccf92e5d005 \
     && git -C /opt/mstar-harness checkout FETCH_HEAD \
     && rm -rf /opt/mstar-harness/.git
 

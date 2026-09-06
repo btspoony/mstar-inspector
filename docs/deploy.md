@@ -637,15 +637,16 @@ controls are installed (the Dockerfile carries the documentation block only).
 
 ## Image pins and digest record
 
-Four pins — mstar-harness bumped to **3.6.0** this iteration (plan 32 Task 1,
-the explicit upgrade decision); base image / Bun / gh re-verified, no bump:
+Four pins — mstar-harness bumped to **3.6.2** this iteration (plan 47 Task 1,
+the explicit upgrade decision, superseding the plan 32 bump to 3.6.0); base
+image / Bun / gh re-verified, no bump:
 
 | Pin | Value | Where |
 |---|---|---|
 | base image | `docker.io/cloudflare/sandbox:0.12.8` | `sandbox-image/omp/Dockerfile` FROM |
 | Bun | `1.4.0` | `sandbox-image/omp/Dockerfile` |
 | gh CLI | `2.98.0` | `sandbox-image/omp/Dockerfile` |
-| mstar-harness | `ad76f0c6600acd5040464248085ad7d22af93e9f` (3.6.0) | `sandbox-image/omp/Dockerfile` |
+| mstar-harness | `3436ddcaf03ddec693dc7059395e9ccf92e5d005` (3.6.2) | `sandbox-image/omp/Dockerfile` |
 
 **In-image DEFAULT model selector: `ark-plan/deepseek-v4-flash`** (pins:
 `src/review/runtime-omp.ts` `DEFAULT_MODEL_PATTERN` + the omp registry entry's
