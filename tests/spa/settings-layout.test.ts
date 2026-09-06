@@ -955,3 +955,18 @@ describe("section-scoped op feedback (plan 44 T3)", () => {
     expect(source).toContain("setNotice(await onSettings(fields))");
   });
 });
+
+describe("settings header typography (plan 45 T7)", () => {
+  test("app-slug heading renders at the heading-20 scale step, not the off-scale 18px (audit UI-45-08)", () => {
+    const source = readFileSync(join(import.meta.dir, "../../src/spa/pages/SettingsPage.tsx"), "utf8");
+    // The slug is the selected-App panel title sitting under the page-level
+    // h1 (text-2xl = heading-24). DESIGN.md's heading scale is 32/24/20/16
+    // only, and heading-20 is the panel-title tier — heading-16 would demote
+    // the slug below the cards it titles. In code the scale step is the
+    // default Tailwind size utility (sibling panel title: LoginPage
+    // CardTitle text-xl).
+    expect(source).toContain('<h2 className="text-xl font-semibold">{app.slug}</h2>');
+    // The off-scale 18px class no longer appears anywhere on the page.
+    expect(source).not.toContain("text-lg");
+  });
+});

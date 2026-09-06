@@ -427,7 +427,7 @@ function SettingsView({
   return (
     <div className="flex flex-col gap-6">
       <div className="flex flex-wrap items-center gap-3">
-        <h2 className="text-lg font-semibold">{app.slug}</h2>
+        <h2 className="text-xl font-semibold">{app.slug}</h2>
         <StatusBadge locale={locale} status={app.status} reviewEnabled={app.review_enabled} />
         <span className="text-sm text-muted-foreground">{t(locale, "apps.by", { login: app.created_by })}</span>
       </div>
