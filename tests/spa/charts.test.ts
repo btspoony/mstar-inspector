@@ -71,10 +71,13 @@ describe("chart layout pure functions (plan 56 T1 / AD-563)", () => {
     expect(bandScale(1, 100)(0)).toBe(15);
   });
 
-  test("groupedBars lays series bars edge to edge inside the band (two rects per week, AD-562)", () => {
+  test("groupedBars centers the series group inside the band (two rects per week, AD-562)", () => {
     const { width, offsets } = groupedBars(2, 17.5);
     expect(width).toBe(7);
-    expect(offsets).toEqual([0, 7]);
+    // Group width 14 centered in the 17.5 band → 1.75 gutter each side, so
+    // the band midpoint (the date-label anchor) is the group's center
+    // (plan 56 QC F-002 label/group alignment).
+    expect(offsets).toEqual([1.75, 8.75]);
   });
 
   test("barRows centers each bar in its row slot", () => {
@@ -89,6 +92,8 @@ describe("chart layout pure functions (plan 56 T1 / AD-563)", () => {
   test("thinXLabels keeps every week up to the cap, then every other week (first stays labeled)", () => {
     expect(thinXLabels(5)).toEqual([0, 1, 2, 3, 4]);
     expect(thinXLabels(8)).toEqual([0, 1, 2, 3, 4, 5, 6, 7]);
+    // The 8→9 boundary: thinning first engages, both endpoints stay labeled.
+    expect(thinXLabels(9)).toEqual([0, 2, 4, 6, 8]);
     expect(thinXLabels(10)).toEqual([0, 2, 4, 6, 8]);
     expect(thinXLabels(13)).toEqual([0, 2, 4, 6, 8, 10, 12]);
   });
@@ -110,7 +115,7 @@ describe("chart layout pure functions (plan 56 T1 / AD-563)", () => {
 describe("BarChart SSR (plan 56 T1)", () => {
   const items: BarChartItem[] = [
     { key: "must-fix", label: "must-fix", value: 7, color: "var(--red-700)" },
-    { key: "nit", label: "nit", value: 2, color: "var(--gray-700)" },
+    { key: "nit", label: "nit", value: 3, color: "var(--gray-700)" },
   ];
 
   test("renders an svg role=img with the aria-label, counts as text, and token-filled bars", () => {
@@ -118,13 +123,23 @@ describe("BarChart SSR (plan 56 T1)", () => {
     expect(html).toContain('role="img"');
     expect(html).toContain('aria-label="Findings by severity"');
     // Counts coexist with the graphic: the value sits in the markup as text.
+    // 3 sits outside the chart's own tick set (niceTicks(7) = [0,2,4,6,8]),
+    // so only a bar-end label — never an axis tick — can satisfy this.
     expect(html).toContain(">7</text>");
-    expect(html).toContain(">2</text>");
-    // AD-561 colors ride var(--token), never raw hex.
-    expect(html).toContain('fill="var(--red-700)"');
-    expect(html).toContain('fill="var(--gray-700)"');
+    expect(html).toContain(">3</text>");
+    // AD-561 colors ride var(--token) through the style attribute (CSS
+    // declarations, where var() resolves), never raw hex.
+    expect(html).toContain('style="fill:var(--red-700)"');
+    expect(html).toContain('style="fill:var(--gray-700)"');
     // Category labels are visible text next to their bars.
     expect(html).toContain("must-fix");
+  });
+
+  test("a non-zero bar width tracks the linear scale (proportion face, plan-45 F-01 class)", () => {
+    // items: max 7 → ticks [0,2,4,6,8]; domain top 8, plotW = 560-118-40 =
+    // 402 → the value-7 bar spans 7/8 · 402 = 351.75 — a collapsed or
+    // domain-saturated width can never satisfy this.
+    expect(barChart(items)).toContain('width="351.75"');
   });
 
   test("long labels truncate with an ellipsis and keep the full text as a title", () => {
@@ -134,7 +149,7 @@ describe("BarChart SSR (plan 56 T1)", () => {
   });
 
   test("a missing per-item color falls back to the neutral series token", () => {
-    expect(barChart([{ key: "c", label: "cats", value: 1 }])).toContain('fill="var(--blue-700)"');
+    expect(barChart([{ key: "c", label: "cats", value: 1 }])).toContain('style="fill:var(--blue-700)"');
   });
 
   test("all-zero values render zero-width bars — never NaN (AC2)", () => {
@@ -156,8 +171,8 @@ describe("TrendChart SSR (plan 56 T1 / AD-562)", () => {
     const html = trendChart(weeks);
     expect(html).toContain('role="img"');
     expect(html).toContain('aria-label="Weekly trend"');
-    expect(html).toContain('fill="var(--blue-700)"');
-    expect(html).toContain('fill="var(--amber-700)"');
+    expect(html).toContain('style="fill:var(--blue-700)"');
+    expect(html).toContain('style="fill:var(--amber-700)"');
     expect(html).toContain("Reviews");
     expect(html).toContain("Findings");
   });
@@ -165,6 +180,13 @@ describe("TrendChart SSR (plan 56 T1 / AD-562)", () => {
   test("each week band carries the two grouped rects (reviews + findings)", () => {
     const html = trendChart(weeks);
     expect(html.split("<rect").length - 1).toBe(2 /* legend swatches */ + 2 /* weeks */ * 2 /* series */);
+  });
+
+  test("a non-zero rect height tracks the linear scale (proportion face, plan-45 F-01 class)", () => {
+    // weeks: max 4 → ticks [0,1,2,3,4]; PLOT_H = 190-28-20 = 142 → the
+    // findings-4 rect spans the full plot height — a collapsed height can
+    // never satisfy this.
+    expect(trendChart(weeks)).toContain('height="142"');
   });
 
   test("date x labels are localized by the locale prop", () => {

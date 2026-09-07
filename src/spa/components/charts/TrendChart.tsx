@@ -9,9 +9,17 @@
  * every-other-date thinning) lives in ./layout as pure functions; this file
  * only positions what they return. Series colors are the locked AD-561
  * mapping — reviews→blue-700, findings→amber-700 — applied as inline
- * `var(--token)` references into the DESIGN.md token layer
- * (src/spa/styles/tokens.css), so dark/light both resolve with zero raw
- * hex; the legend swatches use the same vars, mapping series→color.
+ * `var(--token)` references on the `style` attribute (parsed as CSS
+ * declarations, where var() resolves in every engine — never SVG
+ * presentation attributes, SVGWG open issue 1031) into the DESIGN.md token
+ * layer (src/spa/styles/tokens.css), so dark/light both resolve with zero
+ * raw hex; the legend swatches use the same vars, mapping series→color.
+ *
+ * Numeric coexistence (a11y floor): per-week counts are not labeled on the
+ * points — the window totals ride the page-level summary line
+ * (InsightsPage `trendSummary`, derived from the same weekly buckets)
+ * alongside the y ticks, so the numbers coexist with the graphic and the
+ * chart is never their only carrier (plan 56 T1-PM disposition).
  *
  * Localized copy comes in as props (legend labels from the caller's i18n
  * keys, plan 56 T2); x date labels are formatted from week_start by
@@ -68,16 +76,16 @@ export function TrendChart({
       viewBox={`0 0 ${WIDTH} ${HEIGHT}`}
       className="h-auto w-full"
     >
-      <rect x={PLOT_X} y={8} width={10} height={10} fill="var(--blue-700)" />
-      <text x={PLOT_X + 14} y={13} dominantBaseline="central" fontSize={11} fill="var(--gray-900)">
+      <rect x={PLOT_X} y={8} width={10} height={10} style={{ fill: "var(--blue-700)" }} />
+      <text x={PLOT_X + 14} y={13} dominantBaseline="central" fontSize={11} style={{ fill: "var(--gray-900)" }}>
         {seriesLabels.reviews}
       </text>
-      <rect x={PLOT_X + 150} y={8} width={10} height={10} fill="var(--amber-700)" />
-      <text x={PLOT_X + 164} y={13} dominantBaseline="central" fontSize={11} fill="var(--gray-900)">
+      <rect x={PLOT_X + 150} y={8} width={10} height={10} style={{ fill: "var(--amber-700)" }} />
+      <text x={PLOT_X + 164} y={13} dominantBaseline="central" fontSize={11} style={{ fill: "var(--gray-900)" }}>
         {seriesLabels.findings}
       </text>
-      <line x1={PLOT_X} y1={PLOT_Y} x2={PLOT_X} y2={axisY} stroke="var(--gray-alpha-400)" />
-      <line x1={PLOT_X} y1={axisY} x2={PLOT_X + PLOT_W} y2={axisY} stroke="var(--gray-alpha-400)" />
+      <line x1={PLOT_X} y1={PLOT_Y} x2={PLOT_X} y2={axisY} style={{ stroke: "var(--gray-alpha-400)" }} />
+      <line x1={PLOT_X} y1={axisY} x2={PLOT_X + PLOT_W} y2={axisY} style={{ stroke: "var(--gray-alpha-400)" }} />
       {ticks.map((tick) => (
         <text
           key={tick}
@@ -86,7 +94,7 @@ export function TrendChart({
           dominantBaseline="central"
           textAnchor="end"
           fontSize={10}
-          fill="var(--gray-900)"
+          style={{ fill: "var(--gray-900)" }}
         >
           {tick}
         </text>
@@ -100,14 +108,14 @@ export function TrendChart({
               y={axisY - yScale(point.reviews)}
               width={barWidth}
               height={yScale(point.reviews)}
-              fill="var(--blue-700)"
+              style={{ fill: "var(--blue-700)" }}
             />
             <rect
               x={x + offsets[1]!}
               y={axisY - yScale(point.findings)}
               width={barWidth}
               height={yScale(point.findings)}
-              fill="var(--amber-700)"
+              style={{ fill: "var(--amber-700)" }}
             />
           </g>
         );
@@ -122,7 +130,7 @@ export function TrendChart({
             y={HEIGHT - 6}
             textAnchor="middle"
             fontSize={10}
-            fill="var(--gray-900)"
+            style={{ fill: "var(--gray-900)" }}
           >
             {formatWeekLabel(point.week, locale)}
           </text>

@@ -73,10 +73,15 @@ const renderRecords = (locale: "en" | "zh_CN", data: InsightsSummary = RECORDS) 
  * The page renders exactly three chart svgs (severity, category, trend — no
  * other svg lives in InsightsRecordsView); the slices isolate each chart so
  * count/legend/aria assertions cannot collide with a sibling chart's text.
+ * The exact-count guard also fails loudly on a stray fourth svg (which
+ * would otherwise be silently absorbed and shift every slice's scope).
  */
 const chartSlices = (html: string): [string, string, string] => {
-  const [severity, category, trend] = html.split("<svg").slice(1);
-  if (!severity || !category || !trend) throw new Error("expected three chart svgs on the records page");
+  const slices = html.split("<svg");
+  const [severity, category, trend] = slices.slice(1);
+  if (slices.length !== 4 || !severity || !category || !trend) {
+    throw new Error(`expected exactly three chart svgs on the records page, got ${slices.length - 1}`);
+  }
   return [severity, category, trend];
 };
 
@@ -133,10 +138,11 @@ describe("records page assembly (plan 36 T2)", () => {
     expect(severity).toContain(">5</text>");
     expect(severity).toContain(">3</text>");
     // Bars carry the locked AD-561 tokens and the severity label stays
-    // visible next to its bar.
-    expect(severity).toContain('fill="var(--red-700)"');
-    expect(severity).toContain('fill="var(--amber-700)"');
-    expect(severity).toContain('fill="var(--gray-700)"');
+    // visible next to their bar. Colors ride var(--token) through the
+    // style attribute (CSS declarations, where var() resolves).
+    expect(severity).toContain('style="fill:var(--red-700)"');
+    expect(severity).toContain('style="fill:var(--amber-700)"');
+    expect(severity).toContain('style="fill:var(--gray-700)"');
     expect(severity).toContain("must-fix");
     // The old proportional-bar markup is gone entirely.
     expect(html).not.toContain("basis-full");
@@ -155,8 +161,20 @@ describe("records page assembly (plan 36 T2)", () => {
     expect(category).toContain(">6</text>");
     // No per-item color is passed → the chart's neutral series token
     // (AD-561 default), never one of the severity accents.
-    expect(category).toContain('fill="var(--blue-700)"');
-    expect(category).not.toContain('fill="var(--red-700)"');
+    expect(category).toContain('style="fill:var(--blue-700)"');
+    expect(category).not.toContain('style="fill:var(--red-700)"');
+  });
+
+  test("empty-string category coalesces to the uncategorized face (same as NULL, plan 56 QC F-004)", () => {
+    // category: "" is schema-permitted (review/schema.ts) and persists —
+    // before the falsy-coalescing fix it rendered a blank bar label.
+    const data: InsightsSummary = { ...RECORDS, findings_by_category: [{ category: "", count: 2 }] };
+    const [, category] = chartSlices(renderRecords("en", data));
+    // The i18n label renders as visible text (and as the title) — never a
+    // blank text node with an empty <title>.
+    expect(category).toContain(`>${t("en", "insights.uncategorized")}</text>`);
+    expect(category).toContain(`<title>${t("en", "insights.uncategorized")}</title>`);
+    expect(category).not.toContain("<title></title>");
   });
 
   test("trend chart: dual-series legend with AD-561 colors, localized date axis, bucket-derived totals", () => {
@@ -164,9 +182,9 @@ describe("records page assembly (plan 36 T2)", () => {
     const [, , trend] = chartSlices(html);
     // Legend order pins the series→color pairing: the blue-700 swatch
     // precedes the Reviews label, the amber-700 swatch the Findings label.
-    const blue = trend.indexOf('fill="var(--blue-700)"');
+    const blue = trend.indexOf('style="fill:var(--blue-700)"');
     const reviews = trend.indexOf(">Reviews</text>");
-    const amber = trend.indexOf('fill="var(--amber-700)"');
+    const amber = trend.indexOf('style="fill:var(--amber-700)"');
     const findings = trend.indexOf(">Findings</text>");
     expect(blue).toBeGreaterThanOrEqual(0);
     expect(blue).toBeLessThan(reviews);

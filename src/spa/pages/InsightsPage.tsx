@@ -256,8 +256,11 @@ export function InsightsRecordsView({ locale, data }: { locale: SpaBoot["locale"
                 <BarChart
                   ariaLabel={t(locale, "insights.findingsByCategory")}
                   items={data.findings_by_category.map((row) => ({
-                    key: row.category ?? "uncategorized",
-                    label: row.category ?? t(locale, "insights.uncategorized"),
+                    // Falsy (not nullish) check: "" is schema-permitted
+                    // (review/schema.ts) and persists — same face as NULL:
+                    // the uncategorized key/label (plan 56 QC F-004).
+                    key: row.category ? row.category : "uncategorized",
+                    label: row.category ? row.category : t(locale, "insights.uncategorized"),
                     value: row.count,
                   }))}
                 />

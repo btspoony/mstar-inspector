@@ -56,7 +56,11 @@ export function bandScale(count: number, range: number, bandRatio = BAND_RATIO):
 /**
  * Within-band grouped-series geometry (AD-562: two rects per week band —
  * reviews + findings): `seriesCount` bars of width
- * `bandWidth * innerRatio / seriesCount`, laid edge to edge inside the band.
+ * `bandWidth * innerRatio / seriesCount`, laid edge to edge as a group
+ * centered inside the band — so the band midpoint (the date-label anchor)
+ * stays the group's center instead of drifting right by
+ * `(1 - innerRatio) / 2` of the band (plan 56 QC F-002: ~37px label offset
+ * on the single-week face).
  */
 export function groupedBars(
   seriesCount: number,
@@ -64,9 +68,10 @@ export function groupedBars(
   innerRatio = 0.8,
 ): { width: number; offsets: number[] } {
   const width = (bandWidth * innerRatio) / Math.max(1, seriesCount);
+  const start = (bandWidth - width * Math.max(0, seriesCount)) / 2;
   return {
     width,
-    offsets: Array.from({ length: Math.max(0, seriesCount) }, (_, series) => series * width),
+    offsets: Array.from({ length: Math.max(0, seriesCount) }, (_, series) => start + series * width),
   };
 }
 

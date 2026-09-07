@@ -7,9 +7,13 @@
  * Color mechanism (AD-561 face): fills are inline `var(--token)` references
  * into the DESIGN.md token layer (`src/spa/styles/tokens.css`, imported
  * globally by main.tsx) — the same CSS-var layer pages.module.css consumes.
- * The shadcn semantic Tailwind classes (text-muted-foreground et al) have no
- * chart-series face, and the var chain flips with :root[data-theme], so
- * dark/light both resolve with zero raw hex here. Callers pass series colors
+ * They ride the `style` attribute (parsed as CSS declarations, where var()
+ * resolves in every engine) — never SVG presentation attributes, whose var()
+ * handling is engine-ambiguous (SVGWG open issue 1031, documented black-fill
+ * fallbacks). The shadcn semantic Tailwind classes (text-muted-foreground et
+ * al) have no chart-series face, and the var chain flips with
+ * :root[data-theme], so dark/light both resolve with zero raw hex here.
+ * Callers pass series colors
  * per item (the severity chart supplies the locked AD-561 mapping
  * must-fix→red-700 / should-fix→amber-700 / nit→gray-700 at the page layer,
  * plan 56 T2); the default is blue-700, the neutral series tone.
@@ -73,18 +77,24 @@ export function BarChart({ items, ariaLabel }: { items: BarChartItem[]; ariaLabe
               textAnchor="end"
               dominantBaseline="central"
               fontSize={11}
-              fill="var(--gray-1000)"
+              style={{ fill: "var(--gray-1000)" }}
             >
               <title>{item.label}</title>
               {truncateLabel(item.label, LABEL_MAX_CHARS)}
             </text>
-            <rect x={barsX} y={barY} width={barWidth} height={barHeight} fill={item.color ?? "var(--blue-700)"} />
+            <rect
+              x={barsX}
+              y={barY}
+              width={barWidth}
+              height={barHeight}
+              style={{ fill: item.color ?? "var(--blue-700)" }}
+            />
             <text
               x={barsX + barWidth + 6}
               y={barY + barHeight / 2}
               dominantBaseline="central"
               fontSize={11}
-              fill="var(--gray-900)"
+              style={{ fill: "var(--gray-900)" }}
             >
               {item.value}
             </text>
@@ -96,7 +106,7 @@ export function BarChart({ items, ariaLabel }: { items: BarChartItem[]; ariaLabe
         y1={PAD_TOP + items.length * ROW_H}
         x2={barsX + plotW}
         y2={PAD_TOP + items.length * ROW_H}
-        stroke="var(--gray-alpha-400)"
+        style={{ stroke: "var(--gray-alpha-400)" }}
       />
       {ticks.map((tick) => (
         <text
@@ -105,7 +115,7 @@ export function BarChart({ items, ariaLabel }: { items: BarChartItem[]; ariaLabe
           y={PAD_TOP + items.length * ROW_H + 13}
           textAnchor="middle"
           fontSize={10}
-          fill="var(--gray-900)"
+          style={{ fill: "var(--gray-900)" }}
         >
           {tick}
         </text>
