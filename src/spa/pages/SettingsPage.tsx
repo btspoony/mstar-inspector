@@ -1444,6 +1444,17 @@ const DRAFT_CHAIN_TAB_ID = ":draft";
 
 const DRAFT_CHAIN_TAB: ChainTab = { id: DRAFT_CHAIN_TAB_ID, isDefault: false, chain: null };
 
+/**
+ * Plan 55 (AD-551): the draft tab's label mirrors the lifted draft name live
+ * — a non-blank input shows as-is (trim only gates the fallback), an
+ * empty/whitespace name falls back to the static 新链 copy. Pure render: the
+ * Radix Tabs controlled value derives from tabs/selectedTab alone, so a
+ * label change never touches tab selection.
+ */
+export function draftChainTabLabel(draftName: string, locale: SpaBoot["locale"]): string {
+  return draftName.trim() ? draftName : t(locale, "settings.draftChain");
+}
+
 function ChainsCard({
   locale,
   payload,
@@ -1474,6 +1485,11 @@ function ChainsCard({
   // the create flow is itself a tab, edited in place like every other chain.
   // One boolean of state, so a second draft can never exist while one lives.
   const [draftOpen, setDraftOpen] = useState(false);
+  // Plan 55 (AD-551): the draft name is owned HERE so the tab trigger can
+  // mirror the name input live; the panel is controlled (name/onNameChange).
+  // Lifting it retires the panel's unmount-clears-name reset — the two ways
+  // a draft closes (discard + created) each reset it explicitly below.
+  const [draftName, setDraftName] = useState("");
   const storedTabs = modelChainTabs(payload.model_chains);
   // The draft is a client-side UI element composed AFTER the last named tab
   // (never before Default) — the payload model itself is never mutated.
@@ -1515,7 +1531,7 @@ function ChainsCard({
                 </TabsTrigger>
               ))}
               {draft ? (
-                <TabsTrigger value={DRAFT_CHAIN_TAB_ID}>{t(locale, "settings.draftChain")}</TabsTrigger>
+                <TabsTrigger value={DRAFT_CHAIN_TAB_ID}>{draftChainTabLabel(draftName, locale)}</TabsTrigger>
               ) : null}
             </TabsList>
             <Button type="button" variant="outline" size="sm" onClick={openDraft}>
@@ -1557,16 +1573,26 @@ function ChainsCard({
               <DraftChainPanel
                 locale={locale}
                 groups={groups}
+                name={draftName}
+                onNameChange={setDraftName}
                 onCreate={onCreateDraft}
                 onOutcome={onOutcome}
-                onDiscard={() => setDraftOpen(false)}
+                onDiscard={() => {
+                  // Plan 55 (AD-551): the lifted name no longer dies with the
+                  // panel's unmount — discard resets it so a reopened draft
+                  // starts blank (today's semantics, kept).
+                  setDraftOpen(false);
+                  setDraftName("");
+                }}
                 onCreated={(created) => {
                   // Success: the create handler awaited the reload and it
                   // landed (createDraftChain resolves an error outcome
                   // otherwise), so the stored-name tab exists — the draft is
                   // removed and the real tab is selected. The draft lives in
-                  // component state, so no reload can resurrect it.
+                  // component state, so no reload can resurrect it. The name
+                  // resets with it (AD-551): the reopened draft starts blank.
                   setDraftOpen(false);
+                  setDraftName("");
                   setSelectedTab(created);
                 }}
               />
@@ -1695,10 +1721,15 @@ function SeatsCard({
  * selection coerces through activeChainTabId once the draft tab is gone. The
  * busy gate covers both triggers while the create POST is in flight, so a
  * discard can never race a resolving save into selecting the created tab.
+ * Plan 55 (AD-551): the draft name is controlled — owned by ChainsCard so
+ * the tab trigger can mirror it live; this panel only renders and edits it
+ * through the name/onNameChange props.
  */
-function DraftChainPanel({
+export function DraftChainPanel({
   locale,
   groups,
+  name,
+  onNameChange,
   onCreate,
   onOutcome,
   onDiscard,
@@ -1706,6 +1737,9 @@ function DraftChainPanel({
 }: {
   locale: SpaBoot["locale"];
   groups: ModelOptionGroup[];
+  /** Plan 55 (AD-551): the controlled draft name, owned by ChainsCard. */
+  name: string;
+  onNameChange: (name: string) => void;
   /** The draft create (op=add-chain); resolves an error when the awaited reload fails so the draft stays open. */
   onCreate: (fields: Record<string, string>) => Promise<OpNotice>;
   /** Forwards the SUCCESS outcome to the chains card's region. */
@@ -1714,7 +1748,6 @@ function DraftChainPanel({
   /** Fired after a successful create (the reload has landed) with the stored name. */
   onCreated: (name: string) => void;
 }) {
-  const [name, setName] = useState("");
   const [busy, setBusy] = useState(false);
   return (
     <div className="flex flex-col gap-3">
@@ -1722,7 +1755,7 @@ function DraftChainPanel({
         {t(locale, "settings.chainName")}
         <Input
           value={name}
-          onChange={(event) => setName(event.target.value)}
+          onChange={(event) => onNameChange(event.target.value)}
           placeholder={t(locale, "settings.chainNamePlaceholder")}
           autoComplete="off"
         />

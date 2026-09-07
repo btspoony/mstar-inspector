@@ -22,7 +22,7 @@ import {
   filterCatalogProviders,
   groupCatalogProviders,
 } from "../../src/spa/components/provider-combobox";
-import { AppInfoCard } from "../../src/spa/pages/SettingsPage";
+import { AppInfoCard, DraftChainPanel, draftChainTabLabel } from "../../src/spa/pages/SettingsPage";
 
 describe("settings layout (plan 35 T4)", () => {
   test("SettingsPage folds ops + health into an authorized ops zone; providers and chains are shadcn", () => {
@@ -759,10 +759,12 @@ describe("chain draft peer tab (plan 44 T2)", () => {
     expect(openDraftBody).toContain("setSelectedTab(DRAFT_CHAIN_TAB_ID);");
     // Appended AFTER the last named tab (never before Default): the draft
     // joins the coercion list by spreading after the stored tabs, and its
-    // trigger renders after the stored-tabs map inside the TabsList.
+    // trigger renders after the stored-tabs map inside the TabsList. The
+    // trigger's label is the live AD-551 mirror (plan 55), not the static
+    // 新链 copy.
     expect(chainsBody).toContain("const tabs = draft ? [...storedTabs, draft] : storedTabs;");
     const storedMapPos = chainsBody.indexOf("{storedTabs.map((tab) => (");
-    const draftTriggerPos = chainsBody.indexOf('{t(locale, "settings.draftChain")}');
+    const draftTriggerPos = chainsBody.indexOf("{draftChainTabLabel(draftName, locale)}");
     expect(storedMapPos).toBeGreaterThan(-1);
     expect(draftTriggerPos).toBeGreaterThan(storedMapPos);
     // The old plan-43 disclosure between strip and Default panel is gone —
@@ -819,12 +821,17 @@ describe("chain draft peer tab (plan 44 T2)", () => {
     expect(panelBody).toContain('variant="ghost"');
     expect(panelBody).toContain("disabled={busy}");
     // The draft panel mounts inside its own forceMount TabsContent; the
-    // discard's only state effect is closing the draft — the selection then
-    // coerces through activeChainTabId (plan-39 pin) back to Default.
+    // discard closes the draft — the selection then coerces through
+    // activeChainTabId (plan-39 pin) back to Default — and, plan 55
+    // (AD-551), resets the lifted draft name so a reopened draft starts
+    // blank (the old unmount-clears-name semantics, now explicit).
     const chainsBody = source.slice(source.indexOf("function ChainsCard"), source.indexOf("function SeatsCard"));
     expect(chainsBody).toContain("<TabsContent forceMount value={DRAFT_CHAIN_TAB_ID}>");
-    expect(chainsBody).toContain("onDiscard={() => setDraftOpen(false)}");
-    expect(chainsBody).toContain("setDraftOpen(false);");
+    const discardPos = chainsBody.indexOf("onDiscard={() => {");
+    expect(discardPos).toBeGreaterThan(-1);
+    const discardHandler = chainsBody.slice(discardPos, chainsBody.indexOf("onCreated={(created) => {"));
+    expect(discardHandler).toContain("setDraftOpen(false);");
+    expect(discardHandler).toContain('setDraftName("");');
     expect(chainsBody).toContain("setSelectedTab(created);");
   });
 
@@ -862,6 +869,78 @@ describe("chain draft peer tab (plan 44 T2)", () => {
     // The name-field keys survive the move into the panel.
     expect(t("en", "settings.chainName")).toBe("Chain name");
     expect(t("zh_CN", "settings.chainName")).toBe("链名称");
+  });
+});
+
+describe("draft tab label live-sync (plan 55 A2/A3 / AD-551)", () => {
+  /**
+   * The label faces are pure (the exported draftChainTabLabel mirror), so
+   * they are pinned directly. The controlled panel is pinned behaviorally
+   * through SSR of the exported DraftChainPanel: a typed name must reach the
+   * markup — an internal useState("") would ignore the prop and render
+   * value="" instead. The lifted state + wiring + the two close-time resets
+   * are pinned over the source. createElement keeps this .ts file JSX-free.
+   */
+  const noop = () => {};
+  const panelHtml = (name: string): string =>
+    renderToStaticMarkup(
+      createElement(DraftChainPanel, {
+        locale: "en",
+        groups: [],
+        name,
+        onNameChange: noop,
+        onCreate: () => Promise.resolve({ kind: "error" as const, message: "unused" }),
+        onOutcome: noop,
+        onDiscard: noop,
+        onCreated: noop,
+      }),
+    );
+
+  test("typing mirrors into the tab label live; empty/whitespace falls back to 新链", () => {
+    expect(draftChainTabLabel("my-chain", "en")).toBe("my-chain");
+    // The typed value is locale-independent — the fallback copy is what
+    // localizes.
+    expect(draftChainTabLabel("my-chain", "zh_CN")).toBe("my-chain");
+    // The raw input is the label (trim only gates the fallback) — no data
+    // loss while typing.
+    expect(draftChainTabLabel(" my-chain ", "en")).toBe(" my-chain ");
+    expect(draftChainTabLabel("", "en")).toBe("New chain");
+    expect(draftChainTabLabel("", "zh_CN")).toBe("新链");
+    // Whitespace-only counts as empty (the create would trim to "" anyway).
+    expect(draftChainTabLabel("   ", "zh_CN")).toBe("新链");
+  });
+
+  test("the draft panel is controlled by the lifted name (SSR: the typed value reaches the input)", () => {
+    expect(panelHtml("my-chain")).toContain('value="my-chain"');
+    expect(panelHtml("")).toContain('value=""');
+  });
+
+  test("the lifted state, wiring and both close-time resets live in ChainsCard (AD-551)", () => {
+    const source = readFileSync(join(import.meta.dir, "../../src/spa/pages/SettingsPage.tsx"), "utf8");
+    const chainsBody = source.slice(source.indexOf("function ChainsCard"), source.indexOf("function SeatsCard"));
+    // The name state lives in the card (the panel no longer owns it).
+    expect(chainsBody).toContain('const [draftName, setDraftName] = useState("");');
+    // Controlled wiring: the panel edits the card's state, the trigger
+    // renders the live mirror of the same state.
+    expect(chainsBody).toContain("name={draftName}");
+    expect(chainsBody).toContain("onNameChange={setDraftName}");
+    const triggerPos = chainsBody.indexOf("<TabsTrigger value={DRAFT_CHAIN_TAB_ID}>");
+    expect(triggerPos).toBeGreaterThan(-1);
+    expect(chainsBody.slice(triggerPos, chainsBody.indexOf("</TabsTrigger>", triggerPos))).toContain(
+      "{draftChainTabLabel(draftName, locale)}",
+    );
+    // Success path: the reset accompanies the close + the real (stored-name)
+    // tab selection — the reopened draft starts blank, today's semantics.
+    const createdHandler = chainsBody.slice(
+      chainsBody.indexOf("onCreated={(created) => {"),
+      chainsBody.indexOf("setSelectedTab(created);"),
+    );
+    expect(createdHandler).toContain('setDraftName("");');
+    // The panel body itself keeps no name state (controlled, not lifted back).
+    const panelBody = source.slice(source.indexOf("function DraftChainPanel"), source.indexOf("function ChainEditor"));
+    expect(panelBody).not.toContain('useState("")');
+    expect(panelBody).toContain("value={name}");
+    expect(panelBody).toContain("onNameChange(event.target.value)");
   });
 });
 
