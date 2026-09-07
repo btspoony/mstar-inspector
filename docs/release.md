@@ -32,10 +32,11 @@ duplicated here.
    cancel-in-progress).
 2. **The workflow** fails early if the requested tag already exists, then
    assembles `.changes/unreleased/*.md` into `## [X.Y.Z] - <date>` sections in
-   `CHANGELOG.md` + `CHANGELOG_CN.md`, bumps `package.json#version`, validates
-   (`release:validate`), typechecks and builds the SPA, pushes the
-   `release/vX.Y.Z` branch, and opens (or updates) the `release vX.Y.Z` PR
-   with the EN changelog section in its body.
+   `CHANGELOG.md` + `CHANGELOG_CN.md`, bumps every version surface
+   (`package.json#version` and the generated `src/version.ts` — one
+   `VERSION_SURFACES` list), validates (`release:validate`), typechecks and
+   builds the SPA, pushes the `release/vX.Y.Z` branch, and opens (or updates
+   the) `release vX.Y.Z` PR with the EN changelog section in its body.
 3. **Review the PR — this is the versioning review face.** The diff should
    contain exactly: the two changelog sections, the version bump, and the
    fragment moves into `.changes/archive/<X.Y.Z>/`. **A release PR has no

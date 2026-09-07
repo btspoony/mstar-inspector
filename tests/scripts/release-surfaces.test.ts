@@ -213,6 +213,29 @@ describe("ts-const surface (src/version.ts, plan 51 D4)", () => {
     }
   });
 
+  test("commented-out or mid-line APP_VERSION text is not read (QC F-001 line anchor)", async () => {
+    const root = makeTempRoot();
+    try {
+      // a commented-out decoy above the real line: the real one still reads
+      writeAt(
+        root,
+        "src/version.ts",
+        `// export const APP_VERSION = "9.9.9";\n${renderVersionTs("1.0.0")}`,
+      );
+      expect(await readSurfaceVersion(surface, root)).toBe("1.0.0");
+
+      // decoy only -> no readable export
+      writeAt(root, "src/version.ts", '// export const APP_VERSION = "9.9.9";\n');
+      expect(await readSurfaceVersion(surface, root)).toBeUndefined();
+
+      // mid-line occurrence -> not the generated line shape
+      writeAt(root, "src/version.ts", 'const x = 1; export const APP_VERSION = "9.9.9";\n');
+      expect(await readSurfaceVersion(surface, root)).toBeUndefined();
+    } finally {
+      disposeTempRoot(root);
+    }
+  });
+
   test("write throws on drift instead of silently overwriting a hand edit", async () => {
     const root = makeTempRoot();
     try {

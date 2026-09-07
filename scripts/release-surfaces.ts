@@ -33,8 +33,12 @@ export const VERSION_SURFACES: readonly VersionSurface[] = [
   { label: "src/version.ts", path: "src/version.ts", kind: "ts-const" },
 ] as const;
 
-/** The `export const APP_VERSION = "X.Y.Z";` line inside `src/version.ts`. */
-const APP_VERSION_RE = /export const APP_VERSION = "([^"]*)";/;
+/**
+ * The `export const APP_VERSION = "X.Y.Z";` line inside `src/version.ts`,
+ * line-anchored (QC F-001): commented-out or mid-line text can't satisfy the
+ * read — only the exact generated shape matches.
+ */
+const APP_VERSION_RE = /^export const APP_VERSION = "([^"]*)";$/m;
 
 /**
  * Canonical content of `src/version.ts` — the file is regenerated wholesale
