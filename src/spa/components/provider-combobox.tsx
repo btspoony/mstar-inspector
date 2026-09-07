@@ -13,8 +13,10 @@
  * of scope (zero new dependencies, AD-542 lock). Accessibility follows the
  * ARIA combobox pattern at the plan-54 QA minimum bar: a typeable input
  * (role=combobox with aria-expanded/aria-controls/aria-autocomplete), a
- * listbox panel with role=option rows, Esc and outside-click to dismiss
- * (full keyboard traversal is explicitly not required by plan 54).
+ * listbox panel with role=option rows, ArrowDown/ArrowUp walking an
+ * active-descendant highlight across the filtered rows with Enter to select
+ * (task-3 review fix: 「可选」 must be keyboard-reachable) and Esc /
+ * outside-click to dismiss (the full ARIA 1.2 pattern is still not required).
  *
  * Unavailable entries stay listed and marked (`aria-disabled` + the
  * "unavailable on {image}" suffix) in BOTH groups — selecting one is a no-op,
@@ -64,6 +66,16 @@ export function groupCatalogProviders(providers: readonly CatalogProvider[]): {
 }
 
 /**
+ * Deterministic option-row id — the aria-activedescendant bridge between the
+ * combobox input and the panel rows. The panel renders it on every option;
+ * the shell points the input at the highlighted one. Both call this, so the
+ * two sides cannot drift.
+ */
+function optionId(listboxId: string, providerId: string): string {
+  return `${listboxId}-option-${providerId}`;
+}
+
+/**
  * The open listbox face — pure (no state, no effects), exported so the tests
  * can pin grouping order, filtering, and unavailable marking through static
  * SSR (the AppInfoCard precedent). The stateful combobox renders it beneath
@@ -77,6 +89,8 @@ export function ProviderComboboxPanel({
   imageId,
   listboxId,
   onSelect,
+  activeId,
+  onHoverOption,
 }: {
   locale: Locale;
   providers: readonly CatalogProvider[];
@@ -85,6 +99,10 @@ export function ProviderComboboxPanel({
   imageId: string;
   listboxId: string;
   onSelect: (id: string) => void;
+  /** id of the keyboard-highlighted row (rendered via bg-accent). */
+  activeId?: string;
+  /** Hover sync: the pointer moving over a row moves the highlight. */
+  onHoverOption?: (providerId: string) => void;
 }) {
   const matches = filterCatalogProviders(providers, query);
   const groups = groupCatalogProviders(matches);
@@ -96,7 +114,9 @@ export function ProviderComboboxPanel({
 
   if (total === 0) {
     return (
-      <p className="px-2 py-1.5 text-sm text-muted-foreground">
+      // Carries the listbox id so the input's aria-controls never dangles in
+      // the zero-match state (task-3 review fix).
+      <p id={listboxId} className="px-2 py-1.5 text-sm text-muted-foreground">
         {t(locale, "settings.noProviderMatch", { query: query.trim() })}
       </p>
     );
@@ -109,16 +129,20 @@ export function ProviderComboboxPanel({
             <div className="px-2 py-1.5 text-xs text-muted-foreground">{label}</div>
             {rows.map((provider) => {
               const unavailable = provider.eligibility === "unavailable";
+              const rowId = optionId(listboxId, provider.id);
               return (
                 <div
                   key={provider.id}
+                  id={rowId}
                   role="option"
                   aria-selected={provider.id === value}
                   aria-disabled={unavailable || undefined}
                   className={cn(
                     "flex w-full cursor-pointer items-center gap-2 rounded-sm py-1.5 pr-2 pl-2 text-sm select-none hover:bg-accent",
+                    activeId === rowId && "bg-accent",
                     unavailable && "pointer-events-none opacity-50",
                   )}
+                  onMouseMove={() => onHoverOption?.(provider.id)}
                   onClick={() => {
                     // Unavailable stays unsaveable at every layer (plan-46):
                     // the row is inert here, gated again in AddProviderSection
@@ -147,10 +171,12 @@ export function ProviderComboboxPanel({
 
 /**
  * The stateful combobox shell: query + open state around the pure panel.
- * Focus or typing opens the list; Esc, an option pick, or a pointerdown
- * outside the root closes it. The selected entry is surfaced by the check
- * mark on its row (and by AddProviderSection's form heading) — the input
- * itself stays a query field and clears on selection.
+ * Focus, click, typing, or an arrow key opens the list; Esc, an option pick,
+ * or a pointerdown outside the root closes it. ArrowDown/ArrowUp move the
+ * active-descendant highlight across the filtered rows and Enter selects it,
+ * so 「可选」 is keyboard-reachable (task-3 review fix). The selected entry
+ * is surfaced by the check mark on its row (and by AddProviderSection's form
+ * heading) — the input itself stays a query field and clears on selection.
  */
 export function ProviderCombobox({
   locale,
@@ -170,8 +196,16 @@ export function ProviderCombobox({
 }) {
   const [query, setQuery] = useState("");
   const [open, setOpen] = useState(false);
+  const [activeIndex, setActiveIndex] = useState(0);
   const rootRef = useRef<HTMLDivElement>(null);
   const listboxId = useId();
+
+  // The keyboard highlight walks the FILTERED rows in the panel's render
+  // order (common block, then catalog block) — derived from the same pure
+  // filter/group helpers the panel renders with, so the two cannot drift.
+  const groups = groupCatalogProviders(filterCatalogProviders(providers, query));
+  const visible = [...groups.common, ...groups.catalog];
+  const active = visible[activeIndex];
 
   // Outside-click dismiss (QA minimum bar). Client-only: effects never run
   // during SSR, so the static-markup tests stay clean.
@@ -187,6 +221,9 @@ export function ProviderCombobox({
   function select(id: string) {
     onValueChange(id);
     setQuery("");
+    // The query re-narrows the list — the highlight resets to the first
+    // match with it.
+    setActiveIndex(0);
     setOpen(false);
   }
 
@@ -198,18 +235,48 @@ export function ProviderCombobox({
         autoComplete="off"
         aria-expanded={open}
         aria-controls={open ? listboxId : undefined}
+        aria-activedescendant={open && active ? optionId(listboxId, active.id) : undefined}
         aria-autocomplete="list"
         aria-haspopup="listbox"
         aria-labelledby={labelledby}
         placeholder={t(locale, "settings.selectProvider")}
         value={query}
         onFocus={() => setOpen(true)}
+        // Click re-opens after an Esc: focus is already on the input, so
+        // onFocus alone never re-fires (task-3 review fix).
+        onClick={() => setOpen(true)}
         onChange={(event) => {
           setQuery(event.target.value);
+          // Every keystroke re-narrows the list — reset the highlight to the
+          // first match.
+          setActiveIndex(0);
           setOpen(true);
         }}
         onKeyDown={(event) => {
           if (event.key === "Escape") setOpen(false);
+          if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+            event.preventDefault();
+            if (!open) {
+              // Arrows open the list standalone (the replaced Radix Select
+              // was keyboard-operable): ArrowDown lands on the first match,
+              // ArrowUp on the last.
+              setActiveIndex(event.key === "ArrowDown" ? 0 : Math.max(visible.length - 1, 0));
+              setOpen(true);
+            } else if (visible.length > 0) {
+              // Walk the highlight, clamped to the filtered list bounds
+              // (both group blocks, in panel render order).
+              setActiveIndex((index) =>
+                event.key === "ArrowDown"
+                  ? Math.min(index + 1, visible.length - 1)
+                  : Math.max(index - 1, 0),
+              );
+            }
+          } else if (event.key === "Enter" && open) {
+            event.preventDefault();
+            // Same inert rule as the pointer path: an unavailable row never
+            // selects (plan-46 red line at every layer).
+            if (active && active.eligibility !== "unavailable") select(active.id);
+          }
         }}
       />
       {open ? (
@@ -225,6 +292,11 @@ export function ProviderCombobox({
               imageId={imageId}
               listboxId={listboxId}
               onSelect={select}
+              activeId={active ? optionId(listboxId, active.id) : undefined}
+              onHoverOption={(id) => {
+                const index = visible.findIndex((provider) => provider.id === id);
+                if (index >= 0) setActiveIndex(index);
+              }}
             />
           </div>
         </div>

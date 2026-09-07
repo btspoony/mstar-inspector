@@ -470,6 +470,73 @@ describe("provider combobox (plan 54 T3)", () => {
     expect(source).toContain("if (!unavailable) onSelect(provider.id);");
   });
 
+  test("keyboard selection: arrows walk the filtered list, Enter selects, highlight follows the filter, click re-opens after Esc (source pins, task-3 review fix)", () => {
+    const source = readFileSync(join(import.meta.dir, "../../src/spa/components/provider-combobox.tsx"), "utf8");
+    // The highlight walks the SAME order the panel renders: the shell derives
+    // it from the same pure filter/group helpers (common block, then catalog).
+    expect(source).toContain("groupCatalogProviders(filterCatalogProviders(providers, query))");
+    expect(source).toContain("const visible = [...groups.common, ...groups.catalog];");
+    // ArrowDown/ArrowUp move the active-descendant highlight; arrows also
+    // open the list standalone (the replaced Radix Select was keyboard-
+    // operable — the plan's 可选 minimum bar).
+    expect(source).toContain('if (event.key === "ArrowDown" || event.key === "ArrowUp")');
+    expect(source).toContain("Math.min(index + 1, visible.length - 1)");
+    expect(source).toContain("Math.max(index - 1, 0)");
+    // Enter selects the highlighted row — and the unavailable red line holds
+    // on the keyboard path exactly as on the pointer path.
+    expect(source).toContain('event.key === "Enter" && open');
+    expect(source).toContain('if (active && active.eligibility !== "unavailable") select(active.id);');
+    // The input advertises the highlighted option while the list is open.
+    expect(source).toContain("aria-activedescendant={open && active ? optionId(listboxId, active.id) : undefined}");
+    // The highlight follows filter changes: every keystroke (and a selection)
+    // resets it to the first match.
+    expect(source).toContain("setActiveIndex(0);");
+    // Pointer/keyboard stay in sync: hovering a row moves the highlight.
+    expect(source).toContain("onMouseMove={() => onHoverOption?.(provider.id)}");
+    // After an Esc the input keeps focus, so focus alone never re-fires —
+    // click re-opens the (filtered) list.
+    expect(source).toContain("onClick={() => setOpen(true)}");
+  });
+
+  test("option rows carry the aria-activedescendant ids + highlight, and the zero-match state keeps the listbox id (SSR, task-3 review fix)", () => {
+    const panel = (overrides: { activeId?: string; query?: string } = {}) =>
+      renderToStaticMarkup(
+        createElement(ProviderComboboxPanel, {
+          locale: "en",
+          providers: catalog,
+          query: overrides.query ?? "",
+          value: undefined,
+          imageId: "omp",
+          listboxId: "lb",
+          onSelect: () => {},
+          activeId: overrides.activeId,
+        }),
+      );
+    const full = panel();
+    // Every option row carries its deterministic bridge id — the shape the
+    // input's aria-activedescendant points at.
+    expect(full).toContain('id="lb-option-anthropic"');
+    expect(full).toContain('id="lb-option-gemini"');
+    expect(full).toContain('id="lb-option-gemini-image"');
+    // The highlighted row renders the standalone bg-accent token; every row
+    // always carries the hover: variant (8 rows → 8 substring occurrences,
+    // +1 only when a row is active).
+    expect(full.split("bg-accent").length - 1).toBe(8);
+    const openaiAt = panel({ activeId: "lb-option-openai" });
+    expect(openaiAt.split("bg-accent").length - 1).toBe(9);
+    // …and the standalone token sits on the ACTIVE row, not its neighbours.
+    const openaiRow = openaiAt.slice(
+      openaiAt.indexOf('id="lb-option-openai"'),
+      openaiAt.indexOf("</div>", openaiAt.indexOf('id="lb-option-openai"')),
+    );
+    expect(openaiRow).toContain(" bg-accent");
+    // Zero-match state: the honest empty <p> carries the listbox id, so the
+    // open input's aria-controls never dangles.
+    const empty = panel({ query: "zzz-no-match" });
+    expect(empty).toContain('id="lb"');
+    expect(empty).toContain("No providers match");
+  });
+
   test("plan 54 picker copy is dictionary-backed; zh picker copy carries no bare Provider (AC1 sweep)", () => {
     expect(t("en", "settings.provider")).toBe("Model provider");
     expect(t("zh_CN", "settings.provider")).toBe("模型提供方");
