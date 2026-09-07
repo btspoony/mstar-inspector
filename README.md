@@ -25,10 +25,16 @@ later analysis.
 - **Structured results** — reviews emit a `mstar.review/v1` envelope (verdict + classified findings) stored in D1, so dedup, recurrence, and health analytics are possible later
 - **Fail-closed by design** — a global kill-switch gates everything, and every App must bring its own provider keys and model chain: a misconfigured App's reviews fail loudly, never on someone else's credentials
 
-## Architecture (one line)
+## Architecture
 
-```
-GitHub webhook → POST /webhook/:appSlug (verify + classify) → Queue → Consumer → Sandbox (clone + agent review) → Issues comment upsert + D1 store
+```mermaid
+flowchart LR
+    GH["GitHub webhook"] --> WH["POST /webhook/:appSlug<br/>verify + classify"]
+    WH --> Q[("Queue")]
+    Q --> CO["Consumer"]
+    CO --> SB["Sandbox<br/>clone + agent review"]
+    SB --> CM["Issues comment upsert"]
+    SB --> DB[("D1 store")]
 ```
 
 ## Quick start

@@ -23,10 +23,16 @@ findings 落入 D1 供后续分析。
 - **结构化结果** —— 审查产出 `mstar.review/v1` envelope（verdict + 分级 findings）持久化到 D1，为后续去重、复现统计和健康分析提供数据层
 - **设计上 fail-closed** —— 全局 kill-switch 把总闸，每个 App 必须自带 provider key 与模型链：配置缺失的 App 审查会大声失败，绝不动用别人的凭据
 
-## 架构（一行）
+## 架构
 
-```
-GitHub webhook → POST /webhook/:appSlug（验签 + 分类）→ Queue → Consumer → Sandbox（clone + agent 审查）→ Issues 评论 upsert + D1 存储
+```mermaid
+flowchart LR
+    GH["GitHub webhook"] --> WH["POST /webhook/:appSlug<br/>验签 + 分类"]
+    WH --> Q[("Queue")]
+    Q --> CO["Consumer"]
+    CO --> SB["Sandbox<br/>clone + agent 审查"]
+    SB --> CM["Issues 评论 upsert"]
+    SB --> DB[("D1 存储")]
 ```
 
 ## 快速开始
