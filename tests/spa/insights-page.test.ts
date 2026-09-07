@@ -11,7 +11,10 @@
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
+import { createElement } from "react";
+import { renderToStaticMarkup } from "react-dom/server";
 import { t } from "../../src/i18n";
+import { InsightsRecordsView } from "../../src/spa/pages/InsightsPage";
 import {
   INSIGHTS_WINDOWS,
   insightsWindow,
@@ -24,6 +27,34 @@ import {
 
 const page = readFileSync(join(import.meta.dir, "../../src/spa/pages/InsightsPage.tsx"), "utf8");
 const router = readFileSync(join(import.meta.dir, "../../src/spa/router.tsx"), "utf8");
+
+/** Plan 56 T2 fixture: v1 severity vocabulary + a NULL category row. */
+const RECORDS: InsightsSummary = {
+  window_days: 30,
+  reviews_total: 4,
+  findings_by_severity: [
+    { severity: "must-fix", count: 3 },
+    { severity: "should-fix", count: 2 },
+    { severity: "nit", count: 1 },
+  ],
+  findings_by_category: [
+    { category: "logic", count: 4 },
+    { category: null, count: 2 },
+  ],
+  verdict_distribution: [
+    { verdict: "comment", count: 3 },
+    { verdict: "approve", count: 1 },
+  ],
+  weekly_trend: [
+    { week_start: "2026-08-17", reviews: 1, findings: 0 },
+    { week_start: "2026-08-24", reviews: 3, findings: 4 },
+  ],
+  recurring_top: [],
+  repos: [],
+};
+
+const renderRecords = (locale: "en" | "zh_CN") =>
+  renderToStaticMarkup(createElement(InsightsRecordsView, { locale, data: RECORDS }));
 
 describe("records page assembly (plan 36 T2)", () => {
   test("window switch is the INSIGHTS_WINDOWS segmented ToggleGroup", () => {
@@ -50,18 +81,54 @@ describe("records page assembly (plan 36 T2)", () => {
   test("cards and typography are shadcn/Tailwind token driven (no raw hex)", () => {
     expect(page).toContain("@/components/ui/card");
     expect(page).toContain("text-muted-foreground");
-    expect(page).toContain("bg-primary");
+    // Plan 56 T2 supersede: the plan-45 proportional bar (bg-primary) is
+    // retired — the stat sections render as charts whose series colors ride
+    // var(--token) through the page-layer AD-561 mapping; the no-raw-hex
+    // face is unchanged.
+    expect(page).toContain("@/components/charts/BarChart");
+    expect(page).toContain("SEVERITY_BAR_COLORS");
+    expect(page).toContain("var(--red-700)");
+    expect(page).toContain("var(--amber-700)");
+    expect(page).toContain("var(--gray-700)");
     expect(page).not.toMatch(/#[0-9a-fA-F]{3,8}\b/);
   });
 
-  test("severity bar encodes the share — inline width effective, no basis-full override (plan 45 T1 / F-01)", () => {
-    // F-01: `basis-full` compiles to flex-basis: 100% — the flex base size,
-    // so the browser never consulted the inline width and every bar rendered
-    // full-width. The bar must keep its proportional inline width and must
-    // not regain a flex-basis override.
-    expect(page).toContain("style={{ width:");
-    expect(page).toContain("Math.round((row.count / maxSeverity) * 100)");
-    expect(page).not.toContain("basis-full");
+  test("severity section renders as a chart with counts as text (supersedes plan 45 T1/F-01 pin)", () => {
+    // plan 45 pinned the CSS proportional severity bar (inline width
+    // effective, no basis-full override). Plan 56 T2 replaces that markup
+    // with the BarChart SVG, so the pin is superseded in place — the
+    // regression face it guarded (severity counts visibly rendering, token
+    // discipline) must still hold in the new chart DOM.
+    const html = renderRecords("en");
+    // Counts coexist with the graphic as bar-end text (color is never the
+    // only carrier), bars carry the locked AD-561 tokens.
+    expect(html).toContain(">3</text>");
+    expect(html).toContain(">2</text>");
+    expect(html).toContain('fill="var(--red-700)"');
+    expect(html).toContain('fill="var(--amber-700)"');
+    expect(html).toContain('fill="var(--gray-700)"');
+    expect(html).toContain("must-fix");
+    // The old proportional-bar markup is gone entirely.
+    expect(html).not.toContain("basis-full");
+    expect(html).not.toContain('style="width');
+  });
+
+  test("category NULL keeps the uncategorized label; trend card carries totals, legend, and dates", () => {
+    const html = renderRecords("en");
+    expect(html).toContain("uncategorized");
+    expect(html).toContain("logic");
+    // Window totals line (text counts coexisting with the trend chart).
+    expect(html).toContain("In this window: 4 reviews · 4 findings");
+    // Legend entries and localized date axis labels render in the SVG.
+    expect(html).toContain("Reviews");
+    expect(html).toContain("Findings");
+    expect(html).toContain("8/17");
+  });
+
+  test("records surfaces localize bilingually (plan 56 T2)", () => {
+    const zh = renderRecords("zh_CN");
+    expect(zh).toContain("窗口内共 4 次审查 · 4 个发现");
+    expect(zh).toContain("8月17日");
   });
 
   test("records fetch opts into the repos aggregation (plan 36 QC F-001)", () => {
@@ -189,6 +256,9 @@ describe("records page copy (plan 36 T2 / AC9)", () => {
       "insights.windowSegment",
       "insights.daysShort",
       "insights.noReviews",
+      "insights.seriesReviews",
+      "insights.seriesFindings",
+      "insights.trendSummary",
     ]) {
       expect(page).toContain(`"${key}"`);
     }
