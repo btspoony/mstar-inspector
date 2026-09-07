@@ -87,6 +87,13 @@ export type CatalogProvider = {
   verifiable: boolean;
   /** Usability vs the App's selected runtime image (plan 38). */
   eligibility: ProviderEligibility;
+  /**
+   * Display-only picker group (plan 54, AD-547): `common` = the 5-entry
+   * 常用提供方 tier shown first, `catalog` = the 目录模板 group. Form and
+   * config branching NEVER reads this — the key-only vs template flow stays
+   * keyed to `tier` / `eligibility`.
+   */
+  display_group: "common" | "catalog";
 };
 
 /**
@@ -426,7 +433,10 @@ function isConfiguredProviderList(value: unknown): value is ConfiguredProvider[]
  * Row-level guard for the plan-38 catalog: tier + eligibility are the
  * load-bearing discriminators, and the Add Provider UI renders/branches on
  * `models` / `verifiable` / `base_url` / `api`, so a drifted row missing any
- * of them fails the parse instead of breaking the page.
+ * of them fails the parse instead of breaking the page. Plan 54 (review
+ * handoff S2): `display_group` is word-checked too — the picker groups on
+ * it, so a row without the stamp (or with a stray value) must fail the
+ * parse rather than silently drop out of both groups.
  */
 function isCatalogProviderList(value: unknown): value is CatalogProvider[] {
   return (
@@ -440,6 +450,7 @@ function isCatalogProviderList(value: unknown): value is CatalogProvider[] {
         (row.eligibility === "builtin" ||
           row.eligibility === "template" ||
           row.eligibility === "unavailable") &&
+        (row.display_group === "common" || row.display_group === "catalog") &&
         (row.base_url === null || typeof row.base_url === "string") &&
         (row.api === null || typeof row.api === "string") &&
         typeof row.verifiable === "boolean" &&

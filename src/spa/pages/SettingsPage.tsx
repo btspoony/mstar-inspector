@@ -24,6 +24,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { ProviderCombobox } from "../components/provider-combobox";
 import { fetchJson, postForm } from "../api";
 import type { SpaBoot } from "../boot";
 import { deliveryOutcomeLabel } from "../delivery-outcome";
@@ -1058,11 +1059,13 @@ function ConfiguredCustomRow({
  * provenance (the committed models.dev snapshot, static code) and per-entry
  * runtime eligibility (builtin / template / unavailable vs the App's selected
  * image) are disclosed in copy; an unavailable entry renders its explanation
- * with no submit path. The picker groups builtin tier first, then template,
- * and height-caps the list to an internal scroll so the snapshot breadth
- * stays usable. Only a successful submit closes the flow — a failed
- * verify/add keeps the selection and typed input while the provider stays
- * unconfigured.
+ * with no submit path. Plan 54: the picker is the filterable combobox
+ * (provider-combobox.tsx) showing the common tier first, then the catalog
+ * tier (display-only grouping inside the combobox: the form below keeps
+ * branching on tier/eligibility, AD-547) — with the list height-capped to an
+ * internal scroll so the snapshot breadth stays usable. Only a successful
+ * submit closes the flow — a failed verify/add keeps the selection and typed
+ * input while the provider stays unconfigured.
  */
 function AddProviderSection({
   locale,
@@ -1100,39 +1103,14 @@ function AddProviderSection({
         <span className="text-sm font-medium" id="settings-catalog-provider-label">
           {t(locale, "settings.provider")}
         </span>
-        <Select value={selectedId} onValueChange={setSelectedId}>
-          <SelectTrigger aria-labelledby="settings-catalog-provider-label">
-            <SelectValue placeholder={t(locale, "settings.selectProvider")} />
-          </SelectTrigger>
-          <SelectContent className="max-h-72">
-            <SelectGroup>
-              <SelectLabel>{t(locale, "settings.catalogBuiltin")}</SelectLabel>
-              {payload.provider_catalog
-                .filter((provider) => provider.tier === "builtin")
-                .map((provider) => (
-                  <SelectItem key={provider.id} value={provider.id}>
-                    {provider.label}
-                    {provider.eligibility === "unavailable"
-                      ? ` — ${t(locale, "settings.eligibilityUnavailableShort", { image: imageId })}`
-                      : ""}
-                  </SelectItem>
-                ))}
-            </SelectGroup>
-            <SelectGroup>
-              <SelectLabel>{t(locale, "settings.catalogTemplate")}</SelectLabel>
-              {payload.provider_catalog
-                .filter((provider) => provider.tier === "template")
-                .map((provider) => (
-                  <SelectItem key={provider.id} value={provider.id}>
-                    {provider.label}
-                    {provider.eligibility === "unavailable"
-                      ? ` — ${t(locale, "settings.eligibilityUnavailableShort", { image: imageId })}`
-                      : ""}
-                  </SelectItem>
-                ))}
-            </SelectGroup>
-          </SelectContent>
-        </Select>
+        <ProviderCombobox
+          locale={locale}
+          labelledby="settings-catalog-provider-label"
+          providers={payload.provider_catalog}
+          value={selectedId}
+          onValueChange={setSelectedId}
+          imageId={imageId}
+        />
       </div>
       {selected ? (
         <div className="flex flex-col gap-3">

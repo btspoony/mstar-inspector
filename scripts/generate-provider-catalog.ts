@@ -104,6 +104,27 @@ const BUILTIN_ORDER: BuiltinSpec[] = [
   { id: "ark", sourceKey: "volcengine", label: "Ark", envName: "ARK_API_KEY" },
 ];
 
+/** Display-only grouping of the settings picker (plan 54, AD-547): the
+ *  常用 (common) tier — a fixed-order subset of the builtin ids shown first
+ *  in the Add-provider picker; every other entry renders under the 目录模板
+ *  group. ZERO runner semantics: the BYOK allowlist remains
+ *  PROVIDER_IDS_BUILTIN / PROVIDER_ENV_NAMES — display grouping must never
+ *  gate verify/save/consumer behavior. */
+const COMMON_PROVIDER_IDS: readonly string[] = ["anthropic", "openai", "gemini", "copilot", "xai"];
+
+// Fail loud (mirrors the breadth-collision guard): the display tier must be
+// a duplicate-free subset of the builtin ids — an invalid table breaks
+// generation instead of silently drifting into the committed contract.
+const builtinIds = BUILTIN_ORDER.map((spec) => spec.id);
+if (
+  new Set(COMMON_PROVIDER_IDS).size !== COMMON_PROVIDER_IDS.length ||
+  COMMON_PROVIDER_IDS.some((id) => !builtinIds.includes(id))
+) {
+  throw new Error(
+    `COMMON_PROVIDER_IDS must be a duplicate-free subset of the BUILTIN_ORDER ids — got ${JSON.stringify([...COMMON_PROVIDER_IDS])}`,
+  );
+}
+
 /** Template-tier entries (spec §5): metadata + prefill only — NOT
  *  runner-consumable as env-name entries; the save flow materializes them
  *  through the existing custom-provider machinery (app_custom_providers).
@@ -255,6 +276,7 @@ async function main(): Promise<void> {
 
   const catalogLiteral = JSON.stringify(catalog, null, 2);
   const builtinIdsLiteral = JSON.stringify(BUILTIN_ORDER.map((spec) => spec.id), null, 2);
+  const commonIdsLiteral = JSON.stringify(COMMON_PROVIDER_IDS, null, 2);
   const wrapList = (items: string[]): string => (items.length === 0 ? "(none)" : items.join(", "));
 
   // The auditComment/moduleSource template literals stay at column 0 — their
@@ -294,6 +316,12 @@ async function main(): Promise<void> {
  * \`workers-ai\` template carries the {account_id} base-URL placeholder the
  * save flow substitutes.
  *
+ * Display grouping (plan 54, AD-547): \`PROVIDER_IDS_COMMON\` is a
+ * DISPLAY-ONLY regroup of the settings picker (常用 providers first, the
+ * rest under the 目录模板 group). It carries ZERO runner semantics — the
+ * runner BYOK allowlist remains \`PROVIDER_IDS_BUILTIN\` /
+ * \`PROVIDER_ENV_NAMES\`, and no catalog entry or runner surface reads it.
+ *
 ${auditComment}
  */
 
@@ -332,6 +360,12 @@ export const PROVIDER_CATALOG: Record<string, ProviderCatalogEntry> = ${catalogL
 /** The builtin tier ids in exact mapping order (the dashboard's PROVIDER_IDS
  *  allowlist sequence — plan 24 / AL-24-5, \`ark\` last). */
 export const PROVIDER_IDS_BUILTIN: readonly string[] = Object.freeze(${builtinIdsLiteral});
+
+/** Display-only grouping of the settings picker (plan 54, AD-547): the 常用
+ *  tier shown first in the Add-provider picker — a frozen subset of
+ *  PROVIDER_IDS_BUILTIN in exactly this order. ZERO runner semantics: the
+ *  runner BYOK allowlist remains PROVIDER_IDS_BUILTIN / PROVIDER_ENV_NAMES. */
+export const PROVIDER_IDS_COMMON: readonly string[] = Object.freeze(${commonIdsLiteral});
 
 /** The builtin tier as the legacy env-name mapping (consumer.ts:64
  *  consumption surface — the per-App BYOK allowlist). */

@@ -81,6 +81,9 @@ import {
   type AppConfigBatchFace,
   type AppConfigStore,
 } from "./app-config-store";
+// Plan 54 (AD-547): display-only picker grouping. Never a mechanics input —
+// the runner BYOK allowlist stays PROVIDER_IDS_BUILTIN / PROVIDER_ENV_NAMES.
+import { PROVIDER_IDS_COMMON } from "../contracts/provider-catalog.generated";
 import { enabledSandboxImages, getSandboxImage, sandboxImageHostIds } from "../contracts/sandbox-images";
 import { composeModelOptions, findFailingSelector } from "./model-membership";
 import { PROVIDER_VERIFY_ENDPOINTS, verifyProviderKey, type VerifyFailureReason } from "./provider-verify";
@@ -1501,6 +1504,11 @@ dashboardApp.get("/api/apps/:slug/settings", async (c) => {
       // `verifiable: false` marks the console-only providers (azure-openai /
       // ai-gateway — the old addKeyProviderIds filter); templates verify via
       // the custom probe, so always verifiable.
+      // Plan 54 (AD-547): every entry also carries a display-only
+      // `display_group` ("common" = the 5-entry 常用提供方 tier, "catalog" =
+      // everything else, in both tiers). Array order is unchanged and the
+      // field drives ONLY picker grouping — the add/verify/save mechanics
+      // keep branching on `tier`/`eligibility`, never on `display_group`.
       provider_catalog: [
         ...PROVIDER_IDS.map((id) => {
           const meta = PROVIDER_META[id];
@@ -1514,6 +1522,7 @@ dashboardApp.get("/api/apps/:slug/settings", async (c) => {
             models: [...meta.models],
             verifiable: PROVIDER_VERIFY_ENDPOINTS[id]?.kind !== "unsupported",
             eligibility: ompRuntime ? meta.tier : "unavailable",
+            display_group: PROVIDER_IDS_COMMON.includes(id) ? ("common" as const) : ("catalog" as const),
           };
         }),
         ...Object.entries(PROVIDER_META)
@@ -1527,6 +1536,7 @@ dashboardApp.get("/api/apps/:slug/settings", async (c) => {
             models: [...meta.models],
             verifiable: true,
             eligibility: ompRuntime ? meta.tier : "unavailable",
+            display_group: PROVIDER_IDS_COMMON.includes(id) ? ("common" as const) : ("catalog" as const),
           })),
       ],
       model_role_ids: MODEL_ROLE_IDS,

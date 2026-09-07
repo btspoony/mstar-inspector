@@ -12,6 +12,7 @@ import {
 } from "../../src/dashboard/app-config-store";
 import { composeModelOptions, findFailingSelector, selectorBase } from "../../src/dashboard/model-membership";
 import { PROVIDER_IDS } from "../../src/dashboard/app-config-store";
+import { PROVIDER_IDS_COMMON } from "../../src/contracts/provider-catalog.generated";
 import { SESSION_COOKIE, createSessionValue } from "../../src/dashboard/session";
 import { createUser } from "../../src/dashboard/users";
 import type { Env } from "../../src/worker/env";
@@ -954,5 +955,64 @@ describe("GET settings configured_providers vs provider_catalog (plan 38)", () =
     // "my-custom" is NOT a catalog id — only the configured row exists.
     expect(body.provider_catalog.some((p) => p.id === "my-custom")).toBe(false);
     expect(JSON.stringify(body)).not.toContain(PLAIN_KEY);
+  });
+});
+
+describe("GET settings provider_catalog display_group (plan 54, AD-547)", () => {
+  type CatalogRow = {
+    id: string;
+    tier: string;
+    verifiable: boolean;
+    eligibility: string;
+    display_group: string;
+  };
+
+  async function getCatalog(env: Env): Promise<CatalogRow[]> {
+    const res = await getJson("/dashboard/api/apps/mallorys-app/settings", "mallory", env);
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { provider_catalog: CatalogRow[] };
+    return body.provider_catalog;
+  }
+
+  test("every entry carries display_group; the common group is exactly the 5 frozen ids", async () => {
+    const { db } = await seededWorld();
+    const catalog = await getCatalog(makeEnv(db));
+    expect(catalog.length).toBeGreaterThan(0);
+    // (a) every entry carries the field with a valid word only.
+    for (const row of catalog) {
+      expect(row.display_group === "common" || row.display_group === "catalog").toBe(true);
+    }
+    // (b) common = exactly PROVIDER_IDS_COMMON, no more, no fewer.
+    expect(catalog.filter((p) => p.display_group === "common").map((p) => p.id)).toEqual([...PROVIDER_IDS_COMMON]);
+  });
+
+  test("builtin non-common entries are catalog-grouped while keeping tier and eligibility semantics", async () => {
+    const { db } = await seededWorld();
+    const catalog = await getCatalog(makeEnv(db));
+    // (c) the original builtin rows that fell out of the common tier keep
+    // their builtin tier (the mechanics key) and omp eligibility.
+    for (const id of ["azure-openai", "groq", "mistral", "ark"]) {
+      expect(catalog.find((p) => p.id === id)).toMatchObject({
+        tier: "builtin",
+        eligibility: "builtin",
+        display_group: "catalog",
+      });
+    }
+    // The console-only verifiable flag is untouched by the regroup.
+    expect(catalog.find((p) => p.id === "azure-openai")?.verifiable).toBe(false);
+    expect(catalog.find((p) => p.id === "groq")?.verifiable).toBe(true);
+  });
+
+  test("template entries are all catalog-grouped; the response array order is unchanged", async () => {
+    const { db } = await seededWorld();
+    const catalog = await getCatalog(makeEnv(db));
+    // (d) template tier → catalog group, uniformly.
+    expect(catalog.filter((p) => p.tier === "template").every((p) => p.display_group === "catalog")).toBe(true);
+    // Red line: the array order contract survives — builtin ids first in
+    // PROVIDER_IDS order, then the template tier (server does NOT regroup;
+    // grouping is a client-side display concern).
+    const builtinCount = catalog.filter((p) => p.tier === "builtin").length;
+    expect(catalog.slice(0, builtinCount).map((p) => p.id)).toEqual([...PROVIDER_IDS]);
+    expect(catalog.slice(builtinCount).every((p) => p.tier === "template")).toBe(true);
   });
 });
