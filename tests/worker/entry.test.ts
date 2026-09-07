@@ -22,6 +22,7 @@ mock.module("@cloudflare/sandbox", () => ({
 }));
 
 const { default: worker, Sandbox } = await import("../../src/worker/entry");
+import { APP_VERSION } from "../../src/version";
 import type { Env } from "../../src/worker/env";
 
 function makeEnv(overrides: Partial<Env> = {}): Env {
@@ -43,7 +44,11 @@ describe("worker entry (deploy)", () => {
   test("re-exports the fetch handler (healthz)", async () => {
     const res = await worker.fetch(new Request("https://worker.local/healthz"), makeEnv());
     expect(res.status).toBe(200);
-    expect(await res.json()).toEqual({ ok: true });
+    // Field-set assertion (plan 51): `ok:true` contract unchanged, `version`
+    // additive from the generated single source with the `v` prefix.
+    const body = (await res.json()) as { ok: boolean; version: string };
+    expect(body.ok).toBe(true);
+    expect(body.version).toBe(`v${APP_VERSION}`);
   });
 });
 

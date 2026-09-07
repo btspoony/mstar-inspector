@@ -7,7 +7,9 @@
  * resolves; the SDK import point stays `src/pipeline/sandbox.ts`.
  *
  * Routes:
- *   GET /healthz         → 200 {"ok":true} (readiness probe for the orchestrator)
+ *   GET /healthz         → 200 {"ok":true,"version":"vX.Y.Z"} (readiness
+ *                          probe for the orchestrator; same shape as the
+ *                          worker face — plan 51, generated src/version.ts)
  *   GET /smoke           → T1 falsification: getSandbox → exec gh pr diff →
  *                          destroy. Path 2 falls back to a git clone + diff
  *                          (token injected via git env config, never in the
@@ -30,6 +32,7 @@
 import { runnerCommand, writeJsonCommand } from "./gitops";
 import { getSandbox, Sandbox, type ReviewSandbox, type SandboxBinding } from "./sandbox";
 import { DEFAULT_SANDBOX_IMAGE_ID, getSandboxImage } from "../contracts/sandbox-images";
+import { APP_VERSION } from "../version";
 import { parseReviewOutput } from "../review/schema";
 
 export { Sandbox };
@@ -57,7 +60,8 @@ export default {
   async fetch(request: Request, env: SmokeEnv): Promise<Response> {
     const url = new URL(request.url);
     if (url.pathname === "/healthz") {
-      return Response.json({ ok: true });
+      // Plan 51: same additive version field as the worker face.
+      return Response.json({ ok: true, version: `v${APP_VERSION}` });
     }
     if (url.pathname === "/smoke-review") {
       return runReviewSmoke(env);

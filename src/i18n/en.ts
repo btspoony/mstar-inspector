@@ -367,6 +367,14 @@ export const en = {
       "The sandbox runtime image that executes this App's reviews. Reviews read their model configuration at run time — nothing App-specific is baked into an image.",
     runtimeImageValue: "This App's reviews run on the {id} runtime image.",
     saveRuntimeImage: "Save runtime image",
+    /**
+     * Plan 51 T3: deployment version footer. `{version}` carries the
+     * v-prefixed display form (`v${APP_VERSION}`) — the same shape as the
+     * /healthz field and release tags.
+     */
+    footer: {
+      version: "Version {version}",
+    },
   },
   manifest: {
     title: "Create GitHub App",

@@ -329,6 +329,11 @@ export const zhCN: Dictionary = {
       "执行此 App 审查的沙盒运行时镜像。审查在运行时读取模型配置 — 任何 App 特定配置都不会烘焙进镜像。",
     runtimeImageValue: "此 App 的审查运行在 {id} 运行时镜像上。",
     saveRuntimeImage: "保存运行时镜像",
+    // Plan 51 T3：部署版本页脚。{version} 为带 v 前缀的展示形（v${APP_VERSION}），
+    // 与 /healthz 字段及 release tag 同形。
+    footer: {
+      version: "版本 {version}",
+    },
   },
   manifest: {
     title: "创建 GitHub App",

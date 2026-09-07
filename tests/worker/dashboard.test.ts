@@ -19,6 +19,7 @@ import { Database } from "bun:sqlite";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import worker from "../../src/worker/index";
+import { APP_VERSION } from "../../src/version";
 import { exchangeCodeForToken, fetchGitHubUser } from "../../src/dashboard/oauth";
 import type { Env } from "../../src/worker/env";
 import {
@@ -2194,10 +2195,14 @@ describe("SSR views honor the stored theme (plan 45 T8, F-13)", () => {
 });
 
 describe("existing routes unaffected", () => {
-  test("GET /healthz still returns 200 ok", async () => {
+  test("GET /healthz still returns 200 ok (plus the plan-51 version field)", async () => {
     const res = await worker.fetch(new Request("https://worker.local/healthz"), makeEnv());
     expect(res.status).toBe(200);
-    expect(await res.json()).toEqual({ ok: true });
+    // Field-set assertion (plan 51): `ok:true` contract unchanged, `version`
+    // additive from the generated single source with the `v` prefix.
+    const body = (await res.json()) as { ok: boolean; version: string };
+    expect(body.ok).toBe(true);
+    expect(body.version).toBe(`v${APP_VERSION}`);
   });
 
   test("bare POST /webhook is 404 — the legacy face is retired and the dashboard mount does not intercept it", async () => {

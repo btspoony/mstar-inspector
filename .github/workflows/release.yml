@@ -1,0 +1,166 @@
+name: Release
+
+# PR-driven release. Merging a `release vX.Y.Z` PR (opened by the Release prep
+# workflow) runs the whole release inline on the pull_request closed event:
+# validate → typecheck + test + build → annotated tag on the merge commit →
+# bilingual GitHub Release. Deploying stays fully decoupled — the same merge
+# triggers the Deploy workflow through the ordinary (human-attributed) main
+# push; this workflow never deploys.
+#
+# AD-5 (GITHUB_TOKEN event suppression): release PRs opened by the bot do not
+# run ci.yml, so the Release prep workflow's validate/typecheck/build steps
+# are that PR's verification face — and this workflow re-verifies everything
+# on the merge commit before tagging (double insurance).
+#
+# Prereleases: a version containing `-` (e.g. 1.1.0-alpha.0) creates the
+# GitHub Release flagged as a prerelease.
+#
+# No secrets are required (the tag and the Release are created with the
+# workflow's GITHUB_TOKEN).
+#
+# Deploy-evidence reconciliation (plan 52): after the Release is created, one
+# extra step rebuilds the body from the workspace notes file plus a
+# deploy-evidence section and rewrites the Release with a single idempotent
+# `gh release edit --notes-file` (AD-3 — no live read-modify-write). The
+# section records the Worker Version ID + image digest + run link of the
+# Deploy run for the merge commit, or states its absence explicitly. Evidence
+# is a recording surface, never a gate: it can neither postpone the tag nor
+# fail this workflow.
+#
+# Action pin convention: actions NEW to this repo are SHA-pinned
+# (softprops/action-gh-release below, byte-identical to the sibling repo);
+# actions already used by ci.yml/deploy.yml (actions/checkout,
+# oven-sh/setup-bun) keep the repo's tag-pin convention.
+
+on:
+  pull_request:
+    types: [closed]
+    branches: [main]
+
+permissions:
+  contents: write   # push the tag + create the GitHub Release (no id-token:write — no npm publish, AD-4)
+  actions: read     # `gh run list` / `gh run download` of the deploy-evidence artifact (plan 52) — nothing else added
+
+jobs:
+  release:
+    if: >
+      github.event.pull_request.merged == true
+      && startsWith(github.event.pull_request.title, 'release v')
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout merge commit
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.merge_commit_sha }}
+          fetch-depth: 0   # tag idempotence check needs existing tags
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.0
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Resolve version
+        id: ver
+        run: |
+          VERSION="$(jq -er .version package.json)"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+
+      - name: Validate release version
+        env:
+          VERSION: ${{ steps.ver.outputs.version }}
+        run: bun run release:validate -- "v${VERSION}"
+
+      - name: Typecheck + test + build
+        run: |
+          bun run typecheck
+          bun test
+          bun run build:spa
+
+      - name: Configure git identity
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Create + push tag (idempotent)
+        env:
+          VERSION: ${{ steps.ver.outputs.version }}
+        run: |
+          set -euo pipefail
+          TAG="v${VERSION}"
+          if git rev-parse "$TAG" >/dev/null 2>&1; then
+            echo "Tag $TAG already exists; skipping tag creation."
+            exit 0
+          fi
+          git tag -a -m "Release ${TAG}" "$TAG"
+          git push origin "$TAG"
+
+      # Notes composition contract (plan 50 §Interfaces): EN section, blank
+      # line, `---`, blank line, CN section. Plan 52 appends its deploy-
+      # evidence section after this step with the same separator, rebuilding
+      # the body from this $RUNNER_TEMP file and rewriting the Release with a
+      # single `gh release edit --notes-file` — tag/Release creation never
+      # waits for evidence.
+      - name: Extract bilingual release notes
+        id: changelog
+        env:
+          VERSION: ${{ steps.ver.outputs.version }}
+        run: |
+          NOTES_FILE="${RUNNER_TEMP}/release-notes-${VERSION}.md"
+          # extract emits the trimmed body with no trailing newline, so the
+          # separator needs \n\n to produce: EN, blank line, ---, blank line, CN.
+          {
+            bun run scripts/extract-changelog-section.ts "${VERSION}" --lang en
+            printf '\n\n---\n\n'
+            bun run scripts/extract-changelog-section.ts "${VERSION}" --lang cn
+          } > "$NOTES_FILE"
+          echo "notes_file=${NOTES_FILE}" >> "$GITHUB_OUTPUT"
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
+        with:
+          tag_name: v${{ steps.ver.outputs.version }}
+          name: v${{ steps.ver.outputs.version }}
+          body_path: ${{ steps.changelog.outputs.notes_file }}
+          draft: false
+          prerelease: ${{ contains(steps.ver.outputs.version, '-') }}
+
+      # Plan 52 (AD-3): rebuild the complete body in the workspace — the
+      # bilingual notes file above, this `---` separator (same form as the
+      # EN/CN one), then the collector's section — and rewrite the Release
+      # once. Never read-modify-write the live body.
+      #
+      # This step must not be able to fail the release (evidence is a
+      # recording surface, never a gate): the collector exits 0 for every
+      # outcome by design, and continue-on-error absorbs everything else —
+      # a `gh release edit` failure echoes ::error and exits 1, so the STEP
+      # goes visibly red while the JOB stays green. Re-running the workflow
+      # converges by itself: the extract step rebuilds the notes file from
+      # scratch and the same-body rewrite is idempotent.
+      #
+      # Timeout budget (QC W-F001): the step's own `timeout-minutes` bounds
+      # the wait so it can never starve the pre-steps of the job's 30-min
+      # budget — 15 min (collector's bounded-wait default) + margin for the
+      # artifact download + the single `gh release edit` + bun startup
+      # = 18 min, leaving ≥12 min for everything above. In the extreme case
+      # where slow pre-steps + this budget still hit the job cap, the run
+      # goes red without losing the tag/Release; a rerun converges (runbook).
+      - name: Append deploy evidence to release notes
+        timeout-minutes: 18
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ steps.ver.outputs.version }}
+          MERGE_SHA: ${{ github.event.pull_request.merge_commit_sha }}
+          NOTES_FILE: ${{ steps.changelog.outputs.notes_file }}
+        run: |
+          set -euo pipefail
+          printf '\n\n---\n\n' >> "$NOTES_FILE"
+          bun run scripts/collect-deploy-evidence.ts >> "$NOTES_FILE"
+          if ! gh release edit "v${VERSION}" --notes-file "$NOTES_FILE"; then
+            echo "::error::deploy-evidence append failed — Release notes left without the evidence section; re-run the Release workflow to converge (idempotent)"
+            exit 1   # step visibly red; continue-on-error keeps the job green
+          fi
