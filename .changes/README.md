@@ -11,7 +11,8 @@ assembles into `CHANGELOG.md` / `CHANGELOG_CN.md` at release time.
    `## [Unreleased]`) — those files are assembled at release time.
 2. **At release time**, `bun run release:prepare -- <version>` (or the **Release prep**
    GitHub Actions workflow) reads every `unreleased/*.md`, inserts a `## [<version>] - <date>`
-   section into both changelogs, bumps the version surface (`package.json`), and **moves**
+   section into both changelogs, bumps every version surface (`package.json` and the
+   generated `src/version.ts` — one `VERSION_SURFACES` list), and **moves**
    the consumed fragments into `archive/<version>/`.
 3. The prepared changes ship as a `release vX.Y.Z` PR; merging it tags the verified merge
    commit and publishes a bilingual GitHub Release. The cut walkthrough (Actions steps,

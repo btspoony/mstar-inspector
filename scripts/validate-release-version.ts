@@ -18,8 +18,9 @@
  *      push converges: validate passes -> tag step skips -> Release creation
  *      proceeds).
  *
- * Plan 51 note: when `src/version.ts` joins VERSION_SURFACES, surface
- * alignment covers it automatically (per-kind read in release-surfaces.ts).
+ * Plan 51: `src/version.ts` is a VERSION_SURFACES entry (`kind: "ts-const"`),
+ * so surface alignment covers `package.json#version === APP_VERSION` through
+ * the shared per-kind read in release-surfaces.ts.
  */
 import { join } from "node:path";
 import {

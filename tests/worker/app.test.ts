@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import worker from "../../src/worker/index";
+import { APP_VERSION } from "../../src/version";
 import type { Env } from "../../src/worker/env";
 
 /**
@@ -22,9 +23,14 @@ function makeEnv(overrides: Partial<Env> = {}): Env {
 }
 
 describe("worker fetch entry", () => {
-  test("GET /healthz returns 200 ok", async () => {
+  test("GET /healthz returns 200 ok with the version field (plan 51)", async () => {
     const res = await worker.fetch(new Request("https://worker.local/healthz"), makeEnv());
     expect(res.status).toBe(200);
-    expect(await res.json()).toEqual({ ok: true });
+    // Field-set assertion (plan 51): `ok:true` contract unchanged, `version`
+    // is additive and rides the generated single source with the tag-shaped
+    // `v` prefix — future additive fields do not break this pin.
+    const body = (await res.json()) as { ok: boolean; version: string };
+    expect(body.ok).toBe(true);
+    expect(body.version).toBe(`v${APP_VERSION}`);
   });
 });

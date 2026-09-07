@@ -8,6 +8,7 @@
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
+import { renderVersionTs } from "../../scripts/release-surfaces";
 
 export function makeTempRoot(): string {
   return mkdtempSync(join(tmpdir(), "mstar-release-scripts-"));
@@ -25,6 +26,11 @@ export function writeAt(root: string, rel: string, content: string): string {
   return path;
 }
 
+/** Write the `src/version.ts` surface (canonical template, plan 51). */
+export function writeVersionTs(root: string, version: string): string {
+  return writeAt(root, "src/version.ts", renderVersionTs(version));
+}
+
 /** Minimal bilingual repo layout the prepare flow operates on. */
 export function setupReleaseRepo(root: string, current = "0.1.0"): void {
   writeAt(
@@ -37,6 +43,7 @@ export function setupReleaseRepo(root: string, current = "0.1.0"): void {
 }
 `,
   );
+  writeVersionTs(root, current);
   writeAt(root, "CHANGELOG.md", "# Changelog\n\nIntro.\n\n## [Unreleased]\n");
   writeAt(root, "CHANGELOG_CN.md", "# 更新日志\n\n简介。\n\n## [Unreleased]\n");
   writeAt(

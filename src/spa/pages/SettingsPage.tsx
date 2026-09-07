@@ -1,6 +1,7 @@
 import { Fragment, useEffect, useRef, useState } from "react";
 import { Plus } from "lucide-react";
 import { isDictionaryKey, t, type DictionaryKey } from "../../i18n";
+import { APP_VERSION } from "../../version";
 import { Button } from "@/components/ui/button";
 import { Card, CardAction, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import {
@@ -161,6 +162,14 @@ export function SettingsPage({ boot, slug }: { boot: SpaBoot; slug: string }) {
       {state === "ok" && payload ? (
         <SettingsView locale={locale} payload={payload} groups={groups} onReload={load} />
       ) : null}
+      {/* Version footer (plan 51): the deployment's current release from the
+          generated src/version.ts surface — the same `vX.Y.Z` form as the
+          /healthz field and release tags, so dashboard, health endpoint and
+          tag reconcile by eye. Static build-time value: it renders in every
+          page state, independent of the settings payload. */}
+      <p className="text-sm text-muted-foreground">
+        {t(locale, "settings.footer.version", { version: `v${APP_VERSION}` })}
+      </p>
     </div>
   );
 }

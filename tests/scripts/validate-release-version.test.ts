@@ -1,13 +1,15 @@
 /**
- * `scripts/validate-release-version.ts` unit tests (plan 50 T2.2 / D4 / D11).
+ * `scripts/validate-release-version.ts` unit tests (plan 50 T2.2 / D4 / D11;
+ * plan 51 T2 adds the src/version.ts surface + drift case).
  *
  * Pins the release gate against temp repos (real `git init` where tag state
  * matters):
  *
  * - tag form: `v`-prefixed accepted and stripped, non-semver rejected early;
  * - surface alignment: reads the SAME VERSION_SURFACES list prepare bumps
- *   (json kind -> `version` field), MISSING on absent file, MISMATCH on
- *   stale version;
+ *   (json kind -> `version` field; ts-const kind -> APP_VERSION), MISSING on
+ *   absent file, MISMATCH on stale version — including the plan 51 drift
+ *   case (package.json bumped while src/version.ts is stale);
  * - tag gate (self-heal, QC A1): `git rev-parse refs/tags/v<version>` — tag
  *   at a different commit fails, tag already at HEAD passes (post-tag rerun
  *   converges: validate -> tag step skips), absent tag passes, non-repo
@@ -22,7 +24,7 @@ import {
   tagToVersion,
   validateReleaseVersion,
 } from "../../scripts/validate-release-version";
-import { disposeTempRoot, git, makeTempRoot, writeAt } from "./helpers";
+import { disposeTempRoot, git, makeTempRoot, writeAt, writeVersionTs } from "./helpers";
 
 /** Init a git repo with one commit so lightweight tags resolve. */
 function initGitRepo(root: string): void {
@@ -56,15 +58,17 @@ describe("tag form", () => {
 });
 
 describe("validateReleaseVersion gate", () => {
-  test("aligned surface + free tag passes", async () => {
+  test("both surfaces aligned + free tag passes", async () => {
     const root = makeTempRoot();
     try {
       writeAt(root, "package.json", `{\n  "version": "1.0.0"\n}\n`);
+      writeVersionTs(root, "1.0.0");
       initGitRepo(root);
 
       const result = await validateReleaseVersion("v1.0.0", root);
       expect(result.ok).toBe(true);
       expect(result.lines).toContain("OK package.json: 1.0.0");
+      expect(result.lines).toContain("OK src/version.ts: 1.0.0");
       expect(result.lines).toContain("OK tag: v1.0.0 does not exist yet");
     } finally {
       disposeTempRoot(root);
@@ -75,23 +79,44 @@ describe("validateReleaseVersion gate", () => {
     const root = makeTempRoot();
     try {
       writeAt(root, "package.json", `{\n  "version": "0.1.0"\n}\n`);
+      writeVersionTs(root, "1.0.0");
       initGitRepo(root);
 
       const result = await validateReleaseVersion("v1.0.0", root);
       expect(result.ok).toBe(false);
       expect(result.lines).toContain("MISMATCH package.json (package.json): tag v1.0.0, file has 0.1.0");
+      expect(result.lines).toContain("OK src/version.ts: 1.0.0");
     } finally {
       disposeTempRoot(root);
     }
   });
 
-  test("absent surface file fails with MISSING", async () => {
+  test("drift: package.json bumped while src/version.ts is stale fails with a clear diagnostic (plan 51 AC3)", async () => {
+    const root = makeTempRoot();
+    try {
+      writeAt(root, "package.json", `{\n  "version": "1.0.0"\n}\n`);
+      writeVersionTs(root, "0.1.0"); // stale: the bump missed this surface
+      initGitRepo(root);
+
+      const result = await validateReleaseVersion("v1.0.0", root);
+      expect(result.ok).toBe(false);
+      expect(result.lines).toContain("OK package.json: 1.0.0");
+      expect(result.lines).toContain(
+        "MISMATCH src/version.ts (src/version.ts): tag v1.0.0, file has 0.1.0",
+      );
+    } finally {
+      disposeTempRoot(root);
+    }
+  });
+
+  test("absent surface files fail with MISSING", async () => {
     const root = makeTempRoot();
     try {
       initGitRepo(root);
       const result = await validateReleaseVersion("v1.0.0", root);
       expect(result.ok).toBe(false);
       expect(result.lines).toContain("MISSING package.json");
+      expect(result.lines).toContain("MISSING src/version.ts");
     } finally {
       disposeTempRoot(root);
     }
@@ -101,6 +126,7 @@ describe("validateReleaseVersion gate", () => {
     const root = makeTempRoot();
     try {
       writeAt(root, "package.json", `{\n  "name": "t"\n}\n`);
+      writeVersionTs(root, "1.0.0");
       initGitRepo(root);
       const result = await validateReleaseVersion("v1.0.0", root);
       expect(result.ok).toBe(false);
@@ -110,10 +136,27 @@ describe("validateReleaseVersion gate", () => {
     }
   });
 
+  test("src/version.ts without an APP_VERSION export reads as <missing>", async () => {
+    const root = makeTempRoot();
+    try {
+      writeAt(root, "package.json", `{\n  "version": "1.0.0"\n}\n`);
+      writeAt(root, "src/version.ts", "export const OTHER = 1;\n");
+      initGitRepo(root);
+      const result = await validateReleaseVersion("v1.0.0", root);
+      expect(result.ok).toBe(false);
+      expect(result.lines).toContain(
+        "MISMATCH src/version.ts (src/version.ts): tag v1.0.0, file has <missing>",
+      );
+    } finally {
+      disposeTempRoot(root);
+    }
+  });
+
   test("tag at a different commit fails the gate (double-use of a published version)", async () => {
     const root = makeTempRoot();
     try {
       writeAt(root, "package.json", `{\n  "version": "1.0.0"\n}\n`);
+      writeVersionTs(root, "1.0.0");
       initGitRepo(root);
       git(root, "tag", "-a", "v1.0.0", "-m", "release");
       // a newer commit lands after the tag: the tag no longer points at HEAD
@@ -135,6 +178,7 @@ describe("validateReleaseVersion gate", () => {
     const root = makeTempRoot();
     try {
       writeAt(root, "package.json", `{\n  "version": "1.0.0"\n}\n`);
+      writeVersionTs(root, "1.0.0");
       initGitRepo(root);
       git(root, "tag", "-a", "v1.0.0", "-m", "release"); // single commit == HEAD
 
@@ -152,6 +196,7 @@ describe("validateReleaseVersion gate", () => {
     const root = makeTempRoot();
     try {
       writeAt(root, "package.json", `{\n  "version": "1.1.0"\n}\n`);
+      writeVersionTs(root, "1.1.0");
       initGitRepo(root);
       git(root, "tag", "-a", "v1.0.0", "-m", "release");
 
