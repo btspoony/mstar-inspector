@@ -47,6 +47,35 @@ const JWT_CLOCK_SKEW_SEC = 60;
 
 const enc = new TextEncoder();
 
+/**
+ * Lazy-refresh budget (AD-531 lock, plan 53): a cached profile is served as-is
+ * for 24h since `github_metadata_synced_at`; past that (or when the column is
+ * NULL — never synced) the settings read path refreshes once. This bounds the
+ * egress to ≤1 fetch/App/day and, with the zero-retry fetch discipline below,
+ * is the whole refresh-policy surface — no cron/queue exists.
+ */
+export const GITHUB_METADATA_TTL_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * Whether the cached GitHub profile needs a lazy refresh (plan 53 A4). The
+ * column is SQLite `datetime('now')` TEXT — `YYYY-MM-DD HH:MM:SS` in UTC —
+ * which `Date.parse` alone would read as LOCAL time, so the space form is
+ * normalized to ISO-8601 UTC before parsing (the last_webhook_at TEXT
+ * convention is UTC everywhere). Anything unreadable (NULL, empty, garbage,
+ * a future timestamp) is stale: the worst case is one doomed refresh attempt,
+ * never a wrong "fresh" verdict. Pure — the route pins the behavior; no DB.
+ */
+export function isGithubMetadataStale(
+  syncedAt: string | null | undefined,
+  nowMs: number = Date.now(),
+): boolean {
+  if (typeof syncedAt !== "string" || syncedAt.length === 0) return true;
+  const parsedMs = Date.parse(`${syncedAt.replace(" ", "T")}Z`);
+  if (Number.isNaN(parsedMs)) return true;
+  const ageMs = nowMs - parsedMs;
+  return ageMs < 0 || ageMs >= GITHUB_METADATA_TTL_MS;
+}
+
 /** Standard base64 → bytes (PEM body decoding; the private-key.ts helper). */
 function base64ToBytes(b64: string): Uint8Array<ArrayBuffer> {
   return Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));

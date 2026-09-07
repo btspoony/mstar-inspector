@@ -22,7 +22,7 @@
  * tests/worker/entry.test.ts precedent) — no test touches the real API.
  */
 import { afterEach, describe, expect, test } from "bun:test";
-import { fetchAppMetadata } from "../../src/dashboard/github-app-metadata";
+import { fetchAppMetadata, GITHUB_METADATA_TTL_MS, isGithubMetadataStale } from "../../src/dashboard/github-app-metadata";
 
 // --- test RSA key material (generated per test; no fixtures) ---
 
@@ -294,5 +294,38 @@ describe("fetchAppMetadata (plan 53 T1.2, AD-531)", () => {
         githubAvatarUrl: null,
       },
     });
+  });
+});
+
+describe("isGithubMetadataStale (plan 53 A4 TTL — the settings read path's refresh gate)", () => {
+  // Fixed clock; `utcText` formats a UTC instant as the SQLite
+  // `datetime('now')` TEXT convention (`YYYY-MM-DD HH:MM:SS`, UTC).
+  const NOW_MS = Date.UTC(2026, 8, 8, 12, 0, 0);
+  const utcText = (ms: number): string => new Date(ms).toISOString().slice(0, 19).replace("T", " ");
+
+  test("NULL / empty / garbage / wrong-type synced_at is stale (refresh attempted, never a wrong 'fresh')", () => {
+    expect(isGithubMetadataStale(null, NOW_MS)).toBe(true);
+    expect(isGithubMetadataStale(undefined, NOW_MS)).toBe(true);
+    expect(isGithubMetadataStale("", NOW_MS)).toBe(true);
+    expect(isGithubMetadataStale("not a timestamp", NOW_MS)).toBe(true);
+    expect(isGithubMetadataStale(12 as unknown as string, NOW_MS)).toBe(true);
+  });
+
+  test("the 24h boundary: inside TTL is fresh, past it is stale", () => {
+    expect(GITHUB_METADATA_TTL_MS).toBe(24 * 60 * 60 * 1000);
+    expect(isGithubMetadataStale(utcText(NOW_MS - GITHUB_METADATA_TTL_MS + 60_000), NOW_MS)).toBe(false);
+    expect(isGithubMetadataStale(utcText(NOW_MS - GITHUB_METADATA_TTL_MS - 60_000), NOW_MS)).toBe(true);
+    // At exactly the TTL the cache is expired (the window is [0, 24h)).
+    expect(isGithubMetadataStale(utcText(NOW_MS - GITHUB_METADATA_TTL_MS), NOW_MS)).toBe(true);
+  });
+
+  test("the space-form TEXT is parsed as UTC (the datetime('now') convention)", () => {
+    // 23h old in UTC → fresh; if the space form were read as local time the
+    // wall-clock shift would flip the verdict on any non-UTC machine.
+    const twentyThreeHoursOld = utcText(NOW_MS - 23 * 60 * 60 * 1000);
+    expect(isGithubMetadataStale(twentyThreeHoursOld, NOW_MS)).toBe(false);
+    expect(twentyThreeHoursOld).toMatch(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/);
+    // A future timestamp is stale (doomed refresh attempt, never trusted).
+    expect(isGithubMetadataStale(utcText(NOW_MS + 60_000), NOW_MS)).toBe(true);
   });
 });
