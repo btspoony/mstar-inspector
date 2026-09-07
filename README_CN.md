@@ -31,18 +31,70 @@ GitHub webhook → POST /webhook/:appSlug（验签 + 分类）→ Queue → Cons
 
 ## 快速开始
 
-> 前置：[Cloudflare](https://developers.cloudflare.com/workers/) 账号（Workers + D1 + Queues）、GitHub 账号、本地
+两条部署路径——按你的身份选择：
+
+- **自托管自己的副本**（fork / 私有部署）→ **路径 A**：把某个定版 release 部署到你自己的 Cloudflare 账号。
+- **参与本仓库开发** → **路径 B**：合并到 `main` 自动部署 staging。
+
+> 前置（两条路径相同）：[Cloudflare](https://developers.cloudflare.com/workers/) 账号（Workers + D1 + Queues + Containers）、GitHub 账号、本地
 > [Bun](https://bun.sh) ≥ 1.3.14。完整 runbook——含 Cloudflare 资源初始化与 D1 迁移——见
 > [`docs/deploy.md`](docs/deploy.md)。
 
-1. **部署 Worker** —— 合并到 `main` 即通过 [Deploy workflow](.github/workflows/deploy.yml) 自动部署（secrets 注入 → D1 迁移 → `wrangler deploy` → 冒烟 → digest 记录）。手工/本地部署：
+### 路径 A —— 自托管定版副本
+
+1. **锁定定版**——发布的版本以 tag 形式提供（见 [Releases 页面](https://github.com/btspoony/mstar-inspector/releases)）；部署某个 tag 即部署该份源码，sandbox 容器镜像也会在该 checkout 上于部署时重新构建：
+
+   ```bash
+   git clone https://github.com/btspoony/mstar-inspector && cd mstar-inspector
+   git checkout <tag>          # 例如 v1.0.0
+   bun install
+   ```
+
+2. **创建你自己的 Cloudflare 资源**并让配置指向它们——`wrangler.jsonc` 里提交的两个 id 是本仓库的，换成你自己的：
+
+   ```bash
+   wrangler queues create review-queue
+   wrangler queues create review-dlq
+   wrangler kv namespace create IDEMPOTENCY_KV   # 新 id → wrangler.jsonc kv_namespaces
+   wrangler d1 create mstar-inspector-db         # 新 id → wrangler.jsonc d1_databases
+   ```
+
+3. **应用 D1 迁移**：
+
+   ```bash
+   wrangler d1 migrations apply mstar-inspector-db --remote
+   ```
+
+4. **设置四个 Worker secret**（Worker 层命名，直接设置——不经过 GitHub Secrets；两个随机值用 `openssl rand -base64 32` 生成；OAuth App 为 GitHub **OAuth App**，回调地址 `{origin}/dashboard/oauth/callback`）。审查用的 GitHub App 不是 Worker secret——后面通过 dashboard 按 App 注册：
+
+   ```bash
+   wrangler secret put GITHUB_OAUTH_CLIENT_ID
+   wrangler secret put GITHUB_OAUTH_CLIENT_SECRET
+   wrangler secret put DASHBOARD_SESSION_SECRET
+   wrangler secret put DASHBOARD_ENCRYPTION_KEY
+   ```
+
+5. **构建、部署、验证**——`/healthz` 会回报部署的版本，可直接确认线上跑的就是你 pin 的 tag：
+
+   ```bash
+   bun run build:spa        # 必需——SPA 产物不进 git
+   wrangler deploy          # 同时构建/推送 sandbox 容器镜像
+   curl https://<your-worker>/healthz   # {"ok":true,"version":"vX.Y.Z"}
+   ```
+
+6. 继续**下方第 3 步**（登录并注册你的 GitHub App）。
+
+### 路径 B —— 本仓库的 staging（维护者）
+
+1. **部署** —— 合并到 `main` 即通过 [Deploy workflow](.github/workflows/deploy.yml) 自动部署（secrets 注入 → D1 迁移 → `wrangler deploy` → 冒烟 → digest 记录）。手工/本地部署：
 
    ```bash
    bun install
-   wrangler deploy        # 应用 D1 迁移并部署；细节见 docs/deploy.md
+   bun run build:spa
+   wrangler deploy
    ```
 
-2. **设置 dashboard 密钥**（四个；审查凭据不放在 Worker 层）—— 在 **staging environment**（Settings → Environments → `staging` → Secrets）配置，Deploy workflow 在每次部署时注入 Worker：
+2. **设置 dashboard 密钥**（四个；审查凭据不放在 Worker 层）—— 在 **staging environment**（Settings → Environments → `staging` → Secrets）配置，Deploy workflow 在每次部署时注入 Worker。这套 staging-environment 映射只属于本仓库的自动化——自托管副本（路径 A）直接在 Worker 上设置同样的四个值：
 
    ```bash
    # 本地生成值，然后添加到 staging environment：
@@ -55,6 +107,8 @@ GitHub webhook → POST /webhook/:appSlug（验签 + 分类）→ Queue → Cons
    #   GITHUB_OAUTH_CLIENT_SECRET 写入 Worker。
    #   OAUTH_CLIENT_ID 是 variable —— client id 非敏感；OAUTH_CLIENT_SECRET 是 secret）
    ```
+
+### 然后（两条路径相同）
 
 3. **登录并注册 GitHub App** —— 访问 `https://<your-worker>/dashboard`，用 GitHub 登录，走 **Register App**
    manifest 流程。它会在你的账号上创建 GitHub App（per-App webhook URL 形如
@@ -101,9 +155,11 @@ GitHub webhook → POST /webhook/:appSlug（验签 + 分类）→ Queue → Cons
 
 - **紧急总闸**：per-App `review_enabled`（dashboard 的 Pause/Resume）是审查主控。Worker 变量 `REVIEW_ENABLED`
   仅当精确为 `"false"`（大小写敏感、不 trim）时才全平台停审；未设置 / `""` / `"true"` / 其它值 → 由 per-App 决定。保持未设置。
-- **部署已自动化**：合并到 `main` 即运行 [Deploy workflow](.github/workflows/deploy.yml) —— secrets 注入、D1 迁移、
+- **部署已自动化（本仓库）**：合并到 `main` 即运行 [Deploy workflow](.github/workflows/deploy.yml) —— secrets 注入、D1 迁移、
   `wrangler deploy`、部署后冒烟与 image digest 记录。失败即标红停止（无自动回滚）；失败语义与手工回滚路径见
-  [`docs/deploy.md`](docs/deploy.md)。
+  [`docs/deploy.md`](docs/deploy.md)。自托管自己的副本？你手动部署（或自建流水线）——见[路径 A](#路径-a--自托管定版副本)。
+- **发版已定版化**：发版通过合并 `release vX.Y.Z` PR 完成，自动打 tag 并发布带双语 changelog 与部署证据的 GitHub Release——见
+  [`docs/release.md`](docs/release.md) 与 [Releases 页面](https://github.com/btspoony/mstar-inspector/releases)。
 - **Secrets 清单、部署步骤、回滚、完整 Multi-App go-live checklist** → [`docs/deploy.md`](docs/deploy.md)。
 
 ## 本地开发
@@ -123,6 +179,7 @@ bun test
 | 文档 | 内容 |
 |------|------|
 | [`docs/deploy.md`](docs/deploy.md) | 完整部署 runbook：Cloudflare 资源、D1 迁移、secrets 清单、部署步骤、Multi-App go-live checklist、回滚 |
+| [`docs/release.md`](docs/release.md) | 发版文档：切定版（片段 changelog → `release vX` PR → tag + GitHub Release）、首切 live 验收 checklist、失败与恢复路径 |
 
 ## 许可
 

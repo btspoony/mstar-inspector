@@ -299,9 +299,12 @@ smoke → record the digest.
      bun run scripts/sandbox-smoke.ts
    # /smoke-review: full in-image runner (clone + omp review + parse) → destroy
    ```
-4. `wrangler deploy` — deploys the Worker (webhook face + queue consumer +
-   cron trigger) and rebuilds/pushes the container image when the build
-   context changed. **Copy the image digest from the deploy output.**
+4. `bun run build:spa && wrangler deploy` — build the SPA assets first
+   (`dist/spa` is gitignored — a fresh clone has none, and `wrangler.jsonc`
+   serves them via `assets`), then deploy the Worker (webhook face + queue
+   consumer + cron trigger). The step also rebuilds/pushes the container
+   image when the build context changed. **Copy the image digest from the
+   deploy output.**
 5. Record the digest baseline — on the automated path the workflow writes it
    to the run summary (`$GITHUB_STEP_SUMMARY`) and uploads `deploy-evidence`
    artifacts; the manual equivalent is to note the digest from the deploy
