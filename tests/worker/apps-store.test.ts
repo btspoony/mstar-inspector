@@ -22,11 +22,11 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, test } from "bun:test";
-import { createTestD1 } from "../store/helpers";
+import { createMigratedTestD1, createTestD1 } from "../store/helpers";
 import { createAppsStore } from "../../src/dashboard/apps-store";
 import { createSecretbox } from "../../src/dashboard/secretbox";
 import type { D1Like } from "../../src/store/types";
-import type { CreateAppInput, GithubAppRow } from "../../src/dashboard/apps-store";
+import type { CreateAppInput, GithubAppMetadataInput, GithubAppRow } from "../../src/dashboard/apps-store";
 
 const MIGRATIONS_DIR = join(import.meta.dir, "../../migrations");
 
@@ -549,5 +549,96 @@ describe("apps-store delivery read faces (plan 20 Task 2 consumption)", () => {
       expect.objectContaining({ [appA.id]: { latest: expect.objectContaining({ outcome: "ok" }), rejected24h: 0 } }),
     );
     expect(Object.keys(await s.deliverySummaries([]))).toEqual([]);
+  });
+});
+
+describe("saveGithubMetadata (plan 53, migration 0019)", () => {
+  // `satisfies` pins the saveGithubMetadata input shape while keeping the
+  // literal's non-null field types for exact-value assertions below.
+  const METADATA = {
+    githubName: "Acme Inspector",
+    githubDescription: "PR review bot for Acme",
+    githubHtmlUrl: "https://github.com/apps/acme-inspector",
+    githubAvatarUrl: "https://avatars.githubusercontent.com/u/1?v=4",
+  } satisfies GithubAppMetadataInput;
+
+  test("a freshly created app reads all five profile columns as NULL (never synced)", async () => {
+    const db = createMigratedTestD1();
+    const app = await seedApp(db);
+    const row = await store(db).getAppById(app.id);
+    expect(row).toMatchObject({
+      github_name: null,
+      github_description: null,
+      github_html_url: null,
+      github_avatar_url: null,
+      github_metadata_synced_at: null,
+    });
+  });
+
+  test("writes the four profile fields + synced_at, and does NOT touch updated_at", async () => {
+    const db = createMigratedTestD1();
+    const app = await seedApp(db);
+    // Pin updated_at to a known past value: the write is machine-triggered
+    // (the touchLastWebhook L5 precedent) and must leave the operator
+    // timestamp alone — a same-second datetime('now') would mask a wrongly
+    // touched column, so the pin makes the assertion deterministic.
+    db.raw.prepare("UPDATE github_apps SET updated_at = '2000-01-01 00:00:00' WHERE id = ?").run(app.id);
+
+    const changed = await store(db).saveGithubMetadata(app.id, METADATA);
+    expect(changed).toBe(true);
+
+    const row = db.raw
+      .query(
+        `SELECT github_name, github_description, github_html_url, github_avatar_url,
+                github_metadata_synced_at, updated_at
+         FROM github_apps WHERE id = ?`,
+      )
+      .get(app.id) as {
+      github_name: string;
+      github_description: string;
+      github_html_url: string;
+      github_avatar_url: string;
+      github_metadata_synced_at: string;
+      updated_at: string;
+    };
+    expect(row.github_name).toBe(METADATA.githubName);
+    expect(row.github_description).toBe(METADATA.githubDescription);
+    expect(row.github_html_url).toBe(METADATA.githubHtmlUrl);
+    expect(row.github_avatar_url).toBe(METADATA.githubAvatarUrl);
+    expect(row.github_metadata_synced_at).toMatch(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/);
+    expect(row.updated_at).toBe("2000-01-01 00:00:00");
+  });
+
+  test("null metadata fields persist as NULL while synced_at still records the sync (per-item degradation)", async () => {
+    const db = createMigratedTestD1();
+    const app = await seedApp(db);
+    const changed = await store(db).saveGithubMetadata(app.id, {
+      githubName: "Bare App",
+      githubDescription: null,
+      githubHtmlUrl: null,
+      githubAvatarUrl: null,
+    });
+    expect(changed).toBe(true);
+    const row = await store(db).getAppById(app.id);
+    expect(row!.github_name).toBe("Bare App");
+    expect(row!.github_description).toBeNull();
+    expect(row!.github_html_url).toBeNull();
+    expect(row!.github_avatar_url).toBeNull();
+    expect(row!.github_metadata_synced_at).not.toBeNull();
+  });
+
+  test("refuses soft-deleted rows exactly like setAppStatus (false, zero columns written)", async () => {
+    const db = createMigratedTestD1();
+    const app = await seedApp(db);
+    expect(await store(db).softDeleteApp(app.id)).toBe(true);
+    expect(await store(db).saveGithubMetadata(app.id, METADATA)).toBe(false);
+    const row = await store(db).getAppById(app.id);
+    expect(row!.github_name).toBeNull();
+    expect(row!.github_metadata_synced_at).toBeNull();
+  });
+
+  test("an unknown id is a false-returning no-op (the setAppStatus convention)", async () => {
+    const db = createMigratedTestD1();
+    expect(await store(db).saveGithubMetadata(crypto.randomUUID(), METADATA)).toBe(false);
   });
 });

@@ -963,3 +963,119 @@ describe("migrations/0018_app_sandbox_images.sql (plan 37 T1, spec § Runtime-im
     expect(row.sandbox_image_id).toBe("not-a-registry-id");
   });
 });
+
+describe("migrations/0019_github_apps_metadata.sql (plan 53 T1, AD-531)", () => {
+  /** Apply one migration file verbatim (filename order = wrangler order). */
+  function applyMigrationFile(db: TestD1, name: string): void {
+    db.raw.exec(readFileSync(join(MIGRATIONS_DIR, name), "utf8"));
+  }
+
+  /** Raw-insert one github_apps row (the 0004 column list is sufficient). */
+  function insertApp(db: TestD1, id: string, opts: { githubAppId?: number; deleted?: boolean } = {}): void {
+    db.raw
+      .prepare(
+        `INSERT INTO github_apps (id, slug, github_app_id, name, private_key_enc, webhook_secret_enc,
+           created_by, status, deleted_at, created_at, updated_at)
+         VALUES (?, ?, ?, ?, 'enc', 'enc', 'mallory', 'active',
+           ${opts.deleted ? "datetime('now', '-1 hour')" : "NULL"},
+           datetime('now'), datetime('now'))`,
+      )
+      .run(id, id, opts.githubAppId ?? 1001, id);
+  }
+
+  /** The pre-0019 shape (0001–0018, filename order) — what production runs today. */
+  function createPre0019Db(): TestD1 {
+    const db = createTestD1();
+    for (const name of [
+      "0003_dashboard_users.sql",
+      "0004_github_apps.sql",
+      "0005_reviews_app_id.sql",
+      "0006_app_provider_config.sql",
+      "0007_reviews_app_id_index.sql",
+      "0008_github_apps_ops.sql",
+      "0009_app_model_roles.sql",
+      "0010_review_failures.sql",
+      "0011_webhook_deliveries.sql",
+      "0012_custom_providers_and_key_updated_at.sql",
+      "0013_findings_review_id_index.sql",
+      "0014_idx_reviews_reviewed_at.sql",
+      "0015_provider_verification.sql",
+      "0016_users_login_nocase_unique.sql",
+      "0017_app_model_chains.sql",
+      "0018_app_sandbox_images.sql",
+    ]) {
+      applyMigrationFile(db, name);
+    }
+    return db;
+  }
+
+  test("applies cleanly over a seeded production-shaped DB (0001–0018 with live rows, incl. a soft-deleted app)", () => {
+    const db = createPre0019Db();
+    insertReview(db); // a live review predates the ALTER (wrangler order)
+    insertApp(db, "app-1");
+    insertApp(db, "app-gone", { githubAppId: 1002, deleted: true }); // soft-deleted rows backfill too
+    // Metadata-only ADD COLUMNs alter the table without rewriting it (the
+    // 0008 precedent) — every live row survives untouched, and old rows
+    // read as "never synced" (all five columns NULL).
+    expect(() => applyMigrationFile(db, "0019_github_apps_metadata.sql")).not.toThrow();
+    const rows = db.raw
+      .query("SELECT id, github_name, github_metadata_synced_at FROM github_apps ORDER BY id")
+      .all() as Array<{ id: string; github_name: string | null; github_metadata_synced_at: string | null }>;
+    expect(rows).toEqual([
+      { id: "app-1", github_name: null, github_metadata_synced_at: null },
+      { id: "app-gone", github_name: null, github_metadata_synced_at: null },
+    ]);
+  });
+
+  test("adds the five profile columns as TEXT, nullable, no default (the 0008 last_webhook_at form)", () => {
+    const db = createMigratedTestD1();
+    const columns = db.raw.query("PRAGMA table_info(github_apps)").all() as Array<{
+      name: string;
+      type: string;
+      notnull: number;
+      dflt_value: string | null;
+    }>;
+    for (const name of [
+      "github_name",
+      "github_description",
+      "github_html_url",
+      "github_avatar_url",
+      "github_metadata_synced_at",
+    ]) {
+      const col = columns.find((c) => c.name === name);
+      expect(col).toBeDefined();
+      expect(col!.type).toBe("TEXT");
+      expect(col!.notnull).toBe(0);
+      expect(col!.dflt_value).toBeNull();
+    }
+  });
+
+  test("the profile columns are writable and read back (the synced_at TEXT datetime convention)", () => {
+    const db = createMigratedTestD1();
+    insertApp(db, "app-1");
+    db.raw
+      .prepare(
+        `UPDATE github_apps
+         SET github_name = 'Acme Inspector', github_description = 'Reviews PRs',
+             github_html_url = 'https://github.com/apps/acme-inspector',
+             github_avatar_url = 'https://avatars.githubusercontent.com/u/1?v=4',
+             github_metadata_synced_at = datetime('now')
+         WHERE id = 'app-1'`,
+      )
+      .run();
+    const row = db.raw
+      .query("SELECT github_name, github_description, github_html_url, github_avatar_url, github_metadata_synced_at FROM github_apps WHERE id = 'app-1'")
+      .get() as {
+      github_name: string;
+      github_description: string;
+      github_html_url: string;
+      github_avatar_url: string;
+      github_metadata_synced_at: string;
+    };
+    expect(row.github_name).toBe("Acme Inspector");
+    expect(row.github_description).toBe("Reviews PRs");
+    expect(row.github_html_url).toBe("https://github.com/apps/acme-inspector");
+    expect(row.github_avatar_url).toBe("https://avatars.githubusercontent.com/u/1?v=4");
+    expect(row.github_metadata_synced_at).toMatch(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/);
+  });
+});
