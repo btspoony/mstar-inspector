@@ -9,6 +9,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { t } from "../../src/i18n";
 import { composeModelOptions } from "../../src/dashboard/model-membership";
+import { APP_VERSION } from "../../src/version";
 import { parseModels, modelChainTabs, seatRoleValues, seatSelectValue, splitModelChain } from "../../src/spa/pages/data";
 
 describe("settings layout (plan 35 T4)", () => {
@@ -968,6 +969,29 @@ describe("settings header typography (plan 45 T7)", () => {
     expect(source).toContain('<h2 className="text-xl font-semibold">{app.slug}</h2>');
     // The off-scale 18px class no longer appears anywhere on the page.
     expect(source).not.toContain("text-lg");
+  });
+});
+
+describe("version footer (plan 51 T3)", () => {
+  test("the settings page footer renders the generated version surface via the dictionary", () => {
+    const source = readFileSync(join(import.meta.dir, "../../src/spa/pages/SettingsPage.tsx"), "utf8");
+    // The display reads the generated single-writer surface (src/version.ts) —
+    // never a second hardcoded version string in the SPA.
+    expect(source).toContain('import { APP_VERSION } from "../../version";');
+    // Rendered value is the v-prefixed form, same shape as the /healthz field
+    // and release tags, interpolated through the bilingual footer key.
+    expect(source).toContain('{t(locale, "settings.footer.version", { version: `v${APP_VERSION}` })}');
+    // Footer slot reuses the page's muted small-print classes (existing token
+    // utilities — no new DESIGN.md tokens, no CSS changes).
+    expect(source).toContain('<p className="text-sm text-muted-foreground">');
+  });
+
+  test("the footer copy is dictionary-backed in both locales and carries the deployed version", () => {
+    const shown = `v${APP_VERSION}`;
+    expect(t("en", "settings.footer.version", { version: shown })).toBe(`Version ${shown}`);
+    expect(t("zh_CN", "settings.footer.version", { version: shown })).toBe(`版本 ${shown}`);
+    expect(t("en", "settings.footer.version", { version: shown })).toContain(shown);
+    expect(t("zh_CN", "settings.footer.version", { version: shown })).toContain(shown);
   });
 });
 
