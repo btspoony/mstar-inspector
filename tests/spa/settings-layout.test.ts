@@ -22,7 +22,7 @@ import {
   filterCatalogProviders,
   groupCatalogProviders,
 } from "../../src/spa/components/provider-combobox";
-import { AppInfoCard } from "../../src/spa/pages/SettingsPage";
+import { AppInfoCard, DraftChainPanel, draftChainTabLabel } from "../../src/spa/pages/SettingsPage";
 
 describe("settings layout (plan 35 T4)", () => {
   test("SettingsPage folds ops + health into an authorized ops zone; providers and chains are shadcn", () => {
@@ -757,12 +757,18 @@ describe("chain draft peer tab (plan 44 T2)", () => {
     const openDraftBody = chainsBody.slice(chainsBody.indexOf("function openDraft"), chainsBody.indexOf("return ("));
     expect(openDraftBody).toContain("setDraftOpen(true);");
     expect(openDraftBody).toContain("setSelectedTab(DRAFT_CHAIN_TAB_ID);");
+    // Non-reset equivalence (qc F2): open/re-focus never touches the lifted
+    // draft name — the only resets are the explicit close-time ones (discard
+    // + created), so re-clicking + 新建链 keeps whatever the user typed.
+    expect(openDraftBody).not.toContain("setDraftName");
     // Appended AFTER the last named tab (never before Default): the draft
     // joins the coercion list by spreading after the stored tabs, and its
-    // trigger renders after the stored-tabs map inside the TabsList.
+    // trigger renders after the stored-tabs map inside the TabsList. The
+    // trigger's label is the live AD-551 mirror (plan 55), not the static
+    // 新链 copy.
     expect(chainsBody).toContain("const tabs = draft ? [...storedTabs, draft] : storedTabs;");
     const storedMapPos = chainsBody.indexOf("{storedTabs.map((tab) => (");
-    const draftTriggerPos = chainsBody.indexOf('{t(locale, "settings.draftChain")}');
+    const draftTriggerPos = chainsBody.indexOf("{draftChainTabLabel(draftName, locale)}");
     expect(storedMapPos).toBeGreaterThan(-1);
     expect(draftTriggerPos).toBeGreaterThan(storedMapPos);
     // The old plan-43 disclosure between strip and Default panel is gone —
@@ -797,6 +803,10 @@ describe("chain draft peer tab (plan 44 T2)", () => {
     // chainName keys — Default's panel never shows creation UI.
     expect(panelBody).toContain('t(locale, "settings.chainName")');
     expect(panelBody).toContain('t(locale, "settings.chainNamePlaceholder")');
+    // The name input is capped at 64 (qc F4): the server's
+    // MODEL_CHAIN_NAME_PATTERN admits stored ids of at most 64 chars, so the
+    // input cannot type past it and the live tab-strip label stays bounded.
+    expect(panelBody).toContain("maxLength={64}");
     const namePos = panelBody.indexOf("settings.chainName");
     const editorPos = panelBody.indexOf("<ChainEditor");
     expect(editorPos).toBeGreaterThan(namePos);
@@ -812,19 +822,32 @@ describe("chain draft peer tab (plan 44 T2)", () => {
     expect(panelBody).toContain('outcome.kind === "success"');
     expect(panelBody).toContain("onOutcome(outcome)");
     expect(panelBody).toContain("onCreated(name.trim())");
-    // 放弃 discards through a ghost button without confirmation — gated by
-    // the same busy window as the save, so a discard can never race a
-    // resolving create into selecting the created tab.
-    expect(panelBody).toContain('t(locale, "settings.discardChain")}');
-    expect(panelBody).toContain('variant="ghost"');
-    expect(panelBody).toContain("disabled={busy}");
+    // 放弃 discards without confirmation — plan 55 (AD-552) supersedes the
+    // old hover-only ghost row: the button is injected through ChainEditor's
+    // actions prop into the save row, styled to be visible without hover
+    // (outline + sm + fixed small width). It stays bound to this panel's
+    // busy closure — the same window as the save, so a discard can never
+    // race a resolving create into selecting the created tab.
+    const actionsPos = panelBody.indexOf("actions={");
+    expect(actionsPos).toBeGreaterThan(-1);
+    const actionsNode = panelBody.slice(actionsPos, panelBody.indexOf("/>", actionsPos));
+    expect(actionsNode).toContain('variant="outline"');
+    expect(actionsNode).toContain('size="sm"');
+    expect(actionsNode).toContain('className="w-20"');
+    expect(actionsNode).toContain("disabled={busy}");
+    expect(actionsNode).toContain('t(locale, "settings.discardChain")}');
     // The draft panel mounts inside its own forceMount TabsContent; the
-    // discard's only state effect is closing the draft — the selection then
-    // coerces through activeChainTabId (plan-39 pin) back to Default.
+    // discard closes the draft — the selection then coerces through
+    // activeChainTabId (plan-39 pin) back to Default — and, plan 55
+    // (AD-551), resets the lifted draft name so a reopened draft starts
+    // blank (the old unmount-clears-name semantics, now explicit).
     const chainsBody = source.slice(source.indexOf("function ChainsCard"), source.indexOf("function SeatsCard"));
     expect(chainsBody).toContain("<TabsContent forceMount value={DRAFT_CHAIN_TAB_ID}>");
-    expect(chainsBody).toContain("onDiscard={() => setDraftOpen(false)}");
-    expect(chainsBody).toContain("setDraftOpen(false);");
+    const discardPos = chainsBody.indexOf("onDiscard={() => {");
+    expect(discardPos).toBeGreaterThan(-1);
+    const discardHandler = chainsBody.slice(discardPos, chainsBody.indexOf("onCreated={(created) => {"));
+    expect(discardHandler).toContain("setDraftOpen(false);");
+    expect(discardHandler).toContain('setDraftName("");');
     expect(chainsBody).toContain("setSelectedTab(created);");
   });
 
@@ -862,6 +885,157 @@ describe("chain draft peer tab (plan 44 T2)", () => {
     // The name-field keys survive the move into the panel.
     expect(t("en", "settings.chainName")).toBe("Chain name");
     expect(t("zh_CN", "settings.chainName")).toBe("链名称");
+  });
+});
+
+describe("draft tab label live-sync (plan 55 A2/A3 / AD-551)", () => {
+  /**
+   * The label faces are pure (the exported draftChainTabLabel mirror), so
+   * they are pinned directly. The controlled panel is pinned behaviorally
+   * through SSR of the exported DraftChainPanel: a typed name must reach the
+   * markup — an internal useState("") would ignore the prop and render
+   * value="" instead. The lifted state + wiring + the two close-time resets
+   * are pinned over the source. createElement keeps this .ts file JSX-free.
+   */
+  const noop = () => {};
+  const panelHtml = (name: string): string =>
+    renderToStaticMarkup(
+      createElement(DraftChainPanel, {
+        locale: "en",
+        groups: [],
+        name,
+        onNameChange: noop,
+        onCreate: () => Promise.resolve({ kind: "error" as const, message: "unused" }),
+        onOutcome: noop,
+        onDiscard: noop,
+        onCreated: noop,
+      }),
+    );
+
+  test("typing mirrors into the tab label live; empty/whitespace falls back to 新链", () => {
+    expect(draftChainTabLabel("my-chain", "en")).toBe("my-chain");
+    // The typed value is locale-independent — the fallback copy is what
+    // localizes.
+    expect(draftChainTabLabel("my-chain", "zh_CN")).toBe("my-chain");
+    // The raw input is the label (trim only gates the fallback) — no data
+    // loss while typing.
+    expect(draftChainTabLabel(" my-chain ", "en")).toBe(" my-chain ");
+    expect(draftChainTabLabel("", "en")).toBe("New chain");
+    expect(draftChainTabLabel("", "zh_CN")).toBe("新链");
+    // Whitespace-only counts as empty (the create would trim to "" anyway).
+    expect(draftChainTabLabel("   ", "zh_CN")).toBe("新链");
+  });
+
+  test("the draft panel is controlled by the lifted name (SSR: the typed value reaches the input)", () => {
+    expect(panelHtml("my-chain")).toContain('value="my-chain"');
+    expect(panelHtml("")).toContain('value=""');
+  });
+
+  test("the lifted state, wiring and both close-time resets live in ChainsCard (AD-551)", () => {
+    const source = readFileSync(join(import.meta.dir, "../../src/spa/pages/SettingsPage.tsx"), "utf8");
+    const chainsBody = source.slice(source.indexOf("function ChainsCard"), source.indexOf("function SeatsCard"));
+    // The name state lives in the card (the panel no longer owns it).
+    expect(chainsBody).toContain('const [draftName, setDraftName] = useState("");');
+    // Controlled wiring: the panel edits the card's state, the trigger
+    // renders the live mirror of the same state.
+    expect(chainsBody).toContain("name={draftName}");
+    expect(chainsBody).toContain("onNameChange={setDraftName}");
+    const triggerPos = chainsBody.indexOf("<TabsTrigger value={DRAFT_CHAIN_TAB_ID}>");
+    expect(triggerPos).toBeGreaterThan(-1);
+    expect(chainsBody.slice(triggerPos, chainsBody.indexOf("</TabsTrigger>", triggerPos))).toContain(
+      "{draftChainTabLabel(draftName, locale)}",
+    );
+    // Success path: the reset accompanies the close + the real (stored-name)
+    // tab selection — the reopened draft starts blank, today's semantics.
+    const createdHandler = chainsBody.slice(
+      chainsBody.indexOf("onCreated={(created) => {"),
+      chainsBody.indexOf("setSelectedTab(created);"),
+    );
+    expect(createdHandler).toContain('setDraftName("");');
+    // The panel body itself keeps no name state (controlled, not lifted back).
+    // Exact useState inventory (qc F3, closes ledger T2-S1): the busy gate is
+    // the panel's ONLY state — an internal useState(name) shadow-init would
+    // ignore the controlled prop and slip past a bare negative `useState("")`
+    // pin, so the inventory itself is pinned instead.
+    const panelBody = source.slice(source.indexOf("function DraftChainPanel"), source.indexOf("function ChainEditor"));
+    expect(panelBody.match(/useState\([^)]*\)/g) ?? []).toEqual(["useState(false)"]);
+    expect(panelBody).toContain("value={name}");
+    expect(panelBody).toContain("onNameChange(event.target.value)");
+  });
+});
+
+describe("discard inline with the save row (plan 55 A4/A5 / AD-552)", () => {
+  /**
+   * The discard is a pure render insertion through ChainEditor's optional
+   * actions prop: the save-row wrapper exists only when actions are passed
+   * (absent = byte-equivalent tree for the Default / named-chain editors,
+   * whose pins elsewhere stay untouched), and the injected button keeps its
+   * disabled={busy} bound to DraftChainPanel's own busy closure. Structure
+   * is pinned over the source; the visible styling over SSR of the exported
+   * DraftChainPanel. createElement keeps this .ts file JSX-free.
+   */
+  const noop = () => {};
+  const panelHtml = (): string =>
+    renderToStaticMarkup(
+      createElement(DraftChainPanel, {
+        locale: "en",
+        groups: [],
+        name: "",
+        onNameChange: noop,
+        onCreate: () => Promise.resolve({ kind: "error" as const, message: "unused" }),
+        onOutcome: noop,
+        onDiscard: noop,
+        onCreated: noop,
+      }),
+    );
+
+  test("the save row renders save primary with actions right of it, only when actions exist", () => {
+    const source = readFileSync(join(import.meta.dir, "../../src/spa/pages/SettingsPage.tsx"), "utf8");
+    const editorBody = source.slice(source.indexOf("function ChainEditor"));
+    // Conditional wrapper: with no actions the save button renders bare —
+    // the AD-552 byte-equivalence guard for every other caller.
+    expect(editorBody).toContain("{actions ? (");
+    // Inside the row: save first (primary/leftmost), the actions node right
+    // after it.
+    const rowPos = editorBody.indexOf('<div className="flex items-center gap-2">');
+    const savePos = editorBody.indexOf("{saveButton}");
+    const actionsPos = editorBody.indexOf("{actions}");
+    expect(rowPos).toBeGreaterThan(-1);
+    expect(savePos).toBeGreaterThan(rowPos);
+    expect(actionsPos).toBeGreaterThan(savePos);
+    // DraftChainPanel is the injecting caller; the Default editor's call
+    // stays bare (named-tab editors pass no actions either — the conditional
+    // above already renders them byte-equivalent).
+    const chainsBody = source.slice(source.indexOf("function ChainsCard"), source.indexOf("function SeatsCard"));
+    const firstEditorPos = chainsBody.indexOf("<ChainEditor");
+    const defaultCall = chainsBody.slice(firstEditorPos, chainsBody.indexOf("/>", firstEditorPos));
+    expect(defaultCall).not.toContain("actions={");
+    const panelBody = source.slice(source.indexOf("function DraftChainPanel"), source.indexOf("function ChainEditor"));
+    expect(panelBody).toContain("actions={");
+    // Whole-file count (qc F1): `actions={` occurs exactly once in the page —
+    // the draft panel's discard injection. The Default AND named-chain
+    // ChainEditor callers both stay bare (the conditional above renders them
+    // byte-equivalent); a second actions-passing caller fails this count.
+    expect(source.match(/actions=\{/g)?.length).toBe(1);
+  });
+
+  test("the discard is visibly styled without hover and sits in the save row (SSR)", () => {
+    const html = panelHtml();
+    // Outline + sm + the fixed width land on the real button; the label is
+    // the untouched discardChain key. No confirmation dialog anywhere.
+    expect(html).toContain('data-variant="outline"');
+    expect(html).toContain('data-size="sm"');
+    expect(html).toContain("w-20");
+    expect(html).toContain(">Discard</button>");
+    expect(html).not.toContain("dialog");
+    // Same row: the flex container wraps both buttons — the save (primary,
+    // default variant) opens the row, the outline discard follows it.
+    const rowPos = html.indexOf("flex items-center gap-2");
+    const savePos = html.indexOf('data-variant="default"');
+    const discardPos = html.indexOf('data-variant="outline"');
+    expect(rowPos).toBeGreaterThan(-1);
+    expect(savePos).toBeGreaterThan(rowPos);
+    expect(discardPos).toBeGreaterThan(savePos);
   });
 });
 
@@ -1468,5 +1642,28 @@ describe("GitHub App identity card (plan 53 A5/A6/A7)", () => {
     expect(t("zh_CN", "settings.appInfoViewOnGithub", { name: "Acme" })).toBe("在 GitHub 上查看 Acme");
     expect(t("en", "settings.appInfoSynced", { time: "5 minutes ago" })).toBe("Synced 5 minutes ago");
     expect(t("zh_CN", "settings.appInfoSynced", { time: "5 分钟前" })).toBe("同步于 5 分钟前");
+  });
+});
+
+describe("runtime image row tightness (plan 55 A1)", () => {
+  test("select shell is content-adaptive; save button sits in the same flex-wrap row", () => {
+    const source = readFileSync(join(import.meta.dir, "../../src/spa/pages/SettingsPage.tsx"), "utf8");
+    // User-reported regression: the wrapper reserved min-w-64 (256px) while the
+    // trigger only rendered short option content — a perceived gap between the
+    // select and its save button. The shell must stay content-adaptive.
+    const runtimeBody = source.slice(
+      source.indexOf("function RuntimeImageEditor"),
+      source.indexOf("function OpsCard"),
+    );
+    expect(runtimeBody).toContain('<div className="w-fit max-w-xs">');
+    expect(runtimeBody).not.toContain("min-w-64");
+    // Same-row adjacency: the save trigger follows the select inside the
+    // flex-wrap row (narrow screens still wrap the button below cleanly).
+    const row = runtimeBody.slice(
+      runtimeBody.indexOf('className="flex flex-wrap items-center gap-2"'),
+      runtimeBody.indexOf("<NoticeRegion"),
+    );
+    expect(row).toContain("SelectTrigger");
+    expect(row).toContain("settings.saveRuntimeImage");
   });
 });
