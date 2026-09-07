@@ -1337,13 +1337,17 @@ function settingsMembershipFailResponse(
  *     non-manager face must never 500 for its sake — the manage branch keeps
  *     its existing fail-closed 500 for its OWN decryption needs below);
  *   - `{ok:false}` from the fetch (network, timeout, bad key format, non-200)
- *     keeps the cached columns untouched;
+ *     keeps the cached columns untouched and emits one secret-free structured
+ *     warn (stage + app id — the fetch collapses failure reasons by design);
  *   - a decrypt throw (corrupt envelope / SecretboxKeyError) or a store
- *     rejection is swallowed by the leg's own catch-all.
+ *     rejection is swallowed by the leg's own catch-all and logged via the
+ *     logSettingsFailure convention (error type only — never the PEM, JWT,
+ *     or any header material).
  * Fail-open BY STRUCTURE: this function never throws and returns the row to
- * serve — re-read fresh after a possible persist so the payload carries the
- * values actually in D1, the caller's row otherwise — so the refresh can
- * never enter the route's outer 500 face (AD-531).
+ * serve — re-read fresh after a SUCCESSFUL persist so the payload carries the
+ * values actually in D1, the caller's row otherwise (a failed refresh wrote
+ * nothing, so the re-read is skipped) — so the refresh can never enter the
+ * route's outer 500 face (AD-531).
  */
 async function refreshGithubMetadataForRead(
   app: GithubAppRow,
@@ -1358,11 +1362,22 @@ async function refreshGithubMetadataForRead(
       `github_apps.private_key_enc:${app.id}`,
     );
     const result = await fetchAppMetadata(app.github_app_id, decryptedPem);
-    if (result.ok) await apps.saveGithubMetadata(app.id, result.metadata);
-    const fresh = await apps.getAppById(app.id);
-    if (fresh) return fresh;
-  } catch {
-    // Fail-open: the cached columns serve as-is (metadata is display-only).
+    if (result.ok) {
+      await apps.saveGithubMetadata(app.id, result.metadata);
+      const fresh = await apps.getAppById(app.id);
+      if (fresh) return fresh;
+    } else {
+      // Secret-free structured warn (the logSettingsFailure shape): no error
+      // object exists here — fetchAppMetadata collapses every failure class
+      // into the reason-less `{ok:false}` on purpose.
+      console.warn(
+        JSON.stringify({ event: "dashboard_settings", stage: "github_metadata_fetch", app_id: app.id }),
+      );
+    }
+  } catch (err) {
+    // Fail-open: the cached columns serve as-is (metadata is display-only) —
+    // but the failure stays observable, secret-free.
+    logSettingsFailure("github_metadata_refresh", app.id, err);
   }
   return app;
 }

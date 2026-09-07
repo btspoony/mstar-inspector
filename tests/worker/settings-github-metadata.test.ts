@@ -205,7 +205,12 @@ describe("GET /api/apps/:slug/settings — lazy GitHub-metadata refresh (plan 53
   });
 
   test("TTL hit: a synced_at just inside 24h serves the cache with ZERO fetches, on both faces", async () => {
-    const { db, appId } = await seededWorld("unused — the refresh must not run");
+    // A VALID PEM (not a garbage marker): the zero-fetch pin below must be
+    // load-bearing — a refresh-always regression would mint past the key
+    // check, reach the throwing stub, and fail the call-count assert (a
+    // garbage PEM would fail pre-stub and pin nothing).
+    const pem = await pkcs8PemFixture();
+    const { db, appId } = await seededWorld(pem);
     seedCache(db, appId, "datetime('now', '-23 hours')");
     const { calls } = stubFetch(() => {
       throw new Error("the TTL window must not touch the network");

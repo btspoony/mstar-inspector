@@ -1065,7 +1065,8 @@ describe("GitHub App identity card (plan 53 A5/A6/A7)", () => {
   test("synced profile renders avatar img, hyperlinked name (new tab, noopener), description, AppID", () => {
     const out = html(meta(synced));
     // (a) the avatar is the synced GitHub URL, rendered as a plain <img>
-    // (repo CSP allows the direct avatar origin — no image proxy).
+    // (an external image — no CSP is configured in this repo, so nothing
+    // blocks the direct avatar origin; there is no image proxy either).
     expect(out).toContain('<img src="https://avatars.githubusercontent.com/in/1234?v=4"');
     // (b) the name is the link: href = github_html_url, NEW tab, noopener.
     expect(out).toContain('href="https://github.com/settings/apps/acme-reviewer"');
@@ -1114,6 +1115,12 @@ describe("GitHub App identity card (plan 53 A5/A6/A7)", () => {
     const urlless = html(meta({ github_name: synced.github_name }));
     expect(urlless).not.toContain("<a ");
     expect(urlless).toContain("Acme Reviewer");
+    // The fourth matrix cell — a synced URL whose name is absent: the name
+    // gate makes a stray <a> structurally impossible, so the URL renders
+    // nowhere (no href, no text).
+    const nameless = html(meta({ github_html_url: synced.github_html_url }));
+    expect(nameless).not.toContain("<a ");
+    expect(nameless).not.toContain(synced.github_html_url);
   });
 
   test("the card sits between the slug row and the manage conditional — both faces see it", () => {

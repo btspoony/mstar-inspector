@@ -13,7 +13,9 @@
  *     non-200, and an unexpected payload (missing name);
  *   - extraction: ONLY the four migration-0019 profile fields survive
  *     (slug/permissions/events/owner.login never leave the module);
- *     per-item degradation to null for absent optional fields;
+ *     per-item degradation to null for absent optional fields, with the
+ *     URL fields additionally scheme-gated to https: (non-conforming
+ *     values drop to null);
  *   - upstream face: GET https://api.github.com/app, Accept
  *     application/vnd.github+json, pinned API version, User-Agent, Bearer
  *     JWT, and an AbortSignal (the 5s AD-531 budget).
@@ -150,14 +152,24 @@ async function decodeAndVerifyJwt(
 }
 
 const origFetch = globalThis.fetch;
+const origAbortTimeout = AbortSignal.timeout;
 afterEach(() => {
   globalThis.fetch = origFetch;
+  AbortSignal.timeout = origAbortTimeout;
 });
 
 describe("fetchAppMetadata (plan 53 T1.2, AD-531)", () => {
   test("mints a verifiable RS256 App JWT and extracts ONLY the public profile fields (PKCS#8 PEM)", async () => {
     const { pem, publicKey } = await pkcs8Fixture();
     const { calls } = stubFetch(() => jsonResponse(GITHUB_PROFILE));
+    // Capture the AbortSignal.timeout argument while delegating to the real
+    // implementation (the signal stays genuine) — pins the locked AD-531
+    // 5s budget by value, not just by signal type.
+    let timeoutMs: number | undefined;
+    AbortSignal.timeout = ((ms: number) => {
+      timeoutMs = ms;
+      return origAbortTimeout.call(AbortSignal, ms);
+    }) as typeof AbortSignal.timeout;
 
     const result = await fetchAppMetadata(1001, pem);
 
@@ -184,6 +196,7 @@ describe("fetchAppMetadata (plan 53 T1.2, AD-531)", () => {
     expect(headers.get("x-github-api-version")).toBe("2022-11-28");
     expect(headers.get("user-agent")).toBe("mstar-inspector");
     expect(call.init!.signal).toBeInstanceOf(AbortSignal);
+    expect(timeoutMs).toBe(5000); // the 5s AD-531 budget, exactly
 
     // JWT: pinned header/claims + signature verifiable with the fixture's
     // own public key.
@@ -252,33 +265,39 @@ describe("fetchAppMetadata (plan 53 T1.2, AD-531)", () => {
     });
   });
 
-  test("HTTP non-200 → {ok:false}", async () => {
-    stubFetch(() => jsonResponse({ message: "Not Found" }, 404));
+  test("HTTP non-200 → {ok:false}, zero retries", async () => {
+    const { calls } = stubFetch(() => jsonResponse({ message: "Not Found" }, 404));
     const { pem } = await pkcs8Fixture();
     expect(await fetchAppMetadata(1001, pem)).toEqual({ ok: false });
+    expect(calls).toHaveLength(1); // the zero-retry lock (AD-531)
   });
 
-  test("fetch rejection (network failure / abort) → {ok:false}", async () => {
-    stubFetch(() => {
+  test("fetch rejection (network failure / abort) → {ok:false}, zero retries", async () => {
+    const abort = stubFetch(() => {
       throw new DOMException("The operation was aborted.", "AbortError");
     });
     const { pem } = await pkcs8Fixture();
     expect(await fetchAppMetadata(1001, pem)).toEqual({ ok: false });
+    expect(abort.calls).toHaveLength(1);
 
-    stubFetch(() => {
+    const reject = stubFetch(() => {
       throw new TypeError("fetch failed");
     });
     expect(await fetchAppMetadata(1001, pem)).toEqual({ ok: false });
+    expect(reject.calls).toHaveLength(1);
   });
 
-  test("unexpected payload (missing / empty name, non-JSON body) → {ok:false}", async () => {
+  test("unexpected payload (missing / empty name, non-JSON body) → {ok:false}, zero retries", async () => {
     const { pem } = await pkcs8Fixture();
-    stubFetch(() => jsonResponse({ slug: "acme-inspector" }));
+    const missingName = stubFetch(() => jsonResponse({ slug: "acme-inspector" }));
     expect(await fetchAppMetadata(1001, pem)).toEqual({ ok: false });
-    stubFetch(() => jsonResponse({ name: "" }));
+    expect(missingName.calls).toHaveLength(1);
+    const emptyName = stubFetch(() => jsonResponse({ name: "" }));
     expect(await fetchAppMetadata(1001, pem)).toEqual({ ok: false });
-    stubFetch(() => new Response("<html>gateway error</html>", { status: 200 }));
+    expect(emptyName.calls).toHaveLength(1);
+    const nonJson = stubFetch(() => new Response("<html>gateway error</html>", { status: 200 }));
     expect(await fetchAppMetadata(1001, pem)).toEqual({ ok: false });
+    expect(nonJson.calls).toHaveLength(1);
   });
 
   test("nullable upstream fields degrade per-item to null metadata", async () => {
@@ -289,6 +308,29 @@ describe("fetchAppMetadata (plan 53 T1.2, AD-531)", () => {
       ok: true,
       metadata: {
         githubName: "Bare App",
+        githubDescription: null,
+        githubHtmlUrl: null,
+        githubAvatarUrl: null,
+      },
+    });
+  });
+
+  test("non-https html_url / avatar_url are dropped to null (the extraction scheme gate)", async () => {
+    const { pem } = await pkcs8Fixture();
+    stubFetch(() =>
+      jsonResponse({
+        name: "Odd App",
+        html_url: "http://github.com/apps/odd",
+        owner: { login: "odd", avatar_url: "javascript:alert(1)" },
+      }),
+    );
+
+    // The name still passes the shape gate; the non-https URLs degrade to
+    // null exactly like absent fields (the SPA renders them as href/img).
+    expect(await fetchAppMetadata(1001, pem)).toEqual({
+      ok: true,
+      metadata: {
+        githubName: "Odd App",
         githubDescription: null,
         githubHtmlUrl: null,
         githubAvatarUrl: null,

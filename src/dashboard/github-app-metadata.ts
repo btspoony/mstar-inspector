@@ -17,11 +17,13 @@
  * `{alg:RS256,typ:JWT}` / `{iat,exp,iss:<githubAppId>}` →
  * GET https://api.github.com/app (Bearer) → extract ONLY the public profile
  * fields the migration-0019 columns cache (name / description / html_url /
- * owner.avatar_url). Nothing else from the response — not the slug, not
+ * owner.avatar_url — the URL fields scheme-gated to https: at extraction).
+ * Nothing else from the response — not the slug, not
  * permissions/events, nothing secret-shaped — leaves this module.
  *
  * Failure discipline (AD-531): ZERO retries (the caller's 24h TTL bounds
- * the cost to ≤1 fetch/App/day), a 5s AbortSignal timeout, and a total
+ * the cost to ≤1 fetch per request; ≤1/App/day once a sync succeeds), a
+ * 5s AbortSignal timeout, and a total
  * catch-all — every failure (OpenSSH key, garbage PEM, import/sign error,
  * network failure, timeout, non-200, unexpected payload) collapses to the
  * structured `{ ok: false }`. This function NEVER throws: the settings read
@@ -51,8 +53,9 @@ const enc = new TextEncoder();
  * Lazy-refresh budget (AD-531 lock, plan 53): a cached profile is served as-is
  * for 24h since `github_metadata_synced_at`; past that (or when the column is
  * NULL — never synced) the settings read path refreshes once. This bounds the
- * egress to ≤1 fetch/App/day and, with the zero-retry fetch discipline below,
- * is the whole refresh-policy surface — no cron/queue exists.
+ * egress to ≤1 fetch per request; ≤1/App/day once a sync succeeds and, with
+ * the zero-retry fetch discipline below, is the whole refresh-policy surface
+ * — no cron/queue exists.
  */
 export const GITHUB_METADATA_TTL_MS = 24 * 60 * 60 * 1000;
 
@@ -182,7 +185,10 @@ export async function fetchAppMetadata(
     // Shape gate: `name` is the identity field — without it the payload is
     // not the GET /app shape (STOP clause: a structural change degrades,
     // never breaks). Every other field degrades per-item into the nullable
-    // columns (the SPA renders local fields when they read NULL).
+    // columns (the SPA renders local fields when they read NULL). The URL
+    // fields are additionally scheme-gated to https: — the SPA renders them
+    // as href/img, so a non-conforming value degrades to null like any other
+    // absent field, at the single write source.
     if (!data || typeof data.name !== "string" || data.name.length === 0) {
       return { ok: false };
     }
@@ -192,11 +198,13 @@ export async function fetchAppMetadata(
         githubName: data.name,
         githubDescription: typeof data.description === "string" ? data.description : null,
         githubHtmlUrl:
-          typeof data.html_url === "string" && data.html_url.length > 0 ? data.html_url : null,
+          typeof data.html_url === "string" && data.html_url.startsWith("https://")
+            ? data.html_url
+            : null,
         githubAvatarUrl:
           data.owner &&
           typeof data.owner.avatar_url === "string" &&
-          data.owner.avatar_url.length > 0
+          data.owner.avatar_url.startsWith("https://")
             ? data.owner.avatar_url
             : null,
       },

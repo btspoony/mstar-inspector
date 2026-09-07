@@ -11,13 +11,14 @@
  * the consumer side (src/pipeline/comment.ts — its own copy, since dashboard
  * ↛ pipeline/worker, architect decision Q2).
  *
- * This module therefore has no src/ call site today: it is reserved as the
- * optional write-side format self-check (check-only — never persists a
- * normalized secret) and its equivalence pin against the consumer copy
- * (tests/worker/dashboard.test.ts) guards consumer-side drift. Same
- * algorithm as src/pipeline/comment.ts (the worker/diff.ts copy was deleted
- * in plan 24) — duplicated per the Q2 route isolation; no shared module is
- * extracted.
+ * Its first src/ consumer now exists: src/dashboard/github-app-metadata.ts
+ * (plan 53) reuses `normalizePrivateKey` for the App-JWT mint. The module
+ * stays reserved as the optional write-side format self-check (check-only —
+ * never persists a normalized secret) and its equivalence pin against the
+ * consumer copy (tests/worker/dashboard.test.ts) guards consumer-side drift.
+ * Same algorithm as src/pipeline/comment.ts (the worker/diff.ts copy was
+ * deleted in plan 24) — duplicated per the Q2 route isolation; no shared
+ * module is extracted.
  */
 
 /** DER tag for a SEQUENCE (0x30). */
