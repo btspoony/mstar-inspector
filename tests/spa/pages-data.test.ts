@@ -438,6 +438,7 @@ describe("provider catalog rows + add selection (plan 38 T2)", () => {
     models: ["claude-fable-5"],
     verifiable: true,
     eligibility: "builtin",
+    display_group: "common",
   };
 
   test("catalog rows are row-validated on models/verifiable/base_url/api (plan 38 T2 guards)", () => {

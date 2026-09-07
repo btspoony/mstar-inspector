@@ -87,6 +87,13 @@ export type CatalogProvider = {
   verifiable: boolean;
   /** Usability vs the App's selected runtime image (plan 38). */
   eligibility: ProviderEligibility;
+  /**
+   * Display-only picker group (plan 54, AD-547): `common` = the 5-entry
+   * 常用提供方 tier shown first, `catalog` = the 目录模板 group. Form and
+   * config branching NEVER reads this — the key-only vs template flow stays
+   * keyed to `tier` / `eligibility`.
+   */
+  display_group: "common" | "catalog";
 };
 
 /**
