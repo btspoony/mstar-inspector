@@ -1,0 +1,109 @@
+name: Release
+
+# PR-driven release. Merging a `release vX.Y.Z` PR (opened by the Release prep
+# workflow) runs the whole release inline on the pull_request closed event:
+# validate → typecheck + test + build → annotated tag on the merge commit →
+# bilingual GitHub Release. Deploying stays fully decoupled — the same merge
+# triggers the Deploy workflow through the ordinary (human-attributed) main
+# push; this workflow never deploys.
+#
+# AD-5 (GITHUB_TOKEN event suppression): release PRs opened by the bot do not
+# run ci.yml, so the Release prep workflow's validate/typecheck/build steps
+# are that PR's verification face — and this workflow re-verifies everything
+# on the merge commit before tagging (double insurance).
+#
+# Prereleases: a version containing `-` (e.g. 1.1.0-alpha.0) creates the
+# GitHub Release flagged as a prerelease.
+#
+# No secrets are required (the tag and the Release are created with the
+# workflow's GITHUB_TOKEN).
+
+on:
+  pull_request:
+    types: [closed]
+    branches: [main]
+
+permissions:
+  contents: write   # push the tag + create the GitHub Release (no id-token:write — no npm publish, AD-4)
+
+jobs:
+  release:
+    if: >
+      github.event.pull_request.merged == true
+      && startsWith(github.event.pull_request.title, 'release v')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout merge commit
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.merge_commit_sha }}
+          fetch-depth: 0   # tag idempotence check needs existing tags
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.0
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Resolve version
+        id: ver
+        run: echo "version=$(jq -r .version package.json)" >> "$GITHUB_OUTPUT"
+
+      - name: Validate release version
+        env:
+          VERSION: ${{ steps.ver.outputs.version }}
+        run: bun run release:validate -- "v${VERSION}"
+
+      - name: Typecheck + test + build
+        run: |
+          bun run typecheck
+          bun test
+          bun run build:spa
+
+      - name: Configure git identity
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Create + push tag (idempotent)
+        env:
+          VERSION: ${{ steps.ver.outputs.version }}
+        run: |
+          set -euo pipefail
+          TAG="v${VERSION}"
+          if git rev-parse "$TAG" >/dev/null 2>&1; then
+            echo "Tag $TAG already exists; skipping tag creation."
+            exit 0
+          fi
+          git tag -a -m "Release ${TAG}" "$TAG"
+          git push origin "$TAG"
+
+      # Notes composition contract (plan 50 §Interfaces): EN section, blank
+      # line, `---`, blank line, CN section. Plan 52 appends its deploy-
+      # evidence section after this step with the same separator, rebuilding
+      # the body from this $RUNNER_TEMP file and rewriting the Release with a
+      # single `gh release edit --notes-file` — tag/Release creation never
+      # waits for evidence.
+      - name: Extract bilingual release notes
+        id: changelog
+        env:
+          VERSION: ${{ steps.ver.outputs.version }}
+        run: |
+          NOTES_FILE="${RUNNER_TEMP}/release-notes-${VERSION}.md"
+          {
+            bun run scripts/extract-changelog-section.ts "${VERSION}" --lang en
+            printf '\n---\n\n'
+            bun run scripts/extract-changelog-section.ts "${VERSION}" --lang cn
+          } > "$NOTES_FILE"
+          echo "notes_file=${NOTES_FILE}" >> "$GITHUB_OUTPUT"
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
+        with:
+          tag_name: v${{ steps.ver.outputs.version }}
+          name: v${{ steps.ver.outputs.version }}
+          body_path: ${{ steps.changelog.outputs.notes_file }}
+          draft: false
+          prerelease: ${{ contains(steps.ver.outputs.version, '-') }}
