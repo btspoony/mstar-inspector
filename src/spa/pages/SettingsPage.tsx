@@ -1723,7 +1723,9 @@ function SeatsCard({
  * discard can never race a resolving save into selecting the created tab.
  * Plan 55 (AD-551): the draft name is controlled — owned by ChainsCard so
  * the tab trigger can mirror it live; this panel only renders and edits it
- * through the name/onNameChange props.
+ * through the name/onNameChange props. The input's maxLength=64 mirrors the
+ * server's MODEL_CHAIN_NAME_PATTERN cap (stored ids ≤ 64 chars), so the
+ * live tab-strip label can never grow unbounded.
  */
 export function DraftChainPanel({
   locale,
@@ -1758,6 +1760,7 @@ export function DraftChainPanel({
           onChange={(event) => onNameChange(event.target.value)}
           placeholder={t(locale, "settings.chainNamePlaceholder")}
           autoComplete="off"
+          maxLength={64}
         />
       </label>
       <ChainEditor

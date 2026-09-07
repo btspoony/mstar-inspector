@@ -757,6 +757,10 @@ describe("chain draft peer tab (plan 44 T2)", () => {
     const openDraftBody = chainsBody.slice(chainsBody.indexOf("function openDraft"), chainsBody.indexOf("return ("));
     expect(openDraftBody).toContain("setDraftOpen(true);");
     expect(openDraftBody).toContain("setSelectedTab(DRAFT_CHAIN_TAB_ID);");
+    // Non-reset equivalence (qc F2): open/re-focus never touches the lifted
+    // draft name — the only resets are the explicit close-time ones (discard
+    // + created), so re-clicking + 新建链 keeps whatever the user typed.
+    expect(openDraftBody).not.toContain("setDraftName");
     // Appended AFTER the last named tab (never before Default): the draft
     // joins the coercion list by spreading after the stored tabs, and its
     // trigger renders after the stored-tabs map inside the TabsList. The
@@ -799,6 +803,10 @@ describe("chain draft peer tab (plan 44 T2)", () => {
     // chainName keys — Default's panel never shows creation UI.
     expect(panelBody).toContain('t(locale, "settings.chainName")');
     expect(panelBody).toContain('t(locale, "settings.chainNamePlaceholder")');
+    // The name input is capped at 64 (qc F4): the server's
+    // MODEL_CHAIN_NAME_PATTERN admits stored ids of at most 64 chars, so the
+    // input cannot type past it and the live tab-strip label stays bounded.
+    expect(panelBody).toContain("maxLength={64}");
     const namePos = panelBody.indexOf("settings.chainName");
     const editorPos = panelBody.indexOf("<ChainEditor");
     expect(editorPos).toBeGreaterThan(namePos);
@@ -945,8 +953,12 @@ describe("draft tab label live-sync (plan 55 A2/A3 / AD-551)", () => {
     );
     expect(createdHandler).toContain('setDraftName("");');
     // The panel body itself keeps no name state (controlled, not lifted back).
+    // Exact useState inventory (qc F3, closes ledger T2-S1): the busy gate is
+    // the panel's ONLY state — an internal useState(name) shadow-init would
+    // ignore the controlled prop and slip past a bare negative `useState("")`
+    // pin, so the inventory itself is pinned instead.
     const panelBody = source.slice(source.indexOf("function DraftChainPanel"), source.indexOf("function ChainEditor"));
-    expect(panelBody).not.toContain('useState("")');
+    expect(panelBody.match(/useState\([^)]*\)/g) ?? []).toEqual(["useState(false)"]);
     expect(panelBody).toContain("value={name}");
     expect(panelBody).toContain("onNameChange(event.target.value)");
   });
@@ -1000,6 +1012,11 @@ describe("discard inline with the save row (plan 55 A4/A5 / AD-552)", () => {
     expect(defaultCall).not.toContain("actions={");
     const panelBody = source.slice(source.indexOf("function DraftChainPanel"), source.indexOf("function ChainEditor"));
     expect(panelBody).toContain("actions={");
+    // Whole-file count (qc F1): `actions={` occurs exactly once in the page —
+    // the draft panel's discard injection. The Default AND named-chain
+    // ChainEditor callers both stay bare (the conditional above renders them
+    // byte-equivalent); a second actions-passing caller fails this count.
+    expect(source.match(/actions=\{/g)?.length).toBe(1);
   });
 
   test("the discard is visibly styled without hover and sits in the save row (SSR)", () => {
