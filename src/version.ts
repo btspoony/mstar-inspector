@@ -2,4 +2,4 @@
 // Single writer: the value mirrors `package.json#version` (bare `X.Y.Z`);
 // `release:validate` pins equality. Surfaces display the `v`-prefixed form
 // (`v${APP_VERSION}`) so healthz/SPA match release tags by eye.
-export const APP_VERSION = "0.1.0";
+export const APP_VERSION = "1.0.0-alpha.1";
