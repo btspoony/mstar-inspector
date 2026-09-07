@@ -147,8 +147,8 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           VERSION: ${{ steps.ver.outputs.version }}
           MERGE_SHA: ${{ github.event.pull_request.merge_commit_sha }}
+          NOTES_FILE: ${{ steps.changelog.outputs.notes_file }}
         run: |
-          NOTES_FILE="${RUNNER_TEMP}/release-notes-${VERSION}.md"
           printf '\n\n---\n\n' >> "$NOTES_FILE"
           bun run scripts/collect-deploy-evidence.ts >> "$NOTES_FILE"
           if ! gh release edit "v${VERSION}" --notes-file "$NOTES_FILE"; then

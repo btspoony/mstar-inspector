@@ -15,6 +15,9 @@
  * - checkout ref pins merge_commit_sha (release side);
  * - softprops/action-gh-release SHA pin string (byte-exact, sole
  *   third-party action; new-to-repo actions are SHA-pinned — pin convention);
+ * - deploy-evidence append step (plan 52): exactly one `gh release edit`
+ *   (count, not containment) and the notes file handed off from the extract
+ *   step's `notes_file` output — never rebuilt from RUNNER_TEMP;
  * - timeout-minutes on both jobs.
  *
  * Parsing uses python3 + PyYAML (the method validated in task 4; preinstalled
@@ -158,6 +161,7 @@ describe("release.yml guards", () => {
 
   test("deploy-evidence append step (plan 52): after release creation, never fails the release, env-indirected", () => {
     const steps = wf.jobs.release.steps as {
+      id?: string;
       uses?: string;
       run?: string;
       env?: Record<string, string>;
@@ -169,19 +173,31 @@ describe("release.yml guards", () => {
     expect(evidIdx).toBeGreaterThan(createIdx); // tag/Release creation never waits for evidence
 
     const evid = steps[evidIdx]!;
+    const evidRun = evid.run!;
     // recording surface, not a gate: swallowed failures stay loud (::error) but green
     expect(evid["continue-on-error"]).toBe(true);
-    expect(evid.run).toContain("::error::");
+    expect(evidRun).toContain("::error::");
     // AD-3: single idempotent rewrite from the workspace notes file, same separator
-    expect(evid.run).toContain("printf '\\n\\n---\\n\\n' >> \"$NOTES_FILE\"");
-    expect(evid.run).toContain('gh release edit "v${VERSION}" --notes-file "$NOTES_FILE"');
-    expect(evid.run).not.toContain("${{");
+    expect(evidRun).toContain("printf '\\n\\n---\\n\\n' >> \"$NOTES_FILE\"");
+    expect(evidRun).toContain('gh release edit "v${VERSION}" --notes-file "$NOTES_FILE"');
+    // folded T2 review: "one edit" is a count, not mere containment — a second
+    // `gh release edit` call must fail this guard even if the first stays intact
+    expect(evidRun.match(/gh release edit/g)).toHaveLength(1);
+    expect(evidRun).not.toContain("${{");
     // plan-50 QC B1: version/SHA/token reach the script via step env, never raw interpolation
     expect(evid.env).toEqual({
       GH_TOKEN: "${{ secrets.GITHUB_TOKEN }}",
       VERSION: "${{ steps.ver.outputs.version }}",
       MERGE_SHA: "${{ github.event.pull_request.merge_commit_sha }}",
+      // folded T2 review: the notes path is handed off from the extract step's
+      // output (single shared path), not rebuilt here
+      NOTES_FILE: "${{ steps.changelog.outputs.notes_file }}",
     });
+    // shared-path handoff: the extract step exports the path exactly once …
+    const extract = steps.find((s) => s.id === "changelog");
+    expect(extract?.run).toContain('echo "notes_file=${NOTES_FILE}" >> "$GITHUB_OUTPUT"');
+    // … and this step consumes it without re-deriving it from RUNNER_TEMP/VERSION
+    expect(evidRun).not.toContain("RUNNER_TEMP");
   });
 
   test("no direct `${{ }}` interpolation inside run: scripts (env indirection)", () => {
