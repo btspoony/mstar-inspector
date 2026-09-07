@@ -18,5 +18,5 @@
       "@/*": ["src/spa/*"]
     }
   },
-  "include": ["src/spa", "src/i18n", "tests/spa"]
+  "include": ["src/spa", "src/i18n", "src/version.ts", "tests/spa"]
 }

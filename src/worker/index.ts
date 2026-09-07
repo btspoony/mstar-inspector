@@ -8,7 +8,8 @@
  * Routes:
  * - GET/HEAD /dashboard* trailing slash → 301 (src/worker/redirects.ts)
  * - GET/HEAD enumerated SPA pages with Accept text/html → ASSETS index.html
- * - GET /healthz → 200 {"ok":true}
+ * - GET /healthz → 200 {"ok":true,"version":"vX.Y.Z"} (plan 51: version
+ *   from the generated src/version.ts, same shape as the smoke-entry face)
  * - POST /webhook/:appSlug → per-App webhook face (plan 13 Task 2; plan 24
  *   Task 1: the ONLY HTTP review entry — the legacy bare `/webhook` face is
  *   retired): slug → github_apps row (active, not deleted) → that App's
@@ -32,6 +33,7 @@ import { createSecretbox } from "../dashboard/secretbox";
 import { dashboardApp } from "../dashboard/index";
 import { trailingSlashRedirect } from "./redirects";
 import { spaDispatch } from "./spa-dispatch";
+import { APP_VERSION } from "../version";
 
 const app = new Hono<{ Bindings: Env }>();
 // Plan 29 T3 + plan 30 T4: `/dashboard*` GET/HEAD redirects (trailing
@@ -82,7 +84,10 @@ function webhookInfo(event: string, detail: string, msg: string): void {
   defaultLog.info({ event, reason: event, detail }, msg);
 }
 
-app.get("/healthz", (c) => c.json({ ok: true }));
+// Plan 51: `version` rides the healthz face — additive field, `ok:true`
+// contract unchanged; displayed with the `v` prefix (tag-shaped, eyeball-
+// reconcilable). Single source = generated src/version.ts.
+app.get("/healthz", (c) => c.json({ ok: true, version: `v${APP_VERSION}` }));
 // 08 B0: GitHub OAuth + dashboard shell. Route isolation: the dashboard
 // module never imports pipeline/store/review (architect decision Q2).
 app.route("/dashboard", dashboardApp);
