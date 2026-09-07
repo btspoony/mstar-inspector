@@ -1309,7 +1309,7 @@ function CustomExpand({
 
   return (
     <div className="rounded-md border p-3">
-      <button type="button" className="flex w-full flex-col items-start text-left" onClick={onToggle}>
+      <button type="button" className="flex w-full flex-col items-start text-left" onClick={onToggle} aria-expanded={expanded}>
         <span className="font-medium">{t(locale, "settings.customEntry")}</span>
         <span className="text-xs text-muted-foreground">{t(locale, "settings.customEntryCopy")}</span>
       </button>

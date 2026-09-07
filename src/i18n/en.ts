@@ -13,7 +13,7 @@
  *     Tasks 4/5 and plans 30/31 APPEND keys here — they never start a
  *     second table.
  *   - The `notice` slot mirrors the `PageNotice` type (kind × message);
- *     after the plan-46 dead-key purge it carries only the member-flow
+ *     after the plan-46/49 dead-key purges it carries only the member-flow
  *     messages (the retired SSR settings routes rendered plain text).
  *   - Manifest copy deliberately carries NO REVIEW_ENABLED user-facing
  *     sentence (plan 29 T5 removes it; per-App pause is the only switch).
@@ -89,12 +89,9 @@ export const en = {
     error: {
       enterLogin: "Enter a GitHub login to invite.",
       invalidLogin: "{login} is not a valid GitHub login — use 1–39 letters, digits, or hyphens.",
-      unknownMember: "Unknown member — nothing was removed, try again.",
-      cannotRemoveSelf: "You cannot remove yourself.",
       inviteFailed: "Could not invite {login} — try again.",
       roleChangeFailed: "Could not change {login}'s role — the member list just changed, try again.",
       removeFailed: "Could not remove {login} — the member list just changed, try again.",
-      chainEmpty: "Enter at least one comma-separated model selector.",
     },
   },
   apps: {
