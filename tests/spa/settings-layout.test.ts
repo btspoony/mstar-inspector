@@ -2,15 +2,20 @@
  * Plan 31 T4+T6 + plan 35 T4: settings ops zone, unified providers, chains UI.
  * No DOM runner — source-scan pins over SettingsPage.tsx and its primitives
  * plus pure data helpers (the plan 30 home suite that shared this style is
- * retired).
+ * retired). Plan 53: the AppInfoCard degradation face is additionally pinned
+ * behaviorally through react-dom/server SSR of the exported card (no DOM
+ * needed — static markup output).
  */
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
+import { createElement } from "react";
+import { renderToStaticMarkup } from "react-dom/server";
 import { t } from "../../src/i18n";
 import { composeModelOptions } from "../../src/dashboard/model-membership";
 import { APP_VERSION } from "../../src/version";
-import { parseModels, modelChainTabs, seatRoleValues, seatSelectValue, splitModelChain } from "../../src/spa/pages/data";
+import { parseModels, modelChainTabs, seatRoleValues, seatSelectValue, splitModelChain, type SettingsAppMeta } from "../../src/spa/pages/data";
+import { AppInfoCard } from "../../src/spa/pages/SettingsPage";
 
 describe("settings layout (plan 35 T4)", () => {
   test("SettingsPage folds ops + health into an authorized ops zone; providers and chains are shadcn", () => {
@@ -1018,5 +1023,140 @@ describe("custom-provider disclosure state (plan 49 T3)", () => {
     );
     expect(providersBody).toContain("expanded={customOpen}");
     expect(providersBody).toContain("onToggle={() => setCustomOpen(!customOpen)}");
+  });
+});
+
+describe("GitHub App identity card (plan 53 A5/A6/A7)", () => {
+  /**
+   * The card is a pure presentational component (no hooks, no browser API),
+   * so its degradation face — the load-bearing plan-53 contract — is pinned
+   * behaviorally: static SSR markup of the exported card, no DOM runner.
+   * createElement keeps this .ts file free of JSX.
+   */
+  const html = (app: SettingsAppMeta): string =>
+    renderToStaticMarkup(createElement(AppInfoCard, { locale: "en", app }));
+
+  function meta(overrides: Partial<SettingsAppMeta> = {}): SettingsAppMeta {
+    return {
+      slug: "acme",
+      github_app_id: 123456,
+      status: "active",
+      review_enabled: true,
+      created_by: "alice",
+      last_webhook_at: null,
+      sandbox_image_id: "omp",
+      github_name: null,
+      github_description: null,
+      github_html_url: null,
+      github_avatar_url: null,
+      github_metadata_synced_at: null,
+      ...overrides,
+    };
+  }
+
+  const synced = {
+    github_name: "Acme Reviewer",
+    github_description: "Reviews pull requests for Acme.",
+    github_html_url: "https://github.com/settings/apps/acme-reviewer",
+    github_avatar_url: "https://avatars.githubusercontent.com/in/1234?v=4",
+    github_metadata_synced_at: "2026-09-08 00:00:00",
+  };
+
+  test("synced profile renders avatar img, hyperlinked name (new tab, noopener), description, AppID", () => {
+    const out = html(meta(synced));
+    // (a) the avatar is the synced GitHub URL, rendered as a plain <img>
+    // (an external image — no CSP is configured in this repo, so nothing
+    // blocks the direct avatar origin; there is no image proxy either).
+    expect(out).toContain('<img src="https://avatars.githubusercontent.com/in/1234?v=4"');
+    // (b) the name is the link: href = github_html_url, NEW tab, noopener.
+    expect(out).toContain('href="https://github.com/settings/apps/acme-reviewer"');
+    expect(out).toContain('target="_blank"');
+    expect(out).toContain('rel="noopener noreferrer"');
+    expect(out).toContain("Acme Reviewer");
+    expect(out).toContain('aria-label="View Acme Reviewer on GitHub"');
+    // (c) the description renders when present.
+    expect(out).toContain("Reviews pull requests for Acme.");
+    // (d) the numeric App id renders in plaintext (B1 pin allows the id).
+    expect(out).toContain("App ID: 123456");
+    // The optional synced-at hint localizes through the dictionary.
+    expect(out).toContain("Synced ");
+  });
+
+  test("never-synced App degrades to local fields: card renders, no link, no crash", () => {
+    // (e) all metadata null — the card still renders (title + local App id),
+    // the placeholder mark stands in for the avatar, and nothing pretends a
+    // synced profile exists: no anchor, no img, no GitHub URL anywhere.
+    const out = html(meta());
+    expect(out).toContain("GitHub App");
+    expect(out).toContain("App ID: 123456");
+    expect(out).toContain('viewBox="0 0 24 24"'); // the octocat placeholder mark
+    expect(out).not.toContain("<a ");
+    expect(out).not.toContain("<img");
+    expect(out).not.toContain("http");
+  });
+
+  test("mixed-null metadata renders only the present fields, per-field degradation", () => {
+    // (f) name + url synced, everything else null: the link renders, the
+    // absent fields render nothing — no placeholder text, no layout collapse.
+    const out = html(
+      meta({
+        github_name: synced.github_name,
+        github_html_url: synced.github_html_url,
+      }),
+    );
+    expect(out).toContain('href="https://github.com/settings/apps/acme-reviewer"');
+    expect(out).toContain("Acme Reviewer");
+    expect(out).not.toContain("<img");
+    expect(out).not.toContain("Reviews pull requests");
+    expect(out).not.toContain("Synced ");
+    expect(out).toContain("App ID: 123456");
+    // A synced name whose html_url is missing degrades to plain text — never
+    // a link with an empty href.
+    const urlless = html(meta({ github_name: synced.github_name }));
+    expect(urlless).not.toContain("<a ");
+    expect(urlless).toContain("Acme Reviewer");
+    // The fourth matrix cell — a synced URL whose name is absent: the name
+    // gate makes a stray <a> structurally impossible, so the URL renders
+    // nowhere (no href, no text).
+    const nameless = html(meta({ github_html_url: synced.github_html_url }));
+    expect(nameless).not.toContain("<a ");
+    expect(nameless).not.toContain(synced.github_html_url);
+  });
+
+  test("the card sits between the slug row and the manage conditional — both faces see it", () => {
+    const source = readFileSync(join(import.meta.dir, "../../src/spa/pages/SettingsPage.tsx"), "utf8");
+    const slugRowPos = source.indexOf('<h2 className="text-xl font-semibold">{app.slug}</h2>');
+    const cardPos = source.indexOf("<AppInfoCard");
+    const managePos = source.indexOf("{payload.can_manage ? (");
+    expect(slugRowPos).toBeGreaterThan(-1);
+    expect(cardPos).toBeGreaterThan(slugRowPos);
+    expect(managePos).toBeGreaterThan(cardPos);
+    // Per-field degradation is structural: every synced field is gated by its
+    // own null check inside the card body, and the link pins the new-tab +
+    // noopener contract.
+    const cardBody = source.slice(
+      source.indexOf("export function AppInfoCard"),
+      source.indexOf("function HealthBody"),
+    );
+    expect(cardBody).toContain("app.github_avatar_url ? (");
+    expect(cardBody).toContain("app.github_name ? (");
+    expect(cardBody).toContain("app.github_html_url ? (");
+    expect(cardBody).toContain("app.github_description ?");
+    expect(cardBody).toContain("app.github_metadata_synced_at ? (");
+    expect(cardBody).toContain('target="_blank"');
+    expect(cardBody).toContain('rel="noopener noreferrer"');
+  });
+
+  test("card copy is dictionary-backed in both locales (en/zh parity)", () => {
+    expect(t("en", "settings.appInfo")).toBe("GitHub App");
+    expect(t("zh_CN", "settings.appInfo")).toBe("GitHub App");
+    expect(t("en", "settings.appInfoCopy")).toContain("GitHub");
+    expect(t("zh_CN", "settings.appInfoCopy")).toContain("GitHub");
+    expect(t("en", "settings.appInfoAppId", { id: 123456 })).toBe("App ID: 123456");
+    expect(t("zh_CN", "settings.appInfoAppId", { id: 123456 })).toBe("App ID：123456");
+    expect(t("en", "settings.appInfoViewOnGithub", { name: "Acme" })).toBe("View Acme on GitHub");
+    expect(t("zh_CN", "settings.appInfoViewOnGithub", { name: "Acme" })).toBe("在 GitHub 上查看 Acme");
+    expect(t("en", "settings.appInfoSynced", { time: "5 minutes ago" })).toBe("Synced 5 minutes ago");
+    expect(t("zh_CN", "settings.appInfoSynced", { time: "5 分钟前" })).toBe("同步于 5 分钟前");
   });
 });

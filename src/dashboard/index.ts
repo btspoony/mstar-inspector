@@ -56,6 +56,7 @@ import {
   type ManifestHoldPayload,
 } from "./manifest";
 import { createAppsStore, type DeliverySummary, type GithubAppRow } from "./apps-store";
+import { fetchAppMetadata, isGithubMetadataStale } from "./github-app-metadata";
 import { SecretboxKeyError, createSecretbox } from "./secretbox";
 import {
   CLOUDFLARE_ACCOUNT_ID_PATTERN,
@@ -1324,31 +1325,104 @@ function settingsMembershipFailResponse(
   return c.json({ code: MEMBERSHIP_FAIL_CODE, message, selector }, 400);
 }
 
+/**
+ * Plan 53 A4 (AD-531): the settings read path's lazy GitHub-metadata refresh —
+ * the ONLY writer of the migration-0019 profile columns (via the single store
+ * entry saveGithubMetadata). Runs at most once per request and only when the
+ * cached profile is missing or outside the 24h TTL; the leg is
+ * decrypt (the per-App secretbox envelope, AAD = the createApp convention) →
+ * mint App JWT → GET /app → persist, with every failure mode optional:
+ *   - a missing DASHBOARD_ENCRYPTION_KEY skips the refresh silently (the
+ *     architect watch item: the cached profile is a read-path extra, so the
+ *     non-manager face must never 500 for its sake — the manage branch keeps
+ *     its existing fail-closed 500 for its OWN decryption needs below);
+ *   - `{ok:false}` from the fetch (network, timeout, bad key format, non-200)
+ *     keeps the cached columns untouched and emits one secret-free structured
+ *     warn (stage + app id — the fetch collapses failure reasons by design);
+ *   - a decrypt throw (corrupt envelope / SecretboxKeyError) or a store
+ *     rejection is swallowed by the leg's own catch-all and logged via the
+ *     logSettingsFailure convention (error type only — never the PEM, JWT,
+ *     or any header material).
+ * Fail-open BY STRUCTURE: this function never throws and returns the row to
+ * serve — re-read fresh after a SUCCESSFUL persist so the payload carries the
+ * values actually in D1, the caller's row otherwise (a failed refresh wrote
+ * nothing, so the re-read is skipped) — so the refresh can never enter the
+ * route's outer 500 face (AD-531).
+ */
+async function refreshGithubMetadataForRead(
+  app: GithubAppRow,
+  apps: ReturnType<typeof createAppsStore>,
+  encryptionKey: string | undefined,
+): Promise<GithubAppRow> {
+  try {
+    if (!isGithubMetadataStale(app.github_metadata_synced_at)) return app;
+    if (!encryptionKey) return app;
+    const decryptedPem = await createSecretbox(encryptionKey).decryptSecret(
+      app.private_key_enc,
+      `github_apps.private_key_enc:${app.id}`,
+    );
+    const result = await fetchAppMetadata(app.github_app_id, decryptedPem);
+    if (result.ok) {
+      await apps.saveGithubMetadata(app.id, result.metadata);
+      const fresh = await apps.getAppById(app.id);
+      if (fresh) return fresh;
+    } else {
+      // Secret-free structured warn (the logSettingsFailure shape): no error
+      // object exists here — fetchAppMetadata collapses every failure class
+      // into the reason-less `{ok:false}` on purpose.
+      console.warn(
+        JSON.stringify({ event: "dashboard_settings", stage: "github_metadata_fetch", app_id: app.id }),
+      );
+    }
+  } catch (err) {
+    // Fail-open: the cached columns serve as-is (metadata is display-only) —
+    // but the failure stays observable, secret-free.
+    logSettingsFailure("github_metadata_refresh", app.id, err);
+  }
+  return app;
+}
+
 /** SPA JSON face — plan 35 T4 (spec §2 read face): any member gets the
  * base+health payload (app meta, installations, deliveries); the full
  * settings payload (masked keys, chains, providers) is creator-or-admin only.
  * `can_manage` tells the SPA which shape it got. Writes stay behind
- * requireAppSettings. */
+ * requireAppSettings. Plan 53 A4: the payload's `app` gains the cached
+ * public GitHub profile (nullable, migration 0019) on BOTH faces — served
+ * from D1 after the lazy 24h-TTL refresh above. */
 dashboardApp.get("/api/apps/:slug/settings", async (c) => {
   const gate = await requireAppVisible(c);
   if (!gate.ok) return gate.response;
   const apps = createAppsStore(gate.db);
+  // Outside the render try on purpose: the refresh leg carries its own
+  // catch-all, so no metadata failure can reach this route's 500 face
+  // (AD-531 fail-open by structure).
+  const app = await refreshGithubMetadataForRead(gate.app, apps, c.env.DASHBOARD_ENCRYPTION_KEY);
   try {
-    const installations = await apps.listInstallations(gate.app.id);
-    const deliveries = await apps.listRecentDeliveries(gate.app.id, 5);
-    const deliverySummary = await apps.deliverySummary(gate.app.id);
+    const installations = await apps.listInstallations(app.id);
+    const deliveries = await apps.listRecentDeliveries(app.id, 5);
+    const deliverySummary = await apps.deliverySummary(app.id);
     const base = {
       app: {
-        slug: gate.app.slug,
-        github_app_id: gate.app.github_app_id,
-        status: gate.app.status,
-        review_enabled: gate.app.review_enabled !== 0,
-        created_by: gate.app.created_by,
-        last_webhook_at: gate.app.last_webhook_at ?? null,
+        slug: app.slug,
+        github_app_id: app.github_app_id,
+        status: app.status,
+        review_enabled: app.review_enabled !== 0,
+        created_by: app.created_by,
+        last_webhook_at: app.last_webhook_at ?? null,
         // Plan 37 (spec § Technical interfaces): the App's selected sandbox
         // runtime image — read-only on BOTH faces (registry id only, never
         // image-local configuration or secrets).
-        sandbox_image_id: gate.app.sandbox_image_id,
+        sandbox_image_id: app.sandbox_image_id,
+        // Plan 53 A4: the cached public GitHub profile (migration 0019) —
+        // every field nullable (NULL = never synced / absent upstream, the
+        // old-row degradation) and present on BOTH faces (AC3: the
+        // non-manager payload carries them too). Public profile fields only —
+        // the PEM / webhook-secret envelopes never leave the row.
+        github_name: app.github_name ?? null,
+        github_description: app.github_description ?? null,
+        github_html_url: app.github_html_url ?? null,
+        github_avatar_url: app.github_avatar_url ?? null,
+        github_metadata_synced_at: app.github_metadata_synced_at ?? null,
       },
       installations,
       deliveries: deliveries.map((d) => ({

@@ -11,7 +11,16 @@
     "skipLibCheck": true,
     "forceConsistentCasingInFileNames": true,
     "verbatimModuleSyntax": true,
-    "noUncheckedIndexedAccess": true
+    "noUncheckedIndexedAccess": true,
+    // Deliberate mirror of tsconfig.spa.json's paths block: bun test reads
+    // only this root tsconfig, so component-level tests resolving the SPA's
+    // "@/..." aliases need the mapping here. Root tsc itself is inert for
+    // SPA sources (include/exclude below keep src/spa and tests/spa out of
+    // the root program) — keep the two paths blocks in sync.
+    "baseUrl": ".",
+    "paths": {
+      "@/*": ["src/spa/*"]
+    }
   },
   "include": ["src", "tests"],
   "exclude": ["src/spa", "tests/spa"]

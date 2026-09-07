@@ -186,7 +186,7 @@ export function seatRoleValues(
   return next;
 }
 
-type SettingsAppMeta = {
+export type SettingsAppMeta = {
   slug: string;
   github_app_id: number;
   status: string;
@@ -195,6 +195,18 @@ type SettingsAppMeta = {
   last_webhook_at: string | null;
   /** The App's selected sandbox runtime image (registry id — plan 37). */
   sandbox_image_id: string;
+  /**
+   * Plan 53 A6: the cached public GitHub profile the settings route serves
+   * (migration 0019 columns). Every field nullable — NULL = never synced (old
+   * rows must render, per-field degradation on the card); the PEM / webhook
+   * secret never ride this face. Present on BOTH payload faces (AC3).
+   */
+  github_name: string | null;
+  github_description: string | null;
+  github_html_url: string | null;
+  github_avatar_url: string | null;
+  /** `datetime('now')` UTC string; NULL = never synced. */
+  github_metadata_synced_at: string | null;
 };
 
 type SettingsHealth = {
