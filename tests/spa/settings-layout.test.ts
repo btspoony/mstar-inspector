@@ -1470,3 +1470,26 @@ describe("GitHub App identity card (plan 53 A5/A6/A7)", () => {
     expect(t("zh_CN", "settings.appInfoSynced", { time: "5 分钟前" })).toBe("同步于 5 分钟前");
   });
 });
+
+describe("runtime image row tightness (plan 55 A1)", () => {
+  test("select shell is content-adaptive; save button sits in the same flex-wrap row", () => {
+    const source = readFileSync(join(import.meta.dir, "../../src/spa/pages/SettingsPage.tsx"), "utf8");
+    // User-reported regression: the wrapper reserved min-w-64 (256px) while the
+    // trigger only rendered short option content — a perceived gap between the
+    // select and its save button. The shell must stay content-adaptive.
+    const runtimeBody = source.slice(
+      source.indexOf("function RuntimeImageEditor"),
+      source.indexOf("function OpsCard"),
+    );
+    expect(runtimeBody).toContain('<div className="w-fit max-w-xs">');
+    expect(runtimeBody).not.toContain("min-w-64");
+    // Same-row adjacency: the save trigger follows the select inside the
+    // flex-wrap row (narrow screens still wrap the button below cleanly).
+    const row = runtimeBody.slice(
+      runtimeBody.indexOf('className="flex flex-wrap items-center gap-2"'),
+      runtimeBody.indexOf("<NoticeRegion"),
+    );
+    expect(row).toContain("SelectTrigger");
+    expect(row).toContain("settings.saveRuntimeImage");
+  });
+});

@@ -781,7 +781,10 @@ function RuntimeImageEditor({
   return (
     <div className="flex flex-col gap-3">
       <div className="flex flex-wrap items-center gap-2">
-        <div className="min-w-64 max-w-xs">
+        {/* Plan 55 A1: content-adaptive shell — no reserved min width, so the
+            trigger sits immediately next to the save button; flex-wrap keeps
+            the button wrapping below cleanly on narrow screens. */}
+        <div className="w-fit max-w-xs">
           <Select value={selected} onValueChange={setSelected}>
             <SelectTrigger aria-label={t(locale, "settings.runtimeImage")}>
               <SelectValue />
