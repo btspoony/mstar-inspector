@@ -123,12 +123,20 @@ de-scope it into a "known issue".**
 - **Deploy fails after merge** — independent of the release chain (tag and
   Release are already cut); follow the [deploy runbook](deploy.md) failure
   semantics. A failed deploy never rolls back a tag.
-- **Deploy-evidence append failed** (the run shows a `::error::deploy-evidence
-  append failed` annotation but stays green — the step is deliberately
-  `continue-on-error` so evidence can never fail a release): a transient
-  `gh release edit` failure left the Release without the evidence section.
-  Re-run the Release workflow (it converges idempotently), or append the
-  section by hand per [manual reconciliation](#manual-reconciliation-fallback).
+- **Deploy-evidence append failed** (the evidence **step** goes red —
+  `::error::` annotation plus non-zero exit — while the job stays green via
+  step-level `continue-on-error`, so evidence can never fail the release): a
+  transient `gh release edit` failure left the Release without the evidence
+  section. Re-run the Release workflow (it converges idempotently), or append
+  the section by hand per [manual reconciliation](#manual-reconciliation-fallback).
+- **Job timeout preempted the evidence step** (extreme case only: slow
+  pre-steps plus a full-length bounded wait — the evidence step carries its
+  own `timeout-minutes: 18` budget, 15-min wait default + margin, bounded
+  below the job's 30-minute cap so the wait can never starve the pre-steps;
+  the job cap can still fire mid-wait in a pathologically slow run): the run
+  goes red **without losing the tag or the Release** — both are created
+  before the evidence step. Re-run the Release workflow; it converges and
+  re-appends the evidence section idempotently.
 
 ## Deploy evidence (release ↔ deploy reconciliation)
 

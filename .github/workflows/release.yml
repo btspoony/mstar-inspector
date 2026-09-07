@@ -135,13 +135,21 @@ jobs:
       #
       # This step must not be able to fail the release (evidence is a
       # recording surface, never a gate): the collector exits 0 for every
-      # outcome by design, the `gh release edit` call is guarded so a
-      # transient failure only emits a loud ::error annotation, and
-      # continue-on-error additionally absorbs anything unforeseen (GitHub
-      # still flags the step). Re-running the workflow converges by itself:
-      # the extract step rebuilds the notes file from scratch and the
-      # same-body rewrite is idempotent.
+      # outcome by design, and continue-on-error absorbs everything else —
+      # a `gh release edit` failure echoes ::error and exits 1, so the STEP
+      # goes visibly red while the JOB stays green. Re-running the workflow
+      # converges by itself: the extract step rebuilds the notes file from
+      # scratch and the same-body rewrite is idempotent.
+      #
+      # Timeout budget (QC W-F001): the step's own `timeout-minutes` bounds
+      # the wait so it can never starve the pre-steps of the job's 30-min
+      # budget — 15 min (collector's bounded-wait default) + margin for the
+      # artifact download + the single `gh release edit` + bun startup
+      # = 18 min, leaving ≥12 min for everything above. In the extreme case
+      # where slow pre-steps + this budget still hit the job cap, the run
+      # goes red without losing the tag/Release; a rerun converges (runbook).
       - name: Append deploy evidence to release notes
+        timeout-minutes: 18
         continue-on-error: true
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -149,8 +157,10 @@ jobs:
           MERGE_SHA: ${{ github.event.pull_request.merge_commit_sha }}
           NOTES_FILE: ${{ steps.changelog.outputs.notes_file }}
         run: |
+          set -euo pipefail
           printf '\n\n---\n\n' >> "$NOTES_FILE"
           bun run scripts/collect-deploy-evidence.ts >> "$NOTES_FILE"
           if ! gh release edit "v${VERSION}" --notes-file "$NOTES_FILE"; then
             echo "::error::deploy-evidence append failed — Release notes left without the evidence section; re-run the Release workflow to converge (idempotent)"
+            exit 1   # step visibly red; continue-on-error keeps the job green
           fi

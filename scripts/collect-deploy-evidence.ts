@@ -27,9 +27,12 @@
  * evidence absence.
  *
  * Output contract: the section (heading `### Deploy evidence` + bullets, no
- * trailing newline) on stdout; a one-line outcome summary on stderr. The
- * run link falls back to the bare run id when $GITHUB_SERVER_URL /
- * $GITHUB_REPOSITORY are unset (local dry-runs).
+ * trailing newline) on stdout; a one-line outcome summary on stderr. Error
+ * text is collapsed to a single line and artifact-derived values are
+ * shape-validated (single line, backtick-free, length-capped) before
+ * interpolation — a violation degrades the section, never breaks its `- `
+ * bullet shape. The run link falls back to the bare run id when
+ * $GITHUB_SERVER_URL / $GITHUB_REPOSITORY are unset (local dry-runs).
  */
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -84,6 +87,34 @@ export type CollectResult = {
 };
 
 const FULL_SHA_RE = /^[0-9a-f]{40}$/i;
+
+/** Upper bound for artifact-derived values interpolated into the public release body. */
+export const EVIDENCE_VALUE_MAX_LENGTH = 256;
+
+/**
+ * Shape gate for artifact-derived strings (`version_id.txt` /
+ * `image_digest.txt` values) before they reach the release body: single
+ * line, no backticks (the bullets quote values in `code` spans), bounded
+ * length. Throws naming the file and violation; `concludeRun` catches and
+ * degrades — raw content is never interpolated.
+ */
+export function validateEvidenceShape(value: string, file: string): string {
+  if (/[\r\n]/.test(value)) {
+    throw new Error(`${file} value is not a single line`);
+  }
+  if (value.includes("`")) {
+    throw new Error(`${file} value contains a backtick`);
+  }
+  if (value.length > EVIDENCE_VALUE_MAX_LENGTH) {
+    throw new Error(`${file} value exceeds ${EVIDENCE_VALUE_MAX_LENGTH} characters`);
+  }
+  return value;
+}
+
+/** Error text (`gh` stderr can be multi-line) collapsed to keep the `- ` bullet shape. */
+function oneLine(text: string): string {
+  return text.replace(/\s+/g, " ").trim();
+}
 
 export function parseArgs(argv: string[]): {
   sha?: string;
@@ -189,7 +220,7 @@ function degradedSection(
   env: Record<string, string | undefined>,
 ): string {
   const lines = [
-    `- Status: unavailable — ${err instanceof Error ? err.message : String(err)}`,
+    `- Status: unavailable — ${oneLine(err instanceof Error ? err.message : String(err))}`,
   ];
   if (run) lines.push(`- Actions run: ${runLink(run.databaseId, env)}`);
   return section(lines);
@@ -209,8 +240,14 @@ function concludeRun(run: GhRun, opts: CollectOptions): CollectResult {
   const dir = opts.artifactDir ?? mkdtempSync(join(tmpdir(), "deploy-evidence-"));
   try {
     opts.runner.downloadArtifact(run.databaseId, dir);
-    const versionId = readFileSync(join(dir, "version_id.txt"), "utf8").trim();
-    const digest = readFileSync(join(dir, "image_digest.txt"), "utf8").trim();
+    const versionId = validateEvidenceShape(
+      readFileSync(join(dir, "version_id.txt"), "utf8").trim(),
+      "version_id.txt",
+    );
+    const digest = validateEvidenceShape(
+      readFileSync(join(dir, "image_digest.txt"), "utf8").trim(),
+      "image_digest.txt",
+    );
     if (!versionId || !digest) {
       throw new Error(
         `artifact ${DEPLOY_EVIDENCE_ARTIFACT} has empty version_id.txt / image_digest.txt`,

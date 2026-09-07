@@ -350,6 +350,104 @@ describe("collectDeployEvidence — degraded branches (never fail the release)",
   });
 });
 
+describe("collectDeployEvidence — multiple runs for one SHA (newest wins)", () => {
+  const OLDER_SUCCESS = { ...SUCCESS, databaseId: 42 };
+  const OLDER_FAILED = { ...FAILED, databaseId: 42 };
+
+  test("newest success wins: its artifact is downloaded, older runs ignored", () => {
+    const root = makeTempRoot();
+    try {
+      const { runner, downloads } = makeRunner(
+        () => [SUCCESS, OLDER_FAILED],
+        (_runId, destDir) => writeArtifact(destDir),
+      );
+      const result = collectDeployEvidence(baseOpts({ runner, artifactDir: root }));
+      expect(result.kind).toBe("success");
+      expect(result.section).toContain("- Actions run: 123456");
+      expect(downloads).toEqual([{ runId: 123456, destDir: root }]);
+    } finally {
+      disposeTempRoot(root);
+    }
+  });
+
+  test("newest failure wins over an older success (newest is the live one)", () => {
+    const { runner, downloads } = makeRunner(() => [FAILED, OLDER_SUCCESS]);
+    const result = collectDeployEvidence(baseOpts({ runner, env: {} }));
+    expect(result.kind).toBe("deploy-failed");
+    expect(result.section).toContain("- Actions run: 123456");
+    expect(downloads).toEqual([]);
+  });
+});
+
+describe("collectDeployEvidence — sanitization + shape gates (QC round A1)", () => {
+  test("multi-line error text is collapsed to one line; `- ` bullet shape preserved", () => {
+    const { runner } = makeRunner(() => {
+      throw new Error("gh run list failed (1): boom\nsecond line\n  third line");
+    });
+    const result = collectDeployEvidence(baseOpts({ runner, env: {} }));
+    expect(result.kind).toBe("degraded");
+    expect(result.section).toBe(
+      [
+        "### Deploy evidence",
+        "- Status: unavailable — gh run list failed (1): boom second line third line",
+      ].join("\n"),
+    );
+  });
+
+  test("artifact value with an embedded newline degrades naming the file; raw value never interpolated", () => {
+    const root = makeTempRoot();
+    try {
+      writeAt(root, "version_id.txt", "abc\ninjected line\n");
+      writeAt(root, "image_digest.txt", DIGEST);
+      const { runner } = makeRunner(() => [SUCCESS]); // download no-op: pre-written files
+      const result = collectDeployEvidence(baseOpts({ runner, artifactDir: root }));
+      expect(result.kind).toBe("degraded");
+      expect(result.section).toBe(
+        [
+          "### Deploy evidence",
+          "- Status: unavailable — version_id.txt value is not a single line",
+          "- Actions run: 123456",
+        ].join("\n"),
+      );
+      expect(result.section).not.toContain("injected line");
+    } finally {
+      disposeTempRoot(root);
+    }
+  });
+
+  test("backtick in a digest degrades naming the violation", () => {
+    const root = makeTempRoot();
+    try {
+      writeAt(root, "version_id.txt", VERSION_ID);
+      writeAt(root, "image_digest.txt", "`sha256:not-a-digest`");
+      const { runner } = makeRunner(() => [SUCCESS]);
+      const result = collectDeployEvidence(baseOpts({ runner, artifactDir: root }));
+      expect(result.kind).toBe("degraded");
+      expect(result.section).toContain("image_digest.txt value contains a backtick");
+    } finally {
+      disposeTempRoot(root);
+    }
+  });
+
+  test("over-length value degrades naming the cap; exactly-at-cap value passes", () => {
+    const root = makeTempRoot();
+    try {
+      writeAt(root, "version_id.txt", "a".repeat(257));
+      writeAt(root, "image_digest.txt", DIGEST);
+      const { runner } = makeRunner(() => [SUCCESS]);
+      const over = collectDeployEvidence(baseOpts({ runner, artifactDir: root }));
+      expect(over.kind).toBe("degraded");
+      expect(over.section).toContain("version_id.txt value exceeds 256 characters");
+
+      writeAt(root, "version_id.txt", "a".repeat(256));
+      const atCap = collectDeployEvidence(baseOpts({ runner, artifactDir: root }));
+      expect(atCap.kind).toBe("success");
+    } finally {
+      disposeTempRoot(root);
+    }
+  });
+});
+
 describe("section markdown shape (every branch keeps the explicit heading)", () => {
   test("heading first, dash bullets after, no trailing newline", () => {
     const root = makeTempRoot();
