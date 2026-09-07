@@ -1,5 +1,5 @@
 import { Fragment, useEffect, useRef, useState } from "react";
-import { Plus } from "lucide-react";
+import { ExternalLink, Plus } from "lucide-react";
 import { isDictionaryKey, t, type DictionaryKey } from "../../i18n";
 import { APP_VERSION } from "../../version";
 import { Button } from "@/components/ui/button";
@@ -45,10 +45,12 @@ import {
   type ChainTab,
   type ConfiguredProvider,
   type ModelOptionGroup,
+  type SettingsAppMeta,
   type SettingsManagePayload,
   type SettingsPayload,
 } from "./data";
 import { StatusBadge } from "./AppsPage";
+import { GitHubMark } from "./LoginPage";
 import { LoadFailedNotice, LoadingNotice, PageNotice, type NoticeKind } from "./PageNotice";
 
 type PendingAction =
@@ -441,6 +443,11 @@ function SettingsView({
         <span className="text-sm text-muted-foreground">{t(locale, "apps.by", { login: app.created_by })}</span>
       </div>
 
+      {/* Plan 53 A5: the GitHub identity card sits between the slug row and
+          the manage conditional, so BOTH faces (OpsCard managers and
+          HealthCard members) see it (AC3). */}
+      <AppInfoCard locale={locale} app={app} />
+
       {payload.can_manage ? (
         <OpsCard locale={locale} payload={payload} onPending={setPending} notice={opsNotice} />
       ) : (
@@ -573,6 +580,71 @@ function pendingConfirmCopy(
     },
   } as const;
   return map[pending.kind];
+}
+
+/**
+ * Plan 53 A5: the GitHub identity card — avatar, hyperlinked name,
+ * description, and the numeric App id, fed by the cached GitHub profile the
+ * settings route serves (migration 0019 columns). Rendered outside the
+ * can_manage conditional, so managers and members alike see it (AC3).
+ * Degradation is strictly per-field (plan Global Constraints): a null field
+ * simply does not render — a never-synced App shows the placeholder mark and
+ * its local App id with no link, no error state, no layout collapse
+ * (the fail-open UI face of the AD-531 read path).
+ */
+export function AppInfoCard({ locale, app }: { locale: SpaBoot["locale"]; app: SettingsAppMeta }) {
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle>{t(locale, "settings.appInfo")}</CardTitle>
+        <CardDescription>{t(locale, "settings.appInfoCopy")}</CardDescription>
+      </CardHeader>
+      <CardContent>
+        <div className="flex items-start gap-4">
+          {app.github_avatar_url ? (
+            <img
+              src={app.github_avatar_url}
+              alt=""
+              className="h-12 w-12 shrink-0 rounded-full border object-cover"
+            />
+          ) : (
+            <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded-full border bg-muted text-muted-foreground">
+              <GitHubMark className="h-6 w-6" />
+            </div>
+          )}
+          <div className="flex min-w-0 flex-col gap-1">
+            {app.github_name ? (
+              app.github_html_url ? (
+                <a
+                  href={app.github_html_url}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="inline-flex items-center gap-1.5 font-semibold text-primary hover:underline"
+                  aria-label={t(locale, "settings.appInfoViewOnGithub", { name: app.github_name })}
+                >
+                  {app.github_name}
+                  <ExternalLink className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
+                </a>
+              ) : (
+                <span className="font-semibold">{app.github_name}</span>
+              )
+            ) : null}
+            {app.github_description ? <p className="text-sm">{app.github_description}</p> : null}
+            <p className="text-sm text-muted-foreground">
+              {t(locale, "settings.appInfoAppId", { id: app.github_app_id })}
+            </p>
+            {app.github_metadata_synced_at ? (
+              <p className="text-xs text-muted-foreground">
+                {t(locale, "settings.appInfoSynced", {
+                  time: formatRelativeTime(app.github_metadata_synced_at, locale),
+                })}
+              </p>
+            ) : null}
+          </div>
+        </div>
+      </CardContent>
+    </Card>
+  );
 }
 
 function HealthBody({ locale, payload }: { locale: SpaBoot["locale"]; payload: SettingsPayload }) {

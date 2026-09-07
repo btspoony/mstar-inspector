@@ -368,6 +368,18 @@ export const en = {
     runtimeImageValue: "This App's reviews run on the {id} runtime image.",
     saveRuntimeImage: "Save runtime image",
     /**
+     * Plan 53 A7: GitHub identity card. `{name}`/`{id}`/`{time}` carry the
+     * synced profile name, the numeric App id, and a relative synced-at time
+     * (formatRelativeTime output) — nullable server fields degrade per-field,
+     * so each key renders only when its value exists.
+     */
+    appInfo: "GitHub App",
+    appInfoCopy:
+      "The identity GitHub reports for this App. Profile fields are cached from the App's GitHub settings page; open the name to manage it there.",
+    appInfoAppId: "App ID: {id}",
+    appInfoViewOnGithub: "View {name} on GitHub",
+    appInfoSynced: "Synced {time}",
+    /**
      * Plan 51 T3: deployment version footer. `{version}` carries the
      * v-prefixed display form (`v${APP_VERSION}`) — the same shape as the
      * /healthz field and release tags.
