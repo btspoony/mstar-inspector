@@ -14,7 +14,14 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { t } from "../../src/i18n";
 import { composeModelOptions } from "../../src/dashboard/model-membership";
 import { APP_VERSION } from "../../src/version";
-import { parseModels, modelChainTabs, seatRoleValues, seatSelectValue, splitModelChain, type SettingsAppMeta } from "../../src/spa/pages/data";
+import { PROVIDER_IDS_COMMON } from "../../src/contracts/provider-catalog.generated";
+import { parseModels, modelChainTabs, seatRoleValues, seatSelectValue, splitModelChain, type CatalogProvider, type SettingsAppMeta } from "../../src/spa/pages/data";
+import {
+  ProviderCombobox,
+  ProviderComboboxPanel,
+  filterCatalogProviders,
+  groupCatalogProviders,
+} from "../../src/spa/components/provider-combobox";
 import { AppInfoCard } from "../../src/spa/pages/SettingsPage";
 
 describe("settings layout (plan 35 T4)", () => {
@@ -228,15 +235,18 @@ describe("configured providers + catalog add flow (plan 38 T2)", () => {
 
   test("plan 38 add-flow copy is dictionary-backed in both locales", () => {
     expect(t("en", "settings.addProvider")).toBe("Add provider");
-    // Plan 42: the zh label keeps the English word "Provider" — the settled
-    // label the header button and every referencing copy line share.
-    expect(t("zh_CN", "settings.addProvider")).toBe("添加 Provider");
+    // Plan 54: the zh label unifies on 模型提供方 (supersedes the plan-42
+    // settled "添加 Provider" — no bare "Provider" left on the picker
+    // surface); en keeps "Add provider".
+    expect(t("zh_CN", "settings.addProvider")).toBe("添加模型提供方");
     expect(t("en", "settings.providersCopy")).toContain("Add Provider");
-    expect(t("zh_CN", "settings.providersCopy")).toContain("添加 Provider");
+    expect(t("zh_CN", "settings.providersCopy")).toContain("添加模型提供方");
     expect(t("en", "settings.noConfiguredProviders")).toContain("No providers configured yet");
     expect(t("zh_CN", "settings.noConfiguredProviders")).toContain("尚未配置");
-    expect(t("en", "settings.catalogBuiltin")).toContain("Built-in");
-    expect(t("zh_CN", "settings.catalogBuiltin")).toContain("内置");
+    // Plan 54: the 常用提供方 common tier replaces 内置提供方 as the group
+    // name (supersedes the plan-38 "Built-in"/"内置" pins).
+    expect(t("en", "settings.catalogBuiltin")).toBe("Common providers");
+    expect(t("zh_CN", "settings.catalogBuiltin")).toBe("常用提供方");
     expect(t("en", "settings.catalogTemplate")).toContain("templates");
     expect(t("zh_CN", "settings.catalogTemplate")).toContain("模板");
     expect(t("en", "settings.configureProvider", { label: "Anthropic" })).toContain("Anthropic");
@@ -254,8 +264,11 @@ describe("catalog provenance + eligibility messaging (plan 38 T3)", () => {
     expect(source).toContain("settings.eligibilityBuiltin");
     expect(source).toContain("settings.eligibilityTemplate");
     expect(source).toContain("settings.eligibilityUnavailable");
-    // Unavailable rows keep their picker entry (marked), never hidden silently.
-    expect(source).toContain("settings.eligibilityUnavailableShort");
+    // Unavailable rows keep their picker entry (marked), never hidden
+    // silently — plan 54: the short suffix moved into the combobox file with
+    // the picker rows (supersedes the in-page pin).
+    const combobox = readFileSync(join(import.meta.dir, "../../src/spa/components/provider-combobox.tsx"), "utf8");
+    expect(combobox).toContain("settings.eligibilityUnavailableShort");
   });
 
   test("an unavailable entry gets an explanation instead of a form — nothing can save it silently", () => {
@@ -266,10 +279,12 @@ describe("catalog provenance + eligibility messaging (plan 38 T3)", () => {
 
   test("the catalog picker uses the aria-labelledby precedent; custom configured rows show the catalog label", () => {
     const source = readFileSync(join(import.meta.dir, "../../src/spa/pages/SettingsPage.tsx"), "utf8");
-    // MembersPage precedent: visible label span + aria-labelledby on the
-    // trigger — no wrapping <label> around the Radix Select.
+    // MembersPage precedent: visible label span naming the picker — no
+    // wrapping <label>. Plan 54: the span names the combobox input through
+    // the labelledby prop (the aria-labelledby attribute itself moved into
+    // provider-combobox.tsx, superseding the old attribute pin).
     expect(source).toContain('id="settings-catalog-provider-label"');
-    expect(source).toContain('aria-labelledby="settings-catalog-provider-label"');
+    expect(source).toContain('labelledby="settings-catalog-provider-label"');
     // Template-materialized configured rows resolve the human label via the
     // catalog map (same pattern as key rows), keeping the raw id in the detail.
     expect(source).toContain("catalogById[row.provider_id]?.label");
@@ -291,6 +306,198 @@ describe("catalog provenance + eligibility messaging (plan 38 T3)", () => {
     expect(t("zh_CN", "settings.eligibilityUnavailableShort", { image: "omp" })).toContain("omp");
     expect(t("en", "settings.addProviderCopy")).toContain("can't be saved");
     expect(t("zh_CN", "settings.addProviderCopy")).toContain("无法保存");
+  });
+});
+
+describe("provider combobox (plan 54 T3)", () => {
+  const commonEntry = (id: string, label: string, overrides: Partial<CatalogProvider> = {}): CatalogProvider => ({
+    id,
+    label,
+    tier: "builtin",
+    base_url: null,
+    api: null,
+    models: ["m1"],
+    verifiable: true,
+    eligibility: "builtin",
+    display_group: "common",
+    ...overrides,
+  });
+  const catalogEntry = (id: string, label: string, overrides: Partial<CatalogProvider> = {}): CatalogProvider => ({
+    id,
+    label,
+    tier: "builtin",
+    base_url: null,
+    api: null,
+    models: ["m1"],
+    verifiable: true,
+    eligibility: "builtin",
+    display_group: "catalog",
+    ...overrides,
+  });
+
+  // Common tier = the 5 frozen ids; the catalog group = everything else
+  // (two template rows + one fabricated unavailable builtin whose label
+  // matches the "gem" probe, so the filtered-face marking is observable).
+  const catalog: CatalogProvider[] = [
+    commonEntry("anthropic", "Anthropic"),
+    commonEntry("openai", "OpenAI"),
+    commonEntry("gemini", "Google Gemini"),
+    commonEntry("copilot", "GitHub Copilot"),
+    commonEntry("xai", "xAI"),
+    catalogEntry("mistral", "Mistral AI", { tier: "template", eligibility: "template" }),
+    catalogEntry("workers-ai", "Workers AI", { tier: "template", eligibility: "template" }),
+    catalogEntry("gemini-image", "Gemini Image", { eligibility: "unavailable" }),
+  ];
+
+  test("the pure filter narrows on label or id, case-insensitively; clearing restores the full list", () => {
+    // "gem" keeps both the common Gemini and the unavailable catalog row —
+    // filtering never drops unavailable entries (they stay listed + marked).
+    expect(filterCatalogProviders(catalog, "gem").map((p) => p.id)).toEqual(["gemini", "gemini-image"]);
+    expect(filterCatalogProviders(catalog, "GEM").map((p) => p.id)).toEqual(["gemini", "gemini-image"]);
+    expect(filterCatalogProviders(catalog, "copilot").map((p) => p.id)).toEqual(["copilot"]);
+    expect(filterCatalogProviders(catalog, "github").map((p) => p.id)).toEqual(["copilot"]); // label match
+    // Empty / whitespace query → the full catalog in payload order.
+    expect(filterCatalogProviders(catalog, "")).toHaveLength(catalog.length);
+    expect(filterCatalogProviders(catalog, "   ").map((p) => p.id)).toEqual(catalog.map((p) => p.id));
+    expect(filterCatalogProviders(catalog, "zzz-no-match")).toEqual([]);
+  });
+
+  test("the pure grouping puts the frozen common 5 first; catalog holds the rest", () => {
+    expect([...PROVIDER_IDS_COMMON]).toEqual(["anthropic", "openai", "gemini", "copilot", "xai"]);
+    const groups = groupCatalogProviders(catalog);
+    expect(groups.common.map((p) => p.id)).toEqual([...PROVIDER_IDS_COMMON]);
+    expect(groups.common.every((p) => p.display_group === "common")).toBe(true);
+    // Within-group payload order is preserved; the unavailable row stays.
+    expect(groups.catalog.map((p) => p.id)).toEqual(["mistral", "workers-ai", "gemini-image"]);
+    expect(groups.catalog.every((p) => p.display_group === "catalog")).toBe(true);
+  });
+
+  test("the open panel renders common first, marks the filtered unavailable row, and marks the selection (SSR)", () => {
+    const panel = (query: string, value?: string) =>
+      renderToStaticMarkup(
+        createElement(ProviderComboboxPanel, {
+          locale: "en",
+          providers: catalog,
+          query,
+          value,
+          imageId: "omp",
+          listboxId: "lb",
+          onSelect: () => {},
+        }),
+      );
+    const full = panel("", "gemini");
+    // Common providers group renders before Catalog templates.
+    expect(full.indexOf("Common providers")).toBeGreaterThan(-1);
+    expect(full.indexOf("Catalog templates")).toBeGreaterThan(full.indexOf("Common providers"));
+    // The selected row carries aria-selected.
+    expect(full).toContain('aria-selected="true"');
+    // The unavailable catalog row stays listed and marked, with the suffix.
+    expect(full).toContain('aria-disabled="true"');
+    expect(full).toContain("unavailable on omp");
+    const narrowed = panel("gem", "gemini");
+    // Narrowed to matching entries only — the common group keeps just Gemini
+    // (one of the frozen 5), the catalog group only the unavailable marked
+    // row; every other entry is gone.
+    expect(narrowed).toContain("Google Gemini");
+    expect(narrowed).toContain('aria-selected="true"');
+    expect(narrowed).toContain("Gemini Image");
+    expect(narrowed).toContain('aria-disabled="true"');
+    expect(narrowed).toContain("unavailable on omp");
+    expect(narrowed).not.toContain("Anthropic");
+    expect(narrowed).not.toContain("OpenAI");
+    expect(narrowed).not.toContain("Copilot");
+    expect(narrowed).not.toContain("Mistral");
+    expect(narrowed).not.toContain("Workers AI");
+    // An empty match renders the honest empty state, never a bare box.
+    expect(panel("zzz")).toContain("No providers match");
+  });
+
+  test("an unavailable row is marked the same way in the common group (both groups keep the marker)", () => {
+    const marked: CatalogProvider[] = [
+      commonEntry("xai", "xAI", { eligibility: "unavailable" }),
+      catalogEntry("mistral", "Mistral AI", { tier: "template", eligibility: "template" }),
+    ];
+    const out = renderToStaticMarkup(
+      createElement(ProviderComboboxPanel, {
+        locale: "en",
+        providers: marked,
+        query: "",
+        value: undefined,
+        imageId: "omp",
+        listboxId: "lb",
+        onSelect: () => {},
+      }),
+    );
+    expect(out).toContain('aria-disabled="true"');
+    expect(out).toContain("unavailable on omp");
+    expect(out.indexOf("Common providers")).toBeGreaterThan(-1);
+    expect(out.indexOf("Catalog templates")).toBeGreaterThan(out.indexOf("Common providers"));
+  });
+
+  test("the closed combobox input carries the combobox aria face (SSR)", () => {
+    const out = renderToStaticMarkup(
+      createElement(ProviderCombobox, {
+        locale: "en",
+        labelledby: "settings-catalog-provider-label",
+        providers: catalog,
+        value: undefined,
+        onValueChange: () => {},
+        imageId: "omp",
+      }),
+    );
+    expect(out).toContain('role="combobox"');
+    expect(out).toContain('aria-expanded="false"');
+    expect(out).toContain('aria-autocomplete="list"');
+    expect(out).toContain('aria-labelledby="settings-catalog-provider-label"');
+    expect(out).toContain("Search model providers…");
+    // Closed → no listbox anywhere in the markup.
+    expect(out).not.toContain('role="listbox"');
+  });
+
+  test("Esc and outside-click dismiss; focus/typing opens (source pins at the QA minimum bar)", () => {
+    const source = readFileSync(join(import.meta.dir, "../../src/spa/components/provider-combobox.tsx"), "utf8");
+    // Esc closes.
+    expect(source).toContain('if (event.key === "Escape") setOpen(false);');
+    // An outside pointerdown closes (contains check on the root ref).
+    expect(source).toContain('document.addEventListener("pointerdown", onPointerDown);');
+    expect(source).toContain("!rootRef.current.contains(event.target as Node)");
+    // Focus/typing opens, and every keystroke re-narrows the panel.
+    expect(source).toContain("onFocus={() => setOpen(true)}");
+    expect(source).toContain("setQuery(event.target.value);");
+    // Selection is inert for unavailable rows — the UI side of the red line
+    // (the server-side eligibility pre-check stays the last line of defense
+    // and is untouched).
+    expect(source).toContain("if (!unavailable) onSelect(provider.id);");
+  });
+
+  test("plan 54 picker copy is dictionary-backed; zh picker copy carries no bare Provider (AC1 sweep)", () => {
+    expect(t("en", "settings.provider")).toBe("Model provider");
+    expect(t("zh_CN", "settings.provider")).toBe("模型提供方");
+    expect(t("en", "settings.providers")).toBe("Providers"); // en keeps the section title
+    expect(t("zh_CN", "settings.providers")).toBe("模型提供方");
+    expect(t("en", "settings.selectProvider")).toBe("Search model providers…");
+    expect(t("zh_CN", "settings.selectProvider")).toBe("搜索模型提供方…");
+    expect(t("en", "settings.noProviderMatch", { query: "zzz" })).toContain("zzz");
+    expect(t("zh_CN", "settings.noProviderMatch", { query: "zzz" })).toContain("模型提供方");
+    // Picker-adjacent zh strings stay 模型提供方-consistent: zero bare
+    // "Provider" (the grep-verifiable AC1 closure, pinned per key;
+    // en "Providers"/"Add provider" section/button titles are intentionally
+    // unchanged).
+    for (const key of [
+      "settings.provider",
+      "settings.providers",
+      "settings.providersCopy",
+      "settings.noConfiguredProviders",
+      "settings.addProvider",
+      "settings.addProviderCopy",
+      "settings.selectProvider",
+      "settings.noProviderMatch",
+      "settings.catalogBuiltin",
+      "settings.catalogTemplate",
+      "settings.configureProvider",
+    ] as const) {
+      expect(t("zh_CN", key), key).not.toContain("Provider");
+    }
   });
 });
 
@@ -324,16 +531,24 @@ describe("add-entry visibility + picker usability at breadth (plan 42 T2)", () =
     expect(body).toContain("onOpenChange={setAddOpen}");
   });
 
-  test("the catalog picker groups builtin first, then template, height-capped to an internal scroll", () => {
+  test("the catalog picker is the plan-54 combobox: common group first, then catalog, height-capped to an internal scroll", () => {
+    // Supersedes the plan-42 "builtin SelectGroup precedes template
+    // SelectGroup + <SelectContent className=\"max-h-72\">" pin — the Radix
+    // Select left the add panel (AD-542); the chain/seat editors keep theirs.
     const source = readFileSync(join(import.meta.dir, "../../src/spa/pages/SettingsPage.tsx"), "utf8");
-    // Grouping: the builtin SelectGroup precedes the template one.
-    const builtinPos = source.indexOf("settings.catalogBuiltin");
-    const templatePos = source.indexOf("settings.catalogTemplate");
-    expect(builtinPos).toBeGreaterThan(-1);
-    expect(templatePos).toBeGreaterThan(builtinPos);
-    // Breadth usability: the list is height-capped (internal scroll) on the
-    // existing Select primitive — no new component.
-    expect(source).toContain('<SelectContent className="max-h-72">');
+    expect(source).toContain("<ProviderCombobox");
+    expect(source).not.toContain('<SelectContent className="max-h-72">');
+    // AD-547 separation: grouping reads display_group inside the combobox
+    // only — the page (forms/config branching) never mentions it.
+    expect(source).not.toContain("display_group");
+    const combobox = readFileSync(join(import.meta.dir, "../../src/spa/components/provider-combobox.tsx"), "utf8");
+    // 常用提供方 (catalogBuiltin) heads the panel before 目录模板.
+    const commonPos = combobox.indexOf("settings.catalogBuiltin");
+    const templatePos = combobox.indexOf("settings.catalogTemplate");
+    expect(commonPos).toBeGreaterThan(-1);
+    expect(templatePos).toBeGreaterThan(commonPos);
+    // Breadth usability: the panel is height-capped (internal scroll).
+    expect(combobox).toContain("max-h-72");
   });
 
   test("the template form carries an editable prefilled base URL and a {account_id}-conditional account-id field", () => {
