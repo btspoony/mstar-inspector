@@ -6,6 +6,12 @@
  * insights-home module retired — they now live in pages/data.ts.
  * Plan 49 T2: the URL↔filter re-sync pins — after same-route navigation or
  * history traversal the filter state re-derives from the location.
+ * Plan 56 T3: the three stat sections render as charts (components/charts).
+ * This file pins the assembled page faces — chart wiring (AD-561 token
+ * colors, bar-end counts discriminated from axis ticks, dual-series legend,
+ * localized date axis, role/aria), the empty faces (never an empty-axis
+ * svg), and the bilingual copy; the plan-45 proportional-bar pin is
+ * superseded in place.
  * No DOM runner — same source-scan contract as plan 29 SPA tests.
  */
 import { describe, expect, test } from "bun:test";
@@ -28,33 +34,51 @@ import {
 const page = readFileSync(join(import.meta.dir, "../../src/spa/pages/InsightsPage.tsx"), "utf8");
 const router = readFileSync(join(import.meta.dir, "../../src/spa/router.tsx"), "utf8");
 
-/** Plan 56 T2 fixture: v1 severity vocabulary + a NULL category row. */
+/**
+ * Plan 56 T2 fixture: v1 severity vocabulary + a NULL category row. The
+ * counts sit outside each chart's own niceTicks set (severity max 7 → ticks
+ * 0/2/4/6/8; category max 9 → ticks 0/5/10), so a bar-end count pin can
+ * never be satisfied by axis tick text (T2-M1 strengthening); the weekly
+ * buckets sum to 3 reviews · 6 findings — both off `reviews_total: 4` — so
+ * the trend summary pin only passes if the line derives from weekly_trend.
+ */
 const RECORDS: InsightsSummary = {
   window_days: 30,
   reviews_total: 4,
   findings_by_severity: [
-    { severity: "must-fix", count: 3 },
-    { severity: "should-fix", count: 2 },
-    { severity: "nit", count: 1 },
+    { severity: "must-fix", count: 7 },
+    { severity: "should-fix", count: 5 },
+    { severity: "nit", count: 3 },
   ],
   findings_by_category: [
-    { category: "logic", count: 4 },
-    { category: null, count: 2 },
+    { category: "logic", count: 9 },
+    { category: null, count: 6 },
   ],
   verdict_distribution: [
     { verdict: "comment", count: 3 },
     { verdict: "approve", count: 1 },
   ],
   weekly_trend: [
-    { week_start: "2026-08-17", reviews: 1, findings: 0 },
-    { week_start: "2026-08-24", reviews: 3, findings: 4 },
+    { week_start: "2026-08-17", reviews: 1, findings: 2 },
+    { week_start: "2026-08-24", reviews: 2, findings: 4 },
   ],
   recurring_top: [],
   repos: [],
 };
 
-const renderRecords = (locale: "en" | "zh_CN") =>
-  renderToStaticMarkup(createElement(InsightsRecordsView, { locale, data: RECORDS }));
+const renderRecords = (locale: "en" | "zh_CN", data: InsightsSummary = RECORDS) =>
+  renderToStaticMarkup(createElement(InsightsRecordsView, { locale, data }));
+
+/**
+ * The page renders exactly three chart svgs (severity, category, trend — no
+ * other svg lives in InsightsRecordsView); the slices isolate each chart so
+ * count/legend/aria assertions cannot collide with a sibling chart's text.
+ */
+const chartSlices = (html: string): [string, string, string] => {
+  const [severity, category, trend] = html.split("<svg").slice(1);
+  if (!severity || !category || !trend) throw new Error("expected three chart svgs on the records page");
+  return [severity, category, trend];
+};
 
 describe("records page assembly (plan 36 T2)", () => {
   test("window switch is the INSIGHTS_WINDOWS segmented ToggleGroup", () => {
@@ -100,35 +124,83 @@ describe("records page assembly (plan 36 T2)", () => {
     // regression face it guarded (severity counts visibly rendering, token
     // discipline) must still hold in the new chart DOM.
     const html = renderRecords("en");
+    const [severity] = chartSlices(html);
     // Counts coexist with the graphic as bar-end text (color is never the
-    // only carrier), bars carry the locked AD-561 tokens.
-    expect(html).toContain(">3</text>");
-    expect(html).toContain(">2</text>");
-    expect(html).toContain('fill="var(--red-700)"');
-    expect(html).toContain('fill="var(--amber-700)"');
-    expect(html).toContain('fill="var(--gray-700)"');
-    expect(html).toContain("must-fix");
+    // only carrier). The fixture counts 7/5/3 sit outside the chart's own
+    // tick set (niceTicks(7) = 0/2/4/6/8), so only a rendered bar-end label
+    // — never an axis tick — can satisfy these (T2-M1).
+    expect(severity).toContain(">7</text>");
+    expect(severity).toContain(">5</text>");
+    expect(severity).toContain(">3</text>");
+    // Bars carry the locked AD-561 tokens and the severity label stays
+    // visible next to its bar.
+    expect(severity).toContain('fill="var(--red-700)"');
+    expect(severity).toContain('fill="var(--amber-700)"');
+    expect(severity).toContain('fill="var(--gray-700)"');
+    expect(severity).toContain("must-fix");
     // The old proportional-bar markup is gone entirely.
     expect(html).not.toContain("basis-full");
     expect(html).not.toContain('style="width');
   });
 
-  test("category NULL keeps the uncategorized label; trend card carries totals, legend, and dates", () => {
+  test("category chart: NULL category rides the uncategorized key with the neutral series face", () => {
+    const [severity, category] = chartSlices(renderRecords("en"));
+    expect(severity).not.toContain("uncategorized");
+    // The NULL category row renders under the i18n label, next to the real
+    // category; counts 9/6 sit outside the chart's tick set (niceTicks(9) =
+    // 0/5/10), so these are bar-end labels, not ticks (T2-M1).
+    expect(category).toContain("uncategorized");
+    expect(category).toContain("logic");
+    expect(category).toContain(">9</text>");
+    expect(category).toContain(">6</text>");
+    // No per-item color is passed → the chart's neutral series token
+    // (AD-561 default), never one of the severity accents.
+    expect(category).toContain('fill="var(--blue-700)"');
+    expect(category).not.toContain('fill="var(--red-700)"');
+  });
+
+  test("trend chart: dual-series legend with AD-561 colors, localized date axis, bucket-derived totals", () => {
     const html = renderRecords("en");
-    expect(html).toContain("uncategorized");
-    expect(html).toContain("logic");
-    // Window totals line (text counts coexisting with the trend chart).
-    expect(html).toContain("In this window: 4 reviews · 4 findings");
-    // Legend entries and localized date axis labels render in the SVG.
-    expect(html).toContain("Reviews");
-    expect(html).toContain("Findings");
-    expect(html).toContain("8/17");
+    const [, , trend] = chartSlices(html);
+    // Legend order pins the series→color pairing: the blue-700 swatch
+    // precedes the Reviews label, the amber-700 swatch the Findings label.
+    const blue = trend.indexOf('fill="var(--blue-700)"');
+    const reviews = trend.indexOf(">Reviews</text>");
+    const amber = trend.indexOf('fill="var(--amber-700)"');
+    const findings = trend.indexOf(">Findings</text>");
+    expect(blue).toBeGreaterThanOrEqual(0);
+    expect(blue).toBeLessThan(reviews);
+    expect(reviews).toBeLessThan(amber);
+    expect(amber).toBeLessThan(findings);
+    // Week date axis labels render inside the svg (en M/D format).
+    expect(trend).toContain("8/17");
+    expect(trend).toContain("8/24");
+    // The summary line sums the weekly buckets (1+2 reviews, 2+4 findings);
+    // both totals differ from the fixture's reviews_total=4, so the pin
+    // only passes if the line derives from weekly_trend itself.
+    expect(html).toContain("In this window: 3 reviews · 6 findings");
+  });
+
+  test("each chart svg carries role=img with its section's aria-label (AC4)", () => {
+    const [severity, category, trend] = chartSlices(renderRecords("en"));
+    expect(severity).toContain('role="img"');
+    expect(severity).toContain('aria-label="Findings by severity"');
+    expect(category).toContain('role="img"');
+    expect(category).toContain('aria-label="Findings by category"');
+    expect(trend).toContain('role="img"');
+    expect(trend).toContain('aria-label="Weekly trend"');
   });
 
   test("records surfaces localize bilingually (plan 56 T2)", () => {
     const zh = renderRecords("zh_CN");
-    expect(zh).toContain("窗口内共 4 次审查 · 4 个发现");
+    expect(zh).toContain("窗口内共 3 次审查 · 6 个发现");
+    // The date axis follows the page locale — zh format only, with no en
+    // M/D fallback (pins the locale prop reaching TrendChart).
     expect(zh).toContain("8月17日");
+    expect(zh).not.toContain("8/17");
+    // The NULL category label and the chart aria-labels localize too.
+    expect(zh).toContain("未分类");
+    expect(zh).toContain('aria-label="按严重程度统计的发现"');
   });
 
   test("records fetch opts into the repos aggregation (plan 36 QC F-001)", () => {
@@ -138,6 +210,54 @@ describe("records page assembly (plan 36 T2)", () => {
   test("off-set window deep links are rewritten on mount (plan 36 QC F-002)", () => {
     expect(page).toContain("normalizeWindowSearch");
     expect(page).toContain("window.history.replaceState");
+  });
+});
+
+describe("records page chart empty faces (plan 56 T3 / AC2)", () => {
+  // Same window/verdict payload as RECORDS, but every chart-fed array empty.
+  const NO_CHART_DATA: InsightsSummary = {
+    window_days: 30,
+    reviews_total: 4,
+    findings_by_severity: [],
+    findings_by_category: [],
+    verdict_distribution: [{ verdict: "comment", count: 3 }],
+    weekly_trend: [],
+    recurring_top: [],
+    repos: [],
+  };
+  // reviews_total 0 is the page-level empty: every stat card is suppressed.
+  const ZERO_REVIEWS: InsightsSummary = { ...NO_CHART_DATA, reviews_total: 0 };
+
+  test("reviews_total 0 → heading card only: readable empty copy, never an empty-axis chart (bilingual)", () => {
+    for (const locale of ["en", "zh_CN"] as const) {
+      const html = renderRecords(locale, ZERO_REVIEWS);
+      expect(html).toContain(t(locale, "insights.heading"));
+      expect(html).toContain(t(locale, "insights.noReviews"));
+      // All four stat cards are suppressed — no titles, no svgs at all.
+      expect(html).not.toContain(t(locale, "insights.findingsBySeverity"));
+      expect(html).not.toContain(t(locale, "insights.findingsByCategory"));
+      expect(html).not.toContain(t(locale, "insights.weeklyTrend"));
+      expect(html).not.toContain(t(locale, "insights.recurringFindings"));
+      expect(html).not.toContain("<svg");
+    }
+  });
+
+  test("reviews without findings/trend rows → per-section empty copy instead of bare charts (bilingual)", () => {
+    for (const locale of ["en", "zh_CN"] as const) {
+      const html = renderRecords(locale, NO_CHART_DATA);
+      // Severity and category cards each fall back to the noFindings copy.
+      expect(html.split(t(locale, "insights.noFindings")).length - 1).toBe(2);
+      // The trend card falls back to the noReviews copy — the zero-totals
+      // summary line must not render alongside it.
+      expect(html).toContain(t(locale, "insights.noReviews"));
+      const zeroSummary = t(locale, "insights.trendSummary", {
+        reviews: t(locale, "insights.reviews", { count: 0 }),
+        findings: t(locale, "insights.findings", { count: 0 }),
+      });
+      expect(html).not.toContain(zeroSummary);
+      // No chart got rendered against empty data.
+      expect(html).not.toContain("<svg");
+    }
   });
 });
 
@@ -256,6 +376,8 @@ describe("records page copy (plan 36 T2 / AC9)", () => {
       "insights.windowSegment",
       "insights.daysShort",
       "insights.noReviews",
+      "insights.noFindings",
+      "insights.uncategorized",
       "insights.seriesReviews",
       "insights.seriesFindings",
       "insights.trendSummary",
