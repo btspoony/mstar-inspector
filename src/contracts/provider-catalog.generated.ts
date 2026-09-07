@@ -21,6 +21,12 @@
  * `workers-ai` template carries the {account_id} base-URL placeholder the
  * save flow substitutes.
  *
+ * Display grouping (plan 54, AD-547): `PROVIDER_IDS_COMMON` is a
+ * DISPLAY-ONLY regroup of the settings picker (常用 providers first, the
+ * rest under the 目录模板 group). It carries ZERO runner semantics — the
+ * runner BYOK allowlist remains `PROVIDER_IDS_BUILTIN` /
+ * `PROVIDER_ENV_NAMES`, and no catalog entry or runner surface reads it.
+ *
  * Breadth enumeration (deterministic, auditable — every excluded snapshot
  * key names its rule; 213 snapshot keys → 194 breadth template entries):
  *   - rule (a) excluded as a builtin sourceKey (18 — no duplicate
@@ -4494,6 +4500,18 @@ export const PROVIDER_IDS_BUILTIN: readonly string[] = Object.freeze([
   "ai-gateway",
   "wafer-serverless",
   "ark"
+]);
+
+/** Display-only grouping of the settings picker (plan 54, AD-547): the 常用
+ *  tier shown first in the Add-provider picker — a frozen subset of
+ *  PROVIDER_IDS_BUILTIN in exactly this order. ZERO runner semantics: the
+ *  runner BYOK allowlist remains PROVIDER_IDS_BUILTIN / PROVIDER_ENV_NAMES. */
+export const PROVIDER_IDS_COMMON: readonly string[] = Object.freeze([
+  "anthropic",
+  "openai",
+  "gemini",
+  "copilot",
+  "xai"
 ]);
 
 /** The builtin tier as the legacy env-name mapping (consumer.ts:64
