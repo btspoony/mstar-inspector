@@ -25,6 +25,15 @@ duplicated here.
 
 ## Cutting a release (operator steps)
 
+**Prerequisite (once per repo):** the PR-creation step runs on the workflow's
+`GITHUB_TOKEN`, which requires the repo setting **Settings → Actions →
+General → Workflow permissions → "Allow GitHub Actions to create and approve
+pull requests"** to be enabled — the workflow's `pull-requests: write` does
+not bypass this repo-level gate (it is off by default). Enable it with
+`gh api -X PUT repos/<owner>/<repo>/actions/permissions/workflow -F can_approve_pull_request_reviews=true`.
+Anyone mirroring this release chain on a fork must flip the same setting on
+their repo.
+
 1. **Actions → Release prep → Run workflow.** Optionally pass an explicit
    version (`1.0.0`, or a prerelease like `1.1.0-alpha.0`). Leave the input
    empty for an auto patch bump derived from `package.json#version` — never
@@ -115,6 +124,13 @@ de-scope it into a "known issue".**
   manually: base `main`, head `release/vX.Y.Z`, title `release vX.Y.Z` (the
   title prefix is what the Release workflow's guard matches on — keep it
   exact).
+- **PR creation blocked by workflow permissions** (the final "Open or update
+  release PR" step fails with `GraphQL: GitHub Actions is not permitted to
+  create or approve pull requests (createPullRequest)`) — the repo-level gate
+  from the [prerequisite above](#cutting-a-release-operator-steps) is off.
+  The `release/vX.Y.Z` branch is already pushed by then; after enabling the
+  setting, either open the PR manually as described above, or delete the
+  branch and re-dispatch Release prep with the same version.
 - **Release PR shows no checks** — expected (AD-5, see step 3 above). The
   prep run's own log is the verification evidence for that PR.
 - **Re-dispatching prep for the same version** — the `release/vX.Y.Z` branch
