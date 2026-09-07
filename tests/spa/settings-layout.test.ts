@@ -814,12 +814,20 @@ describe("chain draft peer tab (plan 44 T2)", () => {
     expect(panelBody).toContain('outcome.kind === "success"');
     expect(panelBody).toContain("onOutcome(outcome)");
     expect(panelBody).toContain("onCreated(name.trim())");
-    // 放弃 discards through a ghost button without confirmation — gated by
-    // the same busy window as the save, so a discard can never race a
-    // resolving create into selecting the created tab.
-    expect(panelBody).toContain('t(locale, "settings.discardChain")}');
-    expect(panelBody).toContain('variant="ghost"');
-    expect(panelBody).toContain("disabled={busy}");
+    // 放弃 discards without confirmation — plan 55 (AD-552) supersedes the
+    // old hover-only ghost row: the button is injected through ChainEditor's
+    // actions prop into the save row, styled to be visible without hover
+    // (outline + sm + fixed small width). It stays bound to this panel's
+    // busy closure — the same window as the save, so a discard can never
+    // race a resolving create into selecting the created tab.
+    const actionsPos = panelBody.indexOf("actions={");
+    expect(actionsPos).toBeGreaterThan(-1);
+    const actionsNode = panelBody.slice(actionsPos, panelBody.indexOf("/>", actionsPos));
+    expect(actionsNode).toContain('variant="outline"');
+    expect(actionsNode).toContain('size="sm"');
+    expect(actionsNode).toContain('className="w-20"');
+    expect(actionsNode).toContain("disabled={busy}");
+    expect(actionsNode).toContain('t(locale, "settings.discardChain")}');
     // The draft panel mounts inside its own forceMount TabsContent; the
     // discard closes the draft — the selection then coerces through
     // activeChainTabId (plan-39 pin) back to Default — and, plan 55
@@ -941,6 +949,76 @@ describe("draft tab label live-sync (plan 55 A2/A3 / AD-551)", () => {
     expect(panelBody).not.toContain('useState("")');
     expect(panelBody).toContain("value={name}");
     expect(panelBody).toContain("onNameChange(event.target.value)");
+  });
+});
+
+describe("discard inline with the save row (plan 55 A4/A5 / AD-552)", () => {
+  /**
+   * The discard is a pure render insertion through ChainEditor's optional
+   * actions prop: the save-row wrapper exists only when actions are passed
+   * (absent = byte-equivalent tree for the Default / named-chain editors,
+   * whose pins elsewhere stay untouched), and the injected button keeps its
+   * disabled={busy} bound to DraftChainPanel's own busy closure. Structure
+   * is pinned over the source; the visible styling over SSR of the exported
+   * DraftChainPanel. createElement keeps this .ts file JSX-free.
+   */
+  const noop = () => {};
+  const panelHtml = (): string =>
+    renderToStaticMarkup(
+      createElement(DraftChainPanel, {
+        locale: "en",
+        groups: [],
+        name: "",
+        onNameChange: noop,
+        onCreate: () => Promise.resolve({ kind: "error" as const, message: "unused" }),
+        onOutcome: noop,
+        onDiscard: noop,
+        onCreated: noop,
+      }),
+    );
+
+  test("the save row renders save primary with actions right of it, only when actions exist", () => {
+    const source = readFileSync(join(import.meta.dir, "../../src/spa/pages/SettingsPage.tsx"), "utf8");
+    const editorBody = source.slice(source.indexOf("function ChainEditor"));
+    // Conditional wrapper: with no actions the save button renders bare —
+    // the AD-552 byte-equivalence guard for every other caller.
+    expect(editorBody).toContain("{actions ? (");
+    // Inside the row: save first (primary/leftmost), the actions node right
+    // after it.
+    const rowPos = editorBody.indexOf('<div className="flex items-center gap-2">');
+    const savePos = editorBody.indexOf("{saveButton}");
+    const actionsPos = editorBody.indexOf("{actions}");
+    expect(rowPos).toBeGreaterThan(-1);
+    expect(savePos).toBeGreaterThan(rowPos);
+    expect(actionsPos).toBeGreaterThan(savePos);
+    // DraftChainPanel is the injecting caller; the Default editor's call
+    // stays bare (named-tab editors pass no actions either — the conditional
+    // above already renders them byte-equivalent).
+    const chainsBody = source.slice(source.indexOf("function ChainsCard"), source.indexOf("function SeatsCard"));
+    const firstEditorPos = chainsBody.indexOf("<ChainEditor");
+    const defaultCall = chainsBody.slice(firstEditorPos, chainsBody.indexOf("/>", firstEditorPos));
+    expect(defaultCall).not.toContain("actions={");
+    const panelBody = source.slice(source.indexOf("function DraftChainPanel"), source.indexOf("function ChainEditor"));
+    expect(panelBody).toContain("actions={");
+  });
+
+  test("the discard is visibly styled without hover and sits in the save row (SSR)", () => {
+    const html = panelHtml();
+    // Outline + sm + the fixed width land on the real button; the label is
+    // the untouched discardChain key. No confirmation dialog anywhere.
+    expect(html).toContain('data-variant="outline"');
+    expect(html).toContain('data-size="sm"');
+    expect(html).toContain("w-20");
+    expect(html).toContain(">Discard</button>");
+    expect(html).not.toContain("dialog");
+    // Same row: the flex container wraps both buttons — the save (primary,
+    // default variant) opens the row, the outline discard follows it.
+    const rowPos = html.indexOf("flex items-center gap-2");
+    const savePos = html.indexOf('data-variant="default"');
+    const discardPos = html.indexOf('data-variant="outline"');
+    expect(rowPos).toBeGreaterThan(-1);
+    expect(savePos).toBeGreaterThan(rowPos);
+    expect(discardPos).toBeGreaterThan(savePos);
   });
 });
 

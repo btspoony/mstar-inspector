@@ -1,4 +1,4 @@
-import { Fragment, useEffect, useRef, useState } from "react";
+import { Fragment, useEffect, useRef, useState, type ReactNode } from "react";
 import { ExternalLink, Plus } from "lucide-react";
 import { isDictionaryKey, t, type DictionaryKey } from "../../i18n";
 import { APP_VERSION } from "../../version";
@@ -1788,10 +1788,17 @@ export function DraftChainPanel({
             });
         }}
         saveLabel={t(locale, "settings.saveChain")}
+        actions={
+          // Plan 55 (AD-552): 放弃 joins the save row instead of the old
+          // hover-only ghost row below it — outline + small fixed width so it
+          // is visible without hover, save stays primary on the left. Still
+          // no confirmation, and disabled under the same busy window as the
+          // save (this panel's busy closure — the double-trigger coverage).
+          <Button type="button" variant="outline" size="sm" className="w-20" disabled={busy} onClick={onDiscard}>
+            {t(locale, "settings.discardChain")}
+          </Button>
+        }
       />
-      <Button type="button" variant="ghost" className="self-start" disabled={busy} onClick={onDiscard}>
-        {t(locale, "settings.discardChain")}
-      </Button>
     </div>
   );
 }
@@ -1802,6 +1809,7 @@ function ChainEditor({
   stored,
   onSave,
   saveLabel,
+  actions,
 }: {
   locale: SpaBoot["locale"];
   groups: ModelOptionGroup[];
@@ -1809,6 +1817,13 @@ function ChainEditor({
   /** Resolves the save outcome (plan 44 T3): rendered in this editor's region. */
   onSave: (chain: string) => Promise<OpNotice>;
   saveLabel?: string;
+  /**
+   * Plan 55 (AD-552): caller actions rendered in the save row, right of the
+   * save button (pure render insertion — save semantics, the busy gate and
+   * the outcome region are untouched). Absent, the save button renders bare:
+   * byte-equivalent to the pre-actions tree (Default / named-chain editors).
+   */
+  actions?: ReactNode;
 }) {
   const [chain, setChain] = useState(() => splitModelChain(stored));
   const [pick, setPick] = useState<string | undefined>(undefined);
@@ -1831,6 +1846,12 @@ function ChainEditor({
       setBusy(false);
     }
   }
+
+  const saveButton = (
+    <Button type="button" disabled={busy} onClick={() => void save()}>
+      {saveLabel ?? t(locale, "settings.saveChain")}
+    </Button>
+  );
 
   return (
     <div className="flex flex-col gap-3">
@@ -1889,9 +1910,14 @@ function ChainEditor({
           {t(locale, "settings.addToChain")}
         </Button>
       </div>
-      <Button type="button" disabled={busy} onClick={() => void save()}>
-        {saveLabel ?? t(locale, "settings.saveChain")}
-      </Button>
+      {actions ? (
+        <div className="flex items-center gap-2">
+          {saveButton}
+          {actions}
+        </div>
+      ) : (
+        saveButton
+      )}
       <NoticeRegion notice={notice} />
     </div>
   );
