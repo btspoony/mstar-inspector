@@ -16,7 +16,8 @@
  * listbox panel with role=option rows, ArrowDown/ArrowUp walking an
  * active-descendant highlight across the filtered rows with Enter to select
  * (task-3 review fix: 「可选」 must be keyboard-reachable) and Esc /
- * outside-click to dismiss (the full ARIA 1.2 pattern is still not required).
+ * Tab / outside-click to dismiss (the full ARIA 1.2 pattern is still not
+ * required; the highlight scrolls into view — QC fix round).
  *
  * Unavailable entries stay listed and marked (`aria-disabled` + the
  * "unavailable on {image}" suffix) in BOTH groups — selecting one is a no-op,
@@ -171,10 +172,12 @@ export function ProviderComboboxPanel({
 
 /**
  * The stateful combobox shell: query + open state around the pure panel.
- * Focus, click, typing, or an arrow key opens the list; Esc, an option pick,
- * or a pointerdown outside the root closes it. ArrowDown/ArrowUp move the
- * active-descendant highlight across the filtered rows and Enter selects it,
- * so 「可选」 is keyboard-reachable (task-3 review fix). The selected entry
+ * Focus, click, typing, or an arrow key opens the list; Esc, Tab, an option
+ * pick, or a pointerdown outside the root closes it. ArrowDown/ArrowUp move
+ * the active-descendant highlight across the filtered rows and Enter selects
+ * it, so 「可选」 is keyboard-reachable (task-3 review fix); a highlight
+ * change scrolls the row into view inside the height-capped list (QC fix
+ * round). The selected entry
  * is surfaced by the check mark on its row (and by AddProviderSection's form
  * heading) — the input itself stays a query field and clears on selection.
  */
@@ -218,6 +221,18 @@ export function ProviderCombobox({
     return () => document.removeEventListener("pointerdown", onPointerDown);
   }, [open]);
 
+  // The keyboard highlight stays visible (QC fix round): the list is capped
+  // at max-h-72 with an internal scroll and arrow defaults are prevented, so
+  // without this an ArrowDown past the fold moves the highlight (and a
+  // following Enter commits) to a row the user cannot see — the replaced
+  // Radix Select auto-scrolled its active item. Same id bridge as
+  // aria-activedescendant. Client-only: effects never run during SSR, so the
+  // static-markup tests stay clean and the pure panel stays effect-free.
+  useEffect(() => {
+    if (!open || !active) return;
+    document.getElementById(optionId(listboxId, active.id))?.scrollIntoView({ block: "nearest" });
+  }, [open, active, listboxId]);
+
   function select(id: string) {
     onValueChange(id);
     setQuery("");
@@ -254,6 +269,12 @@ export function ProviderCombobox({
         }}
         onKeyDown={(event) => {
           if (event.key === "Escape") setOpen(false);
+          // Tab moves focus out: collapse first so the overlay and
+          // aria-expanded don't go stale (QC fix round). In keydown, so it
+          // runs before the default focus move; no preventDefault — focus
+          // still advances (and a keydown sidesteps the blur-before-click
+          // trap that a blur-based close would hit on row clicks).
+          if (event.key === "Tab") setOpen(false);
           if (event.key === "ArrowDown" || event.key === "ArrowUp") {
             event.preventDefault();
             if (!open) {

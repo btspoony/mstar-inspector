@@ -498,6 +498,34 @@ describe("provider combobox (plan 54 T3)", () => {
     expect(source).toContain("onClick={() => setOpen(true)}");
   });
 
+  test("QC fix round: the keyboard highlight scrolls into view and Tab closes the list (source pins)", () => {
+    const source = readFileSync(join(import.meta.dir, "../../src/spa/components/provider-combobox.tsx"), "utf8");
+    // F1: while open, a highlight change scrolls the active row into view
+    // inside the max-h-72 scroll container — arrowing past the fold must not
+    // let Enter commit an unseen row (the replaced Radix Select auto-scrolled
+    // its active item).
+    expect(source).toContain('scrollIntoView({ block: "nearest" })');
+    // The effect is gated: it runs only for the open list with a highlighted
+    // row (no scroll work while closed or in the zero-match state).
+    expect(source).toContain("if (!open || !active) return;");
+    // …and it lives in the stateful SHELL, never in the SSR-pure panel (the
+    // panel's static-markup testability depends on being effect-free).
+    const panelBody = source.slice(
+      source.indexOf("export function ProviderComboboxPanel"),
+      source.indexOf("export function ProviderCombobox({"),
+    );
+    const shellBody = source.slice(source.indexOf("export function ProviderCombobox({"));
+    expect(panelBody).not.toContain("scrollIntoView");
+    expect(panelBody).not.toContain("useEffect");
+    expect(shellBody).toContain("scrollIntoView");
+    // F2: Tab closes the open list in the keydown handler — no stale overlay
+    // floating over the page with aria-expanded="true" after focus moves on.
+    expect(source).toContain('if (event.key === "Tab") setOpen(false);');
+    // Deliberately keydown, not onBlur: a blur-close would fire before a
+    // row's click lands (the qc3 F-002 disposition).
+    expect(source).not.toContain("onBlur");
+  });
+
   test("option rows carry the aria-activedescendant ids + highlight, and the zero-match state keeps the listbox id (SSR, task-3 review fix)", () => {
     const panel = (overrides: { activeId?: string; query?: string } = {}) =>
       renderToStaticMarkup(
