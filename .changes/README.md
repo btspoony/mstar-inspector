@@ -35,6 +35,9 @@ category: Added        # optional; drives the `### <Category>` header. Default: 
 
 - **`category`** is the only frontmatter key. It drives the `### <Category>` section header
   under the version section (e.g. `Added` / `Changed` / `Fixed`). Default: `Changed`.
+- **Inline `# comments`** in frontmatter values are stripped at parse time — the value ends at
+  the first ` # …` (whitespace-preceded `#`). The `# optional` annotations in the example
+  above are for humans and never reach the section header.
 - The body before `<!-- CN -->` is English and lands in `CHANGELOG.md`; the body after it is
   Chinese and lands in `CHANGELOG_CN.md`. The two blocks are paired — write both.
 - If a fragment omits the `<!-- CN -->` block, its English bullets are reused verbatim for

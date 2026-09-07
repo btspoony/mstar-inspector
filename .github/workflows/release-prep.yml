@@ -13,6 +13,11 @@ name: Release prep
 # release PR's verification face; the Release workflow re-verifies on the
 # merge commit before tagging. A missing checks tab on the release PR is
 # expected behavior, not an anomaly (see docs/release.md).
+#
+# Action pin convention: actions NEW to this repo are SHA-pinned
+# (softprops/action-gh-release in release.yml); actions already used by
+# ci.yml/deploy.yml (actions/checkout, oven-sh/setup-bun) keep the repo's
+# tag-pin convention.
 
 on:
   workflow_dispatch:
@@ -33,6 +38,7 @@ concurrency:
 jobs:
   prepare:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -49,8 +55,10 @@ jobs:
 
       - name: Reject already-released version
         id: want
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
         run: |
-          V="${{ inputs.version }}"
+          V="${INPUT_VERSION}"
           if [ -z "$V" ]; then V="auto"; fi
           if [ "$V" != "auto" ] && git rev-parse "v$V" >/dev/null 2>&1; then
             echo "::error::Tag v$V already exists."
@@ -59,8 +67,10 @@ jobs:
           echo "version=$V" >> "$GITHUB_OUTPUT"
 
       - name: Assemble fragments + bump version surface
+        env:
+          WANT_VERSION: ${{ steps.want.outputs.version }}
         run: |
-          V="${{ steps.want.outputs.version }}"
+          V="${WANT_VERSION}"
           if [ "$V" = "auto" ]; then
             bun run release:prepare -- --patch
           else
@@ -69,10 +79,14 @@ jobs:
 
       - name: Resolve resulting version
         id: ver
-        run: echo "version=$(jq -r .version package.json)" >> "$GITHUB_OUTPUT"
+        run: |
+          VERSION="$(jq -er .version package.json)"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
 
       - name: Validate release version
-        run: bun run release:validate -- "v${{ steps.ver.outputs.version }}"
+        env:
+          VERSION: ${{ steps.ver.outputs.version }}
+        run: bun run release:validate -- "v${VERSION}"
 
       - name: Typecheck + build SPA (release sanity)
         run: |
@@ -80,16 +94,20 @@ jobs:
           bun run build:spa
 
       - name: Extract release notes (EN)
-        run: bun run scripts/extract-changelog-section.ts "${{ steps.ver.outputs.version }}" > "${RUNNER_TEMP}/notes-en.md"
+        env:
+          VERSION: ${{ steps.ver.outputs.version }}
+        run: bun run scripts/extract-changelog-section.ts "${VERSION}" > "${RUNNER_TEMP}/notes-en.md"
 
       - name: Commit prepared release
+        env:
+          VERSION: ${{ steps.ver.outputs.version }}
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          BRANCH="release/v${{ steps.ver.outputs.version }}"
+          BRANCH="release/v${VERSION}"
           git checkout -B "$BRANCH"
           git add -A
-          git commit -m "chore(release): prepare v${{ steps.ver.outputs.version }}"
+          git commit -m "chore(release): prepare v${VERSION}"
           git push --force-with-lease origin "$BRANCH"
 
       - name: Open or update release PR

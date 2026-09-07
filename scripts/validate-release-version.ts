@@ -12,9 +12,11 @@
  *   2. Surface alignment: every VERSION_SURFACES entry carries exactly the
  *      requested version (the same list `prepare-release.ts` bumps, so a
  *      release can never pass a surface it failed to bump).
- *   3. Tag not yet present: `git rev-parse refs/tags/v<version>` must not
- *      resolve — re-running against an already-published version is a bug,
- *      not a re-release.
+ *   3. Tag gate (self-heal): `git rev-parse refs/tags/v<version>` — a tag
+ *      pointing at a commit other than HEAD fails (double-use of a published
+ *      version); a tag already sitting on HEAD passes (re-run after the tag
+ *      push converges: validate passes -> tag step skips -> Release creation
+ *      proceeds).
  *
  * Plan 51 note: when `src/version.ts` joins VERSION_SURFACES, surface
  * alignment covers it automatically (per-kind read in release-surfaces.ts).
@@ -38,20 +40,33 @@ export function tagToVersion(tag: string): string {
 }
 
 /**
- * Tag-existence check via `git rev-parse` (the same check the Release prep
- * workflow runs as an early-fail shell step). `--verify` + the `refs/tags/`
- * namespace pins it to tags; exit 0 = exists, 1 = absent, anything else
- * (e.g. not a git repo) is surfaced as a hard error.
+ * Resolve the commit the `v<version>` tag points at (`^{commit}` peels
+ * annotated tags to their target commit); `undefined` when no such tag
+ * exists. This is the same check the Release prep workflow runs as an
+ * early-fail shell step. Exit codes: 0 = resolved, 1 = absent, anything
+ * else (e.g. not a git repo) is surfaced as a hard error.
  */
-export function tagExists(version: string, root: string): boolean {
-  const proc = Bun.spawnSync(["git", "rev-parse", "--verify", "--quiet", `refs/tags/v${version}`], {
+export function resolveTagCommit(version: string, root: string): string | undefined {
+  const proc = Bun.spawnSync(
+    ["git", "rev-parse", "--verify", "--quiet", `refs/tags/v${version}^{commit}`],
+    { cwd: root, stdout: "pipe", stderr: "pipe" },
+  );
+  if (proc.exitCode === 0) return proc.stdout.toString().trim();
+  if (proc.exitCode === 1) return undefined;
+  throw new Error(`git rev-parse failed (${proc.exitCode}): ${proc.stderr.toString().trim()}`);
+}
+
+/** The commit the working tree HEAD points at (tag self-heal comparison). */
+export function headCommit(root: string): string {
+  const proc = Bun.spawnSync(["git", "rev-parse", "HEAD"], {
     cwd: root,
     stdout: "pipe",
     stderr: "pipe",
   });
-  if (proc.exitCode === 0) return true;
-  if (proc.exitCode === 1) return false;
-  throw new Error(`git rev-parse failed (${proc.exitCode}): ${proc.stderr.toString().trim()}`);
+  if (proc.exitCode !== 0) {
+    throw new Error(`git rev-parse HEAD failed (${proc.exitCode}): ${proc.stderr.toString().trim()}`);
+  }
+  return proc.stdout.toString().trim();
 }
 
 /**
@@ -85,10 +100,18 @@ export async function validateReleaseVersion(tag: string, root: string): Promise
     }
   }
 
-  if (tagExists(version, root)) {
-    lines.push(`TAGEXISTS v${version} already exists — refusing to validate a published version`);
-  } else {
+  // Tag-exists gate with self-heal (QC A1): a rerun AFTER the tag was pushed
+  // (tag sits on current HEAD) must pass so the Release workflow converges —
+  // validate passes -> tag step skips idempotently -> Release creation
+  // proceeds. A tag pointing at any other commit is a double-use attempt and
+  // still fails closed.
+  const tagCommit = resolveTagCommit(version, root);
+  if (tagCommit === undefined) {
     lines.push(`OK tag: v${version} does not exist yet`);
+  } else if (tagCommit === headCommit(root)) {
+    lines.push(`OK tag: v${version} exists at HEAD (post-tag rerun — the tag step will skip)`);
+  } else {
+    lines.push(`TAGEXISTS v${version} exists at a different commit — refusing to validate a published version`);
   }
 
   return { ok: lines.every((l) => l.startsWith("OK")), lines };

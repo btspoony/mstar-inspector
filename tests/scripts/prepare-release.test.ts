@@ -3,13 +3,16 @@
  *
  * Pins the release-prepare contract against throwaway repo layouts:
  *
- * - fragment parsing (frontmatter `category`, `<!-- CN -->` split, defaults);
+ * - fragment parsing (frontmatter `category`, `<!-- CN -->` split, defaults,
+ *   inline ` # comment` stripping — QC A3);
  * - CLI arg forms (bare `X.Y.Z`, `--minor`, `--allow-empty`; `v`-prefixed
  *   rejected);
  * - bilingual section assembly: EN bullets -> CHANGELOG.md, CN bullets ->
  *   CHANGELOG_CN.md, missing CN block -> EN bullets reused (protocol
  *   fallback); categories grouped, fragment order preserved;
  * - `## [X.Y.Z] - <date>` section inserted under `## [Unreleased]`;
+ *   fail-closed rerun idempotency (duplicate section throws) and
+ *   no-trailing-newline robustness (QC A2);
  * - AD-2 auto-bump (patch default, --minor, prerelease graduation from
  *   package.json#version — never from tags);
  * - guards: explicit version must be > current (compareSemver), semver RE,
@@ -27,7 +30,7 @@ import {
   parseFragment,
   prepareRelease,
 } from "../../scripts/prepare-release";
-import { disposeTempRoot, makeTempRoot, setupReleaseRepo } from "./helpers";
+import { disposeTempRoot, makeTempRoot, setupReleaseRepo, writeAt } from "./helpers";
 
 const argv = (...args: string[]) => ["bun", "script", ...args];
 
@@ -52,6 +55,19 @@ describe("parseFragment", () => {
   test("blank category falls back to undefined (-> Changed at assembly)", () => {
     const frag = parseFragment("c.md", `---\ncategory:   \n---\n\n- EN.\n`);
     expect(frag.category).toBeUndefined();
+  });
+
+  test("trailing inline ` # comment` in frontmatter values is stripped (QC A3)", () => {
+    const frag = parseFragment(
+      "d.md",
+      `---\ncategory: Added        # optional; drives the ### header\n---\n\n- EN.\n`,
+    );
+    expect(frag.category).toBe("Added");
+  });
+
+  test("`#` glued to the value without whitespace is kept", () => {
+    const frag = parseFragment("e.md", `---\ncategory: A#B\n---\n\n- EN.\n`);
+    expect(frag.category).toBe("A#B");
   });
 });
 
@@ -121,6 +137,31 @@ describe("insertSection", () => {
   test("empty body -> header-only section (--allow-empty shape)", () => {
     const next = insertSection(changelog, "1.0.0", "2026-09-07", "");
     expect(next).toContain("\n## [Unreleased]\n\n## [1.0.0] - 2026-09-07\n\n## [0.0.9]");
+  });
+
+  test("duplicate version section throws (fail-closed rerun idempotency, QC A2)", () => {
+    expect(() => insertSection(changelog, "0.0.9", "2026-09-07", "- Again.")).toThrow(
+      "Changelog already has a section for [0.0.9] — refusing to duplicate.",
+    );
+    // exact bracket match: 1.0.0 must NOT trip on a 1.0.0-alpha.1 section
+    const withPre = insertSection(changelog, "1.0.0-alpha.1", "2026-09-07", "- Pre.");
+    expect(() => insertSection(withPre, "1.0.0-alpha.1", "2026-09-07", "- Pre.")).toThrow(
+      "already has a section for [1.0.0-alpha.1]",
+    );
+    expect(insertSection(withPre, "1.0.0", "2026-09-07", "- Stable.")).toContain(
+      "## [1.0.0] - 2026-09-07",
+    );
+  });
+
+  test("`## [Unreleased]` as final line without trailing newline appends below it (QC A2)", () => {
+    const bare = "# Changelog\n\nIntro.\n\n## [Unreleased]";
+    const next = insertSection(bare, "1.0.0", "2026-09-07", "- New.");
+    expect(next.startsWith("# Changelog")).toBe(true); // title not displaced
+    const iUn = next.indexOf("## [Unreleased]");
+    const iNew = next.indexOf("## [1.0.0] - 2026-09-07");
+    expect(iUn).toBeGreaterThan(-1);
+    expect(iNew).toBeGreaterThan(iUn);
+    expect(next).toContain("## [Unreleased]\n\n## [1.0.0] - 2026-09-07\n\n- New.\n\n");
   });
 
   test("without an Unreleased header, inserts after the header block", () => {
@@ -258,6 +299,33 @@ describe("prepareRelease (end to end on a temp repo)", () => {
       await expect(
         prepareRelease({ version: "1.0", bump: "patch", allowEmpty: false, root, date: "2026-09-07" }),
       ).rejects.toThrow('Invalid version "1.0"');
+    } finally {
+      disposeTempRoot(root);
+    }
+  });
+
+  test("partial-failure rerun aborts before duplicating a section (QC A2)", async () => {
+    const root = makeTempRoot();
+    try {
+      setupReleaseRepo(root);
+      await prepareRelease({ version: "1.0.0-alpha.1", bump: "patch", allowEmpty: false, root, date: "2026-09-07" });
+      // half-applied shape: the changelog section landed, but the bump was
+      // reverted and the fragment never moved — as if the run died between
+      // writes. Retrying the same version must fail closed, not duplicate.
+      writeAt(
+        root,
+        "package.json",
+        `{\n  "name": "test-repo",\n  "version": "0.1.0",\n  "private": true\n}\n`,
+      );
+      writeAt(
+        root,
+        ".changes/unreleased/a-baseline.md",
+        `---\ncategory: Baseline\n---\n\n- EN baseline bullet.\n\n<!-- CN -->\n- CN 基线要点。\n`,
+      );
+
+      await expect(
+        prepareRelease({ version: "1.0.0-alpha.1", bump: "patch", allowEmpty: false, root, date: "2026-09-07" }),
+      ).rejects.toThrow("Changelog already has a section for [1.0.0-alpha.1]");
     } finally {
       disposeTempRoot(root);
     }

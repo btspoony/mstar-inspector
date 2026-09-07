@@ -8,14 +8,17 @@
  * - surface alignment: reads the SAME VERSION_SURFACES list prepare bumps
  *   (json kind -> `version` field), MISSING on absent file, MISMATCH on
  *   stale version;
- * - tag-exists: `git rev-parse refs/tags/v<version>` — existing tag fails
- *   the gate, absent tag passes, non-repo errors propagate;
+ * - tag gate (self-heal, QC A1): `git rev-parse refs/tags/v<version>` — tag
+ *   at a different commit fails, tag already at HEAD passes (post-tag rerun
+ *   converges: validate -> tag step skips), absent tag passes, non-repo
+ *   errors propagate;
  * - CLI tag resolution: first positional arg wins over $GITHUB_REF_NAME.
  */
 import { describe, expect, test } from "bun:test";
 import {
+  headCommit,
+  resolveTagCommit,
   resolveTag,
-  tagExists,
   tagToVersion,
   validateReleaseVersion,
 } from "../../scripts/validate-release-version";
@@ -107,16 +110,39 @@ describe("validateReleaseVersion gate", () => {
     }
   });
 
-  test("existing tag fails the gate (re-release is a bug, not a retry)", async () => {
+  test("tag at a different commit fails the gate (double-use of a published version)", async () => {
     const root = makeTempRoot();
     try {
       writeAt(root, "package.json", `{\n  "version": "1.0.0"\n}\n`);
       initGitRepo(root);
       git(root, "tag", "-a", "v1.0.0", "-m", "release");
+      // a newer commit lands after the tag: the tag no longer points at HEAD
+      writeAt(root, "later.txt", "");
+      git(root, "add", "-A");
+      git(root, "commit", "-q", "-m", "later");
 
       const result = await validateReleaseVersion("v1.0.0", root);
       expect(result.ok).toBe(false);
-      expect(result.lines).toContain("TAGEXISTS v1.0.0 already exists — refusing to validate a published version");
+      expect(result.lines).toContain(
+        "TAGEXISTS v1.0.0 exists at a different commit — refusing to validate a published version",
+      );
+    } finally {
+      disposeTempRoot(root);
+    }
+  });
+
+  test("tag already at HEAD passes with a self-heal note (post-tag rerun converges)", async () => {
+    const root = makeTempRoot();
+    try {
+      writeAt(root, "package.json", `{\n  "version": "1.0.0"\n}\n`);
+      initGitRepo(root);
+      git(root, "tag", "-a", "v1.0.0", "-m", "release"); // single commit == HEAD
+
+      const result = await validateReleaseVersion("v1.0.0", root);
+      expect(result.ok).toBe(true);
+      expect(result.lines).toContain(
+        "OK tag: v1.0.0 exists at HEAD (post-tag rerun — the tag step will skip)",
+      );
     } finally {
       disposeTempRoot(root);
     }
@@ -137,22 +163,25 @@ describe("validateReleaseVersion gate", () => {
   });
 });
 
-describe("tagExists (git rev-parse)", () => {
-  test("false on a repo without the tag, true after tagging, throws outside a repo", () => {
+describe("resolveTagCommit / headCommit (git rev-parse)", () => {
+  test("undefined on a repo without the tag, HEAD sha after tagging, throws outside a repo", () => {
     const root = makeTempRoot();
     try {
       writeAt(root, "package.json", `{\n  "version": "1.0.0"\n}\n`);
       initGitRepo(root);
-      expect(tagExists("1.0.0", root)).toBe(false);
+      expect(resolveTagCommit("1.0.0", root)).toBeUndefined();
       git(root, "tag", "-a", "v1.0.0", "-m", "release"); // annotated tag shape
-      expect(tagExists("1.0.0", root)).toBe(true);
+      const head = headCommit(root);
+      expect(head).toMatch(/^[0-9a-f]{40}$/);
+      expect(resolveTagCommit("1.0.0", root)).toBe(head); // peeled to the commit
     } finally {
       disposeTempRoot(root);
     }
 
     const notARepo = makeTempRoot();
     try {
-      expect(() => tagExists("1.0.0", notARepo)).toThrow(/git rev-parse failed/);
+      expect(() => resolveTagCommit("1.0.0", notARepo)).toThrow(/git rev-parse failed/);
+      expect(() => headCommit(notARepo)).toThrow(/git rev-parse HEAD failed/);
     } finally {
       disposeTempRoot(notARepo);
     }

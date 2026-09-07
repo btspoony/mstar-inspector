@@ -17,6 +17,11 @@ name: Release
 #
 # No secrets are required (the tag and the Release are created with the
 # workflow's GITHUB_TOKEN).
+#
+# Action pin convention: actions NEW to this repo are SHA-pinned
+# (softprops/action-gh-release below, byte-identical to the sibling repo);
+# actions already used by ci.yml/deploy.yml (actions/checkout,
+# oven-sh/setup-bun) keep the repo's tag-pin convention.
 
 on:
   pull_request:
@@ -32,6 +37,7 @@ jobs:
       github.event.pull_request.merged == true
       && startsWith(github.event.pull_request.title, 'release v')
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - name: Checkout merge commit
         uses: actions/checkout@v4
@@ -49,7 +55,9 @@ jobs:
 
       - name: Resolve version
         id: ver
-        run: echo "version=$(jq -r .version package.json)" >> "$GITHUB_OUTPUT"
+        run: |
+          VERSION="$(jq -er .version package.json)"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
 
       - name: Validate release version
         env:

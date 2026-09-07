@@ -25,7 +25,9 @@
  *
  * Fragment format: see `.changes/README.md`. Guards: the version must match
  * RELEASE_VERSION_RE and be strictly greater than the current version
- * (compareSemver); an empty unreleased/ dir requires --allow-empty.
+ * (compareSemver); an empty unreleased/ dir requires --allow-empty; a
+ * changelog already carrying a `## [<version>]` section aborts the run
+ * (fail-closed rerun idempotency).
  *
  * This script only edits the working tree. Commit + PR is the caller's job
  * (the Release prep workflow commits and opens the `release vX.Y.Z` PR).
@@ -98,7 +100,13 @@ function parseFrontmatter(text: string): { fm: Record<string, string>; body: str
   const body = text.slice(end + 4).replace(/^\n/, "");
   for (const line of fmText.split("\n")) {
     const m = line.match(/^([A-Za-z0-9 _-]+):\s*(.*)$/);
-    if (m) fm[m[1]?.trim() ?? ""] = m[2]?.trim() ?? "";
+    if (m) {
+      // Strip a trailing inline comment (` # optional`) — the value ends at
+      // the first whitespace-preceded `#` (`.changes/README.md` examples use
+      // them; a `#` glued to the value without whitespace is kept).
+      const key = m[1]?.trim() ?? "";
+      fm[key] = (m[2] ?? "").trim().replace(/\s+#.*$/, "").trim();
+    }
   }
   return { fm, body };
 }
@@ -163,15 +171,30 @@ export function buildSectionBody(lang: "en" | "cn", frags: Fragment[]): string {
  * Insert a `## [<version>] - <date>` section into a changelog: directly under
  * `## [Unreleased]` when present, otherwise above the first existing section
  * (or at the end when the changelog has no sections yet).
+ *
+ * Fail-closed on reruns (QC A2): throws when the changelog already carries a
+ * `## [<version>]` section — a half-applied prepare run (changelog written,
+ * bump or archive not yet) must not assemble a duplicate section on retry.
  */
 export function insertSection(changelog: string, version: string, date: string, body: string): string {
   const header = `## [${version}] - ${date}`;
+  if (changelog.includes(`## [${version}]`)) {
+    throw new Error(
+      `Changelog already has a section for [${version}] — refusing to duplicate. ` +
+        "If a previous prepare run was left half-applied, reset the working tree before retrying.",
+    );
+  }
   const section = body ? `\n${header}\n\n${body}\n\n` : `\n${header}\n\n`;
   const unreleased = changelog.indexOf("## [Unreleased]");
   if (unreleased !== -1) {
-    const afterLine = changelog.indexOf("\n", unreleased) + 1;
-    const tail = changelog.slice(afterLine).replace(/^\n/, "");
-    return `${changelog.slice(0, afterLine)}${section}${tail}`;
+    const lineEnd = changelog.indexOf("\n", unreleased);
+    if (lineEnd === -1) {
+      // `## [Unreleased]` is the final line with no trailing newline — append
+      // below it instead of mis-inserting at the top of the file.
+      return `${changelog}\n${section}`;
+    }
+    const tail = changelog.slice(lineEnd + 1).replace(/^\n/, "");
+    return `${changelog.slice(0, lineEnd + 1)}${section}${tail}`;
   }
   const firstSection = changelog.search(/\n## \[/);
   if (firstSection === -1) {

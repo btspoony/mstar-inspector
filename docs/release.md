@@ -94,13 +94,16 @@ de-scope it into a "known issue".**
   `Tag vX.Y.Z already exists`. Pick a different version; re-releasing an
   existing version is a bug, not an operation.
 - **Release run failed after the tag was pushed** (e.g. Release creation
-  failed on a partial run) — re-running fails **early and closed** at the
-  validate step's tag-exists gate (`TAGEXISTS vX.Y.Z already exists`); the tag
-  step's in-run skip (`Tag vX.Y.Z already exists; skipping tag creation.`) only
-  covers a same-run race and is not the recovery path. Recover by hand: the
-  tag is already on the merge commit, so create the GitHub Release manually
-  from it — `gh release create vX.Y.Z --title vX.Y.Z --notes-file <notes>`
-  (rebuild the bilingual notes with
+  failed on a partial run) — **re-run the Release workflow**; the run
+  converges by itself: the validate step's tag gate is self-healing (a
+  `vX.Y.Z` tag already sitting on the checked-out merge commit passes with an
+  explicit note; only a tag pointing at a *different* commit fails closed as
+  `TAGEXISTS`), the tag step then skips idempotently (`Tag vX.Y.Z already
+  exists; skipping tag creation.`), and Release creation proceeds. If the
+  rerun itself cannot complete, recover by hand: the tag is already on the
+  merge commit, so create the GitHub Release manually from it —
+  `gh release create vX.Y.Z --title vX.Y.Z --notes-file <notes>` (rebuild the
+  bilingual notes with
   `bun run scripts/extract-changelog-section.ts X.Y.Z --lang en|cn`, joined by
   a blank-line-separated `---`).
 - **Release PR could not be opened** (`gh pr create` fails — e.g. branch
