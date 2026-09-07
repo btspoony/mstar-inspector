@@ -92,9 +92,11 @@ jobs:
           VERSION: ${{ steps.ver.outputs.version }}
         run: |
           NOTES_FILE="${RUNNER_TEMP}/release-notes-${VERSION}.md"
+          # extract emits the trimmed body with no trailing newline, so the
+          # separator needs \n\n to produce: EN, blank line, ---, blank line, CN.
           {
             bun run scripts/extract-changelog-section.ts "${VERSION}" --lang en
-            printf '\n---\n\n'
+            printf '\n\n---\n\n'
             bun run scripts/extract-changelog-section.ts "${VERSION}" --lang cn
           } > "$NOTES_FILE"
           echo "notes_file=${NOTES_FILE}" >> "$GITHUB_OUTPUT"

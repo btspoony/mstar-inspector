@@ -93,9 +93,16 @@ de-scope it into a "known issue".**
 - **Requested version already released** — Release prep fails early with
   `Tag vX.Y.Z already exists`. Pick a different version; re-releasing an
   existing version is a bug, not an operation.
-- **Tag already exists at Release time** — the tag step skips idempotently
-  (log: `Tag vX.Y.Z already exists; skipping tag creation.`); the GitHub
-  Release is still (re)created for that tag. The run is green.
+- **Release run failed after the tag was pushed** (e.g. Release creation
+  failed on a partial run) — re-running fails **early and closed** at the
+  validate step's tag-exists gate (`TAGEXISTS vX.Y.Z already exists`); the tag
+  step's in-run skip (`Tag vX.Y.Z already exists; skipping tag creation.`) only
+  covers a same-run race and is not the recovery path. Recover by hand: the
+  tag is already on the merge commit, so create the GitHub Release manually
+  from it — `gh release create vX.Y.Z --title vX.Y.Z --notes-file <notes>`
+  (rebuild the bilingual notes with
+  `bun run scripts/extract-changelog-section.ts X.Y.Z --lang en|cn`, joined by
+  a blank-line-separated `---`).
 - **Release PR could not be opened** (`gh pr create` fails — e.g. branch
   protection): the `release/vX.Y.Z` branch is already pushed. Open the PR
   manually: base `main`, head `release/vX.Y.Z`, title `release vX.Y.Z` (the
