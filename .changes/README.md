@@ -10,7 +10,7 @@ assembles into `CHANGELOG.md` / `CHANGELOG_CN.md` at release time.
    **Do not** paste the same bullets into `CHANGELOG.md` / `CHANGELOG_CN.md` (including under
    `## [Unreleased]`) — those files are assembled at release time.
 2. **At release time**, `bun run release:prepare -- <version>` (or the **Release prep**
-   GitHub Actions workflow) reads every `unreleased/*.md`, inserts a `## [<version>]`
+   GitHub Actions workflow) reads every `unreleased/*.md`, inserts a `## [<version>] - <date>`
    section into both changelogs, bumps the version surface (`package.json`), and **moves**
    the consumed fragments into `archive/<version>/`.
 3. The prepared changes ship as a `release vX.Y.Z` PR; merging it tags the verified merge

@@ -8,7 +8,9 @@
     "test": "bun test",
     "typecheck": "tsc --noEmit && tsc --noEmit -p tsconfig.spa.json",
     "build:spa": "vite build",
-    "review": "bun run src/review/runner.ts"
+    "review": "bun run src/review/runner.ts",
+    "release:prepare": "bun run scripts/prepare-release.ts",
+    "release:validate": "bun run scripts/validate-release-version.ts"
   },
   "engines": {
     "bun": ">=1.3.14"
