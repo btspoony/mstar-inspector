@@ -459,6 +459,14 @@ describe("runCli — exit-code invariant and wiring", () => {
     expect(viaArg.stdout).not.toContain(OTHER_SHA);
   });
 
+  test("MERGE_SHA env value goes through the same full-SHA validation (folded task-1 review fix)", () => {
+    const short = drive({ runs: () => [] }, [], { MERGE_SHA: "1f2e3d4" });
+    expect(short.code).toBe(1);
+    expect(short.err[0]).toMatch(
+      /^Invalid commit SHA: 1f2e3d4 \(expected the full 40-char merge commit SHA/,
+    );
+  });
+
   test("unexpected internal error still exits 0 with a degraded section", () => {
     const { runner } = makeRunner(() => [SUCCESS], downloadOk);
     const stdout: string[] = [];

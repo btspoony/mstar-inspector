@@ -326,9 +326,17 @@ export function runCli(
     printUsage();
     return 0;
   }
-  const sha = parsed.sha ?? env["MERGE_SHA"];
+  const sha = parsed.sha ?? env["MERGE_SHA"]?.toLowerCase();
   if (!sha) {
     console.error("Usage: bun run scripts/collect-deploy-evidence.ts <merge-sha> (or set MERGE_SHA)");
+    return 1;
+  }
+  // Same gate as positional SHAs (folded task-1 review fix): env-provided
+  // values must not bypass the full-SHA validation gh's exact-match relies on.
+  if (!FULL_SHA_RE.test(sha)) {
+    console.error(
+      `Invalid commit SHA: ${sha} (expected the full 40-char merge commit SHA — gh matches runs by exact head SHA)`,
+    );
     return 1;
   }
   const write = deps.stdout ?? ((s: string) => process.stdout.write(s));

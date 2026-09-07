@@ -9,7 +9,8 @@
  *   release = pull_request closed + branches [main];
  * - release job guard: merged == true AND title prefix `release v`;
  * - permission faces (AD-4): prep = contents + pull-requests write, no
- *   issues; release = exactly contents write;
+ *   issues; release = contents write + actions read (the deploy-evidence
+ *   `gh run list`/`gh run download` face, plan 52) and nothing else;
  * - concurrency: prep group `release-prep`, cancel-in-progress: false;
  * - checkout ref pins merge_commit_sha (release side);
  * - softprops/action-gh-release SHA pin string (byte-exact, sole
@@ -117,8 +118,8 @@ describe("release.yml guards", () => {
     expect(cond).toContain("startsWith(github.event.pull_request.title, 'release v')");
   });
 
-  test("permissions (AD-4): exactly contents write", () => {
-    expect(wf.permissions).toEqual({ contents: "write" });
+  test("permissions (AD-4): contents write + actions read (evidence face), nothing else", () => {
+    expect(wf.permissions).toEqual({ contents: "write", actions: "read" });
   });
 
   test("job: timeout-minutes 30", () => {
@@ -153,6 +154,34 @@ describe("release.yml guards", () => {
     expect(runs).toContain("--lang en");
     expect(runs).toContain("--lang cn");
     expect(runs).toContain("printf '\\n\\n---\\n\\n'");
+  });
+
+  test("deploy-evidence append step (plan 52): after release creation, never fails the release, env-indirected", () => {
+    const steps = wf.jobs.release.steps as {
+      uses?: string;
+      run?: string;
+      env?: Record<string, string>;
+      "continue-on-error"?: boolean;
+    }[];
+    const createIdx = steps.findIndex((s) => s.uses?.startsWith("softprops/action-gh-release"));
+    const evidIdx = steps.findIndex((s) => s.run?.includes("collect-deploy-evidence"));
+    expect(createIdx).toBeGreaterThanOrEqual(0);
+    expect(evidIdx).toBeGreaterThan(createIdx); // tag/Release creation never waits for evidence
+
+    const evid = steps[evidIdx]!;
+    // recording surface, not a gate: swallowed failures stay loud (::error) but green
+    expect(evid["continue-on-error"]).toBe(true);
+    expect(evid.run).toContain("::error::");
+    // AD-3: single idempotent rewrite from the workspace notes file, same separator
+    expect(evid.run).toContain("printf '\\n\\n---\\n\\n' >> \"$NOTES_FILE\"");
+    expect(evid.run).toContain('gh release edit "v${VERSION}" --notes-file "$NOTES_FILE"');
+    expect(evid.run).not.toContain("${{");
+    // plan-50 QC B1: version/SHA/token reach the script via step env, never raw interpolation
+    expect(evid.env).toEqual({
+      GH_TOKEN: "${{ secrets.GITHUB_TOKEN }}",
+      VERSION: "${{ steps.ver.outputs.version }}",
+      MERGE_SHA: "${{ github.event.pull_request.merge_commit_sha }}",
+    });
   });
 
   test("no direct `${{ }}` interpolation inside run: scripts (env indirection)", () => {

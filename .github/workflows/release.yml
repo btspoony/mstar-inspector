@@ -18,6 +18,15 @@ name: Release
 # No secrets are required (the tag and the Release are created with the
 # workflow's GITHUB_TOKEN).
 #
+# Deploy-evidence reconciliation (plan 52): after the Release is created, one
+# extra step rebuilds the body from the workspace notes file plus a
+# deploy-evidence section and rewrites the Release with a single idempotent
+# `gh release edit --notes-file` (AD-3 — no live read-modify-write). The
+# section records the Worker Version ID + image digest + run link of the
+# Deploy run for the merge commit, or states its absence explicitly. Evidence
+# is a recording surface, never a gate: it can neither postpone the tag nor
+# fail this workflow.
+#
 # Action pin convention: actions NEW to this repo are SHA-pinned
 # (softprops/action-gh-release below, byte-identical to the sibling repo);
 # actions already used by ci.yml/deploy.yml (actions/checkout,
@@ -30,6 +39,7 @@ on:
 
 permissions:
   contents: write   # push the tag + create the GitHub Release (no id-token:write — no npm publish, AD-4)
+  actions: read     # `gh run list` / `gh run download` of the deploy-evidence artifact (plan 52) — nothing else added
 
 jobs:
   release:
@@ -117,3 +127,30 @@ jobs:
           body_path: ${{ steps.changelog.outputs.notes_file }}
           draft: false
           prerelease: ${{ contains(steps.ver.outputs.version, '-') }}
+
+      # Plan 52 (AD-3): rebuild the complete body in the workspace — the
+      # bilingual notes file above, this `---` separator (same form as the
+      # EN/CN one), then the collector's section — and rewrite the Release
+      # once. Never read-modify-write the live body.
+      #
+      # This step must not be able to fail the release (evidence is a
+      # recording surface, never a gate): the collector exits 0 for every
+      # outcome by design, the `gh release edit` call is guarded so a
+      # transient failure only emits a loud ::error annotation, and
+      # continue-on-error additionally absorbs anything unforeseen (GitHub
+      # still flags the step). Re-running the workflow converges by itself:
+      # the extract step rebuilds the notes file from scratch and the
+      # same-body rewrite is idempotent.
+      - name: Append deploy evidence to release notes
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ steps.ver.outputs.version }}
+          MERGE_SHA: ${{ github.event.pull_request.merge_commit_sha }}
+        run: |
+          NOTES_FILE="${RUNNER_TEMP}/release-notes-${VERSION}.md"
+          printf '\n\n---\n\n' >> "$NOTES_FILE"
+          bun run scripts/collect-deploy-evidence.ts >> "$NOTES_FILE"
+          if ! gh release edit "v${VERSION}" --notes-file "$NOTES_FILE"; then
+            echo "::error::deploy-evidence append failed — Release notes left without the evidence section; re-run the Release workflow to converge (idempotent)"
+          fi
