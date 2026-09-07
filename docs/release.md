@@ -49,7 +49,9 @@ duplicated here.
    merge commit, pushes the annotated `vX.Y.Z` tag (skipping idempotently if
    the tag already exists), and creates the GitHub Release with bilingual
    notes (EN section, `---`, CN section; a `-` in the version marks it as a
-   prerelease).
+   prerelease). A final step then appends the [Deploy evidence
+   section](#deploy-evidence-release--deploy-reconciliation) — it never
+   postpones the tag and never fails the workflow.
 5. **Deploy happens automatically.** The merge's `main` push triggers the
    Deploy workflow (`package.json` is not in its `paths-ignore` set), so the
    version bump ships to staging; after it completes, `/healthz` and the
@@ -77,9 +79,10 @@ explicit version `1.0.0` (not auto). Every item below must pass:
    curated baseline + this iteration's own delivery fragments) and the
    version-surface bump `0.1.0 → 1.0.0`.
 3. **Merge → tag + Release** — the `v1.0.0` annotated tag lands on the merge
-   commit; the GitHub Release `v1.0.0` is published with bilingual notes
-   (+ the deploy-evidence section once plan 52's reconciliation lands; until
-   then its absence is expected, never silent).
+   commit; the GitHub Release `v1.0.0` is published with bilingual notes plus
+   the Deploy evidence section (Worker Version ID + image digest + deploy run
+   link — or an explicit pending/failed/no-run status; never silently
+   missing).
 4. **Live version** — after the post-merge deploy completes, staging
    `/healthz` returns the new `version` field and the SPA displays it
    (surface lands with plan 51).
@@ -120,13 +123,71 @@ de-scope it into a "known issue".**
 - **Deploy fails after merge** — independent of the release chain (tag and
   Release are already cut); follow the [deploy runbook](deploy.md) failure
   semantics. A failed deploy never rolls back a tag.
+- **Deploy-evidence append failed** (the evidence **step** goes red —
+  `::error::` annotation plus non-zero exit — while the job stays green via
+  step-level `continue-on-error`, so evidence can never fail the release): a
+  transient `gh release edit` failure left the Release without the evidence
+  section. Re-run the Release workflow (it converges idempotently), or append
+  the section by hand per [manual reconciliation](#manual-reconciliation-fallback).
+- **Job timeout preempted the evidence step** (extreme case only: slow
+  pre-steps plus a full-length bounded wait — the evidence step carries its
+  own `timeout-minutes: 18` budget, 15-min wait default + margin, bounded
+  below the job's 30-minute cap so the wait can never starve the pre-steps;
+  the job cap can still fire mid-wait in a pathologically slow run): the run
+  goes red **without losing the tag or the Release** — both are created
+  before the evidence step. Re-run the Release workflow; it converges and
+  re-appends the evidence section idempotently.
 
-## Notes composition (deploy-evidence hook)
+## Deploy evidence (release ↔ deploy reconciliation)
 
-Release notes are assembled in the Release workflow's `$RUNNER_TEMP` as:
-EN changelog section, blank line, `---`, blank line, CN changelog section.
-Plan 52 appends the deploy-evidence section (Worker Version ID, sandbox image
-digest, deploy run link) after the same separator and rewrites the Release
-with a single idempotent `gh release edit --notes-file` — tag/Release creation
-never waits for evidence, and a missing evidence section is stated
-explicitly, never silently omitted.
+Every GitHub Release carries a **Deploy evidence** section pinning the tagged
+commit to what actually shipped: the Worker Version ID, the sandbox image
+digest, and the deploy Actions run link of the Deploy run for the merge
+commit. Notes are assembled in the Release workflow's `$RUNNER_TEMP` as: EN
+changelog section, blank line, `---`, blank line, CN changelog section — and
+after Release creation, the evidence section is appended behind the same
+`---` separator. The step then rewrites the Release **once** with a single
+idempotent `gh release edit --notes-file` (AD-3: the body is recomposed from
+workspace artifacts, never read-modify-written from the live body). Data comes
+entirely from the existing Deploy workflow's `deploy-evidence` artifact — no
+new credentials beyond the workflow's `GITHUB_TOKEN` (`actions: read` for the
+artifact download).
+
+**Body ownership window:** between Release creation and the evidence rewrite
+(a minutes-scale window while the bounded wait runs), the body belongs to the
+workflow — hand edits made in that window are overwritten by the rewrite.
+Re-running the Release workflow is safe: the notes file is rebuilt from
+scratch each run and the same-body rewrite is idempotent.
+
+### Section semantics — a recording surface, never a gate
+
+The collector (`scripts/collect-deploy-evidence.ts`) waits a bounded ~15 min
+for the Deploy run of the merge commit, then states one of these explicitly.
+Nothing here can postpone the tag or fail the Release workflow — a missing
+section is always *stated*, never silent:
+
+| Section says | Meaning / operator action |
+|---|---|
+| `Worker version` + `Image digest` + `Actions run` | The Deploy run concluded successfully; IDs come from its `deploy-evidence` artifact. Nothing to do. |
+| `Status: deploy failed` | The Deploy run concluded non-success (conclusion is quoted). Follow the run link; see the [deploy runbook](deploy.md). The tag and Release stand — a failed deploy never rolls them back. |
+| `Status: pending` | Deploy still in flight when the bounded wait expired. The deploy usually finishes shortly after; see [manual reconciliation](#manual-reconciliation-fallback) to backfill or confirm. |
+| `Status: no deploy run for commit …` | No Deploy run matched the merge commit (e.g. everything it touched is in `paths-ignore`). Expected for changelog-only cuts. |
+| `Status: unavailable` | Evidence collection itself errored (the error is quoted in the section). Rare; reconcile manually. |
+
+### Manual reconciliation (fallback)
+
+When the section is pending, unavailable, or looks stale, reconcile by hand —
+the two checks the automation performs, runnable directly:
+
+1. **Worker Version ID** — `bunx wrangler deployments list`: the newest
+   deployment's Version ID (and its source commit) must match the tagged
+   merge commit and the section's `Worker version` bullet.
+2. **Image digest** — open the Deploy run's summary (the section's run link)
+   and compare its "Deploy evidence (DOCS-01 baseline)" bullets against the
+   Release section; live truth is `bunx wrangler containers list --json`
+   (the sandbox image digest).
+
+If the section needs fixing, either re-run the Release workflow (idempotent
+converge — simplest), or edit the Release directly:
+`gh release edit vX.Y.Z --notes-file <notes>` with a body assembled the same
+way (EN + `---` + CN + `---` + evidence section).

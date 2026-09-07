@@ -9,11 +9,18 @@
  *   release = pull_request closed + branches [main];
  * - release job guard: merged == true AND title prefix `release v`;
  * - permission faces (AD-4): prep = contents + pull-requests write, no
- *   issues; release = exactly contents write;
+ *   issues; release = contents write + actions read (the deploy-evidence
+ *   `gh run list`/`gh run download` face, plan 52) and nothing else;
  * - concurrency: prep group `release-prep`, cancel-in-progress: false;
  * - checkout ref pins merge_commit_sha (release side);
  * - softprops/action-gh-release SHA pin string (byte-exact, sole
  *   third-party action; new-to-repo actions are SHA-pinned — pin convention);
+ * - deploy-evidence append step (plan 52): exactly one `gh release edit`
+ *   workflow-wide (count across ALL step runs, not mere containment), its own
+ *   step-level timeout budget bounded below the job cap, edit failure loud at
+ *   the step level (::error + exit 1) while continue-on-error keeps the job
+ *   green, and the notes file handed off from the extract step's
+ *   `notes_file` output — never rebuilt from RUNNER_TEMP;
  * - timeout-minutes on both jobs.
  *
  * Parsing uses python3 + PyYAML (the method validated in task 4; preinstalled
@@ -117,8 +124,8 @@ describe("release.yml guards", () => {
     expect(cond).toContain("startsWith(github.event.pull_request.title, 'release v')");
   });
 
-  test("permissions (AD-4): exactly contents write", () => {
-    expect(wf.permissions).toEqual({ contents: "write" });
+  test("permissions (AD-4): contents write + actions read (evidence face), nothing else", () => {
+    expect(wf.permissions).toEqual({ contents: "write", actions: "read" });
   });
 
   test("job: timeout-minutes 30", () => {
@@ -153,6 +160,61 @@ describe("release.yml guards", () => {
     expect(runs).toContain("--lang en");
     expect(runs).toContain("--lang cn");
     expect(runs).toContain("printf '\\n\\n---\\n\\n'");
+  });
+
+  test("deploy-evidence append step (plan 52): after release creation, never fails the release, env-indirected", () => {
+    const steps = wf.jobs.release.steps as {
+      id?: string;
+      uses?: string;
+      run?: string;
+      env?: Record<string, string>;
+      "continue-on-error"?: boolean;
+      "timeout-minutes"?: number;
+    }[];
+    const createIdx = steps.findIndex((s) => s.uses?.startsWith("softprops/action-gh-release"));
+    const evidIdx = steps.findIndex((s) => s.run?.includes("collect-deploy-evidence"));
+    expect(createIdx).toBeGreaterThanOrEqual(0);
+    expect(evidIdx).toBeGreaterThan(createIdx); // tag/Release creation never waits for evidence
+
+    const evid = steps[evidIdx]!;
+    const evidRun = evid.run!;
+    // QC W-F001: the wait cannot starve pre-steps of the job's 30-min budget —
+    // 15-min bounded-wait default + margin, arithmetic documented in the YAML comment
+    expect(evid["timeout-minutes"]).toBe(18);
+    // QC A3: an edit failure is loud at the step level (::error + exit 1 →
+    // step red) while continue-on-error keeps the JOB green — evidence can
+    // never fail the release
+    expect(evid["continue-on-error"]).toBe(true);
+    expect(evidRun).toContain("::error::");
+    expect(evidRun).toContain("exit 1");
+    // AD-3: single idempotent rewrite from the workspace notes file, same separator
+    expect(evidRun).toContain("printf '\\n\\n---\\n\\n' >> \"$NOTES_FILE\"");
+    expect(evidRun).toContain('gh release edit "v${VERSION}" --notes-file "$NOTES_FILE"');
+    expect(evidRun.match(/gh release edit/g)).toHaveLength(1);
+    expect(evidRun).not.toContain("${{");
+    // plan-50 QC B1: version/SHA/token reach the script via step env, never raw interpolation
+    expect(evid.env).toEqual({
+      GH_TOKEN: "${{ secrets.GITHUB_TOKEN }}",
+      VERSION: "${{ steps.ver.outputs.version }}",
+      MERGE_SHA: "${{ github.event.pull_request.merge_commit_sha }}",
+      // folded T2 review: the notes path is handed off from the extract step's
+      // output (single shared path), not rebuilt here
+      NOTES_FILE: "${{ steps.changelog.outputs.notes_file }}",
+    });
+    // shared-path handoff: the extract step exports the path exactly once …
+    const extract = steps.find((s) => s.id === "changelog");
+    expect(extract?.run).toContain('echo "notes_file=${NOTES_FILE}" >> "$GITHUB_OUTPUT"');
+    // … and this step consumes it without re-deriving it from RUNNER_TEMP/VERSION
+    expect(evidRun).not.toContain("RUNNER_TEMP");
+  });
+
+  test("workflow-wide single-edit guard (QC A2, AD-3): exactly one `gh release edit` across ALL step runs", () => {
+    const allRuns = (wf.jobs.release.steps as { run?: string }[])
+      .map((s) => s.run ?? "")
+      .join("\n---step---\n");
+    // the rewrite happens once, from the evidence step — any second edit
+    // call anywhere in the workflow breaks AD-3's single-idempotent-rewrite
+    expect(allRuns.match(/gh release edit/g)).toHaveLength(1);
   });
 
   test("no direct `${{ }}` interpolation inside run: scripts (env indirection)", () => {
