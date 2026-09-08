@@ -181,6 +181,9 @@ export const en = {
     filterRepo: "Repo",
     filterRepoAll: "All",
     uncategorized: "uncategorized",
+    seriesReviews: "Reviews",
+    seriesFindings: "Findings",
+    trendSummary: "In this window: {reviews} · {findings}",
   },
   settings: {
     title: "App settings",

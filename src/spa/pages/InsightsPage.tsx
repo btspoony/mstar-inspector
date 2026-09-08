@@ -22,6 +22,8 @@ import {
   type InsightsSummary,
 } from "./data";
 import { LoadFailedNotice, LoadingNotice } from "./PageNotice";
+import { BarChart } from "@/components/charts/BarChart";
+import { TrendChart } from "@/components/charts/TrendChart";
 
 /**
  * The filter state as the location states it — the one derivation shared by
@@ -45,6 +47,9 @@ function insightsSearchFromLocation(): InsightsSearch {
  * Plan 49 F-15-02: after navigation the URL is the source of truth —
  * popstate re-derives the filter from the location (see the listener below);
  * in-page edits keep the reverse direction via commitSearch.
+ * Plan 56 T2: the three stat sections (severity / category / weekly trend)
+ * render as the hand-rolled SVG charts from components/charts; the
+ * recurring-findings card stays a list.
  */
 export function InsightsPage({ boot }: { boot: SpaBoot }) {
   const locale = boot.locale;
@@ -164,13 +169,43 @@ export function InsightsPage({ boot }: { boot: SpaBoot }) {
   );
 }
 
-function InsightsRecordsView({ locale, data }: { locale: SpaBoot["locale"]; data: InsightsSummary }) {
+/**
+ * AD-561 (plan 56): severity → DESIGN.md token series fills, applied as
+ * `var(--token)` references (zero raw hex; dark/light both resolve through
+ * the :root[data-theme] var chain). Unknown severity keys (future
+ * vocabulary) fall through to the BarChart neutral series tone — the label
+ * and count still render, color is never the only carrier.
+ */
+const SEVERITY_BAR_COLORS: Record<string, string> = {
+  "must-fix": "var(--red-700)",
+  "should-fix": "var(--amber-700)",
+  nit: "var(--gray-700)",
+};
+
+/**
+ * Exported for the SSR pins (plan 53 AppInfoCard idiom): pure `t()` + data
+ * rendering, no window/router access, so tests can static-render it.
+ */
+export function InsightsRecordsView({ locale, data }: { locale: SpaBoot["locale"]; data: InsightsSummary }) {
   const windowLabel = t(locale, data.window_days === 1 ? "insights.lastDay" : "insights.lastDays", {
     count: data.window_days,
   });
   const repoLabel = data.repo ? ` · ${t(locale, "insights.repo", { repo: data.repo })}` : "";
   const empty = data.reviews_total === 0;
-  const maxSeverity = Math.max(1, ...data.findings_by_severity.map((row) => row.count));
+  // Window totals recomputed from the weekly buckets (plan 56 T2 summary
+  // line — text counts coexisting with the trend chart).
+  const trendTotals = data.weekly_trend.reduce(
+    (totals, row) => ({ reviews: totals.reviews + row.reviews, findings: totals.findings + row.findings }),
+    { reviews: 0, findings: 0 },
+  );
+  const trendSummary = t(locale, "insights.trendSummary", {
+    reviews: t(locale, trendTotals.reviews === 1 ? "insights.review" : "insights.reviews", {
+      count: trendTotals.reviews,
+    }),
+    findings: t(locale, trendTotals.findings === 1 ? "insights.finding" : "insights.findings", {
+      count: trendTotals.findings,
+    }),
+  });
 
   return (
     <>
@@ -198,23 +233,15 @@ function InsightsRecordsView({ locale, data }: { locale: SpaBoot["locale"]; data
               {data.findings_by_severity.length === 0 ? (
                 <p className="text-sm text-muted-foreground">{t(locale, "insights.noFindings")}</p>
               ) : (
-                <ul className="flex flex-col">
-                  {data.findings_by_severity.map((row) => (
-                    <li
-                      key={row.severity}
-                      className="flex flex-wrap items-center gap-x-3 gap-y-2 border-b border-border py-3 last:border-b-0 last:pb-0"
-                    >
-                      <strong className="text-sm font-medium">{row.severity}</strong>
-                      <span className="text-sm text-muted-foreground tabular-nums">
-                        {t(locale, row.count === 1 ? "insights.finding" : "insights.findings", { count: row.count })}
-                      </span>
-                      <span
-                        className="h-2 rounded-sm bg-primary"
-                        style={{ width: `${Math.round((row.count / maxSeverity) * 100)}%` }}
-                      />
-                    </li>
-                  ))}
-                </ul>
+                <BarChart
+                  ariaLabel={t(locale, "insights.findingsBySeverity")}
+                  items={data.findings_by_severity.map((row) => ({
+                    key: row.severity,
+                    label: row.severity,
+                    value: row.count,
+                    color: SEVERITY_BAR_COLORS[row.severity],
+                  }))}
+                />
               )}
             </CardContent>
           </Card>
@@ -226,21 +253,17 @@ function InsightsRecordsView({ locale, data }: { locale: SpaBoot["locale"]; data
               {data.findings_by_category.length === 0 ? (
                 <p className="text-sm text-muted-foreground">{t(locale, "insights.noFindings")}</p>
               ) : (
-                <ul className="flex flex-col">
-                  {data.findings_by_category.map((row) => (
-                    <li
-                      key={row.category ?? "uncategorized"}
-                      className="flex flex-wrap items-center gap-x-3 gap-y-2 border-b border-border py-3 last:border-b-0 last:pb-0"
-                    >
-                      <strong className="text-sm font-medium">
-                        {row.category ?? t(locale, "insights.uncategorized")}
-                      </strong>
-                      <span className="text-sm text-muted-foreground tabular-nums">
-                        {t(locale, row.count === 1 ? "insights.finding" : "insights.findings", { count: row.count })}
-                      </span>
-                    </li>
-                  ))}
-                </ul>
+                <BarChart
+                  ariaLabel={t(locale, "insights.findingsByCategory")}
+                  items={data.findings_by_category.map((row) => ({
+                    // Falsy (not nullish) check: "" is schema-permitted
+                    // (review/schema.ts) and persists — same face as NULL:
+                    // the uncategorized key/label (plan 56 QC F-004).
+                    key: row.category ? row.category : "uncategorized",
+                    label: row.category ? row.category : t(locale, "insights.uncategorized"),
+                    value: row.count,
+                  }))}
+                />
               )}
             </CardContent>
           </Card>
@@ -252,23 +275,22 @@ function InsightsRecordsView({ locale, data }: { locale: SpaBoot["locale"]; data
               {data.weekly_trend.length === 0 ? (
                 <p className="text-sm text-muted-foreground">{t(locale, "insights.noReviews")}</p>
               ) : (
-                <ul className="flex flex-col">
-                  {data.weekly_trend.map((row) => (
-                    <li
-                      key={row.week_start}
-                      className="flex flex-wrap items-center gap-x-3 gap-y-2 border-b border-border py-3 last:border-b-0 last:pb-0"
-                    >
-                      <strong className="text-sm font-medium tabular-nums">{row.week_start}</strong>
-                      <span className="text-sm text-muted-foreground tabular-nums">
-                        {t(locale, row.reviews === 1 ? "insights.review" : "insights.reviews", { count: row.reviews })}
-                        {" · "}
-                        {t(locale, row.findings === 1 ? "insights.finding" : "insights.findings", {
-                          count: row.findings,
-                        })}
-                      </span>
-                    </li>
-                  ))}
-                </ul>
+                <div className="flex flex-col gap-3">
+                  <p className="text-sm text-muted-foreground">{trendSummary}</p>
+                  <TrendChart
+                    ariaLabel={t(locale, "insights.weeklyTrend")}
+                    locale={locale}
+                    seriesLabels={{
+                      reviews: t(locale, "insights.seriesReviews"),
+                      findings: t(locale, "insights.seriesFindings"),
+                    }}
+                    points={data.weekly_trend.map((row) => ({
+                      week: row.week_start,
+                      reviews: row.reviews,
+                      findings: row.findings,
+                    }))}
+                  />
+                </div>
               )}
             </CardContent>
           </Card>

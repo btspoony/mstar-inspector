@@ -169,6 +169,9 @@ export const zhCN: Dictionary = {
     filterRepo: "仓库",
     filterRepoAll: "全部",
     uncategorized: "未分类",
+    seriesReviews: "审查",
+    seriesFindings: "发现",
+    trendSummary: "窗口内共 {reviews} · {findings}",
   },
   settings: {
     title: "应用设置",
