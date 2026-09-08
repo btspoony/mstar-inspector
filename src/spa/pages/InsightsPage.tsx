@@ -22,7 +22,7 @@ import {
   type InsightsSummary,
 } from "./data";
 import { LoadFailedNotice, LoadingNotice } from "./PageNotice";
-import { BarChart } from "@/components/charts/BarChart";
+import { BarChart, type BarChartItem } from "@/components/charts/BarChart";
 import { TrendChart } from "@/components/charts/TrendChart";
 
 /**
@@ -206,6 +206,30 @@ export function InsightsRecordsView({ locale, data }: { locale: SpaBoot["locale"
       count: trendTotals.findings,
     }),
   });
+  // Plan 56 fix round 2 (PR 36 bugbot): the insights query groups NULL and
+  // "" categories as separate rows, and both coalesce to the uncategorized
+  // key below — per-row mapping emitted two identically keyed/labeled bars
+  // (duplicate React keys, split counts). Aggregate by the coalesced key
+  // first: one bar per key, counts summed, first-seen order preserved (Map
+  // insertion order = the API row order). The falsy (not nullish) check
+  // stays: "" is schema-permitted (review/schema.ts) and persists — same
+  // face as NULL (plan 56 QC F-004).
+  const categoryItems = [
+    ...data.findings_by_category.reduce((merged, row) => {
+      const key = row.category ? row.category : "uncategorized";
+      const bar = merged.get(key);
+      if (bar) {
+        bar.value += row.count;
+      } else {
+        merged.set(key, {
+          key,
+          label: row.category ? row.category : t(locale, "insights.uncategorized"),
+          value: row.count,
+        });
+      }
+      return merged;
+    }, new Map<string, BarChartItem>()).values(),
+  ];
 
   return (
     <>
@@ -255,14 +279,7 @@ export function InsightsRecordsView({ locale, data }: { locale: SpaBoot["locale"
               ) : (
                 <BarChart
                   ariaLabel={t(locale, "insights.findingsByCategory")}
-                  items={data.findings_by_category.map((row) => ({
-                    // Falsy (not nullish) check: "" is schema-permitted
-                    // (review/schema.ts) and persists — same face as NULL:
-                    // the uncategorized key/label (plan 56 QC F-004).
-                    key: row.category ? row.category : "uncategorized",
-                    label: row.category ? row.category : t(locale, "insights.uncategorized"),
-                    value: row.count,
-                  }))}
+                  items={categoryItems}
                 />
               )}
             </CardContent>

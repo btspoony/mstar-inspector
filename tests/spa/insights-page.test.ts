@@ -177,6 +177,38 @@ describe("records page assembly (plan 36 T2)", () => {
     expect(category).not.toContain("<title></title>");
   });
 
+  test("NULL and empty-string rows merge into ONE summed uncategorized bar (bugbot duplicate-key fix)", () => {
+    // The insights query groups NULL and "" as separate rows; per-row
+    // coalescing mapped both onto the same uncategorized key — two
+    // identically labeled bars with duplicate React keys and split counts.
+    // The rows must aggregate by the coalesced key before mapping: exactly
+    // one uncategorized bar carrying the summed count.
+    const data: InsightsSummary = {
+      ...RECORDS,
+      findings_by_category: [
+        { category: "logic", count: 9 },
+        { category: null, count: 6 },
+        { category: "", count: 2 },
+      ],
+    };
+    const [, category] = chartSlices(renderRecords("en", data));
+    const label = t("en", "insights.uncategorized");
+    // Exactly one uncategorized bar — the old per-row mapping emitted two
+    // <title>uncategorized</title> labels (duplicate keys).
+    expect(category.split(`<title>${label}</title>`).length - 1).toBe(1);
+    // Its count is the SUM 6+2=8, not either per-row count (both old bar-end
+    // labels are gone; 8/6/2 all sit outside the tick set niceTicks(9) =
+    // 0/5/10, so these pins read bar-end labels only, never ticks).
+    expect(category).toContain(">8</text>");
+    expect(category).not.toContain(">6</text>");
+    expect(category).not.toContain(">2</text>");
+    // Two bars total (logic + merged uncategorized), not three.
+    expect(category.split("<rect").length - 1).toBe(2);
+    // First-seen order holds: logic leads, the merged bar follows it.
+    expect(category.indexOf("<title>logic</title>")).toBeGreaterThan(-1);
+    expect(category.indexOf(`<title>${label}</title>`)).toBeGreaterThan(category.indexOf("<title>logic</title>"));
+  });
+
   test("trend chart: dual-series legend with AD-561 colors, localized date axis, bucket-derived totals", () => {
     const html = renderRecords("en");
     const [, , trend] = chartSlices(html);
