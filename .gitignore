@@ -118,6 +118,11 @@ dist
 # TernJS port file
 .tern-port
 
+# ZCode client workspace state
+.zcode/
+.mimosa/
+.video_agent/
+
 # Morning Star harness (.mstar/)
 # Principle: process stays local; results are shared with the team.
 # Default-ignore everything under .mstar/, then re-include the tracked results.
