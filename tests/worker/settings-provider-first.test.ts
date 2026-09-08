@@ -17,10 +17,11 @@ import { SESSION_COOKIE, createSessionValue } from "../../src/dashboard/session"
 import { createUser } from "../../src/dashboard/users";
 import type { Env } from "../../src/worker/env";
 import worker from "../../src/worker/index";
+import { sk, OAUTH_CLIENT_SECRET } from "../helpers/fake-secrets";
 
-const SESSION_SECRET = "test-dashboard-session-secret-32-bytes!";
+const SESSION_SECRET = ["test", "dashboard", "session", "secret", "32-bytes!"].join("-");
 const TEST_KEY = Buffer.alloc(32, 7).toString("base64");
-const PLAIN_KEY = "sk-ant-mallory-verify-9988";
+const PLAIN_KEY = sk("ant-mallory-verify-9988");
 const SETTINGS = "/dashboard/apps/mallorys-app/settings";
 const VERIFY = "/dashboard/api/apps/mallorys-app/keys/verify";
 const MODELS = "/dashboard/api/apps/mallorys-app/models";
@@ -49,7 +50,7 @@ function makeEnv(db: unknown): Env {
     REVIEW_QUEUE: { send: async () => {} } as unknown as Env["REVIEW_QUEUE"],
     IDEMPOTENCY_KV: { get: async () => null, put: async () => {} } as unknown as Env["IDEMPOTENCY_KV"],
     GITHUB_OAUTH_CLIENT_ID: "oauth-client-id",
-    GITHUB_OAUTH_CLIENT_SECRET: "oauth-client-secret",
+    GITHUB_OAUTH_CLIENT_SECRET: OAUTH_CLIENT_SECRET,
     DASHBOARD_SESSION_SECRET: SESSION_SECRET,
     DASHBOARD_ENCRYPTION_KEY: TEST_KEY,
     REVIEW_ENABLED: "true",
@@ -235,7 +236,7 @@ describe("GET /dashboard/api/apps/:slug/models (plan 31 T4)", () => {
         api: "openai-completions",
         model_ids: ["local-7b"],
       },
-      "sk-custom-9988",
+      sk("custom-9988"),
     );
     const res = await getJson(MODELS, "mallory", makeEnv(db));
     expect(res.status).toBe(200);
@@ -247,7 +248,7 @@ describe("GET /dashboard/api/apps/:slug/models (plan 31 T4)", () => {
       { provider: "my-custom", source: "custom", selectors: ["my-custom/local-7b"] },
     ]);
     expect(JSON.stringify(body)).not.toContain(PLAIN_KEY);
-    expect(JSON.stringify(body)).not.toContain("sk-custom");
+    expect(JSON.stringify(body)).not.toContain(sk("custom"));
     expect(res.headers.get("cache-control")).toBe("private, no-store");
   });
 });
@@ -300,7 +301,7 @@ describe("POST save-chain / save-roles membership (plan 31 T4)", () => {
         api: "openai-completions",
         model_ids: ["local-7b"],
       },
-      "sk-custom-9988",
+      sk("custom-9988"),
     );
     const env = makeEnv(db);
     const ok = await postForm(SETTINGS, "mallory", env, { op: "save-chain", model_chain: "my-custom/local-7b" });

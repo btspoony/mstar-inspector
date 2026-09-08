@@ -1354,7 +1354,7 @@ async function processMessage(payload: ReviewJobPayload, deps: ProcessDeps): Pro
     // deploy finding; verified live). GH_TOKEN stays for the gh steps below.
     // Credentials are exec env only — never in the command string, never in
     // the image, never in logs.
-    const clone = await sandbox.exec(cmds.clone, {
+    const clone = await sandbox.runCommand(cmds.clone, {
       env: {
         GIT_CONFIG_COUNT: "1",
         GIT_CONFIG_KEY_0: "http.https://github.com/.extraheader",
@@ -1370,7 +1370,7 @@ async function processMessage(payload: ReviewJobPayload, deps: ProcessDeps): Pro
     // downstream — idempotency key, D1 row, posted commit_id, KV state — is
     // keyed off this sha, so diff/files/commit_id always describe the same
     // commit and a force-push mid-flight is captured here, not drifted.
-    const rev = await sandbox.exec(cmds.checkedOutSha, { timeout: EXEC_TIMEOUT_GIT_MS });
+    const rev = await sandbox.runCommand(cmds.checkedOutSha, { timeout: EXEC_TIMEOUT_GIT_MS });
     if (rev.exitCode !== 0 || rev.stdout.trim() === "") {
       throw new Error(`cannot resolve head sha: git exit ${rev.exitCode}, stdout ${rev.stdout.length}B`);
     }
@@ -1413,7 +1413,7 @@ async function processMessage(payload: ReviewJobPayload, deps: ProcessDeps): Pro
     }
 
     // 5. Diff (GH_TOKEN via exec env only — never in the command).
-    const diff = await sandbox.exec(cmds.diff, { env: { GH_TOKEN: token }, timeout: EXEC_TIMEOUT_GIT_MS });
+    const diff = await sandbox.runCommand(cmds.diff, { env: { GH_TOKEN: token }, timeout: EXEC_TIMEOUT_GIT_MS });
     if (diff.exitCode !== 0) {
       throw new Error(`diff failed: exit ${diff.exitCode}, stdout ${diff.stdout.length}B`);
     }
@@ -1421,7 +1421,7 @@ async function processMessage(payload: ReviewJobPayload, deps: ProcessDeps): Pro
     // 6. Numstat of the PR diff — `git apply --numstat` reads the unified
     // diff without applying it. The lines ("<add>\t<del>\t<path>") are the
     // runner's seat-partition universe (reconFacts convention, Task 2 port).
-    const numstat = await sandbox.exec(cmds.numstat, { timeout: EXEC_TIMEOUT_GIT_MS });
+    const numstat = await sandbox.runCommand(cmds.numstat, { timeout: EXEC_TIMEOUT_GIT_MS });
     if (numstat.exitCode !== 0) {
       throw new Error(`numstat failed: exit ${numstat.exitCode}, stdout ${numstat.stdout.length}B`);
     }
@@ -1464,7 +1464,7 @@ async function processMessage(payload: ReviewJobPayload, deps: ProcessDeps): Pro
         ? { customProviders: customProviders.map(toRunnerCustomProvider) }
         : {}),
     };
-    const writeInput = await sandbox.exec(
+    const writeInput = await sandbox.runCommand(
       writeJsonCommand(RUNNER_INPUT_PATH, toBase64Utf8(JSON.stringify(runnerInput))),
       { timeout: EXEC_TIMEOUT_GIT_MS },
     );
@@ -1487,7 +1487,7 @@ async function processMessage(payload: ReviewJobPayload, deps: ProcessDeps): Pro
     // the session's actual secret values can be exact-redacted from any
     // model-echoed output below.
     const runnerEnv = buildRunnerEnv(appCfg, deps.log, fields, customProviders);
-    const run = await sandbox.exec(cmds.runner, {
+    const run = await sandbox.runCommand(cmds.runner, {
       cwd: CLONE_DIR,
       env: runnerEnv,
       timeout: runnerTimeoutMs(level),

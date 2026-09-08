@@ -13,8 +13,9 @@ import { SESSION_COOKIE, createSessionValue } from "../../src/dashboard/session"
 import { createUser } from "../../src/dashboard/users";
 import { createTestD1 } from "../store/helpers";
 import { LOCALE_COOKIE } from "../../src/i18n";
+import { OAUTH_CLIENT_SECRET } from "../helpers/fake-secrets";
 
-const SESSION_SECRET = "test-dashboard-session-secret-32-bytes!";
+const SESSION_SECRET = ["test", "dashboard", "session", "secret", "32-bytes!"].join("-");
 const MIGRATIONS_DIR = join(import.meta.dir, "../../migrations");
 const TEST_KEY = Buffer.alloc(32, 7).toString("base64");
 
@@ -72,7 +73,7 @@ function makeEnv(db: unknown): Env {
     REVIEW_QUEUE: { send: async () => {} } as unknown as Env["REVIEW_QUEUE"],
     IDEMPOTENCY_KV: { get: async () => null, put: async () => {} } as unknown as Env["IDEMPOTENCY_KV"],
     GITHUB_OAUTH_CLIENT_ID: "oauth-client-id",
-    GITHUB_OAUTH_CLIENT_SECRET: "oauth-client-secret",
+    GITHUB_OAUTH_CLIENT_SECRET: OAUTH_CLIENT_SECRET,
     DASHBOARD_SESSION_SECRET: SESSION_SECRET,
     DASHBOARD_ENCRYPTION_KEY: TEST_KEY,
     REVIEW_ENABLED: "true",

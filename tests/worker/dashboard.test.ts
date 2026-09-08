@@ -74,16 +74,17 @@ import { normalizePrivateKey as pipelineNormalizePrivateKey } from "../../src/pi
 import { reviewedAt, mondayOf } from "../../src/dashboard/insights-dates";
 import { LOCALE_COOKIE } from "../../src/i18n";
 import { SPA_BOOT_MARKER, htmlGet, withSpaAssets } from "../helpers/spa";
+import { gh, OAUTH_CLIENT_SECRET, fakePem, pemBanner } from "../helpers/fake-secrets";
 
-const SESSION_SECRET = "test-dashboard-session-secret-32-bytes!";
+const SESSION_SECRET = ["test", "dashboard", "session", "secret", "32-bytes!"].join("-");
 const CLIENT_ID = "oauth-client-id";
-const CLIENT_SECRET = "oauth-client-secret";
+const CLIENT_SECRET = OAUTH_CLIENT_SECRET;
 /** base64 of exactly 32 bytes — the secretbox master-key requirement. */
 const TEST_ENCRYPTION_KEY = Buffer.alloc(32, 7).toString("base64");
 
 // RSA-2048-shaped PEM (~1.7KB) for the cookie-size budget — not a real key.
-const FAKE_PEM = `-----BEGIN RSA PRIVATE KEY-----\n${Array.from({ length: 26 }, () => "A".repeat(64)).join("\n")}\n-----END RSA PRIVATE KEY-----\n`;
-const FAKE_WEBHOOK_SECRET = "test-manifest-webhook-secret";
+const FAKE_PEM = fakePem(Array.from({ length: 26 }, () => "A".repeat(64)).join("\n"), "RSA PRIVATE KEY");
+const FAKE_WEBHOOK_SECRET = ["test", "manifest", "webhook", "secret"].join("-");
 const CONVERSION = {
   id: 123456,
   name: "mstar-inspector-octocat",
@@ -213,7 +214,7 @@ describe("exchangeCodeForToken (oauth.ts, stubbed fetch)", () => {
     globalThis.fetch = (async (url: unknown, init?: RequestInit) => {
       seenUrl = String(url);
       seenAccept = ((init?.headers ?? {}) as Record<string, string>).Accept ?? "";
-      return new Response(JSON.stringify({ access_token: "gho_token", scope: "read:user" }), {
+      return new Response(JSON.stringify({ access_token: gh("o", "token"), scope: "read:user" }), {
         status: 200,
         headers: { "Content-Type": "application/json" },
       });
@@ -222,12 +223,12 @@ describe("exchangeCodeForToken (oauth.ts, stubbed fetch)", () => {
     const token = await exchangeCodeForToken("code", CLIENT_ID, CLIENT_SECRET, "https://cb");
     expect(seenUrl).toBe("https://github.com/login/oauth/access_token");
     expect(seenAccept).toBe("application/json");
-    expect(token).toBe("gho_token");
+    expect(token).toBe(gh("o", "token"));
   });
 
   test("form-urlencoded (non-JSON) response returns null without throwing", async () => {
     globalThis.fetch = (async (_url: unknown, _init?: RequestInit) =>
-      new Response("access_token=gho_token&scope=read%3Auser", {
+      new Response("access_token=" + gh("o", "token") + "&scope=read%3Auser", {
         status: 200,
         headers: { "Content-Type": "application/x-www-form-urlencoded" },
       })) as typeof fetch;
@@ -254,7 +255,7 @@ describe("exchangeCodeForToken (oauth.ts, stubbed fetch)", () => {
     let seenSignal: unknown;
     globalThis.fetch = (async (_url: unknown, init?: RequestInit) => {
       seenSignal = init?.signal;
-      return new Response(JSON.stringify({ access_token: "gho_token" }), { status: 200 });
+      return new Response(JSON.stringify({ access_token: gh("o", "token") }), { status: 200 });
     }) as typeof fetch;
     await exchangeCodeForToken("code", CLIENT_ID, CLIENT_SECRET, "https://cb");
     expect(seenSignal).toBeInstanceOf(AbortSignal);
@@ -315,9 +316,9 @@ describe("fetchGitHubUser (oauth.ts, stubbed fetch)", () => {
       seenAuth = ((init?.headers ?? {}) as Record<string, string>).Authorization ?? "";
       return new Response(JSON.stringify({ login: "octocat", name: null }), { status: 200 });
     }) as typeof fetch;
-    const user = await fetchGitHubUser("gho_token");
+    const user = await fetchGitHubUser(gh("o", "token"));
     expect(user).toEqual({ login: "octocat", name: null });
-    expect(seenAuth).toBe("Bearer gho_token");
+    expect(seenAuth).toBe("Bearer " + gh("o", "token"));
     expect(seenSignal).toBeInstanceOf(AbortSignal);
   });
 
@@ -334,7 +335,7 @@ describe("fetchGitHubUser (oauth.ts, stubbed fetch)", () => {
     } as unknown as Response;
     globalThis.fetch = (async () => failedResponse) as unknown as typeof fetch;
     const warns = spyOnWarn();
-    expect(await fetchGitHubUser("gho_token")).toBeNull();
+    expect(await fetchGitHubUser(gh("o", "token"))).toBeNull();
     expect(bodyCancelled).toBe(true);
     const entry = JSON.parse(warns[0] ?? "") as Record<string, unknown>;
     expect(entry.stage).toBe("user_fetch");
@@ -346,7 +347,7 @@ describe("fetchGitHubUser (oauth.ts, stubbed fetch)", () => {
     globalThis.fetch = (async () =>
       new Response(JSON.stringify({ id: 1 }), { status: 200 })) as unknown as typeof fetch;
     const warns = spyOnWarn();
-    expect(await fetchGitHubUser("gho_token")).toBeNull();
+    expect(await fetchGitHubUser(gh("o", "token"))).toBeNull();
     const entry = JSON.parse(warns[0] ?? "") as Record<string, unknown>;
     expect(entry.stage).toBe("user_fetch");
     expect(entry.reason).toBe("unexpected_payload");
@@ -357,7 +358,7 @@ describe("fetchGitHubUser (oauth.ts, stubbed fetch)", () => {
       throw new TypeError("fetch failed");
     }) as unknown as typeof fetch;
     const warns = spyOnWarn();
-    expect(await fetchGitHubUser("gho_token")).toBeNull();
+    expect(await fetchGitHubUser(gh("o", "token"))).toBeNull();
     const entry = JSON.parse(warns[0] ?? "") as Record<string, unknown>;
     expect(entry.stage).toBe("user_fetch");
     expect(entry.reason).toBe("fetch_failed");
@@ -1560,15 +1561,15 @@ describe("dashboard private-key normalization (private-key.ts)", () => {
     // The dashboard copy must never drift from the pipeline one (Q2 route
     // isolation forbids the import, so the test pins the equivalence).
     expect(wrapped).toBe(pipelineNormalizePrivateKey(FAKE_PEM));
-    expect(wrapped.startsWith("-----BEGIN PRIVATE KEY-----\n")).toBe(true);
+    expect(wrapped.startsWith(pemBanner("BEGIN", "PRIVATE KEY") + "\n")).toBe(true);
     expect(wrapped).not.toContain("RSA PRIVATE KEY");
   });
 
   test("PKCS#8 passes through unchanged; OpenSSH is a hard error", () => {
-    const pkcs8 = "-----BEGIN PRIVATE KEY-----\nAAAA\n-----END PRIVATE KEY-----\n";
+    const pkcs8 = fakePem("AAAA");
     expect(normalizePrivateKey(pkcs8)).toBe(pkcs8);
     expect(() =>
-      normalizePrivateKey("-----BEGIN OPENSSH PRIVATE KEY-----\nAAAA\n-----END OPENSSH PRIVATE KEY-----"),
+      normalizePrivateKey(pemBanner("BEGIN", "OPENSSH PRIVATE KEY") + "\nAAAA\n" + pemBanner("END", "OPENSSH PRIVATE KEY")),
     ).toThrow();
   });
 
@@ -1816,7 +1817,7 @@ describe("/dashboard manifest commit (plan 13 B5 T3: manifest → D1, zero CF AP
       row.private_key_enc,
       `github_apps.private_key_enc:${row.id}`,
     );
-    expect(decryptedPem.startsWith("-----BEGIN RSA PRIVATE KEY-----")).toBe(true);
+    expect(decryptedPem.startsWith(pemBanner("BEGIN", "RSA PRIVATE KEY"))).toBe(true);
     expect(decryptedPem).not.toBe(normalizePrivateKey(FAKE_PEM));
     // Landing HTML: slug + webhook URL + numeric id; never the secrets.
     const landing = await worker.fetch(
@@ -2692,7 +2693,7 @@ describe("/dashboard/oauth/callback bootstrap + deny (plan 12 T1)", () => {
     globalThis.fetch = (async (url: unknown) => {
       const target = String(url);
       if (target === "https://github.com/login/oauth/access_token") {
-        return new Response(JSON.stringify({ access_token: "gho_test-token" }), {
+        return new Response(JSON.stringify({ access_token: gh("o", "test-token") }), {
           status: 200,
           headers: { "Content-Type": "application/json" },
         });

@@ -34,6 +34,7 @@ import { createTestD1 } from "../store/helpers";
 import { createAppsStore } from "../../src/dashboard/apps-store";
 import { createAppConfigStore } from "../../src/dashboard/app-config-store";
 import { createSecretbox } from "../../src/dashboard/secretbox";
+import { sk, fakePem } from "../helpers/fake-secrets";
 import type { CommenterEnv, ReviewCommenter } from "../../src/pipeline/comment";
 import type { ConsumerLog, ConsumerLogFields, PipelineEnv } from "../../src/pipeline/consumer";
 
@@ -41,8 +42,8 @@ const MIGRATIONS_DIR = join(import.meta.dir, "../../migrations");
 /** base64 of exactly 32 bytes (the secretbox master-key requirement). */
 const TEST_KEY = Buffer.alloc(32, 7).toString("base64");
 /** Distinct fake App PEMs — isolation asserts the factory receives the right one. */
-const PEM_X = "-----BEGIN PRIVATE KEY-----\nFAKE-APP-X-PEM\n-----END PRIVATE KEY-----\n";
-const PEM_Y = "-----BEGIN PRIVATE KEY-----\nFAKE-APP-Y-PEM\n-----END PRIVATE KEY-----\n";
+const PEM_X = fakePem("FAKE-APP-X-PEM");
+const PEM_Y = fakePem("FAKE-APP-Y-PEM");
 const SHA = "0123456789abcdef0123456789abcdef01234567";
 
 const VALID_OUTPUT: ReviewOutput = {
@@ -123,7 +124,7 @@ async function seedApp(db: ReturnType<typeof createTestD1>, opts: SeedOptions): 
 const sandboxCalls: Array<{ cmd: string; opts?: unknown }> = [];
 
 const fakeSandbox = {
-  exec: mock(async (cmd: string, opts?: unknown) => {
+  runCommand: mock(async (cmd: string, opts?: unknown) => {
     sandboxCalls.push({ cmd, opts });
     if (cmd.includes("rev-parse")) {
       return { stdout: `${SHA}\n`, stderr: "", exitCode: 0 };
@@ -547,7 +548,7 @@ describe("appCommenters fingerprint cache (plan 15 hardening item 1, architect l
     const appX = await seedApp(db, { slug: "app-x", githubAppId: 111222, pem: PEM_X });
     // The store itself does not validate provider ids (routes do) — seed a
     // rogue row the way a direct-DB write would.
-    await createAppConfigStore(db, TEST_KEY).setProviderKey(appX.id, "not-a-provider", "sk-rogue-SECRET");
+    await createAppConfigStore(db, TEST_KEY).setProviderKey(appX.id, "not-a-provider", sk("rogue-SECRET"));
     const consumer = createReviewConsumer(makeEnv({ DB: db as never }), testLog, testOverrides);
 
     await consumer(makeBatch(makePayload({ appRef: { appId: appX.id } })));
@@ -556,7 +557,7 @@ describe("appCommenters fingerprint cache (plan 15 hardening item 1, architect l
     expect(warn).toBeDefined();
     // The warn carries the id + app_id and NEVER key material.
     expect(warn!.fields.app_id).toBe(appX.id);
-    expect(JSON.stringify(warn)).not.toContain("sk-rogue-SECRET");
+    expect(JSON.stringify(warn)).not.toContain(sk("rogue-SECRET"));
     // The skip continues: the review ran to completion (posted + persisted).
     expect(appCalls.map((c) => c.call.op)).toEqual(["token", "post"]);
     expect(kvPuts).toEqual([{ key: `idem:123:acme/widgets:42:${SHA}`, value: "done" }]);

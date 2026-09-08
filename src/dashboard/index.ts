@@ -55,6 +55,7 @@ import {
   readManifestStateValue,
   type ManifestHoldPayload,
 } from "./manifest";
+import { GITHUB_CODE_SHAPE } from "./github-code-shape";
 import { createAppsStore, type DeliverySummary, type GithubAppRow } from "./apps-store";
 import { fetchAppMetadata, isGithubMetadataStale } from "./github-app-metadata";
 import { SecretboxKeyError, createSecretbox } from "./secretbox";
@@ -319,6 +320,13 @@ dashboardApp.get("/oauth/callback", async (c) => {
     logOAuthFailure("callback", "missing_code");
     return c.html(errorPage(t(requestLocale(c), "common.oauth.missingCode"), requestLocale(c)), 400);
   }
+  // Entry-level shape gate, symmetric with the manifest callback: only
+  // URL-safe opaque codes reach the exchange (the code travels in the POST
+  // body to the fixed github.com token endpoint — never in a fetched URL).
+  if (!GITHUB_CODE_SHAPE.test(code)) {
+    logOAuthFailure("callback", "unsafe_code_shape");
+    return c.html(errorPage(t(requestLocale(c), "common.oauth.codeRejected"), requestLocale(c)), 400);
+  }
   const callbackUri = `${new URL(c.req.url).origin}/dashboard/oauth/callback`;
   const token = await exchangeCodeForToken(code, secrets.clientId, secrets.clientSecret, callbackUri);
   if (!token) {
@@ -478,6 +486,14 @@ dashboardApp.get("/manifest/callback", async (c) => {
   if (!code) {
     logManifestFailure("callback", "missing_code");
     return c.html(manifestErrorPage(t(requestLocale(c), "manifest.error.missingCode"), false, requestLocale(c)), 400);
+  }
+  // Entry-level shape gate (mirrors the in-function gate): only URL-safe
+  // opaque codes ever reach the conversion call — the request-derived value
+  // can influence nothing but one encoded path segment on the fixed
+  // api.github.com host.
+  if (!GITHUB_CODE_SHAPE.test(code)) {
+    logManifestFailure("callback", "unsafe_code_shape");
+    return c.html(manifestErrorPage(t(requestLocale(c), "manifest.error.codeRejected"), false, requestLocale(c)), 400);
   }
   const conversion = await exchangeManifestCode(code);
   if (!conversion) {

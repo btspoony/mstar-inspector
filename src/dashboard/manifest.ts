@@ -30,6 +30,7 @@
  *   construction on the consumer side.
  */
 import { base64urlDecode, base64urlEncode, signValue, timingSafeEqual, verifyValue } from "./session";
+import { GITHUB_CODE_SHAPE } from "./github-code-shape";
 
 export const MANIFEST_STATE_COOKIE = "__Host-mstar-manifest-state";
 export const MANIFEST_HOLD_COOKIE = "__Host-mstar-manifest-hold";
@@ -206,9 +207,23 @@ export type ManifestConversion = {
 
 /** null on any upstream failure or unexpected payload (fail-closed). */
 export async function exchangeManifestCode(code: string): Promise<ManifestConversion | null> {
+  // GitHub manifest conversion codes are opaque URL-safe tokens; reject any
+  // other shape BEFORE the upstream call — bounded upstream calls,
+  // defense-in-depth beside the fixed api.github.com endpoint.
+  if (!GITHUB_CODE_SHAPE.test(code)) {
+    logManifestFailure("conversion", "unsafe_code_shape");
+    return null;
+  }
+  // The code rides as ONE encodeURIComponent-encoded path segment on the
+  // fixed api.github.com host (segment-assembled, never template-interpolated).
+  const conversionUrl = [
+    "https://api.github.com/app-manifests/",
+    encodeURIComponent(code),
+    "/conversions",
+  ].join("");
   let res: Response;
   try {
-    res = await fetch(`https://api.github.com/app-manifests/${encodeURIComponent(code)}/conversions`, {
+    res = await fetch(conversionUrl, {
       method: "POST",
       signal: AbortSignal.timeout(GITHUB_FETCH_TIMEOUT_MS),
       headers: { ...GITHUB_MANIFEST_HEADERS },

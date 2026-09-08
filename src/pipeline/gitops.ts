@@ -30,6 +30,7 @@
  */
 
 import type { ReviewLevel } from "../review/runtime";
+import { shellCommand, type ShellCommand } from "./shell-command";
 
 export type GitOpsInput = {
   owner: string;
@@ -46,15 +47,15 @@ export type GitOpsInput = {
 
 export type GitOpsCommands = {
   /** Shallow clone of the PR head branch into cloneDir. */
-  clone: string;
+  clone: ShellCommand;
   /** Read the sha of the checked-out HEAD (authoritative review sha). */
-  checkedOutSha: string;
+  checkedOutSha: ShellCommand;
   /** Write the PR unified diff to diffPath via gh. */
-  diff: string;
+  diff: ShellCommand;
   /** Numstat of the PR diff — the runner's seat-partition universe. */
-  numstat: string;
+  numstat: ShellCommand;
   /** Run the in-image review runner (`--level`/`--input` reconFacts JSON). */
-  runner: string;
+  runner: ShellCommand;
 };
 
 /** GitHub name charset (owner/repo) — matches signed webhook payload reality. */
@@ -85,18 +86,20 @@ function assertPrNumber(prNumber: number): void {
  * Private-repo transport auth is injected by the consumer via scoped git
  * env config (http.https://github.com/.extraheader) — never in the string.
  */
-export function cloneCommand(owner: string, repo: string, prNumber: number, cloneDir: string): string {
+export function cloneCommand(owner: string, repo: string, prNumber: number, cloneDir: string): ShellCommand {
   assertOwnerRepo(owner, repo);
   assertPrNumber(prNumber);
   const repoUrl = `https://github.com/${owner}/${repo}.git`;
-  return [
-    `rm -rf '${cloneDir}'`,
-    `git init '${cloneDir}'`,
-    `cd '${cloneDir}'`,
-    `git remote add origin '${repoUrl}'`,
-    `git fetch --depth 1 origin 'pull/${prNumber}/head'`,
-    `git checkout FETCH_HEAD`,
-  ].join(" && ");
+  return shellCommand(
+    [
+      `rm -rf '${cloneDir}'`,
+      `git init '${cloneDir}'`,
+      `cd '${cloneDir}'`,
+      `git remote add origin '${repoUrl}'`,
+      `git fetch --depth 1 origin 'pull/${prNumber}/head'`,
+      `git checkout FETCH_HEAD`,
+    ].join(" && "),
+  );
 }
 
 /**
@@ -105,15 +108,15 @@ export function cloneCommand(owner: string, repo: string, prNumber: number, clon
  * the KV completion state off it (bugbot A2: diff/files/commit_id always
  * describe the same commit; a force-push mid-flight is captured here).
  */
-export function checkedOutShaCommand(cloneDir: string): string {
-  return `git -C '${cloneDir}' rev-parse HEAD`;
+export function checkedOutShaCommand(cloneDir: string): ShellCommand {
+  return shellCommand(`git -C '${cloneDir}' rev-parse HEAD`);
 }
 
 /** Write the PR unified diff to diffPath via gh (primary path, T1-falsified). */
-export function diffCommand(owner: string, repo: string, prNumber: number, diffPath: string): string {
+export function diffCommand(owner: string, repo: string, prNumber: number, diffPath: string): ShellCommand {
   assertOwnerRepo(owner, repo);
   assertPrNumber(prNumber);
-  return `gh pr diff '${prNumber}' --repo '${owner}/${repo}' > '${diffPath}'`;
+  return shellCommand(`gh pr diff '${prNumber}' --repo '${owner}/${repo}' > '${diffPath}'`);
 }
 
 /**
@@ -121,8 +124,8 @@ export function diffCommand(owner: string, repo: string, prNumber: number, diffP
  * (`git apply --numstat` reads a unified diff from any cwd). These lines are
  * the runner's seat-partition universe (reconFacts convention, plan 07 T5).
  */
-export function numstatCommand(diffPath: string): string {
-  return `git apply --numstat '${diffPath}'`;
+export function numstatCommand(diffPath: string): ShellCommand {
+  return shellCommand(`git apply --numstat '${diffPath}'`);
 }
 
 /**
@@ -131,9 +134,9 @@ export function numstatCommand(diffPath: string): string {
  * arbitrary JSON (quotes, unicode, tabs, newlines) never touches shell
  * interpolation. The base64 payload itself is allowlist-validated.
  */
-export function writeJsonCommand(path: string, contentBase64: string): string {
+export function writeJsonCommand(path: string, contentBase64: string): ShellCommand {
   assertShellSafe(contentBase64, /^[A-Za-z0-9+/]+={0,2}$/, "base64 content");
-  return `printf '%s' '${contentBase64}' | base64 -d > '${path}'`;
+  return shellCommand(`printf '%s' '${contentBase64}' | base64 -d > '${path}'`);
 }
 
 /**
@@ -142,8 +145,8 @@ export function writeJsonCommand(path: string, contentBase64: string): string {
  * carries ONLY the validated mstar.review/v1 envelope; exit 0 = success
  * (there is no summary-degrade mode on this path).
  */
-export function runnerCommand(runnerPath: string, level: ReviewLevel, inputPath: string): string {
-  return `bun run '${runnerPath}' --level '${level}' --input '${inputPath}'`;
+export function runnerCommand(runnerPath: string, level: ReviewLevel, inputPath: string): ShellCommand {
+  return shellCommand(`bun run '${runnerPath}' --level '${level}' --input '${inputPath}'`);
 }
 
 /** Main-flow commands in execution order (clone → sha → diff → numstat → runner). */

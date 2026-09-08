@@ -23,6 +23,7 @@
  */
 import { describe, expect, test } from "bun:test";
 import { computeFindingFingerprint, type FindingFingerprintInput } from "../../src/store/fingerprint";
+import { sk } from "../helpers/fake-secrets";
 
 /** Default realistic finding; tests override only the dimension under pin. */
 function finding(over: Partial<FindingFingerprintInput> = {}): FindingFingerprintInput {
@@ -172,12 +173,12 @@ describe("computeFindingFingerprint", () => {
   });
 
   test("hint priority: a hint CONTAINING the redaction marker falls back to normalization (embedded marker)", () => {
-    // Redaction replaces only the secret span: "sk-abc prod" → "[REDACTED] prod".
+    // Redaction replaces only the secret span: a sk-prefixed secret + " prod" → "[REDACTED] prod".
     // A hint that merely CONTAINS the marker must not win verbatim — two
     // findings whose hints both embed the marker would otherwise collapse
     // into one false repeat (Bugbot wave-1).
-    const a = fp(finding({ fingerprint_hint: "sk-abc prod [REDACTED] key", title: "Secret leak in auth" }));
-    const b = fp(finding({ fingerprint_hint: "sk-xyz prod [REDACTED] key", title: "Secret leak in billing" }));
+    const a = fp(finding({ fingerprint_hint: sk("abc") + " prod [REDACTED] key", title: "Secret leak in auth" }));
+    const b = fp(finding({ fingerprint_hint: sk("xyz") + " prod [REDACTED] key", title: "Secret leak in billing" }));
     expect(a).not.toBe(b);
     // Each equals its own hint-less fingerprint (normalized over distinct content).
     expect(a).toBe(fp(finding({ title: "Secret leak in auth" })));
@@ -185,8 +186,8 @@ describe("computeFindingFingerprint", () => {
   });
 
   test("hint priority: a marker-free hint still wins verbatim", () => {
-    expect(fp(finding({ fingerprint_hint: "sk-abc prod" }))).toBe("sk-abc prod");
+    expect(fp(finding({ fingerprint_hint: sk("abc") + " prod" }))).toBe(sk("abc") + " prod");
     // Marker-free hint survives even when the finding content differs.
-    expect(fp(finding({ fingerprint_hint: "sk-abc prod", title: "Different title" }))).toBe("sk-abc prod");
+    expect(fp(finding({ fingerprint_hint: sk("abc") + " prod", title: "Different title" }))).toBe(sk("abc") + " prod");
   });
 });

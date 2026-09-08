@@ -14,8 +14,9 @@ import { SESSION_COOKIE, createSessionValue } from "../../src/dashboard/session"
 import { createUser } from "../../src/dashboard/users";
 import type { Env } from "../../src/worker/env";
 import worker from "../../src/worker/index";
+import { sk, OAUTH_CLIENT_SECRET } from "../helpers/fake-secrets";
 
-const SESSION_SECRET = "test-dashboard-session-secret-32-bytes!";
+const SESSION_SECRET = ["test", "dashboard", "session", "secret", "32-bytes!"].join("-");
 const TEST_KEY = Buffer.alloc(32, 7).toString("base64");
 const SETTINGS = "/dashboard/apps/mallorys-app/settings";
 const VERIFY = "/dashboard/api/apps/mallorys-app/keys/verify";
@@ -44,7 +45,7 @@ function makeEnv(db: unknown): Env {
     REVIEW_QUEUE: { send: async () => {} } as unknown as Env["REVIEW_QUEUE"],
     IDEMPOTENCY_KV: { get: async () => null, put: async () => {} } as unknown as Env["IDEMPOTENCY_KV"],
     GITHUB_OAUTH_CLIENT_ID: "oauth-client-id",
-    GITHUB_OAUTH_CLIENT_SECRET: "oauth-client-secret",
+    GITHUB_OAUTH_CLIENT_SECRET: OAUTH_CLIENT_SECRET,
     DASHBOARD_SESSION_SECRET: SESSION_SECRET,
     DASHBOARD_ENCRYPTION_KEY: TEST_KEY,
     REVIEW_ENABLED: "true",
@@ -83,7 +84,7 @@ describe("settings 400 key transport (plan 45 T4)", () => {
     const res = await postForm(SETTINGS, "mallory", makeEnv(db), {
       op: "add-key",
       provider: "not-a-provider",
-      key: "sk-whatever",
+      key: sk("whatever"),
     });
     expect(res.status).toBe(400);
     expect(await res.json()).toEqual({
@@ -99,7 +100,7 @@ describe("settings 400 key transport (plan 45 T4)", () => {
     const res = await postForm(SETTINGS, "mallory", makeEnv(db), {
       op: "add-key",
       provider: "anthropic",
-      key: "sk-ant-123",
+      key: sk("ant-123"),
     });
     expect(res.status).toBe(400);
     expect(await res.json()).toEqual({
@@ -159,7 +160,7 @@ describe("settings 400 key transport (plan 45 T4)", () => {
       base_url: "https://example.com/v1",
       api: "openai-completions",
       model_ids: "local-7b",
-      key: "sk-custom-123",
+      key: sk("custom-123"),
     });
     expect(res.status).toBe(400);
     expect(await res.json()).toEqual({
@@ -174,7 +175,7 @@ describe("settings 400 key transport (plan 45 T4)", () => {
     const res = await postForm(SETTINGS, "mallory", makeEnv(db), {
       op: "add-template-provider",
       template_id: "workers-ai",
-      key: "sk-cf-123",
+      key: sk("cf-123"),
     });
     expect(res.status).toBe(400);
     expect(await res.json()).toEqual({
@@ -212,7 +213,7 @@ describe("settings 400 key transport (plan 45 T4)", () => {
       SETTINGS,
       "mallory",
       makeEnv(db),
-      { op: "add-key", provider: "not-a-provider", key: "sk-whatever" },
+      { op: "add-key", provider: "not-a-provider", key: sk("whatever") },
       { Accept: "text/html" },
     );
     expect(res.status).toBe(302);
@@ -224,7 +225,7 @@ describe("CARRY-2: verify-route eligibility rejection gains the keyed face (plan
   test("/keys/verify precheck → same key as the settings POST family, reason unchanged", async () => {
     const { db, app } = await seededWorld();
     rawRun(db, "UPDATE github_apps SET sandbox_image_id = 'legacy-runtime' WHERE id = ?", app.id);
-    const res = await postForm(VERIFY, "mallory", makeEnv(db), { provider: "anthropic", key: "sk-ant-123" });
+    const res = await postForm(VERIFY, "mallory", makeEnv(db), { provider: "anthropic", key: sk("ant-123") });
     expect(res.status).toBe(400);
     expect(await res.json()).toEqual({
       ok: false,

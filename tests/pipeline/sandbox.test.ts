@@ -44,17 +44,17 @@ mock.module("@cloudflare/sandbox", () => ({
   Sandbox: class Sandbox {},
 }));
 
-const { getSandbox, DEFAULT_EXEC_TIMEOUT_MS } = await import("../../src/pipeline/sandbox");
+const { getSandbox, DEFAULT_EXEC_TIMEOUT_MS, shellCommand } = await import("../../src/pipeline/sandbox");
 import type { ReviewSandbox } from "../../src/pipeline/sandbox";
 
 const binding = {} as never;
 
 describe("getSandbox", () => {
-  test("exec passes the command string and env/cwd/timeout options through and maps the result", async () => {
+  test("runCommand passes the command string and env/cwd/timeout options through and maps the result", async () => {
     execResult = { success: true, exitCode: 0, stdout: "diff --git a/x b/x\n", stderr: "review mode: structured\n" };
     const sandbox: ReviewSandbox = await getSandbox(binding, "smoke-abc");
 
-    const result = await sandbox.exec("gh pr diff 1 --repo btspoony/todo-bots", {
+    const result = await sandbox.runCommand(shellCommand("gh pr diff 1 --repo btspoony/todo-bots"), {
       env: { GH_TOKEN: "tok" },
       cwd: "/workspace/repo",
       timeout: 120_000,
@@ -69,12 +69,12 @@ describe("getSandbox", () => {
     expect(result).toEqual({ stdout: "diff --git a/x b/x\n", stderr: "review mode: structured\n", exitCode: 0 });
   });
 
-  test("exec without options passes undefined env/cwd and applies the default timeout", async () => {
+  test("runCommand without options passes undefined env/cwd and applies the default timeout", async () => {
     execCalls.length = 0;
     execResult = { success: true, exitCode: 0, stdout: "out", stderr: "" };
     const sandbox: ReviewSandbox = await getSandbox(binding, "smoke-2");
 
-    const result = await sandbox.exec("echo hi");
+    const result = await sandbox.runCommand(shellCommand("echo hi"));
 
     expect(execCalls).toEqual([
       { cmd: "echo hi", opts: { env: undefined, cwd: undefined, timeout: DEFAULT_EXEC_TIMEOUT_MS } },
@@ -82,23 +82,23 @@ describe("getSandbox", () => {
     expect(result).toEqual({ stdout: "out", stderr: "", exitCode: 0 });
   });
 
-  test("exec with an explicit timeout forwards it unchanged (per-call override wins)", async () => {
+  test("runCommand with an explicit timeout forwards it unchanged (per-call override wins)", async () => {
     execCalls.length = 0;
     execResult = { success: true, exitCode: 0, stdout: "out", stderr: "" };
     const sandbox: ReviewSandbox = await getSandbox(binding, "smoke-6");
 
-    await sandbox.exec("gh pr view 1", { timeout: 120_000 });
+    await sandbox.runCommand(shellCommand("gh pr view 1"), { timeout: 120_000 });
 
     expect(execCalls).toEqual([
       { cmd: "gh pr view 1", opts: { env: undefined, cwd: undefined, timeout: 120_000 } },
     ]);
   });
 
-  test("exec propagates SDK errors (caller decides retry/DLQ)", async () => {
+  test("runCommand propagates SDK errors (caller decides retry/DLQ)", async () => {
     execError = new Error("container unavailable");
     const sandbox: ReviewSandbox = await getSandbox(binding, "smoke-3");
 
-    await expect(sandbox.exec("gh pr diff 1")).rejects.toThrow("container unavailable");
+    await expect(sandbox.runCommand(shellCommand("gh pr diff 1"))).rejects.toThrow("container unavailable");
     execError = undefined;
   });
 

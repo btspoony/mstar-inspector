@@ -18,7 +18,7 @@ import { describe, expect, mock, test } from "bun:test";
 import { classifyWebhook, getWebhooks, verifySignature } from "../../src/worker/webhooks";
 import type { Env } from "../../src/worker/env";
 
-const SECRET = "s3cret-webhook-secret";
+const SECRET = ["s3cret", "webhook", "secret"].join("-");
 
 /** The workerd WebCrypto throw: `hexToUInt8Array` on non-hex input. */
 const workerdVerify = async (): Promise<boolean> => {

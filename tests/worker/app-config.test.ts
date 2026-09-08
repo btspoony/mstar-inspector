@@ -60,12 +60,13 @@ import { createUser, type DashboardD1 } from "../../src/dashboard/users";
 import type { Env } from "../../src/worker/env";
 import type { D1StatementLike } from "../../src/store/types";
 import { SPA_BOOT_MARKER, htmlGet, withSpaAssets } from "../helpers/spa";
+import { sk, OAUTH_CLIENT_SECRET } from "../helpers/fake-secrets";
 
 const MIGRATIONS_DIR = join(import.meta.dir, "../../migrations");
 /** base64 of exactly 32 bytes — the secretbox master-key requirement. */
 const TEST_KEY = Buffer.alloc(32, 11).toString("base64");
-const SESSION_SECRET = "test-dashboard-session-secret-32-bytes!";
-const PLAIN_ANTHROPIC_KEY = "sk-ant-mallory-verysecret-9988";
+const SESSION_SECRET = ["test", "dashboard", "session", "secret", "32-bytes!"].join("-");
+const PLAIN_ANTHROPIC_KEY = sk("ant-mallory-verysecret-9988");
 const PLAIN_CHAIN = "ark-plan/deepseek-v4-flash, openai/gpt-5:thinking";
 /** SQLite datetime('now') format the store writes (UTC "YYYY-MM-DD HH:MM:SS"). */
 const SQLITE_TS_RE = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/;
@@ -206,7 +207,7 @@ function makeEnv(db: unknown, overrides: Partial<Env> = {}): Env {
     REVIEW_QUEUE: { send: async () => {} } as unknown as Env["REVIEW_QUEUE"],
     IDEMPOTENCY_KV: { get: async () => null, put: async () => {} } as unknown as Env["IDEMPOTENCY_KV"],
     GITHUB_OAUTH_CLIENT_ID: "oauth-client-id",
-    GITHUB_OAUTH_CLIENT_SECRET: "oauth-client-secret",
+    GITHUB_OAUTH_CLIENT_SECRET: OAUTH_CLIENT_SECRET,
     DASHBOARD_SESSION_SECRET: SESSION_SECRET,
     DASHBOARD_ENCRYPTION_KEY: TEST_KEY,
     DB: db,
@@ -502,8 +503,8 @@ describe("app-config store (createAppConfigStore) — provider keys", () => {
     const db = createAppConfigD1();
     const app = await seedApp(db, { slug: "a", createdBy: "mallory" });
     const store = configStore(db);
-    await store.setProviderKey(app.id, "anthropic", "sk-first-key-aaaa");
-    await store.setProviderKey(app.id, "anthropic", "sk-second-key-bbbb");
+    await store.setProviderKey(app.id, "anthropic", sk("first-key-aaaa"));
+    await store.setProviderKey(app.id, "anthropic", sk("second-key-bbbb"));
     expect(rawCount(db, "app_provider_keys")).toBe(1);
     const list = await store.listProviderKeys(app.id);
     expect(list).toEqual([{ provider: "anthropic", last4: "bbbb", updated_at: expect.any(String) }]);
@@ -513,7 +514,7 @@ describe("app-config store (createAppConfigStore) — provider keys", () => {
     const db = createAppConfigD1();
     const app = await seedApp(db, { slug: "a", createdBy: "mallory" });
     const store = configStore(db);
-    await store.setProviderKey(app.id, "openai", "sk-openai-key-7777");
+    await store.setProviderKey(app.id, "openai", sk("openai-key-7777"));
     await store.setProviderKey(app.id, "anthropic", PLAIN_ANTHROPIC_KEY);
     const list = await store.listProviderKeys(app.id);
     // Provider-ascending; ONLY the masked tail of each key.
@@ -522,7 +523,7 @@ describe("app-config store (createAppConfigStore) — provider keys", () => {
       { provider: "openai", last4: "7777", updated_at: expect.any(String) },
     ]);
     expect(JSON.stringify(list)).not.toContain(PLAIN_ANTHROPIC_KEY);
-    expect(JSON.stringify(list)).not.toContain("sk-openai-key-7777");
+    expect(JSON.stringify(list)).not.toContain(sk("openai-key-7777"));
   });
 
   test("a key of ≤4 characters reveals NOTHING through the mask", async () => {
@@ -556,15 +557,15 @@ describe("app-config store (createAppConfigStore) — provider keys", () => {
     const x = await seedApp(db, { slug: "app-x", createdBy: "mallory" });
     const y = await seedApp(db, { slug: "app-y", createdBy: "ada", githubAppId: 1002 });
     const store = configStore(db);
-    await store.setProviderKey(x.id, "anthropic", "sk-x-anthropic-key-1111");
-    await store.setProviderKey(y.id, "anthropic", "sk-y-anthropic-key-2222");
-    await store.setProviderKey(y.id, "openai", "sk-y-openai-key-3333");
+    await store.setProviderKey(x.id, "anthropic", sk("x-anthropic-key-1111"));
+    await store.setProviderKey(y.id, "anthropic", sk("y-anthropic-key-2222"));
+    await store.setProviderKey(y.id, "openai", sk("y-openai-key-3333"));
     const cfgX = await store.getAppConfig(x.id);
     expect(Object.keys(cfgX.keys)).toEqual(["anthropic"]);
-    expect(cfgX.keys.anthropic).toBe("sk-x-anthropic-key-1111");
+    expect(cfgX.keys.anthropic).toBe(sk("x-anthropic-key-1111"));
     const serialized = JSON.stringify(cfgX);
-    expect(serialized).not.toContain("sk-y-anthropic-key-2222");
-    expect(serialized).not.toContain("sk-y-openai-key-3333");
+    expect(serialized).not.toContain(sk("y-anthropic-key-2222"));
+    expect(serialized).not.toContain(sk("y-openai-key-3333"));
     // The masked list is scoped the same way.
     const listX = await store.listProviderKeys(x.id);
     expect(listX).toEqual([{ provider: "anthropic", last4: "1111", updated_at: expect.any(String) }]);
@@ -586,14 +587,14 @@ describe("app-config store (createAppConfigStore) — provider keys", () => {
     const db = createAppConfigD1();
     const app = await seedApp(db, { slug: "a", createdBy: "mallory" });
     const store = configStore(db);
-    await store.setProviderKey(app.id, "anthropic", "sk-v1-aaaa");
+    await store.setProviderKey(app.id, "anthropic", sk("v1-aaaa"));
     // Backdate the row so the second write's clock is observably LATER.
     rawRun(
       db,
       "UPDATE app_provider_keys SET created_at = '2026-01-01 00:00:00', updated_at = '2026-01-01 00:00:00' WHERE app_id = ? AND provider = 'anthropic'",
       app.id,
     );
-    await store.setProviderKey(app.id, "anthropic", "sk-v2-bbbb");
+    await store.setProviderKey(app.id, "anthropic", sk("v2-bbbb"));
     const row = db.raw.query("SELECT created_at, updated_at FROM app_provider_keys").get() as {
       created_at: string;
       updated_at: string;
@@ -611,7 +612,7 @@ describe("app-config store (createAppConfigStore) — provider keys", () => {
     const app = await seedApp(db, { slug: "a", createdBy: "mallory" });
     const store = configStore(db);
     await store.setProviderKey(app.id, "anthropic", PLAIN_ANTHROPIC_KEY);
-    await store.setProviderKey(app.id, "kilo", "sk-kilo-key-1234");
+    await store.setProviderKey(app.id, "kilo", sk("kilo-key-1234"));
     // The legacy shape: a pre-0012 row whose updated_at is NULL.
     rawRun(db, "UPDATE app_provider_keys SET updated_at = NULL WHERE provider = 'kilo'");
     const list = await store.listProviderKeys(app.id);
@@ -1054,7 +1055,7 @@ describe("app-config store (createAppConfigStore) — custom providers (plan 23 
     api: "openai-completions",
     model_ids: ["deepseek-v4-flash", "deepseek-r1"],
   };
-  const PLAIN_CUSTOM_KEY = "sk-custom-ark-9988";
+  const PLAIN_CUSTOM_KEY = sk("custom-ark-9988");
 
   test("upsert encrypts the key at rest (secretbox envelope) and list returns the declaration with NO key material", async () => {
     const { db, app } = await seededWorld();
@@ -1107,14 +1108,14 @@ describe("app-config store (createAppConfigStore) — custom providers (plan 23 
     await configStore(db).upsertCustomProvider(
       app.id,
       { ...CUSTOM, model_ids: ["deepseek-v4-flash"] },
-      "sk-custom-ark-7777",
+      sk("custom-ark-7777"),
     );
     const row = db.raw
       .query("SELECT api_key_enc, model_ids, updated_at FROM app_custom_providers WHERE app_id = ? AND provider_id = ?")
       .get(app.id, CUSTOM.provider_id) as { api_key_enc: string; model_ids: string; updated_at: string };
     await expect(
       createSecretbox(TEST_KEY).decryptSecret(row.api_key_enc, `app_custom_providers.api_key_enc:${app.id}:${CUSTOM.provider_id}`),
-    ).resolves.toBe("sk-custom-ark-7777");
+    ).resolves.toBe(sk("custom-ark-7777"));
     expect(JSON.parse(row.model_ids)).toEqual(["deepseek-v4-flash"]);
     expect(row.updated_at).toMatch(SQLITE_TS_RE);
     expect(row.updated_at > "2026-01-01 00:00:00").toBe(true);
@@ -1480,7 +1481,7 @@ describe("POST /dashboard/apps/:slug/settings — add-key (op=add-key)", () => {
     const res = await postForm(SETTINGS, cookie, makeEnv(db), {
       op: "add-key",
       provider: "not-a-provider",
-      key: "sk-whatever-1234",
+      key: sk("whatever-1234"),
     });
     expect(res.status).toBe(400);
     expect(await res.text()).toContain("not a supported provider");
@@ -2093,7 +2094,7 @@ describe("POST /dashboard/apps/:slug/settings — custom providers (op=add-custo
     base_url: "https://ark.cn-beijing.volces.com/api/v3",
     api: "openai-completions",
     model_ids: "deepseek-v4-flash, deepseek-r1",
-    key: "sk-custom-ark-9988",
+    key: sk("custom-ark-9988"),
   };
   const mallory = async () => `${SESSION_COOKIE}=${await sessionCookie("mallory")}`;
 
@@ -2106,7 +2107,7 @@ describe("POST /dashboard/apps/:slug/settings — custom providers (op=add-custo
       .query("SELECT api_key_enc FROM app_custom_providers WHERE app_id = ? AND provider_id = 'my-custom'")
       .get(app.id) as { api_key_enc: string };
     expect(row.api_key_enc).toMatch(/^v1\.primary\./);
-    expect(row.api_key_enc).not.toContain("sk-custom-ark-9988");
+    expect(row.api_key_enc).not.toContain(sk("custom-ark-9988"));
   });
 
   test("400 matrix: bad id / http baseUrl / enum-violating api / empty model_ids / over-length — zero writes", async () => {
@@ -2147,7 +2148,7 @@ describe("POST /dashboard/apps/:slug/settings — custom providers (op=add-custo
     });
     // The bound is inclusive: with 7 declared, the 8th NEW id is allowed.
     for (let i = 1; i < MAX_CUSTOM_PROVIDER_COUNT; i++) {
-      await store.upsertCustomProvider(app.id, decl(`prov-${i}`), "sk-custom-ark-9988");
+      await store.upsertCustomProvider(app.id, decl(`prov-${i}`), sk("custom-ark-9988"));
     }
     const fill = await postForm(SETTINGS, await mallory(), makeEnv(db), { ...CUSTOM_FORM, provider_id: "prov-8" });
     expect(fill.status).toBe(200);

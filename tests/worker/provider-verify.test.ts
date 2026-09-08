@@ -37,11 +37,12 @@ import {
   type VerifyDeps,
 } from "../../src/dashboard/provider-verify";
 import type { DashboardD1 } from "../../src/dashboard/users";
+import { sk } from "../helpers/fake-secrets";
 
 const MIGRATIONS_DIR = join(import.meta.dir, "../../migrations");
 /** base64 of exactly 32 bytes — the secretbox master-key requirement. */
 const TEST_KEY = Buffer.alloc(32, 7).toString("base64");
-const PLAIN_KEY = "sk-ant-test-provider-1234";
+const PLAIN_KEY = sk("ant-test-provider-1234");
 /** SQLite datetime('now') format the store writes (UTC "YYYY-MM-DD HH:MM:SS"). */
 const SQLITE_TS_RE = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/;
 
@@ -595,7 +596,7 @@ describe("store wiring — saveVerifiedKey + getVerifiedModels", () => {
       .query("SELECT verified_at, verified_status FROM app_provider_keys WHERE app_id = ?")
       .get(app.id) as { verified_at: string | null; verified_status: string | null };
     expect(row.verified_status).toBe("ok");
-    await store.setProviderKey(app.id, "openai", "sk-overwrite-key-7777");
+    await store.setProviderKey(app.id, "openai", sk("overwrite-key-7777"));
     const after = db.raw
       .query("SELECT verified_at, verified_status, key_enc FROM app_provider_keys WHERE app_id = ?")
       .get(app.id) as { verified_at: string | null; verified_status: string | null; key_enc: string };
@@ -604,7 +605,7 @@ describe("store wiring — saveVerifiedKey + getVerifiedModels", () => {
     // The unverified overwrite replaced the verified envelope (AAD round-trip).
     await expect(
       createSecretbox(TEST_KEY).decryptSecret(after.key_enc, `app_provider_keys.key_enc:${app.id}:openai`),
-    ).resolves.toBe("sk-overwrite-key-7777");
+    ).resolves.toBe(sk("overwrite-key-7777"));
   });
 
   test("getVerifiedModels fails loud on a malformed app_provider_models row, citing app_provider_models.models_json (not app_custom_providers.model_ids)", async () => {
@@ -625,7 +626,7 @@ describe("store wiring — saveVerifiedKey + getVerifiedModels", () => {
     const app = await seedApp(db, "resave-app");
     const store = configStore(db);
     await store.saveVerifiedKey(app.id, "openai", PLAIN_KEY, ["gpt-5"]);
-    await store.saveVerifiedKey(app.id, "openai", "sk-new-key-9999", ["gpt-5", "gpt-5-mini"]);
+    await store.saveVerifiedKey(app.id, "openai", sk("new-key-9999"), ["gpt-5", "gpt-5-mini"]);
 
     const keyCount = db.raw.query("SELECT COUNT(*) AS n FROM app_provider_keys WHERE app_id = ?").get(app.id) as { n: number };
     const cacheCount = db.raw
@@ -640,7 +641,7 @@ describe("store wiring — saveVerifiedKey + getVerifiedModels", () => {
     const row = db.raw.query("SELECT key_enc FROM app_provider_keys WHERE app_id = ?").get(app.id) as { key_enc: string };
     await expect(
       createSecretbox(TEST_KEY).decryptSecret(row.key_enc, `app_provider_keys.key_enc:${app.id}:openai`),
-    ).resolves.toBe("sk-new-key-9999");
+    ).resolves.toBe(sk("new-key-9999"));
   });
 
   test("getVerifiedModels orders by provider ascending and parses each models_json", async () => {

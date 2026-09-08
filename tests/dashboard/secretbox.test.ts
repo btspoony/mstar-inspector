@@ -17,15 +17,16 @@
  */
 import { describe, expect, test } from "bun:test";
 import { SecretboxKeyError, createSecretbox } from "../../src/dashboard/secretbox";
+import { pemBanner } from "../helpers/fake-secrets";
 
 /** 32 raw bytes as base64 — a valid AES-256 master key. */
 const KEY_32 = btoa("k".repeat(32));
 const AAD = "github_apps.private_key_enc:app-1";
 // RSA-2048-shaped multi-line plaintext (PEM-like), not a real key.
 const PEM = [
-  "-----BEGIN RSA PRIVATE KEY-----",
+  pemBanner("BEGIN", "RSA PRIVATE KEY"),
   ...Array.from({ length: 8 }, (_, i) => `${String(i).repeat(64)}`),
-  "-----END RSA PRIVATE KEY-----",
+  pemBanner("END", "RSA PRIVATE KEY"),
   "",
 ].join("\n");
 

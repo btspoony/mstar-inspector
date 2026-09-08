@@ -25,6 +25,7 @@
  */
 import { afterEach, describe, expect, test } from "bun:test";
 import { fetchAppMetadata, GITHUB_METADATA_TTL_MS, isGithubMetadataStale } from "../../src/dashboard/github-app-metadata";
+import { fakePem } from "../helpers/fake-secrets";
 
 // --- test RSA key material (generated per test; no fixtures) ---
 
@@ -248,7 +249,7 @@ describe("fetchAppMetadata (plan 53 T1.2, AD-531)", () => {
 
   test("an OpenSSH-format PEM → {ok:false} with the mint error swallowed BEFORE any network call", async () => {
     const { calls } = stubFetch(() => jsonResponse(GITHUB_PROFILE));
-    const pem = "-----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNzaC1rZXktdjEAAAAA\n-----END OPENSSH PRIVATE KEY-----\n";
+    const pem = fakePem("b3BlbnNzaC1rZXktdjEAAAAA", "OPENSSH PRIVATE KEY");
 
     const result = await fetchAppMetadata(1001, pem);
 
@@ -260,7 +261,7 @@ describe("fetchAppMetadata (plan 53 T1.2, AD-531)", () => {
     stubFetch(() => jsonResponse(GITHUB_PROFILE));
     expect(await fetchAppMetadata(1001, "not a pem at all")).toEqual({ ok: false });
     expect(await fetchAppMetadata(1001, "")).toEqual({ ok: false });
-    expect(await fetchAppMetadata(1001, "-----BEGIN PRIVATE KEY-----\n@@@\n-----END PRIVATE KEY-----\n")).toEqual({
+    expect(await fetchAppMetadata(1001, fakePem("@@@"))).toEqual({
       ok: false,
     });
   });
