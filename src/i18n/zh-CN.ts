@@ -169,20 +169,24 @@ export const zhCN: Dictionary = {
     filterRepo: "仓库",
     filterRepoAll: "全部",
     uncategorized: "未分类",
+    seriesReviews: "审查",
+    seriesFindings: "发现",
+    trendSummary: "窗口内共 {reviews} · {findings}",
   },
   settings: {
     title: "应用设置",
     backToApps: "返回应用",
     changesSaved: "更改已保存。",
     addKey: "添加密钥",
-    provider: "Provider",
+    provider: "模型提供方",
     apiKey: "API 密钥",
     apiKeyPlaceholder: "粘贴 provider API 密钥",
     keyEnding: "密钥结尾 {last4}",
     keyTooShort: "密钥太短，无法显示结尾",
     updated: "更新于 {time}",
     remove: "移除",
-    selectProvider: "选择 provider…",
+    selectProvider: "搜索模型提供方…",
+    noProviderMatch: "没有匹配「{query}」的模型提供方。",
     modelChainField: "模型链",
     saveChain: "保存模型链",
     providerId: "Provider id",
@@ -284,15 +288,15 @@ export const zhCN: Dictionary = {
     confirmDeleteBody: "这是软删除。App 从列表消失；审查失败关闭。",
     confirmDeleteButton: "删除应用",
     deleteSuccess: "App 已删除，已从应用列表中移除。",
-    providers: "提供方",
+    providers: "模型提供方",
     providersCopy:
-      "此 App 已配置的提供方 — 存储的密钥仅显示掩码尾号，自定义声明显示其 Base URL 与模型。添加 Provider 从目录选择开始；密钥仅在验证成功后存储。",
-    noConfiguredProviders: "尚未配置任何提供方 — 请使用「添加 Provider」进行配置。在验证提供方密钥之前，审查将失败关闭。",
-    addProvider: "添加 Provider",
-    addProviderCopy: "选择一个目录提供方 — 选中后显示其配置要求。在 App 运行时镜像上不可用的条目会被标记且无法保存；目录外的提供方请使用下方的自定义声明。",
+      "此 App 已配置的模型提供方 — 存储的密钥仅显示掩码尾号，自定义声明显示其 Base URL 与模型。添加模型提供方从目录选择开始；密钥仅在验证成功后存储。",
+    noConfiguredProviders: "尚未配置任何模型提供方 — 请使用「添加模型提供方」进行配置。在验证提供方密钥之前，审查将失败关闭。",
+    addProvider: "添加模型提供方",
+    addProviderCopy: "从目录中选择一个模型提供方 — 选中后显示其配置要求。在 App 运行时镜像上不可用的条目会被标记且无法保存；目录外的提供方请使用下方的自定义声明。",
     catalogProvenance:
       "{count} 个提供方，来自已提交的 models.dev 快照并编译进应用 — 在提交密钥验证之前不会联系任何提供方。",
-    catalogBuiltin: "内置提供方",
+    catalogBuiltin: "常用提供方",
     catalogTemplate: "目录模板",
     eligibilityBuiltin: "可与 {image} 运行时镜像配合使用 — 该提供方作为内置提供方运行。",
     eligibilityTemplate: "物化后可与 {image} 运行时镜像配合使用 — 账户 id 与密钥将保存为自定义提供方声明。",
@@ -329,6 +333,14 @@ export const zhCN: Dictionary = {
       "执行此 App 审查的沙盒运行时镜像。审查在运行时读取模型配置 — 任何 App 特定配置都不会烘焙进镜像。",
     runtimeImageValue: "此 App 的审查运行在 {id} 运行时镜像上。",
     saveRuntimeImage: "保存运行时镜像",
+    // Plan 53 A7：GitHub 身份卡。{name}/{id}/{time} 为同步的资料名、数字 App id
+    // 与相对同步时间（formatRelativeTime 输出）— 服务端字段可空、逐项降级，
+    // 每个键仅在其值存在时渲染。
+    appInfo: "GitHub App",
+    appInfoCopy: "此 App 在 GitHub 上的身份。资料字段在访问设置页时从该 App 的 GitHub 设置页缓存；点击名称可前往 GitHub 管理。",
+    appInfoAppId: "App ID：{id}",
+    appInfoViewOnGithub: "在 GitHub 上查看 {name}",
+    appInfoSynced: "同步于 {time}",
     // Plan 51 T3：部署版本页脚。{version} 为带 v 前缀的展示形（v${APP_VERSION}），
     // 与 /healthz 字段及 release tag 同形。
     footer: {

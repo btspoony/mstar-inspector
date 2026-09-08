@@ -44,6 +44,13 @@
  *     timestamp (L5: the per-webhook frequency of this touch must not churn
  *     the operator timestamp, and the plan-15 commenter fingerprint ignores
  *     both columns, so the cache cannot be thrashed by it either).
+ *   - saveGithubMetadata (plan 53, migration 0019) is the SINGLE writer for
+ *     the cached GitHub profile columns (github_name / github_description /
+ *     github_html_url / github_avatar_url + github_metadata_synced_at):
+ *     writes ONLY those five, never updated_at (the touchLastWebhook
+ *     machine-trigger precedent — the settings read path's lazy 24h TTL
+ *     refresh is the only caller), and refuses soft-deleted rows exactly
+ *     like setAppStatus.
  *   - listInstallations is the install-health read face for the settings
  *     panel (plan 16 Task 2): this App's installations, most recently seen
  *     first.
@@ -93,6 +100,23 @@ export type GithubAppRow = {
   /** Last verified (2xx) webhook delivery (migration 0008); NULL = never. */
   last_webhook_at: string | null;
   /**
+   * Cached GitHub-side App name (migration 0019, plan 53); NULL = never
+   * synced. Distinct from the local `name` recorded at manifest commit.
+   */
+  github_name: string | null;
+  /** Cached GitHub App description (migration 0019); NULL = never synced or none upstream. */
+  github_description: string | null;
+  /** Cached GitHub App settings-page URL (migration 0019); NULL = never synced. */
+  github_html_url: string | null;
+  /** Cached owner avatar URL (migration 0019); NULL = never synced. */
+  github_avatar_url: string | null;
+  /**
+   * Last successful GitHub metadata sync (migration 0019, datetime('now')
+   * UTC — the last_webhook_at TEXT convention); NULL = never synced. The
+   * settings read path's lazy 24h TTL refresh keys off this column.
+   */
+  github_metadata_synced_at: string | null;
+  /**
    * Selected sandbox runtime image (migration 0018): a registry id from
    * src/contracts/sandbox-images.ts, default 'omp'. The value domain (only
    * ENABLED registry entries) is store-enforced — no DDL CHECK.
@@ -130,6 +154,20 @@ export type UpsertInstallationInput = {
   installationId: number;
   /** Absent/null → preserve the stored login (a bare touch must not wipe it). */
   accountLogin?: string | null;
+};
+
+/**
+ * The GitHub profile fields cached by migration 0019 (plan 53) — the input
+ * (and result) shape of the single metadata write entry `saveGithubMetadata`.
+ * src/dashboard/github-app-metadata.ts builds it from `GET /app`'s public
+ * profile; the settings read path persists it verbatim. Field names mirror
+ * the D1 columns; every field is nullable (per-item upstream degradation).
+ */
+export type GithubAppMetadataInput = {
+  githubName: string | null;
+  githubDescription: string | null;
+  githubHtmlUrl: string | null;
+  githubAvatarUrl: string | null;
 };
 
 /**
@@ -427,6 +465,35 @@ export function createAppsStore(db: AppsStoreD1) {
         .prepare(`UPDATE github_apps SET last_webhook_at = datetime('now') WHERE id = ?`)
         .bind(id)
         .run();
+    },
+
+    /**
+     * Persist one fetched GitHub profile (plan 53, migration 0019) — the
+     * SINGLE writer for the github_* metadata columns (the settings read
+     * path's lazy 24h TTL refresh; no cron/queue retry exists by plan lock).
+     * Writes ONLY the five new columns — deliberately NOT updated_at, which
+     * stays the operator-mutation timestamp (the touchLastWebhook L5
+     * precedent: this write is machine-triggered, at most once per App per
+     * TTL window). Refuses soft-deleted rows exactly like setAppStatus.
+     * Returns whether a row changed (false also covers unknown ids).
+     */
+    async saveGithubMetadata(id: string, metadata: GithubAppMetadataInput): Promise<boolean> {
+      const res = await db
+        .prepare(
+          `UPDATE github_apps
+           SET github_name = ?, github_description = ?, github_html_url = ?,
+               github_avatar_url = ?, github_metadata_synced_at = datetime('now')
+           WHERE id = ? AND deleted_at IS NULL`,
+        )
+        .bind(
+          metadata.githubName,
+          metadata.githubDescription,
+          metadata.githubHtmlUrl,
+          metadata.githubAvatarUrl,
+          id,
+        )
+        .run();
+      return res.meta.changes > 0;
     },
 
     /**

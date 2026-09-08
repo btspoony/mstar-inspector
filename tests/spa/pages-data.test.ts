@@ -234,6 +234,7 @@ describe("members/apps/settings parsers", () => {
       models: ["claude-fable-5"],
       verifiable: true,
       eligibility: "builtin",
+      display_group: "common",
     };
     // The required unconfigured-App case: EMPTY configured state + a
     // non-empty catalog parses — a catalog dump is never configured state.
@@ -438,6 +439,7 @@ describe("provider catalog rows + add selection (plan 38 T2)", () => {
     models: ["claude-fable-5"],
     verifiable: true,
     eligibility: "builtin",
+    display_group: "common",
   };
 
   test("catalog rows are row-validated on models/verifiable/base_url/api (plan 38 T2 guards)", () => {
@@ -454,6 +456,13 @@ describe("provider catalog rows + add selection (plan 38 T2)", () => {
     // base_url / api are string-or-null.
     expect(parseSettings({ ...manageBase, provider_catalog: [{ ...catalogRow, base_url: 5 }] })).toBeNull();
     expect(parseSettings({ ...manageBase, provider_catalog: [{ ...catalogRow, api: [] }] })).toBeNull();
+    // Plan 54 (review handoff S2): the display-group stamp is word-checked —
+    // a row missing `display_group` (the pre-54 route shape) or carrying a
+    // stray value fails the parse instead of silently falling out of both
+    // picker groups.
+    const { display_group: _droppedDisplayGroup, ...withoutDisplayGroup } = catalogRow;
+    expect(parseSettings({ ...manageBase, provider_catalog: [withoutDisplayGroup] })).toBeNull();
+    expect(parseSettings({ ...manageBase, provider_catalog: [{ ...catalogRow, display_group: "builtin" }] })).toBeNull();
   });
 
   test("add selection maps the picked catalog id to its configuration form kind", () => {

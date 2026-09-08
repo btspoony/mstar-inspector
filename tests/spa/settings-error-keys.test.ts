@@ -78,7 +78,9 @@ describe("SPA 400-body resolution contract (plan 45 T4)", () => {
 
   test("zh noConfiguredProviders copy drift (audit rejected-list note): zh references the Add Provider button like en", () => {
     expect(t("en", "settings.noConfiguredProviders")).toContain("use Add Provider");
-    expect(t("zh_CN", "settings.noConfiguredProviders")).toContain("「添加 Provider」");
+    // Plan 54: the zh button label unified on 模型提供方 (supersedes the
+    // 「添加 Provider」 pin).
+    expect(t("zh_CN", "settings.noConfiguredProviders")).toContain("「添加模型提供方」");
     expect(t("zh_CN", "settings.noConfiguredProviders")).toContain("尚未配置");
   });
 });

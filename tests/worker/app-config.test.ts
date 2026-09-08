@@ -141,6 +141,9 @@ function createAppConfigD1(): ReturnType<typeof createTestD1> {
   // the shape carrying github_apps.sandbox_image_id (the custom-provider
   // collision backstop resolves the App's selected image through it).
   applyMigration(db, "0018_app_sandbox_images.sql");
+  // 0019 (plan 53): the settings JSON GET reads/writes the five github_*
+  // metadata columns — the route must run on the production shape.
+  applyMigration(db, "0019_github_apps_metadata.sql");
   return db;
 }
 

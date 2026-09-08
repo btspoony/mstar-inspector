@@ -24,7 +24,7 @@ import {
   CUSTOM_PROVIDER_ENV_PREFIX,
   CUSTOM_PROVIDER_ENV_SUFFIX,
 } from "../../src/pipeline/provider-catalog";
-import { PROVIDER_IDS_BUILTIN } from "../../src/contracts/provider-catalog.generated";
+import { PROVIDER_IDS_BUILTIN, PROVIDER_IDS_COMMON } from "../../src/contracts/provider-catalog.generated";
 import { CUSTOM_PROVIDER_ID_PATTERN } from "../../src/dashboard/app-config-store";
 import { buildCatalog } from "../../scripts/generate-provider-catalog";
 
@@ -113,6 +113,39 @@ describe("provider catalog tiers (plan 35 T3, spec §5; plan 42 T1 breadth)", ()
       if (entry.tier !== "builtin") continue;
       expect(entry.models.length, id).toBeGreaterThanOrEqual(0);
       expect(entry.doc, id).not.toBeNull();
+    }
+  });
+});
+
+describe("PROVIDER_IDS_COMMON display tier (plan 54 T1, AD-547)", () => {
+  // The locked display order (plan 54 clarify): exactly these 5 ids, shown
+  // first in the Add-provider picker; every other entry renders under the
+  // 目录模板 group. Display-only — the runner BYOK allowlist remains
+  // PROVIDER_IDS_BUILTIN / PROVIDER_ENV_NAMES.
+  const COMMON_DISPLAY_ORDER = ["anthropic", "openai", "gemini", "copilot", "xai"];
+
+  test("is exactly the 5 locked common ids in the frozen display order", () => {
+    expect([...PROVIDER_IDS_COMMON]).toEqual(COMMON_DISPLAY_ORDER);
+  });
+
+  test("is a subset of PROVIDER_IDS_BUILTIN — the display tier only regroups builtin entries", () => {
+    for (const id of PROVIDER_IDS_COMMON) {
+      expect(PROVIDER_IDS_BUILTIN.includes(id), id).toBe(true);
+    }
+  });
+
+  test("is a frozen array (readonly surface)", () => {
+    expect(Object.isFrozen(PROVIDER_IDS_COMMON)).toBe(true);
+  });
+
+  test("carries zero runner semantics — the BYOK allowlist surfaces and entry shape are untouched", () => {
+    // The runner contract stays builtin-only (19 ids / 19 env names), and
+    // no generated catalog entry gains a display marker (AD-547 rejected
+    // reshaping the generated entry type for display needs).
+    expect(PROVIDER_IDS_BUILTIN).toHaveLength(19);
+    expect(PROVIDER_ENV_NAMES).toHaveLength(19);
+    for (const [id, entry] of Object.entries(PROVIDER_CATALOG)) {
+      expect(Object.keys(entry).sort(), id).toEqual(["api", "baseUrl", "doc", "envName", "label", "models", "tier"]);
     }
   });
 });

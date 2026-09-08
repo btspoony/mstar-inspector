@@ -41,6 +41,7 @@ function createDb(): ReturnType<typeof createTestD1> {
     "0015_provider_verification.sql",
     "0017_app_model_chains.sql",
     "0018_app_sandbox_images.sql",
+    "0019_github_apps_metadata.sql",
   ]) {
     db.raw.exec(readFileSync(join(MIGRATIONS_DIR, name), "utf8"));
   }

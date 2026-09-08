@@ -181,20 +181,24 @@ export const en = {
     filterRepo: "Repo",
     filterRepoAll: "All",
     uncategorized: "uncategorized",
+    seriesReviews: "Reviews",
+    seriesFindings: "Findings",
+    trendSummary: "In this window: {reviews} · {findings}",
   },
   settings: {
     title: "App settings",
     backToApps: "Back to Apps",
     changesSaved: "Changes saved.",
     addKey: "Add key",
-    provider: "Provider",
+    provider: "Model provider",
     apiKey: "API key",
     apiKeyPlaceholder: "Paste the provider API key",
     keyEnding: "key ending {last4}",
     keyTooShort: "key too short to show a tail",
     updated: "updated {time}",
     remove: "Remove",
-    selectProvider: "Select a provider…",
+    selectProvider: "Search model providers…",
+    noProviderMatch: 'No providers match "{query}".',
     modelChainField: "Model chain",
     saveChain: "Save model chain",
     providerId: "Provider id",
@@ -328,7 +332,7 @@ export const en = {
       "Pick a catalog provider — its configuration requirements appear once selected. Entries unusable on the App's runtime image are marked and can't be saved; providers outside the catalog use the custom declaration below.",
     catalogProvenance:
       "{count} providers from the committed models.dev snapshot, compiled into the app — no provider is contacted until you submit a key for verification.",
-    catalogBuiltin: "Built-in providers",
+    catalogBuiltin: "Common providers",
     catalogTemplate: "Catalog templates",
     eligibilityBuiltin: "Works on the {image} runtime image — this provider runs as a built-in.",
     eligibilityTemplate:
@@ -367,6 +371,18 @@ export const en = {
       "The sandbox runtime image that executes this App's reviews. Reviews read their model configuration at run time — nothing App-specific is baked into an image.",
     runtimeImageValue: "This App's reviews run on the {id} runtime image.",
     saveRuntimeImage: "Save runtime image",
+    /**
+     * Plan 53 A7: GitHub identity card. `{name}`/`{id}`/`{time}` carry the
+     * synced profile name, the numeric App id, and a relative synced-at time
+     * (formatRelativeTime output) — nullable server fields degrade per-field,
+     * so each key renders only when its value exists.
+     */
+    appInfo: "GitHub App",
+    appInfoCopy:
+      "The identity GitHub reports for this App. Profile fields are cached from the App's GitHub settings page; open the name to manage it there.",
+    appInfoAppId: "App ID: {id}",
+    appInfoViewOnGithub: "View {name} on GitHub",
+    appInfoSynced: "Synced {time}",
     /**
      * Plan 51 T3: deployment version footer. `{version}` carries the
      * v-prefixed display form (`v${APP_VERSION}`) — the same shape as the

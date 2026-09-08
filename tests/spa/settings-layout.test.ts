@@ -2,15 +2,27 @@
  * Plan 31 T4+T6 + plan 35 T4: settings ops zone, unified providers, chains UI.
  * No DOM runner — source-scan pins over SettingsPage.tsx and its primitives
  * plus pure data helpers (the plan 30 home suite that shared this style is
- * retired).
+ * retired). Plan 53: the AppInfoCard degradation face is additionally pinned
+ * behaviorally through react-dom/server SSR of the exported card (no DOM
+ * needed — static markup output).
  */
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
+import { createElement } from "react";
+import { renderToStaticMarkup } from "react-dom/server";
 import { t } from "../../src/i18n";
 import { composeModelOptions } from "../../src/dashboard/model-membership";
 import { APP_VERSION } from "../../src/version";
-import { parseModels, modelChainTabs, seatRoleValues, seatSelectValue, splitModelChain } from "../../src/spa/pages/data";
+import { PROVIDER_IDS_COMMON } from "../../src/contracts/provider-catalog.generated";
+import { parseModels, modelChainTabs, seatRoleValues, seatSelectValue, splitModelChain, type CatalogProvider, type SettingsAppMeta } from "../../src/spa/pages/data";
+import {
+  ProviderCombobox,
+  ProviderComboboxPanel,
+  filterCatalogProviders,
+  groupCatalogProviders,
+} from "../../src/spa/components/provider-combobox";
+import { AppInfoCard, DraftChainPanel, draftChainTabLabel } from "../../src/spa/pages/SettingsPage";
 
 describe("settings layout (plan 35 T4)", () => {
   test("SettingsPage folds ops + health into an authorized ops zone; providers and chains are shadcn", () => {
@@ -223,15 +235,18 @@ describe("configured providers + catalog add flow (plan 38 T2)", () => {
 
   test("plan 38 add-flow copy is dictionary-backed in both locales", () => {
     expect(t("en", "settings.addProvider")).toBe("Add provider");
-    // Plan 42: the zh label keeps the English word "Provider" — the settled
-    // label the header button and every referencing copy line share.
-    expect(t("zh_CN", "settings.addProvider")).toBe("添加 Provider");
+    // Plan 54: the zh label unifies on 模型提供方 (supersedes the plan-42
+    // settled "添加 Provider" — no bare "Provider" left on the picker
+    // surface); en keeps "Add provider".
+    expect(t("zh_CN", "settings.addProvider")).toBe("添加模型提供方");
     expect(t("en", "settings.providersCopy")).toContain("Add Provider");
-    expect(t("zh_CN", "settings.providersCopy")).toContain("添加 Provider");
+    expect(t("zh_CN", "settings.providersCopy")).toContain("添加模型提供方");
     expect(t("en", "settings.noConfiguredProviders")).toContain("No providers configured yet");
     expect(t("zh_CN", "settings.noConfiguredProviders")).toContain("尚未配置");
-    expect(t("en", "settings.catalogBuiltin")).toContain("Built-in");
-    expect(t("zh_CN", "settings.catalogBuiltin")).toContain("内置");
+    // Plan 54: the 常用提供方 common tier replaces 内置提供方 as the group
+    // name (supersedes the plan-38 "Built-in"/"内置" pins).
+    expect(t("en", "settings.catalogBuiltin")).toBe("Common providers");
+    expect(t("zh_CN", "settings.catalogBuiltin")).toBe("常用提供方");
     expect(t("en", "settings.catalogTemplate")).toContain("templates");
     expect(t("zh_CN", "settings.catalogTemplate")).toContain("模板");
     expect(t("en", "settings.configureProvider", { label: "Anthropic" })).toContain("Anthropic");
@@ -249,8 +264,11 @@ describe("catalog provenance + eligibility messaging (plan 38 T3)", () => {
     expect(source).toContain("settings.eligibilityBuiltin");
     expect(source).toContain("settings.eligibilityTemplate");
     expect(source).toContain("settings.eligibilityUnavailable");
-    // Unavailable rows keep their picker entry (marked), never hidden silently.
-    expect(source).toContain("settings.eligibilityUnavailableShort");
+    // Unavailable rows keep their picker entry (marked), never hidden
+    // silently — plan 54: the short suffix moved into the combobox file with
+    // the picker rows (supersedes the in-page pin).
+    const combobox = readFileSync(join(import.meta.dir, "../../src/spa/components/provider-combobox.tsx"), "utf8");
+    expect(combobox).toContain("settings.eligibilityUnavailableShort");
   });
 
   test("an unavailable entry gets an explanation instead of a form — nothing can save it silently", () => {
@@ -261,10 +279,12 @@ describe("catalog provenance + eligibility messaging (plan 38 T3)", () => {
 
   test("the catalog picker uses the aria-labelledby precedent; custom configured rows show the catalog label", () => {
     const source = readFileSync(join(import.meta.dir, "../../src/spa/pages/SettingsPage.tsx"), "utf8");
-    // MembersPage precedent: visible label span + aria-labelledby on the
-    // trigger — no wrapping <label> around the Radix Select.
+    // MembersPage precedent: visible label span naming the picker — no
+    // wrapping <label>. Plan 54: the span names the combobox input through
+    // the labelledby prop (the aria-labelledby attribute itself moved into
+    // provider-combobox.tsx, superseding the old attribute pin).
     expect(source).toContain('id="settings-catalog-provider-label"');
-    expect(source).toContain('aria-labelledby="settings-catalog-provider-label"');
+    expect(source).toContain('labelledby="settings-catalog-provider-label"');
     // Template-materialized configured rows resolve the human label via the
     // catalog map (same pattern as key rows), keeping the raw id in the detail.
     expect(source).toContain("catalogById[row.provider_id]?.label");
@@ -286,6 +306,293 @@ describe("catalog provenance + eligibility messaging (plan 38 T3)", () => {
     expect(t("zh_CN", "settings.eligibilityUnavailableShort", { image: "omp" })).toContain("omp");
     expect(t("en", "settings.addProviderCopy")).toContain("can't be saved");
     expect(t("zh_CN", "settings.addProviderCopy")).toContain("无法保存");
+  });
+});
+
+describe("provider combobox (plan 54 T3)", () => {
+  const commonEntry = (id: string, label: string, overrides: Partial<CatalogProvider> = {}): CatalogProvider => ({
+    id,
+    label,
+    tier: "builtin",
+    base_url: null,
+    api: null,
+    models: ["m1"],
+    verifiable: true,
+    eligibility: "builtin",
+    display_group: "common",
+    ...overrides,
+  });
+  const catalogEntry = (id: string, label: string, overrides: Partial<CatalogProvider> = {}): CatalogProvider => ({
+    id,
+    label,
+    tier: "builtin",
+    base_url: null,
+    api: null,
+    models: ["m1"],
+    verifiable: true,
+    eligibility: "builtin",
+    display_group: "catalog",
+    ...overrides,
+  });
+
+  // Common tier = the 5 frozen ids; the catalog group = everything else
+  // (two template rows + one fabricated unavailable builtin whose label
+  // matches the "gem" probe, so the filtered-face marking is observable).
+  const catalog: CatalogProvider[] = [
+    commonEntry("anthropic", "Anthropic"),
+    commonEntry("openai", "OpenAI"),
+    commonEntry("gemini", "Google Gemini"),
+    commonEntry("copilot", "GitHub Copilot"),
+    commonEntry("xai", "xAI"),
+    catalogEntry("mistral", "Mistral AI", { tier: "template", eligibility: "template" }),
+    catalogEntry("workers-ai", "Workers AI", { tier: "template", eligibility: "template" }),
+    catalogEntry("gemini-image", "Gemini Image", { eligibility: "unavailable" }),
+  ];
+
+  test("the pure filter narrows on label or id, case-insensitively; clearing restores the full list", () => {
+    // "gem" keeps both the common Gemini and the unavailable catalog row —
+    // filtering never drops unavailable entries (they stay listed + marked).
+    expect(filterCatalogProviders(catalog, "gem").map((p) => p.id)).toEqual(["gemini", "gemini-image"]);
+    expect(filterCatalogProviders(catalog, "GEM").map((p) => p.id)).toEqual(["gemini", "gemini-image"]);
+    expect(filterCatalogProviders(catalog, "copilot").map((p) => p.id)).toEqual(["copilot"]);
+    expect(filterCatalogProviders(catalog, "github").map((p) => p.id)).toEqual(["copilot"]); // label match
+    // Empty / whitespace query → the full catalog in payload order.
+    expect(filterCatalogProviders(catalog, "")).toHaveLength(catalog.length);
+    expect(filterCatalogProviders(catalog, "   ").map((p) => p.id)).toEqual(catalog.map((p) => p.id));
+    expect(filterCatalogProviders(catalog, "zzz-no-match")).toEqual([]);
+  });
+
+  test("the pure grouping puts the frozen common 5 first; catalog holds the rest", () => {
+    expect([...PROVIDER_IDS_COMMON]).toEqual(["anthropic", "openai", "gemini", "copilot", "xai"]);
+    const groups = groupCatalogProviders(catalog);
+    expect(groups.common.map((p) => p.id)).toEqual([...PROVIDER_IDS_COMMON]);
+    expect(groups.common.every((p) => p.display_group === "common")).toBe(true);
+    // Within-group payload order is preserved; the unavailable row stays.
+    expect(groups.catalog.map((p) => p.id)).toEqual(["mistral", "workers-ai", "gemini-image"]);
+    expect(groups.catalog.every((p) => p.display_group === "catalog")).toBe(true);
+  });
+
+  test("the open panel renders common first, marks the filtered unavailable row, and marks the selection (SSR)", () => {
+    const panel = (query: string, value?: string) =>
+      renderToStaticMarkup(
+        createElement(ProviderComboboxPanel, {
+          locale: "en",
+          providers: catalog,
+          query,
+          value,
+          imageId: "omp",
+          listboxId: "lb",
+          onSelect: () => {},
+        }),
+      );
+    const full = panel("", "gemini");
+    // Common providers group renders before Catalog templates.
+    expect(full.indexOf("Common providers")).toBeGreaterThan(-1);
+    expect(full.indexOf("Catalog templates")).toBeGreaterThan(full.indexOf("Common providers"));
+    // The selected row carries aria-selected.
+    expect(full).toContain('aria-selected="true"');
+    // The unavailable catalog row stays listed and marked, with the suffix.
+    expect(full).toContain('aria-disabled="true"');
+    expect(full).toContain("unavailable on omp");
+    const narrowed = panel("gem", "gemini");
+    // Narrowed to matching entries only — the common group keeps just Gemini
+    // (one of the frozen 5), the catalog group only the unavailable marked
+    // row; every other entry is gone.
+    expect(narrowed).toContain("Google Gemini");
+    expect(narrowed).toContain('aria-selected="true"');
+    expect(narrowed).toContain("Gemini Image");
+    expect(narrowed).toContain('aria-disabled="true"');
+    expect(narrowed).toContain("unavailable on omp");
+    expect(narrowed).not.toContain("Anthropic");
+    expect(narrowed).not.toContain("OpenAI");
+    expect(narrowed).not.toContain("Copilot");
+    expect(narrowed).not.toContain("Mistral");
+    expect(narrowed).not.toContain("Workers AI");
+    // An empty match renders the honest empty state, never a bare box.
+    expect(panel("zzz")).toContain("No providers match");
+  });
+
+  test("an unavailable row is marked the same way in the common group (both groups keep the marker)", () => {
+    const marked: CatalogProvider[] = [
+      commonEntry("xai", "xAI", { eligibility: "unavailable" }),
+      catalogEntry("mistral", "Mistral AI", { tier: "template", eligibility: "template" }),
+    ];
+    const out = renderToStaticMarkup(
+      createElement(ProviderComboboxPanel, {
+        locale: "en",
+        providers: marked,
+        query: "",
+        value: undefined,
+        imageId: "omp",
+        listboxId: "lb",
+        onSelect: () => {},
+      }),
+    );
+    expect(out).toContain('aria-disabled="true"');
+    expect(out).toContain("unavailable on omp");
+    expect(out.indexOf("Common providers")).toBeGreaterThan(-1);
+    expect(out.indexOf("Catalog templates")).toBeGreaterThan(out.indexOf("Common providers"));
+  });
+
+  test("the closed combobox input carries the combobox aria face (SSR)", () => {
+    const out = renderToStaticMarkup(
+      createElement(ProviderCombobox, {
+        locale: "en",
+        labelledby: "settings-catalog-provider-label",
+        providers: catalog,
+        value: undefined,
+        onValueChange: () => {},
+        imageId: "omp",
+      }),
+    );
+    expect(out).toContain('role="combobox"');
+    expect(out).toContain('aria-expanded="false"');
+    expect(out).toContain('aria-autocomplete="list"');
+    expect(out).toContain('aria-labelledby="settings-catalog-provider-label"');
+    expect(out).toContain("Search model providers…");
+    // Closed → no listbox anywhere in the markup.
+    expect(out).not.toContain('role="listbox"');
+  });
+
+  test("Esc and outside-click dismiss; focus/typing opens (source pins at the QA minimum bar)", () => {
+    const source = readFileSync(join(import.meta.dir, "../../src/spa/components/provider-combobox.tsx"), "utf8");
+    // Esc closes.
+    expect(source).toContain('if (event.key === "Escape") setOpen(false);');
+    // An outside pointerdown closes (contains check on the root ref).
+    expect(source).toContain('document.addEventListener("pointerdown", onPointerDown);');
+    expect(source).toContain("!rootRef.current.contains(event.target as Node)");
+    // Focus/typing opens, and every keystroke re-narrows the panel.
+    expect(source).toContain("onFocus={() => setOpen(true)}");
+    expect(source).toContain("setQuery(event.target.value);");
+    // Selection is inert for unavailable rows — the UI side of the red line
+    // (the server-side eligibility pre-check stays the last line of defense
+    // and is untouched).
+    expect(source).toContain("if (!unavailable) onSelect(provider.id);");
+  });
+
+  test("keyboard selection: arrows walk the filtered list, Enter selects, highlight follows the filter, click re-opens after Esc (source pins, task-3 review fix)", () => {
+    const source = readFileSync(join(import.meta.dir, "../../src/spa/components/provider-combobox.tsx"), "utf8");
+    // The highlight walks the SAME order the panel renders: the shell derives
+    // it from the same pure filter/group helpers (common block, then catalog).
+    expect(source).toContain("groupCatalogProviders(filterCatalogProviders(providers, query))");
+    expect(source).toContain("const visible = [...groups.common, ...groups.catalog];");
+    // ArrowDown/ArrowUp move the active-descendant highlight; arrows also
+    // open the list standalone (the replaced Radix Select was keyboard-
+    // operable — the plan's 可选 minimum bar).
+    expect(source).toContain('if (event.key === "ArrowDown" || event.key === "ArrowUp")');
+    expect(source).toContain("Math.min(index + 1, visible.length - 1)");
+    expect(source).toContain("Math.max(index - 1, 0)");
+    // Enter selects the highlighted row — and the unavailable red line holds
+    // on the keyboard path exactly as on the pointer path.
+    expect(source).toContain('event.key === "Enter" && open');
+    expect(source).toContain('if (active && active.eligibility !== "unavailable") select(active.id);');
+    // The input advertises the highlighted option while the list is open.
+    expect(source).toContain("aria-activedescendant={open && active ? optionId(listboxId, active.id) : undefined}");
+    // The highlight follows filter changes: every keystroke (and a selection)
+    // resets it to the first match.
+    expect(source).toContain("setActiveIndex(0);");
+    // Pointer/keyboard stay in sync: hovering a row moves the highlight.
+    expect(source).toContain("onMouseMove={() => onHoverOption?.(provider.id)}");
+    // After an Esc the input keeps focus, so focus alone never re-fires —
+    // click re-opens the (filtered) list.
+    expect(source).toContain("onClick={() => setOpen(true)}");
+  });
+
+  test("QC fix round: the keyboard highlight scrolls into view and Tab closes the list (source pins)", () => {
+    const source = readFileSync(join(import.meta.dir, "../../src/spa/components/provider-combobox.tsx"), "utf8");
+    // F1: while open, a highlight change scrolls the active row into view
+    // inside the max-h-72 scroll container — arrowing past the fold must not
+    // let Enter commit an unseen row (the replaced Radix Select auto-scrolled
+    // its active item).
+    expect(source).toContain('scrollIntoView({ block: "nearest" })');
+    // The effect is gated: it runs only for the open list with a highlighted
+    // row (no scroll work while closed or in the zero-match state).
+    expect(source).toContain("if (!open || !active) return;");
+    // …and it lives in the stateful SHELL, never in the SSR-pure panel (the
+    // panel's static-markup testability depends on being effect-free).
+    const panelBody = source.slice(
+      source.indexOf("export function ProviderComboboxPanel"),
+      source.indexOf("export function ProviderCombobox({"),
+    );
+    const shellBody = source.slice(source.indexOf("export function ProviderCombobox({"));
+    expect(panelBody).not.toContain("scrollIntoView");
+    expect(panelBody).not.toContain("useEffect");
+    expect(shellBody).toContain("scrollIntoView");
+    // F2: Tab closes the open list in the keydown handler — no stale overlay
+    // floating over the page with aria-expanded="true" after focus moves on.
+    expect(source).toContain('if (event.key === "Tab") setOpen(false);');
+    // Deliberately keydown, not onBlur: a blur-close would fire before a
+    // row's click lands (the qc3 F-002 disposition).
+    expect(source).not.toContain("onBlur");
+  });
+
+  test("option rows carry the aria-activedescendant ids + highlight, and the zero-match state keeps the listbox id (SSR, task-3 review fix)", () => {
+    const panel = (overrides: { activeId?: string; query?: string } = {}) =>
+      renderToStaticMarkup(
+        createElement(ProviderComboboxPanel, {
+          locale: "en",
+          providers: catalog,
+          query: overrides.query ?? "",
+          value: undefined,
+          imageId: "omp",
+          listboxId: "lb",
+          onSelect: () => {},
+          activeId: overrides.activeId,
+        }),
+      );
+    const full = panel();
+    // Every option row carries its deterministic bridge id — the shape the
+    // input's aria-activedescendant points at.
+    expect(full).toContain('id="lb-option-anthropic"');
+    expect(full).toContain('id="lb-option-gemini"');
+    expect(full).toContain('id="lb-option-gemini-image"');
+    // The highlighted row renders the standalone bg-accent token; every row
+    // always carries the hover: variant (8 rows → 8 substring occurrences,
+    // +1 only when a row is active).
+    expect(full.split("bg-accent").length - 1).toBe(8);
+    const openaiAt = panel({ activeId: "lb-option-openai" });
+    expect(openaiAt.split("bg-accent").length - 1).toBe(9);
+    // …and the standalone token sits on the ACTIVE row, not its neighbours.
+    const openaiRow = openaiAt.slice(
+      openaiAt.indexOf('id="lb-option-openai"'),
+      openaiAt.indexOf("</div>", openaiAt.indexOf('id="lb-option-openai"')),
+    );
+    expect(openaiRow).toContain(" bg-accent");
+    // Zero-match state: the honest empty <p> carries the listbox id, so the
+    // open input's aria-controls never dangles.
+    const empty = panel({ query: "zzz-no-match" });
+    expect(empty).toContain('id="lb"');
+    expect(empty).toContain("No providers match");
+  });
+
+  test("plan 54 picker copy is dictionary-backed; zh picker copy carries no bare Provider (AC1 sweep)", () => {
+    expect(t("en", "settings.provider")).toBe("Model provider");
+    expect(t("zh_CN", "settings.provider")).toBe("模型提供方");
+    expect(t("en", "settings.providers")).toBe("Providers"); // en keeps the section title
+    expect(t("zh_CN", "settings.providers")).toBe("模型提供方");
+    expect(t("en", "settings.selectProvider")).toBe("Search model providers…");
+    expect(t("zh_CN", "settings.selectProvider")).toBe("搜索模型提供方…");
+    expect(t("en", "settings.noProviderMatch", { query: "zzz" })).toContain("zzz");
+    expect(t("zh_CN", "settings.noProviderMatch", { query: "zzz" })).toContain("模型提供方");
+    // Picker-adjacent zh strings stay 模型提供方-consistent: zero bare
+    // "Provider" (the grep-verifiable AC1 closure, pinned per key;
+    // en "Providers"/"Add provider" section/button titles are intentionally
+    // unchanged).
+    for (const key of [
+      "settings.provider",
+      "settings.providers",
+      "settings.providersCopy",
+      "settings.noConfiguredProviders",
+      "settings.addProvider",
+      "settings.addProviderCopy",
+      "settings.selectProvider",
+      "settings.noProviderMatch",
+      "settings.catalogBuiltin",
+      "settings.catalogTemplate",
+      "settings.configureProvider",
+    ] as const) {
+      expect(t("zh_CN", key), key).not.toContain("Provider");
+    }
   });
 });
 
@@ -319,16 +626,24 @@ describe("add-entry visibility + picker usability at breadth (plan 42 T2)", () =
     expect(body).toContain("onOpenChange={setAddOpen}");
   });
 
-  test("the catalog picker groups builtin first, then template, height-capped to an internal scroll", () => {
+  test("the catalog picker is the plan-54 combobox: common group first, then catalog, height-capped to an internal scroll", () => {
+    // Supersedes the plan-42 "builtin SelectGroup precedes template
+    // SelectGroup + <SelectContent className=\"max-h-72\">" pin — the Radix
+    // Select left the add panel (AD-542); the chain/seat editors keep theirs.
     const source = readFileSync(join(import.meta.dir, "../../src/spa/pages/SettingsPage.tsx"), "utf8");
-    // Grouping: the builtin SelectGroup precedes the template one.
-    const builtinPos = source.indexOf("settings.catalogBuiltin");
-    const templatePos = source.indexOf("settings.catalogTemplate");
-    expect(builtinPos).toBeGreaterThan(-1);
-    expect(templatePos).toBeGreaterThan(builtinPos);
-    // Breadth usability: the list is height-capped (internal scroll) on the
-    // existing Select primitive — no new component.
-    expect(source).toContain('<SelectContent className="max-h-72">');
+    expect(source).toContain("<ProviderCombobox");
+    expect(source).not.toContain('<SelectContent className="max-h-72">');
+    // AD-547 separation: grouping reads display_group inside the combobox
+    // only — the page (forms/config branching) never mentions it.
+    expect(source).not.toContain("display_group");
+    const combobox = readFileSync(join(import.meta.dir, "../../src/spa/components/provider-combobox.tsx"), "utf8");
+    // 常用提供方 (catalogBuiltin) heads the panel before 目录模板.
+    const commonPos = combobox.indexOf("settings.catalogBuiltin");
+    const templatePos = combobox.indexOf("settings.catalogTemplate");
+    expect(commonPos).toBeGreaterThan(-1);
+    expect(templatePos).toBeGreaterThan(commonPos);
+    // Breadth usability: the panel is height-capped (internal scroll).
+    expect(combobox).toContain("max-h-72");
   });
 
   test("the template form carries an editable prefilled base URL and a {account_id}-conditional account-id field", () => {
@@ -442,12 +757,18 @@ describe("chain draft peer tab (plan 44 T2)", () => {
     const openDraftBody = chainsBody.slice(chainsBody.indexOf("function openDraft"), chainsBody.indexOf("return ("));
     expect(openDraftBody).toContain("setDraftOpen(true);");
     expect(openDraftBody).toContain("setSelectedTab(DRAFT_CHAIN_TAB_ID);");
+    // Non-reset equivalence (qc F2): open/re-focus never touches the lifted
+    // draft name — the only resets are the explicit close-time ones (discard
+    // + created), so re-clicking + 新建链 keeps whatever the user typed.
+    expect(openDraftBody).not.toContain("setDraftName");
     // Appended AFTER the last named tab (never before Default): the draft
     // joins the coercion list by spreading after the stored tabs, and its
-    // trigger renders after the stored-tabs map inside the TabsList.
+    // trigger renders after the stored-tabs map inside the TabsList. The
+    // trigger's label is the live AD-551 mirror (plan 55), not the static
+    // 新链 copy.
     expect(chainsBody).toContain("const tabs = draft ? [...storedTabs, draft] : storedTabs;");
     const storedMapPos = chainsBody.indexOf("{storedTabs.map((tab) => (");
-    const draftTriggerPos = chainsBody.indexOf('{t(locale, "settings.draftChain")}');
+    const draftTriggerPos = chainsBody.indexOf("{draftChainTabLabel(draftName, locale)}");
     expect(storedMapPos).toBeGreaterThan(-1);
     expect(draftTriggerPos).toBeGreaterThan(storedMapPos);
     // The old plan-43 disclosure between strip and Default panel is gone —
@@ -482,6 +803,10 @@ describe("chain draft peer tab (plan 44 T2)", () => {
     // chainName keys — Default's panel never shows creation UI.
     expect(panelBody).toContain('t(locale, "settings.chainName")');
     expect(panelBody).toContain('t(locale, "settings.chainNamePlaceholder")');
+    // The name input is capped at 64 (qc F4): the server's
+    // MODEL_CHAIN_NAME_PATTERN admits stored ids of at most 64 chars, so the
+    // input cannot type past it and the live tab-strip label stays bounded.
+    expect(panelBody).toContain("maxLength={64}");
     const namePos = panelBody.indexOf("settings.chainName");
     const editorPos = panelBody.indexOf("<ChainEditor");
     expect(editorPos).toBeGreaterThan(namePos);
@@ -497,19 +822,32 @@ describe("chain draft peer tab (plan 44 T2)", () => {
     expect(panelBody).toContain('outcome.kind === "success"');
     expect(panelBody).toContain("onOutcome(outcome)");
     expect(panelBody).toContain("onCreated(name.trim())");
-    // 放弃 discards through a ghost button without confirmation — gated by
-    // the same busy window as the save, so a discard can never race a
-    // resolving create into selecting the created tab.
-    expect(panelBody).toContain('t(locale, "settings.discardChain")}');
-    expect(panelBody).toContain('variant="ghost"');
-    expect(panelBody).toContain("disabled={busy}");
+    // 放弃 discards without confirmation — plan 55 (AD-552) supersedes the
+    // old hover-only ghost row: the button is injected through ChainEditor's
+    // actions prop into the save row, styled to be visible without hover
+    // (outline + sm + fixed small width). It stays bound to this panel's
+    // busy closure — the same window as the save, so a discard can never
+    // race a resolving create into selecting the created tab.
+    const actionsPos = panelBody.indexOf("actions={");
+    expect(actionsPos).toBeGreaterThan(-1);
+    const actionsNode = panelBody.slice(actionsPos, panelBody.indexOf("/>", actionsPos));
+    expect(actionsNode).toContain('variant="outline"');
+    expect(actionsNode).toContain('size="sm"');
+    expect(actionsNode).toContain('className="w-20"');
+    expect(actionsNode).toContain("disabled={busy}");
+    expect(actionsNode).toContain('t(locale, "settings.discardChain")}');
     // The draft panel mounts inside its own forceMount TabsContent; the
-    // discard's only state effect is closing the draft — the selection then
-    // coerces through activeChainTabId (plan-39 pin) back to Default.
+    // discard closes the draft — the selection then coerces through
+    // activeChainTabId (plan-39 pin) back to Default — and, plan 55
+    // (AD-551), resets the lifted draft name so a reopened draft starts
+    // blank (the old unmount-clears-name semantics, now explicit).
     const chainsBody = source.slice(source.indexOf("function ChainsCard"), source.indexOf("function SeatsCard"));
     expect(chainsBody).toContain("<TabsContent forceMount value={DRAFT_CHAIN_TAB_ID}>");
-    expect(chainsBody).toContain("onDiscard={() => setDraftOpen(false)}");
-    expect(chainsBody).toContain("setDraftOpen(false);");
+    const discardPos = chainsBody.indexOf("onDiscard={() => {");
+    expect(discardPos).toBeGreaterThan(-1);
+    const discardHandler = chainsBody.slice(discardPos, chainsBody.indexOf("onCreated={(created) => {"));
+    expect(discardHandler).toContain("setDraftOpen(false);");
+    expect(discardHandler).toContain('setDraftName("");');
     expect(chainsBody).toContain("setSelectedTab(created);");
   });
 
@@ -547,6 +885,157 @@ describe("chain draft peer tab (plan 44 T2)", () => {
     // The name-field keys survive the move into the panel.
     expect(t("en", "settings.chainName")).toBe("Chain name");
     expect(t("zh_CN", "settings.chainName")).toBe("链名称");
+  });
+});
+
+describe("draft tab label live-sync (plan 55 A2/A3 / AD-551)", () => {
+  /**
+   * The label faces are pure (the exported draftChainTabLabel mirror), so
+   * they are pinned directly. The controlled panel is pinned behaviorally
+   * through SSR of the exported DraftChainPanel: a typed name must reach the
+   * markup — an internal useState("") would ignore the prop and render
+   * value="" instead. The lifted state + wiring + the two close-time resets
+   * are pinned over the source. createElement keeps this .ts file JSX-free.
+   */
+  const noop = () => {};
+  const panelHtml = (name: string): string =>
+    renderToStaticMarkup(
+      createElement(DraftChainPanel, {
+        locale: "en",
+        groups: [],
+        name,
+        onNameChange: noop,
+        onCreate: () => Promise.resolve({ kind: "error" as const, message: "unused" }),
+        onOutcome: noop,
+        onDiscard: noop,
+        onCreated: noop,
+      }),
+    );
+
+  test("typing mirrors into the tab label live; empty/whitespace falls back to 新链", () => {
+    expect(draftChainTabLabel("my-chain", "en")).toBe("my-chain");
+    // The typed value is locale-independent — the fallback copy is what
+    // localizes.
+    expect(draftChainTabLabel("my-chain", "zh_CN")).toBe("my-chain");
+    // The raw input is the label (trim only gates the fallback) — no data
+    // loss while typing.
+    expect(draftChainTabLabel(" my-chain ", "en")).toBe(" my-chain ");
+    expect(draftChainTabLabel("", "en")).toBe("New chain");
+    expect(draftChainTabLabel("", "zh_CN")).toBe("新链");
+    // Whitespace-only counts as empty (the create would trim to "" anyway).
+    expect(draftChainTabLabel("   ", "zh_CN")).toBe("新链");
+  });
+
+  test("the draft panel is controlled by the lifted name (SSR: the typed value reaches the input)", () => {
+    expect(panelHtml("my-chain")).toContain('value="my-chain"');
+    expect(panelHtml("")).toContain('value=""');
+  });
+
+  test("the lifted state, wiring and both close-time resets live in ChainsCard (AD-551)", () => {
+    const source = readFileSync(join(import.meta.dir, "../../src/spa/pages/SettingsPage.tsx"), "utf8");
+    const chainsBody = source.slice(source.indexOf("function ChainsCard"), source.indexOf("function SeatsCard"));
+    // The name state lives in the card (the panel no longer owns it).
+    expect(chainsBody).toContain('const [draftName, setDraftName] = useState("");');
+    // Controlled wiring: the panel edits the card's state, the trigger
+    // renders the live mirror of the same state.
+    expect(chainsBody).toContain("name={draftName}");
+    expect(chainsBody).toContain("onNameChange={setDraftName}");
+    const triggerPos = chainsBody.indexOf("<TabsTrigger value={DRAFT_CHAIN_TAB_ID}>");
+    expect(triggerPos).toBeGreaterThan(-1);
+    expect(chainsBody.slice(triggerPos, chainsBody.indexOf("</TabsTrigger>", triggerPos))).toContain(
+      "{draftChainTabLabel(draftName, locale)}",
+    );
+    // Success path: the reset accompanies the close + the real (stored-name)
+    // tab selection — the reopened draft starts blank, today's semantics.
+    const createdHandler = chainsBody.slice(
+      chainsBody.indexOf("onCreated={(created) => {"),
+      chainsBody.indexOf("setSelectedTab(created);"),
+    );
+    expect(createdHandler).toContain('setDraftName("");');
+    // The panel body itself keeps no name state (controlled, not lifted back).
+    // Exact useState inventory (qc F3, closes ledger T2-S1): the busy gate is
+    // the panel's ONLY state — an internal useState(name) shadow-init would
+    // ignore the controlled prop and slip past a bare negative `useState("")`
+    // pin, so the inventory itself is pinned instead.
+    const panelBody = source.slice(source.indexOf("function DraftChainPanel"), source.indexOf("function ChainEditor"));
+    expect(panelBody.match(/useState\([^)]*\)/g) ?? []).toEqual(["useState(false)"]);
+    expect(panelBody).toContain("value={name}");
+    expect(panelBody).toContain("onNameChange(event.target.value)");
+  });
+});
+
+describe("discard inline with the save row (plan 55 A4/A5 / AD-552)", () => {
+  /**
+   * The discard is a pure render insertion through ChainEditor's optional
+   * actions prop: the save-row wrapper exists only when actions are passed
+   * (absent = byte-equivalent tree for the Default / named-chain editors,
+   * whose pins elsewhere stay untouched), and the injected button keeps its
+   * disabled={busy} bound to DraftChainPanel's own busy closure. Structure
+   * is pinned over the source; the visible styling over SSR of the exported
+   * DraftChainPanel. createElement keeps this .ts file JSX-free.
+   */
+  const noop = () => {};
+  const panelHtml = (): string =>
+    renderToStaticMarkup(
+      createElement(DraftChainPanel, {
+        locale: "en",
+        groups: [],
+        name: "",
+        onNameChange: noop,
+        onCreate: () => Promise.resolve({ kind: "error" as const, message: "unused" }),
+        onOutcome: noop,
+        onDiscard: noop,
+        onCreated: noop,
+      }),
+    );
+
+  test("the save row renders save primary with actions right of it, only when actions exist", () => {
+    const source = readFileSync(join(import.meta.dir, "../../src/spa/pages/SettingsPage.tsx"), "utf8");
+    const editorBody = source.slice(source.indexOf("function ChainEditor"));
+    // Conditional wrapper: with no actions the save button renders bare —
+    // the AD-552 byte-equivalence guard for every other caller.
+    expect(editorBody).toContain("{actions ? (");
+    // Inside the row: save first (primary/leftmost), the actions node right
+    // after it.
+    const rowPos = editorBody.indexOf('<div className="flex items-center gap-2">');
+    const savePos = editorBody.indexOf("{saveButton}");
+    const actionsPos = editorBody.indexOf("{actions}");
+    expect(rowPos).toBeGreaterThan(-1);
+    expect(savePos).toBeGreaterThan(rowPos);
+    expect(actionsPos).toBeGreaterThan(savePos);
+    // DraftChainPanel is the injecting caller; the Default editor's call
+    // stays bare (named-tab editors pass no actions either — the conditional
+    // above already renders them byte-equivalent).
+    const chainsBody = source.slice(source.indexOf("function ChainsCard"), source.indexOf("function SeatsCard"));
+    const firstEditorPos = chainsBody.indexOf("<ChainEditor");
+    const defaultCall = chainsBody.slice(firstEditorPos, chainsBody.indexOf("/>", firstEditorPos));
+    expect(defaultCall).not.toContain("actions={");
+    const panelBody = source.slice(source.indexOf("function DraftChainPanel"), source.indexOf("function ChainEditor"));
+    expect(panelBody).toContain("actions={");
+    // Whole-file count (qc F1): `actions={` occurs exactly once in the page —
+    // the draft panel's discard injection. The Default AND named-chain
+    // ChainEditor callers both stay bare (the conditional above renders them
+    // byte-equivalent); a second actions-passing caller fails this count.
+    expect(source.match(/actions=\{/g)?.length).toBe(1);
+  });
+
+  test("the discard is visibly styled without hover and sits in the save row (SSR)", () => {
+    const html = panelHtml();
+    // Outline + sm + the fixed width land on the real button; the label is
+    // the untouched discardChain key. No confirmation dialog anywhere.
+    expect(html).toContain('data-variant="outline"');
+    expect(html).toContain('data-size="sm"');
+    expect(html).toContain("w-20");
+    expect(html).toContain(">Discard</button>");
+    expect(html).not.toContain("dialog");
+    // Same row: the flex container wraps both buttons — the save (primary,
+    // default variant) opens the row, the outline discard follows it.
+    const rowPos = html.indexOf("flex items-center gap-2");
+    const savePos = html.indexOf('data-variant="default"');
+    const discardPos = html.indexOf('data-variant="outline"');
+    expect(rowPos).toBeGreaterThan(-1);
+    expect(savePos).toBeGreaterThan(rowPos);
+    expect(discardPos).toBeGreaterThan(savePos);
   });
 });
 
@@ -1018,5 +1507,163 @@ describe("custom-provider disclosure state (plan 49 T3)", () => {
     );
     expect(providersBody).toContain("expanded={customOpen}");
     expect(providersBody).toContain("onToggle={() => setCustomOpen(!customOpen)}");
+  });
+});
+
+describe("GitHub App identity card (plan 53 A5/A6/A7)", () => {
+  /**
+   * The card is a pure presentational component (no hooks, no browser API),
+   * so its degradation face — the load-bearing plan-53 contract — is pinned
+   * behaviorally: static SSR markup of the exported card, no DOM runner.
+   * createElement keeps this .ts file free of JSX.
+   */
+  const html = (app: SettingsAppMeta): string =>
+    renderToStaticMarkup(createElement(AppInfoCard, { locale: "en", app }));
+
+  function meta(overrides: Partial<SettingsAppMeta> = {}): SettingsAppMeta {
+    return {
+      slug: "acme",
+      github_app_id: 123456,
+      status: "active",
+      review_enabled: true,
+      created_by: "alice",
+      last_webhook_at: null,
+      sandbox_image_id: "omp",
+      github_name: null,
+      github_description: null,
+      github_html_url: null,
+      github_avatar_url: null,
+      github_metadata_synced_at: null,
+      ...overrides,
+    };
+  }
+
+  const synced = {
+    github_name: "Acme Reviewer",
+    github_description: "Reviews pull requests for Acme.",
+    github_html_url: "https://github.com/settings/apps/acme-reviewer",
+    github_avatar_url: "https://avatars.githubusercontent.com/in/1234?v=4",
+    github_metadata_synced_at: "2026-09-08 00:00:00",
+  };
+
+  test("synced profile renders avatar img, hyperlinked name (new tab, noopener), description, AppID", () => {
+    const out = html(meta(synced));
+    // (a) the avatar is the synced GitHub URL, rendered as a plain <img>
+    // (an external image — no CSP is configured in this repo, so nothing
+    // blocks the direct avatar origin; there is no image proxy either).
+    expect(out).toContain('<img src="https://avatars.githubusercontent.com/in/1234?v=4"');
+    // (b) the name is the link: href = github_html_url, NEW tab, noopener.
+    expect(out).toContain('href="https://github.com/settings/apps/acme-reviewer"');
+    expect(out).toContain('target="_blank"');
+    expect(out).toContain('rel="noopener noreferrer"');
+    expect(out).toContain("Acme Reviewer");
+    expect(out).toContain('aria-label="View Acme Reviewer on GitHub"');
+    // (c) the description renders when present.
+    expect(out).toContain("Reviews pull requests for Acme.");
+    // (d) the numeric App id renders in plaintext (B1 pin allows the id).
+    expect(out).toContain("App ID: 123456");
+    // The optional synced-at hint localizes through the dictionary.
+    expect(out).toContain("Synced ");
+  });
+
+  test("never-synced App degrades to local fields: card renders, no link, no crash", () => {
+    // (e) all metadata null — the card still renders (title + local App id),
+    // the placeholder mark stands in for the avatar, and nothing pretends a
+    // synced profile exists: no anchor, no img, no GitHub URL anywhere.
+    const out = html(meta());
+    expect(out).toContain("GitHub App");
+    expect(out).toContain("App ID: 123456");
+    expect(out).toContain('viewBox="0 0 24 24"'); // the octocat placeholder mark
+    expect(out).not.toContain("<a ");
+    expect(out).not.toContain("<img");
+    expect(out).not.toContain("http");
+  });
+
+  test("mixed-null metadata renders only the present fields, per-field degradation", () => {
+    // (f) name + url synced, everything else null: the link renders, the
+    // absent fields render nothing — no placeholder text, no layout collapse.
+    const out = html(
+      meta({
+        github_name: synced.github_name,
+        github_html_url: synced.github_html_url,
+      }),
+    );
+    expect(out).toContain('href="https://github.com/settings/apps/acme-reviewer"');
+    expect(out).toContain("Acme Reviewer");
+    expect(out).not.toContain("<img");
+    expect(out).not.toContain("Reviews pull requests");
+    expect(out).not.toContain("Synced ");
+    expect(out).toContain("App ID: 123456");
+    // A synced name whose html_url is missing degrades to plain text — never
+    // a link with an empty href.
+    const urlless = html(meta({ github_name: synced.github_name }));
+    expect(urlless).not.toContain("<a ");
+    expect(urlless).toContain("Acme Reviewer");
+    // The fourth matrix cell — a synced URL whose name is absent: the name
+    // gate makes a stray <a> structurally impossible, so the URL renders
+    // nowhere (no href, no text).
+    const nameless = html(meta({ github_html_url: synced.github_html_url }));
+    expect(nameless).not.toContain("<a ");
+    expect(nameless).not.toContain(synced.github_html_url);
+  });
+
+  test("the card sits between the slug row and the manage conditional — both faces see it", () => {
+    const source = readFileSync(join(import.meta.dir, "../../src/spa/pages/SettingsPage.tsx"), "utf8");
+    const slugRowPos = source.indexOf('<h2 className="text-xl font-semibold">{app.slug}</h2>');
+    const cardPos = source.indexOf("<AppInfoCard");
+    const managePos = source.indexOf("{payload.can_manage ? (");
+    expect(slugRowPos).toBeGreaterThan(-1);
+    expect(cardPos).toBeGreaterThan(slugRowPos);
+    expect(managePos).toBeGreaterThan(cardPos);
+    // Per-field degradation is structural: every synced field is gated by its
+    // own null check inside the card body, and the link pins the new-tab +
+    // noopener contract.
+    const cardBody = source.slice(
+      source.indexOf("export function AppInfoCard"),
+      source.indexOf("function HealthBody"),
+    );
+    expect(cardBody).toContain("app.github_avatar_url ? (");
+    expect(cardBody).toContain("app.github_name ? (");
+    expect(cardBody).toContain("app.github_html_url ? (");
+    expect(cardBody).toContain("app.github_description ?");
+    expect(cardBody).toContain("app.github_metadata_synced_at ? (");
+    expect(cardBody).toContain('target="_blank"');
+    expect(cardBody).toContain('rel="noopener noreferrer"');
+  });
+
+  test("card copy is dictionary-backed in both locales (en/zh parity)", () => {
+    expect(t("en", "settings.appInfo")).toBe("GitHub App");
+    expect(t("zh_CN", "settings.appInfo")).toBe("GitHub App");
+    expect(t("en", "settings.appInfoCopy")).toContain("GitHub");
+    expect(t("zh_CN", "settings.appInfoCopy")).toContain("GitHub");
+    expect(t("en", "settings.appInfoAppId", { id: 123456 })).toBe("App ID: 123456");
+    expect(t("zh_CN", "settings.appInfoAppId", { id: 123456 })).toBe("App ID：123456");
+    expect(t("en", "settings.appInfoViewOnGithub", { name: "Acme" })).toBe("View Acme on GitHub");
+    expect(t("zh_CN", "settings.appInfoViewOnGithub", { name: "Acme" })).toBe("在 GitHub 上查看 Acme");
+    expect(t("en", "settings.appInfoSynced", { time: "5 minutes ago" })).toBe("Synced 5 minutes ago");
+    expect(t("zh_CN", "settings.appInfoSynced", { time: "5 分钟前" })).toBe("同步于 5 分钟前");
+  });
+});
+
+describe("runtime image row tightness (plan 55 A1)", () => {
+  test("select shell is content-adaptive; save button sits in the same flex-wrap row", () => {
+    const source = readFileSync(join(import.meta.dir, "../../src/spa/pages/SettingsPage.tsx"), "utf8");
+    // User-reported regression: the wrapper reserved min-w-64 (256px) while the
+    // trigger only rendered short option content — a perceived gap between the
+    // select and its save button. The shell must stay content-adaptive.
+    const runtimeBody = source.slice(
+      source.indexOf("function RuntimeImageEditor"),
+      source.indexOf("function OpsCard"),
+    );
+    expect(runtimeBody).toContain('<div className="w-fit max-w-xs">');
+    expect(runtimeBody).not.toContain("min-w-64");
+    // Same-row adjacency: the save trigger follows the select inside the
+    // flex-wrap row (narrow screens still wrap the button below cleanly).
+    const row = runtimeBody.slice(
+      runtimeBody.indexOf('className="flex flex-wrap items-center gap-2"'),
+      runtimeBody.indexOf("<NoticeRegion"),
+    );
+    expect(row).toContain("SelectTrigger");
+    expect(row).toContain("settings.saveRuntimeImage");
   });
 });

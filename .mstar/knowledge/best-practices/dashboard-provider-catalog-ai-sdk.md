@@ -1,13 +1,13 @@
 ---
 module: dashboard / provider catalog (ai-sdk ecosystem + workers-ai template tier)
 date: 2026-09-04
-last_updated: 2026-09-04
+last_updated: 2026-09-08
 problem_type: best_practice
 category: best-practices
 severity: medium
 plan_id: 35-apps-detail-ops-providers
 tags: [provider-catalog, ai-sdk, models-dev, workers-ai, custom-providers, byok, zero-runtime-network]
-related_components: [src/pipeline/provider-catalog.ts, scripts/generate-provider-catalog.ts, src/dashboard/provider-verify.ts, src/dashboard/app-config-store.ts]
+related_components: [src/pipeline/provider-catalog.ts, scripts/generate-provider-catalog.ts, src/dashboard/provider-verify.ts, src/dashboard/app-config-store.ts, src/contracts/provider-catalog.generated.ts]
 ---
 
 # Sourcing the provider catalog from models.dev (ai-sdk ecosystem) with a template tier
@@ -23,6 +23,16 @@ The BYOK dashboard hand-maintained a 19-entry provider map (`src/pipeline/provid
 - **Workers AI = template**: OpenAI-compatible REST endpoint with account-id templated base URL + `CUSTOM_WORKERS_AI_API_KEY` env + the plan-31 custom-provider verify probe. Never a builtin-style env-name entry — the in-image base `models.yml` only knows its own providers, so a fake builtin entry would synthesize a models.yml the runner cannot authenticate.
 - **Mirror discipline**: the dashboard mirror (`PROVIDER_IDS` = builtin ids, `PROVIDER_META` = full catalog) re-exports the generated contract (structurally assigned), and parity tests lock the builtin set + generator id-regex grammar so a regen cannot silently desync the faces. Dashboard imports the `src/contracts` module, never the pipeline face (Q2 boundary).
 - **Secrets**: template materialization follows the existing verify-first custom-provider flow (key verified outbound before persist; secretbox envelope unchanged).
+
+## Display tier vs runner tier (017 plan 54, AD-547)
+
+The builtin tier doubles as the runner-consumable BYOK allowlist, so a UI-facing regroup (常用 five: anthropic/openai/gemini/copilot/xai; everything else shown under 目录模板) must **never** re-tier the catalog. Locked mechanism:
+
+- The generator emits an additional frozen `PROVIDER_IDS_COMMON` array (display-only; guard tests pin exact-5 order + ⊆ BUILTIN + frozen + runner surfaces byte-unchanged).
+- The settings route stamps each assembled entry with `display_group: "common" | "catalog"` (= `PROVIDER_IDS_COMMON.includes(id)`); array order and `tier`/`eligibility` semantics stay untouched, so the server never regroups.
+- The SPA groups the picker by `display_group` only; **form/config branching must never read it** (mechanics stay keyed to `tier`/`eligibility` — a demoted builtin keeps its key-only flow under the 目录模板 header). A negative pin proves SettingsPage has zero `display_group` references outside the picker grouping.
+
+Red line for any future change: `PROVIDER_IDS_BUILTIN` / `PROVIDER_ENV_NAMES` / `providerEnvName` / verify-save-consumer faces are byte-semantics frozen; display grouping rides only the added array + stamped field.
 
 ## Why This Matters
 

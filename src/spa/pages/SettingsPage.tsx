@@ -1,5 +1,5 @@
-import { Fragment, useEffect, useRef, useState } from "react";
-import { Plus } from "lucide-react";
+import { Fragment, useEffect, useRef, useState, type ReactNode } from "react";
+import { ExternalLink, Plus } from "lucide-react";
 import { isDictionaryKey, t, type DictionaryKey } from "../../i18n";
 import { APP_VERSION } from "../../version";
 import { Button } from "@/components/ui/button";
@@ -24,6 +24,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { ProviderCombobox } from "../components/provider-combobox";
 import { fetchJson, postForm } from "../api";
 import type { SpaBoot } from "../boot";
 import { deliveryOutcomeLabel } from "../delivery-outcome";
@@ -45,10 +46,12 @@ import {
   type ChainTab,
   type ConfiguredProvider,
   type ModelOptionGroup,
+  type SettingsAppMeta,
   type SettingsManagePayload,
   type SettingsPayload,
 } from "./data";
 import { StatusBadge } from "./AppsPage";
+import { GitHubMark } from "./LoginPage";
 import { LoadFailedNotice, LoadingNotice, PageNotice, type NoticeKind } from "./PageNotice";
 
 type PendingAction =
@@ -441,6 +444,11 @@ function SettingsView({
         <span className="text-sm text-muted-foreground">{t(locale, "apps.by", { login: app.created_by })}</span>
       </div>
 
+      {/* Plan 53 A5: the GitHub identity card sits between the slug row and
+          the manage conditional, so BOTH faces (OpsCard managers and
+          HealthCard members) see it (AC3). */}
+      <AppInfoCard locale={locale} app={app} />
+
       {payload.can_manage ? (
         <OpsCard locale={locale} payload={payload} onPending={setPending} notice={opsNotice} />
       ) : (
@@ -573,6 +581,71 @@ function pendingConfirmCopy(
     },
   } as const;
   return map[pending.kind];
+}
+
+/**
+ * Plan 53 A5: the GitHub identity card — avatar, hyperlinked name,
+ * description, and the numeric App id, fed by the cached GitHub profile the
+ * settings route serves (migration 0019 columns). Rendered outside the
+ * can_manage conditional, so managers and members alike see it (AC3).
+ * Degradation is strictly per-field (plan Global Constraints): a null field
+ * simply does not render — a never-synced App shows the placeholder mark and
+ * its local App id with no link, no error state, no layout collapse
+ * (the fail-open UI face of the AD-531 read path).
+ */
+export function AppInfoCard({ locale, app }: { locale: SpaBoot["locale"]; app: SettingsAppMeta }) {
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle>{t(locale, "settings.appInfo")}</CardTitle>
+        <CardDescription>{t(locale, "settings.appInfoCopy")}</CardDescription>
+      </CardHeader>
+      <CardContent>
+        <div className="flex items-start gap-4">
+          {app.github_avatar_url ? (
+            <img
+              src={app.github_avatar_url}
+              alt=""
+              className="h-12 w-12 shrink-0 rounded-full border object-cover"
+            />
+          ) : (
+            <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded-full border bg-muted text-muted-foreground">
+              <GitHubMark className="h-6 w-6" />
+            </div>
+          )}
+          <div className="flex min-w-0 flex-col gap-1">
+            {app.github_name ? (
+              app.github_html_url ? (
+                <a
+                  href={app.github_html_url}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="inline-flex items-center gap-1.5 font-semibold text-primary hover:underline"
+                  aria-label={t(locale, "settings.appInfoViewOnGithub", { name: app.github_name })}
+                >
+                  {app.github_name}
+                  <ExternalLink className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
+                </a>
+              ) : (
+                <span className="font-semibold">{app.github_name}</span>
+              )
+            ) : null}
+            {app.github_description ? <p className="text-sm">{app.github_description}</p> : null}
+            <p className="text-sm text-muted-foreground">
+              {t(locale, "settings.appInfoAppId", { id: app.github_app_id })}
+            </p>
+            {app.github_metadata_synced_at ? (
+              <p className="text-xs text-muted-foreground">
+                {t(locale, "settings.appInfoSynced", {
+                  time: formatRelativeTime(app.github_metadata_synced_at, locale),
+                })}
+              </p>
+            ) : null}
+          </div>
+        </div>
+      </CardContent>
+    </Card>
+  );
 }
 
 function HealthBody({ locale, payload }: { locale: SpaBoot["locale"]; payload: SettingsPayload }) {
@@ -708,7 +781,10 @@ function RuntimeImageEditor({
   return (
     <div className="flex flex-col gap-3">
       <div className="flex flex-wrap items-center gap-2">
-        <div className="min-w-64 max-w-xs">
+        {/* Plan 55 A1: content-adaptive shell — no reserved min width, so the
+            trigger sits immediately next to the save button; flex-wrap keeps
+            the button wrapping below cleanly on narrow screens. */}
+        <div className="w-fit max-w-xs">
           <Select value={selected} onValueChange={setSelected}>
             <SelectTrigger aria-label={t(locale, "settings.runtimeImage")}>
               <SelectValue />
@@ -986,11 +1062,13 @@ function ConfiguredCustomRow({
  * provenance (the committed models.dev snapshot, static code) and per-entry
  * runtime eligibility (builtin / template / unavailable vs the App's selected
  * image) are disclosed in copy; an unavailable entry renders its explanation
- * with no submit path. The picker groups builtin tier first, then template,
- * and height-caps the list to an internal scroll so the snapshot breadth
- * stays usable. Only a successful submit closes the flow — a failed
- * verify/add keeps the selection and typed input while the provider stays
- * unconfigured.
+ * with no submit path. Plan 54: the picker is the filterable combobox
+ * (provider-combobox.tsx) showing the common tier first, then the catalog
+ * tier (display-only grouping inside the combobox: the form below keeps
+ * branching on tier/eligibility, AD-547) — with the list height-capped to an
+ * internal scroll so the snapshot breadth stays usable. Only a successful
+ * submit closes the flow — a failed verify/add keeps the selection and typed
+ * input while the provider stays unconfigured.
  */
 function AddProviderSection({
   locale,
@@ -1028,39 +1106,14 @@ function AddProviderSection({
         <span className="text-sm font-medium" id="settings-catalog-provider-label">
           {t(locale, "settings.provider")}
         </span>
-        <Select value={selectedId} onValueChange={setSelectedId}>
-          <SelectTrigger aria-labelledby="settings-catalog-provider-label">
-            <SelectValue placeholder={t(locale, "settings.selectProvider")} />
-          </SelectTrigger>
-          <SelectContent className="max-h-72">
-            <SelectGroup>
-              <SelectLabel>{t(locale, "settings.catalogBuiltin")}</SelectLabel>
-              {payload.provider_catalog
-                .filter((provider) => provider.tier === "builtin")
-                .map((provider) => (
-                  <SelectItem key={provider.id} value={provider.id}>
-                    {provider.label}
-                    {provider.eligibility === "unavailable"
-                      ? ` — ${t(locale, "settings.eligibilityUnavailableShort", { image: imageId })}`
-                      : ""}
-                  </SelectItem>
-                ))}
-            </SelectGroup>
-            <SelectGroup>
-              <SelectLabel>{t(locale, "settings.catalogTemplate")}</SelectLabel>
-              {payload.provider_catalog
-                .filter((provider) => provider.tier === "template")
-                .map((provider) => (
-                  <SelectItem key={provider.id} value={provider.id}>
-                    {provider.label}
-                    {provider.eligibility === "unavailable"
-                      ? ` — ${t(locale, "settings.eligibilityUnavailableShort", { image: imageId })}`
-                      : ""}
-                  </SelectItem>
-                ))}
-            </SelectGroup>
-          </SelectContent>
-        </Select>
+        <ProviderCombobox
+          locale={locale}
+          labelledby="settings-catalog-provider-label"
+          providers={payload.provider_catalog}
+          value={selectedId}
+          onValueChange={setSelectedId}
+          imageId={imageId}
+        />
       </div>
       {selected ? (
         <div className="flex flex-col gap-3">
@@ -1391,6 +1444,17 @@ const DRAFT_CHAIN_TAB_ID = ":draft";
 
 const DRAFT_CHAIN_TAB: ChainTab = { id: DRAFT_CHAIN_TAB_ID, isDefault: false, chain: null };
 
+/**
+ * Plan 55 (AD-551): the draft tab's label mirrors the lifted draft name live
+ * — a non-blank input shows as-is (trim only gates the fallback), an
+ * empty/whitespace name falls back to the static 新链 copy. Pure render: the
+ * Radix Tabs controlled value derives from tabs/selectedTab alone, so a
+ * label change never touches tab selection.
+ */
+export function draftChainTabLabel(draftName: string, locale: SpaBoot["locale"]): string {
+  return draftName.trim() ? draftName : t(locale, "settings.draftChain");
+}
+
 function ChainsCard({
   locale,
   payload,
@@ -1421,6 +1485,11 @@ function ChainsCard({
   // the create flow is itself a tab, edited in place like every other chain.
   // One boolean of state, so a second draft can never exist while one lives.
   const [draftOpen, setDraftOpen] = useState(false);
+  // Plan 55 (AD-551): the draft name is owned HERE so the tab trigger can
+  // mirror the name input live; the panel is controlled (name/onNameChange).
+  // Lifting it retires the panel's unmount-clears-name reset — the two ways
+  // a draft closes (discard + created) each reset it explicitly below.
+  const [draftName, setDraftName] = useState("");
   const storedTabs = modelChainTabs(payload.model_chains);
   // The draft is a client-side UI element composed AFTER the last named tab
   // (never before Default) — the payload model itself is never mutated.
@@ -1462,7 +1531,7 @@ function ChainsCard({
                 </TabsTrigger>
               ))}
               {draft ? (
-                <TabsTrigger value={DRAFT_CHAIN_TAB_ID}>{t(locale, "settings.draftChain")}</TabsTrigger>
+                <TabsTrigger value={DRAFT_CHAIN_TAB_ID}>{draftChainTabLabel(draftName, locale)}</TabsTrigger>
               ) : null}
             </TabsList>
             <Button type="button" variant="outline" size="sm" onClick={openDraft}>
@@ -1504,16 +1573,26 @@ function ChainsCard({
               <DraftChainPanel
                 locale={locale}
                 groups={groups}
+                name={draftName}
+                onNameChange={setDraftName}
                 onCreate={onCreateDraft}
                 onOutcome={onOutcome}
-                onDiscard={() => setDraftOpen(false)}
+                onDiscard={() => {
+                  // Plan 55 (AD-551): the lifted name no longer dies with the
+                  // panel's unmount — discard resets it so a reopened draft
+                  // starts blank (today's semantics, kept).
+                  setDraftOpen(false);
+                  setDraftName("");
+                }}
                 onCreated={(created) => {
                   // Success: the create handler awaited the reload and it
                   // landed (createDraftChain resolves an error outcome
                   // otherwise), so the stored-name tab exists — the draft is
                   // removed and the real tab is selected. The draft lives in
-                  // component state, so no reload can resurrect it.
+                  // component state, so no reload can resurrect it. The name
+                  // resets with it (AD-551): the reopened draft starts blank.
                   setDraftOpen(false);
+                  setDraftName("");
                   setSelectedTab(created);
                 }}
               />
@@ -1642,10 +1721,17 @@ function SeatsCard({
  * selection coerces through activeChainTabId once the draft tab is gone. The
  * busy gate covers both triggers while the create POST is in flight, so a
  * discard can never race a resolving save into selecting the created tab.
+ * Plan 55 (AD-551): the draft name is controlled — owned by ChainsCard so
+ * the tab trigger can mirror it live; this panel only renders and edits it
+ * through the name/onNameChange props. The input's maxLength=64 mirrors the
+ * server's MODEL_CHAIN_NAME_PATTERN cap (stored ids ≤ 64 chars), so the
+ * live tab-strip label can never grow unbounded.
  */
-function DraftChainPanel({
+export function DraftChainPanel({
   locale,
   groups,
+  name,
+  onNameChange,
   onCreate,
   onOutcome,
   onDiscard,
@@ -1653,6 +1739,9 @@ function DraftChainPanel({
 }: {
   locale: SpaBoot["locale"];
   groups: ModelOptionGroup[];
+  /** Plan 55 (AD-551): the controlled draft name, owned by ChainsCard. */
+  name: string;
+  onNameChange: (name: string) => void;
   /** The draft create (op=add-chain); resolves an error when the awaited reload fails so the draft stays open. */
   onCreate: (fields: Record<string, string>) => Promise<OpNotice>;
   /** Forwards the SUCCESS outcome to the chains card's region. */
@@ -1661,7 +1750,6 @@ function DraftChainPanel({
   /** Fired after a successful create (the reload has landed) with the stored name. */
   onCreated: (name: string) => void;
 }) {
-  const [name, setName] = useState("");
   const [busy, setBusy] = useState(false);
   return (
     <div className="flex flex-col gap-3">
@@ -1669,9 +1757,10 @@ function DraftChainPanel({
         {t(locale, "settings.chainName")}
         <Input
           value={name}
-          onChange={(event) => setName(event.target.value)}
+          onChange={(event) => onNameChange(event.target.value)}
           placeholder={t(locale, "settings.chainNamePlaceholder")}
           autoComplete="off"
+          maxLength={64}
         />
       </label>
       <ChainEditor
@@ -1702,10 +1791,17 @@ function DraftChainPanel({
             });
         }}
         saveLabel={t(locale, "settings.saveChain")}
+        actions={
+          // Plan 55 (AD-552): 放弃 joins the save row instead of the old
+          // hover-only ghost row below it — outline + small fixed width so it
+          // is visible without hover, save stays primary on the left. Still
+          // no confirmation, and disabled under the same busy window as the
+          // save (this panel's busy closure — the double-trigger coverage).
+          <Button type="button" variant="outline" size="sm" className="w-20" disabled={busy} onClick={onDiscard}>
+            {t(locale, "settings.discardChain")}
+          </Button>
+        }
       />
-      <Button type="button" variant="ghost" className="self-start" disabled={busy} onClick={onDiscard}>
-        {t(locale, "settings.discardChain")}
-      </Button>
     </div>
   );
 }
@@ -1716,6 +1812,7 @@ function ChainEditor({
   stored,
   onSave,
   saveLabel,
+  actions,
 }: {
   locale: SpaBoot["locale"];
   groups: ModelOptionGroup[];
@@ -1723,6 +1820,13 @@ function ChainEditor({
   /** Resolves the save outcome (plan 44 T3): rendered in this editor's region. */
   onSave: (chain: string) => Promise<OpNotice>;
   saveLabel?: string;
+  /**
+   * Plan 55 (AD-552): caller actions rendered in the save row, right of the
+   * save button (pure render insertion — save semantics, the busy gate and
+   * the outcome region are untouched). Absent, the save button renders bare:
+   * byte-equivalent to the pre-actions tree (Default / named-chain editors).
+   */
+  actions?: ReactNode;
 }) {
   const [chain, setChain] = useState(() => splitModelChain(stored));
   const [pick, setPick] = useState<string | undefined>(undefined);
@@ -1745,6 +1849,12 @@ function ChainEditor({
       setBusy(false);
     }
   }
+
+  const saveButton = (
+    <Button type="button" disabled={busy} onClick={() => void save()}>
+      {saveLabel ?? t(locale, "settings.saveChain")}
+    </Button>
+  );
 
   return (
     <div className="flex flex-col gap-3">
@@ -1803,9 +1913,14 @@ function ChainEditor({
           {t(locale, "settings.addToChain")}
         </Button>
       </div>
-      <Button type="button" disabled={busy} onClick={() => void save()}>
-        {saveLabel ?? t(locale, "settings.saveChain")}
-      </Button>
+      {actions ? (
+        <div className="flex items-center gap-2">
+          {saveButton}
+          {actions}
+        </div>
+      ) : (
+        saveButton
+      )}
       <NoticeRegion notice={notice} />
     </div>
   );
