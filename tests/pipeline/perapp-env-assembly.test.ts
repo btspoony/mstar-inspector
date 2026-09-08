@@ -425,8 +425,8 @@ describe("per-App runner env assembly (plan 14 Task 3, spec § Per-App BYOK)", (
     const db = createMigratedTestD1();
     const appX = await seedApp(db, "app-x");
     await configureApp(db, appX.id, "openai/gpt-app,anthropic/claude-app", {
-      openai: "sk-x-openai",
-      anthropic: "sk-x-anthropic",
+      openai: sk("x-openai"),
+      anthropic: sk("x-anthropic"),
     });
     const appY = await seedApp(db, "app-y", { configured: false });
     const consumer = createReviewConsumer(makeEnv({ DB: db as never }), testLog, testOverrides);
@@ -482,8 +482,8 @@ describe("per-App runner env assembly (plan 14 Task 3, spec § Per-App BYOK)", (
     // the fail-closed gate passes; X's whitespace-only chain = missing.
     const store = createAppConfigStore(db, TEST_KEY);
     await store.setProviderKey(appY.id, "ark", ARK_KEY);
-    await store.setProviderKey(appY.id, "openai", "sk-y-o");
-    await store.setProviderKey(appY.id, "anthropic", "sk-y-a");
+    await store.setProviderKey(appY.id, "openai", sk("y-o"));
+    await store.setProviderKey(appY.id, "anthropic", sk("y-a"));
     const consumer = createReviewConsumer(makeEnv({ DB: db as never }), testLog, testOverrides);
 
     // Y (padded real chain) FIRST so its review completes; X's blank chain
@@ -502,7 +502,7 @@ describe("per-App runner env assembly (plan 14 Task 3, spec § Per-App BYOK)", (
     // stored (the guard only decides unset-vs-set; it never mutates the value;
     // the runner-side selector parse trims segments).
     expect(yEnv.OMP_REVIEW_MODEL).toBe(padded);
-    expect(yEnv.OPENAI_API_KEY).toBe("sk-y-o");
+    expect(yEnv.OPENAI_API_KEY).toBe(sk("y-o"));
     const cfgLines = logLines.filter((l) => l.fields.config_source !== undefined);
     expect(cfgLines[0]?.fields.config_source).toBe("app");
     // X failed closed; Y's success row records Y's chain head.
@@ -521,8 +521,8 @@ describe("per-App runner env assembly (plan 14 Task 3, spec § Per-App BYOK)", (
     const db = createMigratedTestD1();
     const appX = await seedApp(db, "app-x");
     const appY = await seedApp(db, "app-y");
-    await configureApp(db, appX.id, "openai/gpt-app,anthropic/claude-app", { openai: "sk-x-o", anthropic: "sk-x-a" });
-    await configureApp(db, appY.id, "ark-plan/deepseek-v4-flash,groq/backup", { groq: "sk-y-g" });
+    await configureApp(db, appX.id, "openai/gpt-app,anthropic/claude-app", { openai: sk("x-o"), anthropic: sk("x-a") });
+    await configureApp(db, appY.id, "ark-plan/deepseek-v4-flash,groq/backup", { groq: sk("y-g") });
     const consumer = createReviewConsumer(makeEnv({ DB: db as never }), testLog, testOverrides);
 
     await consumer(
@@ -559,8 +559,8 @@ describe("per-App runner env assembly (plan 14 Task 3, spec § Per-App BYOK)", (
     const db = createMigratedTestD1();
     const appX = await seedApp(db, "app-x");
     const appY = await seedApp(db, "app-y");
-    await configureApp(db, appX.id, "openai/gpt-app", { openai: "sk-x-openai-SECRET" });
-    await configureApp(db, appY.id, "anthropic/claude-app", { anthropic: "sk-y-anthropic-SECRET" });
+    await configureApp(db, appX.id, "openai/gpt-app", { openai: sk("x-openai-SECRET") });
+    await configureApp(db, appY.id, "anthropic/claude-app", { anthropic: sk("y-anthropic-SECRET") });
     // NO global provider keys: any key in the env must come from the App row.
     const consumer = createReviewConsumer(makeEnv({ DB: db as never }), testLog, testOverrides);
 
@@ -591,8 +591,8 @@ describe("per-App runner env assembly (plan 14 Task 3, spec § Per-App BYOK)", (
     });
     expect(xEnvAgain).toEqual(xEnv);
     // Belt and braces: neither env's values contain the other App's key.
-    expect(Object.values(xEnv)).not.toContain("sk-y-anthropic-SECRET");
-    expect(Object.values(yEnv)).not.toContain("sk-x-openai-SECRET");
+    expect(Object.values(xEnv)).not.toContain(sk("y-anthropic-SECRET"));
+    expect(Object.values(yEnv)).not.toContain(sk("x-openai-SECRET"));
   });
 
   test("secrets never logged: key_source/config_source lines carry ids only, never key material", async () => {
@@ -643,7 +643,7 @@ describe("per-App runner env assembly (plan 14 Task 3, spec § Per-App BYOK)", (
     reset();
     const db = createMigratedTestD1();
     const appY = await seedApp(db, "app-y");
-    await configureApp(db, appY.id, "openai/gpt-app", { openai: "sk-y-openai-SECRET" });
+    await configureApp(db, appY.id, "openai/gpt-app", { openai: sk("y-openai-SECRET") });
     const consumer = createReviewConsumer(
       makeEnv({ DB: db as never, DASHBOARD_ENCRYPTION_KEY: undefined }),
       testLog,
@@ -668,17 +668,17 @@ describe("per-App runner env assembly (plan 14 Task 3, spec § Per-App BYOK)", (
     const db = createMigratedTestD1();
     const appX = await seedApp(db, "app-x");
     const store = createAppConfigStore(db, TEST_KEY);
-    await store.setProviderKey(appX.id, "anthropic", "sk-v1-SECRET");
+    await store.setProviderKey(appX.id, "anthropic", sk("v1-SECRET"));
     const consumer = createReviewConsumer(makeEnv({ DB: db as never }), testLog, testOverrides);
 
     await consumer(makeBatch(makePayload({ pr_number: 42, appRef: { appId: appX.id } })));
-    expect(runnerEnvs()[0]?.ANTHROPIC_API_KEY).toBe("sk-v1-SECRET");
+    expect(runnerEnvs()[0]?.ANTHROPIC_API_KEY).toBe(sk("v1-SECRET"));
 
     // Rotate the key in the dashboard (upsert) — no redeploy, no cache.
-    await store.setProviderKey(appX.id, "anthropic", "sk-v2-SECRET");
+    await store.setProviderKey(appX.id, "anthropic", sk("v2-SECRET"));
     await consumer(makeBatch(makePayload({ pr_number: 43, appRef: { appId: appX.id } })));
-    expect(runnerEnvs()[1]?.ANTHROPIC_API_KEY).toBe("sk-v2-SECRET");
-    expect(JSON.stringify(runnerEnvs()[1])).not.toContain("sk-v1-SECRET");
+    expect(runnerEnvs()[1]?.ANTHROPIC_API_KEY).toBe(sk("v2-SECRET"));
+    expect(JSON.stringify(runnerEnvs()[1])).not.toContain(sk("v1-SECRET"));
   });
 
   test("a provider id outside the PROVIDERS allowlist is never injected (no env name, no crash)", async () => {
@@ -711,7 +711,7 @@ describe("per-App runner env assembly (plan 14 Task 3, spec § Per-App BYOK)", (
     reset();
     const db = createMigratedTestD1();
     const appX = await seedApp(db, "app-x");
-    await configureApp(db, appX.id, "openai/gpt-app,anthropic/claude-app", { openai: "sk-x-openai" });
+    await configureApp(db, appX.id, "openai/gpt-app,anthropic/claude-app", { openai: sk("x-openai") });
     await createAppConfigStore(db, TEST_KEY).setProviderKey(appX.id, "anthropic", "   ");
     const consumer = createReviewConsumer(makeEnv({ DB: db as never }), testLog, testOverrides);
 
@@ -785,8 +785,8 @@ describe("runner input modelOverrides threading (plan 17 Task 1)", () => {
     // — the Bugbot-7aaf18f4 gate requires a key for every override provider,
     // so configure them alongside the ark baseline.
     await configureApp(db, appX.id, "ark-plan/deepseek-v4-flash", {
-      openai: "sk-x-openai",
-      anthropic: "sk-x-anthropic",
+      openai: sk("x-openai"),
+      anthropic: sk("x-anthropic"),
     });
     const store = createAppConfigStore(db, TEST_KEY);
     await mapRole(db, appX.id, "mstar-review-seat", "ark-plan/deepseek-v4-flash:high");
@@ -839,7 +839,7 @@ describe("runner input modelOverrides threading (plan 17 Task 1)", () => {
     const appX = await seedApp(db, "app-x");
     // The override references the openai provider — its key must exist for
     // the fail-closed gate (Bugbot 7aaf18f4).
-    await configureApp(db, appX.id, "ark-plan/deepseek-v4-flash", { openai: "sk-x-openai" });
+    await configureApp(db, appX.id, "ark-plan/deepseek-v4-flash", { openai: sk("x-openai") });
     const store = createAppConfigStore(db, TEST_KEY);
     await mapRole(db, appX.id, "code-reviewer", "openai/v1");
     const consumer = createReviewConsumer(makeEnv({ DB: db as never }), testLog, testOverrides);
@@ -944,7 +944,7 @@ describe("per-role override provider key gate (Bugbot 7aaf18f4)", () => {
     reset();
     const db = createMigratedTestD1();
     const appX = await seedApp(db, "app-x");
-    await configureApp(db, appX.id, "openai/gpt-app", { openai: "sk-x-openai" });
+    await configureApp(db, appX.id, "openai/gpt-app", { openai: sk("x-openai") });
     const store = createAppConfigStore(db, TEST_KEY);
     await mapRole(db, appX.id, "code-reviewer", "openai/gpt-5:thinking, openai/gpt-5-mini");
     const consumer = createReviewConsumer(makeEnv({ DB: db as never }), testLog, testOverrides);
@@ -955,7 +955,7 @@ describe("per-role override provider key gate (Bugbot 7aaf18f4)", () => {
     // the app key rides the exec env under the mapped env name.
     const input = runnerInputs()[0]!;
     expect(input.modelOverrides).toEqual({ "code-reviewer": "openai/gpt-5:thinking, openai/gpt-5-mini" });
-    expect(runnerEnvs()[0]!.OPENAI_API_KEY).toBe("sk-x-openai");
+    expect(runnerEnvs()[0]!.OPENAI_API_KEY).toBe(sk("x-openai"));
     expect(appCalls).toEqual(["token", "post"]);
   });
 
@@ -963,7 +963,7 @@ describe("per-role override provider key gate (Bugbot 7aaf18f4)", () => {
     reset();
     const db = createMigratedTestD1();
     const appX = await seedApp(db, "app-x");
-    await configureApp(db, appX.id, "openai/gpt-app", { openai: "sk-x-openai" });
+    await configureApp(db, appX.id, "openai/gpt-app", { openai: sk("x-openai") });
     const store = createAppConfigStore(db, TEST_KEY);
     await store.upsertCustomProvider(
       appX.id,

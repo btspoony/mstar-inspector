@@ -557,15 +557,15 @@ describe("app-config store (createAppConfigStore) — provider keys", () => {
     const x = await seedApp(db, { slug: "app-x", createdBy: "mallory" });
     const y = await seedApp(db, { slug: "app-y", createdBy: "ada", githubAppId: 1002 });
     const store = configStore(db);
-    await store.setProviderKey(x.id, "anthropic", "sk-x-anthropic-key-1111");
-    await store.setProviderKey(y.id, "anthropic", "sk-y-anthropic-key-2222");
-    await store.setProviderKey(y.id, "openai", "sk-y-openai-key-3333");
+    await store.setProviderKey(x.id, "anthropic", sk("x-anthropic-key-1111"));
+    await store.setProviderKey(y.id, "anthropic", sk("y-anthropic-key-2222"));
+    await store.setProviderKey(y.id, "openai", sk("y-openai-key-3333"));
     const cfgX = await store.getAppConfig(x.id);
     expect(Object.keys(cfgX.keys)).toEqual(["anthropic"]);
-    expect(cfgX.keys.anthropic).toBe("sk-x-anthropic-key-1111");
+    expect(cfgX.keys.anthropic).toBe(sk("x-anthropic-key-1111"));
     const serialized = JSON.stringify(cfgX);
-    expect(serialized).not.toContain("sk-y-anthropic-key-2222");
-    expect(serialized).not.toContain("sk-y-openai-key-3333");
+    expect(serialized).not.toContain(sk("y-anthropic-key-2222"));
+    expect(serialized).not.toContain(sk("y-openai-key-3333"));
     // The masked list is scoped the same way.
     const listX = await store.listProviderKeys(x.id);
     expect(listX).toEqual([{ provider: "anthropic", last4: "1111", updated_at: expect.any(String) }]);
@@ -587,14 +587,14 @@ describe("app-config store (createAppConfigStore) — provider keys", () => {
     const db = createAppConfigD1();
     const app = await seedApp(db, { slug: "a", createdBy: "mallory" });
     const store = configStore(db);
-    await store.setProviderKey(app.id, "anthropic", "sk-v1-aaaa");
+    await store.setProviderKey(app.id, "anthropic", sk("v1-aaaa"));
     // Backdate the row so the second write's clock is observably LATER.
     rawRun(
       db,
       "UPDATE app_provider_keys SET created_at = '2026-01-01 00:00:00', updated_at = '2026-01-01 00:00:00' WHERE app_id = ? AND provider = 'anthropic'",
       app.id,
     );
-    await store.setProviderKey(app.id, "anthropic", "sk-v2-bbbb");
+    await store.setProviderKey(app.id, "anthropic", sk("v2-bbbb"));
     const row = db.raw.query("SELECT created_at, updated_at FROM app_provider_keys").get() as {
       created_at: string;
       updated_at: string;

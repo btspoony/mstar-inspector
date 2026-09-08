@@ -30,6 +30,7 @@
  *   construction on the consumer side.
  */
 import { base64urlDecode, base64urlEncode, signValue, timingSafeEqual, verifyValue } from "./session";
+import { GITHUB_CODE_SHAPE } from "./github-code-shape";
 
 export const MANIFEST_STATE_COOKIE = "__Host-mstar-manifest-state";
 export const MANIFEST_HOLD_COOKIE = "__Host-mstar-manifest-hold";
@@ -42,15 +43,6 @@ const dec = new TextDecoder();
 
 // Upstream GitHub calls are bounded (same convention as oauth.ts).
 const GITHUB_FETCH_TIMEOUT_MS = 10_000;
-
-/**
- * GitHub manifest conversion codes are opaque URL-safe tokens. Exported for
- * the callback ENTRY gate (dashboard/index.ts) and enforced again inside
- * exchangeManifestCode — only codes of this shape ever reach the conversion
- * call, so the request-derived value can influence nothing but one encoded
- * path segment on the fixed api.github.com host.
- */
-export const MANIFEST_CODE_SHAPE = /^[A-Za-z0-9._~-]{1,256}$/;
 
 // Architect lock spec L9: documented Accept + pinned GA API version; the
 // code itself is the credential, so NO Authorization header (a bearer
@@ -218,7 +210,7 @@ export async function exchangeManifestCode(code: string): Promise<ManifestConver
   // GitHub manifest conversion codes are opaque URL-safe tokens; reject any
   // other shape BEFORE the upstream call — bounded upstream calls,
   // defense-in-depth beside the fixed api.github.com endpoint.
-  if (!MANIFEST_CODE_SHAPE.test(code)) {
+  if (!GITHUB_CODE_SHAPE.test(code)) {
     logManifestFailure("conversion", "unsafe_code_shape");
     return null;
   }

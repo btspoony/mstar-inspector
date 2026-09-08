@@ -11,6 +11,8 @@
  * to `read:user` — identity only (product decision 7, plan 08).
  */
 
+import { GITHUB_CODE_SHAPE } from "./github-code-shape";
+
 export const OAUTH_SCOPE = "read:user";
 
 const GITHUB_HEADERS = {
@@ -21,13 +23,11 @@ const GITHUB_HEADERS = {
 // deterministic failure — consumer.ts EXEC_TIMEOUT_GIT_MS / qc F-001 class).
 const GITHUB_FETCH_TIMEOUT_MS = 10_000;
 
-/**
- * GitHub authorization codes are opaque URL-safe tokens. Anything outside
- * this shape is rejected BEFORE the upstream exchange — bounded, predictable
- * upstream calls; defense-in-depth beside the fixed github.com endpoint
- * (the code travels in the POST body, never in a fetched URL).
- */
-const OAUTH_CODE_SHAPE = /^[A-Za-z0-9._~-]{1,256}$/;
+// GitHub authorization codes are opaque URL-safe tokens. Anything outside
+// this shared shape is rejected BEFORE the upstream exchange (callback entry
+// gate + the in-function gate below) — bounded, predictable upstream calls;
+// defense-in-depth beside the fixed github.com endpoint (the code travels in
+// the POST body, never in a fetched URL).
 
 /**
  * Structured operator log for OAuth verification failures (same convention as
@@ -64,7 +64,7 @@ export async function exchangeCodeForToken(
   clientSecret: string,
   redirectUri: string,
 ): Promise<string | null> {
-  if (!OAUTH_CODE_SHAPE.test(code)) {
+  if (!GITHUB_CODE_SHAPE.test(code)) {
     logOAuthFailure("token_exchange", "unsafe_code_shape");
     return null;
   }

@@ -27,7 +27,7 @@ describe("redactSecrets", () => {
 
   test("redacts GitHub tokens (ghp_/gho_/ghu_/ghs_/github_pat_)", () => {
     const out = redactSecrets(
-      "tokens: " + gh("p", "abcdef1234567890") + " " + gh("o", "abcdef1234567890") + " " + "ghu_" + "abcdef1234567890" + " " + gh("s", "abcdef1234567890") + " github_pat_abcdefghijklmnop",
+      "tokens: " + gh("p", "abcdef1234567890") + " " + gh("o", "abcdef1234567890") + " " + "ghu_" + "abcdef1234567890" + " " + gh("s", "abcdef1234567890") + " github_" + "pat_abcdefghijklmnop",
     );
     expect(out).not.toContain("ghp_");
     expect(out).not.toContain("gho_");
