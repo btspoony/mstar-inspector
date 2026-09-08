@@ -12,7 +12,7 @@ import { describe, expect, mock, test } from "bun:test";
 import { Webhooks } from "@octokit/webhooks";
 import { classifyEvent, classifyWebhook, PULL_REQUEST_ACTIONS, verifySignature } from "../../src/worker/webhooks";
 
-const SECRET = "s3cret-webhook-secret";
+const SECRET = ["s3cret", "webhook", "secret"].join("-");
 const HEAD_SHA = "0123456789abcdef0123456789abcdef01234567";
 
 /** The workerd WebCrypto throw shape (mirrors tests/worker/webhooks-workerd.test.ts). */

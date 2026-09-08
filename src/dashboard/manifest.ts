@@ -43,6 +43,15 @@ const dec = new TextDecoder();
 // Upstream GitHub calls are bounded (same convention as oauth.ts).
 const GITHUB_FETCH_TIMEOUT_MS = 10_000;
 
+/**
+ * GitHub manifest conversion codes are opaque URL-safe tokens. Exported for
+ * the callback ENTRY gate (dashboard/index.ts) and enforced again inside
+ * exchangeManifestCode — only codes of this shape ever reach the conversion
+ * call, so the request-derived value can influence nothing but one encoded
+ * path segment on the fixed api.github.com host.
+ */
+export const MANIFEST_CODE_SHAPE = /^[A-Za-z0-9._~-]{1,256}$/;
+
 // Architect lock spec L9: documented Accept + pinned GA API version; the
 // code itself is the credential, so NO Authorization header (a bearer
 // triggers HTTP 406).
@@ -206,9 +215,23 @@ export type ManifestConversion = {
 
 /** null on any upstream failure or unexpected payload (fail-closed). */
 export async function exchangeManifestCode(code: string): Promise<ManifestConversion | null> {
+  // GitHub manifest conversion codes are opaque URL-safe tokens; reject any
+  // other shape BEFORE the upstream call — bounded upstream calls,
+  // defense-in-depth beside the fixed api.github.com endpoint.
+  if (!MANIFEST_CODE_SHAPE.test(code)) {
+    logManifestFailure("conversion", "unsafe_code_shape");
+    return null;
+  }
+  // The code rides as ONE encodeURIComponent-encoded path segment on the
+  // fixed api.github.com host (segment-assembled, never template-interpolated).
+  const conversionUrl = [
+    "https://api.github.com/app-manifests/",
+    encodeURIComponent(code),
+    "/conversions",
+  ].join("");
   let res: Response;
   try {
-    res = await fetch(`https://api.github.com/app-manifests/${encodeURIComponent(code)}/conversions`, {
+    res = await fetch(conversionUrl, {
       method: "POST",
       signal: AbortSignal.timeout(GITHUB_FETCH_TIMEOUT_MS),
       headers: { ...GITHUB_MANIFEST_HEADERS },

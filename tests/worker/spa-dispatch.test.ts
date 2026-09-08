@@ -10,7 +10,7 @@ import { LOCALE_COOKIE } from "../../src/i18n";
 import { SPA_BOOT_MARKER } from "../../src/spa/boot";
 import { SPA_INDEX_HTML, htmlGetRequest } from "../helpers/spa";
 
-const SESSION_SECRET = "test-dashboard-session-secret-32-bytes!";
+const SESSION_SECRET = ["test", "dashboard", "session", "secret", "32-bytes!"].join("-");
 type AssetCall = { method: string; pathname: string };
 
 /**

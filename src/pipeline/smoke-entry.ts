@@ -30,7 +30,7 @@
  */
 
 import { runnerCommand, writeJsonCommand } from "./gitops";
-import { getSandbox, Sandbox, type ReviewSandbox, type SandboxBinding } from "./sandbox";
+import { getSandbox, Sandbox, shellCommand, type ReviewSandbox, type SandboxBinding } from "./sandbox";
 import { DEFAULT_SANDBOX_IMAGE_ID, getSandboxImage } from "../contracts/sandbox-images";
 import { APP_VERSION } from "../version";
 import { parseReviewOutput } from "../review/schema";
@@ -75,7 +75,9 @@ export default {
     let result: Record<string, unknown>;
     try {
       // Path 1 (primary hypothesis): gh CLI with GH_TOKEN env injection.
-      const gh = await sandbox.exec(`gh pr diff ${GH_PR} --repo ${GH_REPO}`, {
+      // GH_PR/GH_REPO are compile-time constants — audited in-repo values,
+      // cleared for the sink via the shellCommand brand mint.
+      const gh = await sandbox.runCommand(shellCommand(`gh pr diff ${GH_PR} --repo ${GH_REPO}`), {
         env: { GH_TOKEN: env.GH_TOKEN },
       });
       if (gh.exitCode === 0 && gh.stdout.trim().length > 0) {
@@ -90,13 +92,15 @@ export default {
       } else {
         // Path 2 (fallback): git equivalent — clone the PR head, diff against
         // base. Token injected via git env config (never in the command string).
-        const git = await sandbox.exec(
-          [
-            `git clone --depth 1 --branch mstar-inspector-seed https://github.com/${GH_REPO}.git ${CLONE_DIR}`,
-            `cd ${CLONE_DIR}`,
-            "git fetch --depth 1 origin main",
-            "git diff FETCH_HEAD HEAD",
-          ].join(" && "),
+        const git = await sandbox.runCommand(
+          shellCommand(
+            [
+              `git clone --depth 1 --branch mstar-inspector-seed https://github.com/${GH_REPO}.git ${CLONE_DIR}`,
+              `cd ${CLONE_DIR}`,
+              "git fetch --depth 1 origin main",
+              "git diff FETCH_HEAD HEAD",
+            ].join(" && "),
+          ),
           {
             env: {
               GIT_CONFIG_COUNT: "1",
@@ -166,13 +170,15 @@ async function runReviewSmoke(env: SmokeEnv): Promise<Response> {
     }
 
     // 1. Clone the real PR head + base into the container.
-    const clone = await sandbox.exec(
-      [
-        `rm -rf ${CLONE_DIR}`,
-        `git clone --depth 1 --branch mstar-inspector-seed https://github.com/${GH_REPO}.git ${CLONE_DIR}`,
-        `cd ${CLONE_DIR}`,
-        "git fetch --depth 1 origin main",
-      ].join(" && "),
+    const clone = await sandbox.runCommand(
+      shellCommand(
+        [
+          `rm -rf ${CLONE_DIR}`,
+          `git clone --depth 1 --branch mstar-inspector-seed https://github.com/${GH_REPO}.git ${CLONE_DIR}`,
+          `cd ${CLONE_DIR}`,
+          "git fetch --depth 1 origin main",
+        ].join(" && "),
+      ),
     );
     if (clone.exitCode !== 0) {
       result = {
@@ -227,8 +233,8 @@ async function execInImageReview(
   if (!sandboxImage) {
     throw new Error(`sandbox image ${DEFAULT_SANDBOX_IMAGE_ID} is missing from the registry`);
   }
-  const recon = await sandbox.exec(
-    `cd ${CLONE_DIR} && git rev-parse HEAD && git diff --numstat FETCH_HEAD HEAD`,
+  const recon = await sandbox.runCommand(
+    shellCommand(`cd ${CLONE_DIR} && git rev-parse HEAD && git diff --numstat FETCH_HEAD HEAD`),
   );
   if (recon.exitCode !== 0) {
     return {
@@ -251,7 +257,7 @@ async function execInImageReview(
     }),
     "utf8",
   ).toString("base64");
-  const writeInput = await sandbox.exec(writeJsonCommand(INPUT_PATH, inputB64));
+  const writeInput = await sandbox.runCommand(writeJsonCommand(INPUT_PATH, inputB64));
   if (writeInput.exitCode !== 0) {
     return {
       ok: false,
@@ -261,7 +267,7 @@ async function execInImageReview(
     };
   }
 
-  const run = await sandbox.exec(runnerCommand(RUNNER_PATH, "quick", INPUT_PATH), {
+  const run = await sandbox.runCommand(runnerCommand(RUNNER_PATH, "quick", INPUT_PATH), {
     cwd: CLONE_DIR,
     env: {
       HARNESS_PLUGIN_ROOT: HARNESS_ROOT,

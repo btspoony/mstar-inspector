@@ -22,6 +22,14 @@ const GITHUB_HEADERS = {
 const GITHUB_FETCH_TIMEOUT_MS = 10_000;
 
 /**
+ * GitHub authorization codes are opaque URL-safe tokens. Anything outside
+ * this shape is rejected BEFORE the upstream exchange — bounded, predictable
+ * upstream calls; defense-in-depth beside the fixed github.com endpoint
+ * (the code travels in the POST body, never in a fetched URL).
+ */
+const OAUTH_CODE_SHAPE = /^[A-Za-z0-9._~-]{1,256}$/;
+
+/**
  * Structured operator log for OAuth verification failures (same convention as
  * webhooks.ts signature-reject logging). NEVER log codes/tokens/secrets —
  * stages, reasons, and upstream statuses are not secrets.
@@ -56,6 +64,10 @@ export async function exchangeCodeForToken(
   clientSecret: string,
   redirectUri: string,
 ): Promise<string | null> {
+  if (!OAUTH_CODE_SHAPE.test(code)) {
+    logOAuthFailure("token_exchange", "unsafe_code_shape");
+    return null;
+  }
   let res: Response;
   try {
     res = await fetch("https://github.com/login/oauth/access_token", {

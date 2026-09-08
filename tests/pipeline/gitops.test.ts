@@ -20,34 +20,37 @@ import {
   runnerCommand,
   writeJsonCommand,
 } from "../../src/pipeline/gitops";
+import { shellCommand } from "../../src/pipeline/shell-command";
 
 describe("gitops command builders", () => {
   test("valid inputs produce single-quoted, allowlisted commands", () => {
     expect(cloneCommand("acme", "widgets", 42, "/workspace/repo")).toBe(
-      [
-        "rm -rf '/workspace/repo'",
-        "git init '/workspace/repo'",
-        "cd '/workspace/repo'",
-        "git remote add origin 'https://github.com/acme/widgets.git'",
-        "git fetch --depth 1 origin 'pull/42/head'",
-        "git checkout FETCH_HEAD",
-      ].join(" && "),
+      shellCommand(
+        [
+          "rm -rf '/workspace/repo'",
+          "git init '/workspace/repo'",
+          "cd '/workspace/repo'",
+          "git remote add origin 'https://github.com/acme/widgets.git'",
+          "git fetch --depth 1 origin 'pull/42/head'",
+          "git checkout FETCH_HEAD",
+        ].join(" && "),
+      ),
     );
-    expect(checkedOutShaCommand("/workspace/repo")).toBe("git -C '/workspace/repo' rev-parse HEAD");
+    expect(checkedOutShaCommand("/workspace/repo")).toBe(shellCommand("git -C '/workspace/repo' rev-parse HEAD"));
     expect(diffCommand("acme", "widgets", 42, "/workspace/pr.diff")).toBe(
-      "gh pr diff '42' --repo 'acme/widgets' > '/workspace/pr.diff'",
+      shellCommand("gh pr diff '42' --repo 'acme/widgets' > '/workspace/pr.diff'"),
     );
     // Plan 07 T5: the runner consumes the runtime envelope path — --level +
     // --input reconFacts JSON; the diff feeds the numstat partition universe.
-    expect(numstatCommand("/workspace/pr.diff")).toBe("git apply --numstat '/workspace/pr.diff'");
+    expect(numstatCommand("/workspace/pr.diff")).toBe(shellCommand("git apply --numstat '/workspace/pr.diff'"));
     expect(writeJsonCommand("/workspace/review-input.json", "eyJhIjoxfQ==")).toBe(
-      "printf '%s' 'eyJhIjoxfQ==' | base64 -d > '/workspace/review-input.json'",
+      shellCommand("printf '%s' 'eyJhIjoxfQ==' | base64 -d > '/workspace/review-input.json'"),
     );
     expect(runnerCommand("/opt/runner/src/review/runner.ts", "default", "/workspace/review-input.json")).toBe(
-      "bun run '/opt/runner/src/review/runner.ts' --level 'default' --input '/workspace/review-input.json'",
+      shellCommand("bun run '/opt/runner/src/review/runner.ts' --level 'default' --input '/workspace/review-input.json'"),
     );
     expect(runnerCommand("/opt/runner/src/review/runner.ts", "quick", "/workspace/review-input.json")).toBe(
-      "bun run '/opt/runner/src/review/runner.ts' --level 'quick' --input '/workspace/review-input.json'",
+      shellCommand("bun run '/opt/runner/src/review/runner.ts' --level 'quick' --input '/workspace/review-input.json'"),
     );
   });
 
@@ -71,11 +74,11 @@ describe("gitops command builders", () => {
     });
     expect(cmds.clone).toContain("origin 'https://github.com/my-org.example/repo_name-2.git'");
     expect(cmds.clone).toContain("origin 'pull/7/head'");
-    expect(cmds.checkedOutSha).toBe("git -C '/workspace/repo' rev-parse HEAD");
-    expect(cmds.diff).toBe("gh pr diff '7' --repo 'my-org.example/repo_name-2' > '/workspace/pr.diff'");
-    expect(cmds.numstat).toBe("git apply --numstat '/workspace/pr.diff'");
+    expect(cmds.checkedOutSha).toBe(shellCommand("git -C '/workspace/repo' rev-parse HEAD"));
+    expect(cmds.diff).toBe(shellCommand("gh pr diff '7' --repo 'my-org.example/repo_name-2' > '/workspace/pr.diff'"));
+    expect(cmds.numstat).toBe(shellCommand("git apply --numstat '/workspace/pr.diff'"));
     expect(cmds.runner).toBe(
-      "bun run '/opt/runner/src/review/runner.ts' --level 'default' --input '/workspace/review-input.json'",
+      shellCommand("bun run '/opt/runner/src/review/runner.ts' --level 'default' --input '/workspace/review-input.json'"),
     );
   });
 

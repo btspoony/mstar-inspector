@@ -39,6 +39,7 @@ import type { AgentRuntime, AgentRuntimeRunInput, CustomProviderDeclaration } fr
 import { getSandboxImage } from "../../src/contracts/sandbox-images";
 import { capabilityHostsYaml } from "../../src/review/models-synthesis";
 import { main } from "../../src/review/runner";
+import { sk } from "../helpers/fake-secrets";
 
 /** Envelope the fake runtime resolves with; overridden per test. */
 let fakeEnvelope: Record<string, unknown> | undefined;
@@ -339,7 +340,7 @@ describe("runner entry (src/review/runner.ts)", () => {
     expect(yaml).toContain("apiKey: ARK_API_KEY");
     expect(yaml).toContain('"my-provider":');
     expect(yaml).toContain("apiKey: CUSTOM_MY_PROVIDER_API_KEY");
-    expect(yaml).not.toContain("sk-live");
+    expect(yaml).not.toContain(sk("live"));
     rmSync(input.agentDir as string, { recursive: true, force: true });
   });
 

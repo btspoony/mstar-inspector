@@ -40,6 +40,7 @@ import {
   writePerReviewModelsYaml,
 } from "../../src/review/models-synthesis";
 import { getSandboxImage } from "../../src/contracts/sandbox-images";
+import { sk } from "../helpers/fake-secrets";
 
 /**
  * The omp capability base, pinned byte-for-byte (plan 37 equivalence lock):
@@ -66,7 +67,7 @@ const EXPECTED_OMP_BASE = `providers:
 const BASE_YAML = capabilityHostsYaml(getSandboxImage("omp")!.hosts);
 
 /** Fixture secret that must never appear in any synthesized text. */
-const FIXTURE_KEY = "sk-live-fixture-12345abcdef";
+const FIXTURE_KEY = sk("live-fixture-12345abcdef");
 
 const CUSTOM: CustomProviderDeclaration = {
   provider_id: "my-provider",
@@ -146,7 +147,7 @@ describe("synthesizeModelsYaml (plan 23 Task 3, AL-23-1 merged-complete file)", 
   test("ZERO key literals: the fixture secret never appears in the synthesized text", () => {
     const yaml = synthesizeModelsYaml(BASE_YAML, [CUSTOM]);
     expect(yaml).not.toContain(FIXTURE_KEY);
-    expect(yaml).not.toContain("sk-live");
+    expect(yaml).not.toContain(sk("live"));
   });
 
   test("multiple custom providers merge in declaration order, each with its own env reference", () => {

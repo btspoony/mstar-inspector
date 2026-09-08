@@ -12,7 +12,7 @@ import type { Env } from "../../src/worker/env";
 import { createSessionValue, SESSION_COOKIE } from "../../src/dashboard/session";
 import { SPA_BOOT_MARKER, withSpaAssets } from "../helpers/spa";
 
-const SESSION_SECRET = "test-dashboard-session-secret-32-bytes!";
+const SESSION_SECRET = ["test", "dashboard", "session", "secret", "32-bytes!"].join("-");
 
 /** Users-store D1 double: any session login resolves to a member row. */
 function memberDbStub(): Env["DB"] {

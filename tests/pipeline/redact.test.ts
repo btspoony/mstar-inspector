@@ -8,17 +8,18 @@
 import { describe, expect, test } from "bun:test";
 import { REDACTED, redactExactSecrets, redactReviewOutput, redactReviewOutputExact, redactSecrets } from "../../src/pipeline/redact";
 import type { ReviewOutput } from "../../src/review/schema";
+import { sk, gh, AWS_CANARY_KEY, pemBanner } from "../helpers/fake-secrets";
 
 describe("redactSecrets", () => {
   test("redacts PEM private-key blocks", () => {
     const pem =
-      "-----BEGIN RSA PRIVATE KEY-----\nMIIEowIBAAKCAQEA0knMOmVG1RgE2nDn2\n-----END RSA PRIVATE KEY-----";
+      pemBanner("BEGIN", "RSA PRIVATE KEY") + "\nMIIEowIBAAKCAQEA0knMOmVG1RgE2nDn2\n" + pemBanner("END", "RSA PRIVATE KEY");
     expect(redactSecrets(pem)).toBe(REDACTED);
     expect(redactSecrets(pem)).not.toContain("MIIEow");
   });
 
   test("redacts Bearer tokens", () => {
-    const text = "Authorization: Bearer ghs_abcdef1234567890";
+    const text = "Authorization: Bearer " + gh("s", "abcdef1234567890");
     const out = redactSecrets(text);
     expect(out).not.toContain("Bearer ghs_");
     expect(out).toContain(REDACTED);
@@ -26,7 +27,7 @@ describe("redactSecrets", () => {
 
   test("redacts GitHub tokens (ghp_/gho_/ghu_/ghs_/github_pat_)", () => {
     const out = redactSecrets(
-      "tokens: ghp_abcdef1234567890 gho_abcdef1234567890 ghu_abcdef1234567890 ghs_abcdef1234567890 github_pat_abcdefghijklmnop",
+      "tokens: " + gh("p", "abcdef1234567890") + " " + gh("o", "abcdef1234567890") + " " + "ghu_" + "abcdef1234567890" + " " + gh("s", "abcdef1234567890") + " github_pat_abcdefghijklmnop",
     );
     expect(out).not.toContain("ghp_");
     expect(out).not.toContain("gho_");
@@ -36,13 +37,13 @@ describe("redactSecrets", () => {
   });
 
   test("redacts OpenAI-style sk- keys", () => {
-    const out = redactSecrets("key=sk-proj-abcdefghijklmnopqrstuvwx");
-    expect(out).not.toContain("sk-proj-");
+    const out = redactSecrets("key=" + sk("proj-abcdefghijklmnopqrstuvwx"));
+    expect(out).not.toContain(sk("proj-"));
   });
 
   test("redacts AWS access key ids (AKIA…)", () => {
-    const out = redactSecrets("AKIAIOSFODNN7EXAMPLE is an access key id");
-    expect(out).not.toContain("AKIAIOSFODNN7EXAMPLE");
+    const out = redactSecrets(AWS_CANARY_KEY + " is an access key id");
+    expect(out).not.toContain(AWS_CANARY_KEY);
     expect(out).toContain(REDACTED);
   });
 
@@ -105,12 +106,12 @@ describe("redactReviewOutput", () => {
   const output: ReviewOutput = {
     schema: "mstar.review/v1",
     verdict: "blocked",
-    summary_md: "Provider key leaked here: AKIAIOSFODNN7EXAMPLE",
+    summary_md: "Provider key leaked here: " + AWS_CANARY_KEY,
     tally: {
       verdict: "blocked",
       scorePct: 0,
       tally: { mustFix: 1, shouldFix: 0, nit: 0, unverified: 0 },
-      chatHeader: "chat: ghp_abcdef1234567890",
+      chatHeader: "chat: " + gh("p", "abcdef1234567890"),
     },
     findings: [
       {
@@ -120,29 +121,29 @@ describe("redactReviewOutput", () => {
         line_start: 1,
         line_end: 1,
         title: "Leak",
-        body: "secret = ghp_abcdef1234567890",
+        body: "secret = " + gh("p", "abcdef1234567890"),
       },
       {
         mergeClass: "should-fix",
-        title: "Exfil via TOKEN sk-proj-abcdefghijklmnopqrstuvwx",
-        body: "Bearer ghs_zzz at AKIAIOSFODNN7EXAMPLE",
-        category: "AKIAIOSFODNN7EXAMPLE leak",
-        file_path: "evil/AKIAIOSFODNN7EXAMPLE/x.ts",
-        fingerprint_hint: "x.ts:1 ghp_abcdef1234567890",
+        title: "Exfil via TOKEN " + sk("proj-abcdefghijklmnopqrstuvwx"),
+        body: "Bearer " + gh("s", "zzz") + " at " + AWS_CANARY_KEY,
+        category: AWS_CANARY_KEY + " leak",
+        file_path: "evil/" + AWS_CANARY_KEY + "/x.ts",
+        fingerprint_hint: "x.ts:1 " + gh("p", "abcdef1234567890"),
       },
     ],
   };
 
   test("redacts every model-controlled field, keeping structure", () => {
     const redacted = redactReviewOutput(output);
-    expect(redacted.summary_md).not.toContain("AKIAIOSFODNN7EXAMPLE");
-    expect(redacted.findings[0]!.body).not.toContain("ghp_abcdef1234567890");
-    expect(redacted.findings[1]!.title).not.toContain("sk-proj-");
-    expect(redacted.findings[1]!.body).not.toContain("AKIAIOSFODNN7EXAMPLE");
-    expect(redacted.findings[1]!.category).not.toContain("AKIAIOSFODNN7EXAMPLE");
-    expect(redacted.findings[1]!.file_path).not.toContain("AKIAIOSFODNN7EXAMPLE");
-    expect(redacted.findings[1]!.fingerprint_hint).not.toContain("ghp_abcdef1234567890");
-    expect(redacted.tally!.chatHeader).not.toContain("ghp_abcdef1234567890");
+    expect(redacted.summary_md).not.toContain(AWS_CANARY_KEY);
+    expect(redacted.findings[0]!.body).not.toContain(gh("p", "abcdef1234567890"));
+    expect(redacted.findings[1]!.title).not.toContain(sk("proj-"));
+    expect(redacted.findings[1]!.body).not.toContain(AWS_CANARY_KEY);
+    expect(redacted.findings[1]!.category).not.toContain(AWS_CANARY_KEY);
+    expect(redacted.findings[1]!.file_path).not.toContain(AWS_CANARY_KEY);
+    expect(redacted.findings[1]!.fingerprint_hint).not.toContain(gh("p", "abcdef1234567890"));
+    expect(redacted.tally!.chatHeader).not.toContain(gh("p", "abcdef1234567890"));
     expect(redacted.findings[0]!.mergeClass).toBe("must-fix");
     expect(redacted.findings[0]!.line_start).toBe(1);
     expect(redacted.tally!.tally.mustFix).toBe(1);

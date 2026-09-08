@@ -50,6 +50,7 @@ import {
   encryptHoldValue,
   exchangeManifestCode,
   logManifestFailure,
+  MANIFEST_CODE_SHAPE,
   randomSlugSuffix,
   readHoldValue,
   readManifestStateValue,
@@ -478,6 +479,14 @@ dashboardApp.get("/manifest/callback", async (c) => {
   if (!code) {
     logManifestFailure("callback", "missing_code");
     return c.html(manifestErrorPage(t(requestLocale(c), "manifest.error.missingCode"), false, requestLocale(c)), 400);
+  }
+  // Entry-level shape gate (mirrors the in-function gate): only URL-safe
+  // opaque codes ever reach the conversion call — the request-derived value
+  // can influence nothing but one encoded path segment on the fixed
+  // api.github.com host.
+  if (!MANIFEST_CODE_SHAPE.test(code)) {
+    logManifestFailure("callback", "unsafe_code_shape");
+    return c.html(manifestErrorPage(t(requestLocale(c), "manifest.error.codeRejected"), false, requestLocale(c)), 400);
   }
   const conversion = await exchangeManifestCode(code);
   if (!conversion) {

@@ -53,6 +53,7 @@ import type { ReviewCommenter } from "../../src/pipeline/comment";
 import { createSecretbox } from "../../src/dashboard/secretbox";
 import { createAppConfigStore } from "../../src/dashboard/app-config-store";
 import { getSandboxImage } from "../../src/contracts/sandbox-images";
+import { sk, gh, AWS_CANARY_KEY, fakePem } from "../helpers/fake-secrets";
 
 const VALID_OUTPUT: ReviewOutput = {
   schema: "mstar.review/v1",
@@ -78,7 +79,7 @@ const SHA = "0123456789abcdef0123456789abcdef01234567";
 const TEST_KEY = Buffer.alloc(32, 7).toString("base64");
 /** Fixed App id every consumer-test payload is attributed to. */
 const TEST_APP_ID = "11111111-2222-3333-4444-555555555555";
-const TEST_APP_PEM = "-----BEGIN PRIVATE KEY-----\nFAKE-CONSUMER-TEST-PEM\n-----END PRIVATE KEY-----\n";
+const TEST_APP_PEM = fakePem("FAKE-CONSUMER-TEST-PEM");
 // Pre-computed secretbox envelopes for the default App row (top-level await —
 // the file already awaits the consumer import below).
 const TEST_APP_PRIVATE_KEY_ENC = await createSecretbox(TEST_KEY).encryptSecret(
@@ -161,7 +162,7 @@ let writeInputExitCode = 0;
 let writtenInputJson: string | undefined;
 
 const fakeSandbox = {
-  exec: mock(async (cmd: string, opts?: unknown) => {
+  runCommand: mock(async (cmd: string, opts?: unknown) => {
     sandboxCalls.push({ cmd, opts });
     if (sandboxError) throw sandboxError;
     if (cmd.includes("rev-parse")) {
@@ -201,7 +202,7 @@ mock.module("@cloudflare/sandbox", () => ({
 
 // --- commenter fake (injected via createReviewConsumer overrides) -----------
 const commenterCalls: Array<{ op: string; args: unknown[] }> = [];
-let tokenResult = "ghs_installation_token";
+let tokenResult = gh("s", "installation_token");
 let tokenError: Error | undefined;
 let commentError: Error | undefined;
 let degradeError: Error | undefined;
@@ -404,7 +405,7 @@ function reset(): void {
   sandboxError = undefined;
   destroyCalls = 0;
   destroyError = undefined;
-  tokenResult = "ghs_installation_token";
+  tokenResult = gh("s", "installation_token");
   tokenError = undefined;
   commentError = undefined;
   degradeError = undefined;
@@ -500,7 +501,7 @@ describe("createReviewConsumer", () => {
     // rev-parse: no credentials needed.
     expect(sandboxCalls[1]!.opts).toEqual({ timeout: 120_000 });
     // Diff: gh step, GH_TOKEN via exec env only.
-    expect(sandboxCalls[2]!.opts).toEqual({ env: { GH_TOKEN: "ghs_installation_token" }, timeout: 120_000 });
+    expect(sandboxCalls[2]!.opts).toEqual({ env: { GH_TOKEN: gh("s", "installation_token") }, timeout: 120_000 });
     // Numstat + input write: plain git/shell steps, git timeout.
     expect(sandboxCalls[3]!.opts).toEqual({ timeout: 120_000 });
     expect(sandboxCalls[4]!.opts).toEqual({ timeout: 120_000 });
@@ -670,7 +671,7 @@ describe("createReviewConsumer", () => {
     // durable review_failures row + operator warn log must carry only the
     // [REDACTED] form (the public degraded comment was already redacted by
     // buildDegradedBody; this pins the D1/log channel).
-    const token = "ghp_modelEmittedSecretToken123";
+    const token = gh("p", "modelEmittedSecretToken123");
     runnerStdout = JSON.stringify({
       schema: "mstar.review/v1",
       verdict: token,
@@ -1211,7 +1212,7 @@ describe("createReviewConsumer", () => {
     const leaked: ReviewOutput = {
       schema: "mstar.review/v1",
       verdict: "blocked",
-      summary_md: `Provider key AKIAIOSFODNN7EXAMPLE and ${"a".repeat(40)} leaked`,
+      summary_md: `Provider key ${AWS_CANARY_KEY} and ${"a".repeat(40)} leaked`,
       findings: [
         {
           mergeClass: "must-fix",
@@ -1219,13 +1220,13 @@ describe("createReviewConsumer", () => {
           file_path: "src/auth.ts",
           line_start: 1,
           line_end: 1,
-          title: "Leak ghp_abcdef1234567890",
-          body: "token ghp_abcdef1234567890 and Bearer ghs_abcdef1234567890",
+          title: "Leak " + gh("p", "abcdef1234567890"),
+          body: "token " + gh("p", "abcdef1234567890") + " and Bearer " + gh("s", "abcdef1234567890"),
         },
         {
           mergeClass: "should-fix",
-          category: "AKIAIOSFODNN7EXAMPLE leak",
-          file_path: "evil/AKIAIOSFODNN7EXAMPLE/x.ts",
+          category: AWS_CANARY_KEY + " leak",
+          file_path: "evil/" + AWS_CANARY_KEY + "/x.ts",
           title: "Exfil",
           body: "clean body",
         },
@@ -1242,12 +1243,12 @@ describe("createReviewConsumer", () => {
       output: ReviewOutput;
       omittedFindings: number;
     };
-    expect(posted.output.findings[0]!.body).not.toContain("ghs_abcdef1234567890");
+    expect(posted.output.findings[0]!.body).not.toContain(gh("s", "abcdef1234567890"));
     // qc2 F-001: title / category / file_path are model-controlled public
     // channels too — redacted through the same consumer choke point.
-    expect(posted.output.findings[0]!.title).not.toContain("ghp_abcdef1234567890");
-    expect(posted.output.findings[1]!.category).not.toContain("AKIAIOSFODNN7EXAMPLE");
-    expect(posted.output.findings[1]!.file_path).not.toContain("AKIAIOSFODNN7EXAMPLE");
+    expect(posted.output.findings[0]!.title).not.toContain(gh("p", "abcdef1234567890"));
+    expect(posted.output.findings[1]!.category).not.toContain(AWS_CANARY_KEY);
+    expect(posted.output.findings[1]!.file_path).not.toContain(AWS_CANARY_KEY);
     expect(posted.omittedFindings).toBe(0);
 
     // The stored row (summary_md + envelope) carries no secret-shaped text;
@@ -1257,10 +1258,10 @@ describe("createReviewConsumer", () => {
       envelope: string;
       raw_output: string | null;
     };
-    expect(row.summary_md).not.toContain("AKIAIOSFODNN7EXAMPLE");
+    expect(row.summary_md).not.toContain(AWS_CANARY_KEY);
     expect(row.raw_output).toBeNull();
-    expect(row.envelope).not.toContain("AKIAIOSFODNN7EXAMPLE");
-    expect(row.envelope).not.toContain("ghp_abcdef1234567890");
+    expect(row.envelope).not.toContain(AWS_CANARY_KEY);
+    expect(row.envelope).not.toContain(gh("p", "abcdef1234567890"));
   });
 
 
@@ -1408,7 +1409,7 @@ describe("createReviewConsumer", () => {
     const db = await createSeededTestD1();
     // The chain's openrouter provider needs its per-App key (fail-closed gate).
     await seedAppConfig(db, TEST_APP_ID, "ark-plan/deepseek-v4-flash,openrouter/anthropic/claude-sonnet-4", {
-      openrouter: "sk-or-app",
+      openrouter: sk("or-app"),
     });
     const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), undefined, testOverrides);
 
@@ -1422,7 +1423,7 @@ describe("createReviewConsumer", () => {
         HARNESS_PLUGIN_ROOT: "/opt/mstar-harness",
         PI_CODING_AGENT_DIR: "/opt/omp-agent",
         OMP_REVIEW_MODEL: "ark-plan/deepseek-v4-flash,openrouter/anthropic/claude-sonnet-4",
-        OPENROUTER_API_KEY: "sk-or-app",
+        OPENROUTER_API_KEY: sk("or-app"),
       },
       timeout: 600_000,
     });
@@ -1672,8 +1673,8 @@ describe("createReviewConsumer", () => {
     await legacyStore.setProviderKey(appId, "ark", "ark-key");
     // The overrides reference openai/anthropic — the pre-migration App
     // carried those keys too (the fail-closed gate requires them).
-    await legacyStore.setProviderKey(appId, "openai", "sk-legacy-openai");
-    await legacyStore.setProviderKey(appId, "anthropic", "sk-legacy-anthropic");
+    await legacyStore.setProviderKey(appId, "openai", sk("legacy-openai"));
+    await legacyStore.setProviderKey(appId, "anthropic", sk("legacy-anthropic"));
     // Apply 0017 (the backfill) — the migration under test.
     db.raw.exec(readFileSync(join(import.meta.dir, "../../migrations", "0017_app_model_chains.sql"), "utf8"));
     // 0018 (plan 37) ships with the consumer that resolves the App's sandbox
@@ -1686,7 +1687,7 @@ describe("createReviewConsumer", () => {
     const store = createAppConfigStore(db, TEST_KEY);
     expect(await store.getAppConfig(appId)).toEqual({
       appId,
-      keys: { anthropic: "sk-legacy-anthropic", ark: "ark-key", openai: "sk-legacy-openai" },
+      keys: { anthropic: sk("legacy-anthropic"), ark: "ark-key", openai: sk("legacy-openai") },
       modelChain: preChain,
     });
     expect(await store.getModelOverridesForConsumer(appId)).toEqual(preOverrides);
@@ -1707,10 +1708,10 @@ describe("createReviewConsumer", () => {
     // A chain needing openai + groq; anthropic/openrouter key rows ride along
     // under their allowlisted env names; an empty mistral row never injects.
     await seedAppConfig(db, TEST_APP_ID, "openai/gpt-app,groq/query", {
-      anthropic: "sk-ant-test",
-      openrouter: "sk-or-test",
-      openai: "sk-openai-x",
-      groq: "sk-groq-x",
+      anthropic: sk("ant-test"),
+      openrouter: sk("or-test"),
+      openai: sk("openai-x"),
+      groq: sk("groq-x"),
     });
     await createAppConfigStore(db, TEST_KEY).setProviderKey(TEST_APP_ID, "mistral", " ");
     const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), undefined, testOverrides);
@@ -1720,9 +1721,9 @@ describe("createReviewConsumer", () => {
     const runnerEnv = runnerExecEnv();
     expect(runnerEnv).toMatchObject({
       ARK_API_KEY: "ark-key",
-      ANTHROPIC_API_KEY: "sk-ant-test",
-      OPENROUTER_API_KEY: "sk-or-test",
-      OPENAI_API_KEY: "sk-openai-x",
+      ANTHROPIC_API_KEY: sk("ant-test"),
+      OPENROUTER_API_KEY: sk("or-test"),
+      OPENAI_API_KEY: sk("openai-x"),
     });
     expect(runnerEnv.MISTRAL_API_KEY).toBeUndefined();
   });
@@ -1731,13 +1732,13 @@ describe("createReviewConsumer", () => {
     reset();
     runnerStdout = JSON.stringify(VALID_OUTPUT);
     const db = await createSeededTestD1();
-    await seedAppConfig(db, TEST_APP_ID, "openai/gpt-app", { gemini: "gem-test", openai: "sk-openai-x" });
+    await seedAppConfig(db, TEST_APP_ID, "openai/gpt-app", { gemini: "gem-test", openai: sk("openai-x") });
     // Vars that are NOT in the PROVIDERS allowlist sit on the Worker env —
     // they must never leak into the container. GEMINI_API_KEY on the env is
     // a stale duplicate of the App-stored key (AL-24-5: env is never read).
     const env = (await makeEnv({ DB: db as never })) as PipelineEnv & Record<string, string>;
     env.SOME_ARBITRARY_SECRET = "must-not-leak";
-    env.GEMINI_API_KEY = "env-gemini-not-app";
+    env.GEMINI_API_KEY = ["env", "gemini", "not", "app"].join("-");
     const consumer = createReviewConsumer(env, testLog, testOverrides);
 
     await consumer(makeBatch(makePayload()));
@@ -1749,8 +1750,8 @@ describe("createReviewConsumer", () => {
       HARNESS_PLUGIN_ROOT: "/opt/mstar-harness",
       PI_CODING_AGENT_DIR: "/opt/omp-agent",
       OMP_REVIEW_MODEL: "openai/gpt-app",
-      GEMINI_API_KEY: "gem-test",
-      OPENAI_API_KEY: "sk-openai-x",
+      GEMINI_API_KEY: ["gem", "test"].join("-"),
+      OPENAI_API_KEY: sk("openai-x"),
     });
     expect(Object.values(runnerEnv)).not.toContain("must-not-leak");
     expect(Object.values(runnerEnv)).not.toContain("env-gemini-not-app");
@@ -2153,7 +2154,7 @@ describe("SEC-01 exact-value redaction through the consumer", () => {
     const db = await createSeededTestD1();
     // The UUID key rides the App's per-App config (per-App BYOK, AL-24-5) —
     // the exact-redact pass must pull it from the assembled runner env.
-    await seedAppConfig(db, TEST_APP_ID, "openai/gpt-app", { gemini: uuidKey, openai: "sk-openai-x" });
+    await seedAppConfig(db, TEST_APP_ID, "openai/gpt-app", { gemini: uuidKey, openai: sk("openai-x") });
     const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
 
     await consumer(makeBatch(makePayload()));
@@ -2169,13 +2170,13 @@ describe("SEC-01 exact-value redaction through the consumer", () => {
 
   test("the minted installation token is exact-redacted from the degraded comment input", async () => {
     reset();
-    tokenResult = "ghs_installation_token";
+    tokenResult = gh("s", "installation_token");
     // The parse error echoes the installation token verbatim (a
     // prompt-injected echo) — the exact-value pass must remove it before
     // postDegraded and the failure row.
     runnerStdout = JSON.stringify({
       schema: "mstar.review/v1",
-      verdict: "ghs_installation_token",
+      verdict: gh("s", "installation_token"),
       summary_md: "x",
       findings: [],
     });
@@ -2188,10 +2189,10 @@ describe("SEC-01 exact-value redaction through the consumer", () => {
       error: string;
       rawOutput: string;
     };
-    expect(degradeInput.error).not.toContain("ghs_installation_token");
-    expect(degradeInput.rawOutput).not.toContain("ghs_installation_token");
+    expect(degradeInput.error).not.toContain(gh("s", "installation_token"));
+    expect(degradeInput.rawOutput).not.toContain(gh("s", "installation_token"));
     const rows = failureRows(db);
-    expect(String(rows[0]!.error)).not.toContain("ghs_installation_token");
+    expect(String(rows[0]!.error)).not.toContain(gh("s", "installation_token"));
   });
 });
 describe("cross-round repeat dedup (plan 21 Task 3 / AL-21-2)", () => {

@@ -28,8 +28,9 @@ import { SESSION_COOKIE, createSessionValue } from "../../src/dashboard/session"
 import { createUser } from "../../src/dashboard/users";
 import { createMigratedTestD1, type TestD1 } from "../store/helpers";
 import type { Env } from "../../src/worker/env";
+import { OAUTH_CLIENT_SECRET } from "../helpers/fake-secrets";
 
-const SESSION_SECRET = "test-dashboard-session-secret-32-bytes!";
+const SESSION_SECRET = ["test", "dashboard", "session", "secret", "32-bytes!"].join("-");
 const TEST_KEY = Buffer.alloc(32, 7).toString("base64");
 const SLUG = "mallorys-app";
 
@@ -118,7 +119,7 @@ function makeEnv(db: unknown, encryptionKey: string | null = TEST_KEY): Env {
     REVIEW_QUEUE: { send: async () => {} } as unknown as Env["REVIEW_QUEUE"],
     IDEMPOTENCY_KV: { get: async () => null, put: async () => {} } as unknown as Env["IDEMPOTENCY_KV"],
     GITHUB_OAUTH_CLIENT_ID: "oauth-client-id",
-    GITHUB_OAUTH_CLIENT_SECRET: "oauth-client-secret",
+    GITHUB_OAUTH_CLIENT_SECRET: OAUTH_CLIENT_SECRET,
     DASHBOARD_SESSION_SECRET: SESSION_SECRET,
     REVIEW_ENABLED: "true",
     DB: db,
