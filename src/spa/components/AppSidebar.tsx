@@ -30,28 +30,36 @@ function Logo() {
   );
 }
 
+/**
+ * Plan 58 T1 (A1, DESIGN.md Sidebar): the active row keeps the neutral
+ * sidebar-accent fill and gains a brand accent edge through the sanctioned
+ * --sidebar-primary bridge (shadcn-theme.css maps it to var(--brand-700));
+ * the fill itself stays neutral.
+ */
+const ACTIVE_BRAND_EDGE = "data-[active=true]:shadow-[inset_2px_0_0_0_var(--sidebar-primary)]";
+
 export function AppSidebar({ model }: { model: SidebarModel }) {
   return (
     <Sidebar collapsible="none" aria-label={model.navLabel}>
-      <SidebarHeader className="border-b border-sidebar-border">
+      <SidebarHeader className="border-b border-sidebar-border p-3">
         <a
-          className="flex items-center gap-2 px-2 py-1 text-sidebar-foreground no-underline outline-none focus-visible:ring-2 focus-visible:ring-sidebar-ring rounded-md"
+          className="flex items-center gap-2 rounded-sm px-2 py-1 text-sidebar-foreground no-underline outline-none transition-[color,background-color] duration-(--duration-base) ease-(--ease-in-out) hover:bg-sidebar-accent focus-visible:ring-2 focus-visible:ring-sidebar-ring"
           href="/dashboard"
           onClick={(event) => spaClick("/dashboard", event)}
         >
           <Logo />
-          <span className="truncate font-semibold text-sm">{model.brand}</span>
+          <span className="truncate text-sm font-semibold tracking-tight">{model.brand}</span>
         </a>
       </SidebarHeader>
       <SidebarContent>
-        <SidebarGroup>
+        <SidebarGroup className="p-3">
           <SidebarGroupContent>
             <SidebarMenu>
               {model.items.map((item) => {
                 const Icon = NAV_ICONS[item.href as keyof typeof NAV_ICONS];
                 return (
                   <SidebarMenuItem key={item.href}>
-                    <SidebarMenuButton asChild isActive={item.current} tooltip={item.label}>
+                    <SidebarMenuButton asChild isActive={item.current} tooltip={item.label} className={ACTIVE_BRAND_EDGE}>
                       <a
                         href={item.href}
                         aria-current={item.current ? "page" : undefined}

@@ -62,7 +62,10 @@ function DashboardChrome({ boot, pathname, children }: LayoutProps) {
     <SidebarProvider defaultOpen>
       <AppSidebar model={sidebar} />
       <SidebarInset>
-        <header className="flex h-14 shrink-0 items-center justify-end gap-2 border-b border-border bg-background px-4">
+        {/* v0.3 (DESIGN.md): navbar sits on background-200, one step above the
+            page canvas, matching the sidebar chrome layer. Control states
+            (hover/active/focus-visible) come from the restyled ghost Button. */}
+        <header className="flex h-14 shrink-0 items-center justify-end gap-2 border-b border-border bg-(--background-200) px-4">
           <Button type="button" variant="ghost" size="sm" onClick={toggleTheme} aria-label={t(boot.locale, "nav.themeToggleAria", { mode: t(boot.locale, theme === "dark" ? "nav.themeDark" : "nav.themeLight"), target: t(boot.locale, theme === "dark" ? "nav.themeLight" : "nav.themeDark") })}>
             {/* Icon-only (plan 44): the icon depicts the CURRENT mode; the aria-label carries the action. */}
             {theme === "dark" ? <Moon aria-hidden="true" /> : <Sun aria-hidden="true" />}
@@ -74,7 +77,7 @@ function DashboardChrome({ boot, pathname, children }: LayoutProps) {
             </Button>
           </form>
           {navbar.accountLabel ? (
-            <span className="hidden text-sm text-muted-foreground sm:inline">{navbar.accountLabel}</span>
+            <span className="hidden max-w-48 truncate text-sm text-muted-foreground sm:inline">{navbar.accountLabel}</span>
           ) : null}
           {boot.login ? (
             <Button asChild variant="ghost" size="sm">
