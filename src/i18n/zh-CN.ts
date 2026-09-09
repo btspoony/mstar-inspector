@@ -58,6 +58,7 @@ export const zhCN: Dictionary = {
     loadFailed: "无法加载此页面。",
     saveFailed: "无法保存更改。",
     cancel: "取消",
+    retry: "重试",
   },
   login: {
     heading: "登录 Morning Star Inspector",

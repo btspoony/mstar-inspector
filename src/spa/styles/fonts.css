@@ -1,0 +1,63 @@
+/*
+ * Self-hosted brand typeface (plan 57 T2, AD-572): Geist Sans, SIL OFL 1.1 —
+ * license vendored alongside the binaries as ../assets/fonts/OFL.txt.
+ * Source: geist@1.7.2 npm package (vercel/geist-font release binaries).
+ * The three woff2 files are the UNMODIFIED upstream full-latin binaries —
+ * full builds, not subsets (QC round 1 F-005 corrected the earlier
+ * "latin/latin-ext subset" description) — renamed only to carry their weight.
+ * Provenance sha256 (byte-identical to
+ * the registry tarball members; re-verify with `shasum -a 256`):
+ *   geist-sans-latin-400.woff2  d8bce822db092746889bcf3f57350b41f53708b025458fe7af30729ec4ce0df2
+ *   geist-sans-latin-500.woff2  b0a0867cda44efef4529a4b13ce37fd9fd6e1597708615287542a51bc7452ab4
+ *   geist-sans-latin-600.woff2  b1e6a1dd2122485d0a1f3a8d30a45443aa9453224f83018bec35f8266bc77915
+ * Weights 400/500/600 — exactly the three weights the v0.3 type scale
+ * declares (copy 400, label/button 500, heading 600; no Bold consumer, and
+ * 400+500+600 totals 138,212 bytes, inside the 150KB budget).
+ *
+ * font-display: swap keeps first paint on the system stack (no invisible
+ * text). The declared unicode-range excludes CJK codepoints, so zh text
+ * never selects this face and never triggers a download — zh text falls back
+ * to the system entries of --font-sans (AD-572: do not bundle CJK).
+ * The face ships native tabular figures (tnum), consumed by the existing
+ * `tabular-nums` utility (MembersPage/AppsPage precedents).
+ *
+ * Imported by src/spa/main.tsx alongside tokens.css/shadcn-theme.css. The
+ * order carries no resolution semantics — @font-face registration is
+ * document-wide and vite emits one stylesheet regardless — so the earlier
+ * "before tokens.css so --font-sans resolves" causality claim was wrong
+ * (QC round 1 F-005); fonts.css stays first only to keep @font-face at the
+ * top of the emitted CSS.
+ */
+
+@font-face {
+  font-family: "Geist Sans";
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url("../assets/fonts/geist-sans-latin-400.woff2") format("woff2");
+  unicode-range: U+0000-00FF, U+0100-024F, U+02BC, U+02C6, U+02DA, U+02DC,
+    U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193,
+    U+2212, U+2215, U+FEFF, U+FFFD;
+}
+
+@font-face {
+  font-family: "Geist Sans";
+  font-style: normal;
+  font-weight: 500;
+  font-display: swap;
+  src: url("../assets/fonts/geist-sans-latin-500.woff2") format("woff2");
+  unicode-range: U+0000-00FF, U+0100-024F, U+02BC, U+02C6, U+02DA, U+02DC,
+    U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193,
+    U+2212, U+2215, U+FEFF, U+FFFD;
+}
+
+@font-face {
+  font-family: "Geist Sans";
+  font-style: normal;
+  font-weight: 600;
+  font-display: swap;
+  src: url("../assets/fonts/geist-sans-latin-600.woff2") format("woff2");
+  unicode-range: U+0000-00FF, U+0100-024F, U+02BC, U+02C6, U+02DA, U+02DC,
+    U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193,
+    U+2212, U+2215, U+FEFF, U+FFFD;
+}

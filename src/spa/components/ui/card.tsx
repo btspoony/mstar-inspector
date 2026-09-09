@@ -1,3 +1,4 @@
+// Locally revised shadcn/ui copy-in (plan 57 T3 v0.3 restyle; 018 copy-in supersede — do not regen over).
 import * as React from "react"
 
 import { cn } from "@/lib/utils"
@@ -6,8 +7,11 @@ function Card({ className, ...props }: React.ComponentProps<"div">) {
   return (
     <div
       data-slot="card"
+      // rounded-xl resolves to the container tier via the bridge remap
+      // (--radius-lg/xl onto var(--rounded-md)); elevation is the tinted
+      // --shadow-card token.
       className={cn(
-        "flex flex-col gap-6 rounded-xl border bg-card py-6 text-card-foreground shadow-sm",
+        "flex flex-col gap-6 rounded-xl border bg-card py-6 text-card-foreground shadow-(--shadow-card)",
         className
       )}
       {...props}

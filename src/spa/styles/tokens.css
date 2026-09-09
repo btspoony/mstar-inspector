@@ -1,5 +1,6 @@
 /*
- * DESIGN.md L2 token layer (plan 29 Task 1; cascade restructured plan 41 T1).
+ * DESIGN.md token layer (plan 29 Task 1; cascade restructured plan 41 T1;
+ * v0.3 value rebase plan 57 T1 — AD-573 value-swap under frozen names).
  *
  * Contract:
  *   - :root = themes.dark (console default)
@@ -12,27 +13,34 @@
  *   - CSS variable names match DESIGN.md color token names so existing
  *     --background-100 / --gray-1000 / --blue-700 (views.ts STYLE) stay valid
  *     for pages that later import this file.
+ *   - v0.3 additive namespaces (AD-573): --brand-* (Signal Cyan accent),
+ *     --shadow-card / --shadow-pop (cool tinted elevation, theme-dependent),
+ *     --duration-* / --ease-* (motion, theme-independent; the reduce media
+ *     query at the end of this file folds durations to 1ms).
  *
  * Task 3+ SPA layout consumes this module. Do not build components here.
+ * Three value sites stay in lockstep (machine-pinned in
+ * tests/spa/tokens.test.ts): DESIGN.md frontmatter, this file, and the
+ * src/dashboard/views.ts STYLE subset.
  */
 
 :root {
   color-scheme: dark;
 
   /* colors — themes.dark (SSOT: DESIGN.md colors: / themes.dark.colors) */
-  --background-100: #09090b;
-  --background-200: #18181b;
-  --background-300: #27272a;
-  --gray-100: #18181b;
-  --gray-200: #1f1f23;
-  --gray-300: #27272a;
-  --gray-400: #3f3f46;
-  --gray-500: #52525b;
-  --gray-600: #71717a;
-  --gray-700: #8b8b94;
-  --gray-800: #d4d4d8;
-  --gray-900: #b0b0b8;
-  --gray-1000: #f4f4f5;
+  --background-100: #0a0c10;
+  --background-200: #15181f;
+  --background-300: #212630;
+  --gray-100: #15181f;
+  --gray-200: #1b1f27;
+  --gray-300: #212630;
+  --gray-400: #39404d;
+  --gray-500: #4d5563;
+  --gray-600: #6b7482;
+  --gray-700: #8b95a3;
+  --gray-800: #ccd5e1;
+  --gray-900: #a9b4c2;
+  --gray-1000: #eef2f7;
   --gray-alpha-100: #ffffff12;
   --gray-alpha-200: #ffffff17;
   --gray-alpha-300: #ffffff21;
@@ -43,6 +51,13 @@
   --gray-alpha-800: #ffffffa3;
   --gray-alpha-900: #ffffffc4;
   --gray-alpha-1000: #ffffffe8;
+
+  /* brand — Signal Cyan accent (v0.3, AD-571; dark wears the bright step).
+     Never encodes alert semantics (red/amber/green stay authoritative). */
+  --brand-600: #06b6d4;
+  --brand-700: #22d3ee;
+  --brand-800: #67e8f9;
+
   --blue-100: #0c1a2e;
   --blue-200: #0f2744;
   --blue-300: #163a5f;
@@ -114,8 +129,10 @@
   --pink-900: #fbcfe8;
   --pink-1000: #fce7f3;
 
-  /* typography primitives */
-  --font-sans: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+  /* typography primitives — sans is self-hosted Geist Sans (plan 57 T2,
+     AD-572; @font-face in styles/fonts.css, latin woff2 + swap). zh and any
+     uncovered glyphs fall back to the system stack. */
+  --font-sans: "Geist Sans", ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
   --font-mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
 
   --typo-heading-32-family: var(--font-sans);
@@ -196,11 +213,28 @@
   --spacing-16: 64px;
   --spacing-24: 96px;
 
-  /* rounded */
-  --rounded-sm: 6px;
+  /* rounded — two-tier system (AD-574): sm = control tier, md = container
+     tier (always +4px above control); full stays pill-only. lg (16px) is
+     legacy: kept declared for name continuity (AD-573) but no longer a
+     consumed tier — the shadcn bridge maps Tailwind lg/xl onto the md
+     container step (plan 57 T3; closes T1-review Minor 1). */
+  --rounded-sm: 8px;
   --rounded-md: 12px;
   --rounded-lg: 16px;
   --rounded-full: 9999px;
+
+  /* motion (v0.3, theme-independent) — every duration/easing consumer folds
+     under prefers-reduced-motion via the media block at the end of this file */
+  --duration-fast: 120ms;
+  --duration-base: 160ms;
+  --duration-slow: 240ms;
+  --ease-out: cubic-bezier(0.22, 1, 0.36, 1);
+  --ease-in-out: cubic-bezier(0.65, 0, 0.35, 1);
+
+  /* elevation (v0.3) — cool tinted shadows, never pure black; dark stays
+     whisper-quiet because surface steps + hairlines carry definition */
+  --shadow-card: 0 1px 2px #02061766, 0 2px 8px #02061733;
+  --shadow-pop: 0 4px 12px #02061780, 0 16px 40px #02061759;
 
   /* breakpoints (min-width) — documented in DESIGN.md; not applied here */
   --breakpoint-sm: 640px;
@@ -208,8 +242,10 @@
   --breakpoint-lg: 900px;
   --breakpoint-xl: 1280px;
 
-  /* components — reference color vars so they follow the active theme */
-  --button-primary-bg: var(--blue-700);
+  /* components — reference color vars so they follow the active theme.
+     button-primary carries the Signal Cyan brand (plan 57 T3 closes the
+     staged-delivery seam; DESIGN.md button-primary declares brand-700). */
+  --button-primary-bg: var(--brand-700);
   --button-primary-fg: var(--background-100);
   --button-primary-height: 40px;
   --button-primary-padding: 0 12px;
@@ -295,30 +331,39 @@
 :root[data-theme="light"] {
   color-scheme: light;
 
-  /* colors — themes.light (keeps L1 hex values for background-100/200, gray-900/1000, blue-700, red-700, amber-700) */
+  /* colors — themes.light (v0.3 retune: cool gray/background cast; blue-700/red-700/amber-700 values kept) */
   --background-100: #ffffff;
-  --background-200: #f4f4f5;
-  --background-300: #e4e4e7;
-  --gray-100: #fafafa;
-  --gray-200: #f4f4f5;
-  --gray-300: #e4e4e7;
-  --gray-400: #d4d4d8;
-  --gray-500: #a1a1aa;
-  --gray-600: #71717a;
-  --gray-700: #52525b;
-  --gray-800: #3f3f46;
-  --gray-900: #3d3d3d;
-  --gray-1000: #111111;
-  --gray-alpha-100: #0000000d;
-  --gray-alpha-200: #00000014;
-  --gray-alpha-300: #0000001a;
-  --gray-alpha-400: #00000024;
-  --gray-alpha-500: #00000036;
-  --gray-alpha-600: #00000052;
-  --gray-alpha-700: #00000073;
-  --gray-alpha-800: #0000008f;
-  --gray-alpha-900: #000000b8;
-  --gray-alpha-1000: #000000e6;
+  --background-200: #f3f5f8;
+  --background-300: #e4e9f0;
+  --gray-100: #fafbfd;
+  --gray-200: #f3f5f8;
+  --gray-300: #e4e9f0;
+  --gray-400: #ccd4df;
+  --gray-500: #9aa5b4;
+  --gray-600: #6d7889;
+  --gray-700: #4e5969;
+  --gray-800: #3a4350;
+  --gray-900: #2f3742;
+  --gray-1000: #0f141a;
+  --gray-alpha-100: #1019280d;
+  --gray-alpha-200: #10192814;
+  --gray-alpha-300: #1019281a;
+  --gray-alpha-400: #10192824;
+  --gray-alpha-500: #10192836;
+  --gray-alpha-600: #10192852;
+  --gray-alpha-700: #10192873;
+  --gray-alpha-800: #1019288f;
+  --gray-alpha-900: #101928b8;
+  --gray-alpha-1000: #101928e6;
+
+  /* brand — Signal Cyan accent (light wears the deep step) */
+  --brand-600: #0891b2;
+  --brand-700: #0e7490;
+  --brand-800: #155e75;
+
+  /* elevation — light shadows tint with the cool #101928 base */
+  --shadow-card: 0 1px 2px #10192814, 0 2px 8px #1019280f;
+  --shadow-pop: 0 4px 12px #1019281f, 0 16px 40px #10192829;
   --blue-100: #eff6ff;
   --blue-200: #dbeafe;
   --blue-300: #bfdbfe;
@@ -396,30 +441,39 @@
   :root:not([data-theme="dark"]) {
     color-scheme: light;
 
-    /* colors — themes.light (keeps L1 hex values for background-100/200, gray-900/1000, blue-700, red-700, amber-700) */
+    /* colors — themes.light (v0.3 retune: cool gray/background cast; blue-700/red-700/amber-700 values kept) */
     --background-100: #ffffff;
-    --background-200: #f4f4f5;
-    --background-300: #e4e4e7;
-    --gray-100: #fafafa;
-    --gray-200: #f4f4f5;
-    --gray-300: #e4e4e7;
-    --gray-400: #d4d4d8;
-    --gray-500: #a1a1aa;
-    --gray-600: #71717a;
-    --gray-700: #52525b;
-    --gray-800: #3f3f46;
-    --gray-900: #3d3d3d;
-    --gray-1000: #111111;
-    --gray-alpha-100: #0000000d;
-    --gray-alpha-200: #00000014;
-    --gray-alpha-300: #0000001a;
-    --gray-alpha-400: #00000024;
-    --gray-alpha-500: #00000036;
-    --gray-alpha-600: #00000052;
-    --gray-alpha-700: #00000073;
-    --gray-alpha-800: #0000008f;
-    --gray-alpha-900: #000000b8;
-    --gray-alpha-1000: #000000e6;
+    --background-200: #f3f5f8;
+    --background-300: #e4e9f0;
+    --gray-100: #fafbfd;
+    --gray-200: #f3f5f8;
+    --gray-300: #e4e9f0;
+    --gray-400: #ccd4df;
+    --gray-500: #9aa5b4;
+    --gray-600: #6d7889;
+    --gray-700: #4e5969;
+    --gray-800: #3a4350;
+    --gray-900: #2f3742;
+    --gray-1000: #0f141a;
+    --gray-alpha-100: #1019280d;
+    --gray-alpha-200: #10192814;
+    --gray-alpha-300: #1019281a;
+    --gray-alpha-400: #10192824;
+    --gray-alpha-500: #10192836;
+    --gray-alpha-600: #10192852;
+    --gray-alpha-700: #10192873;
+    --gray-alpha-800: #1019288f;
+    --gray-alpha-900: #101928b8;
+    --gray-alpha-1000: #101928e6;
+
+    /* brand — Signal Cyan accent (light wears the deep step) */
+    --brand-600: #0891b2;
+    --brand-700: #0e7490;
+    --brand-800: #155e75;
+
+    /* elevation — light shadows tint with the cool #101928 base */
+    --shadow-card: 0 1px 2px #10192814, 0 2px 8px #1019280f;
+    --shadow-pop: 0 4px 12px #1019281f, 0 16px 40px #10192829;
     --blue-100: #eff6ff;
     --blue-200: #dbeafe;
     --blue-300: #bfdbfe;
@@ -490,5 +544,18 @@
     --pink-800: #be185d;
     --pink-900: #9d174d;
     --pink-1000: #500724;
+  }
+}
+
+/* Reduced-motion fold (DESIGN.md motion.reduced-motion): every duration
+   consumer — transitions included — collapses to effectively instant, so
+   entrances render their end state and interactive transitions become
+   immediate. Component-level keyframes must additionally guard any
+   non-token property with the same media query. */
+@media (prefers-reduced-motion: reduce) {
+  :root {
+    --duration-fast: 1ms;
+    --duration-base: 1ms;
+    --duration-slow: 1ms;
   }
 }

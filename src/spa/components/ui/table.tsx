@@ -1,3 +1,4 @@
+// Locally revised shadcn/ui copy-in (plan 57 T3 v0.3 restyle; 018 copy-in supersede — do not regen over).
 import * as React from "react"
 
 import { cn } from "@/lib/utils"
@@ -55,7 +56,9 @@ function TableRow({ className, ...props }: React.ComponentProps<"tr">) {
     <tr
       data-slot="table-row"
       className={cn(
-        "border-b transition-colors hover:bg-muted/50 has-aria-expanded:bg-muted/50 data-[state=selected]:bg-muted",
+        // Row hover is the full muted token (DESIGN.md Table: row hover
+        // gray-100), token-eased per the v0.3 motion discipline.
+        "border-b transition-colors duration-(--duration-base) ease-(--ease-in-out) hover:bg-muted has-aria-expanded:bg-muted/50 data-[state=selected]:bg-muted",
         className
       )}
       {...props}

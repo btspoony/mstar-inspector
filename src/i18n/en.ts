@@ -70,6 +70,7 @@ export const en = {
     loadFailed: "Could not load this page.",
     saveFailed: "Could not save your changes.",
     cancel: "Cancel",
+    retry: "Retry",
   },
   login: {
     heading: "Sign in to Morning Star Inspector",
