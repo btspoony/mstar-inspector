@@ -29,14 +29,14 @@ const STYLE = `<style>
    both together. */
 :root {
   color-scheme: dark;
-  --background-100: #09090b;
-  --background-200: #18181b;
-  --background-300: #27272a;
-  --gray-100: #18181b;
-  --gray-400: #3f3f46;
-  --gray-700: #8b8b94;
-  --gray-900: #b0b0b8;
-  --gray-1000: #f4f4f5;
+  --background-100: #0a0c10;
+  --background-200: #15181f;
+  --background-300: #212630;
+  --gray-100: #15181f;
+  --gray-400: #39404d;
+  --gray-700: #8b95a3;
+  --gray-900: #a9b4c2;
+  --gray-1000: #eef2f7;
   --gray-alpha-400: #ffffff2e;
   --blue-700: #4ea1ff;
   --red-100: #2a1215;
@@ -74,7 +74,7 @@ const STYLE = `<style>
   --spacing-4: 16px;
   --spacing-6: 24px;
   --spacing-8: 32px;
-  --rounded-sm: 6px;
+  --rounded-sm: 8px;
   --rounded-md: 12px;
   --button-primary-bg: var(--blue-700);
   --button-primary-fg: var(--background-100);
@@ -111,14 +111,14 @@ const STYLE = `<style>
   :root:not([data-theme="dark"]) {
     color-scheme: light;
     --background-100: #ffffff;
-    --background-200: #f4f4f5;
-    --background-300: #e4e4e7;
-    --gray-100: #fafafa;
-    --gray-400: #d4d4d8;
-    --gray-700: #52525b;
-    --gray-900: #3d3d3d;
-    --gray-1000: #111111;
-    --gray-alpha-400: #00000024;
+    --background-200: #f3f5f8;
+    --background-300: #e4e9f0;
+    --gray-100: #fafbfd;
+    --gray-400: #ccd4df;
+    --gray-700: #4e5969;
+    --gray-900: #2f3742;
+    --gray-1000: #0f141a;
+    --gray-alpha-400: #10192824;
     --blue-700: #0066cc;
     --red-100: #fef2f2;
     --red-400: #fca5a5;
@@ -137,14 +137,14 @@ const STYLE = `<style>
 :root[data-theme="light"] {
   color-scheme: light;
   --background-100: #ffffff;
-  --background-200: #f4f4f5;
-  --background-300: #e4e4e7;
-  --gray-100: #fafafa;
-  --gray-400: #d4d4d8;
-  --gray-700: #52525b;
-  --gray-900: #3d3d3d;
-  --gray-1000: #111111;
-  --gray-alpha-400: #00000024;
+  --background-200: #f3f5f8;
+  --background-300: #e4e9f0;
+  --gray-100: #fafbfd;
+  --gray-400: #ccd4df;
+  --gray-700: #4e5969;
+  --gray-900: #2f3742;
+  --gray-1000: #0f141a;
+  --gray-alpha-400: #10192824;
   --blue-700: #0066cc;
   --red-100: #fef2f2;
   --red-400: #fca5a5;

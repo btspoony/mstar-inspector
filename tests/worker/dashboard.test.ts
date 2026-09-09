@@ -2120,18 +2120,18 @@ describe("SSR views honor the stored theme (plan 45 T8, F-13)", () => {
     throw new Error(`unbalanced block: ${openToken}`);
   }
 
-  test("STYLE carries a stored-light branch with the recorded light hexes (unchanged, no token migration)", () => {
+  test("STYLE carries a stored-light branch with the v0.3 recorded light hexes (values-only rebase, names frozen)", () => {
     const light = blockAfter(readViews(), ':root[data-theme="light"] {');
     expect(light).toContain("color-scheme: light");
     for (const hex of [
       "--background-100: #ffffff",
-      "--background-200: #f4f4f5",
-      "--gray-100: #fafafa",
-      "--gray-400: #d4d4d8",
-      "--gray-700: #52525b",
-      "--gray-900: #3d3d3d",
-      "--gray-1000: #111111",
-      "--gray-alpha-400: #00000024",
+      "--background-200: #f3f5f8",
+      "--gray-100: #fafbfd",
+      "--gray-400: #ccd4df",
+      "--gray-700: #4e5969",
+      "--gray-900: #2f3742",
+      "--gray-1000: #0f141a",
+      "--gray-alpha-400: #10192824",
       "--blue-700: #0066cc",
       "--red-700: #b91c1c",
       "--amber-700: #b45309",
@@ -2154,7 +2154,7 @@ describe("SSR views honor the stored theme (plan 45 T8, F-13)", () => {
     expect(dark.trim()).toBe("");
     const root = blockAfter(readViews(), ":root {");
     expect(root).toContain("color-scheme: dark");
-    expect(root).toContain("--background-100: #09090b");
+    expect(root).toContain("--background-100: #0a0c10");
   });
 
   test("every SSR face inlines the pre-paint theme bootstrap before STYLE", () => {
