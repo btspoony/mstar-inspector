@@ -98,7 +98,9 @@ export const en = {
   apps: {
     heading: "Apps",
     create: "Create GitHub App",
-    empty: "No Apps yet — Create GitHub App connects your first one.",
+    /** Plan 58 A6: composed empty state (EmptyState title + description). */
+    emptyTitle: "No Apps yet",
+    emptyDescription: "Create GitHub App connects your first one.",
     settings: "Settings",
     appId: "App id {id}",
     by: "by {login}",
@@ -155,7 +157,9 @@ export const en = {
     adminOnly: "This page is restricted to dashboard admins.",
     roleAdmin: "admin",
     roleMember: "member",
-    empty: "No members yet.",
+    /** Plan 58 A6: composed empty state — no-action variant (the invite form is the path). */
+    emptyTitle: "No members yet",
+    emptyDescription: "Invite the first member with the form above.",
   },
   insights: {
     heading: "Review health",

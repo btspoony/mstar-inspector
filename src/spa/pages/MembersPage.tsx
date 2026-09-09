@@ -23,9 +23,17 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { fetchJson, postForm } from "../api";
 import type { SpaBoot } from "../boot";
+import { EmptyState } from "../components/state/EmptyState";
+import { ErrorState } from "../components/state/ErrorState";
+import { PageSkeleton } from "../components/state/PageSkeleton";
 import { formatRelativeTime } from "../relative-time";
 import { canViewMembers, inviteLoginNoticeKey, parseMembers, type MemberRow, type Role } from "./data";
-import { LoadFailedNotice, LoadingNotice, PageNotice, type NoticeKind } from "./PageNotice";
+import { PageNotice, type NoticeKind } from "./PageNotice";
+
+/** DESIGN.md Table: header band on background-200, headers at label-12
+    (12px; the primitive's font-medium supplies the 500 weight). */
+const TABLE_HEADER = "bg-(--background-200)";
+const TABLE_HEAD_LABEL = "text-xs tracking-(--typo-label-12-tracking)";
 
 /** Row action awaiting admin confirmation in the shared dialog. */
 type PendingAction = { kind: "role"; member: MemberRow; nextRole: Role } | { kind: "remove"; member: MemberRow };
@@ -138,16 +146,24 @@ export function MembersPage({ boot }: { boot: SpaBoot }) {
 
   const adminCount = members?.filter((m) => m.role === "admin").length ?? 0;
 
+  // Loading rides the plan-57 skeleton as the page's full loading face —
+  // the component's heading placeholder stands in for the real h1 (AD-582).
+  // Non-admins never load, so they keep the adminOnly notice face below.
+  if (allowed && state === "loading") {
+    return <PageSkeleton locale={locale} kind="table" />;
+  }
+
   return (
     <div className="flex flex-col gap-6">
       <div className="flex flex-col gap-1.5">
-        <h1 className="text-2xl font-semibold tracking-tight">{t(locale, "members.heading")}</h1>
+        <h1 className="font-semibold text-(length:--typo-heading-24-size) leading-(--typo-heading-24-line) tracking-(--typo-heading-24-tracking)">
+          {t(locale, "members.heading")}
+        </h1>
         <p className="text-sm text-muted-foreground">{t(locale, "members.inviteOnlyNotice")}</p>
       </div>
       {!allowed ? <PageNotice kind="error" message={t(locale, "members.adminOnly")} /> : null}
       {notice ? <PageNotice kind={notice.kind} message={notice.message} /> : null}
-      {allowed && state === "loading" ? <LoadingNotice locale={locale} /> : null}
-      {allowed && state === "error" ? <LoadFailedNotice locale={locale} /> : null}
+      {allowed && state === "error" ? <ErrorState locale={locale} onRetry={() => void load()} /> : null}
       {allowed && state === "ok" && members ? (
         <>
           <form className="flex flex-wrap items-end gap-2" onSubmit={(event) => void onInvite(event)}>
@@ -182,25 +198,26 @@ export function MembersPage({ boot }: { boot: SpaBoot }) {
               {t(locale, "members.inviteButton")}
             </Button>
           </form>
-          <div className="rounded-md border">
-            <Table>
-              <TableHeader>
-                <TableRow>
-                  <TableHead>{t(locale, "members.tableLogin")}</TableHead>
-                  <TableHead>{t(locale, "members.roleLabel")}</TableHead>
-                  <TableHead>{t(locale, "members.tableJoined")}</TableHead>
-                  <TableHead className="text-right">{t(locale, "members.tableActions")}</TableHead>
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                {members.length === 0 ? (
-                  <TableRow>
-                    <TableCell className="py-6 text-center text-muted-foreground" colSpan={4}>
-                      {t(locale, "members.empty")}
-                    </TableCell>
+          {members.length === 0 ? (
+            // Composed empty state (no-action variant): the invite form
+            // above is the path, so the guidance only points at it.
+            <EmptyState
+              title={t(locale, "members.emptyTitle")}
+              description={t(locale, "members.emptyDescription")}
+            />
+          ) : (
+            <div className="overflow-hidden rounded-md border">
+              <Table>
+                <TableHeader className={TABLE_HEADER}>
+                  <TableRow className="hover:bg-inherit">
+                    <TableHead className={TABLE_HEAD_LABEL}>{t(locale, "members.tableLogin")}</TableHead>
+                    <TableHead className={TABLE_HEAD_LABEL}>{t(locale, "members.roleLabel")}</TableHead>
+                    <TableHead className={TABLE_HEAD_LABEL}>{t(locale, "members.tableJoined")}</TableHead>
+                    <TableHead className={`text-right ${TABLE_HEAD_LABEL}`}>{t(locale, "members.tableActions")}</TableHead>
                   </TableRow>
-                ) : (
-                  members.map((member) => {
+                </TableHeader>
+                <TableBody>
+                  {members.map((member) => {
                     const self =
                       boot.login !== null && member.github_login.toLowerCase() === boot.login.toLowerCase();
                     // Client-side mirror of the server guard: the last admin
@@ -259,11 +276,11 @@ export function MembersPage({ boot }: { boot: SpaBoot }) {
                         </TableCell>
                       </TableRow>
                     );
-                  })
-                )}
-              </TableBody>
-            </Table>
-          </div>
+                  })}
+                </TableBody>
+              </Table>
+            </div>
+          )}
         </>
       ) : null}
       <Dialog

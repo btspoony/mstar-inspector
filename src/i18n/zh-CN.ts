@@ -86,7 +86,9 @@ export const zhCN: Dictionary = {
   apps: {
     heading: "应用",
     create: "创建 GitHub App",
-    empty: "还没有 App — 使用「创建 GitHub App」连接第一个。",
+    /** Plan 58 A6: composed empty state（EmptyState 标题 + 描述）。 */
+    emptyTitle: "还没有 App",
+    emptyDescription: "使用「创建 GitHub App」连接第一个。",
     settings: "设置",
     appId: "App id {id}",
     by: "创建者 {login}",
@@ -143,7 +145,9 @@ export const zhCN: Dictionary = {
     adminOnly: "此页面仅限控制台管理员访问。",
     roleAdmin: "管理员",
     roleMember: "成员",
-    empty: "还没有成员。",
+    /** Plan 58 A6: composed empty state — 无动作变体（上方邀请表单即路径）。 */
+    emptyTitle: "还没有成员",
+    emptyDescription: "使用上方表单邀请第一位成员。",
   },
   insights: {
     heading: "审查健康",

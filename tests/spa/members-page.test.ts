@@ -70,6 +70,27 @@ describe("members page shadcn rebuild (plan 34 T2)", () => {
     expect(source).toContain('t(locale, "notice.error.removeFailed", { login: member.github_login })');
   });
 
+  test("page-level states ride the plan-57 trio; op notices keep the PageNotice channel (plan 58 T3)", () => {
+    // Loading is the table skeleton; page-load failure is the composed
+    // error with retry wired to the page's own load callback.
+    expect(source).toContain('<PageSkeleton locale={locale} kind="table" />');
+    expect(source).toContain('<ErrorState locale={locale} onRetry={() => void load()} />');
+    expect(source).not.toContain("LoadingNotice");
+    expect(source).not.toContain("LoadFailedNotice");
+    // Channel boundary (AD-582): op-outcome notices stay on PageNotice.
+    expect(source).toContain('<PageNotice kind={notice.kind} message={notice.message} />');
+    expect(source).toContain('<PageNotice kind="error" message={t(locale, "members.adminOnly")} />');
+  });
+
+  test("empty member list renders the no-action EmptyState guidance (plan 58 T3)", () => {
+    expect(source).toContain('t(locale, "members.emptyTitle")');
+    expect(source).toContain('t(locale, "members.emptyDescription")');
+    const emptyCall = source.match(/<EmptyState[\s\S]*?\/>/);
+    expect(emptyCall).not.toBeNull();
+    // No action slot: the invite form above is the path.
+    expect(emptyCall![0]).not.toContain("action=");
+  });
+
   test("new copy interpolates in both locales", () => {
     const keys = [
       "common.cancel",
