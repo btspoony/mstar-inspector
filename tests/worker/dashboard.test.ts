@@ -300,6 +300,34 @@ describe("exchangeCodeForToken (oauth.ts, stubbed fetch)", () => {
     expect(entry.error_type).toBe("TypeError");
     expect(warns[0]).not.toContain(CLIENT_SECRET);
   });
+
+  test("unsafe code shapes → null BEFORE any fetch — no URL-breaking character survives the gate (F11)", async () => {
+    let fetchCalls = 0;
+    globalThis.fetch = (async () => {
+      fetchCalls++;
+      return new Response("{}", { status: 200 });
+    }) as unknown as typeof fetch;
+    // Traversal / authority injection / query-fragment escape / whitespace /
+    // non-ASCII / empty / over-length all fail GITHUB_CODE_SHAPE pre-fetch;
+    // the code can never alter the fetched URL (it rides the POST body of the
+    // fixed github.com token endpoint anyway — plan 61 F11).
+    const hostile = [
+      "../../admin",
+      "x@evil.example",
+      "a/b",
+      "a?next=b",
+      "a#frag",
+      "a b",
+      "a\nb",
+      "コード",
+      "",
+      "a".repeat(257),
+    ];
+    for (const code of hostile) {
+      expect(await exchangeCodeForToken(code, CLIENT_ID, CLIENT_SECRET, "https://cb")).toBeNull();
+    }
+    expect(fetchCalls).toBe(0);
+  });
 });
 
 describe("fetchGitHubUser (oauth.ts, stubbed fetch)", () => {
@@ -311,13 +339,18 @@ describe("fetchGitHubUser (oauth.ts, stubbed fetch)", () => {
   test("returns login/name and sends a bounded AbortSignal (W-1)", async () => {
     let seenSignal: unknown;
     let seenAuth = "";
-    globalThis.fetch = (async (_url: unknown, init?: RequestInit) => {
+    let seenUrl = "";
+    globalThis.fetch = (async (url: unknown, init?: RequestInit) => {
+      seenUrl = String(url);
       seenSignal = init?.signal;
       seenAuth = ((init?.headers ?? {}) as Record<string, string>).Authorization ?? "";
       return new Response(JSON.stringify({ login: "octocat", name: null }), { status: 200 });
     }) as typeof fetch;
     const user = await fetchGitHubUser(gh("o", "token"));
     expect(user).toEqual({ login: "octocat", name: null });
+    // Fixed destination (F12): the token rides the Authorization header of
+    // the constant api.github.com user endpoint — no input reaches a URL.
+    expect(seenUrl).toBe("https://api.github.com/user");
     expect(seenAuth).toBe("Bearer " + gh("o", "token"));
     expect(seenSignal).toBeInstanceOf(AbortSignal);
   });
@@ -359,6 +392,22 @@ describe("fetchGitHubUser (oauth.ts, stubbed fetch)", () => {
     }) as unknown as typeof fetch;
     const warns = spyOnWarn();
     expect(await fetchGitHubUser(gh("o", "token"))).toBeNull();
+    const entry = JSON.parse(warns[0] ?? "") as Record<string, unknown>;
+    expect(entry.stage).toBe("user_fetch");
+    expect(entry.reason).toBe("fetch_failed");
+    expect(entry.error_type).toBe("TypeError");
+  });
+
+  test("a hostile access token (CRLF header injection) fails closed null (F12)", async () => {
+    // The stub validates the header exactly like a real fetch would — the
+    // Headers constructor throws on CR/LF, and the in-function try collapses
+    // that throw into the structured fetch_failed → null path.
+    globalThis.fetch = (async (url: unknown, init?: RequestInit) => {
+      new Request(String(url), init);
+      return new Response(JSON.stringify({ login: "pwn" }), { status: 200 });
+    }) as typeof fetch;
+    const warns = spyOnWarn();
+    expect(await fetchGitHubUser("tok\r\nX-Evil: 1")).toBeNull();
     const entry = JSON.parse(warns[0] ?? "") as Record<string, unknown>;
     expect(entry.stage).toBe("user_fetch");
     expect(entry.reason).toBe("fetch_failed");
@@ -540,6 +589,37 @@ describe("/dashboard routes", () => {
     expect(entry.event).toBe("dashboard_oauth");
     expect(entry.stage).toBe("callback");
     expect(entry.reason).toBe("missing_code");
+  });
+
+  test("callback with a valid state but an unsafe-shaped code → 400, zero upstream fetch, no session (F11 entry gate)", async () => {
+    const state = await createStateValue(SESSION_SECRET);
+    const origFetch = globalThis.fetch;
+    let fetchCalls = 0;
+    globalThis.fetch = (async () => {
+      fetchCalls++;
+      return new Response("{}", { status: 200 });
+    }) as unknown as typeof fetch;
+    try {
+      const warns = spyOnWarn();
+      const res = await worker.fetch(
+        dashboardRequest(
+          `/dashboard/oauth/callback?code=${encodeURIComponent("../../admin")}&state=${state}`,
+          `${OAUTH_STATE_COOKIE}=${state}`,
+        ),
+        makeEnv(),
+      );
+      expect(res.status).toBe(400);
+      expect(fetchCalls).toBe(0);
+      for (const cookie of res.headers.getSetCookie()) {
+        expect(cookie.startsWith(`${SESSION_COOKIE}=`)).toBe(false);
+      }
+      const entry = JSON.parse(warns[0] ?? "") as Record<string, unknown>;
+      expect(entry.event).toBe("dashboard_oauth");
+      expect(entry.stage).toBe("callback");
+      expect(entry.reason).toBe("unsafe_code_shape");
+    } finally {
+      globalThis.fetch = origFetch;
+    }
   });
 
   test("GET /dashboard/logout → 302 to login; session, manifest hold, and manifest state cookies expired", async () => {
@@ -970,6 +1050,50 @@ describe("exchangeManifestCode (manifest.ts, stubbed fetch)", () => {
     expect(entry.stage).toBe("conversion");
     expect(entry.reason).toBe("unexpected_payload");
   });
+
+  test("unsafe code shapes → null BEFORE any fetch — no URL-breaking character survives the gate (F13)", async () => {
+    let fetchCalls = 0;
+    globalThis.fetch = (async () => {
+      fetchCalls++;
+      return new Response("{}", { status: 200 });
+    }) as unknown as typeof fetch;
+    // Traversal / authority injection / query-fragment escape / encoded dots
+    // / whitespace / non-ASCII / empty / over-length all fail
+    // GITHUB_CODE_SHAPE before the upstream call — a request-supplied code
+    // can only ever become ONE encoded path segment on the fixed
+    // api.github.com host (plan 61 F13).
+    const hostile = [
+      "../conversions",
+      "x@evil.example",
+      "a/b",
+      "a?next=b",
+      "a#frag",
+      "a b",
+      "%2e%2e",
+      "a\nb",
+      "",
+      "a".repeat(257),
+    ];
+    for (const code of hostile) {
+      expect(await exchangeManifestCode(code)).toBeNull();
+    }
+    expect(fetchCalls).toBe(0);
+  });
+
+  test("a shape-valid dot-only code stays on the fixed api.github.com host (F13: path normalization cannot cross authorities)", async () => {
+    let seenUrl = "";
+    globalThis.fetch = (async (url: unknown) => {
+      seenUrl = String(url);
+      return new Response("{}", { status: 200 });
+    }) as typeof fetch;
+    await exchangeManifestCode("..");
+    // ".." is inside GITHUB_CODE_SHAPE (dots are allowed), but it can only
+    // climb the PATH of the same fixed authority — a real fetch normalizes
+    // /app-manifests/../ to /, still api.github.com. Scheme and host are
+    // compile-time constants, so no input can move the destination.
+    expect(seenUrl.startsWith("https://api.github.com/app-manifests/")).toBe(true);
+    expect(seenUrl.endsWith("/conversions")).toBe(true);
+  });
 });
 
 describe("/dashboard manifest routes (plan 11 Task 1)", () => {
@@ -1167,6 +1291,22 @@ describe("/dashboard manifest routes (plan 11 Task 1)", () => {
     expect(entry.event).toBe("dashboard_manifest");
     expect(entry.stage).toBe("callback");
     expect(entry.reason).toBe("missing_code");
+  });
+
+  test("callback with a valid state but an unsafe-shaped code → 400, zero conversion fetch (F13 entry gate)", async () => {
+    const guard = stubFetchMustNotBeCalled();
+    const { session, state } = await startManifest();
+    const warns = spyOnWarn();
+    const res = await worker.fetch(
+      callbackRequest(session, state, `code=${encodeURIComponent("../conversions")}&state=${state}`),
+      makeEnv(),
+    );
+    expect(res.status).toBe(400);
+    expect(guard.calls()).toBe(0);
+    const entry = JSON.parse(warns[0] ?? "") as Record<string, unknown>;
+    expect(entry.event).toBe("dashboard_manifest");
+    expect(entry.stage).toBe("callback");
+    expect(entry.reason).toBe("unsafe_code_shape");
   });
 
   test("callback success → conversion exchanged, App auto-committed, 302 to onboarding, hold burned, no secrets (plan 31 T5)", async () => {
