@@ -44,7 +44,10 @@
   --sidebar-primary-foreground: var(--background-100);
   --sidebar-accent: var(--sidebar-active-bg);
   --sidebar-accent-foreground: var(--sidebar-active-fg);
-  --sidebar-ring: var(--brand-700);
+  /* Sidebar focus follows the app-wide focus duty (QC round 1 F-003: revert
+     to blue-700 — DESIGN.md SSOT keeps blue on every focus face; the brand
+     cyan never takes focus, matching --ring above). */
+  --sidebar-ring: var(--blue-700);
 }
 
 @theme inline {
@@ -56,14 +59,21 @@
   --color-popover-foreground: var(--popover-foreground);
   --color-primary: var(--primary);
   --color-primary-foreground: var(--primary-foreground);
+  /* QC round 1 F-001: the hover steps MUST be mapped into the --color-*
+     namespace — Tailwind v4 generates utilities from @theme keys only, so an
+     unmapped :root var leaves hover:bg-primary-hover (and the secondary /
+     destructive equivalents) as dead classes with no compiled CSS. */
+  --color-primary-hover: var(--primary-hover);
   --color-secondary: var(--secondary);
   --color-secondary-foreground: var(--secondary-foreground);
+  --color-secondary-hover: var(--secondary-hover);
   --color-muted: var(--muted);
   --color-muted-foreground: var(--muted-foreground);
   --color-accent: var(--accent);
   --color-accent-foreground: var(--accent-foreground);
   --color-destructive: var(--destructive);
   --color-destructive-foreground: var(--destructive-foreground);
+  --color-destructive-hover: var(--destructive-hover);
   --color-border: var(--border);
   --color-input: var(--input);
   --color-ring: var(--ring);

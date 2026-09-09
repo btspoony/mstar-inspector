@@ -22,7 +22,9 @@ export function ErrorState({
   return (
     <div data-slot="error-state" role="alert" className="flex flex-wrap items-center gap-x-3 gap-y-2">
       <CircleAlert aria-hidden="true" className="size-4 shrink-0 text-destructive" />
-      <p className="text-sm text-foreground">{message ?? t(locale, "common.loadFailed")}</p>
+      {/* Falsy guard (QC round 1 F-008): an empty-string message must fall
+          back too — `message ?? …` would render an empty <p> in the alert. */}
+      <p className="text-sm text-foreground">{!message ? t(locale, "common.loadFailed") : message}</p>
       {onRetry ? (
         <Button type="button" variant="outline" size="sm" onClick={onRetry}>
           {t(locale, "common.retry")}

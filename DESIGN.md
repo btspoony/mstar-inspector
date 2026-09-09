@@ -1,7 +1,7 @@
 ---
 version: 0.3.1
 name: mstar-inspector Console
-description: "Bold Signal-Cyan ops-console design system for the mstar-inspector developer dashboard. Dense, decisive, state through color + copy; one confident cyan accent on cool zinc neutrals. Dark is the default theme; light follows prefers-color-scheme until the navbar theme toggle stores a manual choice (localStorage mstar.dashboard.theme, light|dark) — the stored choice wins over the OS. Supersedes the plan-29 lock (2026-09-04, user instruction, iteration 013). v0.3 (plan 57, AD-573) is a values-only rebase: existing token names are frozen; brand, motion, and elevation enter as additive namespaces. v0.3.1 (plan 57 T2, AD-572) flips the sans stack to self-hosted Geist Sans — latin/latin-ext woff2 with font-display: swap; zh text falls back to the system stack."
+description: "Bold Signal-Cyan ops-console design system for the mstar-inspector developer dashboard. Dense, decisive, state through color + copy; one confident cyan accent on cool zinc neutrals. Dark is the default theme; light follows prefers-color-scheme until the navbar theme toggle stores a manual choice (localStorage mstar.dashboard.theme, light|dark) — the stored choice wins over the OS. Supersedes the plan-29 lock (2026-09-04, user instruction, iteration 013). v0.3 (plan 57, AD-573) is a values-only rebase: existing token names are frozen; brand, motion, and elevation enter as additive namespaces. v0.3.1 (plan 57 T2, AD-572) flips the sans stack to self-hosted Geist Sans — unmodified full-latin woff2 binaries of geist@1.7.2 (sha256 pinned in the fonts.css header) with font-display: swap; zh text falls back to the system stack."
 
 # Runtime default = dark. Top-level colors: matches themes.dark.colors so
 # {colors.X} component refs resolve to the console default. Light values
@@ -649,11 +649,13 @@ together and are machine-pinned: this frontmatter →
 subset. Staged delivery inside plan 57: Task 1 landed palette + motion +
 radius + elevation; Task 2 (v0.3.1) flipped the self-hosted typeface —
 `--font-sans` and every sans `fontFamily` now carry Geist Sans ahead of the
-system fallbacks, with the woff2 riding the vite module graph — and the
-shadcn bridge re-point (`--primary: var(--blue-700)` → `var(--brand-700)`)
-plus component restyle lands in Task 3 — until T3 the rendered primary
-button still reads `blue-700` while this file already declares the brand
-target.
+system fallbacks, with the woff2 riding the vite module graph; Task 3
+landed the shadcn bridge re-point (`--primary: var(--blue-700)` →
+`var(--brand-700)`) plus the base-component restyle, and QC round 1 closed
+the last staged seam — the `views.ts` STYLE `--button-primary-bg` now also
+references `var(--brand-700)` — so every rendered primary button (SPA and
+SSR faces alike) reads the brand accent. The staging narrative is history:
+no surface renders the pre-T3 blue primary anymore.
 
 A separate `DESIGN.dark.md` is intentionally not used: the assignment stores
 both palettes in one file under `themes:`.
@@ -693,8 +695,8 @@ Usage:
   `#0e7490`. Brand **never** encodes error/warning/success semantics and
   never becomes a data-series color (AD-601).
 - `blue-700` — links and the focus ring only (non-alert duty kept per
-  AD-571); no longer the primary-action fill once the T3 bridge re-point
-  lands.
+  AD-571); no longer a primary-action fill anywhere (the T3 bridge re-point
+  landed, and the SSR STYLE re-point closed in QC round 1).
 - `red-700` — errors and destructive submits (Remove, Delete, Overwrite).
 - `amber-700` — warnings only.
 - `green-700` — success notices and healthy badges.
@@ -708,7 +710,9 @@ A disabled placeholder must never look like a clickable primary button: use
 ## Typography
 
 Frontmatter `typography:` is the SSOT. The type identity is **Geist Sans**
-(AD-572): latin/latin-ext subset woff2 self-hosted at
+(AD-572): the unmodified full-latin woff2 binaries of `geist@1.7.2`
+(shipped upstream as full builds, not subsets — provenance sha256 recorded
+in the `fonts.css` header) self-hosted at
 `src/spa/assets/fonts/` with `@font-face` declarations in
 `src/spa/styles/fonts.css` — weights 400/500/600, exactly the three the
 scale below declares (v0.3.1, plan 57 T2). `font-display: swap` keeps first
@@ -803,11 +807,19 @@ transitions/keyframes only.
 |-------|-------|-----|
 | `--duration-fast` | 120ms | press / micro feedback (`:active` scale) |
 | `--duration-base` | 160ms | hover / focus color, border, shadow transitions |
-| `--duration-slow` | 240ms | entrances, popovers, overlays (transform/opacity) |
+| `--duration-slow` | 240ms | entrances, popovers, overlays (transform/opacity) — **reserved, no live consumer yet**; see the entrance note below |
 | `--ease-out` | `cubic-bezier(0.22, 1, 0.36, 1)` | entrances and anything that decelerates |
 | `--ease-in-out` | `cubic-bezier(0.65, 0, 0.35, 1)` | symmetric state transitions |
 
 Discipline (iteration 018 hard constraint #7):
+
+- Entrance animations are **not currently active**: the `animate-in/out` /
+  `fade-*` / `zoom-*` / `slide-in-from-*` classes copied from shadcn/ui onto
+  dialog/dropdown/select emit no CSS in Tailwind 4 core (that plugin family
+  lives in `tw-animate-css`, which is deliberately not a dependency), so
+  those surfaces appear/disappear instantly (QC round 1 F-006). When the
+  plan 58 motion pass wires entrances, it must be zero-dependency keyframes
+  consuming `--duration-slow` with a `prefers-reduced-motion` guard.
 
 - Movement-type animation (entrances, offsets, scale micro-interactions)
   animates `transform` / `opacity` only.
@@ -830,8 +842,9 @@ that follow the active theme because they point at color variables.
 
 ### Button
 
-Variants: `button-primary` (brand-700 — rendered `blue-700` until the T3
-bridge re-point), `button-danger` (red-700), `button-secondary` (surface +
+Variants: `button-primary` (brand-700, rendered on the SPA and SSR faces
+since the T3 bridge re-point + QC-round-1 SSR re-point), `button-danger`
+(red-700), `button-secondary` (surface +
 gray-400 border), `button-disabled` (gray-100 fill, gray-700 text,
 not-allowed). Size: default 40px; `button-small` 32px.
 
@@ -935,7 +948,8 @@ existing `tokens.css` custom properties (read-only). Tailwind utilities use
 | `--background` | `--background-100` |
 | `--foreground` | `--gray-1000` |
 | `--card` / `--card-foreground` | `--card-bg` / `--card-fg` |
-| `--primary` / `--primary-foreground` | `--blue-700` / `--background-100` (v0.3 target: `--brand-700`, re-pointed in plan 57 T3.1) |
+| `--primary` / `--primary-foreground` | `--brand-700` / `--background-100` (re-pointed in plan 57 T3) |
+| `--primary-hover` / `--secondary-hover` / `--destructive-hover` | `--brand-800` / `--background-300` / `--red-800` (mapped into `@theme inline` as `--color-*-hover` — QC round 1 F-001) |
 | `--secondary` / `--secondary-foreground` | `--button-secondary-bg` / `--button-secondary-fg` |
 | `--muted` / `--muted-foreground` | `--gray-100` / `--gray-900` |
 | `--accent` / `--accent-foreground` | `--background-300` / `--gray-1000` |
@@ -946,6 +960,8 @@ existing `tokens.css` custom properties (read-only). Tailwind utilities use
 | `--radius` | `--rounded-sm` |
 | `--sidebar` / `--sidebar-foreground` | `--sidebar-bg` / `--sidebar-fg` |
 | `--sidebar-accent` / `--sidebar-accent-foreground` | `--sidebar-active-bg` / `--sidebar-active-fg` |
+| `--sidebar-primary` | `--brand-700` |
+| `--sidebar-ring` | `--blue-700` (focus duty stays blue app-wide — QC round 1 F-003 revert) |
 | `--color-sidebar-border` (Tailwind) | `--sidebar-border` (tokens only; not redefined in bridge) |
 
 Copy-in components (plan 33 T1c) live under `src/spa/components/ui/` with

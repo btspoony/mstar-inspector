@@ -119,6 +119,16 @@ describe("PageSkeleton (AD-582)", () => {
     expect(count(renderSkeleton("cards", { rows: 6 }), 'data-slot="skeleton-card"')).toBe(6);
     expect(count(renderSkeleton("forms", { rows: 1 }), 'data-slot="skeleton-form-field"')).toBe(1);
   });
+
+  test("rows clamps negative values to 0; 0 stays a legal empty body (QC round 1 F-007)", () => {
+    // Negative input collapses the body rows instead of producing a broken
+    // or silently-wrong shape; the page frame still renders.
+    expect(count(renderSkeleton("table", { rows: -3 }), 'data-slot="skeleton-table-row"')).toBe(0);
+    expect(count(renderSkeleton("table", { rows: -3 }), 'data-slot="skeleton-heading"')).toBe(1);
+    expect(count(renderSkeleton("table", { rows: -3 }), 'data-slot="skeleton-table-header"')).toBe(1);
+    expect(count(renderSkeleton("cards", { rows: -1 }), 'data-slot="skeleton-card"')).toBe(0);
+    expect(count(renderSkeleton("forms", { rows: 0 }), 'data-slot="skeleton-form-field"')).toBe(0);
+  });
 });
 
 describe("EmptyState (AD-582)", () => {
@@ -154,6 +164,11 @@ describe("ErrorState (AD-582)", () => {
     expect(errorState({ locale: "zh_CN" })).toContain(`>${t("zh_CN", "common.loadFailed")}<`);
     expect(errorState({ message: "Rate limited." })).toContain(">Rate limited.<");
     expect(errorState({ message: "Rate limited." })).not.toContain(t("en", "common.loadFailed"));
+  });
+
+  test("empty-string message falls back instead of rendering an empty <p> (QC round 1 F-008)", () => {
+    const out = errorState({ message: "" });
+    expect(out).toContain(`>${t("en", "common.loadFailed")}<`);
   });
 
   test("retry button renders the common.retry label only when onRetry is wired", () => {

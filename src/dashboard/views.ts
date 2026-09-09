@@ -39,6 +39,9 @@ const STYLE = `<style>
   --gray-1000: #eef2f7;
   --gray-alpha-400: #ffffff2e;
   --blue-700: #4ea1ff;
+  /* Brand accent — value-synced with tokens.css (three-site covenant, QC
+     round 1 F-002); --button-primary-bg below references it. */
+  --brand-700: #22d3ee;
   --red-100: #2a1215;
   --red-400: #7f1d1d;
   --red-700: #f87171;
@@ -80,7 +83,7 @@ const STYLE = `<style>
   --spacing-8: 32px;
   --rounded-sm: 8px;
   --rounded-md: 12px;
-  --button-primary-bg: var(--blue-700);
+  --button-primary-bg: var(--brand-700);
   --button-primary-fg: var(--background-100);
   --button-primary-height: 40px;
   --button-primary-padding: 0 12px;
@@ -124,6 +127,7 @@ const STYLE = `<style>
     --gray-1000: #0f141a;
     --gray-alpha-400: #10192824;
     --blue-700: #0066cc;
+    --brand-700: #0e7490;
     --red-100: #fef2f2;
     --red-400: #fca5a5;
     --red-700: #b91c1c;
@@ -150,6 +154,7 @@ const STYLE = `<style>
   --gray-1000: #0f141a;
   --gray-alpha-400: #10192824;
   --blue-700: #0066cc;
+  --brand-700: #0e7490;
   --red-100: #fef2f2;
   --red-400: #fca5a5;
   --red-700: #b91c1c;

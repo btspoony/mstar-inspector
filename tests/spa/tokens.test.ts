@@ -372,10 +372,22 @@ describe("DESIGN.md v0.3 bridge re-point + base-component restyle (plan 57 T3)",
     expect(rootVars["secondary-hover"]).toBe("var(--background-300)");
     expect(rootVars["destructive-hover"]).toBe("var(--red-800)");
     expect(rootVars["sidebar-primary"]).toBe("var(--brand-700)");
-    expect(rootVars["sidebar-ring"]).toBe("var(--brand-700)");
-    // Link/focus duty stays blue (AD-571); brand cyan never takes it, and
-    // alerts keep red/amber/green.
+    // Link/focus duty stays blue (AD-571) — including the sidebar ring
+    // (QC round 1 F-003 revert); brand cyan never takes focus, and alerts
+    // keep red/amber/green.
     expect(rootVars["ring"]).toBe("var(--blue-700)");
+    expect(rootVars["sidebar-ring"]).toBe("var(--blue-700)");
+
+    // Theme coupling (QC round 1 F-001): the hover steps must exist as
+    // --color-* keys in `@theme inline`. Tailwind v4 CSS-first config
+    // generates utilities from theme keys only, so an unmapped :root var
+    // leaves hover:bg-primary-hover (and the secondary/destructive
+    // equivalents) as dead classes with no compiled CSS — the class-string
+    // pins below cannot catch that drift on their own.
+    const themeVars = cssCustomProperties(extractBlock(css, "@theme inline {"));
+    expect(themeVars["color-primary-hover"]).toBe("var(--primary-hover)");
+    expect(themeVars["color-secondary-hover"]).toBe("var(--secondary-hover)");
+    expect(themeVars["color-destructive-hover"]).toBe("var(--destructive-hover)");
   });
 
   test("radius bridge collapses onto the AD-574 two tiers; tokens button maps the brand", async () => {
@@ -425,6 +437,17 @@ describe("DESIGN.md v0.3 bridge re-point + base-component restyle (plan 57 T3)",
     const input = await Bun.file(join(UI_DIR, "input.tsx")).text();
     expect(input).toContain("rounded-sm");
     expect(input).toContain("hover:border-(--gray-500)");
+
+    // QC round 1 F-004: raw `transition-opacity` faces ride the duration +
+    // easing tokens so the prefers-reduced-motion fold reaches them too.
+    const dialog = await Bun.file(join(UI_DIR, "dialog.tsx")).text();
+    expect(dialog).toContain(
+      "transition-opacity duration-(--duration-base) ease-(--ease-in-out)",
+    );
+    const tabs = await Bun.file(join(UI_DIR, "tabs.tsx")).text();
+    expect(tabs).toContain(
+      "after:transition-opacity after:duration-(--duration-base) after:ease-(--ease-in-out)",
+    );
 
     const skeleton = await Bun.file(join(UI_DIR, "skeleton.tsx")).text();
     expect(skeleton).toContain("motion-reduce:animate-none");
@@ -575,6 +598,30 @@ describe("SSR STYLE token parity (plan 29 QC)", () => {
     for (const name of ["rounded-sm", "rounded-md"]) {
       expect(ssrRoot[name], name).toBe(cssRoot[name]);
     }
+  });
+
+  test("component var references stay synced: --button-primary-bg → --brand-700 on both faces (QC round 1 F-002)", async () => {
+    const css = await Bun.file(new URL("../../src/spa/styles/tokens.css", import.meta.url)).text();
+    const views = await Bun.file(new URL("../../src/dashboard/views.ts", import.meta.url)).text();
+    const styleStart = views.indexOf("const STYLE = `<style>");
+    const style = views.slice(styleStart, views.indexOf("`;", styleStart));
+
+    const cssRoot = cssCustomPropertiesFromBlock(extractBlock(css, ":root {"));
+    const cssLight = cssCustomPropertiesFromBlock(extractBlock(css, ':root[data-theme="light"] {'));
+    const ssrRoot = cssCustomPropertiesFromBlock(style.slice(0, style.indexOf("@media (prefers-color-scheme: light) {")));
+    const ssrOsLight = cssCustomPropertiesFromBlock(extractBlock(style, ':root:not([data-theme="dark"]) {'));
+    const ssrStoredLight = cssCustomPropertiesFromBlock(extractBlock(style, ':root[data-theme="light"] {'));
+
+    // The re-point: both faces reference the brand step, not a raw accent.
+    expect(cssRoot["button-primary-bg"], "tokens.css primary").toBe("var(--brand-700)");
+    expect(ssrRoot["button-primary-bg"], "SSR primary").toBe("var(--brand-700)");
+
+    // Reference-level sync — the hex-only parity test above cannot see a
+    // var reference drift, so pin the referenced --brand-700 per theme:
+    // every STYLE branch declares it and its value equals tokens.css.
+    expect(ssrRoot["brand-700"], "SSR dark brand-700").toBe(cssRoot["brand-700"]);
+    expect(ssrOsLight["brand-700"], "SSR OS-light brand-700").toBe(cssLight["brand-700"]);
+    expect(ssrStoredLight["brand-700"], "SSR stored-light brand-700").toBe(cssLight["brand-700"]);
   });
 });
 

@@ -32,7 +32,9 @@ export function PageSkeleton({
   kind: SkeletonKind;
   rows?: number;
 }) {
-  const count = rows ?? DEFAULT_ROWS[kind];
+  // Clamp at 0: negative rows would silently render an empty body shape and
+  // 0 must stay a legal explicit "no rows" value (QC round 1 F-007).
+  const count = Math.max(0, rows ?? DEFAULT_ROWS[kind]);
   return (
     <div
       data-slot="page-skeleton"
