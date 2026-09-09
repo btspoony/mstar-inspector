@@ -1,3 +1,4 @@
+// Locally revised shadcn/ui copy-in (plan 57 T3 v0.3 restyle; 018 copy-in supersede — do not regen over).
 import * as React from "react"
 import { XIcon } from "lucide-react"
 import * as DialogPrimitive from "@radix-ui/react-dialog"
@@ -59,7 +60,10 @@ function DialogContent({
       <DialogPrimitive.Content
         data-slot="dialog-content"
         className={cn(
-          "fixed top-[50%] left-[50%] z-50 grid w-full max-w-[calc(100%-2rem)] translate-x-[-50%] translate-y-[-50%] gap-4 rounded-lg border bg-background p-6 shadow-lg duration-200 outline-none data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=closed]:zoom-out-95 data-[state=open]:animate-in data-[state=open]:fade-in-0 data-[state=open]:zoom-in-95 sm:max-w-lg",
+          // rounded-lg resolves to the container tier via the bridge remap;
+          // elevation is the tinted --shadow-pop token; the entrance duration
+          // rides --duration-slow so prefers-reduced-motion folds it to 1ms.
+          "fixed top-[50%] left-[50%] z-50 grid w-full max-w-[calc(100%-2rem)] translate-x-[-50%] translate-y-[-50%] gap-4 rounded-lg border bg-background p-6 shadow-(--shadow-pop) duration-(--duration-slow) outline-none data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=closed]:zoom-out-95 data-[state=open]:animate-in data-[state=open]:fade-in-0 data-[state=open]:zoom-in-95 sm:max-w-lg",
           className
         )}
         {...props}

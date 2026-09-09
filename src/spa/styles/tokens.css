@@ -214,7 +214,10 @@
   --spacing-24: 96px;
 
   /* rounded — two-tier system (AD-574): sm = control tier, md = container
-     tier (always +4px above control); full stays pill-only */
+     tier (always +4px above control); full stays pill-only. lg (16px) is
+     legacy: kept declared for name continuity (AD-573) but no longer a
+     consumed tier — the shadcn bridge maps Tailwind lg/xl onto the md
+     container step (plan 57 T3; closes T1-review Minor 1). */
   --rounded-sm: 8px;
   --rounded-md: 12px;
   --rounded-lg: 16px;
@@ -239,8 +242,10 @@
   --breakpoint-lg: 900px;
   --breakpoint-xl: 1280px;
 
-  /* components — reference color vars so they follow the active theme */
-  --button-primary-bg: var(--blue-700);
+  /* components — reference color vars so they follow the active theme.
+     button-primary carries the Signal Cyan brand (plan 57 T3 closes the
+     staged-delivery seam; DESIGN.md button-primary declares brand-700). */
+  --button-primary-bg: var(--brand-700);
   --button-primary-fg: var(--background-100);
   --button-primary-height: 40px;
   --button-primary-padding: 0 12px;

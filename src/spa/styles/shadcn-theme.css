@@ -1,5 +1,5 @@
 /*
- * shadcn/ui theme bridge (plan 33 T1a).
+ * shadcn/ui theme bridge (plan 33 T1a; v0.3 brand re-point plan 57 T3).
  * Semantic CSS variables map to DESIGN.md / tokens.css names (tokens.css is read-only).
  * Theme resolves via tokens.css — light on :root[data-theme="light"] or OS light (:root:not([data-theme="dark"])); values flow through the var chain unchanged.
  */
@@ -12,28 +12,39 @@
   --card-foreground: var(--card-fg);
   --popover: var(--background-200);
   --popover-foreground: var(--gray-1000);
-  --primary: var(--blue-700);
+  /* v0.3 brand re-point (plan 57 T3, AD-573): the primary action fill is
+     Signal Cyan (--brand-700); hover/active hold the 800 step (dark brightens,
+     light deepens — DESIGN.md Appendix B). --destructive-hover mirrors the
+     step so danger buttons stay symmetric. */
+  --primary: var(--brand-700);
+  --primary-hover: var(--brand-800);
   --primary-foreground: var(--background-100);
   --secondary: var(--button-secondary-bg);
+  --secondary-hover: var(--background-300);
   --secondary-foreground: var(--button-secondary-fg);
   --muted: var(--gray-100);
   --muted-foreground: var(--gray-900);
   --accent: var(--background-300);
   --accent-foreground: var(--gray-1000);
   --destructive: var(--red-700);
+  --destructive-hover: var(--red-800);
   --destructive-foreground: var(--background-100);
   --border: var(--gray-alpha-400);
   --input: var(--input-border);
+  /* Focus ring stays blue-700 (DESIGN.md v0.3: link + focus are blue's
+     non-alert duty — brand cyan never takes them, alerts keep red/amber). */
   --ring: var(--blue-700);
   --radius: var(--rounded-sm);
 
   --sidebar: var(--sidebar-bg);
   --sidebar-foreground: var(--sidebar-fg);
-  --sidebar-primary: var(--blue-700);
+  /* Brand re-point per the plan 57 T3 staged checklist; plan 58 may express
+     the sidebar active edge with the brand accent (DESIGN.md Sidebar). */
+  --sidebar-primary: var(--brand-700);
   --sidebar-primary-foreground: var(--background-100);
   --sidebar-accent: var(--sidebar-active-bg);
   --sidebar-accent-foreground: var(--sidebar-active-fg);
-  --sidebar-ring: var(--blue-700);
+  --sidebar-ring: var(--brand-700);
 }
 
 @theme inline {
@@ -64,10 +75,14 @@
   --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
   --color-sidebar-border: var(--sidebar-border);
   --color-sidebar-ring: var(--sidebar-ring);
-  --radius-sm: calc(var(--radius) - 2px);
+  /* Radius = the AD-574 two-tier system (plan 57 T3): control tier 8px,
+     container tier 12px. lg/xl collapse onto the container step so copy-in
+     rounded-xl card faces land on the container tier with zero hand edits;
+     --rounded-lg (16px) remains declared in tokens.css as a legacy value. */
+  --radius-sm: var(--rounded-sm);
   --radius-md: var(--rounded-md);
-  --radius-lg: var(--rounded-lg);
-  --radius-xl: calc(var(--rounded-lg) + 4px);
+  --radius-lg: var(--rounded-md);
+  --radius-xl: var(--rounded-md);
   --font-sans: var(--font-sans);
   --font-mono: var(--font-mono);
 }

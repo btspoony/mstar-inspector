@@ -774,6 +774,11 @@ Manifest SSR views stay single column at every width.
 The shadcn bridge re-maps `--radius-lg`/`--radius-xl` onto
 `var(--rounded-md)` (Task 3) so copy-in card faces land on the container
 tier without hand edits; SSR faces already point at `--rounded-*`.
+`--rounded-lg: 16px` stays declared as a **legacy value** (AD-573 name
+freeze): once the remap lands, nothing consumes it as the container step —
+container faces resolve `var(--rounded-md)` directly, and the shadcn control
+class (`rounded-sm`) maps straight onto `var(--rounded-sm)` (8px control
+tier).
 
 ## Elevation
 

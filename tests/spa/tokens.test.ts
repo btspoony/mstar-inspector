@@ -228,7 +228,7 @@ describe("src/spa/styles/tokens.css mapping", () => {
     expect(rootVars["rounded-md"]).toBe("12px");
     expect(rootVars["rounded-lg"]).toBe("16px");
     expect(rootVars["rounded-full"]).toBe("9999px");
-    expect(rootVars["button-primary-bg"]).toBe("var(--blue-700)");
+    expect(rootVars["button-primary-bg"]).toBe("var(--brand-700)");
     expect(rootVars["button-danger-bg"]).toBe("var(--red-700)");
     expect(rootVars["input-border"]).toBe("var(--gray-400)");
     expect(rootVars["card-bg"]).toBe("var(--background-200)");
@@ -353,6 +353,81 @@ describe("DESIGN.md v0.3 design-language tokens (plan 57 T1)", () => {
     for (const [name, fg, bg] of fillPairs) {
       expect(ratio(fg, bg), name).toBeGreaterThanOrEqual(3);
     }
+  });
+});
+
+describe("DESIGN.md v0.3 bridge re-point + base-component restyle (plan 57 T3)", () => {
+  const BRIDGE = new URL("../../src/spa/styles/shadcn-theme.css", import.meta.url);
+  const UI_DIR = fileURLToPath(new URL("../../src/spa/components/ui/", import.meta.url));
+  /** A5 sensitive subset — the only ui/ files allowed to drift from the copy-in. */
+  const SUBSET = ["button", "card", "input", "table", "skeleton", "tabs", "sidebar", "select", "dropdown-menu", "dialog"];
+
+  test("brand re-point: primary/sidebar semantics anchor on brand-700; focus keeps blue-700", async () => {
+    const css = await Bun.file(BRIDGE).text();
+    const rootVars = cssCustomProperties(extractBlock(css, ":root {"));
+    // The staged T1 seam closes: the primary action is Signal Cyan, hover
+    // holds the 800 step (dark brightens, light deepens — Appendix B).
+    expect(rootVars["primary"]).toBe("var(--brand-700)");
+    expect(rootVars["primary-hover"]).toBe("var(--brand-800)");
+    expect(rootVars["secondary-hover"]).toBe("var(--background-300)");
+    expect(rootVars["destructive-hover"]).toBe("var(--red-800)");
+    expect(rootVars["sidebar-primary"]).toBe("var(--brand-700)");
+    expect(rootVars["sidebar-ring"]).toBe("var(--brand-700)");
+    // Link/focus duty stays blue (AD-571); brand cyan never takes it, and
+    // alerts keep red/amber/green.
+    expect(rootVars["ring"]).toBe("var(--blue-700)");
+  });
+
+  test("radius bridge collapses onto the AD-574 two tiers; tokens button maps the brand", async () => {
+    const css = await Bun.file(BRIDGE).text();
+    const themeVars = cssCustomProperties(extractBlock(css, "@theme inline {"));
+    expect(themeVars["radius-sm"]).toBe("var(--rounded-sm)");
+    expect(themeVars["radius-md"]).toBe("var(--rounded-md)");
+    // lg/xl re-point onto the container step so copy-in card faces land
+    // without hand edits; --rounded-lg (16px) is legacy, declared only.
+    expect(themeVars["radius-lg"]).toBe("var(--rounded-md)");
+    expect(themeVars["radius-xl"]).toBe("var(--rounded-md)");
+
+    const tokens = await Bun.file(TOKENS_CSS).text();
+    expect(cssCustomProperties(extractBlock(tokens, ":root {"))["button-primary-bg"]).toBe("var(--brand-700)");
+  });
+
+  test("restyled subset carries v0.3 form: supersede marker, control radius, tinted elevation, token-eased transitions", async () => {
+    for (const name of SUBSET) {
+      const source = await Bun.file(join(UI_DIR, `${name}.tsx`)).text();
+      // Copy-in supersede marker — a future regen must not clobber silently.
+      expect(source, name).toContain("plan 57 T3 v0.3 restyle");
+      // Hard constraint #7 (architect tighten-up): transition-all is
+      // narrowed to explicit property lists across the subset.
+      expect(source, name).not.toContain("transition-all");
+    }
+
+    const button = await Bun.file(join(UI_DIR, "button.tsx")).text();
+    expect(button).toContain("rounded-sm");
+    expect(button).not.toContain("rounded-md");
+    expect(button).toContain("hover:bg-primary-hover");
+    expect(button).toContain("active:bg-primary-hover");
+    expect(button).toContain("duration-(--duration-base)");
+    expect(button).toContain("ease-(--ease-in-out)");
+    // Link duty stays blue even though --primary is now brand cyan.
+    expect(button).toContain("text-(--blue-700)");
+
+    const card = await Bun.file(join(UI_DIR, "card.tsx")).text();
+    expect(card).toContain("shadow-(--shadow-card)");
+    expect(card).not.toMatch(/shadow-(sm|md|lg)\b/);
+
+    for (const name of ["dropdown-menu", "select", "dialog"]) {
+      const source = await Bun.file(join(UI_DIR, `${name}.tsx`)).text();
+      expect(source, name).toContain("shadow-(--shadow-pop)");
+      expect(source, name).not.toMatch(/shadow-(md|lg)\b/);
+    }
+
+    const input = await Bun.file(join(UI_DIR, "input.tsx")).text();
+    expect(input).toContain("rounded-sm");
+    expect(input).toContain("hover:border-(--gray-500)");
+
+    const skeleton = await Bun.file(join(UI_DIR, "skeleton.tsx")).text();
+    expect(skeleton).toContain("motion-reduce:animate-none");
   });
 });
 
