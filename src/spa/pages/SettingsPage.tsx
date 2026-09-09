@@ -25,6 +25,7 @@ import {
 } from "@/components/ui/select";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { ProviderCombobox } from "../components/provider-combobox";
+import { SectionCard, SectionCardTitle, SectionGroup } from "../components/SectionCard";
 import { fetchJson, postForm } from "../api";
 import type { SpaBoot } from "../boot";
 import { deliveryOutcomeLabel } from "../delivery-outcome";
@@ -157,7 +158,7 @@ export function SettingsPage({ boot, slug }: { boot: SpaBoot; slug: string }) {
         >
           {t(locale, "settings.backToApps")}
         </a>
-        <h1 className="text-2xl font-semibold tracking-tight">{t(locale, "settings.title")}</h1>
+        <h1 className="font-semibold text-(length:--typo-heading-24-size) leading-(--typo-heading-24-line) tracking-(--typo-heading-24-tracking)">{t(locale, "settings.title")}</h1>
       </div>
       {state === "loading" ? <LoadingNotice locale={locale} /> : null}
       {state === "error" ? <LoadFailedNotice locale={locale} /> : null}
@@ -437,51 +438,61 @@ function SettingsView({
   const confirmCopy = pendingConfirmCopy(locale, app.slug, pending);
 
   return (
-    <div className="flex flex-col gap-6">
-      <div className="flex flex-wrap items-center gap-3">
-        <h2 className="text-xl font-semibold">{app.slug}</h2>
-        <StatusBadge locale={locale} status={app.status} reviewEnabled={app.review_enabled} />
-        <span className="text-sm text-muted-foreground">{t(locale, "apps.by", { login: app.created_by })}</span>
-      </div>
+    <div className="flex flex-col gap-(--spacing-8)">
+      {/* AD-591 section rhythm: two tier groups — the identity/status zone
+          (Tier 1 primary surfaces) and the configuration zone (Tier 2
+          secondary surfaces), each headed by a group eyebrow. Block order
+          and data flow are unchanged (Non-Goal); the plan-53 position
+          contract (identity card between the slug row and the manage
+          conditional) holds inside the group. */}
+      <SectionGroup label={t(locale, "settings.group.identity")}>
+        <div className="flex flex-wrap items-center gap-3">
+          <h2 className="font-semibold text-(length:--typo-heading-20-size) leading-(--typo-heading-20-line) tracking-(--typo-heading-20-tracking)">{app.slug}</h2>
+          <StatusBadge locale={locale} status={app.status} reviewEnabled={app.review_enabled} />
+          <span className="text-sm text-muted-foreground">{t(locale, "apps.by", { login: app.created_by })}</span>
+        </div>
 
-      {/* Plan 53 A5: the GitHub identity card sits between the slug row and
-          the manage conditional, so BOTH faces (OpsCard managers and
-          HealthCard members) see it (AC3). */}
-      <AppInfoCard locale={locale} app={app} />
+        {/* Plan 53 A5: the GitHub identity card sits between the slug row and
+            the manage conditional, so BOTH faces (OpsCard managers and
+            HealthCard members) see it (AC3). */}
+        <AppInfoCard locale={locale} app={app} />
 
-      {payload.can_manage ? (
-        <OpsCard locale={locale} payload={payload} onPending={setPending} notice={opsNotice} />
-      ) : (
-        <HealthCard locale={locale} payload={payload} />
-      )}
+        {payload.can_manage ? (
+          <OpsCard locale={locale} payload={payload} onPending={setPending} notice={opsNotice} />
+        ) : (
+          <HealthCard locale={locale} payload={payload} />
+        )}
+      </SectionGroup>
 
-      <RuntimeImageCard locale={locale} payload={payload} onSettings={submitSettings} />
+      <SectionGroup label={t(locale, "settings.group.configuration")}>
+        <RuntimeImageCard locale={locale} payload={payload} onSettings={submitSettings} />
 
-      {payload.can_manage ? (
-        <>
-          <ProvidersCard
-            locale={locale}
-            payload={payload}
-            onVerify={submitVerify}
-            onSettings={submitSettings}
-            onPending={setPending}
-            notice={providersNotice}
-            removeOutcome={providersRemoveOutcome}
-            onOutcome={setProvidersNotice}
-          />
-          <ChainsCard
-            locale={locale}
-            payload={payload}
-            groups={groups}
-            onSettings={submitSettings}
-            onCreateDraft={createDraftChain}
-            onRemoveChain={(name) => setPending({ kind: "remove-chain", name })}
-            notice={chainsNotice}
-            onOutcome={setChainsNotice}
-          />
-          <SeatsCard locale={locale} payload={payload} onSettings={submitSettings} />
-        </>
-      ) : null}
+        {payload.can_manage ? (
+          <>
+            <ProvidersCard
+              locale={locale}
+              payload={payload}
+              onVerify={submitVerify}
+              onSettings={submitSettings}
+              onPending={setPending}
+              notice={providersNotice}
+              removeOutcome={providersRemoveOutcome}
+              onOutcome={setProvidersNotice}
+            />
+            <ChainsCard
+              locale={locale}
+              payload={payload}
+              groups={groups}
+              onSettings={submitSettings}
+              onCreateDraft={createDraftChain}
+              onRemoveChain={(name) => setPending({ kind: "remove-chain", name })}
+              notice={chainsNotice}
+              onOutcome={setChainsNotice}
+            />
+            <SeatsCard locale={locale} payload={payload} onSettings={submitSettings} />
+          </>
+        ) : null}
+      </SectionGroup>
 
       <Dialog
         open={pending !== null}
@@ -595,9 +606,9 @@ function pendingConfirmCopy(
  */
 export function AppInfoCard({ locale, app }: { locale: SpaBoot["locale"]; app: SettingsAppMeta }) {
   return (
-    <Card>
+    <SectionCard tier="primary">
       <CardHeader>
-        <CardTitle>{t(locale, "settings.appInfo")}</CardTitle>
+        <SectionCardTitle>{t(locale, "settings.appInfo")}</SectionCardTitle>
         <CardDescription>{t(locale, "settings.appInfoCopy")}</CardDescription>
       </CardHeader>
       <CardContent>
@@ -644,7 +655,7 @@ export function AppInfoCard({ locale, app }: { locale: SpaBoot["locale"]; app: S
           </div>
         </div>
       </CardContent>
-    </Card>
+    </SectionCard>
   );
 }
 
@@ -703,15 +714,15 @@ function HealthBody({ locale, payload }: { locale: SpaBoot["locale"]; payload: S
 
 function HealthCard({ locale, payload }: { locale: SpaBoot["locale"]; payload: SettingsPayload }) {
   return (
-    <Card>
+    <SectionCard tier="primary">
       <CardHeader>
-        <CardTitle>{t(locale, "settings.installHealth")}</CardTitle>
+        <SectionCardTitle>{t(locale, "settings.installHealth")}</SectionCardTitle>
         <CardDescription>{t(locale, "settings.installHealthCopy")}</CardDescription>
       </CardHeader>
       <CardContent>
         <HealthBody locale={locale} payload={payload} />
       </CardContent>
-    </Card>
+    </SectionCard>
   );
 }
 
@@ -732,9 +743,9 @@ function RuntimeImageCard({
   onSettings: (fields: Record<string, string>) => Promise<OpNotice>;
 }) {
   return (
-    <Card>
+    <SectionCard tier="secondary">
       <CardHeader>
-        <CardTitle>{t(locale, "settings.runtimeImage")}</CardTitle>
+        <SectionCardTitle>{t(locale, "settings.runtimeImage")}</SectionCardTitle>
         <CardDescription>{t(locale, "settings.runtimeImageCopy")}</CardDescription>
       </CardHeader>
       <CardContent>
@@ -746,7 +757,7 @@ function RuntimeImageCard({
           </p>
         )}
       </CardContent>
-    </Card>
+    </SectionCard>
   );
 }
 
@@ -822,9 +833,9 @@ function OpsCard({
   const { app } = payload;
   const paused = isPaused(app);
   return (
-    <Card>
+    <SectionCard tier="primary">
       <CardHeader>
-        <CardTitle>{t(locale, "settings.ops")}</CardTitle>
+        <SectionCardTitle>{t(locale, "settings.ops")}</SectionCardTitle>
         <CardDescription>{t(locale, "settings.opsCopy")}</CardDescription>
       </CardHeader>
       <CardContent className="flex flex-col gap-6">
@@ -860,7 +871,7 @@ function OpsCard({
         </div>
         <HealthBody locale={locale} payload={payload} />
       </CardContent>
-    </Card>
+    </SectionCard>
   );
 }
 

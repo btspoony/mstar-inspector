@@ -181,6 +181,11 @@ export const zhCN: Dictionary = {
   settings: {
     title: "应用设置",
     backToApps: "返回应用",
+    /** Plan 59 T1 (AD-591): 分组 eyebrow 标签——身份/状态区与配置区（双语原子）。 */
+    group: {
+      identity: "身份",
+      configuration: "配置",
+    },
     changesSaved: "更改已保存。",
     addKey: "添加密钥",
     provider: "模型提供方",
