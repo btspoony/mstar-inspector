@@ -1,7 +1,9 @@
 import { useEffect } from "react";
 import { t } from "../../i18n";
+import styles from "../pages.module.css";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import { Logo } from "../components/AppSidebar";
 import type { SpaBoot } from "../boot";
 
 // lucide-react ships no GitHub brand mark — inline the octocat silhouette.
@@ -15,6 +17,14 @@ export function GitHubMark({ className }: { className?: string }) {
   );
 }
 
+/**
+ * Plan 58 A3 login facade (clarify-locked form: centered-card reinforced).
+ * The T1 sidebar wordmark echoes above the card (same Logo silhouette +
+ * `nav.brand`); the concise card title rides the DESIGN.md heading-32 step
+ * ("login wordmark-scale titles"). The GitHub POST, the signed-in redirect,
+ * and every dictionary key keep their plan-33 behavior — this is a face
+ * change only.
+ */
 export function LoginPage({ boot }: { boot: SpaBoot }) {
   const locale = boot.locale;
 
@@ -23,10 +33,16 @@ export function LoginPage({ boot }: { boot: SpaBoot }) {
   }, [boot.login]);
 
   return (
-    <div className="flex min-h-svh items-center justify-center p-6">
-      <Card className="w-full max-w-sm">
+    <div className="flex min-h-svh flex-col items-center justify-center gap-6 p-6">
+      <div className="flex items-center gap-2">
+        <Logo />
+        <span className="text-sm font-semibold tracking-tight">{t(locale, "nav.brand")}</span>
+      </div>
+      <Card className={`w-full max-w-sm ${styles.loginEnter}`}>
         <CardHeader>
-          <CardTitle className="text-xl">{t(locale, "login.heading")}</CardTitle>
+          <CardTitle className="text-(length:--typo-heading-32-size) leading-(--typo-heading-32-line) tracking-(--typo-heading-32-tracking)">
+            {t(locale, "login.heading")}
+          </CardTitle>
           <CardDescription>{t(locale, "login.description")}</CardDescription>
         </CardHeader>
         <CardContent className="flex flex-col gap-4">
