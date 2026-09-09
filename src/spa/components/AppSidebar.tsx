@@ -18,7 +18,13 @@ const NAV_ICONS = {
   "/dashboard/members": Users,
 } as const;
 
-function Logo() {
+/**
+ * Brand mark (plan 58 A3): the sidebar wordmark mark is the single source —
+ * the login face's wordmark echo imports this same silhouette instead of
+ * duplicating it. Color rides `currentColor` (`text-primary` = brand-700
+ * through the shadcn bridge); size is set at the usage site.
+ */
+export function Logo() {
   return (
     <svg className="size-6 shrink-0 text-primary" width="24" height="24" viewBox="0 0 24 24" aria-hidden="true">
       <circle cx="12" cy="12" r="10" fill="none" stroke="currentColor" strokeWidth="1.5" />

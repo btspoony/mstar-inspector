@@ -1453,8 +1453,9 @@ describe("settings header typography (plan 45 T7)", () => {
     // h1 (text-2xl = heading-24). DESIGN.md's heading scale is 32/24/20/16
     // only, and heading-20 is the panel-title tier — heading-16 would demote
     // the slug below the cards it titles. In code the scale step is the
-    // default Tailwind size utility (sibling panel title: LoginPage
-    // CardTitle text-xl).
+    // default Tailwind size utility text-xl (plan 58 T2 moved the login
+    // card title onto the heading-32 token utilities; this page keeps the
+    // named-scale discipline for its panels).
     expect(source).toContain('<h2 className="text-xl font-semibold">{app.slug}</h2>');
     // The off-scale 18px class no longer appears anywhere on the page.
     expect(source).not.toContain("text-lg");

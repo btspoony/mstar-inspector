@@ -73,7 +73,7 @@ export const en = {
     retry: "Retry",
   },
   login: {
-    heading: "Sign in to Morning Star Inspector",
+    heading: "Sign in",
     description: "Use your GitHub account to access the console.",
     signIn: "Sign in with GitHub",
     inviteOnly: "This deployment is invite-only — ask an admin to add your GitHub login.",

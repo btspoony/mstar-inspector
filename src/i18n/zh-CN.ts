@@ -61,7 +61,7 @@ export const zhCN: Dictionary = {
     retry: "重试",
   },
   login: {
-    heading: "登录 Morning Star Inspector",
+    heading: "登录",
     description: "使用你的 GitHub 账号访问控制台。",
     signIn: "使用 GitHub 登录",
     inviteOnly: "此部署仅限受邀成员 — 请让管理员添加你的 GitHub 登录名。",

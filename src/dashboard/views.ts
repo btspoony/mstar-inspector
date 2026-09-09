@@ -42,6 +42,9 @@ const STYLE = `<style>
   /* Brand accent — value-synced with tokens.css (three-site covenant, QC
      round 1 F-002); --button-primary-bg below references it. */
   --brand-700: #22d3ee;
+  /* Tinted elevation — value-synced with tokens.css (plan 58 A3 SSR sync);
+     the auth-card face below consumes it. */
+  --shadow-card: 0 1px 2px #02061766, 0 2px 8px #02061733;
   --red-100: #2a1215;
   --red-400: #7f1d1d;
   --red-700: #f87171;
@@ -128,6 +131,7 @@ const STYLE = `<style>
     --gray-alpha-400: #10192824;
     --blue-700: #0066cc;
     --brand-700: #0e7490;
+    --shadow-card: 0 1px 2px #10192814, 0 2px 8px #1019280f;
     --red-100: #fef2f2;
     --red-400: #fca5a5;
     --red-700: #b91c1c;
@@ -155,6 +159,7 @@ const STYLE = `<style>
   --gray-alpha-400: #10192824;
   --blue-700: #0066cc;
   --brand-700: #0e7490;
+  --shadow-card: 0 1px 2px #10192814, 0 2px 8px #1019280f;
   --red-100: #fef2f2;
   --red-400: #fca5a5;
   --red-700: #b91c1c;
@@ -234,6 +239,43 @@ h1 {
   letter-spacing: var(--typo-heading-24-tracking);
 }
 main { max-width: 960px; margin: 0 auto; padding: var(--spacing-6) var(--spacing-4); }
+/* Auth-journey faces (plan 58 A3 SSR sync): the no-chrome auth surfaces
+   (denied / removed / forbidden / OAuth error) share the SPA login face's
+   centered-card language — brand wordmark echo + card tokens on the themed
+   canvas. Values ride the token subset above (three-site covenant with
+   tokens.css); the manifest flow pages stay on the plain main/banner face. */
+main.auth {
+  display: grid;
+  place-items: center;
+  min-height: 100vh;
+  max-width: none;
+  padding: var(--spacing-6) var(--spacing-4);
+}
+.auth-card {
+  width: 100%;
+  max-width: 384px;
+  background: var(--card-bg);
+  color: var(--card-fg);
+  border: 1px solid var(--card-border);
+  border-radius: var(--card-radius);
+  box-shadow: var(--shadow-card);
+  padding: var(--card-padding);
+}
+.auth-brand {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-2);
+  margin: 0 0 var(--spacing-4);
+  font-size: 14px;
+  font-weight: 600;
+  letter-spacing: -0.025em;
+}
+.auth-brand svg {
+  width: 24px;
+  height: 24px;
+  flex: none;
+  color: var(--brand-700);
+}
 .sections { display: grid; grid-template-columns: 1fr; gap: var(--spacing-8); }
 @media (min-width: 900px) {
   .sections { grid-template-columns: repeat(3, 1fr); }
@@ -368,6 +410,35 @@ function wrapPhraseAsLink(text: string, phrase: string, href: string): string {
   const i = text.indexOf(phrase);
   if (i === -1) return text;
   return `${text.slice(0, i)}<a href="${href}">${phrase}</a>${text.slice(i + phrase.length)}`;
+}
+
+/**
+ * Brand mark for the auth-journey faces (plan 58 A3 SSR sync) — the same
+ * inline silhouette as the SPA AppSidebar Logo (zero image assets; the
+ * mark colors via `currentColor`, see `.auth-brand svg` in STYLE).
+ */
+const AUTH_MARK =
+  '<svg viewBox="0 0 24 24" width="24" height="24" aria-hidden="true"><circle cx="12" cy="12" r="10" fill="none" stroke="currentColor" stroke-width="1.5"></circle><path d="M12 4 L13.2 10.2 L20 12 L13.2 13.8 L12 20 L10.8 13.8 L4 12 L10.8 10.2 Z" fill="currentColor"></path></svg>';
+
+/**
+ * No-chrome auth-journey face (plan 58 A3 SSR sync): the login-family
+ * surfaces (denied / removed / forbidden / OAuth error) render the SPA
+ * login face's centered-card language — wordmark echo + card on the themed
+ * canvas. `bannerHtml` arrives pre-escaped by the callers (links composed
+ * with wrapPhraseAsLink pass through raw); the alert keeps role="alert"
+ * (WCAG 4.1.3, unchanged from the plan-12 banner contract).
+ */
+function authFace(title: string, bannerHtml: string, locale: Locale = "en"): string {
+  return page(
+    title,
+    `<main class="auth">
+    <section class="auth-card">
+      <div class="auth-brand">${AUTH_MARK}<span>${escapeHtml(t(locale, "nav.brand"))}</span></div>
+      <div class="banner" role="alert">${bannerHtml}</div>
+    </section>
+  </main>`,
+    locale,
+  );
 }
 
 function page(title: string, body: string, locale: Locale = "en"): string {
@@ -554,11 +625,9 @@ export function manifestErrorPage(message: string, resumable = false, locale: Lo
  * login link back (an unknown user has nothing to return to).
  */
 export function deniedPage(login: string, locale: Locale = "en"): string {
-  return page(
+  return authFace(
     t(locale, "common.error.deniedTitle"),
-    `<main>
-    <div class="banner" role="alert">${t(locale, "common.error.deniedBody", { login: escapeHtml(login) })}</div>
-  </main>`,
+    t(locale, "common.error.deniedBody", { login: escapeHtml(login) }),
     locale,
   );
 }
@@ -571,11 +640,9 @@ export function deniedPage(login: string, locale: Locale = "en"): string {
  * the OAuth callback bootstrap deny until an admin re-invites the login.
  */
 export function removedPage(login: string, locale: Locale = "en"): string {
-  return page(
+  return authFace(
     t(locale, "common.error.removedTitle"),
-    `<main>
-    <div class="banner" role="alert">${t(locale, "common.error.removedBody", { login: escapeHtml(login) })}</div>
-  </main>`,
+    t(locale, "common.error.removedBody", { login: escapeHtml(login) }),
     locale,
   );
 }
@@ -591,13 +658,7 @@ export function forbiddenPage(login: string, locale: Locale = "en"): string {
     "/dashboard",
     '<a href="/dashboard">/dashboard</a>',
   );
-  return page(
-    t(locale, "common.error.forbiddenTitle"),
-    `<main>
-    <div class="banner" role="alert">${body}</div>
-  </main>`,
-    locale,
-  );
+  return authFace(t(locale, "common.error.forbiddenTitle"), body, locale);
 }
 
 /** OAuth failure surface: red-700 banner + what-to-do-next (DESIGN.md § State legibility). */
@@ -606,11 +667,5 @@ export function errorPage(message: string, locale: Locale = "en"): string {
     "/dashboard/login",
     '<a href="/dashboard/login">/dashboard/login</a>',
   );
-  return page(
-    t(locale, "common.error.signInErrorTitle"),
-    `<main>
-    <div class="banner" role="alert">${body}</div>
-  </main>`,
-    locale,
-  );
+  return authFace(t(locale, "common.error.signInErrorTitle"), body, locale);
 }

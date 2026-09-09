@@ -225,9 +225,12 @@ describe("document title + login copy (plan 29 T7)", () => {
   });
 
   test("login-page zh copy is the dictionary source for the SPA", () => {
-    expect(t("zh_CN", "login.heading")).toBe("登录 Morning Star Inspector");
+    // Plan 58 T2.1 form lock: the concise card heading — the brand name
+    // moved to the wordmark echo above the card (nav.brand), so the title
+    // no longer carries it.
+    expect(t("zh_CN", "login.heading")).toBe("登录");
     expect(t("zh_CN", "login.signIn")).toBe("使用 GitHub 登录");
-    expect(t("en", "login.heading")).toBe("Sign in to Morning Star Inspector");
+    expect(t("en", "login.heading")).toBe("Sign in");
     expect(t("en", "login.signIn")).toBe("Sign in with GitHub");
   });
 });
