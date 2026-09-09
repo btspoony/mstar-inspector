@@ -184,6 +184,46 @@ const ACTORS = [
 ] as const;
 
 describe("App write-route permission matrix (plan 35 T1b, spec §2)", () => {
+  // Plan 61 T1.2 (F3–F8 strength pin): before any per-actor gate can even
+  // run, the mount-level membership guard bounces a session-less POST on
+  // every App write route into the OAuth flow — 302 to login, and the
+  // identical zero-mutation invariants as the member sweeps below.
+  test("matrix: anonymous (no session) × every App write route → 302 login, zero mutations", async () => {
+    const db = await seededWorld();
+    const env = makeEnv(db);
+    const fetchSpy = spyOn(globalThis, "fetch").mockImplementation(
+      (async () => {
+        // The guard fires before validation, verification, or writes — no
+        // anonymous request may reach an outbound call.
+        throw new Error("deny path (anonymous) must never call fetch");
+      }) as unknown as typeof fetch,
+    );
+    try {
+      for (const route of MATRIX_ROUTES) {
+        const res = await worker.fetch(
+          new Request(`https://worker.local${route.path}`, {
+            method: "POST",
+            headers: { "Content-Type": "application/x-www-form-urlencoded" },
+            body: new URLSearchParams(route.fields ?? {}),
+          }),
+          env,
+        );
+        expect(res.status, `anonymous × ${route.name}`).toBe(302);
+        expect(res.headers.get("Location"), `anonymous × ${route.name}`).toBe("/dashboard/login");
+      }
+    } finally {
+      fetchSpy.mockRestore();
+    }
+    expect(appStatus(db, "mallorys-app")).toBe("active");
+    expect(reviewEnabled(db, "mallorys-app")).toBe(1);
+    expect(rawCount(db, "app_provider_keys")).toBe(0);
+    expect(rawCount(db, "app_provider_models")).toBe(0);
+    expect(rawCount(db, "app_model_config")).toBe(0);
+    expect(rawCount(db, "app_model_chains")).toBe(0);
+    expect(rawCount(db, "app_model_chain_seats")).toBe(0);
+    expect(rawCount(db, "app_custom_providers")).toBe(0);
+  });
+
   for (const actor of ACTORS) {
     test(`matrix: ${actor.name} (${actor.login}) × every App write route → ${actor.expected}`, async () => {
       const db = await seededWorld();
