@@ -107,10 +107,17 @@ describe("login SSR face sync (plan 58 T2, A3 dual-track)", () => {
 
     const cssRoot = declarations(balancedBlock(tokens, ":root {"));
     const cssLight = declarations(balancedBlock(tokens, ':root[data-theme="light"] {'));
+    // tokens.css's own OS-light block lives inside the prefers-color-scheme
+    // media query — the SSR OS-light branch's true counterpart (plan 58
+    // F-58-4; balancedBlock handles the media-wrapped selector).
+    const cssOsLight = declarations(balancedBlock(tokens, ':root:not([data-theme="dark"]) {'));
 
     expect(ssrRoot["shadow-card"]).toBe(cssRoot["shadow-card"]);
     expect(ssrStoredLight["shadow-card"]).toBe(cssLight["shadow-card"]);
-    expect(ssrOsLight["shadow-card"]).toBe(cssLight["shadow-card"]);
+    // Each light branch pins against its own tokens.css counterpart, so a
+    // drift between the two tokens light blocks cannot hide behind an
+    // equal-today coincidence.
+    expect(ssrOsLight["shadow-card"]).toBe(cssOsLight["shadow-card"]);
   });
 
   test("auth-journey faces render the centered-card language with the alert role intact", async () => {

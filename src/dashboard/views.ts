@@ -424,8 +424,10 @@ const AUTH_MARK =
  * No-chrome auth-journey face (plan 58 A3 SSR sync): the login-family
  * surfaces (denied / removed / forbidden / OAuth error) render the SPA
  * login face's centered-card language — wordmark echo + card on the themed
- * canvas. `bannerHtml` arrives pre-escaped by the callers (links composed
- * with wrapPhraseAsLink pass through raw); the alert keeps role="alert"
+ * canvas. `bannerHtml` must arrive pre-escaped by the caller: dynamic values
+ * are escapeHtml-ed before `t()` interpolation, and links are composed by
+ * string replace on the already-escaped output (wrapPhraseAsLink belongs to
+ * the manifest error pages, not this face); the alert keeps role="alert"
  * (WCAG 4.1.3, unchanged from the plan-12 banner contract).
  */
 function authFace(title: string, bannerHtml: string, locale: Locale = "en"): string {

@@ -82,6 +82,17 @@ describe("members page shadcn rebuild (plan 34 T2)", () => {
     expect(source).toContain('<PageNotice kind="error" message={t(locale, "members.adminOnly")} />');
   });
 
+  test("op-triggered reloads are background — only the initial load gates the skeleton (plan 58 F-58-1)", () => {
+    // Plan-38 background-reload contract (mirrors SettingsPage): `load` flips
+    // to "loading" (the PageSkeleton gate) on foreground loads only.
+    expect(source).toContain('if (!background) setState("loading")');
+    // Both op paths (invite submit + dialog confirm) reload in the background.
+    expect(source.split("load({ background: true })").length - 1).toBe(2);
+    // No bare foreground await remains: a bare `await load()` would flip the
+    // page into the skeleton state mid-op and blink out the op PageNotice.
+    expect(source).not.toContain("await load()");
+  });
+
   test("empty member list renders the no-action EmptyState guidance (plan 58 T3)", () => {
     expect(source).toContain('t(locale, "members.emptyTitle")');
     expect(source).toContain('t(locale, "members.emptyDescription")');

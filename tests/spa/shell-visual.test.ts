@@ -39,6 +39,9 @@ describe("motion token sweep (plan 58 T1, routed from plan 57 QC)", () => {
   for (const [name, source] of Object.entries(sources)) {
     test(`${name}.tsx carries no raw duration or easing literals`, () => {
       expect(source).not.toMatch(/duration-\d{2,4}\b/);
+      // Arbitrary-value forms are raw literals too (plan 58 F-58-3) — the
+      // token consumers use the paren shorthand, never `duration-[...]`.
+      expect(source).not.toMatch(/duration-\[[^\]]+\]/);
       expect(source).not.toMatch(/\bease-linear\b/);
       expect(source).not.toMatch(/cubic-bezier\(/);
     });
