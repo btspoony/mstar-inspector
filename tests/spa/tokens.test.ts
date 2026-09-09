@@ -3,9 +3,13 @@
  * Plan 57 T1: v0.3 value rebase (AD-573) — token names frozen, values swapped
  * (Signal Cyan brand, cool neutral retune, motion/elevation tokens, two-tier
  * radius per AD-571/573/574).
+ * Plan 57 T2: self-hosted Geist Sans (AD-572) — three-site font-stack parity,
+ * @font-face contract (swap, latin-only range), and the vendored-binary size
+ * budget.
  *
  * Locked contract:
- *   - version 0.3.0, defaultTheme dark; the theme mechanism is the manual
+ *   - version 0.3.1 (0.3.0 = plan 57 T1 rebase; 0.3.1 = T2 font flip),
+ *     defaultTheme dark; the theme mechanism is the manual
  *     data-theme override (navbar toggle) with the prefers-color-scheme
  *     fallback — plan 41 T2 rewrites the frontmatter keys together with the
  *     DESIGN.md body and pins the dated plan-29 supersede note
@@ -18,6 +22,9 @@
  *     :root:not([data-theme="dark"]) (plan 41 T1 — reverses the plan-29
  *     "no data-theme attribute selector" lock)
  */
+import { readdirSync, readFileSync, statSync } from "node:fs";
+import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { describe, expect, test } from "bun:test";
 
 const DESIGN = new URL("../../DESIGN.md", import.meta.url);
@@ -108,7 +115,8 @@ function extractBlock(css: string, openToken: string): string {
 describe("DESIGN.md L2 dual-theme tokens", () => {
   test("frontmatter version, default theme, and L1 name continuity", async () => {
     const fm = await loadFrontmatter();
-    expect(fm.version).toBe("0.3.0");
+    // 0.3.1 = plan 57 T2 (AD-572 font flip) on top of the T1 value rebase.
+    expect(fm.version).toBe("0.3.1");
     expect(fm.defaultTheme).toBe("dark");
     // Plan 41 T2: manual data-theme override (navbar toggle) with the OS
     // fallback — top-level keys and themes: keys move together.
@@ -345,6 +353,83 @@ describe("DESIGN.md v0.3 design-language tokens (plan 57 T1)", () => {
     for (const [name, fg, bg] of fillPairs) {
       expect(ratio(fg, bg), name).toBeGreaterThanOrEqual(3);
     }
+  });
+});
+
+describe("DESIGN.md self-hosted Geist Sans typeface (plan 57 T2, AD-572)", () => {
+  const FONTS_CSS = new URL("../../src/spa/styles/fonts.css", import.meta.url);
+  const VIEWS = new URL("../../src/dashboard/views.ts", import.meta.url);
+  const FONT_DIR = fileURLToPath(new URL("../../src/spa/assets/fonts/", import.meta.url));
+  /** Geist first; the system entries keep zh and fallback-glyph duty. */
+  const GEIST_STACK = '"Geist Sans", ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, sans-serif';
+  const MONO_STACK = "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace";
+  const VENDORED = ["geist-sans-latin-400.woff2", "geist-sans-latin-500.woff2", "geist-sans-latin-600.woff2"];
+
+  test("@font-face registers three Geist weights with swap and a zh-excluding range", async () => {
+    const css = await Bun.file(FONTS_CSS).text();
+    const blocks = [...css.matchAll(/@font-face\s*\{([^}]*)\}/g)].map((m) => m[1]!);
+    expect(blocks).toHaveLength(3);
+
+    const weights: number[] = [];
+    for (const block of blocks) {
+      expect(block).toContain('font-family: "Geist Sans"');
+      expect(block).toContain("font-display: swap");
+      expect(block).toContain('format("woff2")');
+      expect(block).toContain('url("../assets/fonts/geist-sans-latin-');
+      weights.push(Number(block.match(/font-weight:\s*(\d+)/)?.[1]));
+      // zh text must never select this face: no declared range may cover
+      // CJK, kana, or fullwidth codepoints (probes: ideographic space,
+      // hiragana, the first CJK ideograph, fullwidth comma). zh runs then
+      // render on the system stack and pure-zh pages never download.
+      const probes: [number, string][] = [
+        [0x3000, "ideographic space"],
+        [0x3042, "hiragana"],
+        [0x4e00, "first CJK ideograph"],
+        [0xff0c, "fullwidth comma"],
+      ];
+      for (const m of block.matchAll(/U\+([0-9A-Fa-f]{4,6})(?:-([0-9A-Fa-f]{4,6}))?/g)) {
+        const lo = parseInt(m[1]!, 16);
+        const hi = parseInt(m[2] ?? m[1]!, 16);
+        for (const [cp, label] of probes) {
+          const covered = cp >= lo && cp <= hi;
+          expect(covered, `range U+${lo.toString(16)}-${hi.toString(16)} covers ${label} U+${cp.toString(16)}`).toBe(false);
+        }
+      }
+    }
+    expect(weights.sort((a, b) => a - b)).toEqual([400, 500, 600]);
+  });
+
+  test("the Geist stack is identical at all three value sites; mono stays system", async () => {
+    const fm = await loadFrontmatter();
+    const css = await Bun.file(TOKENS_CSS).text();
+    const views = await Bun.file(VIEWS).text();
+
+    for (const [name, fields] of Object.entries(fm.typography)) {
+      if (name === "mono-13") continue;
+      expect(fields.fontFamily, name).toBe(GEIST_STACK);
+    }
+    expect(fm.typography["mono-13"]!.fontFamily).toBe(MONO_STACK);
+
+    expect(cssCustomProperties(extractBlock(css, ":root {"))["font-sans"]).toBe(GEIST_STACK);
+
+    const styleStart = views.indexOf("const STYLE = `<style>");
+    const style = views.slice(styleStart, views.indexOf("`;", styleStart));
+    expect(style.match(/--font-sans: ([^;]+);/)?.[1]).toBe(GEIST_STACK);
+  });
+
+  test("vendored binaries are real woff2, inside the 150KB budget, with the OFL license", () => {
+    expect(readdirSync(FONT_DIR)).toContain("OFL.txt");
+    expect(readdirSync(FONT_DIR).filter((f) => f.endsWith(".woff2")).sort()).toEqual(VENDORED);
+
+    let total = 0;
+    for (const file of VENDORED) {
+      const path = join(FONT_DIR, file);
+      // woff2 magic — guards against a placeholder/error-page binary.
+      expect(readFileSync(path).subarray(0, 4).toString("latin1")).toBe("wOF2");
+      total += statSync(path).size;
+    }
+    // AD-572 budget: 150KB read decimal — the stricter of the two readings.
+    expect(total, `${total} bytes of woff2 vs the 150KB budget`).toBeLessThanOrEqual(150_000);
   });
 });
 

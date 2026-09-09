@@ -1,7 +1,7 @@
 ---
-version: 0.3.0
+version: 0.3.1
 name: mstar-inspector Console
-description: "Bold Signal-Cyan ops-console design system for the mstar-inspector developer dashboard. Dense, decisive, state through color + copy; one confident cyan accent on cool zinc neutrals. Dark is the default theme; light follows prefers-color-scheme until the navbar theme toggle stores a manual choice (localStorage mstar.dashboard.theme, light|dark) — the stored choice wins over the OS. Supersedes the plan-29 lock (2026-09-04, user instruction, iteration 013). v0.3 (plan 57, AD-573) is a values-only rebase: existing token names are frozen; brand, motion, and elevation enter as additive namespaces."
+description: "Bold Signal-Cyan ops-console design system for the mstar-inspector developer dashboard. Dense, decisive, state through color + copy; one confident cyan accent on cool zinc neutrals. Dark is the default theme; light follows prefers-color-scheme until the navbar theme toggle stores a manual choice (localStorage mstar.dashboard.theme, light|dark) — the stored choice wins over the OS. Supersedes the plan-29 lock (2026-09-04, user instruction, iteration 013). v0.3 (plan 57, AD-573) is a values-only rebase: existing token names are frozen; brand, motion, and elevation enter as additive namespaces. v0.3.1 (plan 57 T2, AD-572) flips the sans stack to self-hosted Geist Sans — latin/latin-ext woff2 with font-display: swap; zh text falls back to the system stack."
 
 # Runtime default = dark. Top-level colors: matches themes.dark.colors so
 # {colors.X} component refs resolve to the console default. Light values
@@ -380,61 +380,61 @@ themes:
 
 typography:
   heading-32:
-    fontFamily: "ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, sans-serif"
+    fontFamily: "\"Geist Sans\", ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, sans-serif"
     fontSize: 32px
     fontWeight: 600
     lineHeight: 1.2
     letterSpacing: -0.02em
   heading-24:
-    fontFamily: "ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, sans-serif"
+    fontFamily: "\"Geist Sans\", ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, sans-serif"
     fontSize: 24px
     fontWeight: 600
     lineHeight: 1.25
     letterSpacing: -0.01em
   heading-20:
-    fontFamily: "ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, sans-serif"
+    fontFamily: "\"Geist Sans\", ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, sans-serif"
     fontSize: 20px
     fontWeight: 600
     lineHeight: 1.3
     letterSpacing: -0.01em
   heading-16:
-    fontFamily: "ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, sans-serif"
+    fontFamily: "\"Geist Sans\", ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, sans-serif"
     fontSize: 16px
     fontWeight: 600
     lineHeight: 1.4
     letterSpacing: 0
   label-14:
-    fontFamily: "ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, sans-serif"
+    fontFamily: "\"Geist Sans\", ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, sans-serif"
     fontSize: 14px
     fontWeight: 500
     lineHeight: 1.4
     letterSpacing: 0
   label-12:
-    fontFamily: "ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, sans-serif"
+    fontFamily: "\"Geist Sans\", ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, sans-serif"
     fontSize: 12px
     fontWeight: 500
     lineHeight: 1.4
     letterSpacing: 0.01em
   copy-16:
-    fontFamily: "ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, sans-serif"
+    fontFamily: "\"Geist Sans\", ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, sans-serif"
     fontSize: 16px
     fontWeight: 400
     lineHeight: 1.6
     letterSpacing: 0
   copy-14:
-    fontFamily: "ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, sans-serif"
+    fontFamily: "\"Geist Sans\", ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, sans-serif"
     fontSize: 14px
     fontWeight: 400
     lineHeight: 1.55
     letterSpacing: 0
   button-14:
-    fontFamily: "ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, sans-serif"
+    fontFamily: "\"Geist Sans\", ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, sans-serif"
     fontSize: 14px
     fontWeight: 500
     lineHeight: 1.4
     letterSpacing: 0
   button-12:
-    fontFamily: "ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, sans-serif"
+    fontFamily: "\"Geist Sans\", ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, sans-serif"
     fontSize: 12px
     fontWeight: 500
     lineHeight: 1.4
@@ -646,12 +646,14 @@ additive namespaces: `brand-*` (Signal Cyan), `shadow-card`/`shadow-pop`
 (tinted elevation), `duration-*`/`ease-*` (motion). Three value sites move
 together and are machine-pinned: this frontmatter →
 `src/spa/styles/tokens.css` (both light branches) → the `views.ts` STYLE
-subset. Staged delivery inside plan 57: Task 1 lands palette + motion +
-radius + elevation; the self-hosted typeface (`--font-sans`, Geist Sans per
-AD-572) flips both sites together in Task 2, and the shadcn bridge
-re-point (`--primary: var(--blue-700)` → `var(--brand-700)`) plus component
-restyle lands in Task 3 — until T3 the rendered primary button still reads
-`blue-700` while this file already declares the brand target.
+subset. Staged delivery inside plan 57: Task 1 landed palette + motion +
+radius + elevation; Task 2 (v0.3.1) flipped the self-hosted typeface —
+`--font-sans` and every sans `fontFamily` now carry Geist Sans ahead of the
+system fallbacks, with the woff2 riding the vite module graph — and the
+shadcn bridge re-point (`--primary: var(--blue-700)` → `var(--brand-700)`)
+plus component restyle lands in Task 3 — until T3 the rendered primary
+button still reads `blue-700` while this file already declares the brand
+target.
 
 A separate `DESIGN.dark.md` is intentionally not used: the assignment stores
 both palettes in one file under `themes:`.
@@ -705,11 +707,16 @@ A disabled placeholder must never look like a clickable primary button: use
 
 ## Typography
 
-Frontmatter `typography:` is the SSOT. v0.3 declares the type identity as
-**Geist Sans** (AD-572, self-hosted latin woff2 + system-stack zh fallback);
-the frontmatter still carries the system stack until plan 57 Task 2 flips
-`--font-sans` and `fontFamily` together. The mono scale stays the system
-mono stack.
+Frontmatter `typography:` is the SSOT. The type identity is **Geist Sans**
+(AD-572): latin/latin-ext subset woff2 self-hosted at
+`src/spa/assets/fonts/` with `@font-face` declarations in
+`src/spa/styles/fonts.css` — weights 400/500/600, exactly the three the
+scale below declares (v0.3.1, plan 57 T2). `font-display: swap` keeps first
+paint on the system stack; the declared `unicode-range` excludes CJK
+codepoints, so zh text never selects the face or triggers a download and
+falls back to the system entries of `--font-sans`. The face ships native
+tabular figures (`tnum`). License: SIL OFL 1.1, vendored as
+`src/spa/assets/fonts/OFL.txt`. The mono scale stays the system mono stack.
 
 Kept from L1: `heading-24`, `heading-16`, `copy-16`, `copy-14`.
 

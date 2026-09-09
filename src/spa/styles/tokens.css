@@ -129,8 +129,10 @@
   --pink-900: #fbcfe8;
   --pink-1000: #fce7f3;
 
-  /* typography primitives */
-  --font-sans: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+  /* typography primitives — sans is self-hosted Geist Sans (plan 57 T2,
+     AD-572; @font-face in styles/fonts.css, latin woff2 + swap). zh and any
+     uncovered glyphs fall back to the system stack. */
+  --font-sans: "Geist Sans", ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
   --font-mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
 
   --typo-heading-32-family: var(--font-sans);

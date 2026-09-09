@@ -48,7 +48,11 @@ const STYLE = `<style>
   --amber-700: #fbbf24;
   --amber-800: #fcd34d;
   --amber-900: #fde68a;
-  --font-sans: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+  /* Three-site covenant: same stack as tokens.css/DESIGN.md (plan 57 T2,
+     AD-572). This zero-build SSR face declares no @font-face — "Geist Sans"
+     falls through to the system entries here; the woff2 ships via the SPA
+     bundle (styles/fonts.css). */
+  --font-sans: "Geist Sans", ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
   --font-mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
   --typo-heading-24-size: 24px;
   --typo-heading-24-weight: 600;
