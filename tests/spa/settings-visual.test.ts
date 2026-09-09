@@ -7,7 +7,7 @@
  *    the copy-in ui/card.tsx); the page picks a tier through the prop and
  *    never hand-assembles tier classNames. Tier 1 = identity/status zone
  *    (slug row + AppInfo + Ops/Health), Tier 2 = configuration zone
- *    (RuntimeImage; Providers/Chains/Seats join in T2).
+ *    (RuntimeImage from T1; Providers/Chains/Seats joined in T2).
  * 2. v0.3 face: page/panel headings ride the heading-24/20 token steps
  *    (plan-58 QC idiom convergence), card titles ride heading-16, group
  *    eyebrows separate the two zones at the spacing-8 rhythm.
@@ -134,8 +134,9 @@ describe("settings heading idiom (plan 59 T1, plan-58 QC convergence)", () => {
     expect(sectionCard).toContain("text-(length:--typo-heading-16-size)");
     expect(sectionCard).toContain("leading-(--typo-heading-16-line)");
     expect(sectionCard).toContain("tracking-(--typo-heading-16-tracking)");
-    // Each re-parented T1 card consumes the upgraded title (the T2 cards
-    // keep the primitive until their own wave).
+    // Each re-parented card consumes the upgraded title (the T1 wave re-parented
+    // identity/status + runtime image; T2 added providers/chains/seats — pinned
+    // in the T2 describe below).
     for (const card of ["export function AppInfoCard", "function HealthCard", "function RuntimeImageCard", "function OpsCard"]) {
       const from = settingsPage.indexOf(card);
       expect(from, card).toBeGreaterThan(-1);
@@ -160,5 +161,84 @@ describe("group eyebrow copy (plan 59 T1, A8)", () => {
     expect(t("zh_CN", "settings.group.identity")).toBe("身份");
     expect(t("en", "settings.group.configuration")).toBe("Configuration");
     expect(t("zh_CN", "settings.group.configuration")).toBe("配置");
+  });
+});
+
+describe("providers/chains/seats re-parent (plan 59 T2 / AD-591)", () => {
+  const cardBlock = (start: string, end: string) => {
+    const from = settingsPage.indexOf(start);
+    expect(from, start).toBeGreaterThan(-1);
+    return settingsPage.slice(from, settingsPage.indexOf(end, from));
+  };
+
+  test("the three configuration cards ride the Tier 2 surface through the prop, not hand-assembled faces", () => {
+    // The page never spells tier classes (the T1 single-point pin above); the
+    // three manage-face configuration cards re-parent exactly like the
+    // runtime image card did — one prop, zero per-block className assembly.
+    expect(cardBlock("function ProvidersCard", "function ConfiguredKeyRow")).toContain(
+      '<SectionCard tier="secondary">',
+    );
+    expect(cardBlock("function ChainsCard", "function SeatsCard")).toContain(
+      '<SectionCard tier="secondary">',
+    );
+    expect(cardBlock("function SeatsCard", "function DraftChainPanel")).toContain(
+      '<SectionCard tier="secondary">',
+    );
+    // No raw <Card> remains: the whole settings page composes SectionCard.
+    expect(settingsPage).not.toContain("<Card>");
+  });
+
+  test("each re-parented card titles through SectionCardTitle (the heading-16 step)", () => {
+    for (const [card, next] of [
+      ["function ProvidersCard", "function ConfiguredKeyRow"],
+      ["function ChainsCard", "function SeatsCard"],
+      ["function SeatsCard", "function DraftChainPanel"],
+    ] as const) {
+      expect(cardBlock(card, next), card).toContain("<SectionCardTitle>");
+    }
+  });
+
+  test("form labels stay label-above-control; the mirror rows speak one compact dialect", () => {
+    // The shared label-above-field wrapper survives untouched on every
+    // ProviderConfigForm / CustomExpand / DraftChainPanel / SeatsCard field
+    // (plan-38/54 aria-labelledby picker label rides its own pinned idiom).
+    const labelIdiom = 'className="flex flex-col gap-1.5 text-sm font-medium"';
+    expect(settingsPage.split(labelIdiom).length - 1).toBeGreaterThanOrEqual(8);
+    // Both configured-row kinds (the mirror rows) title at the label-14 form
+    // face and carry their meta at the compact xs muted face — one dialect.
+    const keyRow = cardBlock("function ConfiguredKeyRow", "function ConfiguredCustomRow");
+    const customRow = cardBlock("function ConfiguredCustomRow", "function AddProviderSection");
+    for (const [name, row] of [
+      ["key row", keyRow],
+      ["custom row", customRow],
+    ] as const) {
+      expect(row, name).toContain('<div className="text-sm font-medium">{label}</div>');
+      expect(row, name).toContain('className="text-xs text-muted-foreground"');
+    }
+    // Compactness pins stay structural: hairline + container radius + the
+    // padded row body (plan-55 mirror-row compactness, faces retuned only).
+    for (const row of [keyRow, customRow]) {
+      expect(row).toContain("flex flex-wrap items-center justify-between gap-2 rounded-md border p-3");
+    }
+  });
+});
+
+describe("provider combobox panel face (plan 59 T2)", () => {
+  const combobox = readFileSync(join(spaRoot, "components/provider-combobox.tsx"), "utf8");
+
+  test("the open panel rides the v0.3 popover elevation; group labels ride the label-12 idiom", () => {
+    // DESIGN.md elevation: shadow-pop is the popover/disclosure step (the
+    // plan-57 SelectContent face); the generic shadow-md is gone. Container
+    // radius tier + popover surface stay, and the height cap / internal
+    // scroll (plan-42/54 pins) is untouched.
+    expect(combobox).toContain("shadow-(--shadow-pop)");
+    expect(combobox).not.toContain("shadow-md");
+    expect(combobox).toContain("rounded-md border bg-popover");
+    expect(combobox).toContain("max-h-72");
+    // T1 review Minor 1 convergence: label faces prefer the typo-label-12
+    // tracking idiom (same carrier as the SectionGroup eyebrows).
+    expect(combobox).toContain("tracking-(--typo-label-12-tracking)");
+    // Zero raw hex in the component (iteration hard constraint #4).
+    expect(combobox).not.toMatch(/#[0-9a-fA-F]{3,8}\b/);
   });
 });

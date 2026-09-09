@@ -3,7 +3,7 @@ import { ExternalLink, Plus } from "lucide-react";
 import { isDictionaryKey, t, type DictionaryKey } from "../../i18n";
 import { APP_VERSION } from "../../version";
 import { Button } from "@/components/ui/button";
-import { Card, CardAction, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import { CardAction, CardContent, CardDescription, CardHeader } from "@/components/ui/card";
 import {
   Dialog,
   DialogClose,
@@ -927,9 +927,9 @@ function ProvidersCard({
         );
 
   return (
-    <Card>
+    <SectionCard tier="secondary">
       <CardHeader>
-        <CardTitle>{t(locale, "settings.providers")}</CardTitle>
+        <SectionCardTitle>{t(locale, "settings.providers")}</SectionCardTitle>
         <CardDescription>{t(locale, "settings.providersCopy")}</CardDescription>
         <CardAction>
           <Button type="button" variant="outline" size="sm" aria-expanded={addOpen} onClick={() => setAddOpen(!addOpen)}>
@@ -995,7 +995,7 @@ function ProvidersCard({
           onSettings={onSettings}
         />
       </CardContent>
-    </Card>
+    </SectionCard>
   );
 }
 
@@ -1013,7 +1013,7 @@ function ConfiguredKeyRow({
   return (
     <div className="flex flex-wrap items-center justify-between gap-2 rounded-md border p-3">
       <div>
-        <div className="font-medium">{label}</div>
+        <div className="text-sm font-medium">{label}</div>
         <div className="text-xs text-muted-foreground">
           {row.provider} ·{" "}
           {row.last4 ? t(locale, "settings.keyEnding", { last4: row.last4 }) : t(locale, "settings.keyTooShort")}
@@ -1048,8 +1048,8 @@ function ConfiguredCustomRow({
   return (
     <div className="flex flex-wrap items-center justify-between gap-2 rounded-md border p-3">
       <div>
-        <div className="font-medium">{label}</div>
-        <div className="text-sm text-muted-foreground">
+        <div className="text-sm font-medium">{label}</div>
+        <div className="text-xs text-muted-foreground">
           {row.provider_id} · {row.base_url} · {row.api} · {row.model_ids.join(", ")}
         </div>
       </div>
@@ -1522,9 +1522,9 @@ function ChainsCard({
   }
 
   return (
-    <Card>
+    <SectionCard tier="secondary">
       <CardHeader>
-        <CardTitle>{t(locale, "settings.modelChains")}</CardTitle>
+        <SectionCardTitle>{t(locale, "settings.modelChains")}</SectionCardTitle>
         <CardDescription>{t(locale, "settings.modelChainsCopy")}</CardDescription>
       </CardHeader>
       <CardContent className="flex flex-col gap-6">
@@ -1615,7 +1615,7 @@ function ChainsCard({
             the editors themselves render their save outcomes in-panel. */}
         <NoticeRegion notice={notice} />
       </CardContent>
-    </Card>
+    </SectionCard>
   );
 }
 
@@ -1675,9 +1675,9 @@ function SeatsCard({
   }
 
   return (
-    <Card>
+    <SectionCard tier="secondary">
       <CardHeader>
-        <CardTitle>{t(locale, "settings.seats")}</CardTitle>
+        <SectionCardTitle>{t(locale, "settings.seats")}</SectionCardTitle>
         <CardDescription>{t(locale, "settings.seatsCopy")}</CardDescription>
       </CardHeader>
       <CardContent>
@@ -1713,7 +1713,7 @@ function SeatsCard({
           <NoticeRegion notice={notice} />
         </form>
       </CardContent>
-    </Card>
+    </SectionCard>
   );
 }
 
