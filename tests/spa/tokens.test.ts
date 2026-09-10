@@ -388,6 +388,9 @@ describe("DESIGN.md v0.3 bridge re-point + base-component restyle (plan 57 T3)",
     expect(themeVars["color-primary-hover"]).toBe("var(--primary-hover)");
     expect(themeVars["color-secondary-hover"]).toBe("var(--secondary-hover)");
     expect(themeVars["color-destructive-hover"]).toBe("var(--destructive-hover)");
+    // Plan 62 T1 (AD-622): the hover tint consumes the sidebar-accent key at
+    // /40 opacity — same dead-class trap, so the mapping is pinned too.
+    expect(themeVars["color-sidebar-accent"]).toBe("var(--sidebar-accent)");
   });
 
   test("radius bridge collapses onto the AD-574 two tiers; tokens button maps the brand", async () => {
