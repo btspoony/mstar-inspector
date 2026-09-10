@@ -189,6 +189,9 @@ export const en = {
     seriesReviews: "Reviews",
     seriesFindings: "Findings",
     trendSummary: "In this window: {reviews} · {findings}",
+    /** Plan 60 A4: composed zero-review empty state — no-action variant (reviews arrive via installed Apps). */
+    emptyTitle: "No reviews yet",
+    emptyDescription: "Insights fill in as your installed GitHub Apps review pull requests.",
   },
   settings: {
     title: "App settings",
