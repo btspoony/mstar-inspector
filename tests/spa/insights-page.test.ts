@@ -496,6 +496,31 @@ describe("records page on the v0.3 language (plan 60 T2, A2-A5)", () => {
     expect(page).toContain("setReloadNonce");
   });
 
+  test("filter refetch rides an inline busy hint — never a blank main area (PR 41 bugbot)", () => {
+    // The skeleton stays the initial load's face only: its gate is exactly
+    // `state === "loading" && data === null`, so a refetch over retained
+    // data can never swap the mounted page for the skeleton.
+    expect(page).toContain('state === "loading" && data === null');
+    expect(page).toContain('return <PageSkeleton locale={locale} kind="cards" />');
+    // Refetch over retained data (filter change / retry) renders the slim
+    // polite hint below the toolbar instead of a blank main area. The two
+    // gates partition the loading state — one face each, no gap. The pins
+    // read the JSX elements, not the prose comments around them.
+    expect(page).toContain('state === "loading" && data !== null');
+    expect(page).toContain('<p role="status" className="text-sm text-muted-foreground">');
+    expect(page).toContain('common.loading');
+    // The refetch is announced programmatically on the content region.
+    expect(page).toContain('aria-busy={state === "loading"}');
+    // The records view (charts) still mounts only on the ready state — the
+    // hint is the refetch face, not a replacement for the data gate.
+    expect(page).toContain('state === "ok" && data ?');
+    // The retired PageNotice text faces stay off this page (channel pin
+    // above) — the hint is page-local JSX on Tailwind tokens.
+    expect(page).not.toContain("LoadingNotice");
+    expect(page).not.toContain("LoadFailedNotice");
+    expect(page).not.toContain("pages.module.css");
+  });
+
   test("empty-state guidance keys resolve atomically in both locales", () => {
     for (const key of ["insights.emptyTitle", "insights.emptyDescription"] as const) {
       const en = t("en", key);

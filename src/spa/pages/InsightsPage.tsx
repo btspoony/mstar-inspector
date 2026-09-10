@@ -59,6 +59,11 @@ function insightsSearchFromLocation(): InsightsSearch {
  * (PageSkeleton on the initial load, ErrorState with retry, EmptyState for
  * the zero-review window). Filter logic and the URL↔filter pins are
  * untouched.
+ * Plan 60 PR fix (PR 41 bugbot): a filter refetch over retained data
+ * renders a slim polite busy hint below the toolbar instead of a blank
+ * main area — the skeleton stays initial-load-only and the toolbar never
+ * unmounts (plan-38 no-flash contract); the content region also flips
+ * aria-busy so the refetch is announced programmatically.
  */
 export function InsightsPage({ boot }: { boot: SpaBoot }) {
   const locale = boot.locale;
@@ -145,8 +150,11 @@ export function InsightsPage({ boot }: { boot: SpaBoot }) {
     return <PageSkeleton locale={locale} kind="cards" />;
   }
 
+  // WCAG 4.1.3 (PR 41 bugbot): the region renders only past the initial-load
+  // skeleton gate, so aria-busy=true here always means "refetch over
+  // retained data" — the programmatic face for the busy hint below.
   return (
-    <div className="flex flex-col gap-(--spacing-8)">
+    <div className="flex flex-col gap-(--spacing-8)" aria-busy={state === "loading"}>
       <div className="flex flex-wrap items-end justify-between gap-3">
         <h1 className="font-semibold text-(length:--typo-heading-24-size) leading-(--typo-heading-24-line) tracking-(--typo-heading-24-tracking)">
           {t(locale, "insights.recordsHeading")}
@@ -185,6 +193,15 @@ export function InsightsPage({ boot }: { boot: SpaBoot }) {
           </Select>
         </div>
       </div>
+      {state === "loading" && data !== null ? (
+        // Filter refetch over retained data (plan-38 background reload): a
+        // one-line polite hint replaces the blank main area; the toolbar
+        // above stays mounted and interactive. The retired PageNotice text
+        // faces stay off this page (plan-60 T2 pin).
+        <p role="status" className="text-sm text-muted-foreground">
+          {t(locale, "common.loading")}
+        </p>
+      ) : null}
       {state === "error" ? (
         <ErrorState locale={locale} onRetry={() => setReloadNonce((nonce) => nonce + 1)} />
       ) : null}
