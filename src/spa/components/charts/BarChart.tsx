@@ -14,14 +14,19 @@
  * al) have no chart-series face, and the var chain flips with
  * :root[data-theme], so dark/light both resolve with zero raw hex here.
  * Callers pass series colors
- * per item (the severity chart supplies the locked AD-561 mapping
- * must-fix→red-700 / should-fix→amber-700 / nit→gray-700 at the page layer,
- * plan 56 T2); the default is blue-700, the neutral series tone.
+ * per item (the severity chart supplies the AD-561 mapping at the page
+ * layer — families frozen under AD-601: must-fix→red-700 /
+ * should-fix→amber-700 / nit→gray-700, 700 steps re-verified ≥3:1 vs the
+ * v0.3 card faces in both themes, plan 60 T1); the default stays blue-700,
+ * the neutral data-series tone (a data color, not brand expression and not
+ * the link/focus duty — AD-601 records the choice).
  *
  * Legend: the bar-attached colored labels ARE the legend — each bar pairs
  * its color with a visible category label (颜色永非唯一载体), so no separate
  * legend block is rendered (legend is optional for this chart shape; the
- * dual-series TrendChart carries the explicit legend).
+ * dual-series TrendChart carries the explicit legend). Labels carry the
+ * v0.3 label face (weight 500) and every numeral (bar-end counts, axis
+ * ticks) renders tabular figures per the DESIGN.md numerals rule.
  *
  * Empty state: owned by the page (可读空态文案 per plan) — empty input
  * renders null, never a bare axis.
@@ -77,7 +82,7 @@ export function BarChart({ items, ariaLabel }: { items: BarChartItem[]; ariaLabe
               textAnchor="end"
               dominantBaseline="central"
               fontSize={11}
-              style={{ fill: "var(--gray-1000)" }}
+              style={{ fill: "var(--gray-1000)", fontWeight: 500 }}
             >
               <title>{item.label}</title>
               {truncateLabel(item.label, LABEL_MAX_CHARS)}
@@ -94,7 +99,7 @@ export function BarChart({ items, ariaLabel }: { items: BarChartItem[]; ariaLabe
               y={barY + barHeight / 2}
               dominantBaseline="central"
               fontSize={11}
-              style={{ fill: "var(--gray-900)" }}
+              style={{ fill: "var(--gray-900)", fontVariantNumeric: "tabular-nums" }}
             >
               {item.value}
             </text>
@@ -115,7 +120,7 @@ export function BarChart({ items, ariaLabel }: { items: BarChartItem[]; ariaLabe
           y={PAD_TOP + items.length * ROW_H + 13}
           textAnchor="middle"
           fontSize={10}
-          style={{ fill: "var(--gray-900)" }}
+          style={{ fill: "var(--gray-900)", fontVariantNumeric: "tabular-nums" }}
         >
           {tick}
         </text>

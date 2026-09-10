@@ -70,9 +70,10 @@ export const en = {
     loadFailed: "Could not load this page.",
     saveFailed: "Could not save your changes.",
     cancel: "Cancel",
+    retry: "Retry",
   },
   login: {
-    heading: "Sign in to Morning Star Inspector",
+    heading: "Sign in",
     description: "Use your GitHub account to access the console.",
     signIn: "Sign in with GitHub",
     inviteOnly: "This deployment is invite-only — ask an admin to add your GitHub login.",
@@ -97,7 +98,9 @@ export const en = {
   apps: {
     heading: "Apps",
     create: "Create GitHub App",
-    empty: "No Apps yet — Create GitHub App connects your first one.",
+    /** Plan 58 A6: composed empty state (EmptyState title + description). */
+    emptyTitle: "No Apps yet",
+    emptyDescription: "Create GitHub App connects your first one.",
     settings: "Settings",
     appId: "App id {id}",
     by: "by {login}",
@@ -154,7 +157,9 @@ export const en = {
     adminOnly: "This page is restricted to dashboard admins.",
     roleAdmin: "admin",
     roleMember: "member",
-    empty: "No members yet.",
+    /** Plan 58 A6: composed empty state — no-action variant (the invite form is the path). */
+    emptyTitle: "No members yet",
+    emptyDescription: "Invite the first member with the form above.",
   },
   insights: {
     heading: "Review health",
@@ -184,10 +189,21 @@ export const en = {
     seriesReviews: "Reviews",
     seriesFindings: "Findings",
     trendSummary: "In this window: {reviews} · {findings}",
+    /** Plan 60 A4: composed zero-review empty state — no-action variant (reviews arrive via installed Apps). */
+    emptyTitle: "No reviews yet",
+    emptyDescription: "Insights fill in as your installed GitHub Apps review pull requests.",
   },
   settings: {
     title: "App settings",
     backToApps: "Back to Apps",
+    /**
+     * Plan 59 T1 (AD-591): section-group eyebrow labels for the two tier
+     * zones — identity/status (Tier 1) and configuration (Tier 2).
+     */
+    group: {
+      identity: "Identity",
+      configuration: "Configuration",
+    },
     changesSaved: "Changes saved.",
     addKey: "Add key",
     provider: "Model provider",

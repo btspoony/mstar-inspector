@@ -50,3 +50,13 @@ tags:
 - 机制：`src/spa/pages/SettingsPage.tsx` `load({ background })`、六个 op 调用点、`PageNotice.tsx` role 分支
 - 测试：`tests/spa/settings-layout.test.ts`（background 契约 pin、`reload: false` 单点 pin、notice role pin）
 - 已知 accepted 限制：spaClick 双副本待合并；post-delete 页面上继续操作会看到 raw "unknown app"（预存模式）
+
+
+## State-trio era extension (iteration 018, 2026-09-10)
+
+With the plan-57 composed state patterns (`PageSkeleton`/`EmptyState`/`ErrorState`), the contract generalizes: **only foreground loads may gate the page-level skeleton**. Canonical pattern (SettingsPage precedent, mirrored by MembersPage/InsightsPage after plan-58 QC W-1):
+
+- `load({ background = false } = {})`; `if (!background) setState("loading")` is the ONLY path into the skeleton gate.
+- Op-triggered refetches (invite/role/remove, verify, settings saves) reload with `{ background: true }` — page stays mounted, outcomes ride the PageNotice/notice channel.
+- InsightsPage variant: the gate is `state === "loading" && data === null` (data-retention form) so filter-change reloads keep the page mounted; failure paths must always land on `role="alert"` ErrorState/notice, never the skeleton.
+- Pins should assert the negative: op call sites pass `{ background: true }` and no bare `await load()` remains on op paths.

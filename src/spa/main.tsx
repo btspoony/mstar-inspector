@@ -1,5 +1,6 @@
 import { StrictMode, useEffect } from "react";
 import { createRoot } from "react-dom/client";
+import "./styles/fonts.css";
 import "./styles/tokens.css";
 import "./styles/shadcn-theme.css";
 import { readBoot } from "./boot";

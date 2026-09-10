@@ -1,31 +1,32 @@
 ---
-version: 0.2.0
+version: 0.3.1
 name: mstar-inspector Console
-description: "Functional ops-console design system for the mstar-inspector developer dashboard. High contrast, minimal decoration, state through color + copy. Dark is the default theme; light follows prefers-color-scheme until the navbar theme toggle stores a manual choice (localStorage mstar.dashboard.theme, light|dark) — the stored choice wins over the OS. Supersedes the plan-29 lock (2026-09-04, user instruction, iteration 013)."
+description: "Bold Signal-Cyan ops-console design system for the mstar-inspector developer dashboard. Dense, decisive, state through color + copy; one confident cyan accent on cool zinc neutrals. Dark is the default theme; light follows prefers-color-scheme until the navbar theme toggle stores a manual choice (localStorage mstar.dashboard.theme, light|dark) — the stored choice wins over the OS. Supersedes the plan-29 lock (2026-09-04, user instruction, iteration 013). v0.3 (plan 57, AD-573) is a values-only rebase: existing token names are frozen; brand, motion, and elevation enter as additive namespaces. v0.3.1 (plan 57 T2, AD-572) flips the sans stack to self-hosted Geist Sans — unmodified full-latin woff2 binaries of geist@1.7.2 (sha256 pinned in the fonts.css header) with font-display: swap; zh text falls back to the system stack."
 
 # Runtime default = dark. Top-level colors: matches themes.dark.colors so
 # {colors.X} component refs resolve to the console default. Light values
-# (including the original L1 hexes) live under themes.light.colors.
+# live under themes.light.colors.
 defaultTheme: dark
 themeMechanism: "manual data-theme override (navbar toggle), prefers-color-scheme fallback"
 
 colors:
-  # Background surfaces
-  background-100: "#09090b"
-  background-200: "#18181b"
-  background-300: "#27272a"
+  # Background surfaces (v0.3: cool-retuned zinc — slight blue lean carries
+  # the bold language; surface steps kept close to v0.2 luminance)
+  background-100: "#0a0c10"
+  background-200: "#15181f"
+  background-300: "#212630"
 
   # Gray solid (100 lightest fill → 1000 primary text on this theme)
-  gray-100: "#18181b"
-  gray-200: "#1f1f23"
-  gray-300: "#27272a"
-  gray-400: "#3f3f46"
-  gray-500: "#52525b"
-  gray-600: "#71717a"
-  gray-700: "#8b8b94"
-  gray-800: "#d4d4d8"
-  gray-900: "#b0b0b8"
-  gray-1000: "#f4f4f5"
+  gray-100: "#15181f"
+  gray-200: "#1b1f27"
+  gray-300: "#212630"
+  gray-400: "#39404d"
+  gray-500: "#4d5563"
+  gray-600: "#6b7482"
+  gray-700: "#8b95a3"
+  gray-800: "#ccd5e1"
+  gray-900: "#a9b4c2"
+  gray-1000: "#eef2f7"
 
   # Gray alpha (translucent overlays / borders / dividers)
   gray-alpha-100: "#ffffff12"
@@ -39,7 +40,14 @@ colors:
   gray-alpha-900: "#ffffffc4"
   gray-alpha-1000: "#ffffffe8"
 
-  # Blue — links, focus, primary actions
+  # Brand — Signal Cyan accent (v0.3, AD-571). Dark theme wears the bright
+  # cyan step; light theme the deep cyan step. Never encodes alert semantics
+  # (red=error, amber=warning, green=success stay authoritative).
+  brand-600: "#06b6d4"
+  brand-700: "#22d3ee"
+  brand-800: "#67e8f9"
+
+  # Blue — links and focus ring (non-alert duty kept per AD-571)
   blue-100: "#0c1a2e"
   blue-200: "#0f2744"
   blue-300: "#163a5f"
@@ -134,21 +142,21 @@ themes:
   dark:
     colors:
       # Background surfaces
-      background-100: "#09090b"
-      background-200: "#18181b"
-      background-300: "#27272a"
+      background-100: "#0a0c10"
+      background-200: "#15181f"
+      background-300: "#212630"
 
       # Gray solid (100 lightest fill → 1000 primary text on this theme)
-      gray-100: "#18181b"
-      gray-200: "#1f1f23"
-      gray-300: "#27272a"
-      gray-400: "#3f3f46"
-      gray-500: "#52525b"
-      gray-600: "#71717a"
-      gray-700: "#8b8b94"
-      gray-800: "#d4d4d8"
-      gray-900: "#b0b0b8"
-      gray-1000: "#f4f4f5"
+      gray-100: "#15181f"
+      gray-200: "#1b1f27"
+      gray-300: "#212630"
+      gray-400: "#39404d"
+      gray-500: "#4d5563"
+      gray-600: "#6b7482"
+      gray-700: "#8b95a3"
+      gray-800: "#ccd5e1"
+      gray-900: "#a9b4c2"
+      gray-1000: "#eef2f7"
 
       # Gray alpha (translucent overlays / borders / dividers)
       gray-alpha-100: "#ffffff12"
@@ -162,7 +170,12 @@ themes:
       gray-alpha-900: "#ffffffc4"
       gray-alpha-1000: "#ffffffe8"
 
-      # Blue — links, focus, primary actions
+      # Brand — Signal Cyan (dark wears the bright cyan step)
+      brand-600: "#06b6d4"
+      brand-700: "#22d3ee"
+      brand-800: "#67e8f9"
+
+      # Blue — links, focus
       blue-100: "#0c1a2e"
       blue-200: "#0f2744"
       blue-300: "#163a5f"
@@ -249,34 +262,39 @@ themes:
     colors:
       # Background surfaces
       background-100: "#ffffff"
-      background-200: "#f4f4f5"
-      background-300: "#e4e4e7"
+      background-200: "#f3f5f8"
+      background-300: "#e4e9f0"
 
       # Gray solid (100 lightest fill → 1000 primary text on this theme)
-      gray-100: "#fafafa"
-      gray-200: "#f4f4f5"
-      gray-300: "#e4e4e7"
-      gray-400: "#d4d4d8"
-      gray-500: "#a1a1aa"
-      gray-600: "#71717a"
-      gray-700: "#52525b"
-      gray-800: "#3f3f46"
-      gray-900: "#3d3d3d"
-      gray-1000: "#111111"
+      gray-100: "#fafbfd"
+      gray-200: "#f3f5f8"
+      gray-300: "#e4e9f0"
+      gray-400: "#ccd4df"
+      gray-500: "#9aa5b4"
+      gray-600: "#6d7889"
+      gray-700: "#4e5969"
+      gray-800: "#3a4350"
+      gray-900: "#2f3742"
+      gray-1000: "#0f141a"
 
-      # Gray alpha (translucent overlays / borders / dividers)
-      gray-alpha-100: "#0000000d"
-      gray-alpha-200: "#00000014"
-      gray-alpha-300: "#0000001a"
-      gray-alpha-400: "#00000024"
-      gray-alpha-500: "#00000036"
-      gray-alpha-600: "#00000052"
-      gray-alpha-700: "#00000073"
-      gray-alpha-800: "#0000008f"
-      gray-alpha-900: "#000000b8"
-      gray-alpha-1000: "#000000e6"
+      # Gray alpha (translucent overlays / borders / dividers; v0.3 cool base)
+      gray-alpha-100: "#1019280d"
+      gray-alpha-200: "#10192814"
+      gray-alpha-300: "#1019281a"
+      gray-alpha-400: "#10192824"
+      gray-alpha-500: "#10192836"
+      gray-alpha-600: "#10192852"
+      gray-alpha-700: "#10192873"
+      gray-alpha-800: "#1019288f"
+      gray-alpha-900: "#101928b8"
+      gray-alpha-1000: "#101928e6"
 
-      # Blue — links, focus, primary actions
+      # Brand — Signal Cyan (light wears the deep cyan step)
+      brand-600: "#0891b2"
+      brand-700: "#0e7490"
+      brand-800: "#155e75"
+
+      # Blue — links, focus
       blue-100: "#eff6ff"
       blue-200: "#dbeafe"
       blue-300: "#bfdbfe"
@@ -362,61 +380,61 @@ themes:
 
 typography:
   heading-32:
-    fontFamily: "ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, sans-serif"
+    fontFamily: "\"Geist Sans\", ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, sans-serif"
     fontSize: 32px
     fontWeight: 600
     lineHeight: 1.2
     letterSpacing: -0.02em
   heading-24:
-    fontFamily: "ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, sans-serif"
+    fontFamily: "\"Geist Sans\", ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, sans-serif"
     fontSize: 24px
     fontWeight: 600
     lineHeight: 1.25
     letterSpacing: -0.01em
   heading-20:
-    fontFamily: "ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, sans-serif"
+    fontFamily: "\"Geist Sans\", ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, sans-serif"
     fontSize: 20px
     fontWeight: 600
     lineHeight: 1.3
     letterSpacing: -0.01em
   heading-16:
-    fontFamily: "ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, sans-serif"
+    fontFamily: "\"Geist Sans\", ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, sans-serif"
     fontSize: 16px
     fontWeight: 600
     lineHeight: 1.4
     letterSpacing: 0
   label-14:
-    fontFamily: "ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, sans-serif"
+    fontFamily: "\"Geist Sans\", ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, sans-serif"
     fontSize: 14px
     fontWeight: 500
     lineHeight: 1.4
     letterSpacing: 0
   label-12:
-    fontFamily: "ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, sans-serif"
+    fontFamily: "\"Geist Sans\", ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, sans-serif"
     fontSize: 12px
     fontWeight: 500
     lineHeight: 1.4
     letterSpacing: 0.01em
   copy-16:
-    fontFamily: "ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, sans-serif"
+    fontFamily: "\"Geist Sans\", ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, sans-serif"
     fontSize: 16px
     fontWeight: 400
     lineHeight: 1.6
     letterSpacing: 0
   copy-14:
-    fontFamily: "ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, sans-serif"
+    fontFamily: "\"Geist Sans\", ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, sans-serif"
     fontSize: 14px
     fontWeight: 400
     lineHeight: 1.55
     letterSpacing: 0
   button-14:
-    fontFamily: "ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, sans-serif"
+    fontFamily: "\"Geist Sans\", ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, sans-serif"
     fontSize: 14px
     fontWeight: 500
     lineHeight: 1.4
     letterSpacing: 0
   button-12:
-    fontFamily: "ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, sans-serif"
+    fontFamily: "\"Geist Sans\", ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, sans-serif"
     fontSize: 12px
     fontWeight: 500
     lineHeight: 1.4
@@ -440,15 +458,44 @@ spacing:
   16: 64px
   24: 96px
 
+# Two-tier radius (AD-574): --rounded-sm is the control tier (buttons,
+# inputs, selects, tabs triggers, combobox, menu items); --rounded-md is the
+# container tier (cards, dialogs, popovers, panels, form shells). Container
+# sits exactly +4px above control. --rounded-full stays pill-only (badges,
+# avatars, spinners); micro inner corners (checkbox checks, nested chips) are
+# documented exceptions.
 rounded:
-  sm: 6px
+  sm: 8px
   md: 12px
   lg: 16px
   full: 9999px
 
+# Motion (Level 3, v0.3). Theme-independent; short, physical, token-only.
+# Movement animates transform/opacity only; color/border/shadow interaction
+# transitions reuse duration/ease tokens; everything folds under
+# prefers-reduced-motion.
+motion:
+  duration-fast: 120ms
+  duration-base: 160ms
+  duration-slow: 240ms
+  ease-out: "cubic-bezier(0.22, 1, 0.36, 1)"
+  ease-in-out: "cubic-bezier(0.65, 0, 0.35, 1)"
+  reduced-motion: "prefers-reduced-motion: reduce folds every duration to 1ms — entrances render their end state, transitions become immediate"
+
+# Elevation (Level 3, v0.3). Tinted shadows — cool slate, never pure black —
+# layered over tonal surfaces; dark relies on surface steps + hairlines first,
+# shadows stay whisper-quiet.
+elevation:
+  shadow-card:
+    dark: "0 1px 2px #02061766, 0 2px 8px #02061733"
+    light: "0 1px 2px #10192814, 0 2px 8px #1019280f"
+  shadow-pop:
+    dark: "0 4px 12px #02061780, 0 16px 40px #02061759"
+    light: "0 4px 12px #1019281f, 0 16px 40px #10192829"
+
 components:
   button-primary:
-    backgroundColor: "{colors.blue-700}"
+    backgroundColor: "{colors.brand-700}"
     textColor: "{colors.background-100}"
     typography: "{typography.button-14}"
     rounded: "{rounded.sm}"
@@ -563,15 +610,19 @@ components:
     padding: 16px
 ---
 
-<!-- COMPLETENESS_LEVEL: 2 — last audited 2026-09-02 -->
+<!-- COMPLETENESS_LEVEL: 3 — last audited 2026-09-09 -->
 
 # mstar-inspector Console
 
 mstar-inspector Console is the design system for the developer dashboard
-(`/dashboard`). It is a **functional ops console**: high contrast, few
-decorative elements, state legible through color and copy rather than
-ornament. The audience is the operator who deployed the inspector — not a
-marketing surface.
+(`/dashboard`). v0.3 upgrades the voice from the plan-29 "functional ops
+console" to a **bold Signal-Cyan console**: one decisive cyan accent on a
+cool-retuned zinc neutral base, dense data surfaces with quiet tinted
+elevation, and motion that clarifies change without decorating. Boldness is
+carried by the neutral temperature shift, the brand accent, and the
+two-tier radius — never by sacrificing density, scannability, or dual-theme
+legibility. The audience is still the operator who deployed the inspector —
+not a marketing surface.
 
 **Theme contract (plan 41):** dark is the default console theme. With no
 stored choice, light is an automatic override via `prefers-color-scheme:
@@ -586,20 +637,28 @@ default. Implementation maps these names to CSS custom properties in
 `src/spa/styles/tokens.css` — light applies via `:root[data-theme="light"]`
 with the `prefers-color-scheme` fallback on `:root:not([data-theme="dark"])`.
 
-Existing Level 1 token **names** are unchanged (`background-100`,
-`background-200`, `gray-1000`, `gray-900`, `blue-700`, `red-700`,
-`amber-700`). The original light hex values are preserved on
-`themes.light.colors` and remain the recorded values the SSR pages in
-`src/dashboard/views.ts` hardcode (no token migration): as of plan 45 T8
-their STYLE carries the plan-41 branches — stored-choice light, the OS
-fallback guarded by `:root:not([data-theme="dark"])`, and an explicit dark
-no-op — and `page()` inlines the pre-paint bootstrap, so the stored
-`localStorage["mstar.dashboard.theme"]` choice is honored on every SSR
-face. Do not rename those tokens.
+**v0.3 value rebase (plan 57, AD-573):** token **names** are frozen — every
+palette step (`background-*`, `gray-*`, `gray-alpha-*`, `blue-*`, `red-*`,
+`amber-*`, `green-*`, plus reserved `teal`/`purple`/`pink`), component var,
+and `--typo-*`/`--spacing-*`/`--rounded-*`/`--font-*` keeps its name; the
+design change lands as **values**. New language surfaces enter only as
+additive namespaces: `brand-*` (Signal Cyan), `shadow-card`/`shadow-pop`
+(tinted elevation), `duration-*`/`ease-*` (motion). Three value sites move
+together and are machine-pinned: this frontmatter →
+`src/spa/styles/tokens.css` (both light branches) → the `views.ts` STYLE
+subset. Staged delivery inside plan 57: Task 1 landed palette + motion +
+radius + elevation; Task 2 (v0.3.1) flipped the self-hosted typeface —
+`--font-sans` and every sans `fontFamily` now carry Geist Sans ahead of the
+system fallbacks, with the woff2 riding the vite module graph; Task 3
+landed the shadcn bridge re-point (`--primary: var(--blue-700)` →
+`var(--brand-700)`) plus the base-component restyle, and QC round 1 closed
+the last staged seam — the `views.ts` STYLE `--button-primary-bg` now also
+references `var(--brand-700)` — so every rendered primary button (SPA and
+SSR faces alike) reads the brand accent. The staging narrative is history:
+no surface renders the pre-T3 blue primary anymore.
 
 A separate `DESIGN.dark.md` is intentionally not used: the assignment stores
-both palettes in one file under `themes:`. Level 3 dual-file parity remains
-a `LEVEL3_PLACEHOLDER`.
+both palettes in one file under `themes:`.
 
 ## Colors
 
@@ -621,25 +680,47 @@ Step intent (every non-background scale, 100–1000):
 
 Usage:
 
-- `background-100` — page canvas.
+- `background-100` — page canvas. v0.3 leans cool (blue-hued near-black on
+  dark; pure white on light with cool gray surfaces carrying the cast).
 - `background-200` — cards, sidebar, navbar, table header.
 - `background-300` — pressed / selected surface (sidebar active row).
 - `gray-1000` — primary text.
 - `gray-900` — secondary text, meta, muted hints.
 - `gray-alpha-*` — hairlines, overlays, dividers; layer over any surface.
-- `blue-700` — constructive primary actions, links, focus ring.
+  Light-theme alphas are tinted with the cool `#101928` base so borders sit
+  quietly inside the cool palette.
+- `brand-700` — the Signal Cyan accent: primary action fill, active
+  navigation emphasis, brand moments (chart card shells in plan 60). Dark
+  theme wears the bright step `#22d3ee`; light theme the deep step
+  `#0e7490`. Brand **never** encodes error/warning/success semantics and
+  never becomes a data-series color (AD-601).
+- `blue-700` — links and the focus ring only (non-alert duty kept per
+  AD-571); no longer a primary-action fill anywhere (the T3 bridge re-point
+  landed, and the SSR STYLE re-point closed in QC round 1).
 - `red-700` — errors and destructive submits (Remove, Delete, Overwrite).
 - `amber-700` — warnings only.
-- `green-700` — success notices and healthy badges (new at L2; L1 had no success green).
+- `green-700` — success notices and healthy badges.
 - `teal`, `purple`, `pink` — reserved accents; do not use for state that
   already has a semantic scale.
 
 A disabled placeholder must never look like a clickable primary button: use
-`button-disabled` (gray fill + `not-allowed`), never `blue-700`.
+`button-disabled` (gray fill + `not-allowed`), never `brand-700` or
+`blue-700`.
 
 ## Typography
 
-Frontmatter `typography:` is the SSOT. System font stack — no webfonts.
+Frontmatter `typography:` is the SSOT. The type identity is **Geist Sans**
+(AD-572): the unmodified full-latin woff2 binaries of `geist@1.7.2`
+(shipped upstream as full builds, not subsets — provenance sha256 recorded
+in the `fonts.css` header) self-hosted at
+`src/spa/assets/fonts/` with `@font-face` declarations in
+`src/spa/styles/fonts.css` — weights 400/500/600, exactly the three the
+scale below declares (v0.3.1, plan 57 T2). `font-display: swap` keeps first
+paint on the system stack; the declared `unicode-range` excludes CJK
+codepoints, so zh text never selects the face or triggers a download and
+falls back to the system entries of `--font-sans`. The face ships native
+tabular figures (`tnum`). License: SIL OFL 1.1, vendored as
+`src/spa/assets/fonts/OFL.txt`. The mono scale stays the system mono stack.
 
 Kept from L1: `heading-24`, `heading-16`, `copy-16`, `copy-14`.
 
@@ -652,7 +733,10 @@ Kept from L1: `heading-24`, `heading-16`, `copy-16`, `copy-14`.
 - `button-14` / `button-12` — button labels (default / small).
 - `mono-13` — ids, hashes, timestamps; use tabular figures.
 
-Dashboard numerals: `font-variant-numeric: tabular-nums` on counts and ids.
+Dashboard numerals: `font-variant-numeric: tabular-nums` on counts, ids, and
+any column of figures a user might scan or compare (table numeric columns,
+stat cards, timestamps). The self-hosted face must ship tabular figures so
+the existing `tabular-nums` utility keeps working without per-page CSS.
 
 ## Spacing & Layout
 
@@ -680,6 +764,76 @@ on stacked pages; full-bleed shell + inner max-width on the SPA layout.
 
 Manifest SSR views stay single column at every width.
 
+## Radius — two tiers (AD-574)
+
+- `--rounded-sm: 8px` — **control tier**: buttons, inputs, selects, tabs
+  triggers, combobox, menu items. The user-directly-manipulated face.
+- `--rounded-md: 12px` — **container tier**: cards, dialogs, popovers,
+  panels, form shells. Always exactly +4px above the control tier so
+  nesting reads as deliberate.
+- `--rounded-full` — pill exception only: badges, avatars, spinners.
+- Micro inner corners (`rounded-xs` / 2px checkbox indicators and similar
+  nested details) are documented exceptions inside controls.
+
+The shadcn bridge re-maps `--radius-lg`/`--radius-xl` onto
+`var(--rounded-md)` (Task 3) so copy-in card faces land on the container
+tier without hand edits; SSR faces already point at `--rounded-*`.
+`--rounded-lg: 16px` stays declared as a **legacy value** (AD-573 name
+freeze): once the remap lands, nothing consumes it as the container step —
+container faces resolve `var(--rounded-md)` directly, and the shadcn control
+class (`rounded-sm`) maps straight onto `var(--rounded-sm)` (8px control
+tier).
+
+## Elevation
+
+Tonal surfaces first, shadows second. Dark definition comes from surface
+steps + `gray-alpha-*` hairlines; shadows are quiet cool-slate tints, never
+pure black. Light shadows tint with the `#101928` base.
+
+| Token | Dark | Light | Use |
+|-------|------|-------|-----|
+| `shadow-card` | `0 1px 2px #02061766, 0 2px 8px #02061733` | `0 1px 2px #10192814, 0 2px 8px #1019280f` | resting cards, Tier-1 primary surfaces |
+| `shadow-pop` | `0 4px 12px #02061780, 0 16px 40px #02061759` | `0 4px 12px #1019281f, 0 16px 40px #10192829` | popovers, dropdowns, dialogs, toasts |
+
+Pair each elevation with the container radius tier. Never stack `shadow-pop`
+on nested surfaces.
+
+## Motion
+
+Motion clarifies change, never decorates. Zero new dependencies; CSS
+transitions/keyframes only.
+
+| Token | Value | Use |
+|-------|-------|-----|
+| `--duration-fast` | 120ms | press / micro feedback (`:active` scale) |
+| `--duration-base` | 160ms | hover / focus color, border, shadow transitions |
+| `--duration-slow` | 240ms | entrances, popovers, overlays (transform/opacity) — **reserved, no live consumer yet**; see the entrance note below |
+| `--ease-out` | `cubic-bezier(0.22, 1, 0.36, 1)` | entrances and anything that decelerates |
+| `--ease-in-out` | `cubic-bezier(0.65, 0, 0.35, 1)` | symmetric state transitions |
+
+Discipline (iteration 018 hard constraint #7):
+
+- Entrance animations are **not currently active**: the `animate-in/out` /
+  `fade-*` / `zoom-*` / `slide-in-from-*` classes copied from shadcn/ui onto
+  dialog/dropdown/select emit no CSS in Tailwind 4 core (that plugin family
+  lives in `tw-animate-css`, which is deliberately not a dependency), so
+  those surfaces appear/disappear instantly (QC round 1 F-006). When the
+  plan 58 motion pass wires entrances, it must be zero-dependency keyframes
+  consuming `--duration-slow` with a `prefers-reduced-motion` guard.
+
+- Movement-type animation (entrances, offsets, scale micro-interactions)
+  animates `transform` / `opacity` only.
+- Color / border / shadow interaction transitions stay, and their
+  `transition` declarations consume the duration + ease tokens (no raw
+  ms/cubic-bezier literals in component sources).
+- `prefers-reduced-motion: reduce` folds **everything** — tokens.css drops
+  all three durations to 1ms, so entrances render their end state and
+  transitions become immediate. Component-level keyframes must additionally
+  guard any non-token property with the same media query.
+- Entrances trigger via IntersectionObserver; never a `window` scroll
+  listener.
+- No infinite loops except semantic state indicators (spinners).
+
 ## Components
 
 Component tokens live in frontmatter `components:` and reference `{colors.X}`
@@ -688,9 +842,11 @@ that follow the active theme because they point at color variables.
 
 ### Button
 
-Variants: `button-primary` (blue-700), `button-danger` (red-700),
-`button-secondary` (surface + gray-400 border), `button-disabled` (gray-100
-fill, gray-700 text, not-allowed). Size: default 40px; `button-small` 32px.
+Variants: `button-primary` (brand-700, rendered on the SPA and SSR faces
+since the T3 bridge re-point + QC-round-1 SSR re-point), `button-danger`
+(red-700), `button-secondary` (surface +
+gray-400 border), `button-disabled` (gray-100 fill, gray-700 text,
+not-allowed). Size: default 40px; `button-small` 32px.
 
 **States** (all enabled variants):
 
@@ -700,6 +856,9 @@ fill, gray-700 text, not-allowed). Size: default 40px; `button-small` 32px.
 | active | fill → 800 and translateY(0); border 400→600 |
 | disabled | `button-disabled` tokens; `cursor: not-allowed`; no hover |
 | focus-visible | `0 0 0 2px {background-100}, 0 0 0 4px {blue-700}` |
+
+Transitions on color/border/shadow consume `--duration-base` +
+`--ease-in-out`; the press feedback uses `--duration-fast`.
 
 ### Input
 
@@ -714,12 +873,14 @@ Default 40px. Border `gray-400`; text `gray-1000`; fill `background-100`.
 
 ### Card
 
-`background-200` fill, `gray-alpha-400` hairline, `rounded-md`, 24px padding.
-No drop shadow at L2 (elevation is Level 3).
+`background-200` fill, `gray-alpha-400` hairline, container radius
+(`rounded-md`, 12px), 24px padding, `shadow-card` elevation. Tier wrappers
+(plan 59 `SectionCard`) may lift Tier-1 surfaces with `shadow-pop` scale
+boundaries but never invent a third radius.
 
 ### Badge
 
-Pill (`rounded-full`) on `label-12`. Neutral `badge`; semantic
+Pill (`rounded-full` exception) on `label-12`. Neutral `badge`; semantic
 `badge-success` / `badge-warn` / `badge-error` (fill 100, text 800 of the
 accent). Pair with text — do not signal state by color alone.
 
@@ -732,13 +893,21 @@ Header on `background-200` + `label-12`; cells `copy-14`; row hairline
 
 Console chrome (navbar + side nav): `background-200`, hairline
 `gray-alpha-400`, labels `label-14`. Active item: `background-300` fill,
-`gray-1000` text. Muted meta uses `gray-900`.
+`gray-1000` text. Muted meta uses `gray-900`. Plan 58 may express the
+active state with a brand accent edge; the fill stays neutral.
 
 ### Notice (PageNotice)
 
 `notice-success` / `notice-warn` / `notice-error`: 100 fill, 400 border,
-900 text of the semantic scale, `copy-14`, `rounded-sm`, 16px padding.
-Always include what happened + what to do next on error.
+900 text of the semantic scale, `copy-14`, control radius (`rounded-sm`),
+16px padding. Always include what happened + what to do next on error.
+
+## Voice & content
+
+- Sentences over labels: notices state what happened and what to do next.
+- Numbers stay tabular and unit-suffixed (`3 apps`, `12 findings`).
+- Error copy never blames the user; actions are verbs ("Retry", "Remove").
+- zh-CN copy mirrors en structure; i18n keys move atomically.
 
 ## Implementation mapping
 
@@ -749,10 +918,12 @@ Always include what happened + what to do next on error.
 | `spacing.N` | `--spacing-N` |
 | `rounded.K` | `--rounded-K` |
 | `typography.T` | `--typo-T-*` |
+| `motion.X` | `--duration-fast/base/slow`, `--ease-out`, `--ease-in-out` on `:root` (theme-independent); the reduce media query folds durations to 1ms |
+| `elevation.shadow-*` | `--shadow-card`, `--shadow-pop` — dark on `:root`, light overrides on both light branches |
 | `components.C` | `--component-C-*` referencing color vars |
 
-SPA (Task 3+) consumes `tokens.css` only. Theme switching is the manual
-navbar toggle (plan 41): it stores `light` | `dark` in
+SPA consumes `tokens.css` only. Theme switching is the manual navbar toggle
+(plan 41): it stores `light` | `dark` in
 `localStorage["mstar.dashboard.theme"]` and applies `data-theme` before
 first paint — a stored choice wins over `prefers-color-scheme`, unset
 follows the OS. Supersedes the plan-29 lock (2026-09-04, user instruction, iteration 013).
@@ -762,8 +933,8 @@ choice, OS-light fallback guarded by `:root:not([data-theme="dark"])`,
 explicit dark no-op — and honors it via the pre-paint bootstrap snippet
 inlined in `page()` (plan 45 T8): SSR faces apply `data-theme` before
 first paint while staying zero client runtime (snippet only, no bundle).
-Recorded hex values unchanged; no token migration.
-
+The three value sites (this file, tokens.css, views.ts STYLE) are pinned
+equal by `tests/spa/tokens.test.ts`.
 
 ## shadcn/ui mapping layer (plan 33)
 
@@ -777,7 +948,8 @@ existing `tokens.css` custom properties (read-only). Tailwind utilities use
 | `--background` | `--background-100` |
 | `--foreground` | `--gray-1000` |
 | `--card` / `--card-foreground` | `--card-bg` / `--card-fg` |
-| `--primary` / `--primary-foreground` | `--blue-700` / `--background-100` |
+| `--primary` / `--primary-foreground` | `--brand-700` / `--background-100` (re-pointed in plan 57 T3) |
+| `--primary-hover` / `--secondary-hover` / `--destructive-hover` | `--brand-800` / `--background-300` / `--red-800` (mapped into `@theme inline` as `--color-*-hover` — QC round 1 F-001) |
 | `--secondary` / `--secondary-foreground` | `--button-secondary-bg` / `--button-secondary-fg` |
 | `--muted` / `--muted-foreground` | `--gray-100` / `--gray-900` |
 | `--accent` / `--accent-foreground` | `--background-300` / `--gray-1000` |
@@ -788,6 +960,8 @@ existing `tokens.css` custom properties (read-only). Tailwind utilities use
 | `--radius` | `--rounded-sm` |
 | `--sidebar` / `--sidebar-foreground` | `--sidebar-bg` / `--sidebar-fg` |
 | `--sidebar-accent` / `--sidebar-accent-foreground` | `--sidebar-active-bg` / `--sidebar-active-fg` |
+| `--sidebar-primary` | `--brand-700` |
+| `--sidebar-ring` | `--blue-700` (focus duty stays blue app-wide — QC round 1 F-003 revert) |
 | `--color-sidebar-border` (Tailwind) | `--sidebar-border` (tokens only; not redefined in bridge) |
 
 Copy-in components (plan 33 T1c) live under `src/spa/components/ui/` with
@@ -800,14 +974,64 @@ Copy-in components (plan 33 T1c) live under `src/spa/components/ui/` with
 Patterns borrowed at the token level (not pixel copies):
 
 - **Linear** — sidebar-first IA, low-chrome surfaces (`background-200` chrome),
-  single blue accent for constructive actions.
+  one decisive accent for constructive actions.
 - **Vercel** — developer-console typography (`mono-13` for ids), tight
   `spacing-4` rhythm between groups, hairline borders via `gray-alpha-*`.
 - **Supabase** — table-forward density (`table` component tokens), semantic
   reds/ambers for operational state without decorative gradients.
 
+## Appendix A — contrast verification (WCAG 2.x, actual consumer pairs)
 
-<!-- LEVEL3_PLACEHOLDER: Elevation (card/popover/modal shadows), Motion
-(durations + easing + prefers-reduced-motion), Shapes usage table, Voice &
-Content, and DESIGN.dark.md dual-file parity if the project later splits
-themes. See mstar-design-md completeness-checklist § Level 3. -->
+Computed over the v0.3 values (plan 57 T1.1; text bar ≥4.5:1, large-text /
+non-text UI bar ≥3:1). Machine-pinned for the core pairs in
+`tests/spa/tokens.test.ts`.
+
+| Consumer pair | Dark | Light |
+|---------------|------|-------|
+| body text `gray-1000` vs page `background-100` (text) | 17.4:1 | 18.5:1 |
+| body text `gray-1000` vs card `background-200` (text) | 15.8:1 | 16.9:1 |
+| secondary text `gray-900` vs card (text) | 8.5:1 | 11.0:1 |
+| muted `gray-700` vs card (text) | 5.9:1 | 6.5:1 |
+| brand accent `brand-700` vs page (text) | 10.8:1 | 5.4:1 |
+| brand accent `brand-700` vs card (text) | 9.8:1 | 4.9:1 |
+| button label `background-100` on `brand-700` fill (text) | 10.8:1 | 5.4:1 |
+| chart fill `blue-700` vs card (non-text) | 6.7:1 | 5.1:1 |
+| chart fill `green-700` vs card (non-text) | 10.2:1 | 3.0:1 |
+| chart fill `amber-700` vs card (non-text) | 10.6:1 | 4.6:1 |
+| chart fill `red-700` vs card (non-text) | 6.4:1 | 5.9:1 |
+| chart fill `gray-700` vs card (non-text) | 5.9:1 | 6.5:1 |
+
+All pairs clear their bar in both themes. (Light `green-700` vs card is the
+v0.2-unchanged semantic value at 3.0:1 — passes the non-text bar exactly;
+it is not used as text.) The `gray-700` row covers its second duty as the
+Insights nit-series fill (plan 60 T1 AD-601 recalibration: the red/amber/
+blue 700 values are v0.2-unchanged, so every chart series keeps the 700
+step — dark wears the bright value, light the deep — and the trend
+dual-series pair `blue-700` vs `amber-700` stays distinct at Δhue ≈ 169°
+dark / 184° light).
+
+Brand-vs-semantic distinguishability (CIE76 ΔE, hue delta):
+
+| Pair | Dark | Light |
+|------|------|-------|
+| `brand-700` vs `green-700` | ΔE 65.9 (Δhue 46°) | ΔE 71.6 (Δhue 51°) |
+| `brand-700` vs `red-700` | ΔE 98.8 (Δhue 188°) | ΔE 99.8 (Δhue 193°) |
+| `brand-700` vs `amber-700` | ΔE 110.3 (Δhue 145°) | ΔE 92.9 (Δhue 167°) |
+
+## Appendix B — Signal Cyan palette candidates (AD-571)
+
+Three calibration candidates inside the locked Signal Cyan direction; each
+with the required neutral retune (cool zinc/blue-leaning gray + background
+shift is shared by all three).
+
+| Candidate | Dark 700 | Light 700 | Verdict |
+|-----------|----------|-----------|---------|
+| **A — Tailwind cyan anchors (adopted)** | `#22d3ee` | `#0e7490` | Brightest separation from green while reading unmistakably cyan; 5.4:1 text on white; brand-800 hover steps map cleanly (dark brightens, light deepens). Adopted. |
+| B — teal-leaning cyan | `#2dd4bf` | `#0d9488` | Rejected: ΔE vs green-700 collapses to 39–44 (Δhue ~31–33°) — too close to the success scale; light on-card contrast 3.4:1 fails the text bar. |
+| C — blue-leaning cyan (sky) | `#38bdf8` | `#0369a1` | Rejected: hue 198–210° sits in blue-700's link/focus territory (ΔE 26 vs dark blue-700) — blurs the brand-vs-link distinction AD-571 keeps separate. |
+
+
+<!-- LEVEL3_PLACEHOLDER: DESIGN.dark.md dual-file parity remains the only
+unimplemented Level 3 item (intentionally deferred — themes live in one
+file). Elevation, Motion, Shapes, and Voice & Content are in place as of
+v0.3. See mstar-design-md completeness-checklist § Level 3. -->

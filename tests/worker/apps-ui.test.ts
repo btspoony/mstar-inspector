@@ -441,19 +441,29 @@ describe("Apps list → App settings wayfinding (plan 40 T2)", () => {
     expect(t("zh_CN", "apps.openAria", { slug: "acme" })).toBe("打开 acme 设置");
   });
 
-  test("the empty Apps state stays honest: no rows, creation is the only path", () => {
+  test("the empty Apps state stays honest: composed create guidance, creation is the only path (plan 58 A4)", () => {
     const source = readFileSync(APPS_SOURCE, "utf8");
-    expect(source).toContain('t(locale, "apps.empty")');
-    expect(t("en", "apps.empty")).toContain("No Apps yet");
-    expect(t("en", "apps.empty")).toContain("Create GitHub App");
-    expect(t("zh_CN", "apps.empty")).toContain("还没有 App");
-    // Creation remains the header's POST form into the manifest flow.
+    // EmptyState title + description copy (plan 58 A6 keys).
+    expect(source).toContain('t(locale, "apps.emptyTitle")');
+    expect(source).toContain('t(locale, "apps.emptyDescription")');
+    expect(t("en", "apps.emptyTitle")).toContain("No Apps yet");
+    expect(t("en", "apps.emptyDescription")).toContain("Create GitHub App");
+    expect(t("zh_CN", "apps.emptyTitle")).toContain("还没有 App");
+    // Creation remains the manifest-flow POST form — the same CreateAppButton
+    // component is reused as the empty-state action while the header yields
+    // its slot (one form instance on the page, never duplicated).
     expect(source).toContain('action="/dashboard/manifest/start"');
+    expect(source).toContain("{!appsEmpty ? <CreateAppButton locale={locale} /> : null}");
+    expect(source).toContain('action={<CreateAppButton locale={locale} />}');
   });
 
-  test("loading and load-failure feedback stay on the shared notice channel", () => {
+  test("loading and load-failure feedback ride the plan-57 state trio (plan 58 A4)", () => {
     const source = readFileSync(APPS_SOURCE, "utf8");
-    expect(source).toContain("LoadingNotice locale={locale}");
-    expect(source).toContain("LoadFailedNotice locale={locale}");
+    expect(source).toContain('<PageSkeleton locale={locale} kind="table" />');
+    // Retry is wired to the page's own load function.
+    expect(source).toContain('<ErrorState locale={locale} onRetry={() => void load()} />');
+    // The old text-notice faces are retired from this page.
+    expect(source).not.toContain("LoadingNotice");
+    expect(source).not.toContain("LoadFailedNotice");
   });
 });

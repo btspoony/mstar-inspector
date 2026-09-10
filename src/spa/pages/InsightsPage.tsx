@@ -1,10 +1,14 @@
 import { useEffect, useState } from "react";
 import { t } from "../../i18n";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { CardContent, CardDescription, CardHeader } from "@/components/ui/card";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 import { fetchJson } from "../api";
 import type { SpaBoot } from "../boot";
+import { SectionCard, SectionCardTitle } from "../components/SectionCard";
+import { EmptyState } from "../components/state/EmptyState";
+import { ErrorState } from "../components/state/ErrorState";
+import { PageSkeleton } from "../components/state/PageSkeleton";
 import {
   INSIGHTS_WINDOWS,
   INSIGHTS_REPO_ALL,
@@ -21,7 +25,6 @@ import {
   type InsightsSearch,
   type InsightsSummary,
 } from "./data";
-import { LoadFailedNotice, LoadingNotice } from "./PageNotice";
 import { BarChart, type BarChartItem } from "@/components/charts/BarChart";
 import { TrendChart } from "@/components/charts/TrendChart";
 
@@ -50,12 +53,26 @@ function insightsSearchFromLocation(): InsightsSearch {
  * Plan 56 T2: the three stat sections (severity / category / weekly trend)
  * render as the hand-rolled SVG charts from components/charts; the
  * recurring-findings card stays a list.
+ * Plan 60 T2 (A2-A5): the page joins the v0.3 language — heading-24 page
+ * title, spacing-8 group rhythm, SectionCard tiers (overview = primary
+ * surface, stat cards = secondary), and the plan-57 state trio
+ * (PageSkeleton on the initial load, ErrorState with retry, EmptyState for
+ * the zero-review window). Filter logic and the URL↔filter pins are
+ * untouched.
+ * Plan 60 PR fix (PR 41 bugbot): a filter refetch over retained data
+ * renders a slim polite busy hint below the toolbar instead of a blank
+ * main area — the skeleton stays initial-load-only and the toolbar never
+ * unmounts (plan-38 no-flash contract); the content region also flips
+ * aria-busy so the refetch is announced programmatically.
  */
 export function InsightsPage({ boot }: { boot: SpaBoot }) {
   const locale = boot.locale;
   const [search, setSearch] = useState<InsightsSearch>(insightsSearchFromLocation);
   const [data, setData] = useState<InsightsSummary | null>(null);
   const [state, setState] = useState<"loading" | "ok" | "error">("loading");
+  // ErrorState retry (plan 60 A4): bumping the nonce re-runs the load
+  // effect below for the current filter — the fetch body is unchanged.
+  const [reloadNonce, setReloadNonce] = useState(0);
 
   // Plan 36 QC F-002: an off-set legal window deep link (e.g. ?window=60)
   // resolves to the default segment 30 — rewrite the URL on mount so the
@@ -103,7 +120,7 @@ export function InsightsPage({ boot }: { boot: SpaBoot }) {
     return () => {
       cancelled = true;
     };
-  }, [search.window, search.repo]);
+  }, [search.window, search.repo, reloadNonce]);
 
   function commitSearch(next: InsightsSearch): void {
     window.history.replaceState(null, "", searchHref("/dashboard/insights", next));
@@ -124,10 +141,24 @@ export function InsightsPage({ boot }: { boot: SpaBoot }) {
   const repoChoices = insightsRepoOptions(data?.repos ?? [], search.repo);
   const repoSelectDisabled = state === "ok" && repoChoices.length === 0;
 
+  // Loading rides the plan-57 skeleton as the page's full loading face —
+  // the component's heading placeholder stands in for the real h1 (AD-582).
+  // Initial load only: `data === null` gates it, so filter-change reloads
+  // keep the page (and keyboard focus) mounted per the plan-38
+  // background-reload contract; the refreshed data swaps in when it lands.
+  if (state === "loading" && data === null) {
+    return <PageSkeleton locale={locale} kind="cards" />;
+  }
+
+  // WCAG 4.1.3 (PR 41 bugbot): the region renders only past the initial-load
+  // skeleton gate, so aria-busy=true here always means "refetch over
+  // retained data" — the programmatic face for the busy hint below.
   return (
-    <div className="flex flex-col gap-6">
-      <div className="flex flex-wrap items-center justify-between gap-3">
-        <h1 className="text-2xl font-semibold tracking-tight">{t(locale, "insights.recordsHeading")}</h1>
+    <div className="flex flex-col gap-(--spacing-8)" aria-busy={state === "loading"}>
+      <div className="flex flex-wrap items-end justify-between gap-3">
+        <h1 className="font-semibold text-(length:--typo-heading-24-size) leading-(--typo-heading-24-line) tracking-(--typo-heading-24-tracking)">
+          {t(locale, "insights.recordsHeading")}
+        </h1>
         <div className="flex flex-wrap items-center gap-3">
           <ToggleGroup
             type="single"
@@ -162,8 +193,18 @@ export function InsightsPage({ boot }: { boot: SpaBoot }) {
           </Select>
         </div>
       </div>
-      {state === "loading" ? <LoadingNotice locale={locale} /> : null}
-      {state === "error" ? <LoadFailedNotice locale={locale} /> : null}
+      {state === "loading" && data !== null ? (
+        // Filter refetch over retained data (plan-38 background reload): a
+        // one-line polite hint replaces the blank main area; the toolbar
+        // above stays mounted and interactive. The retired PageNotice text
+        // faces stay off this page (plan-60 T2 pin).
+        <p role="status" className="text-sm text-muted-foreground">
+          {t(locale, "common.loading")}
+        </p>
+      ) : null}
+      {state === "error" ? (
+        <ErrorState locale={locale} onRetry={() => setReloadNonce((nonce) => nonce + 1)} />
+      ) : null}
       {state === "ok" && data ? <InsightsRecordsView locale={locale} data={data} /> : null}
     </div>
   );
@@ -233,110 +274,122 @@ export function InsightsRecordsView({ locale, data }: { locale: SpaBoot["locale"
 
   return (
     <>
-      <Card>
-        <CardHeader>
-          <CardTitle>{t(locale, "insights.heading")}</CardTitle>
-        </CardHeader>
-        <CardContent className="flex flex-col gap-1 text-sm">
-          <p>{t(locale, "insights.window", { label: `${windowLabel}${repoLabel}` })}</p>
-          <p>{t(locale, "insights.reviewsTotal", { count: data.reviews_total })}</p>
-          {empty ? (
-            <p className="text-muted-foreground">{t(locale, "insights.noReviews")}</p>
-          ) : (
-            <p>{t(locale, "insights.verdicts", { line: verdictLine(data) })}</p>
-          )}
-        </CardContent>
-      </Card>
-      {empty ? null : (
+      {empty ? (
+        // AD-601 presentation supersede (plan 60 A4): the plan-56
+        // heading-card-only empty face is replaced by the composed
+        // EmptyState. The judgment (`reviews_total === 0`) and the chart
+        // layer contract are untouched, and no in-page action exists —
+        // reviews arrive via installed Apps (no-action variant).
+        <EmptyState
+          title={t(locale, "insights.emptyTitle")}
+          description={t(locale, "insights.emptyDescription")}
+        />
+      ) : (
         <>
-          <Card>
+          <SectionCard tier="primary">
             <CardHeader>
-              <CardTitle>{t(locale, "insights.findingsBySeverity")}</CardTitle>
+              <SectionCardTitle>{t(locale, "insights.heading")}</SectionCardTitle>
+              <CardDescription>
+                {t(locale, "insights.window", { label: `${windowLabel}${repoLabel}` })}
+              </CardDescription>
             </CardHeader>
-            <CardContent>
-              {data.findings_by_severity.length === 0 ? (
-                <p className="text-sm text-muted-foreground">{t(locale, "insights.noFindings")}</p>
-              ) : (
-                <BarChart
-                  ariaLabel={t(locale, "insights.findingsBySeverity")}
-                  items={data.findings_by_severity.map((row) => ({
-                    key: row.severity,
-                    label: row.severity,
-                    value: row.count,
-                    color: SEVERITY_BAR_COLORS[row.severity],
-                  }))}
-                />
-              )}
+            <CardContent className="flex flex-col gap-1 text-sm">
+              <p className="tabular-nums">{t(locale, "insights.reviewsTotal", { count: data.reviews_total })}</p>
+              <p className="tabular-nums">{t(locale, "insights.verdicts", { line: verdictLine(data) })}</p>
             </CardContent>
-          </Card>
-          <Card>
-            <CardHeader>
-              <CardTitle>{t(locale, "insights.findingsByCategory")}</CardTitle>
-            </CardHeader>
-            <CardContent>
-              {data.findings_by_category.length === 0 ? (
-                <p className="text-sm text-muted-foreground">{t(locale, "insights.noFindings")}</p>
-              ) : (
-                <BarChart
-                  ariaLabel={t(locale, "insights.findingsByCategory")}
-                  items={categoryItems}
-                />
-              )}
-            </CardContent>
-          </Card>
-          <Card>
-            <CardHeader>
-              <CardTitle>{t(locale, "insights.weeklyTrend")}</CardTitle>
-            </CardHeader>
-            <CardContent>
-              {data.weekly_trend.length === 0 ? (
-                <p className="text-sm text-muted-foreground">{t(locale, "insights.noReviews")}</p>
-              ) : (
-                <div className="flex flex-col gap-3">
-                  <p className="text-sm text-muted-foreground">{trendSummary}</p>
-                  <TrendChart
-                    ariaLabel={t(locale, "insights.weeklyTrend")}
-                    locale={locale}
-                    seriesLabels={{
-                      reviews: t(locale, "insights.seriesReviews"),
-                      findings: t(locale, "insights.seriesFindings"),
-                    }}
-                    points={data.weekly_trend.map((row) => ({
-                      week: row.week_start,
-                      reviews: row.reviews,
-                      findings: row.findings,
+          </SectionCard>
+          {/* AD-591 rhythm: the four stat cards are one Tier 2 group —
+              spacing-6 inside, spacing-8 to the rest of the page. */}
+          <div className="flex flex-col gap-6">
+            <SectionCard tier="secondary">
+              <CardHeader>
+                <SectionCardTitle>{t(locale, "insights.findingsBySeverity")}</SectionCardTitle>
+              </CardHeader>
+              <CardContent>
+                {data.findings_by_severity.length === 0 ? (
+                  <p className="text-sm text-muted-foreground">{t(locale, "insights.noFindings")}</p>
+                ) : (
+                  <BarChart
+                    ariaLabel={t(locale, "insights.findingsBySeverity")}
+                    items={data.findings_by_severity.map((row) => ({
+                      key: row.severity,
+                      label: row.severity,
+                      value: row.count,
+                      color: SEVERITY_BAR_COLORS[row.severity],
                     }))}
                   />
-                </div>
-              )}
-            </CardContent>
-          </Card>
-          <Card>
-            <CardHeader>
-              <CardTitle>{t(locale, "insights.recurringFindings")}</CardTitle>
-            </CardHeader>
-            <CardContent>
-              {data.recurring_top.length === 0 ? (
-                <p className="text-sm text-muted-foreground">{t(locale, "insights.noRecurring")}</p>
-              ) : (
-                <ul className="flex flex-col">
-                  {data.recurring_top.map((row) => (
-                    <li
-                      key={row.fingerprint}
-                      className="flex flex-wrap items-center gap-x-3 gap-y-2 border-b border-border py-3 last:border-b-0 last:pb-0"
-                    >
-                      <strong className="text-sm font-medium">{row.title_sample}</strong>
-                      <span className="text-sm text-muted-foreground tabular-nums">
-                        {t(locale, row.count === 1 ? "insights.review" : "insights.reviews", { count: row.count })}
-                        {" · "}
-                        {row.repos.join(", ")}
-                      </span>
-                    </li>
-                  ))}
-                </ul>
-              )}
-            </CardContent>
-          </Card>
+                )}
+              </CardContent>
+            </SectionCard>
+            <SectionCard tier="secondary">
+              <CardHeader>
+                <SectionCardTitle>{t(locale, "insights.findingsByCategory")}</SectionCardTitle>
+              </CardHeader>
+              <CardContent>
+                {data.findings_by_category.length === 0 ? (
+                  <p className="text-sm text-muted-foreground">{t(locale, "insights.noFindings")}</p>
+                ) : (
+                  <BarChart
+                    ariaLabel={t(locale, "insights.findingsByCategory")}
+                    items={categoryItems}
+                  />
+                )}
+              </CardContent>
+            </SectionCard>
+            <SectionCard tier="secondary">
+              <CardHeader>
+                <SectionCardTitle>{t(locale, "insights.weeklyTrend")}</SectionCardTitle>
+              </CardHeader>
+              <CardContent>
+                {data.weekly_trend.length === 0 ? (
+                  <p className="text-sm text-muted-foreground">{t(locale, "insights.noReviews")}</p>
+                ) : (
+                  <div className="flex flex-col gap-3">
+                    <p className="text-sm text-muted-foreground">{trendSummary}</p>
+                    <TrendChart
+                      ariaLabel={t(locale, "insights.weeklyTrend")}
+                      locale={locale}
+                      seriesLabels={{
+                        reviews: t(locale, "insights.seriesReviews"),
+                        findings: t(locale, "insights.seriesFindings"),
+                      }}
+                      points={data.weekly_trend.map((row) => ({
+                        week: row.week_start,
+                        reviews: row.reviews,
+                        findings: row.findings,
+                      }))}
+                    />
+                  </div>
+                )}
+              </CardContent>
+            </SectionCard>
+            <SectionCard tier="secondary">
+              <CardHeader>
+                <SectionCardTitle>{t(locale, "insights.recurringFindings")}</SectionCardTitle>
+              </CardHeader>
+              <CardContent>
+                {data.recurring_top.length === 0 ? (
+                  <p className="text-sm text-muted-foreground">{t(locale, "insights.noRecurring")}</p>
+                ) : (
+                  <ul className="flex flex-col">
+                    {data.recurring_top.map((row) => (
+                      <li
+                        key={row.fingerprint}
+                        className="flex flex-wrap items-center gap-x-3 gap-y-2 border-b border-border py-3 last:border-b-0 last:pb-0"
+                      >
+                        <strong className="text-sm font-medium">{row.title_sample}</strong>
+                        <span className="text-sm text-muted-foreground tabular-nums">
+                          {t(locale, row.count === 1 ? "insights.review" : "insights.reviews", { count: row.count })}
+                          {" · "}
+                          {row.repos.join(", ")}
+                        </span>
+                      </li>
+                    ))}
+                  </ul>
+                )}
+              </CardContent>
+            </SectionCard>
+          </div>
         </>
       )}
     </>

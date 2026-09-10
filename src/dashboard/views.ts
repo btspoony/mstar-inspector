@@ -29,16 +29,22 @@ const STYLE = `<style>
    both together. */
 :root {
   color-scheme: dark;
-  --background-100: #09090b;
-  --background-200: #18181b;
-  --background-300: #27272a;
-  --gray-100: #18181b;
-  --gray-400: #3f3f46;
-  --gray-700: #8b8b94;
-  --gray-900: #b0b0b8;
-  --gray-1000: #f4f4f5;
+  --background-100: #0a0c10;
+  --background-200: #15181f;
+  --background-300: #212630;
+  --gray-100: #15181f;
+  --gray-400: #39404d;
+  --gray-700: #8b95a3;
+  --gray-900: #a9b4c2;
+  --gray-1000: #eef2f7;
   --gray-alpha-400: #ffffff2e;
   --blue-700: #4ea1ff;
+  /* Brand accent — value-synced with tokens.css (three-site covenant, QC
+     round 1 F-002); --button-primary-bg below references it. */
+  --brand-700: #22d3ee;
+  /* Tinted elevation — value-synced with tokens.css (plan 58 A3 SSR sync);
+     the auth-card face below consumes it. */
+  --shadow-card: 0 1px 2px #02061766, 0 2px 8px #02061733;
   --red-100: #2a1215;
   --red-400: #7f1d1d;
   --red-700: #f87171;
@@ -48,7 +54,11 @@ const STYLE = `<style>
   --amber-700: #fbbf24;
   --amber-800: #fcd34d;
   --amber-900: #fde68a;
-  --font-sans: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+  /* Three-site covenant: same stack as tokens.css/DESIGN.md (plan 57 T2,
+     AD-572). This zero-build SSR face declares no @font-face — "Geist Sans"
+     falls through to the system entries here; the woff2 ships via the SPA
+     bundle (styles/fonts.css). */
+  --font-sans: "Geist Sans", ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
   --font-mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
   --typo-heading-24-size: 24px;
   --typo-heading-24-weight: 600;
@@ -74,9 +84,9 @@ const STYLE = `<style>
   --spacing-4: 16px;
   --spacing-6: 24px;
   --spacing-8: 32px;
-  --rounded-sm: 6px;
+  --rounded-sm: 8px;
   --rounded-md: 12px;
-  --button-primary-bg: var(--blue-700);
+  --button-primary-bg: var(--brand-700);
   --button-primary-fg: var(--background-100);
   --button-primary-height: 40px;
   --button-primary-padding: 0 12px;
@@ -111,15 +121,17 @@ const STYLE = `<style>
   :root:not([data-theme="dark"]) {
     color-scheme: light;
     --background-100: #ffffff;
-    --background-200: #f4f4f5;
-    --background-300: #e4e4e7;
-    --gray-100: #fafafa;
-    --gray-400: #d4d4d8;
-    --gray-700: #52525b;
-    --gray-900: #3d3d3d;
-    --gray-1000: #111111;
-    --gray-alpha-400: #00000024;
+    --background-200: #f3f5f8;
+    --background-300: #e4e9f0;
+    --gray-100: #fafbfd;
+    --gray-400: #ccd4df;
+    --gray-700: #4e5969;
+    --gray-900: #2f3742;
+    --gray-1000: #0f141a;
+    --gray-alpha-400: #10192824;
     --blue-700: #0066cc;
+    --brand-700: #0e7490;
+    --shadow-card: 0 1px 2px #10192814, 0 2px 8px #1019280f;
     --red-100: #fef2f2;
     --red-400: #fca5a5;
     --red-700: #b91c1c;
@@ -137,15 +149,17 @@ const STYLE = `<style>
 :root[data-theme="light"] {
   color-scheme: light;
   --background-100: #ffffff;
-  --background-200: #f4f4f5;
-  --background-300: #e4e4e7;
-  --gray-100: #fafafa;
-  --gray-400: #d4d4d8;
-  --gray-700: #52525b;
-  --gray-900: #3d3d3d;
-  --gray-1000: #111111;
-  --gray-alpha-400: #00000024;
+  --background-200: #f3f5f8;
+  --background-300: #e4e9f0;
+  --gray-100: #fafbfd;
+  --gray-400: #ccd4df;
+  --gray-700: #4e5969;
+  --gray-900: #2f3742;
+  --gray-1000: #0f141a;
+  --gray-alpha-400: #10192824;
   --blue-700: #0066cc;
+  --brand-700: #0e7490;
+  --shadow-card: 0 1px 2px #10192814, 0 2px 8px #1019280f;
   --red-100: #fef2f2;
   --red-400: #fca5a5;
   --red-700: #b91c1c;
@@ -225,6 +239,43 @@ h1 {
   letter-spacing: var(--typo-heading-24-tracking);
 }
 main { max-width: 960px; margin: 0 auto; padding: var(--spacing-6) var(--spacing-4); }
+/* Auth-journey faces (plan 58 A3 SSR sync): the no-chrome auth surfaces
+   (denied / removed / forbidden / OAuth error) share the SPA login face's
+   centered-card language — brand wordmark echo + card tokens on the themed
+   canvas. Values ride the token subset above (three-site covenant with
+   tokens.css); the manifest flow pages stay on the plain main/banner face. */
+main.auth {
+  display: grid;
+  place-items: center;
+  min-height: 100vh;
+  max-width: none;
+  padding: var(--spacing-6) var(--spacing-4);
+}
+.auth-card {
+  width: 100%;
+  max-width: 384px;
+  background: var(--card-bg);
+  color: var(--card-fg);
+  border: 1px solid var(--card-border);
+  border-radius: var(--card-radius);
+  box-shadow: var(--shadow-card);
+  padding: var(--card-padding);
+}
+.auth-brand {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-2);
+  margin: 0 0 var(--spacing-4);
+  font-size: 14px;
+  font-weight: 600;
+  letter-spacing: -0.025em;
+}
+.auth-brand svg {
+  width: 24px;
+  height: 24px;
+  flex: none;
+  color: var(--brand-700);
+}
 .sections { display: grid; grid-template-columns: 1fr; gap: var(--spacing-8); }
 @media (min-width: 900px) {
   .sections { grid-template-columns: repeat(3, 1fr); }
@@ -359,6 +410,37 @@ function wrapPhraseAsLink(text: string, phrase: string, href: string): string {
   const i = text.indexOf(phrase);
   if (i === -1) return text;
   return `${text.slice(0, i)}<a href="${href}">${phrase}</a>${text.slice(i + phrase.length)}`;
+}
+
+/**
+ * Brand mark for the auth-journey faces (plan 58 A3 SSR sync) — the same
+ * inline silhouette as the SPA AppSidebar Logo (zero image assets; the
+ * mark colors via `currentColor`, see `.auth-brand svg` in STYLE).
+ */
+const AUTH_MARK =
+  '<svg viewBox="0 0 24 24" width="24" height="24" aria-hidden="true"><circle cx="12" cy="12" r="10" fill="none" stroke="currentColor" stroke-width="1.5"></circle><path d="M12 4 L13.2 10.2 L20 12 L13.2 13.8 L12 20 L10.8 13.8 L4 12 L10.8 10.2 Z" fill="currentColor"></path></svg>';
+
+/**
+ * No-chrome auth-journey face (plan 58 A3 SSR sync): the login-family
+ * surfaces (denied / removed / forbidden / OAuth error) render the SPA
+ * login face's centered-card language — wordmark echo + card on the themed
+ * canvas. `bannerHtml` must arrive pre-escaped by the caller: dynamic values
+ * are escapeHtml-ed before `t()` interpolation, and links are composed by
+ * string replace on the already-escaped output (wrapPhraseAsLink belongs to
+ * the manifest error pages, not this face); the alert keeps role="alert"
+ * (WCAG 4.1.3, unchanged from the plan-12 banner contract).
+ */
+function authFace(title: string, bannerHtml: string, locale: Locale = "en"): string {
+  return page(
+    title,
+    `<main class="auth">
+    <section class="auth-card">
+      <div class="auth-brand">${AUTH_MARK}<span>${escapeHtml(t(locale, "nav.brand"))}</span></div>
+      <div class="banner" role="alert">${bannerHtml}</div>
+    </section>
+  </main>`,
+    locale,
+  );
 }
 
 function page(title: string, body: string, locale: Locale = "en"): string {
@@ -545,11 +627,9 @@ export function manifestErrorPage(message: string, resumable = false, locale: Lo
  * login link back (an unknown user has nothing to return to).
  */
 export function deniedPage(login: string, locale: Locale = "en"): string {
-  return page(
+  return authFace(
     t(locale, "common.error.deniedTitle"),
-    `<main>
-    <div class="banner" role="alert">${t(locale, "common.error.deniedBody", { login: escapeHtml(login) })}</div>
-  </main>`,
+    t(locale, "common.error.deniedBody", { login: escapeHtml(login) }),
     locale,
   );
 }
@@ -562,11 +642,9 @@ export function deniedPage(login: string, locale: Locale = "en"): string {
  * the OAuth callback bootstrap deny until an admin re-invites the login.
  */
 export function removedPage(login: string, locale: Locale = "en"): string {
-  return page(
+  return authFace(
     t(locale, "common.error.removedTitle"),
-    `<main>
-    <div class="banner" role="alert">${t(locale, "common.error.removedBody", { login: escapeHtml(login) })}</div>
-  </main>`,
+    t(locale, "common.error.removedBody", { login: escapeHtml(login) }),
     locale,
   );
 }
@@ -582,13 +660,7 @@ export function forbiddenPage(login: string, locale: Locale = "en"): string {
     "/dashboard",
     '<a href="/dashboard">/dashboard</a>',
   );
-  return page(
-    t(locale, "common.error.forbiddenTitle"),
-    `<main>
-    <div class="banner" role="alert">${body}</div>
-  </main>`,
-    locale,
-  );
+  return authFace(t(locale, "common.error.forbiddenTitle"), body, locale);
 }
 
 /** OAuth failure surface: red-700 banner + what-to-do-next (DESIGN.md § State legibility). */
@@ -597,11 +669,5 @@ export function errorPage(message: string, locale: Locale = "en"): string {
     "/dashboard/login",
     '<a href="/dashboard/login">/dashboard/login</a>',
   );
-  return page(
-    t(locale, "common.error.signInErrorTitle"),
-    `<main>
-    <div class="banner" role="alert">${body}</div>
-  </main>`,
-    locale,
-  );
+  return authFace(t(locale, "common.error.signInErrorTitle"), body, locale);
 }

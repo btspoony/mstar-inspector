@@ -12,6 +12,16 @@
  * localized date axis, role/aria), the empty faces (never an empty-axis
  * svg), and the bilingual copy; the plan-45 proportional-bar pin is
  * superseded in place.
+ * Plan 60 T2/T3: the page joins the v0.3 language — SectionCard tiers,
+ * heading-24 title, spacing-8 rhythm, the plan-57 state trio — and this
+ * file carries the finalized AD-601 presentation-supersede ledger (T3.1).
+ * The ledger holds exactly TWO entries, both with covering pins here:
+ * (1) the plan-56 zero-review face → composed EmptyState (PM amendment in
+ * the plan file, 2026-09-10), and (2) the recurringFindings wrapper face →
+ * SectionCard tier="secondary" (PM-ratified T2 amendment, 2026-09-10 —
+ * content/list form untouched; a bare Card renders Tier-1 elevation inside
+ * the Tier-2 group). Everything else is retained zero-supersede; the
+ * plan-36/49 URL↔filter pins stay byte-for-byte.
  * No DOM runner — same source-scan contract as plan 29 SPA tests.
  */
 import { describe, expect, test } from "bun:test";
@@ -278,12 +288,19 @@ describe("records page chart empty faces (plan 56 T3 / AC2)", () => {
   // reviews_total 0 is the page-level empty: every stat card is suppressed.
   const ZERO_REVIEWS: InsightsSummary = { ...NO_CHART_DATA, reviews_total: 0 };
 
-  test("reviews_total 0 → heading card only: readable empty copy, never an empty-axis chart (bilingual)", () => {
+  test("reviews_total 0 → composed EmptyState guidance, never an empty-axis chart (bilingual; AD-601 supersede #1)", () => {
+    // AD-601 presentation supersede #1 of 2 (ledger in the file header): the
+    // plan-56 heading-card-only empty face became the plan-57 EmptyState
+    // (plan 60 A4). The guarded regression faces still hold — readable
+    // composed copy, every stat card suppressed, no chart svg anywhere.
     for (const locale of ["en", "zh_CN"] as const) {
       const html = renderRecords(locale, ZERO_REVIEWS);
-      expect(html).toContain(t(locale, "insights.heading"));
-      expect(html).toContain(t(locale, "insights.noReviews"));
-      // All four stat cards are suppressed — no titles, no svgs at all.
+      expect(html).toContain(t(locale, "insights.emptyTitle"));
+      expect(html).toContain(t(locale, "insights.emptyDescription"));
+      // The overview card is suppressed with the stat cards — no titles,
+      // no svgs at all (the EmptyState carries no icon svg).
+      expect(html).not.toContain(t(locale, "insights.heading"));
+      expect(html).not.toContain(t(locale, "insights.noReviews"));
       expect(html).not.toContain(t(locale, "insights.findingsBySeverity"));
       expect(html).not.toContain(t(locale, "insights.findingsByCategory"));
       expect(html).not.toContain(t(locale, "insights.weeklyTrend"));
@@ -431,8 +448,94 @@ describe("records page copy (plan 36 T2 / AC9)", () => {
       "insights.seriesReviews",
       "insights.seriesFindings",
       "insights.trendSummary",
+      "insights.emptyTitle",
+      "insights.emptyDescription",
     ]) {
       expect(page).toContain(`"${key}"`);
     }
+  });
+});
+
+describe("records page on the v0.3 language (plan 60 T2, A2-A5)", () => {
+  test("stat sections ride the SectionCard tier system (AD-591 consumption; covers AD-601 supersede #2)", () => {
+    expect(page).toContain('../components/SectionCard"');
+    // Exactly one primary (the stats overview) and four secondary (severity,
+    // category, trend, recurring) surfaces — no hand-assembled tier classes.
+    // The recurringFindings card's wrapper face → SectionCard tier=
+    // "secondary" is AD-601 presentation supersede #2 (PM-ratified T2 plan
+    // amendment, 2026-09-10): content, list form and copy untouched. This
+    // pin is its covering test — the 4× secondary count fails if the card
+    // reverts to a bare Card (Tier-1 elevation inside the Tier-2 group).
+    expect(page.split('tier="primary"').length - 1).toBe(1);
+    expect(page.split('tier="secondary"').length - 1).toBe(4);
+    // The tier faces come from the wrapper, not page-level classNames.
+    expect(page).not.toContain("shadow-(--shadow-card)");
+    expect(page).not.toContain("border-(--gray-alpha-500)");
+  });
+
+  test("page title rides the heading-24 token step and the page rhythm is the spacing-8 token", () => {
+    expect(page).toContain("text-(length:--typo-heading-24-size)");
+    expect(page).toContain("leading-(--typo-heading-24-line)");
+    expect(page).toContain("tracking-(--typo-heading-24-tracking)");
+    expect(page).toContain("gap-(--spacing-8)");
+  });
+
+  test("page-level states ride the plan-57 trio (plan 60 A4)", () => {
+    expect(page).toContain('components/state/PageSkeleton"');
+    expect(page).toContain('components/state/EmptyState"');
+    expect(page).toContain('components/state/ErrorState"');
+    expect(page).toContain('kind="cards"');
+    // The text notices are retired from this page (plan-38/44 channels stay
+    // in PageNotice for other pages).
+    expect(page).not.toContain("LoadingNotice");
+    expect(page).not.toContain("LoadFailedNotice");
+    // Skeleton is the initial load's face only — `data === null` gates it so
+    // filter-change reloads keep the page (and focus) mounted.
+    expect(page).toContain('state === "loading" && data === null');
+    // ErrorState retry re-runs the load effect through the nonce.
+    expect(page).toContain("setReloadNonce");
+  });
+
+  test("filter refetch rides an inline busy hint — never a blank main area (PR 41 bugbot)", () => {
+    // The skeleton stays the initial load's face only: its gate is exactly
+    // `state === "loading" && data === null`, so a refetch over retained
+    // data can never swap the mounted page for the skeleton.
+    expect(page).toContain('state === "loading" && data === null');
+    expect(page).toContain('return <PageSkeleton locale={locale} kind="cards" />');
+    // Refetch over retained data (filter change / retry) renders the slim
+    // polite hint below the toolbar instead of a blank main area. The two
+    // gates partition the loading state — one face each, no gap. The pins
+    // read the JSX elements, not the prose comments around them.
+    expect(page).toContain('state === "loading" && data !== null');
+    expect(page).toContain('<p role="status" className="text-sm text-muted-foreground">');
+    expect(page).toContain('common.loading');
+    // The refetch is announced programmatically on the content region.
+    expect(page).toContain('aria-busy={state === "loading"}');
+    // The records view (charts) still mounts only on the ready state — the
+    // hint is the refetch face, not a replacement for the data gate.
+    expect(page).toContain('state === "ok" && data ?');
+    // The retired PageNotice text faces stay off this page (channel pin
+    // above) — the hint is page-local JSX on Tailwind tokens.
+    expect(page).not.toContain("LoadingNotice");
+    expect(page).not.toContain("LoadFailedNotice");
+    expect(page).not.toContain("pages.module.css");
+  });
+
+  test("empty-state guidance keys resolve atomically in both locales", () => {
+    for (const key of ["insights.emptyTitle", "insights.emptyDescription"] as const) {
+      const en = t("en", key);
+      const zh = t("zh_CN", key);
+      expect(en.length, key).toBeGreaterThan(0);
+      expect(zh.length, key).toBeGreaterThan(0);
+      expect(zh, key).not.toBe(en);
+    }
+  });
+
+  test("the composed overview card keeps the bilingual window face and gains tabular figures", () => {
+    const html = renderRecords("en");
+    expect(html).toContain("Window: last 30 days");
+    expect(html).toContain("Reviews: 4");
+    expect(html).toContain("Verdicts: comment 3 · approve 1");
+    expect(page.split("tabular-nums").length - 1).toBeGreaterThanOrEqual(3);
   });
 });

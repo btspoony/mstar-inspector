@@ -1,3 +1,6 @@
+// Locally revised shadcn/ui copy-in (plan 58 T1 motion-token sweep — every
+// duration/easing consumes --duration-*/--ease-*, transition properties
+// unchanged; 018 copy-in supersede — do not regen over).
 import * as React from "react"
 import { XIcon } from "lucide-react"
 import * as SheetPrimitive from "@radix-ui/react-dialog"
@@ -58,7 +61,12 @@ function SheetContent({
       <SheetPrimitive.Content
         data-slot="sheet-content"
         className={cn(
-          "fixed z-50 flex flex-col gap-4 bg-background shadow-lg transition ease-in-out data-[state=closed]:animate-out data-[state=closed]:duration-300 data-[state=open]:animate-in data-[state=open]:duration-500",
+          // Overlay face: durations ride the --duration-slow token (the
+          // dialog.tsx overlay precedent). The data-[state] animate-in/out
+          // classes remain upstream copy-in shape — they emit no CSS in
+          // Tailwind 4 core (QC round 1 F-006 truth note), so this is
+          // tokenization only, not a motion redesign.
+          "fixed z-50 flex flex-col gap-4 bg-background shadow-lg transition duration-(--duration-slow) ease-(--ease-in-out) data-[state=closed]:animate-out data-[state=open]:animate-in",
           side === "right" &&
             "inset-y-0 right-0 h-full w-3/4 border-l data-[state=closed]:slide-out-to-right data-[state=open]:slide-in-from-right sm:max-w-sm",
           side === "left" &&
@@ -73,7 +81,7 @@ function SheetContent({
       >
         {children}
         {showCloseButton && (
-          <SheetPrimitive.Close className="absolute top-4 right-4 rounded-xs opacity-70 ring-offset-background transition-opacity hover:opacity-100 focus:ring-2 focus:ring-ring focus:ring-offset-2 focus:outline-hidden disabled:pointer-events-none data-[state=open]:bg-secondary">
+          <SheetPrimitive.Close className="absolute top-4 right-4 rounded-xs opacity-70 ring-offset-background transition-opacity duration-(--duration-base) ease-(--ease-in-out) hover:opacity-100 focus:ring-2 focus:ring-ring focus:ring-offset-2 focus:outline-hidden disabled:pointer-events-none data-[state=open]:bg-secondary">
             <XIcon className="size-4" />
             <span className="sr-only">Close</span>
           </SheetPrimitive.Close>

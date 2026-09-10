@@ -46,3 +46,8 @@ Any new dashboard chart need with small static data shapes. Reach for a chart li
 ## Examples
 
 `src/spa/components/charts/` (layout/BarChart/TrendChart), `tests/spa/charts.test.ts` (component suite), `tests/spa/insights-page.test.ts` (page wiring + superseded plan-45 pins).
+
+
+## AD-601 recalibration governance (iteration 018, 2026-09-10)
+
+Palette rebase lesson (v0.2 → v0.3 Signal Cyan): because chart colors ride **frozen token names**, the entire "recalibration" pass verified the 700 steps survived byte-identical (values re-tuned only for grays/backgrounds) — semantic families (must-fix=red / should-fix=amber / nit=gray / trend dual-series) needed zero code change, only a re-verified contrast table (all fills ≥3:1 vs new card faces, both themes, recorded in DESIGN.md Appendix A). Governance rules added: brand accent must NEVER become a data-series color (brand expression only in chart card chrome); step re-picks are pin line-value updates, never pin-semantics supersedes; `layout.ts` is structure-frozen. Supersede ledger for presentation faces lives in the pin-file header (exactly 2 entries: page empty face → EmptyState; recurring-card wrapper → SectionCard secondary).
