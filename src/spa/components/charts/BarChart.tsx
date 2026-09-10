@@ -1,37 +1,49 @@
 /**
- * Plan 56 T1 (AD-563): horizontal count bar chart — hand-rolled SVG, zero
- * dependencies. One labeled bar per category with the count as text at the
- * bar end and a ticked x axis, so the numbers coexist with the graphic
- * (a11y floor: the chart is never the only information carrier).
+ * Plan 63 T2 (B2/B3, AD-621): horizontal count bar chart on recharts
+ * (`layout="vertical"`) — recharts owns the band/scale geometry that
+ * charts/layout.ts used to hand-compute; that module retires with this
+ * migration (no compat shims). The public API is unchanged
+ * (`{ items, ariaLabel }`, `BarChartItem` still exported) — the
+ * InsightsPage consumer surface gets zero diff.
  *
- * Color mechanism (AD-561 face): fills are inline `var(--token)` references
- * into the DESIGN.md token layer (`src/spa/styles/tokens.css`, imported
- * globally by main.tsx) — the same CSS-var layer pages.module.css consumes.
- * They ride the `style` attribute (parsed as CSS declarations, where var()
- * resolves in every engine) — never SVG presentation attributes, whose var()
- * handling is engine-ambiguous (SVGWG open issue 1031, documented black-fill
- * fallbacks). The shadcn semantic Tailwind classes (text-muted-foreground et
- * al) have no chart-series face, and the var chain flips with
- * :root[data-theme], so dark/light both resolve with zero raw hex here.
- * Callers pass series colors
- * per item (the severity chart supplies the AD-561 mapping at the page
- * layer — families frozen under AD-601: must-fix→red-700 /
- * should-fix→amber-700 / nit→gray-700, 700 steps re-verified ≥3:1 vs the
- * v0.3 card faces in both themes, plan 60 T1); the default stays blue-700,
- * the neutral data-series tone (a data color, not brand expression and not
- * the link/focus duty — AD-601 records the choice).
+ * Fixed dimensions (AD-621): numeric width/height props, never
+ * ResponsiveContainer — the `renderToStaticMarkup` pin face has no DOM to
+ * measure. The recharts wrapper box is stretched back to the card width
+ * with `style={{ width: "100%", height: "auto" }}` (recharts merges the
+ * prop over its inline box), and the svg's own `width:100%;height:100%`
+ * inline styles resolve against the auto-height wrapper as the same fluid
+ * face the plan-56 svg had via `h-auto w-full` + viewBox.
  *
- * Legend: the bar-attached colored labels ARE the legend — each bar pairs
- * its color with a visible category label (颜色永非唯一载体), so no separate
- * legend block is rendered (legend is optional for this chart shape; the
- * dual-series TrendChart carries the explicit legend). Labels carry the
- * v0.3 label face (weight 500) and every numeral (bar-end counts, axis
- * ticks) renders tabular figures per the DESIGN.md numerals rule.
+ * Color mechanism (B3, AD-621): bar fills are CSS class rules
+ * (`charts.css` `.chart-fill-* { fill: var(--token) }`) chosen from the
+ * page-layer `color` prop — the same `var(--token)` references as before
+ * (AD-561 mapping; AD-601-frozen families: must-fix=red-700 /
+ * should-fix=amber-700 / nit=gray-700, neutral default blue-700). CSS
+ * class rules are parsed as declarations, so var() resolves in every
+ * engine, and they beat the presentation-attribute defaults recharts
+ * stamps on its internals. Presentation-attribute var() and raw hex are
+ * both banned (knowledge ui-bugs/svg-var-presentation-attributes.md;
+ * no-raw-hex pin).
+ *
+ * A11y floor (plan 56, preserved): role=img + aria-label + `<title>` on
+ * the recharts svg, per-bar counts as text (LabelList), category labels as
+ * visible tick text — truncated at 14 chars, with the full label readable
+ * in the hover tooltip — so the chart is never the only information
+ * carrier. The page-level summary lines around the charts are untouched.
+ *
+ * Tooltip (AC1): recharts default content, token-styled via
+ * contentStyle/labelStyle/itemStyle (style attributes = real CSS
+ * declarations, where var() is defined). itemStyle is not optional here —
+ * recharts' default list style paints entry values black, which would be
+ * unreadable in the dark theme. The single
+ * series' name is suppressed (empty name + separator): the tooltip label
+ * IS the category and the value is its count.
  *
  * Empty state: owned by the page (可读空态文案 per plan) — empty input
  * renders null, never a bare axis.
  */
-import { barRows, linearScale, niceTicks, truncateLabel } from "./layout";
+import { Bar as RBar, BarChart as RBarChart, Cell, LabelList, Tooltip, XAxis, YAxis } from "recharts";
+import "./charts.css";
 
 export interface BarChartItem {
   key: string;
@@ -41,90 +53,84 @@ export interface BarChartItem {
   color?: string;
 }
 
+/** Character-count truncation with an ellipsis — deterministic (no text measurement in SSR). */
+function truncateLabel(label: string, maxChars: number): string {
+  return label.length <= maxChars ? label : `${label.slice(0, maxChars - 1)}…`;
+}
+
+/**
+ * `var(--token)` reference → the charts.css fill class. Only the
+ * AD-601-frozen 700-step family resolves; anything else (unknown severity
+ * vocabulary, future tokens without a rule) falls back to the neutral
+ * series tone — the same face the page-level mapping already produces for
+ * unknown keys.
+ */
+const FILL_CLASSES: Record<string, string> = {
+  "var(--red-700)": "chart-fill-red-700",
+  "var(--amber-700)": "chart-fill-amber-700",
+  "var(--gray-700)": "chart-fill-gray-700",
+};
+const NEUTRAL_FILL_CLASS = "chart-fill-blue-700";
+
+function fillClass(color?: string): string {
+  return (color && FILL_CLASSES[color]) || NEUTRAL_FILL_CLASS;
+}
+
 const WIDTH = 560;
 const LABEL_W = 110;
-const LABEL_GAP = 8;
 const VALUE_PAD = 40;
 const ROW_H = 28;
 const BAR_H = 14;
-const AXIS_H = 18;
 const PAD_TOP = 2;
+const AXIS_H = 18;
 const LABEL_MAX_CHARS = 14;
 
 export function BarChart({ items, ariaLabel }: { items: BarChartItem[]; ariaLabel: string }) {
   if (items.length === 0) return null;
 
-  const rows = barRows(items.length, ROW_H, BAR_H);
-  const barsX = LABEL_W + LABEL_GAP;
-  const plotW = WIDTH - barsX - VALUE_PAD;
-  const ticks = niceTicks(Math.max(...items.map((item) => item.value)));
-  // niceTicks always returns at least [0].
-  const xScale = linearScale(ticks[ticks.length - 1]!, plotW);
   const height = PAD_TOP + items.length * ROW_H + AXIS_H;
 
   return (
-    <svg
+    <RBarChart
+      layout="vertical"
+      data={items}
+      width={WIDTH}
+      height={height}
+      margin={{ top: PAD_TOP, right: VALUE_PAD, bottom: 0, left: 0 }}
+      className="chart-frame"
+      style={{ width: "100%", height: "auto" }}
       role="img"
-      aria-label={ariaLabel}
-      viewBox={`0 0 ${WIDTH} ${height}`}
-      className="h-auto w-full"
+      {...{ "aria-label": ariaLabel }}
+      title={ariaLabel}
     >
-      {items.map((item, row) => {
-        // barRows(items.length) yields exactly one row per item — defined by construction.
-        const { y, height: barHeight } = rows[row]!;
-        const barY = PAD_TOP + y;
-        const barWidth = xScale(item.value);
-        return (
-          <g key={item.key}>
-            <text
-              x={LABEL_W}
-              y={barY + barHeight / 2}
-              textAnchor="end"
-              dominantBaseline="central"
-              fontSize={11}
-              style={{ fill: "var(--gray-1000)", fontWeight: 500 }}
-            >
-              <title>{item.label}</title>
-              {truncateLabel(item.label, LABEL_MAX_CHARS)}
-            </text>
-            <rect
-              x={barsX}
-              y={barY}
-              width={barWidth}
-              height={barHeight}
-              style={{ fill: item.color ?? "var(--blue-700)" }}
-            />
-            <text
-              x={barsX + barWidth + 6}
-              y={barY + barHeight / 2}
-              dominantBaseline="central"
-              fontSize={11}
-              style={{ fill: "var(--gray-900)", fontVariantNumeric: "tabular-nums" }}
-            >
-              {item.value}
-            </text>
-          </g>
-        );
-      })}
-      <line
-        x1={barsX}
-        y1={PAD_TOP + items.length * ROW_H}
-        x2={barsX + plotW}
-        y2={PAD_TOP + items.length * ROW_H}
-        style={{ stroke: "var(--gray-alpha-400)" }}
+      <XAxis type="number" allowDecimals={false} tickLine={false} height={AXIS_H} />
+      <YAxis
+        type="category"
+        dataKey="label"
+        width={LABEL_W}
+        axisLine={false}
+        tickLine={false}
+        className="chart-category-axis"
+        tickFormatter={(label: string) => truncateLabel(label, LABEL_MAX_CHARS)}
       />
-      {ticks.map((tick) => (
-        <text
-          key={tick}
-          x={barsX + xScale(tick)}
-          y={PAD_TOP + items.length * ROW_H + 13}
-          textAnchor="middle"
-          fontSize={10}
-          style={{ fill: "var(--gray-900)", fontVariantNumeric: "tabular-nums" }}
-        >
-          {tick}
-        </text>
-      ))}
-    </svg>
+      <Tooltip
+        cursor={false}
+        separator=""
+        formatter={(value) => [value, ""]}
+        contentStyle={{
+          backgroundColor: "var(--card)",
+          border: "1px solid var(--border)",
+          borderRadius: "6px",
+        }}
+        labelStyle={{ color: "var(--gray-1000)", fontWeight: 500 }}
+        itemStyle={{ color: "var(--gray-900)" }}
+      />
+      <RBar dataKey="value" barSize={BAR_H} isAnimationActive={false}>
+        <LabelList dataKey="value" position="right" className="chart-value-label" />
+        {items.map((item) => (
+          <Cell key={item.key} className={fillClass(item.color)} />
+        ))}
+      </RBar>
+    </RBarChart>
   );
 }
