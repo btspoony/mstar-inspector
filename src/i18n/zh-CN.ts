@@ -177,6 +177,9 @@ export const zhCN: Dictionary = {
     seriesReviews: "审查",
     seriesFindings: "发现",
     trendSummary: "窗口内共 {reviews} · {findings}",
+    /** Plan 60 A4: 组合式零审查空态——无动作变体（审查由已安装的 App 产生）。 */
+    emptyTitle: "还没有审查",
+    emptyDescription: "已安装的 GitHub App 完成审查后，这里会逐渐积累数据。",
   },
   settings: {
     title: "应用设置",

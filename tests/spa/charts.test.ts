@@ -152,6 +152,18 @@ describe("BarChart SSR (plan 56 T1)", () => {
     expect(barChart([{ key: "c", label: "cats", value: 1 }])).toContain('style="fill:var(--blue-700)"');
   });
 
+  test("chart text rides the v0.3 label/numerals faces (plan 60 T1 chrome layer)", () => {
+    const html = barChart(items);
+    // Category labels (the bar-attached legend) carry the label-face weight;
+    // bar-end counts and axis ticks render tabular figures (DESIGN.md
+    // numerals rule). T3 tightening of the T1 whole-svg substring check
+    // (plan QC Minor M1): the exact style attribute each face renders, so
+    // the faces cannot drift onto the wrong element or drop a property.
+    // Fills are untouched — the token pins above keep guarding them.
+    expect(html).toContain('style="fill:var(--gray-1000);font-weight:500"');
+    expect(html).toContain('style="fill:var(--gray-900);font-variant-numeric:tabular-nums"');
+  });
+
   test("all-zero values render zero-width bars — never NaN (AC2)", () => {
     expect(barChart([{ key: "z", label: "zero", value: 0 }])).toContain('width="0"');
   });
@@ -175,6 +187,16 @@ describe("TrendChart SSR (plan 56 T1 / AD-562)", () => {
     expect(html).toContain('style="fill:var(--amber-700)"');
     expect(html).toContain("Reviews");
     expect(html).toContain("Findings");
+  });
+
+  test("legend/axis text rides the v0.3 label/numerals faces (plan 60 T1 chrome layer)", () => {
+    const html = trendChart(weeks);
+    // Legend entries carry the label-face weight; y ticks and date labels
+    // render tabular figures. T3 tightening of the T1 whole-svg substring
+    // check (plan QC Minor M1) — per-element style pins; the legend
+    // order/colors stay pinned above.
+    expect(html).toContain('style="fill:var(--gray-900);font-weight:500"');
+    expect(html).toContain('style="fill:var(--gray-900);font-variant-numeric:tabular-nums"');
   });
 
   test("each week band carries the two grouped rects (reviews + findings)", () => {
