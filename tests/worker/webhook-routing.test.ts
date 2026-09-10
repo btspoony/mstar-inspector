@@ -39,9 +39,18 @@ const TEST_KEY = Buffer.alloc(32, 7).toString("base64");
 function createMigratedD1(): ReturnType<typeof createTestD1> {
   const db = createTestD1();
   // 0008 (plan 16): the github_apps ops columns (review_enabled /
-  // last_webhook_at) the pause gate + touch read and write on every delivery
-  // — the fixture must stay production-shaped.
-  for (const name of ["0004_github_apps.sql", "0005_reviews_app_id.sql", "0008_github_apps_ops.sql"]) {
+  // last_webhook_at) the pause gate + touch read and write on every delivery.
+  // 0011 (plan 20): webhook_deliveries — the route's post-classify
+  // recordDelivery is best-effort in production; with the table present the
+  // fixture can pin WHAT it records (plan 61 T1.2: an invalid signature lands
+  // a `rejected` row, never `ok`). Both append-only / additive — the fixture
+  // must stay production-shaped.
+  for (const name of [
+    "0004_github_apps.sql",
+    "0005_reviews_app_id.sql",
+    "0008_github_apps_ops.sql",
+    "0011_webhook_deliveries.sql",
+  ]) {
     db.raw.exec(readFileSync(join(MIGRATIONS_DIR, name), "utf8"));
   }
   return db;
@@ -199,6 +208,33 @@ describe("POST /webhook/:appSlug (per-App routing)", () => {
     expect(resXY.status).toBe(401);
     expect(resYX.status).toBe(401);
     expect(sent).toHaveLength(0);
+  });
+
+  // Plan 61 T1.2 (F9/F10 strength pin): an invalid signature is the REJECTED
+  // classification end to end — 401 on the wire, zero enqueue, and the
+  // post-classify delivery row is `rejected` with the classifier's status,
+  // never `ok` (AL-20-1: rejected rows are the fail-closed evidence the
+  // diagnostics face exists to show).
+  test("invalid signature → 401, zero enqueue, delivery row rejected — never ok (plan 61 T1.2)", async () => {
+    const db = createMigratedD1();
+    const appRow = await seedApp(db, { slug: "app-x", secret: "secret-x" });
+    const { queue, sent } = makeQueue();
+    const env = makeEnv(db, { REVIEW_QUEUE: queue as never });
+    const body = JSON.stringify(PR_PAYLOAD);
+
+    const res = await postWebhook(
+      `/webhook/${appRow.slug}`,
+      body,
+      { "x-hub-signature-256": await signatureFor("not-the-secret", body), "x-github-event": "pull_request" },
+      env,
+    );
+
+    expect(res.status).toBe(401);
+    expect(sent).toHaveLength(0);
+    const rows = db.raw
+      .query("SELECT outcome, status_code FROM webhook_deliveries WHERE app_id = ?")
+      .all(appRow.id) as Array<{ outcome: string; status_code: number | null }>;
+    expect(rows).toEqual([{ outcome: "rejected", status_code: 401 }]);
   });
 
   test("unknown slug → 404, zero enqueue", async () => {
