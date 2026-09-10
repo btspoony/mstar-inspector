@@ -37,6 +37,10 @@ describe("SectionCard tier idiom (plan 59 T1 / AD-591)", () => {
     // Tier faces are spelled out exactly once.
     expect(sectionCard.match(/border-\(--gray-alpha-500\)/g)?.length).toBe(1);
     expect(sectionCard.match(/shadow-none/g)?.length).toBe(1);
+    // Tier 2's hairline color is explicit (qc2 F-001): the primitive's bare
+    // `border` carries width only — preflight leaves border-color at
+    // currentColor — so the secondary face must carry `border-border`.
+    expect(sectionCard).toContain('secondary: "shadow-none border-border"');
     // Zero raw hex in the idiom file.
     expect(sectionCard).not.toMatch(/#[0-9a-fA-F]{3,8}\b/);
   });
@@ -50,10 +54,11 @@ describe("SectionCard tier idiom (plan 59 T1 / AD-591)", () => {
     expect(primary).toContain('data-slot="card"');
     expect(primary).toContain("border-(--gray-alpha-500)");
     expect(primary).not.toContain("shadow-none");
-    // Secondary is flat on the primitive's hairline.
+    // Secondary is flat on the token hairline (border-border → gray-alpha-400).
     const secondary = html("secondary");
     expect(secondary).toContain('data-tier="secondary"');
     expect(secondary).toContain("shadow-none");
+    expect(secondary).toContain("border-border");
     expect(secondary).not.toContain("border-(--gray-alpha-500)");
   });
 
@@ -61,8 +66,12 @@ describe("SectionCard tier idiom (plan 59 T1 / AD-591)", () => {
     const out = renderToStaticMarkup(createElement(SectionGroup, { label: "Identity", children: "cards" }));
     expect(out).toContain('data-slot="section-group-eyebrow"');
     expect(out).toContain(">Identity</p>");
-    // Eyebrow face: label-12 tracking token + muted tone; never a heading.
+    // Eyebrow face: the full label-12 token face (size/line/tracking/weight
+    // per tokens.css --typo-label-12-*) + muted tone; never a heading.
+    expect(out).toContain("text-(length:--typo-label-12-size)");
+    expect(out).toContain("leading-(--typo-label-12-line)");
     expect(out).toContain("tracking-(--typo-label-12-tracking)");
+    expect(out).toContain("font-(weight:--typo-label-12-weight)");
     expect(out).toContain("text-muted-foreground");
     expect(out).toContain('data-slot="section-group"');
     expect(out).toContain("cards");
@@ -138,12 +147,20 @@ describe("settings heading idiom (plan 59 T1, plan-58 QC convergence)", () => {
     expect(sectionCard).toContain("tracking-(--typo-heading-16-tracking)");
     // Each re-parented card consumes the upgraded title (the T1 wave re-parented
     // identity/status + runtime image; T2 added providers/chains/seats — pinned
-    // in the T2 describe below).
-    for (const card of ["export function AppInfoCard", "function HealthCard", "function RuntimeImageCard", "function OpsCard"]) {
-      const from = settingsPage.indexOf(card);
-      expect(from, card).toBeGreaterThan(-1);
-      const nextCard = settingsPage.slice(from, from + 900);
-      expect(nextCard, card).toContain("<SectionCardTitle>");
+    // in the T2 describe below). End anchors use the file's cardBlock
+    // next-declaration pattern so prose near a signature can't break the pin.
+    const cardBlock = (start: string, end: string) => {
+      const from = settingsPage.indexOf(start);
+      expect(from, start).toBeGreaterThan(-1);
+      return settingsPage.slice(from, settingsPage.indexOf(end, from));
+    };
+    for (const [card, next] of [
+      ["export function AppInfoCard", "function HealthBody"],
+      ["function HealthCard", "function RuntimeImageCard"],
+      ["function RuntimeImageCard", "function RuntimeImageEditor"],
+      ["function OpsCard", "function ProvidersCard"],
+    ] as const) {
+      expect(cardBlock(card, next), card).toContain("<SectionCardTitle>");
     }
   });
 });

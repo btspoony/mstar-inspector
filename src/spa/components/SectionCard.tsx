@@ -8,7 +8,9 @@
  * - tier "primary" — identity/status surface: the card primitive's resting
  *   elevation (`shadow-card`) over a one-step-tinted border.
  * - tier "secondary" — configuration surface: flat (no elevation) on the
- *   primitive's gray-alpha-400 hairline.
+ *   token hairline (`border-border` → `--border` = gray-alpha-400). The
+ *   card primitive's bare `border` carries width only — preflight leaves
+ *   border-color at currentColor — so the tier face must supply the color.
  *
  * `SectionCardTitle` upgrades the card title face to the heading-16 token
  * step (DESIGN.md: heading-16 = section/card titles). `SectionGroup` carries
@@ -25,7 +27,7 @@ type SectionTier = "primary" | "secondary";
 /** AD-591 tier faces — the only place tier styling is spelled out. */
 const TIER_FACES: Record<SectionTier, string> = {
   primary: "border-(--gray-alpha-500)",
-  secondary: "shadow-none",
+  secondary: "shadow-none border-border",
 };
 
 export function SectionCard({
@@ -65,7 +67,7 @@ export function SectionGroup({
           slug row) stays the heading tree's owner — no level interleave. */}
       <p
         data-slot="section-group-eyebrow"
-        className="text-xs font-medium uppercase tracking-(--typo-label-12-tracking) text-muted-foreground"
+        className="text-(length:--typo-label-12-size) leading-(--typo-label-12-line) tracking-(--typo-label-12-tracking) font-(weight:--typo-label-12-weight) uppercase text-muted-foreground"
       >
         {label}
       </p>
