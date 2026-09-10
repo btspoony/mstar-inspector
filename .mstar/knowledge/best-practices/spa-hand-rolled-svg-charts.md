@@ -22,6 +22,8 @@ related_components:
 
 # Hand-rolled SVG charts: pure-calc layout + render split, text coexistence, page-owned empty states
 
+> **Status (2026-09-10, plan 63 / AD-621)**: the Insights charts now run on recharts (`best-practices/spa-recharts-token-charts.md`); the plan-56 hand-rolled pipeline (`layout.ts` + these components) is retired from the product. This doc is retained as the pattern reference for zero-dependency chart faces where a library is not adopted — the a11y floor, token discipline and pin hygiene sections remain governing guidance.
+
 ## Context
 
 017-dashboard-ux plan 56 replaced three Insights list sections with charts. Decision G2 (user-locked): hand-rolled SVG, zero chart-library dependencies — data shapes are small (a few counts; ≤13 week points), bundle growth on the Worker-served SPA was a standing concern, and DESIGN.md's ops-console aesthetic favors plain geometry.

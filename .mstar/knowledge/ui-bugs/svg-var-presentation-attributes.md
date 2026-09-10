@@ -56,3 +56,7 @@ Style attributes are parsed as CSS declarations, where custom-property substitut
 
 - Any new SVG code that colors from DESIGN.md tokens uses style props for `fill`/`stroke`/`color`; presentation-attribute `var()` is a review red flag.
 - The no-raw-hex source pin stays as the token-SSOT guard; consider a lint/pin forbidding `(fill|stroke)="var(` in `src/spa` (grep: zero matches is the current invariant, verified at plan-56 QA).
+
+## Update (2026-09-10, plan 63)
+
+The remedy above (inline style props) covers **hand-authored** SVG. When a chart library emits `fill`/`stroke` as presentation attributes on your behalf (recharts serializes props via `filterProps` → attributes), you cannot inject style props per element — the remedy extends: **author CSS class rules beat presentation attributes in the cascade**, so route library elements through `className` and declare `.chart-* { fill: var(--token) }` in a stylesheet. Same root cause, second remedy face. Full pipeline (version line, probe idiom, pin discipline): `best-practices/spa-recharts-token-charts.md`.
