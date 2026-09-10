@@ -16,7 +16,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Setup Bun
         uses: oven-sh/setup-bun@v2
@@ -48,7 +48,7 @@ jobs:
       ALERT_WEBHOOK_URL: ${{ secrets.ALERT_WEBHOOK_URL }}
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           fetch-depth: 0   # Bugbot #14: digest write-back merges origin/main — shallow clone has no merge base
 
@@ -121,7 +121,7 @@ jobs:
           # grep -oE "registry\.cloudflare\.com/${CLOUDFLARE_ACCOUNT_ID}/mstar-inspector-sandbox@sha256:[0-9a-f]{64}" deploy.log
 
       - name: Upload deploy evidence artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: deploy-evidence
           path: |
