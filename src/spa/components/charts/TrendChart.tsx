@@ -1,41 +1,53 @@
 /**
- * Plan 56 T1 (AD-562/AD-563): weekly trend chart — a single chart with TWO
- * series (reviews + findings) as grouped vertical bars, two rects per week
- * band sharing one linear y scale 0..max(reviews, findings), x = week_start
- * bands. Zero polyline/point-marker math: zero-value weeks fall out as
- * zero-height rects naturally.
+ * Plan 63 T2 (B2/B3, AD-621): weekly trend chart on recharts — grouped
+ * vertical bars (reviews + findings) per week_start bucket; recharts owns
+ * the band/grouped-offset/tick geometry that charts/layout.ts used to
+ * hand-compute (that module retires with this migration, no compat shims).
+ * The public API is unchanged: `{ points, locale, seriesLabels, ariaLabel }`.
  *
- * Geometry (band positions, grouped offsets, tick selection, >8-week
- * every-other-date thinning) lives in ./layout as pure functions; this file
- * only positions what they return. Series colors carry the AD-561
- * dual-series function (reviews ≠ findings visually distinct), recalibrated
- * under AD-601 on the v0.3 palette: reviews→blue-700, findings→amber-700 —
- * the 700 values are v0.2-unchanged and ≥3:1 vs the card faces in both
- * themes, Δhue ≈ 169° (dark) / 184° (light). blue-700 here is a data-series
- * tone, not the link/focus duty and never brand expression (AD-601 records
- * the choice). Colors ride inline
- * `var(--token)` references on the `style` attribute (parsed as CSS
- * declarations, where var() resolves in every engine — never SVG
- * presentation attributes, SVGWG open issue 1031) into the DESIGN.md token
- * layer (src/spa/styles/tokens.css), so dark/light both resolve with zero
- * raw hex; the legend swatches use the same vars, mapping series→color.
- * Legend text carries the v0.3 label face (weight 500) and every numeral
- * (y ticks, date labels) renders tabular figures per the DESIGN.md
- * numerals rule.
+ * Series colors (AD-561 dual-series function, AD-601 recalibration — the
+ * exact plan-56 pair): reviews=blue-700, findings=amber-700, applied via
+ * the shared charts.css fill classes (B3 class discipline — no
+ * presentation-attribute var(), no raw hex; the 700 values are ≥3:1 vs the
+ * v0.3 card faces in both themes, Δhue ≈ 169°/184°). blue-700 is a
+ * data-series tone, not the link/focus duty and never brand expression.
+ * The legend row above the chart keeps the plan-56 face (10×10 rounded
+ * swatch + weight-500 label); the swatches are HTML spans carrying the
+ * charts.css background-color twins of the series fills.
  *
- * Numeric coexistence (a11y floor): per-week counts are not labeled on the
- * points — the window totals ride the page-level summary line
+ * Axes (AC1): x = week_start categories formatted by formatWeekLabel per
+ * the `locale` prop (the same deterministic M/D · M月D日 formatting plan-56
+ * shipped — moved here from the retired layout.ts); more than 8 weeks thin
+ * to every-other labels via the axis interval (even indices — the first
+ * week always stays labeled, plan-56 semantics). y = integer counts
+ * (allowDecimals={false}). Both axis lines ride the gray-alpha-400 token
+ * through charts.css.
+ *
+ * Fixed dimensions (AD-621): numeric width/height props, never
+ * ResponsiveContainer. The wrapper box is stretched to the card width with
+ * `style={{ width: "100%", height: "auto" }}`, so the viewBox keeps the
+ * fluid face of the old h-auto w-full svg. The block keeps the plan-56
+ * footprint: 24px legend row + 166px chart = 190px, plot height 142.
+ *
+ * Numeric coexistence (a11y floor, plan 56): per-week counts are not
+ * labeled on the bars — the window totals ride the page-level summary line
  * (InsightsPage `trendSummary`, derived from the same weekly buckets)
- * alongside the y ticks, so the numbers coexist with the graphic and the
- * chart is never their only carrier (plan 56 T1-PM disposition).
+ * alongside the y ticks and date labels, so the chart is never the
+ * numbers' only carrier (plan 56 T1-PM disposition, unchanged).
+ *
+ * Tooltip (AC1): recharts default content with token-styled styles
+ * (contentStyle/labelStyle/itemStyle — itemStyle overrides the recharts
+ * default black text, dark-theme readability); the week label rides
+ * labelFormatter → formatWeekLabel, and the series names come from the
+ * seriesLabels prop.
  *
  * Localized copy comes in as props (legend labels from the caller's i18n
- * keys, plan 56 T2); x date labels are formatted from week_start by
- * formatWeekLabel per the `locale` prop. Empty state: owned by the page
- * (可读空态文案 per plan) — empty input renders null, never a bare axis.
+ * keys, plan 56 T2). Empty state: owned by the page (可读空态文案 per
+ * plan) — empty input renders null, never a bare axis.
  */
 import type { Locale } from "../../../i18n";
-import { BAND_RATIO, bandScale, formatWeekLabel, groupedBars, linearScale, niceTicks, thinXLabels } from "./layout";
+import { Bar as RBar, BarChart as RBarChart, Tooltip, XAxis, YAxis } from "recharts";
+import "./charts.css";
 
 export interface TrendPoint {
   week: string;
@@ -43,18 +55,29 @@ export interface TrendPoint {
   findings: number;
 }
 
-const WIDTH = 560;
-const HEIGHT = 190;
-const PAD_L = 28;
-const PAD_R = 8;
-const LEGEND_H = 24;
-const AXIS_H = 20;
-const PAD_TOP = 4;
+/**
+ * Localized week_start axis label from an ISO `YYYY-MM-DD` string —
+ * "M/D" (en) / "M月D日" (zh_CN). Parsed manually (no Intl) so bun SSR,
+ * workerd, and the browser agree byte for byte; a non-ISO value falls back
+ * to the raw string rather than throwing. (Moved here from the retired
+ * charts/layout.ts — this chart is its only consumer.)
+ */
+function formatWeekLabel(iso: string, locale: Locale): string {
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(iso);
+  if (!match) return iso;
+  const month = Number(match[2]);
+  const day = Number(match[3]);
+  return locale === "zh_CN" ? `${month}月${day}日` : `${month}/${day}`;
+}
 
-const PLOT_X = PAD_L;
-const PLOT_W = WIDTH - PAD_L - PAD_R;
-const PLOT_Y = PAD_TOP + LEGEND_H;
-const PLOT_H = HEIGHT - PLOT_Y - AXIS_H;
+const WIDTH = 560;
+const LEGEND_H = 24;
+const CHART_H = 190 - LEGEND_H;
+const PAD_TOP = 4;
+const PAD_R = 8;
+const AXIS_H = 20;
+const Y_AXIS_W = 28;
+const X_LABEL_MAX_VISIBLE = 8;
 
 export function TrendChart({
   points,
@@ -69,81 +92,56 @@ export function TrendChart({
 }) {
   if (points.length === 0) return null;
 
-  const bandWidth = (PLOT_W / points.length) * BAND_RATIO;
-  const bandX = bandScale(points.length, PLOT_W);
-  const { width: barWidth, offsets } = groupedBars(2, bandWidth);
-  const ticks = niceTicks(Math.max(...points.map((point) => Math.max(point.reviews, point.findings))));
-  // niceTicks always returns at least [0]; groupedBars(2, …) always yields two offsets.
-  const yScale = linearScale(ticks[ticks.length - 1]!, PLOT_H);
-  const axisY = PLOT_Y + PLOT_H;
-
   return (
-    <svg
-      role="img"
-      aria-label={ariaLabel}
-      viewBox={`0 0 ${WIDTH} ${HEIGHT}`}
-      className="h-auto w-full"
-    >
-      <rect x={PLOT_X} y={8} width={10} height={10} rx={2} style={{ fill: "var(--blue-700)" }} />
-      <text x={PLOT_X + 14} y={13} dominantBaseline="central" fontSize={11} style={{ fill: "var(--gray-900)", fontWeight: 500 }}>
-        {seriesLabels.reviews}
-      </text>
-      <rect x={PLOT_X + 150} y={8} width={10} height={10} rx={2} style={{ fill: "var(--amber-700)" }} />
-      <text x={PLOT_X + 164} y={13} dominantBaseline="central" fontSize={11} style={{ fill: "var(--gray-900)", fontWeight: 500 }}>
-        {seriesLabels.findings}
-      </text>
-      <line x1={PLOT_X} y1={PLOT_Y} x2={PLOT_X} y2={axisY} style={{ stroke: "var(--gray-alpha-400)" }} />
-      <line x1={PLOT_X} y1={axisY} x2={PLOT_X + PLOT_W} y2={axisY} style={{ stroke: "var(--gray-alpha-400)" }} />
-      {ticks.map((tick) => (
-        <text
-          key={tick}
-          x={PLOT_X - 6}
-          y={axisY - yScale(tick)}
-          dominantBaseline="central"
-          textAnchor="end"
-          fontSize={10}
-          style={{ fill: "var(--gray-900)", fontVariantNumeric: "tabular-nums" }}
-        >
-          {tick}
-        </text>
-      ))}
-      {points.map((point, index) => {
-        const x = PLOT_X + bandX(index);
-        return (
-          <g key={point.week}>
-            <rect
-              x={x + offsets[0]!}
-              y={axisY - yScale(point.reviews)}
-              width={barWidth}
-              height={yScale(point.reviews)}
-              style={{ fill: "var(--blue-700)" }}
-            />
-            <rect
-              x={x + offsets[1]!}
-              y={axisY - yScale(point.findings)}
-              width={barWidth}
-              height={yScale(point.findings)}
-              style={{ fill: "var(--amber-700)" }}
-            />
-          </g>
-        );
-      })}
-      {thinXLabels(points.length).map((index) => {
-        // thinXLabels(length) yields indices < length — defined by construction.
-        const point = points[index]!;
-        return (
-          <text
-            key={point.week}
-            x={PLOT_X + bandX(index) + bandWidth / 2}
-            y={HEIGHT - 6}
-            textAnchor="middle"
-            fontSize={10}
-            style={{ fill: "var(--gray-900)", fontVariantNumeric: "tabular-nums" }}
-          >
-            {formatWeekLabel(point.week, locale)}
-          </text>
-        );
-      })}
-    </svg>
+    <>
+      <div className="chart-legend">
+        <span className="chart-legend-item">
+          <span className="chart-legend-swatch chart-swatch-blue-700" aria-hidden="true" />
+          <span className="chart-legend-label">{seriesLabels.reviews}</span>
+        </span>
+        <span className="chart-legend-item">
+          <span className="chart-legend-swatch chart-swatch-amber-700" aria-hidden="true" />
+          <span className="chart-legend-label">{seriesLabels.findings}</span>
+        </span>
+      </div>
+      <RBarChart
+        data={points}
+        width={WIDTH}
+        height={CHART_H}
+        margin={{ top: PAD_TOP, right: PAD_R, bottom: 0, left: 0 }}
+        className="chart-frame"
+        style={{ width: "100%", height: "auto" }}
+        role="img"
+        {...{ "aria-label": ariaLabel }}
+        title={ariaLabel}
+      >
+        <XAxis
+          dataKey="week"
+          interval={points.length > X_LABEL_MAX_VISIBLE ? 1 : 0}
+          tickFormatter={(week: string) => formatWeekLabel(week, locale)}
+          tickLine={false}
+          height={AXIS_H}
+        />
+        <YAxis width={Y_AXIS_W} allowDecimals={false} tickLine={false} />
+        <Tooltip
+          cursor={false}
+          labelFormatter={(week) => formatWeekLabel(String(week), locale)}
+          contentStyle={{
+            backgroundColor: "var(--card)",
+            border: "1px solid var(--border)",
+            borderRadius: "6px",
+          }}
+          labelStyle={{ color: "var(--gray-1000)", fontWeight: 500 }}
+          itemStyle={{ color: "var(--gray-900)" }}
+        />
+        <RBar dataKey="reviews" name={seriesLabels.reviews} className="chart-fill-blue-700" isAnimationActive={false} />
+        <RBar
+          dataKey="findings"
+          name={seriesLabels.findings}
+          className="chart-fill-amber-700"
+          isAnimationActive={false}
+        />
+      </RBarChart>
+    </>
   );
 }

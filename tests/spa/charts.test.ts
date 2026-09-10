@@ -1,29 +1,28 @@
 /**
- * Plan 56 T1: chart primitives — BarChart + TrendChart (AD-563) and their
- * pure layout math. The geometry helpers are pinned directly (scale edges,
- * all-zero domains, tick selection, >8-week thinning, truncation, localized
- * week labels); the render components are pinned behaviorally through
- * react-dom/server SSR (no DOM needed — static markup output, the plan-53
- * settings-layout idiom): role/aria-label faces, counts as text, legend
- * entries, the zero-data null face, and the no-raw-hex token discipline
- * (mirrors the insights-page pin; AD-561 colors ride var(--token)).
+ * Plan 63 T2 (B2/B3): chart primitives — BarChart + TrendChart on recharts
+ * (AD-621). The plan-56 hand-rolled layout math and its direct pins
+ * (linearScale/niceTicks/bandScale/… — formerly charts/layout.ts) retired
+ * with the module: recharts owns the geometry now. The render faces are
+ * pinned through react-dom/server SSR (no DOM needed — static markup
+ * output, the plan-53 settings-layout idiom): role/aria faces, counts as
+ * text (LabelList, discriminated from axis ticks via the recharts-label-
+ * list section), the AD-561/601 semantic-family fill classes, the dual-
+ * series legend, the localized date axis, >8-week label thinning, the
+ * zero-data faces, the hostile-label SSR escape pin, and the token
+ * discipline (no raw hex in sources; fills ride the charts.css class rules
+ * — never presentation-attribute var(), knowledge
+ * ui-bugs/svg-var-presentation-attributes.md).
+ *
+ * The recharts-internal class names pinned below (recharts-rectangle,
+ * recharts-label-list, recharts-cartesian-axis-tick-value) couple to
+ * recharts 2.15.4: a recharts upgrade must re-verify these chart pins
+ * (the T1.1 probe pins render shape, not these class names).
  */
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
-import {
-  BAND_RATIO,
-  bandScale,
-  barRows,
-  formatWeekLabel,
-  groupedBars,
-  linearScale,
-  niceTicks,
-  thinXLabels,
-  truncateLabel,
-} from "../../src/spa/components/charts/layout";
 import { BarChart, type BarChartItem } from "../../src/spa/components/charts/BarChart";
 import { TrendChart, type TrendPoint } from "../../src/spa/components/charts/TrendChart";
 
@@ -43,129 +42,100 @@ const trendChart = (
     }),
   );
 
-describe("chart layout pure functions (plan 56 T1 / AD-563)", () => {
-  test("linearScale maps 0..max onto the range and collapses all-zero domains to constant 0", () => {
-    expect(linearScale(10, 100)(5)).toBe(50);
-    expect(linearScale(10, 100)(0)).toBe(0);
-    // Single point / max value → full range.
-    expect(linearScale(7, 14)(7)).toBe(14);
-    // All-zero and negative max → 0, never NaN/Infinity (AC2).
-    expect(linearScale(0, 100)(5)).toBe(0);
-    expect(linearScale(-3, 100)(5)).toBe(0);
-  });
+/**
+ * The recharts-label-list section of a bar render — the bar-end count
+ * texts are the only tspans after it (axis ticks render before), so count
+ * pins against this slice can never be satisfied by tick text (plan 56
+ * T2-M1 discrimination, re-expressed for the recharts face: recharts'
+ * numeric tick sets include data values, e.g. max 9 → ticks 0/3/6/9/12).
+ */
+const valueLabels = (html: string): string => html.slice(html.indexOf("recharts-label-list"));
 
-  test("niceTicks picks integer 1/2/5-ladder steps covering the max; all-zero → [0]", () => {
-    expect(niceTicks(0)).toEqual([0]);
-    expect(niceTicks(1)).toEqual([0, 1]);
-    expect(niceTicks(3)).toEqual([0, 1, 2, 3]);
-    expect(niceTicks(7)).toEqual([0, 2, 4, 6, 8]);
-    expect(niceTicks(10)).toEqual([0, 5, 10]);
-    expect(niceTicks(90)).toEqual([0, 50, 100]);
-  });
-
-  test("bandScale insets each weekly band inside its slot", () => {
-    expect(BAND_RATIO).toBe(0.7);
-    // 4 slots of 25, band width 17.5, centered → band 1 starts at 28.75.
-    expect(bandScale(4, 100)(1)).toBe(28.75);
-    // Single week: the one band is inset from the plot edge.
-    expect(bandScale(1, 100)(0)).toBe(15);
-  });
-
-  test("groupedBars centers the series group inside the band (two rects per week, AD-562)", () => {
-    const { width, offsets } = groupedBars(2, 17.5);
-    expect(width).toBe(7);
-    // Group width 14 centered in the 17.5 band → 1.75 gutter each side, so
-    // the band midpoint (the date-label anchor) is the group's center
-    // (plan 56 QC F-002 label/group alignment).
-    expect(offsets).toEqual([1.75, 8.75]);
-  });
-
-  test("barRows centers each bar in its row slot", () => {
-    expect(barRows(3, 28, 16)).toEqual([
-      { y: 6, height: 16 },
-      { y: 34, height: 16 },
-      { y: 62, height: 16 },
-    ]);
-    expect(barRows(0, 28, 16)).toEqual([]);
-  });
-
-  test("thinXLabels keeps every week up to the cap, then every other week (first stays labeled)", () => {
-    expect(thinXLabels(5)).toEqual([0, 1, 2, 3, 4]);
-    expect(thinXLabels(8)).toEqual([0, 1, 2, 3, 4, 5, 6, 7]);
-    // The 8→9 boundary: thinning first engages, both endpoints stay labeled.
-    expect(thinXLabels(9)).toEqual([0, 2, 4, 6, 8]);
-    expect(thinXLabels(10)).toEqual([0, 2, 4, 6, 8]);
-    expect(thinXLabels(13)).toEqual([0, 2, 4, 6, 8, 10, 12]);
-  });
-
-  test("truncateLabel cuts long labels to maxChars with an ellipsis and keeps short ones intact", () => {
-    expect(truncateLabel("short", 14)).toBe("short");
-    expect(truncateLabel("an-unusually-long-category", 14)).toBe("an-unusually-…");
-    expect(truncateLabel("exactly14chars", 14)).toBe("exactly14chars");
-  });
-
-  test("formatWeekLabel localizes ISO week starts without Intl (deterministic across runtimes)", () => {
-    expect(formatWeekLabel("2026-08-17", "en")).toBe("8/17");
-    expect(formatWeekLabel("2026-08-17", "zh_CN")).toBe("8月17日");
-    // Non-ISO values fall back to the raw string rather than throwing.
-    expect(formatWeekLabel("2026-08", "en")).toBe("2026-08");
-  });
-});
-
-describe("BarChart SSR (plan 56 T1)", () => {
+describe("BarChart SSR (plan 63 T2, recharts face)", () => {
   const items: BarChartItem[] = [
     { key: "must-fix", label: "must-fix", value: 7, color: "var(--red-700)" },
     { key: "nit", label: "nit", value: 3, color: "var(--gray-700)" },
   ];
 
-  test("renders an svg role=img with the aria-label, counts as text, and token-filled bars", () => {
+  test("renders an svg role=img with the aria-label, counts as text, and token-class-filled bars", () => {
     const html = barChart(items);
     expect(html).toContain('role="img"');
     expect(html).toContain('aria-label="Findings by severity"');
-    // Counts coexist with the graphic: the value sits in the markup as text.
-    // 3 sits outside the chart's own tick set (niceTicks(7) = [0,2,4,6,8]),
-    // so only a bar-end label — never an axis tick — can satisfy this.
-    expect(html).toContain(">7</text>");
-    expect(html).toContain(">3</text>");
-    // AD-561 colors ride var(--token) through the style attribute (CSS
-    // declarations, where var() resolves), never raw hex.
-    expect(html).toContain('style="fill:var(--red-700)"');
-    expect(html).toContain('style="fill:var(--gray-700)"');
-    // Category labels are visible text next to their bars.
-    expect(html).toContain("must-fix");
+    // Positive <title> pin (qc1-W-1): the aria label is mirrored as an svg
+    // <title> child (recharts Surface forwards `title` → `<title>`) —
+    // dropping the title prop must fail here, not slip past the aria face.
+    expect(html).toContain("<title>Findings by severity</title>");
+    // Counts coexist with the graphic as bar-end LabelList text — sliced to
+    // the label-list section so an axis tick can never satisfy the pin
+    // (max 7 → recharts ticks 0/2/4/6/8, so 7/3 are label-only anyway).
+    expect(valueLabels(html)).toContain(">7</tspan>");
+    expect(valueLabels(html)).toContain(">3</tspan>");
+    // AD-561 colors ride the charts.css fill classes (B3): CSS class rules
+    // where var() always resolves — never presentation-attribute var(),
+    // never raw hex.
+    expect(html).toContain('class="recharts-rectangle chart-fill-red-700"');
+    expect(html).toContain('class="recharts-rectangle chart-fill-gray-700"');
+    // Category labels stay visible tick text next to their bars — the
+    // fixture label renders as an axis tick value (carried T2 review
+    // minor: a bare substring pin can't tell a tick from any other text).
+    expect(html).toMatch(/recharts-cartesian-axis-tick-value"[^>]*><tspan[^>]*>must-fix<\/tspan>/);
   });
 
-  test("a non-zero bar width tracks the linear scale (proportion face, plan-45 F-01 class)", () => {
-    // items: max 7 → ticks [0,2,4,6,8]; domain top 8, plotW = 560-118-40 =
-    // 402 → the value-7 bar spans 7/8 · 402 = 351.75 — a collapsed or
+  test("a non-zero bar width tracks the value scale (proportion face, plan-45 F-01 class)", () => {
+    // max 7 → recharts domain [0..8]; plot width = 560 - 110 - 40 = 410 →
+    // the value-7 bar spans 7/8 · 410 = 358.75 — a collapsed or
     // domain-saturated width can never satisfy this.
-    expect(barChart(items)).toContain('width="351.75"');
+    expect(barChart(items)).toContain('width="358.75"');
   });
 
-  test("long labels truncate with an ellipsis and keep the full text as a title", () => {
+  test("long labels truncate with an ellipsis on the category axis", () => {
+    // The full label rides the hover tooltip (recharts face); the visible
+    // tick text keeps the deterministic 14-char truncation face.
     const html = barChart([{ key: "c", label: "an-unusually-long-category-name", value: 3 }]);
     expect(html).toContain("an-unusually-…");
-    expect(html).toContain("<title>an-unusually-long-category-name</title>");
   });
 
-  test("a missing per-item color falls back to the neutral series token", () => {
-    expect(barChart([{ key: "c", label: "cats", value: 1 }])).toContain('style="fill:var(--blue-700)"');
+  test("a hostile category label renders as escaped text — no raw element from the label path", () => {
+    // XSS pin (qc2-S-3): category labels travel the React text path only —
+    // hostile markup surfaces as escaped tick text, never a raw <img> or
+    // <script> element inside the chart output.
+    const html = barChart([
+      { key: "img", label: "<img src=x>", value: 2 },
+      { key: "script", label: "<script>alert(1)</script>", value: 5 },
+    ]);
+    expect(html).toContain("&lt;img src=x&gt;");
+    expect(html).toContain("&lt;script&gt;");
+    expect(html).not.toContain("<img");
+    expect(html).not.toContain("<script");
   });
 
-  test("chart text rides the v0.3 label/numerals faces (plan 60 T1 chrome layer)", () => {
-    const html = barChart(items);
-    // Category labels (the bar-attached legend) carry the label-face weight;
-    // bar-end counts and axis ticks render tabular figures (DESIGN.md
-    // numerals rule). T3 tightening of the T1 whole-svg substring check
-    // (plan QC Minor M1): the exact style attribute each face renders, so
-    // the faces cannot drift onto the wrong element or drop a property.
-    // Fills are untouched — the token pins above keep guarding them.
-    expect(html).toContain('style="fill:var(--gray-1000);font-weight:500"');
-    expect(html).toContain('style="fill:var(--gray-900);font-variant-numeric:tabular-nums"');
+  test("a missing per-item color falls back to the neutral series class", () => {
+    expect(barChart([{ key: "c", label: "cats", value: 1 }])).toContain(
+      'class="recharts-rectangle chart-fill-blue-700"',
+    );
   });
 
-  test("all-zero values render zero-width bars — never NaN (AC2)", () => {
-    expect(barChart([{ key: "z", label: "zero", value: 0 }])).toContain('width="0"');
+  test("token fills and text faces live as class rules in charts.css (B3 delivery)", () => {
+    // Source-level guard at the strongest reachable layer for the bun pin
+    // suite; the compiled-bundle grep (dist/spa/assets/index-*.css) is the
+    // kill proof (idiom: knowledge tailwind4-compiled-css-traps.md).
+    const css = readFileSync(join(import.meta.dir, "../../src/spa/components/charts/charts.css"), "utf8");
+    expect(css).toContain(".chart-fill-red-700 { fill: var(--red-700); }");
+    expect(css).toContain(".chart-fill-amber-700 { fill: var(--amber-700); }");
+    expect(css).toContain(".chart-fill-gray-700 { fill: var(--gray-700); }");
+    expect(css).toContain(".chart-fill-blue-700 { fill: var(--blue-700); }");
+    // The v0.3 chrome faces: category labels carry the label-face weight;
+    // counts and ticks render tabular figures (DESIGN.md numerals rule).
+    expect(css).toContain("font-weight: 500");
+    expect(css).toContain("font-variant-numeric: tabular-nums");
+  });
+
+  test("all-zero values keep a coherent zero face — never NaN (AC2)", () => {
+    const html = barChart([{ key: "z", label: "zero", value: 0 }]);
+    // The count still renders as text; recharts renders the zero-value bar
+    // as an empty rectangle group (no zero-size geometry, no NaN domain).
+    expect(valueLabels(html)).toContain(">0</tspan>");
+    expect(html).not.toContain("<path");
   });
 
   test("empty input renders null — the page owns the readable empty state", () => {
@@ -173,42 +143,46 @@ describe("BarChart SSR (plan 56 T1)", () => {
   });
 });
 
-describe("TrendChart SSR (plan 56 T1 / AD-562)", () => {
+describe("TrendChart SSR (plan 63 T2, recharts face)", () => {
   const weeks: TrendPoint[] = [
-    { week: "2026-08-17", reviews: 1, findings: 0 },
+    { week: "2026-08-17", reviews: 1, findings: 2 },
     { week: "2026-08-24", reviews: 3, findings: 4 },
   ];
 
-  test("renders an svg role=img with the aria-label and both legend entries", () => {
+  test("renders an svg role=img with the aria-label, the dual-series legend, and both fill classes", () => {
     const html = trendChart(weeks);
     expect(html).toContain('role="img"');
     expect(html).toContain('aria-label="Weekly trend"');
-    expect(html).toContain('style="fill:var(--blue-700)"');
-    expect(html).toContain('style="fill:var(--amber-700)"');
-    expect(html).toContain("Reviews");
-    expect(html).toContain("Findings");
+    // Same svg <title> mirror pin as the BarChart face (recharts Surface
+    // forwards `title` → `<title>`): dropping the prop fails here too.
+    expect(html).toContain("<title>Weekly trend</title>");
+    // Legend order pins the series→color pairing: the blue swatch precedes
+    // the Reviews label, the amber swatch the Findings label (HTML legend
+    // row above the chart).
+    const blue = html.indexOf("chart-swatch-blue-700");
+    const reviews = html.indexOf(">Reviews</span>");
+    const amber = html.indexOf("chart-swatch-amber-700");
+    const findings = html.indexOf(">Findings</span>");
+    expect(blue).toBeGreaterThanOrEqual(0);
+    expect(blue).toBeLessThan(reviews);
+    expect(reviews).toBeLessThan(amber);
+    expect(amber).toBeLessThan(findings);
+    // The bars carry the same preserved AD-601 pair (reviews=blue-700,
+    // findings=amber-700) via the shared fill classes.
+    expect(html).toContain('class="recharts-rectangle chart-fill-blue-700"');
+    expect(html).toContain('class="recharts-rectangle chart-fill-amber-700"');
   });
 
-  test("legend/axis text rides the v0.3 label/numerals faces (plan 60 T1 chrome layer)", () => {
-    const html = trendChart(weeks);
-    // Legend entries carry the label-face weight; y ticks and date labels
-    // render tabular figures. T3 tightening of the T1 whole-svg substring
-    // check (plan QC Minor M1) — per-element style pins; the legend
-    // order/colors stay pinned above.
-    expect(html).toContain('style="fill:var(--gray-900);font-weight:500"');
-    expect(html).toContain('style="fill:var(--gray-900);font-variant-numeric:tabular-nums"');
+  test("each week carries the two grouped series bars (2 weeks × 2 series)", () => {
+    // Legend swatches are HTML spans now — every <path> is series geometry.
+    expect(trendChart(weeks).split("<path").length - 1).toBe(4);
   });
 
-  test("each week band carries the two grouped rects (reviews + findings)", () => {
-    const html = trendChart(weeks);
-    expect(html.split("<rect").length - 1).toBe(2 /* legend swatches */ + 2 /* weeks */ * 2 /* series */);
-  });
-
-  test("a non-zero rect height tracks the linear scale (proportion face, plan-45 F-01 class)", () => {
-    // weeks: max 4 → ticks [0,1,2,3,4]; PLOT_H = 190-28-20 = 142 → the
-    // findings-4 rect spans the full plot height — a collapsed height can
-    // never satisfy this.
-    expect(trendChart(weeks)).toContain('height="142"');
+  test("a non-zero bar height tracks the value scale (proportion face, plan-45 F-01 class)", () => {
+    // max 4 → recharts domain [0..4]; plot height = 166 - 4 - 20 = 142 →
+    // the findings-4 rect spans the full plot height — a collapsed height
+    // can never satisfy this.
+    expect(trendChart(weeks)).toMatch(/<path [^>]*height="142"[^>]*class="recharts-rectangle chart-fill-amber-700"/);
   });
 
   test("date x labels are localized by the locale prop", () => {
@@ -230,18 +204,17 @@ describe("TrendChart SSR (plan 56 T1 / AD-562)", () => {
     expect(html).not.toContain("8/31");
   });
 
-  test("all-zero series stay a coherent chart: ticks at 0, zero-height rects, legend intact (AC2)", () => {
+  test("all-zero series stay a coherent chart: zero tick, no geometry, legend intact (AC2)", () => {
     const html = trendChart([{ week: "2026-08-17", reviews: 0, findings: 0 }]);
-    expect(html).toContain(">0</text>");
-    expect(html).toContain('height="0"');
+    expect(html).toContain(">0</tspan>");
+    expect(html).not.toContain("<path");
     expect(html).toContain("Reviews");
     expect(html).toContain("Findings");
   });
 
-  test("a single week renders one full band with both series (no division blowups)", () => {
+  test("a single week renders both series (no division blowups)", () => {
     const html = trendChart([{ week: "2026-08-17", reviews: 2, findings: 1 }]);
-    // 2 legend swatches + 1 week × 2 series.
-    expect(html.split("<rect").length - 1).toBe(4);
+    expect(html.split("<path").length - 1).toBe(2);
     expect(html).toContain("8/17");
   });
 
@@ -250,9 +223,9 @@ describe("TrendChart SSR (plan 56 T1 / AD-562)", () => {
   });
 });
 
-describe("chart sources keep the no-raw-hex token discipline (plan 56 global constraint)", () => {
+describe("chart sources keep the no-raw-hex token discipline (plan 63 global constraint)", () => {
   test("zero raw hex in the charts module — colors ride var(--token) only", () => {
-    for (const file of ["BarChart.tsx", "TrendChart.tsx", "layout.ts"]) {
+    for (const file of ["BarChart.tsx", "TrendChart.tsx", "charts.css"]) {
       const source = readFileSync(join(import.meta.dir, `../../src/spa/components/charts/${file}`), "utf8");
       expect(source, file).not.toMatch(/#[0-9a-fA-F]{3,8}\b/);
     }

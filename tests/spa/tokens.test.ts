@@ -339,16 +339,19 @@ describe("DESIGN.md v0.3 design-language tokens (plan 57 T1)", () => {
       expect(ratio(fg, bg), name).toBeGreaterThanOrEqual(4.5);
     }
 
-    // Chart/UI non-text fills vs card face (≥3:1).
+    // Chart/UI non-text fills vs card face (≥3:1) — the full chart series
+    // vocabulary incl. the gray-700 nit bars (charts.css .chart-fill-gray-700).
     const fillPairs: [string, string, string][] = [
       ["dark chart blue vs card", dark["blue-700"]!, dark["background-200"]!],
       ["dark chart green vs card", dark["green-700"]!, dark["background-200"]!],
       ["dark chart amber vs card", dark["amber-700"]!, dark["background-200"]!],
       ["dark chart red vs card", dark["red-700"]!, dark["background-200"]!],
+      ["dark chart gray vs card", dark["gray-700"]!, dark["background-200"]!],
       ["light chart blue vs card", light["blue-700"]!, light["background-200"]!],
       ["light chart green vs card", light["green-700"]!, light["background-200"]!],
       ["light chart amber vs card", light["amber-700"]!, light["background-200"]!],
       ["light chart red vs card", light["red-700"]!, light["background-200"]!],
+      ["light chart gray vs card", light["gray-700"]!, light["background-200"]!],
     ];
     for (const [name, fg, bg] of fillPairs) {
       expect(ratio(fg, bg), name).toBeGreaterThanOrEqual(3);

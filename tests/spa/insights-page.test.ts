@@ -46,11 +46,14 @@ const router = readFileSync(join(import.meta.dir, "../../src/spa/router.tsx"), "
 
 /**
  * Plan 56 T2 fixture: v1 severity vocabulary + a NULL category row. The
- * counts sit outside each chart's own niceTicks set (severity max 7 → ticks
- * 0/2/4/6/8; category max 9 → ticks 0/5/10), so a bar-end count pin can
- * never be satisfied by axis tick text (T2-M1 strengthening); the weekly
- * buckets sum to 3 reviews · 6 findings — both off `reviews_total: 4` — so
- * the trend summary pin only passes if the line derives from weekly_trend.
+ * severity counts sit outside the severity chart's tick set (max 7 →
+ * recharts ticks 0/2/4/6/8), so a bar-end count pin can never be satisfied
+ * by axis tick text there; the category counts 9/6 DO sit inside their
+ * tick set (max 9 → ticks 0/3/6/9/12), so those pins slice to the chart's
+ * recharts-label-list section (T2-M1 discrimination, recharts face). The
+ * weekly buckets sum to 3 reviews · 6 findings — both off
+ * `reviews_total: 4` — so the trend summary pin only passes if the line
+ * derives from weekly_trend.
  */
 const RECORDS: InsightsSummary = {
   window_days: 30,
@@ -134,45 +137,51 @@ describe("records page assembly (plan 36 T2)", () => {
 
   test("severity section renders as a chart with counts as text (supersedes plan 45 T1/F-01 pin)", () => {
     // plan 45 pinned the CSS proportional severity bar (inline width
-    // effective, no basis-full override). Plan 56 T2 replaces that markup
-    // with the BarChart SVG, so the pin is superseded in place — the
-    // regression face it guarded (severity counts visibly rendering, token
-    // discipline) must still hold in the new chart DOM.
+    // effective, no basis-full override). Plan 56 T2 replaced that markup
+    // with a chart; plan 63 T2 moves the chart onto recharts (AD-621) —
+    // the guarded regression faces (severity counts visibly rendering, the
+    // locked token families) still hold in the recharts DOM.
     const html = renderRecords("en");
     const [severity] = chartSlices(html);
-    // Counts coexist with the graphic as bar-end text (color is never the
-    // only carrier). The fixture counts 7/5/3 sit outside the chart's own
-    // tick set (niceTicks(7) = 0/2/4/6/8), so only a rendered bar-end label
-    // — never an axis tick — can satisfy these (T2-M1).
-    expect(severity).toContain(">7</text>");
-    expect(severity).toContain(">5</text>");
-    expect(severity).toContain(">3</text>");
-    // Bars carry the locked AD-561 tokens and the severity label stays
-    // visible next to their bar. Colors ride var(--token) through the
-    // style attribute (CSS declarations, where var() resolves).
-    expect(severity).toContain('style="fill:var(--red-700)"');
-    expect(severity).toContain('style="fill:var(--amber-700)"');
-    expect(severity).toContain('style="fill:var(--gray-700)"');
+    // Counts coexist with the graphic as bar-end LabelList text (color is
+    // never the only carrier). The fixture counts 7/5/3 sit outside the
+    // recharts tick set (max 7 → ticks 0/2/4/6/8), so only a rendered
+    // bar-end label — never an axis tick — can satisfy these (T2-M1).
+    expect(severity).toContain(">7</tspan>");
+    expect(severity).toContain(">5</tspan>");
+    expect(severity).toContain(">3</tspan>");
+    // Bars carry the locked AD-561 token families and the severity label
+    // stays visible next to its bar. Colors ride the charts.css class
+    // rules (B3/AD-621) — CSS declarations where var() always resolves,
+    // never presentation-attribute var(), never raw hex.
+    expect(severity).toContain('class="recharts-rectangle chart-fill-red-700"');
+    expect(severity).toContain('class="recharts-rectangle chart-fill-amber-700"');
+    expect(severity).toContain('class="recharts-rectangle chart-fill-gray-700"');
     expect(severity).toContain("must-fix");
-    // The old proportional-bar markup is gone entirely.
+    // The old proportional-bar markup is gone entirely — no HTML element
+    // carries an inline width any more (the recharts surface's own
+    // style="width:100%" svg box is the chart frame, not a proportional
+    // bar).
     expect(html).not.toContain("basis-full");
-    expect(html).not.toContain('style="width');
+    expect(html).not.toMatch(/<(span|div|p|li)[^>]*style="width/);
   });
 
   test("category chart: NULL category rides the uncategorized key with the neutral series face", () => {
     const [severity, category] = chartSlices(renderRecords("en"));
     expect(severity).not.toContain("uncategorized");
     // The NULL category row renders under the i18n label, next to the real
-    // category; counts 9/6 sit outside the chart's tick set (niceTicks(9) =
-    // 0/5/10), so these are bar-end labels, not ticks (T2-M1).
+    // category. Counts 9/6 sit INSIDE the recharts tick set (max 9 → ticks
+    // 0/3/6/9/12), so the bar-end pins slice to the chart's label-list
+    // section — only bar-end labels live after it (T2-M1).
     expect(category).toContain("uncategorized");
     expect(category).toContain("logic");
-    expect(category).toContain(">9</text>");
-    expect(category).toContain(">6</text>");
-    // No per-item color is passed → the chart's neutral series token
+    const barEnds = category.slice(category.indexOf("recharts-label-list"));
+    expect(barEnds).toContain(">9</tspan>");
+    expect(barEnds).toContain(">6</tspan>");
+    // No per-item color is passed → the chart's neutral series class
     // (AD-561 default), never one of the severity accents.
-    expect(category).toContain('style="fill:var(--blue-700)"');
-    expect(category).not.toContain('style="fill:var(--red-700)"');
+    expect(category).toContain('class="recharts-rectangle chart-fill-blue-700"');
+    expect(category).not.toContain("chart-fill-red-700");
   });
 
   test("empty-string category coalesces to the uncategorized face (same as NULL, plan 56 QC F-004)", () => {
@@ -180,10 +189,10 @@ describe("records page assembly (plan 36 T2)", () => {
     // before the falsy-coalescing fix it rendered a blank bar label.
     const data: InsightsSummary = { ...RECORDS, findings_by_category: [{ category: "", count: 2 }] };
     const [, category] = chartSlices(renderRecords("en", data));
-    // The i18n label renders as visible text (and as the title) — never a
-    // blank text node with an empty <title>.
-    expect(category).toContain(`>${t("en", "insights.uncategorized")}</text>`);
-    expect(category).toContain(`<title>${t("en", "insights.uncategorized")}</title>`);
+    // The i18n label renders as the visible category tick text — never a
+    // blank text node (the svg-level <title> carries the section aria
+    // label on the recharts face; the full label rides the hover tooltip).
+    expect(category).toContain(`>${t("en", "insights.uncategorized")}</tspan>`);
     expect(category).not.toContain("<title></title>");
   });
 
@@ -204,30 +213,35 @@ describe("records page assembly (plan 36 T2)", () => {
     const [, category] = chartSlices(renderRecords("en", data));
     const label = t("en", "insights.uncategorized");
     // Exactly one uncategorized bar — the old per-row mapping emitted two
-    // <title>uncategorized</title> labels (duplicate keys).
-    expect(category.split(`<title>${label}</title>`).length - 1).toBe(1);
-    // Its count is the SUM 6+2=8, not either per-row count (both old bar-end
-    // labels are gone; 8/6/2 all sit outside the tick set niceTicks(9) =
-    // 0/5/10, so these pins read bar-end labels only, never ticks).
-    expect(category).toContain(">8</text>");
-    expect(category).not.toContain(">6</text>");
-    expect(category).not.toContain(">2</text>");
+    // identically labeled bars (duplicate keys); the coalesced tick text
+    // renders once.
+    expect(category.split(`>${label}</tspan>`).length - 1).toBe(1);
+    // Its count is the SUM 6+2=8, not either per-row count. The pin reads
+    // the label-list section only: recharts ticks for max 9 are
+    // 0/3/6/9/12, so a bare ">6</tspan>" would match a tick.
+    const barEnds = category.slice(category.indexOf("recharts-label-list"));
+    expect(barEnds).toContain(">8</tspan>");
+    expect(barEnds).not.toContain(">6</tspan>");
+    expect(barEnds).not.toContain(">2</tspan>");
     // Two bars total (logic + merged uncategorized), not three.
-    expect(category.split("<rect").length - 1).toBe(2);
+    expect(category.split("<path").length - 1).toBe(2);
     // First-seen order holds: logic leads, the merged bar follows it.
-    expect(category.indexOf("<title>logic</title>")).toBeGreaterThan(-1);
-    expect(category.indexOf(`<title>${label}</title>`)).toBeGreaterThan(category.indexOf("<title>logic</title>"));
+    expect(category.indexOf(">logic</tspan>")).toBeGreaterThan(-1);
+    expect(category.indexOf(`>${label}</tspan>`)).toBeGreaterThan(category.indexOf(">logic</tspan>"));
   });
 
-  test("trend chart: dual-series legend with AD-561 colors, localized date axis, bucket-derived totals", () => {
+  test("trend chart: dual-series legend with the preserved AD-601 pair, localized date axis, bucket-derived totals", () => {
     const html = renderRecords("en");
     const [, , trend] = chartSlices(html);
-    // Legend order pins the series→color pairing: the blue-700 swatch
-    // precedes the Reviews label, the amber-700 swatch the Findings label.
-    const blue = trend.indexOf('style="fill:var(--blue-700)"');
-    const reviews = trend.indexOf(">Reviews</text>");
-    const amber = trend.indexOf('style="fill:var(--amber-700)"');
-    const findings = trend.indexOf(">Findings</text>");
+    // Legend order pins the series→color pairing: the blue swatch precedes
+    // the Reviews label, the amber swatch the Findings label. The legend is
+    // the HTML row that precedes the trend svg, so these read the full
+    // page html — all four markers are unique on the page (the summary
+    // line renders "Reviews: N"/"…findings", never a bare legend label).
+    const blue = html.indexOf("chart-swatch-blue-700");
+    const reviews = html.indexOf(">Reviews</span>");
+    const amber = html.indexOf("chart-swatch-amber-700");
+    const findings = html.indexOf(">Findings</span>");
     expect(blue).toBeGreaterThanOrEqual(0);
     expect(blue).toBeLessThan(reviews);
     expect(reviews).toBeLessThan(amber);
