@@ -12,6 +12,11 @@
  * 2.x class components through createElement's overloads (wide string
  * defaultProps), while JSX resolution accepts them — this is also the
  * exact consumption form Tasks 2-3 ship in product code.
+ *
+ * The one pinned class name (`recharts-surface`) is a recharts 2.15.4
+ * internal: this probe guards render shape, not class names — a recharts
+ * upgrade re-verifies the chart pins (tests/spa/charts.test.ts, which
+ * pins the recharts-rectangle / recharts-label-list internals).
  */
 import { describe, expect, test } from "bun:test";
 import { renderToStaticMarkup } from "react-dom/server";
@@ -64,7 +69,9 @@ describe("recharts pin probe (plan 63 T1.1)", () => {
 
   test("the pin path never routes through ResponsiveContainer — fixed dimensions only", () => {
     const html = renderBar();
-    expect(html).not.toContain("ResponsiveContainer");
+    // Kebab-case only: recharts 3.x's empty-wrapper face carries a
+    // responsive-container class; the camelCase component name can never
+    // appear in markup (tautological — dropped, qc3-S-4).
     expect(html).not.toContain("responsive-container");
   });
 });

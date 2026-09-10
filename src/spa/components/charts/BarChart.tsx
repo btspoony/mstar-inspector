@@ -49,7 +49,14 @@ export interface BarChartItem {
   key: string;
   label: string;
   value: number;
-  /** CSS color for the bar fill — pass a `var(--token)` reference (AD-561), never a raw hex. */
+  /**
+   * Bar fill token. Consumed through the closed `FILL_CLASSES` vocabulary —
+   * only `var(--red-700)` / `var(--amber-700)` / `var(--gray-700)` resolve
+   * to a fill class (AD-561 severity mapping); an unknown token or
+   * `undefined` silently falls back to the neutral blue-700 series class
+   * (the documented drift face, same as the page-level unknown-key mapping).
+   * Never a raw hex.
+   */
   color?: string;
 }
 

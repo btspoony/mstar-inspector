@@ -8,9 +8,15 @@
  * text (LabelList, discriminated from axis ticks via the recharts-label-
  * list section), the AD-561/601 semantic-family fill classes, the dual-
  * series legend, the localized date axis, >8-week label thinning, the
- * zero-data faces, and the token discipline (no raw hex in sources; fills
- * ride the charts.css class rules — never presentation-attribute var(),
- * knowledge ui-bugs/svg-var-presentation-attributes.md).
+ * zero-data faces, the hostile-label SSR escape pin, and the token
+ * discipline (no raw hex in sources; fills ride the charts.css class rules
+ * — never presentation-attribute var(), knowledge
+ * ui-bugs/svg-var-presentation-attributes.md).
+ *
+ * The recharts-internal class names pinned below (recharts-rectangle,
+ * recharts-label-list, recharts-cartesian-axis-tick-value) couple to
+ * recharts 2.15.4: a recharts upgrade must re-verify these chart pins
+ * (the T1.1 probe pins render shape, not these class names).
  */
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
@@ -55,6 +61,10 @@ describe("BarChart SSR (plan 63 T2, recharts face)", () => {
     const html = barChart(items);
     expect(html).toContain('role="img"');
     expect(html).toContain('aria-label="Findings by severity"');
+    // Positive <title> pin (qc1-W-1): the aria label is mirrored as an svg
+    // <title> child (recharts Surface forwards `title` → `<title>`) —
+    // dropping the title prop must fail here, not slip past the aria face.
+    expect(html).toContain("<title>Findings by severity</title>");
     // Counts coexist with the graphic as bar-end LabelList text — sliced to
     // the label-list section so an axis tick can never satisfy the pin
     // (max 7 → recharts ticks 0/2/4/6/8, so 7/3 are label-only anyway).
@@ -83,6 +93,20 @@ describe("BarChart SSR (plan 63 T2, recharts face)", () => {
     // tick text keeps the deterministic 14-char truncation face.
     const html = barChart([{ key: "c", label: "an-unusually-long-category-name", value: 3 }]);
     expect(html).toContain("an-unusually-…");
+  });
+
+  test("a hostile category label renders as escaped text — no raw element from the label path", () => {
+    // XSS pin (qc2-S-3): category labels travel the React text path only —
+    // hostile markup surfaces as escaped tick text, never a raw <img> or
+    // <script> element inside the chart output.
+    const html = barChart([
+      { key: "img", label: "<img src=x>", value: 2 },
+      { key: "script", label: "<script>alert(1)</script>", value: 5 },
+    ]);
+    expect(html).toContain("&lt;img src=x&gt;");
+    expect(html).toContain("&lt;script&gt;");
+    expect(html).not.toContain("<img");
+    expect(html).not.toContain("<script");
   });
 
   test("a missing per-item color falls back to the neutral series class", () => {
@@ -129,6 +153,9 @@ describe("TrendChart SSR (plan 63 T2, recharts face)", () => {
     const html = trendChart(weeks);
     expect(html).toContain('role="img"');
     expect(html).toContain('aria-label="Weekly trend"');
+    // Same svg <title> mirror pin as the BarChart face (recharts Surface
+    // forwards `title` → `<title>`): dropping the prop fails here too.
+    expect(html).toContain("<title>Weekly trend</title>");
     // Legend order pins the series→color pairing: the blue swatch precedes
     // the Reviews label, the amber swatch the Findings label (HTML legend
     // row above the chart).

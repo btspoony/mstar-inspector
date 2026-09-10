@@ -7,9 +7,17 @@
  * (no-raw-hex pin). Author CSS rules also beat the presentation-attribute
  * defaults recharts stamps on its own internals (mid-gray fills/strokes on
  * axis text and lines), which is how the recharts-internal classes below
- * get
- * re-faced onto tokens; everything is scoped under .chart-frame so nothing
- * leaks past the charts.
+ * get re-faced onto tokens.
+ *
+ * Scoping: the recharts-internal selectors are scoped under .chart-frame
+ * so nothing leaks past the charts; the .chart-fill-* / .chart-swatch-* /
+ * .chart-legend* rules are standalone class rules keyed on classNames this
+ * repo controls (no .chart-frame ancestor).
+ *
+ * Version coupling: the recharts-internal class names targeted here
+ * (.recharts-cartesian-*) couple to recharts 2.15.4 — a recharts upgrade
+ * must re-verify the chart pins (the T1.1 probe pins render shape, not
+ * these class names).
  *
  * Series fills (svg `fill`) — the AD-601-frozen 700-step semantic family:
  * severity bars map must-fix=red-700 / should-fix=amber-700 / nit=gray-700
