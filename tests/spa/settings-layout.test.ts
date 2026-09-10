@@ -1624,7 +1624,7 @@ describe("GitHub App identity card (plan 53 A5/A6/A7)", () => {
   });
 
   test("manager face targets the GitHub App settings page derived from the html_url slug (plan 62 A5 / AD-623)", () => {
-    // The public page's slug (last non-empty pathname segment, trailing-slash
+    // The public page's slug (the html_url's apps/<slug> tail, trailing-slash
     // tolerant) names the settings target — never github_name (display name
     // ≠ URL slug) nor the local SettingsAppMeta.slug (local App slug ≠ GitHub
     // App slug): a name/local-slug that differ from the URL slug still derive
@@ -1661,6 +1661,16 @@ describe("GitHub App identity card (plan 53 A5/A6/A7)", () => {
     const degraded = html(meta({ ...synced, github_html_url: "https://github.com" }), true);
     expect(degraded).toContain('href="https://github.com"');
     expect(degraded).toContain('aria-label="View Acme Reviewer on GitHub"');
+    // A deep public path derives nothing either (qc round 1, qc2-F-001): the
+    // manager face keeps the PUBLIC href and the honest View label — the
+    // sub-path never masquerades as the settings slug.
+    const deepPath = html(
+      meta({ ...synced, github_html_url: "https://github.com/apps/url-slug-app/settings" }),
+      true,
+    );
+    expect(deepPath).toContain('href="https://github.com/apps/url-slug-app/settings"');
+    expect(deepPath).not.toContain('href="https://github.com/settings/apps/settings"');
+    expect(deepPath).toContain('aria-label="View Acme Reviewer on GitHub"');
     // github_html_url=null stays plain text on BOTH faces — no anchor, no
     // crash, the plan-53 degradation face unchanged.
     for (const canManage of [false, true]) {
@@ -1732,7 +1742,7 @@ describe("GitHub App settings link wiring (plan 62 A5 / AD-623)", () => {
     expect(cardBody).toContain("settingsHref ? \"settings.appInfoManageOnGithub\" : \"settings.appInfoViewOnGithub\"");
   });
 
-  test("slug derivation: last non-empty pathname segment of the html_url, trailing-slash tolerant", () => {
+  test("slug derivation: the html_url's apps/<slug> tail, trailing-slash tolerant", () => {
     expect(githubAppSettingsUrl("https://github.com/apps/acme")).toBe("https://github.com/settings/apps/acme");
     expect(githubAppSettingsUrl("https://github.com/apps/acme/")).toBe("https://github.com/settings/apps/acme");
     expect(githubAppSettingsUrl("https://github.com/apps/acme///")).toBe("https://github.com/settings/apps/acme");
@@ -1740,6 +1750,14 @@ describe("GitHub App settings link wiring (plan 62 A5 / AD-623)", () => {
     expect(githubAppSettingsUrl("https://github.com/settings/apps/acme-reviewer")).toBe(
       "https://github.com/settings/apps/acme-reviewer",
     );
+  });
+
+  test("deep-path shapes derive null (qc round 1, qc2-F-001): no sub-path masquerades as the slug", () => {
+    // A deeper public path has TWO segments after `apps` — the tail segment
+    // (e.g. "settings") must not be read as the slug; the helper returns null
+    // so the caller keeps the public-page link.
+    expect(githubAppSettingsUrl("https://github.com/apps/acme/settings")).toBeNull();
+    expect(githubAppSettingsUrl("https://github.com/apps/acme/installations/new")).toBeNull();
   });
 
   test("no derivable segment or an unparseable https shape derives null (runtime degradation)", () => {

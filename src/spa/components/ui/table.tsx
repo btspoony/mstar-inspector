@@ -1,4 +1,7 @@
-// Locally revised shadcn/ui copy-in (plan 57 T3 v0.3 restyle; 018 copy-in supersede — do not regen over).
+// Locally revised shadcn/ui copy-in (plan 57 T3 v0.3 restyle; plan 62 T2
+// padding raise — TableHead/TableCell horizontal padding steps up to px-3
+// (cell vertical stays py-2) so bordered tables breathe; 018 copy-in
+// supersede — do not regen over).
 import * as React from "react"
 
 import { cn } from "@/lib/utils"

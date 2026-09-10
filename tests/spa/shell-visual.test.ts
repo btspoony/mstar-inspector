@@ -131,6 +131,10 @@ describe("sidebar hover hierarchy recipe (plan 62 T1, AD-622)", () => {
   const menuButtonBlock = sources.sidebar?.match(
     /const sidebarMenuButtonVariants = cva\([\s\S]*?\n\)\n/,
   )?.[0];
+  // AD-622 no-motion surface (qc round 1, qc1-F-003 + qc2-F-003): a hover
+  // face may only tint + brighten — no translate/-translate, scale, shadow,
+  // ring or border motion class may join it.
+  const hoverMotion = /hover:-?(translate|scale|shadow|ring|border)\b/;
 
   test("menu-button cva block is locatable (pin integrity)", () => {
     expect(menuButtonBlock).toBeDefined();
@@ -165,12 +169,18 @@ describe("sidebar hover hierarchy recipe (plan 62 T1, AD-622)", () => {
     expect(menuButtonBlock).not.toContain("hover:shadow-[0_0_0_1px_var(--sidebar-accent)]");
   });
 
+  test("menu-button cva block carries no motion classes on its hover faces (AD-622)", () => {
+    // The tint recipe above is scoped to this exact block, so the no-motion
+    // half of AD-622 covers it too — not just the wordmark scan below.
+    expect(menuButtonBlock).not.toMatch(hoverMotion);
+  });
+
   test("brand wordmark link rides the same tint recipe as the menu rows", () => {
     expect(appSidebar).toContain(
       "hover:bg-sidebar-accent/40 hover:text-sidebar-accent-foreground",
     );
-    // No translate / outline on hover (AD-622): no motion class may join
-    // the wordmark's hover face.
-    expect(appSidebar).not.toMatch(/hover:(translate|scale|ring|border)-/);
+    // No translate / scale / shadow / ring / border on hover (AD-622): no
+    // motion class may join the wordmark's hover face.
+    expect(appSidebar).not.toMatch(hoverMotion);
   });
 });

@@ -612,18 +612,25 @@ function pendingConfirmCopy(
 
 /**
  * Plan 62 A5 (AD-623): the manager-face link target — the GitHub App settings
- * page derived from the cached public html_url. The slug is the LAST NON-EMPTY
- * pathname segment (trailing-slash tolerant); deliberately never `github_name`
- * (display name ≠ URL slug) and never the local `SettingsAppMeta.slug` (local
- * App slug ≠ GitHub App slug). The server validates only the `https://`
- * prefix (github-app-metadata.ts), so an unusable shape — no derivable
- * segment, or a value `new URL` cannot parse — returns null and the caller
- * keeps the public-page link (runtime degradation, never a dead href).
+ * page derived from the cached public html_url. The slug is the segment right
+ * after an `apps` segment — the pathname's `apps/<slug>` tail, exactly one
+ * segment after `apps` (trailing slash tolerated) — never a deeper sub-path:
+ * `/apps/acme/settings` derives null, not slug "settings" (qc round 1,
+ * qc2-F-001); an already settings-shaped url keeps deriving idempotently.
+ * Deliberately never `github_name` (display name ≠ URL slug) and never the
+ * local `SettingsAppMeta.slug` (local App slug ≠ GitHub App slug). The server
+ * validates only the `https://` prefix (github-app-metadata.ts), so an
+ * unusable shape — no `apps/<slug>` tail, or a value `new URL` cannot parse —
+ * returns null and the caller keeps the public-page link (runtime
+ * degradation, never a dead href).
  */
 export function githubAppSettingsUrl(githubHtmlUrl: string): string | null {
   try {
     const segments = new URL(githubHtmlUrl).pathname.split("/").filter(Boolean);
-    const slug = segments[segments.length - 1];
+    const slug =
+      segments.length >= 2 && segments[segments.length - 2] === "apps"
+        ? segments[segments.length - 1]
+        : null;
     return slug ? `https://github.com/settings/apps/${slug}` : null;
   } catch {
     return null;

@@ -97,15 +97,34 @@ describe("v0.3 page face (plan 58 T3, A4/A5)", () => {
 });
 
 describe("table horizontal padding (plan 62 T2, D5/A3)", () => {
+  // The exact head/cell class literals (qc round 1, qc1-F-002): the
+  // retirement pin scans these strings only — a hypothetical future variant
+  // elsewhere in the file (px-2.5, sm:px-2) cannot false-fail it.
+  const headClassLiteral = tablePrimitive.match(/"(h-10 px-3[^"]*)"/)?.[1];
+  const cellClassLiteral = tablePrimitive.match(/"(px-3 py-2[^"]*)"/)?.[1];
+
   test("head and cell ride the spacing-3 horizontal step (12px); vertical untouched", () => {
     // D5: one component-level raise benefits both Apps and Members tables.
     expect(tablePrimitive).toContain("h-10 px-3");
     expect(tablePrimitive).toContain("px-3 py-2");
   });
 
-  test("the 8px horizontal step is retired from head and cell", () => {
-    expect(tablePrimitive).not.toContain("px-2");
-    expect(tablePrimitive).not.toMatch(/\bp-2\b/);
+  test("head/cell class literals are locatable (pin integrity)", () => {
+    expect(headClassLiteral).toBeDefined();
+    expect(cellClassLiteral).toBeDefined();
+  });
+
+  test("the 8px horizontal step is retired from the head/cell class literals", () => {
+    // Standalone-token check inside the literals: a regen reverting the
+    // primitives to upstream px-2/p-2 still fails, while token variants
+    // (px-2.5, sm:px-2) do not count as the retired step.
+    for (const literal of [headClassLiteral, cellClassLiteral]) {
+      const tokens = (literal ?? "").split(/\s+/);
+      expect(tokens).toContain("px-3");
+      expect(tokens).not.toContain("px-2");
+      expect(tokens).not.toContain("p-2");
+    }
+    expect((cellClassLiteral ?? "").split(/\s+/)).toContain("py-2");
   });
 
   test("checkbox flush-right exception survives the padding raise", () => {
