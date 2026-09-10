@@ -353,6 +353,9 @@ export const zhCN: Dictionary = {
     appInfoCopy: "此 App 在 GitHub 上的身份。资料字段在访问设置页时从该 App 的 GitHub 设置页缓存；点击名称可前往 GitHub 管理。",
     appInfoAppId: "App ID：{id}",
     appInfoViewOnGithub: "在 GitHub 上查看 {name}",
+    // Plan 62 A5（AD-623）：管理面标签——名称链接指向该 App 的 GitHub 设置页，
+    // 可及名用「管理」而非「查看」。成员面沿用 appInfoViewOnGithub。
+    appInfoManageOnGithub: "在 GitHub 上管理 {name}",
     appInfoSynced: "同步于 {time}",
     // Plan 51 T3：部署版本页脚。{version} 为带 v 前缀的展示形（v${APP_VERSION}），
     // 与 /healthz 字段及 release tag 同形。

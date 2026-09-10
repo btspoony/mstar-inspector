@@ -1,0 +1,68 @@
+/*
+ * Chart chrome + token colors (plan 63 B3, AD-621). The recharts series
+ * fills ride these CSS class rules into the DESIGN.md token layer
+ * (src/spa/styles/tokens.css) — never SVG presentation attributes
+ * (knowledge ui-bugs/svg-var-presentation-attributes.md: var() in
+ * presentation attributes is engine-ambiguous) and never raw hex
+ * (no-raw-hex pin). Author CSS rules also beat the presentation-attribute
+ * defaults recharts stamps on its own internals (mid-gray fills/strokes on
+ * axis text and lines), which is how the recharts-internal classes below
+ * get re-faced onto tokens.
+ *
+ * Scoping: the recharts-internal selectors are scoped under .chart-frame
+ * so nothing leaks past the charts; the .chart-fill-* / .chart-swatch-* /
+ * .chart-legend* rules are standalone class rules keyed on classNames this
+ * repo controls (no .chart-frame ancestor).
+ *
+ * Version coupling: the recharts-internal class names targeted here
+ * (.recharts-cartesian-*) couple to recharts 2.15.4 — a recharts upgrade
+ * must re-verify the chart pins (the T1.1 probe pins render shape, not
+ * these class names).
+ *
+ * Series fills (svg `fill`) — the AD-601-frozen 700-step semantic family:
+ * severity bars map must-fix=red-700 / should-fix=amber-700 / nit=gray-700
+ * at the page layer (AD-561) and resolve through BarChart.tsx; the neutral
+ * data-series tone blue-700 is the no-color default. TrendChart pins the
+ * dual-series pair reviews=blue-700 / findings=amber-700 (Δhue-recorded
+ * pair, DESIGN.md appendix A ≥3:1 vs both card faces). The trend legend
+ * swatches are HTML spans, so they carry the background-color
+ * .chart-swatch-* twins of the two series in use. A token value that has
+ * no rule here must not be passed — BarChart falls back to the neutral
+ * tone for unknown tokens.
+ */
+.chart-fill-red-700 { fill: var(--red-700); }
+.chart-fill-amber-700 { fill: var(--amber-700); }
+.chart-fill-gray-700 { fill: var(--gray-700); }
+.chart-fill-blue-700 { fill: var(--blue-700); }
+
+.chart-swatch-blue-700 { background-color: var(--blue-700); }
+.chart-swatch-amber-700 { background-color: var(--amber-700); }
+
+/*
+ * Axis chrome on tokens: hairline strokes and tick text replace the
+ * recharts presentation-attribute defaults. Tick numerals and bar-end
+ * counts render tabular figures per the DESIGN.md numerals rule; the
+ * BarChart category axis (chart-category-axis) carries the v0.3 label face
+ * (gray-1000, weight 500).
+ */
+.chart-frame .recharts-cartesian-axis-line { stroke: var(--gray-alpha-400); }
+.chart-frame .recharts-cartesian-axis-tick-value {
+  fill: var(--gray-900);
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+}
+.chart-frame .chart-category-axis .recharts-cartesian-axis-tick-value {
+  fill: var(--gray-1000);
+  font-weight: 500;
+}
+.chart-frame .chart-value-label {
+  fill: var(--gray-900);
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+}
+
+/* TrendChart legend row (HTML, above the svg — the plan-56 legend face). */
+.chart-legend { display: flex; align-items: center; gap: 24px; height: 24px; }
+.chart-legend-item { display: inline-flex; align-items: center; gap: 4px; }
+.chart-legend-swatch { display: inline-block; width: 10px; height: 10px; border-radius: 2px; }
+.chart-legend-label { color: var(--gray-900); font-size: 11px; font-weight: 500; }

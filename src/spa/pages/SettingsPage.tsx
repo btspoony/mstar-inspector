@@ -1,5 +1,5 @@
 import { Fragment, useEffect, useRef, useState, type ReactNode } from "react";
-import { ExternalLink, Plus } from "lucide-react";
+import { ArrowLeft, ExternalLink, Plus } from "lucide-react";
 import { isDictionaryKey, t, type DictionaryKey } from "../../i18n";
 import { APP_VERSION } from "../../version";
 import { Button } from "@/components/ui/button";
@@ -161,13 +161,16 @@ export function SettingsPage({ boot, slug }: { boot: SpaBoot; slug: string }) {
   return (
     <div className="flex flex-col gap-6">
       {/* Wayfinding (plan 40 T2): the App settings page reads as one workflow
-          with the Apps list — a visible path back to the list it came from. */}
+          with the Apps list — a visible path back to the list it came from.
+          Plan 62 A4: the decorative ArrowLeft rides the link (aria-hidden, so
+          the accessible name stays the backToApps text alone). */}
       <div className="flex flex-col gap-1">
         <a
-          className="text-sm text-muted-foreground no-underline hover:text-foreground hover:underline"
+          className="inline-flex items-center gap-1.5 text-sm text-muted-foreground no-underline hover:text-foreground hover:underline"
           href="/dashboard/apps"
           onClick={(event) => spaClick("/dashboard/apps", event)}
         >
+          <ArrowLeft className="size-4 shrink-0" aria-hidden="true" />
           {t(locale, "settings.backToApps")}
         </a>
         <h1 className="font-semibold text-(length:--typo-heading-24-size) leading-(--typo-heading-24-line) tracking-(--typo-heading-24-tracking)">{t(locale, "settings.title")}</h1>
@@ -466,8 +469,9 @@ function SettingsView({
 
         {/* Plan 53 A5: the GitHub identity card sits between the slug row and
             the manage conditional, so BOTH faces (OpsCard managers and
-            HealthCard members) see it (AC3). */}
-        <AppInfoCard locale={locale} app={app} />
+            HealthCard members) see it (AC3). Plan 62 A5: the viewer's
+            authorization switches the name link's destination (AD-623). */}
+        <AppInfoCard locale={locale} app={app} canManage={payload.can_manage} />
 
         {payload.can_manage ? (
           <OpsCard locale={locale} payload={payload} onPending={setPending} notice={opsNotice} />
@@ -607,16 +611,61 @@ function pendingConfirmCopy(
 }
 
 /**
+ * Plan 62 A5 (AD-623): the manager-face link target — the GitHub App settings
+ * page derived from the cached public html_url. The slug is the segment right
+ * after an `apps` segment — the pathname's `apps/<slug>` tail, exactly one
+ * segment after `apps` (trailing slash tolerated) — never a deeper sub-path:
+ * `/apps/acme/settings` derives null, not slug "settings" (qc round 1,
+ * qc2-F-001); an already settings-shaped url keeps deriving idempotently.
+ * Deliberately never `github_name` (display name ≠ URL slug) and never the
+ * local `SettingsAppMeta.slug` (local App slug ≠ GitHub App slug). The server
+ * validates only the `https://` prefix (github-app-metadata.ts), so an
+ * unusable shape — no `apps/<slug>` tail, or a value `new URL` cannot parse —
+ * returns null and the caller keeps the public-page link (runtime
+ * degradation, never a dead href).
+ */
+export function githubAppSettingsUrl(githubHtmlUrl: string): string | null {
+  try {
+    const segments = new URL(githubHtmlUrl).pathname.split("/").filter(Boolean);
+    const slug =
+      segments.length >= 2 && segments[segments.length - 2] === "apps"
+        ? segments[segments.length - 1]
+        : null;
+    return slug ? `https://github.com/settings/apps/${slug}` : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Plan 53 A5: the GitHub identity card — avatar, hyperlinked name,
  * description, and the numeric App id, fed by the cached GitHub profile the
  * settings route serves (migration 0019 columns). Rendered outside the
  * can_manage conditional, so managers and members alike see it (AC3).
+ * Plan 62 A5 (AD-623): `canManage` switches the name link's destination —
+ * managers reach the App's GitHub settings page (githubAppSettingsUrl over
+ * the cached html_url), members keep the public page; the label names the
+ * destination it actually carries.
  * Degradation is strictly per-field (plan Global Constraints): a null field
  * simply does not render — a never-synced App shows the placeholder mark and
  * its local App id with no link, no error state, no layout collapse
  * (the fail-open UI face of the AD-531 read path).
  */
-export function AppInfoCard({ locale, app }: { locale: SpaBoot["locale"]; app: SettingsAppMeta }) {
+export function AppInfoCard({
+  locale,
+  app,
+  canManage,
+}: {
+  locale: SpaBoot["locale"];
+  app: SettingsAppMeta;
+  /** Threaded from payload.can_manage at the call site — presentation only. */
+  canManage: boolean;
+}) {
+  // Derived BEFORE the per-field JSX so the href and the aria-label key off
+  // the same resolved destination; a member viewer or a non-derivable url
+  // leaves settingsHref null and every face below is today's.
+  const settingsHref =
+    canManage && app.github_html_url ? githubAppSettingsUrl(app.github_html_url) : null;
   return (
     <SectionCard tier="primary">
       <CardHeader>
@@ -640,11 +689,15 @@ export function AppInfoCard({ locale, app }: { locale: SpaBoot["locale"]; app: S
             {app.github_name ? (
               app.github_html_url ? (
                 <a
-                  href={app.github_html_url}
+                  href={settingsHref ?? app.github_html_url}
                   target="_blank"
                   rel="noopener noreferrer"
                   className="inline-flex items-center gap-1.5 font-semibold text-primary hover:underline"
-                  aria-label={t(locale, "settings.appInfoViewOnGithub", { name: app.github_name })}
+                  aria-label={t(
+                    locale,
+                    settingsHref ? "settings.appInfoManageOnGithub" : "settings.appInfoViewOnGithub",
+                    { name: app.github_name },
+                  )}
                 >
                   {app.github_name}
                   <ExternalLink className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
