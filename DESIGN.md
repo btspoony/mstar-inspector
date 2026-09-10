@@ -999,10 +999,16 @@ non-text UI bar ≥3:1). Machine-pinned for the core pairs in
 | chart fill `green-700` vs card (non-text) | 10.2:1 | 3.0:1 |
 | chart fill `amber-700` vs card (non-text) | 10.6:1 | 4.6:1 |
 | chart fill `red-700` vs card (non-text) | 6.4:1 | 5.9:1 |
+| chart fill `gray-700` vs card (non-text) | 5.9:1 | 6.5:1 |
 
 All pairs clear their bar in both themes. (Light `green-700` vs card is the
 v0.2-unchanged semantic value at 3.0:1 — passes the non-text bar exactly;
-it is not used as text.)
+it is not used as text.) The `gray-700` row covers its second duty as the
+Insights nit-series fill (plan 60 T1 AD-601 recalibration: the red/amber/
+blue 700 values are v0.2-unchanged, so every chart series keeps the 700
+step — dark wears the bright value, light the deep — and the trend
+dual-series pair `blue-700` vs `amber-700` stays distinct at Δhue ≈ 169°
+dark / 184° light).
 
 Brand-vs-semantic distinguishability (CIE76 ΔE, hue delta):
 

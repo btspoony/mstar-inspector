@@ -7,13 +7,21 @@
  *
  * Geometry (band positions, grouped offsets, tick selection, >8-week
  * every-other-date thinning) lives in ./layout as pure functions; this file
- * only positions what they return. Series colors are the locked AD-561
- * mapping — reviews→blue-700, findings→amber-700 — applied as inline
+ * only positions what they return. Series colors carry the AD-561
+ * dual-series function (reviews ≠ findings visually distinct), recalibrated
+ * under AD-601 on the v0.3 palette: reviews→blue-700, findings→amber-700 —
+ * the 700 values are v0.2-unchanged and ≥3:1 vs the card faces in both
+ * themes, Δhue ≈ 169° (dark) / 184° (light). blue-700 here is a data-series
+ * tone, not the link/focus duty and never brand expression (AD-601 records
+ * the choice). Colors ride inline
  * `var(--token)` references on the `style` attribute (parsed as CSS
  * declarations, where var() resolves in every engine — never SVG
  * presentation attributes, SVGWG open issue 1031) into the DESIGN.md token
  * layer (src/spa/styles/tokens.css), so dark/light both resolve with zero
  * raw hex; the legend swatches use the same vars, mapping series→color.
+ * Legend text carries the v0.3 label face (weight 500) and every numeral
+ * (y ticks, date labels) renders tabular figures per the DESIGN.md
+ * numerals rule.
  *
  * Numeric coexistence (a11y floor): per-week counts are not labeled on the
  * points — the window totals ride the page-level summary line
@@ -76,12 +84,12 @@ export function TrendChart({
       viewBox={`0 0 ${WIDTH} ${HEIGHT}`}
       className="h-auto w-full"
     >
-      <rect x={PLOT_X} y={8} width={10} height={10} style={{ fill: "var(--blue-700)" }} />
-      <text x={PLOT_X + 14} y={13} dominantBaseline="central" fontSize={11} style={{ fill: "var(--gray-900)" }}>
+      <rect x={PLOT_X} y={8} width={10} height={10} rx={2} style={{ fill: "var(--blue-700)" }} />
+      <text x={PLOT_X + 14} y={13} dominantBaseline="central" fontSize={11} style={{ fill: "var(--gray-900)", fontWeight: 500 }}>
         {seriesLabels.reviews}
       </text>
-      <rect x={PLOT_X + 150} y={8} width={10} height={10} style={{ fill: "var(--amber-700)" }} />
-      <text x={PLOT_X + 164} y={13} dominantBaseline="central" fontSize={11} style={{ fill: "var(--gray-900)" }}>
+      <rect x={PLOT_X + 150} y={8} width={10} height={10} rx={2} style={{ fill: "var(--amber-700)" }} />
+      <text x={PLOT_X + 164} y={13} dominantBaseline="central" fontSize={11} style={{ fill: "var(--gray-900)", fontWeight: 500 }}>
         {seriesLabels.findings}
       </text>
       <line x1={PLOT_X} y1={PLOT_Y} x2={PLOT_X} y2={axisY} style={{ stroke: "var(--gray-alpha-400)" }} />
@@ -94,7 +102,7 @@ export function TrendChart({
           dominantBaseline="central"
           textAnchor="end"
           fontSize={10}
-          style={{ fill: "var(--gray-900)" }}
+          style={{ fill: "var(--gray-900)", fontVariantNumeric: "tabular-nums" }}
         >
           {tick}
         </text>
@@ -130,7 +138,7 @@ export function TrendChart({
             y={HEIGHT - 6}
             textAnchor="middle"
             fontSize={10}
-            style={{ fill: "var(--gray-900)" }}
+            style={{ fill: "var(--gray-900)", fontVariantNumeric: "tabular-nums" }}
           >
             {formatWeekLabel(point.week, locale)}
           </text>
