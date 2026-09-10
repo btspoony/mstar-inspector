@@ -21,6 +21,7 @@ import { isDictionaryKey, t } from "../../src/i18n";
 const spaRoot = join(import.meta.dir, "../../src/spa");
 const appsPage = readFileSync(join(spaRoot, "pages/AppsPage.tsx"), "utf8");
 const membersPage = readFileSync(join(spaRoot, "pages/MembersPage.tsx"), "utf8");
+const tablePrimitive = readFileSync(join(spaRoot, "components/ui/table.tsx"), "utf8");
 
 describe("AppsPage table reinforcement (plan 58 T3 / AD-581)", () => {
   test("identity cell is the brand surface: slug primary line + AppID meta line", () => {
@@ -92,6 +93,43 @@ describe("v0.3 page face (plan 58 T3, A4/A5)", () => {
     ] as const) {
       expect(source, name).not.toMatch(/#[0-9a-fA-F]{3,8}\b/);
     }
+  });
+});
+
+describe("table horizontal padding (plan 62 T2, D5/A3)", () => {
+  // The exact head/cell class literals (qc round 1, qc1-F-002): the
+  // retirement pin scans these strings only — a hypothetical future variant
+  // elsewhere in the file (px-2.5, sm:px-2) cannot false-fail it.
+  const headClassLiteral = tablePrimitive.match(/"(h-10 px-3[^"]*)"/)?.[1];
+  const cellClassLiteral = tablePrimitive.match(/"(px-3 py-2[^"]*)"/)?.[1];
+
+  test("head and cell ride the spacing-3 horizontal step (12px); vertical untouched", () => {
+    // D5: one component-level raise benefits both Apps and Members tables.
+    expect(tablePrimitive).toContain("h-10 px-3");
+    expect(tablePrimitive).toContain("px-3 py-2");
+  });
+
+  test("head/cell class literals are locatable (pin integrity)", () => {
+    expect(headClassLiteral).toBeDefined();
+    expect(cellClassLiteral).toBeDefined();
+  });
+
+  test("the 8px horizontal step is retired from the head/cell class literals", () => {
+    // Standalone-token check inside the literals: a regen reverting the
+    // primitives to upstream px-2/p-2 still fails, while token variants
+    // (px-2.5, sm:px-2) do not count as the retired step.
+    for (const literal of [headClassLiteral, cellClassLiteral]) {
+      const tokens = (literal ?? "").split(/\s+/);
+      expect(tokens).toContain("px-3");
+      expect(tokens).not.toContain("px-2");
+      expect(tokens).not.toContain("p-2");
+    }
+    expect((cellClassLiteral ?? "").split(/\s+/)).toContain("py-2");
+  });
+
+  test("checkbox flush-right exception survives the padding raise", () => {
+    // The pr-0 escape hatch exists on both head and cell (shadcn convention).
+    expect(tablePrimitive.match(/\[&:has\(\[role=checkbox\]\)\]:pr-0/g)?.length).toBe(2);
   });
 });
 

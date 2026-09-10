@@ -13,6 +13,10 @@
  * 2. Shell brand surfaces (A1/A2): the sidebar active edge consumes the
  *    sanctioned --sidebar-primary bridge and the navbar sits on the
  *    background-200 chrome token — zero raw hex in the shell sources.
+ * 3. Sidebar hover hierarchy (plan 62 T1, AD-622): every menu-button hover
+ *    face dims to the /40 accent tint + text brighten while the press /
+ *    active / open fills stay full strength — hover always lighter than
+ *    active.
  */
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
@@ -117,5 +121,66 @@ describe("shell brand surfaces (plan 58 T1, A1/A2)", () => {
   test("navbar sits on the background-200 chrome token, zero raw hex", () => {
     expect(layout).toContain("bg-(--background-200)");
     expect(layout).not.toMatch(/#[0-9a-fA-F]{3,8}\b/);
+  });
+});
+
+describe("sidebar hover hierarchy recipe (plan 62 T1, AD-622)", () => {
+  const appSidebar = readFileSync(join(spaRoot, "components/AppSidebar.tsx"), "utf8");
+  // The menu-button cva block only — sidebar.tsx carries out-of-scope hover
+  // faces (menu-action, menu-badge, menu-sub) that plan 62 does not touch.
+  const menuButtonBlock = sources.sidebar?.match(
+    /const sidebarMenuButtonVariants = cva\([\s\S]*?\n\)\n/,
+  )?.[0];
+  // AD-622 no-motion surface (qc round 1, qc1-F-003 + qc2-F-003): a hover
+  // face may only tint + brighten — no translate/-translate, scale, shadow,
+  // ring or border motion class may join it.
+  const hoverMotion = /hover:-?(translate|scale|shadow|ring|border)\b/;
+
+  test("menu-button cva block is locatable (pin integrity)", () => {
+    expect(menuButtonBlock).toBeDefined();
+    expect(menuButtonBlock).toContain("hover:bg-sidebar-accent");
+  });
+
+  test("menu-button hover faces dim to the /40 accent tint (base + state-open + variants)", () => {
+    // Base string hover face…
+    expect(menuButtonBlock).toContain(
+      "hover:bg-sidebar-accent/40 hover:text-sidebar-accent-foreground",
+    );
+    // …the open-state hover face…
+    expect(menuButtonBlock).toContain(
+      "data-[state=open]:hover:bg-sidebar-accent/40 data-[state=open]:hover:text-sidebar-accent-foreground",
+    );
+    // …and no full-strength hover fill survives anywhere in the recipe
+    // (base, default, outline) — hover must stay lighter than active.
+    expect(menuButtonBlock).not.toMatch(/hover:bg-sidebar-accent(?!\/)/);
+  });
+
+  test("menu-button press/active faces keep their full-strength fill (AD-622 untouched list)", () => {
+    expect(menuButtonBlock).toContain(
+      "active:bg-sidebar-accent active:text-sidebar-accent-foreground",
+    );
+    expect(menuButtonBlock).toContain(
+      "data-[active=true]:bg-sidebar-accent data-[active=true]:font-medium data-[active=true]:text-sidebar-accent-foreground",
+    );
+  });
+
+  test("outline variant: resting hairline stays, the hover ring retires with the recipe", () => {
+    expect(menuButtonBlock).toContain("shadow-[0_0_0_1px_var(--sidebar-border)]");
+    expect(menuButtonBlock).not.toContain("hover:shadow-[0_0_0_1px_var(--sidebar-accent)]");
+  });
+
+  test("menu-button cva block carries no motion classes on its hover faces (AD-622)", () => {
+    // The tint recipe above is scoped to this exact block, so the no-motion
+    // half of AD-622 covers it too — not just the wordmark scan below.
+    expect(menuButtonBlock).not.toMatch(hoverMotion);
+  });
+
+  test("brand wordmark link rides the same tint recipe as the menu rows", () => {
+    expect(appSidebar).toContain(
+      "hover:bg-sidebar-accent/40 hover:text-sidebar-accent-foreground",
+    );
+    // No translate / scale / shadow / ring / border on hover (AD-622): no
+    // motion class may join the wordmark's hover face.
+    expect(appSidebar).not.toMatch(hoverMotion);
   });
 });

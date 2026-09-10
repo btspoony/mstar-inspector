@@ -398,6 +398,10 @@ export const en = {
       "The identity GitHub reports for this App. Profile fields are cached from the App's GitHub settings page; open the name to manage it there.",
     appInfoAppId: "App ID: {id}",
     appInfoViewOnGithub: "View {name} on GitHub",
+    // Plan 62 A5 (AD-623): the manager-face label — the name link targets the
+    // App's GitHub settings page, so the accessible name says "manage", not
+    // "view". Member face keeps appInfoViewOnGithub.
+    appInfoManageOnGithub: "Manage {name} on GitHub",
     appInfoSynced: "Synced {time}",
     /**
      * Plan 51 T3: deployment version footer. `{version}` carries the

@@ -49,7 +49,7 @@ export function AppSidebar({ model }: { model: SidebarModel }) {
     <Sidebar collapsible="none" aria-label={model.navLabel}>
       <SidebarHeader className="border-b border-sidebar-border p-3">
         <a
-          className="flex items-center gap-2 rounded-sm px-2 py-1 text-sidebar-foreground no-underline outline-none transition-[color,background-color] duration-(--duration-base) ease-(--ease-in-out) hover:bg-sidebar-accent focus-visible:ring-2 focus-visible:ring-sidebar-ring"
+          className="flex items-center gap-2 rounded-sm px-2 py-1 text-sidebar-foreground no-underline outline-none transition-[color,background-color] duration-(--duration-base) ease-(--ease-in-out) hover:bg-sidebar-accent/40 hover:text-sidebar-accent-foreground focus-visible:ring-2 focus-visible:ring-sidebar-ring"
           href="/dashboard"
           onClick={(event) => spaClick("/dashboard", event)}
         >

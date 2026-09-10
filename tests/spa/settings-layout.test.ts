@@ -22,7 +22,7 @@ import {
   filterCatalogProviders,
   groupCatalogProviders,
 } from "../../src/spa/components/provider-combobox";
-import { AppInfoCard, DraftChainPanel, draftChainTabLabel } from "../../src/spa/pages/SettingsPage";
+import { AppInfoCard, DraftChainPanel, draftChainTabLabel, githubAppSettingsUrl } from "../../src/spa/pages/SettingsPage";
 
 describe("settings layout (plan 35 T4)", () => {
   test("SettingsPage folds ops + health into an authorized ops zone; providers and chains are shadcn", () => {
@@ -1194,6 +1194,16 @@ describe("App workflow boundaries (plan 40 T2)", () => {
     expect(source).toContain('t(locale, "settings.backToApps")');
     expect(t("en", "settings.backToApps")).toBe("Back to Apps");
     expect(t("zh_CN", "settings.backToApps")).toBe("返回应用");
+    // Plan 62 A4: a decorative ArrowLeft rides the link — aria-hidden keeps
+    // the accessible name at the backToApps text alone; inline-flex aligns
+    // icon + label. Copy and target unchanged (AC3).
+    const wayfinding = source.slice(
+      source.lastIndexOf("<a", source.indexOf('href="/dashboard/apps"')),
+      source.indexOf('t(locale, "settings.backToApps")'),
+    );
+    expect(wayfinding).toContain("<ArrowLeft");
+    expect(wayfinding).toContain('aria-hidden="true"');
+    expect(wayfinding).toContain("inline-flex items-center gap-1.5");
   });
 
   test("successful configuration saves surface success feedback; failures keep the structured error", () => {
@@ -1518,10 +1528,13 @@ describe("GitHub App identity card (plan 53 A5/A6/A7)", () => {
    * The card is a pure presentational component (no hooks, no browser API),
    * so its degradation face — the load-bearing plan-53 contract — is pinned
    * behaviorally: static SSR markup of the exported card, no DOM runner.
-   * createElement keeps this .ts file free of JSX.
+   * createElement keeps this .ts file free of JSX. Plan 62 A5: `canManage`
+   * switches the name link's destination — it defaults to false, so every
+   * pin below (and every plan-53 pin) exercises the member face unless it
+   * passes true explicitly.
    */
-  const html = (app: SettingsAppMeta): string =>
-    renderToStaticMarkup(createElement(AppInfoCard, { locale: "en", app }));
+  const html = (app: SettingsAppMeta, canManage = false): string =>
+    renderToStaticMarkup(createElement(AppInfoCard, { locale: "en", app, canManage }));
 
   function meta(overrides: Partial<SettingsAppMeta> = {}): SettingsAppMeta {
     return {
@@ -1610,6 +1623,63 @@ describe("GitHub App identity card (plan 53 A5/A6/A7)", () => {
     expect(nameless).not.toContain(synced.github_html_url);
   });
 
+  test("manager face targets the GitHub App settings page derived from the html_url slug (plan 62 A5 / AD-623)", () => {
+    // The public page's slug (the html_url's apps/<slug> tail, trailing-slash
+    // tolerant) names the settings target — never github_name (display name
+    // ≠ URL slug) nor the local SettingsAppMeta.slug (local App slug ≠ GitHub
+    // App slug): a name/local-slug that differ from the URL slug still derive
+    // the URL slug.
+    const manager = html(meta({ ...synced, github_html_url: "https://github.com/apps/url-slug-app" }), true);
+    expect(manager).toContain('href="https://github.com/settings/apps/url-slug-app"');
+    expect(manager).not.toContain('href="https://github.com/apps/url-slug-app"');
+    const trailing = html(meta({ ...synced, github_html_url: "https://github.com/apps/url-slug-app/" }), true);
+    expect(trailing).toContain('href="https://github.com/settings/apps/url-slug-app"');
+    const mismatched = html(
+      meta({
+        slug: "local-app",
+        github_name: "Totally Different",
+        github_html_url: "https://github.com/apps/url-slug-app",
+      }),
+      true,
+    );
+    expect(mismatched).toContain('href="https://github.com/settings/apps/url-slug-app"');
+    // The honest manager label names the manage destination; the external-link
+    // contract (new tab + noopener) survives the target switch.
+    expect(manager).toContain('aria-label="Manage Acme Reviewer on GitHub"');
+    expect(manager).toContain('target="_blank"');
+    expect(manager).toContain('rel="noopener noreferrer"');
+  });
+
+  test("member face keeps the public page; an unusable url degrades to the public link (AD-623)", () => {
+    const member = html(meta({ ...synced, github_html_url: "https://github.com/apps/acme-reviewer" }));
+    expect(member).toContain('href="https://github.com/apps/acme-reviewer"');
+    expect(member).toContain('aria-label="View Acme Reviewer on GitHub"');
+    // The server validates only the https:// prefix (github-app-metadata.ts),
+    // so a segment-less url reaches the client: the manager face derives
+    // nothing and keeps the public-page link — and the label follows the REAL
+    // destination (View, not Manage).
+    const degraded = html(meta({ ...synced, github_html_url: "https://github.com" }), true);
+    expect(degraded).toContain('href="https://github.com"');
+    expect(degraded).toContain('aria-label="View Acme Reviewer on GitHub"');
+    // A deep public path derives nothing either (qc round 1, qc2-F-001): the
+    // manager face keeps the PUBLIC href and the honest View label — the
+    // sub-path never masquerades as the settings slug.
+    const deepPath = html(
+      meta({ ...synced, github_html_url: "https://github.com/apps/url-slug-app/settings" }),
+      true,
+    );
+    expect(deepPath).toContain('href="https://github.com/apps/url-slug-app/settings"');
+    expect(deepPath).not.toContain('href="https://github.com/settings/apps/settings"');
+    expect(deepPath).toContain('aria-label="View Acme Reviewer on GitHub"');
+    // github_html_url=null stays plain text on BOTH faces — no anchor, no
+    // crash, the plan-53 degradation face unchanged.
+    for (const canManage of [false, true]) {
+      const out = html(meta({ github_name: synced.github_name }), canManage);
+      expect(out).not.toContain("<a ");
+      expect(out).toContain("Acme Reviewer");
+    }
+  });
+
   test("the card sits between the slug row and the manage conditional — both faces see it", () => {
     const source = readFileSync(join(import.meta.dir, "../../src/spa/pages/SettingsPage.tsx"), "utf8");
     // Plan 59 T1 supersede: the slug row anchor moved onto the heading-20
@@ -1647,8 +1717,55 @@ describe("GitHub App identity card (plan 53 A5/A6/A7)", () => {
     expect(t("zh_CN", "settings.appInfoAppId", { id: 123456 })).toBe("App ID：123456");
     expect(t("en", "settings.appInfoViewOnGithub", { name: "Acme" })).toBe("View Acme on GitHub");
     expect(t("zh_CN", "settings.appInfoViewOnGithub", { name: "Acme" })).toBe("在 GitHub 上查看 Acme");
+    // Plan 62 A5: the honest manager-face label rides the settings destination
+    // (atomic en/zh pair).
+    expect(t("en", "settings.appInfoManageOnGithub", { name: "Acme" })).toBe("Manage Acme on GitHub");
+    expect(t("zh_CN", "settings.appInfoManageOnGithub", { name: "Acme" })).toBe("在 GitHub 上管理 Acme");
     expect(t("en", "settings.appInfoSynced", { time: "5 minutes ago" })).toBe("Synced 5 minutes ago");
     expect(t("zh_CN", "settings.appInfoSynced", { time: "5 分钟前" })).toBe("同步于 5 分钟前");
+  });
+});
+
+describe("GitHub App settings link wiring (plan 62 A5 / AD-623)", () => {
+  test("the page threads payload.can_manage into the card; the settings URL derives only through the helper", () => {
+    const source = readFileSync(join(import.meta.dir, "../../src/spa/pages/SettingsPage.tsx"), "utf8");
+    // Presentation-layer threading only — the payload contract gains nothing.
+    expect(source).toContain("<AppInfoCard locale={locale} app={app} canManage={payload.can_manage} />");
+    // The card body routes the manager target through the pure helper (the
+    // forbidden derivations — github_name / the local slug — cannot reach the
+    // URL through it: it takes the html_url alone).
+    const cardBody = source.slice(
+      source.indexOf("export function AppInfoCard"),
+      source.indexOf("function HealthBody"),
+    );
+    expect(cardBody).toContain("githubAppSettingsUrl(app.github_html_url)");
+    expect(cardBody).toContain("settingsHref ? \"settings.appInfoManageOnGithub\" : \"settings.appInfoViewOnGithub\"");
+  });
+
+  test("slug derivation: the html_url's apps/<slug> tail, trailing-slash tolerant", () => {
+    expect(githubAppSettingsUrl("https://github.com/apps/acme")).toBe("https://github.com/settings/apps/acme");
+    expect(githubAppSettingsUrl("https://github.com/apps/acme/")).toBe("https://github.com/settings/apps/acme");
+    expect(githubAppSettingsUrl("https://github.com/apps/acme///")).toBe("https://github.com/settings/apps/acme");
+    // Already settings-shaped urls derive their own slug back (idempotent face).
+    expect(githubAppSettingsUrl("https://github.com/settings/apps/acme-reviewer")).toBe(
+      "https://github.com/settings/apps/acme-reviewer",
+    );
+  });
+
+  test("deep-path shapes derive null (qc round 1, qc2-F-001): no sub-path masquerades as the slug", () => {
+    // A deeper public path has TWO segments after `apps` — the tail segment
+    // (e.g. "settings") must not be read as the slug; the helper returns null
+    // so the caller keeps the public-page link.
+    expect(githubAppSettingsUrl("https://github.com/apps/acme/settings")).toBeNull();
+    expect(githubAppSettingsUrl("https://github.com/apps/acme/installations/new")).toBeNull();
+  });
+
+  test("no derivable segment or an unparseable https shape derives null (runtime degradation)", () => {
+    expect(githubAppSettingsUrl("https://github.com")).toBeNull();
+    expect(githubAppSettingsUrl("https://github.com/")).toBeNull();
+    // The server admits any https://-prefixed value; these must never throw.
+    expect(githubAppSettingsUrl("https://")).toBeNull();
+    expect(githubAppSettingsUrl("not a url")).toBeNull();
   });
 });
 
