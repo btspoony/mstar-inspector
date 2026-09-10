@@ -65,8 +65,10 @@ describe("BarChart SSR (plan 63 T2, recharts face)", () => {
     // never raw hex.
     expect(html).toContain('class="recharts-rectangle chart-fill-red-700"');
     expect(html).toContain('class="recharts-rectangle chart-fill-gray-700"');
-    // Category labels stay visible tick text next to their bars.
-    expect(html).toContain("must-fix");
+    // Category labels stay visible tick text next to their bars — the
+    // fixture label renders as an axis tick value (carried T2 review
+    // minor: a bare substring pin can't tell a tick from any other text).
+    expect(html).toMatch(/recharts-cartesian-axis-tick-value"[^>]*><tspan[^>]*>must-fix<\/tspan>/);
   });
 
   test("a non-zero bar width tracks the value scale (proportion face, plan-45 F-01 class)", () => {
