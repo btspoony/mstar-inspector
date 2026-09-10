@@ -20,10 +20,12 @@ import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { t } from "../../src/i18n";
 import { SectionCard, SectionGroup } from "../../src/spa/components/SectionCard";
+import { PageNotice } from "../../src/spa/pages/PageNotice";
 
 const spaRoot = join(import.meta.dir, "../../src/spa");
 const sectionCard = readFileSync(join(spaRoot, "components/SectionCard.tsx"), "utf8");
 const settingsPage = readFileSync(join(spaRoot, "pages/SettingsPage.tsx"), "utf8");
+const pagesCss = readFileSync(join(spaRoot, "pages.module.css"), "utf8");
 
 describe("SectionCard tier idiom (plan 59 T1 / AD-591)", () => {
   test("the idiom is single-point: a hand-written wrapper composing ui/card, not a copy-in edit", () => {
@@ -240,5 +242,127 @@ describe("provider combobox panel face (plan 59 T2)", () => {
     expect(combobox).toContain("tracking-(--typo-label-12-tracking)");
     // Zero raw hex in the component (iteration hard constraint #4).
     expect(combobox).not.toMatch(/#[0-9a-fA-F]{3,8}\b/);
+  });
+});
+
+describe("notice face (plan 59 T3 / A5)", () => {
+  const pageNotice = readFileSync(join(spaRoot, "pages/PageNotice.tsx"), "utf8");
+
+  test("each kind renders its semantic glyph; the alert/status role contract is untouched", () => {
+    // v0.3 dual-state form: success/warn/error get their semantic glyph over
+    // the tinted token face. The plan-40 WCAG 4.1.3 role pin survives
+    // verbatim, and the kind two-value + message semantics are unchanged
+    // (op-outcome notices keep the PageNotice channel — AD-582 boundary).
+    expect(pageNotice).toContain('role={kind === "error" ? "alert" : "status"}');
+    const html = (kind: "success" | "warn" | "error") =>
+      renderToStaticMarkup(createElement(PageNotice, { kind, message: "msg" }));
+    for (const kind of ["success", "warn", "error"] as const) {
+      const out = html(kind);
+      expect(out, kind).toContain("<svg");
+      expect(out, kind).toContain('aria-hidden="true"');
+      expect(out, kind).toContain(">msg</span>");
+    }
+    expect(html("error")).toContain('role="alert"');
+    expect(html("success")).toContain('role="status"');
+    expect(html("warn")).toContain('role="status"');
+    expect(pageNotice).not.toMatch(/#[0-9a-fA-F]{3,8}\b/);
+  });
+
+  test("the notice face rides the DESIGN.md Notice contract (16px padding, copy-14 line)", () => {
+    const block = pagesCss.match(/\.notice \{[\s\S]*?\n\}/);
+    expect(block).not.toBeNull();
+    const css = block![0];
+    // 16px padding (spacing-4 — converges with the SSR .banner face) and the
+    // copy-14 line step; the flex row carries the glyph at the text's edge.
+    expect(css).toContain("padding: var(--spacing-4)");
+    expect(css).not.toContain("padding: var(--spacing-3)");
+    expect(css).toContain("line-height: var(--typo-copy-14-line)");
+    expect(css).toContain("font-size: var(--typo-copy-14-size)");
+    expect(css).toContain("display: flex");
+    expect(css).toContain("gap: var(--spacing-2)");
+    // Token discipline: semantic tones stay on the --notice-* component vars.
+    expect(css).toContain("var(--notice-success-border)");
+    expect(css).not.toMatch(/#[0-9a-fA-F]{3,8}\b/);
+  });
+});
+
+describe("composed load/error states (plan 59 T3 / A6)", () => {
+  test("the foreground load gate rides the forms skeleton; retry wires the page's own load", () => {
+    // Plan-58 idiom: the skeleton is the page's full loading face (its
+    // heading placeholder stands in for the real h1); the settings kind is
+    // "forms" (AD-582). Retry binds the foreground load — which is the only
+    // path that flips state back to "loading", so op-triggered background
+    // reloads never flash the skeleton (plan-38, unchanged).
+    expect(settingsPage).toContain('<PageSkeleton locale={locale} kind="forms" />');
+    expect(settingsPage).toContain('<ErrorState locale={locale} onRetry={() => void load()} />');
+    // The old text-notice faces are retired from this page.
+    expect(settingsPage).not.toContain("LoadingNotice");
+    expect(settingsPage).not.toContain("LoadFailedNotice");
+    // The background-reload failure channel stays the page banner.
+    expect(settingsPage).toContain('{notice ? <PageNotice kind={notice.kind} message={notice.message} /> : null}');
+  });
+});
+
+describe("chains panel faces (plan 59 T3, T2 review deferrals)", () => {
+  test("the named-chain panel title rides the heading-16 token idiom (SectionCardTitle's face)", () => {
+    const chainsBody = settingsPage.slice(
+      settingsPage.indexOf("function ChainsCard"),
+      settingsPage.indexOf("function SeatsCard"),
+    );
+    expect(chainsBody).toContain(
+      '<span className="font-semibold text-(length:--typo-heading-16-size) leading-(--typo-heading-16-line) tracking-(--typo-heading-16-tracking)">{tab.id}</span>',
+    );
+    // No bare 16px-inherit title face remains in the panel header.
+    expect(chainsBody).not.toContain('<span className="font-medium">{tab.id}</span>');
+  });
+
+  test("the selector-row remove is a local edit (outline); stored-data removes stay destructive", () => {
+    // The ChainEditor row remove filters the UNSAVED local list — recoverable,
+    // no dialog, no server op — so it rides the AD-552 local-edit face. The
+    // named-chain header remove opens the confirm dialog (stored chain) and
+    // keeps the destructive face.
+    const editorBody = settingsPage.slice(settingsPage.indexOf("function ChainEditor"));
+    expect(editorBody).toContain('variant="outline"');
+    expect(editorBody).toContain('onClick={() => setChain(chain.filter((_, i) => i !== index))}');
+    expect(editorBody).not.toContain('variant="destructive"');
+    const chainsBody = settingsPage.slice(
+      settingsPage.indexOf("function ChainsCard"),
+      settingsPage.indexOf("function SeatsCard"),
+    );
+    expect(chainsBody).toContain('variant="destructive" size="sm" onClick={() => onRemoveChain(tab.id)}');
+  });
+
+  test("the draft panel opens with a compact identity-field header; the controlled wiring is intact", () => {
+    const panelBody = settingsPage.slice(
+      settingsPage.indexOf("function DraftChainPanel"),
+      settingsPage.indexOf("function ChainEditor"),
+    );
+    // The name field is the panel's identity header: compact block (w-fit +
+    // w-64, the invite-input idiom), label-above-control idiom preserved.
+    expect(panelBody).toContain('className="flex w-fit flex-col gap-1.5 text-sm font-medium"');
+    expect(panelBody).toContain('className="w-64"');
+    // AD-551 controlled surface + the busy-gate-only state inventory (pinned
+    // in settings-layout) are untouched — presence re-checked here.
+    expect(panelBody).toContain("value={name}");
+    expect(panelBody).toContain("onNameChange(event.target.value)");
+    expect(panelBody.match(/useState\([^)]*\)/g) ?? []).toEqual(["useState(false)"]);
+  });
+});
+
+describe("section description wording (plan 59 T3 / A8)", () => {
+  test("the Default-chain term stays stable across zh faces (wording consistency pass)", () => {
+    // The stable technical term is the capitalized chain id; the zh faces for
+    // the remove-cascade and the chains description used a lowercase drift.
+    expect(t("zh_CN", "settings.seatsCopy")).toContain("回退到 Default");
+    expect(t("zh_CN", "settings.modelChainsCopy")).toContain("回退到 Default 链");
+    expect(t("zh_CN", "settings.confirmRemoveChainBody")).toContain("回退到 Default 链");
+    for (const key of ["settings.modelChainsCopy", "settings.confirmRemoveChainBody"] as const) {
+      expect(t("zh_CN", key), key).not.toContain("回退到 default");
+    }
+    // Pinned technical facts of the touched description survive the pass.
+    expect(t("en", "settings.modelChainsCopy")).toContain("tabs");
+    expect(t("en", "settings.modelChainsCopy")).toContain("can't be removed");
+    expect(t("zh_CN", "settings.modelChainsCopy")).toContain("标签页");
+    expect(t("zh_CN", "settings.modelChainsCopy")).toContain("无法移除");
   });
 });

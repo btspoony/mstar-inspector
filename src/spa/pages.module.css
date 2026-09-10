@@ -13,14 +13,23 @@
   line-height: var(--typo-copy-14-line);
 }
 
+/* Plan 59 T3 (A5): the v0.3 notice face — DESIGN.md Notice contract:
+   semantic token tones, copy-14 with its line step, control radius, 16px
+   padding (matches the SSR .banner face). The flex row carries the kind's
+   semantic glyph at the text's leading edge; the glyph inherits the notice
+   fg token. */
 .notice {
   margin: 0;
-  padding: var(--spacing-3);
+  display: flex;
+  align-items: flex-start;
+  gap: var(--spacing-2);
+  padding: var(--spacing-4);
   border-radius: var(--rounded-sm);
   border: 1px solid var(--notice-success-border);
   background: var(--notice-success-bg);
   color: var(--notice-success-fg);
   font-size: var(--typo-copy-14-size);
+  line-height: var(--typo-copy-14-line);
 }
 
 .noticeWarn {

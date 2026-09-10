@@ -53,7 +53,9 @@ import {
 } from "./data";
 import { StatusBadge } from "./AppsPage";
 import { GitHubMark } from "./LoginPage";
-import { LoadFailedNotice, LoadingNotice, PageNotice, type NoticeKind } from "./PageNotice";
+import { PageNotice, type NoticeKind } from "./PageNotice";
+import { ErrorState } from "../components/state/ErrorState";
+import { PageSkeleton } from "../components/state/PageSkeleton";
 
 type PendingAction =
   | { kind: "pause" | "resume" | "disable" | "enable" | "delete" }
@@ -146,6 +148,16 @@ export function SettingsPage({ boot, slug }: { boot: SpaBoot; slug: string }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [slug]);
 
+  // Loading rides the plan-57 skeleton as the page's full loading face —
+  // the component's heading placeholder stands in for the real h1 (AD-582),
+  // matching the plan-58 Apps/Members idiom. Foreground only: `load` flips
+  // to "loading" solely on the initial/retry load, so op-triggered background
+  // reloads keep the card tree mounted and never flash this skeleton
+  // (plan-38 contract, unchanged above).
+  if (state === "loading") {
+    return <PageSkeleton locale={locale} kind="forms" />;
+  }
+
   return (
     <div className="flex flex-col gap-6">
       {/* Wayfinding (plan 40 T2): the App settings page reads as one workflow
@@ -160,8 +172,7 @@ export function SettingsPage({ boot, slug }: { boot: SpaBoot; slug: string }) {
         </a>
         <h1 className="font-semibold text-(length:--typo-heading-24-size) leading-(--typo-heading-24-line) tracking-(--typo-heading-24-tracking)">{t(locale, "settings.title")}</h1>
       </div>
-      {state === "loading" ? <LoadingNotice locale={locale} /> : null}
-      {state === "error" ? <LoadFailedNotice locale={locale} /> : null}
+      {state === "error" ? <ErrorState locale={locale} onRetry={() => void load()} /> : null}
       {notice ? <PageNotice kind={notice.kind} message={notice.message} /> : null}
       {state === "ok" && payload ? (
         <SettingsView locale={locale} payload={payload} groups={groups} onReload={load} />
@@ -170,7 +181,8 @@ export function SettingsPage({ boot, slug }: { boot: SpaBoot; slug: string }) {
           generated src/version.ts surface — the same `vX.Y.Z` form as the
           /healthz field and release tags, so dashboard, health endpoint and
           tag reconcile by eye. Static build-time value: it renders in every
-          page state, independent of the settings payload. */}
+          payload state (ok / error), independent of the settings payload —
+          the foreground loading state rides the full-page skeleton above. */}
       <p className="text-sm text-muted-foreground">
         {t(locale, "settings.footer.version", { version: `v${APP_VERSION}` })}
       </p>
@@ -1566,7 +1578,11 @@ function ChainsCard({
           {namedTabs.map((tab) => (
             <TabsContent key={tab.id} forceMount value={tab.id}>
               <div className="mb-2 flex items-center justify-between gap-2">
-                <span className="font-medium">{tab.id}</span>
+                {/* Plan 59 T3 (T2 review deferral): the panel's title face
+                    rides the heading-16 token step — the same face as the
+                    SectionCardTitle card titles, expressed through the
+                    --typo-* idiom instead of the 16px inherit. */}
+                <span className="font-semibold text-(length:--typo-heading-16-size) leading-(--typo-heading-16-line) tracking-(--typo-heading-16-tracking)">{tab.id}</span>
                 <Button type="button" variant="destructive" size="sm" onClick={() => onRemoveChain(tab.id)}>
                   {t(locale, "settings.remove")}
                 </Button>
@@ -1764,7 +1780,13 @@ export function DraftChainPanel({
   const [busy, setBusy] = useState(false);
   return (
     <div className="flex flex-col gap-3">
-      <label className="flex flex-col gap-1.5 text-sm font-medium">
+      {/* Plan 59 T3 (T2 review deferral): the draft panel's own visible face —
+          the name field is the panel's identity header, so it renders as a
+          compact header block (w-fit + w-64, the invite-input idiom) instead
+          of a full-width stretch. The named panels open [identity title] +
+          [editor]; the draft opens [identity field] + [editor] — one rhythm.
+          The controlled wiring below is the pinned AD-551 surface, untouched. */}
+      <label className="flex w-fit flex-col gap-1.5 text-sm font-medium">
         {t(locale, "settings.chainName")}
         <Input
           value={name}
@@ -1772,6 +1794,7 @@ export function DraftChainPanel({
           placeholder={t(locale, "settings.chainNamePlaceholder")}
           autoComplete="off"
           maxLength={64}
+          className="w-64"
         />
       </label>
       <ChainEditor
@@ -1882,7 +1905,17 @@ function ChainEditor({
           {chain.map((selector, index) => (
             <li key={`${selector}-${index}`} className="flex items-center justify-between gap-2 rounded-md border px-3 py-2">
               <span className="font-mono text-sm">{selector}</span>
-              <Button type="button" variant="destructive" size="sm" onClick={() => setChain(chain.filter((_, i) => i !== index))}>
+              {/* Plan 59 T3 (T2 review deferral): removing a selector edits
+                  the UNSAVED local list — recoverable by re-picking, no
+                  dialog, no server op — so it rides the AD-552 local-edit
+                  face (outline + sm, the discard idiom). The destructive red
+                  stays reserved for confirm-gated stored-data removals. */}
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                onClick={() => setChain(chain.filter((_, i) => i !== index))}
+              >
                 {t(locale, "settings.remove")}
               </Button>
             </li>
