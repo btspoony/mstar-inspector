@@ -193,6 +193,14 @@ export const en = {
   settings: {
     title: "App settings",
     backToApps: "Back to Apps",
+    /**
+     * Plan 59 T1 (AD-591): section-group eyebrow labels for the two tier
+     * zones — identity/status (Tier 1) and configuration (Tier 2).
+     */
+    group: {
+      identity: "Identity",
+      configuration: "Configuration",
+    },
     changesSaved: "Changes saved.",
     addKey: "Add key",
     provider: "Model provider",

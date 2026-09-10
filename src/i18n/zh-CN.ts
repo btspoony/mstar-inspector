@@ -181,6 +181,11 @@ export const zhCN: Dictionary = {
   settings: {
     title: "应用设置",
     backToApps: "返回应用",
+    /** Plan 59 T1 (AD-591): 分组 eyebrow 标签——身份/状态区与配置区（双语原子）。 */
+    group: {
+      identity: "身份",
+      configuration: "配置",
+    },
     changesSaved: "更改已保存。",
     addKey: "添加密钥",
     provider: "模型提供方",
@@ -316,7 +321,7 @@ export const zhCN: Dictionary = {
     addTemplate: "添加 {label}",
     modelChains: "模型链",
     modelChainsCopy:
-      "Default 链与命名链是同级标签页 — 在各自的标签页中编辑链。Default 链是必需的且无法移除；移除命名链后，引用它的席位将回退到 default。",
+      "Default 链与命名链是同级标签页 — 在各自的标签页中编辑链。Default 链是必需的且无法移除；移除命名链后，引用它的席位将回退到 Default 链。",
     addChain: "新建链",
     chainName: "链名称",
     chainNamePlaceholder: "例如 deep-review",
@@ -327,7 +332,7 @@ export const zhCN: Dictionary = {
     seatsCopy: "每个审查席位运行在 Default 链或显式选择的命名链上 — 其命名链被移除的席位会回退到 Default。",
     useDefaultChain: "Default 链",
     confirmRemoveChainTitle: "移除链 {name}？",
-    confirmRemoveChainBody: "引用 {name} 的席位将回退到 default 链。",
+    confirmRemoveChainBody: "引用 {name} 的席位将回退到 Default 链。",
     consoleOnly: "此 provider 无法在此验证 — 请在对应控制台管理密钥。",
     confirmRemoveKeyTitle: "移除 {provider} 的密钥？",
     confirmRemoveKeyBody: "依赖 {provider} 的选择器将失败，直到你重新验证新密钥。",

@@ -1450,13 +1450,15 @@ describe("settings header typography (plan 45 T7)", () => {
   test("app-slug heading renders at the heading-20 scale step, not the off-scale 18px (audit UI-45-08)", () => {
     const source = readFileSync(join(import.meta.dir, "../../src/spa/pages/SettingsPage.tsx"), "utf8");
     // The slug is the selected-App panel title sitting under the page-level
-    // h1 (text-2xl = heading-24). DESIGN.md's heading scale is 32/24/20/16
-    // only, and heading-20 is the panel-title tier — heading-16 would demote
-    // the slug below the cards it titles. In code the scale step is the
-    // default Tailwind size utility text-xl (plan 58 T2 moved the login
-    // card title onto the heading-32 token utilities; this page keeps the
-    // named-scale discipline for its panels).
-    expect(source).toContain('<h2 className="text-xl font-semibold">{app.slug}</h2>');
+    // h1. DESIGN.md's heading scale is 32/24/20/16 only, and heading-20 is
+    // the panel-title tier — heading-16 would demote the slug below the
+    // cards it titles. SUPERSEDE (plan 59 T1): the plan-45 T7 named-scale
+    // carrier (text-xl) is replaced by the heading-20 token utilities — the
+    // plan-58 QC heading-idiom convergence applied to this page; the scale
+    // step itself is unchanged.
+    expect(source).toContain(
+      '<h2 className="font-semibold text-(length:--typo-heading-20-size) leading-(--typo-heading-20-line) tracking-(--typo-heading-20-tracking)">{app.slug}</h2>',
+    );
     // The off-scale 18px class no longer appears anywhere on the page.
     expect(source).not.toContain("text-lg");
   });
@@ -1610,7 +1612,11 @@ describe("GitHub App identity card (plan 53 A5/A6/A7)", () => {
 
   test("the card sits between the slug row and the manage conditional — both faces see it", () => {
     const source = readFileSync(join(import.meta.dir, "../../src/spa/pages/SettingsPage.tsx"), "utf8");
-    const slugRowPos = source.indexOf('<h2 className="text-xl font-semibold">{app.slug}</h2>');
+    // Plan 59 T1 supersede: the slug row anchor moved onto the heading-20
+    // token utilities (same carrier change as the typography pin above).
+    const slugRowPos = source.indexOf(
+      '<h2 className="font-semibold text-(length:--typo-heading-20-size) leading-(--typo-heading-20-line) tracking-(--typo-heading-20-tracking)">{app.slug}</h2>',
+    );
     const cardPos = source.indexOf("<AppInfoCard");
     const managePos = source.indexOf("{payload.can_manage ? (");
     expect(slugRowPos).toBeGreaterThan(-1);

@@ -127,7 +127,7 @@ export function ProviderComboboxPanel({
       {headed.map(({ key, label, rows }) =>
         rows.length === 0 ? null : (
           <div key={key} role="group" aria-label={label}>
-            <div className="px-2 py-1.5 text-xs text-muted-foreground">{label}</div>
+            <div className="px-2 py-1.5 text-xs tracking-(--typo-label-12-tracking) text-muted-foreground">{label}</div>
             {rows.map((provider) => {
               const unavailable = provider.eligibility === "unavailable";
               const rowId = optionId(listboxId, provider.id);
@@ -304,7 +304,7 @@ export function ProviderCombobox({
         // Height cap mirrors the old SelectContent max-h-72 (plan-42 pin):
         // an internal scroll keeps the 214-entry breadth usable.
         <div className="relative">
-          <div className="absolute z-50 mt-1 max-h-72 w-full overflow-y-auto rounded-md border bg-popover p-1 text-popover-foreground shadow-md">
+          <div className="absolute z-50 mt-1 max-h-72 w-full overflow-y-auto rounded-md border bg-popover p-1 text-popover-foreground shadow-(--shadow-pop)">
             <ProviderComboboxPanel
               locale={locale}
               providers={providers}

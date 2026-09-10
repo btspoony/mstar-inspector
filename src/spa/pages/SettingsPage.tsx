@@ -3,7 +3,7 @@ import { ExternalLink, Plus } from "lucide-react";
 import { isDictionaryKey, t, type DictionaryKey } from "../../i18n";
 import { APP_VERSION } from "../../version";
 import { Button } from "@/components/ui/button";
-import { Card, CardAction, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import { CardAction, CardContent, CardDescription, CardHeader } from "@/components/ui/card";
 import {
   Dialog,
   DialogClose,
@@ -25,6 +25,7 @@ import {
 } from "@/components/ui/select";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { ProviderCombobox } from "../components/provider-combobox";
+import { SectionCard, SectionCardTitle, SectionGroup } from "../components/SectionCard";
 import { fetchJson, postForm } from "../api";
 import type { SpaBoot } from "../boot";
 import { deliveryOutcomeLabel } from "../delivery-outcome";
@@ -52,7 +53,9 @@ import {
 } from "./data";
 import { StatusBadge } from "./AppsPage";
 import { GitHubMark } from "./LoginPage";
-import { LoadFailedNotice, LoadingNotice, PageNotice, type NoticeKind } from "./PageNotice";
+import { PageNotice, type NoticeKind } from "./PageNotice";
+import { ErrorState } from "../components/state/ErrorState";
+import { PageSkeleton } from "../components/state/PageSkeleton";
 
 type PendingAction =
   | { kind: "pause" | "resume" | "disable" | "enable" | "delete" }
@@ -145,6 +148,16 @@ export function SettingsPage({ boot, slug }: { boot: SpaBoot; slug: string }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [slug]);
 
+  // Loading rides the plan-57 skeleton as the page's full loading face —
+  // the component's heading placeholder stands in for the real h1 (AD-582),
+  // matching the plan-58 Apps/Members idiom. Foreground only: `load` flips
+  // to "loading" solely on the initial/retry load, so op-triggered background
+  // reloads keep the card tree mounted and never flash this skeleton
+  // (plan-38 contract, unchanged above).
+  if (state === "loading") {
+    return <PageSkeleton locale={locale} kind="forms" />;
+  }
+
   return (
     <div className="flex flex-col gap-6">
       {/* Wayfinding (plan 40 T2): the App settings page reads as one workflow
@@ -157,10 +170,9 @@ export function SettingsPage({ boot, slug }: { boot: SpaBoot; slug: string }) {
         >
           {t(locale, "settings.backToApps")}
         </a>
-        <h1 className="text-2xl font-semibold tracking-tight">{t(locale, "settings.title")}</h1>
+        <h1 className="font-semibold text-(length:--typo-heading-24-size) leading-(--typo-heading-24-line) tracking-(--typo-heading-24-tracking)">{t(locale, "settings.title")}</h1>
       </div>
-      {state === "loading" ? <LoadingNotice locale={locale} /> : null}
-      {state === "error" ? <LoadFailedNotice locale={locale} /> : null}
+      {state === "error" ? <ErrorState locale={locale} onRetry={() => void load()} /> : null}
       {notice ? <PageNotice kind={notice.kind} message={notice.message} /> : null}
       {state === "ok" && payload ? (
         <SettingsView locale={locale} payload={payload} groups={groups} onReload={load} />
@@ -169,7 +181,8 @@ export function SettingsPage({ boot, slug }: { boot: SpaBoot; slug: string }) {
           generated src/version.ts surface — the same `vX.Y.Z` form as the
           /healthz field and release tags, so dashboard, health endpoint and
           tag reconcile by eye. Static build-time value: it renders in every
-          page state, independent of the settings payload. */}
+          payload state (ok / error), independent of the settings payload —
+          the foreground loading state rides the full-page skeleton above. */}
       <p className="text-sm text-muted-foreground">
         {t(locale, "settings.footer.version", { version: `v${APP_VERSION}` })}
       </p>
@@ -437,51 +450,61 @@ function SettingsView({
   const confirmCopy = pendingConfirmCopy(locale, app.slug, pending);
 
   return (
-    <div className="flex flex-col gap-6">
-      <div className="flex flex-wrap items-center gap-3">
-        <h2 className="text-xl font-semibold">{app.slug}</h2>
-        <StatusBadge locale={locale} status={app.status} reviewEnabled={app.review_enabled} />
-        <span className="text-sm text-muted-foreground">{t(locale, "apps.by", { login: app.created_by })}</span>
-      </div>
+    <div className="flex flex-col gap-(--spacing-8)">
+      {/* AD-591 section rhythm: two tier groups — the identity/status zone
+          (Tier 1 primary surfaces) and the configuration zone (Tier 2
+          secondary surfaces), each headed by a group eyebrow. Block order
+          and data flow are unchanged (Non-Goal); the plan-53 position
+          contract (identity card between the slug row and the manage
+          conditional) holds inside the group. */}
+      <SectionGroup label={t(locale, "settings.group.identity")}>
+        <div className="flex flex-wrap items-center gap-3">
+          <h2 className="font-semibold text-(length:--typo-heading-20-size) leading-(--typo-heading-20-line) tracking-(--typo-heading-20-tracking)">{app.slug}</h2>
+          <StatusBadge locale={locale} status={app.status} reviewEnabled={app.review_enabled} />
+          <span className="text-sm text-muted-foreground">{t(locale, "apps.by", { login: app.created_by })}</span>
+        </div>
 
-      {/* Plan 53 A5: the GitHub identity card sits between the slug row and
-          the manage conditional, so BOTH faces (OpsCard managers and
-          HealthCard members) see it (AC3). */}
-      <AppInfoCard locale={locale} app={app} />
+        {/* Plan 53 A5: the GitHub identity card sits between the slug row and
+            the manage conditional, so BOTH faces (OpsCard managers and
+            HealthCard members) see it (AC3). */}
+        <AppInfoCard locale={locale} app={app} />
 
-      {payload.can_manage ? (
-        <OpsCard locale={locale} payload={payload} onPending={setPending} notice={opsNotice} />
-      ) : (
-        <HealthCard locale={locale} payload={payload} />
-      )}
+        {payload.can_manage ? (
+          <OpsCard locale={locale} payload={payload} onPending={setPending} notice={opsNotice} />
+        ) : (
+          <HealthCard locale={locale} payload={payload} />
+        )}
+      </SectionGroup>
 
-      <RuntimeImageCard locale={locale} payload={payload} onSettings={submitSettings} />
+      <SectionGroup label={t(locale, "settings.group.configuration")}>
+        <RuntimeImageCard locale={locale} payload={payload} onSettings={submitSettings} />
 
-      {payload.can_manage ? (
-        <>
-          <ProvidersCard
-            locale={locale}
-            payload={payload}
-            onVerify={submitVerify}
-            onSettings={submitSettings}
-            onPending={setPending}
-            notice={providersNotice}
-            removeOutcome={providersRemoveOutcome}
-            onOutcome={setProvidersNotice}
-          />
-          <ChainsCard
-            locale={locale}
-            payload={payload}
-            groups={groups}
-            onSettings={submitSettings}
-            onCreateDraft={createDraftChain}
-            onRemoveChain={(name) => setPending({ kind: "remove-chain", name })}
-            notice={chainsNotice}
-            onOutcome={setChainsNotice}
-          />
-          <SeatsCard locale={locale} payload={payload} onSettings={submitSettings} />
-        </>
-      ) : null}
+        {payload.can_manage ? (
+          <>
+            <ProvidersCard
+              locale={locale}
+              payload={payload}
+              onVerify={submitVerify}
+              onSettings={submitSettings}
+              onPending={setPending}
+              notice={providersNotice}
+              removeOutcome={providersRemoveOutcome}
+              onOutcome={setProvidersNotice}
+            />
+            <ChainsCard
+              locale={locale}
+              payload={payload}
+              groups={groups}
+              onSettings={submitSettings}
+              onCreateDraft={createDraftChain}
+              onRemoveChain={(name) => setPending({ kind: "remove-chain", name })}
+              notice={chainsNotice}
+              onOutcome={setChainsNotice}
+            />
+            <SeatsCard locale={locale} payload={payload} onSettings={submitSettings} />
+          </>
+        ) : null}
+      </SectionGroup>
 
       <Dialog
         open={pending !== null}
@@ -595,9 +618,9 @@ function pendingConfirmCopy(
  */
 export function AppInfoCard({ locale, app }: { locale: SpaBoot["locale"]; app: SettingsAppMeta }) {
   return (
-    <Card>
+    <SectionCard tier="primary">
       <CardHeader>
-        <CardTitle>{t(locale, "settings.appInfo")}</CardTitle>
+        <SectionCardTitle>{t(locale, "settings.appInfo")}</SectionCardTitle>
         <CardDescription>{t(locale, "settings.appInfoCopy")}</CardDescription>
       </CardHeader>
       <CardContent>
@@ -644,7 +667,7 @@ export function AppInfoCard({ locale, app }: { locale: SpaBoot["locale"]; app: S
           </div>
         </div>
       </CardContent>
-    </Card>
+    </SectionCard>
   );
 }
 
@@ -703,15 +726,15 @@ function HealthBody({ locale, payload }: { locale: SpaBoot["locale"]; payload: S
 
 function HealthCard({ locale, payload }: { locale: SpaBoot["locale"]; payload: SettingsPayload }) {
   return (
-    <Card>
+    <SectionCard tier="primary">
       <CardHeader>
-        <CardTitle>{t(locale, "settings.installHealth")}</CardTitle>
+        <SectionCardTitle>{t(locale, "settings.installHealth")}</SectionCardTitle>
         <CardDescription>{t(locale, "settings.installHealthCopy")}</CardDescription>
       </CardHeader>
       <CardContent>
         <HealthBody locale={locale} payload={payload} />
       </CardContent>
-    </Card>
+    </SectionCard>
   );
 }
 
@@ -732,9 +755,9 @@ function RuntimeImageCard({
   onSettings: (fields: Record<string, string>) => Promise<OpNotice>;
 }) {
   return (
-    <Card>
+    <SectionCard tier="secondary">
       <CardHeader>
-        <CardTitle>{t(locale, "settings.runtimeImage")}</CardTitle>
+        <SectionCardTitle>{t(locale, "settings.runtimeImage")}</SectionCardTitle>
         <CardDescription>{t(locale, "settings.runtimeImageCopy")}</CardDescription>
       </CardHeader>
       <CardContent>
@@ -746,7 +769,7 @@ function RuntimeImageCard({
           </p>
         )}
       </CardContent>
-    </Card>
+    </SectionCard>
   );
 }
 
@@ -822,9 +845,9 @@ function OpsCard({
   const { app } = payload;
   const paused = isPaused(app);
   return (
-    <Card>
+    <SectionCard tier="primary">
       <CardHeader>
-        <CardTitle>{t(locale, "settings.ops")}</CardTitle>
+        <SectionCardTitle>{t(locale, "settings.ops")}</SectionCardTitle>
         <CardDescription>{t(locale, "settings.opsCopy")}</CardDescription>
       </CardHeader>
       <CardContent className="flex flex-col gap-6">
@@ -860,7 +883,7 @@ function OpsCard({
         </div>
         <HealthBody locale={locale} payload={payload} />
       </CardContent>
-    </Card>
+    </SectionCard>
   );
 }
 
@@ -916,9 +939,9 @@ function ProvidersCard({
         );
 
   return (
-    <Card>
+    <SectionCard tier="secondary">
       <CardHeader>
-        <CardTitle>{t(locale, "settings.providers")}</CardTitle>
+        <SectionCardTitle>{t(locale, "settings.providers")}</SectionCardTitle>
         <CardDescription>{t(locale, "settings.providersCopy")}</CardDescription>
         <CardAction>
           <Button type="button" variant="outline" size="sm" aria-expanded={addOpen} onClick={() => setAddOpen(!addOpen)}>
@@ -984,7 +1007,7 @@ function ProvidersCard({
           onSettings={onSettings}
         />
       </CardContent>
-    </Card>
+    </SectionCard>
   );
 }
 
@@ -1002,7 +1025,7 @@ function ConfiguredKeyRow({
   return (
     <div className="flex flex-wrap items-center justify-between gap-2 rounded-md border p-3">
       <div>
-        <div className="font-medium">{label}</div>
+        <div className="text-sm font-medium">{label}</div>
         <div className="text-xs text-muted-foreground">
           {row.provider} ·{" "}
           {row.last4 ? t(locale, "settings.keyEnding", { last4: row.last4 }) : t(locale, "settings.keyTooShort")}
@@ -1037,8 +1060,8 @@ function ConfiguredCustomRow({
   return (
     <div className="flex flex-wrap items-center justify-between gap-2 rounded-md border p-3">
       <div>
-        <div className="font-medium">{label}</div>
-        <div className="text-sm text-muted-foreground">
+        <div className="text-sm font-medium">{label}</div>
+        <div className="text-xs text-muted-foreground">
           {row.provider_id} · {row.base_url} · {row.api} · {row.model_ids.join(", ")}
         </div>
       </div>
@@ -1511,9 +1534,9 @@ function ChainsCard({
   }
 
   return (
-    <Card>
+    <SectionCard tier="secondary">
       <CardHeader>
-        <CardTitle>{t(locale, "settings.modelChains")}</CardTitle>
+        <SectionCardTitle>{t(locale, "settings.modelChains")}</SectionCardTitle>
         <CardDescription>{t(locale, "settings.modelChainsCopy")}</CardDescription>
       </CardHeader>
       <CardContent className="flex flex-col gap-6">
@@ -1555,7 +1578,11 @@ function ChainsCard({
           {namedTabs.map((tab) => (
             <TabsContent key={tab.id} forceMount value={tab.id}>
               <div className="mb-2 flex items-center justify-between gap-2">
-                <span className="font-medium">{tab.id}</span>
+                {/* Plan 59 T3 (T2 review deferral): the panel's title face
+                    rides the heading-16 token step — the same face as the
+                    SectionCardTitle card titles, expressed through the
+                    --typo-* idiom instead of the 16px inherit. */}
+                <span className="font-semibold text-(length:--typo-heading-16-size) leading-(--typo-heading-16-line) tracking-(--typo-heading-16-tracking)">{tab.id}</span>
                 <Button type="button" variant="destructive" size="sm" onClick={() => onRemoveChain(tab.id)}>
                   {t(locale, "settings.remove")}
                 </Button>
@@ -1604,7 +1631,7 @@ function ChainsCard({
             the editors themselves render their save outcomes in-panel. */}
         <NoticeRegion notice={notice} />
       </CardContent>
-    </Card>
+    </SectionCard>
   );
 }
 
@@ -1664,9 +1691,9 @@ function SeatsCard({
   }
 
   return (
-    <Card>
+    <SectionCard tier="secondary">
       <CardHeader>
-        <CardTitle>{t(locale, "settings.seats")}</CardTitle>
+        <SectionCardTitle>{t(locale, "settings.seats")}</SectionCardTitle>
         <CardDescription>{t(locale, "settings.seatsCopy")}</CardDescription>
       </CardHeader>
       <CardContent>
@@ -1702,7 +1729,7 @@ function SeatsCard({
           <NoticeRegion notice={notice} />
         </form>
       </CardContent>
-    </Card>
+    </SectionCard>
   );
 }
 
@@ -1753,7 +1780,13 @@ export function DraftChainPanel({
   const [busy, setBusy] = useState(false);
   return (
     <div className="flex flex-col gap-3">
-      <label className="flex flex-col gap-1.5 text-sm font-medium">
+      {/* Plan 59 T3 (T2 review deferral): the draft panel's own visible face —
+          the name field is the panel's identity header, so it renders as a
+          compact header block (w-fit + w-64, the invite-input idiom) instead
+          of a full-width stretch. The named panels open [identity title] +
+          [editor]; the draft opens [identity field] + [editor] — one rhythm.
+          The controlled wiring below is the pinned AD-551 surface, untouched. */}
+      <label className="flex w-fit flex-col gap-1.5 text-sm font-medium">
         {t(locale, "settings.chainName")}
         <Input
           value={name}
@@ -1761,6 +1794,7 @@ export function DraftChainPanel({
           placeholder={t(locale, "settings.chainNamePlaceholder")}
           autoComplete="off"
           maxLength={64}
+          className="w-64"
         />
       </label>
       <ChainEditor
@@ -1871,7 +1905,17 @@ function ChainEditor({
           {chain.map((selector, index) => (
             <li key={`${selector}-${index}`} className="flex items-center justify-between gap-2 rounded-md border px-3 py-2">
               <span className="font-mono text-sm">{selector}</span>
-              <Button type="button" variant="destructive" size="sm" onClick={() => setChain(chain.filter((_, i) => i !== index))}>
+              {/* Plan 59 T3 (T2 review deferral): removing a selector edits
+                  the UNSAVED local list — recoverable by re-picking, no
+                  dialog, no server op — so it rides the AD-552 local-edit
+                  face (outline + sm, the discard idiom). The destructive red
+                  stays reserved for confirm-gated stored-data removals. */}
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                onClick={() => setChain(chain.filter((_, i) => i !== index))}
+              >
                 {t(locale, "settings.remove")}
               </Button>
             </li>
