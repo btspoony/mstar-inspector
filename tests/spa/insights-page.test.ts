@@ -12,10 +12,16 @@
  * localized date axis, role/aria), the empty faces (never an empty-axis
  * svg), and the bilingual copy; the plan-45 proportional-bar pin is
  * superseded in place.
- * Plan 60 T2: the page joins the v0.3 language — SectionCard tiers,
- * heading-24 title, spacing-8 rhythm, the plan-57 state trio, and the
- * zero-review EmptyState (AD-601's sanctioned presentation supersede);
- * the plan-36/49 URL↔filter pins stay byte-for-byte.
+ * Plan 60 T2/T3: the page joins the v0.3 language — SectionCard tiers,
+ * heading-24 title, spacing-8 rhythm, the plan-57 state trio — and this
+ * file carries the finalized AD-601 presentation-supersede ledger (T3.1).
+ * The ledger holds exactly TWO entries, both with covering pins here:
+ * (1) the plan-56 zero-review face → composed EmptyState (PM amendment in
+ * the plan file, 2026-09-10), and (2) the recurringFindings wrapper face →
+ * SectionCard tier="secondary" (PM-ratified T2 amendment, 2026-09-10 —
+ * content/list form untouched; a bare Card renders Tier-1 elevation inside
+ * the Tier-2 group). Everything else is retained zero-supersede; the
+ * plan-36/49 URL↔filter pins stay byte-for-byte.
  * No DOM runner — same source-scan contract as plan 29 SPA tests.
  */
 import { describe, expect, test } from "bun:test";
@@ -282,11 +288,11 @@ describe("records page chart empty faces (plan 56 T3 / AC2)", () => {
   // reviews_total 0 is the page-level empty: every stat card is suppressed.
   const ZERO_REVIEWS: InsightsSummary = { ...NO_CHART_DATA, reviews_total: 0 };
 
-  test("reviews_total 0 → composed EmptyState guidance, never an empty-axis chart (bilingual; AD-601 presentation supersede)", () => {
-    // AD-601's single sanctioned presentation supersede: the plan-56
-    // heading-card-only empty face became the plan-57 EmptyState (plan 60
-    // A4). The guarded regression faces still hold — readable composed
-    // copy, every stat card suppressed, no chart svg anywhere.
+  test("reviews_total 0 → composed EmptyState guidance, never an empty-axis chart (bilingual; AD-601 supersede #1)", () => {
+    // AD-601 presentation supersede #1 of 2 (ledger in the file header): the
+    // plan-56 heading-card-only empty face became the plan-57 EmptyState
+    // (plan 60 A4). The guarded regression faces still hold — readable
+    // composed copy, every stat card suppressed, no chart svg anywhere.
     for (const locale of ["en", "zh_CN"] as const) {
       const html = renderRecords(locale, ZERO_REVIEWS);
       expect(html).toContain(t(locale, "insights.emptyTitle"));
@@ -451,10 +457,15 @@ describe("records page copy (plan 36 T2 / AC9)", () => {
 });
 
 describe("records page on the v0.3 language (plan 60 T2, A2-A5)", () => {
-  test("stat sections ride the SectionCard tier system (AD-591 consumption)", () => {
+  test("stat sections ride the SectionCard tier system (AD-591 consumption; covers AD-601 supersede #2)", () => {
     expect(page).toContain('../components/SectionCard"');
     // Exactly one primary (the stats overview) and four secondary (severity,
     // category, trend, recurring) surfaces — no hand-assembled tier classes.
+    // The recurringFindings card's wrapper face → SectionCard tier=
+    // "secondary" is AD-601 presentation supersede #2 (PM-ratified T2 plan
+    // amendment, 2026-09-10): content, list form and copy untouched. This
+    // pin is its covering test — the 4× secondary count fails if the card
+    // reverts to a bare Card (Tier-1 elevation inside the Tier-2 group).
     expect(page.split('tier="primary"').length - 1).toBe(1);
     expect(page.split('tier="secondary"').length - 1).toBe(4);
     // The tier faces come from the wrapper, not page-level classNames.
