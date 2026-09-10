@@ -1,7 +1,7 @@
 ---
 module: dashboard / visual foundation (shadcn + Tailwind v4 on Worker-served Vite SPA)
 date: 2026-09-04
-last_updated: 2026-09-06
+last_updated: 2026-09-10
 problem_type: best_practice
 category: best-practices
 severity: medium
@@ -37,3 +37,12 @@ Any new dashboard surface, any new shadcn component need, any DESIGN.md token ch
 
 - `src/spa/styles/shadcn-theme.css` — bridge layer (17 vars spot-verified against tokens.css).
 - `tests/spa/shell.test.ts` — negative-regex locks for native controls; `home.test.ts` zero-native scan pattern.
+
+
+## v0.3 design-language additions (iteration 018, 2026-09-10)
+
+- **Token architecture (AD-573)**: semantic var names frozen; new tokens enter as additive namespaces (`--brand-*`/`--shadow-*`/`--duration-*`/`--ease-*`). Value changes sync across THREE sites — DESIGN.md frontmatter / tokens.css (both light branches byte-identical) / views.ts STYLE subset — with parity pins extended to the **reference level** (`--button-primary-bg: var(--brand-700)` in views.ts vs tokens), not just hex values (hex-only pins miss reference drift; plan-57 QC F-002).
+- **SectionCard two-tier idiom (AD-591)**: `src/spa/components/SectionCard.tsx` is the single-point tier idiom (`tier: "primary" | "secondary"` composing `ui/card.tsx`). Tier faces: primary = tinted `gray-alpha-500` border + `shadow-card`; secondary = `shadow-none border-border` (the `border-border` is REQUIRED — bare `border` + preflight renders currentColor full-strength text color; see ui-bugs/tailwind4-compiled-css-traps). Pages must not hand-assemble tier classNames (pinned).
+- **Radius two-tier (AD-574)**: `--rounded-sm` control step (8px) / `--rounded-md` container step (12px); `@theme inline` remaps `--radius-lg/xl` → container so copy-in cards land correctly; bridge `--radius-sm` remapped off `calc(-2px)` to `var(--rounded-sm)`.
+- **Copy-in supersede scope**: the restyled sensitive subset (button/card/input/table/skeleton/tabs/sidebar/select/dropdown-menu/dialog) is now "copy-then-locally-revised" — each carries a supersede header so a future `copy-shadcn-ui.ts` regen won't silently clobber; untouched components keep byte-identical discipline.
+- **Motion tokens**: `--duration-fast/base/slow` + `--ease-*` with a token-level 1ms reduced-motion fold; raw `duration-200/300/500`/`ease-linear` faces all swept to token consumers (plan 58 REQUIRED sweep completed).
