@@ -38,8 +38,8 @@
 
   --sidebar: var(--sidebar-bg);
   --sidebar-foreground: var(--sidebar-fg);
-  /* Brand re-point per the plan 57 T3 staged checklist; plan 58 may express
-     the sidebar active edge with the brand accent (DESIGN.md Sidebar). */
+  /* Brand re-point per the plan 57 T3 staged checklist; the sidebar active
+     tint derives through this bridge (plan 64 AD-641, DESIGN.md Sidebar). */
   --sidebar-primary: var(--brand-700);
   --sidebar-primary-foreground: var(--background-100);
   --sidebar-accent: var(--sidebar-active-bg);
