@@ -15,8 +15,10 @@
  *    AD-641 retires the plan-58 left edge line) and the navbar sits on the
  *    background-200 chrome token — zero raw hex in the shell sources.
  * 3. Sidebar hover hierarchy (plan 62 T1, AD-622): every menu-button hover
- *    face dims to the /40 accent tint + text brighten while the press /
- *    active / open fills stay full strength — hover always lighter than
+ *    face dims to the /40 accent tint + text brighten while the press fill
+ *    stays full strength (the open state has no dedicated fill face) and
+ *    the active face wears the plan-64 /12 brand tint (plan 64 AD-641) —
+ *    hover stays lighter than the full-strength press, hue apart from
  *    active.
  */
 import { describe, expect, test } from "bun:test";
@@ -117,8 +119,8 @@ describe("shell brand surfaces (plan 58 T1, A1/A2)", () => {
     expect(tintLine).not.toMatch(/var\(--brand-|#[0-9a-fA-F]{3,8}\b/);
     // The retired edge leaves no inset-shadow face in either sidebar source
     // and no ACTIVE_BRAND_EDGE compat layer behind.
-    expect(sources.sidebar).not.toContain("shadow-[inset_2px_0_0_0_var(--sidebar-primary)]");
-    expect(sidebar).not.toContain("shadow-[inset_2px_0_0_0_var(--sidebar-primary)]");
+    expect(sources.sidebar).not.toMatch(/inset_\d+px_0_0_0_var\(--sidebar-primary\)/);
+    expect(sidebar).not.toMatch(/inset_\d+px_0_0_0_var\(--sidebar-primary\)/);
     expect(sidebar).not.toContain("ACTIVE_BRAND_EDGE");
     // Trap-① discipline (knowledge ui-bugs/tailwind4-compiled-css-traps): the
     // named tint utility only compiles because the `@theme inline` block maps

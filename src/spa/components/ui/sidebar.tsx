@@ -477,9 +477,10 @@ function SidebarMenuItem({ className, ...props }: React.ComponentProps<"li">) {
 }
 
 // Plan 62 T1 (AD-622): hover = low-intensity sidebar-accent tint (/40) +
-// text/icon brighten — always lighter than the full-strength press/open
-// fills below, zero new tokens (design decision D4: no translate, no
-// stroke; the outline variant's hover ring retires with the old recipe).
+// text/icon brighten — always lighter than the full-strength press fill
+// below (the open state has no dedicated fill face), zero new tokens
+// (design decision D4: no translate, no stroke; the outline variant's
+// hover ring retires with the old recipe).
 // Plan 64 (AD-641): the active face wears a low-alpha brand tint instead
 // of the full-strength fill (bg-sidebar-primary/12; the plan-58 left edge
 // is retired) — hue separates active from the neutral hover.

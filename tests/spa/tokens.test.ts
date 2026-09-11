@@ -8,7 +8,7 @@
  * budget.
  *
  * Locked contract:
- *   - version 0.3.1 (0.3.0 = plan 57 T1 rebase; 0.3.1 = T2 font flip),
+ *   - version 0.3.2 (0.3.0 = plan 57 T1 rebase; 0.3.1 = T2 font flip),
  *     defaultTheme dark; the theme mechanism is the manual
  *     data-theme override (navbar toggle) with the prefers-color-scheme
  *     fallback — plan 41 T2 rewrites the frontmatter keys together with the
