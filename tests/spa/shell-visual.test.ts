@@ -10,8 +10,9 @@
  *    properties); only duration/easing moved to tokens. The tokens.css
  *    reduce fold (all durations → 1ms) covers every var consumer, so the
  *    faces need no per-component media query.
- * 2. Shell brand surfaces (A1/A2): the sidebar active edge consumes the
- *    sanctioned --sidebar-primary bridge and the navbar sits on the
+ * 2. Shell brand surfaces (A1/A2): the sidebar active fill wears the plan-64
+ *    brand tint through the sanctioned --sidebar-primary bridge (plan 64
+ *    AD-641 retires the plan-58 left edge line) and the navbar sits on the
  *    background-200 chrome token — zero raw hex in the shell sources.
  * 3. Sidebar hover hierarchy (plan 62 T1, AD-622): every menu-button hover
  *    face dims to the /40 accent tint + text brighten while the press /
@@ -102,14 +103,28 @@ describe("shell brand surfaces (plan 58 T1, A1/A2)", () => {
   const sidebar = readFileSync(join(spaRoot, "components/AppSidebar.tsx"), "utf8");
   const layout = readFileSync(join(spaRoot, "Layout.tsx"), "utf8");
 
-  test("sidebar active edge consumes the sanctioned --sidebar-primary bridge (brand stays off alert semantics)", () => {
-    const edgeLine = sidebar
-      .split("\n")
-      .find((line) => line.includes("ACTIVE_BRAND_EDGE ="));
-    expect(edgeLine).toBeDefined();
-    expect(edgeLine).toContain("data-[active=true]:shadow-[inset_2px_0_0_0_var(--sidebar-primary)]");
-    // The edge rides the bridge, not a raw palette var or hex value.
-    expect(edgeLine).not.toMatch(/var\(--brand-|#[0-9a-fA-F]{3,8}\b/);
+  test("sidebar active fill wears the plan-64 brand tint via the sanctioned --sidebar-primary bridge (brand stays off alert semantics)", () => {
+    // Plan 64 (AD-641) supersedes the plan-58 edge line: the active fill is
+    // the low-alpha brand tint on the menu-button variant string.
+    const tintLine = sources.sidebar
+      ?.split("\n")
+      .find((line) => line.includes("data-[active=true]:bg-sidebar-primary/12"));
+    expect(tintLine).toBeDefined();
+    expect(tintLine).toContain(
+      "data-[active=true]:bg-sidebar-primary/12 data-[active=true]:font-medium data-[active=true]:text-sidebar-accent-foreground",
+    );
+    // The tint rides the bridge, not a raw palette var or hex value.
+    expect(tintLine).not.toMatch(/var\(--brand-|#[0-9a-fA-F]{3,8}\b/);
+    // The retired edge leaves no inset-shadow face in either sidebar source
+    // and no ACTIVE_BRAND_EDGE compat layer behind.
+    expect(sources.sidebar).not.toContain("shadow-[inset_2px_0_0_0_var(--sidebar-primary)]");
+    expect(sidebar).not.toContain("shadow-[inset_2px_0_0_0_var(--sidebar-primary)]");
+    expect(sidebar).not.toContain("ACTIVE_BRAND_EDGE");
+    // Trap-① discipline (knowledge ui-bugs/tailwind4-compiled-css-traps): the
+    // named tint utility only compiles because the `@theme inline` block maps
+    // the key — pin the mapping layer, not the compiled hex.
+    const theme = readFileSync(join(spaRoot, "styles/shadcn-theme.css"), "utf8");
+    expect(theme).toMatch(/--color-sidebar-primary:\s*var\(--sidebar-primary\)/);
   });
 
   test("sidebar brand block is a typographic wordmark (no image/logo assets) on token classes", () => {
@@ -155,12 +170,14 @@ describe("sidebar hover hierarchy recipe (plan 62 T1, AD-622)", () => {
     expect(menuButtonBlock).not.toMatch(/hover:bg-sidebar-accent(?!\/)/);
   });
 
-  test("menu-button press/active faces keep their full-strength fill (AD-622 untouched list)", () => {
+  test("menu-button press face keeps its full-strength fill; the active face wears the plan-64 brand tint (AD-622 untouched list)", () => {
+    // AD-622's untouched list covers the press face; plan 64 (AD-641)
+    // supersedes the active-route face — text brighten + font-medium stay.
     expect(menuButtonBlock).toContain(
       "active:bg-sidebar-accent active:text-sidebar-accent-foreground",
     );
     expect(menuButtonBlock).toContain(
-      "data-[active=true]:bg-sidebar-accent data-[active=true]:font-medium data-[active=true]:text-sidebar-accent-foreground",
+      "data-[active=true]:bg-sidebar-primary/12 data-[active=true]:font-medium data-[active=true]:text-sidebar-accent-foreground",
     );
   });
 
