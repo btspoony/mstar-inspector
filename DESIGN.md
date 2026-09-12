@@ -1,7 +1,7 @@
 ---
-version: 0.3.2
+version: 0.3.3
 name: mstar-inspector Console
-description: "Bold Signal-Cyan ops-console design system for the mstar-inspector developer dashboard. Dense, decisive, state through color + copy; one confident cyan accent on cool zinc neutrals. Dark is the default theme; light follows prefers-color-scheme until the navbar theme toggle stores a manual choice (localStorage mstar.dashboard.theme, light|dark) — the stored choice wins over the OS. Supersedes the plan-29 lock (2026-09-04, user instruction, iteration 013). v0.3 (plan 57, AD-573) is a values-only rebase: existing token names are frozen; brand, motion, and elevation enter as additive namespaces. v0.3.1 (plan 57 T2, AD-572) flips the sans stack to self-hosted Geist Sans — unmodified full-latin woff2 binaries of geist@1.7.2 (sha256 pinned in the fonts.css header) with font-display: swap; zh text falls back to the system stack. v0.3.2 (plan 64, AD-641, 2026-09-11) retires the plan-58 sidebar brand accent edge — the sidebar active item wears a low-alpha brand tint (brand-700 at 12% through the --sidebar-primary shadcn bridge) with medium-weight text; hover keeps the plan-62 neutral accent tint."
+description: "Bold Signal-Cyan ops-console design system for the mstar-inspector developer dashboard. Dense, decisive, state through color + copy; one confident cyan accent on cool zinc neutrals. Dark is the default theme; light follows prefers-color-scheme until the navbar theme toggle stores a manual choice (localStorage mstar.dashboard.theme, light|dark) — the stored choice wins over the OS. Supersedes the plan-29 lock (2026-09-04, user instruction, iteration 013). v0.3 (plan 57, AD-573) is a values-only rebase: existing token names are frozen; brand, motion, and elevation enter as additive namespaces. v0.3.1 (plan 57 T2, AD-572) flips the sans stack to self-hosted Geist Sans — unmodified full-latin woff2 binaries of geist@1.7.2 (sha256 pinned in the fonts.css header) with font-display: swap; zh text falls back to the system stack. v0.3.2 (plan 64, AD-641, 2026-09-11) retires the plan-58 sidebar brand accent edge — the sidebar active item wears a low-alpha brand tint (brand-700 at 12% through the --sidebar-primary shadcn bridge) with medium-weight text; hover keeps the plan-62 neutral accent tint. v0.3.3 (plan 65, AD-653, 2026-09-12) adds the insights daily stacked-bar chart vocabulary: severity stacks keep the frozen 700-step semantic family (red/amber/gray), category stacks join teal/purple/pink with blue-700 staying the neutral unknown-slug tone and gray-700 the uncategorized fallback — Appendix A gains their dual-theme vs-card rows."
 
 # Runtime default = dark. Top-level colors: matches themes.dark.colors so
 # {colors.X} component refs resolve to the console default. Light values
@@ -1004,6 +1004,9 @@ non-text UI bar ≥3:1). Machine-pinned for the core pairs in
 | chart fill `amber-700` vs card (non-text) | 10.6:1 | 4.6:1 |
 | chart fill `red-700` vs card (non-text) | 6.4:1 | 5.9:1 |
 | chart fill `gray-700` vs card (non-text) | 5.9:1 | 6.5:1 |
+| chart fill `teal-700` vs card (non-text) | 9.5:1 | 3.4:1 |
+| chart fill `purple-700` vs card (non-text) | 6.7:1 | 4.9:1 |
+| chart fill `pink-700` vs card (non-text) | 6.7:1 | 4.2:1 |
 
 All pairs clear their bar in both themes. (Light `green-700` vs card is the
 v0.2-unchanged semantic value at 3.0:1 — passes the non-text bar exactly;
@@ -1012,7 +1015,26 @@ Insights nit-series fill (plan 60 T1 AD-601 recalibration: the red/amber/
 blue 700 values are v0.2-unchanged, so every chart series keeps the 700
 step — dark wears the bright value, light the deep — and the trend
 dual-series pair `blue-700` vs `amber-700` stays distinct at Δhue ≈ 169°
-dark / 184° light).
+dark / 184° light). The plan-65 `teal-700` row is the same light-side
+margin class (3.4:1 — passes the non-text bar; never used as text).
+
+Stacked chart presentation (plan 65, AD-652/653): the Insights severity
+and category cards are daily stacked bar time series on the same recharts
+2.15.4 discipline (fixed numeric size + fluid wrapper, `isAnimationActive`
+off, colors only through `.chart-fill-*` class rules — never presentation
+attributes, never raw hex). Severity stacks freeze the AD-601 semantic
+family (must-fix=red-700 / should-fix=amber-700 / nit=gray-700); category
+stacks map the known engine slugs DEBT=teal-700 / DOCS=purple-700 /
+SEC=pink-700 — Δhue 172°/270°/329° dark, 175°/271°/333° light, every
+adjacent pair ≥55°, red/amber left severity-owned — with `blue-700` as the
+neutral tone for unmapped slugs and `gray-700` as the uncategorized
+fallback (stacked last). Day (7/30d) and Monday-anchored week (90d)
+buckets both label as M/D · M月D日 per locale; zero-count buckets stay on
+the axis (time continuity). The legend is the HTML swatch row (plan-56
+face) — never recharts `<Legend>` — and the tooltip rides token-styled
+`contentStyle`/`labelStyle`/`itemStyle`; per-bucket totals read off the y
+ticks and exact series counts ride the tooltip, so the chart is never the
+numbers' only carrier.
 
 Brand-vs-semantic distinguishability (CIE76 ΔE, hue delta):
 

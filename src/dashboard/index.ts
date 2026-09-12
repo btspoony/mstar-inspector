@@ -2314,6 +2314,10 @@ dashboardApp.get("/api/insights/summary", async (c) => {
     findings_by_category: insights.findingsByCategory,
     verdict_distribution: insights.verdictDistribution,
     weekly_trend: insights.weeklyTrend,
+    // Plan 65 (AD-652): additive per-bucket findings distribution for the
+    // stacked charts. Existing fields are untouched — the only change on
+    // this face is the new key.
+    findings_distribution: insights.findingsDistribution,
     recurring_top: insights.recurringTop,
     repos: insights.repos,
   });
