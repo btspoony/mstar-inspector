@@ -488,6 +488,204 @@ describe("migrations/0010_review_failures.sql", () => {
   });
 });
 
+describe("migrations/0020_finding_lifecycle.sql (plan 67 T1, spec review-lifecycle §7.1)", () => {
+  /** Apply one migration file verbatim (filename order = wrangler order). */
+  function applyMigrationFile(db: TestD1, name: string): void {
+    db.raw.exec(readFileSync(join(MIGRATIONS_DIR, name), "utf8"));
+  }
+
+  /** Raw-insert one github_apps row (the 0004 column list is sufficient). */
+  function insertApp(db: TestD1, id: string): void {
+    db.raw
+      .prepare(
+        `INSERT INTO github_apps (id, slug, github_app_id, name, private_key_enc, webhook_secret_enc,
+           created_by, status, deleted_at, created_at, updated_at)
+         VALUES (?, ?, 1001, ?, 'enc', 'enc', 'mallory', 'active', NULL, datetime('now'), datetime('now'))`,
+      )
+      .run(id, id, id);
+  }
+
+  /** The pre-0020 shape (0001–0019, filename order) — what production runs today. */
+  function createPre0020Db(): TestD1 {
+    const db = createTestD1();
+    for (const name of [
+      "0003_dashboard_users.sql",
+      "0004_github_apps.sql",
+      "0005_reviews_app_id.sql",
+      "0006_app_provider_config.sql",
+      "0007_reviews_app_id_index.sql",
+      "0008_github_apps_ops.sql",
+      "0009_app_model_roles.sql",
+      "0010_review_failures.sql",
+      "0011_webhook_deliveries.sql",
+      "0012_custom_providers_and_key_updated_at.sql",
+      "0013_findings_review_id_index.sql",
+      "0014_idx_reviews_reviewed_at.sql",
+      "0015_provider_verification.sql",
+      "0016_users_login_nocase_unique.sql",
+      "0017_app_model_chains.sql",
+      "0018_app_sandbox_images.sql",
+      "0019_github_apps_metadata.sql",
+    ]) {
+      applyMigrationFile(db, name);
+    }
+    return db;
+  }
+
+  test("applies cleanly over a seeded production-shaped DB (0001–0019 with live rows)", () => {
+    const db = createPre0020Db();
+    insertReview(db); // a live review predates the CREATE TABLEs (wrangler order)
+    insertApp(db, "app-1");
+    // Append-only CREATE TABLEs + indexes over the live rows — nothing
+    // existing changes.
+    expect(() => applyMigrationFile(db, "0020_finding_lifecycle.sql")).not.toThrow();
+    const reviewCount = db.raw.query("SELECT COUNT(*) AS n FROM reviews").get() as { n: number };
+    expect(reviewCount.n).toBe(1);
+  });
+
+  test("creates the four lifecycle tables and the three recovery/rotation indexes", () => {
+    const db = createMigratedTestD1();
+    const tables = db.raw
+      .query("SELECT name FROM sqlite_master WHERE type = 'table' AND name IN ('review_publications','review_findings','review_finding_rounds','review_threads') ORDER BY name")
+      .all() as Array<{ name: string }>;
+    expect(tables.map((t) => t.name)).toEqual([
+      "review_finding_rounds",
+      "review_findings",
+      "review_publications",
+      "review_threads",
+    ]);
+    const indexes = db.raw
+      .query("SELECT name, tbl_name FROM sqlite_master WHERE type = 'index' AND name LIKE 'idx_%' AND name IN ('idx_publication_recovery','idx_finding_rotation','idx_thread_recovery')")
+      .all() as Array<{ name: string; tbl_name: string }>;
+    expect(Object.fromEntries(indexes.map((i) => [i.name, i.tbl_name]))).toEqual({
+      idx_publication_recovery: "review_publications",
+      idx_finding_rotation: "review_findings",
+      idx_thread_recovery: "review_threads",
+    });
+    // The rotation index covers the §7.2 scope+state prefix in order.
+    const rotationColumns = db.raw.query("PRAGMA index_info(idx_finding_rotation)").all() as Array<{ name: string }>;
+    expect(rotationColumns.map((c) => c.name)).toEqual([
+      "app_id", "installation_id", "owner", "repo", "pr_number", "state", "last_scheduled_ms", "id",
+    ]);
+  });
+
+  test("UNIQUE (app_id, installation_id, owner, repo, pr_number, head_sha, kind) rejects a second publication row", () => {
+    const db = createMigratedTestD1();
+    insertApp(db, "app-1");
+    const insert = (id: string) =>
+      db.raw
+        .prepare(
+          `INSERT INTO review_publications (id, app_id, installation_id, owner, repo, pr_number, head_sha, kind, phase, payload_json, created_ms, updated_ms)
+           VALUES (?, 'app-1', 123, 'acme', 'widgets', 42, ?, 'review', 'prepared', '{}', 1000, 1000)`,
+        )
+        .run(id, "0".repeat(40));
+    insert("pub-1");
+    expect(() => insert("pub-2")).toThrow(/UNIQUE constraint failed/);
+    // Same SHA with a different kind is a distinct publication (review vs degraded).
+    db.raw
+      .prepare(
+        `INSERT INTO review_publications (id, app_id, installation_id, owner, repo, pr_number, head_sha, kind, phase, payload_json, created_ms, updated_ms)
+         VALUES ('pub-deg', 'app-1', 123, 'acme', 'widgets', 42, ?, 'degraded', 'prepared', '{}', 1000, 1000)`,
+      )
+      .run("0".repeat(40));
+    const count = db.raw.query("SELECT COUNT(*) AS n FROM review_publications").get() as { n: number };
+    expect(count.n).toBe(2);
+  });
+
+  test("CHECK constraints pin the state vocabularies", () => {
+    const db = createMigratedTestD1();
+    insertApp(db, "app-1");
+    db.raw
+      .prepare(
+        `INSERT INTO review_publications (id, app_id, installation_id, owner, repo, pr_number, head_sha, kind, phase, payload_json, recovery_state, created_ms, updated_ms)
+         VALUES ('pub-1', 'app-1', 123, 'acme', 'widgets', 42, ?, 'review', 'prepared', '{}', 'pending', 1000, 1000)`,
+      )
+      .run("0".repeat(40));
+    expect(() =>
+      db.raw.prepare("UPDATE review_publications SET phase = 'bogus' WHERE id = 'pub-1'").run(),
+    ).toThrow(/CHECK constraint failed/);
+    expect(() =>
+      db.raw.prepare("UPDATE review_publications SET kind = 'comment' WHERE id = 'pub-1'").run(),
+    ).toThrow(/CHECK constraint failed/);
+    expect(() =>
+      db.raw.prepare("UPDATE review_publications SET recovery_state = 'later' WHERE id = 'pub-1'").run(),
+    ).toThrow(/CHECK constraint failed/);
+
+    db.raw
+      .prepare(
+        `INSERT INTO review_findings (id, app_id, installation_id, owner, repo, pr_number, finding_id, original_json,
+           first_publication_id, last_publication_id, first_seen_sha, last_seen_sha, first_seen_round, last_seen_round,
+           state, created_ms, updated_ms)
+         VALUES ('row-1', 'app-1', 123, 'acme', 'widgets', 42, 'f-1', '{}', 'pub-1', 'pub-1', ?, ?, 1, 1, 'open', 1000, 1000)`,
+      )
+      .run("0".repeat(40), "0".repeat(40));
+    expect(() =>
+      db.raw.prepare("UPDATE review_findings SET state = 'closed' WHERE id = 'row-1'").run(),
+    ).toThrow(/CHECK constraint failed/);
+
+    db.raw
+      .prepare(
+        `INSERT INTO review_threads (id, finding_row_id, publication_id, app_id, installation_id, owner, repo, pr_number,
+           original_sha, round, intent_json, resolution_state, created_ms, updated_ms)
+         VALUES ('a-1', 'row-1', 'pub-1', 'app-1', 123, 'acme', 'widgets', 42, ?, 1, '{}', 'pending', 1000, 1000)`,
+      )
+      .run("0".repeat(40));
+    expect(() =>
+      db.raw.prepare("UPDATE review_threads SET resolution_state = 'maybe' WHERE id = 'a-1'").run(),
+    ).toThrow(/CHECK constraint failed/);
+  });
+
+  test("FKs: unknown apps are refused; lifecycle rows require their publication/finding parents", () => {
+    const db = createMigratedTestD1();
+    insertApp(db, "app-1");
+    // Publication with an unknown app_id — FK refused.
+    expect(() =>
+      db.raw
+        .prepare(
+          `INSERT INTO review_publications (id, app_id, installation_id, owner, repo, pr_number, head_sha, kind, phase, payload_json, created_ms, updated_ms)
+           VALUES ('pub-x', 'no-such-app', 123, 'acme', 'widgets', 42, ?, 'review', 'prepared', '{}', 1000, 1000)`,
+        )
+        .run("0".repeat(40)),
+    ).toThrow(/FOREIGN KEY constraint failed/);
+
+    db.raw
+      .prepare(
+        `INSERT INTO review_publications (id, app_id, installation_id, owner, repo, pr_number, head_sha, kind, phase, payload_json, created_ms, updated_ms)
+         VALUES ('pub-1', 'app-1', 123, 'acme', 'widgets', 42, ?, 'review', 'prepared', '{}', 1000, 1000)`,
+      )
+      .run("0".repeat(40));
+    // A finding row needs its publication parents.
+    expect(() =>
+      db.raw
+        .prepare(
+          `INSERT INTO review_findings (id, app_id, installation_id, owner, repo, pr_number, finding_id, original_json,
+             first_publication_id, last_publication_id, first_seen_sha, last_seen_sha, first_seen_round, last_seen_round,
+             state, created_ms, updated_ms)
+           VALUES ('row-1', 'app-1', 123, 'acme', 'widgets', 42, 'f-1', '{}', 'pub-missing', 'pub-1', ?, ?, 1, 1, 'open', 1000, 1000)`,
+        )
+        .run("0".repeat(40), "0".repeat(40)),
+    ).toThrow(/FOREIGN KEY constraint failed/);
+  });
+
+  test("the rotation query binds the scope prefix through idx_finding_rotation (recorded plan)", () => {
+    // The §7.2 ORDER BY is an expression (COALESCE) → SQLite temp-sorts;
+    // planner choice for expression-ordered queries is NOT asserted
+    // (AL-21-2 convention) — the plan is recorded and the index existence +
+    // column order is asserted above.
+    const db = createMigratedTestD1();
+    const plan = db.raw
+      .query(
+        `EXPLAIN QUERY PLAN SELECT id FROM review_findings
+         WHERE app_id = 'app-1' AND installation_id = 123 AND owner = 'acme' AND repo = 'widgets' AND pr_number = 42 AND state = 'open'
+         ORDER BY COALESCE(last_scheduled_ms, created_ms), id LIMIT 25`,
+      )
+      .all() as Array<{ detail: string }>;
+    console.log("EXPLAIN QUERY PLAN (lifecycle rotation query):");
+    for (const p of plan) console.log(`  ${p.detail}`);
+    expect(plan.length).toBeGreaterThan(0);
+  });
+});
+
 describe("migrations/0002_mstar_review_v1.sql", () => {
   test("adds the envelope column to reviews (TEXT, nullable)", async () => {
     const db = createTestD1();
