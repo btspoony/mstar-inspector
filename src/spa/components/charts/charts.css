@@ -20,42 +20,39 @@
  * these class names).
  *
  * Series fills (svg `fill`) — the AD-601-frozen 700-step semantic family:
- * severity bars map must-fix=red-700 / should-fix=amber-700 / nit=gray-700
- * at the page layer (AD-561) and resolve through BarChart.tsx; the neutral
- * data-series tone blue-700 is the no-color default. TrendChart pins the
- * dual-series pair reviews=blue-700 / findings=amber-700 (Δhue-recorded
- * pair, DESIGN.md appendix A ≥3:1 vs both card faces). The trend legend
- * swatches are HTML spans, so they carry the background-color
- * .chart-swatch-* twins of the two series in use. A token value that has
- * no rule here must not be passed — BarChart falls back to the neutral
- * tone for unknown tokens.
+ * severity stacks map must-fix=red-700 / should-fix=amber-700 / nit=gray-700
+ * at the page layer (AD-561) and resolve through StackedBarChart.tsx (plan
+ * 65; the aggregate BarChart retired with that migration). Category stacks
+ * (AD-653) map DEBT=teal-700 / DOCS=purple-700 / SEC=pink-700, with
+ * blue-700 kept as the neutral data-series tone for unmapped slugs and
+ * gray-700 as the uncategorized fallback — the legend swatches are HTML
+ * spans, so each series in use carries the background-color
+ * .chart-swatch-* twin of its fill class. The page maps into this closed
+ * vocabulary only — a token with no rule here must not be passed.
  */
 .chart-fill-red-700 { fill: var(--red-700); }
 .chart-fill-amber-700 { fill: var(--amber-700); }
 .chart-fill-gray-700 { fill: var(--gray-700); }
 .chart-fill-blue-700 { fill: var(--blue-700); }
+.chart-fill-teal-700 { fill: var(--teal-700); }
+.chart-fill-purple-700 { fill: var(--purple-700); }
+.chart-fill-pink-700 { fill: var(--pink-700); }
 
 .chart-swatch-blue-700 { background-color: var(--blue-700); }
 .chart-swatch-amber-700 { background-color: var(--amber-700); }
+.chart-swatch-red-700 { background-color: var(--red-700); }
+.chart-swatch-gray-700 { background-color: var(--gray-700); }
+.chart-swatch-teal-700 { background-color: var(--teal-700); }
+.chart-swatch-purple-700 { background-color: var(--purple-700); }
+.chart-swatch-pink-700 { background-color: var(--pink-700); }
 
 /*
  * Axis chrome on tokens: hairline strokes and tick text replace the
- * recharts presentation-attribute defaults. Tick numerals and bar-end
- * counts render tabular figures per the DESIGN.md numerals rule; the
- * BarChart category axis (chart-category-axis) carries the v0.3 label face
- * (gray-1000, weight 500).
+ * recharts presentation-attribute defaults. Tick numerals render tabular
+ * figures per the DESIGN.md numerals rule.
  */
 .chart-frame .recharts-cartesian-axis-line { stroke: var(--gray-alpha-400); }
 .chart-frame .recharts-cartesian-axis-tick-value {
-  fill: var(--gray-900);
-  font-size: 10px;
-  font-variant-numeric: tabular-nums;
-}
-.chart-frame .chart-category-axis .recharts-cartesian-axis-tick-value {
-  fill: var(--gray-1000);
-  font-weight: 500;
-}
-.chart-frame .chart-value-label {
   fill: var(--gray-900);
   font-size: 10px;
   font-variant-numeric: tabular-nums;

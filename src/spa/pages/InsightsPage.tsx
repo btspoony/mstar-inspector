@@ -22,10 +22,11 @@ import {
   parseInsightsSearch,
   searchHref,
   verdictLine,
+  type FindingsDistributionBucket,
   type InsightsSearch,
   type InsightsSummary,
 } from "./data";
-import { BarChart, type BarChartItem } from "@/components/charts/BarChart";
+import { StackedBarChart, type StackedSeries } from "@/components/charts/StackedBarChart";
 import { TrendChart } from "@/components/charts/TrendChart";
 
 /**
@@ -51,8 +52,13 @@ function insightsSearchFromLocation(): InsightsSearch {
  * popstate re-derives the filter from the location (see the listener below);
  * in-page edits keep the reverse direction via commitSearch.
  * Plan 56 T2: the three stat sections (severity / category / weekly trend)
- * render as the hand-rolled SVG charts from components/charts; the
- * recurring-findings card stays a list.
+ * render as charts from components/charts. Plan 65 T2 (AD-652/653): the
+ * severity and category cards are daily stacked bar time series —
+ * x = day/week buckets from the additive `findings_distribution` API
+ * field, one stacked `<Bar>` per closed-vocabulary series (severity
+ * semantic family frozen; AD-653 category palette below) — the aggregate
+ * BarChart retired with this migration; the weekly trend card stays a
+ * grouped week-bucket chart and the recurring-findings card a list.
  * Plan 60 T2 (A2-A5): the page joins the v0.3 language — heading-24 page
  * title, spacing-8 group rhythm, SectionCard tiers (overview = primary
  * surface, stat cards = secondary), and the plan-57 state trio
@@ -211,17 +217,104 @@ export function InsightsPage({ boot }: { boot: SpaBoot }) {
 }
 
 /**
- * AD-561 (plan 56): severity → DESIGN.md token series fills, applied as
- * `var(--token)` references (zero raw hex; dark/light both resolve through
- * the :root[data-theme] var chain). Unknown severity keys (future
- * vocabulary) fall through to the BarChart neutral series tone — the label
- * and count still render, color is never the only carrier.
+ * AD-561/AD-601 (plan 65): severity → DESIGN.md token series fills as
+ * charts.css fill classes consumed by StackedBarChart — the AD-601-frozen
+ * semantic family is unchanged (must-fix=red-700 / should-fix=amber-700 /
+ * nit=gray-700); colors ride class rules into the token layer (never
+ * presentation attributes, never raw hex; dark/light both resolve through
+ * the :root[data-theme] var chain). The vocabulary is this fixed map — the
+ * plan-65 API zero-fills exactly these three merge-class keys per bucket,
+ * so unknown severity keys never enter the series. Labels stay the raw
+ * engine slugs — the aggregate card's visible face carried them unlocalized
+ * already (same product ruling as the category slugs below).
  */
 const SEVERITY_BAR_COLORS: Record<string, string> = {
-  "must-fix": "var(--red-700)",
-  "should-fix": "var(--amber-700)",
-  nit: "var(--gray-700)",
+  "must-fix": "chart-fill-red-700",
+  "should-fix": "chart-fill-amber-700",
+  nit: "chart-fill-gray-700",
 };
+
+/** The fixed severity stack, bottom → top: must-fix, should-fix, nit. */
+const SEVERITY_SERIES: StackedSeries[] = Object.entries(SEVERITY_BAR_COLORS).map(([key, fillClass]) => ({
+  key,
+  label: key,
+  fillClass,
+}));
+
+/**
+ * AD-653 category palette: the known engine slugs take Δhue-distinct
+ * families from the 700-step {teal, purple, pink} candidates (red/amber
+ * stay severity-owned; blue-700 keeps its neutral data-series duty and is
+ * deliberately NOT assigned to a single known category). Alphabetically
+ * stable assignment, recorded per plan 65: DEBT=teal-700, DOCS=purple-700,
+ * SEC=pink-700 (dark Δhue 172°/270°/329°; light 175°/271°/333° — every
+ * adjacent pair ≥55°). Slugs outside this map (long-tail vocabulary; the
+ * >8 top-N trigger stays a product escalation) ride the neutral blue-700
+ * tone; the "uncategorized" fallback (NULL/unknown, plan 65 API) is the
+ * gray-700 series, stacked last.
+ */
+const CATEGORY_FILL_CLASSES: Record<string, string> = {
+  DEBT: "chart-fill-teal-700",
+  DOCS: "chart-fill-purple-700",
+  SEC: "chart-fill-pink-700",
+};
+/** Neutral data-series default (the retired BarChart's fallback tone). */
+const CATEGORY_TAIL_FILL_CLASS = "chart-fill-blue-700";
+/** Store-merged fallback key for NULL/unknown categories (plan 65 API). */
+const UNCATEGORIZED_KEY = "uncategorized";
+const UNCATEGORIZED_FILL_CLASS = "chart-fill-gray-700";
+
+/**
+ * Category series from the window-level union key set of the
+ * `findings_distribution` grids — the legend lists exactly the categories
+ * present somewhere in the window, in stack order: known slugs (palette
+ * order), remaining slugs (payload ASC order) on the neutral tone, the
+ * gray fallback last (topmost segment).
+ */
+function categorySeries(buckets: readonly FindingsDistributionBucket[], locale: SpaBoot["locale"]): StackedSeries[] {
+  const observed = new Set<string>();
+  for (const bucket of buckets) {
+    for (const key of Object.keys(bucket.by_category)) observed.add(key);
+  }
+  const series: StackedSeries[] = [];
+  for (const [key, fillClass] of Object.entries(CATEGORY_FILL_CLASSES)) {
+    if (observed.has(key)) series.push({ key, label: key, fillClass });
+  }
+  for (const key of observed) {
+    // "" never labels a series (schema-permitted, plan 56 QC F-004) — it
+    // merges into the fallback key below.
+    if (key === "" || key === UNCATEGORIZED_KEY || key in CATEGORY_FILL_CLASSES) continue;
+    series.push({ key, label: key, fillClass: CATEGORY_TAIL_FILL_CLASS });
+  }
+  if (observed.has(UNCATEGORIZED_KEY) || observed.has("")) {
+    series.push({
+      key: UNCATEGORIZED_KEY,
+      label: t(locale, "insights.uncategorized"),
+      fillClass: UNCATEGORIZED_FILL_CLASS,
+    });
+  }
+  return series;
+}
+
+/**
+ * The chart buckets: the payload grid with the schema-permitted ""
+ * category key merged into "uncategorized" per bucket (counts summed) so
+ * the gray fallback series reads the honest total — the same plan-56
+ * QC F-004 merge the aggregate card performed, now one layer down.
+ */
+function chartBuckets(buckets: readonly FindingsDistributionBucket[]): FindingsDistributionBucket[] {
+  return buckets.map((bucket) => {
+    if (bucket.by_category[""] === undefined) return bucket;
+    const { "": emptyCount, ...rest } = bucket.by_category;
+    return {
+      ...bucket,
+      by_category: {
+        ...rest,
+        [UNCATEGORIZED_KEY]: (bucket.by_category[UNCATEGORIZED_KEY] ?? 0) + (emptyCount ?? 0),
+      },
+    };
+  });
+}
 
 /**
  * Exported for the SSR pins (plan 53 AppInfoCard idiom): pure `t()` + data
@@ -247,30 +340,6 @@ export function InsightsRecordsView({ locale, data }: { locale: SpaBoot["locale"
       count: trendTotals.findings,
     }),
   });
-  // Plan 56 fix round 2 (PR 36 bugbot): the insights query groups NULL and
-  // "" categories as separate rows, and both coalesce to the uncategorized
-  // key below — per-row mapping emitted two identically keyed/labeled bars
-  // (duplicate React keys, split counts). Aggregate by the coalesced key
-  // first: one bar per key, counts summed, first-seen order preserved (Map
-  // insertion order = the API row order). The falsy (not nullish) check
-  // stays: "" is schema-permitted (review/schema.ts) and persists — same
-  // face as NULL (plan 56 QC F-004).
-  const categoryItems = [
-    ...data.findings_by_category.reduce((merged, row) => {
-      const key = row.category ? row.category : "uncategorized";
-      const bar = merged.get(key);
-      if (bar) {
-        bar.value += row.count;
-      } else {
-        merged.set(key, {
-          key,
-          label: row.category ? row.category : t(locale, "insights.uncategorized"),
-          value: row.count,
-        });
-      }
-      return merged;
-    }, new Map<string, BarChartItem>()).values(),
-  ];
 
   return (
     <>
@@ -309,14 +378,11 @@ export function InsightsRecordsView({ locale, data }: { locale: SpaBoot["locale"
                 {data.findings_by_severity.length === 0 ? (
                   <p className="text-sm text-muted-foreground">{t(locale, "insights.noFindings")}</p>
                 ) : (
-                  <BarChart
+                  <StackedBarChart
                     ariaLabel={t(locale, "insights.findingsBySeverity")}
-                    items={data.findings_by_severity.map((row) => ({
-                      key: row.severity,
-                      label: row.severity,
-                      value: row.count,
-                      color: SEVERITY_BAR_COLORS[row.severity],
-                    }))}
+                    locale={locale}
+                    buckets={data.findings_distribution}
+                    series={SEVERITY_SERIES}
                   />
                 )}
               </CardContent>
@@ -329,9 +395,11 @@ export function InsightsRecordsView({ locale, data }: { locale: SpaBoot["locale"
                 {data.findings_by_category.length === 0 ? (
                   <p className="text-sm text-muted-foreground">{t(locale, "insights.noFindings")}</p>
                 ) : (
-                  <BarChart
+                  <StackedBarChart
                     ariaLabel={t(locale, "insights.findingsByCategory")}
-                    items={categoryItems}
+                    locale={locale}
+                    buckets={chartBuckets(data.findings_distribution)}
+                    series={categorySeries(data.findings_distribution, locale)}
                   />
                 )}
               </CardContent>

@@ -75,6 +75,17 @@ const RECORDS: InsightsSummary = {
     { week_start: "2026-08-17", reviews: 1, findings: 2 },
     { week_start: "2026-08-24", reviews: 2, findings: 4 },
   ],
+  // Plan 65 B3 made the field required (compile fix only — the stale
+  // aggregate-chart face pins above are re-stated by Task 3's stacked
+  // pins). The single day bucket mirrors the aggregate counts.
+  findings_distribution: [
+    {
+      bucket_start: "2026-08-17",
+      granularity: "day",
+      by_severity: { "must-fix": 7, "should-fix": 5, nit: 3 },
+      by_category: { logic: 9, uncategorized: 6 },
+    },
+  ],
   recurring_top: [],
   repos: [],
 };
@@ -296,6 +307,7 @@ describe("records page chart empty faces (plan 56 T3 / AC2)", () => {
     findings_by_category: [],
     verdict_distribution: [{ verdict: "comment", count: 3 }],
     weekly_trend: [],
+    findings_distribution: [],
     recurring_top: [],
     repos: [],
   };
@@ -396,6 +408,7 @@ describe("records page helpers (rehomed plan 30 T3 + plan 36 T1 pins)", () => {
       { week_start: "2026-08-17", reviews: 1, findings: 0 },
       { week_start: "2026-08-24", reviews: 3, findings: 4 },
     ],
+    findings_distribution: [],
     recurring_top: [],
     repos: [],
   };
