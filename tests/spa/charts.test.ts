@@ -21,6 +21,13 @@
  * on the axis (time continuity, AC-C), and the day/week label face. The
  * severity/category page faces ride the InsightsPage pins in
  * insights-page.test.ts.
+ * Plan 65 QC fix-1: the plan-63 pins the BarChart retirement dropped
+ * restate on the stacked face — the charts.css token-binding pin (every
+ * live fill class / swatch twin has its token rule; the axis text faces),
+ * the hostile-label SSR escape pin (legend + tooltip name + tick faces),
+ * plus the tooltip token-styling pin (contentStyle/labelStyle SSR face,
+ * itemStyle source-pinned) and the >8-bucket thinning twin of the
+ * TrendChart pin.
  *
  * The recharts-internal class names pinned below (recharts-rectangle,
  * recharts-cartesian-axis-tick-value) couple to recharts 2.15.4: a
@@ -267,6 +274,103 @@ describe("StackedBarChart SSR (plan 65 B8, stacked face)", () => {
     expect(zh).not.toContain("8/17");
   });
 
+  test("more than 8 buckets thin to every-other date labels; 8 or fewer keep every label", () => {
+    // The StackedBarChart twin of the TrendChart >8-weeks pin above (the
+    // component docblock promises "the TrendChart semantics" for
+    // interval={data.length > 8 ? 1 : 0}): a 90d window renders 13-14 week
+    // buckets and a 30d window 31 day buckets — both thin.
+    const days = ["08-10", "08-11", "08-12", "08-13", "08-14", "08-15", "08-16", "08-17", "08-18", "08-19"];
+    const bucket = (bucket_start: string): DistributionBucket => ({
+      bucket_start,
+      granularity: "day",
+      by_severity: { "must-fix": 1, "should-fix": 0, nit: 0 },
+      by_category: {},
+    });
+    const dense = stackedChart(days.map((day) => bucket(`2026-${day}`)), severitySeries);
+    // Even indices labeled (8/10 .. 8/18); odd days dropped.
+    expect(dense).toContain("8/10");
+    expect(dense).toContain("8/18");
+    expect(dense).not.toContain("8/11");
+    expect(dense).not.toContain("8/19");
+    // Exactly 8 buckets (the threshold) keep every label — including the
+    // odd-index days thinning would drop.
+    const full = stackedChart(days.slice(0, 8).map((day) => bucket(`2026-${day}`)), severitySeries);
+    expect(full).toContain("8/10");
+    expect(full).toContain("8/11");
+    expect(full).toContain("8/13");
+    expect(full).toContain("8/17");
+  });
+
+  test("a hostile category label renders as escaped text on every label surface (legend + tooltip name)", () => {
+    // XSS pin (plan-63 qc2-S-3, restated for plan 65): category labels are
+    // open-set wire strings (review/schema.ts) that travel MORE surfaces
+    // now — the HTML legend text and the tooltip series name — plus the
+    // axis tick face via a hostile bucket_start (next pin). All travel the
+    // React text/attribute path: hostile markup surfaces escaped, never a
+    // raw <img>/<script> element in the chart output.
+    const hostileSeries: StackedSeries[] = [
+      { key: "<img src=x>", label: "<img src=x>", fillClass: "chart-fill-blue-700" },
+      { key: "<script>alert(1)</script>", label: "<script>alert(1)</script>", fillClass: "chart-fill-teal-700" },
+    ];
+    const hostileBuckets: DistributionBucket[] = [
+      {
+        bucket_start: "2026-08-17",
+        granularity: "day",
+        by_severity: {},
+        by_category: { "<img src=x>": 2, "<script>alert(1)</script>": 5 },
+      },
+    ];
+    const html = stackedChart(hostileBuckets, hostileSeries);
+    // The legend label span renders the escaped text…
+    expect(html).toContain(">&lt;img src=x&gt;</span>");
+    expect(html).toContain("&lt;script&gt;alert(1)&lt;/script&gt;");
+    // …and the tooltip series name attribute (the Bar's name prop, the
+    // pinned hover-face carrier) is attribute-escaped, not raw.
+    expect(html).toContain('name="&lt;img src=x&gt;"');
+    // No raw element from either surface.
+    expect(html).not.toContain("<img");
+    expect(html).not.toContain("<script");
+  });
+
+  test("a hostile bucket_start renders as escaped tick text — the non-ISO fallback stays a React text node", () => {
+    // formatBucketDateLabel regex-accepts only ISO dates and falls back to
+    // the raw string for anything else — the fallback must stay a React
+    // text node (escaped), never raw markup on the axis face.
+    const html = stackedChart(
+      [
+        {
+          bucket_start: "<script>alert(1)</script>",
+          granularity: "day",
+          by_severity: { "must-fix": 2, "should-fix": 0, nit: 0 },
+          by_category: {},
+        },
+      ],
+      severitySeries,
+    );
+    expect(html).toContain("&lt;script&gt;alert(1)&lt;/script&gt;");
+    expect(html).not.toContain("<script");
+  });
+
+  test("the tooltip is token-styled: contentStyle/labelStyle ride the SSR face, itemStyle is source-pinned", () => {
+    // Plan component ruling (BarChart.tsx precedent): the recharts default
+    // tooltip must be re-faced onto tokens — itemStyle is MANDATORY
+    // (recharts' default list text is unreadable on the dark card).
+    // contentStyle/labelStyle merge into the statically rendered wrapper
+    // (recharts-internal class names — the file-header 2.15.4 coupling
+    // caveat applies); the item list only renders on hover, so itemStyle
+    // is pinned at the source level, its strongest statically-reachable
+    // layer.
+    const html = stackedChart(severityBuckets, severitySeries);
+    expect(html).toContain("recharts-default-tooltip");
+    const tooltip = html.slice(html.indexOf("recharts-default-tooltip"));
+    expect(tooltip).toContain("background-color:var(--card)");
+    expect(tooltip).toContain("border:1px solid var(--border)");
+    expect(tooltip).toContain("border-radius:6px");
+    expect(tooltip).toContain('class="recharts-tooltip-label" style="margin:0;color:var(--gray-1000);font-weight:500"');
+    const source = readFileSync(join(import.meta.dir, "../../src/spa/components/charts/StackedBarChart.tsx"), "utf8");
+    expect(source).toContain('itemStyle={{ color: "var(--gray-900)" }}');
+  });
+
   test("empty buckets or empty series render null — the page owns the readable empty state", () => {
     expect(stackedChart([], severitySeries)).toBe("");
     expect(stackedChart(severityBuckets, [])).toBe("");
@@ -279,5 +383,28 @@ describe("chart sources keep the no-raw-hex token discipline (plan 63 global con
       const source = readFileSync(join(import.meta.dir, `../../src/spa/components/charts/${file}`), "utf8");
       expect(source, file).not.toMatch(/#[0-9a-fA-F]{3,8}\b/);
     }
+  });
+});
+
+describe("token fills and text faces live as class rules in charts.css (plan-63 B3 pin, restated plan 65)", () => {
+  test("every live fill class and swatch twin binds to a token rule in charts.css; the axis faces exist", () => {
+    // Source-binding pin (restates the plan-63 BarChart-era pin the
+    // stacked migration retired with its describe block): the SSR pins
+    // above lock the rendered class ATTRIBUTES, which still pass if a fill
+    // RULE is deleted from charts.css — segments would silently fall to
+    // recharts' default black while the legend swatch twin keeps its
+    // token color. The closed fill vocabulary (charts.css: the page maps
+    // into this set only) is asserted rule-by-rule.
+    const css = readFileSync(join(import.meta.dir, "../../src/spa/components/charts/charts.css"), "utf8");
+    for (const family of ["red", "amber", "gray", "blue", "teal", "purple", "pink"]) {
+      expect(css, `chart-fill-${family}-700`).toContain(`.chart-fill-${family}-700 { fill: var(--${family}-700); }`);
+      expect(css, `chart-swatch-${family}-700`).toContain(
+        `.chart-swatch-${family}-700 { background-color: var(--${family}-700); }`,
+      );
+    }
+    // The v0.3 chrome faces: tick text renders tabular figures (DESIGN.md
+    // numerals rule) and the legend label carries the label-face weight.
+    expect(css).toContain("font-variant-numeric: tabular-nums");
+    expect(css).toContain("font-weight: 500");
   });
 });

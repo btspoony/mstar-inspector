@@ -367,6 +367,13 @@ export async function createInsightsStore(db: InsightsD1, opts: InsightsWindow =
   );
   for (const row of distributionSeverities.results) {
     const bucket = distributionBuckets.get(row.bucket_start)!;
+    // Vocab coupling (plan 65 qc fix-1): a future severity vocabulary must
+    // extend DISTRIBUTION_SEVERITY_KEYS (here), the page SEVERITY_SERIES
+    // (InsightsPage.tsx), and the wire-guard docblock (spa/pages/data.ts)
+    // together — this accumulation would otherwise grow keys the page's
+    // closed series silently ignore. Unreachable today: mergeClass is
+    // z.enum-locked at ingest (review/schema.ts) and the era gate excludes
+    // non-v1 rows.
     bucket.by_severity[row.severity] = (bucket.by_severity[row.severity] ?? 0) + row.count;
   }
   for (const row of distributionCategories.results) {

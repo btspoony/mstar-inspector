@@ -65,6 +65,9 @@ function insightsSearchFromLocation(): InsightsSearch {
  * (PageSkeleton on the initial load, ErrorState with retry, EmptyState for
  * the zero-review window). Filter logic and the URL↔filter pins are
  * untouched.
+ * Plan 65 QC fix-1: legend entries render only for series with findings in
+ * the window (zero-count series drop from the legend — legend-only; every
+ * bucket stays on the axis per the time-continuity constraint).
  * Plan 60 PR fix (PR 41 bugbot): a filter refetch over retained data
  * renders a slim polite busy hint below the toolbar instead of a blank
  * main area — the skeleton stays initial-load-only and the toolbar never
@@ -227,8 +230,10 @@ export function InsightsPage({ boot }: { boot: SpaBoot }) {
  * so unknown severity keys never enter the series. Labels stay the raw
  * engine slugs — the aggregate card's visible face carried them unlocalized
  * already (same product ruling as the category slugs below).
+ * Exported for the SSR pins (plan 53 AppInfoCard idiom) — the
+ * severity/category disjointness pin reads this vocabulary.
  */
-const SEVERITY_BAR_COLORS: Record<string, string> = {
+export const SEVERITY_BAR_COLORS: Record<string, string> = {
   "must-fix": "chart-fill-red-700",
   "should-fix": "chart-fill-amber-700",
   nit: "chart-fill-gray-700",
@@ -251,9 +256,11 @@ const SEVERITY_SERIES: StackedSeries[] = Object.entries(SEVERITY_BAR_COLORS).map
  * adjacent pair ≥55°). Slugs outside this map (long-tail vocabulary; the
  * >8 top-N trigger stays a product escalation) ride the neutral blue-700
  * tone; the "uncategorized" fallback (NULL/unknown, plan 65 API) is the
- * gray-700 series, stacked last.
+ * gray-700 series, stacked last. Exported for the SSR pins (plan 53
+ * AppInfoCard idiom) — the severity/category disjointness pin reads this
+ * vocabulary alongside SEVERITY_BAR_COLORS.
  */
-const CATEGORY_FILL_CLASSES: Record<string, string> = {
+export const CATEGORY_FILL_CLASSES: Record<string, string> = {
   DEBT: "chart-fill-teal-700",
   DOCS: "chart-fill-purple-700",
   SEC: "chart-fill-pink-700",
@@ -261,7 +268,7 @@ const CATEGORY_FILL_CLASSES: Record<string, string> = {
 /** Neutral data-series default (the retired BarChart's fallback tone). */
 const CATEGORY_TAIL_FILL_CLASS = "chart-fill-blue-700";
 /** Store-merged fallback key for NULL/unknown categories (plan 65 API). */
-const UNCATEGORIZED_KEY = "uncategorized";
+export const UNCATEGORIZED_KEY = "uncategorized";
 const UNCATEGORIZED_FILL_CLASS = "chart-fill-gray-700";
 
 /**
@@ -269,7 +276,10 @@ const UNCATEGORIZED_FILL_CLASS = "chart-fill-gray-700";
  * `findings_distribution` grids — the legend lists exactly the categories
  * present somewhere in the window, in stack order: known slugs (palette
  * order), remaining slugs (payload ASC order) on the neutral tone, the
- * gray fallback last (topmost segment).
+ * gray fallback last (topmost segment). Key presence is the derivation
+ * face; seriesWithFindings applies the zero-count legend filter on top
+ * (the store's always-present "uncategorized" key can hold a window total
+ * of 0).
  */
 function categorySeries(buckets: readonly FindingsDistributionBucket[], locale: SpaBoot["locale"]): StackedSeries[] {
   const observed = new Set<string>();
@@ -317,6 +327,27 @@ function chartBuckets(buckets: readonly FindingsDistributionBucket[]): FindingsD
 }
 
 /**
+ * Plan 65 QC fix-1 (QC F-004 ×3 seats): legend entries only for series
+ * with findings in the window (AD-653 「图例仅列窗口内出现分类」) — a series
+ * whose window total is 0 (e.g. the store's always-present "uncategorized"
+ * grid key, AD-652 恒在) drops from the legend instead of rendering a
+ * zero-count swatch. Legend-only filtering: every bucket stays on the
+ * axis/stack (time continuity, AC-C) and zero-height segments render no
+ * geometry either way. Reads the component's grid lookup
+ * (`by_severity[key] ?? by_category[key] ?? 0`) over the MERGED buckets
+ * (chartBuckets owns the "" merge) so the filter sees exactly what the
+ * chart would render.
+ */
+function seriesWithFindings(
+  series: readonly StackedSeries[],
+  buckets: readonly FindingsDistributionBucket[],
+): StackedSeries[] {
+  return series.filter((s) =>
+    buckets.some((bucket) => (bucket.by_severity[s.key] ?? bucket.by_category[s.key] ?? 0) > 0),
+  );
+}
+
+/**
  * Exported for the SSR pins (plan 53 AppInfoCard idiom): pure `t()` + data
  * rendering, no window/router access, so tests can static-render it.
  */
@@ -340,6 +371,10 @@ export function InsightsRecordsView({ locale, data }: { locale: SpaBoot["locale"
       count: trendTotals.findings,
     }),
   });
+  // The merged distribution grid both cards consume ("" merged into the
+  // uncategorized key); the zero-count legend filter reads the same grid
+  // the charts render.
+  const distribution = chartBuckets(data.findings_distribution);
 
   return (
     <>
@@ -381,8 +416,8 @@ export function InsightsRecordsView({ locale, data }: { locale: SpaBoot["locale"
                   <StackedBarChart
                     ariaLabel={t(locale, "insights.findingsBySeverity")}
                     locale={locale}
-                    buckets={data.findings_distribution}
-                    series={SEVERITY_SERIES}
+                    buckets={distribution}
+                    series={seriesWithFindings(SEVERITY_SERIES, distribution)}
                   />
                 )}
               </CardContent>
@@ -398,8 +433,8 @@ export function InsightsRecordsView({ locale, data }: { locale: SpaBoot["locale"
                   <StackedBarChart
                     ariaLabel={t(locale, "insights.findingsByCategory")}
                     locale={locale}
-                    buckets={chartBuckets(data.findings_distribution)}
-                    series={categorySeries(data.findings_distribution, locale)}
+                    buckets={distribution}
+                    series={seriesWithFindings(categorySeries(data.findings_distribution, locale), distribution)}
                   />
                 )}
               </CardContent>

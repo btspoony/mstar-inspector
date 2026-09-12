@@ -31,6 +31,10 @@
  * positively. Per-bar LabelList counts are retired by design: stacked
  * totals read off the y ticks and the tooltip (plan Global Constraint).
  * No DOM runner — same source-scan contract as plan 29 SPA tests.
+ * Plan 65 QC fix-1: the page-layer constants face gains the
+ * severity/category disjointness pin (the component's grid-read
+ * invariant), and the zero-count series drop from the legends
+ * (AD-653 legend face; the axis keeps every bucket).
  */
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
@@ -38,7 +42,12 @@ import { join } from "node:path";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { t } from "../../src/i18n";
-import { InsightsRecordsView } from "../../src/spa/pages/InsightsPage";
+import {
+  CATEGORY_FILL_CLASSES,
+  InsightsRecordsView,
+  SEVERITY_BAR_COLORS,
+  UNCATEGORIZED_KEY,
+} from "../../src/spa/pages/InsightsPage";
 import {
   INSIGHTS_WINDOWS,
   insightsWindow,
@@ -166,6 +175,22 @@ describe("records page assembly (plan 36 T2)", () => {
     expect(page).not.toContain('name="repo"');
     expect(page).not.toContain("filterRepoPlaceholder");
     expect(page).not.toContain("insights.apply");
+  });
+
+  test("severity and category series vocabularies are disjoint (component grid-read invariant)", () => {
+    // Plan 65 QC fix-1 (seat-3): StackedBarChart reads
+    // `by_severity[key] ?? by_category[key] ?? 0` on the invariant that a
+    // key lives in exactly one grid — a category slug equal to a
+    // merge-class would silently resolve that series to the severity
+    // count. Severity keys are schema-frozen (review/schema.ts mergeClass
+    // enum); category slugs are an open set, so the mapped vocabulary is
+    // pinned constants-level: this fails loudly if a future category
+    // mapping collides. The component's grid-read docblock points here.
+    const severityKeys = Object.keys(SEVERITY_BAR_COLORS);
+    const categoryKeys = [...Object.keys(CATEGORY_FILL_CLASSES), UNCATEGORIZED_KEY];
+    for (const key of categoryKeys) {
+      expect(severityKeys, `category series key collides with the severity vocabulary: ${key}`).not.toContain(key);
+    }
   });
 
   test("cards and typography are shadcn/Tailwind token driven (no raw hex)", () => {
@@ -339,6 +364,46 @@ describe("records page assembly (plan 36 T2)", () => {
     // First-seen order holds: logic leads, the merged series follows it.
     expect(categoryCard.indexOf(">logic</span>")).toBeGreaterThan(-1);
     expect(categoryCard.indexOf(`>${label}</span>`)).toBeGreaterThan(categoryCard.indexOf(">logic</span>"));
+  });
+
+  test("zero-count series drop from the legends; the axis keeps every bucket (AD-653 legend face)", () => {
+    // Plan 65 QC fix-1 (QC F-004 ×3 seats): legend entries render only for
+    // series with findings in the window — the store's always-present
+    // "uncategorized" grid key (AD-652 恒在) is NOT an always-present
+    // legend entry, and a zero-count severity series drops its swatch too.
+    // Legend-only filtering: both cards keep their buckets on the axis
+    // (time continuity, AC-C) — zero-height segments were invisible anyway.
+    const data: InsightsSummary = {
+      ...RECORDS,
+      findings_by_severity: [{ severity: "nit", count: 5 }],
+      findings_by_category: [{ category: "logic", count: 9 }],
+      findings_distribution: [
+        {
+          bucket_start: "2026-08-17",
+          granularity: "day",
+          by_severity: { "must-fix": 0, "should-fix": 0, nit: 5 },
+          by_category: { logic: 9, uncategorized: 0 },
+        },
+      ],
+    };
+    const html = renderRecords("en", data);
+    const severityCard = cardSlice(html, "Findings by severity", "Findings by category");
+    const categoryCard = cardSlice(html, "Findings by category", "Weekly trend");
+    // Severity card: only nit (gray-700) survives the window-total filter.
+    expect(severityCard).toContain("chart-swatch-gray-700");
+    expect(severityCard).toContain(">nit</span>");
+    expect(severityCard).not.toContain("chart-swatch-red-700");
+    expect(severityCard).not.toContain("chart-swatch-amber-700");
+    expect(severityCard).not.toContain(">must-fix</span>");
+    expect(severityCard).not.toContain(">should-fix</span>");
+    // Category card: logic (the neutral tail tone) survives; the
+    // zero-total uncategorized fallback drops from the legend entirely.
+    expect(categoryCard).toContain(">logic</span>");
+    expect(categoryCard).not.toContain(`>${t("en", "insights.uncategorized")}</span>`);
+    expect(categoryCard).not.toContain("chart-swatch-gray-700");
+    // Legend-only scope: the buckets stay on the axis in both cards.
+    expect(severityCard).toContain(">8/17</tspan>");
+    expect(categoryCard).toContain(">8/17</tspan>");
   });
 
   test("trend chart: dual-series legend with the preserved AD-601 pair, localized date axis, bucket-derived totals", () => {

@@ -115,8 +115,14 @@ export function StackedBarChart({
   if (buckets.length === 0 || series.length === 0) return null;
 
   // Flat rows for recharts: one column per bucket, one numeric field per
-  // series key. A key lives in exactly one grid, so `by_severity` wins the
-  // lookup; `?? 0` keeps a missing grid cell at an honest zero.
+  // series key. INVARIANT: a series key lives in exactly ONE grid — the
+  // severity merge-class vocabulary and the category slug vocabulary are
+  // disjoint (plan 65 qc fix-1). `by_severity` winning this lookup is only
+  // unambiguous under that invariant: a category slug equal to a merge
+  // class would silently read the severity count. The page-layer
+  // disjointness pin (insights-page.test.ts, "severity and category series
+  // vocabularies are disjoint") fails loudly on a constants-level
+  // collision; `?? 0` keeps a missing grid cell at an honest zero.
   const data = buckets.map((bucket) => ({
     bucket_start: bucket.bucket_start,
     ...Object.fromEntries(
