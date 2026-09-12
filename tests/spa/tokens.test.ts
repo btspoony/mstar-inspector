@@ -8,7 +8,7 @@
  * budget.
  *
  * Locked contract:
- *   - version 0.3.1 (0.3.0 = plan 57 T1 rebase; 0.3.1 = T2 font flip),
+ *   - version 0.3.2 (0.3.0 = plan 57 T1 rebase; 0.3.1 = T2 font flip),
  *     defaultTheme dark; the theme mechanism is the manual
  *     data-theme override (navbar toggle) with the prefers-color-scheme
  *     fallback — plan 41 T2 rewrites the frontmatter keys together with the
@@ -115,8 +115,9 @@ function extractBlock(css: string, openToken: string): string {
 describe("DESIGN.md L2 dual-theme tokens", () => {
   test("frontmatter version, default theme, and L1 name continuity", async () => {
     const fm = await loadFrontmatter();
-    // 0.3.1 = plan 57 T2 (AD-572 font flip) on top of the T1 value rebase.
-    expect(fm.version).toBe("0.3.1");
+    // 0.3.2 = plan 64 (AD-641 sidebar active brand tint, edge retirement) on
+    // top of the plan 57 T2 font flip.
+    expect(fm.version).toBe("0.3.2");
     expect(fm.defaultTheme).toBe("dark");
     // Plan 41 T2: manual data-theme override (navbar toggle) with the OS
     // fallback — top-level keys and themes: keys move together.

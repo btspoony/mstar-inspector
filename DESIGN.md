@@ -1,7 +1,7 @@
 ---
-version: 0.3.1
+version: 0.3.2
 name: mstar-inspector Console
-description: "Bold Signal-Cyan ops-console design system for the mstar-inspector developer dashboard. Dense, decisive, state through color + copy; one confident cyan accent on cool zinc neutrals. Dark is the default theme; light follows prefers-color-scheme until the navbar theme toggle stores a manual choice (localStorage mstar.dashboard.theme, light|dark) — the stored choice wins over the OS. Supersedes the plan-29 lock (2026-09-04, user instruction, iteration 013). v0.3 (plan 57, AD-573) is a values-only rebase: existing token names are frozen; brand, motion, and elevation enter as additive namespaces. v0.3.1 (plan 57 T2, AD-572) flips the sans stack to self-hosted Geist Sans — unmodified full-latin woff2 binaries of geist@1.7.2 (sha256 pinned in the fonts.css header) with font-display: swap; zh text falls back to the system stack."
+description: "Bold Signal-Cyan ops-console design system for the mstar-inspector developer dashboard. Dense, decisive, state through color + copy; one confident cyan accent on cool zinc neutrals. Dark is the default theme; light follows prefers-color-scheme until the navbar theme toggle stores a manual choice (localStorage mstar.dashboard.theme, light|dark) — the stored choice wins over the OS. Supersedes the plan-29 lock (2026-09-04, user instruction, iteration 013). v0.3 (plan 57, AD-573) is a values-only rebase: existing token names are frozen; brand, motion, and elevation enter as additive namespaces. v0.3.1 (plan 57 T2, AD-572) flips the sans stack to self-hosted Geist Sans — unmodified full-latin woff2 binaries of geist@1.7.2 (sha256 pinned in the fonts.css header) with font-display: swap; zh text falls back to the system stack. v0.3.2 (plan 64, AD-641, 2026-09-11) retires the plan-58 sidebar brand accent edge — the sidebar active item wears a low-alpha brand tint (brand-700 at 12% through the --sidebar-primary shadcn bridge) with medium-weight text; hover keeps the plan-62 neutral accent tint."
 
 # Runtime default = dark. Top-level colors: matches themes.dark.colors so
 # {colors.X} component refs resolve to the console default. Light values
@@ -892,9 +892,13 @@ Header on `background-200` + `label-12`; cells `copy-14`; row hairline
 ### Sidebar
 
 Console chrome (navbar + side nav): `background-200`, hairline
-`gray-alpha-400`, labels `label-14`. Active item: `background-300` fill,
-`gray-1000` text. Muted meta uses `gray-900`. Plan 58 may express the
-active state with a brand accent edge; the fill stays neutral.
+`gray-alpha-400`, labels `label-14`. Active item: low-alpha brand tint —
+`brand-700` at 12% over the sidebar surface (`bg-sidebar-primary/12`
+through the shadcn `--sidebar-primary` bridge), `gray-1000` text at
+medium weight; no edge marker (plan 64, AD-641 — the plan-58 brand
+accent edge is retired). Hover and open-hover keep the neutral
+`background-300` 40% tint (plan 62, AD-622); the press face keeps the
+full `background-300` fill. Muted meta uses `gray-900`.
 
 ### Notice (PageNotice)
 

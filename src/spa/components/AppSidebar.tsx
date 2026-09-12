@@ -36,14 +36,6 @@ export function Logo() {
   );
 }
 
-/**
- * Plan 58 T1 (A1, DESIGN.md Sidebar): the active row keeps the neutral
- * sidebar-accent fill and gains a brand accent edge through the sanctioned
- * --sidebar-primary bridge (shadcn-theme.css maps it to var(--brand-700));
- * the fill itself stays neutral.
- */
-const ACTIVE_BRAND_EDGE = "data-[active=true]:shadow-[inset_2px_0_0_0_var(--sidebar-primary)]";
-
 export function AppSidebar({ model }: { model: SidebarModel }) {
   return (
     <Sidebar collapsible="none" aria-label={model.navLabel}>
@@ -65,7 +57,10 @@ export function AppSidebar({ model }: { model: SidebarModel }) {
                 const Icon = NAV_ICONS[item.href as keyof typeof NAV_ICONS];
                 return (
                   <SidebarMenuItem key={item.href}>
-                    <SidebarMenuButton asChild isActive={item.current} tooltip={item.label} className={ACTIVE_BRAND_EDGE}>
+                    {/* Active face (plan 64 AD-641): low-alpha brand tint +
+                        medium weight live in the SidebarMenuButton variant
+                        string — no edge/fill className appendage here. */}
+                    <SidebarMenuButton asChild isActive={item.current} tooltip={item.label}>
                       <a
                         href={item.href}
                         aria-current={item.current ? "page" : undefined}
