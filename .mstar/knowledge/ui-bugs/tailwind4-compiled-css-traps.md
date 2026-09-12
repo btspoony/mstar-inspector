@@ -18,7 +18,7 @@ symptoms:
   - "rules absent from (or wrong-valued in) dist/spa/assets/index-*.css"
 root_cause: "Tailwind v4 generates utilities only from @theme keys (missing --color-* mapping = dead class); bare width-only border inherits border-color from currentColor under preflight"
 resolution_type: code_fix
-last_updated: 2026-09-10
+last_updated: 2026-09-12
 source_plan: 57-design-language-v2
 ---
 
@@ -56,3 +56,11 @@ Theme key 是 Tailwind v4 生成 utility 的唯一依据；编译产物 grep 直
 - 新增任何 `bg-*`/`text-*`/`border-*` 语义工具类时，三件套一起改：`:root` 变量 + `@theme inline` 映射 + 消费 class，且 pin 落在映射层。
 - 任何「仅声明宽度/样式的 border」必须有显式 border-color 面；review 时对 `border` 单独出现保持警惕。
 - 验收含新 utility 的 plan，QA gate 固定带 built-CSS grep 项（017→018 已成惯例）。
+
+## Extension（plan 64 / 020，2026-09-12）：opacity 修饰符的**成功**路径与编译形态
+
+本文记录的是两类失败；plan 64 补齐了「theme key 存在时 opacity 修饰符如何工作」的实证面（AD-641 探针 + built-CSS kill proof）：
+
+- **命名形 `bg-sidebar-primary/12`（有 `@theme inline` 键 `--color-sidebar-primary`）编译为** `background-color: color-mix(in oklab, var(--sidebar-primary) 12%, transparent)`，且编译器前置一行 `background-color: var(--sidebar-primary)` fallback + `@supports (color-mix(...))` 包裹——fallback 在前 = 无 color-mix 支持的浏览器吃全强度 var（与已上线 `hover:bg-sidebar-accent/40`、`.bg-muted/50` 同机制同暴露）。任意值形 `bg-(--sidebar-primary)/12` 输出逐字节一致。
+- **data-attribute 变体的编译选择器是无引号形态** `[data-active=true]`（grep/pin 文本以 `.data-\[active\=true\]\:bg-sidebar-primary\/12[data-active=true]` 为准——带引号形式 grep 不到，plan 64 曾按引号形写锚点被 T1 实测纠正）。
+- **档位裁决方法**：tint 显著度用 fill-vs-bg 对比 + active-vs-hover 色相/强度双维实测（dark `#22d3ee` / light `#0e7490` 双主题 token 分档），不要靠目测拍档位。

@@ -71,7 +71,7 @@ import { createSecretbox } from "../../src/dashboard/secretbox";
 import { createAppsStore } from "../../src/dashboard/apps-store";
 import { normalizePrivateKey } from "../../src/dashboard/private-key";
 import { normalizePrivateKey as pipelineNormalizePrivateKey } from "../../src/pipeline/comment";
-import { reviewedAt, mondayOf } from "../../src/dashboard/insights-dates";
+import { reviewedAt, mondayOf, dayGrid, weekGrid } from "../../src/dashboard/insights-dates";
 import { LOCALE_COOKIE } from "../../src/i18n";
 import { SPA_BOOT_MARKER, htmlGet, withSpaAssets } from "../helpers/spa";
 import { gh, OAUTH_CLIENT_SECRET, fakePem, pemBanner } from "../helpers/fake-secrets";
@@ -3701,10 +3701,19 @@ describe("/dashboard/api/insights/summary (plan 22 Task 2)", () => {
       findings_by_category: Array<{ category: string | null; count: number }>;
       verdict_distribution: Array<{ verdict: string; count: number }>;
       weekly_trend: Array<{ week_start: string; reviews: number; findings: number }>;
+      findings_distribution: Array<{
+        bucket_start: string;
+        granularity: "day" | "week";
+        by_severity: Record<string, number>;
+        by_category: Record<string, number>;
+      }>;
       recurring_top: Array<{ fingerprint: string; title_sample: string; count: number; repos: string[] }>;
       repos: string[];
     };
     // Exact key set: store return + the two echo params (snake_case API).
+    // Plan 65 (AD-652) adds findings_distribution — the ONLY key ever added
+    // to this face; every other key here is the plan-22/36 legacy set, and
+    // the per-field assertions below pin those byte-for-byte.
     expect(Object.keys(body).sort()).toEqual(
       [
         "window_days",
@@ -3713,6 +3722,7 @@ describe("/dashboard/api/insights/summary (plan 22 Task 2)", () => {
         "findings_by_category",
         "verdict_distribution",
         "weekly_trend",
+        "findings_distribution",
         "recurring_top",
         "repos",
       ].sort(),
@@ -3752,6 +3762,89 @@ describe("/dashboard/api/insights/summary (plan 22 Task 2)", () => {
     // repos is opt-in (plan 36 QC F-001): without include=repos the
     // aggregation is skipped and the field is empty.
     expect(body.repos).toEqual([]);
+  });
+
+  test("findings_distribution (plan 65): day buckets for the default window, zero-filled, additive key set", async () => {
+    const res = await insightsGet("", await octocatCookie());
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      window_days: number;
+      findings_distribution: Array<{
+        bucket_start: string;
+        granularity: "day" | "week";
+        by_severity: Record<string, number>;
+        by_category: Record<string, number>;
+      }>;
+    };
+    const grid = body.findings_distribution;
+    // Default 30-day window → day buckets, ascending, every UTC day the
+    // window predicate can return (ends at the current UTC date).
+    expect(body.window_days).toBe(30);
+    expect(grid.every((b) => b.granularity === "day")).toBe(true);
+    expect(grid.map((b) => b.bucket_start)).toEqual(dayGrid(30));
+    // Stable series keys on every bucket: the fixed severity set; the
+    // window-level category union {logic, security} + uncategorized fallback.
+    for (const bucket of grid) {
+      expect(Object.keys(bucket.by_severity)).toEqual(["must-fix", "should-fix", "nit"]);
+      expect(Object.keys(bucket.by_category)).toEqual(["logic", "security", "uncategorized"]);
+    }
+    // Bucket lookup keyed by each seed review's own UTC date.
+    const at = (daysAgo: number) => grid.find((b) => b.bucket_start === reviewedAt(daysAgo).slice(0, 10))!;
+    // r-a (25d): must-fix/logic + nit/NULL-category (uncategorized fallback).
+    expect(at(25)).toMatchObject({
+      by_severity: { "must-fix": 1, "should-fix": 0, nit: 1 },
+      by_category: { logic: 1, security: 0, uncategorized: 1 },
+    });
+    // r-b (15d): must-fix/logic.
+    expect(at(15)).toMatchObject({
+      by_severity: { "must-fix": 1, "should-fix": 0, nit: 0 },
+      by_category: { logic: 1, security: 0, uncategorized: 0 },
+    });
+    // r-c (5d): should-fix/security.
+    expect(at(5)).toMatchObject({
+      by_severity: { "must-fix": 0, "should-fix": 1, nit: 0 },
+      by_category: { logic: 0, security: 1, uncategorized: 0 },
+    });
+  });
+
+  test("findings_distribution (plan 65): week buckets for window=90, same week definition as weekly_trend", async () => {
+    const res = await insightsGet("window=90", await octocatCookie());
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      window_days: number;
+      weekly_trend: Array<{ week_start: string; reviews: number; findings: number }>;
+      findings_distribution: Array<{
+        bucket_start: string;
+        granularity: "day" | "week";
+        by_severity: Record<string, number>;
+        by_category: Record<string, number>;
+      }>;
+    };
+    expect(body.window_days).toBe(90);
+    const grid = body.findings_distribution;
+    // 90 > 30 → week buckets, every one a Monday (UTC), spanning every
+    // intersecting week of the clamped window (first/last partial).
+    expect(grid.length).toBeGreaterThan(0);
+    expect(grid.every((b) => b.granularity === "week")).toBe(true);
+    for (const bucket of grid) {
+      expect(new Date(`${bucket.bucket_start}T00:00:00Z`).getUTCDay()).toBe(1);
+    }
+    expect(grid.map((b) => b.bucket_start)).toEqual(weekGrid(90));
+    // r-d (60d ago, no findings) is inside the window: its week bucket is
+    // honestly present and all-zero — reviews without findings don't
+    // distribute, but the time axis stays continuous.
+    expect(grid.find((b) => b.bucket_start === mondayOf(reviewedAt(60)))).toMatchObject({
+      by_severity: { "must-fix": 0, "should-fix": 0, nit: 0 },
+      by_category: { logic: 0, security: 0, uncategorized: 0 },
+    });
+    // Same week definition as weekly_trend: per-week severity/category sums
+    // equal that week's weekly_trend findings count.
+    const sum = (record: Record<string, number>) => Object.values(record).reduce((a, c) => a + c, 0);
+    for (const week of body.weekly_trend) {
+      const bucket = grid.find((b) => b.bucket_start === week.week_start)!;
+      expect(sum(bucket.by_severity)).toBe(week.findings);
+      expect(sum(bucket.by_category)).toBe(week.findings);
+    }
   });
 
   test("window parse: non-integer, negative, and empty → 400; 0 is a legal day count", async () => {

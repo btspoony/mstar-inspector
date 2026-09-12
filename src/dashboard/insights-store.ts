@@ -12,8 +12,8 @@
  *   - `windowDays` is an integer number of days, default 30.
  *   - Values > 90 are CLAMPED to 90 here — the single clamp point. The
  *     clamp is applied once at the store entry and every query below binds
- *     the clamped value, so the window is consistent across all six
- *     aggregations.
+ *     the clamped value, so the window is consistent across every
+ *     aggregation.
  *   - Non-integer / negative values are the ROUTE's 400 (plan 22 Task 2) —
  *     the store never sees them in production and does not re-validate.
  *   - The window predicate is `reviews.reviewed_at >= datetime('now', '-' ||
@@ -27,6 +27,22 @@
  *   dependency). `week_start` is the Monday `YYYY-MM-DD`; `reviews` counts
  *   distinct reviews in the bucket, `findings` counts their findings (a
  *   review with zero findings still contributes 1 to `reviews` — LEFT JOIN).
+ *   The expression lives in the WEEK_BUCKET_SQL constant shared verbatim by
+ *   the plan-65 distribution week buckets — two week definitions here would
+ *   be a plan-65 STOP face.
+ *
+ * Findings distribution (plan 65, AD-652 — additive only): two more GROUP BY
+ *   queries (bucket × severity, bucket × category) reusing the shared
+ *   whereSql and the findings×reviews JOIN. Bucket = UTC day
+ *   (`date(r.reviewed_at)`, same UTC domain as the window predicate) or the
+ *   weekly_trend week expression, selected by the CLAMPED window
+ *   (windowDays > 30 → "week", else "day" — UI segments 7/30 → day, 90 →
+ *   week). The zero-filled grid is generated in JS by insights-dates.ts
+ *   (dayGrid / weekGrid): every bucket the window predicate can return,
+ *   first/last partial. `by_severity` carries the fixed v1 merge-class key
+ *   set per bucket; `by_category` carries the window-level union of observed
+ *   categories plus the single "uncategorized" fallback for NULL categories
+ *   — series keys are stable across buckets, so the SPA never re-unions.
  *
  * Bounded top (QC W-E): the insights face adds `LIMIT 10` — "top" is a
  * bounded list by product definition, and the bound caps the JSON payload
@@ -39,13 +55,20 @@
  * (`envelope IS NOT NULL` ⇔ v1 row). M1-era rows (critical|warning|
  * suggestion|info severity, comment|request_changes|approve verdict) must
  * never mix into the v1 merge-class vocab; the gate is applied once in the
- * shared WHERE and therefore covers all six aggregations.
+ * shared WHERE and therefore covers every aggregation.
  *
  * Determinism: every aggregation orders by count DESC then key ASC (NULL
  * keys sort first in SQLite ASC — findingsByCategory surfaces NULL
  * categories as `category: null`), weeklyTrend by week_start ASC,
- * recurringTop by count DESC then fingerprint ASC.
+ * recurringTop by count DESC then fingerprint ASC. The plan-65 distribution
+ * buckets ascend by bucket_start (the JS-generated grid defines the order).
+ *
+ * The bucket-grid generators (dayGrid / weekGrid) come from
+ * src/dashboard/insights-dates.ts — the single copy of the bucket-boundary
+ * math (plan 65 B1), still zero imports from store/pipeline/review.
  */
+import { dayGrid, weekGrid } from "./insights-dates";
+
 /** Optional filters for the insights aggregation (AL-22-1). */
 export type InsightsWindow = {
   /** Integer days, default 30; >90 is clamped to 90 at the store entry. */
@@ -69,6 +92,28 @@ export type CategoryCount = { category: string | null; count: number };
 export type VerdictCount = { verdict: string; count: number };
 /** One Monday-anchored UTC week bucket of weeklyTrend. */
 export type WeekBucket = { week_start: string; reviews: number; findings: number };
+/**
+ * One per-bucket distribution row of findingsDistribution (plan 65, AD-652).
+ * Wire shape is snake_case and passes through the route untouched, mirroring
+ * the other store types.
+ */
+export type FindingsDistributionBucket = {
+  /** UTC bucket start `YYYY-MM-DD` — a day, or a Monday for week buckets. */
+  bucket_start: string;
+  /** "day" for clamped windowDays <= 30, "week" above (AD-652 mapping). */
+  granularity: "day" | "week";
+  /**
+   * Zero-filled per bucket over the FIXED v1 merge-class key set
+   * ({must-fix, should-fix, nit}) — page-level series vocabulary.
+   */
+  by_severity: Record<string, number>;
+  /**
+   * Zero-filled per bucket over the window-level union of observed category
+   * values (ASC) plus the single "uncategorized" fallback for NULL — stable
+   * series keys across every bucket of the response.
+   */
+  by_category: Record<string, number>;
+};
 /** One recurrence group of recurringTop (plan-21 semantics, count >= 2). */
 export type RecurringGroup = {
   fingerprint: string;
@@ -91,6 +136,13 @@ export type Insights = {
    * option set is always the full in-window set, never the filtered subset.
    */
   repos: string[];
+  /**
+   * Per-bucket findings distribution (plan 65, AD-652 — additive): the
+   * daily/weekly stacked-chart face. Ordered bucket_start ASC; every bucket
+   * intersecting the clamped window is present (zero-filled where no
+   * findings), first/last partial.
+   */
+  findingsDistribution: FindingsDistributionBucket[];
 };
 
 /** Narrow D1 statement face, declared locally (dashboard leaf — zero imports). */
@@ -111,6 +163,21 @@ export function clampWindow(windowDays: number | undefined): number {
 }
 
 /**
+ * The single Monday-anchored UTC week-bucket expression (AL-22-1), shared
+ * verbatim by weeklyTrend and the plan-65 distribution week buckets — two
+ * week definitions in this file would be a plan-65 STOP face. The JS mirror
+ * (`mondayOf`, via insights-dates.ts `weekGrid`) stays in lockstep (S-1 pin).
+ */
+const WEEK_BUCKET_SQL = "date(r.reviewed_at, '-' || ((strftime('%w', r.reviewed_at)+6)%7) || ' days')";
+
+/**
+ * Fixed per-bucket severity key set of the distribution (plan 65, AD-652):
+ * the v1 merge-class vocab the era gate guarantees. Declared locally — the
+ * dashboard leaf boundary (AL-22-1) forbids importing it from src/review.
+ */
+const DISTRIBUTION_SEVERITY_KEYS = ["must-fix", "should-fix", "nit"] as const;
+
+/**
  * Resolve the insights aggregation for the review store behind `db`.
  *
  * @param db   a D1 handle (real D1Database or the bun:sqlite test double)
@@ -121,6 +188,16 @@ export async function createInsightsStore(db: InsightsD1, opts: InsightsWindow =
   const windowDays = clampWindow(opts.windowDays);
   const repo = opts.repo;
   const includeRepos = opts.includeRepos ?? false;
+
+  // Plan 65 (AD-652): the distribution granularity derives ONLY from the
+  // clamped window — the UI's 7/30-day segments map to day buckets, 90 days
+  // (and any 31–89 direct URL entry) maps to weeks. Window parsing itself is
+  // untouched (plan 22 QC W-C face).
+  const granularity: FindingsDistributionBucket["granularity"] = windowDays > 30 ? "week" : "day";
+  // Week buckets reuse the weekly_trend expression (WEEK_BUCKET_SQL) — never
+  // a second week definition; day buckets are the UTC date, the same domain
+  // as the window predicate.
+  const bucketSql = granularity === "week" ? WEEK_BUCKET_SQL : "date(r.reviewed_at)";
 
   // Shared window + era-gate predicates — the single source of truth. The
   // era gate (migration 0002 lock): `reviews.envelope IS NOT NULL` ⇔ v1 row;
@@ -158,7 +235,8 @@ export async function createInsightsStore(db: InsightsD1, opts: InsightsWindow =
         .all<{ repo: string }>()
     : Promise.resolve({ results: [] as { repo: string }[] });
 
-  const [total, severities, categories, verdicts, trend, recurring, repoRows] = await Promise.all([
+  const [total, severities, categories, verdicts, trend, recurring, distributionSeverities, distributionCategories, repoRows] =
+    await Promise.all([
     db
       .prepare(`SELECT COUNT(*) AS total FROM reviews r WHERE ${whereSql}`)
       .bind(...binds)
@@ -196,7 +274,7 @@ export async function createInsightsStore(db: InsightsD1, opts: InsightsWindow =
     db
       .prepare(
         `SELECT
-           date(r.reviewed_at, '-' || ((strftime('%w', r.reviewed_at)+6)%7) || ' days') AS week_start,
+           ${WEEK_BUCKET_SQL} AS week_start,
            COUNT(DISTINCT r.id) AS reviews,
            COUNT(f.id) AS findings
          FROM reviews r
@@ -229,8 +307,80 @@ export async function createInsightsStore(db: InsightsD1, opts: InsightsWindow =
       )
       .bind(...binds)
       .all<{ fingerprint: string; title_sample: string; count: number; repos_csv: string | null }>(),
+    // Plan 65 (AD-652): the two additive distribution GROUP BYs — same
+    // whereSql + findings×reviews JOIN as the page-level aggregates (same
+    // cost class), bucketed by day or week. No ORDER BY: the JS grid
+    // assembles and orders the buckets deterministically below.
+    db
+      .prepare(
+        `SELECT ${bucketSql} AS bucket_start, f.severity AS severity, COUNT(*) AS count
+         FROM findings f JOIN reviews r ON r.id = f.review_id
+         WHERE ${whereSql}
+         GROUP BY bucket_start, f.severity`,
+      )
+      .bind(...binds)
+      .all<{ bucket_start: string; severity: string; count: number }>(),
+    db
+      .prepare(
+        `SELECT ${bucketSql} AS bucket_start, f.category AS category, COUNT(*) AS count
+         FROM findings f JOIN reviews r ON r.id = f.review_id
+         WHERE ${whereSql}
+         GROUP BY bucket_start, f.category`,
+      )
+      .bind(...binds)
+      .all<{ bucket_start: string; category: string | null; count: number }>(),
     repoQuery,
   ]);
+
+  // Plan 65 (AD-652): assemble the zero-filled distribution grid. The grid
+  // (dayGrid/weekGrid) is every bucket the window predicate can return;
+  // observed bucket starts are unioned in so that a SQL/JS calendar drift
+  // could only ever surface as an extra honest bucket, never silently
+  // dropped counts. Severity keys are the fixed merge-class set; category
+  // keys are the window-level union (ASC) + "uncategorized" — identical on
+  // every bucket, so series keys are stable for the SPA.
+  const grid = granularity === "week" ? weekGrid(windowDays) : dayGrid(windowDays);
+  const starts = [
+    ...new Set([
+      ...grid,
+      ...distributionSeverities.results.map((row) => row.bucket_start),
+      ...distributionCategories.results.map((row) => row.bucket_start),
+    ]),
+  ].sort();
+  const categoryKeys = [
+    ...new Set(
+      distributionCategories.results
+        .map((row) => row.category)
+        .filter((category): category is string => category !== null),
+    ),
+  ].sort();
+  const distributionBuckets = new Map<string, FindingsDistributionBucket>(
+    starts.map((bucket_start) => [
+      bucket_start,
+      {
+        bucket_start,
+        granularity,
+        by_severity: Object.fromEntries(DISTRIBUTION_SEVERITY_KEYS.map((key) => [key, 0])),
+        by_category: Object.fromEntries([...categoryKeys, "uncategorized"].map((key) => [key, 0])),
+      },
+    ]),
+  );
+  for (const row of distributionSeverities.results) {
+    const bucket = distributionBuckets.get(row.bucket_start)!;
+    // Vocab coupling (plan 65 qc fix-1): a future severity vocabulary must
+    // extend DISTRIBUTION_SEVERITY_KEYS (here), the page SEVERITY_SERIES
+    // (InsightsPage.tsx), and the wire-guard docblock (spa/pages/data.ts)
+    // together — this accumulation would otherwise grow keys the page's
+    // closed series silently ignore. Unreachable today: mergeClass is
+    // z.enum-locked at ingest (review/schema.ts) and the era gate excludes
+    // non-v1 rows.
+    bucket.by_severity[row.severity] = (bucket.by_severity[row.severity] ?? 0) + row.count;
+  }
+  for (const row of distributionCategories.results) {
+    const bucket = distributionBuckets.get(row.bucket_start)!;
+    const key = row.category ?? "uncategorized";
+    bucket.by_category[key] = (bucket.by_category[key] ?? 0) + row.count;
+  }
 
   return {
     reviewsTotal: total?.total ?? 0,
@@ -245,5 +395,6 @@ export async function createInsightsStore(db: InsightsD1, opts: InsightsWindow =
       repos: (row.repos_csv ?? "").split(",").filter((repoName) => repoName.length > 0).sort(),
     })),
     repos: repoRows.results.map((row) => row.repo).filter((name) => name.length > 0),
+    findingsDistribution: starts.map((bucket_start) => distributionBuckets.get(bucket_start)!),
   };
 }

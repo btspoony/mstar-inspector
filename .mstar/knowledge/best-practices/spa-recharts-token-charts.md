@@ -44,3 +44,16 @@ The obvious install (`recharts@3`) is the trap: it installs cleanly, type-checks
 ## When to Apply
 
 Any SPA chart work under `src/spa/components/charts/`; any recharts version bump; any new chart consumer that wants token colors or a tooltip; any future re-evaluation of the chart-library line (start from the probe, not from npm's latest tag).
+
+## Stacked-chart addendum（plan 65 / 020，2026-09-12）
+
+plan 65 把两卡换成按天堆叠柱图（`StackedBarChart.tsx`，BarChart 聚合组件退役），以下纪律在 2.15.4 上实测成立：
+
+- **`stackId` 堆叠是同一 Bar 原语**——SSR 静态渲染 pin 面（`renderToStaticMarkup`）直接可用：pin「自底向上相邻段 y+h 闭合」+「各段高度与计数成比例」即可防堆叠序/计数回归；每 `Bar` 仍 `isAnimationActive={false}`。
+- **图例用 plan-56 HTML 行（`.chart-legend` + `.chart-swatch-*` twins），不用 recharts `<Legend>`**——swatch 色需要 token class 面，recharts Legend 是自带定位 wrapper 的未样式化面，与固定高度布局叠加徒增 pin 脆弱性。
+- **hostile-label escape pin 面扩大**：分类是 open-set wire 字符串（schema `z.string().optional()`），现在到达 HTML 图例 span + tooltip `name` attr + 轴 tspan 三个面——escape pin 必须覆盖三者（React 默认转义仍生效，pin 是防回归的回归护栏）。
+- **退役聚合组件时的连带面**：删除组件会连带删掉它的 describe 块——charts.css 填充规则绑定 pin、hostile-label escape pin、tooltip token styling pin、轴 thinning pin 都可能藏在里面；退役前盘点「该 describe 还 pin 了什么」，逐项重述到新组件（plan 65 QC 三席各自抓到一两条，fix 轮才清干净）。
+- **文字计数底线在堆叠下换脸**：per-bar LabelList 退役（堆叠段内文字不可读），aria/文字并存底线由 `<title>` 正 pin + y 轴刻度文字 + 页级汇总行 + tooltip 承接——pin 这四者而非段落计数。
+- **图例零过滤**：series 图例项按窗口内总量 > 0 过滤（`seriesWithFindings`），轴/堆叠保持全桶时间连续性——「图例仅列窗口内出现分类」的契约措辞落地在页层。
+- **组件 props 与 wire 类型对齐**：闭包词表 `series: {key,label,fillClass}[]` + 页层持语义映射；组件内部 `DistributionBucket` 类型与 `data.ts` wire 守卫保持同形（可选字段松弛会被 review 抓）。
+- **已知残余**：`formatBucketDateLabel` 与 TrendChart 的 formatter 逐字节重复——被「TrendChart byte-identical」锚点强制，动 TrendChart 时才合并。
