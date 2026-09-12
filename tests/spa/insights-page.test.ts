@@ -22,6 +22,14 @@
  * content/list form untouched; a bare Card renders Tier-1 elevation inside
  * the Tier-2 group). Everything else is retained zero-supersede; the
  * plan-36/49 URL↔filter pins stay byte-for-byte.
+ * Plan 65 T3 (B8): the severity/category cards are daily stacked bar time
+ * series (StackedBarChart) — the six aggregate-face pins restate on the
+ * stacked faces (locked fill-class families, the gray uncategorized
+ * fallback, "" coalescing one layer down in chartBuckets, per-card legend
+ * slicing for the trend pins), and the aria/text coexistence floor (svg
+ * <title> mirror, y-tick text, page-level summary rows) is pinned
+ * positively. Per-bar LabelList counts are retired by design: stacked
+ * totals read off the y ticks and the tooltip (plan Global Constraint).
  * No DOM runner — same source-scan contract as plan 29 SPA tests.
  */
 import { describe, expect, test } from "bun:test";
@@ -109,6 +117,35 @@ const chartSlices = (html: string): [string, string, string] => {
   return [severity, category, trend];
 };
 
+/**
+ * Plan 65: the stacked cards own an HTML legend row that PRECEDES each svg,
+ * so svg-boundary slices miss the legend of their own card and pick up the
+ * NEXT card's legend instead. The card regions slice by the SectionCardTitle
+ * headings (legend + svg together); `chartSlices` above keeps the svg-only
+ * isolation for assertions that must not see any legend text. `>Title</div>`
+ * matches only the card title element — the same string inside an
+ * aria-label or an svg <title> carries different delimiters.
+ */
+const cardSlice = (html: string, title: string, nextTitle?: string): string => {
+  const start = html.indexOf(`>${title}</div>`);
+  if (start === -1) throw new Error(`card title not found: ${title}`);
+  const end = nextTitle === undefined ? html.length : html.indexOf(`>${nextTitle}</div>`);
+  if (end === -1) throw new Error(`next card title not found: ${nextTitle}`);
+  return html.slice(start, end);
+};
+
+/**
+ * The y coordinate of one stacked segment path (recharts-rectangle face) —
+ * used by the stacking-order pins. Throws when the segment is absent so a
+ * drifted recharts markup fails loudly instead of comparing NaN.
+ */
+const segmentY = (html: string, name: string, fillClass: string): number => {
+  const tag = new RegExp(`<path [^>]*name="${name}" class="recharts-rectangle ${fillClass}"[^>]*>`).exec(html)?.[0];
+  const y = tag ? /\by="([0-9.]+)"/.exec(tag) : null;
+  if (!y) throw new Error(`stacked segment not found: ${name} (${fillClass})`);
+  return Number(y[1]);
+};
+
 describe("records page assembly (plan 36 T2)", () => {
   test("window switch is the INSIGHTS_WINDOWS segmented ToggleGroup", () => {
     expect(INSIGHTS_WINDOWS).toEqual(["7", "30", "90"]);
@@ -134,85 +171,123 @@ describe("records page assembly (plan 36 T2)", () => {
   test("cards and typography are shadcn/Tailwind token driven (no raw hex)", () => {
     expect(page).toContain("@/components/ui/card");
     expect(page).toContain("text-muted-foreground");
-    // Plan 56 T2 supersede: the plan-45 proportional bar (bg-primary) is
-    // retired — the stat sections render as charts whose series colors ride
-    // var(--token) through the page-layer AD-561 mapping; the no-raw-hex
-    // face is unchanged.
-    expect(page).toContain("@/components/charts/BarChart");
+    // Plan 65 T3 supersede: the aggregate BarChart import is retired — both
+    // stat cards consume StackedBarChart, and the AD-601 severity family
+    // maps to the charts.css fill classes in the page-layer
+    // SEVERITY_BAR_COLORS (values are class tokens now; the var() resolution
+    // lives in the charts.css rules into the token layer — never
+    // presentation attributes). The no-raw-hex face is unchanged.
+    expect(page).toContain("@/components/charts/StackedBarChart");
     expect(page).toContain("SEVERITY_BAR_COLORS");
-    expect(page).toContain("var(--red-700)");
-    expect(page).toContain("var(--amber-700)");
-    expect(page).toContain("var(--gray-700)");
+    expect(page).toContain("chart-fill-red-700");
+    expect(page).toContain("chart-fill-amber-700");
+    expect(page).toContain("chart-fill-gray-700");
     expect(page).not.toMatch(/#[0-9a-fA-F]{3,8}\b/);
   });
 
-  test("severity section renders as a chart with counts as text (supersedes plan 45 T1/F-01 pin)", () => {
+  test("severity section renders as a stacked chart with the text coexistence floor (supersedes the plan-45 T1/F-01 + plan-56 label-list pins)", () => {
     // plan 45 pinned the CSS proportional severity bar (inline width
-    // effective, no basis-full override). Plan 56 T2 replaced that markup
-    // with a chart; plan 63 T2 moves the chart onto recharts (AD-621) —
-    // the guarded regression faces (severity counts visibly rendering, the
-    // locked token families) still hold in the recharts DOM.
+    // effective, no basis-full override). Plan 56 replaced that markup with
+    // a chart; plan 63 moved the chart onto recharts (AD-621); plan 65 T3
+    // (B8) restates the guarded faces on the daily stacked time series:
+    // the severity token families stay locked, and the aria/text
+    // coexistence floor survives the stacking — per-bar counts are retired
+    // by design (stacked totals read off the y ticks and the tooltip; the
+    // page-level summary rows keep the totals as text).
     const html = renderRecords("en");
-    const [severity] = chartSlices(html);
-    // Counts coexist with the graphic as bar-end LabelList text (color is
-    // never the only carrier). The fixture counts 7/5/3 sit outside the
-    // recharts tick set (max 7 → ticks 0/2/4/6/8), so only a rendered
-    // bar-end label — never an axis tick — can satisfy these (T2-M1).
-    expect(severity).toContain(">7</tspan>");
-    expect(severity).toContain(">5</tspan>");
-    expect(severity).toContain(">3</tspan>");
-    // Bars carry the locked AD-561 token families and the severity label
-    // stays visible next to its bar. Colors ride the charts.css class
-    // rules (B3/AD-621) — CSS declarations where var() always resolves,
-    // never presentation-attribute var(), never raw hex.
-    expect(severity).toContain('class="recharts-rectangle chart-fill-red-700"');
-    expect(severity).toContain('class="recharts-rectangle chart-fill-amber-700"');
-    expect(severity).toContain('class="recharts-rectangle chart-fill-gray-700"');
-    expect(severity).toContain("must-fix");
+    const severityCard = cardSlice(html, "Findings by severity", "Findings by category");
+    // The svg <title> mirrors the section aria-label — the positive pin
+    // (never a blank title, never aria-only).
+    expect(severityCard).toContain("<title>Findings by severity</title>");
+    // Stacked segments carry the locked AD-561/AD-601 token families via
+    // the charts.css class rules — CSS declarations where var() always
+    // resolves, never presentation-attribute var(), never raw hex.
+    expect(severityCard).toContain('class="recharts-rectangle chart-fill-red-700"');
+    expect(severityCard).toContain('class="recharts-rectangle chart-fill-amber-700"');
+    expect(severityCard).toContain('class="recharts-rectangle chart-fill-gray-700"');
+    // The severity labels stay visible (legend row), the day bucket renders
+    // its date tick, and the y ticks keep the count scale readable as text
+    // — recharts niceTicks for the 15-unit stack top → domain [0..16],
+    // ticks 0/4/8/12/16 (tick values couple to recharts 2.15.4 — the
+    // charts.test.ts header caveat applies).
+    expect(severityCard).toContain("must-fix");
+    expect(severityCard).toContain(">8/17</tspan>");
+    expect(severityCard).toContain(">0</tspan>");
+    expect(severityCard).toContain(">16</tspan>");
+    // The page-level summary rows keep the window totals as text beside the
+    // charts (the coexistence floor's page face).
+    expect(html).toContain("Reviews: 4");
     // The old proportional-bar markup is gone entirely — no HTML element
-    // carries an inline width any more (the recharts surface's own
-    // style="width:100%" svg box is the chart frame, not a proportional
-    // bar).
+    // carries an inline width any more (the recharts wrapper's own
+    // style="width:100%" box is the chart frame, not a proportional bar).
     expect(html).not.toContain("basis-full");
     expect(html).not.toMatch(/<(span|div|p|li)[^>]*style="width/);
   });
 
-  test("category chart: NULL category rides the uncategorized key with the neutral series face", () => {
-    const [severity, category] = chartSlices(renderRecords("en"));
-    expect(severity).not.toContain("uncategorized");
-    // The NULL category row renders under the i18n label, next to the real
-    // category. Counts 9/6 sit INSIDE the recharts tick set (max 9 → ticks
-    // 0/3/6/9/12), so the bar-end pins slice to the chart's label-list
-    // section — only bar-end labels live after it (T2-M1).
-    expect(category).toContain("uncategorized");
-    expect(category).toContain("logic");
-    const barEnds = category.slice(category.indexOf("recharts-label-list"));
-    expect(barEnds).toContain(">9</tspan>");
-    expect(barEnds).toContain(">6</tspan>");
-    // No per-item color is passed → the chart's neutral series class
-    // (AD-561 default), never one of the severity accents.
-    expect(category).toContain('class="recharts-rectangle chart-fill-blue-700"');
-    expect(category).not.toContain("chart-fill-red-700");
+  test("category chart: NULL category rides the uncategorized key with the gray stacked-last face", () => {
+    const html = renderRecords("en");
+    const severityCard = cardSlice(html, "Findings by severity", "Findings by category");
+    const categoryCard = cardSlice(html, "Findings by category", "Weekly trend");
+    expect(severityCard).not.toContain("uncategorized");
+    // The NULL category renders under the i18n label in the legend, AFTER
+    // the real category — legend order = stack order (AD-653: palette slugs
+    // first, the gray fallback last/topmost).
+    expect(categoryCard).toContain("logic");
+    expect(categoryCard).toContain("uncategorized");
+    const blue = categoryCard.indexOf("chart-swatch-blue-700");
+    const uncategorized = categoryCard.indexOf(`>${t("en", "insights.uncategorized")}</span>`);
+    expect(blue).toBeGreaterThanOrEqual(0);
+    expect(blue).toBeLessThan(uncategorized);
+    // The unknown slug rides the neutral blue-700 tone (the tail rule); the
+    // NULL/uncategorized fallback is the gray-700 series — never one of the
+    // severity accents.
+    expect(categoryCard).toContain('name="logic" class="recharts-rectangle chart-fill-blue-700"');
+    expect(categoryCard).toContain('name="uncategorized" class="recharts-rectangle chart-fill-gray-700"');
+    expect(categoryCard).not.toContain("chart-fill-red-700");
+    // Gray is stacked LAST (topmost segment): its y sits strictly above the
+    // blue segment's (the stackId adjacency is pinned at the component
+    // level in charts.test.ts).
+    expect(segmentY(categoryCard, "uncategorized", "chart-fill-gray-700")).toBeLessThan(
+      segmentY(categoryCard, "logic", "chart-fill-blue-700"),
+    );
   });
 
   test("empty-string category coalesces to the uncategorized face (same as NULL, plan 56 QC F-004)", () => {
     // category: "" is schema-permitted (review/schema.ts) and persists —
-    // before the falsy-coalescing fix it rendered a blank bar label.
-    const data: InsightsSummary = { ...RECORDS, findings_by_category: [{ category: "", count: 2 }] };
-    const [, category] = chartSlices(renderRecords("en", data));
-    // The i18n label renders as the visible category tick text — never a
-    // blank text node (the svg-level <title> carries the section aria
-    // label on the recharts face; the full label rides the hover tooltip).
-    expect(category).toContain(`>${t("en", "insights.uncategorized")}</tspan>`);
-    expect(category).not.toContain("<title></title>");
+    // before the falsy-coalescing fix it rendered a blank bar label. Plan
+    // 65: the coalescing moved one layer down — chartBuckets merges the ""
+    // grid key into the uncategorized series before the chart sees the
+    // distribution — the visible face is unchanged.
+    const data: InsightsSummary = {
+      ...RECORDS,
+      findings_by_category: [{ category: "", count: 2 }],
+      findings_distribution: [
+        {
+          bucket_start: "2026-08-17",
+          granularity: "day",
+          by_severity: { "must-fix": 7, "should-fix": 5, nit: 3 },
+          by_category: { "": 2 },
+        },
+      ],
+    };
+    const html = renderRecords("en", data);
+    const categoryCard = cardSlice(html, "Findings by category", "Weekly trend");
+    // The i18n label renders as the visible category text (legend row — the
+    // stacked x axis is time, not categories) — never a blank label node,
+    // and the svg-level <title> carries the section aria label.
+    expect(categoryCard).toContain(`>${t("en", "insights.uncategorized")}</span>`);
+    expect(categoryCard).not.toContain('chart-legend-label"></span>');
+    expect(categoryCard).toContain('name="uncategorized" class="recharts-rectangle chart-fill-gray-700"');
+    expect(categoryCard).not.toContain("<title></title>");
   });
 
-  test("NULL and empty-string rows merge into ONE summed uncategorized bar (bugbot duplicate-key fix)", () => {
-    // The insights query groups NULL and "" as separate rows; per-row
-    // coalescing mapped both onto the same uncategorized key — two
-    // identically labeled bars with duplicate React keys and split counts.
-    // The rows must aggregate by the coalesced key before mapping: exactly
-    // one uncategorized bar carrying the summed count.
+  test("NULL and empty-string rows merge into ONE summed uncategorized series (bugbot duplicate-key fix)", () => {
+    // The insights store groups NULL and "" as separate grid keys (only
+    // NULL merges server-side; "" is schema-permitted); per-key series
+    // mapping would render two identically labeled gray segments with
+    // split counts. chartBuckets aggregates by the coalesced key before
+    // mapping: exactly one uncategorized series carrying the summed count
+    // (plan 56 QC F-004 semantics, one layer down).
     const data: InsightsSummary = {
       ...RECORDS,
       findings_by_category: [
@@ -220,50 +295,79 @@ describe("records page assembly (plan 36 T2)", () => {
         { category: null, count: 6 },
         { category: "", count: 2 },
       ],
+      findings_distribution: [
+        {
+          bucket_start: "2026-08-17",
+          granularity: "day",
+          by_severity: { "must-fix": 7, "should-fix": 5, nit: 3 },
+          by_category: { logic: 9, "": 2, uncategorized: 6 },
+        },
+      ],
     };
-    const [, category] = chartSlices(renderRecords("en", data));
+    const html = renderRecords("en", data);
     const label = t("en", "insights.uncategorized");
-    // Exactly one uncategorized bar — the old per-row mapping emitted two
-    // identically labeled bars (duplicate keys); the coalesced tick text
-    // renders once.
-    expect(category.split(`>${label}</tspan>`).length - 1).toBe(1);
-    // Its count is the SUM 6+2=8, not either per-row count. The pin reads
-    // the label-list section only: recharts ticks for max 9 are
-    // 0/3/6/9/12, so a bare ">6</tspan>" would match a tick.
-    const barEnds = category.slice(category.indexOf("recharts-label-list"));
-    expect(barEnds).toContain(">8</tspan>");
-    expect(barEnds).not.toContain(">6</tspan>");
-    expect(barEnds).not.toContain(">2</tspan>");
-    // Two bars total (logic + merged uncategorized), not three.
-    expect(category.split("<path").length - 1).toBe(2);
-    // First-seen order holds: logic leads, the merged bar follows it.
-    expect(category.indexOf(">logic</tspan>")).toBeGreaterThan(-1);
-    expect(category.indexOf(`>${label}</tspan>`)).toBeGreaterThan(category.indexOf(">logic</tspan>"));
+    const categoryCard = cardSlice(html, "Findings by category", "Weekly trend");
+    // Exactly one uncategorized legend item — the old per-row mapping
+    // emitted two identically labeled bars (duplicate keys); the coalesced
+    // label renders once.
+    expect(categoryCard.split(`>${label}</span>`).length - 1).toBe(1);
+    // Its stacked segment is the SUM 6+2=8, not either per-row count: the
+    // merged render's gray segment is byte-identical to an explicit
+    // 8-count series and differs from a 6-count one (the geometry path tag
+    // carries no render-unique ids, so cross-render equality is exact).
+    const graySegment = (fixture: InsightsSummary): string =>
+      new RegExp('<path [^>]*name="uncategorized" class="recharts-rectangle chart-fill-gray-700"[^>]*>').exec(
+        cardSlice(renderRecords("en", fixture), "Findings by category", "Weekly trend"),
+      )?.[0] ?? "";
+    const mergedGray = graySegment(data);
+    const explicit = (count: number): InsightsSummary => ({
+      ...data,
+      findings_distribution: [
+        {
+          bucket_start: "2026-08-17",
+          granularity: "day",
+          by_severity: { "must-fix": 7, "should-fix": 5, nit: 3 },
+          by_category: { logic: 9, uncategorized: count },
+        },
+      ],
+    });
+    expect(mergedGray).not.toBe("");
+    expect(mergedGray).toBe(graySegment(explicit(8)));
+    expect(mergedGray).not.toBe(graySegment(explicit(6)));
+    // Two series total (logic + the merged fallback), not three.
+    expect(categoryCard.split("<path").length - 1).toBe(2);
+    // First-seen order holds: logic leads, the merged series follows it.
+    expect(categoryCard.indexOf(">logic</span>")).toBeGreaterThan(-1);
+    expect(categoryCard.indexOf(`>${label}</span>`)).toBeGreaterThan(categoryCard.indexOf(">logic</span>"));
   });
 
   test("trend chart: dual-series legend with the preserved AD-601 pair, localized date axis, bucket-derived totals", () => {
     const html = renderRecords("en");
-    const [, , trend] = chartSlices(html);
+    // Plan 65: the stacked severity/category cards own HTML legends too, so
+    // the legend-order pins slice to the trend card (anchored by its title;
+    // the summary line and legend live inside it) instead of the whole page
+    // — on the full page the severity amber swatch precedes the trend
+    // legend. Within the card the four markers are unique (the summary line
+    // renders "…3 reviews · 6 findings", never a bare legend label).
+    const trendCard = cardSlice(html, "Weekly trend", "Recurring findings");
     // Legend order pins the series→color pairing: the blue swatch precedes
-    // the Reviews label, the amber swatch the Findings label. The legend is
-    // the HTML row that precedes the trend svg, so these read the full
-    // page html — all four markers are unique on the page (the summary
-    // line renders "Reviews: N"/"…findings", never a bare legend label).
-    const blue = html.indexOf("chart-swatch-blue-700");
-    const reviews = html.indexOf(">Reviews</span>");
-    const amber = html.indexOf("chart-swatch-amber-700");
-    const findings = html.indexOf(">Findings</span>");
+    // the Reviews label, the amber swatch the Findings label.
+    const blue = trendCard.indexOf("chart-swatch-blue-700");
+    const reviews = trendCard.indexOf(">Reviews</span>");
+    const amber = trendCard.indexOf("chart-swatch-amber-700");
+    const findings = trendCard.indexOf(">Findings</span>");
     expect(blue).toBeGreaterThanOrEqual(0);
     expect(blue).toBeLessThan(reviews);
     expect(reviews).toBeLessThan(amber);
     expect(amber).toBeLessThan(findings);
     // Week date axis labels render inside the svg (en M/D format).
+    const [, , trend] = chartSlices(html);
     expect(trend).toContain("8/17");
     expect(trend).toContain("8/24");
     // The summary line sums the weekly buckets (1+2 reviews, 2+4 findings);
     // both totals differ from the fixture's reviews_total=4, so the pin
     // only passes if the line derives from weekly_trend itself.
-    expect(html).toContain("In this window: 3 reviews · 6 findings");
+    expect(trendCard).toContain("In this window: 3 reviews · 6 findings");
   });
 
   test("each chart svg carries role=img with its section's aria-label (AC4)", () => {

@@ -91,10 +91,31 @@ describe("insights search wiring", () => {
       findings_by_category: [],
       verdict_distribution: [],
       weekly_trend: [],
+      // Plan 65 (AD-652): the distribution grid is REQUIRED like the other
+      // aggregations — one realistic day bucket (the task-1 store shape:
+      // fixed severity key set + window-union category keys + fallback).
+      findings_distribution: [
+        {
+          bucket_start: "2026-08-17",
+          granularity: "day",
+          by_severity: { "must-fix": 2, "should-fix": 1, nit: 0 },
+          by_category: { logic: 2, style: 0, uncategorized: 1 },
+        },
+      ],
       recurring_top: [],
       repos: [],
     };
     expect(parseInsights(body)?.reviews_total).toBe(0);
+    // The bucket rows parse verbatim — the stacked charts read these grids
+    // directly (row-strict guard, plan 65 B3).
+    expect(parseInsights(body)?.findings_distribution).toEqual([
+      {
+        bucket_start: "2026-08-17",
+        granularity: "day",
+        by_severity: { "must-fix": 2, "should-fix": 1, nit: 0 },
+        by_category: { logic: 2, style: 0, uncategorized: 1 },
+      },
+    ]);
     expect(parseInsights({ ...body, repos: ["acme/web"] })?.repos).toEqual(["acme/web"]);
     expect(parseInsights({ reviews_total: 0 })).toBeNull();
     // repos is opt-in (plan 36 QC F-001): missing is tolerated (defaults
@@ -102,6 +123,26 @@ describe("insights search wiring", () => {
     expect(parseInsights({ ...body, repos: undefined })?.repos).toBeUndefined();
     expect(parseInsights({ ...body, repos: "acme/web" })).toBeNull();
     expect(parseInsights({ ...body, repos: [1, 2] })).toBeNull();
+    // findings_distribution is NOT opt-in: a missing field (rolled-back
+    // Worker) or any drifted row takes the same null fallback as the other
+    // aggregations.
+    expect(parseInsights({ ...body, findings_distribution: undefined })).toBeNull();
+    expect(parseInsights({ ...body, findings_distribution: "2026-08-17" })).toBeNull();
+    expect(parseInsights({ ...body, findings_distribution: [{ bucket_start: "2026-08-17" }] })).toBeNull();
+    expect(
+      parseInsights({
+        ...body,
+        findings_distribution: [{ bucket_start: "2026-08-17", granularity: "month", by_severity: {}, by_category: {} }],
+      }),
+    ).toBeNull();
+    expect(
+      parseInsights({
+        ...body,
+        findings_distribution: [
+          { bucket_start: "2026-08-17", granularity: "day", by_severity: { "must-fix": "2" }, by_category: {} },
+        ],
+      }),
+    ).toBeNull();
   });
 });
 

@@ -12,7 +12,15 @@
  *
  * Plan 65 T2 (B4): the aggregate BarChart and its describe block retired
  * with the component (the insights severity/category cards consume
- * StackedBarChart now); the stacked-chart SSR pins land with Task 3.
+ * StackedBarChart now).
+ * Plan 65 T3 (B8): the stacked-chart SSR pins — StackedBarChart renders the
+ * same terminal stacked geometry through the idiom below (createElement in
+ * this .ts file, the TrendChart face): the series-ordered HTML legend row,
+ * the per-segment fill classes + tooltip series names, the stackId
+ * bottom-up adjacency, the svg <title> mirror, the zero-count buckets kept
+ * on the axis (time continuity, AC-C), and the day/week label face. The
+ * severity/category page faces ride the InsightsPage pins in
+ * insights-page.test.ts.
  *
  * The recharts-internal class names pinned below (recharts-rectangle,
  * recharts-cartesian-axis-tick-value) couple to recharts 2.15.4: a
@@ -25,6 +33,11 @@ import { join } from "node:path";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { TrendChart, type TrendPoint } from "../../src/spa/components/charts/TrendChart";
+import {
+  StackedBarChart,
+  type DistributionBucket,
+  type StackedSeries,
+} from "../../src/spa/components/charts/StackedBarChart";
 
 const trendChart = (
   points: TrendPoint[],
@@ -116,6 +129,147 @@ describe("TrendChart SSR (plan 63 T2, recharts face)", () => {
 
   test("empty input renders null — the page owns the readable empty state", () => {
     expect(trendChart([])).toBe("");
+  });
+});
+
+describe("StackedBarChart SSR (plan 65 B8, stacked face)", () => {
+  const severityBuckets: DistributionBucket[] = [
+    {
+      bucket_start: "2026-08-17",
+      granularity: "day",
+      by_severity: { "must-fix": 7, "should-fix": 5, nit: 3 },
+      by_category: {},
+    },
+  ];
+  const severitySeries: StackedSeries[] = [
+    { key: "must-fix", label: "must-fix", fillClass: "chart-fill-red-700" },
+    { key: "should-fix", label: "should-fix", fillClass: "chart-fill-amber-700" },
+    { key: "nit", label: "nit", fillClass: "chart-fill-gray-700" },
+  ];
+
+  const stackedChart = (
+    buckets: DistributionBucket[],
+    series: StackedSeries[],
+    overrides: { locale?: "en" | "zh_CN"; ariaLabel?: string } = {},
+  ) =>
+    renderToStaticMarkup(
+      createElement(StackedBarChart, {
+        buckets,
+        series,
+        locale: overrides.locale ?? "en",
+        ariaLabel: overrides.ariaLabel ?? "Findings by severity",
+      }),
+    );
+
+  /** The y/height of one stacked segment path (recharts-rectangle face). */
+  const segment = (html: string, fillClass: string): { y: number; height: number } => {
+    const tag = new RegExp(`<path [^>]*class="recharts-rectangle ${fillClass}"[^>]*>`).exec(html)?.[0];
+    const y = tag ? /\by="([0-9.]+)"/.exec(tag) : null;
+    const height = tag ? /\bheight="([0-9.]+)"/.exec(tag) : null;
+    if (!tag || !y || !height) throw new Error(`stacked segment not found: ${fillClass}`);
+    return { y: Number(y[1]), height: Number(height[1]) };
+  };
+
+  test("renders role=img with the aria-label, the svg <title> mirror, and the legend row in series order", () => {
+    const html = stackedChart(severityBuckets, severitySeries);
+    expect(html).toContain('role="img"');
+    expect(html).toContain('aria-label="Findings by severity"');
+    // Same svg <title> mirror pin as the TrendChart face (recharts Surface
+    // forwards `title` → `<title>`): dropping the prop fails here too.
+    expect(html).toContain("<title>Findings by severity</title>");
+    // Legend order = stack order: the red swatch precedes the must-fix
+    // label, amber precedes should-fix, gray precedes nit (the HTML legend
+    // row above the chart — the plan-56 TrendChart face).
+    const red = html.indexOf("chart-swatch-red-700");
+    const mustFix = html.indexOf(">must-fix</span>");
+    const amber = html.indexOf("chart-swatch-amber-700");
+    const shouldFix = html.indexOf(">should-fix</span>");
+    const gray = html.indexOf("chart-swatch-gray-700");
+    const nit = html.indexOf(">nit</span>");
+    expect(red).toBeGreaterThanOrEqual(0);
+    expect(red).toBeLessThan(mustFix);
+    expect(mustFix).toBeLessThan(amber);
+    expect(amber).toBeLessThan(shouldFix);
+    expect(shouldFix).toBeLessThan(gray);
+    expect(gray).toBeLessThan(nit);
+  });
+
+  test("stacked segments carry the series fill classes and the tooltip series names", () => {
+    const html = stackedChart(severityBuckets, severitySeries);
+    // Colors ride the charts.css class rules only — never presentation
+    // attributes, never raw hex (the no-raw-hex source scan below covers
+    // the module; these pins lock the rendered class face).
+    expect(html).toContain('class="recharts-rectangle chart-fill-red-700"');
+    expect(html).toContain('class="recharts-rectangle chart-fill-amber-700"');
+    expect(html).toContain('class="recharts-rectangle chart-fill-gray-700"');
+    // Exact counts ride the tooltip — every segment path carries its series
+    // name so the hover face can name the number it holds.
+    expect(html).toContain('name="must-fix"');
+    expect(html).toContain('name="should-fix"');
+    expect(html).toContain('name="nit"');
+  });
+
+  test("stackId stacking face: segments pile bottom-up in series order, heights track the values", () => {
+    const html = stackedChart(severityBuckets, severitySeries);
+    const must = segment(html, "chart-fill-red-700");
+    const should = segment(html, "chart-fill-amber-700");
+    const nit = segment(html, "chart-fill-gray-700");
+    // The first series sits on the axis (plot bottom = 166 - 20 axis) and
+    // every next series starts exactly where the previous one ends.
+    expect(must.y + must.height).toBeCloseTo(146);
+    expect(should.y + should.height).toBeCloseTo(must.y);
+    expect(nit.y + nit.height).toBeCloseTo(should.y);
+    // Heights track the values (7/5/3), not the stack order — a segment
+    // carrying the wrong key's count cannot satisfy both ratios.
+    expect(must.height / nit.height).toBeCloseTo(7 / 3);
+    expect(should.height / nit.height).toBeCloseTo(5 / 3);
+  });
+
+  test("zero-count buckets stay on the axis (time continuity) without geometry", () => {
+    const buckets: DistributionBucket[] = [
+      {
+        bucket_start: "2026-08-17",
+        granularity: "day",
+        by_severity: { "must-fix": 0, "should-fix": 0, nit: 0 },
+        by_category: {},
+      },
+      {
+        bucket_start: "2026-08-18",
+        granularity: "day",
+        by_severity: { "must-fix": 2, "should-fix": 1, nit: 1 },
+        by_category: {},
+      },
+    ];
+    const html = stackedChart(buckets, severitySeries);
+    // Both date ticks render — the empty day is an honest grid column,
+    // never filtered off the axis (AC-C).
+    expect(html).toContain(">8/17</tspan>");
+    expect(html).toContain(">8/18</tspan>");
+    // Geometry only where counts exist: one column × three stacked
+    // segments (zero-height rects never render).
+    expect(html.split("<path").length - 1).toBe(3);
+  });
+
+  test("day and week buckets share one axis face; the locale localizes the labels", () => {
+    // The 90d window's Monday-anchored week buckets (granularity "week")
+    // render the identical axis grammar as day buckets.
+    const weekBuckets: DistributionBucket[] = [
+      {
+        bucket_start: "2026-08-17",
+        granularity: "week",
+        by_severity: { "must-fix": 1, "should-fix": 0, nit: 0 },
+        by_category: {},
+      },
+    ];
+    expect(stackedChart(weekBuckets, severitySeries)).toContain("8/17");
+    const zh = stackedChart(weekBuckets, severitySeries, { locale: "zh_CN" });
+    expect(zh).toContain("8月17日");
+    expect(zh).not.toContain("8/17");
+  });
+
+  test("empty buckets or empty series render null — the page owns the readable empty state", () => {
+    expect(stackedChart([], severitySeries)).toBe("");
+    expect(stackedChart(severityBuckets, [])).toBe("");
   });
 });
 

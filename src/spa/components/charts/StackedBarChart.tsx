@@ -60,12 +60,13 @@ export interface StackedSeries {
 
 /**
  * One findings_distribution row (plan 65, AD-652 wire shape — mirrors the
- * store type; the dashboard leaf exports no types). `granularity` rides
- * the payload but the chart face is identical for day and week buckets.
+ * store type and the data.ts wire guard; the dashboard leaf exports no
+ * types). `granularity` is wire-required (the B3 row guard rejects a
+ * drifted row) but the chart face is identical for day and week buckets.
  */
 export interface DistributionBucket {
   bucket_start: string;
-  granularity?: "day" | "week";
+  granularity: "day" | "week";
   by_severity: Record<string, number>;
   by_category: Record<string, number>;
 }
