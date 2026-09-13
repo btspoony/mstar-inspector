@@ -1464,10 +1464,16 @@ export async function postLineCommentsWithOctokit(
 export function createReviewCommenter(env: CommenterEnv, threads?: { db: D1Like; nowMs?: () => number }): ReviewCommenter {
   let appAuth: AppAuthStrategy | null = null;
   async function getAppAuth(): Promise<AppAuthStrategy> {
-    if (appAuth === null) {
-      appAuth = createAppAuth({ appId: env.APP_ID, privateKey: normalizePrivateKey(env.PRIVATE_KEY) });
+    // Local capture: the closure variable's null state cannot be narrowed
+    // across awaits by TS. The cast is the documented AppAuthStrategy seam —
+    // auth-app's AuthInterface overloads are not structurally writable to the
+    // named surface, but the runtime strategy satisfies it.
+    let auth = appAuth;
+    if (auth === null) {
+      auth = createAppAuth({ appId: env.APP_ID, privateKey: normalizePrivateKey(env.PRIVATE_KEY) }) as unknown as AppAuthStrategy;
+      appAuth = auth;
     }
-    return appAuth;
+    return auth;
   }
 
   /**
@@ -1508,7 +1514,11 @@ export function createReviewCommenter(env: CommenterEnv, threads?: { db: D1Like;
     try {
       const auth = await getAppAuth();
       const { token } = await auth({ type: "app" });
-      const { data } = await new Octokit({ auth: token }).rest.apps.get();
+      // The installed rest-endpoint types omit `apps.get` on this Octokit
+      // build — the runtime method exists; the cast pins only the response
+      // fields consumed below (identity proof, spec §7.5).
+      const octokit = new Octokit({ auth: token });
+      const { data } = await (octokit.rest.apps as unknown as { get: () => Promise<{ data: { id?: unknown; slug?: unknown } }> }).get();
       cachedIdentity =
         typeof data?.id === "number" && typeof data?.slug === "string" && data.slug.length > 0
           ? { githubAppId: data.id, slug: data.slug }

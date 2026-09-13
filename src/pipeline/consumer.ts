@@ -43,8 +43,11 @@
  * review_failures row (stage=parse) + staged→sent degraded comment (both
  * best-effort) + ack — parseReviewOutput is a pure function of
  * run.stdout, so retry is deterministic waste. No reviews row and NO KV
- * done-state on degrade: a later webhook for the same sha legitimately
- * re-runs the review. Three typed outcomes never throw: the in-flight
+ * done-state on degrade; a later trigger for the same sha re-runs the
+ * review UNLESS the §7.7 step-2 journal read finds a non-terminal row for
+ * that scope/SHA (which hands off to recovery and acks — the applied
+ * degraded publication is terminal and never blocks a legitimate re-run).
+ * Three typed outcomes never throw: the in-flight
  * guard (bugbot BB-3) — guard-held schedules a per-message delayed retry
  * (60s/120s/240s) and finally acks with a warning instead of DLQing — a
  * PAUSED App's message (plan 16, review_enabled=0), which acks
@@ -691,12 +694,17 @@ function parseUnifiedDiffFiles(diffText: string): ParsedDiffFile[] {
  * bounded to 80 lines / 8 KiB per side, whole catalog bounded to 256 KiB —
  * oversized/unsupported slices are EXCLUDED (no eligible slice), never
  * silently truncated. Deleted files yield one `deleted-file` slice proving
- * absence at HEAD (complete when the hunk starts at old line 1). Returns
- * the slices plus the per-target excluded flags (honest coverage).
+ * absence at HEAD (complete when the hunk starts at old line 1). Every
+ * slice is pinned to the capture's anchor: `headSha`/`baseSha` both carry
+ * the AUTHORITATIVE checkout SHA the diff was captured for (the worker runs
+ * one diff per pinned checkout — the per-file old/new blob oids on each
+ * slice carry the finer-grained pins). Returns the slices plus the
+ * per-target excluded flags (honest coverage).
  */
 function buildEvidenceCatalog(
   diffText: string,
   targets: RecheckTarget[],
+  captureSha: string,
 ): { slices: EvidenceSlice[]; excludedTargets: Set<string> } {
   const slices: EvidenceSlice[] = [];
   const excludedTargets = new Set<string>();
@@ -713,8 +721,8 @@ function buildEvidenceCatalog(
     if (hunk.oldLines.length > RECHECK_SLICE_MAX_LINES || hunk.newLines.length > RECHECK_SLICE_MAX_LINES) return null;
     const slice: EvidenceSlice = {
       id: "",
-      headSha: "",
-      baseSha: "",
+      headSha: captureSha,
+      baseSha: captureSha,
       path: file.path,
       oldPath: file.oldPath,
       kind,
@@ -1044,14 +1052,23 @@ async function publishDegradedPublication(input: {
     if (lease === null) {
       return { phase: "failed", reason: "publication journal claim failed — degraded notice not sent" };
     }
-    const sent = await commenter.postPreparedDegraded({
-      ...target,
-      headSha: input.headSha,
-      round: plan.round,
-      targetCommentId: plan.action === "update" ? plan.commentId : null,
-      body,
-      publicationId: staged.id,
-    });
+    let sent: { posted: boolean; commentId: number | null };
+    try {
+      sent = await commenter.postPreparedDegraded({
+        ...target,
+        headSha: input.headSha,
+        round: plan.round,
+        targetCommentId: plan.action === "update" ? plan.commentId : null,
+        body,
+        publicationId: staged.id,
+      });
+    } catch {
+      // A throw AT the send is post-attempt uncertainty: whether GitHub
+      // received it is unknown (§7.9 — only a definitive rejection is "not
+      // published"). The staged row stays sending for read-only discovery;
+      // the Check fallback classification is publication-unknown.
+      return { phase: "unknown", publicationId: staged.id };
+    }
     const proof = {
       publicationId: staged.id,
       scope: input.scope,
@@ -2204,8 +2221,12 @@ async function processMessage(payload: ReviewJobPayload, deps: ProcessDeps): Pro
     }
     const diffText = diff.stdout.length <= DIFF_PREFETCH_MAX_BYTES ? diff.stdout : "";
 
-    // Trusted evidence catalog (§7.3) for the selected targets.
-    const catalog = targets.length > 0 ? buildEvidenceCatalog(diffText, targets) : { slices: [] as EvidenceSlice[], excludedTargets: new Set<string>() };
+    // Trusted evidence catalog (§7.3) for the selected targets, pinned to
+    // the authoritative checkout SHA.
+    const catalog =
+      targets.length > 0
+        ? buildEvidenceCatalog(diffText, targets, headSha)
+        : { slices: [] as EvidenceSlice[], excludedTargets: new Set<string>() };
 
     // Bounded discussion capture (§7.8) for the selected targets' known
     // threads. API failure is unavailable — never empty/complete.

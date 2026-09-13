@@ -732,19 +732,31 @@ describe("createReviewConsumer", () => {
     expect(warn).toBeDefined();
   });
 
-  test("parse failure with a failing degraded post → failure row + ack anyway (best-effort comment)", async () => {
+  test("parse failure with a failing degraded SEND → typed UNKNOWN (post-attempt), journal stays sending, ack anyway", async () => {
     reset();
     runnerStdout = "not json at all";
     commenterState.preparedDegradedError = new Error("github down");
     const db = await createSeededTestD1();
     const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
 
-    await consumer(makeBatch(makePayload())); // resolves — a post failure is a log line only
+    await consumer(makeBatch(makePayload())); // resolves — a send failure is a log line only
 
     expect(failureRows(db)).toHaveLength(1);
     expect(messageAckCalls).toHaveLength(1);
-    const warn = logLines.find((l) => l.level === "warn" && l.msg.includes("degraded publication failed"));
+    // A throw at the SEND is post-attempt uncertainty — never classified as
+    // a definitive not-posted (§7.9: only definitive rejections are).
+    const warn = logLines.find((l) => l.level === "warn" && l.msg.includes("degraded publication unknown"));
     expect(warn).toBeDefined();
+    // The staged degraded payload stays sending/pending (no proof) for M8
+    // read-only discovery.
+    const pub = db.raw.query("SELECT phase, recovery_state, proof_json FROM review_publications").get() as {
+      phase: string;
+      recovery_state: string;
+      proof_json: string | null;
+    };
+    expect(pub.phase).toBe("sending");
+    expect(pub.recovery_state).toBe("pending");
+    expect(pub.proof_json).toBeNull();
   });
 
   test("comment failure → failure row (stage=pipeline) + rethrow, destroy (AL-6)", async () => {
@@ -2936,6 +2948,74 @@ describe("finding recheck & closure (plan 67 §7.7/§7.4/§7.10)", () => {
     const hookWarn = logLines.find((l) => l.level === "warn" && l.msg.includes("check terminalize hook failed"));
     expect(hookWarn).toBeDefined();
     expect(reviewCount(db)).toBe(1);
+  });
+
+  test("catch-path Check classification: send-throw → publication-unknown with the id; claim-fail → pre-publication-failure", async () => {
+    // (a) A throw AT the prepared send is post-attempt uncertainty: the hook
+    // is terminalized WITH the publication id so its proof read decides.
+    reset();
+    runnerStdout = JSON.stringify(VALID_OUTPUT);
+    commenterState.preparedReviewError = new Error("socket hangup after send");
+    const db = await createSeededTestD1();
+    const terminalizeCalls: Array<{ publicationId: string | null; outcome: string }> = [];
+    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, {
+      ...testOverrides,
+      checks: {
+        begin: mock(async () => ({
+          attemptId: "attempt-1",
+          scope: { appId: TEST_APP_ID, installationId: 123, owner: "acme", repo: "widgets", prNumber: 42 },
+          githubAppId: 424242,
+          headSha: SHA,
+          lease: { holder: "h", epoch: 1, untilMs: 1 },
+        })),
+        terminalize: mock(async (input: { publicationId: string | null; outcome: string }) => {
+          terminalizeCalls.push({ publicationId: input.publicationId, outcome: input.outcome });
+        }),
+      },
+    });
+
+    await expect(consumer(makeBatch(makePayload()))).rejects.toThrow("socket hangup after send");
+
+    expect(terminalizeCalls).toEqual([{ publicationId: expect.any(String), outcome: "publication-unknown" }]);
+
+    // (b) A throw BEFORE any send (epoch-fenced claim refused) is a clean
+    // pre-publication failure: terminalized with a null publication id.
+    reset();
+    runnerStdout = JSON.stringify(VALID_OUTPUT);
+    const db2 = await createSeededTestD1();
+    const failingDb = {
+      ...db2,
+      prepare: (query: string) => {
+        if (query.includes("phase = CASE WHEN phase = 'prepared' THEN 'sending'")) {
+          return {
+            bind: () => {
+              throw new Error("d1 down at claim");
+            },
+          } as never;
+        }
+        return db2.prepare(query);
+      },
+    } as typeof db2;
+    const terminalizeCalls2: Array<{ publicationId: string | null; outcome: string }> = [];
+    const consumer2 = createReviewConsumer(await makeEnv({ DB: failingDb as never }), testLog, {
+      ...testOverrides,
+      checks: {
+        begin: mock(async () => ({
+          attemptId: "attempt-2",
+          scope: { appId: TEST_APP_ID, installationId: 123, owner: "acme", repo: "widgets", prNumber: 42 },
+          githubAppId: 424242,
+          headSha: SHA,
+          lease: { holder: "h", epoch: 1, untilMs: 1 },
+        })),
+        terminalize: mock(async (input: { publicationId: string | null; outcome: string }) => {
+          terminalizeCalls2.push({ publicationId: input.publicationId, outcome: input.outcome });
+        }),
+      },
+    });
+
+    await expect(consumer2(makeBatch(makePayload()))).rejects.toThrow("d1 down at claim");
+
+    expect(terminalizeCalls2).toEqual([{ publicationId: null, outcome: "pre-publication-failure" }]);
   });
 
   test("absent checks dep → no Check activity at all, M8 fully operational", async () => {
