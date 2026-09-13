@@ -198,9 +198,31 @@ and mirrored in `.env.example`:
 | Metadata | read | required by GitHub |
 | Pull requests | **write** | the review and its line comments |
 | Issues | **write** | the single overall-comment upsert |
+| Checks | **write** | advisory review Check Runs — execution status only (`mstar-inspector review` on the reviewed commit). Never an approval or a merge gate. |
 
-Plan 68 (M7) will add `checks: write` for advisory Checks — plan 67 does not
-request it, and no Check Run behavior is shipped here.
+**What the Check means.** A `success` conclusion records that the review **was
+published** — for every engine verdict. It is not an approval, not a merge
+gate, and never a `REQUEST_CHANGES` equivalent; the app requests neither
+event. A confirmed degraded publication is `neutral`; an execution failure or
+an unconfirmed publication is `failure`. Conclusions are decided from persisted
+publication proof, not from the code path, and a Check failure never blocks or
+delays the review. The run carries no `details_url`.
+
+**Branch protection is user-controlled.** The app never configures, requires or
+recommends a required status check. Whether any Check gates a merge is entirely
+the repository owner's choice.
+
+**Two same-name runs are possible (RL-12).** Local attempt fencing is not
+external exactly-once, and `external_id` is correlation rather than a
+server-side idempotency key. An attempt whose create was **unconfirmed** — the
+response was lost, or a refusal landed after the request was dispatched — is
+settled read-only by recovery: it adopts and terminalizes, and never creates a
+second run. But a **later attempt for the same commit** is a fresh generation
+with its own `external_id`, so it creates its own run instead of adopting the
+earlier one. GitHub then shows **two runs of `mstar-inspector review`** for one
+commit, and the **newest applicable attempt** is authoritative (it carries the
+latest persisted proof). This is not a duplicate review and never authorizes
+publishing twice.
 
 Two credential boundaries back this set: the Worker mints a purpose-scoped
 `review-write` grant that never leaves the Worker, while every Sandbox and
@@ -480,8 +502,9 @@ Prerequisites: dashboard OAuth (`OAUTH_CLIENT_ID` /
    webhook URL is the App's OWN route `{origin}/webhook/{slug}`
    (`src/dashboard/manifest.ts` `buildManifest`). Confirm the requested
    permissions on GitHub — `contents: write`, `metadata: read`,
-   `pull_requests: write`, `issues: write` (rationale and the Worker-only
-   `contents: write` boundary: § GitHub App permissions above).
+   `pull_requests: write`, `issues: write`, `checks: write` (rationale, the
+   Worker-only `contents: write` boundary and the advisory Check semantics:
+   § GitHub App permissions above).
 3. **Manifest commit** — GitHub redirects back to
    `/dashboard/manifest/callback`; the dashboard exchanges the code, parks
    the credentials in the single-use hold cookie, and shows the confirm
@@ -738,10 +761,11 @@ Deployed image record (DOCS-01 baseline):
 
 - `wrangler.jsonc → triggers.crons: ["*/15 * * * *"]` — every 15 min the
   `scheduled` handler (src/worker/index.ts) runs the sweep
-  (src/worker/sweep.ts) and then the plan-67 lifecycle reconciler
-  ([§ Lifecycle recovery](#lifecycle-recovery-plan-67-7111)), each stage in its
-  own try/catch so neither can break the other (plan 68 appends a Check
-  reconciler after them). The sweep counts `review_failures` rows over the
+  (src/worker/sweep.ts), then the plan-67 lifecycle reconciler
+  ([§ Lifecycle recovery](#lifecycle-recovery-plan-67-7111)), then the plan-68
+  Check recovery reconciler ([§ Check recovery](#check-recovery-plan-68-7112)),
+  each stage in its own try/catch so none can break another. The sweep counts
+  `review_failures` rows over the
   trailing 24h across ALL stages (parse + runner/sandbox/pipeline; the
   per-attempt rows written by plan 18 T2 make this table the sufficient failure
   signal).
@@ -802,6 +826,47 @@ continue only for an **otherwise active** exact App; a disabled, deleted,
 missing or identity-mismatched App keeps its suspension (frozen policy).
 Budgets and the exact selection predicates: `.mstar/specs/review-lifecycle.md`
 §7.11.1.
+
+### Check recovery (plan 68 §7.11.2)
+
+A third independent stage on the same trigger — `reconcileReviewChecks`
+(`src/worker/check-reconcile.ts`), in its own try/catch and throw-proof by
+contract — finishes Check work the inline consumer hook could not complete.
+It never re-runs a paid review:
+
+- **Adopt before create.** A run that may already exist is found by exact
+  App / `external_id` / SHA (`filter: 'all'`, at most 2 pages), never inferred
+  from name or PR association alone. A create is legal only while the attempt
+  is `not-sent` — provably never dispatched, including the adapter's pre-send
+  refusal — and the App is enabled; once a create may have been sent
+  (`sending`/`unknown`) the row is settled by read-only adoption, because
+  resetting to `not-sent` would mint a second run for the same head.
+- **Conclusions come from persisted proof.** An attempt whose
+  `desired = in_progress` expires at its execution deadline and is then
+  terminalized from the publication journal (`success` with matching proof,
+  `neutral` for a confirmed degraded publication, `failure` otherwise) —
+  `in_progress` is never passed to the completion API.
+- **Intent before send, observation after validation.** The frozen conclusion is
+  persisted before the remote update, and the observed state advances only for a
+  response that matches the persisted identity, `completed` status and intended
+  conclusion. A late response from an old lease epoch persists nothing.
+- **Bounded.** ≤6 requests per row, ≤100 requests per 60s run, ≤5s per request
+  (clamped by the remaining run deadline). A budget refusal is pre-dispatch: the
+  claim is handed straight back, nothing is mutated, and no attempt is spent.
+- **Honest give-up.** At the fifth failure the row is marked `local-error` with
+  a `terminal_ms` under the live fence and a structured
+  `ops_check_reconcile_gave_up` warning carrying App/scope/work id and reason.
+  The row stays visible with its remote id and `external_id` — never dropped,
+  never cleared, never reported as remote completion.
+- **Operator retry.** The row-scoped retry reopens recovery of the **same
+  historical identity** — no new generation, no model replay — and refuses a
+  live lease, a newer active generation or a suspended App. It is not
+  permission to replay a review.
+
+Pause semantics for this lane mirror the lifecycle lane: a paused App may adopt
+read-only and terminalize an already-known run, but a never-sent attempt is
+never created while paused. The same-name duplicate-run possibility above
+(§ GitHub App permissions) is the visible consequence of RL-12 in this lane.
 
 ### Secrets inventory delta
 

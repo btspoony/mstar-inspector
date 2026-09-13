@@ -85,6 +85,7 @@ export type ManifestPayload = {
     metadata: "read";
     pull_requests: "write";
     issues: "write";
+    checks: "write";
   };
 };
 /** Manifest App name prefix; GitHub rejects App names over 34 characters. */
@@ -149,6 +150,7 @@ export function buildManifest(origin: string, login: string, slug: string): Mani
       metadata: "read",
       pull_requests: "write",
       issues: "write",
+      checks: "write",
     },
   };
 }
