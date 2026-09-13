@@ -480,6 +480,57 @@ describe("applyPublishedLifecycle (spec §7.2 state machine + §7.7 step 9)", ()
     expect(publicationRow(db, "pub-1").phase).toBe("confirmed");
     expect((db.raw.query("SELECT COUNT(*) AS n FROM reviews").get() as { n: number }).n).toBe(0);
   });
+
+  test("a chunked apply stops writing once the lease is replaced (§7.11.1 chunk fence)", async () => {
+    const db = createSeededTestD1();
+    // >25 statements ⇒ more than one chunk: 30 seen upserts + 30 intents.
+    const seen = Array.from({ length: 30 }, (_, i) => seenEntry(`row-${i}`, `f-${i}`));
+    const pay = payload({
+      lifecycle: lifecycleRound({ seen }),
+      lineIntents: seen.map((entry, i) => intent(`assoc-${i}`, entry.rowId, "pub-1", 1)),
+    });
+    const lease = await stageClaimProve(db, "pub-1", pay, 1000);
+
+    // The clock is read once per chunk fence. Before the SECOND chunk's fence
+    // a rival invocation has already claimed a NEWER epoch (the 120s lease
+    // expired mid-apply): the stale apply must stop instead of mutating
+    // findings/associations under ownership it no longer holds.
+    let reads = 0;
+    const applied = await applyPublishedLifecycle(db, "pub-1", lease, 2000, () => {
+      reads += 1;
+      if (reads === 3) {
+        db.raw
+          .prepare(`UPDATE review_publications SET holder = 'other', lease_epoch = lease_epoch + 1 WHERE id = 'pub-1'`)
+          .run();
+      }
+      return 2000;
+    });
+
+    expect(reads).toBe(3); // entry fence, first chunk, aborted second chunk
+    expect(applied).toBe(false); // the stale invocation never marks complete
+    // Only the first chunk's writes landed; the second chunk never ran.
+    expect((db.raw.query("SELECT COUNT(*) AS n FROM review_findings").get() as { n: number }).n).toBe(25);
+    expect((db.raw.query("SELECT COUNT(*) AS n FROM review_threads").get() as { n: number }).n).toBe(0);
+    expect(publicationRow(db, "pub-1").phase).toBe("confirmed"); // never marked applied
+  });
+
+  test("a chunked apply stops when its own lease expires between chunks", async () => {
+    const db = createSeededTestD1();
+    const seen = Array.from({ length: 30 }, (_, i) => seenEntry(`row-${i}`, `f-${i}`));
+    const pay = payload({ lifecycle: lifecycleRound({ seen }) });
+    const lease = await stageClaimProve(db, "pub-1", pay, 1000);
+
+    let reads = 0;
+    const applied = await applyPublishedLifecycle(db, "pub-1", lease, 2000, () => {
+      reads += 1;
+      return reads < 3 ? 2000 : lease.untilMs + 1; // the second chunk finds the lease expired
+    });
+
+    expect(applied).toBe(false);
+    expect(reads).toBe(3);
+    expect((db.raw.query("SELECT COUNT(*) AS n FROM review_findings").get() as { n: number }).n).toBe(25);
+    expect(publicationRow(db, "pub-1").phase).toBe("confirmed");
+  });
 });
 
 describe("recurrence reopen and identity drift (spec §7.2)", () => {

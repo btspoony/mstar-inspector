@@ -43,11 +43,15 @@
  *
  * Budgets (spec §7.11.1): ≤80 GitHub requests and 45s per run, ≤15 requests
  * per thread operation, each request ≤5s and capped by the remaining run
- * deadline. Costs are conservative per-operation RESERVATIONS checked
- * before the operation starts; budget/deadline exhaustion stops the lane
- * without spending an attempt (a claim never happens). The reconciler
- * cannot enforce a per-request timeout inside the §7.5 surface — the run
- * deadline and the reservation accounting are the enforced bound.
+ * deadline. Costs are conservative per-operation RESERVATIONS checked before
+ * the operation starts (the thread lane reserves its ≤15 up front), so
+ * budget/deadline exhaustion stops a lane without spending an attempt (a
+ * claim never happens). The ≤5s per-request bound is ENFORCED, not declared:
+ * the App's commenter is built with a bounded `fetchImpl` that aborts every
+ * request (identity probe, token mint and API calls alike) at
+ * `min(5s, remaining run deadline)`, so a hung request cannot outlive the
+ * run. Timeout and unknown outcomes stay conservative — the send is not
+ * retried blindly, the row is deferred or capped durably.
  *
  * Throw-proof: the whole function is wrapped — a recovery failure (even a
  * throwing injected dependency) is logged and folded into `errors`; nothing
@@ -83,7 +87,7 @@ import {
   type PublicationRow,
 } from "../store/finding-lifecycle";
 import { createSecretbox } from "../dashboard/secretbox";
-import { createReviewCommenter, type ReviewCommenter } from "../pipeline/comment";
+import { createReviewCommenter, type CommenterFetch, type ReviewCommenter } from "../pipeline/comment";
 
 // ---------------------------------------------------------------------------
 // Summary + budget constants (spec §7.11.1 verbatim values)
@@ -114,6 +118,15 @@ export const RECONCILE_SELECT_LIMIT = 10;
 const PLAN_REQUESTS = 1;
 const SEND_REQUESTS = 2;
 const DISCOVERY_REQUESTS = 2;
+/**
+ * The §7.5 live App-identity proof (`GET /app`) issues exactly one request
+ * per App pair per run (the resolution is cached). It is reserved once per
+ * pair by `reviewerForPair` whenever the probe actually ran, so the probe
+ * cannot slip past the whole-run cap. It is accounted separately from the
+ * per-thread-operation bound (≤15 requests of the §7.5 surface itself,
+ * §7.11.1).
+ */
+const IDENTITY_REQUESTS = 1;
 
 /** Lease holder label for M8 recovery claims. */
 const HOLDER = "lifecycle-reconcile";
@@ -134,9 +147,25 @@ export type ReconcileReviewer = Pick<
   resolveFindingThread: NonNullable<ReviewCommenter["resolveFindingThread"]>;
 };
 
+/** Why a pair's credentials cannot be used (spec §7.6). */
+export type ReviewerUnavailableReason = "missing" | "deleted" | "disabled" | "decrypt-failed" | "identity-mismatch";
+
 export type ReviewerResolution =
   | { kind: "ok"; reviewer: ReconcileReviewer; paused: boolean }
-  | { kind: "unavailable"; reason: "missing" | "deleted" | "disabled" | "decrypt-failed" };
+  | { kind: "unavailable"; reason: ReviewerUnavailableReason };
+
+/**
+ * The run's transport bound, handed to the reviewer factory so every request
+ * the lane issues is aborted at `min(5s, remaining run time)`. `boundMs()`
+ * is read at each request, so a request issued late in the run gets only the
+ * remaining time; the run deadline is the ceiling either way.
+ */
+export type ReconcileTransport = {
+  /** Abort a single request after at most this many ms (≥1). */
+  boundMs: () => number;
+  /** Wrapped fetch — the ONLY transport the built reviewer may use. */
+  fetchImpl: CommenterFetch;
+};
 
 /**
  * Exact `(app_id, installation_id)` credential routing (spec §7.6): the
@@ -146,12 +175,15 @@ export type ReviewerResolution =
  * builds THIS App's commenter — the only credential source, never another
  * App's. `paused` rides the ok resolution (review_enabled = 0): the frozen
  * pause policy is enforced by the lanes, not by refusing credentials.
+ * `transport` carries the run's per-request bound; when supplied, the built
+ * commenter (and its token mint) issues EVERY request through it.
  */
 export type ReviewerFactory = (input: {
   db: D1Like;
   env: ScheduledEnv;
   appId: string;
   installationId: number;
+  transport?: ReconcileTransport;
 }) => Promise<ReviewerResolution>;
 
 type RoutingRow = {
@@ -178,8 +210,16 @@ async function routingRow(db: D1Like, appId: string, installationId: number): Pr
     .first<RoutingRow>();
 }
 
-/** The production reviewer factory: routing gates → decrypt → per-App commenter. */
-export const productionReviewerFactory: ReviewerFactory = async ({ db, env, appId, installationId }) => {
+/**
+ * The production reviewer factory: routing gates → decrypt → per-App
+ * commenter → live App-identity proof. The identity probe happens BEFORE the
+ * resolution is handed out (spec §7.6: an identity mismatch must make no
+ * GitHub mutation), so a mismatched pair is suspended durably by the caller
+ * and never reaches a publication/discovery/resolution surface. A failed or
+ * malformed probe is `identity-mismatch` too — the lanes must not mutate
+ * under an unproven identity.
+ */
+export const productionReviewerFactory: ReviewerFactory = async ({ db, env, appId, installationId, transport }) => {
   const row = await routingRow(db, appId, installationId);
   if (row === null) return { kind: "unavailable", reason: "missing" };
   if (row.deleted_at !== null) return { kind: "unavailable", reason: "deleted" };
@@ -189,9 +229,23 @@ export const productionReviewerFactory: ReviewerFactory = async ({ db, env, appI
       row.private_key_enc,
       `github_apps.private_key_enc:${row.id}`,
     );
-    const commenter = createReviewCommenter({ APP_ID: String(row.github_app_id), PRIVATE_KEY: pem }, { db });
-    const { resolveFindingThread } = commenter;
-    if (resolveFindingThread === undefined) return { kind: "unavailable", reason: "decrypt-failed" };
+    const commenter = createReviewCommenter({ APP_ID: String(row.github_app_id), PRIVATE_KEY: pem }, {
+      db,
+      ...(transport === undefined ? {} : { fetchImpl: transport.fetchImpl }),
+    });
+    const { resolveFindingThread, getAppIdentity } = commenter;
+    if (resolveFindingThread === undefined || getAppIdentity === undefined) {
+      return { kind: "unavailable", reason: "decrypt-failed" };
+    }
+    // The single purpose-scoped App-auth construction point also proves the
+    // LIVE identity (spec §7.5's JWT `GET /app`): the row's `github_app_id`
+    // must be the App the credentials actually authenticate as, with a
+    // nonblank slug. Any disagreement — wrong key, rotated credential,
+    // substituted pair — means no mutation is authorized for this pair.
+    const identity = await getAppIdentity();
+    if (identity === null || identity.githubAppId !== row.github_app_id) {
+      return { kind: "unavailable", reason: "identity-mismatch" };
+    }
     return {
       kind: "ok",
       paused: row.review_enabled === 0,
@@ -256,6 +310,27 @@ function reserve(budget: RunBudget, cost: number): void {
   budget.spent += cost;
 }
 
+/**
+ * The enforced per-request transport bound (§7.11.1: "each request ≤5s and
+ * additionally capped by remaining run deadline"). Every request gets its own
+ * abort signal at `min(5s, time left in the run)` — computed at the request,
+ * so a request issued late in the run cannot exceed the run's remaining
+ * time. A caller-supplied signal is preserved by combining signals rather
+ * than being replaced. This is the same runtime primitive the sweep's alert
+ * webhook uses (`AbortSignal.timeout`).
+ */
+function buildTransport(budget: RunBudget, now: () => number): ReconcileTransport {
+  const boundMs = (): number => Math.max(1, Math.min(RECONCILE_PER_REQUEST_MS, budget.deadline - now()));
+  return {
+    boundMs,
+    fetchImpl: (input, init) => {
+      const timeout = AbortSignal.timeout(boundMs());
+      const signal = init?.signal == null ? timeout : AbortSignal.any([init.signal, timeout]);
+      return fetch(input, { ...init, signal });
+    },
+  };
+}
+
 /** Backoff for the NEXT attempt after `attemptsAfter` consumed attempts. */
 function backoffFor(attemptsAfter: number): number {
   const index = Math.min(Math.max(attemptsAfter - 1, 0), LIFECYCLE_BACKOFF_MS.length - 1);
@@ -296,6 +371,9 @@ export async function reconcileReviewLifecycle(
     const now = deps.now ?? (() => Date.now());
     const budget: RunBudget = { spent: 0, deadline: now() + RECONCILE_RUN_BUDGET_MS };
     const reviewerFactory = deps.reviewer ?? productionReviewerFactory;
+    // The enforced per-request bound (§7.11.1): every request made by a
+    // reviewer this run builds is aborted at min(5s, remaining run time).
+    const transport = buildTransport(budget, now);
     // Per-pair resolution cache: one routing pass (and at most ONE bulk
     // suspension) per App pair per run.
     const reviewerCache = new Map<string, Promise<ReviewerResolution>>();
@@ -319,10 +397,10 @@ export async function reconcileReviewLifecycle(
     }
 
     // 1. Publication lane — at most half the run's request budget.
-    await reconcilePublications(env, db, now, budget, reviewerFactory, reviewerCache, log, summary);
+    await reconcilePublications(env, db, now, budget, reviewerFactory, transport, reviewerCache, log, summary);
 
     // 2. Thread lane — the remaining run budget.
-    await reconcileResolutions(env, db, now, budget, reviewerFactory, reviewerCache, log, summary);
+    await reconcileResolutions(env, db, now, budget, reviewerFactory, transport, reviewerCache, log, summary);
 
     log.info({ event: "ops_lifecycle_reconcile", ...summary }, "lifecycle reconcile pass complete");
     return summary;
@@ -348,7 +426,9 @@ async function reviewerForPair(
   env: ScheduledEnv,
   scope: Scope,
   nowMs: number,
+  budget: RunBudget,
   reviewerFactory: ReviewerFactory,
+  transport: ReconcileTransport,
   reviewerCache: Map<string, Promise<ReviewerResolution>>,
   log: ReconcileLog,
   summary: LifecycleReconcileSummary,
@@ -358,7 +438,15 @@ async function reviewerForPair(
   if (cached !== undefined) return cached;
   const resolution = (async () => {
     try {
-      return await reviewerFactory({ db, env, appId: scope.appId, installationId: scope.installationId });
+      const settled = await reviewerFactory({ db, env, appId: scope.appId, installationId: scope.installationId, transport });
+      // The factory proves the live App identity before returning — that probe
+      // is one GitHub request, counted here once per pair (the cache above
+      // keeps it to a single probe per run). Both outcomes that follow a
+      // COMPLETED probe are charged, so `budget.spent` reflects every request
+      // the run can actually issue; the pre-probe outcomes (missing / deleted
+      // / disabled / decrypt-failed) issue nothing and are not charged.
+      if (settled.kind === "ok" || settled.reason === "identity-mismatch") reserve(budget, IDENTITY_REQUESTS);
+      return settled;
     } catch (error) {
       // A throwing factory is a credential-path failure — fail closed to a
       // durable suspension rather than letting it escape the lane.
@@ -372,7 +460,7 @@ async function reviewerForPair(
   reviewerCache.set(pairKey, resolution);
   const settled = await resolution;
   if (settled.kind === "unavailable") {
-    const reason = `app ${settled.reason === "missing" ? "mapping missing" : settled.reason} — no GitHub mutation for this (${scope.appId}, ${scope.installationId}) pair`;
+    const reason = `app ${UNAVAILABLE_REASON_TEXT[settled.reason]} — no GitHub mutation for this (${scope.appId}, ${scope.installationId}) pair`;
     const pubs = await suspendPublicationRecovery(db, { appId: scope.appId, installationId: scope.installationId }, reason, nowMs);
     const threads = await suspendResolutionRecovery(db, { appId: scope.appId, installationId: scope.installationId }, reason, nowMs);
     summary.suspended += pubs + threads;
@@ -384,6 +472,19 @@ async function reviewerForPair(
   return settled;
 }
 
+/**
+ * Operator-facing suspension reasons (no payload/secret). An App-identity
+ * mismatch gets its own line so the operator can tell a wrong/rotated
+ * credential apart from a disabled or deleted App.
+ */
+const UNAVAILABLE_REASON_TEXT: Record<ReviewerUnavailableReason, string> = {
+  missing: "mapping missing",
+  deleted: "deleted",
+  disabled: "disabled",
+  "decrypt-failed": "credential decrypt failed",
+  "identity-mismatch": "live App identity does not match the routed github_app_id — no GitHub mutation",
+};
+
 // --- publication lane -------------------------------------------------------
 
 async function reconcilePublications(
@@ -392,6 +493,7 @@ async function reconcilePublications(
   now: () => number,
   budget: RunBudget,
   reviewerFactory: ReviewerFactory,
+  transport: ReconcileTransport,
   reviewerCache: Map<string, Promise<ReviewerResolution>>,
   log: ReconcileLog,
   summary: LifecycleReconcileSummary,
@@ -409,7 +511,7 @@ async function reconcilePublications(
     }
     // prepared / sending / unknown need GitHub — route credentials first.
     const scope = row.payload.scope;
-    const resolved = await reviewerForPair(db, env, scope, now(), reviewerFactory, reviewerCache, log, summary);
+    const resolved = await reviewerForPair(db, env, scope, now(), budget, reviewerFactory, transport, reviewerCache, log, summary);
     if (resolved.kind === "unavailable") continue; // pair suspended durably
     if (row.phase === "prepared") {
       await sendPreparedPublication(db, now, budget, resolved, row, log, summary);
@@ -434,7 +536,7 @@ async function applyConfirmedPublication(
   const lease = await claimPublication(db, row.id, HOLDER, now());
   if (lease === null) return; // another invocation owns the live lease
   try {
-    const applied = await applyPublishedLifecycle(db, row.id, lease, now());
+    const applied = await applyPublishedLifecycle(db, row.id, lease, now(), now);
     if (applied) {
       summary.applied += 1;
       return;
@@ -539,7 +641,7 @@ async function sendPreparedPublication(
       await settleFailedPublicationAttempt(db, now, row, lease, "proof persistence rejected the confirmation", summary, true);
       return;
     }
-    const applied = await applyPublishedLifecycle(db, row.id, lease, now());
+    const applied = await applyPublishedLifecycle(db, row.id, lease, now(), now);
     if (applied) {
       summary.applied += 1;
       return;
@@ -608,7 +710,7 @@ async function discoverUncertainPublication(
       await settleFailedPublicationAttempt(db, now, row, lease, "proof persistence rejected the discovered publication", summary, true);
       return;
     }
-    const applied = await applyPublishedLifecycle(db, row.id, lease, now());
+    const applied = await applyPublishedLifecycle(db, row.id, lease, now(), now);
     if (applied) {
       summary.applied += 1;
       return;
@@ -658,18 +760,25 @@ async function reconcileResolutions(
   now: () => number,
   budget: RunBudget,
   reviewerFactory: ReviewerFactory,
+  transport: ReconcileTransport,
   reviewerCache: Map<string, Promise<ReviewerResolution>>,
   log: ReconcileLog,
   summary: LifecycleReconcileSummary,
 ): Promise<void> {
   const rows = await listResolutionRecovery(db, now(), RECONCILE_SELECT_LIMIT);
   for (const { associationId, scope } of rows) {
-    // Budget BEFORE any claim: exhaustion stops the lane without spending
-    // an attempt (the §7.5 surface owns the claim — not calling it costs
-    // nothing).
+    // Budget BEFORE any claim: exhaustion stops the lane without spending an
+    // attempt (the §7.5 surface owns the claim — not calling it costs
+    // nothing). The cost is RESERVED, not merely checked: the §7.5 surface
+    // may issue up to the per-operation cap (lookup pages, two conversation
+    // snapshots, issue fence, mutate/post-observe), so without the
+    // reservation `budget.spent` would never grow and ten selected rows
+    // could each enter T2 after the publication lane already spent its
+    // share — far past the 80-request run cap (§7.11.1).
     if (!canSpend(budget, now(), RECONCILE_THREAD_OPERATION_REQUESTS, false)) return;
+    reserve(budget, RECONCILE_THREAD_OPERATION_REQUESTS);
     summary.examined += 1;
-    const resolved = await reviewerForPair(db, env, scope, now(), reviewerFactory, reviewerCache, log, summary);
+    const resolved = await reviewerForPair(db, env, scope, now(), budget, reviewerFactory, transport, reviewerCache, log, summary);
     if (resolved.kind === "unavailable") continue; // pair suspended durably
     // A paused App keeps "previously-authorized resolution retry" running
     // (frozen pause policy) — no extra gate here.

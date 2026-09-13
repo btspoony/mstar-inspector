@@ -54,9 +54,12 @@ import {
   RECONCILE_THREAD_OPERATION_REQUESTS,
   type LifecycleReconcileDeps,
   type ReconcileReviewer,
+  type ReconcileTransport,
 } from "../../src/worker/lifecycle-reconcile";
+import { createSecretbox } from "../../src/dashboard/secretbox";
 import type { ScheduledEnv } from "../../src/worker/env";
 import { createMigratedTestD1, type TestD1 } from "../store/helpers";
+import { testAppPem } from "../helpers/rsa-key";
 
 const APP = "11111111-2222-3333-4444-555555555555";
 const APP_B = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
@@ -64,6 +67,9 @@ const SCOPE: Scope = { appId: APP, installationId: 123, owner: "acme", repo: "wi
 const SCOPE_B: Scope = { appId: APP_B, installationId: 456, owner: "other", repo: "gadgets", prNumber: 7 };
 const SHA = "0123456789abcdef0123456789abcdef01234567";
 const T0 = 1_000_000;
+
+/** Base64 of exactly 32 bytes — the secretbox master-key requirement. */
+const TEST_ENCRYPTION_KEY = Buffer.alloc(32, 9).toString("base64");
 
 const SILENT_LOG = { warn: () => {}, info: () => {} };
 
@@ -236,6 +242,34 @@ async function seedConfirmedCrashed(db: TestD1, id: string, pay: PublicationPayl
 /** Seed a prepared (never sent) publication row staged `ageMs` ago. */
 async function seedPrepared(db: TestD1, id: string, pay: PublicationPayload, ageMs: number): Promise<void> {
   await stagePublication(db, { id, payload: pay, nowMs: T0 - ageMs });
+}
+
+/**
+ * Seed an App whose stored `private_key_enc` is a REAL, decryptable PKCS#8
+ * PEM. The production factory's identity proof must sign a JWT before it can
+ * reach the transport, so the `'enc-pem'` placeholder `seedApp` uses can
+ * never exercise the live-identity path.
+ */
+async function seedRealApp(db: TestD1, id: string, githubAppId: number): Promise<void> {
+  const pem = await testAppPem();
+  const encrypted = await createSecretbox(TEST_ENCRYPTION_KEY).encryptSecret(
+    pem,
+    `github_apps.private_key_enc:${id}`,
+  );
+  db.raw
+    .prepare(
+      `INSERT INTO github_apps
+         (id, slug, github_app_id, name, private_key_enc, webhook_secret_enc,
+          created_by, status, deleted_at, review_enabled, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, 'enc-secret', 'tester', 'active', NULL, 1, datetime('now'), datetime('now'))`,
+    )
+    .run(id, `reconcile-${id}`, githubAppId, `reconcile-${id}`, encrypted);
+  db.raw
+    .prepare(
+      `INSERT INTO app_installations (id, app_id, installation_id, account_login, seen_at)
+       VALUES (?, ?, ?, 'acme', datetime('now'))`,
+    )
+    .run(`inst-${id}-${SCOPE.installationId}`, id, SCOPE.installationId);
 }
 
 function seedFindingRow(db: TestD1, id: string, publicationId: string, scope: Scope, state = "addressed"): void {
@@ -851,5 +885,306 @@ describe("throw-proof wrapper (spec §7.11)", () => {
       reviewer: okReviewer(),
     });
     expect(summary).toEqual({ examined: 0, applied: 0, resolved: 0, unknown: 0, suspended: 0, errors: 1 });
+  });
+});
+
+describe("enforced per-request transport bound (spec §7.11.1)", () => {
+  /** Drive one pass and capture the run transport the factory receives. */
+  async function captureTransport(db: TestD1, clock: { now: number }): Promise<{
+    transport: ReconcileTransport;
+    boundedMs: () => number;
+  }> {
+    let captured: ReconcileTransport | undefined;
+    await reconcile(db, {
+      now: () => clock.now,
+      reviewer: async (input) => {
+        captured = input.transport;
+        return { kind: "unavailable", reason: "missing" };
+      },
+    });
+    if (captured === undefined) throw new Error("the run never built a transport");
+    return { transport: captured, boundedMs: captured.boundMs };
+  }
+
+  test("a request is clamped to the REMAINING run time, not only the 5s cap", async () => {
+    const db = createMigratedTestD1();
+    seedApp(db, APP);
+    await seedPrepared(db, "pub-1", degradedPayload(SCOPE), 120_000);
+    const clock = { now: T0 };
+    const { transport } = await captureTransport(db, clock);
+
+    // Deadline = T0 + 45s (fixed at run start). With plenty of run left the
+    // per-request bound is the 5s cap...
+    expect(transport.boundMs()).toBe(RECONCILE_PER_REQUEST_MS);
+    // ...and late in the run it collapses to the remaining time — this is the
+    // clamp the review found missing (§7.11.1: "additionally capped by
+    // remaining run deadline").
+    clock.now = T0 + RECONCILE_RUN_BUDGET_MS - 30;
+    expect(transport.boundMs()).toBe(30);
+    // Never zero/negative: a request already past the deadline gets 1ms.
+    clock.now = T0 + RECONCILE_RUN_BUDGET_MS + 10_000;
+    expect(transport.boundMs()).toBe(1);
+
+    // The clamp is ENFORCED on the wire, not merely computed: a hung upstream
+    // rejects inside the bound because the seam passes an aborting signal.
+    const realFetch = globalThis.fetch;
+    try {
+      globalThis.fetch = ((_input: unknown, init?: RequestInit) =>
+        new Promise((_resolve, reject) => {
+          const signal = init?.signal;
+          if (signal == null) {
+            reject(new Error("the bounded seam issued a request with no abort signal"));
+            return;
+          }
+          signal.addEventListener("abort", () => reject(signal.reason));
+        })) as typeof fetch;
+      clock.now = T0 + RECONCILE_RUN_BUDGET_MS - 40; // 40ms of run left
+      const started = performance.now();
+      await expect(transport.fetchImpl("https://api.github.com/app")).rejects.toMatchObject({
+        name: "TimeoutError",
+      });
+      const elapsed = performance.now() - started;
+      expect(elapsed).toBeLessThan(1_000); // far below the 5s cap — the remaining time bound it
+    } finally {
+      globalThis.fetch = realFetch;
+    }
+  });
+
+  test("a caller-supplied signal is preserved, not replaced, by the clamp", async () => {
+    const db = createMigratedTestD1();
+    seedApp(db, APP);
+    await seedPrepared(db, "pub-1", degradedPayload(SCOPE), 120_000);
+    const clock = { now: T0 };
+    const { transport } = await captureTransport(db, clock);
+
+    const realFetch = globalThis.fetch;
+    try {
+      let seen: AbortSignal | null | undefined;
+      globalThis.fetch = ((_input: unknown, init?: RequestInit) => {
+        seen = init?.signal;
+        return Promise.resolve(new Response("{}", { status: 200 }));
+      }) as typeof fetch;
+
+      const caller = AbortSignal.timeout(60_000);
+      await transport.fetchImpl("https://api.github.com/app", { signal: caller });
+      expect(seen).not.toBe(caller); // combined, not substituted
+      expect(seen?.aborted).toBe(false);
+
+      // The COMBINED signal still honours the caller's abort.
+      const aborting = new AbortController();
+      const promise = transport.fetchImpl("https://api.github.com/app", { signal: aborting.signal });
+      aborting.abort(new Error("caller cancelled"));
+      expect(seen?.aborted).toBe(true);
+      await promise;
+    } finally {
+      globalThis.fetch = realFetch;
+    }
+  });
+});
+
+describe("thread lane request budget (spec §7.11.1)", () => {
+  test("the resolution lane RESERVES its per-operation cost, so the run cap binds across selected rows", async () => {
+    const db = createMigratedTestD1();
+    seedApp(db, APP);
+    // Terminal publication as the FK anchor: the publication lane stays empty
+    // so the whole 80-request budget belongs to the thread lane.
+    await seedPrepared(db, "pub-1", degradedPayload(SCOPE), 0);
+    db.raw
+      .prepare(`UPDATE review_publications SET phase = 'superseded', recovery_state = 'done' WHERE id = 'pub-1'`)
+      .run();
+    // TEN due rows — the §7.11.1 selection LIMIT. At 15 requests reserved per
+    // operation only floor(80 / 15) = 5 may enter; without the reservation all
+    // ten enter and the run could issue up to 150 requests.
+    for (let i = 0; i < RECONCILE_SELECT_LIMIT; i += 1) {
+      const rowId = `finding-row-${i}`;
+      const assocId = `assoc-${i}`;
+      seedFindingRow(db, rowId, "pub-1", SCOPE, "addressed");
+      seedThreadRow(db, {
+        id: assocId,
+        publicationId: "pub-1",
+        findingRowId: rowId,
+        scope: SCOPE,
+        verified: verifiedFor(assocId, rowId),
+      });
+    }
+
+    let resolved = 0;
+    const summary = await reconcile(db, {
+      now: () => T0,
+      reviewer: okReviewer({
+        // Faithful to the real §7.5 surface: entering T2 CONSUMES the claim
+        // (attempt counted, lease taken). That makes budget-exhaustion
+        // observably different from "the row was never reached".
+        resolveFindingThread: async (input) => {
+          resolved += 1;
+          db.raw
+            .prepare(
+              `UPDATE review_threads SET attempts = attempts + 1, holder = 't2', lease_until_ms = ?,
+                 resolution_state = 'resolved', updated_ms = ? WHERE id = ?`,
+            )
+            .run(T0 + 60_000, T0, input.associationId);
+          return { kind: "resolved", threadId: "t", adopted: false, outdated: false, lateChange: false };
+        },
+      }),
+    });
+
+    expect(RECONCILE_MAX_REQUESTS).toBe(80);
+    expect(resolved).toBe(5); // floor(80 / 15) — the 80-request run cap binds
+    expect(summary.examined).toBe(5);
+
+    // Budget exhaustion stops the lane BEFORE any claim/attempt mutation for
+    // the rows it never reached (§7.11.1: exhaustion is not a failed attempt).
+    const untouched = db.raw
+      .query(`SELECT COUNT(*) AS n FROM review_threads WHERE attempts = 0 AND lease_until_ms IS NULL AND resolution_state = 'pending'`)
+      .get() as { n: number };
+    expect(untouched.n).toBe(RECONCILE_SELECT_LIMIT - 5); // 5 rows never entered T2
+  });
+
+  test("publication-lane spend is shared with the thread lane, shrinking how many rows may enter", async () => {
+    const db = createMigratedTestD1();
+    seedApp(db, APP);
+    // A prepared publication needing GitHub consumes 1 (plan) + 2 (send) = 3
+    // requests from the SAME run budget before the thread lane runs.
+    await seedPrepared(db, "pub-1", degradedPayload(SCOPE, { round: 1 }), 120_000);
+    for (let i = 0; i < RECONCILE_SELECT_LIMIT; i += 1) {
+      const rowId = `finding-row-${i}`;
+      const assocId = `assoc-${i}`;
+      seedFindingRow(db, rowId, "pub-1", SCOPE, "addressed");
+      seedThreadRow(db, {
+        id: assocId,
+        publicationId: "pub-1",
+        findingRowId: rowId,
+        scope: SCOPE,
+        verified: verifiedFor(assocId, rowId),
+      });
+    }
+
+    let resolved = 0;
+    await reconcile(db, {
+      now: () => T0,
+      reviewer: okReviewer({
+        planReviewUpsert: async () => ({ action: "create", round: 1 }),
+        postPreparedDegraded: async () => ({ posted: true, commentId: 777 }),
+        resolveFindingThread: async () => {
+          resolved += 1;
+          return { kind: "resolved", threadId: "t", adopted: false, outdated: false, lateChange: false };
+        },
+      }),
+    });
+
+    // 3 spent on the send + 1 identity probe = 4; (80 - 4) / 15 = 5 rows.
+    // The point: the thread lane sees the publication lane's spend, so the
+    // shared cap — not an independent 120-request allowance — governs.
+    expect(resolved).toBe(5);
+  });
+});
+
+describe("live App identity mismatch → durable suspension (spec §7.6/§7.11.1)", () => {
+  test("the production factory suspends the exact pair on a live identity mismatch, mutating nothing", async () => {
+    const db = createMigratedTestD1();
+    // Real encrypted PEM: the probe must actually sign a JWT and reach the
+    // transport, otherwise the mismatch is never classifiable.
+    await seedRealApp(db, APP, 1001);
+    await seedPrepared(db, "pub-1", degradedPayload(SCOPE), 120_000);
+    seedFindingRow(db, "finding-row-1", "pub-1", SCOPE, "addressed");
+    seedThreadRow(db, {
+      id: "assoc-1",
+      publicationId: "pub-1",
+      findingRowId: "finding-row-1",
+      scope: SCOPE,
+      verified: verifiedFor("assoc-1", "finding-row-1"),
+    });
+
+    const realFetch = globalThis.fetch;
+    const requests: Array<{ url: string; method: string }> = [];
+    try {
+      globalThis.fetch = (async (input: unknown, init?: RequestInit) => {
+        const url = String(input);
+        requests.push({ url, method: init?.method ?? "GET" });
+        // The live App answers with a DIFFERENT numeric id than the routed
+        // github_app_id — a rotated/substituted credential pair.
+        return new Response(JSON.stringify({ id: 9999, slug: "someone-else" }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      }) as typeof fetch;
+
+      const summary = await reconcileReviewLifecycle(
+        { DB: db as unknown as ScheduledEnv["DB"], DASHBOARD_ENCRYPTION_KEY: TEST_ENCRYPTION_KEY },
+        { log: SILENT_LOG, now: () => T0 },
+      );
+
+      // Durable suspension of BOTH lanes' rows for the exact pair.
+      expect(summary.suspended).toBe(2);
+      expect(summary.applied).toBe(0);
+      expect(pubRow(db, "pub-1")).toMatchObject({ recovery_state: "suspended", attempts: 0 });
+      const thread = threadRow(db, "assoc-1");
+      expect(thread.resolution_state).toBe("suspended");
+      expect(thread.attempts).toBe(0);
+      // The reason names the identity mismatch so an operator can tell it
+      // apart from a disabled/deleted App.
+      expect(thread.last_error).toContain("live App identity does not match");
+
+      // NO remote mutation: the only request issued was the read-only probe,
+      // and no publication send was attempted.
+      expect(requests).toEqual([{ url: "https://api.github.com/app", method: "GET" }]);
+    } finally {
+      globalThis.fetch = realFetch;
+    }
+  });
+
+  test("a MATCHING live identity proceeds (the mismatch suspension is caused by the identity, not a blanket failure)", async () => {
+    const db = createMigratedTestD1();
+    await seedRealApp(db, APP, 1001);
+    await seedPrepared(db, "pub-1", degradedPayload(SCOPE, { round: 1 }), 120_000);
+
+    const realFetch = globalThis.fetch;
+    const posts: string[] = [];
+    try {
+      globalThis.fetch = (async (input: unknown, init?: RequestInit) => {
+        const url = String(input);
+        if (init?.method === "POST") posts.push(url);
+        if (url.endsWith("/app")) {
+          return new Response(JSON.stringify({ id: 1001, slug: "acme-inspector" }), {
+            status: 200,
+            headers: { "content-type": "application/json" },
+          });
+        }
+        if (url.endsWith("/access_tokens")) {
+          return new Response(
+            JSON.stringify({
+              token: "ghs_test",
+              expires_at: new Date(Date.now() + 3_600_000).toISOString(),
+              repositories: [{ id: 1, name: "widgets" }],
+              permissions: { contents: "write", metadata: "read", pull_requests: "write", issues: "write" },
+              repository_selection: "selected",
+            }),
+            { status: 200, headers: { "content-type": "application/json" } },
+          );
+        }
+        // Degraded marker scan (paginated list) — empty page ⇒ create plan.
+        if (url.includes("/issues/42/comments")) {
+          return new Response(JSON.stringify([]), { status: 200, headers: { "content-type": "application/json" } });
+        }
+        if (url.endsWith("/issues/42/comments")) {
+          return new Response(JSON.stringify({ id: 777, body: "posted" }), {
+            status: 201,
+            headers: { "content-type": "application/json" },
+          });
+        }
+        return new Response(JSON.stringify({ id: 777 }), { status: 200, headers: { "content-type": "application/json" } });
+      }) as typeof fetch;
+
+      const summary = await reconcileReviewLifecycle(
+        { DB: db as unknown as ScheduledEnv["DB"], DASHBOARD_ENCRYPTION_KEY: TEST_ENCRYPTION_KEY },
+        { log: SILENT_LOG, now: () => T0 },
+      );
+
+      expect(summary.suspended).toBe(0);
+      expect(summary.applied).toBe(1); // the send went through: identity proved
+      expect(pubRow(db, "pub-1")).toMatchObject({ phase: "applied" });
+    } finally {
+      globalThis.fetch = realFetch;
+    }
   });
 });

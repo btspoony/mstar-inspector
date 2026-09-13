@@ -393,15 +393,32 @@ export async function readPublicationProof(
  * `seen` are never deleted. Returns false (and writes nothing) when the
  * row is unknown, the lease is not live, proof is missing, or the payload
  * is not a complete review publication; the previously-applied row
- * short-circuits to true (idempotent replay).
+ * short-circuits to true (idempotent replay). A chunked apply re-proves the
+ * SAME live holder/epoch before every chunk writes (§7.11.1), so an expired
+ * or replaced lease aborts the remaining chunks instead of mutating rows
+ * under ownership the invocation no longer holds.
  */
-export async function applyPublishedLifecycle(db: D1Like, id: string, lease: Lease, nowMs: number): Promise<boolean> {
+export async function applyPublishedLifecycle(
+  db: D1Like,
+  id: string,
+  lease: Lease,
+  nowMs: number,
+  /**
+   * Fresh clock for the per-chunk lease fence (§7.11.1: "every chunk of the
+   * apply must prove the same live publication holder/epoch"). Defaults to
+   * the call's fixed clock — a caller whose apply spans a real time window
+   * (the M8 reconciler) passes its own clock so an expired lease is
+   * observed between chunks instead of being assumed live.
+   */
+  clock?: () => number,
+): Promise<boolean> {
+  const nowAt = clock ?? (() => nowMs);
   const row = await db.prepare(`SELECT * FROM review_publications WHERE id = ?`).bind(id).first<ReviewPublicationRow>();
   if (row === null) return false;
   if (row.phase === "applied") return true; // idempotent replay — nothing left to apply
   // Live lease fence (holder + epoch + unexpired) and positive persisted proof.
   if (row.holder !== lease.holder || row.lease_epoch !== lease.epoch) return false;
-  if (row.lease_until_ms === null || row.lease_until_ms <= nowMs) return false;
+  if (row.lease_until_ms === null || row.lease_until_ms <= nowAt()) return false;
   if (row.phase !== "confirmed" || row.proof_json === null) return false;
 
   const payload = JSON.parse(row.payload_json) as PublicationPayload;
@@ -449,10 +466,39 @@ export async function applyPublishedLifecycle(db: D1Like, id: string, lease: Lea
   const statements = lifecycleApplyBatch(db, row, payload, payload.lifecycle, nowMs, lease);
   const results: D1BatchResult[] = [];
   for (let start = 0; start < statements.length; start += LIFECYCLE_APPLY_BATCH_STATEMENTS) {
+    // Per-chunk fence (§7.11.1): the apply may span a real time window, and
+    // once the 120s lease expires another invocation can claim a NEWER epoch.
+    // Re-prove the SAME live holder/epoch before this chunk writes, so a
+    // stale invocation stops instead of mutating findings/rounds/associations
+    // under an ownership it no longer holds. The final chunk still carries
+    // the applied mark as its last statement — its SQL re-checks the same
+    // predicate, so a replacement mid-chunk can never mark complete.
+    if (!(await publicationLeaseIsLive(db, id, lease, nowAt()))) return false;
     results.push(...(await db.batch(statements.slice(start, start + LIFECYCLE_APPLY_BATCH_STATEMENTS))));
   }
   const applied = results[results.length - 1]!;
   return applied.meta.changes > 0;
+}
+
+/**
+ * The live-lease fence probe (§7.11.1) — the read twin of the applied
+ * marker's SQL predicate: the publication row must still carry the SAME
+ * holder and epoch with an UNEXPIRED lease at `nowMs`. Returns false when
+ * the row is gone, replaced, or expired, which aborts the apply before the
+ * next chunk writes.
+ */
+async function publicationLeaseIsLive(db: D1Like, id: string, lease: Lease, nowMs: number): Promise<boolean> {
+  const row = await db
+    .prepare(`SELECT holder, lease_epoch, lease_until_ms FROM review_publications WHERE id = ?`)
+    .bind(id)
+    .first<{ holder: string | null; lease_epoch: number; lease_until_ms: number | null }>();
+  if (row === null) return false;
+  return (
+    row.holder === lease.holder &&
+    row.lease_epoch === lease.epoch &&
+    row.lease_until_ms !== null &&
+    row.lease_until_ms > nowMs
+  );
 }
 
 /** The conditional applied-mark STATEMENT: requires the live lease AND a
