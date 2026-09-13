@@ -458,8 +458,12 @@ export async function claimAttempt(
   // key:
   //   - the journal row's own scope columns to equal the ATTEMPT's scope and
   //     head SHA (never another App, installation, repo, PR or commit);
-  //   - the proof to be a closed §7.7 shape: kind in ('review','degraded'),
-  //     a usable numeric round and commentId, and a 64-hex body digest.
+  //   - the proof to be a COMPLETE closed §7.7 shape: every required
+  //     PublicationProof field present with its JSON type, the embedded
+  //     identity agreeing with the row, kind in ('review','degraded'), and
+  //     usable values (round >= 1, commentId > 0, a positive Unix-ms
+  //     confirmedMs, a 64-hex body digest). Syntactically valid but incomplete
+  //     JSON is unproven, not authoritative.
   //     Deliberately NOT gated on `phase`: proof is recorded only on a
   //     confirmed response, and the row legitimately moves on to `applied` (or
   //     is `superseded` by a later round) afterwards. Those heads WERE
@@ -484,6 +488,25 @@ export async function claimAttempt(
        AND pub.kind IN ('review','degraded')
        AND pub.proof_json IS NOT NULL
        AND json_valid(pub.proof_json)
+       -- Presence AND JSON type for every required PublicationProof field.
+       -- json_type returns NULL for a missing path, so these predicates
+       -- enforce presence and type together: a field that is absent, or
+       -- present with the wrong JSON type, leaves the proof unproven.
+       AND json_type(pub.proof_json, '$.publicationId') = 'text'
+       AND json_type(pub.proof_json, '$.headSha') = 'text'
+       AND json_type(pub.proof_json, '$.kind') = 'text'
+       AND json_type(pub.proof_json, '$.bodySha256') = 'text'
+       AND json_type(pub.proof_json, '$.confirmedMs') = 'integer'
+       AND json_type(pub.proof_json, '$.round') = 'integer'
+       AND json_type(pub.proof_json, '$.commentId') = 'integer'
+       AND json_type(pub.proof_json, '$.scope.appId') = 'text'
+       AND json_type(pub.proof_json, '$.scope.installationId') = 'integer'
+       AND json_type(pub.proof_json, '$.scope.owner') = 'text'
+       AND json_type(pub.proof_json, '$.scope.repo') = 'text'
+       AND json_type(pub.proof_json, '$.scope.prNumber') = 'integer'
+       -- Identity: the embedded proof must agree with the journal row it is
+       -- stored on, so JSON that disagrees with its own row is unproven.
+       AND json_extract(pub.proof_json, '$.publicationId') = pub.id
        AND json_extract(pub.proof_json, '$.kind') = pub.kind
        AND json_extract(pub.proof_json, '$.headSha') = pub.head_sha
        AND json_extract(pub.proof_json, '$.scope.appId') = pub.app_id
@@ -491,10 +514,11 @@ export async function claimAttempt(
        AND json_extract(pub.proof_json, '$.scope.owner') = pub.owner
        AND json_extract(pub.proof_json, '$.scope.repo') = pub.repo
        AND json_extract(pub.proof_json, '$.scope.prNumber') = pub.pr_number
-       AND json_type(pub.proof_json, '$.round') = 'integer'
-       AND json_type(pub.proof_json, '$.commentId') = 'integer'
+       -- Values (the contract: round >= 1, commentId > 0, confirmedMs is the
+       -- positive Unix-ms stamp of the confirming response, digest 64-hex).
        AND json_extract(pub.proof_json, '$.round') >= 1
        AND json_extract(pub.proof_json, '$.commentId') > 0
+       AND json_extract(pub.proof_json, '$.confirmedMs') > 0
        AND length(json_extract(pub.proof_json, '$.bodySha256')) = 64
        AND json_extract(pub.proof_json, '$.bodySha256') NOT GLOB '*[^0-9a-f]*'
   )`;

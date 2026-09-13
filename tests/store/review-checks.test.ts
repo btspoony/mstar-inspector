@@ -134,6 +134,15 @@ async function attachRun(db: TestD1, id: string, lease: Lease, runId = 4242, now
 }
 
 /**
+ * A copy of `obj` without `key` — for "required field missing" fixtures.
+ */
+function omit<T extends Record<string, unknown>>(obj: T, key: keyof T & string): Record<string, unknown> {
+  const copy: Record<string, unknown> = { ...obj };
+  delete copy[key];
+  return copy;
+}
+
+/**
  * A remote check-run payload that matches an attempt's persisted identity,
  * with per-test overrides. Defaults to a COMPLETED run carrying `intent`
  * (the conclusion the attempt was terminalized with).
@@ -1032,14 +1041,54 @@ describe("publication-proof dedup is EXACT (spec §7.9)", () => {
     }
   });
 
+  test("an INCOMPLETE or TYPE-WRONG proof never suppresses a claim", async () => {
+    // Syntactically valid JSON is not a proof: the closed PublicationProof
+    // shape requires every field to be present with its own JSON type. A
+    // coerced-equality read (e.g. "42" == 42) is exactly what these reject.
+    const base = { publicationId: "ID", scope: SCOPE, headSha: SHA, kind: "review", round: 1, commentId: 9001, bodySha256: "a".repeat(64), confirmedMs: T0 };
+    const cases: [string, Record<string, unknown>][] = [
+      ["confirmedMs missing", omit(base, "confirmedMs")],
+      ["confirmedMs as string", { ...base, confirmedMs: String(T0) }],
+      ["confirmedMs as bool", { ...base, confirmedMs: true }],
+      ["confirmedMs negative", { ...base, confirmedMs: -1 }],
+      ["confirmedMs zero", { ...base, confirmedMs: 0 }],
+      ["installationId as string", { ...base, scope: { ...SCOPE, installationId: String(SCOPE.installationId) } }],
+      ["prNumber as string", { ...base, scope: { ...SCOPE, prNumber: String(SCOPE.prNumber) } }],
+      ["prNumber as float", { ...base, scope: { ...SCOPE, prNumber: SCOPE.prNumber + 0.5 } }],
+      ["bodySha256 missing", omit(base, "bodySha256")],
+      ["headSha missing", omit(base, "headSha")],
+      ["kind missing", omit(base, "kind")],
+      ["round as float", { ...base, round: 1.5 }],
+      ["commentId as string", { ...base, commentId: "9001" }],
+      ["publicationId mismatch", { ...base, publicationId: "another-id" }],
+    ];
+    for (const [label, proof] of cases) {
+      const db = seededDb();
+      const { id } = await localErrorAttempt(db);
+      const publicationId = crypto.randomUUID();
+      linkPublication(db, id, publicationId, {
+        proofJson: JSON.stringify({
+          ...proof,
+          publicationId: proof.publicationId === "ID" ? publicationId : proof.publicationId,
+        }),
+      });
+      const again = await claimAttempt(db, claimInput({ holder: "run-b" }));
+      expect(again.kind, label).toBe("claimed");
+      expect(again.kind === "claimed" && again.attempt.identity.generation, label).toBe(2);
+    }
+  });
+
   test("a VALID exact-scope proof still dedups (normal and degraded alike)", async () => {
     for (const kind of ["review", "degraded"] as const) {
       const db = seededDb();
       const { id } = await localErrorAttempt(db);
-      linkPublication(db, id, crypto.randomUUID(), {
+      const publicationId = crypto.randomUUID();
+      linkPublication(db, id, publicationId, {
         kind,
+        // A complete, self-consistent proof: every required field present with
+        // its JSON type and the embedded identity equal to its own row.
         proofJson: JSON.stringify({
-          publicationId: "x", scope: SCOPE, headSha: SHA, kind, round: 1, commentId: 9001,
+          publicationId, scope: SCOPE, headSha: SHA, kind, round: 1, commentId: 9001,
           bodySha256: "a".repeat(64), confirmedMs: T0,
         }),
       });
