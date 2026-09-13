@@ -75,7 +75,13 @@ import {
   suspendCheckRecovery,
 } from "../store/review-checks";
 import type { CheckOwnership, Lease, PublicationProof } from "../store/review-checks";
-import { CHECK_SUMMARIES, CheckRequestNotDispatched, decideConclusion, type ChecksAdapter } from "../pipeline/checks";
+import {
+  CHECK_SUMMARIES,
+  CheckRequestNotDispatched,
+  decideConclusion,
+  isRequestNotDispatched,
+  type ChecksAdapter,
+} from "../pipeline/checks";
 import type { ReviewCommenter } from "../pipeline/comment";
 import { createReviewCommenter } from "../pipeline/comment";
 import { createSecretbox } from "../dashboard/secretbox";
@@ -450,7 +456,7 @@ export async function reconcileReviewChecks(
     //    is skipped with no probe and no write, so an identity-mismatch pair
     //    stops occupying the bounded due batch and stops paying a remote probe
     //    on every cron pass.
-    await reenableHealthyAppChecks(env, db, now, credentials, transport, log);
+    await reenableHealthyAppChecks(env, db, now, budget, credentials, transport, log);
 
     // 1. Due attempts, ONE bound nowMs at every predicate position.
     const rows = await listCheckReconcileBatch(db, now(), CHECK_MAX_ATTEMPTS, CHECK_RECONCILE_LIMIT);
@@ -520,6 +526,7 @@ async function reenableHealthyAppChecks(
   env: ScheduledEnv,
   db: D1Like,
   now: () => number,
+  budget: RunBudget,
   credentials: CheckCredentialFactory,
   transport: CheckTransport,
   log: CheckReconcileLog,
@@ -540,7 +547,7 @@ async function reenableHealthyAppChecks(
 
   // The current credential digest per pair, so an unchanged envelope is
   // detectable WITHOUT touching the network. A pair whose digest cannot be read
-  // is treated as changed (fail toward re-probing, never toward silent resume).
+  // yields a null the store's rule handles (F-005).
   const candidates: { appId: string; installationId: number; currentFingerprint: string | null; proven: boolean }[] = [];
   for (const pair of suspended) {
     const routing = await checkRoutingRow(db, pair.app_id, pair.installation_id);
@@ -553,9 +560,10 @@ async function reenableHealthyAppChecks(
     });
   }
 
-  // Status-only resumes (kind `disabled`) and operator corrections resolve here
-  // with no further probe; a pair suspended for a credential reason with an
-  // UNCHANGED envelope is filtered out and never re-probed (P68-QC-003).
+  // Status-only resumes (kind `disabled`/`paused`) and operator corrections
+  // resolve here with no further probe; a pair suspended for a credential
+  // reason with an UNCHANGED envelope is filtered out and never re-probed
+  // (P68-QC-003).
   let resumable: { appId: string; installationId: number }[];
   try {
     resumable = await listReenableableCheckPairs(db, candidates);
@@ -571,10 +579,10 @@ async function reenableHealthyAppChecks(
   // A resume whose pair was suspended for a CREDENTIAL reason is allowed to
   // proceed only after a live probe proves the corrected credentials, so a
   // wrong key or a rotated credential re-suspends instead of running the row
-  // loop against a still-broken pair.
+  // loop against a still-broken pair. The probe is admission-gated (F-004).
   const confirmed: { appId: string; installationId: number }[] = [];
   for (const pair of resumable) {
-    const probe = await reenableProbe(db, env, pair, now, transport, credentials);
+    const probe = await reenableProbe(db, env, pair, now, budget, transport, credentials);
     if (probe.kind === "resume") confirmed.push(pair);
     else if (probe.kind === "resuspend") {
       const reason = checkSuspensionReason(
@@ -583,6 +591,14 @@ async function reenableHealthyAppChecks(
         probe.credentialFingerprint,
       );
       await suspendCheckRecovery(db, pair, reason, now());
+    } else if (probe.kind === "refused") {
+      // Unaffordable or refused before dispatch: this pair's stored state —
+      // kind, digest and reason — is left EXACTLY as it was, so a later pass
+      // with budget re-asks. Writing a verdict here is what F-004 names.
+      log.warn(
+        { event: "ops_check_reconcile_reenable_probe_deferred", detail: `pair=(${pair.appId}, ${pair.installationId})` },
+        "re-enable probe deferred — budget refused before dispatch, prior state retained",
+      );
     }
     // `unchanged` (a digest that turned out equal on re-read) never resumes.
   }
@@ -598,19 +614,41 @@ async function reenableHealthyAppChecks(
 }
 
 /**
- * The one probe that may resume a credential-suspended pair. `disabled` needs
- * none (status proved it); every other kind must be re-proved live before its
- * rows return to the batch, because a corrected envelope that still does not
- * authenticate must stay suspended rather than churn.
+ * The one probe that may resume a credential-suspended pair. `disabled` and
+ * `paused` need none — App status and the kill switch are their own proofs —
+ * so every other kind must be re-proved live before its rows return to the
+ * batch, because a corrected envelope that still does not authenticate must
+ * stay suspended rather than churn.
+ *
+ * The probe is a REAL request, so it passes the same admission discipline as
+ * every other one (F-004). Two outcomes must never be recorded as a verdict:
+ *
+ *  - the estimate does not fit the run/deadline budget → the pair is skipped
+ *    with NO probe and NO write, its previously recorded state (including the
+ *    digest the no-churn filter reads) left exactly as it was so a later pass
+ *    can retry; and
+ *  - the shared transport refused a request BEFORE dispatch → that is a
+ *    deferral, not evidence about credentials. Converting it into a verdict
+ *    would `decrypt-failed`-stamp the CURRENT digest, and the no-churn filter
+ *    would then read that digest as "credentials demonstrably unchanged" and
+ *    suppress every future probe — durably stranding rows whose credentials
+ *    work. This mirrors exactly how `credentialsForPair` consumes
+ *    `budget.refused` on the row path.
  */
 async function reenableProbe(
   db: D1Like,
   env: ScheduledEnv,
   pair: { appId: string; installationId: number },
   now: () => number,
+  budget: RunBudget,
   transport: CheckTransport,
   credentials: CheckCredentialFactory,
-): Promise<{ kind: "resume" } | { kind: "unchanged" } | { kind: "resuspend"; reason: CheckCredentialReason; credentialFingerprint?: string }> {
+): Promise<
+  | { kind: "resume" }
+  | { kind: "unchanged" }
+  | { kind: "refused" }
+  | { kind: "resuspend"; reason: CheckCredentialReason; credentialFingerprint?: string }
+> {
   const row = await db
     .prepare(
       `SELECT last_error FROM review_checks
@@ -624,6 +662,12 @@ async function reenableProbe(
   // resume straight into the row loop, which resolves credentials afresh anyway
   // before any request.
   if (kind === "disabled" || kind === "paused") return { kind: "resume" };
+  // Admission BEFORE the factory (M8's discipline): an unaffordable probe must
+  // not run at all, so nothing is written and the pair stays retryable.
+  if (!canSpend(budget, now(), CREDENTIAL_REQUESTS, false)) return { kind: "refused" };
+  // Scoped to THIS probe: the flag is shared run state, so it is cleared
+  // immediately before the call and read immediately after.
+  budget.refused = false;
   try {
     const settled = await credentials({
       db,
@@ -632,13 +676,21 @@ async function reenableProbe(
       now,
       transport,
     });
+    // A pre-dispatch refusal is a deferral, never a credential verdict.
+    if (budget.refused) return { kind: "refused" };
     if (settled.kind === "ok") return { kind: "resume" };
     return {
       kind: "resuspend",
       reason: settled.reason,
       ...(settled.credentialFingerprint === undefined ? {} : { credentialFingerprint: settled.credentialFingerprint }),
     };
-  } catch {
+  } catch (error) {
+    // A refusal that reached the caller as a throw is still a deferral, not
+    // evidence about credentials — recognized by the SHARED typed marker
+    // (walking the error chain, exactly as `sendRequests` does) as well as by
+    // the flag, because a factory may rethrow rather than return. Anything else
+    // is a real failure and is recorded as one.
+    if (budget.refused || isRequestNotDispatched(error)) return { kind: "refused" };
     return { kind: "resuspend", reason: "decrypt-failed" };
   }
 }

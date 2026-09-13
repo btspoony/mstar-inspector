@@ -1187,13 +1187,26 @@ export async function reenableChecksForApps(
  * due batch, and no remote probe is issued while the credentials are
  * demonstrably unchanged.
  *
- * `fingerprintMatches` carries the durable encrypted-envelope digest the row
- * was suspended on. When the caller can re-read the CURRENT digest it passes
- * `currentFingerprint`; an equal value proves the credentials are untouched, so
- * the pair is skipped WITHOUT a probe. A different value means the operator
- * corrected them, so the pair is re-probed. A null on either side proves
- * nothing and is treated as "changed" (fail closed toward re-probing, never
- * toward silent auto-resume).
+ * `currentFingerprint` is the digest of the encrypted envelope currently stored
+ * for the pair, re-read by the caller. The rule is M8's own comparison
+ * (`currentFingerprint !== recorded`), and it is deliberately asymmetric about
+ * which side may be absent:
+ *
+ *  - a READABLE current digest that differs from the recorded one — INCLUDING
+ *    the "recorded digest absent" case, where a stored null compares unequal —
+ *    means the operator changed something, so the pair earns ONE bounded proof;
+ *  - an identical current digest proves the credentials untouched, so the pair
+ *    is skipped with no probe (the no-churn rule);
+ *  - NO readable current digest proves nothing about the credentials at all, so
+ *    the pair stays suspended. That is the fail-closed direction, and it is also
+ *    what keeps a pair whose routing row is still missing from being resumed.
+ *
+ * Without the first case a suspension recorded with no digest — a `missing`
+ * installation mapping, or a row written before this encoding existed — could
+ * never be resumed by anything: not by proof (`proven` is false on this path),
+ * not by comparison, and not by the operator retry (which refuses suspended
+ * rows). Repairing the mapping would leave the rows durably stranded with no
+ * operator path, which is the defect F-005 names.
  */
 export async function listReenableableCheckPairs(
   db: D1Like,
@@ -1245,11 +1258,12 @@ export async function listReenableableCheckPairs(
       resumable.push({ appId: candidate.appId, installationId: candidate.installationId });
       continue;
     }
-    // No proof: resume only when the durable fingerprint disagrees with the
-    // current one, i.e. the operator changed the credentials. Both sides must
-    // be present — an absent digest is not evidence of a correction.
+    // No proof: resume when the CURRENT digest is readable and disagrees with
+    // the recorded one — M8's comparison, where a stored null compares unequal
+    // (F-005). An unreadable current digest proves nothing, so the pair stays
+    // suspended rather than being resumed on a guess.
     const recorded = suspensionCredentialOf(row.last_error);
-    if (recorded !== null && candidate.currentFingerprint !== null && recorded !== candidate.currentFingerprint) {
+    if (candidate.currentFingerprint !== null && recorded !== candidate.currentFingerprint) {
       resumable.push({ appId: candidate.appId, installationId: candidate.installationId });
     }
   }

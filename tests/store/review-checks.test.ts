@@ -1564,29 +1564,52 @@ describe("suspension encoding and no-churn re-enable (P68-QC-003)", () => {
     expect((await listCheckReconcileBatch(db, T0 + 1)).map((r) => r.identity.attemptId)).toEqual([id]);
   });
 
-  test("a live holder is never resumed, and an absent digest proves nothing", async () => {
+  test("a live holder is never resumed", async () => {
     const db = seededDb();
     const { id } = await suspendedRow(db, "identity-mismatch", DIGEST);
-    // A live holder on the suspended row blocks any resume.
+    // A live holder on the suspended row blocks any resume, even with a changed
+    // digest that would otherwise earn a proof.
     db.raw.prepare(`UPDATE review_checks SET holder = 'other-run', lease_epoch = 5 WHERE id = ?`).run(id);
     expect(
       await listReenableableCheckPairs(db, [
         { appId: APP_ID, installationId: SCOPE.installationId, currentFingerprint: "c".repeat(64), proven: false },
       ]),
     ).toEqual([]);
+  });
 
-    // A suspension with NO recorded digest is not evidence of a correction.
-    db.raw.prepare(`UPDATE review_checks SET holder = NULL, last_error = 'legacy prose' WHERE id = ?`).run(id);
+  test("an UNREADABLE current digest proves nothing, so the pair stays suspended (F-005)", async () => {
+    const db = seededDb();
+    await suspendedRow(db, "identity-mismatch", DIGEST);
+    // No current digest can be read (routing row gone). Nothing about the
+    // credentials is established, so no resume — not by comparison, and not by
+    // proof, which this path never supplies.
     expect(
       await listReenableableCheckPairs(db, [
-        { appId: APP_ID, installationId: SCOPE.installationId, currentFingerprint: "c".repeat(64), proven: false },
+        { appId: APP_ID, installationId: SCOPE.installationId, currentFingerprint: null, proven: false },
       ]),
     ).toEqual([]);
-    // An unclassifiable suspension is proof-required, so a proven live identity
-    // still resumes it.
+  });
+
+  test("a suspension recorded WITHOUT a digest resumes once a current digest is readable (F-005)", async () => {
+    const db = seededDb();
+    // A `missing` installation mapping is the realistic shape: no envelope to
+    // digest at suspension time. Repaired routing then makes a digest readable.
+    const { attempt, lease } = await claim(db);
+    const id = attempt.identity.attemptId;
+    await setCheckDesired(db, id, lease, CONCLUSION, null, T0);
+    await deferCheckRecovery(db, id, lease, { state: "pending", nextAttemptMs: T0, reason: "release" }, T0);
+    // Recorded with NO digest token (the pre-encoding / missing-mapping shape).
+    expect(
+      await suspendCheckRecovery(db, { appId: APP_ID, installationId: SCOPE.installationId },
+        checkSuspensionReason("missing", "mapping missing"), T0),
+    ).toBe(1);
+    expect(suspensionCredentialOf((await rawRow(db, id)).last_error as string)).toBeNull();
+
+    // Repaired routing: a current digest is now readable. M8's comparison treats
+    // a stored null as unequal, so the pair earns its one bounded proof.
     expect(
       await listReenableableCheckPairs(db, [
-        { appId: APP_ID, installationId: SCOPE.installationId, currentFingerprint: null, proven: true },
+        { appId: APP_ID, installationId: SCOPE.installationId, currentFingerprint: "f".repeat(64), proven: false },
       ]),
     ).toEqual([{ appId: APP_ID, installationId: SCOPE.installationId }]);
   });

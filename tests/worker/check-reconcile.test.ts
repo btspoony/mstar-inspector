@@ -44,6 +44,8 @@ import {
   setCheckDesired,
   checkSuspensionKindOf,
   checkSuspensionReason,
+  listReenableableCheckPairs,
+  suspensionCredentialOf,
   suspendCheckRecovery,
   type CheckAttempt,
   type CheckConclusion,
@@ -2480,5 +2482,170 @@ describe("pre-dispatch refusal is typed end to end (P68-QC-005)", () => {
     expect(row.next_attempt_ms).toBe(T0 + CHECK_BACKOFF_MS[0]!);
     expect(row.recovery_state).toBe("remote-unconfirmed");
     expect(row.terminal_ms).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// QC3 revalidation — F-004 admission-gated re-enable probe
+// ---------------------------------------------------------------------------
+
+describe("the re-enable probe is admission-gated and never invents a verdict (F-004)", () => {
+  /** A suspended pair whose recorded digest does NOT match the stored envelope. */
+  async function correctedPair(db: TestD1): Promise<{ id: string; before: Record<string, string | number | null> }> {
+    const { attempt, lease } = await claim(db, { action: "corrected" });
+    const id = attempt.identity.attemptId;
+    await setCheckDesired(db, id, lease, { desired: "failure", title: CHECK_NAME, summary: "unconfirmed" }, null, T0);
+    await deferCheckRecovery(db, id, lease, { state: "pending", nextAttemptMs: T0, reason: "release" }, T0);
+    // Recorded digest is stale, so the CURRENT one differs and a proof is owed.
+    expect(
+      await suspendCheckRecovery(db, { appId: APP, installationId: SCOPE.installationId },
+        checkSuspensionReason("identity-mismatch", "mismatch", "a".repeat(64)), T0),
+    ).toBe(1);
+    return { id, before: await rawRow(db, id) };
+  }
+
+  test("an unaffordable probe is skipped: zero factory calls, zero writes, prior state intact", async () => {
+    const db = seededDb();
+    const { id, before } = await correctedPair(db);
+    let factoryCalls = 0;
+    // The run's deadline is fixed at the pass's start, then the clock jumps past
+    // it. The re-enable scan therefore cannot afford the probe's admission
+    // estimate and must skip the pair WITHOUT calling the factory.
+    let clock = T0;
+    const fetchStub = stubFetch();
+    try {
+      const summary = await run(db, {
+        now: () => {
+          const value = clock;
+          clock = T0 + CHECK_RECONCILE_RUN_BUDGET_MS * 2;
+          return value;
+        },
+        credentials: async ({ scope }) => {
+          factoryCalls += 1;
+          if (scope.appId !== APP) return { kind: "unavailable", reason: "missing" };
+          return { kind: "unavailable", reason: "identity-mismatch", credentialFingerprint: "b".repeat(64) };
+        },
+      });
+      void summary;
+    } finally {
+      fetchStub.restore();
+    }
+    // NOT ONE factory call: the pair's stored state is byte-identical, so a
+    // later pass with budget retries it. Writing a verdict here is F-004.
+    expect(factoryCalls).toBe(0);
+    expect(await rawRow(db, id)).toEqual(before);
+  });
+
+  test("a probe refused before dispatch writes NO verdict and remains eligible next pass", async () => {
+    const db = seededDb();
+    const { id, before } = await correctedPair(db);
+    const warned: { event: string }[] = [];
+    const fetchStub = stubFetch();
+    try {
+      const summary = await run(db, {
+        now: () => T0,
+        log: { warn: (fields) => void warned.push(fields), info: () => {} },
+        credentials: async ({ scope, transport }) => {
+          if (scope.appId !== APP) return { kind: "unavailable", reason: "missing" };
+          // Refuse the probe's own request BEFORE dispatch: the shared transport
+          // throws the typed marker, which the factory must NOT swallow into a
+          // credential verdict.
+          throw new CheckRequestNotDispatched("test: probe refused before dispatch");
+        },
+      });
+      void summary;
+    } finally {
+      fetchStub.restore();
+    }
+    // No re-stamp: the recorded digest and reason are exactly as before, and the
+    // pair was reported as deferred rather than as a credential failure.
+    const after = await rawRow(db, id);
+    expect(after).toEqual(before);
+    expect(after.recovery_state).toBe("suspended");
+    expect(after.last_error).toBe(before.last_error);
+    expect(warned.some((entry) => entry.event === "ops_check_reconcile_reenable_probe_deferred")).toBe(true);
+    // The next pass is still free to prove it.
+    expect(
+      await listReenableableCheckPairs(db, [
+        { appId: APP, installationId: SCOPE.installationId, currentFingerprint: "b".repeat(64), proven: false },
+      ]),
+    ).toEqual([{ appId: APP, installationId: SCOPE.installationId }]);
+  });
+
+  test("a factory that RETURNS unavailable after a refused request is a deferral too", async () => {
+    const db = seededDb();
+    const { id, before } = await correctedPair(db);
+    const warned: { event: string }[] = [];
+    const fetchStub = stubFetch();
+    try {
+      await run(db, {
+        now: () => T0,
+        log: { warn: (fields) => void warned.push(fields), info: () => {} },
+        credentials: async ({ scope, transport }) => {
+          if (scope.appId !== APP) return { kind: "unavailable", reason: "missing" };
+          // The realistic shape: the transport refuses the probe's request, the
+          // factory catches it and answers `unavailable` rather than rethrowing.
+          try {
+            // One MORE than the run's whole allowance, so the last request is
+            // refused before dispatch and the budget flag is set.
+            for (let i = 0; i <= CHECK_RECONCILE_MAX_REQUESTS; i += 1) {
+              await transport.fetchImpl("https://api.github.com/probe");
+            }
+          } catch {
+            return { kind: "unavailable", reason: "identity-mismatch", credentialFingerprint: "b".repeat(64) };
+          }
+          return { kind: "unavailable", reason: "identity-mismatch", credentialFingerprint: "b".repeat(64) };
+        },
+      });
+    } finally {
+      fetchStub.restore();
+    }
+    // The refusal must NOT be recorded as a credential verdict: the row keeps
+    // its exact prior reason and digest, and the pass reports a deferral.
+    expect(await rawRow(db, id)).toEqual(before);
+    expect(warned.some((entry) => entry.event === "ops_check_reconcile_reenable_probe_deferred")).toBe(true);
+  });
+
+  test("a genuine (non-refusal) probe failure DOES re-stamp, so the next pass is D1-only", async () => {
+    const db = seededDb();
+    const { id, before } = await correctedPair(db);
+    const NEW = "d".repeat(64);
+    const fetchStub = stubFetch();
+    try {
+      await run(db, {
+        now: () => T0,
+        credentials: async ({ scope }) => {
+          if (scope.appId !== APP) return { kind: "unavailable", reason: "missing" };
+          return { kind: "unavailable", reason: "identity-mismatch", credentialFingerprint: NEW };
+        },
+      });
+    } finally {
+      fetchStub.restore();
+    }
+    const after = await rawRow(db, id);
+    expect(after.last_error).not.toBe(before.last_error);
+    expect(checkSuspensionKindOf(after.last_error as string)).toBe("identity-mismatch");
+    expect(after.last_error).toContain(NEW);
+  });
+
+  test("a successful probe resumes the pair (the operator path still works)", async () => {
+    const db = seededDb();
+    const { id } = await correctedPair(db);
+    const fetchStub = stubFetch();
+    try {
+      const summary = await run(db, {
+        now: () => T0,
+        credentials: async ({ scope, transport }) => {
+          if (scope.appId !== APP) return { kind: "unavailable", reason: "missing" };
+          return { kind: "ok", paused: false, adapter: scriptedAdapter(db, agreeingScript(), transport) };
+        },
+      });
+      expect(summary.completed).toBe(1);
+    } finally {
+      fetchStub.restore();
+    }
+    const row = await rawRow(db, id);
+    expect(row.recovery_state).toBe("done");
+    expect(row.observed).toBe("failure");
   });
 });
