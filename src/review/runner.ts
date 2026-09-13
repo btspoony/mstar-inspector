@@ -36,6 +36,11 @@
  *         (id + count, no keys); absent/empty = the capability base alone.
  *   - stdout carries ONLY the mstar.review/v1 envelope JSON (validated by
  *     validateMstarReviewV1 inside the runtime); all diagnostics to stderr;
+ *   - optional `--recheck-out <path>` (plan 67 Task 3, spec review-lifecycle
+ *     §7.8): when the runtime result carries a recheck document, its JSON is
+ *     written to <path> BEFORE the envelope reaches stdout (a write failure
+ *     → exit 1, no stdout). No flag or no result writes nothing — absent
+ *     flag/file leaves legacy behavior byte-identical;
  *   - exit codes: 0 success, 1 runtime/I-O failure, 2 usage error. There is
  *     no summary-degrade path: any seat/parse/validation failure exits 1 and
  *     the consumer must not post or persist.
@@ -49,7 +54,7 @@
  *   - OMP_REVIEW_MODEL                             (comma-separated selector chain)
  *   - ARK_API_KEY                                  (injected per exec by the consumer)
  */
-import { readFileSync } from "node:fs";
+import { readFileSync, writeFileSync } from "node:fs";
 import {
   isReviewLevel,
   REVIEW_LEVELS,
@@ -58,14 +63,16 @@ import {
   type CapabilityHost,
   type CustomProviderDeclaration,
 } from "./runtime";
+import { anchorRecheckDeadline } from "./recheck";
 import { ompAgentRuntime, parseModelSelectors } from "./runtime-omp";
 import { writePerReviewModelsYaml } from "./models-synthesis";
+import type { RecheckInput } from "../contracts/recheck";
 
 const USAGE =
-  `usage: bun run runner.ts --level <${REVIEW_LEVELS.join(", ")}> --input <json-file> ` +
+  `usage: bun run runner.ts --level <${REVIEW_LEVELS.join(", ")}> --input <json-file> [--recheck-out <path>] ` +
   "(input JSON: { capabilityHosts: [{ id, catalogProviderId, apiKeyEnv, baseUrl, api, auth, models }], " +
   "worktreePath?: string, reconFacts?: string[], modelOverrides?: Record<string, string>, " +
-  "customProviders?: [{ provider_id, base_url, api, model_ids }] })";
+  "customProviders?: [{ provider_id, base_url, api, model_ids }], recheck?: mstar.recheck-input/v1 document })";
 
 /** Validated shape of the --input JSON file. */
 type RunnerInputJson = {
@@ -74,12 +81,15 @@ type RunnerInputJson = {
   reconFacts?: string[];
   modelOverrides?: Record<string, string>;
   customProviders?: CustomProviderDeclaration[];
+  /** Optional typed recheck input (plan 67 Task 3) — passed through to the runtime. */
+  recheck?: RecheckInput;
 };
 
 /** Parse CLI flags. Throws (usage) on missing/unknown flags or missing values. */
-function parseArgs(argv: string[]): { level: string; inputPath: string } {
+function parseArgs(argv: string[]): { level: string; inputPath: string; recheckOutPath?: string } {
   let level: string | undefined;
   let inputPath: string | undefined;
+  let recheckOutPath: string | undefined;
   for (let index = 0; index < argv.length; index += 2) {
     const flag = argv[index];
     const value = argv[index + 1];
@@ -87,6 +97,8 @@ function parseArgs(argv: string[]): { level: string; inputPath: string } {
       level = value;
     } else if (flag === "--input" && value !== undefined && inputPath === undefined) {
       inputPath = value;
+    } else if (flag === "--recheck-out" && value !== undefined && recheckOutPath === undefined) {
+      recheckOutPath = value;
     } else {
       throw new Error(USAGE);
     }
@@ -94,7 +106,7 @@ function parseArgs(argv: string[]): { level: string; inputPath: string } {
   if (level === undefined || inputPath === undefined) {
     throw new Error(USAGE);
   }
-  return { level, inputPath };
+  return { level, inputPath, recheckOutPath };
 }
 
 /** Validate the untrusted --input JSON with small type guards (no schema dep here). */
@@ -247,6 +259,32 @@ function parseRunnerInput(parsed: unknown): RunnerInputJson {
       };
     });
   }
+  if (record.recheck !== undefined) {
+    // Plan 67 Task 3: shape validation ONLY — the §7.3 wire SSOT is
+    // validateRecheckDoc, which the runtime applies to the seat's OUTPUT
+    // against this input. The consumer (T4) builds the document from
+    // store-selected targets, so the runner guards the envelope shape only:
+    // exact keys, the input schema tag, a nonempty headSha, array
+    // targets/evidence and an object discussion.
+    const doc = record.recheck;
+    if (doc === null || typeof doc !== "object" || Array.isArray(doc)) {
+      throw new Error("input JSON field `recheck` must be an object when present");
+    }
+    const recheck = doc as Record<string, unknown>;
+    if (recheck.schema !== "mstar.recheck-input/v1") {
+      throw new Error('input JSON field `recheck`.schema must be "mstar.recheck-input/v1"');
+    }
+    if (typeof recheck.headSha !== "string" || recheck.headSha.length === 0) {
+      throw new Error("input JSON field `recheck`.headSha must be a nonempty string");
+    }
+    if (!Array.isArray(recheck.targets) || !Array.isArray(recheck.evidence)) {
+      throw new Error("input JSON field `recheck`.targets/.evidence must be arrays");
+    }
+    if (recheck.discussion === null || typeof recheck.discussion !== "object" || Array.isArray(recheck.discussion)) {
+      throw new Error("input JSON field `recheck`.discussion must be an object");
+    }
+    input.recheck = doc as RecheckInput;
+  }
   return input;
 }
 
@@ -259,8 +297,9 @@ function parseRunnerInput(parsed: unknown): RunnerInputJson {
 export async function main(argv: string[], runtime: AgentRuntime = ompAgentRuntime): Promise<number> {
   let level: string;
   let inputPath: string;
+  let recheckOutPath: string | undefined;
   try {
-    ({ level, inputPath } = parseArgs(argv));
+    ({ level, inputPath, recheckOutPath } = parseArgs(argv));
   } catch (error) {
     console.error((error as Error).message);
     return 2;
@@ -272,6 +311,10 @@ export async function main(argv: string[], runtime: AgentRuntime = ompAgentRunti
     );
     return 2;
   }
+  // plan 67 T3 (spec §7.8): anchor the ABSOLUTE outer review deadline once
+  // per process — the recheck seat's budget derives from it, so the seat can
+  // never outlive (or restart past) the review's own wall-clock cap.
+  anchorRecheckDeadline(Date.now(), level);
 
   let input: AgentRuntimeRunInput;
   try {
@@ -306,6 +349,9 @@ export async function main(argv: string[], runtime: AgentRuntime = ompAgentRunti
       // Optional per-role overrides (plan 17 B6): included ONLY when the map
       // is present, so legacy input builds a byte-identical runtime input.
       ...(json.modelOverrides !== undefined ? { modelOverrides: json.modelOverrides } : {}),
+      // Optional typed recheck input (plan 67 T3): included ONLY when
+      // present — same byte-identical legacy rule as modelOverrides.
+      ...(json.recheck !== undefined ? { recheck: json.recheck } : {}),
       // The synthesized per-review models dir (plan 23 T3; plan 37: present
       // on EVERY run — there is no baked models.yml to fall back to).
       agentDir,
@@ -316,7 +362,20 @@ export async function main(argv: string[], runtime: AgentRuntime = ompAgentRunti
   }
 
   try {
-    const envelope = await runtime.runReview(input);
+    const { envelope, recheck } = await runtime.runReview(input);
+    // plan 67 T3: the optional --recheck-out file is written only when a
+    // recheck result exists, and BEFORE the envelope reaches stdout — a
+    // write failure is a genuine I-O failure (exit 1, no stdout), not a
+    // silent lie about the file. No flag / no result writes nothing; stdout
+    // stays envelope-only and exit codes are unchanged.
+    if (recheckOutPath !== undefined && recheck !== null) {
+      try {
+        writeFileSync(recheckOutPath, JSON.stringify(recheck));
+      } catch (error) {
+        console.error(`review: cannot write recheck output ${recheckOutPath}: ${(error as Error).message}`);
+        return 1;
+      }
+    }
     // stdout carries ONLY the envelope JSON (plan Module contracts).
     console.log(JSON.stringify(envelope));
     return 0;

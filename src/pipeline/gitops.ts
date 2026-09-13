@@ -30,6 +30,7 @@
  */
 
 import type { ReviewLevel } from "../review/runtime";
+import { RECHECK_FILE_MAX_BYTES } from "../contracts/recheck";
 import { shellCommand, type ShellCommand } from "./shell-command";
 
 export type GitOpsInput = {
@@ -143,10 +144,40 @@ export function writeJsonCommand(path: string, contentBase64: string): ShellComm
  * Run the in-image review runner on the runtime envelope path (plan 07 T5):
  * `--level` is the review tier, `--input` the reconFacts JSON file. stdout
  * carries ONLY the validated mstar.review/v1 envelope; exit 0 = success
- * (there is no summary-degrade mode on this path).
+ * (there is no summary-degrade mode on this path). `recheckOutPath` is the
+ * optional plan-67 `--recheck-out` target — passed through verbatim when
+ * provided (the consumer reads that file back through readRecheckCommand).
  */
-export function runnerCommand(runnerPath: string, level: ReviewLevel, inputPath: string): ShellCommand {
-  return shellCommand(`bun run '${runnerPath}' --level '${level}' --input '${inputPath}'`);
+export function runnerCommand(
+  runnerPath: string,
+  level: ReviewLevel,
+  inputPath: string,
+  recheckOutPath?: string,
+): ShellCommand {
+  const base = `bun run '${runnerPath}' --level '${level}' --input '${inputPath}'`;
+  return shellCommand(recheckOutPath !== undefined ? `${base} --recheck-out '${recheckOutPath}'` : base);
+}
+
+/**
+ * Bounded read of the runner's recheck output file (plan 67 T3, spec §7.8):
+ * the Worker consumes the seat's validated document through THIS audited
+ * command — never an arbitrary model-produced path. Output contract:
+ *   - line 1: the first RECHECK_FILE_MAX_BYTES (262,144) bytes of the file
+ *     (`head -c` stops the stream at the bound);
+ *   - last line: `1` when a byte exists BEYOND the bound (tail probes byte
+ *     bound+1 — overflow, treat the read as invalid), else `0`.
+ * A missing/unreadable file fails the `head` chain (non-zero exit, empty
+ * stdout) — the consumer fails closed either way (invalid → no recheck).
+ * The path is allowlisted and single-quoted like every builder here; the
+ * consumer passes the same fixed constant the runner flag wrote
+ * (RECHECK_OUTPUT_PATH).
+ */
+export function readRecheckCommand(path: string): ShellCommand {
+  assertShellSafe(path, /^\/[A-Za-z0-9._/-]+$/, "recheck output path");
+  return shellCommand(
+    `head -c '${RECHECK_FILE_MAX_BYTES}' '${path}' && printf '\\n' && ` +
+      `tail -c '+${RECHECK_FILE_MAX_BYTES + 1}' '${path}' | head -c '1' | wc -c`,
+  );
 }
 
 /** Main-flow commands in execution order (clone → sha → diff → numstat → runner). */
