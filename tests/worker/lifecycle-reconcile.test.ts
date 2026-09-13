@@ -23,6 +23,9 @@
  *   - frozen paused policy: confirmed apply + resolution retry continue,
  *     prepared sends do not
  *   - budget/deadline exhaustion stops without spending an attempt
+ *   - whole-run accounting: the pair identity probe is reserved with the
+ *     thread operation, and an ATTEMPTED-then-rejected plan request is
+ *     charged before its await so repeated failures cannot exceed ≤80
  *   - tenant/App isolation: only the failing pair is suspended
  *   - a throwing reviewer/dependency can never escape the handler
  */
@@ -1153,6 +1156,94 @@ describe("whole-run request accounting (spec §7.11.1 ≤80)", () => {
     const accounted = 3 + routed.length + RECONCILE_THREAD_OPERATION_REQUESTS * resolvedScopes.length;
     expect(accounted).toBe(65);
     expect(accounted).toBeLessThanOrEqual(RECONCILE_MAX_REQUESTS);
+  });
+
+  test("a plan request that is sent and then rejects is charged before its await, so repeated failures cannot exceed the run cap", async () => {
+    const db = createMigratedTestD1();
+    seedApp(db, APP);
+    seedApp(db, APP_B, { githubAppId: 1002, installationId: SCOPE_B.installationId });
+    // TEN prepared publications on pair A — the §7.11.1 selection LIMIT, i.e.
+    // the most the publication lane can attempt in one run. Each plan request
+    // is genuinely ATTEMPTED and then rejects (a timeout / HTTP error after the
+    // request left the Worker). Distinct head shas keep every row its own
+    // (scope, sha, kind) publication.
+    const shaAt = (i: number): string => `${SHA.slice(0, 38)}${String(i).padStart(2, "0")}`;
+    for (let i = 0; i < RECONCILE_SELECT_LIMIT; i += 1) {
+      await seedPrepared(db, `pub-a${i}`, degradedPayload(SCOPE, { headSha: shaAt(i) }), 120_000);
+    }
+    // FK anchor (terminal, so the publication lane ignores it) + SIX due thread
+    // rows on pair B: each entered operation reserves the ≤15-request envelope,
+    // so what the run has left admits only a few of them.
+    await seedPrepared(db, "pub-anchor", degradedPayload(SCOPE_B), 0);
+    db.raw
+      .prepare(`UPDATE review_publications SET phase = 'superseded', recovery_state = 'done' WHERE id = 'pub-anchor'`)
+      .run();
+    for (let i = 1; i <= 6; i += 1) {
+      seedFindingRow(db, `finding-b${i}`, "pub-anchor", SCOPE_B, "addressed");
+      seedThreadRow(db, {
+        id: `assoc-b${i}`,
+        publicationId: "pub-anchor",
+        findingRowId: `finding-b${i}`,
+        scope: SCOPE_B,
+        verified: verifiedFor(`assoc-b${i}`, `finding-b${i}`),
+      });
+    }
+
+    let planAttempts = 0;
+    const routed: string[] = [];
+    const entered: Scope[] = [];
+    const summary = await reconcile(db, {
+      now: () => T0,
+      reviewer: okReviewer(
+        {
+          planReviewUpsert: async () => {
+            planAttempts += 1;
+            throw new Error("plan request sent then rejected (timeout)");
+          },
+          resolveFindingThread: async (input) => {
+            entered.push(input.scope);
+            // Faithful to the real §7.5 surface: entering T2 consumes the
+            // claim, so a budget stop is observably different from "reached".
+            db.raw
+              .prepare(
+                `UPDATE review_threads SET attempts = attempts + 1, holder = 't2', lease_until_ms = ?,
+                   resolution_state = 'resolved', updated_ms = ? WHERE id = ?`,
+              )
+              .run(T0 + 60_000, T0, input.associationId);
+            return { kind: "resolved", threadId: "t", adopted: false, outdated: false, lateChange: false };
+          },
+        },
+        { routed },
+      ),
+    });
+
+    // Every prepared row really did issue its plan request: the rejections are
+    // ATTEMPTS, not skipped work.
+    expect(planAttempts).toBe(RECONCILE_SELECT_LIMIT);
+    // ACTUAL requests the run issued: 10 attempted plan requests + 2 identity
+    // probes + 4 bounded thread operations = 72. Charging the plans after their
+    // await (or refunding them on failure) leaves all ten uncounted, which
+    // admits a fifth operation: 10 + 2 + 75 = 87 — past the whole-run cap.
+    expect(routed).toEqual([`${APP}:${SCOPE.installationId}`, `${APP_B}:${SCOPE_B.installationId}`]);
+    const actualRequests = planAttempts + routed.length + entered.length * RECONCILE_THREAD_OPERATION_REQUESTS;
+    expect(actualRequests).toBeLessThanOrEqual(RECONCILE_MAX_REQUESTS);
+    // The ten attempted plans consumed the lane's half share, so only the four
+    // remaining ≤15-request operations were admitted to the thread lane.
+    expect(entered.map((scope) => scope.appId)).toEqual([APP_B, APP_B, APP_B, APP_B]);
+    expect(summary.examined).toBe(RECONCILE_SELECT_LIMIT + entered.length);
+    // Work the budget never admitted stays due: no claim, no attempt mutation.
+    expect(threadRow(db, "assoc-b5")).toMatchObject({ resolution_state: "pending", attempts: 0, lease_until_ms: null });
+    expect(threadRow(db, "assoc-b6")).toMatchObject({ resolution_state: "pending", attempts: 0, lease_until_ms: null });
+    // A rejected plan spends no publication attempt either — a charged-but-
+    // failed request still leaves the row prepared, due and unclaimed.
+    for (let i = 0; i < RECONCILE_SELECT_LIMIT; i += 1) {
+      expect(pubRow(db, `pub-a${i}`)).toMatchObject({
+        phase: "prepared",
+        recovery_state: "pending",
+        attempts: 0,
+        lease_until_ms: null,
+      });
+    }
   });
 });
 

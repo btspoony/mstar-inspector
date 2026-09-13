@@ -87,7 +87,7 @@ import {
   type PublicationRow,
 } from "../store/finding-lifecycle";
 import { createSecretbox } from "../dashboard/secretbox";
-import { createReviewCommenter, type CommenterFetch, type ReviewCommenter } from "../pipeline/comment";
+import { createReviewCommenter, type CommenterFetch, type ReviewCommenter, type UpsertPlan } from "../pipeline/comment";
 
 // ---------------------------------------------------------------------------
 // Summary + budget constants (spec §7.11.1 verbatim values)
@@ -591,10 +591,16 @@ async function sendPreparedPublication(
   const createdMs = await getPublicationCreatedMs(db, row.id);
   if (createdMs === null || now() - createdMs < PREPARED_SEND_MIN_AGE_MS) return;
   if (!canSpend(budget, now(), PLAN_REQUESTS + SEND_REQUESTS, true)) return; // remains due, no attempt
+  // The plan request is charged BEFORE it is issued: it is one real GitHub
+  // request the moment it is attempted, and a sent-then-rejected request
+  // (timeout / HTTP error) has still consumed the run's allowance. Charging
+  // after the await would let repeated failures issue unaccounted requests and
+  // push the run past the ≤80 cap. No refund on failure.
+  reserve(budget, PLAN_REQUESTS);
   // Read-only staleness pre-check: never send a stale publication over a
   // newer round. A pre-check failure is typed "stay due" — no claim, no
   // attempt.
-  let plan: Awaited<ReturnType<ReconcileReviewer["planReviewUpsert"]>>;
+  let plan: UpsertPlan;
   try {
     plan = await resolved.reviewer.planReviewUpsert({
       installationId: scope.installationId,
@@ -605,7 +611,6 @@ async function sendPreparedPublication(
   } catch {
     return;
   }
-  reserve(budget, PLAN_REQUESTS);
   if (plan.action === "update" && plan.round - 1 >= row.payload.round) {
     const superseded = await supersedePublication(
       db,
