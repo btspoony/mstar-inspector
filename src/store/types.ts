@@ -193,6 +193,48 @@ export type ReviewThreadRow = {
 };
 
 /**
+ * A row of the `review_checks` attempt registry (plan 68 Task 1, migration
+ * `0021_review_checks.sql` — spec review-lifecycle §7.1 second block). One row
+ * per Check ATTEMPT: `attempt_key` + `generation` identify it, `external_id`
+ * is the immutable correlation handle GitHub echoes back, `check_run_id` is
+ * the observed remote run id (null until proven). The typed domain shapes
+ * (`CheckAttempt`, `CheckIdentity`, …) live in `src/store/review-checks.ts`.
+ */
+export type ReviewCheckRow = {
+  id: string;
+  app_id: string;
+  github_app_id: number;
+  installation_id: number;
+  owner: string;
+  repo: string;
+  pr_number: number;
+  head_sha: string;
+  triggered_by: string;
+  action: string;
+  attempt_key: string;
+  generation: number;
+  external_id: string;
+  check_run_id: number | null;
+  create_state: string;
+  holder: string | null;
+  lease_epoch: number;
+  lease_until_ms: number | null;
+  execution_deadline_ms: number;
+  desired: string;
+  desired_title: string | null;
+  desired_summary: string | null;
+  observed: string;
+  recovery_state: string;
+  publication_id: string | null;
+  attempts: number;
+  next_attempt_ms: number | null;
+  last_error: string | null;
+  terminal_ms: number | null;
+  created_ms: number;
+  updated_ms: number;
+};
+
+/**
  * Narrow D1 face the ArtifactStore adapter depends on (plan Clarify 5):
  * prepare/bind/first/all/run + batch. A real `D1Database` satisfies this
  * structurally; tests provide a bun:sqlite-backed implementation via

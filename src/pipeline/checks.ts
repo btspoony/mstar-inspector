@@ -1,0 +1,567 @@
+/**
+ * GitHub Checks adapter (plan 68 Task 1, spec review-lifecycle §7.9).
+ *
+ * One advisory Check per review attempt: created `in_progress` at the
+ * authoritative head SHA and terminalized from PERSISTED publication proof.
+ * The adapter is the only place a Check HTTP request is built, and it builds no
+ * credential: the client comes from `src/pipeline/comment.ts`'s single per-App
+ * `createAppAuth` path through the SAME purpose-scoped `review-write` octokit
+ * (spec §7.6 — plan 68 adds `checks: "write"` to that one permission set; there
+ * is no second token, client or auth object).
+ *
+ * Contract boundaries the rest of the plan depends on:
+ *
+ *   - `beginCheck` sends `name`, `head_sha`, `external_id` and a status, and
+ *     NEVER `details_url` (spec §7.9: "omit details_url entirely" — there is no
+ *     Inspector destination, and RL-12 forbids inventing one).
+ *   - A missing Checks surface, a 403/404 permission rejection, and any API or
+ *     transport failure all return `{ kind: "unavailable", reason }`. The
+ *     adapter never throws: Check failure must not block or delay publication
+ *     (D3/RL-3), and `unavailable` changes recovery bookkeeping only — never
+ *     the attempt's `desired` or `observed`.
+ *   - Ownership is proven from PERSISTED state immediately before a send
+ *     (`getCheckOwnership`) plus the identity fields on the response.
+ *     `beginCheck` refuses an attempt that already owns a run; `completeCheck`
+ *     refuses a run id this attempt did not persist, refuses `in_progress` by
+ *     type, and never accepts a caller-chosen arbitrary check id.
+ *   - `adoptCheckRun` matches ONLY on the persisted `external_id`, the owning
+ *     `app.id`, `head_sha` and the exact run name, across at most two
+ *     `filter: "all"` pages of `listForRef`. Zero exact matches after a
+ *     complete walk is `absent`; a saturated walk, a malformed candidate or two
+ *     distinct matches is `incomplete`/`ambiguous` — never `absent`, because
+ *     GitHub caps `listForRef` at the 1000 most recent check suites on a ref.
+ *   - `decideConclusion` reads PERSISTED proof, never a code path. A confirmed
+ *     normal publication is `success` for every engine verdict: execution
+ *     completion, not approval and not a merge gate.
+ */
+
+import type { D1Like } from "../store/types";
+import {
+  CHECK_NAME,
+  type CheckAttempt,
+  type CheckConclusion,
+  type CheckIdentity,
+  type CheckOwnership,
+  type CheckRemote,
+  type Lease,
+  type PublicationProof,
+  type Scope,
+  getCheckOwnership,
+} from "../store/review-checks";
+import { redactSecrets } from "./redact";
+
+// ---------------------------------------------------------------------------
+// Transport seam (spec §7.6: one credential path; §7.9: typed responses)
+// ---------------------------------------------------------------------------
+
+/** A check-run payload as the installed octokit types deliver it. */
+export type CheckRunPayload = {
+  id: number | bigint;
+  name: string;
+  head_sha: string;
+  external_id: string | null;
+  status: string;
+  conclusion: string | null;
+  app: { id: number | bigint } | null;
+};
+
+export type ChecksCreateParams = {
+  owner: string;
+  repo: string;
+  name: string;
+  head_sha: string;
+  external_id: string;
+  status: "in_progress";
+};
+
+export type ChecksUpdateParams = {
+  owner: string;
+  repo: string;
+  check_run_id: number;
+  status: "completed";
+  conclusion: CheckConclusion["desired"];
+  title: string;
+  summary: string;
+};
+
+export type ChecksListParams = {
+  owner: string;
+  repo: string;
+  ref: string;
+  check_name: string;
+  app_id: number;
+  filter: "all";
+  per_page: number;
+  page: number;
+};
+
+/** One `listForRef` page: the runs plus GitHub's own count for this window. */
+export type ChecksListPage = {
+  total_count: number;
+  check_runs: CheckRunPayload[];
+};
+
+/**
+ * The narrowed Checks surface of the per-App review-write octokit — structural
+ * narrowing of the SAME client, not a second one (the `PostOctokit` /
+ * `GraphqlOctokit` precedent). Adoption walks `listForRef` by explicit `page`
+ * (spec §7.9 names the parameter), so the 2-page bound is enforced here rather
+ * than relying on an unbounded auto-pagination helper.
+ */
+export type ChecksOctokit = {
+  rest: {
+    checks: {
+      create(params: ChecksCreateParams): Promise<{ data: CheckRunPayload }>;
+      update(params: ChecksUpdateParams): Promise<{ data: CheckRunPayload }>;
+      get(params: { owner: string; repo: string; check_run_id: number }): Promise<{ data: CheckRunPayload }>;
+      listForRef(params: ChecksListParams): Promise<{ data: ChecksListPage }>;
+    };
+  };
+};
+
+// ---------------------------------------------------------------------------
+// Remote evidence helpers
+// ---------------------------------------------------------------------------
+
+/**
+ * Narrow a raw check-run payload to the fields this contract reasons about, or
+ * null when the payload cannot carry identity evidence at all. A null here is
+ * NEVER treated as a candidate: a malformed run cannot be adopted or observed.
+ */
+export function toCheckRemote(payload: CheckRunPayload | null | undefined): CheckRemote | null {
+  if (payload === null || payload === undefined) return null;
+  const id = Number(payload.id);
+  if (!Number.isInteger(id) || id <= 0) return null;
+  if (typeof payload.name !== "string" || typeof payload.head_sha !== "string") return null;
+  if (typeof payload.status !== "string") return null;
+  if (payload.external_id !== null && typeof payload.external_id !== "string") return null;
+  if (payload.conclusion !== null && typeof payload.conclusion !== "string") return null;
+  if (payload.app === null || payload.app === undefined) {
+    return {
+      id,
+      name: payload.name,
+      head_sha: payload.head_sha,
+      external_id: payload.external_id,
+      status: payload.status,
+      conclusion: payload.conclusion,
+      app: null,
+    };
+  }
+  const appId = Number(payload.app.id);
+  if (!Number.isInteger(appId)) return null;
+  return {
+    id,
+    name: payload.name,
+    head_sha: payload.head_sha,
+    external_id: payload.external_id,
+    status: payload.status,
+    conclusion: payload.conclusion,
+    app: { id: appId },
+  };
+}
+
+/**
+ * The four fields GitHub must agree on for a run to be OURS (spec §7.9:
+ * validate name, SHA, external ID and `app.id === githubAppId`). Ownership is
+ * never inferred from a PR association or from the run name alone.
+ */
+export function remoteBelongsTo(remote: CheckRemote, identity: CheckIdentity): boolean {
+  return (
+    remote.external_id === identity.externalId &&
+    remote.head_sha === identity.headSha &&
+    remote.name === CHECK_NAME &&
+    remote.app !== null &&
+    remote.app.id === identity.githubAppId
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Dependencies and adapter shape
+// ---------------------------------------------------------------------------
+
+export type ChecksDeps = {
+  /** The journal/registry D1 face — proof and ownership are persisted state. */
+  db: D1Like;
+  /**
+   * The per-App review-write octokit for the exact App installation and
+   * repository (spec §7.6), supplied by `createReviewCommenter` so Checks share
+   * the single `createAppAuth` construction point and its token cache.
+   * null = no GitHub mutation (missing/disabled App, identity disagreement,
+   * denial); every operation then reports `unavailable`.
+   */
+  getOctokit(input: { scope: Scope }): Promise<ChecksOctokit | null>;
+};
+
+/** The §7.9 adapter surface, bound to one App credential. */
+export type ChecksAdapter = {
+  beginCheck(input: {
+    identity: CheckIdentity;
+    lease: Lease;
+  }): Promise<{ kind: "ready"; remote: CheckRemote } | { kind: "unavailable"; reason: string }>;
+  adoptCheckRun(input: {
+    identity: CheckIdentity;
+  }): Promise<{ kind: "found"; remote: CheckRemote } | { kind: "absent" | "incomplete" | "ambiguous" }>;
+  completeCheck(input: {
+    identity: CheckIdentity;
+    lease: Lease;
+    checkRunId: number;
+    conclusion: CheckConclusion;
+  }): Promise<{ kind: "completed"; remote: CheckRemote } | { kind: "unavailable"; reason: string }>;
+  /** Read-only GET + identity proof: the recovery lane's confirmation path (§7.11.2 step 3). */
+  fetchCheckRun(input: {
+    identity: CheckIdentity;
+    checkRunId: number;
+  }): Promise<
+    { kind: "found"; remote: CheckRemote } | { kind: "absent" } | { kind: "unavailable"; reason: string }
+  >;
+};
+
+/** Adoption walk bounds (spec §7.9: "max 2 pages", per_page 100). */
+const ADOPT_MAX_PAGES = 2;
+const ADOPT_PAGE_SIZE = 100;
+
+/**
+ * Build the Checks adapter for one purpose-scoped reviewer instance. A factory
+ * rather than free functions is what keeps credentials out of the module: one
+ * instance per App credential pair, exactly like `createReviewThreads`.
+ */
+export function createChecksAdapter(deps: ChecksDeps): ChecksAdapter {
+  return {
+    beginCheck: (input) => beginCheckWith(deps, input),
+    adoptCheckRun: (input) => adoptCheckRunWith(deps, input),
+    completeCheck: (input) => completeCheckWith(deps, input),
+    fetchCheckRun: (input) => fetchCheckRunWith(deps, input),
+  };
+}
+
+/**
+ * Create the in-progress run for an attempt this invocation holds (spec §7.9
+ * "Create/adopt"): prove the persisted row still belongs to this identity and
+ * live lease, prove no run is attached yet, then send `external_id` with NO
+ * `details_url`. A response failing the identity check is `unavailable` — an
+ * unprovable create is never adopted, and the attempt stays `unknown` for
+ * read-only recovery rather than blind re-creation.
+ */
+async function beginCheckWith(
+  deps: ChecksDeps,
+  input: { identity: CheckIdentity; lease: Lease },
+): Promise<{ kind: "ready"; remote: CheckRemote } | { kind: "unavailable"; reason: string }> {
+  const owned = await guardOwnership(deps, input.identity, input.lease);
+  if (owned.kind === "unavailable") return owned;
+  if (owned.data.checkRunId !== null) {
+    return { kind: "unavailable", reason: "attempt already owns a remote check run" };
+  }
+  const client = await clientFor(deps, input.identity.scope);
+  if (client === null) return { kind: "unavailable", reason: "no review-write Checks client for this App" };
+  const { scope } = input.identity;
+  try {
+    const { data } = await client.rest.checks.create({
+      owner: scope.owner,
+      repo: scope.repo,
+      name: CHECK_NAME,
+      head_sha: input.identity.headSha,
+      external_id: input.identity.externalId,
+      status: "in_progress",
+    });
+    const remote = toCheckRemote(data);
+    if (remote === null) return { kind: "unavailable", reason: "check create returned a malformed payload" };
+    if (!remoteBelongsTo(remote, input.identity)) {
+      return { kind: "unavailable", reason: "check create response does not match this attempt identity" };
+    }
+    return { kind: "ready", remote };
+  } catch (error) {
+    return { kind: "unavailable", reason: surfaceFailure(error, "check create") };
+  }
+}
+
+/**
+ * Find the run this attempt's persisted `external_id` already created (spec
+ * §7.9). Read-only by design: no create, no update, no state write — GitHub's
+ * `external_id` is correlation, not server-side idempotency (RL-12), so the
+ * only honest answer to "did my create land?" is an identity-matched read.
+ */
+async function adoptCheckRunWith(
+  deps: ChecksDeps,
+  input: { identity: CheckIdentity },
+): Promise<
+  { kind: "found"; remote: CheckRemote } | { kind: "absent" | "incomplete" | "ambiguous" }
+> {
+  const client = await clientFor(deps, input.identity.scope);
+  if (client === null) return { kind: "incomplete" };
+  const { scope } = input.identity;
+  const matches: CheckRemote[] = [];
+  let pagesRead = 0;
+  let saturated = false;
+  for (let page = 1; page <= ADOPT_MAX_PAGES; page += 1) {
+    let result: { data: ChecksListPage };
+    try {
+      result = await client.rest.checks.listForRef({
+        owner: scope.owner,
+        repo: scope.repo,
+        ref: input.identity.headSha,
+        check_name: CHECK_NAME,
+        app_id: input.identity.githubAppId,
+        filter: "all",
+        per_page: ADOPT_PAGE_SIZE,
+        page,
+      });
+    } catch {
+      // An errored walk proves nothing about presence or absence.
+      return { kind: "incomplete" };
+    }
+    const runs = result?.data?.check_runs;
+    if (!Array.isArray(runs)) return { kind: "incomplete" };
+    pagesRead += 1;
+    for (const payload of runs) {
+      const remote = toCheckRemote(payload);
+      // A malformed candidate inside the App/name/SHA window makes the walk
+      // ambiguous: skipping it could silently drop OUR run.
+      if (remote === null) return { kind: "ambiguous" };
+      if (remoteBelongsTo(remote, input.identity)) matches.push(remote);
+    }
+    if (matches.length > 1) return { kind: "ambiguous" };
+    if (matches.length === 1) return { kind: "found", remote: matches[0]! };
+    saturated = runs.length >= ADOPT_PAGE_SIZE;
+    if (!saturated) break;
+  }
+  // Absence is a claim about a COMPLETE walk only. A bound-hitting walk is
+  // honest about the API's own limits (spec §7.9: listForRef also caps at the
+  // 1000 most recent suites on a ref) and stays incomplete, never absent.
+  if (saturated && pagesRead >= ADOPT_MAX_PAGES) return { kind: "incomplete" };
+  return { kind: "absent" };
+}
+
+/**
+ * Terminalize an owned run with a frozen conclusion (spec §7.9 "Desired versus
+ * observed"): prove persisted ownership of the lease AND of `checkRunId`,
+ * require the persisted terminal intent to agree with what is being sent (the
+ * store freezes `desired` BEFORE any update), then validate the response's
+ * identity and terminal state. Only a validated response lets the caller
+ * advance `observed`.
+ */
+async function completeCheckWith(
+  deps: ChecksDeps,
+  input: { identity: CheckIdentity; lease: Lease; checkRunId: number; conclusion: CheckConclusion },
+): Promise<{ kind: "completed"; remote: CheckRemote } | { kind: "unavailable"; reason: string }> {
+  const owned = await guardOwnership(deps, input.identity, input.lease);
+  if (owned.kind === "unavailable") return owned;
+  // The persisted row must already carry THIS terminal intent: `desired` is
+  // frozen by `setCheckDesired` before any update (spec §7.9), so an
+  // `in_progress` row here means the caller skipped the intent write. The
+  // parameter type already excludes `in_progress`, so no send can carry it.
+  if (owned.data.desired === "in_progress") {
+    return { kind: "unavailable", reason: "terminal intent was never persisted for this attempt" };
+  }
+  if (owned.data.desired !== input.conclusion.desired) {
+    return { kind: "unavailable", reason: "conclusion does not match the persisted terminal intent" };
+  }
+  if (owned.data.checkRunId !== input.checkRunId) {
+    return { kind: "unavailable", reason: "check run id is not the one this attempt persisted" };
+  }
+  const client = await clientFor(deps, input.identity.scope);
+  if (client === null) return { kind: "unavailable", reason: "no review-write Checks client for this App" };
+  const { scope } = input.identity;
+  try {
+    const { data } = await client.rest.checks.update({
+      owner: scope.owner,
+      repo: scope.repo,
+      check_run_id: input.checkRunId,
+      status: "completed",
+      conclusion: input.conclusion.desired,
+      title: input.conclusion.title,
+      summary: input.conclusion.summary,
+    });
+    const remote = toCheckRemote(data);
+    if (remote === null) return { kind: "unavailable", reason: "check update returned a malformed payload" };
+    if (!remoteBelongsTo(remote, input.identity)) {
+      return { kind: "unavailable", reason: "check update response does not match this attempt identity" };
+    }
+    if (remote.status !== "completed" || remote.conclusion !== input.conclusion.desired) {
+      return { kind: "unavailable", reason: "check update response is not the intended terminal state" };
+    }
+    return { kind: "completed", remote };
+  } catch (error) {
+    return { kind: "unavailable", reason: surfaceFailure(error, "check update") };
+  }
+}
+
+/**
+ * Read one run back and prove it belongs to this attempt (spec §7.11.2 step 3:
+ * "If ID known, GET/validate ownership before update"). `absent` = the remote
+ * object is gone (404 or foreign identity); anything else is `unavailable`.
+ */
+async function fetchCheckRunWith(
+  deps: ChecksDeps,
+  input: { identity: CheckIdentity; checkRunId: number },
+): Promise<
+  { kind: "found"; remote: CheckRemote } | { kind: "absent" } | { kind: "unavailable"; reason: string }
+> {
+  const client = await clientFor(deps, input.identity.scope);
+  if (client === null) return { kind: "unavailable", reason: "no review-write Checks client for this App" };
+  const { scope } = input.identity;
+  try {
+    const { data } = await client.rest.checks.get({
+      owner: scope.owner,
+      repo: scope.repo,
+      check_run_id: input.checkRunId,
+    });
+    const remote = toCheckRemote(data);
+    if (remote === null) return { kind: "unavailable", reason: "check get returned a malformed payload" };
+    if (remote.id !== input.checkRunId) return { kind: "unavailable", reason: "check get returned a different run" };
+    return remoteBelongsTo(remote, input.identity) ? { kind: "found", remote } : { kind: "absent" };
+  } catch (error) {
+    if (httpStatus(error) === 404) return { kind: "absent" };
+    return { kind: "unavailable", reason: surfaceFailure(error, "check get") };
+  }
+}
+
+/**
+ * The persisted-ownership read every send shares, behind the same never-throw
+ * rule: a D1 read failure is `unavailable`, not an exception into the review.
+ */
+async function guardOwnership(
+  deps: ChecksDeps,
+  identity: CheckIdentity,
+  lease: Lease,
+): Promise<
+  { kind: "ok"; data: CheckOwnership } | { kind: "unavailable"; reason: string }
+> {
+  let owned: CheckOwnership | null;
+  try {
+    owned = await getCheckOwnership(deps.db, identity.attemptId, lease);
+  } catch (error) {
+    return { kind: "unavailable", reason: `attempt ownership read failed: ${safeDetail(error)}` };
+  }
+  if (owned === null) return { kind: "unavailable", reason: "attempt is not owned by this lease" };
+  if (
+    owned.identity.externalId !== identity.externalId ||
+    owned.identity.generation !== identity.generation ||
+    owned.identity.githubAppId !== identity.githubAppId ||
+    owned.identity.headSha !== identity.headSha
+  ) {
+    return { kind: "unavailable", reason: "caller identity disagrees with the persisted attempt" };
+  }
+  return { kind: "ok", data: owned };
+}
+
+/** Client resolution — a null or throwing transport is `unavailable`, never a throw. */
+async function clientFor(deps: ChecksDeps, scope: Scope): Promise<ChecksOctokit | null> {
+  try {
+    return await deps.getOctokit({ scope });
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Map an octokit rejection to a bounded reason. 403/404 are the permission
+ * answers the fresh-App manifest owes (spec §7.12); every other status or a
+ * non-Error rejection is still only `unavailable` — Check failure never aborts
+ * a review (RL-3).
+ */
+function surfaceFailure(error: unknown, surface: string): string {
+  const status = httpStatus(error);
+  if (status === 403) return `${surface} refused (403): the App installation lacks checks:write`;
+  if (status === 404) return `${surface} refused (404): repository or head ref not visible to this App`;
+  return `${surface} failed: ${safeDetail(error)}`;
+}
+
+function httpStatus(error: unknown): number | null {
+  if (typeof error !== "object" || error === null) return null;
+  const { status } = error as { status?: unknown };
+  return typeof status === "number" ? status : null;
+}
+
+/** Redacted, bounded error text — a transport message may carry a URL or token. */
+function safeDetail(error: unknown): string {
+  const message = error instanceof Error ? error.message : String(error);
+  return redactSecrets(message).replace(/[\r\n]+/g, " ").slice(0, 240);
+}
+
+// ---------------------------------------------------------------------------
+// Conclusions (spec §7.9 matrix)
+// ---------------------------------------------------------------------------
+
+/** The execution-completion disclaimer (D3/RL-10: a Check is never approval). */
+const SUCCESS_SUFFIX = "Execution completion only; not code approval or a merge gate.";
+
+/** Frozen summaries, exactly as spec §7.9's matrix spells them. */
+export const CHECK_SUMMARIES = {
+  success: (sha7: string, round: number) => `Review published for ${sha7} (round ${round}). ${SUCCESS_SUFFIX}`,
+  neutral: "Review output was invalid; a degraded summary comment was published.",
+  prePublicationFailure: (reason: string) =>
+    `Review execution failed before publication: ${reason}. No review was published.`,
+  degradedNotPosted: "Review output was invalid and the degraded notice was not published.",
+  unconfirmed: "Review attempt could not be confirmed complete; publication status is unknown.",
+  exhausted: "Finalization could not be confirmed. Manual inspection may be required.",
+} as const;
+
+/** What the caller knows about execution, alongside the persisted proof. */
+export type CheckTerminalOutcome =
+  | "pre-publication-failure"
+  | "degraded-not-posted"
+  | "publication-unknown"
+  | "expired"
+  | "local-error";
+
+/**
+ * Decide the Check conclusion from spec §7.9's matrix:
+ *
+ * | persisted proof / knowledge                     | desired |
+ * |-------------------------------------------------|---------|
+ * | confirmed normal (`review`) publication          | success |
+ * | confirmed degraded publication                   | neutral |
+ * | definitive failure before any publication send   | failure |
+ * | degraded send rejected, no earlier unknown send  | failure |
+ * | any send with unconfirmed result                 | failure |
+ * | expired attempt without proof                    | failure |
+ * | recovery exhausted                               | proof-derived desired, else failure |
+ *
+ * Proof precedence (normal over degraded within the exact scope/SHA) lives in
+ * `readPublicationProof`, which the caller uses to obtain `proof`; this
+ * function trusts what it is handed and reads `kind` alone. A `null` proof is
+ * UNPROVEN — which is not the same as "not published", and is why an unknown
+ * outcome must conclude `failure` rather than guess.
+ */
+export function decideConclusion(input: {
+  proof: PublicationProof | null;
+  outcome: CheckTerminalOutcome;
+  reason?: string;
+}): CheckConclusion {
+  const { proof, outcome } = input;
+  if (proof !== null) {
+    return proof.kind === "review"
+      ? {
+          desired: "success",
+          title: CHECK_NAME,
+          summary: CHECK_SUMMARIES.success(proof.headSha.slice(0, 7), proof.round),
+        }
+      : { desired: "neutral", title: CHECK_NAME, summary: CHECK_SUMMARIES.neutral };
+  }
+  if (outcome === "local-error") {
+    return { desired: "failure", title: CHECK_NAME, summary: CHECK_SUMMARIES.exhausted };
+  }
+  if (outcome === "pre-publication-failure") {
+    return {
+      desired: "failure",
+      title: CHECK_NAME,
+      summary: CHECK_SUMMARIES.prePublicationFailure(boundedReason(input.reason)),
+    };
+  }
+  if (outcome === "degraded-not-posted") {
+    return { desired: "failure", title: CHECK_NAME, summary: CHECK_SUMMARIES.degradedNotPosted };
+  }
+  // publication-unknown and expired-without-proof are both unconfirmed.
+  return { desired: "failure", title: CHECK_NAME, summary: CHECK_SUMMARIES.unconfirmed };
+}
+
+/** Bounded, redacted failure text — a public Check summary must not leak a token. */
+function boundedReason(reason: string | undefined): string {
+  const text = reason === undefined || reason.trim().length === 0 ? "unknown pipeline failure" : reason;
+  return redactSecrets(text).replace(/[\r\n]+/g, " ").slice(0, 240);
+}
+
+/** The identity of an attempt row (T2/T3 read-back convenience, spec §7.9). */
+export function identityOf(attempt: CheckAttempt): CheckIdentity {
+  return attempt.identity;
+}
