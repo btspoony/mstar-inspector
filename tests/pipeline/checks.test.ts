@@ -265,6 +265,9 @@ describe("beginCheck — the create contract", () => {
     const result = await adapter.beginCheck({ identity: attempt.identity, lease });
     expect(result.kind).toBe("unavailable");
     expect(fake.creates).toHaveLength(0);
+    // Proven pre-send: the fence refused before any request left.
+    if (result.kind === "unavailable") expect(result.requests).toBe(0);
+    expect(await runState(db, attempt)).toBe("not-sent");
   });
 
   test("a matching response yields the remote evidence, not an opinion", async () => {
@@ -291,6 +294,8 @@ describe("beginCheck — the create contract", () => {
     const { attempt, lease } = await claimedAttempt(db);
     const result = await adapterFor(db, null).beginCheck({ identity: attempt.identity, lease });
     expect(result.kind).toBe("unavailable");
+    // No client, no request: nothing can have been created remotely.
+    if (result.kind === "unavailable") expect(result.requests).toBe(0);
     expect(await runState(db, attempt)).toBe("not-sent");
   });
 
@@ -300,6 +305,9 @@ describe("beginCheck — the create contract", () => {
     const bare = { rest: {} } as unknown as ChecksOctokit;
     const result = await adapterFor(db, bare).beginCheck({ identity: attempt.identity, lease });
     expect(result.kind).toBe("unavailable");
+    // A definitive pre-send refusal: reported as zero requests so a caller can
+    // tell it apart from an answered failure.
+    if (result.kind === "unavailable") expect(result.requests).toBe(0);
   });
 
   test("a throwing client factory is unavailable, never an exception", async () => {
@@ -314,7 +322,10 @@ describe("beginCheck — the create contract", () => {
     });
     const result = await adapter.beginCheck({ identity: attempt.identity, lease });
     expect(result.kind).toBe("unavailable");
-    if (result.kind === "unavailable") expect(result.reason).toMatch(/grant mint refused|no review-write/i);
+    if (result.kind === "unavailable") {
+      expect(result.reason).toMatch(/grant mint refused|no review-write/i);
+      expect(result.requests).toBe(0);
+    }
   });
 
   test("403 and 404 permission rejections are unavailable with a named reason", async () => {
@@ -331,6 +342,9 @@ describe("beginCheck — the create contract", () => {
       if (result.kind === "unavailable") {
         expect(result.reason).toContain(String(status));
         expect(result.reason.toLowerCase()).toContain("check create");
+        // The answer was requested: the run may exist, so the caller must
+        // recover by adoption rather than create again.
+        expect(result.requests).toBe(1);
       }
       // The attempt stays honest: still un-created, nothing observed.
       const row = await rowOf(db, attempt);
@@ -391,7 +405,74 @@ describe("beginCheck — the create contract", () => {
     const fake = fakeChecks({ create: () => runPayload(attempt.identity) });
     const result = await adapterFor(db, fake.octokit).beginCheck({ identity: attempt.identity, lease });
     expect(result.kind).toBe("unavailable");
+    // The refusal is a definitive pre-dispatch one: the additive contract
+    // reports a NUMBER, so a caller can read `requests` without narrowing.
+    if (result.kind === "unavailable") {
+      expect(result.requests).toBe(0);
+      expect(result.reason).toMatch(/already owns/i);
+    }
     expect(fake.creates).toHaveLength(0); // no duplicate create for an owned run
+  });
+
+  test("an ownership-read failure is unavailable with zero requests", async () => {
+    const db = seededDb();
+    const { attempt, lease } = await claimedAttempt(db);
+    const fake = fakeChecks({ create: () => runPayload(attempt.identity) });
+    // The ownership read is the FIRST D1 statement the lane issues; failing it
+    // inside `prepare` is the module-level equivalent of a D1 outage.
+    const failingDb = {
+      ...db,
+      prepare: (query: string) => {
+        if (query.includes("FROM review_checks")) {
+          return {
+            bind: () => {
+              throw new Error("d1 down");
+            },
+          } as never;
+        }
+        return db.prepare(query);
+      },
+    } as typeof db;
+    const result = await adapterFor(failingDb, fake.octokit).beginCheck({ identity: attempt.identity, lease });
+    expect(result.kind).toBe("unavailable");
+    if (result.kind === "unavailable") {
+      // A refused guard read never dispatched anything, and the count is
+      // numeric rather than undefined.
+      expect(result.requests).toBe(0);
+      expect(result.reason).toMatch(/ownership read failed/i);
+    }
+    expect(fake.creates).toHaveLength(0);
+  });
+
+  test("every unavailable lane result carries a numeric request count", async () => {
+    // The additive `requests` contract is only useful if NO refusal path can
+    // leave it undefined: an undefined count would be read as a false
+    // zero-request classification by the recovery lane.
+    const db = seededDb();
+    const { attempt, lease } = await claimedAttempt(db);
+    const noClient = await adapterFor(db, null).beginCheck({ identity: attempt.identity, lease });
+    const bareSurface = await adapterFor(db, { rest: {} } as unknown as ChecksOctokit).beginCheck({
+      identity: attempt.identity,
+      lease,
+    });
+    const stale = await adapterFor(db, fakeChecks().octokit).beginCheck({
+      identity: attempt.identity,
+      lease: { holder: "run-a", epoch: 1, untilMs: T0 + CHECK_LEASE_MS + 1 },
+    });
+    await attachedRun(db, attempt, lease, 4242);
+    const alreadyAttached = await adapterFor(db, fakeChecks().octokit).beginCheck({ identity: attempt.identity, lease });
+    await setCheckDesired(db, attempt.identity.attemptId, lease, SUCCESS, null, T0);
+    const unowned = await adapterFor(db, fakeChecks().octokit).completeCheck({
+      identity: { ...attempt.identity, attemptId: "11111111-2222-3333-4444-666666666666" },
+      lease,
+      checkRunId: 4242,
+      conclusion: SUCCESS,
+    });
+
+    for (const lane of [noClient, bareSurface, stale, alreadyAttached, unowned]) {
+      expect(lane.kind).toBe("unavailable");
+      if (lane.kind === "unavailable") expect(typeof lane.requests).toBe("number");
+    }
   });
 
   test("a stale lease sends nothing (the fence is checked immediately before the send)", async () => {

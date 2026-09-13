@@ -147,6 +147,9 @@ import {
   type CustomProviderConsumerConfig,
 } from "../dashboard/app-config-store";
 import { getSandboxImage, type SandboxImageDefinition } from "../contracts/sandbox-images";
+// §7.10 Check seam implementation (plan 68 Task 2): `checks.ts` owns the
+// adapter AND the lifecycle it drives; this module owns the seam call sites.
+import { createCheckLifecycle } from "./checks";
 
 export type PipelineEnv = {
   DB: D1Database;
@@ -492,10 +495,12 @@ function handleGuardHeld(message: Message<ReviewJobPayload>, deps: ProcessDeps):
 // §7.10) — plan-67-owned types so M8 ships and works before plan 68: an
 // ABSENT `checks` dependency produces NO Checks while M8 remains fully
 // operational. Declared with §7.7 types only (Scope, Lease) — never a §7.9
-// type; plan 68 supplies the implementation and owns the durable attempt
-// rows. Hook exceptions/timeouts are caught by the consumer (≤2 requests /
-// 2 seconds per inline hook is the hook's own budget — no publication path
-// waits for hook retries).
+// type. Plan 68 Task 2 supplies the implementation (`createCheckLifecycle` in
+// checks.ts) and `createReviewConsumer` injects it; the dependency stays
+// optional, and a hooks object that cannot reach a Checks surface still
+// produces no row and no remote run. Hook exceptions/timeouts are caught by
+// the consumer (≤2 requests / 2 seconds per inline hook is the hook's own
+// budget — no publication path waits for hook retries).
 // ---------------------------------------------------------------------------
 
 export type CheckHandle = { attemptId: string; scope: Scope; githubAppId: number; headSha: string; lease: Lease };
@@ -513,8 +518,12 @@ export type CheckLifecycleHooks = {
  */
 export const CHECK_EXECUTION_WINDOW_MS = 900_000;
 
-/** Inline hook budget guard: the consumer never waits longer than this. */
-const CHECK_HOOK_TIMEOUT_MS = 2_500;
+/**
+ * Inline hook budget guard (spec §7.10: "Each inline hook has ≤2 requests /
+ * 2 seconds total"). Exported because it is the containment bound the Check
+ * lifecycle must honour, and the two hook-timeout cases pin it by value.
+ */
+export const CHECK_HOOK_TIMEOUT_MS = 2_000;
 
 /**
  * §7.3 catalog budget: "Diff capture plus catalog is bounded to 256 KiB; at
@@ -528,7 +537,15 @@ const RECHECK_SLICES_PER_TARGET = 4;
 /** §7.3 input cap: oversized whole targets are excluded with coverage. */
 const RECHECK_INPUT_MAX_BYTES = 512 * 1024;
 
-/** Await a promise with a hard consumer-side timeout (hook budget guard). */
+/**
+ * Await a promise with the §7.10 inline-hook budget as a hard consumer-side
+ * bound. The bound is on the CONSUMER's wait, not on the hook's work: a hook
+ * that settles late keeps running detached — this guard creates no AbortSignal
+ * and the locked seam exposes none, so a late create/terminalize can still
+ * complete durably on its own (its writes stay fenced on the attempt lease).
+ * The consumer never waits past `CHECK_HOOK_TIMEOUT_MS`, and a rejection that
+ * lands after the timeout is swallowed rather than surfacing unhandled.
+ */
 async function withHookTimeout<T>(promise: Promise<T>, fallback: T): Promise<T> {
   let timer: ReturnType<typeof setTimeout> | undefined;
   const timeout = new Promise<T>((resolve) => {
@@ -1192,11 +1209,13 @@ type ProcessDeps = {
   getSandbox: (binding: unknown, id: string) => Promise<ReviewSandbox>;
   /**
    * Optional Check lifecycle seam (plan 67 §7.10): ABSENT → no Checks, M8
-   * fully operational (plan 68 supplies the implementation). Hook
-   * exceptions/timeouts are caught by the consumer; `begin` runs at §7.7
-   * step 4 (after the authoritative SHA and dedup, before model work),
-   * `terminalize` at step 12 on every terminal path with the publication
-   * identity so the terminal decision reads the persisted proof.
+   * fully operational. `createReviewConsumer` injects the plan 68
+   * implementation by default; the field stays optional so the seam's
+   * absent-dependency contract holds. Hook exceptions/timeouts are caught by
+   * the consumer; `begin` runs at §7.7 step 4 (after the authoritative SHA and
+   * dedup, before model work), `terminalize` at step 12 on every terminal path
+   * with the publication identity so the terminal decision reads the persisted
+   * proof.
    */
   checks?: CheckLifecycleHooks;
 };
@@ -1897,20 +1916,34 @@ export function createReviewConsumer(
   log: ConsumerLog = defaultConsumerLog,
   overrides: ConsumerOverrides = {},
 ): (batch: MessageBatch<ReviewJobPayload>) => Promise<void> {
+  // The per-App commenter cache (plan 13 lock L4) is also the Check lane's
+  // credential route: the lifecycle resolves THIS message's App adapter from
+  // it, so a Check never mints a token, client or permission set of its own.
+  const appCommenters = new Map<string, { commenter: ReviewCommenter; fingerprint: string; githubAppId: number }>();
   const deps: ProcessDeps = {
     env,
     store: overrides.store ?? createArtifactStore(env.DB),
     failureStore: overrides.failureStore ?? createFailureStore(env.DB),
-    appCommenters: new Map(),
+    appCommenters,
     // Production factory (plan 67 §7.5/§7.7 step 11): the commenter is bound
     // to the thread store (`createReviewCommenter(env, { db })`) so
     // `discoverThread` / `resolveFindingThread` are live for the resolution
     // step — the single construction point stays src/pipeline/comment.ts.
     createAppCommenter: overrides.createAppCommenter ?? ((cred) => createReviewCommenter(cred, { db: env.DB })),
     getSandbox: overrides.getSandbox ?? ((binding, id) => getSandbox(binding, id)),
-    ...(overrides.checks !== undefined ? { checks: overrides.checks } : {}),
     log,
   };
+  // §7.10 Check seam (plan 68 Task 2): production always supplies the
+  // lifecycle; an override replaces it wholesale. An App whose commenter
+  // carries no Checks surface yields `null` from `getAdapter`, and the
+  // lifecycle then registers no attempt at all.
+  deps.checks =
+    overrides.checks ??
+    createCheckLifecycle({
+      db: env.DB,
+      nowMs: () => Date.now(),
+      getAdapter: (scope) => appCommenters.get(scope.appId)?.commenter.checks ?? null,
+    });
   return async (batch) => {
     for (const message of batch.messages) {
       const outcome = await processMessage(message.body, deps);
