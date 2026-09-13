@@ -780,13 +780,26 @@ private D1 publication journal and **never re-runs a paid review**:
 
 Retries are bounded with backoff; at the cap the row stays visible as a terminal
 local-error/unknown and is never deleted (the structured warning carries
-App/scope/work ID and reason — no payload, no secret). Rows whose exact
-`(app_id, installation_id)` maps to a missing, disabled or deleted App are
-durably `suspended`, re-checked each run, and resume with fresh fencing on
-re-enable. Pause/kill-switch stops new reviews, publications and line comments;
-local apply of already-confirmed publications, read-only proof discovery and
-previously-authorized resolution retries continue (frozen policy). Budgets and
-the exact selection predicates: `.mstar/specs/review-lifecycle.md` §7.11.1.
+App/scope/work ID and reason — no payload, no secret). App-state suspension is
+per exact `(app_id, installation_id)` pair; recovery distinguishes the reasons:
+
+- a **disabled** App suspends its pending rows durably (no mutation while
+  disabled) and they become eligible again only after **that exact App** is
+  re-enabled — each run re-checks the pair, and due rows resume with the same
+  IDs under fresh fencing;
+- a **missing mapping, deleted App or live identity mismatch** suspends rows
+  durably for operator inspection and does **not** resume automatically on
+  re-enable: a deleted App can never be re-activated, and recovery only
+  proceeds once the operator restores the mapping or corrects the App's
+  credentials.
+
+Pause/kill-switch stops new reviews, publications and line-comment creation.
+The bounded exceptions — local apply of already-confirmed publications,
+read-only proof discovery, and previously-authorized resolution retries —
+continue only for an **otherwise active** exact App; a disabled, deleted,
+missing or identity-mismatched App keeps its suspension (frozen policy).
+Budgets and the exact selection predicates: `.mstar/specs/review-lifecycle.md`
+§7.11.1.
 
 ### Secrets inventory delta
 
