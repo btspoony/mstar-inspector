@@ -66,6 +66,7 @@ import {
   recordCheckObservation,
   reenableChecksForApps,
   releaseCheckClaim,
+  releaseExpiredCheckClaim,
   setCheckDesired,
   suspendCheckRecovery,
 } from "../store/review-checks";
@@ -339,12 +340,14 @@ function isBudgetRefusal(error: unknown): boolean {
  * issues. A request that cannot be admitted fails BEFORE dispatch and marks
  * the budget, so the caller can tell a deferral from a failed attempt.
  *
- * A refusal AFTER a recovery claim leaves the row's 120s recovery lease to
- * lapse rather than mutating it: every store writer that clears a lease also
- * spends an attempt (`deferCheckRecovery`), and the spec forbids a budget
- * deferral from spending one. The row is therefore due again as soon as its
- * own short lease expires — far inside the next cron window — with nothing
- * written and no attempt consumed.
+ * A refusal AFTER a recovery claim does not leave a lease behind. The lane
+ * hands the claim straight back with `releaseCheckClaim` (or
+ * `releaseExpiredCheckClaim` for the zero-dispatch case, whose fence is
+ * identity rather than liveness): holder and lease are cleared, and attempts,
+ * backoff, desired/observed, remote IDs and error state are all preserved. The
+ * row is selector-due again at the SAME instant, not after a 120-second lapse.
+ * `deferCheckRecovery` is deliberately not used here, because it increments
+ * `attempts` and the spec forbids charging an attempt for work that never ran.
  */
 function buildTransport(budget: RunBudget, now: () => number): CheckTransport {
   const boundMs = (): number => Math.max(1, Math.min(CHECK_RECONCILE_PER_REQUEST_MS, budget.deadline - now()));
@@ -647,6 +650,37 @@ async function reconcileCheckAttempt(
         return;
       }
       if (ready.kind === "unavailable") {
+        // `requests === 0` is the adapter's proof that the Checks callable was
+        // never invoked — the durable `sending` mark has no request behind it
+        // and the adapter has already rolled it back to `not-sent`. This is a
+        // no-request refusal, so §7.11.2 step 5 applies exactly as it does to a
+        // budget refusal: leave the row due without spending an attempt.
+        //
+        // The identity-fenced release is required rather than the liveness one:
+        // a zero-request refusal is typically the live-time fence itself (the
+        // lease expired while the client was resolved), so `releaseCheckClaim`
+        // could write nothing on precisely the path that needs it.
+        if (ready.requests === 0) {
+          const released = await releaseExpiredCheckClaim(db, attemptId, lease, now());
+          if (!released) {
+            // The epoch/state moved under us: a newer claim owns the row now, so
+            // its state is none of ours to touch. Nothing was charged and no
+            // request was made; the row is left to its current owner.
+            log.warn(
+              { event: "ops_check_reconcile_zero_dispatch_release_missed", detail: `attempt=${attemptId}` },
+              "zero-dispatch refusal hit a claim that had already moved",
+            );
+            return;
+          }
+          log.info(
+            { event: "ops_check_reconcile_zero_dispatch_deferral", detail: `attempt=${attemptId}` },
+            "no-request create refusal — row released, no attempt spent",
+          );
+          return;
+        }
+        // `requests > 0` (or an older adapter that cannot say): a create may
+        // have reached GitHub. RL-12 honesty applies — adopt-only recovery with
+        // a spent attempt and backoff.
         await settleFailedAttempt(db, now, attemptsBefore, row, lease, ready.reason, log, summary);
         return;
       }

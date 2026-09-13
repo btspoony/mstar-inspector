@@ -61,6 +61,8 @@ import {
   recordCheckObservation,
   reenableChecksForApps,
   releaseCheckClaim,
+  releaseExpiredCheckClaim,
+  rollbackCheckCreateDispatch,
   retryCheckRecovery,
   type Scope,
   setCheckCreateState,
@@ -816,6 +818,119 @@ describe("claimCheckRecovery (spec §7.9/§7.11.2)", () => {
     await setCheckDesired(db, id, lease, CONCLUSION, null, T0);
     await recordCheckObservation(db, id, lease, remoteFor(attempt, {}, "success"), T0);
     expect(await claimCheckRecovery(db, id, "reconciler", DEADLINE * 2)).toBeNull();
+  });
+});
+
+describe("zero-dispatch rollback and the no-request claim release (integrated seam fix 2)", () => {
+  test("a sending mark with no remote id rolls back to not-sent and nothing else moves", async () => {
+    const db = seededDb();
+    const { attempt, lease } = await claim(db);
+    const id = attempt.identity.attemptId;
+    await setCheckDesired(db, id, lease, CONCLUSION, null, T0);
+    expect(await setCheckCreateState(db, id, lease, "sending", undefined, T0)).toBe(true);
+    const before = await rawRow(db, id);
+
+    expect(await rollbackCheckCreateDispatch(db, id, lease, T0 + 1)).toBe(true);
+    const after = await rawRow(db, id);
+    expect(after.create_state).toBe("not-sent");
+    for (const key of [
+      "attempts", "next_attempt_ms", "last_error", "desired", "observed", "external_id",
+      "generation", "check_run_id", "publication_id", "terminal_ms", "holder",
+      "lease_epoch", "lease_until_ms", "app_id", "installation_id", "owner", "repo",
+      "pr_number", "head_sha",
+    ]) {
+      expect([key, after[key]]).toEqual([key, before[key]]);
+    }
+  });
+
+  test("the sending mark preserves an existing error instead of fabricating one", async () => {
+    const db = seededDb();
+    const { attempt, lease } = await claim(db);
+    const id = attempt.identity.attemptId;
+    const PRIOR = "check get failed: 502 bad gateway";
+    db.raw.prepare(`UPDATE review_checks SET last_error = ? WHERE id = ?`).run(PRIOR, id);
+
+    expect(await setCheckCreateState(db, id, lease, "sending", undefined, T0)).toBe(true);
+    expect((await rawRow(db, id)).last_error).toBe(PRIOR);
+    // The `unknown` leg still records its own bounded reason.
+    expect(await setCheckCreateState(db, id, lease, "unknown", "socket closed", T0)).toBe(true);
+    expect((await rawRow(db, id)).last_error).toBe("socket closed");
+  });
+
+  test("rollback refuses to disguise a row that already carries a remote id", async () => {
+    const db = seededDb();
+    const { attempt, lease } = await claim(db);
+    const id = attempt.identity.attemptId;
+    // The dangerous shape the guard exists for: a `sending` row that ALREADY
+    // has a remote id attached. Rolling it back to `not-sent` would declare a
+    // run that demonstrably exists createable again — the blind-recreate
+    // RL-12 forbids. Reachable if an attach lands between the mark and a
+    // recovery rollback.
+    expect(await setCheckCreateState(db, id, lease, "sending", undefined, T0)).toBe(true);
+    await attachCheckRunId(db, id, lease, 4242, T0);
+    db.raw.prepare(`UPDATE review_checks SET create_state = 'sending' WHERE id = ?`).run(id);
+
+    expect(await rollbackCheckCreateDispatch(db, id, lease, T0 + 1)).toBe(false);
+    const row = await rawRow(db, id);
+    expect(row.check_run_id).toBe(4242);
+    expect(row.create_state).toBe("sending");
+    expect(row.external_id).toBe(attempt.identity.externalId);
+  });
+
+  test("rollback is defeated by a newer epoch, leaving the new holder untouched", async () => {
+    const db = seededDb();
+    const { attempt, lease } = await claim(db);
+    const id = attempt.identity.attemptId;
+    expect(await setCheckCreateState(db, id, lease, "sending", undefined, T0)).toBe(true);
+    db.raw
+      .prepare(`UPDATE review_checks SET holder = 'other-run', lease_epoch = ?, lease_until_ms = ? WHERE id = ?`)
+      .run(lease.epoch + 1, T0 + CHECK_RECOVERY_LEASE_MS, id);
+    expect(await rollbackCheckCreateDispatch(db, id, lease, T0)).toBe(false);
+    const row = await rawRow(db, id);
+    expect(row.holder).toBe("other-run");
+    expect(row.lease_epoch).toBe(lease.epoch + 1);
+    expect(row.create_state).toBe("sending");
+  });
+
+  test("releaseExpiredCheckClaim releases an EXPIRED lease that releaseCheckClaim cannot", async () => {
+    const db = seededDb();
+    const { attempt } = await claim(db);
+    const id = attempt.identity.attemptId;
+    await setCheckDesired(db, id, attempt.lease, CONCLUSION, null, T0);
+    await deferCheckRecovery(db, id, attempt.lease, { state: "pending", nextAttemptMs: T0, reason: "release" }, T0);
+    // A recovery claim, then the clock passes its 120s lease end: the row is
+    // leased but no longer live (the zero-dispatch shape).
+    const recovery = await claimCheckRecovery(db, id, "reconciler", T0);
+    expect(recovery).not.toBeNull();
+    const afterExpiry = recovery!.untilMs + 1;
+
+    // The liveness-fenced release writes NOTHING here.
+    expect(await releaseCheckClaim(db, id, recovery!, afterExpiry)).toBe(false);
+    expect((await rawRow(db, id)).holder).toBe("reconciler");
+
+    // The identity-fenced release does, preserving everything else. The
+    // attempt count is the one the fixture's own release already spent — the
+    // point is that THIS release adds nothing to it.
+    const before = await rawRow(db, id);
+    expect(await releaseExpiredCheckClaim(db, id, recovery!, afterExpiry)).toBe(true);
+    const row = await rawRow(db, id);
+    expect(row.holder).toBeNull();
+    expect(row.lease_until_ms).toBeNull();
+    expect(row.attempts).toBe(before.attempts);
+    expect(row.next_attempt_ms).toBe(before.next_attempt_ms);
+    expect(row.desired).toBe(before.desired);
+    expect(row.observed).toBe(before.observed);
+    expect(row.terminal_ms).toBeNull();
+    expect(await listCheckReconcileBatch(db, afterExpiry)).toHaveLength(1);
+  });
+
+  test("releaseExpiredCheckClaim still refuses a newer epoch", async () => {
+    const db = seededDb();
+    const { attempt } = await claim(db);
+    const id = attempt.identity.attemptId;
+    const stale: Lease = { holder: attempt.lease.holder, epoch: attempt.lease.epoch + 5, untilMs: attempt.lease.untilMs };
+    expect(await releaseExpiredCheckClaim(db, id, stale, T0)).toBe(false);
+    expect((await rawRow(db, id)).holder).toBe(attempt.lease.holder);
   });
 });
 

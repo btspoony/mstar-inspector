@@ -36,6 +36,7 @@ import {
   CHECK_RECOVERY_LEASE_MS,
   claimAttempt,
   claimCheckRecovery,
+  rollbackCheckCreateDispatch,
   deferCheckRecovery,
   listCheckReconcileBatch,
   retryCheckRecovery,
@@ -212,7 +213,9 @@ async function rawRow(db: TestD1, id: string): Promise<Record<string, string | n
 // ---------------------------------------------------------------------------
 
 type AdoptOutcome = { kind: "found"; remote: CheckRemote } | { kind: "absent" | "incomplete" | "ambiguous" };
-type BeginOutcome = { kind: "ready"; remote: CheckRemote } | { kind: "unavailable"; reason: string };
+type BeginOutcome =
+  | { kind: "ready"; remote: CheckRemote }
+  | { kind: "unavailable"; reason: string; requests?: number };
 type FetchOutcome = { kind: "found"; remote: CheckRemote } | { kind: "absent" } | { kind: "unavailable"; reason: string };
 type CompleteOutcome = { kind: "completed"; remote: CheckRemote } | { kind: "unavailable"; reason: string };
 
@@ -312,11 +315,20 @@ function scriptedAdapter(db: TestD1, script: AdapterScript, transport: CheckTran
       // Mirror the live adapter: `sending` is persisted BEFORE the request.
       // One millisecond inside the recovery lease is a valid fence instant for
       // every clock these tests use.
-      await setCheckCreateState(db, identity.attemptId, lease, "sending", undefined, lease.untilMs - 1);
+      const markedAt = lease.untilMs - 1;
+      await setCheckCreateState(db, identity.attemptId, lease, "sending", undefined, markedAt);
       if (!(await spend())) return { kind: "unavailable", reason: "request budget refused before dispatch" };
-      return script.begin === undefined
-        ? { kind: "unavailable", reason: "no create scripted" }
-        : script.begin(identity);
+      if (script.begin === undefined) return { kind: "unavailable", reason: "no create scripted", requests: 1 };
+      const begun = await script.begin(identity);
+      if (begun.kind !== "unavailable") return begun;
+      // Mirror the live adapter's additive contract: a script that does not say
+      // otherwise describes a dispatched call, so it reports a positive count.
+      const requests = begun.requests ?? 1;
+      if (requests === 0) {
+        // A provably undispatched create: the adapter undoes its own mark.
+        await rollbackCheckCreateDispatch(db, identity.attemptId, lease, markedAt);
+      }
+      return { requests, ...begun };
     },
     fetchCheckRun: async ({ identity, checkRunId }) => {
       if (!(await spend())) return { kind: "unavailable", reason: "request budget refused before dispatch" };
@@ -1900,6 +1912,168 @@ describe("budget refusal releases the claim (L2 fix 1 finding 4)", () => {
     expect(row.observed).toBe("unknown");
     expect(row.check_run_id).toBe(321);
     expect(await listCheckReconcileBatch(db, T0)).toHaveLength(1);
+  });
+});
+
+describe("zero-dispatch create refusal is left due (integrated seam fix 2)", () => {
+  test("sending → live fence refuses → requests: 0 → rollback, released, no attempt, immediately due", async () => {
+    const db = seededDb();
+    const { attempt } = await claim(db);
+    const id = attempt.identity.attemptId;
+    let creates = 0;
+    const fetchStub = stubFetch();
+    try {
+      const summary = await run(db, {
+        now: () => T0,
+        credentials: scriptedCredentials(db, {
+          adopt: async () => ({ kind: "absent" }),
+          begin: async () => {
+            // Mirror the live post-`sending`, pre-call lease fence: no Checks
+            // callable ever runs, so the adapter proves zero dispatch.
+            creates += 1;
+            return { kind: "unavailable", reason: "lease expired before the create request", requests: 0 };
+          },
+        }),
+      });
+      expect(summary.completed).toBe(0);
+      expect(summary.gaveUp).toBe(0);
+      // NOT a spent attempt: nothing ran.
+      expect(summary.unconfirmed).toBe(0);
+      expect(summary.errors).toBe(0);
+    } finally {
+      fetchStub.restore();
+    }
+    // The adapter's rollback of the `sending` mark: nothing is possibly-sent.
+    const row = await rawRow(db, id);
+    expect(row.create_state).toBe("not-sent");
+    expect(row.check_run_id).toBeNull();
+    // No attempt, backoff or error mutation.
+    expect(row.attempts).toBe(0);
+    expect(row.next_attempt_ms).toBeNull();
+    expect(row.last_error).toBeNull();
+    expect(row.terminal_ms).toBeNull();
+    // T3 released its own claim, so the row is selector-due AT THIS INSTANT…
+    expect(row.holder).toBeNull();
+    expect(row.lease_until_ms).toBeNull();
+    expect(row.recovery_state).toBe("pending");
+    expect(await listCheckReconcileBatch(db, T0)).toHaveLength(1);
+    // …and immediately reclaimable.
+    expect(await claimCheckRecovery(db, id, "reconciler", T0)).not.toBeNull();
+    void creates;
+  });
+
+  test("a zero-dispatch refusal still releases when the clock passes T3's own recovery lease", async () => {
+    const db = seededDb();
+    const { attempt } = await claim(db);
+    const id = attempt.identity.attemptId;
+    // T3's recovery lease runs 120s from its claim. A slow credential step or
+    // adapter call can push the clock past it, at which point a liveness-fenced
+    // release would write NOTHING and the row would stay leased — not "left
+    // due" as §7.11.2 step 5 requires. The identity fence is what makes the
+    // release work here.
+    let clock = T0;
+    const fetchStub = stubFetch();
+    try {
+      const summary = await run(db, {
+        now: () => clock,
+        credentials: scriptedCredentials(db, {
+          adopt: async () => ({ kind: "absent" }),
+          begin: async () => {
+            // The call outlives T3's own recovery lease.
+            clock = T0 + CHECK_RECOVERY_LEASE_MS + 1;
+            return { kind: "unavailable", reason: "lease expired before the create request", requests: 0 };
+          },
+        }),
+      });
+      expect(summary.completed).toBe(0);
+      expect(summary.gaveUp).toBe(0);
+    } finally {
+      fetchStub.restore();
+    }
+    const row = await rawRow(db, id);
+    expect(row.create_state).toBe("not-sent");
+    expect(row.check_run_id).toBeNull();
+    // Released despite the expiry, with nothing else moved.
+    expect(row.holder).toBeNull();
+    expect(row.lease_until_ms).toBeNull();
+    expect(row.attempts).toBe(0);
+    expect(row.next_attempt_ms).toBeNull();
+    expect(row.last_error).toBeNull();
+    // Immediately selector-due and reclaimable at that same instant.
+    expect(await listCheckReconcileBatch(db, clock)).toHaveLength(1);
+    expect(await claimCheckRecovery(db, id, "reconciler", clock)).not.toBeNull();
+  });
+
+  test("requests > 0 stays possibly-sent: a spent attempt with backoff, no rollback", async () => {
+    const db = seededDb();
+    const { attempt } = await claim(db);
+    const id = attempt.identity.attemptId;
+    const fetchStub = stubFetch();
+    try {
+      const summary = await run(db, {
+        now: () => T0,
+        credentials: scriptedCredentials(db, {
+          adopt: async () => ({ kind: "absent" }),
+          begin: async () => ({ kind: "unavailable", reason: "check create failed: socket hang up", requests: 1 }),
+        }),
+      });
+      expect(summary.unconfirmed).toBe(1);
+    } finally {
+      fetchStub.restore();
+    }
+    const row = await rawRow(db, id);
+    // RL-12 honesty: a dispatched create may have landed, so the row keeps its
+    // `sending` mark for read-only adoption and pays an attempt + backoff.
+    expect(row.create_state).toBe("sending");
+    expect(row.recovery_state).toBe("remote-unconfirmed");
+    expect(row.attempts).toBe(1);
+    expect(row.next_attempt_ms).toBe(T0 + CHECK_BACKOFF_MS[0]!);
+  });
+
+  test("an older adapter that cannot report requests stays conservative", async () => {
+    const db = seededDb();
+    const { attempt } = await claim(db);
+    const id = attempt.identity.attemptId;
+    const fetchStub = stubFetch();
+    try {
+      const summary = await run(db, {
+        now: () => T0,
+        credentials: scriptedCredentials(db, {
+          adopt: async () => ({ kind: "absent" }),
+          begin: async () => ({ kind: "unavailable", reason: "no create scripted" }),
+        }),
+      });
+      expect(summary.completed).toBe(0);
+    } finally {
+      fetchStub.restore();
+    }
+    const row = await rawRow(db, id);
+    // No `requests` field: treated as possibly sent, never as a zero-dispatch
+    // refusal, so the row cannot be made createable on a guess.
+    expect(row.create_state).toBe("sending");
+    expect(row.recovery_state).toBe("remote-unconfirmed");
+    expect(row.attempts).toBe(1);
+  });
+
+  test("a stale-epoch rollback race leaves a newer holder's row untouched", async () => {
+    const db = seededDb();
+    const { attempt, lease } = await claim(db);
+    const id = attempt.identity.attemptId;
+    // The adapter's rollback loses: a newer claim bumped the epoch after the
+    // `sending` write, so the identity fence refuses and T3's release misses.
+    // Written inside the claim lease (the claim's own clock), then taken over.
+    expect(await setCheckCreateState(db, id, lease, "sending", undefined, CLAIM_AT)).toBe(true);
+    db.raw
+      .prepare(`UPDATE review_checks SET holder = 'other-run', lease_epoch = ?, lease_until_ms = ? WHERE id = ?`)
+      .run(lease.epoch + 1, T0 + CHECK_RECOVERY_LEASE_MS, id);
+
+    expect(await rollbackCheckCreateDispatch(db, id, lease, CLAIM_AT)).toBe(false);
+    const row = await rawRow(db, id);
+    // The newer holder's ownership and state are exactly as it left them.
+    expect(row.holder).toBe("other-run");
+    expect(row.lease_epoch).toBe(lease.epoch + 1);
+    expect(row.create_state).toBe("sending");
+    expect(row.attempts).toBe(0);
   });
 });
 

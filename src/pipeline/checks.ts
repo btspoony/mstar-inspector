@@ -48,6 +48,7 @@ import {
   deferCheckRecovery,
   readPublicationProof,
   recordCheckObservation,
+  rollbackCheckCreateDispatch,
   setCheckCreateState,
   setCheckDesired,
   type CheckAttempt,
@@ -328,6 +329,13 @@ async function beginCheckWith(
   // re-prove the live lease immediately before the request: the earlier
   // snapshot authorised the decision, not the send itself (spec §7.9).
   if (!(await stillLive(deps, identity, input.lease))) {
+    // Nothing was invoked, so the `sending` mark above now MISSTATES the row
+    // (T2 `requests: 0`). Undo it under an identity fence — this is exactly the
+    // path where a liveness fence would be false — so the attempt does not sit
+    // in the RL-12 adopt-only state with no request behind it. A lost race
+    // leaves `sending` in place, which stays conservative: recovery then adopts
+    // rather than creating again.
+    await rollbackCheckCreateDispatch(deps.db, identity.attemptId, input.lease, nowMs);
     return refused("lease expired before the create request");
   }
   const { scope } = identity;

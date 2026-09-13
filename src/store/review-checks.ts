@@ -685,6 +685,44 @@ export async function releaseCheckClaim(
   return runFenced(db, id, lease, `holder = NULL, lease_until_ms = NULL`, [], nowMs);
 }
 
+/**
+ * The identity-fenced twin of `releaseCheckClaim`, for the one caller that
+ * reports a refusal WITHOUT counting a request: T2's `beginCheck` answering
+ * `requests: 0`.
+ *
+ * §7.11.2 step 5 wants such a row left due with no attempt spent — and T2
+ * already classified it (it learned `requests === 0` and released its own
+ * claim). But `releaseCheckClaim`'s `lease_until_ms > now` condition can fail
+ * on exactly this path, because a zero-request refusal is typically the
+ * live-time fence itself: the lease legitimately expired while the client was
+ * resolved, so a liveness-fenced release writes nothing and T3 would leave the
+ * row leased and invisible to the next selector.
+ *
+ * Fencing on holder + epoch + lease-end equality instead proves ownership
+ * without demanding the row still be unexpired. A newer claimant always bumps
+ * `lease_epoch`, and a same-holder reacquire runs through `claimCheckRecovery`,
+ * which also bumps it — so the epoch is the discriminator, and the exact
+ * `lease_until_ms` match adds the case where an expired lease was never
+ * reclaimed. Writes nothing else: no attempt, backoff, error, or identity.
+ */
+export async function releaseExpiredCheckClaim(
+  db: D1Like,
+  id: string,
+  lease: Lease,
+  nowMs: CheckClock,
+): Promise<boolean> {
+  const result = await db
+    .prepare(
+      `UPDATE review_checks
+          SET holder = NULL, lease_until_ms = NULL, updated_ms = ?
+        WHERE id = ? AND holder = ? AND lease_epoch = ? AND lease_until_ms = ?
+          AND ${NONTERMINAL_WHERE}`,
+    )
+    .bind(nowMs, id, lease.holder, lease.epoch, lease.untilMs)
+    .run();
+  return result.meta.changes === 1;
+}
+
 // ---------------------------------------------------------------------------
 // Fenced mutations (spec §7.9)
 // ---------------------------------------------------------------------------
@@ -735,6 +773,12 @@ export async function attachCheckRunId(
  * head — exactly the blind recreate RL-12 forbids. So `not-sent` (the
  * definitive pre-send rejection) is reachable only from `not-sent`; a
  * possibly-sent state is resolved by read-only adoption, never by reset.
+ *
+ * A `sending` mark is a TRANSITION, not an error: with no explicit `reason` it
+ * leaves any existing `last_error` exactly as it found it, so marking a send
+ * attempt never fabricates a diagnostic and never erases a real one. A
+ * caller-supplied reason (the `unknown` leg, which genuinely records why) still
+ * writes its bounded text.
  */
 export async function setCheckCreateState(
   db: D1Like,
@@ -762,10 +806,54 @@ export async function setCheckCreateState(
     db,
     id,
     lease,
-    `create_state = ?, last_error = ?`,
-    [state, checkReason(reason ?? `create_state=${state}`)],
+    `create_state = ?, last_error = COALESCE(?, last_error)`,
+    [state, reason === undefined ? null : checkReason(reason)],
     nowMs,
   );
+}
+
+/**
+ * Undo a `sending` mark for a create that provably NEVER dispatched (spec §7.9
+ * / RL-12 together with the T2 `requests: 0` contract).
+ *
+ * The ordinary `not-sent` transition above is fenced on a LIVE lease, because a
+ * `sending` row that might have reached GitHub must never be declared
+ * createable again. That reasoning does not apply here: the caller has already
+ * established that the Checks callable was never invoked, so restoring
+ * `not-sent` states a fact rather than erasing one.
+ *
+ * The fence is therefore IDENTITY, not liveness. This path is reached exactly
+ * when the live-time fence may already be false — the refusal that triggers it
+ * IS a failed `lease_until_ms > now` re-proof — so demanding liveness would make
+ * the rollback unreachable precisely when it is needed, and the row would stay
+ * `sending` forever with no request behind it. A newer claimant always bumps
+ * `lease_epoch`, so holder + epoch + lease-end equality proves the row is still
+ * OURS and no third party's state can be overwritten.
+ *
+ * Nothing else moves: no attempt, no backoff, no identity, and `check_run_id` is
+ * guarded NULL so a real remote run is never disguised. `last_error` is
+ * deliberately NOT touched, which is exactly correct: the `sending` mark no
+ * longer fabricates a diagnostic (see `setCheckCreateState`), so whatever error
+ * text the row carried before the mark is still the true one and is preserved
+ * by leaving it alone.
+ */
+export async function rollbackCheckCreateDispatch(
+  db: D1Like,
+  id: string,
+  lease: Lease,
+  nowMs: CheckClock,
+): Promise<boolean> {
+  const result = await db
+    .prepare(
+      `UPDATE review_checks
+          SET create_state = 'not-sent', updated_ms = ?
+        WHERE id = ? AND holder = ? AND lease_epoch = ? AND lease_until_ms = ?
+          AND create_state = 'sending' AND check_run_id IS NULL
+          AND ${NONTERMINAL_WHERE}`,
+    )
+    .bind(nowMs, id, lease.holder, lease.epoch, lease.untilMs)
+    .run();
+  return result.meta.changes === 1;
 }
 
 /**
