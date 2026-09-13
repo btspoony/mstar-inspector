@@ -20,7 +20,7 @@
  */
 
 import { describe, expect, mock, test } from "bun:test";
-import type { Discussion } from "../../src/contracts/recheck";
+import type { Discussion, ThreadSnapshot } from "../../src/contracts/recheck";
 import { issueDigestOf, threadDigestOf, type GraphqlOctokit } from "../../src/pipeline/review-threads";
 import {
   assembleDiscussion,
@@ -348,9 +348,11 @@ describe("assembleDiscussion — §7.8 model context", () => {
 
   test("cap 1200 chars/item: body truncated with a marker, modelCoverage flipped on the owning thread", () => {
     const longBody = "x".repeat(MODEL_ITEM_MAX_CHARS + 100);
-    const threads = [{
+    // assembleDiscussion MUTATES modelCoverage — the fixture carries the
+    // ThreadSnapshot type so the post-assembly "truncated" value is type-visible.
+    const threads: ThreadSnapshot[] = [{
       associationId: "assoc-1", threadId: "T1", commentId: 1, headSha: SHA, digest: "d",
-      commentCount: 1, capturedMs: 1, coverage: "complete" as const, modelCoverage: "complete" as const,
+      commentCount: 1, capturedMs: 1, coverage: "complete", modelCoverage: "complete",
     }];
     const blocks = assembleDiscussion(discussionWith([item(1, longBody, "thread", "assoc-1")], threads));
     expect(blocks).toHaveLength(1);
@@ -363,9 +365,10 @@ describe("assembleDiscussion — §7.8 model context", () => {
   test("total budget 8000 chars: whole items dropped from the OLDEST end until it fits", () => {
     // 20 items x ~700 chars ≈ 14k chars — roughly half must go.
     const items = Array.from({ length: 20 }, (_, i) => item(i, "y".repeat(700)));
-    const threads = [{
+    // Same mutation-visibility annotation as above.
+    const threads: ThreadSnapshot[] = [{
       associationId: "assoc-1", threadId: "T1", commentId: 1, headSha: SHA, digest: "d",
-      commentCount: 1, capturedMs: 1, coverage: "complete" as const, modelCoverage: "complete" as const,
+      commentCount: 1, capturedMs: 1, coverage: "complete", modelCoverage: "complete",
     }];
     const threadItems = items.map((i, n) => (n === 0 ? i : item(n, "y".repeat(700), "thread", "assoc-1")));
     const blocks = assembleDiscussion(discussionWith(threadItems, threads));

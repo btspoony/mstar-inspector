@@ -657,8 +657,11 @@ export async function fetchPrReviews(
     } | null)[] | null } | null } | null };
   }>(REVIEWS_QUERY, { owner: input.owner, name: input.repo, number: input.prNumber });
   const nodes = data?.repository?.pullRequest?.reviews?.nodes ?? [];
+  // The predicate narrows BOTH nullability and the id string-ness — the
+  // mapped stubs require a non-undefined `id` (TS cannot carry the
+  // `typeof n.id === "string"` check through a NonNullable-only predicate).
   return nodes
-    .filter((n): n is NonNullable<typeof n> => n !== null && typeof n.id === "string")
+    .filter((n): n is NonNullable<typeof n> & { id: string } => n !== null && typeof n.id === "string")
     .map((n) => ({
       id: n.id,
       fullDatabaseId: n.fullDatabaseId ?? "",
@@ -1192,7 +1195,9 @@ export async function resolveFindingThreadWithDeps(
     return { kind: "retry", reason: "api" };
   }
 
-  let mutation: { thread?: { id?: string | null; isResolved?: boolean | null } | null } | null = null;
+  // The declared shape mirrors the mutation's response wrapper — the value
+  // assigned from graphql() is the { resolveReviewThread: { thread } } doc.
+  let mutation: { resolveReviewThread?: { thread?: { id?: string | null; isResolved?: boolean | null } | null } | null } | null = null;
   try {
     mutation = await ctx.octokit.graphql<{ resolveReviewThread?: { thread?: { id?: string | null; isResolved?: boolean | null } | null } | null }>(
       RESOLVE_THREAD_MUTATION,

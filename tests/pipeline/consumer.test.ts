@@ -49,10 +49,16 @@ import { computeFindingFingerprint } from "../../src/store/fingerprint";
 import { idemKey } from "../../src/contracts/idem";
 import { createMigratedTestD1, createTestD1, type TestD1 } from "../store/helpers";
 import { REDACTED } from "../../src/pipeline/redact";
-import type { InstallationTokenGrant, ReviewCommenter, TokenInput } from "../../src/pipeline/comment";
+import type { InstallationTokenGrant, ReviewCommenter, UpsertPlan } from "../../src/pipeline/comment";
+import {
+  createFakeCommenter,
+  initialFakeCommenterState,
+  type CommenterCall,
+} from "../helpers/review-commenter";
 import { createSecretbox } from "../../src/dashboard/secretbox";
 import { createAppConfigStore } from "../../src/dashboard/app-config-store";
 import { getSandboxImage } from "../../src/contracts/sandbox-images";
+import type { Assessment, RecheckDoc, RecheckTarget } from "../../src/contracts/recheck";
 import { sk, gh, AWS_CANARY_KEY, fakePem } from "../helpers/fake-secrets";
 
 const VALID_OUTPUT: ReviewOutput = {
@@ -160,6 +166,17 @@ let numstatExitCode = 0;
 let writeInputExitCode = 0;
 /** Decoded runner --input JSON written via the base64 write step. */
 let writtenInputJson: string | undefined;
+/**
+ * Plan 67 T4: the diff stdout IS the worker-captured §7.3 trusted evidence —
+ * the consumer reads it directly from the sandbox exec (no second prefetch).
+ */
+let diffStdout = "";
+/**
+ * Plan 67 T4: the runner's `--recheck-out` file content, read back through
+ * the audited bounded read (`<content>\n<overflow-flag>`).
+ */
+let recheckFileContent = "";
+let recheckFileOverflow = "0";
 
 const fakeSandbox = {
   runCommand: mock(async (cmd: string, opts?: unknown) => {
@@ -169,7 +186,7 @@ const fakeSandbox = {
       return { stdout: `${resolvedSha}\n`, stderr: "", exitCode: revParseExitCode };
     }
     if (cmd.includes("git init")) return { stdout: "", stderr: "", exitCode: cloneExitCode };
-    if (cmd.includes("gh pr diff")) return { stdout: "", stderr: "", exitCode: diffExitCode };
+    if (cmd.includes("gh pr diff")) return { stdout: diffStdout, stderr: "", exitCode: diffExitCode };
     if (cmd.includes("git apply --numstat")) {
       return { stdout: numstatStdout, stderr: "", exitCode: numstatExitCode };
     }
@@ -177,6 +194,10 @@ const fakeSandbox = {
       const match = /printf '%s' '([A-Za-z0-9+/=]+)'/.exec(cmd);
       writtenInputJson = match ? Buffer.from(match[1]!, "base64").toString("utf8") : undefined;
       return { stdout: "", stderr: "", exitCode: writeInputExitCode };
+    }
+    if (cmd.includes("head -c") && cmd.includes("/tmp/mstar-recheck.json")) {
+      // The audited fixed-path recheck read: `<content>\n<flag>`.
+      return { stdout: `${recheckFileContent}\n${recheckFileOverflow}`, stderr: "", exitCode: 0 };
     }
     if (cmd.includes("--input")) {
       return { stdout: runnerStdout, stderr: runnerStderr, exitCode: runnerExitCode };
@@ -201,19 +222,16 @@ mock.module("@cloudflare/sandbox", () => ({
 }));
 
 // --- commenter fake (injected via createReviewConsumer overrides) -----------
-const commenterCalls: Array<{ op: string; args: unknown[] }> = [];
-let tokenResult = gh("s", "installation_token");
-let tokenError: Error | undefined;
-let commentError: Error | undefined;
-let degradeError: Error | undefined;
-let deleteDegradedError: Error | undefined;
-let deleteDegradedOutcome: { deleted: number; skipped: number; errors: string[] } = { deleted: 0, skipped: 0, errors: [] };
-// Plan 18 T3 line comments: the round postReview returns (pinned into the
-// line-comments marker body), the prefetched diff, and per-method errors.
-let postRound = 1;
-let diffError: Error | undefined;
-let lineCommentsError: Error | undefined;
-/** Default prefetched diff: a src/auth.ts hunk whose right range covers line 21. */
+// Plan 67 T4: the shared double (tests/helpers/review-commenter.ts) records
+// every op into commenterCalls and reads behavior from the mutable
+// commenterState (tests mutate it per case, like the `let` vars they
+// replace).
+const commenterCalls: CommenterCall[] = [];
+const commenterState = initialFakeCommenterState();
+
+// Plan 18 T3 line comments: the prefetched diff fixture (now the
+// WORKER-CAPTURED sandbox diff — same text, one capture).
+/** Default diff fixture: a src/auth.ts hunk whose right range covers line 21. */
 const VALID_DIFF = [
   "diff --git a/src/auth.ts b/src/auth.ts",
   "index 1111111..2222222 100644",
@@ -229,53 +247,8 @@ const VALID_DIFF = [
   " return claims;",
   "",
 ].join("\n");
-let diffResult: string = VALID_DIFF;
 
-const fakeCommenter: ReviewCommenter = {
-  // Plan 67 §7.6: the consumer's sandbox path asserts the RETURNED grant
-  // (assertSandboxGrant) — the double wraps the token in a minimal
-  // compliant sandbox-read grant scoped to the requested repository.
-  getInstallationToken: mock(async (input: TokenInput) => {
-    commenterCalls.push({ op: "token", args: [input] });
-    if (tokenError) throw tokenError;
-    return {
-      token: tokenResult,
-      permissions: { contents: "read", metadata: "read" },
-      repositoryNames: [input.scope.repo],
-      repositorySelection: "selected",
-    } satisfies InstallationTokenGrant;
-  }),
-  postReview: mock(async (input: unknown) => {
-    commenterCalls.push({ op: "post", args: [input] });
-    if (commentError) throw commentError;
-    return { round: postRound, commentId: 101 };
-  }),
-  postDegraded: mock(async (input: unknown) => {
-    commenterCalls.push({ op: "degrade", args: [input] });
-    if (degradeError) throw degradeError;
-    return { posted: true, commentId: null };
-  }),
-  deleteDegradedComment: mock(async (input: unknown) => {
-    commenterCalls.push({ op: "delete-degraded", args: [input] });
-    if (deleteDegradedError) throw deleteDegradedError;
-    return deleteDegradedOutcome;
-  }),
-  fetchPrDiff: mock(async (input: unknown) => {
-    commenterCalls.push({ op: "fetch-diff", args: [input] });
-    if (diffError) throw diffError;
-    return diffResult;
-  }),
-  postLineComments: mock(async (input: unknown) => {
-    commenterCalls.push({ op: "line-comments", args: [input] });
-    if (lineCommentsError) throw lineCommentsError;
-    return { posted: [], ambiguous: [], captured: true, reviewId: null };
-  }),
-  // Plan 67 §7.8 discussion capture: not wired into the consumer until
-  // Task 4's ordering — these fixtures never trigger it.
-  listDiscussion: mock(async () => {
-    throw new Error("unexpected: listDiscussion is not wired until Task 4");
-  }),
-};
+const fakeCommenter: ReviewCommenter = createFakeCommenter(commenterState, commenterCalls);
 
 // Injected into every consumer under test (DI replaces the old mock.module).
 const testOverrides = {
@@ -399,6 +372,7 @@ function makeBatch(payload: ReviewJobPayload): MessageBatch<ReviewJobPayload> {
 function reset(): void {
   sandboxCalls.length = 0;
   commenterCalls.length = 0;
+  Object.assign(commenterState, initialFakeCommenterState());
   kvPuts.length = 0;
   kvGuardPuts.length = 0;
   kvGuardDeletes.length = 0;
@@ -420,16 +394,9 @@ function reset(): void {
   sandboxError = undefined;
   destroyCalls = 0;
   destroyError = undefined;
-  tokenResult = gh("s", "installation_token");
-  tokenError = undefined;
-  commentError = undefined;
-  degradeError = undefined;
-  deleteDegradedError = undefined;
-  deleteDegradedOutcome = { deleted: 0, skipped: 0, errors: [] };
-  postRound = 1;
-  diffError = undefined;
-  lineCommentsError = undefined;
-  diffResult = VALID_DIFF;
+  diffStdout = "";
+  recheckFileContent = "";
+  recheckFileOverflow = "0";
   kvPutError = undefined;
   kvGetValue = null;
   kvGuardValue = null;
@@ -468,7 +435,7 @@ describe("createReviewConsumer", () => {
       expect.stringContaining("git init '/workspace/repo'"),
       expect.stringContaining("git -C '/workspace/repo' rev-parse HEAD"),
     ]);
-    expect(commenterCalls.filter((c) => c.op === "post")).toHaveLength(0);
+    expect(commenterCalls.filter((c) => c.op === "post-prepared")).toHaveLength(0);
     expect(kvPuts).toHaveLength(0);
     expect(destroyCalls).toBe(1);
     expect(reviewCount(db)).toBe(1); // untouched
@@ -531,30 +498,51 @@ describe("createReviewConsumer", () => {
       },
       timeout: 600_000,
     });
-    // inside VALID_DIFF's right hunk [18,23]). BUG-01: the KV done fence
-    // and the degraded-comment delete (Bugbot) sit between the upsert and
-    // the line-comments step.
+    // inside VALID_DIFF's right hunk [18,23]). Plan 67 §7.7 order: the
+    // intent-prepared line comments run after the apply; the degraded-comment
+    // delete runs last, only after the normal publication proof.
     expect(commenterCalls.filter((c) => c.op === "token")).toHaveLength(1);
-    expect(commenterCalls.map((c) => c.op)).toEqual(["token", "post", "delete-degraded", "fetch-diff", "line-comments"]);
-    expect(commenterCalls[1]!.args[0]).toMatchObject({
-      installationId: 123,
-      owner: "acme",
-      repo: "widgets",
-      prNumber: 42,
-      headSha: SHA,
-      output: VALID_OUTPUT,
-    });
-    // The line-comments input: same coordinates, the round the upsert
-    // returned, and the capped findings array (B4 — same array as post/put).
-    expect(commenterCalls[4]!.args[0]).toMatchObject({
+    expect(commenterCalls.map((c) => c.op)).toEqual(["token", "plan", "post-prepared", "line-comments", "delete-degraded"]);
+    // The prepared publication send: ONE exact-body upsert (§7.7 step 8).
+    const prepared = commenterCalls[2]!.args as {
+      installationId: number;
+      owner: string;
+      repo: string;
+      prNumber: number;
+      headSha: string;
+      round: number;
+      targetCommentId: number | null;
+      body: string;
+      publicationId: string;
+    };
+    expect(prepared).toMatchObject({
       installationId: 123,
       owner: "acme",
       repo: "widgets",
       prNumber: 42,
       headSha: SHA,
       round: 1,
-      findings: VALID_OUTPUT.findings,
+      targetCommentId: null,
     });
+    expect(prepared.body).toContain("<!-- mstar-inspector:review:v1 round=1 -->");
+    expect(prepared.body).toContain("**Verdict: needs fixes**");
+    expect(prepared.body).toContain("Two issues found in the diff.");
+    expect(prepared.body).toContain("## Prior findings recheck"); // §7.10 closure section
+    expect(prepared.body).toMatch(
+      /<!-- mstar-inspector:publication:v1 id=[0-9a-f-]+ sha=0123456789abcdef0123456789abcdef01234567 kind=review -->/,
+    );
+    // The line-comments input: intent-prepared (trusted thread markers),
+    // pinned to the staged publication id.
+    const lineInput = commenterCalls[3]!.args as {
+      round: number;
+      publicationId: string;
+      intents: Array<{ path: string; line: number; associationId: string; findingRowId: string; body: string }>;
+    };
+    expect(lineInput.round).toBe(1);
+    expect(lineInput.publicationId).toBe(prepared.publicationId);
+    expect(lineInput.intents).toHaveLength(1);
+    expect(lineInput.intents[0]).toMatchObject({ path: "src/auth.ts", line: 21 });
+    expect(lineInput.intents[0]!.body).toContain("Fractional expiry comparison");
 
     // The review row + findings landed in the real D1 double.
     expect(reviewCount(db)).toBe(1);
@@ -627,8 +615,8 @@ describe("createReviewConsumer", () => {
     // The posted commit_id, the D1 row and the KV key all key off the
     // checkout sha — the diff/files/commit_id triple stays consistent even
     // when the webhook payload sha is stale (force-push mid-flight).
-    expect(commenterCalls.filter((c) => c.op === "post")).toHaveLength(1);
-    expect(commenterCalls[1]!.args[0]).toMatchObject({ headSha: actualSha });
+    expect(commenterCalls.filter((c) => c.op === "post-prepared")).toHaveLength(1);
+    expect((commenterCalls[2]!.args as { headSha: string }).headSha).toBe(actualSha);
     const row = db.raw.query("SELECT * FROM reviews").get() as { head_sha: string };
     expect(row.head_sha).toBe(actualSha);
     expect(kvPuts).toEqual([
@@ -651,16 +639,25 @@ describe("createReviewConsumer", () => {
 
     // No real-review side effects: no overall post, no reviews row, NO KV
     // done-state (a later webhook for the same sha legitimately re-runs).
-    expect(commenterCalls.filter((c) => c.op === "post")).toHaveLength(0);
+    expect(commenterCalls.filter((c) => c.op === "post-prepared")).toHaveLength(0);
     expect(reviewCount(db)).toBe(0);
     expect(kvPuts).toHaveLength(0);
     // Degraded comment posted with the parse error + the RAW stdout (the
     // commenter side is the redaction/truncation choke point).
-    const degrades = commenterCalls.filter((c) => c.op === "degrade");
+    const degrades = commenterCalls.filter((c) => c.op === "post-prepared-degraded");
     expect(degrades).toHaveLength(1);
-    const degradeInput = degrades[0]!.args[0] as { error: string; rawOutput: string };
-    expect(degradeInput.error).toBe("not valid ReviewOutput JSON");
-    expect(degradeInput.rawOutput).toBe("not json at all");
+    const degradeInput = degrades[0]!.args as { round: number; targetCommentId: number | null; body: string; publicationId: string };
+    expect(degradeInput.round).toBe(1);
+    expect(degradeInput.targetCommentId).toBeNull();
+    expect(degradeInput.body).toContain("not valid ReviewOutput JSON");
+    expect(degradeInput.body).toContain("not json at all");
+    expect(degradeInput.body).toMatch(/<!-- mstar-inspector:publication:v1 id=[0-9a-f-]+ sha=[0-9a-f]+ kind=degraded -->/);
+    // The degraded publication went through the journal and was applied
+    // (no normal review/lifecycle rows are ever created from it).
+    const degradedPub = db.raw
+      .query("SELECT phase, kind FROM review_publications")
+      .all() as Array<{ phase: string; kind: string }>;
+    expect(degradedPub).toEqual([{ phase: "applied", kind: "degraded" }]);
     // Failure row: stage=parse, keyed off the AUTHORITATIVE checkout sha.
     const rows = failureRows(db);
     expect(rows).toHaveLength(1);
@@ -702,13 +699,13 @@ describe("createReviewConsumer", () => {
     expect(rows).toHaveLength(1);
     expect(String(rows[0]!.error)).toContain(REDACTED);
     expect(String(rows[0]!.error)).not.toContain(token);
-    // SEC-01: the degraded-comment input now arrives PRE-REDACTED (shape +
-    // exact-value passes applied before postDegraded) — the token never
+    // SEC-01: the degraded publication body arrives PRE-REDACTED (shape +
+    // exact-value passes applied before the prepared send) — the token never
     // reaches the commenter, and buildDegradedBody's own redaction remains
     // the in-module choke point for anything it adds.
-    const degradeInput = commenterCalls.filter((c) => c.op === "degrade")[0]!.args[0] as { error: string };
-    expect(degradeInput.error).toContain(REDACTED);
-    expect(degradeInput.error).not.toContain(token);
+    const degradeBody = (commenterCalls.filter((c) => c.op === "post-prepared-degraded")[0]!.args as { body: string }).body;
+    expect(degradeBody).toContain(REDACTED);
+    expect(degradeBody).not.toContain(token);
     expect(messageAckCalls).toHaveLength(1);
   });
 
@@ -728,32 +725,44 @@ describe("createReviewConsumer", () => {
 
     await consumer(makeBatch(makePayload())); // resolves — the insert must not mask the degrade
 
-    expect(commenterCalls.filter((c) => c.op === "degrade")).toHaveLength(1);
+    expect(commenterCalls.filter((c) => c.op === "post-prepared-degraded")).toHaveLength(1);
     expect(failureRows(db)).toHaveLength(0);
     expect(messageAckCalls).toHaveLength(1);
     const warn = logLines.find((l) => l.level === "warn" && l.msg.includes("review_failures insert failed"));
     expect(warn).toBeDefined();
   });
 
-  test("parse failure with a failing degraded post → failure row + ack anyway (best-effort comment)", async () => {
+  test("parse failure with a failing degraded SEND → typed UNKNOWN (post-attempt), journal stays sending, ack anyway", async () => {
     reset();
     runnerStdout = "not json at all";
-    degradeError = new Error("github down");
+    commenterState.preparedDegradedError = new Error("github down");
     const db = await createSeededTestD1();
     const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
 
-    await consumer(makeBatch(makePayload())); // resolves — a post failure is a log line only
+    await consumer(makeBatch(makePayload())); // resolves — a send failure is a log line only
 
     expect(failureRows(db)).toHaveLength(1);
     expect(messageAckCalls).toHaveLength(1);
-    const warn = logLines.find((l) => l.level === "warn" && l.msg.includes("degraded comment post failed"));
+    // A throw at the SEND is post-attempt uncertainty — never classified as
+    // a definitive not-posted (§7.9: only definitive rejections are).
+    const warn = logLines.find((l) => l.level === "warn" && l.msg.includes("degraded publication unknown"));
     expect(warn).toBeDefined();
+    // The staged degraded payload stays sending/pending (no proof) for M8
+    // read-only discovery.
+    const pub = db.raw.query("SELECT phase, recovery_state, proof_json FROM review_publications").get() as {
+      phase: string;
+      recovery_state: string;
+      proof_json: string | null;
+    };
+    expect(pub.phase).toBe("sending");
+    expect(pub.recovery_state).toBe("pending");
+    expect(pub.proof_json).toBeNull();
   });
 
   test("comment failure → failure row (stage=pipeline) + rethrow, destroy (AL-6)", async () => {
     reset();
     runnerStdout = JSON.stringify(VALID_OUTPUT);
-    commentError = new Error("post failed");
+    commenterState.preparedReviewError = new Error("post failed");
     const db = await createSeededTestD1();
     const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), undefined, testOverrides);
 
@@ -780,12 +789,12 @@ describe("createReviewConsumer", () => {
 
   test("token mint failure → failure row (stage=pipeline, GitHub auth not sandbox) + rethrow, destroy", async () => {
     reset();
-    tokenError = new Error("installation token mint failed");
+    commenterState.tokenError = new Error("installation token mint failed");
     const db = await createSeededTestD1();
     const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), undefined, testOverrides);
 
     await expect(consumer(makeBatch(makePayload()))).rejects.toThrow("installation token mint failed");
-    expect(commenterCalls.filter((c) => c.op === "post")).toHaveLength(0);
+    expect(commenterCalls.filter((c) => c.op === "post-prepared")).toHaveLength(0);
     expect(reviewCount(db)).toBe(0);
     expect(failureRows(db)).toHaveLength(1);
     // The mint rides the payload sha (head not yet resolved) and the
@@ -801,7 +810,7 @@ describe("createReviewConsumer", () => {
     const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), undefined, testOverrides);
 
     await expect(consumer(makeBatch(makePayload()))).rejects.toThrow(/clone failed/);
-    expect(commenterCalls.filter((c) => c.op === "post")).toHaveLength(0);
+    expect(commenterCalls.filter((c) => c.op === "post-prepared")).toHaveLength(0);
     expect(reviewCount(db)).toBe(0);
     expect(failureRows(db)).toHaveLength(1);
     expect(failureRows(db)[0]).toMatchObject({ stage: "sandbox" });
@@ -817,7 +826,7 @@ describe("createReviewConsumer", () => {
 
     await consumer(makeBatch(makePayload())); // resolves — stderr is never a gate
 
-    expect(commenterCalls.filter((c) => c.op === "post")).toHaveLength(1);
+    expect(commenterCalls.filter((c) => c.op === "post-prepared")).toHaveLength(1);
     expect(reviewCount(db)).toBe(1);
     expect(destroyCalls).toBe(1);
   });
@@ -830,7 +839,7 @@ describe("createReviewConsumer", () => {
     const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), undefined, testOverrides);
 
     await expect(consumer(makeBatch(makePayload()))).rejects.toThrow(/runner failed/);
-    expect(commenterCalls.filter((c) => c.op === "post")).toHaveLength(0);
+    expect(commenterCalls.filter((c) => c.op === "post-prepared")).toHaveLength(0);
     expect(reviewCount(db)).toBe(0);
     expect(failureRows(db)).toHaveLength(1);
     expect(failureRows(db)[0]).toMatchObject({ stage: "runner", head_sha: SHA });
@@ -898,7 +907,7 @@ describe("createReviewConsumer", () => {
     await expect(consumer(batch)).rejects.toThrow(TypeError);
 
     // The healthy sibling completed before the legacy message threw.
-    expect(commenterCalls.filter((c) => c.op === "post")).toHaveLength(1);
+    expect(commenterCalls.filter((c) => c.op === "post-prepared")).toHaveLength(1);
     expect(reviewCount(db)).toBe(1);
     expect(destroyCalls).toBe(1);
     // The structured channel caught the legacy message: error log + AL-6 row.
@@ -920,7 +929,7 @@ describe("createReviewConsumer", () => {
     await expect(consumer(makeBatch(makePayload()))).rejects.toThrow(/numstat failed/);
 
     expect(sandboxCalls.some((c) => c.cmd.includes("--input"))).toBe(false);
-    expect(commenterCalls.filter((c) => c.op === "post")).toHaveLength(0);
+    expect(commenterCalls.filter((c) => c.op === "post-prepared")).toHaveLength(0);
     expect(reviewCount(db)).toBe(0);
     expect(failureRows(db)).toHaveLength(1);
     expect(failureRows(db)[0]).toMatchObject({ stage: "sandbox", head_sha: SHA });
@@ -940,7 +949,7 @@ describe("createReviewConsumer", () => {
     await expect(consumer(makeBatch(makePayload()))).rejects.toThrow(/runner input write failed/);
 
     expect(sandboxCalls.some((c) => c.cmd.includes("--input"))).toBe(false);
-    expect(commenterCalls.filter((c) => c.op === "post")).toHaveLength(0);
+    expect(commenterCalls.filter((c) => c.op === "post-prepared")).toHaveLength(0);
     expect(reviewCount(db)).toBe(0);
     expect(destroyCalls).toBe(1);
   });
@@ -1159,7 +1168,7 @@ describe("createReviewConsumer", () => {
       consumer(makeBatch(makePayload())),
     ).rejects.toThrow(/cannot resolve head sha/);
 
-    expect(commenterCalls.filter((c) => c.op === "post")).toHaveLength(0);
+    expect(commenterCalls.filter((c) => c.op === "post-prepared")).toHaveLength(0);
     expect(reviewCount(db)).toBe(0);
     expect(failureRows(db)).toHaveLength(1);
     expect(failureRows(db)[0]).toMatchObject({ stage: "sandbox", head_sha: SHA });
@@ -1197,7 +1206,7 @@ describe("createReviewConsumer", () => {
     await consumer(makeBatch(makePayload())); // resolves — KV failure is warn-only
 
     expect(reviewCount(db)).toBe(1);
-    expect(commenterCalls.filter((c) => c.op === "post")).toHaveLength(1);
+    expect(commenterCalls.filter((c) => c.op === "post-prepared")).toHaveLength(1);
     // The completion-write warn (the guard KV warn fires earlier with only
     // baseFields — no idempotency key yet).
     const warnLine = logLines.find((l) => l.level === "warn" && l.msg.includes("KV completion write failed"));
@@ -1215,7 +1224,7 @@ describe("createReviewConsumer", () => {
     await consumer(makeBatch(makePayload())); // resolves — destroy failure is warn-only
 
     expect(reviewCount(db)).toBe(1);
-    expect(commenterCalls.filter((c) => c.op === "post")).toHaveLength(1);
+    expect(commenterCalls.filter((c) => c.op === "post-prepared")).toHaveLength(1);
     const warnLine = logLines.find((l) => l.level === "warn" && l.msg.includes("destroy"));
     expect(warnLine).toBeDefined();
     expect(warnLine!.fields.idempotency_key).toBe(`idem:123:acme/widgets:42:${SHA}`);
@@ -1253,18 +1262,14 @@ describe("createReviewConsumer", () => {
 
     await consumer(makeBatch(makePayload()));
 
-    // The POSTED review carries no secret-shaped text.
-    const posted = commenterCalls.find((c) => c.op === "post")!.args[0] as {
-      output: ReviewOutput;
-      omittedFindings: number;
-    };
-    expect(posted.output.findings[0]!.body).not.toContain(gh("s", "abcdef1234567890"));
+    // The POSTED prepared body (rendered from the SAME capped array that is
+    // stored) carries no secret-shaped text.
+    const posted = commenterCalls.find((c) => c.op === "post-prepared")!.args as { body: string };
+    expect(posted.body).not.toContain(gh("s", "abcdef1234567890"));
     // qc2 F-001: title / category / file_path are model-controlled public
     // channels too — redacted through the same consumer choke point.
-    expect(posted.output.findings[0]!.title).not.toContain(gh("p", "abcdef1234567890"));
-    expect(posted.output.findings[1]!.category).not.toContain(AWS_CANARY_KEY);
-    expect(posted.output.findings[1]!.file_path).not.toContain(AWS_CANARY_KEY);
-    expect(posted.omittedFindings).toBe(0);
+    expect(posted.body).not.toContain(gh("p", "abcdef1234567890"));
+    expect(posted.body).not.toContain(AWS_CANARY_KEY);
 
     // The stored row (summary_md + envelope) carries no secret-shaped text;
     // raw_output is never written on the v1 path (envelope is authoritative).
@@ -1302,9 +1307,12 @@ describe("createReviewConsumer", () => {
 
     await consumer(makeBatch(makePayload()));
 
-    const posted = commenterCalls.find((c) => c.op === "post")!.args[0] as { output: ReviewOutput };
-    expect(posted.output.findings[0]!.title).toHaveLength(FINDING_TITLE_MAX);
-    expect(posted.output.findings[0]!.body).toHaveLength(FINDING_BODY_MAX);
+    // The clamp trims to MAX-1 chars + an ellipsis (the schema's clamp shape).
+    const posted = commenterCalls.find((c) => c.op === "post-prepared")!.args as { body: string };
+    expect(posted.body).toContain("T".repeat(FINDING_TITLE_MAX - 1));
+    expect(posted.body).not.toContain("T".repeat(FINDING_TITLE_MAX + 10));
+    expect(posted.body).toContain("Z".repeat(FINDING_BODY_MAX - 1));
+    expect(posted.body).not.toContain("Z".repeat(FINDING_BODY_MAX + 10));
     // The D1 envelope carries the same clamped array (B4: one capped array).
     const row = db.raw.query("SELECT envelope FROM reviews").get() as { envelope: string };
     expect(row.envelope).not.toContain("T".repeat(FINDING_TITLE_MAX + 10));
@@ -1341,18 +1349,16 @@ describe("createReviewConsumer", () => {
 
     await consumer(makeBatch(makePayload()));
 
-    const posted = commenterCalls.find((c) => c.op === "post")!.args[0] as {
-      output: ReviewOutput;
-      omittedFindings: number;
-    };
-    expect(posted.output.findings).toHaveLength(50);
-    expect(posted.omittedFindings).toBe(10);
+    const posted = commenterCalls.find((c) => c.op === "post-prepared")!.args as { body: string };
+    expect(posted.body).toContain("*(+10 more findings omitted)*");
     // Merge-class priority: the two must-fix first (stable — F0 before F59),
-    // then the should-fix, then the nits.
-    expect(posted.output.findings[0]!.title).toBe("F0");
-    expect(posted.output.findings[1]!.title).toBe("F59");
-    expect(posted.output.findings[2]!.title).toBe("F58");
-    expect(posted.output.findings[2]!.mergeClass).toBe("should-fix");
+    // then the should-fix, then the nits — visible in the rendered order.
+    const f0 = posted.body.indexOf("**F0**");
+    const f59 = posted.body.indexOf("**F59**");
+    const f58 = posted.body.indexOf("**F58**");
+    expect(f0).toBeGreaterThan(-1);
+    expect(f59).toBeGreaterThan(f0);
+    expect(f58).toBeGreaterThan(f59);
 
     // The same capped array landed in D1 (渲染与落库同一裁剪数组).
     const stored = db.raw.query("SELECT COUNT(*) AS n FROM findings").get() as { n: number };
@@ -1374,7 +1380,7 @@ describe("createReviewConsumer", () => {
       expect.stringContaining("git init '/workspace/repo'"),
       expect.stringContaining("git -C '/workspace/repo' rev-parse HEAD"),
     ]);
-    expect(commenterCalls.filter((c) => c.op === "post")).toHaveLength(0);
+    expect(commenterCalls.filter((c) => c.op === "post-prepared")).toHaveLength(0);
     expect(reviewCount(db)).toBe(0);
     expect(kvPuts).toHaveLength(0);
     expect(destroyCalls).toBe(1);
@@ -1382,28 +1388,28 @@ describe("createReviewConsumer", () => {
     expect(infoLine).toBeDefined();
   });
 
-  test("put failure after a successful post → one comment, KV done, warn + ack, no rethrow (B3)", async () => {
+  test("lifecycle apply failure after a successful post → one comment, proof + KV done, warn + ack, no rethrow", async () => {
     reset();
     runnerStdout = JSON.stringify(VALID_OUTPUT);
     const db = await createSeededTestD1();
-    const failingStore = {
-      put: mock(async () => {
+    // §7.7 step 9: the store.put + lifecycle batch live INSIDE
+    // applyPublishedLifecycle — the local-write failure is injected at the
+    // D1 batch (the apply's transaction primitive), after the publication
+    // was already confirmed.
+    const failingDb = {
+      ...db,
+      batch: mock(async () => {
         throw new Error("d1 down");
       }),
-      get: mock(async () => undefined),
-      findByIdempotencyKey: mock(async () => null),
-    };
-    const consumer = createReviewConsumer(
-      await makeEnv({ DB: db as never }),
-      testLog,
-      { ...testOverrides, store: failingStore },
-    );
+    } as typeof db;
+    const consumer = createReviewConsumer(await makeEnv({ DB: failingDb as never }), testLog, testOverrides);
 
     await consumer(makeBatch(makePayload())); // resolves (ack) — no rethrow
 
-    // Exactly one comment was posted; the KV done-state was written BEFORE
-    // the insert attempt, so a retry acks instead of re-posting.
-    expect(commenterCalls.filter((c) => c.op === "post")).toHaveLength(1);
+    // Exactly one comment was posted; the proof persisted (the publication
+    // is CONFIRMED, recovery_state pending — M8 owns the apply), and the KV
+    // done-state follows durable confirmation.
+    expect(commenterCalls.filter((c) => c.op === "post-prepared")).toHaveLength(1);
     expect(kvPuts).toEqual([
       {
         key: `idem:123:acme/widgets:42:${SHA}`,
@@ -1411,8 +1417,13 @@ describe("createReviewConsumer", () => {
         options: { expirationTtl: 86400 },
       },
     ]);
+    const pub = db.raw.query("SELECT phase, recovery_state FROM review_publications").get() as {
+      phase: string;
+      recovery_state: string;
+    };
+    expect(pub).toEqual({ phase: "confirmed", recovery_state: "pending" });
 
-    const warnLine = logLines.find((l) => l.level === "warn" && l.msg.includes("insert failed"));
+    const warnLine = logLines.find((l) => l.level === "warn" && l.msg.includes("lifecycle apply"));
     expect(warnLine).toBeDefined();
     expect(warnLine!.fields.idempotency_key).toBe(`idem:123:acme/widgets:42:${SHA}`);
     expect(destroyCalls).toBe(1);
@@ -1529,7 +1540,7 @@ describe("createReviewConsumer", () => {
     await expect(consumer(batch)).rejects.toThrow(/per-App config incomplete: app .*missing model chain/);
 
     // The healthy sibling completed before the comma-only message threw.
-    expect(commenterCalls.filter((c) => c.op === "post")).toHaveLength(1);
+    expect(commenterCalls.filter((c) => c.op === "post-prepared")).toHaveLength(1);
     expect(reviewCount(db)).toBe(1);
     expect(destroyCalls).toBe(1);
     // Structured channel: error log + stage=pipeline failure row; the
@@ -1614,7 +1625,7 @@ describe("createReviewConsumer", () => {
     );
 
     // The healthy sibling completed before the comma-override message threw.
-    expect(commenterCalls.filter((c) => c.op === "post")).toHaveLength(1);
+    expect(commenterCalls.filter((c) => c.op === "post-prepared")).toHaveLength(1);
     expect(reviewCount(db)).toBe(1);
     expect(destroyCalls).toBe(1);
     // Structured channel: error log + stage=pipeline failure row; the
@@ -1633,7 +1644,10 @@ describe("createReviewConsumer", () => {
     reset();
     runnerStdout = JSON.stringify(VALID_OUTPUT);
     // Pre-0017 DB: 0001–0016 in filename order (the chains migration NOT
-    // yet applied) — the wrangler state before plan 35 deploys.
+    // yet applied) — the wrangler state before plan 35 deploys. Migrations
+    // 0017–0020 are applied after the 0017 backfill below; the lifecycle
+    // journal tables (0020) are required by the plan-67 §7.7 step-2 read
+    // and are unrelated to the 0017 backfill under test.
     const db = createTestD1();
     for (const name of [
       "0003_dashboard_users.sql",
@@ -1694,8 +1708,16 @@ describe("createReviewConsumer", () => {
     db.raw.exec(readFileSync(join(import.meta.dir, "../../migrations", "0017_app_model_chains.sql"), "utf8"));
     // 0018 (plan 37) ships with the consumer that resolves the App's sandbox
     // image — the row backfills to the 'omp' default exactly like a real
-    // pre-37 App under this deployment pair.
-    db.raw.exec(readFileSync(join(import.meta.dir, "../../migrations", "0018_app_sandbox_images.sql"), "utf8"));
+    // pre-37 App under this deployment pair. 0019–0020 complete the current
+    // migration set (0019 metadata, 0020 the plan-67 lifecycle journal the
+    // consumer's step-2 read queries).
+    for (const name of [
+      "0018_app_sandbox_images.sql",
+      "0019_github_apps_metadata.sql",
+      "0020_finding_lifecycle.sql",
+    ]) {
+      db.raw.exec(readFileSync(join(import.meta.dir, "../../migrations", name), "utf8"));
+    }
     // Post-migration resolution is byte-identical: the default row holds
     // the chain verbatim; the seat-<role> chains + reference rows resolve
     // to the same overrides map.
@@ -1951,16 +1973,19 @@ describe("line comments (plan 18 Task 3 / AL-3 layered delivery)", () => {
     // Overall comment + persistence all landed; the diff is NOT even
     // prefetched when the base filter is empty (no extra API call). The
     // degraded-comment delete scan still runs (no stale comment → no call).
-    expect(commenterCalls.map((c) => c.op)).toEqual(["token", "post", "delete-degraded"]);
+    expect(commenterCalls.map((c) => c.op)).toEqual(["token", "plan", "post-prepared", "delete-degraded"]);
     expect(reviewCount(db)).toBe(1);
     expect(kvPuts).toHaveLength(1);
     expect(destroyCalls).toBe(1);
   });
 
-  test("hunk-external findings are excluded; all excluded → prefetch ran but no createReview call", async () => {
+  test("hunk-external findings are excluded by the worker-captured diff; all excluded → no createReview call", async () => {
     reset();
     // VALID_DIFF covers src/auth.ts right range [18,23]: line 100 is
-    // outside every hunk; docs/readme.md is not in the diff at all.
+    // outside every hunk; docs/readme.md is not in the diff at all. The
+    // prefilter input is the SAME sandbox diff exec the evidence catalog
+    // uses (plan 67: one worker-controlled capture, no second prefetch).
+    diffStdout = VALID_DIFF;
     runnerStdout = JSON.stringify({
       ...VALID_OUTPUT,
       findings: [
@@ -1974,10 +1999,11 @@ describe("line comments (plan 18 Task 3 / AL-3 layered delivery)", () => {
 
     await consumer(makeBatch(makePayload()));
 
-    expect(commenterCalls.map((c) => c.op)).toEqual(["token", "post", "delete-degraded", "fetch-diff", "line-comments"]);
-    const lineInput = commenterCalls[4]!.args[0] as { findings: Array<{ title: string; line_end?: number }> };
-    // Only the hunk-internal finding survives the prefilter.
-    expect(lineInput.findings.map((f) => f.title)).toEqual(["Inside"]);
+    expect(commenterCalls.map((c) => c.op)).toEqual(["token", "plan", "post-prepared", "line-comments", "delete-degraded"]);
+    const lineInput = commenterCalls[3]!.args as { intents: Array<{ path: string; line: number; body: string }> };
+    // Only the hunk-internal finding becomes a line intent.
+    expect(lineInput.intents.map((i) => i.line)).toEqual([21]);
+    expect(lineInput.intents[0]!.body).toContain("Inside");
 
     // And when NOTHING survives, the createReview call is skipped entirely.
     reset();
@@ -1987,48 +2013,45 @@ describe("line comments (plan 18 Task 3 / AL-3 layered delivery)", () => {
         { mergeClass: "must-fix", file_path: "src/auth.ts", line_start: 100, line_end: 100, title: "Outside", body: "B." },
       ],
     });
+    diffStdout = VALID_DIFF;
     const db2 = await createSeededTestD1();
     const consumer2 = createReviewConsumer(await makeEnv({ DB: db2 as never }), testLog, testOverrides);
     await consumer2(makeBatch(makePayload()));
-    expect(commenterCalls.map((c) => c.op)).toEqual(["token", "post", "delete-degraded", "fetch-diff"]);
+    expect(commenterCalls.map((c) => c.op)).toEqual(["token", "plan", "post-prepared", "delete-degraded"]);
     expect(reviewCount(db2)).toBe(1);
   });
 
-  test("diff prefetch failure → base-filter attempt (draft semantics), warn without the fallback flag", async () => {
+  test("no diff text (capture unavailable) → base-filter attempt (draft semantics)", async () => {
     reset();
+    // diffStdout stays "" — the prefilter has no trusted diff to compare
+    // against, so the base layer alone decides (GitHub validates at send;
+    // the hunk layer is skipped, never fabricated).
     runnerStdout = JSON.stringify(VALID_OUTPUT);
-    diffError = new Error("diff fetch 500");
     const db = await createSeededTestD1();
     const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
 
     await consumer(makeBatch(makePayload()));
 
     // The createReview attempt still runs, on the UNFILTERED base set.
-    expect(commenterCalls.map((c) => c.op)).toEqual(["token", "post", "delete-degraded", "fetch-diff", "line-comments"]);
-    const lineInput = commenterCalls[4]!.args[0] as { findings: unknown[] };
-    expect(lineInput.findings).toHaveLength(1);
-    // The prefetch failure is a plain warn — NOT a fallback (the attempt
-    // proceeded), and the review completed normally.
-    const warn = logLines.find((l) => l.level === "warn" && l.msg.includes("diff prefetch failed"));
-    expect(warn).toBeDefined();
-    expect(warn!.fields.line_comments_fallback).toBeUndefined();
+    expect(commenterCalls.map((c) => c.op)).toEqual(["token", "plan", "post-prepared", "line-comments", "delete-degraded"]);
+    const lineInput = commenterCalls[3]!.args as { intents: unknown[] };
+    expect(lineInput.intents).toHaveLength(1);
     expect(logLines.some((l) => l.fields.line_comments_fallback === true)).toBe(false);
     expect(reviewCount(db)).toBe(1);
     expect(kvPuts).toHaveLength(1);
     expect(destroyCalls).toBe(1);
   });
 
-  test("oversized diff prefetch → the hunk prefilter is skipped exactly like a prefetch failure (qc3 F-101)", async () => {
+  test("diff over the in-memory bound → the hunk prefilter is skipped exactly like an unavailable diff (qc3 F-101)", async () => {
     reset();
     // A finding OUTSIDE every VALID_DIFF hunk (line 100): with a bounded
-    // prefetch the hunk layer would EXCLUDE it — an over-cap diff must
-    // degrade to the base-filter attempt, never materialize a multi-MB
-    // line array in parseDiffHunkRanges.
+    // diff the hunk layer would EXCLUDE it — an over-cap diff must degrade
+    // to the base-filter attempt, never materialize a multi-MB line array.
     runnerStdout = JSON.stringify({
       ...VALID_OUTPUT,
       findings: [{ ...VALID_OUTPUT.findings[0]!, line_start: 100, line_end: 100 }],
     });
-    diffResult = `${VALID_DIFF}\n${" ".repeat(DIFF_PREFETCH_MAX_BYTES)}`;
+    diffStdout = `${VALID_DIFF}\n${" ".repeat(DIFF_PREFETCH_MAX_BYTES)}`;
     const db = await createSeededTestD1();
     const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
 
@@ -2036,12 +2059,9 @@ describe("line comments (plan 18 Task 3 / AL-3 layered delivery)", () => {
 
     // The attempt still ran on the base-filtered set — the hunk-external
     // finding SURVIVED because the hunk layer never saw the diff.
-    expect(commenterCalls.map((c) => c.op)).toEqual(["token", "post", "delete-degraded", "fetch-diff", "line-comments"]);
-    const lineInput = commenterCalls[4]!.args[0] as { findings: unknown[] };
-    expect(lineInput.findings).toHaveLength(1);
-    const warn = logLines.find((l) => l.level === "warn" && l.msg.includes("diff prefetch failed"));
-    expect(warn).toBeDefined();
-    expect(warn!.msg).toContain("exceeds DIFF_PREFETCH_MAX_BYTES");
+    expect(commenterCalls.map((c) => c.op)).toEqual(["token", "plan", "post-prepared", "line-comments", "delete-degraded"]);
+    const lineInput = commenterCalls[3]!.args as { intents: unknown[] };
+    expect(lineInput.intents).toHaveLength(1);
     // Not a delivery fallback — the createReview attempt proceeded.
     expect(logLines.some((l) => l.fields.line_comments_fallback === true)).toBe(false);
     expect(reviewCount(db)).toBe(1);
@@ -2056,7 +2076,7 @@ describe("line comments (plan 18 Task 3 / AL-3 layered delivery)", () => {
     ]) {
       reset();
       runnerStdout = JSON.stringify(VALID_OUTPUT);
-      lineCommentsError = failure;
+      commenterState.lineCommentsError = failure;
       const db = await createSeededTestD1();
       const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
 
@@ -2065,7 +2085,7 @@ describe("line comments (plan 18 Task 3 / AL-3 layered delivery)", () => {
       // comments.
       await consumer(makeBatch(makePayload()));
 
-      expect(commenterCalls.map((c) => c.op)).toEqual(["token", "post", "delete-degraded", "fetch-diff", "line-comments"]);
+      expect(commenterCalls.map((c) => c.op)).toEqual(["token", "plan", "post-prepared", "line-comments", "delete-degraded"]);
       const fallback = logLines.find((l) => l.fields.line_comments_fallback === true);
       expect(fallback).toBeDefined();
       expect(fallback!.level).toBe("warn");
@@ -2086,7 +2106,7 @@ describe("degraded-comment lifecycle (Bugbot finding)", () => {
   test("success flow with a pre-existing degraded comment → the delete scan runs after the upsert", async () => {
     reset();
     runnerStdout = JSON.stringify(VALID_OUTPUT);
-    deleteDegradedOutcome = { deleted: 1, skipped: 1, errors: ["rate limited"] };
+    commenterState.deleteDegradedOutcome = { deleted: 1, skipped: 1, errors: ["rate limited"] };
     const db = await createSeededTestD1();
     const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
 
@@ -2095,8 +2115,8 @@ describe("degraded-comment lifecycle (Bugbot finding)", () => {
     // The delete scan runs between the overall upsert and the line-comments
     // step (the fake's deleteDegradedComment records the call; the real
     // implementation scans + deletes the stale bot-authored comments).
-    expect(commenterCalls.map((c) => c.op)).toEqual(["token", "post", "delete-degraded", "fetch-diff", "line-comments"]);
-    const deleteInput = commenterCalls.find((c) => c.op === "delete-degraded")!.args[0] as {
+    expect(commenterCalls.map((c) => c.op)).toEqual(["token", "plan", "post-prepared", "line-comments", "delete-degraded"]);
+    const deleteInput = commenterCalls.find((c) => c.op === "delete-degraded")!.args as {
       installationId: number;
       owner: string;
       repo: string;
@@ -2119,7 +2139,7 @@ describe("degraded-comment lifecycle (Bugbot finding)", () => {
   test("stale degraded comment delete failure → warn, review stands, never throws", async () => {
     reset();
     runnerStdout = JSON.stringify(VALID_OUTPUT);
-    deleteDegradedError = new Error("delete 500");
+    commenterState.deleteDegradedError = new Error("delete 500");
     const db = await createSeededTestD1();
     const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
 
@@ -2130,7 +2150,7 @@ describe("degraded-comment lifecycle (Bugbot finding)", () => {
     const warn = logLines.find((l) => l.level === "warn" && l.msg.includes("stale degraded comment delete failed"));
     expect(warn).toBeDefined();
     expect(warn!.msg).toContain("delete 500");
-    expect(commenterCalls.map((c) => c.op)).toEqual(["token", "post", "delete-degraded", "fetch-diff", "line-comments"]);
+    expect(commenterCalls.map((c) => c.op)).toEqual(["token", "plan", "post-prepared", "line-comments", "delete-degraded"]);
     expect(reviewCount(db)).toBe(1);
     expect(kvPuts).toHaveLength(1);
     expect(messageRetryCalls).toHaveLength(0);
@@ -2142,13 +2162,15 @@ describe("line-comments round pin (plan 18 Task 3 / AL-3)", () => {
   test("the line-comments round pins to the round the overall upsert returned", async () => {
     reset();
     runnerStdout = JSON.stringify(VALID_OUTPUT);
-    postRound = 4;
+    // A create plan at round 4 is type-illegal (create pins round 1) — the
+    // double is cast: the consumer pins the line comments to plan.round.
+    commenterState.plan = { action: "create", round: 4 } as unknown as UpsertPlan;
     const db = await createSeededTestD1();
     const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
 
     await consumer(makeBatch(makePayload()));
 
-    const lineInput = commenterCalls.find((c) => c.op === "line-comments")!.args[0] as { round: number };
+    const lineInput = commenterCalls.find((c) => c.op === "line-comments")!.args as { round: number };
     expect(lineInput.round).toBe(4);
   });
 });
@@ -2175,8 +2197,8 @@ describe("SEC-01 exact-value redaction through the consumer", () => {
     await consumer(makeBatch(makePayload()));
 
     // The posted comment body never carries the key.
-    const postInput = commenterCalls.find((c) => c.op === "post")!.args[0] as { output: ReviewOutput };
-    expect(JSON.stringify(postInput.output)).not.toContain(uuidKey);
+    const postInput = commenterCalls.find((c) => c.op === "post-prepared")!.args as { body: string };
+    expect(postInput.body).not.toContain(uuidKey);
     // The D1 envelope never carries the key either.
     const row = db.raw.query("SELECT envelope FROM reviews").get() as { envelope: string };
     expect(row.envelope).not.toContain(uuidKey);
@@ -2185,10 +2207,10 @@ describe("SEC-01 exact-value redaction through the consumer", () => {
 
   test("the minted installation token is exact-redacted from the degraded comment input", async () => {
     reset();
-    tokenResult = gh("s", "installation_token");
+    commenterState.token = gh("s", "installation_token");
     // The parse error echoes the installation token verbatim (a
     // prompt-injected echo) — the exact-value pass must remove it before
-    // postDegraded and the failure row.
+    // the prepared degraded send and the failure row.
     runnerStdout = JSON.stringify({
       schema: "mstar.review/v1",
       verdict: gh("s", "installation_token"),
@@ -2200,12 +2222,8 @@ describe("SEC-01 exact-value redaction through the consumer", () => {
 
     await consumer(makeBatch(makePayload())); // resolves — acked
 
-    const degradeInput = commenterCalls.filter((c) => c.op === "degrade")[0]!.args[0] as {
-      error: string;
-      rawOutput: string;
-    };
-    expect(degradeInput.error).not.toContain(gh("s", "installation_token"));
-    expect(degradeInput.rawOutput).not.toContain(gh("s", "installation_token"));
+    const degradeBody = (commenterCalls.filter((c) => c.op === "post-prepared-degraded")[0]!.args as { body: string }).body;
+    expect(degradeBody).not.toContain(gh("s", "installation_token"));
     const rows = failureRows(db);
     expect(String(rows[0]!.error)).not.toContain(gh("s", "installation_token"));
   });
@@ -2237,18 +2255,21 @@ describe("cross-round repeat dedup (plan 21 Task 3 / AL-21-2)", () => {
 
     await consumer(makeBatch(makePayload()));
 
-    const post = commenterCalls.find((c) => c.op === "post")!;
-    expect(post.args[0]).toMatchObject({
+    const post = commenterCalls.find((c) => c.op === "post-prepared")!;
+    expect(post.args).toMatchObject({
       installationId: 123,
       owner: "acme",
       repo: "widgets",
       prNumber: 42,
     });
-    const input = post.args[0] as { previousFingerprints?: ReadonlySet<string> };
-    expect(input.previousFingerprints).toEqual(new Set([computeFindingFingerprint(prevFinding)]));
+    // The prepared body carries the repeat-dedup rendering: the finding
+    // whose fingerprint appeared last round is marked repeat and excluded
+    // from the recomputed tally (AL-21-2 — display layer only).
+    const body = (post.args as { body: string }).body;
+    expect(body).toContain("*(repeat)*");
   });
 
-  test("no previous round → post proceeds with no previousFingerprints (first round)", async () => {
+  test("no previous round → first-round rendering with no repeat markers", async () => {
     reset();
     runnerStdout = JSON.stringify(VALID_OUTPUT);
     const db = await createSeededTestD1();
@@ -2256,8 +2277,8 @@ describe("cross-round repeat dedup (plan 21 Task 3 / AL-21-2)", () => {
 
     await consumer(makeBatch(makePayload()));
 
-    const post = commenterCalls.find((c) => c.op === "post")!;
-    expect((post.args[0] as { previousFingerprints?: unknown }).previousFingerprints).toBeUndefined();
+    const post = commenterCalls.find((c) => c.op === "post-prepared")!;
+    expect((post.args as { body: string }).body).not.toContain("*(repeat)*");
     expect(reviewCount(db)).toBe(1);
   });
 
@@ -2284,8 +2305,8 @@ describe("cross-round repeat dedup (plan 21 Task 3 / AL-21-2)", () => {
 
     await consumer(makeBatch(makePayload()));
 
-    const post = commenterCalls.find((c) => c.op === "post")!;
-    expect((post.args[0] as { previousFingerprints?: unknown }).previousFingerprints).toBeUndefined();
+    const post = commenterCalls.find((c) => c.op === "post-prepared")!;
+    expect((post.args as { previousFingerprints?: unknown }).previousFingerprints).toBeUndefined();
     const warn = logLines.find((l) => l.level === "warn" && l.msg.includes("previous-round fingerprint query failed"));
     expect(warn).toBeDefined();
     // S-3: the dedup-degradation warn carries a structured field, not just text.
@@ -2310,5 +2331,706 @@ describe("cross-round repeat dedup (plan 21 Task 3 / AL-21-2)", () => {
     expect(row.fingerprint).not.toContain(oversizedHint);
     // …the clamped hint (title budget + ellipsis) is what lands.
     expect(row.fingerprint).toBe(oversizedHint.slice(0, FINDING_TITLE_MAX - 1) + "…");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Finding recheck & closure (plan 67 T4, spec §7.7 order / §7.4 conservative
+// reconciliation / §7.10 closure / §7.10 Check seam). Assertions target the
+// OBSERVABLE multi-round behavior: the captured call order, the prepared
+// publication body, and the D1 lifecycle rows — never internal wiring.
+// ---------------------------------------------------------------------------
+
+/** The prior round's publication row every lifecycle fixture hangs off. */
+const PRIOR_PUB_ID = "aaaaaaaa-0000-4000-8000-000000000001";
+const PRIOR_SHA = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+const TARGET_ROW_ID = "bbbbbbbb-0000-4000-8000-000000000002";
+const ASSOC_ID = "cccccccc-0000-4000-8000-000000000003";
+
+/** The §7.3 OriginalFinding the seeded lifecycle row carries (different title/hint from the current finding). */
+const TARGET_ORIGINAL = {
+  title: "Old null deref on the config path",
+  body: "The original published concern body — never reduced to a title.",
+  filePath: "src/auth.ts",
+  lineStart: 21,
+  lineEnd: 21,
+  mergeClass: "should-fix",
+  category: "logic",
+  fingerprintHint: "old-fp-1",
+};
+
+async function seedPriorPublication(db: TestD1, nowMs = 1_000): Promise<void> {
+  db.raw
+    .prepare(
+      `INSERT INTO review_publications
+         (id, app_id, installation_id, owner, repo, pr_number, head_sha, kind, phase,
+          payload_json, created_ms, updated_ms, recovery_state)
+       VALUES (?, ?, 123, 'acme', 'widgets', 42, ?, 'review', 'applied', ?, ?, ?, 'done')`,
+    )
+    .run(PRIOR_PUB_ID, TEST_APP_ID, PRIOR_SHA, "{}", nowMs, nowMs);
+}
+
+async function seedOpenTarget(db: TestD1, state = "open", nowMs = 2_000): Promise<void> {
+  db.raw
+    .prepare(
+      `INSERT INTO review_findings
+         (id, app_id, installation_id, owner, repo, pr_number, finding_id, original_json,
+          first_publication_id, last_publication_id, first_seen_sha, last_seen_sha,
+          first_seen_round, last_seen_round, state, created_ms, updated_ms)
+       VALUES (?, ?, 123, 'acme', 'widgets', 42, ?, ?, ?, ?, ?, ?, 1, 1, ?, ?, ?)`,
+    )
+    .run(
+      TARGET_ROW_ID,
+      TEST_APP_ID,
+      TARGET_ORIGINAL.fingerprintHint,
+      JSON.stringify(TARGET_ORIGINAL),
+      PRIOR_PUB_ID,
+      PRIOR_PUB_ID,
+      PRIOR_SHA,
+      PRIOR_SHA,
+      state,
+      nowMs,
+      nowMs,
+    );
+}
+
+async function seedAssociation(db: TestD1, threadId: string | null, nowMs = 3_000): Promise<void> {
+  const intent = {
+    associationId: ASSOC_ID,
+    findingRowId: TARGET_ROW_ID,
+    publicationId: PRIOR_PUB_ID,
+    scope: { appId: TEST_APP_ID, installationId: 123, owner: "acme", repo: "widgets", prNumber: 42 },
+    originalSha: PRIOR_SHA,
+    round: 1,
+    path: "src/auth.ts",
+    line: 21,
+    body: "old comment body",
+    bodySha256: "digest-old",
+  };
+  db.raw
+    .prepare(
+      `INSERT INTO review_threads
+         (id, finding_row_id, publication_id, app_id, installation_id, owner, repo, pr_number,
+          original_sha, round, intent_json, resolution_state, thread_id, created_ms, updated_ms)
+       VALUES (?, ?, ?, ?, 123, 'acme', 'widgets', 42, ?, ?, ?, 'pending', ?, ?, ?)`,
+    )
+    .run(ASSOC_ID, TARGET_ROW_ID, PRIOR_PUB_ID, TEST_APP_ID, PRIOR_SHA, 1, JSON.stringify(intent), threadId, nowMs, nowMs);
+}
+
+/** A current-code `addressed` recheck result for the seeded target (cites the trusted catalog slice). */
+const ADDRESSED_QUOTE =
+  "if (!Number.isInteger(claims.exp)) throw 401;\nif (claims.exp < Math.floor(Date.now() / 1000)) throw 401;";
+
+function recheckDocWith(result: Record<string, unknown>, rowId = TARGET_ROW_ID): string {
+  return JSON.stringify({
+    schema: "mstar.recheck/v1",
+    headSha: SHA,
+    results: [
+      {
+        rowId,
+        disposition: "addressed",
+        reason: "verified-fix",
+        evidence: {
+          kind: "current-code",
+          sliceId: "ev-1",
+          startLine: 20,
+          endLine: 21,
+          quote: ADDRESSED_QUOTE,
+          explanation: "The comparison now guards the fractional expiry.",
+        },
+        relatedCurrentFindingIndexes: [],
+        ...result,
+      },
+    ],
+  });
+}
+
+describe("finding recheck & closure (plan 67 §7.7/§7.4/§7.10)", () => {
+  test("recheck round with an open prior row: recheck input rides the runner, closure renders the verified fix, resolution runs discovery then resolve", async () => {
+    reset();
+    diffStdout = VALID_DIFF;
+    runnerStdout = JSON.stringify(VALID_OUTPUT);
+    recheckFileContent = recheckDocWith({});
+    const db = await createSeededTestD1();
+    await seedPriorPublication(db);
+    await seedOpenTarget(db);
+    await seedAssociation(db, "PRRT_thread1");
+    commenterState.discussion = {
+      items: [],
+      issueCoverage: "complete",
+      issueDigest: "issue-digest",
+      capturedMs: 0,
+      threads: [
+        {
+          associationId: ASSOC_ID,
+          threadId: "PRRT_thread1",
+          commentId: 8,
+          headSha: SHA,
+          digest: "thread-digest-1",
+          commentCount: 2,
+          capturedMs: 0,
+          coverage: "complete",
+          modelCoverage: "complete",
+        },
+      ],
+    };
+    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
+
+    await consumer(makeBatch(makePayload()));
+
+    // Step 5: the runner input carries the typed recheck document (targets
+    // with the ORIGINAL concern + trusted evidence + discussion), and the
+    // runner gains --recheck-out, read back through the audited read.
+    const runnerInput = JSON.parse(writtenInputJson!) as { recheck?: { targets: RecheckTarget[]; evidence: unknown[]; discussion: { issueCoverage: string } } };
+    expect(runnerInput.recheck).toBeDefined();
+    expect(runnerInput.recheck!.targets).toHaveLength(1);
+    expect(runnerInput.recheck!.targets[0]!.original.title).toBe(TARGET_ORIGINAL.title);
+    expect(runnerInput.recheck!.targets[0]!.original.body).toContain("never reduced to a title");
+    expect(runnerInput.recheck!.evidence.length).toBeGreaterThan(0);
+    expect(runnerInput.recheck!.discussion.issueCoverage).toBe("complete");
+    const runnerCmd = sandboxCalls.find((c) => c.cmd.includes("--input"))!.cmd;
+    expect(runnerCmd).toContain("--recheck-out '/tmp/mstar-recheck.json'");
+    expect(sandboxCalls.some((c) => c.cmd.includes("head -c") && c.cmd.includes("/tmp/mstar-recheck.json"))).toBe(true);
+
+    // Step 8/§7.10: the prepared body renders the closure with the verified
+    // disposition and the queued resolve as not-yet-resolved (never a
+    // prediction).
+    const prepared = commenterCalls.find((c) => c.op === "post-prepared")!.args as { body: string };
+    expect(prepared.body).toContain("addressed (verified-fix)");
+    expect(prepared.body).toContain("current-code");
+    expect(prepared.body).toContain("not yet resolved");
+    expect(prepared.body).toContain("Reassessed 1/1 open prior finding(s)");
+
+    // Step 9: the round assessment is durable — the row closed addressed and
+    // BOTH rotation clocks advanced (selected → scheduled, assessed → assessed).
+    const findingRow = db.raw.query("SELECT state, last_assessed_ms, last_scheduled_ms FROM review_findings").get() as {
+      state: string;
+      last_assessed_ms: number | null;
+      last_scheduled_ms: number | null;
+    };
+    expect(findingRow.state).toBe("addressed");
+    expect(findingRow.last_assessed_ms).not.toBeNull();
+    expect(findingRow.last_scheduled_ms).not.toBeNull();
+    const rounds = db.raw.query("SELECT assessment_json FROM review_finding_rounds").all() as Array<{ assessment_json: string }>;
+    expect(rounds).toHaveLength(1);
+    expect(JSON.parse(rounds[0]!.assessment_json).disposition).toBe("addressed");
+
+    // Step 11 — resolution LAST: the verified snapshot was enqueued BEFORE
+    // the inline attempt (the D1 row carries it), then discovery bound the
+    // thread and the single resolve attempt ran, in that order.
+    const threadRow = db.raw.query("SELECT verified_json, resolution_state FROM review_threads").get() as {
+      verified_json: string | null;
+      resolution_state: string;
+    };
+    expect(threadRow.verified_json).not.toBeNull();
+    expect(JSON.parse(threadRow.verified_json!).assessment.disposition).toBe("addressed");
+    expect(JSON.parse(threadRow.verified_json!).snapshot.threadId).toBe("PRRT_thread1");
+    const discoverIdx = commenterCalls.findIndex((c) => c.op === "discover");
+    const resolveIdx = commenterCalls.findIndex((c) => c.op === "resolve");
+    expect(discoverIdx).toBeGreaterThan(-1);
+    expect(resolveIdx).toBe(discoverIdx + 1);
+    const resolveInput = commenterCalls[resolveIdx]!.args as { associationId: string; verified: { snapshot: { digest: string } } };
+    expect(resolveInput.associationId).toBe(ASSOC_ID);
+    expect(resolveInput.verified.snapshot.digest).toBe("thread-digest-1");
+    expect(commenterState.resolveResult.kind).toBe("resolved");
+    // The post-publish line comments + degraded cleanup still ran.
+    expect(commenterCalls.some((c) => c.op === "line-comments")).toBe(true);
+    expect(commenterCalls.some((c) => c.op === "delete-degraded")).toBe(true);
+  });
+
+  test("same-round recurrence overrides the recheck closure (§7.4): unverifiable/conflict, row stays open, no resolution", async () => {
+    reset();
+    diffStdout = VALID_DIFF;
+    runnerStdout = JSON.stringify(VALID_OUTPUT); // current finding = same concern as the current envelope's
+    // The doc claims the concern was fixed — but the SAME round re-reports
+    // it: the seeded target's ORIGINAL normalizes exactly to the current
+    // finding (same path/bucket/title) under a DIFFERENT fingerprint (its
+    // hint) — §7.4 forces unverifiable/conflict over recheck closure.
+    const db = await createSeededTestD1();
+    await seedPriorPublication(db);
+    await seedOpenTarget(db);
+    db.raw.prepare(`UPDATE review_findings SET original_json = ? WHERE id = ?`).run(
+      JSON.stringify({ ...TARGET_ORIGINAL, title: "Fractional expiry comparison", fingerprintHint: "old-fp-1" }),
+      TARGET_ROW_ID,
+    );
+    await seedAssociation(db, "PRRT_thread1");
+    recheckFileContent = recheckDocWith({});
+    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
+
+    await consumer(makeBatch(makePayload()));
+
+    const prepared = commenterCalls.find((c) => c.op === "post-prepared")!.args as { body: string };
+    expect(prepared.body).toContain("unverifiable (conflict)");
+    expect(prepared.body).not.toContain("not yet resolved"); // nothing queued
+    // The row is truly assessed (the doc assessed it) but conservatively open.
+    const rounds = db.raw.query("SELECT assessment_json FROM review_finding_rounds").all() as Array<{ assessment_json: string }>;
+    expect(rounds).toHaveLength(1);
+    const assessment = JSON.parse(rounds[0]!.assessment_json);
+    expect(assessment.disposition).toBe("unverifiable");
+    expect(assessment.reason).toBe("conflict");
+    const findingRow = db.raw.query("SELECT state FROM review_findings").get() as { state: string };
+    expect(findingRow.state).toBe("open");
+    // No discovery, no resolve.
+    expect(commenterCalls.some((c) => c.op === "discover")).toBe(false);
+    expect(commenterCalls.some((c) => c.op === "resolve")).toBe(false);
+  });
+
+  test("an omitted selected row is accounted but never assessed: coverage omitted, last_assessed_ms untouched", async () => {
+    reset();
+    diffStdout = VALID_DIFF;
+    runnerStdout = JSON.stringify(VALID_OUTPUT);
+    // The recheck document is EMPTY — the selected target was omitted.
+    recheckFileContent = JSON.stringify({ schema: "mstar.recheck/v1", headSha: SHA, results: [] });
+    const db = await createSeededTestD1();
+    await seedPriorPublication(db);
+    await seedOpenTarget(db);
+    await seedAssociation(db, "PRRT_thread1");
+    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
+
+    await consumer(makeBatch(makePayload()));
+
+    const prepared = commenterCalls.find((c) => c.op === "post-prepared")!.args as { body: string };
+    expect(prepared.body).toContain("Reassessed 0/1 open prior finding(s)");
+    expect(prepared.body).toContain("1 omitted");
+    expect(prepared.body).toContain("unverifiable (omitted)");
+    // Scheduling advanced (selected rows rotate) but the row was NOT assessed.
+    const findingRow = db.raw.query("SELECT last_assessed_ms, last_scheduled_ms, state FROM review_findings").get() as {
+      last_assessed_ms: number | null;
+      last_scheduled_ms: number | null;
+      state: string;
+    };
+    expect(findingRow.last_scheduled_ms).not.toBeNull();
+    expect(findingRow.last_assessed_ms).toBeNull();
+    expect(findingRow.state).toBe("open");
+    // No round-history row for a synthesized outcome (PM resolution: only
+    // truly assessed targets advance last_assessed_ms / get history).
+    const rounds = db.raw.query("SELECT COUNT(*) AS n FROM review_finding_rounds").get() as { n: number };
+    expect(rounds.n).toBe(0);
+  });
+
+  test("same-SHA /review with a pending journal row → hands off to recovery and acks (no recheck, no resolve, rows untouched)", async () => {
+    reset();
+    runnerStdout = JSON.stringify(VALID_OUTPUT);
+    const db = await createSeededTestD1();
+    // A PREPARED publication for this exact scope+SHA (a crashed round).
+    db.raw
+      .prepare(
+        `INSERT INTO review_publications
+           (id, app_id, installation_id, owner, repo, pr_number, head_sha, kind, phase,
+            payload_json, created_ms, updated_ms, recovery_state)
+         VALUES ('dddddddd-0000-4000-8000-000000000004', ?, 123, 'acme', 'widgets', 42, ?, 'review', 'prepared', '{}', 1, 1, 'pending')`,
+      )
+      .run(TEST_APP_ID, SHA);
+    await seedPriorPublication(db);
+    await seedOpenTarget(db);
+    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
+
+    await consumer(makeBatch(makePayload()));
+
+    // The model work never started and nothing was published or resolved.
+    expect(sandboxCalls.some((c) => c.cmd.includes("--input"))).toBe(false);
+    expect(commenterCalls.some((c) => c.op === "post-prepared")).toBe(false);
+    expect(commenterCalls.some((c) => c.op === "resolve")).toBe(false);
+    expect(reviewCount(db)).toBe(0);
+    expect(kvPuts).toHaveLength(0);
+    // The ok path resolves silently (queue auto-ack) — nothing retried.
+    expect(messageRetryCalls).toHaveLength(0);
+    // The journal row is untouched (pending recovery is never deleted).
+    const pub = db.raw.query("SELECT phase, recovery_state FROM review_publications WHERE id = 'dddddddd-0000-4000-8000-000000000004'").get() as {
+      phase: string;
+      recovery_state: string;
+    };
+    expect(pub).toEqual({ phase: "prepared", recovery_state: "pending" });
+    const infoLine = logLines.find((l) => l.level === "info" && l.msg.includes("publication journal hit"));
+    expect(infoLine).toBeDefined();
+  });
+
+  test("staging failure BEFORE any GitHub mutation → no publication, no KV, no reviews row; structured channel", async () => {
+    reset();
+    runnerStdout = JSON.stringify(VALID_OUTPUT);
+    const db = await createSeededTestD1();
+    // Break ONLY the journal INSERT (stagePublication) — everything before
+    // it (journal reads) keeps working.
+    const failingDb = {
+      ...db,
+      prepare: (query: string) => {
+        if (query.includes("INSERT INTO review_publications")) {
+          return {
+            bind: () => {
+              throw new Error("d1 down at staging");
+            },
+          } as never;
+        }
+        return db.prepare(query);
+      },
+    } as typeof db;
+    const consumer = createReviewConsumer(await makeEnv({ DB: failingDb as never }), testLog, testOverrides);
+
+    await expect(consumer(makeBatch(makePayload()))).rejects.toThrow("d1 down at staging");
+
+    // No GitHub MUTATION at all: the pre-staging plan read is read-only and
+    // may have run, but no prepared send, no line comments; no KV done; no
+    // reviews row. The failure rides the AL-6 channel (review_failures +
+    // rethrow).
+    expect(commenterCalls.some((c) => c.op === "post-prepared")).toBe(false);
+    expect(commenterCalls.some((c) => c.op === "line-comments")).toBe(false);
+    expect(kvPuts).toHaveLength(0);
+    expect(reviewCount(db)).toBe(0);
+    const pubRows = db.raw.query("SELECT COUNT(*) AS n FROM review_publications").get() as { n: number };
+    expect(pubRows.n).toBe(0);
+    expect(failureRows(db)).toHaveLength(1);
+    expect(failureRows(db)[0]).toMatchObject({ stage: "pipeline" });
+  });
+
+  test("the honest unknown-publication window: send succeeded, proof write lost → no KV done, no local rows, phase stays sending", async () => {
+    reset();
+    runnerStdout = JSON.stringify(VALID_OUTPUT);
+    const db = await createSeededTestD1();
+    // Break ONLY the proof UPDATE (recordPublicationProof) — the send has
+    // already happened when this runs.
+    const failingDb = {
+      ...db,
+      prepare: (query: string) => {
+        if (query.includes("SET phase = 'confirmed'")) {
+          return {
+            bind: () => {
+              throw new Error("d1 down at proof");
+            },
+          } as never;
+        }
+        return db.prepare(query);
+      },
+    } as typeof db;
+    const consumer = createReviewConsumer(await makeEnv({ DB: failingDb as never }), testLog, testOverrides);
+
+    await consumer(makeBatch(makePayload())); // acks — recovery owns the window
+
+    // The publication is NOT claimed: no KV done, no reviews row, no
+    // lifecycle apply. The staged row stays sending/pending for M8
+    // read-only discovery (never a blind second create).
+    expect(commenterCalls.filter((c) => c.op === "post-prepared")).toHaveLength(1);
+    expect(kvPuts).toHaveLength(0);
+    expect(reviewCount(db)).toBe(0);
+    const pub = db.raw.query("SELECT phase, recovery_state, proof_json FROM review_publications").get() as {
+      phase: string;
+      recovery_state: string;
+      proof_json: string | null;
+    };
+    expect(pub.phase).toBe("sending");
+    expect(pub.recovery_state).toBe("pending");
+    expect(pub.proof_json).toBeNull();
+    const warn = logLines.find((l) => l.level === "warn" && l.msg.includes("proof could not be persisted"));
+    expect(warn).toBeDefined();
+    expect(messageRetryCalls).toHaveLength(0); // acked — recovery owns the window
+  });
+
+  test("recurrence reopen: a re-reported finding reopens its closed row with reopen_count+1 (§7.2)", async () => {
+    reset();
+    runnerStdout = JSON.stringify(VALID_OUTPUT);
+    const db = await createSeededTestD1();
+    await seedPriorPublication(db);
+    // A row CLOSED addressed in an earlier round whose finding_id is the
+    // CURRENT finding's fingerprint — the current review re-reports it.
+    const currentFingerprint = computeFindingFingerprint(VALID_OUTPUT.findings[0]!);
+    db.raw
+      .prepare(
+        `INSERT INTO review_findings
+           (id, app_id, installation_id, owner, repo, pr_number, finding_id, original_json,
+            first_publication_id, last_publication_id, first_seen_sha, last_seen_sha,
+            first_seen_round, last_seen_round, state, created_ms, updated_ms)
+         VALUES ('eeeeeeee-0000-4000-8000-000000000005', ?, 123, 'acme', 'widgets', 42, ?, ?, ?, ?, ?, ?, 1, 1, 'addressed', 1, 1)`,
+      )
+      .run(
+        TEST_APP_ID,
+        currentFingerprint,
+        JSON.stringify({ ...TARGET_ORIGINAL, title: "Fractional expiry comparison", fingerprintHint: null }),
+        PRIOR_PUB_ID,
+        PRIOR_PUB_ID,
+        PRIOR_SHA,
+        PRIOR_SHA,
+      );
+    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
+
+    await consumer(makeBatch(makePayload()));
+
+    // The seen-upsert reopened the row: state back to open, reopen_count 1.
+    const row = db.raw
+      .query("SELECT state, reopen_count, last_seen_sha FROM review_findings WHERE id = 'eeeeeeee-0000-4000-8000-000000000005'")
+      .get() as { state: string; reopen_count: number; last_seen_sha: string };
+    expect(row.state).toBe("open");
+    expect(row.reopen_count).toBe(1);
+    expect(row.last_seen_sha).toBe(SHA);
+  });
+
+  test("force push between capture and resolve (HEAD changed) → the resolve is refused, verified snapshot stays queued", async () => {
+    reset();
+    diffStdout = VALID_DIFF;
+    runnerStdout = JSON.stringify(VALID_OUTPUT);
+    recheckFileContent = recheckDocWith({});
+    const db = await createSeededTestD1();
+    await seedPriorPublication(db);
+    await seedOpenTarget(db);
+    await seedAssociation(db, "PRRT_thread1");
+    commenterState.discussion = {
+      items: [],
+      issueCoverage: "complete",
+      issueDigest: "issue-digest",
+      capturedMs: 0,
+      threads: [
+        {
+          associationId: ASSOC_ID,
+          threadId: "PRRT_thread1",
+          commentId: 8,
+          headSha: SHA,
+          digest: "thread-digest-1",
+          commentCount: 2,
+          capturedMs: 0,
+          coverage: "complete",
+          modelCoverage: "complete",
+        },
+      ],
+    };
+    commenterState.resolveResult = { kind: "needs-recheck", reason: "head-changed" };
+    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
+
+    await consumer(makeBatch(makePayload())); // never throws out of the message
+
+    // The resolve attempt ran ONCE and was refused — the verified snapshot
+    // is durable (M8 can retry within the same fences), nothing resolved.
+    expect(commenterCalls.filter((c) => c.op === "resolve")).toHaveLength(1);
+    const warn = logLines.find((l) => l.level === "warn" && l.msg.includes("returned needs-recheck (head-changed)"));
+    expect(warn).toBeDefined();
+    const threadRow = db.raw.query("SELECT resolution_state, verified_json FROM review_threads").get() as {
+      resolution_state: string;
+      verified_json: string | null;
+    };
+    expect(threadRow.verified_json).not.toBeNull();
+    expect(messageAckCalls).toHaveLength(0); // ok path — queue auto-ack, nothing retried
+  });
+
+  test("marker ambiguity / foreign marker at discovery → the verified resolve stays queued, resolveFindingThread never called", async () => {
+    for (const discovery of [
+      { kind: "ambiguous" },
+      { kind: "foreign" },
+    ] as const) {
+      reset();
+      diffStdout = VALID_DIFF;
+      runnerStdout = JSON.stringify(VALID_OUTPUT);
+      recheckFileContent = recheckDocWith({});
+      const db = await createSeededTestD1();
+      await seedPriorPublication(db);
+      await seedOpenTarget(db);
+      await seedAssociation(db, "PRRT_thread1");
+      commenterState.discussion = {
+        items: [],
+        issueCoverage: "complete",
+        issueDigest: "issue-digest",
+        capturedMs: 0,
+        threads: [
+          {
+            associationId: ASSOC_ID,
+            threadId: "PRRT_thread1",
+            commentId: 8,
+            headSha: SHA,
+            digest: "thread-digest-1",
+            commentCount: 2,
+            capturedMs: 0,
+            coverage: "complete",
+            modelCoverage: "complete",
+          },
+        ],
+      };
+      commenterState.discoverResult = discovery;
+      const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
+
+      await consumer(makeBatch(makePayload()));
+
+      expect(commenterCalls.filter((c) => c.op === "discover")).toHaveLength(1);
+      expect(commenterCalls.some((c) => c.op === "resolve")).toBe(false);
+      const warn = logLines.find((l) => l.level === "warn" && l.msg.includes(`returned ${discovery.kind}`));
+      expect(warn).toBeDefined();
+      const threadRow = db.raw.query("SELECT verified_json FROM review_threads").get() as { verified_json: string | null };
+      expect(threadRow.verified_json).not.toBeNull();
+    }
+  });
+
+  test("resolve API failure → typed retry outcome logged, message ok, durable queue state intact", async () => {
+    reset();
+    diffStdout = VALID_DIFF;
+    runnerStdout = JSON.stringify(VALID_OUTPUT);
+    recheckFileContent = recheckDocWith({});
+    const db = await createSeededTestD1();
+    await seedPriorPublication(db);
+    await seedOpenTarget(db);
+    await seedAssociation(db, "PRRT_thread1");
+    commenterState.discussion = {
+      items: [],
+      issueCoverage: "complete",
+      issueDigest: "issue-digest",
+      capturedMs: 0,
+      threads: [
+        {
+          associationId: ASSOC_ID,
+          threadId: "PRRT_thread1",
+          commentId: 8,
+          headSha: SHA,
+          digest: "thread-digest-1",
+          commentCount: 2,
+          capturedMs: 0,
+          coverage: "complete",
+          modelCoverage: "complete",
+        },
+      ],
+    };
+    commenterState.resolveResult = { kind: "retry", reason: "api" };
+    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
+
+    await consumer(makeBatch(makePayload()));
+
+    expect(commenterCalls.filter((c) => c.op === "resolve")).toHaveLength(1);
+    const warn = logLines.find((l) => l.level === "warn" && l.msg.includes("returned retry (api)"));
+    expect(warn).toBeDefined();
+    expect(reviewCount(db)).toBe(1); // the review itself is unaffected
+  });
+
+  test("the Check seam: begin after dedup before model work; ONE terminalize after the proof is durable; hook throws are isolated", async () => {
+    reset();
+    runnerStdout = JSON.stringify(VALID_OUTPUT);
+    const db = await createSeededTestD1();
+    const beginCalls: unknown[] = [];
+    const terminalizeCalls: Array<{ publicationId: string | null; outcome: string }> = [];
+    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, {
+      ...testOverrides,
+      checks: {
+        begin: mock(async (input: unknown) => {
+          beginCalls.push(input);
+          return {
+            attemptId: "attempt-1",
+            scope: { appId: TEST_APP_ID, installationId: 123, owner: "acme", repo: "widgets", prNumber: 42 },
+            githubAppId: 424242,
+            headSha: SHA,
+            lease: { holder: "h", epoch: 1, untilMs: 1 },
+          };
+        }),
+        terminalize: mock(async (input: { publicationId: string | null; outcome: string }) => {
+          terminalizeCalls.push({ publicationId: input.publicationId, outcome: input.outcome });
+          throw new Error("hook boom"); // isolated — never breaks the pipeline
+        }),
+      },
+    });
+
+    await consumer(makeBatch(makePayload()));
+
+    // begin: exactly once, after the authoritative sha + dedup and BEFORE
+    // the runner exec, with the row's numeric App id and the §7.9 window.
+    expect(beginCalls).toHaveLength(1);
+    const beginInput = beginCalls[0] as { githubAppId: number; headSha: string; triggeredBy: string; action: string; executionDeadlineMs: number };
+    expect(beginInput.githubAppId).toBe(424242);
+    expect(beginInput.headSha).toBe(SHA);
+    expect(beginInput.triggeredBy).toBe("pull_request");
+    expect(beginInput.executionDeadlineMs).toBeGreaterThan(Date.now() + 800_000);
+    const shaIdx = sandboxCalls.findIndex((c) => c.cmd.includes("rev-parse"));
+    const runnerIdx = sandboxCalls.findIndex((c) => c.cmd.includes("--input"));
+    expect(beginCalls).toHaveLength(1);
+    expect(commenterCalls.findIndex((c) => c.op === "plan")).toBeGreaterThan(-1);
+    expect(shaIdx).toBeGreaterThan(-1);
+    expect(runnerIdx).toBeGreaterThan(shaIdx);
+
+    // terminalize: exactly ONCE on the success path, with the publication id
+    // (the hook reads the persisted proof; the outcome is the honest
+    // fallback). Its throw was a warn, and the publication still landed.
+    expect(terminalizeCalls).toHaveLength(1);
+    expect(terminalizeCalls[0]!.outcome).toBe("publication-unknown");
+    expect(terminalizeCalls[0]!.publicationId).toBeTruthy();
+    const pub = db.raw.query("SELECT phase, proof_json FROM review_publications").get() as { phase: string; proof_json: string | null };
+    expect(pub.phase).toBe("applied");
+    expect(pub.proof_json).not.toBeNull();
+    const hookWarn = logLines.find((l) => l.level === "warn" && l.msg.includes("check terminalize hook failed"));
+    expect(hookWarn).toBeDefined();
+    expect(reviewCount(db)).toBe(1);
+  });
+
+  test("catch-path Check classification: send-throw → publication-unknown with the id; claim-fail → pre-publication-failure", async () => {
+    // (a) A throw AT the prepared send is post-attempt uncertainty: the hook
+    // is terminalized WITH the publication id so its proof read decides.
+    reset();
+    runnerStdout = JSON.stringify(VALID_OUTPUT);
+    commenterState.preparedReviewError = new Error("socket hangup after send");
+    const db = await createSeededTestD1();
+    const terminalizeCalls: Array<{ publicationId: string | null; outcome: string }> = [];
+    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, {
+      ...testOverrides,
+      checks: {
+        begin: mock(async () => ({
+          attemptId: "attempt-1",
+          scope: { appId: TEST_APP_ID, installationId: 123, owner: "acme", repo: "widgets", prNumber: 42 },
+          githubAppId: 424242,
+          headSha: SHA,
+          lease: { holder: "h", epoch: 1, untilMs: 1 },
+        })),
+        terminalize: mock(async (input: { publicationId: string | null; outcome: string }) => {
+          terminalizeCalls.push({ publicationId: input.publicationId, outcome: input.outcome });
+        }),
+      },
+    });
+
+    await expect(consumer(makeBatch(makePayload()))).rejects.toThrow("socket hangup after send");
+
+    expect(terminalizeCalls).toEqual([{ publicationId: expect.any(String), outcome: "publication-unknown" }]);
+
+    // (b) A throw BEFORE any send (epoch-fenced claim refused) is a clean
+    // pre-publication failure: terminalized with a null publication id.
+    reset();
+    runnerStdout = JSON.stringify(VALID_OUTPUT);
+    const db2 = await createSeededTestD1();
+    const failingDb = {
+      ...db2,
+      prepare: (query: string) => {
+        if (query.includes("phase = CASE WHEN phase = 'prepared' THEN 'sending'")) {
+          return {
+            bind: () => {
+              throw new Error("d1 down at claim");
+            },
+          } as never;
+        }
+        return db2.prepare(query);
+      },
+    } as typeof db2;
+    const terminalizeCalls2: Array<{ publicationId: string | null; outcome: string }> = [];
+    const consumer2 = createReviewConsumer(await makeEnv({ DB: failingDb as never }), testLog, {
+      ...testOverrides,
+      checks: {
+        begin: mock(async () => ({
+          attemptId: "attempt-2",
+          scope: { appId: TEST_APP_ID, installationId: 123, owner: "acme", repo: "widgets", prNumber: 42 },
+          githubAppId: 424242,
+          headSha: SHA,
+          lease: { holder: "h", epoch: 1, untilMs: 1 },
+        })),
+        terminalize: mock(async (input: { publicationId: string | null; outcome: string }) => {
+          terminalizeCalls2.push({ publicationId: input.publicationId, outcome: input.outcome });
+        }),
+      },
+    });
+
+    await expect(consumer2(makeBatch(makePayload()))).rejects.toThrow("d1 down at claim");
+
+    expect(terminalizeCalls2).toEqual([{ publicationId: null, outcome: "pre-publication-failure" }]);
+  });
+
+  test("absent checks dep → no Check activity at all, M8 fully operational", async () => {
+    reset();
+    runnerStdout = JSON.stringify(VALID_OUTPUT);
+    const db = await createSeededTestD1();
+    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
+
+    await consumer(makeBatch(makePayload()));
+
+    // The full pipeline ran WITHOUT any Checks surface (the override omits
+    // `checks`): review published, applied, KV done.
+    expect(commenterCalls.filter((c) => c.op === "post-prepared")).toHaveLength(1);
+    const pub = db.raw.query("SELECT phase FROM review_publications").get() as { phase: string };
+    expect(pub.phase).toBe("applied");
+    expect(kvPuts).toHaveLength(1);
   });
 });

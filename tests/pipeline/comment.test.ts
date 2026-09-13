@@ -29,8 +29,10 @@
 import { describe, expect, mock, test } from "bun:test";
 import {
   buildDegradedBody,
+  buildPreparedDegradedBody,
+  buildPreparedReviewBody,
+  buildPublicationMarker,
   buildReviewBody,
-  buildUpsertBody,
   DEGRADED_EXCERPT_LIMIT,
   findDegradedComment,
   findDegradedComments,
@@ -38,10 +40,12 @@ import {
   parseDegradedRound,
   parseReviewRound,
   planDegradedUpsert,
+  planDegradedUpsertWithOctokit,
   planUpsert,
+  planReviewUpsertWithOctokit,
+  postPreparedDegradedWithOctokit,
+  postPreparedReviewWithOctokit,
   deleteDegradedCommentWithOctokit,
-  postDegradedWithOctokit,
-  postReviewWithOctokit,
   renderFindings,
   REVIEW_BODY_LIMIT,
   SUMMARY_MD_LIMIT,
@@ -344,32 +348,84 @@ describe("review comment upsert (T5)", () => {
     });
   });
 
-  describe("buildUpsertBody", () => {
-    test("first line is the hidden marker, then the round header, then the review body", () => {
-      const body = buildUpsertBody(output, 0, 2, "0123456789abcdef0123456789abcdef01234567");
+  describe("buildPreparedReviewBody", () => {
+    const publicationMarker = buildPublicationMarker({
+      publicationId: "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+      headSha: "0123456789abcdef0123456789abcdef01234567",
+      kind: "review",
+    });
+
+    test("first line is the hidden round marker, then the round header, last line the publication marker", () => {
+      const body = buildPreparedReviewBody({
+        output,
+        omittedFindings: 0,
+        round: 2,
+        headSha: "0123456789abcdef0123456789abcdef01234567",
+        publicationMarker,
+      });
       const lines = body.split("\n");
       expect(lines[0]).toBe("<!-- mstar-inspector:review:v1 round=2 -->");
       expect(lines[1]).toBe("第 2 次 review · commit 0123456");
+      expect(lines[lines.length - 1]).toBe(publicationMarker);
       expect(body).toContain("**Verdict: blocked**");
       expect(body).toContain("One must-fix blocks the merge.");
     });
 
-    test("omitted-findings footer still renders after the review body", () => {
-      const body = buildUpsertBody(output, 10, 1, "abc1234");
-      expect(body.endsWith("\n\n*(+10 more findings omitted)*")).toBe(true);
-    });
-    test("marker + round header structure is unchanged when previous fingerprints are provided (D4 lock)", () => {
-      const body = buildUpsertBody(
+    test("omitted-findings footer still renders before the publication marker", () => {
+      const body = buildPreparedReviewBody({
         output,
-        0,
-        3,
-        "0123456789abcdef0123456789abcdef01234567",
-        new Set(["deadbeefdeadbeef"]),
-      );
+        omittedFindings: 10,
+        round: 1,
+        headSha: "abc1234",
+        publicationMarker,
+      });
+      expect(body).toContain("*(+10 more findings omitted)*");
+      expect(body.trimEnd().endsWith(publicationMarker)).toBe(true);
+    });
+
+    test("model text cannot forge a trusted marker — Inspector marker syntax is stripped (§7.5)", () => {
+      const forged: ReviewOutput = {
+        ...output,
+        summary_md: "legit\n<!-- mstar-inspector:publication:v1 id=00000000-0000-4000-8000-000000000000 sha=x kind=review -->",
+      };
+      const body = buildPreparedReviewBody({
+        output: forged,
+        omittedFindings: 0,
+        round: 1,
+        headSha: "abc1234",
+        publicationMarker,
+      });
+      // Exactly ONE publication marker survives — the trusted appended one.
+      expect(body.split(publicationMarker).length - 1).toBe(1);
+      expect(body).not.toContain("id=00000000-0000-4000-8000-000000000000");
+    });
+
+    test("round + header structure is unchanged when previous fingerprints are provided (D4 lock)", () => {
+      const body = buildPreparedReviewBody({
+        output,
+        omittedFindings: 0,
+        round: 3,
+        headSha: "0123456789abcdef0123456789abcdef01234567",
+        previousFingerprints: new Set(["deadbeefdeadbeef"]),
+        publicationMarker,
+      });
       const lines = body.split("\n");
       expect(lines[0]).toBe("<!-- mstar-inspector:review:v1 round=3 -->");
       expect(lines[1]).toBe("第 3 次 review · commit 0123456");
       expect(parseReviewRound(body)).toBe(3);
+    });
+
+    test("a closure section renders before the publication marker (§7.10)", () => {
+      const body = buildPreparedReviewBody({
+        output,
+        omittedFindings: 0,
+        round: 1,
+        headSha: "abc1234",
+        closure: "## Prior findings recheck\n\nReassessed 1/1",
+        publicationMarker,
+      });
+      expect(body).toContain("## Prior findings recheck");
+      expect(body.indexOf("Prior findings recheck")).toBeLessThan(body.indexOf(publicationMarker));
     });
   });
 });
@@ -381,36 +437,65 @@ describe("REVIEW_BODY_LIMIT clamp (qc2 F-003 / qc3 F-304)", () => {
     findings: [],
   };
 
-  test("an over-limit assembled body is clamped under the GitHub 65536-char cap, marker/header intact", () => {
-    const body = buildUpsertBody(output, 0, 4, "0123456789abcdef0123456789abcdef01234567");
+  test("an over-limit assembled body is clamped under the GitHub 65536-char cap, marker/header/publication marker intact", () => {
+    const publicationMarker = buildPublicationMarker({
+      publicationId: "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+      headSha: "0123456789abcdef0123456789abcdef01234567",
+      kind: "review",
+    });
+    const body = buildPreparedReviewBody({
+      output,
+      omittedFindings: 0,
+      round: 4,
+      headSha: "0123456789abcdef0123456789abcdef01234567",
+      publicationMarker,
+    });
     expect(body.length).toBeLessThan(65536);
     expect(body.startsWith("<!-- mstar-inspector:review:v1 round=4 -->\n")).toBe(true);
-    expect(body.endsWith("…")).toBe(true);
+    expect(body.trimEnd().endsWith(publicationMarker)).toBe(true);
+    expect(body).toContain("…");
   });
 
   test("within-limit bodies pass through verbatim", () => {
+    const publicationMarker = buildPublicationMarker({
+      publicationId: "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+      headSha: "abc1234",
+      kind: "review",
+    });
     const small: ReviewOutput = { ...output, summary_md: "small" };
-    const body = buildUpsertBody(small, 0, 1, "abc1234");
-    expect(body.endsWith("…")).toBe(false);
+    const body = buildPreparedReviewBody({
+      output: small,
+      omittedFindings: 0,
+      round: 1,
+      headSha: "abc1234",
+      publicationMarker,
+    });
+    expect(body).not.toContain("…");
     expect(body).toContain("small");
   });
 });
 
-describe("postReview wiring (mock octokit, SG-001)", () => {
-  const output: ReviewOutput = {
-    schema: "mstar.review/v1",
-    verdict: "blocked",
-    summary_md: "One must-fix blocks the merge.",
-    findings: [],
-  };
-  const input = {
-    installationId: 1,
-    owner: "acme",
-    repo: "widgets",
-    prNumber: 42,
-    headSha: "0123456789abcdef0123456789abcdef01234567",
-    output,
-  };
+describe("prepared publication wiring (mock octokit, SG-001 — plan 67 §7.7)", () => {
+  const target = { installationId: 1, owner: "acme", repo: "widgets", prNumber: 42 };
+  const sha = "0123456789abcdef0123456789abcdef01234567";
+  const publicationMarker = buildPublicationMarker({
+    publicationId: "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+    headSha: sha,
+    kind: "review",
+  });
+  const preparedBody = buildPreparedReviewBody({
+    output: {
+      schema: "mstar.review/v1",
+      verdict: "blocked",
+      summary_md: "One must-fix blocks the merge.",
+      findings: [],
+    },
+    omittedFindings: 0,
+    round: 3,
+    headSha: sha,
+    publicationMarker,
+  });
+  const sendInput = { ...target, headSha: sha, round: 3, targetCommentId: 7, body: preparedBody, publicationId: "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee" };
 
   type Calls = {
     listRoute?: unknown;
@@ -453,9 +538,9 @@ describe("postReview wiring (mock octokit, SG-001)", () => {
     return { calls, octokit };
   }
 
-  test("paginates the full comment list with the issues.listComments call shape (WF-001)", async () => {
+  test("plan: paginates the full comment list with the issues.listComments call shape (WF-001)", async () => {
     const { calls, octokit } = mockOctok([]);
-    await postReviewWithOctokit(octokit, input);
+    await planReviewUpsertWithOctokit(octokit, target);
     expect(calls.listRoute).toBe(octokit.rest.issues.listComments);
     expect(calls.listParams).toEqual({
       owner: "acme",
@@ -465,77 +550,111 @@ describe("postReview wiring (mock octokit, SG-001)", () => {
     });
   });
 
-  test("no marker comment → createComment with a round=1 body+marker", async () => {
-    const { calls, octokit } = mockOctok([{ id: 1, body: "a human comment" }]);
-    await postReviewWithOctokit(octokit, input);
+  test("plan: create on a miss; update (commentId, round=N+1) on a bot marker hit", async () => {
+    const miss = await planReviewUpsertWithOctokit(mockOctok([{ id: 1, body: "a human comment" }]).octokit, target);
+    expect(miss).toEqual({ action: "create", round: 1 });
+    const hit = await planReviewUpsertWithOctokit(
+      mockOctok([{ id: 7, body: "<!-- mstar-inspector:review:v1 round=2 -->\n第 2 次 review", user: { type: "Bot" } }]).octokit,
+      target,
+    );
+    expect(hit).toEqual({ action: "update", commentId: 7, round: 3 });
+  });
+
+  test("send (create plan): publishes the EXACT prepared body and returns the response id", async () => {
+    const { calls, octokit } = mockOctok([]);
+    const result = await postPreparedReviewWithOctokit(octokit, { ...sendInput, targetCommentId: null });
+    expect(result).toEqual({ commentId: 101 });
     expect(calls.updateParams).toBeUndefined();
-    expect(calls.createParams).toMatchObject({
-      owner: "acme",
-      repo: "widgets",
-      issue_number: 42,
-    });
-    expect(String(calls.createParams!.body)).toMatch(/^<!-- mstar-inspector:review:v1 round=1 -->/);
+    expect(calls.createParams).toMatchObject({ owner: "acme", repo: "widgets", issue_number: 42 });
+    expect(calls.createParams!.body).toBe(preparedBody);
   });
 
-  test("marker hit → updateComment with round+1 (same PR never gets a new comment per round)", async () => {
+  test("send (update plan): the target's expected previous version is verified, then patched with the exact body", async () => {
     const { calls, octokit } = mockOctok([
-      { id: 7, body: "<!-- mstar-inspector:review:v1 round=2 -->\n第 2 次 review", user: { type: "Bot" } },
-    ]);
-    await postReviewWithOctokit(octokit, input);
-    expect(calls.createParams).toBeUndefined();
-    expect(calls.updateParams).toMatchObject({ owner: "acme", repo: "widgets", comment_id: 7 });
-    expect(String(calls.updateParams!.body)).toMatch(/^<!-- mstar-inspector:review:v1 round=3 -->/);
-  });
-
-  test("returns the round just posted AND the exact comment id: create → 1/101, marker hit → 3/7 (plan 67 §7.7)", async () => {
-    // The consumer records the publication proof from THIS return (round +
-    // comment id) and pins the line-comments marker body to the round —
-    // the contract is pinned at the real postReviewWithOctokit.
-    const create = mockOctok([]);
-    await expect(postReviewWithOctokit(create.octokit, input)).resolves.toEqual({ round: 1, commentId: 101 });
-    const update = mockOctok([
       { id: 7, body: "<!-- mstar-inspector:review:v1 round=2 -->\nRound 2", user: { type: "Bot" } },
     ]);
-    await expect(postReviewWithOctokit(update.octokit, input)).resolves.toEqual({ round: 3, commentId: 7 });
+    const result = await postPreparedReviewWithOctokit(octokit, sendInput);
+    expect(result).toEqual({ commentId: 7 });
+    expect(calls.createParams).toBeUndefined();
+    expect(calls.updateParams).toMatchObject({ owner: "acme", repo: "widgets", comment_id: 7 });
+    expect(calls.updateParams!.body).toBe(preparedBody);
+  });
+
+  test("send: an exact-body replay on the target is ADOPTED without mutation (response-lost recovery)", async () => {
+    const { calls, octokit } = mockOctok([{ id: 7, body: preparedBody, user: { type: "Bot" } }]);
+    const result = await postPreparedReviewWithOctokit(octokit, sendInput);
+    expect(result).toEqual({ commentId: 7 });
+    expect(calls.updateParams).toBeUndefined();
+    expect(calls.createParams).toBeUndefined();
+  });
+
+  test("send: a changed target (newer round / replaced body) is a definitive rejection — never overwritten", async () => {
+    const newer = mockOctok([{ id: 7, body: "<!-- mstar-inspector:review:v1 round=9 -->\nnewer", user: { type: "Bot" } }]);
+    await expect(postPreparedReviewWithOctokit(newer.octokit, sendInput)).rejects.toThrow(/expected previous version/);
+    const human = mockOctok([{ id: 7, body: "<!-- mstar-inspector:review:v1 round=2 -->", user: { type: "User" } }]);
+    await expect(postPreparedReviewWithOctokit(human.octokit, sendInput)).rejects.toThrow(/expected previous version/);
+  });
+
+  test("send: a bot marker appearing after a create plan is adopted only on an exact-body match, else rejected", async () => {
+    const foreign = mockOctok([{ id: 9, body: "<!-- mstar-inspector:review:v1 round=5 -->\nsomeone else", user: { type: "Bot" } }]);
+    await expect(postPreparedReviewWithOctokit(foreign.octokit, { ...sendInput, targetCommentId: null })).rejects.toThrow(
+      /refusing to create a second publication/,
+    );
+    const replay = mockOctok([{ id: 9, body: preparedBody, user: { type: "Bot" } }]);
+    await expect(postPreparedReviewWithOctokit(replay.octokit, { ...sendInput, targetCommentId: null })).resolves.toEqual({
+      commentId: 9,
+    });
   });
 
   test("a create response WITHOUT a comment id is an unprovable publication → throws (plan 67 §7.7 step 8)", async () => {
     const { octokit } = mockOctok([]);
     (octokit.rest.issues.createComment as ReturnType<typeof mock>).mockImplementation(async () => ({}));
-    await expect(postReviewWithOctokit(octokit, input)).rejects.toThrow(/unprovable publication/);
-  });
-  test("previousFingerprints flow into the assembled body (repeat marker + recomputed tally)", async () => {
-    const repeat = finding("should-fix", "Fractional expiry comparison");
-    const fresh = finding("should-fix", "Fresh issue");
-    const { calls, octokit } = mockOctok([]);
-    await postReviewWithOctokit(octokit, {
-      ...input,
-      output: {
-        ...output,
-        verdict: "needs fixes",
-        findings: [repeat, fresh],
-        tally: {
-          verdict: "needs fixes",
-          scorePct: 45,
-          tally: { mustFix: 0, shouldFix: 2, nit: 0, unverified: 1 },
-          chatHeader: "unused here",
-        },
-      },
-      previousFingerprints: new Set([computeFindingFingerprint(repeat)]),
-    });
-    const body = String(calls.createParams!.body);
-    expect(body).toMatch(/^<!-- mstar-inspector:review:v1 round=1 -->/);
-    expect(body).toContain("*(repeat)*");
-    expect(body).toContain("**Tally:** 🔴 must-fix 0 · 🟠 should-fix 1 · 🔵 nit 0 · ❓ unverified 1");
+    await expect(postPreparedReviewWithOctokit(octokit, { ...sendInput, targetCommentId: null })).rejects.toThrow(
+      /unprovable publication/,
+    );
   });
 
-  test("blocked and ship it both post with NO review event, never REQUEST_CHANGES/APPROVE (mapping spec §2)", async () => {
+  test("updateComment 404 on the target → create fallback with the SAME prepared body (round preserved, WF-003)", async () => {
+    const notFound = Object.assign(new Error("not found"), { status: 404 });
+    const { calls, octokit } = mockOctok(
+      [{ id: 7, body: "<!-- mstar-inspector:review:v1 round=2 -->\nRound 2", user: { type: "Bot" } }],
+      notFound,
+    );
+    await postPreparedReviewWithOctokit(octokit, sendInput);
+    expect(calls.updateParams).toMatchObject({ comment_id: 7 });
+    expect(calls.createParams!.body).toBe(preparedBody);
+  });
+
+  test("updateComment 403 (foreign App's bot marker) → create fallback with the SAME prepared body (qc2 F-002)", async () => {
+    const forbidden = Object.assign(new Error("forbidden"), { status: 403 });
+    const { calls, octokit } = mockOctok(
+      [{ id: 7, body: "<!-- mstar-inspector:review:v1 round=2 -->\nforeign bot", user: { type: "Bot" } }],
+      forbidden,
+    );
+    await postPreparedReviewWithOctokit(octokit, sendInput);
+    expect(calls.createParams!.body).toBe(preparedBody);
+  });
+
+  test("non-403/404 updateComment errors rethrow (no fallback)", async () => {
+    const { octokit } = mockOctok(
+      [{ id: 7, body: "<!-- mstar-inspector:review:v1 round=2 -->\n第 2 次 review", user: { type: "Bot" } }],
+      new Error("rate limited"),
+    );
+    await expect(postPreparedReviewWithOctokit(octokit, sendInput)).rejects.toThrow("rate limited");
+  });
+
+  test("blocked and ship it both send with NO review event, never REQUEST_CHANGES/APPROVE (mapping spec §2)", async () => {
     for (const verdict of ["blocked", "ship it"] as const) {
+      const marker = buildPublicationMarker({ publicationId: "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee", headSha: sha, kind: "review" });
+      const body = buildPreparedReviewBody({
+        output: { schema: "mstar.review/v1", verdict, summary_md: "x", findings: [] },
+        omittedFindings: 0,
+        round: 1,
+        headSha: sha,
+        publicationMarker: marker,
+      });
       const { calls, octokit } = mockOctok([]);
-      await postReviewWithOctokit(octokit, { ...input, output: { ...output, verdict } });
-
-      // Every captured octokit call: Issues comments API only — no `event`
-      // parameter, no APPROVE/REQUEST_CHANGES anywhere.
+      await postPreparedReviewWithOctokit(octokit, { ...sendInput, body, targetCommentId: null });
       for (const captured of [calls.listParams, calls.updateParams, calls.createParams]) {
         if (captured === undefined) continue;
         expect("event" in captured).toBe(false);
@@ -547,106 +666,29 @@ describe("postReview wiring (mock octokit, SG-001)", () => {
     }
   });
 
-  test("deep envelope posts COMMENT-only: pulls.createReview never called, no event/APPROVE/REQUEST_CHANGES (plan 09 T4)", async () => {
-    // Representative deep-path envelope: the plan 09 T2 parent session
-    // yields exactly this mstar.review/v1 shape and the consumer forwards
-    // it here unchanged — the poster must stay on the Issues comments API.
-    const deepOutput: ReviewOutput = {
-      schema: "mstar.review/v1",
-      verdict: "needs fixes",
-      summary_md: "Deep three-stage parent-session review.",
-      findings: [finding("must-fix", "Deep seat must-fix"), finding("nit", "Deep seat nit")],
-    };
-
-    // Both write branches: create on a marker miss, update on a hit.
-    for (const comments of [
-      [],
-      [{ id: 7, body: "<!-- mstar-inspector:review:v1 round=1 -->\n第 1 次 review", user: { type: "Bot" } }],
-    ]) {
-      const { calls, octokit } = mockOctok(comments);
-      const createReview = mock(async () => {
-        throw new Error("pulls.createReview must never be called (SEC-01: COMMENT-only posting)");
-      });
-      // `pulls` sits on PostOctokit for plan 18 T3 line comments, but the
-      // OVERALL poster must never touch it — a variable (not a fresh
-      // literal) keeps the extra trap assignable while proving postReview
-      // stays on the Issues comments API.
-      const withPulls = { ...octokit, rest: { ...octokit.rest, pulls: { createReview } } };
-      await postReviewWithOctokit(withPulls, { ...input, output: deepOutput });
-
-      expect(createReview).not.toHaveBeenCalled();
-      for (const captured of [calls.listParams, calls.updateParams, calls.createParams]) {
-        if (captured === undefined) continue;
-        expect("event" in captured).toBe(false);
-        expect(JSON.stringify(captured)).not.toContain("REQUEST_CHANGES");
-        expect(JSON.stringify(captured)).not.toContain("APPROVE");
-      }
-      const posted = calls.createParams ?? calls.updateParams;
-      expect(posted).toBeDefined();
-      expect(String(posted!.body)).toContain("**Verdict: needs fixes**");
-      expect(String(posted!.body)).toContain("Deep seat must-fix");
-    }
-  });
-
-  test("updateComment 404 → soft-recovery fallback to createComment round=1 (WF-003)", async () => {
-    const notFound = Object.assign(new Error("not found"), { status: 404 });
-    const { calls, octokit } = mockOctok(
-      [{ id: 7, body: "<!-- mstar-inspector:review:v1 round=2 -->\n第 2 次 review", user: { type: "Bot" } }],
-      notFound,
-    );
-    await postReviewWithOctokit(octokit, input);
-    expect(calls.updateParams).toMatchObject({ comment_id: 7 });
-    expect(String(calls.createParams!.body)).toMatch(/^<!-- mstar-inspector:review:v1 round=1 -->/);
-  });
-
-
-  test("updateComment 403 on a foreign bot's marker → treat as a miss, create round=1 (qc2 F-002)", async () => {
-    const forbidden = Object.assign(new Error("forbidden"), { status: 403 });
-    const { calls, octokit } = mockOctok(
-      [{ id: 7, body: "<!-- mstar-inspector:review:v1 round=2 -->\nforeign bot", user: { type: "Bot" } }],
-      forbidden,
-    );
-    await postReviewWithOctokit(octokit, input);
-    expect(calls.updateParams).toMatchObject({ comment_id: 7 });
-    expect(String(calls.createParams!.body)).toMatch(/^<!-- mstar-inspector:review:v1 round=1 -->/);
-  });
-
-  test("updateComment 403 on the oldest marker → replan updates the NEXT bot marker (qc2 F-002)", async () => {
-    const comments = [
-      { id: 7, body: "<!-- mstar-inspector:review:v1 round=1 -->\nforeign bot", user: { type: "Bot" } },
-      { id: 8, body: "<!-- mstar-inspector:review:v1 round=2 -->\nours", user: { type: "Bot" } },
-    ];
-    const updatedIds: number[] = [];
-    const created: string[] = [];
-    const octokit: PostOctokit = {
-      paginate: mock(async () => comments),
-      rest: {
-        issues: {
-          listComments: mock(async () => {
-            throw new Error("unexpected: listComments is driven through paginate");
-          }),
-          updateComment: mock(async (params: Record<string, unknown>) => {
-            updatedIds.push(params.comment_id as number);
-            if (params.comment_id === 7) throw Object.assign(new Error("forbidden"), { status: 403 });
-            return {};
-          }),
-          createComment: mock(async (params: Record<string, unknown>) => {
-            created.push(String(params.body));
-            return {};
-          }),
-        },
+  test("deep envelope sends COMMENT-only via the Issues API: pulls.createReview never touched (plan 09 T4)", async () => {
+    const marker = buildPublicationMarker({ publicationId: "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee", headSha: sha, kind: "review" });
+    const body = buildPreparedReviewBody({
+      output: {
+        schema: "mstar.review/v1",
+        verdict: "needs fixes",
+        summary_md: "Deep three-stage parent-session review.",
+        findings: [],
       },
-    };
-    await postReviewWithOctokit(octokit, input);
-    expect(updatedIds).toEqual([7, 8]);
-    expect(created).toHaveLength(0);
-  });
-  test("non-404 updateComment errors rethrow (no fallback)", async () => {
-    const { octokit } = mockOctok(
-      [{ id: 7, body: "<!-- mstar-inspector:review:v1 round=2 -->\n第 2 次 review", user: { type: "Bot" } }],
-      new Error("rate limited"),
-    );
-    await expect(postReviewWithOctokit(octokit, input)).rejects.toThrow("rate limited");
+      omittedFindings: 0,
+      round: 1,
+      headSha: sha,
+      publicationMarker: marker,
+    });
+    const { calls, octokit } = mockOctok([]);
+    const createReview = mock(async () => {
+      throw new Error("pulls.createReview must never be called (SEC-01: COMMENT-only posting)");
+    });
+    const withPulls = { ...octokit, rest: { ...octokit.rest, pulls: { createReview } } };
+    await postPreparedReviewWithOctokit(withPulls, { ...sendInput, body, targetCommentId: null });
+    expect(createReview).not.toHaveBeenCalled();
+    expect(calls.createParams).toBeDefined();
+    expect(String(calls.createParams!.body)).toContain("Deep three-stage parent-session review.");
   });
 });
 
@@ -789,14 +831,25 @@ describe("buildDegradedBody", () => {
   });
 });
 
-describe("postDegraded wiring (mock octokit)", () => {
-  const degradeInput = {
-    installationId: 1,
-    owner: "acme",
-    repo: "widgets",
-    prNumber: 42,
+describe("prepared degraded publication wiring (mock octokit, plan 67 §7.7)", () => {
+  const degradeTarget = { installationId: 1, owner: "acme", repo: "widgets", prNumber: 42 };
+  const preparedDegradedBody = buildPreparedDegradedBody({
     error: "not valid ReviewOutput JSON",
     rawOutput: "not json at all",
+    round: 3,
+    publicationMarker: buildPublicationMarker({
+      publicationId: "bbbbbbbb-cccc-4ddd-8eee-ffffffffffff",
+      headSha: "0123456789abcdef0123456789abcdef01234567",
+      kind: "degraded",
+    }),
+  });
+  const sendInput = {
+    ...degradeTarget,
+    headSha: "0123456789abcdef0123456789abcdef01234567",
+    round: 3,
+    targetCommentId: 7 as number | null,
+    body: preparedDegradedBody,
+    publicationId: "bbbbbbbb-cccc-4ddd-8eee-ffffffffffff",
   };
 
   function mockOctok(comments: MockComment[], updateError?: unknown) {
@@ -821,7 +874,7 @@ describe("postDegraded wiring (mock octokit)", () => {
           }),
           createComment: mock(async (params: Record<string, unknown>) => {
             calls.createParams = params;
-            return {};
+            return { data: { id: 202 } };
           }),
         },
       },
@@ -829,31 +882,40 @@ describe("postDegraded wiring (mock octokit)", () => {
     return { calls, octokit };
   }
 
-  test("no degraded marker → createComment with a round=1 degraded body", async () => {
+  test("no degraded marker → createComment with the EXACT prepared degraded body", async () => {
     const { calls, octokit } = mockOctok([{ id: 1, body: "a human comment" }]);
-    await postDegradedWithOctokit(octokit, degradeInput);
+    const result = await postPreparedDegradedWithOctokit(octokit, { ...sendInput, targetCommentId: null });
+    expect(result).toEqual({ posted: true, commentId: 202 });
     expect(calls.createParams).toMatchObject({ owner: "acme", repo: "widgets", issue_number: 42 });
-    const body = String(calls.createParams!.body);
-    expect(body).toMatch(/^<!-- mstar-inspector:review-degraded:v1 round=1 -->/);
-    expect(body).toContain("**Review degraded: output failed schema validation**");
+    expect(calls.createParams!.body).toBe(preparedDegradedBody);
   });
 
-  test("a REAL review marker does not satisfy the degraded scan — still creates round=1", async () => {
+  test("a REAL review marker does not satisfy the degraded scan — still creates", async () => {
     const { calls, octokit } = mockOctok([botReviewMarker(7, 3)]);
-    await postDegradedWithOctokit(octokit, degradeInput);
+    await postPreparedDegradedWithOctokit(octokit, { ...sendInput, targetCommentId: null });
     expect(calls.updateParams).toBeUndefined();
-    expect(String(calls.createParams!.body)).toMatch(/^<!-- mstar-inspector:review-degraded:v1 round=1 -->/);
+    expect(calls.createParams!.body).toBe(preparedDegradedBody);
   });
 
-  test("degraded marker hit → updateComment with round=N+1; 404 → replan to create round=1 (WF-003 parity)", async () => {
+  test("degraded marker hit → the expected previous version is verified then patched with the exact body", async () => {
     const { calls, octokit } = mockOctok([degradedBotMarker(7, 2)]);
-    await postDegradedWithOctokit(octokit, degradeInput);
-    expect(String(calls.updateParams!.body)).toMatch(/^<!-- mstar-inspector:review-degraded:v1 round=3 -->/);
+    const result = await postPreparedDegradedWithOctokit(octokit, sendInput);
+    expect(result).toEqual({ posted: true, commentId: 7 });
+    expect(calls.updateParams).toMatchObject({ comment_id: 7 });
+    expect(calls.updateParams!.body).toBe(preparedDegradedBody);
+  });
 
+  test("404 on the planned target → create fallback with the SAME prepared body (round preserved)", async () => {
     const notFound = Object.assign(new Error("not found"), { status: 404 });
     const recovery = mockOctok([degradedBotMarker(7, 2)], notFound);
-    await postDegradedWithOctokit(recovery.octokit, degradeInput);
-    expect(String(recovery.calls.createParams!.body)).toMatch(/^<!-- mstar-inspector:review-degraded:v1 round=1 -->/);
+    const result = await postPreparedDegradedWithOctokit(recovery.octokit, sendInput);
+    expect(result).toEqual({ posted: true, commentId: 202 });
+    expect(recovery.calls.createParams!.body).toBe(preparedDegradedBody);
+  });
+
+  test("a changed target (non-degraded body / wrong round) is a definitive rejection", async () => {
+    const newer = mockOctok([{ id: 7, body: "<!-- mstar-inspector:review-degraded:v1 round=9 -->\nnewer", user: { type: "Bot" } }]);
+    await expect(postPreparedDegradedWithOctokit(newer.octokit, sendInput)).rejects.toThrow(/expected previous version/);
   });
 });
 
@@ -977,24 +1039,30 @@ describe("missing octokit surface → per-chain error noun (review feedback fix)
   test("the review chain names the review comment; the degraded chain names the degraded comment", async () => {
     const bare = {} as PostOctokit;
     await expect(
-      postReviewWithOctokit(bare, {
+      postPreparedReviewWithOctokit(bare, {
         installationId: 1,
         owner: "acme",
         repo: "widgets",
         prNumber: 42,
         headSha: "0123456789abcdef0123456789abcdef01234567",
-        output: { schema: "mstar.review/v1", verdict: "blocked", summary_md: "s", findings: [] },
+        round: 1,
+        targetCommentId: null,
+        body: "prepared",
+        publicationId: "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
       }),
-    ).rejects.toThrow(/cannot upsert the review comment/);
+    ).rejects.toThrow(/cannot publish the prepared review/);
     await expect(
-      postDegradedWithOctokit(bare, {
+      postPreparedDegradedWithOctokit(bare, {
         installationId: 1,
         owner: "acme",
         repo: "widgets",
         prNumber: 42,
-        error: "not valid ReviewOutput JSON",
-        rawOutput: "not json at all",
+        headSha: "0123456789abcdef0123456789abcdef01234567",
+        round: 1,
+        targetCommentId: null,
+        body: "prepared degraded",
+        publicationId: "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
       }),
-    ).rejects.toThrow(/cannot upsert the degraded comment/);
+    ).rejects.toThrow(/cannot publish the prepared degraded comment/);
   });
 });
