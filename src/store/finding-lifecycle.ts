@@ -11,7 +11,8 @@
  * multi-row transition is ONE logical `db.batch` sequence (knowledge
  * `d1-batch-atomicity`: D1 batch is the transaction primitive), executed in
  * chunks of at most 25 statements per batch for the recovery apply
- * (§7.11.1) with every statement replay-safe; claims use conditional SQL
+ * (§7.11.1) with every statement replay-safe AND carrying the live-lease
+ * predicate inline; claims use conditional SQL
  * and inspect `meta.changes` — no KV CAS assumption. Timestamps are integer
  * Unix milliseconds from one caller-supplied clock per call (spec §7.0).
  *
@@ -393,10 +394,15 @@ export async function readPublicationProof(
  * `seen` are never deleted. Returns false (and writes nothing) when the
  * row is unknown, the lease is not live, proof is missing, or the payload
  * is not a complete review publication; the previously-applied row
- * short-circuits to true (idempotent replay). A chunked apply re-proves the
- * SAME live holder/epoch before every chunk writes (§7.11.1), so an expired
- * or replaced lease aborts the remaining chunks instead of mutating rows
- * under ownership the invocation no longer holds.
+ * short-circuits to true (idempotent replay).
+ *
+ * The lease fence is ATOMIC, not a read-then-write window: every lifecycle
+ * statement (and the applied marker, degraded path included) carries the
+ * live-lease predicate `(id, holder, lease_epoch, lease_until_ms > now)` in
+ * its own SQL, and a fresh-clock chunk-boundary probe additionally stops a
+ * long apply early. A replacement or expiry landing after any probe can
+ * therefore never mutate a finding/round/association row, and can never mark
+ * the publication applied.
  */
 export async function applyPublishedLifecycle(
   db: D1Like,
@@ -481,11 +487,26 @@ export async function applyPublishedLifecycle(
 }
 
 /**
+ * The ATOMIC live-lease fence (§7.11.1: "All local updates require
+ * `(id,holder,lease_epoch,lease_until_ms > now)`"). Every lifecycle
+ * mutation statement of a chunked apply carries this predicate INLINE, so
+ * the fence is evaluated by the same statement (and therefore the same
+ * transaction) that performs the mutation. A read probe before the batch
+ * cannot prove this: a replacement or expiry landing after the probe would
+ * otherwise be invisible to the writes. Binds, in order:
+ * `(publicationId, holder, leaseEpoch, now)`.
+ */
+const APPLY_LEASE_GUARD_SQL = `EXISTS (SELECT 1 FROM review_publications AS apply_lease
+       WHERE apply_lease.id = ? AND apply_lease.holder = ? AND apply_lease.lease_epoch = ?
+         AND apply_lease.lease_until_ms IS NOT NULL AND apply_lease.lease_until_ms > ?)`;
+
+/**
  * The live-lease fence probe (§7.11.1) — the read twin of the applied
  * marker's SQL predicate: the publication row must still carry the SAME
  * holder and epoch with an UNEXPIRED lease at `nowMs`. Returns false when
  * the row is gone, replaced, or expired, which aborts the apply before the
- * next chunk writes.
+ * next chunk writes. It is a chunk-boundary liveness check only; the
+ * mutation statements carry the same predicate themselves.
  */
 async function publicationLeaseIsLive(db: D1Like, id: string, lease: Lease, nowMs: number): Promise<boolean> {
   const row = await db
@@ -501,17 +522,24 @@ async function publicationLeaseIsLive(db: D1Like, id: string, lease: Lease, nowM
   );
 }
 
-/** The conditional applied-mark STATEMENT: requires the live lease AND a
- *  persisted proof AND the confirmed phase; clears the lease on success. */
+/**
+ * The conditional applied-mark STATEMENT: requires the FULL live lease
+ * (`holder` + `lease_epoch` + `lease_until_ms > now`, not holder/epoch
+ * alone) AND a persisted proof AND the confirmed phase; clears the lease on
+ * success. The expiry predicate is part of this statement, so an expired
+ * same-holder lease — and a lease that expires or is replaced between the
+ * pre-apply probe and this marker — can never mark the publication applied.
+ */
 function markPublicationApplied(db: D1Like, id: string, lease: Lease, nowMs: number): D1StatementLike {
   return db
     .prepare(
       `UPDATE review_publications
        SET phase = 'applied', applied_ms = ?, updated_ms = ?, recovery_state = 'done',
            holder = NULL, lease_until_ms = NULL
-       WHERE id = ? AND holder = ? AND lease_epoch = ? AND phase = 'confirmed' AND proof_json IS NOT NULL`,
+       WHERE id = ? AND holder = ? AND lease_epoch = ? AND phase = 'confirmed' AND proof_json IS NOT NULL
+         AND lease_until_ms IS NOT NULL AND lease_until_ms > ?`,
     )
-    .bind(nowMs, nowMs, id, lease.holder, lease.epoch);
+    .bind(nowMs, nowMs, id, lease.holder, lease.epoch, nowMs);
 }
 
 /**
@@ -533,6 +561,13 @@ function markPublicationApplied(db: D1Like, id: string, lease: Lease, nowMs: num
  *   4. Per selected row — advance last_scheduled_ms (fair rotation),
  *      monotonic so a replay can never move a row backwards.
  *   5. Mark applied under the lease (final statement).
+ *
+ * EVERY statement above carries `APPLY_LEASE_GUARD_SQL` inline: the write
+ * is conditional on the SAME live lease predicate in its own SQL, so a
+ * replacement or expiry that lands after a read probe but before (or at)
+ * the mutation cannot slip a finding/round/association write through. The
+ * guard binds are the LAST four parameters of each statement, in the order
+ * `(publicationId, holder, leaseEpoch, operationNow)`.
  */
 function lifecycleApplyBatch(
   db: D1Like,
@@ -547,6 +582,7 @@ function lifecycleApplyBatch(
   const headSha = payload.headSha;
   const round = payload.round;
   const scope = payload.scope;
+  const guard = [pubId, lease.holder, lease.epoch, nowMs] as const;
   const statements: D1StatementLike[] = [];
 
   // 1. Seen upserts — recurrence reopen + last-seen tracking.
@@ -558,7 +594,8 @@ function lifecycleApplyBatch(
              (id, app_id, installation_id, owner, repo, pr_number, finding_id, original_json,
               first_publication_id, last_publication_id, first_seen_sha, last_seen_sha,
               first_seen_round, last_seen_round, state, created_ms, updated_ms)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', ?, ?)
+           SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', ?, ?
+           WHERE ${APPLY_LEASE_GUARD_SQL}
            ON CONFLICT(app_id, installation_id, owner, repo, pr_number, finding_id) DO UPDATE SET
              last_publication_id = excluded.last_publication_id,
              last_seen_sha = excluded.last_seen_sha,
@@ -577,6 +614,7 @@ function lifecycleApplyBatch(
           seen.rowId, scope.appId, scope.installationId, scope.owner, scope.repo,
           scope.prNumber, seen.findingId, JSON.stringify(seen.original),
           pubId, pubId, headSha, headSha, round, round, nowMs, nowMs,
+          ...guard,
         ),
     );
   }
@@ -594,11 +632,13 @@ function lifecycleApplyBatch(
                last_assessment_json = ?, last_assessed_ms = ?
            WHERE id = ?
              AND NOT EXISTS (SELECT 1 FROM review_finding_rounds
-                             WHERE finding_row_id = ? AND publication_id = ?)`,
+                             WHERE finding_row_id = ? AND publication_id = ?)
+             AND ${APPLY_LEASE_GUARD_SQL}`,
         )
         .bind(
           assessment.disposition, assessment.disposition,
           assessmentJson, nowMs, assessment.rowId, assessment.rowId, pubId,
+          ...guard,
         ),
     );
     statements.push(
@@ -606,10 +646,11 @@ function lifecycleApplyBatch(
         .prepare(
           `INSERT INTO review_finding_rounds
              (id, finding_row_id, publication_id, head_sha, round, assessment_json, created_ms)
-           VALUES (?, ?, ?, ?, ?, ?, ?)
+           SELECT ?, ?, ?, ?, ?, ?, ?
+           WHERE ${APPLY_LEASE_GUARD_SQL}
            ON CONFLICT(finding_row_id, publication_id) DO NOTHING`,
         )
-        .bind(crypto.randomUUID(), assessment.rowId, pubId, headSha, round, assessmentJson, nowMs),
+        .bind(crypto.randomUUID(), assessment.rowId, pubId, headSha, round, assessmentJson, nowMs, ...guard),
     );
   }
 
@@ -623,9 +664,10 @@ function lifecycleApplyBatch(
         .prepare(
           `UPDATE review_threads
            SET superseded_by_publication_id = ?, updated_ms = ?
-           WHERE finding_row_id = ? AND publication_id <> ? AND superseded_by_publication_id IS NULL`,
+           WHERE finding_row_id = ? AND publication_id <> ? AND superseded_by_publication_id IS NULL
+             AND ${APPLY_LEASE_GUARD_SQL}`,
         )
-        .bind(pubId, nowMs, intent.findingRowId, pubId),
+        .bind(pubId, nowMs, intent.findingRowId, pubId, ...guard),
     );
   }
   for (const intent of payload.lineIntents) {
@@ -635,13 +677,15 @@ function lifecycleApplyBatch(
           `INSERT INTO review_threads
              (id, finding_row_id, publication_id, app_id, installation_id, owner, repo, pr_number,
               original_sha, round, intent_json, resolution_state, created_ms, updated_ms)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)
+           SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?
+           WHERE ${APPLY_LEASE_GUARD_SQL}
            ON CONFLICT(id) DO NOTHING`,
         )
         .bind(
           intent.associationId, intent.findingRowId, pubId,
           scope.appId, scope.installationId, scope.owner, scope.repo, scope.prNumber,
           intent.originalSha, intent.round, JSON.stringify(intent), nowMs, nowMs,
+          ...guard,
         ),
     );
   }
@@ -652,9 +696,10 @@ function lifecycleApplyBatch(
       db
         .prepare(
           `UPDATE review_findings SET last_scheduled_ms = ?
-           WHERE id = ? AND (last_scheduled_ms IS NULL OR last_scheduled_ms < ?)`,
+           WHERE id = ? AND (last_scheduled_ms IS NULL OR last_scheduled_ms < ?)
+             AND ${APPLY_LEASE_GUARD_SQL}`,
         )
-        .bind(nowMs, rowId, nowMs),
+        .bind(nowMs, rowId, nowMs, ...guard),
     );
   }
 

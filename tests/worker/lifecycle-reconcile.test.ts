@@ -63,8 +63,10 @@ import { testAppPem } from "../helpers/rsa-key";
 
 const APP = "11111111-2222-3333-4444-555555555555";
 const APP_B = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
+const APP_C = "cccccccc-1111-2222-3333-444444444444";
 const SCOPE: Scope = { appId: APP, installationId: 123, owner: "acme", repo: "widgets", prNumber: 42 };
 const SCOPE_B: Scope = { appId: APP_B, installationId: 456, owner: "other", repo: "gadgets", prNumber: 7 };
+const SCOPE_C: Scope = { appId: APP_C, installationId: 789, owner: "acme", repo: "widgets", prNumber: 42 };
 const SHA = "0123456789abcdef0123456789abcdef01234567";
 const T0 = 1_000_000;
 
@@ -1076,6 +1078,81 @@ describe("thread lane request budget (spec §7.11.1)", () => {
     // The point: the thread lane sees the publication lane's spend, so the
     // shared cap — not an independent 120-request allowance — governs.
     expect(resolved).toBe(5);
+  });
+});
+
+describe("whole-run request accounting (spec §7.11.1 ≤80)", () => {
+  test("the pair identity probe is reserved with the thread operation, so probe + reservation can never exceed the cap", async () => {
+    const db = createMigratedTestD1();
+    seedApp(db, APP);
+    seedApp(db, APP_B, { githubAppId: 1002, installationId: SCOPE_B.installationId });
+    seedApp(db, APP_C, { githubAppId: 1003, installationId: SCOPE_C.installationId });
+    // The publication lane spends 4 requests of the SHARED run budget first:
+    // 1 live-identity probe + 1 plan + 2 send on pair APP.
+    await seedPrepared(db, "pub-1", degradedPayload(SCOPE), 120_000);
+    // Four due rows on pair B: 1 probe + 15 reserved for the first, 15 for
+    // each of the next three ⇒ 61. With the publication lane: 65 accounted.
+    for (let i = 1; i <= 4; i += 1) {
+      seedFindingRow(db, `finding-b${i}`, "pub-1", SCOPE_B, "addressed");
+      seedThreadRow(db, {
+        id: `assoc-b${i}`,
+        publicationId: "pub-1",
+        findingRowId: `finding-b${i}`,
+        scope: SCOPE_B,
+        verified: verifiedFor(`assoc-b${i}`, `finding-b${i}`),
+      });
+    }
+    // A fifth row on a pair never resolved this run: at 65 accounted its
+    // probe + 15 needs 81 > 80, so it must stop before any claim/attempt.
+    seedFindingRow(db, "finding-c1", "pub-1", SCOPE_C, "addressed");
+    seedThreadRow(db, {
+      id: "assoc-c1",
+      publicationId: "pub-1",
+      findingRowId: "finding-c1",
+      scope: SCOPE_C,
+      verified: verifiedFor("assoc-c1", "finding-c1"),
+    });
+
+    const resolvedScopes: Scope[] = [];
+    const routed: string[] = [];
+    const summary = await reconcile(db, {
+      now: () => T0,
+      reviewer: okReviewer(
+        {
+          planReviewUpsert: async () => ({ action: "create", round: 1 }),
+          postPreparedDegraded: async () => ({ posted: true, commentId: 777 }),
+          resolveFindingThread: async (input) => {
+            resolvedScopes.push(input.scope);
+            // Faithful to the real §7.5 surface: entering T2 consumes the
+            // claim, so a budget stop is observably different from "reached".
+            db.raw
+              .prepare(
+                `UPDATE review_threads SET attempts = attempts + 1, holder = 't2', lease_until_ms = ?,
+                   resolution_state = 'resolved', updated_ms = ? WHERE id = ?`,
+              )
+              .run(T0 + 60_000, T0, input.associationId);
+            return { kind: "resolved", threadId: "t", adopted: false, outdated: false, lateChange: false };
+          },
+        },
+        { routed },
+      ),
+    });
+
+    expect(summary.applied).toBe(1);
+    // Only the four affordable rows entered T2; the fifth was never admitted.
+    expect(resolvedScopes).toEqual([SCOPE_B, SCOPE_B, SCOPE_B, SCOPE_B]);
+    expect(summary.examined).toBe(5); // 1 publication row + 4 thread rows
+    // The pair-C probe was never issued: the pair was never resolved.
+    expect(routed).toEqual([`${APP}:${SCOPE.installationId}`, `${APP_B}:${SCOPE_B.installationId}`]);
+    expect(threadRow(db, "assoc-c1")).toMatchObject({ resolution_state: "pending", attempts: 0, lease_until_ms: null });
+
+    // Whole-run accounting stays under the cap: 3 (plan + send envelope) +
+    // 2 probes + 15 × 4 operations = 65 ≤ 80. Admitting the fifth row on the
+    // bare 15 (65 + 15 = 80) and charging its identity probe afterwards is
+    // the 81 the ordering fix removes.
+    const accounted = 3 + routed.length + RECONCILE_THREAD_OPERATION_REQUESTS * resolvedScopes.length;
+    expect(accounted).toBe(65);
+    expect(accounted).toBeLessThanOrEqual(RECONCILE_MAX_REQUESTS);
   });
 });
 

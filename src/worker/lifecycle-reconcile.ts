@@ -417,9 +417,23 @@ export async function reconcileReviewLifecycle(
 }
 
 /**
+ * The per-run reviewer cache key. Probes are cached per (app, installation)
+ * pair, so every budget gate that needs to know whether a pair's identity
+ * probe is already accounted builds this key the same way (lockstep).
+ */
+const pairKeyOf = (scope: Scope): string => `${scope.appId}:${scope.installationId}`;
+
+/**
  * Resolve (and cache) the reviewer for a pair; on `unavailable` suspend the
  * pair's pending rows durably (once per pair per run — attempts untouched,
  * no cross-App substitution).
+ *
+ * The live App-identity probe is a GitHub request, so its cost is charged
+ * HERE, immediately after the factory settles and BEFORE the caller reserves
+ * its own operation cost: a lane that resolves the pair first (the thread
+ * lane) therefore accounts the probe before its ≤15-request operation
+ * reservation, and the caller's pre-flight gate covers both costs together
+ * (§7.11.1 ≤80/run). A cached pair resolves without a second charge.
  */
 async function reviewerForPair(
   db: D1Like,
@@ -433,7 +447,7 @@ async function reviewerForPair(
   log: ReconcileLog,
   summary: LifecycleReconcileSummary,
 ): Promise<ReviewerResolution> {
-  const pairKey = `${scope.appId}:${scope.installationId}`;
+  const pairKey = pairKeyOf(scope);
   const cached = reviewerCache.get(pairKey);
   if (cached !== undefined) return cached;
   const resolution = (async () => {
@@ -510,7 +524,12 @@ async function reconcilePublications(
       continue;
     }
     // prepared / sending / unknown need GitHub — route credentials first.
+    // Resolving the pair issues at most ONE identity-probe request (never a
+    // second one for a cached pair), so it is charged to the lane's share
+    // under the same pre-flight discipline as the operation that follows.
     const scope = row.payload.scope;
+    const probeRequests = reviewerCache.has(pairKeyOf(scope)) ? 0 : IDENTITY_REQUESTS;
+    if (!canSpend(budget, now(), probeRequests, true)) continue; // stays due, no claim
     const resolved = await reviewerForPair(db, env, scope, now(), budget, reviewerFactory, transport, reviewerCache, log, summary);
     if (resolved.kind === "unavailable") continue; // pair suspended durably
     if (row.phase === "prepared") {
@@ -767,19 +786,24 @@ async function reconcileResolutions(
 ): Promise<void> {
   const rows = await listResolutionRecovery(db, now(), RECONCILE_SELECT_LIMIT);
   for (const { associationId, scope } of rows) {
-    // Budget BEFORE any claim: exhaustion stops the lane without spending an
-    // attempt (the §7.5 surface owns the claim — not calling it costs
-    // nothing). The cost is RESERVED, not merely checked: the §7.5 surface
-    // may issue up to the per-operation cap (lookup pages, two conversation
-    // snapshots, issue fence, mutate/post-observe), so without the
-    // reservation `budget.spent` would never grow and ten selected rows
-    // could each enter T2 after the publication lane already spent its
-    // share — far past the 80-request run cap (§7.11.1).
-    if (!canSpend(budget, now(), RECONCILE_THREAD_OPERATION_REQUESTS, false)) return;
-    reserve(budget, RECONCILE_THREAD_OPERATION_REQUESTS);
+    // Whole-run budget BEFORE any claim. The gate covers the ≤15-request
+    // operation AND — for a pair not yet resolved in this run — the
+    // one-request live identity probe the pair resolution below issues. The
+    // probe must be accounted BEFORE the operation reservation (it is: the
+    // resolution runs first and charges the probe), so gating both together
+    // is what makes the run cap unreachable-by-overflow: at most
+    // `probe + 15` can ever be admitted for one row. A false gate stops the
+    // lane WITHOUT a claim or an attempt — the row simply stays due
+    // (§7.11.1: budget exhaustion is not a failed attempt).
+    const probeRequests = reviewerCache.has(pairKeyOf(scope)) ? 0 : IDENTITY_REQUESTS;
+    if (!canSpend(budget, now(), RECONCILE_THREAD_OPERATION_REQUESTS + probeRequests, false)) return;
     summary.examined += 1;
+    // Pair credentials (and their charged identity probe) come FIRST; the
+    // §7.5 surface claims and counts its attempt only inside
+    // `resolveFindingThread`, which the operation reservation below precedes.
     const resolved = await reviewerForPair(db, env, scope, now(), budget, reviewerFactory, transport, reviewerCache, log, summary);
     if (resolved.kind === "unavailable") continue; // pair suspended durably
+    reserve(budget, RECONCILE_THREAD_OPERATION_REQUESTS);
     // A paused App keeps "previously-authorized resolution retry" running
     // (frozen pause policy) — no extra gate here.
     const work = await getResolutionRecoveryRow(db, associationId);
