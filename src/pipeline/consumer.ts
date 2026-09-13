@@ -114,7 +114,7 @@ import {
   type RecheckTarget,
   type Scope,
 } from "../contracts/recheck";
-import { assembleDiscussion } from "./discussion-context";
+import { boundDiscussion } from "./discussion-context";
 import { buildLineIntent, sha256Hex } from "./review-threads";
 import { getSandbox, type ReviewSandbox } from "./sandbox";
 import { buildGitOpsCommands, readRecheckCommand, runnerCommand, writeJsonCommand } from "./gitops";
@@ -980,10 +980,15 @@ function roundContextCoverage(discussion: Discussion): Coverage {
 
 /**
  * Bounded read + validation of the runner's recheck output (plan 67 T3/T4):
- * the audited fixed-path command output is `<content>\n<overflow-flag>` —
- * flag "0" = within the byte bound. Anything else (non-zero exit, overflow,
- * malformed JSON, failed validation) is NO recheck: the round proceeds with
- * every selected row conservatively omitted, never a fabricated document.
+ * the audited fixed-path command (`src/pipeline/gitops.ts`
+ * `readRecheckCommand`) emits `<content>\n<overflow-flag>` where the flag is
+ * `wc -c`'s own output, i.e. NEWLINE-TERMINATED (`…\n0\n` / `…\n1\n`). The
+ * flag is therefore read off the last non-empty line after the trailing
+ * newline(s) are dropped — a transport that preserves or trims that final
+ * newline parses identically. Flag `0` = within the byte bound. Anything else
+ * (non-zero exit, overflow, malformed JSON, failed validation) is NO recheck:
+ * the round proceeds with every selected row conservatively omitted, never a
+ * fabricated document.
  */
 async function readRecheckDoc(sandbox: ReviewSandbox, recheckInput: RecheckInput): Promise<RecheckDoc | null> {
   let read;
@@ -993,7 +998,7 @@ async function readRecheckDoc(sandbox: ReviewSandbox, recheckInput: RecheckInput
     return null;
   }
   if (read.exitCode !== 0) return null;
-  const out = read.stdout;
+  const out = read.stdout.trimEnd();
   const split = out.lastIndexOf("\n");
   if (split < 0) return null;
   if (out.slice(split + 1).trim() !== "0") return null; // overflow beyond the byte bound
@@ -2291,10 +2296,12 @@ async function processMessage(payload: ReviewJobPayload, deps: ProcessDeps): Pro
           threads: threadRows.results.map((row) => ({ associationId: row.id, threadId: row.thread_id })),
           nowMs: captureMs,
         });
-        // §7.8 model-coverage honesty: the assembly pass marks the thread
-        // snapshots whose items were dropped/truncated before the model saw
-        // them — the resolution fences read exactly these flags.
-        assembleDiscussion(discussion);
+        // §7.8: the model-context bounds and untrusted-text neutralization are
+        // NOT cosmetic — this bounded view is what rides the wire, so the seat
+        // never sees a raw captured body, and the pass is what marks the thread
+        // snapshots (and a cap-truncated issue capture) whose items were
+        // dropped or clamped — the resolution fences read exactly those flags.
+        discussion = boundDiscussion(discussion);
       } catch (err) {
         captureFailed = true;
         discussion = { items: [], issueCoverage: "unavailable", issueDigest: "", capturedMs: captureMs, threads: [] };

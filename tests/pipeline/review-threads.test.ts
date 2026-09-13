@@ -173,10 +173,11 @@ type ThreadCommentSpec = {
 type GraphqlCall = { kind: string; variables: Record<string, unknown> };
 
 type GraphqlRoutes = {
-  /** Thread node pages, in call order (before=undefined first). */
-  threadPages?: Array<{ comments: ThreadCommentSpec[]; hasPreviousPage?: boolean; isResolved?: boolean; isOutdated?: boolean; headRefOid?: string }>;
+  /** Thread node pages, in call order (before=undefined first). `line: null`
+   *  with `originalLine` set is the REAL outdated shape (§7.5 node query). */
+  threadPages?: Array<{ comments: ThreadCommentSpec[]; hasPreviousPage?: boolean; isResolved?: boolean; isOutdated?: boolean; line?: number | null; originalLine?: number | null; headRefOid?: string }>;
   issueComments?: { comments: ThreadCommentSpec[]; totalCount?: number; hasPreviousPage?: boolean; headRefOid?: string };
-  reviewThreadsPages?: Array<{ threads: unknown[]; hasNextPage?: boolean }>;
+  reviewThreadsPages?: Array<{ threads: Array<Record<string, unknown>>; hasNextPage?: boolean }>;
   reviews?: unknown[];
   /** Thrown instead of returned for the given kind. */
   throwOn?: string;
@@ -211,8 +212,8 @@ function fakeOctokit(routes: GraphqlRoutes): { octokit: GraphqlOctokit; calls: G
             isResolved: page.isResolved ?? false,
             isOutdated: page.isOutdated ?? false,
             path: PATH,
-            line: LINE,
-            originalLine: null,
+            line: page.line === undefined ? LINE : page.line,
+            originalLine: page.originalLine ?? null,
             pullRequest: { id: "PR_node", number: SCOPE.prNumber, headRefOid: page.headRefOid ?? SHA, repository: { nameWithOwner: `${SCOPE.owner}/${SCOPE.repo}` } },
             comments: {
               totalCount: page.comments.length,
@@ -278,15 +279,33 @@ function batchReview(publicationId: string, overrides: Partial<{ fullDatabaseId:
   };
 }
 
-/** A discovery thread stub: root carries OUR thread marker + digest-matched body. */
-function discoveryThread(intent: LineIntent, overrides: Partial<{ threadId: string; rootBody: string; authorLogin: string | null; authorType: string | null; path: string; line: number | null; rootReviewRestId: string | null }> = {}) {
+/**
+ * A discovery thread stub: root carries OUR thread marker + digest-matched
+ * body. `line: null` + `originalLine` + `isOutdated` is the real outdated
+ * shape an owned thread presents after its commented line leaves the diff.
+ */
+function discoveryThread(
+  intent: LineIntent,
+  overrides: Partial<{
+    threadId: string;
+    rootBody: string;
+    authorLogin: string | null;
+    authorType: string | null;
+    path: string;
+    line: number | null;
+    originalLine: number | null;
+    isOutdated: boolean;
+    rootReviewRestId: string | null;
+  }> = {},
+) {
   const rootBody = overrides.rootBody ?? buildLineCommentBody(intent);
   return {
     id: overrides.threadId ?? THREAD_GQL_ID,
     isResolved: false,
-    isOutdated: false,
+    isOutdated: overrides.isOutdated ?? false,
     path: overrides.path ?? PATH,
-    line: overrides.line ?? LINE,
+    line: overrides.line === undefined ? LINE : overrides.line,
+    originalLine: overrides.originalLine ?? null,
     comments: {
       nodes: [
         {
@@ -573,6 +592,49 @@ describe("discoverThread — ownership proof precedes adoption", () => {
     expect(
       await createReviewThreads(makeDeps(db, two.octokit)).discoverThread({ scope: SCOPE, intent, reviewId: null }),
     ).toEqual({ kind: "ambiguous" });
+  });
+
+  test("P67-QC-002: an OWNED OUTDATED thread (line null, originalLine matches) stays discoverable", async () => {
+    const db = createSeededTestD1();
+    const intent = await seedLifecycle(db);
+    // The real response shape once the commented line leaves the diff: `line`
+    // is null and the anchor survives only in `originalLine`.
+    const { octokit } = fakeOctokit({
+      reviews: [batchReview(PUB_ID)],
+      reviewThreadsPages: [
+        { threads: [discoveryThread(intent, { line: null, originalLine: LINE, isOutdated: true })], hasNextPage: false },
+      ],
+    });
+    const result = await createReviewThreads(makeDeps(db, octokit)).discoverThread({ scope: SCOPE, intent, reviewId: 555 });
+    expect(result).toEqual({ kind: "found", reviewId: 555, commentId: ROOT_COMMENT_ID, threadId: THREAD_GQL_ID });
+  });
+
+  test("P67-QC-002: the original anchor NEVER widens ownership to another thread", async () => {
+    const db = createSeededTestD1();
+    const intent = await seedLifecycle(db);
+    const cases: Array<[string, Partial<Parameters<typeof discoveryThread>[1]>]> = [
+      // Original anchor of a DIFFERENT line.
+      ["wrong originalLine", { line: null, originalLine: LINE + 5, isOutdated: true }],
+      // Not outdated but no live anchor — nothing proves this is the intent.
+      ["null line without isOutdated", { line: null, originalLine: LINE, isOutdated: false }],
+      // Outdated with no surviving anchor at all.
+      ["null line and null originalLine", { line: null, originalLine: null, isOutdated: true }],
+      // A LIVE line is authoritative: it must match, whatever originalLine says.
+      ["re-anchored live line", { line: LINE + 1, originalLine: LINE, isOutdated: true }],
+      // Exact path fence is untouched by the anchor rule.
+      ["other path", { path: "src/other.ts", line: null, originalLine: LINE, isOutdated: true }],
+    ];
+    for (const [name, overrides] of cases) {
+      const { octokit } = fakeOctokit({
+        reviews: [batchReview(PUB_ID)],
+        reviewThreadsPages: [{ threads: [discoveryThread(intent, overrides)], hasNextPage: false }],
+      });
+      // `name` in the assertion value: bun's toEqual takes no message arg.
+      expect({ outcome: await createReviewThreads(makeDeps(db, octokit)).discoverThread({ scope: SCOPE, intent, reviewId: 555 }), rejectedAs: name }).toEqual({
+        outcome: { kind: "unknown" },
+        rejectedAs: name,
+      });
+    }
   });
 
   test("two threads claiming the same association → ambiguous; zero threads → unknown", async () => {
@@ -974,6 +1036,47 @@ describe("resolveFindingThread — fences, adoption, mutation confirmation", () 
     });
     expect(outcome).toEqual({ kind: "resolved", threadId: THREAD_GQL_ID, adopted: false, outdated: true, lateChange: false });
     expect(calls.some((c) => c.kind === "mutation")).toBe(true);
+  });
+
+  test("P67-QC-002: an outdated owned thread with NO live line resolves on its original anchor", async () => {
+    const db = createSeededTestD1();
+    const intent = await seedLifecycle(db);
+    const verified = await resolvedFixture(db, intent);
+    const root = { ...ROOT, body: buildLineCommentBody(intent) };
+    const { octokit, calls } = fakeOctokit({
+      // §7.5 node query shape after the commented line left the diff.
+      threadPages: [{ comments: [root, REPLY], isOutdated: true, line: null, originalLine: LINE }],
+      issueComments: { comments: [ISSUE_A] },
+    });
+    const outcome = await createReviewThreads(makeDeps(db, octokit)).resolveFindingThread({
+      scope: SCOPE,
+      associationId: ASSOC_ID,
+      verified,
+    });
+    expect(outcome).toEqual({ kind: "resolved", threadId: THREAD_GQL_ID, adopted: false, outdated: true, lateChange: false });
+    expect(calls.some((c) => c.kind === "mutation")).toBe(true);
+    const row = db.raw.query(`SELECT resolution_state FROM review_threads WHERE id = '${ASSOC_ID}'`).get() as {
+      resolution_state: string;
+    };
+    expect(row.resolution_state).toBe("resolved");
+  });
+
+  test("P67-QC-002: a null live line whose original anchor differs is never resolved on faith", async () => {
+    const db = createSeededTestD1();
+    const intent = await seedLifecycle(db);
+    const verified = await resolvedFixture(db, intent);
+    const root = { ...ROOT, body: buildLineCommentBody(intent) };
+    const { octokit, calls } = fakeOctokit({
+      threadPages: [{ comments: [root, REPLY], isOutdated: true, line: null, originalLine: LINE + 7 }],
+      issueComments: { comments: [ISSUE_A] },
+    });
+    const outcome = await createReviewThreads(makeDeps(db, octokit)).resolveFindingThread({
+      scope: SCOPE,
+      associationId: ASSOC_ID,
+      verified,
+    });
+    expect(outcome).toEqual({ kind: "abandoned", reason: "foreign" });
+    expect(calls.some((c) => c.kind === "mutation")).toBe(false);
   });
 
   test("already-resolved owned thread is ADOPTED (no mutation, provenance re-proven first)", async () => {

@@ -110,13 +110,14 @@ RUN bun install --frozen-lockfile --production \
           node_modules/onnxruntime-web node_modules/sharp node_modules/@img \
     && rm -rf /root/.bun/install/cache
 COPY src/review /opt/runner/src/review
-# Zero-runtime-dependency wire contracts (plan 67 Task 3, PM amendment
-# 2026-09-13): the recheck seat runtime-imports the §7.3 wire module
-# (src/contracts/recheck.ts — no imports of its own), so the contract file
-# must ride the image. ONLY this directory joins src/review — src/pipeline,
-# src/store and every workerd face stay out (tests/review/runtime-boundary
-# enforces the admitted set).
-COPY src/contracts /opt/runner/src/contracts
+# Zero-runtime-dependency wire contract (plan 67 Task 3, PM amendment
+# 2026-09-13; narrowed in QC wave B): the recheck seat runtime-imports the §7.3
+# wire module and NOTHING else, so exactly that ONE file is copied — not the
+# directory. src/pipeline, src/store and every other workerd face stay out, and
+# a future file under src/contracts cannot join the image graph silently
+# (tests/review/runtime-boundary.test.ts derives the admitted set from these
+# COPY lines and re-asserts dependency freedom per admitted file).
+COPY src/contracts/recheck.ts /opt/runner/src/contracts/recheck.ts
 
 # The runner resolves the harness root from this env (plan Clarify #5). Model
 # key (ARK_API_KEY) is injected per exec — never baked into the image.

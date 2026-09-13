@@ -17,7 +17,11 @@
  * `verified-fix` plus an eligible complete catalog slice with an integer
  * ordered range inside the appropriate old/new hunk, exact quote match
  * (1–4096 chars) and a nonblank explanation ≤1200 chars. Dismissed requires
- * the non-fix rationale and never resolves. Unverifiable may have no
+ * the `non-fix-dismissal` reason and never resolves; its rationale basis is
+ * the carried `evidence.explanation` when the output cites evidence (that
+ * explanation is shape-validated) or, with no evidence cited, the original
+ * discussion in the input — so an evidence-free dismissal is legal here and
+ * still evidence-grounded by construction. Unverifiable may have no
  * evidence. Duplicate/foreign/stale/malformed documents fail closed as a
  * whole. The validator proves location/content only — the semantic
  * correctness of the explanation and the trusted capture itself belong to

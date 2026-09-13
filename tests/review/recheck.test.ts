@@ -19,7 +19,7 @@
 import { describe, expect, test } from "bun:test";
 
 import { anchorRecheckDeadline, currentRecheckBudget, RECHECK_OUTPUT_SCHEMA, recheckAssignment, recheckBudget } from "../../src/review/recheck";
-import type { RecheckInput } from "../../src/contracts/recheck";
+import { RECHECK_MAX_RUNTIME_MS, RECHECK_MIN_REMAINING_MS, type RecheckInput } from "../../src/contracts/recheck";
 
 const SHA = "0123456789abcdef0123456789abcdef01234567";
 
@@ -179,6 +179,22 @@ describe("recheckAssignment", () => {
     expect(assignment).toContain("issueCoverage");
   });
 
+  test("states how the discussion arrived: §7.8 caps applied and untrusted text neutralized", () => {
+    const assignment = recheckAssignment(recheckInput());
+
+    expect(assignment).toContain("50 items / 1200 chars per item / 8000 total");
+    expect(assignment).toContain("oldest dropped first");
+    expect(assignment).toContain("Inspector marker syntax");
+    expect(assignment).toContain("[... body truncated ...]");
+  });
+
+  test("states the dismissal rationale basis without inventing an evidence requirement", () => {
+    const assignment = recheckAssignment(recheckInput());
+
+    expect(assignment).toContain("ORIGINAL discussion");
+    expect(assignment).toContain("evidence.explanation");
+  });
+
   test("states the output contract: one mstar.recheck/v1 yield, headSha equality, no foreign rows", () => {
     const assignment = recheckAssignment(recheckInput());
 
@@ -212,6 +228,17 @@ describe("recheckBudget (spec §7.8: min(180000, deadline-now-5000); 0 = skip)",
     expect(recheckBudget(600_000 + 34_999, 600_000)).toBe(0);
     expect(recheckBudget(600_000 + 30_000, 600_000)).toBe(0);
     expect(recheckBudget(600_000, 600_000)).toBe(0);
+  });
+
+  test("the skip floor IS the contract's RECHECK_MIN_REMAINING_MS (P67-QC-014)", () => {
+    // Boundary derived from the exported norm, not a second literal: a seat
+    // that re-types the floor drifts the moment the contract value moves.
+    const floor = RECHECK_MIN_REMAINING_MS;
+    const margin = 5_000; // §7.8 start margin
+    expect(recheckBudget(600_000 + floor + margin, 600_000)).toBe(floor); // exactly the floor runs
+    expect(recheckBudget(600_000 + floor + margin - 1, 600_000)).toBe(0); // 1ms below → skip
+    // The same floor holds when it, not the 180s cap, is what decides.
+    expect(recheckBudget(600_000 + RECHECK_MAX_RUNTIME_MS + margin + 1, 600_000)).toBe(RECHECK_MAX_RUNTIME_MS);
   });
 
   test("non-finite inputs skip", () => {

@@ -10,6 +10,9 @@
  * back with checkedOutShaCommand, so clone/diff/commit_id always agree.
  */
 
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, test } from "bun:test";
 import {
   buildGitOpsCommands,
@@ -83,6 +86,40 @@ describe("gitops command builders", () => {
       "",
     ]) {
       expect(() => readRecheckCommand(evil)).toThrow(/unsafe recheck output path/);
+    }
+  });
+
+  test("readRecheckCommand's REAL stdout is content + newline + newline-terminated flag (P67-QC-006)", async () => {
+    // The parser and the Worker's test double both assume the shipped command
+    // emits a NEWLINE-TERMINATED overflow flag (`wc -c` writes its own trailing
+    // newline). Running the built string through a local POSIX shell against
+    // real files turns that assumption into evidence — no network, no GitHub.
+    const dir = await mkdtemp(join(tmpdir(), "mstar-recheck-read-"));
+    try {
+      const fit = join(dir, "fit.json");
+      const overflow = join(dir, "overflow.json");
+      const fitText = JSON.stringify({ schema: "mstar.recheck/v1", headSha: "x", results: [] });
+      await Bun.write(fit, fitText);
+      await Bun.write(overflow, "b".repeat(262_145));
+
+      for (const [file, flag, content] of [
+        [fit, "0", fitText],
+        [overflow, "1", "b".repeat(262_144)],
+      ] as const) {
+        const proc = Bun.spawn(["sh", "-c", readRecheckCommand(file)]);
+        const stdout = await new Response(proc.stdout).text();
+        expect(await proc.exited).toBe(0);
+        // The stream is newline-terminated and the flag is its LAST LINE;
+        // `wc -c` may left-pad the count (BSD) or not (GNU), so the parser
+        // trims. A parser that required the flag as the final BYTE — the
+        // reviewed defect — fails on every platform and on neither fixture.
+        expect(stdout.endsWith("\n")).toBe(true);
+        const trimmed = stdout.trimEnd();
+        expect(trimmed.slice(trimmed.lastIndexOf("\n") + 1).trim()).toBe(flag);
+        expect(trimmed.slice(0, trimmed.lastIndexOf("\n"))).toBe(content);
+      }
+    } finally {
+      await rm(dir, { recursive: true, force: true });
     }
   });
 

@@ -161,11 +161,13 @@ export function runnerCommand(
 /**
  * Bounded read of the runner's recheck output file (plan 67 T3, spec §7.8):
  * the Worker consumes the seat's validated document through THIS audited
- * command — never an arbitrary model-produced path. Output contract:
- *   - line 1: the first RECHECK_FILE_MAX_BYTES (262,144) bytes of the file
- *     (`head -c` stops the stream at the bound);
- *   - last line: `1` when a byte exists BEYOND the bound (tail probes byte
- *     bound+1 — overflow, treat the read as invalid), else `0`.
+ * command — never an arbitrary model-produced path. Output contract (the exact
+ * bytes the consumer parses and its double mirrors): the first
+ * RECHECK_FILE_MAX_BYTES (262,144) bytes of the file (`head -c` stops the
+ * stream at the bound), a `\n` separator written by `printf`, then the overflow
+ * probe's byte count — `wc -c` output, which is ITSELF newline-terminated. So
+ * a real run ends `<content>\n0\n` (fit) or `<content>\n1\n` (a byte exists
+ * BEYOND the bound: tail probes byte bound+1 → treat the read as invalid).
  * A missing/unreadable file fails the `head` chain (non-zero exit, empty
  * stdout) — the consumer fails closed either way (invalid → no recheck).
  * The path is allowlisted and single-quoted like every builder here; the

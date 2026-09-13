@@ -34,8 +34,9 @@
  *     payload and reject scope mismatch / unknown association BEFORE any API
  *     call; require the confirmed original primary publication, the expected
  *     line-review batch marker, the original review commit SHA, App-author
- *     identity, root comment marker, exact path/range and generated-body
- *     digest. A known `reviewId` must match exactly; after response loss the
+ *     identity, root comment marker, exact path/range (an OWNED `outdated`
+ *     thread whose live line is null matches on its `originalLine` anchor) and
+ *     generated-body digest. A known `reviewId` must match exactly; after response loss the
  *     PR's bounded review batches are inspected and only a unique complete
  *     match to the prepared batch intent is accepted. A copied marker at
  *     another review/round/SHA, a reply containing a marker or a generic Bot
@@ -331,7 +332,10 @@ export type ThreadCapture = {
     isResolved: boolean;
     isOutdated: boolean;
     path: string;
+    /** The thread's live anchor — null once the line left the diff (`outdated`). */
     line: number | null;
+    /** The thread's ORIGINAL anchor (§7.5 node query); survives an outdated line. */
+    originalLine: number | null;
     prNumber: number;
     headRefOid: string;
     nameWithOwner: string;
@@ -362,6 +366,7 @@ export async function fetchThreadConversation(octokit: GraphqlOctokit, threadId:
     isOutdated?: boolean | null;
     path?: string | null;
     line?: number | null;
+    originalLine?: number | null;
     pullRequest?: {
       number?: number | null;
       headRefOid?: string | null;
@@ -382,6 +387,7 @@ export async function fetchThreadConversation(octokit: GraphqlOctokit, threadId:
     isOutdated: node.isOutdated === true,
     path: node.path ?? "",
     line: typeof node.line === "number" ? node.line : null,
+    originalLine: typeof node.originalLine === "number" ? node.originalLine : null,
     prNumber: typeof pr.number === "number" ? pr.number : -1,
     headRefOid,
     nameWithOwner: pr.repository?.nameWithOwner ?? "",
@@ -533,6 +539,7 @@ query($owner: String!, $name: String!, $number: Int!, $after: String) {
           isOutdated
           path
           line
+          originalLine
           comments(first: 1) {
             nodes { id fullDatabaseId body author { __typename login } pullRequestReview { id fullDatabaseId } }
           }
@@ -547,7 +554,10 @@ export type ReviewThreadStub = {
   isResolved: boolean;
   isOutdated: boolean;
   path: string;
+  /** The thread's live anchor — null once the line left the diff (`outdated`). */
   line: number | null;
+  /** The thread's ORIGINAL anchor (§7.5 node query); survives an outdated line. */
+  originalLine: number | null;
   /** The thread's ROOT comment (oldest, via comments(first:1)) — null when absent. */
   root: ThreadCommentEntry | null;
   /** The root comment's owning review (GraphQL id + REST id as string). */
@@ -577,6 +587,7 @@ export async function fetchReviewThreads(
     isOutdated?: boolean | null;
     path?: string | null;
     line?: number | null;
+    originalLine?: number | null;
     comments?: { nodes?: (GraphqlCommentNode | null)[] | null } | null;
   };
   const head = { owner: input.owner, name: input.repo, number: input.prNumber };
@@ -603,6 +614,7 @@ export async function fetchReviewThreads(
         isOutdated: node.isOutdated === true,
         path: node.path ?? "",
         line: typeof node.line === "number" ? node.line : null,
+        originalLine: typeof node.originalLine === "number" ? node.originalLine : null,
         root: root === null ? null : entryOf(root),
         rootReviewId: root?.pullRequestReview?.id ?? null,
         rootReviewRestId: root?.pullRequestReview?.fullDatabaseId ?? null,
@@ -849,6 +861,26 @@ function isBotIdentity(authorType: string | null, authorLogin: string | null, bo
 }
 
 /**
+ * The §7.5 "exact original path/range" anchor fence, shared by discovery's
+ * candidate scan and the resolve re-check (P67-QC-002). A thread with a live
+ * `line` must match it exactly. Once the commented line leaves the diff the
+ * thread becomes `outdated`, GitHub drops the live `line` to null, and the
+ * only surviving anchor is `originalLine` — so an OUTDATED thread whose live
+ * line is null may match on that original anchor. Every other shape fails
+ * closed (different path, a re-anchored live line, a mismatched original
+ * anchor, or a null live line on a thread GitHub did not mark outdated):
+ * ownership never widens to arbitrary threads.
+ */
+function matchesOriginalAnchor(
+  thread: { path: string; line: number | null; originalLine: number | null; isOutdated: boolean },
+  intent: LineIntent,
+): boolean {
+  if (thread.path !== intent.path) return false;
+  if (thread.line !== null) return thread.line === intent.line;
+  return thread.isOutdated && thread.originalLine === intent.line;
+}
+
+/**
  * Discovery + adoption of one prepared association's remote thread (spec
  * §7.5 "Discovery/adoption" verbatim). See the module docblock for the full
  * gate list. `input.reviewId === null` means the send response was lost —
@@ -956,7 +988,7 @@ async function lookupThreadForIntent(
   let foreign = false;
   const candidates: { thread: ReviewThreadStub }[] = [];
   for (const thread of scan.threads) {
-    if (thread.path !== intent.path || thread.line !== intent.line) continue;
+    if (!matchesOriginalAnchor(thread, intent)) continue;
     const root = thread.root;
     if (root === null) continue; // absent root blocks any claim
     const marker = parseLineMarker(root.body);
@@ -1216,7 +1248,7 @@ export async function resolveFindingThreadWithDeps(
     await persistOutcome(deps.db, associationId, lease, nowMs, { state: "abandoned", error: "root author is not the authenticated App bot" });
     return { kind: "abandoned", reason: "identity-mismatch" };
   }
-  if (thread.path !== intent.path || thread.line !== intent.line) {
+  if (!matchesOriginalAnchor(thread, intent)) {
     await persistOutcome(deps.db, associationId, lease, nowMs, { state: "abandoned", error: "thread path/line mismatch" });
     return { kind: "abandoned", reason: "foreign" };
   }

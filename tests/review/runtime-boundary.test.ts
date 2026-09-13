@@ -8,7 +8,7 @@
  */
 
 import { describe, expect, test } from "bun:test";
-import { readdirSync, readFileSync, statSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 
 /** Faces that run on workerd and are barred from the omp SDK. */
@@ -44,19 +44,50 @@ describe("module import matrix — omp SDK is container-only", () => {
     });
   }
 });
-// --- in-image module graph (plan 23 T3 regression; plan 67 T3 amendment) -----
+// --- in-image module graph (plan 23 T3 regression; plan 67 T3 amendment;
+// narrowed per P67-QC-015 in QC wave B) ------------------------------------
 
 /**
- * The sandbox image COPYs src/review plus — since plan 67 Task 3 (PM
- * amendment 2026-09-13) — the zero-runtime-dependency wire contracts
- * directory (COPY src/contracts): the recheck seat runtime-imports
- * src/contracts/recheck.ts. NOTHING else enters the image (no src/pipeline,
- * no src/store), so an import escaping src/review is admissible ONLY when it
- * resolves inside src/contracts. The admitted module itself must stay
- * dependency-free — asserted below.
+ * The sandbox image ships src/review plus — since plan 67 Task 3 (PM amendment
+ * 2026-09-13) — the ONE zero-runtime-dependency wire contract the recheck seat
+ * runtime-imports: `COPY src/contracts/recheck.ts`. Nothing else enters the
+ * image (no src/pipeline, no src/store), so an import escaping src/review is
+ * admissible ONLY when it resolves to a file this Dockerfile actually copies.
+ *
+ * The admitted set is DERIVED FROM THE DOCKERFILE rather than restated from a
+ * directory name (qc2 F-011 / qc3 QC3-007): widening the COPY back to a
+ * directory, or admitting another contract file, fails here instead of joining
+ * the image graph silently — and every admitted file, not just one, must stay
+ * free of runtime imports.
  */
-const IN_IMAGE_FACE = "src/review";
-const ADMITTED_FACE = "src/contracts";
+const REPO_ROOT = join(import.meta.dir, "..", "..");
+const OMP_DOCKERFILE = join(REPO_ROOT, "sandbox-image", "omp", "Dockerfile");
+const IN_IMAGE_FACE = join(REPO_ROOT, "src", "review");
+
+/** Every build-context source a `COPY <src…> <abs dest>` line ships. */
+function dockerfileCopySources(dockerfile: string): string[] {
+  const sources: string[] = [];
+  for (const line of readFileSync(dockerfile, "utf8").split("\n")) {
+    const match = /^COPY\s+(?:--\S+\s+)*(\S+)(?:\s+\S+)*\s+\/\S+\s*$/.exec(line.trim());
+    if (match === null) continue;
+    for (const spec of match[1]!.split(",")) if (spec !== "") sources.push(spec);
+  }
+  return sources;
+}
+
+/** Files under src/contracts the image admits, resolved from those COPY lines. */
+function admittedContractFiles(sources: string[]): string[] {
+  const admitted: string[] = [];
+  for (const spec of sources) {
+    if (!spec.startsWith("src/contracts")) continue;
+    const abs = join(REPO_ROOT, spec);
+    // A directory COPY is the rejected shape — it would silently admit any
+    // future file. Enumerate what is actually admitted so each one is asserted.
+    if (statSync(abs).isDirectory()) admitted.push(...collectFiles(abs));
+    else admitted.push(abs);
+  }
+  return admitted.sort();
+}
 
 /**
  * Relative import specifiers (`./…` / `../…`) in any import/require spelling
@@ -64,34 +95,55 @@ const ADMITTED_FACE = "src/contracts";
  */
 const RELATIVE_IMPORT_RE = /(?:from\s+|import\s*|require\s*\()\s*['"](\.\.?\/[^'"]+)['"]/g;
 
-describe("in-image module graph — src/review is self-contained (Dockerfile COPY src/review)", () => {
-  test("no src/review module imports outside src/review and src/contracts (relative specifiers)", () => {
+/**
+ * The real file a relative specifier resolves to (Bun/TS extensionless
+ * imports), or the unresolved base when nothing exists there — which then
+ * fails the admission test rather than passing on a phantom path.
+ */
+function resolveModuleTarget(specifier: string, fromFile: string): string {
+  const base = resolve(dirname(fromFile), specifier);
+  const candidates = [base, `${base}.ts`, `${base}.tsx`, `${base}.js`, `${base}.mjs`, join(base, "index.ts")];
+  return candidates.find((candidate) => existsSync(candidate)) ?? base;
+}
+
+describe("in-image module graph — the image ships src/review plus named contract files only", () => {
+  const admittedContract = admittedContractFiles(dockerfileCopySources(OMP_DOCKERFILE));
+
+  test("the Dockerfile admits exactly the one dependency-free wire module", () => {
+    expect(admittedContract.map((file) => file.slice(REPO_ROOT.length + 1))).toEqual(["src/contracts/recheck.ts"]);
+  });
+
+  test("no src/review module imports outside src/review and the admitted files", () => {
     const offenders: string[] = [];
     for (const file of collectFiles(IN_IMAGE_FACE)) {
       const source = readFileSync(file, "utf8");
       for (const match of source.matchAll(RELATIVE_IMPORT_RE)) {
         const specifier = match[1]!;
-        const target = resolve(dirname(file), specifier);
-        const inImage =
-          target.startsWith(`${resolve(IN_IMAGE_FACE)}/`) || target.startsWith(`${resolve(ADMITTED_FACE)}/`);
-        if (!inImage) {
-          offenders.push(`${file}: ${specifier}`);
-        }
+        const target = resolveModuleTarget(specifier, file);
+        const admissible =
+          target.startsWith(`${IN_IMAGE_FACE}/`) || admittedContract.includes(target);
+        if (!admissible) offenders.push(`${file.slice(REPO_ROOT.length + 1)}: ${specifier}`);
       }
     }
     expect(offenders).toEqual([]);
   });
 
-  test("the admitted wire module src/contracts/recheck.ts stays runtime-dependency-free", () => {
-    // PM amendment condition (plan 67 T3): src/contracts rides the image ONLY
-    // because recheck.ts is a zero-runtime-dependency module (spec §7.3). Any
-    // import statement appearing there invalidates the admission — stop and
-    // re-narrow the boundary instead of widening this rule. Fresh non-global
-    // regexes: global ones are stateful under .test().
-    const source = readFileSync(join(ADMITTED_FACE, "recheck.ts"), "utf8");
+  test("every admitted contract file stays runtime-dependency-free", () => {
+    // PM amendment condition (plan 67 T3): the file rides the image ONLY
+    // because it is a zero-runtime-dependency module (spec §7.3). Any import
+    // statement appearing in an admitted file invalidates the admission — stop
+    // and re-narrow the boundary instead of widening this rule. Fresh
+    // non-global regexes: global ones are stateful under .test().
+    expect(admittedContract.length).toBeGreaterThan(0);
     const relativeImport = /(?:from\s+|import\s*|require\s*\()\s*['"]\.\.?\/[^'"]*['"]/;
     const moduleImport = /(?:from\s+|import\s+|require\s*\()\s*['"][^.'"][^'"]*['"]/;
-    expect(relativeImport.test(source)).toBe(false);
-    expect(moduleImport.test(source)).toBe(false);
+    const offenders: string[] = [];
+    for (const file of admittedContract) {
+      const source = readFileSync(file, "utf8");
+      if (relativeImport.test(source) || moduleImport.test(source)) {
+        offenders.push(file.slice(REPO_ROOT.length + 1));
+      }
+    }
+    expect(offenders).toEqual([]);
   });
 });
