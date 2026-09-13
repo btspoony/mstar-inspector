@@ -89,6 +89,8 @@ import {
   applyPublishedLifecycle,
   claimPublication,
   countOpenFindings,
+  hasUnprovenDegradedPublication,
+  markPublicationFailed,
   recordPublicationProof,
   selectAssessmentTargets,
   stagePublication,
@@ -124,6 +126,7 @@ import {
   buildPublicationMarker,
   createReviewCommenter,
   filterLineCommentFindings,
+  PreparedSendRejected,
   renderLineCommentText,
   type ClosureRow,
   type CommenterEnv,
@@ -225,6 +228,20 @@ export const DIFF_PREFETCH_MAX_BYTES = 2 * 1024 * 1024;
 export function runnerTimeoutMs(level: ReviewLevel): number {
   return RUNNER_TIMEOUT_MS[level];
 }
+
+/**
+ * Inline resolution admission (§7.11.1's thread-lane discipline applied to
+ * the fast path, P67-QC-017). The inline lane runs AFTER the paid review in a
+ * queue message that already spent most of its wall clock, so it must not
+ * fan out unbounded sequential GitHub work: at most this many entries start,
+ * each with its own slice of the budget, and everything else stays `pending`
+ * for M8 — which owns long convergence with proper backoff.
+ */
+export const INLINE_RESOLVE_MAX_ENTRIES = 3;
+/** Whole inline resolution budget (ms) across every entry of this message. */
+export const INLINE_RESOLVE_BUDGET_MS = 12_000;
+/** Per-entry slice (ms) — one §7.5 discover + resolve must fit inside it. */
+export const INLINE_RESOLVE_ENTRY_MS = 6_000;
 
 /** Structured log fields: seven event fields + sandbox id + idempotency key
  * + the d5-budget visibility quartet (level / runner_timeout_ms /
@@ -1048,6 +1065,17 @@ async function publishDegradedPublication(input: {
       lineIntents: [],
     };
     const staged = await stagePublication(input.db, { id: publicationId, payload, nowMs: Date.now() });
+    // §7.7: an insert conflict returns the EXISTING immutable payload — never
+    // overwrite a prepared/confirmed publication with a second model result.
+    // Same guard as the review chain: send the STORED payload's identity, or
+    // refuse to send at all. Here the caller has no journal payload to fall
+    // back to, so the honest outcome is a definitive not-sent failure.
+    if (staged.id !== publicationId) {
+      return {
+        phase: "failed",
+        reason: `publication journal conflict (existing row ${staged.id}, phase ${staged.phase}) — the immutable payload wins; not sending a second degraded notice`,
+      };
+    }
     const lease = await claimPublication(input.db, staged.id, `consumer-degraded:${staged.id}`, Date.now());
     if (lease === null) {
       return { phase: "failed", reason: "publication journal claim failed — degraded notice not sent" };
@@ -1062,7 +1090,20 @@ async function publishDegradedPublication(input: {
         body,
         publicationId: staged.id,
       });
-    } catch {
+    } catch (err) {
+      if (err instanceof PreparedSendRejected) {
+        // A definitive pre-send rejection (§7.7): NO request left the
+        // Worker, so the truthful durable phase is `failed` — never the
+        // post-attempt `unknown`. The complete payload and its digest stay
+        // retained for operator inspection; the row is never re-sent.
+        try {
+          await markPublicationFailed(input.db, staged.id, lease, err.message, Date.now());
+        } catch {
+          // A D1 failure of the failed-mark does not change the verdict: the
+          // degraded notice was still definitively not sent.
+        }
+        return { phase: "failed", reason: err.message };
+      }
       // A throw AT the send is post-attempt uncertainty: whether GitHub
       // received it is unknown (§7.9 — only a definitive rejection is "not
       // published"). The staged row stays sending for read-only discovery;
@@ -2710,17 +2751,38 @@ async function processMessage(payload: ReviewJobPayload, deps: ProcessDeps): Pro
       throw new Error("publication journal claim failed — refusing to send without the epoch-fenced lease");
     }
     sendAttempt = { publicationId: stagedId };
-    const sent = await commenter.postPreparedReview({
-      installationId: payload.installation_id,
-      owner: payload.owner,
-      repo: payload.repo,
-      prNumber: payload.pr_number,
-      headSha,
-      round,
-      targetCommentId: plan.action === "update" ? plan.commentId : null,
-      body: preparedBody,
-      publicationId: stagedId,
-    });
+    let sent: { commentId: number };
+    try {
+      sent = await commenter.postPreparedReview({
+        installationId: payload.installation_id,
+        owner: payload.owner,
+        repo: payload.repo,
+        prNumber: payload.pr_number,
+        headSha,
+        round,
+        targetCommentId: plan.action === "update" ? plan.commentId : null,
+        body: preparedBody,
+        publicationId: stagedId,
+      });
+    } catch (err) {
+      if (err instanceof PreparedSendRejected) {
+        // Definitive pre-send rejection (§7.7): no request left the Worker.
+        // `failed` is the truthful durable phase (never the post-attempt
+        // `unknown`); payload/digest/attempts are retained and recovery
+        // never re-sends. The Check conclusion is the honest
+        // pre-publication failure.
+        try {
+          await markPublicationFailed(deps.env.DB, stagedId, lease, err.message, Date.now());
+        } catch (markErr) {
+          const detail = markErr instanceof Error ? markErr.message : String(markErr);
+          deps.log.warn(fields, `failed-phase mark could not be persisted: ${detail}`);
+        }
+        await terminalizeCheck(null, "pre-publication-failure");
+        deps.log.warn(fields, `prepared review definitively rejected before send — recorded failed: ${err.message}`);
+        return { kind: "ok" };
+      }
+      throw err;
+    }
     const proof = {
       publicationId: stagedId,
       scope: lifecycleScope,
@@ -2835,6 +2897,14 @@ async function processMessage(payload: ReviewJobPayload, deps: ProcessDeps): Pro
     // Newly-created threads of THIS round are never resolved inline — their
     // associations carry no verified snapshot, so only PRIOR associations
     // with a complete verification are attempted here.
+    //
+    // The inline lane is a fast path, not the recovery engine: M8 owns
+    // unbounded convergence with its own request/deadline discipline
+    // (§7.11.1). Bounding it here keeps one queue message from spending
+    // hundreds of sequential GitHub requests (P67-QC-017) — an entry that
+    // cannot be admitted is simply left `pending`, which is exactly the
+    // durable state M8 picks up, so nothing is lost and no attempt is spent
+    // on skipped work.
     if (reconciled.resolutions.length > 0) {
       const assocPlaceholders = reconciled.resolutions.map(() => "?").join(",");
       const assocRows = await deps.env.DB
@@ -2842,16 +2912,37 @@ async function processMessage(payload: ReviewJobPayload, deps: ProcessDeps): Pro
         .bind(...reconciled.resolutions.map((r) => r.associationId))
         .all<{ id: string; intent_json: string }>();
       const intentById = new Map(assocRows.results.map((row) => [row.id, row.intent_json]));
+      let inlineResolveBudgetMs = INLINE_RESOLVE_BUDGET_MS;
+      let inlineResolveAttempts = 0;
       for (const resolution of reconciled.resolutions) {
         try {
           const enqueued = await deps.env.DB
             .prepare(
-              `UPDATE review_threads SET verified_json = ?, resolution_state = 'pending', updated_ms = ?
+              // A CURRENT round supplies fresh verified_json — that is a
+              // genuinely NEW assessment, so the retry budget and any stale
+              // give-up/backoff state reset with it (§7.11.1: "resets
+              // attempts only for a genuinely new assessment"). Without this
+              // reset a row that had reached the cap could be re-enqueued as
+              // `pending` while still `attempts >= 5`, making it permanently
+              // invisible to `listResolutionRecovery` (a silent stall) and
+              // preserving a stale backoff (P67-QC-005).
+              `UPDATE review_threads
+               SET verified_json = ?, resolution_state = 'pending', attempts = 0,
+                   next_attempt_ms = NULL, last_error = NULL, updated_ms = ?
                WHERE id = ? AND superseded_by_publication_id IS NULL`,
             )
             .bind(JSON.stringify(resolution.verified), Date.now(), resolution.associationId)
             .run();
           if (enqueued.meta.changes === 0) continue; // superseded — nothing to resolve
+          // The row is durably queued from here on, so any entry this lane
+          // declines to start is picked up by M8 without spending an attempt.
+          if (inlineResolveAttempts >= INLINE_RESOLVE_MAX_ENTRIES || inlineResolveBudgetMs <= 0) {
+            deps.log.warn(
+              fields,
+              `inline resolution admission exhausted (${inlineResolveAttempts}/${INLINE_RESOLVE_MAX_ENTRIES} entries, ${inlineResolveBudgetMs}ms left) — association ${resolution.associationId} stays pending for scheduled recovery`,
+            );
+            continue;
+          }
           const intentJson = intentById.get(resolution.associationId);
           if (intentJson === undefined || commenter.discoverThread === undefined || commenter.resolveFindingThread === undefined) {
             deps.log.warn(
@@ -2860,15 +2951,29 @@ async function processMessage(payload: ReviewJobPayload, deps: ProcessDeps): Pro
             );
             continue;
           }
+          // Admission for the entry about to start: it may spend up to the
+          // same per-operation request envelope M8 uses, bounded by the
+          // remaining inline deadline.
+          inlineResolveAttempts += 1;
+          const entryDeadline = Date.now() + Math.min(INLINE_RESOLVE_ENTRY_MS, inlineResolveBudgetMs);
+          const entryStartedMs = Date.now();
           const discovery = await commenter.discoverThread({
             scope: lifecycleScope,
             intent: JSON.parse(intentJson) as LineIntent,
             reviewId: null,
           });
+          inlineResolveBudgetMs -= Date.now() - entryStartedMs;
           if (discovery.kind !== "found") {
             deps.log.warn(
               fields,
               `thread discovery for association ${resolution.associationId} returned ${discovery.kind} — verified resolve stays queued (never claims a foreign or ambiguous thread)`,
+            );
+            continue;
+          }
+          if (Date.now() >= entryDeadline || inlineResolveBudgetMs <= 0) {
+            deps.log.warn(
+              fields,
+              `inline resolve deadline passed before the mutation for association ${resolution.associationId} — left pending for scheduled recovery`,
             );
             continue;
           }
@@ -2877,6 +2982,7 @@ async function processMessage(payload: ReviewJobPayload, deps: ProcessDeps): Pro
             associationId: resolution.associationId,
             verified: resolution.verified,
           });
+          inlineResolveBudgetMs -= Date.now() - entryStartedMs;
           if (outcome.kind === "resolved") {
             deps.log.info(
               fields,
@@ -2899,22 +3005,35 @@ async function processMessage(payload: ReviewJobPayload, deps: ProcessDeps): Pro
     // 17. Degraded-comment lifecycle (Bugbot finding): the successful
     // review supersedes any earlier degradation — best-effort cleanup AFTER
     // the normal publication proof, never deleting unconfirmed evidence.
+    // §7.7 step 11 gate: while ANY degraded journal row for this scope is
+    // still prepared/sending/unknown WITHOUT persisted proof, that comment's
+    // exact body is the sole recovery evidence for a possibly-landed send —
+    // deleting it would make the publication permanently unprovable, so the
+    // cleanup is skipped and the condition is logged for the operator.
     try {
-      const deleteOutcome = await commenter.deleteDegradedComment({
-        installationId: payload.installation_id,
-        owner: payload.owner,
-        repo: payload.repo,
-        prNumber: payload.pr_number,
-        error: "",
-        rawOutput: "",
-      });
-      if (deleteOutcome.deleted > 0 || deleteOutcome.skipped > 0 || deleteOutcome.errors.length > 0) {
+      const mustPreserve = await hasUnprovenDegradedPublication(deps.env.DB, lifecycleScope);
+      if (mustPreserve) {
         deps.log.warn(
-          { ...fields, degraded_delete_deleted: deleteOutcome.deleted, degraded_delete_skipped: deleteOutcome.skipped },
-          `stale degraded comment cleanup (review stands): deleted=${deleteOutcome.deleted}, skipped=${deleteOutcome.skipped}${
-            deleteOutcome.errors.length > 0 ? `, errors=[${deleteOutcome.errors.join("; ")}]` : ""
-          }`,
+          fields,
+          "stale degraded comment cleanup skipped — an unconfirmed degraded publication still depends on its body as recovery evidence",
         );
+      } else {
+        const deleteOutcome = await commenter.deleteDegradedComment({
+          installationId: payload.installation_id,
+          owner: payload.owner,
+          repo: payload.repo,
+          prNumber: payload.pr_number,
+          error: "",
+          rawOutput: "",
+        });
+        if (deleteOutcome.deleted > 0 || deleteOutcome.skipped > 0 || deleteOutcome.errors.length > 0) {
+          deps.log.warn(
+            { ...fields, degraded_delete_deleted: deleteOutcome.deleted, degraded_delete_skipped: deleteOutcome.skipped },
+            `stale degraded comment cleanup (review stands): deleted=${deleteOutcome.deleted}, skipped=${deleteOutcome.skipped}${
+              deleteOutcome.errors.length > 0 ? `, errors=[${deleteOutcome.errors.join("; ")}]` : ""
+            }`,
+          );
+        }
       }
     } catch (err) {
       const detail = err instanceof Error ? err.message : String(err);

@@ -73,6 +73,7 @@ import {
   listSuspendedLifecycleApps,
   LIFECYCLE_BACKOFF_MS,
   LIFECYCLE_MAX_ATTEMPTS,
+  markPublicationFailed,
   markPublicationLocalError,
   markPublicationUnknown,
   markResolutionLocalError,
@@ -87,7 +88,8 @@ import {
   type PublicationRow,
 } from "../store/finding-lifecycle";
 import { createSecretbox } from "../dashboard/secretbox";
-import { createReviewCommenter, type CommenterFetch, type ReviewCommenter, type UpsertPlan } from "../pipeline/comment";
+import { createReviewCommenter, PreparedSendRejected, type CommenterFetch, type ReviewCommenter, type UpsertPlan } from "../pipeline/comment";
+import { sha256Hex } from "../pipeline/review-threads";
 
 // ---------------------------------------------------------------------------
 // Summary + budget constants (spec §7.11.1 verbatim values)
@@ -151,8 +153,19 @@ export type ReconcileReviewer = Pick<
 export type ReviewerUnavailableReason = "missing" | "deleted" | "disabled" | "decrypt-failed" | "identity-mismatch";
 
 export type ReviewerResolution =
-  | { kind: "ok"; reviewer: ReconcileReviewer; paused: boolean }
-  | { kind: "unavailable"; reason: ReviewerUnavailableReason };
+  | { kind: "ok"; reviewer: ReconcileReviewer; paused: boolean; botLogin: string }
+  | {
+      kind: "unavailable";
+      reason: ReviewerUnavailableReason;
+      /**
+       * Digest of the ENCRYPTED credential envelope this pair is suspended
+       * on (§7.6 / P67-QC-007). It is not a secret (the envelope is already
+       * ciphertext) and lets a later pass tell "same credentials, same
+       * mismatch" from "the operator corrected the credentials" without
+       * touching the network. Absent when no credential row was reachable.
+       */
+      credentialFingerprint?: string;
+    };
 
 /**
  * The run's transport bound, handed to the reviewer factory so every request
@@ -224,6 +237,11 @@ export const productionReviewerFactory: ReviewerFactory = async ({ db, env, appI
   if (row === null) return { kind: "unavailable", reason: "missing" };
   if (row.deleted_at !== null) return { kind: "unavailable", reason: "deleted" };
   if (row.status !== "active") return { kind: "unavailable", reason: "disabled" };
+  // The suspension fingerprint binds a durable identity-mismatch suspension
+  // to the credentials it was proven against (§7.6 / P67-QC-007): digesting
+  // the ENCRYPTED envelope means the value can be persisted and compared
+  // without ever exposing or re-deriving the private key.
+  const credentialFingerprint = await sha256Hex(row.private_key_enc);
   try {
     const pem = await createSecretbox(env.DASHBOARD_ENCRYPTION_KEY).decryptSecret(
       row.private_key_enc,
@@ -235,7 +253,7 @@ export const productionReviewerFactory: ReviewerFactory = async ({ db, env, appI
     });
     const { resolveFindingThread, getAppIdentity } = commenter;
     if (resolveFindingThread === undefined || getAppIdentity === undefined) {
-      return { kind: "unavailable", reason: "decrypt-failed" };
+      return { kind: "unavailable", reason: "decrypt-failed", credentialFingerprint };
     }
     // The single purpose-scoped App-auth construction point also proves the
     // LIVE identity (spec §7.5's JWT `GET /app`): the row's `github_app_id`
@@ -244,11 +262,15 @@ export const productionReviewerFactory: ReviewerFactory = async ({ db, env, appI
     // substituted pair — means no mutation is authorized for this pair.
     const identity = await getAppIdentity();
     if (identity === null || identity.githubAppId !== row.github_app_id) {
-      return { kind: "unavailable", reason: "identity-mismatch" };
+      return { kind: "unavailable", reason: "identity-mismatch", credentialFingerprint };
     }
     return {
       kind: "ok",
       paused: row.review_enabled === 0,
+      // The authenticated `<slug>[bot]` login is the EXACT App-ownership
+      // proof (spec §7.5); recovery must never fall back to a generic
+      // `[bot]` suffix (P67-QC-011).
+      botLogin: `${identity.slug}[bot]`,
       reviewer: {
         planReviewUpsert: (input) => commenter.planReviewUpsert(input),
         postPreparedReview: (input) => commenter.postPreparedReview(input),
@@ -258,7 +280,8 @@ export const productionReviewerFactory: ReviewerFactory = async ({ db, env, appI
       },
     };
   } catch {
-    return { kind: "unavailable", reason: "decrypt-failed" }; // missing key / tampered envelope — fail closed
+    // missing key / tampered envelope — fail closed
+    return { kind: "unavailable", reason: "decrypt-failed", credentialFingerprint };
   }
 };
 
@@ -290,40 +313,75 @@ export type LifecycleReconcileDeps = {
 // Run budget
 // ---------------------------------------------------------------------------
 
-type RunBudget = { spent: number; deadline: number };
+type RunBudget = {
+  /** ACTUAL requests issued this run (mutated only at the transport). */
+  spent: number;
+  deadline: number;
+  /**
+   * Admission ceiling for the lane currently running (§7.11.1: "Publication
+   * lane gets at most half the run budget before the thread lane"). Applied
+   * to actual requests at the transport so the lane share is a real bound,
+   * not merely a scheduling hint.
+   */
+  laneCap: number;
+};
 
 /**
- * Conservative pre-flight reservation: the operation runs only if the run's
- * request budget (and, for publication-lane operations, the lane's half
- * share) fits AND the remaining wall-clock deadline has not passed. A false
- * return stops the lane WITHOUT spending an attempt — no claim, no GitHub
- * call, the row simply stays due.
+ * Non-mutating preflight admission (§7.11.1). The per-operation envelopes
+ * below are ESTIMATES used only to decide whether an operation may start —
+ * they are never charged, because the transport meters every ACTUAL request
+ * and charging both would double-count (an operation estimated at 3 that
+ * issues 11 real requests must cost 11, not 14). A false return stops the
+ * lane WITHOUT spending an attempt — no claim, no GitHub call, the row
+ * simply stays due.
  */
 function canSpend(budget: RunBudget, nowMs: number, cost: number, laneScoped: boolean): boolean {
   if (budget.spent + cost > RECONCILE_MAX_REQUESTS) return false;
   if (laneScoped && budget.spent + cost > RECONCILE_PUBLICATION_LANE_MAX_REQUESTS) return false;
+  if (budget.spent + cost > budget.laneCap) return false;
   if (nowMs >= budget.deadline) return false;
   return true;
 }
 
+/** Charge one ACTUAL request (called only from the transport choke point). */
 function reserve(budget: RunBudget, cost: number): void {
   budget.spent += cost;
 }
 
 /**
- * The enforced per-request transport bound (§7.11.1: "each request ≤5s and
- * additionally capped by remaining run deadline"). Every request gets its own
- * abort signal at `min(5s, time left in the run)` — computed at the request,
- * so a request issued late in the run cannot exceed the run's remaining
- * time. A caller-supplied signal is preserved by combining signals rather
- * than being replaced. This is the same runtime primitive the sweep's alert
- * webhook uses (`AbortSignal.timeout`).
+ * The enforced per-request transport bound AND the actual-request meter
+ * (§7.11.1: "each request ≤5s and additionally capped by remaining run
+ * deadline"; ≤80 requests/run). Every request gets its own abort signal at
+ * `min(5s, time left in the run)` — computed at the request, so a request
+ * issued late in the run cannot exceed the run's remaining time. A
+ * caller-supplied signal is preserved by combining signals rather than being
+ * replaced. This is the same runtime primitive the sweep's alert webhook
+ * uses (`AbortSignal.timeout`).
+ *
+ * Metering lives HERE, at the single choke point every request funnels
+ * through (identity probe, token mint, pagination pages, mutations alike),
+ * because per-operation reservations are only PRE-FLIGHT ESTIMATES: one
+ * `octokit.paginate` call or one 5-page thread scan issues many real HTTP
+ * requests that a per-operation cost can never bound. Reserving per request
+ * is what makes the ≤80 cap true. A request that cannot be admitted FAILS
+ * BEFORE DISPATCH (the throw below) — the lane's caller-visible behavior is
+ * unchanged: a throw is typed by the lane into a deferral, so the work
+ * stays durable and due rather than being lost or silently unmetered.
  */
 function buildTransport(budget: RunBudget, now: () => number): ReconcileTransport {
   const boundMs = (): number => Math.max(1, Math.min(RECONCILE_PER_REQUEST_MS, budget.deadline - now()));
   return {
     boundMs,
     fetchImpl: (input, init) => {
+      // Admission + accounting for THIS request, atomically before dispatch.
+      if (!canSpend(budget, now(), 1, false)) {
+        return Promise.reject(
+          new Error(
+            `recovery request budget exhausted (spent=${budget.spent}/${RECONCILE_MAX_REQUESTS}, deadline=${budget.deadline}) — request not dispatched; work stays due`,
+          ),
+        );
+      }
+      reserve(budget, 1);
       const timeout = AbortSignal.timeout(boundMs());
       const signal = init?.signal == null ? timeout : AbortSignal.any([init.signal, timeout]);
       return fetch(input, { ...init, signal });
@@ -369,7 +427,7 @@ export async function reconcileReviewLifecycle(
       return summary;
     }
     const now = deps.now ?? (() => Date.now());
-    const budget: RunBudget = { spent: 0, deadline: now() + RECONCILE_RUN_BUDGET_MS };
+    const budget: RunBudget = { spent: 0, deadline: now() + RECONCILE_RUN_BUDGET_MS, laneCap: RECONCILE_MAX_REQUESTS };
     const reviewerFactory = deps.reviewer ?? productionReviewerFactory;
     // The enforced per-request bound (§7.11.1): every request made by a
     // reviewer this run builds is aborted at min(5s, remaining run time).
@@ -378,16 +436,61 @@ export async function reconcileReviewLifecycle(
     // suspension) per App pair per run.
     const reviewerCache = new Map<string, Promise<ReviewerResolution>>();
 
-    // 0. Exact-App re-enable probe (D1 only, no credentials): suspended
-    // pairs whose App row is active and not deleted resume with fresh
-    // fencing BEFORE the selections, so this run can already pick them up.
+    // 0. Exact-App re-enable policy (D1 only, no credentials):
+    //    - a DISABLED App resumes by status alone once its row is active
+    //      again (§7.6 "Re-enable allows due suspended rows to resume with
+    //      the same IDs and fresh fencing");
+    //    - every other suspension kind (identity mismatch, missing mapping,
+    //      deleted App, credential failure) is DURABLE until an exact-App
+    //      live identity proof succeeds (P67-QC-007). Unchanged credentials
+    //      are proven unchanged by the recorded encrypted-envelope digest —
+    //      the pair is left alone with no probe and no churn — and the
+    //      proof is attempted again only after the credential envelope
+    //      actually changed (the operator's correction).
     const suspendedPairs = await listSuspendedLifecycleApps(db, RECONCILE_SELECT_LIMIT);
     for (const pair of suspendedPairs) {
       try {
         const row = await routingRow(db, pair.appId, pair.installationId);
-        if (row !== null && row.deleted_at === null && row.status === "active") {
-          await reenableLifecycleForApps(db, [pair], now());
+        const active = row !== null && row.deleted_at === null && row.status === "active";
+        if (!active) continue;
+        if (pair.requiresIdentityProof) {
+          const currentFingerprint = row === null ? null : await sha256Hex(row.private_key_enc);
+          if (currentFingerprint === null || currentFingerprint === pair.credentialFingerprint) {
+            // Same credentials that already proved the mismatch (or no
+            // evidence they changed): stay suspended, issue nothing.
+            continue;
+          }
+          // Credentials changed — the operator's correction is the one event
+          // that reopens the identity question. The probe is a real request,
+          // so it passes the same whole-run admission gate as any other
+          // (§7.11.1): unaffordable → the pair simply stays suspended.
+          if (!canSpend(budget, now(), IDENTITY_REQUESTS, false)) continue;
+          const proof = await reviewerFactory({
+            db,
+            env,
+            appId: pair.appId,
+            installationId: pair.installationId,
+            transport,
+          });
+          if (proof.kind !== "ok") {
+            // Still mismatched / still unusable: re-stamp BOTH lanes with the
+            // CURRENT fingerprint so the next pass can tell again.
+            const suspension = {
+              kind: proof.reason,
+              reason: UNAVAILABLE_REASON_TEXT[proof.reason],
+              ...(proof.credentialFingerprint === undefined
+                ? {}
+                : { credentialFingerprint: proof.credentialFingerprint }),
+            };
+            await suspendPublicationRecovery(db, pair, suspension, now());
+            await suspendResolutionRecovery(db, pair, suspension, now());
+            continue;
+          }
+          // Identity proved against the corrected credentials: cache it so
+          // this run's lanes reuse the proof instead of probing again.
+          reviewerCache.set(`${pair.appId}:${pair.installationId}`, Promise.resolve(proof));
         }
+        await reenableLifecycleForApps(db, [pair], now());
       } catch (error) {
         log.warn(
           { event: "ops_lifecycle_reenable_probe_failed", detail: error instanceof Error ? error.message : String(error) },
@@ -396,10 +499,17 @@ export async function reconcileReviewLifecycle(
       }
     }
 
-    // 1. Publication lane — at most half the run's request budget.
+    // 1. Publication lane — at most half the run's request budget. The cap is
+    // applied to ACTUAL requests at the transport (a paginating scan or a
+    // token mint can issue more than its operation estimate), so the half
+    // share is a real bound for this lane rather than a scheduling hint.
+    budget.laneCap = RECONCILE_PUBLICATION_LANE_MAX_REQUESTS;
     await reconcilePublications(env, db, now, budget, reviewerFactory, transport, reviewerCache, log, summary);
 
-    // 2. Thread lane — the remaining run budget.
+    // 2. Thread lane — the remaining run budget (its own ≤15-request
+    // per-operation envelope is the admission estimate; the actual requests
+    // are metered under the whole-run cap).
+    budget.laneCap = RECONCILE_MAX_REQUESTS;
     await reconcileResolutions(env, db, now, budget, reviewerFactory, transport, reviewerCache, log, summary);
 
     log.info({ event: "ops_lifecycle_reconcile", ...summary }, "lifecycle reconcile pass complete");
@@ -452,15 +562,12 @@ async function reviewerForPair(
   if (cached !== undefined) return cached;
   const resolution = (async () => {
     try {
-      const settled = await reviewerFactory({ db, env, appId: scope.appId, installationId: scope.installationId, transport });
-      // The factory proves the live App identity before returning — that probe
-      // is one GitHub request, counted here once per pair (the cache above
-      // keeps it to a single probe per run). Both outcomes that follow a
-      // COMPLETED probe are charged, so `budget.spent` reflects every request
-      // the run can actually issue; the pre-probe outcomes (missing / deleted
-      // / disabled / decrypt-failed) issue nothing and are not charged.
-      if (settled.kind === "ok" || settled.reason === "identity-mismatch") reserve(budget, IDENTITY_REQUESTS);
-      return settled;
+      // The factory proves the live App identity before returning; that probe
+      // (and every other real request the pair issues) is metered at the
+      // transport choke point, so no per-operation reservation is charged
+      // here — reserving an estimate AND metering the real requests would
+      // double-count and shrink the run's true allowance.
+      return await reviewerFactory({ db, env, appId: scope.appId, installationId: scope.installationId, transport });
     } catch (error) {
       // A throwing factory is a credential-path failure — fail closed to a
       // durable suspension rather than letting it escape the lane.
@@ -475,8 +582,16 @@ async function reviewerForPair(
   const settled = await resolution;
   if (settled.kind === "unavailable") {
     const reason = `app ${UNAVAILABLE_REASON_TEXT[settled.reason]} — no GitHub mutation for this (${scope.appId}, ${scope.installationId}) pair`;
-    const pubs = await suspendPublicationRecovery(db, { appId: scope.appId, installationId: scope.installationId }, reason, nowMs);
-    const threads = await suspendResolutionRecovery(db, { appId: scope.appId, installationId: scope.installationId }, reason, nowMs);
+    const pair = { appId: scope.appId, installationId: scope.installationId };
+    const suspension = {
+      kind: settled.reason,
+      reason,
+      ...(settled.credentialFingerprint === undefined
+        ? {}
+        : { credentialFingerprint: settled.credentialFingerprint }),
+    };
+    const pubs = await suspendPublicationRecovery(db, pair, suspension, nowMs);
+    const threads = await suspendResolutionRecovery(db, pair, suspension, nowMs);
     summary.suspended += pubs + threads;
     log.warn(
       { event: "ops_lifecycle_pair_suspended", detail: reason },
@@ -524,12 +639,11 @@ async function reconcilePublications(
       continue;
     }
     // prepared / sending / unknown need GitHub — route credentials first.
-    // Resolving the pair issues at most ONE identity-probe request (never a
-    // second one for a cached pair), so it is charged to the lane's share
-    // under the same pre-flight discipline as the operation that follows.
+    // The identity probe and every other real request are metered at the
+    // transport; this gate only decides whether even ONE request could still
+    // fit the run, so an exhausted run stops the lane before any claim.
     const scope = row.payload.scope;
-    const probeRequests = reviewerCache.has(pairKeyOf(scope)) ? 0 : IDENTITY_REQUESTS;
-    if (!canSpend(budget, now(), probeRequests, true)) continue; // stays due, no claim
+    if (!canSpend(budget, now(), 1, true)) continue; // stays due, no claim
     const resolved = await reviewerForPair(db, env, scope, now(), budget, reviewerFactory, transport, reviewerCache, log, summary);
     if (resolved.kind === "unavailable") continue; // pair suspended durably
     if (row.phase === "prepared") {
@@ -590,13 +704,9 @@ async function sendPreparedPublication(
   // consumer owns younger ones.
   const createdMs = await getPublicationCreatedMs(db, row.id);
   if (createdMs === null || now() - createdMs < PREPARED_SEND_MIN_AGE_MS) return;
+  // Preflight admission only — the plan/send requests are metered as they are
+  // actually issued at the transport, so nothing is charged twice.
   if (!canSpend(budget, now(), PLAN_REQUESTS + SEND_REQUESTS, true)) return; // remains due, no attempt
-  // The plan request is charged BEFORE it is issued: it is one real GitHub
-  // request the moment it is attempted, and a sent-then-rejected request
-  // (timeout / HTTP error) has still consumed the run's allowance. Charging
-  // after the await would let repeated failures issue unaccounted requests and
-  // push the run past the ≤80 cap. No refund on failure.
-  reserve(budget, PLAN_REQUESTS);
   // Read-only staleness pre-check: never send a stale publication over a
   // newer round. A pre-check failure is typed "stay due" — no claim, no
   // attempt.
@@ -628,7 +738,6 @@ async function sendPreparedPublication(
   }
   const lease = await claimPublication(db, row.id, HOLDER, now());
   if (lease === null) return; // claimed elsewhere between pre-check and claim
-  reserve(budget, SEND_REQUESTS);
   try {
     const target = {
       installationId: scope.installationId,
@@ -672,6 +781,24 @@ async function sendPreparedPublication(
     }
     await settleFailedPublicationAttempt(db, now, row, lease, "post-proof apply did not complete", summary, false);
   } catch (error) {
+    if (error instanceof PreparedSendRejected) {
+      // A definitive pre-send rejection (§7.7): no request left the Worker,
+      // so `failed` is the truthful durable phase — never the post-attempt
+      // `unknown`. Payload, digest and attempts are retained; recovery never
+      // re-sends a failed row (the phase is skipped on selection). The
+      // summary's frozen shape (§7.11.1) has no `failed` field, so this
+      // terminal outcome is reported through `errors`, exactly like the
+      // other terminal give-up paths.
+      const marked = await markPublicationFailed(db, row.id, lease, error.message, now());
+      if (marked) {
+        log.warn(
+          { event: "ops_lifecycle_publication_failed", detail: `publication=${row.id}: ${error.message}` },
+          "prepared publication definitively rejected before send — recorded failed, never re-sent",
+        );
+      }
+      summary.errors += 1;
+      return;
+    }
     // The send MAY have landed (§7.7): the honest phase is unknown —
     // read-only discovery only, never a blind second create.
     await settleFailedPublicationAttempt(db, now, row, lease, error instanceof Error ? error.message : String(error), summary, true);
@@ -681,8 +808,11 @@ async function sendPreparedPublication(
 /**
  * Read-only discovery for `sending`/`unknown` rows (§7.7 "Remote unknowns"):
  * scan the PR's bounded newest issue comments for the EXACT prepared body
- * (marker + digest — body equality implies both, and the `[bot]` author
- * suffix is GitHub-reserved for App bots). A hit is proof: persist it and
+ * (marker + digest — body equality implies both). Ownership is proven against
+ * the EXACT authenticated `<slug>[bot]` login of this App (§7.5 / P67-QC-011),
+ * never a generic `[bot]` suffix: the body embeds an opaque publication UUID,
+ * so the risk is low either way, but App-scoped ownership is the contract the
+ * rest of the resolve path already enforces. A hit is proof: persist it and
  * apply the saved payload without the model. A miss defers with backoff —
  * never a blind second create; the cap leaves it local-error for operator
  * inspection.
@@ -699,7 +829,6 @@ async function discoverUncertainPublication(
   if (!canSpend(budget, now(), DISCOVERY_REQUESTS, true)) return; // stays unknown/due, no attempt
   const lease = await claimPublication(db, row.id, HOLDER, now());
   if (lease === null) return; // another invocation owns discovery
-  reserve(budget, DISCOVERY_REQUESTS);
   try {
     const discussion = await resolved.reviewer.listDiscussion({
       installationId: scope.installationId,
@@ -709,7 +838,8 @@ async function discoverUncertainPublication(
       threads: [], // issue comments only — the publication lives on the PR conversation
     });
     const hit = discussion.items.find(
-      (item) => item.source === "issue" && item.author.endsWith("[bot]") && item.body === row.payload.body,
+      (item) =>
+        item.source === "issue" && item.author === resolved.botLogin && item.body === row.payload.body,
     );
     if (hit === undefined) {
       await settleFailedPublicationAttempt(db, now, row, lease, "read-only discovery found no exact publication match", summary, true);
@@ -791,24 +921,18 @@ async function reconcileResolutions(
 ): Promise<void> {
   const rows = await listResolutionRecovery(db, now(), RECONCILE_SELECT_LIMIT);
   for (const { associationId, scope } of rows) {
-    // Whole-run budget BEFORE any claim. The gate covers the ≤15-request
-    // operation AND — for a pair not yet resolved in this run — the
-    // one-request live identity probe the pair resolution below issues. The
-    // probe must be accounted BEFORE the operation reservation (it is: the
-    // resolution runs first and charges the probe), so gating both together
-    // is what makes the run cap unreachable-by-overflow: at most
-    // `probe + 15` can ever be admitted for one row. A false gate stops the
-    // lane WITHOUT a claim or an attempt — the row simply stays due
-    // (§7.11.1: budget exhaustion is not a failed attempt).
-    const probeRequests = reviewerCache.has(pairKeyOf(scope)) ? 0 : IDENTITY_REQUESTS;
-    if (!canSpend(budget, now(), RECONCILE_THREAD_OPERATION_REQUESTS + probeRequests, false)) return;
+    // Preflight admission BEFORE any claim: one operation may spend up to the
+    // §7.11.1 ≤15-request thread envelope (estimate only — the ACTUAL requests
+    // are metered at the transport). A false gate stops the lane WITHOUT a
+    // claim or an attempt — the row simply stays due (§7.11.1: budget
+    // exhaustion is not a failed attempt).
+    if (!canSpend(budget, now(), RECONCILE_THREAD_OPERATION_REQUESTS, false)) return;
     summary.examined += 1;
-    // Pair credentials (and their charged identity probe) come FIRST; the
-    // §7.5 surface claims and counts its attempt only inside
-    // `resolveFindingThread`, which the operation reservation below precedes.
+    // Pair credentials come FIRST; the §7.5 surface claims and counts its
+    // attempt only inside `resolveFindingThread`, which the admission above
+    // precedes.
     const resolved = await reviewerForPair(db, env, scope, now(), budget, reviewerFactory, transport, reviewerCache, log, summary);
     if (resolved.kind === "unavailable") continue; // pair suspended durably
-    reserve(budget, RECONCILE_THREAD_OPERATION_REQUESTS);
     // A paused App keeps "previously-authorized resolution retry" running
     // (frozen pause policy) — no extra gate here.
     const work = await getResolutionRecoveryRow(db, associationId);

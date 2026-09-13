@@ -197,7 +197,7 @@ const appCommenterFactory = mock((_cred: CommenterEnv): ReviewCommenter => ({
     appCalls.push("token");
     return {
       token: "app-token",
-      permissions: { contents: "read", metadata: "read" },
+      permissions: { contents: "read", metadata: "read", pull_requests: "read" },
       repositoryNames: [input.scope.repo],
       repositorySelection: "selected",
     } satisfies InstallationTokenGrant;

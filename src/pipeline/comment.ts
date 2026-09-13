@@ -721,8 +721,20 @@ export type InstallationTokenGrant = {
 
 export type TokenInput = { scope: Scope; purpose: TokenPurpose };
 
-/** Explicit requested permission set for the sandbox read grant (spec §7.6). */
-export const SANDBOX_READ_PERMISSIONS: Record<string, string> = { contents: "read", metadata: "read" };
+/**
+ * Explicit requested permission set for the sandbox read grant (spec §7.6,
+ * QC P67-QC-001): `contents` + `metadata` for the clone, and
+ * `pull_requests: read` because the shipped §7.7 step-2 diff step runs
+ * `gh pr diff` with EXACTLY this token and that endpoint is authorized by
+ * the pull-requests permission. Read-only and repository-scoped as before —
+ * no write capability is added, and `assertSandboxGrant` still rejects any
+ * returned value that is not `read`.
+ */
+export const SANDBOX_READ_PERMISSIONS: Record<string, string> = {
+  contents: "read",
+  metadata: "read",
+  pull_requests: "read",
+};
 /** Explicit requested permission set for Worker review writes (68 adds checks:write). */
 export const REVIEW_WRITE_PERMISSIONS: Record<string, string> = {
   contents: "write",
@@ -737,18 +749,25 @@ function permissionsFor(purpose: TokenPurpose): Record<string, string> {
 
 /**
  * Returned-capability assertion for the sandbox read grant (spec §7.6 /
- * RL-6): nonempty token, contents+metadata read, EVERY other returned
- * permission read-only, `repositorySelection === "selected"`, and exactly
- * one returned repository equal to the requested one. A missing repository
- * list/selection or any broader grant fails closed — throws.
+ * RL-6): nonempty token, contents+metadata+pull_requests read (the three the
+ * sandbox path actually exercises — clone and `gh pr diff`), EVERY other
+ * returned permission read-only, `repositorySelection === "selected"`, and
+ * exactly one returned repository equal to the requested one. A missing
+ * repository list/selection or any broader grant fails closed — throws, so
+ * a token that could not run the shipped diff step is rejected HERE rather
+ * than failing later inside the container.
  */
 export function assertSandboxGrant(grant: InstallationTokenGrant, expectedRepo: string): void {
   if (typeof grant.token !== "string" || grant.token.length === 0) {
     throw new Error("sandbox grant rejected: empty token");
   }
   const permissions = grant.permissions ?? {};
-  if (permissions.contents !== "read" || permissions.metadata !== "read") {
-    throw new Error("sandbox grant rejected: contents/metadata must be returned read");
+  if (
+    permissions.contents !== "read" ||
+    permissions.metadata !== "read" ||
+    permissions.pull_requests !== "read"
+  ) {
+    throw new Error("sandbox grant rejected: contents/metadata/pull_requests must be returned read");
   }
   for (const [name, value] of Object.entries(permissions)) {
     if (name === "contents" || name === "metadata") continue;
@@ -800,8 +819,10 @@ export type PostPreparedDegradedInput = CommenterTargetInput & {
 export type ReviewCommenter = {
   /**
    * Mint a PURPOSE-SCOPED, repository-scoped installation grant (plan 67
-   * §7.6): `sandbox-read` requests {contents:read, metadata:read};
-   * `review-write` requests the Worker write set. The grant is minted
+   * §7.6): `sandbox-read` requests {contents:read, metadata:read,
+   * pull_requests:read} — the full read set the shipped Sandbox path
+   * exercises (clone + `gh pr diff`); `review-write` requests the Worker
+   * write set. The grant is minted
    * through the single createAppAuth object (token cache keyed by
    * installation/repository/permissions) — callers on the sandbox path MUST
    * verify the RETURNED grant via `assertSandboxGrant` (RL-6).
@@ -973,6 +994,24 @@ export async function planDegradedUpsertWithOctokit(octokit: PostOctokit, input:
 }
 
 /**
+ * A definitive rejection BEFORE any request left the Worker (spec §7.7
+ * "A known definitive rejection before any successful/unknown send is
+ * failed, not published"). Thrown by the prepared-send surfaces when the
+ * target no longer shows its expected previous version, a foreign marker
+ * appeared after the plan, or the client surface cannot publish at all —
+ * cases where the honest durable state is `failed`, NOT the post-attempt
+ * `unknown`. Any error that may have reached GitHub (transport throw, a
+ * create response without an id) deliberately stays a plain Error so it
+ * keeps mapping to `unknown`.
+ */
+export class PreparedSendRejected extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "PreparedSendRejected";
+  }
+}
+
+/**
  * Publish the EXACT prepared review body against a caller-provided octokit
  * (plan 67 §7.7 step 8). Before sending, the target is RE-READ and must
  * show its expected previous version — or an already-matching exact
@@ -980,18 +1019,19 @@ export async function planDegradedUpsertWithOctokit(octokit: PostOctokit, input:
  *   - update plan: the target comment must still be bot-authored with the
  *     expected round (= prepared round - 1). Deleted → create fallback with
  *     the SAME prepared body (the round never increments on retry). Changed
- *     (newer round / replaced body) → definitive rejection (throw) — a
- *     newer publication is never overwritten by an older send.
+ *     (newer round / replaced body) → definitive rejection (`PreparedSendRejected`)
+ *     — a newer publication is never overwritten by an older send.
  *   - create plan: a bot review-marker comment appearing between plan and
  *     send is adopted only when it already carries the exact prepared body;
  *     any other marker is a definitive rejection.
  * The send publishes the prepared body VERBATIM; a create response without
- * an id is an unprovable publication and throws.
+ * an id is an unprovable publication and throws a plain Error (a request
+ * WAS sent — the caller must treat it as unknown, never as not-sent).
  */
 export async function postPreparedReviewWithOctokit(octokit: PostOctokit, input: PostPreparedReviewInput): Promise<{ commentId: number }> {
   const issues = octokit.rest?.issues;
   if (!issues?.listComments || !issues?.updateComment || !issues?.createComment || typeof octokit.paginate !== "function") {
-    throw new Error(
+    throw new PreparedSendRejected(
       "octokit is missing rest.issues comment methods / paginate — cannot publish the prepared review; check the injected auth surface",
     );
   }
@@ -1010,7 +1050,7 @@ export async function postPreparedReviewWithOctokit(octokit: PostOctokit, input:
       return { commentId: target.id }; // replay adoption — exact body already published
     }
     if (target.user?.type !== "Bot" || parsedRound(target.body) !== input.round - 1) {
-      throw new Error(
+      throw new PreparedSendRejected(
         `prepared review target ${input.targetCommentId} no longer shows its expected previous version (round ${input.round - 1}) — refusing to overwrite (spec §7.7)`,
       );
     }
@@ -1041,7 +1081,7 @@ export async function postPreparedReviewWithOctokit(octokit: PostOctokit, input:
   const markerComments = comments.filter((c) => c.user?.type === "Bot" && parsedRound(c.body) !== null);
   for (const marker of markerComments) {
     if (marker.body === input.body) return { commentId: marker.id };
-    throw new Error(
+    throw new PreparedSendRejected(
       `a bot review marker (comment ${marker.id}) appeared after the pre-staging plan — refusing to create a second publication (spec §7.7)`,
     );
   }
@@ -1080,7 +1120,7 @@ export async function postPreparedDegradedWithOctokit(
 ): Promise<{ posted: boolean; commentId: number | null }> {
   const issues = octokit.rest?.issues;
   if (!issues?.listComments || !issues?.updateComment || !issues?.createComment || typeof octokit.paginate !== "function") {
-    throw new Error(
+    throw new PreparedSendRejected(
       "octokit is missing rest.issues comment methods / paginate — cannot publish the prepared degraded comment; check the injected auth surface",
     );
   }
@@ -1104,7 +1144,7 @@ export async function postPreparedDegradedWithOctokit(
     }
     if (target.body === input.body) return { posted: true, commentId: target.id };
     if (target.user?.type !== "Bot" || degradedRoundOf(target.body) !== input.round - 1) {
-      throw new Error(
+      throw new PreparedSendRejected(
         `prepared degraded target ${input.targetCommentId} no longer shows its expected previous version (round ${input.round - 1}) — refusing to overwrite (spec §7.7)`,
       );
     }
@@ -1136,7 +1176,7 @@ export async function postPreparedDegradedWithOctokit(
 
   for (const marker of comments.filter((c) => c.user?.type === "Bot" && degradedRoundOf(c.body) !== null)) {
     if (marker.body === input.body) return { posted: true, commentId: marker.id };
-    throw new Error(
+    throw new PreparedSendRejected(
       `a bot degraded marker (comment ${marker.id}) appeared after the pre-staging plan — refusing to create a second publication (spec §7.7)`,
     );
   }

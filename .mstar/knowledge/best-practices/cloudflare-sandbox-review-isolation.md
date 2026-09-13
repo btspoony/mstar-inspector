@@ -32,7 +32,7 @@ mstar-inspector 在 Cloudflare Workers 上编排每 PR 隔离的代码审查：Q
 ### 受信任编排模式
 
 - clone / `gh pr view` / `gh pr diff` 是 **Worker→exec 的受信任编排**，不是 agent 工具。
-- `gh` 认证：`GH_TOKEN` 经 `exec` 的 `env` 注入（实测 `gh pr diff` 对真实 PR 返回非空 diff）；**密钥不进镜像**（含 build args）。
+- `gh` 认证：`GH_TOKEN` 经 `exec` 的 `env` 注入（实测 `gh pr diff` 对真实 PR 返回非空 diff）；**密钥不进镜像**（含 build args）。**该命令用的就是 `sandbox-read` 授权**，所以该授权必须含 `pull_requests: read`（其余仍只读、仅限单仓）——否则 diff 步会 403，review 直接失败。
 - 每消息一个 sandbox，id 用 `randomUUID()`（per-attempt 唯一），`finally` 中 `destroy()`；禁止跨消息复用。
 - 容器内 omp：`HARNESS_PLUGIN_ROOT` 指向镜像预装根（env 注入）；模型 key 仅来自 per-App BYOK：`resolveAppConfig` 产出的 keys 经 PROVIDERS 注册表映射注入（`ark` → `ARK_API_KEY`），`key_source` ∈ `app|custom`（`buildRunnerEnv` 装配，无 env 参数）——全局 `OMP_MODEL_KEY` 单一映射点已随 v0.9 / AL-24-5 退役（零全局回退，见 `perapp-zero-global-fallback.md`）。
 

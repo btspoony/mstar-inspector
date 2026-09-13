@@ -205,9 +205,11 @@ request it, and no Check Run behavior is shipped here.
 Two credential boundaries back this set: the Worker mints a purpose-scoped
 `review-write` grant that never leaves the Worker, while every Sandbox and
 smoke token is the explicitly **repository-scoped, read-only** `sandbox-read`
-grant (`contents: read`, `metadata: read`); the Worker asserts the returned
-capabilities (`assertSandboxGrant`) and fails closed on anything broader or
-unscoped. Webhook events stay `pull_request` and `issue_comment`.
+grant (`contents: read`, `metadata: read`, `pull_requests: read` — the last
+one because the diff step runs `gh pr diff` with exactly that token); the
+Worker asserts the returned capabilities (`assertSandboxGrant`) and fails
+closed on anything broader or unscoped. Webhook events stay `pull_request`
+and `issue_comment`.
 
 > **Evidence caliber:** the permission set, the purpose-scoped mint/assert and
 > the recovery lanes are covered by the implementation's scoped behavioral

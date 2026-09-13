@@ -821,10 +821,102 @@ function recoveryReason(reason: string): string {
   return clean.length <= 300 ? clean : `${clean.slice(0, 299)}…`;
 }
 
+/**
+ * Why a pair's recovery rows are suspended (spec §7.6 / P67-QC-007). The
+ * distinction is load-bearing: a `disabled` App resumes automatically once
+ * its row is active again (status-driven), while an `identity-mismatch`
+ * pair must NOT return to `pending` until a successful exact-App identity
+ * proof follows the credential correction — otherwise every cron pass
+ * re-enables it, re-discovers the same mismatch and re-suspends it.
+ */
+export type SuspensionKind = "disabled" | "identity-mismatch" | "missing" | "deleted" | "decrypt-failed" | "unknown";
+
+const SUSPENSION_PREFIX = "suspend:";
+/** Token carrying the credential-envelope fingerprint inside the reason. */
+const CREDENTIAL_TOKEN = "cred=";
+
+/**
+ * Encode the suspension kind in the durable `last_error` text. The column is
+ * the only per-row reason carrier (§7.1 DDL), so the kind rides a stable,
+ * machine-checkable prefix; the human-readable detail stays after it.
+ * `credentialFingerprint` is a SHA-256 of the ENCRYPTED credential envelope
+ * (never of the plaintext key) and carries no secret — it exists purely so a
+ * later pass can tell "same credentials, same mismatch" from "the operator
+ * corrected the credentials", which is what keeps identity-mismatch
+ * suspension durable without re-proving it on every cron pass.
+ */
+export function suspensionReasonOf(kind: SuspensionKind, text: string, credentialFingerprint?: string): string {
+  const suffix = credentialFingerprint === undefined ? "" : ` ${CREDENTIAL_TOKEN}${credentialFingerprint}`;
+  return `${SUSPENSION_PREFIX}${kind}: ${text}${suffix}`;
+}
+
+/**
+ * Read back the credential fingerprint recorded at suspension time, or null
+ * when none was recorded (missing mapping, a legacy row, or a suspension
+ * written before this encoding).
+ */
+export function suspensionCredentialOf(lastError: string | null): string | null {
+  if (lastError === null) return null;
+  const match = /(?:^|\s)cred=([0-9a-f]{64})(?:\s|$)/.exec(lastError);
+  return match?.[1] ?? null;
+}
+
+/**
+ * Read back the suspension kind from a durable reason. Anything unrecognized
+ * (legacy rows written before this encoding, or free-text operator notes) is
+ * `unknown` — treated exactly like a non-status-driven suspension, so an
+ * unclassifiable pair never auto-re-enables without an identity proof.
+ */
+export function suspensionKindOf(lastError: string | null): SuspensionKind {
+  if (lastError === null || !lastError.startsWith(SUSPENSION_PREFIX)) return "unknown";
+  const rest = lastError.slice(SUSPENSION_PREFIX.length);
+  const colon = rest.indexOf(":");
+  const kind = colon === -1 ? rest : rest.slice(0, colon);
+  switch (kind) {
+    case "disabled":
+    case "identity-mismatch":
+    case "missing":
+    case "deleted":
+    case "decrypt-failed":
+      return kind;
+    default:
+      return "unknown";
+  }
+}
+
 /** Free-lease predicate bound to a now parameter position. */
 const FREE_LEASE_SQL = "(lease_until_ms IS NULL OR lease_until_ms <= ?)";
 
-/** The `created_ms` of a publication row — the §7.11.1 prepared-send age gate. */
+/**
+ * Degraded-cleanup gate (spec §7.7 step 11: "Cleanup must not delete the
+ * only unconfirmed degraded-publication evidence"). The remote body match is
+ * the ONLY recovery channel for a degraded send whose proof was lost
+ * (`discoverUncertainPublication`), so deleting that comment while its
+ * journal row is still non-terminal would make the publication permanently
+ * unprovable. Returns true when ANY degraded row for this exact scope still
+ * sits in `prepared`/`sending`/`unknown` without persisted proof — the
+ * caller then SKIPS the delete and leaves the evidence in place.
+ *
+ * `phase='failed'` is excluded on purpose: a definitively rejected degraded
+ * notice was never published, so it has no remote evidence to preserve.
+ */
+export async function hasUnprovenDegradedPublication(db: D1Like, scope: Scope): Promise<boolean> {
+  const row = await db
+    .prepare(
+      `SELECT id FROM review_publications
+       WHERE app_id = ? AND installation_id = ? AND owner = ? AND repo = ? AND pr_number = ?
+         AND kind = 'degraded' AND proof_json IS NULL
+         AND phase IN ('prepared','sending','unknown')
+       LIMIT 1`,
+    )
+    .bind(scope.appId, scope.installationId, scope.owner, scope.repo, scope.prNumber)
+    .first<{ id: string }>();
+  return row !== null;
+}
+
+/**
+ * The `created_ms` of a publication row — the §7.11.1 prepared-send age gate.
+ */
 export async function getPublicationCreatedMs(db: D1Like, id: string): Promise<number | null> {
   const row = await db
     .prepare(`SELECT created_ms FROM review_publications WHERE id = ?`)
@@ -885,6 +977,36 @@ export async function markPublicationUnknown(
 }
 
 /**
+ * The definitive pre-send rejection (spec §7.7 "A known definitive rejection
+ * before any successful/unknown send is failed, not published"): the staged
+ * row is marked `phase='failed'` under the live lease, which is exactly what
+ * separates it from the post-attempt `unknown`. The complete payload, its
+ * digest, the attempt count and the epoch history are RETAINED so operator
+ * inspection still works; only the lease is released. Recovery never re-sends
+ * a failed row (`reconcilePublications` skips the phase) — a re-send would be
+ * the blind second create §7.7 forbids. Returns whether the transition
+ * applied.
+ */
+export async function markPublicationFailed(
+  db: D1Like,
+  id: string,
+  lease: Lease,
+  reason: string,
+  nowMs: number,
+): Promise<boolean> {
+  const result = await db
+    .prepare(
+      `UPDATE review_publications
+       SET phase = 'failed', last_error = ?, holder = NULL, lease_until_ms = NULL, updated_ms = ?
+       WHERE id = ? AND holder = ? AND lease_epoch = ?
+         AND phase IN ('prepared','sending','unknown')`,
+    )
+    .bind(recoveryReason(reason), nowMs, id, lease.holder, lease.epoch)
+    .run();
+  return result.meta.changes > 0;
+}
+
+/**
  * The attempt cap (spec §7.11.1: "at 5 failures → local-error/unknown
  * retained with structured warning containing App/scope/work ID and reason,
  * no payload/secret"): the row is retained for operator inspection with a
@@ -940,16 +1062,22 @@ export async function supersedePublication(db: D1Like, id: string, reason: strin
 export async function suspendPublicationRecovery(
   db: D1Like,
   pair: { appId: string; installationId: number },
-  reason: string,
+  input: { kind: SuspensionKind; reason: string; credentialFingerprint?: string },
   nowMs: number,
 ): Promise<number> {
   const result = await db
     .prepare(
       `UPDATE review_publications
        SET recovery_state = 'suspended', last_error = ?, holder = NULL, lease_until_ms = NULL, updated_ms = ?
-       WHERE app_id = ? AND installation_id = ? AND recovery_state = 'pending' AND ${FREE_LEASE_SQL}`,
+       WHERE app_id = ? AND installation_id = ? AND recovery_state IN ('pending','suspended') AND ${FREE_LEASE_SQL}`,
     )
-    .bind(recoveryReason(reason), nowMs, pair.appId, pair.installationId, nowMs)
+    .bind(
+      suspensionReasonOf(input.kind, recoveryReason(input.reason), input.credentialFingerprint),
+      nowMs,
+      pair.appId,
+      pair.installationId,
+      nowMs,
+    )
     .run();
   return result.meta.changes;
 }
@@ -958,16 +1086,22 @@ export async function suspendPublicationRecovery(
 export async function suspendResolutionRecovery(
   db: D1Like,
   pair: { appId: string; installationId: number },
-  reason: string,
+  input: { kind: SuspensionKind; reason: string; credentialFingerprint?: string },
   nowMs: number,
 ): Promise<number> {
   const result = await db
     .prepare(
       `UPDATE review_threads
        SET resolution_state = 'suspended', last_error = ?, holder = NULL, lease_until_ms = NULL, updated_ms = ?
-       WHERE app_id = ? AND installation_id = ? AND resolution_state IN ('pending','retry') AND ${FREE_LEASE_SQL}`,
+       WHERE app_id = ? AND installation_id = ? AND resolution_state IN ('pending','retry','suspended') AND ${FREE_LEASE_SQL}`,
     )
-    .bind(recoveryReason(reason), nowMs, pair.appId, pair.installationId, nowMs)
+    .bind(
+      suspensionReasonOf(input.kind, recoveryReason(input.reason), input.credentialFingerprint),
+      nowMs,
+      pair.appId,
+      pair.installationId,
+      nowMs,
+    )
     .run();
   return result.meta.changes;
 }
@@ -975,31 +1109,75 @@ export async function suspendResolutionRecovery(
 /**
  * Distinct suspended `(app_id, installation_id)` pairs across both lanes,
  * bounded — the re-enable probe input (§7.11.1: "Suspended rows are checked
- * for exact-App re-enable before returning to pending").
+ * for exact-App re-enable before returning to pending"). `requiresIdentityProof`
+ * is true when ANY of the pair's suspended rows was suspended for a reason
+ * other than a disabled App (identity mismatch, missing mapping, deleted App,
+ * decrypt failure, or a legacy/unclassifiable reason): the §7.6 policy allows
+ * the status-driven resume for a genuinely re-enabled App, but every other
+ * kind must stay suspended until a successful exact-App identity proof
+ * (P67-QC-007) — otherwise each pass re-enables the pair, rediscovers the same
+ * mismatch and re-suspends it.
+ *
+ * `credentialFingerprint` is the encrypted-envelope digest recorded when the
+ * pair was suspended, or null when none was recorded / the rows disagree. It
+ * lets the caller skip the identity probe entirely while the credentials are
+ * demonstrably unchanged (no remote work, no churn) and prove identity only
+ * after an operator credential correction.
  */
 export async function listSuspendedLifecycleApps(
   db: D1Like,
   limit: number,
-): Promise<{ appId: string; installationId: number }[]> {
+): Promise<
+  { appId: string; installationId: number; requiresIdentityProof: boolean; credentialFingerprint: string | null }[]
+> {
   const pubs = await db
     .prepare(
-      `SELECT DISTINCT app_id, installation_id FROM review_publications
+      `SELECT DISTINCT app_id, installation_id, last_error FROM review_publications
        WHERE recovery_state = 'suspended' LIMIT ?`,
     )
     .bind(limit)
-    .all<{ app_id: string; installation_id: number }>();
+    .all<{ app_id: string; installation_id: number; last_error: string | null }>();
   const threads = await db
     .prepare(
-      `SELECT DISTINCT app_id, installation_id FROM review_threads
+      `SELECT DISTINCT app_id, installation_id, last_error FROM review_threads
        WHERE resolution_state = 'suspended' LIMIT ?`,
     )
     .bind(limit)
-    .all<{ app_id: string; installation_id: number }>();
-  const merged = new Map<string, { appId: string; installationId: number }>();
+    .all<{ app_id: string; installation_id: number; last_error: string | null }>();
+  type Merged = {
+    appId: string;
+    installationId: number;
+    requiresIdentityProof: boolean;
+    credentialFingerprint: string | null;
+    conflicting: boolean;
+  };
+  const merged = new Map<string, Merged>();
   for (const row of [...pubs.results, ...threads.results]) {
-    merged.set(`${row.app_id}:${row.installation_id}`, { appId: row.app_id, installationId: row.installation_id });
+    const key = `${row.app_id}:${row.installation_id}`;
+    const existing = merged.get(key);
+    const recorded = suspensionCredentialOf(row.last_error);
+    let credentialFingerprint = existing?.credentialFingerprint ?? null;
+    let conflicting = existing?.conflicting ?? false;
+    if (recorded !== null) {
+      if (credentialFingerprint === null) credentialFingerprint = recorded;
+      else if (credentialFingerprint !== recorded) conflicting = true;
+    }
+    merged.set(key, {
+      appId: row.app_id,
+      installationId: row.installation_id,
+      requiresIdentityProof: (existing?.requiresIdentityProof ?? false) || suspensionKindOf(row.last_error) !== "disabled",
+      credentialFingerprint,
+      conflicting,
+    });
   }
-  return [...merged.values()].slice(0, limit);
+  return [...merged.values()].slice(0, limit).map((entry) => ({
+    appId: entry.appId,
+    installationId: entry.installationId,
+    requiresIdentityProof: entry.requiresIdentityProof,
+    // Disagreeing records prove nothing about the current credentials —
+    // null forces the identity proof instead of allowing a status-only resume.
+    credentialFingerprint: entry.conflicting ? null : entry.credentialFingerprint,
+  }));
 }
 
 /**

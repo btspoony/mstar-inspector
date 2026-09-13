@@ -18,6 +18,7 @@ import type {
 } from "../../src/pipeline/comment";
 import type { Discussion } from "../../src/contracts/recheck";
 import type { LineIntent } from "../../src/store/finding-lifecycle";
+import { PreparedSendRejected } from "../../src/pipeline/comment";
 
 export type CommenterCall = { op: string; args: unknown };
 
@@ -83,11 +84,16 @@ export function initialFakeCommenterState(): FakeCommenterState {
   };
 }
 
-/** Compliant minimal sandbox-read grant (assertSandboxGrant passes). */
+/**
+ * Compliant minimal sandbox-read grant (assertSandboxGrant passes):
+ * contents/metadata/pull_requests all returned read, exactly one repository,
+ * selection "selected" — the three reads the sandbox path really exercises
+ * (clone + `gh pr diff`).
+ */
 export function fakeSandboxGrant(token: string, input: TokenInput): InstallationTokenGrant {
   return {
     token,
-    permissions: { contents: "read", metadata: "read" },
+    permissions: { contents: "read", metadata: "read", pull_requests: "read" },
     repositoryNames: [input.scope.repo],
     repositorySelection: "selected",
   };
@@ -111,7 +117,7 @@ export function createFakeCommenter(state: FakeCommenterState, calls: CommenterC
     postPreparedReview: mock(async (input: unknown) => {
       calls.push({ op: "post-prepared", args: input });
       if (state.preparedReviewError) throw state.preparedReviewError;
-      if (state.preparedReviewReject) throw new Error("prepared review target no longer shows its expected previous version");
+      if (state.preparedReviewReject) throw new PreparedSendRejected("prepared review target no longer shows its expected previous version");
       return { commentId: state.preparedReviewCommentId };
     }),
     postPreparedDegraded: mock(async (input: unknown) => {

@@ -739,6 +739,111 @@ describe("resolveFindingThread — fences, adoption, mutation confirmation", () 
     expect((mutation!.variables.input as { threadId: string }).threadId).toBe(THREAD_GQL_ID);
   });
 
+  test("crash window: remote ids were never bound → resolve DISCOVERS them from the stored intent, then resolves (P67-QC-004)", async () => {
+    const db = createSeededTestD1();
+    const intent = await seedLifecycle(db);
+    const verified = await resolvedFixture(db, intent);
+    const root = { ...ROOT, body: buildLineCommentBody(intent) };
+    // The enqueue persists verified_json BEFORE discovery, so the crash window
+    // leaves exactly this shape: a verified snapshot with NO remote ids.
+    db.raw
+      .prepare(`UPDATE review_threads SET review_id = NULL, comment_id = NULL, thread_id = NULL WHERE id = ?`)
+      .run(ASSOC_ID);
+    const { octokit, calls } = fakeOctokit({
+      reviews: [batchReview(PUB_ID)],
+      reviewThreadsPages: [{ threads: [discoveryThread(intent)] }],
+      threadPages: [{ comments: [root, REPLY] }],
+      issueComments: { comments: [ISSUE_A] },
+    });
+
+    const outcome = await createReviewThreads(makeDeps(db, octokit)).resolveFindingThread({
+      scope: SCOPE,
+      associationId: ASSOC_ID,
+      verified,
+    });
+
+    // The unbound association completes instead of dying as
+    // `lookup-incomplete` — the crash window is genuinely recoverable.
+    expect(outcome).toEqual({
+      kind: "resolved",
+      threadId: THREAD_GQL_ID,
+      adopted: false,
+      outdated: false,
+      lateChange: false,
+    });
+    const row = db.raw
+      .query(`SELECT resolution_state, review_id, comment_id, thread_id FROM review_threads WHERE id = ?`)
+      .get(ASSOC_ID) as { resolution_state: string; review_id: number | null; comment_id: number | null; thread_id: string | null };
+    expect(row.resolution_state).toBe("resolved");
+    // Discovery BOUND the ids (they were null before this call).
+    expect(row.review_id).toBe(555);
+    expect(row.comment_id).toBe(ROOT_COMMENT_ID);
+    expect(row.thread_id).toBe(THREAD_GQL_ID);
+    expect(calls.some((c) => c.kind === "mutation")).toBe(true);
+  });
+
+  test("crash window with unprovable ownership: retry + durable error, never a terminal abandon (P67-QC-004)", async () => {
+    const db = createSeededTestD1();
+    const intent = await seedLifecycle(db);
+    const verified = await resolvedFixture(db, intent);
+    db.raw
+      .prepare(`UPDATE review_threads SET review_id = NULL, comment_id = NULL, thread_id = NULL WHERE id = ?`)
+      .run(ASSOC_ID);
+    // The consumer enqueues the verified snapshot BEFORE discovery (the crash
+    // window §7.11.1 protects), so the row owns a snapshot while unbound.
+    db.raw
+      .prepare(`UPDATE review_threads SET verified_json = ? WHERE id = ?`)
+      .run(JSON.stringify(verified), ASSOC_ID);
+    // No batch review at all → discovery cannot prove ownership.
+    const { octokit, calls } = fakeOctokit({
+      reviews: [],
+      reviewThreadsPages: [],
+      issueComments: { comments: [ISSUE_A] },
+    });
+
+    const outcome = await createReviewThreads(makeDeps(db, octokit)).resolveFindingThread({
+      scope: SCOPE,
+      associationId: ASSOC_ID,
+      verified,
+    });
+
+    expect(outcome).toEqual({ kind: "retry", reason: "lookup-incomplete" });
+    expect(calls.some((c) => c.kind === "mutation")).toBe(false);
+    const row = db.raw
+      .query(`SELECT resolution_state, holder, verified_json FROM review_threads WHERE id = ?`)
+      .get(ASSOC_ID) as { resolution_state: string; holder: string | null; verified_json: string | null };
+    // Retryable, lease-free, snapshot retained — M8 keeps owning it.
+    expect(row.resolution_state).toBe("retry");
+    expect(row.holder).toBeNull();
+    expect(row.verified_json).not.toBeNull();
+  });
+
+  test("discovery does NOT spend the resolution attempt budget (P67-QC-005)", async () => {
+    const db = createSeededTestD1();
+    const intent = await seedLifecycle(db);
+    const root = { ...ROOT, body: buildLineCommentBody(intent) };
+    const { octokit } = fakeOctokit({
+      reviews: [batchReview(PUB_ID)],
+      reviewThreadsPages: [{ threads: [discoveryThread(intent)] }],
+      threadPages: [{ comments: [root] }],
+      issueComments: { comments: [ISSUE_A] },
+    });
+    const ops = createReviewThreads(makeDeps(db, octokit));
+
+    const attemptsOf = (): number => {
+      const row = db.raw.query(`SELECT attempts FROM review_threads WHERE id = ?`).get(ASSOC_ID) as { attempts: number };
+      return row.attempts;
+    };
+    expect(attemptsOf()).toBe(0);
+
+    await ops.discoverThread({ scope: SCOPE, intent, reviewId: null });
+    // Binding remote ids is bookkeeping: the resolve budget is untouched.
+    expect(attemptsOf()).toBe(0);
+
+    await ops.discoverThread({ scope: SCOPE, intent, reviewId: null });
+    expect(attemptsOf()).toBe(0);
+  });
+
   test("HEAD changed after verification → needs-recheck head-changed, no mutation", async () => {
     const db = createSeededTestD1();
     const intent = await seedLifecycle(db);

@@ -711,13 +711,27 @@ async function loadAssociation(db: D1Like, id: string): Promise<AssociationRow |
 /**
  * Conditional epoch-fenced association lease: only a non-terminal row
  * (`pending`/`retry`) with a free or expired lease can be claimed; claiming
- * counts one attempt and stamps holder + epoch + 120s.
+ * stamps holder + epoch + 120s.
+ *
+ * `countAttempt` (default true) decides whether this claim spends one of the
+ * row's resolution attempts. An ACTUAL resolution attempt spends one; the
+ * §7.5 DISCOVERY pass does not (P67-QC-005) — discovery is read-only
+ * bookkeeping that binds remote ids, and charging it would let a crash
+ * window burn the whole retry budget before any resolve was ever issued.
  */
-async function claimAssociationLease(db: D1Like, id: string, holder: string, nowMs: number): Promise<Lease | null> {
+async function claimAssociationLease(
+  db: D1Like,
+  id: string,
+  holder: string,
+  nowMs: number,
+  countAttempt = true,
+): Promise<Lease | null> {
   const claim = await db
     .prepare(
       `UPDATE review_threads
-       SET holder = ?, lease_epoch = lease_epoch + 1, lease_until_ms = ?, updated_ms = ?, attempts = attempts + 1
+       SET holder = ?, lease_epoch = lease_epoch + 1, lease_until_ms = ?, updated_ms = ?${
+         countAttempt ? ", attempts = attempts + 1" : ""
+       }
        WHERE id = ? AND resolution_state IN ('pending','retry')
          AND (lease_until_ms IS NULL OR lease_until_ms <= ?)`,
     )
@@ -842,11 +856,23 @@ function isBotIdentity(authorType: string | null, authorLogin: string | null, bo
  * batch match. Found ids persist under the association's lease BEFORE any
  * resolve may run.
  */
-export async function discoverThreadWithDeps(
+/**
+ * The §7.5 ownership/provenance LOOKUP shared by discovery and resolve: load
+ * the prepared association, verify the confirmed original publication + the
+ * stored intent consistency, prove the authenticated App identity, then walk
+ * the bounded review-batch and thread scans for the unique complete match.
+ *
+ * Read-only and lease-free by design: the caller owns persistence (and
+ * therefore the lease/fencing), which is what lets the resolve path use this
+ * same proof when it has to bind missing remote ids itself (P67-QC-004)
+ * without a nested claim on a lease it already holds.
+ */
+async function lookupThreadForIntent(
   deps: ReviewThreadsDeps,
-  input: { scope: Scope; intent: LineIntent; reviewId: number | null },
+  scope: Scope,
+  intent: LineIntent,
+  reviewId: number | null,
 ): Promise<DiscoveryResult> {
-  const { scope, intent } = input;
   // Reject scope mismatch or unknown association BEFORE any API call.
   const row = await loadAssociation(deps.db, intent.associationId);
   if (row === null || !sameScope(row, scope)) return { kind: "unknown" };
@@ -882,7 +908,7 @@ export async function discoverThreadWithDeps(
 
   // The expected original line-review batch marker on the App-owned review.
   // Read-path transport failures are TYPED (`unknown`), never exceptions —
-  // discovery has no lease held yet, so there is nothing to unwind.
+  // the caller holds no lease for this read, so there is nothing to unwind.
   let reviews: PrReviewStub[];
   try {
     reviews = await fetchPrReviews(ctx.octokit, scope);
@@ -890,12 +916,12 @@ export async function discoverThreadWithDeps(
     return { kind: "unknown" };
   }
   let review: PrReviewStub | null = null;
-  if (input.reviewId !== null) {
+  if (reviewId !== null) {
     // A known returned reviewId must match exactly — AND the review body
     // must carry OUR prepared line-batch marker (spec §7.5 lists the batch
     // marker among the unconditional adoption requirements; a review id
     // alone never proves the body was not edited/replaced).
-    const known = reviews.find((r) => r.fullDatabaseId === String(input.reviewId));
+    const known = reviews.find((r) => r.fullDatabaseId === String(reviewId));
     if (known === undefined) {
       return { kind: "foreign" };
     }
@@ -954,24 +980,45 @@ export async function discoverThreadWithDeps(
   if (candidates.length > 1) return { kind: "ambiguous" };
   const found = candidates[0]!.thread;
   const root = found.root!;
-  const reviewId = Number(review.fullDatabaseId);
+  const resolvedReviewId = Number(review.fullDatabaseId);
   const commentId = Number(root.fullDatabaseId);
-  if (!Number.isSafeInteger(reviewId) || !Number.isSafeInteger(commentId)) return { kind: "unknown" };
+  if (!Number.isSafeInteger(resolvedReviewId) || !Number.isSafeInteger(commentId)) return { kind: "unknown" };
+  return { kind: "found", reviewId: resolvedReviewId, commentId, threadId: found.id };
+}
+
+/**
+ * Discovery + adoption of one prepared association's remote thread (spec
+ * §7.5 "Discovery/adoption" verbatim). See the module docblock for the full
+ * gate list. `input.reviewId === null` means the send response was lost —
+ * the PR's bounded review batches are then inspected for the unique complete
+ * batch match. Found ids persist under the association's lease BEFORE any
+ * resolve may run.
+ */
+export async function discoverThreadWithDeps(
+  deps: ReviewThreadsDeps,
+  input: { scope: Scope; intent: LineIntent; reviewId: number | null },
+): Promise<DiscoveryResult> {
+  const { scope, intent } = input;
+  const result = await lookupThreadForIntent(deps, scope, intent, input.reviewId);
+  if (result.kind !== "found") return result;
 
   // Persist discovered review/comment/thread ids under the association's
-  // lease BEFORE resolving (spec §7.5).
+  // lease BEFORE resolving (spec §7.5). This is DISCOVERY, not a resolution
+  // attempt: the claim does not spend the row's ≤5-attempt resolution budget
+  // (P67-QC-005), so a crash-recovery pass that only binds ids can never
+  // consume the budget the actual resolve needs.
   const holder = `review-threads:${intent.associationId}`;
-  const lease = await claimAssociationLease(deps.db, intent.associationId, holder, deps.nowMs());
+  const lease = await claimAssociationLease(deps.db, intent.associationId, holder, deps.nowMs(), false);
   if (lease === null) return { kind: "unknown" };
   await deps.db
     .prepare(
       `UPDATE review_threads SET review_id = ?, comment_id = ?, thread_id = ?, updated_ms = ?
        WHERE id = ? AND holder = ? AND lease_epoch = ?`,
     )
-    .bind(reviewId, commentId, found.id, deps.nowMs(), intent.associationId, lease.holder, lease.epoch)
+    .bind(result.reviewId, result.commentId, result.threadId, deps.nowMs(), intent.associationId, lease.holder, lease.epoch)
     .run();
   await releaseAssociationLease(deps.db, intent.associationId, lease, deps.nowMs());
-  return { kind: "found", reviewId, commentId, threadId: found.id };
+  return result;
 }
 
 // --- resolution ---------------------------------------------------------------
@@ -1086,14 +1133,50 @@ export async function resolveFindingThreadWithDeps(
     await persistOutcome(deps.db, associationId, lease, nowMs, { state: "retry", error: "app identity unavailable" });
     return { kind: "retry", reason: "api" };
   }
-  if (row.thread_id === null || row.comment_id === null || row.review_id === null) {
-    await releaseAssociationLease(deps.db, associationId, lease, nowMs);
-    return { kind: "retry", reason: "lookup-incomplete" };
+  const intent: LineIntent | null = safeParseIntent(row.intent_json);
+  if (intent === null) {
+    await persistOutcome(deps.db, associationId, lease, nowMs, { state: "abandoned", error: "stored intent unreadable" });
+    return { kind: "abandoned", reason: "foreign" };
+  }
+  // Crash-window recovery (§7.11.1 failure matrix: "Crash before/after
+  // resolve API → Pending association + verified snapshot → M8 retries
+  // original fences"): the row may hold its verified snapshot while the
+  // remote ids were never bound, because the enqueue is deliberately
+  // persisted BEFORE discovery. Discovery is exactly the §7.5 pass that
+  // binds them, so run it here from the STORED intent rather than
+  // returning `lookup-incomplete` forever — that outcome would consume the
+  // whole retry budget and strand the row as a terminal local-error for a
+  // crash we can repair (P67-QC-004).
+  let commentId = row.comment_id;
+  let threadId = row.thread_id;
+  if (threadId === null || commentId === null || row.review_id === null) {
+    const discovered = await lookupThreadForIntent(deps, scope, intent, null);
+    if (discovered.kind !== "found") {
+      // Still unprovable (unknown/ambiguous/foreign): a TYPED retry — the
+      // row keeps its snapshot and stays due for the next pass. The lease
+      // is released through persistOutcome, never held until expiry.
+      await persistOutcome(deps.db, associationId, lease, nowMs, {
+        state: "retry",
+        error: `thread discovery returned ${discovered.kind}`,
+      });
+      return { kind: "retry", reason: "lookup-incomplete" };
+    }
+    // Bind the discovered ids in the SAME fencing epoch as the claim, so a
+    // concurrent resolver can never observe a half-written association.
+    await deps.db
+      .prepare(
+        `UPDATE review_threads SET review_id = ?, comment_id = ?, thread_id = ?, updated_ms = ?
+         WHERE id = ? AND holder = ? AND lease_epoch = ?`,
+      )
+      .bind(discovered.reviewId, discovered.commentId, discovered.threadId, nowMs, associationId, lease.holder, lease.epoch)
+      .run();
+    commentId = discovered.commentId;
+    threadId = discovered.threadId;
   }
 
   let capture: ThreadCapture;
   try {
-    capture = await fetchThreadConversation(ctx.octokit, row.thread_id);
+    capture = await fetchThreadConversation(ctx.octokit, threadId);
   } catch (err) {
     // Read-path transport failure is a TYPED retry — the lease is released
     // through persistOutcome, never held until expiry by an escaping throw.
@@ -1116,7 +1199,7 @@ export async function resolveFindingThreadWithDeps(
     return { kind: "needs-recheck", reason: "context-incomplete" };
   }
   const root = capture.comments[0] ?? null; // chronological first = root
-  if (root === null || root.fullDatabaseId !== String(row.comment_id)) {
+  if (root === null || root.fullDatabaseId !== String(commentId)) {
     await persistOutcome(deps.db, associationId, lease, nowMs, { state: "abandoned", error: "root comment mismatch" });
     return { kind: "abandoned", reason: "foreign" };
   }
@@ -1133,11 +1216,6 @@ export async function resolveFindingThreadWithDeps(
     await persistOutcome(deps.db, associationId, lease, nowMs, { state: "abandoned", error: "root author is not the authenticated App bot" });
     return { kind: "abandoned", reason: "identity-mismatch" };
   }
-  const intent: LineIntent | null = safeParseIntent(row.intent_json);
-  if (intent === null) {
-    await persistOutcome(deps.db, associationId, lease, nowMs, { state: "abandoned", error: "stored intent unreadable" });
-    return { kind: "abandoned", reason: "foreign" };
-  }
   if (thread.path !== intent.path || thread.line !== intent.line) {
     await persistOutcome(deps.db, associationId, lease, nowMs, { state: "abandoned", error: "thread path/line mismatch" });
     return { kind: "abandoned", reason: "foreign" };
@@ -1151,7 +1229,7 @@ export async function resolveFindingThreadWithDeps(
   }
   const digest = await threadDigestOf({
     threadId: thread.id,
-    rootCommentId: String(row.comment_id),
+    rootCommentId: String(commentId),
     headSha: capture.headRefOid,
     comments: capture.comments,
   });
@@ -1227,7 +1305,7 @@ export async function resolveFindingThreadWithDeps(
       after.headRefOid !== capture.headRefOid ||
       (await threadDigestOf({
         threadId: thread.id,
-        rootCommentId: String(row.comment_id),
+        rootCommentId: String(commentId),
         headSha: after.headRefOid,
         comments: after.comments,
       })) !== digest ||

@@ -3034,3 +3034,148 @@ describe("finding recheck & closure (plan 67 §7.7/§7.4/§7.10)", () => {
     expect(kvPuts).toHaveLength(1);
   });
 });
+
+describe("definitive pre-send rejection in the consumer (spec §7.7, P67-QC-010)", () => {
+  test("a prepared review refusal marks the journal failed, not unknown, and terminalizes pre-publication-failure", async () => {
+    reset();
+    diffStdout = VALID_DIFF;
+    runnerStdout = JSON.stringify(VALID_OUTPUT);
+    // The send refuses BEFORE any request leaves the Worker (a foreign marker
+    // appeared after the plan / the target lost its expected previous version).
+    commenterState.preparedReviewReject = true;
+    const db = await createSeededTestD1();
+    const terminalized: Array<{ outcome: string; publicationId: string | null }> = [];
+    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, {
+      ...testOverrides,
+      checks: {
+        begin: mock(async () => ({ attemptId: "a1", scope: { appId: TEST_APP_ID, installationId: 123, owner: "acme", repo: "widgets", prNumber: 42 }, githubAppId: 1001, headSha: SHA, lease: { holder: "h", epoch: 1, untilMs: Date.now() + 1000 } })),
+        terminalize: mock(async (input: { outcome: string; publicationId: string | null }) => {
+          terminalized.push({ outcome: input.outcome, publicationId: input.publicationId });
+        }),
+      },
+    });
+
+    await consumer(makeBatch(makePayload()));
+
+    const row = db.raw
+      .query(`SELECT phase, payload_json, proof_json, attempts FROM review_publications`)
+      .get() as { phase: string; payload_json: string; proof_json: string | null; attempts: number };
+    // Not published, and durably recorded as NOT sent.
+    expect(row.phase).toBe("failed");
+    expect(row.proof_json).toBeNull();
+    // The complete payload survives for operator inspection.
+    expect(JSON.parse(row.payload_json).body).toContain("mstar-inspector:publication:v1");
+    // The Check conclusion is the honest pre-publication failure, not unknown.
+    expect(terminalized).toHaveLength(1);
+    expect(terminalized[0]!.outcome).toBe("pre-publication-failure");
+    expect(terminalized[0]!.publicationId).toBeNull();
+
+    // No KV done: the message acked on the honest failure path only.
+    expect(kvPuts).toHaveLength(0);
+  });
+
+  test("a post-attempt send throw still classifies as publication-unknown with the id", async () => {
+    reset();
+    diffStdout = VALID_DIFF;
+    runnerStdout = JSON.stringify(VALID_OUTPUT);
+    commenterState.preparedReviewError = new Error("socket hangup after send");
+    const db = await createSeededTestD1();
+    const terminalized: Array<{ outcome: string; publicationId: string | null }> = [];
+    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, {
+      ...testOverrides,
+      checks: {
+        begin: mock(async () => ({ attemptId: "a1", scope: { appId: TEST_APP_ID, installationId: 123, owner: "acme", repo: "widgets", prNumber: 42 }, githubAppId: 1001, headSha: SHA, lease: { holder: "h", epoch: 1, untilMs: Date.now() + 1000 } })),
+        terminalize: mock(async (input: { outcome: string; publicationId: string | null }) => {
+          terminalized.push({ outcome: input.outcome, publicationId: input.publicationId });
+        }),
+      },
+    });
+
+    await expect(consumer(makeBatch(makePayload()))).rejects.toThrow("socket hangup after send");
+
+    const row = db.raw.query(`SELECT phase FROM review_publications`).get() as { phase: string };
+    expect(row.phase).toBe("sending"); // read-only discovery owns it
+    expect(terminalized).toHaveLength(1);
+    expect(terminalized[0]!.outcome).toBe("publication-unknown");
+    expect(terminalized[0]!.publicationId).not.toBeNull();
+  });
+});
+
+describe("degraded publication journal conflict guard (spec §7.7, P67-QC-012)", () => {
+  test("a degraded staging conflict refuses to send under the existing identity", async () => {
+    reset();
+    runnerStdout = "not valid json at all";
+    const db = await createSeededTestD1();
+    // Pre-seed a TERMINAL degraded row for the SAME (scope, sha, kind) under
+    // another id. It is terminal, so the earlier journal handoff does not ack
+    // the message, but stagePublication still conflicts on the unique
+    // (scope, sha, kind) key and returns the existing row — the consumer must
+    // then NOT send its own body under that identity.
+    db.raw
+      .prepare(
+        `INSERT INTO review_publications
+           (id, app_id, installation_id, owner, repo, pr_number, head_sha, kind, phase,
+            payload_json, created_ms, updated_ms)
+         VALUES ('existing-deg', ?, 123, 'acme', 'widgets', 42, ?, 'degraded', 'failed', ?, 1, 1)`,
+      )
+      .run(TEST_APP_ID, SHA, JSON.stringify({ version: 1, body: "existing immutable payload" }));
+    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
+
+    await consumer(makeBatch(makePayload()));
+
+    // The degraded send was never attempted under the existing identity.
+    expect(commenterCalls.some((c) => c.op === "post-prepared-degraded")).toBe(false);
+    // The pre-existing payload is untouched (immutable payload wins).
+    const row = db.raw.query(`SELECT payload_json FROM review_publications WHERE id = 'existing-deg'`).get() as { payload_json: string };
+    expect(JSON.parse(row.payload_json).body).toBe("existing immutable payload");
+    const warn = logLines.find((l) => l.msg.includes("journal conflict"));
+    expect(warn).toBeDefined();
+  });
+});
+
+describe("degraded cleanup journal gate (spec §7.7 step 11, P67-QC-008)", () => {
+  test("an unconfirmed degraded publication preserves its comment body evidence", async () => {
+    reset();
+    diffStdout = VALID_DIFF;
+    runnerStdout = JSON.stringify(VALID_OUTPUT);
+    const db = await createSeededTestD1();
+    // A prior degraded send whose proof was lost: its body is the ONLY
+    // recovery evidence for a possibly-landed publication.
+    db.raw
+      .prepare(
+        `INSERT INTO review_publications
+           (id, app_id, installation_id, owner, repo, pr_number, head_sha, kind, phase,
+            payload_json, created_ms, updated_ms)
+         VALUES ('deg-uncertain', ?, 123, 'acme', 'widgets', 42, 'oldsha', 'degraded', 'unknown', ?, 1, 1)`,
+      )
+      .run(TEST_APP_ID, JSON.stringify({ version: 1, body: "degraded body" }));
+    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
+
+    await consumer(makeBatch(makePayload()));
+
+    // Cleanup was SKIPPED: deleting the comment would destroy that evidence.
+    expect(commenterCalls.some((c) => c.op === "delete-degraded")).toBe(false);
+    const warn = logLines.find((l) => l.msg.includes("cleanup skipped"));
+    expect(warn).toBeDefined();
+  });
+
+  test("a terminal degraded row does not block the cleanup", async () => {
+    reset();
+    diffStdout = VALID_DIFF;
+    runnerStdout = JSON.stringify(VALID_OUTPUT);
+    const db = await createSeededTestD1();
+    db.raw
+      .prepare(
+        `INSERT INTO review_publications
+           (id, app_id, installation_id, owner, repo, pr_number, head_sha, kind, phase,
+            payload_json, proof_json, created_ms, updated_ms)
+         VALUES ('deg-confirmed', ?, 123, 'acme', 'widgets', 42, 'oldsha', 'degraded', 'applied', ?, '{}', 1, 1)`,
+      )
+      .run(TEST_APP_ID, JSON.stringify({ version: 1, body: "degraded body" }));
+    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
+
+    await consumer(makeBatch(makePayload()));
+
+    expect(commenterCalls.some((c) => c.op === "delete-degraded")).toBe(true);
+  });
+});

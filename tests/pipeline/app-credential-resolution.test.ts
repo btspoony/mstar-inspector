@@ -166,7 +166,7 @@ const appCommenterFactory = mock((cred: CommenterEnv): ReviewCommenter => {
   // sandbox-read grant scoped to the requested repository.
   const sandboxGrant = (token: string, input: TokenInput): InstallationTokenGrant => ({
     token,
-    permissions: { contents: "read", metadata: "read" },
+    permissions: { contents: "read", metadata: "read", pull_requests: "read" },
     repositoryNames: [input.scope.repo],
     repositorySelection: "selected",
   });

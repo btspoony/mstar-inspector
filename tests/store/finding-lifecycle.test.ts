@@ -42,8 +42,11 @@ import {
   applyPublishedLifecycle,
   claimPublication,
   countOpenFindings,
+  hasUnprovenDegradedPublication,
   listPublicationRecovery,
   listResolutionRecovery,
+  listSuspendedLifecycleApps,
+  markPublicationFailed,
   PUBLICATION_LEASE_MS,
   PUBLICATION_MAX_BYTES,
   readPublicationProof,
@@ -51,6 +54,11 @@ import {
   retryLifecycleWork,
   selectAssessmentTargets,
   stagePublication,
+  suspendPublicationRecovery,
+  suspendResolutionRecovery,
+  suspensionCredentialOf,
+  suspensionKindOf,
+  suspensionReasonOf,
   type LifecycleRound,
   type LineIntent,
   type Lease,
@@ -1204,5 +1212,196 @@ describe("private journal visibility (spec §7.1, consumer-visible behavior)", (
       .prepare("SELECT COUNT(*) AS n FROM findings WHERE title LIKE '%' || ? || '%' OR body LIKE '%' || ? || '%'")
       .get("assoc-1", "pub-1") as { n: number };
     expect(bodyLeak.n).toBe(0);
+  });
+});
+
+describe("definitive pre-send failure is a durable phase (spec §7.7, P67-QC-010)", () => {
+  test("markPublicationFailed sets phase='failed' and retains payload/attempts; recovery stops selecting it", async () => {
+    const db = createSeededTestD1();
+    await stagePublication(db, { id: "pub-1", payload: payload(), nowMs: 1_000 });
+    const lease = await claimPublication(db, "pub-1", "holder", 2_000);
+    if (lease === null) throw new Error("setup: claim failed");
+
+    const ok = await markPublicationFailed(db, "pub-1", lease, "definitive rejection before send", 3_000);
+    expect(ok).toBe(true);
+
+    const row = db.raw
+      .prepare(`SELECT phase, payload_json, proof_json, attempts, holder, lease_until_ms, recovery_state, last_error
+                FROM review_publications WHERE id = 'pub-1'`)
+      .get() as {
+        phase: string; payload_json: string; proof_json: string | null; attempts: number;
+        holder: string | null; lease_until_ms: number | null; recovery_state: string; last_error: string | null;
+      };
+    // The truthful terminal state for a not-sent publication…
+    expect(row.phase).toBe("failed");
+    expect(row.last_error).toContain("definitive rejection before send");
+    // …with the payload RETAINED for operator inspection and no proof claim.
+    expect(JSON.parse(row.payload_json).body).toBe("review body");
+    expect(row.proof_json).toBeNull();
+    expect(row.attempts).toBe(1); // the claim that discovered the rejection
+    expect(row.holder).toBeNull();
+    expect(row.lease_until_ms).toBeNull();
+    expect(row.recovery_state).toBe("pending");
+
+    // Nothing re-sends it: the phase is skipped by the recovery selector's
+    // caller, and the failure is not erasable by a later pass.
+    const selected = await listPublicationRecovery(db, 10_000, 10);
+    expect(selected.map((r) => r.phase)).toEqual(["failed"]);
+  });
+
+  test("a post-attempt unknown is NOT marked failed — the two states stay distinct", async () => {
+    const db = createSeededTestD1();
+    await stagePublication(db, { id: "pub-1", payload: payload(), nowMs: 1_000 });
+    const lease = await claimPublication(db, "pub-1", "holder", 2_000);
+    if (lease === null) throw new Error("setup: claim failed");
+    // already confirmed → not eligible for the failed transition
+    const confirmed = await recordPublicationProof(db, "pub-1", lease, {
+      publicationId: "pub-1",
+      scope: SCOPE,
+      headSha: SHA,
+      kind: "review",
+      round: 1,
+      commentId: 5,
+      bodySha256: payload().bodySha256,
+      confirmedMs: 3_000,
+    });
+    expect(confirmed).toBe(true);
+    const stale = { holder: "holder", epoch: lease.epoch, untilMs: 0 };
+    expect(await markPublicationFailed(db, "pub-1", stale, "late", 4_000)).toBe(false);
+    const row = db.raw.prepare(`SELECT phase FROM review_publications WHERE id = 'pub-1'`).get() as { phase: string };
+    expect(row.phase).toBe("confirmed");
+  });
+});
+
+describe("degraded-cleanup journal gate (spec §7.7 step 11, P67-QC-008)", () => {
+  test("an unproven degraded publication blocks cleanup; proof or a terminal failure unblocks it", async () => {
+    const db = createSeededTestD1();
+    // No degraded row at all → cleanup is safe.
+    expect(await hasUnprovenDegradedPublication(db, SCOPE)).toBe(false);
+
+    await stagePublication(db, { id: "deg-1", payload: payload({ kind: "degraded", artifact: null, lifecycle: null, body: "degraded body", bodySha256: "c".repeat(64) }), nowMs: 1_000 });
+    // Prepared, unproven: its body is the ONLY recovery evidence.
+    expect(await hasUnprovenDegradedPublication(db, SCOPE)).toBe(true);
+
+    // Sending/unknown are equally protected (the send may have landed).
+    db.raw.prepare(`UPDATE review_publications SET phase = 'sending' WHERE id = 'deg-1'`).run();
+    expect(await hasUnprovenDegradedPublication(db, SCOPE)).toBe(true);
+    db.raw.prepare(`UPDATE review_publications SET phase = 'unknown' WHERE id = 'deg-1'`).run();
+    expect(await hasUnprovenDegradedPublication(db, SCOPE)).toBe(true);
+
+    // A definitive not-sent failure has no remote evidence to preserve.
+    db.raw.prepare(`UPDATE review_publications SET phase = 'failed' WHERE id = 'deg-1'`).run();
+    expect(await hasUnprovenDegradedPublication(db, SCOPE)).toBe(false);
+
+    // Confirmed proof likewise unblocks the cleanup.
+    db.raw
+      .prepare(`UPDATE review_publications SET phase = 'confirmed', proof_json = '{}' WHERE id = 'deg-1'`)
+      .run();
+    expect(await hasUnprovenDegradedPublication(db, SCOPE)).toBe(false);
+  });
+
+  test("a REVIEW publication never blocks the degraded cleanup (kind-scoped)", async () => {
+    const db = createSeededTestD1();
+    await stagePublication(db, { id: "pub-1", payload: payload(), nowMs: 1_000 });
+    expect(await hasUnprovenDegradedPublication(db, SCOPE)).toBe(false);
+  });
+});
+
+describe("durable suspension kinds (spec §7.6, P67-QC-007)", () => {
+  test("suspension kinds round-trip through the durable reason, with the credential fingerprint", () => {
+    const fingerprint = "a".repeat(64);
+    const reason = suspensionReasonOf("identity-mismatch", "live App identity does not match", fingerprint);
+    expect(suspensionKindOf(reason)).toBe("identity-mismatch");
+    expect(suspensionCredentialOf(reason)).toBe(fingerprint);
+    // No fingerprint recorded (missing mapping) stays null, not a fake value.
+    const plain = suspensionReasonOf("missing", "mapping missing");
+    expect(suspensionKindOf(plain)).toBe("missing");
+    expect(suspensionCredentialOf(plain)).toBeNull();
+    // Legacy / free-text rows are `unknown` — never treated as status-driven.
+    expect(suspensionKindOf("a legacy operator note")).toBe("unknown");
+    expect(suspensionKindOf(null)).toBe("unknown");
+  });
+
+  test("listSuspendedLifecycleApps marks identity-mismatch pairs as requiring an identity proof, disabled ones not", async () => {
+    const db = createSeededTestD1();
+    await stagePublication(db, { id: "pub-1", payload: payload(), nowMs: 1_000 });
+    const fingerprint = "b".repeat(64);
+    await suspendPublicationRecovery(
+      db,
+      { appId: APP_ID, installationId: 123 },
+      { kind: "identity-mismatch", reason: "identity mismatch", credentialFingerprint: fingerprint },
+      2_000,
+    );
+    let pairs = await listSuspendedLifecycleApps(db, 10);
+    expect(pairs).toHaveLength(1);
+    expect(pairs[0]).toMatchObject({
+      appId: APP_ID,
+      installationId: 123,
+      requiresIdentityProof: true,
+      credentialFingerprint: fingerprint,
+    });
+
+    // A DISABLED suspension is status-driven: no identity proof required.
+    const db2 = createSeededTestD1();
+    await stagePublication(db2, { id: "pub-2", payload: payload(), nowMs: 1_000 });
+    await suspendPublicationRecovery(
+      db2,
+      { appId: APP_ID, installationId: 123 },
+      { kind: "disabled", reason: "disabled" },
+      2_000,
+    );
+    pairs = await listSuspendedLifecycleApps(db2, 10);
+    expect(pairs[0]).toMatchObject({ requiresIdentityProof: false, credentialFingerprint: null });
+  });
+
+  test("the thread lane's suspension carries the kind too, and both lanes agree on the pair", async () => {
+    const db = createSeededTestD1();
+    await stagePublication(db, { id: "pub-1", payload: payload(), nowMs: 1_000 });
+    await stagePublication(db, { id: "pub-2", payload: payload({ kind: "degraded", artifact: null, lifecycle: null, body: "degraded body", bodySha256: "c".repeat(64) }), nowMs: 1_000 });
+    const fingerprint = "c".repeat(64);
+    await suspendPublicationRecovery(
+      db,
+      { appId: APP_ID, installationId: 123 },
+      { kind: "identity-mismatch", reason: "identity mismatch", credentialFingerprint: fingerprint },
+      2_000,
+    );
+    await suspendResolutionRecovery(
+      db,
+      { appId: APP_ID, installationId: 123 },
+      { kind: "identity-mismatch", reason: "identity mismatch", credentialFingerprint: fingerprint },
+      2_000,
+    );
+    const pairs = await listSuspendedLifecycleApps(db, 10);
+    expect(pairs).toHaveLength(1);
+    expect(pairs[0]!.requiresIdentityProof).toBe(true);
+    expect(pairs[0]!.credentialFingerprint).toBe(fingerprint);
+  });
+
+  test("disagreeing credential fingerprints on one pair withhold the fingerprint (forcing a fresh proof)", async () => {
+    const db = createSeededTestD1();
+    await stagePublication(db, { id: "pub-1", payload: payload(), nowMs: 1_000 });
+    await stagePublication(
+      db,
+      { id: "pub-2", payload: payload({ kind: "degraded", artifact: null, lifecycle: null, body: "degraded body" }), nowMs: 1_000 },
+    );
+    await suspendPublicationRecovery(
+      db,
+      { appId: APP_ID, installationId: 123 },
+      { kind: "identity-mismatch", reason: "identity mismatch", credentialFingerprint: "d".repeat(64) },
+      2_000,
+    );
+    // A second row of the SAME pair carrying a DIFFERENT recorded fingerprint:
+    // the pair's history disagrees, so no single digest may be trusted.
+    db.raw
+      .prepare(
+        `UPDATE review_publications SET recovery_state = 'suspended', last_error = ?
+         WHERE id = 'pub-2'`,
+      )
+      .run(suspensionReasonOf("identity-mismatch", "identity mismatch", "e".repeat(64)));
+    const pairs = await listSuspendedLifecycleApps(db, 10);
+    expect(pairs).toHaveLength(1);
+    expect(pairs[0]!.requiresIdentityProof).toBe(true);
+    // Withheld: the caller must re-prove identity rather than trust one digest.
+    expect(pairs[0]!.credentialFingerprint).toBeNull();
   });
 });
