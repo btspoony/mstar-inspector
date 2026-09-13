@@ -47,8 +47,68 @@
  */
 
 import type { Scope } from "../contracts/recheck";
-import type { Lease } from "./finding-lifecycle";
+import { suspensionCredentialOf, type Lease, type SuspensionKind } from "./finding-lifecycle";
 import type { D1Like, ReviewCheckRow } from "./types";
+
+// ---------------------------------------------------------------------------
+// Suspension encoding (spec §7.6 — one grammar, shared with the M8 lane)
+// ---------------------------------------------------------------------------
+
+/**
+ * The Check lane's suspension kinds. It carries the M8 set verbatim plus its
+ * own `paused`, which M8 has no equivalent for: the Check lane must stop
+ * creating for a kill-switched App (spec §7.6) while M8's publication lane
+ * simply does not send.
+ */
+export type CheckSuspensionKind = SuspensionKind | "paused";
+
+/**
+ * Encode a suspension reason in the SAME durable grammar the M8 lane owns
+ * (`<prefix><kind>: <text> cred=<64-hex>`, `src/store/finding-lifecycle.ts`).
+ * `suspensionReasonOf` is the encoder of record but its parameter is narrowed
+ * to the M8 kind set, and finding-lifecycle is outside this task's allowed
+ * edit set — so the lane's one extra kind rides the identical grammar here
+ * rather than widening a sibling module's public union. The fingerprint is
+ * parsed back by the SHARED reader (`suspensionCredentialOf`), so the token
+ * cannot drift between the two lanes.
+ */
+export function checkSuspensionReason(
+  kind: CheckSuspensionKind,
+  text: string,
+  credentialFingerprint?: string,
+): string {
+  const suffix = credentialFingerprint === undefined ? "" : ` cred=${credentialFingerprint}`;
+  return `suspend:${kind}: ${text}${suffix}`;
+}
+
+/**
+ * The matching reader. Anything unrecognized — including a legacy row written
+ * before this encoding — is `unknown`, which the re-enable scan treats exactly
+ * like an identity-mismatch: it demands a fresh live credential proof rather
+ * than auto-resuming on App status alone. That fail-closed default is the whole
+ * point of the encoding (P68-QC-003).
+ */
+export function checkSuspensionKindOf(lastError: string | null): CheckSuspensionKind {
+  if (lastError === null || !lastError.startsWith("suspend:")) return "unknown";
+  const rest = lastError.slice("suspend:".length);
+  const colon = rest.indexOf(":");
+  const kind = colon === -1 ? rest : rest.slice(0, colon);
+  switch (kind) {
+    case "disabled":
+    case "identity-mismatch":
+    case "missing":
+    case "deleted":
+    case "decrypt-failed":
+    case "paused":
+      return kind;
+    default:
+      return "unknown";
+  }
+}
+
+/** The shared fingerprint reader (M8's own), re-exported for the Check lane. */
+export { suspensionCredentialOf };
+export type { SuspensionKind };
 
 /** The authenticated routing scope (spec §7.0) — same vocabulary as the store. */
 export type { Scope } from "../contracts/recheck";
@@ -1015,6 +1075,43 @@ export async function markCheckLocalError(
 }
 
 /**
+ * Bounded pause deferral (P68-QC-006). A paused App's never-sent row has
+ * proved (complete adoption walk, no remote run) that it must NOT create, but
+ * §7.11.2 step 5 forbids spending an attempt for work that did not run. The
+ * row therefore leaves the immediately-due batch through the SAME durable
+ * `suspended` state the credential path uses — with the `paused` kind recorded
+ * — and is returned by the ordinary re-enable scan.
+ *
+ * That is exactly the "fenced owned-row suspension/deferral" the finding asks
+ * for: one statement under the live lease, no bulk write racing the release,
+ * `attempts` untouched, and every identity field retained. `next_attempt_ms`
+ * is cleared for the same reason `suspendCheckRecovery` clears it — a suspended
+ * row is not "due later", it is out of the batch until its pair is re-enabled.
+ *
+ * The trade-off is deliberate and is the safer half of the finding: while the
+ * App is paused the row costs ONE D1 read per pass (the re-enable scan) and
+ * ZERO credential or adoption requests, instead of re-minting a client and
+ * re-walking `listForRef` every cron window.
+ */
+export async function suspendCheckForPause(
+  db: D1Like,
+  id: string,
+  lease: Lease,
+  reason: string,
+  nowMs: number,
+): Promise<boolean> {
+  return runFenced(
+    db,
+    id,
+    lease,
+    `recovery_state = 'suspended', holder = NULL, lease_until_ms = NULL,
+            next_attempt_ms = NULL, last_error = ?`,
+    [checkReason(checkSuspensionReason("paused", reason))],
+    nowMs,
+  );
+}
+
+/**
  * Durable App-lifecycle suspension for the Check lane (spec §7.6): rows keep
  * their identities while suspended and return to `pending` on re-enable. The
  * pair binds BOTH durable App ids through the registry's own columns — never a
@@ -1027,6 +1124,13 @@ export async function markCheckLocalError(
  * that invocation's next fenced write silently a no-op. Only expired/null
  * leases are suspended; a live one is left for its owner to finish, and the
  * pair is re-examined on a later pass.
+ *
+ * `suspended` is INCLUDED in the state predicate, matching M8 verbatim. That is
+ * what makes a re-stamp work: when an operator corrects the credentials and the
+ * pair still fails, the pass must be able to overwrite the recorded digest on
+ * the already-suspended row. Without it the stale digest would survive, every
+ * later pass would see "credentials changed" again, and the pair would churn
+ * exactly as P68-QC-003 describes — the finding the digest exists to close.
  */
 export async function suspendCheckRecovery(
   db: D1Like,
@@ -1040,7 +1144,7 @@ export async function suspendCheckRecovery(
           SET recovery_state = 'suspended', holder = NULL, lease_until_ms = NULL,
               next_attempt_ms = NULL, last_error = ?, updated_ms = ?
         WHERE app_id = ? AND installation_id = ? AND ${NONTERMINAL_WHERE}
-          AND recovery_state IN ('pending','remote-unconfirmed')
+          AND recovery_state IN ('pending','remote-unconfirmed','suspended')
           AND (lease_until_ms IS NULL OR lease_until_ms <= ?)`,
     )
     .bind(checkReason(reason), nowMs, pair.appId, pair.installationId, nowMs)
@@ -1064,6 +1168,92 @@ export async function reenableChecksForApps(
       .bind(nowMs, pair.appId, pair.installationId)
       .run();
   }
+}
+
+/**
+ * The pairs the re-enable scan may resume (P68-QC-003). This is the Check
+ * lane's translation of the M8 no-churn contract, and it is deliberately a
+ * READ, not a write: the worker decides, the store only answers.
+ *
+ * A suspended pair is resumable when EITHER
+ *  - its recorded suspension is `disabled` and the App row is now active and
+ *    not deleted (status alone is legitimate proof for that kind), OR
+ *  - the caller proved a fresh live credential identity for the pair
+ *    (`proven`), which is the operator-correction path.
+ *
+ * Everything else keeps its suspension. That is what stops an unchanged
+ * `identity-mismatch` / `decrypt-failed` / `missing` pair from being re-probed
+ * and re-suspended on every pass forever: the rows stop occupying the bounded
+ * due batch, and no remote probe is issued while the credentials are
+ * demonstrably unchanged.
+ *
+ * `fingerprintMatches` carries the durable encrypted-envelope digest the row
+ * was suspended on. When the caller can re-read the CURRENT digest it passes
+ * `currentFingerprint`; an equal value proves the credentials are untouched, so
+ * the pair is skipped WITHOUT a probe. A different value means the operator
+ * corrected them, so the pair is re-probed. A null on either side proves
+ * nothing and is treated as "changed" (fail closed toward re-probing, never
+ * toward silent auto-resume).
+ */
+export async function listReenableableCheckPairs(
+  db: D1Like,
+  candidates: { appId: string; installationId: number; currentFingerprint: string | null; proven: boolean }[],
+): Promise<{ appId: string; installationId: number }[]> {
+  if (candidates.length === 0) return [];
+  const resumable: { appId: string; installationId: number }[] = [];
+  for (const candidate of candidates) {
+    const row = await db
+      .prepare(
+        `SELECT rc.holder, rc.last_error, ga.status AS app_status, ga.deleted_at AS app_deleted,
+                ga.review_enabled AS review_enabled
+           FROM review_checks rc
+           JOIN github_apps ga ON ga.id = rc.app_id
+          WHERE rc.app_id = ? AND rc.installation_id = ? AND rc.recovery_state = 'suspended'
+          LIMIT 1`,
+      )
+      .bind(candidate.appId, candidate.installationId)
+      .first<{
+        holder: string | null;
+        last_error: string | null;
+        app_status: string;
+        app_deleted: string | null;
+        review_enabled: number;
+      }>();
+    if (row === null) continue;
+    // A live holder is never yanked out from under its owner.
+    if (row.holder !== null) continue;
+    const kind = checkSuspensionKindOf(row.last_error);
+    const active = row.app_status === "active" && row.app_deleted === null;
+    if (!active) continue;
+    // A `paused` hold (P68-QC-006) is released by exactly one event: the kill
+    // switch being lifted. Until then the row stays out of the due batch, and —
+    // unlike every credential kind — no proof is owed, because nothing about
+    // the credentials was ever in question.
+    if (kind === "paused") {
+      if (row.review_enabled !== 0) {
+        resumable.push({ appId: candidate.appId, installationId: candidate.installationId });
+      }
+      continue;
+    }
+    // A disabled App resumes on status alone: no credential was in question.
+    if (kind === "disabled") {
+      resumable.push({ appId: candidate.appId, installationId: candidate.installationId });
+      continue;
+    }
+    // A live credential proof is the ONLY other legitimate resume.
+    if (candidate.proven) {
+      resumable.push({ appId: candidate.appId, installationId: candidate.installationId });
+      continue;
+    }
+    // No proof: resume only when the durable fingerprint disagrees with the
+    // current one, i.e. the operator changed the credentials. Both sides must
+    // be present — an absent digest is not evidence of a correction.
+    const recorded = suspensionCredentialOf(row.last_error);
+    if (recorded !== null && candidate.currentFingerprint !== null && recorded !== candidate.currentFingerprint) {
+      resumable.push({ appId: candidate.appId, installationId: candidate.installationId });
+    }
+  }
+  return resumable;
 }
 
 // ---------------------------------------------------------------------------

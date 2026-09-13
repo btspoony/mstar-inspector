@@ -60,7 +60,11 @@ import {
   readPublicationProof,
   recordCheckObservation,
   reenableChecksForApps,
+  checkSuspensionKindOf,
+  checkSuspensionReason,
+  listReenableableCheckPairs,
   releaseCheckClaim,
+  suspendCheckForPause,
   releaseExpiredCheckClaim,
   rollbackCheckCreateDispatch,
   retryCheckRecovery,
@@ -68,6 +72,7 @@ import {
   setCheckCreateState,
   setCheckDesired,
   suspendCheckRecovery,
+  suspensionCredentialOf,
 } from "../../src/store/review-checks";
 import { createMigratedTestD1, type TestD1 } from "./helpers";
 
@@ -1491,3 +1496,176 @@ async function stageProof(
   expect(await recordPublicationProof(db, publicationId, lease, proof)).toBe(true);
   return proof;
 }
+
+// ---------------------------------------------------------------------------
+// QC zero-residual fix wave — suspension codec, no-churn re-enable, pause
+// ---------------------------------------------------------------------------
+
+describe("suspension encoding and no-churn re-enable (P68-QC-003)", () => {
+  const DIGEST = "b".repeat(64);
+
+  /**
+   * Seed a SUSPENDED free row carrying `kind` + `fingerprint`. The suspension
+   * writer is free-lease fenced, so the claim lease is released first — the
+   * established fixture pattern in this file.
+   */
+  async function suspendedRow(
+    db: TestD1,
+    kind: Parameters<typeof checkSuspensionReason>[0],
+    fingerprint?: string,
+    appId = APP_ID,
+  ): Promise<{ id: string; externalId: string; lease: Lease }> {
+    const { attempt, lease } = await claim(db, { scope: { ...SCOPE, appId }, action: `attempt-${kind}-${appId}` });
+    const id = attempt.identity.attemptId;
+    await setCheckDesired(db, id, lease, CONCLUSION, null, T0);
+    await deferCheckRecovery(db, id, lease, { state: "pending", nextAttemptMs: T0, reason: "release" }, T0);
+    const written = await suspendCheckRecovery(
+      db,
+      { appId, installationId: SCOPE.installationId },
+      checkSuspensionReason(kind, "suspended", fingerprint),
+      T0,
+    );
+    if (written !== 1) throw new Error(`fixture: suspension did not land (${written})`);
+    return { id, externalId: attempt.identity.externalId, lease };
+  }
+
+  test("the codec round-trips every kind and fails closed on anything unrecognized", () => {
+    for (const kind of ["disabled", "identity-mismatch", "missing", "deleted", "decrypt-failed", "paused"] as const) {
+      expect(checkSuspensionKindOf(checkSuspensionReason(kind, "why", DIGEST))).toBe(kind);
+    }
+    // The fingerprint is read back through the SHARED M8 reader, so the token
+    // cannot drift between the two lanes.
+    expect(suspensionCredentialOf(checkSuspensionReason("identity-mismatch", "why", DIGEST))).toBe(DIGEST);
+    // Legacy prose, an unknown kind and null all fail closed to `unknown`, which
+    // the re-enable scan treats as proof-required rather than status-resumable.
+    expect(checkSuspensionKindOf("app disabled — no Check mutation")).toBe("unknown");
+    expect(checkSuspensionKindOf("suspend:something-new: why")).toBe("unknown");
+    expect(checkSuspensionKindOf(null)).toBe("unknown");
+  });
+
+  test("an UNCHANGED fingerprint is filtered out; a corrected one resumes", async () => {
+    const db = seededDb();
+    const { id } = await suspendedRow(db, "identity-mismatch", DIGEST);
+
+    expect(
+      await listReenableableCheckPairs(db, [
+        { appId: APP_ID, installationId: SCOPE.installationId, currentFingerprint: DIGEST, proven: false },
+      ]),
+    ).toEqual([]);
+    expect(await listCheckReconcileBatch(db, T0)).toHaveLength(0);
+
+    expect(
+      await listReenableableCheckPairs(db, [
+        { appId: APP_ID, installationId: SCOPE.installationId, currentFingerprint: "c".repeat(64), proven: false },
+      ]),
+    ).toEqual([{ appId: APP_ID, installationId: SCOPE.installationId }]);
+    // Resuming returns the SAME historical identity to the batch.
+    await reenableChecksForApps(db, [{ appId: APP_ID, installationId: SCOPE.installationId }], T0 + 1);
+    expect((await listCheckReconcileBatch(db, T0 + 1)).map((r) => r.identity.attemptId)).toEqual([id]);
+  });
+
+  test("a live holder is never resumed, and an absent digest proves nothing", async () => {
+    const db = seededDb();
+    const { id } = await suspendedRow(db, "identity-mismatch", DIGEST);
+    // A live holder on the suspended row blocks any resume.
+    db.raw.prepare(`UPDATE review_checks SET holder = 'other-run', lease_epoch = 5 WHERE id = ?`).run(id);
+    expect(
+      await listReenableableCheckPairs(db, [
+        { appId: APP_ID, installationId: SCOPE.installationId, currentFingerprint: "c".repeat(64), proven: false },
+      ]),
+    ).toEqual([]);
+
+    // A suspension with NO recorded digest is not evidence of a correction.
+    db.raw.prepare(`UPDATE review_checks SET holder = NULL, last_error = 'legacy prose' WHERE id = ?`).run(id);
+    expect(
+      await listReenableableCheckPairs(db, [
+        { appId: APP_ID, installationId: SCOPE.installationId, currentFingerprint: "c".repeat(64), proven: false },
+      ]),
+    ).toEqual([]);
+    // An unclassifiable suspension is proof-required, so a proven live identity
+    // still resumes it.
+    expect(
+      await listReenableableCheckPairs(db, [
+        { appId: APP_ID, installationId: SCOPE.installationId, currentFingerprint: null, proven: true },
+      ]),
+    ).toEqual([{ appId: APP_ID, installationId: SCOPE.installationId }]);
+  });
+
+  test("a re-stamp overwrites the digest so the next pass is D1-only", async () => {
+    const db = seededDb();
+    const { id } = await suspendedRow(db, "identity-mismatch", DIGEST);
+    const NEW = "d".repeat(64);
+    // The corrected envelope still fails: the pass must be able to overwrite the
+    // recorded digest, which is what stops the "changed every pass" churn.
+    expect(
+      await suspendCheckRecovery(db, { appId: APP_ID, installationId: SCOPE.installationId },
+        checkSuspensionReason("identity-mismatch", "new", NEW), T0 + 1),
+    ).toBe(1);
+    const row = await rawRow(db, id);
+    expect(suspensionCredentialOf(row.last_error as string)).toBe(NEW);
+    // Now an unchanged re-read is filtered out — no churn.
+    expect(
+      await listReenableableCheckPairs(db, [
+        { appId: APP_ID, installationId: SCOPE.installationId, currentFingerprint: NEW, proven: false },
+      ]),
+    ).toEqual([]);
+  });
+
+  test("a not-active App is never resumable, whatever the kind or proof", async () => {
+    const db = seededDb();
+    await suspendedRow(db, "disabled", "a".repeat(64));
+    db.raw.prepare(`UPDATE github_apps SET status = 'disabled' WHERE id = ?`).run(APP_ID);
+    expect(
+      await listReenableableCheckPairs(db, [
+        { appId: APP_ID, installationId: SCOPE.installationId, currentFingerprint: null, proven: true },
+      ]),
+    ).toEqual([]);
+  });
+
+  test("a paused hold resumes only when the kill switch lifts", async () => {
+    const db = seededDb();
+    const { attempt, lease } = await claim(db);
+    const id = attempt.identity.attemptId;
+    await setCheckDesired(db, id, lease, CONCLUSION, null, T0);
+    expect(await suspendCheckForPause(db, id, lease, "App is paused", T0)).toBe(true);
+    expect((await rawRow(db, id)).recovery_state).toBe("suspended");
+    db.raw.prepare(`UPDATE github_apps SET review_enabled = 0 WHERE id = ?`).run(APP_ID);
+
+    expect(
+      await listReenableableCheckPairs(db, [
+        { appId: APP_ID, installationId: SCOPE.installationId, currentFingerprint: null, proven: false },
+      ]),
+    ).toEqual([]);
+
+    db.raw.prepare(`UPDATE github_apps SET review_enabled = 1 WHERE id = ?`).run(APP_ID);
+    expect(
+      await listReenableableCheckPairs(db, [
+        { appId: APP_ID, installationId: SCOPE.installationId, currentFingerprint: null, proven: false },
+      ]),
+    ).toEqual([{ appId: APP_ID, installationId: SCOPE.installationId }]);
+    await reenableChecksForApps(db, [{ appId: APP_ID, installationId: SCOPE.installationId }], T0 + 1);
+    const row = await rawRow(db, id);
+    expect(row.recovery_state).toBe("pending");
+    expect(row.attempts).toBe(0);
+    expect(row.external_id).toBe(attempt.identity.externalId);
+    expect(await listCheckReconcileBatch(db, T0 + 1)).toHaveLength(1);
+  });
+
+  test("suspendCheckForPause preserves the identity and spends no attempt", async () => {
+    const db = seededDb();
+    const { attempt, lease } = await claim(db);
+    const id = attempt.identity.attemptId;
+    await setCheckDesired(db, id, lease, CONCLUSION, null, T0);
+    const before = await rawRow(db, id);
+    expect(await suspendCheckForPause(db, id, lease, "paused", T0)).toBe(true);
+    const after = await rawRow(db, id);
+    expect(after.recovery_state).toBe("suspended");
+    expect(checkSuspensionKindOf(after.last_error as string)).toBe("paused");
+    for (const key of ["attempts", "desired", "observed", "external_id", "generation", "check_run_id", "publication_id", "terminal_ms"]) {
+      expect([key, after[key]]).toEqual([key, before[key]]);
+    }
+    // A stale lease writes nothing.
+    const stale: Lease = { holder: lease.holder, epoch: lease.epoch + 1, untilMs: lease.untilMs };
+    expect(await suspendCheckForPause(db, id, stale, T0)).toBe(false);
+  });
+});

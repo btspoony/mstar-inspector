@@ -53,6 +53,8 @@ import {
   CHECK_NAME,
   CHECK_RECONCILE_LIMIT,
   CHECK_BACKOFF_MS,
+  checkSuspensionKindOf,
+  checkSuspensionReason,
   claimCheckRecovery,
   type CheckAttempt,
   type CheckConclusion,
@@ -61,6 +63,7 @@ import {
   getCheckAttempt,
   getCheckOwnership,
   listCheckReconcileBatch,
+  listReenableableCheckPairs,
   markCheckLocalError,
   readPublicationProof,
   recordCheckObservation,
@@ -68,13 +71,15 @@ import {
   releaseCheckClaim,
   releaseExpiredCheckClaim,
   setCheckDesired,
+  suspendCheckForPause,
   suspendCheckRecovery,
 } from "../store/review-checks";
 import type { CheckOwnership, Lease, PublicationProof } from "../store/review-checks";
-import { CHECK_SUMMARIES, decideConclusion, type ChecksAdapter } from "../pipeline/checks";
+import { CHECK_SUMMARIES, CheckRequestNotDispatched, decideConclusion, type ChecksAdapter } from "../pipeline/checks";
 import type { ReviewCommenter } from "../pipeline/comment";
 import { createReviewCommenter } from "../pipeline/comment";
 import { createSecretbox } from "../dashboard/secretbox";
+import { sha256Hex } from "../pipeline/review-threads";
 import type { ReconcileTransport } from "./lifecycle-reconcile";
 
 // ---------------------------------------------------------------------------
@@ -154,7 +159,18 @@ export type CheckCredentialResolution =
        */
       paused: boolean;
     }
-  | { kind: "unavailable"; reason: CheckCredentialReason };
+  | {
+      kind: "unavailable";
+      reason: CheckCredentialReason;
+      /**
+       * Digest of the ENCRYPTED credential envelope this verdict was proved
+       * against (never the plaintext key) — the M8 P67-QC-007 fingerprint. It
+       * rides the suspension reason so a later pass can tell "same credentials,
+       * same failure" from "the operator corrected the credentials", which is
+       * what makes an identity-mismatch suspension durable instead of churning.
+       */
+      credentialFingerprint?: string;
+    };
 
 /**
  * Exact `(app_id, installation_id)` credential routing for the Check lane.
@@ -225,6 +241,12 @@ export const productionCheckCredentials: CheckCredentialFactory = async ({ db, e
   if (row === null) return { kind: "unavailable", reason: "missing" };
   if (row.deleted_at !== null) return { kind: "unavailable", reason: "deleted" };
   if (row.status !== "active") return { kind: "unavailable", reason: "disabled" };
+  // The suspension fingerprint binds a durable mismatch to the credentials it
+  // was proven against (P68-QC-003, the M8 P67-QC-007 contract): digesting the
+  // ENCRYPTED envelope means the value can be persisted and compared without
+  // ever exposing or re-deriving the private key, and no plaintext credential
+  // is logged or stored.
+  const credentialFingerprint = await sha256Hex(row.private_key_enc);
   try {
     const pem = await createSecretbox(env.DASHBOARD_ENCRYPTION_KEY).decryptSecret(
       row.private_key_enc,
@@ -240,14 +262,14 @@ export const productionCheckCredentials: CheckCredentialFactory = async ({ db, e
     );
     const identity = (await commenter.getAppIdentity?.()) ?? null;
     if (identity === null || identity.githubAppId !== row.github_app_id) {
-      return { kind: "unavailable", reason: "identity-mismatch" };
+      return { kind: "unavailable", reason: "identity-mismatch", credentialFingerprint };
     }
     const adapter = commenter.checks;
-    if (adapter === undefined) return { kind: "unavailable", reason: "decrypt-failed" };
+    if (adapter === undefined) return { kind: "unavailable", reason: "decrypt-failed", credentialFingerprint };
     return { kind: "ok", adapter, paused: row.review_enabled === 0 };
   } catch {
     // missing key / tampered envelope — fail closed, never a mutation
-    return { kind: "unavailable", reason: "decrypt-failed" };
+    return { kind: "unavailable", reason: "decrypt-failed", credentialFingerprint };
   }
 };
 
@@ -270,7 +292,7 @@ type RunBudget = {
   deadline: number;
   /** ACTUAL requests issued for the CURRENT row (reset per row). */
   rowSpent: number;
-  /** Only the row's own operations count against the ≤6/row cap. */
+  /** True while a row's iteration is open, so its requests debit `rowSpent`. */
   rowActive: boolean;
   /**
    * Set when a request was refused BEFORE dispatch. The caller must then stop
@@ -281,11 +303,33 @@ type RunBudget = {
 };
 
 /**
- * Non-mutating preflight admission. Checks the whole-run cap, the run
- * deadline and (for row-scoped calls) the per-row cap. The credential lane is
- * charged to the run only: its identity probe and mint are once-per-pair work
- * shared by every row of that pair, so counting them against the first row's
- * ≤6 would shrink that row's real allowance.
+ * Non-mutating preflight admission, consulted at three points: before a
+ * credential probe, before a row's work, and at every individual request in
+ * the transport.
+ *
+ * THE ACCOUNTING RULE (P68-QC-004 — one rule, stated once, matching what is
+ * enforced): **every actual metered request while a row is active is charged
+ * to BOTH the run cap (`spent`, ≤100) and that row's cap (`rowSpent`, ≤6)** —
+ * including the pair's credential probe and installation-token mint, because
+ * they are real GitHub requests issued while the row is being worked.
+ *
+ * The only asymmetry is in ADMISSION, and it is deliberate: the credential
+ * preflight consults the RUN cap only (`rowScoped = false`), because at that
+ * moment no request has yet been attributed to the row and the probe is
+ * once-per-pair work whose cost is not knowable per row. The `rowScoped = true`
+ * path is what the transport uses, so a probe that then dispatches IS charged
+ * to the row it was made for. Admission therefore never over-promises: the run
+ * cap bounds every path, and the row cap binds from the first request onward.
+ *
+ * Consequence, accepted and measured rather than hidden: the first row of each
+ * pair starts its own work with `rowSpent = 2` (probe + mint), so a maximal
+ * 5-request row path (two-page adoption + create + fetch + update) can be
+ * deferred once by the ≤6 bound and completed on the next pass, where the
+ * pair's credentials are cached and the row gets the full allowance. Refusals
+ * are pre-dispatch, uncharged beyond what already dispatched, and leave the row
+ * due with no attempt spent, so this costs one bounded cron cycle and never a
+ * correctness, honesty or budget breach. Both caps and the ≤5s per-request
+ * bound are unchanged.
  */
 function canSpend(budget: RunBudget, nowMs: number, cost: number, rowScoped: boolean): boolean {
   if (budget.spent + cost > CHECK_RECONCILE_MAX_REQUESTS) return false;
@@ -301,44 +345,23 @@ function reserve(budget: RunBudget, cost: number): void {
 }
 
 /**
- * The run's allowance refused a request BEFORE it was dispatched (§7.11.2
- * step 5: budget deferral leaves work due and spends no attempt). Distinct
- * from a transport failure because a refused request provably never reached
- * GitHub, so the row must not be marked as an attempted-and-failed recovery.
- *
- * Octokit re-wraps a custom transport rejection (`RequestError` with the
- * original parked on `cause`), so the refusal is recognized by walking the
- * error CHAIN by identity — never by message text, which would classify any
- * error merely mentioning the budget as un-dispatched.
- */
-class RecoveryBudgetRefused extends Error {
-  constructor(message: string) {
-    super(message);
-    this.name = "RecoveryBudgetRefused";
-  }
-}
-
-function isBudgetRefusal(error: unknown): boolean {
-  const seen = new Set<unknown>();
-  let current: unknown = error;
-  for (let depth = 0; depth < 8; depth += 1) {
-    if (current instanceof RecoveryBudgetRefused) return true;
-    if (typeof current !== "object" || current === null || seen.has(current)) return false;
-    seen.add(current);
-    if (!("cause" in current)) return false;
-    current = current.cause;
-  }
-  return false;
-}
-
-/**
  * The enforced per-request transport bound AND the actual-request meter: every
  * request gets an abort signal at `min(5s, time left in the run)` computed AT
  * the request, so a request issued late cannot outlive the run. Metering lives
  * here — the single choke point every request funnels through — because a
  * per-operation estimate can never bound what a paginating scan actually
- * issues. A request that cannot be admitted fails BEFORE dispatch and marks
- * the budget, so the caller can tell a deferral from a failed attempt.
+ * issues.
+ *
+ * A request that cannot be admitted fails BEFORE dispatch by throwing the
+ * UPSTREAM typed marker (`CheckRequestNotDispatched`, `src/pipeline/checks.ts`)
+ * — the same class the adapter's `sendRequests` classifies — so a pre-dispatch
+ * refusal is provably zero-dispatched end to end: the adapter reports
+ * `requests: 0`, rolls a `sending` mark back under identity fencing, and this
+ * lane releases the claim without spending an attempt. A local look-alike
+ * class would be a second, unrecognized grammar: `sendRequests` walks for the
+ * shared marker by identity, so a private twin could never be classified and
+ * the refusal would be reported as a possibly-sent request — the exact defect
+ * P68-QC-005 names.
  *
  * A refusal AFTER a recovery claim does not leave a lease behind. The lane
  * hands the claim straight back with `releaseCheckClaim` (or
@@ -357,7 +380,7 @@ function buildTransport(budget: RunBudget, now: () => number): CheckTransport {
       if (!canSpend(budget, now(), 1, true)) {
         budget.refused = true;
         return Promise.reject(
-          new RecoveryBudgetRefused(
+          new CheckRequestNotDispatched(
             `check recovery request budget exhausted (spent=${budget.spent}/${CHECK_RECONCILE_MAX_REQUESTS}, row=${budget.rowSpent}/${CHECK_ROW_MAX_REQUESTS}) — request not dispatched; work stays due`,
           ),
         );
@@ -421,12 +444,13 @@ export async function reconcileReviewChecks(
     // probe and one purpose-scoped client, reused by every row of that pair.
     const credentialCache = new Map<string, Promise<CheckCredentialResolution>>();
 
-    // 0. Status-driven re-enable (D1 only): rows of an App that is active and
-    //    not deleted resume with fresh fencing and their identities intact.
-    //    The live credential proof is re-established by the row loop below, so
-    //    a pair that is still unusable is suspended again on its next due run
-    //    — this can never auto-resume work for a broken App.
-    await reenableHealthyAppChecks(db, now(), log);
+    // 0. Suspension-aware re-enable (spec §7.6 / P68-QC-003): a disabled App
+    //    resumes on status alone; a credential-suspended pair resumes only on a
+    //    live proof after its envelope actually CHANGED. An unchanged envelope
+    //    is skipped with no probe and no write, so an identity-mismatch pair
+    //    stops occupying the bounded due batch and stops paying a remote probe
+    //    on every cron pass.
+    await reenableHealthyAppChecks(env, db, now, credentials, transport, log);
 
     // 1. Due attempts, ONE bound nowMs at every predicate position.
     const rows = await listCheckReconcileBatch(db, now(), CHECK_MAX_ATTEMPTS, CHECK_RECONCILE_LIMIT);
@@ -466,44 +490,156 @@ export async function reconcileReviewChecks(
 }
 
 /**
- * §7.11.2 step 6's re-enable half: an App row that is active and not deleted
- * lets its suspended Check rows resume (fresh claims, same identities). This
- * is a D1-only transition — no credential is trusted from a previous run, and
- * the pair's usability is proven again by the row loop before any request.
+ * §7.11.2 step 6's re-enable half (P68-QC-003). Resuming a suspended pair is
+ * decision-heavy and the M8 lane's P67-QC-007 lesson is the contract: an
+ * unchanged credential failure must NOT be re-probed and re-suspended every
+ * pass, because its rows then never converge and permanently occupy the bounded
+ * 25-row due batch.
  *
- * Pairs are drawn from the SUSPENDED rows themselves (the work that actually
- * needs resuming), so a pair is considered exactly when it holds suspended
- * Check work — never a window over every App in the deployment, which would
- * both spuriously resume nothing and miss a pair beyond the window.
+ * The scan is exact-pair, bounded, deterministic and D1-only while nothing has
+ * changed:
+ *
+ *  1. Candidate pairs are drawn from the SUSPENDED rows themselves, so a pair
+ *     is considered exactly when it holds suspended Check work — never a window
+ *     over every App in the deployment.
+ *  2. For each, the durable suspension kind and the encrypted-envelope digest
+ *     are read from `review_checks.last_error` (the same grammar M8 writes), and
+ *     the CURRENT digest is re-derived from `github_apps.private_key_enc`.
+ *  3. An unchanged digest is SKIPPED with no probe and no write. A changed
+ *     digest — the operator's correction — is the one event that reopens the
+ *     identity question, and it costs a real credential probe whose verdict
+ *     either resumes the pair or re-stamps the suspension with the new digest.
+ *  4. `disabled` suspensions still resume on App status alone, because status
+ *     is legitimate proof for that kind and no credential was ever in question.
+ *
+ * No stale credential object is trusted: a resumed pair always goes through the
+ * ordinary row loop, which resolves credentials afresh and proves live identity
+ * before any request.
  */
-async function reenableHealthyAppChecks(db: D1Like, nowMs: number, log: CheckReconcileLog): Promise<void> {
-  const { results } = await db
+async function reenableHealthyAppChecks(
+  env: ScheduledEnv,
+  db: D1Like,
+  now: () => number,
+  credentials: CheckCredentialFactory,
+  transport: CheckTransport,
+  log: CheckReconcileLog,
+): Promise<void> {
+  const { results: suspended } = await db
     .prepare(
-      `SELECT DISTINCT ga.id AS app_id, rc.installation_id AS installation_id
+      `SELECT DISTINCT rc.app_id AS app_id, rc.installation_id AS installation_id
          FROM review_checks rc
          JOIN github_apps ga ON ga.id = rc.app_id
         WHERE rc.recovery_state = 'suspended'
           AND ga.status = 'active' AND ga.deleted_at IS NULL
-        ORDER BY rc.installation_id, ga.id
+        ORDER BY rc.installation_id, rc.app_id
         LIMIT ?`,
     )
     .bind(REENABLE_PAIR_LIMIT)
     .all<{ app_id: string; installation_id: number }>();
-  if (results.length === 0) return;
+  if (suspended.length === 0) return;
+
+  // The current credential digest per pair, so an unchanged envelope is
+  // detectable WITHOUT touching the network. A pair whose digest cannot be read
+  // is treated as changed (fail toward re-probing, never toward silent resume).
+  const candidates: { appId: string; installationId: number; currentFingerprint: string | null; proven: boolean }[] = [];
+  for (const pair of suspended) {
+    const routing = await checkRoutingRow(db, pair.app_id, pair.installation_id);
+    const currentFingerprint = routing === null ? null : await sha256Hex(routing.private_key_enc);
+    candidates.push({
+      appId: pair.app_id,
+      installationId: pair.installation_id,
+      currentFingerprint,
+      proven: false,
+    });
+  }
+
+  // Status-only resumes (kind `disabled`) and operator corrections resolve here
+  // with no further probe; a pair suspended for a credential reason with an
+  // UNCHANGED envelope is filtered out and never re-probed (P68-QC-003).
+  let resumable: { appId: string; installationId: number }[];
   try {
-    await reenableChecksForApps(
-      db,
-      results.map((row) => ({ appId: row.app_id, installationId: row.installation_id })),
-      nowMs,
-    );
+    resumable = await listReenableableCheckPairs(db, candidates);
   } catch (error) {
     log.warn(
-      {
-        event: "ops_check_reconcile_reenable_failed",
-        detail: error instanceof Error ? error.message : String(error),
-      },
+      { event: "ops_check_reconcile_reenable_read_failed", detail: error instanceof Error ? error.message : String(error) },
+      "check re-enable scan failed — suspended rows stay suspended",
+    );
+    return;
+  }
+  if (resumable.length === 0) return;
+
+  // A resume whose pair was suspended for a CREDENTIAL reason is allowed to
+  // proceed only after a live probe proves the corrected credentials, so a
+  // wrong key or a rotated credential re-suspends instead of running the row
+  // loop against a still-broken pair.
+  const confirmed: { appId: string; installationId: number }[] = [];
+  for (const pair of resumable) {
+    const probe = await reenableProbe(db, env, pair, now, transport, credentials);
+    if (probe.kind === "resume") confirmed.push(pair);
+    else if (probe.kind === "resuspend") {
+      const reason = checkSuspensionReason(
+        probe.reason,
+        `app ${UNAVAILABLE_REASON_TEXT[probe.reason]} — no Check mutation for (${pair.appId}, ${pair.installationId})`,
+        probe.credentialFingerprint,
+      );
+      await suspendCheckRecovery(db, pair, reason, now());
+    }
+    // `unchanged` (a digest that turned out equal on re-read) never resumes.
+  }
+  if (confirmed.length === 0) return;
+  try {
+    await reenableChecksForApps(db, confirmed, now());
+  } catch (error) {
+    log.warn(
+      { event: "ops_check_reconcile_reenable_failed", detail: error instanceof Error ? error.message : String(error) },
       "check re-enable skipped — suspended rows stay suspended",
     );
+  }
+}
+
+/**
+ * The one probe that may resume a credential-suspended pair. `disabled` needs
+ * none (status proved it); every other kind must be re-proved live before its
+ * rows return to the batch, because a corrected envelope that still does not
+ * authenticate must stay suspended rather than churn.
+ */
+async function reenableProbe(
+  db: D1Like,
+  env: ScheduledEnv,
+  pair: { appId: string; installationId: number },
+  now: () => number,
+  transport: CheckTransport,
+  credentials: CheckCredentialFactory,
+): Promise<{ kind: "resume" } | { kind: "unchanged" } | { kind: "resuspend"; reason: CheckCredentialReason; credentialFingerprint?: string }> {
+  const row = await db
+    .prepare(
+      `SELECT last_error FROM review_checks
+        WHERE app_id = ? AND installation_id = ? AND recovery_state = 'suspended' LIMIT 1`,
+    )
+    .bind(pair.appId, pair.installationId)
+    .first<{ last_error: string | null }>();
+  const kind = checkSuspensionKindOf(row?.last_error ?? null);
+  // Neither kind ever had a credential question, so neither owes a probe:
+  // `disabled` was proved by App status and `paused` by the kill switch. Both
+  // resume straight into the row loop, which resolves credentials afresh anyway
+  // before any request.
+  if (kind === "disabled" || kind === "paused") return { kind: "resume" };
+  try {
+    const settled = await credentials({
+      db,
+      env,
+      scope: { appId: pair.appId, installationId: pair.installationId, owner: "", repo: "", prNumber: 0 },
+      now,
+      transport,
+    });
+    if (settled.kind === "ok") return { kind: "resume" };
+    return {
+      kind: "resuspend",
+      reason: settled.reason,
+      ...(settled.credentialFingerprint === undefined ? {} : { credentialFingerprint: settled.credentialFingerprint }),
+    };
+  } catch {
+    return { kind: "resuspend", reason: "decrypt-failed" };
   }
 }
 
@@ -634,14 +770,32 @@ async function reconcileCheckAttempt(
       }
       // Pause / kill switch (spec §7.6): a paused App performs NO new Check.
       // The walk above proved the run was never created, so there is nothing
-      // to terminalize either — the honest outcome is to leave the work due,
-      // with the claim released and no attempt spent, until the App resumes.
+      // to terminalize either. Rather than releasing the claim and leaving the
+      // row immediately due (which re-mints a client and re-walks adoption on
+      // every cron window without progress — P68-QC-006), take the row out of
+      // the due batch through the durable `paused` suspension: same attempt,
+      // same identity, `attempts` untouched, and ZERO credential/adoption
+      // requests while the pause lasts. The ordinary re-enable scan returns it
+      // to the batch once `review_enabled` allows work, where the create runs
+      // under a fresh claim.
       if (resolved.paused) {
-        await releaseCheckClaim(db, attemptId, lease, now());
-        log.info(
-          { event: "ops_check_reconcile_paused_deferral", detail: `attempt=${attemptId}` },
-          "paused App holds a never-sent Check — left due, no create",
+        const deferred = await suspendCheckForPause(
+          db,
+          attemptId,
+          lease,
+          "App is paused (review_enabled = 0) — never-sent Check held until work is allowed",
+          now(),
         );
+        if (deferred) {
+          summary.suspended += 1;
+          log.info(
+            { event: "ops_check_reconcile_paused_deferral", detail: `attempt=${attemptId}` },
+            "paused App holds a never-sent Check — deferred out of the due batch, no create",
+          );
+        } else {
+          // The fence moved; the row belongs to whoever holds it now.
+          summary.errors += 1;
+        }
         return;
       }
       const ready = await resolved.adapter.beginCheck({ identity: intent.identity, lease });
@@ -883,10 +1037,15 @@ async function credentialsForPair(
   }
   if (settled.kind === "unavailable") {
     const reason = `app ${UNAVAILABLE_REASON_TEXT[settled.reason]} — no Check mutation for (${scope.appId}, ${scope.installationId})`;
+    // Encode the KIND and the encrypted-envelope digest in the record
+    // (P68-QC-003): the kind is what lets a later pass tell a status-resumable
+    // `disabled` suspension from one that needs a live proof, and the digest is
+    // what lets it detect the operator's correction WITHOUT a probe. No
+    // plaintext credential is ever stored or logged.
     const suspended = await suspendCheckRecovery(
       db,
       { appId: scope.appId, installationId: scope.installationId },
-      reason,
+      checkSuspensionReason(settled.reason, reason, settled.credentialFingerprint),
       now(),
     );
     summary.suspended += suspended;

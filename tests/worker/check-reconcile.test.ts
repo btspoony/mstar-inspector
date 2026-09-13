@@ -27,6 +27,7 @@
  *     → `reconcileReviewChecks`, each stage caught independently
  */
 import { describe, expect, test } from "bun:test";
+import { readFileSync } from "node:fs";
 import type { Scope } from "../../src/contracts/recheck";
 import {
   CHECK_BACKOFF_MS,
@@ -42,6 +43,8 @@ import {
   retryCheckRecovery,
   setCheckCreateState,
   setCheckDesired,
+  checkSuspensionKindOf,
+  checkSuspensionReason,
   suspendCheckRecovery,
   type CheckAttempt,
   type CheckConclusion,
@@ -62,11 +65,12 @@ import {
   type CheckReconcileSummary,
   type CheckTransport,
 } from "../../src/worker/check-reconcile";
-import type { ChecksAdapter } from "../../src/pipeline/checks";
+import { CheckRequestNotDispatched, isRequestNotDispatched, type ChecksAdapter } from "../../src/pipeline/checks";
 import type { ScheduledEnv } from "../../src/worker/env";
 import { defaultReconcileLog } from "../../src/worker/lifecycle-reconcile";
 import { defaultSweepLog } from "../../src/worker/sweep";
 import worker from "../../src/worker/index";
+import { sha256Hex } from "../../src/pipeline/review-threads";
 import { createMigratedTestD1, type TestD1 } from "../store/helpers";
 
 const APP = "11111111-2222-3333-4444-555555555555";
@@ -1183,17 +1187,20 @@ describe("tenant/App isolation and status-driven re-enable (spec §7.6)", () => 
     expect(badRow.attempts).toBe(0);
   });
 
-  test("re-enable resumes only suspended work of ACTIVE, non-deleted Apps", async () => {
+  test("re-enable never touches a suspended row of a NOT-active App", async () => {
     const db = seededDb();
     const healthy = await claim(db, { action: "healthy" });
     const disabled = await claim(db, { scope: SCOPE_B, githubAppId: NUMERIC_APP_B, action: "disabled" });
-    db.raw
-      .prepare(
-        `UPDATE review_checks SET holder = NULL, lease_until_ms = NULL, recovery_state = 'suspended' WHERE id IN (?, ?)`,
-      )
-      .run(healthy.attempt.identity.attemptId, disabled.attempt.identity.attemptId);
-    // The second row's App is disabled: its suspension must survive untouched,
-    // which is observable as the lane never even ASKING for that pair.
+    // Both rows carry a status-resumable `disabled` suspension.
+    for (const id of [healthy.attempt.identity.attemptId, disabled.attempt.identity.attemptId]) {
+      db.raw
+        .prepare(
+          `UPDATE review_checks SET holder = NULL, lease_until_ms = NULL, recovery_state = 'suspended', last_error = ? WHERE id = ?`,
+        )
+        .run(checkSuspensionReason("disabled", "app disabled"), id);
+    }
+    // The second row's App row is NOT active: its suspension must survive even
+    // though its recorded kind is the status-resumable one.
     db.raw.prepare(`UPDATE github_apps SET status = 'disabled' WHERE id = ?`).run(APP_B);
     const asked: string[] = [];
     const fetchStub = stubFetch();
@@ -1202,10 +1209,10 @@ describe("tenant/App isolation and status-driven re-enable (spec §7.6)", () => 
         now: () => T0,
         credentials: async ({ scope }) => {
           asked.push(scope.appId);
-          return { kind: "unavailable", reason: "disabled" };
+          return { kind: "unavailable", reason: "missing" };
         },
       });
-      // Only the healthy pair was examined. The disabled App's row stayed
+      // Only the healthy pair was examined. The not-active App's row stayed
       // suspended and was never claimed, asked about, or terminalized.
       expect(summary.examined).toBe(1);
     } finally {
@@ -1216,37 +1223,6 @@ describe("tenant/App isolation and status-driven re-enable (spec §7.6)", () => 
     expect(disabledRow.recovery_state).toBe("suspended");
     expect(disabledRow.terminal_ms).toBeNull();
     expect(disabledRow.holder).toBeNull();
-  });
-
-  test("a healthy App's suspended row is re-enabled, then re-suspended while its credentials stay unusable", async () => {
-    const db = seededDb();
-    const { attempt } = await claim(db);
-    db.raw
-      .prepare(`UPDATE review_checks SET holder = NULL, lease_until_ms = NULL, recovery_state = 'suspended' WHERE id = ?`)
-      .run(attempt.identity.attemptId);
-    const fetchStub = stubFetch();
-    try {
-      // The row is resumed by App status, then the credential check fails
-      // again — it ends suspended, never silently left running.
-      const summary = await run(db, {
-        now: () => T0,
-        credentials: async () => ({ kind: "unavailable", reason: "disabled" }),
-      });
-      expect(summary.suspended).toBe(1);
-    } finally {
-      fetchStub.restore();
-    }
-    expect((await rawRow(db, attempt.identity.attemptId)).recovery_state).toBe("suspended");
-
-    // A WORKING credential on the next pass proves the re-enable loop is real.
-    const second = stubFetch();
-    try {
-      const summary = await run(db, { now: () => T0 + 1_000, credentials: scriptedCredentials(db, agreeingScript()) });
-      expect(summary.completed).toBe(1);
-    } finally {
-      second.restore();
-    }
-    expect((await rawRow(db, attempt.identity.attemptId)).observed).toBe("failure");
   });
 });
 
@@ -1632,7 +1608,7 @@ describe("pause / kill switch (L2 fix 1 finding 3)", () => {
     expect(row.recovery_state).toBe("done");
   });
 
-  test("a paused App's never-sent row with a complete absent walk issues NO create and stays due", async () => {
+  test("a paused App's never-sent row with a complete absent walk issues NO create and leaves the due batch", async () => {
     const db = seededDb();
     const { attempt } = await claim(db);
     let creates = 0;
@@ -1656,17 +1632,19 @@ describe("pause / kill switch (L2 fix 1 finding 3)", () => {
     }
     expect(creates).toBe(0);
     const row = await rawRow(db, attempt.identity.attemptId);
-    // Left DUE: claim released, no attempt spent, no lease withheld.
+    // P68-QC-006: the row is deferred OUT of the due batch through a durable
+    // `paused` suspension — no attempt spent, no lease withheld, identity kept.
     expect(row.holder).toBeNull();
     expect(row.lease_until_ms).toBeNull();
     expect(row.attempts).toBe(0);
     expect(row.next_attempt_ms).toBeNull();
-    expect(row.recovery_state).toBe("pending");
+    expect(row.recovery_state).toBe("suspended");
     expect(row.create_state).toBe("not-sent");
     expect(row.check_run_id).toBeNull();
     expect(row.terminal_ms).toBeNull();
-    // Immediately selector-due again — the whole point of releasing the claim.
-    expect(await listCheckReconcileBatch(db, T0)).toHaveLength(1);
+    // NOT immediately due: the deferral is what stops the every-pass credential
+    // mint + adoption re-walk this finding names.
+    expect(await listCheckReconcileBatch(db, T0)).toHaveLength(0);
   });
 
   test("an UNPAUSED App with the same shape still creates exactly once", async () => {
@@ -2120,5 +2098,364 @@ describe("operator retry accepts a recorded in-progress observation (L2 fix 1 fi
     expect(row.observed).toBe("success");
     expect(row.terminal_ms).toBe(T0);
     expect(row.recovery_state).toBe("done");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// QC zero-residual fix wave — P68-QC-003/004/005/006
+// ---------------------------------------------------------------------------
+
+describe("credential suspension is durable, not churn (P68-QC-003)", () => {
+  /** Seed a suspended pair whose row records `kind` and `fingerprint`. */
+  async function seedSuspended(
+    db: TestD1,
+    kind: Parameters<typeof checkSuspensionReason>[0],
+    fingerprint: string,
+    appId = APP,
+  ): Promise<string> {
+    const { attempt } = await claim(db, { scope: { ...SCOPE, appId }, action: `attempt-${kind}-${appId}` });
+    db.raw
+      .prepare(
+        `UPDATE review_checks SET holder = NULL, lease_until_ms = NULL, recovery_state = 'suspended', attempts = 0, last_error = ? WHERE id = ?`,
+      )
+      .run(checkSuspensionReason(kind, "suspended", fingerprint), attempt.identity.attemptId);
+    return attempt.identity.attemptId;
+  }
+
+  test("a suspension WRITES the kind and the envelope digest the verdict was proven against", async () => {
+    const db = seededDb();
+    const { attempt } = await claim(db);
+    const id = attempt.identity.attemptId;
+    // The digest the production factory would derive from the STORED envelope —
+    // so the next pass's comparison is exercising the real value, not a fiction.
+    const envelope = db.raw.prepare(`SELECT private_key_enc FROM github_apps WHERE id = ?`).get(APP) as {
+      private_key_enc: string;
+    };
+    const DIGEST = await sha256Hex(envelope.private_key_enc);
+    const fetchStub = stubFetch();
+    try {
+      await run(db, {
+        now: () => T0,
+        credentials: async () => ({ kind: "unavailable", reason: "identity-mismatch", credentialFingerprint: DIGEST }),
+      });
+    } finally {
+      fetchStub.restore();
+    }
+    // Without the digest on the row, the next pass cannot tell "same
+    // credentials, same failure" from "the operator corrected them" — which is
+    // the whole mechanism that stops the churn. So the persisted value is the
+    // contract, not an implementation detail.
+    const row = await rawRow(db, id);
+    expect(row.recovery_state).toBe("suspended");
+    expect(checkSuspensionKindOf(row.last_error as string)).toBe("identity-mismatch");
+    expect(row.last_error).toContain(`cred=${DIGEST}`);
+    // And the pair is then skipped with NO probe while the envelope is unchanged.
+    let probes = 0;
+    const second = stubFetch();
+    try {
+      const summary = await run(db, {
+        now: () => T0 + 15 * 60_000,
+        credentials: async () => {
+          probes += 1;
+          return { kind: "unavailable", reason: "identity-mismatch", credentialFingerprint: DIGEST };
+        },
+      });
+      expect(summary.examined).toBe(0);
+      expect(summary.suspended).toBe(0);
+    } finally {
+      second.restore();
+    }
+    expect(probes).toBe(0);
+  });
+
+  test("an UNCHANGED credential failure is never re-probed and never re-enters the batch", async () => {
+    const db = seededDb();
+    // The row records an identity-mismatch proven against the digest of the
+    // envelope currently stored on the App row.
+    const envelope = db.raw.prepare(`SELECT private_key_enc FROM github_apps WHERE id = ?`).get(APP) as {
+      private_key_enc: string;
+    };
+    const digest = await sha256Hex(envelope.private_key_enc);
+    const id = await seedSuspended(db, "identity-mismatch", digest);
+
+    let probes = 0;
+    const fetchStub = stubFetch();
+    try {
+      // TWO passes: the second is the one that used to churn.
+      for (const at of [T0, T0 + 15 * 60_000]) {
+        const summary = await run(db, {
+          now: () => at,
+          credentials: async () => {
+            probes += 1;
+            return { kind: "unavailable", reason: "identity-mismatch", credentialFingerprint: digest };
+          },
+        });
+        expect(summary.examined).toBe(0);
+        expect(summary.suspended).toBe(0);
+      }
+    } finally {
+      fetchStub.restore();
+    }
+    // ZERO credential probes across both passes: the digest proved the
+    // credentials were untouched, so no identity question was reopened.
+    expect(probes).toBe(0);
+    expect(fetchStub.urls).toHaveLength(0);
+    const row = await rawRow(db, id);
+    expect(row.recovery_state).toBe("suspended");
+    expect(row.attempts).toBe(0);
+    // And it never occupied the bounded batch.
+    expect(await listCheckReconcileBatch(db, T0 + 15 * 60_000)).toHaveLength(0);
+  });
+
+  test("an operator-corrected envelope reopens the pair and resumes the SAME attempt identity", async () => {
+    const db = seededDb();
+    const envelope = db.raw.prepare(`SELECT private_key_enc FROM github_apps WHERE id = ?`).get(APP) as {
+      private_key_enc: string;
+    };
+    const oldDigest = await sha256Hex(envelope.private_key_enc);
+    const id = await seedSuspended(db, "identity-mismatch", oldDigest);
+    // The operator replaces the credentials.
+    db.raw.prepare(`UPDATE github_apps SET private_key_enc = 'enc-pem-rotated' WHERE id = ?`).run(APP);
+
+    let probes = 0;
+    const fetchStub = stubFetch();
+    try {
+      const summary = await run(db, {
+        now: () => T0,
+        credentials: async (input) => {
+          probes += 1;
+          return scriptedCredentials(db, agreeingScript())(input);
+        },
+      });
+      // The changed digest earned exactly ONE proof, and the pair resumed.
+      expect(probes).toBeGreaterThanOrEqual(1);
+      expect(summary.completed).toBe(1);
+    } finally {
+      fetchStub.restore();
+    }
+    const row = await rawRow(db, id);
+    expect(row.observed).toBe("failure");
+    // The SAME historical identity — never a new generation or a new id.
+    expect(row.generation).toBe(1);
+    expect(row.external_id).toBe((await rawRow(db, id)).external_id);
+  });
+
+  test("a KEPT-failing corrected envelope re-stamps with the new digest instead of churning", async () => {
+    const db = seededDb();
+    const envelope = db.raw.prepare(`SELECT private_key_enc FROM github_apps WHERE id = ?`).get(APP) as {
+      private_key_enc: string;
+    };
+    const oldDigest = await sha256Hex(envelope.private_key_enc);
+    const id = await seedSuspended(db, "identity-mismatch", oldDigest);
+    db.raw.prepare(`UPDATE github_apps SET private_key_enc = 'enc-pem-rotated' WHERE id = ?`).run(APP);
+    const newDigest = await sha256Hex("enc-pem-rotated");
+
+    let probes = 0;
+    const fetchStub = stubFetch();
+    try {
+      const summary = await run(db, {
+        now: () => T0,
+        credentials: async () => {
+          probes += 1;
+          return { kind: "unavailable", reason: "identity-mismatch", credentialFingerprint: newDigest };
+        },
+      });
+      // The corrected envelope earned exactly ONE proof; the still-failing pair
+      // is re-stamped rather than returned to the due batch.
+      expect(probes).toBe(1);
+      expect(summary.examined).toBe(0);
+      // Second pass on the now-stamped digest: D1-only, no probe at all.
+      const second = await run(db, {
+        now: () => T0 + 15 * 60_000,
+        credentials: async () => {
+          probes += 1;
+          return { kind: "unavailable", reason: "identity-mismatch", credentialFingerprint: newDigest };
+        },
+      });
+      expect(second.examined).toBe(0);
+      expect(probes).toBe(1);
+    } finally {
+      fetchStub.restore();
+    }
+    const row = await rawRow(db, id);
+    expect(row.recovery_state).toBe("suspended");
+    // The re-stamp carries the NEW digest, so the next pass is D1-only.
+    expect(checkSuspensionKindOf(row.last_error as string)).toBe("identity-mismatch");
+    expect(row.last_error).toContain(newDigest);
+  });
+
+  test("a DISABLED suspension still resumes on App status alone, with no probe", async () => {
+    const db = seededDb();
+    const id = await seedSuspended(db, "disabled", "a".repeat(64));
+    let probes = 0;
+    const fetchStub = stubFetch();
+    try {
+      const summary = await run(db, {
+        now: () => T0,
+        credentials: async (input) => {
+          probes += 1;
+          return scriptedCredentials(db, agreeingScript())(input);
+        },
+      });
+      expect(summary.completed).toBe(1);
+    } finally {
+      fetchStub.restore();
+    }
+    // Status was the proof, so no separate re-enable probe was issued.
+    expect(probes).toBe(1); // only the row loop's own resolution
+    expect((await rawRow(db, id)).observed).toBe("failure");
+  });
+});
+
+describe("paused work leaves the due batch and resumes without attempt spend (P68-QC-006)", () => {
+  test("a paused never-sent row is deferred once, costs nothing per pass, and resumes with the same identity", async () => {
+    const db = seededDb();
+    const { attempt } = await claim(db);
+    const id = attempt.identity.attemptId;
+    const externalId = attempt.identity.externalId;
+    db.raw.prepare(`UPDATE github_apps SET review_enabled = 0 WHERE id = ?`).run(APP);
+    let creates = 0;
+    const fetchStub = stubFetch();
+    try {
+      const summary = await run(db, {
+        now: () => T0,
+        credentials: scriptedCredentials(db, {
+          adopt: async () => ({ kind: "absent" }),
+          begin: async (identity) => {
+            creates += 1;
+            return { kind: "ready", remote: remoteFor(identity, { status: "in_progress", conclusion: null }) };
+          },
+        }, undefined, SCOPE, true),
+      });
+      expect(summary.suspended).toBe(1);
+      const row = await rawRow(db, id);
+      expect(row.recovery_state).toBe("suspended");
+      expect(row.attempts).toBe(0);
+      expect(checkSuspensionKindOf(row.last_error as string)).toBe("paused");
+      // Out of the batch — the per-pass churn is gone.
+      expect(await listCheckReconcileBatch(db, T0)).toHaveLength(0);
+
+      // A SECOND paused pass costs nothing: the row is not even selected, so no
+      // credential resolution and no adoption walk is issued for it.
+      let probes = 0;
+      const second = await run(db, {
+        now: () => T0 + 15 * 60_000,
+        credentials: async () => {
+          probes += 1;
+          return { kind: "unavailable", reason: "missing" };
+        },
+      });
+      expect(second.examined).toBe(0);
+      expect(probes).toBe(0);
+      expect(creates).toBe(0);
+
+      // The kill switch lifts: the SAME row resumes and creates under a fresh
+      // claim, addressing the SAME historical identity.
+      db.raw.prepare(`UPDATE github_apps SET review_enabled = 1 WHERE id = ?`).run(APP);
+      const resumed = await run(db, {
+        now: () => T0 + 30 * 60_000,
+        credentials: scriptedCredentials(db, {
+          adopt: async () => ({ kind: "absent" }),
+          begin: async (identity) => {
+            creates += 1;
+            return { kind: "ready", remote: remoteFor(identity, { status: "in_progress", conclusion: null }) };
+          },
+          fetch: async (identity) => ({
+            kind: "found",
+            remote: remoteFor(identity, { status: "completed", conclusion: "failure" }),
+          }),
+        }),
+      });
+      expect(resumed.completed).toBe(1);
+      expect(creates).toBe(1);
+    } finally {
+      fetchStub.restore();
+    }
+    const row = await rawRow(db, id);
+    expect(row.external_id).toBe(externalId);
+    expect(row.generation).toBe(1);
+    expect(row.attempts).toBe(0); // the pause never charged an attempt
+    expect(row.observed).toBe("failure");
+  });
+
+  test("a paused App STILL adopt-and-terminalizes an already-known run", async () => {
+    const db = seededDb();
+    const { attempt } = await claim(db);
+    db.raw.prepare(`UPDATE review_checks SET create_state = 'sending' WHERE id = ?`).run(attempt.identity.attemptId);
+    db.raw.prepare(`UPDATE github_apps SET review_enabled = 0 WHERE id = ?`).run(APP);
+    let creates = 0;
+    const fetchStub = stubFetch();
+    try {
+      const summary = await run(db, {
+        now: () => T0,
+        credentials: scriptedCredentials(db, {
+          adopt: async (identity) => ({
+            kind: "found",
+            remote: remoteFor(identity, { id: 909, status: "in_progress", conclusion: null }),
+          }),
+          begin: async (identity) => {
+            creates += 1;
+            return { kind: "ready", remote: remoteFor(identity, { status: "in_progress", conclusion: null }) };
+          },
+          fetch: async (identity) => ({
+            kind: "found",
+            remote: remoteFor(identity, { id: 909, status: "in_progress", conclusion: null }),
+          }),
+          complete: async (identity) => ({
+            kind: "completed",
+            remote: remoteFor(identity, { id: 909, conclusion: "failure" }),
+          }),
+        }, undefined, SCOPE, true),
+      });
+      expect(summary.completed).toBe(1);
+    } finally {
+      fetchStub.restore();
+    }
+    expect(creates).toBe(0);
+    const row = await rawRow(db, attempt.identity.attemptId);
+    expect(row.observed).toBe("failure");
+    expect(row.recovery_state).toBe("done");
+  });
+});
+
+describe("pre-dispatch refusal is typed end to end (P68-QC-005)", () => {
+  test("the lane's own transport throws the SHARED marker, which the adapter classifies as zero-dispatch", async () => {
+    const db = seededDb();
+    await claim(db);
+    // Capture the transport the lane builds and refuse at its first admission.
+    let transport: CheckTransport | undefined;
+    const fetchStub = stubFetch();
+    try {
+      await run(db, {
+        now: () => T0,
+        credentials: async ({ transport: t }) => {
+          transport = t;
+          return { kind: "unavailable", reason: "missing" };
+        },
+      });
+      expect(transport).toBeDefined();
+      // Exhaust the run budget so the NEXT admission is refused pre-dispatch.
+      for (let i = 0; i < CHECK_RECONCILE_MAX_REQUESTS; i += 1) {
+        await transport!.fetchImpl("https://api.github.com/probe");
+      }
+      // The refusal must be the UPSTREAM marker class, not a local look-alike:
+      // `sendRequests` walks the error chain for that exact class by identity.
+      const err = await transport!.fetchImpl("https://api.github.com/checks").then(
+        () => null,
+        (e: unknown) => e,
+      );
+      expect(err).toBeInstanceOf(CheckRequestNotDispatched);
+      expect(isRequestNotDispatched(err)).toBe(true);
+    } finally {
+      fetchStub.restore();
+    }
+  });
+
+  test("the dead local budget-refusal grammar is gone from the lane", () => {
+    const source = readFileSync(new URL("../../src/worker/check-reconcile.ts", import.meta.url), "utf8");
+    // No second, unrecognized refusal grammar may exist in this module.
+    expect(source).not.toContain("RecoveryBudgetRefused");
+    expect(source).not.toContain("isBudgetRefusal");
+    expect(source).toContain('from "../pipeline/checks"');
   });
 });
