@@ -20,16 +20,27 @@
  * resolution via the F-001 channel — review failed log + review_failures
  * row + rethrow → retry×3 → DLQ); GH_TOKEN rides ONLY the git/gh step
  * envs) → parse
- * the mstar.review/v1 envelope → post the overall review comment FIRST →
- * store.put (idempotent — the UNIQUE first-written row wins) → KV
- * completion state → finally destroy. Any step throwing → structured log
+ * the mstar.review/v1 envelope → (plan 67, spec §7.7 FROZEN ORDER) dedup +
+ * publication-journal handoff read BEFORE model work → pending confirmed
+ * lifecycle apply + targets/evidence/discussion capture → optional fenced
+ * Check claim (the §7.10 seam; absent `checks` dep = no Checks, M8 fully
+ * operational) → runner + concurrent bounded recheck → validation +
+ * conservative §7.4 reconciliation + §7.10 closure + final body →
+ * STAGE the complete private payload BEFORE any GitHub mutation →
+ * epoch-fenced claim + proof-based publication (proof persisted before KV
+ * done) → proof-gated store.put + ONE idempotent lifecycle batch →
+ * intent-prepared line comments + id capture → resolution LAST (verified
+ * snapshots enqueued before the single inline discover+resolve attempt) →
+ * proof-read Check terminalize → finally destroy. Any step throwing →
+ * structured log
  * + a best-effort review_failures row (stage classified from the phase in
  * flight; plan 18 Task 2 / AL-6 — DLQ-bound infra failures otherwise leave
  * zero D1 trace) + rethrow (queue retry → DLQ). The runtime runner has NO
  * summary-degrade path: exit 0 means stdout is the engine-validated
  * envelope; a non-zero exit keeps the no-post/no-insert rethrow. A
  * parse/validate failure takes the DEGRADE path instead (plan 18 Task 2 /
- * AL-1): review_failures row (stage=parse) + degraded comment (both
+ * AL-1, now routed through the §7.7 journal as a `degraded` publication):
+ * review_failures row (stage=parse) + staged→sent degraded comment (both
  * best-effort) + ack — parseReviewOutput is a pure function of
  * run.stdout, so retry is deterministic waste. No reviews row and NO KV
  * done-state on degrade: a later webhook for the same sha legitimately
@@ -64,19 +75,57 @@ import type { D1Database, KVNamespace, Message, MessageBatch } from "@cloudflare
 import type { ReviewJobPayload } from "../contracts/review-job";
 import { idemKey, IDEMPOTENCY_SECONDS, type IdempotencyKey } from "../contracts/idem";
 import { parseReviewOutput, capFindings, clampFindingSizes } from "../review/schema";
+import type { ReviewFinding, ReviewOutput } from "../review/schema";
 import { isReviewLevel, REVIEW_LEVELS, type CustomProviderDeclaration, type ReviewLevel } from "../review/runtime";
 import { providerEnvName, customProviderEnvName } from "./provider-catalog";
 import { redactExactSecrets, redactReviewOutput, redactReviewOutputExact, redactSecrets } from "./redact";
 import { createArtifactStore, previousRoundFingerprints, type D1ArtifactStore } from "../store/artifact-store";
 import { createFailureStore, type FailureStage, type FailureStore } from "../store/failure-store";
+import { computeFindingFingerprint } from "../store/fingerprint";
+import {
+  applyPublishedLifecycle,
+  claimPublication,
+  countOpenFindings,
+  recordPublicationProof,
+  selectAssessmentTargets,
+  stagePublication,
+  type Lease,
+  type LineIntent,
+  type LifecycleRound,
+  type PublicationPayload,
+  type PublicationRow,
+  type VerifiedResolution,
+} from "../store/finding-lifecycle";
+import {
+  ASSESSMENT_TARGET_CAP,
+  RECHECK_OUTPUT_PATH,
+  validateRecheckDoc,
+  type Assessment,
+  type Coverage,
+  type Discussion,
+  type EvidenceSlice,
+  type RecheckDoc,
+  type RecheckInput,
+  type RecheckTarget,
+  type Scope,
+} from "../contracts/recheck";
+import { assembleDiscussion } from "./discussion-context";
+import { buildLineIntent, sha256Hex } from "./review-threads";
 import { getSandbox, type ReviewSandbox } from "./sandbox";
-import { buildGitOpsCommands, writeJsonCommand } from "./gitops";
+import { buildGitOpsCommands, readRecheckCommand, runnerCommand, writeJsonCommand } from "./gitops";
 import {
   assertSandboxGrant,
+  buildClosureSection,
+  buildPreparedDegradedBody,
+  buildPreparedReviewBody,
+  buildPublicationMarker,
   createReviewCommenter,
   filterLineCommentFindings,
+  renderLineCommentText,
+  type ClosureRow,
   type CommenterEnv,
   type ReviewCommenter,
+  type UpsertPlan,
 } from "./comment";
 // Per-App credential resolution (plan 13 Task 2, lock L4): the consumer is a
 // sanctioned reader of the dashboard store leaves (apps-store reads the
@@ -418,6 +467,628 @@ function handleGuardHeld(message: Message<ReviewJobPayload>, deps: ProcessDeps):
   }
 }
 
+// ---------------------------------------------------------------------------
+// Check lifecycle seam (plan 67, spec review-lifecycle §7.7 steps 4/12 +
+// §7.10) — plan-67-owned types so M8 ships and works before plan 68: an
+// ABSENT `checks` dependency produces NO Checks while M8 remains fully
+// operational. Declared with §7.7 types only (Scope, Lease) — never a §7.9
+// type; plan 68 supplies the implementation and owns the durable attempt
+// rows. Hook exceptions/timeouts are caught by the consumer (≤2 requests /
+// 2 seconds per inline hook is the hook's own budget — no publication path
+// waits for hook retries).
+// ---------------------------------------------------------------------------
+
+export type CheckHandle = { attemptId: string; scope: Scope; githubAppId: number; headSha: string; lease: Lease };
+
+export type CheckLifecycleHooks = {
+  begin(input: { scope: Scope; githubAppId: number; headSha: string; triggeredBy: string; action: string; executionDeadlineMs: number }): Promise<CheckHandle | null>;
+  terminalize(input: { handle: CheckHandle; publicationId: string | null;
+    outcome: "pre-publication-failure" | "degraded-not-posted" | "publication-unknown" | "expired" | "local-error" }): Promise<void>;
+};
+
+/**
+ * Check execution window (spec §7.9: the immutable execution deadline is
+ * claim time + 900,000ms) — the consumer passes it to `begin`; plan 68's
+ * claim persists it as the lease/expiry anchor.
+ */
+export const CHECK_EXECUTION_WINDOW_MS = 900_000;
+
+/** Inline hook budget guard: the consumer never waits longer than this. */
+const CHECK_HOOK_TIMEOUT_MS = 2_500;
+
+/**
+ * §7.3 catalog budget: "Diff capture plus catalog is bounded to 256 KiB; at
+ * most 4 slices per target, 80 lines/8 KiB per slice." Oversized evidence is
+ * excluded (no eligible slice), never silently truncated.
+ */
+const RECHECK_CATALOG_MAX_BYTES = 262_144;
+const RECHECK_SLICE_MAX_LINES = 80;
+const RECHECK_SLICE_MAX_BYTES = 8 * 1024;
+const RECHECK_SLICES_PER_TARGET = 4;
+/** §7.3 input cap: oversized whole targets are excluded with coverage. */
+const RECHECK_INPUT_MAX_BYTES = 512 * 1024;
+
+/** Await a promise with a hard consumer-side timeout (hook budget guard). */
+async function withHookTimeout<T>(promise: Promise<T>, fallback: T): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<T>((resolve) => {
+    timer = setTimeout(() => resolve(fallback), CHECK_HOOK_TIMEOUT_MS);
+  });
+  // A hook rejecting AFTER its timeout won the race must not surface as an
+  // unhandled rejection — the failure is already treated as the fallback.
+  promise.catch(() => {});
+  try {
+    return await Promise.race([promise, timeout]);
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
+}
+
+/** One JSON.stringify size in UTF-8 bytes (bounded-input accounting). */
+function jsonByteLength(value: unknown): number {
+  return new TextEncoder().encode(JSON.stringify(value)).length;
+}
+
+/**
+ * §7.7 step 2 journal check: an existing non-terminal publication row for
+ * this exact scope/SHA (prepared/sending/unknown/confirmed) hands off to
+ * recovery and ACKs — never a second paid review for the same head.
+ * Terminal rows (applied/failed/superseded) do not hand off: the D1
+ * idempotency check above already covered applied rows, and failed/superseded
+ * heads are legitimately re-reviewable on a new trigger.
+ */
+async function journalHandoffRow(
+  db: PipelineEnv["DB"],
+  scope: Scope,
+  headSha: string,
+): Promise<{ id: string; phase: PublicationRow["phase"] } | null> {
+  const row = await db
+    .prepare(
+      `SELECT id, phase FROM review_publications
+       WHERE app_id = ? AND installation_id = ? AND owner = ? AND repo = ? AND pr_number = ?
+         AND head_sha = ? AND phase IN ('prepared','sending','unknown','confirmed')
+       ORDER BY created_ms, id LIMIT 1`,
+    )
+    .bind(scope.appId, scope.installationId, scope.owner, scope.repo, scope.prNumber, headSha)
+    .first<{ id: string; phase: string }>();
+  if (row === null) return null;
+  return { id: row.id, phase: row.phase as PublicationRow["phase"] };
+}
+
+/**
+ * §7.7 step 3: apply this scope's pending CONFIRMED journals in original
+ * publication order (oldest first) before the lifecycle assessment — an
+ * older assessment must never lose to a newer unapplied recurrence. Each
+ * row: conditional claim (epoch-fenced) → proof-gated idempotent apply. Any
+ * failure leaves that row (and the rest) for M8 recovery and reports false —
+ * the caller records context-unavailable and cannot close stale state.
+ */
+async function applyPendingLifecycleJournals(
+  db: PipelineEnv["DB"],
+  scope: Scope,
+  nowMs: number,
+): Promise<boolean> {
+  const rows = await db
+    .prepare(
+      `SELECT id FROM review_publications
+       WHERE app_id = ? AND installation_id = ? AND owner = ? AND repo = ? AND pr_number = ?
+         AND phase = 'confirmed' AND recovery_state = 'pending'
+       ORDER BY created_ms, id LIMIT 10`,
+    )
+    .bind(scope.appId, scope.installationId, scope.owner, scope.repo, scope.prNumber)
+    .all<{ id: string }>();
+  for (const { id } of rows.results) {
+    const lease = await claimPublication(db, id, `consumer-journal-apply:${id}`, nowMs);
+    if (lease === null) return false;
+    let applied = false;
+    try {
+      applied = await applyPublishedLifecycle(db, id, lease, Date.now());
+    } catch {
+      return false;
+    }
+    if (!applied) return false;
+  }
+  return true;
+}
+
+/** A parsed unified-diff hunk with its old/new line arrays (evidence raw material). */
+type ParsedDiffHunk = {
+  oldStart: number;
+  oldLines: string[];
+  newStart: number;
+  newLines: string[];
+};
+
+type ParsedDiffFile = {
+  path: string;
+  oldPath: string | null;
+  /** Deleted file (`+++ /dev/null`): absent at HEAD. */
+  deleted: boolean;
+  oldBlobOid: string | null;
+  headBlobOid: string | null;
+  hunks: ParsedDiffHunk[];
+};
+
+/**
+ * Parse a unified diff into per-file hunks (worker-controlled §7.3 trusted
+ * capture raw material — never model output). Handles renames (b-side new
+ * path), deleted files (`+++ /dev/null`), new files, multiple hunks per
+ * file, abbreviated `index <old>..<head>` blob oids, and skips binary files
+ * (no hunks). Hunk bodies are consumed by COUNT like parseDiffHunkRanges.
+ */
+function parseUnifiedDiffFiles(diffText: string): ParsedDiffFile[] {
+  const files: ParsedDiffFile[] = [];
+  let current: ParsedDiffFile | null = null;
+  let hunk: ParsedDiffHunk | null = null;
+  let remainingOld = 0;
+  let remainingNew = 0;
+  for (const line of diffText.split("\n")) {
+    if (hunk !== null && (remainingOld > 0 || remainingNew > 0)) {
+      const marker = line.charAt(0);
+      if (marker === " " || marker === "-") {
+        hunk.oldLines.push(line.slice(1));
+        remainingOld -= 1;
+      }
+      if (marker === " " || marker === "+") {
+        hunk.newLines.push(line.slice(1));
+        remainingNew -= 1;
+      }
+      // "\" ("\ No newline at end of file") consumes neither tally.
+      if (remainingOld <= 0 && remainingNew <= 0) hunk = null;
+      continue;
+    }
+    if (line.startsWith("diff --git ")) {
+      current = { path: "", oldPath: null, deleted: false, oldBlobOid: null, headBlobOid: null, hunks: [] };
+      files.push(current);
+      hunk = null;
+      continue;
+    }
+    if (current === null) continue;
+    if (line.startsWith("index ")) {
+      const match = /^index ([0-9a-f]+)\.\.([0-9a-f]+)/.exec(line);
+      if (match) {
+        current.oldBlobOid = match[1]!;
+        current.headBlobOid = match[2]!;
+      }
+      continue;
+    }
+    if (line.startsWith("--- ")) {
+      const target = line.slice(4).trim();
+      current.oldPath = target === "/dev/null" ? null : target.startsWith("a/") ? target.slice(2) : target;
+      continue;
+    }
+    if (line.startsWith("+++ ")) {
+      const target = line.slice(4).trim();
+      if (target === "/dev/null") {
+        current.deleted = true;
+        current.path = current.oldPath ?? "";
+      } else {
+        current.path = target.startsWith("b/") ? target.slice(2) : target;
+      }
+      continue;
+    }
+    const hunkHeader = /^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@/.exec(line);
+    if (hunkHeader) {
+      hunk = {
+        oldStart: Number(hunkHeader[1]),
+        oldLines: [],
+        newStart: Number(hunkHeader[3]),
+        newLines: [],
+      };
+      current.hunks.push(hunk);
+      remainingOld = hunkHeader[2] === undefined ? 1 : Number(hunkHeader[2]);
+      remainingNew = hunkHeader[4] === undefined ? 1 : Number(hunkHeader[4]);
+      if (remainingOld <= 0 && remainingNew <= 0) hunk = null;
+    }
+  }
+  return files;
+}
+
+/**
+ * Build the §7.3 trusted evidence catalog for the selected targets from the
+ * worker-captured diff: per target at most `RECHECK_SLICES_PER_TARGET`
+ * slices from its file (nearest the original concern's line first), each
+ * bounded to 80 lines / 8 KiB per side, whole catalog bounded to 256 KiB —
+ * oversized/unsupported slices are EXCLUDED (no eligible slice), never
+ * silently truncated. Deleted files yield one `deleted-file` slice proving
+ * absence at HEAD (complete when the hunk starts at old line 1). Returns
+ * the slices plus the per-target excluded flags (honest coverage).
+ */
+function buildEvidenceCatalog(
+  diffText: string,
+  targets: RecheckTarget[],
+): { slices: EvidenceSlice[]; excludedTargets: Set<string> } {
+  const slices: EvidenceSlice[] = [];
+  const excludedTargets = new Set<string>();
+  if (diffText === "") {
+    for (const target of targets) excludedTargets.add(target.rowId);
+    return { slices, excludedTargets };
+  }
+  const files = parseUnifiedDiffFiles(diffText);
+  let budget = RECHECK_CATALOG_MAX_BYTES;
+  const sliceIdByKey = new Map<string, string>();
+  const sizeOf = (slice: EvidenceSlice): number => jsonByteLength(slice);
+
+  const addSlice = (file: ParsedDiffFile, hunk: ParsedDiffHunk, kind: EvidenceSlice["kind"]): EvidenceSlice | null => {
+    if (hunk.oldLines.length > RECHECK_SLICE_MAX_LINES || hunk.newLines.length > RECHECK_SLICE_MAX_LINES) return null;
+    const slice: EvidenceSlice = {
+      id: "",
+      headSha: "",
+      baseSha: "",
+      path: file.path,
+      oldPath: file.oldPath,
+      kind,
+      oldStart: hunk.oldStart,
+      oldLines: hunk.oldLines,
+      newStart: hunk.newStart,
+      newLines: hunk.newLines,
+      oldBlobOid: file.oldBlobOid,
+      headBlobOid: file.headBlobOid,
+      absentAtHead: file.deleted,
+      complete: kind === "deleted-file" ? hunk.oldStart === 1 : true,
+    };
+    const bytes = sizeOf(slice);
+    if (bytes > RECHECK_SLICE_MAX_BYTES || bytes > budget) return null;
+    return slice;
+  };
+
+  for (const target of targets) {
+    const filePath = target.original.filePath;
+    if (filePath === null) {
+      excludedTargets.add(target.rowId); // repo-level concern: no diff slice can prove it
+      continue;
+    }
+    const matching = files.filter((f) => f.path === filePath || f.oldPath === filePath);
+    if (matching.length === 0) {
+      excludedTargets.add(target.rowId);
+      continue;
+    }
+    const lineAnchor = target.original.lineStart ?? 0;
+    const candidates: { file: ParsedDiffFile; hunk: ParsedDiffHunk }[] = matching.flatMap((file) =>
+      file.hunks.map((hunk) => ({ file, hunk })),
+    );
+    candidates.sort(
+      (a, b) =>
+        Math.abs(a.hunk.oldStart - lineAnchor) - Math.abs(b.hunk.oldStart - lineAnchor) ||
+        a.hunk.oldStart - b.hunk.oldStart,
+    );
+    let included = 0;
+    for (const { file, hunk } of candidates) {
+      if (included >= RECHECK_SLICES_PER_TARGET) break;
+      const key = `${file.path}\u0000${hunk.oldStart}:${hunk.oldLines.length}+${hunk.newStart}:${hunk.newLines.length}`;
+      if (sliceIdByKey.has(key)) {
+        included += 1; // the hunk is already in the catalog — targets share slices
+        continue;
+      }
+      const kind: EvidenceSlice["kind"] = file.deleted ? "deleted-file" : "hunk";
+      const built = addSlice(file, hunk, kind);
+      if (built === null) continue;
+      built.id = `ev-${slices.length + 1}`;
+      slices.push(built);
+      budget -= sizeOf(built);
+      sliceIdByKey.set(key, built.id);
+      included += 1;
+    }
+    if (included === 0) excludedTargets.add(target.rowId);
+  }
+  return { slices, excludedTargets };
+}
+
+/**
+ * Project a current envelope finding onto the §7.3 OriginalFinding wire
+ * (the durable original concern shape lifecycle rows store).
+ */
+function projectOriginalFinding(finding: ReviewFinding): OriginalFindingProjection {
+  return {
+    title: finding.title,
+    body: finding.body,
+    filePath: finding.file_path ?? null,
+    lineStart: finding.line_start ?? null,
+    lineEnd: finding.line_end ?? null,
+    mergeClass: finding.mergeClass,
+    category: finding.category ?? null,
+    fingerprintHint: finding.fingerprint_hint ?? null,
+  };
+}
+
+/** Local alias so the projection needs no runtime import of the contract type. */
+type OriginalFindingProjection = RecheckTarget["original"];
+
+/**
+ * §7.4 reconciliation (plan 67 Task 4): validate the recheck document
+ * against the trusted input AND the final current findings, applying the
+ * CONSERVATIVE precedence —
+ *   - same-round recurrence (same fingerprint, or exact normalized original
+ *     equality under a different fingerprint) forces `unverifiable/conflict`
+ *     over any recheck closure (the current review's recurrence wins);
+ *   - model-reported related current finding indexes are validated against
+ *     the final envelope (never blindly trusted): any related unresolved
+ *     concern wins over addressed; an out-of-range index is fabrication and
+ *     forces unverifiable;
+ *   - an unavailable prior-journal apply means stale lifecycle state — no
+ *     closure is trusted (context-incomplete).
+ * Rows the document omitted are accounted as `unverifiable/omitted` for the
+ * closure and coverage but are NOT truly assessed — they never enter
+ * `lifecycle.assessments`, so `last_assessed_ms` advances only for real
+ * assessments (fair-rotation §7.2).
+ */
+function reconcileRecheckRound(input: {
+  targets: RecheckTarget[];
+  doc: RecheckDoc | null;
+  discussion: Discussion;
+  output: ReviewOutput;
+  /** Stale lifecycle state (failed pending-journal apply or capture): no closure. */
+  staleContext: boolean;
+  /** Selected rows excluded from the recheck input by the §7.3 size budget. */
+  budgetExcluded: ReadonlySet<string>;
+}): {
+  assessments: Assessment[];
+  outcomeByRowId: Map<string, Assessment>;
+  resolutions: { associationId: string; verified: VerifiedResolution }[];
+  assessedCount: number;
+  omittedCount: number;
+} {
+  const { targets, doc, discussion, output, staleContext, budgetExcluded } = input;
+  const outcomeByRowId = new Map<string, Assessment>();
+  const assessments: Assessment[] = [];
+  const forceUnverifiable = (rowId: string, reason: Assessment["reason"]): Assessment => ({
+    rowId,
+    disposition: "unverifiable",
+    reason,
+    evidence: null,
+    relatedCurrentFindingIndexes: [],
+  });
+
+  const currentFingerprints = new Set(output.findings.map((f) => computeFindingFingerprint(f)));
+  const currentComposites = new Set(
+    output.findings.map((f) => computeFindingFingerprint({ ...f, fingerprint_hint: null })),
+  );
+
+  for (const target of targets) {
+    const docResult = doc?.results.find((r) => r.rowId === target.rowId) ?? undefined;
+    let assessment: Assessment;
+    if (staleContext) {
+      // Stale lifecycle state (pending-journal apply or capture failed):
+      // nothing may close this round, assessed or not.
+      assessment = forceUnverifiable(target.rowId, "context-incomplete");
+    } else if (docResult === undefined) {
+      // Omitted selected row: no recheck ran for it. Honest conservative
+      // accounting by WHY — invalid/absent document, §7.3 size budget, or
+      // omitted from an otherwise valid document. Never "assessed".
+      const reason: Assessment["reason"] =
+        doc === null ? "invalid-output" : budgetExcluded.has(target.rowId) ? "budget" : "omitted";
+      assessment = forceUnverifiable(target.rowId, reason);
+    } else {
+      assessment = { ...docResult };
+      // Conservative precedence vs the SAME round's current findings.
+      const original = target.original;
+      const projected = {
+        file_path: original.filePath,
+        line_start: original.lineStart,
+        line_end: original.lineEnd,
+        title: original.title,
+        category: original.category,
+        mergeClass: original.mergeClass,
+        fingerprint_hint: original.fingerprintHint,
+      };
+      const fingerprint = computeFindingFingerprint(projected);
+      const composite = computeFindingFingerprint({ ...projected, fingerprint_hint: null });
+      if (currentFingerprints.has(fingerprint) || currentComposites.has(composite)) {
+        // Same-round recurrence (exact or normalized-original match) wins
+        // over recheck closure — never false `addressed`.
+        assessment = forceUnverifiable(target.rowId, "conflict");
+      } else {
+        // Validate model-reported related indexes against the FINAL
+        // envelope; any related unresolved concern wins over addressed.
+        const inRange = assessment.relatedCurrentFindingIndexes.every((i) => i < output.findings.length);
+        if (!inRange) {
+          assessment = forceUnverifiable(target.rowId, "conflict");
+        } else if (
+          assessment.disposition === "addressed" &&
+          assessment.relatedCurrentFindingIndexes.length > 0
+        ) {
+          assessment = forceUnverifiable(target.rowId, "conflict");
+        }
+      }
+    }
+    outcomeByRowId.set(target.rowId, assessment);
+    if (docResult !== undefined) assessments.push(assessment);
+  }
+
+  // Resolution eligibility (§7.4/§7.5): addressed verdicts only, with the
+  // complete snapshot fences actually captured this round.
+  const resolutions: { associationId: string; verified: VerifiedResolution }[] = [];
+  for (const target of targets) {
+    const assessment = outcomeByRowId.get(target.rowId);
+    if (assessment === undefined || assessment.disposition !== "addressed") continue;
+    if (discussion.issueCoverage !== "complete" || discussion.issueDigest === "") continue;
+    for (const associationId of target.associationIds) {
+      const snapshot = discussion.threads.find((t) => t.associationId === associationId);
+      if (
+        snapshot === undefined ||
+        snapshot.coverage !== "complete" ||
+        snapshot.modelCoverage !== "complete" ||
+        snapshot.digest === ""
+      ) {
+        continue;
+      }
+      resolutions.push({
+        associationId,
+        verified: {
+          assessment,
+          snapshot,
+          issueDigest: discussion.issueDigest,
+          issueCoverage: discussion.issueCoverage,
+        },
+      });
+    }
+  }
+
+  return {
+    assessments,
+    outcomeByRowId,
+    resolutions,
+    assessedCount: assessments.length,
+    omittedCount: targets.length - assessments.length,
+  };
+}
+
+/** The empty discussion for rounds with no open rows (nothing to capture). */
+function emptyDiscussion(nowMs: number): Discussion {
+  return { items: [], issueCoverage: "complete", issueDigest: "", capturedMs: nowMs, threads: [] };
+}
+
+/**
+ * The round's context coverage (§7.4): complete only when the issue capture
+ * AND every captured thread snapshot (fetch AND model coverage) are
+ * complete — a truncated or unavailable capture never labels a round
+ * complete.
+ */
+function roundContextCoverage(discussion: Discussion): Coverage {
+  if (discussion.issueCoverage === "unavailable") return "unavailable";
+  if (discussion.issueCoverage !== "complete") return "truncated";
+  for (const thread of discussion.threads) {
+    if (thread.coverage !== "complete" || thread.modelCoverage !== "complete") return "truncated";
+  }
+  return "complete";
+}
+
+/**
+ * Bounded read + validation of the runner's recheck output (plan 67 T3/T4):
+ * the audited fixed-path command output is `<content>\n<overflow-flag>` —
+ * flag "0" = within the byte bound. Anything else (non-zero exit, overflow,
+ * malformed JSON, failed validation) is NO recheck: the round proceeds with
+ * every selected row conservatively omitted, never a fabricated document.
+ */
+async function readRecheckDoc(sandbox: ReviewSandbox, recheckInput: RecheckInput): Promise<RecheckDoc | null> {
+  let read;
+  try {
+    read = await sandbox.runCommand(readRecheckCommand(RECHECK_OUTPUT_PATH), { timeout: EXEC_TIMEOUT_GIT_MS });
+  } catch {
+    return null;
+  }
+  if (read.exitCode !== 0) return null;
+  const out = read.stdout;
+  const split = out.lastIndexOf("\n");
+  if (split < 0) return null;
+  if (out.slice(split + 1).trim() !== "0") return null; // overflow beyond the byte bound
+  try {
+    const gate = validateRecheckDoc(JSON.parse(out.slice(0, split)), recheckInput);
+    return gate.ok ? gate.doc : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The degraded publication outcome (§7.7 degraded payload). `confirmed` =
+ * proof persisted (the Check hook reads it for the neutral conclusion);
+ * `unknown` = a send was attempted but the proof could not be persisted
+ * (read-only discovery owns it); `failed` = a definitive no-send
+ * (pre-publication failure / lease loss / send rejection).
+ */
+type DegradedPublicationOutcome =
+  | { phase: "confirmed"; publicationId: string }
+  | { phase: "unknown"; publicationId: string }
+  | { phase: "failed"; reason: string };
+
+/**
+ * Publish the parse-degrade notice through the §7.7 journal (plan: stage →
+ * claim → send the EXACT prepared body → proof → applied mark). The
+ * degraded payload has `artifact: null`, `lifecycle: null`, empty line
+ * intents and the bounded final degraded body — no normal review or
+ * lifecycle rows are ever created from it. NEVER throws: every failure is a
+ * typed outcome (the caller acks regardless — a parse fail is a
+ * deterministic model-output failure where retry is waste).
+ */
+async function publishDegradedPublication(input: {
+  db: PipelineEnv["DB"];
+  commenter: ReviewCommenter;
+  scope: Scope;
+  headSha: string;
+  redactedError: string;
+  redactedStdout: string;
+}): Promise<DegradedPublicationOutcome> {
+  const { commenter } = input;
+  const target = {
+    installationId: input.scope.installationId,
+    owner: input.scope.owner,
+    repo: input.scope.repo,
+    prNumber: input.scope.prNumber,
+  };
+  try {
+    const plan = await commenter.planDegradedUpsert(target);
+    const publicationId = crypto.randomUUID();
+    const publicationMarker = buildPublicationMarker({ publicationId, headSha: input.headSha, kind: "degraded" });
+    const body = buildPreparedDegradedBody({
+      error: input.redactedError,
+      rawOutput: input.redactedStdout,
+      round: plan.round,
+      publicationMarker,
+    });
+    const payload: PublicationPayload = {
+      version: 1,
+      scope: input.scope,
+      headSha: input.headSha,
+      kind: "degraded",
+      round: plan.round,
+      targetCommentId: plan.action === "update" ? plan.commentId : null,
+      body,
+      bodySha256: await sha256Hex(body),
+      artifact: null,
+      lifecycle: null,
+      lineIntents: [],
+    };
+    const staged = await stagePublication(input.db, { id: publicationId, payload, nowMs: Date.now() });
+    const lease = await claimPublication(input.db, staged.id, `consumer-degraded:${staged.id}`, Date.now());
+    if (lease === null) {
+      return { phase: "failed", reason: "publication journal claim failed — degraded notice not sent" };
+    }
+    const sent = await commenter.postPreparedDegraded({
+      ...target,
+      headSha: input.headSha,
+      round: plan.round,
+      targetCommentId: plan.action === "update" ? plan.commentId : null,
+      body,
+      publicationId: staged.id,
+    });
+    const proof = {
+      publicationId: staged.id,
+      scope: input.scope,
+      headSha: input.headSha,
+      kind: "degraded" as const,
+      round: plan.round,
+      // 0 = posted but the response carried no id — the typed sentinel for
+      // "sent, id uncaptured" (never a fabricated GitHub id); §7.5 marker
+      // discovery can still bind the exact comment later.
+      commentId: sent.commentId ?? 0,
+      bodySha256: payload.bodySha256,
+      confirmedMs: Date.now(),
+    };
+    let proofOk = false;
+    try {
+      proofOk = await recordPublicationProof(input.db, staged.id, lease, proof);
+    } catch {
+      proofOk = false;
+    }
+    if (!proofOk) {
+      return { phase: "unknown", publicationId: staged.id };
+    }
+    let applied = false;
+    try {
+      applied = await applyPublishedLifecycle(input.db, staged.id, lease, Date.now());
+    } catch {
+      applied = false;
+    }
+    if (!applied) {
+      return { phase: "unknown", publicationId: staged.id };
+    }
+    return { phase: "confirmed", publicationId: staged.id };
+  } catch (err) {
+    return { phase: "failed", reason: err instanceof Error ? err.message : String(err) };
+  }
+}
+
 type ProcessDeps = {
   env: PipelineEnv;
   store: D1ArtifactStore;
@@ -446,7 +1117,7 @@ type ProcessDeps = {
    * per-instance, so one instance per App keeps token caches isolated AND
    * prevents credentials from crossing instances.
    */
-  appCommenters: Map<string, { commenter: ReviewCommenter; fingerprint: string }>;
+  appCommenters: Map<string, { commenter: ReviewCommenter; fingerprint: string; githubAppId: number }>;
   /**
    * Per-App commenter factory — `createReviewCommenter` in production (the
    * ONLY createAppAuth construction point stays src/pipeline/comment.ts,
@@ -456,6 +1127,15 @@ type ProcessDeps = {
   createAppCommenter: (cred: CommenterEnv) => ReviewCommenter;
   log: ConsumerLog;
   getSandbox: (binding: unknown, id: string) => Promise<ReviewSandbox>;
+  /**
+   * Optional Check lifecycle seam (plan 67 §7.10): ABSENT → no Checks, M8
+   * fully operational (plan 68 supplies the implementation). Hook
+   * exceptions/timeouts are caught by the consumer; `begin` runs at §7.7
+   * step 4 (after the authoritative SHA and dedup, before model work),
+   * `terminalize` at step 12 on every terminal path with the publication
+   * identity so the terminal decision reads the persisted proof.
+   */
+  checks?: CheckLifecycleHooks;
 };
 
 /**
@@ -488,14 +1168,16 @@ function toBaseFields(payload: ReviewJobPayload): ConsumerLogFields {
 
 /**
  * Outcome of the per-message commenter resolution (plan 16, architect lock
- * L4): `ok` carries the commenter the review runs with; `paused` is the
+ * L4): `ok` carries the commenter the review runs with PLUS the row's
+ * numeric `github_app_id` (the §7.10 Check seam's App identity — the row is
+ * already read here, no second query); `paused` is the
  * DISTINCT typed outcome for a paused App (review_enabled=0) — returned
  * AFTER the status/deleted gates (disabled is judged first and keeps its
  * byte-identical throw→retry→DLQ semantics) and consumed by processMessage
  * as an immediate ack-skip. NOT a throw: a throw would enter the
  * retry→DLQ path — the wrong semantics for an intentional pause.
  */
-type CommenterResolution = { kind: "ok"; commenter: ReviewCommenter } | { kind: "paused" };
+type CommenterResolution = { kind: "ok"; commenter: ReviewCommenter; githubAppId: number } | { kind: "paused" };
 
 /**
  * Resolve the commenter for one message (plan 13 Task 2, architect lock L4
@@ -555,7 +1237,7 @@ async function resolveCommenter(payload: ReviewJobPayload, deps: ProcessDeps): P
   const fingerprint = JSON.stringify([row.github_app_id, row.private_key_enc]);
   const cached = deps.appCommenters.get(appRef.appId);
   if (cached !== undefined && cached.fingerprint === fingerprint) {
-    return { kind: "ok", commenter: cached.commenter };
+    return { kind: "ok", commenter: cached.commenter, githubAppId: cached.githubAppId };
   }
   // Cache miss (first message for this App) or fingerprint mismatch
   // (rotation): decrypt + build + REPLACE the entry. A decrypt failure here
@@ -567,8 +1249,8 @@ async function resolveCommenter(payload: ReviewJobPayload, deps: ProcessDeps): P
     `github_apps.private_key_enc:${row.id}`,
   );
   const commenter = deps.createAppCommenter({ APP_ID: String(row.github_app_id), PRIVATE_KEY: pem });
-  deps.appCommenters.set(appRef.appId, { commenter, fingerprint });
-  return { kind: "ok", commenter };
+  deps.appCommenters.set(appRef.appId, { commenter, fingerprint, githubAppId: row.github_app_id });
+  return { kind: "ok", commenter, githubAppId: row.github_app_id };
 }
 
 /**
@@ -1131,7 +1813,7 @@ async function kvDoneHit(
  * — every field defaults to the production implementation when omitted.
  */
 type ConsumerOverrides = Partial<
-  Pick<ProcessDeps, "store" | "failureStore" | "createAppCommenter" | "getSandbox">
+  Pick<ProcessDeps, "store" | "failureStore" | "createAppCommenter" | "getSandbox" | "checks">
 >;
 
 /**
@@ -1157,8 +1839,13 @@ export function createReviewConsumer(
     store: overrides.store ?? createArtifactStore(env.DB),
     failureStore: overrides.failureStore ?? createFailureStore(env.DB),
     appCommenters: new Map(),
-    createAppCommenter: overrides.createAppCommenter ?? createReviewCommenter,
+    // Production factory (plan 67 §7.5/§7.7 step 11): the commenter is bound
+    // to the thread store (`createReviewCommenter(env, { db })`) so
+    // `discoverThread` / `resolveFindingThread` are live for the resolution
+    // step — the single construction point stays src/pipeline/comment.ts.
+    createAppCommenter: overrides.createAppCommenter ?? ((cred) => createReviewCommenter(cred, { db: env.DB })),
     getSandbox: overrides.getSandbox ?? ((binding, id) => getSandbox(binding, id)),
+    ...(overrides.checks !== undefined ? { checks: overrides.checks } : {}),
     log,
   };
   return async (batch) => {
@@ -1237,6 +1924,32 @@ async function processMessage(payload: ReviewJobPayload, deps: ProcessDeps): Pro
   // review_failures row + rethrow). Pure relocation — no runtime guard
   // (AL-24-4 forbids one).
   let baseFields: ConsumerLogFields | undefined;
+  // §7.10 Check seam state (plan 67): the handle from the step-4 begin hook
+  // (null = no Checks / hook failed) and the ONCE-guarded terminalize —
+  // every terminal path reports exactly one outcome, hook exceptions are
+  // isolated warns, and a hook timeout resolves without blocking the path.
+  let checkHandle: CheckHandle | null = null;
+  let checkTerminalized = false;
+  // Set the moment the prepared publication send is ATTEMPTED: a throw after
+  // this point is post-send uncertainty (publication-unknown), never a
+  // clean pre-publication failure.
+  let sendAttempt: { publicationId: string } | null = null;
+  const terminalizeCheck = async (
+    publicationId: string | null,
+    outcome: "pre-publication-failure" | "degraded-not-posted" | "publication-unknown" | "expired" | "local-error",
+  ): Promise<void> => {
+    if (deps.checks === undefined || checkHandle === null || checkTerminalized) return;
+    checkTerminalized = true;
+    try {
+      await withHookTimeout(deps.checks.terminalize({ handle: checkHandle, publicationId, outcome }), undefined as void);
+    } catch (err) {
+      const detail = err instanceof Error ? err.message : String(err);
+      deps.log.warn(
+        { ...(baseFields ?? payloadIdentityFields(payload)), sandbox_id: sandboxId },
+        `check terminalize hook failed (isolated): ${detail}`,
+      );
+    }
+  };
 
   try {
     baseFields = toBaseFields(payload);
@@ -1269,7 +1982,7 @@ async function processMessage(payload: ReviewJobPayload, deps: ProcessDeps): Pro
       );
       return { kind: "paused" };
     }
-    const commenter = resolution.commenter;
+    const { commenter, githubAppId } = resolution;
     // Per-App AI config (plan 14 B2): hangs off the SAME appRef resolution as
     // the commenter — one getAppConfig read per message, before the
     // guard/sandbox so an unresolvable config (undecryptable key envelope,
@@ -1414,10 +2127,10 @@ async function processMessage(payload: ReviewJobPayload, deps: ProcessDeps): Pro
       sandbox_id: sandboxId,
     };
 
-    // 4. Dedup: already completed for this checked-out sha → ack (no post,
-    // no insert). KV done-state first (B3), then D1. Keyed off the checkout,
-    // so a force-push between delivery and processing is never mis-deduped
-    // against the stale payload sha.
+    // 4. Dedup (§7.7 step 2, first half): already completed for this
+    // checked-out sha → ack (no post, no insert). KV done-state first (B3),
+    // then D1. Keyed off the checkout, so a force-push between delivery and
+    // processing is never mis-deduped against the stale payload sha.
     const done = await kvDoneHit(deps.env.IDEMPOTENCY_KV, idemKey(key), fields, deps.log);
     if (done) {
       deps.log.info(fields, "KV idempotency hit — ack");
@@ -1428,11 +2141,157 @@ async function processMessage(payload: ReviewJobPayload, deps: ProcessDeps): Pro
       deps.log.info(fields, "idempotency hit — ack");
       return { kind: "ok" };
     }
+    // §7.7 step 2 (second half) — the publication journal: an existing
+    // prepared/sending/unknown/confirmed row for this exact scope/SHA hands
+    // off to recovery and ACKs without another paid review. Pending recovery
+    // is never deleted by a same-SHA `/review`.
+    const lifecycleScope: Scope = {
+      appId: payload.appRef.appId,
+      installationId: payload.installation_id,
+      owner: payload.owner,
+      repo: payload.repo,
+      prNumber: payload.pr_number,
+    };
+    const journalRow = await journalHandoffRow(deps.env.DB, lifecycleScope, headSha);
+    if (journalRow !== null) {
+      deps.log.info(
+        fields,
+        `publication journal hit (phase ${journalRow.phase}, id ${journalRow.id}) — handing off to recovery, ack without a second paid review`,
+      );
+      return { kind: "ok" };
+    }
 
-    // 5. Diff (GH_TOKEN via exec env only — never in the command).
+    // 5. §7.7 step 3 — lifecycle context: apply this scope's pending
+    // CONFIRMED journals in original publication order (an older assessment
+    // never loses to a newer unapplied recurrence), then capture targets,
+    // trusted diff evidence and discussions. Any capture/apply failure is
+    // honest context-unavailable — the round cannot close stale lifecycle
+    // state, never a false first-round closure.
+    const captureMs = Date.now();
+    let pendingApplyFailed = false;
+    try {
+      pendingApplyFailed = !(await applyPendingLifecycleJournals(deps.env.DB, lifecycleScope, captureMs));
+      if (pendingApplyFailed) {
+        deps.log.warn(fields, "pending lifecycle journal apply failed — proceeding with context-unavailable coverage (no closure this round)");
+      }
+    } catch (err) {
+      pendingApplyFailed = true;
+      const detail = err instanceof Error ? err.message : String(err);
+      deps.log.warn(fields, `pending lifecycle journal read failed — context-unavailable: ${detail}`);
+    }
+
+    let targets: RecheckTarget[] = [];
+    let totalOpen = 0;
+    let captureFailed = false;
+    try {
+      targets = await selectAssessmentTargets(deps.env.DB, lifecycleScope, ASSESSMENT_TARGET_CAP);
+      totalOpen = await countOpenFindings(deps.env.DB, lifecycleScope);
+    } catch (err) {
+      captureFailed = true;
+      const detail = err instanceof Error ? err.message : String(err);
+      deps.log.warn(fields, `lifecycle target capture failed — context-unavailable: ${detail}`);
+    }
+
+    // Diff (GH_TOKEN via exec env only — never in the command). The stdout
+    // is retained as the WORKER-CONTROLLED §7.3 trusted capture: the
+    // evidence catalog slices AND the line-intent hunk prefilter both derive
+    // from this one diff. Over the in-memory bound the text is treated as
+    // unavailable (no slices; base-filter line comments) — never truncated
+    // slices.
     const diff = await sandbox.runCommand(cmds.diff, { env: { GH_TOKEN: token }, timeout: EXEC_TIMEOUT_GIT_MS });
     if (diff.exitCode !== 0) {
       throw new Error(`diff failed: exit ${diff.exitCode}, stdout ${diff.stdout.length}B`);
+    }
+    const diffText = diff.stdout.length <= DIFF_PREFETCH_MAX_BYTES ? diff.stdout : "";
+
+    // Trusted evidence catalog (§7.3) for the selected targets.
+    const catalog = targets.length > 0 ? buildEvidenceCatalog(diffText, targets) : { slices: [] as EvidenceSlice[], excludedTargets: new Set<string>() };
+
+    // Bounded discussion capture (§7.8) for the selected targets' known
+    // threads. API failure is unavailable — never empty/complete.
+    let discussion = emptyDiscussion(captureMs);
+    if (targets.length > 0) {
+      try {
+        const placeholders = targets.map(() => "?").join(",");
+        const threadRows = await deps.env.DB
+          .prepare(
+            `SELECT id, thread_id FROM review_threads
+             WHERE finding_row_id IN (${placeholders}) AND thread_id IS NOT NULL
+               AND superseded_by_publication_id IS NULL`,
+          )
+          .bind(...targets.map((t) => t.rowId))
+          .all<{ id: string; thread_id: string }>();
+        discussion = await commenter.listDiscussion({
+          installationId: payload.installation_id,
+          owner: payload.owner,
+          repo: payload.repo,
+          prNumber: payload.pr_number,
+          threads: threadRows.results.map((row) => ({ associationId: row.id, threadId: row.thread_id })),
+          nowMs: captureMs,
+        });
+        // §7.8 model-coverage honesty: the assembly pass marks the thread
+        // snapshots whose items were dropped/truncated before the model saw
+        // them — the resolution fences read exactly these flags.
+        assembleDiscussion(discussion);
+      } catch (err) {
+        captureFailed = true;
+        discussion = { items: [], issueCoverage: "unavailable", issueDigest: "", capturedMs: captureMs, threads: [] };
+        const detail = err instanceof Error ? err.message : String(err);
+        deps.log.warn(fields, `discussion capture failed — context-unavailable: ${detail}`);
+      }
+    }
+
+    // The typed recheck input (§7.3): omitted ENTIRELY when no open rows
+    // exist — the runner input stays byte-identical on a first round.
+    // Oversized whole targets are excluded with coverage (never silently
+    // truncated concerns).
+    let recheckInput: RecheckInput | undefined;
+    const budgetExcluded = new Set<string>();
+    if (targets.length > 0 && !captureFailed) {
+      const included: RecheckTarget[] = [];
+      let budget = RECHECK_INPUT_MAX_BYTES - jsonByteLength({ headSha, evidence: catalog.slices, discussion });
+      for (const target of targets) {
+        const cost = jsonByteLength(target);
+        if (cost > budget) {
+          budgetExcluded.add(target.rowId); // §7.3: oversized whole target — accounted, never truncated
+          continue;
+        }
+        budget -= cost;
+        included.push(target);
+      }
+      if (included.length > 0) {
+        recheckInput = {
+          schema: "mstar.recheck-input/v1",
+          headSha,
+          targets: included,
+          evidence: catalog.slices,
+          discussion,
+        };
+      }
+    }
+
+    // 6. §7.7 step 4 — the fenced Check claim: after the authoritative SHA
+    // and dedup, BEFORE model work. Absent `checks` dep = no Checks, M8
+    // fully operational; hook failure is isolated and cannot prevent the
+    // review (step 5).
+    if (deps.checks !== undefined) {
+      try {
+        checkHandle = await withHookTimeout(
+          deps.checks.begin({
+            scope: lifecycleScope,
+            githubAppId,
+            headSha,
+            triggeredBy: payload.triggered_by,
+            action: payload.action,
+            executionDeadlineMs: Date.now() + CHECK_EXECUTION_WINDOW_MS,
+          }),
+          null,
+        );
+      } catch (err) {
+        const detail = err instanceof Error ? err.message : String(err);
+        deps.log.warn(fields, `check begin hook failed (isolated, no Check): ${detail}`);
+        checkHandle = null;
+      }
     }
 
     // 6. Numstat of the PR diff — `git apply --numstat` reads the unified
@@ -1480,6 +2339,10 @@ async function processMessage(payload: ReviewJobPayload, deps: ProcessDeps): Pro
       ...(customProviders !== undefined
         ? { customProviders: customProviders.map(toRunnerCustomProvider) }
         : {}),
+      // Plan 67 §7.8: the typed recheck input rides ONLY when open rows
+      // exist — a first round with an empty lifecycle serializes
+      // byte-identically to the pre-plan-67 payload.
+      ...(recheckInput !== undefined ? { recheck: recheckInput } : {}),
     };
     const writeInput = await sandbox.runCommand(
       writeJsonCommand(RUNNER_INPUT_PATH, toBase64Utf8(JSON.stringify(runnerInput))),
@@ -1504,7 +2367,14 @@ async function processMessage(payload: ReviewJobPayload, deps: ProcessDeps): Pro
     // the session's actual secret values can be exact-redacted from any
     // model-echoed output below.
     const runnerEnv = buildRunnerEnv(appCfg, deps.log, fields, customProviders);
-    const run = await sandbox.runCommand(cmds.runner, {
+    // §7.8: with a recheck input the runner gains `--recheck-out` — the seat
+    // writes its validated document to the audited fixed path before the
+    // envelope reaches stdout.
+    const runnerCmd =
+      recheckInput !== undefined
+        ? runnerCommand(RUNNER_PATH, level, RUNNER_INPUT_PATH, RECHECK_OUTPUT_PATH)
+        : cmds.runner;
+    const run = await sandbox.runCommand(runnerCmd, {
       cwd: CLONE_DIR,
       env: runnerEnv,
       timeout: runnerTimeoutMs(level),
@@ -1529,6 +2399,19 @@ async function processMessage(payload: ReviewJobPayload, deps: ProcessDeps): Pro
     // AL-6 stage window: post-runner steps (parse has its own branch; the
     // post/KV/put orchestration is worker-side) are "pipeline" again.
     failureStage = "pipeline";
+
+    // §7.7 step 5 (cont): read the concurrent recheck seat's document
+    // through the audited fixed-path bounded read (§7.3: Worker validates
+    // against ITS OWN trusted input — never a model echo). Anything other
+    // than a valid document is NO recheck; the round proceeds with every
+    // selected row conservatively accounted (§7.4).
+    const recheckDoc = recheckInput !== undefined ? await readRecheckDoc(sandbox, recheckInput) : null;
+    if (recheckInput !== undefined && recheckDoc === null) {
+      deps.log.warn(
+        fields,
+        "recheck output absent or failed validation — proceeding with selected rows conservatively unverifiable",
+      );
+    }
 
     // 9. Parse + validate the envelope (engine gate inside parseReviewOutput;
     // mapping spec §4.2). Parse-fail is the DEGRADE path (plan 18 Task 2 /
@@ -1566,27 +2449,29 @@ async function processMessage(payload: ReviewJobPayload, deps: ProcessDeps): Pro
         const detail = err instanceof Error ? err.message : String(err);
         deps.log.warn(fields, `review_failures insert failed (degrade continues): ${detail}`);
       }
-      try {
-        // The same resolved commenter instance as the token mint above
-        // (lock L4) — the degraded chain rides the PR's own App identity.
-        // SEC-01: the error + raw stdout arrive PRE-REDACTED (shape +
-        // exact-value passes) — buildDegradedBody's own redaction remains
-        // the in-module choke point for anything it adds.
-        await commenter.postDegraded({
-          installationId: payload.installation_id,
-          owner: payload.owner,
-          repo: payload.repo,
-          prNumber: payload.pr_number,
-          error: redactedError,
-          rawOutput: redactedStdout,
-        });
-      } catch (err) {
-        const detail = err instanceof Error ? err.message : String(err);
-        deps.log.warn(fields, `degraded comment post failed (acking anyway): ${detail}`);
+      // §7.7 degraded publication (plan: stage → claim → send the exact
+      // prepared body → proof → applied mark). The same resolved commenter
+      // instance as the token mint above (lock L4). Best-effort with typed
+      // outcomes — the message acks regardless (deterministic model-output
+      // failure; retry is waste), and the Check hook terminalizes with the
+      // publication identity so plan 68 reads the persisted proof.
+      const degradedOutcome = await publishDegradedPublication({
+        db: deps.env.DB,
+        commenter,
+        scope: lifecycleScope,
+        headSha,
+        redactedError,
+        redactedStdout,
+      });
+      if (degradedOutcome.phase === "failed") {
+        await terminalizeCheck(null, "degraded-not-posted");
+      } else {
+        await terminalizeCheck(degradedOutcome.publicationId, "publication-unknown");
       }
       deps.log.warn(
         fields,
-        `review degraded: output failed schema validation (${redactedError}) — acked, no retry/DLQ`,
+        `review degraded: output failed schema validation (${redactedError}) — degraded publication ${degradedOutcome.phase}` +
+          `${degradedOutcome.phase === "failed" ? ` (${degradedOutcome.reason})` : ""}; acked, no retry/DLQ`,
       );
       return { kind: "degraded" };
     }
@@ -1627,32 +2512,226 @@ async function processMessage(payload: ReviewJobPayload, deps: ProcessDeps): Pro
       );
     }
 
-    // 11. Upsert the overall review comment FIRST (the user-facing
-    // deliverable must not be lost to a later store failure), then persist.
-    // T5: the commenter creates the app's marker comment (round=1) on a miss
-    // and PATCHes it (round=N+1) on a hit — one comment per PR, never a new
-    // review per round. The verdict is rendered as text only (SEC-01).
-    // Same resolved commenter instance as the token mint above (lock L4).
-    // Returns the round just posted AND the exact comment id (plan 67 §7.7
-    // publication proof inputs) — the line-comments marker pins to `round`.
-    const { round } = await commenter.postReview({
+    // 11. §7.7 step 6 — validation + conservative reconciliation + closure
+    // assembly + final body. The recheck document is reconciled against the
+    // SAME round's final capped findings (§7.4 conservative precedence:
+    // same-round recurrence and related unresolved concerns force
+    // unverifiable; omitted rows are accounted but never "assessed").
+    const staleContext = pendingApplyFailed || captureFailed;
+    const reconciled = reconcileRecheckRound({
+      targets,
+      doc: recheckDoc,
+      discussion,
+      output,
+      staleContext,
+      budgetExcluded,
+    });
+    const contextCoverage: Coverage = staleContext
+      ? "unavailable"
+      : roundContextCoverage(discussion);
+    const coverage = {
+      totalOpen,
+      selected: targets.length,
+      assessed: reconciled.assessedCount,
+      omitted: reconciled.omittedCount,
+      capped: Math.max(0, totalOpen - targets.length),
+      contextCoverage,
+    };
+    const queuedAssociations = new Set(reconciled.resolutions.map((r) => r.associationId));
+    const closureRows: ClosureRow[] = targets.map((target) => {
+      const outcome = reconciled.outcomeByRowId.get(target.rowId)!;
+      return {
+        title: target.original.title,
+        disposition: outcome.disposition,
+        reason: outcome.reason,
+        evidenceKind: outcome.evidence?.kind ?? null,
+        // A pending resolve renders not-yet-resolved, not a prediction —
+        // remote outcomes appear in the NEXT round's single upsert (§7.10).
+        thread: target.associationIds.some((id) => queuedAssociations.has(id)) ? "not yet resolved" : "-",
+      };
+    });
+    const closure = buildClosureSection(coverage, closureRows);
+
+    // 12. §7.7 step 7 — calculate round/target from the App's current single
+    // comment (pre-staging read), assemble the FINAL body, and stage the
+    // COMPLETE private payload BEFORE any GitHub mutation. Staging failure
+    // means no publication/line comments/result writes at all.
+    const plan: UpsertPlan = await commenter.planReviewUpsert({
+      installationId: payload.installation_id,
+      owner: payload.owner,
+      repo: payload.repo,
+      prNumber: payload.pr_number,
+    });
+    const round = plan.round;
+    const publicationId = crypto.randomUUID();
+    const publicationMarker = buildPublicationMarker({ publicationId, headSha, kind: "review" });
+    const preparedBody = buildPreparedReviewBody({
+      output,
+      omittedFindings: capped.omitted,
+      round,
+      headSha,
+      previousFingerprints,
+      closure,
+      publicationMarker,
+    });
+    const bodySha256 = await sha256Hex(preparedBody);
+
+    // Seen records for the current findings: the stable finding identity is
+    // the fingerprint — an existing lifecycle row (open or CLOSED) with the
+    // same finding_id REUSES its row id so the apply's upsert reopens it
+    // (§7.2 recurrence) instead of minting a duplicate.
+    const seenRowIdByFindingId = new Map<string, string>();
+    if (output.findings.length > 0) {
+      const findingIdPlaceholders = output.findings.map(() => "?").join(",");
+      const findingIds = output.findings.map((f) => computeFindingFingerprint(f));
+      const knownRows = await deps.env.DB
+        .prepare(
+          `SELECT id, finding_id FROM review_findings
+           WHERE app_id = ? AND installation_id = ? AND owner = ? AND repo = ? AND pr_number = ?
+             AND finding_id IN (${findingIdPlaceholders})`,
+        )
+        .bind(
+          lifecycleScope.appId,
+          lifecycleScope.installationId,
+          lifecycleScope.owner,
+          lifecycleScope.repo,
+          lifecycleScope.prNumber,
+          ...findingIds,
+        )
+        .all<{ id: string; finding_id: string }>();
+      for (const known of knownRows.results) seenRowIdByFindingId.set(known.finding_id, known.id);
+    }
+    const seen: LifecycleRound["seen"] = output.findings.map((finding) => {
+      const findingId = computeFindingFingerprint(finding);
+      let rowId = seenRowIdByFindingId.get(findingId);
+      if (rowId === undefined) {
+        rowId = crypto.randomUUID();
+        seenRowIdByFindingId.set(findingId, rowId);
+      }
+      return { rowId, findingId, original: projectOriginalFinding(finding) };
+    });
+
+    // Line intents for the line-commentable findings (hunk prefilter over
+    // the SAME worker-captured diff as the evidence catalog): preallocated
+    // opaque UUIDs, trusted marker bodies, digest computed at staging.
+    const qualifying = filterLineCommentFindings(
+      output.findings,
+      diffText !== "" ? diffText : undefined,
+    );
+    const lineIntents: LineIntent[] = [];
+    for (const finding of qualifying) {
+      const rowId = seenRowIdByFindingId.get(computeFindingFingerprint(finding));
+      if (rowId === undefined) continue; // unreachable — seen covers every finding
+      lineIntents.push(
+        await buildLineIntent({
+          findingRowId: rowId,
+          publicationId,
+          associationId: crypto.randomUUID(),
+          scope: lifecycleScope,
+          originalSha: headSha,
+          round,
+          path: finding.file_path!,
+          line: finding.line_end!,
+          body: renderLineCommentText(finding),
+        }),
+      );
+    }
+
+    const lifecycleRound: LifecycleRound = {
+      selectedRowIds: targets.map((t) => t.rowId),
+      assessments: reconciled.assessments,
+      seen,
+      resolutions: reconciled.resolutions,
+      coverage,
+    };
+    const payloadDoc: PublicationPayload = {
+      version: 1,
+      scope: lifecycleScope,
+      headSha,
+      kind: "review",
+      round,
+      targetCommentId: plan.action === "update" ? plan.commentId : null,
+      body: preparedBody,
+      bodySha256,
+      artifact: {
+        kind: "review",
+        key: idemKey(key),
+        schema: "mstar.review/v1",
+        payload: output,
+        appId: payload.appRef.appId,
+        model: chainHeadSelector(effectiveModelChain(appCfg).chain),
+        provider: null,
+      },
+      lifecycle: lifecycleRound,
+      lineIntents,
+    };
+    const staged = await stagePublication(deps.env.DB, { id: publicationId, payload: payloadDoc, nowMs: Date.now() });
+    // An insert conflict returns the EXISTING immutable payload — a
+    // prepared/confirmed publication is never overwritten with a second
+    // model result (spec §7.7). The existing row owns this scope+SHA: hand
+    // it to recovery instead of sending OUR newer body over it.
+    if (staged.id !== publicationId) {
+      deps.log.warn(
+        fields,
+        `publication journal conflict (existing row ${staged.id}, phase ${staged.phase}) — the immutable payload wins; not sending a second publication`,
+      );
+      await terminalizeCheck(null, "pre-publication-failure");
+      return { kind: "ok" };
+    }
+    const stagedId = staged.id;
+
+    // 13. §7.7 step 8 — epoch-fenced claim, phase sending, publish the EXACT
+    // prepared upsert, validate the response id, persist proof BEFORE KV
+    // done. A response/proof loss retains the staged payload for read-only
+    // discovery — never a second paid review, never a blind re-send.
+    const lease = await claimPublication(deps.env.DB, stagedId, `consumer:${sandboxId}`, Date.now());
+    if (lease === null) {
+      throw new Error("publication journal claim failed — refusing to send without the epoch-fenced lease");
+    }
+    sendAttempt = { publicationId: stagedId };
+    const sent = await commenter.postPreparedReview({
       installationId: payload.installation_id,
       owner: payload.owner,
       repo: payload.repo,
       prNumber: payload.pr_number,
       headSha,
-      output,
-      omittedFindings: capped.omitted,
-      previousFingerprints,
+      round,
+      targetCommentId: plan.action === "update" ? plan.commentId : null,
+      body: preparedBody,
+      publicationId: stagedId,
     });
+    const proof = {
+      publicationId: stagedId,
+      scope: lifecycleScope,
+      headSha,
+      kind: "review" as const,
+      round,
+      commentId: sent.commentId,
+      bodySha256,
+      confirmedMs: Date.now(),
+    };
+    let proofOk = false;
+    try {
+      proofOk = await recordPublicationProof(deps.env.DB, stagedId, lease, proof);
+    } catch (err) {
+      const detail = err instanceof Error ? err.message : String(err);
+      deps.log.warn(fields, `publication proof write threw: ${detail}`);
+    }
+    if (!proofOk) {
+      // The honest unknown-publication window: the send happened but the
+      // proof is not durable — no KV done, no local rows, no claim of
+      // publication. The staged payload stays for M8 read-only discovery.
+      deps.log.warn(
+        fields,
+        "publication proof could not be persisted after the send — retaining staged/sending for read-only discovery; no local completion is claimed",
+      );
+      await terminalizeCheck(stagedId, "publication-unknown");
+      return { kind: "ok" };
+    }
 
-    // 11a. KV done-state fence (BUG-01): written immediately after the
-    // overall-comment upsert succeeds, BEFORE the line-comments step — a
-    // crash in the line-comments window redelivers and sees the done key →
-    // acks (outcome = overall-only, same as the 422 fallback). Line
-    // comments become best-effort after the fence. The D1 insert below
-    // still runs after; a put failure keeps the B3 semantics (KV done
-    // marks completion, never re-post).
+    // 13a. KV done-state fence (BUG-01): follows durable confirmation (the
+    // persisted proof) — a crash in the steps below redelivers into the
+    // journal handoff ack, never a duplicate paid review.
     try {
       await deps.env.IDEMPOTENCY_KV.put(idemKey(key), "done", {
         expirationTtl: IDEMPOTENCY_SECONDS,
@@ -1662,14 +2741,143 @@ async function processMessage(payload: ReviewJobPayload, deps: ProcessDeps): Pro
       deps.log.warn(fields, `KV completion write failed: ${detail}`);
     }
 
-    // 11a2. Degraded-comment lifecycle (Bugbot finding): the successful
-    // review supersedes any earlier degradation — scan for bot-authored
-    // `review-degraded:v1` comments on the PR and DELETE them (Issues
-    // comments API, app-authored only). Best-effort: the delete step NEVER
-    // throws — it returns an outcome (deleted/skipped/errors) that is
-    // logged as a structured warn; a stale comment left behind is a warn,
-    // never a review blocker. The catch is a defensive guard only — the
-    // real implementation never rejects.
+    // 14. §7.7 step 9 — with positive persisted proof only: the artifact
+    // store.put + ONE idempotent lifecycle batch (inside
+    // applyPublishedLifecycle, ending with the applied mark under the
+    // lease). Local write failures do not undo the publication and never
+    // rerun the model — the confirmed row stays due for M8 recovery.
+    let applied = false;
+    try {
+      applied = await applyPublishedLifecycle(deps.env.DB, stagedId, lease, Date.now());
+    } catch (err) {
+      const detail = err instanceof Error ? err.message : String(err);
+      deps.log.warn(fields, `lifecycle apply threw after a confirmed publication: ${detail}`);
+    }
+    if (!applied) {
+      deps.log.warn(
+        fields,
+        "review published and confirmed but the lifecycle apply did not complete — publication stays confirmed for M8 recovery; acking to avoid a duplicate comment",
+      );
+      await terminalizeCheck(stagedId, "publication-unknown");
+      return { kind: "ok" };
+    }
+
+    // 15. §7.7 step 10 — post/capture the intent-prepared COMMENT-only line
+    // review AFTER the result/lifecycle apply; persist the exact returned
+    // review/comment ids against the associations. NEVER throwing: a remote
+    // line failure is an explicit fallback log (the intents stay staged and
+    // discoverable), never fabricated mappings.
+    if (lineIntents.length > 0) {
+      try {
+        const postedLine = await commenter.postLineComments({
+          installationId: payload.installation_id,
+          owner: payload.owner,
+          repo: payload.repo,
+          prNumber: payload.pr_number,
+          headSha,
+          round,
+          publicationId: stagedId,
+          intents: lineIntents,
+        });
+        if (postedLine.posted.length > 0) {
+          try {
+            const captureStmts = postedLine.posted.map((p) =>
+              deps.env.DB
+                .prepare(`UPDATE review_threads SET review_id = ?, comment_id = ?, updated_ms = ? WHERE id = ?`)
+                .bind(postedLine.reviewId, p.commentId, Date.now(), p.associationId),
+            );
+            await deps.env.DB.batch(captureStmts);
+          } catch (err) {
+            const detail = err instanceof Error ? err.message : String(err);
+            deps.log.warn(fields, `line-comment id capture failed (intents stay discoverable): ${detail}`);
+          }
+        }
+        if (!postedLine.captured || postedLine.ambiguous.length > 0) {
+          deps.log.warn(
+            { ...fields, line_comments_fallback: true },
+            `line-comment capture incomplete (ambiguous: ${postedLine.ambiguous.join(", ") || "none"}) — never fabricated`,
+          );
+        }
+      } catch (err) {
+        const detail = err instanceof Error ? err.message : String(err);
+        deps.log.warn(
+          { ...fields, line_comments_fallback: true },
+          `line comments failed — overall comment already published, continuing overall-only: ${detail}`,
+        );
+      }
+    }
+
+    // 16. §7.7 step 11 — resolution LAST: persist the verified snapshot and
+    // enqueue the pending row BEFORE the single inline attempt (a crash
+    // before the first attempt stays discoverable by M8), then discover +
+    // resolve. Never throws out of the message; never reruns the model.
+    // Newly-created threads of THIS round are never resolved inline — their
+    // associations carry no verified snapshot, so only PRIOR associations
+    // with a complete verification are attempted here.
+    if (reconciled.resolutions.length > 0) {
+      const assocPlaceholders = reconciled.resolutions.map(() => "?").join(",");
+      const assocRows = await deps.env.DB
+        .prepare(`SELECT id, intent_json FROM review_threads WHERE id IN (${assocPlaceholders})`)
+        .bind(...reconciled.resolutions.map((r) => r.associationId))
+        .all<{ id: string; intent_json: string }>();
+      const intentById = new Map(assocRows.results.map((row) => [row.id, row.intent_json]));
+      for (const resolution of reconciled.resolutions) {
+        try {
+          const enqueued = await deps.env.DB
+            .prepare(
+              `UPDATE review_threads SET verified_json = ?, resolution_state = 'pending', updated_ms = ?
+               WHERE id = ? AND superseded_by_publication_id IS NULL`,
+            )
+            .bind(JSON.stringify(resolution.verified), Date.now(), resolution.associationId)
+            .run();
+          if (enqueued.meta.changes === 0) continue; // superseded — nothing to resolve
+          const intentJson = intentById.get(resolution.associationId);
+          if (intentJson === undefined || commenter.discoverThread === undefined || commenter.resolveFindingThread === undefined) {
+            deps.log.warn(
+              fields,
+              `resolution for association ${resolution.associationId} enqueued but discovery is unavailable — left pending for recovery`,
+            );
+            continue;
+          }
+          const discovery = await commenter.discoverThread({
+            scope: lifecycleScope,
+            intent: JSON.parse(intentJson) as LineIntent,
+            reviewId: null,
+          });
+          if (discovery.kind !== "found") {
+            deps.log.warn(
+              fields,
+              `thread discovery for association ${resolution.associationId} returned ${discovery.kind} — verified resolve stays queued (never claims a foreign or ambiguous thread)`,
+            );
+            continue;
+          }
+          const outcome = await commenter.resolveFindingThread({
+            scope: lifecycleScope,
+            associationId: resolution.associationId,
+            verified: resolution.verified,
+          });
+          if (outcome.kind === "resolved") {
+            deps.log.info(
+              fields,
+              `resolved association ${resolution.associationId} (thread ${outcome.threadId}${outcome.adopted ? ", adopted" : ""}${outcome.lateChange ? ", LATE CHANGE recorded" : ""})`,
+            );
+          } else {
+            const reason = outcome.kind === "needs-recheck" || outcome.kind === "retry" || outcome.kind === "abandoned" ? outcome.reason : "";
+            deps.log.warn(
+              fields,
+              `resolve for association ${resolution.associationId} returned ${outcome.kind} (${reason}) — durable queue state owns the follow-up`,
+            );
+          }
+        } catch (err) {
+          const detail = err instanceof Error ? err.message : String(err);
+          deps.log.warn(fields, `resolution attempt for ${resolution.associationId} failed (queued state intact): ${detail}`);
+        }
+      }
+    }
+
+    // 17. Degraded-comment lifecycle (Bugbot finding): the successful
+    // review supersedes any earlier degradation — best-effort cleanup AFTER
+    // the normal publication proof, never deleting unconfirmed evidence.
     try {
       const deleteOutcome = await commenter.deleteDegradedComment({
         installationId: payload.installation_id,
@@ -1692,109 +2900,23 @@ async function processMessage(payload: ReviewJobPayload, deps: ProcessDeps): Pro
       deps.log.warn(fields, `stale degraded comment delete failed (review stands): ${detail}`);
     }
 
-    // 11b. Line comments (plan 18 Task 3, architect AL-3 layered delivery) —
-    // AFTER the overall-comment upsert + KV fence succeeded and NEVER
-    // throwing: any Octokit error → structured log + continue (the overall
-    // comment, KV done and D1 row below are unaffected). Ordering per
-    // brief: upsert → done → diff prefetch → createReview; no retry (next
-    // round re-anchors).
-    //
-    // Layered filter: base = file_path non-empty AND line_end ≥ 1; with the
-    // prefetched diff, additionally b-side path exact-match + line_end inside
-    // a right-side hunk range (createReview is ATOMIC — one invalid line →
-    // the whole request 422s and every line comment is lost, so prefilter).
-    // Prefetch failure → base-filter attempt (draft semantics; GitHub
-    // validates). Residual 422 (race: fetched diff vs pinned commit_id) or
-    // any other createReview error → line_comments_fallback=true log and
-    // overall-comment-only for this round. Zero qualifying findings → zero
-    // API calls (byte-compat; the diff is not even prefetched).
-    const lineCommentable = filterLineCommentFindings(output.findings);
-    if (lineCommentable.length > 0) {
-      let qualifying = lineCommentable;
-      try {
-        const diff = await commenter.fetchPrDiff({
-          installationId: payload.installation_id,
-          owner: payload.owner,
-          repo: payload.repo,
-          prNumber: payload.pr_number,
-        });
-        // qc3 F-101: bound the considered diff payload — a multi-MB PR diff
-        // would otherwise be materialized into a full line array by
-        // parseDiffHunkRanges on EVERY qualifying round. Overflow is treated
-        // exactly like a prefetch failure (the catch below): base-filter
-        // attempt, residual 422 still falls back per AL-3.
-        if (diff.length > DIFF_PREFETCH_MAX_BYTES) {
-          throw new Error(
-            `diff payload ${diff.length} bytes exceeds DIFF_PREFETCH_MAX_BYTES (${DIFF_PREFETCH_MAX_BYTES}) — skipping the hunk prefilter`,
-          );
-        }
-        qualifying = filterLineCommentFindings(lineCommentable, diff);
-      } catch (err) {
-        const detail = err instanceof Error ? err.message : String(err);
-        deps.log.warn(
-          fields,
-          `line-comments diff prefetch failed — attempting the base-filtered set unfiltered: ${detail}`,
-        );
-      }
-      if (qualifying.length > 0) {
-        try {
-          await commenter.postLineComments({
-            installationId: payload.installation_id,
-            owner: payload.owner,
-            repo: payload.repo,
-            prNumber: payload.pr_number,
-            headSha,
-            round,
-            findings: qualifying,
-          });
-        } catch (err) {
-          const detail = err instanceof Error ? err.message : String(err);
-          deps.log.warn(
-            { ...fields, line_comments_fallback: true },
-            `line comments failed — overall comment already posted, continuing overall-only: ${detail}`,
-          );
-        }
-      }
-    }
-
-    // 13. Persist via the D1 ArtifactStore (plan 07 Task 4): the parsed
-    // envelope is the write authority (put re-validates it as defense in
-    // depth; a UNIQUE race loss resolves idempotently — the first-written
-    // row wins and is never overwritten, so no raw_output twin exists). A
-    // put failure AFTER a successful post is a warn + ack, never a rethrow
-    // (B3): the comment is out, retrying would re-post it. The missing D1
-    // row is acceptable (KV done marks completion) and alerted. Per-App
-    // attribution (plan 13 Done criterion, QC F-001; plan 24: required):
-    // the appRef's appId rides the put into `reviews.app_id` — every new
-    // row is attributed; `app_id` NULL survives only on pre-plan-24 rows.
-    try {
-      await deps.store.put({
-        kind: "review",
-        key: idemKey(key),
-        schema: "mstar.review/v1",
-        payload: output,
-        appId: payload.appRef.appId,
-        // Version records (plan 18 Task 1, architect AL-2): `model` = the
-        // head selector of the SAME effective chain the runner exec env
-        // carried (single-sourced via effectiveModelChain — no re-resolution
-        // split-brain). AL-24-5: the fail-closed gate guarantees the App's
-        // chain is present on every success, so `model` is never NULL on a
-        // new row (the column stays nullable only for pre-plan-24 historical
-        // rows — AL-24-4). `provider` is NULL on BOTH paths: RunnerAppConfig
-        // carries a multi-provider key set, not one provider — never invent
-        // a mapping. Plan-17 modelOverrides are NOT reflected in the columns.
-        model: chainHeadSelector(effectiveModelChain(appCfg).chain),
-        provider: null,
-      });
-    } catch (err) {
-      const detail = err instanceof Error ? err.message : String(err);
-      deps.log.warn(
-        fields,
-        `review posted but insert failed — D1 row missing, acking to avoid a duplicate comment: ${detail}`,
-      );
-    }
+    // 18. §7.7 step 12 — the Check terminal decision reads the persisted
+    // proof for this publication (the hook derives success/neutral from it;
+    // the inline outcome value is only the honest fallback when the proof
+    // is unreadable).
+    await terminalizeCheck(stagedId, "publication-unknown");
     return { kind: "ok" };
   } catch (err) {
+    // §7.7 step 12 on the failure path: a Check begun at step 4 must
+    // terminalize even when the pipeline throws. After a send ATTEMPT the
+    // publication status is unknown (the request may have landed); before
+    // any send the honest outcome is pre-publication-failure. Isolated —
+    // never masks the throw.
+    if (sendAttempt !== null) {
+      await terminalizeCheck(sendAttempt.publicationId, "publication-unknown");
+    } else {
+      await terminalizeCheck(null, "pre-publication-failure");
+    }
     // Structured failure log carrying the idempotency key + sandbox id
     // (plan Clarify #11 / Done criteria: 失败路径错误日志含幂等键), then
     // rethrow so the worker retries and eventually DLQs.
