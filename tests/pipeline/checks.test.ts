@@ -56,8 +56,10 @@ import {
   type ChecksOctokit,
   type ChecksUpdateParams,
 } from "../../src/pipeline/checks";
+import { generateKeyPairSync } from "node:crypto";
 import {
   createReviewCommenter,
+  type CommenterFetch,
   REVIEW_WRITE_PERMISSIONS,
   SANDBOX_READ_PERMISSIONS,
   type AuthSeam,
@@ -231,6 +233,38 @@ describe("beginCheck — the create contract", () => {
     const result = await adapterFor(db, null).beginCheck({ identity: attempt.identity, lease });
     expect(result.kind).toBe("unavailable");
     expect(await runState(db, attempt)).toBe("not-sent");
+  });
+
+  test("a client whose create method is MISSING keeps the row unsent (no request, no sending mark)", async () => {
+    const db = seededDb();
+    const { attempt, lease } = await claimedAttempt(db);
+    // A surface exists but the exact callable does not: calling it would throw
+    // and look like a possibly-lost send, so it must be refused pre-emptively.
+    const partial = { rest: { checks: { update: async () => ({ data: null }) } } } as unknown as ChecksOctokit;
+    const result = await adapterFor(db, partial).beginCheck({ identity: attempt.identity, lease });
+    expect(result.kind).toBe("unavailable");
+    expect(await runState(db, attempt)).toBe("not-sent");
+    expect((await rowOf(db, attempt)).check_run_id).toBeNull();
+  });
+
+  test("a lease that expires during client resolution blocks the create request", async () => {
+    const db = seededDb();
+    const { attempt, lease } = await claimedAttempt(db);
+    const fake = fakeChecks({ create: () => runPayload(attempt.identity) });
+    // The clock advances past the lease while the client is being resolved —
+    // exactly what a real token mint can do. The pre-flight snapshot is not a
+    // sufficient send fence; the check must be re-sampled before the request.
+    const adapter = createChecksAdapter({
+      db,
+      nowMs: () => CLOCK,
+      getOctokit: async () => {
+        CLOCK = lease.untilMs + 1;
+        return fake.octokit;
+      },
+    });
+    const result = await adapter.beginCheck({ identity: attempt.identity, lease });
+    expect(result.kind).toBe("unavailable");
+    expect(fake.creates).toHaveLength(0);
   });
 
   test("a matching response yields the remote evidence, not an opinion", async () => {
@@ -677,6 +711,46 @@ describe("completeCheck — the terminal send", () => {
     expect("external_id" in raw).toBe(false); // the caller cannot re-point a run at another identity
   });
 
+  test("a lease that expires during client resolution blocks the update request", async () => {
+    const db = seededDb();
+    const { attempt, lease } = await claimedAttempt(db);
+    await attachedRun(db, attempt, lease, 4242);
+    expect(await setCheckDesired(db, attempt.identity.attemptId, lease, SUCCESS, null, T0)).toBe(true);
+    const fake = fakeChecks({ update: () => runPayload(attempt.identity, { status: "completed", conclusion: "success" }) });
+    const adapter = createChecksAdapter({
+      db,
+      nowMs: () => CLOCK,
+      getOctokit: async () => {
+        CLOCK = lease.untilMs + 1;
+        return fake.octokit;
+      },
+    });
+    const result = await adapter.completeCheck({
+      identity: attempt.identity,
+      lease,
+      checkRunId: 4242,
+      conclusion: SUCCESS,
+    });
+    expect(result.kind).toBe("unavailable");
+    expect(fake.updates).toHaveLength(0);
+  });
+
+  test("a client with no callable update method is refused before any request", async () => {
+    const db = seededDb();
+    const { attempt, lease } = await claimedAttempt(db);
+    await attachedRun(db, attempt, lease, 4242);
+    expect(await setCheckDesired(db, attempt.identity.attemptId, lease, SUCCESS, null, T0)).toBe(true);
+    const partial = { rest: { checks: { create: async () => ({ data: null }) } } } as unknown as ChecksOctokit;
+    const result = await adapterFor(db, partial).completeCheck({
+      identity: attempt.identity,
+      lease,
+      checkRunId: 4242,
+      conclusion: SUCCESS,
+    });
+    expect(result.kind).toBe("unavailable");
+    expect(result.kind === "unavailable" && result.reason).toMatch(/no callable update/);
+  });
+
   test("a run id the attempt never persisted is refused before any request", async () => {
     const db = seededDb();
     const { attempt, lease } = await claimedAttempt(db);
@@ -1026,48 +1100,96 @@ describe("identity helpers", () => {
 });
 
 describe("credential boundary (spec §7.6 / §7.9)", () => {
-  test("Checks and review writes share the ONE review-write mint; Sandbox stays read-only", async () => {
-    // Seam-level BEHAVIOR, not source text or library shape: build the real
-    // commenter with a recorded auth seam and drive BOTH lanes. A second
-    // `createAppAuth` construction, or a Sandbox grant widened to the write
-    // set, fails this. The mint itself cannot reach GitHub here (the private
-    // key is a placeholder), and that is irrelevant to the invariant being
-    // proven: the requested purpose/permissions are recorded at the single
-    // construction point before any request is made.
+  test("a REAL Checks operation rides the commenter's one review-write mint", async () => {
+    // This drives an actual adapter operation obtained through the real
+    // `createReviewCommenter`, over a controlled transport, and observes the
+    // credential construction behind it. It fails if `getChecksOctokit` built a
+    // second client, minted a second `createAppAuth`, or used any purpose other
+    // than review-write — none of which the previous method-presence test could
+    // detect. The private key is generated per run purely so auth-app can sign
+    // its JWT; the single HTTP request it makes (and the Checks request) are
+    // answered locally, so nothing here is a live GitHub call.
     const db = seededDb();
+    const { privateKey } = generateKeyPairSync("rsa", {
+      modulusLength: 2_048,
+      privateKeyEncoding: { type: "pkcs8", format: "pem" },
+      publicKeyEncoding: { type: "spki", format: "pem" },
+    });
     const seam: AuthSeam = { constructed: [], minted: [] };
+    const requests: { method: string; url: string; body: string }[] = [];
+    const fetchImpl: CommenterFetch = async (input, init) => {
+      const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+      const method = init?.method ?? "GET";
+      const body = typeof init?.body === "string" ? init.body : "";
+      requests.push({ method, url, body });
+      if (url.includes("/access_tokens")) {
+        // The installation-token mint auth-app issues; answered locally.
+        return new Response(
+          JSON.stringify({
+            token: "ghs_controlled",
+            expires_at: new Date(Date.now() + 3_600_000).toISOString(),
+            permissions: { contents: "write", metadata: "read", pull_requests: "write", issues: "write", checks: "write" },
+            repository_selection: "selected",
+          }),
+          { status: 201, headers: { "content-type": "application/json" } },
+        );
+      }
+      // The Checks create the adapter issues.
+      return new Response(
+        JSON.stringify({
+          id: 4242,
+          name: CHECK_NAME,
+          head_sha: SHA,
+          external_id: expected,
+          status: "in_progress",
+          conclusion: null,
+          app: { id: GITHUB_APP_ID },
+        }),
+        { status: 201, headers: { "content-type": "application/json" } },
+      );
+    };
+
+    const CLOCK_T = T0;
+    const attempt = await claimedAttempt(db);
+    const expected = attempt.attempt.identity.externalId;
     const commenter = createReviewCommenter(
-      { APP_ID: "12345", PRIVATE_KEY: "not-a-real-key" },
-      { db, nowMs: () => CLOCK, authSeam: seam },
+      { APP_ID: String(GITHUB_APP_ID), PRIVATE_KEY: privateKey },
+      { db, nowMs: () => CLOCK_T, fetchImpl, authSeam: seam },
     );
-    // The Checks surface exists on the SAME commenter instance — no second
-    // client is constructed to obtain it.
     expect(commenter.checks).toBeDefined();
 
-    const scope: Scope = { appId: APP_ID, installationId: 123, owner: "acme", repo: "widgets", prNumber: 42 };
-    await commenter.getInstallationToken({ scope, purpose: "review-write" }).catch(() => undefined);
-    await commenter.getInstallationToken({ scope, purpose: "sandbox-read" }).catch(() => undefined);
+    const result = await commenter.checks!.beginCheck({ identity: attempt.attempt.identity, lease: attempt.lease });
+    expect(result.kind).toBe("ready");
 
-    // ONE credential object was built, for every lane (the lazy `createAppAuth`
-    // closure is memoized per instance).
+    // The Checks call went through the wire, to the PERSISTED scope.
+    const checksCall = requests.find((r) => r.url.includes("/check-runs"));
+    expect(checksCall?.method).toBe("POST");
+    expect(checksCall?.url).toBe("https://api.github.com/repos/acme/widgets/check-runs");
+    expect(checksCall?.body).toContain(expected);
+
+    // ONE credential object served the whole operation.
     expect(seam.constructed).toHaveLength(1);
-
-    // Checks ride the review-write mint: same purpose, same repository, and a
-    // permission set that carries checks:write.
+    // The mint that authorised it is the review-write one, for THIS repository,
+    // carrying checks:write — not a sandbox or other-purpose grant.
     const write = seam.minted.find((m) => m.purpose === "review-write");
     expect(write).toBeDefined();
     expect(write?.repo).toBe("widgets");
+    expect(write?.installationId).toBe(SCOPE.installationId);
     expect(write?.permissions.checks).toBe("write");
     expect(write?.permissions.contents).toBe("write");
+    // The mint precedes the Checks request: the request used that grant.
+    expect(requests.findIndex((r) => r.url.includes("/access_tokens"))).toBeLessThan(
+      requests.findIndex((r) => r.url.includes("/check-runs")),
+    );
 
-    // The Sandbox grant stays read-only and never gains `checks`.
+    // The Sandbox lane still requests a read-only set with no checks scope.
+    await commenter
+      .getInstallationToken({ scope: SCOPE, purpose: "sandbox-read" })
+      .catch(() => undefined);
     const sandbox = seam.minted.find((m) => m.purpose === "sandbox-read");
-    expect(sandbox).toBeDefined();
-    expect(sandbox?.permissions).not.toHaveProperty("checks");
     expect(sandbox?.permissions.contents).toBe("read");
-
-    // No third purpose family exists: the two lanes above are the whole set.
-    expect(seam.minted.map((m) => m.purpose).sort()).toEqual(["review-write", "sandbox-read"]);
+    expect(sandbox?.permissions).not.toHaveProperty("checks");
+    // Still exactly one construction after a second lane ran.
     expect(seam.constructed).toHaveLength(1);
   });
 

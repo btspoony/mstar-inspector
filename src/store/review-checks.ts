@@ -448,17 +448,60 @@ export async function claimAttempt(
   // effects fail). A row can hold a positive proof link and still carry
   // `observed = 'unknown'` — e.g. `markCheckLocalError` after a successful
   // publication — so gating on `observed` would mint generation N+1 for a head
-  // that is durably published. The gate therefore mirrors §7.7's proof
-  // predicate exactly: any generation of this key whose PUBLICATION is proven
-  // by a journal row for the same scope/SHA, plus the local fallback that a
-  // generation already observed success/neutral (proof link may be absent when
-  // observation arrived before the link was written).
+  // that is durably published.
+  //
+  // The proof test is EXACT, because suppressing a claim is itself a claim of
+  // success: a merely non-null FK would let a foreign-scope publication id, a
+  // prepared payload, or malformed JSON silently dedup a head that was never
+  // published (spec §7.9 reads proof by exact App/scope/SHA). The gate
+  // therefore requires, for the linked publication of some generation of this
+  // key:
+  //   - the journal row's own scope columns to equal the ATTEMPT's scope and
+  //     head SHA (never another App, installation, repo, PR or commit);
+  //   - the proof to be a closed §7.7 shape: kind in ('review','degraded'),
+  //     a usable numeric round and commentId, and a 64-hex body digest.
+  //     Deliberately NOT gated on `phase`: proof is recorded only on a
+  //     confirmed response, and the row legitimately moves on to `applied` (or
+  //     is `superseded` by a later round) afterwards. Those heads WERE
+  //     published, so keying on a phase the row passes through would wrongly
+  //     mint a new generation for them. An unproven row is exactly the one with
+  //     `proof_json IS NULL` — the prepared/as-yet-unconfirmed case;
+  //   - the EMBEDDED proof identity (scope + headSha + kind) to agree with the
+  //     journal row as well, so a payload whose JSON disagrees with its own row
+  //     is unproven rather than authoritative.
+  // Both a normal and a degraded proof dedup (§7.9's matrix gives confirmed
+  // degraded publication `neutral`, still a closed outcome); malformed,
+  // prepared, foreign or ambiguous proof does not, and the head stays
+  // retryable.
+  const provenPublication = `(
+    SELECT COUNT(*) FROM review_checks p
+      JOIN review_publications pub ON pub.id = p.publication_id
+     WHERE p.attempt_key = ?
+       AND pub.app_id = p.app_id
+       AND pub.installation_id = p.installation_id
+       AND pub.owner = p.owner AND pub.repo = p.repo
+       AND pub.pr_number = p.pr_number AND pub.head_sha = p.head_sha
+       AND pub.kind IN ('review','degraded')
+       AND pub.proof_json IS NOT NULL
+       AND json_valid(pub.proof_json)
+       AND json_extract(pub.proof_json, '$.kind') = pub.kind
+       AND json_extract(pub.proof_json, '$.headSha') = pub.head_sha
+       AND json_extract(pub.proof_json, '$.scope.appId') = pub.app_id
+       AND json_extract(pub.proof_json, '$.scope.installationId') = pub.installation_id
+       AND json_extract(pub.proof_json, '$.scope.owner') = pub.owner
+       AND json_extract(pub.proof_json, '$.scope.repo') = pub.repo
+       AND json_extract(pub.proof_json, '$.scope.prNumber') = pub.pr_number
+       AND json_type(pub.proof_json, '$.round') = 'integer'
+       AND json_type(pub.proof_json, '$.commentId') = 'integer'
+       AND json_extract(pub.proof_json, '$.round') >= 1
+       AND json_extract(pub.proof_json, '$.commentId') > 0
+       AND length(json_extract(pub.proof_json, '$.bodySha256')) = 64
+       AND json_extract(pub.proof_json, '$.bodySha256') NOT GLOB '*[^0-9a-f]*'
+  )`;
   const noProvenPublication = `(
     (SELECT COUNT(*) FROM review_checks p
       WHERE p.attempt_key = ? AND p.observed IN ('success','neutral')) = 0
-    AND (SELECT COUNT(*) FROM review_checks p
-           JOIN review_publications pub ON pub.id = p.publication_id
-          WHERE p.attempt_key = ? AND pub.proof_json IS NOT NULL) = 0
+    AND ${provenPublication} = 0
   )`;
   const insert = db
     .prepare(
@@ -924,6 +967,12 @@ export async function retryCheckRecovery(
   // observed and the proof link are all retained, and `observed` is NOT
   // rewritten, so this never pretends the remote run completed.
   //
+  // Suspension is excluded: an operator retry must not be able to resume work
+  // for a disabled/deleted App (spec §7.6). Only the explicit App re-enable —
+  // which proves the App is live again — may return that identity to
+  // `pending`. A suspended row therefore stays put, exactly like the recovery
+  // claim fence in `claimCheckRecovery`.
+  //
   // The "no newer active generation" precondition is a correlated EXISTS over
   // the same key: the row being reopened must still be the newest unfinished
   // identity for its key, so an old superseded row stays put for inspection.
@@ -935,6 +984,7 @@ export async function retryCheckRecovery(
               terminal_ms = NULL, updated_ms = ?
         WHERE id = ? AND app_id = ? AND installation_id = ? AND owner = ? AND repo = ? AND pr_number = ?
           AND observed = 'unknown'
+          AND recovery_state <> 'suspended'
           AND (lease_until_ms IS NULL OR lease_until_ms <= ?)
           AND NOT EXISTS (
             SELECT 1 FROM review_checks n

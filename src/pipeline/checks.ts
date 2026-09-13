@@ -280,6 +280,13 @@ async function beginCheckWith(
   // `sending` mark here would strand the attempt as possibly-sent forever).
   const client = await clientFor(deps, identity.scope);
   if (client === null) return { kind: "unavailable", reason: "no review-write Checks client for this App" };
+  // Preflight the EXACT callable before recording anything (a surface can exist
+  // while `create` is missing on an older/foreign client). A missing method is
+  // a definitive pre-send refusal: the row must keep its honest `not-sent`
+  // state rather than be marked as a create that could never have left.
+  if (!hasChecksMethod(client, "create")) {
+    return { kind: "unavailable", reason: "Checks surface has no callable create method" };
+  }
   // Persist `sending` BEFORE the request leaves (spec §7.9): if the response is
   // lost, the row must already record that a create was attempted, because that
   // durable fact is what stops a later `beginCheck` from minting a second run.
@@ -288,6 +295,13 @@ async function beginCheckWith(
   const marked = await setCheckCreateState(deps.db, identity.attemptId, input.lease, "sending", undefined, nowMs);
   if (!marked) {
     return { kind: "unavailable", reason: "could not record the create attempt under this lease" };
+  }
+  // Client resolution minted a token and awaited the network; the lease may
+  // have expired meanwhile WITHOUT an epoch takeover. Re-sample the clock and
+  // re-prove the live lease immediately before the request: the earlier
+  // snapshot authorised the decision, not the send itself (spec §7.9).
+  if (!(await stillLive(deps, identity, input.lease))) {
+    return { kind: "unavailable", reason: "lease expired before the create request" };
   }
   const { scope } = identity;
   try {
@@ -416,6 +430,15 @@ async function completeCheckWith(
   }
   const client = await clientFor(deps, identity.scope);
   if (client === null) return { kind: "unavailable", reason: "no review-write Checks client for this App" };
+  if (!hasChecksMethod(client, "update")) {
+    return { kind: "unavailable", reason: "Checks surface has no callable update method" };
+  }
+  // Same fresh live-lease proof as the create path: token minting and client
+  // resolution can cross `lease.untilMs`, and an expired holder must not
+  // terminalize a remote run (spec §7.9).
+  if (!(await stillLive(deps, identity, input.lease))) {
+    return { kind: "unavailable", reason: "lease expired before the update request" };
+  }
   const { scope } = identity;
   try {
     const { data } = await client.rest.checks.update({
@@ -542,6 +565,30 @@ async function persistedIdentity(
     return { kind: "unavailable", reason: "caller identity disagrees with the persisted attempt" };
   }
   return { kind: "ok", identity: attempt.identity };
+}
+
+/**
+ * The exact callable a lane is about to use. A structural surface can be
+ * present while a method is missing (an older client, a partial double, a
+ * foreign object), and calling it would throw — which would look like a
+ * possibly-lost send instead of the definitive pre-send refusal it is.
+ */
+function hasChecksMethod(client: ChecksOctokit, method: "create" | "update" | "get" | "listForRef"): boolean {
+  const surface = client?.rest?.checks as Record<string, unknown> | undefined;
+  return typeof surface?.[method] === "function";
+}
+
+/**
+ * Re-prove the live lease against a FRESH clock reading, immediately before a
+ * remote request. Fails closed on a D1 read error: an unprovable lease is not
+ * an authorised send.
+ */
+async function stillLive(deps: ChecksDeps, identity: CheckIdentity, lease: Lease): Promise<boolean> {
+  try {
+    return (await getCheckOwnership(deps.db, identity.attemptId, lease, deps.nowMs())) !== null;
+  } catch {
+    return false;
+  }
 }
 
 /** Client resolution — a null or throwing transport is `unavailable`, never a throw. */

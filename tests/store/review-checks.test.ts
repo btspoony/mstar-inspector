@@ -910,6 +910,147 @@ describe("tenant and App isolation (spec §7.0)", () => {
   });
 });
 
+describe("publication-proof dedup is EXACT (spec §7.9)", () => {
+  /** Link an arbitrary publication row to an attempt, bypassing the store. */
+  function linkPublication(
+    db: TestD1,
+    id: string,
+    publicationId: string,
+    fields: {
+      appId?: string;
+      installationId?: number;
+      owner?: string;
+      repo?: string;
+      prNumber?: number;
+      headSha?: string;
+      kind?: string;
+      phase?: string;
+      proofJson?: string | null;
+    } = {},
+  ): void {
+    const appId = fields.appId ?? APP_ID;
+    db.raw
+      .prepare(
+        `INSERT OR REPLACE INTO review_publications
+           (id, app_id, installation_id, owner, repo, pr_number, head_sha, kind, phase,
+            payload_json, proof_json, holder, lease_epoch, lease_until_ms, attempts,
+            recovery_state, last_error, created_ms, updated_ms, confirmed_ms, applied_ms)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, '{}', ?, NULL, 0, NULL, 0, 'pending', NULL, ?, ?, NULL, NULL)`,
+      )
+      .run(
+        publicationId, appId, fields.installationId ?? SCOPE.installationId, fields.owner ?? SCOPE.owner,
+        fields.repo ?? SCOPE.repo, fields.prNumber ?? SCOPE.prNumber, fields.headSha ?? SHA,
+        fields.kind ?? "review", fields.phase ?? "confirmed",
+        fields.proofJson === undefined ? JSON.stringify({
+          publicationId, scope: SCOPE, headSha: SHA, kind: "review", round: 1, commentId: 9001,
+          bodySha256: "a".repeat(64), confirmedMs: T0,
+        }) : fields.proofJson,
+        T0, T0,
+      );
+    db.raw.prepare(`UPDATE review_checks SET publication_id = ?, terminal_ms = ? WHERE id = ?`).run(publicationId, T0, id);
+  }
+
+  async function localErrorAttempt(db: TestD1) {
+    const { attempt, lease } = await claim(db);
+    const id = attempt.identity.attemptId;
+    expect(await setCheckDesired(db, id, lease, FAILURE, null, T0)).toBe(true);
+    expect(await markCheckLocalError(db, id, lease, "gave up", T0)).toBe(true);
+    return { id, attempt };
+  }
+
+  test("a FOREIGN-SCOPE publication id does not suppress a new claim", async () => {
+    const db = seededDb();
+    const { id } = await localErrorAttempt(db);
+    linkPublication(db, id, crypto.randomUUID(), { owner: "someone-else", headSha: `f${SHA.slice(1)}` });
+    const again = await claimAttempt(db, claimInput({ holder: "run-b" }));
+    expect(again.kind).toBe("claimed"); // unproven for THIS scope/SHA → retryable
+    expect(again.attempt.identity.generation).toBe(2);
+  });
+
+  test("another App's or installation's proof does not suppress a new claim", async () => {
+    const db = seededDb();
+    const { id } = await localErrorAttempt(db);
+    linkPublication(db, id, crypto.randomUUID(), { appId: OTHER_APP_ID, installationId: 999 });
+    expect((await claimAttempt(db, claimInput({ holder: "run-b" }))).kind).toBe("claimed");
+  });
+
+  test("MALFORMED proof JSON does not suppress a new claim", async () => {
+    const db = seededDb();
+    const { id } = await localErrorAttempt(db);
+    linkPublication(db, id, crypto.randomUUID(), { proofJson: "{not json at all" });
+    expect((await claimAttempt(db, claimInput({ holder: "run-b" }))).kind).toBe("claimed");
+  });
+
+  test("a PREPARED (unproven) publication does not suppress a new claim", async () => {
+    // The real shape of a staged-but-unconfirmed row: no proof yet. Prepending
+    // a phase name to a row that still holds a proof would be beside the point —
+    // the presence of a VALID proof is what proves publication.
+    const db = seededDb();
+    const { id } = await localErrorAttempt(db);
+    linkPublication(db, id, crypto.randomUUID(), { phase: "prepared", proofJson: null });
+    expect((await claimAttempt(db, claimInput({ holder: "run-b" }))).kind).toBe("claimed");
+  });
+
+  test("a publication that has moved on to `applied` still dedups", async () => {
+    // A normally-completed publication advances past `confirmed`; its proof is
+    // still the proof that this head was published, so the gate must not key on
+    // a phase the row merely passes through.
+    for (const phase of ["applied", "superseded"]) {
+      const db = seededDb();
+      const { id } = await localErrorAttempt(db);
+      linkPublication(db, id, crypto.randomUUID(), { phase });
+      const again = await claimAttempt(db, claimInput({ holder: "run-b" }));
+      expect(again.kind, `phase=${phase}`).toBe("terminal");
+      expect(await rowCount(db)).toBe(1);
+    }
+  });
+
+  test("a proof whose EMBEDDED identity disagrees with its row does not suppress a claim", async () => {
+    const db = seededDb();
+    const { id } = await localErrorAttempt(db);
+    linkPublication(db, id, crypto.randomUUID(), {
+      proofJson: JSON.stringify({
+        publicationId: "x", scope: { ...SCOPE, owner: "elsewhere" }, headSha: SHA, kind: "review",
+        round: 1, commentId: 9001, bodySha256: "a".repeat(64), confirmedMs: T0,
+      }),
+    });
+    expect((await claimAttempt(db, claimInput({ holder: "run-b" }))).kind).toBe("claimed");
+  });
+
+  test("a proof with a malformed SHAPE does not suppress a claim", async () => {
+    const cases: string[] = [
+      JSON.stringify({ publicationId: "x", scope: SCOPE, headSha: SHA, kind: "review", round: 0, commentId: 9001, bodySha256: "a".repeat(64), confirmedMs: T0 }),
+      JSON.stringify({ publicationId: "x", scope: SCOPE, headSha: SHA, kind: "review", round: 1, commentId: 0, bodySha256: "a".repeat(64), confirmedMs: T0 }),
+      JSON.stringify({ publicationId: "x", scope: SCOPE, headSha: SHA, kind: "review", round: 1, commentId: 9001, bodySha256: "short", confirmedMs: T0 }),
+      JSON.stringify({ publicationId: "x", scope: SCOPE, headSha: SHA, kind: "bogus", round: 1, commentId: 9001, bodySha256: "a".repeat(64), confirmedMs: T0 }),
+    ];
+    for (const proofJson of cases) {
+      const db = seededDb();
+      const { id } = await localErrorAttempt(db);
+      linkPublication(db, id, crypto.randomUUID(), { proofJson });
+      expect((await claimAttempt(db, claimInput({ holder: "run-b" }))).kind).toBe("claimed");
+    }
+  });
+
+  test("a VALID exact-scope proof still dedups (normal and degraded alike)", async () => {
+    for (const kind of ["review", "degraded"] as const) {
+      const db = seededDb();
+      const { id } = await localErrorAttempt(db);
+      linkPublication(db, id, crypto.randomUUID(), {
+        kind,
+        proofJson: JSON.stringify({
+          publicationId: "x", scope: SCOPE, headSha: SHA, kind, round: 1, commentId: 9001,
+          bodySha256: "a".repeat(64), confirmedMs: T0,
+        }),
+      });
+      const again = await claimAttempt(db, claimInput({ holder: "run-b" }));
+      expect(again.kind, `kind=${kind} should dedup`).toBe("terminal");
+      expect(again.attempt.identity.generation).toBe(1);
+      expect(await rowCount(db)).toBe(1);
+    }
+  });
+});
+
 describe("recovery claim fences (spec §7.6 / §7.9)", () => {
   test("a SUSPENDED row cannot be leased until explicit re-enable", async () => {
     const db = seededDb();
@@ -923,6 +1064,11 @@ describe("recovery claim fences (spec §7.6 / §7.9)", () => {
     expect(await suspendCheckRecovery(db, { appId: APP_ID, installationId: SCOPE.installationId }, "app disabled", T0)).toBe(1);
     expect(await claimCheckRecovery(db, id, "stale-reconciler", T0 + 1)).toBeNull();
     expect((await getCheckAttempt(db, id))?.lease).toBeNull();
+
+    // An operator retry must NOT resurrect it either: only the explicit
+    // re-enable may resume a suspended identity (spec §7.6).
+    expect(await retryCheckRecovery(db, { scope: SCOPE, attemptId: id, nowMs: T0 + 1 })).toBe(false);
+    expect((await rawRow(db, id)).recovery_state).toBe("suspended");
 
     // Re-enable returns it to `pending`, and only then is it claimable again.
     await reenableChecksForApps(db, [{ appId: APP_ID, installationId: SCOPE.installationId }], T0 + 2);
