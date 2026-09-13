@@ -93,6 +93,7 @@ import {
   type GraphqlOctokit,
   type ResolveOutcome,
 } from "./review-threads";
+import { createChecksAdapter, type ChecksAdapter, type ChecksOctokit } from "./checks";
 
 export type { ListDiscussionInput };
 export type { DiscoveryResult, ResolveOutcome };
@@ -698,7 +699,24 @@ export type ReviewCommenterOptions = {
   nowMs?: () => number;
   /** Per-request transport seam (timeout/abort wrapper). */
   fetchImpl?: CommenterFetch;
+  /**
+   * Test-only seam recording the SEAM-LEVEL construction this module performs:
+   * each `createAppAuth` build and each minted purpose/repository grant. It
+   * exists so the single-credential invariant (spec §7.6) is provable by
+   * BEHAVIOR — that Checks and comment writes share one review-write path while
+   * the Sandbox surface stays read-only — rather than by reading source text or
+   * library method presence. Production callers omit it; nothing here branches
+   * on it and no token or client is exposed through it.
+   */
+  authSeam?: AuthSeam;
 };
+
+/** One `createAppAuth` construction, as observed through `authSeam`. */
+export type AuthConstruction = { appId: string };
+/** One minted installation grant, as observed through `authSeam`. */
+export type AuthMint = { installationId: number; repo: string; purpose: TokenPurpose; permissions: Record<string, string> };
+/** Records the credential construction/mint seam (test-only; see `authSeam`). */
+export type AuthSeam = { constructed: AuthConstruction[]; minted: AuthMint[] };
 
 // ---------------------------------------------------------------------------
 // Purpose-scoped token boundary (plan 67 Task 2, spec §7.6): every mint is
@@ -735,12 +753,22 @@ export const SANDBOX_READ_PERMISSIONS: Record<string, string> = {
   metadata: "read",
   pull_requests: "read",
 };
-/** Explicit requested permission set for Worker review writes (68 adds checks:write). */
+/**
+ * Explicit requested permission set for Worker review writes. Plan 68 adds
+ * `checks: "write"` here (spec §7.6/§7.12): Check runs ride the SAME
+ * purpose-scoped, repository-scoped credential as the comment, degraded and
+ * line-comment chains, so the pipeline keeps exactly one `createAppAuth`
+ * construction point, one mint path and one token client. auth-app's cache is
+ * keyed by installation/repository/permissions, so this widened set simply
+ * becomes a distinct cache entry from the sandbox read grant — the two purpose
+ * families still never cross-reuse a token.
+ */
 export const REVIEW_WRITE_PERMISSIONS: Record<string, string> = {
   contents: "write",
   metadata: "read",
   pull_requests: "write",
   issues: "write",
+  checks: "write",
 };
 
 function permissionsFor(purpose: TokenPurpose): Record<string, string> {
@@ -885,6 +913,16 @@ export type ReviewCommenter = {
     associationId: string;
     verified: VerifiedResolution;
   }): Promise<ResolveOutcome>;
+  /**
+   * §7.9 Checks adapter (plan 68 Task 1) — present only when the commenter is
+   * constructed with the registry/journal store (`createReviewCommenter(env,
+   * { db })`), because every send is fenced on PERSISTED ownership. The
+   * adapter reuses THIS instance's purpose-scoped `review-write` client:
+   * `checks: "write"` was added to that one permission set, so no second
+   * credential, token mint or Octokit construction exists. T2 owns the
+   * consumer's call ordering.
+   */
+  checks?: ChecksAdapter;
   /**
    * JWT-authenticated `GET /app` identity proof (spec §7.5/§7.6): the numeric
    * App id + nonblank slug of the LIVE App behind THIS instance's
@@ -1567,6 +1605,8 @@ export function createReviewCommenter(env: CommenterEnv, options?: ReviewComment
         ...(authRequest === null ? {} : { request: authRequest as never }),
       }) as unknown as AppAuthStrategy;
       appAuth = auth;
+      // Seam record: exactly ONE strategy object is ever built per instance.
+      options?.authSeam?.constructed.push({ appId: env.APP_ID });
     }
     return auth;
   }
@@ -1577,11 +1617,21 @@ export function createReviewCommenter(env: CommenterEnv, options?: ReviewComment
    */
   async function mintGrant(input: { installationId: number; repo: string; purpose: TokenPurpose }): Promise<InstallationTokenGrant> {
     const auth = await getAppAuth();
+    const permissions = permissionsFor(input.purpose);
+    // Seam record: every grant this instance can mint, with its exact purpose
+    // and requested permission set — the evidence that Checks and comment
+    // writes ride the review-write mint and that Sandbox stays read-only.
+    options?.authSeam?.minted.push({
+      installationId: input.installationId,
+      repo: input.repo,
+      purpose: input.purpose,
+      permissions: { ...permissions },
+    });
     return auth({
       type: "installation",
       installationId: input.installationId,
       repositoryNames: [input.repo],
-      permissions: permissionsFor(input.purpose),
+      permissions,
     });
   }
 
@@ -1632,6 +1682,31 @@ export function createReviewCommenter(env: CommenterEnv, options?: ReviewComment
     return (await getOctokit(input)) as unknown as GraphqlOctokit;
   }
 
+  /**
+   * The SAME review-write client, narrowed to `rest.checks` (spec §7.9/§7.6).
+   * Structural only: no second mint, no second `Octokit`, no second auth
+   * object — the checks methods exist on every @octokit/rest instance, and
+   * `checks: "write"` is part of the one `review-write` permission set. A mint
+   * rejection propagates and the adapter reports `unavailable`.
+   */
+  async function getChecksOctokit(scope: Scope): Promise<ChecksOctokit> {
+    return (await getOctokit({ installationId: scope.installationId, repo: scope.repo })) as unknown as ChecksOctokit;
+  }
+
+  // §7.9 Checks adapter (plan 68 Task 1): wired only when the caller binds the
+  // registry/journal store, because every Check send must be fenced on the
+  // PERSISTED attempt row before it can reach the API.
+  const checksAdapter = options?.db
+    ? createChecksAdapter({
+        db: options.db,
+        // The send fence needs a live clock (spec §7.9): an expired holder must
+        // not be able to create or update a remote Check. Same injected clock
+        // the §7.5 thread surface uses.
+        nowMs: options.nowMs ?? (() => Date.now()),
+        getOctokit: async ({ scope }) => getChecksOctokit(scope),
+      })
+    : null;
+
   // §7.5 adapter (plan 67 Task 2): wired only when the caller binds the
   // thread store — the two optional methods stay undefined otherwise.
   const threadSurface = options?.db
@@ -1653,6 +1728,7 @@ export function createReviewCommenter(env: CommenterEnv, options?: ReviewComment
             threadSurface.resolveFindingThread(input),
         }
       : {}),
+    ...(checksAdapter ? { checks: checksAdapter } : {}),
     async getInstallationToken(input) {
       return mintGrant({
         installationId: input.scope.installationId,

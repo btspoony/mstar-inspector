@@ -1,6 +1,6 @@
 # Review lifecycle (review-lifecycle)
 
-> **Status:** Contract locked by PM 2026-09-12 after product-manager review, architect review with correction continuation, and writing-specialist corpus hygiene; product direction D1–D9 is preserved. Plan 67 (M8) is now implemented — T1–T5 merged, this documentation cutover is the final slice — with scoped local behavioral evidence only; live GitHub/App behavior stays unverified (§7.13).
+> **Status:** Contract locked by PM 2026-09-12 after product-manager review, architect review with correction continuation, and writing-specialist corpus hygiene; product direction D1–D9 is preserved. Both implementation slices are now delivered — plan 67 (M8, §7.0–§7.8/§7.10/§7.11.1) and plan 68 (M7, §7.9/§7.11.2) — together with this §7.12–§7.13 documentation cutover, on scoped local behavioral evidence only; live GitHub/App behavior stays unverified (§7.13).
 > **Cross-iteration authority:** This tracked file contains the normative schemas, APIs, state machines, ordering and recovery contracts. Plans 67/68 own assignments, current source anchors and scoped verification commands, not a second normative contract.
 > **Related authority:** [github-review-comment-mapping.md](github-review-comment-mapping.md) owns COMMENT-only publication vocabulary. The harness `mstar.review/v1` envelope and engine verdict remain unchanged. The local compass records D1–D9 verbatim; no normative contract below requires an ignored plan to interpret it.
 
@@ -53,7 +53,7 @@ No App/data deletion, old-App backfill, broad historical scans, code edits by re
 
 - **67 / M8:** RL-1–RL-9, RL-11/12; §7.0–§7.8, §7.10, §7.11.1 and its own cron composition.
 - **68 / M7:** RL-10–RL-12; §7.9 and §7.11.2, extending the M8 credential/composition.
-- **Both:** §7.12–§7.13. Cross-plan consumer/manifest writes are serial. Plan 67's implementation delivered §7.0–§7.8, §7.10 and §7.11.1; plan 68 (§7.9, §7.11.2) is unimplemented.
+- **Both:** §7.12–§7.13. Cross-plan consumer/manifest writes are serial. Both implementation slices are delivered: plan 67 ships §7.0–§7.8, §7.10 and §7.11.1 with their own cron composition, and plan 68 ships §7.9 and §7.11.2 on top of them (Check registry, adapter, consumer handoff and the independent Check recovery stage). This §7.12–§7.13 documentation cutover is delivered with them. Evidence caliber: §7.13 (scoped local behavioral evidence; live GitHub/App behavior unverified).
 
 ## 7. Normative technical contract
 
@@ -560,7 +560,7 @@ LIMIT ?;
 
 ### 7.12 Fresh-App surfaces
 
-67 updates contents:write; 68 adds checks:write. Final manifest permissions: contents write, metadata read, pull_requests write, issues write, checks write. Events remain pull_request and issue_comment only. Direct surfaces: `src/dashboard/manifest.ts`, `.env.example`, `README.md`, `docs/deploy.md`, operator smoke documentation and the publication companion spec. No old-App acceptance branch. Documentation explains Worker-only writes, read-only Sandbox, success-not-approval, branch protection user control, and historical same-name Check generations (newest applicable attempt, not universal cross-App authority). Plan 67 ships the four-permission set in all named direct surfaces (manifest, env mirror, README, deploy runbook and the smoke runbook); the Check-facing items (success-not-approval, branch protection user control, same-name Check generations) describe the frozen plan-68 contract and are not shipped by plan 67.
+67 updates contents:write; 68 adds checks:write. Final manifest permissions: contents write, metadata read, pull_requests write, issues write, checks write. Events remain pull_request and issue_comment only. Direct surfaces: `src/dashboard/manifest.ts`, `.env.example`, `README.md`, `docs/deploy.md`, operator smoke documentation and the publication companion spec. No old-App acceptance branch. Documentation explains Worker-only writes, read-only Sandbox, success-not-approval, branch protection user control, and historical same-name Check generations (newest applicable attempt, not universal cross-App authority). Plan 67 ships the four-permission set in all named direct surfaces (manifest, env mirror, README, deploy runbook and the smoke runbook); the Check-facing items (success-not-approval, branch protection user control, same-name Check generations) describe the frozen plan-68 contract and are not shipped by plan 67 — plan 68 ships them on the same surfaces (the final five-permission set above), together with §7.9/§7.11.2.
 
 ### 7.13 Verification caliber and source basis
 

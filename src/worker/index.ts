@@ -24,6 +24,7 @@ import type { ExecutionContext, MessageBatch, ScheduledController } from "@cloud
 import type { Env, ScheduledEnv } from "./env";
 import { defaultSweepLog, runSweep } from "./sweep";
 import { reconcileReviewLifecycle } from "./lifecycle-reconcile";
+import { reconcileReviewChecks } from "./check-reconcile";
 import { redactSecrets } from "../pipeline/redact";
 import type { ReviewJobPayload } from "../contracts/review-job";
 import type { PipelineEnv } from "../pipeline/consumer";
@@ -329,13 +330,14 @@ export default {
   },
   // 19 T1 cron wiring (AL-6): the trailing-24h `review_failures` sweep,
   // composed (spec review-lifecycle §7.11) with the plan-67 M8 recovery
-  // reconciler — runSweep → reconcileReviewLifecycle → (plan 68 appends
-  // reconcileReviewChecks here) — each stage caught INDEPENDENTLY so one
-  // stage's failure can never break another, and nothing ever throws out of
-  // `scheduled` (a throwing cron handler just retries into alert noise).
-  // The sweep reads D1 only; the reconciler additionally reads the
-  // DASHBOARD_ENCRYPTION_KEY binding to route per-App recovery credentials
-  // (§7.6). The handler awaits both directly, so no ctx.waitUntil is needed.
+  // reconciler and the plan-68 M7 Check recovery reconciler — runSweep →
+  // reconcileReviewLifecycle → reconcileReviewChecks — each stage caught
+  // INDEPENDENTLY so one stage's failure can never break another, and nothing
+  // ever throws out of `scheduled` (a throwing cron handler just retries into
+  // alert noise). The sweep reads D1 only; the reconcilers additionally read
+  // the DASHBOARD_ENCRYPTION_KEY binding to route per-App recovery credentials
+  // (§7.6). All three stages are awaited directly, so no ctx.waitUntil is
+  // needed.
   async scheduled(_controller: ScheduledController, env: ScheduledEnv, _ctx: ExecutionContext): Promise<void> {
     try {
       if (!env.DB) {
@@ -371,6 +373,21 @@ export default {
           detail: redactSecrets(error instanceof Error ? error.message : String(error)),
         },
         "lifecycle reconcile failed",
+      );
+    }
+    // M7 Check recovery reconciler (plan 68 §7.11.2) — the SECOND independent
+    // reconciler, in its OWN try/catch AFTER the M8 lane. M8 owns publication
+    // proof; this lane only reads what M8 persisted, so ordering is what makes
+    // a proven publication visible to the Check conclusion in the same run.
+    try {
+      await reconcileReviewChecks(env);
+    } catch (error) {
+      defaultSweepLog.warn(
+        {
+          event: "ops_check_reconcile_failed",
+          detail: redactSecrets(error instanceof Error ? error.message : String(error)),
+        },
+        "check reconcile failed",
       );
     }
   },
