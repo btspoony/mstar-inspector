@@ -836,15 +836,37 @@ export type CheckLifecycleDeps = {
   getAdapter(scope: Scope): ChecksAdapter | null;
   /** The transaction clock (spec §7.0) — re-read immediately before each fenced write. */
   nowMs(): number;
-  /**
-   * The consumer's §7.10 abandonment signal: true once the inline-hook budget
-   * elapsed and this invocation's result was discarded. A `begin` that checks
-   * it after its create cannot keep working on behalf of a caller that is no
-   * longer waiting — it hands the created attempt to recovery instead (see
-   * `abandonUnterminalized`). Omitted → never abandoned (the seam's default).
-   */
-  isCancelled?(): boolean;
 };
+
+/**
+ * The per-invocation abandonment latch: one object per `begin` this caller
+ * starts, handed IN with the call and read only by that call. It is never
+ * reset or reused, so a detached begin's abandonment can never be undone by a
+ * later message, and two invocations cannot observe each other's state.
+ *
+ * `signal` is the standard `AbortSignal` the consumer drives when its §7.10
+ * budget elapses; `isAbandoned()` reads it. Both are provided so a caller can
+ * either await the signal or poll the predicate without holding a second
+ * source of truth.
+ */
+export type CheckBeginLatch = {
+  signal: AbortSignal;
+  isAbandoned(): boolean;
+};
+
+/**
+ * One immutable-lifetime abandonment latch. The controller is captured by the
+ * returned closure and is deliberately NOT exposed: only the consumer's own
+ * timer may trip it, and nothing can re-arm it.
+ */
+export function createCheckBeginLatch(): CheckBeginLatch & { abandon(): void } {
+  const controller = new AbortController();
+  return {
+    signal: controller.signal,
+    isAbandoned: () => controller.signal.aborted,
+    abandon: () => controller.abort(),
+  };
+}
 
 /**
  * The handle `begin` hands back to the seam: the persisted attempt id plus the
@@ -869,6 +891,15 @@ export type CheckLifecycle = {
     triggeredBy: string;
     action: string;
     executionDeadlineMs: number;
+    /**
+     * OPTIONAL per-invocation abandonment latch owned by the caller. When the
+     * caller's §7.10 budget elapses it trips `abandon()`, and this `begin` then
+     * stops attaching a created run on behalf of a caller that is gone —
+     * leaving the attempt with a terminal obligation instead (see
+     * `abandonUnterminalized`). Omitted → this invocation is never abandoned,
+     * which is the non-consumer (test/recovery) default.
+     */
+    latch?: CheckBeginLatch;
   }): Promise<CheckLifecycleHandle | null>;
   terminalize(input: {
     handle: CheckLifecycleHandle;
@@ -1032,10 +1063,12 @@ export function createCheckLifecycle(deps: CheckLifecycleDeps): CheckLifecycle {
       // ran. Its wait is bounded (publication is never delayed by a Check), so
       // the honest response is to stop attaching and leave the created run to
       // the recovery lane with a terminal obligation instead of a fifteen-minute
-      // wait for the execution deadline. The attempt keeps its identity and the
-      // run id this invocation just proved, so recovery ADOPTS rather than
+      // wait for the execution deadline. The check reads THIS call's own latch —
+      // never ambient state — so a later message can neither un-abandon this
+      // begin nor observe its abandonment. The attempt keeps its identity and
+      // the run id this invocation just proved, so recovery ADOPTS rather than
       // creating a second run (RL-12).
-      if (deps.isCancelled?.() === true) {
+      if (input.latch?.isAbandoned() === true) {
         await adoptLateCreatedRun(identity, claim.lease, begun.remote.id);
         return null;
       }

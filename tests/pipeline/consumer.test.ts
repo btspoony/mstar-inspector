@@ -3616,6 +3616,18 @@ function checkRowFor(db: TestD1, sha: string): CheckRowShape {
   return db.raw.query("SELECT * FROM review_checks WHERE head_sha = ?").get(sha) as unknown as CheckRowShape;
 }
 
+/**
+ * TEST-ONLY row retrieval for multi-message cases: every message resolves the
+ * SAME checkout SHA (the consumer keys Checks off the authoritative checkout,
+ * not the payload), so a fixture that runs two messages must fetch the
+ * resulting row by PR. This is pure test-side reading — production state is
+ * keyed by `attempt_key`/`id`, and abandonment is captured per `begin` call,
+ * never by PR.
+ */
+function checkRowForPr(db: TestD1, prNumber: number): CheckRowShape {
+  return db.raw.query("SELECT * FROM review_checks WHERE pr_number = ?").get(prNumber) as unknown as CheckRowShape;
+}
+
 function publicationRow(db: TestD1): { id: string; kind: string; phase: string; proof_json: string | null } {
   return db.raw.query("SELECT id, kind, phase, proof_json FROM review_publications ORDER BY created_ms, id").get() as {
     id: string;
@@ -4569,6 +4581,138 @@ describe("check lifecycle (plan 68 T2 — consumer binding, spec §7.10/§7.9)",
     const reacquired = await claimCheckRecovery(db, row.id, "reconciler", row.next_attempt_ms!);
     expect(reacquired).not.toBeNull();
     expect(checkRequests.filter((r) => r.op === "create")).toHaveLength(1);
+  });
+
+  test("check lifecycle: a later message cannot un-abandon an earlier detached begin", async () => {
+    reset();
+    runnerStdout = JSON.stringify(VALID_OUTPUT);
+    const db = await createSeededTestD1();
+    // Message A's create is held open past the budget; message B then runs its
+    // OWN begin to completion; only THEN does A's create settle.
+    const heldA = Promise.withResolvers<void>();
+    const createCalls: string[] = [];
+    const adapter = createChecksAdapter({
+      db,
+      nowMs: () => Date.now(),
+      getOctokit: async () => ({
+        rest: {
+          checks: {
+            async create(params) {
+              createCalls.push(params.head_sha);
+              checkRequests.push({
+                op: "create",
+                params: params as unknown as Record<string, unknown>,
+                sandboxCalls: sandboxCalls.length,
+                commenterCalls: commenterCalls.length,
+              });
+              // Only MESSAGE A's create (the first) is held open past the
+              // budget; B's create resolves immediately, as a normal begin does.
+              if (createCalls.length === 1) await heldA.promise;
+              const id = (checkRunSeq += 1);
+              checkRuns.set(id, {
+                id,
+                name: params.name,
+                head_sha: params.head_sha,
+                external_id: params.external_id,
+                status: "in_progress",
+                conclusion: null,
+                app: { id: TEST_GITHUB_APP_ID },
+              });
+              return { data: checkRuns.get(id)! };
+            },
+            async update(params) {
+              const run = checkRuns.get(params.check_run_id)!;
+              const completed: CheckRunPayload = { ...run, status: "completed", conclusion: params.conclusion };
+              checkRuns.set(params.check_run_id, completed);
+              return { data: completed };
+            },
+            async get(params) {
+              return { data: checkRuns.get(params.check_run_id)! };
+            },
+            async listForRef() {
+              return { data: { total_count: 0, check_runs: [] } };
+            },
+          },
+        },
+      }),
+    });
+    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, {
+      ...testOverrides,
+      createAppCommenter: () => commenterWithChecks(adapter),
+    });
+
+    // A: times out at the budget and is abandoned by the consumer.
+    const startedA = Date.now();
+    await consumer(makeBatch(makePayload({ head_sha: SHA, pr_number: 42 })));
+    expect(Date.now() - startedA).toBeLessThan(CHECK_HOOK_TIMEOUT_MS + 1_500);
+
+    // B: a SECOND message, which starts its own begin call and its own latch,
+    //     and completes normally while A's create is still in flight. Under the
+    //     old shared-reset shape this cleared A's abandonment.
+    await consumer(makeBatch(makePayload({ pr_number: 43 })));
+    const rowB = checkRowForPr(db, 43);
+    expect(rowB.desired).toBe("success"); // B terminalized normally
+    expect(rowB.observed).toBe("success");
+    // B's own success is not affected by A's abandonment.
+    expect(createCalls).toHaveLength(2);
+
+    // A's create finally settles, AFTER B's whole invocation.
+    heldA.resolve();
+    for (let attempt = 0; attempt < 200 && checkRowForPr(db, 42).check_run_id === null; attempt += 1) {
+      await Bun.sleep(5);
+    }
+
+    // A still followed the ABANDONED path: its run is attached (adoptable) and
+    // it carries a terminal obligation with a bounded recovery time — not the
+    // unobservable normal handle a stale shared flag would have produced.
+    const rowA = checkRowForPr(db, 42);
+    // The run attached to A is exactly the one A created (B's create resolved
+    // first while A was held, so the numeric id is not A's to predict).
+    expect(rowA.check_run_id).not.toBeNull();
+    expect(
+      checkRequests.some(
+        (r) => r.op === "create" && (r.params as { external_id?: string }).external_id === rowA.external_id,
+      ),
+    ).toBe(true);
+    expect(rowA.desired).toBe("failure");
+    expect(rowA.desired_summary).toBe(CHECK_SUMMARIES.unconfirmed);
+    expect(rowA.observed).toBe("unknown");
+    expect(rowA.holder).toBeNull();
+    expect(rowA.lease_until_ms).toBeNull();
+    expect(rowA.recovery_state).toBe("remote-unconfirmed");
+    expect(rowA.attempts).toBe(1);
+    expect(rowA.next_attempt_ms).toBeLessThan(rowA.execution_deadline_ms);
+    // No second create for A, and B's row is untouched by A's late settle.
+    expect(createCalls).toHaveLength(2);
+    expect(checkRowForPr(db, 43).observed).toBe("success");
+  });
+
+  test("check lifecycle: a fast begin in one message cannot cancel a later message's Check", async () => {
+    reset();
+    runnerStdout = JSON.stringify(VALID_OUTPUT);
+    const db = await createSeededTestD1();
+    const adapter = checksAdapterFor(db);
+    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, {
+      ...testOverrides,
+      createAppCommenter: () => commenterWithChecks(adapter),
+    });
+
+    // Both messages begin and terminalize normally, well inside the budget: no
+    // latch is ever tripped, so each Check completes as success.
+    await consumer(makeBatch(makePayload({ pr_number: 42 })));
+    await consumer(makeBatch(makePayload({ pr_number: 43 })));
+
+    expect(checkRequests.map((r) => r.op)).toEqual(["create", "update", "create", "update"]);
+    const rowA = checkRowForPr(db, 42);
+    const rowB = checkRowForPr(db, 43);
+    for (const row of [rowA, rowB]) {
+      expect(row.desired).toBe("success");
+      // `observed` is the validated terminal conclusion; the lease is retained
+      // for the execution window (no release is needed on the completed path).
+      expect(row.observed).toBe("success");
+      expect(row.recovery_state).toBe("done");
+      expect(row.terminal_ms).not.toBeNull();
+    }
   });
 
   test("check lifecycle: an App without a Checks surface claims no attempt and still publishes", async () => {

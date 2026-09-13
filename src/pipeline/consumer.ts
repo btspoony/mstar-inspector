@@ -149,7 +149,7 @@ import {
 import { getSandboxImage, type SandboxImageDefinition } from "../contracts/sandbox-images";
 // §7.10 Check seam implementation (plan 68 Task 2): `checks.ts` owns the
 // adapter AND the lifecycle it drives; this module owns the seam call sites.
-import { createCheckLifecycle } from "./checks";
+import { createCheckBeginLatch, createCheckLifecycle, type CheckBeginLatch } from "./checks";
 
 export type PipelineEnv = {
   DB: D1Database;
@@ -506,7 +506,22 @@ function handleGuardHeld(message: Message<ReviewJobPayload>, deps: ProcessDeps):
 export type CheckHandle = { attemptId: string; scope: Scope; githubAppId: number; headSha: string; lease: Lease };
 
 export type CheckLifecycleHooks = {
-  begin(input: { scope: Scope; githubAppId: number; headSha: string; triggeredBy: string; action: string; executionDeadlineMs: number }): Promise<CheckHandle | null>;
+  begin(input: {
+    scope: Scope;
+    githubAppId: number;
+    headSha: string;
+    triggeredBy: string;
+    action: string;
+    executionDeadlineMs: number;
+    /**
+     * The per-invocation abandonment latch for THIS call (plan 68 T2 fix): the
+     * consumer trips it when its §7.10 budget elapses, and a lifecycle that
+     * reads it stops attaching on behalf of a caller that is gone. Optional and
+     * additive — an implementation may ignore it, and the field is never shared
+     * or reset across invocations.
+     */
+    latch?: CheckBeginLatch;
+  }): Promise<CheckHandle | null>;
   terminalize(input: { handle: CheckHandle; publicationId: string | null;
     outcome: "pre-publication-failure" | "degraded-not-posted" | "publication-unknown" | "expired" | "local-error" }): Promise<void>;
 };
@@ -1223,15 +1238,6 @@ type ProcessDeps = {
    * proof.
    */
   checks?: CheckLifecycleHooks;
-  /**
-   * §7.10 inline-hook budget state for the CURRENT message. The batch loop
-   * awaits each message in turn, so one holder is enough; `beginAbandoned` is
-   * set the instant the consumer stops waiting on `begin`, and the production
-   * lifecycle reads it (through its `isCancelled` dep) so a create that already
-   * dispatched is handed to recovery with a terminal obligation rather than
-   * left attached to an invocation nobody will terminalize.
-   */
-  checkHookState: { beginAbandoned: boolean };
 };
 
 /**
@@ -1934,9 +1940,6 @@ export function createReviewConsumer(
   // credential route: the lifecycle resolves THIS message's App adapter from
   // it, so a Check never mints a token, client or permission set of its own.
   const appCommenters = new Map<string, { commenter: ReviewCommenter; fingerprint: string; githubAppId: number }>();
-  // §7.10 inline-hook budget signal (see ProcessDeps): created once per
-  // consumer, RESET per message by `processMessage`.
-  const checkHookState = { beginAbandoned: false };
   const deps: ProcessDeps = {
     env,
     store: overrides.store ?? createArtifactStore(env.DB),
@@ -1948,20 +1951,19 @@ export function createReviewConsumer(
     // step — the single construction point stays src/pipeline/comment.ts.
     createAppCommenter: overrides.createAppCommenter ?? ((cred) => createReviewCommenter(cred, { db: env.DB })),
     getSandbox: overrides.getSandbox ?? ((binding, id) => getSandbox(binding, id)),
-    checkHookState,
     log,
   };
   // §7.10 Check seam (plan 68 Task 2): production always supplies the
   // lifecycle; an override replaces it wholesale. An App whose commenter
   // carries no Checks surface yields `null` from `getAdapter`, and the
-  // lifecycle then registers no attempt at all.
+  // lifecycle then registers no attempt at all. The lifecycle needs NO
+  // consumer-wide cancellation state: each `begin` receives its own latch.
   deps.checks =
     overrides.checks ??
     createCheckLifecycle({
       db: env.DB,
       nowMs: () => Date.now(),
       getAdapter: (scope) => appCommenters.get(scope.appId)?.commenter.checks ?? null,
-      isCancelled: () => checkHookState.beginAbandoned,
     });
   return async (batch) => {
     for (const message of batch.messages) {
@@ -2045,9 +2047,6 @@ async function processMessage(payload: ReviewJobPayload, deps: ProcessDeps): Pro
   // isolated warns, and a hook timeout resolves without blocking the path.
   let checkHandle: CheckHandle | null = null;
   let checkTerminalized = false;
-  // The §7.10 budget signal is per MESSAGE: a previous message's abandonment
-  // must never make this one's `begin` stop early.
-  deps.checkHookState.beginAbandoned = false;
   // Set the moment the prepared publication send is ATTEMPTED: a throw after
   // this point is post-send uncertainty (publication-unknown), never a
   // clean pre-publication failure.
@@ -2399,6 +2398,11 @@ async function processMessage(payload: ReviewJobPayload, deps: ProcessDeps): Pro
     // fully operational; hook failure is isolated and cannot prevent the
     // review (step 5).
     if (deps.checks !== undefined) {
+      // One latch per `begin` call, created HERE and never stored anywhere: a
+      // later message cannot clear or reuse it, so a detached begin from this
+      // message stays abandoned for its whole lifetime (QC1-001 replacement
+      // race).
+      const beginLatch = createCheckBeginLatch();
       try {
         checkHandle = await withHookTimeout(
           deps.checks.begin({
@@ -2408,15 +2412,16 @@ async function processMessage(payload: ReviewJobPayload, deps: ProcessDeps): Pro
             triggeredBy: payload.triggered_by,
             action: payload.action,
             executionDeadlineMs: Date.now() + CHECK_EXECUTION_WINDOW_MS,
+            latch: beginLatch,
           }),
           null,
-          // The consumer gave up waiting: a production lifecycle that reads the
-          // signal stops attaching state on behalf of this abandoned
-          // invocation and leaves the created run with a terminal obligation
-          // (§7.10's budget is a consumer bound, not a licence to create an
-          // attempt nobody will ever terminalize).
+          // The consumer gave up waiting: a lifecycle that reads this call's
+          // latch stops attaching state on behalf of this abandoned invocation
+          // and leaves the created run with a terminal obligation (§7.10's
+          // budget is a consumer bound, not a licence to create an attempt
+          // nobody will ever terminalize).
           () => {
-            deps.checkHookState.beginAbandoned = true;
+            beginLatch.abandon();
           },
         );
       } catch (err) {
