@@ -122,17 +122,29 @@ export const RECONCILE_THREAD_OPERATION_REQUESTS = 15;
 export const RECONCILE_PUBLICATION_LANE_MAX_REQUESTS = 40;
 /** Bounded selection per lane (§7.11.1: LIMIT 10). */
 export const RECONCILE_SELECT_LIMIT = 10;
-/** Conservative request reservations per publication-lane operation. */
+/**
+ * Conservative, non-mutating preflight admission estimates for the
+ * publication lane's operations (plan, send, read-only discovery).
+ * `canSpend` consults them only to decide whether an operation may start;
+ * they are NOT reservations and are never charged — the transport meters
+ * every ACTUAL request (§7.11.1), and charging an estimate on top would
+ * double-count a paginating scan.
+ */
 const PLAN_REQUESTS = 1;
 const SEND_REQUESTS = 2;
 const DISCOVERY_REQUESTS = 2;
 /**
  * The §7.5 live App-identity proof (`GET /app`) issues exactly one request
- * per App pair per run (the resolution is cached). It is reserved once per
- * pair by `reviewerForPair` whenever the probe actually ran, so the probe
- * cannot slip past the whole-run cap. It is accounted separately from the
- * per-thread-operation bound (≤15 requests of the §7.5 surface itself,
- * §7.11.1).
+ * per App pair per run (the resolution is cached). The probe's request is
+ * metered at the shared transport choke point like every other request the
+ * pair issues, so it is counted under the whole-run cap; this constant is
+ * only the preflight estimate the suspended-pair re-enable admission
+ * consults before the pair is built. It is neither a charge nor a
+ * reservation — `reviewerForPair` charges nothing and `budget.spent` is
+ * mutated only by the transport's `reserve`. The estimate is accounted
+ * separately from the per-thread-operation admission bound (≤15 requests of
+ * the §7.5 surface itself, §7.11.1): the two gate different operations, and
+ * the probe is metered once, at the transport — never double-counted.
  */
 const IDENTITY_REQUESTS = 1;
 
