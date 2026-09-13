@@ -37,8 +37,15 @@
 
 import type { D1Like } from "../store/types";
 import {
+  attachCheckRunId,
+  CHECK_BACKOFF_MS,
   CHECK_NAME,
+  claimAttempt,
+  deferCheckRecovery,
+  readPublicationProof,
+  recordCheckObservation,
   setCheckCreateState,
+  setCheckDesired,
   type CheckAttempt,
   type CheckConclusion,
   type CheckIdentity,
@@ -706,4 +713,193 @@ export function decideConclusion(input: {
 function boundedReason(reason: string | undefined): string {
   const text = reason === undefined || reason.trim().length === 0 ? "unknown pipeline failure" : reason;
   return redactSecrets(text).replace(/[\r\n]+/g, " ").slice(0, 240);
+}
+
+// ---------------------------------------------------------------------------
+// Lifecycle seam implementation (plan 68 Task 2, spec §7.10 hooks / §7.7 4+12)
+// ---------------------------------------------------------------------------
+
+/**
+ * What the production lifecycle needs beyond the frozen §7.10 hook input.
+ * `getAdapter` is the per-App routing seam: the consumer hands back the
+ * adapter bound to THIS message's App credential (the single purpose-scoped
+ * `review-write` client, spec §7.6), so the Check lane never mints a second
+ * token, client or permission set. `null` = no Checks surface for the App,
+ * which is an INELIGIBLE attempt — no row, no remote call.
+ */
+export type CheckLifecycleDeps = {
+  db: D1Like;
+  getAdapter(scope: Scope): ChecksAdapter | null;
+  /** The transaction clock (spec §7.0) — one sample per fenced operation. */
+  nowMs(): number;
+};
+
+/**
+ * The handle `begin` hands back to the seam: the persisted attempt id plus the
+ * exact claim lease this invocation holds. Structurally identical to the
+ * consumer's §7.10 `CheckHandle`; declared here so this module needs no
+ * pipeline→consumer import for the shape.
+ */
+export type CheckLifecycleHandle = {
+  attemptId: string;
+  scope: Scope;
+  githubAppId: number;
+  headSha: string;
+  lease: Lease;
+};
+
+/** The §7.10 hook pair, as `begin`/`terminalize` (spec §7.10). */
+export type CheckLifecycle = {
+  begin(input: {
+    scope: Scope;
+    githubAppId: number;
+    headSha: string;
+    triggeredBy: string;
+    action: string;
+    executionDeadlineMs: number;
+  }): Promise<CheckLifecycleHandle | null>;
+  terminalize(input: {
+    handle: CheckLifecycleHandle;
+    publicationId: string | null;
+    outcome: CheckTerminalOutcome;
+  }): Promise<void>;
+};
+
+/**
+ * The production §7.10 lifecycle (plan 68 Task 2).
+ *
+ * `begin` maps the seam input onto a FENCED attempt: an ineligible App (no
+ * Checks surface) registers nothing, `claimAttempt` is the one race-decided
+ * insert, and only a create whose response proved the attempt's identity is
+ * attached to the row before the handle is returned. `busy` (a nonterminal
+ * attempt owns the key — duplicate delivery included) and `terminal` (a
+ * generation already ended with a PROVEN publication) both yield `null`: no
+ * second row, no second remote run.
+ *
+ * `terminalize` decides from PERSISTED proof, never from the code path that
+ * called it: the proof is read by exact App/scope/SHA with this attempt's
+ * publication id preferred, `setCheckDesired` freezes that intent BEFORE the
+ * one bounded remote update, and `observed` advances ONLY from a response the
+ * adapter validated. Every write is fenced on the handle's live lease, so a
+ * stale/lost holder writes nothing — and the attempt stays recoverable
+ * (`pending`/`remote-unconfirmed` + backoff) for the scheduled lane, never
+ * blocking or delaying the review.
+ */
+export function createCheckLifecycle(deps: CheckLifecycleDeps): CheckLifecycle {
+  /**
+   * Hand a claimed attempt to the recovery lane: release the live lease and
+   * record the honest state. `pending` when nothing could have been sent, so
+   * recovery may create; `remote-unconfirmed` once a create may have reached
+   * GitHub, so recovery must adopt rather than blindly create (spec §7.9).
+   * The §7.11.2 ladder's first rung is the delay; the recovery lane owns the
+   * remaining rungs and the attempt cap.
+   */
+  const releaseForRecovery = async (attemptId: string, lease: Lease, reason: string): Promise<void> => {
+    const nowMs = deps.nowMs();
+    const attempt = await getCheckAttempt(deps.db, attemptId);
+    await deferCheckRecovery(
+      deps.db,
+      attemptId,
+      lease,
+      {
+        state: attempt !== null && attempt.createState === "not-sent" ? "pending" : "remote-unconfirmed",
+        nextAttemptMs: nowMs + CHECK_BACKOFF_MS[0]!,
+        reason,
+      },
+      nowMs,
+    );
+  };
+
+  return {
+    async begin(input) {
+      // Eligibility BEFORE the claim: an App with no Checks surface leaves no
+      // registry row behind (a row nothing could ever drive is not "recoverable").
+      const adapter = deps.getAdapter(input.scope);
+      if (adapter === null) return null;
+      const nowMs = deps.nowMs();
+      const claim = await claimAttempt(deps.db, {
+        scope: input.scope,
+        githubAppId: input.githubAppId,
+        headSha: input.headSha,
+        triggeredBy: input.triggeredBy,
+        action: input.action,
+        holder: `consumer:${crypto.randomUUID()}`,
+        nowMs,
+        executionDeadlineMs: input.executionDeadlineMs,
+      });
+      // busy = a nonterminal attempt already owns this key (a duplicate
+      // delivery's second pass included); terminal = a generation of this key
+      // already ended with a proven publication. Either way: no Check here.
+      if (claim.kind !== "claimed") return null;
+      const { identity } = claim.attempt;
+      const begun = await adapter.beginCheck({ identity, lease: claim.lease });
+      if (begun.kind !== "ready") {
+        await releaseForRecovery(identity.attemptId, claim.lease, begun.reason);
+        return null;
+      }
+      // The run is OURS only once its id is attached under this lease; if the
+      // lease was lost in between, this invocation owns nothing (the create
+      // stays `sending` for read-only adoption, never a blind second create).
+      // The fence samples a FRESH clock: the create awaited a token mint and
+      // the network, and a stale reading must not authorise the attach.
+      const attached = await attachCheckRunId(deps.db, identity.attemptId, claim.lease, begun.remote.id, deps.nowMs());
+      if (!attached) return null;
+      return {
+        attemptId: identity.attemptId,
+        scope: identity.scope,
+        githubAppId: identity.githubAppId,
+        headSha: identity.headSha,
+        lease: claim.lease,
+      };
+    },
+
+    async terminalize(input) {
+      const { handle } = input;
+      const nowMs = deps.nowMs();
+      // PROOF decides (spec §7.9): exact App/scope/SHA, this attempt's
+      // publication id preferred. `null` is UNPROVEN — never "not published" —
+      // which is why an unconfirmed send must conclude `failure`, not success.
+      const proof = await readPublicationProof(deps.db, {
+        scope: handle.scope,
+        headSha: handle.headSha,
+        publicationId: input.publicationId ?? undefined,
+      });
+      const conclusion = decideConclusion({ proof, outcome: input.outcome });
+      // Freeze the boundary title/summary and the proof link BEFORE any remote
+      // update. `false` = this invocation no longer holds the lease: write
+      // nothing and leave the attempt to whoever does.
+      const frozen = await setCheckDesired(
+        deps.db,
+        handle.attemptId,
+        handle.lease,
+        conclusion,
+        proof !== null ? proof.publicationId : input.publicationId,
+        nowMs,
+      );
+      if (!frozen) return;
+      const owned = await getCheckOwnership(deps.db, handle.attemptId, handle.lease, nowMs);
+      // Nothing remote to terminalize yet (the create never landed, or the
+      // row is already terminal): the persisted intent is the durable boundary,
+      // and the recovery lane completes it.
+      if (owned === null) return;
+      const checkRunId = owned.checkRunId;
+      if (checkRunId === null) return;
+      const adapter = deps.getAdapter(handle.scope);
+      if (adapter === null) return;
+      const completed = await adapter.completeCheck({
+        identity: owned.identity,
+        lease: handle.lease,
+        checkRunId,
+        conclusion,
+      });
+      if (completed.kind === "completed") {
+        // `observed` advances ONLY from this validated response (spec §7.9).
+        await recordCheckObservation(deps.db, handle.attemptId, handle.lease, completed.remote, deps.nowMs());
+        return;
+      }
+      // Unavailable/unconfirmed: recovery status, error and backoff only —
+      // never `desired`, never `observed`. Publication is untouched either way.
+      await releaseForRecovery(handle.attemptId, handle.lease, completed.reason);
+    },
+  };
 }

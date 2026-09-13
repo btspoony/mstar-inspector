@@ -55,6 +55,25 @@ import {
   initialFakeCommenterState,
   type CommenterCall,
 } from "../helpers/review-commenter";
+// Plan 68 T2: the Check lifecycle is driven through PRODUCTION code — the real
+// registry double plus a scripted GitHub Checks surface (no live request).
+import { PreparedSendRejected } from "../../src/pipeline/comment";
+import {
+  CHECK_SUMMARIES,
+  createCheckLifecycle,
+  createChecksAdapter,
+  type CheckRunPayload,
+  type ChecksAdapter,
+  type ChecksCreateParams,
+  type ChecksOctokit,
+  type ChecksUpdateParams,
+} from "../../src/pipeline/checks";
+import {
+  CHECK_LEASE_MS,
+  CHECK_NAME,
+  CHECK_RECOVERY_LEASE_MS,
+  claimCheckRecovery,
+} from "../../src/store/review-checks";
 import { createSecretbox } from "../../src/dashboard/secretbox";
 import { createAppConfigStore } from "../../src/dashboard/app-config-store";
 import { getSandboxImage } from "../../src/contracts/sandbox-images";
@@ -404,6 +423,10 @@ function reset(): void {
   kvPutError = undefined;
   kvGetValue = null;
   kvGuardValue = null;
+  checkRequests.length = 0;
+  checkRuns.clear();
+  checkRequestOverrides = {};
+  checkRunSeq = FIRST_CHECK_RUN_ID;
 }
 
 /** Count review rows in the real D1 double. */
@@ -3141,22 +3164,6 @@ describe("finding recheck & closure (plan 67 §7.7/§7.4/§7.10)", () => {
 
     expect(terminalizeCalls2).toEqual([{ publicationId: null, outcome: "pre-publication-failure" }]);
   });
-
-  test("absent checks dep → no Check activity at all, M8 fully operational", async () => {
-    reset();
-    runnerStdout = JSON.stringify(VALID_OUTPUT);
-    const db = await createSeededTestD1();
-    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
-
-    await consumer(makeBatch(makePayload()));
-
-    // The full pipeline ran WITHOUT any Checks surface (the override omits
-    // `checks`): review published, applied, KV done.
-    expect(commenterCalls.filter((c) => c.op === "post-prepared")).toHaveLength(1);
-    const pub = db.raw.query("SELECT phase FROM review_publications").get() as { phase: string };
-    expect(pub.phase).toBe("applied");
-    expect(kvPuts).toHaveLength(1);
-  });
 });
 
 describe("inline resolution admission bound (spec §7.11.1, P67-QC-017 / P67-QC-020)", () => {
@@ -3460,5 +3467,643 @@ describe("degraded cleanup journal gate (spec §7.7 step 11, P67-QC-008)", () =>
     await consumer(makeBatch(makePayload()));
 
     expect(commenterCalls.some((c) => c.op === "delete-degraded")).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Check lifecycle binding (plan 68 T2, spec §7.10 seam + §7.9 semantics) — the
+// PRODUCTION `createCheckLifecycle` driven through the real consumer over the
+// bun:sqlite registry double, with the GitHub Checks surface scripted.
+// Assertions target the observable remote sequence (which request, carrying
+// which frozen intent, in what order) and the durable `review_checks` /
+// `review_publications` rows — never internal wiring. NOTHING HERE IS
+// LIVE-VERIFIED: no GitHub request is made or claimed (spec §7.13).
+// ---------------------------------------------------------------------------
+
+/** The numeric GitHub App id of the seeded `consumer-test-app` row. */
+const TEST_GITHUB_APP_ID = 424242;
+/** A second authoritative head SHA (the superseded-SHA case). */
+const SHA2 = "89abcdef89abcdef89abcdef89abcdef89abcdef";
+/** The scope every Check-lifecycle test drives (matches the seeded App row). */
+const CHECK_SCOPE = { appId: TEST_APP_ID, installationId: 123, owner: "acme", repo: "widgets", prNumber: 42 };
+
+type ChecksRequest = {
+  op: "create" | "update" | "get" | "list";
+  params: Record<string, unknown>;
+  /** Sandbox commands already executed when this request was issued (call order). */
+  sandboxCalls: number;
+  /** Commenter ops already recorded when this request was issued (call order). */
+  commenterCalls: number;
+};
+
+const FIRST_CHECK_RUN_ID = 8000;
+const checkRequests: ChecksRequest[] = [];
+/** The runs the scripted GitHub "created", by id — update/get answer from here. */
+const checkRuns = new Map<number, CheckRunPayload>();
+let checkRequestOverrides: {
+  create?: (params: ChecksCreateParams) => CheckRunPayload;
+  update?: (params: ChecksUpdateParams) => CheckRunPayload;
+} = {};
+let checkRunSeq = FIRST_CHECK_RUN_ID;
+
+/**
+ * The scripted Checks surface. Every request is recorded together with the
+ * sandbox/commenter progress at issue time, so call order is observable, and
+ * answered the way GitHub answers: the create mints a run for the sent
+ * external id, the update echoes that run as completed with the sent
+ * conclusion.
+ */
+function scriptedChecks(): ChecksOctokit {
+  const record = (op: ChecksRequest["op"], params: Record<string, unknown>): void => {
+    checkRequests.push({ op, params, sandboxCalls: sandboxCalls.length, commenterCalls: commenterCalls.length });
+  };
+  return {
+    rest: {
+      checks: {
+        async create(params) {
+          record("create", params as unknown as Record<string, unknown>);
+          const respond = checkRequestOverrides.create;
+          if (respond !== undefined) return { data: respond(params) };
+          const id = (checkRunSeq += 1);
+          const run: CheckRunPayload = {
+            id,
+            name: params.name,
+            head_sha: params.head_sha,
+            external_id: params.external_id,
+            status: "in_progress",
+            conclusion: null,
+            app: { id: TEST_GITHUB_APP_ID },
+          };
+          checkRuns.set(id, run);
+          return { data: run };
+        },
+        async update(params) {
+          record("update", params as unknown as Record<string, unknown>);
+          const respond = checkRequestOverrides.update;
+          if (respond !== undefined) return { data: respond(params) };
+          const run = checkRuns.get(params.check_run_id);
+          if (run === undefined) throw Object.assign(new Error(`no scripted run ${params.check_run_id}`), { status: 404 });
+          const completed: CheckRunPayload = { ...run, status: "completed", conclusion: params.conclusion };
+          checkRuns.set(params.check_run_id, completed);
+          return { data: completed };
+        },
+        async get(params) {
+          record("get", params as unknown as Record<string, unknown>);
+          const run = checkRuns.get(params.check_run_id);
+          if (run === undefined) throw Object.assign(new Error(`no scripted run ${params.check_run_id}`), { status: 404 });
+          return { data: run };
+        },
+        async listForRef(params) {
+          record("list", params as unknown as Record<string, unknown>);
+          return { data: { total_count: 0, check_runs: [] } };
+        },
+      },
+    },
+  };
+}
+
+/** The real registry plus the scripted transport, as the consumer's per-App adapter. */
+function checksAdapterFor(db: TestD1, nowMs: () => number = () => Date.now()): ChecksAdapter {
+  return createChecksAdapter({ db, nowMs, getOctokit: async () => scriptedChecks() });
+}
+
+/** The fake commenter carrying a real Checks adapter — the production route. */
+function commenterWithChecks(adapter: ChecksAdapter): ReviewCommenter {
+  return { ...fakeCommenter, checks: adapter };
+}
+
+type CheckRowShape = {
+  id: string;
+  generation: number;
+  head_sha: string;
+  external_id: string;
+  check_run_id: number | null;
+  create_state: string;
+  holder: string | null;
+  lease_epoch: number;
+  lease_until_ms: number | null;
+  desired: string;
+  desired_title: string | null;
+  desired_summary: string | null;
+  observed: string;
+  recovery_state: string;
+  publication_id: string | null;
+  attempts: number;
+  next_attempt_ms: number | null;
+  last_error: string | null;
+  terminal_ms: number | null;
+  execution_deadline_ms: number;
+};
+
+function checkRows(db: TestD1): CheckRowShape[] {
+  return db.raw.query("SELECT * FROM review_checks ORDER BY created_ms, id").all() as unknown as CheckRowShape[];
+}
+
+function checkRowFor(db: TestD1, sha: string): CheckRowShape {
+  return db.raw.query("SELECT * FROM review_checks WHERE head_sha = ?").get(sha) as unknown as CheckRowShape;
+}
+
+function publicationRow(db: TestD1): { id: string; kind: string; phase: string; proof_json: string | null } {
+  return db.raw.query("SELECT id, kind, phase, proof_json FROM review_publications ORDER BY created_ms, id").get() as {
+    id: string;
+    kind: string;
+    phase: string;
+    proof_json: string | null;
+  };
+}
+
+/** One production lifecycle over the registry double with the scripted transport. */
+function lifecycleFor(db: TestD1, nowMs: () => number = () => Date.now()) {
+  const adapter = checksAdapterFor(db, nowMs);
+  return createCheckLifecycle({ db, nowMs, getAdapter: () => adapter });
+}
+
+function beginInput(sha: string, executionDeadlineMs: number) {
+  return {
+    scope: CHECK_SCOPE,
+    githubAppId: TEST_GITHUB_APP_ID,
+    headSha: sha,
+    triggeredBy: "pull_request",
+    action: "opened",
+    executionDeadlineMs,
+  };
+}
+
+describe("check lifecycle (plan 68 T2 — consumer binding, spec §7.10/§7.9)", () => {
+  test("check lifecycle: a published review creates one in-progress run and terminalizes success from the persisted proof", async () => {
+    reset();
+    runnerStdout = JSON.stringify(VALID_OUTPUT);
+    const db = await createSeededTestD1();
+    const adapter = checksAdapterFor(db);
+    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, {
+      ...testOverrides,
+      createAppCommenter: () => commenterWithChecks(adapter),
+    });
+
+    await consumer(makeBatch(makePayload()));
+
+    // Exactly one create and one terminal update — nothing else.
+    expect(checkRequests.map((r) => r.op)).toEqual(["create", "update"]);
+    const create = checkRequests[0]!.params as unknown as ChecksCreateParams;
+    const update = checkRequests[1]!.params as unknown as ChecksUpdateParams;
+    expect(create.name).toBe(CHECK_NAME);
+    expect(create.head_sha).toBe(SHA);
+    expect(create.status).toBe("in_progress");
+    expect(create.owner).toBe("acme");
+    expect(create.repo).toBe("widgets");
+    expect("details_url" in (checkRequests[0]!.params as object)).toBe(false);
+    expect(create.external_id).toMatch(/^mstar-check:v1:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}:1$/);
+    expect(update.status).toBe("completed");
+    expect(update.conclusion).toBe("success");
+    expect(update.title).toBe(CHECK_NAME);
+    expect(update.summary).toBe(CHECK_SUMMARIES.success(SHA.slice(0, 7), 1));
+
+    // Order: the create lands after the authoritative-SHA step and before the
+    // model work; the terminal update lands after the publication was posted.
+    const revParseIdx = sandboxCalls.findIndex((c) => c.cmd.includes("rev-parse"));
+    const runnerIdx = sandboxCalls.findIndex((c) => c.cmd.includes("--input"));
+    const postIdx = commenterCalls.findIndex((c) => c.op === "post-prepared");
+    expect(revParseIdx).toBeGreaterThan(-1);
+    expect(runnerIdx).toBeGreaterThan(revParseIdx);
+    expect(checkRequests[0]!.sandboxCalls).toBeGreaterThan(revParseIdx);
+    expect(checkRequests[0]!.sandboxCalls).toBeLessThanOrEqual(runnerIdx);
+    expect(postIdx).toBeGreaterThan(-1);
+    expect(checkRequests[1]!.commenterCalls).toBeGreaterThan(postIdx);
+
+    // Durable row: the run is OUR attached run, the intent was frozen BEFORE
+    // the update, the observation came from the validated response, and the
+    // proof link names the journal row that was actually published.
+    const pub = publicationRow(db);
+    expect(pub.kind).toBe("review");
+    expect(pub.phase).toBe("applied");
+    expect(pub.proof_json).not.toBeNull();
+    const row = checkRowFor(db, SHA);
+    expect(checkRows(db)).toHaveLength(1);
+    expect(row.external_id).toBe(create.external_id);
+    expect(row.generation).toBe(1);
+    expect(row.create_state).toBe("known");
+    expect(row.check_run_id).toBe(FIRST_CHECK_RUN_ID + 1);
+    expect(row.desired).toBe("success");
+    expect(row.observed).toBe("success");
+    expect(row.recovery_state).toBe("done");
+    expect(row.terminal_ms).not.toBeNull();
+    expect(row.publication_id).toBe(pub.id);
+  });
+
+  test("check lifecycle: duplicate delivery takes no second claim and no second remote run", async () => {
+    reset();
+    runnerStdout = JSON.stringify(VALID_OUTPUT);
+    const db = await createSeededTestD1();
+    const adapter = checksAdapterFor(db);
+    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, {
+      ...testOverrides,
+      createAppCommenter: () => commenterWithChecks(adapter),
+    });
+
+    await consumer(makeBatch(makePayload()));
+    await consumer(makeBatch(makePayload())); // the same message delivered twice
+
+    // The second delivery is acked by the idempotency check BEFORE step 4, so
+    // it never reaches the Check lane: one attempt, one run, one publication.
+    expect(checkRequests.map((r) => r.op)).toEqual(["create", "update"]);
+    expect(checkRows(db)).toHaveLength(1);
+    expect(commenterCalls.filter((c) => c.op === "post-prepared")).toHaveLength(1);
+    expect(kvPuts).toHaveLength(1);
+    expect(logLines.some((l) => l.msg.includes("idempotency hit"))).toBe(true);
+    const row = checkRowFor(db, SHA);
+    expect(row.desired).toBe("success");
+    expect(row.observed).toBe("success");
+  });
+
+  test("check lifecycle: a same-SHA /review journal handoff claims no attempt and runs no Check", async () => {
+    reset();
+    runnerStdout = JSON.stringify(VALID_OUTPUT);
+    const db = await createSeededTestD1();
+    // A PREPARED publication for this exact scope+SHA (a crashed round).
+    db.raw
+      .prepare(
+        `INSERT INTO review_publications
+           (id, app_id, installation_id, owner, repo, pr_number, head_sha, kind, phase,
+            payload_json, created_ms, updated_ms, recovery_state)
+         VALUES ('dddddddd-0000-4000-8000-000000000004', ?, 123, 'acme', 'widgets', 42, ?, 'review', 'prepared', '{}', 1, 1, 'pending')`,
+      )
+      .run(TEST_APP_ID, SHA);
+    const adapter = checksAdapterFor(db);
+    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, {
+      ...testOverrides,
+      createAppCommenter: () => commenterWithChecks(adapter),
+    });
+
+    await consumer(makeBatch(makePayload({ head_sha: null, triggered_by: "review_command" })));
+
+    expect(sandboxCalls.some((c) => c.cmd.includes("--input"))).toBe(false);
+    expect(checkRequests).toHaveLength(0);
+    expect(checkRows(db)).toHaveLength(0);
+    expect(commenterCalls.some((c) => c.op === "post-prepared")).toBe(false);
+    const pub = db.raw.query("SELECT phase, recovery_state FROM review_publications").get() as {
+      phase: string;
+      recovery_state: string;
+    };
+    expect(pub).toEqual({ phase: "prepared", recovery_state: "pending" });
+  });
+
+  test("check lifecycle: a guard-held delivery claims no attempt and runs no Check", async () => {
+    reset();
+    kvGuardValue = "inflight";
+    runnerStdout = JSON.stringify(VALID_OUTPUT);
+    const db = await createSeededTestD1();
+    const adapter = checksAdapterFor(db);
+    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, {
+      ...testOverrides,
+      createAppCommenter: () => commenterWithChecks(adapter),
+    });
+
+    await consumer(makeBatch(makePayload()));
+
+    // The guard returns before the Check step: a delayed retry, zero Checks.
+    expect(messageRetryCalls).toHaveLength(1);
+    expect(checkRequests).toHaveLength(0);
+    expect(checkRows(db)).toHaveLength(0);
+    expect(commenterCalls.some((c) => c.op === "post-prepared")).toBe(false);
+  });
+
+  test("check lifecycle: a paused App claims no attempt and runs no Check", async () => {
+    reset();
+    runnerStdout = JSON.stringify(VALID_OUTPUT);
+    const db = await createSeededTestD1();
+    db.raw.prepare("UPDATE github_apps SET review_enabled = 0 WHERE id = ?").run(TEST_APP_ID);
+    const adapter = checksAdapterFor(db);
+    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, {
+      ...testOverrides,
+      createAppCommenter: () => commenterWithChecks(adapter),
+    });
+
+    await consumer(makeBatch(makePayload()));
+
+    expect(messageAckCalls).toHaveLength(1);
+    expect(checkRequests).toHaveLength(0);
+    expect(checkRows(db)).toHaveLength(0);
+  });
+
+  test("check lifecycle: a DLQ-bound runner failure terminalizes the same attempt as failure", async () => {
+    reset();
+    runnerExitCode = 1;
+    runnerStderr = "review: session failed: boom";
+    const db = await createSeededTestD1();
+    const adapter = checksAdapterFor(db);
+    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, {
+      ...testOverrides,
+      createAppCommenter: () => commenterWithChecks(adapter),
+    });
+
+    await expect(consumer(makeBatch(makePayload()))).rejects.toThrow("runner failed");
+
+    // The attempt begun at step 4 is closed ONCE, from the code path's honest
+    // knowledge (no publication send ever happened) — and never a second row.
+    expect(checkRequests.map((r) => r.op)).toEqual(["create", "update"]);
+    const update = checkRequests[1]!.params as unknown as ChecksUpdateParams;
+    expect(update.conclusion).toBe("failure");
+    expect(update.summary).toBe(CHECK_SUMMARIES.prePublicationFailure("unknown pipeline failure"));
+    expect(checkRows(db)).toHaveLength(1);
+    const row = checkRowFor(db, SHA);
+    expect(row.desired).toBe("failure");
+    expect(row.observed).toBe("failure");
+    expect(row.terminal_ms).not.toBeNull();
+    expect(commenterCalls.some((c) => c.op === "post-prepared")).toBe(false);
+    expect(failureRows(db)).toHaveLength(1);
+  });
+
+  test("check lifecycle: a confirmed degraded publication concludes neutral on the same attempt", async () => {
+    reset();
+    runnerStdout = "not valid json at all";
+    const db = await createSeededTestD1();
+    const adapter = checksAdapterFor(db);
+    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, {
+      ...testOverrides,
+      createAppCommenter: () => commenterWithChecks(adapter),
+    });
+
+    await consumer(makeBatch(makePayload()));
+
+    expect(checkRequests.map((r) => r.op)).toEqual(["create", "update"]);
+    const update = checkRequests[1]!.params as unknown as ChecksUpdateParams;
+    expect(update.conclusion).toBe("neutral");
+    expect(update.summary).toBe(CHECK_SUMMARIES.neutral);
+    const pub = publicationRow(db);
+    expect(pub.kind).toBe("degraded");
+    expect(pub.phase).toBe("applied");
+    const row = checkRowFor(db, SHA);
+    expect(checkRows(db)).toHaveLength(1);
+    expect(row.desired).toBe("neutral");
+    expect(row.observed).toBe("neutral");
+    expect(row.publication_id).toBe(pub.id);
+    expect(row.terminal_ms).not.toBeNull();
+  });
+
+  test("check lifecycle: a definitively rejected degraded send terminalizes the same attempt as failure", async () => {
+    reset();
+    runnerStdout = "not valid json at all";
+    commenterState.preparedDegradedError = new PreparedSendRejected("degraded target no longer shows its expected version");
+    const db = await createSeededTestD1();
+    const adapter = checksAdapterFor(db);
+    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, {
+      ...testOverrides,
+      createAppCommenter: () => commenterWithChecks(adapter),
+    });
+
+    await consumer(makeBatch(makePayload()));
+
+    expect(checkRequests.map((r) => r.op)).toEqual(["create", "update"]);
+    const update = checkRequests[1]!.params as unknown as ChecksUpdateParams;
+    expect(update.conclusion).toBe("failure");
+    expect(update.summary).toBe(CHECK_SUMMARIES.degradedNotPosted);
+    // ONE attempt: the rejection closes the same row, it never mints a second.
+    expect(checkRows(db)).toHaveLength(1);
+    const row = checkRowFor(db, SHA);
+    expect(row.desired).toBe("failure");
+    expect(row.observed).toBe("failure");
+    expect(row.terminal_ms).not.toBeNull();
+    const pub = publicationRow(db);
+    expect(pub.phase).toBe("failed");
+    expect(pub.proof_json).toBeNull();
+  });
+
+  test("check lifecycle: an unavailable create is left recoverable and never blocks the review", async () => {
+    reset();
+    runnerStdout = JSON.stringify(VALID_OUTPUT);
+    const db = await createSeededTestD1();
+    checkRequestOverrides.create = () => {
+      throw Object.assign(new Error("forbidden"), { status: 403 });
+    };
+    const adapter = checksAdapterFor(db);
+    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, {
+      ...testOverrides,
+      createAppCommenter: () => commenterWithChecks(adapter),
+    });
+
+    await consumer(makeBatch(makePayload()));
+
+    // The create was attempted (and its `sending` state persisted first), the
+    // attempt stays recoverable on the backoff ladder, and the review is
+    // completely unaffected.
+    expect(checkRequests.map((r) => r.op)).toEqual(["create"]);
+    const row = checkRowFor(db, SHA);
+    expect(row.create_state).toBe("sending");
+    expect(row.check_run_id).toBeNull();
+    expect(row.desired).toBe("in_progress");
+    expect(row.observed).toBe("unknown");
+    expect(row.recovery_state).toBe("remote-unconfirmed");
+    expect(row.holder).toBeNull();
+    expect(row.lease_until_ms).toBeNull();
+    expect(row.attempts).toBe(1);
+    expect(row.next_attempt_ms).toBeGreaterThan(Date.now());
+    expect(row.last_error).toContain("403");
+    expect(commenterCalls.filter((c) => c.op === "post-prepared")).toHaveLength(1);
+    expect(publicationRow(db).phase).toBe("applied");
+    expect(kvPuts).toHaveLength(1);
+  });
+
+  test("check lifecycle: a published review stays success when the local persistence step fails", async () => {
+    reset();
+    runnerStdout = JSON.stringify(VALID_OUTPUT);
+    const db = await createSeededTestD1();
+    // Fail ONLY a batch issued after the publication proof is durable: the
+    // Check must keep reading the PERSISTED proof, not the failed code path.
+    const failingDb = {
+      ...db,
+      batch: async (statements: Parameters<typeof db.batch>[0]) => {
+        const pub = db.raw.query("SELECT phase FROM review_publications").get() as { phase: string } | null;
+        if (pub !== null && pub.phase === "confirmed") throw new Error("d1 down at apply");
+        return db.batch(statements);
+      },
+    } as typeof db;
+    const adapter = checksAdapterFor(db);
+    const consumer = createReviewConsumer(await makeEnv({ DB: failingDb as never }), testLog, {
+      ...testOverrides,
+      createAppCommenter: () => commenterWithChecks(adapter),
+    });
+
+    await consumer(makeBatch(makePayload()));
+
+    expect(checkRequests.map((r) => r.op)).toEqual(["create", "update"]);
+    const update = checkRequests[1]!.params as unknown as ChecksUpdateParams;
+    expect(update.conclusion).toBe("success");
+    expect(update.summary).toBe(CHECK_SUMMARIES.success(SHA.slice(0, 7), 1));
+    const row = checkRowFor(db, SHA);
+    expect(row.desired).toBe("success");
+    expect(row.observed).toBe("success");
+    expect(row.terminal_ms).not.toBeNull();
+    // The publication stayed confirmed (the local apply is M8's), the proof
+    // was durable, and the KV done-state followed the confirmation.
+    expect(publicationRow(db).phase).toBe("confirmed");
+    expect(kvPuts).toHaveLength(1);
+  });
+
+  test("check lifecycle: a lost proof write concludes failure — never a false success", async () => {
+    reset();
+    runnerStdout = JSON.stringify(VALID_OUTPUT);
+    const db = await createSeededTestD1();
+    // Break ONLY the proof UPDATE (recordPublicationProof): the send already
+    // happened, so the honest durable state is the unknown-publication window.
+    const failingDb = {
+      ...db,
+      prepare: (query: string) => {
+        if (query.includes("SET phase = 'confirmed'")) {
+          return {
+            bind: () => {
+              throw new Error("d1 down at proof");
+            },
+          } as never;
+        }
+        return db.prepare(query);
+      },
+    } as typeof db;
+    const adapter = checksAdapterFor(db);
+    const consumer = createReviewConsumer(await makeEnv({ DB: failingDb as never }), testLog, {
+      ...testOverrides,
+      createAppCommenter: () => commenterWithChecks(adapter),
+    });
+
+    await consumer(makeBatch(makePayload()));
+
+    // No proof ⇒ the Check must NOT claim success; the same attempt closes as
+    // the truthful unconfirmed failure.
+    expect(checkRequests.map((r) => r.op)).toEqual(["create", "update"]);
+    const update = checkRequests[1]!.params as unknown as ChecksUpdateParams;
+    expect(update.conclusion).toBe("failure");
+    expect(update.summary).toBe(CHECK_SUMMARIES.unconfirmed);
+    const row = checkRowFor(db, SHA);
+    expect(checkRows(db)).toHaveLength(1);
+    expect(row.desired).toBe("failure");
+    expect(row.observed).toBe("failure");
+    expect(row.terminal_ms).not.toBeNull();
+    const pub = publicationRow(db);
+    expect(pub.phase).toBe("sending");
+    expect(pub.proof_json).toBeNull();
+    expect(kvPuts).toHaveLength(0);
+    expect(reviewCount(db)).toBe(0);
+  });
+
+  test("check lifecycle: an expired attempt lease terminalizes nothing", async () => {
+    reset();
+    const db = await createSeededTestD1();
+    let clock = 1_700_000_000_000;
+    const hooks = lifecycleFor(db, () => clock);
+
+    const handle = await hooks.begin(beginInput(SHA, clock + CHECK_LEASE_MS));
+    expect(handle).not.toBeNull();
+    expect(checkRequests.map((r) => r.op)).toEqual(["create"]);
+
+    // The review outlived the attempt's execution window: this invocation's
+    // lease is dead, so its terminal decision must not be written anywhere —
+    // the scheduled recovery lane owns the attempt from here.
+    clock = handle!.lease.untilMs + 1;
+    await hooks.terminalize({ handle: handle!, publicationId: null, outcome: "expired" });
+
+    expect(checkRequests.map((r) => r.op)).toEqual(["create"]); // no update
+    const row = checkRowFor(db, SHA);
+    expect(row.desired).toBe("in_progress");
+    expect(row.observed).toBe("unknown");
+    expect(row.terminal_ms).toBeNull();
+    expect(row.recovery_state).toBe("pending");
+    expect(row.check_run_id).not.toBeNull();
+  });
+
+  test("check lifecycle: a stale invocation cannot terminalize a newer lease", async () => {
+    reset();
+    const db = await createSeededTestD1();
+    let clock = 1_700_000_000_000;
+    const hooks = lifecycleFor(db, () => clock);
+
+    const handle = await hooks.begin(beginInput(SHA, clock + CHECK_LEASE_MS));
+    expect(handle).not.toBeNull();
+    const attemptId = handle!.attemptId;
+
+    // The lease expires and recovery reacquires the SAME attempt at a new epoch.
+    clock = handle!.lease.untilMs + 1;
+    const reacquired = await claimCheckRecovery(db, attemptId, "reconciler", clock);
+    expect(reacquired).toEqual({ holder: "reconciler", epoch: 2, untilMs: clock + CHECK_RECOVERY_LEASE_MS });
+
+    // The old invocation's catch still runs — and must write nothing.
+    await hooks.terminalize({ handle: handle!, publicationId: null, outcome: "publication-unknown" });
+
+    expect(checkRequests.map((r) => r.op)).toEqual(["create"]);
+    const row = checkRowFor(db, SHA);
+    expect(row.desired).toBe("in_progress");
+    expect(row.observed).toBe("unknown");
+    expect(row.terminal_ms).toBeNull();
+    expect(row.holder).toBe("reconciler");
+    expect(row.lease_epoch).toBe(2);
+  });
+
+  test("check lifecycle: a superseded SHA gets its own attempt and leaves the older one untouched", async () => {
+    reset();
+    const db = await createSeededTestD1();
+    const clock = 1_700_000_000_000;
+    const hooks = lifecycleFor(db, () => clock);
+
+    const older = await hooks.begin(beginInput(SHA, clock + CHECK_LEASE_MS));
+    const newer = await hooks.begin(beginInput(SHA2, clock + CHECK_LEASE_MS));
+    expect(older).not.toBeNull();
+    expect(newer).not.toBeNull();
+    expect(checkRows(db)).toHaveLength(2);
+    expect(checkRowFor(db, SHA).id).not.toBe(checkRowFor(db, SHA2).id);
+
+    await hooks.terminalize({ handle: newer!, publicationId: null, outcome: "pre-publication-failure" });
+
+    // Only the invocation's OWN attempt is closed; the superseded SHA's row is
+    // exactly as its (still running) invocation left it.
+    const superseded = checkRowFor(db, SHA);
+    expect(superseded.desired).toBe("in_progress");
+    expect(superseded.observed).toBe("unknown");
+    expect(superseded.terminal_ms).toBeNull();
+    const current = checkRowFor(db, SHA2);
+    expect(current.desired).toBe("failure");
+    expect(current.observed).toBe("failure");
+    expect(current.terminal_ms).not.toBeNull();
+  });
+
+  test("check lifecycle: a hung terminal hook never blocks the published review", async () => {
+    reset();
+    runnerStdout = JSON.stringify(VALID_OUTPUT);
+    const db = await createSeededTestD1();
+    const real = lifecycleFor(db);
+    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, {
+      ...testOverrides,
+      checks: {
+        begin: real.begin,
+        // The hook never settles: the consumer's own budget (2.5s) must resolve
+        // it without delaying the review, and no completion may be invented.
+        terminalize: () => Promise.withResolvers<void>().promise,
+      },
+    });
+
+    await consumer(makeBatch(makePayload()));
+
+    expect(checkRequests.map((r) => r.op)).toEqual(["create"]);
+    expect(commenterCalls.filter((c) => c.op === "post-prepared")).toHaveLength(1);
+    expect(publicationRow(db).phase).toBe("applied");
+    expect(kvPuts).toHaveLength(1);
+    const row = checkRowFor(db, SHA);
+    expect(row.desired).toBe("in_progress");
+    expect(row.observed).toBe("unknown");
+    expect(row.terminal_ms).toBeNull();
+  });
+
+  test("check lifecycle: an App without a Checks surface claims no attempt and still publishes", async () => {
+    reset();
+    runnerStdout = JSON.stringify(VALID_OUTPUT);
+    const db = await createSeededTestD1();
+    // `testOverrides` builds the fake commenter (no Checks adapter): the
+    // production seam is present, the App has no Checks surface, so the
+    // lifecycle is ineligible — no row, no remote call, M8 fully operational.
+    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
+
+    await consumer(makeBatch(makePayload()));
+
+    expect(checkRequests).toHaveLength(0);
+    expect(checkRows(db)).toHaveLength(0);
+    expect(commenterCalls.filter((c) => c.op === "post-prepared")).toHaveLength(1);
+    expect(publicationRow(db).phase).toBe("applied");
   });
 });
