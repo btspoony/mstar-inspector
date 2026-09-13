@@ -411,8 +411,10 @@ export async function applyPublishedLifecycle(db: D1Like, id: string, lease: Lea
   await store.put(payload.artifact);
 
   // Step 2 — ONE lifecycle batch, ending with the applied mark under the
-  // lease (all-or-nothing with the lifecycle writes it guards).
-  const statements = lifecycleApplyBatch(db, row, payload, nowMs, lease);
+  // lease (all-or-nothing with the lifecycle writes it guards). The guard
+  // above narrowed `payload.lifecycle` to non-null; it is passed explicitly
+  // so the helper's signature carries that invariant.
+  const statements = lifecycleApplyBatch(db, row, payload, payload.lifecycle, nowMs, lease);
   const results = await db.batch(statements);
   const applied = results[results.length - 1]!;
   return applied.meta.changes > 0;
@@ -455,6 +457,8 @@ function lifecycleApplyBatch(
   db: D1Like,
   row: ReviewPublicationRow,
   payload: PublicationPayload,
+  /** The caller-narrowed non-null `payload.lifecycle` (review kind only). */
+  lifecycle: LifecycleRound,
   nowMs: number,
   lease: Lease,
 ): D1StatementLike[] {
@@ -462,7 +466,6 @@ function lifecycleApplyBatch(
   const headSha = payload.headSha;
   const round = payload.round;
   const scope = payload.scope;
-  const lifecycle = payload.lifecycle;
   const statements: D1StatementLike[] = [];
 
   // 1. Seen upserts — recurrence reopen + last-seen tracking.
