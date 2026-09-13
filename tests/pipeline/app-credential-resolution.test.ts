@@ -35,7 +35,7 @@ import { createAppsStore } from "../../src/dashboard/apps-store";
 import { createAppConfigStore } from "../../src/dashboard/app-config-store";
 import { createSecretbox } from "../../src/dashboard/secretbox";
 import { sk, fakePem } from "../helpers/fake-secrets";
-import type { CommenterEnv, ReviewCommenter } from "../../src/pipeline/comment";
+import type { CommenterEnv, InstallationTokenGrant, ReviewCommenter, TokenInput } from "../../src/pipeline/comment";
 import type { ConsumerLog, ConsumerLogFields, PipelineEnv } from "../../src/pipeline/consumer";
 
 const MIGRATIONS_DIR = join(import.meta.dir, "../../migrations");
@@ -161,17 +161,27 @@ let factoryInstanceSeq = 0;
 const appCommenterFactory = mock((cred: CommenterEnv): ReviewCommenter => {
   const instance = ++factoryInstanceSeq;
   factoryCreds.push({ instance, cred });
+  // Plan 67 §7.6: the consumer's sandbox path asserts the RETURNED grant
+  // (assertSandboxGrant) — the double returns a minimal compliant
+  // sandbox-read grant scoped to the requested repository.
+  const sandboxGrant = (token: string, input: TokenInput): InstallationTokenGrant => ({
+    token,
+    permissions: { contents: "read", metadata: "read" },
+    repositoryNames: [input.scope.repo],
+    repositorySelection: "selected",
+  });
   return {
-    getInstallationToken: mock(async (installationId: number) => {
-      appCalls.push({ instance, call: { op: "token", installationId } });
-      return `app-${instance}-token`;
+    getInstallationToken: mock(async (input: TokenInput) => {
+      appCalls.push({ instance, call: { op: "token", installationId: input.scope.installationId } });
+      return sandboxGrant(`app-${instance}-token`, input);
     }),
     postReview: mock(async () => {
       appCalls.push({ instance, call: { op: "post" } });
-      return 1;
+      return { round: 1, commentId: 101 };
     }),
     postDegraded: mock(async () => {
       appCalls.push({ instance, call: { op: "degrade" } });
+      return { posted: true, commentId: null };
     }),
     // Bugbot degraded-comment lifecycle: the success path runs the delete
     // scan (no stale comment → the real implementation finds nothing); the
@@ -183,6 +193,11 @@ const appCommenterFactory = mock((cred: CommenterEnv): ReviewCommenter => {
     }),
     postLineComments: mock(async () => {
       throw new Error("unexpected: no qualifying findings → no line comments");
+    }),
+    // Plan 67 §7.8 discussion capture: not wired into the consumer until
+    // Task 4's ordering — these fixtures never trigger it.
+    listDiscussion: mock(async () => {
+      throw new Error("unexpected: listDiscussion is not wired until Task 4");
     }),
   };
 });

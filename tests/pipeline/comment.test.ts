@@ -443,7 +443,9 @@ describe("postReview wiring (mock octokit, SG-001)", () => {
           }),
           createComment: mock(async (params: Record<string, unknown>) => {
             calls.createParams = params;
-            return {};
+            // Real octokit returns the created comment — the publication
+            // proof needs its id (plan 67 §7.7).
+            return { data: { id: 101 } };
           }),
         },
       },
@@ -485,16 +487,22 @@ describe("postReview wiring (mock octokit, SG-001)", () => {
     expect(String(calls.updateParams!.body)).toMatch(/^<!-- mstar-inspector:review:v1 round=3 -->/);
   });
 
-  test("returns the round just posted: create → 1, marker hit → next round (T3-M4 / qc3 F-104)", async () => {
-    // The consumer pins the line-comments marker body to postReview's
-    // RETURN (single-sourced from the upsert scan) — the contract is pinned
-    // at the real postReviewWithOctokit, not only the consumer fake seam.
+  test("returns the round just posted AND the exact comment id: create → 1/101, marker hit → 3/7 (plan 67 §7.7)", async () => {
+    // The consumer records the publication proof from THIS return (round +
+    // comment id) and pins the line-comments marker body to the round —
+    // the contract is pinned at the real postReviewWithOctokit.
     const create = mockOctok([]);
-    await expect(postReviewWithOctokit(create.octokit, input)).resolves.toBe(1);
+    await expect(postReviewWithOctokit(create.octokit, input)).resolves.toEqual({ round: 1, commentId: 101 });
     const update = mockOctok([
       { id: 7, body: "<!-- mstar-inspector:review:v1 round=2 -->\nRound 2", user: { type: "Bot" } },
     ]);
-    await expect(postReviewWithOctokit(update.octokit, input)).resolves.toBe(3);
+    await expect(postReviewWithOctokit(update.octokit, input)).resolves.toEqual({ round: 3, commentId: 7 });
+  });
+
+  test("a create response WITHOUT a comment id is an unprovable publication → throws (plan 67 §7.7 step 8)", async () => {
+    const { octokit } = mockOctok([]);
+    (octokit.rest.issues.createComment as ReturnType<typeof mock>).mockImplementation(async () => ({}));
+    await expect(postReviewWithOctokit(octokit, input)).rejects.toThrow(/unprovable publication/);
   });
   test("previousFingerprints flow into the assembled body (repeat marker + recomputed tally)", async () => {
     const repeat = finding("should-fix", "Fractional expiry comparison");

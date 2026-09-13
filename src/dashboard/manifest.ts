@@ -81,7 +81,7 @@ export type ManifestPayload = {
   public: false;
   default_events: ["pull_request", "issue_comment"];
   default_permissions: {
-    contents: "read";
+    contents: "write";
     metadata: "read";
     pull_requests: "write";
     issues: "write";
@@ -126,9 +126,12 @@ export function randomSlugSuffix(length = 4): string {
 }
 
 /**
- * Manifest JSON for the locked review permission set (mirrors the
- * `.env.example` permission comment; no extra permissions, no OAuth App
- * fields). `redirect_url` stays the bare callback — CSRF `state` rides the
+ * Manifest JSON for the locked review permission set (plan 67 §7.6:
+ * `contents: "write"` is authorized for Worker-side thread resolution —
+ * Worker-only; plan 68 adds `checks: "write"`; mirrors the `.env.example`
+ * permission comment; no extra permissions, no OAuth App fields, no
+ * old-App migration branch).
+ * `redirect_url` stays the bare callback — CSRF `state` rides the
  * form-action query instead (GitHub echoes it back next to `code`). B5: the
  * webhook is the App's OWN route `{origin}/webhook/{slug}` — the slug is
  * minted at start and carried to the commit through the signed state.
@@ -142,7 +145,7 @@ export function buildManifest(origin: string, login: string, slug: string): Mani
     public: false,
     default_events: ["pull_request", "issue_comment"],
     default_permissions: {
-      contents: "read",
+      contents: "write",
       metadata: "read",
       pull_requests: "write",
       issues: "write",

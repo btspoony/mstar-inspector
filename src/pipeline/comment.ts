@@ -79,6 +79,19 @@ import { MERGE_CLASSES, REVIEW_EMOJI } from "@mstar-harness/engine";
 import { FINDING_BODY_MAX, type ReviewFinding, type ReviewOutput } from "../review/schema";
 import { redactSecrets } from "./redact";
 import { computeFindingFingerprint } from "../store/fingerprint";
+import type { Scope, Discussion } from "../contracts/recheck";
+import type { LineIntent, VerifiedResolution } from "../store/finding-lifecycle";
+import type { D1Like } from "../store/types";
+import { listDiscussionWithOctokit, type ListDiscussionInput } from "./discussion-context";
+import {
+  createReviewThreads,
+  type DiscoveryResult,
+  type GraphqlOctokit,
+  type ResolveOutcome,
+} from "./review-threads";
+
+export type { ListDiscussionInput };
+export type { DiscoveryResult, ResolveOutcome };
 
 /** summary_md budget for the overall review body (plan Task 3). */
 export const SUMMARY_MD_LIMIT = 8000;
@@ -536,6 +549,71 @@ export function normalizePrivateKey(pem: string): string {
 
 export type CommenterEnv = { APP_ID: string; PRIVATE_KEY: string };
 
+// ---------------------------------------------------------------------------
+// Purpose-scoped token boundary (plan 67 Task 2, spec §7.6): every mint is
+// tied to a purpose + the exact repository, and the SANDBOX grant is checked
+// against the RETURNED capabilities (RL-6) — the request is never presented
+// as proof of the response. The unrestricted `getInstallationToken(
+// installationId)` contract is deleted; every caller migrates to
+// `getInstallationToken({ scope, purpose })`.
+// ---------------------------------------------------------------------------
+
+export type TokenPurpose = "sandbox-read" | "review-write";
+
+export type InstallationTokenGrant = {
+  token: string;
+  permissions: Record<string, string>;
+  repositoryIds?: number[];
+  repositoryNames?: string[];
+  repositorySelection?: string;
+};
+
+export type TokenInput = { scope: Scope; purpose: TokenPurpose };
+
+/** Explicit requested permission set for the sandbox read grant (spec §7.6). */
+export const SANDBOX_READ_PERMISSIONS: Record<string, string> = { contents: "read", metadata: "read" };
+/** Explicit requested permission set for Worker review writes (68 adds checks:write). */
+export const REVIEW_WRITE_PERMISSIONS: Record<string, string> = {
+  contents: "write",
+  metadata: "read",
+  pull_requests: "write",
+  issues: "write",
+};
+
+function permissionsFor(purpose: TokenPurpose): Record<string, string> {
+  return purpose === "sandbox-read" ? { ...SANDBOX_READ_PERMISSIONS } : { ...REVIEW_WRITE_PERMISSIONS };
+}
+
+/**
+ * Returned-capability assertion for the sandbox read grant (spec §7.6 /
+ * RL-6): nonempty token, contents+metadata read, EVERY other returned
+ * permission read-only, `repositorySelection === "selected"`, and exactly
+ * one returned repository equal to the requested one. A missing repository
+ * list/selection or any broader grant fails closed — throws.
+ */
+export function assertSandboxGrant(grant: InstallationTokenGrant, expectedRepo: string): void {
+  if (typeof grant.token !== "string" || grant.token.length === 0) {
+    throw new Error("sandbox grant rejected: empty token");
+  }
+  const permissions = grant.permissions ?? {};
+  if (permissions.contents !== "read" || permissions.metadata !== "read") {
+    throw new Error("sandbox grant rejected: contents/metadata must be returned read");
+  }
+  for (const [name, value] of Object.entries(permissions)) {
+    if (name === "contents" || name === "metadata") continue;
+    if (value !== "read") {
+      throw new Error(`sandbox grant rejected: returned permission ${name} is not read-only`);
+    }
+  }
+  if (grant.repositorySelection !== "selected") {
+    throw new Error(`sandbox grant rejected: repositorySelection must be "selected", got ${JSON.stringify(grant.repositorySelection ?? null)}`);
+  }
+  const names = grant.repositoryNames ?? [];
+  if (names.length !== 1 || names[0] !== expectedRepo) {
+    throw new Error(`sandbox grant rejected: exactly one returned repository equal to ${JSON.stringify(expectedRepo)} is required, got ${JSON.stringify(names)}`);
+  }
+}
+
 export type PostReviewInput = {
   installationId: number;
   owner: string;
@@ -555,24 +633,33 @@ export type PostReviewInput = {
 };
 
 export type ReviewCommenter = {
-  /** Mint an installation access token (injected as GH_TOKEN into exec env). */
-  getInstallationToken(installationId: number): Promise<string>;
+  /**
+   * Mint a PURPOSE-SCOPED, repository-scoped installation grant (plan 67
+   * §7.6): `sandbox-read` requests {contents:read, metadata:read};
+   * `review-write` requests the Worker write set. The grant is minted
+   * through the single createAppAuth object (token cache keyed by
+   * installation/repository/permissions) — callers on the sandbox path MUST
+   * verify the RETURNED grant via `assertSandboxGrant` (RL-6).
+   */
+  getInstallationToken(input: TokenInput): Promise<InstallationTokenGrant>;
   /**
    * Upsert one overall review comment (Issues comments API; T5): create with
    * round=1 on a miss, PATCH the app's own marker comment with round=N+1 on
-   * a hit. Returns the round just posted — the consumer pins the
-   * line-comments marker body (plan 18 Task 3) to the SAME round, single
-   * source: the upsert scan.
+   * a hit. Returns the round just posted AND the exact comment id — the
+   * publication proof (spec §7.7) records both; a create response without a
+   * parseable id throws (an unprovable publication is never claimed).
    */
-  postReview(input: PostReviewInput): Promise<number>;
+  postReview(input: PostReviewInput): Promise<{ round: number; commentId: number }>;
   /**
    * Upsert the degraded comment (plan 18 Task 2 / AL-1): the parse-fail
    * visibility chain — a SEPARATE marker family (`review-degraded:v1`) with
    * an independent round counter from postReview's real review chain. The
    * consumer calls it best-effort on the degrade path: a rejection is a
-   * structured log line, never a mask for the ack.
+   * structured log line, never a mask for the ack. Returns the typed
+   * posted/not-posted result — `commentId` is null when the response did
+   * not yield one (best-effort chain, never a fabricated id).
    */
-  postDegraded(input: PostDegradedInput): Promise<void>;
+  postDegraded(input: PostDegradedInput): Promise<{ posted: boolean; commentId: number | null }>;
   /**
    * Delete stale bot-authored `review-degraded:v1` comments (Bugbot
    * finding — degraded-comment lifecycle): the success path calls this
@@ -592,9 +679,32 @@ export type ReviewCommenter = {
    * Post the line-comments review (plan 18 Task 3 / AL-3): ONE
    * pulls.createReview with `event: "COMMENT"` (D4 event lock) and the
    * pre-filtered qualifying findings as `comments[]`. Throws on any Octokit
-   * error — the consumer's never-throw guard is the catch site.
+   * error — the consumer's never-throw guard is the catch site. Returns the
+   * §7.7 capture result: returned comment ids mapped back to the input,
+   * `associationId: ""` for findings without a lifecycle association (the
+   * intent-driven path rides the publication payload, T4).
    */
-  postLineComments(input: PostLineCommentsInput): Promise<void>;
+  postLineComments(input: PostLineCommentsInput): Promise<PostedLineComments>;
+  /**
+   * Bounded discussion capture (plan 67 §7.8): newest-first GraphQL issue
+   * comments (≤2 pages) + each known thread conversation (≤2 pages), with
+   * three-valued coverage and §7.5 digests. API failure is `unavailable`.
+   */
+  listDiscussion(input: ListDiscussionInput): Promise<Discussion>;
+  /**
+   * §7.5 thread identity surface — present only when the commenter is
+   * constructed with the thread store (`createReviewCommenter(env, { db })`);
+   * absent (undefined) otherwise. `discoverThread` proves ownership from the
+   * prepared association BEFORE any adoption; `resolveFindingThread` applies
+   * the verified resolution behind the §7.5 fences. T4 owns the consumer
+   * call ordering.
+   */
+  discoverThread?(input: { scope: Scope; intent: LineIntent; reviewId: number | null }): Promise<DiscoveryResult>;
+  resolveFindingThread?(input: {
+    scope: Scope;
+    associationId: string;
+    verified: VerifiedResolution;
+  }): Promise<ResolveOutcome>;
 };
 /**
  * Structural auth surface for the createAppAuth strategy. `AuthInterface` is
@@ -602,10 +712,20 @@ export type ReviewCommenter = {
  * strategy is assignable (same pattern as the deleted worker/diff.ts
  * AppAuth, plan 04). With a factory the call resolves to the factory's
  * return (the octokit); without one it resolves to the installation access
- * token.
+ * grant — auth-app 8.3.0 maps the response's `permissions`,
+ * `repository_selection` and `repositories[].id/name` into `permissions`,
+ * `repositorySelection`, `repositoryIds`/`repositoryNames` (spec §7.6), and
+ * its token cache is keyed by installation/repository/permissions.
  */
 export type AppAuthStrategy = {
-  (options: { type: "installation"; installationId: number }): Promise<{ token: string }>;
+  /** App-level JWT (spec §7.5: JWT-authenticated `GET /app` identity proof). */
+  (options: { type: "app" }): Promise<{ token: string }>;
+  (options: {
+    type: "installation";
+    installationId: number;
+    repositoryNames?: string[];
+    permissions?: Record<string, string>;
+  }): Promise<InstallationTokenGrant>;
   <T>(options: { type: "installation"; installationId: number; factory: (options: unknown) => T }): Promise<T>;
 };
 
@@ -662,9 +782,13 @@ type CommentTarget = { owner: string; repo: string; prNumber: number };
  * the next bot marker wins, else a fresh round=1 is created. Each replan
  * permanently excludes one id, so the loop always terminates). The chain
  * the scan matches is the caller's `planComment` choice — the recovery
- * semantics must never drift between the two chains. Returns the round
- * just posted (the caller's `buildBody` round) — the line-comments marker
- * (plan 18 Task 3) pins itself to the review chain's round.
+ * semantics must never drift between the two chains.
+ *
+ * Returns the round just posted AND the exact comment id: create extracts
+ * the response id (the review chain requires it — a response without one
+ * throws, the caller must never claim an unprovable publication; the
+ * degraded chain degrades to `commentId: null`); update returns the PATCHed
+ * comment id.
  */
 async function upsertMarkerComment(
   octokit: PostOctokit,
@@ -673,7 +797,9 @@ async function upsertMarkerComment(
   buildBody: (round: number) => string,
   /** Which marker chain is posting — names the missing-surface error per chain. */
   surface: "review" | "degraded",
-): Promise<number> {
+  /** Whether a create response without an id is a hard failure (review) or a null capture (degraded). */
+  requireResponseId: boolean,
+): Promise<{ round: number; commentId: number | null }> {
   const issues = octokit.rest?.issues;
   if (
     !issues?.listComments ||
@@ -696,13 +822,19 @@ async function upsertMarkerComment(
     const planned = planComment(comments, dead);
     const body = buildBody(planned.round);
     if (planned.action === "create") {
-      await issues.createComment({
+      const created = (await issues.createComment({
         owner: target.owner,
         repo: target.repo,
         issue_number: target.prNumber,
         body,
-      });
-      return planned.round;
+      })) as { data?: { id?: unknown } } | undefined;
+      const id = created?.data?.id;
+      if (typeof id !== "number" && requireResponseId) {
+        throw new Error(
+          `${surface} comment create response carries no comment id — refusing to claim an unprovable publication (spec §7.7 step 8)`,
+        );
+      }
+      return { round: planned.round, commentId: typeof id === "number" ? id : null };
     }
     try {
       await issues.updateComment({
@@ -711,7 +843,7 @@ async function upsertMarkerComment(
         comment_id: planned.commentId,
         body,
       });
-      return planned.round;
+      return { round: planned.round, commentId: planned.commentId };
     } catch (err) {
       // A RequestError from octokit carries `.status` (duck-typed so the
       // mock-octokit tests can reject with a plain { status: N }).
@@ -734,18 +866,25 @@ async function upsertMarkerComment(
  * The Issues comments API has no review event — the model verdict is
  * prompt-injectable and is rendered as text only (SEC-01, structural).
  *
- * Returns the round just posted (plan 18 Task 3: the line-comments marker
- * body carries `round N` from THIS source, never a re-scan).
+ * Returns the round just posted and the exact comment id (plan 18 Task 3:
+ * the line-comments marker body carries `round N` from THIS source, never a
+ * re-scan; spec §7.7: the proof records the exact returned comment id).
  */
-export async function postReviewWithOctokit(octokit: PostOctokit, input: PostReviewInput): Promise<number> {
-  return upsertMarkerComment(
+export async function postReviewWithOctokit(octokit: PostOctokit, input: PostReviewInput): Promise<{ round: number; commentId: number }> {
+  const { round, commentId } = await upsertMarkerComment(
     octokit,
     input,
     planUpsert,
     (round) =>
       buildUpsertBody(input.output, input.omittedFindings ?? 0, round, input.headSha, input.previousFingerprints),
     "review",
+    true,
   );
+  if (commentId === null) {
+    // Unreachable with requireResponseId — kept as the typed narrowing guard.
+    throw new Error("review comment create response carries no comment id");
+  }
+  return { round, commentId };
 }
 
 export type PostDegradedInput = {
@@ -764,16 +903,20 @@ export type PostDegradedInput = {
  * Task 2 / AL-1): the parse-fail visibility chain. Same scan/replan
  * mechanics as the real review upsert, but the scan is restricted to the
  * `review-degraded:v1` marker prefix — the real review chain (`review:v1`)
- * and its round counter stay independent.
+ * and its round counter stay independent. Returns the typed posted result;
+ * `commentId` is null when the create response carried no id (best-effort
+ * chain — never throws for a missing id, unlike the publication path).
  */
-export async function postDegradedWithOctokit(octokit: PostOctokit, input: PostDegradedInput): Promise<void> {
-  await upsertMarkerComment(
+export async function postDegradedWithOctokit(octokit: PostOctokit, input: PostDegradedInput): Promise<{ posted: boolean; commentId: number | null }> {
+  const { commentId } = await upsertMarkerComment(
     octokit,
     input,
     planDegradedUpsert,
     (round) => buildDegradedBody({ error: input.error, rawOutput: input.rawOutput, round }),
     "degraded",
+    false,
   );
+  return { posted: true, commentId };
 }
 
 /** Degraded-comment delete outcome (Bugbot round-2 fix): the consumer logs
@@ -1009,6 +1152,25 @@ export type PostLineCommentsInput = {
 };
 
 /**
+ * §7.7 line-comment capture result (plan 67 Task 2): the returned review
+ * comments mapped back to the input. `associationId` is "" for a finding
+ * without a lifecycle association — the pre-publication posting path; the
+ * intent-driven capture (association ids, thread markers, the line-batch
+ * marker body) rides the publication payload and is wired by Task 4's
+ * consumer ordering. `ambiguous` lists `path:line` descriptors that could
+ * not be uniquely matched to a returned comment; `captured` is true only
+ * when the response carried the created comments and every finding mapped.
+ * `reviewId` is the created review's REST id (null when not returned) — the
+ * value `discoverThread` pins discovery to.
+ */
+export type PostedLineComments = {
+  posted: { associationId: string; commentId: number; path: string; line: number }[];
+  ambiguous: string[];
+  captured: boolean;
+  reviewId: number | null;
+};
+
+/**
  * Extract the unified-diff string from a `pulls.get` diff-mediaType response
  * (pattern originated from the deleted worker/diff.ts extractDiff — pipeline
  * ↛ worker isolation holds): octokit returns the diff as `data` (string)
@@ -1057,19 +1219,23 @@ export async function fetchPrDiffWithOctokit(octokit: PostOctokit, input: FetchP
  * a marker short line only — never a copy of the overall review body.
  * Empty qualifying set → zero API calls (byte-compat). No `start_line`
  * this iteration; old rounds' line comments stay in place.
+ *
+ * Returns the §7.7 capture result (see `PostedLineComments`).
  */
 export async function postLineCommentsWithOctokit(
   octokit: PostOctokit,
   input: PostLineCommentsInput,
-): Promise<void> {
-  if (input.findings.length === 0) return;
+): Promise<PostedLineComments> {
+  if (input.findings.length === 0) {
+    return { posted: [], ambiguous: [], captured: true, reviewId: null };
+  }
   const createReview = octokit.rest?.pulls?.createReview;
   if (!createReview) {
     throw new Error(
       "octokit is missing rest.pulls.createReview — cannot post line comments; check the injected auth surface",
     );
   }
-  await createReview({
+  const response = (await createReview({
     owner: input.owner,
     repo: input.repo,
     pull_number: input.prNumber,
@@ -1082,23 +1248,53 @@ export async function postLineCommentsWithOctokit(
       line: finding.line_end,
       body: buildLineCommentBody(finding),
     })),
-  });
+  })) as {
+    data?: { id?: unknown; comments?: Array<{ id?: unknown; path?: unknown; line?: unknown }> | null };
+  } | undefined;
+
+  const returned = Array.isArray(response?.data?.comments) ? response!.data!.comments! : null;
+  const reviewIdRaw = response?.data?.id;
+  const reviewId = typeof reviewIdRaw === "number" ? reviewIdRaw : null;
+  const posted: PostedLineComments["posted"] = [];
+  const ambiguous: string[] = [];
+  if (returned === null) {
+    // No returned comments in the response — nothing can be captured.
+    return { posted: [], ambiguous: [], captured: false, reviewId };
+  }
+  for (const finding of input.findings) {
+    const path = finding.file_path ?? "";
+    const line = finding.line_end ?? -1;
+    const matches = returned.filter((c) => c.path === path && c.line === line && typeof c.id === "number");
+    if (matches.length === 1) {
+      posted.push({ associationId: "", commentId: matches[0]!.id as number, path, line });
+    } else {
+      ambiguous.push(`${path}:${line}`);
+    }
+  }
+  return { posted, ambiguous, captured: ambiguous.length === 0, reviewId };
 }
 
 /**
- * Production commenter: createAppAuth (APP_ID + normalized PRIVATE_KEY) →
- * per-installation octokit via the documented factory pattern. The
- * createAppAuth instance is memoized so its installation-token cache is
- * shared across calls (auth-app default: tokens cached until expiry).
+ * Production commenter: createAppAuth (APP_ID + normalized PRIVATE_KEY) —
+ * the ONLY createAppAuth construction point in the pipeline (architect lock
+ * L4, plan 13): every credential enters through the `CommenterEnv`
+ * parameter — every per-App instance (consumer-side appRef resolution,
+ * src/pipeline/consumer.ts) is built here, one instance per credential so
+ * each App keeps its own installation-token cache. Octokit construction
+ * stays inside this module; call sites never duplicate it.
  *
- * This factory is the ONLY createAppAuth construction point in the pipeline
- * (architect lock L4, plan 13): every credential enters through the
- * `CommenterEnv` parameter — every per-App instance (consumer-side appRef
- * resolution, src/pipeline/consumer.ts) is built here, one instance per
- * credential so each App keeps its own installation-token cache. Octokit
- * construction stays inside this module; call sites never duplicate it.
+ * Purpose-scoped clients (plan 67 §7.6): every octokit is built from a
+ * minted grant — `auth({type:"installation", repositoryNames:[repo],
+ * permissions})` through the memoized auth object, then a token-
+ * authenticated `Octokit({auth: grant.token})` for that exact
+ * purpose/repository. The old unrestricted factory auto-auth
+ * (`factory: (options) => new Octokit({authStrategy: createAppAuth, …})`)
+ * is deleted — no client refreshes or widens its own grant, and a token
+ * client never leaves the Worker. auth-app's cache is keyed by
+ * installation/repository/permissions, so the two purpose families never
+ * cross-reuse tokens.
  */
-export function createReviewCommenter(env: CommenterEnv): ReviewCommenter {
+export function createReviewCommenter(env: CommenterEnv, threads?: { db: D1Like; nowMs?: () => number }): ReviewCommenter {
   let appAuth: AppAuthStrategy | null = null;
   async function getAppAuth(): Promise<AppAuthStrategy> {
     if (appAuth === null) {
@@ -1108,41 +1304,104 @@ export function createReviewCommenter(env: CommenterEnv): ReviewCommenter {
   }
 
   /**
-   * Per-installation octokit via the documented factory pattern. The real
+   * Mint the purpose-scoped grant (the single mint path — the returned
+   * grant's capabilities are the GitHub response, not the request).
+   */
+  async function mintGrant(input: { installationId: number; repo: string; purpose: TokenPurpose }): Promise<InstallationTokenGrant> {
+    const auth = await getAppAuth();
+    return auth({
+      type: "installation",
+      installationId: input.installationId,
+      repositoryNames: [input.repo],
+      permissions: permissionsFor(input.purpose),
+    });
+  }
+
+  /**
+   * Token-authenticated octokit for the exact purpose/repository. The real
    * Octokit satisfies PostOctokit at runtime (paginate is bundled with
    * @octokit/rest); the cast bridges the overloaded plugin-paginate-rest
    * types to the minimal surface above.
    */
-  async function getOctokit(installationId: number): Promise<PostOctokit> {
-    const auth = await getAppAuth();
-    const octokit = await auth({
-      type: "installation",
-      installationId,
-      factory: (options: unknown) => new Octokit({ authStrategy: createAppAuth, auth: options }),
-    });
-    return octokit as unknown as PostOctokit;
+  async function getOctokit(input: { installationId: number; repo: string }): Promise<PostOctokit> {
+    const grant = await mintGrant({ ...input, purpose: "review-write" });
+    return new Octokit({ auth: grant.token }) as unknown as PostOctokit;
   }
 
-  return {
-    async getInstallationToken(installationId) {
+  /**
+   * JWT-authenticated `GET /app` identity proof (spec §7.5): the numeric
+   * App id + nonblank slug of the LIVE App behind THIS instance's
+   * credentials — never an installation-token `viewer.login` assumption.
+   * Memoized per credential identity (this instance is one App's
+   * credential pair — never shared across Apps).
+   */
+  let cachedIdentity: { githubAppId: number; slug: string } | null | undefined;
+  async function getAppIdentity(): Promise<{ githubAppId: number; slug: string } | null> {
+    if (cachedIdentity !== undefined) return cachedIdentity;
+    try {
       const auth = await getAppAuth();
-      const installation = await auth({ type: "installation", installationId });
-      return installation.token;
+      const { token } = await auth({ type: "app" });
+      const { data } = await new Octokit({ auth: token }).rest.apps.get();
+      cachedIdentity =
+        typeof data?.id === "number" && typeof data?.slug === "string" && data.slug.length > 0
+          ? { githubAppId: data.id, slug: data.slug }
+          : null;
+    } catch {
+      cachedIdentity = null; // identity unavailable fails closed downstream
+    }
+    return cachedIdentity;
+  }
+
+  /** Purpose-scoped review-write client exposing the existing graphql(). */
+  async function getGraphqlOctokit(input: { installationId: number; repo: string }): Promise<GraphqlOctokit> {
+    return (await getOctokit(input)) as unknown as GraphqlOctokit;
+  }
+
+  // §7.5 adapter (plan 67 Task 2): wired only when the caller binds the
+  // thread store — the two optional methods stay undefined otherwise.
+  const threadSurface = threads
+    ? createReviewThreads({
+        db: threads.db,
+        nowMs: threads.nowMs ?? (() => Date.now()),
+        getAppIdentity: async () => getAppIdentity(),
+        getOctokit: async ({ installationId, repo }) => getGraphqlOctokit({ installationId, repo }),
+      })
+    : null;
+
+  return {
+    ...(threadSurface
+      ? {
+          discoverThread: (input: { scope: Scope; intent: LineIntent; reviewId: number | null }) =>
+            threadSurface.discoverThread(input),
+          resolveFindingThread: (input: { scope: Scope; associationId: string; verified: VerifiedResolution }) =>
+            threadSurface.resolveFindingThread(input),
+        }
+      : {}),
+    async getInstallationToken(input) {
+      return mintGrant({
+        installationId: input.scope.installationId,
+        repo: input.scope.repo,
+        purpose: input.purpose,
+      });
     },
     async postReview(input) {
-      return postReviewWithOctokit(await getOctokit(input.installationId), input);
+      return postReviewWithOctokit(await getOctokit({ installationId: input.installationId, repo: input.repo }), input);
     },
     async postDegraded(input) {
-      await postDegradedWithOctokit(await getOctokit(input.installationId), input);
+      return postDegradedWithOctokit(await getOctokit({ installationId: input.installationId, repo: input.repo }), input);
     },
     async deleteDegradedComment(input) {
-      return deleteDegradedCommentWithOctokit(await getOctokit(input.installationId), input);
+      return deleteDegradedCommentWithOctokit(await getOctokit({ installationId: input.installationId, repo: input.repo }), input);
     },
     async fetchPrDiff(input) {
-      return fetchPrDiffWithOctokit(await getOctokit(input.installationId), input);
+      return fetchPrDiffWithOctokit(await getOctokit({ installationId: input.installationId, repo: input.repo }), input);
     },
     async postLineComments(input) {
-      await postLineCommentsWithOctokit(await getOctokit(input.installationId), input);
+      return postLineCommentsWithOctokit(await getOctokit({ installationId: input.installationId, repo: input.repo }), input);
+    },
+    async listDiscussion(input) {
+      const octokit = await getOctokit({ installationId: input.installationId, repo: input.repo });
+      return listDiscussionWithOctokit(octokit as unknown as GraphqlOctokit, input);
     },
   };
 }

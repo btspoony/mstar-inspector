@@ -49,7 +49,7 @@ import { computeFindingFingerprint } from "../../src/store/fingerprint";
 import { idemKey } from "../../src/contracts/idem";
 import { createMigratedTestD1, createTestD1, type TestD1 } from "../store/helpers";
 import { REDACTED } from "../../src/pipeline/redact";
-import type { ReviewCommenter } from "../../src/pipeline/comment";
+import type { InstallationTokenGrant, ReviewCommenter, TokenInput } from "../../src/pipeline/comment";
 import { createSecretbox } from "../../src/dashboard/secretbox";
 import { createAppConfigStore } from "../../src/dashboard/app-config-store";
 import { getSandboxImage } from "../../src/contracts/sandbox-images";
@@ -232,19 +232,28 @@ const VALID_DIFF = [
 let diffResult: string = VALID_DIFF;
 
 const fakeCommenter: ReviewCommenter = {
-  getInstallationToken: mock(async (installationId: number) => {
-    commenterCalls.push({ op: "token", args: [installationId] });
+  // Plan 67 §7.6: the consumer's sandbox path asserts the RETURNED grant
+  // (assertSandboxGrant) — the double wraps the token in a minimal
+  // compliant sandbox-read grant scoped to the requested repository.
+  getInstallationToken: mock(async (input: TokenInput) => {
+    commenterCalls.push({ op: "token", args: [input] });
     if (tokenError) throw tokenError;
-    return tokenResult;
+    return {
+      token: tokenResult,
+      permissions: { contents: "read", metadata: "read" },
+      repositoryNames: [input.scope.repo],
+      repositorySelection: "selected",
+    } satisfies InstallationTokenGrant;
   }),
   postReview: mock(async (input: unknown) => {
     commenterCalls.push({ op: "post", args: [input] });
     if (commentError) throw commentError;
-    return postRound;
+    return { round: postRound, commentId: 101 };
   }),
   postDegraded: mock(async (input: unknown) => {
     commenterCalls.push({ op: "degrade", args: [input] });
     if (degradeError) throw degradeError;
+    return { posted: true, commentId: null };
   }),
   deleteDegradedComment: mock(async (input: unknown) => {
     commenterCalls.push({ op: "delete-degraded", args: [input] });
@@ -259,6 +268,12 @@ const fakeCommenter: ReviewCommenter = {
   postLineComments: mock(async (input: unknown) => {
     commenterCalls.push({ op: "line-comments", args: [input] });
     if (lineCommentsError) throw lineCommentsError;
+    return { posted: [], ambiguous: [], captured: true, reviewId: null };
+  }),
+  // Plan 67 §7.8 discussion capture: not wired into the consumer until
+  // Task 4's ordering — these fixtures never trigger it.
+  listDiscussion: mock(async () => {
+    throw new Error("unexpected: listDiscussion is not wired until Task 4");
   }),
 };
 
