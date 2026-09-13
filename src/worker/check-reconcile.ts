@@ -105,15 +105,9 @@ export const CHECK_ROW_MAX_REQUESTS = 6;
  */
 const CREDENTIAL_REQUESTS = 2;
 /**
- * Bound on the status-driven re-enable pass. Re-enabling is a D1-only
- * transition gated on the App row being active and not deleted; the live
- * credential proof is re-established by the row loop itself, so a pair that
- * is still unusable is suspended again on its next due run.
- *
- * simplify: bounded to the same order as the row batch. A suspended-pair
- * listing in the store (the §7.11.1 `listSuspendedLifecycleApps` analogue)
- * would make this exact instead of windowed; add it if a fleet ever exceeds
- * this window of concurrently suspended App pairs.
+ * Bound on the status-driven re-enable pass. The pairs are selected from the
+ * rows that are ACTUALLY suspended — never a window over all Apps — so the
+ * bound is the row batch's own order rather than an app-count ceiling.
  */
 const REENABLE_PAIR_LIMIT = CHECK_RECONCILE_LIMIT;
 
@@ -458,15 +452,21 @@ export async function reconcileReviewChecks(
  * lets its suspended Check rows resume (fresh claims, same identities). This
  * is a D1-only transition — no credential is trusted from a previous run, and
  * the pair's usability is proven again by the row loop before any request.
+ *
+ * Pairs are drawn from the SUSPENDED rows themselves (the work that actually
+ * needs resuming), so a pair is considered exactly when it holds suspended
+ * Check work — never a window over every App in the deployment, which would
+ * both spuriously resume nothing and miss a pair beyond the window.
  */
 async function reenableHealthyAppChecks(db: D1Like, nowMs: number, log: CheckReconcileLog): Promise<void> {
   const { results } = await db
     .prepare(
-      `SELECT ga.id AS app_id, ai.installation_id AS installation_id
-         FROM github_apps ga
-         JOIN app_installations ai ON ai.app_id = ga.id
-        WHERE ga.status = 'active' AND ga.deleted_at IS NULL
-        ORDER BY ga.id, ai.installation_id
+      `SELECT DISTINCT ga.id AS app_id, rc.installation_id AS installation_id
+         FROM review_checks rc
+         JOIN github_apps ga ON ga.id = rc.app_id
+        WHERE rc.recovery_state = 'suspended'
+          AND ga.status = 'active' AND ga.deleted_at IS NULL
+        ORDER BY rc.installation_id, ga.id
         LIMIT ?`,
     )
     .bind(REENABLE_PAIR_LIMIT)

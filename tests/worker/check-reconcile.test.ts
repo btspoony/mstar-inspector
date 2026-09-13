@@ -423,6 +423,56 @@ describe("due selection (spec §7.11.2 predicate)", () => {
     expect((await rawRow(db, capped.attempt.identity.attemptId)).terminal_ms).toBeNull();
   });
 
+  test("a lease that goes LIVE between selection and claim stops the row (selection grants no ownership)", async () => {
+    const db = seededDb();
+    const { attempt, lease } = await claim(db);
+    const fetchStub = stubFetch();
+    try {
+      // The row is due when selected; before this lane can claim it, another
+      // invocation acquires a live lease (the credentials step runs in that
+      // window). The conditional reacquire must then refuse, and the lane must
+      // write NOTHING — selection alone grants no ownership (§7.11.2 step 1).
+      const summary = await run(db, {
+        now: () => T0,
+        credentials: async () => {
+          db.raw
+            .prepare(`UPDATE review_checks SET holder = 'other-run', lease_epoch = 9, lease_until_ms = ? WHERE id = ?`)
+            .run(T0 + CHECK_RECOVERY_LEASE_MS, attempt.identity.attemptId);
+          return {
+            kind: "ok",
+            adapter: {
+              adoptCheckRun: async () => {
+                throw new Error("adoption must not run: the claim fence refused first");
+              },
+              beginCheck: async () => {
+                throw new Error("create must not run: the claim fence refused first");
+              },
+              fetchCheckRun: async () => {
+                throw new Error("fetch must not run: the claim fence refused first");
+              },
+              completeCheck: async () => {
+                throw new Error("complete must not run: the claim fence refused first");
+              },
+            },
+          };
+        },
+      });
+      expect(summary.completed).toBe(0);
+      expect(summary.gaveUp).toBe(0);
+    } finally {
+      fetchStub.restore();
+    }
+    const row = await rawRow(db, attempt.identity.attemptId);
+    // The other holder's lease, epoch and timestamps are untouched.
+    expect(row.holder).toBe("other-run");
+    expect(row.lease_epoch).toBe(9);
+    expect(row.lease_until_ms).toBe(T0 + CHECK_RECOVERY_LEASE_MS);
+    expect(row.attempts).toBe(0);
+    expect(row.terminal_ms).toBeNull();
+    expect(row.desired).toBe("in_progress");
+    expect(lease.holder).toBe("consumer-run");
+  });
+
   test("a suspended row of a DISABLED App is not examined and stays suspended", async () => {
     const db = seededDb();
     const { attempt } = await claim(db);
@@ -1092,6 +1142,41 @@ describe("tenant/App isolation and status-driven re-enable (spec §7.6)", () => 
     expect(badRow.external_id).toBe(bad.attempt.identity.externalId);
     expect(badRow.app_id).toBe(APP_B);
     expect(badRow.attempts).toBe(0);
+  });
+
+  test("re-enable resumes only suspended work of ACTIVE, non-deleted Apps", async () => {
+    const db = seededDb();
+    const healthy = await claim(db, { action: "healthy" });
+    const disabled = await claim(db, { scope: SCOPE_B, githubAppId: NUMERIC_APP_B, action: "disabled" });
+    db.raw
+      .prepare(
+        `UPDATE review_checks SET holder = NULL, lease_until_ms = NULL, recovery_state = 'suspended' WHERE id IN (?, ?)`,
+      )
+      .run(healthy.attempt.identity.attemptId, disabled.attempt.identity.attemptId);
+    // The second row's App is disabled: its suspension must survive untouched,
+    // which is observable as the lane never even ASKING for that pair.
+    db.raw.prepare(`UPDATE github_apps SET status = 'disabled' WHERE id = ?`).run(APP_B);
+    const asked: string[] = [];
+    const fetchStub = stubFetch();
+    try {
+      const summary = await run(db, {
+        now: () => T0,
+        credentials: async ({ scope }) => {
+          asked.push(scope.appId);
+          return { kind: "unavailable", reason: "disabled" };
+        },
+      });
+      // Only the healthy pair was examined. The disabled App's row stayed
+      // suspended and was never claimed, asked about, or terminalized.
+      expect(summary.examined).toBe(1);
+    } finally {
+      fetchStub.restore();
+    }
+    expect(asked).toEqual([APP]);
+    const disabledRow = await rawRow(db, disabled.attempt.identity.attemptId);
+    expect(disabledRow.recovery_state).toBe("suspended");
+    expect(disabledRow.terminal_ms).toBeNull();
+    expect(disabledRow.holder).toBeNull();
   });
 
   test("a healthy App's suspended row is re-enabled, then re-suspended while its credentials stay unusable", async () => {
