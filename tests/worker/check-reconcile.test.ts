@@ -35,8 +35,13 @@ import {
   CHECK_RECONCILE_LIMIT,
   CHECK_RECOVERY_LEASE_MS,
   claimAttempt,
+  claimCheckRecovery,
+  deferCheckRecovery,
+  listCheckReconcileBatch,
+  retryCheckRecovery,
   setCheckCreateState,
   setCheckDesired,
+  suspendCheckRecovery,
   type CheckAttempt,
   type CheckConclusion,
   type CheckIdentity,
@@ -53,8 +58,10 @@ import {
   reconcileReviewChecks,
   type CheckCredentialFactory,
   type CheckReconcileDeps,
+  type CheckReconcileSummary,
   type CheckTransport,
 } from "../../src/worker/check-reconcile";
+import type { ChecksAdapter } from "../../src/pipeline/checks";
 import type { ScheduledEnv } from "../../src/worker/env";
 import { defaultReconcileLog } from "../../src/worker/lifecycle-reconcile";
 import { defaultSweepLog } from "../../src/worker/sweep";
@@ -257,53 +264,72 @@ function scriptedCredentials(
   script: AdapterScript = {},
   capture?: { transport?: CheckTransport },
   scopeFor: Scope = SCOPE,
+  paused = false,
 ): CheckCredentialFactory {
   return async ({ scope, transport }) => {
     if (capture !== undefined) capture.transport = transport;
     if (scope.appId !== scopeFor.appId || scope.installationId !== scopeFor.installationId) {
       return { kind: "unavailable", reason: "missing" };
     }
-    const perCall = script.requestsPerCall ?? 1;
-    const spend = async (): Promise<void> => {
-      for (let i = 0; i < perCall; i += 1) {
-        try {
-          await transport.fetchImpl("https://api.github.com/checks");
-        } catch {
-          return; // refused before dispatch — the caller reads budget.refused
-        }
+    return { kind: "ok", paused, adapter: scriptedAdapter(db, script, transport) };
+  };
+}
+
+/**
+ * The adapter double itself, for tests that need to serve an ARBITRARY scope
+ * (a run-budget case spread over many pairs) rather than one pinned pair. Each
+ * operation issues its scripted real requests through the run's transport, so
+ * every budget assertion counts genuine dispatches.
+ *
+ * `beginCheck` deliberately writes the durable `sending` transition through
+ * the REAL store, because that is what the live adapter does before it lets a
+ * create request leave — a double that skipped it would make the row's
+ * `not-sent` state contradict the run it just created.
+ */
+function scriptedAdapter(db: TestD1, script: AdapterScript, transport: CheckTransport): ChecksAdapter {
+  const perCall = script.requestsPerCall ?? 1;
+  /** True when every scripted request for this call actually dispatched. */
+  const spend = async (): Promise<boolean> => {
+    for (let i = 0; i < perCall; i += 1) {
+      try {
+        await transport.fetchImpl("https://api.github.com/checks");
+      } catch {
+        // Refused BEFORE dispatch. The live adapter surfaces this as
+        // `unavailable` and never would have reached GitHub, so the script must
+        // not run either: a double that answered anyway would fake a request
+        // the budget already refused.
+        return false;
       }
-    };
-    return {
-      kind: "ok",
-      adapter: {
-        adoptCheckRun: async ({ identity }) => {
-          await spend();
-          return script.adopt === undefined ? { kind: "absent" } : script.adopt(identity);
-        },
-        beginCheck: async ({ identity, lease }) => {
-          // Mirror the live adapter: `sending` is persisted BEFORE the request.
-          // One millisecond inside the recovery lease is a valid fence instant
-          // for every clock these tests use.
-          await setCheckCreateState(db, identity.attemptId, lease, "sending", undefined, lease.untilMs - 1);
-          await spend();
-          return script.begin === undefined
-            ? { kind: "unavailable", reason: "no create scripted" }
-            : script.begin(identity);
-        },
-        fetchCheckRun: async ({ identity, checkRunId }) => {
-          await spend();
-          return script.fetch === undefined
-            ? { kind: "unavailable", reason: "no fetch scripted" }
-            : script.fetch(identity, checkRunId);
-        },
-        completeCheck: async ({ identity, checkRunId, conclusion }) => {
-          await spend();
-          return script.complete === undefined
-            ? { kind: "unavailable", reason: "no complete scripted" }
-            : script.complete(identity, checkRunId, conclusion);
-        },
-      },
-    };
+    }
+    return true;
+  };
+  return {
+    adoptCheckRun: async ({ identity }) => {
+      if (!(await spend())) return { kind: "incomplete" };
+      return script.adopt === undefined ? { kind: "absent" } : script.adopt(identity);
+    },
+    beginCheck: async ({ identity, lease }) => {
+      // Mirror the live adapter: `sending` is persisted BEFORE the request.
+      // One millisecond inside the recovery lease is a valid fence instant for
+      // every clock these tests use.
+      await setCheckCreateState(db, identity.attemptId, lease, "sending", undefined, lease.untilMs - 1);
+      if (!(await spend())) return { kind: "unavailable", reason: "request budget refused before dispatch" };
+      return script.begin === undefined
+        ? { kind: "unavailable", reason: "no create scripted" }
+        : script.begin(identity);
+    },
+    fetchCheckRun: async ({ identity, checkRunId }) => {
+      if (!(await spend())) return { kind: "unavailable", reason: "request budget refused before dispatch" };
+      return script.fetch === undefined
+        ? { kind: "unavailable", reason: "no fetch scripted" }
+        : script.fetch(identity, checkRunId);
+    },
+    completeCheck: async ({ identity, checkRunId, conclusion }) => {
+      if (!(await spend())) return { kind: "unavailable", reason: "request budget refused before dispatch" };
+      return script.complete === undefined
+        ? { kind: "unavailable", reason: "no complete scripted" }
+        : script.complete(identity, checkRunId, conclusion);
+    },
   };
 }
 
@@ -440,6 +466,7 @@ describe("due selection (spec §7.11.2 predicate)", () => {
             .run(T0 + CHECK_RECOVERY_LEASE_MS, attempt.identity.attemptId);
           return {
             kind: "ok",
+            paused: false,
             adapter: {
               adoptCheckRun: async () => {
                 throw new Error("adoption must not run: the claim fence refused first");
@@ -1371,5 +1398,553 @@ describe("scheduled composition (spec §7.11)", () => {
     expect(events2).toContain("ops_lifecycle_reconcile");
     expect(events2).toContain("ops_check_reconcile");
     expect((await rawRow(db, attempt.identity.attemptId)).recovery_state).toBe("suspended");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// L2 fix 1 — claim eligibility, live-safe suspension, pause, budget release
+// ---------------------------------------------------------------------------
+
+describe("claim repeats the selector's eligibility (L2 fix 1 finding 1)", () => {
+  /**
+   * Drive one pass while mutating a row into an ineligible state AFTER the
+   * selector produced it. The mutation rides the credential step, which is the
+   * real window between selection and claim.
+   */
+  async function withPostSelectionMutation(
+    mutate: (db: TestD1, id: string) => void,
+  ): Promise<{ summary: CheckReconcileSummary; row: Record<string, string | number | null>; urls: string[] }> {
+    const db = seededDb();
+    const { attempt } = await claim(db);
+    let creates = 0;
+    const fetchStub = stubFetch();
+    try {
+      const summary = await run(db, {
+        now: () => T0,
+        credentials: async () => {
+          mutate(db, attempt.identity.attemptId);
+          return {
+            kind: "ok",
+            paused: false,
+            adapter: {
+              adoptCheckRun: async () => {
+                creates += 1;
+                return { kind: "absent" } as const;
+              },
+              beginCheck: async (identity) => {
+                creates += 1;
+                return { kind: "ready", remote: remoteFor(identity, { status: "in_progress", conclusion: null }) };
+              },
+              fetchCheckRun: async (identity) => ({
+                kind: "found" as const,
+                remote: remoteFor(identity, { status: "completed", conclusion: "failure" }),
+              }),
+              completeCheck: async (identity) => ({
+                kind: "completed" as const,
+                remote: remoteFor(identity, { conclusion: "failure" }),
+              }),
+            },
+          };
+        },
+      });
+      expect(creates).toBe(0);
+      return { summary, row: await rawRow(db, attempt.identity.attemptId), urls: fetchStub.urls };
+    } finally {
+      fetchStub.restore();
+    }
+  }
+
+  test("a backoff that moves into the future after selection blocks the claim", async () => {
+    const { summary, row, urls } = await withPostSelectionMutation((db, id) => {
+      db.raw.prepare(`UPDATE review_checks SET next_attempt_ms = ? WHERE id = ?`).run(T0 + 60_000, id);
+    });
+    expect(summary.examined).toBe(1);
+    expect(summary.completed).toBe(0);
+    expect(summary.unconfirmed).toBe(0);
+    expect(urls).toHaveLength(0);
+    // Nothing mutated: no timestamp, no attempt, no lease taken.
+    expect(row.lease_epoch).toBe(1);
+    expect(row.lease_until_ms).toBe(EXPIRED_DEADLINE);
+    expect(row.attempts).toBe(0);
+    expect(row.holder).toBe("consumer-run");
+    expect(row.next_attempt_ms).toBe(T0 + 60_000);
+  });
+
+  test("reaching the attempt cap after selection blocks the claim", async () => {
+    const { summary, row, urls } = await withPostSelectionMutation((db, id) => {
+      db.raw.prepare(`UPDATE review_checks SET attempts = ? WHERE id = ?`).run(CHECK_MAX_ATTEMPTS, id);
+    });
+    expect(summary.examined).toBe(1);
+    expect(summary.gaveUp).toBe(0);
+    expect(urls).toHaveLength(0);
+    expect(row.attempts).toBe(CHECK_MAX_ATTEMPTS); // not incremented further
+    expect(row.holder).toBe("consumer-run");
+    expect(row.terminal_ms).toBeNull();
+  });
+
+  test("a row that returns to in_progress inside its execution deadline blocks the claim", async () => {
+    const { summary, row, urls } = await withPostSelectionMutation((db, id) => {
+      db.raw
+        .prepare(`UPDATE review_checks SET desired = 'in_progress', execution_deadline_ms = ? WHERE id = ?`)
+        .run(T0 + 900_000, id);
+    });
+    expect(summary.examined).toBe(1);
+    expect(summary.completed).toBe(0);
+    expect(urls).toHaveLength(0);
+    expect(row.execution_deadline_ms).toBe(T0 + 900_000);
+    expect(row.holder).toBe("consumer-run");
+    expect(row.attempts).toBe(0);
+  });
+
+  test("a lease that goes live after selection blocks the claim", async () => {
+    const { summary, row, urls } = await withPostSelectionMutation((db, id) => {
+      db.raw
+        .prepare(`UPDATE review_checks SET holder = 'other-run', lease_epoch = 9, lease_until_ms = ? WHERE id = ?`)
+        .run(T0 + CHECK_RECOVERY_LEASE_MS, id);
+    });
+    expect(summary.examined).toBe(1);
+    expect(urls).toHaveLength(0);
+    expect(row.holder).toBe("other-run");
+    expect(row.lease_epoch).toBe(9);
+    expect(row.attempts).toBe(0);
+  });
+
+  test("a suspended row selected earlier is not claimed", async () => {
+    const { summary, row, urls } = await withPostSelectionMutation((db, id) => {
+      db.raw.prepare(`UPDATE review_checks SET recovery_state = 'suspended' WHERE id = ?`).run(id);
+    });
+    expect(summary.examined).toBe(1);
+    expect(urls).toHaveLength(0);
+    expect(row.recovery_state).toBe("suspended");
+    expect(row.attempts).toBe(0);
+  });
+});
+
+describe("suspension is fenced to free rows (L2 fix 1 finding 2)", () => {
+  test("a live holder/lease on the same pair survives suspension untouched", async () => {
+    const db = seededDb();
+    // Row A: released, terminal intent — suspendable.
+    const free = await claim(db, { action: "free" });
+    await setCheckDesired(db, free.attempt.identity.attemptId, free.lease, {
+      desired: "failure",
+      title: CHECK_NAME,
+      summary: "unconfirmed",
+    }, null, T0);
+    await deferCheckRecovery(db, free.attempt.identity.attemptId, free.lease, {
+      state: "pending",
+      nextAttemptMs: T0,
+      reason: "release",
+    }, T0);
+    // Row B: same pair, LIVE lease held by another invocation mid-operation.
+    const live = await claim(db, { action: "live", triggeredBy: "other", nowMs: T0, executionDeadlineMs: T0 + 900_000 });
+    const before = await rawRow(db, live.attempt.identity.attemptId);
+
+    const suspended = await suspendCheckRecovery(
+      db,
+      { appId: APP, installationId: SCOPE.installationId },
+      "app disabled",
+      T0,
+    );
+    // Only the free row was suspended; the live one was left completely alone.
+    expect(suspended).toBe(1);
+    expect((await rawRow(db, free.attempt.identity.attemptId)).recovery_state).toBe("suspended");
+    const after = await rawRow(db, live.attempt.identity.attemptId);
+    expect(after.holder).toBe(before.holder);
+    expect(after.lease_epoch).toBe(before.lease_epoch);
+    expect(after.lease_until_ms).toBe(before.lease_until_ms);
+    expect(after.updated_ms).toBe(before.updated_ms);
+    expect(after.recovery_state).toBe("pending");
+    // Its fenced write still works — proof the lease was never erased.
+    expect(
+      await setCheckCreateState(db, live.attempt.identity.attemptId, live.lease, "unknown", "still down", T0),
+    ).toBe(true);
+  });
+
+  test("an EXPIRED holder's row is suspendable (fire-and-forget leftover lease)", async () => {
+    const db = seededDb();
+    const { attempt, lease } = await claim(db);
+    await setCheckDesired(db, attempt.identity.attemptId, lease, {
+      desired: "failure",
+      title: CHECK_NAME,
+      summary: "unconfirmed",
+    }, null, CLAIM_AT);
+    // The claim lease is past; the row is nobody's in-flight work.
+    const suspended = await suspendCheckRecovery(
+      db,
+      { appId: APP, installationId: SCOPE.installationId },
+      "app disabled",
+      T0,
+    );
+    expect(suspended).toBe(1);
+    const row = await rawRow(db, attempt.identity.attemptId);
+    expect(row.recovery_state).toBe("suspended");
+    expect(row.holder).toBeNull();
+    expect(row.lease_until_ms).toBeNull();
+  });
+});
+
+describe("pause / kill switch (L2 fix 1 finding 3)", () => {
+  test("a paused App TERMINALIZES an already-known Check (read-only adoption then update)", async () => {
+    const db = seededDb();
+    const { attempt } = await claim(db);
+    // A create was attempted and its run exists: pause must not strand it.
+    db.raw.prepare(`UPDATE review_checks SET create_state = 'sending' WHERE id = ?`).run(attempt.identity.attemptId);
+    let creates = 0;
+    const fetchStub = stubFetch();
+    try {
+      const summary = await run(db, {
+        now: () => T0,
+        credentials: scriptedCredentials(db, {
+          adopt: async (identity) => ({
+            kind: "found",
+            remote: remoteFor(identity, { id: 909, status: "in_progress", conclusion: null }),
+          }),
+          begin: async (identity) => {
+            creates += 1;
+            return { kind: "ready", remote: remoteFor(identity, { status: "in_progress", conclusion: null }) };
+          },
+          fetch: async (identity) => ({
+            kind: "found",
+            remote: remoteFor(identity, { id: 909, status: "in_progress", conclusion: null }),
+          }),
+          complete: async (identity) => ({ kind: "completed", remote: remoteFor(identity, { id: 909, conclusion: "failure" }) }),
+        }, undefined, SCOPE, true),
+      });
+      expect(summary.completed).toBe(1);
+    } finally {
+      fetchStub.restore();
+    }
+    expect(creates).toBe(0);
+    const row = await rawRow(db, attempt.identity.attemptId);
+    expect(row.observed).toBe("failure");
+    expect(row.recovery_state).toBe("done");
+  });
+
+  test("a paused App's never-sent row with a complete absent walk issues NO create and stays due", async () => {
+    const db = seededDb();
+    const { attempt } = await claim(db);
+    let creates = 0;
+    const fetchStub = stubFetch();
+    try {
+      const summary = await run(db, {
+        now: () => T0,
+        credentials: scriptedCredentials(db, {
+          adopt: async () => ({ kind: "absent" }),
+          begin: async (identity) => {
+            creates += 1;
+            return { kind: "ready", remote: remoteFor(identity, { status: "in_progress", conclusion: null }) };
+          },
+        }, undefined, SCOPE, true),
+      });
+      expect(summary.completed).toBe(0);
+      expect(summary.gaveUp).toBe(0);
+      expect(summary.unconfirmed).toBe(0);
+    } finally {
+      fetchStub.restore();
+    }
+    expect(creates).toBe(0);
+    const row = await rawRow(db, attempt.identity.attemptId);
+    // Left DUE: claim released, no attempt spent, no lease withheld.
+    expect(row.holder).toBeNull();
+    expect(row.lease_until_ms).toBeNull();
+    expect(row.attempts).toBe(0);
+    expect(row.next_attempt_ms).toBeNull();
+    expect(row.recovery_state).toBe("pending");
+    expect(row.create_state).toBe("not-sent");
+    expect(row.check_run_id).toBeNull();
+    expect(row.terminal_ms).toBeNull();
+    // Immediately selector-due again — the whole point of releasing the claim.
+    expect(await listCheckReconcileBatch(db, T0)).toHaveLength(1);
+  });
+
+  test("an UNPAUSED App with the same shape still creates exactly once", async () => {
+    const db = seededDb();
+    const { attempt } = await claim(db);
+    let creates = 0;
+    const fetchStub = stubFetch();
+    try {
+      const summary = await run(db, {
+        now: () => T0,
+        credentials: scriptedCredentials(db, {
+          adopt: async () => ({ kind: "absent" }),
+          begin: async (identity) => {
+            creates += 1;
+            return { kind: "ready", remote: remoteFor(identity, { status: "in_progress", conclusion: null }) };
+          },
+          fetch: async (identity) => ({
+            kind: "found",
+            remote: remoteFor(identity, { status: "completed", conclusion: "failure" }),
+          }),
+        }, undefined, SCOPE, false),
+      });
+      expect(summary.completed).toBe(1);
+    } finally {
+      fetchStub.restore();
+    }
+    expect(creates).toBe(1);
+    expect((await rawRow(db, attempt.identity.attemptId)).observed).toBe("failure");
+  });
+});
+
+describe("budget refusal releases the claim (L2 fix 1 finding 4)", () => {
+  test("an exhausted RUN budget leaves later rows unclaimed and completely untouched", async () => {
+    const db = seededDb();
+    // 20 due rows on DISTINCT pairs (distinct installation ids). Each pair
+    // spends 5 probe + 6 row requests before its create, so 20 pairs are far
+    // more than the ≤100 per-RUN cap — the exact shape the run-level ceiling
+    // exists for. Nothing that was refused may be left claimed, charged or
+    // written.
+    const rows: { id: string; before: Record<string, string | number | null> }[] = [];
+    for (let i = 0; i < 20; i += 1) {
+      const { attempt, lease } = await claim(db, {
+        scope: { ...SCOPE, installationId: 1000 + i },
+        action: `row-${i}`,
+      });
+      await setCheckDesired(db, attempt.identity.attemptId, lease, {
+        desired: "failure",
+        title: CHECK_NAME,
+        summary: "unconfirmed",
+      }, null, CLAIM_AT);
+      await deferCheckRecovery(
+        db,
+        attempt.identity.attemptId,
+        lease,
+        { state: "pending", nextAttemptMs: CLAIM_AT, reason: "release" },
+        CLAIM_AT,
+      );
+      db.raw.prepare(`UPDATE review_checks SET created_ms = ? WHERE id = ?`).run(CLAIM_AT + i, attempt.identity.attemptId);
+      rows.push({ id: attempt.identity.attemptId, before: await rawRow(db, attempt.identity.attemptId) });
+    }
+
+    let creates = 0;
+    const fetchStub = stubFetch();
+    try {
+      const summary = await run(db, {
+        now: () => T0,
+        credentials: async ({ transport }) => {
+          // Burn 5 of the row's ≤6 allowance in the credential probe (the real
+          // cost of a mint + identity proof), then hand back the adapter double
+          // so every further call is metered through the same transport.
+          for (let i = 0; i < 5; i += 1) {
+            try {
+              await transport.fetchImpl("https://api.github.com/probe");
+            } catch {
+              return { kind: "unavailable", reason: "missing" };
+            }
+          }
+          return {
+            kind: "ok",
+            paused: false,
+            adapter: scriptedAdapter(db, {
+              adopt: async () => ({ kind: "absent" }),
+              begin: async (identity) => {
+                creates += 1;
+                return { kind: "ready", remote: remoteFor(identity, { status: "in_progress", conclusion: null }) };
+              },
+            }, transport),
+          };
+        },
+      });
+      expect(summary.examined).toBe(20);
+      expect(summary.completed).toBe(0);
+      expect(summary.gaveUp).toBe(0);
+    } finally {
+      fetchStub.restore();
+    }
+
+    // The run ceiling held exactly, which is what makes the claims below
+    // meaningful rather than vacuous.
+    expect(fetchStub.urls.length).toBe(CHECK_RECONCILE_MAX_REQUESTS);
+    // The ceiling stopped work BEFORE any create could leave.
+    expect(creates).toBe(0);
+
+    // No row was left claimed, leased or terminal by a refused operation, and
+    // no attempt was charged for one.
+    for (const row of rows) {
+      const after = await rawRow(db, row.id);
+      expect(after.holder).toBeNull();
+      expect(after.lease_until_ms).toBeNull();
+      expect(after.terminal_ms).toBeNull();
+      expect(after.attempts).toBe(row.before.attempts);
+      expect(after.recovery_state).toBe("pending");
+    }
+
+    // And the rows the run never even reached are byte-identical.
+    const unreached: string[] = [];
+    for (const row of rows) {
+      if (JSON.stringify(await rawRow(db, row.id)) === JSON.stringify(row.before)) unreached.push(row.id);
+    }
+    expect(unreached.length).toBeGreaterThan(0);
+  });
+
+  test("a per-row refusal mid-operation releases the claim without spending an attempt", async () => {
+    const db = seededDb();
+    const { attempt } = await claim(db);
+    const fetchStub = stubFetch();
+    try {
+      // The credential probe costs nothing; each adapter call costs 5, so the
+      // row's second operation is refused by the ≤6 per-row bound AFTER the
+      // claim was taken — the exact window finding 4 describes.
+      const summary = await run(db, {
+        now: () => T0,
+        credentials: scriptedCredentials(db, {
+          requestsPerCall: 5,
+          adopt: async () => ({ kind: "absent" }),
+          begin: async (identity) => ({ kind: "ready", remote: remoteFor(identity, { status: "in_progress", conclusion: null }) }),
+        }),
+      });
+      expect(summary.unconfirmed).toBe(0);
+      expect(summary.gaveUp).toBe(0);
+      expect(summary.errors).toBe(0);
+    } finally {
+      fetchStub.restore();
+    }
+    const row = await rawRow(db, attempt.identity.attemptId);
+    // Released, not withheld: due again immediately, no attempt charged.
+    expect(row.holder).toBeNull();
+    expect(row.lease_until_ms).toBeNull();
+    expect(row.attempts).toBe(0);
+    expect(row.recovery_state).toBe("pending");
+    expect(row.desired).not.toBe("in_progress"); // intent still persisted
+    // The load-bearing assertion: the selector sees the row due at the very
+    // clock instant the refusal happened. A withheld 120s recovery lease would
+    // hide it here, which is precisely the defect finding 4 names.
+    expect(await listCheckReconcileBatch(db, T0)).toHaveLength(1);
+    // …and a SECOND pass in the same window can claim it again immediately.
+    const reclaim = await claimCheckRecovery(db, attempt.identity.attemptId, "reconciler", T0);
+    expect(reclaim, "the released row must be immediately reclaimable").not.toBeNull();
+  });
+
+  test("a refusal inside ADOPTION releases the claim too", async () => {
+    const db = seededDb();
+    const { attempt } = await claim(db);
+    const fetchStub = stubFetch();
+    try {
+      // One more request than the row allows: the 7th is refused INSIDE the
+      // adoption call itself, so the refusal must unwind through that branch.
+      await run(db, {
+        now: () => T0,
+        credentials: scriptedCredentials(db, {
+          requestsPerCall: CHECK_ROW_MAX_REQUESTS + 1,
+          adopt: async () => ({ kind: "absent" }),
+        }),
+      });
+    } finally {
+      fetchStub.restore();
+    }
+    const row = await rawRow(db, attempt.identity.attemptId);
+    expect(row.holder).toBeNull();
+    expect(row.lease_until_ms).toBeNull();
+    expect(row.attempts).toBe(0);
+    expect(row.recovery_state).toBe("pending");
+    expect(await listCheckReconcileBatch(db, T0)).toHaveLength(1);
+  });
+
+  test("a refusal inside the owned-run FETCH releases the claim too", async () => {
+    const db = seededDb();
+    const { attempt } = await claim(db);
+    // A known run id: adoption is skipped, so the fetch is the first operation.
+    db.raw
+      .prepare(`UPDATE review_checks SET create_state = 'known', check_run_id = 321 WHERE id = ?`)
+      .run(attempt.identity.attemptId);
+    const fetchStub = stubFetch();
+    try {
+      await run(db, {
+        now: () => T0,
+        credentials: scriptedCredentials(db, {
+          requestsPerCall: CHECK_ROW_MAX_REQUESTS + 1,
+          fetch: async () => ({ kind: "unavailable", reason: "should not be reached" }),
+        }),
+      });
+    } finally {
+      fetchStub.restore();
+    }
+    const row = await rawRow(db, attempt.identity.attemptId);
+    expect(row.holder).toBeNull();
+    expect(row.lease_until_ms).toBeNull();
+    expect(row.attempts).toBe(0);
+    expect(row.recovery_state).toBe("pending");
+    expect(row.check_run_id).toBe(321); // identity retained
+    expect(await listCheckReconcileBatch(db, T0)).toHaveLength(1);
+  });
+
+  test("a refusal inside the terminal UPDATE releases the claim too", async () => {
+    const db = seededDb();
+    const { attempt } = await claim(db);
+    // Known run id and a non-terminal remote read, so the flow reaches the
+    // update — where the 7th request is refused.
+    db.raw
+      .prepare(`UPDATE review_checks SET create_state = 'known', check_run_id = 321 WHERE id = ?`)
+      .run(attempt.identity.attemptId);
+    const fetchStub = stubFetch();
+    try {
+      await run(db, {
+        now: () => T0,
+        credentials: scriptedCredentials(db, {
+          // adoption is skipped (id known): fetch spends 1, the update the rest.
+          requestsPerCall: CHECK_ROW_MAX_REQUESTS,
+          fetch: async (identity) => ({
+            kind: "found",
+            remote: remoteFor(identity, { id: 321, status: "in_progress", conclusion: null }),
+          }),
+        }),
+      });
+    } finally {
+      fetchStub.restore();
+    }
+    const row = await rawRow(db, attempt.identity.attemptId);
+    expect(row.holder).toBeNull();
+    expect(row.lease_until_ms).toBeNull();
+    expect(row.attempts).toBe(0);
+    expect(row.recovery_state).toBe("pending");
+    expect(row.observed).toBe("unknown");
+    expect(row.check_run_id).toBe(321);
+    expect(await listCheckReconcileBatch(db, T0)).toHaveLength(1);
+  });
+});
+
+describe("operator retry accepts a recorded in-progress observation (L2 fix 1 finding 5)", () => {
+  test("an in_progress observation survives give-up and is reopened by retry with its identity intact", async () => {
+    const db = seededDb();
+    const { attempt } = await claim(db);
+    const id = attempt.identity.attemptId;
+    // The lane observed the run as running (a validated non-terminal payload),
+    // then exhausted its attempts and gave up. That durable `in_progress`
+    // observation must not strand the row — it is exactly the "external run
+    // still pending" state the spec's operator retry exists for.
+    db.raw
+      .prepare(`UPDATE review_checks SET create_state = 'known', check_run_id = 321, observed = 'in_progress', recovery_state = 'local-error', terminal_ms = ?, attempts = ? WHERE id = ?`)
+      .run(T0, CHECK_MAX_ATTEMPTS, id);
+
+    // A live lease is still refused.
+    const reacquired = await claimCheckRecovery(db, id, "reconciler", T0 - 1);
+    expect(reacquired).toBeNull();
+
+    expect(await retryCheckRecovery(db, { scope: SCOPE, attemptId: id, nowMs: T0 })).toBe(true);
+    const row = await rawRow(db, id);
+    expect(row.recovery_state).toBe("pending");
+    expect(row.terminal_ms).toBeNull();
+    expect(row.attempts).toBe(0);
+    expect(row.check_run_id).toBe(321); // remote identity retained
+    expect(row.external_id).toBe(attempt.identity.externalId);
+    expect(row.generation).toBe(attempt.identity.generation);
+    // The observation is RETAINED, never rewritten to a fake completion.
+    expect(row.observed).toBe("in_progress");
+    // …and the row is a selector candidate again.
+    expect(await listCheckReconcileBatch(db, T0)).toHaveLength(1);
+  });
+
+  test("a TERMINAL observation is still refused (settled evidence is not reopened)", async () => {
+    const db = seededDb();
+    const { attempt } = await claim(db);
+    const id = attempt.identity.attemptId;
+    db.raw
+      .prepare(`UPDATE review_checks SET observed = 'success', recovery_state = 'done', terminal_ms = ? WHERE id = ?`)
+      .run(T0, id);
+    expect(await retryCheckRecovery(db, { scope: SCOPE, attemptId: id, nowMs: T0 + 1 })).toBe(false);
+    const row = await rawRow(db, id);
+    expect(row.observed).toBe("success");
+    expect(row.terminal_ms).toBe(T0);
+    expect(row.recovery_state).toBe("done");
   });
 });

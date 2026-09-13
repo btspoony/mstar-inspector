@@ -58,12 +58,14 @@ import {
   type CheckConclusion,
   type CheckRemote,
   deferCheckRecovery,
+  getCheckAttempt,
   getCheckOwnership,
   listCheckReconcileBatch,
   markCheckLocalError,
   readPublicationProof,
   recordCheckObservation,
   reenableChecksForApps,
+  releaseCheckClaim,
   setCheckDesired,
   suspendCheckRecovery,
 } from "../store/review-checks";
@@ -139,7 +141,18 @@ export type CheckTransport = ReconcileTransport;
 export type CheckCredentialReason = "missing" | "deleted" | "disabled" | "decrypt-failed" | "identity-mismatch";
 
 export type CheckCredentialResolution =
-  | { kind: "ok"; adapter: ChecksAdapter }
+  | {
+      kind: "ok";
+      adapter: ChecksAdapter;
+      /**
+       * `github_apps.review_enabled = 0` (spec §7.6 pause / kill switch). A
+       * paused App may still READ — adoption and terminalization of a run that
+       * already exists — but must never create a Check that was never sent, so
+       * the lane gates `beginCheck` on this flag rather than refusing
+       * credentials outright.
+       */
+      paused: boolean;
+    }
   | { kind: "unavailable"; reason: CheckCredentialReason };
 
 /**
@@ -175,6 +188,7 @@ type CheckRoutingRow = {
   github_app_id: number;
   status: string;
   deleted_at: string | null;
+  review_enabled: number;
   private_key_enc: string;
 };
 
@@ -182,7 +196,8 @@ async function checkRoutingRow(db: D1Like, appId: string, installationId: number
   return db
     .prepare(
       `SELECT ga.id AS id, ga.github_app_id AS github_app_id, ga.status AS status,
-              ga.deleted_at AS deleted_at, ga.private_key_enc AS private_key_enc
+              ga.deleted_at AS deleted_at, ga.review_enabled AS review_enabled,
+              ga.private_key_enc AS private_key_enc
        FROM app_installations ai
        JOIN github_apps ga ON ga.id = ai.app_id
        WHERE ai.app_id = ? AND ai.installation_id = ?`,
@@ -199,10 +214,10 @@ async function checkRoutingRow(db: D1Like, appId: string, installationId: number
  * routed `github_app_id` is the App these credentials actually authenticate
  * as before any Check request is allowed.
  *
- * Pause (`review_enabled = 0`) is deliberately NOT a gate here: the Check
- * lane finishes work for attempts that already exist, exactly like M8's
- * resolution retry, and a frozen review schedule is not a reason to strand a
- * run that is already in flight.
+ * Pause (`review_enabled = 0`) does NOT make the pair unusable — credentials
+ * are still minted so the lane can adopt and terminalize a Check that already
+ * exists — but the flag rides the resolution because §7.6 forbids a paused App
+ * from producing a NEW Check. The lane, not this factory, owns that gate.
  */
 export const productionCheckCredentials: CheckCredentialFactory = async ({ db, env, scope, now, transport }) => {
   const row = await checkRoutingRow(db, scope.appId, scope.installationId);
@@ -228,7 +243,7 @@ export const productionCheckCredentials: CheckCredentialFactory = async ({ db, e
     }
     const adapter = commenter.checks;
     if (adapter === undefined) return { kind: "unavailable", reason: "decrypt-failed" };
-    return { kind: "ok", adapter };
+    return { kind: "ok", adapter, paused: row.review_enabled === 0 };
   } catch {
     // missing key / tampered envelope — fail closed, never a mutation
     return { kind: "unavailable", reason: "decrypt-failed" };
@@ -493,6 +508,15 @@ async function reenableHealthyAppChecks(db: D1Like, nowMs: number, log: CheckRec
  * One due attempt, §7.11.2 steps 1–5 in order. Ownership is only ever granted
  * by `claimCheckRecovery`; everything after it is fenced on that lease, and
  * every exit leaves the row in a state its next run can continue from.
+ *
+ * Two exits deliberately give the claim BACK (`releaseCheckClaim`) instead of
+ * settling the row as a failed attempt, because in neither case did a recovery
+ * action actually run:
+ *   - the run's request budget refused a request before dispatch, and
+ *   - a paused App's never-sent attempt has no legal create.
+ * Both leave every durable field untouched (attempts, due time, IDs, desired/
+ * observed, error), so the row is immediately selector-due again rather than
+ * withheld behind a 120s lease it never used (§7.11.2 step 5).
  */
 async function reconcileCheckAttempt(
   env: ScheduledEnv,
@@ -514,15 +538,26 @@ async function reconcileCheckAttempt(
   const resolved = await credentialsForPair(db, env, scope, now, budget, transport, credentials, credentialCache, log, summary);
   if (resolved.kind !== "ok") return;
 
-  // 1. Reacquire: a conditional UPDATE repeating eligibility that increments
-  //    the epoch. A live lease — another invocation's or this holder's
-  //    unexpired one — is never taken, and nothing is stamped or spent.
+  // 1. Reacquire: a conditional UPDATE repeating the SELECTOR'S FULL
+  //    eligibility that increments the epoch. A live lease — another
+  //    invocation's or this holder's unexpired one — is never taken, and a row
+  //    that stopped being due after selection (a forward backoff, the attempt
+  //    cap, an `in_progress` still inside its execution deadline) is refused
+  //    here. Nothing is stamped or spent on refusal.
   const claimed = await claimCheckRecovery(db, attemptId, HOLDER, now());
   if (claimed === null) return;
   const lease: Lease = claimed;
 
   const owned = await getCheckOwnership(db, attemptId, lease, now());
   if (owned === null) return; // fence lost between claim and read
+
+  // Re-read against the CLAIM, not the selection: the decision below must use
+  // the eligibility the claim actually proved, so a row whose attempts or due
+  // time moved after selection cannot feed a stale `attempts` into the
+  // backoff/give-up arithmetic.
+  const current = await getCheckAttempt(db, attemptId);
+  if (current === null) return;
+  const attemptsBefore = current.attempts;
 
   // 2. Proof by exact App/scope/SHA, preferring this attempt's publication id.
   //    M8's lane precedes this one and owns read-only discovery; the Check
@@ -535,10 +570,15 @@ async function reconcileCheckAttempt(
   // send reads, so the frozen text cannot be swapped after this point.
   await setCheckDesired(db, attemptId, lease, conclusion, proof?.publicationId ?? null, now());
   const intent = await getCheckOwnership(db, attemptId, lease, now());
-  // Nothing terminal to push (the intent write did not land, or the row is
-  // still `in_progress`): leave it to the next run rather than update a run
-  // with a conclusion the row does not carry.
-  if (intent === null || intent.desired === "in_progress") return;
+  if (intent === null) return;
+  // A row whose persisted intent is still `in_progress` has nothing terminal
+  // to push — `setCheckDesired` refuses to move it backwards and
+  // `completeCheck` cannot carry it. That is the paused-App shape: give the
+  // claim back so the row stays due without spending an attempt.
+  if (intent.desired === "in_progress") {
+    await releaseCheckClaim(db, attemptId, lease, now());
+    return;
+  }
   if (intent.desiredTitle === null || intent.desiredSummary === null) return;
 
   const frozen: CheckConclusion = {
@@ -553,8 +593,13 @@ async function reconcileCheckAttempt(
   if (checkRunId === null) {
     // Adoption runs FIRST, always (spec §7.11.2 step 3): it is the only
     // honest way to answer "did a create land?" without minting a second run.
+    // Adoption is READ-ONLY, so it is legal even for a paused App — §7.6 lets
+    // a paused Check be discovered, it only forbids producing a new one.
     const adopted = await resolved.adapter.adoptCheckRun({ identity: intent.identity });
-    if (budget.refused) return; // deferral: nothing mutated, no attempt spent
+    if (budget.refused) {
+      await releaseCheckClaim(db, attemptId, lease, now());
+      return;
+    }
     if (adopted.kind === "found") {
       // An adopted run is attached only through the store's legal transition,
       // which requires a create to have been attempted. A `not-sent` row that
@@ -564,7 +609,7 @@ async function reconcileCheckAttempt(
       const attached = await attachCheckRunId(db, attemptId, lease, adopted.remote.id, now());
       if (!attached) {
         await settleFailedAttempt(
-          db, now, row, lease,
+          db, now, attemptsBefore, row, lease,
           `a matching run exists but the attempt's durable create state is '${intent.createState}' — attachment refused`,
           log, summary,
         );
@@ -578,16 +623,31 @@ async function reconcileCheckAttempt(
       // that case stays recoverable rather than creating again.
       if (intent.createState !== "not-sent") {
         await settleFailedAttempt(
-          db, now, row, lease,
+          db, now, attemptsBefore, row, lease,
           "a create may already have been sent and no run is observable — read-only adoption only",
           log, summary,
         );
         return;
       }
+      // Pause / kill switch (spec §7.6): a paused App performs NO new Check.
+      // The walk above proved the run was never created, so there is nothing
+      // to terminalize either — the honest outcome is to leave the work due,
+      // with the claim released and no attempt spent, until the App resumes.
+      if (resolved.paused) {
+        await releaseCheckClaim(db, attemptId, lease, now());
+        log.info(
+          { event: "ops_check_reconcile_paused_deferral", detail: `attempt=${attemptId}` },
+          "paused App holds a never-sent Check — left due, no create",
+        );
+        return;
+      }
       const ready = await resolved.adapter.beginCheck({ identity: intent.identity, lease });
-      if (budget.refused) return;
+      if (budget.refused) {
+        await releaseCheckClaim(db, attemptId, lease, now());
+        return;
+      }
       if (ready.kind === "unavailable") {
-        await settleFailedAttempt(db, now, row, lease, ready.reason, log, summary);
+        await settleFailedAttempt(db, now, attemptsBefore, row, lease, ready.reason, log, summary);
         return;
       }
       // Attach immediately, before any further request: if a later step is
@@ -595,7 +655,7 @@ async function reconcileCheckAttempt(
       const attached = await attachCheckRunId(db, attemptId, lease, ready.remote.id, now());
       if (!attached) {
         await settleFailedAttempt(
-          db, now, row, lease,
+          db, now, attemptsBefore, row, lease,
           "the created run could not be attached to this attempt's durable state",
           log, summary,
         );
@@ -606,7 +666,7 @@ async function reconcileCheckAttempt(
       // `incomplete`/`ambiguous`: the walk could not PROVE absence, so no
       // create is legal and the row stays due with its attempt deferred.
       await settleFailedAttempt(
-        db, now, row, lease,
+        db, now, attemptsBefore, row, lease,
         `adoption is ${adopted.kind} — absence unproven, no create`,
         log, summary,
       );
@@ -617,22 +677,25 @@ async function reconcileCheckAttempt(
   // 4. Terminalize the owned run and record `observed` only from a validated
   //    response that matches the persisted intent.
   const fetched = await resolved.adapter.fetchCheckRun({ identity: intent.identity, checkRunId });
-  if (budget.refused) return;
+  if (budget.refused) {
+    await releaseCheckClaim(db, attemptId, lease, now());
+    return;
+  }
   if (fetched.kind === "unavailable") {
-    await settleFailedAttempt(db, now, row, lease, fetched.reason, log, summary);
+    await settleFailedAttempt(db, now, attemptsBefore, row, lease, fetched.reason, log, summary);
     return;
   }
   if (fetched.kind === "absent") {
     // The recorded remote id is RETAINED (never cleared to create a lookalike);
     // a vanished run is reported honestly and retried under the same identity.
-    await settleFailedAttempt(db, now, row, lease, "the recorded check run is absent remotely", log, summary);
+    await settleFailedAttempt(db, now, attemptsBefore, row, lease, "the recorded check run is absent remotely", log, summary);
     return;
   }
   if (fetched.remote.status === "completed") {
     const recorded = await recordTerminal(db, attemptId, lease, fetched.remote, frozen, now, summary);
     if (recorded === "mismatch") {
       await settleFailedAttempt(
-        db, now, row, lease,
+        db, now, attemptsBefore, row, lease,
         `remote run concluded ${fetched.remote.conclusion ?? "null"}, persisted intent is ${frozen.desired}`,
         log, summary,
       );
@@ -646,17 +709,20 @@ async function reconcileCheckAttempt(
     checkRunId,
     conclusion: frozen,
   });
-  if (budget.refused) return;
+  if (budget.refused) {
+    await releaseCheckClaim(db, attemptId, lease, now());
+    return;
+  }
   if (completed.kind === "unavailable") {
     // §7.11.2 step 4: preserve desired and actual observed, stay
     // `remote-unconfirmed`, back off, release the lease.
-    await settleFailedAttempt(db, now, row, lease, completed.reason, log, summary);
+    await settleFailedAttempt(db, now, attemptsBefore, row, lease, completed.reason, log, summary);
     return;
   }
   const recorded = await recordTerminal(db, attemptId, lease, completed.remote, frozen, now, summary);
   if (recorded === "mismatch") {
     await settleFailedAttempt(
-      db, now, row, lease,
+      db, now, attemptsBefore, row, lease,
       "the validated response did not match the persisted terminal intent",
       log, summary,
     );
@@ -692,10 +758,15 @@ async function recordTerminal(
  * cap, a terminal `local-error` with the structured App/scope/work-ID line.
  * The row, its external id and any known remote run id are RETAINED — nothing
  * here drops work or claims the remote finished.
+ *
+ * `attemptsBefore` is the count read back through the CLAIM's fence, never the
+ * selected row's copy: a row whose attempts moved between selection and claim
+ * must not feed a stale number into the ladder or the cap test.
  */
 async function settleFailedAttempt(
   db: D1Like,
   now: () => number,
+  attemptsBefore: number,
   row: CheckAttempt,
   lease: Lease,
   reason: string,
@@ -703,7 +774,7 @@ async function settleFailedAttempt(
   summary: CheckReconcileSummary,
 ): Promise<void> {
   const attemptId = row.identity.attemptId;
-  const attemptsAfter = row.attempts + 1; // this recovery claimed exactly one
+  const attemptsAfter = attemptsBefore + 1; // this recovery claimed exactly one
   if (attemptsAfter >= CHECK_MAX_ATTEMPTS) {
     const line = giveUpLine(row.identity.scope, attemptId, attemptsAfter, reason);
     const marked = await markCheckLocalError(db, attemptId, lease, line, now());

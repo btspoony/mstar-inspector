@@ -60,6 +60,7 @@ import {
   readPublicationProof,
   recordCheckObservation,
   reenableChecksForApps,
+  releaseCheckClaim,
   retryCheckRecovery,
   type Scope,
   setCheckCreateState,
@@ -686,6 +687,84 @@ describe("fenced mutations (spec §7.9)", () => {
 });
 
 describe("claimCheckRecovery (spec §7.9/§7.11.2)", () => {
+  test("the claim repeats the FULL selector predicate, not just liveness", async () => {
+    const db = seededDb();
+    const { attempt, lease } = await claim(db);
+    const id = attempt.identity.attemptId;
+    const beforeDeadline = DEADLINE - 1;
+
+    // A free lease alone is not enough: the row still wants `in_progress` and
+    // its execution deadline has not arrived, so it is NOT due.
+    expect(
+      await deferCheckRecovery(db, id, lease, { state: "pending", nextAttemptMs: 0, reason: "release" }, T0),
+    ).toBe(true);
+    expect(await claimCheckRecovery(db, id, "reconciler", beforeDeadline)).toBeNull();
+
+    // At the execution deadline it becomes due (the same rule the selector uses).
+    expect(await claimCheckRecovery(db, id, "reconciler", DEADLINE)).not.toBeNull();
+
+    // With a terminal intent instead, a future backoff withholds it.
+    const second = await claim(db, { action: "second" });
+    const sid = second.attempt.identity.attemptId;
+    await setCheckDesired(db, sid, second.lease, CONCLUSION, null, T0);
+    expect(
+      await deferCheckRecovery(db, sid, second.lease, { state: "pending", nextAttemptMs: 0, reason: "release" }, T0),
+    ).toBe(true);
+    db.raw.prepare(`UPDATE review_checks SET next_attempt_ms = ? WHERE id = ?`).run(DEADLINE + 1_000, sid);
+    expect(await claimCheckRecovery(db, sid, "reconciler", DEADLINE)).toBeNull();
+    expect(await claimCheckRecovery(db, sid, "reconciler", DEADLINE + 1_000)).not.toBeNull();
+  });
+
+  test("the claim refuses a row at the attempt cap", async () => {
+    const db = seededDb();
+    const { attempt, lease } = await claim(db);
+    const id = attempt.identity.attemptId;
+    await setCheckDesired(db, id, lease, CONCLUSION, null, T0);
+    await deferCheckRecovery(db, id, lease, { state: "pending", nextAttemptMs: T0, reason: "release" }, T0);
+    db.raw.prepare(`UPDATE review_checks SET attempts = ? WHERE id = ?`).run(CHECK_MAX_ATTEMPTS, id);
+    expect(await claimCheckRecovery(db, id, "reconciler", DEADLINE + 1)).toBeNull();
+    // A generous cap is an operator decision, not this claim's default.
+    expect(await claimCheckRecovery(db, id, "reconciler", DEADLINE + 1, CHECK_MAX_ATTEMPTS + 1)).not.toBeNull();
+  });
+
+  test("releaseCheckClaim gives a claim back with nothing else moved", async () => {
+    const db = seededDb();
+    const { attempt, lease } = await claim(db);
+    const id = attempt.identity.attemptId;
+    await setCheckDesired(db, id, lease, CONCLUSION, null, T0);
+    await deferCheckRecovery(db, id, lease, { state: "pending", nextAttemptMs: T0, reason: "release" }, T0);
+    const recovery = await claimCheckRecovery(db, id, "reconciler", DEADLINE + 1);
+    expect(recovery).not.toBeNull();
+    const before = await rawRow(db, id);
+
+    expect(await releaseCheckClaim(db, id, recovery!, DEADLINE + 1)).toBe(true);
+    const after = await rawRow(db, id);
+    expect(after.holder).toBeNull();
+    expect(after.lease_until_ms).toBeNull();
+    // Everything a budget deferral must preserve is untouched.
+    expect(after.attempts).toBe(before.attempts);
+    expect(after.next_attempt_ms).toBe(before.next_attempt_ms);
+    expect(after.desired).toBe(before.desired);
+    expect(after.observed).toBe(before.observed);
+    expect(after.last_error).toBe(before.last_error);
+    expect(after.publication_id).toBe(before.publication_id);
+    // Immediately due and immediately reclaimable again.
+    expect(await listCheckReconcileBatch(db, DEADLINE + 1)).toHaveLength(1);
+    expect(await claimCheckRecovery(db, id, "reconciler", DEADLINE + 1)).not.toBeNull();
+  });
+
+  test("releaseCheckClaim is a no-op once the lease has moved", async () => {
+    const db = seededDb();
+    const { attempt, lease } = await claim(db);
+    const id = attempt.identity.attemptId;
+    await setCheckDesired(db, id, lease, CONCLUSION, null, T0);
+    await deferCheckRecovery(db, id, lease, { state: "pending", nextAttemptMs: T0, reason: "release" }, T0);
+    const recovery = await claimCheckRecovery(db, id, "reconciler", DEADLINE + 1);
+    const stale: Lease = { holder: "reconciler", epoch: recovery!.epoch - 1, untilMs: recovery!.untilMs };
+    expect(await releaseCheckClaim(db, id, stale, DEADLINE + 1)).toBe(false);
+    expect((await rawRow(db, id)).holder).toBe("reconciler");
+  });
+
   test("a live holder's lease is never taken", async () => {
     const db = seededDb();
     const { attempt } = await claim(db);
@@ -719,6 +798,10 @@ describe("claimCheckRecovery (spec §7.9/§7.11.2)", () => {
     const db = seededDb();
     const { attempt, lease } = await claim(db);
     const id = attempt.identity.attemptId;
+    // A terminal intent is what makes an attempt recovery-eligible at all
+    // (§7.11.2: a row still wanting `in_progress` waits for its execution
+    // deadline). Release the lease on top of that.
+    await setCheckDesired(db, id, lease, CONCLUSION, null, T0);
     expect(await deferCheckRecovery(db, id, lease, { state: "pending", nextAttemptMs: T0, reason: "release" }, T0)).toBe(true);
     const reacquired = await claimCheckRecovery(db, id, "reconciler", T0 + 1);
     expect(reacquired).toEqual({ holder: "reconciler", epoch: 2, untilMs: T0 + 1 + CHECK_RECOVERY_LEASE_MS });
@@ -896,8 +979,16 @@ describe("tenant and App isolation (spec §7.0)", () => {
 
   test("suspend/reenable bind the exact (app_id, installation_id) pair", async () => {
     const db = seededDb();
-    await claim(db);
-    await claim(db, { scope: { ...SCOPE, appId: OTHER_APP_ID }, githubAppId: OTHER_NUMERIC_APP_ID, holder: "run-o" });
+    // Suspension is fenced to FREE rows, so both rows must be released (and
+    // carry a terminal intent) before they are suspendable at all.
+    for (const [index, input] of [
+      {},
+      { scope: { ...SCOPE, appId: OTHER_APP_ID }, githubAppId: OTHER_NUMERIC_APP_ID, holder: "run-o" },
+    ].entries()) {
+      const { attempt, lease } = await claim(db, input as Partial<ClaimInput>);
+      await setCheckDesired(db, attempt.identity.attemptId, lease, CONCLUSION, null, T0);
+      await deferCheckRecovery(db, attempt.identity.attemptId, lease, { state: "pending", nextAttemptMs: T0, reason: "release" }, T0 + index);
+    }
     expect(await suspendCheckRecovery(db, { appId: APP_ID, installationId: SCOPE.installationId }, "disabled", T0)).toBe(1);
     const suspended = db.raw
       .prepare(`SELECT app_id, installation_id FROM review_checks WHERE recovery_state = 'suspended'`)
