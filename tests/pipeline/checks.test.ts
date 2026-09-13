@@ -29,7 +29,6 @@
  *     @octokit/rest instance exposes no second auth path
  */
 import { describe, expect, test } from "bun:test";
-import { Octokit } from "@octokit/rest";
 import {
   claimAttempt,
   attachCheckRunId,
@@ -58,8 +57,10 @@ import {
   type ChecksUpdateParams,
 } from "../../src/pipeline/checks";
 import {
+  createReviewCommenter,
   REVIEW_WRITE_PERMISSIONS,
   SANDBOX_READ_PERMISSIONS,
+  type AuthSeam,
 } from "../../src/pipeline/comment";
 import { createMigratedTestD1, type TestD1 } from "../store/helpers";
 
@@ -87,6 +88,7 @@ async function claimedAttempt(
   db: TestD1,
   overrides: Partial<Parameters<typeof claimAttempt>[1]> = {},
 ): Promise<{ attempt: CheckAttempt; lease: Lease }> {
+  CLOCK = T0;
   const result = await claimAttempt(db, {
     scope: SCOPE,
     githubAppId: GITHUB_APP_ID,
@@ -168,8 +170,10 @@ function fakeChecks(respond: Partial<{
   return { octokit, creates, updates, lists };
 }
 
+/** The transaction clock every test drives explicitly (spec §7.0). */
+let CLOCK = T0;
 function adapterFor(db: TestD1, octokit: ChecksOctokit | null) {
-  return createChecksAdapter({ db, getOctokit: async () => octokit });
+  return createChecksAdapter({ db, nowMs: () => CLOCK, getOctokit: async () => octokit });
 }
 
 const SUCCESS: CheckConclusion = {
@@ -201,6 +205,32 @@ describe("beginCheck — the create contract", () => {
     expect("id" in raw).toBe(false);
     expect("check_run_id" in raw).toBe(false);
     expect("output" in raw).toBe(false);
+  });
+
+  test("`sending` is persisted BEFORE the create request leaves", async () => {
+    const db = seededDb();
+    const { attempt, lease } = await claimedAttempt(db);
+    let stateAtSend: string | undefined;
+    const fake = fakeChecks({
+      create: () => {
+        // Read the durable row at the moment GitHub would receive the request:
+        // a lost response is only recoverable if this already says `sending`.
+        stateAtSend = String((db.raw.prepare(`SELECT create_state FROM review_checks WHERE id = ?`).get(attempt.identity.attemptId) as { create_state: string }).create_state);
+        return runPayload(attempt.identity);
+      },
+    });
+    expect((await adapterFor(db, fake.octokit).beginCheck({ identity: attempt.identity, lease })).kind).toBe("ready");
+    expect(stateAtSend).toBe("sending");
+  });
+
+  test("a create that never reached the wire leaves the row unsent", async () => {
+    const db = seededDb();
+    const { attempt, lease } = await claimedAttempt(db);
+    // No client at all: nothing was attempted, so `not-sent` must survive —
+    // marking it `sending` would strand the attempt as possibly-sent.
+    const result = await adapterFor(db, null).beginCheck({ identity: attempt.identity, lease });
+    expect(result.kind).toBe("unavailable");
+    expect(await runState(db, attempt)).toBe("not-sent");
   });
 
   test("a matching response yields the remote evidence, not an opinion", async () => {
@@ -243,6 +273,7 @@ describe("beginCheck — the create contract", () => {
     const { attempt, lease } = await claimedAttempt(db);
     const adapter = createChecksAdapter({
       db,
+      nowMs: () => CLOCK,
       getOctokit: async () => {
         throw new Error("grant mint refused");
       },
@@ -322,7 +353,7 @@ describe("beginCheck — the create contract", () => {
   test("an attempt that already owns a run is never created again", async () => {
     const db = seededDb();
     const { attempt, lease } = await claimedAttempt(db);
-    expect(await attachCheckRunId(db, attempt.identity.attemptId, lease, 4242, T0)).toBe(true);
+    await attachedRun(db, attempt, lease, 4242);
     const fake = fakeChecks({ create: () => runPayload(attempt.identity) });
     const result = await adapterFor(db, fake.octokit).beginCheck({ identity: attempt.identity, lease });
     expect(result.kind).toBe("unavailable");
@@ -355,6 +386,133 @@ describe("beginCheck — the create contract", () => {
 let attempt0!: { attempt: CheckAttempt; lease: Lease };
 const scopeForAttempt0 = await seededDb();
 attempt0 = await claimedAttempt(scopeForAttempt0);
+
+describe("persisted scope identity (spec §7.6 / §7.9)", () => {
+  /**
+   * A valid lease proves WHO holds the attempt, not WHICH scope it belongs to.
+   * Every scope-bound operation must therefore compare the caller's identity
+   * against the persisted row before resolving a client or issuing a request:
+   * otherwise a lease-holder could aim the purpose-scoped client at another
+   * installation or repository while every Check field still matched.
+   */
+  const scopeChanges: [string, Partial<CheckIdentity["scope"]>][] = [
+    ["appId", { appId: "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee" }],
+    ["installationId", { installationId: 999 }],
+    ["owner", { owner: "other-owner" }],
+    ["repo", { repo: "other-repo" }],
+    ["prNumber", { prNumber: 43 }],
+  ];
+
+  for (const [label, change] of scopeChanges) {
+    test(`beginCheck refuses a changed scope (${label}) and issues no request`, async () => {
+      const db = seededDb();
+      const { attempt, lease } = await claimedAttempt(db);
+      const fake = fakeChecks({ create: () => runPayload(attempt.identity) });
+      const result = await adapterFor(db, fake.octokit).beginCheck({
+        identity: { ...attempt.identity, scope: { ...attempt.identity.scope, ...change } },
+        lease,
+      });
+      expect(result.kind).toBe("unavailable");
+      expect(fake.creates).toHaveLength(0);
+    });
+
+    test(`adoptCheckRun refuses a changed scope (${label}) and issues no request`, async () => {
+      const db = seededDb();
+      const { attempt } = await claimedAttempt(db);
+      const fake = fakeChecks({});
+      const result = await adapterFor(db, fake.octokit).adoptCheckRun({
+        identity: { ...attempt.identity, scope: { ...attempt.identity.scope, ...change } },
+      });
+      expect(result.kind).toBe("incomplete");
+      expect(fake.lists).toHaveLength(0);
+    });
+
+    test(`fetchCheckRun refuses a changed scope (${label}) and issues no request`, async () => {
+      const db = seededDb();
+      const { attempt } = await claimedAttempt(db);
+      const fake = fakeChecks({ get: () => runPayload(attempt.identity, { id: 4242 }) });
+      const result = await adapterFor(db, fake.octokit).fetchCheckRun({
+        identity: { ...attempt.identity, scope: { ...attempt.identity.scope, ...change } },
+        checkRunId: 4242,
+      });
+      expect(result.kind).toBe("unavailable");
+    });
+  }
+
+  test("a changed generation or external id is refused too", async () => {
+    const db = seededDb();
+    const { attempt, lease } = await claimedAttempt(db);
+    const fake = fakeChecks({ create: () => runPayload(attempt.identity) });
+    const adapter = adapterFor(db, fake.octokit);
+    expect((await adapter.beginCheck({
+      identity: { ...attempt.identity, generation: attempt.identity.generation + 1 },
+      lease,
+    })).kind).toBe("unavailable");
+    expect((await adapter.beginCheck({
+      identity: { ...attempt.identity, externalId: "mstar-check:v1:other:1" },
+      lease,
+    })).kind).toBe("unavailable");
+    expect(fake.creates).toHaveLength(0);
+  });
+
+  test("routing uses the PERSISTED scope, not a caller-supplied one", async () => {
+    const db = seededDb();
+    const { attempt, lease } = await claimedAttempt(db);
+    const asked: { installationId: number; repo: string }[] = [];
+    const fake = fakeChecks({ create: () => runPayload(attempt.identity) });
+    const adapter = createChecksAdapter({
+      db,
+      nowMs: () => CLOCK,
+      getOctokit: async ({ scope }) => {
+        asked.push({ installationId: scope.installationId, repo: scope.repo });
+        return fake.octokit;
+      },
+    });
+    expect((await adapter.beginCheck({ identity: attempt.identity, lease })).kind).toBe("ready");
+    expect(asked).toEqual([{ installationId: SCOPE.installationId, repo: SCOPE.repo }]);
+  });
+});
+
+describe("the live-lease send fence (spec §7.9)", () => {
+  test("an EXPIRED lease with otherwise-exact fields sends nothing and mutates nothing", async () => {
+    const db = seededDb();
+    const { attempt, lease } = await claimedAttempt(db);
+    const id = attempt.identity.attemptId;
+    const fake = fakeChecks({ create: () => runPayload(attempt.identity) });
+    const adapter = adapterFor(db, fake.octokit);
+
+    // The exact persisted lease triple, but time has passed its `untilMs`. An
+    // expired holder must not create a remote run merely because recovery has
+    // not yet bumped the epoch.
+    CLOCK = lease.untilMs + 1;
+    const result = await adapter.beginCheck({ identity: attempt.identity, lease });
+    expect(result.kind).toBe("unavailable");
+    expect(fake.creates).toHaveLength(0);
+    expect((await rowOf(db, attempt)).check_run_id).toBeNull();
+
+    // Nothing local may be written under the expired lease either.
+    expect(await setCheckCreateState(db, id, lease, "sending", undefined, CLOCK)).toBe(false);
+    expect((await rowOf(db, attempt)).create_state).toBe("not-sent");
+  });
+
+  test("an expired lease cannot complete a run it previously owned", async () => {
+    const db = seededDb();
+    const { attempt, lease } = await claimedAttempt(db);
+    await attachedRun(db, attempt, lease, 4242);
+    expect(await setCheckDesired(db, attempt.identity.attemptId, lease, SUCCESS, null, T0)).toBe(true);
+    const fake = fakeChecks({ update: () => runPayload(attempt.identity, { status: "completed", conclusion: "success" }) });
+
+    CLOCK = lease.untilMs + 1;
+    const result = await adapterFor(db, fake.octokit).completeCheck({
+      identity: attempt.identity,
+      lease,
+      checkRunId: 4242,
+      conclusion: SUCCESS,
+    });
+    expect(result.kind).toBe("unavailable");
+    expect(fake.updates).toHaveLength(0);
+  });
+});
 
 describe("adoptCheckRun — the adoption fences", () => {
   test("adopts ONLY the run whose external id, App id, SHA and name all match", async () => {
@@ -499,7 +657,7 @@ describe("completeCheck — the terminal send", () => {
   test("sends the frozen intent and returns the validated terminal evidence", async () => {
     const db = seededDb();
     const { attempt, lease } = await claimedAttempt(db);
-    await attachCheckRunId(db, attempt.identity.attemptId, lease, 4242, T0);
+    await attachedRun(db, attempt, lease, 4242);
     expect(await setCheckDesired(db, attempt.identity.attemptId, lease, SUCCESS, null, T0)).toBe(true);
     const fake = fakeChecks({
       update: () => runPayload(attempt.identity, { status: "completed", conclusion: "success" }),
@@ -522,7 +680,7 @@ describe("completeCheck — the terminal send", () => {
   test("a run id the attempt never persisted is refused before any request", async () => {
     const db = seededDb();
     const { attempt, lease } = await claimedAttempt(db);
-    await attachCheckRunId(db, attempt.identity.attemptId, lease, 4242, T0);
+    await attachedRun(db, attempt, lease, 4242);
     await setCheckDesired(db, attempt.identity.attemptId, lease, SUCCESS, null, T0);
     const fake = fakeChecks({ update: () => runPayload(attempt.identity, { status: "completed", conclusion: "success" }) });
     const result = await adapterFor(db, fake.octokit).completeCheck({
@@ -549,7 +707,7 @@ describe("completeCheck — the terminal send", () => {
   test("an unpersisted intent cannot be sent (desired is frozen before the update)", async () => {
     const db = seededDb();
     const { attempt, lease } = await claimedAttempt(db);
-    await attachCheckRunId(db, attempt.identity.attemptId, lease, 4242, T0);
+    await attachedRun(db, attempt, lease, 4242);
     const fake = fakeChecks({ update: () => runPayload(attempt.identity, { status: "completed", conclusion: "success" }) });
     const result = await adapterFor(db, fake.octokit).completeCheck({
       identity: attempt.identity,
@@ -565,7 +723,7 @@ describe("completeCheck — the terminal send", () => {
   test("a conclusion that disagrees with the persisted intent is refused", async () => {
     const db = seededDb();
     const { attempt, lease } = await claimedAttempt(db);
-    await attachCheckRunId(db, attempt.identity.attemptId, lease, 4242, T0);
+    await attachedRun(db, attempt, lease, 4242);
     await setCheckDesired(db, attempt.identity.attemptId, lease, { ...SUCCESS, desired: "neutral" }, null, T0);
     const fake = fakeChecks({ update: () => runPayload(attempt.identity, { status: "completed", conclusion: "success" }) });
     expect(
@@ -577,7 +735,7 @@ describe("completeCheck — the terminal send", () => {
   test("in_progress can never reach the wire", async () => {
     const db = seededDb();
     const { attempt, lease } = await claimedAttempt(db);
-    await attachCheckRunId(db, attempt.identity.attemptId, lease, 4242, T0);
+    await attachedRun(db, attempt, lease, 4242);
     await setCheckDesired(db, attempt.identity.attemptId, lease, SUCCESS, null, T0);
     const fake = fakeChecks({ update: () => runPayload(attempt.identity) });
     // The type excludes it; a cast proves the runtime guard holds too.
@@ -591,7 +749,7 @@ describe("completeCheck — the terminal send", () => {
   test("a lost lease sends nothing, and a run whose identity moved is refused", async () => {
     const db = seededDb();
     const { attempt, lease } = await claimedAttempt(db);
-    await attachCheckRunId(db, attempt.identity.attemptId, lease, 4242, T0);
+    await attachedRun(db, attempt, lease, 4242);
     await setCheckDesired(db, attempt.identity.attemptId, lease, SUCCESS, null, T0);
     const fake = fakeChecks({ update: () => runPayload(attempt.identity, { status: "completed", conclusion: "success" }) });
     const taken = { ...lease, epoch: lease.epoch + 1 };
@@ -604,7 +762,7 @@ describe("completeCheck — the terminal send", () => {
   test("a response that is not the intended terminal state is unavailable", async () => {
     const db = seededDb();
     const { attempt, lease } = await claimedAttempt(db);
-    await attachCheckRunId(db, attempt.identity.attemptId, lease, 4242, T0);
+    await attachedRun(db, attempt, lease, 4242);
     await setCheckDesired(db, attempt.identity.attemptId, lease, SUCCESS, null, T0);
     for (const echo of [
       runPayload(attempt.identity, { status: "in_progress", conclusion: null }), // not completed
@@ -622,7 +780,7 @@ describe("completeCheck — the terminal send", () => {
     for (const status of [403, 502]) {
       const db = seededDb();
       const { attempt, lease } = await claimedAttempt(db);
-      await attachCheckRunId(db, attempt.identity.attemptId, lease, 4242, T0);
+      await attachedRun(db, attempt, lease, 4242);
       await setCheckDesired(db, attempt.identity.attemptId, lease, SUCCESS, null, T0);
       const fake = fakeChecks({
         update: () => {
@@ -643,11 +801,72 @@ describe("completeCheck — the terminal send", () => {
   });
 });
 
+describe("frozen terminal intent (spec §7.9)", () => {
+  test("the update ships the PERSISTED text, not the caller's copies", async () => {
+    const db = seededDb();
+    const { attempt, lease } = await claimedAttempt(db);
+    const id = attempt.identity.attemptId;
+    await attachedRun(db, attempt, lease, 4242);
+    expect(await setCheckDesired(db, id, lease, SUCCESS, null, T0)).toBe(true);
+    const fake = fakeChecks({ update: () => runPayload(attempt.identity, { status: "completed", conclusion: "success" }) });
+
+    // The caller presents a DIVERGENT (and oversized) conclusion for the same
+    // enum. The frozen text must win, so nothing unredacted/unbounded reaches
+    // the public Check surface.
+    const result = await adapterFor(db, fake.octokit).completeCheck({
+      identity: attempt.identity,
+      lease,
+      checkRunId: 4242,
+      conclusion: { desired: "success", title: "hijacked", summary: "x".repeat(5_000) },
+    });
+    expect(result.kind).toBe("completed");
+    expect(fake.updates).toHaveLength(1);
+    const raw = fake.updates[0]!.raw;
+    expect(raw.title).toBe(CHECK_NAME);
+    expect(raw.summary).toBe(SUCCESS.summary);
+    expect(raw.summary).not.toContain("xxxx");
+  });
+
+  test("an oversized or multi-line intent is bounded at persistence", async () => {
+    const db = seededDb();
+    const { attempt, lease } = await claimedAttempt(db);
+    const id = attempt.identity.attemptId;
+    await setCheckDesired(
+      db,
+      id,
+      lease,
+      { desired: "failure", title: "t".repeat(500), summary: `line one\nline two\n${"y".repeat(4_000)}` },
+      null,
+      T0,
+    );
+    const row = await rowOf(db, attempt);
+    expect((row.desired_title as string).length).toBeLessThanOrEqual(120);
+    expect((row.desired_summary as string).length).toBeLessThanOrEqual(2_000);
+    expect(row.desired_summary).not.toContain("\n");
+  });
+
+  test("a divergent conclusion enum is still refused before any request", async () => {
+    const db = seededDb();
+    const { attempt, lease } = await claimedAttempt(db);
+    await attachedRun(db, attempt, lease, 4242);
+    expect(await setCheckDesired(db, attempt.identity.attemptId, lease, SUCCESS, null, T0)).toBe(true);
+    const fake = fakeChecks({ update: () => runPayload(attempt.identity, { status: "completed", conclusion: "failure" }) });
+    const result = await adapterFor(db, fake.octokit).completeCheck({
+      identity: attempt.identity,
+      lease,
+      checkRunId: 4242,
+      conclusion: { desired: "failure", title: CHECK_NAME, summary: "different" },
+    });
+    expect(result.kind).toBe("unavailable");
+    expect(fake.updates).toHaveLength(0);
+  });
+});
+
 describe("fetchCheckRun — the recovery lane's read", () => {
   test("returns the run only when its identity matches this attempt", async () => {
     const db = seededDb();
     const { attempt, lease } = await claimedAttempt(db);
-    await attachCheckRunId(db, attempt.identity.attemptId, lease, 4242, T0);
+    await attachedRun(db, attempt, lease, 4242);
     const fake = fakeChecks({ get: () => runPayload(attempt.identity, { id: 4242 }) });
     const found = await adapterFor(db, fake.octokit).fetchCheckRun({ identity: attempt.identity, checkRunId: 4242 });
     expect(found.kind).toBe("found");
@@ -662,7 +881,7 @@ describe("fetchCheckRun — the recovery lane's read", () => {
   test("a run id that does not echo the request is unavailable (a proxy lied)", async () => {
     const db = seededDb();
     const { attempt, lease } = await claimedAttempt(db);
-    await attachCheckRunId(db, attempt.identity.attemptId, lease, 4242, T0);
+    await attachedRun(db, attempt, lease, 4242);
     const fake = fakeChecks({ get: () => runPayload(attempt.identity, { id: 111 }) });
     expect((await adapterFor(db, fake.octokit).fetchCheckRun({ identity: attempt.identity, checkRunId: 4242 })).kind).toBe("unavailable");
   });
@@ -807,14 +1026,49 @@ describe("identity helpers", () => {
 });
 
 describe("credential boundary (spec §7.6 / §7.9)", () => {
-  test("the real @octokit/rest instance structurally satisfies the narrowed Checks surface", () => {
-    // A real Octokit (no auth, no request made): the Checks methods exist on the
-    // SAME client the comment chains use, so no second client is constructible.
-    const real = new Octokit() as unknown as ChecksOctokit;
-    expect(typeof real.rest.checks.create).toBe("function");
-    expect(typeof real.rest.checks.update).toBe("function");
-    expect(typeof real.rest.checks.get).toBe("function");
-    expect(typeof real.rest.checks.listForRef).toBe("function");
+  test("Checks and review writes share the ONE review-write mint; Sandbox stays read-only", async () => {
+    // Seam-level BEHAVIOR, not source text or library shape: build the real
+    // commenter with a recorded auth seam and drive BOTH lanes. A second
+    // `createAppAuth` construction, or a Sandbox grant widened to the write
+    // set, fails this. The mint itself cannot reach GitHub here (the private
+    // key is a placeholder), and that is irrelevant to the invariant being
+    // proven: the requested purpose/permissions are recorded at the single
+    // construction point before any request is made.
+    const db = seededDb();
+    const seam: AuthSeam = { constructed: [], minted: [] };
+    const commenter = createReviewCommenter(
+      { APP_ID: "12345", PRIVATE_KEY: "not-a-real-key" },
+      { db, nowMs: () => CLOCK, authSeam: seam },
+    );
+    // The Checks surface exists on the SAME commenter instance — no second
+    // client is constructed to obtain it.
+    expect(commenter.checks).toBeDefined();
+
+    const scope: Scope = { appId: APP_ID, installationId: 123, owner: "acme", repo: "widgets", prNumber: 42 };
+    await commenter.getInstallationToken({ scope, purpose: "review-write" }).catch(() => undefined);
+    await commenter.getInstallationToken({ scope, purpose: "sandbox-read" }).catch(() => undefined);
+
+    // ONE credential object was built, for every lane (the lazy `createAppAuth`
+    // closure is memoized per instance).
+    expect(seam.constructed).toHaveLength(1);
+
+    // Checks ride the review-write mint: same purpose, same repository, and a
+    // permission set that carries checks:write.
+    const write = seam.minted.find((m) => m.purpose === "review-write");
+    expect(write).toBeDefined();
+    expect(write?.repo).toBe("widgets");
+    expect(write?.permissions.checks).toBe("write");
+    expect(write?.permissions.contents).toBe("write");
+
+    // The Sandbox grant stays read-only and never gains `checks`.
+    const sandbox = seam.minted.find((m) => m.purpose === "sandbox-read");
+    expect(sandbox).toBeDefined();
+    expect(sandbox?.permissions).not.toHaveProperty("checks");
+    expect(sandbox?.permissions.contents).toBe("read");
+
+    // No third purpose family exists: the two lanes above are the whole set.
+    expect(seam.minted.map((m) => m.purpose).sort()).toEqual(["review-write", "sandbox-read"]);
+    expect(seam.constructed).toHaveLength(1);
   });
 
   test("a client whose checks surface is absent fails soft, without throwing", async () => {
@@ -832,7 +1086,7 @@ describe("credential boundary (spec §7.6 / §7.9)", () => {
     const db = seededDb();
     const { attempt, lease } = await claimedAttempt(db);
     // Terminalize the attempt through the store, then the adapter must refuse.
-    await attachCheckRunId(db, attempt.identity.attemptId, lease, 4242, T0);
+    await attachedRun(db, attempt, lease, 4242);
     await setCheckDesired(db, attempt.identity.attemptId, lease, SUCCESS, null, T0);
     expect(await setCheckCreateState(db, attempt.identity.attemptId, lease, "sending", undefined, T0)).toBe(true);
     const fake = fakeChecks({
@@ -867,36 +1121,56 @@ describe("the review-write permission set (spec §7.12)", () => {
 });
 
 describe("the remote non-idempotency boundary (RL-12)", () => {
-  test("a lost create response is reported, not blindly re-created", async () => {
+  test("a create whose response was lost is never blindly re-created", async () => {
     const db = seededDb();
     const { attempt, lease } = await claimedAttempt(db);
     const id = attempt.identity.attemptId;
-    // The caller persisted `sending`, the request left, the response was lost.
+    // The send was ATTEMPTED and the response was lost: `sending` with no id.
     expect(await setCheckCreateState(db, id, lease, "sending", undefined, T0)).toBe(true);
-    const fake = fakeChecks({
-      create: () => {
-        throw Object.assign(new Error("socket hang up"), { status: undefined });
-      },
-    });
-    const result = await adapterFor(db, fake.octokit).beginCheck({ identity: attempt.identity, lease });
+    const fake = fakeChecks({ create: () => runPayload(attempt.identity) });
+    const adapter = adapterFor(db, fake.octokit);
+
+    // A second begin on a possibly-sent attempt must issue NO create request:
+    // `external_id` is correlation, not server-side idempotency (RL-12), so a
+    // blind retry could leave two live runs for one head.
+    const result = await adapter.beginCheck({ identity: attempt.identity, lease });
     expect(result.kind).toBe("unavailable");
-    expect(fake.creates).toHaveLength(1);
-    // The adapter did not attach a run id or claim anything happened: the row
-    // stays in the caller's create state for read-only discovery.
+    expect(fake.creates).toHaveLength(0);
+
+    // Nor is the state resettable into a createable one: `not-sent` is a
+    // definitive pre-send claim and may not be re-asserted after a send was
+    // attempted. The row therefore stays honestly un-resolved.
+    expect(await setCheckCreateState(db, id, lease, "not-sent", undefined, T0)).toBe(false);
+    expect((await adapter.beginCheck({ identity: attempt.identity, lease })).kind).toBe("unavailable");
+    expect(fake.creates).toHaveLength(0);
+
     const row = await rowOf(db, attempt);
     expect(row.check_run_id).toBeNull();
     expect(row.create_state).toBe("sending");
     expect(row.observed).toBe("unknown");
-    // Recovery's honest answer without an identity-matched read is
-    // incomplete/ambiguous — and adoption is read-only, so no second create.
+
+    // Read-only adoption remains the recovery route; with no matching run it
+    // reports incomplete rather than absence, and still creates nothing.
     const adopt = fakeChecks({});
     expect((await adapterFor(db, adopt.octokit).adoptCheckRun({ identity: attempt.identity })).kind).toBe("incomplete");
+    expect(adopt.creates).toHaveLength(0);
   });
 });
 
 // ---------------------------------------------------------------------------
 // helpers
 // ---------------------------------------------------------------------------
+
+/**
+ * Attach a proven run id through the LEGAL transition path. The store now
+ * refuses to attach an id to an attempt whose create was never sent (that
+ * would record a run this attempt did not create), so tests must first record
+ * the send attempt — exactly as the pipeline does.
+ */
+async function attachedRun(db: TestD1, attempt: CheckAttempt, lease: Lease, runId: number, now = T0): Promise<void> {
+  expect(await setCheckCreateState(db, attempt.identity.attemptId, lease, "sending", undefined, now)).toBe(true);
+  expect(await attachCheckRunId(db, attempt.identity.attemptId, lease, runId, now)).toBe(true);
+}
 
 async function rowOf(db: TestD1, attempt: CheckAttempt): Promise<Record<string, string | number | null>> {
   return (await db.prepare(`SELECT * FROM review_checks WHERE id = ?`).bind(attempt.identity.attemptId).first()) as Record<

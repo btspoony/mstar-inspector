@@ -38,6 +38,7 @@
 import type { D1Like } from "../store/types";
 import {
   CHECK_NAME,
+  setCheckCreateState,
   type CheckAttempt,
   type CheckConclusion,
   type CheckIdentity,
@@ -46,6 +47,7 @@ import {
   type Lease,
   type PublicationProof,
   type Scope,
+  getCheckAttempt,
   getCheckOwnership,
 } from "../store/review-checks";
 import { redactSecrets } from "./redact";
@@ -190,6 +192,14 @@ export type ChecksDeps = {
    * denial); every operation then reports `unavailable`.
    */
   getOctokit(input: { scope: Scope }): Promise<ChecksOctokit | null>;
+  /**
+   * The transaction clock (spec §7.0). Every ownership read and remote send
+   * fences on `lease_until_ms > now`, so the adapter must be handed the
+   * caller's current time rather than trusting a lease object it was given —
+   * an expired holder may not create or update a remote Check merely because
+   * recovery has not yet bumped the epoch (spec §7.9).
+   */
+  nowMs: () => number;
 };
 
 /** The §7.9 adapter surface, bound to one App credential. */
@@ -246,26 +256,52 @@ async function beginCheckWith(
   deps: ChecksDeps,
   input: { identity: CheckIdentity; lease: Lease },
 ): Promise<{ kind: "ready"; remote: CheckRemote } | { kind: "unavailable"; reason: string }> {
-  const owned = await guardOwnership(deps, input.identity, input.lease);
+  const nowMs = deps.nowMs();
+  const owned = await guardOwnership(deps, input.identity, input.lease, nowMs);
   if (owned.kind === "unavailable") return owned;
+  // Route on the PERSISTED scope, never the caller's (spec §7.6): the lease may
+  // be valid while the supplied scope points at another installation/repo.
+  const identity = owned.data.identity;
   if (owned.data.checkRunId !== null) {
     return { kind: "unavailable", reason: "attempt already owns a remote check run" };
   }
-  const client = await clientFor(deps, input.identity.scope);
+  // A create is legal ONLY from a definitive pre-send state (spec §7.9/RL-12):
+  // `sending`/`unknown` mean a create may already have reached GitHub, and
+  // since `external_id` is correlation rather than server-side idempotency, the
+  // only honest recovery is bounded read-only adoption — never a second create.
+  if (owned.data.createState !== "not-sent") {
+    return {
+      kind: "unavailable",
+      reason: `create is not definitively unsent (create_state=${owned.data.createState}); adopt instead`,
+    };
+  }
+  // Resolve the client BEFORE any durable claim of a send: with no client
+  // nothing has been attempted, so the row must stay `not-sent` (an honest
+  // `sending` mark here would strand the attempt as possibly-sent forever).
+  const client = await clientFor(deps, identity.scope);
   if (client === null) return { kind: "unavailable", reason: "no review-write Checks client for this App" };
-  const { scope } = input.identity;
+  // Persist `sending` BEFORE the request leaves (spec §7.9): if the response is
+  // lost, the row must already record that a create was attempted, because that
+  // durable fact is what stops a later `beginCheck` from minting a second run.
+  // Fenced on the live lease, so a lease lost between the guard and here aborts
+  // the send instead of creating an unattributable run.
+  const marked = await setCheckCreateState(deps.db, identity.attemptId, input.lease, "sending", undefined, nowMs);
+  if (!marked) {
+    return { kind: "unavailable", reason: "could not record the create attempt under this lease" };
+  }
+  const { scope } = identity;
   try {
     const { data } = await client.rest.checks.create({
       owner: scope.owner,
       repo: scope.repo,
       name: CHECK_NAME,
-      head_sha: input.identity.headSha,
-      external_id: input.identity.externalId,
+      head_sha: identity.headSha,
+      external_id: identity.externalId,
       status: "in_progress",
     });
     const remote = toCheckRemote(data);
     if (remote === null) return { kind: "unavailable", reason: "check create returned a malformed payload" };
-    if (!remoteBelongsTo(remote, input.identity)) {
+    if (!remoteBelongsTo(remote, identity)) {
       return { kind: "unavailable", reason: "check create response does not match this attempt identity" };
     }
     return { kind: "ready", remote };
@@ -286,9 +322,15 @@ async function adoptCheckRunWith(
 ): Promise<
   { kind: "found"; remote: CheckRemote } | { kind: "absent" | "incomplete" | "ambiguous" }
 > {
-  const client = await clientFor(deps, input.identity.scope);
+  // Adoption is read-only, but it is still an operation ON a persisted
+  // attempt: resolve the stored identity first and target the stored scope, so
+  // a caller cannot use it to probe another installation/repository (§7.9).
+  const persisted = await persistedIdentity(deps, input.identity);
+  if (persisted.kind === "unavailable") return { kind: "incomplete" };
+  const identity = persisted.identity;
+  const client = await clientFor(deps, identity.scope);
   if (client === null) return { kind: "incomplete" };
-  const { scope } = input.identity;
+  const { scope } = identity;
   const matches: CheckRemote[] = [];
   let pagesRead = 0;
   let saturated = false;
@@ -298,9 +340,9 @@ async function adoptCheckRunWith(
       result = await client.rest.checks.listForRef({
         owner: scope.owner,
         repo: scope.repo,
-        ref: input.identity.headSha,
+        ref: identity.headSha,
         check_name: CHECK_NAME,
-        app_id: input.identity.githubAppId,
+        app_id: identity.githubAppId,
         filter: "all",
         per_page: ADOPT_PAGE_SIZE,
         page,
@@ -317,7 +359,7 @@ async function adoptCheckRunWith(
       // A malformed candidate inside the App/name/SHA window makes the walk
       // ambiguous: skipping it could silently drop OUR run.
       if (remote === null) return { kind: "ambiguous" };
-      if (remoteBelongsTo(remote, input.identity)) matches.push(remote);
+      if (remoteBelongsTo(remote, identity)) matches.push(remote);
     }
     if (matches.length > 1) return { kind: "ambiguous" };
     if (matches.length === 1) return { kind: "found", remote: matches[0]! };
@@ -343,8 +385,9 @@ async function completeCheckWith(
   deps: ChecksDeps,
   input: { identity: CheckIdentity; lease: Lease; checkRunId: number; conclusion: CheckConclusion },
 ): Promise<{ kind: "completed"; remote: CheckRemote } | { kind: "unavailable"; reason: string }> {
-  const owned = await guardOwnership(deps, input.identity, input.lease);
+  const owned = await guardOwnership(deps, input.identity, input.lease, deps.nowMs());
   if (owned.kind === "unavailable") return owned;
+  const identity = owned.data.identity;
   // The persisted row must already carry THIS terminal intent: `desired` is
   // frozen by `setCheckDesired` before any update (spec §7.9), so an
   // `in_progress` row here means the caller skipped the intent write. The
@@ -352,31 +395,44 @@ async function completeCheckWith(
   if (owned.data.desired === "in_progress") {
     return { kind: "unavailable", reason: "terminal intent was never persisted for this attempt" };
   }
-  if (owned.data.desired !== input.conclusion.desired) {
+  // The FROZEN text is what ships (spec §7.9): the update carries the persisted
+  // conclusion, title and summary, never the caller's copies. A caller that
+  // mutates or enlarges the text between freezing the intent and completing the
+  // run therefore cannot diverge from what was bounded and stored — and cannot
+  // push an oversized/unredacted title into the public Check surface.
+  const frozen = {
+    desired: owned.data.desired as CheckConclusion["desired"],
+    title: owned.data.desiredTitle,
+    summary: owned.data.desiredSummary,
+  };
+  if (frozen.title === null || frozen.summary === null) {
+    return { kind: "unavailable", reason: "persisted terminal intent carries no frozen title/summary" };
+  }
+  if (frozen.desired !== input.conclusion.desired) {
     return { kind: "unavailable", reason: "conclusion does not match the persisted terminal intent" };
   }
   if (owned.data.checkRunId !== input.checkRunId) {
     return { kind: "unavailable", reason: "check run id is not the one this attempt persisted" };
   }
-  const client = await clientFor(deps, input.identity.scope);
+  const client = await clientFor(deps, identity.scope);
   if (client === null) return { kind: "unavailable", reason: "no review-write Checks client for this App" };
-  const { scope } = input.identity;
+  const { scope } = identity;
   try {
     const { data } = await client.rest.checks.update({
       owner: scope.owner,
       repo: scope.repo,
       check_run_id: input.checkRunId,
       status: "completed",
-      conclusion: input.conclusion.desired,
-      title: input.conclusion.title,
-      summary: input.conclusion.summary,
+      conclusion: frozen.desired,
+      title: frozen.title,
+      summary: frozen.summary,
     });
     const remote = toCheckRemote(data);
     if (remote === null) return { kind: "unavailable", reason: "check update returned a malformed payload" };
-    if (!remoteBelongsTo(remote, input.identity)) {
+    if (!remoteBelongsTo(remote, identity)) {
       return { kind: "unavailable", reason: "check update response does not match this attempt identity" };
     }
-    if (remote.status !== "completed" || remote.conclusion !== input.conclusion.desired) {
+    if (remote.status !== "completed" || remote.conclusion !== frozen.desired) {
       return { kind: "unavailable", reason: "check update response is not the intended terminal state" };
     }
     return { kind: "completed", remote };
@@ -396,9 +452,12 @@ async function fetchCheckRunWith(
 ): Promise<
   { kind: "found"; remote: CheckRemote } | { kind: "absent" } | { kind: "unavailable"; reason: string }
 > {
-  const client = await clientFor(deps, input.identity.scope);
+  const persisted = await persistedIdentity(deps, input.identity);
+  if (persisted.kind === "unavailable") return persisted;
+  const identity = persisted.identity;
+  const client = await clientFor(deps, identity.scope);
   if (client === null) return { kind: "unavailable", reason: "no review-write Checks client for this App" };
-  const { scope } = input.identity;
+  const { scope } = identity;
   try {
     const { data } = await client.rest.checks.get({
       owner: scope.owner,
@@ -408,7 +467,7 @@ async function fetchCheckRunWith(
     const remote = toCheckRemote(data);
     if (remote === null) return { kind: "unavailable", reason: "check get returned a malformed payload" };
     if (remote.id !== input.checkRunId) return { kind: "unavailable", reason: "check get returned a different run" };
-    return remoteBelongsTo(remote, input.identity) ? { kind: "found", remote } : { kind: "absent" };
+    return remoteBelongsTo(remote, identity) ? { kind: "found", remote } : { kind: "absent" };
   } catch (error) {
     if (httpStatus(error) === 404) return { kind: "absent" };
     return { kind: "unavailable", reason: surfaceFailure(error, "check get") };
@@ -423,25 +482,66 @@ async function guardOwnership(
   deps: ChecksDeps,
   identity: CheckIdentity,
   lease: Lease,
+  nowMs: number,
 ): Promise<
   { kind: "ok"; data: CheckOwnership } | { kind: "unavailable"; reason: string }
 > {
   let owned: CheckOwnership | null;
   try {
-    owned = await getCheckOwnership(deps.db, identity.attemptId, lease);
+    owned = await getCheckOwnership(deps.db, identity.attemptId, lease, nowMs);
   } catch (error) {
     return { kind: "unavailable", reason: `attempt ownership read failed: ${safeDetail(error)}` };
   }
-  if (owned === null) return { kind: "unavailable", reason: "attempt is not owned by this lease" };
-  if (
-    owned.identity.externalId !== identity.externalId ||
-    owned.identity.generation !== identity.generation ||
-    owned.identity.githubAppId !== identity.githubAppId ||
-    owned.identity.headSha !== identity.headSha
-  ) {
+  if (owned === null) return { kind: "unavailable", reason: "attempt is not owned by this live lease" };
+  if (!sameIdentity(owned.identity, identity)) {
     return { kind: "unavailable", reason: "caller identity disagrees with the persisted attempt" };
   }
   return { kind: "ok", data: owned };
+}
+
+/**
+ * Exact identity agreement between a caller-supplied identity and the PERSISTED
+ * row (spec §7.6/§7.9). Every routing component is compared, not just the check
+ * fields: a caller holding a valid lease but presenting a different
+ * installation, owner, repository, PR, App row or SHA must not be able to aim
+ * the purpose-scoped client — or an adoption read — at another tenant's scope.
+ */
+function sameIdentity(persisted: CheckIdentity, supplied: CheckIdentity): boolean {
+  return (
+    persisted.attemptId === supplied.attemptId &&
+    persisted.generation === supplied.generation &&
+    persisted.externalId === supplied.externalId &&
+    persisted.githubAppId === supplied.githubAppId &&
+    persisted.headSha === supplied.headSha &&
+    persisted.scope.appId === supplied.scope.appId &&
+    persisted.scope.installationId === supplied.scope.installationId &&
+    persisted.scope.owner === supplied.scope.owner &&
+    persisted.scope.repo === supplied.scope.repo &&
+    persisted.scope.prNumber === supplied.scope.prNumber
+  );
+}
+
+/**
+ * The PERSISTED identity of an attempt, read without a lease (the read-only
+ * lanes' entry point) or `null` when the row is gone. Adoption and fetch are
+ * read-only, so they cannot present a lease — but they must still answer for
+ * the stored attempt, never for a caller-supplied scope (spec §7.9).
+ */
+async function persistedIdentity(
+  deps: ChecksDeps,
+  supplied: CheckIdentity,
+): Promise<{ kind: "ok"; identity: CheckIdentity } | { kind: "unavailable"; reason: string }> {
+  let attempt: CheckAttempt | null;
+  try {
+    attempt = await getCheckAttempt(deps.db, supplied.attemptId);
+  } catch (error) {
+    return { kind: "unavailable", reason: `attempt identity read failed: ${safeDetail(error)}` };
+  }
+  if (attempt === null) return { kind: "unavailable", reason: "no persisted attempt for this id" };
+  if (!sameIdentity(attempt.identity, supplied)) {
+    return { kind: "unavailable", reason: "caller identity disagrees with the persisted attempt" };
+  }
+  return { kind: "ok", identity: attempt.identity };
 }
 
 /** Client resolution — a null or throwing transport is `unavailable`, never a throw. */
@@ -559,9 +659,4 @@ export function decideConclusion(input: {
 function boundedReason(reason: string | undefined): string {
   const text = reason === undefined || reason.trim().length === 0 ? "unknown pipeline failure" : reason;
   return redactSecrets(text).replace(/[\r\n]+/g, " ").slice(0, 240);
-}
-
-/** The identity of an attempt row (T2/T3 read-back convenience, spec §7.9). */
-export function identityOf(attempt: CheckAttempt): CheckIdentity {
-  return attempt.identity;
 }

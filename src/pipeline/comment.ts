@@ -699,7 +699,24 @@ export type ReviewCommenterOptions = {
   nowMs?: () => number;
   /** Per-request transport seam (timeout/abort wrapper). */
   fetchImpl?: CommenterFetch;
+  /**
+   * Test-only seam recording the SEAM-LEVEL construction this module performs:
+   * each `createAppAuth` build and each minted purpose/repository grant. It
+   * exists so the single-credential invariant (spec §7.6) is provable by
+   * BEHAVIOR — that Checks and comment writes share one review-write path while
+   * the Sandbox surface stays read-only — rather than by reading source text or
+   * library method presence. Production callers omit it; nothing here branches
+   * on it and no token or client is exposed through it.
+   */
+  authSeam?: AuthSeam;
 };
+
+/** One `createAppAuth` construction, as observed through `authSeam`. */
+export type AuthConstruction = { appId: string };
+/** One minted installation grant, as observed through `authSeam`. */
+export type AuthMint = { installationId: number; repo: string; purpose: TokenPurpose; permissions: Record<string, string> };
+/** Records the credential construction/mint seam (test-only; see `authSeam`). */
+export type AuthSeam = { constructed: AuthConstruction[]; minted: AuthMint[] };
 
 // ---------------------------------------------------------------------------
 // Purpose-scoped token boundary (plan 67 Task 2, spec §7.6): every mint is
@@ -1588,6 +1605,8 @@ export function createReviewCommenter(env: CommenterEnv, options?: ReviewComment
         ...(authRequest === null ? {} : { request: authRequest as never }),
       }) as unknown as AppAuthStrategy;
       appAuth = auth;
+      // Seam record: exactly ONE strategy object is ever built per instance.
+      options?.authSeam?.constructed.push({ appId: env.APP_ID });
     }
     return auth;
   }
@@ -1598,11 +1617,21 @@ export function createReviewCommenter(env: CommenterEnv, options?: ReviewComment
    */
   async function mintGrant(input: { installationId: number; repo: string; purpose: TokenPurpose }): Promise<InstallationTokenGrant> {
     const auth = await getAppAuth();
+    const permissions = permissionsFor(input.purpose);
+    // Seam record: every grant this instance can mint, with its exact purpose
+    // and requested permission set — the evidence that Checks and comment
+    // writes ride the review-write mint and that Sandbox stays read-only.
+    options?.authSeam?.minted.push({
+      installationId: input.installationId,
+      repo: input.repo,
+      purpose: input.purpose,
+      permissions: { ...permissions },
+    });
     return auth({
       type: "installation",
       installationId: input.installationId,
       repositoryNames: [input.repo],
-      permissions: permissionsFor(input.purpose),
+      permissions,
     });
   }
 
@@ -1670,6 +1699,10 @@ export function createReviewCommenter(env: CommenterEnv, options?: ReviewComment
   const checksAdapter = options?.db
     ? createChecksAdapter({
         db: options.db,
+        // The send fence needs a live clock (spec §7.9): an expired holder must
+        // not be able to create or update a remote Check. Same injected clock
+        // the §7.5 thread surface uses.
+        nowMs: options.nowMs ?? (() => Date.now()),
         getOctokit: async ({ scope }) => getChecksOctokit(scope),
       })
     : null;

@@ -139,6 +139,12 @@ export const CHECK_BACKOFF_MS = [60_000, 120_000, 240_000, 480_000, 960_000];
 export const CHECK_ERROR_MAX_CHARS = 300;
 /** Frozen summary cap (spec §7.9: "summary ≤2000 chars"). */
 export const CHECK_SUMMARY_MAX_CHARS = 2_000;
+/**
+ * Frozen title cap. The spec bounds the summary explicitly; the title is the
+ * short line GitHub renders above it, so it is bounded by the same rule — a
+ * caller must not be able to smuggle unbounded text into the public surface.
+ */
+export const CHECK_TITLE_MAX_CHARS = 120;
 
 /** Canonical lowercase UUID syntax — the only Worker-generated ids (spec §7.0). */
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
@@ -251,6 +257,29 @@ export function checkReason(text: string): string {
 }
 
 /**
+ * Flatten and bound frozen terminal text before it is persisted (spec §7.9).
+ * A Check title/summary is PUBLIC: collapsing newlines/tabs and dropping
+ * control characters keeps an injected multi-line payload from restructuring
+ * the rendered Check, and the cut happens on the already-flattened string so
+ * no split can re-introduce one. Redaction is the pipeline's choke point
+ * (model text is redacted before it reaches this store, SEC-02); the store's
+ * job is the deterministic bound — the plan 67 `recoveryReason` precedent.
+ */
+function boundText(text: string, max: number): string {
+  const flat = text
+    .replace(/[\r\n\t]+/g, " ")
+    .replace(/[\u0000-\u001f\u007f]/g, "")
+    .trim();
+  return flat.length <= max ? flat : flat.slice(0, max);
+}
+
+/** Never persist an empty title: GitHub renders it verbatim above the summary. */
+function frozenTitle(title: string): string {
+  const bounded = boundText(title, CHECK_TITLE_MAX_CHARS);
+  return bounded.length === 0 ? CHECK_NAME : bounded;
+}
+
+/**
  * The one fenced-mutation executor behind every post-claim write: the exact
  * lease triple from the caller's `Lease`, plus `terminal_ms IS NULL` so
  * finished history is never rewritten. An optional transaction clock adds the
@@ -266,26 +295,30 @@ async function runFenced(
   lease: Lease,
   sets: string,
   values: unknown[],
-  nowMs?: CheckClock,
+  nowMs: CheckClock,
+  /**
+   * Extra state predicate a transition additionally requires, bound with
+   * `guardValues` AFTER the lease params. Every legal-transition rule belongs
+   * in the statement itself: proving legality by a read-then-write window
+   * would let a concurrent transition land in between.
+   */
+  guard?: string,
+  guardValues: unknown[] = [],
 ): Promise<boolean> {
-  const clocked = nowMs !== undefined;
-  // A clocked write ALSO proves the lease is still live: `lease_until_ms` is
+  // The live-lease fence is MANDATORY (spec §7.9/§7.0): `lease_until_ms` is
   // bound twice — once as the exact triple match, once as the `> now`
   // liveness test — so an expired-but-not-yet-reassigned lease cannot write.
-  const sql =
-    `UPDATE review_checks SET ${clocked ? "updated_ms = ?, " : ""}${sets} ` +
-    `WHERE id = ? AND holder = ? AND lease_epoch = ? AND lease_until_ms = ?` +
-    `${clocked ? " AND lease_until_ms > ?" : ""} AND ${NONTERMINAL_WHERE}`;
-  const bound = [
-    ...(clocked ? [nowMs] : []),
-    ...values,
-    id,
-    lease.holder,
-    lease.epoch,
-    lease.untilMs,
-    ...(clocked ? [nowMs] : []),
-  ];
-  const result = await db.prepare(sql).bind(...bound).run();
+  // There is no unclocked variant: the clock is the caller's single supplied
+  // transaction time (§7.0), never a value this module invents.
+  const result = await db
+    .prepare(
+      `UPDATE review_checks SET updated_ms = ?, ${sets} ` +
+        `WHERE id = ? AND holder = ? AND lease_epoch = ? AND lease_until_ms = ?` +
+        ` AND lease_until_ms > ? AND ${NONTERMINAL_WHERE}` +
+        `${guard === undefined ? "" : ` AND ${guard}`}`,
+    )
+    .bind(nowMs, ...values, id, lease.holder, lease.epoch, lease.untilMs, nowMs, ...guardValues)
+    .run();
   return result.meta.changes === 1;
 }
 
@@ -311,16 +344,18 @@ export async function getCheckOwnership(
   db: D1Like,
   id: string,
   lease: Lease,
-  nowMs?: CheckClock,
+  nowMs: CheckClock,
 ): Promise<CheckOwnership | null> {
-  const clocked = nowMs !== undefined;
+  // Clock REQUIRED: an ownership read that skipped `lease_until_ms > now`
+  // would authorise a send the spec forbids (§7.9 "remote sends require the
+  // same check") — the adapter's send fence reads through here.
   const row = await db
     .prepare(
       `SELECT * FROM review_checks
         WHERE id = ? AND holder = ? AND lease_epoch = ? AND lease_until_ms = ?` +
-        `${clocked ? " AND lease_until_ms > ?" : ""} AND ${NONTERMINAL_WHERE}`,
+        ` AND lease_until_ms > ? AND ${NONTERMINAL_WHERE}`,
     )
-    .bind(id, lease.holder, lease.epoch, lease.untilMs, ...(clocked ? [nowMs] : []))
+    .bind(id, lease.holder, lease.epoch, lease.untilMs, nowMs)
     .first<ReviewCheckRow>();
   if (row === null) return null;
   const attempt = attemptOf(row);
@@ -401,13 +436,30 @@ export async function claimAttempt(
   // The claim is the whole race. `INSERT … SELECT` is gated on TWO facts about
   // `attempt_key`: no NONTERMINAL row exists (a live or expired-but-open
   // attempt belongs to its holder and to recovery, never to a new claim), and
-  // no generation of this key ended WITH a proven publication (spec §7.9's
-  // terminal/dedup rule — a successfully published head is never Check-created
-  // a second time). If two claims pass the gates in the same instant, the
-  // partial unique index rejects exactly one, and because a failed statement
-  // rolls back the batch, the loser owns nothing: it surfaces through the
-  // reread below as `busy`, never as its own generation.
-  const noPublishedTerminal = `(SELECT COUNT(*) FROM review_checks p WHERE p.attempt_key = ? AND p.observed IN ('success','neutral')) = 0`;
+  // no generation of this key ended WITH a proven publication. If two claims
+  // pass the gates in the same instant, the partial unique index rejects
+  // exactly one, and because a failed statement rolls back the batch, the
+  // loser owns nothing: it surfaces through the reread below as `busy`, never
+  // as its own generation.
+  //
+  // Dedup reads PROOF, not Check observation (spec §7.9: a terminal
+  // successfully published attempt is the `terminal` answer, and the §7.9
+  // matrix makes confirmed publication authoritative even when Check side
+  // effects fail). A row can hold a positive proof link and still carry
+  // `observed = 'unknown'` — e.g. `markCheckLocalError` after a successful
+  // publication — so gating on `observed` would mint generation N+1 for a head
+  // that is durably published. The gate therefore mirrors §7.7's proof
+  // predicate exactly: any generation of this key whose PUBLICATION is proven
+  // by a journal row for the same scope/SHA, plus the local fallback that a
+  // generation already observed success/neutral (proof link may be absent when
+  // observation arrived before the link was written).
+  const noProvenPublication = `(
+    (SELECT COUNT(*) FROM review_checks p
+      WHERE p.attempt_key = ? AND p.observed IN ('success','neutral')) = 0
+    AND (SELECT COUNT(*) FROM review_checks p
+           JOIN review_publications pub ON pub.id = p.publication_id
+          WHERE p.attempt_key = ? AND pub.proof_json IS NOT NULL) = 0
+  )`;
   const insert = db
     .prepare(
       `INSERT INTO review_checks
@@ -425,7 +477,7 @@ export async function claimAttempt(
               'pending', NULL, 0, NULL, NULL, NULL, ?, ?
          FROM (SELECT 1) AS seed
         WHERE NOT EXISTS (SELECT 1 FROM review_checks o WHERE o.attempt_key = ? AND ${NONTERMINAL_WHERE})
-          AND ${noPublishedTerminal}`,
+          AND ${noProvenPublication}`,
     )
     .bind(
       attemptId, scope.appId, input.githubAppId, scope.installationId,
@@ -435,6 +487,7 @@ export async function claimAttempt(
       attemptId, key,
       input.holder, input.executionDeadlineMs, input.executionDeadlineMs,
       nowMs, nowMs,
+      key,
       key,
       key,
     );
@@ -503,11 +556,17 @@ export async function claimCheckRecovery(
   holder: string,
   nowMs: number,
 ): Promise<Lease | null> {
+  // Suspension is a CLAIM FENCE, not merely a selector filter (spec §7.6): a
+  // disabled/deleted App's rows are recoverable again only after the explicit
+  // re-enable that returns them to `pending`. Without this predicate a stale
+  // selector result — or a direct caller — could lease a suspended App's row
+  // while the App is still disabled.
   const claim = await db
     .prepare(
       `UPDATE review_checks
           SET holder = ?, lease_epoch = lease_epoch + 1, lease_until_ms = ?, updated_ms = ?
         WHERE id = ? AND ${NONTERMINAL_WHERE}
+          AND recovery_state IN ('pending','remote-unconfirmed')
           AND (lease_until_ms IS NULL OR lease_until_ms <= ?)`,
     )
     .bind(holder, nowMs + CHECK_RECOVERY_LEASE_MS, nowMs, id, nowMs)
@@ -537,11 +596,15 @@ export async function attachCheckRunId(
   id: string,
   lease: Lease,
   checkRunId: number,
-  nowMs?: CheckClock,
+  nowMs: CheckClock,
 ): Promise<boolean> {
   if (!Number.isInteger(checkRunId) || checkRunId <= 0) {
     throw new Error(`review-checks: check_run_id must be a positive integer, got ${String(checkRunId)}`);
   }
+  // An id may only be attached to a send that was ACTUALLY attempted
+  // (`sending`/`unknown`). `not-sent` proving nothing was sent, and an
+  // already-`known` id being idempotently re-attached, are the two legal
+  // shapes — anything else would record a run this attempt never created.
   return runFenced(
     db,
     id,
@@ -549,6 +612,8 @@ export async function attachCheckRunId(
     `check_run_id = COALESCE(check_run_id, ?), create_state = 'known', last_error = NULL`,
     [checkRunId],
     nowMs,
+    `(create_state IN ('sending','unknown') OR (create_state = 'known' AND check_run_id = ?))`,
+    [checkRunId],
   );
 }
 
@@ -557,21 +622,45 @@ export async function attachCheckRunId(
  * create_state=sending before create"; a lost response sets `unknown`; a
  * definitive pre-send rejection reverts to `not-sent`). `known` is reachable
  * only through `attachCheckRunId`, and no path here clears a known remote id.
+ *
+ * Legal transitions are enforced IN SQL, because the dangerous shape is not a
+ * caller typo but a race: `sending`/`unknown` mean a create may have reached
+ * GitHub. Reverting either to `not-sent` would declare the attempt createable
+ * again, and a later `beginCheck` would then mint a SECOND run for the same
+ * head — exactly the blind recreate RL-12 forbids. So `not-sent` (the
+ * definitive pre-send rejection) is reachable only from `not-sent`; a
+ * possibly-sent state is resolved by read-only adoption, never by reset.
  */
 export async function setCheckCreateState(
   db: D1Like,
   id: string,
   lease: Lease,
   state: Exclude<CheckCreateState, "known">,
-  reason?: string,
-  nowMs?: CheckClock,
+  reason: string | undefined,
+  nowMs: CheckClock,
 ): Promise<boolean> {
-  const sets =
-    state === "not-sent"
-      ? `create_state = 'not-sent', last_error = NULL`
-      : `create_state = ?, last_error = ?`;
-  const values: unknown[] = state === "not-sent" ? [] : [state, checkReason(reason ?? `create_state=${state}`)];
-  return runFenced(db, id, lease, sets, values, nowMs);
+  if (state === "not-sent") {
+    // Definitive pre-send rejection: only a state that never sent may claim it.
+    return runFenced(
+      db,
+      id,
+      lease,
+      `create_state = 'not-sent', last_error = NULL`,
+      [],
+      nowMs,
+      `create_state = 'not-sent' AND check_run_id IS NULL`,
+    );
+  }
+  // `sending`/`unknown` record that a create was attempted — always legal, and
+  // never reachable backwards, so the row can only move toward resolution.
+  return runFenced(
+    db,
+    id,
+    lease,
+    `create_state = ?, last_error = ?`,
+    [state, checkReason(reason ?? `create_state=${state}`)],
+    nowMs,
+  );
 }
 
 /**
@@ -595,19 +684,20 @@ export async function setCheckDesired(
   lease: Lease,
   conclusion: CheckConclusion,
   publicationId: string | null,
-  nowMs?: CheckClock,
+  nowMs: CheckClock,
 ): Promise<boolean> {
-  const current = await getCheckOwnership(db, id, lease);
+  const current = await getCheckOwnership(db, id, lease, nowMs);
   if (current === null) return false;
   const was = current.desired;
   if (was !== "in_progress" && was !== conclusion.desired) {
     const correction = was === "failure" && (conclusion.desired === "success" || conclusion.desired === "neutral");
     if (!correction || publicationId === null) return false;
   }
-  const summary =
-    conclusion.summary.length > CHECK_SUMMARY_MAX_CHARS
-      ? conclusion.summary.slice(0, CHECK_SUMMARY_MAX_CHARS)
-      : conclusion.summary;
+  // Freeze BOUNDED text: the persisted row is the only source the send reads,
+  // so an oversized or newline-injected title/summary cannot reach the public
+  // Check surface later (spec §7.9).
+  const title = frozenTitle(conclusion.title);
+  const summary = boundText(conclusion.summary, CHECK_SUMMARY_MAX_CHARS);
   return runFenced(
     db,
     id,
@@ -615,7 +705,7 @@ export async function setCheckDesired(
     `desired = ?, desired_title = ?, desired_summary = ?,
             publication_id = COALESCE(?, publication_id),
             recovery_state = 'pending', next_attempt_ms = NULL, last_error = NULL`,
-    [conclusion.desired, conclusion.title, summary, publicationId],
+    [conclusion.desired, title, summary, publicationId],
     nowMs,
   );
 }
@@ -638,9 +728,9 @@ export async function recordCheckObservation(
   id: string,
   lease: Lease,
   remote: CheckRemote,
-  nowMs?: CheckClock,
+  nowMs: CheckClock,
 ): Promise<boolean> {
-  const owned = await getCheckOwnership(db, id, lease);
+  const owned = await getCheckOwnership(db, id, lease, nowMs);
   if (owned === null) return false;
   const { identity } = owned;
   if (remote.external_id !== identity.externalId) return false;
@@ -819,45 +909,46 @@ export async function retryCheckRecovery(
   db: D1Like,
   input: { scope: Scope; attemptId: string; nowMs: number },
 ): Promise<boolean> {
-  const row = await db
-    .prepare(
-      `SELECT * FROM review_checks
-        WHERE id = ? AND app_id = ? AND installation_id = ? AND owner = ? AND repo = ? AND pr_number = ?`,
-    )
-    .bind(
-      input.attemptId, input.scope.appId, input.scope.installationId,
-      input.scope.owner, input.scope.repo, input.scope.prNumber,
-    )
-    .first<ReviewCheckRow>();
-  if (row === null) return false;
-  // A row whose remote run already proved the intended conclusion has nothing
-  // left to recover: reopening it would re-drive a completed attempt. Only
-  // UNPROVEN rows (unknown observation) are retryable.
-  if (row.observed === "success" || row.observed === "neutral") return false;
-  if (row.lease_until_ms !== null && row.lease_until_ms > input.nowMs) return false;
-  const newerActive = await db
-    .prepare(
-      `SELECT 1 AS hit FROM review_checks
-        WHERE attempt_key = ? AND ${NONTERMINAL_WHERE} AND generation > ? LIMIT 1`,
-    )
-    .bind(row.attempt_key, row.generation)
-    .first();
-  if (newerActive !== null) return false;
-  // Reopening ALSO clears the local give-up mark: the selector only ever
-  // considers `terminal_ms IS NULL` rows, so a `local-error` row that kept its
-  // terminal mark could never be reconciled — the operator retry would be a
-  // silent no-op. Nothing else moves: generation, external id, check run id,
-  // desired, observed and the proof link are all retained, and `observed` is
-  // NOT rewritten, so this never pretends the remote run completed.
+  // ONE conditional statement, not read-then-write (spec §7.9/§7.11.2 step 6).
+  // Every precondition is repeated inside the UPDATE so a concurrent
+  // terminalization, a live lease, a newer active generation or an unproven
+  // observation landing between a preliminary read and the write can never be
+  // overwritten. The old shape re-read the row first and then updated
+  // `WHERE id = ?`, which could clear `terminal_ms` on a row another worker
+  // had just finished — erasing terminal history the spec requires be retained.
+  //
+  // Reopening clears the local give-up mark, because the selector only ever
+  // considers `terminal_ms IS NULL` rows: a `local-error` row that kept its
+  // mark could never be reconciled and the operator retry would be a silent
+  // no-op. Nothing else moves — generation, external id, check run id, desired,
+  // observed and the proof link are all retained, and `observed` is NOT
+  // rewritten, so this never pretends the remote run completed.
+  //
+  // The "no newer active generation" precondition is a correlated EXISTS over
+  // the same key: the row being reopened must still be the newest unfinished
+  // identity for its key, so an old superseded row stays put for inspection.
   const result = await db
     .prepare(
       `UPDATE review_checks
           SET recovery_state = 'pending', attempts = 0, next_attempt_ms = NULL,
               last_error = NULL, holder = NULL, lease_until_ms = NULL,
               terminal_ms = NULL, updated_ms = ?
-        WHERE id = ?`,
+        WHERE id = ? AND app_id = ? AND installation_id = ? AND owner = ? AND repo = ? AND pr_number = ?
+          AND observed = 'unknown'
+          AND (lease_until_ms IS NULL OR lease_until_ms <= ?)
+          AND NOT EXISTS (
+            SELECT 1 FROM review_checks n
+             WHERE n.attempt_key = review_checks.attempt_key
+               AND n.${NONTERMINAL_WHERE}
+               AND n.generation > review_checks.generation
+          )`,
     )
-    .bind(input.nowMs, input.attemptId)
+    .bind(
+      input.nowMs,
+      input.attemptId, input.scope.appId, input.scope.installationId,
+      input.scope.owner, input.scope.repo, input.scope.prNumber,
+      input.nowMs,
+    )
     .run();
   return result.meta.changes === 1;
 }
