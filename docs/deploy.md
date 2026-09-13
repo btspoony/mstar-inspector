@@ -185,8 +185,37 @@ settings; redeploy to change:
 > 5. Spot-check the dashboard: no `REVIEW_ENABLED` copy on any page; the
 >    Pause/Resume switch is the only review control.
 
-GitHub App setup (permissions, webhook events, installation):
-`.mstar/iterations/v0.2/guides/github-app-runbook.md`.
+#### GitHub App permissions (fresh-App contract)
+
+The App is created by the dashboard manifest flow (`src/dashboard/manifest.ts`
+`buildManifest`); the requested permission set is the locked contract in
+[`.mstar/specs/review-lifecycle.md`](../.mstar/specs/review-lifecycle.md) §7.6
+and mirrored in `.env.example`:
+
+| Permission | Access | Why |
+|---|---|---|
+| Contents | **write** | Worker-only, one purpose: resolving positively verified, Inspector-owned review threads. No code-write / push / merge authority. |
+| Metadata | read | required by GitHub |
+| Pull requests | **write** | the review and its line comments |
+| Issues | **write** | the single overall-comment upsert |
+
+Plan 68 (M7) will add `checks: write` for advisory Checks — plan 67 does not
+request it, and no Check Run behavior is shipped here.
+
+Two credential boundaries back this set: the Worker mints a purpose-scoped
+`review-write` grant that never leaves the Worker, while every Sandbox and
+smoke token is the explicitly **repository-scoped, read-only** `sandbox-read`
+grant (`contents: read`, `metadata: read`); the Worker asserts the returned
+capabilities (`assertSandboxGrant`) and fails closed on anything broader or
+unscoped. Webhook events stay `pull_request` and `issue_comment`.
+
+> **Evidence caliber:** the permission set, the purpose-scoped mint/assert and
+> the recovery lanes are covered by the implementation's scoped behavioral
+> tests and static checks. Live GitHub / GitHub App behavior is **not**
+> verified — no live scoped run was authorized for this delivery
+> (§7.13). The historical v0.2 iteration runbook (single global App,
+> `wrangler secret put APP_ID`) is superseded by the dashboard manifest flow
+> above and is no longer a permission reference.
 
 ### Local tooling
 
@@ -287,8 +316,11 @@ smoke → record the digest.
    `src/pipeline/smoke-entry.ts`). The orchestrator reads **shell env only**
    (never Worker secrets, never D1): `SMOKE_APP_ID` + `SMOKE_PRIVATE_KEY`
    (inline PEM or `~`-relative/absolute path — the local orchestrator's
-   dual form, resolved by scripts/sandbox-smoke.ts) for the
-   installation-token mint, plus the optional
+   dual form, resolved by scripts/sandbox-smoke.ts) for the purpose-scoped
+   `sandbox-read` installation-token mint — restricted to the one GH_REPO
+   repository and asserted read-only against the **returned** grant
+   (`assertSandboxGrant`), so a broader or unscoped capability fails the smoke
+   closed — plus the optional
    `INSTALLATION_ID` (default 156621513), `GH_REPO` (default
    btspoony/todo-bots), `GH_PR` (default 1), `SMOKE_ROUTE` (default `/smoke`),
    and `ARK_API_KEY` (required when `SMOKE_ROUTE=/smoke-review`):
@@ -445,7 +477,9 @@ Prerequisites: dashboard OAuth (`OAUTH_CLIENT_ID` /
    manifest to `https://github.com/settings/apps/new` — the manifest's
    webhook URL is the App's OWN route `{origin}/webhook/{slug}`
    (`src/dashboard/manifest.ts` `buildManifest`). Confirm the requested
-   permissions on GitHub.
+   permissions on GitHub — `contents: write`, `metadata: read`,
+   `pull_requests: write`, `issues: write` (rationale and the Worker-only
+   `contents: write` boundary: § GitHub App permissions above).
 3. **Manifest commit** — GitHub redirects back to
    `/dashboard/manifest/callback`; the dashboard exchanges the code, parks
    the credentials in the single-use hold cookie, and shows the confirm
@@ -702,9 +736,13 @@ Deployed image record (DOCS-01 baseline):
 
 - `wrangler.jsonc → triggers.crons: ["*/15 * * * *"]` — every 15 min the
   `scheduled` handler (src/worker/index.ts) runs the sweep
-  (src/worker/sweep.ts): counts `review_failures` rows over the trailing 24h
-  across ALL stages (parse + runner/sandbox/pipeline; the per-attempt rows
-  written by plan 18 T2 make this table the sufficient failure signal).
+  (src/worker/sweep.ts) and then the plan-67 lifecycle reconciler
+  ([§ Lifecycle recovery](#lifecycle-recovery-plan-67-7111)), each stage in its
+  own try/catch so neither can break the other (plan 68 appends a Check
+  reconciler after them). The sweep counts `review_failures` rows over the
+  trailing 24h across ALL stages (parse + runner/sandbox/pipeline; the
+  per-attempt rows written by plan 18 T2 make this table the sufficient failure
+  signal).
 - Threshold: `failures_24h > 5` (per-attempt semantics — a DLQ'd message
   leaves up to 4 rows: 1 initial delivery + max_retries = 3 retries).
   Constants pinned in src/worker/sweep.ts (`SWEEP_FAILURE_THRESHOLD`,
@@ -716,8 +754,52 @@ Deployed image record (DOCS-01 baseline):
 - DLQ depth is NOT read (no CF API token surface — `dlq_check: "skipped"`);
   guard-leak cleanup stays out of cron (KV guard TTL is the leak upper
   bound).
-- The sweep is read-only: D1 query + log/webhook only — no queue/KV/D1
-  mutation.
+- The sweep stage is read-only: D1 query + log/webhook only — no queue/KV/D1
+  mutation. (The composed lifecycle-recovery stage below does write its own
+  D1 journal rows and may call GitHub, strictly within its own bounds.)
+
+### Lifecycle recovery (plan 67 §7.11.1)
+
+The same `*/15 * * * *` trigger runs a second, independent stage after the
+sweep: `reconcileReviewLifecycle` (`src/worker/lifecycle-reconcile.ts`), in its
+own try/catch and throw-proof by contract. It completes plan-67 work from the
+private D1 publication journal and **never re-runs a paid review**:
+
+- confirmed publications are applied locally (no GitHub call — works even while
+  GitHub is unavailable);
+- a due staged publication older than 60s is sent once with its exact prepared
+  body, unless a newer round supersedes it;
+- an interrupted send is proved read-only by the exact App-owned marker plus
+  body digest and then applied; an unprovable send stays `unknown` instead of
+  being re-created;
+- authorized thread resolutions are retried through the same §7.5
+  ownership/HEAD/conversation fences as the inline attempt — a finding's
+  *addressed* disposition is never itself a resolve; only a proven-owned thread
+  with a confirmed remote `isResolved` counts, and anything weaker stays
+  visible as unresolved.
+
+Retries are bounded with backoff; at the cap the row stays visible as a terminal
+local-error/unknown and is never deleted (the structured warning carries
+App/scope/work ID and reason — no payload, no secret). App-state suspension is
+per exact `(app_id, installation_id)` pair; recovery distinguishes the reasons:
+
+- a **disabled** App suspends its pending rows durably (no mutation while
+  disabled) and they become eligible again only after **that exact App** is
+  re-enabled — each run re-checks the pair, and due rows resume with the same
+  IDs under fresh fencing;
+- a **missing mapping, deleted App or live identity mismatch** suspends rows
+  durably for operator inspection and does **not** resume automatically on
+  re-enable: a deleted App can never be re-activated, and recovery only
+  proceeds once the operator restores the mapping or corrects the App's
+  credentials.
+
+Pause/kill-switch stops new reviews, publications and line-comment creation.
+The bounded exceptions — local apply of already-confirmed publications,
+read-only proof discovery, and previously-authorized resolution retries —
+continue only for an **otherwise active** exact App; a disabled, deleted,
+missing or identity-mismatched App keeps its suspension (frozen policy).
+Budgets and the exact selection predicates: `.mstar/specs/review-lifecycle.md`
+§7.11.1.
 
 ### Secrets inventory delta
 
@@ -732,7 +814,8 @@ Deployed image record (DOCS-01 baseline):
 `review_failures` is an append-only per-attempt event log: a DLQ'd message
 leaves up to 4 rows (1 initial delivery + max_retries = 3 retries), so the
 table grows with every failed attempt. Retention is **runbook-executed** —
-the cron sweep is read-only by design (AL-6) and must never mutate D1.
+the cron sweep **stage** is read-only by design (AL-6) and must never mutate
+D1 (the separate lifecycle-recovery stage owns its own journal rows).
 
 Monthly (or when the table grows noticeably), delete rows older than 30
 days:
