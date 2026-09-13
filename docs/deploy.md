@@ -56,7 +56,7 @@ exist before the first deploy:
   `sandbox-image/omp/Dockerfile` at deploy time (`image_build_context: "."`,
   `instance_type: lite`, `max_instances: 1`).
 
-### D1 migrations (0001–0018, forward-only)
+### D1 migrations (0001–0021, forward-only)
 
 ```bash
 wrangler d1 migrations apply mstar-inspector-db --remote   # production
@@ -83,6 +83,9 @@ wrangler d1 migrations apply mstar-inspector-db            # local dev
 | `0016_users_login_nocase_unique` | NOCASE unique index on `users.github_login` — case-insensitive membership uniqueness (plan 34 QC W-1) |
 | `0017_app_model_chains` | default + named model chains (`app_model_chains` + `app_model_chain_seats`), backfilled from `app_model_config`/`app_model_roles` (plans 35/39) |
 | `0018_app_sandbox_images` | `github_apps.sandbox_image_id` NOT NULL DEFAULT 'omp' — backfills live AND soft-deleted rows, so no manager visit is needed after deploy (plan 37) |
+| `0019_github_apps_metadata` | five metadata-only ADD COLUMNs caching the App's public GitHub profile (`github_name`/`github_description`/`github_html_url`/`github_avatar_url`/`github_metadata_synced_at`) for the settings info card — all nullable, safe over a live DB (plan 53) |
+| `0020_finding_lifecycle` | the finding-lifecycle and private pre-publication journal tables (`review_publications`, `review_findings`, `review_finding_rounds`, `review_threads`) — publication proof, closure and thread-resolution state (plan 67, spec §7.1) |
+| `0021_review_checks` | the per-attempt Check registry (`review_checks`) behind the advisory Check Runs, with `UNIQUE(attempt_key, generation)` and the partial unique index keeping at most one nonterminal generation per attempt key (plan 68, spec §7.1/§7.9) |
 
 Migrations are **forward-only** (0002 precedent): never hand-edit an applied
 migration; add the next file.
@@ -451,8 +454,11 @@ docker run --rm --entrypoint /opt/verify-synthesis.sh <image>
 > Plan 20: activates the multi-App platform on a deployed Worker — the
 > `DASHBOARD_ENCRYPTION_KEY`, the dashboard registration flow, the per-App
 > webhook repoint, and the R1/R2 verification pins. Run AFTER § Deploy steps
-> and § Post-deploy smoke (the base Worker and D1 0001–0011 must be live);
-> the live execution is QA-coordinated (plan 20 Task 4).
+> and § Post-deploy smoke (the base Worker and D1 migrations **through
+> `0021`** must be live); the live execution is QA-coordinated (plan 20
+> Task 4). Historical note: plan 20 originally required `0001–0011`; later
+> plans extend the chain to `0021` (`0019` profile columns, `0020`
+> finding lifecycle, `0021` Check registry).
 
 ### 1. Set DASHBOARD_ENCRYPTION_KEY
 
@@ -490,7 +496,10 @@ either key for the other duty (rotation stays decoupled).
 Prerequisites: dashboard OAuth (`OAUTH_CLIENT_ID` /
 `OAUTH_CLIENT_SECRET`), `DASHBOARD_SESSION_SECRET`, an admin login
 (`ADMIN_LOGINS` bootstrap or the first-login fallback),
-`DASHBOARD_ENCRYPTION_KEY` set, and D1 migrations 0001–0011 applied.
+`DASHBOARD_ENCRYPTION_KEY` set, and D1 migrations applied **through
+`0021`** — the full forward-only chain above, not a historical prefix.
+`0020` supplies the finding-lifecycle/publication journal and `0021` the
+Check registry, so a review on this Worker fails without them.
 
 1. **Admin login** — open `/dashboard/login` and complete the GitHub OAuth
    flow. The first login against an empty `dashboard_users` table becomes
@@ -615,8 +624,9 @@ Rollback is `wrangler rollback` (see § Rollback below) — there is no legacy
 face to repoint to; the per-App webhook URL on GitHub is unchanged by a
 Worker rollback.
 
-- **D1 is forward-only** — never reverse migration 0011 on rollback; new
-  code tolerates the prior schema (0002 precedent), roll back code only.
+- **D1 is forward-only** — never reverse an applied migration on rollback
+  (the chain head is `0021`); new code tolerates the prior schema (0002
+  precedent), roll back code only.
 - **Secrets untouched** — rollback does not remove
   `DASHBOARD_ENCRYPTION_KEY`; rotate it explicitly when the rollback is
   security-motivated. A registered App's encrypted credentials stay valid
