@@ -951,6 +951,48 @@ export async function deferPublicationRecovery(
 }
 
 /**
+ * Undo a claim whose send never reached GitHub (spec §7.11.1). The run
+ * transport refuses a request BEFORE dispatch once the request allowance is
+ * spent; when that refusal lands inside an already-claimed publication send,
+ * the claim is pure bookkeeping (one attempt counted, phase moved
+ * `prepared`→`sending`) wrapped around work that never happened. This
+ * restores the exact pre-claim send state — `prepared` again, due (no
+ * `next_attempt_ms`), lease released, the attempt returned — so the
+ * publication stays retryable by the next run.
+ *
+ * The phase this row must NOT take is `unknown`: that means a send MAY have
+ * landed and is reserved for post-attempt uncertainty (§7.7), so recording a
+ * never-dispatched send there would strand a retryable publication behind
+ * read-only discovery permanently. A budget refusal is likewise not one of
+ * the 5 attempts: exhaustion is an admission outcome, not a failed send.
+ *
+ * Fenced on the live claim (`holder` + `lease_epoch`) and `phase='sending'`,
+ * so a row another invocation already moved (confirmed/failed/unknown) is
+ * left untouched — `false` tells the caller to report the unexpected state
+ * instead of assuming the restore applied. `lease_epoch` is deliberately not
+ * rewound: epochs are monotonic fencing tokens, and reusing one would let a
+ * stale holder win a later claim.
+ */
+export async function releaseUnspentPublicationClaim(
+  db: D1Like,
+  id: string,
+  lease: Lease,
+  nowMs: number,
+): Promise<boolean> {
+  const result = await db
+    .prepare(
+      `UPDATE review_publications
+       SET phase = 'prepared', attempts = attempts - 1,
+           holder = NULL, lease_until_ms = NULL, updated_ms = ?
+       WHERE id = ? AND holder = ? AND lease_epoch = ?
+         AND phase = 'sending' AND attempts > 0`,
+    )
+    .bind(nowMs, id, lease.holder, lease.epoch)
+    .run();
+  return result.meta.changes > 0;
+}
+
+/**
  * After an UNCERTAIN send/discovery attempt (spec §7.7 "Remote unknowns"):
  * the row becomes phase `unknown` (from `sending`) — the payload is retained
  * and ONLY read-only discovery may touch it — plus backoff and the released

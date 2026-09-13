@@ -543,7 +543,7 @@ describe("migrations/0020_finding_lifecycle.sql (plan 67 T1, spec review-lifecyc
     expect(reviewCount.n).toBe(1);
   });
 
-  test("creates the four lifecycle tables and the three recovery/rotation indexes", () => {
+  test("creates the four lifecycle tables and the recovery/rotation/scope indexes", () => {
     const db = createMigratedTestD1();
     const tables = db.raw
       .query("SELECT name FROM sqlite_master WHERE type = 'table' AND name IN ('review_publications','review_findings','review_finding_rounds','review_threads') ORDER BY name")
@@ -665,6 +665,36 @@ describe("migrations/0020_finding_lifecycle.sql (plan 67 T1, spec review-lifecyc
         )
         .run("0".repeat(40), "0".repeat(40)),
     ).toThrow(/FOREIGN KEY constraint failed/);
+  });
+
+  test("creates idx_publication_scope on review_publications(scope…,kind,phase) and the journal probe uses it (P67-QC-019)", () => {
+    const db = createMigratedTestD1();
+    const index = db.raw
+      .query("SELECT tbl_name FROM sqlite_master WHERE type = 'index' AND name = 'idx_publication_scope'")
+      .get() as { tbl_name: string } | null;
+    expect(index).not.toBeNull();
+    expect(index!.tbl_name).toBe("review_publications");
+    // The §7.0 scope prefix leads, then the probe's discriminating equalities
+    // — so the per-message lookup seeks instead of scanning every retained
+    // row of the scope.
+    const columns = db.raw.query("PRAGMA index_info(idx_publication_scope)").all() as Array<{ name: string }>;
+    expect(columns.map((c) => c.name)).toEqual([
+      "app_id", "installation_id", "owner", "repo", "pr_number", "kind", "phase",
+    ]);
+
+    // The degraded-journal probe (`hasUnprovenDegradedPublication`) is what
+    // the index exists for: without it the planner falls back to the
+    // scope-only UNIQUE autoindex and discards the whole non-degraded and
+    // terminal remainder of the scope.
+    const plan = db.raw
+      .query(
+        `EXPLAIN QUERY PLAN SELECT id FROM review_publications
+         WHERE app_id = 'app-1' AND installation_id = 123 AND owner = 'acme' AND repo = 'widgets' AND pr_number = 42
+           AND kind = 'degraded' AND proof_json IS NULL AND phase IN ('prepared','sending','unknown')
+         LIMIT 1`,
+      )
+      .all() as Array<{ detail: string }>;
+    expect(plan.some((p) => p.detail.includes("USING INDEX idx_publication_scope"))).toBe(true);
   });
 
   test("the rotation query binds the scope prefix through idx_finding_rotation (recorded plan)", () => {

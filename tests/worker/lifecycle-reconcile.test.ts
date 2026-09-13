@@ -36,6 +36,7 @@ import type { Scope } from "../../src/contracts/recheck";
 import {
   applyPublishedLifecycle,
   claimPublication,
+  listPublicationRecovery,
   listResolutionRecovery,
   recordPublicationProof,
   stagePublication,
@@ -1621,6 +1622,138 @@ describe("definitive pre-send rejection → durable failed phase (spec §7.7, P6
     expect(pubRow(db, "pub-1").phase).toBe("unknown");
     expect(summary.unknown).toBe(1);
     expect(summary.errors).toBe(1);
+  });
+});
+
+describe("budget refusal inside a claimed send (spec §7.11.1, P67-QC-018)", () => {
+  /**
+   * Issue `count` requests through the REAL run transport with the global
+   * fetch neutralized. Unlike `meterRequests`, this deliberately does NOT
+   * swallow the refusal: the transport's own throw propagates to the caller,
+   * which is exactly how the §7.5 surface experiences an exhausted allowance.
+   */
+  async function spendThrough(transport: ReconcileTransport, count: number): Promise<void> {
+    const realFetch = globalThis.fetch;
+    try {
+      globalThis.fetch = (async () => new Response("{}", { status: 200 })) as unknown as typeof fetch;
+      for (let i = 0; i < count; i += 1) {
+        await transport.fetchImpl(`https://api.github.com/x?n=${i}`);
+      }
+    } finally {
+      globalThis.fetch = realFetch;
+    }
+  }
+
+  test("a pre-dispatch refusal releases the claim: row back to due prepared, no attempt spent, re-sendable", async () => {
+    const db = createMigratedTestD1();
+    seedApp(db, APP);
+    await seedPrepared(db, "pub-1", degradedPayload(SCOPE), 120_000);
+
+    // The publication lane's own admission passes (its estimate fits), so the
+    // row IS claimed; the allowance then runs out INSIDE the send — the
+    // reachable arithmetic case this check pins.
+    const summary = await reconcile(db, {
+      now: () => T0,
+      reviewer: async (input) => {
+        const runTransport = input.transport!;
+        return okResolution({
+          planReviewUpsert: async (): Promise<UpsertPlan> => ({ action: "create", round: 1 }),
+          postPreparedDegraded: async () => {
+            await spendThrough(runTransport, RECONCILE_MAX_REQUESTS + 1);
+            return { posted: true, commentId: 777 };
+          },
+        });
+      },
+    });
+
+    // The publication was NEVER dispatched, so its durable state must stay
+    // sendable: `prepared` — not the post-attempt `unknown` that read-only
+    // discovery would then own forever — due, unleased, with the claim's
+    // attempt returned.
+    expect(pubRow(db, "pub-1")).toMatchObject({
+      phase: "prepared",
+      recovery_state: "pending",
+      attempts: 0,
+      lease_until_ms: null,
+    });
+    expect(summary.unknown).toBe(0);
+
+    // "No attempt spent" is what keeps the row immediately selectable: M8
+    // re-selects it on the very next pass with its full attempt budget.
+    const dueAgain = await listPublicationRecovery(db, T0, RECONCILE_SELECT_LIMIT);
+    expect(dueAgain.map((r) => r.id)).toContain("pub-1");
+
+    // And the next run really does send it, proving the refusal deferred the
+    // publication rather than abandoning it.
+    let sent = 0;
+    await reconcile(db, {
+      now: () => T0 + 1_000,
+      reviewer: okReviewer({
+        planReviewUpsert: async (): Promise<UpsertPlan> => ({ action: "create", round: 1 }),
+        postPreparedDegraded: async () => {
+          sent += 1;
+          return { posted: true, commentId: 777 };
+        },
+      }),
+    });
+    expect(sent).toBe(1);
+  });
+
+  test("the refusal is recognized through the cause chain a real transport rejection carries", async () => {
+    // Octokit does not let a custom transport error reach the lane intact:
+    // `@octokit/request`'s fetchWrapper re-wraps every non-abort rejection in
+    // a RequestError with the original parked on `cause`. If classification
+    // only unwrapped a bare throw, a real pre-dispatch refusal would read as
+    // post-attempt uncertainty and strand an unsent publication. This
+    // reproduces that exact wrap around the REAL refusal type.
+    const db = createMigratedTestD1();
+    seedApp(db, APP);
+    await seedPrepared(db, "pub-1", degradedPayload(SCOPE), 120_000);
+
+    const summary = await reconcile(db, {
+      now: () => T0,
+      reviewer: async (input) => {
+        const runTransport = input.transport!;
+        return okResolution({
+          planReviewUpsert: async (): Promise<UpsertPlan> => ({ action: "create", round: 1 }),
+          postPreparedDegraded: async () => {
+            try {
+              await spendThrough(runTransport, RECONCILE_MAX_REQUESTS + 1);
+            } catch (refusal) {
+              throw new Error("Request failed", { cause: refusal });
+            }
+            return { posted: true, commentId: 777 };
+          },
+        });
+      },
+    });
+
+    expect(pubRow(db, "pub-1")).toMatchObject({ phase: "prepared", attempts: 0, lease_until_ms: null });
+    expect(summary.unknown).toBe(0);
+  });
+
+  test("a post-attempt failure at the same boundary still becomes unknown (the distinction is not a blanket excuse)", async () => {
+    // Same lane, same claim, same throw site — but the error is not the
+    // budget refusal, so the send MAY have landed and `unknown` remains the
+    // honest phase. This is the guard against over-broad classification.
+    const db = createMigratedTestD1();
+    seedApp(db, APP);
+    await seedPrepared(db, "pub-1", degradedPayload(SCOPE), 120_000);
+
+    const summary = await reconcile(db, {
+      now: () => T0,
+      reviewer: okReviewer({
+        planReviewUpsert: async (): Promise<UpsertPlan> => ({ action: "create", round: 1 }),
+        postPreparedDegraded: async () => {
+          // Mentions the budget, but is NOT the typed refusal: identity, never
+          // message text, decides.
+          throw new Error("request failed while reporting: recovery request budget exhausted");
+        },
+      }),
+    });
+
+    expect(pubRow(db, "pub-1").phase).toBe("unknown");
+    expect(summary.unknown).toBe(1);
   });
 });
 

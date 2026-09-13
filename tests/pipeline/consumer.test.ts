@@ -277,6 +277,7 @@ const {
   reviewGuardTtlSeconds,
   guardRetryDelaysSeconds,
   DIFF_PREFETCH_MAX_BYTES,
+  INLINE_RESOLVE_MAX_ENTRIES,
 } = await import("../../src/pipeline/consumer");
 import type { PipelineEnv } from "../../src/pipeline/consumer";
 import type { ConsumerLog, ConsumerLogFields } from "../../src/pipeline/consumer";
@@ -3155,6 +3156,165 @@ describe("finding recheck & closure (plan 67 §7.7/§7.4/§7.10)", () => {
     const pub = db.raw.query("SELECT phase FROM review_publications").get() as { phase: string };
     expect(pub.phase).toBe("applied");
     expect(kvPuts).toHaveLength(1);
+  });
+});
+
+describe("inline resolution admission bound (spec §7.11.1, P67-QC-017 / P67-QC-020)", () => {
+  /**
+   * Seed `count` open lifecycle rows, each with its own pending association,
+   * so the round produces more eligible resolutions than the inline lane may
+   * start. Distinct `created_ms` values keep the §7.2 selection order (and
+   * therefore which entry goes unvisited) deterministic.
+   */
+  function seedOpenTargets(db: TestD1, count: number): Array<{ rowId: string; assocId: string }> {
+    const seeded: Array<{ rowId: string; assocId: string }> = [];
+    for (let i = 0; i < count; i += 1) {
+      const rowId = `open-row-${i}`;
+      const assocId = `open-assoc-${i}`;
+      const createdMs = 2_000 + i;
+      const original = { ...TARGET_ORIGINAL, fingerprintHint: `old-fp-${i}` };
+      db.raw
+        .prepare(
+          `INSERT INTO review_findings
+             (id, app_id, installation_id, owner, repo, pr_number, finding_id, original_json,
+              first_publication_id, last_publication_id, first_seen_sha, last_seen_sha,
+              first_seen_round, last_seen_round, state, created_ms, updated_ms)
+           VALUES (?, ?, 123, 'acme', 'widgets', 42, ?, ?, ?, ?, ?, ?, 1, 1, 'open', ?, ?)`,
+        )
+        .run(
+          rowId, TEST_APP_ID, `finding-${i}`, JSON.stringify(original),
+          PRIOR_PUB_ID, PRIOR_PUB_ID, PRIOR_SHA, PRIOR_SHA, createdMs, createdMs,
+        );
+      const intent = {
+        associationId: assocId,
+        findingRowId: rowId,
+        publicationId: PRIOR_PUB_ID,
+        scope: { appId: TEST_APP_ID, installationId: 123, owner: "acme", repo: "widgets", prNumber: 42 },
+        originalSha: PRIOR_SHA,
+        round: 1,
+        path: "src/auth.ts",
+        line: 21,
+        body: "old comment body",
+        bodySha256: "digest-old",
+      };
+      db.raw
+        .prepare(
+          `INSERT INTO review_threads
+             (id, finding_row_id, publication_id, app_id, installation_id, owner, repo, pr_number,
+              original_sha, round, intent_json, resolution_state, thread_id, created_ms, updated_ms)
+           VALUES (?, ?, ?, ?, 123, 'acme', 'widgets', 42, ?, 1, ?, 'pending', ?, ?, ?)`,
+        )
+        .run(assocId, rowId, PRIOR_PUB_ID, TEST_APP_ID, PRIOR_SHA, JSON.stringify(intent), `PRRT_${i}`, createdMs, createdMs);
+      seeded.push({ rowId, assocId });
+    }
+    return seeded;
+  }
+
+  /** Complete thread snapshots for `seeded` — the §7.4 fence for auto-resolution. */
+  function discussionFor(seeded: Array<{ rowId: string; assocId: string }>) {
+    return {
+      items: [],
+      issueCoverage: "complete" as const,
+      issueDigest: "issue-digest",
+      capturedMs: 0,
+      threads: seeded.map(({ assocId }) => ({
+        associationId: assocId,
+        threadId: `PRRT_${assocId}`,
+        commentId: 8,
+        headSha: SHA,
+        digest: `digest-${assocId}`,
+        commentCount: 1,
+        capturedMs: 0,
+        coverage: "complete" as const,
+        modelCoverage: "complete" as const,
+      })),
+    };
+  }
+
+  /** An `addressed` recheck result for every seeded row (all eligible to resolve). */
+  function recheckDocFor(seeded: Array<{ rowId: string }>): string {
+    return JSON.stringify({
+      schema: "mstar.recheck/v1",
+      headSha: SHA,
+      results: seeded.map(({ rowId }) => ({
+        rowId,
+        disposition: "addressed",
+        reason: "verified-fix",
+        evidence: {
+          kind: "current-code",
+          sliceId: "ev-1",
+          startLine: 20,
+          endLine: 21,
+          quote: ADDRESSED_QUOTE,
+          explanation: "The comparison now guards the fractional expiry.",
+        },
+        relatedCurrentFindingIndexes: [],
+      })),
+    });
+  }
+
+  function threadRowOf(db: TestD1, assocId: string): {
+    resolution_state: string;
+    attempts: number;
+    verified_json: string | null;
+    lease_until_ms: number | null;
+  } {
+    return db.raw
+      .prepare(`SELECT resolution_state, attempts, verified_json, lease_until_ms FROM review_threads WHERE id = ?`)
+      .get(assocId) as never;
+  }
+
+  test("admission exhaustion leaves the unvisited row durably pending with zero attempts and no resolve", async () => {
+    reset();
+    diffStdout = VALID_DIFF;
+    runnerStdout = JSON.stringify(VALID_OUTPUT);
+    // One more eligible association than the inline lane may start.
+    const count = INLINE_RESOLVE_MAX_ENTRIES + 1;
+    const db = await createSeededTestD1();
+    await seedPriorPublication(db);
+    const seeded = seedOpenTargets(db, count);
+    recheckFileContent = recheckDocFor(seeded);
+    commenterState.discussion = discussionFor(seeded);
+    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
+
+    await consumer(makeBatch(makePayload()));
+
+    // The lane really ran: every admitted entry reached discovery then resolve,
+    // so this is a bound being exercised — not a vacuous pass.
+    // The shared double records raw `args: unknown`; the consumer always
+    // passes the §7.5 shapes, so these two named casts are the boundary.
+    const discoverTarget = (call: CommenterCall): string => {
+      const args = call.args as { intent: { associationId: string } };
+      return args.intent.associationId;
+    };
+    const resolveTarget = (call: CommenterCall): string => {
+      const args = call.args as { associationId: string };
+      return args.associationId;
+    };
+    const discovered = commenterCalls.filter((c) => c.op === "discover").map(discoverTarget);
+    const resolved = commenterCalls.filter((c) => c.op === "resolve").map(resolveTarget);
+    expect(discovered).toEqual(seeded.slice(0, INLINE_RESOLVE_MAX_ENTRIES).map((s) => s.assocId));
+    expect(resolved).toEqual(discovered);
+
+    // The entry the lane declined to start is the ONLY observable difference:
+    // it never reached discovery or the mutation...
+    const unvisited = seeded[count - 1]!;
+    expect(discovered).not.toContain(unvisited.assocId);
+    expect(resolved).not.toContain(unvisited.assocId);
+
+    // ...and its durable row is exactly what M8 selects: still pending, the
+    // verified snapshot retained, zero attempts and no lease from this lane.
+    expect(threadRowOf(db, unvisited.assocId)).toMatchObject({
+      resolution_state: "pending",
+      attempts: 0,
+      lease_until_ms: null,
+    });
+    expect(threadRowOf(db, unvisited.assocId).verified_json).not.toBeNull();
+
+    // The operator-visible reason names the bound and the deferred work.
+    expect(
+      logLines.some((l) => l.msg.includes("inline resolution admission exhausted") && l.msg.includes(unvisited.assocId)),
+    ).toBe(true);
   });
 });
 

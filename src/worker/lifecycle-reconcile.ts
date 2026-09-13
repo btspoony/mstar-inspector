@@ -43,15 +43,20 @@
  *
  * Budgets (spec §7.11.1): ≤80 GitHub requests and 45s per run, ≤15 requests
  * per thread operation, each request ≤5s and capped by the remaining run
- * deadline. Costs are conservative per-operation RESERVATIONS checked before
- * the operation starts (the thread lane reserves its ≤15 up front), so
- * budget/deadline exhaustion stops a lane without spending an attempt (a
- * claim never happens). The ≤5s per-request bound is ENFORCED, not declared:
- * the App's commenter is built with a bounded `fetchImpl` that aborts every
- * request (identity probe, token mint and API calls alike) at
- * `min(5s, remaining run deadline)`, so a hung request cannot outlive the
- * run. Timeout and unknown outcomes stay conservative — the send is not
- * retried blindly, the row is deferred or capped durably.
+ * deadline. The per-operation envelopes are PRE-FLIGHT ADMISSION ESTIMATES
+ * that decide whether an operation may start; the ACTUAL requests are what
+ * the run is charged, metered at the single transport choke point every
+ * request funnels through. Reserving estimates AND metering real requests
+ * would double-count (a scan estimated at 3 that paginates 11 times must
+ * cost 11, not 14). Budget/deadline exhaustion therefore stops a lane before
+ * any claim — a claim never happens, so no attempt is spent — and a refusal
+ * inside an already-claimed send releases that claim back to due `prepared`
+ * rather than recording post-attempt uncertainty. The ≤5s per-request bound
+ * is ENFORCED, not declared: the App's commenter is built with a bounded
+ * `fetchImpl` that aborts every request (identity probe, token mint and API
+ * calls alike) at `min(5s, remaining run deadline)`, so a hung request
+ * cannot outlive the run. Timeout and unknown outcomes stay conservative —
+ * the send is not retried blindly, the row is deferred or capped durably.
  *
  * Throw-proof: the whole function is wrapped — a recovery failure (even a
  * throwing injected dependency) is logged and folded into `errors`; nothing
@@ -81,6 +86,7 @@ import {
   recordNeedsRecheck,
   recordPublicationProof,
   reenableLifecycleForApps,
+  releaseUnspentPublicationClaim,
   supersedePublication,
   suspendPublicationRecovery,
   suspendResolutionRecovery,
@@ -349,6 +355,51 @@ function reserve(budget: RunBudget, cost: number): void {
 }
 
 /**
+ * The run's request allowance refused a request BEFORE it was dispatched
+ * (spec §7.11.1: "budget exhaustion is not a failed attempt"). It is a
+ * distinct type because the refusal must be told apart from a send that
+ * MIGHT have reached GitHub: the caller restores the claimed publication to
+ * its due `prepared` state instead of recording post-attempt `unknown`, so a
+ * publication that was never sent is never stranded behind read-only
+ * discovery. Nothing dispatches, so no attempt is spent either.
+ *
+ * Thrown by the transport only; classified by chain in the lanes below.
+ */
+class RecoveryBudgetRefused extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "RecoveryBudgetRefused";
+  }
+}
+
+/**
+ * Does this error CHAIN carry a pre-dispatch budget refusal? Octokit does not
+ * let a custom transport error reach the caller intact: `fetchWrapper`
+ * re-wraps every non-abort rejection in `RequestError(message, 500, ...)`
+ * with the original parked on `cause` (`@octokit/request`), and the
+ * paginate/plugin layers re-wrap again. The refusal therefore has to be
+ * recognized by walking `cause` rather than by an `instanceof` at the throw
+ * site. The chain is walked by IDENTITY, never by message text — a message
+ * match would classify any error that merely mentions the budget as
+ * un-dispatched, which is exactly the false "never sent" claim this
+ * distinction exists to prevent. Each link is read defensively: `cause` is
+ * not typed on `Error`, and a hostile/cyclic cause chain must not hang the
+ * recovery lane, so the walk is bounded and deduplicated by identity.
+ */
+function isBudgetRefusal(error: unknown): boolean {
+  const seen = new Set<unknown>();
+  let current: unknown = error;
+  for (let depth = 0; depth < 8; depth += 1) {
+    if (current instanceof RecoveryBudgetRefused) return true;
+    if (typeof current !== "object" || current === null || seen.has(current)) return false;
+    seen.add(current);
+    if (!("cause" in current)) return false;
+    current = current.cause;
+  }
+  return false;
+}
+
+/**
  * The enforced per-request transport bound AND the actual-request meter
  * (§7.11.1: "each request ≤5s and additionally capped by remaining run
  * deadline"; ≤80 requests/run). Every request gets its own abort signal at
@@ -376,7 +427,7 @@ function buildTransport(budget: RunBudget, now: () => number): ReconcileTranspor
       // Admission + accounting for THIS request, atomically before dispatch.
       if (!canSpend(budget, now(), 1, false)) {
         return Promise.reject(
-          new Error(
+          new RecoveryBudgetRefused(
             `recovery request budget exhausted (spent=${budget.spent}/${RECONCILE_MAX_REQUESTS}, deadline=${budget.deadline}) — request not dispatched; work stays due`,
           ),
         );
@@ -538,12 +589,13 @@ const pairKeyOf = (scope: Scope): string => `${scope.appId}:${scope.installation
  * pair's pending rows durably (once per pair per run — attempts untouched,
  * no cross-App substitution).
  *
- * The live App-identity probe is a GitHub request, so its cost is charged
- * HERE, immediately after the factory settles and BEFORE the caller reserves
- * its own operation cost: a lane that resolves the pair first (the thread
- * lane) therefore accounts the probe before its ≤15-request operation
- * reservation, and the caller's pre-flight gate covers both costs together
- * (§7.11.1 ≤80/run). A cached pair resolves without a second charge.
+ * Transport metering only. The live App-identity probe the factory runs
+ * (`GET /app`) is a GitHub request like any other, so it is metered at the
+ * transport choke point (`buildTransport`) together with every later request
+ * this pair issues; nothing is charged here. Charging a per-operation
+ * estimate HERE on top of the real requests would double-count the probe and
+ * shrink the run's true §7.11.1 allowance. A cached pair resolves without a
+ * second probe, so it also costs nothing.
  */
 async function reviewerForPair(
   db: D1Like,
@@ -797,6 +849,32 @@ async function sendPreparedPublication(
         );
       }
       summary.errors += 1;
+      return;
+    }
+    if (isBudgetRefusal(error)) {
+      // The allowance refused a request BEFORE dispatch (§7.11.1: "budget
+      // exhaustion is not a failed attempt"). This send never left the
+      // Worker, so the claim is unwound — the row returns to due `prepared`
+      // with its attempt returned and stays re-sendable next run. Recording
+      // post-attempt `unknown` here would strand a publication that was
+      // never dispatched (P67-QC-018), and spending an attempt would charge
+      // a run's exhaustion against the publication.
+      const restored = await releaseUnspentPublicationClaim(db, row.id, lease, now());
+      if (!restored) {
+        // The claim was no longer ours (another invocation moved or released
+        // the row first). Report rather than assume the restore applied; the
+        // row keeps whatever truthful state its new owner gave it.
+        summary.errors += 1;
+        log.warn(
+          { event: "ops_lifecycle_publication_claim_restore_missed", detail: `publication=${row.id}` },
+          "budget refusal hit a claim that had already moved — row left to its current owner",
+        );
+        return;
+      }
+      log.warn(
+        { event: "ops_lifecycle_publication_budget_refused", detail: `publication=${row.id}` },
+        "publication send refused before dispatch — claim released, row stays due, no attempt spent",
+      );
       return;
     }
     // The send MAY have landed (§7.7): the honest phase is unknown —

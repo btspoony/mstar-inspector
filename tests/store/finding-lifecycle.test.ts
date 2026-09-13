@@ -51,6 +51,7 @@ import {
   PUBLICATION_MAX_BYTES,
   readPublicationProof,
   recordPublicationProof,
+  releaseUnspentPublicationClaim,
   retryLifecycleWork,
   selectAssessmentTargets,
   stagePublication,
@@ -213,8 +214,9 @@ async function stageClaimProve(db: TestD1, id: string, pay: PublicationPayload, 
 function publicationRow(db: TestD1, id: string): {
   phase: string; recovery_state: string; attempts: number; holder: string | null;
   lease_epoch: number; proof_json: string | null; applied_ms: number | null; confirmed_ms: number | null;
+  lease_until_ms: number | null; next_attempt_ms: number | null;
 } {
-  return db.raw.prepare("SELECT phase, recovery_state, attempts, holder, lease_epoch, proof_json, applied_ms, confirmed_ms FROM review_publications WHERE id = ?").get(id) as never;
+  return db.raw.prepare("SELECT phase, recovery_state, attempts, holder, lease_epoch, proof_json, applied_ms, confirmed_ms, lease_until_ms, next_attempt_ms FROM review_publications WHERE id = ?").get(id) as never;
 }
 
 describe("stagePublication (spec §7.7 staging)", () => {
@@ -290,6 +292,51 @@ describe("claimPublication / recordPublicationProof (spec §7.7 step 8)", () => 
     const lease = await stageClaimProve(db, "pub-1", payload(), 1000);
     expect(await applyPublishedLifecycle(db, "pub-1", lease, 2000)).toBe(true);
     expect(await claimPublication(db, "pub-1", "recovery", 3000)).toBeNull();
+  });
+
+  test("releaseUnspentPublicationClaim returns a never-dispatched claim to due prepared (P67-QC-018)", async () => {
+    const db = createSeededTestD1();
+    await stagePublication(db, { id: "pub-1", payload: payload(), nowMs: 1000 });
+
+    const lease = (await claimPublication(db, "pub-1", "lifecycle-reconcile", 2000)) ?? (() => { throw new Error("setup"); })();
+    // The claim already moved the row and counted one attempt.
+    expect(publicationRow(db, "pub-1").phase).toBe("sending");
+    expect(publicationRow(db, "pub-1").attempts).toBe(1);
+
+    expect(await releaseUnspentPublicationClaim(db, "pub-1", lease, 3000)).toBe(true);
+    // Exactly the pre-claim send state: prepared, no lease, attempt returned,
+    // and due — `next_attempt_ms` was never set, so the row is selectable by
+    // the very next recovery pass instead of waiting out a backoff.
+    const released = publicationRow(db, "pub-1");
+    expect(released.phase).toBe("prepared");
+    expect(released.attempts).toBe(0);
+    expect(released.holder).toBeNull();
+    expect(released.lease_until_ms).toBeNull();
+    expect(released.next_attempt_ms).toBeNull();
+    expect(await listPublicationRecovery(db, 3000, 10)).toHaveLength(1);
+
+    // It is a real release, not a terminal mark: the row re-claims normally.
+    const reClaim = await claimPublication(db, "pub-1", "lifecycle-reconcile", 4000);
+    expect(reClaim).not.toBeNull();
+    expect(publicationRow(db, "pub-1").phase).toBe("sending");
+    expect(publicationRow(db, "pub-1").attempts).toBe(1);
+  });
+
+  test("releaseUnspentPublicationClaim is fenced: a stale or already-terminal claim is refused", async () => {
+    const db = createSeededTestD1();
+    await stagePublication(db, { id: "pub-1", payload: payload(), nowMs: 1000 });
+    const lease = (await claimPublication(db, "pub-1", "lifecycle-reconcile", 2000)) ?? (() => { throw new Error("setup"); })();
+
+    // A foreign holder or a stale epoch cannot unwind someone else's claim.
+    expect(await releaseUnspentPublicationClaim(db, "pub-1", { ...lease, holder: "other" }, 3000)).toBe(false);
+    expect(await releaseUnspentPublicationClaim(db, "pub-1", { ...lease, epoch: lease.epoch + 5 }, 3000)).toBe(false);
+    expect(publicationRow(db, "pub-1").phase).toBe("sending");
+
+    // Once proof landed the row is confirmed — a budget refusal can no longer
+    // un-send it, so the release must refuse rather than fabricate `prepared`.
+    expect(await recordPublicationProof(db, "pub-1", lease, proof("pub-1", payload(), 3000))).toBe(true);
+    expect(await releaseUnspentPublicationClaim(db, "pub-1", lease, 4000)).toBe(false);
+    expect(publicationRow(db, "pub-1").phase).toBe("confirmed");
   });
 
   test("proof recording fails closed on holder/epoch/publication mismatch", async () => {

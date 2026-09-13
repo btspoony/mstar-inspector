@@ -85,6 +85,7 @@ CREATE TABLE review_publications (
   UNIQUE(app_id, installation_id, owner, repo, pr_number, head_sha, kind)
 );
 CREATE INDEX idx_publication_recovery ON review_publications(recovery_state,next_attempt_ms,lease_until_ms);
+CREATE INDEX idx_publication_scope ON review_publications(app_id,installation_id,owner,repo,pr_number,kind,phase);
 
 CREATE TABLE review_findings (
   id TEXT PRIMARY KEY,

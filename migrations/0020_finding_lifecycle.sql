@@ -16,7 +16,9 @@
 --
 -- The DDL below is copied verbatim from spec §7.1 — the spec stays the
 -- single normative copy (plan convention: DDL single source; the migration
--- file is the executable form, edits go through the spec first).
+-- file is the executable form, edits go through the spec first). The
+-- `idx_publication_scope` index was added by the plan-67 QC follow-up
+-- (P67-QC-019) and is mirrored in the spec in the same change.
 --
 -- Conventions (spec §7.0): timestamps are integer Unix milliseconds from
 -- one supplied clock per transaction (no mixed datetime/ISO columns);
@@ -44,6 +46,18 @@ CREATE TABLE review_publications (
   UNIQUE(app_id, installation_id, owner, repo, pr_number, head_sha, kind)
 );
 CREATE INDEX idx_publication_recovery ON review_publications(recovery_state,next_attempt_ms,lease_until_ms);
+-- Scope-led index for the per-message degraded-journal probe (spec §7.7 step
+-- 11 / P67-QC-019). `hasUnprovenDegradedPublication` asks "does THIS scope
+-- still hold an unproven degraded publication?" on every review message,
+-- filtering the full `(app_id, installation_id, owner, repo, pr_number)`
+-- scope plus `kind`/`phase`, while `proof_json IS NULL` rides as an index
+-- filter. Without it that probe falls back to the scope-only UNIQUE
+-- autoindex and discards every non-degraded or terminal row of the scope;
+-- review_publications retains failed/superseded rows indefinitely, so the
+-- discarded set only grows. `kind` precedes `phase` because kind is a single
+-- equality and phase is the optional IN list, keeping the seek prefix as
+-- long as possible.
+CREATE INDEX idx_publication_scope ON review_publications(app_id,installation_id,owner,repo,pr_number,kind,phase);
 
 CREATE TABLE review_findings (
   id TEXT PRIMARY KEY,
