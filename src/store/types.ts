@@ -89,6 +89,110 @@ export type RecurrenceGroup = {
 };
 
 /**
+ * Raw rows of the finding-lifecycle tables (plan 67 Task 1, migration
+ * `0020_finding_lifecycle.sql` — DDL single source; spec review-lifecycle
+ * §7.1 owns the normative shapes). Snake_case D1 column names, same
+ * convention as `ReviewRow` / `FindingRow`. The typed journal domain
+ * shapes (`PublicationPayload`, `PublicationRow`, `Lease`, …) live in
+ * `src/store/finding-lifecycle.ts` / `src/contracts/recheck.ts`; these are
+ * the storage-layer rows they map from. Timestamps are integer Unix
+ * milliseconds (spec §7.0), not the datetime TEXT of the 0001 tables.
+ */
+
+/** A row of the `review_publications` journal (private — spec §7.1 Visibility). */
+export type ReviewPublicationRow = {
+  id: string;
+  app_id: string;
+  installation_id: number;
+  owner: string;
+  repo: string;
+  pr_number: number;
+  head_sha: string;
+  kind: string;
+  phase: string;
+  payload_json: string;
+  proof_json: string | null;
+  holder: string | null;
+  lease_epoch: number;
+  lease_until_ms: number | null;
+  attempts: number;
+  next_attempt_ms: number | null;
+  recovery_state: string;
+  last_error: string | null;
+  created_ms: number;
+  updated_ms: number;
+  confirmed_ms: number | null;
+  applied_ms: number | null;
+};
+
+/** A row of the `review_findings` lifecycle table. */
+export type ReviewFindingRow = {
+  id: string;
+  app_id: string;
+  installation_id: number;
+  owner: string;
+  repo: string;
+  pr_number: number;
+  finding_id: string;
+  original_json: string;
+  first_publication_id: string;
+  last_publication_id: string;
+  first_seen_sha: string;
+  last_seen_sha: string;
+  first_seen_round: number;
+  last_seen_round: number;
+  state: string;
+  last_assessment_json: string | null;
+  reopen_count: number;
+  last_scheduled_ms: number | null;
+  last_assessed_ms: number | null;
+  created_ms: number;
+  updated_ms: number;
+};
+
+/** A row of the `review_finding_rounds` per-round assessment history. */
+export type ReviewFindingRoundRow = {
+  id: string;
+  finding_row_id: string;
+  publication_id: string;
+  head_sha: string;
+  round: number;
+  assessment_json: string;
+  created_ms: number;
+};
+
+/** A row of the `review_threads` association/resolution-queue table. */
+export type ReviewThreadRow = {
+  id: string;
+  finding_row_id: string;
+  publication_id: string;
+  app_id: string;
+  installation_id: number;
+  owner: string;
+  repo: string;
+  pr_number: number;
+  original_sha: string;
+  round: number;
+  intent_json: string;
+  review_id: number | null;
+  comment_id: number | null;
+  thread_id: string | null;
+  resolution_state: string;
+  verified_json: string | null;
+  holder: string | null;
+  lease_epoch: number;
+  lease_until_ms: number | null;
+  attempts: number;
+  next_attempt_ms: number | null;
+  superseded_by_publication_id: string | null;
+  resolved_ms: number | null;
+  late_change: number;
+  last_error: string | null;
+  created_ms: number;
+  updated_ms: number;
+};
+
+/**
  * Narrow D1 face the ArtifactStore adapter depends on (plan Clarify 5):
  * prepare/bind/first/all/run + batch. A real `D1Database` satisfies this
  * structurally; tests provide a bun:sqlite-backed implementation via

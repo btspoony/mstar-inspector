@@ -23,7 +23,8 @@ later analysis.
 - **Multi-App from one deployment** — register any number of GitHub Apps through the dashboard; each gets its own slug, encrypted credentials, BYOK provider keys, and model chain
 - **Isolated execution** — every review runs in a one-shot Cloudflare Sandbox container (clone → review → destroy), with no secrets baked into the image
 - **Structured results** — reviews emit a `mstar.review/v1` envelope (verdict + classified findings) stored in D1, so dedup, recurrence, and health analytics are possible later
-- **Fail-closed by design** — a global kill-switch gates everything, and every App must bring its own provider keys and model chain: a misconfigured App's reviews fail loudly, never on someone else's credentials
+- **Retained finding lifecycle** — unresolved findings survive across rounds: each round re-verifies them against the current code and discussion, reports the outcome in the same overall comment, and automatically resolves only the Inspector-owned review threads it can prove are its own and positively fixed (a finding's *addressed* disposition is never equated with a *resolved* GitHub thread)
+- **Fail-closed by design** — the global kill-switch blocks new reviews (including their model runs), publications and line-comment creation; only the bounded [recovery exceptions](docs/deploy.md#lifecycle-recovery-plan-67-7111) may still finish already-authorized work, and only for an otherwise active App. Every App must bring its own provider keys and model chain: a misconfigured App's reviews fail loudly, never on someone else's credentials
 
 ## Architecture
 
@@ -129,6 +130,12 @@ Two deployment paths — pick the one that matches who you are:
 
 - **Per-App routing**: GitHub delivers webhooks to `POST /webhook/:appSlug`. The Worker resolves the slug, verifies the signature with that App's own decrypted secret, and enqueues a review job tagged with the App's identity. There is no other review entry point.
 - **Queue → Sandbox**: a Cloudflare Queue consumer clones the PR inside a one-shot Sandbox container and runs a multi-seat agent session — see [Agent runtimes](#agent-runtimes).
+- **Purpose-scoped credentials**: the Worker mints two installation grants from one auth point, each restricted to the one repository. The Sandbox always receives the `sandbox-read` grant (`contents: read`, `metadata: read`, `pull_requests: read` — the last covers the `gh pr diff` step, which runs with exactly this token) and the Worker asserts the *returned* capabilities before use, so a broader or unscoped token fails closed and never reaches a review container. GitHub writes ride a separate `review-write` grant.
+- **Permissions**: the App manifest requests `contents: write`, `metadata: read`, `pull_requests: write`, `issues: write`. `contents: write` exists for exactly one Worker-only purpose — resolving positively verified, Inspector-owned review threads — and grants no model, push, merge or code-write authority. A later plan adds `checks: write` for advisory Checks; it is not part of this permission set.
+- **Addressed is not resolved**: a finding is `addressed` from typed code evidence; a GitHub thread is `resolved` only after the Worker proves the thread is its own (opaque Inspector association plus the App's authenticated identity), re-checks the reviewed HEAD and the exact conversation it inspected, and receives a confirmed `isResolved` from GitHub. Failures, ambiguity and stale context keep the row open and visible instead of claiming a resolve.
+- **Crash-safe publication**: the complete publication payload is staged privately in D1 before any GitHub mutation. If a crash or API failure interrupts the send or the subsequent database apply, the 15-minute cron reconciler completes it from that journal — or retries an already-authorized thread resolution — without re-running the paid review, with bounded retries and a visible terminal give-up state. Contract: [`.mstar/specs/review-lifecycle.md`](.mstar/specs/review-lifecycle.md) §7.
+
+> The lifecycle, credential and recovery behavior above is covered by the implementation's scoped behavioral tests and static checks. Live GitHub / GitHub App behavior — the returned installation grant and remote thread resolution in particular — is **not** verified in this repository: no live scoped run was authorized (spec §7.13).
 
 
 ## Agent runtimes
@@ -168,7 +175,7 @@ bun test
 
 - Local `wrangler dev` secrets go in `.dev.vars` (gitignored) — see `.env.example`.
 - Review runner CLI (the in-image entry): `bun run review --level <quick|default> --input <json-file>` — prints the `mstar.review/v1` envelope JSON on stdout.
-- Sandbox smoke: `bun run scripts/sandbox-smoke.ts` (requires `SMOKE_APP_ID` / `SMOKE_PRIVATE_KEY`; see the file header).
+- Sandbox smoke: `bun run scripts/sandbox-smoke.ts` (requires `SMOKE_APP_ID` / `SMOKE_PRIVATE_KEY`; see the file header) — it mints the same repository-scoped **read-only** `sandbox-read` grant the Worker uses and fails closed on any broader returned capability; full runbook in [`docs/deploy.md`](docs/deploy.md#sandbox-smoke).
 
 ## Documentation
 

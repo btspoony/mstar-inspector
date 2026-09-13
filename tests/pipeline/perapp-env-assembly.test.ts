@@ -46,7 +46,7 @@ import { createAppConfigStore } from "../../src/dashboard/app-config-store";
 import { createSecretbox } from "../../src/dashboard/secretbox";
 import { getSandboxImage } from "../../src/contracts/sandbox-images";
 import { sk, fakePem } from "../helpers/fake-secrets";
-import type { CommenterEnv, ReviewCommenter } from "../../src/pipeline/comment";
+import type { CommenterEnv, InstallationTokenGrant, ReviewCommenter, TokenInput } from "../../src/pipeline/comment";
 import type { ConsumerLog, ConsumerLogFields, PipelineEnv } from "../../src/pipeline/consumer";
 
 /** base64 of exactly 32 bytes (the secretbox master-key requirement). */
@@ -190,27 +190,54 @@ mock.module("@cloudflare/sandbox", () => ({
 const appCalls: string[] = [];
 
 const appCommenterFactory = mock((_cred: CommenterEnv): ReviewCommenter => ({
-  getInstallationToken: mock(async () => {
+  // Plan 67 §7.6: the consumer's sandbox path asserts the RETURNED grant
+  // (assertSandboxGrant) — the double returns a minimal compliant
+  // sandbox-read grant scoped to the requested repository.
+  getInstallationToken: mock(async (input: TokenInput) => {
     appCalls.push("token");
-    return "app-token";
+    return {
+      token: "app-token",
+      permissions: { contents: "read", metadata: "read", pull_requests: "read" },
+      repositoryNames: [input.scope.repo],
+      repositorySelection: "selected",
+    } satisfies InstallationTokenGrant;
   }),
-  postReview: mock(async () => {
+  // Plan 67 §7.7: the pre-staging plan read ("plan"), then the prepared
+  // send ("post" — the EXACT staged body).
+  planReviewUpsert: mock(async () => {
+    appCalls.push("plan");
+    return { action: "create", round: 1 } as const;
+  }),
+  planDegradedUpsert: mock(async () => {
+    appCalls.push("plan-degraded");
+    return { action: "create", round: 1 } as const;
+  }),
+  postPreparedReview: mock(async () => {
     appCalls.push("post");
-    return 1;
+    return { commentId: 101 };
   }),
-  postDegraded: mock(async () => {
+  postPreparedDegraded: mock(async () => {
     appCalls.push("degrade");
+    return { posted: true, commentId: 202 };
   }),
   // Bugbot degraded-comment lifecycle: the success path runs the delete
   // scan (no stale comment → the real implementation finds nothing); the
   // double is a no-op outcome so the flow exercises the real call.
   deleteDegradedComment: mock(async () => ({ deleted: 0, skipped: 0, errors: [] })),
-  // Plan 18 T3 line comments: VALID_OUTPUT has no findings → never called.
-  fetchPrDiff: mock(async () => {
-    throw new Error("unexpected: no qualifying findings → no diff prefetch");
-  }),
+  // Plan 67 T4 line comments: VALID_OUTPUT has no findings → never called.
   postLineComments: mock(async () => {
     throw new Error("unexpected: no qualifying findings → no line comments");
+  }),
+  // Plan 67 §7.8 discussion capture + §7.5 resolution: no open lifecycle
+  // rows in these fixtures → never triggered.
+  listDiscussion: mock(async () => {
+    throw new Error("unexpected: listDiscussion requires open lifecycle rows");
+  }),
+  discoverThread: mock(async () => {
+    throw new Error("unexpected: discoverThread requires queued resolutions");
+  }),
+  resolveFindingThread: mock(async () => {
+    throw new Error("unexpected: resolveFindingThread requires queued resolutions");
   }),
 }));
 
@@ -342,7 +369,7 @@ describe("per-App runner env assembly (plan 14 Task 3, spec § Per-App BYOK)", (
     expect(sources).toEqual({ anthropic: "app", openai: "app", ark: "app" });
     const cfgLine = logLines.find((l) => l.fields.config_source !== undefined);
     expect(cfgLine?.fields.config_source).toBe("app");
-    expect(appCalls).toEqual(["token", "post"]);
+    expect(appCalls).toEqual(["token", "plan", "post"]);
   });
 
   test("chain provider without a configured key → fail closed after App resolution, no global fallback (AL-24-5)", async () => {
@@ -447,7 +474,7 @@ describe("per-App runner env assembly (plan 14 Task 3, spec § Per-App BYOK)", (
     expect(xEnv.OMP_REVIEW_MODEL).toBe("openai/gpt-app,anthropic/claude-app");
     const cfgLines = logLines.filter((l) => l.fields.config_source !== undefined);
     expect(cfgLines[0]?.fields.config_source).toBe("app");
-    expect(appCalls).toEqual(["token", "post"]); // only X reviewed
+    expect(appCalls).toEqual(["token", "plan", "post"]); // only X reviewed
     const rows = db.raw.query("SELECT model FROM reviews").all() as Array<{ model: string | null }>;
     expect(rows).toEqual([{ model: "openai/gpt-app" }]);
     const failRows = db.raw.query("SELECT error FROM review_failures").all() as Array<{ error: string }>;
@@ -756,7 +783,7 @@ describe("per-App runner env assembly (plan 14 Task 3, spec § Per-App BYOK)", (
     expect(env.ANTHROPIC_API_KEY).toBe(sk("healthy-anthropic-SECRET"));
     expect(env.ARK_API_KEY).toBe(ARK_KEY);
     expect(env.OMP_REVIEW_MODEL).toBe("openai/gpt-app,anthropic/claude-app");
-    expect(appCalls).toEqual(["token", "post"]);
+    expect(appCalls).toEqual(["token", "plan", "post"]);
     expect((db.raw.query("SELECT COUNT(*) AS n FROM reviews").get() as { n: number }).n).toBe(1);
     // The misconfigured sibling failed structurally: stage=pipeline row +
     // rethrow; zero sandbox/guard/GitHub side effects for it.
@@ -923,7 +950,7 @@ describe("per-role override provider key gate (Bugbot 7aaf18f4)", () => {
     // The healthy sibling completed with ITS OWN keys + chain.
     const env = runnerEnvs()[0]!;
     expect(env.OPENAI_API_KEY).toBe(sk("healthy-openai"));
-    expect(appCalls).toEqual(["token", "post"]); // only the healthy sibling reviewed
+    expect(appCalls).toEqual(["token", "plan", "post"]); // only the healthy sibling reviewed
     // The misconfigured sibling failed structurally through the F-001
     // channel: one review_failures row at stage=pipeline (payload sha) plus
     // the structured error log — zero sandbox/guard/GitHub side effects.
@@ -956,7 +983,7 @@ describe("per-role override provider key gate (Bugbot 7aaf18f4)", () => {
     const input = runnerInputs()[0]!;
     expect(input.modelOverrides).toEqual({ "code-reviewer": "openai/gpt-5:thinking, openai/gpt-5-mini" });
     expect(runnerEnvs()[0]!.OPENAI_API_KEY).toBe(sk("x-openai"));
-    expect(appCalls).toEqual(["token", "post"]);
+    expect(appCalls).toEqual(["token", "plan", "post"]);
   });
 
   test("role override referencing a CUSTOM provider declaration (with key) → gate passes, override reaches the runner input", async () => {
@@ -982,7 +1009,7 @@ describe("per-role override provider key gate (Bugbot 7aaf18f4)", () => {
 
     const input = runnerInputs()[0]!;
     expect(input.modelOverrides).toEqual({ "frontend-dev": "my-provider/m1" });
-    expect(appCalls).toEqual(["token", "post"]);
+    expect(appCalls).toEqual(["token", "plan", "post"]);
   });
 });
 
@@ -1076,7 +1103,7 @@ describe("custom provider env injection + runner input threading (plan 23 Task 3
     const env = runnerEnvs()[0]!;
     expect(env.CUSTOM_MY_PROVIDER_API_KEY).toBe(sk("custom-fixture-AAA"));
     expect(env.OMP_REVIEW_MODEL).toBe("my-provider/model-1");
-    expect(appCalls).toEqual(["token", "post"]); // the review completed
+    expect(appCalls).toEqual(["token", "plan", "post"]); // the review completed
     // key_source: custom for the declaration (id + env name, never the key).
     const customLines = keySourceLines().filter((l) => l.fields.key_source === "custom");
     expect(customLines).toHaveLength(1);
@@ -1209,7 +1236,7 @@ describe("sandbox image resolution at review execution (plan 37 Task 2)", () => 
     // The review completes (the ark-plan chain passed the gate through the
     // resolved image's catalogProviderId mapping) and the input stays
     // keyless — zero secret material.
-    expect(appCalls).toEqual(["token", "post"]);
+    expect(appCalls).toEqual(["token", "plan", "post"]);
     expect(JSON.stringify(input)).not.toContain(ARK_KEY);
   });
 
@@ -1267,6 +1294,6 @@ describe("sandbox image resolution at review execution (plan 37 Task 2)", () => 
     // The valid-id message started exactly one sandbox and completed.
     expect(sandboxCalls.length).toBeGreaterThan(0);
     expect(runnerInputs()).toHaveLength(1);
-    expect(appCalls).toEqual(["token", "post"]);
+    expect(appCalls).toEqual(["token", "plan", "post"]);
   });
 });

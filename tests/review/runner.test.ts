@@ -27,15 +27,21 @@
  *     shape-guarded; merged INTO the capability-host base with custom keys
  *     referenced as CUSTOM_<ID>_API_KEY env names (never literals); absent or
  *     empty = the capability base alone (byte-identical zero-custom path).
+ *   - the optional recheck channel (plan 67 Task 3, spec review-lifecycle
+ *     §7.8): the input's `recheck` document is shape-guarded and forwarded
+ *     verbatim; the optional `--recheck-out <path>` flag writes the runtime's
+ *     recheck result only when one exists, before the envelope reaches
+ *     stdout (a write failure = exit 1, no stdout); legacy input carries no
+ *     `recheck` key and writes no file.
  */
 
 import { afterEach, describe, expect, mock, test } from "bun:test";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import type { MstarReviewV1 } from "@mstar-harness/engine";
-import type { AgentRuntime, AgentRuntimeRunInput, CustomProviderDeclaration } from "../../src/review/runtime";
+import type { AgentRuntime, AgentRuntimeRunInput, CustomProviderDeclaration, ReviewRunResult } from "../../src/review/runtime";
 import { getSandboxImage } from "../../src/contracts/sandbox-images";
 import { capabilityHostsYaml } from "../../src/review/models-synthesis";
 import { main } from "../../src/review/runner";
@@ -43,6 +49,8 @@ import { sk } from "../helpers/fake-secrets";
 
 /** Envelope the fake runtime resolves with; overridden per test. */
 let fakeEnvelope: Record<string, unknown> | undefined;
+/** Recheck document the fake runtime resolves with (null = no result). */
+let fakeRecheck: Record<string, unknown> | null = null;
 /** Error the fake runtime rejects with; takes precedence when set. */
 let runtimeError: Error | undefined;
 /** Captured runReview inputs. */
@@ -50,10 +58,10 @@ const runInputs: unknown[] = [];
 
 /** Injected AgentRuntime double: records inputs, then rejects or resolves. */
 const fakeRuntime: AgentRuntime = {
-  runReview: mock(async (input: AgentRuntimeRunInput): Promise<MstarReviewV1> => {
+  runReview: mock(async (input: AgentRuntimeRunInput): Promise<ReviewRunResult> => {
     runInputs.push(input);
     if (runtimeError) throw runtimeError;
-    return fakeEnvelope as MstarReviewV1;
+    return { envelope: fakeEnvelope as MstarReviewV1, recheck: fakeRecheck as ReviewRunResult["recheck"] };
   }),
 };
 
@@ -104,11 +112,28 @@ function cleanupAgentDirs(): void {
 
 afterEach(() => {
   fakeEnvelope = ENVELOPE;
+  fakeRecheck = null;
   runtimeError = undefined;
   cleanupAgentDirs();
   runInputs.length = 0;
   delete process.env.OMP_REVIEW_MODEL;
 });
+
+/** A shape-valid recheck INPUT document (the runner guards shape only). */
+const RECHECK_INPUT_DOC = {
+  schema: "mstar.recheck-input/v1",
+  headSha: "0123456789abcdef0123456789abcdef01234567",
+  targets: [],
+  evidence: [],
+  discussion: { items: [], issueCoverage: "complete", issueDigest: "d", capturedMs: 1, threads: [] },
+};
+
+/** The valid recheck OUTPUT document the fake runtime returns when set. */
+const RECHECK_RESULT_DOC = {
+  schema: "mstar.recheck/v1",
+  headSha: "0123456789abcdef0123456789abcdef01234567",
+  results: [],
+};
 
 describe("runner entry (src/review/runner.ts)", () => {
   test("valid invocation → exit 0, stdout is ONLY the envelope JSON", async () => {
@@ -234,6 +259,19 @@ describe("runner entry (src/review/runner.ts)", () => {
       { customProviders: [{ provider_id: 42, base_url: "u", api: "a", model_ids: ["m"] }] },
       { customProviders: [{ provider_id: "p", base_url: "u", api: "a", model_ids: "nope" }] },
       { customProviders: [{ provider_id: "p", base_url: "u", api: "a", model_ids: [1, 2] }] },
+      // Plan 67 T3: shape-only guard on the optional recheck document.
+      { recheck: "nope" },
+      { recheck: 42 },
+      { recheck: [] },
+      { recheck: {} },
+      { recheck: { schema: "mstar.review/v1" } },
+      { recheck: { ...RECHECK_INPUT_DOC, schema: "other/v1" } },
+      { recheck: { ...RECHECK_INPUT_DOC, headSha: "" } },
+      { recheck: { ...RECHECK_INPUT_DOC, headSha: 42 } },
+      { recheck: { ...RECHECK_INPUT_DOC, targets: "not-an-array" } },
+      { recheck: { ...RECHECK_INPUT_DOC, evidence: "not-an-array" } },
+      { recheck: { ...RECHECK_INPUT_DOC, discussion: null } },
+      { recheck: { ...RECHECK_INPUT_DOC, discussion: [] } },
     ]) {
       const inputPath = writeInput(bad);
       const { code, stdout } = await runCli(["--level", "quick", "--input", inputPath]);
@@ -380,5 +418,100 @@ describe("runner entry (src/review/runner.ts)", () => {
     expect(yaml).not.toContain("https://evil.example.com/");
     expect(yaml).toContain('"my-provider":');
     rmSync(input.agentDir as string, { recursive: true, force: true });
+  });
+});
+
+describe("runner entry — --recheck-out channel (plan 67 Task 3)", () => {
+  test("recheck result + flag → file written BEFORE stdout; stdout stays envelope-only", async () => {
+    fakeEnvelope = ENVELOPE;
+    fakeRecheck = RECHECK_RESULT_DOC;
+    const outDir = mkdtempSync(join(tmpdir(), "recheck-out-"));
+    const outPath = join(outDir, "recheck.json");
+    const inputPath = writeInput({
+      capabilityHosts: OMP_HOSTS,
+      worktreePath: "/workspace/clone",
+      recheck: RECHECK_INPUT_DOC,
+    });
+    const { code, stdout, stderr } = await runCli([
+      "--level",
+      "quick",
+      "--input",
+      inputPath,
+      "--recheck-out",
+      outPath,
+    ]);
+
+    expect(code).toBe(0);
+    expect(stderr).toBe("");
+    expect(JSON.parse(stdout)).toEqual(ENVELOPE);
+    // The recheck document is the FILE, byte-written JSON; stdout never carries it.
+    expect(JSON.parse(readFileSync(outPath, "utf8"))).toEqual(RECHECK_RESULT_DOC);
+    // The typed recheck input rides into the runtime input verbatim.
+    expect(runInputs[0]).toMatchObject({ recheck: RECHECK_INPUT_DOC });
+  });
+
+  test("recheck result without the flag → exit 0, input still forwarded, nothing written", async () => {
+    fakeEnvelope = ENVELOPE;
+    fakeRecheck = RECHECK_RESULT_DOC;
+    const inputPath = writeInput({ capabilityHosts: OMP_HOSTS, recheck: RECHECK_INPUT_DOC });
+    const { code, stdout, stderr } = await runCli(["--level", "quick", "--input", inputPath]);
+
+    expect(code).toBe(0);
+    expect(stderr).toBe("");
+    expect(JSON.parse(stdout)).toEqual(ENVELOPE);
+    expect(runInputs[0]).toMatchObject({ recheck: RECHECK_INPUT_DOC });
+  });
+
+  test("null recheck result → no file created at the --recheck-out path", async () => {
+    fakeEnvelope = ENVELOPE;
+    fakeRecheck = null;
+    const outDir = mkdtempSync(join(tmpdir(), "recheck-out-"));
+    const outPath = join(outDir, "recheck.json");
+    const inputPath = writeInput({ capabilityHosts: OMP_HOSTS, recheck: RECHECK_INPUT_DOC });
+    const { code } = await runCli(["--level", "quick", "--input", inputPath, "--recheck-out", outPath]);
+
+    expect(code).toBe(0);
+    expect(existsSync(outPath)).toBe(false);
+  });
+
+  test("legacy input (no recheck field) → runtime input carries no recheck key, no file written", async () => {
+    fakeEnvelope = ENVELOPE;
+    const outDir = mkdtempSync(join(tmpdir(), "recheck-out-"));
+    const outPath = join(outDir, "recheck.json");
+    const inputPath = writeInput({ capabilityHosts: OMP_HOSTS, worktreePath: "/workspace/clone" });
+    const { code } = await runCli(["--level", "quick", "--input", inputPath, "--recheck-out", outPath]);
+
+    expect(code).toBe(0);
+    expect(Object.keys(runInputs[0] as Record<string, unknown>)).not.toContain("recheck");
+    expect(existsSync(outPath)).toBe(false);
+  });
+
+  test("--recheck-out write failure → exit 1, stdout empty, stderr diagnostic", async () => {
+    fakeEnvelope = ENVELOPE;
+    fakeRecheck = RECHECK_RESULT_DOC;
+    // A directory path makes writeFileSync throw (EISDIR) — a genuine I-O
+    // failure must not masquerade as success (exit codes unchanged).
+    const outDir = mkdtempSync(join(tmpdir(), "recheck-out-"));
+    const inputPath = writeInput({ capabilityHosts: OMP_HOSTS, recheck: RECHECK_INPUT_DOC });
+    const { code, stdout, stderr } = await runCli([
+      "--level",
+      "quick",
+      "--input",
+      inputPath,
+      "--recheck-out",
+      outDir,
+    ]);
+
+    expect(code).toBe(1);
+    expect(stdout).toBe("");
+    expect(stderr).toContain("cannot write recheck output");
+  });
+
+  test("--recheck-out without a value → usage error (exit 2)", async () => {
+    const inputPath = writeInput({ capabilityHosts: OMP_HOSTS });
+    const { code, stdout } = await runCli(["--level", "quick", "--input", inputPath, "--recheck-out"]);
+    expect(code).toBe(2);
+    expect(stdout).toBe("");
+    expect(runInputs).toHaveLength(0);
   });
 });

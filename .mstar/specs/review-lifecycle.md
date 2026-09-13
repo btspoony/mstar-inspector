@@ -1,6 +1,6 @@
 # Review lifecycle (review-lifecycle)
 
-> **Status:** Locked by PM, 2026-09-12, after product-manager review, architect review with correction continuation, and writing-specialist corpus hygiene. Product direction D1–D9 is preserved. This locks the contract; implementation remains unstarted under mode pause.
+> **Status:** Contract locked by PM 2026-09-12 after product-manager review, architect review with correction continuation, and writing-specialist corpus hygiene; product direction D1–D9 is preserved. Plan 67 (M8) is now implemented — T1–T5 merged, this documentation cutover is the final slice — with scoped local behavioral evidence only; live GitHub/App behavior stays unverified (§7.13).
 > **Cross-iteration authority:** This tracked file contains the normative schemas, APIs, state machines, ordering and recovery contracts. Plans 67/68 own assignments, current source anchors and scoped verification commands, not a second normative contract.
 > **Related authority:** [github-review-comment-mapping.md](github-review-comment-mapping.md) owns COMMENT-only publication vocabulary. The harness `mstar.review/v1` envelope and engine verdict remain unchanged. The local compass records D1–D9 verbatim; no normative contract below requires an ignored plan to interpret it.
 
@@ -17,8 +17,8 @@ M8 verifies retained earlier findings against current code and discussion, rende
 - **D5:** One fresh-App contract, no old-App migration/permission-acceptance UX, compatibility layer or rollout toggle. The user deletes old test Apps; agents do not delete Apps or data. Forward-only feature migrations are allowed.
 - **D6:** Automatic resolution after evidence-backed verification is required. Only exactly mapped Inspector-owned threads; absence-only, unresolved concerns, unverifiable evidence, stale HEAD and failed API calls never authorize a resolve claim.
 - **D7:** Worker-only contents:write is authorized for resolution. Sandbox tokens are explicitly repository-scoped and read-only; broad tokens never enter Sandbox, prompts, files or logs.
-- **D8:** origin/main → iteration/021-review-lifecycle → final PR main; primary main checkout remains the local harness control directory. Feature worktrees belong to future implementation.
-- **D9:** Pause after the sequential preparation chain and PM-owned lock/integration delivery. This architecture pass performs documentation changes only, not implementation, Git writes, deployment or live mutations.
+- **D8:** origin/main → iteration/021-review-lifecycle → final PR main; primary main checkout remains the local harness control directory. Plan implementation runs in feature worktrees.
+- **D9:** Pause after the sequential preparation chain and PM-owned lock/integration delivery. That preparation/architecture pass performed documentation changes only (no implementation, Git writes, deployment or live mutations); implementation then proceeded under plan 67's own tasks.
 
 ## 3. Product requirements
 
@@ -53,7 +53,7 @@ No App/data deletion, old-App backfill, broad historical scans, code edits by re
 
 - **67 / M8:** RL-1–RL-9, RL-11/12; §7.0–§7.8, §7.10, §7.11.1 and its own cron composition.
 - **68 / M7:** RL-10–RL-12; §7.9 and §7.11.2, extending the M8 credential/composition.
-- Both: §7.12–§7.13. Cross-plan consumer/manifest writes are serial. No implementation task is complete in preparation.
+- **Both:** §7.12–§7.13. Cross-plan consumer/manifest writes are serial. Plan 67's implementation delivered §7.0–§7.8, §7.10 and §7.11.1; plan 68 (§7.9, §7.11.2) is unimplemented.
 
 ## 7. Normative technical contract
 
@@ -85,6 +85,7 @@ CREATE TABLE review_publications (
   UNIQUE(app_id, installation_id, owner, repo, pr_number, head_sha, kind)
 );
 CREATE INDEX idx_publication_recovery ON review_publications(recovery_state,next_attempt_ms,lease_until_ms);
+CREATE INDEX idx_publication_scope ON review_publications(app_id,installation_id,owner,repo,pr_number,kind,phase);
 
 CREATE TABLE review_findings (
   id TEXT PRIMARY KEY,
@@ -319,9 +320,9 @@ export function assertSandboxGrant(grant: InstallationTokenGrant, expectedRepo: 
 // ReviewCommenter.getInstallationToken(input: TokenInput): Promise<InstallationTokenGrant>
 ```
 
-Retain the single `createAppAuth` construction point in `src/pipeline/comment.ts`. Mint with `auth({type:'installation',installationId,repositoryNames:[repo],permissions})`. `sandbox-read` explicitly requests `{contents:'read',metadata:'read'}`; `review-write` explicitly requests `{contents:'write',metadata:'read',pull_requests:'write',issues:'write'}`, with `checks:'write'` added by 68. Worker `getOctokit` receives scope/purpose, explicitly mints that scoped grant through the same auth object, then creates a token-authenticated `Octokit({auth:grant.token})`; do not rely on unrestricted factory auto-auth refresh. Each operation obtains a current cached grant and a client for the exact purpose/repository. Token cache belongs to that App auth object and includes installation/repository/permissions. A token client never leaves the Worker.
+Retain the single `createAppAuth` construction point in `src/pipeline/comment.ts`. Mint with `auth({type:'installation',installationId,repositoryNames:[repo],permissions})`. `sandbox-read` explicitly requests `{contents:'read',metadata:'read',pull_requests:'read'}` (the last because the shipped §7.7 step-2 diff step runs `gh pr diff` with exactly this token); `review-write` explicitly requests `{contents:'write',metadata:'read',pull_requests:'write',issues:'write'}`, with `checks:'write'` added by 68. Worker `getOctokit` receives scope/purpose, explicitly mints that scoped grant through the same auth object, then creates a token-authenticated `Octokit({auth:grant.token})`; do not rely on unrestricted factory auto-auth refresh. Each operation obtains a current cached grant and a client for the exact purpose/repository. Token cache belongs to that App auth object and includes installation/repository/permissions. A token client never leaves the Worker.
 
-The installed auth-app 8.3.0 implementation maps returned `permissions`, `repository_selection`, `repositories[].id/name` into `permissions`, `repositorySelection`, `repositoryIds/Names`. The Sandbox guard requires nonempty token, contents/metadata read, all other returned permission values read, `repositorySelection === 'selected'`, and exactly one returned repository name equal to the requested repository. Missing repository list/selection or a broader grant fails closed. GitHub's token-create API contract additionally guarantees requested repository/permission scoping; the code must not present the **request** as proof of the **response**. No broad mint fallback or cross-purpose cache reuse.
+The installed auth-app 8.3.0 implementation maps returned `permissions`, `repository_selection`, `repositories[].id/name` into `permissions`, `repositorySelection`, `repositoryIds/Names`. The Sandbox guard requires nonempty token, contents/metadata/pull_requests read, all other returned permission values read, `repositorySelection === 'selected'`, and exactly one returned repository name equal to the requested repository. Missing repository list/selection or a broader grant fails closed. GitHub's token-create API contract additionally guarantees requested repository/permission scoping; the code must not present the **request** as proof of the **response**. No broad mint fallback or cross-purpose cache reuse.
 
 Routing query binds **both** durable `app_id` and `installation_id` through `app_installations` into the matching `github_apps` row; validates `github_app_id` against `GET /app`. It does not scan all active Apps and choose the only one for a repository. Account/repository metadata must agree with the requested installation before mint/use. Missing mapping, disabled/deleted App, changed identity or token denial means no GitHub mutation and a durable suspended reason. No credential substitution by another App or reinstall.
 
@@ -559,18 +560,18 @@ LIMIT ?;
 
 ### 7.12 Fresh-App surfaces
 
-67 updates contents:write; 68 adds checks:write. Final manifest permissions: contents write, metadata read, pull_requests write, issues write, checks write. Events remain pull_request and issue_comment only. Direct surfaces: `src/dashboard/manifest.ts`, `.env.example`, `README.md`, `docs/deploy.md`, operator smoke documentation and the publication companion spec. No old-App acceptance branch. Documentation explains Worker-only writes, read-only Sandbox, success-not-approval, branch protection user control, and historical same-name Check generations (newest applicable attempt, not universal cross-App authority).
+67 updates contents:write; 68 adds checks:write. Final manifest permissions: contents write, metadata read, pull_requests write, issues write, checks write. Events remain pull_request and issue_comment only. Direct surfaces: `src/dashboard/manifest.ts`, `.env.example`, `README.md`, `docs/deploy.md`, operator smoke documentation and the publication companion spec. No old-App acceptance branch. Documentation explains Worker-only writes, read-only Sandbox, success-not-approval, branch protection user control, and historical same-name Check generations (newest applicable attempt, not universal cross-App authority). Plan 67 ships the four-permission set in all named direct surfaces (manifest, env mirror, README, deploy runbook and the smoke runbook); the Check-facing items (success-not-approval, branch protection user control, same-name Check generations) describe the frozen plan-68 contract and are not shipped by plan 67.
 
 ### 7.13 Verification caliber and source basis
 
-Implementation requires scoped behavioral unit evidence for identity/domain boundaries, recurrence, actual evidence range/content validation, capture truncation, every crash boundary, private-result invisibility, lease races, proof/observed separation and both independent reconcilers. No source-text/exact-call-count tests in lieu of behavior. No tests/build/lint/formatters or runtime/live mutations run in this documentation pass. QA consumes scoped evidence; **live/E2E is not an iteration gate**. Actual remote behavior remains unverified unless the user explicitly authorizes a separate scoped run.
+Implementation requires scoped behavioral unit evidence for identity/domain boundaries, recurrence, actual evidence range/content validation, capture truncation, every crash boundary, private-result invisibility, lease races, proof/observed separation and both independent reconcilers. No source-text/exact-call-count tests in lieu of behavior. Plan 67's implementation and its scoped local behavioral tests confirm the code path; the documentation cutover itself runs static link/claim checks only (no tests, build, lint or formatter). QA consumes scoped evidence; **live/E2E is not an iteration gate**. Actual remote behavior remains unverified — in particular the returned installation grant and live thread resolution — unless the user explicitly authorizes a separate scoped run.
 
 Source/API basis (read-only evidence, not live behavior):
 
 - `src/store/fingerprint.ts:113-120`: arbitrary nonblank hint is returned verbatim; opaque UUID markers avoid changing that domain.
 - `src/store/artifact-store.ts:218-321`: `put` validates the complete envelope and atomically inserts reviews/findings; it cannot be recreated from assessments alone or claimed atomic with an external lifecycle batch.
-- `src/pipeline/consumer.ts:1620-1753`: current primary post precedes KV done, line comments and store; §7.7 explicitly changes that unsafe persistence window.
-- `src/pipeline/comment.ts:669-725,1101-1148`: current upsert increments on every invocation and discards response IDs; current auth factory is unrestricted. Prepared identity/typed outcomes/purpose minting replace those behaviors.
+- `src/pipeline/consumer.ts`: at plan-lock time the primary comment post preceded KV done, line comments and the store write; §7.7's frozen order replaced that unsafe persistence window (staged payload before the send, then KV done, line comments and resolution last) — implemented in plan 67.
+- `src/pipeline/comment.ts`: at plan-lock time the upsert incremented a round on every invocation and discarded response IDs, and the auth factory minted unrestricted installation tokens. Those behaviors are replaced — implemented in plan 67 — by the prepared publication identity plus typed posted/not-posted results, and by the purpose-scoped mint (`getInstallationToken({scope, purpose})`) with the returned-capability `assertSandboxGrant` on the Sandbox path.
 - `node_modules/@octokit/auth-app/dist-src/get-installation-authentication.js:76-105`: request restrictions and returned grant fields; [official installation token API](https://docs.github.com/en/rest/apps/apps#create-an-installation-access-token-for-an-app) documents restrictions. [GET /app](https://docs.github.com/en/rest/apps/apps#get-the-authenticated-app) requires JWT and returns authenticated App identity.
 - [GraphQL Pulls reference](https://docs.github.com/en/graphql/reference/pulls): `PullRequest.headRefOid`, `reviewThreads`, thread `isResolved`/`isOutdated`/`line`/`originalLine`, `comments` connections with `before`/`last`/`totalCount`, comment `fullDatabaseId`, `originalCommit`, `pullRequestReview`, and the `resolveReviewThread` mutation returning the thread. `databaseId` is documented as deprecated with removal on 2024-07-01, hence §7.5's `fullDatabaseId` bridge. The reference does not promise atomic read→mutation fencing.
 - [Checks Runs API](https://docs.github.com/en/rest/checks/runs#list-check-runs-for-a-git-reference): external_id, app.id, head_sha, filter=all, app_id and status/conclusion support exact adoption/observation; external_id is correlation, not server idempotency.

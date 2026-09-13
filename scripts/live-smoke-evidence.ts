@@ -12,7 +12,9 @@ import { validateMstarReviewV1 } from "@mstar-harness/engine";
 import { ompAgentRuntime, parseModelSelectors } from "../src/review/runtime-omp";
 
 const worktreePath = process.argv[2] ?? process.cwd();
-const envelope = await ompAgentRuntime.runReview({
+// plan 67 T3: runReview resolves { envelope, recheck } — the smoke captures
+// the envelope only (the optional recheck document rides its own file).
+const { envelope } = await ompAgentRuntime.runReview({
   level: "quick",
   worktreePath,
   reconFacts: [],

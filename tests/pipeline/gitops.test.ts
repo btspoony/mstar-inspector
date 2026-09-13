@@ -10,6 +10,9 @@
  * back with checkedOutShaCommand, so clone/diff/commit_id always agree.
  */
 
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, test } from "bun:test";
 import {
   buildGitOpsCommands,
@@ -17,6 +20,7 @@ import {
   cloneCommand,
   diffCommand,
   numstatCommand,
+  readRecheckCommand,
   runnerCommand,
   writeJsonCommand,
 } from "../../src/pipeline/gitops";
@@ -59,6 +63,75 @@ describe("gitops command builders", () => {
       /unsafe base64 content/,
     );
     expect(() => writeJsonCommand("/workspace/review-input.json", "ey Jh")).toThrow(/unsafe base64 content/);
+  });
+
+  test("readRecheckCommand bounds the read at 262,144 bytes and probes for overflow (plan 67 T3)", () => {
+    // Fixed audited path shape: head stops the content stream at the bound,
+    // tail probes byte bound+1 → last line 1 = overflow, 0 = exact fit.
+    expect(readRecheckCommand("/tmp/mstar-recheck.json")).toBe(
+      shellCommand(
+        "head -c '262144' '/tmp/mstar-recheck.json' && printf '\\n' && " +
+          "tail -c '+262145' '/tmp/mstar-recheck.json' | head -c '1' | wc -c",
+      ),
+    );
+  });
+
+  test("readRecheckCommand rejects metacharacter-laden and relative paths fail-closed", () => {
+    for (const evil of [
+      "/tmp/x; rm -rf /",
+      "/tmp/$(id)",
+      "/tmp/a b",
+      "/tmp/recheck'",
+      "relative/recheck.json",
+      "",
+    ]) {
+      expect(() => readRecheckCommand(evil)).toThrow(/unsafe recheck output path/);
+    }
+  });
+
+  test("readRecheckCommand's REAL stdout is content + newline + newline-terminated flag (P67-QC-006)", async () => {
+    // The parser and the Worker's test double both assume the shipped command
+    // emits a NEWLINE-TERMINATED overflow flag (`wc -c` writes its own trailing
+    // newline). Running the built string through a local POSIX shell against
+    // real files turns that assumption into evidence — no network, no GitHub.
+    const dir = await mkdtemp(join(tmpdir(), "mstar-recheck-read-"));
+    try {
+      const fit = join(dir, "fit.json");
+      const overflow = join(dir, "overflow.json");
+      const fitText = JSON.stringify({ schema: "mstar.recheck/v1", headSha: "x", results: [] });
+      await Bun.write(fit, fitText);
+      await Bun.write(overflow, "b".repeat(262_145));
+
+      for (const [file, flag, content] of [
+        [fit, "0", fitText],
+        [overflow, "1", "b".repeat(262_144)],
+      ] as const) {
+        const proc = Bun.spawn(["sh", "-c", readRecheckCommand(file)]);
+        const stdout = await new Response(proc.stdout).text();
+        expect(await proc.exited).toBe(0);
+        // The stream is newline-terminated and the flag is its LAST LINE;
+        // `wc -c` may left-pad the count (BSD) or not (GNU), so the parser
+        // trims. A parser that required the flag as the final BYTE — the
+        // reviewed defect — fails on every platform and on neither fixture.
+        expect(stdout.endsWith("\n")).toBe(true);
+        const trimmed = stdout.trimEnd();
+        expect(trimmed.slice(trimmed.lastIndexOf("\n") + 1).trim()).toBe(flag);
+        expect(trimmed.slice(0, trimmed.lastIndexOf("\n"))).toBe(content);
+      }
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("runnerCommand appends the optional --recheck-out flag quoted (plan 67 T3)", () => {
+    expect(
+      runnerCommand("/opt/runner/src/review/runner.ts", "quick", "/workspace/review-input.json", "/tmp/mstar-recheck.json"),
+    ).toBe(
+      shellCommand(
+        "bun run '/opt/runner/src/review/runner.ts' --level 'quick' --input '/workspace/review-input.json' " +
+          "--recheck-out '/tmp/mstar-recheck.json'",
+      ),
+    );
   });
 
   test("buildGitOpsCommands accepts dotted/dashed GitHub names and a high pr number", () => {

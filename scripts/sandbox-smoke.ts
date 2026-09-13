@@ -2,8 +2,11 @@
  * Sandbox smoke orchestrator (plan 06 Task 1 STOP gate + Task 2 runner smoke).
  *
  * Drives the real falsification sequences locally:
- *   1. Mint an installation token (JWT → POST /app/installations/{id}/access_tokens
- *      via @octokit/auth-app — the same auth surface the Worker uses).
+ *   1. Mint a PURPOSE-SCOPED sandbox-read installation grant (plan 67 §7.6)
+ *      through the same helper the Worker uses (createReviewCommenter →
+ *      getInstallationToken) and verify the RETURNED capabilities with
+ *      assertSandboxGrant — read-only, repository-scoped, no write
+ *      capabilities; the smoke fails closed on any broader grant.
  *   2. Start `wrangler dev` with the smoke entry (src/pipeline/smoke-entry.ts)
  *      and the sandbox containers binding (wrangler.smoke.jsonc).
  *   3. GET the selected route:
@@ -24,11 +27,11 @@
  * logged, never in the image).
  */
 
-import { createAppAuth } from "@octokit/auth-app";
 import { spawn } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { assertSandboxGrant, createReviewCommenter } from "../src/pipeline/comment";
 
 const SMOKE_APP_ID = Bun.env.SMOKE_APP_ID;
 const SMOKE_PRIVATE_KEY = Bun.env.SMOKE_PRIVATE_KEY;
@@ -55,11 +58,23 @@ function resolvePrivateKey(value: string): string {
   return readFileSync(path, "utf8");
 }
 
-/** Mint an installation token via the GitHub App auth flow. */
+/**
+ * Mint the sandbox-read grant via the SAME purpose-scoped helper the Worker
+ * uses (plan 67 §7.6: the smoke path is migrated off the raw createAppAuth
+ * mint), then assert the RETURNED capabilities — repository-scoped,
+ * read-only, exactly the requested repository. `appId` is the smoke's local
+ * numeric App-id stand-in (the mint itself binds installationId + repo).
+ */
 async function mintInstallationToken(): Promise<string> {
-  const auth = createAppAuth({ appId: SMOKE_APP_ID, privateKey: resolvePrivateKey(SMOKE_PRIVATE_KEY) });
-  const { token } = await auth({ type: "installation", installationId: INSTALLATION_ID });
-  return token;
+  const commenter = createReviewCommenter({ APP_ID: SMOKE_APP_ID, PRIVATE_KEY: resolvePrivateKey(SMOKE_PRIVATE_KEY) });
+  const [owner, repo] = GH_REPO.split("/");
+  if (!repo) throw new Error(`sandbox-smoke: GH_REPO must be owner/repo, got ${JSON.stringify(GH_REPO)}`);
+  const grant = await commenter.getInstallationToken({
+    scope: { appId: SMOKE_APP_ID, installationId: INSTALLATION_ID, owner: owner ?? "", repo, prNumber: Number(GH_PR) },
+    purpose: "sandbox-read",
+  });
+  assertSandboxGrant(grant, repo);
+  return grant.token;
 }
 
 /** Wait for the dev server to accept connections on the given port. */

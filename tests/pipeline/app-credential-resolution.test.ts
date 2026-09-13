@@ -35,7 +35,7 @@ import { createAppsStore } from "../../src/dashboard/apps-store";
 import { createAppConfigStore } from "../../src/dashboard/app-config-store";
 import { createSecretbox } from "../../src/dashboard/secretbox";
 import { sk, fakePem } from "../helpers/fake-secrets";
-import type { CommenterEnv, ReviewCommenter } from "../../src/pipeline/comment";
+import type { CommenterEnv, InstallationTokenGrant, ReviewCommenter, TokenInput } from "../../src/pipeline/comment";
 import type { ConsumerLog, ConsumerLogFields, PipelineEnv } from "../../src/pipeline/consumer";
 
 const MIGRATIONS_DIR = join(import.meta.dir, "../../migrations");
@@ -150,7 +150,7 @@ mock.module("@cloudflare/sandbox", () => ({
 
 // --- commenter fakes --------------------------------------------------------
 
-type CommenterCall = { op: "token" | "post" | "degrade"; installationId?: number };
+type CommenterCall = { op: "token" | "plan" | "post" | "degrade"; installationId?: number };
 /** Calls grouped by instance — same-instance assertions key off this. */
 const appCalls: Array<{ instance: number; call: CommenterCall }> = [];
 /** Credential each factory invocation built an instance from. */
@@ -161,28 +161,56 @@ let factoryInstanceSeq = 0;
 const appCommenterFactory = mock((cred: CommenterEnv): ReviewCommenter => {
   const instance = ++factoryInstanceSeq;
   factoryCreds.push({ instance, cred });
+  // Plan 67 §7.6: the consumer's sandbox path asserts the RETURNED grant
+  // (assertSandboxGrant) — the double returns a minimal compliant
+  // sandbox-read grant scoped to the requested repository.
+  const sandboxGrant = (token: string, input: TokenInput): InstallationTokenGrant => ({
+    token,
+    permissions: { contents: "read", metadata: "read", pull_requests: "read" },
+    repositoryNames: [input.scope.repo],
+    repositorySelection: "selected",
+  });
   return {
-    getInstallationToken: mock(async (installationId: number) => {
-      appCalls.push({ instance, call: { op: "token", installationId } });
-      return `app-${instance}-token`;
+    getInstallationToken: mock(async (input: TokenInput) => {
+      appCalls.push({ instance, call: { op: "token", installationId: input.scope.installationId } });
+      return sandboxGrant(`app-${instance}-token`, input);
     }),
-    postReview: mock(async () => {
-      appCalls.push({ instance, call: { op: "post" } });
-      return 1;
+    // Plan 67 §7.7: the pre-staging plan read, then the prepared send —
+    // the recorded "post" op is the send of the EXACT staged body.
+    planReviewUpsert: mock(async () => {
+      appCalls.push({ instance, call: { op: "plan" } });
+      return { action: "create", round: 1 } as const;
     }),
-    postDegraded: mock(async () => {
+    planDegradedUpsert: mock(async () => {
       appCalls.push({ instance, call: { op: "degrade" } });
+      return { action: "create", round: 1 } as const;
+    }),
+    postPreparedReview: mock(async () => {
+      appCalls.push({ instance, call: { op: "post" } });
+      return { commentId: 101 };
+    }),
+    postPreparedDegraded: mock(async () => {
+      appCalls.push({ instance, call: { op: "degrade" } });
+      return { posted: true, commentId: 202 };
     }),
     // Bugbot degraded-comment lifecycle: the success path runs the delete
     // scan (no stale comment → the real implementation finds nothing); the
     // double is a no-op outcome so the flow exercises the real call.
     deleteDegradedComment: mock(async () => ({ deleted: 0, skipped: 0, errors: [] })),
-    // Plan 18 T3 line comments: VALID_OUTPUT has no findings → never called.
-    fetchPrDiff: mock(async () => {
-      throw new Error("unexpected: no qualifying findings → no diff prefetch");
-    }),
+    // Plan 67 T4 line comments: VALID_OUTPUT has no findings → never called.
     postLineComments: mock(async () => {
       throw new Error("unexpected: no qualifying findings → no line comments");
+    }),
+    // Plan 67 §7.8 discussion capture + §7.5 resolution: no open lifecycle
+    // rows in these fixtures → never triggered.
+    listDiscussion: mock(async () => {
+      throw new Error("unexpected: listDiscussion requires open lifecycle rows");
+    }),
+    discoverThread: mock(async () => {
+      throw new Error("unexpected: discoverThread requires queued resolutions");
+    }),
+    resolveFindingThread: mock(async () => {
+      throw new Error("unexpected: resolveFindingThread requires queued resolutions");
     }),
   };
 });
@@ -292,7 +320,7 @@ describe("consumer appRef resolution (plan 13 Task 2, lock L4)", () => {
     expect(factoryCreds).toHaveLength(1);
     expect(factoryCreds[0]!.cred).toEqual({ APP_ID: "111222", PRIVATE_KEY: PEM_X });
     // Token mint + postReview both on that same instance.
-    expect(appCalls.map((c) => c.call.op)).toEqual(["token", "post"]);
+    expect(appCalls.map((c) => c.call.op)).toEqual(["token", "plan", "post"]);
     expect(appCalls[0]!.instance).toBe(factoryCreds[0]!.instance);
     expect(appCalls[1]!.instance).toBe(factoryCreds[0]!.instance);
     expect(appCalls[0]!.call.installationId).toBe(123);
@@ -420,7 +448,7 @@ describe("consumer appRef resolution (plan 13 Task 2, lock L4)", () => {
     expect(factoryCreds).toHaveLength(1);
     const instance = factoryCreds[0]!.instance;
     expect(appCalls.map((c) => c.instance)).toEqual([instance, instance]);
-    expect(appCalls.map((c) => c.call.op)).toEqual(["token", "post"]);
+    expect(appCalls.map((c) => c.call.op)).toEqual(["token", "plan", "post"]);
   });
 });
 
@@ -559,7 +587,7 @@ describe("appCommenters fingerprint cache (plan 15 hardening item 1, architect l
     expect(warn!.fields.app_id).toBe(appX.id);
     expect(JSON.stringify(warn)).not.toContain(sk("rogue-SECRET"));
     // The skip continues: the review ran to completion (posted + persisted).
-    expect(appCalls.map((c) => c.call.op)).toEqual(["token", "post"]);
+    expect(appCalls.map((c) => c.call.op)).toEqual(["token", "plan", "post"]);
     expect(kvPuts).toEqual([{ key: `idem:123:acme/widgets:42:${SHA}`, value: "done" }]);
   });
 });

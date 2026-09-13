@@ -8,6 +8,7 @@
  */
 
 import type { MstarReviewV1 } from "@mstar-harness/engine";
+import type { RecheckDoc, RecheckInput } from "../contracts/recheck";
 
 /**
  * Full review-tier universe (plan 09 Task 1). `deep` is a first-class tier
@@ -137,14 +138,30 @@ export type AgentRuntimeRunInput = {
    * without a synthesized directory has no models.yml at all.
    */
   agentDir: string;
+  /**
+   * Optional typed recheck input (plan 67 Task 3, spec review-lifecycle
+   * §7.3/§7.8): the worker-captured assessment targets, trusted evidence
+   * catalog and untrusted discussion snapshot for the SAME head this run
+   * reviews (headSha equality is enforced downstream by validateRecheckDoc).
+   * ABSENT = the legacy runtime input — no recheck child is started and the
+   * result's `recheck` is null (byte-identical legacy behavior). Never a
+   * second prompt/yield stream on any existing session.
+   */
+  recheck?: RecheckInput;
 };
+
+/** One completed review run: the validated envelope plus its optional recheck document (plan 67 Task 3, spec §7.8). */
+export type ReviewRunResult = { envelope: MstarReviewV1; recheck: RecheckDoc | null };
 
 export interface AgentRuntime {
   /**
    * 跑一次审查。仅以「已通过 validateMstarReviewV1 的 mstar.review/v1」
-   * resolve；session/解析/校验失败一律 throw（绝不返回 M1 形状冒充成功）。
+   * envelope resolve（plan 67 起 result 形状为 { envelope, recheck }：recheck
+   * 要么是已通过 validateRecheckDoc 的文档，要么是 null——席位失败/超时/
+   * 无输出绝不冒充成功，也绝不丢失审查本体）；session/解析/校验失败一律
+   * throw（绝不返回 M1 形状冒充成功）。
    */
-  runReview(input: AgentRuntimeRunInput): Promise<MstarReviewV1>;
+  runReview(input: AgentRuntimeRunInput): Promise<ReviewRunResult>;
 }
 
 /**
