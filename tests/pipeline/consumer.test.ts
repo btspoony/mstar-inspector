@@ -4455,7 +4455,10 @@ describe("check lifecycle (plan 68 T2 — consumer binding, spec §7.10/§7.9)",
         ...fakeCommenter,
         get checks() {
           // Present for the step-4 create; gone once the review is published.
-          return commenterCalls.some((c) => c.op === "post-prepared") ? null : real;
+          // Absent is `undefined` (the ReviewCommenter contract: `checks?`),
+          // which is exactly what the consumer's
+          // `commenter.checks ?? null` seam turns into a local `null`.
+          return commenterCalls.some((c) => c.op === "post-prepared") ? undefined : real;
         },
       }),
     });
@@ -4473,7 +4476,7 @@ describe("check lifecycle (plan 68 T2 — consumer binding, spec §7.10/§7.9)",
     const row = checkRowFor(db, SHA);
     // The attempt keeps its identity and the run it created.
     expect(row.check_run_id).toBe(FIRST_CHECK_RUN_ID + 1);
-    expect(row.external_id).toBe(checkRequests[0]!.params.external_id);
+    expect(row.external_id).toBe((checkRequests[0]!.params as unknown as ChecksCreateParams).external_id);
     // The review DID publish, so the persisted proof drives the frozen intent
     // (success) — the missing adapter only prevents the remote terminal update.
     expect(row.desired).toBe("success");

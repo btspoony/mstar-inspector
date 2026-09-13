@@ -899,10 +899,10 @@ describe("zero-dispatch rollback and the no-request claim release (integrated se
 
   test("releaseExpiredCheckClaim releases an EXPIRED lease that releaseCheckClaim cannot", async () => {
     const db = seededDb();
-    const { attempt } = await claim(db);
+    const { attempt, lease } = await claim(db);
     const id = attempt.identity.attemptId;
-    await setCheckDesired(db, id, attempt.lease, CONCLUSION, null, T0);
-    await deferCheckRecovery(db, id, attempt.lease, { state: "pending", nextAttemptMs: T0, reason: "release" }, T0);
+    await setCheckDesired(db, id, lease, CONCLUSION, null, T0);
+    await deferCheckRecovery(db, id, lease, { state: "pending", nextAttemptMs: T0, reason: "release" }, T0);
     // A recovery claim, then the clock passes its 120s lease end: the row is
     // leased but no longer live (the zero-dispatch shape).
     const recovery = await claimCheckRecovery(db, id, "reconciler", T0);
@@ -931,11 +931,11 @@ describe("zero-dispatch rollback and the no-request claim release (integrated se
 
   test("releaseExpiredCheckClaim still refuses a newer epoch", async () => {
     const db = seededDb();
-    const { attempt } = await claim(db);
+    const { attempt, lease } = await claim(db);
     const id = attempt.identity.attemptId;
-    const stale: Lease = { holder: attempt.lease.holder, epoch: attempt.lease.epoch + 5, untilMs: attempt.lease.untilMs };
+    const stale: Lease = { holder: lease.holder, epoch: lease.epoch + 5, untilMs: lease.untilMs };
     expect(await releaseExpiredCheckClaim(db, id, stale, T0)).toBe(false);
-    expect((await rawRow(db, id)).holder).toBe(attempt.lease.holder);
+    expect((await rawRow(db, id)).holder).toBe(lease.holder);
   });
 });
 
@@ -1689,6 +1689,6 @@ describe("suspension encoding and no-churn re-enable (P68-QC-003)", () => {
     }
     // A stale lease writes nothing.
     const stale: Lease = { holder: lease.holder, epoch: lease.epoch + 1, untilMs: lease.untilMs };
-    expect(await suspendCheckForPause(db, id, stale, T0)).toBe(false);
+    expect(await suspendCheckForPause(db, id, stale, "paused", T0)).toBe(false);
   });
 });
