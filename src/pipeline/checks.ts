@@ -15,7 +15,11 @@
  *     NEVER `details_url` (spec §7.9: "omit details_url entirely" — there is no
  *     Inspector destination, and RL-12 forbids inventing one).
  *   - A missing Checks surface, a 403/404 permission rejection, and any API or
- *     transport failure all return `{ kind: "unavailable", reason }`. The
+ *     transport failure all return `{ kind: "unavailable", reason, requests }`.
+ *     `requests` is the NUMBER of Checks calls this lane actually invoked: `0`
+ *     for every refusal taken before the callable ran (unowned attempt, missing
+ *     surface/client, an expired lease fence), `1` once it was answered or lost
+ *     — the recovery lane's create-versus-adopt gate. The
  *     adapter never throws: Check failure must not block or delay publication
  *     (D3/RL-3), and `unavailable` changes recovery bookkeeping only — never
  *     the attempt's `desired` or `observed`.
@@ -289,30 +293,26 @@ async function beginCheckWith(
   // be valid while the supplied scope points at another installation/repo.
   const identity = owned.data.identity;
   if (owned.data.checkRunId !== null) {
-    return { kind: "unavailable", reason: "attempt already owns a remote check run" };
+    return refused("attempt already owns a remote check run");
   }
   // A create is legal ONLY from a definitive pre-send state (spec §7.9/RL-12):
   // `sending`/`unknown` mean a create may already have reached GitHub, and
   // since `external_id` is correlation rather than server-side idempotency, the
   // only honest recovery is bounded read-only adoption — never a second create.
   if (owned.data.createState !== "not-sent") {
-    return {
-      kind: "unavailable",
-      requests: 0,
-      reason: `create is not definitively unsent (create_state=${owned.data.createState}); adopt instead`,
-    };
+    return refused(`create is not definitively unsent (create_state=${owned.data.createState}); adopt instead`);
   }
   // Resolve the client BEFORE any durable claim of a send: with no client
   // nothing has been attempted, so the row must stay `not-sent` (an honest
   // `sending` mark here would strand the attempt as possibly-sent forever).
   const client = await clientFor(deps, identity.scope);
-  if (client === null) return { kind: "unavailable", requests: 0, reason: "no review-write Checks client for this App" };
+  if (client === null) return refused("no review-write Checks client for this App");
   // Preflight the EXACT callable before recording anything (a surface can exist
   // while `create` is missing on an older/foreign client). A missing method is
   // a definitive pre-send refusal: the row must keep its honest `not-sent`
   // state rather than be marked as a create that could never have left.
   if (!hasChecksMethod(client, "create")) {
-    return { kind: "unavailable", requests: 0, reason: "Checks surface has no callable create method" };
+    return refused("Checks surface has no callable create method");
   }
   // Persist `sending` BEFORE the request leaves (spec §7.9): if the response is
   // lost, the row must already record that a create was attempted, because that
@@ -321,14 +321,14 @@ async function beginCheckWith(
   // the send instead of creating an unattributable run.
   const marked = await setCheckCreateState(deps.db, identity.attemptId, input.lease, "sending", undefined, nowMs);
   if (!marked) {
-    return { kind: "unavailable", requests: 0, reason: "could not record the create attempt under this lease" };
+    return refused("could not record the create attempt under this lease");
   }
   // Client resolution minted a token and awaited the network; the lease may
   // have expired meanwhile WITHOUT an epoch takeover. Re-sample the clock and
   // re-prove the live lease immediately before the request: the earlier
   // snapshot authorised the decision, not the send itself (spec §7.9).
   if (!(await stillLive(deps, identity, input.lease))) {
-    return { kind: "unavailable", requests: 0, reason: "lease expired before the create request" };
+    return refused("lease expired before the create request");
   }
   const { scope } = identity;
   const attempted = await sendRequests(
@@ -439,7 +439,7 @@ async function completeCheckWith(
   // `in_progress` row here means the caller skipped the intent write. The
   // parameter type already excludes `in_progress`, so no send can carry it.
   if (owned.data.desired === "in_progress") {
-    return { kind: "unavailable", reason: "terminal intent was never persisted for this attempt" };
+    return refused("terminal intent was never persisted for this attempt");
   }
   // The FROZEN text is what ships (spec §7.9): the update carries the persisted
   // conclusion, title and summary, never the caller's copies. A caller that
@@ -452,24 +452,24 @@ async function completeCheckWith(
     summary: owned.data.desiredSummary,
   };
   if (frozen.title === null || frozen.summary === null) {
-    return { kind: "unavailable", requests: 0, reason: "persisted terminal intent carries no frozen title/summary" };
+    return refused("persisted terminal intent carries no frozen title/summary");
   }
   if (frozen.desired !== input.conclusion.desired) {
-    return { kind: "unavailable", requests: 0, reason: "conclusion does not match the persisted terminal intent" };
+    return refused("conclusion does not match the persisted terminal intent");
   }
   if (owned.data.checkRunId !== input.checkRunId) {
-    return { kind: "unavailable", requests: 0, reason: "check run id is not the one this attempt persisted" };
+    return refused("check run id is not the one this attempt persisted");
   }
   const client = await clientFor(deps, identity.scope);
-  if (client === null) return { kind: "unavailable", requests: 0, reason: "no review-write Checks client for this App" };
+  if (client === null) return refused("no review-write Checks client for this App");
   if (!hasChecksMethod(client, "update")) {
-    return { kind: "unavailable", requests: 0, reason: "Checks surface has no callable update method" };
+    return refused("Checks surface has no callable update method");
   }
   // Same fresh live-lease proof as the create path: token minting and client
   // resolution can cross `lease.untilMs`, and an expired holder must not
   // terminalize a remote run (spec §7.9).
   if (!(await stillLive(deps, identity, input.lease))) {
-    return { kind: "unavailable", requests: 0, reason: "lease expired before the update request" };
+    return refused("lease expired before the update request");
   }
   const { scope } = identity;
   const attempted = await sendRequests(
@@ -535,6 +535,18 @@ async function fetchCheckRunWith(
 }
 
 /**
+ * A send-lane refusal that provably never reached the API. `guardOwnership`
+ * and every pre-dispatch branch funnel through here so the additive
+ * `requests: number` contract cannot drift into an `undefined` count: an
+ * unowned attempt, a missing callable and a refusal BEFORE the request all
+ * report `0`, and only the lanes that actually invoked the callable report a
+ * positive count (see `sendRequests`).
+ */
+function refused(reason: string): { kind: "unavailable"; reason: string; requests: 0 } {
+  return { kind: "unavailable", reason, requests: 0 };
+}
+
+/**
  * The persisted-ownership read every send shares, behind the same never-throw
  * rule: a D1 read failure is `unavailable`, not an exception into the review.
  */
@@ -544,17 +556,17 @@ async function guardOwnership(
   lease: Lease,
   nowMs: number,
 ): Promise<
-  { kind: "ok"; data: CheckOwnership } | { kind: "unavailable"; reason: string }
+  { kind: "ok"; data: CheckOwnership } | { kind: "unavailable"; reason: string; requests: 0 }
 > {
   let owned: CheckOwnership | null;
   try {
     owned = await getCheckOwnership(deps.db, identity.attemptId, lease, nowMs);
   } catch (error) {
-    return { kind: "unavailable", reason: `attempt ownership read failed: ${safeDetail(error)}` };
+    return refused(`attempt ownership read failed: ${safeDetail(error)}`);
   }
-  if (owned === null) return { kind: "unavailable", reason: "attempt is not owned by this live lease" };
+  if (owned === null) return refused("attempt is not owned by this live lease");
   if (!sameIdentity(owned.identity, identity)) {
-    return { kind: "unavailable", reason: "caller identity disagrees with the persisted attempt" };
+    return refused("caller identity disagrees with the persisted attempt");
   }
   return { kind: "ok", data: owned };
 }

@@ -4410,6 +4410,55 @@ describe("check lifecycle (plan 68 T2 — consumer binding, spec §7.10/§7.9)",
     expect(checkRowFor(db, SHA).execution_deadline_ms).toBe(row.execution_deadline_ms);
   });
 
+  test("check lifecycle: a terminalize that cannot obtain its Checks adapter releases to recovery, never blocking publication", async () => {
+    reset();
+    runnerStdout = JSON.stringify(VALID_OUTPUT);
+    const db = await createSeededTestD1();
+    // The App DOES have a Checks surface at `begin` (the run is created and
+    // attached), but the surface is resolved per call and is gone by the time
+    // terminalize runs — a representable state for this seam. An OWNED attempt
+    // must then be released to recovery under the live fence rather than left
+    // holding a lease, and the review must publish regardless.
+    const real = checksAdapterFor(db);
+    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, {
+      ...testOverrides,
+      createAppCommenter: () => ({
+        ...fakeCommenter,
+        get checks() {
+          // Present for the step-4 create; gone once the review is published.
+          return commenterCalls.some((c) => c.op === "post-prepared") ? null : real;
+        },
+      }),
+    });
+
+    await consumer(makeBatch(makePayload()));
+
+    // The full publication path ran: the review is posted, applied and the KV
+    // done-state is written — the missing adapter did not block it.
+    expect(commenterCalls.filter((c) => c.op === "post-prepared")).toHaveLength(1);
+    expect(publicationRow(db).phase).toBe("applied");
+    expect(kvPuts).toHaveLength(1);
+    // Exactly one create; NO update could be sent without the adapter.
+    expect(checkRequests.map((r) => r.op)).toEqual(["create"]);
+
+    const row = checkRowFor(db, SHA);
+    // The attempt keeps its identity and the run it created.
+    expect(row.check_run_id).toBe(FIRST_CHECK_RUN_ID + 1);
+    expect(row.external_id).toBe(checkRequests[0]!.params.external_id);
+    // The review DID publish, so the persisted proof drives the frozen intent
+    // (success) — the missing adapter only prevents the remote terminal update.
+    expect(row.desired).toBe("success");
+    expect(row.desired_title).toBe(CHECK_NAME);
+    expect(row.observed).toBe("unknown");
+    expect(row.terminal_ms).toBeNull();
+    // Released for recovery under the live fence, with its backoff.
+    expect(row.holder).toBeNull();
+    expect(row.lease_until_ms).toBeNull();
+    expect(row.recovery_state).toBe("remote-unconfirmed");
+    expect(row.attempts).toBe(1);
+    expect(row.next_attempt_ms).toBeGreaterThan(Date.now());
+  });
+
   test("check lifecycle: an App without a Checks surface claims no attempt and still publishes", async () => {
     reset();
     runnerStdout = JSON.stringify(VALID_OUTPUT);
