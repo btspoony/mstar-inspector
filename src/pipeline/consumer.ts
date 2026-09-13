@@ -72,6 +72,7 @@ import { createFailureStore, type FailureStage, type FailureStore } from "../sto
 import { getSandbox, type ReviewSandbox } from "./sandbox";
 import { buildGitOpsCommands, writeJsonCommand } from "./gitops";
 import {
+  assertSandboxGrant,
   createReviewCommenter,
   filterLineCommentFindings,
   type CommenterEnv,
@@ -1328,7 +1329,23 @@ async function processMessage(payload: ReviewJobPayload, deps: ProcessDeps): Pro
       sandbox = await deps.getSandbox(deps.env.SANDBOX, sandboxId);
     }
     failureStage = "pipeline";
-    const token = await commenter.getInstallationToken(payload.installation_id);
+    // Purpose-scoped sandbox read grant (plan 67 §7.6 / RL-6): the mint is
+    // repository-scoped read-only BY REQUEST, and the sandbox path only
+    // proceeds on the RETURNED capabilities — assertSandboxGrant fails
+    // closed on any broader grant (RL-6: the request is never presented as
+    // proof of the response).
+    const grant = await commenter.getInstallationToken({
+      scope: {
+        appId: payload.appRef.appId,
+        installationId: payload.installation_id,
+        owner: payload.owner,
+        repo: payload.repo,
+        prNumber: payload.pr_number,
+      },
+      purpose: "sandbox-read",
+    });
+    assertSandboxGrant(grant, payload.repo);
+    const token = grant.token;
     // SEC-01: seed the exact-value list with the minted token immediately —
     // a failure before the runner env is assembled (clone/diff/input steps)
     // still exact-redacts the token in the catch path.
@@ -1616,8 +1633,9 @@ async function processMessage(payload: ReviewJobPayload, deps: ProcessDeps): Pro
     // and PATCHes it (round=N+1) on a hit — one comment per PR, never a new
     // review per round. The verdict is rendered as text only (SEC-01).
     // Same resolved commenter instance as the token mint above (lock L4).
-    // Returns the round just posted — the line-comments marker pins to it.
-    const round = await commenter.postReview({
+    // Returns the round just posted AND the exact comment id (plan 67 §7.7
+    // publication proof inputs) — the line-comments marker pins to `round`.
+    const { round } = await commenter.postReview({
       installationId: payload.installation_id,
       owner: payload.owner,
       repo: payload.repo,

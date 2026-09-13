@@ -46,7 +46,7 @@ import { createAppConfigStore } from "../../src/dashboard/app-config-store";
 import { createSecretbox } from "../../src/dashboard/secretbox";
 import { getSandboxImage } from "../../src/contracts/sandbox-images";
 import { sk, fakePem } from "../helpers/fake-secrets";
-import type { CommenterEnv, ReviewCommenter } from "../../src/pipeline/comment";
+import type { CommenterEnv, InstallationTokenGrant, ReviewCommenter, TokenInput } from "../../src/pipeline/comment";
 import type { ConsumerLog, ConsumerLogFields, PipelineEnv } from "../../src/pipeline/consumer";
 
 /** base64 of exactly 32 bytes (the secretbox master-key requirement). */
@@ -190,16 +190,25 @@ mock.module("@cloudflare/sandbox", () => ({
 const appCalls: string[] = [];
 
 const appCommenterFactory = mock((_cred: CommenterEnv): ReviewCommenter => ({
-  getInstallationToken: mock(async () => {
+  // Plan 67 §7.6: the consumer's sandbox path asserts the RETURNED grant
+  // (assertSandboxGrant) — the double returns a minimal compliant
+  // sandbox-read grant scoped to the requested repository.
+  getInstallationToken: mock(async (input: TokenInput) => {
     appCalls.push("token");
-    return "app-token";
+    return {
+      token: "app-token",
+      permissions: { contents: "read", metadata: "read" },
+      repositoryNames: [input.scope.repo],
+      repositorySelection: "selected",
+    } satisfies InstallationTokenGrant;
   }),
   postReview: mock(async () => {
     appCalls.push("post");
-    return 1;
+    return { round: 1, commentId: 101 };
   }),
   postDegraded: mock(async () => {
     appCalls.push("degrade");
+    return { posted: true, commentId: null };
   }),
   // Bugbot degraded-comment lifecycle: the success path runs the delete
   // scan (no stale comment → the real implementation finds nothing); the
@@ -211,6 +220,11 @@ const appCommenterFactory = mock((_cred: CommenterEnv): ReviewCommenter => ({
   }),
   postLineComments: mock(async () => {
     throw new Error("unexpected: no qualifying findings → no line comments");
+  }),
+  // Plan 67 §7.8 discussion capture: not wired into the consumer until
+  // Task 4's ordering — these fixtures never trigger it.
+  listDiscussion: mock(async () => {
+    throw new Error("unexpected: listDiscussion is not wired until Task 4");
   }),
 }));
 
