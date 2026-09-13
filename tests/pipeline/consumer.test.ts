@@ -4255,9 +4255,19 @@ describe("check lifecycle (plan 68 T2 — consumer binding, spec §7.10/§7.9)",
     expect(released.next_attempt_ms).toBeGreaterThan(checkState.clockMs);
     expect(released.desired).toBe("in_progress");
 
-    // A second invocation can claim recovery immediately (the lease was
-    // released) and then owns the terminal decision for that same attempt.
-    const reacquired = await claimCheckRecovery(db, released.id, "reconciler", checkState.clockMs + 1_000);
+    // Released: lease-free and recoverable, but gated by the integrated due
+    // predicate — before the persisted due instant no claim is granted, and
+    // the refusal leaves the row exactly as released.
+    const beforeDue = await claimCheckRecovery(db, released.id, "reconciler", released.next_attempt_ms! - 1);
+    expect(beforeDue).toBeNull();
+    expect(checkRowFor(db, SHA).holder).toBeNull();
+
+    // The integrated claim repeats the FULL candidate predicate (spec §7.11.2),
+    // and this row still WANTS `in_progress`: its execution deadline is the
+    // instant that makes it due. Before it, no claim; at it, the same
+    // attempt/identity is claimed and owns the terminal decision.
+    expect(await claimCheckRecovery(db, released.id, "reconciler", released.execution_deadline_ms - 1)).toBeNull();
+    const reacquired = await claimCheckRecovery(db, released.id, "reconciler", released.execution_deadline_ms);
     expect(reacquired).not.toBeNull();
     await hooks.terminalize({
       handle: {
@@ -4360,7 +4370,14 @@ describe("check lifecycle (plan 68 T2 — consumer binding, spec §7.10/§7.9)",
     expect(row.recovery_state).toBe("remote-unconfirmed");
     expect(row.attempts).toBe(1);
     expect(row.next_attempt_ms).toBe(checkState.clockMs + 60_000);
-    expect(await claimCheckRecovery(db, row.id, "reconciler", checkState.clockMs + 1_000)).not.toBeNull();
+    // The integrated claim repeats the FULL candidate predicate (spec §7.11.2):
+    // lease-free and past its backoff, but still wanting `in_progress`, so it is
+    // due only at its execution deadline. Before that instant no claim; exactly
+    // at it the same attempt and identity are claimed.
+    expect(await claimCheckRecovery(db, row.id, "reconciler", row.next_attempt_ms! - 1)).toBeNull();
+    expect(await claimCheckRecovery(db, row.id, "reconciler", row.execution_deadline_ms - 1)).toBeNull();
+    const claim = await claimCheckRecovery(db, row.id, "reconciler", row.execution_deadline_ms);
+    expect(claim?.holder).toBe("reconciler");
   });
 
   test("check lifecycle: a lease lost while the create was in flight writes nothing further", async () => {
