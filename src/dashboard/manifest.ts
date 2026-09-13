@@ -129,9 +129,9 @@ export function randomSlugSuffix(length = 4): string {
 /**
  * Manifest JSON for the locked review permission set (plan 67 §7.6:
  * `contents: "write"` is authorized for Worker-side thread resolution —
- * Worker-only; plan 68 adds `checks: "write"`; mirrors the `.env.example`
- * permission comment; no extra permissions, no OAuth App fields, no
- * old-App migration branch).
+ * Worker-only; plan 68's `checks: "write"` covers the advisory Check run;
+ * mirrors the `.env.example` permission comment; no extra permissions, no
+ * OAuth App fields, no old-App migration branch).
  * `redirect_url` stays the bare callback — CSRF `state` rides the
  * form-action query instead (GitHub echoes it back next to `code`). B5: the
  * webhook is the App's OWN route `{origin}/webhook/{slug}` — the slug is
