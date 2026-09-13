@@ -88,10 +88,13 @@ export type Env = {
 /**
  * Cron scheduled-face environment (plan 19 T1, AL-6): the `scheduled`
  * handler receives the same Worker bindings as every other face; this
- * narrows the type to what the sweep actually reads. Derived via `Pick` so
- * the narrowing is compiler-enforced against `Env` and cannot drift as `Env`
- * evolves (optionality rides along: `DB` stays optional — unbound fails
- * closed with a warn, never a throw). The sweep is read-only: no queue/KV
- * mutation from this face, so those bindings are deliberately absent here.
+ * narrows the type to what the sweep and the recovery reconciler actually
+ * read. Derived via `Pick` so the narrowing is compiler-enforced against
+ * `Env` and cannot drift as `Env` evolves (optionality rides along: `DB`
+ * stays optional — unbound fails closed with a warn, never a throw). The
+ * sweep is read-only; `DASHBOARD_ENCRYPTION_KEY` (plan 67 §7.11: "the
+ * already-used App-decryption secret binding") is what M8's reconciler
+ * needs to decrypt per-App credentials for prepared-send/discovery/resolve
+ * recovery — the sweep itself never touches it.
  */
-export type ScheduledEnv = Pick<Env, "DB" | "ALERT_WEBHOOK_URL">;
+export type ScheduledEnv = Pick<Env, "DB" | "ALERT_WEBHOOK_URL" | "DASHBOARD_ENCRYPTION_KEY">;

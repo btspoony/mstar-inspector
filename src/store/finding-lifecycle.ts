@@ -8,9 +8,12 @@
  * the zero-dependency recheck wire contract only — NO worker/pipeline
  * dependencies. Every query binds the complete authenticated scope
  * `(appId, installationId, owner, repo, prNumber)` (spec §7.0); every
- * multi-row transition is ONE `db.batch` (knowledge `d1-batch-atomicity`:
- * D1 batch is the transaction primitive); claims use conditional SQL and
- * inspect `meta.changes` — no KV CAS assumption. Timestamps are integer
+ * multi-row transition is ONE logical `db.batch` sequence (knowledge
+ * `d1-batch-atomicity`: D1 batch is the transaction primitive), executed in
+ * chunks of at most 25 statements per batch for the recovery apply
+ * (§7.11.1) with every statement replay-safe AND carrying the live-lease
+ * predicate inline; claims use conditional SQL
+ * and inspect `meta.changes` — no KV CAS assumption. Timestamps are integer
  * Unix milliseconds from one caller-supplied clock per call (spec §7.0).
  *
  * Journal privacy (spec §7.1 Visibility): `review_publications` /
@@ -34,6 +37,7 @@ import type { Assessment, Coverage, OriginalFinding, RecheckTarget, ThreadSnapsh
 import { ASSESSMENT_TARGET_CAP } from "../contracts/recheck";
 import { createArtifactStore, type ReviewArtifactDoc } from "./artifact-store";
 import type {
+  D1BatchResult,
   D1Like,
   D1StatementLike,
   ReviewFindingRow,
@@ -111,6 +115,16 @@ export const PUBLICATION_LEASE_MS = 120_000;
 export const LIFECYCLE_MAX_ATTEMPTS = 5;
 /** Staged payload cap (spec §7.7: size ≤1 MiB UTF-8; reject, never truncate). */
 export const PUBLICATION_MAX_BYTES = 1_048_576;
+/**
+ * Backoff after the Nth failed recovery attempt (spec §7.11.1: "1,2,4,8,16
+ * minutes"); indexed by `attempts - 1` after the failure. The fifth failure
+ * gives up (local-error) instead of scheduling a sixth attempt.
+ */
+export const LIFECYCLE_BACKOFF_MS = [60_000, 120_000, 240_000, 480_000, 960_000];
+/** §7.11.1 apply budget: at most 25 row-transition statements per db.batch. */
+export const LIFECYCLE_APPLY_BATCH_STATEMENTS = 25;
+/** §7.11.1: a prepared publication older than this may be sent by recovery. */
+export const PREPARED_SEND_MIN_AGE_MS = 60_000;
 
 // ---------------------------------------------------------------------------
 // Row mapping helpers
@@ -372,23 +386,45 @@ export async function readPublicationProof(
  * Proof-gated idempotent apply — the frozen §7.7 step 9 local sequence:
  * (1) the existing atomic `store.put` for the review artifact (idempotent
  * UNIQUE no-op — a replay after store.put but before the lifecycle apply
- * does not duplicate findings), then (2) ONE `db.batch` upserting
- * `review_findings` / `review_finding_rounds` / `review_threads` with the
- * §7.2 state machine, whose FINAL statement marks the publication applied
- * under the lease (atomic with the batch). Degraded proof creates no
+ * does not duplicate findings; skipped entirely when the review row already
+ * exists), then (2) the lifecycle writes in batches of at most 25 row
+ * transitions (§7.11.1), whose FINAL statement marks the publication applied
+ * under the lease. Degraded proof creates no
  * normal review/lifecycle rows — it only marks applied. Rows absent from
  * `seen` are never deleted. Returns false (and writes nothing) when the
  * row is unknown, the lease is not live, proof is missing, or the payload
  * is not a complete review publication; the previously-applied row
  * short-circuits to true (idempotent replay).
+ *
+ * The lease fence is ATOMIC, not a read-then-write window: every lifecycle
+ * statement (and the applied marker, degraded path included) carries the
+ * live-lease predicate `(id, holder, lease_epoch, lease_until_ms > now)` in
+ * its own SQL, and a fresh-clock chunk-boundary probe additionally stops a
+ * long apply early. A replacement or expiry landing after any probe can
+ * therefore never mutate a finding/round/association row, and can never mark
+ * the publication applied.
  */
-export async function applyPublishedLifecycle(db: D1Like, id: string, lease: Lease, nowMs: number): Promise<boolean> {
+export async function applyPublishedLifecycle(
+  db: D1Like,
+  id: string,
+  lease: Lease,
+  nowMs: number,
+  /**
+   * Fresh clock for the per-chunk lease fence (§7.11.1: "every chunk of the
+   * apply must prove the same live publication holder/epoch"). Defaults to
+   * the call's fixed clock — a caller whose apply spans a real time window
+   * (the M8 reconciler) passes its own clock so an expired lease is
+   * observed between chunks instead of being assumed live.
+   */
+  clock?: () => number,
+): Promise<boolean> {
+  const nowAt = clock ?? (() => nowMs);
   const row = await db.prepare(`SELECT * FROM review_publications WHERE id = ?`).bind(id).first<ReviewPublicationRow>();
   if (row === null) return false;
   if (row.phase === "applied") return true; // idempotent replay — nothing left to apply
   // Live lease fence (holder + epoch + unexpired) and positive persisted proof.
   if (row.holder !== lease.holder || row.lease_epoch !== lease.epoch) return false;
-  if (row.lease_until_ms === null || row.lease_until_ms <= nowMs) return false;
+  if (row.lease_until_ms === null || row.lease_until_ms <= nowAt()) return false;
   if (row.phase !== "confirmed" || row.proof_json === null) return false;
 
   const payload = JSON.parse(row.payload_json) as PublicationPayload;
@@ -407,30 +443,103 @@ export async function applyPublishedLifecycle(db: D1Like, id: string, lease: Lea
 
   // Step 1 — the existing atomic store.put (review kind only), a separate
   // idempotent step, never described as part of the lifecycle batch.
-  const store = createArtifactStore(db);
-  await store.put(payload.artifact);
+  // §7.11.1: skipped entirely when the review row already exists — the
+  // UNIQUE(installation_id, owner, repo, pr_number, head_sha) row IS the
+  // review, so the put would be a pure no-op batch.
+  const stored = await db
+    .prepare(
+      `SELECT 1 AS present FROM reviews
+       WHERE installation_id = ? AND owner = ? AND repo = ? AND pr_number = ? AND head_sha = ?`,
+    )
+    .bind(payload.scope.installationId, payload.scope.owner, payload.scope.repo, payload.scope.prNumber, payload.headSha)
+    .first<{ present: number }>();
+  if (stored === null) {
+    const store = createArtifactStore(db);
+    await store.put(payload.artifact);
+  }
 
-  // Step 2 — ONE lifecycle batch, ending with the applied mark under the
-  // lease (all-or-nothing with the lifecycle writes it guards). The guard
-  // above narrowed `payload.lifecycle` to non-null; it is passed explicitly
-  // so the helper's signature carries that invariant.
+  // Step 2 — the lifecycle writes in db.batches of at most
+  // LIFECYCLE_APPLY_BATCH_STATEMENTS statements each (§7.11.1: "Local apply
+  // batches ≤25 row transitions each; a larger payload is resumed
+  // idempotently with applied-publication/association IDs, never marks
+  // complete early"). Every statement is replay-safe (the guards above), so
+  // a crash between batches resumes on the next recovery pass — applied
+  // transitions skip and the applied mark stays the FINAL statement of the
+  // FINAL batch, under the lease. Small payloads (the common case) still
+  // run as ONE batch. The guard above narrowed `payload.lifecycle` to
+  // non-null; it is passed explicitly so the helper's signature carries
+  // that invariant.
   const statements = lifecycleApplyBatch(db, row, payload, payload.lifecycle, nowMs, lease);
-  const results = await db.batch(statements);
+  const results: D1BatchResult[] = [];
+  for (let start = 0; start < statements.length; start += LIFECYCLE_APPLY_BATCH_STATEMENTS) {
+    // Per-chunk fence (§7.11.1): the apply may span a real time window, and
+    // once the 120s lease expires another invocation can claim a NEWER epoch.
+    // Re-prove the SAME live holder/epoch before this chunk writes, so a
+    // stale invocation stops instead of mutating findings/rounds/associations
+    // under an ownership it no longer holds. The final chunk still carries
+    // the applied mark as its last statement — its SQL re-checks the same
+    // predicate, so a replacement mid-chunk can never mark complete.
+    if (!(await publicationLeaseIsLive(db, id, lease, nowAt()))) return false;
+    results.push(...(await db.batch(statements.slice(start, start + LIFECYCLE_APPLY_BATCH_STATEMENTS))));
+  }
   const applied = results[results.length - 1]!;
   return applied.meta.changes > 0;
 }
 
-/** The conditional applied-mark STATEMENT: requires the live lease AND a
- *  persisted proof AND the confirmed phase; clears the lease on success. */
+/**
+ * The ATOMIC live-lease fence (§7.11.1: "All local updates require
+ * `(id,holder,lease_epoch,lease_until_ms > now)`"). Every lifecycle
+ * mutation statement of a chunked apply carries this predicate INLINE, so
+ * the fence is evaluated by the same statement (and therefore the same
+ * transaction) that performs the mutation. A read probe before the batch
+ * cannot prove this: a replacement or expiry landing after the probe would
+ * otherwise be invisible to the writes. Binds, in order:
+ * `(publicationId, holder, leaseEpoch, now)`.
+ */
+const APPLY_LEASE_GUARD_SQL = `EXISTS (SELECT 1 FROM review_publications AS apply_lease
+       WHERE apply_lease.id = ? AND apply_lease.holder = ? AND apply_lease.lease_epoch = ?
+         AND apply_lease.lease_until_ms IS NOT NULL AND apply_lease.lease_until_ms > ?)`;
+
+/**
+ * The live-lease fence probe (§7.11.1) — the read twin of the applied
+ * marker's SQL predicate: the publication row must still carry the SAME
+ * holder and epoch with an UNEXPIRED lease at `nowMs`. Returns false when
+ * the row is gone, replaced, or expired, which aborts the apply before the
+ * next chunk writes. It is a chunk-boundary liveness check only; the
+ * mutation statements carry the same predicate themselves.
+ */
+async function publicationLeaseIsLive(db: D1Like, id: string, lease: Lease, nowMs: number): Promise<boolean> {
+  const row = await db
+    .prepare(`SELECT holder, lease_epoch, lease_until_ms FROM review_publications WHERE id = ?`)
+    .bind(id)
+    .first<{ holder: string | null; lease_epoch: number; lease_until_ms: number | null }>();
+  if (row === null) return false;
+  return (
+    row.holder === lease.holder &&
+    row.lease_epoch === lease.epoch &&
+    row.lease_until_ms !== null &&
+    row.lease_until_ms > nowMs
+  );
+}
+
+/**
+ * The conditional applied-mark STATEMENT: requires the FULL live lease
+ * (`holder` + `lease_epoch` + `lease_until_ms > now`, not holder/epoch
+ * alone) AND a persisted proof AND the confirmed phase; clears the lease on
+ * success. The expiry predicate is part of this statement, so an expired
+ * same-holder lease — and a lease that expires or is replaced between the
+ * pre-apply probe and this marker — can never mark the publication applied.
+ */
 function markPublicationApplied(db: D1Like, id: string, lease: Lease, nowMs: number): D1StatementLike {
   return db
     .prepare(
       `UPDATE review_publications
        SET phase = 'applied', applied_ms = ?, updated_ms = ?, recovery_state = 'done',
            holder = NULL, lease_until_ms = NULL
-       WHERE id = ? AND holder = ? AND lease_epoch = ? AND phase = 'confirmed' AND proof_json IS NOT NULL`,
+       WHERE id = ? AND holder = ? AND lease_epoch = ? AND phase = 'confirmed' AND proof_json IS NOT NULL
+         AND lease_until_ms IS NOT NULL AND lease_until_ms > ?`,
     )
-    .bind(nowMs, nowMs, id, lease.holder, lease.epoch);
+    .bind(nowMs, nowMs, id, lease.holder, lease.epoch, nowMs);
 }
 
 /**
@@ -452,6 +561,13 @@ function markPublicationApplied(db: D1Like, id: string, lease: Lease, nowMs: num
  *   4. Per selected row — advance last_scheduled_ms (fair rotation),
  *      monotonic so a replay can never move a row backwards.
  *   5. Mark applied under the lease (final statement).
+ *
+ * EVERY statement above carries `APPLY_LEASE_GUARD_SQL` inline: the write
+ * is conditional on the SAME live lease predicate in its own SQL, so a
+ * replacement or expiry that lands after a read probe but before (or at)
+ * the mutation cannot slip a finding/round/association write through. The
+ * guard binds are the LAST four parameters of each statement, in the order
+ * `(publicationId, holder, leaseEpoch, operationNow)`.
  */
 function lifecycleApplyBatch(
   db: D1Like,
@@ -466,6 +582,7 @@ function lifecycleApplyBatch(
   const headSha = payload.headSha;
   const round = payload.round;
   const scope = payload.scope;
+  const guard = [pubId, lease.holder, lease.epoch, nowMs] as const;
   const statements: D1StatementLike[] = [];
 
   // 1. Seen upserts — recurrence reopen + last-seen tracking.
@@ -477,7 +594,8 @@ function lifecycleApplyBatch(
              (id, app_id, installation_id, owner, repo, pr_number, finding_id, original_json,
               first_publication_id, last_publication_id, first_seen_sha, last_seen_sha,
               first_seen_round, last_seen_round, state, created_ms, updated_ms)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', ?, ?)
+           SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', ?, ?
+           WHERE ${APPLY_LEASE_GUARD_SQL}
            ON CONFLICT(app_id, installation_id, owner, repo, pr_number, finding_id) DO UPDATE SET
              last_publication_id = excluded.last_publication_id,
              last_seen_sha = excluded.last_seen_sha,
@@ -496,6 +614,7 @@ function lifecycleApplyBatch(
           seen.rowId, scope.appId, scope.installationId, scope.owner, scope.repo,
           scope.prNumber, seen.findingId, JSON.stringify(seen.original),
           pubId, pubId, headSha, headSha, round, round, nowMs, nowMs,
+          ...guard,
         ),
     );
   }
@@ -513,11 +632,13 @@ function lifecycleApplyBatch(
                last_assessment_json = ?, last_assessed_ms = ?
            WHERE id = ?
              AND NOT EXISTS (SELECT 1 FROM review_finding_rounds
-                             WHERE finding_row_id = ? AND publication_id = ?)`,
+                             WHERE finding_row_id = ? AND publication_id = ?)
+             AND ${APPLY_LEASE_GUARD_SQL}`,
         )
         .bind(
           assessment.disposition, assessment.disposition,
           assessmentJson, nowMs, assessment.rowId, assessment.rowId, pubId,
+          ...guard,
         ),
     );
     statements.push(
@@ -525,10 +646,11 @@ function lifecycleApplyBatch(
         .prepare(
           `INSERT INTO review_finding_rounds
              (id, finding_row_id, publication_id, head_sha, round, assessment_json, created_ms)
-           VALUES (?, ?, ?, ?, ?, ?, ?)
+           SELECT ?, ?, ?, ?, ?, ?, ?
+           WHERE ${APPLY_LEASE_GUARD_SQL}
            ON CONFLICT(finding_row_id, publication_id) DO NOTHING`,
         )
-        .bind(crypto.randomUUID(), assessment.rowId, pubId, headSha, round, assessmentJson, nowMs),
+        .bind(crypto.randomUUID(), assessment.rowId, pubId, headSha, round, assessmentJson, nowMs, ...guard),
     );
   }
 
@@ -542,9 +664,10 @@ function lifecycleApplyBatch(
         .prepare(
           `UPDATE review_threads
            SET superseded_by_publication_id = ?, updated_ms = ?
-           WHERE finding_row_id = ? AND publication_id <> ? AND superseded_by_publication_id IS NULL`,
+           WHERE finding_row_id = ? AND publication_id <> ? AND superseded_by_publication_id IS NULL
+             AND ${APPLY_LEASE_GUARD_SQL}`,
         )
-        .bind(pubId, nowMs, intent.findingRowId, pubId),
+        .bind(pubId, nowMs, intent.findingRowId, pubId, ...guard),
     );
   }
   for (const intent of payload.lineIntents) {
@@ -554,13 +677,15 @@ function lifecycleApplyBatch(
           `INSERT INTO review_threads
              (id, finding_row_id, publication_id, app_id, installation_id, owner, repo, pr_number,
               original_sha, round, intent_json, resolution_state, created_ms, updated_ms)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)
+           SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?
+           WHERE ${APPLY_LEASE_GUARD_SQL}
            ON CONFLICT(id) DO NOTHING`,
         )
         .bind(
           intent.associationId, intent.findingRowId, pubId,
           scope.appId, scope.installationId, scope.owner, scope.repo, scope.prNumber,
           intent.originalSha, intent.round, JSON.stringify(intent), nowMs, nowMs,
+          ...guard,
         ),
     );
   }
@@ -571,9 +696,10 @@ function lifecycleApplyBatch(
       db
         .prepare(
           `UPDATE review_findings SET last_scheduled_ms = ?
-           WHERE id = ? AND (last_scheduled_ms IS NULL OR last_scheduled_ms < ?)`,
+           WHERE id = ? AND (last_scheduled_ms IS NULL OR last_scheduled_ms < ?)
+             AND ${APPLY_LEASE_GUARD_SQL}`,
         )
-        .bind(nowMs, rowId, nowMs),
+        .bind(nowMs, rowId, nowMs, ...guard),
     );
   }
 
@@ -675,6 +801,329 @@ export async function retryLifecycleWork(
          AND resolution_state IN ('pending','retry','local-error','suspended')`,
     )
     .bind(input.nowMs, input.associationId!, ...scopeBinds, input.nowMs)
+    .run();
+  return result.meta.changes > 0;
+}
+
+// ---------------------------------------------------------------------------
+// §7.11.1 recovery bookkeeping writers (plan 67 Task 5 / M8) — the
+// post-failure state machine the reconciler drives: backoff after failed
+// attempts, the terminal local-error at the attempt cap, supersede on
+// newer-round evidence, App-lifecycle suspension and exact-App re-enable,
+// and the needs-recheck stop state for the resolution lane. Bookkeeping
+// NEVER resets `attempts` (§7.11.1: "resets attempts only for a genuinely
+// new assessment, never for bookkeeping") and never deletes a row.
+// ---------------------------------------------------------------------------
+
+/** Bound a durable reason string — structured, no payload/secret content. */
+function recoveryReason(reason: string): string {
+  const clean = reason.replace(/\s+/g, " ").trim();
+  return clean.length <= 300 ? clean : `${clean.slice(0, 299)}…`;
+}
+
+/** Free-lease predicate bound to a now parameter position. */
+const FREE_LEASE_SQL = "(lease_until_ms IS NULL OR lease_until_ms <= ?)";
+
+/** The `created_ms` of a publication row — the §7.11.1 prepared-send age gate. */
+export async function getPublicationCreatedMs(db: D1Like, id: string): Promise<number | null> {
+  const row = await db
+    .prepare(`SELECT created_ms FROM review_publications WHERE id = ?`)
+    .bind(id)
+    .first<{ created_ms: number }>();
+  return row?.created_ms ?? null;
+}
+
+/**
+ * Release the live lease and schedule the next recovery attempt (backoff)
+ * after a failed attempt on a CONFIRMED row (local-apply failure — the
+ * phase is retained). Phase-preserving by design: a confirmed publication
+ * that failed its local apply stays confirmed.
+ */
+export async function deferPublicationRecovery(
+  db: D1Like,
+  id: string,
+  lease: Lease,
+  nextAttemptMs: number,
+  reason: string,
+  nowMs: number,
+): Promise<boolean> {
+  const result = await db
+    .prepare(
+      `UPDATE review_publications
+       SET next_attempt_ms = ?, last_error = ?, holder = NULL, lease_until_ms = NULL, updated_ms = ?
+       WHERE id = ? AND holder = ? AND lease_epoch = ?`,
+    )
+    .bind(nextAttemptMs, recoveryReason(reason), nowMs, id, lease.holder, lease.epoch)
+    .run();
+  return result.meta.changes > 0;
+}
+
+/**
+ * After an UNCERTAIN send/discovery attempt (spec §7.7 "Remote unknowns"):
+ * the row becomes phase `unknown` (from `sending`) — the payload is retained
+ * and ONLY read-only discovery may touch it — plus backoff and the released
+ * lease. An already-`unknown` row stays unknown.
+ */
+export async function markPublicationUnknown(
+  db: D1Like,
+  id: string,
+  lease: Lease,
+  nextAttemptMs: number,
+  reason: string,
+  nowMs: number,
+): Promise<boolean> {
+  const result = await db
+    .prepare(
+      `UPDATE review_publications
+       SET phase = CASE WHEN phase = 'sending' THEN 'unknown' ELSE phase END,
+           next_attempt_ms = ?, last_error = ?, holder = NULL, lease_until_ms = NULL, updated_ms = ?
+       WHERE id = ? AND holder = ? AND lease_epoch = ?`,
+    )
+    .bind(nextAttemptMs, recoveryReason(reason), nowMs, id, lease.holder, lease.epoch)
+    .run();
+  return result.meta.changes > 0;
+}
+
+/**
+ * The attempt cap (spec §7.11.1: "at 5 failures → local-error/unknown
+ * retained with structured warning containing App/scope/work ID and reason,
+ * no payload/secret"): the row is retained for operator inspection with a
+ * durable local-error, lease released, phase unchanged (unknown stays
+ * unknown; prepared/confirmed stay theirs — the operator sees the real
+ * phase).
+ */
+export async function markPublicationLocalError(
+  db: D1Like,
+  id: string,
+  lease: Lease,
+  reason: string,
+  nowMs: number,
+): Promise<boolean> {
+  const result = await db
+    .prepare(
+      `UPDATE review_publications
+       SET recovery_state = 'local-error', last_error = ?, holder = NULL, lease_until_ms = NULL, updated_ms = ?
+       WHERE id = ? AND holder = ? AND lease_epoch = ?`,
+    )
+    .bind(recoveryReason(reason), nowMs, id, lease.holder, lease.epoch)
+    .run();
+  return result.meta.changes > 0;
+}
+
+/**
+ * A newer publication round already owns the PR surface (read-only
+ * pre-send evidence): "Never send a stale initial publication over a newer
+ * round" (§7.11.1). The row becomes phase `superseded` — terminal, no
+ * publication, no closure — with recovery `done` (nothing left to recover)
+ * and its lease released. Guarded to non-terminal phases and a FREE lease:
+ * a row another invocation holds is never yanked mid-send.
+ */
+export async function supersedePublication(db: D1Like, id: string, reason: string, nowMs: number): Promise<boolean> {
+  const result = await db
+    .prepare(
+      `UPDATE review_publications
+       SET phase = 'superseded', recovery_state = 'done', last_error = ?,
+           holder = NULL, lease_until_ms = NULL, updated_ms = ?
+       WHERE id = ? AND phase IN ('prepared','sending','unknown','confirmed') AND ${FREE_LEASE_SQL}`,
+    )
+    .bind(recoveryReason(reason), nowMs, id, nowMs)
+    .run();
+  return result.meta.changes > 0;
+}
+
+/**
+ * Durable App-lifecycle suspension (spec §7.6/§7.11.1): missing mapping,
+ * disabled or deleted App — every pending recovery row of the EXACT
+ * `(app_id, installation_id)` pair stops (no cross-App substitution), lease
+ * released, attempts untouched. Returns the number of suspended rows.
+ */
+export async function suspendPublicationRecovery(
+  db: D1Like,
+  pair: { appId: string; installationId: number },
+  reason: string,
+  nowMs: number,
+): Promise<number> {
+  const result = await db
+    .prepare(
+      `UPDATE review_publications
+       SET recovery_state = 'suspended', last_error = ?, holder = NULL, lease_until_ms = NULL, updated_ms = ?
+       WHERE app_id = ? AND installation_id = ? AND recovery_state = 'pending' AND ${FREE_LEASE_SQL}`,
+    )
+    .bind(recoveryReason(reason), nowMs, pair.appId, pair.installationId, nowMs)
+    .run();
+  return result.meta.changes;
+}
+
+/** The thread-lane twin of `suspendPublicationRecovery`. */
+export async function suspendResolutionRecovery(
+  db: D1Like,
+  pair: { appId: string; installationId: number },
+  reason: string,
+  nowMs: number,
+): Promise<number> {
+  const result = await db
+    .prepare(
+      `UPDATE review_threads
+       SET resolution_state = 'suspended', last_error = ?, holder = NULL, lease_until_ms = NULL, updated_ms = ?
+       WHERE app_id = ? AND installation_id = ? AND resolution_state IN ('pending','retry') AND ${FREE_LEASE_SQL}`,
+    )
+    .bind(recoveryReason(reason), nowMs, pair.appId, pair.installationId, nowMs)
+    .run();
+  return result.meta.changes;
+}
+
+/**
+ * Distinct suspended `(app_id, installation_id)` pairs across both lanes,
+ * bounded — the re-enable probe input (§7.11.1: "Suspended rows are checked
+ * for exact-App re-enable before returning to pending").
+ */
+export async function listSuspendedLifecycleApps(
+  db: D1Like,
+  limit: number,
+): Promise<{ appId: string; installationId: number }[]> {
+  const pubs = await db
+    .prepare(
+      `SELECT DISTINCT app_id, installation_id FROM review_publications
+       WHERE recovery_state = 'suspended' LIMIT ?`,
+    )
+    .bind(limit)
+    .all<{ app_id: string; installation_id: number }>();
+  const threads = await db
+    .prepare(
+      `SELECT DISTINCT app_id, installation_id FROM review_threads
+       WHERE resolution_state = 'suspended' LIMIT ?`,
+    )
+    .bind(limit)
+    .all<{ app_id: string; installation_id: number }>();
+  const merged = new Map<string, { appId: string; installationId: number }>();
+  for (const row of [...pubs.results, ...threads.results]) {
+    merged.set(`${row.app_id}:${row.installation_id}`, { appId: row.app_id, installationId: row.installation_id });
+  }
+  return [...merged.values()].slice(0, limit);
+}
+
+/**
+ * Exact-App re-enable (spec §7.6: "Re-enable allows due suspended rows to
+ * resume with the same IDs and fresh fencing"): the caller has re-verified
+ * the pair's App is active and not deleted. Rows resume with cleared leases
+ * and due immediately; payloads/proofs/remote ids/verified snapshots are
+ * retained. Threads resume as `retry`, publications as `pending`.
+ */
+export async function reenableLifecycleForApps(
+  db: D1Like,
+  pairs: { appId: string; installationId: number }[],
+  nowMs: number,
+): Promise<void> {
+  for (const pair of pairs) {
+    await db
+      .prepare(
+        `UPDATE review_publications
+         SET recovery_state = 'pending', next_attempt_ms = NULL, last_error = NULL,
+             holder = NULL, lease_until_ms = NULL, updated_ms = ?
+         WHERE app_id = ? AND installation_id = ? AND recovery_state = 'suspended'`,
+      )
+      .bind(nowMs, pair.appId, pair.installationId)
+      .run();
+    await db
+      .prepare(
+        `UPDATE review_threads
+         SET resolution_state = 'retry', next_attempt_ms = NULL, last_error = NULL,
+             holder = NULL, lease_until_ms = NULL, updated_ms = ?
+         WHERE app_id = ? AND installation_id = ? AND resolution_state = 'suspended'`,
+      )
+      .bind(nowMs, pair.appId, pair.installationId)
+      .run();
+  }
+}
+
+/**
+ * The full recovery-relevant view of one resolution-queue row (M8): the
+ * stored verified snapshot to re-drive §7.5 with, the attempts counter for
+ * backoff/give-up decisions, and the authenticated scope. Null when the row
+ * is gone.
+ */
+export async function getResolutionRecoveryRow(
+  db: D1Like,
+  id: string,
+): Promise<{ scope: Scope; verifiedJson: string; attempts: number } | null> {
+  const row = await db
+    .prepare(
+      `SELECT app_id, installation_id, owner, repo, pr_number, verified_json, attempts
+       FROM review_threads WHERE id = ?`,
+    )
+    .bind(id)
+    .first<{
+      app_id: string; installation_id: number; owner: string; repo: string;
+      pr_number: number; verified_json: string | null; attempts: number;
+    }>();
+  if (row === null || row.verified_json === null) return null;
+  return {
+    scope: {
+      appId: row.app_id, installationId: row.installation_id,
+      owner: row.owner, repo: row.repo, prNumber: row.pr_number,
+    },
+    verifiedJson: row.verified_json,
+    attempts: row.attempts,
+  };
+}
+
+/**
+ * A needs-recheck resolve outcome (HEAD/conversation/context mismatch —
+ * spec §7.11.1: "no blind retry at a new snapshot"): the association stops
+ * cycling through the recovery selectors while the old concern stays
+ * untouched for the next real review. The next real review's fresh
+ * assessment re-enqueues it with a new publication id.
+ */
+export async function recordNeedsRecheck(db: D1Like, id: string, reason: string, nowMs: number): Promise<boolean> {
+  const result = await db
+    .prepare(
+      `UPDATE review_threads
+       SET resolution_state = 'needs-recheck', last_error = ?, next_attempt_ms = NULL,
+           holder = NULL, lease_until_ms = NULL, updated_ms = ?
+       WHERE id = ? AND resolution_state IN ('pending','retry') AND ${FREE_LEASE_SQL}`,
+    )
+    .bind(recoveryReason(reason), nowMs, id, nowMs)
+    .run();
+  return result.meta.changes > 0;
+}
+
+/**
+ * Backoff after a failed resolve attempt (the §7.5 surface already released
+ * the lease and retained `retry`): schedule the next attempt, keep the
+ * durable reason. Bookkeeping only — attempts are never reset here.
+ */
+export async function deferResolutionRecovery(
+  db: D1Like,
+  id: string,
+  nextAttemptMs: number,
+  reason: string,
+  nowMs: number,
+): Promise<boolean> {
+  const result = await db
+    .prepare(
+      `UPDATE review_threads
+       SET next_attempt_ms = ?, last_error = ?, holder = NULL, lease_until_ms = NULL, updated_ms = ?
+       WHERE id = ? AND resolution_state IN ('pending','retry') AND ${FREE_LEASE_SQL}`,
+    )
+    .bind(nextAttemptMs, recoveryReason(reason), nowMs, id, nowMs)
+    .run();
+  return result.meta.changes > 0;
+}
+
+/**
+ * The resolution-lane attempt cap (spec §7.11.1): a terminal, VISIBLE
+ * local-error with the structured App/scope/work-ID + reason line — the row
+ * is retained (never deleted); only the operator retry reopens it.
+ */
+export async function markResolutionLocalError(db: D1Like, id: string, reason: string, nowMs: number): Promise<boolean> {
+  const result = await db
+    .prepare(
+      `UPDATE review_threads
+       SET resolution_state = 'local-error', last_error = ?, next_attempt_ms = NULL,
+           holder = NULL, lease_until_ms = NULL, updated_ms = ?
+       WHERE id = ? AND resolution_state IN ('pending','retry') AND ${FREE_LEASE_SQL}`,
+    )
+    .bind(recoveryReason(reason), nowMs, id, nowMs)
     .run();
   return result.meta.changes > 0;
 }

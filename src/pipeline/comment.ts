@@ -675,6 +675,31 @@ export function normalizePrivateKey(pem: string): string {
 
 export type CommenterEnv = { APP_ID: string; PRIVATE_KEY: string };
 
+/**
+ * The transport shape the bounded-fetch seam accepts. Deliberately narrower
+ * than `typeof fetch`: bun's global also declares a `preconnect` property,
+ * and a runner-supplied wrapper is a plain callable. The runtime global
+ * fetch satisfies this shape, so callers pass it unchanged.
+ */
+export type CommenterFetch = (input: string | URL | Request, init?: RequestInit) => Promise<Response>;
+
+/**
+ * Construction options for `createReviewCommenter`. `fetchImpl` is the
+ * per-request transport seam (spec §7.11.1): the caller wraps every request
+ * with its own abort/timeout bound and the instance routes ALL traffic
+ * through it. The connection is threaded explicitly rather than left to a
+ * mutation of the global fetch, because a Worker isolates one module-level
+ * binding per isolate — module state is not a safe place for per-run state.
+ */
+export type ReviewCommenterOptions = {
+  /** Optional bounded transport — include the thread-surface store to enable §7.5. */
+  db?: D1Like;
+  /** Injectable clock for the §7.5 thread surface. */
+  nowMs?: () => number;
+  /** Per-request transport seam (timeout/abort wrapper). */
+  fetchImpl?: CommenterFetch;
+};
+
 // ---------------------------------------------------------------------------
 // Purpose-scoped token boundary (plan 67 Task 2, spec §7.6): every mint is
 // tied to a purpose + the exact repository, and the SANDBOX grant is checked
@@ -839,6 +864,15 @@ export type ReviewCommenter = {
     associationId: string;
     verified: VerifiedResolution;
   }): Promise<ResolveOutcome>;
+  /**
+   * JWT-authenticated `GET /app` identity proof (spec §7.5/§7.6): the numeric
+   * App id + nonblank slug of the LIVE App behind THIS instance's
+   * credentials, memoized per instance. `null` = identity unavailable (the
+   * probe failed or answered malformed) — callers fail closed. Present on
+   * every instance `createReviewCommenter` builds; declared optional so
+   * minimal test doubles stay assignable (the `discoverThread?` precedent).
+   */
+  getAppIdentity?(): Promise<{ githubAppId: number; slug: string } | null>;
 };
 /**
  * Structural auth surface for the createAppAuth strategy. `AuthInterface` is
@@ -1461,7 +1495,20 @@ export async function postLineCommentsWithOctokit(
  * installation/repository/permissions, so the two purpose families never
  * cross-reuse tokens.
  */
-export function createReviewCommenter(env: CommenterEnv, threads?: { db: D1Like; nowMs?: () => number }): ReviewCommenter {
+export function createReviewCommenter(env: CommenterEnv, options?: ReviewCommenterOptions): ReviewCommenter {
+  // Per-request transport clamp (spec §7.11.1): when the caller supplies a
+  // bounded fetch, EVERY request this instance can issue goes through it —
+  // the App-identity probe, the installation-token mint (auth-app's own POST,
+  // wired through `request` below) and every token-authenticated Octokit
+  // call. Omitted → the runtime global fetch, unbounded (the consumer's
+  // long-running publication path keeps its current behavior).
+  const boundedFetch = options?.fetchImpl;
+  const requestOptions: { request?: { fetch?: CommenterFetch } } =
+    boundedFetch === undefined ? {} : { request: { fetch: boundedFetch } };
+  /** Octokit construction options carrying the transport seam when present. */
+  const httpOptions = (auth?: string): { auth?: string; request?: { fetch?: CommenterFetch } } =>
+    auth === undefined ? { ...requestOptions } : { auth, ...requestOptions };
+
   let appAuth: AppAuthStrategy | null = null;
   async function getAppAuth(): Promise<AppAuthStrategy> {
     // Local capture: the closure variable's null state cannot be narrowed
@@ -1470,7 +1517,15 @@ export function createReviewCommenter(env: CommenterEnv, threads?: { db: D1Like;
     // named surface, but the runtime strategy satisfies it.
     let auth = appAuth;
     if (auth === null) {
-      auth = createAppAuth({ appId: env.APP_ID, privateKey: normalizePrivateKey(env.PRIVATE_KEY) }) as unknown as AppAuthStrategy;
+      // The mint must be bounded too: auth-app defaults to its own unbounded
+      // request, so a bounded seam is handed over as the strategy's request
+      // (built here, at the single createAppAuth construction point).
+      const authRequest = boundedFetch === undefined ? null : new Octokit(requestOptions).request;
+      auth = createAppAuth({
+        appId: env.APP_ID,
+        privateKey: normalizePrivateKey(env.PRIVATE_KEY),
+        ...(authRequest === null ? {} : { request: authRequest as never }),
+      }) as unknown as AppAuthStrategy;
       appAuth = auth;
     }
     return auth;
@@ -1498,7 +1553,7 @@ export function createReviewCommenter(env: CommenterEnv, threads?: { db: D1Like;
    */
   async function getOctokit(input: { installationId: number; repo: string }): Promise<PostOctokit> {
     const grant = await mintGrant({ ...input, purpose: "review-write" });
-    return new Octokit({ auth: grant.token }) as unknown as PostOctokit;
+    return new Octokit(httpOptions(grant.token)) as unknown as PostOctokit;
   }
 
   /**
@@ -1514,11 +1569,14 @@ export function createReviewCommenter(env: CommenterEnv, threads?: { db: D1Like;
     try {
       const auth = await getAppAuth();
       const { token } = await auth({ type: "app" });
-      // The installed rest-endpoint types omit `apps.get` on this Octokit
-      // build — the runtime method exists; the cast pins only the response
-      // fields consumed below (identity proof, spec §7.5).
-      const octokit = new Octokit({ auth: token });
-      const { data } = await (octokit.rest.apps as unknown as { get: () => Promise<{ data: { id?: unknown; slug?: unknown } }> }).get();
+      // `GET /app` is exposed by the installed plugin as
+      // `rest.apps.getAuthenticated` — there is NO `apps.get` (verified
+      // against the plugin's endpoint map), so the probe MUST use this name:
+      // the wrong name throws TypeError and would collapse every App into the
+      // unusable "identity unavailable" branch. The installed types carry the
+      // response shape, so the fields are read directly.
+      const octokit = new Octokit(httpOptions(token));
+      const { data } = await octokit.rest.apps.getAuthenticated();
       cachedIdentity =
         typeof data?.id === "number" && typeof data?.slug === "string" && data.slug.length > 0
           ? { githubAppId: data.id, slug: data.slug }
@@ -1536,16 +1594,17 @@ export function createReviewCommenter(env: CommenterEnv, threads?: { db: D1Like;
 
   // §7.5 adapter (plan 67 Task 2): wired only when the caller binds the
   // thread store — the two optional methods stay undefined otherwise.
-  const threadSurface = threads
+  const threadSurface = options?.db
     ? createReviewThreads({
-        db: threads.db,
-        nowMs: threads.nowMs ?? (() => Date.now()),
+        db: options.db,
+        nowMs: options.nowMs ?? (() => Date.now()),
         getAppIdentity: async () => getAppIdentity(),
         getOctokit: async ({ installationId, repo }) => getGraphqlOctokit({ installationId, repo }),
       })
     : null;
 
   return {
+    getAppIdentity,
     ...(threadSurface
       ? {
           discoverThread: (input: { scope: Scope; intent: LineIntent; reviewId: number | null }) =>

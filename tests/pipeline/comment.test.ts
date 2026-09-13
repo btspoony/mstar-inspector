@@ -26,13 +26,14 @@
  *     called, and no call carries `event` / APPROVE / REQUEST_CHANGES
  */
 
-import { describe, expect, mock, test } from "bun:test";
+import { afterEach, describe, expect, mock, test } from "bun:test";
 import {
   buildDegradedBody,
   buildPreparedDegradedBody,
   buildPreparedReviewBody,
   buildPublicationMarker,
   buildReviewBody,
+  createReviewCommenter,
   DEGRADED_EXCERPT_LIMIT,
   findDegradedComment,
   findDegradedComments,
@@ -50,10 +51,12 @@ import {
   REVIEW_BODY_LIMIT,
   SUMMARY_MD_LIMIT,
   truncateSummary,
+  type CommenterFetch,
   type PostOctokit,
 } from "../../src/pipeline/comment";
 import type { ReviewFinding, ReviewOutput } from "../../src/review/schema";
 import { computeFindingFingerprint } from "../../src/store/fingerprint";
+import { testAppPem } from "../helpers/rsa-key";
 
 function finding(mergeClass: ReviewFinding["mergeClass"], title: string): ReviewFinding {
   return {
@@ -1064,5 +1067,110 @@ describe("missing octokit surface → per-chain error noun (review feedback fix)
         publicationId: "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
       }),
     ).rejects.toThrow(/cannot publish the prepared degraded comment/);
+  });
+});
+
+describe("createReviewCommenter — bounded transport seam + live App identity (plan 67 T5 §7.11.1/§7.5)", () => {
+  // A real PKCS#8 key: auth-app must be able to SIGN the App JWT, otherwise
+  // the request never reaches the seam and the seam stays unobservable.
+  const ENV = { APP_ID: "1001", PRIVATE_KEY: "" };
+  const SCOPE = { appId: "app-1", installationId: 123, owner: "acme", repo: "widgets", prNumber: 42 };
+
+  type SeamCall = { url: string; method: string; signal: AbortSignal | null };
+  /** Records every request and answers the two upstream shapes involved. */
+  function recordingFetch(): { calls: SeamCall[]; impl: CommenterFetch } {
+    const calls: SeamCall[] = [];
+    const impl: CommenterFetch = async (input, init) => {
+      const url = String(input);
+      calls.push({ url, method: init?.method ?? "GET", signal: init?.signal ?? null });
+      if (url.endsWith("/app")) {
+        return new Response(JSON.stringify({ id: 1001, slug: "acme-inspector" }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      }
+      return new Response(
+        JSON.stringify({
+          token: "ghs_test",
+          expires_at: new Date(Date.now() + 3_600_000).toISOString(),
+          repositories: [{ id: 1, name: "widgets" }],
+          permissions: { contents: "write", metadata: "read", pull_requests: "write", issues: "write" },
+          repository_selection: "selected",
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      );
+    };
+    return { calls, impl };
+  }
+
+  /** Global fetch is severed: anything bypassing the seam throws loudly. */
+  const realFetch = globalThis.fetch;
+  afterEach(() => {
+    globalThis.fetch = realFetch;
+  });
+  function severGlobalFetch(): void {
+    globalThis.fetch = (async (_input: unknown, _init?: RequestInit): Promise<Response> => {
+      throw new Error("global fetch must not be used — the request escaped the bounded seam");
+    }) as typeof fetch;
+  }
+
+  test("the identity probe uses GET /app and returns the LIVE App id + slug", async () => {
+    const { calls, impl } = recordingFetch();
+    severGlobalFetch();
+    const commenter = createReviewCommenter({ ...ENV, PRIVATE_KEY: await testAppPem() }, { fetchImpl: impl });
+
+    expect(await commenter.getAppIdentity!()).toEqual({ githubAppId: 1001, slug: "acme-inspector" });
+    expect(calls).toHaveLength(1);
+    expect(calls[0]!.url).toBe("https://api.github.com/app");
+    expect(calls[0]!.method).toBe("GET");
+    // Memoized: a second probe issues no further request.
+    expect(await commenter.getAppIdentity!()).toEqual({ githubAppId: 1001, slug: "acme-inspector" });
+    expect(calls).toHaveLength(1);
+  });
+
+  test("the token mint and every token-authenticated call travel through the seam, never the global fetch", async () => {
+    const { calls, impl } = recordingFetch();
+    severGlobalFetch();
+    const commenter = createReviewCommenter({ ...ENV, PRIVATE_KEY: await testAppPem() }, { fetchImpl: impl });
+
+    const grant = await commenter.getInstallationToken({ scope: SCOPE, purpose: "review-write" });
+    expect(grant.token).toBe("ghs_test");
+    expect(calls.map((c) => `${c.method} ${c.url}`)).toEqual([
+      "POST https://api.github.com/app/installations/123/access_tokens",
+    ]);
+  });
+
+  test("a non-blank answer that is not the expected shape fails closed to null (identity unavailable)", async () => {
+    severGlobalFetch();
+    const commenter = createReviewCommenter(
+      { ...ENV, PRIVATE_KEY: await testAppPem() },
+      {
+        fetchImpl: async () =>
+          new Response(JSON.stringify({ id: 1001, slug: "" }), {
+            status: 200,
+            headers: { "content-type": "application/json" },
+          }),
+      },
+    );
+
+    expect(await commenter.getAppIdentity!()).toBeNull();
+  });
+
+  test("without the seam the instance still uses the runtime global fetch (consumer default unchanged)", async () => {
+    // The seam is OPT-IN: an instance built by the consumer (no `fetchImpl`)
+    // must keep issuing through the global fetch. Stubbing the global proves
+    // the default route without touching the network.
+    const globalCalls: string[] = [];
+    globalThis.fetch = (async (input: unknown) => {
+      globalCalls.push(String(input));
+      return new Response(JSON.stringify({ id: 1001, slug: "acme-inspector" }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    }) as typeof fetch;
+
+    const commenter = createReviewCommenter({ ...ENV, PRIVATE_KEY: await testAppPem() });
+    expect(await commenter.getAppIdentity!()).toEqual({ githubAppId: 1001, slug: "acme-inspector" });
+    expect(globalCalls).toEqual(["https://api.github.com/app"]);
   });
 });

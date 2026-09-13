@@ -23,6 +23,7 @@ import { Hono } from "hono";
 import type { ExecutionContext, MessageBatch, ScheduledController } from "@cloudflare/workers-types";
 import type { Env, ScheduledEnv } from "./env";
 import { defaultSweepLog, runSweep } from "./sweep";
+import { reconcileReviewLifecycle } from "./lifecycle-reconcile";
 import { redactSecrets } from "../pipeline/redact";
 import type { ReviewJobPayload } from "../contracts/review-job";
 import type { PipelineEnv } from "../pipeline/consumer";
@@ -326,12 +327,15 @@ export default {
     const { createReviewConsumer } = await import("../pipeline/consumer");
     await createReviewConsumer(env)(batch);
   },
-  // 19 T1 cron wiring (AL-6): the trailing-24h `review_failures` sweep. The
-  // WHOLE sweep is try/caught — a sweep failure must never throw out of
-  // `scheduled` (a throwing cron handler just retries into alert noise). The
-  // sweep reads D1 only: no queue/KV mutation from this face (ScheduledEnv
-  // deliberately omits those bindings). The handler awaits the sweep
-  // directly, so no ctx.waitUntil is needed.
+  // 19 T1 cron wiring (AL-6): the trailing-24h `review_failures` sweep,
+  // composed (spec review-lifecycle §7.11) with the plan-67 M8 recovery
+  // reconciler — runSweep → reconcileReviewLifecycle → (plan 68 appends
+  // reconcileReviewChecks here) — each stage caught INDEPENDENTLY so one
+  // stage's failure can never break another, and nothing ever throws out of
+  // `scheduled` (a throwing cron handler just retries into alert noise).
+  // The sweep reads D1 only; the reconciler additionally reads the
+  // DASHBOARD_ENCRYPTION_KEY binding to route per-App recovery credentials
+  // (§7.6). The handler awaits both directly, so no ctx.waitUntil is needed.
   async scheduled(_controller: ScheduledController, env: ScheduledEnv, _ctx: ExecutionContext): Promise<void> {
     try {
       if (!env.DB) {
@@ -352,6 +356,21 @@ export default {
           detail: redactSecrets(error instanceof Error ? error.message : String(error)),
         },
         "ops sweep failed",
+      );
+    }
+    // M8 recovery reconciler (plan 67 §7.11) — OWN try/catch AFTER runSweep.
+    // reconcileReviewLifecycle is throw-proof by contract; the catch is the
+    // composition's independent-failure guarantee (and matches plan 68's
+    // upcoming stage shape).
+    try {
+      await reconcileReviewLifecycle(env);
+    } catch (error) {
+      defaultSweepLog.warn(
+        {
+          event: "ops_lifecycle_reconcile_failed",
+          detail: redactSecrets(error instanceof Error ? error.message : String(error)),
+        },
+        "lifecycle reconcile failed",
       );
     }
   },

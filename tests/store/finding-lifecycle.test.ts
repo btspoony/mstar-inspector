@@ -58,6 +58,7 @@ import {
   type PublicationProof,
 } from "../../src/store/finding-lifecycle";
 import type { Scope } from "../../src/contracts/recheck";
+import type { D1BatchResult, D1Like, D1StatementLike } from "../../src/store/types";
 import { createArtifactStore, type ReviewArtifactDoc } from "../../src/store/artifact-store";
 import { idemKey } from "../../src/contracts/idem";
 import { createMigratedTestD1, type TestD1 } from "./helpers";
@@ -479,6 +480,210 @@ describe("applyPublishedLifecycle (spec §7.2 state machine + §7.7 step 9)", ()
     expect(await applyPublishedLifecycle(db, "pub-1", lease, 2000)).toBe(false);
     expect(publicationRow(db, "pub-1").phase).toBe("confirmed");
     expect((db.raw.query("SELECT COUNT(*) AS n FROM reviews").get() as { n: number }).n).toBe(0);
+  });
+
+  test("a chunked apply stops writing once the lease is replaced (§7.11.1 chunk fence)", async () => {
+    const db = createSeededTestD1();
+    // >25 statements ⇒ more than one chunk: 30 seen upserts + 30 intents.
+    const seen = Array.from({ length: 30 }, (_, i) => seenEntry(`row-${i}`, `f-${i}`));
+    const pay = payload({
+      lifecycle: lifecycleRound({ seen }),
+      lineIntents: seen.map((entry, i) => intent(`assoc-${i}`, entry.rowId, "pub-1", 1)),
+    });
+    const lease = await stageClaimProve(db, "pub-1", pay, 1000);
+
+    // The clock is read once per chunk fence. Before the SECOND chunk's fence
+    // a rival invocation has already claimed a NEWER epoch (the 120s lease
+    // expired mid-apply): the stale apply must stop instead of mutating
+    // findings/associations under ownership it no longer holds.
+    let reads = 0;
+    const applied = await applyPublishedLifecycle(db, "pub-1", lease, 2000, () => {
+      reads += 1;
+      if (reads === 3) {
+        db.raw
+          .prepare(`UPDATE review_publications SET holder = 'other', lease_epoch = lease_epoch + 1 WHERE id = 'pub-1'`)
+          .run();
+      }
+      return 2000;
+    });
+
+    expect(reads).toBe(3); // entry fence, first chunk, aborted second chunk
+    expect(applied).toBe(false); // the stale invocation never marks complete
+    // Only the first chunk's writes landed; the second chunk never ran.
+    expect((db.raw.query("SELECT COUNT(*) AS n FROM review_findings").get() as { n: number }).n).toBe(25);
+    expect((db.raw.query("SELECT COUNT(*) AS n FROM review_threads").get() as { n: number }).n).toBe(0);
+    expect(publicationRow(db, "pub-1").phase).toBe("confirmed"); // never marked applied
+  });
+
+  test("a chunked apply stops when its own lease expires between chunks", async () => {
+    const db = createSeededTestD1();
+    const seen = Array.from({ length: 30 }, (_, i) => seenEntry(`row-${i}`, `f-${i}`));
+    const pay = payload({ lifecycle: lifecycleRound({ seen }) });
+    const lease = await stageClaimProve(db, "pub-1", pay, 1000);
+
+    let reads = 0;
+    const applied = await applyPublishedLifecycle(db, "pub-1", lease, 2000, () => {
+      reads += 1;
+      return reads < 3 ? 2000 : lease.untilMs + 1; // the second chunk finds the lease expired
+    });
+
+    expect(applied).toBe(false);
+    expect(reads).toBe(3);
+    expect((db.raw.query("SELECT COUNT(*) AS n FROM review_findings").get() as { n: number }).n).toBe(25);
+    expect(publicationRow(db, "pub-1").phase).toBe("confirmed");
+  });
+});
+
+/**
+ * Wrap the D1 double so a lease mutation can land at every WRITE boundary:
+ * `mutate` runs immediately before each `db.batch` and before the first
+ * direct statement `run()` (the degraded marker), i.e. after every read probe
+ * has already passed. A read-then-write fence cannot refuse this — only a
+ * live-lease predicate inside the write statements themselves can, which is
+ * exactly what §7.11.1 ("All local updates require `(id,holder,lease_epoch,
+ * lease_until_ms > now)`") demands.
+ */
+function leaseMutationAtWriteBoundary(db: TestD1, mutate: () => void): D1Like {
+  let inBatch = false;
+  let directRun = false;
+  return {
+    prepare(query: string): D1StatementLike {
+      const inner = db.prepare(query);
+      const statement: D1StatementLike = {
+        bind(...values: unknown[]): D1StatementLike {
+          inner.bind(...values);
+          return statement;
+        },
+        first<T = Record<string, unknown>>(): Promise<T | null> {
+          return inner.first<T>();
+        },
+        all<T = Record<string, unknown>>(): Promise<{ results: T[] }> {
+          return inner.all<T>();
+        },
+        run<T = Record<string, unknown>>() {
+          // Runs inside `batch` are covered by that batch's boundary hook.
+          if (!inBatch && !directRun) {
+            directRun = true;
+            mutate();
+          }
+          return inner.run<T>();
+        },
+      };
+      return statement;
+    },
+    async batch(statements: D1StatementLike[]): Promise<D1BatchResult[]> {
+      mutate();
+      inBatch = true;
+      try {
+        return await db.batch(statements);
+      } finally {
+        inBatch = false;
+      }
+    },
+  };
+}
+
+describe("atomic live-lease fence at the mutation boundary (spec §7.11.1)", () => {
+  /** Row count of one lifecycle table after an apply. */
+  const count = (db: TestD1, table: string): number => {
+    // bun:sqlite `get()` is untyped; a COUNT(*) aggregate is always one row.
+    const row = db.raw.prepare(`SELECT COUNT(*) AS n FROM ${table}`).get() as { n: number };
+    return row.n;
+  };
+
+  test("a lease replaced at the mutation boundary writes no lifecycle row and never marks applied", async () => {
+    const db = createSeededTestD1();
+    const pay = payload({
+      lifecycle: lifecycleRound({ selectedRowIds: ["row-1"], seen: [seenEntry("row-1", "f-1")] }),
+      lineIntents: [intent("assoc-1", "row-1", "pub-1", 1)],
+    });
+    const lease = await stageClaimProve(db, "pub-1", pay, 1000);
+    // The review row already exists, so the apply's ONLY write is the guarded
+    // lifecycle batch (store.put is skipped).
+    await createArtifactStore(db).put(pay.artifact!);
+
+    // A rival invocation claims a NEWER epoch after the entry probe passed and
+    // immediately before the batch executes — the window a read probe misses.
+    const raced = leaseMutationAtWriteBoundary(db, () => {
+      db.raw
+        .prepare(`UPDATE review_publications SET holder = 'rival', lease_epoch = lease_epoch + 1 WHERE id = 'pub-1'`)
+        .run();
+    });
+
+    expect(await applyPublishedLifecycle(raced, "pub-1", lease, 2000)).toBe(false);
+    expect(count(db, "review_findings")).toBe(0);
+    expect(count(db, "review_finding_rounds")).toBe(0);
+    expect(count(db, "review_threads")).toBe(0);
+    expect(publicationRow(db, "pub-1")).toMatchObject({ phase: "confirmed", applied_ms: null });
+  });
+
+  test("an expired same-holder lease writes nothing and refuses the applied marker", async () => {
+    const db = createSeededTestD1();
+    const pay = payload({
+      lifecycle: lifecycleRound({ selectedRowIds: ["row-1"], seen: [seenEntry("row-1", "f-1")] }),
+      lineIntents: [intent("assoc-1", "row-1", "pub-1", 1)],
+    });
+    const lease = await stageClaimProve(db, "pub-1", pay, 1000);
+    await createArtifactStore(db).put(pay.artifact!);
+
+    // Same holder and epoch — only the expiry predicate can refuse this, and
+    // the applied marker alone carried no expiry predicate before the fix.
+    const raced = leaseMutationAtWriteBoundary(db, () => {
+      db.raw.prepare(`UPDATE review_publications SET lease_until_ms = ? WHERE id = 'pub-1'`).run(1999);
+    });
+
+    expect(await applyPublishedLifecycle(raced, "pub-1", lease, 2000)).toBe(false);
+    expect(count(db, "review_findings")).toBe(0);
+    expect(count(db, "review_threads")).toBe(0);
+    expect(publicationRow(db, "pub-1")).toMatchObject({ phase: "confirmed", applied_ms: null });
+  });
+
+  test("a replacement between chunks cannot write the remaining chunks", async () => {
+    const db = createSeededTestD1();
+    // >25 statements ⇒ more than one chunk: the second chunk's writes land
+    // after the first chunk committed and after ITS fence read passed.
+    const seen = Array.from({ length: 30 }, (_, i) => seenEntry(`row-${i}`, `f-${i}`));
+    const pay = payload({
+      lifecycle: lifecycleRound({ seen }),
+      lineIntents: seen.map((entry, i) => intent(`assoc-${i}`, entry.rowId, "pub-1", 1)),
+    });
+    const lease = await stageClaimProve(db, "pub-1", pay, 1000);
+    await createArtifactStore(db).put(pay.artifact!);
+
+    let writes = 0;
+    const raced = leaseMutationAtWriteBoundary(db, () => {
+      writes += 1;
+      if (writes === 2) {
+        db.raw
+          .prepare(`UPDATE review_publications SET holder = 'rival', lease_epoch = lease_epoch + 1 WHERE id = 'pub-1'`)
+          .run();
+      }
+    });
+
+    expect(await applyPublishedLifecycle(raced, "pub-1", lease, 2000)).toBe(false);
+    // Only the first chunk (25 seen upserts) committed; the second chunk's
+    // statements are refused by their own predicate, not by a later probe.
+    expect(count(db, "review_findings")).toBe(25);
+    expect(count(db, "review_threads")).toBe(0);
+    expect(publicationRow(db, "pub-1")).toMatchObject({ phase: "confirmed", applied_ms: null });
+  });
+
+  test("the degraded applied marker is atomically expiry-fenced", async () => {
+    const db = createSeededTestD1();
+    const pay = payload({ kind: "degraded", artifact: null, lifecycle: null });
+    const lease = await stageClaimProve(db, "pub-1", pay, 1000);
+
+    const raced = leaseMutationAtWriteBoundary(db, () => {
+      db.raw.prepare(`UPDATE review_publications SET lease_until_ms = ? WHERE id = 'pub-1'`).run(1999);
+    });
+
+    expect(await applyPublishedLifecycle(raced, "pub-1", lease, 2000)).toBe(false);
+    expect(publicationRow(db, "pub-1")).toMatchObject({ phase: "confirmed", applied_ms: null });
+
+    // Control: the same apply lands once the lease really is live again.
+    db.raw.prepare(`UPDATE review_publications SET lease_until_ms = ? WHERE id = 'pub-1'`).run(lease.untilMs);
+    expect(await applyPublishedLifecycle(db, "pub-1", lease, 2000)).toBe(true);
+    expect(publicationRow(db, "pub-1").phase).toBe("applied");
   });
 });
 
