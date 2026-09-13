@@ -245,15 +245,54 @@ export type ChecksAdapter = {
 };
 
 /**
+ * The typed proof that a send lane's request NEVER reached GitHub: the single
+ * error a pre-dispatch gate (an allowance/transport bound, a client-side
+ * fence) throws instead of dispatching. It carries no behaviour — it is a
+ * marker, and `isRequestNotDispatched` recognises it through the error chain
+ * because octokit re-wraps a custom transport rejection as a `RequestError`
+ * with the original parked on `cause`.
+ *
+ * The distinction is load-bearing for recovery (spec §7.11.2 step 5): a
+ * refusal that never left the process must report `requests: 0` so the caller
+ * may roll the durable `sending` mark back and let recovery CREATE again,
+ * while every unproven failure stays `requests: 1` and adopt-only. Throw this
+ * ONLY when dispatch provably did not happen — a false marker would authorise
+ * a second remote run for a head that already has one (RL-12).
+ */
+export class CheckRequestNotDispatched extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "CheckRequestNotDispatched";
+  }
+}
+
+/** Identity walk of the error chain — never message text, which would classify
+ * any error merely mentioning the budget as un-dispatched. */
+export function isRequestNotDispatched(error: unknown): boolean {
+  const seen = new Set<unknown>();
+  let current: unknown = error;
+  for (let depth = 0; depth < 8; depth += 1) {
+    if (current instanceof CheckRequestNotDispatched) return true;
+    if (typeof current !== "object" || current === null || seen.has(current)) return false;
+    seen.add(current);
+    if (!("cause" in current)) return false;
+    current = current.cause;
+  }
+  return false;
+}
+
+/**
  * The one network request each send lane issues, so a refusal can report
  * whether the API was actually contacted (an `unavailable` that never sent
- * leaves nothing possibly-created on GitHub). A transport throw counts as a
- * request that may have landed — an answered rejection is still a request.
+ * leaves nothing possibly-created on GitHub). A typed pre-dispatch refusal
+ * reports `0`; EVERY other rejection — including one whose cause chain we
+ * cannot classify — reports `1`, because "we cannot prove it was not sent" is
+ * exactly the case that must stay adopt-only.
  */
 function sendRequests<T>(promise: Promise<T>): Promise<{ sent: number; outcome: T | { failure: unknown } }> {
   return promise.then(
     (outcome) => ({ sent: 1, outcome }),
-    (failure: unknown) => ({ sent: 1, outcome: { failure } }),
+    (failure: unknown) => ({ sent: isRequestNotDispatched(failure) ? 0 : 1, outcome: { failure } }),
   );
 }
 
@@ -350,6 +389,15 @@ async function beginCheckWith(
     }),
   );
   if ("failure" in attempted.outcome) {
+    if (attempted.sent === 0) {
+      // The transport refused BEFORE dispatch (a typed pre-dispatch marker), so
+      // the `sending` mark above now MISSTATES the row: nothing left the
+      // process. Undo it under the identity fence — this is exactly the path
+      // where a liveness fence would be false — so the attempt does not sit in
+      // the RL-12 adopt-only state with no request behind it. A lost race
+      // leaves `sending` in place, which stays conservative.
+      await rollbackCheckCreateDispatch(deps.db, identity.attemptId, input.lease, nowMs);
+    }
     return { kind: "unavailable", requests: attempted.sent, reason: surfaceFailure(attempted.outcome.failure, "check create") };
   }
   const remote = toCheckRemote(attempted.outcome.data);
@@ -386,7 +434,6 @@ async function adoptCheckRunWith(
   if (client === null) return { kind: "incomplete" };
   const { scope } = identity;
   const matches: CheckRemote[] = [];
-  let pagesRead = 0;
   let saturated = false;
   for (let page = 1; page <= ADOPT_MAX_PAGES; page += 1) {
     let result: { data: ChecksListPage };
@@ -407,7 +454,6 @@ async function adoptCheckRunWith(
     }
     const runs = result?.data?.check_runs;
     if (!Array.isArray(runs)) return { kind: "incomplete" };
-    pagesRead += 1;
     for (const payload of runs) {
       const remote = toCheckRemote(payload);
       // A malformed candidate inside the App/name/SHA window makes the walk
@@ -416,15 +462,23 @@ async function adoptCheckRunWith(
       if (remoteBelongsTo(remote, identity)) matches.push(remote);
     }
     if (matches.length > 1) return { kind: "ambiguous" };
-    if (matches.length === 1) return { kind: "found", remote: matches[0]! };
     saturated = runs.length >= ADOPT_PAGE_SIZE;
-    if (!saturated) break;
+    // A NON-saturated page exhausts the candidate set: the walk is complete, so
+    // a single match is now provably unique and the absence of one is provable.
+    // Returning `found` from a SATURATED page would be a claim about an
+    // incomplete set — an unobserved duplicate on page 2 (a `Re-run` UI action,
+    // a server-side anomaly) would then be treated as ours and terminalized
+    // while the reachable second page was never read (spec §7.9: "Multiple/
+    // incomplete candidates remain unknown").
+    if (!saturated) {
+      return matches.length === 1 ? { kind: "found", remote: matches[0]! } : { kind: "absent" };
+    }
   }
-  // Absence is a claim about a COMPLETE walk only. A bound-hitting walk is
-  // honest about the API's own limits (spec §7.9: listForRef also caps at the
-  // 1000 most recent suites on a ref) and stays incomplete, never absent.
-  if (saturated && pagesRead >= ADOPT_MAX_PAGES) return { kind: "incomplete" };
-  return { kind: "absent" };
+  // The bound was reached while the pages were still saturated (spec §7.9:
+  // "listForRef also caps at the 1000 most recent suites on a ref"), and
+  // `ADOPT_MAX_PAGES` is all the honesty this lane may spend. Uniqueness is
+  // NOT proven for a single match either, so the answer stays incomplete.
+  return { kind: "incomplete" };
 }
 
 /**
@@ -782,6 +836,14 @@ export type CheckLifecycleDeps = {
   getAdapter(scope: Scope): ChecksAdapter | null;
   /** The transaction clock (spec §7.0) — re-read immediately before each fenced write. */
   nowMs(): number;
+  /**
+   * The consumer's §7.10 abandonment signal: true once the inline-hook budget
+   * elapsed and this invocation's result was discarded. A `begin` that checks
+   * it after its create cannot keep working on behalf of a caller that is no
+   * longer waiting — it hands the created attempt to recovery instead (see
+   * `abandonUnterminalized`). Omitted → never abandoned (the seam's default).
+   */
+  isCancelled?(): boolean;
 };
 
 /**
@@ -847,6 +909,54 @@ export function createCheckLifecycle(deps: CheckLifecycleDeps): CheckLifecycle {
   const fenceFor = (lease: Lease): { lease: Lease; nowMs: number } => ({ lease, nowMs: deps.nowMs() });
 
   /**
+   * A lease carried by an invocation the CONSUMER has already abandoned (the
+   * §7.10 two-second hook budget elapsed). A refused attach or unavailable send
+   * must not leave such an attempt holding a lease nothing will terminalize:
+   * the recovery lane would not select it until its execution deadline (the
+   * integrated claim still requires `desired <> 'in_progress' OR
+   * execution_deadline_ms <= now`). The attempt is therefore released NOW with
+   * an explicit terminalized intent, so recovery is due after the first backoff
+   * rung instead of up to fifteen minutes later — identity, the attached run id
+   * and any sent-request truth are all preserved.
+   *
+   * Both the release and the intent write are fenced on the live lease, so an
+   * attempt whose lease has genuinely expired is untouched by this path — its
+   * own expiry is what the deadline rule already covers. A refused-marker
+   * failure when no request was dispatched is the exception: the lease is
+   * provably dead in that case, and the identity fence is the honest one.
+   */
+  const abandonUnterminalized = async (
+    identity: CheckIdentity,
+    lease: Lease,
+    reason: string,
+    requestsSpent: boolean,
+  ): Promise<void> => {
+    const fence = fenceFor(lease);
+    const frozen = await setCheckDesired(
+      deps.db,
+      identity.attemptId,
+      fence.lease,
+      {
+        desired: "failure",
+        title: CHECK_NAME,
+        summary: CHECK_SUMMARIES.unconfirmed,
+      },
+      null,
+      fence.nowMs,
+    );
+    if (frozen) {
+      await releaseForRecovery(identity.attemptId, fence.lease, reason, requestsSpent);
+      return;
+    }
+    if (!requestsSpent) {
+      // No request was dispatched, so nothing may exist remotely: the
+      // identity-fenced release is the correct one even though the lease is
+      // dead (that is exactly why the intent write above refused).
+      await releaseForRecovery(identity.attemptId, fence.lease, reason, false);
+    }
+  };
+
+  /**
    * Hand an attempt to the recovery lane: release the lease and record the
    * honest state + backoff. `requestsSpent` is the caller's knowledge that a
    * remote request was already issued (or may have been) for this attempt:
@@ -871,6 +981,22 @@ export function createCheckLifecycle(deps: CheckLifecycleDeps): CheckLifecycle {
       },
       nowMs,
     );
+  };
+
+  /**
+   * Record the run a cancelled invocation created, then hand the attempt to
+   * recovery. The id is attached first — the durable fact recovery needs to
+   * ADOPT this run instead of creating a second one — and the terminal intent
+   * plus the released lease make the row due after the first backoff rung
+   * rather than at the execution deadline. Every write is fenced on the live
+   * lease: if the lease died while the create ran, the attach is refused and
+   * the row keeps exactly what the adapter persisted (`sending` for the
+   * adopt-only state the deadline rule already covers).
+   */
+  const adoptLateCreatedRun = async (identity: CheckIdentity, lease: Lease, remoteId: number): Promise<void> => {
+    const fence = fenceFor(lease);
+    if (!(await attachCheckRunId(deps.db, identity.attemptId, fence.lease, remoteId, fence.nowMs))) return;
+    await abandonUnterminalized(identity, lease, "the creating invocation was abandoned by the consumer budget", true);
   };
 
   return {
@@ -900,6 +1026,17 @@ export function createCheckLifecycle(deps: CheckLifecycleDeps): CheckLifecycle {
       const begun = await adapter.beginCheck({ identity, lease: claim.lease });
       if (begun.kind !== "ready") {
         await releaseForRecovery(identity.attemptId, claim.lease, begun.reason, begun.requests > 0);
+        return null;
+      }
+      // The consumer's §7.10 budget may already have elapsed while this create
+      // ran. Its wait is bounded (publication is never delayed by a Check), so
+      // the honest response is to stop attaching and leave the created run to
+      // the recovery lane with a terminal obligation instead of a fifteen-minute
+      // wait for the execution deadline. The attempt keeps its identity and the
+      // run id this invocation just proved, so recovery ADOPTS rather than
+      // creating a second run (RL-12).
+      if (deps.isCancelled?.() === true) {
+        await adoptLateCreatedRun(identity, claim.lease, begun.remote.id);
         return null;
       }
       // The run is OURS only once its id is attached under a lease this

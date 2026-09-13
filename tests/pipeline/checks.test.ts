@@ -47,6 +47,7 @@ import {
 } from "../../src/store/review-checks";
 import {
   CHECK_SUMMARIES,
+  CheckRequestNotDispatched,
   createChecksAdapter,
   decideConclusion,
   remoteBelongsTo,
@@ -708,6 +709,72 @@ describe("adoptCheckRun — the adoption fences", () => {
     expect(fake.lists.map((p) => p.page)).toEqual([1, 2]);
   });
 
+  test("a saturated page-1 match must finish the walk: a duplicate on page 2 is ambiguous", async () => {
+    const db = seededDb();
+    const { attempt } = await claimedAttempt(db);
+    const identity = attempt.identity;
+    const filler = Array.from({ length: 99 }, (_, i) => runPayload(identity, { id: i + 1, external_id: `x${i}` }));
+    const fake = fakeChecks({
+      pages: (_p, page) =>
+        page === 1
+          // SATURATED (100 runs) with exactly ONE match: the pre-fix walk
+          // returned `found` here without ever reading page 2.
+          ? { total_count: 101, check_runs: [...filler, runPayload(identity, { id: 500 })] }
+          : page === 2
+            // The duplicate the incomplete walk could not see.
+            ? { total_count: 101, check_runs: [runPayload(identity, { id: 501 })] }
+            : null,
+    });
+    const result = await adapterFor(db, fake.octokit).adoptCheckRun({ identity });
+    expect(result.kind).toBe("ambiguous");
+    expect(fake.lists.map((p) => p.page)).toEqual([1, 2]);
+  });
+
+  test("a saturated page-1 match is confirmed by a complete page 2 (uniqueness proven)", async () => {
+    const db = seededDb();
+    const { attempt } = await claimedAttempt(db);
+    const identity = attempt.identity;
+    const filler = Array.from({ length: 99 }, (_, i) => runPayload(identity, { id: i + 1, external_id: `x${i}` }));
+    const fake = fakeChecks({
+      pages: (_p, page) =>
+        page === 1
+          ? { total_count: 100, check_runs: [...filler, runPayload(identity, { id: 500 })] }
+          : page === 2
+            // A SHORT page exhausts the candidate set: uniqueness is now proven.
+            ? { total_count: 100, check_runs: [runPayload(identity, { id: 9, external_id: "someone-else" })] }
+            : null,
+    });
+    const result = await adapterFor(db, fake.octokit).adoptCheckRun({ identity });
+    expect(result).toMatchObject({ kind: "found", remote: { id: 500 } });
+    expect(fake.lists.map((p) => p.page)).toEqual([1, 2]);
+  });
+
+  test("a still-saturated two-page walk with one match stays incomplete, never found", async () => {
+    const db = seededDb();
+    const { attempt } = await claimedAttempt(db);
+    const identity = attempt.identity;
+    const pageWith = (page: number, match: boolean) => {
+      // 100 runs = a SATURATED page; the match-bearing page carries 99 fillers
+      // plus our run, the other carries 100 fillers so the walk never exhausts.
+      const fillers = Array.from({ length: match ? 99 : 100 }, (_, i) =>
+        runPayload(identity, { id: page * 1000 + i, external_id: `x${page}-${i}` }),
+      );
+      return match ? [...fillers, runPayload(identity, { id: 500 })] : fillers;
+    };
+    const fake = fakeChecks({
+      pages: (_p, page) =>
+        page === 1
+          ? { total_count: 9999, check_runs: pageWith(1, true) }
+          : page === 2
+            ? { total_count: 9999, check_runs: pageWith(2, false) }
+            : null,
+    });
+    const result = await adapterFor(db, fake.octokit).adoptCheckRun({ identity });
+    // Uniqueness was never proven: the bound is all the honesty this lane may spend.
+    expect(result.kind).toBe("incomplete");
+    expect(fake.lists.map((p) => p.page)).toEqual([1, 2]);
+  });
+
   test("a saturated 2-page walk without a match is INCOMPLETE, never absent", async () => {
     const db = seededDb();
     const { attempt } = await claimedAttempt(db);
@@ -1274,6 +1341,47 @@ describe("credential boundary (spec §7.6 / §7.9)", () => {
     expect(sandbox?.permissions).not.toHaveProperty("checks");
     // Still exactly one construction after a second lane ran.
     expect(seam.constructed).toHaveLength(1);
+  });
+
+  test("a typed pre-dispatch refusal reports zero requests, an unknown failure stays conservative", async () => {
+    const db = seededDb();
+    const { attempt, lease } = await claimedAttempt(db);
+    // The transport refused BEFORE dispatch (a budget/allocation gate): the
+    // marker is what tells the lane nothing left the process.
+    const notDispatched = fakeChecks({
+      create: () => {
+        throw new CheckRequestNotDispatched("budget exhausted — request not dispatched");
+      },
+    });
+    const zero = await adapterFor(db, notDispatched.octokit).beginCheck({ identity: attempt.identity, lease });
+    expect(zero.kind).toBe("unavailable");
+    if (zero.kind === "unavailable") expect(zero.requests).toBe(0);
+    // The `sending` mark is rolled back so the attempt is createable again.
+    expect(await runState(db, attempt)).toBe("not-sent");
+
+    // An UNKNOWN failure must stay adopt-only: octokit's re-wrapped error
+    // (marker parked on `cause`) is still recognised, but a plain error is not.
+    const second = await claimedAttempt(db, { headSha: SHA.replace("0", "e") });
+    const wrapped = fakeChecks({
+      create: () => {
+        throw Object.assign(new Error("RequestError"), { cause: new CheckRequestNotDispatched("refused before dispatch") });
+      },
+    });
+    const viaCause = await adapterFor(db, wrapped.octokit).beginCheck({ identity: second.attempt.identity, lease: second.lease });
+    expect(viaCause.kind).toBe("unavailable");
+    if (viaCause.kind === "unavailable") expect(viaCause.requests).toBe(0);
+
+    const third = await claimedAttempt(db, { headSha: SHA.replace("0", "d") });
+    const unknown = fakeChecks({
+      create: () => {
+        throw new Error("socket hangup");
+      },
+    });
+    const conservative = await adapterFor(db, unknown.octokit).beginCheck({ identity: third.attempt.identity, lease: third.lease });
+    expect(conservative.kind).toBe("unavailable");
+    if (conservative.kind === "unavailable") expect(conservative.requests).toBe(1);
+    // An unprovable failure keeps the durable `sending` mark (adopt-only).
+    expect(await runState(db, third.attempt)).toBe("sending");
   });
 
   test("a client whose checks surface is absent fails soft, without throwing", async () => {

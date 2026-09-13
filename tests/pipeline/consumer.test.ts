@@ -4476,6 +4476,101 @@ describe("check lifecycle (plan 68 T2 — consumer binding, spec §7.10/§7.9)",
     expect(row.next_attempt_ms).toBeGreaterThan(Date.now());
   });
 
+  test("check lifecycle: a real begin that outlives the budget still leaves a prompt terminal obligation", async () => {
+    reset();
+    runnerStdout = JSON.stringify(VALID_OUTPUT);
+    const db = await createSeededTestD1();
+    // The REAL lifecycle with a create that outlives the consumer's bound: the
+    // adapter's Checks callable is held open past the 2-second budget, then
+    // completes and really creates the run.
+    const held = Promise.withResolvers<void>();
+    const realAdapter = createChecksAdapter({
+      db,
+      nowMs: () => Date.now(),
+      getOctokit: async () => ({
+        rest: {
+          checks: {
+            async create(params) {
+              checkRequests.push({
+                op: "create",
+                params: params as unknown as Record<string, unknown>,
+                sandboxCalls: sandboxCalls.length,
+                commenterCalls: commenterCalls.length,
+              });
+              await held.promise; // outlives CHECK_HOOK_TIMEOUT_MS
+              const id = (checkRunSeq += 1);
+              checkRuns.set(id, {
+                id,
+                name: params.name,
+                head_sha: params.head_sha,
+                external_id: params.external_id,
+                status: "in_progress",
+                conclusion: null,
+                app: { id: TEST_GITHUB_APP_ID },
+              });
+              return { data: checkRuns.get(id)! };
+            },
+            async update(params) {
+              const run = checkRuns.get(params.check_run_id)!;
+              const completed: CheckRunPayload = { ...run, status: "completed", conclusion: params.conclusion };
+              checkRuns.set(params.check_run_id, completed);
+              return { data: completed };
+            },
+            async get(params) {
+              return { data: checkRuns.get(params.check_run_id)! };
+            },
+            async listForRef() {
+              return { data: { total_count: 0, check_runs: [] } };
+            },
+          },
+        },
+      }),
+    });
+    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, {
+      ...testOverrides,
+      createAppCommenter: () => commenterWithChecks(realAdapter),
+    });
+    const startedAt = Date.now();
+
+    // Release the held create AFTER the consumer has already stopped waiting.
+    setTimeout(() => held.resolve(), CHECK_HOOK_TIMEOUT_MS + 500);
+    await consumer(makeBatch(makePayload()));
+    const elapsed = Date.now() - startedAt;
+
+    // (1) The consumer honoured its bound and published regardless.
+    expect(elapsed).toBeLessThan(CHECK_HOOK_TIMEOUT_MS + 1_500);
+    expect(commenterCalls.filter((c) => c.op === "post-prepared")).toHaveLength(1);
+    expect(publicationRow(db).phase).toBe("applied");
+    expect(kvPuts).toHaveLength(1);
+
+    // (2) The late real begin attached its run and, being abandoned, left the
+    //     attempt with a TERMINAL obligation instead of an in_progress row
+    //     waiting for the execution deadline.
+    await held.promise;
+    // The detached begin continues asynchronously: wait for its durable result
+    // (the attach) rather than guessing a delay.
+    for (let attempt = 0; attempt < 200 && checkRowFor(db, SHA).check_run_id === null; attempt += 1) {
+      await Bun.sleep(5);
+    }
+    const row = checkRowFor(db, SHA);
+    expect(row.check_run_id).toBe(FIRST_CHECK_RUN_ID + 1);
+    expect(row.desired).toBe("failure");
+    expect(row.desired_summary).toBe(CHECK_SUMMARIES.unconfirmed);
+    expect(row.observed).toBe("unknown");
+    expect(row.terminal_ms).toBeNull();
+    // Released: no lease held, and the first backoff rung — not 15 minutes.
+    expect(row.holder).toBeNull();
+    expect(row.lease_until_ms).toBeNull();
+    expect(row.recovery_state).toBe("remote-unconfirmed");
+    expect(row.attempts).toBe(1);
+    expect(row.next_attempt_ms).toBeLessThan(row.execution_deadline_ms);
+
+    // (3) The recovery lane can now complete it WITHOUT creating a second run.
+    const reacquired = await claimCheckRecovery(db, row.id, "reconciler", row.next_attempt_ms!);
+    expect(reacquired).not.toBeNull();
+    expect(checkRequests.filter((r) => r.op === "create")).toHaveLength(1);
+  });
+
   test("check lifecycle: an App without a Checks surface claims no attempt and still publishes", async () => {
     reset();
     runnerStdout = JSON.stringify(VALID_OUTPUT);

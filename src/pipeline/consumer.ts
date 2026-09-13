@@ -541,15 +541,20 @@ const RECHECK_INPUT_MAX_BYTES = 512 * 1024;
  * Await a promise with the §7.10 inline-hook budget as a hard consumer-side
  * bound. The bound is on the CONSUMER's wait, not on the hook's work: a hook
  * that settles late keeps running detached — this guard creates no AbortSignal
- * and the locked seam exposes none, so a late create/terminalize can still
- * complete durably on its own (its writes stay fenced on the attempt lease).
- * The consumer never waits past `CHECK_HOOK_TIMEOUT_MS`, and a rejection that
- * lands after the timeout is swallowed rather than surfacing unhandled.
+ * (the locked seam exposes none), so a late create can still complete durably
+ * on its own, but `onBudgetElapsed` fires at the instant this invocation gives
+ * up on it, which is what lets the lifecycle stop attaching a run on behalf of
+ * a caller that is no longer waiting. The consumer never waits past
+ * `CHECK_HOOK_TIMEOUT_MS`, and a rejection that lands after the timeout is
+ * swallowed rather than surfacing unhandled.
  */
-async function withHookTimeout<T>(promise: Promise<T>, fallback: T): Promise<T> {
+async function withHookTimeout<T>(promise: Promise<T>, fallback: T, onBudgetElapsed?: () => void): Promise<T> {
   let timer: ReturnType<typeof setTimeout> | undefined;
   const timeout = new Promise<T>((resolve) => {
-    timer = setTimeout(() => resolve(fallback), CHECK_HOOK_TIMEOUT_MS);
+    timer = setTimeout(() => {
+      onBudgetElapsed?.();
+      resolve(fallback);
+    }, CHECK_HOOK_TIMEOUT_MS);
   });
   // A hook rejecting AFTER its timeout won the race must not surface as an
   // unhandled rejection — the failure is already treated as the fallback.
@@ -1218,6 +1223,15 @@ type ProcessDeps = {
    * proof.
    */
   checks?: CheckLifecycleHooks;
+  /**
+   * §7.10 inline-hook budget state for the CURRENT message. The batch loop
+   * awaits each message in turn, so one holder is enough; `beginAbandoned` is
+   * set the instant the consumer stops waiting on `begin`, and the production
+   * lifecycle reads it (through its `isCancelled` dep) so a create that already
+   * dispatched is handed to recovery with a terminal obligation rather than
+   * left attached to an invocation nobody will terminalize.
+   */
+  checkHookState: { beginAbandoned: boolean };
 };
 
 /**
@@ -1920,6 +1934,9 @@ export function createReviewConsumer(
   // credential route: the lifecycle resolves THIS message's App adapter from
   // it, so a Check never mints a token, client or permission set of its own.
   const appCommenters = new Map<string, { commenter: ReviewCommenter; fingerprint: string; githubAppId: number }>();
+  // §7.10 inline-hook budget signal (see ProcessDeps): created once per
+  // consumer, RESET per message by `processMessage`.
+  const checkHookState = { beginAbandoned: false };
   const deps: ProcessDeps = {
     env,
     store: overrides.store ?? createArtifactStore(env.DB),
@@ -1931,6 +1948,7 @@ export function createReviewConsumer(
     // step — the single construction point stays src/pipeline/comment.ts.
     createAppCommenter: overrides.createAppCommenter ?? ((cred) => createReviewCommenter(cred, { db: env.DB })),
     getSandbox: overrides.getSandbox ?? ((binding, id) => getSandbox(binding, id)),
+    checkHookState,
     log,
   };
   // §7.10 Check seam (plan 68 Task 2): production always supplies the
@@ -1943,6 +1961,7 @@ export function createReviewConsumer(
       db: env.DB,
       nowMs: () => Date.now(),
       getAdapter: (scope) => appCommenters.get(scope.appId)?.commenter.checks ?? null,
+      isCancelled: () => checkHookState.beginAbandoned,
     });
   return async (batch) => {
     for (const message of batch.messages) {
@@ -2026,6 +2045,9 @@ async function processMessage(payload: ReviewJobPayload, deps: ProcessDeps): Pro
   // isolated warns, and a hook timeout resolves without blocking the path.
   let checkHandle: CheckHandle | null = null;
   let checkTerminalized = false;
+  // The §7.10 budget signal is per MESSAGE: a previous message's abandonment
+  // must never make this one's `begin` stop early.
+  deps.checkHookState.beginAbandoned = false;
   // Set the moment the prepared publication send is ATTEMPTED: a throw after
   // this point is post-send uncertainty (publication-unknown), never a
   // clean pre-publication failure.
@@ -2388,6 +2410,14 @@ async function processMessage(payload: ReviewJobPayload, deps: ProcessDeps): Pro
             executionDeadlineMs: Date.now() + CHECK_EXECUTION_WINDOW_MS,
           }),
           null,
+          // The consumer gave up waiting: a production lifecycle that reads the
+          // signal stops attaching state on behalf of this abandoned
+          // invocation and leaves the created run with a terminal obligation
+          // (§7.10's budget is a consumer bound, not a licence to create an
+          // attempt nobody will ever terminalize).
+          () => {
+            deps.checkHookState.beginAbandoned = true;
+          },
         );
       } catch (err) {
         const detail = err instanceof Error ? err.message : String(err);
