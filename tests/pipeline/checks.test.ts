@@ -34,6 +34,8 @@ import {
   attachCheckRunId,
   CHECK_LEASE_MS,
   CHECK_NAME,
+  CHECK_RECOVERY_LEASE_MS,
+  rollbackCheckCreateDispatch,
   setCheckCreateState,
   setCheckDesired,
   type CheckAttempt,
@@ -1385,3 +1387,139 @@ async function rowOf(db: TestD1, attempt: CheckAttempt): Promise<Record<string, 
 async function runState(db: TestD1, attempt: CheckAttempt): Promise<string | null> {
   return ((await rowOf(db, attempt)).create_state as string | null) ?? null;
 }
+
+// ---------------------------------------------------------------------------
+// Zero-dispatch rollback (plan 68 integrated seam fix 2)
+// ---------------------------------------------------------------------------
+
+/**
+ * The cross-task seam: `beginCheck` persists `create_state = 'sending'` before
+ * it may dispatch, and its LAST fence before the callable is a fresh live-lease
+ * re-proof. When that fence fails, no Checks request was invoked — the row must
+ * not be left claiming that one might have been.
+ */
+describe("zero-dispatch create refusal rolls the sending mark back", () => {
+  test("a lease that expires after the sending mark restores not-sent with no request", async () => {
+    const db = seededDb();
+    const { attempt, lease } = await claimedAttempt(db);
+    const identity = attempt.identity;
+    const fake = fakeChecks({ create: () => runPayload(identity) });
+    // `beginCheck` reads the clock twice before dispatch: once for the opening
+    // ownership guard, once for the pre-call live-lease re-proof. The clock
+    // crosses the lease end on that SECOND read — exactly T2's post-`sending`,
+    // pre-call fence — while the durable `sending` write still used the valid
+    // first reading.
+    let calls = 0;
+    const adapter = createChecksAdapter({
+      db,
+      nowMs: () => {
+        calls += 1;
+        return calls >= 2 ? lease.untilMs + 1 : CLOCK;
+      },
+      getOctokit: async () => fake.octokit,
+    });
+
+    const result = await adapter.beginCheck({ identity, lease });
+    expect(result.kind).toBe("unavailable");
+    if (result.kind !== "unavailable") throw new Error("unreachable");
+    // The additive contract: zero Checks calls were invoked.
+    expect(result.requests).toBe(0);
+    expect(fake.creates).toHaveLength(0);
+
+    const row = await rowOf(db, attempt);
+    expect(row.create_state).toBe("not-sent");
+    expect(row.check_run_id).toBeNull();
+    // Nothing else moved: no attempt, no backoff, no error, no identity loss.
+    expect(row.attempts).toBe(0);
+    expect(row.next_attempt_ms).toBeNull();
+    // The `sending` mark is a transition, not an error, so nothing fabricated
+    // and nothing real was lost.
+    expect(row.last_error).toBeNull();
+    expect(row.external_id).toBe(identity.externalId);
+    expect(row.generation).toBe(identity.generation);
+    expect(row.terminal_ms).toBeNull();
+    // The lease is intact so the caller can still release/attach under it.
+    expect(row.holder).toBe(lease.holder);
+    expect(row.lease_epoch).toBe(lease.epoch);
+  });
+
+  test("a pre-existing error survives the mark and the rollback untouched", async () => {
+    const db = seededDb();
+    const { attempt, lease } = await claimedAttempt(db);
+    const identity = attempt.identity;
+    // A real diagnostic already on the row (e.g. from an earlier deferral).
+    const PRIOR = "check get failed: 502 bad gateway";
+    await db
+      .prepare(`UPDATE review_checks SET last_error = ? WHERE id = ?`)
+      .bind(PRIOR, identity.attemptId)
+      .run();
+
+    const fake = fakeChecks({ create: () => runPayload(identity) });
+    let calls = 0;
+    const adapter = createChecksAdapter({
+      db,
+      nowMs: () => {
+        calls += 1;
+        return calls >= 2 ? lease.untilMs + 1 : CLOCK;
+      },
+      getOctokit: async () => fake.octokit,
+    });
+
+    const result = await adapter.beginCheck({ identity, lease });
+    expect(result.kind).toBe("unavailable");
+    const row = await rowOf(db, attempt);
+    expect(row.create_state).toBe("not-sent");
+    // The sending mark is a transition, not an error: the prior value is
+    // neither overwritten with a fabricated sentinel nor cleared.
+    expect(row.last_error).toBe(PRIOR);
+  });
+
+  test("a stale epoch defeats the rollback: a newer holder's state is untouched", async () => {
+    const db = seededDb();
+    const { attempt, lease } = await claimedAttempt(db);
+    // A newer recovery claim takes the row over (epoch bumps) after this
+    // caller's `sending` write.
+    await db
+      .prepare(`UPDATE review_checks SET holder = 'other-run', lease_epoch = ?, lease_until_ms = ? WHERE id = ?`)
+      .bind(lease.epoch + 1, T0 + CHECK_RECOVERY_LEASE_MS, attempt.identity.attemptId)
+      .run();
+
+    expect(
+      await rollbackCheckCreateDispatch(db, attempt.identity.attemptId, lease, T0),
+    ).toBe(false);
+    const row = await rowOf(db, attempt);
+    // The newer holder's row is exactly as it was.
+    expect(row.holder).toBe("other-run");
+    expect(row.lease_epoch).toBe(lease.epoch + 1);
+    expect(row.check_run_id).toBeNull();
+  });
+
+  test("a known remote id is never disguised as unsent", async () => {
+    const db = seededDb();
+    const { attempt, lease } = await claimedAttempt(db);
+    await attachedRun(db, attempt, lease, 4242);
+
+    expect(await rollbackCheckCreateDispatch(db, attempt.identity.attemptId, lease, T0)).toBe(false);
+    const row = await rowOf(db, attempt);
+    expect(row.check_run_id).toBe(4242);
+    expect(row.create_state).toBe("known");
+  });
+
+  test("the rollback moves only create_state: no attempt, backoff, error or identity change", async () => {
+    const db = seededDb();
+    const { attempt, lease } = await claimedAttempt(db);
+    await setCheckCreateState(db, attempt.identity.attemptId, lease, "sending", undefined, T0);
+    const before = await rowOf(db, attempt);
+
+    expect(await rollbackCheckCreateDispatch(db, attempt.identity.attemptId, lease, T0 + 1)).toBe(true);
+    const after = await rowOf(db, attempt);
+    expect(after.create_state).toBe("not-sent");
+    for (const key of [
+      "attempts", "next_attempt_ms", "last_error", "desired", "observed",
+      "external_id", "generation", "check_run_id", "publication_id", "terminal_ms",
+      "holder", "lease_epoch", "lease_until_ms", "app_id", "owner", "repo", "head_sha",
+    ]) {
+      expect([key, after[key]]).toEqual([key, before[key]]);
+    }
+  });
+});

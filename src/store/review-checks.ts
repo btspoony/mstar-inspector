@@ -27,8 +27,11 @@
  * triple implies the caller's lease is still the live one; an optional
  * transaction clock additionally enforces `lease_until_ms > nowMs`. Recovery
  * reacquires an EXPIRED or released lease with a single epoch-incrementing
- * UPDATE and never takes a live one. The recovery lease (120s) never moves
+ * UPDATE — repeating the selector's full eligibility predicate — and never
+ * takes a live one. The recovery lease (120s) never moves
  * `execution_deadline_ms`, and expiry always means the execution deadline.
+ * `releaseCheckClaim` gives a claim back without spending an attempt (budget
+ * deferral, paused not-sent work), leaving the row immediately selector-due.
  *
  * Desired versus observed: `setCheckDesired` freezes the terminal intent
  * (conclusion, bounded title/summary, publication proof link) BEFORE any remote
@@ -36,7 +39,8 @@
  * `recordCheckObservation` advances `observed` only from a remote payload whose
  * persisted identity already matches. An `unavailable` outcome flows through
  * `deferCheckRecovery`, which touches recovery status/error/backoff only —
- * never `desired`, never `observed`.
+ * never `desired`, never `observed`. Suspension is fenced to free rows, so it
+ * can never clear a live holder's lease.
  *
  * Storage layer: no `src/pipeline/**` or `src/worker/**` imports, no GitHub
  * call, no clock of its own (one supplied `nowMs` per transaction, §7.0).
@@ -608,20 +612,29 @@ function isUniqueViolation(error: unknown): boolean {
 // ---------------------------------------------------------------------------
 
 /**
- * Recovery reacquire: ONE conditional UPDATE that repeats eligibility and
- * increments the epoch. A live lease — another holder's or this holder's
- * unexpired one — is never taken. `execution_deadline_ms` is untouched and the
- * recovery lease runs `CHECK_RECOVERY_LEASE_MS` from `nowMs`, so expiry always
- * still means the execution deadline (spec §7.9/§7.11.2).
+ * Recovery reacquire: ONE conditional UPDATE that repeats the FULL candidate
+ * eligibility predicate of `listCheckReconcileBatch` and increments the epoch.
+ * A live lease — another holder's or this holder's unexpired one — is never
+ * taken. `execution_deadline_ms` is untouched and the recovery lease runs
+ * `CHECK_RECOVERY_LEASE_MS` from `nowMs`, so expiry always still means the
+ * execution deadline (spec §7.9/§7.11.2).
  *
- * Deliberately spends NO attempt: selection alone grants no ownership and a
- * budget deferral must not burn a retry (§7.11.2 step 5).
+ * Repeating the selector is not redundancy: selection alone grants no
+ * ownership (§7.11.2 step 1), and a row selected as due can stop being due
+ * before this statement runs — a backoff moved forward, the attempt cap
+ * reached, or `desired` becoming `in_progress` under a still-live execution
+ * deadline. Every one of those is re-checked HERE, at the claim, against the
+ * SAME claim-time `nowMs` the selector would use.
+ *
+ * Deliberately spends NO attempt: a budget deferral must not burn a retry
+ * (§7.11.2 step 5) — the caller releases the claim instead.
  */
 export async function claimCheckRecovery(
   db: D1Like,
   id: string,
   holder: string,
   nowMs: number,
+  maxAttempts: number = CHECK_MAX_ATTEMPTS,
 ): Promise<Lease | null> {
   // Suspension is a CLAIM FENCE, not merely a selector filter (spec §7.6): a
   // disabled/deleted App's rows are recoverable again only after the explicit
@@ -634,9 +647,12 @@ export async function claimCheckRecovery(
           SET holder = ?, lease_epoch = lease_epoch + 1, lease_until_ms = ?, updated_ms = ?
         WHERE id = ? AND ${NONTERMINAL_WHERE}
           AND recovery_state IN ('pending','remote-unconfirmed')
-          AND (lease_until_ms IS NULL OR lease_until_ms <= ?)`,
+          AND attempts < ?
+          AND (next_attempt_ms IS NULL OR next_attempt_ms <= ?)
+          AND (lease_until_ms IS NULL OR lease_until_ms <= ?)
+          AND (desired <> 'in_progress' OR execution_deadline_ms <= ?)`,
     )
-    .bind(holder, nowMs + CHECK_RECOVERY_LEASE_MS, nowMs, id, nowMs)
+    .bind(holder, nowMs + CHECK_RECOVERY_LEASE_MS, nowMs, id, maxAttempts, nowMs, nowMs, nowMs)
     .run();
   if (claim.meta.changes !== 1) return null;
   const row = await db
@@ -645,6 +661,66 @@ export async function claimCheckRecovery(
     .first<Pick<ReviewCheckRow, "holder" | "lease_epoch" | "lease_until_ms">>();
   if (row === null || row.holder !== holder || row.lease_until_ms === null) return null;
   return { holder, epoch: row.lease_epoch, untilMs: row.lease_until_ms };
+}
+
+/**
+ * Release a recovery claim WITHOUT spending an attempt (spec §7.11.2 step 5:
+ * a budget deferral "does not spend an attempt"; the same applies to a paused
+ * App's not-sent row, which must stay due rather than be charged). Everything
+ * except the lease is preserved — attempts, `next_attempt_ms`, desired,
+ * observed, the remote IDs, the proof link and `last_error` all stay exactly
+ * as they were, so the next selector pass in the same window sees the row due
+ * again immediately instead of waiting out a 120s lease.
+ *
+ * `deferCheckRecovery` is deliberately NOT used here: it increments `attempts`
+ * and rewrites the due time, which is the correct shape for a recovery action
+ * that actually failed and the wrong shape for one that never ran.
+ */
+export async function releaseCheckClaim(
+  db: D1Like,
+  id: string,
+  lease: Lease,
+  nowMs: CheckClock,
+): Promise<boolean> {
+  return runFenced(db, id, lease, `holder = NULL, lease_until_ms = NULL`, [], nowMs);
+}
+
+/**
+ * The identity-fenced twin of `releaseCheckClaim`, for the one caller that
+ * reports a refusal WITHOUT counting a request: T2's `beginCheck` answering
+ * `requests: 0`.
+ *
+ * §7.11.2 step 5 wants such a row left due with no attempt spent — and T2
+ * already classified it (it learned `requests === 0` and released its own
+ * claim). But `releaseCheckClaim`'s `lease_until_ms > now` condition can fail
+ * on exactly this path, because a zero-request refusal is typically the
+ * live-time fence itself: the lease legitimately expired while the client was
+ * resolved, so a liveness-fenced release writes nothing and T3 would leave the
+ * row leased and invisible to the next selector.
+ *
+ * Fencing on holder + epoch + lease-end equality instead proves ownership
+ * without demanding the row still be unexpired. A newer claimant always bumps
+ * `lease_epoch`, and a same-holder reacquire runs through `claimCheckRecovery`,
+ * which also bumps it — so the epoch is the discriminator, and the exact
+ * `lease_until_ms` match adds the case where an expired lease was never
+ * reclaimed. Writes nothing else: no attempt, backoff, error, or identity.
+ */
+export async function releaseExpiredCheckClaim(
+  db: D1Like,
+  id: string,
+  lease: Lease,
+  nowMs: CheckClock,
+): Promise<boolean> {
+  const result = await db
+    .prepare(
+      `UPDATE review_checks
+          SET holder = NULL, lease_until_ms = NULL, updated_ms = ?
+        WHERE id = ? AND holder = ? AND lease_epoch = ? AND lease_until_ms = ?
+          AND ${NONTERMINAL_WHERE}`,
+    )
+    .bind(nowMs, id, lease.holder, lease.epoch, lease.untilMs)
+    .run();
+  return result.meta.changes === 1;
 }
 
 // ---------------------------------------------------------------------------
@@ -697,6 +773,12 @@ export async function attachCheckRunId(
  * head — exactly the blind recreate RL-12 forbids. So `not-sent` (the
  * definitive pre-send rejection) is reachable only from `not-sent`; a
  * possibly-sent state is resolved by read-only adoption, never by reset.
+ *
+ * A `sending` mark is a TRANSITION, not an error: with no explicit `reason` it
+ * leaves any existing `last_error` exactly as it found it, so marking a send
+ * attempt never fabricates a diagnostic and never erases a real one. A
+ * caller-supplied reason (the `unknown` leg, which genuinely records why) still
+ * writes its bounded text.
  */
 export async function setCheckCreateState(
   db: D1Like,
@@ -724,10 +806,54 @@ export async function setCheckCreateState(
     db,
     id,
     lease,
-    `create_state = ?, last_error = ?`,
-    [state, checkReason(reason ?? `create_state=${state}`)],
+    `create_state = ?, last_error = COALESCE(?, last_error)`,
+    [state, reason === undefined ? null : checkReason(reason)],
     nowMs,
   );
+}
+
+/**
+ * Undo a `sending` mark for a create that provably NEVER dispatched (spec §7.9
+ * / RL-12 together with the T2 `requests: 0` contract).
+ *
+ * The ordinary `not-sent` transition above is fenced on a LIVE lease, because a
+ * `sending` row that might have reached GitHub must never be declared
+ * createable again. That reasoning does not apply here: the caller has already
+ * established that the Checks callable was never invoked, so restoring
+ * `not-sent` states a fact rather than erasing one.
+ *
+ * The fence is therefore IDENTITY, not liveness. This path is reached exactly
+ * when the live-time fence may already be false — the refusal that triggers it
+ * IS a failed `lease_until_ms > now` re-proof — so demanding liveness would make
+ * the rollback unreachable precisely when it is needed, and the row would stay
+ * `sending` forever with no request behind it. A newer claimant always bumps
+ * `lease_epoch`, so holder + epoch + lease-end equality proves the row is still
+ * OURS and no third party's state can be overwritten.
+ *
+ * Nothing else moves: no attempt, no backoff, no identity, and `check_run_id` is
+ * guarded NULL so a real remote run is never disguised. `last_error` is
+ * deliberately NOT touched, which is exactly correct: the `sending` mark no
+ * longer fabricates a diagnostic (see `setCheckCreateState`), so whatever error
+ * text the row carried before the mark is still the true one and is preserved
+ * by leaving it alone.
+ */
+export async function rollbackCheckCreateDispatch(
+  db: D1Like,
+  id: string,
+  lease: Lease,
+  nowMs: CheckClock,
+): Promise<boolean> {
+  const result = await db
+    .prepare(
+      `UPDATE review_checks
+          SET create_state = 'not-sent', updated_ms = ?
+        WHERE id = ? AND holder = ? AND lease_epoch = ? AND lease_until_ms = ?
+          AND create_state = 'sending' AND check_run_id IS NULL
+          AND ${NONTERMINAL_WHERE}`,
+    )
+    .bind(nowMs, id, lease.holder, lease.epoch, lease.untilMs)
+    .run();
+  return result.meta.changes === 1;
 }
 
 /**
@@ -893,6 +1019,14 @@ export async function markCheckLocalError(
  * their identities while suspended and return to `pending` on re-enable. The
  * pair binds BOTH durable App ids through the registry's own columns — never a
  * repository-wide scan.
+ *
+ * Fenced to FREE rows only, exactly like the M8 suspension helpers
+ * (`suspendPublicationRecovery` / `suspendResolutionRecovery`): a row under a
+ * live lease belongs to an invocation that is mid-operation, and clearing its
+ * holder/lease would erase ownership this lane never had — it would also make
+ * that invocation's next fenced write silently a no-op. Only expired/null
+ * leases are suspended; a live one is left for its owner to finish, and the
+ * pair is re-examined on a later pass.
  */
 export async function suspendCheckRecovery(
   db: D1Like,
@@ -906,9 +1040,10 @@ export async function suspendCheckRecovery(
           SET recovery_state = 'suspended', holder = NULL, lease_until_ms = NULL,
               next_attempt_ms = NULL, last_error = ?, updated_ms = ?
         WHERE app_id = ? AND installation_id = ? AND ${NONTERMINAL_WHERE}
-          AND recovery_state IN ('pending','remote-unconfirmed')`,
+          AND recovery_state IN ('pending','remote-unconfirmed')
+          AND (lease_until_ms IS NULL OR lease_until_ms <= ?)`,
     )
-    .bind(checkReason(reason), nowMs, pair.appId, pair.installationId)
+    .bind(checkReason(reason), nowMs, pair.appId, pair.installationId, nowMs)
     .run();
   return result.meta.changes;
 }
@@ -978,7 +1113,7 @@ export async function retryCheckRecovery(
 ): Promise<boolean> {
   // ONE conditional statement, not read-then-write (spec §7.9/§7.11.2 step 6).
   // Every precondition is repeated inside the UPDATE so a concurrent
-  // terminalization, a live lease, a newer active generation or an unproven
+  // terminalization, a live lease, a newer active generation or a newer
   // observation landing between a preliminary read and the write can never be
   // overwritten. The old shape re-read the row first and then updated
   // `WHERE id = ?`, which could clear `terminal_ms` on a row another worker
@@ -990,6 +1125,15 @@ export async function retryCheckRecovery(
   // no-op. Nothing else moves — generation, external id, check run id, desired,
   // observed and the proof link are all retained, and `observed` is NOT
   // rewritten, so this never pretends the remote run completed.
+  //
+  // A TERMINAL observation (`success`/`neutral`/`failure`) is refused: that
+  // row already carries its finished evidence and reopening it would relaunder
+  // a settled result. A NON-terminal observation — `unknown` or `in_progress`
+  // — is retryable, which is exactly the "external run still pending" state
+  // §7.11.2 step 6 names: the spec fences retry on identity, liveness and
+  // generation, and never on the observation being unrecorded. The recorded
+  // observation is preserved either way, so a retried `in_progress` row still
+  // shows the running Check it actually saw.
   //
   // Suspension is excluded: an operator retry must not be able to resume work
   // for a disabled/deleted App (spec §7.6). Only the explicit App re-enable —
@@ -1007,7 +1151,7 @@ export async function retryCheckRecovery(
               last_error = NULL, holder = NULL, lease_until_ms = NULL,
               terminal_ms = NULL, updated_ms = ?
         WHERE id = ? AND app_id = ? AND installation_id = ? AND owner = ? AND repo = ? AND pr_number = ?
-          AND observed = 'unknown'
+          AND observed IN ('unknown','in_progress')
           AND recovery_state <> 'suspended'
           AND (lease_until_ms IS NULL OR lease_until_ms <= ?)
           AND NOT EXISTS (
