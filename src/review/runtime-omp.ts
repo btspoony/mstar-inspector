@@ -37,6 +37,13 @@
  *      drives the three stages; the turn must end in a schema-validated
  *      yield, which the adapter re-validates with validateMstarReviewV1
  *      (spec Architect locks L1/L2).
+ *   6. recheck (plan 67 T3, spec §7.8): when the input carries a typed
+ *      recheck document, runRecheckSeat runs CONCURRENTLY with the review
+ *      work — quick/default as one more structured child on the same
+ *      read-only ToolSession, deep on a DEDICATED read-only session (never a
+ *      second prompt/yield stream on the deep parent). Its result is
+ *      validated with validateRecheckDoc and rides ReviewRunResult.recheck;
+ *      any failure resolves null without touching the envelope.
  *
  * Failure contract: ANY seat/parse/validation failure throws — the caller
  * never receives an M1-shaped fake success and nothing is posted or stored.
@@ -75,7 +82,9 @@ import {
   type MstarReviewFinding,
   type MstarReviewV1,
 } from "@mstar-harness/engine";
-import { REVIEW_SEATS, type AgentRuntime, type AgentRuntimeRunInput, type ReviewLevel } from "./runtime";
+import { REVIEW_SEATS, type AgentRuntime, type AgentRuntimeRunInput, type ReviewLevel, type ReviewRunResult } from "./runtime";
+import { runRecheckSeat } from "./recheck";
+import type { RecheckDoc } from "../contracts/recheck";
 
 /**
  * Environment override for the mstar-harness plugin root — the primary,
@@ -710,22 +719,61 @@ async function deepAssignment(input: AgentRuntimeRunInput, pluginRoot: string): 
 }
 
 /**
+ * The review-seat model chain (plan 17 B6, Architect lock L2; plan 67 T3:
+ * shared by the review seats AND the recheck seat — spec §7.8 "Recheck uses
+ * the existing review-seat model selection"):
+ *   - input.modelSelectors is the single model SSOT (the runner parses
+ *     OMP_REVIEW_MODEL once) — never re-parse env here (split-brain).
+ *   - A present, non-blank `mstar-review-seat` override REPLACES the global
+ *     chain as the seat's explicit model — sole verbatim entry (`:thinking`
+ *     suffixes ride along; the SDK comma-splits and trims model entries, so
+ *     a stored chain value resolves identically). No merge: the App's global
+ *     chain remains only the session-level retry fallback configured by
+ *     buildSessionOptions. Blank value or no map → the caller's chain
+ *     verbatim.
+ *   - An empty selector chain falls back to the same DEFAULT_MODEL_PATTERN
+ *     the parent gets — seats must never see `model: []` (an empty array is
+ *     truthy, not "inherit from parent"; PR #4 Bugbot).
+ */
+function seatModelChain(input: AgentRuntimeRunInput): string[] {
+  const seatOverride = input.modelOverrides?.["mstar-review-seat"];
+  if (seatOverride !== undefined && seatOverride.trim() !== "") return [seatOverride];
+  return input.modelSelectors.length > 0 ? [...input.modelSelectors] : [DEFAULT_MODEL_PATTERN];
+}
+
+/**
  * The deep parent-session path (plan 09 T2; spec § 父 session 约束 +
  * Architect locks L1/L2): one parent LLM turn runs the harness three-stage
  * flow and dispatches its own seats via the built-in `task` tool; the turn
  * must end in a schema-validated `yield` of the mstar.review/v1 envelope,
  * which is re-validated against the engine vocabulary. No yield, a yielded
  * error, or a validation failure throws — nothing is posted or stored.
+ *
+ * plan 67 T3 (spec §7.8): when `input.recheck` is present, a DEDICATED
+ * read-only recheck AgentSession/ToolSession runs `runRecheckSeat`
+ * concurrently from the beginning of model work — never a second prompt/
+ * yield stream on the deep parent's session (its listener captures terminal
+ * yields). The shared mstar-review-seat definition is installed before
+ * concurrent work and removed with the deep role files after both sessions
+ * settle; an unfinished seat is aborted when the parent turn settles
+ * (success OR failure), and the seat itself never throws — a failure
+ * resolves `recheck: null` without touching the envelope.
  */
-async function runDeepReview(input: AgentRuntimeRunInput): Promise<MstarReviewV1> {
+async function runDeepReview(input: AgentRuntimeRunInput): Promise<ReviewRunResult> {
   const pluginRoot = resolveHarnessRoot();
   const skills = await loadHarnessSkills(pluginRoot);
   // The session cwd IS the PR clone: .omp/agents discovery and every task
   // tool seat cwd resolve against the review tree.
   const cwd = input.worktreePath;
+  const wantsRecheck = input.recheck !== undefined;
+  const installedFiles: readonly string[] = wantsRecheck
+    ? ["mstar-review-seat.md", ...DEEP_SEAT_ROLE_FILES]
+    : DEEP_SEAT_ROLE_FILES;
   let session: AgentSession | undefined;
+  let recheckSession: AgentSession | undefined;
   try {
     await installDeepSeatAgents(cwd, pluginRoot);
+    if (wantsRecheck) await installSeatAgent(cwd);
     return await withoutGitHubTokenEnv(async () => {
       const created = await createAgentSession(
         deepSessionOptions({
@@ -740,7 +788,34 @@ async function runDeepReview(input: AgentRuntimeRunInput): Promise<MstarReviewV1
           agentDir: input.agentDir,
         }),
       );
-      session = created.session;
+      const parentSession = created.session;
+      session = parentSession;
+
+      // The dedicated recheck session (plan 67 T3): same quick/default
+      // isolation set — read/grep/glob only, no `task` tool, no yield
+      // schema — its own in-memory session manager.
+      const recheckController = new AbortController();
+      let recheckWork: Promise<RecheckDoc | null> | null = null;
+      if (input.recheck !== undefined) {
+        const recheckCreated = await createAgentSession(
+          buildSessionOptions({
+            cwd,
+            pluginRoot,
+            skills,
+            modelPattern: input.modelSelectors[0] ?? DEFAULT_MODEL_PATTERN,
+            fallbackChain: [...input.modelSelectors],
+            agentDir: input.agentDir,
+          }),
+        );
+        const liveRecheckSession = recheckCreated.session;
+        recheckSession = liveRecheckSession;
+        recheckWork = runRecheckSeat({
+          session: asToolSession(liveRecheckSession, cwd),
+          input: input.recheck,
+          model: seatModelChain(input),
+          signal: recheckController.signal,
+        });
+      }
 
       // Capture the structured yield the turn must end with. Capture rides
       // `tool_execution_end`, NOT start: the SDK yield tool validates the
@@ -751,83 +826,107 @@ async function runDeepReview(input: AgentRuntimeRunInput): Promise<MstarReviewV1
       // end carries the accepted payload in result.details.data, and the
       // LAST successful capture wins (`=`, never `??=`) so a corrected
       // re-yield replaces an earlier accepted one.
-      let yielded: unknown;
-      let yieldError: string | undefined;
-      const unsubscribe = session.subscribe((event) => {
-        if (event.type !== "tool_execution_end" || event.toolName !== "yield") return;
-        if (event.isError) return;
-        const details = (event.result as { details?: unknown } | undefined)?.details;
-        if (!details || typeof details !== "object") return;
-        const record = details as { data?: unknown; error?: string; status?: string; type?: unknown };
-        if (typeof record.error === "string") {
-          yieldError = record.error;
-          return;
+      const runParentTurn = async (): Promise<MstarReviewV1> => {
+        let yielded: unknown;
+        let yieldError: string | undefined;
+        const unsubscribe = parentSession.subscribe((event) => {
+          if (event.type !== "tool_execution_end" || event.toolName !== "yield") return;
+          if (event.isError) return;
+          const details = (event.result as { details?: unknown } | undefined)?.details;
+          if (!details || typeof details !== "object") return;
+          const record = details as { data?: unknown; error?: string; status?: string; type?: unknown };
+          if (typeof record.error === "string") {
+            yieldError = record.error;
+            return;
+          }
+          // Incremental section yields (array-typed `type`) carry partial data
+          // that can never satisfy the envelope; only terminal (untyped) yields
+          // with a payload count.
+          if (record.status === "success" && !Array.isArray(record.type) && record.data !== undefined) {
+            yielded = record.data;
+          }
+        });
+        let turnError: unknown;
+        try {
+          await parentSession.prompt(await deepAssignment(input, pluginRoot));
+        } catch (error) {
+          turnError = error;
+        } finally {
+          unsubscribe();
         }
-        // Incremental section yields (array-typed `type`) carry partial data
-        // that can never satisfy the envelope; only terminal (untyped) yields
-        // with a payload count.
-        if (record.status === "success" && !Array.isArray(record.type) && record.data !== undefined) {
-          yielded = record.data;
+        if (yielded === undefined) {
+          if (turnError !== undefined) {
+            throw turnError;
+          }
+          throw new Error(
+            yieldError !== undefined
+              ? `deep parent yielded an error: ${yieldError}`
+              : "deep parent turn produced no structured yield (mstar.review/v1 envelope)",
+          );
         }
-      });
-      let turnError: unknown;
-      try {
-        await session.prompt(await deepAssignment(input, pluginRoot));
-      } catch (error) {
-        turnError = error;
-      } finally {
-        unsubscribe();
-      }
-      if (yielded === undefined) {
+        // A prompt throw AFTER a successful yield must stay observable (qc3
+        // S-002): the envelope below is engine-validated, so returning it
+        // stands — but the partially-failed turn is logged, not swallowed.
         if (turnError !== undefined) {
-          throw turnError;
+          console.error("deep parent turn raised after a successful yield", turnError);
         }
-        throw new Error(
-          yieldError !== undefined
-            ? `deep parent yielded an error: ${yieldError}`
-            : "deep parent turn produced no structured yield (mstar.review/v1 envelope)",
-        );
-      }
-      // A prompt throw AFTER a successful yield must stay observable (qc3
-      // S-002): the envelope below is engine-validated, so returning it
-      // stands — but the partially-failed turn is logged, not swallowed.
-      if (turnError !== undefined) {
-        console.error("deep parent turn raised after a successful yield", turnError);
-      }
 
-      // SDK strict schema enforcement only guarantees shape — the engine
-      // vocabulary stays the SSOT (spec Architect lock L2).
-      const gate = validateMstarReviewV1(yielded);
-      if (!gate.ok) {
-        const detail = gate.violations.map((violation) => `${violation.code}: ${violation.message}`).join("; ");
-        throw new Error(`deep parent yield failed mstar.review/v1 validation: ${detail}`);
+        // SDK strict schema enforcement only guarantees shape — the engine
+        // vocabulary stays the SSOT (spec Architect lock L2).
+        const gate = validateMstarReviewV1(yielded);
+        if (!gate.ok) {
+          const detail = gate.violations.map((violation) => `${violation.code}: ${violation.message}`).join("; ");
+          throw new Error(`deep parent yield failed mstar.review/v1 validation: ${detail}`);
+        }
+        return yielded as MstarReviewV1;
+      };
+
+      let envelope: MstarReviewV1;
+      try {
+        envelope = await runParentTurn();
+      } catch (error) {
+        // Normal-review failure aborts the recheck seat too (spec §7.8);
+        // runRecheckSeat never rejects — awaiting only reaps the seat.
+        recheckController.abort();
+        if (recheckWork) await recheckWork;
+        throw error;
       }
-      return yielded as MstarReviewV1;
+      // The review settled: use an already-completed recheck or abort the
+      // unfinished seat — never start or await a fresh budget after review.
+      recheckController.abort();
+      const recheck = recheckWork ? await recheckWork : null;
+      return { envelope, recheck };
     });
   } finally {
-    if (session) {
-      try {
-        await session.dispose();
-      } catch (error) {
-        // Teardown failure must not mask the primary outcome; the session
-        // is one-shot and owns no other resources.
-        console.error("omp review runtime session dispose failed", error);
+    // Teardown order: both sessions settle BEFORE the agent-file cleanup
+    // (never concurrent agent-file writes/cleanup, spec §7.8).
+    for (const live of [session, recheckSession]) {
+      if (live) {
+        try {
+          await live.dispose();
+        } catch (error) {
+          // Teardown failure must not mask the primary outcome; the session
+          // is one-shot and owns no other resources.
+          console.error("omp review runtime session dispose failed", error);
+        }
       }
     }
-    // Undo the seat installs; the set is static (DEEP_SEAT_ROLE_FILES), so a
+    // Undo the seat installs; the set is static (installedFiles), so a
     // partially-failed install cleans up exactly like a complete one (qc1
     // F-002). The clone itself is caller-owned and must survive (rmdir
     // removes the dirs only if we left them empty).
-    await removeInstalledAgents(cwd, DEEP_SEAT_ROLE_FILES);
+    await removeInstalledAgents(cwd, installedFiles);
   }
 }
 
 /**
  * The delivered omp AgentRuntime (plan 07 Task 2). Resolves ONLY with an
- * engine-validated mstar.review/v1 envelope; anything short of that throws.
+ * engine-validated mstar.review/v1 envelope in `envelope` plus the
+ * concurrent recheck document (or null) in `recheck` (plan 67 T3); anything
+ * short of that throws.
  */
 export const ompAgentRuntime: AgentRuntime = {
-  async runReview(input: AgentRuntimeRunInput): Promise<MstarReviewV1> {
+  async runReview(input: AgentRuntimeRunInput): Promise<ReviewRunResult> {
     // Port-level guard: the type system makes a bad level unrepresentable in
     // TS, but runtime values arrive from JSON (runner `--level`) — reject
     // instead of silently degrading (spec: throw, 不静默降档). Deep branches
@@ -855,33 +954,9 @@ export const ompAgentRuntime: AgentRuntime = {
     let session: AgentSession | undefined;
     try {
       await installSeatAgent(cwd);
-      // input.modelSelectors is the single model SSOT (the runner parses
-      // OMP_REVIEW_MODEL once) — the first selector is the parent's primary
-      // model, the full list rides as retry.fallbackChains.default and is
-      // passed verbatim per seat (falling back to the default pattern when empty). Never re-parse env here (split-brain).
-      // Seats must never see `model: []` — an empty array is truthy, not
-      // "inherit from parent", so an unset OMP_REVIEW_MODEL means every seat
-      // gets the same DEFAULT_MODEL_PATTERN the parent gets (PR #4 Bugbot).
-      //
-      // Plan 17 B6 (Architect lock L2): the quick/default seat override is
-      // applied HERE, at the seatModels synthesis — quick/default always
-      // passes the explicit `model` param, and the SDK resolves an explicit
-      // model BEFORE the `task.agentModelOverrides` settings override, so
-      // writing the settings key would be a dead surface (it is NOT written:
-      // buildSessionOptions is untouched). A present, non-blank override
-      // REPLACES the global chain as the seat's explicit model — sole
-      // verbatim entry (the SDK comma-splits and trims model entries, so a
-      // stored chain value resolves identically; `:thinking` suffixes ride
-      // along). No merge: the App's global chain remains only the
-      // session-level retry fallback configured by buildSessionOptions.
-      // Blank value or no map → today's synthesis verbatim.
-      const seatOverride = input.modelOverrides?.["mstar-review-seat"];
-      const seatModels =
-        seatOverride !== undefined && seatOverride.trim() !== ""
-          ? [seatOverride]
-          : input.modelSelectors.length > 0
-            ? [...input.modelSelectors]
-            : [DEFAULT_MODEL_PATTERN];
+      // Seat model chain: single SSOT derivation shared with the recheck
+      // seat — see seatModelChain (plan 17 B6 L2 rationale lives there).
+      const seatModels = seatModelChain(input);
       const created = await createAgentSession(
         buildSessionOptions({
           cwd,
@@ -903,22 +978,49 @@ export const ompAgentRuntime: AgentRuntime = {
         );
       }
       const toolSession = asToolSession(session, cwd);
-      const outputs = await Promise.all(
-        plans.map(async (plan, index) => {
-          const result = await runStructuredSubagent({
-            session: toolSession,
-            invocationKind: "task",
-            assignment: seatAssignment(input, pluginRoot, plan),
-            agent: "mstar-review-seat",
-            model: seatModels,
-            outputSchema: SEAT_OUTPUT_SCHEMA,
-            schemaMode: "strict",
-            enableLsp: false,
-            enableIrc: false,
-          });
-          return seatOutput(result, index);
-        }),
-      );
+
+      // plan 67 T3 (spec §7.8): the recheck seat runs CONCURRENTLY as one
+      // more structured child on the SAME read-only ToolSession (separate
+      // result slot). runRecheckSeat never throws; when the review work
+      // settles, the controller aborts an unfinished seat and the result
+      // (already completed, or null) is reaped — never a fresh budget after
+      // review. A review failure aborts the seat too, then rethrows.
+      const recheckController = new AbortController();
+      const recheckDoc = input.recheck;
+      const recheckWork =
+        recheckDoc !== undefined
+          ? runRecheckSeat({
+              session: toolSession,
+              input: recheckDoc,
+              model: seatModels,
+              signal: recheckController.signal,
+            })
+          : null;
+      let outputs;
+      try {
+        outputs = await Promise.all(
+          plans.map(async (plan, index) => {
+            const result = await runStructuredSubagent({
+              session: toolSession,
+              invocationKind: "task",
+              assignment: seatAssignment(input, pluginRoot, plan),
+              agent: "mstar-review-seat",
+              model: seatModels,
+              outputSchema: SEAT_OUTPUT_SCHEMA,
+              schemaMode: "strict",
+              enableLsp: false,
+              enableIrc: false,
+            });
+            return seatOutput(result, index);
+          }),
+        );
+      } catch (error) {
+        recheckController.abort();
+        if (recheckWork) await recheckWork;
+        throw error;
+      }
+      recheckController.abort();
+      const recheck = recheckWork ? await recheckWork : null;
 
       const { findings, unverifiedCount } = mergeSeatOutputs(outputs);
       const envelope = synthesizeReview({ findings, unverifiedCount, target: parseTarget(input.reconFacts) });
@@ -927,7 +1029,7 @@ export const ompAgentRuntime: AgentRuntime = {
         const detail = gate.violations.map((violation) => `${violation.code}: ${violation.message}`).join("; ");
         throw new Error(`synthesized review failed mstar.review/v1 validation: ${detail}`);
       }
-      return envelope;
+      return { envelope, recheck };
     } finally {
       if (session) {
         try {

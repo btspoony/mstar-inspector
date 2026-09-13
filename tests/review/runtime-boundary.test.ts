@@ -44,10 +44,19 @@ describe("module import matrix — omp SDK is container-only", () => {
     });
   }
 });
-// --- in-image module graph (plan 23 T3 regression) ---------------------------
+// --- in-image module graph (plan 23 T3 regression; plan 67 T3 amendment) -----
 
-/** The sandbox image COPYs ONLY src/review (sandbox-image/omp/Dockerfile:96). */
+/**
+ * The sandbox image COPYs src/review plus — since plan 67 Task 3 (PM
+ * amendment 2026-09-13) — the zero-runtime-dependency wire contracts
+ * directory (COPY src/contracts): the recheck seat runtime-imports
+ * src/contracts/recheck.ts. NOTHING else enters the image (no src/pipeline,
+ * no src/store), so an import escaping src/review is admissible ONLY when it
+ * resolves inside src/contracts. The admitted module itself must stay
+ * dependency-free — asserted below.
+ */
 const IN_IMAGE_FACE = "src/review";
+const ADMITTED_FACE = "src/contracts";
 
 /**
  * Relative import specifiers (`./…` / `../…`) in any import/require spelling
@@ -56,18 +65,33 @@ const IN_IMAGE_FACE = "src/review";
 const RELATIVE_IMPORT_RE = /(?:from\s+|import\s*|require\s*\()\s*['"](\.\.?\/[^'"]+)['"]/g;
 
 describe("in-image module graph — src/review is self-contained (Dockerfile COPY src/review)", () => {
-  test("no src/review module imports outside src/review (relative specifiers)", () => {
+  test("no src/review module imports outside src/review and src/contracts (relative specifiers)", () => {
     const offenders: string[] = [];
     for (const file of collectFiles(IN_IMAGE_FACE)) {
       const source = readFileSync(file, "utf8");
       for (const match of source.matchAll(RELATIVE_IMPORT_RE)) {
         const specifier = match[1]!;
         const target = resolve(dirname(file), specifier);
-        if (!target.startsWith(`${resolve(IN_IMAGE_FACE)}/`)) {
+        const inImage =
+          target.startsWith(`${resolve(IN_IMAGE_FACE)}/`) || target.startsWith(`${resolve(ADMITTED_FACE)}/`);
+        if (!inImage) {
           offenders.push(`${file}: ${specifier}`);
         }
       }
     }
     expect(offenders).toEqual([]);
+  });
+
+  test("the admitted wire module src/contracts/recheck.ts stays runtime-dependency-free", () => {
+    // PM amendment condition (plan 67 T3): src/contracts rides the image ONLY
+    // because recheck.ts is a zero-runtime-dependency module (spec §7.3). Any
+    // import statement appearing there invalidates the admission — stop and
+    // re-narrow the boundary instead of widening this rule. Fresh non-global
+    // regexes: global ones are stateful under .test().
+    const source = readFileSync(join(ADMITTED_FACE, "recheck.ts"), "utf8");
+    const relativeImport = /(?:from\s+|import\s*|require\s*\()\s*['"]\.\.?\/[^'"]*['"]/;
+    const moduleImport = /(?:from\s+|import\s+|require\s*\()\s*['"][^.'"][^'"]*['"]/;
+    expect(relativeImport.test(source)).toBe(false);
+    expect(moduleImport.test(source)).toBe(false);
   });
 });

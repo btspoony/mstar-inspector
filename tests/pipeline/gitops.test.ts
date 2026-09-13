@@ -17,6 +17,7 @@ import {
   cloneCommand,
   diffCommand,
   numstatCommand,
+  readRecheckCommand,
   runnerCommand,
   writeJsonCommand,
 } from "../../src/pipeline/gitops";
@@ -59,6 +60,41 @@ describe("gitops command builders", () => {
       /unsafe base64 content/,
     );
     expect(() => writeJsonCommand("/workspace/review-input.json", "ey Jh")).toThrow(/unsafe base64 content/);
+  });
+
+  test("readRecheckCommand bounds the read at 262,144 bytes and probes for overflow (plan 67 T3)", () => {
+    // Fixed audited path shape: head stops the content stream at the bound,
+    // tail probes byte bound+1 → last line 1 = overflow, 0 = exact fit.
+    expect(readRecheckCommand("/tmp/mstar-recheck.json")).toBe(
+      shellCommand(
+        "head -c '262144' '/tmp/mstar-recheck.json' && printf '\\n' && " +
+          "tail -c '+262145' '/tmp/mstar-recheck.json' | head -c '1' | wc -c",
+      ),
+    );
+  });
+
+  test("readRecheckCommand rejects metacharacter-laden and relative paths fail-closed", () => {
+    for (const evil of [
+      "/tmp/x; rm -rf /",
+      "/tmp/$(id)",
+      "/tmp/a b",
+      "/tmp/recheck'",
+      "relative/recheck.json",
+      "",
+    ]) {
+      expect(() => readRecheckCommand(evil)).toThrow(/unsafe recheck output path/);
+    }
+  });
+
+  test("runnerCommand appends the optional --recheck-out flag quoted (plan 67 T3)", () => {
+    expect(
+      runnerCommand("/opt/runner/src/review/runner.ts", "quick", "/workspace/review-input.json", "/tmp/mstar-recheck.json"),
+    ).toBe(
+      shellCommand(
+        "bun run '/opt/runner/src/review/runner.ts' --level 'quick' --input '/workspace/review-input.json' " +
+          "--recheck-out '/tmp/mstar-recheck.json'",
+      ),
+    );
   });
 
   test("buildGitOpsCommands accepts dotted/dashed GitHub names and a high pr number", () => {
