@@ -27,7 +27,6 @@
  *     → `reconcileReviewChecks`, each stage caught independently
  */
 import { describe, expect, test } from "bun:test";
-import { readFileSync } from "node:fs";
 import type { Scope } from "../../src/contracts/recheck";
 import {
   CHECK_BACKOFF_MS,
@@ -2451,11 +2450,35 @@ describe("pre-dispatch refusal is typed end to end (P68-QC-005)", () => {
     }
   });
 
-  test("the dead local budget-refusal grammar is gone from the lane", () => {
-    const source = readFileSync(new URL("../../src/worker/check-reconcile.ts", import.meta.url), "utf8");
-    // No second, unrecognized refusal grammar may exist in this module.
-    expect(source).not.toContain("RecoveryBudgetRefused");
-    expect(source).not.toContain("isBudgetRefusal");
-    expect(source).toContain('from "../pipeline/checks"');
+  test("a possibly-sent create failure stays conservatively adopt-only (requests > 0)", async () => {
+    const db = seededDb();
+    const { attempt } = await claim(db);
+    const id = attempt.identity.attemptId;
+    const fetchStub = stubFetch();
+    try {
+      const summary = await run(db, {
+        now: () => T0,
+        credentials: scriptedCredentials(db, {
+          adopt: async () => ({ kind: "absent" }),
+          // A create whose REQUEST left the process and failed: one request.
+          begin: async () => ({ kind: "unavailable", reason: "check create failed: socket hang up", requests: 1 }),
+        }),
+      });
+      // Not a deferral: the row pays an attempt and takes a backoff rung,
+      // because GitHub may hold a run this lane cannot see.
+      expect(summary.unconfirmed).toBe(1);
+      expect(summary.completed).toBe(0);
+    } finally {
+      fetchStub.restore();
+    }
+    const row = await rawRow(db, id);
+    // The `sending` mark is RETAINED (never rolled back) and recovery is
+    // adopt-only — the RL-12 posture a possibly-sent create demands.
+    expect(row.create_state).toBe("sending");
+    expect(row.check_run_id).toBeNull();
+    expect(row.attempts).toBe(1);
+    expect(row.next_attempt_ms).toBe(T0 + CHECK_BACKOFF_MS[0]!);
+    expect(row.recovery_state).toBe("remote-unconfirmed");
+    expect(row.terminal_ms).toBeNull();
   });
 });
