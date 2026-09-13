@@ -145,9 +145,10 @@ describe("listDiscussionWithOctokit — §7.8 capture", () => {
       ],
     });
     const discussion = await listDiscussionWithOctokit(octokit, input());
-    // Two backward pages requested: first without `before`, then with the
-    // newest page's startCursor.
-    expect(calls.map((c) => c.variables.before)).toEqual([undefined, "cursor-older"]);
+    // Three reads: two backward pages (first without `before`, then with the
+    // newest page's startCursor) plus the §7.5/§7.8 post-pagination
+    // stability recheck of the newest page (before undefined again).
+    expect(calls.map((c) => c.variables.before)).toEqual([undefined, "cursor-older", undefined]);
     expect(discussion.issueCoverage).toBe("complete");
     // Chronological merge: the OLDER page's nodes come first.
     expect(discussion.items.map((i) => i.body)).toEqual(["oldest", "old", "newest", "new"]);

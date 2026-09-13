@@ -18,7 +18,11 @@
  *     new dependency, no second client. `fullDatabaseId` (BigInt JSON string)
  *     is the only selected id bridge; `databaseId` (deprecated) is never
  *     selected. Pagination is bounded: reviewThreads ≤ 5 pages, thread
- *     conversations ≤ 2 pages, issue comments ≤ 2 pages (spec §7.5/§7.8).
+ *     conversations ≤ 2 pages, issue comments ≤ 2 pages (spec §7.5/§7.8),
+ *     and a complete walk is followed by a final newest-page/count/HEAD
+ *     stability recheck — drift marks the capture incomplete, never falsely
+ *     complete (spec §7.5 "Re-read the final page/count and PR HEAD after
+ *     pagination; instability marks incomplete").
  *   - Credential routing: exact `(app_id, installation_id)` through
  *     `app_installations` into the matching `github_apps` row (never a
  *     repository-wide scan), deleted/disabled rows fail closed, and the
@@ -344,6 +348,12 @@ export type ThreadCapture = {
  * Fetch one thread's full conversation (spec §7.5 node query) walking the
  * `comments(last:100, before:cursor)` connection backward, at most TWO pages
  * of the thread's OWN connection (never unrelated PR-wide review comments).
+ * The FIRST read is the newest page — its response carries both the thread
+ * metadata and that page's comments, so no separate `before: undefined`
+ * metadata fetch exists. After a complete walk the final newest page, count
+ * and PR HEAD are RE-READ (spec §7.5: "Re-read the final page/count and PR
+ * HEAD after pagination; instability marks incomplete") — any drift marks
+ * the capture incomplete, never silently complete.
  */
 export async function fetchThreadConversation(octokit: GraphqlOctokit, threadId: string): Promise<ThreadCapture> {
   type ThreadNode = {
@@ -377,25 +387,47 @@ export async function fetchThreadConversation(octokit: GraphqlOctokit, threadId:
     nameWithOwner: pr.repository?.nameWithOwner ?? "",
   };
   const comments: ThreadCommentEntry[] = [];
+  for (const n of node.comments.nodes ?? []) {
+    if (n !== null) comments.push(entryOf(n));
+  }
   let totalCount = node.comments.totalCount ?? 0;
   let complete = true;
-  let before: string | undefined;
-  for (let page = 0; page < 2; page++) {
-    const connection = (await octokit.graphql<{ node?: ThreadNode | null }>(THREAD_NODE_QUERY, { id: threadId, before })).node;
-    const conn = connection?.comments;
+  // Walk backward — the first read above is page 1 of at most 2.
+  let before =
+    node.comments.pageInfo?.hasPreviousPage === true && node.comments.pageInfo.startCursor
+      ? node.comments.pageInfo.startCursor
+      : undefined;
+  let pages = 1;
+  while (before !== undefined && pages < 2) {
+    const conn = (await octokit.graphql<{ node?: ThreadNode | null }>(THREAD_NODE_QUERY, { id: threadId, before })).node?.comments;
     if (!conn) {
       complete = false;
       break;
     }
     totalCount = conn.totalCount ?? totalCount;
+    pages += 1;
     for (const n of conn.nodes ?? []) {
       if (n !== null) comments.push(entryOf(n));
     }
-    if (conn.pageInfo?.hasPreviousPage === true && conn.pageInfo.startCursor) {
-      before = conn.pageInfo.startCursor;
-      if (page === 1) complete = false; // 2-page bound exhausted with an older page remaining
-    } else {
-      break;
+    before = conn.pageInfo?.hasPreviousPage === true && conn.pageInfo.startCursor ? conn.pageInfo.startCursor : undefined;
+  }
+  if (before !== undefined) complete = false; // 2-page bound exhausted with an older page remaining
+  if (complete) {
+    // Post-pagination stability recheck (spec §7.5/§7.8): re-read the newest
+    // page's count and the PR HEAD after the walk — the re-read nodes are
+    // discarded; it only validates. A concurrent reply/edit/HEAD move between
+    // page reads marks the capture incomplete instead of falsely complete.
+    const recheck = (await octokit.graphql<{ node?: ThreadNode | null }>(THREAD_NODE_QUERY, { id: threadId })).node;
+    const conn = recheck?.comments;
+    if (
+      recheck === null ||
+      recheck === undefined ||
+      conn === undefined ||
+      conn === null ||
+      (conn.totalCount ?? totalCount) !== totalCount ||
+      (recheck.pullRequest?.headRefOid ?? "") !== headRefOid
+    ) {
+      complete = false;
     }
   }
   return { thread, comments, totalCount, complete, headRefOid };
@@ -419,7 +451,7 @@ export type IssueCapture = {
   headRefOid: string;
   comments: ThreadCommentEntry[];
   totalCount: number;
-  /** false when pagination hit the 2-page bound with an older page remaining. */
+  /** false when pagination hit the 2-page bound OR the post-walk stability recheck drifted. */
   complete: boolean;
 };
 
@@ -428,6 +460,8 @@ export type IssueCapture = {
  * `comments(last:100, before:cursor)` connection walked backward, TWO pages
  * maximum — deliberately avoiding the oldest-first REST `issues.listComments`
  * first pages. Nodes are merged chronologically for presentation/digests.
+ * After a complete walk the final newest page count and PR HEAD are RE-READ
+ * (spec §7.5/§7.8 stability recheck) — drift marks the capture incomplete.
  */
 export async function fetchIssueComments(
   octokit: GraphqlOctokit,
@@ -471,6 +505,16 @@ export async function fetchIssueComments(
   if (!sawConnection) {
     // The PR itself was missing/malformed — an unavailable capture, never empty.
     return { headRefOid: "", comments: [], totalCount: 0, complete: false };
+  }
+  if (complete) {
+    // Post-pagination stability recheck (spec §7.8 "a final newest-page/count
+    // recheck"): the re-read nodes are discarded; it only validates.
+    const data = await octokit.graphql<{ repository?: { pullRequest?: PrNode | null } }>(ISSUE_COMMENTS_QUERY, head);
+    const pr = data?.repository?.pullRequest;
+    const conn = pr?.comments;
+    if (!conn || (conn.totalCount ?? totalCount) !== totalCount || (pr?.headRefOid ?? "") !== headRefOid) {
+      complete = false;
+    }
   }
   return { headRefOid, comments, totalCount, complete };
 }
@@ -732,34 +776,40 @@ type AppContext = { octokit: GraphqlOctokit; botLogin: string; githubAppId: numb
  * `app_installations` into the matching `github_apps` row — never scan all
  * active Apps for a repository. Deleted/disabled rows, missing identity,
  * identity disagreement with the row's `github_app_id`, or a blank slug all
- * fail closed (null).
+ * fail closed (null). Routing-query, identity-proof and mint throws are
+ * caught here — callers map null to their typed outcome, so a transport
+ * outage never escapes the discriminated-union contracts.
  */
 async function resolveAppContext(deps: ReviewThreadsDeps, scope: Scope): Promise<AppContext | null> {
-  const row = await deps.db
-    .prepare(
-      `SELECT ga.github_app_id AS github_app_id, ga.slug AS slug, ga.status AS status, ga.deleted_at AS deleted_at
-       FROM app_installations ai
-       JOIN github_apps ga ON ga.id = ai.app_id
-       WHERE ai.app_id = ? AND ai.installation_id = ?`,
-    )
-    .bind(scope.appId, scope.installationId)
-    .first<{ github_app_id: number; slug: string; status: string; deleted_at: string | null }>();
-  if (row === null) return null;
-  if (row.deleted_at !== null || row.status !== "active") return null;
-  const identity = await deps.getAppIdentity({ appId: scope.appId, installationId: scope.installationId });
-  if (identity === null) return null;
-  // Slug-vs-live-App disagreement fails closed (changed identity / spoofed
-  // credential pair); a blank slug is never a bot identity.
-  if (identity.githubAppId !== row.github_app_id) return null;
-  if (typeof identity.slug !== "string" || identity.slug.length === 0) return null;
-  const octokit = await deps.getOctokit({
-    appId: scope.appId,
-    installationId: scope.installationId,
-    owner: scope.owner,
-    repo: scope.repo,
-  });
-  if (octokit === null) return null;
-  return { octokit, botLogin: `${identity.slug}[bot]`, githubAppId: row.github_app_id, slug: identity.slug };
+  try {
+    const row = await deps.db
+      .prepare(
+        `SELECT ga.github_app_id AS github_app_id, ga.slug AS slug, ga.status AS status, ga.deleted_at AS deleted_at
+         FROM app_installations ai
+         JOIN github_apps ga ON ga.id = ai.app_id
+         WHERE ai.app_id = ? AND ai.installation_id = ?`,
+      )
+      .bind(scope.appId, scope.installationId)
+      .first<{ github_app_id: number; slug: string; status: string; deleted_at: string | null }>();
+    if (row === null) return null;
+    if (row.deleted_at !== null || row.status !== "active") return null;
+    const identity = await deps.getAppIdentity({ appId: scope.appId, installationId: scope.installationId });
+    if (identity === null) return null;
+    // Slug-vs-live-App disagreement fails closed (changed identity / spoofed
+    // credential pair); a blank slug is never a bot identity.
+    if (identity.githubAppId !== row.github_app_id) return null;
+    if (typeof identity.slug !== "string" || identity.slug.length === 0) return null;
+    const octokit = await deps.getOctokit({
+      appId: scope.appId,
+      installationId: scope.installationId,
+      owner: scope.owner,
+      repo: scope.repo,
+    });
+    if (octokit === null) return null;
+    return { octokit, botLogin: `${identity.slug}[bot]`, githubAppId: row.github_app_id, slug: identity.slug };
+  } catch {
+    return null; // identity/mint/routing failure fails closed (typed downstream)
+  }
 }
 
 function sameScope(row: AssociationRow, scope: Scope): boolean {
@@ -828,12 +878,26 @@ export async function discoverThreadWithDeps(
   if (ctx === null) return { kind: "unknown" };
 
   // The expected original line-review batch marker on the App-owned review.
-  const reviews = await fetchPrReviews(ctx.octokit, scope);
+  // Read-path transport failures are TYPED (`unknown`), never exceptions —
+  // discovery has no lease held yet, so there is nothing to unwind.
+  let reviews: PrReviewStub[];
+  try {
+    reviews = await fetchPrReviews(ctx.octokit, scope);
+  } catch {
+    return { kind: "unknown" };
+  }
   let review: PrReviewStub | null = null;
   if (input.reviewId !== null) {
-    // A known returned reviewId must match exactly.
+    // A known returned reviewId must match exactly — AND the review body
+    // must carry OUR prepared line-batch marker (spec §7.5 lists the batch
+    // marker among the unconditional adoption requirements; a review id
+    // alone never proves the body was not edited/replaced).
     const known = reviews.find((r) => r.fullDatabaseId === String(input.reviewId));
-    if (known === undefined) {      return { kind: "foreign" };
+    if (known === undefined) {
+      return { kind: "foreign" };
+    }
+    if (parseLineBatchMarker(known.body)?.publicationId !== intent.publicationId) {
+      return { kind: "foreign" };
     }
     review = known;
   } else {
@@ -853,7 +917,12 @@ export async function discoverThreadWithDeps(
   }
 
   // Bounded thread scan; match by exact path/range + root marker + digest.
-  const scan = await fetchReviewThreads(ctx.octokit, scope);
+  let scan: ReviewThreadsCapture;
+  try {
+    scan = await fetchReviewThreads(ctx.octokit, scope);
+  } catch {
+    return { kind: "unknown" }; // typed read-path failure, never an exception
+  }
   if (!scan.complete) return { kind: "unknown" };
   let foreign = false;
   const candidates: { thread: ReviewThreadStub }[] = [];
@@ -933,7 +1002,37 @@ export async function resolveFindingThreadWithDeps(
 
   // 1. Acquire the association lease.
   const lease = await claimAssociationLease(deps.db, associationId, holder, nowMs);
-  if (lease === null) return { kind: "retry", reason: "api" };
+  if (lease === null) {
+    // A failed claim is a live competing lease OR a terminal row this module
+    // already settled. Terminal rows are typed no-ops — surfacing retry:api
+    // for a settled row would hot-loop recovery against it (the outcome
+    // contracts never leak exceptions, and a settled association is never
+    // re-resolved through re-entry).
+    const current = await loadAssociation(deps.db, associationId);
+    if (current !== null && sameScope(current, scope)) {
+      if (current.resolution_state === "resolved") {
+        // Idempotent re-entry on a settled row: report the stored resolution
+        // (outdated is not re-derived without a fetch; lateChange is stored).
+        return {
+          kind: "resolved",
+          threadId: current.thread_id ?? "",
+          adopted: true,
+          outdated: false,
+          lateChange: current.late_change === 1,
+        };
+      }
+      if (current.resolution_state === "abandoned") {
+        // The specific abandon reason is persisted only as free-text
+        // last_error; supersession is recoverable from its column. Either
+        // way the row is terminal — never resolved through re-entry.
+        return {
+          kind: "abandoned",
+          reason: current.superseded_by_publication_id !== null ? "superseded" : "foreign",
+        };
+      }
+    }
+    return { kind: "retry", reason: "api" };
+  }
 
   // 2. Reload the row under the lease.
   const row = await loadAssociation(deps.db, associationId);
@@ -989,7 +1088,16 @@ export async function resolveFindingThreadWithDeps(
     return { kind: "retry", reason: "lookup-incomplete" };
   }
 
-  const capture = await fetchThreadConversation(ctx.octokit, row.thread_id);
+  let capture: ThreadCapture;
+  try {
+    capture = await fetchThreadConversation(ctx.octokit, row.thread_id);
+  } catch (err) {
+    // Read-path transport failure is a TYPED retry — the lease is released
+    // through persistOutcome, never held until expiry by an escaping throw.
+    const detail = err instanceof Error ? err.message : String(err);
+    await persistOutcome(deps.db, associationId, lease, nowMs, { state: "retry", error: `thread capture failed: ${detail}` });
+    return { kind: "retry", reason: "api" };
+  }
   if (capture.thread === null) {
     await persistOutcome(deps.db, associationId, lease, nowMs, { state: "abandoned", error: "thread missing" });
     return { kind: "abandoned", reason: "foreign" };
@@ -1048,7 +1156,14 @@ export async function resolveFindingThreadWithDeps(
     await releaseAssociationLease(deps.db, associationId, lease, nowMs);
     return { kind: "needs-recheck", reason: "conversation-changed" };
   }
-  const issue = await currentIssueDigest(ctx, scope);
+  let issue: string | null;
+  try {
+    issue = await currentIssueDigest(ctx, scope);
+  } catch (err) {
+    const detail = err instanceof Error ? err.message : String(err);
+    await persistOutcome(deps.db, associationId, lease, nowMs, { state: "retry", error: `issue capture failed: ${detail}` });
+    return { kind: "retry", reason: "api" };
+  }
   if (issue === null || issue !== verified.issueDigest) {
     await releaseAssociationLease(deps.db, associationId, lease, nowMs);
     return { kind: "needs-recheck", reason: issue === null ? "context-incomplete" : "conversation-changed" };

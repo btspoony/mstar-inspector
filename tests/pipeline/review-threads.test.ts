@@ -38,6 +38,8 @@ import {
   buildLineCommentBody,
   buildLineIntent,
   createReviewThreads,
+  fetchIssueComments,
+  fetchThreadConversation,
   lineMarker,
   parseLineBatchMarker,
   parseLineMarker,
@@ -512,6 +514,19 @@ describe("discoverThread — ownership proof precedes adoption", () => {
     expect(await ops.discoverThread({ scope: SCOPE, intent, reviewId: 555 })).toEqual({ kind: "foreign" });
   });
 
+  test("a known reviewId whose body does NOT carry our line-batch marker is foreign (marker check is unconditional)", async () => {
+    const db = createSeededTestD1();
+    const intent = await seedLifecycle(db);
+    const { octokit, calls } = fakeOctokit({
+      reviews: [batchReview(PUB_ID, { body: "an edited/replaced review body without our batch marker" })],
+      reviewThreadsPages: [{ threads: [discoveryThread(intent)], hasNextPage: false }],
+    });
+    const ops = createReviewThreads(makeDeps(db, octokit));
+    expect(await ops.discoverThread({ scope: SCOPE, intent, reviewId: 555 })).toEqual({ kind: "foreign" });
+    // Rejected before the thread scan — the batch gate precedes adoption.
+    expect(calls.some((c) => c.kind === "reviewThreads")).toBe(false);
+  });
+
   test("a copied marker on a human account / with a different body is foreign, never authority", async () => {
     const db = createSeededTestD1();
     const intent = await seedLifecycle(db);
@@ -605,6 +620,36 @@ describe("discoverThread — ownership proof precedes adoption", () => {
       }),
     ).toEqual({ kind: "unknown" });
     expect(calls.every((c) => c.kind !== "reviews")).toBe(true); // no review scan past the identity gate
+  });
+
+  test("discovery read-path transport failures are TYPED unknown (reviews scan, thread scan, mint)", async () => {
+    const db = createSeededTestD1();
+    const intent = await seedLifecycle(db);
+    const failingReviews = fakeOctokit({ throwOn: "reviews" });
+    expect(
+      await createReviewThreads(makeDeps(db, failingReviews.octokit)).discoverThread({ scope: SCOPE, intent, reviewId: null }),
+    ).toEqual({ kind: "unknown" });
+
+    const db2 = createSeededTestD1();
+    const intent2 = await seedLifecycle(db2);
+    const failingThreads = fakeOctokit({ reviews: [batchReview(PUB_ID)], throwOn: "reviewThreads" });
+    expect(
+      await createReviewThreads(makeDeps(db2, failingThreads.octokit)).discoverThread({ scope: SCOPE, intent: intent2, reviewId: null }),
+    ).toEqual({ kind: "unknown" });
+
+    // A mint outage inside resolveAppContext fails closed to the typed
+    // outcome instead of throwing out of the adapter.
+    const db3 = createSeededTestD1();
+    const intent3 = await seedLifecycle(db3);
+    const base = makeDeps(db3, fakeOctokit({ reviews: [batchReview(PUB_ID)] }).octokit);
+    expect(
+      await createReviewThreads({
+        ...base,
+        getOctokit: async () => {
+          throw new Error("mint outage");
+        },
+      }).discoverThread({ scope: SCOPE, intent: intent3, reviewId: null }),
+    ).toEqual({ kind: "unknown" });
   });
 
   test("incomplete reviewThreads pagination (5-page bound) is unknown, never authority", async () => {
@@ -963,6 +1008,95 @@ describe("resolveFindingThread — fences, adoption, mutation confirmation", () 
     expect(row.lease_epoch).toBe(4);
   });
 
+  test("thread capture transport failure → typed retry:api with the lease released (never an escaping throw)", async () => {
+    const db = createSeededTestD1();
+    const intent = await seedLifecycle(db);
+    const verified = await resolvedFixture(db, intent);
+    const { octokit, calls } = fakeOctokit({
+      threadPages: [{ comments: [{ ...ROOT, body: buildLineCommentBody(intent) }, REPLY] }],
+      issueComments: { comments: [ISSUE_A] },
+      throwOn: "thread",
+    });
+    const outcome = await createReviewThreads(makeDeps(db, octokit)).resolveFindingThread({
+      scope: SCOPE,
+      associationId: ASSOC_ID,
+      verified,
+    });
+    expect(outcome).toEqual({ kind: "retry", reason: "api" });
+    const row = db.raw.query(`SELECT resolution_state, holder FROM review_threads WHERE id = '${ASSOC_ID}'`).get() as {
+      resolution_state: string; holder: string | null;
+    };
+    expect(row.resolution_state).toBe("retry");
+    expect(row.holder).toBeNull(); // released through persistOutcome, not held until expiry
+    expect(calls.some((c) => c.kind === "mutation")).toBe(false);
+  });
+
+  test("issue capture transport failure → typed retry:api (a thrown read is never a false fence verdict)", async () => {
+    const db = createSeededTestD1();
+    const intent = await seedLifecycle(db);
+    const verified = await resolvedFixture(db, intent);
+    const { octokit, calls } = fakeOctokit({
+      threadPages: [{ comments: [{ ...ROOT, body: buildLineCommentBody(intent) }, REPLY] }],
+      issueComments: { comments: [ISSUE_A] },
+      throwOn: "issue",
+    });
+    const outcome = await createReviewThreads(makeDeps(db, octokit)).resolveFindingThread({
+      scope: SCOPE,
+      associationId: ASSOC_ID,
+      verified,
+    });
+    expect(outcome).toEqual({ kind: "retry", reason: "api" });
+    expect(calls.some((c) => c.kind === "mutation")).toBe(false);
+  });
+
+  test("re-entry on an already-RESOLVED row is a typed terminal no-op (no lease steal, zero API calls)", async () => {
+    const db = createSeededTestD1();
+    await seedLifecycle(db);
+    db.raw
+      .prepare(`UPDATE review_threads SET resolution_state = 'resolved', resolved_ms = 9000, thread_id = ? WHERE id = ?`)
+      .run(THREAD_GQL_ID, ASSOC_ID);
+    const { octokit, calls } = fakeOctokit({});
+    const outcome = await createReviewThreads(makeDeps(db, octokit)).resolveFindingThread({
+      scope: SCOPE,
+      associationId: ASSOC_ID,
+      verified: {
+        assessment: { rowId: FINDING_ROW_ID, disposition: "addressed", reason: "verified-fix", evidence: null, relatedCurrentFindingIndexes: [] },
+        snapshot: {
+          associationId: ASSOC_ID, threadId: THREAD_GQL_ID, commentId: ROOT_COMMENT_ID,
+          headSha: SHA, digest: "irrelevant", commentCount: 2, capturedMs: 5000,
+          coverage: "complete", modelCoverage: "complete",
+        },
+        issueDigest: "irrelevant", issueCoverage: "complete",
+      },
+    });
+    expect(outcome).toEqual({ kind: "resolved", threadId: THREAD_GQL_ID, adopted: true, outdated: false, lateChange: false });
+    expect(calls).toEqual([]); // settled row — no remote reads, no mutation, no retry loop
+  });
+
+  test("re-entry on an already-ABANDONED row is a typed terminal no-op (supersession recoverable from the column)", async () => {
+    const db = createSeededTestD1();
+    const intent = await seedLifecycle(db);
+    const verified = await resolvedFixture(db, intent);
+    const { octokit, calls } = fakeOctokit({});
+
+    // Non-superseded abandon (e.g. a provenance failure) → terminal foreign.
+    db.raw.prepare(`UPDATE review_threads SET resolution_state = 'abandoned' WHERE id = ?`).run(ASSOC_ID);
+    expect(
+      await createReviewThreads(makeDeps(db, octokit)).resolveFindingThread({ scope: SCOPE, associationId: ASSOC_ID, verified }),
+    ).toEqual({ kind: "abandoned", reason: "foreign" });
+
+    // Superseded abandon → terminal superseded.
+    const db2 = createSeededTestD1();
+    await seedLifecycle(db2);
+    db2.raw
+      .prepare(`UPDATE review_threads SET resolution_state = 'abandoned', superseded_by_publication_id = ? WHERE id = ?`)
+      .run(uuid(9), ASSOC_ID);
+    expect(
+      await createReviewThreads(makeDeps(db2, octokit)).resolveFindingThread({ scope: SCOPE, associationId: ASSOC_ID, verified }),
+    ).toEqual({ kind: "abandoned", reason: "superseded" });
+    expect(calls).toEqual([]);
+  });
+
   test("post-mutation late change (HEAD moved between mutation and post-read) is recorded, resolution stands", async () => {
     const db = createSeededTestD1();
     const intent = await seedLifecycle(db);
@@ -977,8 +1111,10 @@ describe("resolveFindingThread — fences, adoption, mutation confirmation", () 
     octokit.graphql = (async (query: string, variables: Record<string, unknown> = {}) => {
       if (query.includes("node(id: $id)")) {
         reads += 1;
-        // Pre-mutation reads (2 pages max) see SHA; the post-read sees SHA2.
-        if (reads >= 2) {
+        // The pre-mutation capture makes TWO node reads (newest page +
+        // stability recheck) and both see SHA; the POST-mutation re-read
+        // (reads 3+) sees SHA2.
+        if (reads >= 3) {
           return fakeOctokit({ threadPages: [{ comments: [root, REPLY], headRefOid: SHA2 }] }).octokit.graphql(query, variables);
         }
       }
@@ -996,5 +1132,136 @@ describe("resolveFindingThread — fences, adoption, mutation confirmation", () 
     };
     expect(row.resolution_state).toBe("resolved");
     expect(row.late_change).toBe(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Post-pagination stability recheck (spec §7.5 "Re-read the final page/count
+// and PR HEAD after pagination; instability marks incomplete" / §7.8 "a
+// final newest-page/count recheck") — capture primitives.
+// ---------------------------------------------------------------------------
+
+describe("post-pagination stability recheck (§7.5/§7.8)", () => {
+  /** A thread-node response for one read: newest page, metadata included. */
+  const nodeResponse = (totalCount: number, comments: ThreadCommentSpec[], headRefOid = SHA) => ({
+    node: {
+      id: THREAD_GQL_ID,
+      isResolved: false,
+      isOutdated: false,
+      path: PATH,
+      line: LINE,
+      originalLine: null,
+      pullRequest: { id: "PR_node", number: SCOPE.prNumber, headRefOid, repository: { nameWithOwner: `${SCOPE.owner}/${SCOPE.repo}` } },
+      comments: {
+        totalCount,
+        pageInfo: { hasPreviousPage: false, startCursor: null },
+        nodes: comments.map((c) => ({
+          id: c.id,
+          fullDatabaseId: c.fullDatabaseId,
+          body: c.body,
+          createdAt: c.createdAt,
+          updatedAt: c.updatedAt,
+          author: { __typename: c.authorType ?? "Bot", login: c.authorLogin ?? BOT_LOGIN },
+          originalCommit: { oid: SHA },
+          pullRequestReview: { id: "PRR_node_1" },
+        })),
+      },
+    },
+  });
+
+  /** Responses served in read order; the last one repeats when exceeded. */
+  function countingOctokit(responses: unknown[]): { octokit: GraphqlOctokit; calls: Array<Record<string, unknown>> } {
+    const calls: Array<Record<string, unknown>> = [];
+    let i = 0;
+    const octokit: GraphqlOctokit = {
+      graphql: async <T,>(query: string, variables: Record<string, unknown> = {}): Promise<T> => {
+        void query;
+        calls.push({ ...variables });
+        const response = responses[Math.min(i, responses.length - 1)];
+        i += 1;
+        return response as T;
+      },
+    };
+    return { octokit, calls };
+  }
+
+  test("single-page thread capture: the first read carries metadata AND the newest page — no redundant page-0 re-fetch", async () => {
+    const root = { ...ROOT, body: "root body" };
+    const { octokit, calls } = countingOctokit([nodeResponse(2, [root, REPLY]), nodeResponse(2, [root, REPLY])]);
+    const capture = await fetchThreadConversation(octokit, THREAD_GQL_ID);
+    expect(capture.complete).toBe(true);
+    expect(capture.totalCount).toBe(2);
+    expect(capture.comments).toHaveLength(2);
+    // EXACTLY two node reads: newest page (metadata + comments together) and
+    // the stability recheck. The old metadata-then-page-0 double fetch (which
+    // discarded the first connection) is gone.
+    expect(calls).toHaveLength(2);
+    expect(calls[0]!.before).toBeUndefined();
+    expect(calls[1]!.before).toBeUndefined();
+  });
+
+  test("totalCount drifted between the walk and the recheck → incomplete, never falsely complete", async () => {
+    const root = { ...ROOT, body: "root body" };
+    // A reply landed after the walk: the recheck's count no longer matches.
+    const { octokit } = countingOctokit([nodeResponse(2, [root, REPLY]), nodeResponse(3, [root, REPLY])]);
+    const capture = await fetchThreadConversation(octokit, THREAD_GQL_ID);
+    expect(capture.complete).toBe(false);
+    // The walked set is reported as captured; the recheck only validates.
+    expect(capture.totalCount).toBe(2);
+    expect(capture.comments).toHaveLength(2);
+  });
+
+  test("PR HEAD moved between the walk and the recheck → incomplete", async () => {
+    const root = { ...ROOT, body: "root body" };
+    const { octokit } = countingOctokit([nodeResponse(2, [root, REPLY], SHA), nodeResponse(2, [root, REPLY], SHA2)]);
+    expect((await fetchThreadConversation(octokit, THREAD_GQL_ID)).complete).toBe(false);
+  });
+
+  test("thread deleted between the walk and the recheck → incomplete (never complete for a vanished node)", async () => {
+    const root = { ...ROOT, body: "root body" };
+    const { octokit } = countingOctokit([nodeResponse(2, [root, REPLY]), { node: null }]);
+    expect((await fetchThreadConversation(octokit, THREAD_GQL_ID)).complete).toBe(false);
+  });
+
+  test("issue-comment capture: stability recheck drift (new comment) → incomplete", async () => {
+    const page = (totalCount: number) => ({
+      repository: {
+        pullRequest: {
+          headRefOid: SHA,
+          comments: {
+            totalCount,
+            pageInfo: { hasPreviousPage: false, startCursor: null },
+            nodes: [
+              { id: "i-1", fullDatabaseId: "8001", body: "issue comment", createdAt: "2026-09-01T09:00:00Z", updatedAt: "2026-09-01T09:00:00Z", author: { __typename: "User", login: "octocat" } },
+            ],
+          },
+        },
+      },
+    });
+    const { octokit, calls } = countingOctokit([page(1), page(2)]);
+    const capture = await fetchIssueComments(octokit, { owner: SCOPE.owner, repo: SCOPE.repo, prNumber: SCOPE.prNumber });
+    expect(capture.complete).toBe(false);
+    expect(capture.totalCount).toBe(1);
+    expect(calls).toHaveLength(2); // walk + recheck
+  });
+
+  test("stable issue-comment capture stays complete with the recheck in place", async () => {
+    const page = (totalCount: number) => ({
+      repository: {
+        pullRequest: {
+          headRefOid: SHA,
+          comments: {
+            totalCount,
+            pageInfo: { hasPreviousPage: false, startCursor: null },
+            nodes: [
+              { id: "i-1", fullDatabaseId: "8001", body: "issue comment", createdAt: "2026-09-01T09:00:00Z", updatedAt: "2026-09-01T09:00:00Z", author: { __typename: "User", login: "octocat" } },
+            ],
+          },
+        },
+      },
+    });
+    const { octokit } = countingOctokit([page(1), page(1)]);
+    const capture = await fetchIssueComments(octokit, { owner: SCOPE.owner, repo: SCOPE.repo, prNumber: SCOPE.prNumber });
+    expect(capture.complete).toBe(true);
   });
 });
