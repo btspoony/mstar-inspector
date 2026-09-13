@@ -518,8 +518,12 @@ export type CheckLifecycleHooks = {
  */
 export const CHECK_EXECUTION_WINDOW_MS = 900_000;
 
-/** Inline hook budget guard: the consumer never waits longer than this. */
-const CHECK_HOOK_TIMEOUT_MS = 2_500;
+/**
+ * Inline hook budget guard (spec §7.10: "Each inline hook has ≤2 requests /
+ * 2 seconds total"). Exported because it is the containment bound the Check
+ * lifecycle must honour, and the two hook-timeout cases pin it by value.
+ */
+export const CHECK_HOOK_TIMEOUT_MS = 2_000;
 
 /**
  * §7.3 catalog budget: "Diff capture plus catalog is bounded to 256 KiB; at
@@ -533,7 +537,15 @@ const RECHECK_SLICES_PER_TARGET = 4;
 /** §7.3 input cap: oversized whole targets are excluded with coverage. */
 const RECHECK_INPUT_MAX_BYTES = 512 * 1024;
 
-/** Await a promise with a hard consumer-side timeout (hook budget guard). */
+/**
+ * Await a promise with the §7.10 inline-hook budget as a hard consumer-side
+ * bound. The bound is on the CONSUMER's wait, not on the hook's work: a hook
+ * that settles late keeps running detached — this guard creates no AbortSignal
+ * and the locked seam exposes none, so a late create/terminalize can still
+ * complete durably on its own (its writes stay fenced on the attempt lease).
+ * The consumer never waits past `CHECK_HOOK_TIMEOUT_MS`, and a rejection that
+ * lands after the timeout is swallowed rather than surfacing unhandled.
+ */
 async function withHookTimeout<T>(promise: Promise<T>, fallback: T): Promise<T> {
   let timer: ReturnType<typeof setTimeout> | undefined;
   const timeout = new Promise<T>((resolve) => {

@@ -265,6 +265,9 @@ describe("beginCheck — the create contract", () => {
     const result = await adapter.beginCheck({ identity: attempt.identity, lease });
     expect(result.kind).toBe("unavailable");
     expect(fake.creates).toHaveLength(0);
+    // Proven pre-send: the fence refused before any request left.
+    if (result.kind === "unavailable") expect(result.requests).toBe(0);
+    expect(await runState(db, attempt)).toBe("not-sent");
   });
 
   test("a matching response yields the remote evidence, not an opinion", async () => {
@@ -291,6 +294,8 @@ describe("beginCheck — the create contract", () => {
     const { attempt, lease } = await claimedAttempt(db);
     const result = await adapterFor(db, null).beginCheck({ identity: attempt.identity, lease });
     expect(result.kind).toBe("unavailable");
+    // No client, no request: nothing can have been created remotely.
+    if (result.kind === "unavailable") expect(result.requests).toBe(0);
     expect(await runState(db, attempt)).toBe("not-sent");
   });
 
@@ -300,6 +305,9 @@ describe("beginCheck — the create contract", () => {
     const bare = { rest: {} } as unknown as ChecksOctokit;
     const result = await adapterFor(db, bare).beginCheck({ identity: attempt.identity, lease });
     expect(result.kind).toBe("unavailable");
+    // A definitive pre-send refusal: reported as zero requests so a caller can
+    // tell it apart from an answered failure.
+    if (result.kind === "unavailable") expect(result.requests).toBe(0);
   });
 
   test("a throwing client factory is unavailable, never an exception", async () => {
@@ -314,7 +322,10 @@ describe("beginCheck — the create contract", () => {
     });
     const result = await adapter.beginCheck({ identity: attempt.identity, lease });
     expect(result.kind).toBe("unavailable");
-    if (result.kind === "unavailable") expect(result.reason).toMatch(/grant mint refused|no review-write/i);
+    if (result.kind === "unavailable") {
+      expect(result.reason).toMatch(/grant mint refused|no review-write/i);
+      expect(result.requests).toBe(0);
+    }
   });
 
   test("403 and 404 permission rejections are unavailable with a named reason", async () => {
@@ -331,6 +342,9 @@ describe("beginCheck — the create contract", () => {
       if (result.kind === "unavailable") {
         expect(result.reason).toContain(String(status));
         expect(result.reason.toLowerCase()).toContain("check create");
+        // The answer was requested: the run may exist, so the caller must
+        // recover by adoption rather than create again.
+        expect(result.requests).toBe(1);
       }
       // The attempt stays honest: still un-created, nothing observed.
       const row = await rowOf(db, attempt);

@@ -72,7 +72,10 @@ import {
   CHECK_LEASE_MS,
   CHECK_NAME,
   CHECK_RECOVERY_LEASE_MS,
+  attachCheckRunId,
+  claimAttempt,
   claimCheckRecovery,
+  setCheckCreateState,
 } from "../../src/store/review-checks";
 import { createSecretbox } from "../../src/dashboard/secretbox";
 import { createAppConfigStore } from "../../src/dashboard/app-config-store";
@@ -297,6 +300,7 @@ const {
   guardRetryDelaysSeconds,
   DIFF_PREFETCH_MAX_BYTES,
   INLINE_RESOLVE_MAX_ENTRIES,
+  CHECK_HOOK_TIMEOUT_MS,
 } = await import("../../src/pipeline/consumer");
 import type { PipelineEnv } from "../../src/pipeline/consumer";
 import type { ConsumerLog, ConsumerLogFields } from "../../src/pipeline/consumer";
@@ -427,6 +431,7 @@ function reset(): void {
   checkRuns.clear();
   checkRequestOverrides = {};
   checkRunSeq = FIRST_CHECK_RUN_ID;
+  checkState.clockMs = 1_700_000_000_000;
 }
 
 /** Count review rows in the real D1 double. */
@@ -3505,6 +3510,14 @@ let checkRequestOverrides: {
   update?: (params: ChecksUpdateParams) => CheckRunPayload;
 } = {};
 let checkRunSeq = FIRST_CHECK_RUN_ID;
+/**
+ * The clock the Check cases drive — shared by the lifecycle and the adapter, so
+ * advancing it simulates the attempt's execution window closing while an
+ * asynchronous read is in flight.
+ */
+const checkState = { clockMs: 1_700_000_000_000 };
+/** The clock a test drives for the checks adapter (production uses Date.now). */
+const checkClock = (): number => checkState.clockMs;
 
 /**
  * The scripted Checks surface. Every request is recorded together with the
@@ -4063,7 +4076,7 @@ describe("check lifecycle (plan 68 T2 — consumer binding, spec §7.10/§7.9)",
     expect(current.terminal_ms).not.toBeNull();
   });
 
-  test("check lifecycle: a hung terminal hook never blocks the published review", async () => {
+  test("check lifecycle: a hung terminal hook cannot hold the published review past the 2s bound", async () => {
     reset();
     runnerStdout = JSON.stringify(VALID_OUTPUT);
     const db = await createSeededTestD1();
@@ -4072,14 +4085,20 @@ describe("check lifecycle (plan 68 T2 — consumer binding, spec §7.10/§7.9)",
       ...testOverrides,
       checks: {
         begin: real.begin,
-        // The hook never settles: the consumer's own budget (2.5s) must resolve
-        // it without delaying the review, and no completion may be invented.
+        // The hook NEVER settles (the locked seam exposes no AbortSignal). Real
+        // timers are the point of this case: the production containment IS a
+        // `setTimeout`, so the assertion under test is the wall-clock bound.
         terminalize: () => Promise.withResolvers<void>().promise,
       },
     });
+    const startedAt = Date.now();
 
+    expect(CHECK_HOOK_TIMEOUT_MS).toBe(2_000); // §7.10's normative bound
     await consumer(makeBatch(makePayload()));
 
+    const elapsed = Date.now() - startedAt;
+    expect(elapsed).toBeGreaterThanOrEqual(CHECK_HOOK_TIMEOUT_MS - 50);
+    expect(elapsed).toBeLessThan(CHECK_HOOK_TIMEOUT_MS + 1_500);
     expect(checkRequests.map((r) => r.op)).toEqual(["create"]);
     expect(commenterCalls.filter((c) => c.op === "post-prepared")).toHaveLength(1);
     expect(publicationRow(db).phase).toBe("applied");
@@ -4088,6 +4107,307 @@ describe("check lifecycle (plan 68 T2 — consumer binding, spec §7.10/§7.9)",
     expect(row.desired).toBe("in_progress");
     expect(row.observed).toBe("unknown");
     expect(row.terminal_ms).toBeNull();
+  });
+
+  test("check lifecycle: a late BEGIN hook cannot hold the review past the 2s bound and creates nothing", async () => {
+    reset();
+    runnerStdout = JSON.stringify(VALID_OUTPUT);
+    const db = await createSeededTestD1();
+    const real = lifecycleFor(db);
+    const late = Promise.withResolvers<void>();
+    const lateSettled = Promise.withResolvers<void>();
+    let beginCalls = 0;
+    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, {
+      ...testOverrides,
+      checks: {
+        begin: async () => {
+          beginCalls += 1;
+          // Late by ~1s, NOT cancelled (mirrors a create that outlives the
+          // budget). Real timers are required: the containment under test is
+          // the consumer's own `setTimeout`.
+          setTimeout(() => late.resolve(), CHECK_HOOK_TIMEOUT_MS + 1_000);
+          return late.promise.then(() => {
+            lateSettled.resolve();
+            return null;
+          });
+        },
+        terminalize: real.terminalize,
+      },
+    });
+    const startedAt = Date.now();
+
+    await consumer(makeBatch(makePayload()));
+    const elapsed = Date.now() - startedAt;
+
+    // Publication happened FIRST and the bound was honoured: this delivery did
+    // no Check work at all (the hook resolution was the null fallback).
+    expect(elapsed).toBeGreaterThanOrEqual(CHECK_HOOK_TIMEOUT_MS - 50);
+    expect(elapsed).toBeLessThan(CHECK_HOOK_TIMEOUT_MS + 1_500);
+    expect(checkRequests).toHaveLength(0);
+    expect(checkRows(db)).toHaveLength(0);
+    expect(commenterCalls.filter((c) => c.op === "post-prepared")).toHaveLength(1);
+    expect(publicationRow(db).phase).toBe("applied");
+    expect(kvPuts).toHaveLength(1);
+
+    // Honest late behavior: the abandoned hook settles ~1s later, is never
+    // re-entered, and still produces no attempt row or remote call.
+    await late.promise;
+    await lateSettled.promise;
+    expect(beginCalls).toBe(1);
+    expect(checkRows(db)).toHaveLength(0);
+    expect(checkRequests).toHaveLength(0);
+  });
+
+  test("check lifecycle: a lease that expires during the proof read writes nothing", async () => {
+    reset();
+    const db = await createSeededTestD1();
+    const hooks = createCheckLifecycle({
+      db,
+      nowMs: checkClock,
+      getAdapter: () => checksAdapterFor(db, checkClock),
+    });
+
+    const handle = await hooks.begin(beginInput(SHA, checkState.clockMs + CHECK_LEASE_MS));
+    expect(handle).not.toBeNull();
+    expect(checkRequests.map((r) => r.op)).toEqual(["create"]);
+
+    // The terminal decision arrives after the execution window closed: the
+    // proof read straddles `lease_until_ms`, so the fenced writes re-sample the
+    // clock and must refuse rather than write with the pre-read timestamp.
+    checkState.clockMs = handle!.lease.untilMs + 1;
+    await hooks.terminalize({
+      handle: handle!,
+      publicationId: null,
+      outcome: "publication-unknown",
+    });
+
+    // No remote update, no desired mutation, no recovery bookkeeping: the
+    // attempt is left exactly as its (now expired) holder left it.
+    expect(checkRequests.map((r) => r.op)).toEqual(["create"]);
+    const row = checkRowFor(db, SHA);
+    expect(row.desired).toBe("in_progress");
+    expect(row.observed).toBe("unknown");
+    expect(row.terminal_ms).toBeNull();
+    expect(row.recovery_state).toBe("pending");
+    expect(row.attempts).toBe(0);
+    expect(row.holder).toBe(handle!.lease.holder);
+    expect(row.lease_until_ms).toBe(handle!.lease.untilMs);
+  });
+
+  test("check lifecycle: an unavailable terminal update keeps the frozen intent and defers honestly", async () => {
+    reset();
+    runnerStdout = JSON.stringify(VALID_OUTPUT);
+    const db = await createSeededTestD1();
+    // The create succeeds, the terminal UPDATE is rejected by GitHub (403).
+    checkRequestOverrides.update = () => {
+      throw Object.assign(new Error("forbidden"), { status: 403 });
+    };
+    const adapter = checksAdapterFor(db);
+    const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, {
+      ...testOverrides,
+      createAppCommenter: () => commenterWithChecks(adapter),
+    });
+
+    await consumer(makeBatch(makePayload()));
+
+    expect(checkRequests.map((r) => r.op)).toEqual(["create", "update"]);
+    const row = checkRowFor(db, SHA);
+    // One attempt, its frozen success intent retained, observed NOT advanced.
+    expect(checkRows(db)).toHaveLength(1);
+    expect(row.check_run_id).not.toBeNull();
+    expect(row.desired).toBe("success");
+    expect(row.desired_summary).toBe(CHECK_SUMMARIES.success(SHA.slice(0, 7), 1));
+    expect(row.desired_title).toBe(CHECK_NAME);
+    expect(row.observed).toBe("unknown");
+    expect(row.terminal_ms).toBeNull();
+    // Released to the recovery lane with its backoff, honest about the fact
+    // that a remote request was issued.
+    expect(row.recovery_state).toBe("remote-unconfirmed");
+    expect(row.holder).toBeNull();
+    expect(row.lease_until_ms).toBeNull();
+    expect(row.attempts).toBe(1);
+    expect(row.next_attempt_ms).toBeGreaterThan(Date.now());
+    expect(row.last_error).toContain("403");
+    // Publication is untouched by a Check failure.
+    expect(commenterCalls.filter((c) => c.op === "post-prepared")).toHaveLength(1);
+    expect(publicationRow(db).phase).toBe("applied");
+    expect(kvPuts).toHaveLength(1);
+    expect(reviewCount(db)).toBe(1);
+  });
+
+  test("check lifecycle: an attempt whose create never landed is released, not left holding its lease", async () => {
+    reset();
+    const db = await createSeededTestD1();
+    const hooks = lifecycleFor(db, checkClock);
+    // The create response was lost (the run may exist) and the create state is
+    // `sending`, so the failed begin releases the row as remote-unconfirmed.
+    checkRequestOverrides.create = () => {
+      throw Object.assign(new Error("socket hangup"), { status: 500 });
+    };
+    const handle = await hooks.begin(beginInput(SHA, checkState.clockMs + CHECK_LEASE_MS));
+    expect(handle).toBeNull();
+
+    const released = checkRowFor(db, SHA);
+    expect(released.recovery_state).toBe("remote-unconfirmed");
+    expect(released.holder).toBeNull();
+    expect(released.lease_until_ms).toBeNull();
+    expect(released.attempts).toBe(1);
+    expect(released.next_attempt_ms).toBeGreaterThan(checkState.clockMs);
+    expect(released.desired).toBe("in_progress");
+
+    // A second invocation can claim recovery immediately (the lease was
+    // released) and then owns the terminal decision for that same attempt.
+    const reacquired = await claimCheckRecovery(db, released.id, "reconciler", checkState.clockMs + 1_000);
+    expect(reacquired).not.toBeNull();
+    await hooks.terminalize({
+      handle: {
+        attemptId: released.id,
+        scope: CHECK_SCOPE,
+        githubAppId: TEST_GITHUB_APP_ID,
+        headSha: SHA,
+        lease: reacquired!,
+      },
+      publicationId: null,
+      outcome: "pre-publication-failure",
+    });
+
+    const row = checkRowFor(db, SHA);
+    expect(row.desired).toBe("failure");
+    expect(checkRows(db)).toHaveLength(1);
+  });
+
+  test("check lifecycle: a terminalize on an attempt with no attached run releases it instead of holding the lease", async () => {
+    reset();
+    const db = await createSeededTestD1();
+    const hooks = lifecycleFor(db, checkClock);
+    // A claimed, OWNED attempt whose create never attached a run id — the
+    // nullable branch `CheckLifecycleHandle` still structurally permits.
+    const claim = await claimAttempt(db, {
+      scope: CHECK_SCOPE,
+      githubAppId: TEST_GITHUB_APP_ID,
+      headSha: SHA,
+      triggeredBy: "pull_request",
+      action: "opened",
+      holder: "consumer:preload",
+      nowMs: checkState.clockMs,
+      executionDeadlineMs: checkState.clockMs + CHECK_LEASE_MS,
+    });
+    if (claim.kind !== "claimed") throw new Error(`fixture: expected claimed, got ${claim.kind}`);
+
+    await hooks.terminalize({
+      handle: {
+        attemptId: claim.attempt.identity.attemptId,
+        scope: CHECK_SCOPE,
+        githubAppId: TEST_GITHUB_APP_ID,
+        headSha: SHA,
+        lease: claim.lease,
+      },
+      publicationId: null,
+      outcome: "expired",
+    });
+
+    // The desired intent is frozen, and the attempt is handed to recovery with
+    // an honest remote-unconfirmed state instead of sitting on the lease until
+    // the execution deadline.
+    const row = checkRowFor(db, SHA);
+    expect(row.desired).toBe("failure");
+    expect(row.observed).toBe("unknown");
+    expect(row.terminal_ms).toBeNull();
+    expect(row.recovery_state).toBe("remote-unconfirmed");
+    expect(row.holder).toBeNull();
+    expect(row.lease_until_ms).toBeNull();
+    expect(row.attempts).toBe(1);
+    expect(row.next_attempt_ms).toBe(checkState.clockMs + 60_000);
+    expect(checkRequests).toHaveLength(0);
+  });
+
+  test("check lifecycle: a refused attach on a live lease hands the attempt to recovery", async () => {
+    reset();
+    const db = await createSeededTestD1();
+    // The create is marked `sending` and answered, but the attach is REFUSED
+    // (a different run id is already recorded — a concurrent writer got there
+    // first, and T1 never clears a known id). The claimed attempt is owned and
+    // live, so it must be released instead of holding a lease nobody drives.
+    const hooks = createCheckLifecycle({
+      db,
+      nowMs: checkClock,
+      getAdapter: () => ({
+        beginCheck: async ({ identity, lease }) => {
+          await setCheckCreateState(db, identity.attemptId, lease, "sending", undefined, checkState.clockMs);
+          await attachCheckRunId(db, identity.attemptId, lease, 777, checkState.clockMs);
+          return {
+            kind: "ready",
+            remote: { id: 4242, name: CHECK_NAME, head_sha: SHA, external_id: null, status: "in_progress", conclusion: null, app: { id: TEST_GITHUB_APP_ID } },
+          };
+        },
+        adoptCheckRun: async () => ({ kind: "absent" }),
+        completeCheck: async () => ({ kind: "unavailable", requests: 0, reason: "unused" }),
+        fetchCheckRun: async () => ({ kind: "absent" }),
+      }),
+    });
+    const handle = await hooks.begin(beginInput(SHA, checkState.clockMs + CHECK_LEASE_MS));
+    expect(handle).toBeNull();
+
+    const row = checkRowFor(db, SHA);
+    // The pre-existing run id is retained (never cleared for a lookalike).
+    expect(row.check_run_id).toBe(777);
+    expect(row.desired).toBe("in_progress");
+    expect(row.observed).toBe("unknown");
+    expect(row.terminal_ms).toBeNull();
+    // Released for recovery with its backoff: a create may have been sent.
+    expect(row.holder).toBeNull();
+    expect(row.lease_until_ms).toBeNull();
+    expect(row.recovery_state).toBe("remote-unconfirmed");
+    expect(row.attempts).toBe(1);
+    expect(row.next_attempt_ms).toBe(checkState.clockMs + 60_000);
+    expect(await claimCheckRecovery(db, row.id, "reconciler", checkState.clockMs + 1_000)).not.toBeNull();
+  });
+
+  test("check lifecycle: a lease lost while the create was in flight writes nothing further", async () => {
+    reset();
+    const db = await createSeededTestD1();
+    // The lease expires during the create request: the attach fence refuses AND
+    // the release fence is dead too, so the row keeps exactly what the adapter
+    // persisted (`sending`) until the recovery lane takes it at the deadline.
+    const hooks = createCheckLifecycle({
+      db,
+      nowMs: checkClock,
+      getAdapter: () => ({
+        beginCheck: async ({ identity, lease }) => {
+          await setCheckCreateState(db, identity.attemptId, lease, "sending", undefined, checkState.clockMs);
+          checkState.clockMs = lease.untilMs + 1;
+          return {
+            kind: "ready",
+            remote: { id: 4242, name: CHECK_NAME, head_sha: SHA, external_id: null, status: "in_progress", conclusion: null, app: { id: TEST_GITHUB_APP_ID } },
+          };
+        },
+        adoptCheckRun: async () => ({ kind: "absent" }),
+        completeCheck: async () => ({ kind: "unavailable", requests: 0, reason: "unused" }),
+        fetchCheckRun: async () => ({ kind: "absent" }),
+      }),
+    });
+    const handle = await hooks.begin(beginInput(SHA, checkState.clockMs + CHECK_LEASE_MS));
+    expect(handle).toBeNull();
+
+    const row = checkRowFor(db, SHA);
+    expect(row.create_state).toBe("sending");
+    expect(row.check_run_id).toBeNull();
+    expect(row.desired).toBe("in_progress");
+    expect(row.observed).toBe("unknown");
+    expect(row.terminal_ms).toBeNull();
+    // The dead invocation wrote nothing on its way out (attempts stayed 0, the
+    // row was not marked remote-unconfirmed), and the naturally expired lease
+    // is what makes the attempt claimable — the recovery lease is 120s and the
+    // execution deadline it must respect is UNCHANGED by that bookkeeping.
+    expect(row.attempts).toBe(0);
+    expect(row.recovery_state).toBe("pending");
+    const reacquired = await claimCheckRecovery(db, row.id, "reconciler", checkState.clockMs);
+    expect(reacquired).toEqual({
+      holder: "reconciler",
+      epoch: 2,
+      untilMs: checkState.clockMs + CHECK_RECOVERY_LEASE_MS,
+    });
+    expect(checkRowFor(db, SHA).execution_deadline_ms).toBe(row.execution_deadline_ms);
   });
 
   test("check lifecycle: an App without a Checks surface claims no attempt and still publishes", async () => {

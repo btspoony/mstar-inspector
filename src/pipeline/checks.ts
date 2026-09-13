@@ -214,7 +214,10 @@ export type ChecksAdapter = {
   beginCheck(input: {
     identity: CheckIdentity;
     lease: Lease;
-  }): Promise<{ kind: "ready"; remote: CheckRemote } | { kind: "unavailable"; reason: string }>;
+  }): Promise<
+    | { kind: "ready"; remote: CheckRemote }
+    | { kind: "unavailable"; reason: string; requests: number }
+  >;
   adoptCheckRun(input: {
     identity: CheckIdentity;
   }): Promise<{ kind: "found"; remote: CheckRemote } | { kind: "absent" | "incomplete" | "ambiguous" }>;
@@ -223,7 +226,10 @@ export type ChecksAdapter = {
     lease: Lease;
     checkRunId: number;
     conclusion: CheckConclusion;
-  }): Promise<{ kind: "completed"; remote: CheckRemote } | { kind: "unavailable"; reason: string }>;
+  }): Promise<
+    | { kind: "completed"; remote: CheckRemote }
+    | { kind: "unavailable"; reason: string; requests: number }
+  >;
   /** Read-only GET + identity proof: the recovery lane's confirmation path (§7.11.2 step 3). */
   fetchCheckRun(input: {
     identity: CheckIdentity;
@@ -232,6 +238,19 @@ export type ChecksAdapter = {
     { kind: "found"; remote: CheckRemote } | { kind: "absent" } | { kind: "unavailable"; reason: string }
   >;
 };
+
+/**
+ * The one network request each send lane issues, so a refusal can report
+ * whether the API was actually contacted (an `unavailable` that never sent
+ * leaves nothing possibly-created on GitHub). A transport throw counts as a
+ * request that may have landed — an answered rejection is still a request.
+ */
+function sendRequests<T>(promise: Promise<T>): Promise<{ sent: number; outcome: T | { failure: unknown } }> {
+  return promise.then(
+    (outcome) => ({ sent: 1, outcome }),
+    (failure: unknown) => ({ sent: 1, outcome: { failure } }),
+  );
+}
 
 /** Adoption walk bounds (spec §7.9: "max 2 pages", per_page 100). */
 const ADOPT_MAX_PAGES = 2;
@@ -262,7 +281,7 @@ export function createChecksAdapter(deps: ChecksDeps): ChecksAdapter {
 async function beginCheckWith(
   deps: ChecksDeps,
   input: { identity: CheckIdentity; lease: Lease },
-): Promise<{ kind: "ready"; remote: CheckRemote } | { kind: "unavailable"; reason: string }> {
+): Promise<{ kind: "ready"; remote: CheckRemote } | { kind: "unavailable"; reason: string; requests: number }> {
   const nowMs = deps.nowMs();
   const owned = await guardOwnership(deps, input.identity, input.lease, nowMs);
   if (owned.kind === "unavailable") return owned;
@@ -279,6 +298,7 @@ async function beginCheckWith(
   if (owned.data.createState !== "not-sent") {
     return {
       kind: "unavailable",
+      requests: 0,
       reason: `create is not definitively unsent (create_state=${owned.data.createState}); adopt instead`,
     };
   }
@@ -286,13 +306,13 @@ async function beginCheckWith(
   // nothing has been attempted, so the row must stay `not-sent` (an honest
   // `sending` mark here would strand the attempt as possibly-sent forever).
   const client = await clientFor(deps, identity.scope);
-  if (client === null) return { kind: "unavailable", reason: "no review-write Checks client for this App" };
+  if (client === null) return { kind: "unavailable", requests: 0, reason: "no review-write Checks client for this App" };
   // Preflight the EXACT callable before recording anything (a surface can exist
   // while `create` is missing on an older/foreign client). A missing method is
   // a definitive pre-send refusal: the row must keep its honest `not-sent`
   // state rather than be marked as a create that could never have left.
   if (!hasChecksMethod(client, "create")) {
-    return { kind: "unavailable", reason: "Checks surface has no callable create method" };
+    return { kind: "unavailable", requests: 0, reason: "Checks surface has no callable create method" };
   }
   // Persist `sending` BEFORE the request leaves (spec §7.9): if the response is
   // lost, the row must already record that a create was attempted, because that
@@ -301,34 +321,39 @@ async function beginCheckWith(
   // the send instead of creating an unattributable run.
   const marked = await setCheckCreateState(deps.db, identity.attemptId, input.lease, "sending", undefined, nowMs);
   if (!marked) {
-    return { kind: "unavailable", reason: "could not record the create attempt under this lease" };
+    return { kind: "unavailable", requests: 0, reason: "could not record the create attempt under this lease" };
   }
   // Client resolution minted a token and awaited the network; the lease may
   // have expired meanwhile WITHOUT an epoch takeover. Re-sample the clock and
   // re-prove the live lease immediately before the request: the earlier
   // snapshot authorised the decision, not the send itself (spec §7.9).
   if (!(await stillLive(deps, identity, input.lease))) {
-    return { kind: "unavailable", reason: "lease expired before the create request" };
+    return { kind: "unavailable", requests: 0, reason: "lease expired before the create request" };
   }
   const { scope } = identity;
-  try {
-    const { data } = await client.rest.checks.create({
+  const attempted = await sendRequests(
+    client.rest.checks.create({
       owner: scope.owner,
       repo: scope.repo,
       name: CHECK_NAME,
       head_sha: identity.headSha,
       external_id: identity.externalId,
       status: "in_progress",
-    });
-    const remote = toCheckRemote(data);
-    if (remote === null) return { kind: "unavailable", reason: "check create returned a malformed payload" };
-    if (!remoteBelongsTo(remote, identity)) {
-      return { kind: "unavailable", reason: "check create response does not match this attempt identity" };
-    }
-    return { kind: "ready", remote };
-  } catch (error) {
-    return { kind: "unavailable", reason: surfaceFailure(error, "check create") };
+    }),
+  );
+  if ("failure" in attempted.outcome) {
+    return { kind: "unavailable", requests: attempted.sent, reason: surfaceFailure(attempted.outcome.failure, "check create") };
   }
+  const remote = toCheckRemote(attempted.outcome.data);
+  // A malformed or foreign response is still a REQUEST: the run may exist on
+  // GitHub, so recovery must adopt rather than create again.
+  if (remote === null) {
+    return { kind: "unavailable", requests: attempted.sent, reason: "check create returned a malformed payload" };
+  }
+  if (!remoteBelongsTo(remote, identity)) {
+    return { kind: "unavailable", requests: attempted.sent, reason: "check create response does not match this attempt identity" };
+  }
+  return { kind: "ready", remote };
 }
 
 /**
@@ -405,7 +430,7 @@ async function adoptCheckRunWith(
 async function completeCheckWith(
   deps: ChecksDeps,
   input: { identity: CheckIdentity; lease: Lease; checkRunId: number; conclusion: CheckConclusion },
-): Promise<{ kind: "completed"; remote: CheckRemote } | { kind: "unavailable"; reason: string }> {
+): Promise<{ kind: "completed"; remote: CheckRemote } | { kind: "unavailable"; reason: string; requests: number }> {
   const owned = await guardOwnership(deps, input.identity, input.lease, deps.nowMs());
   if (owned.kind === "unavailable") return owned;
   const identity = owned.data.identity;
@@ -427,28 +452,28 @@ async function completeCheckWith(
     summary: owned.data.desiredSummary,
   };
   if (frozen.title === null || frozen.summary === null) {
-    return { kind: "unavailable", reason: "persisted terminal intent carries no frozen title/summary" };
+    return { kind: "unavailable", requests: 0, reason: "persisted terminal intent carries no frozen title/summary" };
   }
   if (frozen.desired !== input.conclusion.desired) {
-    return { kind: "unavailable", reason: "conclusion does not match the persisted terminal intent" };
+    return { kind: "unavailable", requests: 0, reason: "conclusion does not match the persisted terminal intent" };
   }
   if (owned.data.checkRunId !== input.checkRunId) {
-    return { kind: "unavailable", reason: "check run id is not the one this attempt persisted" };
+    return { kind: "unavailable", requests: 0, reason: "check run id is not the one this attempt persisted" };
   }
   const client = await clientFor(deps, identity.scope);
-  if (client === null) return { kind: "unavailable", reason: "no review-write Checks client for this App" };
+  if (client === null) return { kind: "unavailable", requests: 0, reason: "no review-write Checks client for this App" };
   if (!hasChecksMethod(client, "update")) {
-    return { kind: "unavailable", reason: "Checks surface has no callable update method" };
+    return { kind: "unavailable", requests: 0, reason: "Checks surface has no callable update method" };
   }
   // Same fresh live-lease proof as the create path: token minting and client
   // resolution can cross `lease.untilMs`, and an expired holder must not
   // terminalize a remote run (spec §7.9).
   if (!(await stillLive(deps, identity, input.lease))) {
-    return { kind: "unavailable", reason: "lease expired before the update request" };
+    return { kind: "unavailable", requests: 0, reason: "lease expired before the update request" };
   }
   const { scope } = identity;
-  try {
-    const { data } = await client.rest.checks.update({
+  const attempted = await sendRequests(
+    client.rest.checks.update({
       owner: scope.owner,
       repo: scope.repo,
       check_run_id: input.checkRunId,
@@ -456,19 +481,24 @@ async function completeCheckWith(
       conclusion: frozen.desired,
       title: frozen.title,
       summary: frozen.summary,
-    });
-    const remote = toCheckRemote(data);
-    if (remote === null) return { kind: "unavailable", reason: "check update returned a malformed payload" };
-    if (!remoteBelongsTo(remote, identity)) {
-      return { kind: "unavailable", reason: "check update response does not match this attempt identity" };
-    }
-    if (remote.status !== "completed" || remote.conclusion !== frozen.desired) {
-      return { kind: "unavailable", reason: "check update response is not the intended terminal state" };
-    }
-    return { kind: "completed", remote };
-  } catch (error) {
-    return { kind: "unavailable", reason: surfaceFailure(error, "check update") };
+    }),
+  );
+  if ("failure" in attempted.outcome) {
+    return { kind: "unavailable", requests: attempted.sent, reason: surfaceFailure(attempted.outcome.failure, "check update") };
   }
+  const remote = toCheckRemote(attempted.outcome.data);
+  // An unprovable response is still a REQUEST: the update may have landed, so
+  // `observed` stays untouched and the attempt defers to recovery.
+  if (remote === null) {
+    return { kind: "unavailable", requests: attempted.sent, reason: "check update returned a malformed payload" };
+  }
+  if (!remoteBelongsTo(remote, identity)) {
+    return { kind: "unavailable", requests: attempted.sent, reason: "check update response does not match this attempt identity" };
+  }
+  if (remote.status !== "completed" || remote.conclusion !== frozen.desired) {
+    return { kind: "unavailable", requests: attempted.sent, reason: "check update response is not the intended terminal state" };
+  }
+  return { kind: "completed", remote };
 }
 
 /**
@@ -730,7 +760,7 @@ function boundedReason(reason: string | undefined): string {
 export type CheckLifecycleDeps = {
   db: D1Like;
   getAdapter(scope: Scope): ChecksAdapter | null;
-  /** The transaction clock (spec §7.0) — one sample per fenced operation. */
+  /** The transaction clock (spec §7.0) — re-read immediately before each fenced write. */
   nowMs(): number;
 };
 
@@ -787,22 +817,35 @@ export type CheckLifecycle = {
  */
 export function createCheckLifecycle(deps: CheckLifecycleDeps): CheckLifecycle {
   /**
-   * Hand a claimed attempt to the recovery lane: release the live lease and
-   * record the honest state. `pending` when nothing could have been sent, so
-   * recovery may create; `remote-unconfirmed` once a create may have reached
-   * GitHub, so recovery must adopt rather than blindly create (spec §7.9).
-   * The §7.11.2 ladder's first rung is the delay; the recovery lane owns the
-   * remaining rungs and the attempt cap.
+   * The fence for ONE fenced mutation: the lease this invocation holds, with a
+   * clock sampled at this instant. Every fenced store call re-reads the clock
+   * here, so a lease that expired while an asynchronous proof/attempt/client
+   * read was in flight refuses the write (spec §7.9: all local updates require
+   * `lease_until_ms > now`) — a clock captured before such a read cannot
+   * authorise a mutation that lands after it.
    */
-  const releaseForRecovery = async (attemptId: string, lease: Lease, reason: string): Promise<void> => {
+  const fenceFor = (lease: Lease): { lease: Lease; nowMs: number } => ({ lease, nowMs: deps.nowMs() });
+
+  /**
+   * Hand an attempt to the recovery lane: release the lease and record the
+   * honest state + backoff. `requestsSpent` is the caller's knowledge that a
+   * remote request was already issued (or may have been) for this attempt:
+   * such a row is `remote-unconfirmed` so recovery adopts instead of blindly
+   * creating, otherwise it is `pending`. The clock is sampled for THIS write.
+   */
+  const releaseForRecovery = async (
+    attemptId: string,
+    lease: Lease,
+    reason: string,
+    requestsSpent: boolean,
+  ): Promise<void> => {
     const nowMs = deps.nowMs();
-    const attempt = await getCheckAttempt(deps.db, attemptId);
     await deferCheckRecovery(
       deps.db,
       attemptId,
       lease,
       {
-        state: attempt !== null && attempt.createState === "not-sent" ? "pending" : "remote-unconfirmed",
+        state: requestsSpent ? "remote-unconfirmed" : "pending",
         nextAttemptMs: nowMs + CHECK_BACKOFF_MS[0]!,
         reason,
       },
@@ -812,11 +855,13 @@ export function createCheckLifecycle(deps: CheckLifecycleDeps): CheckLifecycle {
 
   return {
     async begin(input) {
-      // Eligibility BEFORE the claim: an App with no Checks surface leaves no
-      // registry row behind (a row nothing could ever drive is not "recoverable").
+      // Eligibility BEFORE the claim (L2-accepted): an App whose commenter
+      // exposes no Checks surface is ineligible outright — no registry row is
+      // created for an attempt nothing could ever drive, and no lease is taken.
       const adapter = deps.getAdapter(input.scope);
       if (adapter === null) return null;
-      const nowMs = deps.nowMs();
+      // The claim INSERT establishes ownership, so no lease exists to fence on
+      // yet; the clock is sampled for this write.
       const claim = await claimAttempt(deps.db, {
         scope: input.scope,
         githubAppId: input.githubAppId,
@@ -824,7 +869,7 @@ export function createCheckLifecycle(deps: CheckLifecycleDeps): CheckLifecycle {
         triggeredBy: input.triggeredBy,
         action: input.action,
         holder: `consumer:${crypto.randomUUID()}`,
-        nowMs,
+        nowMs: deps.nowMs(),
         executionDeadlineMs: input.executionDeadlineMs,
       });
       // busy = a nonterminal attempt already owns this key (a duplicate
@@ -834,16 +879,33 @@ export function createCheckLifecycle(deps: CheckLifecycleDeps): CheckLifecycle {
       const { identity } = claim.attempt;
       const begun = await adapter.beginCheck({ identity, lease: claim.lease });
       if (begun.kind !== "ready") {
-        await releaseForRecovery(identity.attemptId, claim.lease, begun.reason);
+        await releaseForRecovery(identity.attemptId, claim.lease, begun.reason, begun.requests > 0);
         return null;
       }
-      // The run is OURS only once its id is attached under this lease; if the
-      // lease was lost in between, this invocation owns nothing (the create
-      // stays `sending` for read-only adoption, never a blind second create).
-      // The fence samples a FRESH clock: the create awaited a token mint and
-      // the network, and a stale reading must not authorise the attach.
-      const attached = await attachCheckRunId(deps.db, identity.attemptId, claim.lease, begun.remote.id, deps.nowMs());
-      if (!attached) return null;
+      // The run is OURS only once its id is attached under a lease this
+      // invocation still holds: a create that awaited a token mint and the
+      // network may have outlived it, and then we own nothing (the create stays
+      // `sending` for read-only adoption, never a blind second create).
+      const attached = await attachCheckRunId(
+        deps.db,
+        identity.attemptId,
+        claim.lease,
+        begun.remote.id,
+        fenceFor(claim.lease).nowMs,
+      );
+      if (!attached) {
+        // The invocation still owns the claim but cannot prove the run, so the
+        // attempt is handed to recovery (a create WAS sent — possibly two, if a
+        // concurrent writer attached first) instead of holding a lease nobody
+        // will terminalize. A dead lease makes this a no-op by fence.
+        await releaseForRecovery(
+          identity.attemptId,
+          claim.lease,
+          "the check run could not be attached under this lease",
+          true,
+        );
+        return null;
+      }
       return {
         attemptId: identity.attemptId,
         scope: identity.scope,
@@ -855,7 +917,6 @@ export function createCheckLifecycle(deps: CheckLifecycleDeps): CheckLifecycle {
 
     async terminalize(input) {
       const { handle } = input;
-      const nowMs = deps.nowMs();
       // PROOF decides (spec §7.9): exact App/scope/SHA, this attempt's
       // publication id preferred. `null` is UNPROVEN — never "not published" —
       // which is why an unconfirmed send must conclude `failure`, not success.
@@ -866,40 +927,51 @@ export function createCheckLifecycle(deps: CheckLifecycleDeps): CheckLifecycle {
       });
       const conclusion = decideConclusion({ proof, outcome: input.outcome });
       // Freeze the boundary title/summary and the proof link BEFORE any remote
-      // update. `false` = this invocation no longer holds the lease: write
-      // nothing and leave the attempt to whoever does.
+      // update, fenced on the CURRENT lease with a clock sampled for THIS write
+      // (the proof read awaited D1; its pre-read clock cannot authorise it).
+      const intentFence = fenceFor(handle.lease);
       const frozen = await setCheckDesired(
         deps.db,
         handle.attemptId,
-        handle.lease,
+        intentFence.lease,
         conclusion,
         proof !== null ? proof.publicationId : input.publicationId,
-        nowMs,
+        intentFence.nowMs,
       );
       if (!frozen) return;
-      const owned = await getCheckOwnership(deps.db, handle.attemptId, handle.lease, nowMs);
-      // Nothing remote to terminalize yet (the create never landed, or the
-      // row is already terminal): the persisted intent is the durable boundary,
-      // and the recovery lane completes it.
+      const ownedFence = fenceFor(handle.lease);
+      const owned = await getCheckOwnership(deps.db, handle.attemptId, ownedFence.lease, ownedFence.nowMs);
       if (owned === null) return;
+      const attemptId = owned.identity.attemptId;
       const checkRunId = owned.checkRunId;
-      if (checkRunId === null) return;
+      if (checkRunId === null) {
+        // No remote run exists to terminalize (an attempt whose create never
+        // landed). Release it with its frozen intent instead of holding this
+        // lease until the execution deadline: recovery is due after backoff.
+        await releaseForRecovery(attemptId, fenceFor(handle.lease).lease, "no remote check run attached to this attempt", true);
+        return;
+      }
       const adapter = deps.getAdapter(handle.scope);
-      if (adapter === null) return;
+      if (adapter === null) {
+        await releaseForRecovery(attemptId, fenceFor(handle.lease).lease, "no Checks surface for this App", true);
+        return;
+      }
       const completed = await adapter.completeCheck({
         identity: owned.identity,
-        lease: handle.lease,
+        lease: fenceFor(handle.lease).lease,
         checkRunId,
         conclusion,
       });
       if (completed.kind === "completed") {
-        // `observed` advances ONLY from this validated response (spec §7.9).
-        await recordCheckObservation(deps.db, handle.attemptId, handle.lease, completed.remote, deps.nowMs());
+        // `observed` advances ONLY from this validated response (spec §7.9),
+        // under a fence re-read for this mutation.
+        const observedFence = fenceFor(handle.lease);
+        await recordCheckObservation(deps.db, attemptId, observedFence.lease, completed.remote, observedFence.nowMs);
         return;
       }
       // Unavailable/unconfirmed: recovery status, error and backoff only —
       // never `desired`, never `observed`. Publication is untouched either way.
-      await releaseForRecovery(handle.attemptId, handle.lease, completed.reason);
+      await releaseForRecovery(attemptId, fenceFor(handle.lease).lease, completed.reason, completed.requests > 0);
     },
   };
 }
