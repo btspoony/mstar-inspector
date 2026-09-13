@@ -222,7 +222,9 @@ type BeginOutcome =
   | { kind: "ready"; remote: CheckRemote }
   | { kind: "unavailable"; reason: string; requests?: number };
 type FetchOutcome = { kind: "found"; remote: CheckRemote } | { kind: "absent" } | { kind: "unavailable"; reason: string };
-type CompleteOutcome = { kind: "completed"; remote: CheckRemote } | { kind: "unavailable"; reason: string };
+type CompleteOutcome =
+  | { kind: "completed"; remote: CheckRemote }
+  | { kind: "unavailable"; reason: string; requests?: number };
 
 type AdapterScript = {
   /**
@@ -322,7 +324,12 @@ function scriptedAdapter(db: TestD1, script: AdapterScript, transport: CheckTran
       // every clock these tests use.
       const markedAt = lease.untilMs - 1;
       await setCheckCreateState(db, identity.attemptId, lease, "sending", undefined, markedAt);
-      if (!(await spend())) return { kind: "unavailable", reason: "request budget refused before dispatch" };
+      if (!(await spend())) {
+        // The transport refused BEFORE dispatch — the live adapter's
+        // `refused(...)` shape, which reports zero invoked Checks calls. (The
+        // caller short-circuits on `budget.refused` before reading a count.)
+        return { kind: "unavailable", reason: "request budget refused before dispatch", requests: 0 };
+      }
       if (script.begin === undefined) return { kind: "unavailable", reason: "no create scripted", requests: 1 };
       const begun = await script.begin(identity);
       if (begun.kind !== "unavailable") return begun;
@@ -333,7 +340,9 @@ function scriptedAdapter(db: TestD1, script: AdapterScript, transport: CheckTran
         // A provably undispatched create: the adapter undoes its own mark.
         await rollbackCheckCreateDispatch(db, identity.attemptId, lease, markedAt);
       }
-      return { requests, ...begun };
+      // `requests` LAST so the declared `number` wins over the script type's
+      // optional field — identical value at runtime.
+      return { ...begun, requests };
     },
     fetchCheckRun: async ({ identity, checkRunId }) => {
       if (!(await spend())) return { kind: "unavailable", reason: "request budget refused before dispatch" };
@@ -342,10 +351,15 @@ function scriptedAdapter(db: TestD1, script: AdapterScript, transport: CheckTran
         : script.fetch(identity, checkRunId);
     },
     completeCheck: async ({ identity, checkRunId, conclusion }) => {
-      if (!(await spend())) return { kind: "unavailable", reason: "request budget refused before dispatch" };
-      return script.complete === undefined
-        ? { kind: "unavailable", reason: "no complete scripted" }
-        : script.complete(identity, checkRunId, conclusion);
+      if (!(await spend())) {
+        return { kind: "unavailable", reason: "request budget refused before dispatch", requests: 0 };
+      }
+      if (script.complete === undefined) return { kind: "unavailable", reason: "no complete scripted", requests: 1 };
+      const completed = await script.complete(identity, checkRunId, conclusion);
+      if (completed.kind !== "unavailable") return completed;
+      // Same additive contract as `beginCheck`: a script that does not say
+      // otherwise describes a dispatched update, so it reports a positive count.
+      return { ...completed, requests: completed.requests ?? 1 };
     },
   };
 }
@@ -671,7 +685,7 @@ describe("expired attempt → terminal conclusion from persisted proof (spec §7
     expect(row.desired).toBe("success");
     expect(row.publication_id).toBe(proof.publicationId);
     // The correction happened on the SAME owned run — no second generation.
-    expect(await db.prepare(`SELECT COUNT(*) AS n FROM review_checks`).first()).toEqual({ n: 1 });
+    expect(await db.prepare(`SELECT COUNT(*) AS n FROM review_checks`).first<{ n: number }>()).toEqual({ n: 1 });
   });
 
   test("proof from ANOTHER SHA never decides this attempt's conclusion", async () => {
@@ -1420,15 +1434,15 @@ describe("claim repeats the selector's eligibility (L2 fix 1 finding 1)", () => 
                 creates += 1;
                 return { kind: "absent" } as const;
               },
-              beginCheck: async (identity) => {
+              beginCheck: async ({ identity }) => {
                 creates += 1;
                 return { kind: "ready", remote: remoteFor(identity, { status: "in_progress", conclusion: null }) };
               },
-              fetchCheckRun: async (identity) => ({
+              fetchCheckRun: async ({ identity }) => ({
                 kind: "found" as const,
                 remote: remoteFor(identity, { status: "completed", conclusion: "failure" }),
               }),
-              completeCheck: async (identity) => ({
+              completeCheck: async ({ identity }) => ({
                 kind: "completed" as const,
                 remote: remoteFor(identity, { conclusion: "failure" }),
               }),
