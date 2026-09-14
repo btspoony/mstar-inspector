@@ -1045,7 +1045,7 @@ describe("createReviewConsumer", () => {
 
     // Deep runner budget: 14 min — CF Queue consumers cap at 15 min
     // wall-clock, so grill-me's 30 min could never finish in-consumer
-    // (10-review-d5-budget qc2/qc3 Critical); the old 10 min ceiling would
+    // (qc2/qc3 Critical); the old 10 min ceiling would
     // false-timeout a deep three-phase run into the DLQ (spec d5-budget
     // Problem Statement).
     expect(runnerExecTimeout()).toBe(840_000);
