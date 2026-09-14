@@ -1,10 +1,10 @@
 /**
- * Dashboard signed-cookie sessions (plan 08 B0, architect decision Q1).
+ * Dashboard signed-cookie sessions (architect decision Q1).
  *
  * Cookie value format: `base64url(payload).base64url(sig)` where
  * sig = HMAC-SHA256(payload, DASHBOARD_SESSION_SECRET) via WebCrypto
  * `crypto.subtle`. Signature comparison is byte-wise XOR accumulation —
- * non-constant-time comparison is a red line (plan Task 2). The payload
+ * non-constant-time comparison is a red line. The payload
  * carries `iat`/`exp` (seconds) and is rejected once expired. No KV/D1
  * session store (plan non-goal); no reuse of GITHUB_OAUTH_CLIENT_SECRET
  * as the signing key (rotation must stay decoupled).
@@ -133,7 +133,7 @@ export async function readSessionValue(
 
 // --- OAuth CSRF state ---
 
-/** Random token via crypto.getRandomValues (plan Task 2 red line). */
+/** Random token via crypto.getRandomValues (a security red line). */
 export function randomToken(byteLength = 16): string {
   const bytes = new Uint8Array(byteLength);
   crypto.getRandomValues(bytes);

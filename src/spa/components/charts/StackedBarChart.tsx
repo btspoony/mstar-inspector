@@ -1,15 +1,15 @@
 /**
- * Plan 65 T2 (B4, AD-652/653): daily stacked bar chart — one column per
+ * (AD-652/653): daily stacked bar chart — one column per
  * time bucket (day buckets for the 7/30-day windows, Monday-anchored week
  * buckets for 90d, from the additive `findings_distribution` API field),
  * each column stacked by the caller's closed `series` vocabulary (severity
  * merge-classes or category slugs). Replaces the retired aggregate
  * BarChart on the two insights stat cards.
  *
- * Component API (plan-63 discipline): `{ buckets, series, locale,
+ * Component API (the chart discipline): `{ buckets, series, locale,
  * ariaLabel }`. `buckets` = the payload's findings_distribution rows (the
  * page merges the schema-permitted "" category key into "uncategorized"
- * before passing — plan 56 QC F-004 semantics, one layer down); the
+ * before passing — QC F-004 semantics, one layer down); the
  * component reads each series value as
  * `by_severity[key] ?? by_category[key] ?? 0`, so it stays generic over
  * the two distribution grids. `series` is the closed vocabulary: the PAGE
@@ -18,21 +18,21 @@
  * `<Bar dataKey fillClass stackId>` in array order (first = bottom of the
  * stack = first legend item; legend order = stack order).
  *
- * Render discipline (plan 63, knowledge
+ * Render discipline (knowledge
  * best-practices/spa-recharts-token-charts.md): fixed numeric width/height
  * + fluid wrapper (`style={{ width: "100%", height: "auto" }}`),
  * `isAnimationActive={false}` on every Bar, named recharts imports, no
  * ResponsiveContainer. Series colors ride charts.css `.chart-fill-*` class
  * rules only — never presentation-attribute var(), never raw hex. Legend =
- * the plan-56 HTML row (`.chart-legend` + `.chart-swatch-*`
+ * the HTML legend row (`.chart-legend` + `.chart-swatch-*`
  * background-color twins derived from the series fill classes), NOT
- * recharts `<Legend>` (architect ruling, plan 65 — same face as
+ * recharts `<Legend>` (architect ruling — same face as
  * TrendChart). The tooltip is the recharts default content token-styled
  * via contentStyle/labelStyle/itemStyle (itemStyle mandatory — recharts'
  * default list text is unreadable on the dark card; BarChart.tsx:123-134
  * precedent).
  *
- * A11y floor (plan 56 → 65): role=img + aria-label + svg `<title>`;
+ * A11y floor (carried across the chart rework): role=img + aria-label + svg `<title>`;
  * every bucket stays on the axis (zero-count buckets are honest grid
  * columns — time continuity, AC-C) with deterministic M/D · M月D日 date
  * labels per `locale` (>8 buckets thin to every-other labels, first bucket
@@ -59,7 +59,7 @@ export interface StackedSeries {
 }
 
 /**
- * One findings_distribution row (plan 65, AD-652 wire shape — mirrors the
+ * One findings_distribution row (AD-652 wire shape — mirrors the
  * store type and the data.ts wire guard; the dashboard leaf exports no
  * types). `granularity` is wire-required (the B3 row guard rejects a
  * drifted row) but the chart face is identical for day and week buckets.
@@ -76,7 +76,7 @@ export interface DistributionBucket {
  * string — "M/D" (en) / "M月D日" (zh_CN). Parsed manually (no Intl) so bun
  * SSR, workerd, and the browser agree byte for byte; a non-ISO value falls
  * back to the raw string. Same grammar as TrendChart's formatWeekLabel —
- * kept local so TrendChart.tsx stays byte-identical (plan 65 B4).
+ * kept local so TrendChart.tsx stays byte-identical.
  */
 function formatBucketDateLabel(iso: string, locale: Locale): string {
   const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(iso);
@@ -117,7 +117,7 @@ export function StackedBarChart({
   // Flat rows for recharts: one column per bucket, one numeric field per
   // series key. INVARIANT: a series key lives in exactly ONE grid — the
   // severity merge-class vocabulary and the category slug vocabulary are
-  // disjoint (plan 65 qc fix-1). `by_severity` winning this lookup is only
+  // disjoint (qc fix-1). `by_severity` winning this lookup is only
   // unambiguous under that invariant: a category slug equal to a merge
   // class would silently read the severity count. The page-layer
   // disjointness pin (insights-page.test.ts, "severity and category series

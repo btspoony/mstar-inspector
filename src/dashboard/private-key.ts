@@ -1,23 +1,23 @@
 /**
- * Private-key PEM normalization — the lock-L1 reserved utility (plan 11 B1
- * Task 2, retained through plan 13): PKCS#1 → PKCS#8 wrapping, PKCS#8
+ * Private-key PEM normalization — the lock-L1 reserved utility
+ * (manifest-flow import): PKCS#1 → PKCS#8 wrapping, PKCS#8
  * pass-through, OpenSSH hard error.
  *
- * Plan-13 storage口径 (lock L1): the GitHub App manifest conversion PEM is
+ * Storage口径 (lock L1): the GitHub App manifest conversion PEM is
  * stored VERBATIM (encrypted via secretbox) — no normalization happens at
- * the write side, and the retired plan-12 secrets-bulk flow no longer
+ * the write side, and the retired secrets-bulk flow no longer
  * exists. PKCS#8 normalization (the only format workerd WebCrypto
  * `importKey` accepts) happens at `createReviewCommenter` construction on
  * the consumer side (src/pipeline/comment.ts — its own copy, since dashboard
  * ↛ pipeline/worker, architect decision Q2).
  *
  * Its first src/ consumer now exists: src/dashboard/github-app-metadata.ts
- * (plan 53) reuses `normalizePrivateKey` for the App-JWT mint. The module
+ * (the metadata writer) reuses `normalizePrivateKey` for the App-JWT mint. The module
  * stays reserved as the optional write-side format self-check (check-only —
  * never persists a normalized secret) and its equivalence pin against the
  * consumer copy (tests/worker/dashboard.test.ts) guards consumer-side drift.
  * Same algorithm as src/pipeline/comment.ts (the worker/diff.ts copy was
- * deleted in plan 24) — duplicated per the Q2 route isolation; no shared
+ * retired) — duplicated per the Q2 route isolation; no shared
  * module is extracted.
  */
 

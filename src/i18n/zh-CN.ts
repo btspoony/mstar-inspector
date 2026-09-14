@@ -1,5 +1,5 @@
 /**
- * Simplified-Chinese dictionary (plan 29 T2).
+ * Simplified-Chinese dictionary.
  *
  * Typed as `Dictionary` (derived from en.ts via `typeof en`): a missing or
  * extra key is a compile error. Values are plain text; `{placeholder}`
@@ -17,7 +17,7 @@ export const zhCN: Dictionary = {
     members: "成员",
     /** 目标语言的标签 — 切换按钮显示要切换到的语言（中文界面显示 EN）。 */
     language: "EN",
-    /** 主题切换（plan 41/44）：仅图标的按钮；状态与动作在 aria 文案中表达。 */
+    /** 主题切换：仅图标的按钮；状态与动作在 aria 文案中表达。 */
     /** {mode} = 当前生效主题，{target} = 点击后切换到的主题。 */
     themeToggleAria: "当前显示模式：{mode}，点击切换为{target}",
     themeDark: "深色",
@@ -86,7 +86,7 @@ export const zhCN: Dictionary = {
   apps: {
     heading: "应用",
     create: "创建 GitHub App",
-    /** Plan 58 A6: composed empty state（EmptyState 标题 + 描述）。 */
+    /** 组合式空态（EmptyState 标题 + 描述）。 */
     emptyTitle: "还没有 App",
     emptyDescription: "使用「创建 GitHub App」连接第一个。",
     settings: "设置",
@@ -145,7 +145,7 @@ export const zhCN: Dictionary = {
     adminOnly: "此页面仅限控制台管理员访问。",
     roleAdmin: "管理员",
     roleMember: "成员",
-    /** Plan 58 A6: composed empty state — 无动作变体（上方邀请表单即路径）。 */
+    /** 组合式空态——无动作变体（上方邀请表单即路径）。 */
     emptyTitle: "还没有成员",
     emptyDescription: "使用上方表单邀请第一位成员。",
   },
@@ -177,14 +177,14 @@ export const zhCN: Dictionary = {
     seriesReviews: "审查",
     seriesFindings: "发现",
     trendSummary: "窗口内共 {reviews} · {findings}",
-    /** Plan 60 A4: 组合式零审查空态——无动作变体（审查由已安装的 App 产生）。 */
+    /** 组合式零审查空态——无动作变体（审查由已安装的 App 产生）。 */
     emptyTitle: "还没有审查",
     emptyDescription: "已安装的 GitHub App 完成审查后，这里会逐渐积累数据。",
   },
   settings: {
     title: "应用设置",
     backToApps: "返回应用",
-    /** Plan 59 T1 (AD-591): 分组 eyebrow 标签——身份/状态区与配置区（双语原子）。 */
+    /** (AD-591) 分组 eyebrow 标签——身份/状态区与配置区（双语原子）。 */
     group: {
       identity: "身份",
       configuration: "配置",
@@ -240,7 +240,7 @@ export const zhCN: Dictionary = {
     membership: {
       not_in_verified_models: "选择器 {selector} 不在此 App 的已验证模型中。",
     },
-    // Plan 45 T4：设置 POST 400 的机器可读文案（与 en.ts settings.error 一一对应）。
+    // 设置 POST 400 的机器可读文案（与 en.ts settings.error 一一对应）。
     error: {
       providerRequired: "请为密钥选择一个 provider。",
       providerUnknown: "{provider} 不是受支持的 provider — 请从列表中选择。",
@@ -346,18 +346,18 @@ export const zhCN: Dictionary = {
       "执行此 App 审查的沙盒运行时镜像。审查在运行时读取模型配置 — 任何 App 特定配置都不会烘焙进镜像。",
     runtimeImageValue: "此 App 的审查运行在 {id} 运行时镜像上。",
     saveRuntimeImage: "保存运行时镜像",
-    // Plan 53 A7：GitHub 身份卡。{name}/{id}/{time} 为同步的资料名、数字 App id
+    // GitHub 身份卡。{name}/{id}/{time} 为同步的资料名、数字 App id
     // 与相对同步时间（formatRelativeTime 输出）— 服务端字段可空、逐项降级，
     // 每个键仅在其值存在时渲染。
     appInfo: "GitHub App",
     appInfoCopy: "此 App 在 GitHub 上的身份。资料字段在访问设置页时从该 App 的 GitHub 设置页缓存；点击名称可前往 GitHub 管理。",
     appInfoAppId: "App ID：{id}",
     appInfoViewOnGithub: "在 GitHub 上查看 {name}",
-    // Plan 62 A5（AD-623）：管理面标签——名称链接指向该 App 的 GitHub 设置页，
+    // (AD-623) 管理面标签——名称链接指向该 App 的 GitHub 设置页，
     // 可及名用「管理」而非「查看」。成员面沿用 appInfoViewOnGithub。
     appInfoManageOnGithub: "在 GitHub 上管理 {name}",
     appInfoSynced: "同步于 {time}",
-    // Plan 51 T3：部署版本页脚。{version} 为带 v 前缀的展示形（v${APP_VERSION}），
+    // 部署版本页脚。{version} 为带 v 前缀的展示形（v${APP_VERSION}），
     // 与 /healthz 字段及 release tag 同形。
     footer: {
       version: "版本 {version}",

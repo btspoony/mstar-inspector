@@ -1,8 +1,8 @@
 /**
- * Container review-runner entry (plan 07 Task 2).
+ * Container review-runner entry.
  *
  * Runs INSIDE the sandbox image and is invoked by the Worker consumer via
- * `exec` (the consumer wiring to the new runtime lands in plan 07 Task 5):
+ * `exec` (the consumer wires the runtime in):
  *
  *   bun run /opt/runner/src/review/runner.ts --level <quick|default|deep> --input <json-file>
  *
@@ -10,23 +10,23 @@
  *   - `--level` is the review tier (quick | default | deep); anything else is a
  *     usage error (the runtime itself rejects unknown levels as well);
  *   - `--input <json-file>` carries the review job as JSON:
- *       - `capabilityHosts` (plan 37 Task 2) — REQUIRED array of the App's
+ *       - `capabilityHosts` — REQUIRED array of the App's
  *         selected sandbox image's capability hosts (the consumer resolves
  *         them from the source-controlled registry and passes them verbatim;
  *         keyless — `apiKeyEnv` is an env-var NAME). The runner ALWAYS
  *         synthesizes a COMPLETE per-review models.yml
  *         (/tmp/omp-agent-<uuid>/models.yml) with the capability hosts as the
- *         base — plan 37 removed the baked in-image models.yml — and rides
+ *         base — the baked in-image models.yml was removed — and rides
  *         that directory as the runtime `agentDir` (required for every run);
  *       - `worktreePath` (string) — the in-container PR clone path; defaults
  *         to the process cwd;
  *       - `reconFacts` (string[]) — per-seat recon facts (owner/repo#pr, head
  *         sha, diff stats, file scope); defaults to [];
  *       - `modelOverrides` (Record<string, string>) — per-agent selector
- *         chains (plan 17 B6); shape-guarded here, the role vocabulary and
+ *         chains; shape-guarded here, the role vocabulary and
  *         selector grammar live dashboard-side; absent = the legacy runtime
  *         input shape;
- *       - `customProviders` (plan 23 Task 3) — an OPTIONAL array of keyless
+ *       - `customProviders` — an OPTIONAL array of keyless
  *         declarations `{ provider_id, base_url, api, model_ids }`; merged
  *         INTO the capability-host base of the synthesized models.yml with
  *         every custom key as a CUSTOM_<ID>_API_KEY env-name reference (the
@@ -36,7 +36,7 @@
  *         (id + count, no keys); absent/empty = the capability base alone.
  *   - stdout carries ONLY the mstar.review/v1 envelope JSON (validated by
  *     validateMstarReviewV1 inside the runtime); all diagnostics to stderr;
- *   - optional `--recheck-out <path>` (plan 67 Task 3, spec review-lifecycle
+ *   - optional `--recheck-out <path>` (spec review-lifecycle
  *     §7.8): when the runtime result carries a recheck document, its JSON is
  *     written to <path> BEFORE the envelope reaches stdout (a write failure
  *     → exit 1, no stdout). No flag or no result writes nothing — absent
@@ -81,7 +81,7 @@ type RunnerInputJson = {
   reconFacts?: string[];
   modelOverrides?: Record<string, string>;
   customProviders?: CustomProviderDeclaration[];
-  /** Optional typed recheck input (plan 67 Task 3) — passed through to the runtime. */
+  /** Optional typed recheck input — passed through to the runtime. */
   recheck?: RecheckInput;
 };
 
@@ -116,7 +116,7 @@ function parseRunnerInput(parsed: unknown): RunnerInputJson {
   }
   const record = parsed as Record<string, unknown>;
   const input = {} as RunnerInputJson;
-  // Plan 37 Task 2: the capability hosts are the base of the synthesized
+  // The capability hosts are the base of the synthesized
   // models.yml — REQUIRED (there is no baked in-image base to fall back to).
   // Shape validation ONLY: the values are consumer-resolved registry data
   // (source-controlled, keyless); the generator emits them verbatim.
@@ -204,7 +204,7 @@ function parseRunnerInput(parsed: unknown): RunnerInputJson {
     input.reconFacts = record.reconFacts;
   }
   if (record.modelOverrides !== undefined) {
-    // Plan 17 B6 (spec Architect lock L3): shape validation ONLY here — the
+    // (spec Architect lock L3): shape validation ONLY here — the
     // role vocabulary lives dashboard-side and selector grammar in the
     // dashboard store's parseModelChain mirror; unknown agent names pass
     // through inertly (the SDK consumes only names it actually dispatches).
@@ -222,7 +222,7 @@ function parseRunnerInput(parsed: unknown): RunnerInputJson {
     input.modelOverrides = map as Record<string, string>;
   }
   if (record.customProviders !== undefined) {
-    // Plan 23 Task 3 (AL-23-1): shape validation ONLY here — the id
+    // (AL-23-1): shape validation ONLY here — the id
     // pattern/baseUrl/api-enum/model bounds live dashboard-side
     // (assertCustomProvider). The declarations carry NO keys: each key rides
     // the container exec env under CUSTOM_<id>_API_KEY (the synthesized
@@ -260,9 +260,9 @@ function parseRunnerInput(parsed: unknown): RunnerInputJson {
     });
   }
   if (record.recheck !== undefined) {
-    // Plan 67 Task 3: shape validation ONLY — the §7.3 wire SSOT is
+    // Shape validation ONLY — the §7.3 wire SSOT is
     // validateRecheckDoc, which the runtime applies to the seat's OUTPUT
-    // against this input. The consumer (T4) builds the document from
+    // against this input. The consumer builds the document from
     // store-selected targets, so the runner guards the envelope shape only:
     // exact keys, the input schema tag, a nonempty headSha, array
     // targets/evidence and an object discussion.
@@ -311,7 +311,7 @@ export async function main(argv: string[], runtime: AgentRuntime = ompAgentRunti
     );
     return 2;
   }
-  // plan 67 T3 (spec §7.8): anchor the ABSOLUTE outer review deadline once
+  // spec §7.8: anchor the ABSOLUTE outer review deadline once
   // per process — the recheck seat's budget derives from it, so the seat can
   // never outlive (or restart past) the review's own wall-clock cap.
   anchorRecheckDeadline(Date.now(), level);
@@ -320,7 +320,7 @@ export async function main(argv: string[], runtime: AgentRuntime = ompAgentRunti
   try {
     const parsed: unknown = JSON.parse(readFileSync(inputPath, "utf8"));
     const json = parseRunnerInput(parsed);
-    // Plan 23 Task 3 (AL-23-1) + plan 37 Task 2: EVERY run synthesizes the
+    // (AL-23-1): EVERY run synthesizes the
     // COMPLETE per-review models.yml (/tmp/omp-agent-<uuid>/) — the App's
     // selected image's capability hosts are the base, the custom-provider
     // declarations merge into it — and the directory rides as `agentDir` (the
@@ -346,13 +346,13 @@ export async function main(argv: string[], runtime: AgentRuntime = ompAgentRunti
       worktreePath: json.worktreePath ?? process.cwd(),
       reconFacts: json.reconFacts ?? [],
       modelSelectors: parseModelSelectors(Bun.env.OMP_REVIEW_MODEL),
-      // Optional per-role overrides (plan 17 B6): included ONLY when the map
+      // Optional per-role overrides: included ONLY when the map
       // is present, so legacy input builds a byte-identical runtime input.
       ...(json.modelOverrides !== undefined ? { modelOverrides: json.modelOverrides } : {}),
-      // Optional typed recheck input (plan 67 T3): included ONLY when
+      // Optional typed recheck input: included ONLY when
       // present — same byte-identical legacy rule as modelOverrides.
       ...(json.recheck !== undefined ? { recheck: json.recheck } : {}),
-      // The synthesized per-review models dir (plan 23 T3; plan 37: present
+      // The synthesized per-review models dir (present
       // on EVERY run — there is no baked models.yml to fall back to).
       agentDir,
     };
@@ -363,7 +363,7 @@ export async function main(argv: string[], runtime: AgentRuntime = ompAgentRunti
 
   try {
     const { envelope, recheck } = await runtime.runReview(input);
-    // plan 67 T3: the optional --recheck-out file is written only when a
+    // The optional --recheck-out file is written only when a
     // recheck result exists, and BEFORE the envelope reaches stdout — a
     // write failure is a genuine I-O failure (exit 1, no stdout), not a
     // silent lie about the file. No flag / no result writes nothing; stdout

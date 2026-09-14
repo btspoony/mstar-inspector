@@ -1,6 +1,6 @@
 /**
- * Pipeline face over the generated provider catalog (plan 42 T1 — the
- * catalog SSOT moved to src/contracts/provider-catalog.generated.ts, which
+ * Pipeline face over the generated provider catalog (the
+ * catalog SSOT lives in src/contracts/provider-catalog.generated.ts, which
  * the dashboard imports directly; dashboard modules must not import pipeline
  * code, architect decision Q2, so the contract lives in src/contracts/).
  *

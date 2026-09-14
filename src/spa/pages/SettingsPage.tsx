@@ -64,18 +64,18 @@ type PendingAction =
   | { kind: "remove-custom"; providerId: string };
 
 /**
- * Plan 44 T3: one op's outcome, resolved back to the card (or form cluster)
+ * One op's outcome, resolved back to the card (or form cluster)
  * that produced it. Op feedback never rides the page-level notice channel —
- * that stays reserved for background-reload failures (plan 38). `warn` never
+ * that stays reserved for background-reload failures. `warn` never
  * applies to op outcomes, so the kind narrows to success/error.
  */
 type OpNotice = { kind: "success" | "error"; message: string };
 
 /**
- * A card's inline op-feedback region (plan 44 T3): the page banner's markup,
+ * A card's inline op-feedback region: the page banner's markup,
  * roles (alert/status) and notice tokens rendered INSIDE the card next to the
  * actions that produced the outcome. Regions are per action cluster, so the
- * feedback sits where the user is looking. Plan 45 T6: a cluster's region may
+ * feedback sits where the user is looking. A cluster's region may
  * also sit inside the card's row list — the providers remove outcome renders
  * at the removed row's position. Clear rule (pinned): a region's content is
  * replaced wholesale by the next op targeting that same region — no manual
@@ -97,7 +97,7 @@ export function SettingsPage({ boot, slug }: { boot: SpaBoot; slug: string }) {
   // Background reloads (op-triggered refreshes) keep the loaded card tree
   // mounted: they must not flip state back to "loading" — that unmount would
   // destroy Add Provider's open/selection state and every form's typed input
-  // (plan 38 QC fix wave 1, F-001). A failed background refresh surfaces the
+  // (QC fix wave 1, F-001). A failed background refresh surfaces the
   // error through the notice channel instead of the page-level error state.
   // Resolves whether a fresh payload landed, so callers can tell a completed
   // refresh from a failed one (the draft create must not close on failure).
@@ -127,7 +127,7 @@ export function SettingsPage({ boot, slug }: { boot: SpaBoot; slug: string }) {
       setState("ok");
       // A healthy page has no page-level failure: any successful load —
       // foreground or background — clears the banner a failed background
-      // reload left behind (plan 44 bugbot fix).
+      // reload left behind (the bugbot fix).
       setNotice(null);
       return true;
     } catch {
@@ -148,21 +148,21 @@ export function SettingsPage({ boot, slug }: { boot: SpaBoot; slug: string }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [slug]);
 
-  // Loading rides the plan-57 skeleton as the page's full loading face —
+  // Loading rides the shared skeleton as the page's full loading face —
   // the component's heading placeholder stands in for the real h1 (AD-582),
-  // matching the plan-58 Apps/Members idiom. Foreground only: `load` flips
+  // matching the Apps/Members idiom. Foreground only: `load` flips
   // to "loading" solely on the initial/retry load, so op-triggered background
   // reloads keep the card tree mounted and never flash this skeleton
-  // (plan-38 contract, unchanged above).
+  // (the background-reload contract, unchanged above).
   if (state === "loading") {
     return <PageSkeleton locale={locale} kind="forms" />;
   }
 
   return (
     <div className="flex flex-col gap-6">
-      {/* Wayfinding (plan 40 T2): the App settings page reads as one workflow
+      {/* Wayfinding: the App settings page reads as one workflow
           with the Apps list — a visible path back to the list it came from.
-          Plan 62 A4: the decorative ArrowLeft rides the link (aria-hidden, so
+          The decorative ArrowLeft rides the link (aria-hidden, so
           the accessible name stays the backToApps text alone). */}
       <div className="flex flex-col gap-1">
         <a
@@ -180,7 +180,7 @@ export function SettingsPage({ boot, slug }: { boot: SpaBoot; slug: string }) {
       {state === "ok" && payload ? (
         <SettingsView locale={locale} payload={payload} groups={groups} onReload={load} />
       ) : null}
-      {/* Version footer (plan 51): the deployment's current release from the
+      {/* Version footer: the deployment's current release from the
           generated src/version.ts surface — the same `vX.Y.Z` form as the
           /healthz field and release tags, so dashboard, health endpoint and
           tag reconcile by eye. Static build-time value: it renders in every
@@ -209,7 +209,7 @@ function settingsErrorMessage(locale: SpaBoot["locale"], body: string): string {
       message?: unknown;
       selector?: unknown;
     };
-    // Plan 45 T4: mapped 400s carry a machine-readable key plus the
+    // Mapped 400s carry a machine-readable key plus the
     // interpolation params — resolve it in the operator's locale. An unknown
     // key (newer server, stale client) falls through to the English face
     // below — fail-visible, never blank.
@@ -247,18 +247,18 @@ function SettingsView({
   const base = `/dashboard/apps/${app.slug}/settings`;
   const [pending, setPending] = useState<PendingAction | null>(null);
   const [busy, setBusy] = useState(false);
-  // Plan 44 T3: dialog-confirmed ops report into the card that owns the
+  // Dialog-confirmed ops report into the card that owns the
   // action (one notice state per card region). Form-submit outcomes render
   // through their own form-local regions instead and never pass through here.
-  // Plan 45 T6: the providers card's state keeps only the add-flow (verify /
+  // The providers card's state keeps only the add-flow (verify /
   // template) outcomes — the dialog-confirmed removes moved to the row-local
   // outcome below.
   const [opsNotice, setOpsNotice] = useState<OpNotice | null>(null);
   const [providersNotice, setProvidersNotice] = useState<OpNotice | null>(null);
   const [chainsNotice, setChainsNotice] = useState<OpNotice | null>(null);
-  // Plan 45 T6 (audit UI-45-05): remove-key / remove-custom outcome plus the
+  // (audit UI-45-05): remove-key / remove-custom outcome plus the
   // removed row's position. The slot is captured from the pre-POST payload in
-  // onConfirm — the awaited background reload (plan 38) drops the row from
+  // onConfirm — the awaited background reload drops the row from
   // the payload before the outcome resolves, so the position must be
   // remembered for the card to render the feedback where the row was.
   const [providersRemoveOutcome, setProvidersRemoveOutcome] = useState<{
@@ -267,10 +267,10 @@ function SettingsView({
   } | null>(null);
 
   /**
-   * Resolve the op's outcome to the caller (plan 44 T3): the card/cluster that
+   * Resolve the op's outcome to the caller: the card/cluster that
    * submitted the fields renders it in its own region. A network-level POST
    * failure (postForm throws before an outcome exists) resolves the
-   * save-failed copy (plan 45 T3: a failed save must not claim the page
+   * save-failed copy (a failed save must not claim the page
    * couldn't load) so no op stays silent; a redirect hop navigates away
    * before this resolves. The outcome also carries `reloaded` — whether the
    * awaited background refresh actually landed — which only the draft create
@@ -281,7 +281,7 @@ function SettingsView({
     let status: number;
     let body: string;
     // The catch guards only the POST — a background reload never rejects:
-    // load() catches its own failures into the page notice (plan 38).
+    // load() catches its own failures into the page notice.
     try {
       ({ status, body } = await postForm(base, fields));
     } catch {
@@ -296,7 +296,7 @@ function SettingsView({
   }
 
   /**
-   * The draft create's completion check (plan 44 bugbot fix): POST success
+   * The draft create's completion check (the bugbot fix): POST success
    * alone is not done — the chain is only usable once the awaited background
    * reload lands it in the payload. A successful POST whose reload failed
    * resolves the load-failed error instead of success, so the draft panel
@@ -311,7 +311,7 @@ function SettingsView({
     return outcome;
   }
 
-  // Plan 38: resolves whether the key was verified AND stored. The refresh
+  // Resolves whether the key was verified AND stored. The refresh
   // after the POST is a background reload (the card tree stays mounted), so a
   // failed verify keeps the add panel open with the typed key for correction
   // while the provider stays unconfigured; only success resets/closes the
@@ -320,7 +320,7 @@ function SettingsView({
     let status: number;
     let body: string;
     // The catch guards only the verify POST — a background reload never
-    // rejects: load() catches its own failures into the page notice (plan 38).
+    // rejects: load() catches its own failures into the page notice.
     try {
       ({ status, body } = await postForm(
         `/dashboard/api/apps/${encodeURIComponent(app.slug)}/keys/verify`,
@@ -331,7 +331,7 @@ function SettingsView({
     }
     if (status >= 400) {
       let reason = "unexpected";
-      // Plan 45 T4 (CARRY-2): the eligibility rejection additionally carries
+      // (CARRY-2): the eligibility rejection additionally carries
       // the keyed face — prefer the mapped key so the runtime-image cause
       // renders in the operator's locale; reason-only 400s keep the
       // existing verify copy.
@@ -381,7 +381,7 @@ function SettingsView({
     let status: number;
     let body: string;
     // The catch guards only the POST — a background reload never rejects:
-    // load() catches its own failures into the page notice (plan 38).
+    // load() catches its own failures into the page notice.
     try {
       ({ status, body } = await postForm(path, fields));
     } catch {
@@ -389,7 +389,7 @@ function SettingsView({
     }
     const outcome: OpNotice =
       status >= 400
-        ? // Plan 45 T4: the pinned path resolves through the same resolver as
+        ? // The pinned path resolves through the same resolver as
           // the settings POST family — keyed JSON renders localized; raw
           // text still displays (fail-visible, never blank).
           { kind: "error", message: settingsErrorMessage(locale, body) }
@@ -410,9 +410,9 @@ function SettingsView({
       if (action.kind === "remove-chain") {
         setChainsNotice(await submitSettings({ op: "remove-chain", name: action.name }));
       } else if (action.kind === "remove-custom") {
-        // Plan 45 T6 (audit UI-45-05): the remove outcome renders row-locally,
+        // (audit UI-45-05): the remove outcome renders row-locally,
         // so it carries the row's position — captured from the pre-POST
-        // payload, because the awaited background reload (plan 38) drops the
+        // payload, because the awaited background reload drops the
         // row before the outcome resolves. A dialog-confirmed row is always
         // found; the length fallback keeps the outcome visible at the list's
         // end instead of dropping it.
@@ -457,7 +457,7 @@ function SettingsView({
       {/* AD-591 section rhythm: two tier groups — the identity/status zone
           (Tier 1 primary surfaces) and the configuration zone (Tier 2
           secondary surfaces), each headed by a group eyebrow. Block order
-          and data flow are unchanged (Non-Goal); the plan-53 position
+          and data flow are unchanged (Non-Goal); the identity-card position
           contract (identity card between the slug row and the manage
           conditional) holds inside the group. */}
       <SectionGroup label={t(locale, "settings.group.identity")}>
@@ -467,9 +467,9 @@ function SettingsView({
           <span className="text-sm text-muted-foreground">{t(locale, "apps.by", { login: app.created_by })}</span>
         </div>
 
-        {/* Plan 53 A5: the GitHub identity card sits between the slug row and
+        {/* The GitHub identity card sits between the slug row and
             the manage conditional, so BOTH faces (OpsCard managers and
-            HealthCard members) see it (AC3). Plan 62 A5: the viewer's
+            HealthCard members) see it (AC3). The viewer's
             authorization switches the name link's destination (AD-623). */}
         <AppInfoCard locale={locale} app={app} canManage={payload.can_manage} />
 
@@ -611,7 +611,7 @@ function pendingConfirmCopy(
 }
 
 /**
- * Plan 62 A5 (AD-623): the manager-face link target — the GitHub App settings
+ * (AD-623): the manager-face link target — the GitHub App settings
  * page derived from the cached public html_url. The slug is the segment right
  * after an `apps` segment — the pathname's `apps/<slug>` tail, exactly one
  * segment after `apps` (trailing slash tolerated) — never a deeper sub-path:
@@ -638,15 +638,15 @@ export function githubAppSettingsUrl(githubHtmlUrl: string): string | null {
 }
 
 /**
- * Plan 53 A5: the GitHub identity card — avatar, hyperlinked name,
+ * The GitHub identity card — avatar, hyperlinked name,
  * description, and the numeric App id, fed by the cached GitHub profile the
  * settings route serves (migration 0019 columns). Rendered outside the
  * can_manage conditional, so managers and members alike see it (AC3).
- * Plan 62 A5 (AD-623): `canManage` switches the name link's destination —
+ * (AD-623): `canManage` switches the name link's destination —
  * managers reach the App's GitHub settings page (githubAppSettingsUrl over
  * the cached html_url), members keep the public page; the label names the
  * destination it actually carries.
- * Degradation is strictly per-field (plan Global Constraints): a null field
+ * Degradation is strictly per-field (global constraint): a null field
  * simply does not render — a never-synced App shows the placeholder mark and
  * its local App id with no link, no error state, no layout collapse
  * (the fail-open UI face of the AD-531 read path).
@@ -792,9 +792,9 @@ function HealthCard({ locale, payload }: { locale: SpaBoot["locale"]; payload: S
 }
 
 /**
- * Runtime image (plan 37): the App's sandbox runtime-image selection.
+ * Runtime image: the App's sandbox runtime-image selection.
  * Managers get the shadcn selector over the enabled registry entries (one
- * `omp` option this iteration) and save through op=save-sandbox-image;
+ * `omp` option for now) and save through op=save-sandbox-image;
  * other members get the read-only selected id. The payload carries registry
  * ids only — never image-local configuration or secrets.
  */
@@ -836,7 +836,7 @@ function RuntimeImageEditor({
   onSettings: (fields: Record<string, string>) => Promise<OpNotice>;
 }) {
   const [selected, setSelected] = useState(payload.app.sandbox_image_id);
-  // Plan 44 T3: the save outcome renders in this card, next to the trigger —
+  // The save outcome renders in this card, next to the trigger —
   // the busy guard keeps the save button disabled while its POST is in flight.
   const [notice, setNotice] = useState<OpNotice | null>(null);
   const [busy, setBusy] = useState(false);
@@ -857,7 +857,7 @@ function RuntimeImageEditor({
   return (
     <div className="flex flex-col gap-3">
       <div className="flex flex-wrap items-center gap-2">
-        {/* Plan 55 A1: content-adaptive shell — no reserved min width, so the
+        {/* Content-adaptive shell — no reserved min width, so the
             trigger sits immediately next to the save button; flex-wrap keeps
             the button wrapping below cleanly on narrow screens. */}
         <div className="w-fit max-w-xs">
@@ -892,7 +892,7 @@ function OpsCard({
   locale: SpaBoot["locale"];
   payload: SettingsPayload;
   onPending: (action: PendingAction) => void;
-  /** Plan 44 T3: the confirmed ops outcome (pause/resume/disable/enable/delete — delete carries its own copy). */
+  /** The confirmed ops outcome (pause/resume/disable/enable/delete — delete carries its own copy). */
   notice: OpNotice | null;
 }) {
   const { app } = payload;
@@ -941,13 +941,13 @@ function OpsCard({
 }
 
 /**
- * Providers (plan 38): this card lists ONLY the App's configured providers —
+ * Providers: this card lists ONLY the App's configured providers —
  * a stored key (masked tail) or a saved custom-provider declaration. Catalog
  * entries are discovery metadata and appear solely inside the Add Provider
  * picker, whose selection determines the configuration form; the non-catalog
  * custom declaration path (CustomExpand) stays for ids outside the catalog.
  *
- * Plan 42: the Add Provider entry is a labeled, bordered button in the card
+ * The Add Provider entry is a labeled, bordered button in the card
  * header (CardAction slot) — the catalog breadth made discoverability the
  * point, so the flow opens from a control that reads as a control. The open
  * panel is the card content's first row.
@@ -967,18 +967,18 @@ function ProvidersCard({
   onVerify: (fields: Record<string, string>) => Promise<OpNotice>;
   onSettings: (fields: Record<string, string>) => Promise<OpNotice>;
   onPending: (action: PendingAction) => void;
-  /** Plan 44 T3 / 45 T6: the add-flow (verify / template) outcomes — removes render row-local (below). */
+  /** The add-flow (verify / template) outcomes — removes render row-local (below). */
   notice: OpNotice | null;
-  /** Plan 45 T6 (audit UI-45-05): the remove-key / remove-custom outcome, rendered at the removed row's position. */
+  /** (audit UI-45-05): the remove-key / remove-custom outcome, rendered at the removed row's position. */
   removeOutcome: { notice: OpNotice; slot: number } | null;
-  /** Plan 44 T3: where the add-flow forms (verify / template) report their outcome. */
+  /** Where the add-flow forms (verify / template) report their outcome. */
   onOutcome: (notice: OpNotice) => void;
 }) {
   const [addOpen, setAddOpen] = useState(false);
   const [customOpen, setCustomOpen] = useState(false);
   const catalogById: Record<string, CatalogProvider> = {};
   for (const provider of payload.provider_catalog) catalogById[provider.id] = provider;
-  // Plan 45 T6 (audit UI-45-05): where the remove outcome renders inside the
+  // (audit UI-45-05): where the remove outcome renders inside the
   // rows list. Success takes the row's former slot — the awaited reload has
   // already dropped the row; a failure leaves the row in place, so the
   // region renders directly below it (the field-error position). Clamped so
@@ -1016,7 +1016,7 @@ function ProvidersCard({
         {/* The card's region sits directly under the add panel: verify /
             template outcomes stay next to their submit button while the panel
             is open, and survive its success-close (unlike panel-local state).
-            Plan 45 T6: the dialog-confirmed removes render row-locally below
+            The dialog-confirmed removes render row-locally below
             instead — this region keeps only the add-flow outcomes. */}
         <NoticeRegion notice={notice} />
         {payload.configured_providers.length === 0 ? (
@@ -1024,11 +1024,11 @@ function ProvidersCard({
         ) : (
           payload.configured_providers.map((row, index) => (
             <Fragment key={row.kind === "key" ? row.provider : row.provider_id}>
-              {/* Plan 45 T6 (audit UI-45-05): the remove outcome renders in
+              {/* (audit UI-45-05): the remove outcome renders in
                   the removed row's position — at catalog scale the feedback
                   is visible without scrolling away from the Remove control
                   that produced it. The shared NoticeRegion inherits the
-                  plan-44 roles (alert/status) and notice tokens. */}
+                  the alert/status roles and notice tokens. */}
               {index === removeSlot && removeOutcome ? <NoticeRegion notice={removeOutcome.notice} /> : null}
               {row.kind === "key" ? (
                 <ConfiguredKeyRow
@@ -1131,14 +1131,14 @@ function ConfiguredCustomRow({
 }
 
 /**
- * Add Provider (plan 38): the open panel beneath the card header's labeled
- * disclosure button (plan 42 moved the button to the CardAction slot; the
+ * Add Provider: the open panel beneath the card header's labeled
+ * disclosure button (the button moved to the CardAction slot; the
  * panel renders as the content's first row). The selected entry's id
  * determines the configuration form rendered beneath the picker. Catalog
  * provenance (the committed models.dev snapshot, static code) and per-entry
  * runtime eligibility (builtin / template / unavailable vs the App's selected
  * image) are disclosed in copy; an unavailable entry renders its explanation
- * with no submit path. Plan 54: the picker is the filterable combobox
+ * with no submit path. The picker is the filterable combobox
  * (provider-combobox.tsx) showing the common tier first, then the catalog
  * tier (display-only grouping inside the combobox: the form below keeps
  * branching on tier/eligibility, AD-547) — with the list height-capped to an
@@ -1199,7 +1199,7 @@ function AddProviderSection({
           {selected.eligibility === "unavailable" ? (
             // Runtime-ineligible rows stay selectable for discovery but get
             // an explanation instead of a form — no submit path, so an
-            // unusable provider can never be saved silently (plan 38 T3).
+            // unusable provider can never be saved silently.
             <p className="text-sm text-muted-foreground">
               {t(locale, "settings.eligibilityUnavailable", { image: imageId })}
             </p>
@@ -1233,13 +1233,13 @@ function AddProviderSection({
 }
 
 /**
- * The selected catalog entry's configuration requirements (plan 38): template
+ * The selected catalog entry's configuration requirements: template
  * entries materialize through op=add-template-provider, verifiable builtins
  * use the verify-first /keys/verify path, and console-only providers have no
  * in-app form. Every form clears and closes only on success — a rejected
  * submit surfaces the structured error and keeps the typed input.
  *
- * Plan 42: the template form carries the base URL explicitly — prefilled from
+ * The template form carries the base URL explicitly — prefilled from
  * the catalog entry, editable as an override (required only when the entry's
  * catalog base URL is null) — and the account-id field appears only when the
  * effective base URL carries the {account_id} placeholder, mirroring the
@@ -1270,7 +1270,7 @@ function ProviderConfigForm({
   const [busy, setBusy] = useState(false);
   const formKind = providerFormKind(provider);
 
-  // Plan 44 T3: both add-flow forms report through the providers card's
+  // Both add-flow forms report through the providers card's
   // region (directly beneath this panel), so the outcome survives the
   // success-close; a rejected submit keeps the typed input for correction.
   async function submitTemplate(): Promise<void> {
@@ -1414,7 +1414,7 @@ function CustomExpand({
   const [api, setApi] = useState(payload.custom_provider_api_ids[0] ?? "");
   const [modelIds, setModelIds] = useState("");
   const [key, setKey] = useState("");
-  // Plan 44 T3: the custom declaration's outcome renders inside its own form
+  // The custom declaration's outcome renders inside its own form
   // (this container stays mounted, unlike the add panel) — the card's region
   // above the configured rows is too far from this form's submit button.
   const [notice, setNotice] = useState<OpNotice | null>(null);
@@ -1510,7 +1510,7 @@ function CustomExpand({
 }
 
 /**
- * The draft tab's client-side id (plan 44 T2). A colon can never appear in a
+ * The draft tab's client-side id. A colon can never appear in a
  * stored chain name (MODEL_CHAIN_NAME_PATTERN allows only lowercase letters,
  * digits and hyphens), so the sentinel is collision-free with real tab ids.
  * It never reaches the server — the draft saves under the ENTERED name
@@ -1521,7 +1521,7 @@ const DRAFT_CHAIN_TAB_ID = ":draft";
 const DRAFT_CHAIN_TAB: ChainTab = { id: DRAFT_CHAIN_TAB_ID, isDefault: false, chain: null };
 
 /**
- * Plan 55 (AD-551): the draft tab's label mirrors the lifted draft name live
+ * (AD-551): the draft tab's label mirrors the lifted draft name live
  * — a non-blank input shows as-is (trim only gates the fallback), an
  * empty/whitespace name falls back to the static 新链 copy. Pure render: the
  * Radix Tabs controlled value derives from tabs/selectedTab alone, so a
@@ -1545,23 +1545,23 @@ function ChainsCard({
   payload: SettingsManagePayload;
   groups: ModelOptionGroup[];
   onSettings: (fields: Record<string, string>) => Promise<OpNotice>;
-  /** Plan 44 bugbot fix: the draft create — resolves an error when the awaited reload fails, so the panel keeps the draft open. */
+  /** Bugbot fix: the draft create — resolves an error when the awaited reload fails, so the panel keeps the draft open. */
   onCreateDraft: (fields: Record<string, string>) => Promise<OpNotice>;
   onRemoveChain: (name: string) => void;
-  /** Plan 44 T3: the dialog-confirmed remove-chain outcome. */
+  /** The dialog-confirmed remove-chain outcome. */
   notice: OpNotice | null;
-  /** Plan 44 T3: where the draft panel reports its success (the draft closes, so its panel cannot render it). */
+  /** Where the draft panel reports its success (the draft closes, so its panel cannot render it). */
   onOutcome: (notice: OpNotice) => void;
 }) {
-  // Plan 39: Default and named chains are peer tabs. The selection coerces
+  // Default and named chains are peer tabs. The selection coerces
   // through activeChainTabId so a delete or a stale payload lands on the
   // non-removable Default tab instead of pointing at a removed chain.
   const [selectedTab, setSelectedTab] = useState<string>(DEFAULT_CHAIN_NAME);
-  // Plan 44 T2: `+ 新建链` opens a DRAFT peer tab instead of a disclosure —
+  // `+ 新建链` opens a DRAFT peer tab instead of a disclosure —
   // the create flow is itself a tab, edited in place like every other chain.
   // One boolean of state, so a second draft can never exist while one lives.
   const [draftOpen, setDraftOpen] = useState(false);
-  // Plan 55 (AD-551): the draft name is owned HERE so the tab trigger can
+  // (AD-551): the draft name is owned HERE so the tab trigger can
   // mirror the name input live; the panel is controlled (name/onNameChange).
   // Lifting it retires the panel's unmount-clears-name reset — the two ways
   // a draft closes (discard + created) each reset it explicitly below.
@@ -1594,9 +1594,9 @@ function ChainsCard({
       </CardHeader>
       <CardContent className="flex flex-col gap-6">
         <Tabs value={activeChainTabId(tabs, selectedTab)} onValueChange={setSelectedTab}>
-          {/* The add-chain entry keeps its plan-43 strip placement: a TabsList
+          {/* The add-chain entry keeps its strip placement: a TabsList
               SIBLING (never inside the role=tablist) — outline control, plus
-              glyph, localized label. Plan 44: the click no longer toggles a
+              glyph, localized label. The click no longer toggles a
               disclosure form between strip and Default panel; it opens the
               draft peer tab. */}
           <div className="flex items-center gap-2">
@@ -1631,7 +1631,7 @@ function ChainsCard({
           {namedTabs.map((tab) => (
             <TabsContent key={tab.id} forceMount value={tab.id}>
               <div className="mb-2 flex items-center justify-between gap-2">
-                {/* Plan 59 T3 (T2 review deferral): the panel's title face
+                {/* (review deferral): the panel's title face
                     rides the heading-16 token step — the same face as the
                     SectionCardTitle card titles, expressed through the
                     --typo-* idiom instead of the 16px inherit. */}
@@ -1658,7 +1658,7 @@ function ChainsCard({
                 onCreate={onCreateDraft}
                 onOutcome={onOutcome}
                 onDiscard={() => {
-                  // Plan 55 (AD-551): the lifted name no longer dies with the
+                  // (AD-551): the lifted name no longer dies with the
                   // panel's unmount — discard resets it so a reopened draft
                   // starts blank (today's semantics, kept).
                   setDraftOpen(false);
@@ -1679,7 +1679,7 @@ function ChainsCard({
             </TabsContent>
           ) : null}
         </Tabs>
-        {/* The card's region (plan 44 T3): the dialog-confirmed remove and the
+        {/* The card's region: the dialog-confirmed remove and the
             draft's forwarded save success render here, below every tabpanel —
             the editors themselves render their save outcomes in-panel. */}
         <NoticeRegion notice={notice} />
@@ -1689,9 +1689,9 @@ function ChainsCard({
 }
 
 /**
- * Seats (plan 39 T2): the role → chain mapping is its own card below chain
+ * Seats: the role → chain mapping is its own card below chain
  * management, independent of the chain tabs. Every select offers Default
- * first, then the current named chains from the same plan-39 tab model; a
+ * first, then the current named chains from the same tab model; a
  * stored name that no longer resolves (deleted chain, stale payload) renders
  * and saves as Default, so op=save-roles never submits an invalid reference.
  * The save stays the route's full-map contract: one role_<role> field per
@@ -1726,7 +1726,7 @@ function SeatsCard({
     setSeats(seatRoleValues(payload.model_role_ids, payload.model_roles, tabs));
   }, [tabIdSetKey]);
 
-  // Plan 44 T3: the seat save reports in this card, under its own trigger.
+  // The seat save reports in this card, under its own trigger.
   const [notice, setNotice] = useState<OpNotice | null>(null);
   const [busy, setBusy] = useState(false);
 
@@ -1787,12 +1787,12 @@ function SeatsCard({
 }
 
 /**
- * The draft chain tab's panel (plan 44 T2, unified with the T3 pattern): the
+ * The draft chain tab's panel (the shared editor pattern): the
  * full editor inside its own tabpanel — the name field first, then the model
  * builder (the components a named chain's panel uses verbatim). 保存 posts
  * the unchanged op=add-chain with the entered name + built chain; a rejected
- * create — or a create whose awaited background reload failed (plan 44 bugbot
- * fix) — renders its error INLINE through ChainEditor's own region (role=
+ * create — or a create whose awaited background reload failed — renders its
+ * error INLINE through ChainEditor's own region (role=
  * alert, inside this panel) and keeps the draft + typed input; only success
  * (POST ok AND reload landed) hands the trimmed stored name back so the real
  * tab is selected, forwarding the saved outcome to the card's region (the
@@ -1801,7 +1801,7 @@ function SeatsCard({
  * selection coerces through activeChainTabId once the draft tab is gone. The
  * busy gate covers both triggers while the create POST is in flight, so a
  * discard can never race a resolving save into selecting the created tab.
- * Plan 55 (AD-551): the draft name is controlled — owned by ChainsCard so
+ * (AD-551): the draft name is controlled — owned by ChainsCard so
  * the tab trigger can mirror it live; this panel only renders and edits it
  * through the name/onNameChange props. The input's maxLength=64 mirrors the
  * server's MODEL_CHAIN_NAME_PATTERN cap (stored ids ≤ 64 chars), so the
@@ -1819,7 +1819,7 @@ export function DraftChainPanel({
 }: {
   locale: SpaBoot["locale"];
   groups: ModelOptionGroup[];
-  /** Plan 55 (AD-551): the controlled draft name, owned by ChainsCard. */
+  /** (AD-551): the controlled draft name, owned by ChainsCard. */
   name: string;
   onNameChange: (name: string) => void;
   /** The draft create (op=add-chain); resolves an error when the awaited reload fails so the draft stays open. */
@@ -1833,7 +1833,7 @@ export function DraftChainPanel({
   const [busy, setBusy] = useState(false);
   return (
     <div className="flex flex-col gap-3">
-      {/* Plan 59 T3 (T2 review deferral): the draft panel's own visible face —
+      {/* (review deferral): the draft panel's own visible face —
           the name field is the panel's identity header, so it renders as a
           compact header block (w-fit + w-64, the invite-input idiom) instead
           of a full-width stretch. The named panels open [identity title] +
@@ -1873,13 +1873,13 @@ export function DraftChainPanel({
             .finally(() => {
               // Success closes the draft tab (onCreated) and unmounts this
               // panel, so on success this reset is a deliberate React 19
-              // setState-after-unmount no-op (plan 44 QC fix round, F-001).
+              // setState-after-unmount no-op (QC fix round, F-001).
               setBusy(false);
             });
         }}
         saveLabel={t(locale, "settings.saveChain")}
         actions={
-          // Plan 55 (AD-552): 放弃 joins the save row instead of the old
+          // (AD-552): 放弃 joins the save row instead of the old
           // hover-only ghost row below it — outline + small fixed width so it
           // is visible without hover, save stays primary on the left. Still
           // no confirmation, and disabled under the same busy window as the
@@ -1904,11 +1904,11 @@ function ChainEditor({
   locale: SpaBoot["locale"];
   groups: ModelOptionGroup[];
   stored: string | null;
-  /** Resolves the save outcome (plan 44 T3): rendered in this editor's region. */
+  /** Resolves the save outcome; rendered in this editor's region. */
   onSave: (chain: string) => Promise<OpNotice>;
   saveLabel?: string;
   /**
-   * Plan 55 (AD-552): caller actions rendered in the save row, right of the
+   * (AD-552): caller actions rendered in the save row, right of the
    * save button (pure render insertion — save semantics, the busy gate and
    * the outcome region are untouched). Absent, the save button renders bare:
    * byte-equivalent to the pre-actions tree (Default / named-chain editors).
@@ -1917,7 +1917,7 @@ function ChainEditor({
 }) {
   const [chain, setChain] = useState(() => splitModelChain(stored));
   const [pick, setPick] = useState<string | undefined>(undefined);
-  // Plan 44 T3: each editor instance owns its region — a chain save's outcome
+  // Each editor instance owns its region — a chain save's outcome
   // renders inside its own tabpanel (the user-reported 400 case), never on
   // the page top. The next save replaces the content (replace-on-submit).
   const [notice, setNotice] = useState<OpNotice | null>(null);
@@ -1958,7 +1958,7 @@ function ChainEditor({
           {chain.map((selector, index) => (
             <li key={`${selector}-${index}`} className="flex items-center justify-between gap-2 rounded-md border px-3 py-2">
               <span className="font-mono text-sm">{selector}</span>
-              {/* Plan 59 T3 (T2 review deferral): removing a selector edits
+              {/* (review deferral): removing a selector edits
                   the UNSAVED local list — recoverable by re-picking, no
                   dialog, no server op — so it rides the AD-552 local-edit
                   face (outline + sm, the discard idiom). The destructive red

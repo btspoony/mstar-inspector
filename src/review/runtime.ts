@@ -1,6 +1,6 @@
 /**
- * AgentRuntime port (plan 07 Task 2) — interface signature locked verbatim to
- * `.mstar/iterations/v0.3/specs/agent-runtime.md` § TypeScript 端口.
+ * AgentRuntime port — interface signature locked verbatim to the
+ * agent-runtime spec § TypeScript 端口.
  *
  * Pure types + constants only: zero omp SDK import, zero I/O, safe to import
  * from BOTH runtime faces (container Bun and workerd — module import matrix,
@@ -11,8 +11,8 @@ import type { MstarReviewV1 } from "@mstar-harness/engine";
 import type { RecheckDoc, RecheckInput } from "../contracts/recheck";
 
 /**
- * Full review-tier universe (plan 09 Task 1). `deep` is a first-class tier
- * (parent-session path lands in Task 2); unknown values are still rejected
+ * Full review-tier universe. `deep` is a first-class tier
+ * (the parent-session path); unknown values are still rejected
  * at the port: throw, never a silent downgrade.
  */
 export const REVIEW_LEVELS = ["quick", "default", "deep"] as const;
@@ -21,13 +21,13 @@ export type ReviewLevel = (typeof REVIEW_LEVELS)[number];
 /**
  * Seats per Bun fan-out level — commands/amazing-pr-review.md 档位表.
  * `deep` deliberately has NO seats entry: it runs one parent session, not a
- * seat partition (plan 09 Task 2).
+ * seat partition.
  */
 export const REVIEW_SEATS: Record<Exclude<ReviewLevel, "deep">, number> = { quick: 1, default: 2 };
 
 /**
- * One custom-provider declaration as the runner input JSON carries it (plan
- * 23 Task 3, AL-23-1): the SETTINGS declaration, keyless — the API key rides
+ * One custom-provider declaration as the runner input JSON carries it
+ * (AL-23-1): the SETTINGS declaration, keyless — the API key rides
  * ONLY the container exec env under CUSTOM_<UPPER_SNAKE(id)>_API_KEY (never
  * the input JSON, never a synthesized models.yml, never a log line). The
  * `api` vocabulary (anthropic-messages | openai-completions |
@@ -56,7 +56,7 @@ export const CUSTOM_PROVIDER_ENV_SUFFIX = "_API_KEY";
 
 /**
  * One capability-host model the runtime synthesizer materializes into the
- * per-review models.yml (plan 37 Task 2) — the same shape the source-controlled
+ * per-review models.yml — the same shape the source-controlled
  * registry (src/contracts/sandbox-images.ts `SandboxImageHostModel`) carries.
  */
 export type CapabilityHostModel = {
@@ -71,7 +71,7 @@ export type CapabilityHostModel = {
 
 /**
  * One capability host of the App's selected sandbox image, as the runner input
- * JSON carries it (plan 37 Task 2): the runner materializes these into the
+ * JSON carries it: the runner materializes these into the
  * base of every synthesized per-review models.yml. KEYLESS static data —
  * `apiKeyEnv` is the ENV VAR NAME the host's key resolves from at request
  * time; host ids are runtime capabilities, NOT Providers catalog ids (omp's
@@ -97,7 +97,7 @@ export type CapabilityHost = {
 };
 
 /**
- * Env var name for a custom-provider API key (plan 23 Task 3, AL-23-1): a
+ * Env var name for a custom-provider API key (AL-23-1): a
  * total function — any id maps to a syntactically valid env var name. The
  * queue consumer injects the decrypted key under this name and the runner's
  * synthesized per-review models.yml references the SAME name (`apiKey:
@@ -117,10 +117,10 @@ export type AgentRuntimeRunInput = {
   /** 模型选择链；SSOT = env `OMP_REVIEW_MODEL`（逗号分隔，容器注入）。 */
   modelSelectors: readonly string[];
   /**
-   * Per-seat model overrides (plan 17 B6, spec Architect lock L3): agent
+   * Per-seat model overrides (spec Architect lock L3): agent
    * name → selector chain (B2 `parseModelChain` grammar, `:thinking` suffix
    * verbatim). OPTIONAL — absent = the legacy runner input, resolved
-   * byte-identically to the pre-plan-17 behavior. Shape is validated by the
+   * byte-identically to the pre-chains behavior. Shape is validated by the
    * runner guard (`parseRunnerInput`); the role vocabulary and selector
    * grammar live dashboard-side (`MODEL_ROLE_IDS` + its parse mirror), and
    * unknown agent names pass through inertly (the SDK consumes only names it
@@ -128,18 +128,18 @@ export type AgentRuntimeRunInput = {
    */
   modelOverrides?: Record<string, string>;
   /**
-   * Directory holding the synthesized COMPLETE per-review models.yml (plan 23
-   * Task 3, AL-23-1; plan 37 Task 2): the runner ALWAYS synthesizes
+   * Directory holding the synthesized COMPLETE per-review models.yml
+   * (AL-23-1): the runner ALWAYS synthesizes
    * /tmp/omp-agent-<uuid>/models.yml — capability hosts of the App's selected
    * image as the base, custom-provider declarations merged in (capability ids
    * win on collision) — and rides the directory here REQUIRED for every omp
    * run; runtime-omp passes it to createAgentSession({ agentDir }). There is
-   * no baked in-image models.yml to fall back to (plan 37 deleted it): a run
+   * no baked in-image models.yml to fall back to (deleted): a run
    * without a synthesized directory has no models.yml at all.
    */
   agentDir: string;
   /**
-   * Optional typed recheck input (plan 67 Task 3, spec review-lifecycle
+   * Optional typed recheck input (spec review-lifecycle
    * §7.3/§7.8): the worker-captured assessment targets, trusted evidence
    * catalog and untrusted discussion snapshot for the SAME head this run
    * reviews (headSha equality is enforced downstream by validateRecheckDoc).
@@ -150,13 +150,13 @@ export type AgentRuntimeRunInput = {
   recheck?: RecheckInput;
 };
 
-/** One completed review run: the validated envelope plus its optional recheck document (plan 67 Task 3, spec §7.8). */
+/** One completed review run: the validated envelope plus its optional recheck document (spec §7.8). */
 export type ReviewRunResult = { envelope: MstarReviewV1; recheck: RecheckDoc | null };
 
 export interface AgentRuntime {
   /**
    * 跑一次审查。仅以「已通过 validateMstarReviewV1 的 mstar.review/v1」
-   * envelope resolve（plan 67 起 result 形状为 { envelope, recheck }：recheck
+   * envelope resolve（result 形状为 { envelope, recheck }：recheck
    * 要么是已通过 validateRecheckDoc 的文档，要么是 null——席位失败/超时/
    * 无输出绝不冒充成功，也绝不丢失审查本体）；session/解析/校验失败一律
    * throw（绝不返回 M1 形状冒充成功）。

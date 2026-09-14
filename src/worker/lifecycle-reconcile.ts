@@ -1,5 +1,5 @@
 /**
- * M8 publication and thread recovery reconciler (plan 67 Task 5, spec
+ * M8 publication and thread recovery reconciler (spec
  * review-lifecycle §7.11 composition + §7.11.1) — the self-sufficient cron
  * lane that makes crash recovery no longer lose assessments.
  *
@@ -22,7 +22,7 @@
  *        second create").
  *   2. Thread lane (`listResolutionRecovery`, LIMIT 10): each queued
  *      association with a stored verified snapshot is re-driven through the
- *      §7.5 resolution surface (T2 — ownership proof, HEAD/conversation
+ *      §7.5 resolution surface (ownership proof, HEAD/conversation
  *      fences and adoption are its contract, never re-implemented here).
  *      Outcomes: resolved / abandoned (terminal), needs-recheck (stops
  *      cycling, concern retained for the next real review), retry (backoff
@@ -156,7 +156,7 @@ const HOLDER = "lifecycle-reconcile";
 // ---------------------------------------------------------------------------
 
 /**
- * The GitHub surface M8 needs. `resolveFindingThread` is T2's §7.5 adapter
+ * The GitHub surface M8 needs. `resolveFindingThread` is the §7.5 adapter
  * (wired by `createReviewCommenter(env, { db })`) — the reconciler consumes
  * it; it never re-implements ownership proofs or fences.
  */

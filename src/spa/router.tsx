@@ -1,5 +1,5 @@
 /**
- * Hash-free client router (plan 29 T3). Enumerated routes only — unknown
+ * Hash-free client router. Enumerated routes only — unknown
  * paths render the unknown stub; the Worker never history-fallbacks them.
  */
 import { useEffect, useState, type ReactNode } from "react";

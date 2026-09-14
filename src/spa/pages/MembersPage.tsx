@@ -54,8 +54,8 @@ export function MembersPage({ boot }: { boot: SpaBoot }) {
   // Background reloads (op-triggered refreshes) keep the loaded page mounted:
   // they must not flip state back to "loading" — that unmount would replace
   // the whole page (heading, invite form, table and any visible op PageNotice)
-  // with the skeleton for one API round trip (plan-38 background-reload
-  // contract, mirroring SettingsPage; plan 58 QC fix round 1 F-58-1). A failed
+  // with the skeleton for one API round trip (background-reload
+  // contract, mirroring SettingsPage; QC fix round 1 F-58-1). A failed
   // background refresh surfaces through the notice channel instead of the
   // page-level error state.
   const load = useCallback(
@@ -101,7 +101,7 @@ export function MembersPage({ boot }: { boot: SpaBoot }) {
         return;
       }
       // Background reload: the page (and this op's notice) stays mounted —
-      // no skeleton flash while the members list refreshes (plan-38; F-58-1).
+      // no skeleton flash while the members list refreshes (F-58-1).
       await load({ background: true });
       setNotice({
         kind: existed ? "warn" : "success",
@@ -142,7 +142,7 @@ export function MembersPage({ boot }: { boot: SpaBoot }) {
         );
       }
       // Background reload: the outcome notice above stays visible — no
-      // skeleton flash while the members list refreshes (plan-38; F-58-1).
+      // skeleton flash while the members list refreshes (F-58-1).
       await load({ background: true });
     } catch {
       // Network failure — postForm throws on fetch rejection (qc2/qc3 S-002).
@@ -162,7 +162,7 @@ export function MembersPage({ boot }: { boot: SpaBoot }) {
 
   const adminCount = members?.filter((m) => m.role === "admin").length ?? 0;
 
-  // Loading rides the plan-57 skeleton as the page's full loading face —
+  // Loading rides the shared skeleton as the page's full loading face —
   // the component's heading placeholder stands in for the real h1 (AD-582).
   // Foreground only: `load` flips to "loading" solely on the initial/retry
   // load, so op-triggered background reloads never reach this gate (F-58-1).

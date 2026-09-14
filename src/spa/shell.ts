@@ -1,5 +1,5 @@
 /**
- * Pure shell models (plan 33 T2): sidebar carries page nav; navbar is slim
+ * Pure shell models: sidebar carries page nav; navbar is slim
  * (Lang + username + logout). Tested without a DOM runner.
  */
 import { NAV_ITEMS, t, type Locale } from "../i18n";
@@ -38,7 +38,7 @@ export function accountDisplay(boot: Pick<SpaBoot, "login" | "name">): string | 
 /**
  * Apps → `/dashboard`, `/dashboard/apps` (+ settings under
  * `/dashboard/apps/:slug`) — the root lands on Apps, so the brand href and
- * `/dashboard/apps` highlight the same entry (plan 40).
+ * `/dashboard/apps` highlight the same entry.
  * Insights → `/dashboard/insights` only (the generic rule below).
  */
 export function isNavCurrent(href: string, pathname: string): boolean {

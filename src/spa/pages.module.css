@@ -13,7 +13,7 @@
   line-height: var(--typo-copy-14-line);
 }
 
-/* Plan 59 T3 (A5): the v0.3 notice face — DESIGN.md Notice contract:
+/* The v0.3 notice face — DESIGN.md Notice contract:
    semantic token tones, copy-14 with its line step, control radius, 16px
    padding (matches the SSR .banner face). The flex row carries the kind's
    semantic glyph at the text's leading edge; the glyph inherits the notice
@@ -44,7 +44,7 @@
   color: var(--notice-error-fg);
 }
 
-/* Plan 58 T2 login entrance (composed, one motion moment): transform and
+/* Login entrance (composed, one motion moment): transform and
    opacity only, on the duration and ease token clock. The tokens.css
    prefers-reduced-motion fold collapses the duration to 1ms; the explicit
    fold below guards the keyframe outright. */

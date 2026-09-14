@@ -1,5 +1,5 @@
 /*
- * Chart chrome + token colors (plan 63 B3, AD-621). The recharts series
+ * Chart chrome + token colors (AD-621). The recharts series
  * fills ride these CSS class rules into the DESIGN.md token layer
  * (src/spa/styles/tokens.css) — never SVG presentation attributes
  * (knowledge ui-bugs/svg-var-presentation-attributes.md: var() in
@@ -16,7 +16,7 @@
  *
  * Version coupling: the recharts-internal class names targeted here
  * (.recharts-cartesian-*) couple to recharts 2.15.4 — a recharts upgrade
- * must re-verify the chart pins (the T1.1 probe pins render shape, not
+ * must re-verify the chart pins (the probe pins render shape, not
  * these class names).
  *
  * Series fills (svg `fill`) — the AD-601-frozen 700-step semantic family:
@@ -58,7 +58,7 @@
   font-variant-numeric: tabular-nums;
 }
 
-/* TrendChart legend row (HTML, above the svg — the plan-56 legend face). */
+/* TrendChart legend row (HTML, above the svg — the HTML legend face). */
 .chart-legend { display: flex; align-items: center; gap: 24px; height: 24px; }
 .chart-legend-item { display: inline-flex; align-items: center; gap: 4px; }
 .chart-legend-swatch { display: inline-block; width: 10px; height: 10px; border-radius: 2px; }

@@ -1,4 +1,4 @@
-// Locally revised shadcn/ui copy-in (plan 57 T3 v0.3 restyle; plan 62 T2
+// Locally revised shadcn/ui copy-in (v0.3 restyle;
 // padding raise — TableHead/TableCell horizontal padding steps up to px-3
 // (cell vertical stays py-2) so bordered tables breathe; 018 copy-in
 // supersede — do not regen over).
@@ -74,7 +74,7 @@ function TableHead({ className, ...props }: React.ComponentProps<"th">) {
     <th
       data-slot="table-head"
       className={cn(
-        // plan 62 (D5): horizontal padding rides the spacing-3 step (12px)
+        // D5: horizontal padding rides the spacing-3 step (12px)
         // so bordered tables breathe; vertical density stays untouched.
         "h-10 px-3 text-left align-middle font-medium whitespace-nowrap text-foreground [&:has([role=checkbox])]:pr-0 [&>[role=checkbox]]:translate-y-[2px]",
         className
@@ -89,7 +89,7 @@ function TableCell({ className, ...props }: React.ComponentProps<"td">) {
     <td
       data-slot="table-cell"
       className={cn(
-        // plan 62 (D5): px-3 py-2 — horizontal 12px, vertical stays 8px.
+        // D5: px-3 py-2 — horizontal 12px, vertical stays 8px.
         "px-3 py-2 align-middle whitespace-nowrap [&:has([role=checkbox])]:pr-0 [&>[role=checkbox]]:translate-y-[2px]",
         className
       )}

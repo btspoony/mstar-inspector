@@ -1,4 +1,4 @@
-// Locally revised shadcn/ui copy-in (plan 57 T3 v0.3 restyle; 018 copy-in supersede — do not regen over).
+// Locally revised shadcn/ui copy-in (v0.3 restyle; a later copy-in supersede — do not regen over).
 import * as React from "react"
 import { XIcon } from "lucide-react"
 import * as DialogPrimitive from "@radix-ui/react-dialog"
@@ -66,7 +66,7 @@ function DialogContent({
           // NO-OPS — Tailwind 4 core ships no such utilities and the
           // tw-animate-css dependency is deliberately not added — so the
           // dialog enters/exits instantly and duration-(--duration-slow)
-          // currently rides nothing. Plan 58's motion pass decides the real
+          // currently rides nothing. The motion pass decides the real
           // entrance (zero-dep keyframes consuming --duration-slow with a
           // prefers-reduced-motion guard); the classes stay as upstream
           // copy-in shape until then.

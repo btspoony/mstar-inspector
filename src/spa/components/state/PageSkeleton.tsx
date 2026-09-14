@@ -1,10 +1,10 @@
 /**
- * Page-level loading skeleton (plan 57 T4 / AD-582): layout-shape-matched
+ * Page-level loading skeleton (AD-582): layout-shape-matched
  * placeholder composed from the `ui/skeleton.tsx` primitive. Kind selects
  * the block idiom — a bordered table (header row + N body rows), card
  * shells, or labeled input blocks — so the page keeps its final geometry
  * while loading. Only page-level loading lives here: op-outcome notices and
- * background-reload failures stay on the `PageNotice` channel (plan 38/44).
+ * background-reload failures stay on the `PageNotice` channel.
  *
  * Accessibility: `role="status"` announces politely, and the localized
  * `common.loading` line rides a visually hidden span — the pulse bars are

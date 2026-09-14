@@ -1,4 +1,4 @@
-// Locally revised shadcn/ui copy-in (plan 57 T3 v0.3 restyle; 018 copy-in supersede — do not regen over).
+// Locally revised shadcn/ui copy-in (v0.3 restyle; a later copy-in supersede — do not regen over).
 import * as React from "react"
 
 import { cn } from "@/lib/utils"

@@ -1,5 +1,5 @@
 /**
- * D1 store for `github_apps` / `app_installations` (plan 13 Task 1) — the
+ * D1 store for `github_apps` / `app_installations` — the
  * ONE write authority for multi-App rows. Spec
  * dashboard-multi-app-platform § Data model; migrations 0004/0005 are the
  * DDL single sources.
@@ -9,10 +9,10 @@
  * verbatim — this module never decrypts, logs, or inspects them, so plaintext
  * credentials never enter the store layer.
  *
- * Module boundary (plan Global Constraints, lock L1): zero-dependency leaf
+ * Module boundary (the global constraints, lock L1): zero-dependency leaf
  * consumed by dashboard routes, the worker webhook face, and the pipeline
  * consumer. Its one import is the zero-dependency sandbox-image contract
- * (src/contracts/sandbox-images.ts — the plan-37 registry, not
+ * (src/contracts/sandbox-images.ts — the registry, not
  * pipeline/review code), which bounds the sandbox_image_id value domain.
  * The `db` parameter is a locally-declared narrow D1 face (types
  * only, zero imports) — a real `D1Database`, the bun:sqlite test double
@@ -22,29 +22,29 @@
  * decision Q2), and this store never uses D1 batch() — multi-row reads go
  * through IN-list queries (deliverySummaries) — so it needs a narrower face.
  *
- * Semantics (Task 2/3 call sites rely on these):
+ * Semantics (route call sites rely on these):
  *   - getAppBySlug / getAppById return the row REGARDLESS of status or
  *     deleted_at — callers (webhook route, consumer) filter active + not
  *     deleted per the Multi-App contract.
  *   - listApps is the dashboard-list face: non-deleted rows, newest first.
  *   - setAppStatus refuses soft-deleted rows (a deleted app can never be
  *     re-activated) and returns whether a row changed.
- *   - setReviewEnabled (plan 16, migration 0008) is the per-App pause
+ *   - setReviewEnabled (migration 0008) is the per-App pause
  *     switch: writes review_enabled + updated_at (an operator mutation) and
  *     refuses soft-deleted rows exactly like setAppStatus.
- *   - setSandboxImage (plan 37, migration 0018) is the per-App sandbox
+ *   - setSandboxImage (migration 0018) is the per-App sandbox
  *     runtime-image selection: the id must be an ENABLED entry of the
  *     sandbox-image registry (plain Error backstop, the recordDelivery
  *     convention — the settings route 400s first), writes sandbox_image_id +
  *     updated_at, and refuses soft-deleted rows exactly like setAppStatus.
  *     createApp omits the column, so the migration 0018 DDL default seeds
  *     'omp'.
- *   - touchLastWebhook (plan 16, migration 0008) writes ONLY
+ *   - touchLastWebhook (migration 0008) writes ONLY
  *     last_webhook_at — never updated_at, which stays the operator-mutation
  *     timestamp (L5: the per-webhook frequency of this touch must not churn
- *     the operator timestamp, and the plan-15 commenter fingerprint ignores
+ *     the operator timestamp, and the commenter fingerprint ignores
  *     both columns, so the cache cannot be thrashed by it either).
- *   - saveGithubMetadata (plan 53, migration 0019) is the SINGLE writer for
+ *   - saveGithubMetadata (migration 0019) is the SINGLE writer for
  *     the cached GitHub profile columns (github_name / github_description /
  *     github_html_url / github_avatar_url + github_metadata_synced_at):
  *     writes ONLY those five, never updated_at (the touchLastWebhook
@@ -52,18 +52,18 @@
  *     refresh is the only caller), and refuses soft-deleted rows exactly
  *     like setAppStatus.
  *   - listInstallations is the install-health read face for the settings
- *     panel (plan 16 Task 2): this App's installations, most recently seen
+ *     panel: this App's installations, most recently seen
  *     first.
  *   - softDeleteApp is idempotent — the FIRST deleted_at wins; returns
  *     whether THIS call performed the delete.
- *   - recordDelivery / deliverySummary / listRecentDeliveries (plan 20,
- *     migration 0011) are the webhook_deliveries face: the per-App webhook
+ *   - recordDelivery / deliverySummary / listRecentDeliveries (migration
+ *     0011) are the webhook_deliveries face: the per-App webhook
  *     route appends one best-effort row per CLASSIFIED delivery (ok /
  *     paused / ignored / rejected — outcome vocabulary DELIVERY_OUTCOMES,
  *     producer-side enforced), and the dashboard reads the health summary +
  *     recent list through the same store (AL-20-1: the legacy face records
  *     nothing).
- *   - deliverySummaries (plan 20 QC wave 1, W-1) is the BATCHED health
+ *   - deliverySummaries (QC wave 1, W-1) is the BATCHED health
  *     read face for the Apps list: latest row + 24h rejected count for
  *     every requested app in exactly TWO statements regardless of N;
  *     deliverySummary(appId) stays the single-settings-page face.
@@ -72,7 +72,7 @@
  *     the unauthenticated reject path; the DDL has no length constraint.
  *   - Timestamps are SQLite datetime('now') (UTC — the reviews.reviewed_at
  *     convention); createApp ids are caller-supplied UUIDs (the reviews.id
- *     caller-UUID convention — the T1 review pin: secretbox AAD rowKey MUST
+ *     caller-UUID convention — review pin: secretbox AAD rowKey MUST
  *     equal the row PK, so the caller generates the id before encrypting).
  *   - UNIQUE / FK violations throw (fail-loud): duplicate slug,
  *     github_app_id, or (app_id, installation_id) pairs, and unknown app
@@ -100,7 +100,7 @@ export type GithubAppRow = {
   /** Last verified (2xx) webhook delivery (migration 0008); NULL = never. */
   last_webhook_at: string | null;
   /**
-   * Cached GitHub-side App name (migration 0019, plan 53); NULL = never
+   * Cached GitHub-side App name (migration 0019); NULL = never
    * synced. Distinct from the local `name` recorded at manifest commit.
    */
   github_name: string | null;
@@ -131,7 +131,7 @@ export type GithubAppStatus = "active" | "disabled";
 /** Input for createApp — encrypted payloads are built by the caller. */
 export type CreateAppInput = {
   /**
-   * Caller-supplied row PK (plan 13 T1 review pin): the caller encrypts
+   * Caller-supplied row PK (review pin): the caller encrypts
    * private_key_enc / webhook_secret_enc with secretbox AAD
    * `github_apps.<column>:<id>` BEFORE insert, so the id must exist first —
    * the encrypted columns' AAD rowKey always equals this primary key. Not
@@ -157,7 +157,7 @@ export type UpsertInstallationInput = {
 };
 
 /**
- * The GitHub profile fields cached by migration 0019 (plan 53) — the input
+ * The GitHub profile fields cached by migration 0019 — the input
  * (and result) shape of the single metadata write entry `saveGithubMetadata`.
  * src/dashboard/github-app-metadata.ts builds it from `GET /app`'s public
  * profile; the settings read path persists it verbatim. Field names mirror
@@ -171,8 +171,8 @@ export type GithubAppMetadataInput = {
 };
 
 /**
- * An `app_installations` row as the settings health panel reads it (plan 16
- * Task 2; DDL = migration 0004). The `id` PK is deliberately not projected —
+ * An `app_installations` row as the settings health panel reads it
+ * (DDL = migration 0004). The `id` PK is deliberately not projected —
  * the panel keys installations by installation_id.
  */
 export type AppInstallationRow = {
@@ -183,7 +183,7 @@ export type AppInstallationRow = {
 };
 
 /**
- * The producer-side delivery-outcome vocabulary (plan 20 Task 1, AL-20-1;
+ * The producer-side delivery-outcome vocabulary (AL-20-1;
  * 0010 FAILURE_STAGES precedent; 0011 webhook_deliveries is current):
  * `ok` = job enqueued, `paused` = the App's
  * review switch is off (2xx ignore, zero enqueue), `ignored` = verified but
@@ -202,7 +202,7 @@ export const DELIVERY_OUTCOMES: readonly string[] = Object.freeze([
 export type DeliveryOutcome = "ok" | "paused" | "ignored" | "rejected";
 
 /**
- * Persist bound for the x-github-event header (plan 20 QC wave 1, seat2
+ * Persist bound for the x-github-event header (QC wave 1, seat2
  * hygiene pin): the header is attacker-influenced on the unauthenticated
  * reject path, and the DDL has no length constraint — store the bounded
  * prefix, never the raw blob (GitHub's longest real event names sit well
@@ -235,10 +235,10 @@ export type WebhookDeliveryRow = {
 };
 
 /**
- * The dashboard health read face (plan 20 Task 2 consumes this): the App's
+ * The dashboard health read face: the App's
  * LATEST delivery row + the count of `rejected` rows inside the trailing
- * 24h window (`created_at > datetime('now', '-24 hours')` — the plan-19
- * sweep window convention). ignored/paused/ok are healthy states and are
+ * 24h window (`created_at > datetime('now', '-24 hours')` — the sweep
+ * window convention). ignored/paused/ok are healthy states and are
  * deliberately NOT counted (AL-20-2).
  */
 export type DeliverySummary = {
@@ -267,7 +267,7 @@ type AppsStoreD1 = {
 /** Create the github_apps / app_installations store over one D1 handle. */
 export function createAppsStore(db: AppsStoreD1) {
   /**
-   * BATCHED health-read face (plan 20 QC wave 1, W-1): the Apps list
+   * BATCHED health-read face (QC wave 1, W-1): the Apps list
    * renders every row's health on each POST re-render, so the per-App
    * deliverySummary fan-out (2N statements) is replaced by exactly TWO
    * statements for any N: (a) the latest row per app — the same
@@ -320,7 +320,7 @@ export function createAppsStore(db: AppsStoreD1) {
   return {
     /**
      * Insert a new active app row (status 'active', deleted_at NULL) with
-     * the CALLER-SUPPLIED id as the row PK (T1 review pin — the caller's
+     * the CALLER-SUPPLIED id as the row PK (review pin — the caller's
      * secretbox AAD rowKey is this id). sandbox_image_id is omitted: the
      * migration 0018 DDL default materializes every new row onto the
      * registry's default image ('omp') — the store face for changing it is
@@ -390,7 +390,7 @@ export function createAppsStore(db: AppsStoreD1) {
     },
 
     /**
-     * Toggle the per-App pause switch (plan 16, spec 语义锁 B3): 1 = the App's
+     * Toggle the per-App pause switch (spec 语义锁): 1 = the App's
      * PRs are reviewed, 0 = paused — webhook face 2xx-ignores with zero
      * enqueue, in-flight messages ack-skip. Writes review_enabled +
      * updated_at (an operator mutation, L5) and refuses soft-deleted rows
@@ -409,7 +409,7 @@ export function createAppsStore(db: AppsStoreD1) {
     },
 
     /**
-     * Select the App's sandbox runtime image (plan 37, migration 0018). The
+     * Select the App's sandbox runtime image (migration 0018). The
      * id must be an ENABLED entry of the src/contracts/sandbox-images.ts
      * registry — anything else throws BEFORE any write (this is the
      * store-enforced value domain the DDL deliberately leaves CHECK-less;
@@ -453,7 +453,7 @@ export function createAppsStore(db: AppsStoreD1) {
     },
 
     /**
-     * Record the App's most recent verified (2xx) webhook delivery (plan 16,
+     * Record the App's most recent verified (2xx) webhook delivery (lock
      * L5). Writes ONLY last_webhook_at — deliberately NOT updated_at: this
      * touch runs per webhook (high-frequency), while updated_at must stay
      * the operator-mutation timestamp. An unknown id is a silent no-op (the
@@ -468,7 +468,7 @@ export function createAppsStore(db: AppsStoreD1) {
     },
 
     /**
-     * Persist one fetched GitHub profile (plan 53, migration 0019) — the
+     * Persist one fetched GitHub profile (migration 0019) — the
      * SINGLE writer for the github_* metadata columns (the settings read
      * path's lazy 24h TTL refresh; no cron/queue retry exists by plan lock).
      * Writes ONLY the five new columns — deliberately NOT updated_at, which
@@ -515,7 +515,7 @@ export function createAppsStore(db: AppsStoreD1) {
     },
 
     /**
-     * Install-health read face (plan 16 Task 2 settings panel): this App's
+     * Install-health read face (settings panel): this App's
      * installation rows, most recently seen first (stable installation_id
      * tiebreak). Read-only — the panel never mutates through this face.
      */
@@ -531,7 +531,7 @@ export function createAppsStore(db: AppsStoreD1) {
     },
 
     /**
-     * Append one delivery row (plan 20 Task 1, AL-20-1) — the R2 diagnostics
+     * Append one delivery row (AL-20-1) — the R2 diagnostics
      * face. Fail-loud like the rest of this store: an off-vocabulary outcome
      * throws BEFORE any row is written (producer-side enforcement, 0010
      * FAILURE_STAGES precedent); FK violations (unknown appId) throw. The
@@ -557,9 +557,9 @@ export function createAppsStore(db: AppsStoreD1) {
     },
 
     /**
-     * Health read face (plan 20 Task 2): the App's LATEST delivery row +
+     * Health read face: the App's LATEST delivery row +
      * the count of `rejected` rows inside the trailing 24h window
-     * (`created_at > datetime('now', '-24 hours')` — the plan-19 sweep
+     * (`created_at > datetime('now', '-24 hours')` — the sweep
      * window convention). ignored/paused/ok are healthy states and are
      * deliberately NOT counted (AL-20-2). An app with no rows → latest
      * null, rejected24h 0. Single-app delegate of the batched
@@ -573,7 +573,7 @@ export function createAppsStore(db: AppsStoreD1) {
     deliverySummaries,
 
     /**
-     * Recent-deliveries read face (plan 20 Task 2 settings panel): THIS
+     * Recent-deliveries read face (settings panel): THIS
      * App's rows, newest first (created_at has second precision, so rowid
      * breaks ties inside one second — the order is total and
      * deterministic), bounded by the caller's N (default 5).

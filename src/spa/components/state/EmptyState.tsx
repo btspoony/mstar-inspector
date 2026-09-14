@@ -1,5 +1,5 @@
 /**
- * Composed empty state (plan 57 T4 / AD-582): a guidance view — optional
+ * Composed empty state (AD-582): a guidance view — optional
  * icon chip, title line, description, optional action slot — on the
  * restyled Card surface, replacing the old bordered single-line box.
  * Purely presentational: pages resolve `t()` themselves and pass

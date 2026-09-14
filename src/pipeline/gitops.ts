@@ -1,5 +1,5 @@
 /**
- * GitOps command construction (plan 06 Task 3) — pure command builders for the
+ * GitOps command construction — pure command builders for the
  * sandbox exec steps. Trusted orchestration: the consumer runs these commands
  * inside the sandbox with credentials injected via exec env (never in the
  * command string, never in the image, never in logs — compass contracts D).
@@ -7,8 +7,8 @@
  * verified webhook payload, not from untrusted free text.
  *
  * Payload-derived fields (owner/repo/prNumber) are validated against a
- * strict allowlist and single-quoted before interpolation (plan QC 06 fix
- * round 1 / qc2 F-001): owner/repo are GitHub name chars
+ * strict allowlist and single-quoted before interpolation (qc2 F-001):
+ * owner/repo are GitHub name chars
  * ([A-Za-z0-9._-]), prNumber is a positive integer. The in-image path
  * fields (clone/diff/runner/input) are NOT payload-derived — they are
  * fixed constants supplied by the consumer (verified against qc2 F-006);
@@ -16,7 +16,7 @@
  * descriptive error BEFORE a shell string is built — a metacharacter
  * (`;`, space, backtick, `$(...)`, `'`) can never reach `sh -c`.
  *
- * Primary diff path is `gh pr diff` (T1 falsified: GH_TOKEN env injection
+ * Primary diff path is `gh pr diff` (falsified: GH_TOKEN env injection
  * works, non-empty diff, exit 0). The clone step exists so the in-image
  * runner's session cwd is the PR head checkout (the model reads repo files).
  *
@@ -113,7 +113,7 @@ export function checkedOutShaCommand(cloneDir: string): ShellCommand {
   return shellCommand(`git -C '${cloneDir}' rev-parse HEAD`);
 }
 
-/** Write the PR unified diff to diffPath via gh (primary path, T1-falsified). */
+/** Write the PR unified diff to diffPath via gh (primary path, falsified). */
 export function diffCommand(owner: string, repo: string, prNumber: number, diffPath: string): ShellCommand {
   assertOwnerRepo(owner, repo);
   assertPrNumber(prNumber);
@@ -123,7 +123,7 @@ export function diffCommand(owner: string, repo: string, prNumber: number, diffP
 /**
  * Numstat lines (`"<add>\t<del>\t<path>"`) of the PR diff without applying it
  * (`git apply --numstat` reads a unified diff from any cwd). These lines are
- * the runner's seat-partition universe (reconFacts convention, plan 07 T5).
+ * the runner's seat-partition universe (reconFacts convention).
  */
 export function numstatCommand(diffPath: string): ShellCommand {
   return shellCommand(`git apply --numstat '${diffPath}'`);
@@ -141,11 +141,11 @@ export function writeJsonCommand(path: string, contentBase64: string): ShellComm
 }
 
 /**
- * Run the in-image review runner on the runtime envelope path (plan 07 T5):
+ * Run the in-image review runner on the runtime envelope path:
  * `--level` is the review tier, `--input` the reconFacts JSON file. stdout
  * carries ONLY the validated mstar.review/v1 envelope; exit 0 = success
  * (there is no summary-degrade mode on this path). `recheckOutPath` is the
- * optional plan-67 `--recheck-out` target — passed through verbatim when
+ * optional `--recheck-out` target — passed through verbatim when
  * provided (the consumer reads that file back through readRecheckCommand).
  */
 export function runnerCommand(
@@ -159,7 +159,7 @@ export function runnerCommand(
 }
 
 /**
- * Bounded read of the runner's recheck output file (plan 67 T3, spec §7.8):
+ * Bounded read of the runner's recheck output file (spec §7.8):
  * the Worker consumes the seat's validated document through THIS audited
  * command — never an arbitrary model-produced path. Output contract (the exact
  * bytes the consumer parses and its double mirrors): the first

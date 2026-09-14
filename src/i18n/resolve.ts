@@ -1,5 +1,5 @@
 /**
- * Locale resolution + the mstar_locale cookie (plan 29 T2).
+ * Locale resolution + the mstar_locale cookie.
  *
  * Decision chain (spec §3, architect-locked — NO locale middleware):
  *   1. cookie `mstar_locale` — valid ids only (`en` | `zh_CN`); any other

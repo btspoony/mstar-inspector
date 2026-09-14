@@ -1,8 +1,8 @@
 /**
- * Review comment assembly + posting (plan 06 Task 3 + postdeploy feedback T5).
+ * Review comment assembly + posting.
  *
  * Assembly (pure, unit-tested):
- *   - summary_md truncated to 8000 chars (plan Task 3 budget);
+ *   - summary_md truncated to 8000 chars (budget cap);
  *   - findings grouped and listed BY merge class, category verbatim
  *     (mapping spec §3: findings 按 merge class 列出 — class原文写入, never
  *     rewritten to M1 severity);
@@ -15,11 +15,11 @@
  *     ship it**` / `needs fixes` / `blocked` — never M1 vocab, never a
  *     GitHub review event).
  *
- * Posting (T5): single-comment UPSERT via the Issues comments API
+ * Posting: single-comment UPSERT via the Issues comments API
  * (@octokit/rest + createAppAuth — same deps and pattern as the deleted
- * worker/diff.ts, plan 04; the auth factory is invoked separately here
+ * worker/diff.ts; the auth factory is invoked separately here
  * because pipeline MUST NOT import src/worker/** and no shared module is
- * extracted per plan). The first line of the body is a hidden HTML marker
+ * extracted). The first line of the body is a hidden HTML marker
  * (`<!-- mstar-inspector:review:v1 round=N -->`); the app locates its own
  * previous comment via issues.listComments (marker prefix match AND
  * bot-authorship — qc2 F-002: a human-planted marker is a miss, and a
@@ -31,7 +31,7 @@
  * comments API has no review event at all, and the verdict is rendered as
  * text in the body header (SEC-01 guarantee, structurally).
  *
- * Degraded chain (plan 18 Task 2 / architect AL-1): a parse-fail review
+ * Degraded chain (architect AL-1): a parse-fail review
  * posts a summary-only "Review degraded" comment on a SEPARATE marker
  * family (`<!-- mstar-inspector:review-degraded:v1 round=N -->`) with an
  * independent round counter — the real review chain is untouched. The
@@ -54,7 +54,7 @@
  * truncation cut, keeping a straddling or zod-`received`-embedded token out
  * of the public body.
  *
- * Line comments (plan 18 Task 3 / architect AL-3, layered delivery):
+ * Line comments (architect AL-3, layered delivery):
  * qualifying findings (file_path non-empty, line_end ≥ 1, inside a
  * right-side hunk of the prefetched PR diff) are anchored as ONE
  * pulls.createReview call with `event: "COMMENT"` (D4 permanent event lock —
@@ -64,13 +64,13 @@
  * (`mstar-inspector line comments · round N · <short sha>`) — never a copy
  * of the overall review body. The consumer prefetches the diff via
  * `pulls.get` + `mediaType: { format: "diff" }` on this module's extended
- * PostOctokit surface (pattern originated from the deleted worker/diff.ts,
- * plan 24 — NOT imported, pipeline ↛ worker isolation holds), prefilters
+ * PostOctokit surface (pattern originated from the deleted worker/diff.ts —
+ * NOT imported, pipeline ↛ worker isolation holds), prefilters
  * with the pure `parseDiffHunkRanges` (createReview is atomic: one invalid
  * line → whole request 422), attempts the review, and on residual 422/any
  * Octokit error falls back to overall-comment-only (structured log, never
  * throws after the overall comment succeeded). Empty qualifying set → zero
- * API calls. No `start_line` this iteration; old rounds' line comments
+ * API calls. No `start_line` for now; old rounds' line comments
  * stay in place.
  */
 import { createAppAuth } from "@octokit/auth-app";
@@ -98,7 +98,7 @@ import { createChecksAdapter, type ChecksAdapter, type ChecksOctokit } from "./c
 export type { ListDiscussionInput };
 export type { DiscoveryResult, ResolveOutcome };
 
-/** summary_md budget for the overall review body (plan Task 3). */
+/** summary_md budget for the overall review body. */
 export const SUMMARY_MD_LIMIT = 8000;
 
 /**
@@ -122,7 +122,7 @@ export function truncateSummary(md: string, limit: number = SUMMARY_MD_LIMIT): s
  * "repo-wide" when the finding is not file-scoped. Empty findings → empty
  * string (no section).
  *
- * Plan 21 Task 3 (AL-21-2): when a previous-round fingerprint set is
+ * AL-21-2: when a previous-round fingerprint set is
  * provided, a finding whose fingerprint appeared in the previous round is
  * marked `*(repeat)*` — still listed, but excluded from the tally's new
  * counts (display-layer semantics; envelope/persist untouched).
@@ -151,7 +151,7 @@ export function renderFindings(findings: ReviewFinding[], previousFingerprints?:
 
 /**
  * Tally line from the envelope's PrTallyResult; empty when absent (§3).
- * Plan 21 Task 3 (AL-21-2): with a non-empty previous-round fingerprint
+ * AL-21-2: with a non-empty previous-round fingerprint
  * set, each class count is recomputed as the number of NON-repeat findings
  * in the rendered (capped) array — repeats are still listed but no longer
  * re-voted. unverified is a fingerprint-less independent list and keeps the
@@ -191,13 +191,13 @@ function renderTally(
 /**
  * Assemble the overall review body: verdict header (verbatim) + tally line
  * (when present) + truncated summary + findings-by-class section + optional
- * omitted-findings footer + optional closure section (plan 67 §7.10),
+ * omitted-findings footer + optional closure section (§7.10),
  * finally clamped to REVIEW_BODY_LIMIT (qc2 F-003 / qc3 F-304 — the API
  * never sees an over-limit body). `omittedFindings` is the count of findings
  * dropped by the consumer's merge-class cap (B4) — the footer tells readers
  * the review is a Top-N subset.
  *
- * Plan 21 Task 3 (AL-21-2): `previousFingerprints` is the repeat-dedup data
+ * AL-21-2: `previousFingerprints` is the repeat-dedup data
  * channel — assembly INPUT only (the consumer queries the store; this module
  * never does). Publication structure (marker/header/line comments) is
  * untouched.
@@ -220,7 +220,7 @@ export function buildReviewBody(
 }
 
 // ---------------------------------------------------------------------------
-// Closure section (plan 67, spec review-lifecycle §7.10): the per-round
+// Closure section (spec review-lifecycle §7.10): the per-round
 // rendering of the prior-findings recheck. Single upsert only — remote
 // resolution outcomes discovered after this publication appear in the NEXT
 // round's closure, never a second closure-only comment.
@@ -291,7 +291,7 @@ export function buildClosureSection(coverage: ClosureCoverage, rows: ClosureRow[
 }
 
 // ---------------------------------------------------------------------------
-// Prepared publication (plan 67, spec §7.7): the FINAL body is computed and
+// Prepared publication (spec §7.7): the FINAL body is computed and
 // durably staged BEFORE any GitHub mutation; the send publishes exactly the
 // prepared upsert. The publication identity marker is appended to the round
 // marker; model text is stripped of Inspector marker syntax first so the
@@ -355,7 +355,7 @@ export function buildPreparedDegradedBody(input: {
   return `${roundMarker}\n${clamped}\n${input.publicationMarker}`;
 }
 // ---------------------------------------------------------------------------
-// Single-comment upsert (postdeploy feedback T5)
+// Single-comment upsert
 // ---------------------------------------------------------------------------
 
 /** Hidden HTML marker prefix — the first line of every review comment body. */
@@ -409,7 +409,7 @@ export type UpsertPlan =
   | { action: "update"; commentId: number; round: number };
 
 /**
- * Decide create vs update for the review comment (T5 + qc2 F-002):
+ * Decide create vs update for the review comment (qc2 F-002):
  *   - no bot-authored marker comment → create with round=1;
  *   - bot marker comment with a well-formed round N → update that comment
  *     with round = N + 1;
@@ -426,7 +426,7 @@ export function planUpsert(comments: ReviewComment[], excludeIds?: ReadonlySet<n
 }
 
 // ---------------------------------------------------------------------------
-// Degraded comment chain (plan 18 Task 2 / architect AL-1): the parse-fail
+// Degraded comment chain (architect AL-1): the parse-fail
 // visibility chain. A SEPARATE marker family from the real review upsert —
 // `review-degraded:v1` never starts with the `review:v1` prefix and vice
 // versa, so the two scans and their round counters stay independent (the
@@ -635,8 +635,8 @@ function bytesToBase64(bytes: Uint8Array): string {
  * (version 0, rsaEncryption algorithm, OCTET STRING payload). Pure JS — no
  * `node:crypto` — so Bun and workerd behave identically. The output is
  * byte-identical to `openssl pkcs8 -topk8 -nocrypt` for RSA keys (same
- * algorithm as the deleted worker/diff.ts, plan 04; duplicated here because
- * pipeline ↛ worker and no shared module is extracted per plan).
+ * algorithm as the deleted worker/diff.ts; duplicated here because
+ * pipeline ↛ worker and no shared module is extracted).
  */
 export function pkcs1ToPkcs8(pkcs1Pem: string): string {
   const body = pkcs1Pem
@@ -719,7 +719,7 @@ export type AuthMint = { installationId: number; repo: string; purpose: TokenPur
 export type AuthSeam = { constructed: AuthConstruction[]; minted: AuthMint[] };
 
 // ---------------------------------------------------------------------------
-// Purpose-scoped token boundary (plan 67 Task 2, spec §7.6): every mint is
+// Purpose-scoped token boundary (spec §7.6): every mint is
 // tied to a purpose + the exact repository, and the SANDBOX grant is checked
 // against the RETURNED capabilities (RL-6) — the request is never presented
 // as proof of the response. The unrestricted `getInstallationToken(
@@ -754,7 +754,7 @@ export const SANDBOX_READ_PERMISSIONS: Record<string, string> = {
   pull_requests: "read",
 };
 /**
- * Explicit requested permission set for Worker review writes. Plan 68 adds
+ * Explicit requested permission set for Worker review writes. Adds
  * `checks: "write"` here (spec §7.6/§7.12): Check runs ride the SAME
  * purpose-scoped, repository-scoped credential as the comment, degraded and
  * line-comment chains, so the pipeline keeps exactly one `createAppAuth`
@@ -821,7 +821,7 @@ export type CommenterTargetInput = {
 };
 
 /**
- * Prepared-publication send input (plan 67 §7.7 step 8): the EXACT body was
+ * Prepared-publication send input (§7.7 step 8): the EXACT body was
  * durably staged before this call; `targetCommentId`/`round` come from the
  * pre-staging plan. The send validates the target's expected previous version
  * (or an already-matching exact body) and publishes the prepared body
@@ -846,8 +846,8 @@ export type PostPreparedDegradedInput = CommenterTargetInput & {
 
 export type ReviewCommenter = {
   /**
-   * Mint a PURPOSE-SCOPED, repository-scoped installation grant (plan 67
-   * §7.6): `sandbox-read` requests {contents:read, metadata:read,
+   * Mint a PURPOSE-SCOPED, repository-scoped installation grant (§7.6):
+   * `sandbox-read` requests {contents:read, metadata:read,
    * pull_requests:read} — the full read set the shipped Sandbox path
    * exercises (clone + `gh pr diff`); `review-write` requests the Worker
    * write set. The grant is minted
@@ -857,7 +857,7 @@ export type ReviewCommenter = {
    */
   getInstallationToken(input: TokenInput): Promise<InstallationTokenGrant>;
   /**
-   * Pre-staging plan read (plan 67 §7.7: "Calculate round/target from the
+   * Pre-staging plan read (§7.7: "Calculate round/target from the
    * authenticated App's current single comment BEFORE staging"): the same
    * bot-marker scan the upsert used, surfaced so the consumer can compute
    * round/targetCommentId and stage the exact prepared body. Read-only.
@@ -885,7 +885,7 @@ export type ReviewCommenter = {
    */
   deleteDegradedComment(input: PostDegradedInput): Promise<DegradedDeleteOutcome>;
   /**
-   * Post the INTENT-prepared line-comments review (plan 67 §7.7 step 10):
+   * Post the INTENT-prepared line-comments review (§7.7 step 10):
    * ONE pulls.createReview with `event: "COMMENT"` (D4 event lock), the
    * line-batch marker body, and per-intent bodies carrying the trusted
    * thread marker (§7.5). Returns the §7.7 capture result: returned comment
@@ -894,7 +894,7 @@ export type ReviewCommenter = {
    */
   postLineComments(input: PostPreparedLineCommentsInput): Promise<PostedLineComments>;
   /**
-   * Bounded discussion capture (plan 67 §7.8): newest-first GraphQL issue
+   * Bounded discussion capture (§7.8): newest-first GraphQL issue
    * comments (≤2 pages) + each known thread conversation (≤2 pages), with
    * three-valued coverage and §7.5 digests. API failure is `unavailable`.
    */
@@ -904,7 +904,7 @@ export type ReviewCommenter = {
    * constructed with the thread store (`createReviewCommenter(env, { db })`);
    * absent (undefined) otherwise. `discoverThread` proves ownership from the
    * prepared association BEFORE any adoption; `resolveFindingThread` applies
-   * the verified resolution behind the §7.5 fences. T4 owns the consumer
+   * the verified resolution behind the §7.5 fences. The consumer owns the
    * call ordering.
    */
   discoverThread?(input: { scope: Scope; intent: LineIntent; reviewId: number | null }): Promise<DiscoveryResult>;
@@ -914,12 +914,12 @@ export type ReviewCommenter = {
     verified: VerifiedResolution;
   }): Promise<ResolveOutcome>;
   /**
-   * §7.9 Checks adapter (plan 68 Task 1) — present only when the commenter is
+   * §7.9 Checks adapter — present only when the commenter is
    * constructed with the registry/journal store (`createReviewCommenter(env,
    * { db })`), because every send is fenced on PERSISTED ownership. The
    * adapter reuses THIS instance's purpose-scoped `review-write` client:
    * `checks: "write"` was added to that one permission set, so no second
-   * credential, token mint or Octokit construction exists. T2 owns the
+   * credential, token mint or Octokit construction exists. The adapter owns the
    * consumer's call ordering.
    */
   checks?: ChecksAdapter;
@@ -937,7 +937,7 @@ export type ReviewCommenter = {
  * Structural auth surface for the createAppAuth strategy. `AuthInterface` is
  * not exported by @octokit/auth-app, so the surface is named here; the real
  * strategy is assignable (same pattern as the deleted worker/diff.ts
- * AppAuth, plan 04). With a factory the call resolves to the factory's
+ * AppAuth). With a factory the call resolves to the factory's
  * return (the octokit); without one it resolves to the installation access
  * grant — auth-app 8.3.0 maps the response's `permissions`,
  * `repository_selection` and `repositories[].id/name` into `permissions`,
@@ -979,7 +979,7 @@ export type PostOctokit = {
       deleteComment?: (parameters: Record<string, unknown>) => Promise<unknown>;
     };
     /**
-     * Pulls surface for plan 67 Task 4 line comments: `createReview`
+     * Pulls surface for the intent-driven line comments: `createReview`
      * (COMMENT-event delivery of the prepared line intents). Optional and
      * guarded — the marker-comment chains never touch it, and the
      * line-comment path fails soft through the consumer's catch.
@@ -1015,7 +1015,7 @@ async function scanCommentsWithOctokit(octokit: PostOctokit, target: CommentTarg
 }
 
 /**
- * Pre-staging plan read against a caller-provided octokit (plan 67 §7.7):
+ * Pre-staging plan read against a caller-provided octokit (§7.7):
  * the same bot-marker scan the upsert used, exported for the consumer to
  * compute round/targetCommentId BEFORE staging the exact prepared body.
  * Read-only — no mutation.
@@ -1051,7 +1051,7 @@ export class PreparedSendRejected extends Error {
 
 /**
  * Publish the EXACT prepared review body against a caller-provided octokit
- * (plan 67 §7.7 step 8). Before sending, the target is RE-READ and must
+ * (§7.7 step 8). Before sending, the target is RE-READ and must
  * show its expected previous version — or an already-matching exact
  * marker/body (the response-lost replay case, adopted without mutation):
  *   - update plan: the target comment must still be bot-authored with the
@@ -1147,7 +1147,7 @@ async function createPreparedComment(
 }
 
 /**
- * Publish the EXACT prepared degraded body (plan 67 §7.7 degraded payload).
+ * Publish the EXACT prepared degraded body (§7.7 degraded payload).
  * Same target-version mechanics as the review chain; the degraded chain is
  * best-effort at the consumer, so a missing create-response id degrades to
  * `commentId: null` instead of throwing.
@@ -1311,7 +1311,7 @@ export async function deleteDegradedCommentWithOctokit(
 }
 
 // ---------------------------------------------------------------------------
-// Line comments (plan 18 Task 3 / architect AL-3, layered delivery): a pure
+// Line comments (architect AL-3, layered delivery): a pure
 // hunk-range parser over the prefetched PR diff, the layered qualifying
 // filter, and the pulls.createReview COMMENT poster. The consumer
 // orchestrates prefetch → filter → attempt; THIS module never decides
@@ -1436,7 +1436,7 @@ export function filterLineCommentFindings(findings: ReviewFinding[], diff?: stri
  * The marker-LESS per-finding comment text (title + merge-class tag +
  * finding body, clamped to the FINDING_BODY_MAX budget). This is the
  * `LineIntent.body` payload — the TRUSTED thread marker is appended later by
- * the §7.5 `buildLineCommentBody` at send time (plan 67 Task 4: the legacy
+ * the §7.5 `buildLineCommentBody` at send time (the legacy
  * marker-less posting path is replaced by the intent-driven path, so thread
  * discovery has a marker to pin).
  */
@@ -1447,7 +1447,7 @@ export function renderLineCommentText(finding: ReviewFinding): string {
 }
 
 /**
- * §7.7 line-comment capture result (plan 67 Task 4): the returned review
+ * §7.7 line-comment capture result: the returned review
  * comments mapped back to the posted intents. `posted[].associationId` is
  * the intent's association id (every posted comment carries a trusted
  * thread marker now). `ambiguous` lists `path:line` descriptors that could
@@ -1479,7 +1479,7 @@ export type PostPreparedLineCommentsInput = {
 
 /**
  * Post the INTENT-prepared line-comments review against a caller-provided
- * octokit (plan 67 §7.7 step 10 / §7.5): ONE pulls.createReview,
+ * octokit (§7.7 step 10 / §7.5): ONE pulls.createReview,
  * `event: "COMMENT"` (D4 permanent event lock — never APPROVE/
  * REQUEST_CHANGES), `commit_id` pinned to the review's head sha, the
  * REQUIRED top-level body carrying the trusted line-batch marker
@@ -1556,13 +1556,13 @@ export async function postLineCommentsWithOctokit(
 /**
  * Production commenter: createAppAuth (APP_ID + normalized PRIVATE_KEY) —
  * the ONLY createAppAuth construction point in the pipeline (architect lock
- * L4, plan 13): every credential enters through the `CommenterEnv`
+ * L4): every credential enters through the `CommenterEnv`
  * parameter — every per-App instance (consumer-side appRef resolution,
  * src/pipeline/consumer.ts) is built here, one instance per credential so
  * each App keeps its own installation-token cache. Octokit construction
  * stays inside this module; call sites never duplicate it.
  *
- * Purpose-scoped clients (plan 67 §7.6): every octokit is built from a
+ * Purpose-scoped clients (§7.6): every octokit is built from a
  * minted grant — `auth({type:"installation", repositoryNames:[repo],
  * permissions})` through the memoized auth object, then a token-
  * authenticated `Octokit({auth: grant.token})` for that exact
@@ -1693,7 +1693,7 @@ export function createReviewCommenter(env: CommenterEnv, options?: ReviewComment
     return (await getOctokit({ installationId: scope.installationId, repo: scope.repo })) as unknown as ChecksOctokit;
   }
 
-  // §7.9 Checks adapter (plan 68 Task 1): wired only when the caller binds the
+  // §7.9 Checks adapter: wired only when the caller binds the
   // registry/journal store, because every Check send must be fenced on the
   // PERSISTED attempt row before it can reach the API.
   const checksAdapter = options?.db
@@ -1707,7 +1707,7 @@ export function createReviewCommenter(env: CommenterEnv, options?: ReviewComment
       })
     : null;
 
-  // §7.5 adapter (plan 67 Task 2): wired only when the caller binds the
+  // §7.5 adapter: wired only when the caller binds the
   // thread store — the two optional methods stay undefined otherwise.
   const threadSurface = options?.db
     ? createReviewThreads({

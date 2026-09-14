@@ -1,5 +1,5 @@
 /**
- * Dashboard chrome (plan 33 T2): left sidebar (Apps / Insights / Members) +
+ * Dashboard chrome: left sidebar (Apps / Insights / Members) +
  * slim navbar (theme + Lang + username + logout).
  */
 import { useState, type ReactNode } from "react";
@@ -20,7 +20,7 @@ type LayoutProps = {
 
 type Theme = "light" | "dark";
 
-/** Same key the pre-paint bootstrap in index.html reads (plan 41). */
+/** Same key the pre-paint bootstrap in index.html reads. */
 const THEME_STORAGE_KEY = "mstar.dashboard.theme";
 
 /** Whitelist — a corrupted/unreadable stored value behaves as unset. */
@@ -67,7 +67,7 @@ function DashboardChrome({ boot, pathname, children }: LayoutProps) {
             (hover/active/focus-visible) come from the restyled ghost Button. */}
         <header className="flex h-14 shrink-0 items-center justify-end gap-2 border-b border-border bg-(--background-200) px-4">
           <Button type="button" variant="ghost" size="sm" onClick={toggleTheme} aria-label={t(boot.locale, "nav.themeToggleAria", { mode: t(boot.locale, theme === "dark" ? "nav.themeDark" : "nav.themeLight"), target: t(boot.locale, theme === "dark" ? "nav.themeLight" : "nav.themeDark") })}>
-            {/* Icon-only (plan 44): the icon depicts the CURRENT mode; the aria-label carries the action. */}
+            {/* Icon-only: the icon depicts the CURRENT mode; the aria-label carries the action. */}
             {theme === "dark" ? <Moon aria-hidden="true" /> : <Sun aria-hidden="true" />}
           </Button>
           <form className="m-0" method="post" action="/dashboard/locale">

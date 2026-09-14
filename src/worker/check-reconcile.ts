@@ -1,6 +1,6 @@
 /**
- * M7 Check recovery reconciler (plan 68 Task 3, spec review-lifecycle
- * §7.11.2) — the second independent cron lane, composed after plan 67's M8
+ * M7 Check recovery reconciler (spec review-lifecycle
+ * §7.11.2) — the second independent cron lane, composed after the M8
  * reconciler (`runSweep` → `reconcileReviewLifecycle` → `reconcileReviewChecks`,
  * each stage caught on its own).
  *
@@ -37,7 +37,7 @@
  *   the row stays due, nothing is mutated, and NO attempt is spent.
  * - **M8 owns publication discovery.** The Check lane reads persisted
  *   publication proof through the one journal reader and never triggers a
- *   send, replay or paid re-review; plan 67's lane — composed before this one
+ *   send, replay or paid re-review; the publication lane — composed before this one
  *   — is the only writer of that proof.
  * - **Throw-proof.** Every row is isolated, and the whole pass is wrapped: a
  *   recovery failure is logged and folded into `errors`, so nothing ever
@@ -182,7 +182,7 @@ export type CheckCredentialResolution =
  * Exact `(app_id, installation_id)` credential routing for the Check lane.
  * The production implementation is the §7.6 chain — routing gates → decrypt →
  * the ONE `createReviewCommenter` construction point per pair per run (whose
- * `checks: "write"` mint and Checks client are the T1 adapter) → live
+ * `checks: "write"` mint and Checks client are the §7.9 adapter) → live
  * `GET /app` identity proof. No second `createAppAuth`, no second client.
  */
 export type CheckCredentialFactory = (input: {
@@ -233,7 +233,7 @@ async function checkRoutingRow(db: D1Like, appId: string, installationId: number
  * The production Check credential factory: the same §7.6 gates M8 applies
  * (missing mapping / soft-deleted / disabled → `unavailable`, no GitHub), the
  * encrypted-envelope decrypt, and the single purpose-scoped commenter whose
- * `checks` adapter is the T1 surface. The live identity probe proves the
+ * `checks` adapter is the only mint surface. The live identity probe proves the
  * routed `github_app_id` is the App these credentials actually authenticate
  * as before any Check request is allowed.
  *
@@ -258,7 +258,7 @@ export const productionCheckCredentials: CheckCredentialFactory = async ({ db, e
       row.private_key_enc,
       `github_apps.private_key_enc:${row.id}`,
     );
-    // The single construction point (§7.6): `db` wires the T1 Checks adapter,
+    // The single construction point (§7.6): `db` wires the Checks adapter,
     // `nowMs` fences every local send on the run's clock, and `fetchImpl`
     // routes every request (including auth-app's own mint POST) through the
     // run's bounded transport.

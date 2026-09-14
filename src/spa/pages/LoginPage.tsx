@@ -7,7 +7,7 @@ import { Logo } from "../components/AppSidebar";
 import type { SpaBoot } from "../boot";
 
 // lucide-react ships no GitHub brand mark — inline the octocat silhouette.
-// Plan 53: exported for the settings page's avatar placeholder (same mark,
+// Exported for the settings page's avatar placeholder (same mark,
 // sized at the usage site via `className`).
 export function GitHubMark({ className }: { className?: string }) {
   return (
@@ -18,11 +18,11 @@ export function GitHubMark({ className }: { className?: string }) {
 }
 
 /**
- * Plan 58 A3 login facade (clarify-locked form: centered-card reinforced).
- * The T1 sidebar wordmark echoes above the card (same Logo silhouette +
+ * Login facade (clarify-locked form: centered-card reinforced).
+ * The sidebar wordmark echoes above the card (same Logo silhouette +
  * `nav.brand`); the concise card title rides the DESIGN.md heading-32 step
  * ("login wordmark-scale titles"). The GitHub POST, the signed-in redirect,
- * and every dictionary key keep their plan-33 behavior — this is a face
+ * and every dictionary key keep their original behavior — this is a face
  * change only.
  */
 export function LoginPage({ boot }: { boot: SpaBoot }) {

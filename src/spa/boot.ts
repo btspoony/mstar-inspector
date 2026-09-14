@@ -1,5 +1,5 @@
 /**
- * Per-request SPA bootstrap (plan 29 T3).
+ * Per-request SPA bootstrap.
  *
  * Channel: the Worker SPA dispatcher fetches `dist/spa/index.html` and
  * replaces `<!--SPA_BOOT-->` with `window.__BOOT__ = {…}` before returning
@@ -7,7 +7,7 @@
  * login/role itself — this injection is the only bootstrap path.
  *
  * Shape is intentionally small (locale + identity). Page data still comes
- * from legacy `/dashboard/api/*` (Task 4).
+ * from legacy `/dashboard/api/*`.
  */
 import type { Locale } from "../i18n";
 

@@ -1,15 +1,15 @@
 /**
- * Worker-side SPA dispatch (plan 29 T3, plan 30 T4, plan 33 T3).
+ * Worker-side SPA dispatch.
  *
  * GET/HEAD + enumerated SPA page → `ASSETS` `/index.html` with
  * `window.__BOOT__` injected. `/dashboard` is the SPA workbench for EVERY
- * Accept variant (plan 30 T4 — the legacy SSR home is retired); other
+ * Accept variant (the legacy SSR home is retired); other
  * enumerated pages require HTML navigation (`Accept: text/html`) so API and
  * test clients never get the shell. Direct `GET /index.html` takes the same
  * boot path. `/assets/*` are the Vite hashed files — also ASSETS. Every
- * shell response re-reads membership (plan 30 QC W-001): a session whose
+ * shell response re-reads membership (QC W-001): a session whose
  * login has no users row gets the removedPage 403 instead of the shell.
- * Plan 33 T3: no valid session → 302 `/dashboard/login` (the old null-boot
+ * No valid session → 302 `/dashboard/login` (the old null-boot
  * shell was the render-then-kick flash source); the SPA router guard is the
  * second line. Removed members get the session cookie expired on every
  * shell request — HTML navigation 302s to login, API/fetch keeps the 403.
@@ -29,7 +29,7 @@ import type { Env } from "./env";
 type SpaContext = Context<{ Bindings: Env }>;
 
 /**
- * Per-request shell auth (plan 30 QC W-001, plan 33 T3). spa-dispatch runs
+ * Per-request shell auth (QC W-001). spa-dispatch runs
  * BEFORE the dashboard membership guard (src/worker/index.ts), so the
  * boot-injected shell cannot rely on the guard's 403 — a removed member with
  * a still-valid session cookie would get the workbench with their own
@@ -83,7 +83,7 @@ async function readShellAuth(c: SpaContext): Promise<ShellAuth> {
         login: session.login,
       }),
     );
-    // Plan 33 T3: actively invalidate the removed member's session. The
+    // Actively invalidate the removed member's session. The
     // login page itself serves the null-boot shell (no self-loop); other
     // HTML navigation → expire + 302 login; API/fetch → expire + 403 (a
     // fetch must not silently follow the 302 into the HTML login page).
@@ -122,7 +122,7 @@ export async function serveSpaIndex(c: SpaContext): Promise<Response> {
   const html = await assetResponse.text();
   const headers: Record<string, string> = {
     "content-type": "text/html; charset=utf-8",
-    // Plan 30 QC S-001: the injected boot personalizes the document
+    // QC S-001: the injected boot personalizes the document
     // (login/name/role) — never cache it.
     "cache-control": "private, no-store",
   };
@@ -141,8 +141,8 @@ export function spaDispatch(): MiddlewareHandler<{ Bindings: Env }> {
     if (!assets) return next();
     const pathname = new URL(c.req.url).pathname;
     const accept = c.req.header("Accept") ?? null;
-    // `/dashboard` is the SPA workbench for EVERY Accept variant (plan 30
-    // T4: the legacy SSR home is retired). Other enumerated pages keep the
+    // `/dashboard` is the SPA workbench for EVERY Accept variant (the
+    // legacy SSR home is retired). Other enumerated pages keep the
     // HTML-navigation gate so API/test clients never get the shell.
     if (pathname === "/dashboard" || (matchSpaRoute(pathname) && wantsHtml(accept))) {
       return serveSpaIndex(c);

@@ -1,6 +1,6 @@
 /**
- * Bounded discussion capture and model-context assembly (plan 67 Task 2,
- * spec review-lifecycle §7.8).
+ * Bounded discussion capture and model-context assembly (spec
+ * review-lifecycle §7.8).
  *
  * Capture (`listDiscussionWithOctokit`): newest-first GraphQL page traversal
  * — the PR's issue comments (`comments(last:100, before:cursor)`, TWO pages

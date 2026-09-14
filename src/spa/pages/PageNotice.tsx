@@ -5,13 +5,13 @@ import styles from "../pages.module.css";
 export type NoticeKind = "success" | "warn" | "error";
 
 /**
- * Plan 59 T3 (A5): the v0.3 notice form — each kind gets its semantic glyph
+ * The v0.3 notice form — each kind gets its semantic glyph
  * over the tinted token face, so success and error read as distinct states
  * at a glance (DESIGN.md Notice: semantic 100 fill / 400 border / 900 text).
  * The glyph inherits the notice's fg token (currentColor), stays decorative
  * (aria-hidden — the message text is the announcement), and the channel
  * semantics are untouched: op-outcome notices and background-reload failures
- * keep riding this face (plan 38/44; AD-582 boundary).
+ * keep riding this face (the AD-582 boundary).
  */
 const NOTICE_ICONS = {
   success: CircleCheck,

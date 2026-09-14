@@ -1,5 +1,5 @@
 /**
- * Plan 54 (AD-542): the hand-rolled filterable provider combobox — the Add
+ * (AD-542): the hand-rolled filterable provider combobox — the Add
  * Provider picker. The 214-entry catalog outgrew a plain Select, so the
  * picker is an input that narrows options as you type (case-insensitive
  * substring over label + id), with the 常用提供方 common tier grouped first
@@ -11,7 +11,7 @@
  * layer — AppSidebar.tsx precedent), NOT in vendored components/ui/ (shadcn
  * copy-in only): Radix Select cannot host a free-typed query and cmdk is out
  * of scope (zero new dependencies, AD-542 lock). Accessibility follows the
- * ARIA combobox pattern at the plan-54 QA minimum bar: a typeable input
+ * ARIA combobox pattern at the QA minimum bar: a typeable input
  * (role=combobox with aria-expanded/aria-controls/aria-autocomplete), a
  * listbox panel with role=option rows, ArrowDown/ArrowUp walking an
  * active-descendant highlight across the filtered rows with Enter to select
@@ -22,7 +22,7 @@
  * Unavailable entries stay listed and marked (`aria-disabled` + the
  * "unavailable on {image}" suffix) in BOTH groups — selecting one is a no-op,
  * and the AddProviderSection gate plus the server-side eligibility pre-check
- * (plan-46) keep them unsaveable.
+ * keep them unsaveable.
  */
 import { useEffect, useId, useRef, useState } from "react";
 import { CheckIcon } from "lucide-react";
@@ -35,7 +35,7 @@ import { cn } from "@/lib/utils";
  * The pure filter (AD-542): case-insensitive substring match over the
  * entry's label or id. An empty/whitespace query keeps the full list in
  * payload order. Unavailable entries are never dropped here — they stay
- * visible (marked at render) so the breadth stays discoverable (plan 38).
+ * visible (marked at render) so the breadth stays discoverable.
  */
 export function filterCatalogProviders(
   providers: readonly CatalogProvider[],
@@ -50,7 +50,7 @@ export function filterCatalogProviders(
 }
 
 /**
- * The pure display grouping (plan 54, AD-547): `common` (常用提供方) first,
+ * The pure display grouping (AD-547): `common` (常用提供方) first,
  * `catalog` (目录模板) second, payload order preserved within each group.
  * Reads ONLY `display_group` — `tier`/`eligibility` stay the mechanics' keys.
  */
@@ -145,7 +145,7 @@ export function ProviderComboboxPanel({
                   )}
                   onMouseMove={() => onHoverOption?.(provider.id)}
                   onClick={() => {
-                    // Unavailable stays unsaveable at every layer (plan-46):
+                    // Unavailable stays unsaveable at every layer:
                     // the row is inert here, gated again in AddProviderSection
                     // (no form), and pre-checked server-side on save.
                     if (!unavailable) onSelect(provider.id);
@@ -190,7 +190,7 @@ export function ProviderCombobox({
   imageId,
 }: {
   locale: Locale;
-  /** id of the visible field label (plan-38 aria-labelledby precedent). */
+  /** id of the visible field label (aria-labelledby precedent). */
   labelledby: string;
   providers: readonly CatalogProvider[];
   value: string | undefined;
@@ -295,13 +295,13 @@ export function ProviderCombobox({
           } else if (event.key === "Enter" && open) {
             event.preventDefault();
             // Same inert rule as the pointer path: an unavailable row never
-            // selects (plan-46 red line at every layer).
+            // selects (the red line at every layer).
             if (active && active.eligibility !== "unavailable") select(active.id);
           }
         }}
       />
       {open ? (
-        // Height cap mirrors the old SelectContent max-h-72 (plan-42 pin):
+        // Height cap mirrors the old SelectContent max-h-72:
         // an internal scroll keeps the 214-entry breadth usable.
         <div className="relative">
           <div className="absolute z-50 mt-1 max-h-72 w-full overflow-y-auto rounded-md border bg-popover p-1 text-popover-foreground shadow-(--shadow-pop)">

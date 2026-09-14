@@ -19,7 +19,7 @@ const NAV_ICONS = {
 } as const;
 
 /**
- * Brand mark (plan 58 A3): the sidebar wordmark mark is the single source —
+ * Brand mark: the sidebar wordmark mark is the single source —
  * the login face's wordmark echo imports this same silhouette instead of
  * duplicating it. Color rides `currentColor` (`text-primary` = brand-700
  * through the shadcn bridge); size is set at the usage site.
@@ -57,7 +57,7 @@ export function AppSidebar({ model }: { model: SidebarModel }) {
                 const Icon = NAV_ICONS[item.href as keyof typeof NAV_ICONS];
                 return (
                   <SidebarMenuItem key={item.href}>
-                    {/* Active face (plan 64 AD-641): low-alpha brand tint +
+                    {/* Active face (AD-641): low-alpha brand tint +
                         medium weight live in the SidebarMenuButton variant
                         string — no edge/fill className appendage here. */}
                     <SidebarMenuButton asChild isActive={item.current} tooltip={item.label}>

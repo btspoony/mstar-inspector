@@ -1,10 +1,10 @@
 /**
- * Enumerated SPA pages (plan 29 Interfaces `SPA_PAGES`, plan 33 apps,
- * plan 40 apps-default root).
+ * Enumerated SPA pages (the `SPA_PAGES` interface; apps route,
+ * apps-default root).
  *
  * `/dashboard` and `/dashboard/apps` are one root-routing rule: both render
- * the Apps workbench (plan 40 retires the insights home at the root; plan 33
- * retired the Worker 301 alias). History fallback is this matcher, not
+ * the Apps workbench (the insights home at the root is retired, as is the
+ * Worker 301 alias). History fallback is this matcher, not
  * wrangler `not_found_handling`.
  */
 export const SPA_PAGES = ["apps", "insights", "members", "login", "settings"] as const;

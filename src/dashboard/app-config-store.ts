@@ -1,6 +1,6 @@
 /**
- * D1 store for per-App AI configuration (plan 14 B2 Task 1): the
- * `app_provider_keys` BYOK keys + the model chains (plan 35 T2: the
+ * D1 store for per-App AI configuration: the
+ * `app_provider_keys` BYOK keys + the model chains (the
  * `app_model_chains` default + named chains and the `app_model_chain_seats`
  * seat references, migration 0017). Spec dashboard-multi-app-platform
  * § Per-App BYOK + § Crypto envelope; migration 0006 is the DDL single
@@ -10,7 +10,7 @@
  * src/dashboard/secretbox.ts — plaintext keys arrive only as the method
  * argument and never come back out: listProviderKeys is masked (at most the
  * last 4 characters) and getAppConfig exists for the ONE legitimate decrypt
- * consumer, the plan-14 Task 3 per-App exec-env assembly. The envelope AAD is
+ * consumer, the per-App exec-env assembly. The envelope AAD is
  * the composite row key `app_provider_keys.key_enc:<appId>:<provider>`
  * (composite-PK rowKey, lock L1). The master key (the DASHBOARD_ENCRYPTION_KEY
  * env value) is bound at factory time; a missing/malformed key surfaces as
@@ -25,23 +25,23 @@
  * tests/worker/app-config.test.ts.
  *
  * Module boundary: dashboard-side leaf consumed by the dashboard routes and
- * (Task 3) the pipeline consumer — imports ONLY src/dashboard/secretbox.ts
+ * the pipeline consumer — imports ONLY src/dashboard/secretbox.ts
  * (itself a zero-dependency leaf) and the zero-dependency src/contracts/
- * static contract data (src/contracts/sandbox-images.ts — the plan-37
- * registry; src/contracts/provider-catalog.generated.ts — the plan-42
- * generated catalog SSOT; both NOT pipeline/review code), so the dashboard ↛
+ * static contract data (src/contracts/sandbox-images.ts — the runtime-image
+ * registry; src/contracts/provider-catalog.generated.ts — the generated
+ * catalog SSOT; both NOT pipeline/review code), so the dashboard ↛
  * pipeline/worker isolation stays intact. The `db` parameter is a
  * locally-declared narrow D1 face (types only, zero imports) — a real
  * `D1Database`, the bun:sqlite test double (tests/store/helpers.ts), and the
  * store layer's `D1Like` all satisfy it structurally (same pattern as
  * apps-store.ts). Every write here is a
- * single statement EXCEPT the atomic multi-write faces (plan 35 T2, spec
+ * single statement EXCEPT the atomic multi-write faces (spec
  * §4.4): setModelChain's default-row clear-then-set, setModelChainSeats'
- * full-map save (the plan-17 role editor, now chain references), and
+ * full-map save (the role editor, now chain references), and
  * removeModelChain's seat-reference cascade — each is ONE atomic
  * `db.batch`, added for multi-write atomicity, never for throughput.
  *
- * Model chains (plan 35 T2, spec §4.4): `app_model_chains` (migration
+ * Model chains (spec §4.4): `app_model_chains` (migration
  * 0017) holds one row per (App, chain name) — the default chain row keeps
  * the RESERVED name "default" (is_default = 1, at most one per App,
  * enforced by the store in one batch), named chains are user-named
@@ -59,11 +59,11 @@
  * write-retired / read-retired after migration 0017's backfill (rows
  * retained, code no longer references them; no DROP).
  *
- * Semantics (the Task 2 UI + Task 3 consumer call sites rely on these):
+ * Semantics (the settings UI + consumer call sites rely on these):
  *   - setProviderKey upserts: re-setting a provider replaces the ciphertext
  *     (one row per (app_id, provider) — the composite PK). A key longer than
  *     MAX_PROVIDER_KEY_LENGTH (4096) throws ProviderKeyTooLongError before
- *     any crypto or write (plan 15 input bounds; the settings route re-renders
+ *     any crypto or write (input bounds; the settings route re-renders
  *     400 first — the guard here is the backstop for direct callers).
  *   - removeProviderKey returns whether a row was deleted (an unconfigured
  *     provider is an idempotent no-op, like setAppStatus).
@@ -72,16 +72,16 @@
  *     provider-ascending; a key of ≤4 characters reveals NOTHING (the mask
  *     must never render a whole key).
  *   - setModelChain(null) — or any BLANK chain (empty / whitespace-only,
- *     plan 15: aligned with the route's 空 = 清除) — REMOVES the default
+ *     aligned with the route's 空 = 清除) — REMOVES the default
  *     chain row (absent = unset; AL-24-5: a chain-less App's reviews FAIL
- *     CLOSED — the consumer rejects the message with a structured failure
- *     (plan 24 Task 6); there is no deployment-level chain to fall back to).
+ *     CLOSED — the consumer rejects the message with a structured failure;
+ *     there is no deployment-level chain to fall back to).
  *     A chain with content upserts the 'default' row VERBATIM with
  *     is_default = 1 — the per-App is_default uniqueness is enforced in ONE
  *     atomic db.batch (clear-old-set-new, spec §4.4). Read it back with
  *     getModelChain (the settings route prefills the editor from it WITHOUT
  *     decrypting any key material).
- *   - Named chains (plan 35 T2): upsertModelChain / removeModelChain /
+ *   - Named chains: upsertModelChain / removeModelChain /
  *     getModelChains manage user-named selector chains (is_default = 0;
  *     the name "default" is reserved and rejected at route AND store
  *     level). removeModelChain deletes the chain AND every seat reference
@@ -94,15 +94,15 @@
  *   - getAppConfig decrypts for the consumer face: an App with no config
  *     yields an EMPTY keys map and a null chain (a chain referring to a
  *     provider without a key is rejected fail-closed by the consumer's
- *     assertAppConfigComplete — plan 24 Task 6; zero-config is NOT a valid
+ *     assertAppConfigComplete — zero-config is NOT a valid
  *     review state anymore), and an undecryptable row is a loud throw
  *     (tamper/misconfiguration is never swallowed).
- *   - Custom providers (plan 23 T2, migration 0012): upsertCustomProvider /
+ *   - Custom providers (migration 0012): upsertCustomProvider /
  *     removeCustomProvider / listCustomProviders manage per-App declarations
  *     of NON-built-in model providers (base URL + AL-23-1 api enum + model
  *     ids). The key is encrypted INSIDE the store with the composite-PK AAD
  *     `app_custom_providers.api_key_enc:<app_id>:<provider_id>` (0006 L1
- *     precedent) and never appears in the list face; the Task 3 consumer
+ *     precedent) and never appears in the list face; the consumer
  *     decrypts it with the same AAD via getCustomProvidersForConsumer (the
  *     getAppConfig analogue — fail-loud on tamper). Declaration bounds
  *     (AL-23-1/AL-23-2) are enforced here as the backstop and by the
@@ -131,7 +131,7 @@ export type AppProviderKeyRow = {
 };
 
 /**
- * A row of `app_model_chains` (migration 0017, plan 35 T2, spec §4.4).
+ * A row of `app_model_chains` (migration 0017, spec §4.4).
  * The default chain row keeps the RESERVED name "default" (is_default = 1);
  * named chains are user-named selector chains (is_default = 0). is_default
  * uniqueness per App is store-enforced in ONE atomic db.batch (no CHECK /
@@ -149,7 +149,7 @@ export type AppModelChainRow = {
   updated_at: string;
 };
 
-/** A row of `app_model_chain_seats` (migration 0017, plan 35 T2, spec §4.4). Absent row = the seat uses the default chain. */
+/** A row of `app_model_chain_seats` (migration 0017, spec §4.4). Absent row = the seat uses the default chain. */
 export type AppModelChainSeatRow = {
   app_id: string;
   /** One of the MODEL_ROLE_IDS audit-seat agent names. */
@@ -174,7 +174,7 @@ export const CUSTOM_PROVIDER_API_IDS = [
 export type CustomProviderApi = (typeof CUSTOM_PROVIDER_API_IDS)[number];
 
 /**
- * A row of `app_custom_providers` (migration 0012, plan 23 T2 — D1 column
+ * A row of `app_custom_providers` (migration 0012 — D1 column
  * names, snake_case). model_ids is a TEXT JSON array (AL-23-1 DDL);
  * api_key_enc is a secretbox envelope (lock L1, composite-PK AAD).
  */
@@ -194,12 +194,12 @@ export type AppCustomProviderRow = {
 };
 
 /**
- * One custom-provider declaration (the settings-page face and the Task 3
+ * One custom-provider declaration (the settings-page face and the
  * consumer input): a NON-built-in model provider bound to a base URL, one
  * of the AL-23-1 protocol forms, and the model ids it serves. The API key
  * is NEVER part of this shape — it exists only as the encrypted
- * api_key_enc column (declaration-time input, decrypt consumer face in
- * plan 23 Task 3).
+ * api_key_enc column (declaration-time input; the consumer decrypt face
+ * reads it).
  */
 export type AppCustomProvider = {
   provider_id: string;
@@ -208,7 +208,7 @@ export type AppCustomProvider = {
   model_ids: string[];
 };
 /**
- * One custom-provider declaration as the Task 3 consumer sees it (the
+ * One custom-provider declaration as the consumer sees it (the
  * getAppConfig analogue for app_custom_providers): the decrypt-free
  * declaration PLUS the decrypted API key. The key exists ONLY on this
  * face — the settings list (listCustomProviders) stays decrypt-free.
@@ -222,7 +222,7 @@ export type CustomProviderConsumerConfig = {
 };
 
 /**
- * A row of `app_provider_models` (migration 0015, plan 31 T2): the per-App
+ * A row of `app_provider_models` (migration 0015): the per-App
  * verified-model cache for BUILT-IN providers. `provider` is the
  * SELECTOR-FACING key (spec §6.1) — `ark` BYOK keys verify under the BYOK id
  * "ark" but their cache rows are written under "ark-plan" (the in-image base
@@ -239,8 +239,8 @@ export type AppProviderModelsRow = {
 };
 
 /**
- * One verified-model cache entry as the settings loader sees it (plan 31
- * Interfaces — the dropdown source for selector literal grammar
+ * One verified-model cache entry as the settings loader sees it (the
+ * Interfaces face — the dropdown source for selector literal grammar
  * `provider/model`). `provider` is the selector-facing prefix of every
  * option built from this row.
  */
@@ -268,10 +268,10 @@ export function modelCacheProviderKey(provider: string): string {
 
 /**
  * The provider id allowlist — the builtin tier of the generated provider
- * catalog (19 builtin-tier provider ids incl. `ark`, same order — plan 24
- * Task 6 / AL-24-5 added `ark` so the in-image ark-plan base provider's
+ * catalog (19 builtin-tier provider ids incl. `ark`, same order — AL-24-5
+ * added `ark` so the in-image ark-plan base provider's
  * ARK_API_KEY rides the per-App BYOK keys map like every other provider).
- * Re-exported from the generated contract (plan 42 T1): the catalog SSOT
+ * Re-exported from the generated contract: the catalog SSOT
  * lives in src/contracts/provider-catalog.generated.ts — a
  * dashboard-importable pure-data module (Q2 forbids dashboard → pipeline
  * imports, so the mirror is a re-export of the CONTRACT, not a hand copy).
@@ -279,7 +279,7 @@ export function modelCacheProviderKey(provider: string): string {
 export const PROVIDER_IDS: readonly string[] = PROVIDER_IDS_BUILTIN;
 
 /**
- * The dashboard's catalog mirror (spec §5, plan 35 T3; plan 42 T1 rewire) —
+ * The dashboard's catalog mirror (spec §5) —
  * the FULL generated catalog (builtin AND template tier, ~214 rows) as
  * id → { label, tier, baseUrl, api, models, doc }, re-exported from
  * src/contracts/provider-catalog.generated.ts. The generated entry shape is
@@ -308,7 +308,7 @@ export type ProviderMirrorEntry = {
 export const PROVIDER_META: Record<string, ProviderMirrorEntry> = PROVIDER_CATALOG;
 
 /**
- * The per-role model vocabulary (plan 17 B6, spec § B6 语义锁) — EXACTLY the
+ * The per-role model vocabulary (spec § 语义锁) — EXACTLY the
  * 4 audit-seat agent names the runner dispatches: `mstar-review-seat` is the
  * quick/default seat (the agent definition installed from
  * src/review/seat-agent.md), the three deep seats are the harness roles
@@ -359,15 +359,14 @@ function parseModelIdsJson(raw: string, source: string): string[] {
 }
 
 /**
- * Provider-key length bound (plan 15 Task 1, spec dashboard-ops-and-role-models
+ * Provider-key length bound (spec dashboard-ops-and-role-models
  * § 硬化项 4): a pasted API key longer than this is rejected BEFORE any
  * encryption or D1 write, so an oversized input can never bloat the store.
  */
 export const MAX_PROVIDER_KEY_LENGTH = 4096;
 /**
- * Custom-provider declaration bounds (AL-23-2 verdict, plan 23 Global
- * Constraints): provider id `[a-z0-9][a-z0-9-]{0,63}` (the env-name mapping
- * `CUSTOM_<UPPER_SNAKE>_API_KEY` the Task 3 consumer injects), baseUrl
+ * Custom-provider declaration bounds (AL-23-2 verdict): provider id `[a-z0-9][a-z0-9-]{0,63}` (the env-name mapping
+ * `CUSTOM_<UPPER_SNAKE>_API_KEY` the consumer injects), baseUrl
  * https-only ≤2048, model_ids 1..32 entries × ≤128 characters (AL-23-1).
  * The route answers 400 first; the store re-validates as the backstop for
  * direct callers (the ProviderKeyTooLongError pattern).
@@ -377,7 +376,7 @@ export const MAX_CUSTOM_PROVIDER_BASE_URL_LENGTH = 2048;
 export const MAX_CUSTOM_PROVIDER_MODEL_IDS = 32;
 export const MAX_CUSTOM_PROVIDER_MODEL_ID_LENGTH = 128;
 /**
- * Declarations per App bound (plan 23 QC wave-1 W-2): the last AL-23-2 input
+ * Declarations per App bound (QC wave-1 W-2): the last AL-23-2 input
  * dimension left unbounded. Every declaration rides the container exec env
  * (decrypted key, ≤4096 chars each) and the runner input JSON, so an App
  * accumulating declarations grows both without limit. Growth-only: updating
@@ -388,7 +387,7 @@ export const MAX_CUSTOM_PROVIDER_MODEL_ID_LENGTH = 128;
 export const MAX_CUSTOM_PROVIDER_COUNT = 8;
 
 /**
- * Cloudflare account id bound (plan 35 T3, spec §5 — the workers-ai
+ * Cloudflare account id bound (spec §5 — the workers-ai
  * template's base URL placeholder): Cloudflare account ids are 32 hex
  * characters (the `{account_id}` slot of
  * `https://api.cloudflare.com/client/v4/accounts/{account_id}/ai/v1`).
@@ -398,8 +397,8 @@ export const MAX_CUSTOM_PROVIDER_COUNT = 8;
 export const CLOUDFLARE_ACCOUNT_ID_PATTERN = /^[0-9a-f]{32}$/i;
 
 /**
- * Model selector/chain input bound (AL-23-2 verdict, plan 23 Global
- * Constraints): the save-chain `model_chain` and each save-roles role
+ * Model selector/chain input bound (AL-23-2 verdict): the save-chain
+ * `model_chain` and each save-roles role
  * selector are capped at 400 characters at the ROUTE (400 re-render, zero
  * writes); the store keeps whatever it is given verbatim — the cap is an
  * input bound, not a storage shape.
@@ -414,7 +413,7 @@ export const MAX_MODEL_SELECTOR_LENGTH = 400;
  */
 export const DEFAULT_CHAIN_NAME = "default";
 /**
- * Named-chain name grammar (plan 35 T2, spec §4.4): the same
+ * Named-chain name grammar (spec §4.4): the same
  * `[a-z0-9][a-z0-9-]{0,63}` identifier shape as custom-provider ids (the
  * established identifier convention in this module). The backfill's
  * `seat-<role>` names fit it. "default" is excluded by the reserved-name
@@ -424,7 +423,7 @@ export const MODEL_CHAIN_NAME_PATTERN = /^[a-z0-9][a-z0-9-]{0,63}$/;
 export const MAX_MODEL_CHAIN_NAME_LENGTH = 64;
 
 /**
- * Chain-name error (plan 35 T2): an upsertModelChain/removeModelChain call
+ * Chain-name error: an upsertModelChain/removeModelChain call
  * named the reserved "default" row or a name outside the
  * MODEL_CHAIN_NAME_PATTERN grammar. The settings route re-renders 400
  * first; this typed throw is the backstop for direct callers (the
@@ -440,7 +439,7 @@ export class InvalidModelChainNameError extends Error {
 }
 
 /**
- * Unknown-chain error (plan 35 T2): a setModelChainSeat/setModelChainSeats
+ * Unknown-chain error: a setModelChainSeat/setModelChainSeats
  * call referenced a chain name with no stored row for the App. The settings
  * route re-renders 400 first; this typed throw is the backstop for direct
  * callers (the UnknownModelRoleError convention).
@@ -453,10 +452,10 @@ export class UnknownModelChainError extends Error {
 }
 
 /**
- * Declaration-shape error (plan 23 T2): an upsertCustomProvider call named
+ * Declaration-shape error: an upsertCustomProvider call named
  * an id outside the `[a-z0-9][a-z0-9-]{0,63}` grammar, an id colliding with
  * a built-in (PROVIDER_IDS) or with a capability host of the App's selected
- * sandbox image (sandboxImageHostIds, plan 37 — QC wave-1 W-1's successor),
+ * sandbox image (sandboxImageHostIds — QC wave-1 W-1's successor),
  * a non-https or over-length base URL, an api outside the
  * AL-23-1 three-form enum, an empty / over-long / over-count model_ids list,
  * an empty key, or a NEW declaration at the MAX_CUSTOM_PROVIDER_COUNT cap
@@ -471,7 +470,7 @@ export class InvalidCustomProviderError extends Error {
 }
 
 /**
- * Input-bound error (plan 15): the plaintext key passed to setProviderKey
+ * Input-bound error: the plaintext key passed to setProviderKey
  * exceeds MAX_PROVIDER_KEY_LENGTH. The settings route never surfaces it —
  * it validates the same bound first and re-renders 400 — so this typed throw
  * is the backstop for any caller that skips the route. Same class convention
@@ -485,9 +484,9 @@ export class ProviderKeyTooLongError extends Error {
 }
 
 /**
- * Role-vocabulary error (plan 17): a setModelChainSeat/setModelChainSeats/
+ * Role-vocabulary error: a setModelChainSeat/setModelChainSeats/
  * clearModelChainSeat call named a role outside MODEL_ROLE_IDS. The
- * settings route re-renders 400 first (plan 17 Task 3); this typed throw
+ * settings route re-renders 400 first; this typed throw
  * is the backstop for direct callers. Same class convention as
  * ProviderKeyTooLongError (name set for structured logs).
  */
@@ -501,7 +500,7 @@ export class UnknownModelRoleError extends Error {
 }
 
 /**
- * Selector-grammar error (plan 17): a role selector with content parses to
+ * Selector-grammar error: a role selector with content parses to
  * ZERO comma-separated selectors (e.g. only commas/whitespace — the same
  * parseModelChain mirror the save-chain route 400s against). A BLANK selector
  * is NOT an error: it clears the mapping (the setModelChain 空 = 清除
@@ -527,19 +526,19 @@ function providerKeyAad(appId: string, provider: string): string {
  * Composite-PK secretbox AAD rowKey for app_custom_providers (lock L1, 0006
  * precedent): the envelope is bound to BOTH primary-key columns, joined in
  * DDL order — `app_custom_providers.api_key_enc:<app_id>:<provider_id>`.
- * The Task 3 consumer decrypts with this exact string.
+ * The consumer decrypts with this exact string.
  */
 function customProviderAad(appId: string, providerId: string): string {
   return `app_custom_providers.api_key_enc:${appId}:${providerId}`;
 }
 
 /**
- * Declaration-shape gate (plan 23 T2): every bound in the AL-23-1/AL-23-2
+ * Declaration-shape gate: every bound in the AL-23-1/AL-23-2
  * verdicts, checked BEFORE any crypto or write — an invalid declaration
  * throws InvalidCustomProviderError (or ProviderKeyTooLongError for an
  * over-length key, the setProviderKey convention) and touches zero rows.
- * `capabilityHostIds` are the selected sandbox image's registry host ids
- * (plan 37) — passed in by upsertCustomProvider so this gate stays pure.
+ * `capabilityHostIds` are the selected sandbox image's registry host ids —
+ * passed in by upsertCustomProvider so this gate stays pure.
  * The settings route re-renders 400 first; this is the backstop for direct
  * callers.
  */
@@ -570,7 +569,7 @@ function assertCustomProvider(decl: AppCustomProvider, plainKey: string, capabil
       `custom provider id ${JSON.stringify(decl.provider_id)} collides with a built-in provider id`,
     );
   }
-  // Plan 37 (QC wave-1 W-1's successor): an id the App's SELECTED sandbox
+  // (QC wave-1 W-1's successor): an id the App's SELECTED sandbox
   // image already declares as a capability host (omp: ark-plan) would be
   // skipped base-wins at synthesis — silently dead on every review — so it
   // is rejected exactly like a built-in collision.
@@ -628,7 +627,7 @@ function assertModelRole(role: string): void {
 }
 
 /**
- * Named-chain name gate (plan 35 T2, spec §4.4): the reserved "default"
+ * Named-chain name gate (spec §4.4): the reserved "default"
  * row name and any name outside the MODEL_CHAIN_NAME_PATTERN grammar are
  * rejected — the route answers 400 first; this is the backstop for direct
  * callers.
@@ -659,16 +658,16 @@ export type MaskedProviderKey = {
   updated_at: string | null;
 };
 
-/** The decrypted per-App configuration (the plan-14 Task 3 consumer face). */
+/** The decrypted per-App configuration (the consumer face). */
 export type AppConfig = {
   appId: string;
   /** provider id → decrypted key; only providers with a stored key appear. */
   keys: Record<string, string>;
-  /** Verbatim stored chain; null = unset (missing/empty = that App's reviews fail closed — plan 24 Task 6 / AL-24-5). */
+  /** Verbatim stored chain; null = unset (missing/empty = that App's reviews fail closed — AL-24-5). */
   modelChain: string | null;
 };
 
-/** One chain as the settings face sees it (plan 35 T2, spec §4.4). */
+/** One chain as the settings face sees it (spec §4.4). */
 export type AppModelChain = {
   name: string;
   /** Verbatim comma-separated selector chain — configuration, not a secret. */
@@ -701,7 +700,7 @@ export type AppConfigBatchFace = {
 /**
  * Narrow D1 face, declared locally so this leaf module imports nothing
  * structural: prepare/bind/first/all/run for every single-statement write,
- * plus `batch` for the atomic multi-write faces (plan 35 T2, spec §4.4):
+ * plus `batch` for the atomic multi-write faces (spec §4.4):
  * setModelChain's default-row clear-then-set, setModelChainSeats' full-map
  * save, and removeModelChain's seat-reference cascade. A real
  * `D1Database`, the bun:sqlite test double (tests/store/helpers.ts) and
@@ -731,7 +730,7 @@ export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | un
   const box = createSecretbox(encryptionKey);
 
   /**
-   * The App's stored sandbox image id (plan 37, migration 0018) — the
+   * The App's stored sandbox image id (migration 0018) — the
    * custom-provider collision gate resolves the SELECTED image's capability
    * hosts through it. Unknown app → null (no host ids to refuse with; the
    * write itself fails the FK, the fail-loud convention).
@@ -747,7 +746,7 @@ export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | un
   /**
    * The App's default chain value (spec §4.4): the 'default' row of
    * app_model_chains, or null when no default row exists (absent = unset =
-   * that App's reviews fail closed — plan 24 Task 6 / AL-24-5).
+   * that App's reviews fail closed — AL-24-5).
    */
   async function readModelChain(appId: string): Promise<string | null> {
     const row = await db
@@ -775,7 +774,7 @@ export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | un
   }
 
   /**
-   * The App's per-role model overrides for the consumer (plan 35 T2, spec
+   * The App's per-role model overrides for the consumer (spec
    * §4.4): role → verbatim chain value, resolved through the seat → chain
    * mapping. Seats with NO reference row (absent = default) and seats
    * referencing the default chain are OMITTED — the runner input map only
@@ -889,7 +888,7 @@ export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | un
     },
 
     /**
-     * Store one provider key AFTER successful verification (plan 31 T3): the
+     * Store one provider key AFTER successful verification: the
      * verified analogue of setProviderKey — encrypts with the SAME
      * composite-PK AAD, upserts the (app_id, provider) row with the
      * verification bookkeeping (migration 0015: verified_at = now +
@@ -899,12 +898,12 @@ export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | un
      * db.batch (D1 batch is transactional; a mid-save failure rolls back both
      * statements, so a verified key with no cache row is impossible).
      * `models` may be [] (a provider that only got an auth-probe has an
-     * empty cache — that is the "probe-only" signal Task 4's member
+     * empty cache — that is the "probe-only" signal the member
      * validation falls back to syntax-only on). Bounds/backstop contract
      * identical to setProviderKey (a key longer than MAX_PROVIDER_KEY_LENGTH
      * throws ProviderKeyTooLongError before any crypto or write; the callers
      * that still write UNverified rows via setProviderKey keep compiling —
-     * Task 4 switches the save flow over; until then those rows stay
+     * the verify-first save cutover closes this path; until then those rows stay
      * verified_status NULL = legacy unverified).
      */
     async saveVerifiedKey(appId: string, provider: string, plainKey: string, models: string[]): Promise<void> {
@@ -915,7 +914,7 @@ export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | un
       // modelCacheProviderKey maps the BYOK id to the selector-facing cache
       // key (ark → ark-plan) — the ONLY place that relationship is applied.
       const cacheProvider = modelCacheProviderKey(provider);
-      // One clock read per statement pair (the 0012 T1 convention); the key
+      // One clock read per statement pair (the migration-0012 convention); the key
       // upsert moves created_at/updated_at forward exactly like setProviderKey.
       await db.batch([
         db.prepare(
@@ -985,10 +984,10 @@ export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | un
     /**
      * Store the App's default model chain VERBATIM (the route has already
      * validated ≥1 selector), or clear it: `null` AND any blank chain
-     * (empty or whitespace-only — the route's 空 = 清除 semantics, plan 15
-     * alignment) REMOVE the 'default' row (absent = unset; a chain-less
+     * (empty or whitespace-only — the route's 空 = 清除 semantics)
+     * REMOVE the 'default' row (absent = unset; a chain-less
      * App's reviews fail closed in the consumer with `per-App config
-     * incomplete: app <id>: missing model chain` — plan 24 Task 6; no
+     * incomplete: app <id>: missing model chain` — no
      * deployment-level fallback exists). A chain with content upserts the
      * 'default' row verbatim, interior/trailing whitespace included, with
      * is_default = 1 — the per-App is_default uniqueness is enforced in ONE
@@ -1028,7 +1027,7 @@ export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | un
     },
 
     /**
-     * Decrypt the App's full configuration for the consumer (Task 3 env
+     * Decrypt the App's full configuration for the consumer (env
      * assembly): provider-id → plaintext key for every stored provider, plus
      * the model chain. No config → `{ keys: {}, modelChain: null }`. An
      * undecryptable row throws (tamper/misconfiguration is never swallowed).
@@ -1046,7 +1045,7 @@ export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | un
     },
 
     /**
-     * The App's verified-model cache (plan 31 Interfaces read face): every
+     * The App's verified-model cache (the Interfaces read face): every
      * app_provider_models row for the App, provider-ascending — the settings
      * loader's dropdown source (one cache row = one verified provider whose
      * options render as selector literal grammar `provider/model`; the row's
@@ -1069,7 +1068,7 @@ export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | un
     },
 
     /**
-     * The App's chains (settings face, plan 35 T2): every app_model_chains
+     * The App's chains (settings face): every app_model_chains
      * row, name-ascending ("default" sorts first). is_default is exposed as
      * a boolean. Decrypt-free by design — a model selector is
      * configuration, not a secret (the 0006 model_chain rationale).
@@ -1089,7 +1088,7 @@ export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | un
     },
 
     /**
-     * Create or replace one NAMED chain (plan 35 T2, spec §4.4): the name
+     * Create or replace one NAMED chain (spec §4.4): the name
      * must pass assertModelChainName (the reserved "default" row name and
      * any name outside the MODEL_CHAIN_NAME_PATTERN grammar are rejected —
      * the route answers 400 first; this is the backstop) and the chain
@@ -1137,7 +1136,7 @@ export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | un
     },
 
     /**
-     * The App's seat → chain-name map (settings face, plan 35 T2): role →
+     * The App's seat → chain-name map (settings face): role →
      * referenced chain name, only the REFERENCED roles appear; an App with
      * no reference rows yields `{}` (= every seat uses the default chain).
      * Decrypt-free by design — a chain reference is configuration, not a
@@ -1186,8 +1185,8 @@ export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | un
     },
 
     /**
-     * Bulk face for the settings single-save (the plan-17 4-row editor,
-     * now chain references, plan 35 T2): validates EVERY (role, chain_name)
+     * Bulk face for the settings single-save (the 4-row editor,
+     * now chain references): validates EVERY (role, chain_name)
      * entry BEFORE any write (one bad entry → typed throw, zero rows
      * touched), then applies the whole map as ONE atomic `db.batch`.
      * Each name is canonicalized (whitespace-trimmed) once: the
@@ -1232,7 +1231,7 @@ export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | un
     },
 
     /**
-     * The App's per-role model overrides for the consumer (plan 35 T2, spec
+     * The App's per-role model overrides for the consumer (spec
      * §4.4): role → verbatim chain value, resolved through the seat →
      * chain mapping. Seats with NO reference row (absent = default) and
      * seats referencing the default chain are OMITTED — the runner input
@@ -1250,11 +1249,11 @@ export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | un
       return readModelOverrides(appId);
     },
     /**
-     * Store (or replace) one custom-provider declaration for the App (plan
-     * 23 T2): validates the full AL-23-1/AL-23-2 shape, encrypts the key
+     * Store (or replace) one custom-provider declaration for the App:
+     * validates the full AL-23-1/AL-23-2 shape, encrypts the key
      * INSIDE with the composite-PK AAD, then upserts the (app_id,
      * provider_id) row. The plaintext key is never persisted, logged, or
-     * returned — it exists only as the api_key_enc envelope (the Task 3
+     * returned — it exists only as the api_key_enc envelope (the
      * consumer decrypts it with the same AAD). model_ids is stored as a
      * TEXT JSON array (AL-23-1 DDL). An invalid declaration throws
      * InvalidCustomProviderError / ProviderKeyTooLongError before any
@@ -1268,11 +1267,11 @@ export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | un
      * zero rows and throws the cap error. The pre-check below stays as the
      * fast 400 path (defense in depth, both layers).
      * The upsert maintains the row's write time from ONE clock read (the
-     * 0012 T1 convention): a fresh insert writes updated_at == created_at;
+     * migration-0012 convention): a fresh insert writes updated_at == created_at;
      * re-declaring moves both forward.
      */
     async upsertCustomProvider(appId: string, decl: AppCustomProvider, plainKey: string): Promise<void> {
-      // Plan 37: the collision vocabulary is the App's SELECTED image's
+      // The collision vocabulary is the App's SELECTED image's
       // capability host ids (omp: ark-plan) — resolved here so the backstop
       // stays self-contained for direct callers (one read per declaration
       // write, the same posture as the cap-count SELECT below).
@@ -1303,7 +1302,7 @@ export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | un
         // App is under the cap — a concurrent save that won the last slot
         // makes this one match zero rows (changes === 0) and the cap error
         // is thrown instead of a silent over-cap insert. One clock read for
-        // both timestamps (the 0012 T1 convention, same as the upsert).
+        // both timestamps (the migration-0012 convention, same as the upsert).
         const res = await db
           .prepare(
             `WITH now AS (SELECT datetime('now') AS ts)
@@ -1351,10 +1350,10 @@ export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | un
     },
 
     /**
-     * The settings-page list face (plan 23 T2): every declaration for the
+     * The settings-page list face: every declaration for the
      * App, provider_id-ascending, as the decrypt-free AppCustomProvider
      * shape — the key material NEVER appears (it exists only as the
-     * api_key_enc envelope; the Task 3 consumer decrypts it separately).
+     * api_key_enc envelope; the consumer decrypts it separately).
      * model_ids is parsed from the stored TEXT JSON array; a malformed row
      * throws (fail-loud, the getAppConfig tamper convention).
      */
@@ -1372,7 +1371,7 @@ export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | un
     },
     /**
      * Decrypt the App's custom-provider declarations for the consumer
-     * (plan 23 Task 3 models synthesis): the getAppConfig analogue for
+     * (the models-synthesis face): the getAppConfig analogue for
      * app_custom_providers — every declaration plus its decrypted key,
      * provider_id-ascending. An undecryptable row throws (tamper /
      * misconfiguration is never swallowed, the getAppConfig convention).

@@ -1,10 +1,10 @@
 /**
- * GitHub App Manifest flow (plan 11 B1: start → GitHub form POST →
- * callback → code conversion → encrypted hold cookie; plan 13 B5 T3:
- * commit writes the encrypted `github_apps` D1 row — the dashboard's
+ * GitHub App Manifest flow (start → GitHub form POST →
+ * callback → code conversion → encrypted hold cookie; the commit writes
+ * the encrypted `github_apps` D1 row — the dashboard's
  * Cloudflare API dependency is retired, spec § Multi-App 契约).
  *
- * Architect locks (spec dashboard-b1-manifest.md § L6/L7/L8/L9 + plan 13):
+ * Architect locks (spec dashboard-b1-manifest.md § L6/L7/L8/L9 + L1):
  * - CSRF state cookie `__Host-mstar-manifest-state`: reuses the B0 HMAC
  *   signValue/verifyValue discipline (createStateValue), single-use,
  *   Max-Age 600; DISTINCT from B0's `__Host-mstar-oauth-state`. `state`
@@ -21,11 +21,11 @@
  *   `__Host-mstar-manifest-hold`, key = HKDF-SHA256(DASHBOARD_SESSION_SECRET,
  *   info "mstar-manifest-hold"), Max-Age 600; bound to the callback session
  *   login, kept across retryable commit outcomes (500/502), burned on
- *   success, login mismatch, bad hold, or logout (T2).
+ *   success, login mismatch, bad hold, or logout.
  *   Payload NEVER enters HTML, logs, or D1. B5: the payload also carries
  *   the slug so the commit can write the D1 row after the state cookie is
  *   burned.
- * - Storage口径 (plan 13 lock L1): the conversion PEM is stored VERBATIM
+ * - Storage口径 (lock L1): the conversion PEM is stored VERBATIM
  *   (encrypted) — normalization to PKCS#8 stays at createReviewCommenter
  *   construction on the consumer side.
  */
@@ -101,7 +101,7 @@ export function buildAppName(login: string): string {
   return `${APP_NAME_PREFIX}${login}`.slice(0, GITHUB_APP_NAME_MAX_LENGTH);
 }
 
-// --- webhook slug (plan 13 B5: per-App webhook URL, spec § Multi-App 契约) ---
+// --- webhook slug (per-App webhook URL, spec § Multi-App 契约) ---
 
 /** Per-App slug prefix; the slug routes `/webhook/{slug}` and names the row. */
 export const APP_SLUG_PREFIX = "mstar-inspector-";
@@ -127,9 +127,9 @@ export function randomSlugSuffix(length = 4): string {
 }
 
 /**
- * Manifest JSON for the locked review permission set (plan 67 §7.6:
+ * Manifest JSON for the locked review permission set (spec §7.6:
  * `contents: "write"` is authorized for Worker-side thread resolution —
- * Worker-only; plan 68's `checks: "write"` covers the advisory Check run;
+ * Worker-only; the `checks: "write"` grant covers the advisory Check run;
  * mirrors the `.env.example` permission comment; no extra permissions, no
  * OAuth App fields, no old-App migration branch).
  * `redirect_url` stays the bare callback — CSRF `state` rides the
@@ -301,7 +301,7 @@ async function holdKey(secret: string): Promise<CryptoKey> {
 }
 
 /**
- * Build the plaintext hold payload (plan 31 T5: the callback auto-commit
+ * Build the plaintext hold payload (the callback auto-commit
  * consumes the payload directly while ALSO minting the cookie string, so
  * the payload construction is shared instead of built twice).
  */

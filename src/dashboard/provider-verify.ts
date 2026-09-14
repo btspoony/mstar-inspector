@@ -1,6 +1,6 @@
 /**
- * Provider-key verification for the provider-first settings flow (plan 31
- * Task 3, spec v1.1-dashboard-platform §6.1/6.2) — dashboard side.
+ * Provider-key verification for the provider-first settings flow
+ * (spec v1.1-dashboard-platform §6.1/6.2) — dashboard side.
  *
  * The settings save route verifies a freshly typed key BEFORE anything is
  * stored: built-in providers hit their list-models endpoint (or a documented

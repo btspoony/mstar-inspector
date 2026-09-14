@@ -1,5 +1,5 @@
 /**
- * English dictionary — the i18n source of truth (plan 29 T2).
+ * English dictionary — the i18n source of truth.
  *
  * Contract:
  *   - `Dictionary` is derived from this object via `typeof en`; `zh-CN.ts`
@@ -9,14 +9,14 @@
  *   - Values are PLAIN TEXT (no HTML entities, no markup). Consumers escape
  *     before rendering — SSR pages via escapeHtml, the SPA via JSX.
  *   - `{placeholder}` tokens are interpolated by `t(locale, key, params)`.
- *   - This is the single string table for the whole dashboard: plan 29
- *     Tasks 4/5 and plans 30/31 APPEND keys here — they never start a
+ *   - This is the single string table for the whole dashboard: later
+ *     feature work APPENDs keys here — they never start a
  *     second table.
  *   - The `notice` slot mirrors the `PageNotice` type (kind × message);
- *     after the plan-46/49 dead-key purges it carries only the member-flow
+ *     after the dead-key purges it carries only the member-flow
  *     messages (the retired SSR settings routes rendered plain text).
  *   - Manifest copy deliberately carries NO REVIEW_ENABLED user-facing
- *     sentence (plan 29 T5 removes it; per-App pause is the only switch).
+ *     sentence (per-App pause is the only switch).
  */
 export const en = {
   nav: {
@@ -27,7 +27,7 @@ export const en = {
     members: "Members",
     /** Label of the OTHER locale — the toggle target (en shows 中文, zh_CN shows EN). */
     language: "中文",
-    /** Theme toggle (plan 41/44): icon-only button; state + action live in the aria copy. */
+    /** Theme toggle: icon-only button; state + action live in the aria copy. */
     /** {mode} = current effective theme, {target} = the theme clicking switches to. */
     themeToggleAria: "Display theme: {mode}. Activate to switch to {target}.",
     themeDark: "dark",
@@ -98,7 +98,7 @@ export const en = {
   apps: {
     heading: "Apps",
     create: "Create GitHub App",
-    /** Plan 58 A6: composed empty state (EmptyState title + description). */
+    /** Composed empty state (EmptyState title + description). */
     emptyTitle: "No Apps yet",
     emptyDescription: "Create GitHub App connects your first one.",
     settings: "Settings",
@@ -157,7 +157,7 @@ export const en = {
     adminOnly: "This page is restricted to dashboard admins.",
     roleAdmin: "admin",
     roleMember: "member",
-    /** Plan 58 A6: composed empty state — no-action variant (the invite form is the path). */
+    /** Composed empty state — no-action variant (the invite form is the path). */
     emptyTitle: "No members yet",
     emptyDescription: "Invite the first member with the form above.",
   },
@@ -189,7 +189,7 @@ export const en = {
     seriesReviews: "Reviews",
     seriesFindings: "Findings",
     trendSummary: "In this window: {reviews} · {findings}",
-    /** Plan 60 A4: composed zero-review empty state — no-action variant (reviews arrive via installed Apps). */
+    /** Composed zero-review empty state — no-action variant (reviews arrive via installed Apps). */
     emptyTitle: "No reviews yet",
     emptyDescription: "Insights fill in as your installed GitHub Apps review pull requests.",
   },
@@ -197,7 +197,7 @@ export const en = {
     title: "App settings",
     backToApps: "Back to Apps",
     /**
-     * Plan 59 T1 (AD-591): section-group eyebrow labels for the two tier
+     * (AD-591): section-group eyebrow labels for the two tier
      * zones — identity/status (Tier 1) and configuration (Tier 2).
      */
     group: {
@@ -257,7 +257,7 @@ export const en = {
       not_in_verified_models: "Selector {selector} is not in this App's verified models.",
     },
     /**
-     * Plan 45 T4: machine-readable 400 faces for the settings POST family.
+     * Machine-readable 400 faces for the settings POST family.
      * The worker emits `{ key, message, params? }` — `message` is this en
      * face (interpolated server-side, also the fallback when the SPA does
      * not know the key); the SPA resolves `key` in the operator's locale.
@@ -388,7 +388,7 @@ export const en = {
     runtimeImageValue: "This App's reviews run on the {id} runtime image.",
     saveRuntimeImage: "Save runtime image",
     /**
-     * Plan 53 A7: GitHub identity card. `{name}`/`{id}`/`{time}` carry the
+     * GitHub identity card. `{name}`/`{id}`/`{time}` carry the
      * synced profile name, the numeric App id, and a relative synced-at time
      * (formatRelativeTime output) — nullable server fields degrade per-field,
      * so each key renders only when its value exists.
@@ -398,13 +398,13 @@ export const en = {
       "The identity GitHub reports for this App. Profile fields are cached from the App's GitHub settings page; open the name to manage it there.",
     appInfoAppId: "App ID: {id}",
     appInfoViewOnGithub: "View {name} on GitHub",
-    // Plan 62 A5 (AD-623): the manager-face label — the name link targets the
+    // (AD-623): the manager-face label — the name link targets the
     // App's GitHub settings page, so the accessible name says "manage", not
     // "view". Member face keeps appInfoViewOnGithub.
     appInfoManageOnGithub: "Manage {name} on GitHub",
     appInfoSynced: "Synced {time}",
     /**
-     * Plan 51 T3: deployment version footer. `{version}` carries the
+     * Deployment version footer. `{version}` carries the
      * v-prefixed display form (`v${APP_VERSION}`) — the same shape as the
      * /healthz field and release tags.
      */

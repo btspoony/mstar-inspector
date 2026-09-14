@@ -1,7 +1,7 @@
 /**
- * Finding fingerprint normalization (plan 21 Task 1, AL-21-1) — the single
+ * Finding fingerprint normalization (AL-21-1) — the single
  * source of truth for the deterministic fingerprint written to
- * `findings.fingerprint` (persist-path consumer: `artifact-store.ts`, Task 2).
+ * `findings.fingerprint` (persist-path consumer: `artifact-store.ts`).
  *
  * Locked input domain (architect verdict AL-21-1):
  *

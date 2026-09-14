@@ -1,6 +1,6 @@
 /**
  * Selector membership + dropdown composition for the provider-first
- * settings flow (plan 31 Task 4, spec §6.3). Pure functions over the
+ * settings flow (spec §6.3). Pure functions over the
  * verified-model cache and custom-provider declarations — dashboard-side,
  * zero pipeline/review imports (Q2).
  *
@@ -34,7 +34,7 @@ export type ModelOptionGroup = {
 };
 
 /**
- * Settings dropdown source (plan 31 Interfaces): verified-cache rows first
+ * Settings dropdown source (the Interfaces face): verified-cache rows first
  * (the row's `provider` IS the selector prefix, including `ark-plan`), then
  * custom declarations. Probe-only rows (empty models) yield no options —
  * the UI shows the no-discovery hint instead of a free-text box.
