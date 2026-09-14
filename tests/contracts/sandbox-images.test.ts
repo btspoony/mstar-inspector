@@ -1,5 +1,5 @@
 /**
- * Source-contract locks for the sandbox-image registry (plan 37 QC fix wave
+ * Source-contract locks for the sandbox-image registry (QC fix wave
  * 1). The registry (src/contracts/sandbox-images.ts) is the zero-import SSOT;
  * three consumers mirror it by hand across boundaries a runtime import cannot
  * cross — each lock below turns that drift into a failing gate:

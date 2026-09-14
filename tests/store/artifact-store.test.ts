@@ -1,5 +1,5 @@
 /**
- * ArtifactStore adapter tests (plan 07 Task 4) — `src/store/artifact-store.ts`
+ * ArtifactStore adapter tests — `src/store/artifact-store.ts`
  * against the bun:sqlite test double running the real migration SQL
  * (0001 → 0005 via createMigratedTestD1 — the put INSERT binds
  * `reviews.app_id`, so the full production-shaped schema is required; DDL
@@ -9,11 +9,11 @@
  *   - put writes the v1-caliber row: envelope = full JSON, raw_output NULL,
  *     skill_version pinned, findings.severity = mergeClass (the single
  *     vocab-switch mapping point)
- *   - per-App attribution (plan 13 QC F-001; plan 24 Task 1: REQUIRED): the
+ * - per-App attribution (QC F-001; REQUIRED): the
  *     put doc's appId lands in reviews.app_id (FK-valid); an unknown appId
  *     is FK-rejected with zero rows written; historical NULL rows (direct
  *     SQL) stay readable — the column stays nullable, zero DDL
- *   - version records (plan 18 Task 1): a put carrying `model`/`provider`
+ * - version records: a put carrying `model`/`provider`
  *     lands them in the columns; omitted fields persist NULL (byte-compat)
  *   - second put for the same sha resolves idempotently — still 1 review
  *     row, no duplicate findings, the first-written row is NOT overwritten
@@ -121,8 +121,8 @@ describe("createArtifactStore().put", () => {
     expect(JSON.parse(row.envelope!)).toEqual(payload());
     expect(row.raw_output).toBeNull();
 
-    // Version records (plan 18 Task 1): omitted put-input fields persist
-    // NULL — byte-compat for pre-plan-18 callers.
+    // Version records: omitted put-input fields persist
+    // NULL — byte-compat for pre-per-App callers.
     expect(row.model).toBeNull();
     expect(row.provider).toBeNull();
 
@@ -151,7 +151,7 @@ describe("createArtifactStore().put", () => {
     });
   });
 
-  test("writes the normalized computed fingerprint for findings without a hint (plan 21 T2)", async () => {
+  test("writes the normalized computed fingerprint for findings without a hint", async () => {
     const db = createSeededTestD1();
     const store = createArtifactStore(db);
     const findings: MstarReviewFinding[] = [
@@ -183,7 +183,7 @@ describe("createArtifactStore().put", () => {
     }
   });
 
-  test("hint findings keep the hint verbatim, even when the normalized value would differ (plan 21 T2)", async () => {
+  test("hint findings keep the hint verbatim, even when the normalized value would differ", async () => {
     const db = createSeededTestD1();
     const store = createArtifactStore(db);
     const findings: MstarReviewFinding[] = [
@@ -201,11 +201,11 @@ describe("createArtifactStore().put", () => {
     );
   });
 
-  test("era semantics: put never backfills historical NULL fingerprints (plan 21)", async () => {
+  test("era semantics: put never backfills historical NULL fingerprints", async () => {
     const db = createSeededTestD1();
     const store = createArtifactStore(db);
     // Simulate a pre-fingerprint era review row (envelope NULL = M1-era) with
-    // a NULL-fingerprint finding — the shape put() wrote before plan 21.
+    // a NULL-fingerprint finding — the shape put() wrote before the era gate.
     const oldReviewId = crypto.randomUUID();
     db.raw
       .prepare(
@@ -264,7 +264,7 @@ describe("createArtifactStore().put", () => {
     expect(row.fingerprint).toBe(computeFindingFingerprint(finding));
   });
 
-  test("per-App put persists app_id; historical NULL rows stay NULL (plan 24: appId required, zero DDL)", async () => {
+  test("per-App put persists app_id; historical NULL rows stay NULL (appId required, zero DDL)", async () => {
     const db = createSeededTestD1();
     const store = createArtifactStore(db);
 
@@ -274,7 +274,7 @@ describe("createArtifactStore().put", () => {
       app_id: string | null;
     };
     expect(perApp.app_id).toBe(TEST_APP_ID);
-    // Historical NULL semantics (pre-plan-24 rows) are preserved at the
+    // Historical NULL semantics (pre-per-App rows) are preserved at the
     // column level: an unattributed put is now impossible at the type layer,
     // so the NULL row is asserted via a direct SQL insert (the column stays
     // nullable — zero DDL, AL-24-4).
@@ -290,7 +290,7 @@ describe("createArtifactStore().put", () => {
     expect(legacy.app_id).toBeNull();
   });
 
-  test("version records: a put carrying model/provider persists them; explicit nulls stay NULL (plan 18 Task 1)", async () => {
+  test("version records: a put carrying model/provider persists them; explicit nulls stay NULL", async () => {
     const db = createSeededTestD1();
     const store = createArtifactStore(db);
 
@@ -454,7 +454,7 @@ describe("createArtifactStore().put", () => {
     const db = createSeededTestD1();
     // Inject a failure on the SECOND findings insert (title 'boom') to prove
     // the review row written earlier in the same batch is rolled back too —
-    // a partial review must never survive (plan 05 T2 review I1, absorbed).
+    // a partial review must never survive (review I1, absorbed).
     db.raw.exec(
       `CREATE TRIGGER fail_findings BEFORE INSERT ON findings
        WHEN NEW.title = 'boom' BEGIN SELECT RAISE(ABORT, 'injected findings failure'); END;`,

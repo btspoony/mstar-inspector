@@ -1,5 +1,5 @@
 /**
- * Plan 29 T6: the insights HTML panel is retired — /dashboard/insights is
+ * the insights HTML panel is retired — /dashboard/insights is
  * SPA-owned. The data contract lives on the JSON face
  * (GET /dashboard/api/insights/summary, tested in dashboard.test.ts); this
  * file pins the route-level behavior: an HTML navigation GET is served by
@@ -40,7 +40,7 @@ function makeEnv(overrides: Partial<Env> = {}): Env {
   } as Env);
 }
 
-describe("GET /dashboard/insights (plan 29 T6: SPA-owned)", () => {
+describe("GET /dashboard/insights (SPA-owned)", () => {
   test("HTML navigation GET is served by SPA dispatch (boot-injected index)", async () => {
     const session = await createSessionValue("octocat", null, SESSION_SECRET);
     const res = await worker.fetch(

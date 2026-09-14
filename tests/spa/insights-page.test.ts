@@ -1,37 +1,37 @@
 /**
- * Plan 36 T2: `/dashboard/insights` is the review-records surface —
+ * `/dashboard/insights` is the review-records surface —
  * segmented window (INSIGHTS_WINDOWS) + shadcn Select repo filter.
- * Plan 40 T2: the behavioral pins for the records-page helpers (window
+ * the behavioral pins for the records-page helpers (window
  * normalization, searchHref, verdictLine) were rehomed here after the
  * insights-home module retired — they now live in pages/data.ts.
- * Plan 49 T2: the URL↔filter re-sync pins — after same-route navigation or
+ * the URL↔filter re-sync pins — after same-route navigation or
  * history traversal the filter state re-derives from the location.
- * Plan 56 T3: the three stat sections render as charts (components/charts).
+ * the three stat sections render as charts (components/charts).
  * This file pins the assembled page faces — chart wiring (AD-561 token
  * colors, bar-end counts discriminated from axis ticks, dual-series legend,
  * localized date axis, role/aria), the empty faces (never an empty-axis
- * svg), and the bilingual copy; the plan-45 proportional-bar pin is
+ * svg), and the bilingual copy; the proportional-bar pin is
  * superseded in place.
- * Plan 60 T2/T3: the page joins the v0.3 language — SectionCard tiers,
- * heading-24 title, spacing-8 rhythm, the plan-57 state trio — and this
+ * The page joins the v0.3 language — SectionCard tiers,
+ * heading-24 title, spacing-8 rhythm, the shared state trio — and this
  * file carries the finalized AD-601 presentation-supersede ledger (T3.1).
  * The ledger holds exactly TWO entries, both with covering pins here:
- * (1) the plan-56 zero-review face → composed EmptyState (PM amendment in
- * the plan file, 2026-09-10), and (2) the recurringFindings wrapper face →
- * SectionCard tier="secondary" (PM-ratified T2 amendment, 2026-09-10 —
+ * (1) the zero-review face → composed EmptyState (PM amendment,
+ * 2026-09-10), and (2) the recurringFindings wrapper face →
+ * SectionCard tier="secondary" (PM-ratified amendment, 2026-09-10 —
  * content/list form untouched; a bare Card renders Tier-1 elevation inside
  * the Tier-2 group). Everything else is retained zero-supersede; the
- * plan-36/49 URL↔filter pins stay byte-for-byte.
- * Plan 65 T3 (B8): the severity/category cards are daily stacked bar time
+ * The URL↔filter pins stay byte-for-byte.
+ * (B8): the severity/category cards are daily stacked bar time
  * series (StackedBarChart) — the six aggregate-face pins restate on the
  * stacked faces (locked fill-class families, the gray uncategorized
  * fallback, "" coalescing one layer down in chartBuckets, per-card legend
  * slicing for the trend pins), and the aria/text coexistence floor (svg
  * <title> mirror, y-tick text, page-level summary rows) is pinned
  * positively. Per-bar LabelList counts are retired by design: stacked
- * totals read off the y ticks and the tooltip (plan Global Constraint).
- * No DOM runner — same source-scan contract as plan 29 SPA tests.
- * Plan 65 QC fix-1: the page-layer constants face gains the
+ * totals read off the y ticks and the tooltip by design.
+ * No DOM runner — same source-scan contract as SPA tests.
+ * QC fix-1: the page-layer constants face gains the
  * severity/category disjointness pin (the component's grid-read
  * invariant), and the zero-count series drop from the legends
  * (AD-653 legend face; the axis keeps every bucket).
@@ -62,7 +62,7 @@ const page = readFileSync(join(import.meta.dir, "../../src/spa/pages/InsightsPag
 const router = readFileSync(join(import.meta.dir, "../../src/spa/router.tsx"), "utf8");
 
 /**
- * Plan 56 T2 fixture: v1 severity vocabulary + a NULL category row. The
+ * fixture: v1 severity vocabulary + a NULL category row. The
  * severity counts sit outside the severity chart's tick set (max 7 →
  * recharts ticks 0/2/4/6/8), so a bar-end count pin can never be satisfied
  * by axis tick text there; the category counts 9/6 DO sit inside their
@@ -92,8 +92,8 @@ const RECORDS: InsightsSummary = {
     { week_start: "2026-08-17", reviews: 1, findings: 2 },
     { week_start: "2026-08-24", reviews: 2, findings: 4 },
   ],
-  // Plan 65 B3 made the field required (compile fix only — the stale
-  // aggregate-chart face pins above are re-stated by Task 3's stacked
+  // The field was made required (compile fix only — the stale
+  // aggregate-chart face pins above are re-stated by the stacked
   // pins). The single day bucket mirrors the aggregate counts.
   findings_distribution: [
     {
@@ -127,7 +127,7 @@ const chartSlices = (html: string): [string, string, string] => {
 };
 
 /**
- * Plan 65: the stacked cards own an HTML legend row that PRECEDES each svg,
+ * the stacked cards own an HTML legend row that PRECEDES each svg,
  * so svg-boundary slices miss the legend of their own card and pick up the
  * NEXT card's legend instead. The card regions slice by the SectionCardTitle
  * headings (legend + svg together); `chartSlices` above keeps the svg-only
@@ -155,7 +155,7 @@ const segmentY = (html: string, name: string, fillClass: string): number => {
   return Number(y[1]);
 };
 
-describe("records page assembly (plan 36 T2)", () => {
+describe("records page assembly", () => {
   test("window switch is the INSIGHTS_WINDOWS segmented ToggleGroup", () => {
     expect(INSIGHTS_WINDOWS).toEqual(["7", "30", "90"]);
     expect(page).toContain("@/components/ui/toggle-group");
@@ -178,7 +178,7 @@ describe("records page assembly (plan 36 T2)", () => {
   });
 
   test("severity and category series vocabularies are disjoint (component grid-read invariant)", () => {
-    // Plan 65 QC fix-1 (seat-3): StackedBarChart reads
+    // QC fix-1 (seat-3): StackedBarChart reads
     // `by_severity[key] ?? by_category[key] ?? 0` on the invariant that a
     // key lives in exactly one grid — a category slug equal to a
     // merge-class would silently resolve that series to the severity
@@ -196,7 +196,7 @@ describe("records page assembly (plan 36 T2)", () => {
   test("cards and typography are shadcn/Tailwind token driven (no raw hex)", () => {
     expect(page).toContain("@/components/ui/card");
     expect(page).toContain("text-muted-foreground");
-    // Plan 65 T3 supersede: the aggregate BarChart import is retired — both
+    // BarChart retirement: the aggregate import is retired — both
     // stat cards consume StackedBarChart, and the AD-601 severity family
     // maps to the charts.css fill classes in the page-layer
     // SEVERITY_BAR_COLORS (values are class tokens now; the var() resolution
@@ -210,10 +210,10 @@ describe("records page assembly (plan 36 T2)", () => {
     expect(page).not.toMatch(/#[0-9a-fA-F]{3,8}\b/);
   });
 
-  test("severity section renders as a stacked chart with the text coexistence floor (supersedes the plan-45 T1/F-01 + plan-56 label-list pins)", () => {
-    // plan 45 pinned the CSS proportional severity bar (inline width
-    // effective, no basis-full override). Plan 56 replaced that markup with
-    // a chart; plan 63 moved the chart onto recharts (AD-621); plan 65 T3
+  test("severity section renders as a stacked chart with the text coexistence floor (supersedes the earlier proportional-bar + label-list pins)", () => {
+    // pinned the CSS proportional severity bar (inline width
+    // effective, no basis-full override). A later rework replaced that markup with
+    // a chart; the chart later moved onto recharts (AD-621);
     // (B8) restates the guarded faces on the daily stacked time series:
     // the severity token families stay locked, and the aria/text
     // coexistence floor survives the stacking — per-bar counts are retired
@@ -277,7 +277,7 @@ describe("records page assembly (plan 36 T2)", () => {
     );
   });
 
-  test("empty-string category coalesces to the uncategorized face (same as NULL, plan 56 QC F-004)", () => {
+  test("empty-string category coalesces to the uncategorized face (same as NULL, QC F-004)", () => {
     // category: "" is schema-permitted (review/schema.ts) and persists —
     // before the falsy-coalescing fix it rendered a blank bar label. Plan
     // 65: the coalescing moved one layer down — chartBuckets merges the ""
@@ -312,7 +312,7 @@ describe("records page assembly (plan 36 T2)", () => {
     // mapping would render two identically labeled gray segments with
     // split counts. chartBuckets aggregates by the coalesced key before
     // mapping: exactly one uncategorized series carrying the summed count
-    // (plan 56 QC F-004 semantics, one layer down).
+    // (QC F-004 semantics, one layer down).
     const data: InsightsSummary = {
       ...RECORDS,
       findings_by_category: [
@@ -367,7 +367,7 @@ describe("records page assembly (plan 36 T2)", () => {
   });
 
   test("zero-count series drop from the legends; the axis keeps every bucket (AD-653 legend face)", () => {
-    // Plan 65 QC fix-1 (QC F-004 ×3 seats): legend entries render only for
+    // QC fix-1 (QC F-004 ×3 seats): legend entries render only for
     // series with findings in the window — the store's always-present
     // "uncategorized" grid key (AD-652 恒在) is NOT an always-present
     // legend entry, and a zero-count severity series drops its swatch too.
@@ -408,7 +408,7 @@ describe("records page assembly (plan 36 T2)", () => {
 
   test("trend chart: dual-series legend with the preserved AD-601 pair, localized date axis, bucket-derived totals", () => {
     const html = renderRecords("en");
-    // Plan 65: the stacked severity/category cards own HTML legends too, so
+    // the stacked severity/category cards own HTML legends too, so
     // the legend-order pins slice to the trend card (anchored by its title;
     // the summary line and legend live inside it) instead of the whole page
     // — on the full page the severity amber swatch precedes the trend
@@ -445,7 +445,7 @@ describe("records page assembly (plan 36 T2)", () => {
     expect(trend).toContain('aria-label="Weekly trend"');
   });
 
-  test("records surfaces localize bilingually (plan 56 T2)", () => {
+  test("records surfaces localize bilingually", () => {
     const zh = renderRecords("zh_CN");
     expect(zh).toContain("窗口内共 3 次审查 · 6 个发现");
     // The date axis follows the page locale — zh format only, with no en
@@ -457,17 +457,17 @@ describe("records page assembly (plan 36 T2)", () => {
     expect(zh).toContain('aria-label="按严重程度统计的发现"');
   });
 
-  test("records fetch opts into the repos aggregation (plan 36 QC F-001)", () => {
+  test("records fetch opts into the repos aggregation (QC F-001)", () => {
     expect(page).toContain("insightsSummaryUrl(search, true)");
   });
 
-  test("off-set window deep links are rewritten on mount (plan 36 QC F-002)", () => {
+  test("off-set window deep links are rewritten on mount (QC F-002)", () => {
     expect(page).toContain("normalizeWindowSearch");
     expect(page).toContain("window.history.replaceState");
   });
 });
 
-describe("records page chart empty faces (plan 56 T3 / AC2)", () => {
+describe("records page chart empty faces (AC2)", () => {
   // Same window/verdict payload as RECORDS, but every chart-fed array empty.
   const NO_CHART_DATA: InsightsSummary = {
     window_days: 30,
@@ -485,8 +485,8 @@ describe("records page chart empty faces (plan 56 T3 / AC2)", () => {
 
   test("reviews_total 0 → composed EmptyState guidance, never an empty-axis chart (bilingual; AD-601 supersede #1)", () => {
     // AD-601 presentation supersede #1 of 2 (ledger in the file header): the
-    // plan-56 heading-card-only empty face became the plan-57 EmptyState
-    // (plan 60 A4). The guarded regression faces still hold — readable
+    // heading-card-only empty face became the composed EmptyState.
+    // The guarded regression faces still hold — readable
     // composed copy, every stat card suppressed, no chart svg anywhere.
     for (const locale of ["en", "zh_CN"] as const) {
       const html = renderRecords(locale, ZERO_REVIEWS);
@@ -523,7 +523,7 @@ describe("records page chart empty faces (plan 56 T3 / AC2)", () => {
   });
 });
 
-describe("records page URL↔filter re-sync (plan 49 T2 / F-15-02)", () => {
+describe("records page URL↔filter re-sync (F-15-02)", () => {
   test("same-route navigation re-derives the filter from the now-bare location (synthetic popstate)", () => {
     // Sidebar Insights click on a filtered view: navigate() pushes the bare
     // path (query stripped) and then dispatches a synthetic popstate — the
@@ -560,7 +560,7 @@ describe("records page URL↔filter re-sync (plan 49 T2 / F-15-02)", () => {
   });
 });
 
-describe("records page helpers (rehomed plan 30 T3 + plan 36 T1 pins)", () => {
+describe("records page helpers (rehomed + pins)", () => {
   const SUMMARY: InsightsSummary = {
     window_days: 30,
     reviews_total: 4,
@@ -603,7 +603,7 @@ describe("records page helpers (rehomed plan 30 T3 + plan 36 T1 pins)", () => {
     expect(insightsWindow("?window=abc")).toBe("30");
   });
 
-  test("normalizeWindowSearch rewrites off-set windows to the default segment (plan 36 QC F-002)", () => {
+  test("normalizeWindowSearch rewrites off-set windows to the default segment (QC F-002)", () => {
     // Already a segment → unchanged (no URL rewrite needed).
     expect(normalizeWindowSearch("")).toBe("");
     expect(normalizeWindowSearch("?window=7")).toBe("?window=7");
@@ -621,7 +621,7 @@ describe("records page helpers (rehomed plan 30 T3 + plan 36 T1 pins)", () => {
   });
 });
 
-describe("records page copy (plan 36 T2 / AC9)", () => {
+describe("records page copy (AC9)", () => {
   test("records heading and repo Select keys resolve in both locales", () => {
     expect(t("en", "insights.recordsHeading")).toBe("Review records");
     expect(t("zh_CN", "insights.recordsHeading")).toBe("审查记录");
@@ -652,7 +652,7 @@ describe("records page copy (plan 36 T2 / AC9)", () => {
   });
 });
 
-describe("records page on the v0.3 language (plan 60 T2, A2-A5)", () => {
+describe("records page on the v0.3 language (A2-A5)", () => {
   test("stat sections ride the SectionCard tier system (AD-591 consumption; covers AD-601 supersede #2)", () => {
     expect(page).toContain('../components/SectionCard"');
     // Exactly one primary (the stats overview) and four secondary (severity,
@@ -676,12 +676,12 @@ describe("records page on the v0.3 language (plan 60 T2, A2-A5)", () => {
     expect(page).toContain("gap-(--spacing-8)");
   });
 
-  test("page-level states ride the plan-57 trio (plan 60 A4)", () => {
+  test("page-level states ride the shared state trio", () => {
     expect(page).toContain('components/state/PageSkeleton"');
     expect(page).toContain('components/state/EmptyState"');
     expect(page).toContain('components/state/ErrorState"');
     expect(page).toContain('kind="cards"');
-    // The text notices are retired from this page (plan-38/44 channels stay
+    // The text notices are retired from this page (the settings/members channels stay
     // in PageNotice for other pages).
     expect(page).not.toContain("LoadingNotice");
     expect(page).not.toContain("LoadFailedNotice");

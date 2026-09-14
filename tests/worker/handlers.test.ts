@@ -1,5 +1,5 @@
 /**
- * Handler tests — idempotency pre-check + queue enqueue (plan 04 Task 2).
+ * Handler tests — idempotency pre-check + queue enqueue.
  * Mock env: in-memory KV stub + queue send recorder. No real bindings.
  *
  * Product lock (compass S4 / plan Clarify 4): a null `head_sha` must never
@@ -23,7 +23,7 @@ function prPayload(overrides: Partial<ReviewJobPayload> = {}): ReviewJobPayload 
     head_sha: HEAD_SHA,
     action: "opened",
     triggered_by: "pull_request",
-    // Required single shape (plan 24 Task 1) — a reference, never a credential.
+    // Required single shape — a reference, never a credential.
     appRef: { appId: "11111111-2222-3333-4444-555555555555" },
     ...overrides,
   };
@@ -273,7 +273,7 @@ describe("payload hygiene — no secrets", () => {
       head_sha: true,
       action: true,
       triggered_by: true,
-      // The App attribution reference (plan 24 Task 1) — an id, never a secret.
+      // The App attribution reference — an id, never a secret.
       appRef: true,
     };
     for (const payload of sent) {

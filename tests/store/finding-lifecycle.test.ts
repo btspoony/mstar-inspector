@@ -1,5 +1,5 @@
 /**
- * Finding lifecycle store tests (plan 67 Task 1, spec review-lifecycle
+ * Finding lifecycle store tests (spec review-lifecycle
  * §7.1/§7.2/§7.7/§7.11.1) — `src/store/finding-lifecycle.ts` against the
  * bun:sqlite double running the real migration SQL (0001 → 0020 via
  * createMigratedTestD1; DDL single sources).

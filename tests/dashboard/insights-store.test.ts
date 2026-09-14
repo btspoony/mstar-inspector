@@ -1,5 +1,5 @@
 /**
- * Plan 22 Task 1 tests: the dashboard insights aggregation store
+ * Unit tests: the dashboard insights aggregation store
  * (src/dashboard/insights-store.ts) — the review-health panel's read face.
  *
  * Locked surface (AL-22-1):
@@ -12,10 +12,10 @@
  *   - weeklyTrend buckets by Monday-anchored UTC week via the portable
  *     `date(reviewed_at, '-' || ((strftime('%w', reviewed_at)+6)%7) || ' days')`
  *     expression (no %G/%V dependency, AL-22-1).
- *   - findingsDistribution (plan 65, AD-652 — additive): zero-filled
+ * - findingsDistribution (AD-652 — additive): zero-filled
  *     day/week grid derived ONLY from the clamped window (<= 30 → day,
  *     else week); week buckets reuse the weeklyTrend week definition.
- *   - recurringTop inlines the plan-21 recurrence semantics (count >= 2
+ * - recurringTop inlines the recurrence semantics (count >= 2
  *     distinct reviews, NULL fingerprints excluded) — parity-locked against
  *     store.recurrenceByFingerprint below (bidirectional anchor with
  *     src/store/artifact-store.ts).
@@ -29,7 +29,7 @@
  * 0011/0012 arrive via the integration merge). The shared date helpers
  * (reviewedAt / mondayOf) live in src/dashboard/insights-dates.ts — the
  * single copy used by the store test, the T2 route test, and the T3 UI test
- * (plan 22 QC W-C).
+ * (QC W-C).
  */
 import { describe, expect, test } from "bun:test";
 import { createInsightsStore } from "../../src/dashboard/insights-store";
@@ -236,7 +236,7 @@ describe("createInsightsStore", () => {
     ]);
   });
 
-  test("recurringTop matches plan-21 semantics (count >= 2, NULL excluded, repos aggregated)", async () => {
+  test("recurringTop matches the recurrence semantics (count >= 2, NULL excluded, repos aggregated)", async () => {
     const db = createMigratedTestD1();
     seedFixture(db);
 
@@ -334,7 +334,7 @@ describe("createInsightsStore", () => {
       weeklyTrend: [],
       recurringTop: [],
       repos: [],
-      // Plan 65: the distribution grid is zero-count-honest, not empty —
+      // the distribution grid is zero-count-honest, not empty —
       // every UTC day of the default 30-day window, all zeros, with only the
       // "uncategorized" fallback in the (empty) category union.
       findingsDistribution: dayGrid(30).map((bucket_start) => ({
@@ -346,7 +346,7 @@ describe("createInsightsStore", () => {
     });
   });
 
-  test("NULL fingerprints never enter recurringTop (era gate parity with plan 21)", async () => {
+  test("NULL fingerprints never enter recurringTop (era gate parity)", async () => {
     const db = createMigratedTestD1();
     insertReview(db, {
       id: "r-1",
@@ -480,7 +480,7 @@ describe("createInsightsStore", () => {
     ]);
   });
 
-  test("repos aggregation is opt-in: skipped ([]) without includeRepos, populated with it (plan 36 QC F-001)", async () => {
+  test("repos aggregation is opt-in: skipped ([]) without includeRepos, populated with it (QC F-001)", async () => {
     const db = createMigratedTestD1();
     seedFixture(db);
 
@@ -491,7 +491,7 @@ describe("createInsightsStore", () => {
     expect(withRepos.repos).toEqual(["acme/widgets", "other/lib"]);
   });
 
-  test("repos is the window-scoped distinct set, independent of the repo filter (plan 36 T2)", async () => {
+  test("repos is the window-scoped distinct set, independent of the repo filter", async () => {
     const db = createMigratedTestD1();
     seedFixture(db);
     insertReview(db, {
@@ -525,9 +525,9 @@ describe("createInsightsStore", () => {
     expect(clamped.repos).toEqual(["acme/widgets", "other/lib"]);
   });
 
-  // --- Plan 65 (AD-652): findingsDistribution --------------------------------
+  // --- (AD-652): findingsDistribution --------------------------------
 
-  test("findingsDistribution: day grid over the default window, zero-filled, ASC (plan 65)", async () => {
+  test("findingsDistribution: day grid over the default window, zero-filled, ASC", async () => {
     const db = createMigratedTestD1();
     seedFixture(db);
 
@@ -578,7 +578,7 @@ describe("createInsightsStore", () => {
     expect(grid.reduce((acc, b) => acc + sum(b.by_category), 0)).toBe(5);
   });
 
-  test("findingsDistribution: week grid for windowDays=90, same week definition as weeklyTrend (plan 65)", async () => {
+  test("findingsDistribution: week grid for windowDays=90, same week definition as weeklyTrend", async () => {
     const db = createMigratedTestD1();
     seedFixture(db);
 
@@ -610,7 +610,7 @@ describe("createInsightsStore", () => {
     expect(grid.reduce((acc, b) => acc + sum(b.by_severity), 0)).toBe(5);
   });
 
-  test("findingsDistribution: granularity derives only from the clamped window (plan 65)", async () => {
+  test("findingsDistribution: granularity derives only from the clamped window", async () => {
     const db = createMigratedTestD1();
 
     for (const [windowDays, granularity] of [
@@ -634,7 +634,7 @@ describe("createInsightsStore", () => {
     expect(clamped.findingsDistribution).toEqual(explicit.findingsDistribution);
   });
 
-  test("findingsDistribution respects the repo filter (plan 65)", async () => {
+  test("findingsDistribution respects the repo filter", async () => {
     const db = createMigratedTestD1();
     seedFixture(db);
 

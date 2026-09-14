@@ -1,8 +1,8 @@
 /**
- * Plan 45 T4: the settings POST family's plain-text 400s carry a
+ * The settings POST family's plain-text 400s carry a
  * machine-readable key — the SPA gets JSON `{ key, message, params? }`
  * (`message` keeps the English face, `params` replays the interpolation in
- * the operator's locale), native form posts keep the plan-29 302, and the
+ * the operator's locale), native form posts keep the legacy 302, and the
  * CARRY-2 verify-route eligibility rejection gains the same keyed face with
  * no new reason value. Static-key bodies carry no `params` field.
  */
@@ -78,7 +78,7 @@ async function postForm(
   );
 }
 
-describe("settings 400 key transport (plan 45 T4)", () => {
+describe("settings 400 key transport", () => {
   test("add-key unknown provider → keyed JSON with the English face and params", async () => {
     const { db } = await seededWorld();
     const res = await postForm(SETTINGS, "mallory", makeEnv(db), {
@@ -170,7 +170,7 @@ describe("settings 400 key transport (plan 45 T4)", () => {
     });
   });
 
-  test("add-template-provider missing Cloudflare account id (plan-42 slot) → keyed JSON", async () => {
+  test("add-template-provider missing Cloudflare account id (the Cloudflare slot) → keyed JSON", async () => {
     const { db } = await seededWorld();
     const res = await postForm(SETTINGS, "mallory", makeEnv(db), {
       op: "add-template-provider",
@@ -207,7 +207,7 @@ describe("settings 400 key transport (plan 45 T4)", () => {
     });
   });
 
-  test("native HTML form post keeps the plan-29 302 — the keyed body is never seen", async () => {
+  test("native HTML form post keeps the legacy 302 — the keyed body is never seen", async () => {
     const { db } = await seededWorld();
     const res = await postForm(
       SETTINGS,
@@ -221,7 +221,7 @@ describe("settings 400 key transport (plan 45 T4)", () => {
   });
 });
 
-describe("CARRY-2: verify-route eligibility rejection gains the keyed face (plan 45 T4)", () => {
+describe("CARRY-2: verify-route eligibility rejection gains the keyed face", () => {
   test("/keys/verify precheck → same key as the settings POST family, reason unchanged", async () => {
     const { db, app } = await seededWorld();
     rawRun(db, "UPDATE github_apps SET sandbox_image_id = 'legacy-runtime' WHERE id = ?", app.id);

@@ -1,5 +1,5 @@
 /**
- * Apps management UI tests (plan 13 B5 T3, spec § Multi-App 契约 + § IA).
+ * Apps management UI tests (spec § Multi-App 契约 + § IA).
  *
  * `GET /dashboard/apps` is member-visible (slug, numeric App id, status,
  * creator — never the encrypted columns or row ids); the pinned POST action
@@ -12,9 +12,9 @@
  *
  * The D1 double is the real bun:sqlite helper over migrations
  * 0001/0002 + 0003–0009 + 0012 (production-shaped, filename order — 0006 backs the
- * per-App config tables the settings page reads; 0008 is plan 16's per-App
+ * per-App config tables the settings page reads; 0008 adds the per-App
  * ops columns behind the pause toggle and the install-health panel; 0009 is
- * plan 17's app_model_roles, read on every settings render by the Role
+ * app_model_roles, read on every settings render by the Role
  * models editor).
  */
 import { describe, expect, test } from "bun:test";
@@ -92,7 +92,7 @@ async function seedApp(
 }
 
 /**
- * Seeded world (plan 12 membership semantics + plan 13 apps):
+ * Seeded world (membership semantics + apps):
  *   octocat = admin; mallory owns her App; ada owns hers; hubot owns none.
  */
 async function seededWorld(): Promise<ReturnType<typeof createTestD1>> {
@@ -129,7 +129,7 @@ async function get(path: string, cookie: string, env: Env): Promise<Response> {
   return await worker.fetch(new Request(`https://worker.local${path}`, { headers: { Cookie: cookie } }), env);
 }
 
-// Plan 29 T6/T7: apps/settings HTML GETs are SPA-owned (shared spa helper).
+// SPA ownership: apps/settings HTML GETs are SPA-owned (shared spa helper).
 
 async function post(path: string, cookie: string, env: Env): Promise<Response> {
   return await worker.fetch(
@@ -153,7 +153,7 @@ function reviewEnabled(db: ReturnType<typeof createAppsUiD1>, slug: string): num
   return row?.review_enabled ?? null;
 }
 
-describe("GET /dashboard/apps (plan 33 T2: enumerated SPA route)", () => {
+describe("GET /dashboard/apps (enumerated SPA route)", () => {
   test("HTML navigation GET is served by SPA dispatch (boot-injected index)", async () => {
     const db = await seededWorld();
     const res = await htmlGet("/dashboard/apps", `${SESSION_COOKIE}=${await sessionCookie("hubot")}`, withSpaAssets(makeEnv(db)));
@@ -285,7 +285,7 @@ describe("POST /dashboard/apps/:slug/disable|enable|delete (pinned action paths)
   });
 });
 
-describe("POST /dashboard/apps/:slug/pause|resume (plan 16, per-App review pause)", () => {
+describe("POST /dashboard/apps/:slug/pause|resume (per-App review pause)", () => {
   test("guard covers the pinned routes: no session → 302 to login, zero mutation", async () => {
     const db = await seededWorld();
     for (const path of ["pause", "resume"]) {
@@ -393,7 +393,7 @@ describe("POST /dashboard/apps/:slug/pause|resume (plan 16, per-App review pause
 
 });
 
-describe("GET /dashboard/apps/:slug/settings (plan 29 T6: SPA-owned)", () => {
+describe("GET /dashboard/apps/:slug/settings (SPA-owned)", () => {
   const SETTINGS = "/dashboard/apps/mstar-inspector-mallory/settings";
   const ownerCookie = async () => `${SESSION_COOKIE}=${await sessionCookie("mallory")}`;
 
@@ -414,7 +414,7 @@ describe("GET /dashboard/apps/:slug/settings (plan 29 T6: SPA-owned)", () => {
   });
 });
 
-describe("Apps list → App settings wayfinding (plan 40 T2)", () => {
+describe("Apps list → App settings wayfinding", () => {
   const APPS_SOURCE = join(import.meta.dir, "../../src/spa/pages/AppsPage.tsx");
 
   test("each App row carries the /dashboard/apps/:slug/settings deep link, and that route resolves as App settings", () => {
@@ -441,9 +441,9 @@ describe("Apps list → App settings wayfinding (plan 40 T2)", () => {
     expect(t("zh_CN", "apps.openAria", { slug: "acme" })).toBe("打开 acme 设置");
   });
 
-  test("the empty Apps state stays honest: composed create guidance, creation is the only path (plan 58 A4)", () => {
+  test("the empty Apps state stays honest: composed create guidance, creation is the only path", () => {
     const source = readFileSync(APPS_SOURCE, "utf8");
-    // EmptyState title + description copy (plan 58 A6 keys).
+    // EmptyState title + description copy (keys).
     expect(source).toContain('t(locale, "apps.emptyTitle")');
     expect(source).toContain('t(locale, "apps.emptyDescription")');
     expect(t("en", "apps.emptyTitle")).toContain("No Apps yet");
@@ -457,7 +457,7 @@ describe("Apps list → App settings wayfinding (plan 40 T2)", () => {
     expect(source).toContain('action={<CreateAppButton locale={locale} />}');
   });
 
-  test("loading and load-failure feedback ride the plan-57 state trio (plan 58 A4)", () => {
+  test("loading and load-failure feedback ride the state trio", () => {
     const source = readFileSync(APPS_SOURCE, "utf8");
     expect(source).toContain('<PageSkeleton locale={locale} kind="table" />');
     // Retry is wired to the page's own load function.

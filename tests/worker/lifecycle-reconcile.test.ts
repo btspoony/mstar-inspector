@@ -1,5 +1,5 @@
 /**
- * M8 recovery reconciler tests (plan 67 Task 5, spec review-lifecycle
+ * M8 recovery reconciler tests (spec review-lifecycle
  * §7.11/§7.11.1) — src/worker/lifecycle-reconcile.ts over the REAL migration
  * DDL (bun:sqlite D1 double, tests/store/helpers.ts) with the reviewer
  * surface injected (no GitHub, no credentials in tests).

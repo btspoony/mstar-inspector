@@ -1,5 +1,5 @@
 /**
- * GitOps command builder tests (plan 06 QC fix round 1 / qc2 F-001) — the
+ * GitOps command builder tests (QC fix round 1 / qc2 F-001) — the
  * shell-injection surface. Every payload-derived field (owner/repo/prNumber/
  * cloneDir) must be allowlisted and single-quoted before interpolation; any
  * metacharacter fails closed with a descriptive error BEFORE a shell string
@@ -44,7 +44,7 @@ describe("gitops command builders", () => {
     expect(diffCommand("acme", "widgets", 42, "/workspace/pr.diff")).toBe(
       shellCommand("gh pr diff '42' --repo 'acme/widgets' > '/workspace/pr.diff'"),
     );
-    // Plan 07 T5: the runner consumes the runtime envelope path — --level +
+    // the runner consumes the runtime envelope path — --level +
     // --input reconFacts JSON; the diff feeds the numstat partition universe.
     expect(numstatCommand("/workspace/pr.diff")).toBe(shellCommand("git apply --numstat '/workspace/pr.diff'"));
     expect(writeJsonCommand("/workspace/review-input.json", "eyJhIjoxfQ==")).toBe(
@@ -65,7 +65,7 @@ describe("gitops command builders", () => {
     expect(() => writeJsonCommand("/workspace/review-input.json", "ey Jh")).toThrow(/unsafe base64 content/);
   });
 
-  test("readRecheckCommand bounds the read at 262,144 bytes and probes for overflow (plan 67 T3)", () => {
+  test("readRecheckCommand bounds the read at 262,144 bytes and probes for overflow", () => {
     // Fixed audited path shape: head stops the content stream at the bound,
     // tail probes byte bound+1 → last line 1 = overflow, 0 = exact fit.
     expect(readRecheckCommand("/tmp/mstar-recheck.json")).toBe(
@@ -123,7 +123,7 @@ describe("gitops command builders", () => {
     }
   });
 
-  test("runnerCommand appends the optional --recheck-out flag quoted (plan 67 T3)", () => {
+  test("runnerCommand appends the optional --recheck-out flag quoted", () => {
     expect(
       runnerCommand("/opt/runner/src/review/runner.ts", "quick", "/workspace/review-input.json", "/tmp/mstar-recheck.json"),
     ).toBe(

@@ -1,5 +1,5 @@
 /**
- * Bounded discussion capture + model-context assembly tests (plan 67 Task 2,
+ * Bounded discussion capture + model-context assembly tests (
  * spec review-lifecycle §7.8) — `src/pipeline/discussion-context.ts`.
  *
  * Behaviors covered (brief verification list):

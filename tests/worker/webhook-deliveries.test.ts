@@ -1,5 +1,5 @@
 /**
- * webhook_deliveries tests (plan 20 Task 1, architect verdict AL-20-1) —
+ * webhook_deliveries tests (architect verdict AL-20-1) —
  * migration 0011 + the apps-store delivery face + the per-App webhook
  * face's best-effort recording.
  *
@@ -322,12 +322,12 @@ describe("apps-store delivery face (recordDelivery / deliverySummary / listRecen
   });
 });
 
-describe("per-App webhook face — best-effort delivery recording (plan 20)", () => {
+describe("per-App webhook face — best-effort delivery recording", () => {
   function createMigratedD1(withDeliveries = true): ReturnType<typeof createTestD1> {
     const db = createTestD1();
-    // 0008 (plan 16): the github_apps ops columns (review_enabled /
+    // 0008: the github_apps ops columns (review_enabled /
     // last_webhook_at) the pause gate + touch read and write on every
-    // delivery; 0011 (plan 20) is the delivery table under test — omitted
+    // delivery; 0011 is the delivery table under test — omitted
     // for the best-effort failure fixture.
     const names = ["0004_github_apps.sql", "0005_reviews_app_id.sql", "0008_github_apps_ops.sql"];
     if (withDeliveries) {
@@ -670,7 +670,7 @@ describe("per-App webhook face — best-effort delivery recording (plan 20)", ()
     const { queue, sent } = makeQueue();
     const body = JSON.stringify(PR_PAYLOAD);
 
-    // Emergency brake (REVIEW_ENABLED exactly "false" — plan 31 AC4a) returns
+    // Emergency brake (REVIEW_ENABLED exactly "false" — AC4a) returns
     // before the slug lookup.
     const envKill = makeEnv(db, { REVIEW_QUEUE: queue as never, REVIEW_ENABLED: "false" });
     const resKill = await postWebhook("/webhook/app-x", body, await sigHeaders("secret-x", body), envKill);

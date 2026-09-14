@@ -1,6 +1,6 @@
 /**
  * Real RSA key material for tests that must reach the HTTP transport
- * (plan 67 T5 fix). A `fakePem`-shaped dummy cannot: `createAppAuth` signs
+ * — a `fakePem`-shaped dummy cannot: `createAppAuth` signs
  * the App JWT with WebCrypto and `importKey` throws on a non-PKCS#8 body, so
  * the request never leaves the process and a fetch/identity seam stays
  * unobservable. Generated once per process and memoized — RSA-2048 keygen

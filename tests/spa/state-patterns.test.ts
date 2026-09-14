@@ -1,7 +1,7 @@
 /**
- * Plan 57 T4: state-pattern trio (AD-582) — PageSkeleton / EmptyState /
+ * state-pattern trio (AD-582) — PageSkeleton / EmptyState /
  * ErrorState under `src/spa/components/state/`. Components are pinned
- * behaviorally through react-dom/server SSR (the plan-53 settings-layout
+ * behaviorally through react-dom/server SSR (the settings-layout
  * idiom, no DOM runner in this stack): role faces, per-kind skeleton
  * shapes and per-kind row defaults, the EmptyState slot composition, the
  * ErrorState default message + retry wiring, i18n key faces in both
@@ -54,7 +54,7 @@ const errorState = (overrides: { locale?: "en" | "zh_CN"; message?: string; onRe
     }),
   );
 
-describe("state trio placement + channel boundary (plan 57 T4 / AD-582)", () => {
+describe("state trio placement + channel boundary (AD-582)", () => {
   test("the trio lives under src/spa/components/state/ as three files", () => {
     for (const file of ["PageSkeleton.tsx", "EmptyState.tsx", "ErrorState.tsx"]) {
       const source = readFileSync(join(spaRoot, "components/state", file), "utf8");
@@ -62,7 +62,7 @@ describe("state trio placement + channel boundary (plan 57 T4 / AD-582)", () => 
     }
   });
 
-  test("the trio does not touch the PageNotice channel (plan 38/44 untouched)", () => {
+  test("the trio does not touch the PageNotice channel (legacy notice channels untouched)", () => {
     const pageNotice = readFileSync(join(spaRoot, "pages/PageNotice.tsx"), "utf8");
     expect(pageNotice).not.toContain('from "../components/state');
     for (const file of ["PageSkeleton.tsx", "EmptyState.tsx", "ErrorState.tsx"]) {

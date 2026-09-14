@@ -1,5 +1,5 @@
 /**
- * Plan 33 T2: shell models per role/locale (no DOM runner in this stack).
+ * shell models per role/locale (no DOM runner in this stack).
  */
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
@@ -18,7 +18,7 @@ import { injectSpaBoot, SPA_BOOT_MARKER, type SpaBoot } from "../../src/spa/boot
 const member: SpaBoot = { locale: "en", login: "mallory", name: "Mallory", role: "member" };
 const admin: SpaBoot = { locale: "zh_CN", login: "octocat", name: "The Octocat", role: "admin" };
 
-describe("shell models (plan 33 T2)", () => {
+describe("shell models", () => {
   test("nav order is Apps → Insights → Members", () => {
     expect(NAV_ITEMS.map((item) => item.href)).toEqual([
       "/dashboard/apps",
@@ -53,7 +53,7 @@ describe("shell models (plan 33 T2)", () => {
     expect(navbar.languageTarget).toBe("en");
     expect(navbar.accountLabel).toBe("The Octocat (octocat)");
     expect(navbar.logoutLabel).toBe("退出登录");
-    // Plan 41: the theme toggle is pure client state rendered directly in
+    // the theme toggle is pure client state rendered directly in
     // Layout's header — the boot-derived navbar model gains no key.
     expect(Object.keys(navbar)).toEqual(["languageLabel", "languageTarget", "accountLabel", "logoutLabel"]);
   });
@@ -82,7 +82,7 @@ describe("shell models (plan 33 T2)", () => {
     expect(navbar.accountLabel).toBeNull();
   });
 
-  test("Apps current is /dashboard, /dashboard/apps and settings, not insights (plan 40)", () => {
+  test("Apps current is /dashboard, /dashboard/apps and settings, not insights", () => {
     expect(isNavCurrent("/dashboard/apps", "/dashboard")).toBe(true);
     expect(isNavCurrent("/dashboard/apps", "/dashboard/apps")).toBe(true);
     expect(isNavCurrent("/dashboard/apps", "/dashboard/apps/acme/settings")).toBe(true);
@@ -92,7 +92,7 @@ describe("shell models (plan 33 T2)", () => {
     expect(apps.items.find((item) => item.href === "/dashboard/insights")?.current).toBe(false);
   });
 
-  test("root highlights Apps; Insights current is only /dashboard/insights (plan 40)", () => {
+  test("root highlights Apps; Insights current is only /dashboard/insights", () => {
     expect(isNavCurrent("/dashboard/insights", "/dashboard")).toBe(false);
     expect(isNavCurrent("/dashboard/insights", "/dashboard/insights")).toBe(true);
     const root = buildSidebarModel(member, "/dashboard");
@@ -101,7 +101,7 @@ describe("shell models (plan 33 T2)", () => {
   });
 });
 
-describe("navbar theme toggle (plan 41 T2)", () => {
+describe("navbar theme toggle", () => {
   const layoutSource = () => readFileSync(join(import.meta.dir, "../../src/spa/Layout.tsx"), "utf8");
   const shellSource = () => readFileSync(join(import.meta.dir, "../../src/spa/index.html"), "utf8");
 
@@ -115,7 +115,7 @@ describe("navbar theme toggle (plan 41 T2)", () => {
     expect(source).not.toContain("reload");
   });
 
-  test("theme toggle is icon-only (plan 44 T1): current-mode lucide icon, no visible text label", () => {
+  test("theme toggle is icon-only: current-mode lucide icon, no visible text label", () => {
     const source = layoutSource();
     expect(source).toContain('import { Moon, Sun } from "lucide-react"');
     // The icon depicts the CURRENT mode: Moon in dark, Sun in light.
@@ -130,7 +130,7 @@ describe("navbar theme toggle (plan 41 T2)", () => {
     expect(layoutSource()).toContain(`"${bootstrapKey}"`);
   });
 
-  test("toggle copy is complete in both locales (aria + toggled-state semantics; the visible label key is retired, plan 44)", () => {
+  test("toggle copy is complete in both locales (aria + toggled-state semantics; the visible label key is retired)", () => {
     expect(t("en", "nav.themeToggleAria", { mode: "dark", target: "light" })).toBe(
       "Display theme: dark. Activate to switch to light.",
     );
@@ -144,7 +144,7 @@ describe("navbar theme toggle (plan 41 T2)", () => {
   });
 });
 
-describe("injectSpaBoot (plan 29 T3)", () => {
+describe("injectSpaBoot", () => {
   test("replaces the marker with window.__BOOT__", () => {
     const html = `<head>${SPA_BOOT_MARKER}</head>`;
     const out = injectSpaBoot(html, member);
@@ -161,13 +161,13 @@ describe("injectSpaBoot (plan 29 T3)", () => {
   });
 });
 
-describe("spaClick single-implementation source contract (plan 46 T2)", () => {
+describe("spaClick single-implementation source contract", () => {
   const spaRoot = join(import.meta.dir, "../../src/spa");
 
   test("spaClick is defined exactly once — in src/spa/spa-click.ts", () => {
     const moduleSource = readFileSync(join(spaRoot, "spa-click.ts"), "utf8");
     expect(moduleSource).toContain("export function spaClick(");
-    // No other SPA file carries a spaClick definition (plan 46 T2
+    // No other SPA file carries a spaClick definition.
     // consolidation — per-surface copies were replaced by the shared module).
     const definitionsElsewhere: string[] = [];
     for (const file of new Bun.Glob("**/*.{ts,tsx}").scanSync({ cwd: spaRoot })) {

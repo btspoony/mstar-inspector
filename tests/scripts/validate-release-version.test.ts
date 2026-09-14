@@ -1,6 +1,6 @@
 /**
- * `scripts/validate-release-version.ts` unit tests (plan 50 T2.2 / D4 / D11;
- * plan 51 T2 adds the src/version.ts surface + drift case).
+ * `scripts/validate-release-version.ts` unit tests (D4 / D11;
+ * the ts-const rework adds the src/version.ts surface + drift case).
  *
  * Pins the release gate against temp repos (real `git init` where tag state
  * matters):
@@ -8,7 +8,7 @@
  * - tag form: `v`-prefixed accepted and stripped, non-semver rejected early;
  * - surface alignment: reads the SAME VERSION_SURFACES list prepare bumps
  *   (json kind -> `version` field; ts-const kind -> APP_VERSION), MISSING on
- *   absent file, MISMATCH on stale version — including the plan 51 drift
+ * absent file, MISMATCH on stale version — including the drift
  *   case (package.json bumped while src/version.ts is stale);
  * - tag gate (self-heal, QC A1): `git rev-parse refs/tags/v<version>` — tag
  *   at a different commit fails, tag already at HEAD passes (post-tag rerun
@@ -91,7 +91,7 @@ describe("validateReleaseVersion gate", () => {
     }
   });
 
-  test("drift: package.json bumped while src/version.ts is stale fails with a clear diagnostic (plan 51 AC3)", async () => {
+  test("drift: package.json bumped while src/version.ts is stale fails with a clear diagnostic (AC3)", async () => {
     const root = makeTempRoot();
     try {
       writeAt(root, "package.json", `{\n  "version": "1.0.0"\n}\n`);

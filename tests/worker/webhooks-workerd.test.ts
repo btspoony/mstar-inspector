@@ -7,10 +7,10 @@
  * `node` condition → `timingSafeEqual` → returns false. The `verifySignature`
  * seam reproduces the workerd throw path and locks the behavior both
  * runtimes must share: malformed signature → 401, never 500, with a
- * structured stage-labeled warning (plan 15 log hygiene).
+ * structured stage-labeled warning (log hygiene).
  *
  * The `getWebhooks` accessor is used to lock the module-level verifier
- * cache (F-005 + plan 15 L1): the hot path must not build a `Webhooks`
+ * cache (F-005 + L1): the hot path must not build a `Webhooks`
  * instance per request, cacheKeys are isolated, and a secret mismatch
  * (rotation) rebuilds + replaces the entry.
  */
@@ -55,7 +55,7 @@ describe("verifySignature — workerd hex-decode throw path (F-001)", () => {
     expect(valid).toBe(false);
     expect(warn).toHaveBeenCalledTimes(1);
     const [fields, msg] = warn.mock.calls[0] ?? [];
-    // Plan 15 log hygiene: no literal "unknown" — the direct call passes no
+    // log hygiene: no literal "unknown" — the direct call passes no
     // event, so the warn falls back to the stage label.
     expect(fields).toMatchObject({
       event: "signature_verification_error",
@@ -94,7 +94,7 @@ describe("classifyWebhook — malformed signatures fail closed with 401 (F-001)"
   });
 });
 
-describe("module-level verifier cache (F-005 + plan 15 L1)", () => {
+describe("module-level verifier cache (F-005 + L1)", () => {
   test("getWebhooks returns the same instance across calls for one cacheKey", () => {
     const first = getWebhooks("workerd-test-key", SECRET);
     const second = getWebhooks("workerd-test-key", SECRET);

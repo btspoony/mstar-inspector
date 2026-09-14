@@ -1,12 +1,12 @@
 /**
- * Shared provider mapping tests (bugbot BB-2 → AL-24-5, plan 35 T3; plan 42
- * T1 breadth): the allowlist that maps per-App BYOK provider ids to the env
+ * Shared provider mapping tests (bugbot BB-2 → AL-24-5;
+ * catalog breadth): the allowlist that maps per-App BYOK provider ids to the env
  * var names injected into the review container. The global-env picker
  * (`pickProviderKeys`) was retired with the zero-global-fallback cutover
- * (plan 24 Task 6): keys come only from the App's per-App config, so there
+ * Keys come only from the App's per-App config, so there
  * is nothing to pick from a worker-env-shaped record anymore. The mapping
  * lives in the generated contract src/contracts/provider-catalog.generated.ts
- * (the SSOT since plan 42); src/pipeline/provider-catalog.ts is the
+ * (the SSOT); src/pipeline/provider-catalog.ts is the
  * hand-written pipeline face re-exporting it — the export contract
  * (providerEnvName / PROVIDER_ENV_NAMES) is unchanged.
  */
@@ -48,7 +48,7 @@ describe("shared provider mapping", () => {
     expect(Object.keys(PROVIDERS)).toHaveLength(19);
   });
 });
-describe("customProviderEnvName (plan 23 Task 3, AL-23-1)", () => {
+describe("customProviderEnvName (AL-23-1)", () => {
   test("maps provider ids to CUSTOM_<UPPER_SNAKE>_API_KEY — hyphen → underscore, uppercased", () => {
     expect(customProviderEnvName("my-provider")).toBe("CUSTOM_MY_PROVIDER_API_KEY");
     expect(customProviderEnvName("ark")).toBe("CUSTOM_ARK_API_KEY");
@@ -63,11 +63,11 @@ describe("customProviderEnvName (plan 23 Task 3, AL-23-1)", () => {
   });
 });
 
-describe("provider catalog tiers (plan 35 T3, spec §5; plan 42 T1 breadth)", () => {
+describe("provider catalog tiers (spec §5; breadth)", () => {
   test("the catalog is 19 builtin + the full template tier (workers-ai + snapshot breadth)", () => {
     const builtin = Object.entries(PROVIDER_CATALOG).filter(([, e]) => e.tier === "builtin");
     const template = Object.entries(PROVIDER_CATALOG).filter(([, e]) => e.tier === "template");
-    // The 19 runner-consumable builtins are immutable (plan 42 Global
+    // The 19 runner-consumable builtins are immutable (Global
     // Constraints); the template tier is the hand-curated workers-ai entry
     // plus every breadth row from the committed snapshot (194 → 195).
     expect(builtin).toHaveLength(19);
@@ -117,8 +117,8 @@ describe("provider catalog tiers (plan 35 T3, spec §5; plan 42 T1 breadth)", ()
   });
 });
 
-describe("PROVIDER_IDS_COMMON display tier (plan 54 T1, AD-547)", () => {
-  // The locked display order (plan 54 clarify): exactly these 5 ids, shown
+describe("PROVIDER_IDS_COMMON display tier (AD-547)", () => {
+  // The locked display order: exactly these 5 ids, shown
   // first in the Add-provider picker; every other entry renders under the
   // 目录模板 group. Display-only — the runner BYOK allowlist remains
   // PROVIDER_IDS_BUILTIN / PROVIDER_ENV_NAMES.
@@ -150,7 +150,7 @@ describe("PROVIDER_IDS_COMMON display tier (plan 54 T1, AD-547)", () => {
   });
 });
 
-describe("provider catalog breadth enumeration (plan 42 T1, spec § Providers contract 2)", () => {
+describe("provider catalog breadth enumeration (spec § Providers contract 2)", () => {
   const repoRoot = join(import.meta.dir, "../..");
   const generatorPath = join(repoRoot, "scripts/generate-provider-catalog.ts");
   const snapshotPath = join(repoRoot, "scripts/provider-catalog/models.dev-2026-09-04.json");
@@ -228,7 +228,7 @@ describe("provider catalog breadth enumeration (plan 42 T1, spec § Providers co
   });
 });
 
-describe("provider catalog provenance + determinism (plan 38 T3; plan 42 T1 re-target)", () => {
+describe("provider catalog provenance + determinism (post-breadth re-target)", () => {
   const repoRoot = join(import.meta.dir, "../..");
   const contractPath = join(repoRoot, "src/contracts/provider-catalog.generated.ts");
   const facePath = join(repoRoot, "src/pipeline/provider-catalog.ts");
@@ -306,7 +306,7 @@ describe("provider catalog provenance + determinism (plan 38 T3; plan 42 T1 re-t
   });
 });
 
-describe("generator breadth-collision guard (plan 46 T5; audit DEBT-46-05)", () => {
+describe("generator breadth-collision guard (audit DEBT-46-05)", () => {
   const repoRoot = join(import.meta.dir, "../..");
   // The committed snapshot, seeded with a colliding breadth-eligible key per
   // test case. buildCatalog is imported pure (the generator's read/write tail

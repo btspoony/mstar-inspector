@@ -1,5 +1,5 @@
 /**
- * Plan 29 QC W-2: dashboard POST mutations honor Accept + SPA postForm marker.
+ * QC W-2: dashboard POST mutations honor Accept + SPA postForm marker.
  */
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
@@ -84,7 +84,7 @@ async function postMutation(
   );
 }
 
-describe("POST mutation Accept routing (plan 29 QC W-2)", () => {
+describe("POST mutation Accept routing (QC W-2)", () => {
   test("default Accept keeps plain-text ok for SPA fetch-style POST", async () => {
     const db = createD1();
     await seed(db);

@@ -1,5 +1,5 @@
 /**
- * Finding fingerprint normalization contract lock (plan 21 Task 1, AL-21-1).
+ * Finding fingerprint normalization contract lock (AL-21-1).
  *
  * `src/store/fingerprint.ts` is the single source of truth for the
  * deterministic finding fingerprint written to `findings.fingerprint`

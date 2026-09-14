@@ -1,5 +1,5 @@
 /**
- * Unit tests for the omp AgentRuntime adapter (plan 07 Task 2).
+ * Unit tests for the omp AgentRuntime adapter.
  *
  * Both omp SDK surfaces are mocked (same technique as the former
  * session.test.ts): the root entry (createAgentSession / SessionManager /
@@ -19,7 +19,7 @@
  *     copies here) carrying the worktree path and the seat file scope;
  *   - strict seat output → merge → synthesizeReview → validateMstarReviewV1
  *     envelope; any failure throws (never an M1-shaped success);
- *   - level "deep" drives the parent-session path (plan 09 Task 2): the
+ * - level "deep" drives the parent-session path: the
  *     parent session (cwd = worktreePath, read/grep/glob + `task`, strict
  *     output schema) is prompted once, the harness review command is loaded
  *     from the plugin-root fixture at runtime, the deep seat roles are
@@ -30,7 +30,7 @@
  *     partitionSeats/runStructuredSubagent are never called — quick/default
  *     keep the Bun fan-out untouched;
  *   - a non-delivered level is rejected at the port;
- *   - per-role model overrides (plan 17 B6): quick/default applies the
+ * - per-role model overrides: quick/default applies the
  *     `mstar-review-seat` override at the seatModels synthesis (explicit
  *     model replaces the global chain verbatim; NO settings key), deep writes
  *     the map into the isolated settings as `task.agentModelOverrides` with
@@ -264,7 +264,7 @@ const TWO_CLUSTER_FACTS = [
   "8\t1\tlib/c.ts",
 ];
 
-/** The synthesized per-review models dir (plan 37: REQUIRED on every run). */
+/** The synthesized per-review models dir (REQUIRED on every run). */
 const AGENT_DIR = "/tmp/omp-agent-test";
 
 const BASE_INPUT = {
@@ -476,7 +476,7 @@ describe("ompAgentRuntime.runReview — seat fan-out", () => {
   });
 });
 
-describe("ompAgentRuntime.runReview — per-role model overrides (plan 17 B6)", () => {
+describe("ompAgentRuntime.runReview — per-role model overrides", () => {
   test("quick/default: the mstar-review-seat override replaces the seat model chain verbatim", async () => {
     seatResults = [{ data: seatPayload() }, { data: seatPayload({ findings: [] }) }];
     await ompAgentRuntime.runReview({
@@ -629,7 +629,7 @@ describe("ompAgentRuntime.runReview — per-role model overrides (plan 17 B6)", 
   });
 });
 
-describe("ompAgentRuntime.runReview — deep parent path (plan 09 T2)", () => {
+describe("ompAgentRuntime.runReview — deep parent path", () => {
   test("drives the parent session: one prompt, zero seat fan-out", async () => {
     parentYields = [deepEnvelope()];
     const { envelope } = await ompAgentRuntime.runReview(DEEP_INPUT);
@@ -906,7 +906,7 @@ describe("ompAgentRuntime.runReview — envelope", () => {
     });
   });
 });
-describe("ompAgentRuntime.runReview — per-review agentDir threading (plan 23 Task 3, AL-23-1; plan 37 Task 2)", () => {
+describe("ompAgentRuntime.runReview — per-review agentDir threading (AL-23-1; capability-host threading)", () => {
   test("quick/default: input.agentDir flows into createAgentSession options verbatim", async () => {
     seatResults = [{ data: seatPayload() }];
     await ompAgentRuntime.runReview({ ...BASE_INPUT, level: "quick", agentDir: "/tmp/omp-agent-abc" });
@@ -933,7 +933,7 @@ describe("ompAgentRuntime.runReview — per-review agentDir threading (plan 23 T
     expect(createdOptions[0]!.toolNames).toEqual(["read", "grep", "glob", "task"]);
   });
 
-  test("agentDir is REQUIRED on every path — the options always carry it (plan 37: no baked models.yml fallback)", async () => {
+  test("agentDir is REQUIRED on every path — the options always carry it (no baked models.yml fallback)", async () => {
     seatResults = [{ data: seatPayload() }];
     await ompAgentRuntime.runReview({ ...BASE_INPUT, level: "quick" });
     expect(createdOptions[0]!.agentDir).toBe(AGENT_DIR);
@@ -944,7 +944,7 @@ describe("ompAgentRuntime.runReview — per-review agentDir threading (plan 23 T
   });
 });
 
-describe("ompAgentRuntime.runReview — recheck seat (plan 67 T3, spec §7.8)", () => {
+describe("ompAgentRuntime.runReview — recheck seat (spec §7.8)", () => {
   const RECHECK_SHA = "0123456789abcdef0123456789abcdef01234567";
 
   /** Minimal trusted-catalog recheck input (shape mirrors the T1 fixtures). */

@@ -1,5 +1,5 @@
 /**
- * Plan 14 B2 Task 1 tests: migration 0006 + the per-App config store
+ * Unit tests: migration 0006 + the per-App config store
  * (`app_provider_keys` BYOK keys + `app_model_config` model chain) + the
  * /dashboard/apps/:slug/settings route family (spec
  * dashboard-multi-app-platform § Per-App BYOK + § Crypto envelope, architect
@@ -18,11 +18,11 @@
  *
  * Duplication locks (architect decision Q2 forbids the dashboard from
  * importing pipeline/review code): PROVIDER_IDS ≡ the builtin id sequence
- * (since plan 42 T1 a direct re-export of the generated contract, locked
+ * (a direct re-export of the generated contract, locked
  * against both the contract and the pipeline face), PROVIDER_META ≡ the
- * generated catalog (plan 35 T3, spec §5; full breadth since plan 42),
+ * generated catalog (spec §5; full breadth since the catalog expansion),
  * parseModelChain ≡ the runtime-omp parseModelSelectors behavior, and
- * MODEL_ROLE_IDS ≡ the review-side seat vocabulary (plan 17 B6), all
+ * MODEL_ROLE_IDS ≡ the review-side seat vocabulary, all
  * asserted against the originals here.
  */
 import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
@@ -116,11 +116,11 @@ function createPopulatedPre0006D1(): ReturnType<typeof createTestD1> {
 
 /**
  * Fully-migrated shape with 0006 applied over the populated DB (0008 and 0009
- * too — plan 16: the settings page renders the Review switch and the
+ * too — the settings page renders the Review switch and the
  * install-health panel from github_apps.review_enabled / last_webhook_at and
- * app_installations; plan 17: the role-models store tests need
+ * app_installations; the role-models store tests need
  * app_model_roles — so the route tests run on the production shape; the 0007
- * index skip stays, harmless for these tables). 0015 too (plan 31): the
+ * index skip stays, harmless for these tables). 0015 too: the
  * store's setProviderKey upsert now writes the verified_* columns, so every
  * config-store test must run on the 0015-shaped schema.
  */
@@ -129,20 +129,20 @@ function createAppConfigD1(): ReturnType<typeof createTestD1> {
   applyMigration(db, "0006_app_provider_config.sql");
   applyMigration(db, "0008_github_apps_ops.sql");
   applyMigration(db, "0009_app_model_roles.sql");
-  // 0011 (plan 20): the settings page now renders the recent-deliveries
+  // 0011: the settings page now renders the recent-deliveries
   // panel from webhook_deliveries on every render — the fixture must carry
   // the table or every settings route 500s.
   applyMigration(db, "0011_webhook_deliveries.sql");
   applyMigration(db, "0012_custom_providers_and_key_updated_at.sql");
   applyMigration(db, "0015_provider_verification.sql");
-  // 0017 (plan 35 T2): the chains store tests + the settings routes run on
+  // 0017: the chains store tests + the settings routes run on
   // the chains shape (app_model_chains + app_model_chain_seats).
   applyMigration(db, "0017_app_model_chains.sql");
-  // 0018 (plan 37): the settings routes + the sandbox-image selection run on
+  // 0018: the settings routes + the sandbox-image selection run on
   // the shape carrying github_apps.sandbox_image_id (the custom-provider
   // collision backstop resolves the App's selected image through it).
   applyMigration(db, "0018_app_sandbox_images.sql");
-  // 0019 (plan 53): the settings JSON GET reads/writes the five github_*
+  // 0019: the settings JSON GET reads/writes the five github_*
   // metadata columns — the route must run on the production shape.
   applyMigration(db, "0019_github_apps_metadata.sql");
   return db;
@@ -237,7 +237,7 @@ async function postForm(
   );
 }
 
-// Plan 29 T6/T7: settings HTML GET is SPA-owned (shared spa helper).
+// SPA ownership: settings HTML GET is SPA-owned (shared spa helper).
 
 const SETTINGS = "/dashboard/apps/mallorys-app/settings";
 
@@ -343,9 +343,9 @@ describe("migration 0006_app_provider_config.sql (on a seeded production-shaped 
   });
 });
 
-// --- migration 0012 (plan 23 T1: app_provider_keys.updated_at) ---
+// --- migration 0012 (app_provider_keys.updated_at) ---
 
-describe("migration 0012_custom_providers_and_key_updated_at.sql (plan 23 T1)", () => {
+describe("migration 0012_custom_providers_and_key_updated_at.sql", () => {
   test("applies cleanly after 0006; pre-existing key rows keep created_at and carry NULL updated_at until the key is re-set", async () => {
     const db = createPopulatedPre0006D1();
     const app = await seedApp(db, { slug: "a", createdBy: "mallory" });
@@ -402,9 +402,9 @@ describe("migration 0012_custom_providers_and_key_updated_at.sql (plan 23 T1)", 
   });
 });
 
-// --- migration 0017 (plan 35 T2: default + named chains + backfill DML) ---
+// --- migration 0017 (default + named chains + backfill DML) ---
 
-describe("migration 0017_app_model_chains.sql (plan 35 T2, spec §4.4)", () => {
+describe("migration 0017_app_model_chains.sql (spec §4.4)", () => {
   test("applies cleanly over a seeded production-shaped DB; backfill DML migrates the pre-chains shape", async () => {
     // A pre-0017 DB (0001–0016) with the pre-chains shape seeded RAW —
     // exactly the wrangler order on a live deployment.
@@ -676,7 +676,7 @@ describe("app-config store (createAppConfigStore) — model chain + getAppConfig
     await expect(store.setModelChain(app.id, null)).resolves.toBeUndefined();
   });
 
-  test("setModelChain(\"\") CLEARS the row — same path as null (plan 15: empty = unset = fail closed)", async () => {
+  test("setModelChain(\"\") CLEARS the row — same path as null (empty = unset = fail closed)", async () => {
     const db = createAppConfigD1();
     const app = await seedApp(db, { slug: "a", createdBy: "mallory" });
     const store = configStore(db);
@@ -736,9 +736,9 @@ describe("app-config store (createAppConfigStore) — model chain + getAppConfig
   });
 });
 
-// --- store: model chains + seats (plan 35 T2, spec §4.4) ---
+// --- store: model chains + seats (spec §4.4) ---
 
-describe("app-config store (createAppConfigStore) — model chains + seats (plan 35 T2)", () => {
+describe("app-config store (createAppConfigStore) — model chains + seats", () => {
   test("setModelChain stores the default row VERBATIM (:thinking suffix and padding untouched); getModelChain reads it back", async () => {
     const db = createAppConfigD1();
     const app = await seedApp(db, { slug: "a", createdBy: "mallory" });
@@ -1044,12 +1044,12 @@ describe("app-config store (createAppConfigStore) — model chains + seats (plan
   });
 });
 
-// --- store: custom providers (plan 23 T2) ---
+// --- store: custom providers ---
 
-describe("app-config store (createAppConfigStore) — custom providers (plan 23 T2)", () => {
+describe("app-config store (createAppConfigStore) — custom providers", () => {
   const CUSTOM: AppCustomProvider = {
-    // NOT a built-in: "ark" is a PROVIDER_IDS member since plan 24 Task 6
-    // (AL-24-5), so a custom declaration must use a free id.
+    // NOT a built-in: "ark" is a PROVIDER_IDS member from the
+    // AL-24-5 ark-plan entry, so a custom declaration must use a free id.
     provider_id: "my-custom",
     base_url: "https://ark.cn-beijing.volces.com/api/v3",
     api: "openai-completions",
@@ -1160,7 +1160,7 @@ describe("app-config store (createAppConfigStore) — custom providers (plan 23 
     expect(rawCount(db, "app_custom_providers")).toBe(0);
   });
 
-  // QC wave-1 (seat3 W-1), plan 37 rewording: the runner's base-wins merge
+  // QC wave-1 (seat3 W-1) rewording: the runner's base-wins merge
   // skips a custom id colliding with a capability host of the App's SELECTED
   // sandbox image (omp declares ark-plan) while the consumer STILL injects
   // its key — the declaration is silently dead on every review, so the
@@ -1249,7 +1249,7 @@ describe("app-config store (createAppConfigStore) — custom providers (plan 23 
 // --- duplication locks (Q2: dashboard may not import pipeline/review) ---
 
 describe("duplication locks", () => {
-  // PROVIDER_IDS (plan 42 T1) — a direct re-export of the generated
+  // PROVIDER_IDS — a direct re-export of the generated
   // contract's builtin sequence (src/contracts/provider-catalog.generated.ts;
   // dashboard → pipeline imports stay forbidden, so the mirror binds the
   // CONTRACT, not the pipeline face). The locks below fail on any drift
@@ -1258,13 +1258,13 @@ describe("duplication locks", () => {
   test("PROVIDER_IDS mirrors the pipeline catalog's builtin key sequence exactly", () => {
     expect([...PROVIDER_IDS]).toEqual(Object.keys(PROVIDERS));
     expect([...PROVIDER_IDS]).toEqual([...PROVIDER_IDS_BUILTIN]);
-    // 19 ids: the 18 built-in omp providers + `ark` (plan 24 Task 6 /
-    // AL-24-5 — the in-image ark-plan base provider's ARK_API_KEY rides the
+    // 19 ids: the 18 built-in omp providers + `ark` (the
+    // AL-24-5 entry — the in-image ark-plan base provider's ARK_API_KEY rides the
     // per-App BYOK keys map under this id).
     expect(PROVIDER_IDS).toHaveLength(19);
   });
 
-  // PROVIDER_META (plan 35 T3, spec §5; plan 42 T1 rewire) — the dashboard's
+  // PROVIDER_META (spec §5; breadth rewire) — the dashboard's
   // catalog mirror: now the FULL generated catalog re-export (builtin AND
   // template tier, breadth included) instead of a hand-maintained copy. The
   // lock guards the re-export: PROVIDER_META must equal the generated
@@ -1298,15 +1298,15 @@ describe("duplication locks", () => {
     }
   });
 
-  test("MODEL_ROLE_IDS mirrors the review-side seat vocabulary exactly (plan 17 B6 parity lock)", () => {
+  test("MODEL_ROLE_IDS mirrors the review-side seat vocabulary exactly (parity lock)", () => {
     // quick/default seat: the frontmatter `name:` of the agent definition the
     // runtime installs for Bun fan-out (src/review/seat-agent.md — the real
     // seat-name SSOT on the review side).
     const seatAgent = readFileSync(join(import.meta.dir, "../../src/review/seat-agent.md"), "utf8");
     const quickSeat = /^name:\s*(\S+)\s*$/m.exec(seatAgent)?.[1];
     expect(quickSeat).toBe("mstar-review-seat");
-    // Deep seats: DEEP_SEAT_ROLES is exported from runtime-omp since plan 17
-    // Task 2 (the export exists for this parity lock; the dashboard's own
+    // Deep seats: DEEP_SEAT_ROLES is exported from runtime-omp for
+    // this parity lock ( the dashboard's own
     // import boundary — Q2 — stays: src/dashboard still has zero review
     // imports, the mirror constant remains its SSOT).
     const deepSeats: readonly string[] = DEEP_SEAT_ROLES;
@@ -1316,7 +1316,7 @@ describe("duplication locks", () => {
     expect(MODEL_ROLE_IDS).toHaveLength(4); // spec § B6 语义锁: exactly the 4 audit seats
   });
 
-  test("the custom-id collision vocabulary is the selected image's registry host ids (plan 37, QC W-1 successor)", () => {
+  test("the custom-id collision vocabulary is the selected image's registry host ids (QC W-1 successor)", () => {
     // The dashboard keeps NO local base-provider mirror: the refusal set is
     // sandboxImageHostIds(app.sandbox_image_id) straight from the
     // src/contracts/sandbox-images.ts registry. Lock the registry shape the
@@ -1336,7 +1336,7 @@ describe("duplication locks", () => {
 
 // --- routes ---
 
-describe("GET /dashboard/apps/:slug/settings (plan 29 T6: SPA-owned)", () => {
+describe("GET /dashboard/apps/:slug/settings (SPA-owned)", () => {
   test("HTML navigation GET is served by SPA dispatch (boot-injected index)", async () => {
     const { db } = await seededWorld();
     const res = await htmlGet(SETTINGS, `${SESSION_COOKIE}=${await sessionCookie("mallory")}`, withSpaAssets(makeEnv(db)));
@@ -1354,7 +1354,7 @@ describe("GET /dashboard/apps/:slug/settings (plan 29 T6: SPA-owned)", () => {
   });
 });
 
-describe("sandbox image selection (plan 37 T1: payload + op=save-sandbox-image)", () => {
+describe("sandbox image selection (payload + op=save-sandbox-image)", () => {
   const SETTINGS_API = "/dashboard/api/apps/mallorys-app/settings";
 
   test("manage face: app.sandbox_image_id + sandbox_images ({ id, enabled } rows, enabled entries only)", async () => {
@@ -1516,7 +1516,7 @@ describe("POST /dashboard/apps/:slug/settings — add-key (op=add-key)", () => {
     expect(rawCount(db, "app_provider_keys")).toBe(0);
   });
 
-  test("key over 4096 characters → 400, zero rows written (plan 15 input bounds)", async () => {
+  test("key over 4096 characters → 400, zero rows written", async () => {
     const { db } = await seededWorld();
     const cookie = `${SESSION_COOKIE}=${await sessionCookie("mallory")}`;
     const res = await postForm(SETTINGS, cookie, makeEnv(db), {
@@ -1683,7 +1683,7 @@ describe("POST /dashboard/apps/:slug/settings — save-chain (op=save-chain)", (
   });
 });
 
-// --- plan 17 T3 editor, plan 35 T2 rework: the Role models editor (settings op save-roles) ---
+// --- the Role models editor (settings op save-roles) ---
 
 /**
  * The exact body the Role models editor posts: the hidden op plus one
@@ -1702,7 +1702,7 @@ function roleForm(
   return { ...fields, ...extra };
 }
 
-describe("Role models editor (plan 17 T3 — save-roles op, plan 35 T2 chain references)", () => {
+describe("Role models editor (save-roles op, chain references)", () => {
   test("owner saves the map: chain references stored, plain-text 200", async () => {
     const { db, app } = await seededWorld();
     const store = configStore(db);
@@ -1929,9 +1929,9 @@ describe("Role models editor (plan 17 T3 — save-roles op, plan 35 T2 chain ref
 
 });
 
-// --- plan 35 T2: named chains (settings ops add-chain / remove-chain) ---
+// --- named chains (settings ops add-chain / remove-chain) ---
 
-describe("POST /dashboard/apps/:slug/settings — named chains (op=add-chain / remove-chain, plan 35 T2)", () => {
+describe("POST /dashboard/apps/:slug/settings — named chains (op=add-chain / remove-chain)", () => {
   test("owner adds a named chain: stored with is_default=0, plain-text 200", async () => {
     const { db, app } = await seededWorld();
     const res = await postForm(SETTINGS, `${SESSION_COOKIE}=${await sessionCookie("mallory")}`, makeEnv(db), {
@@ -2077,9 +2077,9 @@ describe("POST /dashboard/apps/:slug/settings/key/delete (delete-key route)", ()
   });
 });
 
-// --- plan 23 T2: custom provider declarations (settings ops) ---
+// --- custom provider declarations (settings ops) ---
 
-describe("POST /dashboard/apps/:slug/settings — custom providers (op=add-custom-provider / remove-custom-provider, plan 23 T2)", () => {
+describe("POST /dashboard/apps/:slug/settings — custom providers (op=add-custom-provider / remove-custom-provider)", () => {
   let fetchSpy: ReturnType<typeof spyOn>;
   beforeEach(() => {
     fetchSpy = spyOn(globalThis, "fetch").mockImplementation((async () => new Response("{}", { status: 200 })) as unknown as typeof fetch);
@@ -2172,7 +2172,7 @@ describe("POST /dashboard/apps/:slug/settings — custom providers (op=add-custo
     // The route pre-check reads listCustomProviders (7 rows → passes); the
     // store's atomic conditional INSERT then matches zero rows (a concurrent
     // save won the last slot) → InvalidCustomProviderError → the route must
-    // answer 400 (the keyed rejection face since plan 45 T4), never 500.
+    // answer 400 (the keyed rejection face since the SPA 400 rework), never 500.
     const sevenRows = Array.from({ length: 7 }, (_, i) => ({
       provider_id: `prov-${i + 1}`,
       base_url: "https://example.com/v1",
@@ -2226,7 +2226,7 @@ describe("POST /dashboard/apps/:slug/settings — custom providers (op=add-custo
       provider_id: "prov-9",
     });
     expect(res.status).toBe(400);
-    // Plan 45 T4: the keyed 400 face replaces the store's developer-facing
+    // the keyed 400 face replaces the store's developer-facing
     // err.message ("custom provider cap (8) reached") — the route pre-checks
     // make the cap race the realistic backstop cause, and the operator copy
     // now localizes. The PR #10 contract (400, never 500) is unchanged.

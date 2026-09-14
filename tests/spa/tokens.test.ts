@@ -1,26 +1,26 @@
 /**
- * Plan 29 Task 1: DESIGN.md L2 dual-theme tokens ↔ src/spa/styles/tokens.css.
- * Plan 57 T1: v0.3 value rebase (AD-573) — token names frozen, values swapped
+ * DESIGN.md L2 dual-theme tokens ↔ src/spa/styles/tokens.css.
+ * v0.3 value rebase (AD-573) — token names frozen, values swapped
  * (Signal Cyan brand, cool neutral retune, motion/elevation tokens, two-tier
  * radius per AD-571/573/574).
- * Plan 57 T2: self-hosted Geist Sans (AD-572) — three-site font-stack parity,
+ * self-hosted Geist Sans (AD-572) — three-site font-stack parity,
  * @font-face contract (swap, latin-only range), and the vendored-binary size
  * budget.
  *
  * Locked contract:
- *   - version 0.3.3 (0.3.0 = plan 57 T1 rebase; 0.3.1 = T2 font flip;
- *     0.3.2 = plan 64 sidebar tint; 0.3.3 = plan 65 stacked palette),
+ * - version 0.3.3 (0.3.0 = the v0.3 value rebase; 0.3.1 = the font flip;
+ * 0.3.2 = sidebar tint; 0.3.3 = stacked palette),
  *     defaultTheme dark; the theme mechanism is the manual
  *     data-theme override (navbar toggle) with the prefers-color-scheme
- *     fallback — plan 41 T2 rewrites the frontmatter keys together with the
- *     DESIGN.md body and pins the dated plan-29 supersede note
+ * fallback — the frontmatter keys were rewritten together with the
+ * DESIGN.md body and pins the dated supersede note
  *   - L1 token names kept; v0.3 retunes the light neutrals (cool cast) while
  *     background-100/blue-700/red-700/amber-700 keep their recorded light hexes
  *   - top-level colors: === themes.dark.colors
  *   - both theme palettes share the same key set
  *   - tokens.css :root maps dark values; light applies via
  *     :root[data-theme="light"] plus the prefers-color-scheme fallback on
- *     :root:not([data-theme="dark"]) (plan 41 T1 — reverses the plan-29
+ * :root:not([data-theme="dark"]) — reverses the earlier
  *     "no data-theme attribute selector" lock)
  */
 import { readdirSync, readFileSync, statSync } from "node:fs";
@@ -31,10 +31,10 @@ import { describe, expect, test } from "bun:test";
 const DESIGN = new URL("../../DESIGN.md", import.meta.url);
 const TOKENS_CSS = new URL("../../src/spa/styles/tokens.css", import.meta.url);
 
-/** Plan 41 theme mechanism — frontmatter top level and themes: stay equal. */
+/** The DESIGN.md theme mechanism — frontmatter top level and themes: stay equal. */
 const THEME_MECHANISM = "manual data-theme override (navbar toggle), prefers-color-scheme fallback";
-/** Dated user authorization reversing the plan-29 "no toggle" lock. */
-const SUPERSEDE_NOTE = "Supersedes the plan-29 lock (2026-09-04, user instruction, iteration 013)";
+/** Dated user authorization reversing the "no toggle" lock. */
+const SUPERSEDE_NOTE = "Supersedes the earlier theme lock (2026-09-04, user instruction)";
 
 /** Light hexes that survive the v0.3 retune unchanged. */
 const KEPT_LIGHT: Record<string, string> = {
@@ -116,11 +116,11 @@ function extractBlock(css: string, openToken: string): string {
 describe("DESIGN.md L2 dual-theme tokens", () => {
   test("frontmatter version, default theme, and L1 name continuity", async () => {
     const fm = await loadFrontmatter();
-    // 0.3.3 = plan 65 (AD-653 category stacked palette + Appendix A
-    // dual-theme rows) on top of the plan 64 sidebar tint increment.
+    // 0.3.3 = stacked palette (AD-653 category stacked palette + Appendix A
+    // dual-theme rows) on top of the sidebar tint increment.
     expect(fm.version).toBe("0.3.3");
     expect(fm.defaultTheme).toBe("dark");
-    // Plan 41 T2: manual data-theme override (navbar toggle) with the OS
+    // Manual data-theme override (navbar toggle) with the OS
     // fallback — top-level keys and themes: keys move together.
     expect(fm.themeMechanism).toBe(THEME_MECHANISM);
     expect(fm.themes.default).toBe("dark");
@@ -193,7 +193,7 @@ describe("src/spa/styles/tokens.css mapping", () => {
     const fm = await loadFrontmatter();
     const css = await Bun.file(TOKENS_CSS).text();
 
-    // Plan 41 T1: the data-theme cascade replaces the plan-29 "no attribute
+    // The data-theme cascade replaces the "no attribute
     // selector" lock — stored light wins over the OS; the OS-light fallback
     // applies only while the stored value is not dark.
     const darkBlock = extractBlock(css, ":root {");
@@ -240,7 +240,7 @@ describe("src/spa/styles/tokens.css mapping", () => {
   });
 });
 
-describe("DESIGN.md v0.3 design-language tokens (plan 57 T1)", () => {
+describe("DESIGN.md v0.3 design-language tokens", () => {
   test("Signal Cyan brand namespace is additive and dual-theme (AD-571/573)", async () => {
     const fm = await loadFrontmatter();
     for (const step of ["600", "700", "800"]) {
@@ -361,7 +361,7 @@ describe("DESIGN.md v0.3 design-language tokens (plan 57 T1)", () => {
   });
 });
 
-describe("DESIGN.md v0.3 bridge re-point + base-component restyle (plan 57 T3)", () => {
+describe("DESIGN.md v0.3 bridge re-point + base-component restyle", () => {
   const BRIDGE = new URL("../../src/spa/styles/shadcn-theme.css", import.meta.url);
   const UI_DIR = fileURLToPath(new URL("../../src/spa/components/ui/", import.meta.url));
   /** A5 sensitive subset — the only ui/ files allowed to drift from the copy-in. */
@@ -393,7 +393,7 @@ describe("DESIGN.md v0.3 bridge re-point + base-component restyle (plan 57 T3)",
     expect(themeVars["color-primary-hover"]).toBe("var(--primary-hover)");
     expect(themeVars["color-secondary-hover"]).toBe("var(--secondary-hover)");
     expect(themeVars["color-destructive-hover"]).toBe("var(--destructive-hover)");
-    // Plan 62 T1 (AD-622): the hover tint consumes the sidebar-accent key at
+    // (AD-622): the hover tint consumes the sidebar-accent key at
     // /40 opacity — same dead-class trap, so the mapping is pinned too.
     expect(themeVars["color-sidebar-accent"]).toBe("var(--sidebar-accent)");
   });
@@ -416,7 +416,7 @@ describe("DESIGN.md v0.3 bridge re-point + base-component restyle (plan 57 T3)",
     for (const name of SUBSET) {
       const source = await Bun.file(join(UI_DIR, `${name}.tsx`)).text();
       // Copy-in supersede marker — a future regen must not clobber silently.
-      expect(source, name).toContain("plan 57 T3 v0.3 restyle");
+      expect(source, name).toContain("Locally revised shadcn/ui copy-in (v0.3 restyle;");
       // Hard constraint #7 (architect tighten-up): transition-all is
       // narrowed to explicit property lists across the subset.
       expect(source, name).not.toContain("transition-all");
@@ -462,7 +462,7 @@ describe("DESIGN.md v0.3 bridge re-point + base-component restyle (plan 57 T3)",
   });
 });
 
-describe("DESIGN.md self-hosted Geist Sans typeface (plan 57 T2, AD-572)", () => {
+describe("DESIGN.md self-hosted Geist Sans typeface (AD-572)", () => {
   const FONTS_CSS = new URL("../../src/spa/styles/fonts.css", import.meta.url);
   const VIEWS = new URL("../../src/dashboard/views.ts", import.meta.url);
   const FONT_DIR = fileURLToPath(new URL("../../src/spa/assets/fonts/", import.meta.url));
@@ -539,26 +539,25 @@ describe("DESIGN.md self-hosted Geist Sans typeface (plan 57 T2, AD-572)", () =>
   });
 });
 
-describe("DESIGN.md theme contract (plan 41 T2)", () => {
-  test("manual navbar-toggle override documented with the dated plan-29 supersede note", async () => {
+describe("DESIGN.md theme contract", () => {
+  test("manual navbar-toggle override documented with the dated supersede note", async () => {
     const md = await Bun.file(DESIGN).text();
     // The toggle contract: storage key + pre-paint application, in body prose.
     expect(md).toContain('localStorage["mstar.dashboard.theme"]');
     expect(md).toContain("documentElement.dataset.theme");
     expect(md).toContain(SUPERSEDE_NOTE);
-    // Cascade description matches the plan 41 T1 tokens.css restructure.
+    // Cascade description matches the tokens.css restructure.
     expect(md).toContain(':root[data-theme="light"]');
     expect(md).toContain(':root:not([data-theme="dark"])');
-    // The plan-29 lock wording is gone from every theme location.
+    // The lock wording is gone from every theme location.
     expect(md).not.toContain("No independent theme toggle");
     expect(md).not.toContain("navbar theme button");
     expect(md).not.toContain("switcher");
     expect(md).not.toContain("Do not introduce a theme toggle");
-    expect(md).not.toContain("locked, plan 29");
   });
 });
 
-describe("SSR STYLE token parity (plan 29 QC)", () => {
+describe("SSR STYLE token parity", () => {
   function cssCustomPropertiesFromBlock(block: string): Record<string, string> {
     const out: Record<string, string> = {};
     for (const m of block.matchAll(/--([a-z0-9-]+):\s*([^;]+);/gi)) {

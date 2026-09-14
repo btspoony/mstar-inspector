@@ -1,10 +1,10 @@
 /**
- * Per-App webhook routing tests (plan 13 Task 2, spec § Multi-App 契约).
+ * Per-App webhook routing tests (spec § Multi-App 契约).
  *
- * `POST /webhook/:appSlug` — the ONLY HTTP review entry (plan 24 Task 1:
- * the legacy bare `/webhook` face is retired):
+ * `POST /webhook/:appSlug` — the ONLY HTTP review entry
+ * (the legacy bare `/webhook` face is retired):
  * body-size cap (413) → REVIEW_ENABLED emergency brake (exact "false" →
- * 2xx ignore; plan 31 AC4a — per-App `review_enabled` is the primary
+ * 2xx ignore; AC4a — per-App `review_enabled` is the primary
  * control) → slug lookup (active, not deleted) → signature verify with THAT
  * App's decrypted webhook secret. The route attaches `appRef: { appId }`
  * after classification (lock L3).
@@ -38,11 +38,11 @@ const TEST_KEY = Buffer.alloc(32, 7).toString("base64");
 
 function createMigratedD1(): ReturnType<typeof createTestD1> {
   const db = createTestD1();
-  // 0008 (plan 16): the github_apps ops columns (review_enabled /
+  // 0008: the github_apps ops columns (review_enabled /
   // last_webhook_at) the pause gate + touch read and write on every delivery.
-  // 0011 (plan 20): webhook_deliveries — the route's post-classify
+  // 0011: webhook_deliveries — the route's post-classify
   // recordDelivery is best-effort in production; with the table present the
-  // fixture can pin WHAT it records (plan 61 T1.2: an invalid signature lands
+  // fixture can pin WHAT it records (an invalid signature lands
   // a `rejected` row, never `ok`). Both append-only / additive — the fixture
   // must stay production-shaped.
   for (const name of [
@@ -112,7 +112,7 @@ function makeKv() {
   };
 }
 
-// Plan 13 T4: `Env` itself declares `DB` (optional, fail-closed when
+// `Env` itself declares `DB` (optional, fail-closed when
 // unbound) — the T2 local `Env & Pick<PipelineEnv, "DB">` intersection is
 // retired on both the route and here.
 type RouteEnv = Env;
@@ -210,12 +210,12 @@ describe("POST /webhook/:appSlug (per-App routing)", () => {
     expect(sent).toHaveLength(0);
   });
 
-  // Plan 61 T1.2 (F9/F10 strength pin): an invalid signature is the REJECTED
+  // (F9/F10 strength pin): an invalid signature is the REJECTED
   // classification end to end — 401 on the wire, zero enqueue, and the
   // post-classify delivery row is `rejected` with the classifier's status,
   // never `ok` (AL-20-1: rejected rows are the fail-closed evidence the
   // diagnostics face exists to show).
-  test("invalid signature → 401, zero enqueue, delivery row rejected — never ok (plan 61 T1.2)", async () => {
+  test("invalid signature → 401, zero enqueue, delivery row rejected — never ok", async () => {
     const db = createMigratedD1();
     const appRow = await seedApp(db, { slug: "app-x", secret: "secret-x" });
     const { queue, sent } = makeQueue();
@@ -452,7 +452,7 @@ describe("POST /webhook/:appSlug (per-App routing)", () => {
   });
 });
 
-describe("REVIEW_ENABLED semantic matrix (plan 31 AC4a — per-App governs; env is an emergency brake)", () => {
+describe("REVIEW_ENABLED semantic matrix (AC4a — per-App governs; env is an emergency brake)", () => {
   function appOps(
     db: ReturnType<typeof createTestD1>,
     id: string,
@@ -607,7 +607,7 @@ describe("REVIEW_ENABLED semantic matrix (plan 31 AC4a — per-App governs; env 
   });
 });
 
-describe("installations upsert wiring (plan 13 Task 4)", () => {
+describe("installations upsert wiring", () => {
   test("per-App webhook with installation_id → app_installations row INSERTED (seen_at set, bare login)", async () => {
     const db = createMigratedD1();
     const appRow = await seedApp(db, { slug: "app-x", secret: "secret-x" });
@@ -754,7 +754,7 @@ describe("installations upsert wiring (plan 13 Task 4)", () => {
   });
 });
 
-describe("per-App pause gate + last_webhook_at (plan 16, spec 语义锁 B3 / L5)", () => {
+describe("per-App pause gate + last_webhook_at (spec 语义锁 B3 / L5)", () => {
   /** Read the App row's ops columns back raw. */
   function appOps(
     db: ReturnType<typeof createTestD1>,
@@ -948,7 +948,7 @@ describe("per-App pause gate + last_webhook_at (plan 16, spec 语义锁 B3 / L5)
   });
 });
 
-describe("verifier cache — rotation + cacheKey isolation (plan 15 L1)", () => {
+describe("verifier cache — rotation + cacheKey isolation (L1)", () => {
   test("rotated webhook secret verifies with the NEW secret only (secret mismatch → rebuild + replace)", async () => {
     const db = createMigratedD1();
     const appRow = await seedApp(db, { slug: "app-x", secret: "secret-v1" });

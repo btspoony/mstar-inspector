@@ -1,5 +1,5 @@
 /**
- * Sandbox adapter unit tests (plan 06 Task 1) — mock the @cloudflare/sandbox
+ * Sandbox adapter unit tests — mock the @cloudflare/sandbox
  * SDK boundary (same technique as tests/review/session.test.ts) so the tests
  * are deterministic. Contract under test (plan interface section):
  *   - getSandbox(binding, id) returns a ReviewSandbox whose exec passes the

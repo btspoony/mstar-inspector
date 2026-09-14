@@ -1,5 +1,5 @@
 /**
- * Ops sweep tests (plan 19 Task 1, architect verdict AL-6) — the cron
+ * Ops sweep tests (architect verdict AL-6) — the cron
  * failure sweep (src/worker/sweep.ts) over the REAL migration DDL
  * (bun:sqlite D1 double, tests/store/helpers.ts) plus a recording fake for
  * the window-SQL pin and an injected fetch for the webhook paths.

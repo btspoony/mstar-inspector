@@ -1,5 +1,5 @@
 /**
- * Plan 31 Tasks 2+3 tests: migration 0015 (verification columns +
+ * Provider verification tests: migration 0015 (verification columns +
  * app_provider_models) + the provider verify service
  * (src/dashboard/provider-verify.ts) + the store wiring (saveVerifiedKey /
  * getVerifiedModels).
@@ -222,7 +222,7 @@ describe("PROVIDER_VERIFY_ENDPOINTS parity lock", () => {
     expect(Object.keys(PROVIDER_VERIFY_ENDPOINTS)).toHaveLength(19);
   });
 
-  test("unsupported built-ins are exactly azure-openai + ai-gateway (the settings face's verifiable flag, plan 35 T4)", () => {
+  test("unsupported built-ins are exactly azure-openai + ai-gateway (the settings face's verifiable flag)", () => {
     const unsupported = PROVIDER_IDS.filter((id) => PROVIDER_VERIFY_ENDPOINTS[id]?.kind === "unsupported");
     expect(unsupported).toEqual(["azure-openai", "ai-gateway"]);
   });
@@ -248,7 +248,7 @@ describe("PROVIDER_VERIFY_ENDPOINTS parity lock", () => {
     expect(modelCacheProviderKey("ark")).toBe("ark-plan");
     expect(modelCacheProviderKey("anthropic")).toBe("anthropic");
     // The selector-facing id is the omp registry entry's capability host id —
-    // resolved through the host's catalogProviderId `ark` (plan 37: the host
+    // resolved through the host's catalogProviderId `ark` (the host
     // list lives in src/contracts/sandbox-images.ts and is synthesized into
     // every per-review models.yml).
     const arkHost = getSandboxImage("omp")!.hosts.find((host) => host.catalogProviderId === "ark");

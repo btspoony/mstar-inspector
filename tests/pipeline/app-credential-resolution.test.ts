@@ -1,9 +1,9 @@
 /**
- * Per-App credential resolution tests (plan 13 Task 2, architect lock L4).
+ * Per-App credential resolution tests (architect lock L4).
  *
  * The consumer resolves the commenter from `payload.appRef` BEFORE the
  * in-flight guard / sandbox (fail fast, zero side effects on failure):
- *   - `{ appId }` (required — plan 24 Task 1: single shape) → D1
+ * - `{ appId }` (required — single shape) → D1
  *     `github_apps` row (re-read per message:
  *     active, not soft-deleted) → PEM decrypted in memory (secretbox, AAD
  *     `github_apps.private_key_enc:<id>`) → `createAppCommenter(...)`
@@ -55,31 +55,31 @@ const VALID_OUTPUT: ReviewOutput = {
 
 function createMigratedD1(): ReturnType<typeof createTestD1> {
   const db = createTestD1();
-  // 0006 (plan 14): the per-App config tables the Task-3 consumer now reads
+  // 0006: the per-App config tables the settings consumer now reads
   // on EVERY app-path message — the fixture must stay production-shaped.
-  // 0008 (plan 16): the github_apps ops columns (review_enabled) the
+  // 0008: the github_apps ops columns (review_enabled) the
   // paused gate reads on every app-path message.
-  // 0009 (plan 17): the per-role table the consumer's modelOverrides read
+  // 0009: the per-role table the consumer's modelOverrides read
   // queries on every app-path message.
-  // 0012 (plan 23): app_provider_keys.updated_at — the store's upsert writes
+  // 0012: app_provider_keys.updated_at — the store's upsert writes
   // it, so the fixture must carry the column.
-  // 0015 (plan 31): the store's setProviderKey upsert now writes the
+  // 0015: the store's setProviderKey upsert now writes the
   // verified_* columns, so the fixture must carry them too.
-  // 0017 (plan 35 T2): the store's setModelChain now writes the default
+  // 0017: the store's setModelChain now writes the default
   // app_model_chains row, so the fixture must carry the chains tables.
-  // 0018 (plan 37): github_apps.sandbox_image_id — the consumer's per-message
+  // 0018: github_apps.sandbox_image_id — the consumer's per-message
   // sandbox-image resolution reads it on EVERY app-path message.
   // 0019–0021 complete the shipped schema the same per-message path now
   // reads, so the fixture must carry it too (the migration order below is
   // wrangler's apply order; 0021's FKs target 0020, which targets 0004):
-  //   0019 (plan 53): the github_apps github_* metadata columns — the app
+  // 0019: the github_apps github_* metadata columns — the app
   //     row the consumer re-reads per message is the production `SELECT *`
   //     shape, which carries them.
-  //   0020 (plan 67): the finding-lifecycle journal. The consumer's step-2
+  // 0020: the finding-lifecycle journal. The consumer's step-2
   //     journal handoff queries review_publications on EVERY app-path
   //     message (journalHandoffRow), and its lifecycle-context step
   //     reads review_findings (selectAssessmentTargets / countOpenFindings).
-  //   0021 (plan 68): review_checks — the Check-attempt registry the
+  // 0021: review_checks — the Check-attempt registry the
   //     consumer's §7.10 lifecycle seam owns; its publication_id FK
   //     resolves against 0020's review_publications.
   for (const name of [
@@ -125,7 +125,7 @@ async function seedApp(db: ReturnType<typeof createTestD1>, opts: SeedOptions): 
        VALUES (?, ?, ?, ?, ?, ?, 'tester', 'active', NULL, datetime('now'), datetime('now'))`,
     )
     .run(id, opts.slug, opts.githubAppId, opts.slug, privateKeyEnc, webhookSecretEnc);
-  // AL-24-5 (plan 24 Task 6): every seeded App gets its AI-config health
+  // AL-24-5: every seeded App gets its AI-config health
   // baseline — a model chain + the `ark` BYOK key its chain needs — so the
   // fail-closed gate in the consumer passes on the success-path tests (this
   // file pins credential resolution, not config completeness).
@@ -177,7 +177,7 @@ let factoryInstanceSeq = 0;
 const appCommenterFactory = mock((cred: CommenterEnv): ReviewCommenter => {
   const instance = ++factoryInstanceSeq;
   factoryCreds.push({ instance, cred });
-  // Plan 67 §7.6: the consumer's sandbox path asserts the RETURNED grant
+  // the consumer's sandbox path asserts the RETURNED grant
   // (assertSandboxGrant) — the double returns a minimal compliant
   // sandbox-read grant scoped to the requested repository.
   const sandboxGrant = (token: string, input: TokenInput): InstallationTokenGrant => ({
@@ -191,7 +191,7 @@ const appCommenterFactory = mock((cred: CommenterEnv): ReviewCommenter => {
       appCalls.push({ instance, call: { op: "token", installationId: input.scope.installationId } });
       return sandboxGrant(`app-${instance}-token`, input);
     }),
-    // Plan 67 §7.7: the pre-staging plan read, then the prepared send —
+    // the pre-staging plan read, then the prepared send —
     // the recorded "post" op is the send of the EXACT staged body.
     planReviewUpsert: mock(async () => {
       appCalls.push({ instance, call: { op: "plan" } });
@@ -213,11 +213,11 @@ const appCommenterFactory = mock((cred: CommenterEnv): ReviewCommenter => {
     // scan (no stale comment → the real implementation finds nothing); the
     // double is a no-op outcome so the flow exercises the real call.
     deleteDegradedComment: mock(async () => ({ deleted: 0, skipped: 0, errors: [] })),
-    // Plan 67 T4 line comments: VALID_OUTPUT has no findings → never called.
+    // line comments: VALID_OUTPUT has no findings → never called.
     postLineComments: mock(async () => {
       throw new Error("unexpected: no qualifying findings → no line comments");
     }),
-    // Plan 67 §7.8 discussion capture + §7.5 resolution: no open lifecycle
+    // Discussion capture + resolution: no open lifecycle
     // rows in these fixtures → never triggered.
     listDiscussion: mock(async () => {
       throw new Error("unexpected: listDiscussion requires open lifecycle rows");
@@ -281,7 +281,7 @@ function makePayload(overrides: Partial<ReviewJobPayload> = {}): ReviewJobPayloa
     head_sha: SHA,
     action: "opened",
     triggered_by: "pull_request",
-    // Required single shape (plan 24 Task 1) — every test overrides it with
+    // Required single shape — every test overrides it with
     // a seeded App id; the default is type-only (never resolved).
     appRef: { appId: "00000000-0000-0000-0000-000000000000" },
     ...overrides,
@@ -306,7 +306,7 @@ function makeBatch(...bodies: ReviewJobPayload[]): MessageBatch<ReviewJobPayload
   } as unknown as MessageBatch<ReviewJobPayload>;
 }
 
-/** Queue-handler outcomes per message id (plan 16 ack-skip assertions). */
+/** Queue-handler outcomes per message id. */
 const ackIds: string[] = [];
 const retryIds: string[] = [];
 
@@ -322,7 +322,7 @@ function reset(): void {
   retryIds.length = 0;
 }
 
-describe("consumer appRef resolution (plan 13 Task 2, lock L4)", () => {
+describe("consumer appRef resolution (lock L4)", () => {
   test("appRef {appId} → authenticates with THAT App's decrypted PEM (sibling isolation)", async () => {
     reset();
     const db = createMigratedD1();
@@ -468,7 +468,7 @@ describe("consumer appRef resolution (plan 13 Task 2, lock L4)", () => {
   });
 });
 
-describe("appCommenters fingerprint cache (plan 15 hardening item 1, architect lock L1)", () => {
+describe("appCommenters fingerprint cache (hardening item 1, architect lock L1)", () => {
   /** The row-id AAD the consumer decrypts `private_key_enc` under. */
   const keyAad = (id: string) => `github_apps.private_key_enc:${id}`;
 
@@ -610,7 +610,7 @@ describe("appCommenters fingerprint cache (plan 15 hardening item 1, architect l
   });
 });
 
-describe("per-App pause ack-skip (plan 16, architect lock L4)", () => {
+describe("per-App pause ack-skip (architect lock L4)", () => {
   test("paused App (review_enabled=0) → direct ack, ZERO sandbox/guard/token/config/GitHub calls, no retry, no DLQ", async () => {
     reset();
     const db = createMigratedD1();
@@ -683,7 +683,7 @@ describe("per-App pause ack-skip (plan 16, architect lock L4)", () => {
     expect(factoryCreds).toHaveLength(1);
 
     // Resume → the VERY NEXT review runs (恢复后下一次 review 生效), served
-    // by the SAME warm instance (the plan-15 fingerprint ignores
+    // by the SAME warm instance (the fingerprint ignores
     // review_enabled writes).
     await store.setReviewEnabled(appX.id, true);
     await consumer(makeBatch(makePayload({ pr_number: 44, appRef: { appId: appX.id } })));
@@ -724,7 +724,7 @@ describe("per-App pause ack-skip (plan 16, architect lock L4)", () => {
     db.raw.prepare("DELETE FROM app_model_chain_seats WHERE app_id = ?").run(appX.id);
     db.raw.prepare("DELETE FROM app_model_chains WHERE app_id = ?").run(appX.id);
     db.raw.prepare("DELETE FROM app_provider_keys WHERE app_id = ?").run(appX.id);
-    // 0020/0021 (plan 67/68) add the same NO ACTION app_id FK to the
+    // 0020/0021 add the same NO ACTION app_id FK to the
     // finding-lifecycle tables. The completed review above staged one
     // publication journal row; clear that family child-first (rounds →
     // threads → checks → findings → publications) so the hard DELETE can
@@ -740,7 +740,7 @@ describe("per-App pause ack-skip (plan 16, architect lock L4)", () => {
     ).rejects.toThrow(/per-App credential resolution failed: app .* not found/);
     expect(factoryCreds).toHaveLength(1); // no rebuild on the failure path
 
-    // Re-insert the IDENTICAL row (same envelope bytes, plan-15 L1): a
+    // Re-insert the IDENTICAL row (same envelope bytes, L1): a
     // surviving cache entry would fingerprint-hit and reuse instance 1 — a
     // second factory call proves the not-found gate evicted the entry.
     db.raw

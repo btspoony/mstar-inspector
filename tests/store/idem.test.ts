@@ -1,5 +1,5 @@
 /**
- * Idempotency contract lock (plan 05 Task 2) — `src/contracts/idem.ts` is the
+ * Idempotency contract lock — `src/contracts/idem.ts` is the
  * single source of truth for the KV key format and TTL (plan Clarify 2 /
  * Global Constraints: no second `idem:` literal or magic 86400 anywhere).
  *
@@ -7,7 +7,7 @@
  * architect revision — putIfAbsent's only caller is the 04 worker hot path).
  * The putIfAbsent semantics themselves (hit → skip, miss → pass, KV failure →
  * conservative pass with warning, claim writes TTL) are already locked by
- * `tests/worker/handlers.test.ts` (plan 04); this file locks the contract
+ * `tests/worker/handlers.test.ts`; this file locks the contract
  * those handlers consume.
  */
 import { describe, expect, test } from "bun:test";

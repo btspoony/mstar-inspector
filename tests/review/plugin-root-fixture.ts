@@ -1,5 +1,5 @@
 /**
- * Test-only plugin-root fixture (plan 03 CI fix).
+ * Test-only plugin-root fixture (CI fix).
  *
  * Creates a minimal temp mstar-harness layout — a `skills/mstar-audit/SKILL.md`
  * marker mirroring the real plugin root just far enough for the runtime unit
@@ -40,20 +40,20 @@ writeFileSync(
   ].join("\n"),
 );
 
-// Plan 07 Task 1: the pinned harness 3.5.0 plugin root ships
+// The pinned harness 3.5.0 plugin root ships
 // `commands/amazing-pr-review.md`; the fixture mirrors it as a marker only
-// (zero-copy of the real command body — plan 07 Global Constraints).
+// (zero copy of the real command body).
 mkdirSync(join(PLUGIN_ROOT_FIXTURE, "commands"), { recursive: true });
 writeFileSync(
   join(PLUGIN_ROOT_FIXTURE, "commands", "amazing-pr-review.md"),
   ["# amazing-pr-review", "", "Fixture marker for the pinned 3.5.0 command.", ""].join("\n"),
 );
 
-// Plan 09 Task 2: the deep parent path installs the deep seat roles
+// The deep parent path installs the deep seat roles
 // (code-reviewer / fullstack-dev / frontend-dev — the Stage 2 domain seats
 // of the harness three-stage flow) into the PR clone at .omp/agents/ so omp
 // task discovery can spawn them — the fixture mirrors one-line markers only
-// (zero copy of the real role definitions, plan 02 Global Constraints).
+// (zero copy of the real role definitions).
 mkdirSync(join(PLUGIN_ROOT_FIXTURE, "agents"), { recursive: true });
 writeFileSync(join(PLUGIN_ROOT_FIXTURE, "agents", "code-reviewer.md"), "# fixture agent: code-reviewer\n");
 writeFileSync(join(PLUGIN_ROOT_FIXTURE, "agents", "frontend-dev.md"), "# fixture agent: frontend-dev\n");

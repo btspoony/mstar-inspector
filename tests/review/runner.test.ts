@@ -1,6 +1,6 @@
 /**
- * Unit tests for the container review-runner entry (plan 07 Task 2; plan 37
- * Task 2 — required capabilityHosts, always synthesize).
+ * Unit tests for the container review-runner entry
+ * (required capabilityHosts, always synthesize).
  *
  * The AgentRuntime is INJECTED (main(argv, runtime)) so the tests are
  * deterministic. mock.module on the shared "../../src/review/runtime-omp"
@@ -14,20 +14,20 @@
  *   - usage errors (missing flags, unknown level) → exit 2, stdout empty;
  *   - unreadable/malformed input file → exit 1, stdout empty;
  *   - runtime failure → exit 1, stdout empty, stderr diagnostic;
- *   - `capabilityHosts` (plan 37 Task 2) is REQUIRED and shape-guarded — the
+ * - `capabilityHosts` is REQUIRED and shape-guarded — the
  *     runner ALWAYS synthesizes a COMPLETE per-review models.yml
  *     (/tmp/omp-agent-<uuid>/models.yml) from the capability hosts (there is
  *     no baked in-image base to fall back to) and rides that directory as the
  *     REQUIRED `agentDir` in the runtime input on EVERY run;
  *   - `worktreePath` defaults to the process cwd; `reconFacts` defaults to [];
  *   - the OMP_REVIEW_MODEL chain flows into the runtime input;
- *   - the optional `modelOverrides` map (plan 17 B6) is shape-guarded and
+ * - the optional `modelOverrides` map is shape-guarded and
  *     rides into the runtime input verbatim; absent = the legacy shape.
- *   - the optional `customProviders` list (plan 23 Task 3, AL-23-1) is
+ * - the optional `customProviders` list (AL-23-1) is
  *     shape-guarded; merged INTO the capability-host base with custom keys
  *     referenced as CUSTOM_<ID>_API_KEY env names (never literals); absent or
  *     empty = the capability base alone (byte-identical zero-custom path).
- *   - the optional recheck channel (plan 67 Task 3, spec review-lifecycle
+ * - the optional recheck channel (spec review-lifecycle
  *     §7.8): the input's `recheck` document is shape-guarded and forwarded
  *     verbatim; the optional `--recheck-out <path>` flag writes the runtime's
  *     recheck result only when one exists, before the envelope reaches
@@ -72,7 +72,7 @@ const ENVELOPE = {
   findings: [],
 };
 
-/** The omp capability hosts, exactly as the consumer resolves them (plan 37). */
+/** The omp capability hosts, exactly as the consumer resolves them. */
 const OMP_HOSTS = getSandboxImage("omp")!.hosts;
 /** The base those hosts generate — the zero-custom models.yml equivalence lock. */
 const OMP_BASE_YAML = capabilityHostsYaml(OMP_HOSTS);
@@ -154,7 +154,7 @@ describe("runner entry (src/review/runner.ts)", () => {
     expect(input.worktreePath).toBe("/workspace/clone");
     expect(input.reconFacts).toEqual(["acme/widgets#7"]);
     expect(input.modelSelectors).toEqual([]);
-    // plan 37: every run rides a synthesized per-review models dir.
+    // every run rides a synthesized per-review models dir.
     expect(input.agentDir).toMatch(/^\/tmp\/omp-agent-/);
   });
 
@@ -191,7 +191,7 @@ describe("runner entry (src/review/runner.ts)", () => {
     expect(runInputs).toHaveLength(0);
   });
 
-  test("--level deep parses and reaches the runtime — forwarded into runReview (plan 09 T3)", async () => {
+  test("--level deep parses and reaches the runtime — forwarded into runReview", async () => {
     fakeEnvelope = ENVELOPE;
     const inputPath = writeInput({ capabilityHosts: OMP_HOSTS, worktreePath: "/workspace/clone" });
     const { code, stdout, stderr } = await runCli(["--level", "deep", "--input", inputPath]);
@@ -232,7 +232,7 @@ describe("runner entry (src/review/runner.ts)", () => {
   test("input shape violations → exit 1", async () => {
     for (const bad of [
       [1, 2, 3],
-      // plan 37: capabilityHosts is REQUIRED and shape-guarded (QC fix wave 1:
+      // capabilityHosts is REQUIRED and shape-guarded (QC fix wave 1:
       // a non-empty base — there is no baked in-image models.yml to fall back to).
       {},
       { capabilityHosts: "not-an-array" },
@@ -246,20 +246,20 @@ describe("runner entry (src/review/runner.ts)", () => {
       { worktreePath: 42 },
       { reconFacts: "not-an-array" },
       { reconFacts: [1, 2] },
-      // Plan 17 B6: shape-only guard on the optional overrides map.
+      // shape-only guard on the optional overrides map.
       { modelOverrides: "not-an-object" },
       { modelOverrides: [] },
       { modelOverrides: null },
       { modelOverrides: { "mstar-review-seat": 42 } },
       { modelOverrides: { "code-reviewer": { nested: "object" } } },
-      // Plan 23 T3: shape-only guard on the optional customProviders list.
+      // shape-only guard on the optional customProviders list.
       { customProviders: "not-an-array" },
       { customProviders: [42] },
       { customProviders: [{}] },
       { customProviders: [{ provider_id: 42, base_url: "u", api: "a", model_ids: ["m"] }] },
       { customProviders: [{ provider_id: "p", base_url: "u", api: "a", model_ids: "nope" }] },
       { customProviders: [{ provider_id: "p", base_url: "u", api: "a", model_ids: [1, 2] }] },
-      // Plan 67 T3: shape-only guard on the optional recheck document.
+      // shape-only guard on the optional recheck document.
       { recheck: "nope" },
       { recheck: 42 },
       { recheck: [] },
@@ -297,7 +297,7 @@ describe("runner entry (src/review/runner.ts)", () => {
     }
   });
 
-  test("modelOverrides rides into the runtime input verbatim (plan 17 B6)", async () => {
+  test("modelOverrides rides into the runtime input verbatim", async () => {
     // Shape-only validation: unknown agent names and `:thinking` suffixes are
     // NOT the runner's business — they pass through untouched (L3).
     const overrides = {
@@ -330,7 +330,7 @@ describe("runner entry (src/review/runner.ts)", () => {
     expect(stderr).toContain("provider boom");
   });
 
-  test("ALWAYS synthesizes: a zero-custom run rides an agentDir whose models.yml is the capability base alone (plan 37)", async () => {
+  test("ALWAYS synthesizes: a zero-custom run rides an agentDir whose models.yml is the capability base alone", async () => {
     const inputPath = writeInput({ capabilityHosts: OMP_HOSTS, worktreePath: "/workspace/clone" });
     const { code, stderr } = await runCli(["--level", "quick", "--input", inputPath]);
 
@@ -421,7 +421,7 @@ describe("runner entry (src/review/runner.ts)", () => {
   });
 });
 
-describe("runner entry — --recheck-out channel (plan 67 Task 3)", () => {
+describe("runner entry — --recheck-out channel", () => {
   test("recheck result + flag → file written BEFORE stdout; stdout stays envelope-only", async () => {
     fakeEnvelope = ENVELOPE;
     fakeRecheck = RECHECK_RESULT_DOC;

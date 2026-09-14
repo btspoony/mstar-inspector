@@ -1,11 +1,11 @@
 /**
- * Per-review omp models.yml synthesis tests (plan 23 Task 3, AL-23-1; plan 37
- * Task 2 — capability-host base, always synthesize).
+ * Per-review omp models.yml synthesis tests (AL-23-1;
+ * capability-host base, always synthesize).
  *
  * The omp SDK (18.0.4) has NO include semantics: the ModelRegistry reads ONE
  * models.yml — `path.join(getAgentDir(), "models.yml")` (or the
  * createAgentSession `agentDir` override) — so a provider can only reach the
- * runtime through a COMPLETE synthesized file. Plan 37 deleted the baked
+ * runtime through a COMPLETE synthesized file. The image ships no baked
  * in-image models.yml, so EVERY review synthesizes its own:
  *   - the BASE is GENERATED from the App's selected image's capability hosts
  *     (the consumer resolves them from src/contracts/sandbox-images.ts and
@@ -27,7 +27,7 @@
  *     every skip is reported through the onCollision callback (never silent);
  *   - no declarations → the base text unchanged (byte-identical);
  *   - the write helper targets /tmp/omp-agent-<uuid>/models.yml and NEVER
- *     reads an in-image base file (plan 37: no baked models.yml exists).
+ * reads an in-image base file (no baked models.yml exists).
  */
 
 import { describe, expect, test } from "bun:test";
@@ -43,7 +43,7 @@ import { getSandboxImage } from "../../src/contracts/sandbox-images";
 import { sk } from "../helpers/fake-secrets";
 
 /**
- * The omp capability base, pinned byte-for-byte (plan 37 equivalence lock):
+ * The omp capability base, pinned byte-for-byte (equivalence lock):
  * EXACTLY the body the deleted baked in-image models.yml carried from
  * `providers:` down. Generated from the REGISTRY (not a file read) — a drift
  * in either the generator or the omp entry breaks this pin loudly.
@@ -76,7 +76,7 @@ const CUSTOM: CustomProviderDeclaration = {
   model_ids: ["my-model-1", "my-model-2"],
 };
 
-describe("capabilityHostsYaml (plan 37 Task 2 — the registry-generated base)", () => {
+describe("capabilityHostsYaml (the registry-generated base)", () => {
   test("the omp registry entry generates EXACTLY the old baked in-image base body (byte-equivalence lock)", () => {
     expect(BASE_YAML).toBe(EXPECTED_OMP_BASE);
   });
@@ -119,7 +119,7 @@ describe("capabilityHostsYaml (plan 37 Task 2 — the registry-generated base)",
   });
 });
 
-describe("synthesizeModelsYaml (plan 23 Task 3, AL-23-1 merged-complete file)", () => {
+describe("synthesizeModelsYaml (AL-23-1 merged-complete file)", () => {
   test("preserves the capability base ark-plan declaration AND appends the custom provider block", () => {
     const yaml = synthesizeModelsYaml(BASE_YAML, [CUSTOM]);
     // Base preserved verbatim (the merge must be complete, not destructive).
@@ -255,7 +255,7 @@ describe("synthesizeModelsYaml (plan 23 Task 3, AL-23-1 merged-complete file)", 
   });
 });
 
-describe("writePerReviewModelsYaml (plan 37 Task 2 — always synthesizes from capability hosts)", () => {
+describe("writePerReviewModelsYaml (always synthesizes from capability hosts)", () => {
   test("ZERO-custom (defaulted App): the written file is byte-identical to the old baked base — ark-plan equivalence", async () => {
     const agentDir = await writePerReviewModelsYaml(getSandboxImage("omp")!.hosts);
     expect(agentDir).toMatch(/^\/tmp\/omp-agent-/);

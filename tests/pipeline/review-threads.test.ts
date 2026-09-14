@@ -1,6 +1,6 @@
 /**
- * Review-thread identity, discovery and resolution tests (plan 67 Task 2,
- * spec review-lifecycle §7.5) — `src/pipeline/review-threads.ts` against the
+ * Review-thread identity, discovery and resolution tests
+ * (spec review-lifecycle §7.5) — `src/pipeline/review-threads.ts` against the
  * bun:sqlite double running the real migration SQL (createMigratedTestD1:
  * 0001 → 0020, so review_publications/review_findings/review_threads/
  * app_installations/github_apps are production-shaped) plus an in-memory

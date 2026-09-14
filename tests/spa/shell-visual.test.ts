@@ -1,7 +1,7 @@
 /**
- * Plan 58 T1: shell visual-discipline pins.
+ * shell visual-discipline pins.
  *
- * 1. Motion-token sweep (routed from plan 57 QC, binding): the shell
+ * 1. Motion-token sweep (routed from QC, binding): the shell
  *    primitive faces (ui/sidebar.tsx, ui/sheet.tsx, ui/toggle.tsx) must
  *    express every transition through the duration/ease tokens (duration-
  *    and ease- namespaces) — no raw ms/cubic-bezier literals, no silent
@@ -10,14 +10,14 @@
  *    properties); only duration/easing moved to tokens. The tokens.css
  *    reduce fold (all durations → 1ms) covers every var consumer, so the
  *    faces need no per-component media query.
- * 2. Shell brand surfaces (A1/A2): the sidebar active fill wears the plan-64
- *    brand tint through the sanctioned --sidebar-primary bridge (plan 64
- *    AD-641 retires the plan-58 left edge line) and the navbar sits on the
+ * 2. Shell brand surfaces (A1/A2): the sidebar active fill wears the
+ * v0.3.2 brand tint through the sanctioned --sidebar-primary bridge
+ * (AD-641 retires the left edge line) and the navbar sits on the
  *    background-200 chrome token — zero raw hex in the shell sources.
- * 3. Sidebar hover hierarchy (plan 62 T1, AD-622): every menu-button hover
+ * 3. Sidebar hover hierarchy (AD-622): every menu-button hover
  *    face dims to the /40 accent tint + text brighten while the press fill
  *    stays full strength (the open state has no dedicated fill face) and
- *    the active face wears the plan-64 /12 brand tint (plan 64 AD-641) —
+ * the active face wears the 12%-alpha brand tint (AD-641) —
  *    hover stays lighter than the full-strength press, hue apart from
  *    active.
  */
@@ -42,11 +42,11 @@ function transitionFaces(source: string): string[] {
     .filter((line) => /\btransition\b|transition-\[|transition-transform|transition-opacity|transition-colors/.test(line));
 }
 
-describe("motion token sweep (plan 58 T1, routed from plan 57 QC)", () => {
+describe("motion token sweep (routed from QC)", () => {
   for (const [name, source] of Object.entries(sources)) {
     test(`${name}.tsx carries no raw duration or easing literals`, () => {
       expect(source).not.toMatch(/duration-\d{2,4}\b/);
-      // Arbitrary-value forms are raw literals too (plan 58 F-58-3) — the
+      // Arbitrary-value forms are raw literals too (F-58-3) — the
       // token consumers use the paren shorthand, never `duration-[...]`.
       expect(source).not.toMatch(/duration-\[[^\]]+\]/);
       expect(source).not.toMatch(/\bease-linear\b/);
@@ -101,12 +101,12 @@ describe("motion token sweep (plan 58 T1, routed from plan 57 QC)", () => {
   });
 });
 
-describe("shell brand surfaces (plan 58 T1, A1/A2)", () => {
+describe("shell brand surfaces (A1/A2)", () => {
   const sidebar = readFileSync(join(spaRoot, "components/AppSidebar.tsx"), "utf8");
   const layout = readFileSync(join(spaRoot, "Layout.tsx"), "utf8");
 
-  test("sidebar active fill wears the plan-64 brand tint via the sanctioned --sidebar-primary bridge (brand stays off alert semantics)", () => {
-    // Plan 64 (AD-641) supersedes the plan-58 edge line: the active fill is
+  test("sidebar active fill wears the brand tint via the sanctioned --sidebar-primary bridge (brand stays off alert semantics)", () => {
+    // (AD-641) supersedes the edge line: the active fill is
     // the low-alpha brand tint on the menu-button variant string.
     const tintLine = sources.sidebar
       ?.split("\n")
@@ -141,10 +141,10 @@ describe("shell brand surfaces (plan 58 T1, A1/A2)", () => {
   });
 });
 
-describe("sidebar hover hierarchy recipe (plan 62 T1, AD-622)", () => {
+describe("sidebar hover hierarchy recipe (AD-622)", () => {
   const appSidebar = readFileSync(join(spaRoot, "components/AppSidebar.tsx"), "utf8");
   // The menu-button cva block only — sidebar.tsx carries out-of-scope hover
-  // faces (menu-action, menu-badge, menu-sub) that plan 62 does not touch.
+  // faces (menu-action, menu-badge, menu-sub) that the AD-622 rework does not touch.
   const menuButtonBlock = sources.sidebar?.match(
     /const sidebarMenuButtonVariants = cva\([\s\S]*?\n\)\n/,
   )?.[0];
@@ -172,8 +172,8 @@ describe("sidebar hover hierarchy recipe (plan 62 T1, AD-622)", () => {
     expect(menuButtonBlock).not.toMatch(/hover:bg-sidebar-accent(?!\/)/);
   });
 
-  test("menu-button press face keeps its full-strength fill; the active face wears the plan-64 brand tint (AD-622 untouched list)", () => {
-    // AD-622's untouched list covers the press face; plan 64 (AD-641)
+  test("menu-button press face keeps its full-strength fill; the active face wears the brand tint (AD-622 untouched list)", () => {
+    // AD-622's untouched list covers the press face; the v0.3.2 tint rework (AD-641)
     // supersedes the active-route face — text brighten + font-medium stay.
     expect(menuButtonBlock).toContain(
       "active:bg-sidebar-accent active:text-sidebar-accent-foreground",

@@ -1,5 +1,5 @@
 /**
- * Consumer tests (plan 06 Task 3 + Phase 5 Wave A) — full-mock flow. The
+ * Consumer tests (Phase 5 Wave A) — full-mock flow. The
  * sandbox adapter and the commenter are injected via createReviewConsumer's
  * overrides (DI — no process-wide mock.module on relative module paths, which
  * leaks across test files sharing a worker on CI, run 32946710695); the review
@@ -15,7 +15,7 @@
  *     no longer used for dedup — a force-push mid-flight is self-consistent)
  *   - dedup runs AFTER clone against the checked-out sha
  *
- * Acceptance points (plan Task 3 / brief; plan 07 Task 5 rewire):
+ * Acceptance points (original brief + later rewiring):
  *   - findByIdempotencyKey hit after clone → ack (no post, no insert)
  *   - full flow: clone → rev-parse → diff → numstat → write runner input
  *     (reconFacts) → runner `--level/--input` (env-injected secrets) →
@@ -24,13 +24,13 @@
  *   - REVIEW_LEVEL configurable (quick/default/deep); invalid value fails loud
  *     BEFORE any sandbox step (never a silent downgrade)
  *   - null payload sha → sha resolved from the checkout (no gh pr view)
- *   - parse failure (plan 18 T2 / AL-1) → failure row (stage=parse) +
+ *   - parse failure (AL-1) → failure row (stage=parse) +
  *     degraded comment + ack — no post, no reviews row, no KV done, zero DLQ
  *   - infra failure (AL-6) → best-effort failure row with the phase stage
  *     (runner | sandbox | pipeline) + unchanged rethrow → retry/DLQ
  *   - comment failure → failure row (stage=pipeline) + rethrow, destroy
  *   - finally destroy on every path
- *   - line comments (plan 18 T3 / AL-3): upsert → diff prefetch →
+ *   - line comments (AL-3): upsert → diff prefetch →
  *     createReview ordering; hunk prefilter; prefetch failure → base-filter
  *     attempt; residual 422/any error → line_comments_fallback log +
  *     continue (never throws after the overall comment landed); zero
@@ -55,7 +55,7 @@ import {
   initialFakeCommenterState,
   type CommenterCall,
 } from "../helpers/review-commenter";
-// Plan 68 T2: the Check lifecycle is driven through PRODUCTION code — the real
+// the Check lifecycle is driven through PRODUCTION code — the real
 // registry double plus a scripted GitHub Checks surface (no live request).
 import { PreparedSendRejected } from "../../src/pipeline/comment";
 import {
@@ -102,7 +102,7 @@ const VALID_OUTPUT: ReviewOutput = {
 
 const SHA = "0123456789abcdef0123456789abcdef01234567";
 
-// --- default App row (plan 24 Task 1: every message is per-App) -------------
+// --- default App row (every message is per-App) -------------
 /** base64 of exactly 32 bytes (the secretbox master-key requirement). */
 const TEST_KEY = Buffer.alloc(32, 7).toString("base64");
 /** Fixed App id every consumer-test payload is attributed to. */
@@ -122,8 +122,8 @@ const TEST_APP_WEBHOOK_SECRET_ENC = await createSecretbox(TEST_KEY).encryptSecre
 /**
  * Fully-migrated D1 with the default App row seeded — the consumer's
  * per-App credential resolution needs a real active row on every message
- * (plan 24 Task 1: appRef is required, the env-App branch is retired).
- * AL-24-5 (plan 24 Task 6): the App is also given its AI-config health
+ * (appRef is required, the env-App branch is retired).
+ * AL-24-5: the App is also given its AI-config health
  * baseline — a model chain (`ark-plan/deepseek-v4-flash`, the in-image
  * base provider) + the `ark` BYOK key (ARK_API_KEY) whose env the chain's
  * provider reads — so a zero-extra-env message passes the fail-closed gate
@@ -177,7 +177,7 @@ let sandboxError: Error | undefined;
 let destroyCalls = 0;
 let destroyError: Error | undefined;
 
-// Plan 07 Task 5: the runtime runner contract — exit 0 ⇒ stdout is the
+// the runtime runner contract — exit 0 ⇒ stdout is the
 // engine-validated envelope; stderr is diagnostics-only (no mode marker).
 let runnerStderr = "";
 let runnerExitCode = 0;
@@ -189,12 +189,12 @@ let writeInputExitCode = 0;
 /** Decoded runner --input JSON written via the base64 write step. */
 let writtenInputJson: string | undefined;
 /**
- * Plan 67 T4: the diff stdout IS the worker-captured §7.3 trusted evidence —
+ * the diff stdout IS the worker-captured §7.3 trusted evidence —
  * the consumer reads it directly from the sandbox exec (no second prefetch).
  */
 let diffStdout = "";
 /**
- * Plan 67 T4: the runner's `--recheck-out` file content, read back through
+ * the runner's `--recheck-out` file content, read back through
  * the audited bounded read. The double mirrors the REAL bytes of
  * `readRecheckCommand`: `<content>\n` + `wc -c`'s NEWLINE-TERMINATED count,
  * i.e. `…\n0\n` (fit) / `…\n1\n` (overflow). P67-QC-006: a shape that differs
@@ -247,14 +247,14 @@ mock.module("@cloudflare/sandbox", () => ({
 }));
 
 // --- commenter fake (injected via createReviewConsumer overrides) -----------
-// Plan 67 T4: the shared double (tests/helpers/review-commenter.ts) records
+// the shared double (tests/helpers/review-commenter.ts) records
 // every op into commenterCalls and reads behavior from the mutable
 // commenterState (tests mutate it per case, like the `let` vars they
 // replace).
 const commenterCalls: CommenterCall[] = [];
 const commenterState = initialFakeCommenterState();
 
-// Plan 18 T3 line comments: the prefetched diff fixture (now the
+// line comments: the prefetched diff fixture (now the
 // WORKER-CAPTURED sandbox diff — same text, one capture).
 /** Default diff fixture: a src/auth.ts hunk whose right range covers line 21. */
 const VALID_DIFF = [
@@ -366,7 +366,7 @@ function makePayload(overrides: Partial<ReviewJobPayload> = {}): ReviewJobPayloa
     head_sha: SHA,
     action: "opened",
     triggered_by: "pull_request",
-    // Guard note (plan 24 Task 1 Step 4): a payload WITHOUT appRef is
+    // Guard note (Step 4): a payload WITHOUT appRef is
     // impossible at the type level (required field). At runtime the
     // classifier never attaches App identity — the per-App route is the
     // only producer that adds appRef, so every enqueued job carries it.
@@ -493,7 +493,7 @@ describe("createReviewConsumer", () => {
     ]);
     // The runner input JSON carries the reconFacts the runtime folds into
     // the envelope target (owner/repo#pr + the AUTHORITATIVE checkout sha),
-    // the numstat seat-partition universe, and (plan 37) the App's resolved
+    // the numstat seat-partition universe, and the App's resolved
     // sandbox image's capability hosts — the in-image synthesis base.
     expect(JSON.parse(writtenInputJson!)).toEqual({
       worktreePath: "/workspace/repo",
@@ -530,7 +530,7 @@ describe("createReviewConsumer", () => {
       },
       timeout: 600_000,
     });
-    // inside VALID_DIFF's right hunk [18,23]). Plan 67 §7.7 order: the
+    // inside VALID_DIFF's right hunk [18,23]). §7.7 order: the
     // intent-prepared line comments run after the apply; the degraded-comment
     // delete runs last, only after the normal publication proof.
     expect(commenterCalls.filter((c) => c.op === "token")).toHaveLength(1);
@@ -587,11 +587,11 @@ describe("createReviewConsumer", () => {
     };
     expect(row.head_sha).toBe(SHA);
     expect(row.verdict).toBe("needs fixes");
-    // The review row carries the App attribution (plan 24 Task 1: appRef is
+    // The review row carries the App attribution (appRef is
     // required — every new row is attributed; app_id NULL survives only on
-    // pre-plan-24 historical rows).
+    // pre-per-App historical rows).
     expect(row.app_id).toBe(TEST_APP_ID);
-    // Version records (plan 18 Task 1, AL-24-5): the seed App's own chain is
+    // Version records (AL-24-5): the seed App's own chain is
     // the only chain source — `model` records its head selector (never NULL
     // on a new row); `provider` is NULL on BOTH paths (architect AL-2).
     expect(row.model).toBe("ark-plan/deepseek-v4-flash");
@@ -661,7 +661,7 @@ describe("createReviewConsumer", () => {
     expect(destroyCalls).toBe(1);
   });
 
-  test("parse failure → failure row (stage=parse) + degraded comment + ack, zero DLQ (plan 18 T2 / AL-1)", async () => {
+  test("parse failure → failure row (stage=parse) + degraded comment + ack, zero DLQ (AL-1)", async () => {
     reset();
     runnerStdout = "not json at all";
     const db = await createSeededTestD1();
@@ -899,7 +899,7 @@ describe("createReviewConsumer", () => {
     expect(warn).toBeDefined();
   });
 
-  test("in-flight legacy-shape payload (absent appRef) → structured channel + healthy batch sibling completes (plan 24 F-001)", async () => {
+  test("in-flight legacy-shape payload (absent appRef) → structured channel + healthy batch sibling completes (F-001)", async () => {
     reset();
     runnerStdout = JSON.stringify(VALID_OUTPUT);
     const db = await createSeededTestD1();
@@ -1015,7 +1015,7 @@ describe("createReviewConsumer", () => {
     expect(reviewCount(db)).toBe(1);
   });
 
-  test("REVIEW_LEVEL=deep → runner runs `--level 'deep'` forwarded unchanged (plan 09 T3 / AC-S9-trigger)", async () => {
+  test("REVIEW_LEVEL=deep → runner runs `--level 'deep'` forwarded unchanged (AC-S9-trigger)", async () => {
     reset();
     runnerStdout = JSON.stringify(VALID_OUTPUT);
     const db = await createSeededTestD1();
@@ -1129,8 +1129,8 @@ describe("createReviewConsumer", () => {
   test("invalid REVIEW_LEVEL (Object.prototype keys) → fail-loud BEFORE any sandbox step (never a silent downgrade)", async () => {
     // qc3 F-302: "toString"/"__proto__" would pass an `in`-style guard — only
     // REVIEW_LEVELS membership (isReviewLevel) rejects them at this first,
-    // pre-sandbox guard. "deep" is NOT here: it is a legal tier since plan 09
-    // T1 and is covered by the success test above.
+    // pre-sandbox guard. "deep" is NOT here: it is a legal tier since the
+    // deep-tier work and is covered by the success test above.
     for (const level of ["toString", "constructor", "__proto__"]) {
       reset();
       const db = await createSeededTestD1();
@@ -1485,7 +1485,7 @@ describe("createReviewConsumer", () => {
       },
       timeout: 600_000,
     });
-    // Version record (plan 18 Task 1): the row records the App chain's HEAD
+    // Version record: the row records the App chain's HEAD
     // selector; provider stays NULL.
     const versionRow = db.raw.query("SELECT model, provider FROM reviews").get() as {
       model: string | null;
@@ -1499,7 +1499,7 @@ describe("createReviewConsumer", () => {
     reset();
     runnerStdout = JSON.stringify(VALID_OUTPUT);
     const db = await createSeededTestD1();
-    // Clear the seeded chain (setModelChain("") removes the row — plan 15).
+    // Clear the seeded chain (setModelChain("") removes the row).
     await createAppConfigStore(db, TEST_KEY).setModelChain(TEST_APP_ID, "");
     const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), testLog, testOverrides);
 
@@ -1591,7 +1591,7 @@ describe("createReviewConsumer", () => {
     const db = await createSeededTestD1();
     // A second App with a HEALTHY base chain (passes the base gate) but a
     // raw `,` override chain inserted DIRECTLY into app_model_chains with a
-    // seat reference row (the plan-35 shape). The dashboard store rejects
+    // seat reference row (the shape). The dashboard store rejects
     // this chain value (upsertModelChain → InvalidModelSelectorError), so
     // only a direct-D1 write can land it; the consumer gate is the backstop
     // and must treat it as "missing model chain" — the runner's
@@ -1672,13 +1672,13 @@ describe("createReviewConsumer", () => {
     );
   });
 
-  test("migration equivalence: a pre-chains App (0006/0009 shape) resolves byte-identically after 0017's backfill (plan 35 T2, spec §4.4)", async () => {
+  test("migration equivalence: a pre-chains App (0006/0009 shape) resolves byte-identically after 0017's backfill (spec §4.4)", async () => {
     reset();
     runnerStdout = JSON.stringify(VALID_OUTPUT);
     // Pre-0017 DB: 0001–0016 in filename order (the chains migration NOT
-    // yet applied) — the wrangler state before plan 35 deploys. Migrations
+    // yet applied) — the wrangler state before the chains migration. Migrations
     // 0017–0020 are applied after the 0017 backfill below; the lifecycle
-    // journal tables (0020) are required by the plan-67 §7.7 step-2 read
+    // journal tables (0020) are required by the §7.7 step-2 read
     // and are unrelated to the 0017 backfill under test.
     const db = createTestD1();
     for (const name of [
@@ -1738,10 +1738,10 @@ describe("createReviewConsumer", () => {
     await legacyStore.setProviderKey(appId, "anthropic", sk("legacy-anthropic"));
     // Apply 0017 (the backfill) — the migration under test.
     db.raw.exec(readFileSync(join(import.meta.dir, "../../migrations", "0017_app_model_chains.sql"), "utf8"));
-    // 0018 (plan 37) ships with the consumer that resolves the App's sandbox
+    // 0018 ships with the consumer that resolves the App's sandbox
     // image — the row backfills to the 'omp' default exactly like a real
     // pre-37 App under this deployment pair. 0019–0020 complete the current
-    // migration set (0019 metadata, 0020 the plan-67 lifecycle journal the
+    // migration set (0019 metadata, 0020 the lifecycle journal the
     // consumer's step-2 read queries).
     for (const name of [
       "0018_app_sandbox_images.sql",
@@ -1963,7 +1963,7 @@ describe("createReviewConsumer", () => {
     // runner-input write) × 120s + the LEVEL's runner budget + 120s slack
     // for the untimed steps (token mint, sandbox create, comment post,
     // KV/D1 puts) = 1320s quick/default, 1560s deep (spec d5-budget L4).
-    // numstat + the input write were added by plan 07 without recomputing
+    // numstat + the input write were added without recomputing
     // the old 3-step formula (1020s) — any future step or ceiling change
     // must recompute this helper ON PURPOSE.
     expect(reviewGuardTtlSeconds("quick")).toBe(1320);
@@ -1986,7 +1986,7 @@ describe("createReviewConsumer", () => {
   });
 });
 
-describe("line comments (plan 18 Task 3 / AL-3 layered delivery)", () => {
+describe("line comments (AL-3 layered delivery)", () => {
   test("no qualifying findings (no position) → zero line-comment API calls (byte-compat)", async () => {
     reset();
     runnerStdout = JSON.stringify({
@@ -2016,7 +2016,7 @@ describe("line comments (plan 18 Task 3 / AL-3 layered delivery)", () => {
     // VALID_DIFF covers src/auth.ts right range [18,23]: line 100 is
     // outside every hunk; docs/readme.md is not in the diff at all. The
     // prefilter input is the SAME sandbox diff exec the evidence catalog
-    // uses (plan 67: one worker-controlled capture, no second prefetch).
+    // uses (one worker-controlled capture, no second prefetch).
     diffStdout = VALID_DIFF;
     runnerStdout = JSON.stringify({
       ...VALID_OUTPUT,
@@ -2190,7 +2190,7 @@ describe("degraded-comment lifecycle (Bugbot finding)", () => {
   });
 });
 
-describe("line-comments round pin (plan 18 Task 3 / AL-3)", () => {
+describe("line-comments round pin (AL-3)", () => {
   test("the line-comments round pins to the round the overall upsert returned", async () => {
     reset();
     runnerStdout = JSON.stringify(VALID_OUTPUT);
@@ -2260,7 +2260,7 @@ describe("SEC-01 exact-value redaction through the consumer", () => {
     expect(String(rows[0]!.error)).not.toContain(gh("s", "installation_token"));
   });
 });
-describe("cross-round repeat dedup (plan 21 Task 3 / AL-21-2)", () => {
+describe("cross-round repeat dedup (AL-21-2)", () => {
   test("previous round fingerprints are queried before the post and passed to comment assembly", async () => {
     reset();
     runnerStdout = JSON.stringify(VALID_OUTPUT);
@@ -2367,7 +2367,7 @@ describe("cross-round repeat dedup (plan 21 Task 3 / AL-21-2)", () => {
 });
 
 // ---------------------------------------------------------------------------
-// Finding recheck & closure (plan 67 T4, spec §7.7 order / §7.4 conservative
+// Finding recheck & closure (spec §7.7 order / §7.4 conservative
 // reconciliation / §7.10 closure / §7.10 Check seam). Assertions target the
 // OBSERVABLE multi-round behavior: the captured call order, the prepared
 // publication body, and the D1 lifecycle rows — never internal wiring.
@@ -2477,7 +2477,7 @@ function recheckDocWith(result: Record<string, unknown>, rowId = TARGET_ROW_ID):
   });
 }
 
-describe("finding recheck & closure (plan 67 §7.7/§7.4/§7.10)", () => {
+describe("finding recheck & closure (§7.7/§7.4/§7.10)", () => {
   test("recheck round with an open prior row: recheck input rides the runner, closure renders the verified fix, resolution runs discovery then resolve", async () => {
     reset();
     diffStdout = VALID_DIFF;
@@ -3476,7 +3476,7 @@ describe("degraded cleanup journal gate (spec §7.7 step 11, P67-QC-008)", () =>
 });
 
 // ---------------------------------------------------------------------------
-// Check lifecycle binding (plan 68 T2, spec §7.10 seam + §7.9 semantics) — the
+// Check lifecycle binding (spec §7.10 seam + §7.9 semantics) — the
 // PRODUCTION `createCheckLifecycle` driven through the real consumer over the
 // bun:sqlite registry double, with the GitHub Checks surface scripted.
 // Assertions target the observable remote sequence (which request, carrying
@@ -3654,7 +3654,7 @@ function beginInput(sha: string, executionDeadlineMs: number) {
   };
 }
 
-describe("check lifecycle (plan 68 T2 — consumer binding, spec §7.10/§7.9)", () => {
+describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
   test("check lifecycle: a published review creates one in-progress run and terminalizes success from the persisted proof", async () => {
     reset();
     runnerStdout = JSON.stringify(VALID_OUTPUT);

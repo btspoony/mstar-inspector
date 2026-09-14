@@ -1,5 +1,5 @@
 /**
- * Plan 53 Task 1 (T1.2) unit tests for src/dashboard/github-app-metadata.ts
+ * Unit tests for src/dashboard/github-app-metadata.ts
  * — the per-App JWT mint + `GET /app` metadata fetch (architect decision
  * AD-531). Pinned here:
  *   - the JWT face: header `{alg:RS256,typ:JWT}`, claims
@@ -159,7 +159,7 @@ afterEach(() => {
   AbortSignal.timeout = origAbortTimeout;
 });
 
-describe("fetchAppMetadata (plan 53 T1.2, AD-531)", () => {
+describe("fetchAppMetadata (AD-531)", () => {
   test("mints a verifiable RS256 App JWT and extracts ONLY the public profile fields (PKCS#8 PEM)", async () => {
     const { pem, publicKey } = await pkcs8Fixture();
     const { calls } = stubFetch(() => jsonResponse(GITHUB_PROFILE));
@@ -340,7 +340,7 @@ describe("fetchAppMetadata (plan 53 T1.2, AD-531)", () => {
   });
 });
 
-describe("isGithubMetadataStale (plan 53 A4 TTL — the settings read path's refresh gate)", () => {
+describe("isGithubMetadataStale (TTL — the settings read path's refresh gate)", () => {
   // Fixed clock; `utcText` formats a UTC instant as the SQLite
   // `datetime('now')` TEXT convention (`YYYY-MM-DD HH:MM:SS`, UTC).
   const NOW_MS = Date.UTC(2026, 8, 8, 12, 0, 0);

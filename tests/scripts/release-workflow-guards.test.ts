@@ -1,21 +1,21 @@
 /**
- * Durable workflow-guard tests (plan 50 QC round B2; AC2's 守卫断言 made
- * permanent — previously only transient task-4 heredoc evidence).
+ * Durable workflow-guard tests (QC round B2; AC2's 守卫断言 made
+ * permanent — previously only transient CI-run heredoc evidence).
  *
  * YAML-parses `.github/workflows/release-prep.yml` + `release.yml` and pins
- * the release-chain guard surface (also the 51/52 hook surface):
+ * the release-chain guard surface (also the deploy-evidence hook surface):
  *
  * - triggers: prep = workflow_dispatch with the optional `version` input;
  *   release = pull_request closed + branches [main];
  * - release job guard: merged == true AND title prefix `release v`;
  * - permission faces (AD-4): prep = contents + pull-requests write, no
  *   issues; release = contents write + actions read (the deploy-evidence
- *   `gh run list`/`gh run download` face, plan 52) and nothing else;
+ * `gh run list`/`gh run download` face) and nothing else;
  * - concurrency: prep group `release-prep`, cancel-in-progress: false;
  * - checkout ref pins merge_commit_sha (release side);
  * - softprops/action-gh-release SHA pin string (byte-exact, sole
  *   third-party action; new-to-repo actions are SHA-pinned — pin convention);
- * - deploy-evidence append step (plan 52): exactly one `gh release edit`
+ * - deploy-evidence append step: exactly one `gh release edit`
  *   workflow-wide (count across ALL step runs, not mere containment), its own
  *   step-level timeout budget bounded below the job cap, edit failure loud at
  *   the step level (::error + exit 1) while continue-on-error keeps the job
@@ -162,7 +162,7 @@ describe("release.yml guards", () => {
     expect(runs).toContain("printf '\\n\\n---\\n\\n'");
   });
 
-  test("deploy-evidence append step (plan 52): after release creation, never fails the release, env-indirected", () => {
+  test("deploy-evidence append step: after release creation, never fails the release, env-indirected", () => {
     const steps = wf.jobs.release.steps as {
       id?: string;
       uses?: string;
@@ -192,7 +192,7 @@ describe("release.yml guards", () => {
     expect(evidRun).toContain('gh release edit "v${VERSION}" --notes-file "$NOTES_FILE"');
     expect(evidRun.match(/gh release edit/g)).toHaveLength(1);
     expect(evidRun).not.toContain("${{");
-    // plan-50 QC B1: version/SHA/token reach the script via step env, never raw interpolation
+    // QC B1: version/SHA/token reach the script via step env, never raw interpolation
     expect(evid.env).toEqual({
       GH_TOKEN: "${{ secrets.GITHUB_TOKEN }}",
       VERSION: "${{ steps.ver.outputs.version }}",

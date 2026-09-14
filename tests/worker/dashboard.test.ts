@@ -1,9 +1,9 @@
 /**
- * Plan 08 Task 2 tests: signed session cookie + OAuth state CSRF, through
- * the real worker mount (app.route("/dashboard", dashboardApp)). Plan 11
- * Task 1 adds the GitHub App Manifest start/callback coverage (state CSRF,
- * locked conversion headers, encrypted hold cookie, no-secret HTML); plan 13
- * B5 T3 rewrites the commit coverage: slug-carrying signed state, hold-bound
+ * Unit tests: signed session cookie + OAuth state CSRF, through
+ * the real worker mount (app.route("/dashboard", dashboardApp)).
+ * The GitHub App Manifest start/callback coverage (state CSRF,
+ * locked conversion headers, encrypted hold cookie, no-secret HTML);
+ * the commit coverage pins the rewritten flow: slug-carrying signed state, hold-bound
  * D1 write of the encrypted github_apps row (AAD rowKey = row PK), the
  * commit-time slug-conflict 409 burn (never remap — the manifest registered
  * the webhook URL), fail-closed DASHBOARD_ENCRYPTION_KEY, zero
@@ -107,7 +107,7 @@ function baseEnv(overrides: Partial<Env> = {}): Env {
 }
 
 /**
- * Plan 12 T2: every /dashboard route sits behind the per-request membership
+ * every /dashboard route sits behind the per-request membership
  * guard, so each session-bearing request resolves a users row through D1.
  * The default env therefore ships a store seeded with exactly the logins the
  * existing route tests sign in as (the "existing tests pass unchanged with a
@@ -310,7 +310,7 @@ describe("exchangeCodeForToken (oauth.ts, stubbed fetch)", () => {
     // Traversal / authority injection / query-fragment escape / whitespace /
     // non-ASCII / empty / over-length all fail GITHUB_CODE_SHAPE pre-fetch;
     // the code can never alter the fetched URL (it rides the POST body of the
-    // fixed github.com token endpoint anyway — plan 61 F11).
+    // fixed github.com token endpoint anyway — F11).
     const hostile = [
       "../../admin",
       "x@evil.example",
@@ -416,7 +416,7 @@ describe("fetchGitHubUser (oauth.ts, stubbed fetch)", () => {
 });
 
 describe("/dashboard routes", () => {
-  test("GET /dashboard without a session → 302 to login (plan 33 T3)", async () => {
+  test("GET /dashboard without a session → 302 to login", async () => {
     const res = await worker.fetch(dashboardRequest("/dashboard"), withSpaAssets(makeEnv()));
     expect(res.status).toBe(302);
     expect(res.headers.get("Location")).toBe("/dashboard/login");
@@ -435,7 +435,7 @@ describe("/dashboard routes", () => {
     // qc1/qc2 F-001: octocat is an admin (default seed) — the boot carries
     // the admin role so the SPA renders the Members entry.
     expect(body).toContain('"role":"admin"');
-    // The legacy three-card home is retired (plan 30 T4): no SSR sections,
+    // The legacy three-card home is retired: no SSR sections,
     // no manifest start form, no REVIEW_ENABLED copy.
     expect(body).not.toContain("Model keys");
     expect(body).not.toContain("Not in this iteration (B3).");
@@ -443,7 +443,7 @@ describe("/dashboard routes", () => {
     expect(body).not.toContain("REVIEW_ENABLED");
   });
 
-  test("the SPA home document title is the SPA index title (plan 30 T4)", async () => {
+  test("the SPA home document title is the SPA index title", async () => {
     const indexHtml = readFileSync(join(import.meta.dir, "../../src/spa/index.html"), "utf8");
     expect(indexHtml).toContain("<title>Morning Star Inspector</title>");
     expect(indexHtml).not.toContain("Dashboard —");
@@ -623,7 +623,7 @@ describe("/dashboard routes", () => {
   });
 
   test("GET /dashboard/logout → 302 to login; session, manifest hold, and manifest state cookies expired", async () => {
-    // Plan 12 T2: /logout is guarded (spec L5 — not exempt), so a real logout
+    // /logout is guarded (spec L5 — not exempt), so a real logout
     // arrives with a member session (the shell header link); without one the
     // guard 302s before the cookie-expiry route (asserted in the guard suite).
     const session = await createSessionValue("octocat", null, SESSION_SECRET);
@@ -649,7 +649,7 @@ describe("/dashboard routes", () => {
       GITHUB_OAUTH_CLIENT_SECRET: undefined,
       DASHBOARD_SESSION_SECRET: undefined,
     });
-    // Plan 33 T3: no session secret = no valid session → the shell path 302s
+    // no session secret = no valid session → the shell path 302s
     // to login (no null-boot flash); the login/API routes behind it still
     // fail closed.
     const shell = await worker.fetch(dashboardRequest("/dashboard"), withSpaAssets(env));
@@ -715,7 +715,7 @@ describe("/dashboard routes", () => {
   });
 });
 
-describe("/dashboard/locale (plan 29 T2)", () => {
+describe("/dashboard/locale", () => {
   const sessionCookie = async () =>
     `${SESSION_COOKIE}=${await createSessionValue("octocat", null, SESSION_SECRET)}`;
 
@@ -1061,7 +1061,7 @@ describe("exchangeManifestCode (manifest.ts, stubbed fetch)", () => {
     // / whitespace / non-ASCII / empty / over-length all fail
     // GITHUB_CODE_SHAPE before the upstream call — a request-supplied code
     // can only ever become ONE encoded path segment on the fixed
-    // api.github.com host (plan 61 F13).
+    // api.github.com host (F13).
     const hostile = [
       "../conversions",
       "x@evil.example",
@@ -1096,7 +1096,7 @@ describe("exchangeManifestCode (manifest.ts, stubbed fetch)", () => {
   });
 });
 
-describe("/dashboard manifest routes (plan 11 Task 1)", () => {
+describe("/dashboard manifest routes", () => {
   const origFetch = globalThis.fetch;
   afterEach(() => {
     globalThis.fetch = origFetch;
@@ -1181,8 +1181,8 @@ describe("/dashboard manifest routes (plan 11 Task 1)", () => {
     expect(manifest.public).toBe(false);
     expect(manifest.default_events).toEqual(["pull_request", "issue_comment"]);
     expect(manifest.default_permissions).toEqual({
-      // Plan 67 §7.6: contents:write is authorized for Worker-side thread
-      // resolution (plan 68 adds checks:write for advisory Check runs).
+      // contents:write is authorized for Worker-side thread
+      // resolution (adds checks:write for advisory Check runs).
       contents: "write",
       metadata: "read",
       pull_requests: "write",
@@ -1190,7 +1190,7 @@ describe("/dashboard manifest routes (plan 11 Task 1)", () => {
       checks: "write",
     });
   });
-  test("Accept-Language zh renders the start page in zh_CN (plan 29 T5)", async () => {
+  test("Accept-Language zh renders the start page in zh_CN", async () => {
     const session = await createSessionValue("octocat", null, SESSION_SECRET);
     const res = await worker.fetch(
       new Request("https://worker.local/dashboard/manifest/start", {
@@ -1312,7 +1312,7 @@ describe("/dashboard manifest routes (plan 11 Task 1)", () => {
     expect(entry.reason).toBe("unsafe_code_shape");
   });
 
-  test("callback success → conversion exchanged, App auto-committed, 302 to onboarding, hold burned, no secrets (plan 31 T5)", async () => {
+  test("callback success → conversion exchanged, App auto-committed, 302 to onboarding, hold burned, no secrets", async () => {
     // The callback now runs the commit itself (AC4b — no second click), so
     // it needs the commit-shaped env: encryption key + D1.
     const env = makeEnv({ DASHBOARD_ENCRYPTION_KEY: TEST_ENCRYPTION_KEY });
@@ -1383,7 +1383,7 @@ describe("/dashboard manifest routes (plan 11 Task 1)", () => {
     expect(body).not.toContain('class="danger"');
   });
 
-  test("callback auto-commit already-connected (github_app_id taken) → 409 error page, hold burned, zero new rows (plan 31 T5)", async () => {
+  test("callback auto-commit already-connected (github_app_id taken) → 409 error page, hold burned, zero new rows", async () => {
     const env = makeEnv({ DASHBOARD_ENCRYPTION_KEY: TEST_ENCRYPTION_KEY });
     // The same GitHub App is already connected on this deployment.
     await envDb(env).createApp({
@@ -1417,7 +1417,7 @@ describe("/dashboard manifest routes (plan 11 Task 1)", () => {
     expect(entry.reason).toBe("github_app_id_conflict");
   });
 
-  test("callback auto-commit slug race → 409 error page, hold burned, zero rows for the held App (plan 31 T5)", async () => {
+  test("callback auto-commit slug race → 409 error page, hold burned, zero rows for the held App", async () => {
     const env = makeEnv({ DASHBOARD_ENCRYPTION_KEY: TEST_ENCRYPTION_KEY });
     // Hold carries the base slug, but the slug got claimed before the write.
     await envDb(env).createApp({
@@ -1446,7 +1446,7 @@ describe("/dashboard manifest routes (plan 11 Task 1)", () => {
     expect(body).not.toContain("BEGIN");
   });
 
-  test("callback retryable 500 (missing encryption key) → resumable page, hold cookie parked, confirm gate reachable (plan 31 T5)", async () => {
+  test("callback retryable 500 (missing encryption key) → resumable page, hold cookie parked, confirm gate reachable", async () => {
     // No DASHBOARD_ENCRYPTION_KEY → the inline commit fails closed at
     // encryption: 500, zero rows, and the hold lands in a cookie so the
     // operator can resume from the confirm page.
@@ -1498,7 +1498,7 @@ describe("/dashboard manifest routes (plan 11 Task 1)", () => {
     expect(resumedBody).not.toContain(FAKE_WEBHOOK_SECRET);
   });
 
-  test("callback retryable 500 (unbound D1) → resumable page, hold cookie parked, confirm gate reachable (plan 31 QC F-005)", async () => {
+  test("callback retryable 500 (unbound D1) → resumable page, hold cookie parked, confirm gate reachable (QC F-005)", async () => {
     // Encryption is configured so this isolates db_unbound from encrypt_failed.
     // The membership guard skips unbound-D1 fail-closed on callback/confirm so
     // the hold can park and the confirm link stays reachable.
@@ -1537,8 +1537,8 @@ describe("/dashboard manifest routes (plan 11 Task 1)", () => {
     expect(resumedBody).not.toContain(FAKE_WEBHOOK_SECRET);
   });
 
-  test("callback retryable 500 (github_apps missing) → hold parked, confirm gate reachable (plan 31 T5)", async () => {
-    // through=3: a pre-plan-13 DB (users only — no github_apps table). The
+  test("callback retryable 500 (github_apps missing) → hold parked, confirm gate reachable", async () => {
+    // through=3: a pre-apps DB (users only — no github_apps table). The
     // guard passes (membership reads users), the inline commit fails on the
     // missing table: retryable, hold parked for the resume path.
     const env = {
@@ -1677,7 +1677,7 @@ describe("/dashboard confirm resume (Bugbot: confirm step must be resumable)", (
     expect(noHold.headers.get("Location")).toBe("/dashboard");
   });
 
-  test("Accept-Language zh renders the confirm page in zh_CN (plan 29 T7)", async () => {
+  test("Accept-Language zh renders the confirm page in zh_CN", async () => {
     const session = await createSessionValue("octocat", null, SESSION_SECRET);
     const hold = await freshHold();
     const res = await worker.fetch(
@@ -1729,7 +1729,7 @@ describe("dashboard private-key normalization (private-key.ts)", () => {
   });
 });
 
-describe("/dashboard manifest commit (plan 13 B5 T3: manifest → D1, zero CF API)", () => {
+describe("/dashboard manifest commit (manifest → D1, zero CF API)", () => {
   const origFetch = globalThis.fetch;
   afterEach(() => {
     globalThis.fetch = origFetch;
@@ -1767,7 +1767,7 @@ describe("/dashboard manifest commit (plan 13 B5 T3: manifest → D1, zero CF AP
 
   function commitEnv(overrides: Partial<Env> = {}): Env {
     // makeEnv seeds the default members (octocat is an admin) and the
-    // production-shaped plan-13 DB — the commit writes github_apps.
+    // production-shaped DB — the commit writes github_apps.
     return makeEnv({ DASHBOARD_ENCRYPTION_KEY: TEST_ENCRYPTION_KEY, ...overrides });
   }
 
@@ -1875,7 +1875,7 @@ describe("/dashboard manifest commit (plan 13 B5 T3: manifest → D1, zero CF AP
 
   test("migrations not applied (no github_apps table) → 500 fail-closed, hold KEPT", async () => {
     const rec = stubFetchRecording();
-    // through=3: a pre-plan-13 DB (users only — no github_apps table).
+    // through=3: a pre-apps DB (users only — no github_apps table).
     const res = await doCommit({
       env: {
         ...baseEnv({ DASHBOARD_ENCRYPTION_KEY: TEST_ENCRYPTION_KEY }),
@@ -1888,7 +1888,7 @@ describe("/dashboard manifest commit (plan 13 B5 T3: manifest → D1, zero CF AP
     expect(rec.urls).toHaveLength(0);
   });
 
-  test("e2e start→callback AUTO-COMMIT (plan 31 T5): encrypted github_apps row, PEM verbatim (L1), AAD rowKey = row PK, onboarding shows slug/webhook URL/id, ZERO api.cloudflare.com calls, no secrets in HTML", async () => {
+  test("e2e start→callback AUTO-COMMIT: encrypted github_apps row, PEM verbatim (L1), AAD rowKey = row PK, onboarding shows slug/webhook URL/id, ZERO api.cloudflare.com calls, no secrets in HTML", async () => {
     const rec = stubGitHubConversionOnly();
     const env = commitEnv();
     const session = await createSessionValue("octocat", null, SESSION_SECRET);
@@ -1977,7 +1977,7 @@ describe("/dashboard manifest commit (plan 13 B5 T3: manifest → D1, zero CF AP
     expect(html).not.toContain(FAKE_WEBHOOK_SECRET);
   });
 
-  test("POST /manifest/commit stays an idempotent-recovery path: after a retryable callback 500, the SAME hold resubmits → 302 onboarding + one row (plan 31 T5)", async () => {
+  test("POST /manifest/commit stays an idempotent-recovery path: after a retryable callback 500, the SAME hold resubmits → 302 onboarding + one row", async () => {
     // 1. Callback with a key-less env: the auto-commit fails at encryption and
     // parks the hold cookie (500, zero rows). The signed state carries the
     // slug exactly as /manifest/start would have minted it.
@@ -2157,7 +2157,7 @@ describe("/dashboard manifest commit (plan 13 B5 T3: manifest → D1, zero CF AP
     expectHoldKept(res);
   });
 
-  test("Accept-Language zh renders the onboarding page after a successful commit (plan 31 T5)", async () => {
+  test("Accept-Language zh renders the onboarding page after a successful commit", async () => {
     stubFetchRecording();
     const session = await createSessionValue("octocat", null, SESSION_SECRET);
     const env = commitEnv();
@@ -2183,7 +2183,7 @@ describe("/dashboard manifest commit (plan 13 B5 T3: manifest → D1, zero CF AP
     expect(body).not.toContain("REVIEW_ENABLED");
   });
 
-  test("Accept-Language zh renders the retryable commit error in zh_CN (plan 29 T7)", async () => {
+  test("Accept-Language zh renders the retryable commit error in zh_CN", async () => {
     stubFetchRecording();
     const res = await doCommit({
       env: commitEnv({ DASHBOARD_ENCRYPTION_KEY: undefined }),
@@ -2199,13 +2199,13 @@ describe("/dashboard manifest commit (plan 13 B5 T3: manifest → D1, zero CF AP
   });
 });
 
-describe("/dashboard placeholder lock + legacy home retirement (plan 11 Task 3 + plan 30 T4)", () => {
+describe("/dashboard placeholder lock + legacy home retirement", () => {
   const origFetch = globalThis.fetch;
   afterEach(() => {
     globalThis.fetch = origFetch;
   });
 
-  test("legacy three-card home is retired: no dashboardPage/section code remains (plan 30 T4)", () => {
+  test("legacy three-card home is retired: no dashboardPage/section code remains", () => {
     const views = readFileSync(join(import.meta.dir, "../../src/dashboard/views.ts"), "utf8");
     for (const symbol of ["dashboardPage", "placeholderSection", "githubAppSection", "modelKeysSection"]) {
       expect(views, symbol).not.toContain(symbol);
@@ -2233,7 +2233,7 @@ describe("/dashboard placeholder lock + legacy home retirement (plan 11 Task 3 +
         env,
       );
       // AC-S11-placeholders: still 405 (B0 behavior kept); the stale "in B0"
-      // wording is gone (plan 11 T1 review minor).
+      // wording is gone (review minor).
       expect(res.status).toBe(405);
       expect(await res.text()).not.toContain("B0");
     }
@@ -2244,7 +2244,7 @@ describe("/dashboard placeholder lock + legacy home retirement (plan 11 Task 3 +
   });
 });
 
-describe("SSR views honor the stored theme (plan 45 T8, F-13)", () => {
+describe("SSR views honor the stored theme (F-13)", () => {
   const readViews = () => readFileSync(join(import.meta.dir, "../../src/dashboard/views.ts"), "utf8");
 
   /** Extract the balanced `{...}` block introduced by `openToken`. */
@@ -2283,7 +2283,7 @@ describe("SSR views honor the stored theme (plan 45 T8, F-13)", () => {
     }
   });
 
-  test("OS-light fallback is guarded so a stored dark choice wins over OS light (plan-41 both-directions rule)", () => {
+  test("OS-light fallback is guarded so a stored dark choice wins over OS light (both-directions rule)", () => {
     const views = readViews();
     const media = blockAfter(views, "@media (prefers-color-scheme: light)");
     // The inner selector is NOT a bare :root — a stored dark choice
@@ -2325,7 +2325,7 @@ describe("SSR views honor the stored theme (plan 45 T8, F-13)", () => {
       expect(scriptAt, face).toBeGreaterThan(0);
       expect(styleAt, face).toBeGreaterThan(0);
       // The snippet sits in <head> before the stylesheet — the attribute is
-      // applied before first paint, per the plan-41 mechanism.
+      // applied before first paint, per the mechanism.
       expect(scriptAt, face).toBeLessThan(styleAt);
       for (const fragment of [
         'localStorage.getItem("mstar.dashboard.theme")',
@@ -2339,10 +2339,10 @@ describe("SSR views honor the stored theme (plan 45 T8, F-13)", () => {
 });
 
 describe("existing routes unaffected", () => {
-  test("GET /healthz still returns 200 ok (plus the plan-51 version field)", async () => {
+  test("GET /healthz still returns 200 ok (plus the version field)", async () => {
     const res = await worker.fetch(new Request("https://worker.local/healthz"), makeEnv());
     expect(res.status).toBe(200);
-    // Field-set assertion (plan 51): `ok:true` contract unchanged, `version`
+    // Field-set assertion: `ok:true` contract unchanged, `version`
     // additive from the generated single source with the `v` prefix.
     const body = (await res.json()) as { ok: boolean; version: string };
     expect(body.ok).toBe(true);
@@ -2365,7 +2365,7 @@ describe("existing routes unaffected", () => {
       }),
       env,
     );
-    // No bare route exists (plan 24 Task 1) — Hono's default 404, zero
+    // No bare route exists — Hono's default 404, zero
     // enqueue, zero delivery rows; the dashboard mount never intercepts it.
     expect(res.status).toBe(404);
     expect(sent).toHaveLength(0);
@@ -2374,13 +2374,13 @@ describe("existing routes unaffected", () => {
   });
 });
 
-// --- plan 12 T1 + plan 13 T3: D1 fixture + dashboard membership --------------
+// --- + D1 fixture + dashboard membership --------------
 // Local mirror of tests/store/helpers.ts createTestD1 (which pins 0001+0002
-// and sits outside this plan's file set): migrations apply over a DB that
+// and pin 0001+0002 only): migrations apply over a DB that
 // ALREADY holds rows, so the fixture seeds a review row between 0002 and
-// 0003 (plan 12 T1 AC). Plan 13 B5 extends the production shape through
+// 0003 (AC). The manifest work extends the production shape through
 // 0005 — /dashboard routes (manifest start/commit, apps UI) read/write
-// github_apps — with a `through` index kept for pre-plan-13 DB premises.
+// github_apps — with a `through` index kept for pre-manifest DB premises.
 
 function applyMigrationFile(db: Database, name: string): void {
   db.exec(readFileSync(join(import.meta.dir, "../../migrations", name), "utf8"));
@@ -2448,7 +2448,7 @@ function userCount(db: DashboardD1 & { raw: Database }): number {
 
 type DashboardTestDb = DashboardD1 & { raw: Database };
 
-/** Commit-flow envs carry a full plan-13 DB — pull it back out for asserts. */
+/** Commit-flow envs carry a full DB — pull it back out for asserts. */
 function dbOf(env: Env): DashboardTestDb {
   return (env as Env & { DB: DashboardTestDb }).DB;
 }
@@ -2464,7 +2464,7 @@ function envDb(env: Env) {
 
 /**
  * The D1 binding is runtime-real (wrangler.jsonc `d1_databases` binding DB)
- * but the fetch-face Env deliberately does not declare it (plan 12 keeps
+ * but the fetch-face Env deliberately does not declare it (the callback keeps
  * src/worker/env.ts changes to ADMIN_LOGINS only) — the callback reads it
  * through a local intersection type, and the test env carries it the same
  * way.
@@ -2473,7 +2473,7 @@ function makeDbEnv(db: DashboardD1, overrides: Partial<Env> = {}): Env {
   return { ...baseEnv(overrides), DB: db } as Env;
 }
 
-describe("GET /dashboard/apps/:slug/onboarding (plan 31 T5, AC4b)", () => {
+describe("GET /dashboard/apps/:slug/onboarding (AC4b)", () => {
   const origFetch = globalThis.fetch;
   afterEach(() => {
     globalThis.fetch = origFetch;
@@ -2560,7 +2560,7 @@ describe("GET /dashboard/apps/:slug/onboarding (plan 31 T5, AC4b)", () => {
     expect(await res.text()).toContain('href="/dashboard/apps/mstar-inspector-octocat/settings"');
   });
 
-  test("Accept-Language zh renders the onboarding page in zh_CN (plan 31 T5)", async () => {
+  test("Accept-Language zh renders the onboarding page in zh_CN", async () => {
     const env = makeEnv();
     await seedApp(env);
     const session = await createSessionValue("octocat", null, SESSION_SECRET);
@@ -2581,7 +2581,7 @@ describe("GET /dashboard/apps/:slug/onboarding (plan 31 T5, AC4b)", () => {
   });
 });
 
-describe("migrations/0003_dashboard_users.sql (plan 12 T1)", () => {
+describe("migrations/0003_dashboard_users.sql", () => {
   test("creates the users table per spec § Data model — no status column (removal = delete row)", () => {
     const db = createDashboardTestD1();
     const cols = db.raw.query("PRAGMA table_info(users)").all() as Array<{
@@ -2632,7 +2632,7 @@ describe("migrations/0003_dashboard_users.sql (plan 12 T1)", () => {
   });
 });
 
-describe("dashboard users store (plan 12 T1, users.ts)", () => {
+describe("dashboard users store (users.ts)", () => {
   test("createUser + getUserByLogin round trip (bootstrapped admin shape)", async () => {
     const db = createDashboardTestD1();
     const created = await createUser(db, { login: "octocat", role: "admin" });
@@ -2710,7 +2710,7 @@ describe("dashboard users store (plan 12 T1, users.ts)", () => {
     expect(await deleteUserUnlessLastAdmin(db, "missing-id")).toBe(false);
   });
 
-  test("updateUserRoleUnlessLastAdmin: promotes members, demotes non-last admins, refuses the sole admin (plan 34 T1)", async () => {
+  test("updateUserRoleUnlessLastAdmin: promotes members, demotes non-last admins, refuses the sole admin", async () => {
     const db = createDashboardTestD1();
     const admin = await createUser(db, { login: "octocat", role: "admin" });
     const member = await createUser(db, { login: "hubot", role: "member" });
@@ -2731,7 +2731,7 @@ describe("dashboard users store (plan 12 T1, users.ts)", () => {
     expect((await getUserByLogin(db, "octocat"))?.role).toBe("admin");
   });
 
-  test("concurrent demotions of the last two admins cannot both land (TOCTOU closed by the single conditional UPDATE, plan 34 T1)", async () => {
+  test("concurrent demotions of the last two admins cannot both land (TOCTOU closed by the single conditional UPDATE)", async () => {
     const db = createDashboardTestD1();
     const octocat = await createUser(db, { login: "octocat", role: "admin" });
     const ada = await createUser(db, { login: "ada", role: "admin" });
@@ -2767,7 +2767,7 @@ describe("dashboard users store (plan 12 T1, users.ts)", () => {
   });
 });
 
-describe("bootstrapDashboardAccess precedence matrix (plan 12 T1, spec § AuthZ)", () => {
+describe("bootstrapDashboardAccess precedence matrix (spec § AuthZ)", () => {
   test("1. row exists → allow, zero writes, no promotion (ADMIN_LOGINS does not outrank the row)", async () => {
     const db = createDashboardTestD1();
     const existing = await createUser(db, { login: "octocat", role: "member" });
@@ -2825,7 +2825,7 @@ describe("bootstrapDashboardAccess precedence matrix (plan 12 T1, spec § AuthZ)
   });
 });
 
-describe("/dashboard/oauth/callback bootstrap + deny (plan 12 T1)", () => {
+describe("/dashboard/oauth/callback bootstrap + deny", () => {
   const origFetch = globalThis.fetch;
   afterEach(() => {
     globalThis.fetch = origFetch;
@@ -2928,7 +2928,7 @@ describe("/dashboard/oauth/callback bootstrap + deny (plan 12 T1)", () => {
   });
 });
 
-describe("per-request allowlist guard (plan 12 T2, spec § AuthZ + lock L5)", () => {
+describe("per-request allowlist guard (spec § AuthZ + lock L5)", () => {
   const origFetch = globalThis.fetch;
   afterEach(() => {
     globalThis.fetch = origFetch;
@@ -2958,14 +2958,14 @@ describe("per-request allowlist guard (plan 12 T2, spec § AuthZ + lock L5)", ()
       networkCalls++;
       throw new Error("no network may run behind the guard");
     }) as unknown as typeof fetch;
-    // Plan 30 W-001: production ALWAYS binds ASSETS, so GET /dashboard hits
-    // spa-dispatch's own membership gate before the guard — the plan-12 403
+    // W-001: production ALWAYS binds ASSETS, so GET /dashboard hits
+    // spa-dispatch's own membership gate before the guard — the 403
     // contract is preserved there (PM decision), not only via the legacy
     // fall-through. Bind ASSETS so this test models production.
     const env = withSpaAssets(await removedMemberEnv());
     const cookie = `${SESSION_COOKIE}=${await mallorySession()}`;
     // GET shell (B0) — non-HTML Accept variants keep the removedPage 403
-    // (plan 33 T3: a fetch must not silently follow a 302 into the HTML
+    // (a fetch must not silently follow a 302 into the HTML
     // login page), each with the session cookie expired.
     for (const accept of [undefined, "application/json"]) {
       const headers: Record<string, string> = { Cookie: cookie };
@@ -2982,7 +2982,7 @@ describe("per-request allowlist guard (plan 12 T2, spec § AuthZ + lock L5)", ()
       expect(setCookie[0]).toContain(`${SESSION_COOKIE}=;`);
       expect(setCookie[0]).toContain("Max-Age=0");
     }
-    // HTML navigation on the shell path → expire + 302 login (plan 33 T3).
+    // HTML navigation on the shell path → expire + 302 login.
     const htmlShell = await worker.fetch(
       new Request("https://worker.local/dashboard", {
         headers: { Cookie: cookie, Accept: "text/html" },
@@ -3008,7 +3008,7 @@ describe("per-request allowlist guard (plan 12 T2, spec § AuthZ + lock L5)", ()
     expect(confirm.headers.getSetCookie()).toHaveLength(1);
     // POST manifest commit (B1 confirm gate) — guard fires before secret work
     // (no body: the commit route retired the confirm=overwrite requirement in
-    // plan 13 T3, and the guard 403s before any handler logic anyway).
+    // place, and the guard 403s before any handler logic anyway).
     const commit = await worker.fetch(
       new Request("https://worker.local/dashboard/manifest/commit", {
         method: "POST",
@@ -3019,7 +3019,7 @@ describe("per-request allowlist guard (plan 12 T2, spec § AuthZ + lock L5)", ()
     expect(commit.status).toBe(403);
     expect(commit.headers.getSetCookie()).toHaveLength(1);
     // POST catch-all placeholder — the single use("*") mount auto-covers
-    // routes that do not exist yet (plan 13/14 will add /dashboard/* routes).
+    // routes that do not exist yet (later migrations add /dashboard/* routes).
     const future = await worker.fetch(
       new Request("https://worker.local/dashboard/some-future-route", {
         method: "POST",
@@ -3032,7 +3032,7 @@ describe("per-request allowlist guard (plan 12 T2, spec § AuthZ + lock L5)", ()
     expect(networkCalls).toBe(0);
   });
 
-  test("removed member HTML navigation on a non-enumerated route → expire + 302 login (guard, plan 33 T3)", async () => {
+  test("removed member HTML navigation on a non-enumerated route → expire + 302 login (guard)", async () => {
     // GET /dashboard/manifest/confirm is not an enumerated SPA page, so it
     // falls through to the legacy guard — HTML navigation there must expire
     // the session and 302 to login, not render the removedPage.
@@ -3101,7 +3101,7 @@ describe("per-request allowlist guard (plan 12 T2, spec § AuthZ + lock L5)", ()
     const shellBody = await shell.text();
     expect(shellBody).toContain("window.__BOOT__=");
     expect(shellBody).toContain('"login":"octocat"');
-    // Plan 30 W-001: the shell gate's shared D1 lookup still resolves the
+    // W-001: the shell gate's shared D1 lookup still resolves the
     // role for valid members (octocat is the seeded admin).
     expect(shellBody).toContain('"role":"admin"');
     const start = await worker.fetch(
@@ -3144,7 +3144,7 @@ describe("per-request allowlist guard (plan 12 T2, spec § AuthZ + lock L5)", ()
   });
 
   test("removed-member denial logs a structured not_a_member warning (login only, no secrets)", async () => {
-    // Plan 30 W-001: ASSETS is always bound in production, so the shell-path
+    // W-001: ASSETS is always bound in production, so the shell-path
     // denial fires in spa-dispatch's membership gate (stage spa_dispatch), not
     // the legacy guard — the structured event is identical otherwise.
     const warns = spyOnWarn();
@@ -3161,15 +3161,15 @@ describe("per-request allowlist guard (plan 12 T2, spec § AuthZ + lock L5)", ()
   });
 });
 
-// --- plan 12 T3: members page (admin-only) + DESIGN mapping ------------------
+// --- members page (admin-only) + DESIGN mapping ------------------
 
-describe("members page (plan 12 T3, admin-only)", () => {
+describe("members page (admin-only)", () => {
   const adminCookie = async () =>
     `${SESSION_COOKIE}=${await createSessionValue("octocat", null, SESSION_SECRET)}`;
   const memberCookie = async () =>
     `${SESSION_COOKIE}=${await createSessionValue("mallory", null, SESSION_SECRET)}`;
 
-  // Plan 29 T6/T7: /dashboard/members is SPA-owned (shared spa helper).
+  ///T7: /dashboard/members is SPA-owned (shared spa helper).
 
   async function membersGet(cookie: string, env?: Env): Promise<Response> {
     return await worker.fetch(dashboardRequest("/dashboard/members", cookie), env ?? makeEnv());
@@ -3191,10 +3191,10 @@ describe("members page (plan 12 T3, admin-only)", () => {
     );
   }
 
-  test("the pinned POSTs sit behind the guard: no session → 302 to login; the HTML GET 302s too (plan 33 T3)", async () => {
+  test("the pinned POSTs sit behind the guard: no session → 302 to login; the HTML GET 302s too", async () => {
     const db = createDashboardTestD1();
     await createUser(db, { login: "octocat", role: "admin" });
-    // HTML navigation GET without a session → 302 login (plan 33 T3 — the
+    // HTML navigation GET without a session → 302 login (the
     // old null-boot shell was the render-then-kick flash source).
     const get = await htmlGet("/dashboard/members", "", withSpaAssets(makeDbEnv(db)));
     expect(get.status).toBe(302);
@@ -3362,7 +3362,7 @@ describe("members page (plan 12 T3, admin-only)", () => {
     expect(await res.text()).toBe("ok");
     expect(await getUserByLogin(db, "mallory")).toBeNull();
     // Done criterion: a removed member cannot reach any /dashboard/** route
-    // with the still-valid session cookie. Plan 30 W-001: production always
+    // with the still-valid session cookie. W-001: production always
     // binds ASSETS, so the shell path is denied by spa-dispatch's membership
     // gate — bind ASSETS to model production, not the legacy fall-through.
     const shell = await worker.fetch(
@@ -3372,7 +3372,7 @@ describe("members page (plan 12 T3, admin-only)", () => {
     expect(shell.status).toBe(403);
   });
 
-  test("non-admin POST role → 403, zero mutations (plan 34 T1)", async () => {
+  test("non-admin POST role → 403, zero mutations", async () => {
     const db = createDashboardTestD1();
     await createUser(db, { login: "octocat", role: "admin" });
     const mallory = await createUser(db, { login: "mallory", role: "member" });
@@ -3382,7 +3382,7 @@ describe("members page (plan 12 T3, admin-only)", () => {
     expect(userCount(db)).toBe(2);
   });
 
-  test("admin role change member → admin → 200, row updated (plan 34 T1)", async () => {
+  test("admin role change member → admin → 200, row updated", async () => {
     const db = createDashboardTestD1();
     await createUser(db, { login: "octocat", role: "admin" });
     const mallory = await createUser(db, { login: "mallory", role: "member" });
@@ -3393,7 +3393,7 @@ describe("members page (plan 12 T3, admin-only)", () => {
     expect(await countAdmins(db)).toBe(2);
   });
 
-  test("admin role change admin → member succeeds while 2 admins exist; the remaining last admin cannot then be demoted (plan 34 T1)", async () => {
+  test("admin role change admin → member succeeds while 2 admins exist; the remaining last admin cannot then be demoted", async () => {
     const db = createDashboardTestD1();
     await createUser(db, { login: "octocat", role: "admin" });
     const ada = await createUser(db, { login: "ada", role: "admin" });
@@ -3415,7 +3415,7 @@ describe("members page (plan 12 T3, admin-only)", () => {
     expect(await countAdmins(db)).toBe(1);
   });
 
-  test("self-demotion → 400, row intact (the only admin is always the actor, so this is also the last-admin case) (plan 34 T1)", async () => {
+  test("self-demotion → 400, row intact (the only admin is always the actor, so this is also the last-admin case)", async () => {
     const db = createDashboardTestD1();
     const admin = await createUser(db, { login: "octocat", role: "admin" });
     const res = await membersPost("role", await adminCookie(), `userId=${admin.id}&role=member`, makeDbEnv(db));
@@ -3425,7 +3425,7 @@ describe("members page (plan 12 T3, admin-only)", () => {
     expect(await countAdmins(db)).toBe(1);
   });
 
-  test("role change unknown / blank userId → 400, rows intact (plan 34 T1)", async () => {
+  test("role change unknown / blank userId → 400, rows intact", async () => {
     const db = createDashboardTestD1();
     await createUser(db, { login: "octocat", role: "admin" });
     await createUser(db, { login: "mallory", role: "member" });
@@ -3436,7 +3436,7 @@ describe("members page (plan 12 T3, admin-only)", () => {
     expect(userCount(db)).toBe(2);
   });
 
-  test("role change with a role outside the 0003 CHECK domain → 400, rows intact (plan 34 T1)", async () => {
+  test("role change with a role outside the 0003 CHECK domain → 400, rows intact", async () => {
     const db = createDashboardTestD1();
     await createUser(db, { login: "octocat", role: "admin" });
     const mallory = await createUser(db, { login: "mallory", role: "member" });
@@ -3449,7 +3449,7 @@ describe("members page (plan 12 T3, admin-only)", () => {
     expect(userCount(db)).toBe(2);
   });
 
-  test("invite with role=admin → 200, admin row created with invitedBy (plan 34 T1)", async () => {
+  test("invite with role=admin → 200, admin row created with invitedBy", async () => {
     const db = createDashboardTestD1();
     await createUser(db, { login: "octocat", role: "admin" });
     const res = await membersPost("invite", await adminCookie(), "login=ada&role=admin", makeDbEnv(db));
@@ -3461,7 +3461,7 @@ describe("members page (plan 12 T3, admin-only)", () => {
     expect(await countAdmins(db)).toBe(2);
   });
 
-  test("invite with a role outside the 0003 CHECK domain → 400, zero rows (plan 34 T1)", async () => {
+  test("invite with a role outside the 0003 CHECK domain → 400, zero rows", async () => {
     const db = createDashboardTestD1();
     await createUser(db, { login: "octocat", role: "admin" });
     for (const role of ["owner", "ADMIN"]) {
@@ -3473,7 +3473,7 @@ describe("members page (plan 12 T3, admin-only)", () => {
     expect(await getUserByLogin(db, "ada")).toBeNull();
   });
 
-  test("concurrent demotions of the last two admins: exactly one lands, the loser 400s (TOCTOU closed, plan 34 T1)", async () => {
+  test("concurrent demotions of the last two admins: exactly one lands, the loser 400s (TOCTOU closed)", async () => {
     const db = createDashboardTestD1();
     const octocat = await createUser(db, { login: "octocat", role: "admin" });
     const ada = await createUser(db, { login: "ada", role: "admin" });
@@ -3546,7 +3546,7 @@ describe("members page (plan 12 T3, admin-only)", () => {
     expect(envTs).not.toContain("wrangler vars put");
   });
 });
-// --- plan 22 T2: Review Health insights summary API --------------------------
+// --- Review Health insights summary API --------------------------
 // GET /dashboard/api/insights/summary — the JSON read face for the insights
 // aggregation (src/dashboard/insights-store.ts). The guard is the SAME
 // mount-level membership gate as every other /dashboard route (AL-22-1: zero
@@ -3661,7 +3661,7 @@ function insightsUrl(query: string): string {
   return `/dashboard/api/insights/summary${query === "" ? "" : `?${query}`}`;
 }
 
-describe("/dashboard/api/insights/summary (plan 22 Task 2)", () => {
+describe("/dashboard/api/insights/summary", () => {
   const octocatCookie = async () => `${SESSION_COOKIE}=${await createSessionValue("octocat", null, SESSION_SECRET)}`;
   const malloryCookie = async () => `${SESSION_COOKIE}=${await createSessionValue("mallory", null, SESSION_SECRET)}`;
 
@@ -3714,8 +3714,8 @@ describe("/dashboard/api/insights/summary (plan 22 Task 2)", () => {
       repos: string[];
     };
     // Exact key set: store return + the two echo params (snake_case API).
-    // Plan 65 (AD-652) adds findings_distribution — the ONLY key ever added
-    // to this face; every other key here is the plan-22/36 legacy set, and
+    // (AD-652) adds findings_distribution — the ONLY key ever added
+    // to this face; every other key here is the/36 legacy set, and
     // the per-field assertions below pin those byte-for-byte.
     expect(Object.keys(body).sort()).toEqual(
       [
@@ -3762,12 +3762,12 @@ describe("/dashboard/api/insights/summary (plan 22 Task 2)", () => {
     expect(body.recurring_top).toEqual([
       { fingerprint: "fp-x", title_sample: "Null deref risk", count: 2, repos: ["acme/widgets"] },
     ]);
-    // repos is opt-in (plan 36 QC F-001): without include=repos the
+    // repos is opt-in (QC F-001): without include=repos the
     // aggregation is skipped and the field is empty.
     expect(body.repos).toEqual([]);
   });
 
-  test("findings_distribution (plan 65): day buckets for the default window, zero-filled, additive key set", async () => {
+  test("findings_distribution: day buckets for the default window, zero-filled, additive key set", async () => {
     const res = await insightsGet("", await octocatCookie());
     expect(res.status).toBe(200);
     const body = (await res.json()) as {
@@ -3810,7 +3810,7 @@ describe("/dashboard/api/insights/summary (plan 22 Task 2)", () => {
     });
   });
 
-  test("findings_distribution (plan 65): week buckets for window=90, same week definition as weekly_trend", async () => {
+  test("findings_distribution: week buckets for window=90, same week definition as weekly_trend", async () => {
     const res = await insightsGet("window=90", await octocatCookie());
     expect(res.status).toBe(200);
     const body = (await res.json()) as {
@@ -3882,7 +3882,7 @@ describe("/dashboard/api/insights/summary (plan 22 Task 2)", () => {
 
   test("repo filter: valid owner/repo echoed and forwarded; each aggregation restricted", async () => {
     // include=repos so the opt-in aggregation runs and the independence
-    // assertion below is observable (plan 36 QC F-001).
+    // assertion below is observable (QC F-001).
     const res = await insightsGet("repo=globex/gadgets&include=repos", await octocatCookie());
     expect(res.status).toBe(200);
     const body = (await res.json()) as {
@@ -3909,7 +3909,7 @@ describe("/dashboard/api/insights/summary (plan 22 Task 2)", () => {
     }
   });
 
-  test("include=repos opt-in: aggregation runs only when requested; malformed include → 400 (plan 36 QC F-001)", async () => {
+  test("include=repos opt-in: aggregation runs only when requested; malformed include → 400 (QC F-001)", async () => {
     const cookie = await octocatCookie();
 
     // Without include → repos is empty (aggregation skipped).

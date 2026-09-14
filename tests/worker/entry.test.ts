@@ -1,5 +1,5 @@
 /**
- * Production Worker entry (deploy) tests (plan 06 T3 fix, review Important 2).
+ * Production Worker entry (deploy) tests (review Important 2 fix).
  *
  * The entry module (src/worker/entry.ts) is what wrangler.jsonc `main` points
  * at: it must export BOTH the fetch/queue handler (re-exported from ./index)
@@ -44,7 +44,7 @@ describe("worker entry (deploy)", () => {
   test("re-exports the fetch handler (healthz)", async () => {
     const res = await worker.fetch(new Request("https://worker.local/healthz"), makeEnv());
     expect(res.status).toBe(200);
-    // Field-set assertion (plan 51): `ok:true` contract unchanged, `version`
+    // Field-set assertion: `ok:true` contract unchanged, `version`
     // additive from the generated single source with the `v` prefix.
     const body = (await res.json()) as { ok: boolean; version: string };
     expect(body.ok).toBe(true);
@@ -53,12 +53,12 @@ describe("worker entry (deploy)", () => {
 });
 
 /**
- * Cron scheduled wiring (plan 19 T1, AL-6): the deploy entry must expose the
+ * Cron scheduled wiring (AL-6): the deploy entry must expose the
  * `scheduled` face (re-exported from ./index) that runs the trailing-24h
  * failure sweep over the bound D1 — read-only, and NEVER throwing out of the
  * handler (a throwing cron handler just retries into alert noise).
  */
-describe("worker entry scheduled wiring (plan 19 T1)", () => {
+describe("worker entry scheduled wiring", () => {
   const NOOP_CONTROLLER = {} as ScheduledController;
   const NOOP_CTX = {} as ExecutionContext;
 

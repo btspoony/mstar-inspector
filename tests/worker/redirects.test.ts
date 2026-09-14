@@ -1,5 +1,5 @@
 /**
- * Plan 29 T3: trailing-slash 301 matrix (pure + Worker mount).
+ * trailing-slash 301 matrix (pure + Worker mount).
  */
 import { describe, expect, test } from "bun:test";
 import { normalizeDashboardTrailingSlash } from "../../src/worker/redirects";
@@ -16,7 +16,7 @@ function env(): Env {
   };
 }
 
-describe("normalizeDashboardTrailingSlash (plan 29 T3)", () => {
+describe("normalizeDashboardTrailingSlash", () => {
   test("GET /dashboard/ → /dashboard", () => {
     expect(normalizeDashboardTrailingSlash("GET", "/dashboard/")).toBe("/dashboard");
   });
@@ -48,7 +48,7 @@ describe("normalizeDashboardTrailingSlash (plan 29 T3)", () => {
     expect(normalizeDashboardTrailingSlash("GET", "/webhook/acme/")).toBeNull();
   });
 
-  test("GET /dashboard/apps passes through (plan 33 T2: enumerated SPA route)", () => {
+  test("GET /dashboard/apps passes through (enumerated SPA route)", () => {
     expect(normalizeDashboardTrailingSlash("GET", "/dashboard/apps")).toBeNull();
     expect(normalizeDashboardTrailingSlash("GET", "/dashboard/apps/")).toBe("/dashboard/apps");
     expect(normalizeDashboardTrailingSlash("HEAD", "/dashboard/apps")).toBeNull();
@@ -97,7 +97,7 @@ describe("normalizeDashboardTrailingSlash (plan 29 T3)", () => {
   });
 });
 
-describe("trailing-slash middleware mount (plan 29 T3)", () => {
+describe("trailing-slash middleware mount", () => {
   test("GET /dashboard/ returns 301 Location /dashboard", async () => {
     const res = await worker.fetch(new Request("https://worker.local/dashboard/?q=1"), env());
     expect(res.status).toBe(301);
@@ -154,7 +154,7 @@ describe("trailing-slash middleware mount (plan 29 T3)", () => {
     expect(res.status).not.toBe(301);
   });
 
-  test("GET /dashboard/apps is not a 301 (enumerated SPA route, plan 33 T2)", async () => {
+  test("GET /dashboard/apps is not a 301 (enumerated SPA route)", async () => {
     const res = await worker.fetch(new Request("https://worker.local/dashboard/apps?q=1"), env());
     expect(res.status).not.toBe(301);
   });

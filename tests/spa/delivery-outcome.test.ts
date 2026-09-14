@@ -1,10 +1,10 @@
 /**
- * Plan 45 T2 / F-05: the delivery `outcome` vocabulary is localized on both
+ * F-05: the delivery `outcome` vocabulary is localized on both
  * health surfaces. Pins the shared label map (known values →
  * apps.health.outcome.*, unknown → raw fail-visible), the both-locale
  * dictionary copy, and the source contract on each surface (no raw outcome
  * interpolation left). No DOM runner — same source-scan contract as the
- * other plan 45 SPA pins.
+ * other SPA pins.
  */
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
@@ -14,7 +14,7 @@ import { deliveryOutcomeLabel } from "../../src/spa/delivery-outcome";
 const appsPage = readFileSync(join(import.meta.dir, "../../src/spa/pages/AppsPage.tsx"), "utf8");
 const settingsPage = readFileSync(join(import.meta.dir, "../../src/spa/pages/SettingsPage.tsx"), "utf8");
 
-describe("deliveryOutcomeLabel (plan 45 T2)", () => {
+describe("deliveryOutcomeLabel", () => {
   test("the four producer-vocabulary outcomes resolve in both locales", () => {
     expect(deliveryOutcomeLabel("ok", "en")).toBe("OK");
     expect(deliveryOutcomeLabel("paused", "en")).toBe("Paused");
@@ -32,7 +32,7 @@ describe("deliveryOutcomeLabel (plan 45 T2)", () => {
   });
 });
 
-describe("outcome surfaces (plan 45 T2 / F-05)", () => {
+describe("outcome surfaces (F-05)", () => {
   test("AppsPage labels the latest delivery outcome through the shared map", () => {
     expect(appsPage).toContain("deliveryOutcomeLabel(latest.outcome, locale)");
     // The raw interpolation this task replaced must not come back.
