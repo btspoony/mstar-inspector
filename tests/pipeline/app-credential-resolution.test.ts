@@ -35,7 +35,7 @@ import { createAppsStore } from "../../src/dashboard/apps-store";
 import { createAppConfigStore } from "../../src/dashboard/app-config-store";
 import { createSecretbox } from "../../src/dashboard/secretbox";
 import { sk, fakePem } from "../helpers/fake-secrets";
-import type { CommenterEnv, ReviewCommenter } from "../../src/pipeline/comment";
+import type { CommenterEnv, InstallationTokenGrant, ReviewCommenter, TokenInput } from "../../src/pipeline/comment";
 import type { ConsumerLog, ConsumerLogFields, PipelineEnv } from "../../src/pipeline/consumer";
 
 const MIGRATIONS_DIR = join(import.meta.dir, "../../migrations");
@@ -69,6 +69,19 @@ function createMigratedD1(): ReturnType<typeof createTestD1> {
   // app_model_chains row, so the fixture must carry the chains tables.
   // 0018 (plan 37): github_apps.sandbox_image_id — the consumer's per-message
   // sandbox-image resolution reads it on EVERY app-path message.
+  // 0019–0021 complete the shipped schema the same per-message path now
+  // reads, so the fixture must carry it too (the migration order below is
+  // wrangler's apply order; 0021's FKs target 0020, which targets 0004):
+  //   0019 (plan 53): the github_apps github_* metadata columns — the app
+  //     row the consumer re-reads per message is the production `SELECT *`
+  //     shape, which carries them.
+  //   0020 (plan 67): the finding-lifecycle journal. The consumer's step-2
+  //     journal handoff queries review_publications on EVERY app-path
+  //     message (journalHandoffRow), and its lifecycle-context step
+  //     reads review_findings (selectAssessmentTargets / countOpenFindings).
+  //   0021 (plan 68): review_checks — the Check-attempt registry the
+  //     consumer's §7.10 lifecycle seam owns; its publication_id FK
+  //     resolves against 0020's review_publications.
   for (const name of [
     "0004_github_apps.sql",
     "0005_reviews_app_id.sql",
@@ -79,6 +92,9 @@ function createMigratedD1(): ReturnType<typeof createTestD1> {
     "0015_provider_verification.sql",
     "0017_app_model_chains.sql",
     "0018_app_sandbox_images.sql",
+    "0019_github_apps_metadata.sql",
+    "0020_finding_lifecycle.sql",
+    "0021_review_checks.sql",
   ]) {
     db.raw.exec(readFileSync(join(MIGRATIONS_DIR, name), "utf8"));
   }
@@ -150,7 +166,7 @@ mock.module("@cloudflare/sandbox", () => ({
 
 // --- commenter fakes --------------------------------------------------------
 
-type CommenterCall = { op: "token" | "post" | "degrade"; installationId?: number };
+type CommenterCall = { op: "token" | "plan" | "post" | "degrade"; installationId?: number };
 /** Calls grouped by instance — same-instance assertions key off this. */
 const appCalls: Array<{ instance: number; call: CommenterCall }> = [];
 /** Credential each factory invocation built an instance from. */
@@ -161,28 +177,56 @@ let factoryInstanceSeq = 0;
 const appCommenterFactory = mock((cred: CommenterEnv): ReviewCommenter => {
   const instance = ++factoryInstanceSeq;
   factoryCreds.push({ instance, cred });
+  // Plan 67 §7.6: the consumer's sandbox path asserts the RETURNED grant
+  // (assertSandboxGrant) — the double returns a minimal compliant
+  // sandbox-read grant scoped to the requested repository.
+  const sandboxGrant = (token: string, input: TokenInput): InstallationTokenGrant => ({
+    token,
+    permissions: { contents: "read", metadata: "read", pull_requests: "read" },
+    repositoryNames: [input.scope.repo],
+    repositorySelection: "selected",
+  });
   return {
-    getInstallationToken: mock(async (installationId: number) => {
-      appCalls.push({ instance, call: { op: "token", installationId } });
-      return `app-${instance}-token`;
+    getInstallationToken: mock(async (input: TokenInput) => {
+      appCalls.push({ instance, call: { op: "token", installationId: input.scope.installationId } });
+      return sandboxGrant(`app-${instance}-token`, input);
     }),
-    postReview: mock(async () => {
-      appCalls.push({ instance, call: { op: "post" } });
-      return 1;
+    // Plan 67 §7.7: the pre-staging plan read, then the prepared send —
+    // the recorded "post" op is the send of the EXACT staged body.
+    planReviewUpsert: mock(async () => {
+      appCalls.push({ instance, call: { op: "plan" } });
+      return { action: "create", round: 1 } as const;
     }),
-    postDegraded: mock(async () => {
+    planDegradedUpsert: mock(async () => {
       appCalls.push({ instance, call: { op: "degrade" } });
+      return { action: "create", round: 1 } as const;
+    }),
+    postPreparedReview: mock(async () => {
+      appCalls.push({ instance, call: { op: "post" } });
+      return { commentId: 101 };
+    }),
+    postPreparedDegraded: mock(async () => {
+      appCalls.push({ instance, call: { op: "degrade" } });
+      return { posted: true, commentId: 202 };
     }),
     // Bugbot degraded-comment lifecycle: the success path runs the delete
     // scan (no stale comment → the real implementation finds nothing); the
     // double is a no-op outcome so the flow exercises the real call.
     deleteDegradedComment: mock(async () => ({ deleted: 0, skipped: 0, errors: [] })),
-    // Plan 18 T3 line comments: VALID_OUTPUT has no findings → never called.
-    fetchPrDiff: mock(async () => {
-      throw new Error("unexpected: no qualifying findings → no diff prefetch");
-    }),
+    // Plan 67 T4 line comments: VALID_OUTPUT has no findings → never called.
     postLineComments: mock(async () => {
       throw new Error("unexpected: no qualifying findings → no line comments");
+    }),
+    // Plan 67 §7.8 discussion capture + §7.5 resolution: no open lifecycle
+    // rows in these fixtures → never triggered.
+    listDiscussion: mock(async () => {
+      throw new Error("unexpected: listDiscussion requires open lifecycle rows");
+    }),
+    discoverThread: mock(async () => {
+      throw new Error("unexpected: discoverThread requires queued resolutions");
+    }),
+    resolveFindingThread: mock(async () => {
+      throw new Error("unexpected: resolveFindingThread requires queued resolutions");
     }),
   };
 });
@@ -292,7 +336,7 @@ describe("consumer appRef resolution (plan 13 Task 2, lock L4)", () => {
     expect(factoryCreds).toHaveLength(1);
     expect(factoryCreds[0]!.cred).toEqual({ APP_ID: "111222", PRIVATE_KEY: PEM_X });
     // Token mint + postReview both on that same instance.
-    expect(appCalls.map((c) => c.call.op)).toEqual(["token", "post"]);
+    expect(appCalls.map((c) => c.call.op)).toEqual(["token", "plan", "post"]);
     expect(appCalls[0]!.instance).toBe(factoryCreds[0]!.instance);
     expect(appCalls[1]!.instance).toBe(factoryCreds[0]!.instance);
     expect(appCalls[0]!.call.installationId).toBe(123);
@@ -321,7 +365,7 @@ describe("consumer appRef resolution (plan 13 Task 2, lock L4)", () => {
     );
 
     expect(factoryCreds).toHaveLength(1); // cache hit on the second message
-    expect(appCalls).toHaveLength(4); // token+post × 2 messages, same instance
+    expect(appCalls).toHaveLength(6); // token+plan+post × 2 messages, same instance
     expect(new Set(appCalls.map((c) => c.instance))).toEqual(new Set([factoryCreds[0]!.instance]));
   });
 
@@ -416,11 +460,11 @@ describe("consumer appRef resolution (plan 13 Task 2, lock L4)", () => {
     await consumer(makeBatch(makePayload({ appRef: { appId: appX.id } })));
 
     // One factory invocation per message (cache hit would skip it), and the
-    // message's token + post both hit the instance the factory returned.
+    // message's token + plan + post all hit the instance the factory returned.
     expect(factoryCreds).toHaveLength(1);
     const instance = factoryCreds[0]!.instance;
-    expect(appCalls.map((c) => c.instance)).toEqual([instance, instance]);
-    expect(appCalls.map((c) => c.call.op)).toEqual(["token", "post"]);
+    expect(appCalls.map((c) => c.instance)).toEqual([instance, instance, instance]);
+    expect(appCalls.map((c) => c.call.op)).toEqual(["token", "plan", "post"]);
   });
 });
 
@@ -441,6 +485,8 @@ describe("appCommenters fingerprint cache (plan 15 hardening item 1, architect l
     // instance (identity via the factory's instance numbers).
     expect(factoryCreds).toHaveLength(1);
     expect(appCalls.map((c) => c.instance)).toEqual([
+      factoryCreds[0]!.instance,
+      factoryCreds[0]!.instance,
       factoryCreds[0]!.instance,
       factoryCreds[0]!.instance,
       factoryCreds[0]!.instance,
@@ -469,7 +515,7 @@ describe("appCommenters fingerprint cache (plan 15 hardening item 1, architect l
     expect(factoryCreds[0]!.cred).toEqual({ APP_ID: "111222", PRIVATE_KEY: PEM_X });
     expect(factoryCreds[1]!.cred).toEqual({ APP_ID: "111222", PRIVATE_KEY: PEM_Y });
     // Message 2 was served by the NEW instance only — the old one is replaced.
-    expect(appCalls.map((c) => c.instance)).toEqual([1, 1, 2, 2]);
+    expect(appCalls.map((c) => c.instance)).toEqual([1, 1, 1, 2, 2, 2]);
   });
 
   test("re-saved identical PEM → NEW envelope (random IV) → ONE harmless rebuild, same credential", async () => {
@@ -559,7 +605,7 @@ describe("appCommenters fingerprint cache (plan 15 hardening item 1, architect l
     expect(warn!.fields.app_id).toBe(appX.id);
     expect(JSON.stringify(warn)).not.toContain(sk("rogue-SECRET"));
     // The skip continues: the review ran to completion (posted + persisted).
-    expect(appCalls.map((c) => c.call.op)).toEqual(["token", "post"]);
+    expect(appCalls.map((c) => c.call.op)).toEqual(["token", "plan", "post"]);
     expect(kvPuts).toEqual([{ key: `idem:123:acme/widgets:42:${SHA}`, value: "done" }]);
   });
 });
@@ -678,6 +724,16 @@ describe("per-App pause ack-skip (plan 16, architect lock L4)", () => {
     db.raw.prepare("DELETE FROM app_model_chain_seats WHERE app_id = ?").run(appX.id);
     db.raw.prepare("DELETE FROM app_model_chains WHERE app_id = ?").run(appX.id);
     db.raw.prepare("DELETE FROM app_provider_keys WHERE app_id = ?").run(appX.id);
+    // 0020/0021 (plan 67/68) add the same NO ACTION app_id FK to the
+    // finding-lifecycle tables. The completed review above staged one
+    // publication journal row; clear that family child-first (rounds →
+    // threads → checks → findings → publications) so the hard DELETE can
+    // proceed.
+    db.raw.prepare("DELETE FROM review_finding_rounds WHERE finding_row_id IN (SELECT id FROM review_findings WHERE app_id = ?)").run(appX.id);
+    db.raw.prepare("DELETE FROM review_threads WHERE app_id = ?").run(appX.id);
+    db.raw.prepare("DELETE FROM review_checks WHERE app_id = ?").run(appX.id);
+    db.raw.prepare("DELETE FROM review_findings WHERE app_id = ?").run(appX.id);
+    db.raw.prepare("DELETE FROM review_publications WHERE app_id = ?").run(appX.id);
     db.raw.prepare("DELETE FROM github_apps WHERE id = ?").run(appX.id);
     await expect(
       consumer(makeBatch(makePayload({ pr_number: 43, appRef: { appId: appX.id } }))),

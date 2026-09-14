@@ -66,7 +66,19 @@ export type SweepAlertFields = {
  * warn events, so this shape cannot drift from the shared warn contract.
  */
 export type SweepWarnFields = Omit<WebhookStageWarnLog, "event" | "reason"> & {
-  event: "ops_sweep_alert_webhook_failed" | "ops_sweep_failed" | "ops_sweep_db_unbound";
+  event:
+    | "ops_sweep_alert_webhook_failed"
+    | "ops_sweep_failed"
+    | "ops_sweep_db_unbound"
+    // Plan 67 §7.11: the scheduled composition's independent catch for the
+    // M8 reconciler (type-only addition — the sweep's own behavior is
+    // untouched and the reconciler is throw-proof, so this line is a
+    // belt-and-braces fence, not a path).
+    | "ops_lifecycle_reconcile_failed"
+    // Plan 68 §7.11.2: the composition's THIRD independent catch, for the M7
+    // Check reconciler — same shape and the same type-only rationale as the
+    // M8 line above.
+    | "ops_check_reconcile_failed";
 };
 
 /**

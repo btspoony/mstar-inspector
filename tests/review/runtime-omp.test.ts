@@ -36,13 +36,15 @@
  *     the map into the isolated settings as `task.agentModelOverrides` with
  *     exact agent names; absent/empty map = today's options byte-for-byte.
  */
-import { afterAll, afterEach, describe, expect, mock, spyOn, test } from "bun:test";
+import { afterAll, afterEach, beforeEach, describe, expect, mock, spyOn, test } from "bun:test";
 import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { parseAgent } from "@oh-my-pi/pi-coding-agent/task/agents";
 
 import type { AgentRuntime } from "../../src/review/runtime";
+import { anchorRecheckDeadline, RECHECK_OUTPUT_SCHEMA } from "../../src/review/recheck";
+import type { RecheckDoc, RecheckInput } from "../../src/contracts/recheck";
 import { PLUGIN_ROOT_FIXTURE } from "./plugin-root-fixture";
 
 /**
@@ -630,7 +632,7 @@ describe("ompAgentRuntime.runReview — per-role model overrides (plan 17 B6)", 
 describe("ompAgentRuntime.runReview — deep parent path (plan 09 T2)", () => {
   test("drives the parent session: one prompt, zero seat fan-out", async () => {
     parentYields = [deepEnvelope()];
-    const envelope = await ompAgentRuntime.runReview(DEEP_INPUT);
+    const { envelope } = await ompAgentRuntime.runReview(DEEP_INPUT);
 
     expect(promptTexts).toHaveLength(1);
     expect(subagentRequests).toHaveLength(0);
@@ -668,7 +670,7 @@ describe("ompAgentRuntime.runReview — deep parent path (plan 09 T2)", () => {
 
   test("returns the strict yield payload after engine re-validation", async () => {
     parentYields = [deepEnvelope()];
-    const envelope = await ompAgentRuntime.runReview(DEEP_INPUT);
+    const { envelope } = await ompAgentRuntime.runReview(DEEP_INPUT);
 
     expect(envelope.schema).toBe("mstar.review/v1");
     expect(envelope.verdict).toBe("needs fixes");
@@ -682,7 +684,7 @@ describe("ompAgentRuntime.runReview — deep parent path (plan 09 T2)", () => {
     // its args carried a payload; the corrected re-yield is the envelope.
     parentRejectedYields = [{ schema: "mstar.review/v1", verdict: "ship it", summary_md: "bad", findings: [] }];
     parentYields = [deepEnvelope()];
-    const envelope = await ompAgentRuntime.runReview(DEEP_INPUT);
+    const { envelope } = await ompAgentRuntime.runReview(DEEP_INPUT);
 
     expect(envelope.schema).toBe("mstar.review/v1");
     expect(envelope.verdict).toBe("needs fixes");
@@ -693,7 +695,7 @@ describe("ompAgentRuntime.runReview — deep parent path (plan 09 T2)", () => {
       { schema: "mstar.review/v1", verdict: "ship it", summary_md: "earlier", findings: [] },
       deepEnvelope(),
     ];
-    const envelope = await ompAgentRuntime.runReview(DEEP_INPUT);
+    const { envelope } = await ompAgentRuntime.runReview(DEEP_INPUT);
 
     expect(envelope.verdict).toBe("needs fixes");
     expect(envelope.findings).toHaveLength(1);
@@ -709,7 +711,7 @@ describe("ompAgentRuntime.runReview — deep parent path (plan 09 T2)", () => {
     try {
       // The envelope was yielded and engine-validated before the throw —
       // returning it stands, but the turn error must stay observable.
-      const envelope = await ompAgentRuntime.runReview(DEEP_INPUT);
+      const { envelope } = await ompAgentRuntime.runReview(DEEP_INPUT);
       expect(envelope.schema).toBe("mstar.review/v1");
     } finally {
       spy.mockRestore();
@@ -884,7 +886,7 @@ describe("ompAgentRuntime.runReview — envelope", () => {
       },
     ];
 
-    const envelope = await ompAgentRuntime.runReview(BASE_INPUT);
+    const { envelope } = await ompAgentRuntime.runReview(BASE_INPUT);
 
     expect(envelope.schema).toBe("mstar.review/v1");
     // A must-fix finding drives the engine tally → "blocked".
@@ -939,5 +941,228 @@ describe("ompAgentRuntime.runReview — per-review agentDir threading (plan 23 T
     parentYields = [deepEnvelope()];
     await ompAgentRuntime.runReview(DEEP_INPUT);
     expect(createdOptions[0]!.agentDir).toBe(AGENT_DIR);
+  });
+});
+
+describe("ompAgentRuntime.runReview — recheck seat (plan 67 T3, spec §7.8)", () => {
+  const RECHECK_SHA = "0123456789abcdef0123456789abcdef01234567";
+
+  /** Minimal trusted-catalog recheck input (shape mirrors the T1 fixtures). */
+  function recheckInput(overrides: Partial<RecheckInput> = {}): RecheckInput {
+    return {
+      schema: "mstar.recheck-input/v1",
+      headSha: RECHECK_SHA,
+      targets: [
+        {
+          rowId: "row-1",
+          findingId: "f-1",
+          original: {
+            title: "Unbounded recursion",
+            body: "The reaper recurses without a depth bound.",
+            filePath: "src/reaper.ts",
+            lineStart: 8,
+            lineEnd: 10,
+            mergeClass: "must-fix",
+            category: "logic",
+            fingerprintHint: "fp-reaper",
+          },
+          firstSeenSha: RECHECK_SHA,
+          lastAssessment: null,
+          associationIds: ["assoc-1"],
+        },
+      ],
+      evidence: [
+        {
+          id: "slice-1",
+          headSha: RECHECK_SHA,
+          baseSha: "b000000000000000000000000000000000000000",
+          path: "src/reaper.ts",
+          oldPath: null,
+          kind: "hunk",
+          oldStart: 8,
+          oldLines: ["const a = 1;", "const b = 2;", "const c = 3;"],
+          newStart: 8,
+          newLines: ["const a = 1;", "const b = null ?? 2;", "const c = 3;"],
+          oldBlobOid: "oid-old",
+          headBlobOid: "oid-head",
+          absentAtHead: false,
+          complete: true,
+        },
+      ],
+      discussion: { items: [], issueCoverage: "complete", issueDigest: "d", capturedMs: 1, threads: [] },
+      ...overrides,
+    };
+  }
+
+  /** A document validateRecheckDoc accepts against `recheckInput()`. */
+  function validRecheckDoc(): RecheckDoc {
+    return {
+      schema: "mstar.recheck/v1",
+      headSha: RECHECK_SHA,
+      results: [
+        { rowId: "row-1", disposition: "unverifiable", reason: "no-evidence", evidence: null, relatedCurrentFindingIndexes: [] },
+      ],
+    };
+  }
+
+  /** A stale document — validateRecheckDoc rejects it as a whole. */
+  function staleRecheckDoc(): RecheckDoc {
+    return { ...validRecheckDoc(), headSha: "ffffffffffffffffffffffffffffffffffffffff" };
+  }
+
+  beforeEach(() => {
+    // Fresh far-future anchor per test: budget-equivalent to the unset state
+    // (full 180s cap) AND immune to anchor state leaked from other test
+    // files (bun's module registry is process-global — the runner's
+    // anchorRecheckDeadline state is shared).
+    anchorRecheckDeadline(Date.now() + 3_600_000, "deep");
+  });
+
+  afterEach(() => {
+    // Same neutralization for every describe that runs after this one.
+    anchorRecheckDeadline(Date.now() + 3_600_000, "deep");
+  });
+
+  test("quick/default: the recheck child runs concurrently on the SAME read-only ToolSession", async () => {
+    // Dispatch order: the recheck child is created BEFORE the review seats.
+    seatResults = [{ data: validRecheckDoc() }, { data: seatPayload() }, { data: seatPayload({ findings: [] }) }];
+    const { envelope, recheck } = await ompAgentRuntime.runReview({ ...BASE_INPUT, recheck: recheckInput() });
+
+    // The validated doc rides the result; the envelope is untouched.
+    expect(recheck).toEqual(validRecheckDoc());
+    expect(envelope.schema).toBe("mstar.review/v1");
+    expect(envelope.verdict).toBe("blocked");
+
+    expect(subagentRequests).toHaveLength(3);
+    const request = subagentRequests[0]!;
+    expect(request.agent).toBe("mstar-review-seat");
+    // The ToolSession handed to the recheck child reports the PR-clone cwd
+    // (probe by property access — the shim proxy erases to unknown, and
+    // toMatchObject cannot see through the get trap).
+    expect((request.session as { cwd: unknown }).cwd).toBe(TEST_WORKTREE);
+    expect(request.outputSchema).toBe(RECHECK_OUTPUT_SCHEMA);
+    expect(request.schemaMode).toBe("strict");
+    expect(request.enableLsp).toBe(false);
+    expect(request.enableIrc).toBe(false);
+    // Unset (fresh far-future) anchor → the full 180s cap; the SDK abort
+    // signal is wired.
+    expect(request.maxRuntimeMs).toBe(180_000);
+    expect(request.signal).toBeInstanceOf(AbortSignal);
+    expect(request.model).toEqual([...BASE_INPUT.modelSelectors]);
+    // The assignment labels the discussion untrusted and carries the
+    // ORIGINAL concern body + trusted catalog.
+    const assignment = request.assignment as string;
+    expect(assignment).toContain("mstar.recheck-input/v1");
+    expect(assignment).toContain(RECHECK_SHA);
+    expect(assignment).toContain("The reaper recurses without a depth bound.");
+    expect(assignment).toContain("UNTRUSTED");
+    expect(assignment).toContain("mstar.recheck/v1");
+    // The review seats keep their own assignments.
+    expect(subagentRequests[1]!.assignment).toContain("changeset-1-src");
+    expect(subagentRequests[2]!.assignment).toContain("changeset-2-lib");
+  });
+
+  test("invalid recheck payload → recheck null + stderr log; the envelope is untouched", async () => {
+    seatResults = [{ data: staleRecheckDoc() }, { data: seatPayload() }];
+    const errorCalls: unknown[][] = [];
+    const spy = spyOn(console, "error").mockImplementation((...args: unknown[]) => {
+      errorCalls.push(args);
+    });
+    let result: Awaited<ReturnType<typeof ompAgentRuntime.runReview>>;
+    try {
+      result = await ompAgentRuntime.runReview({ ...BASE_INPUT, level: "quick", recheck: recheckInput() });
+    } finally {
+      spy.mockRestore();
+    }
+    // Seat failure/invalid payload never loses the review and never throws.
+    expect(result.recheck).toBeNull();
+    expect(result.envelope.schema).toBe("mstar.review/v1");
+    expect(result.envelope.verdict).toBe("blocked");
+    const logged = errorCalls.map((args) => args.join(" ")).join("\n");
+    expect(logged).toContain("recheck_seat_failed");
+    expect(logged).toContain("stale document");
+  });
+
+  test("exhausted budget → the seat is skipped entirely (no child started)", async () => {
+    anchorRecheckDeadline(Date.now() - 600_000, "quick"); // outer deadline already past → 0
+    seatResults = [{ data: seatPayload() }];
+    const { recheck } = await ompAgentRuntime.runReview({ ...BASE_INPUT, level: "quick", recheck: recheckInput() });
+
+    expect(recheck).toBeNull();
+    // Only the review seat ran — no recheck child was dispatched.
+    expect(subagentRequests).toHaveLength(1);
+    expect(subagentRequests[0]!.outputSchema).not.toBe(RECHECK_OUTPUT_SCHEMA);
+  });
+
+  test("a review failure aborts the recheck child and still rejects (never lose the review)", async () => {
+    seatResults = [{ data: validRecheckDoc() }, { error: "provider boom" }];
+    await expect(
+      ompAgentRuntime.runReview({ ...BASE_INPUT, level: "quick", recheck: recheckInput() }),
+    ).rejects.toThrow(/provider boom/);
+
+    // The recheck child was aborted through the shared controller; the
+    // review seats carry no SDK signal — they ARE the work that settles.
+    expect(subagentRequests).toHaveLength(2);
+    expect((subagentRequests[0]!.signal as AbortSignal).aborted).toBe(true);
+    expect(subagentRequests[1]!.signal).toBeUndefined();
+  });
+
+  test("deep: the recheck seat runs on a DEDICATED read-only session, not the parent's yield stream", async () => {
+    parentYields = [deepEnvelope()];
+    seatResults = [{ data: validRecheckDoc() }];
+    const { envelope, recheck } = await ompAgentRuntime.runReview({ ...DEEP_INPUT, recheck: recheckInput() });
+
+    // The deep parent envelope capture is uncontaminated by the recheck
+    // session: exactly the yielded envelope, re-validated.
+    expect(envelope.schema).toBe("mstar.review/v1");
+    expect(envelope.findings[0]!.title).toBe("Missing null check");
+    expect(recheck).toEqual(validRecheckDoc());
+
+    // TWO sessions: the deep parent + the dedicated recheck session.
+    expect(createdOptions).toHaveLength(2);
+    const parent = createdOptions[0]!;
+    const recheckSessionOptions = createdOptions[1]!;
+    expect(parent.toolNames).toEqual(["read", "grep", "glob", "task"]);
+    expect(parent.requireYieldTool).toBe(true);
+    // The recheck session: quick/default isolation — read/grep/glob only,
+    // no `task` tool, no yield schema.
+    expect(recheckSessionOptions.toolNames).toEqual(["read", "grep", "glob"]);
+    expect(recheckSessionOptions.requireYieldTool).toBe(false);
+    expect(recheckSessionOptions.outputSchema).toBeUndefined();
+    expect(recheckSessionOptions.cwd).toBe(TEST_WORKTREE);
+    expect(recheckSessionOptions.agentDir).toBe(AGENT_DIR);
+
+    // Exactly one structured child: the recheck seat (never a second
+    // prompt/yield stream on the parent session).
+    expect(subagentRequests).toHaveLength(1);
+    expect(subagentRequests[0]!.outputSchema).toBe(RECHECK_OUTPUT_SCHEMA);
+    expect(subagentRequests[0]!.assignment).not.toContain("Fixture marker");
+    expect(promptTexts).toHaveLength(1);
+
+    // The shared mstar-review-seat definition joined the deep installs.
+    expect(installedAgentFiles).toEqual([
+      "code-reviewer.md",
+      "frontend-dev.md",
+      "fullstack-dev.md",
+      "mstar-review-seat.md",
+    ]);
+    // Both sessions settle before the cleanup; the clone survives.
+    expect(disposeCalls).toBe(2);
+    expect(existsSync(join(TEST_WORKTREE, ".omp", "agents", "mstar-review-seat.md"))).toBe(false);
+    expect(existsSync(join(TEST_WORKTREE, ".omp"))).toBe(false);
+    expect(existsSync(TEST_WORKTREE)).toBe(true);
+  });
+
+  test("deep: a parent-turn failure aborts the recheck child and still rejects", async () => {
+    parentPromptThrow = "model provider exploded before any yield";
+    seatResults = [{ data: validRecheckDoc() }];
+    await expect(
+      ompAgentRuntime.runReview({ ...DEEP_INPUT, recheck: recheckInput() }),
+    ).rejects.toThrow("model provider exploded before any yield");
+
+    expect((subagentRequests[0]!.signal as AbortSignal).aborted).toBe(true);
+    expect(disposeCalls).toBe(2);
+    // Cleanup still removed every installed definition (both sessions settled).
+    expect(existsSync(join(TEST_WORKTREE, ".omp", "agents"))).toBe(false);
   });
 });

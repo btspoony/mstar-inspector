@@ -1181,10 +1181,13 @@ describe("/dashboard manifest routes (plan 11 Task 1)", () => {
     expect(manifest.public).toBe(false);
     expect(manifest.default_events).toEqual(["pull_request", "issue_comment"]);
     expect(manifest.default_permissions).toEqual({
-      contents: "read",
+      // Plan 67 §7.6: contents:write is authorized for Worker-side thread
+      // resolution (plan 68 adds checks:write for advisory Check runs).
+      contents: "write",
       metadata: "read",
       pull_requests: "write",
       issues: "write",
+      checks: "write",
     });
   });
   test("Accept-Language zh renders the start page in zh_CN (plan 29 T5)", async () => {

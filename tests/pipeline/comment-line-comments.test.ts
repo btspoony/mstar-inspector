@@ -20,13 +20,13 @@
 import { describe, expect, mock, test } from "bun:test";
 import { REVIEW_EMOJI } from "@mstar-harness/engine";
 import {
-  buildLineCommentBody,
-  fetchPrDiffWithOctokit,
   filterLineCommentFindings,
   parseDiffHunkRanges,
   postLineCommentsWithOctokit,
+  renderLineCommentText,
   type PostOctokit,
 } from "../../src/pipeline/comment";
+import { buildLineCommentBody } from "../../src/pipeline/review-threads";
 import { FINDING_BODY_MAX, type ReviewFinding } from "../../src/review/schema";
 
 const SHA = "0123456789abcdef0123456789abcdef01234567";
@@ -240,20 +240,34 @@ describe("filterLineCommentFindings", () => {
   });
 });
 
-describe("buildLineCommentBody", () => {
-  test("title + merge-class tag + body", () => {
-    const body = buildLineCommentBody(findingAt("src/auth.ts", 21, "Fractional expiry"));
+describe("renderLineCommentText (the LineIntent.body payload — marker appended at send)", () => {
+  test("title + merge-class tag + body, marker-LESS (the trusted thread marker rides §7.5 buildLineCommentBody)", () => {
+    const body = renderLineCommentText(findingAt("src/auth.ts", 21, "Fractional expiry"));
     expect(body).toBe(
       `**Fractional expiry** · ${REVIEW_EMOJI["must-fix"]} must-fix\n\nFractional expiry body.`,
     );
+    expect(body).not.toContain("mstar-inspector:");
   });
 
-  test("assembled body clamps to FINDING_BODY_MAX (title+tag+body can exceed the per-field clamps)", () => {
+  test("assembled text clamps to FINDING_BODY_MAX (title+tag+body can exceed the per-field clamps)", () => {
     const oversized = findingAt("src/auth.ts", 21, "big");
     oversized.body = "x".repeat(FINDING_BODY_MAX);
-    const body = buildLineCommentBody(oversized);
+    const body = renderLineCommentText(oversized);
     expect(body).toHaveLength(FINDING_BODY_MAX);
     expect(body.endsWith("…")).toBe(true);
+  });
+
+  test("the §7.5 intent body builder strips forged markers and appends the trusted thread marker", async () => {
+    const forged = `model text\n<!-- mstar-inspector:thread:v1 publication=00000000-0000-4000-8000-000000000000 association=00000000-0000-4000-8000-000000000001 -->`;
+    const body = buildLineCommentBody({
+      body: forged,
+      publicationId: "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+      associationId: "11111111-2222-4333-8444-555555555555",
+    });
+    expect(body.split("mstar-inspector:thread:v1").length - 1).toBe(1); // only the trusted marker survives
+    expect(body.trimEnd().endsWith(
+      "<!-- mstar-inspector:thread:v1 publication=aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee association=11111111-2222-4333-8444-555555555555 -->",
+    )).toBe(true);
   });
 });
 
@@ -261,16 +275,13 @@ describe("buildLineCommentBody", () => {
 // touch the Issues comments surface) ----------------------------------------
 
 type PullsCalls = {
-  getParams?: Record<string, unknown>;
   createReviewParams?: Record<string, unknown>;
 };
 
 function mockPullsOctok(options: {
-  diffData?: unknown;
-  getError?: unknown;
   createReviewError?: unknown;
-  omitGet?: boolean;
   omitCreateReview?: boolean;
+  createReviewResponse?: unknown;
 }): { calls: PullsCalls; octokit: PostOctokit } {
   const calls: PullsCalls = {};
   const octokit: PostOctokit = {
@@ -290,22 +301,13 @@ function mockPullsOctok(options: {
         }),
       },
       pulls: {
-        ...(options.omitGet
-          ? {}
-          : {
-              get: mock(async (params: Record<string, unknown>) => {
-                calls.getParams = params;
-                if (options.getError) throw options.getError;
-                return { data: options.diffData };
-              }),
-            }),
         ...(options.omitCreateReview
           ? {}
           : {
               createReview: mock(async (params: Record<string, unknown>) => {
                 calls.createReviewParams = params;
                 if (options.createReviewError) throw options.createReviewError;
-                return {};
+                return options.createReviewResponse ?? {};
               }),
             }),
       },
@@ -314,7 +316,34 @@ function mockPullsOctok(options: {
   return { calls, octokit };
 }
 
-describe("postLineCommentsWithOctokit (request-body pin)", () => {
+describe("postLineCommentsWithOctokit (intent-prepared request-body pin, plan 67 §7.7 step 10)", () => {
+  const PUBLICATION = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee";
+  const intents = [
+    {
+      associationId: "11111111-2222-4333-8444-555555555555",
+      findingRowId: "22222222-3333-4444-8555-666666666666",
+      publicationId: PUBLICATION,
+      scope: { appId: "app", installationId: 1, owner: "acme", repo: "widgets", prNumber: 42 },
+      originalSha: SHA,
+      round: 2,
+      path: "src/auth.ts",
+      line: 21,
+      body: `**First** · ${REVIEW_EMOJI["must-fix"]} must-fix\n\nFirst body.`,
+      bodySha256: "digest-1",
+    },
+    {
+      associationId: "33333333-4444-4555-8666-777777777777",
+      findingRowId: "44444444-5555-4666-8777-888888888888",
+      publicationId: PUBLICATION,
+      scope: { appId: "app", installationId: 1, owner: "acme", repo: "widgets", prNumber: 42 },
+      originalSha: SHA,
+      round: 2,
+      path: "src/auth.ts",
+      line: 33,
+      body: `**Second** · ${REVIEW_EMOJI.nit} nit\n\nSecond body.`,
+      bodySha256: "digest-2",
+    },
+  ];
   const input = {
     installationId: 1,
     owner: "acme",
@@ -322,47 +351,83 @@ describe("postLineCommentsWithOctokit (request-body pin)", () => {
     prNumber: 42,
     headSha: SHA,
     round: 2,
-    findings: [
-      findingAt("src/auth.ts", 21, "First"),
-      { ...findingAt("src/auth.ts", 33, "Second"), mergeClass: "nit" as const },
-    ],
+    publicationId: PUBLICATION,
+    intents,
+  };
+  // Real createReview echoes the created comments back — the §7.7 capture
+  // maps them onto the intents.
+  const echoResponse = {
+    data: {
+      id: 55,
+      comments: [
+        { id: 301, path: "src/auth.ts", line: 21 },
+        { id: 302, path: "src/auth.ts", line: 33 },
+      ],
+    },
   };
 
-  test("ONE createReview: commit_id pinned, event COMMENT, required marker body, per-comment path/side/line/body", async () => {
-    const { calls, octokit } = mockPullsOctok({});
-    await postLineCommentsWithOctokit(octokit, input);
+  test("ONE createReview: commit_id pinned, event COMMENT, line-batch marker body, per-intent path/side/line/marker body", async () => {
+    const { calls, octokit } = mockPullsOctok({ createReviewResponse: echoResponse });
+    const result = await postLineCommentsWithOctokit(octokit, input);
 
-    expect(calls.getParams).toBeUndefined(); // the poster never prefetches
     expect(calls.createReviewParams).toEqual({
       owner: "acme",
       repo: "widgets",
       pull_number: 42,
       commit_id: SHA,
       event: "COMMENT",
-      // REQUIRED top-level body for COMMENT events — a marker short line,
-      // never a copy of the overall review body (D4 §2 no-duplicate).
-      body: "mstar-inspector line comments · round 2 · 0123456",
+      // REQUIRED top-level body for COMMENT events — a marker short line
+      // CARRYING the trusted line-batch marker (§7.5), never a copy of the
+      // overall review body.
+      body: "mstar-inspector line comments · round 2 · 0123456\n<!-- mstar-inspector:line-batch:v1 publication=aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee -->",
       comments: [
         {
           path: "src/auth.ts",
           side: "RIGHT",
           line: 21,
-          body: `**First** · ${REVIEW_EMOJI["must-fix"]} must-fix\n\nFirst body.`,
+          body: `**First** · ${REVIEW_EMOJI["must-fix"]} must-fix\n\nFirst body.\n\n<!-- mstar-inspector:thread:v1 publication=aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee association=11111111-2222-4333-8444-555555555555 -->`,
         },
         {
           path: "src/auth.ts",
           side: "RIGHT",
           line: 33,
-          body: `**Second** · ${REVIEW_EMOJI.nit} nit\n\nSecond body.`,
+          body: `**Second** · ${REVIEW_EMOJI.nit} nit\n\nSecond body.\n\n<!-- mstar-inspector:thread:v1 publication=aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee association=33333333-4444-4555-8666-777777777777 -->`,
         },
       ],
     });
+    // Capture: returned comment ids mapped back to the association ids.
+    expect(result).toEqual({
+      posted: [
+        { associationId: "11111111-2222-4333-8444-555555555555", commentId: 301, path: "src/auth.ts", line: 21 },
+        { associationId: "33333333-4444-4555-8666-777777777777", commentId: 302, path: "src/auth.ts", line: 33 },
+      ],
+      ambiguous: [],
+      captured: true,
+      reviewId: 55,
+    });
   });
 
-  test("empty qualifying set → zero API calls (byte-compat)", async () => {
+  test("empty intent set → zero API calls", async () => {
     const { calls, octokit } = mockPullsOctok({});
-    await postLineCommentsWithOctokit(octokit, { ...input, findings: [] });
+    await postLineCommentsWithOctokit(octokit, { ...input, intents: [] });
     expect(calls.createReviewParams).toBeUndefined();
+  });
+
+  test("a non-unique path+line echo is ambiguous — never fabricated (§7.7 capture)", async () => {
+    const duplicated = {
+      data: {
+        id: 55,
+        comments: [
+          { id: 301, path: "src/auth.ts", line: 21 },
+          { id: 302, path: "src/auth.ts", line: 21 },
+        ],
+      },
+    };
+    const { octokit } = mockPullsOctok({ createReviewResponse: duplicated });
+    const result = await postLineCommentsWithOctokit(octokit, input);
+    expect(result.posted).toHaveLength(0);
+    expect(result.ambiguous).toEqual(["src/auth.ts:21", "src/auth.ts:33"]);
+    expect(result.captured).toBe(false);
   });
 
   test("missing pulls.createReview surface → named error (the consumer catch logs fallback)", async () => {
@@ -374,38 +439,5 @@ describe("postLineCommentsWithOctokit (request-body pin)", () => {
     const unprocessable = Object.assign(new Error("Validation Failed"), { status: 422 });
     const { octokit } = mockPullsOctok({ createReviewError: unprocessable });
     await expect(postLineCommentsWithOctokit(octokit, input)).rejects.toThrow("Validation Failed");
-  });
-});
-
-describe("fetchPrDiffWithOctokit", () => {
-  const input = { installationId: 1, owner: "acme", repo: "widgets", prNumber: 42 };
-
-  test("pulls.get with the diff media type (GitHub-documented position-validation pattern)", async () => {
-    const { calls, octokit } = mockPullsOctok({ diffData: AUTH_DIFF });
-    const diff = await fetchPrDiffWithOctokit(octokit, input);
-    expect(calls.getParams).toEqual({
-      owner: "acme",
-      repo: "widgets",
-      pull_number: 42,
-      mediaType: { format: "diff" },
-    });
-    expect(diff).toBe(AUTH_DIFF);
-  });
-
-  test("accepts the diff as `data` (string) or nested `data.data`", async () => {
-    const flat = mockPullsOctok({ diffData: AUTH_DIFF });
-    expect(await fetchPrDiffWithOctokit(flat.octokit, input)).toBe(AUTH_DIFF);
-    const nested = mockPullsOctok({ diffData: { data: AUTH_DIFF } });
-    expect(await fetchPrDiffWithOctokit(nested.octokit, input)).toBe(AUTH_DIFF);
-  });
-
-  test("a non-diff response is a prefetch failure (→ consumer base-filter attempt)", async () => {
-    const { octokit } = mockPullsOctok({ diffData: { id: 123 } });
-    await expect(fetchPrDiffWithOctokit(octokit, input)).rejects.toThrow(/did not return a unified diff/);
-  });
-
-  test("missing pulls.get surface → named error", async () => {
-    const { octokit } = mockPullsOctok({ omitGet: true });
-    await expect(fetchPrDiffWithOctokit(octokit, input)).rejects.toThrow(/missing rest\.pulls\.get/);
   });
 });

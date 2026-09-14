@@ -56,7 +56,7 @@ exist before the first deploy:
   `sandbox-image/omp/Dockerfile` at deploy time (`image_build_context: "."`,
   `instance_type: lite`, `max_instances: 1`).
 
-### D1 migrations (0001–0018, forward-only)
+### D1 migrations (0001–0021, forward-only)
 
 ```bash
 wrangler d1 migrations apply mstar-inspector-db --remote   # production
@@ -83,6 +83,9 @@ wrangler d1 migrations apply mstar-inspector-db            # local dev
 | `0016_users_login_nocase_unique` | NOCASE unique index on `users.github_login` — case-insensitive membership uniqueness (plan 34 QC W-1) |
 | `0017_app_model_chains` | default + named model chains (`app_model_chains` + `app_model_chain_seats`), backfilled from `app_model_config`/`app_model_roles` (plans 35/39) |
 | `0018_app_sandbox_images` | `github_apps.sandbox_image_id` NOT NULL DEFAULT 'omp' — backfills live AND soft-deleted rows, so no manager visit is needed after deploy (plan 37) |
+| `0019_github_apps_metadata` | five metadata-only ADD COLUMNs caching the App's public GitHub profile (`github_name`/`github_description`/`github_html_url`/`github_avatar_url`/`github_metadata_synced_at`) for the settings info card — all nullable, safe over a live DB (plan 53) |
+| `0020_finding_lifecycle` | the finding-lifecycle and private pre-publication journal tables (`review_publications`, `review_findings`, `review_finding_rounds`, `review_threads`) — publication proof, closure and thread-resolution state (plan 67, spec §7.1) |
+| `0021_review_checks` | the per-attempt Check registry (`review_checks`) behind the advisory Check Runs, with `UNIQUE(attempt_key, generation)` and the partial unique index keeping at most one nonterminal generation per attempt key (plan 68, spec §7.1/§7.9) |
 
 Migrations are **forward-only** (0002 precedent): never hand-edit an applied
 migration; add the next file.
@@ -185,8 +188,61 @@ settings; redeploy to change:
 > 5. Spot-check the dashboard: no `REVIEW_ENABLED` copy on any page; the
 >    Pause/Resume switch is the only review control.
 
-GitHub App setup (permissions, webhook events, installation):
-`.mstar/iterations/v0.2/guides/github-app-runbook.md`.
+#### GitHub App permissions (fresh-App contract)
+
+The App is created by the dashboard manifest flow (`src/dashboard/manifest.ts`
+`buildManifest`); the requested permission set is the locked contract in
+[`.mstar/specs/review-lifecycle.md`](../.mstar/specs/review-lifecycle.md) §7.6
+and mirrored in `.env.example`:
+
+| Permission | Access | Why |
+|---|---|---|
+| Contents | **write** | Worker-only, one purpose: resolving positively verified, Inspector-owned review threads. No code-write / push / merge authority. |
+| Metadata | read | required by GitHub |
+| Pull requests | **write** | the review and its line comments |
+| Issues | **write** | the single overall-comment upsert |
+| Checks | **write** | advisory review Check Runs — execution status only (`mstar-inspector review` on the reviewed commit). Never an approval or a merge gate. |
+
+**What the Check means.** A `success` conclusion records that the review **was
+published** — for every engine verdict. It is not an approval, not a merge
+gate, and never a `REQUEST_CHANGES` equivalent; the app requests neither
+event. A confirmed degraded publication is `neutral`; an execution failure or
+an unconfirmed publication is `failure`. Conclusions are decided from persisted
+publication proof, not from the code path, and a Check failure never blocks or
+delays the review. The run carries no `details_url`.
+
+**Branch protection is user-controlled.** The app never configures, requires or
+recommends a required status check. Whether any Check gates a merge is entirely
+the repository owner's choice.
+
+**Two same-name runs are possible (RL-12).** Local attempt fencing is not
+external exactly-once, and `external_id` is correlation rather than a
+server-side idempotency key. An attempt whose create was **unconfirmed** — the
+response was lost, or a refusal landed after the request was dispatched — is
+settled read-only by recovery: it adopts and terminalizes, and never creates a
+second run. But a **later attempt for the same commit** is a fresh generation
+with its own `external_id`, so it creates its own run instead of adopting the
+earlier one. GitHub then shows **two runs of `mstar-inspector review`** for one
+commit, and the **newest applicable attempt** is authoritative (it carries the
+latest persisted proof). This is not a duplicate review and never authorizes
+publishing twice.
+
+Two credential boundaries back this set: the Worker mints a purpose-scoped
+`review-write` grant that never leaves the Worker, while every Sandbox and
+smoke token is the explicitly **repository-scoped, read-only** `sandbox-read`
+grant (`contents: read`, `metadata: read`, `pull_requests: read` — the last
+one because the diff step runs `gh pr diff` with exactly that token); the
+Worker asserts the returned capabilities (`assertSandboxGrant`) and fails
+closed on anything broader or unscoped. Webhook events stay `pull_request`
+and `issue_comment`.
+
+> **Evidence caliber:** the permission set, the purpose-scoped mint/assert and
+> the recovery lanes are covered by the implementation's scoped behavioral
+> tests and static checks. Live GitHub / GitHub App behavior is **not**
+> verified — no live scoped run was authorized for this delivery
+> (§7.13). The historical v0.2 iteration runbook (single global App,
+> `wrangler secret put APP_ID`) is superseded by the dashboard manifest flow
+> above and is no longer a permission reference.
 
 ### Local tooling
 
@@ -287,8 +343,11 @@ smoke → record the digest.
    `src/pipeline/smoke-entry.ts`). The orchestrator reads **shell env only**
    (never Worker secrets, never D1): `SMOKE_APP_ID` + `SMOKE_PRIVATE_KEY`
    (inline PEM or `~`-relative/absolute path — the local orchestrator's
-   dual form, resolved by scripts/sandbox-smoke.ts) for the
-   installation-token mint, plus the optional
+   dual form, resolved by scripts/sandbox-smoke.ts) for the purpose-scoped
+   `sandbox-read` installation-token mint — restricted to the one GH_REPO
+   repository and asserted read-only against the **returned** grant
+   (`assertSandboxGrant`), so a broader or unscoped capability fails the smoke
+   closed — plus the optional
    `INSTALLATION_ID` (default 156621513), `GH_REPO` (default
    btspoony/todo-bots), `GH_PR` (default 1), `SMOKE_ROUTE` (default `/smoke`),
    and `ARK_API_KEY` (required when `SMOKE_ROUTE=/smoke-review`):
@@ -395,8 +454,11 @@ docker run --rm --entrypoint /opt/verify-synthesis.sh <image>
 > Plan 20: activates the multi-App platform on a deployed Worker — the
 > `DASHBOARD_ENCRYPTION_KEY`, the dashboard registration flow, the per-App
 > webhook repoint, and the R1/R2 verification pins. Run AFTER § Deploy steps
-> and § Post-deploy smoke (the base Worker and D1 0001–0011 must be live);
-> the live execution is QA-coordinated (plan 20 Task 4).
+> and § Post-deploy smoke (the base Worker and D1 migrations **through
+> `0021`** must be live); the live execution is QA-coordinated (plan 20
+> Task 4). Historical note: plan 20 originally required `0001–0011`; later
+> plans extend the chain to `0021` (`0019` profile columns, `0020`
+> finding lifecycle, `0021` Check registry).
 
 ### 1. Set DASHBOARD_ENCRYPTION_KEY
 
@@ -434,7 +496,10 @@ either key for the other duty (rotation stays decoupled).
 Prerequisites: dashboard OAuth (`OAUTH_CLIENT_ID` /
 `OAUTH_CLIENT_SECRET`), `DASHBOARD_SESSION_SECRET`, an admin login
 (`ADMIN_LOGINS` bootstrap or the first-login fallback),
-`DASHBOARD_ENCRYPTION_KEY` set, and D1 migrations 0001–0011 applied.
+`DASHBOARD_ENCRYPTION_KEY` set, and D1 migrations applied **through
+`0021`** — the full forward-only chain above, not a historical prefix.
+`0020` supplies the finding-lifecycle/publication journal and `0021` the
+Check registry, so a review on this Worker fails without them.
 
 1. **Admin login** — open `/dashboard/login` and complete the GitHub OAuth
    flow. The first login against an empty `dashboard_users` table becomes
@@ -445,7 +510,10 @@ Prerequisites: dashboard OAuth (`OAUTH_CLIENT_ID` /
    manifest to `https://github.com/settings/apps/new` — the manifest's
    webhook URL is the App's OWN route `{origin}/webhook/{slug}`
    (`src/dashboard/manifest.ts` `buildManifest`). Confirm the requested
-   permissions on GitHub.
+   permissions on GitHub — `contents: write`, `metadata: read`,
+   `pull_requests: write`, `issues: write`, `checks: write` (rationale, the
+   Worker-only `contents: write` boundary and the advisory Check semantics:
+   § GitHub App permissions above).
 3. **Manifest commit** — GitHub redirects back to
    `/dashboard/manifest/callback`; the dashboard exchanges the code, parks
    the credentials in the single-use hold cookie, and shows the confirm
@@ -556,8 +624,9 @@ Rollback is `wrangler rollback` (see § Rollback below) — there is no legacy
 face to repoint to; the per-App webhook URL on GitHub is unchanged by a
 Worker rollback.
 
-- **D1 is forward-only** — never reverse migration 0011 on rollback; new
-  code tolerates the prior schema (0002 precedent), roll back code only.
+- **D1 is forward-only** — never reverse an applied migration on rollback
+  (the chain head is `0021`); new code tolerates the prior schema (0002
+  precedent), roll back code only.
 - **Secrets untouched** — rollback does not remove
   `DASHBOARD_ENCRYPTION_KEY`; rotate it explicitly when the rollback is
   security-motivated. A registered App's encrypted credentials stay valid
@@ -702,9 +771,14 @@ Deployed image record (DOCS-01 baseline):
 
 - `wrangler.jsonc → triggers.crons: ["*/15 * * * *"]` — every 15 min the
   `scheduled` handler (src/worker/index.ts) runs the sweep
-  (src/worker/sweep.ts): counts `review_failures` rows over the trailing 24h
-  across ALL stages (parse + runner/sandbox/pipeline; the per-attempt rows
-  written by plan 18 T2 make this table the sufficient failure signal).
+  (src/worker/sweep.ts), then the plan-67 lifecycle reconciler
+  ([§ Lifecycle recovery](#lifecycle-recovery-plan-67-7111)), then the plan-68
+  Check recovery reconciler ([§ Check recovery](#check-recovery-plan-68-7112)),
+  each stage in its own try/catch so none can break another. The sweep counts
+  `review_failures` rows over the
+  trailing 24h across ALL stages (parse + runner/sandbox/pipeline; the
+  per-attempt rows written by plan 18 T2 make this table the sufficient failure
+  signal).
 - Threshold: `failures_24h > 5` (per-attempt semantics — a DLQ'd message
   leaves up to 4 rows: 1 initial delivery + max_retries = 3 retries).
   Constants pinned in src/worker/sweep.ts (`SWEEP_FAILURE_THRESHOLD`,
@@ -716,8 +790,93 @@ Deployed image record (DOCS-01 baseline):
 - DLQ depth is NOT read (no CF API token surface — `dlq_check: "skipped"`);
   guard-leak cleanup stays out of cron (KV guard TTL is the leak upper
   bound).
-- The sweep is read-only: D1 query + log/webhook only — no queue/KV/D1
-  mutation.
+- The sweep stage is read-only: D1 query + log/webhook only — no queue/KV/D1
+  mutation. (The composed lifecycle-recovery stage below does write its own
+  D1 journal rows and may call GitHub, strictly within its own bounds.)
+
+### Lifecycle recovery (plan 67 §7.11.1)
+
+The same `*/15 * * * *` trigger runs a second, independent stage after the
+sweep: `reconcileReviewLifecycle` (`src/worker/lifecycle-reconcile.ts`), in its
+own try/catch and throw-proof by contract. It completes plan-67 work from the
+private D1 publication journal and **never re-runs a paid review**:
+
+- confirmed publications are applied locally (no GitHub call — works even while
+  GitHub is unavailable);
+- a due staged publication older than 60s is sent once with its exact prepared
+  body, unless a newer round supersedes it;
+- an interrupted send is proved read-only by the exact App-owned marker plus
+  body digest and then applied; an unprovable send stays `unknown` instead of
+  being re-created;
+- authorized thread resolutions are retried through the same §7.5
+  ownership/HEAD/conversation fences as the inline attempt — a finding's
+  *addressed* disposition is never itself a resolve; only a proven-owned thread
+  with a confirmed remote `isResolved` counts, and anything weaker stays
+  visible as unresolved.
+
+Retries are bounded with backoff; at the cap the row stays visible as a terminal
+local-error/unknown and is never deleted (the structured warning carries
+App/scope/work ID and reason — no payload, no secret). App-state suspension is
+per exact `(app_id, installation_id)` pair; recovery distinguishes the reasons:
+
+- a **disabled** App suspends its pending rows durably (no mutation while
+  disabled) and they become eligible again only after **that exact App** is
+  re-enabled — each run re-checks the pair, and due rows resume with the same
+  IDs under fresh fencing;
+- a **missing mapping, deleted App or live identity mismatch** suspends rows
+  durably for operator inspection and does **not** resume automatically on
+  re-enable: a deleted App can never be re-activated, and recovery only
+  proceeds once the operator restores the mapping or corrects the App's
+  credentials.
+
+Pause/kill-switch stops new reviews, publications and line-comment creation.
+The bounded exceptions — local apply of already-confirmed publications,
+read-only proof discovery, and previously-authorized resolution retries —
+continue only for an **otherwise active** exact App; a disabled, deleted,
+missing or identity-mismatched App keeps its suspension (frozen policy).
+Budgets and the exact selection predicates: `.mstar/specs/review-lifecycle.md`
+§7.11.1.
+
+### Check recovery (plan 68 §7.11.2)
+
+A third independent stage on the same trigger — `reconcileReviewChecks`
+(`src/worker/check-reconcile.ts`), in its own try/catch and throw-proof by
+contract — finishes Check work the inline consumer hook could not complete.
+It never re-runs a paid review:
+
+- **Adopt before create.** A run that may already exist is found by exact
+  App / `external_id` / SHA (`filter: 'all'`, at most 2 pages), never inferred
+  from name or PR association alone. A create is legal only while the attempt
+  is `not-sent` — provably never dispatched, including the adapter's pre-send
+  refusal — and the App is enabled; once a create may have been sent
+  (`sending`/`unknown`) the row is settled by read-only adoption, because
+  resetting to `not-sent` would mint a second run for the same head.
+- **Conclusions come from persisted proof.** An attempt whose
+  `desired = in_progress` expires at its execution deadline and is then
+  terminalized from the publication journal (`success` with matching proof,
+  `neutral` for a confirmed degraded publication, `failure` otherwise) —
+  `in_progress` is never passed to the completion API.
+- **Intent before send, observation after validation.** The frozen conclusion is
+  persisted before the remote update, and the observed state advances only for a
+  response that matches the persisted identity, `completed` status and intended
+  conclusion. A late response from an old lease epoch persists nothing.
+- **Bounded.** ≤6 requests per row, ≤100 requests per 60s run, ≤5s per request
+  (clamped by the remaining run deadline). A budget refusal is pre-dispatch: the
+  claim is handed straight back, nothing is mutated, and no attempt is spent.
+- **Honest give-up.** At the fifth failure the row is marked `local-error` with
+  a `terminal_ms` under the live fence and a structured
+  `ops_check_reconcile_gave_up` warning carrying App/scope/work id and reason.
+  The row stays visible with its remote id and `external_id` — never dropped,
+  never cleared, never reported as remote completion.
+- **Operator retry.** The row-scoped retry reopens recovery of the **same
+  historical identity** — no new generation, no model replay — and refuses a
+  live lease, a newer active generation or a suspended App. It is not
+  permission to replay a review.
+
+Pause semantics for this lane mirror the lifecycle lane: a paused App may adopt
+read-only and terminalize an already-known run, but a never-sent attempt is
+never created while paused. The same-name duplicate-run possibility above
+(§ GitHub App permissions) is the visible consequence of RL-12 in this lane.
 
 ### Secrets inventory delta
 
@@ -732,7 +891,8 @@ Deployed image record (DOCS-01 baseline):
 `review_failures` is an append-only per-attempt event log: a DLQ'd message
 leaves up to 4 rows (1 initial delivery + max_retries = 3 retries), so the
 table grows with every failed attempt. Retention is **runbook-executed** —
-the cron sweep is read-only by design (AL-6) and must never mutate D1.
+the cron sweep **stage** is read-only by design (AL-6) and must never mutate
+D1 (the separate lifecycle-recovery stage owns its own journal rows).
 
 Monthly (or when the table grows noticeably), delete rows older than 30
 days:

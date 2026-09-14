@@ -37,8 +37,8 @@
  * independent round counter — the real review chain is untouched. The
  * body carries the redacted parse error line plus a redacted
  * (redactSecrets), ≤1000-char raw-output excerpt behind a details
- * collapse; both chains share the scan/upsert/403-404-replan mechanics
- * (upsertMarkerComment).
+ * collapse; both chains share the scan/plan/verify mechanics (the shared
+ * full-list scan + the bot-marker planners).
  *
  * Secrets: the CommenterEnv APP_ID/PRIVATE_KEY pair (same literal names as
  * the retired Worker env secrets) is populated by consumer.ts
@@ -79,6 +79,24 @@ import { MERGE_CLASSES, REVIEW_EMOJI } from "@mstar-harness/engine";
 import { FINDING_BODY_MAX, type ReviewFinding, type ReviewOutput } from "../review/schema";
 import { redactSecrets } from "./redact";
 import { computeFindingFingerprint } from "../store/fingerprint";
+import type { Assessment, Coverage, Scope, Discussion } from "../contracts/recheck";
+import type { LineIntent, VerifiedResolution } from "../store/finding-lifecycle";
+import type { D1Like } from "../store/types";
+import { listDiscussionWithOctokit, type ListDiscussionInput } from "./discussion-context";
+import {
+  buildLineBatchMarker,
+  buildLineCommentBody,
+  createReviewThreads,
+  sha256Hex,
+  stripInspectorMarkerSyntax,
+  type DiscoveryResult,
+  type GraphqlOctokit,
+  type ResolveOutcome,
+} from "./review-threads";
+import { createChecksAdapter, type ChecksAdapter, type ChecksOctokit } from "./checks";
+
+export type { ListDiscussionInput };
+export type { DiscoveryResult, ResolveOutcome };
 
 /** summary_md budget for the overall review body (plan Task 3). */
 export const SUMMARY_MD_LIMIT = 8000;
@@ -173,10 +191,11 @@ function renderTally(
 /**
  * Assemble the overall review body: verdict header (verbatim) + tally line
  * (when present) + truncated summary + findings-by-class section + optional
- * omitted-findings footer, finally clamped to REVIEW_BODY_LIMIT (qc2 F-003 /
- * qc3 F-304 — the API never sees an over-limit body). `omittedFindings` is
- * the count of findings dropped by the consumer's merge-class cap (B4) —
- * the footer tells readers the review is a Top-N subset.
+ * omitted-findings footer + optional closure section (plan 67 §7.10),
+ * finally clamped to REVIEW_BODY_LIMIT (qc2 F-003 / qc3 F-304 — the API
+ * never sees an over-limit body). `omittedFindings` is the count of findings
+ * dropped by the consumer's merge-class cap (B4) — the footer tells readers
+ * the review is a Top-N subset.
  *
  * Plan 21 Task 3 (AL-21-2): `previousFingerprints` is the repeat-dedup data
  * channel — assembly INPUT only (the consumer queries the store; this module
@@ -187,6 +206,7 @@ export function buildReviewBody(
   output: ReviewOutput,
   omittedFindings = 0,
   previousFingerprints?: ReadonlySet<string>,
+  closure?: string,
 ): string {
   const verdict = `**Verdict: ${output.verdict}**`;
   const tally = renderTally(output.tally, output.findings, previousFingerprints);
@@ -194,8 +214,145 @@ export function buildReviewBody(
   const findings = renderFindings(output.findings, previousFingerprints);
   const head = tally ? `${verdict}\n\n${tally}` : verdict;
   const body = findings ? `${head}\n\n${summary}\n\n${findings}` : `${head}\n\n${summary}`;
-  const full = omittedFindings > 0 ? `${body}\n\n*(+${omittedFindings} more findings omitted)*` : body;
-  return full.length <= REVIEW_BODY_LIMIT ? full : `${full.slice(0, REVIEW_BODY_LIMIT - 1)}…`;
+  const withOmitted = omittedFindings > 0 ? `${body}\n\n*(+${omittedFindings} more findings omitted)*` : body;
+  const withClosure = closure ? `${withOmitted}\n\n${closure}` : withOmitted;
+  return withClosure.length <= REVIEW_BODY_LIMIT ? withClosure : `${withClosure.slice(0, REVIEW_BODY_LIMIT - 1)}…`;
+}
+
+// ---------------------------------------------------------------------------
+// Closure section (plan 67, spec review-lifecycle §7.10): the per-round
+// rendering of the prior-findings recheck. Single upsert only — remote
+// resolution outcomes discovered after this publication appear in the NEXT
+// round's closure, never a second closure-only comment.
+// ---------------------------------------------------------------------------
+
+/** §7.10: at most 25 selected prior rows are shown; the rest is a count. */
+export const CLOSURE_MAX_ROWS = 25;
+
+/** One closure table row (§7.10 columns: finding, disposition, evidence, thread). */
+export type ClosureRow = {
+  /** The ORIGINAL published concern title (never a paraphrase). */
+  title: string;
+  disposition: Assessment["disposition"];
+  reason: Assessment["reason"];
+  /** Evidence kind of an addressed verdict, else null. */
+  evidenceKind: string | null;
+  /**
+   * Thread column: "not yet resolved" while the verified resolve is still
+   * pending (a pending resolve renders not-yet-resolved, NOT a prediction),
+   * "-" when no thread resolution is in flight this round.
+   */
+  thread: string;
+};
+
+export type ClosureCoverage = {
+  totalOpen: number;
+  selected: number;
+  assessed: number;
+  omitted: number;
+  capped: number;
+  contextCoverage: Coverage;
+};
+
+/**
+ * Render the §7.10 closure section: one honest coverage line, then at most
+ * `CLOSURE_MAX_ROWS` rows (finding / disposition / evidence / thread) plus
+ * the overflow count. Deterministic; the caller re-clamps via
+ * buildReviewBody's budget.
+ */
+export function buildClosureSection(coverage: ClosureCoverage, rows: ClosureRow[]): string {
+  const shown = rows.slice(0, CLOSURE_MAX_ROWS);
+  const overflow = rows.length - shown.length;
+  const lines: string[] = [
+    "## Prior findings recheck",
+    "",
+    `Reassessed ${coverage.assessed}/${coverage.selected} open prior finding(s) this round` +
+      ` · ${coverage.omitted} omitted · ${coverage.capped} over cap · ${coverage.totalOpen} open` +
+      ` · context coverage: ${coverage.contextCoverage}`,
+  ];
+  if (shown.length > 0) {
+    lines.push(
+      "",
+      "| finding | disposition | evidence | thread |",
+      "|---|---|---|---|",
+      ...shown.map(
+        (row) =>
+          `| ${row.title.replace(/\|/g, "\\|").replace(/\n/g, " ")} ` +
+          `| ${row.disposition} (${row.reason}) ` +
+          `| ${row.evidenceKind ?? "-"} ` +
+          `| ${row.thread} |`,
+      ),
+    );
+  }
+  if (overflow > 0) {
+    lines.push("", `*(+${overflow} more prior finding(s) over the ${CLOSURE_MAX_ROWS}-row display cap)*`);
+  }
+  return lines.join("\n");
+}
+
+// ---------------------------------------------------------------------------
+// Prepared publication (plan 67, spec §7.7): the FINAL body is computed and
+// durably staged BEFORE any GitHub mutation; the send publishes exactly the
+// prepared upsert. The publication identity marker is appended to the round
+// marker; model text is stripped of Inspector marker syntax first so the
+// trusted markers are always ours (§7.5).
+// ---------------------------------------------------------------------------
+
+/**
+ * The trusted publication identity marker appended to every prepared
+ * publication body (spec §7.7: preserve the existing round marker and append
+ * `<!-- mstar-inspector:publication:v1 id=<uuid> sha=<sha> kind=... -->`).
+ */
+export function buildPublicationMarker(input: { publicationId: string; headSha: string; kind: "review" | "degraded" }): string {
+  return `<!-- mstar-inspector:publication:v1 id=${input.publicationId} sha=${input.headSha} kind=${input.kind} -->`;
+}
+
+/**
+ * Assemble the prepared REVIEW publication body (spec §7.7): the round
+ * marker line, the round header, the marker-stripped review body (findings +
+ * closure — model text can never forge an Inspector marker), clamped so the
+ * appended trusted publication marker stays intact under the body limit.
+ */
+export function buildPreparedReviewBody(input: {
+  output: ReviewOutput;
+  omittedFindings: number;
+  round: number;
+  headSha: string;
+  previousFingerprints?: ReadonlySet<string>;
+  closure?: string;
+  publicationMarker: string;
+}): string {
+  const roundMarker = `<!-- mstar-inspector:review:v1 round=${input.round} -->`;
+  const header = `第 ${input.round} 次 review · commit ${input.headSha.slice(0, 7)}`;
+  const core = stripInspectorMarkerSyntax(
+    buildReviewBody(input.output, input.omittedFindings, input.previousFingerprints, input.closure),
+  );
+  const reserve = roundMarker.length + header.length + input.publicationMarker.length + 8;
+  const budget = REVIEW_BODY_LIMIT - reserve;
+  const clamped = core.length <= budget ? core : `${core.slice(0, Math.max(0, budget - 1))}…`;
+  return `${roundMarker}\n${header}\n\n${clamped}\n${input.publicationMarker}`;
+}
+
+/**
+ * Assemble the prepared DEGRADED publication body (spec §7.7 degraded
+ * payload): the degraded chain body (own redaction choke point), stripped of
+ * Inspector marker syntax and clamped so the trusted publication marker
+ * stays intact.
+ */
+export function buildPreparedDegradedBody(input: {
+  error: string;
+  rawOutput: string;
+  round: number;
+  publicationMarker: string;
+}): string {
+  const roundMarker = `${DEGRADED_MARKER_PREFIX} round=${input.round} -->`;
+  const core = stripInspectorMarkerSyntax(
+    buildDegradedBody({ error: input.error, rawOutput: input.rawOutput, round: input.round }),
+  );
+  const reserve = roundMarker.length + input.publicationMarker.length + 4;
+  const budget = REVIEW_BODY_LIMIT - reserve;
+  const clamped = core.length <= budget ? core : `${core.slice(0, Math.max(0, budget - 1))}…`;
+  return `${roundMarker}\n${clamped}\n${input.publicationMarker}`;
 }
 // ---------------------------------------------------------------------------
 // Single-comment upsert (postdeploy feedback T5)
@@ -268,23 +425,6 @@ export function planUpsert(comments: ReviewComment[], excludeIds?: ReadonlySet<n
   return { action: "update", commentId: existing.id, round: round + 1 };
 }
 
-/**
- * Assemble the upsert body: hidden marker line (round), the「第 N 次 review ·
- * commit <short sha>」header, then the existing buildReviewBody rendering.
- * Plan 21 Task 3 (AL-21-2): `previousFingerprints` is the repeat-dedup
- * assembly input (marker/header structure untouched — D4 lock).
- */
-export function buildUpsertBody(
-  output: ReviewOutput,
-  omittedFindings: number,
-  round: number,
-  headSha: string,
-  previousFingerprints?: ReadonlySet<string>,
-): string {
-  const marker = `<!-- mstar-inspector:review:v1 round=${round} -->`;
-  const header = `第 ${round} 次 review · commit ${headSha.slice(0, 7)}`;
-  return `${marker}\n${header}\n\n${buildReviewBody(output, omittedFindings, previousFingerprints)}`;
-}
 // ---------------------------------------------------------------------------
 // Degraded comment chain (plan 18 Task 2 / architect AL-1): the parse-fail
 // visibility chain. A SEPARATE marker family from the real review upsert —
@@ -536,43 +676,206 @@ export function normalizePrivateKey(pem: string): string {
 
 export type CommenterEnv = { APP_ID: string; PRIVATE_KEY: string };
 
-export type PostReviewInput = {
+/**
+ * The transport shape the bounded-fetch seam accepts. Deliberately narrower
+ * than `typeof fetch`: bun's global also declares a `preconnect` property,
+ * and a runner-supplied wrapper is a plain callable. The runtime global
+ * fetch satisfies this shape, so callers pass it unchanged.
+ */
+export type CommenterFetch = (input: string | URL | Request, init?: RequestInit) => Promise<Response>;
+
+/**
+ * Construction options for `createReviewCommenter`. `fetchImpl` is the
+ * per-request transport seam (spec §7.11.1): the caller wraps every request
+ * with its own abort/timeout bound and the instance routes ALL traffic
+ * through it. The connection is threaded explicitly rather than left to a
+ * mutation of the global fetch, because a Worker isolates one module-level
+ * binding per isolate — module state is not a safe place for per-run state.
+ */
+export type ReviewCommenterOptions = {
+  /** Optional bounded transport — include the thread-surface store to enable §7.5. */
+  db?: D1Like;
+  /** Injectable clock for the §7.5 thread surface. */
+  nowMs?: () => number;
+  /** Per-request transport seam (timeout/abort wrapper). */
+  fetchImpl?: CommenterFetch;
+  /**
+   * Test-only seam recording the SEAM-LEVEL construction this module performs:
+   * each `createAppAuth` build and each minted purpose/repository grant. It
+   * exists so the single-credential invariant (spec §7.6) is provable by
+   * BEHAVIOR — that Checks and comment writes share one review-write path while
+   * the Sandbox surface stays read-only — rather than by reading source text or
+   * library method presence. Production callers omit it; nothing here branches
+   * on it and no token or client is exposed through it.
+   */
+  authSeam?: AuthSeam;
+};
+
+/** One `createAppAuth` construction, as observed through `authSeam`. */
+export type AuthConstruction = { appId: string };
+/** One minted installation grant, as observed through `authSeam`. */
+export type AuthMint = { installationId: number; repo: string; purpose: TokenPurpose; permissions: Record<string, string> };
+/** Records the credential construction/mint seam (test-only; see `authSeam`). */
+export type AuthSeam = { constructed: AuthConstruction[]; minted: AuthMint[] };
+
+// ---------------------------------------------------------------------------
+// Purpose-scoped token boundary (plan 67 Task 2, spec §7.6): every mint is
+// tied to a purpose + the exact repository, and the SANDBOX grant is checked
+// against the RETURNED capabilities (RL-6) — the request is never presented
+// as proof of the response. The unrestricted `getInstallationToken(
+// installationId)` contract is deleted; every caller migrates to
+// `getInstallationToken({ scope, purpose })`.
+// ---------------------------------------------------------------------------
+
+export type TokenPurpose = "sandbox-read" | "review-write";
+
+export type InstallationTokenGrant = {
+  token: string;
+  permissions: Record<string, string>;
+  repositoryIds?: number[];
+  repositoryNames?: string[];
+  repositorySelection?: string;
+};
+
+export type TokenInput = { scope: Scope; purpose: TokenPurpose };
+
+/**
+ * Explicit requested permission set for the sandbox read grant (spec §7.6,
+ * QC P67-QC-001): `contents` + `metadata` for the clone, and
+ * `pull_requests: read` because the shipped §7.7 step-2 diff step runs
+ * `gh pr diff` with EXACTLY this token and that endpoint is authorized by
+ * the pull-requests permission. Read-only and repository-scoped as before —
+ * no write capability is added, and `assertSandboxGrant` still rejects any
+ * returned value that is not `read`.
+ */
+export const SANDBOX_READ_PERMISSIONS: Record<string, string> = {
+  contents: "read",
+  metadata: "read",
+  pull_requests: "read",
+};
+/**
+ * Explicit requested permission set for Worker review writes. Plan 68 adds
+ * `checks: "write"` here (spec §7.6/§7.12): Check runs ride the SAME
+ * purpose-scoped, repository-scoped credential as the comment, degraded and
+ * line-comment chains, so the pipeline keeps exactly one `createAppAuth`
+ * construction point, one mint path and one token client. auth-app's cache is
+ * keyed by installation/repository/permissions, so this widened set simply
+ * becomes a distinct cache entry from the sandbox read grant — the two purpose
+ * families still never cross-reuse a token.
+ */
+export const REVIEW_WRITE_PERMISSIONS: Record<string, string> = {
+  contents: "write",
+  metadata: "read",
+  pull_requests: "write",
+  issues: "write",
+  checks: "write",
+};
+
+function permissionsFor(purpose: TokenPurpose): Record<string, string> {
+  return purpose === "sandbox-read" ? { ...SANDBOX_READ_PERMISSIONS } : { ...REVIEW_WRITE_PERMISSIONS };
+}
+
+/**
+ * Returned-capability assertion for the sandbox read grant (spec §7.6 /
+ * RL-6): nonempty token, contents+metadata+pull_requests read (the three the
+ * sandbox path actually exercises — clone and `gh pr diff`), EVERY other
+ * returned permission read-only, `repositorySelection === "selected"`, and
+ * exactly one returned repository equal to the requested one. A missing
+ * repository list/selection or any broader grant fails closed — throws, so
+ * a token that could not run the shipped diff step is rejected HERE rather
+ * than failing later inside the container.
+ */
+export function assertSandboxGrant(grant: InstallationTokenGrant, expectedRepo: string): void {
+  if (typeof grant.token !== "string" || grant.token.length === 0) {
+    throw new Error("sandbox grant rejected: empty token");
+  }
+  const permissions = grant.permissions ?? {};
+  if (
+    permissions.contents !== "read" ||
+    permissions.metadata !== "read" ||
+    permissions.pull_requests !== "read"
+  ) {
+    throw new Error("sandbox grant rejected: contents/metadata/pull_requests must be returned read");
+  }
+  for (const [name, value] of Object.entries(permissions)) {
+    if (name === "contents" || name === "metadata") continue;
+    if (value !== "read") {
+      throw new Error(`sandbox grant rejected: returned permission ${name} is not read-only`);
+    }
+  }
+  if (grant.repositorySelection !== "selected") {
+    throw new Error(`sandbox grant rejected: repositorySelection must be "selected", got ${JSON.stringify(grant.repositorySelection ?? null)}`);
+  }
+  const names = grant.repositoryNames ?? [];
+  if (names.length !== 1 || names[0] !== expectedRepo) {
+    throw new Error(`sandbox grant rejected: exactly one returned repository equal to ${JSON.stringify(expectedRepo)} is required, got ${JSON.stringify(names)}`);
+  }
+}
+
+/** Coordinates for one PR's marker-comment scans (plan faces + prepared sends). */
+export type CommenterTargetInput = {
   installationId: number;
   owner: string;
   repo: string;
   prNumber: number;
+};
+
+/**
+ * Prepared-publication send input (plan 67 §7.7 step 8): the EXACT body was
+ * durably staged before this call; `targetCommentId`/`round` come from the
+ * pre-staging plan. The send validates the target's expected previous version
+ * (or an already-matching exact body) and publishes the prepared body
+ * verbatim — a newer publication is never overwritten.
+ */
+export type PostPreparedReviewInput = CommenterTargetInput & {
   headSha: string;
-  output: ReviewOutput;
-  /** Findings dropped by the merge-class cap (B4) — rendered as a body footer. */
-  omittedFindings?: number;
-  /**
-   * Previous-round fingerprint set (plan 21 Task 3 / AL-21-2): the consumer
-   * queries it BEFORE the post (the current sha row does not exist yet) and
-   * passes it here — assembly INPUT only. Findings whose fingerprint is in
-   * the set are marked repeat and excluded from the tally's new counts.
-   */
-  previousFingerprints?: ReadonlySet<string>;
+  round: number;
+  /** The comment id the pre-staging plan targeted (null = create). */
+  targetCommentId: number | null;
+  body: string;
+  publicationId: string;
+};
+
+export type PostPreparedDegradedInput = CommenterTargetInput & {
+  headSha: string;
+  round: number;
+  targetCommentId: number | null;
+  body: string;
+  publicationId: string;
 };
 
 export type ReviewCommenter = {
-  /** Mint an installation access token (injected as GH_TOKEN into exec env). */
-  getInstallationToken(installationId: number): Promise<string>;
   /**
-   * Upsert one overall review comment (Issues comments API; T5): create with
-   * round=1 on a miss, PATCH the app's own marker comment with round=N+1 on
-   * a hit. Returns the round just posted — the consumer pins the
-   * line-comments marker body (plan 18 Task 3) to the SAME round, single
-   * source: the upsert scan.
+   * Mint a PURPOSE-SCOPED, repository-scoped installation grant (plan 67
+   * §7.6): `sandbox-read` requests {contents:read, metadata:read,
+   * pull_requests:read} — the full read set the shipped Sandbox path
+   * exercises (clone + `gh pr diff`); `review-write` requests the Worker
+   * write set. The grant is minted
+   * through the single createAppAuth object (token cache keyed by
+   * installation/repository/permissions) — callers on the sandbox path MUST
+   * verify the RETURNED grant via `assertSandboxGrant` (RL-6).
    */
-  postReview(input: PostReviewInput): Promise<number>;
+  getInstallationToken(input: TokenInput): Promise<InstallationTokenGrant>;
   /**
-   * Upsert the degraded comment (plan 18 Task 2 / AL-1): the parse-fail
-   * visibility chain — a SEPARATE marker family (`review-degraded:v1`) with
-   * an independent round counter from postReview's real review chain. The
-   * consumer calls it best-effort on the degrade path: a rejection is a
-   * structured log line, never a mask for the ack.
+   * Pre-staging plan read (plan 67 §7.7: "Calculate round/target from the
+   * authenticated App's current single comment BEFORE staging"): the same
+   * bot-marker scan the upsert used, surfaced so the consumer can compute
+   * round/targetCommentId and stage the exact prepared body. Read-only.
    */
-  postDegraded(input: PostDegradedInput): Promise<void>;
+  planReviewUpsert(input: CommenterTargetInput): Promise<UpsertPlan>;
+  /** planReviewUpsert for the degraded chain (independent marker family). */
+  planDegradedUpsert(input: CommenterTargetInput): Promise<UpsertPlan>;
+  /**
+   * Publish the EXACT prepared review body (§7.7 step 8): validate the
+   * target's expected previous version (or an already-matching exact
+   * marker/body — the replay case), send the prepared body verbatim, and
+   * require the returned comment id (an unprovable publication is never
+   * claimed). A newer publication is never overwritten — a target-version
+   * mismatch throws.
+   */
+  postPreparedReview(input: PostPreparedReviewInput): Promise<{ commentId: number }>;
+  /** postPreparedReview for the degraded chain; the id may be uncaptured (null). */
+  postPreparedDegraded(input: PostPreparedDegradedInput): Promise<{ posted: boolean; commentId: number | null }>;
   /**
    * Delete stale bot-authored `review-degraded:v1` comments (Bugbot
    * finding — degraded-comment lifecycle): the success path calls this
@@ -582,19 +885,53 @@ export type ReviewCommenter = {
    */
   deleteDegradedComment(input: PostDegradedInput): Promise<DegradedDeleteOutcome>;
   /**
-   * Fetch the PR diff as a unified-diff string (plan 18 Task 3 / AL-3):
-   * `pulls.get` + `mediaType: { format: "diff" }` — the hunk prefilter input.
-   * Throws on a missing surface or a non-diff response; the consumer treats
-   * any failure as "prefetch failed → base-filter attempt".
-   */
-  fetchPrDiff(input: FetchPrDiffInput): Promise<string>;
-  /**
-   * Post the line-comments review (plan 18 Task 3 / AL-3): ONE
-   * pulls.createReview with `event: "COMMENT"` (D4 event lock) and the
-   * pre-filtered qualifying findings as `comments[]`. Throws on any Octokit
+   * Post the INTENT-prepared line-comments review (plan 67 §7.7 step 10):
+   * ONE pulls.createReview with `event: "COMMENT"` (D4 event lock), the
+   * line-batch marker body, and per-intent bodies carrying the trusted
+   * thread marker (§7.5). Returns the §7.7 capture result: returned comment
+   * ids mapped back to the intents' association ids. Throws on any Octokit
    * error — the consumer's never-throw guard is the catch site.
    */
-  postLineComments(input: PostLineCommentsInput): Promise<void>;
+  postLineComments(input: PostPreparedLineCommentsInput): Promise<PostedLineComments>;
+  /**
+   * Bounded discussion capture (plan 67 §7.8): newest-first GraphQL issue
+   * comments (≤2 pages) + each known thread conversation (≤2 pages), with
+   * three-valued coverage and §7.5 digests. API failure is `unavailable`.
+   */
+  listDiscussion(input: ListDiscussionInput): Promise<Discussion>;
+  /**
+   * §7.5 thread identity surface — present only when the commenter is
+   * constructed with the thread store (`createReviewCommenter(env, { db })`);
+   * absent (undefined) otherwise. `discoverThread` proves ownership from the
+   * prepared association BEFORE any adoption; `resolveFindingThread` applies
+   * the verified resolution behind the §7.5 fences. T4 owns the consumer
+   * call ordering.
+   */
+  discoverThread?(input: { scope: Scope; intent: LineIntent; reviewId: number | null }): Promise<DiscoveryResult>;
+  resolveFindingThread?(input: {
+    scope: Scope;
+    associationId: string;
+    verified: VerifiedResolution;
+  }): Promise<ResolveOutcome>;
+  /**
+   * §7.9 Checks adapter (plan 68 Task 1) — present only when the commenter is
+   * constructed with the registry/journal store (`createReviewCommenter(env,
+   * { db })`), because every send is fenced on PERSISTED ownership. The
+   * adapter reuses THIS instance's purpose-scoped `review-write` client:
+   * `checks: "write"` was added to that one permission set, so no second
+   * credential, token mint or Octokit construction exists. T2 owns the
+   * consumer's call ordering.
+   */
+  checks?: ChecksAdapter;
+  /**
+   * JWT-authenticated `GET /app` identity proof (spec §7.5/§7.6): the numeric
+   * App id + nonblank slug of the LIVE App behind THIS instance's
+   * credentials, memoized per instance. `null` = identity unavailable (the
+   * probe failed or answered malformed) — callers fail closed. Present on
+   * every instance `createReviewCommenter` builds; declared optional so
+   * minimal test doubles stay assignable (the `discoverThread?` precedent).
+   */
+  getAppIdentity?(): Promise<{ githubAppId: number; slug: string } | null>;
 };
 /**
  * Structural auth surface for the createAppAuth strategy. `AuthInterface` is
@@ -602,10 +939,20 @@ export type ReviewCommenter = {
  * strategy is assignable (same pattern as the deleted worker/diff.ts
  * AppAuth, plan 04). With a factory the call resolves to the factory's
  * return (the octokit); without one it resolves to the installation access
- * token.
+ * grant — auth-app 8.3.0 maps the response's `permissions`,
+ * `repository_selection` and `repositories[].id/name` into `permissions`,
+ * `repositorySelection`, `repositoryIds`/`repositoryNames` (spec §7.6), and
+ * its token cache is keyed by installation/repository/permissions.
  */
 export type AppAuthStrategy = {
-  (options: { type: "installation"; installationId: number }): Promise<{ token: string }>;
+  /** App-level JWT (spec §7.5: JWT-authenticated `GET /app` identity proof). */
+  (options: { type: "app" }): Promise<{ token: string }>;
+  (options: {
+    type: "installation";
+    installationId: number;
+    repositoryNames?: string[];
+    permissions?: Record<string, string>;
+  }): Promise<InstallationTokenGrant>;
   <T>(options: { type: "installation"; installationId: number; factory: (options: unknown) => T }): Promise<T>;
 };
 
@@ -632,14 +979,12 @@ export type PostOctokit = {
       deleteComment?: (parameters: Record<string, unknown>) => Promise<unknown>;
     };
     /**
-     * Pulls surface for plan 18 Task 3 line comments: `get` with
-     * `mediaType: { format: "diff" }` (diff prefetch for the hunk prefilter)
-     * and `createReview` (COMMENT-event delivery). Optional and per-method
+     * Pulls surface for plan 67 Task 4 line comments: `createReview`
+     * (COMMENT-event delivery of the prepared line intents). Optional and
      * guarded — the marker-comment chains never touch it, and the
      * line-comment path fails soft through the consumer's catch.
      */
     pulls?: {
-      get?: (parameters: Record<string, unknown>) => Promise<{ data: unknown }>;
       createReview?: (parameters: Record<string, unknown>) => Promise<unknown>;
     };
   };
@@ -649,103 +994,238 @@ export type PostOctokit = {
 type CommentTarget = { owner: string; repo: string; prNumber: number };
 
 /**
- * Shared marker-comment upsert behind BOTH public chains (the T5 review
- * upsert and the plan-18 degraded chain): guard the octokit surface, scan
- * the FULL comment list (WF-001: `issues.listComments` caps at 100 per
- * page — on a busy PR the app's marker can sit beyond page 1, and a
- * page-1-only scan would treat it as a miss and create a duplicate round=1
- * comment), then create-on-miss / PATCH-on-hit with the 403/404
- * dead-comment replan (WF-003 / qc2 F-002: 404 = the marker was deleted
- * mid-flight; 403 = the marker belongs to another author — only
- * bot-authored comments are matched, but another app's bot can still plant
- * one. Both are treated as a MISS: re-plan with that comment excluded —
- * the next bot marker wins, else a fresh round=1 is created. Each replan
- * permanently excludes one id, so the loop always terminates). The chain
- * the scan matches is the caller's `planComment` choice — the recovery
- * semantics must never drift between the two chains. Returns the round
- * just posted (the caller's `buildBody` round) — the line-comments marker
- * (plan 18 Task 3) pins itself to the review chain's round.
+ * The full-comment-list scan behind every marker chain (WF-001:
+ * `issues.listComments` caps at 100 per page — on a busy PR the app's marker
+ * can sit beyond page 1, so every plan/send/delete scan paginates the FULL
+ * list). Guards the octokit surface with the per-chain error noun.
  */
-async function upsertMarkerComment(
-  octokit: PostOctokit,
-  target: CommentTarget,
-  planComment: (comments: ReviewComment[], excludeIds?: ReadonlySet<number>) => UpsertPlan,
-  buildBody: (round: number) => string,
-  /** Which marker chain is posting — names the missing-surface error per chain. */
-  surface: "review" | "degraded",
-): Promise<number> {
+async function scanCommentsWithOctokit(octokit: PostOctokit, target: CommentTarget, surface: "review" | "degraded"): Promise<ReviewComment[]> {
   const issues = octokit.rest?.issues;
-  if (
-    !issues?.listComments ||
-    !issues?.updateComment ||
-    !issues?.createComment ||
-    typeof octokit.paginate !== "function"
-  ) {
+  if (!issues?.listComments || !issues?.updateComment || !issues?.createComment || typeof octokit.paginate !== "function") {
     throw new Error(
       `octokit is missing rest.issues comment methods / paginate — cannot upsert the ${surface} comment; check the injected auth surface`,
     );
   }
-  const comments = await octokit.paginate(issues.listComments, {
+  return octokit.paginate(issues.listComments, {
     owner: target.owner,
     repo: target.repo,
     issue_number: target.prNumber,
     per_page: 100,
   });
-  const dead = new Set<number>();
-  for (;;) {
-    const planned = planComment(comments, dead);
-    const body = buildBody(planned.round);
-    if (planned.action === "create") {
-      await issues.createComment({
-        owner: target.owner,
-        repo: target.repo,
-        issue_number: target.prNumber,
-        body,
-      });
-      return planned.round;
-    }
-    try {
-      await issues.updateComment({
-        owner: target.owner,
-        repo: target.repo,
-        comment_id: planned.commentId,
-        body,
-      });
-      return planned.round;
-    } catch (err) {
-      // A RequestError from octokit carries `.status` (duck-typed so the
-      // mock-octokit tests can reject with a plain { status: N }).
-      const status = typeof err === "object" && err !== null ? (err as { status?: unknown }).status : undefined;
-      if (status === 404 || status === 403) {
-        dead.add(planned.commentId);
-        continue;
-      }
-      throw err;
-    }
+}
+
+/**
+ * Pre-staging plan read against a caller-provided octokit (plan 67 §7.7):
+ * the same bot-marker scan the upsert used, exported for the consumer to
+ * compute round/targetCommentId BEFORE staging the exact prepared body.
+ * Read-only — no mutation.
+ */
+export async function planReviewUpsertWithOctokit(octokit: PostOctokit, input: CommenterTargetInput): Promise<UpsertPlan> {
+  const comments = await scanCommentsWithOctokit(octokit, input, "review");
+  return planUpsert(comments);
+}
+
+/** planReviewUpsertWithOctokit for the degraded chain (independent marker family). */
+export async function planDegradedUpsertWithOctokit(octokit: PostOctokit, input: CommenterTargetInput): Promise<UpsertPlan> {
+  const comments = await scanCommentsWithOctokit(octokit, input, "degraded");
+  return planDegradedUpsert(comments);
+}
+
+/**
+ * A definitive rejection BEFORE any request left the Worker (spec §7.7
+ * "A known definitive rejection before any successful/unknown send is
+ * failed, not published"). Thrown by the prepared-send surfaces when the
+ * target no longer shows its expected previous version, a foreign marker
+ * appeared after the plan, or the client surface cannot publish at all —
+ * cases where the honest durable state is `failed`, NOT the post-attempt
+ * `unknown`. Any error that may have reached GitHub (transport throw, a
+ * create response without an id) deliberately stays a plain Error so it
+ * keeps mapping to `unknown`.
+ */
+export class PreparedSendRejected extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "PreparedSendRejected";
   }
 }
 
 /**
- * Upsert the overall review comment against a caller-provided octokit
- * (T5 + WF-001/WF-003). Exported so tests can drive the full wiring with a
- * mock octokit (SG-001); the production commenter builds the real octokit
- * and delegates here.
- *
- * The Issues comments API has no review event — the model verdict is
- * prompt-injectable and is rendered as text only (SEC-01, structural).
- *
- * Returns the round just posted (plan 18 Task 3: the line-comments marker
- * body carries `round N` from THIS source, never a re-scan).
+ * Publish the EXACT prepared review body against a caller-provided octokit
+ * (plan 67 §7.7 step 8). Before sending, the target is RE-READ and must
+ * show its expected previous version — or an already-matching exact
+ * marker/body (the response-lost replay case, adopted without mutation):
+ *   - update plan: the target comment must still be bot-authored with the
+ *     expected round (= prepared round - 1). Deleted → create fallback with
+ *     the SAME prepared body (the round never increments on retry). Changed
+ *     (newer round / replaced body) → definitive rejection (`PreparedSendRejected`)
+ *     — a newer publication is never overwritten by an older send.
+ *   - create plan: a bot review-marker comment appearing between plan and
+ *     send is adopted only when it already carries the exact prepared body;
+ *     any other marker is a definitive rejection.
+ * The send publishes the prepared body VERBATIM; a create response without
+ * an id is an unprovable publication and throws a plain Error (a request
+ * WAS sent — the caller must treat it as unknown, never as not-sent).
  */
-export async function postReviewWithOctokit(octokit: PostOctokit, input: PostReviewInput): Promise<number> {
-  return upsertMarkerComment(
-    octokit,
-    input,
-    planUpsert,
-    (round) =>
-      buildUpsertBody(input.output, input.omittedFindings ?? 0, round, input.headSha, input.previousFingerprints),
-    "review",
-  );
+export async function postPreparedReviewWithOctokit(octokit: PostOctokit, input: PostPreparedReviewInput): Promise<{ commentId: number }> {
+  const issues = octokit.rest?.issues;
+  if (!issues?.listComments || !issues?.updateComment || !issues?.createComment || typeof octokit.paginate !== "function") {
+    throw new PreparedSendRejected(
+      "octokit is missing rest.issues comment methods / paginate — cannot publish the prepared review; check the injected auth surface",
+    );
+  }
+  const comments = await scanCommentsWithOctokit(octokit, input, "review");
+  const parsedRound = (body: string | null | undefined): number | null =>
+    body ? parseReviewRound(body) : null;
+
+  if (input.targetCommentId !== null) {
+    const target = comments.find((c) => c.id === input.targetCommentId);
+    if (target === undefined) {
+      // The planned target is gone (deleted mid-flight) — create fallback
+      // with the SAME prepared body; the prepared round is never recomputed.
+      return createPreparedComment(issues, input);
+    }
+    if (target.body === input.body) {
+      return { commentId: target.id }; // replay adoption — exact body already published
+    }
+    if (target.user?.type !== "Bot" || parsedRound(target.body) !== input.round - 1) {
+      throw new PreparedSendRejected(
+        `prepared review target ${input.targetCommentId} no longer shows its expected previous version (round ${input.round - 1}) — refusing to overwrite (spec §7.7)`,
+      );
+    }
+    try {
+      await issues.updateComment({
+        owner: input.owner,
+        repo: input.repo,
+        comment_id: target.id,
+        body: input.body,
+      });
+      return { commentId: target.id };
+    } catch (err) {
+      // qc2 F-002 parity with a STAGED body: 404 (deleted mid-flight) or 403
+      // (foreign App's bot marker — we can never edit it) makes the target
+      // dead; the prepared publication is NOT recomputed (a retry never
+      // increments the round) and falls back to CREATE with the exact
+      // prepared body. Any other error rethrows.
+      const status = typeof err === "object" && err !== null ? (err as { status?: unknown }).status : undefined;
+      if (status === 404 || status === 403) {
+        return createPreparedComment(issues, input);
+      }
+      throw err;
+    }
+  }
+
+  // Create plan: adopt an exact-body replay; any other bot review marker
+  // that appeared since the plan is a definitive rejection.
+  const markerComments = comments.filter((c) => c.user?.type === "Bot" && parsedRound(c.body) !== null);
+  for (const marker of markerComments) {
+    if (marker.body === input.body) return { commentId: marker.id };
+    throw new PreparedSendRejected(
+      `a bot review marker (comment ${marker.id}) appeared after the pre-staging plan — refusing to create a second publication (spec §7.7)`,
+    );
+  }
+  return createPreparedComment(issues, input);
+}
+
+/** Create with the exact prepared body; require the response id. */
+async function createPreparedComment(
+  issues: NonNullable<PostOctokit["rest"]>["issues"],
+  input: PostPreparedReviewInput,
+): Promise<{ commentId: number }> {
+  const created = (await issues.createComment({
+    owner: input.owner,
+    repo: input.repo,
+    issue_number: input.prNumber,
+    body: input.body,
+  })) as { data?: { id?: unknown } } | undefined;
+  const id = created?.data?.id;
+  if (typeof id !== "number") {
+    throw new Error(
+      "review comment create response carries no comment id — refusing to claim an unprovable publication (spec §7.7 step 8)",
+    );
+  }
+  return { commentId: id };
+}
+
+/**
+ * Publish the EXACT prepared degraded body (plan 67 §7.7 degraded payload).
+ * Same target-version mechanics as the review chain; the degraded chain is
+ * best-effort at the consumer, so a missing create-response id degrades to
+ * `commentId: null` instead of throwing.
+ */
+export async function postPreparedDegradedWithOctokit(
+  octokit: PostOctokit,
+  input: PostPreparedDegradedInput,
+): Promise<{ posted: boolean; commentId: number | null }> {
+  const issues = octokit.rest?.issues;
+  if (!issues?.listComments || !issues?.updateComment || !issues?.createComment || typeof octokit.paginate !== "function") {
+    throw new PreparedSendRejected(
+      "octokit is missing rest.issues comment methods / paginate — cannot publish the prepared degraded comment; check the injected auth surface",
+    );
+  }
+  const comments = await scanCommentsWithOctokit(octokit, input, "degraded");
+  const degradedRoundOf = (body: string | null | undefined): number | null => {
+    if (!body || !body.startsWith(DEGRADED_MARKER_PREFIX)) return null;
+    return parseDegradedRound(body);
+  };
+
+  if (input.targetCommentId !== null) {
+    const target = comments.find((c) => c.id === input.targetCommentId);
+    if (target === undefined) {
+      const created = (await issues.createComment({
+        owner: input.owner,
+        repo: input.repo,
+        issue_number: input.prNumber,
+        body: input.body,
+      })) as { data?: { id?: unknown } } | undefined;
+      const id = created?.data?.id;
+      return { posted: true, commentId: typeof id === "number" ? id : null };
+    }
+    if (target.body === input.body) return { posted: true, commentId: target.id };
+    if (target.user?.type !== "Bot" || degradedRoundOf(target.body) !== input.round - 1) {
+      throw new PreparedSendRejected(
+        `prepared degraded target ${input.targetCommentId} no longer shows its expected previous version (round ${input.round - 1}) — refusing to overwrite (spec §7.7)`,
+      );
+    }
+    try {
+      await issues.updateComment({
+        owner: input.owner,
+        repo: input.repo,
+        comment_id: target.id,
+        body: input.body,
+      });
+      return { posted: true, commentId: target.id };
+    } catch (err) {
+      // Same dead-target parity as the review chain: 403/404 → create
+      // fallback with the exact prepared body; other errors rethrow.
+      const status = typeof err === "object" && err !== null ? (err as { status?: unknown }).status : undefined;
+      if (status === 404 || status === 403) {
+        const created = (await issues.createComment({
+          owner: input.owner,
+          repo: input.repo,
+          issue_number: input.prNumber,
+          body: input.body,
+        })) as { data?: { id?: unknown } } | undefined;
+        const id = created?.data?.id;
+        return { posted: true, commentId: typeof id === "number" ? id : null };
+      }
+      throw err;
+    }
+  }
+
+  for (const marker of comments.filter((c) => c.user?.type === "Bot" && degradedRoundOf(c.body) !== null)) {
+    if (marker.body === input.body) return { posted: true, commentId: marker.id };
+    throw new PreparedSendRejected(
+      `a bot degraded marker (comment ${marker.id}) appeared after the pre-staging plan — refusing to create a second publication (spec §7.7)`,
+    );
+  }
+  const created = (await issues.createComment({
+    owner: input.owner,
+    repo: input.repo,
+    issue_number: input.prNumber,
+    body: input.body,
+  })) as { data?: { id?: unknown } } | undefined;
+  const id = created?.data?.id;
+  return { posted: true, commentId: typeof id === "number" ? id : null };
 }
 
 export type PostDegradedInput = {
@@ -758,23 +1238,6 @@ export type PostDegradedInput = {
   /** Raw runner stdout — redacted + truncated inside buildDegradedBody. */
   rawOutput: string;
 };
-
-/**
- * Upsert the degraded comment against a caller-provided octokit (plan 18
- * Task 2 / AL-1): the parse-fail visibility chain. Same scan/replan
- * mechanics as the real review upsert, but the scan is restricted to the
- * `review-degraded:v1` marker prefix — the real review chain (`review:v1`)
- * and its round counter stay independent.
- */
-export async function postDegradedWithOctokit(octokit: PostOctokit, input: PostDegradedInput): Promise<void> {
-  await upsertMarkerComment(
-    octokit,
-    input,
-    planDegradedUpsert,
-    (round) => buildDegradedBody({ error: input.error, rawOutput: input.rawOutput, round }),
-    "degraded",
-  );
-}
 
 /** Degraded-comment delete outcome (Bugbot round-2 fix): the consumer logs
  * this instead of catching — the delete step is best-effort and never
@@ -821,12 +1284,7 @@ export async function deleteDegradedCommentWithOctokit(
       ],
     };
   }
-  const comments = await octokit.paginate(issues.listComments, {
-    owner: input.owner,
-    repo: input.repo,
-    issue_number: input.prNumber,
-    per_page: 100,
-  });
+  const comments = await scanCommentsWithOctokit(octokit, input, "degraded");
   const matches = findDegradedComments(comments);
   const outcome: DegradedDeleteOutcome = { deleted: 0, skipped: 0, errors: [] };
   for (const match of matches) {
@@ -975,174 +1433,330 @@ export function filterLineCommentFindings(findings: ReviewFinding[], diff?: stri
 }
 
 /**
- * One line-comment body: title + merge-class tag (engine emoji + class
- * verbatim, the renderFindings vocabulary) + finding body, clamped to the
- * FINDING_BODY_MAX budget (clampFindingSizes bounds title/body
- * individually; the ASSEMBLED comment can still exceed it).
+ * The marker-LESS per-finding comment text (title + merge-class tag +
+ * finding body, clamped to the FINDING_BODY_MAX budget). This is the
+ * `LineIntent.body` payload — the TRUSTED thread marker is appended later by
+ * the §7.5 `buildLineCommentBody` at send time (plan 67 Task 4: the legacy
+ * marker-less posting path is replaced by the intent-driven path, so thread
+ * discovery has a marker to pin).
  */
-export function buildLineCommentBody(finding: ReviewFinding): string {
+export function renderLineCommentText(finding: ReviewFinding): string {
   const tag = `${REVIEW_EMOJI[finding.mergeClass]} ${finding.mergeClass}`;
   const body = `**${finding.title}** · ${tag}\n\n${finding.body}`;
   return body.length <= FINDING_BODY_MAX ? body : `${body.slice(0, FINDING_BODY_MAX - 1)}…`;
 }
 
-export type FetchPrDiffInput = {
-  installationId: number;
-  owner: string;
-  repo: string;
-  prNumber: number;
+/**
+ * §7.7 line-comment capture result (plan 67 Task 4): the returned review
+ * comments mapped back to the posted intents. `posted[].associationId` is
+ * the intent's association id (every posted comment carries a trusted
+ * thread marker now). `ambiguous` lists `path:line` descriptors that could
+ * not be uniquely matched to a returned comment; `captured` is true only
+ * when the response carried the created comments and every intent mapped.
+ * `reviewId` is the created review's REST id (null when not returned) — the
+ * value `discoverThread` pins discovery to.
+ */
+export type PostedLineComments = {
+  posted: { associationId: string; commentId: number; path: string; line: number }[];
+  ambiguous: string[];
+  captured: boolean;
+  reviewId: number | null;
 };
 
-export type PostLineCommentsInput = {
+export type PostPreparedLineCommentsInput = {
   installationId: number;
   owner: string;
   repo: string;
   prNumber: number;
   headSha: string;
-  /**
-   * The round the overall-comment upsert just posted (postReview's return
-   * value) — the required top-level marker body pins itself to it.
-   */
+  /** The round the prepared review publication posted. */
   round: number;
-  /** Qualifying findings, pre-filtered by the consumer (≥ 1 or NO call). */
-  findings: ReviewFinding[];
+  /** The staged publication id — the line-batch marker pins to it (§7.5). */
+  publicationId: string;
+  /** Prepared line intents (≥ 1 or NO call), pre-built by the consumer. */
+  intents: LineIntent[];
 };
 
 /**
- * Extract the unified-diff string from a `pulls.get` diff-mediaType response
- * (pattern originated from the deleted worker/diff.ts extractDiff — pipeline
- * ↛ worker isolation holds): octokit returns the diff as `data` (string)
- * or nested `data.data`. A non-diff response is a prefetch failure — the
- * consumer falls back to the base-filter attempt.
- */
-function extractDiffText(data: unknown): string {
-  const candidate = typeof data === "string" ? data : (data as { data?: unknown } | null)?.data;
-  if (typeof candidate !== "string" || candidate.length === 0 || !candidate.startsWith("diff --git")) {
-    throw new Error(
-      "pulls.get did not return a unified diff (expected non-empty string starting with 'diff --git'); check the Accept/mediaType header",
-    );
-  }
-  return candidate;
-}
-
-/**
- * Fetch the PR diff against a caller-provided octokit (plan 18 Task 3):
- * `pulls.get` with `mediaType: { format: "diff" }` — the
- * GitHub-schema-documented pattern for validating review-comment positions
- * (same-mode precedent: the deleted worker/diff.ts:226-256, pattern only).
- */
-export async function fetchPrDiffWithOctokit(octokit: PostOctokit, input: FetchPrDiffInput): Promise<string> {
-  const pullsGet = octokit.rest?.pulls?.get;
-  if (!pullsGet) {
-    throw new Error(
-      "octokit is missing rest.pulls.get — cannot fetch the PR diff for line comments; check the injected auth surface",
-    );
-  }
-  const response = await pullsGet({
-    owner: input.owner,
-    repo: input.repo,
-    pull_number: input.prNumber,
-    mediaType: { format: "diff" },
-  });
-  return extractDiffText(response.data);
-}
-
-/**
- * Post the line-comments review against a caller-provided octokit (plan 18
- * Task 3 / AL-3): ONE pulls.createReview, `event: "COMMENT"` (D4 permanent
- * event lock — never APPROVE/REQUEST_CHANGES), `commit_id` pinned to the
- * review's head sha, per-comment `{path, side: "RIGHT", line: line_end,
- * body}`. The top-level `body` is REQUIRED for COMMENT events (installed
- * octokit schema: "Required when using REQUEST_CHANGES or COMMENT") and is
- * a marker short line only — never a copy of the overall review body.
- * Empty qualifying set → zero API calls (byte-compat). No `start_line`
- * this iteration; old rounds' line comments stay in place.
+ * Post the INTENT-prepared line-comments review against a caller-provided
+ * octokit (plan 67 §7.7 step 10 / §7.5): ONE pulls.createReview,
+ * `event: "COMMENT"` (D4 permanent event lock — never APPROVE/
+ * REQUEST_CHANGES), `commit_id` pinned to the review's head sha, the
+ * REQUIRED top-level body carrying the trusted line-batch marker
+ * (`mstar-inspector:line-batch:v1`), and per-intent comments whose bodies
+ * come from the §7.5 `buildLineCommentBody` — untrusted intent text stripped
+ * of Inspector marker syntax, trusted thread marker appended. The intents'
+ * bodies/digests were durably staged before any mutation (§7.7 step 7).
+ *
+ * Returns the §7.7 capture result: returned comment ids matched back to the
+ * intents by exact path+line; a non-unique match lands in `ambiguous` and
+ * is never fabricated. Empty intent set → zero API calls.
  */
 export async function postLineCommentsWithOctokit(
   octokit: PostOctokit,
-  input: PostLineCommentsInput,
-): Promise<void> {
-  if (input.findings.length === 0) return;
+  input: PostPreparedLineCommentsInput,
+): Promise<PostedLineComments> {
+  if (input.intents.length === 0) {
+    return { posted: [], ambiguous: [], captured: true, reviewId: null };
+  }
   const createReview = octokit.rest?.pulls?.createReview;
   if (!createReview) {
     throw new Error(
       "octokit is missing rest.pulls.createReview — cannot post line comments; check the injected auth surface",
     );
   }
-  await createReview({
+  const response = (await createReview({
     owner: input.owner,
     repo: input.repo,
     pull_number: input.prNumber,
     commit_id: input.headSha,
     event: "COMMENT",
-    body: `mstar-inspector line comments · round ${input.round} · ${input.headSha.slice(0, 7)}`,
-    comments: input.findings.map((finding) => ({
-      path: finding.file_path,
+    body: `mstar-inspector line comments · round ${input.round} · ${input.headSha.slice(0, 7)}\n${buildLineBatchMarker(input.publicationId)}`,
+    comments: input.intents.map((intent) => ({
+      path: intent.path,
       side: "RIGHT",
-      line: finding.line_end,
-      body: buildLineCommentBody(finding),
+      line: intent.line,
+      body: buildLineCommentBody({
+        body: intent.body,
+        publicationId: intent.publicationId,
+        associationId: intent.associationId,
+      }),
     })),
-  });
+  })) as {
+    data?: { id?: unknown; comments?: Array<{ id?: unknown; path?: unknown; line?: unknown }> | null };
+  } | undefined;
+
+  const returned = Array.isArray(response?.data?.comments) ? response!.data!.comments! : null;
+  const reviewIdRaw = response?.data?.id;
+  const reviewId = typeof reviewIdRaw === "number" ? reviewIdRaw : null;
+  const posted: PostedLineComments["posted"] = [];
+  const ambiguous: string[] = [];
+  if (returned === null) {
+    // No returned comments in the response — nothing can be captured.
+    return { posted: [], ambiguous: [], captured: false, reviewId };
+  }
+  for (const intent of input.intents) {
+    const matches = returned.filter(
+      (c) => c.path === intent.path && c.line === intent.line && typeof c.id === "number",
+    );
+    if (matches.length === 1) {
+      posted.push({
+        associationId: intent.associationId,
+        commentId: matches[0]!.id as number,
+        path: intent.path,
+        line: intent.line,
+      });
+    } else {
+      ambiguous.push(`${intent.path}:${intent.line}`);
+    }
+  }
+  return { posted, ambiguous, captured: ambiguous.length === 0 && posted.length === input.intents.length, reviewId };
 }
 
 /**
- * Production commenter: createAppAuth (APP_ID + normalized PRIVATE_KEY) →
- * per-installation octokit via the documented factory pattern. The
- * createAppAuth instance is memoized so its installation-token cache is
- * shared across calls (auth-app default: tokens cached until expiry).
+ * Production commenter: createAppAuth (APP_ID + normalized PRIVATE_KEY) —
+ * the ONLY createAppAuth construction point in the pipeline (architect lock
+ * L4, plan 13): every credential enters through the `CommenterEnv`
+ * parameter — every per-App instance (consumer-side appRef resolution,
+ * src/pipeline/consumer.ts) is built here, one instance per credential so
+ * each App keeps its own installation-token cache. Octokit construction
+ * stays inside this module; call sites never duplicate it.
  *
- * This factory is the ONLY createAppAuth construction point in the pipeline
- * (architect lock L4, plan 13): every credential enters through the
- * `CommenterEnv` parameter — every per-App instance (consumer-side appRef
- * resolution, src/pipeline/consumer.ts) is built here, one instance per
- * credential so each App keeps its own installation-token cache. Octokit
- * construction stays inside this module; call sites never duplicate it.
+ * Purpose-scoped clients (plan 67 §7.6): every octokit is built from a
+ * minted grant — `auth({type:"installation", repositoryNames:[repo],
+ * permissions})` through the memoized auth object, then a token-
+ * authenticated `Octokit({auth: grant.token})` for that exact
+ * purpose/repository. The old unrestricted factory auto-auth
+ * (`factory: (options) => new Octokit({authStrategy: createAppAuth, …})`)
+ * is deleted — no client refreshes or widens its own grant, and a token
+ * client never leaves the Worker. auth-app's cache is keyed by
+ * installation/repository/permissions, so the two purpose families never
+ * cross-reuse tokens.
  */
-export function createReviewCommenter(env: CommenterEnv): ReviewCommenter {
+export function createReviewCommenter(env: CommenterEnv, options?: ReviewCommenterOptions): ReviewCommenter {
+  // Per-request transport clamp (spec §7.11.1): when the caller supplies a
+  // bounded fetch, EVERY request this instance can issue goes through it —
+  // the App-identity probe, the installation-token mint (auth-app's own POST,
+  // wired through `request` below) and every token-authenticated Octokit
+  // call. Omitted → the runtime global fetch, unbounded (the consumer's
+  // long-running publication path keeps its current behavior).
+  const boundedFetch = options?.fetchImpl;
+  const requestOptions: { request?: { fetch?: CommenterFetch } } =
+    boundedFetch === undefined ? {} : { request: { fetch: boundedFetch } };
+  /** Octokit construction options carrying the transport seam when present. */
+  const httpOptions = (auth?: string): { auth?: string; request?: { fetch?: CommenterFetch } } =>
+    auth === undefined ? { ...requestOptions } : { auth, ...requestOptions };
+
   let appAuth: AppAuthStrategy | null = null;
   async function getAppAuth(): Promise<AppAuthStrategy> {
-    if (appAuth === null) {
-      appAuth = createAppAuth({ appId: env.APP_ID, privateKey: normalizePrivateKey(env.PRIVATE_KEY) });
+    // Local capture: the closure variable's null state cannot be narrowed
+    // across awaits by TS. The cast is the documented AppAuthStrategy seam —
+    // auth-app's AuthInterface overloads are not structurally writable to the
+    // named surface, but the runtime strategy satisfies it.
+    let auth = appAuth;
+    if (auth === null) {
+      // The mint must be bounded too: auth-app defaults to its own unbounded
+      // request, so a bounded seam is handed over as the strategy's request
+      // (built here, at the single createAppAuth construction point).
+      const authRequest = boundedFetch === undefined ? null : new Octokit(requestOptions).request;
+      auth = createAppAuth({
+        appId: env.APP_ID,
+        privateKey: normalizePrivateKey(env.PRIVATE_KEY),
+        ...(authRequest === null ? {} : { request: authRequest as never }),
+      }) as unknown as AppAuthStrategy;
+      appAuth = auth;
+      // Seam record: exactly ONE strategy object is ever built per instance.
+      options?.authSeam?.constructed.push({ appId: env.APP_ID });
     }
-    return appAuth;
+    return auth;
   }
 
   /**
-   * Per-installation octokit via the documented factory pattern. The real
+   * Mint the purpose-scoped grant (the single mint path — the returned
+   * grant's capabilities are the GitHub response, not the request).
+   */
+  async function mintGrant(input: { installationId: number; repo: string; purpose: TokenPurpose }): Promise<InstallationTokenGrant> {
+    const auth = await getAppAuth();
+    const permissions = permissionsFor(input.purpose);
+    // Seam record: every grant this instance can mint, with its exact purpose
+    // and requested permission set — the evidence that Checks and comment
+    // writes ride the review-write mint and that Sandbox stays read-only.
+    options?.authSeam?.minted.push({
+      installationId: input.installationId,
+      repo: input.repo,
+      purpose: input.purpose,
+      permissions: { ...permissions },
+    });
+    return auth({
+      type: "installation",
+      installationId: input.installationId,
+      repositoryNames: [input.repo],
+      permissions,
+    });
+  }
+
+  /**
+   * Token-authenticated octokit for the exact purpose/repository. The real
    * Octokit satisfies PostOctokit at runtime (paginate is bundled with
    * @octokit/rest); the cast bridges the overloaded plugin-paginate-rest
    * types to the minimal surface above.
    */
-  async function getOctokit(installationId: number): Promise<PostOctokit> {
-    const auth = await getAppAuth();
-    const octokit = await auth({
-      type: "installation",
-      installationId,
-      factory: (options: unknown) => new Octokit({ authStrategy: createAppAuth, auth: options }),
-    });
-    return octokit as unknown as PostOctokit;
+  async function getOctokit(input: { installationId: number; repo: string }): Promise<PostOctokit> {
+    const grant = await mintGrant({ ...input, purpose: "review-write" });
+    return new Octokit(httpOptions(grant.token)) as unknown as PostOctokit;
   }
 
-  return {
-    async getInstallationToken(installationId) {
+  /**
+   * JWT-authenticated `GET /app` identity proof (spec §7.5): the numeric
+   * App id + nonblank slug of the LIVE App behind THIS instance's
+   * credentials — never an installation-token `viewer.login` assumption.
+   * Memoized per credential identity (this instance is one App's
+   * credential pair — never shared across Apps).
+   */
+  let cachedIdentity: { githubAppId: number; slug: string } | null | undefined;
+  async function getAppIdentity(): Promise<{ githubAppId: number; slug: string } | null> {
+    if (cachedIdentity !== undefined) return cachedIdentity;
+    try {
       const auth = await getAppAuth();
-      const installation = await auth({ type: "installation", installationId });
-      return installation.token;
+      const { token } = await auth({ type: "app" });
+      // `GET /app` is exposed by the installed plugin as
+      // `rest.apps.getAuthenticated` — there is NO `apps.get` (verified
+      // against the plugin's endpoint map), so the probe MUST use this name:
+      // the wrong name throws TypeError and would collapse every App into the
+      // unusable "identity unavailable" branch. The installed types carry the
+      // response shape, so the fields are read directly.
+      const octokit = new Octokit(httpOptions(token));
+      const { data } = await octokit.rest.apps.getAuthenticated();
+      cachedIdentity =
+        typeof data?.id === "number" && typeof data?.slug === "string" && data.slug.length > 0
+          ? { githubAppId: data.id, slug: data.slug }
+          : null;
+    } catch {
+      cachedIdentity = null; // identity unavailable fails closed downstream
+    }
+    return cachedIdentity;
+  }
+
+  /** Purpose-scoped review-write client exposing the existing graphql(). */
+  async function getGraphqlOctokit(input: { installationId: number; repo: string }): Promise<GraphqlOctokit> {
+    return (await getOctokit(input)) as unknown as GraphqlOctokit;
+  }
+
+  /**
+   * The SAME review-write client, narrowed to `rest.checks` (spec §7.9/§7.6).
+   * Structural only: no second mint, no second `Octokit`, no second auth
+   * object — the checks methods exist on every @octokit/rest instance, and
+   * `checks: "write"` is part of the one `review-write` permission set. A mint
+   * rejection propagates and the adapter reports `unavailable`.
+   */
+  async function getChecksOctokit(scope: Scope): Promise<ChecksOctokit> {
+    return (await getOctokit({ installationId: scope.installationId, repo: scope.repo })) as unknown as ChecksOctokit;
+  }
+
+  // §7.9 Checks adapter (plan 68 Task 1): wired only when the caller binds the
+  // registry/journal store, because every Check send must be fenced on the
+  // PERSISTED attempt row before it can reach the API.
+  const checksAdapter = options?.db
+    ? createChecksAdapter({
+        db: options.db,
+        // The send fence needs a live clock (spec §7.9): an expired holder must
+        // not be able to create or update a remote Check. Same injected clock
+        // the §7.5 thread surface uses.
+        nowMs: options.nowMs ?? (() => Date.now()),
+        getOctokit: async ({ scope }) => getChecksOctokit(scope),
+      })
+    : null;
+
+  // §7.5 adapter (plan 67 Task 2): wired only when the caller binds the
+  // thread store — the two optional methods stay undefined otherwise.
+  const threadSurface = options?.db
+    ? createReviewThreads({
+        db: options.db,
+        nowMs: options.nowMs ?? (() => Date.now()),
+        getAppIdentity: async () => getAppIdentity(),
+        getOctokit: async ({ installationId, repo }) => getGraphqlOctokit({ installationId, repo }),
+      })
+    : null;
+
+  return {
+    getAppIdentity,
+    ...(threadSurface
+      ? {
+          discoverThread: (input: { scope: Scope; intent: LineIntent; reviewId: number | null }) =>
+            threadSurface.discoverThread(input),
+          resolveFindingThread: (input: { scope: Scope; associationId: string; verified: VerifiedResolution }) =>
+            threadSurface.resolveFindingThread(input),
+        }
+      : {}),
+    ...(checksAdapter ? { checks: checksAdapter } : {}),
+    async getInstallationToken(input) {
+      return mintGrant({
+        installationId: input.scope.installationId,
+        repo: input.scope.repo,
+        purpose: input.purpose,
+      });
     },
-    async postReview(input) {
-      return postReviewWithOctokit(await getOctokit(input.installationId), input);
+    async planReviewUpsert(input) {
+      return planReviewUpsertWithOctokit(await getOctokit({ installationId: input.installationId, repo: input.repo }), input);
     },
-    async postDegraded(input) {
-      await postDegradedWithOctokit(await getOctokit(input.installationId), input);
+    async planDegradedUpsert(input) {
+      return planDegradedUpsertWithOctokit(await getOctokit({ installationId: input.installationId, repo: input.repo }), input);
+    },
+    async postPreparedReview(input) {
+      return postPreparedReviewWithOctokit(await getOctokit({ installationId: input.installationId, repo: input.repo }), input);
+    },
+    async postPreparedDegraded(input) {
+      return postPreparedDegradedWithOctokit(await getOctokit({ installationId: input.installationId, repo: input.repo }), input);
     },
     async deleteDegradedComment(input) {
-      return deleteDegradedCommentWithOctokit(await getOctokit(input.installationId), input);
-    },
-    async fetchPrDiff(input) {
-      return fetchPrDiffWithOctokit(await getOctokit(input.installationId), input);
+      return deleteDegradedCommentWithOctokit(await getOctokit({ installationId: input.installationId, repo: input.repo }), input);
     },
     async postLineComments(input) {
-      await postLineCommentsWithOctokit(await getOctokit(input.installationId), input);
+      return postLineCommentsWithOctokit(await getOctokit({ installationId: input.installationId, repo: input.repo }), input);
+    },
+    async listDiscussion(input) {
+      const octokit = await getOctokit({ installationId: input.installationId, repo: input.repo });
+      return listDiscussionWithOctokit(octokit as unknown as GraphqlOctokit, input);
     },
   };
 }
