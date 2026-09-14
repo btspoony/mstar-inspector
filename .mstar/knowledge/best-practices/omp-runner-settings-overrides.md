@@ -4,7 +4,7 @@ date: 2026-08-30
 problem_type: best_practice
 category: best-practices
 severity: high
-plan_id: 17-dashboard-perrole-models
+topic: dashboard per-role models
 tags: [omp, settings, model-roles, agent-overrides, sdk, dead-surfaces, per-role]
 related_components: [runtime-omp, runner, consumer, deep-seats]
 ---

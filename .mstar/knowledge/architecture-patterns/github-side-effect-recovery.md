@@ -4,7 +4,7 @@ date: 2026-09-13
 problem_type: architecture_pattern
 category: architecture-patterns
 severity: high
-plan_id: 68-checks-integration
+topic: checks integration
 applies_when:
   - adding recoverable GitHub mutations to queue consumers
   - reconciling external writes without replaying paid review work

@@ -4,7 +4,7 @@ date: 2026-08-28
 problem_type: best_practice
 category: best-practices
 severity: high
-plan_id: 07-review-engine
+topic: review engine
 applies_when:
   - "Persisting cloud PR reviews from mstar-harness 3.5.0"
   - "Implementing ArtifactStore kind review on D1"

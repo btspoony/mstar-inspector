@@ -4,7 +4,7 @@ date: 2026-09-07
 problem_type: best_practice
 category: best-practices
 severity: medium
-plan_id: 50-release-pr-chain
+topic: release PR chain
 tags:
   - github-actions
   - release
@@ -22,7 +22,7 @@ applies_when:
 
 ## Context
 
-mstar-inspector 的 staging 部署已由 main-push 自动化（`deploy.yml`，见 [`github-actions-deploy-automation.md`](github-actions-deploy-automation.md)）。发版流程只为**定版发版打 tag**：与部署完全解耦，`ci.yml`/`deploy.yml` 零改动。CF 官方 CI/CD 文档只覆盖 push-to-main 部署，release 侧取 GitHub OSS 共识的 **Release PR 模式**（release-please / changesets / mstar-harness 自研链三者收敛）。本仓从 `../mstar-harness` 简化移植：单版本面（`package.json` + 生成文件）、双语片段 changelog、无 npm publish（迭代 016，plans 50/51/52，2026-09-07）。
+mstar-inspector 的 staging 部署已由 main-push 自动化（`deploy.yml`，见 [`github-actions-deploy-automation.md`](github-actions-deploy-automation.md)）。发版流程只为**定版发版打 tag**：与部署完全解耦，`ci.yml`/`deploy.yml` 零改动。CF 官方 CI/CD 文档只覆盖 push-to-main 部署，release 侧取 GitHub OSS 共识的 **Release PR 模式**（release-please / changesets / mstar-harness 自研链三者收敛）。本仓从 `../mstar-harness` 简化移植：单版本面（`package.json` + 生成文件）、双语片段 changelog、无 npm publish（release PR 链专项，2026-09-07）。
 
 ## Guidance
 
@@ -61,5 +61,5 @@ mstar-inspector 的 staging 部署已由 main-push 自动化（`deploy.yml`，�
 
 ## Examples
 
-- 本仓库 `.github/workflows/{release-prep,release}.yml` + `scripts/{prepare-release,validate-release-version,extract-changelog-section,release-surfaces,collect-deploy-evidence}.ts` + `tests/scripts/*`（迭代 016，2026-09-07 交付，QC tri Approve ×3 + QA PASS ×3）。
+- 本仓库 `.github/workflows/{release-prep,release}.yml` + `scripts/{prepare-release,validate-release-version,extract-changelog-section,release-surfaces,collect-deploy-evidence}.ts` + `tests/scripts/*`（release PR 链专项，2026-09-07 交付，QC tri Approve ×3 + QA PASS ×3）。
 - 首切实跑 = live 验收事件（`docs/release.md` first-cut checklist：tag / bilingual Release / `/healthz` v1.0.0 / evidence 节）。

@@ -4,7 +4,7 @@ date: 2026-09-01
 problem_type: best_practice
 category: best-practices
 severity: medium
-plan_id: 26-deploy-automation
+topic: deploy automation
 tags:
   - github-actions
   - wrangler
@@ -22,7 +22,7 @@ applies_when:
 
 ## Context
 
-mstar-inspector 的 live 部署从手动 runbook（`docs/deploy.md`：D1 migrations → `wrangler secret put` → `wrangler deploy` → 手工冒烟 → 手工 digest 记录）改为 GitHub Actions 自动化主路径（plan 26，2026-09-01）。用户裁决：部署必须自动化、secrets 经 GitHub Secrets 管理、失败 STOP 不自动回滚（D1 forward-only 迁移已应用时回滚 = schema 错配）。
+mstar-inspector 的 live 部署从手动 runbook（`docs/deploy.md`：D1 migrations → `wrangler secret put` → `wrangler deploy` → 手工冒烟 → 手工 digest 记录）改为 GitHub Actions 自动化主路径（2026-09-01）。用户裁决：部署必须自动化、secrets 经 GitHub Secrets 管理、失败 STOP 不自动回滚（D1 forward-only 迁移已应用时回滚 = schema 错配）。
 
 ## Guidance
 
@@ -73,5 +73,5 @@ mstar-inspector 的 live 部署从手动 runbook（`docs/deploy.md`：D1 migrati
 
 ## Examples
 
-- 本仓库 `.github/workflows/deploy.yml`（plan 26，2026-09-01 交付，QC Approve 3/3 + QA PASS）。
-- 完整决策记录：`{ITERATION_DIR}/v1.0-deploy-automation/specs/v1.0-deploy-automation.md` §4（AL-26-1…AL-26-5 RESOLVED）。
+- 本仓库 `.github/workflows/deploy.yml`（2026-09-01 交付，QC Approve 3/3 + QA PASS）。
+- 完整决策记录：v1.0 部署自动化专项 spec §4（AL-26-1…AL-26-5 RESOLVED；spec 过程本地存档，未入库）。

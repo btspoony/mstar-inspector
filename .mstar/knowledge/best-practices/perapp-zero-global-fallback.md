@@ -9,7 +9,7 @@ applies_when:
   - "Designing multi-tenant credential or model-chain resolution for per-App/per-tenant review jobs"
   - "Deciding whether an operator-level (global) key/model fallback is acceptable in a BYOK product"
   - "Implementing fail-closed gates for incomplete tenant configuration in queue consumers"
-plan_id: 24-legacy-webhook-retirement
+topic: legacy webhook retirement
 tags:
   - multi-tenant
   - byok
@@ -21,7 +21,7 @@ tags:
 
 ## Context
 
-mstar-inspector reviews PRs for MULTIPLE GitHub Apps from one Worker deployment. Each App (tenant) configures its own provider keys (BYOK) and per-role model chains, stored encrypted in D1 (`github_apps` + per-App config stores). Through v0.8 the runner env still carried operator-level fallbacks: a global `OMP_MODEL_KEY` (injected as `ARK_API_KEY`), a global `OMP_REVIEW_MODEL` chain, and 18 per-provider Worker secrets forwarded into every review container. v0.9 (plan 24, AL-24-5) removed ALL of them after the owner ruled: 「不能存在全局兜底！per-app 的多租户产品」.
+mstar-inspector reviews PRs for MULTIPLE GitHub Apps from one Worker deployment. Each App (tenant) configures its own provider keys (BYOK) and per-role model chains, stored encrypted in D1 (`github_apps` + per-App config stores). Through v0.8 the runner env still carried operator-level fallbacks: a global `OMP_MODEL_KEY` (injected as `ARK_API_KEY`), a global `OMP_REVIEW_MODEL` chain, and 18 per-provider Worker secrets forwarded into every review container. v0.9 (AL-24-5) removed ALL of them after the owner ruled: 「不能存在全局兜底！per-app 的多租户产品」.
 
 ## Guidance
 

@@ -4,7 +4,7 @@ date: 2026-09-08
 problem_type: best_practice
 category: best-practices
 severity: medium
-plan_id: 53-app-info-header
+topic: app info header
 tags:
   - github-app
   - jwt
@@ -25,7 +25,7 @@ related_components:
 
 ## Context
 
-Plan 53 (017-dashboard-ux) needed the App settings page to show the GitHub App's real identity (avatar, name, description, settings URL). The dashboard had zero GitHub API calls — only the review pipeline used octokit, and `consumer.ts:449-455` pins `createAppAuth` construction to a single pipeline site (installation-token face). The metadata need is a *different* auth shape: a short-lived App JWT for one `GET /app` call, per-App, from the dashboard read path.
+The dashboard-UX work needed the App settings page to show the GitHub App's real identity (avatar, name, description, settings URL). The dashboard had zero GitHub API calls — only the review pipeline used octokit, and `consumer.ts:449-455` pins `createAppAuth` construction to a single pipeline site (installation-token face). The metadata need is a *different* auth shape: a short-lived App JWT for one `GET /app` call, per-App, from the dashboard read path.
 
 ## Guidance
 

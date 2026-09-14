@@ -9,9 +9,9 @@ applies_when:
   - "Per-review / per-App custom model provider configuration in the sandbox runner"
   - "Generating omp models.yml at runtime"
   - "Adding modules to the in-image runner (src/review) — import graph rules"
-plan_id: 23-dashboard-consolidation
+topic: dashboard consolidation
 related_components:
-  - "37-sandbox-image-registry (always-synthesize cutover; registry capability hosts)"
+  - "sandbox image registry (always-synthesize cutover; registry capability hosts)"
 tags:
   - omp
   - models-yml
@@ -25,12 +25,12 @@ tags:
 
 ## Context
 
-omp 18.0.4 的自定义 provider 声明只有两条路：烤进镜像或 per-App BYOK 动态声明。多 App BYOK 产品面下，镜像烤死不可扩展。**2026-09-04（plan 37）烤制路线已退役**：`sandbox-image/omp-models.yml` 已删除，base 由源码内 registry（`src/contracts/sandbox-images.ts`）的 capability hosts 现场生成——**每次** review 都合成完整 models.yml（含零自定义 provider 的 App），不再有 skip-synthesis 路径。
+omp 18.0.4 的自定义 provider 声明只有两条路：烤进镜像或 per-App BYOK 动态声明。多 App BYOK 产品面下，镜像烤死不可扩展。**2026-09-04 烤制路线已退役**：`sandbox-image/omp-models.yml` 已删除，base 由源码内 registry（`src/contracts/sandbox-images.ts`）的 capability hosts 现场生成——**每次** review 都合成完整 models.yml（含零自定义 provider 的 App），不再有 skip-synthesis 路径。
 
-## Guidance（源码级核实的机制，AL-23-1；37 后更新）
+## Guidance（源码级核实的机制，AL-23-1；2026-09-04 cutover 后更新）
 
 1. **omp 无 include/merge 语义**：`ModelRegistry` 构造 `ModelsConfigFile.relocate(modelsPath ?? path.join(getAgentDir(), "models.yml"))`，`ConfigFile` 单文件解析（.yml/.yaml fallback）。任何「增量片段/include 指令」方案不成立——必须**合成完整 models.yml**。
-2. **`getAgentDir()` = `PI_CODING_AGENT_DIR` 环境覆盖（模块加载时快照）**；`CreateAgentSessionOptions.agentDir` 是 18.0.4 公开选项 → 合成目录通过它注入。**37 起 `agentDir` 与 runner input 的 `capabilityHosts` 均为必填**（shape guard 拒绝缺失/空数组/非有限数值）。
+2. **`getAgentDir()` = `PI_CODING_AGENT_DIR` 环境覆盖（模块加载时快照）**；`CreateAgentSessionOptions.agentDir` 是 18.0.4 公开选项 → 合成目录通过它注入。**2026-09-04 cutover 起 `agentDir` 与 runner input 的 `capabilityHosts` 均为必填**（shape guard 拒绝缺失/空数组/非有限数值）。
 3. **合成流程**（runner 内）：`capabilityHostsYaml`（capability hosts 来自 registry，随 runner input 进容器——in-image 模块图禁 import `src/contracts`，verify-synthesis.sh 内联 `ARK_PLAN_HOST` 字面量并有 source-contract 漂移锁）作 base → merge App 自定义 providers（**capability/base ids wins** 碰撞；计数走 `onCollision` 回调 → runner 结构化 stderr warn）→ 写 `/tmp/omp-agent-<uuid>/models.yml` → `createAgentSession({ agentDir })`。每审查独立目录。等价性由三层测试锁（generator、write helper、zero-custom bytes ≙ 旧烤制文件含 `ark-plan`）。
 4. **零 secret 落盘**：`apiKey` 字段 = **env var 名引用形**（`CUSTOM_<UPPER_SNAKE(id)>_API_KEY`），SDK 请求时从 exec env 解析；key 明文只存在于 `resolveCustomProviders` 内存 + exec env，永不进合成文件/日志/runner input JSON。SEC-01 exact-redaction 用 `sessionSecretValues` 把自定义 key 纳入脱敏。
 5. **校验/边界**：provider id `^[a-z0-9][a-z0-9-]{0,63}$`；内置 PROVIDER_IDS **和** 所选镜像 capability host ids（如 `ark-plan`，经 `sandboxImageHostIds(selectedImageId)`）在声明时 400 拒绝（否则 base-wins 静默吞掉 + key 白注入）；每 App 声明数 ≤8；baseUrl https-only；模型 id 非空 ≤128 字符。

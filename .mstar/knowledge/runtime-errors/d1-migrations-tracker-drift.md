@@ -13,7 +13,7 @@ symptoms:
   - "wrangler d1 migrations apply --remote fails with duplicate column/table [code 7500]"
   - "d1_migrations rows far fewer than local migrations/ files"
   - "schema objects verifiably exist despite tracker showing them unapplied"
-plan_id: 20-multiapp-platform-golive
+topic: multi-app platform go-live
 tags:
   - cloudflare-d1
   - wrangler
@@ -36,7 +36,7 @@ tags:
 
 ## Root Cause（本仓实例）
 
-v0.7 plan 19 T3 的「real-D1 migrations 0002–0010 catch-up」当时用 **raw SQL（`wrangler d1 execute`）** 追平了现网 schema——wrangler 的 tracker 只在 `migrations apply` 通道内记账。此后任何 `migrations apply` 都会重放已应用文件。SQLite 没有幂等 ALTER，重放必炸。
+v0.7 的「real-D1 migrations 0002–0010 catch-up」当时用 **raw SQL（`wrangler d1 execute`）** 追平了现网 schema——wrangler 的 tracker 只在 `migrations apply` 通道内记账。此后任何 `migrations apply` 都会重放已应用文件。SQLite 没有幂等 ALTER，重放必炸。
 
 ## What Didn't Work
 
@@ -57,4 +57,4 @@ v0.7 plan 19 T3 的「real-D1 migrations 0002–0010 catch-up」当时用 **raw 
 - **永不用 `wrangler d1 execute --file` 追 schema**——追平也必须事后 backfill tracker（本条即教训）。
 - 部署前置检查：`SELECT COUNT(*) FROM d1_migrations` vs `ls migrations/ | wc -l`，不等 = 先对账。
 - CI/部署脚本若做「migration 数量」断言，以 tracker 为准并允许 backfill 后的跳跃。
-- 实例记录：v0.8 plan 20 T4 run-2/run-3（Worker version 91394193-7cf5-4455-8d90-0727ef2cfab3 部署前）。
+- 实例记录：v0.8 multi-app go-live run-2/run-3（Worker version 91394193-7cf5-4455-8d90-0727ef2cfab3 部署前）。

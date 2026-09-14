@@ -5,7 +5,7 @@ last_updated: 2026-08-29
 problem_type: best_practice
 category: best-practices
 severity: medium
-plan_id: 08-dev-dashboard-scaffold
+topic: dev dashboard scaffold
 applies_when:
   - "Adding GitHub OAuth login on a Cloudflare Worker"
   - "Using __Host- cookies on workers.dev"

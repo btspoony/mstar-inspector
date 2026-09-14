@@ -8,7 +8,7 @@ applies_when:
   - "Posting per-line PR review comments via the GitHub pulls API"
   - "Anchoring machine-generated findings to diff line positions"
   - "Keeping a COMMENT-only event lock while adding line comments"
-plan_id: 18-m3-review-quality
+topic: review quality (M3)
 tags:
   - github-api
   - pull-requests
@@ -21,7 +21,7 @@ tags:
 
 ## Context
 
-Findings carry `file_path`/`line_start`/`line_end`, but issues-API comments cannot anchor to lines. The pulls API (`POST /repos/{o}/{r}/pulls/{pull_number}/reviews` with `comments[]`) anchors them — with three non-obvious constraints verified against the installed `@octokit/rest` 22.0.1 openapi types and live behavior (v0.7 / plan 18, AL-3).
+Findings carry `file_path`/`line_start`/`line_end`, but issues-API comments cannot anchor to lines. The pulls API (`POST /repos/{o}/{r}/pulls/{pull_number}/reviews` with `comments[]`) anchors them — with three non-obvious constraints verified against the installed `@octokit/rest` 22.0.1 openapi types and live behavior (v0.7, AL-3).
 
 ## Guidance
 

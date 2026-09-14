@@ -4,7 +4,7 @@ date: 2026-09-04
 problem_type: best_practice
 category: best-practices
 severity: high
-plan_id: 35-apps-detail-ops-providers
+topic: app detail ops & providers
 tags: [d1, migration, backfill, model-chains, consumer, parity, omp, models-yml]
 related_components: [migrations/0017_app_model_chains.sql, src/dashboard/app-config-store.ts, src/pipeline/consumer.ts, src/review/runtime-omp.ts]
 ---
@@ -13,7 +13,7 @@ related_components: [migrations/0017_app_model_chains.sql, src/dashboard/app-con
 
 ## Context
 
-Each review App had one implicit model chain + per-seat single-model overrides. iter011 plan 35 upgraded to **1 default + N named chains** where audit seats reference a chain by name — without changing anything the sandbox runner consumes (omp `models.yml` synthesis, selector grammar `provider/model[:variant]`).
+Each review App had one implicit model chain + per-seat single-model overrides. The 2026-09 named model chains rework upgraded to **1 default + N named chains** where audit seats reference a chain by name — without changing anything the sandbox runner consumes (omp `models.yml` synthesis, selector grammar `provider/model[:variant]`).
 
 ## Guidance
 

@@ -4,7 +4,7 @@ date: 2026-08-25
 problem_type: best_practice
 category: best-practices
 severity: high
-plan_id: 02-omp-review-spike
+topic: omp review spike
 tags:
   - omp
   - pi-coding-agent
@@ -25,7 +25,7 @@ related_components:
 
 ## Context
 
-mstar-inspector M0 spike (plan 02) verified that `@oh-my-pi/pi-coding-agent@18.0.4` can host one-shot, read-only PR review sessions under Bun 1.4.0. Everything below was verified against installed `.d.ts` files and two live runs (smoke + CLI e2e). Plugin: morning-star-harness 3.2.6 loaded from a local checkout.
+mstar-inspector M0 spike verified that `@oh-my-pi/pi-coding-agent@18.0.4` can host one-shot, read-only PR review sessions under Bun 1.4.0. Everything below was verified against installed `.d.ts` files and two live runs (smoke + CLI e2e). Plugin: morning-star-harness 3.2.6 loaded from a local checkout.
 
 ## Guidance
 
@@ -55,8 +55,8 @@ These gates are the product's security boundary: reviewer sessions handle untrus
 
 ## When to Apply
 
-Any `pi-coding-agent` embedding that must be read-only and offline. For multi-tenant/target-repo work, add Cloudflare Sandbox per-repo isolation on top (M1 plan).
+Any `pi-coding-agent` embedding that must be read-only and offline. For multi-tenant/target-repo work, add Cloudflare Sandbox per-repo isolation on top (M1).
 
 ## Examples
 
-Working reference: `src/review/session.ts` + `src/review/schema.ts` (integration branch `iteration/iter-001-20260825`). Live evidence: raw output 9423 chars → 5 findings (smoke), CLI e2e 4 then 3 findings, verdict `request_changes`, ~136 s per review — budget queue timeouts accordingly.
+Working reference: `src/review/session.ts` + `src/review/schema.ts`. Live evidence: raw output 9423 chars → 5 findings (smoke), CLI e2e 4 then 3 findings, verdict `request_changes`, ~136 s per review — budget queue timeouts accordingly.

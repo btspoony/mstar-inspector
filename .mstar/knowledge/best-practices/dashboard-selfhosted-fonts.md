@@ -4,7 +4,7 @@ date: 2026-09-10
 problem_type: developer_experience
 category: best-practices
 severity: low
-plan_id: 57-design-language-v2
+topic: design language v2
 tags:
   - fonts
   - geist
@@ -14,14 +14,14 @@ tags:
   - budget-pin
 title: "Dashboard self-hosted brand typeface: vite module graph + zh exclusion + budget/provenance pins"
 last_updated: 2026-09-10
-source_plan: 57-design-language-v2
+source: design language v2
 ---
 
-# Dashboard 自托管品牌字体管线（plan 57 落地契约）
+# Dashboard 自托管品牌字体管线（设计语言 v2 落地契约）
 
 ## Context
 
-018 设计语言 v2 引入 Geist Sans。约束：零新 npm 依赖、Workers Assets 伺服、双语（zh 回退系统栈）、体积预算 ≤150KB。
+设计语言 v2 引入 Geist Sans。约束：零新 npm 依赖、Workers Assets 伺服、双语（zh 回退系统栈）、体积预算 ≤150KB。
 
 ## Guidance
 

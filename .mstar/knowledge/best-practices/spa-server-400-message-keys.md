@@ -6,8 +6,8 @@ description: "Plain-text server 400s localize via a compile-gated key inventory:
 problem_type: best_practice
 category: best-practices
 severity: medium
-plan_id: 45-dashboard-uiux-polish
-source_plan: 45-dashboard-uiux-polish (T4; contract amendments ratified in plan)
+topic: dashboard UI/UX polish
+source: dashboard UI/UX polish (T4 task; contract amendments ratified in the same pass)
 status: active
 tags:
   - i18n
@@ -21,7 +21,7 @@ tags:
 
 ## Context
 
-Before plan 45 (iteration 014), ~50 plain-text server 400 sites on the dashboard settings family surfaced raw English to zh_CN operators, while structured reasons (verify/membership) already localized. The task: localize without breaking (a) `.toContain(<English substring>)` worker pins, (b) native HTML-form posts that never see the response body (302), and (c) the fail-visible principle — no failure surface may render blank.
+Before the dashboard UI/UX polish pass, ~50 plain-text server 400 sites on the dashboard settings family surfaced raw English to zh_CN operators, while structured reasons (verify/membership) already localized. The task: localize without breaking (a) `.toContain(<English substring>)` worker pins, (b) native HTML-form posts that never see the response body (302), and (c) the fail-visible principle — no failure surface may render blank.
 
 ## Guidance
 
@@ -52,5 +52,5 @@ The naive alternative — translating at the render layer by matching English su
 
 ## Examples
 
-- Plan 45 T4 (`src/dashboard/index.ts` `SETTINGS_400_KEYS` + `settings400Response`; `src/spa/pages/SettingsPage.tsx` `settingsErrorMessage`; `src/i18n/t.ts` `isDictionaryKey`), tests `tests/worker/settings-400-keys.test.ts` / `tests/spa/settings-error-keys.test.ts`.
+- The dashboard UI/UX polish pass (`src/dashboard/index.ts` `SETTINGS_400_KEYS` + `settings400Response`; `src/spa/pages/SettingsPage.tsx` `settingsErrorMessage`; `src/i18n/t.ts` `isDictionaryKey`), tests `tests/worker/settings-400-keys.test.ts` / `tests/spa/settings-error-keys.test.ts`.
 - Related contracts: `dashboard-spa-shell-dispatch.md` (SPA shell dispatch + i18n chain), `spa-op-refresh-background-reload.md` (op feedback placement), `dashboard-provider-catalog-ai-sdk.md` (structured verify reasons).

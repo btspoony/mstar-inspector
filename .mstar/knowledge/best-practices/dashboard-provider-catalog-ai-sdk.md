@@ -5,7 +5,7 @@ last_updated: 2026-09-08
 problem_type: best_practice
 category: best-practices
 severity: medium
-plan_id: 35-apps-detail-ops-providers
+topic: app detail ops & providers
 tags: [provider-catalog, ai-sdk, models-dev, workers-ai, custom-providers, byok, zero-runtime-network]
 related_components: [src/pipeline/provider-catalog.ts, scripts/generate-provider-catalog.ts, src/dashboard/provider-verify.ts, src/dashboard/app-config-store.ts, src/contracts/provider-catalog.generated.ts]
 ---
@@ -14,17 +14,17 @@ related_components: [src/pipeline/provider-catalog.ts, scripts/generate-provider
 
 ## Context
 
-The BYOK dashboard hand-maintained a 19-entry provider map (`src/pipeline/providers.ts`). iter011 plan 35 replaced it with a generated catalog (PM decision, user-directed): ai-sdk-ecosystem metadata via a pinned **models.dev** snapshot, plus Cloudflare Workers AI as an entry — evaluated and rejected for ai-sdk runtime adoption, and `void` verified to have no provider catalog surface (T0 verdict 2026-09-04).
+The BYOK dashboard hand-maintained a 19-entry provider map (`src/pipeline/providers.ts`). The 2026-09 provider-catalog rework replaced it with a generated catalog (PM decision, user-directed): ai-sdk-ecosystem metadata via a pinned **models.dev** snapshot, plus Cloudflare Workers AI as an entry — evaluated and rejected for ai-sdk runtime adoption, and `void` verified to have no provider catalog surface (T0 verdict 2026-09-04).
 
 ## Guidance
 
-- **Generated static module, zero runtime network**: `scripts/generate-provider-catalog.ts` reads a vendored `models.dev-<date>.json` snapshot and emits the generated contract `src/contracts/provider-catalog.generated.ts` (regen byte-identical; 013 plan 42 moved the SSOT from the pipeline module — full breadth, 214 rows: 19 builtin + 195 template incl. curated workers-ai; enumeration rules: 18 builtin-sourceKey exclusions + dedupe + id-regex skip-count). `src/pipeline/provider-catalog.ts` remains the hand-written pipeline face (`export *` from the contract + the `../review/runtime` re-export the consumer imports). No ai-sdk runtime dependency — the ai-sdk ecosystem is the *metadata source*, not an execution layer; the runner remains omp + `models.yml`.
-- **Two tiers**: `builtin` = runner-consumable entries (display name / default base URL / env key / representative models; keeps `providerEnvName` + `PROVIDER_ENV_NAMES` parity tests and plan-31 `PROVIDER_VERIFY_ENDPOINTS` green). `template` = providers that are **not** directly runner-consumable (omp has no built-in discovery for them) — they materialize through the existing `app_custom_providers` machinery instead.
-- **Workers AI = template**: OpenAI-compatible REST endpoint with account-id templated base URL + `CUSTOM_WORKERS_AI_API_KEY` env + the plan-31 custom-provider verify probe. Never a builtin-style env-name entry — the in-image base `models.yml` only knows its own providers, so a fake builtin entry would synthesize a models.yml the runner cannot authenticate.
+- **Generated static module, zero runtime network**: `scripts/generate-provider-catalog.ts` reads a vendored `models.dev-<date>.json` snapshot and emits the generated contract `src/contracts/provider-catalog.generated.ts` (regen byte-identical; a later consolidation pass moved the SSOT from the pipeline module into the generated contract — full breadth, 214 rows: 19 builtin + 195 template incl. curated workers-ai; enumeration rules: 18 builtin-sourceKey exclusions + dedupe + id-regex skip-count). `src/pipeline/provider-catalog.ts` remains the hand-written pipeline face (`export *` from the contract + the `../review/runtime` re-export the consumer imports). No ai-sdk runtime dependency — the ai-sdk ecosystem is the *metadata source*, not an execution layer; the runner remains omp + `models.yml`.
+- **Two tiers**: `builtin` = runner-consumable entries (display name / default base URL / env key / representative models; keeps `providerEnvName` + `PROVIDER_ENV_NAMES` parity tests and the `PROVIDER_VERIFY_ENDPOINTS` inventory green). `template` = providers that are **not** directly runner-consumable (omp has no built-in discovery for them) — they materialize through the existing `app_custom_providers` machinery instead.
+- **Workers AI = template**: OpenAI-compatible REST endpoint with account-id templated base URL + `CUSTOM_WORKERS_AI_API_KEY` env + the custom-provider verify probe. Never a builtin-style env-name entry — the in-image base `models.yml` only knows its own providers, so a fake builtin entry would synthesize a models.yml the runner cannot authenticate.
 - **Mirror discipline**: the dashboard mirror (`PROVIDER_IDS` = builtin ids, `PROVIDER_META` = full catalog) re-exports the generated contract (structurally assigned), and parity tests lock the builtin set + generator id-regex grammar so a regen cannot silently desync the faces. Dashboard imports the `src/contracts` module, never the pipeline face (Q2 boundary).
 - **Secrets**: template materialization follows the existing verify-first custom-provider flow (key verified outbound before persist; secretbox envelope unchanged).
 
-## Display tier vs runner tier (017 plan 54, AD-547)
+## Display tier vs runner tier (dashboard-UX rework, AD-547)
 
 The builtin tier doubles as the runner-consumable BYOK allowlist, so a UI-facing regroup (常用 five: anthropic/openai/gemini/copilot/xai; everything else shown under 目录模板) must **never** re-tier the catalog. Locked mechanism:
 

@@ -4,7 +4,7 @@ date: 2026-08-29
 problem_type: best_practice
 category: best-practices
 severity: high
-plan_id: 12-dashboard-access-control
+topic: dashboard access control
 tags: [oauth, allowlist, guard-middleware, stateless-cookies, invite-only, hono]
 related_components: [session.ts, users.ts, index.ts]
 ---
