@@ -65,7 +65,7 @@ export const REVIEW_SCHEMA = "mstar.review/v1" as const;
  * `reviews.skill_version` for every v1 row (write caliber, spec § 新行写入
  * 口径): the pinned engine version + harness image commit.
  */
-export const REVIEW_SKILL_VERSION = "3.8.1+4c8fbb21";
+export const REVIEW_SKILL_VERSION = "3.9.2+23d2c78c";
 
 /** Number of `:`-separated segments in an `idemKey()` string. */
 const IDEM_KEY_PARTS = 5;
