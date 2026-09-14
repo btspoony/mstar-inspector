@@ -6,6 +6,15 @@
 
 ## [Unreleased]
 
+## [1.0.0-alpha.2] - 2026-09-14
+
+### Changed
+
+- **应用设置页新增 GitHub 信息卡**：展示头像、可点击直达 GitHub 设置页的 App 名称、描述与 App ID——数据由服务端以 per-App App JWT 从 GitHub 拉取，D1 缓存 + 24 小时惰性刷新，GitHub 不可达时优雅降级。
+- **Provider 选择器重构**：214 项平铺下拉改为输入即筛选的 combobox（完整键盘可达），新增「常用提供方」分组（Anthropic、OpenAI、Google Gemini、GitHub Copilot、xAI）置于目录模板之前；中文术语统一为「模型提供方」。运行时/ BYOK 机制零变化。
+- **模型链微交互**：新建链的 draft tab 标签随链名称输入实时更新；「放弃」按钮移入保存行，改为清晰可见的 outline 样式。
+- **审查记录统计区图表化**：按严重程度/按类别统计改为计数柱图，每周趋势改为审查/发现双系列图（带日期轴与图例）——手写 SVG、零新依赖、适配明暗双主题。
+
 ## [1.0.0-alpha.1] - 2026-09-07
 
 ### Added

@@ -8,6 +8,15 @@ fragment format and the per-change commit flow.
 
 ## [Unreleased]
 
+## [1.0.0-alpha.2] - 2026-09-14
+
+### Changed
+
+- **App settings page gains a GitHub identity card**: avatar, the App's name hyperlinked to its GitHub settings page, description, and App ID — served from GitHub metadata fetched per-App with a dashboard-local App JWT, cached in D1 with a 24h lazy refresh, and degrading gracefully when GitHub is unreachable.
+- **Provider picker rebuilt**: the flat 214-entry dropdown is now a type-to-filter combobox (full keyboard operability), with a new "Common providers" group (Anthropic, OpenAI, Google Gemini, GitHub Copilot, xAI) ahead of the catalog templates; provider terminology is unified as "model provider" in Chinese. Runner/BYOK mechanics are unchanged.
+- **Model-chain micro-UX**: the new-chain draft tab now live-relabels as you type the chain name, and the discard button sits inline with save as a visible outline control.
+- **Insights stat sections are now charts**: findings by severity and by category render as count bars, weekly trends as a dual-series (reviews/findings) chart with a dated axis and legends — hand-rolled SVG, zero new dependencies, dark/light theme tokens.
+
 ## [1.0.0-alpha.1] - 2026-09-07
 
 ### Added
