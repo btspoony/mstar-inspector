@@ -1,5 +1,5 @@
--- 0005_reviews_app_id.sql — attribute reviews to their GitHub App (plan 13
--- Task 1, spec dashboard-multi-app-platform § Data model, architect lock L2).
+-- 0005_reviews_app_id.sql — attribute reviews to their GitHub App (spec
+-- dashboard-multi-app-platform § Data model, architect lock L2).
 --
 -- app_id = NULL marks legacy rows (the Worker-secrets global App) — legacy
 -- rows are never backfilled with a synthetic app row (Clarify #3). Must

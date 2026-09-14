@@ -94,7 +94,7 @@ explicit version `1.0.0` (not auto). Every item below must pass:
    missing).
 4. **Live version** — after the post-merge deploy completes, staging
    `/healthz` returns the new `version` field and the SPA displays it
-   (surface lands with plan 51).
+   (surface lands with the `src/version.ts` VERSION_SURFACES entry).
 5. **Fragments archived** — `.changes/unreleased/` is empty and the consumed
    fragments live under `.changes/archive/1.0.0/`.
 

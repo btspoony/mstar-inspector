@@ -1,5 +1,5 @@
--- 0019_github_apps_metadata.sql — per-App GitHub profile columns (plan 53
--- Task 1, iteration 017-dashboard-ux, architect decision AD-531).
+-- 0019_github_apps_metadata.sql — per-App GitHub profile columns (architect
+-- decision AD-531).
 --
 -- Five metadata-only ADD COLUMNs caching the App's public GitHub profile as
 -- served by `GET https://api.github.com/app` (App-JWT auth, zero octokit —
@@ -18,7 +18,7 @@
 --
 -- All nullable, no default, no REFERENCES — the 0008 "Metadata-only ADD
 -- COLUMN" form, safe to apply over a live production DB with existing rows
--- (old rows read as "never synced" and render local fields, per the plan-53
+-- (old rows read as "never synced" and render local fields, per the
 -- fail-open degradation). Must apply AFTER 0004 (the altered table must
 -- exist).
 --

@@ -1,5 +1,5 @@
--- 0021_review_checks.sql — per-attempt review Check registry (plan 68 Task 1,
--- spec review-lifecycle §7.1 second block).
+-- 0021_review_checks.sql — per-attempt review Check registry (spec
+-- review-lifecycle §7.1 second block).
 --
 -- One row per Check ATTEMPT. A `(app, installation, owner, repo, pr, head_sha,
 -- triggered_by, action)` tuple is an `attempt_key`; each fresh attempt is a new

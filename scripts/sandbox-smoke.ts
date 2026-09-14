@@ -1,8 +1,8 @@
 /**
- * Sandbox smoke orchestrator (plan 06 Task 1 STOP gate + Task 2 runner smoke).
+ * Sandbox smoke orchestrator (STOP gate + runner smoke).
  *
  * Drives the real falsification sequences locally:
- *   1. Mint a PURPOSE-SCOPED sandbox-read installation grant (plan 67 §7.6)
+ *   1. Mint a PURPOSE-SCOPED sandbox-read installation grant (§7.6)
  *      through the same helper the Worker uses (createReviewCommenter →
  *      getInstallationToken) and verify the RETURNED capabilities with
  *      assertSandboxGrant — read-only, repository-scoped, no write
@@ -60,7 +60,7 @@ function resolvePrivateKey(value: string): string {
 
 /**
  * Mint the sandbox-read grant via the SAME purpose-scoped helper the Worker
- * uses (plan 67 §7.6: the smoke path is migrated off the raw createAppAuth
+ * uses (§7.6: the smoke path is migrated off the raw createAppAuth
  * mint), then assert the RETURNED capabilities — repository-scoped,
  * read-only, exactly the requested repository. `appId` is the smoke's local
  * numeric App-id stand-in (the mint itself binds installationId + repo).

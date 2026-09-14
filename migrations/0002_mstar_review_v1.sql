@@ -1,4 +1,4 @@
--- 0002_mstar_review_v1.sql — mstar.review/v1 consumption (plan 07 Task 4).
+-- 0002_mstar_review_v1.sql — mstar.review/v1 consumption.
 -- Era model: reviews.envelope IS NOT NULL ⇔ 该行走 v0.3+ 路径（mstar.review/v1）。
 -- M1 行保留 raw_output + M1 词表，只读历史（.mstar/specs/findings-schema.md），永不改写。
 -- findings.severity 语义切换（architect 锁）：v1 行的 finding class 列 = severity，

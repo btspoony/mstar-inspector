@@ -1,7 +1,7 @@
 -- 0012_custom_providers_and_key_updated_at.sql — provider-key updated_at
--- (plan 23 Task 1) + custom-provider declarations (plan 23 Task 2).
+-- + custom-provider declarations.
 --
--- SECTION 1 (plan 23 Task 1 — THIS FILE's committed content): the
+-- SECTION 1 (THIS FILE's committed content): the
 -- app_provider_keys.updated_at column — polish #6 "masked key last-updated"
 -- (iteration spec v0.8 §2.4 item 3 / AC-23c). The store's setProviderKey
 -- upsert maintains it on every write (fresh insert: updated_at == created_at
@@ -16,11 +16,11 @@
 
 ALTER TABLE app_provider_keys ADD COLUMN updated_at TEXT;
 
--- SECTION 2 (plan 23 Task 2): app_custom_providers — per-App custom
+-- SECTION 2: app_custom_providers — per-App custom
 -- provider declarations (AL-23-1 DDL). One row per (App, provider_id): a
 -- BYOK-style declaration of a NON-built-in model provider (base URL + API
 -- protocol + model ids), consumed by the review runner's per-review models
--- synthesis (plan 23 Task 3). The API key is a secretbox envelope
+-- synthesis. The API key is a secretbox envelope
 -- (src/dashboard/secretbox.ts) with the composite-PK AAD rowKey
 -- `app_custom_providers.api_key_enc:<app_id>:<provider_id>` (0006 L1
 -- precedent) — plaintext keys never touch D1, logs, HTML, or git.

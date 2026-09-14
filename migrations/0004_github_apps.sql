@@ -1,4 +1,4 @@
--- 0004_github_apps.sql — multi-App foundation (plan 13 Task 1, spec
+-- 0004_github_apps.sql — multi-App foundation (spec
 -- dashboard-multi-app-platform § Data model, architect lock L2).
 --
 -- github_apps holds one row per audit GitHub App served by this deployment.

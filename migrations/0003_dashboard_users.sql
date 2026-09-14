@@ -1,4 +1,4 @@
--- 0003_dashboard_users.sql — Dashboard membership (plan 12 B4 Task 1).
+-- 0003_dashboard_users.sql — Dashboard membership.
 --
 -- Append-only DDL on the existing production DB: 0001/0002 are untouched and
 -- wrangler applies this file in filename order like every migration before
@@ -7,7 +7,7 @@
 --
 -- Shape locked by the v0.5 spec § Data model (dashboard-multi-app-platform):
 --   * NO status column — removal is a row DELETE. The per-request guard
---     (plan 12 Task 2) re-reads this table every request, so a deleted row
+--     re-reads this table every request, so a deleted row
 --     is what invalidates removed members' stateless session cookies.
 --   * role is pinned to 'admin' | 'member' by CHECK (no other roles, ever).
 --   * github_login UNIQUE — one membership row per GitHub login. Code-side

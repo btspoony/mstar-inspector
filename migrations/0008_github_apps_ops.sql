@@ -1,4 +1,4 @@
--- 0008_github_apps_ops.sql — per-App ops columns (plan 16 Task 1, spec
+-- 0008_github_apps_ops.sql — per-App ops columns (spec
 -- dashboard-ops-and-role-models § Data model + § 语义锁(B3), architect lock L5).
 --
 -- review_enabled is the per-App PAUSE switch (B3: paused ≠ disabled):

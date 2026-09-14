@@ -1,8 +1,8 @@
 -- 0007_reviews_app_id_index.sql — index the review→App attribution column
--- (plan 15 Task 1, spec dashboard-ops-and-role-models § Data model + § 硬化项 2).
+-- (spec dashboard-ops-and-role-models § Data model + § 硬化项 2).
 --
 -- reviews.app_id (added by 0005) is the per-App attribution column: the
--- consumer's store.put writes it on every per-App review (plan 13), and the
+-- consumer's store.put writes it on every per-App review, and the
 -- table only grows. No per-App reader queries it yet — the index exists so
 -- per-App lookups (dashboard review filtering and the like) never scan the
 -- table when they arrive. NULL (legacy rows — the Worker-secrets global

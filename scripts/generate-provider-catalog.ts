@@ -1,6 +1,6 @@
 /**
  * Author-time generator for `src/contracts/provider-catalog.generated.ts`
- * (plan 42 T1; originally plan 35 T3, spec §5 — architect-locked form).
+ * (spec §5 — architect-locked form).
  *
  * The catalog is a compile-time static module: the Worker, the dashboard,
  * and the sandbox image only ever import the committed artifact — zero
@@ -32,7 +32,7 @@
  *   3. The hand-curated `workers-ai` template — preserved verbatim; the
  *      snapshot's `cloudflare-workers-ai` row is deduped into it.
  *
- * Breadth enumeration (plan 42, spec § Providers contract item 2): beyond
+ * Breadth enumeration (spec § Providers contract item 2): beyond
  * the pinned tiers above, EVERY remaining snapshot key becomes a `template`
  * entry — deterministic, auditable skips only (each rule and its skip count
  * are named in the generated file's header comment):
@@ -80,7 +80,7 @@ type BuiltinSpec = {
 };
 
 /** The 19 builtin ids in mapping order (the PROVIDER_ENV_NAMES /
- *  PROVIDER_IDS parity sequence — plan 24 / AL-24-5, `ark` last). */
+ *  PROVIDER_IDS parity sequence — AL-24-5, `ark` last). */
 const BUILTIN_ORDER: BuiltinSpec[] = [
   { id: "anthropic", sourceKey: "anthropic", label: "Anthropic", envName: "ANTHROPIC_API_KEY" },
   { id: "openai", sourceKey: "openai", label: "OpenAI", envName: "OPENAI_API_KEY" },
@@ -104,7 +104,7 @@ const BUILTIN_ORDER: BuiltinSpec[] = [
   { id: "ark", sourceKey: "volcengine", label: "Ark", envName: "ARK_API_KEY" },
 ];
 
-/** Display-only grouping of the settings picker (plan 54, AD-547): the
+/** Display-only grouping of the settings picker (AD-547): the
  *  常用 (common) tier — a fixed-order subset of the builtin ids shown first
  *  in the Add-provider picker; every other entry renders under the 目录模板
  *  group. ZERO runner semantics: the BYOK allowlist remains
@@ -168,7 +168,7 @@ const CUSTOM_PROVIDER_ID_PATTERN = /^[a-z0-9][a-z0-9-]{0,63}$/;
 
 const DEFAULT_MODEL_COUNT = 5;
 
-/** Breadth template models prefill cap (plan 42): at most the first 20
+/** Breadth template models prefill cap: at most the first 20
  *  model ids per provider, deterministic snapshot order — template prefill
  *  only, bounding the settings payload. */
 const TEMPLATE_MODEL_PREFILL_CAP = 20;
@@ -294,8 +294,7 @@ async function main(): Promise<void> {
  *     (deterministic snapshot order — template prefill only)`;
 
   const moduleSource = `/**
- * GENERATED FILE — provider catalog (plan 42 T1; originally plan 35 T3,
- * spec §5). DO NOT EDIT BY HAND — regenerate with
+ * GENERATED FILE — provider catalog (spec §5). DO NOT EDIT BY HAND — regenerate with
  * \`bun run scripts/generate-provider-catalog.ts\` and commit the result as
  * an explicit, reviewable regeneration commit.
  *
@@ -309,14 +308,14 @@ async function main(): Promise<void> {
  * zero imports of any kind.
  *
  * Tiers: \`builtin\` = runner-consumable env-name entries (the per-App BYOK
- * allowlist, plan 24 / AL-24-5 — consumer.ts injects ONLY these env names
+ * allowlist, AL-24-5 — consumer.ts injects ONLY these env names
  * into the review container); \`template\` = metadata + prefill only,
  * materialized through the existing custom-provider machinery
  * (app_custom_providers) at save time (spec §5). The hand-curated
  * \`workers-ai\` template carries the {account_id} base-URL placeholder the
  * save flow substitutes.
  *
- * Display grouping (plan 54, AD-547): \`PROVIDER_IDS_COMMON\` is a
+ * Display grouping (AD-547): \`PROVIDER_IDS_COMMON\` is a
  * DISPLAY-ONLY regroup of the settings picker (常用 providers first, the
  * rest under the 目录模板 group). It carries ZERO runner semantics — the
  * runner BYOK allowlist remains \`PROVIDER_IDS_BUILTIN\` /
@@ -358,10 +357,10 @@ export type ProviderInfo = {
 export const PROVIDER_CATALOG: Record<string, ProviderCatalogEntry> = ${catalogLiteral};
 
 /** The builtin tier ids in exact mapping order (the dashboard's PROVIDER_IDS
- *  allowlist sequence — plan 24 / AL-24-5, \`ark\` last). */
+ *  allowlist sequence — AL-24-5, \`ark\` last). */
 export const PROVIDER_IDS_BUILTIN: readonly string[] = Object.freeze(${builtinIdsLiteral});
 
-/** Display-only grouping of the settings picker (plan 54, AD-547): the 常用
+/** Display-only grouping of the settings picker (AD-547): the 常用
  *  tier shown first in the Add-provider picker — a frozen subset of
  *  PROVIDER_IDS_BUILTIN in exactly this order. ZERO runner semantics: the
  *  runner BYOK allowlist remains PROVIDER_IDS_BUILTIN / PROVIDER_ENV_NAMES. */
@@ -391,9 +390,9 @@ export const TEMPLATE_PROVIDERS: Record<string, ProviderCatalogEntry> = Object.f
 ) as Record<string, ProviderCatalogEntry>;
 `;
 
-  // QC wave (seat1, plan 35): the parity locks (tests/worker/app-config.test.ts)
+  // QC wave (seat1): the parity locks (tests/worker/app-config.test.ts)
   // fail CI on drift between this contract and the dashboard mirror — the
-  // mirror is now a direct re-export of this module (plan 42 T1), so the lock
+  // mirror is now a direct re-export of this module, so the lock
   // guards the re-export instead of a hand-maintained copy.
   await writeFile(OUT_PATH, moduleSource, "utf8");
   console.log(

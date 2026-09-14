@@ -1,7 +1,7 @@
 #!/usr/bin/env bun
 /**
- * extract-changelog-section.ts — print a version's changelog section body
- * (plan 50 D5). Feeds the bilingual GitHub Release notes.
+ * extract-changelog-section.ts — print a version's changelog section body.
+ * Feeds the bilingual GitHub Release notes.
  *
  * Usage:
  *   bun run scripts/extract-changelog-section.ts 1.0.0             # EN (CHANGELOG.md)

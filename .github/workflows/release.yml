@@ -18,7 +18,7 @@ name: Release
 # No secrets are required (the tag and the Release are created with the
 # workflow's GITHUB_TOKEN).
 #
-# Deploy-evidence reconciliation (plan 52): after the Release is created, one
+# Deploy-evidence reconciliation: after the Release is created, one
 # extra step rebuilds the body from the workspace notes file plus a
 # deploy-evidence section and rewrites the Release with a single idempotent
 # `gh release edit --notes-file` (AD-3 — no live read-modify-write). The
@@ -39,7 +39,7 @@ on:
 
 permissions:
   contents: write   # push the tag + create the GitHub Release (no id-token:write — no npm publish, AD-4)
-  actions: read     # `gh run list` / `gh run download` of the deploy-evidence artifact (plan 52) — nothing else added
+  actions: read     # `gh run list` / `gh run download` of the deploy-evidence artifact — nothing else added
 
 jobs:
   release:
@@ -98,9 +98,9 @@ jobs:
           git tag -a -m "Release ${TAG}" "$TAG"
           git push origin "$TAG"
 
-      # Notes composition contract (plan 50 §Interfaces): EN section, blank
-      # line, `---`, blank line, CN section. Plan 52 appends its deploy-
-      # evidence section after this step with the same separator, rebuilding
+      # Notes composition contract: EN section, blank
+      # line, `---`, blank line, CN section. The deploy-evidence step appends its
+      # section after this step with the same separator, rebuilding
       # the body from this $RUNNER_TEMP file and rewriting the Release with a
       # single `gh release edit --notes-file` — tag/Release creation never
       # waits for evidence.
@@ -128,7 +128,7 @@ jobs:
           draft: false
           prerelease: ${{ contains(steps.ver.outputs.version, '-') }}
 
-      # Plan 52 (AD-3): rebuild the complete body in the workspace — the
+      # Evidence append (AD-3): rebuild the complete body in the workspace — the
       # bilingual notes file above, this `---` separator (same form as the
       # EN/CN one), then the collector's section — and rewrite the Release
       # once. Never read-modify-write the live body.

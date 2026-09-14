@@ -1,7 +1,7 @@
 #!/usr/bin/env bun
 /**
- * collect-deploy-evidence.ts — bounded-wait deploy evidence collector
- * (plan 52 D1). Consumes the existing deploy.yml evidence chain: for the
+ * collect-deploy-evidence.ts — bounded-wait deploy evidence collector.
+ * Consumes the existing deploy.yml evidence chain: for the
  * release PR's merge commit SHA, wait for the Deploy workflow run to reach a
  * terminal state, download its `deploy-evidence` artifact, and print the
  * markdown section task 2 appends to the release notes.
@@ -12,7 +12,7 @@
  *   bun run scripts/collect-deploy-evidence.ts <sha> --wait-minutes 15 --interval-seconds 30
  *   bun run scripts/collect-deploy-evidence.ts --help
  *
- * Branches (evidence is a recording surface, never a gate — plan 52):
+ * Branches (evidence is a recording surface, never a gate):
  *   - run concludes success -> download `deploy-evidence`, print Worker
  *     Version ID + image digest + run link;
  *   - run concludes failure -> explicit failed section (run link);

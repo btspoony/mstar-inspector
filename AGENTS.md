@@ -15,7 +15,7 @@ Morning Star harness SSOT lives in [`.mstar/AGENTS.md`](.mstar/AGENTS.md) — pa
 
 Feature worktrees for this repo are created **under `./.worktrees/`** (repo-relative), not as sibling directories next to the clone.
 
-Examples: `.worktrees/09-review-deep-parent/`, `.worktrees/feat-foo/`.
+Examples: `.worktrees/my-topic/`, `.worktrees/feat-foo/`.
 
 `git worktree add .worktrees/<plan-id> -b feat/<plan-id> <base>`
 

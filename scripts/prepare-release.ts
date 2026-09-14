@@ -1,7 +1,7 @@
 #!/usr/bin/env bun
 /**
  * prepare-release.ts — assemble changelog fragments + bump every version
- * surface (plan 50 D3).
+ * surface.
  *
  * Usage:
  *   bun run release:prepare                    # auto patch bump (0.1.0 -> 0.1.1)

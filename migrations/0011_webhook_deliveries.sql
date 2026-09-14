@@ -1,5 +1,5 @@
--- 0011_webhook_deliveries.sql — per-App webhook delivery log (plan 20 Task 1,
--- architect verdict AL-20-1, iteration spec v0.8-platform-insights §4).
+-- 0011_webhook_deliveries.sql — per-App webhook delivery log (architect
+-- verdict AL-20-1, iteration spec v0.8-platform-insights §4).
 --
 -- webhook_deliveries: one row per CLASSIFIED per-App webhook delivery
 -- (ok / paused / ignored / rejected) — the R2 diagnostics face

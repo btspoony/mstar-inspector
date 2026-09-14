@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 #
-# U-001 in-image models.yml synthesis verification (plan 25 Task 2,
-# AL-25-1/25-3; plan 37 Task 3 — capability-host base, NO baked file).
+# U-001 in-image models.yml synthesis verification
+# (AL-25-1/25-3 — capability-host base, NO baked file).
 #
 # Proves, inside the review-runner image, that a COMPLETE models.yml reaches
 # the omp SDK through the runner's REAL synthesis path — with no baked
-# in-image models.yml (plan 37 deleted it; the image ships an EMPTY
+# in-image models.yml (the image ships an EMPTY
 # /opt/omp-agent):
 #   (a) writePerReviewModelsYaml (src/review/models-synthesis.ts) synthesizes
 #       a COMPLETE per-review models.yml from the CAPABILITY HOSTS (the omp
@@ -100,7 +100,7 @@ try {
 
   // Layer (a): real synthesis through the runner module — capability hosts
   // are the ALWAYS-present base, the optional custom declaration merges
-  // under it. NO baked file participates (plan 37: the baked models.yml is
+  // under it. NO baked file participates (the baked models.yml is
   // gone and /opt/omp-agent is empty).
   agentDir = await writePerReviewModelsYaml([ARK_PLAN_HOST], [DECL]);
   const yaml = readFileSync(join(agentDir, "models.yml"), "utf8");

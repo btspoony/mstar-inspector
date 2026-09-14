@@ -1,7 +1,7 @@
 ---
 version: 0.3.3
 name: mstar-inspector Console
-description: "Bold Signal-Cyan ops-console design system for the mstar-inspector developer dashboard. Dense, decisive, state through color + copy; one confident cyan accent on cool zinc neutrals. Dark is the default theme; light follows prefers-color-scheme until the navbar theme toggle stores a manual choice (localStorage mstar.dashboard.theme, light|dark) — the stored choice wins over the OS. Supersedes the plan-29 lock (2026-09-04, user instruction, iteration 013). v0.3 (plan 57, AD-573) is a values-only rebase: existing token names are frozen; brand, motion, and elevation enter as additive namespaces. v0.3.1 (plan 57 T2, AD-572) flips the sans stack to self-hosted Geist Sans — unmodified full-latin woff2 binaries of geist@1.7.2 (sha256 pinned in the fonts.css header) with font-display: swap; zh text falls back to the system stack. v0.3.2 (plan 64, AD-641, 2026-09-11) retires the plan-58 sidebar brand accent edge — the sidebar active item wears a low-alpha brand tint (brand-700 at 12% through the --sidebar-primary shadcn bridge) with medium-weight text; hover keeps the plan-62 neutral accent tint. v0.3.3 (plan 65, AD-653, 2026-09-12) adds the insights daily stacked-bar chart vocabulary: severity stacks keep the frozen 700-step semantic family (red/amber/gray), category stacks join teal/purple/pink with blue-700 staying the neutral unknown-slug tone and gray-700 the uncategorized fallback — Appendix A gains their dual-theme vs-card rows."
+description: "Bold Signal-Cyan ops-console design system for the mstar-inspector developer dashboard. Dense, decisive, state through color + copy; one confident cyan accent on cool zinc neutrals. Dark is the default theme; light follows prefers-color-scheme until the navbar theme toggle stores a manual choice (localStorage mstar.dashboard.theme, light|dark) — the stored choice wins over the OS. Supersedes the earlier theme lock (2026-09-04, user instruction). v0.3 (AD-573) is a values-only rebase: existing token names are frozen; brand, motion, and elevation enter as additive namespaces. v0.3.1 (AD-572) flips the sans stack to self-hosted Geist Sans — unmodified full-latin woff2 binaries of geist@1.7.2 (sha256 pinned in the fonts.css header) with font-display: swap; zh text falls back to the system stack. v0.3.2 (AD-641, 2026-09-11) retires the sidebar brand accent edge — the sidebar active item wears a low-alpha brand tint (brand-700 at 12% through the --sidebar-primary shadcn bridge) with medium-weight text; hover keeps the neutral accent tint. v0.3.3 (AD-653, 2026-09-12) adds the insights daily stacked-bar chart vocabulary: severity stacks keep the frozen 700-step semantic family (red/amber/gray), category stacks join teal/purple/pink with blue-700 staying the neutral unknown-slug tone and gray-700 the uncategorized fallback — Appendix A gains their dual-theme vs-card rows."
 
 # Runtime default = dark. Top-level colors: matches themes.dark.colors so
 # {colors.X} component refs resolve to the console default. Light values
@@ -134,11 +134,11 @@ colors:
 themes:
   default: dark
   mechanism: "manual data-theme override (navbar toggle), prefers-color-scheme fallback"
-  # Manual theme contract (plan 41): the navbar toggle stores light|dark in
+  # Manual theme contract: the navbar toggle stores light|dark in
   # localStorage["mstar.dashboard.theme"] and applies documentElement[data-theme]
   # before first paint; a stored choice wins over prefers-color-scheme, unset
   # follows the OS (dark console default when the OS expresses neither).
-  # Supersedes the plan-29 lock (2026-09-04, user instruction, iteration 013).
+  # Supersedes the earlier theme lock (2026-09-04, user instruction).
   dark:
     colors:
       # Background surfaces
@@ -615,7 +615,7 @@ components:
 # mstar-inspector Console
 
 mstar-inspector Console is the design system for the developer dashboard
-(`/dashboard`). v0.3 upgrades the voice from the plan-29 "functional ops
+(`/dashboard`). v0.3 upgrades the voice from the earlier "functional ops
 console" to a **bold Signal-Cyan console**: one decisive cyan accent on a
 cool-retuned zinc neutral base, dense data surfaces with quiet tinted
 elevation, and motion that clarifies change without decorating. Boldness is
@@ -624,12 +624,12 @@ two-tier radius — never by sacrificing density, scannability, or dual-theme
 legibility. The audience is still the operator who deployed the inspector —
 not a marketing surface.
 
-**Theme contract (plan 41):** dark is the default console theme. With no
+**Theme contract:** dark is the default console theme. With no
 stored choice, light is an automatic override via `prefers-color-scheme:
 light`. A manual **navbar theme toggle** stores `light` | `dark` in
 `localStorage["mstar.dashboard.theme"]` and applies
 `documentElement.dataset.theme` before first paint; the stored choice wins
-over the OS preference. Supersedes the plan-29 lock (2026-09-04, user instruction, iteration 013).
+over the OS preference. Supersedes the earlier theme lock (2026-09-04, user instruction).
 Dual-theme values live in this file under `themes.dark` / `themes.light`
 (same token **names**, different values). Top-level `colors:` equals
 `themes.dark.colors` so `{colors.X}` component refs resolve to the runtime
@@ -637,7 +637,7 @@ default. Implementation maps these names to CSS custom properties in
 `src/spa/styles/tokens.css` — light applies via `:root[data-theme="light"]`
 with the `prefers-color-scheme` fallback on `:root:not([data-theme="dark"])`.
 
-**v0.3 value rebase (plan 57, AD-573):** token **names** are frozen — every
+**v0.3 value rebase (AD-573):** token **names** are frozen — every
 palette step (`background-*`, `gray-*`, `gray-alpha-*`, `blue-*`, `red-*`,
 `amber-*`, `green-*`, plus reserved `teal`/`purple`/`pink`), component var,
 and `--typo-*`/`--spacing-*`/`--rounded-*`/`--font-*` keeps its name; the
@@ -646,16 +646,16 @@ additive namespaces: `brand-*` (Signal Cyan), `shadow-card`/`shadow-pop`
 (tinted elevation), `duration-*`/`ease-*` (motion). Three value sites move
 together and are machine-pinned: this frontmatter →
 `src/spa/styles/tokens.css` (both light branches) → the `views.ts` STYLE
-subset. Staged delivery inside plan 57: Task 1 landed palette + motion +
-radius + elevation; Task 2 (v0.3.1) flipped the self-hosted typeface —
+subset. Staged delivery: palette + motion +
+radius + elevation landed first, then v0.3.1 flipped the self-hosted typeface —
 `--font-sans` and every sans `fontFamily` now carry Geist Sans ahead of the
-system fallbacks, with the woff2 riding the vite module graph; Task 3
-landed the shadcn bridge re-point (`--primary: var(--blue-700)` →
-`var(--brand-700)`) plus the base-component restyle, and QC round 1 closed
+system fallbacks, with the woff2 riding the vite module graph; the shadcn
+bridge re-point (`--primary: var(--blue-700)` →
+`var(--brand-700)`) plus the base-component restyle landed next, and QC round 1 closed
 the last staged seam — the `views.ts` STYLE `--button-primary-bg` now also
 references `var(--brand-700)` — so every rendered primary button (SPA and
 SSR faces alike) reads the brand accent. The staging narrative is history:
-no surface renders the pre-T3 blue primary anymore.
+no surface renders the pre-rebase blue primary anymore.
 
 A separate `DESIGN.dark.md` is intentionally not used: the assignment stores
 both palettes in one file under `themes:`.
@@ -690,12 +690,12 @@ Usage:
   Light-theme alphas are tinted with the cool `#101928` base so borders sit
   quietly inside the cool palette.
 - `brand-700` — the Signal Cyan accent: primary action fill, active
-  navigation emphasis, brand moments (chart card shells in plan 60). Dark
+  navigation emphasis, brand moments (chart card shells). Dark
   theme wears the bright step `#22d3ee`; light theme the deep step
   `#0e7490`. Brand **never** encodes error/warning/success semantics and
   never becomes a data-series color (AD-601).
 - `blue-700` — links and the focus ring only (non-alert duty kept per
-  AD-571); no longer a primary-action fill anywhere (the T3 bridge re-point
+  AD-571); no longer a primary-action fill anywhere (the bridge re-point
   landed, and the SSR STYLE re-point closed in QC round 1).
 - `red-700` — errors and destructive submits (Remove, Delete, Overwrite).
 - `amber-700` — warnings only.
@@ -715,7 +715,7 @@ Frontmatter `typography:` is the SSOT. The type identity is **Geist Sans**
 in the `fonts.css` header) self-hosted at
 `src/spa/assets/fonts/` with `@font-face` declarations in
 `src/spa/styles/fonts.css` — weights 400/500/600, exactly the three the
-scale below declares (v0.3.1, plan 57 T2). `font-display: swap` keeps first
+scale below declares (v0.3.1). `font-display: swap` keeps first
 paint on the system stack; the declared `unicode-range` excludes CJK
 codepoints, so zh text never selects the face or triggers a download and
 falls back to the system entries of `--font-sans`. The face ships native
@@ -817,8 +817,8 @@ Discipline (iteration 018 hard constraint #7):
   `fade-*` / `zoom-*` / `slide-in-from-*` classes copied from shadcn/ui onto
   dialog/dropdown/select emit no CSS in Tailwind 4 core (that plugin family
   lives in `tw-animate-css`, which is deliberately not a dependency), so
-  those surfaces appear/disappear instantly (QC round 1 F-006). When the
-  plan 58 motion pass wires entrances, it must be zero-dependency keyframes
+  those surfaces appear/disappear instantly (QC round 1 F-006). When a
+  future motion pass wires entrances, it must be zero-dependency keyframes
   consuming `--duration-slow` with a `prefers-reduced-motion` guard.
 
 - Movement-type animation (entrances, offsets, scale micro-interactions)
@@ -875,7 +875,7 @@ Default 40px. Border `gray-400`; text `gray-1000`; fill `background-100`.
 
 `background-200` fill, `gray-alpha-400` hairline, container radius
 (`rounded-md`, 12px), 24px padding, `shadow-card` elevation. Tier wrappers
-(plan 59 `SectionCard`) may lift Tier-1 surfaces with `shadow-pop` scale
+(`SectionCard`) may lift Tier-1 surfaces with `shadow-pop` scale
 boundaries but never invent a third radius.
 
 ### Badge
@@ -895,9 +895,9 @@ Console chrome (navbar + side nav): `background-200`, hairline
 `gray-alpha-400`, labels `label-14`. Active item: low-alpha brand tint —
 `brand-700` at 12% over the sidebar surface (`bg-sidebar-primary/12`
 through the shadcn `--sidebar-primary` bridge), `gray-1000` text at
-medium weight; no edge marker (plan 64, AD-641 — the plan-58 brand
+medium weight; no edge marker (AD-641 — the brand
 accent edge is retired). Hover and open-hover keep the neutral
-`background-300` 40% tint (plan 62, AD-622); the press face keeps the
+`background-300` 40% tint (AD-622); the press face keeps the
 full `background-300` fill. Muted meta uses `gray-900`.
 
 ### Notice (PageNotice)
@@ -926,21 +926,21 @@ full `background-300` fill. Muted meta uses `gray-900`.
 | `elevation.shadow-*` | `--shadow-card`, `--shadow-pop` — dark on `:root`, light overrides on both light branches |
 | `components.C` | `--component-C-*` referencing color vars |
 
-SPA consumes `tokens.css` only. Theme switching is the manual navbar toggle
-(plan 41): it stores `light` | `dark` in
+SPA consumes `tokens.css` only. Theme switching is the manual navbar toggle:
+it stores `light` | `dark` in
 `localStorage["mstar.dashboard.theme"]` and applies `data-theme` before
 first paint — a stored choice wins over `prefers-color-scheme`, unset
-follows the OS. Supersedes the plan-29 lock (2026-09-04, user instruction, iteration 013).
+follows the OS. Supersedes the earlier theme lock (2026-09-04, user instruction).
 Legacy `views.ts` STYLE keeps its own copied token subset with the same
 cascade — dark `:root` default, `:root[data-theme="light"]` for the stored
 choice, OS-light fallback guarded by `:root:not([data-theme="dark"])`,
 explicit dark no-op — and honors it via the pre-paint bootstrap snippet
-inlined in `page()` (plan 45 T8): SSR faces apply `data-theme` before
+inlined in `page()`: SSR faces apply `data-theme` before
 first paint while staying zero client runtime (snippet only, no bundle).
 The three value sites (this file, tokens.css, views.ts STYLE) are pinned
 equal by `tests/spa/tokens.test.ts`.
 
-## shadcn/ui mapping layer (plan 33)
+## shadcn/ui mapping layer
 
 Tailwind v4 + shadcn/ui (New York) read **semantic** CSS variables from
 `src/spa/styles/shadcn-theme.css`. That file bridges shadcn names to the
@@ -952,7 +952,7 @@ existing `tokens.css` custom properties (read-only). Tailwind utilities use
 | `--background` | `--background-100` |
 | `--foreground` | `--gray-1000` |
 | `--card` / `--card-foreground` | `--card-bg` / `--card-fg` |
-| `--primary` / `--primary-foreground` | `--brand-700` / `--background-100` (re-pointed in plan 57 T3) |
+| `--primary` / `--primary-foreground` | `--brand-700` / `--background-100` (re-pointed in v0.3) |
 | `--primary-hover` / `--secondary-hover` / `--destructive-hover` | `--brand-800` / `--background-300` / `--red-800` (mapped into `@theme inline` as `--color-*-hover` — QC round 1 F-001) |
 | `--secondary` / `--secondary-foreground` | `--button-secondary-bg` / `--button-secondary-fg` |
 | `--muted` / `--muted-foreground` | `--gray-100` / `--gray-900` |
@@ -968,7 +968,7 @@ existing `tokens.css` custom properties (read-only). Tailwind utilities use
 | `--sidebar-ring` | `--blue-700` (focus duty stays blue app-wide — QC round 1 F-003 revert) |
 | `--color-sidebar-border` (Tailwind) | `--sidebar-border` (tokens only; not redefined in bridge) |
 
-Copy-in components (plan 33 T1c) live under `src/spa/components/ui/` with
+Copy-in components live under `src/spa/components/ui/` with
 `components.json` aliases (`@/components` → `src/spa/components`,
 `@/lib/utils` → `src/spa/lib/utils.ts`). Radix primitives use pinned
 `@radix-ui/react-*` packages per plan Global Constraints.
@@ -986,7 +986,7 @@ Patterns borrowed at the token level (not pixel copies):
 
 ## Appendix A — contrast verification (WCAG 2.x, actual consumer pairs)
 
-Computed over the v0.3 values (plan 57 T1.1; text bar ≥4.5:1, large-text /
+Computed over the v0.3 values (text bar ≥4.5:1, large-text /
 non-text UI bar ≥3:1). Machine-pinned for the core pairs in
 `tests/spa/tokens.test.ts`.
 
@@ -1011,14 +1011,14 @@ non-text UI bar ≥3:1). Machine-pinned for the core pairs in
 All pairs clear their bar in both themes. (Light `green-700` vs card is the
 v0.2-unchanged semantic value at 3.0:1 — passes the non-text bar exactly;
 it is not used as text.) The `gray-700` row covers its second duty as the
-Insights nit-series fill (plan 60 T1 AD-601 recalibration: the red/amber/
+Insights nit-series fill (AD-601 recalibration: the red/amber/
 blue 700 values are v0.2-unchanged, so every chart series keeps the 700
 step — dark wears the bright value, light the deep — and the trend
 dual-series pair `blue-700` vs `amber-700` stays distinct at Δhue ≈ 169°
-dark / 184° light). The plan-65 `teal-700` row is the same light-side
+dark / 184° light). The `teal-700` row is the same light-side
 margin class (3.4:1 — passes the non-text bar; never used as text).
 
-Stacked chart presentation (plan 65, AD-652/653): the Insights severity
+Stacked chart presentation (AD-652/653): the Insights severity
 and category cards are daily stacked bar time series on the same recharts
 2.15.4 discipline (fixed numeric size + fluid wrapper, `isAnimationActive`
 off, colors only through `.chart-fill-*` class rules — never presentation
@@ -1030,7 +1030,7 @@ adjacent pair ≥55°, red/amber left severity-owned — with `blue-700` as the
 neutral tone for unmapped slugs and `gray-700` as the uncategorized
 fallback (stacked last). Day (7/30d) and Monday-anchored week (90d)
 buckets both label as M/D · M月D日 per locale; zero-count buckets stay on
-the axis (time continuity). The legend is the HTML swatch row (plan-56
+the axis (time continuity). The legend is the HTML swatch row (SPA
 face) — never recharts `<Legend>` — and the tooltip rides token-styled
 `contentStyle`/`labelStyle`/`itemStyle`; per-bucket totals read off the y
 ticks and exact series counts ride the tooltip, so the chart is never the
