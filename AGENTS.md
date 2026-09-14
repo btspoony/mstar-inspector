@@ -21,6 +21,23 @@ Examples: `.worktrees/09-review-deep-parent/`, `.worktrees/feat-foo/`.
 
 The directory is gitignored. Do not `git add` it. Cleanup still uses `git worktree remove` on abandoned paths listed by `git worktree list`.
 
+## No local process IDs in tracked content
+
+`.mstar/` harness state (plans, iterations, SDD runs, workflows, status) is
+gitignored local process data. Its identifiers must never appear in any
+git-tracked file (docs, code comments, migration headers, config comments)
+or in commit messages / PR titles / PR bodies:
+
+- Banned: `plan NN` / `plan-NN` / `planNN`, `iter NNN` / `iter-NNN` /
+  `iter0NN`, iteration slugs (`NNN-slug`, `iteration-vX.Y`, `NNN 迭代`),
+  workflow/SDD directory names, and `.mstar/plans|sdd|iterations|workflows`
+  path references.
+- Write self-contained references instead: what it is + date + upstream
+  tag/SHA when relevant. Provenance lives only under `.mstar/`.
+- `AD-*` / `AL-*` and acceptance/finding-style IDs recorded in tracked docs
+  are fine; local plan/iteration identifiers are not.
+- Applies to all new work; existing pushed history is never rewritten.
+
 ## Post-work cleanup
 
 After a session that spawned **local** wrangler / Cloudflare Sandbox / Docker

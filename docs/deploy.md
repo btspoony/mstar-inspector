@@ -709,8 +709,8 @@ controls are installed (the Dockerfile carries the documentation block only).
 
 ## Image pins and digest record
 
-Five pins — mstar-harness bumped to **3.9.2** (plan 69 Task 1, superseding
-the plan 66 bump to 3.8.1); the `mstar` CLI (`@mstar-harness/cli`) preinstall
+Five pins — mstar-harness bumped to **3.9.2** (2026-09-14, superseding
+the 3.8.1 pin); the `mstar` CLI (`@mstar-harness/cli`) preinstall
 is the container-level mechanism established in plan 47 Tasks 1–2, carried
 forward at the exact `@3.9.2` pin. The CLI
 preinstall is container-level only (`sandbox exec` resolves the `mstar`

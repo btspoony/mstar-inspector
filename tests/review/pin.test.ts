@@ -1,12 +1,12 @@
 /**
  * Pin assertions for the sandbox image harness ref, engine dep, and the
- * preinstalled @mstar-harness/cli (plan 69 Task 1 — supersedes the plan 66
- * Task 1 pin).
+ * preinstalled @mstar-harness/cli (bumped 2026-09-14 — supersedes the
+ * previous 3.8.1 pin).
  *
- * POLICY CHANGE (plan 47, user instruction 2026-09-06; range carried forward
- * at `^3.9.2` by plan 69): the repo manifest
+ * POLICY CHANGE (user instruction 2026-09-06; range carried forward
+ * at `^3.9.2`, 2026-09-14): the repo manifest
  * `@mstar-harness/engine` range is now `^3.9.2` — the only range allowed in
- * package.json. This supersedes the plan 07/32 "exact pin, no
+ * package.json. This supersedes the earlier "exact pin, no
  * `^`/`~`/`latest`" discipline for the manifest ONLY. The sandbox image side
  * stays exact: the Dockerfile fetches a pinned deref commit, and reproducibility is frozen
  * by bun.lock (packages row must resolve to exact 3.9.2) +
@@ -29,12 +29,12 @@ import { join } from "node:path";
 import { PLUGIN_ROOT_FIXTURE } from "./plugin-root-fixture";
 import { REVIEW_SKILL_VERSION } from "../../src/store/artifact-store";
 
-/** Harness 3.9.2 git ref fetched into the sandbox image (plan 69 Task 1). */
+/** Harness 3.9.2 git ref fetched into the sandbox image (bumped 2026-09-14). */
 const HARNESS_392_REF = "23d2c78c481e3571bf3e975886ace5f8c1f9f905";
 /** Superseded refs that must no longer appear in the Dockerfile. */
-/** Harness 3.8.1 git ref (plan 66 Task 1) — superseded by plan 69 Task 1 (2026-09-14). */
+/** Harness 3.8.1 git ref — superseded by the 3.9.2 bump (2026-09-14). */
 const SUPERSEDED_381_REF = "4c8fbb216c444df832b1943d68e4eee76261bbd2";
-/** Harness 3.6.3 git ref (plan 48 Task 1) — superseded by plan 66 Task 1 (2026-09-12). */
+/** Harness 3.6.3 git ref — superseded by the 3.8.1 bump (2026-09-12). */
 const SUPERSEDED_363_REF = "6cbeea67179a82483429cc6476111bfdbb959c7e";
 const SUPERSEDED_362_REF = "3436ddcaf03ddec693dc7059395e9ccf92e5d005";
 const SUPERSEDED_360_REF = "ad76f0c6600acd5040464248085ad7d22af93e9f";
@@ -43,7 +43,7 @@ const SUPERSEDED_REF = "c188934c807184f416656a80ca50adb61ccbd525";
 const SUPERSEDED_350_REF = "f1b60df0b3b2e29b9a904edb4077e52cf6d7ca66";
 
 const REPO_ROOT = join(import.meta.dir, "..", "..");
-/** The runtime-specific Dockerfile location (plan 37: sandbox-image/omp/). */
+/** The runtime-specific Dockerfile location (sandbox-image/omp/). */
 const OMP_DOCKERFILE = join(REPO_ROOT, "sandbox-image", "omp", "Dockerfile");
 
 describe("sandbox image harness pin", () => {
@@ -73,7 +73,7 @@ describe("sandbox image CLI pin", () => {
 
   test("Dockerfile preinstalls @mstar-harness/cli at the exact 3.9.2 pin (bun global)", () => {
     // bun global install of the exact pin — image pinning discipline; the
-    // repo manifest `^3.9.2` exception (plan 47 policy change) does NOT
+    // repo manifest `^3.9.2` exception (2026-09-06 policy change) does NOT
     // extend to the image.
     expect(dockerfile).toContain("bun add --global @mstar-harness/cli@3.9.2");
   });
@@ -95,7 +95,7 @@ describe("engine dependency pin", () => {
     dependencies: Record<string, string>;
   };
 
-  test("@mstar-harness/engine manifest declares the ^3.9.2 range (plan 47 policy change)", () => {
+  test("@mstar-harness/engine manifest declares the ^3.9.2 range (2026-09-06 policy change)", () => {
     expect(pkg.dependencies["@mstar-harness/engine"]).toBe("^3.9.2");
   });
 

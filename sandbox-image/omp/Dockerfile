@@ -57,7 +57,7 @@ RUN curl -fsSL https://github.com/cli/cli/releases/download/v2.98.0/gh_2.98.0_li
     && chmod +x /usr/local/bin/gh \
     && rm -rf /tmp/gh_2.98.0_linux_amd64 /tmp/gh.tar.gz
 
-# mstar-harness plugin, pinned ref 23d2c78c481e3571bf3e975886ace5f8c1f9f905 (tag v3.9.2, plan 69 Task 1).
+# mstar-harness plugin, pinned ref 23d2c78c481e3571bf3e975886ace5f8c1f9f905 (tag v3.9.2, bumped 2026-09-14).
 # Choice: build-time shallow clone (NOT a git submodule, NOT COPY):
 #   - the harness is a separate PUBLIC repo — a submodule would couple this
 #     repo's git metadata to it and require submodule state inside the build
