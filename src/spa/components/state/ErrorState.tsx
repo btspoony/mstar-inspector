@@ -1,10 +1,10 @@
 /**
- * Page-level error state (plan 57 T4 / AD-582): inline composed error —
+ * Page-level error state (AD-582): inline composed error —
  * alert icon, message line (defaulting to `common.loadFailed`), optional
  * retry button (`common.retry`) bound to the page's own reload. `role="
  * alert"` announces assertively (WCAG 4.1.3), matching the PageNotice
  * error semantics — which remain the channel for op-outcome notices and
- * background-reload failures (plan 38/44).
+ * background-reload failures.
  */
 import { CircleAlert } from "lucide-react";
 import { t, type Locale } from "../../../i18n";

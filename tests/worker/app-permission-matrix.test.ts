@@ -1,10 +1,10 @@
 /**
- * Plan 35 T1b: the App write-route permission matrix (spec §2 权限矩阵).
+ * The App write-route permission matrix (spec §2 权限矩阵).
  *
  * The T1b audit confirmed every App write route — config (settings family:
  * add-key / save-chain / save-roles / add-custom-provider /
  * add-template-provider / remove-custom-provider / key/delete / keys/verify,
- * plus the plan 35 T2/T3 chain ops add-chain / remove-chain) and ops
+ * plus the chain ops add-chain / remove-chain) and ops
  * (pause / resume / disable / enable / delete) — funnels through the SAME
  * server-side creator-or-admin gate (`canManageApp`,
  * src/dashboard/index.ts:952-954). This file locks that matrix as
@@ -140,7 +140,7 @@ const MATRIX_ROUTES: MatrixRoute[] = [
       "role_frontend-dev": "",
     },
   },
-  // Plan 35 T2/T3 ops (QC wave, seat1): add-chain must also exercise the
+  // Chain ops (QC wave, seat1): add-chain must also exercise the
   // route's membership layer, so its selector names an unverified provider
   // (syntax-only check passes); remove-chain then removes it again so the
   // sweep's later routes see a clean chain table.
@@ -183,8 +183,8 @@ const ACTORS = [
   { name: "creator of a different app", login: "ada", expected: 403 },
 ] as const;
 
-describe("App write-route permission matrix (plan 35 T1b, spec §2)", () => {
-  // Plan 61 T1.2 (F3–F8 strength pin): before any per-actor gate can even
+describe("App write-route permission matrix (T1b, spec §2)", () => {
+  // Strength pin (F3–F8): before any per-actor gate can even
   // run, the mount-level membership guard bounces a session-less POST on
   // every App write route into the OAuth flow — 302 to login, and the
   // identical zero-mutation invariants as the member sweeps below.

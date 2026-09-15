@@ -1,5 +1,5 @@
 /**
- * Sandbox runtime-image registry (plan 37, spec
+ * Sandbox runtime-image registry (spec
  * dashboard-sandbox-configuration § Runtime-image contract) — the single
  * source-controlled list of runtime images an App can select. Every entry is
  * static build-time data: this module must never import dashboard/pipeline/
@@ -15,7 +15,7 @@
  * `ark-plan` host resolves its key through `catalogProviderId: "ark"`
  * (ARK_API_KEY), while the catalog/BYOK id stays `ark`.
  *
- * `omp` is the only entry this iteration and the only enabled one — a future
+ * `omp` is the only entry for now and the only enabled one — a future
  * runtime ships its own Dockerfile, registry entry, and synthesizer. Enabling
  * a second image or changing an image's container target re-opens the
  * deploy-window skew contract (an old Worker against a newly built image

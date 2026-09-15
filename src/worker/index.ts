@@ -1,22 +1,22 @@
 /**
  * Worker entry — Hono app exported as the module `fetch` handler (no listen).
  * 06 appends the queue wiring here (worker → pipeline, the only legal edge);
- * 19 T1 appends the cron `scheduled` wiring (worker → store read-only sweep,
+ * The cron face appends the `scheduled` wiring (worker → store read-only sweep,
  * AL-6 — the sweep statically imports nothing workerd-only, so the Bun test
  * runner keeps importing this module without SDK mocks).
  *
  * Routes:
  * - GET/HEAD /dashboard* trailing slash → 301 (src/worker/redirects.ts)
  * - GET/HEAD enumerated SPA pages with Accept text/html → ASSETS index.html
- * - GET /healthz → 200 {"ok":true,"version":"vX.Y.Z"} (plan 51: version
+ * - GET /healthz → 200 {"ok":true,"version":"vX.Y.Z"} (version
  *   from the generated src/version.ts, same shape as the smoke-entry face)
- * - POST /webhook/:appSlug → per-App webhook face (plan 13 Task 2; plan 24
- *   Task 1: the ONLY HTTP review entry — the legacy bare `/webhook` face is
+ * - POST /webhook/:appSlug → per-App webhook face (the ONLY HTTP review
+ *   entry — the legacy bare `/webhook` face is
  *   retired): slug → github_apps row (active, not deleted) → that App's
  *   decrypted webhook secret verifies the signature → classify → enqueue
  *   with `appRef: { appId }` (spec § Multi-App 契约, locks L3/L4); the
  *   classified payload's installation_id touches `app_installations`
- *   (fire-and-forget relative to the enqueue, plan 13 Task 4)
+ *   (fire-and-forget relative to the enqueue)
  * - /dashboard/* → GitHub OAuth login + signed-cookie session shell (08 B0)
  */
 import { Hono } from "hono";
@@ -38,14 +38,14 @@ import { spaDispatch } from "./spa-dispatch";
 import { APP_VERSION } from "../version";
 
 const app = new Hono<{ Bindings: Env }>();
-// Plan 29 T3 + plan 30 T4: `/dashboard*` GET/HEAD redirects (trailing
+// `/dashboard*` GET/HEAD redirects (trailing
 // slash + the `/dashboard/apps` exact alias) then SPA dispatch. Both run
 // BEFORE the dashboard membership guard (mounted inside dashboardApp) so
 // POST family, OAuth, and APIs still fall through unchanged.
 app.use("*", trailingSlashRedirect());
 app.use("*", spaDispatch());
 /**
- * Classifier outcome → delivery-record outcome (plan 20 QC wave 1, S-2):
+ * Classifier outcome → delivery-record outcome (QC wave 1, S-2):
  * the pure mapping the per-App route applies immediately after
  * classifyWebhook — reject → rejected / ignore → ignored / job → paused
  * when the App's review switch is off, else ok. Extracted from the inline
@@ -64,8 +64,8 @@ export function deliveryOutcomeFromWebhook(
 }
 
 /**
- * Structured warn for the webhook face's rejection/bookkeeping paths (plan
- * 13 QC F-005; plan 15 log hygiene): the caller passes the real stage label
+ * Structured warn for the webhook face's rejection/bookkeeping paths (QC
+ * F-005; log hygiene): the caller passes the real stage label
  * (e.g. `webhook_body_too_large`,
  * `db_binding_missing`, `installation_upsert_failed`) and it rides `event` —
  * never the generic "unknown" — so log consumers can filter these warns by
@@ -86,7 +86,7 @@ function webhookInfo(event: string, detail: string, msg: string): void {
   defaultLog.info({ event, reason: event, detail }, msg);
 }
 
-// Plan 51: `version` rides the healthz face — additive field, `ok:true`
+// `version` rides the healthz face — additive field, `ok:true`
 // contract unchanged; displayed with the `v` prefix (tag-shaped, eyeball-
 // reconcilable). Single source = generated src/version.ts.
 app.get("/healthz", (c) => c.json({ ok: true, version: `v${APP_VERSION}` }));
@@ -95,12 +95,12 @@ app.get("/healthz", (c) => c.json({ ok: true, version: `v${APP_VERSION}` }));
 app.route("/dashboard", dashboardApp);
 
 /**
- * Per-App webhook face (plan 13 Task 2, spec § Multi-App 契约; plan 24
- * Task 1: the ONLY HTTP review entry — the legacy bare `/webhook` face is
+ * Per-App webhook face (spec § Multi-App 契约; the ONLY HTTP review
+ * entry — the legacy bare `/webhook` face is
  * retired). Pre-order: body-size cap (413) → REVIEW_ENABLED
  * emergency brake (exactly "false" → 2xx ignore, zero side effects;
  * deployment-level brake only — per-App `github_apps.review_enabled` is the
- * primary control, plan 31 AC4a) → DB-unbound guard (500 fail-closed — the
+ * primary control, AC4a) → DB-unbound guard (500 fail-closed — the
  * dashboard-dependency convention) → slug lookup → signature verify. The
  * slug locates the `github_apps` row (active, not deleted) whose DECRYPTED
  * webhook secret parameterizes the same `classifyWebhook` classifier
@@ -111,7 +111,7 @@ app.route("/dashboard", dashboardApp);
  * secret decrypt failure (missing DASHBOARD_ENCRYPTION_KEY, tampered
  * envelope) → 500 fail-closed (lock L1); GitHub retries, nothing enqueues.
  *
- * Per-App pause (plan 16, spec 语义锁 B3 — paused ≠ disabled): once the
+ * Per-App pause (spec 语义锁 — paused ≠ disabled): once the
  * signature VERIFIED (classifyWebhook returned a non-reject),
  * `last_webhook_at` is touched exactly once — after signature verification,
  * regardless of the subsequent enqueue outcome (job / ignore / paused; a
@@ -124,7 +124,7 @@ app.route("/dashboard", dashboardApp);
  * The in-flight queue face ack-skips paused messages symmetrically
  * (consumer lock L4).
  *
- * Install bookkeeping (plan 13 Task 4): a classified job payload always
+ * Install bookkeeping: a classified job payload always
  * carries `installation_id`, so the accepted path touches
  * `app_installations` (seen_at upsert, lock L1 store). The touch runs AFTER
  * the enqueue — fire-and-forget relative to it, so the review path never
@@ -132,7 +132,7 @@ app.route("/dashboard", dashboardApp);
  * warn: it never blocks the enqueue nor fails the webhook (best-effort
  * install health, B3 roadmap).
  *
- * Delivery recording (plan 20 Task 1, AL-20-1): immediately after
+ * Delivery recording (AL-20-1): immediately after
  * classification (before the reject return) ONE best-effort row is appended
  * to `webhook_deliveries` — every classified outcome lands (rejected /
  * ignored / paused / ok), the pre-classify failures record nothing, and a
@@ -156,7 +156,7 @@ app.post("/webhook/:appSlug", async (c) => {
   const eventName = c.req.header("x-github-event") ?? null;
 
   // Emergency brake BEFORE the slug lookup (spec ordering; zero side effects
-  // — no D1 read when the brake is pulled). Plan 31 AC4a: the env is an
+  // — no D1 read when the brake is pulled). AC4a: the env is an
   // emergency brake ONLY — per-App `github_apps.review_enabled` is the
   // primary control, so the predicate is inverted to `!== "false"` (unset /
   // "" / "true" / "TRUE" / anything else → per-App governs; only the exact,
@@ -173,7 +173,7 @@ app.post("/webhook/:appSlug", async (c) => {
     return c.text("ignored", 200);
   }
 
-  // DB-unbound guard (plan 13 T4 fold): unreachable on the deployed Worker
+  // DB-unbound guard (fold-in): unreachable on the deployed Worker
   // (wrangler.jsonc binds DB globally) — the branch exists because the
   // shared fetch-face Env keeps DB optional for the dashboard's unbound-D1
   // premises. Fail-closed 500, zero enqueue.
@@ -225,13 +225,13 @@ app.post("/webhook/:appSlug", async (c) => {
     return c.text("webhook secret decrypt failed", 500);
   }
 
-  // Plan 15 (architect lock L1): the verifier memoizes under the row id as
+  // Architect lock L1: the verifier memoizes under the row id as
   // cacheKey — a rotated webhook secret (same id, new envelope → new
   // secret) is rebuilt + REPLACED on the next delivery; entries are
   // structurally bounded (≤ github_apps rows) with no eviction policy.
   const outcome = await classifyWebhook(appSecret, rawBody, signature, eventName, defaultLog, reviewEnabled, row.id);
 
-  // Plan 20 (AL-20-1): best-effort delivery recording — the R2 diagnostics
+  // AL-20-1: best-effort delivery recording — the R2 diagnostics
   // face ("断线看得见"). ONE row per VERIFIED delivery, written immediately
   // after classification (before the reject return) so EVERY classified
   // outcome lands: reject → rejected (status_code = the classifier's
@@ -258,7 +258,7 @@ app.post("/webhook/:appSlug", async (c) => {
     return c.text(outcome.reason, outcome.status);
   }
 
-  // Plan 16 (L5): the signature VERIFIED (classifyWebhook returned a
+  // Lock L5: the signature VERIFIED (classifyWebhook returned a
   // non-reject), so this delivery is touched — after signature verification,
   // regardless of the subsequent enqueue outcome (job / ignore / paused; a
   // queue-send failure in handleReviewJob below still leaves this touch
@@ -278,7 +278,7 @@ app.post("/webhook/:appSlug", async (c) => {
     return c.text("ignored", 200);
   }
 
-  // Pause gate (plan 16, spec 语义锁 B3 — paused ≠ disabled): review_enabled
+  // Pause gate (spec 语义锁 — paused ≠ disabled): review_enabled
   // =0 answers 2xx with ZERO enqueue — the webhook stays healthy (and
   // touched, above) while reviews are paused. disabled/deleted already
   // returned 404 above; the consumer ack-skips the in-flight messages it
@@ -301,7 +301,7 @@ app.post("/webhook/:appSlug", async (c) => {
     env: c.env,
     log: defaultLog,
   });
-  // Install bookkeeping (plan 13 Task 4): the classified job payload always
+  // Install bookkeeping: the classified job payload always
   // carries installation_id, so touch `app_installations` AFTER the enqueue
   // — fire-and-forget relative to it (the review path never waits on
   // bookkeeping) and best-effort: a failure logs a structured warn and the
@@ -328,9 +328,9 @@ export default {
     const { createReviewConsumer } = await import("../pipeline/consumer");
     await createReviewConsumer(env)(batch);
   },
-  // 19 T1 cron wiring (AL-6): the trailing-24h `review_failures` sweep,
-  // composed (spec review-lifecycle §7.11) with the plan-67 M8 recovery
-  // reconciler and the plan-68 M7 Check recovery reconciler — runSweep →
+  // Cron wiring (AL-6): the trailing-24h `review_failures` sweep,
+  // composed (spec review-lifecycle §7.11) with the M8 recovery
+  // reconciler and the M7 Check recovery reconciler — runSweep →
   // reconcileReviewLifecycle → reconcileReviewChecks — each stage caught
   // INDEPENDENTLY so one stage's failure can never break another, and nothing
   // ever throws out of `scheduled` (a throwing cron handler just retries into
@@ -360,9 +360,9 @@ export default {
         "ops sweep failed",
       );
     }
-    // M8 recovery reconciler (plan 67 §7.11) — OWN try/catch AFTER runSweep.
+    // M8 recovery reconciler (§7.11) — OWN try/catch AFTER runSweep.
     // reconcileReviewLifecycle is throw-proof by contract; the catch is the
-    // composition's independent-failure guarantee (and matches plan 68's
+    // composition's independent-failure guarantee (and matches the
     // upcoming stage shape).
     try {
       await reconcileReviewLifecycle(env);
@@ -375,7 +375,7 @@ export default {
         "lifecycle reconcile failed",
       );
     }
-    // M7 Check recovery reconciler (plan 68 §7.11.2) — the SECOND independent
+    // M7 Check recovery reconciler (§7.11.2) — the SECOND independent
     // reconciler, in its OWN try/catch AFTER the M8 lane. M8 owns publication
     // proof; this lane only reads what M8 persisted, so ordering is what makes
     // a proven publication visible to the Check conclusion in the same run.

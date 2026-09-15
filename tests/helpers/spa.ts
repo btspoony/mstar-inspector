@@ -1,5 +1,5 @@
 /**
- * Shared SPA dispatch test helpers (plan 29 T7).
+ * Shared SPA dispatch test helpers.
  *
  * Worker tests that exercise HTML navigation against spa-dispatch need a
  * stub ASSETS binding that serves a marker-bearing index.html. Four files

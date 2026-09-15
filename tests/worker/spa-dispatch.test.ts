@@ -1,5 +1,5 @@
 /**
- * Plan 29 T3: enumerated SPA dispatch + HTML/JSON negotiation.
+ * enumerated SPA dispatch + HTML/JSON negotiation.
  */
 import { describe, expect, test } from "bun:test";
 import type { Fetcher } from "@cloudflare/workers-types";
@@ -35,7 +35,7 @@ function memberDbStub(): Env["DB"] {
 }
 
 /**
- * Users-store D1 double for the removed-member shell gate (plan 33 T3):
+ * Users-store D1 double for the removed-member shell gate:
  * `first()` returns no row, so any session login is treated as removed.
  */
 function removedMemberDbStub(): Env["DB"] {
@@ -80,7 +80,7 @@ function makeEnv(overrides: Partial<Env> = {}): { env: Env; calls: AssetCall[] }
 }
 
 
-describe("SPA dispatch (plan 29 T3)", () => {
+describe("SPA dispatch", () => {
   test("SPA page GET with Accept: text/html fetches /index.html", async () => {
     const { env, calls } = makeEnv({ DB: memberDbStub() });
     const session = await createSessionValue("octocat", null, SESSION_SECRET);
@@ -144,12 +144,12 @@ describe("SPA dispatch (plan 29 T3)", () => {
     expect(res.status).toBe(200);
     expect(calls).toEqual([{ method: "GET", pathname: "/index.html" }]);
     expect(await res.text()).toContain("window.__BOOT__=");
-    // Plan 30 QC S-001: the boot-injected document carries identity (login/
+    // QC S-001: the boot-injected document carries identity (login/
     // role) — explicitly uncacheable.
     expect(res.headers.get("cache-control")).toBe("private, no-store");
   });
 
-  test("GET /dashboard is the SPA workbench for every Accept variant (plan 30 T4)", async () => {
+  test("GET /dashboard is the SPA workbench for every Accept variant", async () => {
     for (const accept of [undefined, "*/*", "application/json", "text/html"]) {
       const { env, calls } = makeEnv({ DB: memberDbStub() });
       const session = await createSessionValue("octocat", null, SESSION_SECRET);
@@ -197,7 +197,7 @@ describe("SPA dispatch (plan 29 T3)", () => {
     expect(body).not.toContain(SPA_BOOT_MARKER);
   });
 
-  test("theme bootstrap precedes the injected boot and the bundle in the served shell (plan 41 T1)", async () => {
+  test("theme bootstrap precedes the injected boot and the bundle in the served shell", async () => {
     // serveSpaIndex fetches ASSETS /index.html verbatim and injects the boot
     // at <!--SPA_BOOT--> — the prod document is the real shell source plus
     // the injection, so serve the actual src/spa/index.html here to pin the
@@ -232,7 +232,7 @@ describe("SPA dispatch (plan 29 T3)", () => {
   });
 
   test("boot script carries locale from the mstar_locale cookie", async () => {
-    // The login page is exempt from the no-session redirect (plan 33 T3),
+    // The login page is exempt from the no-session redirect,
     // so it is the session-less shell surface that still carries the boot.
     const { env } = makeEnv();
     const res = await worker.fetch(
@@ -243,7 +243,7 @@ describe("SPA dispatch (plan 29 T3)", () => {
     expect(body).toContain('"locale":"zh_CN"');
   });
 
-  test("login HTML GET with Accept-Language zh injects locale zh_CN in boot (plan 29 T7)", async () => {
+  test("login HTML GET with Accept-Language zh injects locale zh_CN in boot", async () => {
     const { env } = makeEnv();
     const res = await worker.fetch(
       htmlGetRequest("/dashboard/login", { "Accept-Language": "zh-CN,zh;q=0.9" }),
@@ -256,7 +256,7 @@ describe("SPA dispatch (plan 29 T3)", () => {
   });
 
   test("boot script carries login from the session cookie", async () => {
-    // Plan 30 W-001: a session-bearing shell request re-reads membership
+    // W-001: a session-bearing shell request re-reads membership
     // through D1 — bind the users store so the boot's login/name resolve
     // past the gate (role comes from the same single lookup).
     const { env } = makeEnv({ DB: memberDbStub() });
@@ -272,7 +272,7 @@ describe("SPA dispatch (plan 29 T3)", () => {
     expect(body).toContain('"role":"admin"');
   });
 
-  test("session on the shell path fails closed when D1 is unbound (500, plan 30 W-001)", async () => {
+  test("session on the shell path fails closed when D1 is unbound (500, W-001)", async () => {
     // Mirrors the guard: a session whose membership cannot be verified (no
     // users-store binding) must never receive the shell — 500, not a leak.
     const { env } = makeEnv({ DB: undefined });
@@ -285,7 +285,7 @@ describe("SPA dispatch (plan 29 T3)", () => {
     expect(await res.text()).toContain("dashboard storage is not configured");
   });
 
-  // --- plan 33 T3: auth redirect 全覆盖 (spec §1.3) ---
+  // --- auth redirect 全覆盖 (spec §1.3) ---
 
   test("unauthenticated deep link HTML GET → 302 login, no ASSETS call", async () => {
     const deepLinks = [

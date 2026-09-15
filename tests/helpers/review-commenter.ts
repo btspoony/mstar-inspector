@@ -1,5 +1,5 @@
 /**
- * Shared ReviewCommenter test double (plan 67 Task 4) — one factory for the
+ * Shared ReviewCommenter test double — one factory for the
  * consumer-flow test files. The double records every op into a caller-owned
  * array and reads its BEHAVIOR from a caller-owned mutable state object, so
  * tests reset state between cases exactly like the module-level `let` vars

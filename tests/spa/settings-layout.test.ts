@@ -1,8 +1,8 @@
 /**
- * Plan 31 T4+T6 + plan 35 T4: settings ops zone, unified providers, chains UI.
+ * Settings ops zone, unified providers, chains UI.
  * No DOM runner — source-scan pins over SettingsPage.tsx and its primitives
- * plus pure data helpers (the plan 30 home suite that shared this style is
- * retired). Plan 53: the AppInfoCard degradation face is additionally pinned
+ * plus pure data helpers (the home suite that shared this style is
+ * retired). The AppInfoCard degradation face is additionally pinned
  * behaviorally through react-dom/server SSR of the exported card (no DOM
  * needed — static markup output).
  */
@@ -24,7 +24,7 @@ import {
 } from "../../src/spa/components/provider-combobox";
 import { AppInfoCard, DraftChainPanel, draftChainTabLabel, githubAppSettingsUrl } from "../../src/spa/pages/SettingsPage";
 
-describe("settings layout (plan 35 T4)", () => {
+describe("settings layout", () => {
   test("SettingsPage folds ops + health into an authorized ops zone; providers and chains are shadcn", () => {
     const source = readFileSync(join(import.meta.dir, "../../src/spa/pages/SettingsPage.tsx"), "utf8");
     expect(source).toContain("settings.ops");
@@ -58,7 +58,7 @@ describe("settings layout (plan 35 T4)", () => {
   });
 });
 
-describe("settings dropdowns (plan 31 T4 / plan 35 T4)", () => {
+describe("settings dropdowns", () => {
   test("chain and role editors are dropdowns, not free-text; add-key posts the JSON verify route", () => {
     const source = readFileSync(join(import.meta.dir, "../../src/spa/pages/SettingsPage.tsx"), "utf8");
     expect(source).toContain("/keys/verify");
@@ -95,10 +95,10 @@ describe("settings dropdowns (plan 31 T4 / plan 35 T4)", () => {
   });
 });
 
-describe("runtime image selector (plan 37)", () => {
+describe("runtime image selector", () => {
   test("managers get a shadcn selector saved through op=save-sandbox-image; other members read-only", () => {
     const source = readFileSync(join(import.meta.dir, "../../src/spa/pages/SettingsPage.tsx"), "utf8");
-    // The editor posts the plan-37 op with the selected registry id.
+    // The editor posts the op with the selected registry id.
     expect(source).toContain('op: "save-sandbox-image"');
     expect(source).toContain("sandbox_image_id: selected");
     // The choices come from the manage payload's enabled registry rows.
@@ -123,7 +123,7 @@ describe("runtime image selector (plan 37)", () => {
   });
 });
 
-describe("settings copy is dictionary-backed (plan 31 T4+T6 / plan 35 T4)", () => {
+describe("settings copy is dictionary-backed", () => {
   test("new keys exist in both locales", () => {
     expect(t("en", "settings.verify.invalid_key")).toContain("rejected");
     expect(t("zh_CN", "settings.verify.invalid_key")).toContain("拒绝");
@@ -167,7 +167,7 @@ describe("settings copy is dictionary-backed (plan 31 T4+T6 / plan 35 T4)", () =
   });
 });
 
-describe("configured providers + catalog add flow (plan 38 T2)", () => {
+describe("configured providers + catalog add flow", () => {
   test("the providers card renders configured state only; the catalog is the Add Provider picker", () => {
     const source = readFileSync(join(import.meta.dir, "../../src/spa/pages/SettingsPage.tsx"), "utf8");
     // Primary list = configured state (kind rows), never the catalog dump.
@@ -182,7 +182,7 @@ describe("configured providers + catalog add flow (plan 38 T2)", () => {
 
   test("Add Provider: catalog selection drives the configuration form; custom path preserved", () => {
     const source = readFileSync(join(import.meta.dir, "../../src/spa/pages/SettingsPage.tsx"), "utf8");
-    // Header disclosure button (plan 42) → catalog select → selected provider's form.
+    // Header disclosure button → catalog select → selected provider's form.
     expect(source).toContain("settings.addProvider");
     expect(source).toContain("aria-expanded={addOpen}");
     expect(source).toContain("selectedCatalogProvider");
@@ -201,7 +201,7 @@ describe("configured providers + catalog add flow (plan 38 T2)", () => {
     expect(source).toContain("verifyReasonMessage(locale, reason)");
     // Forms reset and close only on success — a rejected submit keeps the
     // typed input and the add selection while the background reload refreshes
-    // data in place (plan 44 T3: the outcome literal replaces the old
+    // data in place (the outcome literal replaces the old
     // boolean, and the success branch keys off the outcome kind).
     expect(source).toContain('if (outcome.kind === "success") {');
     expect(source).toContain("await onReload({ background: true })");
@@ -233,9 +233,9 @@ describe("configured providers + catalog add flow (plan 38 T2)", () => {
     expect(source).toContain('setKey("")');
   });
 
-  test("plan 38 add-flow copy is dictionary-backed in both locales", () => {
+  test("catalog add-flow copy is dictionary-backed in both locales", () => {
     expect(t("en", "settings.addProvider")).toBe("Add provider");
-    // Plan 54: the zh label unifies on 模型提供方 (supersedes the plan-42
+    // The zh label unifies on 模型提供方 (supersedes the
     // settled "添加 Provider" — no bare "Provider" left on the picker
     // surface); en keeps "Add provider".
     expect(t("zh_CN", "settings.addProvider")).toBe("添加模型提供方");
@@ -243,8 +243,8 @@ describe("configured providers + catalog add flow (plan 38 T2)", () => {
     expect(t("zh_CN", "settings.providersCopy")).toContain("添加模型提供方");
     expect(t("en", "settings.noConfiguredProviders")).toContain("No providers configured yet");
     expect(t("zh_CN", "settings.noConfiguredProviders")).toContain("尚未配置");
-    // Plan 54: the 常用提供方 common tier replaces 内置提供方 as the group
-    // name (supersedes the plan-38 "Built-in"/"内置" pins).
+    // The 常用提供方 common tier replaces 内置提供方 as the group
+    // name (supersedes the "Built-in"/"内置" pins).
     expect(t("en", "settings.catalogBuiltin")).toBe("Common providers");
     expect(t("zh_CN", "settings.catalogBuiltin")).toBe("常用提供方");
     expect(t("en", "settings.catalogTemplate")).toContain("templates");
@@ -254,7 +254,7 @@ describe("configured providers + catalog add flow (plan 38 T2)", () => {
   });
 });
 
-describe("catalog provenance + eligibility messaging (plan 38 T3)", () => {
+describe("catalog provenance + eligibility messaging", () => {
   test("Add Provider discloses provenance and per-entry eligibility vs the selected runtime image", () => {
     const source = readFileSync(join(import.meta.dir, "../../src/spa/pages/SettingsPage.tsx"), "utf8");
     // Provenance: the catalog is generated, pinned metadata — not a live query.
@@ -265,7 +265,7 @@ describe("catalog provenance + eligibility messaging (plan 38 T3)", () => {
     expect(source).toContain("settings.eligibilityTemplate");
     expect(source).toContain("settings.eligibilityUnavailable");
     // Unavailable rows keep their picker entry (marked), never hidden
-    // silently — plan 54: the short suffix moved into the combobox file with
+    // silently — the short suffix moved into the combobox file with
     // the picker rows (supersedes the in-page pin).
     const combobox = readFileSync(join(import.meta.dir, "../../src/spa/components/provider-combobox.tsx"), "utf8");
     expect(combobox).toContain("settings.eligibilityUnavailableShort");
@@ -280,7 +280,7 @@ describe("catalog provenance + eligibility messaging (plan 38 T3)", () => {
   test("the catalog picker uses the aria-labelledby precedent; custom configured rows show the catalog label", () => {
     const source = readFileSync(join(import.meta.dir, "../../src/spa/pages/SettingsPage.tsx"), "utf8");
     // MembersPage precedent: visible label span naming the picker — no
-    // wrapping <label>. Plan 54: the span names the combobox input through
+    // wrapping <label>. the span names the combobox input through
     // the labelledby prop (the aria-labelledby attribute itself moved into
     // provider-combobox.tsx, superseding the old attribute pin).
     expect(source).toContain('id="settings-catalog-provider-label"');
@@ -290,8 +290,8 @@ describe("catalog provenance + eligibility messaging (plan 38 T3)", () => {
     expect(source).toContain("catalogById[row.provider_id]?.label");
   });
 
-  test("plan 38 T3 copy is dictionary-backed in both locales", () => {
-    // Provenance names the count + committed-snapshot source (plan 42 breadth).
+  test("provenance copy is dictionary-backed in both locales", () => {
+    // Provenance names the count + committed-snapshot source.
     expect(t("en", "settings.catalogProvenance", { count: 214 })).toContain("214");
     expect(t("en", "settings.catalogProvenance", { count: 214 })).toContain("models.dev");
     expect(t("zh_CN", "settings.catalogProvenance", { count: 214 })).toContain("214");
@@ -309,7 +309,7 @@ describe("catalog provenance + eligibility messaging (plan 38 T3)", () => {
   });
 });
 
-describe("provider combobox (plan 54 T3)", () => {
+describe("provider combobox", () => {
   const commonEntry = (id: string, label: string, overrides: Partial<CatalogProvider> = {}): CatalogProvider => ({
     id,
     label,
@@ -565,7 +565,7 @@ describe("provider combobox (plan 54 T3)", () => {
     expect(empty).toContain("No providers match");
   });
 
-  test("plan 54 picker copy is dictionary-backed; zh picker copy carries no bare Provider (AC1 sweep)", () => {
+  test("picker copy is dictionary-backed; zh picker copy carries no bare Provider (AC1 sweep)", () => {
     expect(t("en", "settings.provider")).toBe("Model provider");
     expect(t("zh_CN", "settings.provider")).toBe("模型提供方");
     expect(t("en", "settings.providers")).toBe("Providers"); // en keeps the section title
@@ -596,7 +596,7 @@ describe("provider combobox (plan 54 T3)", () => {
   });
 });
 
-describe("add-entry visibility + picker usability at breadth (plan 42 T2)", () => {
+describe("add-entry visibility + picker usability at breadth", () => {
   test("the Add Provider entry is a labeled, bordered control in the Providers card header", () => {
     const source = readFileSync(join(import.meta.dir, "../../src/spa/pages/SettingsPage.tsx"), "utf8");
     // The entry lives in the card HEADER (CardAction slot) — visible without
@@ -626,8 +626,8 @@ describe("add-entry visibility + picker usability at breadth (plan 42 T2)", () =
     expect(body).toContain("onOpenChange={setAddOpen}");
   });
 
-  test("the catalog picker is the plan-54 combobox: common group first, then catalog, height-capped to an internal scroll", () => {
-    // Supersedes the plan-42 "builtin SelectGroup precedes template
+  test("the catalog picker is the provider combobox: common group first, then catalog, height-capped to an internal scroll", () => {
+    // Supersedes the "builtin SelectGroup precedes template
     // SelectGroup + <SelectContent className=\"max-h-72\">" pin — the Radix
     // Select left the add panel (AD-542); the chain/seat editors keep theirs.
     const source = readFileSync(join(import.meta.dir, "../../src/spa/pages/SettingsPage.tsx"), "utf8");
@@ -663,7 +663,7 @@ describe("add-entry visibility + picker usability at breadth (plan 42 T2)", () =
     expect(source).toContain('setBaseUrl("")');
   });
 
-  test("plan 42 copy is dictionary-backed in both locales; account id is no longer Cloudflare-worded", () => {
+  test(" copy is dictionary-backed in both locales; account id is no longer Cloudflare-worded", () => {
     expect(t("en", "settings.accountId")).toBe("Account id");
     expect(t("zh_CN", "settings.accountId")).toBe("账户 id");
     expect(t("en", "settings.accountId")).not.toContain("Cloudflare");
@@ -674,7 +674,7 @@ describe("add-entry visibility + picker usability at breadth (plan 42 T2)", () =
   });
 });
 
-describe("model chain tabs (plan 39 T1)", () => {
+describe("model chain tabs", () => {
   test("Default and named chains are peer shadcn tabs with a coherent selected state", () => {
     const source = readFileSync(join(import.meta.dir, "../../src/spa/pages/SettingsPage.tsx"), "utf8");
     // The chain card is an accessible Radix tablist (roles + arrow-key nav via
@@ -682,7 +682,7 @@ describe("model chain tabs (plan 39 T1)", () => {
     expect(source).toContain("TabsList");
     expect(source).toContain("TabsTrigger");
     expect(source).toContain("TabsContent");
-    // Tab ids come from the pure plan-39 tab model; the selection coerces to a
+    // Tab ids come from the pure tab model; the selection coerces to a
     // tab that exists so deletes/reloads land on Default.
     expect(source).toContain("modelChainTabs(payload.model_chains)");
     expect(source).toContain("activeChainTabId(tabs, selectedTab)");
@@ -693,7 +693,7 @@ describe("model chain tabs (plan 39 T1)", () => {
     // Only the named tabs' content offers remove, via the existing
     // confirm-dialog flow (pendingConfirmCopy → op=remove-chain).
     expect(source).toContain("onRemoveChain(tab.id)");
-    // Plan 44 T2: a successful create closes the draft and selects the real
+    // after a successful create, the draft closes and the real
     // (stored-name) tab after the reload lands — the draft flow's success
     // branch lives in the ChainsCard onCreated callback.
     expect(source).toContain("setSelectedTab(created);");
@@ -739,11 +739,11 @@ describe("model chain tabs (plan 39 T1)", () => {
   });
 });
 
-describe("chain draft peer tab (plan 44 T2)", () => {
+describe("chain draft peer tab", () => {
   test("+ 新建链 opens a draft peer tab: after the named tabs, auto-selected, never two drafts", () => {
     const source = readFileSync(join(import.meta.dir, "../../src/spa/pages/SettingsPage.tsx"), "utf8");
     const chainsBody = source.slice(source.indexOf("function ChainsCard"), source.indexOf("function SeatsCard"));
-    // The entry mirrors the plan-43 strip placement: outline button, plus
+    // The entry mirrors the strip placement: outline button, plus
     // glyph, localized label (icon-only is not acceptable) — a TabsList
     // SIBLING in the strip row, never a trigger inside the role=tablist.
     expect(chainsBody).toContain('variant="outline"');
@@ -764,14 +764,14 @@ describe("chain draft peer tab (plan 44 T2)", () => {
     // Appended AFTER the last named tab (never before Default): the draft
     // joins the coercion list by spreading after the stored tabs, and its
     // trigger renders after the stored-tabs map inside the TabsList. The
-    // trigger's label is the live AD-551 mirror (plan 55), not the static
+    // trigger's label is the live AD-551 mirror, not the static
     // 新链 copy.
     expect(chainsBody).toContain("const tabs = draft ? [...storedTabs, draft] : storedTabs;");
     const storedMapPos = chainsBody.indexOf("{storedTabs.map((tab) => (");
     const draftTriggerPos = chainsBody.indexOf("{draftChainTabLabel(draftName, locale)}");
     expect(storedMapPos).toBeGreaterThan(-1);
     expect(draftTriggerPos).toBeGreaterThan(storedMapPos);
-    // The old plan-43 disclosure between strip and Default panel is gone —
+    // The old disclosure between strip and Default panel is gone —
     // Default's area never shows creation UI.
     expect(chainsBody).not.toContain("createOpen");
     expect(chainsBody).not.toContain("NamedChainCreate");
@@ -782,7 +782,7 @@ describe("chain draft peer tab (plan 44 T2)", () => {
   test("the add-chain control is a TabsList sibling: its source sits after the tablist close", () => {
     const source = readFileSync(join(import.meta.dir, "../../src/spa/pages/SettingsPage.tsx"), "utf8");
     const chainsBody = source.slice(source.indexOf("function ChainsCard"), source.indexOf("function SeatsCard"));
-    // Plan-43 strip-level contract, structurally pinned (plan 46 T6, audit
+    // strip-level contract, structurally pinned (audit
     // F-10): the labels/props pins above cannot see WHERE the control sits —
     // a regression nesting the add-chain button inside the role=tablist would
     // still carry its outline variant, plus glyph, label and click handler
@@ -814,7 +814,7 @@ describe("chain draft peer tab (plan 44 T2)", () => {
     // call) with the shared 保存模型链 label semantics.
     expect(panelBody).toContain('op: "add-chain", name, chain: value');
     expect(panelBody).toContain('saveLabel={t(locale, "settings.saveChain")}');
-    // Plan 44 T3 unification: a rejected create renders INLINE through
+    // row-local unification: a rejected create renders INLINE through
     // ChainEditor's own region (inside this panel) and keeps the draft +
     // typed input; success forwards the saved outcome to the card's region
     // (the panel unmounts) and hands the trimmed stored name back so the
@@ -822,7 +822,7 @@ describe("chain draft peer tab (plan 44 T2)", () => {
     expect(panelBody).toContain('outcome.kind === "success"');
     expect(panelBody).toContain("onOutcome(outcome)");
     expect(panelBody).toContain("onCreated(name.trim())");
-    // 放弃 discards without confirmation — plan 55 (AD-552) supersedes the
+    // 放弃 discards without confirmation — the AD-552 discard rework supersedes the
     // old hover-only ghost row: the button is injected through ChainEditor's
     // actions prop into the save row, styled to be visible without hover
     // (outline + sm + fixed small width). It stays bound to this panel's
@@ -838,8 +838,8 @@ describe("chain draft peer tab (plan 44 T2)", () => {
     expect(actionsNode).toContain('t(locale, "settings.discardChain")}');
     // The draft panel mounts inside its own forceMount TabsContent; the
     // discard closes the draft — the selection then coerces through
-    // activeChainTabId (plan-39 pin) back to Default — and, plan 55
-    // (AD-551), resets the lifted draft name so a reopened draft starts
+    // activeChainTabId (the tab-model pin) back to Default — and,
+    // per AD-551, resets the lifted draft name so a reopened draft starts
     // blank (the old unmount-clears-name semantics, now explicit).
     const chainsBody = source.slice(source.indexOf("function ChainsCard"), source.indexOf("function SeatsCard"));
     expect(chainsBody).toContain("<TabsContent forceMount value={DRAFT_CHAIN_TAB_ID}>");
@@ -853,7 +853,7 @@ describe("chain draft peer tab (plan 44 T2)", () => {
 
   test("a failed post-create reload keeps the draft open: the create resolves the load-failed error, not success", () => {
     const source = readFileSync(join(import.meta.dir, "../../src/spa/pages/SettingsPage.tsx"), "utf8");
-    // Bugbot fix (plan 44): POST success alone is not completion — the chain
+    // Bugbot fix: POST success alone is not completion — the chain
     // is only usable once the awaited background reload lands it in the
     // payload. createDraftChain demotes a POST success whose reload failed to
     // the load-failed copy, so the panel's success branch (onOutcome +
@@ -888,7 +888,7 @@ describe("chain draft peer tab (plan 44 T2)", () => {
   });
 });
 
-describe("draft tab label live-sync (plan 55 A2/A3 / AD-551)", () => {
+describe("draft tab label live-sync (A2/A3 / AD-551)", () => {
   /**
    * The label faces are pure (the exported draftChainTabLabel mirror), so
    * they are pinned directly. The controlled panel is pinned behaviorally
@@ -964,7 +964,7 @@ describe("draft tab label live-sync (plan 55 A2/A3 / AD-551)", () => {
   });
 });
 
-describe("discard inline with the save row (plan 55 A4/A5 / AD-552)", () => {
+describe("discard inline with the save row (A4/A5 / AD-552)", () => {
   /**
    * The discard is a pure render insertion through ChainEditor's optional
    * actions prop: the save-row wrapper exists only when actions are passed
@@ -1039,7 +1039,7 @@ describe("discard inline with the save row (plan 55 A4/A5 / AD-552)", () => {
   });
 });
 
-describe("seat assignment section (plan 39 T2)", () => {
+describe("seat assignment section", () => {
   test("seats are an independent titled card below chain management, not a section of the chains card", () => {
     const source = readFileSync(join(import.meta.dir, "../../src/spa/pages/SettingsPage.tsx"), "utf8");
     // SeatsCard is its own card component, rendered after ChainsCard for
@@ -1059,7 +1059,7 @@ describe("seat assignment section (plan 39 T2)", () => {
 
   test("seat selects offer Default first, then current named tabs; values coerce before render and save", () => {
     const source = readFileSync(join(import.meta.dir, "../../src/spa/pages/SettingsPage.tsx"), "utf8");
-    // Options derive from the same plan-39 tab model as the chain tabs.
+    // Options derive from the same tab model as the chain tabs.
     expect(source).toContain("modelChainTabs(payload.model_chains)");
     // Default is an explicit option (the reserved name, never a free-text
     // value), and every rendered value passes seatSelectValue so a stale or
@@ -1119,7 +1119,7 @@ describe("seat assignment section (plan 39 T2)", () => {
   });
 });
 
-describe("operational action hierarchy (plan 39 T3)", () => {
+describe("operational action hierarchy", () => {
   test("Disable is destructive-outline with reversible wording; Delete stays filled destructive behind its confirmation", () => {
     const source = readFileSync(join(import.meta.dir, "../../src/spa/pages/SettingsPage.tsx"), "utf8");
     // The ops zone renders Disable through the destructive-outline family —
@@ -1186,7 +1186,7 @@ describe("operational action hierarchy (plan 39 T3)", () => {
   });
 });
 
-describe("App workflow boundaries (plan 40 T2)", () => {
+describe("App workflow boundaries", () => {
   test("App settings reads as one workflow with the Apps list: a visible path back", () => {
     const source = readFileSync(join(import.meta.dir, "../../src/spa/pages/SettingsPage.tsx"), "utf8");
     // The back link targets the enumerated Apps route (the /dashboard surface).
@@ -1194,7 +1194,7 @@ describe("App workflow boundaries (plan 40 T2)", () => {
     expect(source).toContain('t(locale, "settings.backToApps")');
     expect(t("en", "settings.backToApps")).toBe("Back to Apps");
     expect(t("zh_CN", "settings.backToApps")).toBe("返回应用");
-    // Plan 62 A4: a decorative ArrowLeft rides the link — aria-hidden keeps
+    // A decorative ArrowLeft rides the link — aria-hidden keeps
     // the accessible name at the backToApps text alone; inline-flex aligns
     // icon + label. Copy and target unchanged (AC3).
     const wayfinding = source.slice(
@@ -1208,7 +1208,7 @@ describe("App workflow boundaries (plan 40 T2)", () => {
 
   test("successful configuration saves surface success feedback; failures keep the structured error", () => {
     const source = readFileSync(join(import.meta.dir, "../../src/spa/pages/SettingsPage.tsx"), "utf8");
-    // Success is no longer silent — and since plan 44 T3 it is section-scoped:
+    // Success is no longer silent — and since the inline-outcome rework it is section-scoped:
     // handlers resolve the saved outcome to the card that caused it.
     expect(source).toContain('successMessage ?? t(locale, "settings.changesSaved")');
     expect(t("en", "settings.changesSaved")).toBe("Changes saved.");
@@ -1237,7 +1237,7 @@ describe("App workflow boundaries (plan 40 T2)", () => {
   });
 });
 
-describe("notice channel (plan 40 T3 reviewer handoffs)", () => {
+describe("notice channel (reviewer handoffs)", () => {
   test("success and warn notices are announced via role=status; errors keep role=alert", () => {
     const source = readFileSync(join(import.meta.dir, "../../src/spa/pages/PageNotice.tsx"), "utf8");
     // WCAG 4.1.3: the "Changes saved." success notice must not be silent to
@@ -1271,7 +1271,7 @@ describe("notice channel (plan 40 T3 reviewer handoffs)", () => {
   });
 });
 
-describe("section-scoped op feedback (plan 44 T3)", () => {
+describe("section-scoped op feedback", () => {
   const settingsSource = () => readFileSync(join(import.meta.dir, "../../src/spa/pages/SettingsPage.tsx"), "utf8");
 
   test("op outcomes resolve to the originating card; the top notice is page-level reload failure only", () => {
@@ -1282,10 +1282,10 @@ describe("section-scoped op feedback (plan 44 T3)", () => {
     expect(source).toContain("type OpNotice =");
     expect(source).toContain("Promise<OpNotice>");
     // The only top-notice writes left are load()'s two background-failure
-    // paths (parse failure + request failure) — the plan-38 page-level
+    // paths (parse failure + request failure) — the page-level
     // channel for background reloads. Ops never land there.
     expect(source.match(/setNotice\(\{/g)?.length).toBe(2);
-    // Bugbot fix (plan 44): a successful load() — foreground or background —
+    // Bugbot fix: a successful load() — foreground or background —
     // clears the page banner, so a recovered reload never leaves a stale
     // "load failed" up. New shape: failure writes 2 + success clear 1, and
     // the clear is pinned INSIDE load()'s success path (between the payload
@@ -1296,7 +1296,7 @@ describe("section-scoped op feedback (plan 44 T3)", () => {
       source.indexOf("return true;"),
     );
     expect(loadSuccessPath).toContain("setNotice(null);");
-    // Carry-over (Task 2 review), refined by plan 45 T3 (audit F-09): a
+    // Carry-over (Task 2 review), refined by a later audit fix (F-09): a
     // network-level POST failure (postForm throws before an outcome exists)
     // resolves the dedicated save-failed copy so the op's card still reports
     // — no silent failure surface, and a failed save no longer claims the
@@ -1317,7 +1317,7 @@ describe("section-scoped op feedback (plan 44 T3)", () => {
     const source = settingsSource();
     // The shared local region component wraps PageNotice, so every region
     // inherits the banner's alert/status roles and notice tokens (WCAG
-    // 4.1.3 — pinned on PageNotice.tsx itself in the plan-40 describe).
+    // 4.1.3 — pinned on PageNotice.tsx itself in the notice-channel describe).
     expect(source).toContain("function NoticeRegion");
     expect(source).toContain("return <PageNotice kind={notice.kind} message={notice.message} />;");
     // Runtime image: region inside the editor, next to the save trigger.
@@ -1330,7 +1330,7 @@ describe("section-scoped op feedback (plan 44 T3)", () => {
     const opsBody = source.slice(source.indexOf("function OpsCard"), source.indexOf("function ProvidersCard"));
     expect(opsBody).toContain("<NoticeRegion notice={notice} />");
     // Providers: card region directly under the add panel serves the verify /
-    // template forms only — plan 45 T6 moved the dialog-confirmed removes to
+    // template forms only — moved the dialog-confirmed removes to
     // a row-local region (pinned in the F-08 test below).
     const providersBody = source.slice(
       source.indexOf("function ProvidersCard"),
@@ -1372,7 +1372,7 @@ describe("section-scoped op feedback (plan 44 T3)", () => {
   test("dialog-confirmed ops report into the card that owns the action", () => {
     const source = settingsSource();
     // remove-chain → chains card; remove-key / remove-custom → the providers
-    // card's row-local outcome (plan 45 T6); pause/resume/disable/enable/
+    // card's row-local outcome; pause/resume/disable/enable/
     // delete (delete with its own copy) → ops zone. Each card renders its own
     // notice state.
     const confirmBody = source.slice(source.indexOf("async function onConfirm"), source.indexOf("const confirmCopy"));
@@ -1382,7 +1382,7 @@ describe("section-scoped op feedback (plan 44 T3)", () => {
     expect(source).toContain("notice={opsNotice}");
     expect(source).toContain("notice={providersNotice}");
     expect(source).toContain("notice={chainsNotice}");
-    // Plan 45 T6: the removes no longer write the card-level providers state —
+    // the removes no longer write the card-level providers state —
     // that region keeps only the add-flow (verify / template) outcomes.
     expect(confirmBody).not.toContain("setProvidersNotice(");
     // The add-flow forms forward their outcome into the providers card's
@@ -1392,10 +1392,10 @@ describe("section-scoped op feedback (plan 44 T3)", () => {
     expect(source).toContain("onOutcome={setChainsNotice}");
   });
 
-  test("provider remove outcomes render row-locally at the removed row's position (plan 45 T6, audit UI-45-05)", () => {
+  test("provider remove outcomes render row-locally at the removed row's position (audit UI-45-05)", () => {
     const source = settingsSource();
     // The outcome state carries the removed row's slot, captured in onConfirm
-    // from the PRE-POST payload: the awaited background reload (plan 38)
+    // from the PRE-POST payload: the awaited background reload
     // drops the row from the payload before the outcome resolves, so the
     // position must be remembered — the row unmounts with the fresh payload
     // while the card (and the region it renders) stay mounted.
@@ -1405,7 +1405,7 @@ describe("section-scoped op feedback (plan 44 T3)", () => {
     expect(confirmBody).toContain("slot: slot >= 0 ? slot : configured.length");
     // The card renders the outcome inside the rows list at that position —
     // through the shared NoticeRegion, so the row-local region inherits the
-    // plan-44 roles (alert/status) and notice tokens.
+    // roles (alert/status) and notice tokens.
     const providersBody = source.slice(
       source.indexOf("function ProvidersCard"),
       source.indexOf("function ConfiguredKeyRow"),
@@ -1456,15 +1456,15 @@ describe("section-scoped op feedback (plan 44 T3)", () => {
   });
 });
 
-describe("settings header typography (plan 45 T7)", () => {
+describe("settings header typography", () => {
   test("app-slug heading renders at the heading-20 scale step, not the off-scale 18px (audit UI-45-08)", () => {
     const source = readFileSync(join(import.meta.dir, "../../src/spa/pages/SettingsPage.tsx"), "utf8");
     // The slug is the selected-App panel title sitting under the page-level
     // h1. DESIGN.md's heading scale is 32/24/20/16 only, and heading-20 is
     // the panel-title tier — heading-16 would demote the slug below the
-    // cards it titles. SUPERSEDE (plan 59 T1): the plan-45 T7 named-scale
+    // cards it titles. SUPERSEDE: the named-scale
     // carrier (text-xl) is replaced by the heading-20 token utilities — the
-    // plan-58 QC heading-idiom convergence applied to this page; the scale
+    // QC heading-idiom convergence applied to this page; the scale
     // step itself is unchanged.
     expect(source).toContain(
       '<h2 className="font-semibold text-(length:--typo-heading-20-size) leading-(--typo-heading-20-line) tracking-(--typo-heading-20-tracking)">{app.slug}</h2>',
@@ -1474,7 +1474,7 @@ describe("settings header typography (plan 45 T7)", () => {
   });
 });
 
-describe("version footer (plan 51 T3)", () => {
+describe("version footer", () => {
   test("the settings page footer renders the generated version surface via the dictionary", () => {
     const source = readFileSync(join(import.meta.dir, "../../src/spa/pages/SettingsPage.tsx"), "utf8");
     // The display reads the generated single-writer surface (src/version.ts) —
@@ -1497,11 +1497,11 @@ describe("version footer (plan 51 T3)", () => {
   });
 });
 
-describe("custom-provider disclosure state (plan 49 T3)", () => {
+describe("custom-provider disclosure state", () => {
   test("the CustomExpand toggle exposes aria-expanded wired to the disclosure state (audit F-15-03)", () => {
     const source = readFileSync(join(import.meta.dir, "../../src/spa/pages/SettingsPage.tsx"), "utf8");
     // Structural pin mirroring the AddProviderSection header-disclosure
-    // precedent (plan 42): the toggle carries aria-expanded bound to the
+    // precedent: the toggle carries aria-expanded bound to the
     // component's open-state prop — same element, exact-string pinned, so a
     // regression dropping the attribute (or binding it anywhere other than
     // the disclosure toggle) fails here. Single-state disclosure semantics
@@ -1523,14 +1523,14 @@ describe("custom-provider disclosure state (plan 49 T3)", () => {
   });
 });
 
-describe("GitHub App identity card (plan 53 A5/A6/A7)", () => {
+describe("GitHub App identity card", () => {
   /**
    * The card is a pure presentational component (no hooks, no browser API),
-   * so its degradation face — the load-bearing plan-53 contract — is pinned
+   * so its degradation face — the load-bearing contract — is pinned
    * behaviorally: static SSR markup of the exported card, no DOM runner.
-   * createElement keeps this .ts file free of JSX. Plan 62 A5: `canManage`
+   * createElement keeps this .ts file free of JSX. `canManage`
    * switches the name link's destination — it defaults to false, so every
-   * pin below (and every plan-53 pin) exercises the member face unless it
+   * pin below (and every pin) exercises the member face unless it
    * passes true explicitly.
    */
   const html = (app: SettingsAppMeta, canManage = false): string =>
@@ -1623,7 +1623,7 @@ describe("GitHub App identity card (plan 53 A5/A6/A7)", () => {
     expect(nameless).not.toContain(synced.github_html_url);
   });
 
-  test("manager face targets the GitHub App settings page derived from the html_url slug (plan 62 A5 / AD-623)", () => {
+  test("manager face targets the GitHub App settings page derived from the html_url slug (AD-623)", () => {
     // The public page's slug (the html_url's apps/<slug> tail, trailing-slash
     // tolerant) names the settings target — never github_name (display name
     // ≠ URL slug) nor the local SettingsAppMeta.slug (local App slug ≠ GitHub
@@ -1672,7 +1672,7 @@ describe("GitHub App identity card (plan 53 A5/A6/A7)", () => {
     expect(deepPath).not.toContain('href="https://github.com/settings/apps/settings"');
     expect(deepPath).toContain('aria-label="View Acme Reviewer on GitHub"');
     // github_html_url=null stays plain text on BOTH faces — no anchor, no
-    // crash, the plan-53 degradation face unchanged.
+    // crash, the degradation face unchanged.
     for (const canManage of [false, true]) {
       const out = html(meta({ github_name: synced.github_name }), canManage);
       expect(out).not.toContain("<a ");
@@ -1682,7 +1682,7 @@ describe("GitHub App identity card (plan 53 A5/A6/A7)", () => {
 
   test("the card sits between the slug row and the manage conditional — both faces see it", () => {
     const source = readFileSync(join(import.meta.dir, "../../src/spa/pages/SettingsPage.tsx"), "utf8");
-    // Plan 59 T1 supersede: the slug row anchor moved onto the heading-20
+    // supersede: the slug row anchor moved onto the heading-20
     // token utilities (same carrier change as the typography pin above).
     const slugRowPos = source.indexOf(
       '<h2 className="font-semibold text-(length:--typo-heading-20-size) leading-(--typo-heading-20-line) tracking-(--typo-heading-20-tracking)">{app.slug}</h2>',
@@ -1717,7 +1717,7 @@ describe("GitHub App identity card (plan 53 A5/A6/A7)", () => {
     expect(t("zh_CN", "settings.appInfoAppId", { id: 123456 })).toBe("App ID：123456");
     expect(t("en", "settings.appInfoViewOnGithub", { name: "Acme" })).toBe("View Acme on GitHub");
     expect(t("zh_CN", "settings.appInfoViewOnGithub", { name: "Acme" })).toBe("在 GitHub 上查看 Acme");
-    // Plan 62 A5: the honest manager-face label rides the settings destination
+    // the honest manager-face label rides the settings destination
     // (atomic en/zh pair).
     expect(t("en", "settings.appInfoManageOnGithub", { name: "Acme" })).toBe("Manage Acme on GitHub");
     expect(t("zh_CN", "settings.appInfoManageOnGithub", { name: "Acme" })).toBe("在 GitHub 上管理 Acme");
@@ -1726,7 +1726,7 @@ describe("GitHub App identity card (plan 53 A5/A6/A7)", () => {
   });
 });
 
-describe("GitHub App settings link wiring (plan 62 A5 / AD-623)", () => {
+describe("GitHub App settings link wiring (AD-623)", () => {
   test("the page threads payload.can_manage into the card; the settings URL derives only through the helper", () => {
     const source = readFileSync(join(import.meta.dir, "../../src/spa/pages/SettingsPage.tsx"), "utf8");
     // Presentation-layer threading only — the payload contract gains nothing.
@@ -1769,7 +1769,7 @@ describe("GitHub App settings link wiring (plan 62 A5 / AD-623)", () => {
   });
 });
 
-describe("runtime image row tightness (plan 55 A1)", () => {
+describe("runtime image row tightness", () => {
   test("select shell is content-adaptive; save button sits in the same flex-wrap row", () => {
     const source = readFileSync(join(import.meta.dir, "../../src/spa/pages/SettingsPage.tsx"), "utf8");
     // User-reported regression: the wrapper reserved min-w-64 (256px) while the

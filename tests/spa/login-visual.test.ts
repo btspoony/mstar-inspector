@@ -1,5 +1,5 @@
 /**
- * Plan 58 T2: login surface visual-discipline pins (A3, clarify-locked
+ * login surface visual-discipline pins (A3, exact-copy locked
  * centered-card reinforced form).
  *
  * 1. SPA face (src/spa/pages/LoginPage.tsx): behavior face (POST + signed-in
@@ -11,7 +11,7 @@
  *    centered-card language, and the STYLE --shadow-card values stay synced
  *    with tokens.css (three-site covenant — the hex-only parity pin in
  *    tokens.test.ts cannot see a multi-stop shadow value, same gap the
- *    plan-57 QC F-002 reference-level pin covered for --brand-700).
+ * QC F-002 reference-level pin covered for --brand-700).
  */
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
@@ -22,7 +22,7 @@ const loginPage = readFileSync(join(spaRoot, "pages/LoginPage.tsx"), "utf8");
 const pagesCss = readFileSync(join(spaRoot, "pages.module.css"), "utf8");
 const sidebar = readFileSync(join(spaRoot, "components/AppSidebar.tsx"), "utf8");
 
-describe("login SPA face (plan 58 T2, A3)", () => {
+describe("login SPA face (A3)", () => {
   test("behavior face is unchanged: signed-in redirect + GitHub form POST", () => {
     expect(loginPage).toContain('if (boot.login) window.location.replace("/dashboard")');
     expect(loginPage).toContain('<form method="post" action="/dashboard/login">');
@@ -70,7 +70,7 @@ describe("login SPA face (plan 58 T2, A3)", () => {
   });
 });
 
-describe("login SSR face sync (plan 58 T2, A3 dual-track)", () => {
+describe("login SSR face sync (A3 dual-track)", () => {
   const views = readFileSync(join(import.meta.dir, "../../src/dashboard/views.ts"), "utf8");
   const tokens = readFileSync(join(spaRoot, "styles/tokens.css"), "utf8");
 
@@ -108,8 +108,8 @@ describe("login SSR face sync (plan 58 T2, A3 dual-track)", () => {
     const cssRoot = declarations(balancedBlock(tokens, ":root {"));
     const cssLight = declarations(balancedBlock(tokens, ':root[data-theme="light"] {'));
     // tokens.css's own OS-light block lives inside the prefers-color-scheme
-    // media query — the SSR OS-light branch's true counterpart (plan 58
-    // F-58-4; balancedBlock handles the media-wrapped selector).
+    // media query — the SSR OS-light branch's true counterpart
+    // (F-58-4; balancedBlock handles the media-wrapped selector).
     const cssOsLight = declarations(balancedBlock(tokens, ':root:not([data-theme="dark"]) {'));
 
     expect(ssrRoot["shadow-card"]).toBe(cssRoot["shadow-card"]);

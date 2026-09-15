@@ -1,4 +1,4 @@
--- 0001_reviews.sql — Central Review Store DDL (plan 05 Task 1).
+-- 0001_reviews.sql — Central Review Store DDL.
 --
 -- DDL single source of truth: tests execute THIS file (bun:sqlite in-memory)
 -- and wrangler applies it to real D1 (--local / --remote). There is no

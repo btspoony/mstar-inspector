@@ -1,6 +1,6 @@
-// Locally revised shadcn/ui copy-in (plan 57 T3 v0.3 restyle; plan 58 T1
+// Locally revised shadcn/ui copy-in (v0.3 restyle;
 // motion-token sweep — every duration/easing consumes --duration-*/--ease-*,
-// transition properties unchanged; plan 62 T1 hover recipe — menu-button
+// transition properties unchanged; hover recipe — menu-button
 // hover faces dim to sidebar-accent/40 + text brighten, press/active/open
 // fills stay full strength; 018 copy-in supersede — do not regen over).
 import * as React from "react"
@@ -476,13 +476,13 @@ function SidebarMenuItem({ className, ...props }: React.ComponentProps<"li">) {
   )
 }
 
-// Plan 62 T1 (AD-622): hover = low-intensity sidebar-accent tint (/40) +
+// (AD-622): hover = low-intensity sidebar-accent tint (/40) +
 // text/icon brighten — always lighter than the full-strength press fill
 // below (the open state has no dedicated fill face), zero new tokens
 // (design decision D4: no translate, no stroke; the outline variant's
 // hover ring retires with the old recipe).
-// Plan 64 (AD-641): the active face wears a low-alpha brand tint instead
-// of the full-strength fill (bg-sidebar-primary/12; the plan-58 left edge
+// (AD-641): the active face wears a low-alpha brand tint instead
+// of the full-strength fill (bg-sidebar-primary/12; the original left edge
 // is retired) — hue separates active from the neutral hover.
 const sidebarMenuButtonVariants = cva(
   "peer/menu-button flex w-full items-center gap-2 overflow-hidden rounded-sm p-2 text-left text-sm ring-sidebar-ring outline-hidden transition-[width,height,padding] duration-(--duration-base) ease-(--ease-in-out) group-has-data-[sidebar=menu-action]/menu-item:pr-8 group-data-[collapsible=icon]:size-8! group-data-[collapsible=icon]:p-2! hover:bg-sidebar-accent/40 hover:text-sidebar-accent-foreground focus-visible:ring-2 active:bg-sidebar-accent active:text-sidebar-accent-foreground disabled:pointer-events-none disabled:opacity-50 aria-disabled:pointer-events-none aria-disabled:opacity-50 data-[active=true]:bg-sidebar-primary/12 data-[active=true]:font-medium data-[active=true]:text-sidebar-accent-foreground data-[state=open]:hover:bg-sidebar-accent/40 data-[state=open]:hover:text-sidebar-accent-foreground [&>span:last-child]:truncate [&>svg]:size-4 [&>svg]:shrink-0",

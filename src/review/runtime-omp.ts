@@ -1,5 +1,5 @@
 /**
- * omp AgentRuntime adapter (plan 07 Task 2; deep path plan 09 Task 2) — the
+ * omp AgentRuntime adapter — the
  * SINGLE omp SDK import point of this module tree. The former single-session
  * PR adapter (src/review/session.ts + review.ts + run.ts) is retired here.
  * quick/default: the parent session never prompts a model — it only hosts
@@ -7,7 +7,7 @@
  * that drives the harness three-stage flow and must yield the envelope.
  * No level carries `appendSystemPrompt` (spec: grill-me / architect lock).
  *
- * Flow (`.mstar/iterations/v0.3/specs/agent-runtime.md` § omp adapter 内部形状):
+ * Flow (agent-runtime spec § omp adapter 内部形状):
  *   1. createAgentSession — parent session, M1 isolation items unchanged
  *      (Settings.isolated fetch.enabled=false, restrictToolNames + read/grep/
  *      glob, additionalExtensionPaths=[HARNESS_PLUGIN_ROOT], autoApprove),
@@ -27,7 +27,7 @@
  *      prompt text in this repo — and a strict seat output schema.
  *   4. Merge + dedupe seat findings (fingerprint_hint ?? file:line:title),
  *      synthesizeReview (engine default summary template), validateMstarReviewV1.
- *   5. deep (plan 09 T2): no partition, no Bun fan-out — createAgentSession
+ *   5. deep: no partition, no Bun fan-out — createAgentSession
  *      with read/grep/glob + the SDK built-in `task` tool and a strict
  *      PARENT_OUTPUT_SCHEMA; the harness /amazing-pr-review command is loaded
  *      from HARNESS_PLUGIN_ROOT into the assignment (zero copy), the deep
@@ -37,7 +37,7 @@
  *      drives the three stages; the turn must end in a schema-validated
  *      yield, which the adapter re-validates with validateMstarReviewV1
  *      (spec Architect locks L1/L2).
- *   6. recheck (plan 67 T3, spec §7.8): when the input carries a typed
+ *   6. recheck (spec §7.8): when the input carries a typed
  *      recheck document, runRecheckSeat runs CONCURRENTLY with the review
  *      work — quick/default as one more structured child on the same
  *      read-only ToolSession, deep on a DEDICATED read-only session (never a
@@ -48,8 +48,7 @@
  * Failure contract: ANY seat/parse/validation failure throws — the caller
  * never receives an M1-shaped fake success and nothing is posted or stored.
  *
- * reconFacts conventions this adapter defines for the consumer (wired in plan
- * 07 Task 5):
+ * reconFacts conventions this adapter defines for the consumer:
  *   - `<owner>/<repo>#<pr>`     → folded into the envelope `target`;
  *   - `head <sha>`              → folded into `target.head_sha`;
  *   - git-numstat lines `"<add>\t<del>\t<path>"` → the seat-partition universe.
@@ -94,7 +93,7 @@ import type { RecheckDoc } from "../contracts/recheck";
  */
 const HARNESS_ROOT_ENV = "HARNESS_PLUGIN_ROOT";
 
-/** Plan-verified absolute fallback for the M0 plugin root (plan 02 Global Constraints). */
+/** Verified absolute fallback for the plugin root (Global Constraints). */
 const ABSOLUTE_HARNESS_ROOT = "/Users/bibi/workspace/ai/mstar-harness";
 
 /**
@@ -102,7 +101,7 @@ const ABSOLUTE_HARNESS_ROOT = "/Users/bibi/workspace/ai/mstar-harness";
  *   1. $HARNESS_PLUGIN_ROOT — explicit configuration (primary surface);
  *   2. the sibling directory `../mstar-harness` relative to this package
  *      (the main-repo layout);
- *   3. the plan-verified absolute path (local default fallback only).
+ *   3. the verified absolute path (local default fallback only).
  * M0 never installs from GitHub. Resolved lazily per call so tests can
  * inject a fixture root regardless of module evaluation order.
  */
@@ -114,7 +113,7 @@ export function resolveHarnessRoot(): string {
   return ABSOLUTE_HARNESS_ROOT;
 }
 
-/** Read-only tool whitelist (plan 02 Global Constraints — parent + seat). */
+/** Read-only tool whitelist (Global Constraints — parent + seat). */
 export const REVIEW_TOOL_NAMES = ["read", "grep", "glob"] as const;
 
 /** Default model selector; used when the caller passes an empty modelSelectors chain (the runner parses OMP_REVIEW_MODEL into modelSelectors). */
@@ -135,7 +134,7 @@ export function parseModelSelectors(raw: string | undefined): string[] {
 
 /**
  * Load every skill from the local mstar-harness plugin root and require the
- * mstar-audit judgment skill to be present (plan 02 Global Constraints).
+ * mstar-audit judgment skill to be present (Global Constraints).
  * Seats receive these as session skills; their prompts point at the plugin
  * root's pr-review reference by absolute path (engine prReviewSeatPrompt).
  */
@@ -194,10 +193,10 @@ export function buildSessionOptions(opts: {
   modelPattern: string;
   fallbackChain?: string[];
   /**
-   * Directory holding the synthesized COMPLETE per-review models.yml (plan 23
-   * Task 3, AL-23-1; plan 37 Task 2): passed to createAgentSession so the
+   * Directory holding the synthesized COMPLETE per-review models.yml
+   * (AL-23-1): passed to createAgentSession so the
    * SDK's ModelRegistry reads <agentDir>/models.yml (discoverModels →
-   * model-registry single-file loader). REQUIRED — plan 37 removed the baked
+   * model-registry single-file loader). REQUIRED — the registry removed the baked
    * in-image models.yml, so every run synthesizes its own and the session
    * must read that directory.
    */
@@ -276,7 +275,7 @@ const SEAT_OUTPUT_SCHEMA = {
 } as const;
 
 /**
- * Parent-session output contract for the deep path (plan 09 T2) — the
+ * Parent-session output contract for the deep path — the
  * mstar.review/v1 envelope shape as a strict JSON Schema (spec Architect
  * lock L2). The SDK's strict mode only enforces shape; the engine
  * vocabulary SSOT re-validates the extracted payload.
@@ -529,7 +528,7 @@ async function installSeatAgent(cwd: string): Promise<void> {
  * three-stage flow dispatches exactly these harness roles as domain seats
  * (each carrying the in-domain security lens). Installing ONLY these keeps
  * the task-tool agent schema minimal, and the cleanup set static. Exported
- * for the dashboard-side MODEL_ROLE_IDS parity lock (plan 17 B6 — the test
+ * for the dashboard-side MODEL_ROLE_IDS parity lock — the test
  * import does not widen the dashboard's own import boundary).
  */
 export const DEEP_SEAT_ROLES = ["code-reviewer", "fullstack-dev", "frontend-dev"] as const;
@@ -633,7 +632,7 @@ async function withoutGitHubTokenEnv<T>(review: () => Promise<T>): Promise<T> {
  * structurally absent: restrictToolNames admits ONLY the four named tools,
  * extension/MCP discovery is disabled, and fetch is off.
  *
- * Plan 17 B6 (Architect lock L2): a non-empty `agentModelOverrides` map is
+ * Architect lock L2: a non-empty `agentModelOverrides` map is
  * written into the isolated settings record as `task.agentModelOverrides` —
  * the deep `task`-tool dispatch passes NO explicit model, so the SDK preflight
  * resolves each spawned seat from that record per agent name (resolution
@@ -657,7 +656,7 @@ function deepSessionOptions(opts: {
   modelPattern: string;
   fallbackChain?: string[];
   agentModelOverrides?: Record<string, string>;
-  /** Directory of the synthesized per-review models.yml — required (plan 37 Task 2). */
+  /** Directory of the synthesized per-review models.yml — required. */
   agentDir: string;
 }): CreateAgentSessionOptions {
   const overrides = opts.agentModelOverrides;
@@ -719,7 +718,7 @@ async function deepAssignment(input: AgentRuntimeRunInput, pluginRoot: string): 
 }
 
 /**
- * The review-seat model chain (plan 17 B6, Architect lock L2; plan 67 T3:
+ * The review-seat model chain (Architect lock L2;
  * shared by the review seats AND the recheck seat — spec §7.8 "Recheck uses
  * the existing review-seat model selection"):
  *   - input.modelSelectors is the single model SSOT (the runner parses
@@ -742,14 +741,14 @@ function seatModelChain(input: AgentRuntimeRunInput): string[] {
 }
 
 /**
- * The deep parent-session path (plan 09 T2; spec § 父 session 约束 +
+ * The deep parent-session path (spec § 父 session 约束 +
  * Architect locks L1/L2): one parent LLM turn runs the harness three-stage
  * flow and dispatches its own seats via the built-in `task` tool; the turn
  * must end in a schema-validated `yield` of the mstar.review/v1 envelope,
  * which is re-validated against the engine vocabulary. No yield, a yielded
  * error, or a validation failure throws — nothing is posted or stored.
  *
- * plan 67 T3 (spec §7.8): when `input.recheck` is present, a DEDICATED
+ * spec §7.8: when `input.recheck` is present, a DEDICATED
  * read-only recheck AgentSession/ToolSession runs `runRecheckSeat`
  * concurrently from the beginning of model work — never a second prompt/
  * yield stream on the deep parent's session (its listener captures terminal
@@ -783,7 +782,7 @@ async function runDeepReview(input: AgentRuntimeRunInput): Promise<ReviewRunResu
           modelPattern: input.modelSelectors[0] ?? DEFAULT_MODEL_PATTERN,
           fallbackChain: [...input.modelSelectors],
           agentModelOverrides: input.modelOverrides,
-          // Plan 37 Task 2: the synthesized per-review models.yml directory —
+          // The synthesized per-review models.yml directory —
           // present on EVERY run (no baked in-image base remains).
           agentDir: input.agentDir,
         }),
@@ -791,7 +790,7 @@ async function runDeepReview(input: AgentRuntimeRunInput): Promise<ReviewRunResu
       const parentSession = created.session;
       session = parentSession;
 
-      // The dedicated recheck session (plan 67 T3): same quick/default
+      // The dedicated recheck session: same quick/default
       // isolation set — read/grep/glob only, no `task` tool, no yield
       // schema — its own in-memory session manager.
       const recheckController = new AbortController();
@@ -920,9 +919,9 @@ async function runDeepReview(input: AgentRuntimeRunInput): Promise<ReviewRunResu
 }
 
 /**
- * The delivered omp AgentRuntime (plan 07 Task 2). Resolves ONLY with an
+ * The delivered omp AgentRuntime. Resolves ONLY with an
  * engine-validated mstar.review/v1 envelope in `envelope` plus the
- * concurrent recheck document (or null) in `recheck` (plan 67 T3); anything
+ * concurrent recheck document (or null) in `recheck`; anything
  * short of that throws.
  */
 export const ompAgentRuntime: AgentRuntime = {
@@ -930,7 +929,7 @@ export const ompAgentRuntime: AgentRuntime = {
     // Port-level guard: the type system makes a bad level unrepresentable in
     // TS, but runtime values arrive from JSON (runner `--level`) — reject
     // instead of silently degrading (spec: throw, 不静默降档). Deep branches
-    // first (plan 09 T2): the parent-session path never enters this Bun
+    // first: the parent-session path never enters this Bun
     // fan-out, and naming the branch first narrows `input.level` to the
     // REVIEW_SEATS keys. The own-key check (qc3 F-302) stays for the
     // remaining runtime values: `in` also matches Object.prototype keys,
@@ -955,7 +954,7 @@ export const ompAgentRuntime: AgentRuntime = {
     try {
       await installSeatAgent(cwd);
       // Seat model chain: single SSOT derivation shared with the recheck
-      // seat — see seatModelChain (plan 17 B6 L2 rationale lives there).
+      // seat — see seatModelChain (the L2 rationale lives there).
       const seatModels = seatModelChain(input);
       const created = await createAgentSession(
         buildSessionOptions({
@@ -964,7 +963,7 @@ export const ompAgentRuntime: AgentRuntime = {
           skills,
           modelPattern: input.modelSelectors[0] ?? DEFAULT_MODEL_PATTERN,
           fallbackChain: [...input.modelSelectors],
-          // Plan 37 Task 2: the synthesized per-review models.yml directory —
+          // The synthesized per-review models.yml directory —
           // present on EVERY run (no baked in-image base remains).
           agentDir: input.agentDir,
         }),
@@ -979,7 +978,7 @@ export const ompAgentRuntime: AgentRuntime = {
       }
       const toolSession = asToolSession(session, cwd);
 
-      // plan 67 T3 (spec §7.8): the recheck seat runs CONCURRENTLY as one
+      // spec §7.8: the recheck seat runs CONCURRENTLY as one
       // more structured child on the SAME read-only ToolSession (separate
       // result slot). runRecheckSeat never throws; when the review work
       // settles, the controller aborts an unfinished seat and the result

@@ -1,5 +1,5 @@
--- 0009_app_model_roles.sql — per-App per-role model overrides (plan 17
--- Task 1, spec dashboard-ops-and-role-models § Data model + § B6 语义锁).
+-- 0009_app_model_roles.sql — per-App per-role model overrides (spec
+-- dashboard-ops-and-role-models § Data model + § B6 语义锁).
 --
 -- app_model_roles: one row per (App, role) — the model selector chain that
 -- seat reviews with. `role` is one of the 4 audit-seat agent names

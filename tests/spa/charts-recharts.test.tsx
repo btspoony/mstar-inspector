@@ -1,5 +1,5 @@
 /**
- * Plan 63 T1.1: the recharts@2.15.4 static-render pin probe (AD-621
+ * the recharts@2.15.4 static-render pin probe (AD-621
  * re-decision). recharts 3.x emits only an empty wrapper div under
  * `renderToStaticMarkup` (upstream #5997, no ETA) — this pin locks the
  * 2.15.4 face the whole plan rides on: full terminal SVG geometry renders
@@ -7,7 +7,7 @@
  * as tests/spa/insights-page.test.ts.
  * It seeds the Task-2/3 pin idiom: named recharts imports, fixed
  * width/height props, `isAnimationActive={false}` on the pin path, and
- * ResponsiveContainer excluded from every render path (plan 63 B1).
+ * ResponsiveContainer excluded from every render path.
  * TSX (not createElement) is deliberate: React 19 types reject recharts
  * 2.x class components through createElement's overloads (wide string
  * defaultProps), while JSX resolution accepts them — this is also the
@@ -47,7 +47,7 @@ const geometryRects = (html: string): string[] =>
     (rect) => /\bx="\d+"/.test(rect) && /\by="\d+"/.test(rect) && /\bheight="[1-9]\d*"/.test(rect),
   );
 
-describe("recharts pin probe (plan 63 T1.1)", () => {
+describe("recharts pin probe", () => {
   test("static render emits the full-size chart surface (never the 3.x empty-wrapper face)", () => {
     const html = renderBar();
     expect(html).toContain('class="recharts-surface" width="520" height="200"');

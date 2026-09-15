@@ -1,5 +1,5 @@
 /**
- * `scripts/extract-changelog-section.ts` unit tests (plan 50 T2.3 / D5 / D11).
+ * `scripts/extract-changelog-section.ts` unit tests (D5 / D11).
  *
  * Pins the release-notes feed contract:
  *

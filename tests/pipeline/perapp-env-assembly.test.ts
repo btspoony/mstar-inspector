@@ -1,5 +1,5 @@
 /**
- * Per-App runner-env assembly tests (plan 14 Task 3, spec § Per-App BYOK).
+ * Per-App runner-env assembly tests (spec § Per-App BYOK).
  *
  * The consumer resolves the App's AI config (`getAppConfig` decrypt face, ONE
  * read per message) off the SAME appRef resolution as the commenter and feeds
@@ -14,7 +14,7 @@
  *   - every injected key logs `key_source: app|custom` (the source, never
  *     the key) and the assembly logs `config_source: "app"` (the only
  *     remaining source — the "global"/"fallback" variants were retired with
- *     plan 24 Task 6 / AL-24-5);
+ *     the zero-global-fallback cutover (AL-24-5);
  *   - the assembly builds a FRESH env object per review (no shared mutable
  *     env) — cross-App leakage is structurally impossible (full-object pins);
  *   - an UNREADABLE App key (tampered envelope / missing master key) fails
@@ -24,11 +24,11 @@
  *     stage="pipeline" row + rethrow → retry×3 → DLQ) — zero side effects
  *     (no sandbox, no guard, no GitHub write).
  *
- * Runner-input threading (plan 17 Task 1): the consumer resolves the App's
+ * Runner-input threading: the consumer resolves the App's
  * per-role selector map (decrypt-free `getAppModelRoles`) into the runner
  * input JSON's OPTIONAL `modelOverrides` field; empty maps omit the field
  * entirely (byte-identical payload). The runner-side guard/type extension
- * is plan 17 Task 2's.
+ * is pinned in the runtime-input tests.
  *
  * Same technique as tests/pipeline/consumer.test.ts: sandbox + commenters
  * injected via createReviewConsumer overrides (no process-wide relative-path
@@ -119,7 +119,7 @@ async function configureApp(
 }
 
 /**
- * Map one seat to a named chain holding the given selector (plan 35 T2,
+ * Map one seat to a named chain holding the given selector
  * spec §4.4): the `seat-<role>` chain + the reference row — the same shape
  * migration 0017's backfill produces for legacy app_model_roles rows.
  */
@@ -190,7 +190,7 @@ mock.module("@cloudflare/sandbox", () => ({
 const appCalls: string[] = [];
 
 const appCommenterFactory = mock((_cred: CommenterEnv): ReviewCommenter => ({
-  // Plan 67 §7.6: the consumer's sandbox path asserts the RETURNED grant
+  // the consumer's sandbox path asserts the RETURNED grant
   // (assertSandboxGrant) — the double returns a minimal compliant
   // sandbox-read grant scoped to the requested repository.
   getInstallationToken: mock(async (input: TokenInput) => {
@@ -202,7 +202,7 @@ const appCommenterFactory = mock((_cred: CommenterEnv): ReviewCommenter => ({
       repositorySelection: "selected",
     } satisfies InstallationTokenGrant;
   }),
-  // Plan 67 §7.7: the pre-staging plan read ("plan"), then the prepared
+  // the pre-staging plan read ("plan"), then the prepared
   // send ("post" — the EXACT staged body).
   planReviewUpsert: mock(async () => {
     appCalls.push("plan");
@@ -224,11 +224,11 @@ const appCommenterFactory = mock((_cred: CommenterEnv): ReviewCommenter => ({
   // scan (no stale comment → the real implementation finds nothing); the
   // double is a no-op outcome so the flow exercises the real call.
   deleteDegradedComment: mock(async () => ({ deleted: 0, skipped: 0, errors: [] })),
-  // Plan 67 T4 line comments: VALID_OUTPUT has no findings → never called.
+  // line comments: VALID_OUTPUT has no findings → never called.
   postLineComments: mock(async () => {
     throw new Error("unexpected: no qualifying findings → no line comments");
   }),
-  // Plan 67 §7.8 discussion capture + §7.5 resolution: no open lifecycle
+  // §7.8 discussion capture + §7.5 resolution: no open lifecycle
   // rows in these fixtures → never triggered.
   listDiscussion: mock(async () => {
     throw new Error("unexpected: listDiscussion requires open lifecycle rows");
@@ -289,7 +289,7 @@ function makePayload(overrides: Partial<ReviewJobPayload> = {}): ReviewJobPayloa
     head_sha: SHA,
     action: "opened",
     triggered_by: "pull_request",
-    // Required single shape (plan 24 Task 1) — every test overrides it with
+    // Required single shape — every test overrides it with
     // a seeded App id; the default is type-only (never resolved).
     appRef: { appId: "00000000-0000-0000-0000-000000000000" },
     ...overrides,
@@ -344,7 +344,7 @@ function keySourceLines(): Array<{ fields: ConsumerLogFields; msg: string }> {
   return logLines.filter((l) => l.fields.key_source !== undefined);
 }
 
-describe("per-App runner env assembly (plan 14 Task 3, spec § Per-App BYOK)", () => {
+describe("per-App runner env assembly (spec § Per-App BYOK)", () => {
   test("app-key: the App's own keys inject under their PROVIDERS env names (per-App BYOK, incl. ark → ARK_API_KEY)", async () => {
     reset();
     const db = createMigratedTestD1();
@@ -482,14 +482,14 @@ describe("per-App runner env assembly (plan 14 Task 3, spec § Per-App BYOK)", (
     expect(failRows[0]!.error).toContain("missing model chain");
   });
 
-  test("blank chain via direct-DB write fails closed; a padded real chain forwards VERBATIM (plan 15 trim guard)", async () => {
+  test("blank chain via direct-DB write fails closed; a padded real chain forwards VERBATIM (trim guard)", async () => {
     reset();
     const db = createMigratedTestD1();
     // Unconfigured seeds: the default chain row is a singleton per app, so
     // the raw direct-DB chain writes below must be the ONLY config rows.
     const appX = await seedApp(db, "app-x", { configured: false });
     const appY = await seedApp(db, "app-y", { configured: false });
-    // Bypass the store (the plan-15 threat model: a direct DB write can hold a
+    // Bypass the store (the threat model: a direct DB write can hold a
     // blank chain the routes would have normalized away) — the raw rows pin
     // the fail-closed + verbatim guards independent of store semantics.
     db.raw
@@ -543,7 +543,7 @@ describe("per-App runner env assembly (plan 14 Task 3, spec § Per-App BYOK)", (
     expect(rows).toEqual([{ pr_number: 43, model: "openai/gpt-padded" }]);
   });
 
-  test("version records (plan 18 Task 1): reviews.model = the App chain's head selector; provider always NULL", async () => {
+  test("version records: reviews.model = the App chain's head selector; provider always NULL", async () => {
     reset();
     const db = createMigratedTestD1();
     const appX = await seedApp(db, "app-x");
@@ -726,7 +726,7 @@ describe("per-App runner env assembly (plan 14 Task 3, spec § Per-App BYOK)", (
       OMP_REVIEW_MODEL: "ark-plan/deepseek-v4-flash",
     });
     expect(JSON.stringify(runnerEnvs()[0])).not.toContain(sk("rogue-SECRET"));
-    // Plan 15 log hygiene (硬化项 3): the rogue row's skip is a structured
+    // log hygiene (硬化项 3): the rogue row's skip is a structured
     // warn carrying the provider id + app_id — never key material.
     const warn = logLines.find((l) => l.level === "warn" && l.fields.provider === "not-a-provider");
     expect(warn).toBeDefined();
@@ -801,9 +801,9 @@ describe("per-App runner env assembly (plan 14 Task 3, spec § Per-App BYOK)", (
   });
 });
 
-// --- runner input modelOverrides threading (plan 17 Task 1) ---
+// --- runner input modelOverrides threading ---
 
-describe("runner input modelOverrides threading (plan 17 Task 1)", () => {
+describe("runner input modelOverrides threading", () => {
   test("app message with a role map: the input JSON carries modelOverrides exactly as mapped (:thinking suffix verbatim)", async () => {
     reset();
     const db = createMigratedTestD1();
@@ -827,8 +827,8 @@ describe("runner input modelOverrides threading (plan 17 Task 1)", () => {
       "mstar-review-seat": "ark-plan/deepseek-v4-flash:high",
       "code-reviewer": "openai/gpt-5:thinking, anthropic/claude-x",
     });
-    // The field rides AFTER the pre-plan-17 shape (additive optional field),
-    // next to the plan 37 capability hosts (present on every run).
+    // The field rides AFTER the pre- shape (additive optional field),
+    // next to the capability hosts (present on every run).
     expect(Object.keys(input)).toEqual(["worktreePath", "reconFacts", "capabilityHosts", "modelOverrides"]);
   });
 
@@ -840,7 +840,7 @@ describe("runner input modelOverrides threading (plan 17 Task 1)", () => {
     await appConsumer(makeBatch(makePayload({ pr_number: 42, appRef: { appId: appX.id } })));
     const [appInput] = runnerInputs();
     // No role map → the runner input JSON omits the field entirely
-    // (byte-identical to a no-map run); plan 37 capability hosts ride always.
+    // (byte-identical to a no-map run); capability hosts ride always.
     expect(Object.keys(appInput!)).toEqual(["worktreePath", "reconFacts", "capabilityHosts"]);
   });
 
@@ -1013,7 +1013,7 @@ describe("per-role override provider key gate (Bugbot 7aaf18f4)", () => {
   });
 });
 
-describe("custom provider env injection + runner input threading (plan 23 Task 3, AL-23-1)", () => {
+describe("custom provider env injection + runner input threading (AL-23-1)", () => {
   test("app with custom providers: env carries CUSTOM_<ID>_API_KEY values, input JSON carries keyless declarations", async () => {
     reset();
     const db = createMigratedTestD1();
@@ -1066,7 +1066,7 @@ describe("custom provider env injection + runner input threading (plan 23 Task 3
         model_ids: ["b-model"],
       },
     ]);
-    // Additive optional field after the pre-plan-23 shape — plus the plan 37
+    // Additive optional field after the pre- shape — plus the
     // capability hosts the consumer resolves and rides ALWAYS.
     expect(Object.keys(input)).toEqual(["worktreePath", "reconFacts", "capabilityHosts", "customProviders"]);
     const serialized = JSON.stringify(input);
@@ -1150,7 +1150,7 @@ describe("custom provider env injection + runner input threading (plan 23 Task 3
     const [appInput] = runnerInputs();
     const [appEnv] = runnerEnvs();
     // No declarations → the runner input JSON omits the field entirely and
-    // no CUSTOM_* env name is injected (plan 23 byte-compat pin). The plan 37
+    // no CUSTOM_* env name is injected (byte-compat pin). The
     // capability hosts ride ALWAYS (keyless registry data).
     expect(Object.keys(appInput!)).toEqual(["worktreePath", "reconFacts", "capabilityHosts"]);
     expect(JSON.stringify(appEnv)).not.toContain("CUSTOM_");
@@ -1214,7 +1214,7 @@ describe("custom provider env injection + runner input threading (plan 23 Task 3
   });
 });
 
-describe("sandbox image resolution at review execution (plan 37 Task 2)", () => {
+describe("sandbox image resolution at review execution", () => {
   test("defaulted omp App (zero-custom): the runner input carries the resolved image's capability hosts verbatim — ark-plan included", async () => {
     reset();
     const db = createMigratedTestD1();
@@ -1244,7 +1244,7 @@ describe("sandbox image resolution at review execution (plan 37 Task 2)", () => 
     reset();
     const db = createMigratedTestD1();
     const appX = await seedApp(db, "app-x");
-    // Bypass the store (the plan-37 threat model: a direct DB write or a
+    // Bypass the store (the threat model: a direct DB write or a
     // registry contraction can hold an id the current registry rejects).
     db.raw
       .prepare(`UPDATE github_apps SET sandbox_image_id = 'retired-image' WHERE id = ?`)

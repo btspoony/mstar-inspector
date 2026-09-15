@@ -1,5 +1,5 @@
 /**
- * Pure parsers/guards for resident SPA pages (plan 29 T4).
+ * Pure parsers/guards for resident SPA pages.
  * Tested without a DOM runner.
  */
 
@@ -8,8 +8,8 @@ export type Role = "admin" | "member";
 export type InsightsSearch = { window: string; repo: string };
 
 /**
- * One per-bucket distribution row of `findings_distribution` (plan 65,
- * AD-652) — structurally mirrors the store's FindingsDistributionBucket
+ * One per-bucket distribution row of `findings_distribution` (AD-652) —
+ * structurally mirrors the store's FindingsDistributionBucket
  * (the dashboard leaf exports no types). `by_severity` is zero-filled over
  * the fixed merge-class set {must-fix, should-fix, nit}; `by_category` is
  * zero-filled over the window-level union of observed categories plus the
@@ -34,7 +34,7 @@ export type InsightsSummary = {
   verdict_distribution: Array<{ verdict: string; count: number }>;
   weekly_trend: Array<{ week_start: string; reviews: number; findings: number }>;
   /**
-   * Per-bucket findings distribution (plan 65, AD-652 — additive): the
+   * Per-bucket findings distribution (AD-652 — additive): the
    * severity/category cards' stacked time-series grid. REQUIRED like the
    * other aggregations — a payload missing it (or carrying malformed rows)
    * takes the same null fallback as any other shape drift; it is never
@@ -43,9 +43,9 @@ export type InsightsSummary = {
   findings_distribution: FindingsDistributionBucket[];
   recurring_top: Array<{ fingerprint: string; title_sample: string; count: number; repos: string[] }>;
   /**
-   * Window-scoped distinct owner/repo values (plan 36 T2). Independent of
-   * `repo`. Absent on payloads that did not request `include=repos` (plan
-   * 36 QC F-001) — consumers default to [].
+   * Window-scoped distinct owner/repo values. Independent of
+   * `repo`. Absent on payloads that did not request `include=repos`
+   * (QC F-001) — consumers default to [].
    */
   repos?: string[];
 };
@@ -95,7 +95,7 @@ export type AppsPayload = {
 };
 
 /**
- * Plan 38 (spec § Provider configuration contract): whether a catalog entry
+ * (spec § Provider configuration contract): whether a catalog entry
  * is usable by the App's SELECTED sandbox runtime image — `builtin` consumes
  * it via env names, `template` needs custom-provider materialization,
  * `unavailable` cannot run on that image at all. Judged server-side against
@@ -111,10 +111,10 @@ export type CatalogProvider = {
   api: string | null;
   models: string[];
   verifiable: boolean;
-  /** Usability vs the App's selected runtime image (plan 38). */
+  /** Usability vs the App's selected runtime image. */
   eligibility: ProviderEligibility;
   /**
-   * Display-only picker group (plan 54, AD-547): `common` = the 5-entry
+   * Display-only picker group (AD-547): `common` = the 5-entry
    * 常用提供方 tier shown first, `catalog` = the 目录模板 group. Form and
    * config branching NEVER reads this — the key-only vs template flow stays
    * keyed to `tier` / `eligibility`.
@@ -123,7 +123,7 @@ export type CatalogProvider = {
 };
 
 /**
- * One row of the App's PERSISTED provider state (plan 38): a stored builtin
+ * One row of the App's PERSISTED provider state: a stored builtin
  * key (masked tail only) or a saved custom-provider declaration. The `kind`
  * discriminator keeps this shape disjoint from {@link CatalogProvider} — a
  * catalog entry (id/label/tier/models, no `kind`) can never be mistaken for
@@ -149,7 +149,7 @@ export type ModelChainEntry = {
 export const DEFAULT_CHAIN_NAME = "default";
 
 /**
- * One peer tab of the chain tab model (plan 39): Default and every named
+ * One peer tab of the chain tab model: Default and every named
  * chain sit at the same hierarchy.
  */
 export type ChainTab = {
@@ -162,7 +162,7 @@ export type ChainTab = {
 };
 
 /**
- * The plan-39 chain tab list: the Default tab is ALWAYS synthesized first —
+ * The chain tab list: the Default tab is ALWAYS synthesized first —
  * an empty, legacy, or malformed `model_chains` payload can never remove it —
  * and payload rows named "default" collapse into that tab instead of becoming
  * named tabs. Named tab ids are the stored names, de-duplicated (first row
@@ -191,7 +191,7 @@ export function activeChainTabId(tabs: readonly ChainTab[], selected: string | n
 }
 
 /**
- * Seat select value (plan 39 T2), derived from the same tab model: an absent
+ * Seat select value, derived from the same tab model: an absent
  * mapping, the empty string, and the reserved "default" name all mean the
  * Default chain; a stored name that no current named tab offers (deleted
  * chain, stale payload) renders as Default too — so the select never shows a
@@ -226,10 +226,10 @@ export type SettingsAppMeta = {
   review_enabled: boolean;
   created_by: string;
   last_webhook_at: string | null;
-  /** The App's selected sandbox runtime image (registry id — plan 37). */
+  /** The App's selected sandbox runtime image (registry id). */
   sandbox_image_id: string;
   /**
-   * Plan 53 A6: the cached public GitHub profile the settings route serves
+   * The cached public GitHub profile the settings route serves
    * (migration 0019 columns). Every field nullable — NULL = never synced (old
    * rows must render, per-field degradation on the card); the PEM / webhook
    * secret never ride this face. Present on BOTH payload faces (AC3).
@@ -256,7 +256,7 @@ type SettingsHealth = {
   };
 };
 
-/** Plan 35 T4 (spec §2): every member gets base+health only. */
+/** (spec §2): every member gets base+health only. */
 export type SettingsReadOnlyPayload = { can_manage: false; app: SettingsAppMeta } & SettingsHealth;
 
 /** Creator-or-admin adds the settings zones: keys, chains, providers. */
@@ -268,9 +268,9 @@ export type SettingsManagePayload = {
   model_roles: Record<string, string>;
   model_chains: ModelChainEntry[];
   custom_providers: Array<{ provider_id: string; base_url: string; api: string; model_ids: string[] }>;
-  /** Plan 38: the App's persisted provider state ONLY — empty is the valid unconfigured case. */
+  /** The App's persisted provider state ONLY — empty is the valid unconfigured case. */
   configured_providers: ConfiguredProvider[];
-  /** Plan 38: discovery metadata + eligibility — never configured state. */
+  /** Discovery metadata + eligibility — never configured state. */
   provider_catalog: CatalogProvider[];
   model_role_ids: readonly string[];
   custom_provider_api_ids: readonly string[];
@@ -295,7 +295,7 @@ export function canViewMembers(role: Role | null): boolean {
 }
 
 /**
- * Paused = active but reviews switched off (plan 46 T4: one predicate for
+ * Paused = active but reviews switched off (one predicate for
  * both faces). The two wire representations of `review_enabled` — raw
  * integer on the apps list face (dashboard/index.ts), boolean on the
  * settings face (`!== 0` coercion) — are normalized here, so AppsPage's
@@ -315,7 +315,7 @@ export function insightsSummaryUrl(search: InsightsSearch, includeRepos = false)
   const params = new URLSearchParams();
   if (search.window !== "" && search.window !== "30") params.set("window", search.window);
   if (search.repo !== "") params.set("repo", search.repo);
-  // Opt-in repos aggregation (plan 36 QC F-001): only the records page
+  // Opt-in repos aggregation (QC F-001): only the records page
   // requests it, so default summary reads never pay the DISTINCT scan+sort.
   if (includeRepos) params.set("include", "repos");
   const query = params.toString();
@@ -335,11 +335,11 @@ function isNumberRecord(value: unknown): value is Record<string, number> {
 }
 
 /**
- * Row-level guard for the plan-65 distribution grid: every bucket must
+ * Row-level guard for the distribution grid: every bucket must
  * carry the bucket start, the day|week granularity, and both zero-filled
  * count grids — the stacked charts read these shapes directly, so a
  * drifted row fails the parse into the page's error face instead of
- * rendering NaN/undefined series. (Plan 65 B3: the field is required;
+ * rendering NaN/undefined series. (The field is required;
  * missing or malformed → the existing null fallback path, and no existing
  * assertion was loosened.)
  */
@@ -363,11 +363,11 @@ export function parseInsights(data: unknown): InsightsSummary | null {
   if (!Array.isArray(data.verdict_distribution) || !Array.isArray(data.weekly_trend) || !Array.isArray(data.recurring_top)) {
     return null;
   }
-  // Plan 65 (AD-652): required — a rolled-back Worker's payload (no field)
+  // (AD-652): required — a rolled-back Worker's payload (no field)
   // or any drifted row takes the same null fallback as the fields above.
   // Not tolerate-absent: that face is the opt-in `repos` field only.
   if (!isDistributionList(data.findings_distribution)) return null;
-  // `repos` is opt-in (plan 36 QC F-001): absent on payloads that did not
+  // `repos` is opt-in (QC F-001): absent on payloads that did not
   // request include=repos (and on rolled-back Workers) — tolerate missing,
   // reject malformed.
   if (data.repos !== undefined && !isStringArray(data.repos)) return null;
@@ -377,7 +377,7 @@ export function parseInsights(data: unknown): InsightsSummary | null {
 /**
  * Segmented window options (days) for the insights window ToggleGroup — a
  * legal subset of the API window domain (`^\d+$`, store clamp ≤90), zero API
- * extension. (Lives here since plan 40 retired the home module; the names
+ * extension. (Lives here since the home module was retired; the names
  * say insights — these helpers serve only the records page.)
  */
 export const INSIGHTS_WINDOWS = ["7", "30", "90"] as const;
@@ -389,7 +389,7 @@ export type InsightsWindow = (typeof INSIGHTS_WINDOWS)[number];
  * legal on the API, but the records page only offers the segmented set, so
  * off-set values resolve to the default instead of leaving the control
  * without an active segment. The page rewrites the URL on mount when an
- * off-set value is normalized (plan 36 QC F-002), so the address bar
+ * off-set value is normalized (QC F-002), so the address bar
  * reflects the applied filter.
  */
 export function insightsWindow(search: string): InsightsWindow {
@@ -402,7 +402,7 @@ export function insightsWindow(search: string): InsightsWindow {
  * segment (e.g. "?window=60" → "" since 30 is the default, or
  * "?window=60&repo=acme/web" → "?repo=acme%2Fweb"). Returns the input
  * unchanged when the window is already a segment. Used on mount to rewrite
- * the URL so it reflects the applied filter (plan 36 QC F-002).
+ * the URL so it reflects the applied filter (QC F-002).
  */
 export function normalizeWindowSearch(search: string): string {
   const raw = parseInsightsSearch(search);
@@ -457,7 +457,7 @@ export function parseApps(data: unknown): AppsPayload | null {
 }
 
 /**
- * Row-level guard for the plan-38 configured list: every row must carry the
+ * Row-level guard for the configured list: every row must carry the
  * `kind` discriminator, so a catalog-shaped entry (no `kind`) can never be
  * parsed as configured state.
  */
@@ -487,11 +487,11 @@ function isConfiguredProviderList(value: unknown): value is ConfiguredProvider[]
 }
 
 /**
- * Row-level guard for the plan-38 catalog: tier + eligibility are the
+ * Row-level guard for the catalog: tier + eligibility are the
  * load-bearing discriminators, and the Add Provider UI renders/branches on
  * `models` / `verifiable` / `base_url` / `api`, so a drifted row missing any
- * of them fails the parse instead of breaking the page. Plan 54 (review
- * handoff S2): `display_group` is word-checked too — the picker groups on
+ * of them fails the parse instead of breaking the page. Review handoff S2:
+ * `display_group` is word-checked too — the picker groups on
  * it, so a row without the stamp (or with a stray value) must fail the
  * parse rather than silently drop out of both groups.
  */
@@ -517,7 +517,7 @@ function isCatalogProviderList(value: unknown): value is CatalogProvider[] {
 }
 
 /**
- * Which configuration form a selected Add Provider entry requires (plan 38):
+ * Which configuration form a selected Add Provider entry requires:
  * `key` = verifiable builtin (verify-first `/keys/verify`), `template` =
  * custom-provider materialization (`op=add-template-provider`), `console` =
  * console-only provider with no in-app verify path.
@@ -546,7 +546,7 @@ export function parseSettings(data: unknown): SettingsPayload | null {
   if (typeof data.app.slug !== "string" || typeof data.app.status !== "string") return null;
   if (typeof data.app.review_enabled !== "boolean") return null;
   if (typeof data.app.created_by !== "string" || typeof data.app.github_app_id !== "number") return null;
-  // Plan 37: the selected runtime-image id rides BOTH faces (registry id
+  // The selected runtime-image id rides BOTH faces (registry id
   // only — never image-local configuration or secrets).
   if (typeof data.app.sandbox_image_id !== "string") return null;
   if (!Array.isArray(data.installations) || !Array.isArray(data.deliveries)) return null;
@@ -555,13 +555,13 @@ export function parseSettings(data: unknown): SettingsPayload | null {
   if (!Array.isArray(data.model_role_ids) || !isStringArray(data.model_role_ids)) return null;
   if (!Array.isArray(data.custom_provider_api_ids) || !isStringArray(data.custom_provider_api_ids)) return null;
   if (!Array.isArray(data.model_chains)) return null;
-  // Plan 38 clean cutover: the primary list is configured state and the
+  // Clean cutover: the primary list is configured state and the
   // catalog is discovery-only — BOTH are required and row-validated, so the
   // old `providers` dump (or catalog rows masquerading as configured state)
   // fails the parse instead of silently passing.
   if (!isConfiguredProviderList(data.configured_providers)) return null;
   if (!isCatalogProviderList(data.provider_catalog)) return null;
-  // Plan 37 manage face: the selector choices — { id, enabled } rows only.
+  // The manage face: the selector choices — { id, enabled } rows only.
   if (!isSandboxImageList(data.sandbox_images)) return null;
   return data as SettingsPayload;
 }

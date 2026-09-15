@@ -1,5 +1,5 @@
 /**
- * Migration tests (plan 05 Task 1 + plan 07 Task 4) — the DDL in
+ * Migration tests — the DDL in
  * `migrations/0001_reviews.sql` + `0002_mstar_review_v1.sql` is the single
  * source of truth; these tests execute it verbatim through the bun:sqlite
  * test double and assert the schema contract:
@@ -488,7 +488,7 @@ describe("migrations/0010_review_failures.sql", () => {
   });
 });
 
-describe("migrations/0020_finding_lifecycle.sql (plan 67 T1, spec review-lifecycle §7.1)", () => {
+describe("migrations/0020_finding_lifecycle.sql (spec review-lifecycle §7.1)", () => {
   /** Apply one migration file verbatim (filename order = wrangler order). */
   function applyMigrationFile(db: TestD1, name: string): void {
     db.raw.exec(readFileSync(join(MIGRATIONS_DIR, name), "utf8"));
@@ -849,7 +849,7 @@ describe("migrations/0014_idx_reviews_reviewed_at.sql", () => {
   });
 
   test("the insights window predicate seeks the index (EXPLAIN QUERY PLAN)", () => {
-    // The plan-22 window predicate `reviewed_at >= datetime('now', …)` is a
+    // The window predicate `reviewed_at >= datetime('now', …)` is a
     // range probe — with 0014 the planner seeks the window slice instead of
     // full-scanning reviews. Recorded for the record (plan convention);
     // planner choice is a runtime fact (AL-21-2 caveat applies to GROUP-BY
@@ -866,7 +866,7 @@ describe("migrations/0014_idx_reviews_reviewed_at.sql", () => {
   });
 });
 
-describe("migrations/0016_users_login_nocase_unique.sql (plan 34 QC W-1)", () => {
+describe("migrations/0016_users_login_nocase_unique.sql (QC W-1)", () => {
   /** Apply one migration file verbatim (filename order = wrangler order). */
   function applyMigrationFile(db: TestD1, name: string): void {
     db.raw.exec(readFileSync(join(MIGRATIONS_DIR, name), "utf8"));
@@ -916,7 +916,7 @@ describe("migrations/0016_users_login_nocase_unique.sql (plan 34 QC W-1)", () =>
   });
 });
 
-describe("migrations/0017_app_model_chains.sql (plan 35 T2, spec §4.4)", () => {
+describe("migrations/0017_app_model_chains.sql (spec §4.4)", () => {
   /** Apply one migration file verbatim (filename order = wrangler order). */
   function applyMigrationFile(db: TestD1, name: string): void {
     db.raw.exec(readFileSync(join(MIGRATIONS_DIR, name), "utf8"));
@@ -1081,7 +1081,7 @@ describe("migrations/0017_app_model_chains.sql (plan 35 T2, spec §4.4)", () => 
   });
 });
 
-describe("migrations/0018_app_sandbox_images.sql (plan 37 T1, spec § Runtime-image contract)", () => {
+describe("migrations/0018_app_sandbox_images.sql (spec § Runtime-image contract)", () => {
   /** Apply one migration file verbatim (filename order = wrangler order). */
   function applyMigrationFile(db: TestD1, name: string): void {
     db.raw.exec(readFileSync(join(MIGRATIONS_DIR, name), "utf8"));
@@ -1192,7 +1192,7 @@ describe("migrations/0018_app_sandbox_images.sql (plan 37 T1, spec § Runtime-im
   });
 });
 
-describe("migrations/0019_github_apps_metadata.sql (plan 53 T1, AD-531)", () => {
+describe("migrations/0019_github_apps_metadata.sql (AD-531)", () => {
   /** Apply one migration file verbatim (filename order = wrangler order). */
   function applyMigrationFile(db: TestD1, name: string): void {
     db.raw.exec(readFileSync(join(MIGRATIONS_DIR, name), "utf8"));

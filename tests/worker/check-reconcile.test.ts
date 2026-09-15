@@ -1,5 +1,5 @@
 /**
- * M7 Check recovery reconciler tests (plan 68 Task 3, spec review-lifecycle
+ * M7 Check recovery reconciler tests (spec review-lifecycle
  * §7.11.2 + §7.11 composition) — `src/worker/check-reconcile.ts` over the REAL
  * migration DDL (bun:sqlite D1 double, tests/store/helpers.ts) with the
  * credential/adapter surface injected (no GitHub, no credentials in tests).

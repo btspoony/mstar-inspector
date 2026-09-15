@@ -1,39 +1,39 @@
 /**
- * Plan 63 T2 (B2/B3, AD-621): weekly trend chart on recharts — grouped
+ * (AD-621): weekly trend chart on recharts — grouped
  * vertical bars (reviews + findings) per week_start bucket; recharts owns
  * the band/grouped-offset/tick geometry that charts/layout.ts used to
  * hand-compute (that module retires with this migration, no compat shims).
  * The public API is unchanged: `{ points, locale, seriesLabels, ariaLabel }`.
  *
  * Series colors (AD-561 dual-series function, AD-601 recalibration — the
- * exact plan-56 pair): reviews=blue-700, findings=amber-700, applied via
+ * exact original pair): reviews=blue-700, findings=amber-700, applied via
  * the shared charts.css fill classes (B3 class discipline — no
  * presentation-attribute var(), no raw hex; the 700 values are ≥3:1 vs the
  * v0.3 card faces in both themes, Δhue ≈ 169°/184°). blue-700 is a
  * data-series tone, not the link/focus duty and never brand expression.
- * The legend row above the chart keeps the plan-56 face (10×10 rounded
+ * The legend row above the chart keeps the original face (10×10 rounded
  * swatch + weight-500 label); the swatches are HTML spans carrying the
  * charts.css background-color twins of the series fills.
  *
  * Axes (AC1): x = week_start categories formatted by formatWeekLabel per
- * the `locale` prop (the same deterministic M/D · M月D日 formatting plan-56
- * shipped — moved here from the retired layout.ts); more than 8 weeks thin
+ * the `locale` prop (the same deterministic M/D · M月D日 formatting the
+ * retired layout shipped — moved here from it); more than 8 weeks thin
  * to every-other labels via the axis interval (even indices — the first
- * week always stays labeled, plan-56 semantics). y = integer counts
+ * week always stays labeled). y = integer counts
  * (allowDecimals={false}). Both axis lines ride the gray-alpha-400 token
  * through charts.css.
  *
  * Fixed dimensions (AD-621): numeric width/height props, never
  * ResponsiveContainer. The wrapper box is stretched to the card width with
  * `style={{ width: "100%", height: "auto" }}`, so the viewBox keeps the
- * fluid face of the old h-auto w-full svg. The block keeps the plan-56
+ * fluid face of the old h-auto w-full svg. The block keeps the original
  * footprint: 24px legend row + 166px chart = 190px, plot height 142.
  *
- * Numeric coexistence (a11y floor, plan 56): per-week counts are not
+ * Numeric coexistence (a11y floor): per-week counts are not
  * labeled on the bars — the window totals ride the page-level summary line
  * (InsightsPage `trendSummary`, derived from the same weekly buckets)
  * alongside the y ticks and date labels, so the chart is never the
- * numbers' only carrier (plan 56 T1-PM disposition, unchanged).
+ * numbers' only carrier (unchanged).
  *
  * Tooltip (AC1): recharts default content with token-styled styles
  * (contentStyle/labelStyle/itemStyle — itemStyle overrides the recharts
@@ -42,8 +42,8 @@
  * seriesLabels prop.
  *
  * Localized copy comes in as props (legend labels from the caller's i18n
- * keys, plan 56 T2). Empty state: owned by the page (可读空态文案 per
- * plan) — empty input renders null, never a bare axis.
+ * keys). Empty state: owned by the page (可读空态文案) — empty input
+ * renders null, never a bare axis.
  */
 import type { Locale } from "../../../i18n";
 import { Bar as RBar, BarChart as RBarChart, Tooltip, XAxis, YAxis } from "recharts";

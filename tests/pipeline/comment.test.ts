@@ -1,5 +1,5 @@
 /**
- * Review comment assembly tests (plan 07 Task 3 + Phase 5 B1/B4 +
+ * Review comment assembly tests (Phase 5 B1/B4 +
  * postdeploy feedback T5) — pure functions (the posting wiring is covered
  * with a mock octokit; see "postReview wiring" below).
  *
@@ -20,7 +20,7 @@
  *     new comment per round)
  *   - postReview wiring (WF-001/WF-003/SG-001): paginated scan, create vs
  *     update dispatch, 404 soft-recovery fallback
- *   - plan 09 T4 deep lock: a deep-path envelope (parent-session yield,
+ * - deep lock: a deep-path envelope (parent-session yield,
  *     same mstar.review/v1 shape) posts through the SAME COMMENT/upsert
  *     path — `pulls.createReview` is present on the client but never
  *     called, and no call carries `event` / APPROVE / REQUEST_CHANGES
@@ -127,7 +127,7 @@ describe("renderFindings", () => {
   test("returns an empty string for no findings", () => {
     expect(renderFindings([])).toBe("");
   });
-  test("marks a finding whose fingerprint appeared in the previous round as repeat, still listed (plan 21 T3)", () => {
+  test("marks a finding whose fingerprint appeared in the previous round as repeat, still listed", () => {
     const f = finding("should-fix", "Fractional expiry comparison");
     const md = renderFindings([f], new Set([computeFindingFingerprint(f)]));
     expect(md).toContain("**Fractional expiry comparison**");
@@ -478,7 +478,7 @@ describe("REVIEW_BODY_LIMIT clamp (qc2 F-003 / qc3 F-304)", () => {
   });
 });
 
-describe("prepared publication wiring (mock octokit, SG-001 — plan 67 §7.7)", () => {
+describe("prepared publication wiring (mock octokit, SG-001 — spec §7.7)", () => {
   const target = { installationId: 1, owner: "acme", repo: "widgets", prNumber: 42 };
   const sha = "0123456789abcdef0123456789abcdef01234567";
   const publicationMarker = buildPublicationMarker({
@@ -532,7 +532,7 @@ describe("prepared publication wiring (mock octokit, SG-001 — plan 67 §7.7)",
           createComment: mock(async (params: Record<string, unknown>) => {
             calls.createParams = params;
             // Real octokit returns the created comment — the publication
-            // proof needs its id (plan 67 §7.7).
+            // proof needs its id (§7.7).
             return { data: { id: 101 } };
           }),
         },
@@ -609,7 +609,7 @@ describe("prepared publication wiring (mock octokit, SG-001 — plan 67 §7.7)",
     });
   });
 
-  test("a create response WITHOUT a comment id is an unprovable publication → throws (plan 67 §7.7 step 8)", async () => {
+  test("a create response WITHOUT a comment id is an unprovable publication → throws (§7.7 step 8)", async () => {
     const { octokit } = mockOctok([]);
     (octokit.rest.issues.createComment as ReturnType<typeof mock>).mockImplementation(async () => ({}));
     await expect(postPreparedReviewWithOctokit(octokit, { ...sendInput, targetCommentId: null })).rejects.toThrow(
@@ -669,7 +669,7 @@ describe("prepared publication wiring (mock octokit, SG-001 — plan 67 §7.7)",
     }
   });
 
-  test("deep envelope sends COMMENT-only via the Issues API: pulls.createReview never touched (plan 09 T4)", async () => {
+  test("deep envelope sends COMMENT-only via the Issues API: pulls.createReview never touched", async () => {
     const marker = buildPublicationMarker({ publicationId: "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee", headSha: sha, kind: "review" });
     const body = buildPreparedReviewBody({
       output: {
@@ -696,7 +696,7 @@ describe("prepared publication wiring (mock octokit, SG-001 — plan 67 §7.7)",
 });
 
 // ---------------------------------------------------------------------------
-// Degraded chain (plan 18 Task 2 / architect AL-1)
+// Degraded chain (architect AL-1)
 // ---------------------------------------------------------------------------
 
 const botReviewMarker = (id: number, round: number) => ({
@@ -834,7 +834,7 @@ describe("buildDegradedBody", () => {
   });
 });
 
-describe("prepared degraded publication wiring (mock octokit, plan 67 §7.7)", () => {
+describe("prepared degraded publication wiring (mock octokit, spec §7.7)", () => {
   const degradeTarget = { installationId: 1, owner: "acme", repo: "widgets", prNumber: 42 };
   const preparedDegradedBody = buildPreparedDegradedBody({
     error: "not valid ReviewOutput JSON",
@@ -1070,7 +1070,7 @@ describe("missing octokit surface → per-chain error noun (review feedback fix)
   });
 });
 
-describe("createReviewCommenter — bounded transport seam + live App identity (plan 67 T5 §7.11.1/§7.5)", () => {
+describe("createReviewCommenter — bounded transport seam + live App identity (§7.11.1/§7.5)", () => {
   // A real PKCS#8 key: auth-app must be able to SIGN the App JWT, otherwise
   // the request never reaches the seam and the seam stays unobservable.
   const ENV = { APP_ID: "1001", PRIVATE_KEY: "" };

@@ -1,5 +1,5 @@
 /**
- * Module import matrix guard (plan 07 Task 2 + spec § 模块 import 矩阵):
+ * Module import matrix guard (+ spec § 模块 import 矩阵):
  * the workerd faces — src/worker, src/pipeline, src/store — must NEVER import
  * the omp SDK (container-only). This is the executable form of the plan
  * verification `grep -n 'from "@oh-my-pi/pi-coding-agent"' src/worker
@@ -44,11 +44,11 @@ describe("module import matrix — omp SDK is container-only", () => {
     });
   }
 });
-// --- in-image module graph (plan 23 T3 regression; plan 67 T3 amendment;
+// --- in-image module graph (custom-providers regression; recheck amendment;
 // narrowed per P67-QC-015 in QC wave B) ------------------------------------
 
 /**
- * The sandbox image ships src/review plus — since plan 67 Task 3 (PM amendment
+ * The sandbox image ships src/review plus — since the recheck amendment (PM
  * 2026-09-13) — the ONE zero-runtime-dependency wire contract the recheck seat
  * runtime-imports: `COPY src/contracts/recheck.ts`. Nothing else enters the
  * image (no src/pipeline, no src/store), so an import escaping src/review is
@@ -129,7 +129,7 @@ describe("in-image module graph — the image ships src/review plus named contra
   });
 
   test("every admitted contract file stays runtime-dependency-free", () => {
-    // PM amendment condition (plan 67 T3): the file rides the image ONLY
+    // PM amendment condition: the file rides the image ONLY
     // because it is a zero-runtime-dependency module (spec §7.3). Any import
     // statement appearing in an admitted file invalidates the admission — stop
     // and re-narrow the boundary instead of widening this rule. Fresh

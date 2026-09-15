@@ -1,5 +1,5 @@
--- 0017_app_model_chains.sql — default + named model chains (plan 35 T2,
--- spec §4.4, architect lock 2026-09-03).
+-- 0017_app_model_chains.sql — default + named model chains (spec §4.4,
+-- architect lock 2026-09-03).
 --
 -- app_model_chains: one row per (App, chain name). The default chain row
 -- keeps the RESERVED name 'default' (is_default = 1); named chains are

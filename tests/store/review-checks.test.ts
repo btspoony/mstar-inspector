@@ -1,5 +1,5 @@
 /**
- * Review Check attempt registry tests (plan 68 Task 1, spec review-lifecycle
+ * Review Check attempt registry tests (spec review-lifecycle
  * §7.1 second block + §7.9) — `src/store/review-checks.ts` against the
  * bun:sqlite double running the REAL migration SQL (0001 → 0021 through
  * `createMigratedTestD1`, DDL single sources).

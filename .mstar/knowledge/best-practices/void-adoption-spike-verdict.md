@@ -5,7 +5,7 @@ last_updated: 2026-09-02
 problem_type: best_practice
 category: best-practices
 severity: medium
-plan_id: 28-void-foundation
+topic: void foundation spike
 tags: [void, vite, migration-assessment, cloudflare-workers, spike]
 related_components: [wrangler.jsonc, queues, sandbox-image]
 applies_when:
@@ -17,7 +17,7 @@ applies_when:
 
 ## Context
 
-Plan 28 T0 spike (2026-09-02) empirically tested Void adoption for mstar-inspector (production PR-review Worker: Hono + D1 + KV + Queues+DLQ + Sandbox DO + cron). Verdict: **Void framework layer rejected; pure Vite SPA adopted** (compass AC1 fallback gate).
+The T0 spike (2026-09-02) empirically tested Void adoption for mstar-inspector (production PR-review Worker: Hono + D1 + KV + Queues+DLQ + Sandbox DO + cron). Verdict: **Void framework layer rejected; pure Vite SPA adopted** (compass AC1 fallback gate).
 
 ## Guidance (durable findings)
 
@@ -33,4 +33,4 @@ Re-evaluating Void post-beta: re-run the same six-point spike; check whether que
 
 ## Examples
 
-- `.mstar/iterations/v1.1-dashboard-platform/` compass AC1; `.mstar/sdd/28-void-foundation/task-0-report.md`; `void-spike/` scratch evidence (plan 28 branch).
+- Evidence was iteration-local (compass AC1 record, T0 spike task report, `void-spike/` scratch checkout) and is not part of the tracked repo.

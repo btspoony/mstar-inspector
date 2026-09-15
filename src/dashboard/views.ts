@@ -1,9 +1,9 @@
 /**
- * Zero-build SSR HTML for /dashboard (plan 08, architect decision Q8): TS
- * template strings + a single inline <style> block. Plan 29 T5 ports the
+ * Zero-build SSR HTML for /dashboard (architect decision Q8): TS
+ * template strings + a single inline <style> block. The i18n pass ports the
  * DESIGN.md L2 token subset from src/spa/styles/tokens.css into STYLE
- * (dark default + prefers-color-scheme light). Plan 45 T8: STYLE carries
- * the plan-41 theme branches and page() inlines the pre-paint theme
+ * (dark default + prefers-color-scheme light). STYLE carries
+ * the theme branches and page() inlines the pre-paint theme
  * bootstrap, so the stored localStorage["mstar.dashboard.theme"] choice
  * is honored before first paint. Manifest pages stay zero client runtime
  * — pre-paint bootstrap snippet only; no bundle, no build chain, no new
@@ -42,7 +42,7 @@ const STYLE = `<style>
   /* Brand accent — value-synced with tokens.css (three-site covenant, QC
      round 1 F-002); --button-primary-bg below references it. */
   --brand-700: #22d3ee;
-  /* Tinted elevation — value-synced with tokens.css (plan 58 A3 SSR sync);
+  /* Tinted elevation — value-synced with tokens.css (SSR sync);
      the auth-card face below consumes it. */
   --shadow-card: 0 1px 2px #02061766, 0 2px 8px #02061733;
   --red-100: #2a1215;
@@ -54,8 +54,8 @@ const STYLE = `<style>
   --amber-700: #fbbf24;
   --amber-800: #fcd34d;
   --amber-900: #fde68a;
-  /* Three-site covenant: same stack as tokens.css/DESIGN.md (plan 57 T2,
-     AD-572). This zero-build SSR face declares no @font-face — "Geist Sans"
+  /* Three-site covenant: same stack as tokens.css/DESIGN.md (AD-572).
+     This zero-build SSR face declares no @font-face — "Geist Sans"
      falls through to the system entries here; the woff2 ships via the SPA
      bundle (styles/fonts.css). */
   --font-sans: "Geist Sans", ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
@@ -143,8 +143,8 @@ const STYLE = `<style>
     --amber-900: #78350f;
   }
 }
-/* Stored manual choice — light tokens win over the OS preference (plan 41
-   mechanism, applied pre-paint by the bootstrap in page()). Same recorded
+/* Stored manual choice — light tokens win over the OS preference (the
+   theme mechanism, applied pre-paint by the bootstrap in page()). Same recorded
    hexes as the OS fallback above. */
 :root[data-theme="light"] {
   color-scheme: light;
@@ -239,7 +239,7 @@ h1 {
   letter-spacing: var(--typo-heading-24-tracking);
 }
 main { max-width: 960px; margin: 0 auto; padding: var(--spacing-6) var(--spacing-4); }
-/* Auth-journey faces (plan 58 A3 SSR sync): the no-chrome auth surfaces
+/* Auth-journey faces (SSR sync): the no-chrome auth surfaces
    (denied / removed / forbidden / OAuth error) share the SPA login face's
    centered-card language — brand wordmark echo + card tokens on the themed
    canvas. Values ride the token subset above (three-site covenant with
@@ -413,7 +413,7 @@ function wrapPhraseAsLink(text: string, phrase: string, href: string): string {
 }
 
 /**
- * Brand mark for the auth-journey faces (plan 58 A3 SSR sync) — the same
+ * Brand mark for the auth-journey faces (SSR sync) — the same
  * inline silhouette as the SPA AppSidebar Logo (zero image assets; the
  * mark colors via `currentColor`, see `.auth-brand svg` in STYLE).
  */
@@ -421,14 +421,14 @@ const AUTH_MARK =
   '<svg viewBox="0 0 24 24" width="24" height="24" aria-hidden="true"><circle cx="12" cy="12" r="10" fill="none" stroke="currentColor" stroke-width="1.5"></circle><path d="M12 4 L13.2 10.2 L20 12 L13.2 13.8 L12 20 L10.8 13.8 L4 12 L10.8 10.2 Z" fill="currentColor"></path></svg>';
 
 /**
- * No-chrome auth-journey face (plan 58 A3 SSR sync): the login-family
+ * No-chrome auth-journey face (SSR sync): the login-family
  * surfaces (denied / removed / forbidden / OAuth error) render the SPA
  * login face's centered-card language — wordmark echo + card on the themed
  * canvas. `bannerHtml` must arrive pre-escaped by the caller: dynamic values
  * are escapeHtml-ed before `t()` interpolation, and links are composed by
  * string replace on the already-escaped output (wrapPhraseAsLink belongs to
  * the manifest error pages, not this face); the alert keeps role="alert"
- * (WCAG 4.1.3, unchanged from the plan-12 banner contract).
+ * (WCAG 4.1.3, unchanged from the banner contract).
  */
 function authFace(title: string, bannerHtml: string, locale: Locale = "en"): string {
   return page(
@@ -451,7 +451,7 @@ function page(title: string, body: string, locale: Locale = "en"): string {
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>${escapeHtml(t(locale, "common.pageTitle", { page: title, brand: t(locale, "nav.brand") }))}</title>
 <script>
-// Pre-paint theme bootstrap (plan 41 mechanism, SSR face plan 45 T8):
+// Pre-paint theme bootstrap (the theme mechanism, SSR face):
 // apply the stored manual theme before first paint. Whitelist — unreadable
 // or invalid values stay unset and follow prefers-color-scheme.
 try {
@@ -469,7 +469,7 @@ ${STYLE}
  * Flow-page chrome: product name + GitHub identity + Logout, restyled to
  * the SPA navbar tokens. Manifest pages never pass `adminNav` (Members
  * stays on the dashboard shell only). No language toggle — current IA.
- * Apps points at the workbench itself (`/dashboard`, plan 30 T4 — the
+ * Apps points at the workbench itself (`/dashboard` — the
  * legacy `/dashboard/apps` page is a 301 alias).
  */
 function shellHeader(
@@ -494,7 +494,7 @@ function shellHeader(
 }
 
 /**
- * Manifest start interstitial (B1 Task 1): zero-JS form POST to GitHub
+ * Manifest start interstitial: zero-JS form POST to GitHub
  * carrying the manifest JSON; `state` rides the form-action query (GitHub
  * echoes it into the redirect_url next to `code`). Nothing is created until
  * the operator confirms on GitHub.
@@ -525,7 +525,7 @@ export function manifestStartPage(
 }
 
 /**
- * App summary confirm gate (B5 T3, spec § Multi-App 契约 — the B1
+ * App summary confirm gate (spec § Multi-App 契约 — the manifest
  * overwrite-confirm semantics are GONE: nothing shared is overwritten, the
  * commit writes a NEW github_apps row). Single column, read-only summary
  * (name, numeric id, slug, webhook URL), amber note, primary submit.
@@ -565,7 +565,7 @@ export function manifestConfirmPage(
 }
 
 /**
- * App onboarding surface (plan 31 T5, AC4b) — the post-commit landing page:
+ * App onboarding surface (AC4b) — the post-commit landing page:
  * App name, numeric id, slug, webhook URL, and the provider-first next-step
  * CTA into Settings. Same summary discipline as the confirm gate: tabular
  * id, no success green. PEM / webhook_secret NEVER appear here.
@@ -620,7 +620,7 @@ export function manifestErrorPage(message: string, resumable = false, locale: Lo
 }
 
 /**
- * Invite-only denial (plan 12 B4 T1, spec § User-visible behavior 1) —
+ * Invite-only denial (spec § User-visible behavior 1) —
  * locked English copy with the GitHub-verified login interpolated
  * (escaped). The callback deny path renders this at 403 with ZERO
  * Set-Cookie: no session, no state expiry, nothing. Red-700 banner, no
@@ -635,7 +635,7 @@ export function deniedPage(login: string, locale: Locale = "en"): string {
 }
 
 /**
- * Removed-member denial (plan 12 B4 T2, per-request guard) — distinct from
+ * Removed-member denial (per-request guard) — distinct from
  * deniedPage: this visitor's cookie verified but has no users row (access
  * removed after the session was minted; removal = row delete, no status
  * column). Red-700 banner, no login link back — re-authenticating lands on
@@ -650,7 +650,7 @@ export function removedPage(login: string, locale: Locale = "en"): string {
 }
 
 /**
- * Non-admin denial for admin-only surfaces (plan 12 B4 T3): the visitor IS a
+ * Non-admin denial for admin-only surfaces: the visitor IS a
  * member — the per-request guard passed — but has no `admin` row. Distinct
  * from deniedPage / removedPage: access exists, this page does not. Red-700
  * banner with a way back to the shell.

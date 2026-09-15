@@ -1,7 +1,6 @@
 /**
- * Dashboard membership store + OAuth-callback bootstrap decision (plan 12
- * B4 Task 1; spec .mstar/iterations/v0.5/specs/dashboard-multi-app-platform.md
- * § AuthZ + § Data model).
+ * Dashboard membership store + OAuth-callback bootstrap decision
+ * (spec dashboard-multi-app-platform.md § AuthZ + § Data model).
  *
  * Self-contained on purpose (route isolation, architect decision Q2 — the
  * dashboard/index.ts header contract): NO pipeline/store/review imports.
@@ -20,8 +19,8 @@
  *                                  nothing)
  *
  * There is NO status column: removal = row delete (migration 0003). That
- * delete is what makes removed members' stateless cookies fail the plan 12
- * Task 2 per-request guard — never soften this into a flag.
+ * delete is what makes removed members' stateless cookies fail the
+ * per-request guard — never soften this into a flag.
  *
  * Case handling: GitHub logins are case-insensitive upstream, so row
  * lookups and ADMIN_LOGINS comparison are case-insensitive; the UNIQUE
@@ -173,7 +172,7 @@ export async function createUser(
 }
 
 /**
- * Full membership list (Task 3 members page): oldest member first;
+ * Full membership list (members page): oldest member first;
  * `github_login` breaks same-millisecond `created_at` ties so the display
  * order is deterministic (qc1/qc3).
  */
@@ -184,7 +183,7 @@ export async function listUsers(db: DashboardD1): Promise<DashboardUserRow[]> {
   return results;
 }
 
-/** Remove by row id (Task 3 remove — row id avoids login case ambiguity). */
+/** Remove by row id (row id avoids login case ambiguity). */
 export async function deleteUser(db: DashboardD1, id: string): Promise<boolean> {
   const result = await db.prepare("DELETE FROM users WHERE id = ?").bind(id).run();
   return result.meta.changes > 0;
@@ -251,7 +250,7 @@ export async function countUsers(db: DashboardD1): Promise<number> {
   return row?.n ?? 0;
 }
 
-/** Admin count — last-admin protection (Task 3 remove guard). */
+/** Admin count — last-admin protection (remove guard). */
 export async function countAdmins(db: DashboardD1): Promise<number> {
   const row = await db
     .prepare("SELECT COUNT(*) AS n FROM users WHERE role = 'admin'")

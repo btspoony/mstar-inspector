@@ -1,5 +1,5 @@
 /**
- * Plan 31 Task 4: provider-first settings routes — JSON verify, models
+ * provider-first settings routes — JSON verify, models
  * dropdown source, and save-chain/save-roles membership (spec §6.3).
  */
 import { afterEach, describe, expect, spyOn, test } from "bun:test";
@@ -111,7 +111,7 @@ function mockStatus(status: number, body: unknown = {}): ReturnType<typeof spyOn
   );
 }
 
-describe("selector membership helpers (plan 31 T4, spec §6.3)", () => {
+describe("selector membership helpers (spec §6.3)", () => {
   test("selectorBase strips a :variant suffix and requires a provider prefix", () => {
     expect(selectorBase("anthropic/claude-sonnet-4-6:thinking")).toEqual({
       provider: "anthropic",
@@ -153,7 +153,7 @@ describe("selector membership helpers (plan 31 T4, spec §6.3)", () => {
   });
 });
 
-describe("POST /dashboard/api/apps/:slug/keys/verify (plan 31 T4)", () => {
+describe("POST /dashboard/api/apps/:slug/keys/verify", () => {
   let fetchSpy: ReturnType<typeof spyOn> | undefined;
   afterEach(() => {
     fetchSpy?.mockRestore();
@@ -221,7 +221,7 @@ describe("POST /dashboard/api/apps/:slug/keys/verify (plan 31 T4)", () => {
   });
 });
 
-describe("GET /dashboard/api/apps/:slug/models (plan 31 T4)", () => {
+describe("GET /dashboard/api/apps/:slug/models", () => {
   test("returns grouped selector grammar from verified cache + custom declarations", async () => {
     const { db, app } = await seededWorld();
     const store = createAppConfigStore(db, TEST_KEY);
@@ -253,7 +253,7 @@ describe("GET /dashboard/api/apps/:slug/models (plan 31 T4)", () => {
   });
 });
 
-describe("POST save-chain / save-roles membership (plan 31 T4)", () => {
+describe("POST save-chain / save-roles membership", () => {
   test("selector in the verified cache (with variant) saves; unknown cache member 400s and is not stored", async () => {
     const { db, app } = await seededWorld();
     const store = createAppConfigStore(db, TEST_KEY);
@@ -317,7 +317,7 @@ describe("POST save-chain / save-roles membership (plan 31 T4)", () => {
     expect((await store.getVerifiedModels(app.id)).some((row) => row.provider === "my-custom")).toBe(false);
   });
 
-  test("save-roles references chains (plan 35 T2): unknown chain 400s, blank still clears", async () => {
+  test("save-roles references chains: unknown chain 400s, blank still clears", async () => {
     const { db, app } = await seededWorld();
     const store = createAppConfigStore(db, TEST_KEY);
     await store.upsertModelChain(app.id, "seat-mstar-review-seat", "anthropic/claude-sonnet-4-6:thinking");
@@ -345,7 +345,7 @@ describe("POST save-chain / save-roles membership (plan 31 T4)", () => {
   });
 });
 
-describe("POST save-sandbox-image (plan 37, spec § Technical interfaces)", () => {
+describe("POST save-sandbox-image (spec § Technical interfaces)", () => {
   test("creator saves an enabled registry id; the selection persists and rides the payload", async () => {
     const { db, app } = await seededWorld();
     const env = makeEnv(db);
@@ -396,7 +396,7 @@ describe("POST save-sandbox-image (plan 37, spec § Technical interfaces)", () =
   });
 });
 
-describe("POST /dashboard/apps/:slug/settings — pinned add-key / add-custom-provider verify (plan 31 T4)", () => {
+describe("POST /dashboard/apps/:slug/settings — pinned add-key / add-custom-provider verify", () => {
   let fetchSpy: ReturnType<typeof spyOn> | undefined;
   afterEach(() => {
     fetchSpy?.mockRestore();
@@ -488,7 +488,7 @@ function rawRun(
   db.raw.prepare(sql).run(...params);
 }
 
-describe("Plan 46 T7: server-side eligibility precheck (fail-closed)", () => {
+describe("Server-side eligibility precheck (fail-closed)", () => {
   let fetchSpy: ReturnType<typeof spyOn> | undefined;
   afterEach(() => {
     fetchSpy?.mockRestore();
@@ -506,7 +506,7 @@ describe("Plan 46 T7: server-side eligibility precheck (fail-closed)", () => {
     }) as unknown as typeof fetch);
     const res = await postForm(VERIFY, "mallory", makeEnv(db), { provider: "anthropic", key: PLAIN_KEY });
     expect(res.status).toBe(400);
-    // Plan 45 T4 / CARRY-2: the closed `{ ok, reason }` family gains the
+    // CARRY-2: the closed `{ ok, reason }` family gains the
     // optional keyed face — same key as the settings POST family's
     // eligibility site, no new reason value.
     expect(await res.json()).toEqual({
@@ -575,7 +575,7 @@ describe("Plan 46 T7: server-side eligibility precheck (fail-closed)", () => {
   });
 });
 
-describe("POST /dashboard/apps/:slug/settings — add-template-provider materialization (plan 35 T3, spec §5)", () => {
+describe("POST /dashboard/apps/:slug/settings — add-template-provider materialization (spec §5)", () => {
   let fetchSpy: ReturnType<typeof spyOn> | undefined;
   afterEach(() => {
     fetchSpy?.mockRestore();
@@ -596,7 +596,7 @@ describe("POST /dashboard/apps/:slug/settings — add-template-provider material
     const body = await res.text();
     expect(body).toContain("Cloudflare Workers AI");
     expect(body).not.toContain(PLAIN_KEY);
-    // The custom probe hit the materialized models endpoint (plan 31 custom
+    // The custom probe hit the materialized models endpoint (custom
     // probe path: {base}/models for a base already ending in /v1).
     expect(fetchSpy).toHaveBeenCalledWith(
       `https://api.cloudflare.com/client/v4/accounts/${ACCOUNT_ID}/ai/v1/models`,
@@ -676,7 +676,7 @@ describe("POST /dashboard/apps/:slug/settings — add-template-provider material
     expect(db.raw.query("SELECT COUNT(*) AS n FROM app_custom_providers").get() as { n: number }).toEqual({ n: 0 });
   });
 
-  // --- plan 42 T1 breadth generalization (spec § Providers contract 1b) ---
+  // --- breadth generalization (spec § Providers contract 1b) ---
 
   test("a no-placeholder breadth template materializes WITHOUT an account id (catalog base URL prefill)", async () => {
     const { db, app } = await seededWorld();
@@ -690,7 +690,7 @@ describe("POST /dashboard/apps/:slug/settings — add-template-provider material
     });
     expect(res.status).toBe(200);
     expect(await res.text()).toContain("Subconscious");
-    // The probe hit the catalog-prefilled base URL (plan 31 custom probe
+    // The probe hit the catalog-prefilled base URL (custom probe
     // path: {base}/models for a base already ending in /v1).
     expect(fetchSpy).toHaveBeenCalledWith(
       "https://api.subconscious.dev/v1/models",
@@ -781,7 +781,7 @@ describe("POST /dashboard/apps/:slug/settings — add-template-provider material
   });
 });
 
-describe("GET settings includes delivery_summary for the sidebar (plan 31 T6)", () => {
+describe("GET settings includes delivery_summary for the sidebar", () => {
   test("delivery_summary is present and never includes encrypted columns", async () => {
     const { db } = await seededWorld();
     const res = await getJson("/dashboard/api/apps/mallorys-app/settings", "mallory", makeEnv(db));
@@ -794,14 +794,14 @@ describe("GET settings includes delivery_summary for the sidebar (plan 31 T6)", 
       sandbox_images?: Array<{ id: string; enabled: boolean }>;
     };
     expect(body.delivery_summary).toEqual({ latest: null, rejected24h: 0 });
-    // Plan 37 payload shape: the selected image id on the app meta + the
+    // payload shape: the selected image id on the app meta + the
     // enabled-registry selector choices on the manage face.
     expect(body.app.sandbox_image_id).toBe("omp");
     expect(body.sandbox_images).toEqual([{ id: "omp", enabled: true }]);
     expect(JSON.stringify(body)).not.toContain("key_enc");
     expect(JSON.stringify(body)).not.toContain("private_key");
     expect(res.headers.get("cache-control")).toBe("private, no-store");
-    // Plan 38 clean cutover: a fresh App is the unconfigured case — empty
+    // clean cutover: a fresh App is the unconfigured case — empty
     // configured state while the discovery catalog stays fully populated
     // (builtin ids in PROVIDER_IDS order + the template tier, with
     // verifiable flags and eligibility vs the selected omp image).
@@ -848,7 +848,7 @@ describe("GET settings includes delivery_summary for the sidebar (plan 31 T6)", 
   });
 });
 
-describe("GET settings configured_providers vs provider_catalog (plan 38)", () => {
+describe("GET settings configured_providers vs provider_catalog", () => {
   let fetchSpy: ReturnType<typeof spyOn> | undefined;
   afterEach(() => {
     fetchSpy?.mockRestore();
@@ -959,7 +959,7 @@ describe("GET settings configured_providers vs provider_catalog (plan 38)", () =
   });
 });
 
-describe("GET settings provider_catalog display_group (plan 54, AD-547)", () => {
+describe("GET settings provider_catalog display_group (AD-547)", () => {
   type CatalogRow = {
     id: string;
     tier: string;

@@ -1,5 +1,5 @@
--- 0018_app_sandbox_images.sql — per-App sandbox runtime image (plan 37 Task 1,
--- spec dashboard-sandbox-configuration § Runtime-image contract).
+-- 0018_app_sandbox_images.sql — per-App sandbox runtime image (spec
+-- dashboard-sandbox-configuration § Runtime-image contract).
 --
 -- sandbox_image_id is the App's SELECTED runtime image — a stable id from the
 -- source-controlled registry src/contracts/sandbox-images.ts:

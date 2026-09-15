@@ -1,19 +1,19 @@
 /**
- * Plan 63 T2 (B2/B3): chart primitives — TrendChart on recharts (AD-621).
- * The plan-56 hand-rolled layout math and its direct pins
+ * Chart primitives (B2/B3) — TrendChart on recharts (AD-621).
+ * The hand-rolled layout math and its direct pins
  * (linearScale/niceTicks/bandScale/… — formerly charts/layout.ts) retired
  * with the module: recharts owns the geometry now. The render faces are
  * pinned through react-dom/server SSR (no DOM needed — static markup
- * output, the plan-53 settings-layout idiom): role/aria faces, the dual-
+ * output, the settings-layout idiom): role/aria faces, the dual-
  * series legend, the localized date axis, >8-week label thinning, the
  * zero-data faces, and the token discipline (no raw hex in sources; fills
  * ride the charts.css class rules — never presentation-attribute var(),
  * knowledge ui-bugs/svg-var-presentation-attributes.md).
  *
- * Plan 65 T2 (B4): the aggregate BarChart and its describe block retired
+ * (B4): the aggregate BarChart and its describe block retired
  * with the component (the insights severity/category cards consume
  * StackedBarChart now).
- * Plan 65 T3 (B8): the stacked-chart SSR pins — StackedBarChart renders the
+ * (B8): the stacked-chart SSR pins — StackedBarChart renders the
  * same terminal stacked geometry through the idiom below (createElement in
  * this .ts file, the TrendChart face): the series-ordered HTML legend row,
  * the per-segment fill classes + tooltip series names, the stackId
@@ -21,7 +21,7 @@
  * on the axis (time continuity, AC-C), and the day/week label face. The
  * severity/category page faces ride the InsightsPage pins in
  * insights-page.test.ts.
- * Plan 65 QC fix-1: the plan-63 pins the BarChart retirement dropped
+ * QC fix-1: the pins dropped with the BarChart retirement
  * restate on the stacked face — the charts.css token-binding pin (every
  * live fill class / swatch twin has its token rule; the axis text faces),
  * the hostile-label SSR escape pin (legend + tooltip name + tick faces),
@@ -59,7 +59,7 @@ const trendChart = (
     }),
   );
 
-describe("TrendChart SSR (plan 63 T2, recharts face)", () => {
+describe("TrendChart SSR (recharts face)", () => {
   const weeks: TrendPoint[] = [
     { week: "2026-08-17", reviews: 1, findings: 2 },
     { week: "2026-08-24", reviews: 3, findings: 4 },
@@ -94,7 +94,7 @@ describe("TrendChart SSR (plan 63 T2, recharts face)", () => {
     expect(trendChart(weeks).split("<path").length - 1).toBe(4);
   });
 
-  test("a non-zero bar height tracks the value scale (proportion face, plan-45 F-01 class)", () => {
+  test("a non-zero bar height tracks the value scale (proportion face, F-01 class)", () => {
     // max 4 → recharts domain [0..4]; plot height = 166 - 4 - 20 = 142 →
     // the findings-4 rect spans the full plot height — a collapsed height
     // can never satisfy this.
@@ -139,7 +139,7 @@ describe("TrendChart SSR (plan 63 T2, recharts face)", () => {
   });
 });
 
-describe("StackedBarChart SSR (plan 65 B8, stacked face)", () => {
+describe("StackedBarChart SSR (stacked face)", () => {
   const severityBuckets: DistributionBucket[] = [
     {
       bucket_start: "2026-08-17",
@@ -186,7 +186,7 @@ describe("StackedBarChart SSR (plan 65 B8, stacked face)", () => {
     expect(html).toContain("<title>Findings by severity</title>");
     // Legend order = stack order: the red swatch precedes the must-fix
     // label, amber precedes should-fix, gray precedes nit (the HTML legend
-    // row above the chart — the plan-56 TrendChart face).
+    // row above the chart — the TrendChart face).
     const red = html.indexOf("chart-swatch-red-700");
     const mustFix = html.indexOf(">must-fix</span>");
     const amber = html.indexOf("chart-swatch-amber-700");
@@ -302,7 +302,7 @@ describe("StackedBarChart SSR (plan 65 B8, stacked face)", () => {
   });
 
   test("a hostile category label renders as escaped text on every label surface (legend + tooltip name)", () => {
-    // XSS pin (plan-63 qc2-S-3, restated for plan 65): category labels are
+    // XSS pin (qc2-S-3, restated): category labels are
     // open-set wire strings (review/schema.ts) that travel MORE surfaces
     // now — the HTML legend text and the tooltip series name — plus the
     // axis tick face via a hostile bucket_start (next pin). All travel the
@@ -377,7 +377,7 @@ describe("StackedBarChart SSR (plan 65 B8, stacked face)", () => {
   });
 });
 
-describe("chart sources keep the no-raw-hex token discipline (plan 63 global constraint)", () => {
+describe("chart sources keep the no-raw-hex token discipline (global constraint)", () => {
   test("zero raw hex in the charts module — colors ride var(--token) only", () => {
     for (const file of ["StackedBarChart.tsx", "TrendChart.tsx", "charts.css"]) {
       const source = readFileSync(join(import.meta.dir, `../../src/spa/components/charts/${file}`), "utf8");
@@ -386,9 +386,9 @@ describe("chart sources keep the no-raw-hex token discipline (plan 63 global con
   });
 });
 
-describe("token fills and text faces live as class rules in charts.css (plan-63 B3 pin, restated plan 65)", () => {
+describe("token fills and text faces live as class rules in charts.css (class-rule pin, restated)", () => {
   test("every live fill class and swatch twin binds to a token rule in charts.css; the axis faces exist", () => {
-    // Source-binding pin (restates the plan-63 BarChart-era pin the
+    // Source-binding pin (restates the BarChart-era pin the
     // stacked migration retired with its describe block): the SSR pins
     // above lock the rendered class ATTRIBUTES, which still pass if a fill
     // RULE is deleted from charts.css — segments would silently fall to

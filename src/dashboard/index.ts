@@ -1,17 +1,17 @@
 /**
- * /dashboard Hono sub-app: GitHub OAuth login + signed-cookie session (08 B0)
- * + GitHub App Manifest start/callback/commit (11 B1 T1/T2; 13 B5 T3 — the
+ * /dashboard Hono sub-app: GitHub OAuth login + signed-cookie session
+ * + GitHub App Manifest start/callback/commit (the
  * commit writes the encrypted github_apps D1 row, the Cloudflare secrets-bulk
- * path is retired) + per-App management UI (13 B5 T3: /dashboard/apps list,
+ * path is retired) + per-App management UI (/dashboard/apps list,
  * POST …/disable|enable|delete — creator-or-admin) + per-App review
- * pause/resume (16 T2: POST …/pause|/resume — same gate, plan-13 action
- * pattern) + per-App AI config settings (14 B2 T1 routes + T2 view: GET/POST
+ * pause/resume (POST …/pause|/resume — the same action
+ * pattern) + per-App AI config settings (GET/POST
  * /dashboard/apps/:slug/settings — BYOK provider keys, masked, + model chain
- * — and POST …/settings/key/delete, creator-or-admin; 16 T2 adds the
- * settings Review switch and the read-only install-health panel; 17 T3 adds
+ * — and POST …/settings/key/delete, creator-or-admin; plus the
+ * settings Review switch and the read-only install-health panel, and
  * the Role models editor on the same op-discriminated POST) behind a
- * per-request membership guard (12 B4 T2) + admin-only members management
- * (12 B4 T3). Mounted by src/worker/index.ts as
+ * per-request membership guard + admin-only members management.
+ * Mounted by src/worker/index.ts as
  * `app.route("/dashboard", dashboardApp)`.
  *
  * Route isolation (architect decision Q2): this module MUST NOT import
@@ -82,7 +82,7 @@ import {
   type AppConfigBatchFace,
   type AppConfigStore,
 } from "./app-config-store";
-// Plan 54 (AD-547): display-only picker grouping. Never a mechanics input —
+// Display-only picker grouping (AD-547). Never a mechanics input —
 // the runner BYOK allowlist stays PROVIDER_IDS_BUILTIN / PROVIDER_ENV_NAMES.
 import { PROVIDER_IDS_COMMON } from "../contracts/provider-catalog.generated";
 import { enabledSandboxImages, getSandboxImage, sandboxImageHostIds } from "../contracts/sandbox-images";
@@ -116,7 +116,7 @@ import { SPA_POST_FORM_HEADER, SPA_POST_FORM_VALUE } from "../spa/post-form-head
 
 export const dashboardApp = new Hono<{ Bindings: Env }>();
 
-/** SPA shell entry for members/apps list mutations (plan 29 QC W-2, plan 33 apps route). */
+/** SPA shell entry for members/apps list mutations (QC W-2, apps route). */
 const DASHBOARD_SHELL_REDIRECT = "/dashboard";
 const APPS_LIST_REDIRECT = "/dashboard/apps";
 
@@ -164,9 +164,9 @@ function dashboardSecrets(env: Env) {
 type DashboardDb = DashboardD1 & AppConfigBatchFace;
 
 /**
- * D1 membership store binding (plan 12 B4). Runtime-real via wrangler.jsonc
+ * D1 membership store binding. Runtime-real via wrangler.jsonc
  * `d1_databases` (binding DB), but the fetch-face Env deliberately does not
- * declare it (src/worker/env.ts stays ADMIN_LOGINS-only this plan) — read
+ * declare it (src/worker/env.ts stays ADMIN_LOGINS-only for now) — read
  * through this local intersection and fail closed when unbound, like every
  * missing dashboard dependency.
  */
@@ -175,7 +175,7 @@ function dashboardD1(env: Env): DashboardDb | null {
   return db ?? null;
 }
 
-// --- Plan 13 B5 T3: webhook slug resolution + manifest commit helpers ---
+// --- Webhook slug resolution + manifest commit helpers ---
 
 /** Bounded suffix attempts before the INSERT's own UNIQUE error surfaces. */
 const SLUG_SUFFIX_ATTEMPTS = 6;
@@ -207,7 +207,7 @@ async function resolveAvailableSlug(db: DashboardD1, base: string): Promise<stri
   return slug;
 }
 
-// --- Plan 12 B4 T2: per-request allowlist guard (spec § AuthZ, lock L5) ---
+// --- Per-request allowlist guard (spec § AuthZ, lock L5) ---
 //
 // ONE middleware mount before every route definition auto-covers all
 // /dashboard routes (B1 manifest trio + the POST "*" catch-all today, plan
@@ -232,7 +232,7 @@ dashboardApp.use("*", async (c, next) => {
   if (!sessionSecret) return c.text("dashboard OAuth is not configured", 500);
   const session = await readSessionValue(getCookie(c, SESSION_COOKIE), sessionSecret);
   // No session → the pre-guard behavior: 302 into the OAuth flow.
-  // POST /dashboard/locale is session-optional (plan 29 T4): the login-page
+  // POST /dashboard/locale is session-optional: the login-page
   // language toggle must set mstar_locale without membership. Locale is not
   // a privileged action — the route writes only the language cookie.
   if (!session) {
@@ -249,7 +249,7 @@ dashboardApp.use("*", async (c, next) => {
   // Logged in → the only new check: an active user row (spec § AuthZ).
   // Fail closed on an unbound store, like every missing dashboard dependency.
   // Callback/confirm must still run so a retryable db_unbound can park the
-  // hold and serve the resumable confirm link (plan 31 QC F-005). Confirm
+  // hold and serve the resumable confirm link (QC F-005). Confirm
   // itself is hold-cookie-only and does not read D1.
   const db = dashboardD1(c.env);
   if (!db) {
@@ -270,7 +270,7 @@ dashboardApp.use("*", async (c, next) => {
         login: session.login,
       }),
     );
-    // Plan 33 T3: actively invalidate the removed member's session. HTML
+    // Actively invalidate the removed member's session. HTML
     // navigation → expire + 302 login; API/fetch → expire + 403 (a fetch
     // must not silently follow the 302 into the HTML login page).
     c.header("Set-Cookie", expireCookie(SESSION_COOKIE));
@@ -336,7 +336,7 @@ dashboardApp.get("/oauth/callback", async (c) => {
   if (!user) {
     return c.html(errorPage(t(requestLocale(c), "common.oauth.profileFailed"), requestLocale(c)), 502);
   }
-  // Plan 12 B4 T1: invite-only bootstrap decision (spec § AuthZ precedence:
+  // Invite-only bootstrap decision (spec § AuthZ precedence:
   // row → ADMIN_LOGINS → empty-table fallback → deny) BEFORE any session is
   // minted. Deny = 403 page with ZERO Set-Cookie (spec: 零 cookie、零写入) —
   // the single-use state-expiry header set above is withdrawn here — and
@@ -364,7 +364,7 @@ dashboardApp.get("/logout", (c) => {
   return c.redirect("/dashboard/login", 302);
 });
 
-// --- Plan 29 T2: locale preference (i18n) ---
+// --- Locale preference (i18n) ---
 //
 // POST /dashboard/locale — the navbar [EN/中文] toggle target. Body is
 // JSON or form-encoded `{ locale }`; valid ids are the two Locale values.
@@ -373,7 +373,7 @@ dashboardApp.get("/logout", (c) => {
 // a Referer-derived target sanitized by safeLocaleRedirect (anything
 // off-origin, protocol-relative, empty, or missing → /dashboard). Invalid
 // locale → 400, no cookie.
-// Plan 29 T4: the mount-level guard treats POST /dashboard/locale as
+// The mount-level guard treats POST /dashboard/locale as
 // session-optional and membership-exempt (same L5 family as logout). A
 // logged-out login-page toggle and a row-less session may both set the
 // cookie. Every other /dashboard route stays membership-enforcing.
@@ -427,8 +427,8 @@ dashboardApp.post("/locale", async (c) => {
   return c.redirect(location, 302);
 });
 
-// --- B1 Task 1: GitHub App Manifest start + callback (no secret write) ---
-// --- B5 Task 3: per-App slug mints here and rides the signed state ---
+// --- GitHub App Manifest start + callback (no secret write) ---
+// --- Per-App slug mints here and rides the signed state ---
 
 // Start: logged-in only. Mints the webhook slug (login-derived, DB
 // pre-resolved against existing slugs), the single-use CSRF state cookie
@@ -455,7 +455,7 @@ dashboardApp.post("/manifest/start", async (c) => {
 
 // Callback: GitHub redirects here with ?code=…&state=…. Bad/missing state →
 // 4xx with ZERO secret-API calls (the conversion fetch never runs). On
-// success the code is exchanged and — plan 31 AC4b — the App is committed
+// success the code is exchanged and — AC4b — the App is committed
 // immediately (no second click): the shared commit path (commitManifestApp,
 // the same write the POST /manifest/commit recovery route uses) encrypts
 // the credentials with DASHBOARD_ENCRYPTION_KEY and writes one github_apps
@@ -548,7 +548,7 @@ dashboardApp.get("/manifest/callback", async (c) => {
   }
 });
 
-// Commit (B5 Task 3, spec § Multi-App 契约 — replaces the B1 Cloudflare
+// Commit (spec § Multi-App 契约 — replaces the retired Cloudflare
 // secrets-bulk write; `confirm=overwrite` is gone because nothing shared is
 // overwritten). The hold cookie is bound to the committing session and
 // survives RETRYABLE outcomes (500 encrypt/DB failures) so the operator can
@@ -557,7 +557,7 @@ dashboardApp.get("/manifest/callback", async (c) => {
 // already-connected conflict, and the non-retryable slug-conflict race (the
 // manifest already registered the webhook URL — remapping would desync it).
 // Missing/undecryptable/expired hold = flow expired → 302 back to the start,
-// zero writes. Plan 31 T5: the write is delegated to commitManifestApp — the
+// zero writes. The write is delegated to commitManifestApp — the
 // SAME path the callback auto-commit runs — so a native resubmit after a
 // retryable callback failure is an idempotent recovery resubmit, and success
 // lands on the same onboarding page as the auto-commit.
@@ -608,7 +608,7 @@ dashboardApp.post("/manifest/commit", async (c) => {
   }
 });
 
-// --- Plan 31 T5: shared manifest commit (callback auto-commit + POST
+// --- Shared manifest commit (callback auto-commit + POST
 // /manifest/commit recovery run the same write path, spec § 5) ---
 
 type ManifestCommitOutcome =
@@ -626,7 +626,7 @@ type ManifestCommitOutcome =
  * hold payload + the acting session login are passed in; the hold's login
  * binding is re-checked here on EVERY call. Outcomes mirror the route's long-standing
  * semantics: success = ONE github_apps row (secretbox AAD rowKey = the
- * caller-generated row PK, decided BEFORE encryption — T1 review pin);
+ * caller-generated row PK, decided BEFORE encryption — review pin);
  * login_mismatch / slug_conflict / already_connected = non-retryable (the
  * caller burns the hold); db_unbound / encrypt_failed / db_rejected =
  * retryable (the caller keeps the hold so /manifest/confirm can resume).
@@ -644,7 +644,7 @@ async function commitManifestApp(args: {
     return { kind: "login_mismatch" };
   }
   if (!db) return { kind: "db_unbound" };
-  // T1 review pin: the row id exists BEFORE encryption so the secretbox AAD
+  // Review pin: the row id exists BEFORE encryption so the secretbox AAD
   // rowKey (github_apps.<column>:<id>) equals the row's primary key.
   const appId = crypto.randomUUID();
   let privateKeyEnc: string;
@@ -731,7 +731,7 @@ dashboardApp.get("/manifest/confirm", async (c) => {
   );
 });
 
-// --- Plan 31 T5: post-commit onboarding page (AC4b) ---
+// --- Post-commit onboarding page (AC4b) ---
 //
 // The landing page after a successful manifest commit: App name / GitHub
 // id / slug / webhook URL + the provider-first next-step CTA into Settings.
@@ -766,7 +766,7 @@ dashboardApp.get("/apps/:slug/onboarding", async (c) => {
   );
 });
 
-// --- Plan 12 B4 T3: admin-only members management (spec § AuthZ) ---
+// --- Admin-only members management (spec § AuthZ) ---
 //
 // The per-request guard above has already verified membership on every route
 // below; the admin gate re-resolves the acting row per request (same
@@ -816,7 +816,7 @@ dashboardApp.get("/api/members", async (c) => {
   });
 });
 
-// Plan 29 T6: the members page is SPA-owned; these pinned POSTs answer the
+// The members page is SPA-owned; these pinned POSTs answer the
 // SPA's postForm (2xx → refetch + client notice; 4xx → client error notice)
 // with plain-text bodies — the re-rendered HTML page is retired.
 dashboardApp.post("/members/invite", async (c) => {
@@ -824,8 +824,8 @@ dashboardApp.post("/members/invite", async (c) => {
   if (!gate.ok) return gate.response;
   const form = await c.req.parseBody();
   const login = typeof form.login === "string" ? form.login.trim() : "";
-  // Plan 34: the invite accepts an explicit role (default member — the
-  // pre-plan-34 behavior). Value domain = the 0003 CHECK ('admin'|'member');
+  // The invite accepts an explicit role (default member — the legacy
+  // behavior). Value domain = the 0003 CHECK ('admin'|'member');
   // anything else is rejected here before any read or write.
   const role = typeof form.role === "string" ? form.role : "member";
   if (role !== "admin" && role !== "member") {
@@ -839,7 +839,7 @@ dashboardApp.post("/members/invite", async (c) => {
   if (!GITHUB_LOGIN_PATTERN.test(login)) {
     return pinnedPostMutationResponse(c, DASHBOARD_SHELL_REDIRECT, `${login} is not a valid GitHub login — use 1–39 letters, digits, or hyphens.`, 400);
   }
-  // T1 review pin (Minor 2): resolve the login case-insensitively BEFORE any
+  // Review pin (minor 2): resolve the login case-insensitively BEFORE any
   // createUser call — the sequential duplicate path ("OctoCat" exists →
   // invite "octocat") is an idempotent no-op here. The CONCURRENT window is
   // closed by the migration 0016 NOCASE unique index: a case-variant insert
@@ -890,7 +890,7 @@ dashboardApp.post("/members/remove", async (c) => {
   return pinnedPostMutationResponse(c, DASHBOARD_SHELL_REDIRECT, "ok");
 });
 
-// Plan 34 T1: role change — same pinned-POST family as invite/remove
+// Role change — same pinned-POST family as invite/remove
 // (spec §3: members family is pinned paths, NOT the settings op
 // discriminator). Same requireAdmin gate + form parse +
 // pinnedPostMutationResponse shape. The last-admin and self-demotion
@@ -939,7 +939,7 @@ dashboardApp.post("/members/role", async (c) => {
   return pinnedPostMutationResponse(c, DASHBOARD_SHELL_REDIRECT, "ok");
 });
 
-// --- Plan 13 B5 T3: Apps list + per-App management (spec § Multi-App 契约,
+// --- Apps list + per-App management (spec § Multi-App 契约,
 // Clarify #6, architect-pinned POST action paths) ---
 //
 // The per-request guard above has already verified membership on every route
@@ -974,14 +974,14 @@ function canManageApp(user: DashboardUserRow, app: GithubAppRow): boolean {
 }
 
 /**
- * The Apps list with the plan-20 health column data (AL-20-2): every row
+ * The Apps list with the health column data (AL-20-2): every row
  * carries its deliverySummary (the App's LATEST webhook_deliveries row +
  * the 24h rejected count). The health column reads webhook_deliveries —
  * NOT the github_apps.last_webhook_at column, which stays the L5 "last
  * verified delivery" stamp (display-only, no computed health).
  *
  * The summaries come from the store's BATCHED deliverySummaries face
- * (plan 20 QC wave 1, W-1): exactly TWO D1 statements for any N instead
+ * (QC wave 1, W-1): exactly TWO D1 statements for any N instead
  * of the per-App 2N fan-out — this helper runs on GET /api/apps (the SPA
  * JSON face), so the statement count must not scale with the App count.
  */
@@ -1025,7 +1025,7 @@ dashboardApp.get("/api/apps", async (c) => {
 /**
  * One handler for the three pinned action routes. Unknown and soft-deleted
  * apps are equally invisible (the list never shows them) → 404, zero writes.
- * Plan 29 T6: the Apps list is SPA-owned, so the response is a plain 2xx the
+ * The Apps list is SPA-owned, so the response is a plain 2xx the
  * SPA's postForm treats as success (it refetches the JSON face); the
  * re-rendered HTML page is retired. The store write still happens exactly
  * once; the `changed` result only shaped the retired notice copy.
@@ -1052,7 +1052,7 @@ dashboardApp.post("/apps/:slug/disable", (c) => appStatusAction(c, "disable"));
 dashboardApp.post("/apps/:slug/enable", (c) => appStatusAction(c, "enable"));
 dashboardApp.post("/apps/:slug/delete", (c) => appStatusAction(c, "delete"));
 
-// --- Plan 16 B3 T2: per-App review pause/resume (spec § IA, pinned action
+// --- Per-App review pause/resume (spec § IA, pinned action
 // paths) ---
 //
 // The per-App pause switch (migration 0008 review_enabled) surfaced on the
@@ -1062,7 +1062,7 @@ dashboardApp.post("/apps/:slug/delete", (c) => appStatusAction(c, "delete"));
 // soft-deleted apps are equally invisible (→ 404, zero writes), then
 // creator-or-admin (→ 403 forbiddenPage, zero writes). Confirm-free and
 // reversible (pause ≠ disable — the webhook face stays healthy while
-// paused). Plan 29 T6: the response is plain 200 "ok"; the SPA refetches
+// paused). The response is plain 200 "ok"; the SPA refetches
 // the JSON face rather than re-rendering HTML.
 
 /**
@@ -1086,9 +1086,9 @@ function reviewActionRedirect(c: Context<{ Bindings: Env }>, slug: string): stri
  * case is short-circuited BEFORE the store write — pausing a paused App /
  * resuming an active one never touches the row (setReviewEnabled would
  * count a same-value UPDATE as changed and would churn updated_at, the
- * operator-mutation timestamp). Plan 29 T6: the response is a plain 2xx the
+ * operator-mutation timestamp). The response is a plain 2xx the
  * SPA's postForm treats as success (it refetches the JSON face); the
- * re-rendered HTML page is retired. Plan 29 QC round 2: HTML-nav 302 target
+ * re-rendered HTML page is retired. QC round 2: HTML-nav 302 target
  * depends on origin (settings vs apps list); fetch is unchanged.
  */
 async function appReviewAction(
@@ -1111,7 +1111,7 @@ async function appReviewAction(
 dashboardApp.post("/apps/:slug/pause", (c) => appReviewAction(c, "pause"));
 dashboardApp.post("/apps/:slug/resume", (c) => appReviewAction(c, "resume"));
 
-// --- Plan 14 B2 T1: per-App AI configuration settings (spec § Per-App BYOK) ---
+// --- Per-App AI configuration settings (spec § Per-App BYOK) ---
 //
 // The settings family for one App: provider API keys (BYOK, masked list) and
 // the model chain. Authorization = the same canManageApp rule as the status
@@ -1127,7 +1127,7 @@ dashboardApp.post("/apps/:slug/resume", (c) => appReviewAction(c, "resume"));
 // Encryption-dependent reads AND writes: masking needs plaintext (the last-4
 // tail), so a missing/malformed DASHBOARD_ENCRYPTION_KEY fails the whole
 // family closed with 5xx (spec § Crypto envelope) — never a partial page,
-// never a stored key. Plan 29 T6: the settings page is SPA-owned (the JSON
+// never a stored key. The settings page is SPA-owned (the JSON
 // face below serves the SPA); the DESIGN-token appSettingsPage view in
 // src/dashboard/views.ts is retired.
 
@@ -1136,7 +1136,7 @@ type AppSettingsGate =
   | { ok: false; response: Response };
 
 /**
- * Plan 35 T4 (spec §2 read face): any member may load App detail basic盘 —
+ * (spec §2 read face): any member may load App detail basic盘 —
  * app meta + health (installations / deliveries). The full settings payload
  * (masked keys, chains, providers) stays creator-or-admin via the GET
  * handler's canManageApp branch below; writes go through requireAppSettings.
@@ -1190,7 +1190,7 @@ function settingsFailureNotice(err: unknown): string {
 }
 
 /**
- * Plan 46 T7: the App-selected-image eligibility gate — ONE derivation shared
+ * The App-selected-image eligibility gate — ONE derivation shared
  * by the settings display face (provider_catalog eligibility stamping) and
  * the add-key/verify POST prechecks, so the UI and the server-side precheck
  * can never disagree. Fail-closed: an unknown image id yields an undefined
@@ -1203,11 +1203,11 @@ function isOmpRuntimeImage(sandboxImageId: string): boolean {
 }
 
 /**
- * Plain-text settings POST response (plan 29 T6: the settings page is
- * SPA-owned and read-only today — plan 31 wires the forms; the pinned POST
+ * Plain-text settings POST response (the settings page is
+ * SPA-owned and read-only today — its forms POST here; the pinned POST
  * paths keep their full validation and mutation, and answer the SPA's
  * postForm contract: 2xx → refetch the JSON face, 4xx/5xx → client error).
- * Plan 45 T4: the family's 400s moved to settings400Response (keyed JSON),
+ * The family's 400s moved to settings400Response (keyed JSON),
  * so this helper now carries only the 2xx faces and the
  * settingsFailureNotice 500s.
  */
@@ -1221,7 +1221,7 @@ function settingsPostResponse(
 }
 
 /**
- * Plan 45 T4 (audit UI-45-03): machine-readable 400 keys for the settings
+ * (audit UI-45-03): machine-readable 400 keys for the settings
  * POST family — ONE inventory of the site→key mapping. Values are
  * `settings.error.*` dictionary paths; settings400Response interpolates the
  * English face from the same dictionary entry, so a mapped 400 body is
@@ -1277,8 +1277,8 @@ const SETTINGS_400_KEYS = {
 } as const satisfies Record<string, DictionaryKey>;
 
 /**
- * Keyed 400 for the settings POST family (plan 45 T4): native `<form>`
- * navigation keeps the plan-29 contract — 302 to the settings page, the
+ * Keyed 400 for the settings POST family: native `<form>`
+ * navigation keeps the pinned-POST contract — 302 to the settings page, the
  * body is never seen; the SPA's postForm fetch gets the keyed JSON face
  * (`message` = the en dictionary face, so existing English-substring pins
  * keep passing; `params` = the interpolation data for the SPA's t()).
@@ -1345,7 +1345,7 @@ function settingsMembershipFailResponse(
 }
 
 /**
- * Plan 53 A4 (AD-531): the settings read path's lazy GitHub-metadata refresh —
+ * (AD-531): the settings read path's lazy GitHub-metadata refresh —
  * the ONLY writer of the migration-0019 profile columns (via the single store
  * entry saveGithubMetadata). Runs at most once per request and only when the
  * cached profile is missing or outside the 24h TTL; the leg is
@@ -1401,11 +1401,11 @@ async function refreshGithubMetadataForRead(
   return app;
 }
 
-/** SPA JSON face — plan 35 T4 (spec §2 read face): any member gets the
+/** SPA JSON face (spec §2 read face): any member gets the
  * base+health payload (app meta, installations, deliveries); the full
  * settings payload (masked keys, chains, providers) is creator-or-admin only.
  * `can_manage` tells the SPA which shape it got. Writes stay behind
- * requireAppSettings. Plan 53 A4: the payload's `app` gains the cached
+ * requireAppSettings. The payload's `app` gains the cached
  * public GitHub profile (nullable, migration 0019) on BOTH faces — served
  * from D1 after the lazy 24h-TTL refresh above. */
 dashboardApp.get("/api/apps/:slug/settings", async (c) => {
@@ -1428,11 +1428,11 @@ dashboardApp.get("/api/apps/:slug/settings", async (c) => {
         review_enabled: app.review_enabled !== 0,
         created_by: app.created_by,
         last_webhook_at: app.last_webhook_at ?? null,
-        // Plan 37 (spec § Technical interfaces): the App's selected sandbox
+        // (spec § Technical interfaces): the App's selected sandbox
         // runtime image — read-only on BOTH faces (registry id only, never
         // image-local configuration or secrets).
         sandbox_image_id: app.sandbox_image_id,
-        // Plan 53 A4: the cached public GitHub profile (migration 0019) —
+        // The cached public GitHub profile (migration 0019) —
         // every field nullable (NULL = never synced / absent upstream, the
         // old-row degradation) and present on BOTH faces (AC3: the
         // non-manager payload carries them too). Public profile fields only —
@@ -1475,12 +1475,12 @@ dashboardApp.get("/api/apps/:slug/settings", async (c) => {
     const modelChainSeats = await store.getModelChainSeats(gate.app.id);
     const modelChains = await store.getModelChains(gate.app.id);
     const customProviders = await store.listCustomProviders(gate.app.id);
-    // Plan 38 (spec § Provider configuration contract): eligibility is judged
+    // (spec § Provider configuration contract): eligibility is judged
     // against the App's SELECTED runtime image, never an inferred filter. The
     // registry entry's runtime kind is the contract: an omp-selected App
     // consumes builtin entries via env names and materializes templates
     // through the custom-provider machinery; any other runtime would leave
-    // every row unavailable (zero such rows this iteration — omp is the only
+    // every row unavailable (zero such rows today — omp is the only
     // registry entry, and the persisted id is store-validated against it).
     const ompRuntime = isOmpRuntimeImage(gate.app.sandbox_image_id);
     return c.json({
@@ -1488,13 +1488,13 @@ dashboardApp.get("/api/apps/:slug/settings", async (c) => {
       ...base,
       keys: maskedKeys,
       model_chain: modelChain,
-      // Plan 35 T2 (spec §4.4): the role editor's data is now seat → chain
+      // (spec §4.4): the role editor's data is now seat → chain
       // reference (blank = default chain); the chains list carries every
-      // chain (default + named) for the chains management UI (T4).
+      // chain (default + named) for the chains management UI.
       model_roles: modelChainSeats,
       model_chains: modelChains,
       custom_providers: customProviders,
-      // Plan 38 clean cutover: the App's PERSISTED provider state only — a
+      // Clean cutover: the App's PERSISTED provider state only — a
       // stored key (masked tail) or a saved custom-provider declaration. No
       // plaintext keys, and catalog rows never appear here; an empty array is
       // the valid unconfigured-App state.
@@ -1513,14 +1513,14 @@ dashboardApp.get("/api/apps/:slug/settings", async (c) => {
           model_ids: [...row.model_ids],
         })),
       ],
-      // Plan 38: discovery metadata (the retired `providers` dump) plus
+      // Discovery metadata (the retired `providers` dump) plus
       // eligibility vs the App's selected image. Builtin ids in PROVIDER_IDS
       // order, then the template tier (the hand-curated workers-ai entry
       // followed by the snapshot breadth — the catalog's own key order).
       // `verifiable: false` marks the console-only providers (azure-openai /
       // ai-gateway — the old addKeyProviderIds filter); templates verify via
       // the custom probe, so always verifiable.
-      // Plan 54 (AD-547): every entry also carries a display-only
+      // (AD-547): every entry also carries a display-only
       // `display_group` ("common" = the 5-entry 常用提供方 tier, "catalog" =
       // everything else, in both tiers). Array order is unchanged and the
       // field drives ONLY picker grouping — the add/verify/save mechanics
@@ -1557,7 +1557,7 @@ dashboardApp.get("/api/apps/:slug/settings", async (c) => {
       ],
       model_role_ids: MODEL_ROLE_IDS,
       custom_provider_api_ids: CUSTOM_PROVIDER_API_IDS,
-      // Plan 37 (spec § Technical interfaces): the manage face's selector
+      // (spec § Technical interfaces): the manage face's selector
       // choices — enabled registry entries only, as { id, enabled } rows.
       sandbox_images: enabledSandboxImages().map((image) => ({ id: image.id, enabled: image.enabled })),
     });
@@ -1583,10 +1583,10 @@ dashboardApp.get("/api/apps/:slug/models", async (c) => {
 });
 
 /**
- * SPA add-key path (plan 31 T4): verify the as-typed key, then store. Failure
+ * SPA add-key path: verify the as-typed key, then store. Failure
  * is 400 JSON with a structured reason (invalid_key / unreachable / unexpected /
  * unsupported_provider) and ZERO writes. The key is never logged or returned.
- * Plan 46 T7: an App whose selected runtime image is not omp (unknown id
+ * An App whose selected runtime image is not omp (unknown id
  * included — fail-closed) is refused with unsupported_provider before any
  * probe, mirroring the display face's eligibility gate.
  */
@@ -1599,11 +1599,11 @@ dashboardApp.post("/api/apps/:slug/keys/verify", async (c) => {
   if (!PROVIDER_IDS.includes(provider) || plainKey === "" || plainKey.length > MAX_PROVIDER_KEY_LENGTH) {
     return c.json({ ok: false, reason: "unexpected" as const }, 400);
   }
-  // Plan 46 T7 (fail-closed server-side precheck): the App's selected runtime
+  // Fail-closed server-side precheck: the App's selected runtime
   // image must carry an omp runtime for ANY provider key to be eligible —
   // the same gate the settings display face stamps into provider_catalog
   // (isOmpRuntimeImage). Unknown image id → not omp → 400. The precheck
-  // reuses the existing closed reason enum (no new value; plan 45 T4 /
+  // reuses the existing closed reason enum (no new value;
   // CARRY-2 adds the optional keyed face so the SPA renders the
   // runtime-image copy in the operator's locale); zero writes.
   if (!isOmpRuntimeImage(gate.app.sandbox_image_id)) {
@@ -1639,37 +1639,37 @@ dashboardApp.post("/api/apps/:slug/keys/verify", async (c) => {
  * The settings POST: the operations on the pinned action path, discriminated
  * by the forms' hidden `op` field. add-key = provider allowlist (400 on any
  * other id — the allowlist is the plan's Global Constraint) + the
- * selected-image eligibility precheck (plan 46 T7: a selected image whose
+ * selected-image eligibility precheck (a selected image whose
  * runtime is not omp — unknown id included, fail-closed — is a 400 with zero
  * writes, the same gate the display face stamps into provider_catalog) +
  * non-empty key
- * of at most MAX_PROVIDER_KEY_LENGTH characters (plan 15 input bounds — an
+ * of at most MAX_PROVIDER_KEY_LENGTH characters (input bounds — an
  * oversized key is a 400 with zero writes; the store guard beneath
  * is the backstop), then the store encrypts inside. save-chain = empty →
  * clear the default chain (an unconfigured chain fails that App's reviews
- * closed in the consumer — plan 24 Task 6 / AL-24-5: no deployment-level
+ * closed in the consumer — AL-24-5: no deployment-level
  * chain exists to fall back to), otherwise ≥1 comma-separated selector
  * required and the chain is stored VERBATIM as the 'default' chain row
  * (a `:thinking`-style suffix is legal omp syntax; full selector
- * validation stays omp-side). save-roles (plan 17 T3, plan 35 T2 rework) =
+ * validation stays omp-side). save-roles (the seat → chain rework) =
  * the Role models editor's full map — one `role_<role>` field per audit
  * seat, blanks = the seat uses the default chain, content = a chain NAME
  * reference, saved through the validate-all-first setModelChainSeats (zero
- * partial writes on any validation failure). add-chain / remove-chain
- * (plan 35 T2) = the named-chains management section: add-chain validates
+ * partial writes on any validation failure). add-chain / remove-chain =
+ * the named-chains management section: add-chain validates
  * the name grammar (the reserved "default" is rejected) and the selector
  * chain exactly like save-chain; remove-chain deletes the named chain and
  * its seat references atomically (seats fall back to the default chain).
- * add-custom-provider / remove-custom-provider (plan 23 T2) = the
+ * add-custom-provider / remove-custom-provider = the
  * custom-provider declarations section: every AL-23-1/AL-23-2 bound (id
  * grammar, https-only baseUrl, three-form api enum, model_ids 1..32 × ≤128,
  * key required ≤4096) is a 400 with zero writes; the key is encrypted
- * inside the store and never echoed. save-sandbox-image (plan 37) = the
+ * inside the store and never echoed. save-sandbox-image = the
  * App's sandbox runtime-image selection: only ENABLED
  * src/contracts/sandbox-images.ts registry ids are storable (unknown or
- * disabled → 400, nothing stored). Plan 29 T6: the settings page is
+ * disabled → 400, nothing stored). The settings page is
  * SPA-owned — 2xx = the SPA refetches the JSON face, 4xx/5xx = the reason
- * (plan 45 T4: 400s are keyed JSON via settings400Response — native form
+ * (400s are keyed JSON via settings400Response — native form
  * posts keep the 302); the re-rendered HTML page is retired.
  */
 dashboardApp.post("/apps/:slug/settings", async (c) => {
@@ -1691,7 +1691,7 @@ dashboardApp.post("/apps/:slug/settings", async (c) => {
         ? settings400Response(c, gate.app.slug, SETTINGS_400_KEYS.providerRequired)
         : settings400Response(c, gate.app.slug, SETTINGS_400_KEYS.providerUnknown, { provider });
     }
-    // Plan 46 T7 (fail-closed server-side precheck): the App's selected
+    // Fail-closed server-side precheck: the App's selected
     // runtime image must carry an omp runtime for ANY provider key to be
     // eligible — the same gate the settings display face stamps into
     // provider_catalog (isOmpRuntimeImage). Unknown image id → not omp →
@@ -1736,7 +1736,7 @@ dashboardApp.post("/apps/:slug/settings", async (c) => {
     try {
       if (raw.trim() === "") {
         await store.setModelChain(gate.app.id, null);
-        return settingsPostResponse(c, gate.app.slug, `Cleared the model chain for ${gate.app.slug} — reviews fail closed until a chain + provider keys are configured (per-App only, plan 24).`,
+        return settingsPostResponse(c, gate.app.slug, `Cleared the model chain for ${gate.app.slug} — reviews fail closed until a chain + provider keys are configured (per-App only).`,
         );
       }
       if (raw.length > MAX_MODEL_SELECTOR_LENGTH) {
@@ -1765,7 +1765,7 @@ dashboardApp.post("/apps/:slug/settings", async (c) => {
     return settingsPostResponse(c, gate.app.slug, `Saved the model chain for ${gate.app.slug}.`);
   }
   if (op === "save-roles") {
-    // Plan 17 T3 editor, plan 35 T2 rework (spec §4.4), F-002 (QC wave):
+    // The seat → chain editor rework (spec §4.4), F-002 (QC wave):
     // the Role models editor posts one `role_<role>` field per audit seat
     // (the page always renders all four rows, blank inputs included), so
     // the submitted map is FULL — a save MISSING any seat key is a stale
@@ -1837,7 +1837,7 @@ dashboardApp.post("/apps/:slug/settings", async (c) => {
     return settingsPostResponse(c, gate.app.slug, `Saved the role models for ${gate.app.slug}.`);
   }
   if (op === "add-chain") {
-    // Plan 35 T2 (spec §4.4): create or replace one NAMED chain. The name
+    // (spec §4.4): create or replace one NAMED chain. The name
     // must be a valid chain name (MODEL_CHAIN_NAME_PATTERN) and NOT the
     // reserved "default"; the chain value is a selector chain validated
     // exactly like save-chain (grammar + verified-models membership).
@@ -1878,7 +1878,7 @@ dashboardApp.post("/apps/:slug/settings", async (c) => {
     return settingsPostResponse(c, gate.app.slug, `Saved the ${name} model chain for ${gate.app.slug}.`);
   }
   if (op === "remove-chain") {
-    // Plan 35 T2 (spec §4.4): delete one NAMED chain — seats referencing
+    // (spec §4.4): delete one NAMED chain — seats referencing
     // it fall back to the default chain (the store cleans the reference
     // rows in the same atomic batch). The reserved "default" row cannot be
     // removed here (clear it via save-chain instead).
@@ -1895,10 +1895,10 @@ dashboardApp.post("/apps/:slug/settings", async (c) => {
     return settingsPostResponse(c, gate.app.slug, `Removed the ${name} model chain for ${gate.app.slug} — seats using it fall back to the default chain.`);
   }
   if (op === "add-custom-provider") {
-    // Plan 23 T2: declare a NON-built-in model provider for the App. Every
+    // Declare a NON-built-in model provider for the App. Every
     // AL-23-1/AL-23-2 bound is checked here (400, zero writes —
     // the store re-validates as the backstop): provider id grammar
-    // `[a-z0-9][a-z0-9-]{0,63}` (the env-name mapping the Task 3 consumer
+    // `[a-z0-9][a-z0-9-]{0,63}` (the env-name mapping the consumer
     // injects), no collision with a built-in OR in-image base provider id
     // (QC wave-1 W-1 — ark-plan would be silently dead at synthesis), at
     // most MAX_CUSTOM_PROVIDER_COUNT declarations per App (QC wave-1 W-2,
@@ -1920,7 +1920,7 @@ dashboardApp.post("/apps/:slug/settings", async (c) => {
     if (PROVIDER_IDS.includes(providerId)) {
       return settings400Response(c, gate.app.slug, SETTINGS_400_KEYS.providerIdBuiltin, { provider: providerId });
     }
-    // Plan 37 (QC wave-1 W-1's successor): an id the App's SELECTED sandbox
+    // save-sandbox-image (QC wave-1 W-1's successor): an id the App's SELECTED sandbox
     // image already declares as a capability host (omp: ark-plan) would be
     // skipped by the base-wins synthesis merge on every review while its key
     // still got injected, so the declaration is refused up front (the store's
@@ -2014,8 +2014,8 @@ dashboardApp.post("/apps/:slug/settings", async (c) => {
     );
   }
   if (op === "add-template-provider") {
-    // Plan 35 T3 (spec §5), generalized for catalog breadth (plan 42 T1,
-    // spec § Providers contract 1b): materialize a template-tier catalog
+    // (spec §5), generalized for catalog breadth (spec § Providers
+    // contract 1b): materialize a template-tier catalog
     // entry into the EXISTING custom-provider mechanism — zero models.yml /
     // env injection / selector-grammar changes. The base URL the template
     // materializes with is the form's `base_url` override when provided,
@@ -2025,7 +2025,7 @@ dashboardApp.post("/apps/:slug/settings", async (c) => {
     // pins the template's api protocol, prefills model_ids from the
     // template's representative models, and stores the key under
     // CUSTOM_<UPPER_SNAKE(id)>_API_KEY via the same upsertCustomProvider
-    // path as add-custom-provider (verify-first, plan 31 custom probe —
+    // path as add-custom-provider (verify-first custom probe —
     // every bound below mirrors the add-custom-provider checks).
     const templateId = typeof form.template_id === "string" ? form.template_id.trim() : "";
     const accountId = typeof form.account_id === "string" ? form.account_id.trim() : "";
@@ -2162,7 +2162,7 @@ dashboardApp.post("/apps/:slug/settings", async (c) => {
     );
   }
   if (op === "save-sandbox-image") {
-    // Plan 37 (spec § Technical interfaces): save the App's sandbox runtime
+    // (spec § Technical interfaces): save the App's sandbox runtime
     // image. Only ENABLED registry ids are storable — an unknown or disabled
     // id is a 400 with zero writes (getSandboxImage distinguishes nothing
     // user-visible here; both refuse identically). The store re-validates
@@ -2183,7 +2183,7 @@ dashboardApp.post("/apps/:slug/settings", async (c) => {
     }
     return settingsPostResponse(c, gate.app.slug, `Saved the ${image.id} runtime image for ${gate.app.slug}.`);
   }
-  // T2 review fold (T1 minor): an unknown op is a validation failure like any
+  // Review fold-in: an unknown op is a validation failure like any
   // other — 400 with the reason.
   return settings400Response(c, gate.app.slug, SETTINGS_400_KEYS.unknownOperation);
 });
@@ -2212,15 +2212,15 @@ dashboardApp.post("/apps/:slug/settings/key/delete", async (c) => {
   );
 });
 
-// Plan 30 T4: the legacy SSR home (`dashboardApp.get("/")` →
+// The legacy SSR home (`dashboardApp.get("/")` →
 // dashboardPage) is retired. GET /dashboard — every Accept variant — is the
 // SPA workbench, served by spa-dispatch before this app is reached. The
 // manifest-hold resume gate lives on its dedicated route
 // /dashboard/manifest/confirm (the retryable-error page links there).
-// --- Plan 22 T2: Review Health insights summary API -------------------------
+// --- Review Health insights summary API -------------------------
 //
 // JSON read face for the insights aggregation (src/dashboard/insights-store.ts
-// — the T1 module-boundary leaf, zero store/pipeline/review imports, AL-22-1
+// — the module-boundary leaf, zero store/pipeline/review imports, AL-22-1
 // candidate A). The mount-level guard above has already verified membership
 // on every /dashboard route, so this handler adds ZERO auth code (AL-22-1):
 // it only parses the two query params and serializes the store result.
@@ -2231,7 +2231,7 @@ dashboardApp.post("/apps/:slug/settings/key/delete", async (c) => {
 //   - repo: optional owner/repo filter, malformed → 400.
 // Response = the store return plus the two echoed params (snake_case keys).
 const INSIGHTS_REPO_PATTERN = /^[^/\s]+\/[^/\s]+$/;
-/** The only supported `include` extra (plan 36 QC F-001). */
+/** The only supported `include` extra (QC F-001). */
 const INSIGHTS_INCLUDE_VALUES = ["repos"] as const;
 
 /**
@@ -2241,8 +2241,8 @@ const INSIGHTS_INCLUDE_VALUES = ["repos"] as const;
  * repo aggregation, opt-in so only consumers that need it pay for it).
  * Returns
  * the parsed values or the 400 reason; the route answers 400 with a JSON
- * error body (the HTML notice page retired with GET /insights in plan 29
- * T6). The >90 clamp stays in the store — the single clamp point — and the
+ * error body (the HTML notice page retired with GET /insights). The >90
+ * clamp stays in the store — the single clamp point — and the
  * route echoes the EFFECTIVE window.
  */
 type InsightsParams =
@@ -2314,7 +2314,7 @@ dashboardApp.get("/api/insights/summary", async (c) => {
     findings_by_category: insights.findingsByCategory,
     verdict_distribution: insights.verdictDistribution,
     weekly_trend: insights.weeklyTrend,
-    // Plan 65 (AD-652): additive per-bucket findings distribution for the
+    // (AD-652): additive per-bucket findings distribution for the
     // stacked charts. Existing fields are untouched — the only change on
     // this face is the new key.
     findings_distribution: insights.findingsDistribution,
@@ -2323,7 +2323,7 @@ dashboardApp.get("/api/insights/summary", async (c) => {
   });
 });
 
-// Plan 29 T6: the insights HTML panel is retired — /dashboard/insights is
+// The insights HTML panel is retired — /dashboard/insights is
 // SPA-owned (spa-dispatch serves the shell; the SPA reads the JSON face
 // above). The legacy GET handler is gone.
 

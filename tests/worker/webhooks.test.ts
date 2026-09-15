@@ -125,7 +125,7 @@ describe("classifyWebhook — reject paths log structured warnings (B6b)", () =>
     expect(outcome.kind).toBe("reject");
     expect(log.warn).toHaveBeenCalledTimes(1);
     const [fields, msg] = log.warn.mock.calls[0] ?? [];
-    // Plan 15 log hygiene: `event` carries the REAL GitHub event — no more
+    // log hygiene: `event` carries the REAL GitHub event — no more
     // literal "unknown" at the classifier call sites.
     expect(fields).toMatchObject({ event: "pull_request", reason: "secret_misconfigured" });
     expect(msg).toContain("500");
@@ -164,7 +164,7 @@ describe("classifyWebhook — reject paths log structured warnings (B6b)", () =>
   });
 });
 
-describe("warn event labels (plan 15 log hygiene 硬化项 3)", () => {
+describe("warn event labels (log hygiene 硬化项 3)", () => {
   test("absent event header → event falls back to the stage label (= reason)", async () => {
     const log = makeLog();
     await classifyWebhook(SECRET, "{}", null, null, log);
@@ -362,7 +362,7 @@ describe("classifyEvent — everything else", () => {
     expect(outcome).toEqual({ kind: "reject", status: 400, reason: "invalid JSON body" });
   });
 });
-describe("REVIEW_ENABLED emergency brake (plan 31 AC4a)", () => {
+describe("REVIEW_ENABLED emergency brake (AC4a)", () => {
   test("classifyEvent with reviews disabled ignores even a whitelisted event", () => {
     const outcome = classifyEvent("pull_request", pullRequestBody("opened"), undefined, false);
     expect(outcome).toEqual({

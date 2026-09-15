@@ -1,10 +1,10 @@
 /**
- * `/dashboard*` GET/HEAD redirect normalization (plan 29 T3, plan 33 T2).
+ * `/dashboard*` GET/HEAD redirect normalization.
  *
  * Trailing-slash strip: a path ending in `/` (other than `/dashboard`
  * itself) loses the slash. GET/HEAD only — a 301 would convert POST to GET
  * and break pinned settings/actions. `/dashboard/apps` is an enumerated SPA
- * route (plan 33 retires the legacy 301 alias to `/dashboard`).
+ * route (the legacy 301 alias to `/dashboard` is retired).
  */
 import type { MiddlewareHandler } from "hono";
 

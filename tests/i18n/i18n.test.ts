@@ -1,5 +1,5 @@
 /**
- * Plan 29 T2 tests: i18n dictionary parity, t() interpolation, the
+ * Unit tests: i18n dictionary parity, t() interpolation, the
  * resolveLocale decision matrix, and the shared navbar contract.
  *
  * The zh-CN type-level parity (missing key = compile error) is enforced by
@@ -30,7 +30,7 @@ function requestWith(headers: Record<string, string>): Request {
   return new Request("https://worker.local/dashboard", { headers });
 }
 
-describe("dictionary parity (plan 29 T2)", () => {
+describe("dictionary parity", () => {
   test("zh-CN satisfies the Dictionary type at compile time (missing key = error)", () => {
     // The type assertion lives in src/i18n/zh-CN.ts (`zhCN: Dictionary`);
     // this runtime check pins the same contract for the test runner.
@@ -66,7 +66,7 @@ describe("dictionary parity (plan 29 T2)", () => {
   });
 });
 
-describe("t() interpolation (plan 29 T2)", () => {
+describe("t() interpolation", () => {
   test("plain lookup returns the dictionary value", () => {
     expect(t("en", "nav.apps")).toBe("Apps");
     expect(t("zh_CN", "nav.apps")).toBe("应用");
@@ -82,15 +82,15 @@ describe("t() interpolation (plan 29 T2)", () => {
   });
 
   test("numeric params are stringified", () => {
-    // Fixture re-pointed in plan 46 T1: the old fixture notice.error.keyTooLong
+    // Fixture re-pointed: the old fixture notice.error.keyTooLong
     // was an audit-dead key with no production consumer; common.time.minutesAgo
     // exercises the same number→string substitution on a live key.
     expect(t("en", "common.time.minutesAgo", { count: 200 })).toBe("200 minutes ago");
   });
 
   test("two {placeholder} params are substituted in one value", () => {
-    // Two-param coverage restored (plan 46 fix wave 1): the numeric fixture
-    // above was re-pointed in plan 46 T1 to a one-param key (the old
+    // Two-param coverage restored: the numeric fixture
+    // above was re-pointed to a one-param key (the old
     // notice.error.keyTooLong was audit-dead). notice.success.roleChanged is
     // a live two-param key — the MembersPage role-change notice.
     expect(t("en", "notice.success.roleChanged", { login: "octocat", role: "admin" })).toBe(
@@ -111,7 +111,7 @@ describe("t() interpolation (plan 29 T2)", () => {
   });
 });
 
-describe("resolveLocale decision matrix (plan 29 T2)", () => {
+describe("resolveLocale decision matrix", () => {
   const cases: Array<{
     name: string;
     cookie?: string;
@@ -177,7 +177,7 @@ describe("resolveLocale decision matrix (plan 29 T2)", () => {
   });
 });
 
-describe("mstar_locale cookie serialization (plan 29 T2)", () => {
+describe("mstar_locale cookie serialization", () => {
   test("attribute set mirrors session.ts conventions with Path=/dashboard", () => {
     const value = serializeLocaleCookie("zh_CN");
     expect(value).toContain(`${LOCALE_COOKIE}=zh_CN`);
@@ -189,7 +189,7 @@ describe("mstar_locale cookie serialization (plan 29 T2)", () => {
   });
 });
 
-describe("shared navbar contract (plan 29 T2)", () => {
+describe("shared navbar contract", () => {
   test("order is locked: Apps → Insights → Members", () => {
     expect(NAV_ITEMS.map((item) => item.labelKey)).toEqual(["nav.apps", "nav.insights", "nav.members"]);
   });
@@ -209,7 +209,7 @@ describe("shared navbar contract (plan 29 T2)", () => {
   });
 });
 
-describe("document title + login copy (plan 29 T7)", () => {
+describe("document title + login copy", () => {
   test("common.pageTitle interpolates nav.brand, never the mstar-inspector slug", () => {
     expect(t("en", "nav.brand")).toBe("Morning Star Inspector");
     expect(t("zh_CN", "nav.brand")).toBe("Morning Star Inspector");
@@ -225,7 +225,7 @@ describe("document title + login copy (plan 29 T7)", () => {
   });
 
   test("login-page zh copy is the dictionary source for the SPA", () => {
-    // Plan 58 T2.1 form lock: the concise card heading — the brand name
+    // Card heading form lock: the concise card heading — the brand name
     // moved to the wordmark echo above the card (nav.brand), so the title
     // no longer carries it.
     expect(t("zh_CN", "login.heading")).toBe("登录");
@@ -235,7 +235,7 @@ describe("document title + login copy (plan 29 T7)", () => {
   });
 });
 
-describe("REVIEW_ENABLED user copy is absent on restyled surfaces (plan 29 T7)", () => {
+describe("REVIEW_ENABLED user copy is absent on restyled surfaces", () => {
   test("no dictionary leaf contains REVIEW_ENABLED", () => {
     for (const locale of LOCALES) {
       for (const key of collectKeys(dictionaries[locale])) {

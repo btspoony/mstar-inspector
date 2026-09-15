@@ -1,5 +1,5 @@
 /**
- * Central Review Store row types (v1 caliber, plan 07 Task 4).
+ * Central Review Store row types (v1 caliber).
  *
  * Type-only module. `D1Like` (the narrow D1 face the store depends on) is
  * reused by the ArtifactStore adapter (`src/store/artifact-store.ts`) and
@@ -63,9 +63,9 @@ export type FindingRow = {
 };
 
 /**
- * Input for the cross-PR recurrence aggregation (plan 21 Task 4, AC-21c).
+ * Input for the cross-PR recurrence aggregation (AC-21c).
  * Both filters are optional: omitted `window_days` = all-time; omitted
- * `repo` = all repos. `window_days` is used as-is (the plan 22 API layer
+ * `repo` = all repos. `window_days` is used as-is (the API layer
  * owns validation/clamping per AL-22-1).
  */
 export type RecurrenceQuery = {
@@ -76,7 +76,7 @@ export type RecurrenceQuery = {
 };
 
 /**
- * One recurrence group (plan 21 Task 4): a fingerprint seen in >= 2
+ * One recurrence group: a fingerprint seen in >= 2
  * distinct reviews. `count` = distinct reviews; `repos` = distinct
  * owner/repo pairs among them (sorted); `title_sample` = any one title
  * for the fingerprint (MIN, deterministic).
@@ -89,7 +89,7 @@ export type RecurrenceGroup = {
 };
 
 /**
- * Raw rows of the finding-lifecycle tables (plan 67 Task 1, migration
+ * Raw rows of the finding-lifecycle tables (migration
  * `0020_finding_lifecycle.sql` — DDL single source; spec review-lifecycle
  * §7.1 owns the normative shapes). Snake_case D1 column names, same
  * convention as `ReviewRow` / `FindingRow`. The typed journal domain
@@ -193,7 +193,7 @@ export type ReviewThreadRow = {
 };
 
 /**
- * A row of the `review_checks` attempt registry (plan 68 Task 1, migration
+ * A row of the `review_checks` attempt registry (migration
  * `0021_review_checks.sql` — spec review-lifecycle §7.1 second block). One row
  * per Check ATTEMPT: `attempt_key` + `generation` identify it, `external_id`
  * is the immutable correlation handle GitHub echoes back, `check_run_id` is
@@ -235,11 +235,11 @@ export type ReviewCheckRow = {
 };
 
 /**
- * Narrow D1 face the ArtifactStore adapter depends on (plan Clarify 5):
+ * Narrow D1 face the ArtifactStore adapter depends on:
  * prepare/bind/first/all/run + batch. A real `D1Database` satisfies this
  * structurally; tests provide a bun:sqlite-backed implementation via
  * `tests/store/helpers.ts`. The store writes the review row and its
- * findings in ONE atomic D1 batch (plan 05 T2 review I1, absorbed by the
+ * findings in ONE atomic D1 batch (review invariant I1, absorbed by the
  * adapter) — it never touches exec/withSession/dump, so the test double
  * stays small.
  */

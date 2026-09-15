@@ -1,6 +1,6 @@
 /**
  * Per-App GitHub metadata fetch — the dashboard-local `GET /app` face
- * (plan 53 Task 1, architect decision AD-531).
+ * (architect decision AD-531).
  *
  * Route-isolation red line (Q2 / AD-531): this module is dashboard-local —
  * it imports NOTHING from src/pipeline/, constructs NO createAppAuth, and
@@ -50,7 +50,7 @@ const JWT_CLOCK_SKEW_SEC = 60;
 const enc = new TextEncoder();
 
 /**
- * Lazy-refresh budget (AD-531 lock, plan 53): a cached profile is served as-is
+ * Lazy-refresh budget (AD-531 lock): a cached profile is served as-is
  * for 24h since `github_metadata_synced_at`; past that (or when the column is
  * NULL — never synced) the settings read path refreshes once. This bounds the
  * egress to ≤1 fetch per request; ≤1/App/day once a sync succeeds and, with
@@ -60,7 +60,7 @@ const enc = new TextEncoder();
 export const GITHUB_METADATA_TTL_MS = 24 * 60 * 60 * 1000;
 
 /**
- * Whether the cached GitHub profile needs a lazy refresh (plan 53 A4). The
+ * Whether the cached GitHub profile needs a lazy refresh. The
  * column is SQLite `datetime('now')` TEXT — `YYYY-MM-DD HH:MM:SS` in UTC —
  * which `Date.parse` alone would read as LOCAL time, so the space form is
  * normalized to ISO-8601 UTC before parsing (the last_webhook_at TEXT
@@ -146,8 +146,8 @@ export type FetchAppMetadataResult =
   | { ok: false };
 
 /**
- * Fetch one App's public GitHub profile with a freshly minted App JWT
- * (plan 53 A3). `githubAppId` is the numeric GitHub App id
+ * Fetch one App's public GitHub profile with a freshly minted App JWT.
+ * `githubAppId` is the numeric GitHub App id
  * (`github_apps.github_app_id` — the JWT `iss` claim, NOT the row UUID);
  * `decryptedPem` is the already-secretbox-decrypted App private key
  * (decryption happens at the caller — the last responsible moment).

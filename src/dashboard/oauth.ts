@@ -3,12 +3,12 @@
  * authorize URL, code→token exchange, user fetch.
  *
  * These credentials are DISTINCT from the review GitHub App (whose
- * Worker-env secrets APP_ID / PRIVATE_KEY / WEBHOOK_SECRET were retired in
- * plan 24 — per-App credentials now live encrypted in D1; this guard
- * predates plan 24 and is unaffected by it): dashboard login uses
+ * Worker-env secrets APP_ID / PRIVATE_KEY / WEBHOOK_SECRET were retired —
+ * per-App credentials now live encrypted in D1; this guard
+ * predates that cutover and is unaffected by it): dashboard login uses
  * GITHUB_OAUTH_CLIENT_ID / GITHUB_OAUTH_CLIENT_SECRET only
- * (.mstar/iterations/v0.3/guides/oauth-vs-github-app.md). Scope is locked
- * to `read:user` — identity only (product decision 7, plan 08).
+ * (an OAuth App, distinct from a GitHub App). Scope is locked
+ * to `read:user` — identity only (product decision 7).
  */
 
 import { GITHUB_CODE_SHAPE } from "./github-code-shape";

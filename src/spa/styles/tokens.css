@@ -1,6 +1,6 @@
 /*
- * DESIGN.md token layer (plan 29 Task 1; cascade restructured plan 41 T1;
- * v0.3 value rebase plan 57 T1 — AD-573 value-swap under frozen names).
+ * DESIGN.md token layer (with the later cascade restructure and the
+ * v0.3 value rebase — AD-573 value-swap under frozen names).
  *
  * Contract:
  *   - :root = themes.dark (console default)
@@ -18,7 +18,7 @@
  *     --duration-* / --ease-* (motion, theme-independent; the reduce media
  *     query at the end of this file folds durations to 1ms).
  *
- * Task 3+ SPA layout consumes this module. Do not build components here.
+ * The SPA layout consumes this module. Do not build components here.
  * Three value sites stay in lockstep (machine-pinned in
  * tests/spa/tokens.test.ts): DESIGN.md frontmatter, this file, and the
  * src/dashboard/views.ts STYLE subset.
@@ -129,7 +129,7 @@
   --pink-900: #fbcfe8;
   --pink-1000: #fce7f3;
 
-  /* typography primitives — sans is self-hosted Geist Sans (plan 57 T2,
+  /* typography primitives — sans is self-hosted Geist Sans (AD-572,
      AD-572; @font-face in styles/fonts.css, latin woff2 + swap). zh and any
      uncovered glyphs fall back to the system stack. */
   --font-sans: "Geist Sans", ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
@@ -217,7 +217,7 @@
      tier (always +4px above control); full stays pill-only. lg (16px) is
      legacy: kept declared for name continuity (AD-573) but no longer a
      consumed tier — the shadcn bridge maps Tailwind lg/xl onto the md
-     container step (plan 57 T3; closes T1-review Minor 1). */
+     container step. */
   --rounded-sm: 8px;
   --rounded-md: 12px;
   --rounded-lg: 16px;
@@ -243,8 +243,8 @@
   --breakpoint-xl: 1280px;
 
   /* components — reference color vars so they follow the active theme.
-     button-primary carries the Signal Cyan brand (plan 57 T3 closes the
-     staged-delivery seam; DESIGN.md button-primary declares brand-700). */
+     button-primary carries the Signal Cyan brand (the staged-delivery
+     seam is closed; DESIGN.md button-primary declares brand-700). */
   --button-primary-bg: var(--brand-700);
   --button-primary-fg: var(--background-100);
   --button-primary-height: 40px;

@@ -1,4 +1,4 @@
--- 0016_users_login_nocase_unique.sql — case-insensitive unique membership (plan 34 QC W-1).
+-- 0016_users_login_nocase_unique.sql — case-insensitive unique membership (QC W-1).
 --
 -- Append-only DDL on the existing production DB (0003+ convention): the
 -- 0003 `github_login TEXT UNIQUE` index is BINARY-collated, so two

@@ -1,5 +1,5 @@
 /**
- * Plan 59 T1: settings section-rhythm visual-discipline pins (A1/A2,
+ * settings section-rhythm visual-discipline pins (A1/A2,
  * AD-591 two-tier surface + grouped rhythm). Source-scan + static-SSR
  * contract — no DOM runner.
  *
@@ -9,7 +9,7 @@
  *    (slug row + AppInfo + Ops/Health), Tier 2 = configuration zone
  *    (RuntimeImage from T1; Providers/Chains/Seats joined in T2).
  * 2. v0.3 face: page/panel headings ride the heading-24/20 token steps
- *    (plan-58 QC idiom convergence), card titles ride heading-16, group
+ * (QC idiom convergence), card titles ride heading-16, group
  *    eyebrows separate the two zones at the spacing-8 rhythm.
  * 3. Group label keys exist atomically in both locales.
  */
@@ -27,7 +27,7 @@ const sectionCard = readFileSync(join(spaRoot, "components/SectionCard.tsx"), "u
 const settingsPage = readFileSync(join(spaRoot, "pages/SettingsPage.tsx"), "utf8");
 const pagesCss = readFileSync(join(spaRoot, "pages.module.css"), "utf8");
 
-describe("SectionCard tier idiom (plan 59 T1 / AD-591)", () => {
+describe("SectionCard tier idiom (AD-591)", () => {
   test("the idiom is single-point: a hand-written wrapper composing ui/card, not a copy-in edit", () => {
     // AD-591: SectionCard lives in components/ (the extension surface), and
     // composes the copy-in Card primitive rather than forking it.
@@ -78,7 +78,7 @@ describe("SectionCard tier idiom (plan 59 T1 / AD-591)", () => {
   });
 });
 
-describe("settings section rhythm (plan 59 T1 / AD-591)", () => {
+describe("settings section rhythm (AD-591)", () => {
   test("the page picks tiers through props only — no per-block tier className assembly", () => {
     // The tier vocabulary lives in SectionCard.tsx alone; the page source
     // never spells tier classes or the data-tier attribute by hand.
@@ -127,7 +127,7 @@ describe("settings section rhythm (plan 59 T1 / AD-591)", () => {
   });
 });
 
-describe("settings heading idiom (plan 59 T1, plan-58 QC convergence)", () => {
+describe("settings heading idiom (QC convergence)", () => {
   test("page title rides heading-24, the app slug rides heading-20 — no raw size utilities", () => {
     expect(settingsPage).toContain("text-(length:--typo-heading-24-size)");
     expect(settingsPage).toContain("leading-(--typo-heading-24-line)");
@@ -165,7 +165,7 @@ describe("settings heading idiom (plan 59 T1, plan-58 QC convergence)", () => {
   });
 });
 
-describe("group eyebrow copy (plan 59 T1, A8)", () => {
+describe("group eyebrow copy (A8)", () => {
   test("identity/configuration keys exist atomically in both locales", () => {
     for (const key of ["settings.group.identity", "settings.group.configuration"] as const) {
       const en = t("en", key);
@@ -183,7 +183,7 @@ describe("group eyebrow copy (plan 59 T1, A8)", () => {
   });
 });
 
-describe("providers/chains/seats re-parent (plan 59 T2 / AD-591)", () => {
+describe("providers/chains/seats re-parent (AD-591)", () => {
   const cardBlock = (start: string, end: string) => {
     const from = settingsPage.indexOf(start);
     expect(from, start).toBeGreaterThan(-1);
@@ -220,7 +220,7 @@ describe("providers/chains/seats re-parent (plan 59 T2 / AD-591)", () => {
   test("form labels stay label-above-control; the mirror rows speak one compact dialect", () => {
     // The shared label-above-field wrapper survives untouched on every
     // ProviderConfigForm / CustomExpand / DraftChainPanel / SeatsCard field
-    // (plan-38/54 aria-labelledby picker label rides its own pinned idiom).
+    // (the combobox aria-labelledby picker label rides its own pinned idiom).
     const labelIdiom = 'className="flex flex-col gap-1.5 text-sm font-medium"';
     expect(settingsPage.split(labelIdiom).length - 1).toBeGreaterThanOrEqual(8);
     // Both configured-row kinds (the mirror rows) title at the label-14 form
@@ -235,21 +235,21 @@ describe("providers/chains/seats re-parent (plan 59 T2 / AD-591)", () => {
       expect(row, name).toContain('className="text-xs text-muted-foreground"');
     }
     // Compactness pins stay structural: hairline + container radius + the
-    // padded row body (plan-55 mirror-row compactness, faces retuned only).
+    // padded row body (mirror-row compactness, faces retuned only).
     for (const row of [keyRow, customRow]) {
       expect(row).toContain("flex flex-wrap items-center justify-between gap-2 rounded-md border p-3");
     }
   });
 });
 
-describe("provider combobox panel face (plan 59 T2)", () => {
+describe("provider combobox panel face", () => {
   const combobox = readFileSync(join(spaRoot, "components/provider-combobox.tsx"), "utf8");
 
   test("the open panel rides the v0.3 popover elevation; group labels ride the label-12 idiom", () => {
     // DESIGN.md elevation: shadow-pop is the popover/disclosure step (the
-    // plan-57 SelectContent face); the generic shadow-md is gone. Container
+    // SelectContent face); the generic shadow-md is gone. Container
     // radius tier + popover surface stay, and the height cap / internal
-    // scroll (plan-42/54 pins) is untouched.
+    // scroll (combobox pins) is untouched.
     expect(combobox).toContain("shadow-(--shadow-pop)");
     expect(combobox).not.toContain("shadow-md");
     expect(combobox).toContain("rounded-md border bg-popover");
@@ -262,12 +262,12 @@ describe("provider combobox panel face (plan 59 T2)", () => {
   });
 });
 
-describe("notice face (plan 59 T3 / A5)", () => {
+describe("notice face (A5)", () => {
   const pageNotice = readFileSync(join(spaRoot, "pages/PageNotice.tsx"), "utf8");
 
   test("each kind renders its semantic glyph; the alert/status role contract is untouched", () => {
     // v0.3 dual-state form: success/warn/error get their semantic glyph over
-    // the tinted token face. The plan-40 WCAG 4.1.3 role pin survives
+    // the tinted token face. The WCAG 4.1.3 role pin survives
     // verbatim, and the kind two-value + message semantics are unchanged
     // (op-outcome notices keep the PageNotice channel — AD-582 boundary).
     expect(pageNotice).toContain('role={kind === "error" ? "alert" : "status"}');
@@ -303,13 +303,13 @@ describe("notice face (plan 59 T3 / A5)", () => {
   });
 });
 
-describe("composed load/error states (plan 59 T3 / A6)", () => {
+describe("composed load/error states (A6)", () => {
   test("the foreground load gate rides the forms skeleton; retry wires the page's own load", () => {
-    // Plan-58 idiom: the skeleton is the page's full loading face (its
+    // idiom: the skeleton is the page's full loading face (its
     // heading placeholder stands in for the real h1); the settings kind is
     // "forms" (AD-582). Retry binds the foreground load — which is the only
     // path that flips state back to "loading", so op-triggered background
-    // reloads never flash the skeleton (plan-38, unchanged).
+    // reloads never flash the skeleton (unchanged).
     expect(settingsPage).toContain('<PageSkeleton locale={locale} kind="forms" />');
     expect(settingsPage).toContain('<ErrorState locale={locale} onRetry={() => void load()} />');
     // The old text-notice faces are retired from this page.
@@ -320,7 +320,7 @@ describe("composed load/error states (plan 59 T3 / A6)", () => {
   });
 });
 
-describe("chains panel faces (plan 59 T3, T2 review deferrals)", () => {
+describe("chains panel faces (review deferrals)", () => {
   test("the named-chain panel title rides the heading-16 token idiom (SectionCardTitle's face)", () => {
     const chainsBody = settingsPage.slice(
       settingsPage.indexOf("function ChainsCard"),
@@ -366,7 +366,7 @@ describe("chains panel faces (plan 59 T3, T2 review deferrals)", () => {
   });
 });
 
-describe("section description wording (plan 59 T3 / A8)", () => {
+describe("section description wording (A8)", () => {
   test("the Default-chain term stays stable across zh faces (wording consistency pass)", () => {
     // The stable technical term is the capitalized chain id; the zh faces for
     // the remove-cascade and the chains description used a lowercase drift.

@@ -1,5 +1,5 @@
 /**
- * Plan 13 Task 1 tests: migrations 0004/0005 + the github_apps store layer
+ * Unit tests: migrations 0004/0005 + the github_apps store layer
  * (spec dashboard-multi-app-platform § Data model, architect lock L2).
  *
  * Production-shaped sequence (the brief's STOP anchor): the bun:sqlite
@@ -48,7 +48,7 @@ function applyMigration(db: ReturnType<typeof createTestD1>, name: string): void
   db.raw.exec(readFileSync(join(MIGRATIONS_DIR, name), "utf8"));
 }
 
-/** A DB shaped like production before plan 13: 0001/0002 + seeded rows. */function createSeededD1(): ReturnType<typeof createTestD1> {
+/** A DB shaped like production at migration 0002: 0001/0002 + seeded rows. */function createSeededD1(): ReturnType<typeof createTestD1> {
   const db = createTestD1();
   // One M1-era row (raw_output, no envelope) and one v1 row (envelope).
   db.raw
@@ -63,7 +63,7 @@ function applyMigration(db: ReturnType<typeof createTestD1>, name: string): void
     .run();
   return db;
 }
-/** Seed DB + apply both plan-13 migrations in locked order 0004 → 0005. */
+/** Seed DB + apply both migrations in locked order 0004 → 0005. */
 function createMigratedD1(): ReturnType<typeof createTestD1> {
   const db = createSeededD1();
   applyMigration(db, "0004_github_apps.sql");
@@ -423,7 +423,7 @@ describe("apps-store (createAppsStore)", () => {
     ).rejects.toThrow(/FOREIGN KEY constraint failed/);
   });
 });
-describe("apps-store sandbox image selection (plan 37, migration 0018)", () => {
+describe("apps-store sandbox image selection (migration 0018)", () => {
   /** createMigratedD1 (0004/0005) + the sandbox_image_id column. */
   function createSandboxImageD1(): ReturnType<typeof createTestD1> {
     const db = createMigratedD1();
@@ -472,7 +472,7 @@ describe("apps-store sandbox image selection (plan 37, migration 0018)", () => {
   });
 });
 
-describe("apps-store delivery read faces (plan 20 Task 2 consumption)", () => {
+describe("apps-store delivery read faces (consumption)", () => {
   /** The apps-store fixture + migration 0011 (the webhook_deliveries table). */
   function createDeliveryD1(): ReturnType<typeof createTestD1> {
     const db = createMigratedD1();
@@ -552,7 +552,7 @@ describe("apps-store delivery read faces (plan 20 Task 2 consumption)", () => {
   });
 });
 
-describe("saveGithubMetadata (plan 53, migration 0019)", () => {
+describe("saveGithubMetadata (migration 0019)", () => {
   // `satisfies` pins the saveGithubMetadata input shape while keeping the
   // literal's non-null field types for exact-value assertions below.
   const METADATA = {

@@ -1,5 +1,5 @@
 /**
- * Localized delivery-outcome label (plan 45 T2 / F-05). The producer-side
+ * Localized delivery-outcome label (F-05). The producer-side
  * vocabulary is DELIVERY_OUTCOMES in src/dashboard/apps-store.ts (enforced
  * there before any row is written): `ok` = job enqueued, `paused` = the
  * App's review switch is off (2xx ignore), `ignored` = verified but not a

@@ -1,16 +1,16 @@
 /**
  * Webhook job handlers — structured logging, KV idempotency pre-check,
- * queue enqueue (plan 04 Task 2).
+ * queue enqueue.
  *
  * Hot path: no GitHub API calls, no diff fetch, no review — verify + enqueue
  * only (webhook 5s timeout budget; sha comes from the webhook payload).
  *
- * Idempotency (compass S4 / plan Clarify 4):
+ * Idempotency (compass S4):
  * - KV key only for non-empty `head_sha`; a null/empty sha must never become
  *   a KV key — `/review` commands always enqueue.
  * - KV has no atomic conditional write (`noneMatch` is not in
  *   workers-types), so this is get-then-put with a race window; the D1
- *   UNIQUE constraint (plan 05) is the durable fallback.
+ *   UNIQUE constraint is the durable fallback.
  * - KV read/write failure → conservative pass: log a warning and enqueue
  *   anyway (D1 fallback covers duplicates).
  * - Ordering invariant: the KV key is claimed only AFTER `REVIEW_QUEUE.send`
@@ -34,8 +34,8 @@ export type WorkerEventLog = {
 };
 
 /**
- * Structured log fields for a webhook-face rejection/bookkeeping warn (plan
- * 13 QC F-005; plan 15 log hygiene): the caller's REAL stage label rides
+ * Structured log fields for a webhook-face rejection/bookkeeping warn (QC
+ * F-005; log hygiene): the caller's REAL stage label rides
  * `event` — the literal "unknown" no longer
  * exists anywhere — so e.g. `installation_upsert_failed` /
  * `webhook_body_too_large` warns are filterable by event alone. `reason`
@@ -85,7 +85,7 @@ function toEventLog(payload: ReviewJobPayload): WorkerEventLog {
 /**
  * Idempotency pre-check: true when the key already exists (skip). On KV
  * failure, returns false (conservative pass) and logs a warning — the D1
- * UNIQUE constraint (plan 05) is the durable duplicate guard.
+ * UNIQUE constraint is the durable duplicate guard.
  */
 export async function idempotencyHit(
   kv: KVNamespace,

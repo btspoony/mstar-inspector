@@ -8,7 +8,7 @@ date: 2026-08-26
 status: active
 created_at: 2026-08-26
 last_updated: 2026-08-26
-source_plan: 05-review-store
+source: review store
 iteration: v0.2
 verified: true
 ---

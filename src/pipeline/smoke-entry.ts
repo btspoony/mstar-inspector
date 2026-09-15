@@ -1,20 +1,20 @@
 /**
- * Sandbox smoke entry (plan 06 Task 1 STOP gate + Task 2 runner falsification)
+ * Sandbox smoke entry (STOP-gate + runner falsification)
  * — a dedicated Worker entry that exercises the real sandbox path locally via
  * `wrangler dev`. Not the production worker entry: the production consumer
- * wiring lands in `src/worker/index.ts` at T3. The `Sandbox` Durable Object
+ * wiring lives in `src/worker/index.ts`. The `Sandbox` Durable Object
  * class is re-exported here (and only here) so the containers binding
  * resolves; the SDK import point stays `src/pipeline/sandbox.ts`.
  *
  * Routes:
  *   GET /healthz         → 200 {"ok":true,"version":"vX.Y.Z"} (readiness
  *                          probe for the orchestrator; same shape as the
- *                          worker face — plan 51, generated src/version.ts)
- *   GET /smoke           → T1 falsification: getSandbox → exec gh pr diff →
+ *                          worker face — generated src/version.ts)
+ *   GET /smoke           → falsification: getSandbox → exec gh pr diff →
  *                          destroy. Path 2 falls back to a git clone + diff
  *                          (token injected via git env config, never in the
  *                          command string). Returns JSON evidence, no secrets.
- *   GET /smoke-review    → T2: clone the real PR head (btspoony/todo-bots#1),
+ *   GET /smoke-review    → clone the real PR head (btspoony/todo-bots#1),
  *                          write the runner --input JSON (reconFacts: PR fact
  *                          + checked-out head sha + numstat universe — the
  *                          same shape src/pipeline/consumer.ts writes, plus
@@ -41,7 +41,7 @@ type SmokeEnv = {
   SANDBOX: SandboxBinding;
   /** Installation token minted by the orchestrator (scripts/sandbox-smoke.ts). */
   GH_TOKEN: string;
-  /** omp model key for the ark-plan provider (T2 runner smoke; injected per exec). */
+  /** omp model key for the ark-plan provider (runner smoke; injected per exec). */
   ARK_API_KEY?: string;
 };
 
@@ -53,14 +53,14 @@ const INPUT_PATH = "/workspace/review-input.json";
 /** In-image runner path (Dockerfile v2: WORKDIR /opt/runner, COPY src/review). */
 const RUNNER_PATH = "/opt/runner/src/review/runner.ts";
 const HARNESS_ROOT = "/opt/mstar-harness";
-/** Image omp agent dir (PI_CODING_AGENT_DIR, empty — the runner synthesizes every models.yml; plan 37). */
+/** Image omp agent dir (PI_CODING_AGENT_DIR, empty — the runner synthesizes every models.yml). */
 const OMP_AGENT_DIR = "/opt/omp-agent";
 
 export default {
   async fetch(request: Request, env: SmokeEnv): Promise<Response> {
     const url = new URL(request.url);
     if (url.pathname === "/healthz") {
-      // Plan 51: same additive version field as the worker face.
+      // Same additive version field as the worker face.
       return Response.json({ ok: true, version: `v${APP_VERSION}` });
     }
     if (url.pathname === "/smoke-review") {
@@ -138,7 +138,7 @@ export default {
     }
 
     // Destroy is part of the falsification evidence: run it before returning
-    // so the response carries the destroy outcome (plan Verdict key).
+    // so the response carries the destroy outcome (a verdict pin).
     try {
       await sandbox.destroy();
       result.destroyEvidence = { ok: true };
@@ -154,7 +154,7 @@ export default {
 };
 
 /**
- * T2 runner falsification: real SDK, real model key (ARK_API_KEY via exec env),
+ * Runner falsification: real SDK, real model key (ARK_API_KEY via exec env),
  * real PR clone (btspoony/todo-bots#1). The runner inside the image reads the
  * diff file, runs the omp review session, and prints ONLY the ReviewOutput JSON
  * to stdout. We parse that stdout with parseReviewOutput and return the verdict
@@ -225,7 +225,7 @@ async function execInImageReview(
   arkApiKey: string,
   startedAt: number,
 ): Promise<Record<string, unknown>> {
-  // Plan 37: the runner input REQUIRES the capability hosts (the in-image
+  // The runner input REQUIRES the capability hosts (the in-image
   // synthesizer base — there is no baked models.yml to fall back to). The
   // smoke exercises the deployed omp image, resolved through the SAME
   // source-controlled registry the production consumer resolves with.

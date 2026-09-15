@@ -1,13 +1,13 @@
 /**
- * Ops failure sweep (plan 19 Task 1, architect verdict AL-6) — the cron
+ * Ops failure sweep (architect verdict AL-6) — the cron
  * handler's read-only scan: count `review_failures` rows over the trailing
- * 24h across ALL stages (parse + runner/sandbox/pipeline — plan 18 T2's
+ * 24h across ALL stages (parse + runner/sandbox/pipeline — the
  * infra-failure rows make this table the sufficient failure signal, closing
  * the "DLQ-bound failure leaves zero D1 trace" blind spot) and alert when
  * the count breaches the threshold.
  *
  * Verdict-pinned boundaries (AL-6, do not widen without a new verdict):
- * - DLQ depth is NOT read: there is no CF API token surface this iteration,
+ * - DLQ depth is NOT read: there is no CF API token surface,
  *   so every alert payload carries `dlq_check: "skipped"` — the failure
  *   table IS the signal, the DLQ is only its overflow destination.
  * - Guard-leak cleanup stays OUT of the sweep: the KV guard TTL is the leak
@@ -70,12 +70,12 @@ export type SweepWarnFields = Omit<WebhookStageWarnLog, "event" | "reason"> & {
     | "ops_sweep_alert_webhook_failed"
     | "ops_sweep_failed"
     | "ops_sweep_db_unbound"
-    // Plan 67 §7.11: the scheduled composition's independent catch for the
+    // §7.11: the scheduled composition's independent catch for the
     // M8 reconciler (type-only addition — the sweep's own behavior is
     // untouched and the reconciler is throw-proof, so this line is a
     // belt-and-braces fence, not a path).
     | "ops_lifecycle_reconcile_failed"
-    // Plan 68 §7.11.2: the composition's THIRD independent catch, for the M7
+    // §7.11.2: the composition's THIRD independent catch, for the M7
     // Check reconciler — same shape and the same type-only rationale as the
     // M8 line above.
     | "ops_check_reconcile_failed";

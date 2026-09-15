@@ -1,5 +1,5 @@
 /**
- * Plan 13 Task 1 tests: the AES-256-GCM secretbox envelope (spec
+ * Unit tests: the AES-256-GCM secretbox envelope (spec
  * dashboard-multi-app-platform § Crypto envelope, architect lock L1).
  *
  * Locked surface under test:

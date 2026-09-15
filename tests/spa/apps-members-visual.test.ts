@@ -1,5 +1,5 @@
 /**
- * Plan 58 T3: Apps + Members visual-discipline pins (A4/A5, AD-581
+ * Apps + Members visual-discipline pins (A4/A5, AD-581
  * table-reinforced form). Source-scan contract — no DOM runner.
  *
  * 1. AD-581: the Apps list stays a semantic table — the identity cell is
@@ -23,7 +23,7 @@ const appsPage = readFileSync(join(spaRoot, "pages/AppsPage.tsx"), "utf8");
 const membersPage = readFileSync(join(spaRoot, "pages/MembersPage.tsx"), "utf8");
 const tablePrimitive = readFileSync(join(spaRoot, "components/ui/table.tsx"), "utf8");
 
-describe("AppsPage table reinforcement (plan 58 T3 / AD-581)", () => {
+describe("AppsPage table reinforcement (AD-581)", () => {
   test("identity cell is the brand surface: slug primary line + AppID meta line", () => {
     expect(appsPage).toContain('className="text-sm font-semibold text-foreground no-underline hover:underline"');
     expect(appsPage).toContain("text-xs text-muted-foreground tabular-nums");
@@ -31,7 +31,7 @@ describe("AppsPage table reinforcement (plan 58 T3 / AD-581)", () => {
   });
 
   test("whole-row click and the visible settings anchor keep their channels", () => {
-    // Row-level and identity-link spaClick handlers (plan 40 behavior).
+    // Row-level and identity-link spaClick handlers (behavior).
     expect(appsPage.split("onClick={(event) => spaClick(href, event)}").length - 1).toBe(3);
     expect(appsPage).toContain('className="text-primary underline-offset-4 hover:underline"');
     expect(appsPage).toContain('{t(locale, "apps.settings")}');
@@ -52,7 +52,7 @@ describe("AppsPage table reinforcement (plan 58 T3 / AD-581)", () => {
   });
 
   test("row hover is the restyled primitive's tinted surface; header row opts out", () => {
-    // ui/table.tsx (plan 57) carries hover:bg-muted on data rows — the page
+    // ui/table.tsx carries hover:bg-muted on data rows — the page
     // must not shadow it, and the header band opts out of the row hover.
     expect(appsPage).toContain('className="cursor-pointer"');
     expect(appsPage).toContain('<TableRow className="hover:bg-inherit">');
@@ -64,7 +64,7 @@ describe("AppsPage table reinforcement (plan 58 T3 / AD-581)", () => {
   });
 });
 
-describe("v0.3 page face (plan 58 T3, A4/A5)", () => {
+describe("v0.3 page face (A4/A5)", () => {
   test("page titles ride the heading-24 token step", () => {
     for (const [name, source] of [
       ["AppsPage", appsPage],
@@ -96,7 +96,7 @@ describe("v0.3 page face (plan 58 T3, A4/A5)", () => {
   });
 });
 
-describe("table horizontal padding (plan 62 T2, D5/A3)", () => {
+describe("table horizontal padding (D5/A3)", () => {
   // The exact head/cell class literals (qc round 1, qc1-F-002): the
   // retirement pin scans these strings only — a hypothetical future variant
   // elsewhere in the file (px-2.5, sm:px-2) cannot false-fail it.
@@ -133,7 +133,7 @@ describe("table horizontal padding (plan 62 T2, D5/A3)", () => {
   });
 });
 
-describe("empty-state copy (plan 58 T3, A6)", () => {
+describe("empty-state copy (A6)", () => {
   test("guidance keys exist atomically in both locales", () => {
     for (const key of [
       "apps.emptyTitle",

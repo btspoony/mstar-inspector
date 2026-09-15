@@ -1,6 +1,5 @@
 /**
- * Unit tests for the AgentRuntime port + deterministic seat logic (plan 07
- * Task 2). Pure functions only — no SDK boundary involved:
+ * Unit tests for the AgentRuntime port + deterministic seat logic). Pure functions only — no SDK boundary involved:
  *   - port constants (REVIEW_SEATS) and the level guard;
  *   - partitionSeats: quick full-diff seat, default cluster balance,
  *     degenerate half-split, single-file overlap, empty universe;

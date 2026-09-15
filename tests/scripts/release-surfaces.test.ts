@@ -1,13 +1,12 @@
 /**
- * `scripts/release-surfaces.ts` contract pins (plan 50 T2.1 / D3; plan 51 T2
- * extends the surface list).
+ * `scripts/release-surfaces.ts` contract pins (D3;
+ * the ts-const rework extends the surface list).
  *
  * The module is the SSOT shared by prepare (bump writer) and validate
  * (gate): VERSION_SURFACES list + RELEASE_VERSION_RE + compareSemver /
  * bumpVersion. These tests pin:
  *
- * - the surface list shape (package.json json + src/version.ts ts-const —
- *   plan 51 D4);
+ * - the surface list shape (package.json json + src/version.ts ts-const);
  * - semver acceptance / rejection (semver 2.0.0 §9 prerelease identifiers);
  * - semver 2.0.0 §11 precedence chain used by the `version > current` guard;
  * - AD-2 auto-bump semantics (patch default, --minor, prerelease
@@ -35,7 +34,7 @@ import type { VersionSurface } from "../../scripts/release-surfaces";
 import { disposeTempRoot, makeTempRoot, writeAt } from "./helpers";
 
 describe("VERSION_SURFACES SSOT", () => {
-  test("exactly package.json (json) + src/version.ts (ts-const) — plan 51 D4", () => {
+  test("exactly package.json (json) + src/version.ts (ts-const) — D4", () => {
     expect(VERSION_SURFACES).toHaveLength(2);
     expect(VERSION_SURFACES[0]).toEqual({ label: "package.json", path: "package.json", kind: "json" });
     expect(VERSION_SURFACES[1]).toEqual({
@@ -180,7 +179,7 @@ describe("json surface read/write", () => {
   });
 });
 
-describe("ts-const surface (src/version.ts, plan 51 D4)", () => {
+describe("ts-const surface (src/version.ts)", () => {
   const surface = VERSION_SURFACES[1]!;
 
   test("round-trips the version, regenerating from the canonical template", async () => {

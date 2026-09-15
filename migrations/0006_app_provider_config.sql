@@ -1,5 +1,5 @@
--- 0006_app_provider_config.sql — per-App BYOK configuration (plan 14 B2
--- Task 1, spec dashboard-multi-app-platform § Data model, architect locks
+-- 0006_app_provider_config.sql — per-App BYOK configuration (spec
+-- dashboard-multi-app-platform § Data model, architect locks
 -- L1/L2).
 --
 -- app_provider_keys: one row per (App, provider) API key — the BYOK store.

@@ -1,5 +1,5 @@
 /**
- * Review envelope schema (plan 07 Task 3) — the inspector-side zod mirror of
+ * Review envelope schema — the inspector-side zod mirror of
  * the harness `mstar.review/v1` envelope. SSOT for the vocabulary is the
  * pinned engine (`@mstar-harness/engine` `validateMstarReviewV1` /
  * `synthesizeReview`); the publishing contract is
@@ -135,7 +135,7 @@ export function capFindings(
 export const FINDING_TITLE_MAX = 200;
 export const FINDING_BODY_MAX = 2000;
 /**
- * Plan 21 (S-1, qc2 F-002): `fingerprint_hint` is clamped at the SAME choke
+ * S-1 / qc2 F-002: `fingerprint_hint` is clamped at the SAME choke
  * point with FINDING_TITLE_MAX semantics — the hint feeds the D1
  * `findings.fingerprint` index column verbatim, so an unbounded hint would
  * blow the column budget. Over-budget hints are truncated like titles; a

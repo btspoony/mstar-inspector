@@ -1,17 +1,17 @@
 /**
- * Plan 29 T3 + plan 33 T2: enumerated client router (pathname + params).
+ * Enumerated client router (pathname + params).
  */
 import { describe, expect, test } from "bun:test";
 import { matchRoute } from "../../src/spa/router";
 import { SPA_PAGES, isSpaAssetPath, matchSpaRoute, wantsHtml } from "../../src/spa/routes";
 
-describe("SPA_PAGES enum (plan 33 T2 + plan 40)", () => {
+describe("SPA_PAGES enum", () => {
   test("includes apps, insights, members, login, settings (home retired)", () => {
     expect([...SPA_PAGES]).toEqual(["apps", "insights", "members", "login", "settings"]);
   });
 });
 
-describe("matchSpaRoute (plan 29 T3 + plan 33 T2 + plan 40)", () => {
+describe("matchSpaRoute", () => {
   test("matches exact enumerated paths", () => {
     expect(matchSpaRoute("/dashboard")).toEqual({ page: "apps", pathname: "/dashboard" });
     expect(matchSpaRoute("/dashboard/apps")).toEqual({ page: "apps", pathname: "/dashboard/apps" });
@@ -34,7 +34,7 @@ describe("matchSpaRoute (plan 29 T3 + plan 33 T2 + plan 40)", () => {
     });
   });
 
-  test("/dashboard and /dashboard/apps resolve to the same Apps page (plan 40)", () => {
+  test("/dashboard and /dashboard/apps resolve to the same Apps page", () => {
     expect(matchSpaRoute("/dashboard")?.page).toBe("apps");
     expect(matchSpaRoute("/dashboard/apps")?.page).toBe("apps");
     expect(matchRoute("/dashboard")).toEqual({ page: "apps", pathname: "/dashboard" });
@@ -48,7 +48,7 @@ describe("matchSpaRoute (plan 29 T3 + plan 33 T2 + plan 40)", () => {
   });
 });
 
-describe("wantsHtml / asset paths (plan 29 T3)", () => {
+describe("wantsHtml / asset paths", () => {
   test("only Accept: text/html* is an HTML navigation", () => {
     expect(wantsHtml("text/html")).toBe(true);
     expect(wantsHtml("text/html,application/xhtml+xml")).toBe(true);

@@ -1,12 +1,12 @@
 /**
- * Review-thread identity, discovery and resolution (plan 67 Task 2, spec
+ * Review-thread identity, discovery and resolution (spec
  * review-lifecycle §7.5 verbatim — plus the shared GraphQL capture
  * primitives and digests that §7.8's discussion capture reuses).
  *
  * Module map:
  *   - Opaque marker wire: `lineMarker` / `parseLineMarker` / batch marker /
  *     `buildLineCommentBody` / `stripInspectorMarkerSyntax` / `buildLineIntent`.
- *     Ids are canonical lowercase UUIDs preallocated by the T1 journal
+ *     Ids are canonical lowercase UUIDs preallocated by the journal
  *     (`stagePublication` payload) — no fingerprint encoding, length
  *     assumption or hint-derived content ever enters a marker, and untrusted
  *     bodies are stripped of Inspector marker syntax before a trusted marker
@@ -150,9 +150,9 @@ export function buildLineCommentBody(intent: Pick<LineIntent, "body" | "publicat
 
 export type BuildLineIntentInput = {
   findingRowId: string;
-  /** Preallocated publication UUID (T1 journal payload). */
+  /** Preallocated publication UUID (journal payload). */
   publicationId: string;
-  /** Preallocated association UUID (T1 journal payload — becomes the row id). */
+  /** Preallocated association UUID (journal payload — becomes the row id). */
   associationId: string;
   scope: Scope;
   originalSha: string;
@@ -1395,7 +1395,7 @@ async function persistOutcome(
 }
 
 // ---------------------------------------------------------------------------
-// Factory — the §7.5 adapter T4 wires onto the per-App commenter surface.
+// Factory — the §7.5 adapter wired onto the per-App commenter surface.
 // ---------------------------------------------------------------------------
 
 export function createReviewThreads(deps: ReviewThreadsDeps): {
@@ -1408,6 +1408,6 @@ export function createReviewThreads(deps: ReviewThreadsDeps): {
   };
 }
 
-// Re-export the thread-snapshot vocabulary so T4's wiring can build
+// Re-export the thread-snapshot vocabulary so the adapter wiring can build
 // VerifiedResolution values without importing two modules.
 export type { Coverage, ThreadSnapshot };

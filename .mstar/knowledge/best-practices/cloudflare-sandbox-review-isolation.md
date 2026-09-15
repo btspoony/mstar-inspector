@@ -8,7 +8,7 @@ date: 2026-08-26
 status: active
 created_at: 2026-08-26
 last_updated: 2026-09-01
-source_plan: 06-sandbox-review-pipeline
+source: sandbox review pipeline
 iteration: v0.2
 verified: true
 ---
@@ -17,7 +17,7 @@ verified: true
 
 ## Context
 
-mstar-inspector 在 Cloudflare Workers 上编排每 PR 隔离的代码审查：Queue consumer 在 Sandbox 容器内 clone + `gh pr diff` + 跑 omp（Bun）审查。本迭代（v0.2 / plan 06 T1）把 solution §5.6 的全部 ASSUMPTION 证伪为已核实。
+mstar-inspector 在 Cloudflare Workers 上编排每 PR 隔离的代码审查：Queue consumer 在 Sandbox 容器内 clone + `gh pr diff` + 跑 omp（Bun）审查。本迭代（v0.2）把 solution §5.6 的全部 ASSUMPTION 证伪为已核实。
 
 ## Guidance
 
@@ -36,7 +36,7 @@ mstar-inspector 在 Cloudflare Workers 上编排每 PR 隔离的代码审查：Q
 - 每消息一个 sandbox，id 用 `randomUUID()`（per-attempt 唯一），`finally` 中 `destroy()`；禁止跨消息复用。
 - 容器内 omp：`HARNESS_PLUGIN_ROOT` 指向镜像预装根（env 注入）；模型 key 仅来自 per-App BYOK：`resolveAppConfig` 产出的 keys 经 PROVIDERS 注册表映射注入（`ark` → `ARK_API_KEY`），`key_source` ∈ `app|custom`（`buildRunnerEnv` 装配，无 env 参数）——全局 `OMP_MODEL_KEY` 单一映射点已随 v0.9 / AL-24-5 退役（零全局回退，见 `perapp-zero-global-fallback.md`）。
 
-### 网络出站控制面（v0.7 / plan 19, AL-4 核实）
+### 网络出站控制面（v0.7, AL-4 核实）
 
 - `@cloudflare/sandbox` 0.12.8 自身 **无** egress 配置面（`SandboxOptions` 无网络字段）；控制面在其钉版依赖 **`@cloudflare/containers` 0.3.7** 的 `Container` 超类上：`allowedHosts`（白名单外 → 520 fail-closed）/ `deniedHosts` / `enableInternet` / `interceptHttps`。
 - **启用前先问 host 清单是否有仓内 SSOT**：BYOK 开放 provider 集时，漏一个 host = 全部该 App review 520→DLQ，失败模式比不启用更差。先落 host SSOT + staging 验证，再启用。

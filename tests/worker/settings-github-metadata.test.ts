@@ -1,5 +1,5 @@
 /**
- * Plan 53 Task 2 (T2.1, A4/A8 route side): the settings read path's lazy
+ * The settings read path's lazy
  * GitHub-metadata refresh + the response contract. Pinned here:
  *   - first sync (NULL synced_at) → exactly ONE GET https://api.github.com/app
  *     (App-JWT face), the five migration-0019 columns persist via
@@ -167,7 +167,7 @@ function seedCache(db: TestD1, appId: string, syncedAtSql: string): void {
     .run(appId);
 }
 
-describe("GET /api/apps/:slug/settings — lazy GitHub-metadata refresh (plan 53 T2.1, AD-531)", () => {
+describe("GET /api/apps/:slug/settings — lazy GitHub-metadata refresh (AD-531)", () => {
   test("first sync: NULL synced_at → one GET /app, columns persist, response carries the profile, updated_at untouched", async () => {
     const pem = await pkcs8PemFixture();
     const { db, appId } = await seededWorld(pem);
@@ -345,7 +345,7 @@ describe("GET /api/apps/:slug/settings — lazy GitHub-metadata refresh (plan 53
     expect(viewerBody.app.github_metadata_synced_at).toMatch(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/);
     // The synced-at cache means the second face triggered NO second fetch.
     expect(calls).toHaveLength(1);
-    // The base-only face still carries no settings zones (plan 35 T4 pin).
+    // The base-only face still carries no settings zones (pin).
     expect(viewerBody.keys).toBeUndefined();
     expect(viewerBody.provider_catalog).toBeUndefined();
   });

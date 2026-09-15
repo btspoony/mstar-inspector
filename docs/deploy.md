@@ -6,9 +6,9 @@
 > image-digest record all run in CI. The manual runbook below is retained as
 > reference / rollback material.
 >
-> Plan 19 status: T1 landed the ops-config surfaces (queue concurrency cap +
+> Status: the ops-config surfaces have landed (queue concurrency cap +
 > cron failure sweep + optional alert webhook — SSOT in § Ops config below);
-> T2 (this document) completed the full runbook; T3 executes it and fills the
+> this runbook documents the full procedure; each deploy fills the
 > deployed image digest + deploy date in § Image pins and digest record.
 > 2026-08-31: domains/preview surface added (§ Domains and previews).
 
@@ -69,27 +69,27 @@ wrangler d1 migrations apply mstar-inspector-db            # local dev
 | `0002_mstar_review_v1` | mstar.review/v1 envelope columns (era lock: `envelope IS NOT NULL` ⇔ v1 row) |
 | `0003_dashboard_users` | dashboard membership |
 | `0004_github_apps` | multi-App registry (secretbox-encrypted App credentials) |
-| `0005_reviews_app_id` | `reviews.app_id` attribution (NULL = historical rows from the retired global App — archaeology: the legacy env-App face was deleted in plan 24) |
+| `0005_reviews_app_id` | `reviews.app_id` attribution (NULL = historical rows from the retired global App — archaeology: the legacy env-App face was deleted) |
 | `0006_app_provider_config` | per-App BYOK provider keys + model chain |
 | `0007_reviews_app_id_index` | index on `reviews.app_id` |
 | `0008_github_apps_ops` | per-App ops columns (`review_enabled` pause switch) |
-| `0009_app_model_roles` | per-App per-role model overrides (plan 17) |
-| `0010_review_failures` | all-stage failure table (plan 18) — the cron sweep's signal |
-| `0011_webhook_deliveries` | per-App webhook delivery log (plan 20) |
-| `0012_custom_providers_and_key_updated_at` | per-App custom provider declarations + provider-key `updated_at` (plan 23) |
-| `0013_findings_review_id_index` | index on `findings.review_id` — insights/previous-round lookups (plan 22) |
-| `0014_idx_reviews_reviewed_at` | index on `reviews.reviewed_at` — insights window scans (plan 22) |
-| `0015_provider_verification` | per-App key `verified_at`/`verified_status` + `app_provider_models` cache (plan 31) |
-| `0016_users_login_nocase_unique` | NOCASE unique index on `users.github_login` — case-insensitive membership uniqueness (plan 34 QC W-1) |
-| `0017_app_model_chains` | default + named model chains (`app_model_chains` + `app_model_chain_seats`), backfilled from `app_model_config`/`app_model_roles` (plans 35/39) |
-| `0018_app_sandbox_images` | `github_apps.sandbox_image_id` NOT NULL DEFAULT 'omp' — backfills live AND soft-deleted rows, so no manager visit is needed after deploy (plan 37) |
-| `0019_github_apps_metadata` | five metadata-only ADD COLUMNs caching the App's public GitHub profile (`github_name`/`github_description`/`github_html_url`/`github_avatar_url`/`github_metadata_synced_at`) for the settings info card — all nullable, safe over a live DB (plan 53) |
-| `0020_finding_lifecycle` | the finding-lifecycle and private pre-publication journal tables (`review_publications`, `review_findings`, `review_finding_rounds`, `review_threads`) — publication proof, closure and thread-resolution state (plan 67, spec §7.1) |
-| `0021_review_checks` | the per-attempt Check registry (`review_checks`) behind the advisory Check Runs, with `UNIQUE(attempt_key, generation)` and the partial unique index keeping at most one nonterminal generation per attempt key (plan 68, spec §7.1/§7.9) |
+| `0009_app_model_roles` | per-App per-role model overrides |
+| `0010_review_failures` | all-stage failure table — the cron sweep's signal |
+| `0011_webhook_deliveries` | per-App webhook delivery log |
+| `0012_custom_providers_and_key_updated_at` | per-App custom provider declarations + provider-key `updated_at` |
+| `0013_findings_review_id_index` | index on `findings.review_id` — insights/previous-round lookups |
+| `0014_idx_reviews_reviewed_at` | index on `reviews.reviewed_at` — insights window scans |
+| `0015_provider_verification` | per-App key `verified_at`/`verified_status` + `app_provider_models` cache |
+| `0016_users_login_nocase_unique` | NOCASE unique index on `users.github_login` — case-insensitive membership uniqueness (QC W-1) |
+| `0017_app_model_chains` | default + named model chains (`app_model_chains` + `app_model_chain_seats`), backfilled from `app_model_config`/`app_model_roles` |
+| `0018_app_sandbox_images` | `github_apps.sandbox_image_id` NOT NULL DEFAULT 'omp' — backfills live AND soft-deleted rows, so no manager visit is needed after deploy |
+| `0019_github_apps_metadata` | five metadata-only ADD COLUMNs caching the App's public GitHub profile (`github_name`/`github_description`/`github_html_url`/`github_avatar_url`/`github_metadata_synced_at`) for the settings info card — all nullable, safe over a live DB |
+| `0020_finding_lifecycle` | the finding-lifecycle and private pre-publication journal tables (`review_publications`, `review_findings`, `review_finding_rounds`, `review_threads`) — publication proof, closure and thread-resolution state (spec §7.1) |
+| `0021_review_checks` | the per-attempt Check registry (`review_checks`) behind the advisory Check Runs, with `UNIQUE(attempt_key, generation)` and the partial unique index keeping at most one nonterminal generation per attempt key (spec §7.1/§7.9) |
 
 Migrations are **forward-only** (0002 precedent): never hand-edit an applied
 migration; add the next file.
-Note: migration 0006's `app_model_config` comment ("NULL / absent row = unset → falls back to the global OMP_REVIEW_MODEL") is superseded by plan 24 AL-24-5 — chain-less Apps fail closed, no global chain since v0.9.
+Note: migration 0006's `app_model_config` comment ("NULL / absent row = unset → falls back to the global OMP_REVIEW_MODEL") is superseded by AL-24-5 — chain-less Apps fail closed, no global chain since v0.9.
 
 ### Secrets and vars inventory
 
@@ -108,7 +108,7 @@ bulk` writes, and what `src/worker/env.ts` reads) stay unchanged:
 | `OAUTH_CLIENT_SECRET` | `GITHUB_OAUTH_CLIENT_SECRET` | secret | dashboard | user OAuth login App secret |
 | `DASHBOARD_SESSION_SECRET` | `DASHBOARD_SESSION_SECRET` | secret | dashboard | session-cookie HMAC key |
 | `DASHBOARD_ENCRYPTION_KEY` | `DASHBOARD_ENCRYPTION_KEY` | secret | multi-App | AES-256-GCM master key for D1-stored App credentials |
-| `ALERT_WEBHOOK_URL` | `ALERT_WEBHOOK_URL` | secret | no — **NEW (plan 19)** | ops sweep alert webhook; unset = log-only alerting (§ Ops config) |
+| `ALERT_WEBHOOK_URL` | `ALERT_WEBHOOK_URL` | secret | no — **NEW** | ops sweep alert webhook; unset = log-only alerting (§ Ops config) |
 
 The Deploy workflow maps `vars.OAUTH_CLIENT_ID` →
 `env.OAUTH_CLIENT_ID` → `GITHUB_OAUTH_CLIENT_ID` in the bulk payload (same
@@ -158,7 +158,7 @@ but lacks D1 access fails the migration step with
 Provider API keys and the review model chain are **not** Worker env — they
 live per App in D1 (`app_provider_keys` / `app_model_config`, migration
 0006), configured on each App's dashboard Settings page and injected into the
-review container from the App's config only (AL-24-5 / plan 24 Task 6: the
+review container from the App's config only (AL-24-5: the
 `OMP_MODEL_KEY` / `OMP_REVIEW_MODEL` / `bun run keys` Worker-secret surface
 was retired with the global fallback — an App missing its chain or a chain
 provider's key fails its reviews closed).
@@ -168,11 +168,11 @@ settings; redeploy to change:
 
 | Name | Default | Purpose |
 |---|---|---|
-| `REVIEW_ENABLED` | unset | **emergency brake only** (plan 31): per-App `github_apps.review_enabled` is the primary review control; only the exact `"false"` (case-sensitive, untrimmed) stops ALL reviews — unset / `""` / `"true"` / `"TRUE"` / other → per-App governs |
+| `REVIEW_ENABLED` | unset | **emergency brake only**: per-App `github_apps.review_enabled` is the primary review control; only the exact `"false"` (case-sensitive, untrimmed) stops ALL reviews — unset / `""` / `"true"` / `"TRUE"` / other → per-App governs |
 | `ADMIN_LOGINS` | unset | comma-separated GitHub logins bootstrapped as dashboard admin |
 
-> **Plan 31 cutover checklist (上线即生效 — run BEFORE any deploy containing
-> plan 31; the semantic inversion takes effect the moment the Worker lands):**
+> **REVIEW_ENABLED cutover checklist (上线即生效 — run BEFORE the deploy that
+> flips the semantics; the semantic inversion takes effect the moment the Worker lands):**
 >
 > 1. `wrangler d1 execute mstar-inspector-db --remote --command "SELECT slug, status, review_enabled FROM github_apps WHERE deleted_at IS NULL;"`
 > 2. Confirm each App's state matches operational intent: a `review_enabled=1`
@@ -379,13 +379,13 @@ smoke → record the digest.
    `wrangler containers list --json` — a stale baseline makes the "which
    image is live" audit wrong.
 
-### Sandbox image — U-001 synthesis verification (plan 25 Task 2)
+### Sandbox image — U-001 synthesis verification
 
 The image ships `/opt/verify-synthesis.sh` (repo `sandbox-image/verify-synthesis.sh`,
-COPY'd into the digest — plan 25 AL-25-3). It replays the U-001 evidence on
+COPY'd into the digest — AL-25-3). It replays the U-001 evidence on
 ANY image build: per-review models.yml synthesis through the runner's
 real `writePerReviewModelsYaml` (the omp capability hosts — `ark-plan`
-synthesized without any baked file, plan 37 — plus the keyless custom
+synthesized without any baked file — plus the keyless custom
 declaration `u001-verify` / `https://example.invalid/v1` / `verify-model`),
 omp SDK `ModelRegistry`
 resolution of the synthesized file, and a minimal `createAgentSession` on the
@@ -410,7 +410,7 @@ docker run --rm --entrypoint /opt/verify-synthesis.sh <image>
 > are extra / local investigation steps, not the workflow smoke — for local
 > runs and for investigating a red run.
 >
-> **URL permanence (plan 30):** `/dashboard/apps` — and `/dashboard/apps/` —
+> **URL permanence:** `/dashboard/apps` — and `/dashboard/apps/` —
 > are permanently retired → 301 `/dashboard`; do not re-introduce the path
 > (browsers cache the 301).
 
@@ -419,7 +419,7 @@ docker run --rm --entrypoint /opt/verify-synthesis.sh <image>
    mstar-inspector → Settings → Triggers). The sweep is quiet below
    threshold: no log line is expected on a healthy system
    (`src/worker/sweep.ts` emits only the breach event / warns).
-2. **D1 migration check (real D1)** — verifies plan 18's 0010 applied and the
+2. **D1 migration check (real D1)** — verifies migration 0010 applied and the
    sweep's signal table is queryable:
    ```bash
    wrangler d1 execute mstar-inspector-db --remote --command \
@@ -451,13 +451,13 @@ docker run --rm --entrypoint /opt/verify-synthesis.sh <image>
 
 ## Multi-App go-live
 
-> Plan 20: activates the multi-App platform on a deployed Worker — the
+> This section activates the multi-App platform on a deployed Worker — the
 > `DASHBOARD_ENCRYPTION_KEY`, the dashboard registration flow, the per-App
 > webhook repoint, and the R1/R2 verification pins. Run AFTER § Deploy steps
 > and § Post-deploy smoke (the base Worker and D1 migrations **through
-> `0021`** must be live); the live execution is QA-coordinated (plan 20
-> Task 4). Historical note: plan 20 originally required `0001–0011`; later
-> plans extend the chain to `0021` (`0019` profile columns, `0020`
+> `0021`** must be live); the live execution is QA-coordinated. Historical
+> note: the go-live originally required `0001–0011`; the chain now extends
+> to `0021` (`0019` profile columns, `0020`
 > finding lifecycle, `0021` Check registry).
 
 ### 1. Set DASHBOARD_ENCRYPTION_KEY
@@ -487,7 +487,7 @@ wrangler secret put DASHBOARD_ENCRYPTION_KEY
 ```
 
 This key is a plain Worker secret (no key script — the `bun run keys`
-worker-secret face was retired in plan 24; provider keys are per-App now).
+worker-secret face was retired; provider keys are per-App now).
 It is independent of `DASHBOARD_SESSION_SECRET` (session HMAC) — never reuse
 either key for the other duty (rotation stays decoupled).
 
@@ -578,11 +578,11 @@ the checklist above.
 
 The R1 pin proves the per-App model configuration reaches the review and is
 recorded. `reviews.model` records the **effective BASE chain head** — the
-first selector of the App's stored model chain. AL-24-5 (plan 24 Task 6):
+first selector of the App's stored model chain. AL-24-5:
 there is no deployment-level chain to fall back to — an App with no chain
 fails its reviews closed (structured `review_failures` row, `stage=pipeline`,
 retry → DLQ), so a successful review ALWAYS has a non-NULL `model` (NULL
-survives only on pre-plan-24 historical rows — AL-24-4; see
+survives only on pre-cutover historical rows — AL-24-4; see
 `src/pipeline/consumer.ts` `assertAppConfigComplete`/`effectiveModelChain` +
 `chainHeadSelector`). The same gate checks every per-role override selector
 chain: an override referencing a provider with no configured key fails
@@ -662,7 +662,7 @@ HTTP 520), `deniedHosts` (unconditional block), `enableInternet` (default
 true), `interceptHttps` (default false; requires the container to trust the
 Cloudflare CA), plus the static `outbound*` handler chain; enforcement lives
 in `ContainerProxy.fetch` (denied → allowed gate → handlers → direct).
-Evidence: iteration spec `.mstar/iterations/v0.7/specs/m3-production-grade.md`
+Evidence: iteration spec m3-production-grade
 §1.3 + §4 AL-4.
 
 It is deliberately NOT activated. Reasons (AL-4):
@@ -670,9 +670,9 @@ It is deliberately NOT activated. Reasons (AL-4):
 - The host inventory has no SSOT in this repo: the 18 built-in provider API
   hosts resolve in omp's runtime registry (outside the repo — the omp SDK
   registry, NOT the Worker-side `PROVIDERS` allowlist, which is a separate
-  19-entry list since plan 24 Task 6 added `ark`); the ark capability host is
+  19-entry list, `ark` included); the ark capability host is
   declared in-repo in the omp registry entry
-  (`src/contracts/sandbox-images.ts`, synthesized at review time — plan 37).
+  (`src/contracts/sandbox-images.ts`, synthesized at review time).
 - Per-App BYOK keeps the provider set open — the host set is a product
   surface, not a constant.
 - A missing host fails CLOSED (520 → review failure → retry → DLQ) — a worse
@@ -695,10 +695,10 @@ controls are installed (the Dockerfile carries the documentation block only).
   - Provider API hosts by active provider config — the 18 built-in provider
     hosts resolve in omp's runtime registry (omp SDK 18.0.4, outside this
     repo — NOT the Worker-side `PROVIDERS` allowlist, which is a separate
-    19-entry list since plan 24 Task 6 added `ark`); the ark capability host
+    19-entry list, `ark` included); the ark capability host
     `ark.cn-beijing.volces.com` is declared in the omp registry entry
     (`src/contracts/sandbox-images.ts`) and synthesized into every per-review
-    models.yml (plan 37 — no baked in-image file).
+    models.yml (no baked in-image file).
 - **Runner tool whitelist:** the in-image review session restricts agent
   tools to read-only `read` / `grep` / `glob`
   (`src/review/runtime-omp.ts` `REVIEW_TOOL_NAMES`) — no write/exec tool
@@ -709,15 +709,15 @@ controls are installed (the Dockerfile carries the documentation block only).
 
 ## Image pins and digest record
 
-Five pins — mstar-harness bumped to **3.8.1** (plan 66 Task 1, superseding
-the plan 48 bump to 3.6.3); the `mstar` CLI (`@mstar-harness/cli`) preinstall
-is the container-level mechanism established in plan 47 Tasks 1–2, carried
-forward at the exact `@3.8.1` pin. The CLI
+Five pins — mstar-harness bumped to **3.9.2** (2026-09-14, superseding
+the 3.8.1 pin); the `mstar` CLI (`@mstar-harness/cli`) preinstall
+is the container-level mechanism, carried
+forward at the exact `@3.9.2` pin. The CLI
 preinstall is container-level only (`sandbox exec` resolves the `mstar`
 shim): review sessions stay restricted to the read-only `read` / `grep` /
 `glob` whitelist (Runner tool whitelist above), so the review-session model
 cannot invoke the CLI today — a sanctioned session toolcall path is a
-tracked follow-up (plan 47 roadmap), not a shipped mechanism. Base image /
+tracked follow-up, not a shipped mechanism. Base image /
 Bun / gh re-verified, no bump:
 
 | Pin | Value | Where |
@@ -725,16 +725,16 @@ Bun / gh re-verified, no bump:
 | base image | `docker.io/cloudflare/sandbox:0.12.8` | `sandbox-image/omp/Dockerfile` FROM |
 | Bun | `1.4.0` | `sandbox-image/omp/Dockerfile` |
 | gh CLI | `2.98.0` | `sandbox-image/omp/Dockerfile` |
-| mstar-harness | `4c8fbb216c444df832b1943d68e4eee76261bbd2` (3.8.1) | `sandbox-image/omp/Dockerfile` |
-| mstar-harness CLI | `@mstar-harness/cli@3.8.1` | `sandbox-image/omp/Dockerfile` |
+| mstar-harness | `23d2c78c481e3571bf3e975886ace5f8c1f9f905` (3.9.2) | `sandbox-image/omp/Dockerfile` |
+| mstar-harness CLI | `@mstar-harness/cli@3.9.2` | `sandbox-image/omp/Dockerfile` |
 
 **In-image DEFAULT model selector: `ark-plan/deepseek-v4-flash`** (pins:
 `src/review/runtime-omp.ts` `DEFAULT_MODEL_PATTERN` + the omp registry entry's
 `ark-plan` capability host in `src/contracts/sandbox-images.ts`, synthesized
-into every per-review models.yml — plan 37 removed the baked file). This line
+into every per-review models.yml — the baked file was removed). This line
 is the record for architect
-verdict AL-2: with the zero-global-fallback cutover (AL-24-5 / plan 24 Task
-6) the App's `modelChain` is the only chain source — a chain-less App is
+verdict AL-2: with the zero-global-fallback cutover (AL-24-5)
+the App's `modelChain` is the only chain source — a chain-less App is
 fail-closed by the consumer and the runner's default is reachable only via a
 direct/manual in-image runner call (the in-image scaffold, not the Worker
 path). On the production path the Worker never records NULL (the column
@@ -756,7 +756,7 @@ Deployed image record (DOCS-01 baseline):
 > digest `sha256:09724a204ef38dab02b88a6537bdd3f051997ac144f0aeff7d5901d9d75aa57d`,
 > Worker version `62c18d0a`.
 
-## Ops config (plan 19 T1)
+## Ops config
 
 ### Queue consumer concurrency (architect verdict AL-5)
 
@@ -771,13 +771,13 @@ Deployed image record (DOCS-01 baseline):
 
 - `wrangler.jsonc → triggers.crons: ["*/15 * * * *"]` — every 15 min the
   `scheduled` handler (src/worker/index.ts) runs the sweep
-  (src/worker/sweep.ts), then the plan-67 lifecycle reconciler
-  ([§ Lifecycle recovery](#lifecycle-recovery-plan-67-7111)), then the plan-68
-  Check recovery reconciler ([§ Check recovery](#check-recovery-plan-68-7112)),
+  (src/worker/sweep.ts), then the lifecycle reconciler
+  ([§ Lifecycle recovery](#lifecycle-recovery-7111)), then the
+  Check recovery reconciler ([§ Check recovery](#check-recovery-7112)),
   each stage in its own try/catch so none can break another. The sweep counts
   `review_failures` rows over the
   trailing 24h across ALL stages (parse + runner/sandbox/pipeline; the
-  per-attempt rows written by plan 18 T2 make this table the sufficient failure
+  per-attempt rows written by migration 0010 make this table the sufficient failure
   signal).
 - Threshold: `failures_24h > 5` (per-attempt semantics — a DLQ'd message
   leaves up to 4 rows: 1 initial delivery + max_retries = 3 retries).
@@ -794,11 +794,11 @@ Deployed image record (DOCS-01 baseline):
   mutation. (The composed lifecycle-recovery stage below does write its own
   D1 journal rows and may call GitHub, strictly within its own bounds.)
 
-### Lifecycle recovery (plan 67 §7.11.1)
+### Lifecycle recovery (§7.11.1)
 
 The same `*/15 * * * *` trigger runs a second, independent stage after the
 sweep: `reconcileReviewLifecycle` (`src/worker/lifecycle-reconcile.ts`), in its
-own try/catch and throw-proof by contract. It completes plan-67 work from the
+own try/catch and throw-proof by contract. It completes the finding-lifecycle work from the
 private D1 publication journal and **never re-runs a paid review**:
 
 - confirmed publications are applied locally (no GitHub call — works even while
@@ -837,7 +837,7 @@ missing or identity-mismatched App keeps its suspension (frozen policy).
 Budgets and the exact selection predicates: `.mstar/specs/review-lifecycle.md`
 §7.11.1.
 
-### Check recovery (plan 68 §7.11.2)
+### Check recovery (§7.11.2)
 
 A third independent stage on the same trigger — `reconcileReviewChecks`
 (`src/worker/check-reconcile.ts`), in its own try/catch and throw-proof by

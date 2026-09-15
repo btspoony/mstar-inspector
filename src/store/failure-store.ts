@@ -1,5 +1,5 @@
 /**
- * D1 failure store (plan 18 Task 2, architect verdicts AL-1 + AL-6) — the
+ * D1 failure store (architect verdicts AL-1 + AL-6) — the
  * single write/read authority for the `review_failures` event log
  * (migration 0010). Dedicated leaf, mirroring the app-config-store.ts leaf
  * pattern: `artifact-store.ts` stays the single write authority for
@@ -12,13 +12,13 @@
  * writes one best-effort row (stage="runner" | "sandbox" | "pipeline")
  * before each rethrow, so a DLQ'd message leaves up to 4 rows (one per
  * delivery: 1 initial + max_retries = 3 retries). There is no update/delete
- * face by design — audit-log semantics (the plan-19 sweep
+ * face by design — audit-log semantics (the cron sweep
  * counts rows over a created_at window; it never mutates them).
  *
  * created_at contract (BUG-03, documented — no schema rebuild): `record`
  * NEVER writes created_at — the column is ALWAYS the DDL DEFAULT
  * `datetime('now')` (migration 0010), i.e. the `YYYY-MM-DD HH:MM:SS` UTC
- * format. The plan-19 sweep's TEXT window comparison
+ * format. The cron sweep's TEXT window comparison
  * (`created_at > datetime('now', '-24 hours')`) depends on this exact
  * format; a producer that wrote an ISO-8601 or epoch value would silently
  * break the sweep. A CHECK constraint would require a table-rebuild

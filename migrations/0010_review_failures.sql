@@ -1,8 +1,8 @@
--- 0010_review_failures.sql — review failure event log (plan 18 Task 2,
--- architect verdicts AL-1 + AL-6, iteration spec m3-production-grade §2.2/§4).
+-- 0010_review_failures.sql — review failure event log (architect verdicts
+-- AL-1 + AL-6, iteration spec m3-production-grade §2.2/§4).
 --
 -- review_failures: one row per FAILED review ATTEMPT — the single failure
--- signal table for the plan-19 ops sweep (AL-6: without it, DLQ-bound infra
+-- signal table for the ops sweep (AL-6: without it, DLQ-bound infra
 -- failures leave zero D1 trace). Two producer paths:
 --   * parse-fail degrade (AL-1): stage = "parse", written on the ack path —
 --     parseReviewOutput is a pure function of run.stdout, so retry is

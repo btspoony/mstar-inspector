@@ -1,16 +1,16 @@
 /**
- * Queue consumer — the review pipeline main flow (plan 06 Task 3).
+ * Queue consumer — the review pipeline main flow.
  *
- * Flow (plan 07 Task 5 / compass S7): message → resolve the App's sandbox
- * image (plan 37: the stored github_apps.sandbox_image_id through the closed
+ * Flow (compass S7): message → resolve the App's sandbox
+ * image (the stored github_apps.sandbox_image_id through the closed
  * registry — unknown/disabled ids fail closed BEFORE the guard/sandbox) →
  * getSandbox (unique id per attempt) → clone the PR head branch (git
  * transport auth via scoped extraheader env) → `git rev-parse HEAD` for the
  * AUTHORITATIVE sha →
  * dedup by that sha (hit → ack) → diff → numstat (the seat-partition
  * universe) → write the runner `--input` JSON (reconFacts, plus the per-App
- * `modelOverrides` role map — plan 17 B6; no-map App = byte-identical
- * payload; plus the resolved image's capability hosts — plan 37 T2, the
+ * `modelOverrides` role map; no-map App = byte-identical
+ * payload; plus the resolved image's capability hosts (the
  * in-image synthesis base) → exec the
  * in-image runner `--level <quick|default|deep>` (exec env =
  * ARK_API_KEY/PI_CODING_AGENT_DIR/HARNESS_PLUGIN_ROOT + OMP_REVIEW_MODEL and
@@ -20,7 +20,7 @@
  * resolution via the F-001 channel — review failed log + review_failures
  * row + rethrow → retry×3 → DLQ); GH_TOKEN rides ONLY the git/gh step
  * envs) → parse
- * the mstar.review/v1 envelope → (plan 67, spec §7.7 FROZEN ORDER) dedup +
+ * the mstar.review/v1 envelope → (spec §7.7 FROZEN ORDER) dedup +
  * publication-journal handoff read BEFORE model work → pending confirmed
  * lifecycle apply + targets/evidence/discussion capture → optional fenced
  * Check claim (the §7.10 seam; absent `checks` dep = no Checks, M8 fully
@@ -34,12 +34,12 @@
  * proof-read Check terminalize → finally destroy. Any step throwing →
  * structured log
  * + a best-effort review_failures row (stage classified from the phase in
- * flight; plan 18 Task 2 / AL-6 — DLQ-bound infra failures otherwise leave
+ * flight; AL-6 — DLQ-bound infra failures otherwise leave
  * zero D1 trace) + rethrow (queue retry → DLQ). The runtime runner has NO
  * summary-degrade path: exit 0 means stdout is the engine-validated
  * envelope; a non-zero exit keeps the no-post/no-insert rethrow. A
- * parse/validate failure takes the DEGRADE path instead (plan 18 Task 2 /
- * AL-1, now routed through the §7.7 journal as a `degraded` publication):
+ * parse/validate failure takes the DEGRADE path instead (AL-1, now routed
+ * through the §7.7 journal as a `degraded` publication):
  * review_failures row (stage=parse) + staged→sent degraded comment (both
  * best-effort) + ack — parseReviewOutput is a pure function of
  * run.stdout, so retry is deterministic waste. No reviews row and NO KV
@@ -50,7 +50,7 @@
  * Three typed outcomes never throw: the in-flight
  * guard (bugbot BB-3) — guard-held schedules a per-message delayed retry
  * (60s/120s/240s) and finally acks with a warning instead of DLQing — a
- * PAUSED App's message (plan 16, review_enabled=0), which acks
+ * PAUSED App's message (review_enabled=0), which acks
  * immediately with ZERO side effects (no guard, no sandbox, no token
  * mint, no app-config read, no GitHub write, no retry, no DLQ) — and the
  * parse-fail degrade.
@@ -69,8 +69,8 @@
  * worker → pipeline (worker/index.ts queue wiring). It imports contracts/
  * (payload + idempotency key), review/schema (pure zod) + review/runtime
  * (pure port types/constants — dual-face, zero omp SDK),
- * store/artifact-store (07 D1 ArtifactStore) + store/failure-store (plan 18
- * Task 2 review_failures leaf), and the pipeline modules —
+ * store/artifact-store (07 D1 ArtifactStore) + store/failure-store (the
+ * review_failures leaf), and the pipeline modules —
  * never src/worker/**.
  */
 
@@ -133,13 +133,13 @@ import {
   type ReviewCommenter,
   type UpsertPlan,
 } from "./comment";
-// Per-App credential resolution (plan 13 Task 2, lock L4): the consumer is a
+// Per-App credential resolution (lock L4): the consumer is a
 // sanctioned reader of the dashboard store leaves (apps-store reads the
 // github_apps row, secretbox decrypts the PEM) — the dashboard ↛
 // pipeline/worker isolation is one-directional and unaffected.
 import { createAppsStore } from "../dashboard/apps-store";
 import { createSecretbox } from "../dashboard/secretbox";
-// Per-App AI-config resolution (plan 14 Task 3): the same sanctioned reader
+// Per-App AI-config resolution: the same sanctioned reader
 // edge — app-config-store reads app_provider_keys / app_model_config and
 // decrypts keys via secretbox (itself a zero-dependency leaf, lock L1).
 import {
@@ -147,17 +147,17 @@ import {
   type CustomProviderConsumerConfig,
 } from "../dashboard/app-config-store";
 import { getSandboxImage, type SandboxImageDefinition } from "../contracts/sandbox-images";
-// §7.10 Check seam implementation (plan 68 Task 2): `checks.ts` owns the
+// §7.10 Check seam implementation: `checks.ts` owns the
 // adapter AND the lifecycle it drives; this module owns the seam call sites.
 import { createCheckBeginLatch, createCheckLifecycle, type CheckBeginLatch } from "./checks";
 
 export type PipelineEnv = {
   DB: D1Database;
   IDEMPOTENCY_KV: KVNamespace;
-  SANDBOX: unknown; // binding shape = DurableObjectNamespace<Sandbox> (T1-pinned)
+  SANDBOX: unknown; // binding shape = DurableObjectNamespace<Sandbox> (pinned)
   /**
-   * Envelope master key for the per-App credential resolution (plan 13 Task
-   * 2, lock L4): base64 of exactly 32 bytes (the same DASHBOARD_ENCRYPTION_KEY
+   * Envelope master key for the per-App credential resolution (lock L4):
+   * base64 of exactly 32 bytes (the same DASHBOARD_ENCRYPTION_KEY
    * Worker secret the dashboard write face uses, src/dashboard/secretbox.ts).
    * Missing / malformed → SecretboxKeyError → per-App resolution fails
    * closed (structured error + the existing retry/DLQ semantics, zero GitHub
@@ -165,7 +165,7 @@ export type PipelineEnv = {
    */
   DASHBOARD_ENCRYPTION_KEY?: string;
   /**
-   * Review tier for the in-image runner (plan 09 T1): "quick" (1 seat),
+   * Review tier for the in-image runner: "quick" (1 seat),
    * "default" (2 seats, the harness no-flag landing tier), or "deep" (the
    * three-stage parent-session path). Unset/empty → "default". Any other
    * value fails the review fail-loud — the port never silently downgrades;
@@ -184,7 +184,7 @@ export type PipelineEnv = {
    */
 };
 
-/** In-image paths (Dockerfile v2 / T2 smoke — single source of truth). */
+/** In-image paths (Dockerfile v2 / smoke — single source of truth). */
 const CLONE_DIR = "/workspace/repo";
 const DIFF_PATH = "/workspace/pr.diff";
 const RUNNER_INPUT_PATH = "/workspace/review-input.json";
@@ -194,7 +194,7 @@ const OMP_AGENT_DIR = "/opt/omp-agent";
 
 // Per-call exec bounds (ms) — every sandbox exec carries an explicit timeout
 // so a hung gh/git/model call fails deterministically instead of silently
-// eating a container (plan QC 06 fix round 1 / qc3 F-001).
+// eating a container (qc3 F-001).
 /** gh/git steps (clone, rev-parse, diff, numstat, runner-input write) — measured ~2.6s total, 2min each is generous. */
 const EXEC_TIMEOUT_GIT_MS = 120_000;
 /**
@@ -203,7 +203,7 @@ const EXEC_TIMEOUT_GIT_MS = 120_000;
  * keep the frozen 10min ceiling (measured ~52s on a real model call); deep
  * gets 14min: Cloudflare Queue consumers cap at 15min wall-clock, so the
  * grill-me 30min budget could never finish in-consumer (force-kill skips
- * finally, retries DLQ — 10-review-d5-budget qc2/qc3 Critical); 14min still
+ * finally, retries DLQ — the d5-budget review's qc2/qc3 Critical); 14min still
  * covers the three-phase parent-session run without false-timeout into the
  * DLQ. Record<ReviewLevel, …> makes a future level widen fail at compile
  * time, never silently fall back.
@@ -216,7 +216,7 @@ const RUNNER_TIMEOUT_MS: Record<ReviewLevel, number> = {
 
 /**
  * Cap on the prefetched PR diff considered for the line-comments hunk
- * prefilter (plan 18 QC fix r1 / qc3 F-101): 2 MiB of diff text. Beyond it,
+ * prefilter (qc3 F-101): 2 MiB of diff text. Beyond it,
  * parseDiffHunkRanges would materialize a full line array per qualifying
  * round on multi-MB PRs; overflow degrades to the prefetch-failure path
  * (base-filter attempt; a residual 422 still falls back per AL-3).
@@ -253,7 +253,7 @@ export const INLINE_RESOLVE_ENTRY_MS = 6_000;
 export type ConsumerLogFields = {
   /**
    * `pull_request` / `review_command` — the trigger that produced the job.
-   * `review_paused` (plan 16, architect lock L4 — union widened ADDITIVELY):
+   * `review_paused` (architect lock L4 — union widened ADDITIVELY):
    * the ack-skip line for a paused App's in-flight message; it overrides the
    * trigger fields' event on that one log line.
    */
@@ -265,7 +265,7 @@ export type ConsumerLogFields = {
   pr_number: number;
   head_sha: string | null;
   sandbox_id?: string;
-  /** github_apps.id the job resolves to (per-App jobs only, plan 13 T2). */
+  /** github_apps.id the job resolves to (per-App jobs only). */
   app_id?: string;
   idempotency_key?: string;
   /** Review tier resolved from REVIEW_LEVEL. */
@@ -277,7 +277,7 @@ export type ConsumerLogFields = {
   /** Runner orchestration: deep = parent session; quick/default = Bun fan-out. */
   orchestration?: "bun-fanout" | "parent";
   /**
-   * Per-App key assembly (plan 14 B2, per-App messages only): the provider id
+   * Per-App key assembly (per-App messages only): the provider id
    * (a PROVIDERS key) the key_source field refers to. An id, never a
    * credential — key material is NEVER logged.
    */
@@ -285,20 +285,20 @@ export type ConsumerLogFields = {
   /**
    * Which source supplied `provider`'s key for the runner env: the App's own
    * per-App BYOK config ("app") or a custom-provider declaration keyed by
-   * provider id ("custom" — plan 23 Task 3, AL-23-1). AL-24-5: the former
+   * provider id ("custom" — AL-23-1). AL-24-5: the former
    * "global" source was retired with the zero-global-fallback cutover —
-   * there is no Worker-env key to fall back to (plan 24 Task 6).
+   * there is no Worker-env key to fall back to.
    */
   key_source?: "app" | "custom";
   /**
    * The runner env's config source for a per-App message: ALWAYS "app" —
    * keys and the model chain come only from the App's own config
    * (AL-24-5 zero global fallback; the "fallback" variant was retired with
-   * the global env surface in plan 24 Task 6).
+   * the global env surface).
    */
   config_source?: "app";
   /**
-   * Plan 18 Task 3 (AL-3): the line-comments createReview FAILED after the
+   * AL-3: the line-comments createReview FAILED after the
    * overall comment landed (residual 422 position validation or any other
    * Octokit error) — the review degraded to overall-comment-only for this
    * round. The overall comment + D1 row + KV done are unaffected.
@@ -314,7 +314,7 @@ export type ConsumerLogFields = {
   degraded_delete_deleted?: number;
   degraded_delete_skipped?: number;
   /**
-   * Plan 21 Task 3 (S-3, qc3 F-003): the previous-round fingerprint query
+   * S-3 / qc3 F-003: the previous-round fingerprint query
    * THREW — repeat dedup degraded to first-round semantics (empty set).
    * Set only on the dedup-failure warn; an empty previous round is silent.
    */
@@ -341,7 +341,7 @@ export const defaultConsumerLog: ConsumerLog = {
 /**
  * Guard TTL (seconds): must exceed the max review wall-clock — ALL FIVE
  * git-timed steps (clone / rev-parse / diff / numstat / runner-input write,
- * 120s each — numstat + the input write were added by plan 07 without
+ * 120s each — numstat + the input write were added without
  * recomputing this, qc3 F-301) plus the LEVEL's runner step
  * (runnerTimeoutMs(level) — 600s quick/default, 840s deep) plus slack for
  * the untimed steps (token mint, sandbox create, comment post, KV/D1
@@ -378,7 +378,7 @@ export function reviewGuardKey(key: {
  * up to ~60s) and has no compare-and-set, so this is a BEST-EFFORT mutex —
  * two attempts racing the GET can both pass before either PUT is visible.
  * It narrows the duplicate window from the full review wall-clock to a
- * sub-second KV race; the marker-based upsert (T5) remains the durable
+ * sub-second KV race; the marker-based upsert remains the durable
  * backstop. KV failure → warn + proceed WITHOUT the guard (the same
  * conservative-pass policy as the idempotency keys), logging that the
  * duplicate-comment race window is open until KV recovers.
@@ -437,8 +437,8 @@ export function guardRetryDelaysSeconds(level: ReviewLevel): readonly number[] {
 }
 
 /**
- * Outcome of one message pass (bugbot BB-3 + plan 16 lock L4 + plan 18 Task
- * 2 AL-1). THREE DISTINCT typed outcomes never throw: a guard-held message
+ * Outcome of one message pass (bugbot BB-3 + architect lock L4 + AL-1).
+ * THREE DISTINCT typed outcomes never throw: a guard-held message
  * is scheduled for a per-message delayed retry and finally acked with a
  * warning — it is never rethrown into the immediate-retry ×3 → DLQ path; a
  * PAUSED message (the App's review_enabled=0) is acked directly — an
@@ -491,12 +491,12 @@ function handleGuardHeld(message: Message<ReviewJobPayload>, deps: ProcessDeps):
 }
 
 // ---------------------------------------------------------------------------
-// Check lifecycle seam (plan 67, spec review-lifecycle §7.7 steps 4/12 +
-// §7.10) — plan-67-owned types so M8 ships and works before plan 68: an
-// ABSENT `checks` dependency produces NO Checks while M8 remains fully
-// operational. Declared with §7.7 types only (Scope, Lease) — never a §7.9
-// type. Plan 68 Task 2 supplies the implementation (`createCheckLifecycle` in
-// checks.ts) and `createReviewConsumer` injects it; the dependency stays
+// Check lifecycle seam (spec review-lifecycle §7.7 steps 4/12 +
+// §7.10) — §7.10-owned types so M8 ships and works before the
+// implementation: an ABSENT `checks` dependency produces NO Checks while M8
+// remains fully operational. Declared with §7.7 types only (Scope, Lease) —
+// never a §7.9 type. checks.ts supplies the implementation
+// (`createCheckLifecycle`) and `createReviewConsumer` injects it; the dependency stays
 // optional, and a hooks object that cannot reach a Checks surface still
 // produces no row and no remote run. Hook exceptions/timeouts are caught by
 // the consumer (≤2 requests / 2 seconds per inline hook is the hook's own
@@ -514,7 +514,7 @@ export type CheckLifecycleHooks = {
     action: string;
     executionDeadlineMs: number;
     /**
-     * The per-invocation abandonment latch for THIS call (plan 68 T2 fix): the
+     * The per-invocation abandonment latch for THIS call: the
      * consumer trips it when its §7.10 budget elapses, and a lifecycle that
      * reads it stops attaching on behalf of a caller that is gone. Optional and
      * additive — an implementation may ignore it, and the field is never shared
@@ -528,8 +528,8 @@ export type CheckLifecycleHooks = {
 
 /**
  * Check execution window (spec §7.9: the immutable execution deadline is
- * claim time + 900,000ms) — the consumer passes it to `begin`; plan 68's
- * claim persists it as the lease/expiry anchor.
+ * claim time + 900,000ms) — the consumer passes it to `begin`; the
+ * lifecycle claim persists it as the lease/expiry anchor.
  */
 export const CHECK_EXECUTION_WINDOW_MS = 900_000;
 
@@ -857,7 +857,7 @@ function projectOriginalFinding(finding: ReviewFinding): OriginalFindingProjecti
 type OriginalFindingProjection = RecheckTarget["original"];
 
 /**
- * §7.4 reconciliation (plan 67 Task 4): validate the recheck document
+ * §7.4 reconciliation: validate the recheck document
  * against the trusted input AND the final current findings, applying the
  * CONSERVATIVE precedence —
  *   - same-round recurrence (same fingerprint, or exact normalized original
@@ -1016,7 +1016,7 @@ function roundContextCoverage(discussion: Discussion): Coverage {
 }
 
 /**
- * Bounded read + validation of the runner's recheck output (plan 67 T3/T4):
+ * Bounded read + validation of the runner's recheck output:
  * the audited fixed-path command (`src/pipeline/gitops.ts`
  * `readRecheckCommand`) emits `<content>\n<overflow-flag>` where the flag is
  * `wc -c`'s own output, i.e. NEWLINE-TERMINATED (`…\n0\n` / `…\n1\n`). The
@@ -1193,15 +1193,15 @@ type ProcessDeps = {
   env: PipelineEnv;
   store: D1ArtifactStore;
   /**
-   * review_failures leaf (plan 18 Task 2 / AL-1 + AL-6): the parse-fail
+   * review_failures leaf (AL-1 + AL-6): the parse-fail
    * degrade branch and the infra-failure catch record through it. Both call
    * sites are best-effort (try/catch at the call site — an insert failure
    * never masks the ack or the rethrow).
    */
   failureStore: FailureStore;
   /**
-   * Per-App commenter instance cache keyed by appId (plan 13 Task 2, lock
-   * L4; plan 15 hardening item 1 / architect lock L1). Entry = `{ commenter, fingerprint }` where the
+   * Per-App commenter instance cache keyed by appId (lock L4; the
+   * credential-fingerprint hardening, architect lock L1). Entry = `{ commenter, fingerprint }` where the
    * fingerprint is the EXACT string pair `github_app_id` +
    * `private_key_enc` (the envelope as stored) from the per-message row the
    * resolver already re-reads: a fingerprint match reuses the instance
@@ -1209,7 +1209,7 @@ type ProcessDeps = {
    * envelope, even for a re-saved identical PEM) decrypts + rebuilds +
    * REPLACES, and the not-found/disabled/deleted gates evict before their
    * unchanged throw. Deliberately NOT keyed or fingerprinted on
-   * `updated_at` (plan 16's per-webhook `touchLastWebhook` would make it
+   * `updated_at` (the per-webhook `touchLastWebhook` would make it
    * high-frequency) and not on a decrypted-PEM digest (that would spend the
    * decrypt the cache exists to spare). The row status is still re-checked
    * per message — the cache only spares the decrypt + construction, never
@@ -1228,8 +1228,8 @@ type ProcessDeps = {
   log: ConsumerLog;
   getSandbox: (binding: unknown, id: string) => Promise<ReviewSandbox>;
   /**
-   * Optional Check lifecycle seam (plan 67 §7.10): ABSENT → no Checks, M8
-   * fully operational. `createReviewConsumer` injects the plan 68
+   * Optional Check lifecycle seam (§7.10): ABSENT → no Checks, M8
+   * fully operational. `createReviewConsumer` injects the checks.ts
    * implementation by default; the field stays optional so the seam's
    * absent-dependency contract holds. Hook exceptions/timeouts are caught by
    * the consumer; `begin` runs at §7.7 step 4 (after the authoritative SHA and
@@ -1263,13 +1263,13 @@ function toBaseFields(payload: ReviewJobPayload): ConsumerLogFields {
   return {
     ...payloadIdentityFields(payload),
     // Every job carries the appId reference in every structured log line
-    // (an id, never a credential — lock L4; plan 24: appRef is required).
+    // (an id, never a credential — lock L4; appRef is required).
     app_id: payload.appRef.appId,
   };
 }
 
 /**
- * Outcome of the per-message commenter resolution (plan 16, architect lock
+ * Outcome of the per-message commenter resolution (architect lock
  * L4): `ok` carries the commenter the review runs with PLUS the row's
  * numeric `github_app_id` (the §7.10 Check seam's App identity — the row is
  * already read here, no second query); `paused` is the
@@ -1282,21 +1282,21 @@ function toBaseFields(payload: ReviewJobPayload): ConsumerLogFields {
 type CommenterResolution = { kind: "ok"; commenter: ReviewCommenter; githubAppId: number } | { kind: "paused" };
 
 /**
- * Resolve the commenter for one message (plan 13 Task 2, architect lock L4
- * — consumer-side credential resolution; plan 24 Task 1: single path —
+ * Resolve the commenter for one message (architect lock L4
+ * — consumer-side credential resolution; single path —
  * `appRef.appId` is required, the env-App legacy branch is retired):
  *
  * The `github_apps` row via D1 (re-read per message),
  * gated in order: missing row / soft-deleted / disabled THROWS
  * (unchanged retry→DLQ semantics; the failed gate EVICTS the cached
- * instance) → PAUSED (`review_enabled = 0`, plan 16 lock L4) returns the
+ * instance) → PAUSED (`review_enabled = 0`, lock L4) returns the
  * DISTINCT `paused` outcome AFTER those gates, leaving any cached
- * instance in place (resume reuses the warm instance — the plan-15
+ * instance in place (resume reuses the warm instance — the credential
  * fingerprint ignores review_enabled) → the row's PEM decrypted in memory
  * (secretbox, AAD `github_apps.private_key_enc:<id>`) →
  * `createAppCommenter({ APP_ID: String(github_app_id), PRIVATE_KEY })`,
  * cached per appId in `deps.appCommenters` with the row's credential
- * fingerprint (plan 15 L1: `github_app_id` + `private_key_enc` envelope
+ * fingerprint (architect lock L1: `github_app_id` + `private_key_enc` envelope
  * exact-string match — reuse on match, rebuild + replace on rotation).
  *
  * Any unresolvable state — missing row, disabled, soft-deleted, missing
@@ -1320,19 +1320,19 @@ async function resolveCommenter(payload: ReviewJobPayload, deps: ProcessDeps): P
     deps.appCommenters.delete(appRef.appId);
     throw new Error(`per-App credential resolution failed: app ${appRef.appId} is ${row.status}`);
   }
-  // Plan 16 (architect lock L4): the PAUSED gate sits AFTER the status/
+  // Architect lock L4: the PAUSED gate sits AFTER the status/
   // deleted gates (disabled is judged first — its throw→retry→DLQ semantics
   // stay byte-identical) and returns the DISTINCT typed outcome instead of
   // throwing. The cached instance (if any) is deliberately LEFT in place —
-  // resuming the App must reuse the warm instance, and the plan-15
+  // resuming the App must reuse the warm instance, and the credential
   // fingerprint (`github_app_id` + `private_key_enc`) is immune to
   // review_enabled writes.
   if (row.review_enabled === 0) {
     return { kind: "paused" };
   }
-  // Plan 15 hardening item 1 (architect lock L1): the fingerprint is the
+  // The credential-fingerprint hardening (architect lock L1): the fingerprint is the
   // exact string pair read from the row THIS call already fetched — zero
-  // extra reads, no hashing, never `updated_at` (plan 16's per-webhook
+  // extra reads, no hashing, never `updated_at` (the per-webhook
   // touchLastWebhook would churn it). A re-saved identical PEM yields a NEW
   // AES-GCM envelope → one harmless rebuild; a real rotation rebuilds with
   // the new credential on the very next message.
@@ -1356,10 +1356,10 @@ async function resolveCommenter(payload: ReviewJobPayload, deps: ProcessDeps): P
 }
 
 /**
- * Resolve the review tier from PipelineEnv.REVIEW_LEVEL (plan 07
- * AC-S7-level). Unset/empty → "default" (the harness no-flag landing tier).
+ * Resolve the review tier from PipelineEnv.REVIEW_LEVEL (AC-S7-level).
+ * Unset/empty → "default" (the harness no-flag landing tier).
  * Anything else throws — the port rejects unknown levels fail-loud and never
- * silently downgrades (spec § 档位). "deep" is a legal tier (plan 09 T1);
+ * silently downgrades (spec § 档位). "deep" is a legal tier;
  * the message lists every tier from REVIEW_LEVELS so it cannot drift when
  * the level universe widens again (architect lock L3).
  */
@@ -1388,7 +1388,7 @@ function toBase64Utf8(text: string): string {
 }
 
 /**
- * Per-App AI configuration for the runner exec env (plan 14 Task 3) — the
+ * Per-App AI configuration for the runner exec env — the
  * `getAppConfig` decrypt face of src/dashboard/app-config-store.ts narrowed
  * to what assembly consumes. `keys` maps provider id → DECRYPTED plaintext
  * key (only providers with a stored row appear); `modelChain` is the verbatim
@@ -1396,7 +1396,7 @@ function toBase64Utf8(text: string): string {
  * or a chain provider without a key in THIS App's own config (BYOK allowlist
  * key or custom declaration) fails closed — assertAppConfigComplete throws
  * and the review never runs (F-001 channel); there is NO deployment-level
- * chain or key to fall back to (plan 15 input bounds: falsy/blank = unset).
+ * chain or key to fall back to (input bounds: falsy/blank = unset).
  */
 export type RunnerAppConfig = {
   keys: Record<string, string>;
@@ -1404,11 +1404,11 @@ export type RunnerAppConfig = {
 };
 
 /**
- * Resolve the per-App AI config for one message (plan 14 Task 3; plan 24
- * Task 1: single path — `appRef.appId` is required).
+ * Resolve the per-App AI config for one message (single path —
+ * `appRef.appId` is required).
  * ONE `getAppConfig` read per message (all
  * provider keys + the model chain in a single store call — never per key),
- * decrypted in memory. Plan 35 T2 (spec §4.4): the model chain is the
+ * decrypted in memory. Per spec §4.4, the model chain is the
  * App's DEFAULT chain row (app_model_chains name = 'default'); an App with
  * no default row resolves modelChain = null (fail-closed, unchanged). The
  * read hangs off the same appRef resolution as
@@ -1440,8 +1440,8 @@ async function resolveAppConfig(payload: ReviewJobPayload, deps: ProcessDeps): P
 }
 
 /**
- * Resolve the App's per-role model overrides for one message (plan 17 B6
- * Task 1; plan 35 T2 rework, spec §4.4): role → verbatim chain value via
+ * Resolve the App's per-role model overrides for one message (the
+ * model-chain rework, spec §4.4): role → verbatim chain value via
  * the decrypt-free `getModelOverridesForConsumer` read (a model selector is
  * configuration, not a secret — no secretbox). The seat → chain mapping
  * resolves each referenced seat to its chain's value; seats with NO
@@ -1449,8 +1449,8 @@ async function resolveAppConfig(payload: ReviewJobPayload, deps: ProcessDeps): P
  * are OMITTED, so the map only carries seats whose chain differs from the
  * App default — byte-identical to the pre-chains app_model_roles semantics
  * for migrated Apps. An App with NO overrides → `undefined` — the runner
- * input JSON omits the field, byte-identical to a no-map run (plan Global
- * Constraints: empty map = unchanged runner behavior). Hangs off the same
+ * input JSON omits the field, byte-identical to a no-map run (the global
+ * constraint: empty map = unchanged runner behavior). Hangs off the same
  * appRef resolution as `resolveAppConfig` (the App row is already proven
  * present, active and non-deleted there) and runs BEFORE the in-flight
  * guard so a resolution failure has zero side effects. The map is re-read
@@ -1475,13 +1475,13 @@ async function resolveModelOverrides(
   }
 }
 /**
- * Resolve the App's custom-provider declarations for one message (plan 23
- * Task 3, AL-23-1): the DECRYPTING `getCustomProvidersForConsumer` read
+ * Resolve the App's custom-provider declarations for one message (AL-23-1):
+ * the DECRYPTING `getCustomProvidersForConsumer` read
  * (every declaration plus its key, provider_id-ascending) via
  * createAppConfigStore — the getAppConfig analogue for app_custom_providers.
  * An App with NO declarations → `undefined` — the runner input JSON
- * serializes byte-identically to a no-declaration run (plan Global
- * Constraints: empty = unchanged runner behavior). Hangs off the same
+ * serializes byte-identically to a no-declaration run (the global
+ * constraint: empty = unchanged runner behavior). Hangs off the same
  * appRef resolution as `resolveAppConfig` (the App row is already proven
  * present, active and non-deleted there) and runs BEFORE the in-flight
  * guard so a resolution failure has zero side effects. The set is re-read
@@ -1515,7 +1515,7 @@ async function resolveCustomProviders(
 }
 
 /**
- * Resolve the App's sandbox image for one message (plan 37 Task 2): the
+ * Resolve the App's sandbox image for one message: the
  * `github_apps.sandbox_image_id` stored selection through the CLOSED
  * source-controlled registry (`getSandboxImage`) — the ONE deliberate
  * resolution interface between App storage and execution. Fails CLOSED with a
@@ -1566,11 +1566,11 @@ function toRunnerCustomProvider(provider: CustomProviderConsumerConfig): CustomP
 }
 
 /**
- * The effective model selector chain for one message (plan 18 Task 1,
- * architect AL-2) plus WHERE it came from. AL-24-5 zero global fallback: the
+ * The effective model selector chain for one message (architect AL-2)
+ * plus WHERE it came from. AL-24-5 zero global fallback: the
  * App's verbatim non-blank chain is the ONLY source — the global
  * `env.OMP_REVIEW_MODEL` branch was retired with the PipelineEnv field.
- * A falsy/whitespace-only chain = unset (plan 15 input bounds) →
+ * A falsy/whitespace-only chain = unset (input bounds) →
  * `chain: undefined` (unreachable on the production path: the fail-closed
  * assertAppConfigComplete gate rejects a chain-less App before the
  * runner/put steps; the undefined shape survives only for direct unit calls
@@ -1593,7 +1593,7 @@ export function effectiveModelChain(
 
 /**
  * The head (primary) selector of an effective chain — the version record
- * written to `reviews.model` (plan 18 Task 1). Comma-separated, trimmed,
+ * written to `reviews.model`. Comma-separated, trimmed,
  * empty segments dropped (the same grammar as the runner-side selector
  * parse). No chain → NULL — reachable only from direct unit calls: on the
  * production path assertAppConfigComplete fail-closes any App whose chain
@@ -1611,7 +1611,7 @@ function chainHeadSelector(chain: string | undefined): string | null {
 }
 
 /**
- * Fail-closed per-App configuration gate (plan 24 Task 6 / AL-24-5 — zero
+ * Fail-closed per-App configuration gate (AL-24-5 — zero
  * global fallback): the App's modelChain is the ONLY chain source and every
  * provider on the chain must have a key source in the App's OWN config — a
  * BYOK allowlist key (app_provider_keys, provider id → env name via the
@@ -1629,7 +1629,7 @@ function chainHeadSelector(chain: string | undefined): string | null {
  * resolution and BEFORE the in-flight guard/sandbox, so a misconfigured App
  * fails with zero side effects.
  *
- * `sandboxImage` (plan 37 Task 2) is the App's resolved registry entry
+ * `sandboxImage` is the App's resolved registry entry
  * (resolveSandboxImage): a chain provider id that is one of its capability
  * hosts (e.g. omp's `ark-plan`) maps to that host's catalog provider env
  * name (`catalogProviderId` → PROVIDERS envName, ARK_API_KEY) — capability
@@ -1669,7 +1669,7 @@ function assertAppConfigComplete(
   // grammar as the runner's parseModelSelectors (comma-separated selectors,
   // provider = the segment before the first `/`): an allowlisted id → its
   // mapped env name; a capability host of the App's RESOLVED sandbox image
-  // (plan 37 registry, e.g. omp's `ark-plan`, whose apiKeyEnv ARK_API_KEY
+  // (the closed registry, e.g. omp's `ark-plan`, whose apiKeyEnv ARK_API_KEY
   // rides catalogProviderId `ark`) → that catalog entry's env name;
   // anything else → a custom provider's CUSTOM_<ID>_API_KEY env name.
   const hostEnvNames = new Map(
@@ -1738,15 +1738,15 @@ function assertAppConfigComplete(
  * per-provider Worker-secret forwarding surface is retired; there is no
  * Worker-env key to pick up).
  *
- * Per-App assembly (plan 14 B2 — per-App messages only): every App-stored
+ * Per-App assembly (per-App messages only): every App-stored
  * key is injected under its PROVIDERS-mapped env name (skipped when
  * empty/whitespace; a provider id outside the allowlist is skipped with a
- * structured warn — plan 15 log hygiene — that carries the id + app_id,
+ * structured warn — log hygiene — that carries the id + app_id,
  * never key material). The `ark` entry maps the in-image ark-plan base
  * provider's ARK_API_KEY, so the ark key rides the SAME per-App keys map as
  * every other provider. The App's verbatim modelChain becomes the exec env
- * OMP_REVIEW_MODEL (the runner's only chain channel — transport unchanged,
- * plan 24 Interfaces); assertAppConfigComplete has already fail-closed any
+ * OMP_REVIEW_MODEL (the runner's only chain channel — transport unchanged
+ * per the Interfaces contract); assertAppConfigComplete has already fail-closed any
  * App whose chain provider lacks a key, so a chain reaching this point is
  * complete. Every injected key is logged with `key_source: app|custom` (the
  * source, never the key), and the assembly logs `config_source: "app"` (the
@@ -1754,7 +1754,7 @@ function assertAppConfigComplete(
  * never mutates its inputs or any module-level record, so key material
  * cannot leak across Apps structurally.
  *
- * Custom-provider keys (plan 23 Task 3, `customProviders` — the DECRYPTED
+ * Custom-provider keys (`customProviders` — the DECRYPTED
  * getCustomProvidersForConsumer configs, per-App messages only): each key is
  * injected under CUSTOM_<UPPER_SNAKE(provider_id)>_API_KEY — the exact env
  * name the runner's synthesized models.yml references (`apiKey:
@@ -1781,7 +1781,7 @@ export function buildRunnerEnv(
   const emit = log !== undefined && fields !== undefined;
   // 1. The App's own BYOK keys, mapped through the PROVIDERS allowlist. A
   //    provider id without a mapping has no env name — it is never injected,
-  //    and the skip is no longer silent (plan 15 log hygiene 硬化项 3): the
+  //    and the skip is no longer silent (log hygiene hardening item 3): the
   //    rogue id rides a structured warn (an id + app_id, NEVER key material)
   //    so the operator can see a stored credential going unused.
   let appKeys = 0;
@@ -1803,7 +1803,7 @@ export function buildRunnerEnv(
       log.info({ ...fields, provider, key_source: "app" }, `provider key from App config: ${envName}`);
     }
   }
-  // 2. Custom-provider keys (plan 23 Task 3, AL-23-1): each declaration's
+  // 2. Custom-provider keys (AL-23-1): each declaration's
   //    decrypted key under CUSTOM_<UPPER_SNAKE(provider_id)>_API_KEY — the
   //    env name the synthesized models.yml references. Only per-App
   //    messages carry declarations (resolveCustomProviders).
@@ -1835,7 +1835,7 @@ export function buildRunnerEnv(
   //    — assertAppConfigComplete fails the message before the guard — but
   //    direct unit calls keep the unset→omit guard (the in-image runner then
   //    falls back to its DEFAULT_MODEL_PATTERN scaffold). The precedence
-  //    lives in effectiveModelChain (plan 18 Task 1: ONE resolution shared
+  //    lives in effectiveModelChain (ONE resolution shared
   //    with the version-record put — no re-resolution split-brain).
   const { chain } = effectiveModelChain(appCfg);
   if (chain !== undefined) {
@@ -1911,7 +1911,7 @@ async function kvDoneHit(
 /**
  * Test seam for createReviewConsumer: additive overrides for the process
  * dependencies (store / failureStore / per-App commenter factory /
- * getSandbox). The plan contract `createReviewConsumer(env)` is unchanged
+ * getSandbox). The contract `createReviewConsumer(env)` is unchanged
  * — every field defaults to the production implementation when omitted.
  */
 type ConsumerOverrides = Partial<
@@ -1921,7 +1921,7 @@ type ConsumerOverrides = Partial<
 /**
  * Create the queue consumer. The store and commenters are created once per
  * consumer instance (per-App commenter instances live in the appCommenters
- * Map — one per appId, plan 13 Task 2 lock L4). Each message
+ * Map — one per appId, lock L4). Each message
  * gets its own sandbox, destroyed in finally; failures rethrow so the queue
  * retries and eventually DLQs.
  *
@@ -1936,7 +1936,7 @@ export function createReviewConsumer(
   log: ConsumerLog = defaultConsumerLog,
   overrides: ConsumerOverrides = {},
 ): (batch: MessageBatch<ReviewJobPayload>) => Promise<void> {
-  // The per-App commenter cache (plan 13 lock L4) is also the Check lane's
+  // The per-App commenter cache (lock L4) is also the Check lane's
   // credential route: the lifecycle resolves THIS message's App adapter from
   // it, so a Check never mints a token, client or permission set of its own.
   const appCommenters = new Map<string, { commenter: ReviewCommenter; fingerprint: string; githubAppId: number }>();
@@ -1945,7 +1945,7 @@ export function createReviewConsumer(
     store: overrides.store ?? createArtifactStore(env.DB),
     failureStore: overrides.failureStore ?? createFailureStore(env.DB),
     appCommenters,
-    // Production factory (plan 67 §7.5/§7.7 step 11): the commenter is bound
+    // Production factory (§7.5/§7.7 step 11): the commenter is bound
     // to the thread store (`createReviewCommenter(env, { db })`) so
     // `discoverThread` / `resolveFindingThread` are live for the resolution
     // step — the single construction point stays src/pipeline/comment.ts.
@@ -1953,7 +1953,7 @@ export function createReviewConsumer(
     getSandbox: overrides.getSandbox ?? ((binding, id) => getSandbox(binding, id)),
     log,
   };
-  // §7.10 Check seam (plan 68 Task 2): production always supplies the
+  // §7.10 Check seam: production always supplies the
   // lifecycle; an override replaces it wholesale. An App whose commenter
   // carries no Checks surface yields `null` from `getAdapter`, and the
   // lifecycle then registers no attempt at all. The lifecycle needs NO
@@ -1974,12 +1974,12 @@ export function createReviewConsumer(
       if (outcome.kind === "guard-held") {
         handleGuardHeld(message, deps);
       } else if (outcome.kind === "paused") {
-        // Plan 16 (architect lock L4): a paused App's in-flight message is
+        // Architect lock L4: a paused App's in-flight message is
         // acked DIRECTLY — an intentional skip with zero side effects, never
         // a retry and never a DLQ entry.
         message.ack();
       } else if (outcome.kind === "degraded") {
-        // Plan 18 Task 2 (architect AL-1): parse-fail degrade — the
+        // Architect AL-1: parse-fail degrade — the
         // best-effort failure row and degraded comment already ran inside
         // processMessage; the message is acked DIRECTLY (deterministic
         // model-output failure — retry re-runs the same pure function on the
@@ -1991,7 +1991,7 @@ export function createReviewConsumer(
 }
 
 async function processMessage(payload: ReviewJobPayload, deps: ProcessDeps): Promise<ProcessOutcome> {
-  // Unique per attempt (plan Clarify #11): a destroyed sandbox's id is never
+  // Unique per attempt: a destroyed sandbox's id is never
   // reused — attach-after-destroy behavior is unknown, uniqueness wins.
   const sandboxId = `review-${crypto.randomUUID()}`;
   let sandbox: ReviewSandbox | null = null;
@@ -2018,7 +2018,7 @@ async function processMessage(payload: ReviewJobPayload, deps: ProcessDeps): Pro
   // elapsed never aborts; the sandbox exec timeout is the only wall-clock
   // failure (spec 不 abort).
   let runnerStartedAt: number | undefined;
-  // Failure-stage tracking (plan 18 Task 2 / AL-6): the catch site's
+  // Failure-stage tracking (AL-6): the catch site's
   // best-effort review_failures row classifies `stage` from the coarse phase
   // in flight — "pipeline" (default) = worker-side orchestration (level /
   // credential / config resolution, token mint, comment post); "sandbox" =
@@ -2034,14 +2034,14 @@ async function processMessage(payload: ReviewJobPayload, deps: ProcessDeps): Pro
   // assembled. Hoisted so the catch site's best-effort failure row can
   // exact-redact the error detail too (SEC-03).
   let secretValues: string[] = [];
-  // F-001 (plan 24 QC wave 1): toBaseFields derefs payload.appRef.appId, so
+  // F-001 (QC wave-1): toBaseFields derefs payload.appRef.appId, so
   // an in-flight pre-deploy message (absent appRef — AL-24-4 accepts the
   // TypeError) must throw INSIDE the try: it then flows through the
   // established structured channel (review failed: log + AL-6
   // review_failures row + rethrow). Pure relocation — no runtime guard
   // (AL-24-4 forbids one).
   let baseFields: ConsumerLogFields | undefined;
-  // §7.10 Check seam state (plan 67): the handle from the step-4 begin hook
+  // §7.10 Check seam state: the handle from the step-4 begin hook
   // (null = no Checks / hook failed) and the ONCE-guarded terminalize —
   // every terminal path reports exactly one outcome, hook exceptions are
   // isolated warns, and a hook timeout resolves without blocking the path.
@@ -2074,10 +2074,10 @@ async function processMessage(payload: ReviewJobPayload, deps: ProcessDeps): Pro
     // misconfigured REVIEW_LEVEL fails loud (structured log + rethrow)
     // without touching the in-flight guard.
     level = resolveReviewLevel(deps.env.REVIEW_LEVEL);
-    // Credential resolution FIRST (plan 13 Task 2, lock L4 — consumer-side),
+    // Credential resolution FIRST (lock L4 — consumer-side),
     // before the guard/sandbox: app → D1 row gated
     // missing/deleted/disabled (throw → retry/DLQ, byte-identical) then
-    // PAUSED (plan 16 lock L4: DISTINCT typed outcome, below) → decrypted
+    // PAUSED (lock L4: DISTINCT typed outcome, below) → decrypted
     // PEM → per-App commenter instance (cached per appId). An unresolvable
     // App (missing / disabled / soft-deleted / undecryptable) fails
     // structurally here with zero side effects — the rethrow keeps the
@@ -2085,7 +2085,7 @@ async function processMessage(payload: ReviewJobPayload, deps: ProcessDeps): Pro
     // mint and postReview below both use THIS resolved instance (same App
     // identity, lock L4).
     const resolution = await resolveCommenter(payload, deps);
-    // Plan 16 ack-skip (architect lock L4): a paused App's in-flight message
+    // Ack-skip (architect lock L4): a paused App's in-flight message
     // is the DISTINCT `paused` outcome — the queue handler acks it directly.
     // EVERYTHING below is skipped: no in-flight guard acquisition (no guard
     // TTL consumed), no sandbox creation, no token mint, no app-config read,
@@ -2100,23 +2100,23 @@ async function processMessage(payload: ReviewJobPayload, deps: ProcessDeps): Pro
       return { kind: "paused" };
     }
     const { commenter, githubAppId } = resolution;
-    // Per-App AI config (plan 14 B2): hangs off the SAME appRef resolution as
+    // Per-App AI config: hangs off the SAME appRef resolution as
     // the commenter — one getAppConfig read per message, before the
     // guard/sandbox so an unresolvable config (undecryptable key envelope,
     // missing DASHBOARD_ENCRYPTION_KEY) fails closed with zero side effects.
     const appCfg = await resolveAppConfig(payload, deps);
-    // Per-role model overrides (plan 17 B6): rides the SAME appRef gate,
+    // Per-role model overrides: rides the SAME appRef gate,
     // before the guard like the config above. undefined (empty map)
     // → the runner input JSON below stays byte-identical.
     const modelOverrides = await resolveModelOverrides(payload, deps);
-    // Custom-provider declarations (plan 23 Task 3): hangs off the SAME
+    // Custom-provider declarations: hangs off the SAME
     // appRef gate, before the guard like the config/overrides above —
     // undefined (no declarations) → the runner input JSON stays
     // byte-identical and no CUSTOM_* env is injected. The decrypt face is
     // fail-loud (tamper never swallowed): a broken envelope throws here
     // with zero side effects, never a silently-skipped provider.
     const customProviders = await resolveCustomProviders(payload, deps);
-    // The App's sandbox image (plan 37 Task 2): resolves the stored
+    // The App's sandbox image: resolves the stored
     // github_apps.sandbox_image_id through the CLOSED registry and fails
     // closed (structured, non-secret error) on unknown/disabled ids —
     // BEFORE the in-flight guard and sandbox creation, so an invalid id
@@ -2124,7 +2124,7 @@ async function processMessage(payload: ReviewJobPayload, deps: ProcessDeps): Pro
     // config gate below (capability-host env-name mapping) and the runner
     // input (the synthesis base's capability hosts).
     const sandboxImage = await resolveSandboxImage(payload, deps);
-    // AL-24-5 fail-closed gate (plan 24 Task 6): after App resolution,
+    // AL-24-5 fail-closed gate: after App resolution,
     // BEFORE the in-flight guard / sandbox. The App's modelChain is the ONLY
     // chain source and every chain provider must have a key in the App's OWN
     // config (BYOK allowlist key — incl. `ark` for the ark-plan base
@@ -2159,7 +2159,7 @@ async function processMessage(payload: ReviewJobPayload, deps: ProcessDeps): Pro
       sandbox = await deps.getSandbox(deps.env.SANDBOX, sandboxId);
     }
     failureStage = "pipeline";
-    // Purpose-scoped sandbox read grant (plan 67 §7.6 / RL-6): the mint is
+    // Purpose-scoped sandbox read grant (§7.6 / RL-6): the mint is
     // repository-scoped read-only BY REQUEST, and the sandbox path only
     // proceeds on the RETURNED capabilities — assertSandboxGrant fails
     // closed on any broader grant (RL-6: the request is never presented as
@@ -2433,7 +2433,7 @@ async function processMessage(payload: ReviewJobPayload, deps: ProcessDeps): Pro
 
     // 6. Numstat of the PR diff — `git apply --numstat` reads the unified
     // diff without applying it. The lines ("<add>\t<del>\t<path>") are the
-    // runner's seat-partition universe (reconFacts convention, Task 2 port).
+    // runner's seat-partition universe (reconFacts convention).
     const numstat = await sandbox.runCommand(cmds.numstat, { timeout: EXEC_TIMEOUT_GIT_MS });
     if (numstat.exitCode !== 0) {
       throw new Error(`numstat failed: exit ${numstat.exitCode}, stdout ${numstat.stdout.length}B`);
@@ -2454,17 +2454,17 @@ async function processMessage(payload: ReviewJobPayload, deps: ProcessDeps): Pro
       `head ${headSha}`,
       ...numstatLines,
     ];
-    // Plan 17 B6: the App's per-role model overrides ride as an OPTIONAL
+    // The App's per-role model overrides ride as an OPTIONAL
     // input field, included ONLY when a role map resolved above — no-map
-    // messages serialize byte-identically to the pre-plan-17 payload
-    // (the runner-side guard + type extension are plan 17 Task 2's).
-    // Plan 23 T3: the App's custom-provider declarations ride as an OPTIONAL
+    // messages serialize byte-identically to the pre-overrides payload
+    // (the runner-side guard + type extension ride alongside).
+    // The App's custom-provider declarations ride as an OPTIONAL
     // input field — keyless (toRunnerCustomProvider strips the decrypted
     // key; keys reach the container ONLY via the exec env) — included ONLY
     // when declarations resolved above. No-declaration messages serialize
-    // byte-identically to the pre-plan-23 payload (the runner-side guard +
-    // synthesis are plan 23 Task 3's).
-    // Plan 37 T2: the resolved image's capability hosts ride ALWAYS (keyless
+    // byte-identically to the pre-declarations payload (the runner-side guard +
+    // synthesis ride alongside).
+    // The resolved image's capability hosts ride ALWAYS (keyless
     // registry data) — the in-image synthesizer's base (it cannot import the
     // contract: the runner module graph stays inside src/review,
     // tests/review/runtime-boundary).
@@ -2476,9 +2476,9 @@ async function processMessage(payload: ReviewJobPayload, deps: ProcessDeps): Pro
       ...(customProviders !== undefined
         ? { customProviders: customProviders.map(toRunnerCustomProvider) }
         : {}),
-      // Plan 67 §7.8: the typed recheck input rides ONLY when open rows
+      // §7.8: the typed recheck input rides ONLY when open rows
       // exist — a first round with an empty lifecycle serializes
-      // byte-identically to the pre-plan-67 payload.
+      // byte-identically to the pre-recheck payload.
       ...(recheckInput !== undefined ? { recheck: recheckInput } : {}),
     };
     const writeInput = await sandbox.runCommand(
@@ -2551,8 +2551,8 @@ async function processMessage(payload: ReviewJobPayload, deps: ProcessDeps): Pro
     }
 
     // 9. Parse + validate the envelope (engine gate inside parseReviewOutput;
-    // mapping spec §4.2). Parse-fail is the DEGRADE path (plan 18 Task 2 /
-    // architect AL-1): parseReviewOutput is a pure function of run.stdout —
+    // mapping spec §4.2). Parse-fail is the DEGRADE path (architect AL-1):
+    // parseReviewOutput is a pure function of run.stdout —
     // the same stdout fails identically on a retry (a deterministic
     // model-output failure), so the message ACKS instead of throwing. Order:
     // review_failures row (best-effort — an insert failure must never mask
@@ -2591,7 +2591,7 @@ async function processMessage(payload: ReviewJobPayload, deps: ProcessDeps): Pro
       // instance as the token mint above (lock L4). Best-effort with typed
       // outcomes — the message acks regardless (deterministic model-output
       // failure; retry is waste), and the Check hook terminalizes with the
-      // publication identity so plan 68 reads the persisted proof.
+      // publication identity so the lifecycle reads the persisted proof.
       const degradedOutcome = await publishDegradedPublication({
         db: deps.env.DB,
         commenter,
@@ -2626,7 +2626,7 @@ async function processMessage(payload: ReviewJobPayload, deps: ProcessDeps): Pro
       clampFindingSizes(redactReviewOutputExact(redactReviewOutput(parsed.output), secretValues)),
     );
     const output = capped.output;
-    // 10a. Plan 21 Task 3 (AL-21-2): cross-round repeat dedup — read the
+    // 10a. Cross-round repeat dedup (AL-21-2): read the
     // previous round's fingerprint set BEFORE the post (the current sha row
     // does not exist yet at this point; post → put order). A query THROW is
     // first-round semantics: log a structured warn (dedup: "degraded") and
@@ -3133,7 +3133,7 @@ async function processMessage(payload: ReviewJobPayload, deps: ProcessDeps): Pro
       await terminalizeCheck(null, "pre-publication-failure");
     }
     // Structured failure log carrying the idempotency key + sandbox id
-    // (plan Clarify #11 / Done criteria: 失败路径错误日志含幂等键), then
+    // (the failure log must carry the idempotency key: 失败路径错误日志含幂等键), then
     // rethrow so the worker retries and eventually DLQs.
     const detail = err instanceof Error ? err.message : String(err);
     deps.log.error(
@@ -3156,9 +3156,9 @@ async function processMessage(payload: ReviewJobPayload, deps: ProcessDeps): Pro
       `review failed: ${detail}`,
     );
 
-    // AL-6 (plan 18 Task 2): best-effort review_failures row BEFORE the
+    // AL-6: best-effort review_failures row BEFORE the
     // rethrow — DLQ-bound infra failures otherwise leave zero D1 trace (the
-    // plan-19 sweep blind spot). `stage` = the coarse phase in flight
+    // audit blind spot). `stage` = the coarse phase in flight
     // (failureStage); rows are per-attempt events (a DLQ'd message leaves
     // up to 4: 1 initial delivery + max_retries = 3 retries). The insert
     // must never mask the rethrow: its own failure is a warn line only.

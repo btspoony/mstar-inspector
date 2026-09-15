@@ -13,7 +13,7 @@ function App() {
   const pathname = usePathname();
   const route = matchRoute(pathname);
 
-  // Plan 33 T3: SPA router fallback guard — the server 302s first; this
+  // SPA router fallback guard — the server 302s first; this
   // catches any shell that renders without a session (defense in depth).
   // The login page itself is exempt (no self-loop).
   useEffect(() => {

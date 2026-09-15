@@ -1,7 +1,7 @@
 /**
- * Shared date helpers for the plan 22 insights surface (QC W-C): the ONE
- * copy of the UTC date math used by the insights store test, the T2 JSON
- * route test, and the T3 HTML panel test — previously duplicated verbatim
+ * Shared date helpers for the insights surface (QC W-C): the ONE
+ * copy of the UTC date math used by the insights store test, the JSON
+ * route test, and the HTML panel test — previously duplicated verbatim
  * in all three files.
  *
  * `mondayOf` is a JS mirror of the store's Monday-anchored bucketing
@@ -12,7 +12,7 @@
  * (tests/dashboard/insights-store.test.ts, S-1) anchors both to real
  * calendar dates.
  *
- * Plan 65 (AD-652) adds the distribution bucket-grid generators here — the
+ * AD-652 adds the distribution bucket-grid generators here — the
  * single copy of the bucket-boundary math, imported by the store itself
  * (still zero imports from store/pipeline/review) and by its tests:
  *
@@ -61,7 +61,7 @@ function isoDate(ms: number): string {
 
 /**
  * Every UTC date the insights window predicate can return, ascending:
- * `today - windowDays` .. `today` (plan 65 distribution day grid). The
+ * `today - windowDays` .. `today` (the distribution day grid). The
  * window cut is time-of-day (`datetime('now', '-' || N || ' days')`), so a
  * review on the first date only lands after the cut — the same partial-edge
  * convention as `weekGrid`'s first/last partial Mondays.
@@ -77,7 +77,7 @@ export function dayGrid(windowDays: number): string[] {
 
 /**
  * Every Monday-anchored UTC week intersecting the insights window, ascending
- * (plan 65 distribution week grid): `mondayOf(today - windowDays)` ..
+ * (the distribution week grid): `mondayOf(today - windowDays)` ..
  * `mondayOf(today)`. Anchored via `mondayOf` — the SAME week definition as
  * the store's weekly_trend SQL, never a second one. First and last weeks are
  * partial (the window cuts mid-week).

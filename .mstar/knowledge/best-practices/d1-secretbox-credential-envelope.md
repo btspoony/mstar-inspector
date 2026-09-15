@@ -4,7 +4,7 @@ date: 2026-08-29
 problem_type: best_practice
 category: best-practices
 severity: high
-plan_id: 13-dashboard-multi-app
+topic: dashboard multi-app
 tags: [d1, aes-gcm, secretbox, credential-storage, webcrypto, workers]
 related_components: [github_apps, app_provider_keys, manifest-hold-cookie]
 ---

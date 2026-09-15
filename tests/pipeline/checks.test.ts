@@ -1,5 +1,5 @@
 /**
- * GitHub Checks adapter tests (plan 68 Task 1, spec review-lifecycle §7.9) —
+ * GitHub Checks adapter tests (spec review-lifecycle §7.9) —
  * `src/pipeline/checks.ts` against the REAL attempt registry (migration 0021
  * through `createMigratedTestD1`) and a scripted Checks surface.
  *
@@ -1497,7 +1497,7 @@ async function runState(db: TestD1, attempt: CheckAttempt): Promise<string | nul
 }
 
 // ---------------------------------------------------------------------------
-// Zero-dispatch rollback (plan 68 integrated seam fix 2)
+// Zero-dispatch rollback
 // ---------------------------------------------------------------------------
 
 /**

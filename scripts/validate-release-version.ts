@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
 /**
- * validate-release-version.ts — release gate (plan 50 D4).
+ * validate-release-version.ts — release gate.
  *
  * Usage:
  *   bun run release:validate -- v1.0.0
@@ -18,7 +18,7 @@
  *      push converges: validate passes -> tag step skips -> Release creation
  *      proceeds).
  *
- * Plan 51: `src/version.ts` is a VERSION_SURFACES entry (`kind: "ts-const"`),
+ * `src/version.ts` is a VERSION_SURFACES entry (`kind: "ts-const"`),
  * so surface alignment covers `package.json#version === APP_VERSION` through
  * the shared per-kind read in release-surfaces.ts.
  */

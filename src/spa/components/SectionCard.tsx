@@ -1,5 +1,5 @@
 /**
- * AD-591 section idiom (plan 59 T1, consumed by plan 60): the two-tier
+ * AD-591 section idiom: the two-tier
  * surface system for long settings-style pages, defined ONCE here — a page
  * picks a tier through the `tier` prop and never hand-assembles tier
  * classNames per block. Composes the copy-in `ui/card.tsx` primitives (the

@@ -1,13 +1,13 @@
 /**
- * Test D1 double (plan 05 Task 1 + plan 07 Task 4) — bun:sqlite in-memory
+ * Test D1 double — bun:sqlite in-memory
  * database executing the REAL migration SQL (DDL single sources, applied in
  * filename order exactly like `wrangler d1 migrations apply`), exposing only
- * the narrow D1 face the store depends on (plan Clarify 5:
- * prepare/bind/first/all/run + batch).
+ * the narrow D1 face the store depends on
+ * (prepare/bind/first/all/run + batch).
  *
  * Two schema shapes:
- * - `createTestD1()` — the plan-07-era review-store shape (0001 + 0002),
- *   i.e. production BEFORE plan 13. Kept for fixtures that exercise the
+ * - `createTestD1()` — the initial review-store shape (0001 + 0002),
+ * i.e. production before the github_apps work. Kept for fixtures that exercise the
  *   append-only ALTER sequence itself (tests/worker/apps-store.test.ts
  *   seeds rows, THEN applies 0004/0005).
  * - `createMigratedTestD1()` — the full current shape (0001 → 0021 in
@@ -15,24 +15,24 @@
  *   app_installations, 0005 reviews.app_id, 0006 app_provider_keys +
  *   app_model_config, 0007 idx_reviews_app_id, 0008 github_apps
  *   review_enabled + last_webhook_at, 0009 app_model_roles, 0010
- *   review_failures, 0011 webhook_deliveries (plan 20), 0012 app_provider_keys
- *   updated_at + app_custom_providers (plan 23), 0013 idx_findings_review_id,
- *   0014 idx_reviews_reviewed_at (plan 22), 0015 provider verification
- *   columns + app_provider_models (plan 31), 0016 users.login_nocase UNIQUE
- *   (plan 34), 0017 app_model_chains + seats (plan 35), 0018
- *   github_apps.sandbox_image_id (plan 37), 0019 github_apps GitHub-profile
- *   columns (plan 53), 0020 finding lifecycle + publication journal +
- *   resolution queue (plan 67), 0021 review Check attempt registry
- *   (plan 68)), i.e. what
+ * review_failures, 0011 webhook_deliveries, 0012 app_provider_keys
+ * updated_at + app_custom_providers, 0013 idx_findings_review_id,
+ * 0014 idx_reviews_reviewed_at, 0015 provider verification
+ * columns + app_provider_models, 0016 users.login_nocase UNIQUE
+ *, 0017 app_model_chains + seats, 0018
+ * github_apps.sandbox_image_id, 0019 github_apps GitHub-profile
+ * columns, 0020 finding lifecycle + publication journal +
+ * resolution queue, 0021 review Check attempt registry
+ *), i.e. what
  *   `wrangler d1 migrations apply` produces today. The store adapter's INSERT
- *   binds `reviews.app_id` (plan 13, QC fix wave 1 F-001), so every test
+ * binds `reviews.app_id` (QC fix wave 1 F-001), so every test
  *   exercising the REAL store.put against production-shaped data runs on this
- *   one — and plan-14 fixtures get the per-App config tables without
+ * one — and fixtures get the per-App config tables without
  *   re-applying migrations by hand.
  *
  * bun:sqlite and D1 are both SQLite, so UNIQUE/ON CONFLICT semantics match;
  * if a divergence ever shows up against real D1, the remote apply is
- * authoritative and this helper must be updated (plan Clarify 5).
+ * authoritative and this helper must be updated.
  */
 import { Database, type Statement } from "bun:sqlite";
 import { readFileSync } from "node:fs";
@@ -40,7 +40,7 @@ import { join } from "node:path";
 import type { D1BatchResult, D1Like, D1StatementLike } from "../../src/store/types";
 
 const MIGRATIONS_DIR = join(import.meta.dir, "../../migrations");
-/** Plan-07-era review-store schema (production before plan 13). */
+/** Earliest review-store schema (production before the github_apps work). */
 const BASE_MIGRATIONS = ["0001_reviews.sql", "0002_mstar_review_v1.sql"];
 /** Full current migration list, filename order = wrangler apply order. */
 const ALL_MIGRATIONS = [
@@ -149,7 +149,7 @@ function wrapDb(db: Database): D1Like & { raw: Database } {
 export type TestD1 = D1Like & { raw: Database };
 
 /**
- * Create a fresh in-memory D1-like database with the plan-07-era
+ * Create a fresh in-memory D1-like database with the earliest
  * review-store schema (0001 + 0002) applied. Each call returns an
  * independent database (tests must not share state). The underlying
  * bun:sqlite handle is exposed for direct assertions (e.g. counting rows)
@@ -162,14 +162,14 @@ export function createTestD1(): TestD1 {
 }
 
 /**
- * Fully-migrated variant (plan 13; extended by plans 14–17): the same double
+ * Fully-migrated variant (the full migration list): the same double
  * with the complete migration list applied (0001 → 0009, filename order).
  * Reviews carries the `app_id` column (FK to github_apps), so tests exercising
  * the REAL store.put — whose INSERT binds `app_id` — run against the
- * production-shaped schema, the plan-14 per-App config tables
+ * production-shaped schema, the per-App config tables
  * (app_provider_keys / app_model_config) exist without extra fixture work,
- * github_apps carries the plan-16 ops columns (review_enabled /
- * last_webhook_at), and the plan-17 per-role table (app_model_roles) exists
+ * github_apps carries the ops columns (review_enabled /
+ * last_webhook_at), and the per-role table (app_model_roles) exists
  * for the consumer modelOverrides tests. Each call returns an independent
  * database.
  */

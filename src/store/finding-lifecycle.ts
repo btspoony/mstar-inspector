@@ -1,5 +1,5 @@
 /**
- * Finding lifecycle store (plan 67 Task 1, spec review-lifecycle §7.1/§7.2/
+ * Finding lifecycle store (spec review-lifecycle §7.1/§7.2/
  * §7.7/§7.11.1) — durable lifecycle rows, fair rotation, the private
  * pre-publication journal and the resolution-queue accessors.
  *
@@ -70,7 +70,7 @@ export type PublicationProof = {
  * §7.5 marker data shapes needed by the journal payload (`LineIntent` rides
  * `PublicationPayload.lineIntents`; `VerifiedResolution` rides
  * `LifecycleRound.resolutions`). The marker FUNCTIONS (`lineMarker` /
- * `parseLineMarker` / discovery / resolution) belong to plan 67 Task 2's
+ * `parseLineMarker` / discovery / resolution) belong to
  * `src/pipeline/review-threads.ts`, which imports these type declarations —
  * a single code copy of the shapes.
  */
@@ -806,7 +806,7 @@ export async function retryLifecycleWork(
 }
 
 // ---------------------------------------------------------------------------
-// §7.11.1 recovery bookkeeping writers (plan 67 Task 5 / M8) — the
+// §7.11.1 recovery bookkeeping writers (the M8 lane) — the
 // post-failure state machine the reconciler drives: backoff after failed
 // attempts, the terminal local-error at the attempt cap, supersede on
 // newer-round evidence, App-lifecycle suspension and exact-App re-enable,

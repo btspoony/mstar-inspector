@@ -1,11 +1,11 @@
 /**
- * Per-review omp models.yml synthesis (plan 23 Task 3, AL-23-1; plan 37
- * Task 2 — capability-host base, always synthesize).
+ * Per-review omp models.yml synthesis (AL-23-1; the
+ * capability-host base, always synthesize).
  *
  * omp 18.0.4 has NO include semantics: the SDK's ModelRegistry reads exactly
  * ONE models.yml — `path.join(getAgentDir(), "models.yml")` unless
- * `createAgentSession({ agentDir })` overrides the directory. Since plan 37
- * removed the baked in-image models.yml, EVERY omp review synthesizes its own
+ * `createAgentSession({ agentDir })` overrides the directory. Since the
+ * baked in-image models.yml was removed, EVERY omp review synthesizes its own
  * COMPLETE per-review file:
  *
  *   1. generate the BASE from the App's selected image's CAPABILITY HOSTS
@@ -59,7 +59,7 @@ function yamlQuote(value: string): string {
 /**
  * One capability-host block, 2-space-indented under `providers:` — byte-shape
  * identical to the baked in-image models.yml body this generator replaced
- * (plan 37 equivalence: a defaulted App's synthesized file is
+ * (equivalence: a defaulted App's synthesized file is
  * runner-consumable-equivalent to the old base+custom merge). Registry values
  * are source-controlled trusted scalars and emit BARE (like the old baked
  * file); only user-derived custom blocks carry the defensive yamlQuote form.
@@ -183,8 +183,8 @@ export function synthesizeModelsYaml(
 /**
  * Synthesize the COMPLETE per-review models.yml under a fresh
  * /tmp/omp-agent-<uuid>/ directory and return that directory (the `agentDir`
- * the runner passes to createAgentSession). ALWAYS runs — plan 37 removed the
- * baked in-image models.yml, so every omp review synthesizes its own:
+ * the runner passes to createAgentSession). ALWAYS runs — the baked
+ * in-image models.yml was removed, so every omp review synthesizes its own:
  * capability hosts are the base, `customProviders` (OPTIONAL — zero
  * declarations yield the byte-identical capability base) merge under it.
  * Fail-loud on any generation/merge/write problem — a review must never run

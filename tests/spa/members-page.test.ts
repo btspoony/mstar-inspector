@@ -1,8 +1,8 @@
 /**
- * Plan 34 T2: Members page rebuilt on shadcn Table + invite toolbox bar +
+ * Members page rebuilt on shadcn Table + invite toolbox bar +
  * confirm dialogs. No DOM runner — same source-scan contract as
  * settings-layout.test.ts — plus dictionary interpolation in both locales.
- * Plan 45 T5 / F-07: the Joined column renders through the shared
+ * F-07: the Joined column renders through the shared
  * relative-time helper, with the absolute stamp kept as a native tooltip.
  */
 import { describe, expect, test } from "bun:test";
@@ -12,7 +12,7 @@ import { t } from "../../src/i18n";
 
 const source = readFileSync(join(import.meta.dir, "../../src/spa/pages/MembersPage.tsx"), "utf8");
 
-describe("members page shadcn rebuild (plan 34 T2)", () => {
+describe("members page shadcn rebuild", () => {
   test("table, dropdown, dialog, select, input, button come from the ui kit — zero native controls", () => {
     for (const component of ["table", "dropdown-menu", "dialog", "select", "input", "button"]) {
       expect(source).toContain(`@/components/ui/${component}`);
@@ -36,7 +36,7 @@ describe("members page shadcn rebuild (plan 34 T2)", () => {
     }
   });
 
-  test("joined column renders the shared relative-time helper (plan 45 T5 / F-07)", () => {
+  test("joined column renders the shared relative-time helper (F-07)", () => {
     expect(source).toContain('from "../relative-time"');
     // Same call shape as AppsPage / SettingsPage: value first, locale second.
     expect(source).toContain("formatRelativeTime(member.created_at, locale)");
@@ -70,7 +70,7 @@ describe("members page shadcn rebuild (plan 34 T2)", () => {
     expect(source).toContain('t(locale, "notice.error.removeFailed", { login: member.github_login })');
   });
 
-  test("page-level states ride the plan-57 trio; op notices keep the PageNotice channel (plan 58 T3)", () => {
+  test("page-level states ride the shared state trio; op notices keep the PageNotice channel", () => {
     // Loading is the table skeleton; page-load failure is the composed
     // error with retry wired to the page's own load callback.
     expect(source).toContain('<PageSkeleton locale={locale} kind="table" />');
@@ -82,8 +82,8 @@ describe("members page shadcn rebuild (plan 34 T2)", () => {
     expect(source).toContain('<PageNotice kind="error" message={t(locale, "members.adminOnly")} />');
   });
 
-  test("op-triggered reloads are background — only the initial load gates the skeleton (plan 58 F-58-1)", () => {
-    // Plan-38 background-reload contract (mirrors SettingsPage): `load` flips
+  test("op-triggered reloads are background — only the initial load gates the skeleton (F-58-1)", () => {
+    // background-reload contract (mirrors SettingsPage): `load` flips
     // to "loading" (the PageSkeleton gate) on foreground loads only.
     expect(source).toContain('if (!background) setState("loading")');
     // Both op paths (invite submit + dialog confirm) reload in the background.
@@ -93,7 +93,7 @@ describe("members page shadcn rebuild (plan 34 T2)", () => {
     expect(source).not.toContain("await load()");
   });
 
-  test("empty member list renders the no-action EmptyState guidance (plan 58 T3)", () => {
+  test("empty member list renders the no-action EmptyState guidance", () => {
     expect(source).toContain('t(locale, "members.emptyTitle")');
     expect(source).toContain('t(locale, "members.emptyDescription")');
     const emptyCall = source.match(/<EmptyState[\s\S]*?\/>/);

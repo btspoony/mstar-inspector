@@ -1,5 +1,5 @@
 {
-  // T1/T2 smoke config (plan 06) — dedicated entry src/pipeline/smoke-entry.ts.
+  // T1/T2 smoke config — dedicated entry src/pipeline/smoke-entry.ts.
   // NOT the production config: the production worker (src/worker/index.ts)
   // gains the consumer + sandbox wiring at T3.
   // Binding shape verified against @cloudflare/sandbox 0.12.8 docs + types:

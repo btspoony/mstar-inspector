@@ -1,5 +1,5 @@
 /**
- * Recheck wire contract tests (plan 67 Task 1, spec review-lifecycle §7.3) —
+ * Recheck wire contract tests (spec review-lifecycle §7.3) —
  * `src/contracts/recheck.ts` `validateRecheckDoc` against a trusted input.
  *
  * Every rejection rule is exercised as fail-closed behavior:

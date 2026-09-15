@@ -4,7 +4,7 @@ date: 2026-08-29
 problem_type: best_practice
 category: best-practices
 severity: high
-plan_id: 13-dashboard-multi-app
+topic: dashboard multi-app
 tags: [queue-consumer, octokit, app-auth, per-app, instance-cache, comment-upsert]
 related_components: [review-job-contract, comment.ts, webhooks.ts, artifact-store]
 ---

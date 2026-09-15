@@ -8,7 +8,7 @@ severity: high
 applies_when:
   - "Sizing Cloudflare Queue consumer timeouts for sandbox review jobs"
   - "Setting EXEC/runner budgets larger than 10 minutes"
-plan_id: 10-review-d5-budget
+topic: review deep-run budget
 tags:
   - cloudflare-queues
   - wall-clock
@@ -28,7 +28,7 @@ Size the in-consumer runner **under 15 minutes with headroom**. v0.4 pin: deep `
 
 Do not advertise a runner budget the consumer cannot finish.
 
-### Concurrency: UNSET max_concurrency auto-scales by backlog (v0.7 / plan 19, AL-5)
+### Concurrency: UNSET max_concurrency auto-scales by backlog (v0.7, AL-5)
 
 Wrangler's config schema states it plainly: an unset consumer `max_concurrency` means the platform **scales concurrency up by backlog** — "serial by accident" is not a safety property. On this stack each attempt takes a per-attempt-unique Sandbox DO id while `max_instances: 1`, so a backlog spike under auto-scale causes container-acquisition blocking → `instanceGetTimeoutMS` timeouts → retry storm → DLQ. Fix is explicit: `max_concurrency: 1` (protective pin), and only raise it together with `max_instances` after verifying concurrent runner execs. Deep (14 min) against the 15-min consumer cap leaves no headroom for contention retries.
 

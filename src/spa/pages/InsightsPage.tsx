@@ -31,7 +31,7 @@ import { TrendChart } from "@/components/charts/TrendChart";
 
 /**
  * The filter state as the location states it — the one derivation shared by
- * the mount initializer and the popstate re-sync (plan 49 F-15-02), built on
+ * the mount initializer and the popstate re-sync (F-15-02), built on
  * the pinned helpers (off-set windows resolve to the default segment).
  */
 function insightsSearchFromLocation(): InsightsSearch {
@@ -42,36 +42,36 @@ function insightsSearchFromLocation(): InsightsSearch {
 }
 
 /**
- * `/dashboard/insights` records page (plan 36 T2): review records with a
+ * `/dashboard/insights` records page: review records with a
  * segmented window (INSIGHTS_WINDOWS 7/30/90) and a shadcn
  * Select repo filter (全部 + summary.repos). Free-text repo input retired.
  * Data plane: existing `/dashboard/api/insights/summary` plus the read-only
  * `repos` field (window-scoped distinct owner/repo, independent of `repo=`).
  * URL `repo=` shape is unchanged — out-of-set legal values stay applied.
- * Plan 49 F-15-02: after navigation the URL is the source of truth —
+ * F-15-02: after navigation the URL is the source of truth —
  * popstate re-derives the filter from the location (see the listener below);
  * in-page edits keep the reverse direction via commitSearch.
- * Plan 56 T2: the three stat sections (severity / category / weekly trend)
- * render as charts from components/charts. Plan 65 T2 (AD-652/653): the
+ * The three stat sections (severity / category / weekly trend)
+ * render as charts from components/charts. (AD-652/653): the
  * severity and category cards are daily stacked bar time series —
  * x = day/week buckets from the additive `findings_distribution` API
  * field, one stacked `<Bar>` per closed-vocabulary series (severity
  * semantic family frozen; AD-653 category palette below) — the aggregate
  * BarChart retired with this migration; the weekly trend card stays a
  * grouped week-bucket chart and the recurring-findings card a list.
- * Plan 60 T2 (A2-A5): the page joins the v0.3 language — heading-24 page
+ * (A2-A5): the page joins the v0.3 language — heading-24 page
  * title, spacing-8 group rhythm, SectionCard tiers (overview = primary
- * surface, stat cards = secondary), and the plan-57 state trio
+ * surface, stat cards = secondary), and the shared state trio
  * (PageSkeleton on the initial load, ErrorState with retry, EmptyState for
  * the zero-review window). Filter logic and the URL↔filter pins are
  * untouched.
- * Plan 65 QC fix-1: legend entries render only for series with findings in
+ * QC fix-1: legend entries render only for series with findings in
  * the window (zero-count series drop from the legend — legend-only; every
  * bucket stays on the axis per the time-continuity constraint).
- * Plan 60 PR fix (PR 41 bugbot): a filter refetch over retained data
+ * PR fix (PR 41 bugbot): a filter refetch over retained data
  * renders a slim polite busy hint below the toolbar instead of a blank
  * main area — the skeleton stays initial-load-only and the toolbar never
- * unmounts (plan-38 no-flash contract); the content region also flips
+ * unmounts (the no-flash contract); the content region also flips
  * aria-busy so the refetch is announced programmatically.
  */
 export function InsightsPage({ boot }: { boot: SpaBoot }) {
@@ -79,11 +79,11 @@ export function InsightsPage({ boot }: { boot: SpaBoot }) {
   const [search, setSearch] = useState<InsightsSearch>(insightsSearchFromLocation);
   const [data, setData] = useState<InsightsSummary | null>(null);
   const [state, setState] = useState<"loading" | "ok" | "error">("loading");
-  // ErrorState retry (plan 60 A4): bumping the nonce re-runs the load
+  // ErrorState retry: bumping the nonce re-runs the load
   // effect below for the current filter — the fetch body is unchanged.
   const [reloadNonce, setReloadNonce] = useState(0);
 
-  // Plan 36 QC F-002: an off-set legal window deep link (e.g. ?window=60)
+  // QC F-002: an off-set legal window deep link (e.g. ?window=60)
   // resolves to the default segment 30 — rewrite the URL on mount so the
   // address bar reflects the applied filter.
   useEffect(() => {
@@ -93,7 +93,7 @@ export function InsightsPage({ boot }: { boot: SpaBoot }) {
     }
   }, []);
 
-  // Plan 49 F-15-02: navigation re-sync. `navigate()` pushStates then
+  // F-15-02: navigation re-sync. `navigate()` pushStates then
   // dispatches a synthetic popstate (router.tsx), so a same-route sidebar
   // click on a filtered view lands here with the now-bare location — the
   // filter resets along with the address bar. History back/forward fires a
@@ -111,7 +111,7 @@ export function InsightsPage({ boot }: { boot: SpaBoot }) {
     let cancelled = false;
     setState("loading");
     // include=repos: the records Select needs the window-scoped distinct
-    // repo set (plan 36 QC F-001); default summary reads stay cheap.
+    // repo set (QC F-001); default summary reads stay cheap.
     fetchJson(insightsSummaryUrl(search, true))
       .then((raw) => {
         if (cancelled) return;
@@ -150,10 +150,10 @@ export function InsightsPage({ boot }: { boot: SpaBoot }) {
   const repoChoices = insightsRepoOptions(data?.repos ?? [], search.repo);
   const repoSelectDisabled = state === "ok" && repoChoices.length === 0;
 
-  // Loading rides the plan-57 skeleton as the page's full loading face —
+  // Loading rides the shared skeleton as the page's full loading face —
   // the component's heading placeholder stands in for the real h1 (AD-582).
   // Initial load only: `data === null` gates it, so filter-change reloads
-  // keep the page (and keyboard focus) mounted per the plan-38
+  // keep the page (and keyboard focus) mounted per the
   // background-reload contract; the refreshed data swaps in when it lands.
   if (state === "loading" && data === null) {
     return <PageSkeleton locale={locale} kind="cards" />;
@@ -203,10 +203,10 @@ export function InsightsPage({ boot }: { boot: SpaBoot }) {
         </div>
       </div>
       {state === "loading" && data !== null ? (
-        // Filter refetch over retained data (plan-38 background reload): a
+        // Filter refetch over retained data (background reload): a
         // one-line polite hint replaces the blank main area; the toolbar
         // above stays mounted and interactive. The retired PageNotice text
-        // faces stay off this page (plan-60 T2 pin).
+        // faces stay off this page (v0.3 pin).
         <p role="status" className="text-sm text-muted-foreground">
           {t(locale, "common.loading")}
         </p>
@@ -220,17 +220,17 @@ export function InsightsPage({ boot }: { boot: SpaBoot }) {
 }
 
 /**
- * AD-561/AD-601 (plan 65): severity → DESIGN.md token series fills as
+ * AD-561/AD-601: severity → DESIGN.md token series fills as
  * charts.css fill classes consumed by StackedBarChart — the AD-601-frozen
  * semantic family is unchanged (must-fix=red-700 / should-fix=amber-700 /
  * nit=gray-700); colors ride class rules into the token layer (never
  * presentation attributes, never raw hex; dark/light both resolve through
  * the :root[data-theme] var chain). The vocabulary is this fixed map — the
- * plan-65 API zero-fills exactly these three merge-class keys per bucket,
+ * the API zero-fills exactly these three merge-class keys per bucket,
  * so unknown severity keys never enter the series. Labels stay the raw
  * engine slugs — the aggregate card's visible face carried them unlocalized
  * already (same product ruling as the category slugs below).
- * Exported for the SSR pins (plan 53 AppInfoCard idiom) — the
+ * Exported for the SSR pins (the AppInfoCard idiom) — the
  * severity/category disjointness pin reads this vocabulary.
  */
 export const SEVERITY_BAR_COLORS: Record<string, string> = {
@@ -251,12 +251,12 @@ const SEVERITY_SERIES: StackedSeries[] = Object.entries(SEVERITY_BAR_COLORS).map
  * families from the 700-step {teal, purple, pink} candidates (red/amber
  * stay severity-owned; blue-700 keeps its neutral data-series duty and is
  * deliberately NOT assigned to a single known category). Alphabetically
- * stable assignment, recorded per plan 65: DEBT=teal-700, DOCS=purple-700,
+ * stable assignment: DEBT=teal-700, DOCS=purple-700,
  * SEC=pink-700 (dark Δhue 172°/270°/329°; light 175°/271°/333° — every
  * adjacent pair ≥55°). Slugs outside this map (long-tail vocabulary; the
  * >8 top-N trigger stays a product escalation) ride the neutral blue-700
- * tone; the "uncategorized" fallback (NULL/unknown, plan 65 API) is the
- * gray-700 series, stacked last. Exported for the SSR pins (plan 53
+ * tone; the "uncategorized" fallback (NULL/unknown) is the
+ * gray-700 series, stacked last. Exported for the SSR pins (the
  * AppInfoCard idiom) — the severity/category disjointness pin reads this
  * vocabulary alongside SEVERITY_BAR_COLORS.
  */
@@ -267,7 +267,7 @@ export const CATEGORY_FILL_CLASSES: Record<string, string> = {
 };
 /** Neutral data-series default (the retired BarChart's fallback tone). */
 const CATEGORY_TAIL_FILL_CLASS = "chart-fill-blue-700";
-/** Store-merged fallback key for NULL/unknown categories (plan 65 API). */
+/** Store-merged fallback key for NULL/unknown categories. */
 export const UNCATEGORIZED_KEY = "uncategorized";
 const UNCATEGORIZED_FILL_CLASS = "chart-fill-gray-700";
 
@@ -291,7 +291,7 @@ function categorySeries(buckets: readonly FindingsDistributionBucket[], locale: 
     if (observed.has(key)) series.push({ key, label: key, fillClass });
   }
   for (const key of observed) {
-    // "" never labels a series (schema-permitted, plan 56 QC F-004) — it
+    // "" never labels a series (schema-permitted, QC F-004) — it
     // merges into the fallback key below.
     if (key === "" || key === UNCATEGORIZED_KEY || key in CATEGORY_FILL_CLASSES) continue;
     series.push({ key, label: key, fillClass: CATEGORY_TAIL_FILL_CLASS });
@@ -309,7 +309,7 @@ function categorySeries(buckets: readonly FindingsDistributionBucket[], locale: 
 /**
  * The chart buckets: the payload grid with the schema-permitted ""
  * category key merged into "uncategorized" per bucket (counts summed) so
- * the gray fallback series reads the honest total — the same plan-56
+ * the gray fallback series reads the honest total — the same
  * QC F-004 merge the aggregate card performed, now one layer down.
  */
 function chartBuckets(buckets: readonly FindingsDistributionBucket[]): FindingsDistributionBucket[] {
@@ -327,7 +327,7 @@ function chartBuckets(buckets: readonly FindingsDistributionBucket[]): FindingsD
 }
 
 /**
- * Plan 65 QC fix-1 (QC F-004 ×3 seats): legend entries only for series
+ * QC fix-1 (QC F-004 ×3 seats): legend entries only for series
  * with findings in the window (AD-653 「图例仅列窗口内出现分类」) — a series
  * whose window total is 0 (e.g. the store's always-present "uncategorized"
  * grid key, AD-652 恒在) drops from the legend instead of rendering a
@@ -348,7 +348,7 @@ function seriesWithFindings(
 }
 
 /**
- * Exported for the SSR pins (plan 53 AppInfoCard idiom): pure `t()` + data
+ * Exported for the SSR pins (the AppInfoCard idiom): pure `t()` + data
  * rendering, no window/router access, so tests can static-render it.
  */
 export function InsightsRecordsView({ locale, data }: { locale: SpaBoot["locale"]; data: InsightsSummary }) {
@@ -357,7 +357,7 @@ export function InsightsRecordsView({ locale, data }: { locale: SpaBoot["locale"
   });
   const repoLabel = data.repo ? ` · ${t(locale, "insights.repo", { repo: data.repo })}` : "";
   const empty = data.reviews_total === 0;
-  // Window totals recomputed from the weekly buckets (plan 56 T2 summary
+  // Window totals recomputed from the weekly buckets (the summary
   // line — text counts coexisting with the trend chart).
   const trendTotals = data.weekly_trend.reduce(
     (totals, row) => ({ reviews: totals.reviews + row.reviews, findings: totals.findings + row.findings }),
@@ -379,7 +379,7 @@ export function InsightsRecordsView({ locale, data }: { locale: SpaBoot["locale"
   return (
     <>
       {empty ? (
-        // AD-601 presentation supersede (plan 60 A4): the plan-56
+        // AD-601 presentation supersede: the
         // heading-card-only empty face is replaced by the composed
         // EmptyState. The judgment (`reviews_total === 0`) and the chart
         // layer contract are untouched, and no in-page action exists —

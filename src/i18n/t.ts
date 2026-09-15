@@ -1,6 +1,6 @@
 /**
  * `t(locale, key, params?)` — server + client isomorphic lookup with
- * `{placeholder}` interpolation (plan 29 T2).
+ * `{placeholder}` interpolation.
  *
  * `DictionaryKey` is the dotted-path type derived from the en dictionary
  * (`typeof en`), so a typo in a key is a compile error. A runtime miss
@@ -41,7 +41,7 @@ export function t(
 }
 
 /**
- * True when `key` resolves to a dictionary string (plan 45 T4): the SPA
+ * True when `key` resolves to a dictionary string: the SPA
  * validates server-emitted message keys before resolving them with `t()`,
  * so an unknown key (newer server, stale client) falls through to the
  * English `message` face instead of rendering the raw key.

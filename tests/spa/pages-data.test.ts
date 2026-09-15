@@ -1,5 +1,5 @@
 /**
- * Plan 29 T4: pure page-data parsers and client guards (no DOM runner).
+ * Pure page-data parsers and client guards (no DOM runner).
  */
 import { describe, expect, test } from "bun:test";
 import { t } from "../../src/i18n";
@@ -27,7 +27,7 @@ import {
 } from "../../src/spa/pages/data";
 import { DEFAULT_CHAIN_NAME as STORE_DEFAULT_CHAIN_NAME } from "../../src/dashboard/app-config-store";
 
-describe("admin guard (plan 29 T4)", () => {
+describe("admin guard", () => {
   test("only admin can view members", () => {
     expect(canViewMembers("admin")).toBe(true);
     expect(canViewMembers("member")).toBe(false);
@@ -59,7 +59,7 @@ describe("insights search wiring", () => {
     );
   });
 
-  test("summary URL requests the repos aggregation only when opted in (plan 36 QC F-001)", () => {
+  test("summary URL requests the repos aggregation only when opted in (QC F-001)", () => {
     // Default summary read: no include param (only the records surface opts in).
     expect(insightsSummaryUrl({ window: "7", repo: "" })).toBe("/dashboard/api/insights/summary?window=7");
     // Records surface: include=repos appended.
@@ -91,7 +91,7 @@ describe("insights search wiring", () => {
       findings_by_category: [],
       verdict_distribution: [],
       weekly_trend: [],
-      // Plan 65 (AD-652): the distribution grid is REQUIRED like the other
+      // (AD-652): the distribution grid is REQUIRED like the other
       // aggregations — one realistic day bucket (the task-1 store shape:
       // fixed severity key set + window-union category keys + fallback).
       findings_distribution: [
@@ -107,7 +107,7 @@ describe("insights search wiring", () => {
     };
     expect(parseInsights(body)?.reviews_total).toBe(0);
     // The bucket rows parse verbatim — the stacked charts read these grids
-    // directly (row-strict guard, plan 65 B3).
+    // directly (row-strict guard).
     expect(parseInsights(body)?.findings_distribution).toEqual([
       {
         bucket_start: "2026-08-17",
@@ -118,7 +118,7 @@ describe("insights search wiring", () => {
     ]);
     expect(parseInsights({ ...body, repos: ["acme/web"] })?.repos).toEqual(["acme/web"]);
     expect(parseInsights({ reviews_total: 0 })).toBeNull();
-    // repos is opt-in (plan 36 QC F-001): missing is tolerated (defaults
+    // repos is opt-in (QC F-001): missing is tolerated (defaults
     // to undefined on the parsed shape), malformed is rejected.
     expect(parseInsights({ ...body, repos: undefined })?.repos).toBeUndefined();
     expect(parseInsights({ ...body, repos: "acme/web" })).toBeNull();
@@ -162,7 +162,7 @@ describe("members/apps/settings parsers", () => {
     expect(parseApps({ apps: [] })).toBeNull();
   });
 
-  test("parseSettings requires can_manage, created_by, the plan-38 collections, and chains", () => {
+  test("parseSettings requires can_manage, created_by, the collections, and chains", () => {
     const ok = parseSettings({
       can_manage: true,
       app: {
@@ -201,7 +201,7 @@ describe("members/apps/settings parsers", () => {
     ).toBeNull();
   });
 
-  test("parseSettings requires the sandbox image selection + selector choices (plan 37)", () => {
+  test("parseSettings requires the sandbox image selection + selector choices", () => {
     const manageBase = {
       can_manage: true,
       app: {
@@ -241,7 +241,7 @@ describe("members/apps/settings parsers", () => {
     expect(ok && ok.can_manage && ok.sandbox_images).toEqual([{ id: "omp", enabled: true }]);
   });
 
-  test("parseSettings separates configured state from the catalog (plan 38)", () => {
+  test("parseSettings separates configured state from the catalog", () => {
     const manageBase = {
       can_manage: true,
       app: {
@@ -288,7 +288,7 @@ describe("members/apps/settings parsers", () => {
     });
     expect(unconfigured && unconfigured.can_manage && unconfigured.configured_providers).toEqual([]);
     expect(unconfigured && unconfigured.can_manage && unconfigured.provider_catalog).toHaveLength(2);
-    // Both plan-38 collections are REQUIRED (clean cutover — no legacy shape).
+    // Both collections are REQUIRED (clean cutover — no legacy shape).
     const { configured_providers: _droppedConfigured, ...withoutConfigured } = manageBase;
     expect(parseSettings(withoutConfigured)).toBeNull();
     const { provider_catalog: _droppedCatalog, ...withoutCatalog } = manageBase;
@@ -333,8 +333,8 @@ describe("members/apps/settings parsers", () => {
   });
 
   test("parseSettings accepts the non-manager base+health shape (no settings zones)", () => {
-    // Plan 35 T4 review: can_manage=false payloads carry only app meta + health.
-    // Plan 37: the read-only face still carries the selected image id.
+    // Review pin: can_manage=false payloads carry only app meta + health.
+    // The read-only face still carries the selected image id.
     const readOnly = parseSettings({
       can_manage: false,
       app: {
@@ -388,7 +388,7 @@ describe("members/apps/settings parsers", () => {
   });
 });
 
-describe("model chain tab model (plan 39 T1)", () => {
+describe("model chain tab model", () => {
   const entry = (name: string, chain: string): ModelChainEntry => ({
     name,
     chain,
@@ -446,7 +446,7 @@ describe("model chain tab model (plan 39 T1)", () => {
   });
 });
 
-describe("provider catalog rows + add selection (plan 38 T2)", () => {
+describe("provider catalog rows + add selection", () => {
   const manageBase = {
     can_manage: true,
     app: {
@@ -483,7 +483,7 @@ describe("provider catalog rows + add selection (plan 38 T2)", () => {
     display_group: "common",
   };
 
-  test("catalog rows are row-validated on models/verifiable/base_url/api (plan 38 T2 guards)", () => {
+  test("catalog rows are row-validated on models/verifiable/base_url/api (guards)", () => {
     // A well-formed row (nullable url/api for builtins) parses.
     expect(parseSettings({ ...manageBase, provider_catalog: [catalogRow] })).not.toBeNull();
     // A drifted payload missing `models` must fail the parse — the Add
@@ -497,7 +497,7 @@ describe("provider catalog rows + add selection (plan 38 T2)", () => {
     // base_url / api are string-or-null.
     expect(parseSettings({ ...manageBase, provider_catalog: [{ ...catalogRow, base_url: 5 }] })).toBeNull();
     expect(parseSettings({ ...manageBase, provider_catalog: [{ ...catalogRow, api: [] }] })).toBeNull();
-    // Plan 54 (review handoff S2): the display-group stamp is word-checked —
+    // Review handoff S2: the display-group stamp is word-checked —
     // a row missing `display_group` (the pre-54 route shape) or carrying a
     // stray value fails the parse instead of silently falling out of both
     // picker groups.
@@ -560,7 +560,7 @@ describe("provider catalog rows + add selection (plan 38 T2)", () => {
   });
 });
 
-describe("invite grammar + page copy (plan 29 T4)", () => {
+describe("invite grammar + page copy", () => {
   test("invite login grammar matches the legacy route", () => {
     expect(inviteLoginNoticeKey("")).toBe("notice.error.enterLogin");
     expect(inviteLoginNoticeKey("   ")).toBe("notice.error.enterLogin");

@@ -7,7 +7,7 @@ severity: high
 applies_when:
   - "Spawning omp parent-session deep review seats from HARNESS_PLUGIN_ROOT"
   - "Copying mstar-harness agents/*.md into a sandbox .omp/agents directory"
-plan_id: 09-review-deep-parent
+topic: review deep-runner orchestration
 tags:
   - omp
   - deep-review

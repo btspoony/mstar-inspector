@@ -1,5 +1,5 @@
 /**
- * Shared fixtures for release-script unit tests (plan 50 T2 / D11).
+ * Shared fixtures for release-script unit tests (D11).
  *
  * The scripts take an explicit `root` so tests run against throwaway temp
  * dirs — no chdir, no touching the real checkout's `.changes/`, changelogs,
@@ -26,7 +26,7 @@ export function writeAt(root: string, rel: string, content: string): string {
   return path;
 }
 
-/** Write the `src/version.ts` surface (canonical template, plan 51). */
+/** Write the `src/version.ts` surface (canonical template). */
 export function writeVersionTs(root: string, version: string): string {
   return writeAt(root, "src/version.ts", renderVersionTs(version));
 }

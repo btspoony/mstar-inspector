@@ -1,5 +1,5 @@
 /**
- * Review Check attempt registry (plan 68 Task 1, spec review-lifecycle §7.1
+ * Review Check attempt registry (spec review-lifecycle §7.1
  * second block + §7.9). One row per Check ATTEMPT; this module is the only
  * place attempt identity, lease fencing and the desired/observed split live.
  *
@@ -222,7 +222,7 @@ const NONTERMINAL_WHERE = "terminal_ms IS NULL";
 
 /**
  * Canonical `attempt_key`: `JSON.stringify` of the flat attempt tuple in the
- * fixed spec order (plan 68 §T1 pins this shape — callers pass the scope
+ * fixed spec order (the spec pins this shape — callers pass the scope
  * fields directly, never a nested `Scope`). Owner/repo arrive canonicalised
  * from authenticated repository metadata (§7.0) — never from model text, and
  * never re-cased here, so a case-mismatched scope fails closed as a different
@@ -327,7 +327,7 @@ export function checkReason(text: string): string {
  * the rendered Check, and the cut happens on the already-flattened string so
  * no split can re-introduce one. Redaction is the pipeline's choke point
  * (model text is redacted before it reaches this store, SEC-02); the store's
- * job is the deterministic bound — the plan 67 `recoveryReason` precedent.
+ * job is the deterministic bound — the `recoveryReason` precedent.
  */
 function boundText(text: string, max: number): string {
   const flat = text
@@ -747,15 +747,15 @@ export async function releaseCheckClaim(
 
 /**
  * The identity-fenced twin of `releaseCheckClaim`, for the one caller that
- * reports a refusal WITHOUT counting a request: T2's `beginCheck` answering
+ * reports a refusal WITHOUT counting a request: `beginCheck` answering
  * `requests: 0`.
  *
- * §7.11.2 step 5 wants such a row left due with no attempt spent — and T2
- * already classified it (it learned `requests === 0` and released its own
+ * §7.11.2 step 5 wants such a row left due with no attempt spent — and the
+ * adapter already classified it (it learned `requests === 0` and released its own
  * claim). But `releaseCheckClaim`'s `lease_until_ms > now` condition can fail
  * on exactly this path, because a zero-request refusal is typically the
  * live-time fence itself: the lease legitimately expired while the client was
- * resolved, so a liveness-fenced release writes nothing and T3 would leave the
+ * resolved, so a liveness-fenced release writes nothing and the recovery sweep would leave the
  * row leased and invisible to the next selector.
  *
  * Fencing on holder + epoch + lease-end equality instead proves ownership
@@ -874,7 +874,7 @@ export async function setCheckCreateState(
 
 /**
  * Undo a `sending` mark for a create that provably NEVER dispatched (spec §7.9
- * / RL-12 together with the T2 `requests: 0` contract).
+ * / RL-12 together with the `requests: 0` contract).
  *
  * The ordinary `not-sent` transition above is fenced on a LIVE lease, because a
  * `sending` row that might have reached GitHub must never be declared
@@ -1023,7 +1023,7 @@ export async function recordCheckObservation(
 }
 
 // ---------------------------------------------------------------------------
-// Recovery bookkeeping (spec §7.9 / §7.11.2 — consumed by T3)
+// Recovery bookkeeping (spec §7.9 / §7.11.2 — consumed by the reconciler)
 // ---------------------------------------------------------------------------
 
 /**
@@ -1379,7 +1379,7 @@ export async function retryCheckRecovery(
  * Proof reader for the Check lane (spec §7.9: "Read proof by exact App/scope/SHA,
  * preferring this attempt's publication ID"). The journal stays in
  * `src/store/finding-lifecycle.ts`, so exactly one reader exists; this
- * re-export is plan 68's integration point. `null` means UNPROVEN — never
+ * re-export is the Check lifecycle's integration point. `null` means UNPROVEN — never
  * "not published".
  */
 export { readPublicationProof } from "./finding-lifecycle";

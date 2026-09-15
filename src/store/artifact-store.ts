@@ -1,5 +1,5 @@
 /**
- * D1 ArtifactStore adapter (plan 07 Task 4) — the ONE write authority for
+ * D1 ArtifactStore adapter — the ONE write authority for
  * review persistence. Implements the engine `ArtifactStore` contract for
  * `kind: "review"` only; every other kind (status / snapshot / residuals /
  * json) throws — fail-loud, never a silent no-op pretending success. D1
@@ -31,20 +31,20 @@
  * the only workerd-legal face) only; no worker/pipeline/session/omp
  * dependencies. The `db` parameter is the narrow D1 face (`D1Like`) so the
  * bun:sqlite test double and a real `D1Database` both satisfy it
- * structurally (plan Clarify 5).
+ * structurally.
  *
- * Per-App attribution (plan 13, migration 0005; plan 24 Task 1: REQUIRED):
+ * Per-App attribution (migration 0005; REQUIRED):
  * the put doc carries the caller-supplied `appId` — the resolved `appRef`'s
  * id — which is bound into `reviews.app_id`. Every new write is attributed;
- * `app_id` NULL survives only on pre-plan-24 historical rows (the column
+ * `app_id` NULL survives only on legacy historical rows (the column
  * stays nullable, zero DDL — AL-24-4). The column's FK to `github_apps(id)`
  * makes an unknown appId a loud batch failure, never a silent
  * mis-attribution.
  *
- * Version records (plan 18 Task 1): the put doc may carry the review's
+ * Version records: the put doc may carry the review's
  * `model` (the effective model chain's head selector, consumer-resolved)
  * and `provider` (always NULL on the v1 path — architect AL-2) — both
- * OPTIONAL; omitted = NULL (byte-compat for pre-plan-18 callers).
+ * OPTIONAL; omitted = NULL (byte-compat for legacy callers).
  */
 
 import {
@@ -65,7 +65,7 @@ export const REVIEW_SCHEMA = "mstar.review/v1" as const;
  * `reviews.skill_version` for every v1 row (write caliber, spec § 新行写入
  * 口径): the pinned engine version + harness image commit.
  */
-export const REVIEW_SKILL_VERSION = "3.8.1+4c8fbb21";
+export const REVIEW_SKILL_VERSION = "3.9.2+23d2c78c";
 
 /** Number of `:`-separated segments in an `idemKey()` string. */
 const IDEM_KEY_PARTS = 5;
@@ -143,8 +143,8 @@ function assertTargetAgrees(key: IdempotencyKey, payload: MstarReviewV1): void {
 
 /**
  * The review put input: the engine `ArtifactDoc` plus the caller-supplied
- * per-App attribution (plan 13, QC fix wave 1 F-001; plan 24 Task 1:
- * REQUIRED) and the plan-18 version records (`model` / `provider`). A
+ * per-App attribution (QC fix wave 1 F-001; REQUIRED) and the version
+ * records (`model` / `provider`). A
  * structural superset of the engine contract — the engine package is
  * unchanged; the consumer is the only production caller and always passes
  * `appId` (the new contract's single shape).
@@ -152,13 +152,13 @@ function assertTargetAgrees(key: IdempotencyKey, payload: MstarReviewV1): void {
 export type ReviewArtifactDoc = ArtifactDoc & {
   /**
    * `github_apps.id` the review belongs to. REQUIRED on every new write
-   * (plan 24 Task 1, AL-24-4): the type-level guarantee that no new row is
-   * unattributed — `app_id` NULL survives only on pre-plan-24 historical
+   * (AL-24-4): the type-level guarantee that no new row is
+   * unattributed — `app_id` NULL survives only on legacy historical
    * rows. Never a credential.
    */
   appId: string;
   /**
-   * Version record (plan 18 Task 1): the HEAD (primary) selector of the
+   * Version record: the HEAD (primary) selector of the
    * effective chain the review ran with — `chainHeadSelector` (consumer.ts)
    * on the `effectiveModelChain` result (comma-separated, trimmed, empty
    * segments dropped; single-sourced with `buildRunnerEnv`). Omitted/NULL
@@ -171,7 +171,7 @@ export type ReviewArtifactDoc = ArtifactDoc & {
    */
   model?: string | null;
   /**
-   * Version record (plan 18 Task 1): always NULL on the v1 path —
+   * Version record: always NULL on the v1 path —
    * `RunnerAppConfig` carries a multi-provider key set, not one provider
    * (architect AL-2: do not invent a mapping). Optional; omitted = NULL.
    */
@@ -183,7 +183,7 @@ export type D1ArtifactStore = ArtifactStore & {
   /**
    * Widened put input (see `ReviewArtifactDoc`): the REQUIRED `appId` rides
    * the doc into `reviews.app_id`; the optional `model` / `provider`
-   * version records (plan 18 Task 1) ride into `reviews.model` /
+   * version records ride into `reviews.model` /
    * `reviews.provider` (absent/NULL = unset).
    */
   put(doc: ReviewArtifactDoc): Promise<void>;
@@ -198,7 +198,7 @@ export type D1ArtifactStore = ArtifactStore & {
 /**
  * Create the D1-backed ArtifactStore for `kind: "review"`. Absorbs the
  * retired review-store's (src/store/reviews.ts, deleted this task)
- * batch atomicity and UNIQUE duplicate handling (plan 05 T2):
+ * batch atomicity and UNIQUE duplicate handling:
  *
  * The review row and ALL its findings are written in ONE `db.batch([...])`
  * call — Cloudflare D1 documents batch as a transaction ("if any statement
@@ -242,9 +242,9 @@ export function createArtifactStore(db: D1Like): D1ArtifactStore {
       assertTargetAgrees(key, payload);
 
       const reviewId = crypto.randomUUID();
-      // app_id: the REQUIRED caller-supplied per-App attribution (plan 24
-      // Task 1 — every new row is attributed; NULL survives only on
-      // pre-plan-24 historical rows). The FK to github_apps(id) rejects an
+      // app_id: the REQUIRED caller-supplied per-App attribution
+      // (every new row is attributed; NULL survives only on
+      // legacy historical rows). The FK to github_apps(id) rejects an
       // unknown appId loud.
       const appId = doc.appId;
       const reviewStmt = db
@@ -267,7 +267,7 @@ export function createArtifactStore(db: D1Like): D1ArtifactStore {
           // restorable via get() (no 64KB truncation on this column).
           JSON.stringify(payload),
           appId,
-          // Version records (plan 18 Task 1): the caller-supplied chain head
+          // Version records: the caller-supplied chain head
           // selector / provider — `?? null` because D1 .bind() rejects
           // undefined; omitted put-input fields persist NULL (byte-compat).
           doc.model ?? null,
@@ -302,7 +302,7 @@ export function createArtifactStore(db: D1Like): D1ArtifactStore {
             finding.line_end ?? null,
             finding.title,
             finding.body,
-            // Plan 21 (AL-21-1): the persist path is the single fingerprint
+            // AL-21-1: the persist path is the single fingerprint
             // write point — a non-blank, non-marker hint is returned verbatim
             // by the pure function; a blank or [REDACTED]-marker hint falls
             // back to the normalized FNV-1a fingerprint (W-1).
@@ -354,8 +354,8 @@ export function createArtifactStore(db: D1Like): D1ArtifactStore {
   };
 }
 /**
- * Previous-round fingerprint set for cross-round repeat dedup (plan 21
- * Task 3, AL-21-2): the latest v1 review row for the same
+ * Previous-round fingerprint set for cross-round repeat dedup
+ * (AL-21-2): the latest v1 review row for the same
  * (installation_id, owner, repo, pr_number) — `envelope IS NOT NULL` era
  * gate, ORDER BY reviewed_at DESC, id DESC LIMIT 1 — then that row's
  * findings' non-NULL fingerprints. NO head_sha exclusion: the consumer
@@ -385,8 +385,8 @@ export async function previousRoundFingerprints(
   return new Set(rows.results.map((row) => row.fingerprint));
 }
 /**
- * Cross-PR recurrence aggregation (plan 21 Task 4, AC-21c) — the store-layer
- * query consumed by plan 22 (review-health-insights) for the "复现 top"
+ * Cross-PR recurrence aggregation (AC-21c) — the store-layer
+ * query consumed by the insights store (review-health-insights) for the "复现 top"
  * panel. Groups findings by fingerprint across reviews:
  *
  *   - count = number of DISTINCT reviews containing the fingerprint; only
@@ -403,10 +403,10 @@ export async function previousRoundFingerprints(
  *     column default); omitted = all-time
  *   - optional `repo` restricts the aggregation to one owner/repo pair
  *
- * Module boundary (AL-21-2 / AL-22-1 candidate A): this plan delivers the
- * store-layer aggregation; plan 22's dashboard insights-store inlines
+ * Module boundary (AL-21-2 / AL-22-1 candidate A): this module delivers the
+ * store-layer aggregation; the dashboard insights-store inlines
  * equivalent SQL and keeps a parity test against this function (bidirectional
- * anchor — mirror any SQL change here in the plan 22 consumer).
+ * anchor — mirror any SQL change here in the dashboard consumer).
  *
  * Index: the group-by rides the 0001-era `idx_findings_fingerprint`
  * (existence locked by tests/store/migration.test.ts). Planner choice is NOT

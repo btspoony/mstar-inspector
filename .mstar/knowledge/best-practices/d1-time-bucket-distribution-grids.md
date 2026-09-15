@@ -4,7 +4,7 @@ date: 2026-09-12
 problem_type: best_practice
 category: best-practices
 severity: medium
-plan_id: 65-insights-daily-stacked-charts
+topic: insights daily stacked charts
 tags:
   - d1
   - insights
@@ -24,7 +24,7 @@ related_components:
 
 ## Context
 
-plan 65（020 迭代）给 `/api/insights/summary` 增加按天/周分桶的 findings 分布（`findings_distribution`），供 SPA 堆叠柱状时间序列消费。约束：**additive-only**（既有字段逐字节零 diff）、D1（SQLite 方言）、窗口 7/30/90 天、category 为 open-set 字符串。本文沉淀桶网格的构造纪律——这些点在 review 中被反复问询，且每一处都有明确的「错法」。
+2026-09-12 的 insights 堆叠图表迭代给 `/api/insights/summary` 增加按天/周分桶的 findings 分布（`findings_distribution`），供 SPA 堆叠柱状时间序列消费。约束：**additive-only**（既有字段逐字节零 diff）、D1（SQLite 方言）、窗口 7/30/90 天、category 为 open-set 字符串。本文沉淀桶网格的构造纪律——这些点在 review 中被反复问询，且每一处都有明确的「错法」。
 
 ## Guidance
 

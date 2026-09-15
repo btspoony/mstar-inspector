@@ -1,9 +1,9 @@
 /**
- * Shared navigation contract (plan 29 T2, plan 33 T2 sidebar IA).
+ * Shared navigation contract (the sidebar IA).
  *
  * Order is LOCKED (spec §1.1): Apps → Insights → Members. `labelKey` is a
  * dictionary key (type-checked against en.ts), `adminOnly` gates the
- * Members entry. Apps href is `/dashboard/apps` (plan 33). The language
+ * Members entry. Apps href is `/dashboard/apps`. The language
  * toggle is NOT a nav item — it renders from `t(locale, "nav.language")`
  * (the label of the OTHER locale: en shows 中文, zh_CN shows EN) and POSTs
  * to /dashboard/locale.

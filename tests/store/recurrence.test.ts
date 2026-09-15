@@ -1,6 +1,6 @@
 /**
- * Cross-PR recurrence aggregation contract lock (plan 21 Task 4, AC-21c) —
- * the store-layer query consumed by plan 22 (review-health-insights) for the
+ * Cross-PR recurrence aggregation contract lock (AC-21c) —
+ * the store-layer query consumed by the insights aggregation for the
  * "复现 top" panel.
  *
  * `recurrenceByFingerprint` groups findings by fingerprint across reviews:

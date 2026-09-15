@@ -1,7 +1,7 @@
 -- 0015_provider_verification.sql — provider-key verification columns +
--- verified-model cache (plan 31 Tasks 2+3, spec v1.1-dashboard-platform §6.1).
+-- verified-model cache (spec v1.1-dashboard-platform §6.1).
 --
--- SECTION 1 (plan 31 Task 2): verification bookkeeping on the two key stores.
+-- SECTION 1: verification bookkeeping on the two key stores.
 -- app_provider_keys and app_custom_providers each gain two nullable TEXT
 -- columns — verified_at (SQLite datetime('now') UTC, written by the store)
 -- and verified_status ('ok' | 'failed'; NULL = never verified). Both stores
@@ -19,7 +19,7 @@
 -- 'ok'|'failed' value domain is enforced producer-side by the dashboard
 -- store (0006/0012 precedent).
 --
--- SECTION 2 (plan 31 Task 2): app_provider_models — the per-App verified
+-- SECTION 2: app_provider_models — the per-App verified
 -- model cache for BUILT-IN providers (selector-facing provider keys only:
 -- the `ark` BYOK key verifies under "ark" but its cached row is written
 -- under "ark-plan", the in-image base provider id the chain actually

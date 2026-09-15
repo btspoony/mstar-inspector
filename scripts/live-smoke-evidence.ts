@@ -1,5 +1,5 @@
 /**
- * Live smoke evidence capture (plan 07): run one real review (quick tier,
+ * Live smoke evidence capture: run one real review (quick tier,
  * single seat) through the omp AgentRuntime, save the mstar.review/v1
  * envelope to a temp file, and report whether validateMstarReviewV1 accepts
  * it. Requires HARNESS_PLUGIN_ROOT + a configured provider key + a PR clone
@@ -12,7 +12,7 @@ import { validateMstarReviewV1 } from "@mstar-harness/engine";
 import { ompAgentRuntime, parseModelSelectors } from "../src/review/runtime-omp";
 
 const worktreePath = process.argv[2] ?? process.cwd();
-// plan 67 T3: runReview resolves { envelope, recheck } — the smoke captures
+// runReview resolves { envelope, recheck } — the smoke captures
 // the envelope only (the optional recheck document rides its own file).
 const { envelope } = await ompAgentRuntime.runReview({
   level: "quick",

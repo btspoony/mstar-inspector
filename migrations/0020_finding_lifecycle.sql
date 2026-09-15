@@ -1,5 +1,5 @@
 -- 0020_finding_lifecycle.sql — finding lifecycle, publication journal and
--- resolution queue (plan 67 Task 1, spec review-lifecycle §7.1).
+-- resolution queue (spec review-lifecycle §7.1).
 --
 -- Four append-only tables backing the private pre-publication journal and
 -- the durable finding lifecycle:
@@ -17,7 +17,7 @@
 -- The DDL below is copied verbatim from spec §7.1 — the spec stays the
 -- single normative copy (plan convention: DDL single source; the migration
 -- file is the executable form, edits go through the spec first). The
--- `idx_publication_scope` index was added by the plan-67 QC follow-up
+-- `idx_publication_scope` index was added by the QC follow-up
 -- (P67-QC-019) and is mirrored in the spec in the same change.
 --
 -- Conventions (spec §7.0): timestamps are integer Unix milliseconds from
@@ -26,7 +26,7 @@
 -- authenticated scope on every row. No ON DELETE clauses — the default NO
 -- ACTION makes hard deletes of referenced rows impossible at the schema
 -- level (the 0004 precedent). Must apply AFTER 0004 (github_apps must
--- exist for the FKs); plan 68's review_checks (spec §7.1 second block) is
+-- exist for the FKs); the review_checks DDL (spec §7.1 second block) is
 -- migration 0021 and is deliberately NOT in this file.
 
 CREATE TABLE review_publications (

@@ -1,5 +1,5 @@
 /**
- * `scripts/prepare-release.ts` unit tests (plan 50 T2.1 / D3 / D11).
+ * `scripts/prepare-release.ts` unit tests (D3 / D11).
  *
  * Pins the release-prepare contract against throwaway repo layouts:
  *
@@ -211,7 +211,7 @@ describe("prepareRelease (end to end on a temp repo)", () => {
       const pkg = (await Bun.file(join(root, "package.json")).json()) as { version: string };
       expect(pkg.version).toBe("1.0.0");
 
-      // plan 51 D4: prepare bumps BOTH surfaces from the one VERSION_SURFACES
+      // prepare bumps BOTH surfaces from the one VERSION_SURFACES
       // list — src/version.ts is regenerated at the new version.
       const versionTs = await Bun.file(join(root, "src", "version.ts")).text();
       expect(versionTs).toBe(renderVersionTs("1.0.0"));

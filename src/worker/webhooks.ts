@@ -7,7 +7,7 @@
  * Every reject path logs a structured warning (no secret material) so the
  * operator can spot bad configurations / probes (Phase 5 B6).
  *
- * Event whitelist (compass S4 / plan Clarify 3):
+ * Event whitelist (compass S4):
  * - `pull_request.{opened,synchronize,reopened}`
  * - `issue_comment.created` whose body is EXACTLY `/review` or starts with
  *   `/review ` (case-sensitive; `/reviewing` must not trigger), on a pull
@@ -30,7 +30,7 @@ export const PULL_REQUEST_ACTIONS = ["opened", "synchronize", "reopened"] as con
 export const WEBHOOK_BODY_LIMIT = 1_000_000;
 
 /**
- * Module-level verifier cache (QC F-005; plan 15 hardening item 1 /
+ * Module-level verifier cache (QC F-005; the hardening item /
  * architect lock L1): the hot path constructed a `Webhooks` instance per
  * request only to call `verify`, which uses nothing but `options.secret`.
  * KEYED BY CACHEKEY, NOT the raw secret: each entry is `{ secret, webhooks }`
@@ -46,7 +46,7 @@ export const WEBHOOK_BODY_LIMIT = 1_000_000;
  * never be hit again. `getWebhooks` stays exported as a test seam to lock
  * the reuse and rotation-replace behavior; the worker always passes an
  * explicit cacheKey, and direct callers that omit it fall back to the
- * pre-plan-15 secret-keyed memoization.
+ * legacy secret-keyed memoization.
  */
 type VerifierCacheEntry = { secret: string; webhooks: Webhooks };
 
@@ -73,7 +73,7 @@ export function getWebhooks(cacheKey: string, secret: string): Webhooks {
  * `node` condition → `timingSafeEqual` → returns false. Both must fail
  * closed with 401; this wrapper unifies the two paths and logs the
  * malformed input structurally so the operator can spot it. `event` is the
- * real GitHub event when the caller knows it (plan 15 log hygiene) — the
+ * real GitHub event when the caller knows it (log hygiene) — the
  * warn falls back to a stage label, never the literal "unknown".
  */
 export async function verifySignature(
@@ -96,8 +96,8 @@ export async function verifySignature(
 }
 
 /**
- * Classifier outcome. The `job` payload NEVER carries `appRef` (plan 24 Task
- * 1, AL-24-2/4): the classifier is secret-parameterized only and never sees
+ * Classifier outcome. The `job` payload NEVER carries `appRef`
+ * (AL-24-2/4): the classifier is secret-parameterized only and never sees
  * the App identity — the ONLY production attach point is the per-App
  * `POST /webhook/:appSlug` route, which adds `appRef: { appId }` after
  * classification, before enqueue.
@@ -155,7 +155,7 @@ const issueCommentSchema = z.object({
  * path emits a structured warning with a machine reason and NO secret
  * material (Phase 5 B6).
  *
- * Emergency brake (plan 31 AC4a): `reviewEnabled` is the computed
+ * Emergency brake (AC4a): `reviewEnabled` is the computed
  * REVIEW_ENABLED state (`!== "false"` — the env is an emergency brake only;
  * per-App `github_apps.review_enabled` is the primary control). When the
  * brake is pulled (exact "false"), EVERY webhook is classified as `ignore`
@@ -164,14 +164,14 @@ const issueCommentSchema = z.object({
  * `log` is optional (defaults to no logging) so the pure classifier stays
  * testable without a sink; the fetch entry passes `defaultLog`.
  *
- * `cacheKey` (plan 15 hardening item 1 / architect lock L1) is a
+ * `cacheKey` (the hardening item / architect lock L1) is a
  * MEMOIZATION-ONLY parameter for the verifier cache — a per-App route
  * passes its `github_apps.id`; the classifier NEVER branches on it (same
  * secret + same payload classifies identically whichever key rides along).
- * Omitted → the verifier memoizes under the secret itself (the pre-plan-15
+ * Omitted → the verifier memoizes under the secret itself (the legacy
  * shape, for direct callers).
  *
- * Warn labels (plan 15 log hygiene 硬化项 3): every structured warn carries
+ * Warn labels (log hygiene hardening item 3): every structured warn carries
  * the REAL GitHub event in `event` when the header is present, falling back
  * to the stage label (= the machine `reason`) when the header is absent —
  * never the literal "unknown", so log consumers can filter by event alone.
@@ -225,7 +225,7 @@ export async function classifyWebhook(
 
 /**
  * Event whitelist → ReviewJobPayload. Returns `ignore` for everything else.
- * `reviewEnabled` is the computed REVIEW_ENABLED state (plan 31 AC4a): when
+ * `reviewEnabled` is the computed REVIEW_ENABLED state (AC4a): when
  * the emergency brake is pulled (exact "false"), every event is ignored
  * (HTTP 2xx, no queue enqueue).
  */
@@ -323,7 +323,7 @@ function classifyIssueComment(rawBody: string, log?: HandlerLog): WebhookOutcome
   if (actorLogin === null || (actorLogin !== authorLogin && actorLogin !== ownerLogin)) {
     log?.warn(
       {
-        // Plan 15 log hygiene: this warn is only reachable via
+        // Log hygiene: this warn is only reachable via
         // classifyEvent("issue_comment", …), so `event` carries the REAL
         // GitHub event — filterable, never the literal "unknown".
         event: "issue_comment",

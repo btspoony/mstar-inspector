@@ -1,4 +1,4 @@
-# mstar-inspector review sandbox image (plan 06 Task 2, review-runner containerization).
+# mstar-inspector review sandbox image (review-runner containerization).
 #
 # Version pinning (compass contracts E): base tag, Bun, gh, mstar-harness ref,
 # the mstar-harness CLI, and the omp SDK (via package.json/bun.lock) are all
@@ -10,7 +10,7 @@
 # every per-review models.yml) reference env var NAMES only (e.g. ARK_API_KEY)
 # — no key value is ever in the image or its build context.
 #
-# Outbound egress (architect verdict AL-4, plan 19 T2 — DOCUMENTED, NOT
+# Outbound egress (architect verdict AL-4 — DOCUMENTED, NOT
 # enforced): a REAL egress control surface exists but is deliberately NOT
 # activated. @cloudflare/sandbox 0.12.8's pinned dependency
 # @cloudflare/containers 0.3.7 (bun.lock) ships an egress face on the
@@ -29,10 +29,10 @@
 # (provider-host SSOT + staging verification). No fake controls are installed
 # here — documentation only.
 #
-# Runtime provisioning (plan 06 T2 + plan 37 T3 — generic omp runtime, NO App
+# Runtime provisioning (generic omp runtime, NO App
 # model configuration):
 #   - mstar-harness plugin preinstalled at a pinned ref (build-time clone);
-#   - an EMPTY omp agent dir (PI_CODING_AGENT_DIR) — plan 37 deleted the baked
+#   - an EMPTY omp agent dir (PI_CODING_AGENT_DIR) — no baked
 #     in-image models.yml; the runner synthesizes the COMPLETE per-review
 #     models.yml (capability hosts + App custom providers) at execution time;
 #   - runner + omp SDK deps installed via `bun install --frozen-lockfile`.
@@ -57,7 +57,7 @@ RUN curl -fsSL https://github.com/cli/cli/releases/download/v2.98.0/gh_2.98.0_li
     && chmod +x /usr/local/bin/gh \
     && rm -rf /tmp/gh_2.98.0_linux_amd64 /tmp/gh.tar.gz
 
-# mstar-harness plugin, pinned ref 4c8fbb216c444df832b1943d68e4eee76261bbd2 (tag v3.8.1, plan 66 Task 1).
+# mstar-harness plugin, pinned ref 23d2c78c481e3571bf3e975886ace5f8c1f9f905 (tag v3.9.2, bumped 2026-09-14).
 # Choice: build-time shallow clone (NOT a git submodule, NOT COPY):
 #   - the harness is a separate PUBLIC repo — a submodule would couple this
 #     repo's git metadata to it and require submodule state inside the build
@@ -68,27 +68,27 @@ RUN curl -fsSL https://github.com/cli/cli/releases/download/v2.98.0/gh_2.98.0_li
 # .git is removed after checkout to keep the image lean.
 RUN git init /opt/mstar-harness \
     && git -C /opt/mstar-harness remote add origin https://github.com/btspoony/mstar-harness.git \
-    && git -C /opt/mstar-harness fetch --depth 1 origin 4c8fbb216c444df832b1943d68e4eee76261bbd2 \
+    && git -C /opt/mstar-harness fetch --depth 1 origin 23d2c78c481e3571bf3e975886ace5f8c1f9f905 \
     && git -C /opt/mstar-harness checkout FETCH_HEAD \
     && rm -rf /opt/mstar-harness/.git
 
-# mstar-harness CLI preinstall (plan 47 Task 2): CONTAINER-level availability
+# mstar-harness CLI preinstall: CONTAINER-level availability
 # per user instruction (2026-09-06) — NOT a review-session mechanism. Review
 # sessions are restricted to read-only read/grep/glob
 # (src/review/runtime-omp.ts REVIEW_TOOL_NAMES), so review-session toolcalls
 # canNOT invoke the `mstar` CLI today; absent a wired invocation path, review
 # behavior is unchanged (legacy, non-CLI). Wiring a sanctioned session
-# toolcall path is a tracked follow-up (plan 47 roadmap) — no such mechanism
-# exists in this image. Exact pin `@mstar-harness/cli@3.8.1`: image pinning
-# discipline — the repo manifest `^3.8.1` exception does NOT extend to the
+# toolcall path is a tracked follow-up — no such mechanism
+# exists in this image. Exact pin `@mstar-harness/cli@3.9.2`: image pinning
+# discipline — the repo manifest `^3.9.2` exception does NOT extend to the
 # image. The CLI dist ships `#!/usr/bin/env bun` (verified) and the Bun 1.4.0
 # installed above executes it directly, so no node is added. The global bin
 # dir is put on PATH so sandbox exec resolves the `mstar` shim.
-RUN bun add --global @mstar-harness/cli@3.8.1
+RUN bun add --global @mstar-harness/cli@3.9.2
 ENV PATH="/root/.bun/bin:${PATH}"
 
-# omp agent dir: PI_CODING_AGENT_DIR points at an EMPTY directory (plan 37 —
-# no baked models.yml is an App-configuration artifact). The in-image runner
+# omp agent dir: PI_CODING_AGENT_DIR points at an EMPTY directory (no baked
+# models.yml is an App-configuration artifact). The in-image runner
 # (src/review/runner.ts) synthesizes the COMPLETE per-review models.yml under
 # /tmp/omp-agent-<uuid>/ (capability hosts from the App's selected registry
 # entry, src/contracts/sandbox-images.ts, + App custom providers) and rides
@@ -110,7 +110,7 @@ RUN bun install --frozen-lockfile --production \
           node_modules/onnxruntime-web node_modules/sharp node_modules/@img \
     && rm -rf /root/.bun/install/cache
 COPY src/review /opt/runner/src/review
-# Zero-runtime-dependency wire contract (plan 67 Task 3, PM amendment
+# Zero-runtime-dependency wire contract (PM amendment
 # 2026-09-13; narrowed in QC wave B): the recheck seat runtime-imports the §7.3
 # wire module and NOTHING else, so exactly that ONE file is copied — not the
 # directory. src/pipeline, src/store and every other workerd face stay out, and
@@ -122,7 +122,7 @@ COPY src/contracts/recheck.ts /opt/runner/src/contracts/recheck.ts
 # The runner resolves the harness root from this env (plan Clarify #5). Model
 # key (ARK_API_KEY) is injected per exec — never baked into the image.
 ENV HARNESS_PLUGIN_ROOT=/opt/mstar-harness
-# U-001 in-image models.yml synthesis verification (plan 25 Task 2, AL-25-3):
+# U-001 in-image models.yml synthesis verification (AL-25-3):
 # the script ships inside the image so the evidence replays on the exact
 # digest being verified. Not a build gate — run manually in a container:
 #   docker run --rm --entrypoint /opt/verify-synthesis.sh <image>

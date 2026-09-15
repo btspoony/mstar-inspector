@@ -9,7 +9,7 @@ applies_when:
   - "Designing finding/fingerprint identity across PRs or review rounds"
   - "Any identity/hash field that consumes model-controlled text"
   - "Deduplicating LLM review output stored in D1"
-plan_id: 21-fingerprint-dedup
+topic: finding fingerprint dedup
 tags:
   - fingerprint
   - dedup
@@ -23,7 +23,7 @@ tags:
 
 ## Context (设计共识)
 
-`findings.fingerprint`（migrations/0001）在 v0.8 前是「裸 hint 透传」列：唯一写入点落 `fingerprint_hint ?? null`（模型自报、optional → 多数 NULL），无索引消费。v0.8（plan 21）把它升级为跨 round/跨 PR 的稳定身份。四条 architect 锁（AL-21-1/21-2）+ 一个 QC 深审发现（REDACTED 塌缩）构成完整设计。
+`findings.fingerprint`（migrations/0001）在 v0.8 前是「裸 hint 透传」列：唯一写入点落 `fingerprint_hint ?? null`（模型自报、optional → 多数 NULL），无索引消费。v0.8 把它升级为跨 round/跨 PR 的稳定身份。四条 architect 锁（AL-21-1/21-2）+ 一个 QC 深审发现（REDACTED 塌缩）构成完整设计。
 
 ## Guidance（锁点清单）
 
@@ -48,4 +48,4 @@ tags:
 
 - 实现：`src/store/fingerprint.ts`（纯函数、零 import）+ `artifact-store.ts` put/previousRoundFingerpoints/recurrenceByFingerprint
 - 测试 pin 形状：`tests/store/fingerprint.test.ts`（golden 向量 `c3f136c3fe89ebbb`、REDACTED 双 finding 不等、CJK 标点）
-- QC 交互发现全文：v0.8 `{SDD_DIR}/21-fingerprint-dedup/review/qc2.md` F-001
+- QC 交互发现全文：v0.8 第二席 QC 深审 F-001

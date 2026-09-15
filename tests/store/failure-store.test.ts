@@ -1,11 +1,11 @@
 /**
- * Failure-store tests (plan 18 Task 2 / architect AL-1 + AL-6) — the
+ * Failure-store tests (architect AL-1 + AL-6) — the
  * `review_failures` leaf (src/store/failure-store.ts) over the REAL
  * migration DDL (bun:sqlite D1 double, tests/store/helpers.ts).
  *
  * The store is an append-only event log: record (create) + listRecent
  * (read) are the only faces — update/delete do not exist by design
- * (audit-log semantics: the plan-19 sweep counts rows, it never mutates
+ * (audit-log semantics: the sweep counts rows, it never mutates
  * them). The best-effort contract lives at the consumer call sites; the
  * store itself fails loud.
  */

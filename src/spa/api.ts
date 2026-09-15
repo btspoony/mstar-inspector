@@ -1,7 +1,7 @@
 import { SPA_POST_FORM_HEADER, SPA_POST_FORM_VALUE } from "./post-form-headers";
 
 /**
- * Same-origin JSON fetch for SPA pages (plan 29 T4).
+ * Same-origin JSON fetch for SPA pages.
  *
  * `redirect: "manual"` so a 302 to login is visible (the session cookie is
  * HttpOnly; the client cannot detect expiry except through the API).

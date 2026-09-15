@@ -1,5 +1,5 @@
 /*
- * shadcn/ui theme bridge (plan 33 T1a; v0.3 brand re-point plan 57 T3).
+ * shadcn/ui theme bridge (with the v0.3 brand re-point).
  * Semantic CSS variables map to DESIGN.md / tokens.css names (tokens.css is read-only).
  * Theme resolves via tokens.css — light on :root[data-theme="light"] or OS light (:root:not([data-theme="dark"])); values flow through the var chain unchanged.
  */
@@ -12,7 +12,7 @@
   --card-foreground: var(--card-fg);
   --popover: var(--background-200);
   --popover-foreground: var(--gray-1000);
-  /* v0.3 brand re-point (plan 57 T3, AD-573): the primary action fill is
+  /* v0.3 brand re-point (AD-573): the primary action fill is
      Signal Cyan (--brand-700); hover/active hold the 800 step (dark brightens,
      light deepens — DESIGN.md Appendix B). --destructive-hover mirrors the
      step so danger buttons stay symmetric. */
@@ -38,8 +38,8 @@
 
   --sidebar: var(--sidebar-bg);
   --sidebar-foreground: var(--sidebar-fg);
-  /* Brand re-point per the plan 57 T3 staged checklist; the sidebar active
-     tint derives through this bridge (plan 64 AD-641, DESIGN.md Sidebar). */
+  /* Brand re-point per the staged checklist; the sidebar active
+     tint derives through this bridge (AD-641, DESIGN.md Sidebar). */
   --sidebar-primary: var(--brand-700);
   --sidebar-primary-foreground: var(--background-100);
   --sidebar-accent: var(--sidebar-active-bg);
@@ -85,7 +85,7 @@
   --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
   --color-sidebar-border: var(--sidebar-border);
   --color-sidebar-ring: var(--sidebar-ring);
-  /* Radius = the AD-574 two-tier system (plan 57 T3): control tier 8px,
+  /* Radius = the AD-574 two-tier system: control tier 8px,
      container tier 12px. lg/xl collapse onto the container step so copy-in
      rounded-xl card faces land on the container tier with zero hand edits;
      --rounded-lg (16px) remains declared in tokens.css as a legacy value. */

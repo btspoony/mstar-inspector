@@ -9,7 +9,7 @@ applies_when:
   - "wrangler (d1 execute / deploy / secret) fails with Cloudflare API error 7403 'The given account is not valid or is not authorized'"
   - "Cloudflare operations work for one teammate/machine but fail from another checkout"
   - "Auditing which Cloudflare account a Worker/D1 actually lives in before deploy"
-plan_id: 24-legacy-webhook-retirement
+topic: legacy webhook retirement
 tags:
   - cloudflare
   - wrangler

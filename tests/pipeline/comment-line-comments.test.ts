@@ -1,5 +1,5 @@
 /**
- * Line-comments tests (plan 18 Task 3 / architect AL-3, layered delivery):
+ * Line-comments tests (architect AL-3, layered delivery):
  *   - parseDiffHunkRanges: multi-file diffs, renames (b-side path), binary /
  *     deleted files, omitted hunk counts, context ranges, and hunk-body
  *     content lines that masquerade as `+++ ` file headers
@@ -316,7 +316,7 @@ function mockPullsOctok(options: {
   return { calls, octokit };
 }
 
-describe("postLineCommentsWithOctokit (intent-prepared request-body pin, plan 67 §7.7 step 10)", () => {
+describe("postLineCommentsWithOctokit (intent-prepared request-body pin, §7.7 step 10)", () => {
   const PUBLICATION = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee";
   const intents = [
     {

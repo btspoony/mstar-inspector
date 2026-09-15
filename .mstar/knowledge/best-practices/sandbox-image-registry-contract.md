@@ -8,7 +8,7 @@ applies_when:
   - "Adding or changing a sandbox runtime image for review execution"
   - "Wiring App-selected runtime configuration into the review pipeline"
   - "Deciding what may be baked into a container image vs synthesized at runtime"
-plan_id: 37-sandbox-image-registry
+topic: sandbox image registry
 tags:
   - sandbox-image
   - registry
@@ -22,7 +22,7 @@ tags:
 
 ## Context
 
-Iteration 012-dashboard-sandbox (plan 37) 把 sandbox 运行时从「omp 专属 + 烤制 models.yml」改成 **App 选择的镜像 registry**：`github_apps.sandbox_image_id` 持久化选择、`src/contracts/sandbox-images.ts` 是零依赖 registry SSOT（dashboard Q2 不能 import `src/review`/`src/pipeline`）、部署仍只有一个 Cloudflare `Sandbox` container class（omp 镜像）。Future runtimes（Pi/AI SDK 等）按本契约扩展，不再改 omp 专属逻辑。
+2026-09-04 落地的 sandbox 镜像 registry 改造把 sandbox 运行时从「omp 专属 + 烤制 models.yml」改成 **App 选择的镜像 registry**：`github_apps.sandbox_image_id` 持久化选择、`src/contracts/sandbox-images.ts` 是零依赖 registry SSOT（dashboard Q2 不能 import `src/review`/`src/pipeline`）、部署仍只有一个 Cloudflare `Sandbox` container class（omp 镜像）。Future runtimes（Pi/AI SDK 等）按本契约扩展，不再改 omp 专属逻辑。
 
 ## Guidance
 
@@ -50,4 +50,4 @@ Iteration 012-dashboard-sandbox (plan 37) 把 sandbox 运行时从「omp 专属 
 
 ## Promoted to
 
-Source: `iteration:012-dashboard-sandbox/specs/dashboard-sandbox-configuration.md`（Runtime-image contract §§；结构化重写，非整文复制）
+Source: dashboard 沙箱配置专项的 runtime-image contract §§（结构化重写，非整文复制；原 spec 过程本地存档，未入库）

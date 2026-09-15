@@ -1,10 +1,10 @@
 /**
- * i18n module public face (plan 29 T2).
+ * i18n module public face.
  *
  * The single string table for the whole dashboard: en.ts is the source of
  * truth, zh-CN.ts is type-checked against it, resolve.ts owns the locale
  * decision chain + mstar_locale cookie, t.ts is the isomorphic lookup, and
- * nav.ts is the shared navbar contract for Task 3's Layout.
+ * nav.ts is the shared navbar contract used by the Layout.
  */
 export { en, type Dictionary } from "./en";
 export { zhCN } from "./zh-CN";

@@ -1,5 +1,5 @@
 /**
- * Bounded recheck model seat (plan 67 Task 3, spec review-lifecycle §7.8) —
+ * Bounded recheck model seat (spec review-lifecycle §7.8) —
  * the concurrent side channel that reassesses previously published findings
  * while the normal review seats run, without touching the mstar.review/v1
  * envelope, the seat prompts, or the deep parent's yield stream.
@@ -117,7 +117,7 @@ const OUTER_RUNNER_CAP_MS: Record<ReviewLevel, number> = {
 let anchoredDeadlineMs: number | undefined;
 
 /**
- * Anchor the ABSOLUTE outer review deadline for this process (plan 67 T3):
+ * Anchor the ABSOLUTE outer review deadline for this process:
  * the runner calls this ONCE per process at start (`startMs` = process
  * start, `level` = review tier). The recheck seat's budget is derived from
  * this deadline, so the seat can never outlive — or restart past — the
@@ -152,7 +152,7 @@ export function recheckBudget(outerDeadlineMs: number, nowMs: number): number {
 }
 
 /**
- * The recheck seat's assignment (plan 67 T3, spec §7.8): the input document
+ * The recheck seat's assignment (spec §7.8): the input document
  * rides verbatim — targets carry the ORIGINAL published concern body and the
  * trusted evidence catalog; the discussion section is explicitly labelled
  * UNTRUSTED with its three-valued coverage (complete | truncated |
@@ -231,7 +231,7 @@ function recheckStructuredData(result: Awaited<ReturnType<typeof runStructuredSu
 }
 
 /**
- * Run the bounded recheck seat (plan 67 T3, spec §7.8) against `session` —
+ * Run the bounded recheck seat (spec §7.8) against `session` —
  * the caller owns concurrency (started alongside the review work, aborted
  * via `signal` when the normal review settles) and this function NEVER
  * throws: any failure/timeout/invalid payload logs one structured stderr

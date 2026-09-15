@@ -8,10 +8,10 @@ applies_when:
   - "Settings/dashboard SPA pages where mutations trigger a data refetch"
   - "Any SPA page with a global loading gate that swaps the whole view"
   - "Designing form flows that must survive a failed verification"
-plan_id: 38-provider-configuration-flow
+topic: provider configuration flow
 related_components:
-  - "39-app-detail-model-chains (contract reused by chain/seat ops)"
-  - "40-apps-default-polish (delete branch reload:false exception)"
+  - "app detail model chains (contract reused by chain/seat ops)"
+  - "apps default polish (delete branch reload:false exception)"
 tags:
   - spa
   - react
@@ -25,7 +25,7 @@ tags:
 
 ## Context
 
-`SettingsPage` 是多卡片配置面（runtime image、configured providers、chain tabs、seats、ops）。每个 op（verify key、save chain、save roles、remove、delete）成功/失败后都要 refetch。plan 38 曾把「失败后保留已输入 key 与打开的 Add 面板」写成契约，但 `load()` 每次 refetch 都把 `state` 翻成 `"loading"`，而视图只在 `"ok"` 渲染——**每次 op 后整棵卡片树被卸载**：面板关闭、输入丢失、success 回调落在已卸载实例上（静默 no-op）。失败看起来"还行"只是因为 remount 恰好复位。QC Warning 抓到后修复为 background reload 契约（plan 39/40 沿用）。
+`SettingsPage` 是多卡片配置面（runtime image、configured providers、chain tabs、seats、ops）。每个 op（verify key、save chain、save roles、remove、delete）成功/失败后都要 refetch。provider 配置流迭代曾把「失败后保留已输入 key 与打开的 Add 面板」写成契约，但 `load()` 每次 refetch 都把 `state` 翻成 `"loading"`，而视图只在 `"ok"` 渲染——**每次 op 后整棵卡片树被卸载**：面板关闭、输入丢失、success 回调落在已卸载实例上（静默 no-op）。失败看起来"还行"只是因为 remount 恰好复位。QC Warning 抓到后修复为 background reload 契约（后续 app detail / apps polish 迭代沿用）。
 
 ## Guidance
 
@@ -52,9 +52,9 @@ tags:
 - 已知 accepted 限制：spaClick 双副本待合并；post-delete 页面上继续操作会看到 raw "unknown app"（预存模式）
 
 
-## State-trio era extension (iteration 018, 2026-09-10)
+## State-trio era extension (2026-09-10)
 
-With the plan-57 composed state patterns (`PageSkeleton`/`EmptyState`/`ErrorState`), the contract generalizes: **only foreground loads may gate the page-level skeleton**. Canonical pattern (SettingsPage precedent, mirrored by MembersPage/InsightsPage after plan-58 QC W-1):
+With the design-language composed state patterns (`PageSkeleton`/`EmptyState`/`ErrorState`), the contract generalizes: **only foreground loads may gate the page-level skeleton**. Canonical pattern (SettingsPage precedent, mirrored by MembersPage/InsightsPage after a later QC round, W-1):
 
 - `load({ background = false } = {})`; `if (!background) setState("loading")` is the ONLY path into the skeleton gate.
 - Op-triggered refetches (invite/role/remove, verify, settings saves) reload with `{ background: true }` — page stays mounted, outcomes ride the PageNotice/notice channel.

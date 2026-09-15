@@ -10,7 +10,7 @@ symptoms:
   - "Tests pass and typecheck is clean because no CSS/DOM assertion covers visibility of inactive panels"
 root_cause: "Radix TabsContent renders hidden via Presence (hidden: !present); forceMount pins present=true, so `hidden` is never applied — and the repo had no data-[state=inactive] hiding CSS. In-active-panel hiding must be supplied by the consumer when forceMount is used."
 resolution_type: code_fix
-plan_id: 39-app-detail-model-chains
+topic: app detail model chains
 tags:
   - radix
   - tabs
@@ -24,7 +24,7 @@ tags:
 
 ## Problem
 
-Plan 39 wanted chain editors to stay mounted across tab switches (preserve in-progress edits) while showing exactly one panel. Adding `forceMount` to every `TabsContent` kept editors mounted — but also kept them **visible**: the "peer tabs" UI rendered as the old stacked list with a broken tab strip on top. Plan Done criterion 1 was unmet even though the suite was green.
+The app detail model-chains pass wanted chain editors to stay mounted across tab switches (preserve in-progress edits) while showing exactly one panel. Adding `forceMount` to every `TabsContent` kept editors mounted — but also kept them **visible**: the "peer tabs" UI rendered as the old stacked list with a broken tab strip on top. Its Done criterion 1 was unmet even though the suite was green.
 
 ## Symptoms
 

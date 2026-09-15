@@ -1,6 +1,6 @@
 /**
- * AES-256-GCM secretbox for D1-stored dashboard secrets (plan 13 B5 Task 1;
- * plan 14 B2 reuses it for per-App provider keys). Spec
+ * AES-256-GCM secretbox for D1-stored dashboard secrets (also reused for
+ * per-App provider keys). Spec
  * dashboard-multi-app-platform § Crypto envelope, architect lock L1.
  *
  * Envelope: `v1.<keyId>.<iv_b64>.<ct_b64>`
@@ -12,7 +12,7 @@
  *     16B GCM tag encoded together, never split.
  *   - keyId is constant "primary" in v1; decrypt on an unknown keyId →
  *     SecretboxKeyError (rotation is reserved via keyId, not implemented
- *     this iteration).
+ *     for now).
  *
  * Master key: the DASHBOARD_ENCRYPTION_KEY Worker secret, base64 of EXACTLY
  * 32 bytes (AES-256). Validation is lazy (first use) and the imported
@@ -23,7 +23,7 @@
  * precedent as the B0 session cookie key).
  *
  * AAD: caller-supplied `<table>.<column>:<rowKey>` string (composite keys
- * join with `:`, e.g. `<appId>:<provider>` for app_provider_keys, plan 14).
+ * join with `:`, e.g. `<appId>:<provider>` for app_provider_keys).
  * An AAD mismatch fails GCM tag verification → decrypt throws.
  *
  * Module boundary (lock L1): zero-dependency leaf — no imports at all — so

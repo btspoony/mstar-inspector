@@ -1,5 +1,5 @@
 /**
- * Plan 29 T4: SPA JSON faces for members / apps / settings.
+ * SPA JSON faces for members / apps / settings.
  * Same gates as the HTML pages; payloads never include encrypted columns.
  */
 import { describe, expect, test } from "bun:test";
@@ -89,7 +89,7 @@ async function get(path: string, login?: string, env?: Env): Promise<Response> {
   return worker.fetch(new Request(`https://worker.local${path}`, { headers }), env ?? makeEnv(await seededWorld()));
 }
 
-describe("GET /dashboard/api/members (plan 29 T4)", () => {
+describe("GET /dashboard/api/members", () => {
   test("admin 200, member 403, anon 302", async () => {
     const db = await seededWorld();
     const env = makeEnv(db);
@@ -113,7 +113,7 @@ describe("GET /dashboard/api/members (plan 29 T4)", () => {
   });
 });
 
-describe("GET /dashboard/api/apps (plan 29 T4)", () => {
+describe("GET /dashboard/api/apps", () => {
   test("member 200 JSON with health, never encrypted columns", async () => {
     const db = await seededWorld();
     const env = makeEnv(db);
@@ -134,7 +134,7 @@ describe("GET /dashboard/api/apps (plan 29 T4)", () => {
   });
 });
 
-describe("GET /dashboard/api/apps/:slug/settings (plan 29 T4)", () => {
+describe("GET /dashboard/api/apps/:slug/settings", () => {
   test("creator 200 can_manage; other member 200 can_manage false; unknown slug 404", async () => {
     const db = await seededWorld();
     const env = makeEnv(db);
@@ -152,7 +152,7 @@ describe("GET /dashboard/api/apps/:slug/settings (plan 29 T4)", () => {
     expect(body.app.slug).toBe("mstar-inspector-mallory");
     expect(body.app.review_enabled).toBe(true);
     expect(body.can_manage).toBe(true);
-    // Plan 38 clean cutover: the old `providers` catalog dump is gone; the
+    // clean cutover: the old `providers` catalog dump is gone; the
     // manage face splits persisted state from the discovery catalog.
     expect(body.providers).toBeUndefined();
     // Fresh world = the unconfigured-App case: persisted state is EMPTY while
@@ -168,7 +168,7 @@ describe("GET /dashboard/api/apps/:slug/settings (plan 29 T4)", () => {
     // omp is the selected runtime image: zero rows are unavailable this
     // iteration, and omp itself is NOT a catalog entry.
     expect(body.provider_catalog!.some((p) => p.eligibility === "unavailable")).toBe(false);
-    // Plan 37: the selected image id defaults to omp, and the manage face
+    // the selected image id defaults to omp, and the manage face
     // carries the enabled-registry selector choices (ids only — never
     // image-local yaml or secrets).
     expect(body.app.sandbox_image_id).toBe("omp");
@@ -178,7 +178,7 @@ describe("GET /dashboard/api/apps/:slug/settings (plan 29 T4)", () => {
 
     const other = await get("/dashboard/api/apps/mstar-inspector-mallory/settings", "hubot", env);
     expect(other.status).toBe(200);
-    // Plan 35 T4 review: non-managers get base+health ONLY — no keys/chains/providers.
+    // review: non-managers get base+health ONLY — no keys/chains/providers.
     const otherBody = (await other.json()) as {
       can_manage: boolean;
       app: { slug: string; sandbox_image_id: string };
@@ -197,8 +197,8 @@ describe("GET /dashboard/api/apps/:slug/settings (plan 29 T4)", () => {
     expect(otherBody.app.slug).toBe("mstar-inspector-mallory");
     expect(otherBody.installations).toEqual([]);
     expect(otherBody.deliveries).toEqual([]);
-    // Plan 37: the read-only face keeps the selected image id but NOT the
-    // editor's choice list. Plan 38: neither settings zone rides it.
+    // the read-only face keeps the selected image id but NOT the
+    // editor's choice list. neither settings zone rides it.
     expect(otherBody.app.sandbox_image_id).toBe("omp");
     expect(otherBody.keys).toBeUndefined();
     expect(otherBody.configured_providers).toBeUndefined();
@@ -231,7 +231,7 @@ describe("GET /dashboard/api/apps/:slug/settings (plan 29 T4)", () => {
   });
 });
 
-describe("membership stays enforcing outside locale (plan 29 T4)", () => {
+describe("membership stays enforcing outside locale", () => {
   test("row-less session cannot read members or apps JSON", async () => {
     const env = makeEnv(await seededWorld());
     const headers = { Cookie: `${SESSION_COOKIE}=${await cookie("stranger")}`, Accept: "application/json" };
@@ -241,7 +241,7 @@ describe("membership stays enforcing outside locale (plan 29 T4)", () => {
     expect(apps.status).toBe(403);
   });
 
-  test("forbidden members HTML follows mstar_locale (plan 29 T6: the HTML GET is SPA-owned, so the 403 face is the API route)", async () => {
+  test("forbidden members HTML follows mstar_locale (the HTML GET is SPA-owned, so the 403 face is the API route)", async () => {
     const env = makeEnv(await seededWorld());
     const res = await worker.fetch(
       new Request("https://worker.local/dashboard/api/members", {

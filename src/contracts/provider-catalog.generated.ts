@@ -1,6 +1,5 @@
 /**
- * GENERATED FILE — provider catalog (plan 42 T1; originally plan 35 T3,
- * spec §5). DO NOT EDIT BY HAND — regenerate with
+ * GENERATED FILE — provider catalog (spec §5). DO NOT EDIT BY HAND — regenerate with
  * `bun run scripts/generate-provider-catalog.ts` and commit the result as
  * an explicit, reviewable regeneration commit.
  *
@@ -14,14 +13,14 @@
  * zero imports of any kind.
  *
  * Tiers: `builtin` = runner-consumable env-name entries (the per-App BYOK
- * allowlist, plan 24 / AL-24-5 — consumer.ts injects ONLY these env names
+ * allowlist, AL-24-5 — consumer.ts injects ONLY these env names
  * into the review container); `template` = metadata + prefill only,
  * materialized through the existing custom-provider machinery
  * (app_custom_providers) at save time (spec §5). The hand-curated
  * `workers-ai` template carries the {account_id} base-URL placeholder the
  * save flow substitutes.
  *
- * Display grouping (plan 54, AD-547): `PROVIDER_IDS_COMMON` is a
+ * Display grouping (AD-547): `PROVIDER_IDS_COMMON` is a
  * DISPLAY-ONLY regroup of the settings picker (常用 providers first, the
  * rest under the 目录模板 group). It carries ZERO runner semantics — the
  * runner BYOK allowlist remains `PROVIDER_IDS_BUILTIN` /
@@ -4479,7 +4478,7 @@ export const PROVIDER_CATALOG: Record<string, ProviderCatalogEntry> = {
 };
 
 /** The builtin tier ids in exact mapping order (the dashboard's PROVIDER_IDS
- *  allowlist sequence — plan 24 / AL-24-5, `ark` last). */
+ *  allowlist sequence — AL-24-5, `ark` last). */
 export const PROVIDER_IDS_BUILTIN: readonly string[] = Object.freeze([
   "anthropic",
   "openai",
@@ -4502,7 +4501,7 @@ export const PROVIDER_IDS_BUILTIN: readonly string[] = Object.freeze([
   "ark"
 ]);
 
-/** Display-only grouping of the settings picker (plan 54, AD-547): the 常用
+/** Display-only grouping of the settings picker (AD-547): the 常用
  *  tier shown first in the Add-provider picker — a frozen subset of
  *  PROVIDER_IDS_BUILTIN in exactly this order. ZERO runner semantics: the
  *  runner BYOK allowlist remains PROVIDER_IDS_BUILTIN / PROVIDER_ENV_NAMES. */

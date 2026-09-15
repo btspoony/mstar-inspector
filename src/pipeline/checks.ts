@@ -1,15 +1,15 @@
 /**
- * GitHub Checks adapter (plan 68 Task 1, spec review-lifecycle §7.9).
+ * GitHub Checks adapter (spec review-lifecycle §7.9).
  *
  * One advisory Check per review attempt: created `in_progress` at the
  * authoritative head SHA and terminalized from PERSISTED publication proof.
  * The adapter is the only place a Check HTTP request is built, and it builds no
  * credential: the client comes from `src/pipeline/comment.ts`'s single per-App
  * `createAppAuth` path through the SAME purpose-scoped `review-write` octokit
- * (spec §7.6 — plan 68 adds `checks: "write"` to that one permission set; there
+ * (spec §7.6 — the `checks: "write"` grant rides that one permission set; there
  * is no second token, client or auth object).
  *
- * Contract boundaries the rest of the plan depends on:
+ * Contract boundaries the rest of the pipeline depends on:
  *
  *   - `beginCheck` sends `name`, `head_sha`, `external_id` and a status, and
  *     NEVER `details_url` (spec §7.9: "omit details_url entirely" — there is no
@@ -369,7 +369,7 @@ async function beginCheckWith(
   // snapshot authorised the decision, not the send itself (spec §7.9).
   if (!(await stillLive(deps, identity, input.lease))) {
     // Nothing was invoked, so the `sending` mark above now MISSTATES the row
-    // (T2 `requests: 0`). Undo it under an identity fence — this is exactly the
+    // (`requests: 0`). Undo it under an identity fence — this is exactly the
     // path where a liveness fence would be false — so the attempt does not sit
     // in the RL-12 adopt-only state with no request behind it. A lost race
     // leaves `sending` in place, which stays conservative: recovery then adopts
@@ -820,7 +820,7 @@ function boundedReason(reason: string | undefined): string {
 }
 
 // ---------------------------------------------------------------------------
-// Lifecycle seam implementation (plan 68 Task 2, spec §7.10 hooks / §7.7 4+12)
+// Lifecycle seam implementation (spec §7.10 hooks / §7.7 4+12)
 // ---------------------------------------------------------------------------
 
 /**
@@ -909,7 +909,7 @@ export type CheckLifecycle = {
 };
 
 /**
- * The production §7.10 lifecycle (plan 68 Task 2).
+ * The production §7.10 lifecycle.
  *
  * `begin` maps the seam input onto a FENCED attempt: an ineligible App (no
  * Checks surface) registers nothing, `claimAttempt` is the one race-decided

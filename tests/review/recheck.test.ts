@@ -1,5 +1,5 @@
 /**
- * Unit tests for the bounded recheck seat module (plan 67 Task 3, spec
+ * Unit tests for the bounded recheck seat module (spec
  * review-lifecycle §7.8). Pure functions only — the seat's SDK interaction
  * is covered through the mocked omp runtime in runtime-omp.test.ts (bun's
  * mock.module registry is process-global, so this file deliberately does

@@ -1,5 +1,5 @@
 /**
- * Typed recheck wire format + fail-closed validator (plan 67 Task 1, spec
+ * Typed recheck wire format + fail-closed validator (spec
  * review-lifecycle §7.3). ZERO-RUNTIME-DEPENDENCY shared wire module —
  * type-only imports permitted, no value imports, no IO, no clock: the same
  * module is safe on the worker, in the sandbox runner, and in bun tests.

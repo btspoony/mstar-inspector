@@ -1,5 +1,5 @@
 /**
- * `scripts/collect-deploy-evidence.ts` unit tests (plan 52 T1 / D1 / D3).
+ * `scripts/collect-deploy-evidence.ts` unit tests (D1 / D3).
  *
  * The GH-touching layer is injected (`GhRunner` + fake clock/sleep), so the
  * wait/match/timeout decision logic is pinned without `gh`, network, or real
@@ -7,7 +7,7 @@
  * instantaneous, so a 90 s window at 30 s interval deterministically polls
  * at t=0,30,60,90 (4 polls, 3 sleeps).
  *
- * Branch matrix (plan 52 §Clarify / AC1):
+ * Branch matrix (AC1):
  * - success: run concludes success -> artifact read -> Worker Version ID +
  *   image digest + run link (bare id without the GitHub env pair);
  * - deploy-failed: explicit failed section with conclusion + run link;

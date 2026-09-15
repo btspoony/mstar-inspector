@@ -48,7 +48,7 @@ export function AppsPage({ boot }: { boot: SpaBoot }) {
     };
   }, []);
 
-  // Loading rides the plan-57 skeleton as the page's full loading face —
+  // Loading rides the shared skeleton as the page's full loading face —
   // the component's heading placeholder stands in for the real h1 (AD-582).
   if (state === "loading") {
     return <PageSkeleton locale={locale} kind="table" />;

@@ -4,7 +4,7 @@ date: 2026-09-08
 problem_type: ui_bug
 category: ui-bugs
 severity: medium
-plan_id: 56-insights-charts
+topic: insights charts
 tags:
   - svg
   - css-vars
@@ -28,7 +28,7 @@ resolution_type: code_fix
 
 ## Problem
 
-Plan 56's first chart implementation set token colors as SVG presentation attributes: `fill="var(--red-700)"`. QC flagged the mechanism: putting `var()` inside presentation attributes is not a sanctioned combination (open SVG working group issue; SVG 2 notes presentation attributes are parsed as SVG values, not CSS declarations, with documented black-fill fallbacks — and some engines reject `var()` in attribute-value contexts outright). Failure face: bars/text silently render black or invisible in the dark theme — exactly the face the SSR string pins could not catch, because the markup *string* looks correct either way.
+The insights charts' first implementation set token colors as SVG presentation attributes: `fill="var(--red-700)"`. QC flagged the mechanism: putting `var()` inside presentation attributes is not a sanctioned combination (open SVG working group issue; SVG 2 notes presentation attributes are parsed as SVG values, not CSS declarations, with documented black-fill fallbacks — and some engines reject `var()` in attribute-value contexts outright). Failure face: bars/text silently render black or invisible in the dark theme — exactly the face the SSR string pins could not catch, because the markup *string* looks correct either way.
 
 ## Symptoms
 
@@ -55,8 +55,8 @@ Style attributes are parsed as CSS declarations, where custom-property substitut
 ## Prevention
 
 - Any new SVG code that colors from DESIGN.md tokens uses style props for `fill`/`stroke`/`color`; presentation-attribute `var()` is a review red flag.
-- The no-raw-hex source pin stays as the token-SSOT guard; consider a lint/pin forbidding `(fill|stroke)="var(` in `src/spa` (grep: zero matches is the current invariant, verified at plan-56 QA).
+- The no-raw-hex source pin stays as the token-SSOT guard; consider a lint/pin forbidding `(fill|stroke)="var(` in `src/spa` (grep: zero matches is the current invariant, verified at QA).
 
-## Update (2026-09-10, plan 63)
+## Update (2026-09-10)
 
 The remedy above (inline style props) covers **hand-authored** SVG. When a chart library emits `fill`/`stroke` as presentation attributes on your behalf (recharts serializes props via `filterProps` → attributes), you cannot inject style props per element — the remedy extends: **author CSS class rules beat presentation attributes in the cascade**, so route library elements through `className` and declare `.chart-* { fill: var(--token) }` in a stylesheet. Same root cause, second remedy face. Full pipeline (version line, probe idiom, pin discipline): `best-practices/spa-recharts-token-charts.md`.

@@ -1,5 +1,5 @@
 /**
- * Plan 45 T4: the SPA resolves server-emitted 400 message keys in the
+ * The SPA resolves server-emitted 400 message keys in the
  * operator's locale with a fail-visible fallback. Pins the shared key
  * validator, both-locale dictionary faces for the `settings.error.*`
  * family, and the source contract on both SettingsPage render paths
@@ -13,7 +13,7 @@ import { isDictionaryKey, t } from "../../src/i18n";
 
 const settingsPage = readFileSync(join(import.meta.dir, "../../src/spa/pages/SettingsPage.tsx"), "utf8");
 
-describe("isDictionaryKey (plan 45 T4)", () => {
+describe("isDictionaryKey", () => {
   test("known dictionary paths validate; unknown paths (newer server, stale client) do not", () => {
     expect(isDictionaryKey("settings.error.providerUnknown")).toBe(true);
     expect(isDictionaryKey("settings.membership.not_in_verified_models")).toBe(true);
@@ -27,7 +27,7 @@ describe("isDictionaryKey (plan 45 T4)", () => {
   });
 });
 
-describe("settings.error dictionary faces (plan 45 T4)", () => {
+describe("settings.error dictionary faces", () => {
   test("interpolated faces resolve with params in both locales", () => {
     expect(t("en", "settings.error.providerUnknown", { provider: "acme" })).toBe(
       "acme is not a supported provider — pick one from the list.",
@@ -41,7 +41,7 @@ describe("settings.error dictionary faces (plan 45 T4)", () => {
     expect(t("zh_CN", "settings.error.roleFieldsMissing", { roles: "a, b" })).toContain("席位字段缺失");
   });
 
-  test("the plan-42 Cloudflare slot and the CARRY-2 runtime-image copy exist in both locales", () => {
+  test("the Cloudflare slot and the CARRY-2 runtime-image copy exist in both locales", () => {
     expect(t("en", "settings.error.accountIdRequired")).toContain("Cloudflare account id");
     expect(t("zh_CN", "settings.error.accountIdRequired")).toContain("Cloudflare 账户 id");
     const image = "omp";
@@ -54,7 +54,7 @@ describe("settings.error dictionary faces (plan 45 T4)", () => {
   });
 });
 
-describe("SPA 400-body resolution contract (plan 45 T4)", () => {
+describe("SPA 400-body resolution contract", () => {
   test("settingsErrorMessage resolves a known key first; unknown keys fall through to the English face", () => {
     // The key-first branch (the audit's UI-45-03 fix).
     expect(settingsPage).toContain("isDictionaryKey(parsed.key)");
@@ -78,7 +78,7 @@ describe("SPA 400-body resolution contract (plan 45 T4)", () => {
 
   test("zh noConfiguredProviders copy drift (audit rejected-list note): zh references the Add Provider button like en", () => {
     expect(t("en", "settings.noConfiguredProviders")).toContain("use Add Provider");
-    // Plan 54: the zh button label unified on 模型提供方 (supersedes the
+    // The zh button label unified on 模型提供方 (supersedes the
     // 「添加 Provider」 pin).
     expect(t("zh_CN", "settings.noConfiguredProviders")).toContain("「添加模型提供方」");
     expect(t("zh_CN", "settings.noConfiguredProviders")).toContain("尚未配置");
