@@ -353,15 +353,34 @@ describe("POST /webhook/:appSlug (per-App routing)", () => {
     const env = makeEnv(db, { REVIEW_QUEUE: queue as never });
     const oversized = "a".repeat(WEBHOOK_BODY_LIMIT + 1);
 
-    const res = await postWebhook(
-      "/webhook/app-x",
-      oversized,
-      { "content-length": String(oversized.length), "x-github-event": "ping" },
-      env,
-    );
+    // Gate attribution: the detail pins the HEADER fast path (not the
+    // streamed read below) — without it a 413 alone cannot tell the two
+    // gates apart.
+    const warn = mock((_msg: unknown) => {});
+    const origWarn = console.warn;
+    console.warn = warn;
+    let res: Response;
+    try {
+      res = await postWebhook(
+        "/webhook/app-x",
+        oversized,
+        { "content-length": String(oversized.length), "x-github-event": "ping" },
+        env,
+      );
+    } finally {
+      console.warn = origWarn;
+    }
 
     expect(res.status).toBe(413);
     expect(sent).toHaveLength(0);
+    const line = warn.mock.calls.map((call) => String(call[0])).find((s) => s.includes("webhook_body_too_large"));
+    expect(line).toBeDefined();
+    const fields = JSON.parse(line!) as { event: string; reason: string; detail: string };
+    expect(fields).toMatchObject({
+      event: "webhook_body_too_large",
+      reason: "webhook_body_too_large",
+      detail: `content_length=${WEBHOOK_BODY_LIMIT + 1}`,
+    });
   });
 
   test("lying short content-length + oversized body → 413 (byte count, not the header), zero enqueue", async () => {
@@ -371,15 +390,34 @@ describe("POST /webhook/:appSlug (per-App routing)", () => {
     const env = makeEnv(db, { REVIEW_QUEUE: queue as never });
     const oversized = "a".repeat(WEBHOOK_BODY_LIMIT + 1);
 
-    const res = await postWebhook(
-      "/webhook/app-x",
-      oversized,
-      { "content-length": "10", "x-github-event": "ping" },
-      env,
-    );
+    // Gate attribution: the header (10) is under the limit, so the fast path
+    // cannot fire — the `read_bytes>` detail pins the STREAMED gate as the
+    // one that rejected (byte count, not the header).
+    const warn = mock((_msg: unknown) => {});
+    const origWarn = console.warn;
+    console.warn = warn;
+    let res: Response;
+    try {
+      res = await postWebhook(
+        "/webhook/app-x",
+        oversized,
+        { "content-length": "10", "x-github-event": "ping" },
+        env,
+      );
+    } finally {
+      console.warn = origWarn;
+    }
 
     expect(res.status).toBe(413);
     expect(sent).toHaveLength(0);
+    const line = warn.mock.calls.map((call) => String(call[0])).find((s) => s.includes("webhook_body_too_large"));
+    expect(line).toBeDefined();
+    const fields = JSON.parse(line!) as { event: string; reason: string; detail: string };
+    expect(fields).toMatchObject({
+      event: "webhook_body_too_large",
+      reason: "webhook_body_too_large",
+      detail: `read_bytes>${WEBHOOK_BODY_LIMIT}`,
+    });
   });
 
   test("headerless chunked oversized body → 413 + webhook_body_too_large warn, zero enqueue", async () => {
@@ -419,8 +457,14 @@ describe("POST /webhook/:appSlug (per-App routing)", () => {
     expect(sent).toHaveLength(0);
     const line = warn.mock.calls.map((call) => String(call[0])).find((s) => s.includes("webhook_body_too_large"));
     expect(line).toBeDefined();
-    const fields = JSON.parse(line!) as { event: string; reason: string };
-    expect(fields).toMatchObject({ event: "webhook_body_too_large", reason: "webhook_body_too_large" });
+    // Gate attribution: no content-length header → the STREAMED gate fired;
+    // the detail distinguishes it from the header fast path.
+    const fields = JSON.parse(line!) as { event: string; reason: string; detail: string };
+    expect(fields).toMatchObject({
+      event: "webhook_body_too_large",
+      reason: "webhook_body_too_large",
+      detail: `read_bytes>${WEBHOOK_BODY_LIMIT}`,
+    });
   });
 
   test("at-limit body (exactly WEBHOOK_BODY_LIMIT bytes) → 200 accepted, enqueued (HMAC verifies the streamed rawBody)", async () => {
@@ -434,6 +478,33 @@ describe("POST /webhook/:appSlug (per-App routing)", () => {
     const base = JSON.stringify({ ...PR_PAYLOAD, pad: "" });
     const body = JSON.stringify({ ...PR_PAYLOAD, pad: "x".repeat(WEBHOOK_BODY_LIMIT - base.length) });
     expect(body.length).toBe(WEBHOOK_BODY_LIMIT);
+
+    const res = await postWebhook("/webhook/app-x", body, await sigHeaders("secret-x", body), env);
+
+    expect(res.status).toBe(200);
+    expect(await res.text()).toBe("accepted");
+    expect(sent).toHaveLength(1);
+    expect(sent[0]).toMatchObject({ pr_number: 42, appRef: { appId: appRow.id } });
+  });
+
+  // At-limit pin with MULTI-BYTE content: `body.length` counts UTF-16
+  // units, so an all-ASCII at-limit body proves nothing about byte
+  // accounting — this body pads with 3-byte chars and computes the byte
+  // length explicitly (Buffer.byteLength), landing EXACTLY on
+  // WEBHOOK_BODY_LIMIT bytes while its UTF-16 length sits well under the
+  // cap. Acceptance + HMAC verify = the streamed gate counted bytes and the
+  // decode stayed byte-identical.
+  test("at-limit multi-byte UTF-8 body (exactly WEBHOOK_BODY_LIMIT bytes) → 200 accepted, enqueued (HMAC verifies)", async () => {
+    const db = createMigratedD1();
+    const appRow = await seedApp(db, { slug: "app-x", secret: "secret-x" });
+    const { queue, sent } = makeQueue();
+    const env = makeEnv(db, { REVIEW_QUEUE: queue as never });
+    const emptyPad = JSON.stringify({ ...PR_PAYLOAD, pad: "" });
+    const padBytes = WEBHOOK_BODY_LIMIT - Buffer.byteLength(emptyPad);
+    const pad = "漢".repeat(Math.floor(padBytes / 3)) + "x".repeat(padBytes % 3);
+    const body = JSON.stringify({ ...PR_PAYLOAD, pad });
+    expect(Buffer.byteLength(body)).toBe(WEBHOOK_BODY_LIMIT);
+    expect(body.length).toBeLessThan(WEBHOOK_BODY_LIMIT); // the UTF-16 trap is real
 
     const res = await postWebhook("/webhook/app-x", body, await sigHeaders("secret-x", body), env);
 
