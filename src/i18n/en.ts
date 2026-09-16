@@ -326,6 +326,15 @@ export const en = {
     },
     ops: "Operations",
     opsCopy: "Pause ignores deliveries with 2xx; disable answers 404; delete is a soft-delete — all fail closed.",
+    // Review trigger mode (spec review-trigger-policy §2/§3): segment
+    // labels localize; the wire values (open / every_push / manual) and the
+    // mention string stay verbatim.
+    triggerMode: "Review trigger",
+    triggerModeOpen: "First open",
+    triggerModeEveryPush: "Every push",
+    triggerModeManual: "Manual",
+    triggerModeMention: "Mention the bot in a PR comment to (re-)start a review — works in every mode:",
+    triggerModeMentionAria: "Bot mention: {mention}",
     confirmPauseTitle: "Pause reviews for {slug}?",
     confirmPauseBody: "Webhooks stay connected — deliveries are answered and ignored until you resume.",
     confirmResumeTitle: "Resume reviews for {slug}?",

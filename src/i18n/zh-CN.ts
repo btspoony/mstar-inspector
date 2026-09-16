@@ -289,6 +289,14 @@ export const zhCN: Dictionary = {
     },
     ops: "运维",
     opsCopy: "暂停以 2xx 忽略投递；停用以 404 应答；删除为软删 — 全部失败关闭。",
+    // 评审触发模式（spec review-trigger-policy §2/§3）：分段标签本地化；
+    // 线上取值（open / every_push / manual）与提及字符串保持原样。
+    triggerMode: "评审触发",
+    triggerModeOpen: "首次打开",
+    triggerModeEveryPush: "每次推送",
+    triggerModeManual: "仅手动",
+    triggerModeMention: "在 PR 评论中提及机器人即可（重新）启动审查 — 所有模式下均可用：",
+    triggerModeMentionAria: "机器人提及字符串：{mention}",
     confirmPauseTitle: "暂停 {slug} 的审查？",
     confirmPauseBody: "Webhook 保持连接 — 投递会被应答并忽略，直到你恢复。",
     confirmResumeTitle: "恢复 {slug} 的审查？",

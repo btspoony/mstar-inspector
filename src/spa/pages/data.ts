@@ -219,6 +219,20 @@ export function seatRoleValues(
   return next;
 }
 
+/**
+ * Per-App review trigger modes (spec review-trigger-policy §2) — the
+ * migration 0022 CHECK enum. Mirrors the store's frozen
+ * `REVIEW_TRIGGER_MODES` across the bundle boundary (documented, deliberately
+ * not imported — the DEFAULT_CHAIN_NAME duplication-lock convention; the
+ * lock test pins drift). Values are wire-verbatim; only labels localize.
+ */
+export const REVIEW_TRIGGER_MODES = ["open", "every_push", "manual"] as const;
+export type ReviewTriggerMode = (typeof REVIEW_TRIGGER_MODES)[number];
+
+export function isReviewTriggerMode(value: unknown): value is ReviewTriggerMode {
+  return (REVIEW_TRIGGER_MODES as readonly string[]).includes(value as string);
+}
+
 export type SettingsAppMeta = {
   slug: string;
   github_app_id: number;
@@ -228,6 +242,8 @@ export type SettingsAppMeta = {
   last_webhook_at: string | null;
   /** The App's selected sandbox runtime image (registry id). */
   sandbox_image_id: string;
+  /** The App's review trigger mode (spec §2) — the control's current value. */
+  review_trigger_mode: ReviewTriggerMode;
   /**
    * The cached public GitHub profile the settings route serves
    * (migration 0019 columns). Every field nullable — NULL = never synced (old
@@ -549,6 +565,10 @@ export function parseSettings(data: unknown): SettingsPayload | null {
   // The selected runtime-image id rides BOTH faces (registry id
   // only — never image-local configuration or secrets).
   if (typeof data.app.sandbox_image_id !== "string") return null;
+  // The trigger mode rides BOTH faces too — the mode control's
+  // current value; an off-vocabulary value (DB CHECK makes it impossible from
+  // a correct worker) fails the parse instead of rendering a dead selection.
+  if (!isReviewTriggerMode(data.app.review_trigger_mode)) return null;
   if (!Array.isArray(data.installations) || !Array.isArray(data.deliveries)) return null;
   if (!data.can_manage) return data as SettingsPayload;
   if (!Array.isArray(data.keys)) return null;

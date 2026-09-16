@@ -1545,6 +1545,7 @@ describe("GitHub App identity card", () => {
       created_by: "alice",
       last_webhook_at: null,
       sandbox_image_id: "omp",
+      review_trigger_mode: "every_push",
       github_name: null,
       github_description: null,
       github_html_url: null,

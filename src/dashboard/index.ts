@@ -1490,6 +1490,11 @@ dashboardApp.get("/api/apps/:slug/settings", async (c) => {
         // runtime image — read-only on BOTH faces (registry id only, never
         // image-local configuration or secrets).
         sandbox_image_id: app.sandbox_image_id,
+        // The App's review trigger mode (spec review-trigger-policy §2,
+        // read face the SPA's mode control consumes) — vocabulary-checked
+        // by the column's CHECK enum, so the wire value is always one of
+        // open | every_push | manual.
+        review_trigger_mode: app.review_trigger_mode,
         // The cached public GitHub profile (migration 0019) —
         // every field nullable (NULL = never synced / absent upstream, the
         // old-row degradation) and present on BOTH faces (AC3: the
