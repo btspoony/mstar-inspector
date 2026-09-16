@@ -56,7 +56,7 @@ exist before the first deploy:
   `sandbox-image/omp/Dockerfile` at deploy time (`image_build_context: "."`,
   `instance_type: lite`, `max_instances: 1`).
 
-### D1 migrations (0001–0021, forward-only)
+### D1 migrations (0001–0022, forward-only)
 
 ```bash
 wrangler d1 migrations apply mstar-inspector-db --remote   # production
@@ -86,6 +86,7 @@ wrangler d1 migrations apply mstar-inspector-db            # local dev
 | `0019_github_apps_metadata` | five metadata-only ADD COLUMNs caching the App's public GitHub profile (`github_name`/`github_description`/`github_html_url`/`github_avatar_url`/`github_metadata_synced_at`) for the settings info card — all nullable, safe over a live DB |
 | `0020_finding_lifecycle` | the finding-lifecycle and private pre-publication journal tables (`review_publications`, `review_findings`, `review_finding_rounds`, `review_threads`) — publication proof, closure and thread-resolution state (spec §7.1) |
 | `0021_review_checks` | the per-attempt Check registry (`review_checks`) behind the advisory Check Runs, with `UNIQUE(attempt_key, generation)` and the partial unique index keeping at most one nonterminal generation per attempt key (spec §7.1/§7.9) |
+| `0022_app_trigger_mode` | `github_apps.review_trigger_mode` TEXT NOT NULL DEFAULT 'every_push' CHECK (IN ('open','every_push','manual')) — the per-App review trigger mode (spec `review-trigger-policy.md` §2); metadata-only ADD COLUMN, existing rows (live and soft-deleted) materialize to the `every_push` default, no manager visit needed |
 
 Migrations are **forward-only** (0002 precedent): never hand-edit an applied
 migration; add the next file.
@@ -431,7 +432,10 @@ docker run --rm --entrypoint /opt/verify-synthesis.sh <image>
 3. **End-to-end review (v0.6 `modelOverrides` pin)** — with
    `REVIEW_ENABLED` unset (or any value except the exact `"false"` — the
    emergency brake), open or update a test PR on an installed repo and
-   confirm the review comment lands. To pin per-role overrides end-to-end,
+   confirm the review comment lands (the App's trigger mode must cover the
+   event — the default `every_push` auto-triggers on open/update; from any
+   mode, a PR comment @mentioning the App's bot forces a run —
+   § Review triggers (per App)). To pin per-role overrides end-to-end,
    first configure a role chain on the dashboard (`app_model_roles`, 0009)
    for the test App: the consumer materializes it into the runner input JSON
    (`src/pipeline/consumer.ts` `resolveModelOverrides`) and the in-image
@@ -455,10 +459,10 @@ docker run --rm --entrypoint /opt/verify-synthesis.sh <image>
 > `DASHBOARD_ENCRYPTION_KEY`, the dashboard registration flow, the per-App
 > webhook repoint, and the R1/R2 verification pins. Run AFTER § Deploy steps
 > and § Post-deploy smoke (the base Worker and D1 migrations **through
-> `0021`** must be live); the live execution is QA-coordinated. Historical
+> `0022`** must be live); the live execution is QA-coordinated. Historical
 > note: the go-live originally required `0001–0011`; the chain now extends
-> to `0021` (`0019` profile columns, `0020`
-> finding lifecycle, `0021` Check registry).
+> to `0022` (`0019` profile columns, `0020`
+> finding lifecycle, `0021` Check registry, `0022` per-App trigger mode).
 
 ### 1. Set DASHBOARD_ENCRYPTION_KEY
 
@@ -497,9 +501,10 @@ Prerequisites: dashboard OAuth (`OAUTH_CLIENT_ID` /
 `OAUTH_CLIENT_SECRET`), `DASHBOARD_SESSION_SECRET`, an admin login
 (`ADMIN_LOGINS` bootstrap or the first-login fallback),
 `DASHBOARD_ENCRYPTION_KEY` set, and D1 migrations applied **through
-`0021`** — the full forward-only chain above, not a historical prefix.
-`0020` supplies the finding-lifecycle/publication journal and `0021` the
-Check registry, so a review on this Worker fails without them.
+`0022`** — the full forward-only chain above, not a historical prefix.
+`0020` supplies the finding-lifecycle/publication journal, `0021` the
+Check registry, and `0022` the per-App trigger-mode column the webhook
+face reads on every delivery, so a review on this Worker fails without them.
 
 1. **Admin login** — open `/dashboard/login` and complete the GitHub OAuth
    flow. The first login against an empty `dashboard_users` table becomes
@@ -596,7 +601,9 @@ runner evidence, not the column.
    and save. The head (the first selector) is what the column must show.
 2. **Real PR** — with `REVIEW_ENABLED` unset (any value except the exact
    `"false"` — the emergency brake), open or update a PR on an installed
-   repo of that App.
+   repo of that App (default `every_push` mode auto-triggers; from any
+   mode, a PR comment @mentioning the App's bot works too —
+   § Review triggers (per App)).
 3. **Assert the column** — the review lands and the row records the chain
    head:
    ```bash
@@ -625,7 +632,7 @@ face to repoint to; the per-App webhook URL on GitHub is unchanged by a
 Worker rollback.
 
 - **D1 is forward-only** — never reverse an applied migration on rollback
-  (the chain head is `0021`); new code tolerates the prior schema (0002
+  (the chain head is `0022`); new code tolerates the prior schema (0002
   precedent), roll back code only.
 - **Secrets untouched** — rollback does not remove
   `DASHBOARD_ENCRYPTION_KEY`; rotate it explicitly when the rollback is
@@ -757,6 +764,28 @@ Deployed image record (DOCS-01 baseline):
 > Worker version `62c18d0a`.
 
 ## Ops config
+
+### Review triggers (per App)
+
+Each App chooses when its reviews auto-start — the `review_trigger_mode`
+column (migration `0022`), set on the App's dashboard Settings page
+alongside the pause switch:
+
+- `every_push` (default) — review on `opened`, `synchronize` and
+  `reopened` (the historical behavior, preserved exactly).
+- `open` — the PR's first `opened` event only; pushes and reopens never
+  auto-trigger.
+- `manual` — never auto-reviews.
+
+In every mode, a PR comment that @mentions the App's bot — `@<slug>` or
+the canonical `@<slug>[bot]`, matched as a standalone token —
+(re-)starts a review when the commenter is the PR author or the
+repository owner (bot-sender comments are ignored; anyone else gets a
+structured warn). The per-App pause (`review_enabled`) and the
+`REVIEW_ENABLED` emergency brake still govern every trigger path.
+Contract:
+[`.mstar/specs/review-trigger-policy.md`](../.mstar/specs/review-trigger-policy.md)
+(§2.1 classification matrix, §3 mention grammar).
 
 ### Queue consumer concurrency (architect verdict AL-5)
 
