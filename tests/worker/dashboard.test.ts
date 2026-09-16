@@ -2283,13 +2283,12 @@ describe("SSR views honor the stored theme (F-13)", () => {
     }
   });
 
-  test("OS-light fallback is guarded so a stored dark choice wins over OS light (both-directions rule)", () => {
+  test("the OS-light fallback is deleted — unset stays dark in every browser (deterministic default)", () => {
     const views = readViews();
-    const media = blockAfter(views, "@media (prefers-color-scheme: light)");
-    // The inner selector is NOT a bare :root — a stored dark choice
-    // excludes this branch, exactly like tokens.css:394-396.
-    expect(media).toContain(':root:not([data-theme="dark"])');
-    expect(media).not.toContain(":root {");
+    // v0.3.4 (2026-09-16): the prefers-color-scheme media branch is gone;
+    // dark is the unconditional :root default and light is stored-choice-only.
+    expect(views).not.toContain("@media (prefers-color-scheme: light)");
+    expect(views).not.toContain(':root:not([data-theme="dark"])');
   });
 
   test("explicit stored-dark branch is a no-op and dark stays the :root default", () => {

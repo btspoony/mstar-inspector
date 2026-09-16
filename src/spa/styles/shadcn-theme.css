@@ -1,7 +1,7 @@
 /*
  * shadcn/ui theme bridge (with the v0.3 brand re-point).
  * Semantic CSS variables map to DESIGN.md / tokens.css names (tokens.css is read-only).
- * Theme resolves via tokens.css — light on :root[data-theme="light"] or OS light (:root:not([data-theme="dark"])); values flow through the var chain unchanged.
+ * Theme resolves via tokens.css — dark on :root (unset = deterministic dark default, v0.3.4), light on :root[data-theme="light"]; values flow through the var chain unchanged.
  */
 @import "tailwindcss";
 
@@ -95,4 +95,15 @@
   --radius-xl: var(--rounded-md);
   --font-sans: var(--font-sans);
   --font-mono: var(--font-mono);
+}
+
+/* Body canvas (v0.3.4): the SPA paints the page canvas itself, mirroring
+   the views.ts SSR body idiom — the browser-default canvas (white, or dark
+   under color-scheme) can otherwise bleed through pre-paint / overscroll /
+   uncovered regions and diverge per browser. */
+body {
+  margin: 0;
+  min-height: 100svh;
+  background: var(--background-100);
+  color: var(--gray-1000);
 }

@@ -7,7 +7,7 @@
     <script>
       // Pre-paint theme bootstrap: apply the stored manual theme
       // before first paint. Whitelist — unreadable or invalid values stay
-      // unset and follow prefers-color-scheme.
+      // unset and render dark (deterministic default).
       try {
         const t = localStorage.getItem("mstar.dashboard.theme");
         if (t === "light" || t === "dark") document.documentElement.dataset.theme = t;
