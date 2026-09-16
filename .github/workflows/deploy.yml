@@ -131,7 +131,7 @@ jobs:
           if [ -n "$settings" ]; then
             value=$(printf '%s' "$settings" \
               | jq -r '[.result.bindings[]? | select(.name == "ADMIN_LOGINS") | if .type == "secret_text" then "set" else (.text // "") end] | join("")' \
-              | tr -d ' \t,')
+              | tr -d ' \t\n\r,')
             if [ -z "$value" ]; then
               echo "::warning::ADMIN_LOGINS is unset on the deployed Worker — with an empty dashboard_users table the first OAuth login becomes admin (self-disarming once any user row exists). Set ADMIN_LOGINS (plain var: dashboard Worker variable settings or wrangler.jsonc vars, then redeploy) before go-live — see docs/deploy.md § Multi-App go-live."
             fi

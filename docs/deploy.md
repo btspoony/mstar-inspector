@@ -651,8 +651,9 @@ annotation when the deployed Worker has **no usable `ADMIN_LOGINS` value**.
 The step reads the Worker's live settings via the Cloudflare API (NOT
 `wrangler secret list` — `ADMIN_LOGINS` is a plain var, so a secret listing
 never shows it) and treats a missing `ADMIN_LOGINS` binding, or one whose
-value is blank/comma-only, as unset — the same parsing rule as
-`parseAdminLogins` (`src/dashboard/users.ts`).
+value is blank/comma-only, as unset — mirroring `parseAdminLogins`
+(`src/dashboard/users.ts`) and its blank/comma-only rule, modulo whitespace
+trimming, which the smoke check additionally strips.
 
 What the warning means: with `ADMIN_LOGINS` unset and an **empty
 `dashboard_users` table**, the first OAuth login becomes admin (the
