@@ -1012,7 +1012,10 @@ export function ReviewTriggerControl({
   // Server-state mirror: after this save's (or any op's) background reload
   // lands a fresh payload, the selection tracks the stored mode — a failed
   // save reverts instead of leaving the optimistic value (the
-  // sandbox-image editor's identical effect).
+  // sandbox-image editor's identical effect). The save's own success path
+  // echoes first: save() updates the selection only after the POST resolves
+  // success (success = stored), so the highlight moves immediately and the
+  // reload just confirms it.
   useEffect(() => {
     setSelected(mode);
   }, [mode]);
@@ -1021,7 +1024,13 @@ export function ReviewTriggerControl({
     if (!isReviewTriggerMode(next) || next === selected) return;
     setBusy(true);
     try {
-      setNotice(await onTriggerMode(next));
+      const outcome = await onTriggerMode(next);
+      setNotice(outcome);
+      // Success-path echo: success means stored, so the controlled
+      // ToggleGroup highlights the new mode now instead of waiting for the
+      // reload; a failure leaves the previous segment highlighted and the
+      // reload resyncs `selected` from the stored mode (the effect above).
+      if (outcome.kind === "success") setSelected(next);
     } finally {
       setBusy(false);
     }
