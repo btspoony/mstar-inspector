@@ -15,7 +15,7 @@
  * per-App config tables the settings page reads; 0008 adds the per-App
  * ops columns behind the pause toggle and the install-health panel; 0009 is
  * app_model_roles, read on every settings render by the Role
- * models editor).
+ * models editor; 0022 is the per-App review trigger mode column).
  */
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
@@ -64,6 +64,7 @@ function createAppsUiD1(): ReturnType<typeof createTestD1> {
     "0009_app_model_roles.sql",
     "0011_webhook_deliveries.sql",
     "0012_custom_providers_and_key_updated_at.sql",
+    "0022_app_trigger_mode.sql",
   ]) {
     db.raw.exec(readFileSync(join(MIGRATIONS_DIR, name), "utf8"));
   }
@@ -138,6 +139,24 @@ async function post(path: string, cookie: string, env: Env): Promise<Response> {
   );
 }
 
+/** Form-encoded POST (the trigger-mode route reads a `mode` field from the body). */
+async function postForm(
+  path: string,
+  cookie: string,
+  env: Env,
+  fields: Record<string, string>,
+  headers: Record<string, string> = {},
+): Promise<Response> {
+  return await worker.fetch(
+    new Request(`https://worker.local${path}`, {
+      method: "POST",
+      headers: { Cookie: cookie, "Content-Type": "application/x-www-form-urlencoded", ...headers },
+      body: new URLSearchParams(fields),
+    }),
+    env,
+  );
+}
+
 function appStatus(db: ReturnType<typeof createAppsUiD1>, slug: string): string | null {
   const row = db.raw.query("SELECT status FROM github_apps WHERE slug = ?").get(slug) as {
     status: string;
@@ -151,6 +170,14 @@ function reviewEnabled(db: ReturnType<typeof createAppsUiD1>, slug: string): num
     review_enabled: number;
   } | null;
   return row?.review_enabled ?? null;
+}
+
+/** The per-App trigger-mode column (migration 0022) straight from the row. */
+function reviewTriggerMode(db: ReturnType<typeof createAppsUiD1>, slug: string): string | null {
+  const row = db.raw.query("SELECT review_trigger_mode FROM github_apps WHERE slug = ?").get(slug) as {
+    review_trigger_mode: string;
+  } | null;
+  return row?.review_trigger_mode ?? null;
 }
 
 describe("GET /dashboard/apps (enumerated SPA route)", () => {
@@ -391,6 +418,130 @@ describe("POST /dashboard/apps/:slug/pause|resume (per-App review pause)", () =>
     }
   });
 
+});
+
+describe("POST /dashboard/apps/:slug/review-trigger-mode (per-App review trigger mode)", () => {
+  test("guard covers the pinned route: no session → 302 to login, zero mutation", async () => {
+    const db = await seededWorld();
+    const res = await postForm(
+      "/dashboard/apps/mstar-inspector-mallory/review-trigger-mode",
+      "",
+      makeEnv(db),
+      { mode: "manual" },
+    );
+    expect(res.status).toBe(302);
+    expect(res.headers.get("Location")).toBe("/dashboard/login");
+    expect(reviewTriggerMode(db, "mstar-inspector-mallory")).toBe("every_push");
+  });
+
+  test("creator sets each vocabulary mode → 200 ok, exact wire spelling stored (spec §2 enum)", async () => {
+    const db = await seededWorld();
+    const cookie = `${SESSION_COOKIE}=${await sessionCookie("mallory")}`;
+    for (const mode of ["open", "every_push", "manual"]) {
+      const res = await postForm("/dashboard/apps/mstar-inspector-mallory/review-trigger-mode", cookie, makeEnv(db), {
+        mode,
+      });
+      expect(res.status).toBe(200);
+      expect(await res.text()).toBe("ok");
+      expect(reviewTriggerMode(db, "mstar-inspector-mallory")).toBe(mode);
+    }
+  });
+
+  test("invalid mode → keyed 400, stored row left unchanged — no silent coercion to the default (spec §2)", async () => {
+    const db = await seededWorld();
+    const cookie = `${SESSION_COOKIE}=${await sessionCookie("mallory")}`;
+    for (const mode of ["bogus", "EVERY_PUSH", ""]) {
+      const res = await postForm("/dashboard/apps/mstar-inspector-mallory/review-trigger-mode", cookie, makeEnv(db), {
+        mode,
+      });
+      expect(res.status).toBe(400);
+      expect(await res.json()).toEqual({
+        key: "settings.error.triggerModeUnknown",
+        message: `${mode} is not a review trigger mode — use open, every_push, or manual. Nothing was stored.`,
+        params: { mode },
+      });
+      expect(reviewTriggerMode(db, "mstar-inspector-mallory")).toBe("every_push");
+    }
+    // A missing mode field fails closed the same way.
+    const missing = await postForm("/dashboard/apps/mstar-inspector-mallory/review-trigger-mode", cookie, makeEnv(db), {});
+    expect(missing.status).toBe(400);
+    expect(reviewTriggerMode(db, "mstar-inspector-mallory")).toBe("every_push");
+  });
+
+  test("selecting the already-stored mode is an idempotent no-op — 200, zero mutation (updated_at untouched)", async () => {
+    const db = await seededWorld();
+    const cookie = `${SESSION_COOKIE}=${await sessionCookie("mallory")}`;
+    db.raw
+      .prepare("UPDATE github_apps SET updated_at = '2026-01-01 00:00:00' WHERE slug = ?")
+      .run("mstar-inspector-mallory");
+    const res = await postForm("/dashboard/apps/mstar-inspector-mallory/review-trigger-mode", cookie, makeEnv(db), {
+      mode: "every_push",
+    });
+    expect(res.status).toBe(200);
+    expect(await res.text()).toBe("ok");
+    const row = db.raw
+      .query("SELECT review_trigger_mode, updated_at FROM github_apps WHERE slug = ?")
+      .get("mstar-inspector-mallory") as { review_trigger_mode: string; updated_at: string };
+    expect(row.review_trigger_mode).toBe("every_push");
+    expect(row.updated_at).toBe("2026-01-01 00:00:00");
+  });
+
+  test("authz matrix: another member → 403 zero mutation; the creator of a DIFFERENT app → 403 (scope is per-App)", async () => {
+    const db = await seededWorld();
+    for (const login of ["hubot", "ada"]) {
+      const res = await postForm(
+        "/dashboard/apps/mstar-inspector-mallory/review-trigger-mode",
+        `${SESSION_COOKIE}=${await sessionCookie(login)}`,
+        makeEnv(db),
+        { mode: "manual" },
+      );
+      expect(res.status).toBe(403);
+      expect(await res.text()).toContain("restricted to dashboard admins");
+      expect(reviewTriggerMode(db, "mstar-inspector-mallory")).toBe("every_push");
+    }
+  });
+
+  test("admin (non-creator) may set another creator's app", async () => {
+    const db = await seededWorld();
+    const res = await postForm(
+      "/dashboard/apps/mstar-inspector-ada/review-trigger-mode",
+      `${SESSION_COOKIE}=${await sessionCookie("octocat")}`,
+      makeEnv(db),
+      { mode: "open" },
+    );
+    expect(res.status).toBe(200);
+    expect(await res.text()).toBe("ok");
+    expect(reviewTriggerMode(db, "mstar-inspector-ada")).toBe("open");
+  });
+
+  test("unknown slug → 404; soft-deleted app → 404, zero side effects", async () => {
+    const db = await seededWorld();
+    const apps = createAppsStore(db);
+    const cookie = `${SESSION_COOKIE}=${await sessionCookie("octocat")}`;
+    const unknown = await postForm("/dashboard/apps/no-such-app/review-trigger-mode", cookie, makeEnv(db), {
+      mode: "manual",
+    });
+    expect(unknown.status).toBe(404);
+    await apps.softDeleteApp((await apps.listApps()).find((a) => a.slug === "mstar-inspector-mallory")!.id);
+    const deleted = await postForm("/dashboard/apps/mstar-inspector-mallory/review-trigger-mode", cookie, makeEnv(db), {
+      mode: "manual",
+    });
+    expect(deleted.status).toBe(404);
+  });
+
+  test("native HTML form post keeps the pinned 302 to the App settings page", async () => {
+    const db = await seededWorld();
+    const res = await postForm(
+      "/dashboard/apps/mstar-inspector-mallory/review-trigger-mode",
+      `${SESSION_COOKIE}=${await sessionCookie("mallory")}`,
+      makeEnv(db),
+      { mode: "manual" },
+      { Accept: "text/html" },
+    );
+    expect(res.status).toBe(302);
+    expect(res.headers.get("Location")).toBe("/dashboard/apps/mstar-inspector-mallory/settings");
+    expect(reviewTriggerMode(db, "mstar-inspector-mallory")).toBe("manual");
+  });
 });
 
 describe("GET /dashboard/apps/:slug/settings (SPA-owned)", () => {

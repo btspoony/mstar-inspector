@@ -321,6 +321,7 @@ export const en = {
       templateMaterializeMax:
         "This App already has the maximum of {limit} custom providers — remove one before materializing another (updating an existing declaration is always allowed). Nothing was stored.",
       sandboxImageUnknown: "Unknown or disabled sandbox image — nothing was stored.",
+      triggerModeUnknown: "{mode} is not a review trigger mode — use open, every_push, or manual. Nothing was stored.",
       unknownOperation: "Unknown settings operation — resubmit one of this page's forms.",
     },
     ops: "Operations",

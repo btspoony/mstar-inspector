@@ -1,0 +1,33 @@
+-- 0022_app_trigger_mode.sql — per-App review trigger mode (spec
+-- review-trigger-policy §2).
+--
+-- review_trigger_mode selects when the App's reviews start:
+--   'open'       = the PR's first `opened` event only; pushes/reopens never
+--                  auto-trigger (a bot mention re-runs).
+--   'every_push' = review on opened + synchronize + reopened — today's
+--                  behavior; the DEFAULT preserves it exactly (spec §2: no
+--                  old-App compatibility or migration UX — every existing
+--                  row materializes to 'every_push' via ADD COLUMN DEFAULT,
+--                  soft-deleted rows included, so no manager visit is needed
+--                  after deploy).
+--   'manual'     = never auto-review; only a bot mention starts a review.
+-- The bot-mention comment trigger itself is orthogonal and works in every
+-- mode (spec §3); this column only bounds the AUTO-trigger matrix (§2.1).
+--
+-- TEXT NOT NULL DEFAULT 'every_push' is the legal D1/SQLite ADD COLUMN form
+-- (the 0008/0018 precedent: NOT NULL requires a non-NULL DEFAULT and there
+-- is no REFERENCES clause). Metadata-only: one ADD COLUMN alters the schema
+-- without rewriting the table — safe to apply over a live production DB
+-- with existing rows. Must apply AFTER 0004 (the altered table must exist).
+--
+-- UNLIKE the app-family convention (0018: value domains store-enforced,
+-- never schema-encoded), the CHECK enum here is SPEC-MANDATED verbatim
+-- (spec §2 Storage row): the trigger mode gates review enqueue, so an
+-- off-vocabulary value must be unrepresentable in the row itself — the
+-- store setter (apps-store.setReviewTriggerMode) still answers first for
+-- direct callers and the settings route 400s before any write; the CHECK is
+-- the last-line backstop, and the DEFAULT satisfies it so the ALTER is legal
+-- over existing rows.
+
+ALTER TABLE github_apps ADD COLUMN review_trigger_mode TEXT NOT NULL DEFAULT 'every_push'
+  CHECK (review_trigger_mode IN ('open','every_push','manual'));

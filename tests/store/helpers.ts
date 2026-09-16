@@ -10,7 +10,7 @@
  * i.e. production before the github_apps work. Kept for fixtures that exercise the
  *   append-only ALTER sequence itself (tests/worker/apps-store.test.ts
  *   seeds rows, THEN applies 0004/0005).
- * - `createMigratedTestD1()` — the full current shape (0001 → 0021 in
+ * - `createMigratedTestD1()` — the full current shape (0001 → 0022 in
  *   filename order: 0003 dashboard users, 0004 github_apps +
  *   app_installations, 0005 reviews.app_id, 0006 app_provider_keys +
  *   app_model_config, 0007 idx_reviews_app_id, 0008 github_apps
@@ -22,7 +22,8 @@
  *, 0017 app_model_chains + seats, 0018
  * github_apps.sandbox_image_id, 0019 github_apps GitHub-profile
  * columns, 0020 finding lifecycle + publication journal +
- * resolution queue, 0021 review Check attempt registry
+ * resolution queue, 0021 review Check attempt registry, 0022
+ * github_apps review trigger mode
  *), i.e. what
  *   `wrangler d1 migrations apply` produces today. The store adapter's INSERT
  * binds `reviews.app_id` (QC fix wave 1 F-001), so every test
@@ -64,6 +65,7 @@ const ALL_MIGRATIONS = [
   "0019_github_apps_metadata.sql",
   "0020_finding_lifecycle.sql",
   "0021_review_checks.sql",
+  "0022_app_trigger_mode.sql",
 ];
 
 /** Execute the migration DDL on a fresh in-memory database. */
