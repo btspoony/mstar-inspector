@@ -27,6 +27,7 @@ import { join } from "node:path";
 import { Webhooks } from "@octokit/webhooks";
 import worker from "../../src/worker/index";
 import type { Env } from "../../src/worker/env";
+import { WEBHOOK_BODY_LIMIT } from "../../src/worker/webhooks";
 import { createSecretbox } from "../../src/dashboard/secretbox";
 import { createAppsStore } from "../../src/dashboard/apps-store";
 import { createTestD1 } from "../store/helpers";
@@ -338,6 +339,122 @@ describe("POST /webhook/:appSlug (per-App routing)", () => {
 
     expect(res.status).toBe(413);
     expect(sent).toHaveLength(0);
+  });
+
+  // 61-R1: the cap is byte-authoritative on the streamed body. The
+  // truthful-header fast path above stays; these pin the streamed read — a
+  // missing or lying header can never buffer past WEBHOOK_BODY_LIMIT, and an
+  // at-limit body still passes (the streamed-decoded rawBody is
+  // decode-identical, so the HMAC signature verifies exactly as before).
+  test("truthful content-length header over the limit → 413 fast path, zero enqueue", async () => {
+    const db = createMigratedD1();
+    await seedApp(db, { slug: "app-x", secret: "secret-x" });
+    const { queue, sent } = makeQueue();
+    const env = makeEnv(db, { REVIEW_QUEUE: queue as never });
+    const oversized = "a".repeat(WEBHOOK_BODY_LIMIT + 1);
+
+    const res = await postWebhook(
+      "/webhook/app-x",
+      oversized,
+      { "content-length": String(oversized.length), "x-github-event": "ping" },
+      env,
+    );
+
+    expect(res.status).toBe(413);
+    expect(sent).toHaveLength(0);
+  });
+
+  test("lying short content-length + oversized body → 413 (byte count, not the header), zero enqueue", async () => {
+    const db = createMigratedD1();
+    await seedApp(db, { slug: "app-x", secret: "secret-x" });
+    const { queue, sent } = makeQueue();
+    const env = makeEnv(db, { REVIEW_QUEUE: queue as never });
+    const oversized = "a".repeat(WEBHOOK_BODY_LIMIT + 1);
+
+    const res = await postWebhook(
+      "/webhook/app-x",
+      oversized,
+      { "content-length": "10", "x-github-event": "ping" },
+      env,
+    );
+
+    expect(res.status).toBe(413);
+    expect(sent).toHaveLength(0);
+  });
+
+  test("headerless chunked oversized body → 413 + webhook_body_too_large warn, zero enqueue", async () => {
+    const db = createMigratedD1();
+    await seedApp(db, { slug: "app-x", secret: "secret-x" });
+    const { queue, sent } = makeQueue();
+    const env = makeEnv(db, { REVIEW_QUEUE: queue as never });
+    // A stream body carries no content-length (the runtime cannot know it).
+    // Two limit/2 chunks + 1 byte: the byte count crosses the cap only on
+    // the third chunk — multi-chunk accumulation, a single byte over.
+    const half = new Uint8Array(WEBHOOK_BODY_LIMIT / 2).fill(97);
+    const request = new Request("https://worker.local/webhook/app-x", {
+      method: "POST",
+      headers: { "x-github-event": "ping" },
+      body: new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(half);
+          controller.enqueue(half);
+          controller.enqueue(new Uint8Array([97]));
+          controller.close();
+        },
+      }),
+      duplex: "half",
+    });
+
+    const warn = mock((_msg: unknown) => {});
+    const origWarn = console.warn;
+    console.warn = warn;
+    let res: Response;
+    try {
+      res = await worker.fetch(request, env);
+    } finally {
+      console.warn = origWarn;
+    }
+
+    expect(res.status).toBe(413);
+    expect(sent).toHaveLength(0);
+    const line = warn.mock.calls.map((call) => String(call[0])).find((s) => s.includes("webhook_body_too_large"));
+    expect(line).toBeDefined();
+    const fields = JSON.parse(line!) as { event: string; reason: string };
+    expect(fields).toMatchObject({ event: "webhook_body_too_large", reason: "webhook_body_too_large" });
+  });
+
+  test("at-limit body (exactly WEBHOOK_BODY_LIMIT bytes) → 200 accepted, enqueued (HMAC verifies the streamed rawBody)", async () => {
+    const db = createMigratedD1();
+    const appRow = await seedApp(db, { slug: "app-x", secret: "secret-x" });
+    const { queue, sent } = makeQueue();
+    const env = makeEnv(db, { REVIEW_QUEUE: queue as never });
+    // Pad the valid PR payload to EXACTLY the cap: the streamed read accepts
+    // limit bytes, and the signature only verifies if the decode was
+    // byte-identical to the buffered read (UTF-8 decode invariant).
+    const base = JSON.stringify({ ...PR_PAYLOAD, pad: "" });
+    const body = JSON.stringify({ ...PR_PAYLOAD, pad: "x".repeat(WEBHOOK_BODY_LIMIT - base.length) });
+    expect(body.length).toBe(WEBHOOK_BODY_LIMIT);
+
+    const res = await postWebhook("/webhook/app-x", body, await sigHeaders("secret-x", body), env);
+
+    expect(res.status).toBe(200);
+    expect(await res.text()).toBe("accepted");
+    expect(sent).toHaveLength(1);
+    expect(sent[0]).toMatchObject({ pr_number: 42, appRef: { appId: appRow.id } });
+  });
+
+  test("small valid webhook unchanged by the streamed cap → 200 accepted, enqueued", async () => {
+    const db = createMigratedD1();
+    await seedApp(db, { slug: "app-x", secret: "secret-x" });
+    const { queue, sent } = makeQueue();
+    const env = makeEnv(db, { REVIEW_QUEUE: queue as never });
+    const body = JSON.stringify(PR_PAYLOAD);
+
+    const res = await postWebhook("/webhook/app-x", body, await sigHeaders("secret-x", body), env);
+
+    expect(res.status).toBe(200);
+    expect(await res.text()).toBe("accepted");
+    expect(sent).toHaveLength(1);
   });
 
   test("missing signature header → 401, zero enqueue", async () => {
