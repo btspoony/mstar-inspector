@@ -7,24 +7,122 @@
  * Every reject path logs a structured warning (no secret material) so the
  * operator can spot bad configurations / probes (Phase 5 B6).
  *
- * Event whitelist (compass S4):
- * - `pull_request.{opened,synchronize,reopened}`
- * - `issue_comment.created` whose body is EXACTLY `/review` or starts with
- *   `/review ` (case-sensitive; `/reviewing` must not trigger), on a pull
- *   request thread, sent by a non-bot whose login is the PR author or the
- *   repository owner (Phase 5 B5 actor allowlist — prevents quota abuse by
- *   arbitrary commenters on public installs).
+ * Event whitelist (spec review-trigger-policy §2.1):
+ * - `pull_request.{opened,synchronize,reopened}` filtered by the resolved
+ *   App's `review_trigger_mode`: `open` auto-triggers `opened` only,
+ *   `every_push` (the default) all three, `manual` none.
+ * - `issue_comment.created` whose body contains the App's bot mention
+ *   `@{appSlug}` as a standalone token (spec §3 grammar), on a pull request
+ *   thread, sent by a non-bot whose login is the PR author or the repository
+ *   owner (Phase 5 B5 actor allowlist — prevents quota abuse by arbitrary
+ *   commenters on public installs).
  * Everything else returns 200 quickly — GitHub retries non-2xx, so
  * uninteresting events must not 4xx.
  */
 import { Webhooks } from "@octokit/webhooks";
 import { z } from "zod";
 import type { ReviewJobPayload } from "../contracts/review-job";
+import type { ReviewTriggerMode } from "../dashboard/apps-store";
 import type { HandlerLog } from "./handlers";
 
-export const REVIEW_COMMAND_PREFIX = "/review";
-
 export const PULL_REQUEST_ACTIONS = ["opened", "synchronize", "reopened"] as const;
+
+/**
+ * The per-App trigger inputs classification branches on (spec
+ * review-trigger-policy §2 read path): the resolved row's
+ * `review_trigger_mode` and its slug (the mention target — one App's
+ * mention never triggers another App). The per-App webhook route passes
+ * both from the already-resolved row — no second lookup. An omitted
+ * context defaults to `every_push` with NO mention target (empty slug never
+ * matches — fail-safe: no trigger rather than a spurious one).
+ */
+export type ReviewTriggerContext = { mode: ReviewTriggerMode; appSlug: string };
+
+/**
+ * The GitHub login continuation set (spec §3): `A-Z a-z 0-9 -`. A mention
+ * match is a standalone token only when the characters immediately before
+ * `@` and immediately after the slug are BOTH outside this set (absent
+ * counts as outside). Hyphens continue a login, so `@slug-other` /
+ * `@slugbot` never match and an email-shaped `name@slug.host` never matches.
+ * Always evaluated against the ORIGINAL body text, never a case-folded copy
+ * (see bodyMentionsApp).
+ */
+const LOGIN_CONTINUATION = /[A-Za-z0-9-]/;
+
+/**
+ * ASCII-restricted case-insensitive equality for two single body characters:
+ * identical, or both ASCII (code unit ≤ 127) with the same toLowerCase()
+ * form. `String.toLowerCase()` alone is a Unicode SUPERSET of ASCII folding
+ * (U+212A KELVIN SIGN folds to `k`, U+0130 folds to `i` + combining dot), so
+ * it must never decide a match — a non-ASCII character never equals an ASCII
+ * letter here (QC F-001/S-1).
+ */
+function asciiFoldEquals(a: string, b: string): boolean {
+  if (a === b) {
+    return true;
+  }
+  if (a.charCodeAt(0) > 127 || b.charCodeAt(0) > 127) {
+    return false;
+  }
+  return a.toLowerCase() === b.toLowerCase();
+}
+
+/**
+ * Whether `body` mentions the App's bot: contains `@{appSlug}` (ASCII
+ * case-insensitive, literal) as a standalone token per the LOGIN_CONTINUATION
+ * boundary rule. Any position in the body; the mention IS the entire
+ * grammar (spec §3 — no wording, no commands).
+ *
+ * The scan runs over the ORIGINAL body: the case fold is applied
+ * per-character via asciiFoldEquals (ASCII-only), and both boundary
+ * characters are read from the original text. A whole-string
+ * `toLowerCase()` copy would corrupt the grammar in both directions
+ * (QC F-001/S-1): Unicode-only folds fabricate occurrences that do not
+ * exist in the original (`@<KELVIN>-bot` lowering to `@k-bot`) and the
+ * length change (U+0130 is one code unit lowering to two) shifts every
+ * index after the fold, misreading both boundaries. An empty slug never
+ * matches — fail-safe: no trigger rather than a spurious one.
+ */
+function bodyMentionsApp(body: string, appSlug: string): boolean {
+  if (!appSlug) {
+    return false;
+  }
+  const needle = `@${appSlug}`.toLowerCase();
+  let i = body.indexOf("@");
+  while (i !== -1) {
+    const end = i + needle.length;
+    if (end <= body.length) {
+      let matched = true;
+      for (let j = 1; j < needle.length; j++) {
+        if (!asciiFoldEquals(body[i + j]!, needle[j]!)) {
+          matched = false;
+          break;
+        }
+      }
+      if (matched) {
+        const before = i > 0 ? body[i - 1]! : "";
+        const after = end < body.length ? body[end]! : "";
+        if (!LOGIN_CONTINUATION.test(before) && !LOGIN_CONTINUATION.test(after)) {
+          return true;
+        }
+      }
+    }
+    i = body.indexOf("@", i + 1);
+  }
+  return false;
+}
+
+/**
+ * §2.1 matrix for the auto (pull_request) face: `open` enqueues `opened`
+ * only; `every_push` enqueues all whitelisted actions; `manual` never
+ * auto-triggers (a bot mention is the only trigger).
+ */
+function autoTriggerAllows(mode: ReviewTriggerMode, action: string): boolean {
+  if (mode === "manual") {
+    return false;
+  }
+  return mode === "open" ? action === "opened" : true;
+}
 
 /** Webhook body size cap (B6): checked BEFORE the body is buffered (413). */
 export const WEBHOOK_BODY_LIMIT = 1_000_000;
@@ -175,6 +273,10 @@ const issueCommentSchema = z.object({
  * the REAL GitHub event in `event` when the header is present, falling back
  * to the stage label (= the machine `reason`) when the header is absent —
  * never the literal "unknown", so log consumers can filter by event alone.
+ *
+ * `trigger` (spec review-trigger-policy §2 read path) is the resolved
+ * App row's mode + slug, passed straight to classifyEvent — the classifier
+ * branches on it but still never sees the App identity (no appId).
  */
 export async function classifyWebhook(
   secret: string,
@@ -184,6 +286,7 @@ export async function classifyWebhook(
   log?: HandlerLog,
   reviewEnabled = true,
   cacheKey?: string,
+  trigger: ReviewTriggerContext = { mode: "every_push", appSlug: "" },
 ): Promise<WebhookOutcome> {
   if (!reviewEnabled) {
     log?.warn(
@@ -220,7 +323,7 @@ export async function classifyWebhook(
     );
     return { kind: "reject", status: 401, reason: "signature verification failed" };
   }
-  return classifyEvent(eventName, rawBody, log, reviewEnabled);
+  return classifyEvent(eventName, rawBody, log, reviewEnabled, trigger);
 }
 
 /**
@@ -228,12 +331,18 @@ export async function classifyWebhook(
  * `reviewEnabled` is the computed REVIEW_ENABLED state (AC4a): when
  * the emergency brake is pulled (exact "false"), every event is ignored
  * (HTTP 2xx, no queue enqueue).
+ *
+ * `trigger` is the per-App trigger context (spec review-trigger-policy §2):
+ * `mode` gates the pull_request auto face (§2.1 matrix) and `appSlug` keys
+ * the issue_comment bot mention (§3). Defaults to `every_push` with no
+ * mention target.
  */
 export function classifyEvent(
   eventName: string | null,
   rawBody: string,
   log?: HandlerLog,
   reviewEnabled = true,
+  trigger: ReviewTriggerContext = { mode: "every_push", appSlug: "" },
 ): WebhookOutcome {
   if (!reviewEnabled) {
     log?.warn(
@@ -246,15 +355,15 @@ export function classifyEvent(
     return { kind: "ignore", reason: "missing X-GitHub-Event header" };
   }
   if (eventName === "pull_request") {
-    return classifyPullRequest(rawBody);
+    return classifyPullRequest(rawBody, trigger.mode);
   }
   if (eventName === "issue_comment") {
-    return classifyIssueComment(rawBody, log);
+    return classifyIssueComment(rawBody, log, trigger.appSlug);
   }
   return { kind: "ignore", reason: `event ${eventName} is not whitelisted` };
 }
 
-function classifyPullRequest(rawBody: string): WebhookOutcome {
+function classifyPullRequest(rawBody: string, mode: ReviewTriggerMode): WebhookOutcome {
   const parsed = parseBody(rawBody);
   if (parsed === null) {
     return { kind: "reject", status: 400, reason: "invalid JSON body" };
@@ -272,8 +381,15 @@ function classifyPullRequest(rawBody: string): WebhookOutcome {
   const repo = repository?.name;
   const prNumber = pull_request?.number ?? result.data.number;
   const headSha = pull_request?.head?.sha ?? null;
+  // Malformed-payload reject BEFORE the mode gate: reject stays reserved for
+  // malformed payloads in EVERY mode (spec §2.1 — exactly as today).
   if (installationId === undefined || owner === undefined || repo === undefined || prNumber === undefined) {
     return { kind: "reject", status: 400, reason: "pull_request payload missing required fields" };
+  }
+  // §2.1 matrix: the mode gates the auto face (manual never auto-triggers;
+  // open is opened-only). The bot-mention comment face is orthogonal.
+  if (!autoTriggerAllows(mode, action)) {
+    return { kind: "ignore", reason: `pull_request action ${action} does not auto-trigger in ${mode} mode` };
   }
   return {
     kind: "job",
@@ -289,7 +405,7 @@ function classifyPullRequest(rawBody: string): WebhookOutcome {
   };
 }
 
-function classifyIssueComment(rawBody: string, log?: HandlerLog): WebhookOutcome {
+function classifyIssueComment(rawBody: string, log: HandlerLog | undefined, appSlug: string): WebhookOutcome {
   const parsed = parseBody(rawBody);
   if (parsed === null) {
     return { kind: "reject", status: 400, reason: "invalid JSON body" };
@@ -302,12 +418,13 @@ function classifyIssueComment(rawBody: string, log?: HandlerLog): WebhookOutcome
   if (action !== "created") {
     return { kind: "ignore", reason: `issue_comment action ${action} is not whitelisted` };
   }
-  // Exact command (B5): `/review` or `/review <anything>` — a bare `/review`
-  // prefix (e.g. `/reviewing`) must NOT trigger.
+  // Bare mention (spec review-trigger-policy §3): the body must contain the
+  // resolved App's `@{appSlug}` as a standalone token — any position, no
+  // required wording. Keyed to the route-resolved slug, so one App's mention
+  // never triggers another App.
   const body = comment?.body ?? "";
-  const trimmed = body.trim();
-  if (trimmed !== REVIEW_COMMAND_PREFIX && !trimmed.startsWith(`${REVIEW_COMMAND_PREFIX} `)) {
-    return { kind: "ignore", reason: "comment body is not the exact /review command" };
+  if (!bodyMentionsApp(body, appSlug)) {
+    return { kind: "ignore", reason: "comment body does not mention the App bot" };
   }
   if (issue?.pull_request == null) {
     return { kind: "ignore", reason: "comment is not on a pull request thread" };
@@ -330,7 +447,7 @@ function classifyIssueComment(rawBody: string, log?: HandlerLog): WebhookOutcome
         reason: "actor_not_allowed",
         detail: `actor=${actorLogin ?? "null"} author=${authorLogin ?? "null"} owner=${ownerLogin ?? "null"}`,
       },
-      "review command ignored — commenter is not the PR author or repo owner",
+      "bot mention ignored — commenter is not the PR author or repo owner",
     );
     return { kind: "ignore", reason: "comment actor is not the PR author or repo owner" };
   }
@@ -350,7 +467,7 @@ function classifyIssueComment(rawBody: string, log?: HandlerLog): WebhookOutcome
       pr_number: prNumber,
       head_sha: null,
       action: "created",
-      triggered_by: "review_command",
+      triggered_by: "issue_comment",
     },
   };
 }

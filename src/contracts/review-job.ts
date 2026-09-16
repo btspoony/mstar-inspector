@@ -25,6 +25,6 @@ export type ReviewJobPayload = {
   pr_number: number;
   head_sha: string | null;
   action: string;
-  triggered_by: "pull_request" | "review_command";
+  triggered_by: "pull_request" | "issue_comment";
   appRef: { appId: string };
 };

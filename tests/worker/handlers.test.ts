@@ -3,7 +3,7 @@
  * Mock env: in-memory KV stub + queue send recorder. No real bindings.
  *
  * Product lock (compass S4 / plan Clarify 4): a null `head_sha` must never
- * become a KV key and must always enqueue — `/review` commands are never
+ * become a KV key and must always enqueue — comment-mention jobs are never
  * KV-skipped.
  */
 import { describe, expect, mock, test, type Mock } from "bun:test";
@@ -29,7 +29,7 @@ function prPayload(overrides: Partial<ReviewJobPayload> = {}): ReviewJobPayload 
   };
 }
 
-function reviewCommandPayload(overrides: Partial<ReviewJobPayload> = {}): ReviewJobPayload {
+function mentionPayload(overrides: Partial<ReviewJobPayload> = {}): ReviewJobPayload {
   return {
     installation_id: 12345,
     owner: "acme",
@@ -37,7 +37,7 @@ function reviewCommandPayload(overrides: Partial<ReviewJobPayload> = {}): Review
     pr_number: 42,
     head_sha: null,
     action: "created",
-    triggered_by: "review_command",
+    triggered_by: "issue_comment",
     appRef: { appId: "11111111-2222-3333-4444-555555555555" },
     ...overrides,
   };
@@ -144,14 +144,14 @@ describe("handleReviewJob — null head_sha (product lock)", () => {
     const { queue, sent } = makeQueueStub();
     const log = makeLog();
 
-    const outcome = await handleReviewJob(reviewCommandPayload(), {
+    const outcome = await handleReviewJob(mentionPayload(), {
       env: { IDEMPOTENCY_KV: kv, REVIEW_QUEUE: queue },
       log,
     });
 
     expect(outcome).toEqual({ kind: "enqueued" });
     expect(queue.send).toHaveBeenCalledTimes(1);
-    expect(sent[0]).toEqual(reviewCommandPayload());
+    expect(sent[0]).toEqual(mentionPayload());
     expect(kv.get).not.toHaveBeenCalled();
     expect(kv.put).not.toHaveBeenCalled();
     expect(store.size).toBe(0);
@@ -162,13 +162,13 @@ describe("handleReviewJob — null head_sha (product lock)", () => {
     });
   });
 
-  test("repeated /review commands always enqueue (never KV-skipped)", async () => {
+  test("repeated bot-mention comments always enqueue (never KV-skipped)", async () => {
     const { kv } = makeKvStub();
     const { queue, sent } = makeQueueStub();
     const log = makeLog();
 
-    await handleReviewJob(reviewCommandPayload(), { env: { IDEMPOTENCY_KV: kv, REVIEW_QUEUE: queue }, log });
-    const outcome = await handleReviewJob(reviewCommandPayload(), {
+    await handleReviewJob(mentionPayload(), { env: { IDEMPOTENCY_KV: kv, REVIEW_QUEUE: queue }, log });
+    const outcome = await handleReviewJob(mentionPayload(), {
       env: { IDEMPOTENCY_KV: kv, REVIEW_QUEUE: queue },
       log,
     });
@@ -263,7 +263,7 @@ describe("payload hygiene — no secrets", () => {
     const log = makeLog();
 
     await handleReviewJob(prPayload(), { env: { IDEMPOTENCY_KV: kv, REVIEW_QUEUE: queue }, log });
-    await handleReviewJob(reviewCommandPayload(), { env: { IDEMPOTENCY_KV: kv, REVIEW_QUEUE: queue }, log });
+    await handleReviewJob(mentionPayload(), { env: { IDEMPOTENCY_KV: kv, REVIEW_QUEUE: queue }, log });
 
     const allowed: Record<string, true> = {
       installation_id: true,

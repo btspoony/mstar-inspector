@@ -39,6 +39,14 @@
  *     updated_at, and refuses soft-deleted rows exactly like setAppStatus.
  *     createApp omits the column, so the migration 0018 DDL default seeds
  *     'omp'.
+ *   - setReviewTriggerMode (migration 0022, spec review-trigger-policy §2)
+ *     is the per-App auto-trigger selection: the mode must be on the
+ *     REVIEW_TRIGGER_MODES vocabulary (plain Error backstop, the
+ *     setSandboxImage convention — the settings route 400s first; the DDL
+ *     CHECK is the last-line backstop), writes review_trigger_mode +
+ *     updated_at, and refuses soft-deleted rows exactly like setAppStatus.
+ *     createApp omits the column, so the migration 0022 DDL default seeds
+ *     'every_push' (today's behavior, preserved exactly).
  *   - touchLastWebhook (migration 0008) writes ONLY
  *     last_webhook_at — never updated_at, which stays the operator-mutation
  *     timestamp (L5: the per-webhook frequency of this touch must not churn
@@ -97,6 +105,13 @@ export type GithubAppRow = {
   deleted_at: string | null;
   /** Per-App pause switch (migration 0008): 1 = reviewing, 0 = paused. */
   review_enabled: number;
+  /**
+   * Per-App auto-trigger selection (migration 0022, spec
+   * review-trigger-policy §2): 'open' | 'every_push' | 'manual'; the DDL
+   * default seeds 'every_push' (today's behavior). The bot-mention comment
+   * trigger is orthogonal and works in every mode.
+   */
+  review_trigger_mode: ReviewTriggerMode;
   /** Last verified (2xx) webhook delivery (migration 0008); NULL = never. */
   last_webhook_at: string | null;
   /**
@@ -127,6 +142,23 @@ export type GithubAppRow = {
 };
 
 export type GithubAppStatus = "active" | "disabled";
+
+/**
+ * The per-App auto-trigger vocabulary (migration 0022, spec
+ * review-trigger-policy §2 — exact enum spelling is wire-visible: the
+ * settings POST body carries it and the SPA replays it). Producer-side
+ * enforced like DELIVERY_OUTCOMES: an off-vocabulary mode throws BEFORE any
+ * row is written; the DDL CHECK is the last-line backstop. The array is
+ * typed against the union, so a misspelled literal here is a compile error;
+ * every member must also appear in the migration 0022 CHECK.
+ */
+export type ReviewTriggerMode = "open" | "every_push" | "manual";
+
+export const REVIEW_TRIGGER_MODES: readonly ReviewTriggerMode[] = Object.freeze([
+  "open",
+  "every_push",
+  "manual",
+]);
 
 /** Input for createApp — encrypted payloads are built by the caller. */
 export type CreateAppInput = {
@@ -404,6 +436,33 @@ export function createAppsStore(db: AppsStoreD1) {
            WHERE id = ? AND deleted_at IS NULL`,
         )
         .bind(enabled ? 1 : 0, id)
+        .run();
+      return res.meta.changes > 0;
+    },
+
+    /**
+     * Select the per-App review trigger mode (migration 0022, spec
+     * review-trigger-policy §2). The mode must be on the
+     * REVIEW_TRIGGER_MODES vocabulary — anything else throws BEFORE any
+     * write (the setSandboxImage store-enforced value domain backstop; the
+     * settings route answers 400 first, and the DDL CHECK is the last line).
+     * Writes review_trigger_mode + updated_at (an operator mutation, the
+     * setReviewEnabled convention) and refuses soft-deleted rows exactly
+     * like setAppStatus. Returns whether a row changed (false also covers
+     * unknown ids).
+     */
+    async setReviewTriggerMode(id: string, mode: ReviewTriggerMode): Promise<boolean> {
+      if (!REVIEW_TRIGGER_MODES.includes(mode)) {
+        throw new Error(
+          `apps-store: review trigger mode ${JSON.stringify(mode)} is not on the vocabulary (${REVIEW_TRIGGER_MODES.join(" | ")}) — zero rows written`,
+        );
+      }
+      const res = await db
+        .prepare(
+          `UPDATE github_apps SET review_trigger_mode = ?, updated_at = datetime('now')
+           WHERE id = ? AND deleted_at IS NULL`,
+        )
+        .bind(mode, id)
         .run();
       return res.meta.changes > 0;
     },

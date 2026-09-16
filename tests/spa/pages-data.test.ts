@@ -21,6 +21,7 @@ import {
   parseMembers,
   parseSettings,
   providerFormKind,
+  REVIEW_TRIGGER_MODES,
   selectedCatalogProvider,
   type CatalogProvider,
   type ModelChainEntry,
@@ -173,6 +174,7 @@ describe("members/apps/settings parsers", () => {
         created_by: "mallory",
         last_webhook_at: null,
         sandbox_image_id: "omp",
+        review_trigger_mode: "every_push",
       },
       keys: [],
       model_chain: null,
@@ -212,6 +214,7 @@ describe("members/apps/settings parsers", () => {
         created_by: "mallory",
         last_webhook_at: null,
         sandbox_image_id: "omp",
+        review_trigger_mode: "every_push",
       },
       keys: [],
       model_chain: null,
@@ -241,6 +244,58 @@ describe("members/apps/settings parsers", () => {
     expect(ok && ok.can_manage && ok.sandbox_images).toEqual([{ id: "omp", enabled: true }]);
   });
 
+  test("parseSettings requires the review trigger mode on both faces; off-vocabulary fails the parse", () => {
+    const base = {
+      can_manage: false,
+      app: {
+        slug: "demo",
+        github_app_id: 1,
+        status: "active",
+        review_enabled: true,
+        created_by: "mallory",
+        last_webhook_at: null,
+        sandbox_image_id: "omp",
+        review_trigger_mode: "every_push",
+      },
+      installations: [],
+      deliveries: [],
+    };
+    // Missing mode is a contract breach — the control would render without a
+    // current value, so the whole payload fails the parse (sandbox_image_id
+    // precedent).
+    const { review_trigger_mode: _dropped, ...withoutMode } = base.app;
+    expect(parseSettings({ ...base, app: withoutMode })).toBeNull();
+    // An off-vocabulary value (impossible from the DB CHECK, but a drifted
+    // worker could serve it) fails the parse instead of rendering a dead
+    // selection — never silently coerced to the default.
+    expect(parseSettings({ ...base, app: { ...base.app, review_trigger_mode: "whenever" } })).toBeNull();
+    expect(parseSettings({ ...base, app: { ...base.app, review_trigger_mode: "EVERY_PUSH" } })).toBeNull();
+    // Every vocabulary value parses verbatim — read-only face...
+    for (const mode of REVIEW_TRIGGER_MODES) {
+      const readOnly = parseSettings({ ...base, app: { ...base.app, review_trigger_mode: mode } });
+      expect(readOnly?.app.review_trigger_mode).toBe(mode);
+    }
+    // ...and manage face.
+    for (const mode of REVIEW_TRIGGER_MODES) {
+      const manage = parseSettings({
+        ...base,
+        can_manage: true,
+        app: { ...base.app, review_trigger_mode: mode },
+        keys: [],
+        model_chain: null,
+        model_roles: {},
+        model_chains: [],
+        custom_providers: [],
+        configured_providers: [],
+        provider_catalog: [],
+        model_role_ids: [],
+        custom_provider_api_ids: [],
+        sandbox_images: [{ id: "omp", enabled: true }],
+      });
+      expect(manage?.app.review_trigger_mode).toBe(mode);
+    }
+  });
+
   test("parseSettings separates configured state from the catalog", () => {
     const manageBase = {
       can_manage: true,
@@ -252,6 +307,7 @@ describe("members/apps/settings parsers", () => {
         created_by: "mallory",
         last_webhook_at: null,
         sandbox_image_id: "omp",
+        review_trigger_mode: "every_push",
       },
       keys: [],
       model_chain: null,
@@ -345,6 +401,7 @@ describe("members/apps/settings parsers", () => {
         created_by: "mallory",
         last_webhook_at: null,
         sandbox_image_id: "omp",
+        review_trigger_mode: "every_push",
       },
       installations: [],
       deliveries: [],
@@ -365,6 +422,7 @@ describe("members/apps/settings parsers", () => {
           created_by: "mallory",
           last_webhook_at: null,
           sandbox_image_id: "omp",
+          review_trigger_mode: "every_push",
         },
       }),
     ).toBeNull();
@@ -380,6 +438,7 @@ describe("members/apps/settings parsers", () => {
           created_by: "mallory",
           last_webhook_at: null,
           sandbox_image_id: "omp",
+          review_trigger_mode: "every_push",
         },
         installations: [],
         deliveries: [],
@@ -457,6 +516,7 @@ describe("provider catalog rows + add selection", () => {
       created_by: "mallory",
       last_webhook_at: null,
       sandbox_image_id: "omp",
+      review_trigger_mode: "every_push",
     },
     keys: [],
     model_chain: null,

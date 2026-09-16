@@ -23,10 +23,15 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, test } from "bun:test";
 import { createMigratedTestD1, createTestD1 } from "../store/helpers";
-import { createAppsStore } from "../../src/dashboard/apps-store";
+import { createAppsStore, REVIEW_TRIGGER_MODES } from "../../src/dashboard/apps-store";
 import { createSecretbox } from "../../src/dashboard/secretbox";
 import type { D1Like } from "../../src/store/types";
-import type { CreateAppInput, GithubAppMetadataInput, GithubAppRow } from "../../src/dashboard/apps-store";
+import type {
+  CreateAppInput,
+  GithubAppMetadataInput,
+  GithubAppRow,
+  ReviewTriggerMode,
+} from "../../src/dashboard/apps-store";
 
 const MIGRATIONS_DIR = join(import.meta.dir, "../../migrations");
 
@@ -469,6 +474,78 @@ describe("apps-store sandbox image selection (migration 0018)", () => {
     const row = (await store(db).getAppById(app.id))!;
     expect(row.deleted_at).not.toBeNull();
     expect(row.updated_at).toBe(deleted.updated_at); // the refused write bumped nothing
+  });
+});
+
+describe("apps-store review trigger mode (migration 0022)", () => {
+  /** createMigratedD1 (0004/0005) + the review_trigger_mode column. */
+  function createTriggerModeD1(): ReturnType<typeof createTestD1> {
+    const db = createMigratedD1();
+    applyMigration(db, "0022_app_trigger_mode.sql");
+    return db;
+  }
+
+  test("0022 applies over a DB with live rows: they materialize to the 'every_push' default (spec §2 — today's behavior preserved)", async () => {
+    const db = createMigratedD1();
+    const app = await seedApp(db); // the row EXISTS before the ALTER
+    expect(() => applyMigration(db, "0022_app_trigger_mode.sql")).not.toThrow();
+    const stored = db.raw.query("SELECT review_trigger_mode FROM github_apps WHERE id = ?").get(app.id) as {
+      review_trigger_mode: string;
+    };
+    expect(stored.review_trigger_mode).toBe("every_push");
+  });
+
+  test("createApp omits the column: the 0022 DDL default seeds 'every_push'", async () => {
+    const db = createTriggerModeD1();
+    const app = await seedApp(db);
+    expect(app.review_trigger_mode).toBe("every_push");
+  });
+
+  test("setReviewTriggerMode round-trips every vocabulary mode, bumps updated_at, and reports the change", async () => {
+    const db = createTriggerModeD1();
+    const app = await seedApp(db);
+    for (const mode of REVIEW_TRIGGER_MODES) {
+      rawRun(db, "UPDATE github_apps SET updated_at = '2026-01-01 00:00:00' WHERE id = ?", app.id);
+      expect(await store(db).setReviewTriggerMode(app.id, mode)).toBe(true);
+      const row = (await store(db).getAppById(app.id))!;
+      expect(row.review_trigger_mode).toBe(mode);
+      expect(row.updated_at).not.toBe("2026-01-01 00:00:00"); // an operator mutation
+    }
+    // An unknown app id changed nothing (the setAppStatus convention).
+    expect(await store(db).setReviewTriggerMode("no-such-id", "manual")).toBe(false);
+  });
+
+  test("setReviewTriggerMode throws on an off-vocabulary mode BEFORE any write (the store-enforced value domain)", async () => {
+    const db = createTriggerModeD1();
+    const app = await seedApp(db);
+    rawRun(db, "UPDATE github_apps SET updated_at = '2026-01-01 00:00:00' WHERE id = ?", app.id);
+    for (const bogus of ["whenever", "", "EVERY_PUSH", "open "]) {
+      await expect(store(db).setReviewTriggerMode(app.id, bogus as ReviewTriggerMode)).rejects.toThrow(
+        /is not on the vocabulary/,
+      );
+    }
+    const row = (await store(db).getAppById(app.id))!;
+    expect(row.review_trigger_mode).toBe("every_push"); // untouched — zero rows written
+    expect(row.updated_at).toBe("2026-01-01 00:00:00"); // and updated_at did not churn
+  });
+
+  test("setReviewTriggerMode refuses soft-deleted apps (a deleted app is never mutated)", async () => {
+    const db = createTriggerModeD1();
+    const app = await seedApp(db);
+    await store(db).softDeleteApp(app.id);
+    const deleted = (await store(db).getAppById(app.id))!;
+    expect(await store(db).setReviewTriggerMode(app.id, "manual")).toBe(false);
+    const row = (await store(db).getAppById(app.id))!;
+    expect(row.review_trigger_mode).toBe("every_push");
+    expect(row.updated_at).toBe(deleted.updated_at); // the refused write bumped nothing
+  });
+
+  test("the 0022 CHECK is the last-line backstop: a raw off-vocabulary write is unrepresentable", async () => {
+    const db = createTriggerModeD1();
+    const app = await seedApp(db);
+    expect(() =>
+      rawRun(db, "UPDATE github_apps SET review_trigger_mode = 'whenever' WHERE id = ?", app.id),
+    ).toThrow(/CHECK constraint failed/);
   });
 });
 
