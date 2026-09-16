@@ -509,6 +509,44 @@ describe("classifyEvent — bot mention grammar (spec §3 standalone token)", ()
   });
 });
 
+describe("classifyEvent — bot mention grammar: ASCII-restricted folding (QC F-001/S-1)", () => {
+  const K_SLUG: ReviewTriggerContext = { mode: "every_push", appSlug: "k-app" };
+  const I_SLUG: ReviewTriggerContext = { mode: "every_push", appSlug: "bot-i" };
+  const NOT_A_MENTION = {
+    kind: "ignore",
+    reason: "comment body does not mention the App bot",
+  } as const;
+
+  test("plain-ASCII control: the same k/i slug shapes match as before (behavior unchanged)", () => {
+    expect(classifyMention("@k-app", K_SLUG).kind).toBe("job");
+    expect(classifyMention("@K-App", K_SLUG).kind).toBe("job");
+    expect(classifyMention("@bot-i", I_SLUG).kind).toBe("job");
+    expect(classifyMention("@Bot-I", I_SLUG).kind).toBe("job");
+  });
+
+  test("U+212A KELVIN SIGN never folds into a k of the slug (no phantom mention)", () => {
+    // In place of the leading k: String.toLowerCase() built "@k-app" in a
+    // folded copy, but the ORIGINAL body never contains the mention.
+    expect(classifyMention("@\u212A-app", K_SLUG)).toEqual(NOT_A_MENTION);
+    // Same for a KELVIN SIGN continuing a real leading k (still not `@k-app`).
+    expect(classifyMention("@k\u212A-app", K_SLUG)).toEqual(NOT_A_MENTION);
+  });
+
+  test("U+0130 never folds into the trailing i of an i-ending slug (no boundary-opening match)", () => {
+    // In place of the trailing i: the folded copy matched "@bot-i" and its
+    // combining dot opened the after-boundary; the original text does not
+    // contain the mention at all.
+    expect(classifyMention("@bot-\u0130", I_SLUG)).toEqual(NOT_A_MENTION);
+    expect(classifyMention("@bot-\u0130x", I_SLUG)).toEqual(NOT_A_MENTION);
+  });
+
+  test("a non-ASCII character before `@` is not a login continuation: a literal mention still matches", () => {
+    // Boundary characters are read from the ORIGINAL body against the ASCII
+    // class — U+0130 is outside [A-Za-z0-9-], so it cannot close the boundary.
+    expect(classifyMention("\u0130 @bot-i please", I_SLUG).kind).toBe("job");
+  });
+});
+
 describe("classifyEvent — bot mention actor allowlist (B5)", () => {
   test("the PR author is allowed", () => {
     const outcome = classifyEvent(

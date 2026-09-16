@@ -44,34 +44,72 @@ export type ReviewTriggerContext = { mode: ReviewTriggerMode; appSlug: string };
  * `@` and immediately after the slug are BOTH outside this set (absent
  * counts as outside). Hyphens continue a login, so `@slug-other` /
  * `@slugbot` never match and an email-shaped `name@slug.host` never matches.
+ * Always evaluated against the ORIGINAL body text, never a case-folded copy
+ * (see bodyMentionsApp).
  */
-const LOGIN_CONTINUATION = /[a-z0-9-]/;
+const LOGIN_CONTINUATION = /[A-Za-z0-9-]/;
+
+/**
+ * ASCII-restricted case-insensitive equality for two single body characters:
+ * identical, or both ASCII (code unit ≤ 127) with the same toLowerCase()
+ * form. `String.toLowerCase()` alone is a Unicode SUPERSET of ASCII folding
+ * (U+212A KELVIN SIGN folds to `k`, U+0130 folds to `i` + combining dot), so
+ * it must never decide a match — a non-ASCII character never equals an ASCII
+ * letter here (QC F-001/S-1).
+ */
+function asciiFoldEquals(a: string, b: string): boolean {
+  if (a === b) {
+    return true;
+  }
+  if (a.charCodeAt(0) > 127 || b.charCodeAt(0) > 127) {
+    return false;
+  }
+  return a.toLowerCase() === b.toLowerCase();
+}
 
 /**
  * Whether `body` mentions the App's bot: contains `@{appSlug}` (ASCII
  * case-insensitive, literal) as a standalone token per the LOGIN_CONTINUATION
  * boundary rule. Any position in the body; the mention IS the entire
  * grammar (spec §3 — no wording, no commands).
+ *
+ * The scan runs over the ORIGINAL body: the case fold is applied
+ * per-character via asciiFoldEquals (ASCII-only), and both boundary
+ * characters are read from the original text. A whole-string
+ * `toLowerCase()` copy would corrupt the grammar in both directions
+ * (QC F-001/S-1): Unicode-only folds fabricate occurrences that do not
+ * exist in the original (`@<KELVIN>-bot` lowering to `@k-bot`) and the
+ * length change (U+0130 is one code unit lowering to two) shifts every
+ * index after the fold, misreading both boundaries. An empty slug never
+ * matches — fail-safe: no trigger rather than a spurious one.
  */
 function bodyMentionsApp(body: string, appSlug: string): boolean {
   if (!appSlug) {
     return false;
   }
-  const haystack = body.toLowerCase();
   const needle = `@${appSlug}`.toLowerCase();
-  let from = 0;
-  for (;;) {
-    const idx = haystack.indexOf(needle, from);
-    if (idx === -1) {
-      return false;
+  let i = body.indexOf("@");
+  while (i !== -1) {
+    const end = i + needle.length;
+    if (end <= body.length) {
+      let matched = true;
+      for (let j = 1; j < needle.length; j++) {
+        if (!asciiFoldEquals(body[i + j]!, needle[j]!)) {
+          matched = false;
+          break;
+        }
+      }
+      if (matched) {
+        const before = i > 0 ? body[i - 1]! : "";
+        const after = end < body.length ? body[end]! : "";
+        if (!LOGIN_CONTINUATION.test(before) && !LOGIN_CONTINUATION.test(after)) {
+          return true;
+        }
+      }
     }
-    const before = idx > 0 ? haystack[idx - 1]! : "";
-    const after = idx + needle.length < haystack.length ? haystack[idx + needle.length]! : "";
-    if (!LOGIN_CONTINUATION.test(before) && !LOGIN_CONTINUATION.test(after)) {
-      return true;
-    }
-    from = idx + 1;
+    i = body.indexOf("@", i + 1);
   }
+  return false;
 }
 
 /**
