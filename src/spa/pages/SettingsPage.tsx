@@ -24,6 +24,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 import { ProviderCombobox } from "../components/provider-combobox";
 import { SectionCard, SectionCardTitle, SectionGroup } from "../components/SectionCard";
 import { fetchJson, postForm } from "../api";
@@ -35,10 +36,12 @@ import {
   activeChainTabId,
   DEFAULT_CHAIN_NAME,
   isPaused,
+  isReviewTriggerMode,
   modelChainTabs,
   parseModels,
   parseSettings,
   providerFormKind,
+  REVIEW_TRIGGER_MODES,
   seatRoleValues,
   seatSelectValue,
   selectedCatalogProvider,
@@ -47,6 +50,7 @@ import {
   type ChainTab,
   type ConfiguredProvider,
   type ModelOptionGroup,
+  type ReviewTriggerMode,
   type SettingsAppMeta,
   type SettingsManagePayload,
   type SettingsPayload,
@@ -366,6 +370,17 @@ function SettingsView({
   }
 
   /**
+   * The review trigger mode save (spec review-trigger-policy §2): the
+   * same pinned-ops POST family as pause/resume — `runPinnedWithBody`
+   * resolves the keyed 400 (`settings.error.triggerModeUnknown`) through
+   * the shared settingsErrorMessage resolver and lands the stored value
+   * via the awaited background reload.
+   */
+  async function runTriggerMode(mode: ReviewTriggerMode): Promise<OpNotice> {
+    return runPinnedWithBody(`/dashboard/apps/${app.slug}/review-trigger-mode`, { mode });
+  }
+
+  /**
    * POST a pinned ops path and resolve the outcome to the calling card.
    * Options: `successMessage` differentiates an outcome the generic
    * "Changes saved." would misrepresent; `reload: false` skips the background
@@ -474,7 +489,7 @@ function SettingsView({
         <AppInfoCard locale={locale} app={app} canManage={payload.can_manage} />
 
         {payload.can_manage ? (
-          <OpsCard locale={locale} payload={payload} onPending={setPending} notice={opsNotice} />
+          <OpsCard locale={locale} payload={payload} onPending={setPending} notice={opsNotice} onTriggerMode={runTriggerMode} />
         ) : (
           <HealthCard locale={locale} payload={payload} />
         )}
@@ -888,12 +903,15 @@ function OpsCard({
   payload,
   onPending,
   notice,
+  onTriggerMode,
 }: {
   locale: SpaBoot["locale"];
   payload: SettingsPayload;
   onPending: (action: PendingAction) => void;
   /** The confirmed ops outcome (pause/resume/disable/enable/delete — delete carries its own copy). */
   notice: OpNotice | null;
+  /** The review-trigger-mode save (the mode control's POST, resolved back to its own region). */
+  onTriggerMode: (mode: ReviewTriggerMode) => Promise<OpNotice>;
 }) {
   const { app } = payload;
   const paused = isPaused(app);
@@ -904,6 +922,12 @@ function OpsCard({
         <CardDescription>{t(locale, "settings.opsCopy")}</CardDescription>
       </CardHeader>
       <CardContent className="flex flex-col gap-6">
+        <ReviewTriggerControl
+          locale={locale}
+          slug={app.slug}
+          mode={app.review_trigger_mode}
+          onTriggerMode={onTriggerMode}
+        />
         <div className="flex flex-col gap-3">
           <div className="flex flex-wrap gap-2">
             {app.status === "active" ? (
@@ -937,6 +961,109 @@ function OpsCard({
         <HealthBody locale={locale} payload={payload} />
       </CardContent>
     </SectionCard>
+  );
+}
+
+/**
+ * The App's exact bot-mention string (spec review-trigger-policy §3):
+ * the canonical GitHub form `@{slug}[bot]`. Typing this in a PR comment
+ * (re-)starts a review in every trigger mode.
+ */
+export function botMention(slug: string): string {
+  return `@${slug}[bot]`;
+}
+
+/** Localized segment labels; the wire values stay verbatim (spec §2). */
+const REVIEW_TRIGGER_MODE_LABEL_KEYS: Record<ReviewTriggerMode, DictionaryKey> = {
+  open: "settings.triggerModeOpen",
+  every_push: "settings.triggerModeEveryPush",
+  manual: "settings.triggerModeManual",
+};
+
+/**
+ * Review trigger mode (spec review-trigger-policy §2): the per-App
+ * cadence segmented control beside the review toggle, plus the §3 operator
+ * visibility — the exact mention string this App answers to. The control
+ * saves on selection through the pinned-ops POST family (body `mode`), so a
+ * keyed 400 (`settings.error.triggerModeUnknown`) resolves localized via the
+ * shared resolver and the awaited background reload lands the stored value.
+ * The selection mirrors the payload (the RuntimeImageEditor discipline): a
+ * failed save reverts to the stored mode once the reload lands. Radix's
+ * empty-string deselect (clicking the active segment) is not a mode and
+ * never reaches the wire.
+ */
+export function ReviewTriggerControl({
+  locale,
+  slug,
+  mode,
+  onTriggerMode,
+}: {
+  locale: SpaBoot["locale"];
+  slug: string;
+  mode: ReviewTriggerMode;
+  onTriggerMode: (mode: ReviewTriggerMode) => Promise<OpNotice>;
+}) {
+  const [selected, setSelected] = useState<ReviewTriggerMode>(mode);
+  const [busy, setBusy] = useState(false);
+  // The control's own region: this save's outcome renders here, next to
+  // the trigger — never through the card's dialog-ops region above.
+  const [notice, setNotice] = useState<OpNotice | null>(null);
+
+  // Server-state mirror: after this save's (or any op's) background reload
+  // lands a fresh payload, the selection tracks the stored mode — a failed
+  // save reverts instead of leaving the optimistic value (the
+  // sandbox-image editor's identical effect).
+  useEffect(() => {
+    setSelected(mode);
+  }, [mode]);
+
+  async function save(next: string): Promise<void> {
+    if (!isReviewTriggerMode(next) || next === selected) return;
+    setBusy(true);
+    try {
+      setNotice(await onTriggerMode(next));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  const mention = botMention(slug);
+
+  return (
+    <div className="flex flex-col gap-2">
+      <span className="text-sm font-medium">{t(locale, "settings.triggerMode")}</span>
+      <div className="w-fit">
+        <ToggleGroup
+          type="single"
+          variant="outline"
+          size="sm"
+          value={selected}
+          disabled={busy}
+          onValueChange={(value) => void save(value)}
+          aria-label={t(locale, "settings.triggerMode")}
+        >
+          {REVIEW_TRIGGER_MODES.map((triggerMode) => (
+            <ToggleGroupItem key={triggerMode} value={triggerMode} title={triggerMode}>
+              {t(locale, REVIEW_TRIGGER_MODE_LABEL_KEYS[triggerMode])}
+            </ToggleGroupItem>
+          ))}
+        </ToggleGroup>
+      </div>
+      <p className="text-xs text-muted-foreground">
+        {t(locale, "settings.triggerModeMention")}{" "}
+        {/* The mention renders as ONE text node, so a click-drag selects /
+            copies the exact string; the plain form rides the title and the
+            localized aria label (spec §3 operator visibility). */}
+        <code
+          className="rounded bg-muted px-1 py-0.5 font-mono text-foreground"
+          title={mention}
+          aria-label={t(locale, "settings.triggerModeMentionAria", { mention })}
+        >
+          {mention}
+        </code>
+      </p>
+      <NoticeRegion notice={notice} />
+    </div>
   );
 }
 
