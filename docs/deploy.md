@@ -668,8 +668,10 @@ warning per deploy. To clear it, set `ADMIN_LOGINS` (plain Worker **var,
 not a secret** — login names are public identity; § Secrets and vars
 inventory) in the dashboard's Worker variable settings or `wrangler.jsonc`
 `vars` and redeploy (`keep_vars` preserves dashboard-managed values across
-automated deploys). Transport/API errors inside the check stay silent: the
-warning fires only on a positively observed unset.
+automated deploys). Transport/API errors inside the check stay silent, and
+a 200 response whose body fails the success-payload check (malformed JSON
+or `success != true`) degrades to the same silence: the warning fires only
+on a positively observed unset.
 
 ## Rollback
 

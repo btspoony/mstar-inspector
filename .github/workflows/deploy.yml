@@ -100,7 +100,7 @@ jobs:
         run: |
           ok=0
           for _ in 1 2 3; do
-            if curl -sf https://mstar-inspector.42ch.dev/healthz >/dev/null; then
+            if curl -sf --max-time 30 --connect-timeout 5 https://mstar-inspector.42ch.dev/healthz >/dev/null; then
               ok=1
               break
             fi
@@ -126,8 +126,13 @@ jobs:
       # same rule as src/dashboard/users.ts parseAdminLogins.
       - name: "Smoke: warn if ADMIN_LOGINS unset (first-login admin fallback)"
         run: |
-          settings=$(curl -sf -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" \
+          settings=$(curl -sf --max-time 30 --connect-timeout 5 -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" \
             "https://api.cloudflare.com/client/v4/accounts/$CLOUDFLARE_ACCOUNT_ID/workers/scripts/mstar-inspector/settings") || settings=""
+          # A 200 with a malformed / non-success body is NOT a positively
+          # observed unset: jq must never read a parse failure as an empty
+          # ADMIN_LOGINS, so an unparseable payload degrades to the same
+          # silent path as a transport error.
+          printf '%s' "$settings" | jq -e '.success == true' >/dev/null 2>&1 || settings=""
           if [ -n "$settings" ]; then
             value=$(printf '%s' "$settings" \
               | jq -r '[.result.bindings[]? | select(.name == "ADMIN_LOGINS") | if .type == "secret_text" then "set" else (.text // "") end] | join("")' \
