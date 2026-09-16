@@ -168,6 +168,10 @@ describe("save flow + 400 fallback contract (source pins)", () => {
     // a failed save reverts instead of leaving the optimistic value.
     expect(controlBody).toContain("setSelected(mode);");
     expect(controlBody).toContain("}, [mode]);");
+    // Success-path echo (never optimistic): the save updates the selection
+    // only after the POST resolves success (success = stored) — the highlight
+    // moves immediately on success, and a failure still resyncs via the mirror.
+    expect(controlBody).toContain('if (outcome.kind === "success") setSelected(next);');
     // The save is busy-gated (one POST at a time) and reports into the
     // control's own region, never the card's dialog-ops region.
     expect(controlBody).toContain("disabled={busy}");
