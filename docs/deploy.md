@@ -644,6 +644,33 @@ Worker rollback.
   security-motivated. A registered App's encrypted credentials stay valid
   across a Worker rollback (the key is unchanged).
 
+### 6. ADMIN_LOGINS bootstrap warning (deploy-time)
+
+The Deploy workflow's post-deploy smoke emits a **`::warning`** run
+annotation when the deployed Worker has **no usable `ADMIN_LOGINS` value**.
+The step reads the Worker's live settings via the Cloudflare API (NOT
+`wrangler secret list` — `ADMIN_LOGINS` is a plain var, so a secret listing
+never shows it) and treats a missing `ADMIN_LOGINS` binding, or one whose
+value is blank/comma-only, as unset — mirroring `parseAdminLogins`
+(`src/dashboard/users.ts`) and its blank/comma-only rule, modulo whitespace
+trimming, which the smoke check additionally strips.
+
+What the warning means: with `ADMIN_LOGINS` unset and an **empty
+`dashboard_users` table**, the first OAuth login becomes admin (the
+first-login fallback, `bootstrapDashboardAccess`). The fallback is
+**self-disarming** — once any user row exists, unknown logins are denied
+(403, zero cookies) until an admin invites them. The warning exists so the
+fallback is never silently armed: at go-live, either set `ADMIN_LOGINS`
+first or knowingly claim the first-login admin identity.
+
+It is visibility, not a gate — the deploy succeeds either way, at most one
+warning per deploy. To clear it, set `ADMIN_LOGINS` (plain Worker **var,
+not a secret** — login names are public identity; § Secrets and vars
+inventory) in the dashboard's Worker variable settings or `wrangler.jsonc`
+`vars` and redeploy (`keep_vars` preserves dashboard-managed values across
+automated deploys). Transport/API errors inside the check stay silent: the
+warning fires only on a positively observed unset.
+
 ## Rollback
 
 > Rollback is a **manual human action** — the Deploy workflow never rolls
