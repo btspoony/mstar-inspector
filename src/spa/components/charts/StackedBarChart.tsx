@@ -6,7 +6,7 @@
  * merge-classes or category slugs). Replaces the retired aggregate
  * BarChart on the two insights stat cards.
  *
- * Component API (the chart discipline): `{ buckets, series, locale,
+ * Component API (the chart discipline): `{ buckets, series,
  * ariaLabel }`. `buckets` = the payload's findings_distribution rows (the
  * page merges the schema-permitted "" category key into "uncategorized"
  * before passing — QC F-004 semantics, one layer down); the
@@ -22,7 +22,11 @@
  * best-practices/spa-recharts-token-charts.md): fixed numeric width/height
  * + fluid wrapper (`style={{ width: "100%", height: "auto" }}`),
  * `isAnimationActive={false}` on every Bar, named recharts imports, no
- * ResponsiveContainer. Series colors ride charts.css `.chart-fill-*` class
+ * ResponsiveContainer. The width number comes from useContainerWidth —
+ * the measured container width client-side, the designed 560 default on
+ * the static/SSR face (v0.3.4 round: true-size rendering, no viewBox
+ * upscale on wide cards). Series colors ride charts.css `.chart-fill-*`
+ * class
  * rules only — never presentation-attribute var(), never raw hex. Legend =
  * the HTML legend row (`.chart-legend` + `.chart-swatch-*`
  * background-color twins derived from the series fill classes), NOT
@@ -34,8 +38,9 @@
  *
  * A11y floor (carried across the chart rework): role=img + aria-label + svg `<title>`;
  * every bucket stays on the axis (zero-count buckets are honest grid
- * columns — time continuity, AC-C) with deterministic M/D · M月D日 date
- * labels per `locale` (>8 buckets thin to every-other labels, first bucket
+ * columns — time continuity, AC-C) with deterministic pinned `M/D` date
+ * labels (dateLabel.ts, every locale — 2026-09-16 user-feedback pin)
+ * (>8 buckets thin to every-other labels, first bucket
  * always labeled — the TrendChart semantics). Bucket totals read off the
  * y ticks and exact series counts ride the tooltip, so the chart is never
  * the numbers' only carrier; the page-level summary lines and empty states
@@ -44,9 +49,10 @@
  * Empty state: owned by the page — empty buckets or empty series render
  * null, never a bare axis.
  */
-import type { Locale } from "../../../i18n";
 import { Bar as RBar, BarChart as RBarChart, Tooltip, XAxis, YAxis } from "recharts";
 import "./charts.css";
+import { formatDateLabel } from "./dateLabel";
+import { useContainerWidth } from "./useContainerWidth";
 
 /** One closed-vocabulary stacked series: the page-mapped label + fill class. */
 export interface StackedSeries {
@@ -71,27 +77,11 @@ export interface DistributionBucket {
   by_category: Record<string, number>;
 }
 
-/**
- * Localized bucket_start axis/tooltip label from an ISO `YYYY-MM-DD`
- * string — "M/D" (en) / "M月D日" (zh_CN). Parsed manually (no Intl) so bun
- * SSR, workerd, and the browser agree byte for byte; a non-ISO value falls
- * back to the raw string. Same grammar as TrendChart's formatWeekLabel —
- * kept local so TrendChart.tsx stays byte-identical.
- */
-function formatBucketDateLabel(iso: string, locale: Locale): string {
-  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(iso);
-  if (!match) return iso;
-  const month = Number(match[2]);
-  const day = Number(match[3]);
-  return locale === "zh_CN" ? `${month}月${day}日` : `${month}/${day}`;
-}
-
 /** The HTML-legend swatch twin of a series fill class: chart-fill-* → chart-swatch-*. */
 function swatchClass(fillClass: string): string {
   return fillClass.replace(/^chart-fill-/, "chart-swatch-");
 }
 
-const WIDTH = 560;
 const LEGEND_H = 24;
 const CHART_H = 190 - LEGEND_H;
 const PAD_TOP = 4;
@@ -104,14 +94,18 @@ const STACK_ID = "findings";
 export function StackedBarChart({
   buckets,
   series,
-  locale,
   ariaLabel,
 }: {
   buckets: readonly DistributionBucket[];
   series: readonly StackedSeries[];
-  locale: Locale;
   ariaLabel: string;
 }) {
+  // Measured container width (useContainerWidth): the default-560 static/SSR
+  // face client-side becomes the real container width, so the viewBox never
+  // upscales and the designed 10px ticks stay true-size. Called before the
+  // empty-state return (Rules of Hooks).
+  const [containerRef, width] = useContainerWidth();
+
   if (buckets.length === 0 || series.length === 0) return null;
 
   // Flat rows for recharts: one column per bucket, one numeric field per
@@ -131,7 +125,7 @@ export function StackedBarChart({
   }));
 
   return (
-    <>
+    <div ref={containerRef}>
       <div className="chart-legend">
         {series.map((s) => (
           <span key={s.key} className="chart-legend-item">
@@ -142,7 +136,7 @@ export function StackedBarChart({
       </div>
       <RBarChart
         data={data}
-        width={WIDTH}
+        width={width}
         height={CHART_H}
         margin={{ top: PAD_TOP, right: PAD_R, bottom: 0, left: 0 }}
         className="chart-frame"
@@ -154,14 +148,14 @@ export function StackedBarChart({
         <XAxis
           dataKey="bucket_start"
           interval={data.length > X_LABEL_MAX_VISIBLE ? 1 : 0}
-          tickFormatter={(bucket: string) => formatBucketDateLabel(bucket, locale)}
+          tickFormatter={(bucket: string) => formatDateLabel(bucket)}
           tickLine={false}
           height={AXIS_H}
         />
         <YAxis width={Y_AXIS_W} allowDecimals={false} tickLine={false} />
         <Tooltip
           cursor={false}
-          labelFormatter={(bucket) => formatBucketDateLabel(String(bucket), locale)}
+          labelFormatter={(bucket) => formatDateLabel(String(bucket))}
           contentStyle={{
             backgroundColor: "var(--card)",
             border: "1px solid var(--border)",
@@ -181,6 +175,6 @@ export function StackedBarChart({
           />
         ))}
       </RBarChart>
-    </>
+    </div>
   );
 }
