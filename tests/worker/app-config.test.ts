@@ -145,6 +145,10 @@ function createAppConfigD1(): ReturnType<typeof createTestD1> {
   // 0019: the settings JSON GET reads/writes the five github_*
   // metadata columns — the route must run on the production shape.
   applyMigration(db, "0019_github_apps_metadata.sql");
+  // 0022: the settings read face serves github_apps.review_trigger_mode
+  // (the SPA mode control's value) and the trigger-mode route validates
+  // against the CHECK enum — the route tests run on the production shape.
+  applyMigration(db, "0022_app_trigger_mode.sql");
   return db;
 }
 
@@ -1438,6 +1442,23 @@ describe("sandbox image selection (payload + op=save-sandbox-image)", () => {
       .get(app.id) as { sandbox_image_id: string; updated_at: string };
     expect(row.sandbox_image_id).toBe("omp");
     expect(row.updated_at).toBe(app.updated_at); // ada's refused save touched nothing
+  });
+
+  test("the settings read face carries app.review_trigger_mode on BOTH faces (the SPA mode control's value)", async () => {
+    // The seeded row never chose a mode, so the column default 'every_push'
+    // is what both faces must serve (spec review-trigger-policy §2: default
+    // preserves today's behavior; unset renders as every_push).
+    const { db } = await seededWorld();
+    const manage = await get(SETTINGS_API, `${SESSION_COOKIE}=${await sessionCookie("mallory")}`, makeEnv(db));
+    expect(manage.status).toBe(200);
+    expect(((await manage.json()) as { app: { review_trigger_mode: string } }).app.review_trigger_mode).toBe(
+      "every_push",
+    );
+    const member = await get(SETTINGS_API, `${SESSION_COOKIE}=${await sessionCookie("hubot")}`, makeEnv(db));
+    expect(member.status).toBe(200);
+    expect(((await member.json()) as { app: { review_trigger_mode: string } }).app.review_trigger_mode).toBe(
+      "every_push",
+    );
   });
 });
 

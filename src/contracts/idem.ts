@@ -16,7 +16,8 @@ export const IDEMPOTENCY_SECONDS = 86400;
 /**
  * Build the KV idempotency key: `idem:{installation_id}:{owner}/{repo}:{pr_number}:{head_sha}`.
  * Throws on empty head_sha — a null/empty sha must never become a KV key
- * (compass contracts B: `/review` has no sha → enqueue without KV write).
+ * (compass contracts B: a comment mention has no sha → enqueue without KV
+ * write).
  */
 export function idemKey(key: IdempotencyKey): string {
   if (!key.head_sha) {

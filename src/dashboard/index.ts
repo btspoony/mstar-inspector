@@ -56,7 +56,13 @@ import {
   type ManifestHoldPayload,
 } from "./manifest";
 import { GITHUB_CODE_SHAPE } from "./github-code-shape";
-import { createAppsStore, type DeliverySummary, type GithubAppRow } from "./apps-store";
+import {
+  createAppsStore,
+  REVIEW_TRIGGER_MODES,
+  type DeliverySummary,
+  type GithubAppRow,
+  type ReviewTriggerMode,
+} from "./apps-store";
 import { fetchAppMetadata, isGithubMetadataStale } from "./github-app-metadata";
 import { SecretboxKeyError, createSecretbox } from "./secretbox";
 import {
@@ -1111,6 +1117,57 @@ async function appReviewAction(
 dashboardApp.post("/apps/:slug/pause", (c) => appReviewAction(c, "pause"));
 dashboardApp.post("/apps/:slug/resume", (c) => appReviewAction(c, "resume"));
 
+// --- Per-App review trigger mode (spec review-trigger-policy §2, pinned
+// action path beside pause/resume) ---
+//
+// The App's auto-trigger selection: 'open' (first open only) |
+// 'every_push' (opened + synchronize + reopened — today's behavior, the DDL
+// default) | 'manual' (never auto-review). The bot-mention comment trigger
+// is orthogonal and works in every mode (spec §3). Gate/order mirror
+// appReviewAction exactly: the per-request guard has verified membership,
+// then unknown and soft-deleted apps are equally invisible (→ 404, zero
+// writes), then creator-or-admin (→ 403 forbiddenPage, zero writes). The
+// mode is validated BEFORE any write — an unknown/invalid value fails
+// closed with the keyed settings 400 and the stored row is left unchanged
+// (no silent coercion to the default, spec §2); the store setter throws as
+// the backstop for direct callers. Success is the plain 2xx "ok" the SPA's
+// postForm treats as success (it refetches the JSON face); HTML-nav keeps
+// the pinned 302 to the settings page via settingsPostResponse — this
+// control lives on the settings page only, so unlike pause/resume the
+// target is fixed, not referer-derived.
+
+/** True exactly when `value` is a migration 0022 vocabulary mode. */
+function isReviewTriggerMode(value: string): value is ReviewTriggerMode {
+  return (REVIEW_TRIGGER_MODES as readonly string[]).includes(value);
+}
+
+/**
+ * One handler for the pinned review-trigger-mode route. The idempotent
+ * no-op case is short-circuited BEFORE the store write — selecting the
+ * already-stored mode never touches the row (a same-value UPDATE would
+ * churn updated_at, the operator-mutation timestamp — the appReviewAction
+ * discipline).
+ */
+async function appReviewTriggerModeAction(c: Context<{ Bindings: Env }>): Promise<Response> {
+  const gate = await requireMember(c);
+  if (!gate.ok) return gate.response;
+  const apps = createAppsStore(gate.db);
+  const app = await apps.getAppBySlug(c.req.param("slug") ?? "");
+  if (!app || app.deleted_at !== null) return pinnedPostMutationResponse(c, DASHBOARD_SHELL_REDIRECT, "unknown app", 404);
+  if (!canManageApp(gate.user, app)) return c.html(forbiddenPage(gate.session.login, requestLocale(c)), 403);
+  const form = await c.req.parseBody();
+  const mode = typeof form["mode"] === "string" ? form["mode"] : "";
+  if (!isReviewTriggerMode(mode)) {
+    return settings400Response(c, app.slug, SETTINGS_400_KEYS.triggerModeUnknown, { mode });
+  }
+  if (app.review_trigger_mode !== mode) {
+    await apps.setReviewTriggerMode(app.id, mode);
+  }
+  return settingsPostResponse(c, app.slug, "ok");
+}
+
+dashboardApp.post("/apps/:slug/review-trigger-mode", (c) => appReviewTriggerModeAction(c));
+
 // --- Per-App AI configuration settings (spec § Per-App BYOK) ---
 //
 // The settings family for one App: provider API keys (BYOK, masked list) and
@@ -1273,6 +1330,7 @@ const SETTINGS_400_KEYS = {
   templateNoModels: "settings.error.templateNoModels",
   templateMaterializeMax: "settings.error.templateMaterializeMax",
   sandboxImageUnknown: "settings.error.sandboxImageUnknown",
+  triggerModeUnknown: "settings.error.triggerModeUnknown",
   unknownOperation: "settings.error.unknownOperation",
 } as const satisfies Record<string, DictionaryKey>;
 
@@ -1432,6 +1490,11 @@ dashboardApp.get("/api/apps/:slug/settings", async (c) => {
         // runtime image — read-only on BOTH faces (registry id only, never
         // image-local configuration or secrets).
         sandbox_image_id: app.sandbox_image_id,
+        // The App's review trigger mode (spec review-trigger-policy §2,
+        // read face the SPA's mode control consumes) — vocabulary-checked
+        // by the column's CHECK enum, so the wire value is always one of
+        // open | every_push | manual.
+        review_trigger_mode: app.review_trigger_mode,
         // The cached public GitHub profile (migration 0019) —
         // every field nullable (NULL = never synced / absent upstream, the
         // old-row degradation) and present on BOTH faces (AC3: the

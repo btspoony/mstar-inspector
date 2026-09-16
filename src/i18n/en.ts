@@ -321,10 +321,20 @@ export const en = {
       templateMaterializeMax:
         "This App already has the maximum of {limit} custom providers — remove one before materializing another (updating an existing declaration is always allowed). Nothing was stored.",
       sandboxImageUnknown: "Unknown or disabled sandbox image — nothing was stored.",
+      triggerModeUnknown: "{mode} is not a review trigger mode — use open, every_push, or manual. Nothing was stored.",
       unknownOperation: "Unknown settings operation — resubmit one of this page's forms.",
     },
     ops: "Operations",
     opsCopy: "Pause ignores deliveries with 2xx; disable answers 404; delete is a soft-delete — all fail closed.",
+    // Review trigger mode (spec review-trigger-policy §2/§3): segment
+    // labels localize; the wire values (open / every_push / manual) and the
+    // mention string stay verbatim.
+    triggerMode: "Review trigger",
+    triggerModeOpen: "First open",
+    triggerModeEveryPush: "Every push",
+    triggerModeManual: "Manual",
+    triggerModeMention: "Mention the bot in a PR comment to (re-)start a review — works in every mode:",
+    triggerModeMentionAria: "Bot mention: {mention}",
     confirmPauseTitle: "Pause reviews for {slug}?",
     confirmPauseBody: "Webhooks stay connected — deliveries are answered and ignored until you resume.",
     confirmResumeTitle: "Resume reviews for {slug}?",

@@ -21,6 +21,7 @@ findings 落入 D1 供后续分析。
 - **一份部署，多 App 共用** —— 通过 dashboard 注册任意数量的 GitHub App；每个 App 拥有独立的 slug、加密凭据、BYOK provider keys 和模型链
 - **隔离执行** —— 每次审查运行在一次性 Cloudflare Sandbox 容器中（clone → review → 销毁），镜像内零密钥
 - **结构化结果** —— 审查产出 `mstar.review/v1` envelope（verdict + 分级 findings）持久化到 D1，为后续去重、复现统计和健康分析提供数据层
+- **按 App 的触发模式** —— 每个 App 在 settings 页选择审查何时自动启动：`open`（仅首次打开）、`every_push`（默认——打开、push、重新打开）或 `manual`（从不自动审查）；任何模式下，PR 作者或仓库所有者在 PR 评论中 @提及 App 的 bot（`@your-app-slug[bot]`）即可（重新）启动一次审查
 - **设计上 fail-closed** —— 全局 kill-switch 把总闸，每个 App 必须自带 provider key 与模型链：配置缺失的 App 审查会大声失败，绝不动用别人的凭据
 
 ## 架构

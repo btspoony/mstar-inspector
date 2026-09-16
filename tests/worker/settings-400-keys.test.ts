@@ -197,6 +197,19 @@ describe("settings 400 key transport", () => {
     });
   });
 
+  test("review-trigger-mode invalid value → keyed JSON naming the rejected mode", async () => {
+    const { db } = await seededWorld();
+    const res = await postForm("/dashboard/apps/mallorys-app/review-trigger-mode", "mallory", makeEnv(db), {
+      mode: "whenever",
+    });
+    expect(res.status).toBe(400);
+    expect(await res.json()).toEqual({
+      key: "settings.error.triggerModeUnknown",
+      message: "whenever is not a review trigger mode — use open, every_push, or manual. Nothing was stored.",
+      params: { mode: "whenever" },
+    });
+  });
+
   test("unknown op → keyed JSON", async () => {
     const { db } = await seededWorld();
     const res = await postForm(SETTINGS, "mallory", makeEnv(db), { op: "not-an-op" });

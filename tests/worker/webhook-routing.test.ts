@@ -27,6 +27,7 @@ import { join } from "node:path";
 import { Webhooks } from "@octokit/webhooks";
 import worker from "../../src/worker/index";
 import type { Env } from "../../src/worker/env";
+import { WEBHOOK_BODY_LIMIT } from "../../src/worker/webhooks";
 import { createSecretbox } from "../../src/dashboard/secretbox";
 import { createAppsStore } from "../../src/dashboard/apps-store";
 import { createTestD1 } from "../store/helpers";
@@ -45,11 +46,14 @@ function createMigratedD1(): ReturnType<typeof createTestD1> {
   // fixture can pin WHAT it records (an invalid signature lands
   // a `rejected` row, never `ok`). Both append-only / additive — the fixture
   // must stay production-shaped.
+  // 0022: github_apps.review_trigger_mode — the trigger context the route
+  // threads into classifyWebhook (spec review-trigger-policy §2).
   for (const name of [
     "0004_github_apps.sql",
     "0005_reviews_app_id.sql",
     "0008_github_apps_ops.sql",
     "0011_webhook_deliveries.sql",
+    "0022_app_trigger_mode.sql",
   ]) {
     db.raw.exec(readFileSync(join(MIGRATIONS_DIR, name), "utf8"));
   }
@@ -63,6 +67,11 @@ type SeedOptions = {
   githubAppId?: number;
   /** Tamper anchor: encrypt the webhook secret under a WRONG row AAD. */
   wrongAad?: boolean;
+  /**
+   * Per-App auto-trigger mode (migration 0022). OMITTED → the column is not
+   * written, so the row exercises the DDL DEFAULT 'every_push'.
+   */
+  reviewTriggerMode?: "open" | "every_push" | "manual";
 };
 
 /** Raw-insert an active, non-deleted github_apps row with real envelopes. */
@@ -76,14 +85,16 @@ async function seedApp(
   const webhookSecretEnc = await box.encryptSecret(opts.secret, aad);
   const privateKeyEnc = await box.encryptSecret("test-pem", `github_apps.private_key_enc:${id}`);
   const appCount = (db.raw.query("SELECT COUNT(*) AS n FROM github_apps").get() as { n: number }).n;
+  const mode = opts.reviewTriggerMode;
+  const baseArgs = [id, opts.slug, opts.githubAppId ?? 1000 + appCount, opts.slug, privateKeyEnc, webhookSecretEnc] as const;
   db.raw
     .prepare(
       `INSERT INTO github_apps
          (id, slug, github_app_id, name, private_key_enc, webhook_secret_enc,
-          created_by, status, deleted_at, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, 'tester', 'active', NULL, datetime('now'), datetime('now'))`,
+          created_by, status, deleted_at, created_at, updated_at${mode !== undefined ? ", review_trigger_mode" : ""})
+       VALUES (?, ?, ?, ?, ?, ?, 'tester', 'active', NULL, datetime('now'), datetime('now')${mode !== undefined ? ", ?" : ""})`,
     )
-    .run(id, opts.slug, opts.githubAppId ?? 1000 + appCount, opts.slug, privateKeyEnc, webhookSecretEnc);
+    .run(...(mode !== undefined ? [...baseArgs, mode] : [...baseArgs]));
   return { id, slug: opts.slug };
 }
 
@@ -330,6 +341,193 @@ describe("POST /webhook/:appSlug (per-App routing)", () => {
     expect(sent).toHaveLength(0);
   });
 
+  // 61-R1: the cap is byte-authoritative on the streamed body. The
+  // truthful-header fast path above stays; these pin the streamed read — a
+  // missing or lying header can never buffer past WEBHOOK_BODY_LIMIT, and an
+  // at-limit body still passes (the streamed-decoded rawBody is
+  // decode-identical, so the HMAC signature verifies exactly as before).
+  test("truthful content-length header over the limit → 413 fast path, zero enqueue", async () => {
+    const db = createMigratedD1();
+    await seedApp(db, { slug: "app-x", secret: "secret-x" });
+    const { queue, sent } = makeQueue();
+    const env = makeEnv(db, { REVIEW_QUEUE: queue as never });
+    const oversized = "a".repeat(WEBHOOK_BODY_LIMIT + 1);
+
+    // Gate attribution: the detail pins the HEADER fast path (not the
+    // streamed read below) — without it a 413 alone cannot tell the two
+    // gates apart.
+    const warn = mock((_msg: unknown) => {});
+    const origWarn = console.warn;
+    console.warn = warn;
+    let res: Response;
+    try {
+      res = await postWebhook(
+        "/webhook/app-x",
+        oversized,
+        { "content-length": String(oversized.length), "x-github-event": "ping" },
+        env,
+      );
+    } finally {
+      console.warn = origWarn;
+    }
+
+    expect(res.status).toBe(413);
+    expect(sent).toHaveLength(0);
+    const line = warn.mock.calls.map((call) => String(call[0])).find((s) => s.includes("webhook_body_too_large"));
+    expect(line).toBeDefined();
+    const fields = JSON.parse(line!) as { event: string; reason: string; detail: string };
+    expect(fields).toMatchObject({
+      event: "webhook_body_too_large",
+      reason: "webhook_body_too_large",
+      detail: `content_length=${WEBHOOK_BODY_LIMIT + 1}`,
+    });
+  });
+
+  test("lying short content-length + oversized body → 413 (byte count, not the header), zero enqueue", async () => {
+    const db = createMigratedD1();
+    await seedApp(db, { slug: "app-x", secret: "secret-x" });
+    const { queue, sent } = makeQueue();
+    const env = makeEnv(db, { REVIEW_QUEUE: queue as never });
+    const oversized = "a".repeat(WEBHOOK_BODY_LIMIT + 1);
+
+    // Gate attribution: the header (10) is under the limit, so the fast path
+    // cannot fire — the `read_bytes>` detail pins the STREAMED gate as the
+    // one that rejected (byte count, not the header).
+    const warn = mock((_msg: unknown) => {});
+    const origWarn = console.warn;
+    console.warn = warn;
+    let res: Response;
+    try {
+      res = await postWebhook(
+        "/webhook/app-x",
+        oversized,
+        { "content-length": "10", "x-github-event": "ping" },
+        env,
+      );
+    } finally {
+      console.warn = origWarn;
+    }
+
+    expect(res.status).toBe(413);
+    expect(sent).toHaveLength(0);
+    const line = warn.mock.calls.map((call) => String(call[0])).find((s) => s.includes("webhook_body_too_large"));
+    expect(line).toBeDefined();
+    const fields = JSON.parse(line!) as { event: string; reason: string; detail: string };
+    expect(fields).toMatchObject({
+      event: "webhook_body_too_large",
+      reason: "webhook_body_too_large",
+      detail: `read_bytes>${WEBHOOK_BODY_LIMIT}`,
+    });
+  });
+
+  test("headerless chunked oversized body → 413 + webhook_body_too_large warn, zero enqueue", async () => {
+    const db = createMigratedD1();
+    await seedApp(db, { slug: "app-x", secret: "secret-x" });
+    const { queue, sent } = makeQueue();
+    const env = makeEnv(db, { REVIEW_QUEUE: queue as never });
+    // A stream body carries no content-length (the runtime cannot know it).
+    // Two limit/2 chunks + 1 byte: the byte count crosses the cap only on
+    // the third chunk — multi-chunk accumulation, a single byte over.
+    const half = new Uint8Array(WEBHOOK_BODY_LIMIT / 2).fill(97);
+    const request = new Request("https://worker.local/webhook/app-x", {
+      method: "POST",
+      headers: { "x-github-event": "ping" },
+      body: new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(half);
+          controller.enqueue(half);
+          controller.enqueue(new Uint8Array([97]));
+          controller.close();
+        },
+      }),
+      duplex: "half",
+    });
+
+    const warn = mock((_msg: unknown) => {});
+    const origWarn = console.warn;
+    console.warn = warn;
+    let res: Response;
+    try {
+      res = await worker.fetch(request, env);
+    } finally {
+      console.warn = origWarn;
+    }
+
+    expect(res.status).toBe(413);
+    expect(sent).toHaveLength(0);
+    const line = warn.mock.calls.map((call) => String(call[0])).find((s) => s.includes("webhook_body_too_large"));
+    expect(line).toBeDefined();
+    // Gate attribution: no content-length header → the STREAMED gate fired;
+    // the detail distinguishes it from the header fast path.
+    const fields = JSON.parse(line!) as { event: string; reason: string; detail: string };
+    expect(fields).toMatchObject({
+      event: "webhook_body_too_large",
+      reason: "webhook_body_too_large",
+      detail: `read_bytes>${WEBHOOK_BODY_LIMIT}`,
+    });
+  });
+
+  test("at-limit body (exactly WEBHOOK_BODY_LIMIT bytes) → 200 accepted, enqueued (HMAC verifies the streamed rawBody)", async () => {
+    const db = createMigratedD1();
+    const appRow = await seedApp(db, { slug: "app-x", secret: "secret-x" });
+    const { queue, sent } = makeQueue();
+    const env = makeEnv(db, { REVIEW_QUEUE: queue as never });
+    // Pad the valid PR payload to EXACTLY the cap: the streamed read accepts
+    // limit bytes, and the signature only verifies if the decode was
+    // byte-identical to the buffered read (UTF-8 decode invariant).
+    const base = JSON.stringify({ ...PR_PAYLOAD, pad: "" });
+    const body = JSON.stringify({ ...PR_PAYLOAD, pad: "x".repeat(WEBHOOK_BODY_LIMIT - base.length) });
+    expect(body.length).toBe(WEBHOOK_BODY_LIMIT);
+
+    const res = await postWebhook("/webhook/app-x", body, await sigHeaders("secret-x", body), env);
+
+    expect(res.status).toBe(200);
+    expect(await res.text()).toBe("accepted");
+    expect(sent).toHaveLength(1);
+    expect(sent[0]).toMatchObject({ pr_number: 42, appRef: { appId: appRow.id } });
+  });
+
+  // At-limit pin with MULTI-BYTE content: `body.length` counts UTF-16
+  // units, so an all-ASCII at-limit body proves nothing about byte
+  // accounting — this body pads with 3-byte chars and computes the byte
+  // length explicitly (Buffer.byteLength), landing EXACTLY on
+  // WEBHOOK_BODY_LIMIT bytes while its UTF-16 length sits well under the
+  // cap. Acceptance + HMAC verify = the streamed gate counted bytes and the
+  // decode stayed byte-identical.
+  test("at-limit multi-byte UTF-8 body (exactly WEBHOOK_BODY_LIMIT bytes) → 200 accepted, enqueued (HMAC verifies)", async () => {
+    const db = createMigratedD1();
+    const appRow = await seedApp(db, { slug: "app-x", secret: "secret-x" });
+    const { queue, sent } = makeQueue();
+    const env = makeEnv(db, { REVIEW_QUEUE: queue as never });
+    const emptyPad = JSON.stringify({ ...PR_PAYLOAD, pad: "" });
+    const padBytes = WEBHOOK_BODY_LIMIT - Buffer.byteLength(emptyPad);
+    const pad = "漢".repeat(Math.floor(padBytes / 3)) + "x".repeat(padBytes % 3);
+    const body = JSON.stringify({ ...PR_PAYLOAD, pad });
+    expect(Buffer.byteLength(body)).toBe(WEBHOOK_BODY_LIMIT);
+    expect(body.length).toBeLessThan(WEBHOOK_BODY_LIMIT); // the UTF-16 trap is real
+
+    const res = await postWebhook("/webhook/app-x", body, await sigHeaders("secret-x", body), env);
+
+    expect(res.status).toBe(200);
+    expect(await res.text()).toBe("accepted");
+    expect(sent).toHaveLength(1);
+    expect(sent[0]).toMatchObject({ pr_number: 42, appRef: { appId: appRow.id } });
+  });
+
+  test("small valid webhook unchanged by the streamed cap → 200 accepted, enqueued", async () => {
+    const db = createMigratedD1();
+    await seedApp(db, { slug: "app-x", secret: "secret-x" });
+    const { queue, sent } = makeQueue();
+    const env = makeEnv(db, { REVIEW_QUEUE: queue as never });
+    const body = JSON.stringify(PR_PAYLOAD);
+
+    const res = await postWebhook("/webhook/app-x", body, await sigHeaders("secret-x", body), env);
+
+    expect(res.status).toBe(200);
+    expect(await res.text()).toBe("accepted");
+    expect(sent).toHaveLength(1);
+  });
+
   test("missing signature header → 401, zero enqueue", async () => {
     const db = createMigratedD1();
     await seedApp(db, { slug: "app-x", secret: "secret-x" });
@@ -397,7 +595,7 @@ describe("POST /webhook/:appSlug (per-App routing)", () => {
     expect(sent).toHaveLength(0);
   });
 
-  test("/review command via the per-App route enqueues the review_command payload with the appRef", async () => {
+  test("bot mention via the per-App route enqueues the issue_comment payload with the appRef", async () => {
     const db = createMigratedD1();
     const appRow = await seedApp(db, { slug: "app-x", secret: "secret-x" });
     const { queue, sent } = makeQueue();
@@ -405,7 +603,7 @@ describe("POST /webhook/:appSlug (per-App routing)", () => {
     const body = JSON.stringify({
       action: "created",
       installation: { id: 123 },
-      comment: { body: "/review" },
+      comment: { body: "@app-x please take another look" },
       issue: { number: 7, pull_request: {}, user: { login: "alice" } },
       repository: { name: "test-repo", owner: { login: "alice" } },
       sender: { type: "User", login: "alice" },
@@ -427,9 +625,76 @@ describe("POST /webhook/:appSlug (per-App routing)", () => {
       pr_number: 7,
       head_sha: null,
       action: "created",
-      triggered_by: "review_command",
+      triggered_by: "issue_comment",
       appRef: { appId: appRow.id },
     });
+  });
+
+  test("mode threading: a manual-mode App ignores pull_request.opened but a bot mention still enqueues", async () => {
+    const db = createMigratedD1();
+    const appRow = await seedApp(db, { slug: "app-x", secret: "secret-x", reviewTriggerMode: "manual" });
+    const { queue, sent } = makeQueue();
+    const env = makeEnv(db, { REVIEW_QUEUE: queue as never });
+    const prBody = JSON.stringify(PR_PAYLOAD);
+
+    const prRes = await postWebhook(
+      "/webhook/app-x",
+      prBody,
+      { "x-hub-signature-256": await signatureFor("secret-x", prBody), "x-github-event": "pull_request" },
+      env,
+    );
+
+    expect(prRes.status).toBe(200);
+    expect(sent).toHaveLength(0); // manual mode: the auto face never fires
+
+    const mentionBody = JSON.stringify({
+      action: "created",
+      installation: { id: 123 },
+      comment: { body: "@app-x" },
+      issue: { number: 7, pull_request: {}, user: { login: "alice" } },
+      repository: { name: "test-repo", owner: { login: "alice" } },
+      sender: { type: "User", login: "alice" },
+    });
+    const mentionRes = await postWebhook(
+      "/webhook/app-x",
+      mentionBody,
+      { "x-hub-signature-256": await signatureFor("secret-x", mentionBody), "x-github-event": "issue_comment" },
+      env,
+    );
+
+    expect(mentionRes.status).toBe(200);
+    expect(sent).toHaveLength(1); // the mention face works in every mode
+    expect(sent[0]).toMatchObject({
+      pr_number: 7,
+      head_sha: null,
+      triggered_by: "issue_comment",
+      appRef: { appId: appRow.id },
+    });
+  });
+
+  test("a sibling App's mention does not trigger this App (slug-keyed matching)", async () => {
+    const db = createMigratedD1();
+    await seedApp(db, { slug: "app-x", secret: "secret-x" });
+    const { queue, sent } = makeQueue();
+    const env = makeEnv(db, { REVIEW_QUEUE: queue as never });
+    const body = JSON.stringify({
+      action: "created",
+      installation: { id: 123 },
+      comment: { body: "@app-y look here" },
+      issue: { number: 7, pull_request: {}, user: { login: "alice" } },
+      repository: { name: "test-repo", owner: { login: "alice" } },
+      sender: { type: "User", login: "alice" },
+    });
+
+    const res = await postWebhook(
+      "/webhook/app-x",
+      body,
+      { "x-hub-signature-256": await signatureFor("secret-x", body), "x-github-event": "issue_comment" },
+      env,
+    );
+
+    expect(res.status).toBe(200);
+    expect(sent).toHaveLength(0);
   });
 
   test("idempotency: a second identical delivery is KV-skipped", async () => {

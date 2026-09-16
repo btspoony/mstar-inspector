@@ -86,6 +86,46 @@ function webhookInfo(event: string, detail: string, msg: string): void {
   defaultLog.info({ event, reason: event, detail }, msg);
 }
 
+/**
+ * Byte-authoritative streamed body read for the webhook cap (61-R1): reads
+ * the request stream up to `limit` bytes and UTF-8-decodes exactly those
+ * bytes — TextDecoder's default (UTF-8, non-fatal) is the same decode
+ * `request.text()` performed, so the returned string is decode-identical for
+ * HMAC signature verification. Returns null the moment the accumulated byte
+ * count exceeds `limit`: the remainder is never consumed (the stream is
+ * cancelled), so a missing, chunked, or lying `content-length` header can
+ * never buffer past the cap. `null` → the caller answers 413 with the
+ * existing `webhook_body_too_large` warn.
+ */
+async function readBodyWithinLimit(request: Request, limit: number): Promise<string | null> {
+  const stream = request.body;
+  if (stream === null) {
+    return "";
+  }
+  const reader = stream.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) {
+      break;
+    }
+    total += value.byteLength;
+    if (total > limit) {
+      void reader.cancel().catch(() => {});
+      return null;
+    }
+    chunks.push(value);
+  }
+  const bytes = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return new TextDecoder().decode(bytes);
+}
+
 // `version` rides the healthz face — additive field, `ok:true`
 // contract unchanged; displayed with the `v` prefix (tag-shaped, eyeball-
 // reconcilable). Single source = generated src/version.ts.
@@ -141,7 +181,10 @@ app.route("/dashboard", dashboardApp);
  * legacy 不落行 — it was the fallback path with no dashboard consumer).
  */
 app.post("/webhook/:appSlug", async (c) => {
-  // Body-size cap checked BEFORE buffering the body (B6).
+  // Body-size cap checked BEFORE buffering the body (B6). Two gates: the
+  // truthful over-limit header short-circuits before any byte is read, and
+  // the streamed read below is byte-authoritative (61-R1) — a missing,
+  // chunked, or lying `content-length` header never bypasses the byte count.
   const contentLength = Number(c.req.header("content-length") ?? "0");
   if (contentLength > WEBHOOK_BODY_LIMIT) {
     webhookWarn(
@@ -151,7 +194,15 @@ app.post("/webhook/:appSlug", async (c) => {
     );
     return c.text("payload too large", 413);
   }
-  const rawBody = await c.req.text();
+  const rawBody = await readBodyWithinLimit(c.req.raw, WEBHOOK_BODY_LIMIT);
+  if (rawBody === null) {
+    webhookWarn(
+      "webhook_body_too_large",
+      `read_bytes>${WEBHOOK_BODY_LIMIT}`,
+      "per-App webhook rejected with 413 — body exceeds size limit",
+    );
+    return c.text("payload too large", 413);
+  }
   const signature = c.req.header("x-hub-signature-256") ?? null;
   const eventName = c.req.header("x-github-event") ?? null;
 
@@ -229,7 +280,20 @@ app.post("/webhook/:appSlug", async (c) => {
   // cacheKey — a rotated webhook secret (same id, new envelope → new
   // secret) is rebuilt + REPLACED on the next delivery; entries are
   // structurally bounded (≤ github_apps rows) with no eviction policy.
-  const outcome = await classifyWebhook(appSecret, rawBody, signature, eventName, defaultLog, reviewEnabled, row.id);
+  // Trigger context (spec review-trigger-policy §2 read path): the
+  // already-resolved row's review_trigger_mode gates the pull_request auto
+  // face and its slug keys the issue_comment bot mention — no second
+  // lookup, no App identity beyond that.
+  const outcome = await classifyWebhook(
+    appSecret,
+    rawBody,
+    signature,
+    eventName,
+    defaultLog,
+    reviewEnabled,
+    row.id,
+    { mode: row.review_trigger_mode, appSlug: slug },
+  );
 
   // AL-20-1: best-effort delivery recording — the R2 diagnostics
   // face ("断线看得见"). ONE row per VERIFIED delivery, written immediately

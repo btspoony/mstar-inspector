@@ -40,7 +40,7 @@ M8 verifies retained earlier findings against current code and discussion, rende
 | Candidate | Owner | Trigger | Done definition |
 |---|---|---|---|
 | Check rerequested, annotations, check-suite triggers | PM/product-manager | Explicit user demand after this delivery | Approved plan, implementation evidence and updated contract |
-| `/review` command extensions | PM/product-manager | Explicit user demand revising RL-7 | Approved command/authorization contract and evidence |
+| `/review` command extensions — **closed 2026-09-17, superseded**: retired outright (not extended) per the 2026-09-17 user direction to replace the command with the bare bot-mention trigger; the bare bot-mention trigger in `review-trigger-policy.md` now governs the comment trigger. RL-7 itself is unchanged | PM/product-manager | — (resolved; no longer awaiting demand) | Delivered: trigger-mode + mention contract and acceptance evidence alongside the superseding policy |
 | Fuzzy/alias thread re-anchoring | PM/product-manager | Explicit user demand revising exact mapping | Approved plan with detection/undo story and evidence; **not implemented here** |
 
 Deferring fuzzy matching does **not** prohibit checking an existing row's original concern against current code or resolving its already-known thread. New-finding fingerprint drift alone never invalidates that association. Actual conflicting concern evidence stays unverifiable. Commit-status dual writing is a permanent non-goal.
