@@ -5,7 +5,8 @@
  * with the module: recharts owns the geometry now. The render faces are
  * pinned through react-dom/server SSR (no DOM needed — static markup
  * output, the settings-layout idiom): role/aria faces, the dual-
- * series legend, the localized date axis, >8-week label thinning, the
+ * series legend, the pinned M/D date axis (every locale — dateLabel.ts,
+ * the 2026-09-16 user-feedback pin), >8-week label thinning, the
  * zero-data faces, and the token discipline (no raw hex in sources; fills
  * ride the charts.css class rules — never presentation-attribute var(),
  * knowledge ui-bugs/svg-var-presentation-attributes.md).
@@ -48,12 +49,11 @@ import {
 
 const trendChart = (
   points: TrendPoint[],
-  overrides: { locale?: "en" | "zh_CN"; seriesLabels?: { reviews: string; findings: string }; ariaLabel?: string } = {},
+  overrides: { seriesLabels?: { reviews: string; findings: string }; ariaLabel?: string } = {},
 ) =>
   renderToStaticMarkup(
     createElement(TrendChart, {
       points,
-      locale: overrides.locale ?? "en",
       seriesLabels: overrides.seriesLabels ?? { reviews: "Reviews", findings: "Findings" },
       ariaLabel: overrides.ariaLabel ?? "Weekly trend",
     }),
@@ -101,10 +101,13 @@ describe("TrendChart SSR (recharts face)", () => {
     expect(trendChart(weeks)).toMatch(/<path [^>]*height="142"[^>]*class="recharts-rectangle chart-fill-amber-700"/);
   });
 
-  test("date x labels are localized by the locale prop", () => {
-    expect(trendChart(weeks)).toContain("8/17");
-    expect(trendChart(weeks, { locale: "zh_CN" })).toContain("8月17日");
-    expect(trendChart(weeks, { locale: "zh_CN" })).not.toContain("8/17");
+  test("date labels are the pinned M/D format in every locale (2026-09-16 user-feedback pin)", () => {
+    // The locale prop is retired: the shared formatDateLabel (dateLabel.ts)
+    // renders numeric M/D on the axis face regardless of the app locale —
+    // the zh M月D日 face never renders again.
+    const html = trendChart(weeks);
+    expect(html).toContain("8/17");
+    expect(html).not.toContain("月");
   });
 
   test("more than 8 weeks thins to every-other-week date labels", () => {
@@ -157,13 +160,12 @@ describe("StackedBarChart SSR (stacked face)", () => {
   const stackedChart = (
     buckets: DistributionBucket[],
     series: StackedSeries[],
-    overrides: { locale?: "en" | "zh_CN"; ariaLabel?: string } = {},
+    overrides: { ariaLabel?: string } = {},
   ) =>
     renderToStaticMarkup(
       createElement(StackedBarChart, {
         buckets,
         series,
-        locale: overrides.locale ?? "en",
         ariaLabel: overrides.ariaLabel ?? "Findings by severity",
       }),
     );
@@ -257,7 +259,7 @@ describe("StackedBarChart SSR (stacked face)", () => {
     expect(html.split("<path").length - 1).toBe(3);
   });
 
-  test("day and week buckets share one axis face; the locale localizes the labels", () => {
+  test("day and week buckets share one axis face; the pinned M/D label holds for both", () => {
     // The 90d window's Monday-anchored week buckets (granularity "week")
     // render the identical axis grammar as day buckets.
     const weekBuckets: DistributionBucket[] = [
@@ -269,9 +271,7 @@ describe("StackedBarChart SSR (stacked face)", () => {
       },
     ];
     expect(stackedChart(weekBuckets, severitySeries)).toContain("8/17");
-    const zh = stackedChart(weekBuckets, severitySeries, { locale: "zh_CN" });
-    expect(zh).toContain("8月17日");
-    expect(zh).not.toContain("8/17");
+    expect(stackedChart(weekBuckets, severitySeries)).not.toContain("月");
   });
 
   test("more than 8 buckets thin to every-other date labels; 8 or fewer keep every label", () => {
@@ -333,7 +333,7 @@ describe("StackedBarChart SSR (stacked face)", () => {
   });
 
   test("a hostile bucket_start renders as escaped tick text — the non-ISO fallback stays a React text node", () => {
-    // formatBucketDateLabel regex-accepts only ISO dates and falls back to
+    // formatDateLabel regex-accepts only ISO dates and falls back to
     // the raw string for anything else — the fallback must stay a React
     // text node (escaped), never raw markup on the axis face.
     const html = stackedChart(

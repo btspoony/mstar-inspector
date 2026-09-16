@@ -1,13 +1,13 @@
 ---
-version: 0.3.3
+version: 0.3.4
 name: mstar-inspector Console
-description: "Bold Signal-Cyan ops-console design system for the mstar-inspector developer dashboard. Dense, decisive, state through color + copy; one confident cyan accent on cool zinc neutrals. Dark is the default theme; light follows prefers-color-scheme until the navbar theme toggle stores a manual choice (localStorage mstar.dashboard.theme, light|dark) — the stored choice wins over the OS. Supersedes the earlier theme lock (2026-09-04, user instruction). v0.3 (AD-573) is a values-only rebase: existing token names are frozen; brand, motion, and elevation enter as additive namespaces. v0.3.1 (AD-572) flips the sans stack to self-hosted Geist Sans — unmodified full-latin woff2 binaries of geist@1.7.2 (sha256 pinned in the fonts.css header) with font-display: swap; zh text falls back to the system stack. v0.3.2 (AD-641, 2026-09-11) retires the sidebar brand accent edge — the sidebar active item wears a low-alpha brand tint (brand-700 at 12% through the --sidebar-primary shadcn bridge) with medium-weight text; hover keeps the neutral accent tint. v0.3.3 (AD-653, 2026-09-12) adds the insights daily stacked-bar chart vocabulary: severity stacks keep the frozen 700-step semantic family (red/amber/gray), category stacks join teal/purple/pink with blue-700 staying the neutral unknown-slug tone and gray-700 the uncategorized fallback — Appendix A gains their dual-theme vs-card rows."
+description: "Bold Signal-Cyan ops-console design system for the mstar-inspector developer dashboard. Dense, decisive, state through color + copy; one confident cyan accent on cool zinc neutrals. Dark is the default theme — deterministic in every browser; the navbar theme toggle stores a manual choice (localStorage mstar.dashboard.theme, light|dark) and the stored choice wins; unset renders dark (the OS preference is not consulted). Supersedes the earlier theme lock (2026-09-04, user instruction). v0.3 (AD-573) is a values-only rebase: existing token names are frozen; brand, motion, and elevation enter as additive namespaces. v0.3.1 (AD-572) flips the sans stack to self-hosted Geist Sans — unmodified full-latin woff2 binaries of geist@1.7.2 (sha256 pinned in the fonts.css header) with font-display: swap; zh text falls back to the system stack. v0.3.2 (AD-641, 2026-09-11) retires the sidebar brand accent edge — the sidebar active item wears a low-alpha brand tint (brand-700 at 12% through the --sidebar-primary shadcn bridge) with medium-weight text; hover keeps the neutral accent tint. v0.3.3 (AD-653, 2026-09-12) adds the insights daily stacked-bar chart vocabulary: severity stacks keep the frozen 700-step semantic family (red/amber/gray), category stacks join teal/purple/pink with blue-700 staying the neutral unknown-slug tone and gray-700 the uncategorized fallback — Appendix A gains their dual-theme vs-card rows. v0.3.4 (2026-09-16, user feedback round) makes the default deterministic: the prefers-color-scheme OS fallback is removed, so with no stored choice every browser renders dark, and the SPA body canvas is painted background-100."
 
 # Runtime default = dark. Top-level colors: matches themes.dark.colors so
 # {colors.X} component refs resolve to the console default. Light values
 # live under themes.light.colors.
 defaultTheme: dark
-themeMechanism: "manual data-theme override (navbar toggle), prefers-color-scheme fallback"
+themeMechanism: "manual data-theme override (navbar toggle); unset = dark default"
 
 colors:
   # Background surfaces (v0.3: cool-retuned zinc — slight blue lean carries
@@ -133,11 +133,11 @@ colors:
 
 themes:
   default: dark
-  mechanism: "manual data-theme override (navbar toggle), prefers-color-scheme fallback"
+  mechanism: "manual data-theme override (navbar toggle); unset = dark default"
   # Manual theme contract: the navbar toggle stores light|dark in
   # localStorage["mstar.dashboard.theme"] and applies documentElement[data-theme]
-  # before first paint; a stored choice wins over prefers-color-scheme, unset
-  # follows the OS (dark console default when the OS expresses neither).
+  # before first paint; the stored choice wins and unset renders dark — no OS
+  # fallback, deterministic across browsers (v0.3.4, 2026-09-16).
   # Supersedes the earlier theme lock (2026-09-04, user instruction).
   dark:
     colors:
@@ -624,18 +624,21 @@ two-tier radius — never by sacrificing density, scannability, or dual-theme
 legibility. The audience is still the operator who deployed the inspector —
 not a marketing surface.
 
-**Theme contract:** dark is the default console theme. With no
-stored choice, light is an automatic override via `prefers-color-scheme:
-light`. A manual **navbar theme toggle** stores `light` | `dark` in
+**Theme contract:** dark is the default console theme — deterministic in
+every browser. The `prefers-color-scheme` OS fallback is gone (v0.3.4,
+2026-09-16, user feedback round): with no stored choice every face renders
+dark regardless of the OS preference. A manual **navbar theme toggle**
+stores `light` | `dark` in
 `localStorage["mstar.dashboard.theme"]` and applies
-`documentElement.dataset.theme` before first paint; the stored choice wins
-over the OS preference. Supersedes the earlier theme lock (2026-09-04, user instruction).
+`documentElement.dataset.theme` before first paint; the stored choice wins.
+Supersedes the earlier theme lock (2026-09-04, user instruction).
 Dual-theme values live in this file under `themes.dark` / `themes.light`
 (same token **names**, different values). Top-level `colors:` equals
 `themes.dark.colors` so `{colors.X}` component refs resolve to the runtime
 default. Implementation maps these names to CSS custom properties in
-`src/spa/styles/tokens.css` — light applies via `:root[data-theme="light"]`
-with the `prefers-color-scheme` fallback on `:root:not([data-theme="dark"])`.
+`src/spa/styles/tokens.css` — light applies only via the stored-choice
+branch `:root[data-theme="light"]`, and the SPA `body` canvas is painted
+`var(--background-100)`.
 
 **v0.3 value rebase (AD-573):** token **names** are frozen — every
 palette step (`background-*`, `gray-*`, `gray-alpha-*`, `blue-*`, `red-*`,
@@ -645,7 +648,7 @@ design change lands as **values**. New language surfaces enter only as
 additive namespaces: `brand-*` (Signal Cyan), `shadow-card`/`shadow-pop`
 (tinted elevation), `duration-*`/`ease-*` (motion). Three value sites move
 together and are machine-pinned: this frontmatter →
-`src/spa/styles/tokens.css` (both light branches) → the `views.ts` STYLE
+`src/spa/styles/tokens.css` (the stored-light branch) → the `views.ts` STYLE
 subset. Staged delivery: palette + motion +
 radius + elevation landed first, then v0.3.1 flipped the self-hosted typeface —
 `--font-sans` and every sans `fontFamily` now carry Geist Sans ahead of the
@@ -918,24 +921,23 @@ full `background-300` fill. Muted meta uses `gray-900`.
 | DESIGN.md | CSS (`src/spa/styles/tokens.css`) |
 |-----------|-------------------------------------|
 | `themes.dark.colors.X` | `:root { --X: … }` (default) |
-| `themes.light.colors.X` | `:root[data-theme="light"] { --X: … }` + `@media (prefers-color-scheme: light) { :root:not([data-theme="dark"]) { --X: … } }` |
+| `themes.light.colors.X` | `:root[data-theme="light"] { --X: … }` (stored choice; no OS media branch) |
 | `spacing.N` | `--spacing-N` |
 | `rounded.K` | `--rounded-K` |
 | `typography.T` | `--typo-T-*` |
 | `motion.X` | `--duration-fast/base/slow`, `--ease-out`, `--ease-in-out` on `:root` (theme-independent); the reduce media query folds durations to 1ms |
-| `elevation.shadow-*` | `--shadow-card`, `--shadow-pop` — dark on `:root`, light overrides on both light branches |
+| `elevation.shadow-*` | `--shadow-card`, `--shadow-pop` — dark on `:root`, light overrides on the stored-light branch |
 | `components.C` | `--component-C-*` referencing color vars |
 
 SPA consumes `tokens.css` only. Theme switching is the manual navbar toggle:
 it stores `light` | `dark` in
 `localStorage["mstar.dashboard.theme"]` and applies `data-theme` before
-first paint — a stored choice wins over `prefers-color-scheme`, unset
-follows the OS. Supersedes the earlier theme lock (2026-09-04, user instruction).
+first paint — the stored choice wins and unset renders dark (deterministic
+default, v0.3.4). Supersedes the earlier theme lock (2026-09-04, user instruction).
 Legacy `views.ts` STYLE keeps its own copied token subset with the same
 cascade — dark `:root` default, `:root[data-theme="light"]` for the stored
-choice, OS-light fallback guarded by `:root:not([data-theme="dark"])`,
-explicit dark no-op — and honors it via the pre-paint bootstrap snippet
-inlined in `page()`: SSR faces apply `data-theme` before
+choice, explicit dark no-op — and honors it via the pre-paint bootstrap
+snippet inlined in `page()`: SSR faces apply `data-theme` before
 first paint while staying zero client runtime (snippet only, no bundle).
 The three value sites (this file, tokens.css, views.ts STYLE) are pinned
 equal by `tests/spa/tokens.test.ts`.

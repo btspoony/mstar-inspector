@@ -8,20 +8,20 @@
  * budget.
  *
  * Locked contract:
- * - version 0.3.3 (0.3.0 = the v0.3 value rebase; 0.3.1 = the font flip;
- * 0.3.2 = sidebar tint; 0.3.3 = stacked palette),
+ * - version 0.3.4 (0.3.0 = the v0.3 value rebase; 0.3.1 = the font flip;
+ * 0.3.2 = sidebar tint; 0.3.3 = stacked palette; 0.3.4 = deterministic
+ * dark default — the prefers-color-scheme OS fallback is removed),
  *     defaultTheme dark; the theme mechanism is the manual
- *     data-theme override (navbar toggle) with the prefers-color-scheme
- * fallback — the frontmatter keys were rewritten together with the
+ *     data-theme override (navbar toggle); unset = dark default —
+ *     the frontmatter keys were rewritten together with the
  * DESIGN.md body and pins the dated supersede note
  *   - L1 token names kept; v0.3 retunes the light neutrals (cool cast) while
  *     background-100/blue-700/red-700/amber-700 keep their recorded light hexes
  *   - top-level colors: === themes.dark.colors
  *   - both theme palettes share the same key set
- *   - tokens.css :root maps dark values; light applies via
- *     :root[data-theme="light"] plus the prefers-color-scheme fallback on
- * :root:not([data-theme="dark"]) — reverses the earlier
- *     "no data-theme attribute selector" lock)
+ *   - tokens.css :root maps dark values; light applies only via
+ *     :root[data-theme="light"] (the stored choice) — the earlier
+ *     OS-light fallback branch is deleted
  */
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
@@ -32,7 +32,7 @@ const DESIGN = new URL("../../DESIGN.md", import.meta.url);
 const TOKENS_CSS = new URL("../../src/spa/styles/tokens.css", import.meta.url);
 
 /** The DESIGN.md theme mechanism — frontmatter top level and themes: stay equal. */
-const THEME_MECHANISM = "manual data-theme override (navbar toggle), prefers-color-scheme fallback";
+const THEME_MECHANISM = "manual data-theme override (navbar toggle); unset = dark default";
 /** Dated user authorization reversing the "no toggle" lock. */
 const SUPERSEDE_NOTE = "Supersedes the earlier theme lock (2026-09-04, user instruction)";
 
@@ -116,12 +116,13 @@ function extractBlock(css: string, openToken: string): string {
 describe("DESIGN.md L2 dual-theme tokens", () => {
   test("frontmatter version, default theme, and L1 name continuity", async () => {
     const fm = await loadFrontmatter();
-    // 0.3.3 = stacked palette (AD-653 category stacked palette + Appendix A
-    // dual-theme rows) on top of the sidebar tint increment.
-    expect(fm.version).toBe("0.3.3");
+    // 0.3.4 = deterministic dark default (2026-09-16 user feedback round:
+    // the OS fallback branch is deleted from every value site) on top of
+    // the stacked-palette increment.
+    expect(fm.version).toBe("0.3.4");
     expect(fm.defaultTheme).toBe("dark");
-    // Manual data-theme override (navbar toggle) with the OS
-    // fallback — top-level keys and themes: keys move together.
+    // Manual data-theme override (navbar toggle); unset = dark
+    // default — top-level keys and themes: keys move together.
     expect(fm.themeMechanism).toBe(THEME_MECHANISM);
     expect(fm.themes.default).toBe("dark");
     expect(fm.themes.mechanism).toBe(THEME_MECHANISM);
@@ -189,34 +190,31 @@ describe("DESIGN.md L2 dual-theme tokens", () => {
 });
 
 describe("src/spa/styles/tokens.css mapping", () => {
-  test("dark :root, manual light attribute, and OS-light media fallback match DESIGN.md palettes", async () => {
+  test("dark :root and the stored-light attribute branch match DESIGN.md palettes (no OS fallback)", async () => {
     const fm = await loadFrontmatter();
     const css = await Bun.file(TOKENS_CSS).text();
 
-    // The data-theme cascade replaces the "no attribute
-    // selector" lock — stored light wins over the OS; the OS-light fallback
-    // applies only while the stored value is not dark.
+    // v0.3.4 (2026-09-16): the prefers-color-scheme OS-light fallback is
+    // deleted — unset renders dark in every browser; light applies only
+    // via the stored-choice attribute branch.
     const darkBlock = extractBlock(css, ":root {");
     const lightBlock = extractBlock(css, ':root[data-theme="light"] {');
-    const mediaBlock = extractBlock(css, "@media (prefers-color-scheme: light) {");
-    expect(mediaBlock).toContain(':root:not([data-theme="dark"])');
+    expect(css).not.toContain("prefers-color-scheme");
+    expect(css).not.toContain(':root:not([data-theme="dark"])');
 
     // color-scheme stays in sync per branch.
     expect(darkBlock).toContain("color-scheme: dark");
     expect(lightBlock).toContain("color-scheme: light");
-    expect(mediaBlock).toContain("color-scheme: light");
 
     const darkVars = cssCustomProperties(darkBlock);
     const lightVars = cssCustomProperties(lightBlock);
-    const mediaVars = cssCustomProperties(mediaBlock);
 
     for (const [name, value] of Object.entries(fm.themes.dark.colors)) {
       expect(darkVars[name]).toBe(value);
     }
-    // Both light branches carry the full light palette (kept in sync).
+    // The single light branch carries the full light palette.
     for (const [name, value] of Object.entries(fm.themes.light.colors)) {
       expect(lightVars[name]).toBe(value);
-      expect(mediaVars[name]).toBe(value);
     }
   });
 
@@ -280,7 +278,6 @@ describe("DESIGN.md v0.3 design-language tokens", () => {
     const css = await Bun.file(TOKENS_CSS).text();
     const darkVars = cssCustomProperties(extractBlock(css, ":root {"));
     const lightVars = cssCustomProperties(extractBlock(css, ':root[data-theme="light"] {'));
-    const mediaVars = cssCustomProperties(extractBlock(css, "@media (prefers-color-scheme: light) {"));
 
     // Motion is theme-independent on :root.
     expect(darkVars["duration-fast"]).toBe("120ms");
@@ -289,13 +286,11 @@ describe("DESIGN.md v0.3 design-language tokens", () => {
     expect(darkVars["ease-out"]).toBe("cubic-bezier(0.22, 1, 0.36, 1)");
     expect(darkVars["ease-in-out"]).toBe("cubic-bezier(0.65, 0, 0.35, 1)");
 
-    // Elevation: dark values on :root, light values on BOTH light branches.
+    // Elevation: dark values on :root, light values on the stored-light branch.
     expect(darkVars["shadow-card"]).toBe("0 1px 2px #02061766, 0 2px 8px #02061733");
     expect(darkVars["shadow-pop"]).toBe("0 4px 12px #02061780, 0 16px 40px #02061759");
     expect(lightVars["shadow-card"]).toBe("0 1px 2px #10192814, 0 2px 8px #1019280f");
     expect(lightVars["shadow-pop"]).toBe("0 4px 12px #1019281f, 0 16px 40px #10192829");
-    expect(mediaVars["shadow-card"]).toBe(lightVars["shadow-card"]);
-    expect(mediaVars["shadow-pop"]).toBe(lightVars["shadow-pop"]);
 
     // Two-tier radius (AD-574).
     expect(darkVars["rounded-sm"]).toBe("8px");
@@ -546,9 +541,11 @@ describe("DESIGN.md theme contract", () => {
     expect(md).toContain('localStorage["mstar.dashboard.theme"]');
     expect(md).toContain("documentElement.dataset.theme");
     expect(md).toContain(SUPERSEDE_NOTE);
-    // Cascade description matches the tokens.css restructure.
+    // v0.3.4: the cascade is the stored-light branch only — the OS-fallback
+    // selector is gone from every theme location (the two remaining
+    // "prefers-color-scheme" strings are the dated v0.3.4 version notes).
     expect(md).toContain(':root[data-theme="light"]');
-    expect(md).toContain(':root:not([data-theme="dark"])');
+    expect(md).not.toContain(':root:not([data-theme="dark"])');
     // The lock wording is gone from every theme location.
     expect(md).not.toContain("No independent theme toggle");
     expect(md).not.toContain("navbar theme button");
@@ -576,9 +573,11 @@ describe("SSR STYLE token parity", () => {
 
     const cssRoot = cssCustomPropertiesFromBlock(extractBlock(css, ":root {"));
     const cssLight = cssCustomPropertiesFromBlock(extractBlock(css, ':root[data-theme="light"] {'));
-    const ssrMediaAt = style.indexOf("@media (prefers-color-scheme: light) {");
-    const ssrRoot = cssCustomPropertiesFromBlock(style.slice(0, ssrMediaAt));
-    const ssrLight = cssCustomPropertiesFromBlock(style.slice(ssrMediaAt));
+    // v0.3.4: the SSR STYLE has two branches — dark :root default and the
+    // stored-light attribute; the OS-light media branch is deleted.
+    const ssrLightAt = style.indexOf(':root[data-theme="light"] {');
+    const ssrRoot = cssCustomPropertiesFromBlock(style.slice(0, ssrLightAt));
+    const ssrLight = cssCustomPropertiesFromBlock(style.slice(ssrLightAt));
 
     for (const [name, value] of Object.entries(ssrRoot)) {
       if (/^#[0-9a-f]{3,8}$/i.test(value)) {
@@ -600,7 +599,7 @@ describe("SSR STYLE token parity", () => {
     const style = views.slice(styleStart, styleEnd);
 
     const cssRoot = cssCustomPropertiesFromBlock(extractBlock(css, ":root {"));
-    const ssrRoot = cssCustomPropertiesFromBlock(style.slice(0, style.indexOf("@media (prefers-color-scheme: light) {")));
+    const ssrRoot = cssCustomPropertiesFromBlock(style.slice(0, style.indexOf(':root[data-theme="light"] {')));
 
     for (const name of ["rounded-sm", "rounded-md"]) {
       expect(ssrRoot[name], name).toBe(cssRoot[name]);
@@ -615,8 +614,7 @@ describe("SSR STYLE token parity", () => {
 
     const cssRoot = cssCustomPropertiesFromBlock(extractBlock(css, ":root {"));
     const cssLight = cssCustomPropertiesFromBlock(extractBlock(css, ':root[data-theme="light"] {'));
-    const ssrRoot = cssCustomPropertiesFromBlock(style.slice(0, style.indexOf("@media (prefers-color-scheme: light) {")));
-    const ssrOsLight = cssCustomPropertiesFromBlock(extractBlock(style, ':root:not([data-theme="dark"]) {'));
+    const ssrRoot = cssCustomPropertiesFromBlock(style.slice(0, style.indexOf(':root[data-theme="light"] {')));
     const ssrStoredLight = cssCustomPropertiesFromBlock(extractBlock(style, ':root[data-theme="light"] {'));
 
     // The re-point: both faces reference the brand step, not a raw accent.
@@ -627,7 +625,6 @@ describe("SSR STYLE token parity", () => {
     // var reference drift, so pin the referenced --brand-700 per theme:
     // every STYLE branch declares it and its value equals tokens.css.
     expect(ssrRoot["brand-700"], "SSR dark brand-700").toBe(cssRoot["brand-700"]);
-    expect(ssrOsLight["brand-700"], "SSR OS-light brand-700").toBe(cssLight["brand-700"]);
     expect(ssrStoredLight["brand-700"], "SSR stored-light brand-700").toBe(cssLight["brand-700"]);
   });
 });

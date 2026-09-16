@@ -9,7 +9,7 @@
  * the three stat sections render as charts (components/charts).
  * This file pins the assembled page faces — chart wiring (AD-561 token
  * colors, bar-end counts discriminated from axis ticks, dual-series legend,
- * localized date axis, role/aria), the empty faces (never an empty-axis
+ * pinned M/D date axis, role/aria), the empty faces (never an empty-axis
  * svg), and the bilingual copy; the proportional-bar pin is
  * superseded in place.
  * The page joins the v0.3 language — SectionCard tiers,
@@ -425,7 +425,8 @@ describe("records page assembly", () => {
     expect(blue).toBeLessThan(reviews);
     expect(reviews).toBeLessThan(amber);
     expect(amber).toBeLessThan(findings);
-    // Week date axis labels render inside the svg (en M/D format).
+    // Week date axis labels render inside the svg (pinned M/D format —
+    // dateLabel.ts, every locale).
     const [, , trend] = chartSlices(html);
     expect(trend).toContain("8/17");
     expect(trend).toContain("8/24");
@@ -448,10 +449,11 @@ describe("records page assembly", () => {
   test("records surfaces localize bilingually", () => {
     const zh = renderRecords("zh_CN");
     expect(zh).toContain("窗口内共 3 次审查 · 6 个发现");
-    // The date axis follows the page locale — zh format only, with no en
-    // M/D fallback (pins the locale prop reaching TrendChart).
-    expect(zh).toContain("8月17日");
-    expect(zh).not.toContain("8/17");
+    // The date axis is the pinned M/D format in BOTH locales (2026-09-16
+    // user-feedback pin; dateLabel.ts) — the zh M月D日 face never renders,
+    // and the en M/D face is no longer locale-conditional.
+    expect(zh).toContain("8/17");
+    expect(zh).not.toContain("月");
     // The NULL category label and the chart aria-labels localize too.
     expect(zh).toContain("未分类");
     expect(zh).toContain('aria-label="按严重程度统计的发现"');

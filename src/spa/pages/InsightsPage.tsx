@@ -415,7 +415,6 @@ export function InsightsRecordsView({ locale, data }: { locale: SpaBoot["locale"
                 ) : (
                   <StackedBarChart
                     ariaLabel={t(locale, "insights.findingsBySeverity")}
-                    locale={locale}
                     buckets={distribution}
                     series={seriesWithFindings(SEVERITY_SERIES, distribution)}
                   />
@@ -432,7 +431,6 @@ export function InsightsRecordsView({ locale, data }: { locale: SpaBoot["locale"
                 ) : (
                   <StackedBarChart
                     ariaLabel={t(locale, "insights.findingsByCategory")}
-                    locale={locale}
                     buckets={distribution}
                     series={seriesWithFindings(categorySeries(data.findings_distribution, locale), distribution)}
                   />
@@ -451,7 +449,6 @@ export function InsightsRecordsView({ locale, data }: { locale: SpaBoot["locale"
                     <p className="text-sm text-muted-foreground">{trendSummary}</p>
                     <TrendChart
                       ariaLabel={t(locale, "insights.weeklyTrend")}
-                      locale={locale}
                       seriesLabels={{
                         reviews: t(locale, "insights.seriesReviews"),
                         findings: t(locale, "insights.seriesFindings"),

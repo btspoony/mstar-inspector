@@ -56,4 +56,13 @@ Any SPA chart work under `src/spa/components/charts/`; any recharts version bump
 - **文字计数底线在堆叠下换脸**：per-bar LabelList 退役（堆叠段内文字不可读），aria/文字并存底线由 `<title>` 正 pin + y 轴刻度文字 + 页级汇总行 + tooltip 承接——pin 这四者而非段落计数。
 - **图例零过滤**：series 图例项按窗口内总量 > 0 过滤（`seriesWithFindings`），轴/堆叠保持全桶时间连续性——「图例仅列窗口内出现分类」的契约措辞落地在页层。
 - **组件 props 与 wire 类型对齐**：闭包词表 `series: {key,label,fillClass}[]` + 页层持语义映射；组件内部 `DistributionBucket` 类型与 `data.ts` wire 守卫保持同形（可选字段松弛会被 review 抓）。
-- **已知残余**：`formatBucketDateLabel` 与 TrendChart 的 formatter 逐字节重复——被「TrendChart byte-identical」锚点强制，动 TrendChart 时才合并。
+- **已知残余**：~~`formatBucketDateLabel` 与 TrendChart 的 formatter 逐字节重复~~——**已闭合（2026-09-16）**：共享 formatter 抽至 `charts/dateLabel.ts`（两处本地副本删除），同时把日期面钉死为跨语言的数字 `M/D`（locale prop 随之退役）。
+
+### Measured-width addendum（2026-09-16）
+
+用户反馈图表文字过大/拥挤：固定 560×166 svg 被 `style={{width:"100%",height:"auto"}}` wrapper 拉到全宽卡片（~970px @1280 viewport），viewBox 放大 ~1.7×，设计的 10px 刻度文字实际渲染 ~17px。以下为实测成立的修正纪律：
+
+- **真尺寸渲染的 sanctioned pattern 是 `useContainerWidth` hook（`charts/useContainerWidth.ts`）**：fixed numeric width/height props **保持不变**（pin-path 不破），变的只是 width 数字的来源——客户端测容器实际宽度（`ResizeObserver` + `useLayoutEffect`，四舍五入取整），SSR/静态面永不测量、保持设计的 `DEFAULT_CHART_WIDTH = 560`。**`ResponsiveContainer` 仍然禁用**——该 hook 不是它的回归。
+- **零宽读数必须忽略**（隐藏/脱离容器会报 0）：hook 忽略 `<=0` 读数，图表面保持默认 560，绝不塌缩为零宽。
+- **`typeof ResizeObserver === "undefined"` 守卫**让 SSR 面（无 effect）与老 webview 同落 560 默认面——SSR geometry pins 无需改动。无 DOM runner 的测试环境下，observer 接线以 `attachWidthObserver`（hook 的导出接线缝）+ stubbed ResizeObserver 单测钉住。
+- **跨语言日期面**：轴 + tooltip 日期统一 `formatDateLabel`（`charts/dateLabel.ts`）钉死数字 `M/D`（无前导零，无 Intl，bun SSR / workerd / browser 逐字节一致）——`M月D日` 随 locale prop 一并退役。

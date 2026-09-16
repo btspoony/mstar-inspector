@@ -2,7 +2,7 @@
  * Zero-build SSR HTML for /dashboard (architect decision Q8): TS
  * template strings + a single inline <style> block. The i18n pass ports the
  * DESIGN.md L2 token subset from src/spa/styles/tokens.css into STYLE
- * (dark default + prefers-color-scheme light). STYLE carries
+ * (deterministic dark default — no OS fallback, v0.3.4). STYLE carries
  * the theme branches and page() inlines the pre-paint theme
  * bootstrap, so the stored localStorage["mstar.dashboard.theme"] choice
  * is honored before first paint. Manifest pages stay zero client runtime
@@ -23,10 +23,10 @@ function escapeHtml(value: string): string {
 
 const STYLE = `<style>
 /* Token subset ported from src/spa/styles/tokens.css (DESIGN.md L2 SSOT).
-   Dark is the console default; the pre-paint bootstrap in page() applies a
-   stored light/dark choice, which wins over the OS; otherwise light follows
-   prefers-color-scheme. Do not diverge hex values from tokens.css — update
-   both together. */
+   Dark is the console default and the deterministic fallback: the pre-paint
+   bootstrap in page() applies a stored light/dark choice, which wins; unset
+   stays dark in every browser (no OS fallback, v0.3.4). Do not diverge hex
+   values from tokens.css — update both together. */
 :root {
   color-scheme: dark;
   --background-100: #0a0c10;
@@ -116,36 +116,8 @@ const STYLE = `<style>
   --sidebar-active-bg: var(--background-300);
   --focus-ring: 0 0 0 2px var(--background-100), 0 0 0 4px var(--blue-700);
 }
-/* OS-light fallback — applies only while no stored dark choice exists. */
-@media (prefers-color-scheme: light) {
-  :root:not([data-theme="dark"]) {
-    color-scheme: light;
-    --background-100: #ffffff;
-    --background-200: #f3f5f8;
-    --background-300: #e4e9f0;
-    --gray-100: #fafbfd;
-    --gray-400: #ccd4df;
-    --gray-700: #4e5969;
-    --gray-900: #2f3742;
-    --gray-1000: #0f141a;
-    --gray-alpha-400: #10192824;
-    --blue-700: #0066cc;
-    --brand-700: #0e7490;
-    --shadow-card: 0 1px 2px #10192814, 0 2px 8px #1019280f;
-    --red-100: #fef2f2;
-    --red-400: #fca5a5;
-    --red-700: #b91c1c;
-    --red-900: #7f1d1d;
-    --amber-100: #fffbeb;
-    --amber-400: #fcd34d;
-    --amber-700: #b45309;
-    --amber-800: #92400e;
-    --amber-900: #78350f;
-  }
-}
-/* Stored manual choice — light tokens win over the OS preference (the
-   theme mechanism, applied pre-paint by the bootstrap in page()). Same recorded
-   hexes as the OS fallback above. */
+/* Stored manual choice — the only light face (the theme mechanism, applied
+   pre-paint by the bootstrap in page()). Same recorded hexes as tokens.css. */
 :root[data-theme="light"] {
   color-scheme: light;
   --background-100: #ffffff;
@@ -453,7 +425,7 @@ function page(title: string, body: string, locale: Locale = "en"): string {
 <script>
 // Pre-paint theme bootstrap (the theme mechanism, SSR face):
 // apply the stored manual theme before first paint. Whitelist — unreadable
-// or invalid values stay unset and follow prefers-color-scheme.
+// or invalid values stay unset and render dark (deterministic default).
 try {
   const theme = localStorage.getItem("mstar.dashboard.theme");
   if (theme === "light" || theme === "dark") document.documentElement.dataset.theme = theme;

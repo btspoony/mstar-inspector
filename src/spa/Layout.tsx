@@ -33,9 +33,10 @@ function storedTheme(): Theme | null {
   }
 }
 
-/** Stored choice wins; unset follows the OS (dark console default otherwise). */
+/** Stored choice wins; unset = dark default (deterministic — the OS
+ * preference is never consulted, v0.3.4). */
 function effectiveTheme(): Theme {
-  return storedTheme() ?? (window.matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark");
+  return storedTheme() ?? "dark";
 }
 
 function LoginChrome({ children }: { children: ReactNode }) {
