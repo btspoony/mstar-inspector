@@ -120,6 +120,23 @@ jobs:
           # 备源（首次实跑若 .name 与预期不符，以部署日志锚定行兜底）：
           # grep -oE "registry\.cloudflare\.com/${CLOUDFLARE_ACCOUNT_ID}/mstar-inspector-sandbox@sha256:[0-9a-f]{64}" deploy.log
 
+      # ADMIN_LOGINS is a dashboard-managed plain var (keep_vars), never a
+      # Worker secret — `wrangler secret list` cannot observe it. Read the
+      # Worker settings instead; blank/comma-only parses to zero logins, the
+      # same rule as src/dashboard/users.ts parseAdminLogins.
+      - name: "Smoke: warn if ADMIN_LOGINS unset (first-login admin fallback)"
+        run: |
+          settings=$(curl -sf -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" \
+            "https://api.cloudflare.com/client/v4/accounts/$CLOUDFLARE_ACCOUNT_ID/workers/scripts/mstar-inspector/settings") || settings=""
+          if [ -n "$settings" ]; then
+            value=$(printf '%s' "$settings" \
+              | jq -r '[.result.bindings[]? | select(.name == "ADMIN_LOGINS") | if .type == "secret_text" then "set" else (.text // "") end] | join("")' \
+              | tr -d ' \t,')
+            if [ -z "$value" ]; then
+              echo "::warning::ADMIN_LOGINS is unset on the deployed Worker — with an empty dashboard_users table the first OAuth login becomes admin (self-disarming once any user row exists). Set ADMIN_LOGINS (plain var: dashboard Worker variable settings or wrangler.jsonc vars, then redeploy) before go-live — see docs/deploy.md § Multi-App go-live."
+            fi
+          fi
+
       - name: Upload deploy evidence artifacts
         uses: actions/upload-artifact@v7
         with:
