@@ -252,12 +252,14 @@ export const INLINE_RESOLVE_ENTRY_MS = 6_000;
  * no new APM, no webhook sink). */
 export type ConsumerLogFields = {
   /**
-   * `pull_request` / `review_command` — the trigger that produced the job.
+   * `pull_request` / `issue_comment` — the trigger that produced the job
+   * (spec review-trigger-policy §3: the comment trigger is the bot mention;
+   * the retired command's label went with it).
    * `review_paused` (architect lock L4 — union widened ADDITIVELY):
    * the ack-skip line for a paused App's in-flight message; it overrides the
    * trigger fields' event on that one log line.
    */
-  event: "pull_request" | "review_command" | "review_paused";
+  event: "pull_request" | "issue_comment" | "review_paused";
   action: string;
   installation_id: number;
   owner: string;
@@ -356,8 +358,8 @@ export function reviewGuardTtlSeconds(level: ReviewLevel): number {
 
 /**
  * In-flight guard key: `inflight:{installation_id}:{owner}/{repo}:{pr_number}`.
- * Keyed WITHOUT head_sha on purpose — `/review` commands carry head_sha=null
- * and must still be serialized per PR.
+ * Keyed WITHOUT head_sha on purpose — comment-mention jobs carry
+ * head_sha=null and must still be serialized per PR.
  */
 export function reviewGuardKey(key: {
   installation_id: number;
@@ -1248,7 +1250,7 @@ type ProcessDeps = {
  */
 function payloadIdentityFields(payload: ReviewJobPayload): ConsumerLogFields {
   return {
-    event: payload.triggered_by === "pull_request" ? "pull_request" : "review_command",
+    event: payload.triggered_by === "pull_request" ? "pull_request" : "issue_comment",
     action: payload.action,
     installation_id: payload.installation_id,
     owner: payload.owner,
@@ -2000,7 +2002,7 @@ async function processMessage(payload: ReviewJobPayload, deps: ProcessDeps): Pro
   // criteria: 失败路径错误日志含幂等键).
   let fields: ConsumerLogFields | undefined;
   // In-flight guard (WF-002): serializes concurrent reviews per PR — keyed
-  // without head_sha so `/review` commands (head_sha=null) are covered too.
+  // without head_sha so comment-mention jobs (head_sha=null) are covered too.
   const guardKey = reviewGuardKey({
     installation_id: payload.installation_id,
     owner: payload.owner,
@@ -2261,7 +2263,7 @@ async function processMessage(payload: ReviewJobPayload, deps: ProcessDeps): Pro
     // §7.7 step 2 (second half) — the publication journal: an existing
     // prepared/sending/unknown/confirmed row for this exact scope/SHA hands
     // off to recovery and ACKs without another paid review. Pending recovery
-    // is never deleted by a same-SHA `/review`.
+    // is never deleted by a same-SHA mention re-run.
     const lifecycleScope: Scope = {
       appId: payload.appRef.appId,
       installationId: payload.installation_id,

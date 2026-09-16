@@ -229,7 +229,20 @@ app.post("/webhook/:appSlug", async (c) => {
   // cacheKey — a rotated webhook secret (same id, new envelope → new
   // secret) is rebuilt + REPLACED on the next delivery; entries are
   // structurally bounded (≤ github_apps rows) with no eviction policy.
-  const outcome = await classifyWebhook(appSecret, rawBody, signature, eventName, defaultLog, reviewEnabled, row.id);
+  // Trigger context (spec review-trigger-policy §2 read path): the
+  // already-resolved row's review_trigger_mode gates the pull_request auto
+  // face and its slug keys the issue_comment bot mention — no second
+  // lookup, no App identity beyond that.
+  const outcome = await classifyWebhook(
+    appSecret,
+    rawBody,
+    signature,
+    eventName,
+    defaultLog,
+    reviewEnabled,
+    row.id,
+    { mode: row.review_trigger_mode, appSlug: slug },
+  );
 
   // AL-20-1: best-effort delivery recording — the R2 diagnostics
   // face ("断线看得见"). ONE row per VERIFIED delivery, written immediately

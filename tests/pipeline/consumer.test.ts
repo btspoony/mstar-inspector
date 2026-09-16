@@ -616,7 +616,7 @@ describe("createReviewConsumer", () => {
     const db = await createSeededTestD1();
     const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), undefined, testOverrides);
 
-    await consumer(makeBatch(makePayload({ head_sha: null, triggered_by: "review_command" })));
+    await consumer(makeBatch(makePayload({ head_sha: null, triggered_by: "issue_comment" })));
 
     // No gh pr view anywhere: the authoritative sha comes from the clone.
     expect(sandboxCalls.some((c) => c.cmd.includes("gh pr view"))).toBe(false);
@@ -3740,7 +3740,7 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
     expect(row.observed).toBe("success");
   });
 
-  test("check lifecycle: a same-SHA /review journal handoff claims no attempt and runs no Check", async () => {
+  test("check lifecycle: a same-SHA mention journal handoff claims no attempt and runs no Check", async () => {
     reset();
     runnerStdout = JSON.stringify(VALID_OUTPUT);
     const db = await createSeededTestD1();
@@ -3759,7 +3759,7 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
       createAppCommenter: () => commenterWithChecks(adapter),
     });
 
-    await consumer(makeBatch(makePayload({ head_sha: null, triggered_by: "review_command" })));
+    await consumer(makeBatch(makePayload({ head_sha: null, triggered_by: "issue_comment" })));
 
     expect(sandboxCalls.some((c) => c.cmd.includes("--input"))).toBe(false);
     expect(checkRequests).toHaveLength(0);

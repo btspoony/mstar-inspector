@@ -7,7 +7,7 @@
  *
  * Idempotency (compass S4):
  * - KV key only for non-empty `head_sha`; a null/empty sha must never become
- *   a KV key — `/review` commands always enqueue.
+ *   a KV key — comment-mention jobs always enqueue.
  * - KV has no atomic conditional write (`noneMatch` is not in
  *   workers-types), so this is get-then-put with a race window; the D1
  *   UNIQUE constraint is the durable fallback.
@@ -134,7 +134,7 @@ export async function handleReviewJob(
 ): Promise<HandleOutcome> {
   const fields = toEventLog(payload);
 
-  // Non-empty sha only: a null/empty sha (e.g. `/review` commands) must
+  // Non-empty sha only: a null/empty sha (e.g. comment-mention jobs) must
   // never become a KV key and always enqueues (compass S4 / Clarify 4).
   const key =
     payload.head_sha
