@@ -100,7 +100,7 @@ jobs:
         run: |
           ok=0
           for _ in 1 2 3; do
-            if curl -sf https://mstar-inspector.42ch.dev/healthz >/dev/null; then
+            if curl -sf --max-time 30 --connect-timeout 5 https://mstar-inspector.42ch.dev/healthz >/dev/null; then
               ok=1
               break
             fi
@@ -119,6 +119,28 @@ jobs:
           test -s image_digest.txt
           # 备源（首次实跑若 .name 与预期不符，以部署日志锚定行兜底）：
           # grep -oE "registry\.cloudflare\.com/${CLOUDFLARE_ACCOUNT_ID}/mstar-inspector-sandbox@sha256:[0-9a-f]{64}" deploy.log
+
+      # ADMIN_LOGINS is a dashboard-managed plain var (keep_vars), never a
+      # Worker secret — `wrangler secret list` cannot observe it. Read the
+      # Worker settings instead; blank/comma-only parses to zero logins, the
+      # same rule as src/dashboard/users.ts parseAdminLogins.
+      - name: "Smoke: warn if ADMIN_LOGINS unset (first-login admin fallback)"
+        run: |
+          settings=$(curl -sf --max-time 30 --connect-timeout 5 -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" \
+            "https://api.cloudflare.com/client/v4/accounts/$CLOUDFLARE_ACCOUNT_ID/workers/scripts/mstar-inspector/settings") || settings=""
+          # A 200 with a malformed / non-success body is NOT a positively
+          # observed unset: jq must never read a parse failure as an empty
+          # ADMIN_LOGINS, so an unparseable payload degrades to the same
+          # silent path as a transport error.
+          printf '%s' "$settings" | jq -e '.success == true' >/dev/null 2>&1 || settings=""
+          if [ -n "$settings" ]; then
+            value=$(printf '%s' "$settings" \
+              | jq -r '[.result.bindings[]? | select(.name == "ADMIN_LOGINS") | if .type == "secret_text" then "set" else (.text // "") end] | join("")' \
+              | tr -d ' \t\n\r,')
+            if [ -z "$value" ]; then
+              echo "::warning::ADMIN_LOGINS is unset on the deployed Worker — with an empty dashboard_users table the first OAuth login becomes admin (self-disarming once any user row exists). Set ADMIN_LOGINS (plain var: dashboard Worker variable settings or wrangler.jsonc vars, then redeploy) before go-live — see docs/deploy.md § Multi-App go-live."
+            fi
+          fi
 
       - name: Upload deploy evidence artifacts
         uses: actions/upload-artifact@v7
