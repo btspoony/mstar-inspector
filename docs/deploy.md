@@ -504,7 +504,12 @@ Prerequisites: dashboard OAuth (`OAUTH_CLIENT_ID` /
 `0022`** — the full forward-only chain above, not a historical prefix.
 `0020` supplies the finding-lifecycle/publication journal, `0021` the
 Check registry, and `0022` the per-App trigger-mode column the webhook
-face reads on every delivery, so a review on this Worker fails without them.
+face reads on every delivery. A missing `0022` does NOT stop reviews:
+the webhook face degrades to `every_push` semantics (the row's mode
+reads as `undefined`, which the classifier treats as every_push). What
+fails closed instead is the dashboard: the Settings page
+(`parseSettings` rejects the payload without the mode field) and the
+trigger-mode POST (its D1 UPDATE errors on the missing column).
 
 1. **Admin login** — open `/dashboard/login` and complete the GitHub OAuth
    flow. The first login against an empty `dashboard_users` table becomes
@@ -783,6 +788,9 @@ the canonical `@<slug>[bot]`, matched as a standalone token —
 repository owner (bot-sender comments are ignored; anyone else gets a
 structured warn). The per-App pause (`review_enabled`) and the
 `REVIEW_ENABLED` emergency brake still govern every trigger path.
+Operator note: the structured-log `event` label for comment-triggered
+reviews retires `review_command` → `issue_comment`; operator-saved log
+filters keyed on the old label stop matching after deploy.
 Contract:
 [`.mstar/specs/review-trigger-policy.md`](../.mstar/specs/review-trigger-policy.md)
 (§2.1 classification matrix, §3 mention grammar).
