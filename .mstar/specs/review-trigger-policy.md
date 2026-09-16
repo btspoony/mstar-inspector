@@ -51,7 +51,7 @@ Ignored paths keep today's structured-log discipline; classification never rejec
 ## 4. Hardening closures delivered alongside this policy
 
 - **Webhook body cap (61-R1):** the pre-buffer 413 cap is enforced on streamed bytes read, independent of the client-supplied `content-length` header. The cap applies while reading the request stream — reading past `WEBHOOK_BODY_LIMIT` bytes rejects 413 before the remainder is consumed — never after a full buffered read. The streamed read stays byte-authoritative for signature verification: the accumulated bytes are the exact request body, UTF-8-decoded identically to today's buffered read, so HMAC verification is unchanged. Same `WEBHOOK_BODY_LIMIT` value; a truthful over-limit header may still short-circuit early; headerless/chunked/lying-header requests can no longer buffer past the cap, and oversized requests reject 413 with the existing structured warn.
-- **Admin bootstrap warning (61-R2):** when `DASHBOARD_ADMIN_LOGINS` is unset, a visible deploy-time warning surfaces (bounded, structured, documented in `docs/deploy.md`) so the first-login-becomes-admin fallback is never silently armed. The fallback's semantics themselves are unchanged by this iteration.
+- **Admin bootstrap warning (61-R2):** when the deployed Worker has no usable `ADMIN_LOGINS` binding (the dashboard-managed bootstrap allowlist var — not a Worker secret), a visible deploy-time warning surfaces from the deploy workflow's post-deploy smoke check (bounded, exit-0, documented in `docs/deploy.md`) so the first-login-becomes-admin fallback is never silently armed. The fallback's semantics themselves are unchanged by this iteration.
 
 ## 5. Non-goals
 
