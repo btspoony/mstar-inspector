@@ -2760,7 +2760,7 @@ describe("finding recheck & closure (§7.7/§7.4/§7.10)", () => {
     expect(rounds.n).toBe(0);
   });
 
-  test("same-SHA /review with a pending journal row → hands off to recovery and acks (no recheck, no resolve, rows untouched)", async () => {
+  test("same-SHA issue-comment-triggered review with a pending journal row → hands off to recovery and acks (no recheck, no resolve, rows untouched)", async () => {
     reset();
     runnerStdout = JSON.stringify(VALID_OUTPUT);
     const db = await createSeededTestD1();
