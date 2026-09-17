@@ -76,6 +76,13 @@ export type InsightsWindow = {
   /** Restrict every aggregation to one owner/repo pair. */
   repo?: { owner: string; repo: string };
   /**
+   * Restrict every aggregation (and the opt-in `repos` list) to one
+   * GitHub App — the `github_apps.id` row PK (string), not the numeric
+   * `github_app_id`. Rows with `app_id` NULL (legacy unattributed) are
+   * excluded when set; without the option every output is unchanged.
+   */
+  appId?: string;
+  /**
    * Opt-in window-scoped distinct `repos` aggregation (QC F-001).
    * Skipped (resolves to []) unless requested — only the insights records
    * surface opts in (its repo Select); default summary reads must not pay
@@ -187,6 +194,7 @@ const DISTRIBUTION_SEVERITY_KEYS = ["must-fix", "should-fix", "nit"] as const;
 export async function createInsightsStore(db: InsightsD1, opts: InsightsWindow = {}): Promise<Insights> {
   const windowDays = clampWindow(opts.windowDays);
   const repo = opts.repo;
+  const appId = opts.appId;
   const includeRepos = opts.includeRepos ?? false;
 
   // (AD-652): the distribution granularity derives ONLY from the
@@ -213,6 +221,12 @@ export async function createInsightsStore(db: InsightsD1, opts: InsightsWindow =
     where.push("r.owner = ?", "r.repo = ?");
     binds.push(repo.owner, repo.repo);
   }
+  if (appId !== undefined) {
+    // Additive per-App predicate (plan 75): composed alongside — never
+    // inside — windowEraWhere, so the era gate and window stay untouched.
+    where.push("r.app_id = ?");
+    binds.push(appId);
+  }
   where.push(windowEraWhere);
   binds.push(windowDays);
   const whereSql = where.join(" AND ");
@@ -221,17 +235,21 @@ export async function createInsightsStore(db: InsightsD1, opts: InsightsWindow =
   // Opt-in (QC F-001) — skipped unless includeRepos, so the home
   // surface never pays the DISTINCT scan+sort. Deliberately ignores
   // opts.repo — the option set is the in-window universe, not the
-  // currently filtered subset. Shares windowEraWhere so the window + era
-  // gate predicates cannot drift from the other aggregations (F-003).
+  // currently filtered subset — but HONORS opts.appId (plan 75): the
+  // per-App repo selector must never offer another App's repos. Shares
+  // windowEraWhere so the window + era gate predicates cannot drift
+  // from the other aggregations (F-003).
+  const repoAppWhere = appId !== undefined ? "r.app_id = ? AND " : "";
+  const repoBinds = appId !== undefined ? [appId, windowDays] : [windowDays];
   const repoQuery = includeRepos
     ? db
         .prepare(
           `SELECT DISTINCT r.owner || '/' || r.repo AS repo
            FROM reviews r
-           WHERE ${windowEraWhere}
+           WHERE ${repoAppWhere}${windowEraWhere}
            ORDER BY repo ASC`,
         )
-        .bind(windowDays)
+        .bind(...repoBinds)
         .all<{ repo: string }>()
     : Promise.resolve({ results: [] as { repo: string }[] });
 
