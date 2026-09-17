@@ -1378,18 +1378,19 @@ describe("sandbox image selection (payload + op=save-sandbox-image)", () => {
     expect(body.sandbox_images).toEqual([{ id: "omp", enabled: true }]);
   });
 
-  test("non-manager face: sandbox_image_id is read-only visible; sandbox_images (the editor data) is absent", async () => {
+  test("non-manager face: sandbox_image_id and sandbox_images are both absent (identity-set only)", async () => {
     const { db } = await seededWorld();
     const cookie = `${SESSION_COOKIE}=${await sessionCookie("hubot")}`;
     const res = await get(SETTINGS_API, cookie, makeEnv(db));
     expect(res.status).toBe(200);
     const body = (await res.json()) as {
       can_manage: boolean;
-      app: { sandbox_image_id: string };
+      app: Record<string, unknown>;
       sandbox_images?: unknown;
     };
     expect(body.can_manage).toBe(false);
-    expect(body.app.sandbox_image_id).toBe("omp");
+    expect("sandbox_image_id" in body.app).toBe(false);
+    expect((body.app as { sandbox_image_id?: unknown }).sandbox_image_id).toBeUndefined();
     expect(body.sandbox_images).toBeUndefined();
   });
 
@@ -1444,21 +1445,20 @@ describe("sandbox image selection (payload + op=save-sandbox-image)", () => {
     expect(row.updated_at).toBe(app.updated_at); // ada's refused save touched nothing
   });
 
-  test("the settings read face carries app.review_trigger_mode on BOTH faces (the SPA mode control's value)", async () => {
+  test("app.review_trigger_mode: manager face carries the column default 'every_push'; non-manager face has no such key", async () => {
     // The seeded row never chose a mode, so the column default 'every_push'
-    // is what both faces must serve (spec review-trigger-policy §2: default
-    // preserves today's behavior; unset renders as every_push).
+    // is what the manager face must serve (spec review-trigger-policy §2).
+    // The non-manager settings face is identity-set only — no trigger mode.
     const { db } = await seededWorld();
     const manage = await get(SETTINGS_API, `${SESSION_COOKIE}=${await sessionCookie("mallory")}`, makeEnv(db));
     expect(manage.status).toBe(200);
-    expect(((await manage.json()) as { app: { review_trigger_mode: string } }).app.review_trigger_mode).toBe(
-      "every_push",
-    );
+    const manageBody = (await manage.json()) as { app: Record<string, unknown> };
+    expect(manageBody.app.review_trigger_mode).toBe("every_push");
     const member = await get(SETTINGS_API, `${SESSION_COOKIE}=${await sessionCookie("hubot")}`, makeEnv(db));
     expect(member.status).toBe(200);
-    expect(((await member.json()) as { app: { review_trigger_mode: string } }).app.review_trigger_mode).toBe(
-      "every_push",
-    );
+    const memberBody = (await member.json()) as { app: Record<string, unknown> };
+    expect("review_trigger_mode" in memberBody.app).toBe(false);
+    expect(memberBody.app.review_trigger_mode).toBeUndefined();
   });
 });
 
