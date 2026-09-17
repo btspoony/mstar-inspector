@@ -2283,14 +2283,23 @@ dashboardApp.post("/apps/:slug/settings/key/delete", async (c) => {
 // --- Review Health insights summary API -------------------------
 //
 // JSON read face for the insights aggregation (src/dashboard/insights-store.ts
-// — the module-boundary leaf, zero store/pipeline/review imports, AL-22-1
-// candidate A). The mount-level guard above has already verified membership
-// on every /dashboard route, so this handler adds ZERO auth code (AL-22-1):
-// it only parses the two query params and serializes the store result.
+// — the module-boundary leaf, zero store/pipeline/review imports), scoped to a
+// single App: GET /api/apps/:slug/insights/summary. The former cross-App
+// global endpoint (GET /api/insights/summary) is REMOVED — insights are an
+// App-owned surface, and the store's `appId` filter composes the app row PK
+// into EVERY aggregation (including the opt-in repos query), so one App's
+// reader can never see another App's reviews.
+// Gate (JSON-only face — never an HTML page):
+//   - membership: requireMember (session + live member row);
+//   - app lookup by slug, same rule as requireAppVisible: unknown and
+//     soft-deleted apps are equally invisible → 404;
+//   - creator-or-admin via canManageApp → 403.
+//   All deny bodies are `{ error }` JSON.
+// Params (same parse + 400 semantics the global face had):
 //   - window: pure integer days, default 30. Non-integer (incl. negative and
-//     empty) → 400 (AL-22-1: malformed 400). Values > 90 are NOT rejected —
-//     the single clamp point caps them at 90, and the response echoes the
-//     EFFECTIVE window so clients see what the aggregation actually used.
+//     empty) → 400. Values > 90 are NOT rejected — the single clamp point
+//     caps them at 90, and the response echoes the EFFECTIVE window so
+//     clients see what the aggregation actually used.
 //   - repo: optional owner/repo filter, malformed → 400.
 // Response = the store return plus the two echoed params (snake_case keys).
 const INSIGHTS_REPO_PATTERN = /^[^/\s]+\/[^/\s]+$/;
@@ -2298,15 +2307,14 @@ const INSIGHTS_REPO_PATTERN = /^[^/\s]+\/[^/\s]+$/;
 const INSIGHTS_INCLUDE_VALUES = ["repos"] as const;
 
 /**
- * Query-param parse for the insights JSON face (QC W-C): window (integer
+ * Query-param parse for the per-App insights JSON face: window (integer
  * days, default 30) + optional repo owner/repo filter + optional
  * comma-separated `include` extras (`repos` — the window-scoped distinct
  * repo aggregation, opt-in so only consumers that need it pay for it).
  * Returns
  * the parsed values or the 400 reason; the route answers 400 with a JSON
- * error body (the HTML notice page retired with GET /insights). The >90
- * clamp stays in the store — the single clamp point — and the
- * route echoes the EFFECTIVE window.
+ * error body. The >90 clamp stays in the store — the single clamp point —
+ * and the route echoes the EFFECTIVE window.
  */
 type InsightsParams =
   | {
@@ -2353,7 +2361,17 @@ function parseInsightsParams(query: { window?: string; repo?: string; include?: 
   return { ok: true, windowDays, repoFilter, rawRepo, includeRepos };
 }
 
-dashboardApp.get("/api/insights/summary", async (c) => {
+dashboardApp.get("/api/apps/:slug/insights/summary", async (c) => {
+  const member = await requireMember(c);
+  if (!member.ok) return member.response;
+
+  // Same slug-resolution rule as requireAppVisible: unknown and soft-deleted
+  // apps are equally invisible → 404. JSON body — this face never renders
+  // HTML (no forbiddenPage on either deny path).
+  const app = await createAppsStore(member.db).getAppBySlug(c.req.param("slug") ?? "");
+  if (!app || app.deleted_at !== null) return c.json({ error: "unknown app" }, 404);
+  if (!canManageApp(member.user, app)) return c.json({ error: "forbidden" }, 403);
+
   const db = dashboardD1(c.env);
   if (!db) return c.text("dashboard storage is not configured", 500);
 
@@ -2368,6 +2386,9 @@ dashboardApp.get("/api/insights/summary", async (c) => {
     windowDays: params.windowDays,
     repo: params.repoFilter,
     includeRepos: params.includeRepos,
+    // The App row PK (never empty — the slug lookup resolved a real row),
+    // composed into every aggregation by the store's appId filter.
+    appId: app.id,
   });
   return c.json({
     window_days: clampWindow(params.windowDays),
@@ -2386,9 +2407,10 @@ dashboardApp.get("/api/insights/summary", async (c) => {
   });
 });
 
-// The insights HTML panel is retired — /dashboard/insights is
-// SPA-owned (spa-dispatch serves the shell; the SPA reads the JSON face
-// above). The legacy GET handler is gone.
+// The insights HTML panel and the cross-App global JSON endpoint are both
+// retired — /dashboard/insights is SPA-owned (spa-dispatch serves the shell;
+// the SPA reads the per-App JSON face above). The legacy GET handlers are
+// gone; the global URL answers 404.
 
 // Placeholder actions (IA routing table): every POST under /dashboard that is
 // not a wired route above is a placeholder submit and must never succeed —

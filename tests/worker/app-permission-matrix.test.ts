@@ -267,3 +267,52 @@ describe("App write-route permission matrix (T1b, spec §2)", () => {
     });
   }
 });
+
+// --- Read-face matrix: GET /dashboard/api/apps/:slug/insights/summary ---
+// The per-App insights data face rides the SAME creator-or-admin rule
+// (canManageApp) as every write route above, plus the slug lookup
+// (unknown/soft-deleted → 404). Read-only, so no zero-mutation sweep is
+// needed — the assertions are the status matrix itself.
+describe("App insights read-face permission matrix", () => {
+  const FACE = "/dashboard/api/apps/mallorys-app/insights/summary";
+
+  async function getFace(login: string, env: Env): Promise<Response> {
+    return worker.fetch(
+      new Request(`https://worker.local${FACE}`, {
+        headers: { Cookie: `${SESSION_COOKIE}=${await createSessionValue(login, null, SESSION_SECRET)}` },
+      }),
+      env,
+    );
+  }
+
+  test("anonymous (no session) → 302 login", async () => {
+    const res = await worker.fetch(new Request(`https://worker.local${FACE}`), makeEnv(await seededWorld()));
+    expect(res.status).toBe(302);
+    expect(res.headers.get("Location")).toBe("/dashboard/login");
+  });
+
+  for (const actor of ACTORS) {
+    test(`read face: ${actor.name} (${actor.login}) → ${actor.expected}`, async () => {
+      const res = await getFace(actor.login, makeEnv(await seededWorld()));
+      expect(res.status).toBe(actor.expected);
+      if (actor.expected !== 200) {
+        // JSON-only deny body — this face never renders an HTML page.
+        const body = (await res.json()) as { error?: string };
+        expect(body.error).toBeDefined();
+      } else {
+        expect(res.headers.get("Content-Type")).toContain("application/json");
+      }
+    });
+  }
+
+  test("read face: unknown slug → 404 for a manager", async () => {
+    const db = await seededWorld();
+    const res = await worker.fetch(
+      new Request("https://worker.local/dashboard/api/apps/no-such-app/insights/summary", {
+        headers: { Cookie: `${SESSION_COOKIE}=${await createSessionValue("mallory", null, SESSION_SECRET)}` },
+      }),
+      makeEnv(db),
+    );
+    expect(res.status).toBe(404);
+  });
+});
