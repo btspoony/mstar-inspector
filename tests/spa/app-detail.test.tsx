@@ -118,12 +118,12 @@ describe("app detail URL state (shared pure helpers)", () => {
     );
   });
 
-  test("the per-App summary URL is mount-prefixed and encodes slug + filters", () => {
-    expect(appInsightsSummaryUrl("demo", "30", "", true)).toBe(
+  test("the per-App summary URL is mount-prefixed and encodes slug + filters; include=repos always rides", () => {
+    expect(appInsightsSummaryUrl("demo", "30", "")).toBe(
       "/dashboard/api/apps/demo/insights/summary?window=30&include=repos",
     );
-    expect(appInsightsSummaryUrl("acme inc", "7", "acme/web", false)).toBe(
-      "/dashboard/api/apps/acme%20inc/insights/summary?window=7&repo=acme%2Fweb",
+    expect(appInsightsSummaryUrl("acme inc", "7", "acme/web")).toBe(
+      "/dashboard/api/apps/acme%20inc/insights/summary?window=7&include=repos&repo=acme%2Fweb",
     );
   });
 });
@@ -152,6 +152,40 @@ describe("tab shell source contracts", () => {
     expect(tabsWrapper).toContain("data-[state=inactive]:hidden");
   });
 
+  test("mount-once tab switching: BOTH panels forceMount — switching tabs preserves settings form state (qc1)", () => {
+    // Radix unmounts inactive panels by default, which would destroy the
+    // settings forms (typed inputs, Add Provider panel, op notices) and
+    // refetch insights from scratch on every 应用设置 ↔ 洞察 switch. Both
+    // panels forceMount; the wrapper's data-[state=inactive]:hidden keeps
+    // the one-visible-panel invariant (pin above).
+    expect(detailPage.match(/<TabsContent value="settings" forceMount>/g)?.length).toBe(1);
+    expect(detailPage.match(/<TabsContent value="insights" forceMount>/g)?.length).toBe(1);
+    // No unmount-by-default panel remains on the shell.
+    expect(detailPage).not.toMatch(/<TabsContent value="[^"]+">\s*\n/);
+  });
+
+  test("mid-session demotion rewrite: a stale ?tab=insights is replaced when the payload says non-manager (qc2)", () => {
+    // The payload-landing effect rewrites the URL (replaceState via
+    // commitSearch — loop-free) to the settings tab, so the stale param
+    // cannot auto-reactivate the insights face on a later re-promotion.
+    const landing = detailPage.slice(
+      detailPage.indexOf("// When the payload lands"),
+      detailPage.indexOf("const onPop"),
+    );
+    expect(landing).toContain('parseAppDetailSearch(window.location.search, true).tab === "insights"');
+    expect(landing).toContain('commitSearch({ tab: "settings", window: "30", repo: "" });');
+  });
+
+  test("insights refetch retains data: content renders on data !== null; ErrorState is initial-load-only (qc3)", () => {
+    // The filter refetch never blanks the four stat sections — the
+    // previous data stays rendered under the polite busy hint, and a
+    // refetch failure over retained data reports in a slim alert line
+    // instead of unmounting the face.
+    expect(insightsTab).toContain('{data !== null ? <InsightsRecordsView locale={locale} data={data} /> : null}');
+    expect(insightsTab).toContain('state === "error" && data === null');
+    expect(insightsTab).toContain('state === "error" && data !== null');
+  });
+
   test("URL state re-sync: exactly one []-mounted popstate listener; commits ride replaceState, never pushState", () => {
     expect(detailPage.match(/addEventListener\("popstate"/g)?.length).toBe(1);
     expect(detailPage).toContain("removeEventListener(\"popstate\"");
@@ -159,8 +193,9 @@ describe("tab shell source contracts", () => {
     // The page never pushes history itself (navigation stays in the router).
     expect(detailPage).not.toContain(".pushState(");
     // State derives through the shared pure helper (mount init, slug
-    // re-derivation, payload-landing re-derivation, popstate).
-    expect(detailPage.match(/parseAppDetailSearch\(/g)?.length).toBe(4);
+    // re-derivation, payload-landing demotion check + re-derivation,
+    // popstate).
+    expect(detailPage.match(/parseAppDetailSearch\(/g)?.length).toBe(5);
   });
 
   test("manager deep-link fix: the gate rides a ref mirror, re-derived when the payload lands — never a stale false closure", () => {
@@ -184,7 +219,7 @@ describe("tab shell source contracts", () => {
     );
     expect(landing).toContain("canManageRef.current = payload?.can_manage ?? false;");
     expect(landing).toContain(
-      "if (payload) setSearch(parseAppDetailSearch(window.location.search, canManageRef.current));",
+      "setSearch(parseAppDetailSearch(window.location.search, canManageRef.current));",
     );
   });
 

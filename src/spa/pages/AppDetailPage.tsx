@@ -130,7 +130,20 @@ export function AppDetailPage({ boot, slug }: { boot: SpaBoot; slug: string }) {
   // popstate while the gate stays stable.
   useEffect(() => {
     canManageRef.current = payload?.can_manage ?? false;
-    if (payload) setSearch(parseAppDetailSearch(window.location.search, canManageRef.current));
+    if (payload) {
+      // Mid-session demotion: a URL still carrying ?tab=insights while the
+      // landed payload says non-manager is rewritten to the bare path
+      // (replaceState — loop-free), so the stale param cannot silently
+      // auto-reactivate the insights face on a later re-promotion.
+      if (
+        !canManageRef.current &&
+        parseAppDetailSearch(window.location.search, true).tab === "insights"
+      ) {
+        commitSearch({ tab: "settings", window: "30", repo: "" });
+        return;
+      }
+      setSearch(parseAppDetailSearch(window.location.search, canManageRef.current));
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [payload?.can_manage]);
 
@@ -226,11 +239,18 @@ export function AppDetailView({
               non-manager contract, pinned by test. */}
           {canManage ? <TabsTrigger value="insights">{t(locale, "appDetail.tabInsights")}</TabsTrigger> : null}
         </TabsList>
-        <TabsContent value="settings">
+        {/* forceMount on BOTH panels (mount-once tab switching): the
+            settings form state (typed inputs, Add Provider panel, op
+            notices) and the loaded insights data survive 应用设置 ↔ 洞察
+            switches — no unmount, no refetch. Radix does NOT hide
+            forced-mounted inactive panels itself; the wrapper's
+            `data-[state=inactive]:hidden` carries the one-visible-panel
+            invariant (ui-bugs knowledge pin, source-tested below). */}
+        <TabsContent value="settings" forceMount>
           <SettingsView locale={locale} payload={payload} groups={groups} onReload={onReload} />
         </TabsContent>
         {canManage ? (
-          <TabsContent value="insights">
+          <TabsContent value="insights" forceMount>
             <AppInsightsTab locale={locale} slug={slug} search={search} onSearch={onSearch} />
           </TabsContent>
         ) : null}

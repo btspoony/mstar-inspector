@@ -451,18 +451,13 @@ export function verdictLine(data: InsightsSummary): string {
 /**
  * Per-App insights summary URL — the mount-prefixed dashboard API face
  * of the Worker's `GET /api/apps/:slug/insights/summary`. `repo` is omitted
- * when empty (the no-filter default); `include=repos` is opt-in, requested
- * only when the repo Select needs the window-scoped distinct set.
+ * when empty (the no-filter default). `include=repos` rides every read:
+ * the repo Select needs the window-scoped distinct repo set on every face
+ * it can render (the insights tab has no repo-less summary consumer).
  */
-export function appInsightsSummaryUrl(
-  slug: string,
-  window: string,
-  repo: string,
-  includeRepos: boolean,
-): string {
-  const params = new URLSearchParams({ window });
+export function appInsightsSummaryUrl(slug: string, window: string, repo: string): string {
+  const params = new URLSearchParams({ window, include: "repos" });
   if (repo !== "") params.set("repo", repo);
-  if (includeRepos) params.set("include", "repos");
   return `/dashboard/api/apps/${encodeURIComponent(slug)}/insights/summary?${params.toString()}`;
 }
 

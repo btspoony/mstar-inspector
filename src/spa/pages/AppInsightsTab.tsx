@@ -71,7 +71,7 @@ export function AppInsightsTab({
     setState("loading");
     // include=repos: the records Select needs the window-scoped distinct
     // repo set (QC F-001); default summary reads stay cheap.
-    fetchJson(appInsightsSummaryUrl(slug, search.window, search.repo, true))
+    fetchJson(appInsightsSummaryUrl(slug, search.window, search.repo))
       .then((raw) => {
         if (cancelled) return;
         const parsed = parseInsights(raw);
@@ -141,14 +141,27 @@ export function AppInsightsTab({
       </div>
       {state === "loading" && data !== null ? (
         // Filter refetch over retained data (background reload): a
-        // one-line polite hint; the toolbar above stays mounted and
-        // interactive (the no-flash contract).
+        // one-line polite hint; the toolbar above and the previous
+        // sections below stay mounted — the refetch never blanks the
+        // stat cards (the no-flash contract, honored literally: content
+        // renders on `data !== null`, not on `state === "ok"`).
         <p role="status" className="text-sm text-muted-foreground">
           {t(locale, "common.loading")}
         </p>
       ) : null}
-      {state === "error" ? <ErrorState locale={locale} onRetry={() => setReloadNonce((nonce) => nonce + 1)} /> : null}
-      {state === "ok" && data ? <InsightsRecordsView locale={locale} data={data} /> : null}
+      {/* ErrorState is the INITIAL-load face only (no retained data). A
+          refetch failure over retained data keeps the previous sections
+          and reports the failure in a slim alert line instead of blanking
+          the tab. */}
+      {state === "error" && data === null ? (
+        <ErrorState locale={locale} onRetry={() => setReloadNonce((nonce) => nonce + 1)} />
+      ) : null}
+      {state === "error" && data !== null ? (
+        <p role="alert" className="text-sm text-muted-foreground">
+          {t(locale, "common.loadFailed")}
+        </p>
+      ) : null}
+      {data !== null ? <InsightsRecordsView locale={locale} data={data} /> : null}
     </div>
   );
 }

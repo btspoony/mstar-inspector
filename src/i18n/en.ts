@@ -202,7 +202,6 @@ export const en = {
     emptyDescription: "Invite the first member with the form above.",
   },
   settings: {
-    title: "App settings",
     backToApps: "Back to Apps",
     /**
      * (AD-591): section-group eyebrow labels for the two tier
