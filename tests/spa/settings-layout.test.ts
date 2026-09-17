@@ -209,14 +209,17 @@ describe("configured providers + catalog add flow", () => {
   });
 
   test("op-triggered reloads are background: the card tree stays mounted across a failed verify (QC fix wave 1 F-001)", () => {
+    // SUPERSEDE (App detail IA): load() lives on the AppDetailPage shell
+    // now; the tab's op handlers keep the background-reload contract.
+    const detail = readFileSync(join(import.meta.dir, "../../src/spa/pages/AppDetailPage.tsx"), "utf8");
     const source = readFileSync(join(import.meta.dir, "../../src/spa/pages/SettingsPage.tsx"), "utf8");
     // load() defaults to the foreground (loading-flash) behavior; only the
     // background variant skips the "loading" flip.
-    expect(source).toContain("background = false");
-    expect(source).toContain('if (!background) setState("loading")');
+    expect(detail).toContain("background = false");
+    expect(detail).toContain('if (!background) setState("loading")');
     // Initial mount loads in the foreground — genuine navigation keeps the
     // loading state.
-    expect(source).toContain("void load()");
+    expect(detail).toContain("void load()");
     // Every op-triggered refresh is a background reload: no unmount, so the
     // Add Provider panel (open + selection) and every form's typed input
     // survive a failed verify.
@@ -1219,10 +1222,10 @@ describe("App workflow boundaries", () => {
 
   test("configuration section headings are described and unlabeled selects are named", () => {
     const source = readFileSync(join(import.meta.dir, "../../src/spa/pages/SettingsPage.tsx"), "utf8");
-    // Every section heading carries a description — install health included.
-    expect(source).toContain('t(locale, "settings.installHealthCopy")');
-    expect(t("en", "settings.installHealthCopy")).toContain("deliveries");
-    expect(t("zh_CN", "settings.installHealthCopy")).toContain("投递");
+    // SUPERSEDE (App detail IA): the standalone install-health card retired
+    // with the identity-only non-manager face — the health body now renders
+    // only inside the manager OpsCard, which keeps its section descriptions.
+    expect(source).toContain('t(locale, "settings.recentDeliveriesCopy")');
     // Selects without a visible label get an accessible name (DESIGN.md L2
     // label audit) — the runtime-image selector and the chain model picker.
     expect(source).toContain('aria-label={t(locale, "settings.runtimeImage")}');
@@ -1275,6 +1278,9 @@ describe("section-scoped op feedback", () => {
   const settingsSource = () => readFileSync(join(import.meta.dir, "../../src/spa/pages/SettingsPage.tsx"), "utf8");
 
   test("op outcomes resolve to the originating card; the top notice is page-level reload failure only", () => {
+    // SUPERSEDE (App detail IA): load() — and with it the page-level notice
+    // writes — lives on the AppDetailPage shell now.
+    const detail = readFileSync(join(import.meta.dir, "../../src/spa/pages/AppDetailPage.tsx"), "utf8");
     const source = settingsSource();
     // Handlers RESOLVE the outcome (OpNotice) instead of pushing to the page
     // channel — nothing outside load() writes the top notice anymore.
@@ -1284,16 +1290,17 @@ describe("section-scoped op feedback", () => {
     // The only top-notice writes left are load()'s two background-failure
     // paths (parse failure + request failure) — the page-level
     // channel for background reloads. Ops never land there.
-    expect(source.match(/setNotice\(\{/g)?.length).toBe(2);
+    expect(detail.match(/setNotice\(\{/g)?.length).toBe(2);
+    expect(source).not.toContain("setNotice({");
     // Bugbot fix: a successful load() — foreground or background —
     // clears the page banner, so a recovered reload never leaves a stale
     // "load failed" up. New shape: failure writes 2 + success clear 1, and
     // the clear is pinned INSIDE load()'s success path (between the payload
     // commit and its success return), not anywhere in the file.
-    expect(source.match(/setNotice\(null\)/g)?.length).toBe(1);
-    const loadSuccessPath = source.slice(
-      source.indexOf("setPayload(parsed);"),
-      source.indexOf("return true;"),
+    expect(detail.match(/setNotice\(null\)/g)?.length).toBe(1);
+    const loadSuccessPath = detail.slice(
+      detail.indexOf("setPayload(parsed);"),
+      detail.indexOf("return true;"),
     );
     expect(loadSuccessPath).toContain("setNotice(null);");
     // Carry-over (Task 2 review), refined by a later audit fix (F-09): a
@@ -1457,19 +1464,18 @@ describe("section-scoped op feedback", () => {
 });
 
 describe("settings header typography", () => {
-  test("app-slug heading renders at the heading-20 scale step, not the off-scale 18px (audit UI-45-08)", () => {
+  test("app-slug heading rides the detail shell's heading-24 h1; no off-scale page heading remains (audit UI-45-08)", () => {
+    // SUPERSEDE (App detail IA): the slug heading moved onto the
+    // AppDetailPage shell as the identity header — the page-level h1 at the
+    // heading-24 token step, serving BOTH tabs. The settings tab carries no
+    // page heading of its own anymore.
+    const shell = readFileSync(join(import.meta.dir, "../../src/spa/pages/AppDetailPage.tsx"), "utf8");
     const source = readFileSync(join(import.meta.dir, "../../src/spa/pages/SettingsPage.tsx"), "utf8");
-    // The slug is the selected-App panel title sitting under the page-level
-    // h1. DESIGN.md's heading scale is 32/24/20/16 only, and heading-20 is
-    // the panel-title tier — heading-16 would demote the slug below the
-    // cards it titles. SUPERSEDE: the named-scale
-    // carrier (text-xl) is replaced by the heading-20 token utilities — the
-    // QC heading-idiom convergence applied to this page; the scale
-    // step itself is unchanged.
-    expect(source).toContain(
-      '<h2 className="font-semibold text-(length:--typo-heading-20-size) leading-(--typo-heading-20-line) tracking-(--typo-heading-20-tracking)">{app.slug}</h2>',
+    expect(shell).toContain(
+      '<h1 className="font-semibold text-(length:--typo-heading-24-size) leading-(--typo-heading-24-line) tracking-(--typo-heading-24-tracking)">{slug}</h1>',
     );
-    // The off-scale 18px class no longer appears anywhere on the page.
+    // The off-scale 18px class no longer appears anywhere on either face.
+    expect(shell).not.toContain("text-lg");
     expect(source).not.toContain("text-lg");
   });
 });
@@ -1681,17 +1687,14 @@ describe("GitHub App identity card", () => {
     }
   });
 
-  test("the card sits between the slug row and the manage conditional — both faces see it", () => {
+  test("the card precedes the manage conditional — both faces see it", () => {
     const source = readFileSync(join(import.meta.dir, "../../src/spa/pages/SettingsPage.tsx"), "utf8");
-    // supersede: the slug row anchor moved onto the heading-20
-    // token utilities (same carrier change as the typography pin above).
-    const slugRowPos = source.indexOf(
-      '<h2 className="font-semibold text-(length:--typo-heading-20-size) leading-(--typo-heading-20-line) tracking-(--typo-heading-20-tracking)">{app.slug}</h2>',
-    );
+    // SUPERSEDE (App detail IA): the slug row is the AppDetailPage shell's
+    // identity header now; inside the tab, the card ordering contract is
+    // AppInfoCard → manage conditional.
     const cardPos = source.indexOf("<AppInfoCard");
     const managePos = source.indexOf("{payload.can_manage ? (");
-    expect(slugRowPos).toBeGreaterThan(-1);
-    expect(cardPos).toBeGreaterThan(slugRowPos);
+    expect(cardPos).toBeGreaterThan(-1);
     expect(managePos).toBeGreaterThan(cardPos);
     // Per-field degradation is structural: every synced field is gated by its
     // own null check inside the card body, and the link pins the new-tab +

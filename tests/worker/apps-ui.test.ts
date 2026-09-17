@@ -577,9 +577,11 @@ describe("Apps list → App settings wayfinding", () => {
     expect(t("en", "apps.settings")).toBe("Settings");
     expect(t("zh_CN", "apps.settings")).toBe("设置");
     // User-visible route semantics: what the link emits is the settings
-    // surface the SPA matcher owns (slug captured, not a 404 stub).
+    // surface the SPA matcher owns (slug captured, not a 404 stub). The
+    // legacy settings path is a permanent deep link onto the detail
+    // page's settings tab — one page id serves both detail paths.
     expect(matchSpaRoute("/dashboard/apps/acme/settings")).toEqual({
-      page: "settings",
+      page: "app-detail",
       pathname: "/dashboard/apps/acme/settings",
       slug: "acme",
     });
