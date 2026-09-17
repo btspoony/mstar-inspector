@@ -189,7 +189,10 @@ const DISTRIBUTION_SEVERITY_KEYS = ["must-fix", "should-fix", "nit"] as const;
  *
  * @param db   a D1 handle (real D1Database or the bun:sqlite test double)
  * @param opts windowDays (default 30, >90 clamped to 90) + optional
- *             owner/repo filter applied to EVERY aggregation
+ *             owner/repo filter and optional `appId` (a `github_apps.id`
+ *             row PK string — not the numeric `github_app_id`), each
+ *             applied to EVERY aggregation; `appId` also scopes the
+ *             opt-in `repos` list and excludes legacy `app_id` NULL rows.
  */
 export async function createInsightsStore(db: InsightsD1, opts: InsightsWindow = {}): Promise<Insights> {
   const windowDays = clampWindow(opts.windowDays);
@@ -222,7 +225,7 @@ export async function createInsightsStore(db: InsightsD1, opts: InsightsWindow =
     binds.push(repo.owner, repo.repo);
   }
   if (appId !== undefined) {
-    // Additive per-App predicate (plan 75): composed alongside — never
+    // Additive per-App predicate (the app-scoped filter): composed alongside — never
     // inside — windowEraWhere, so the era gate and window stay untouched.
     where.push("r.app_id = ?");
     binds.push(appId);
@@ -235,7 +238,8 @@ export async function createInsightsStore(db: InsightsD1, opts: InsightsWindow =
   // Opt-in (QC F-001) — skipped unless includeRepos, so the home
   // surface never pays the DISTINCT scan+sort. Deliberately ignores
   // opts.repo — the option set is the in-window universe, not the
-  // currently filtered subset — but HONORS opts.appId (plan 75): the
+  // currently filtered subset — but HONORS opts.appId (the app-scoped
+  // filter): the
   // per-App repo selector must never offer another App's repos. Shares
   // windowEraWhere so the window + era gate predicates cannot drift
   // from the other aggregations (F-003).

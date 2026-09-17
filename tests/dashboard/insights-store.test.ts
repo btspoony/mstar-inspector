@@ -663,7 +663,7 @@ describe("createInsightsStore", () => {
     });
   });
 
-  // --- (plan 75 Task 1): appId filter ---------------------------------
+  // --- appId filter (per-App insights data face) ----------------------
 
   /**
    * App-scoped fixture: r-a attributed to app-a, r-b to app-b, r-c left
