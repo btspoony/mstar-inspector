@@ -6,8 +6,8 @@ import { matchRoute } from "../../src/spa/router";
 import { SPA_PAGES, isSpaAssetPath, matchSpaRoute, wantsHtml } from "../../src/spa/routes";
 
 describe("SPA_PAGES enum", () => {
-  test("includes apps, insights, members, login, settings (home retired)", () => {
-    expect([...SPA_PAGES]).toEqual(["apps", "insights", "members", "login", "settings"]);
+  test("includes apps, members, login, settings (insights and home retired)", () => {
+    expect([...SPA_PAGES]).toEqual(["apps", "members", "login", "settings"]);
   });
 });
 
@@ -15,10 +15,6 @@ describe("matchSpaRoute", () => {
   test("matches exact enumerated paths", () => {
     expect(matchSpaRoute("/dashboard")).toEqual({ page: "apps", pathname: "/dashboard" });
     expect(matchSpaRoute("/dashboard/apps")).toEqual({ page: "apps", pathname: "/dashboard/apps" });
-    expect(matchSpaRoute("/dashboard/insights")).toEqual({
-      page: "insights",
-      pathname: "/dashboard/insights",
-    });
     expect(matchSpaRoute("/dashboard/members")).toEqual({
       page: "members",
       pathname: "/dashboard/members",
@@ -44,6 +40,8 @@ describe("matchSpaRoute", () => {
     expect(matchSpaRoute("/dashboard/apps/acme")).toBeNull();
     expect(matchSpaRoute("/dashboard/apps/acme/settings/key/delete")).toBeNull();
     expect(matchSpaRoute("/dashboard/api/insights/summary")).toBeNull();
+    // The global insights page is retired: its path is no longer a SPA page.
+    expect(matchSpaRoute("/dashboard/insights")).toBeNull();
     expect(matchSpaRoute("/apps")).toBeNull();
   });
 });

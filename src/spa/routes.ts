@@ -7,13 +7,12 @@
  * Worker 301 alias). History fallback is this matcher, not
  * wrangler `not_found_handling`.
  */
-export const SPA_PAGES = ["apps", "insights", "members", "login", "settings"] as const;
+export const SPA_PAGES = ["apps", "members", "login", "settings"] as const;
 
 export type SpaPageId = (typeof SPA_PAGES)[number];
 
 export type SpaRoute =
   | { page: "apps"; pathname: "/dashboard" | "/dashboard/apps" }
-  | { page: "insights"; pathname: "/dashboard/insights" }
   | { page: "members"; pathname: "/dashboard/members" }
   | { page: "login"; pathname: "/dashboard/login" }
   | { page: "settings"; pathname: string; slug: string };
@@ -25,8 +24,6 @@ export function matchSpaRoute(pathname: string): SpaRoute | null {
     case "/dashboard":
     case "/dashboard/apps":
       return { page: "apps", pathname };
-    case "/dashboard/insights":
-      return { page: "insights", pathname };
     case "/dashboard/members":
       return { page: "members", pathname };
     case "/dashboard/login":

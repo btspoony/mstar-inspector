@@ -1,7 +1,8 @@
 /**
  * Shared navigation contract (the sidebar IA).
  *
- * Order is LOCKED (spec §1.1): Apps → Insights → Members. `labelKey` is a
+ * Order is LOCKED (spec §1.1): Apps → Members (the global insights entry is
+ * retired). `labelKey` is a
  * dictionary key (type-checked against en.ts), `adminOnly` gates the
  * Members entry. Apps href is `/dashboard/apps`. The language
  * toggle is NOT a nav item — it renders from `t(locale, "nav.language")`
@@ -14,6 +15,5 @@ export type NavItem = { labelKey: DictionaryKey; href: string; adminOnly?: boole
 
 export const NAV_ITEMS: NavItem[] = [
   { labelKey: "nav.apps", href: "/dashboard/apps" },
-  { labelKey: "nav.insights", href: "/dashboard/insights" },
   { labelKey: "nav.members", href: "/dashboard/members", adminOnly: true },
 ];
