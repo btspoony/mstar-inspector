@@ -141,7 +141,7 @@ export const en = {
     /** Composed empty state (EmptyState title + description). */
     emptyTitle: "No Apps yet",
     emptyDescription: "Create GitHub App connects your first one.",
-    settings: "Settings",
+    detail: "Detail",
     appId: "App id {id}",
     by: "by {login}",
     status: {
@@ -171,7 +171,7 @@ export const en = {
     tableStatus: "Status",
     tableHealth: "Health",
     tableCreator: "Creator",
-    openAria: "Open {slug} settings",
+    openAria: "Open {slug} detail",
   },
   members: {
     heading: "Members",

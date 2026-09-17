@@ -125,7 +125,7 @@ export const zhCN: Dictionary = {
     /** 组合式空态（EmptyState 标题 + 描述）。 */
     emptyTitle: "还没有 App",
     emptyDescription: "使用「创建 GitHub App」连接第一个。",
-    settings: "设置",
+    detail: "详情",
     appId: "App id {id}",
     by: "创建者 {login}",
     status: {
@@ -155,7 +155,7 @@ export const zhCN: Dictionary = {
     tableStatus: "状态",
     tableHealth: "健康",
     tableCreator: "创建者",
-    openAria: "打开 {slug} 设置",
+    openAria: "打开 {slug} 详情",
   },
   members: {
     heading: "成员",
