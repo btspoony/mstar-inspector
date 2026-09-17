@@ -1,13 +1,23 @@
 ---
 module: dashboard / multi-App platform (B4+B5+B2 contract)
 date: 2026-08-29
-last_updated: 2026-09-01
+last_updated: 2026-09-18
 problem_type: best_practice
 category: best-practices
 severity: medium
 topic: dashboard multi-app
-tags: [multi-app, data-model, webhook-routing, byok, design-contract, v0-5]
-related_components: [github_apps, app_provider_keys, app_model_config, reviews]
+tags:
+  - multi-app
+  - data-model
+  - webhook-routing
+  - byok
+  - design-contract
+  - v0-5
+related_components:
+  - github_apps
+  - app_provider_keys
+  - app_model_config
+  - reviews
 applies_when:
   - planning B3 (per-App ops UI) or B6 (per-role models) on this platform
   - extending the per-App configuration model to new setting kinds
@@ -51,3 +61,19 @@ Planning any new per-App setting kind (add a column/table + settings route + ass
 ## Examples
 
 - Access-control / multi-app platform buildout (v0.5, migrations 0003–0009); `src/dashboard/{users,apps-store,app-config-store,secretbox}.ts`; `src/pipeline/consumer.ts`; `tests/pipeline/perapp-env-assembly.test.ts`.
+
+
+## Per-App insights face (2026-09-18 contract addendum)
+
+- `GET /api/apps/:slug/insights/summary` (window ≤90 clamp / repo / include=repos)
+  replaced the retired global `/api/insights/summary`; gate = membership guard +
+  slug resolution (404 unknown/soft-deleted) + `canManageApp` 403. The global
+  cross-App face was removed outright — insights have no global concept.
+- **Composition trap (verified):** the insights store's shared `whereSql` is NOT
+  the only WHERE — the opt-in repos aggregation composes only `windowEraWhere`.
+  Any new store-level filter (here: `r.app_id = ?`) must be added to BOTH faces
+  or the scoped endpoint leaks cross-App rows through the bypassing query.
+  Keep the filter additive (WHERE-only, byte-identical when absent) to preserve
+  the zero-diff grid pin; compose alongside `windowEraWhere`, never inside.
+- `reviews.app_id` (migration 0005; index 0007) backs the predicate; legacy
+  `app_id IS NULL` rows are excluded by design.
