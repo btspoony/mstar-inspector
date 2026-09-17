@@ -1,8 +1,8 @@
 /**
  * Shared navigation contract (the sidebar IA).
  *
- * Order is LOCKED (spec §1.1): Apps → Members (the global insights entry is
- * retired). `labelKey` is a
+ * Order is LOCKED (spec § IA, dashboard nav): Apps → Members (the global
+ * insights entry is retired). `labelKey` is a
  * dictionary key (type-checked against en.ts), `adminOnly` gates the
  * Members entry. Apps href is `/dashboard/apps`. The language
  * toggle is NOT a nav item — it renders from `t(locale, "nav.language")`

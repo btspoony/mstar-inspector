@@ -3549,20 +3549,7 @@ describe("members page (admin-only)", () => {
 // REMOVED — insights are a per-App read face now: the store filters every
 // aggregation by the `github_apps.id` row PK, and the data is served by
 // GET /dashboard/api/apps/:slug/insights/summary behind the membership +
-// creator-or-admin gate (matrix in app-permission-matrix.test.ts, route
-// behavior in insights-ui.test.ts). No compat shim — the global URL
-// answers 404 even for a signed-in member.
-describe("/dashboard/api/insights/summary (removed)", () => {
-  test("the global endpoint is gone: member GET → 404, never a summary", async () => {
-    const db = createDashboardTestD1();
-    await createUser(db, { login: "octocat", role: "admin" });
-    const res = await worker.fetch(
-      dashboardRequest(
-        "/dashboard/api/insights/summary",
-        `${SESSION_COOKIE}=${await createSessionValue("octocat", null, SESSION_SECRET)}`,
-      ),
-      makeDbEnv(db),
-    );
-    expect(res.status).toBe(404);
-  });
-});
+// creator-or-admin gate (matrix in app-permission-matrix.test.ts). The
+// member-GET → 404 no-compat-shim removal pin lives in
+// insights-ui.test.ts ("the cross-App global endpoint is removed") —
+// kept there, once, to avoid a duplicate assertion here.

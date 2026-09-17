@@ -86,10 +86,10 @@ const API_TEST_KEY = Buffer.alloc(32, 7).toString("base64");
 
 /**
  * Fixture world (per-App scoping): mallory owns "widgets-app"; octocat is
- * admin; hubot is a plain member. Reviews: two attributed to widgets-app
- * (25d / 15d ago, sharing fingerprint fp-x → recurrence count 2), one
- * attributed to a DIFFERENT app (5d ago) that must never leak into
- * widgets-app's aggregation.
+ * admin; hubot is a plain member. Reviews: three attributed to widgets-app
+ * (25d / 15d ago sharing fingerprint fp-x → recurrence count 2, plus a
+ * 10d approve in the app's second repo acme/portal), one attributed to a
+ * DIFFERENT app (5d ago) that must never leak into widgets-app's numbers.
  */
 async function insightsWorld(): Promise<{ db: TestD1; env: Env; appId: string }> {
   const db = createMigratedTestD1();
@@ -132,6 +132,9 @@ async function insightsWorld(): Promise<{ db: TestD1; env: Env; appId: string }>
   insertFinding.run("f-a2", "r-a", "nit", null, "Trailing space", "fp-y");
   insertReview.run("r-b", "acme", "widgets", 2, daysAgo(15), "approve", appId);
   insertFinding.run("f-b1", "r-b", "must-fix", "logic", "Null deref risk", "fp-x");
+  // Second repo of the SAME app — lets the repo= filter case prove the
+  // filter is applied (not merely echoed) within one App's data.
+  insertReview.run("r-d", "acme", "portal", 4, daysAgo(10), "approve", appId);
   // The other App's review — must stay out of widgets-app's numbers.
   insertReview.run("r-c", "globex", "gadgets", 3, daysAgo(5), "request changes", otherAppId);
   insertFinding.run("f-c1", "r-c", "should-fix", "security", "Injection", "fp-z");
@@ -191,8 +194,9 @@ describe("GET /dashboard/api/apps/:slug/insights/summary", () => {
       ].sort(),
     );
     expect(body.window_days).toBe(30);
-    // r-a + r-b are the app's in-window reviews; r-c belongs to another App.
-    expect(body.reviews_total).toBe(2);
+    // r-a + r-b + r-d are the app's in-window reviews; r-c belongs to
+    // another App.
+    expect(body.reviews_total).toBe(3);
     expect(body.findings_by_severity).toEqual([
       { severity: "must-fix", count: 2 },
       { severity: "nit", count: 1 },
@@ -202,7 +206,7 @@ describe("GET /dashboard/api/apps/:slug/insights/summary", () => {
       { category: null, count: 1 },
     ]);
     expect(body.verdict_distribution).toEqual([
-      { verdict: "approve", count: 1 },
+      { verdict: "approve", count: 2 },
       { verdict: "comment", count: 1 },
     ]);
     expect(body.recurring_top).toEqual([
@@ -217,7 +221,44 @@ describe("GET /dashboard/api/apps/:slug/insights/summary", () => {
     const res = await appsInsightsGet(env, "widgets-app", await apiCookie(SESSION_SECRET_API, "mallory"), "include=repos");
     expect(res.status).toBe(200);
     const body = (await res.json()) as { repos: string[] };
-    expect(body.repos).toEqual(["acme/widgets"]);
+    // Both of the app's own repos, ascending — never the other App's.
+    expect(body.repos).toEqual(["acme/portal", "acme/widgets"]);
+  });
+
+  test("repo= filter: valid owner/repo echoed AND applied — the app's other-repo review drops out", async () => {
+    const { env } = await insightsWorld();
+    const res = await appsInsightsGet(
+      env,
+      "widgets-app",
+      await apiCookie(SESSION_SECRET_API, "mallory"),
+      "repo=acme/widgets&include=repos",
+    );
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { repo: string; reviews_total: number };
+    expect(body.repo).toBe("acme/widgets");
+    // Applied, not just echoed: the app has 3 in-window reviews, but r-d
+    // (acme/portal) is outside the owner/repo filter.
+    expect(body.reviews_total).toBe(2);
+  });
+
+  test("malformed repo= → 400 (parseInsightsParams owner/repo semantics)", async () => {
+    const { env } = await insightsWorld();
+    const cookie = await apiCookie(SESSION_SECRET_API, "mallory");
+    for (const repo of ["oops", "owner/repo/extra", "/repo", "owner/"]) {
+      const res = await appsInsightsGet(env, "widgets-app", cookie, `repo=${encodeURIComponent(repo)}`);
+      expect(res.status, `repo=${repo}`).toBe(400);
+      expect(((await res.json()) as { error?: string }).error, `repo=${repo}`).toContain("repo");
+    }
+  });
+
+  test("malformed include= → 400 (only `repos` is a valid extra)", async () => {
+    const { env } = await insightsWorld();
+    const cookie = await apiCookie(SESSION_SECRET_API, "mallory");
+    for (const include of ["foo", "repos,foo", "repos,"]) {
+      const res = await appsInsightsGet(env, "widgets-app", cookie, `include=${include}`);
+      expect(res.status, `include=${include}`).toBe(400);
+      expect(((await res.json()) as { error?: string }).error, `include=${include}`).toContain("include");
+    }
   });
 
   test("non-manager member → 403 JSON; admin (non-creator) → 200", async () => {
