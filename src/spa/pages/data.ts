@@ -327,17 +327,6 @@ export function parseInsightsSearch(search: string): InsightsSearch {
   return { window: params.get("window") ?? "30", repo: params.get("repo") ?? "" };
 }
 
-export function insightsSummaryUrl(search: InsightsSearch, includeRepos = false): string {
-  const params = new URLSearchParams();
-  if (search.window !== "" && search.window !== "30") params.set("window", search.window);
-  if (search.repo !== "") params.set("repo", search.repo);
-  // Opt-in repos aggregation (QC F-001): only the records page
-  // requests it, so default summary reads never pay the DISTINCT scan+sort.
-  if (includeRepos) params.set("include", "repos");
-  const query = params.toString();
-  return query === "" ? "/dashboard/api/insights/summary" : `/dashboard/api/insights/summary?${query}`;
-}
-
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
@@ -429,15 +418,6 @@ export function normalizeWindowSearch(search: string): string {
   if (raw.repo !== "") params.set("repo", raw.repo);
   const query = params.toString();
   return query === "" ? "" : `?${query}`;
-}
-
-/** The records-page URL for an insights filter (default window/repo omitted). */
-export function searchHref(pathname: "/dashboard/insights", search: InsightsSearch): string {
-  const params = new URLSearchParams();
-  if (search.window !== "" && search.window !== "30") params.set("window", search.window);
-  if (search.repo !== "") params.set("repo", search.repo);
-  const query = params.toString();
-  return query === "" ? pathname : `${pathname}?${query}`;
 }
 
 /** One-line verdict distribution for the summary card. */

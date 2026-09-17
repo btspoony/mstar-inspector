@@ -1,5 +1,5 @@
 /**
- * Dashboard chrome: left sidebar (Apps / Insights / Members) +
+ * Dashboard chrome: left sidebar (Apps / Members) +
  * slim navbar (theme + Lang + username + logout).
  */
 import { useState, type ReactNode } from "react";

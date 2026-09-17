@@ -113,10 +113,12 @@ export function StackedBarChart({
   // severity merge-class vocabulary and the category slug vocabulary are
   // disjoint (qc fix-1). `by_severity` winning this lookup is only
   // unambiguous under that invariant: a category slug equal to a merge
-  // class would silently read the severity count. The page-layer
-  // disjointness pin (insights-page.test.ts, "severity and category series
-  // vocabularies are disjoint") fails loudly on a constants-level
-  // collision; `?? 0` keeps a missing grid cell at an honest zero.
+  // class would silently read the severity count — the vocabularies are
+  // disjoint by construction (merge classes vs category slugs), and the
+  // per-App insights face (insights-ui.test.ts) feeds these buckets
+  // straight through from the store, so a constants-level collision would
+  // surface there as swapped counts. `?? 0` keeps a missing grid cell at
+  // an honest zero.
   const data = buckets.map((bucket) => ({
     bucket_start: bucket.bucket_start,
     ...Object.fromEntries(

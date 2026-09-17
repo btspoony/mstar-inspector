@@ -84,14 +84,19 @@ function insertReview(
     findings: SeedFinding[];
     /** v1 rows carry the envelope; M1-era rows pass null (era-gate tests). */
     envelope?: string | null;
+    /**
+     * `github_apps.id` row PK attribution. Omitted → `app_id` NULL, the
+     * legacy unattributed shape (pre-app rows / the appId-filter tests).
+     */
+    appId?: string;
   },
 ): void {
   db.raw
     .query(
-      `INSERT INTO reviews (id, installation_id, owner, repo, pr_number, head_sha, reviewed_at, verdict, summary_md, envelope)
-       VALUES (?, 123, ?, ?, ?, 'sha', ?, ?, 's', ?)`,
+      `INSERT INTO reviews (id, installation_id, owner, repo, pr_number, head_sha, reviewed_at, verdict, summary_md, envelope, app_id)
+       VALUES (?, 123, ?, ?, ?, 'sha', ?, ?, 's', ?, ?)`,
     )
-    .run(opts.id, opts.owner, opts.repo, opts.pr_number, opts.reviewedAt, opts.verdict, opts.envelope === undefined ? "{}" : opts.envelope);
+    .run(opts.id, opts.owner, opts.repo, opts.pr_number, opts.reviewedAt, opts.verdict, opts.envelope === undefined ? "{}" : opts.envelope, opts.appId ?? null);
   for (const f of opts.findings) {
     db.raw
       .query(
@@ -656,5 +661,112 @@ describe("createInsightsStore", () => {
       by_severity: { "must-fix": 1, "should-fix": 1, nit: 0 },
       by_category: { logic: 2, style: 0, uncategorized: 0 },
     });
+  });
+
+  // --- appId filter (per-App insights data face) ----------------------
+
+  /**
+   * App-scoped fixture: r-a attributed to app-a, r-b to app-b, r-c left
+   * `app_id` NULL (legacy unattributed row). Same three weeks as seedFixture.
+   */
+  function seedAppFixture(db: TestD1): void {
+    // github_apps rows for the FK — the ids are the appId option's values.
+    for (const [id, ghId] of [["app-a", 1001], ["app-b", 1002]] as const) {
+      db.raw
+        .query(
+          `INSERT INTO github_apps
+             (id, slug, github_app_id, name, private_key_enc, webhook_secret_enc,
+              created_by, status, deleted_at, created_at, updated_at)
+           VALUES (?, ?, ?, ?, 'enc', 'enc', 'tester', 'active', NULL, datetime('now'), datetime('now'))`,
+        )
+        .run(id, id, ghId, id);
+    }
+    insertReview(db, {
+      id: "r-a",
+      owner: "acme",
+      repo: "widgets",
+      pr_number: 1,
+      reviewedAt: reviewedAt(1),
+      verdict: "needs fixes",
+      appId: "app-a",
+      findings: [{ id: "f-a1", severity: "must-fix", category: "logic", title: "Null deref risk", fingerprint: FP_X }],
+    });
+    insertReview(db, {
+      id: "r-b",
+      owner: "acme",
+      repo: "portal",
+      pr_number: 2,
+      reviewedAt: reviewedAt(8),
+      verdict: "approved",
+      appId: "app-b",
+      findings: [{ id: "f-b1", severity: "nit", category: "style", title: "Trailing space", fingerprint: FP_Z }],
+    });
+    insertReview(db, {
+      id: "r-c",
+      owner: "other",
+      repo: "lib",
+      pr_number: 3,
+      reviewedAt: reviewedAt(15),
+      verdict: "needs fixes",
+      // no appId → legacy app_id NULL row
+      findings: [{ id: "f-c1", severity: "should-fix", category: null, title: "Null deref risk", fingerprint: FP_X }],
+    });
+  }
+
+  test("appId restricts every aggregation to one app: other apps and legacy app_id NULL rows excluded", async () => {
+    const db = createMigratedTestD1();
+    seedAppFixture(db);
+
+    const insights = await createInsightsStore(db, { appId: "app-a" });
+
+    expect(insights.reviewsTotal).toBe(1);
+    expect(insights.findingsBySeverity).toEqual([{ severity: "must-fix", count: 1 }]);
+    expect(insights.findingsByCategory).toEqual([{ category: "logic", count: 1 }]);
+    expect(insights.verdictDistribution).toEqual([{ verdict: "needs fixes", count: 1 }]);
+    // Only app-a's week survives the filter.
+    expect(insights.weeklyTrend).toEqual([
+      { week_start: mondayOf(reviewedAt(1)), reviews: 1, findings: 1 },
+    ]);
+    // Distribution: app-b (8d) and legacy (15d) buckets go honestly zero,
+    // and the category union carries only app-a's observed keys.
+    const at = (daysAgo: number) =>
+      insights.findingsDistribution.find((b) => b.bucket_start === reviewedAt(daysAgo).slice(0, 10))!;
+    expect(at(1)).toMatchObject({
+      by_severity: { "must-fix": 1, "should-fix": 0, nit: 0 },
+      by_category: { logic: 1, uncategorized: 0 },
+    });
+    expect(at(8)).toMatchObject({ by_severity: { "must-fix": 0, nit: 0 } });
+    expect(at(15)).toMatchObject({ by_severity: { "must-fix": 0, "should-fix": 0 } });
+    expect(Object.keys(insights.findingsDistribution[0]!.by_category)).toEqual(["logic", "uncategorized"]);
+  });
+
+  test("appId + includeRepos: repos lists only the app's own repos, never other apps'", async () => {
+    const db = createMigratedTestD1();
+    seedAppFixture(db);
+
+    const insights = await createInsightsStore(db, { appId: "app-a", includeRepos: true });
+
+    expect(insights.repos).toEqual(["acme/widgets"]);
+  });
+
+  test("without appId, outputs match the pre-appId pinned expectations (zero-diff pin)", async () => {
+    const db = createMigratedTestD1();
+    seedAppFixture(db);
+
+    const insights = await createInsightsStore(db, { includeRepos: true });
+
+    // All three rows count (app attribution is invisible without the filter).
+    expect(insights.reviewsTotal).toBe(3);
+    expect(insights.findingsBySeverity).toEqual([
+      { severity: "must-fix", count: 1 },
+      { severity: "nit", count: 1 },
+      { severity: "should-fix", count: 1 },
+    ]);
+    expect(insights.verdictDistribution).toEqual([
+      { verdict: "needs fixes", count: 2 },
+      { verdict: "approved", count: 1 },
+    ]);
+    expect(insights.weeklyTrend).toHaveLength(3);
+    expect(insights.repos).toEqual(["acme/portal", "acme/widgets", "other/lib"]);
   });
 });

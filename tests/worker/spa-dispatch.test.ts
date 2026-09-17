@@ -85,7 +85,7 @@ describe("SPA dispatch", () => {
     const { env, calls } = makeEnv({ DB: memberDbStub() });
     const session = await createSessionValue("octocat", null, SESSION_SECRET);
     const res = await worker.fetch(
-      htmlGetRequest("/dashboard/insights", { Cookie: `${SESSION_COOKIE}=${session}` }),
+      htmlGetRequest("/dashboard/members", { Cookie: `${SESSION_COOKIE}=${session}` }),
       env,
     );
     expect(res.status).toBe(200);
@@ -99,7 +99,6 @@ describe("SPA dispatch", () => {
     const pages = [
       "/dashboard",
       "/dashboard/apps",
-      "/dashboard/insights",
       "/dashboard/members",
       "/dashboard/login",
       "/dashboard/apps/acme/settings",
@@ -119,7 +118,7 @@ describe("SPA dispatch", () => {
   test("POST to an SPA path does not call ASSETS (legacy)", async () => {
     const { env, calls } = makeEnv();
     await worker.fetch(
-      new Request("https://worker.local/dashboard/insights", {
+      new Request("https://worker.local/dashboard/members", {
         method: "POST",
         headers: { Accept: "text/html" },
       }),
@@ -165,7 +164,7 @@ describe("SPA dispatch", () => {
   test("Accept: application/json stays on legacy", async () => {
     const { env, calls } = makeEnv();
     await worker.fetch(
-      new Request("https://worker.local/dashboard/insights", {
+      new Request("https://worker.local/dashboard/members", {
         headers: { Accept: "application/json" },
       }),
       env,
@@ -175,7 +174,7 @@ describe("SPA dispatch", () => {
 
   test("default Accept */* stays on legacy (existing tests)", async () => {
     const { env, calls } = makeEnv();
-    await worker.fetch(new Request("https://worker.local/dashboard/insights"), env);
+    await worker.fetch(new Request("https://worker.local/dashboard/members"), env);
     expect(calls).toEqual([]);
   });
 
@@ -290,7 +289,6 @@ describe("SPA dispatch", () => {
   test("unauthenticated deep link HTML GET → 302 login, no ASSETS call", async () => {
     const deepLinks = [
       "/dashboard/apps",
-      "/dashboard/insights",
       "/dashboard/members",
       "/dashboard/apps/acme/settings",
     ];
