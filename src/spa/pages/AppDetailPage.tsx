@@ -45,15 +45,24 @@ export function AppDetailPage({ boot, slug }: { boot: SpaBoot; slug: string }) {
   const [state, setState] = useState<"loading" | "ok" | "error">("loading");
   const [notice, setNotice] = useState<{ kind: NoticeKind; message: string } | null>(null);
   const cancelledRef = useRef(false);
+  // The can_manage gate as the payload states it, mirrored into a ref so
+  // the (registered-once) popstate listener and the mount/slug
+  // re-derivations read the CURRENT gate instead of a stale `false`
+  // closure — a manager's `?tab=insights` deep link and history
+  // back/forward must activate the insights tab. The mirror is written
+  // when the payload lands (the re-derivation effect below); until then
+  // `false` is the honest gate (nothing but settings can render anyway).
+  const canManageRef = useRef(false);
 
   // Mount-time URL state, re-derived on every popstate. `navigate()`
   // pushStates then dispatches a synthetic popstate (router.tsx), and
   // history traversal fires the native event, so push and history both
   // land here. `canManage` gates the insights tab: a non-manager's
   // `?tab=insights` deep link resolves to the settings tab (the listener
-  // below re-reads canManage at call time; registration is once).
+  // below re-reads the canManageRef mirror at call time; registration is
+  // once).
   const [search, setSearch] = useState<AppDetailSearch>(() =>
-    parseAppDetailSearch(window.location.search, false),
+    parseAppDetailSearch(window.location.search, canManageRef.current),
   );
 
   // Background reloads (op-triggered refreshes) keep the loaded card tree
@@ -104,16 +113,29 @@ export function AppDetailPage({ boot, slug }: { boot: SpaBoot; slug: string }) {
   useEffect(() => {
     cancelledRef.current = false;
     void load();
-    // A slug push re-derives the URL state too (the address bar moved).
-    setSearch(parseAppDetailSearch(window.location.search, payload?.can_manage ?? false));
+    // A slug push re-derives the URL state too (the address bar moved);
+    // the gate comes from the ref mirror, never a stale payload closure.
+    setSearch(parseAppDetailSearch(window.location.search, canManageRef.current));
     return () => {
       cancelledRef.current = true;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [slug]);
 
+  // When the payload lands (can_manage becomes known), mirror the gate and
+  // re-derive the URL state once: a manager's `?tab=insights` deep link —
+  // or a history entry carrying it — activates the insights tab only now
+  // that the payload confirms can_manage. Registered-once listeners keep
+  // reading the ref, so this re-derivation also covers every later
+  // popstate while the gate stays stable.
   useEffect(() => {
-    const onPop = () => setSearch(parseAppDetailSearch(window.location.search, payload?.can_manage ?? false));
+    canManageRef.current = payload?.can_manage ?? false;
+    if (payload) setSearch(parseAppDetailSearch(window.location.search, canManageRef.current));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [payload?.can_manage]);
+
+  useEffect(() => {
+    const onPop = () => setSearch(parseAppDetailSearch(window.location.search, canManageRef.current));
     window.addEventListener("popstate", onPop);
     return () => window.removeEventListener("popstate", onPop);
     // eslint-disable-next-line react-hooks/exhaustive-deps

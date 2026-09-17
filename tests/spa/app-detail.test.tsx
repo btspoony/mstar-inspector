@@ -158,8 +158,34 @@ describe("tab shell source contracts", () => {
     expect(detailPage).toContain("history.replaceState");
     // The page never pushes history itself (navigation stays in the router).
     expect(detailPage).not.toContain(".pushState(");
-    // State derives through the shared pure helper (mount + popstate).
-    expect(detailPage.match(/parseAppDetailSearch\(/g)?.length).toBe(3);
+    // State derives through the shared pure helper (mount init, slug
+    // re-derivation, payload-landing re-derivation, popstate).
+    expect(detailPage.match(/parseAppDetailSearch\(/g)?.length).toBe(4);
+  });
+
+  test("manager deep-link fix: the gate rides a ref mirror, re-derived when the payload lands — never a stale false closure", () => {
+    // (Fix round 1): the registered-once popstate listener (and the
+    // mount/slug re-derivations) must read the canManageRef mirror — a
+    // stale `payload?.can_manage ?? false` closure would permanently
+    // resolve a manager's `?tab=insights` deep link and history
+    // back/forward to the settings tab.
+    expect(detailPage).toContain("const canManageRef = useRef(false);");
+    expect(detailPage).toContain(
+      "const onPop = () => setSearch(parseAppDetailSearch(window.location.search, canManageRef.current));",
+    );
+    expect(detailPage).not.toContain("parseAppDetailSearch(window.location.search, payload?.can_manage ?? false)");
+    // One re-derivation when the payload lands: the gate mirror is written
+    // and the location re-parsed, so a manager's `?tab=insights` deep link
+    // (and a history entry carrying it — native popstate re-reads the same
+    // ref) activates the insights tab as soon as can_manage is known.
+    const landing = detailPage.slice(
+      detailPage.indexOf("// When the payload lands"),
+      detailPage.indexOf("const onPop"),
+    );
+    expect(landing).toContain("canManageRef.current = payload?.can_manage ?? false;");
+    expect(landing).toContain(
+      "if (payload) setSearch(parseAppDetailSearch(window.location.search, canManageRef.current));",
+    );
   });
 
   test("R1 closure: the insights tab consumes the kept data.ts helpers over the mount-prefixed per-App face", () => {

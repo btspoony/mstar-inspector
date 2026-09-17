@@ -256,7 +256,7 @@ describe("REVIEW_ENABLED user copy is absent on restyled surfaces", () => {
   });
 });
 
-describe("App detail IA copy (App detail IA)", () => {
+describe("App detail IA copy", () => {
   test("the two tab labels exist atomically in both locales — 应用设置 / 洞察", () => {
     expect(t("en", "appDetail.tabSettings")).toBe("Settings");
     expect(t("zh_CN", "appDetail.tabSettings")).toBe("应用设置");

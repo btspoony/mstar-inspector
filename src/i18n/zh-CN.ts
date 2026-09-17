@@ -218,8 +218,6 @@ export const zhCN: Dictionary = {
     pauseReviews: "暂停审查",
     resumeReviews: "恢复审查",
     disconnected: "此 App 已断开连接 — 启用后即可审查。",
-    installHealth: "安装健康",
-    installHealthCopy: "此 App 的 webhook 安装与最近投递。",
     lastWebhook: "最近 webhook：{time}",
     noInstallations: "还没有安装。",
     installation: "安装 {id}",

@@ -237,8 +237,6 @@ export const en = {
     pauseReviews: "Pause reviews",
     resumeReviews: "Resume reviews",
     disconnected: "This App is disconnected — enable it to review.",
-    installHealth: "Install health",
-    installHealthCopy: "Webhook installations and the latest deliveries for this App.",
     lastWebhook: "Last webhook: {time}",
     noInstallations: "No installations yet.",
     installation: "installation {id}",

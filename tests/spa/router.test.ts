@@ -1,5 +1,5 @@
 /**
- * Enumerated client router (pathname + params). Plan 76 detail IA:
+ * Enumerated client router (pathname + params). App detail IA:
  * ONE page id (`app-detail`) serves both `/dashboard/apps/:slug` (default
  * tab 应用设置) and the legacy `/dashboard/apps/:slug/settings` permanent
  * settings-tab deep link.

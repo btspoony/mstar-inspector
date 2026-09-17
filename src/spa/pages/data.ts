@@ -467,8 +467,7 @@ export function appInsightsSummaryUrl(
 }
 
 /** The App detail page's two tabs (应用设置 / 洞察). Insights is manager-only. */
-export const APP_DETAIL_TABS = ["settings", "insights"] as const;
-export type AppDetailTab = (typeof APP_DETAIL_TABS)[number];
+export type AppDetailTab = "settings" | "insights";
 
 /** URL-derived detail state: the active tab plus the insights filters. */
 export type AppDetailSearch = { tab: AppDetailTab; window: InsightsWindow; repo: string };
@@ -484,10 +483,10 @@ export type AppDetailSearch = { tab: AppDetailTab; window: InsightsWindow; repo:
 export function parseAppDetailSearch(search: string, canManage: boolean): AppDetailSearch {
   const insights = parseInsightsSearch(search);
   const rawTab = new URLSearchParams(search.startsWith("?") ? search.slice(1) : search).get("tab");
-  const tab: AppDetailTab =
-    canManage && rawTab === "insights" && (APP_DETAIL_TABS as readonly string[]).includes(rawTab)
-      ? "insights"
-      : "settings";
+  // Any tab value that is not exactly "insights" (or a non-manager) is the
+  // settings tab — the bare path IS settings, so no vocabulary whitelist is
+  // needed beyond the one legal insights value.
+  const tab: AppDetailTab = canManage && rawTab === "insights" ? "insights" : "settings";
   const window = (INSIGHTS_WINDOWS as readonly string[]).includes(insights.window)
     ? (insights.window as InsightsWindow)
     : "30";
@@ -659,7 +658,6 @@ export function parseSettings(data: unknown): SettingsPayload | null {
   // worker) fails the parse instead of rendering a dead selection.
   if (!isReviewTriggerMode(data.app.review_trigger_mode)) return null;
   if (!Array.isArray(data.installations) || !Array.isArray(data.deliveries)) return null;
-  if (!data.can_manage) return data as SettingsPayload;
   if (!Array.isArray(data.keys)) return null;
   if (!Array.isArray(data.model_role_ids) || !isStringArray(data.model_role_ids)) return null;
   if (!Array.isArray(data.custom_provider_api_ids) || !isStringArray(data.custom_provider_api_ids)) return null;
