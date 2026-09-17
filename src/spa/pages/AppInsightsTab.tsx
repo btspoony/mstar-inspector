@@ -139,6 +139,15 @@ export function AppInsightsTab({
           </SelectContent>
         </Select>
       </div>
+      {state === "loading" && data === null ? (
+        // Initial load (deep link or first fetch): no retained data yet,
+        // so the records face below is still unmounted — render a polite
+        // loading face (same role="status" pattern as the retained-data
+        // hint) instead of a bare filter toolbar (bugbot fix).
+        <p role="status" className="text-sm text-muted-foreground">
+          {t(locale, "common.loading")}
+        </p>
+      ) : null}
       {state === "loading" && data !== null ? (
         // Filter refetch over retained data (background reload): a
         // one-line polite hint; the toolbar above and the previous
