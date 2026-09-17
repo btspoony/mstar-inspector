@@ -27,7 +27,7 @@ import {
   type InsightsSummary,
 } from "../../src/spa/pages/data";
 import { AppDetailView } from "../../src/spa/pages/AppDetailPage";
-import { InsightsRecordsView } from "../../src/spa/pages/AppInsightsTab";
+import { AppInsightsTab, InsightsRecordsView } from "../../src/spa/pages/AppInsightsTab";
 
 const spaRoot = join(import.meta.dir, "../../src/spa");
 const detailPage = readFileSync(join(spaRoot, "pages/AppDetailPage.tsx"), "utf8");
@@ -223,6 +223,30 @@ describe("tab shell source contracts", () => {
     );
   });
 
+  test("manager deep-link first paint: the tab face is withheld until the URL tab is committed against the landed payload (qc4)", () => {
+    // The shell seeds `search` with the mount-time gate (false), and the
+    // payload flips `state` to "ok" BEFORE the landing effect re-derives
+    // the tab — rendering the face in between would first-paint 应用设置
+    // on a manager's `?tab=insights` deep link. `searchReady` withholds
+    // the face behind the loading skeleton until the landing effect has
+    // committed the URL-requested tab (or performed the demotion rewrite).
+    expect(detailPage).toContain("const [searchReady, setSearchReady] = useState(false);");
+    const landing = detailPage.slice(
+      detailPage.indexOf("// When the payload lands"),
+      detailPage.indexOf("const onPop"),
+    );
+    // BOTH landing paths commit readiness: the demotion rewrite and the
+    // re-derivation. The gate stays true afterwards — background reloads
+    // never re-flash the skeleton.
+    expect(landing.match(/setSearchReady\(true\);/g)?.length).toBe(2);
+    const render = detailPage.slice(detailPage.indexOf("if (state === \"loading\")"));
+    expect(render).toContain('if (state === "ok" && payload && !searchReady)');
+    expect(render).toContain("<PageSkeleton locale={locale} kind=\"forms\" />");
+    // Loop-free unchanged: the withhold adds no history writes and no new
+    // location parses (the demotion rewrite keeps its replaceState).
+    expect(detailPage).not.toContain(".pushState(");
+  });
+
   test("R1 closure: the insights tab consumes the kept data.ts helpers over the mount-prefixed per-App face", () => {
     expect(insightsTab).toContain("appInsightsSummaryUrl(slug");
     expect(insightsTab).toContain("parseInsights(");
@@ -266,5 +290,25 @@ describe("insights tab face (static SSR over the kept charts)", () => {
     const empty: InsightsSummary = { ...data, reviews_total: 0, findings_by_severity: [], findings_by_category: [] };
     const html = renderToStaticMarkup(createElement(InsightsRecordsView, { locale: "en", data: empty }));
     expect(html).toContain("No reviews yet");
+  });
+
+  test("initial load renders a polite loading face before the first fetch lands (qc4)", () => {
+    // SSR render = the pre-effect mount: data is null and state is
+    // "loading", exactly the first-paint face of a deep link or an
+    // in-flight first request. The tab must not be a bare toolbar.
+    const html = renderToStaticMarkup(
+      createElement(AppInsightsTab, {
+        locale: "en",
+        slug: "demo",
+        search: { tab: "insights", window: "30", repo: "" },
+        onSearch: () => {},
+      }),
+    );
+    expect(html).toContain('role="status"');
+    expect(html).toContain("Loading…");
+    // Retained-data contract unchanged: content still renders on
+    // data !== null, and the retained-data busy hint keeps its own face.
+    expect(insightsTab).toContain('{state === "loading" && data === null ?');
+    expect(insightsTab).toContain('{state === "loading" && data !== null ?');
   });
 });

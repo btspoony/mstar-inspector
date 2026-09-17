@@ -64,6 +64,14 @@ export function AppDetailPage({ boot, slug }: { boot: SpaBoot; slug: string }) {
   const [search, setSearch] = useState<AppDetailSearch>(() =>
     parseAppDetailSearch(window.location.search, canManageRef.current),
   );
+  // Whether the URL-requested tab has been committed against a landed
+  // payload. Until the payload effect below re-derives (or rewrites) the
+  // location, `search` still carries the mount-time gate (`false`) — a
+  // manager's `?tab=insights` deep link would first-paint the settings
+  // tab. The shell withholds the tab face (renders the loading skeleton)
+  // until this flips true; the demotion rewrite and the re-derivation
+  // both commit it.
+  const [searchReady, setSearchReady] = useState(false);
 
   // Background reloads (op-triggered refreshes) keep the loaded card tree
   // mounted: they must not flip state back to "loading" — that unmount would
@@ -140,9 +148,11 @@ export function AppDetailPage({ boot, slug }: { boot: SpaBoot; slug: string }) {
         parseAppDetailSearch(window.location.search, true).tab === "insights"
       ) {
         commitSearch({ tab: "settings", window: "30", repo: "" });
+        setSearchReady(true);
         return;
       }
       setSearch(parseAppDetailSearch(window.location.search, canManageRef.current));
+      setSearchReady(true);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [payload?.can_manage]);
@@ -165,6 +175,17 @@ export function AppDetailPage({ boot, slug }: { boot: SpaBoot; slug: string }) {
   // matching the Apps/Members idiom. Foreground only, so op-triggered
   // background reloads never flash it (the background-reload contract).
   if (state === "loading") {
+    return <PageSkeleton locale={locale} kind="forms" />;
+  }
+
+  // Deep-link withhold (bugbot fix): once the payload lands, `state` is
+  // "ok" but the URL-requested tab has not been committed yet (the
+  // payload-landing effect runs after this render) — `search` still
+  // carries the mount-time gate. Rendering the tab face now would flash
+  // 应用设置 before 洞察 on a manager's `?tab=insights` deep link, so the
+  // shell withholds it behind the loading skeleton for exactly that one
+  // paint. Background reloads are unaffected: searchReady stays true.
+  if (state === "ok" && payload && !searchReady) {
     return <PageSkeleton locale={locale} kind="forms" />;
   }
 
