@@ -568,18 +568,28 @@ describe("GET /dashboard/apps/:slug/settings (SPA-owned)", () => {
 describe("Apps list → App settings wayfinding", () => {
   const APPS_SOURCE = join(import.meta.dir, "../../src/spa/pages/AppsPage.tsx");
 
-  test("each App row carries the /dashboard/apps/:slug/settings deep link, and that route resolves as App settings", () => {
+  test("each App row carries the /dashboard/apps/:slug detail link, and that route resolves as App detail", () => {
     const source = readFileSync(APPS_SOURCE, "utf8");
-    // The link target is the same deep-linkable settings route as before.
-    expect(source).toContain("const href = `/dashboard/apps/${app.slug}/settings`;");
-    // The visible per-row destination label comes from the dictionary.
-    expect(source).toContain('{t(locale, "apps.settings")}');
-    expect(t("en", "apps.settings")).toBe("Settings");
-    expect(t("zh_CN", "apps.settings")).toBe("设置");
-    // User-visible route semantics: what the link emits is the settings
-    // surface the SPA matcher owns (slug captured, not a 404 stub).
+    // The link target is the detail route (App detail IA).
+    expect(source).toContain("const href = `/dashboard/apps/${app.slug}`;");
+    expect(source).not.toContain("/dashboard/apps/${app.slug}/settings");
+    // The visible per-row destination label comes from the dictionary —
+    // detail semantics, and the settings key is retired.
+    expect(source).toContain('{t(locale, "apps.detail")}');
+    expect(t("en", "apps.detail")).toBe("Detail");
+    expect(t("zh_CN", "apps.detail")).toBe("详情");
+    expect(source).not.toContain('{t(locale, "apps.settings")}');
+    // User-visible route semantics: what the link emits is the detail
+    // surface the SPA matcher owns (slug captured, not a 404 stub). The
+    // legacy settings path is a permanent deep link onto the detail
+    // page's settings tab — one page id serves both detail paths.
+    expect(matchSpaRoute("/dashboard/apps/acme")).toEqual({
+      page: "app-detail",
+      pathname: "/dashboard/apps/acme",
+      slug: "acme",
+    });
     expect(matchSpaRoute("/dashboard/apps/acme/settings")).toEqual({
-      page: "settings",
+      page: "app-detail",
       pathname: "/dashboard/apps/acme/settings",
       slug: "acme",
     });
@@ -588,8 +598,8 @@ describe("Apps list → App settings wayfinding", () => {
   test("the row link names its destination for assistive tech", () => {
     const source = readFileSync(APPS_SOURCE, "utf8");
     expect(source).toContain('aria-label={t(locale, "apps.openAria", { slug: app.slug })}');
-    expect(t("en", "apps.openAria", { slug: "acme" })).toBe("Open acme settings");
-    expect(t("zh_CN", "apps.openAria", { slug: "acme" })).toBe("打开 acme 设置");
+    expect(t("en", "apps.openAria", { slug: "acme" })).toBe("Open acme detail");
+    expect(t("zh_CN", "apps.openAria", { slug: "acme" })).toBe("打开 acme 详情");
   });
 
   test("the empty Apps state stays honest: composed create guidance, creation is the only path", () => {

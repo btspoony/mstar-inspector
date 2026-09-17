@@ -233,6 +233,29 @@ export function isReviewTriggerMode(value: unknown): value is ReviewTriggerMode 
   return (REVIEW_TRIGGER_MODES as readonly string[]).includes(value as string);
 }
 
+/**
+ * The D4 identity set — the fields the GET /api/apps list rows expose
+ * (slug, github_app_id, status, review_enabled, created_by) plus created_at
+ * and the cached public GitHub profile. This is the NON-MANAGER detail
+ * face's whole app shape: everything from the ops stores (installations,
+ * deliveries, sandbox_image_id, review-trigger runtime config) stays behind
+ * the manager face (the server keys the split on `can_manage`).
+ */
+export type SettingsIdentityAppMeta = {
+  slug: string;
+  github_app_id: number;
+  status: string;
+  review_enabled: boolean;
+  created_by: string;
+  /** `datetime('now')` UTC string — joins the required identity keys. */
+  created_at: string;
+  github_name: string | null;
+  github_description: string | null;
+  github_html_url: string | null;
+  github_avatar_url: string | null;
+  github_metadata_synced_at: string | null;
+};
+
 export type SettingsAppMeta = {
   slug: string;
   github_app_id: number;
@@ -272,8 +295,8 @@ type SettingsHealth = {
   };
 };
 
-/** (spec §2): every member gets base+health only. */
-export type SettingsReadOnlyPayload = { can_manage: false; app: SettingsAppMeta } & SettingsHealth;
+/** (spec §2): a non-manager gets the identity-only face (no ops stores). */
+export type SettingsReadOnlyPayload = { can_manage: false; app: SettingsIdentityAppMeta };
 
 /** Creator-or-admin adds the settings zones: keys, chains, providers. */
 export type SettingsManagePayload = {
@@ -425,6 +448,62 @@ export function verdictLine(data: InsightsSummary): string {
   return data.verdict_distribution.map((row) => `${row.verdict} ${row.count}`).join(" · ");
 }
 
+/**
+ * Per-App insights summary URL — the mount-prefixed dashboard API face
+ * of the Worker's `GET /api/apps/:slug/insights/summary`. `repo` is omitted
+ * when empty (the no-filter default). `include=repos` rides every read:
+ * the repo Select needs the window-scoped distinct repo set on every face
+ * it can render (the insights tab has no repo-less summary consumer).
+ */
+export function appInsightsSummaryUrl(slug: string, window: string, repo: string): string {
+  const params = new URLSearchParams({ window, include: "repos" });
+  if (repo !== "") params.set("repo", repo);
+  return `/dashboard/api/apps/${encodeURIComponent(slug)}/insights/summary?${params.toString()}`;
+}
+
+/** The App detail page's two tabs (应用设置 / 洞察). Insights is manager-only. */
+export type AppDetailTab = "settings" | "insights";
+
+/** URL-derived detail state: the active tab plus the insights filters. */
+export type AppDetailSearch = { tab: AppDetailTab; window: InsightsWindow; repo: string };
+
+/**
+ * The search string as the detail page states it — the ONE derivation
+ * shared by the mount initializer and the popstate re-sync (the
+ * spa-url-state-resync contract), built on the pinned insights helpers
+ * (off-set windows resolve to the default segment). A `?tab=insights` value
+ * is only honored for managers; a non-manager always resolves to the
+ * settings tab.
+ */
+export function parseAppDetailSearch(search: string, canManage: boolean): AppDetailSearch {
+  const insights = parseInsightsSearch(search);
+  const rawTab = new URLSearchParams(search.startsWith("?") ? search.slice(1) : search).get("tab");
+  // Any tab value that is not exactly "insights" (or a non-manager) is the
+  // settings tab — the bare path IS settings, so no vocabulary whitelist is
+  // needed beyond the one legal insights value.
+  const tab: AppDetailTab = canManage && rawTab === "insights" ? "insights" : "settings";
+  const window = (INSIGHTS_WINDOWS as readonly string[]).includes(insights.window)
+    ? (insights.window as InsightsWindow)
+    : "30";
+  return { tab, window, repo: insights.repo };
+}
+
+/**
+ * The query string for a detail state — the inverse of
+ * {@link parseAppDetailSearch}: the tab param only when insights (the bare
+ * path IS the settings tab), the window param only off the 30 default, the
+ * repo param only when set. Loop-free by construction: consumers write it
+ * with replaceState only.
+ */
+export function appDetailSearchQuery(search: AppDetailSearch): string {
+  const params = new URLSearchParams();
+  if (search.tab === "insights") params.set("tab", "insights");
+  if (search.window !== "30") params.set("window", search.window);
+  if (search.repo !== "") params.set("repo", search.repo);
+  const query = params.toString();
+  return query === "" ? "" : `?${query}`;
+}
+
 export function parseMembers(data: unknown): MemberRow[] | null {
   if (!isRecord(data) || !Array.isArray(data.members)) return null;
   const members: MemberRow[] = [];
@@ -536,21 +615,44 @@ export function providerFormKind(provider: CatalogProvider): ProviderFormKind {
   return "key";
 }
 
+/** `string | null` presence check — the cached GitHub profile columns are nullable (NULL = never synced). */
+function isNullableString(value: unknown): value is string | null {
+  return value === null || typeof value === "string";
+}
+
 export function parseSettings(data: unknown): SettingsPayload | null {
   if (!isRecord(data) || !isRecord(data.app)) return null;
   if (typeof data.can_manage !== "boolean") return null;
   if (typeof data.app.slug !== "string" || typeof data.app.status !== "string") return null;
   if (typeof data.app.review_enabled !== "boolean") return null;
   if (typeof data.app.created_by !== "string" || typeof data.app.github_app_id !== "number") return null;
-  // The selected runtime-image id rides BOTH faces (registry id
+  if (!data.can_manage) {
+    // Identity-only non-manager face (App detail IA): the D4
+    // identity set — created_at joins the required keys; everything from
+    // the ops stores (installations/deliveries/sandbox image/trigger mode)
+    // is NOT part of this face and is not required. The cached GitHub
+    // profile is required presence, nullable per field (NULL = never
+    // synced) — the identity face has nothing else to render.
+    if (typeof data.app.created_at !== "string") return null;
+    if (
+      !isNullableString(data.app.github_name) ||
+      !isNullableString(data.app.github_description) ||
+      !isNullableString(data.app.github_html_url) ||
+      !isNullableString(data.app.github_avatar_url) ||
+      !isNullableString(data.app.github_metadata_synced_at)
+    ) {
+      return null;
+    }
+    return data as SettingsPayload;
+  }
+  // The selected runtime-image id rides the MANAGER face (registry id
   // only — never image-local configuration or secrets).
   if (typeof data.app.sandbox_image_id !== "string") return null;
-  // The trigger mode rides BOTH faces too — the mode control's
-  // current value; an off-vocabulary value (DB CHECK makes it impossible from
-  // a correct worker) fails the parse instead of rendering a dead selection.
+  // The trigger mode too — the mode control's current value; an
+  // off-vocabulary value (DB CHECK makes it impossible from a correct
+  // worker) fails the parse instead of rendering a dead selection.
   if (!isReviewTriggerMode(data.app.review_trigger_mode)) return null;
   if (!Array.isArray(data.installations) || !Array.isArray(data.deliveries)) return null;
-  if (!data.can_manage) return data as SettingsPayload;
   if (!Array.isArray(data.keys)) return null;
   if (!Array.isArray(data.model_role_ids) || !isStringArray(data.model_role_ids)) return null;
   if (!Array.isArray(data.custom_provider_api_ids) || !isStringArray(data.custom_provider_api_ids)) return null;

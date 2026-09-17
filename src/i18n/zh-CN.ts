@@ -82,13 +82,50 @@ export const zhCN: Dictionary = {
       removeFailed: "无法移除 {login} — 成员列表刚刚发生变化，请重试。",
     },
   },
+  /** App 详情页（App detail IA）：双标签页外壳。 */
+  appDetail: {
+    tabSettings: "应用设置",
+    tabInsights: "洞察",
+  },
+  /** Per-App 洞察标签页。7/30/90 窗口分段与仓库筛选语义保持不变。 */
+  insights: {
+    heading: "审查健康",
+    window: "窗口：{label}",
+    reviewsTotal: "审查数：{count}",
+    verdicts: "结论：{line}",
+    noReviews: "此窗口内没有审查。",
+    findingsBySeverity: "按严重程度统计的发现",
+    findingsByCategory: "按类别统计的发现",
+    weeklyTrend: "每周趋势",
+    recurringFindings: "重复出现的发现",
+    noFindings: "此窗口内没有发现。",
+    noRecurring: "此窗口内没有重复出现的发现。",
+    finding: "{count} 个发现",
+    findings: "{count} 个发现",
+    review: "{count} 次审查",
+    reviews: "{count} 次审查",
+    lastDay: "最近 {count} 天",
+    lastDays: "最近 {count} 天",
+    repo: "仓库 {repo}",
+    windowSegment: "时间窗口",
+    daysShort: "{count} 天",
+    filterRepo: "仓库",
+    filterRepoAll: "全部",
+    uncategorized: "未分类",
+    seriesReviews: "审查",
+    seriesFindings: "发现",
+    trendSummary: "窗口内共 {reviews} · {findings}",
+    /** 组合式零审查空态——无动作变体（审查由已安装的 App 产生）。 */
+    emptyTitle: "还没有审查",
+    emptyDescription: "已安装的 GitHub App 完成审查后，这里会逐渐积累数据。",
+  },
   apps: {
     heading: "应用",
     create: "创建 GitHub App",
     /** 组合式空态（EmptyState 标题 + 描述）。 */
     emptyTitle: "还没有 App",
     emptyDescription: "使用「创建 GitHub App」连接第一个。",
-    settings: "设置",
+    detail: "详情",
     appId: "App id {id}",
     by: "创建者 {login}",
     status: {
@@ -118,7 +155,7 @@ export const zhCN: Dictionary = {
     tableStatus: "状态",
     tableHealth: "健康",
     tableCreator: "创建者",
-    openAria: "打开 {slug} 设置",
+    openAria: "打开 {slug} 详情",
   },
   members: {
     heading: "成员",
@@ -149,7 +186,6 @@ export const zhCN: Dictionary = {
     emptyDescription: "使用上方表单邀请第一位成员。",
   },
   settings: {
-    title: "应用设置",
     backToApps: "返回应用",
     /** (AD-591) 分组 eyebrow 标签——身份/状态区与配置区（双语原子）。 */
     group: {
@@ -181,8 +217,6 @@ export const zhCN: Dictionary = {
     pauseReviews: "暂停审查",
     resumeReviews: "恢复审查",
     disconnected: "此 App 已断开连接 — 启用后即可审查。",
-    installHealth: "安装健康",
-    installHealthCopy: "此 App 的 webhook 安装与最近投递。",
     lastWebhook: "最近 webhook：{time}",
     noInstallations: "还没有安装。",
     installation: "安装 {id}",

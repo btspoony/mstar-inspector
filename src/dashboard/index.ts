@@ -1193,10 +1193,11 @@ type AppSettingsGate =
   | { ok: false; response: Response };
 
 /**
- * (spec §2 read face): any member may load App detail basic盘 —
- * app meta + health (installations / deliveries). The full settings payload
- * (masked keys, chains, providers) stays creator-or-admin via the GET
- * handler's canManageApp branch below; writes go through requireAppSettings.
+ * (spec §2 read face): any member may load the App detail data face — the
+ * non-manager payload is the identity-only set; the full base+health and
+ * settings payloads (masked keys, chains, providers) stay creator-or-admin
+ * via the GET handler's canManageApp branch below; writes go through
+ * requireAppSettings.
  */
 async function requireAppVisible(c: Context<{ Bindings: Env }>): Promise<AppSettingsGate> {
   const member = await requireMember(c);
@@ -1459,13 +1460,13 @@ async function refreshGithubMetadataForRead(
   return app;
 }
 
-/** SPA JSON face (spec §2 read face): any member gets the
- * base+health payload (app meta, installations, deliveries); the full
- * settings payload (masked keys, chains, providers) is creator-or-admin only.
- * `can_manage` tells the SPA which shape it got. Writes stay behind
- * requireAppSettings. The payload's `app` gains the cached
- * public GitHub profile (nullable, migration 0019) on BOTH faces — served
- * from D1 after the lazy 24h-TTL refresh above. */
+/** SPA JSON face (spec §2 read face): any member can load the face, but the
+ * payload splits on `canManageApp` — a non-manager gets the identity-only
+ * set (list-face fields + created_at + the cached public GitHub profile)
+ * with `can_manage: false`; a manager gets the full base+health payload
+ * (app meta, installations, deliveries) plus the settings payload (masked
+ * keys, chains, providers). Writes stay behind requireAppSettings. Both
+ * faces are served from D1 after the lazy 24h-TTL refresh above. */
 dashboardApp.get("/api/apps/:slug/settings", async (c) => {
   const gate = await requireAppVisible(c);
   if (!gate.ok) return gate.response;
@@ -1475,6 +1476,32 @@ dashboardApp.get("/api/apps/:slug/settings", async (c) => {
   // (AD-531 fail-open by structure).
   const app = await refreshGithubMetadataForRead(gate.app, apps, c.env.DASHBOARD_ENCRYPTION_KEY);
   try {
+    c.header("Cache-Control", "private, no-store");
+    if (!canManageApp(gate.user, gate.app)) {
+      // Identity-only non-manager face: the D4 identity set — the fields the
+      // GET /api/apps list rows already expose (slug, github_app_id, status,
+      // review_enabled, created_by) plus created_at and the cached public
+      // GitHub profile. Everything from the ops stores (installations,
+      // deliveries, sandbox_image_id, review-trigger runtime config) stays
+      // behind the canManageApp branch below. `can_manage: false` is the
+      // discrimination the SPA's detail-face parse keys on.
+      return c.json({
+        can_manage: false,
+        app: {
+          slug: app.slug,
+          github_app_id: app.github_app_id,
+          status: app.status,
+          review_enabled: app.review_enabled !== 0,
+          created_by: app.created_by,
+          created_at: app.created_at,
+          github_name: app.github_name ?? null,
+          github_description: app.github_description ?? null,
+          github_html_url: app.github_html_url ?? null,
+          github_avatar_url: app.github_avatar_url ?? null,
+          github_metadata_synced_at: app.github_metadata_synced_at ?? null,
+        },
+      });
+    }
     const installations = await apps.listInstallations(app.id);
     const deliveries = await apps.listRecentDeliveries(app.id, 5);
     const deliverySummary = await apps.deliverySummary(app.id);
@@ -1525,10 +1552,6 @@ dashboardApp.get("/api/apps/:slug/settings", async (c) => {
         rejected24h: deliverySummary.rejected24h,
       },
     };
-    c.header("Cache-Control", "private, no-store");
-    if (!canManageApp(gate.user, gate.app)) {
-      return c.json({ can_manage: false, ...base });
-    }
     if (!c.env.DASHBOARD_ENCRYPTION_KEY) {
       return c.text("the app settings need a configured DASHBOARD_ENCRYPTION_KEY", 500);
     }

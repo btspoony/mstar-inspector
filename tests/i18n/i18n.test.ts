@@ -255,3 +255,21 @@ describe("REVIEW_ENABLED user copy is absent on restyled surfaces", () => {
     expect(hits).toEqual([]);
   });
 });
+
+describe("App detail IA copy", () => {
+  test("the two tab labels exist atomically in both locales — 应用设置 / 洞察", () => {
+    expect(t("en", "appDetail.tabSettings")).toBe("Settings");
+    expect(t("zh_CN", "appDetail.tabSettings")).toBe("应用设置");
+    expect(t("en", "appDetail.tabInsights")).toBe("Insights");
+    expect(t("zh_CN", "appDetail.tabInsights")).toBe("洞察");
+  });
+
+  test("the insights tab copy returns with the per-App view — window segments keep the 7/30/90 semantics", () => {
+    // The records page's window/repo vocabulary is reused verbatim by the
+    // per-App insights tab (the segments label the same day counts).
+    expect(t("en", "insights.daysShort", { count: 7 })).toBe("7d");
+    expect(t("zh_CN", "insights.daysShort", { count: 7 })).toBe("7 天");
+    expect(t("en", "insights.filterRepoAll")).toBe("All");
+    expect(t("zh_CN", "insights.filterRepoAll")).toBe("全部");
+  });
+});

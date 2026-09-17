@@ -229,9 +229,9 @@ describe("members/apps/settings parsers", () => {
     expect(ok && ok.can_manage && ok.sandbox_images).toEqual([{ id: "omp", enabled: true }]);
   });
 
-  test("parseSettings requires the review trigger mode on both faces; off-vocabulary fails the parse", () => {
+  test("parseSettings requires the review trigger mode on the manage face; off-vocabulary fails the parse", () => {
     const base = {
-      can_manage: false,
+      can_manage: true,
       app: {
         slug: "demo",
         github_app_id: 1,
@@ -242,12 +242,22 @@ describe("members/apps/settings parsers", () => {
         sandbox_image_id: "omp",
         review_trigger_mode: "every_push",
       },
+      keys: [],
+      model_chain: null,
+      model_roles: {},
+      model_chains: [],
+      custom_providers: [],
+      configured_providers: [],
+      provider_catalog: [],
+      model_role_ids: [],
+      custom_provider_api_ids: [],
+      sandbox_images: [{ id: "omp", enabled: true }],
       installations: [],
       deliveries: [],
     };
-    // Missing mode is a contract breach — the control would render without a
-    // current value, so the whole payload fails the parse (sandbox_image_id
-    // precedent).
+    // Missing mode is a contract breach on the MANAGE face — the control
+    // would render without a current value, so the whole payload fails the
+    // parse (sandbox_image_id precedent).
     const { review_trigger_mode: _dropped, ...withoutMode } = base.app;
     expect(parseSettings({ ...base, app: withoutMode })).toBeNull();
     // An off-vocabulary value (impossible from the DB CHECK, but a drifted
@@ -255,30 +265,44 @@ describe("members/apps/settings parsers", () => {
     // selection — never silently coerced to the default.
     expect(parseSettings({ ...base, app: { ...base.app, review_trigger_mode: "whenever" } })).toBeNull();
     expect(parseSettings({ ...base, app: { ...base.app, review_trigger_mode: "EVERY_PUSH" } })).toBeNull();
-    // Every vocabulary value parses verbatim — read-only face...
+    // Every vocabulary value parses verbatim — the manage face keeps
+    // today's required-field contract.
     for (const mode of REVIEW_TRIGGER_MODES) {
-      const readOnly = parseSettings({ ...base, app: { ...base.app, review_trigger_mode: mode } });
-      expect(readOnly?.app.review_trigger_mode).toBe(mode);
+      const manage = parseSettings({ ...base, app: { ...base.app, review_trigger_mode: mode } });
+      expect(manage && manage.can_manage && manage.app.review_trigger_mode).toBe(mode);
     }
-    // ...and manage face.
-    for (const mode of REVIEW_TRIGGER_MODES) {
-      const manage = parseSettings({
-        ...base,
-        can_manage: true,
-        app: { ...base.app, review_trigger_mode: mode },
-        keys: [],
-        model_chain: null,
-        model_roles: {},
-        model_chains: [],
-        custom_providers: [],
-        configured_providers: [],
-        provider_catalog: [],
-        model_role_ids: [],
-        custom_provider_api_ids: [],
-        sandbox_images: [{ id: "omp", enabled: true }],
-      });
-      expect(manage?.app.review_trigger_mode).toBe(mode);
-    }
+  });
+
+  test("parseSettings (identity-only face) requires the D4 identity set — created_at joins the required keys", () => {
+    const identityBase = {
+      can_manage: false,
+      app: {
+        slug: "demo",
+        github_app_id: 1,
+        status: "active",
+        review_enabled: true,
+        created_by: "mallory",
+        created_at: "2026-01-01 00:00:00",
+        github_name: "Demo",
+        github_description: null,
+        github_html_url: "https://github.com/apps/demo",
+        github_avatar_url: null,
+        github_metadata_synced_at: null,
+      },
+    };
+    const ok = parseSettings(identityBase);
+    expect(ok?.can_manage).toBe(false);
+    expect(ok && !ok.can_manage && ok.app.created_at).toBe("2026-01-01 00:00:00");
+    // created_at is REQUIRED on the identity face.
+    const { created_at: _dropped, ...withoutCreatedAt } = identityBase.app;
+    expect(parseSettings({ ...identityBase, app: withoutCreatedAt })).toBeNull();
+    // GitHub profile fields are nullable but never absent.
+    const { github_name: _droppedName, ...withoutGithubName } = identityBase.app;
+    expect(parseSettings({ ...identityBase, app: withoutGithubName })).toBeNull();
+    // The manage-face extras are NOT part of this face: a payload without
+    // sandbox_image_id / review_trigger_mode / installations / deliveries
+    // still parses — the identity set is the whole contract.
+    expect(parseSettings(identityBase)).not.toBeNull();
   });
 
   test("parseSettings separates configured state from the catalog", () => {
@@ -373,44 +397,32 @@ describe("members/apps/settings parsers", () => {
     ).toBeNull();
   });
 
-  test("parseSettings accepts the non-manager base+health shape (no settings zones)", () => {
-    // Review pin: can_manage=false payloads carry only app meta + health.
-    // The read-only face still carries the selected image id.
-    const readOnly = parseSettings({
-      can_manage: false,
-      app: {
-        slug: "demo",
-        github_app_id: 1,
-        status: "active",
-        review_enabled: true,
-        created_by: "mallory",
-        last_webhook_at: null,
-        sandbox_image_id: "omp",
-        review_trigger_mode: "every_push",
-      },
-      installations: [],
-      deliveries: [],
-    });
+  test("parseSettings accepts the identity-only non-manager face (no ops stores, no settings zones)", () => {
+    // SUPERSEDE (App detail IA): can_manage=false now carries ONLY the D4
+    // identity set — created_at + the cached public GitHub profile; no
+    // installations/deliveries, no sandbox image, no trigger mode.
+    const identityApp = {
+      slug: "demo",
+      github_app_id: 1,
+      status: "active",
+      review_enabled: true,
+      created_by: "mallory",
+      created_at: "2026-01-01 00:00:00",
+      github_name: "Demo",
+      github_description: null,
+      github_html_url: "https://github.com/apps/demo",
+      github_avatar_url: null,
+      github_metadata_synced_at: null,
+    };
+    const readOnly = parseSettings({ can_manage: false, app: identityApp });
     expect(readOnly?.can_manage).toBe(false);
-    expect(readOnly?.app.sandbox_image_id).toBe("omp");
+    expect(readOnly && !readOnly.can_manage && readOnly.app.created_at).toBe("2026-01-01 00:00:00");
     expect(readOnly && "keys" in readOnly).toBe(false);
     expect(readOnly && "sandbox_images" in readOnly).toBe(false);
-    // Missing health fields is a contract breach even for the slim shape.
-    expect(
-      parseSettings({
-        can_manage: false,
-        app: {
-          slug: "demo",
-          github_app_id: 1,
-          status: "active",
-          review_enabled: true,
-          created_by: "mallory",
-          last_webhook_at: null,
-          sandbox_image_id: "omp",
-          review_trigger_mode: "every_push",
-        },
-      }),
-    ).toBeNull();
+    expect(readOnly && "installations" in readOnly).toBe(false);
+    // A missing identity field is a contract breach.
+    const { created_at: _dropped, ...withoutCreated } = identityApp;
+    expect(parseSettings({ can_manage: false, app: withoutCreated })).toBeNull();
     // can_manage=true without the settings zones is also a breach.
     expect(
       parseSettings({

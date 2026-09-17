@@ -94,13 +94,54 @@ export const en = {
       removeFailed: "Could not remove {login} — the member list just changed, try again.",
     },
   },
+  /** App detail page (App detail IA): the two-tab shell. */
+  appDetail: {
+    tabSettings: "Settings",
+    tabInsights: "Insights",
+  },
+  /**
+   * Per-App insights tab (the 洞察 face). The records copy returns with
+   * the per-App successor of the retired global insights page — the
+   * 7/30/90 window segments and repo filter semantics are unchanged.
+   */
+  insights: {
+    heading: "Review health",
+    window: "Window: {label}",
+    reviewsTotal: "Reviews: {count}",
+    verdicts: "Verdicts: {line}",
+    noReviews: "No reviews in this window.",
+    findingsBySeverity: "Findings by severity",
+    findingsByCategory: "Findings by category",
+    weeklyTrend: "Weekly trend",
+    recurringFindings: "Recurring findings",
+    noFindings: "No findings in this window.",
+    noRecurring: "No recurring findings in this window.",
+    finding: "{count} finding",
+    findings: "{count} findings",
+    review: "{count} review",
+    reviews: "{count} reviews",
+    lastDay: "last {count} day",
+    lastDays: "last {count} days",
+    repo: "repo {repo}",
+    windowSegment: "Time window",
+    daysShort: "{count}d",
+    filterRepo: "Repo",
+    filterRepoAll: "All",
+    uncategorized: "uncategorized",
+    seriesReviews: "Reviews",
+    seriesFindings: "Findings",
+    trendSummary: "In this window: {reviews} · {findings}",
+    /** Composed zero-review empty state — no-action variant (reviews arrive via installed Apps). */
+    emptyTitle: "No reviews yet",
+    emptyDescription: "Insights fill in as your installed GitHub Apps review pull requests.",
+  },
   apps: {
     heading: "Apps",
     create: "Create GitHub App",
     /** Composed empty state (EmptyState title + description). */
     emptyTitle: "No Apps yet",
     emptyDescription: "Create GitHub App connects your first one.",
-    settings: "Settings",
+    detail: "Detail",
     appId: "App id {id}",
     by: "by {login}",
     status: {
@@ -130,7 +171,7 @@ export const en = {
     tableStatus: "Status",
     tableHealth: "Health",
     tableCreator: "Creator",
-    openAria: "Open {slug} settings",
+    openAria: "Open {slug} detail",
   },
   members: {
     heading: "Members",
@@ -161,7 +202,6 @@ export const en = {
     emptyDescription: "Invite the first member with the form above.",
   },
   settings: {
-    title: "App settings",
     backToApps: "Back to Apps",
     /**
      * (AD-591): section-group eyebrow labels for the two tier
@@ -196,8 +236,6 @@ export const en = {
     pauseReviews: "Pause reviews",
     resumeReviews: "Resume reviews",
     disconnected: "This App is disconnected — enable it to review.",
-    installHealth: "Install health",
-    installHealthCopy: "Webhook installations and the latest deliveries for this App.",
     lastWebhook: "Last webhook: {time}",
     noInstallations: "No installations yet.",
     installation: "installation {id}",

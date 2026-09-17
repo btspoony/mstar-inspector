@@ -178,12 +178,14 @@ describe("GET /dashboard/api/apps/:slug/settings", () => {
 
     const other = await get("/dashboard/api/apps/mstar-inspector-mallory/settings", "hubot", env);
     expect(other.status).toBe(200);
-    // review: non-managers get base+health ONLY — no keys/chains/providers.
+    // identity-only non-manager face: the D4 identity set + the cached
+    // public GitHub profile + can_manage false — NO health or ops data.
     const otherBody = (await other.json()) as {
       can_manage: boolean;
-      app: { slug: string; sandbox_image_id: string };
-      installations: unknown[];
-      deliveries: unknown[];
+      app: Record<string, unknown>;
+      installations?: unknown;
+      deliveries?: unknown;
+      delivery_summary?: unknown;
       keys?: unknown;
       configured_providers?: unknown;
       provider_catalog?: unknown;
@@ -195,11 +197,26 @@ describe("GET /dashboard/api/apps/:slug/settings", () => {
     };
     expect(otherBody.can_manage).toBe(false);
     expect(otherBody.app.slug).toBe("mstar-inspector-mallory");
-    expect(otherBody.installations).toEqual([]);
-    expect(otherBody.deliveries).toEqual([]);
-    // the read-only face keeps the selected image id but NOT the
-    // editor's choice list. neither settings zone rides it.
-    expect(otherBody.app.sandbox_image_id).toBe("omp");
+    expect(Object.keys(otherBody).sort()).toEqual(["app", "can_manage"]);
+    expect(Object.keys(otherBody.app).sort()).toEqual([
+      "created_at",
+      "created_by",
+      "github_app_id",
+      "github_avatar_url",
+      "github_description",
+      "github_html_url",
+      "github_metadata_synced_at",
+      "github_name",
+      "review_enabled",
+      "slug",
+      "status",
+    ]);
+    expect(typeof otherBody.app.created_at).toBe("string");
+    // health/ops fields moved behind the manager branch; the settings
+    // zones never ride this face.
+    expect(otherBody.installations).toBeUndefined();
+    expect(otherBody.deliveries).toBeUndefined();
+    expect(otherBody.delivery_summary).toBeUndefined();
     expect(otherBody.keys).toBeUndefined();
     expect(otherBody.configured_providers).toBeUndefined();
     expect(otherBody.provider_catalog).toBeUndefined();

@@ -103,12 +103,12 @@ function AppsList({ locale, payload }: { locale: SpaBoot["locale"]; payload: App
             <TableHead className={TABLE_HEAD_LABEL}>{t(locale, "apps.tableStatus")}</TableHead>
             <TableHead className={TABLE_HEAD_LABEL}>{t(locale, "apps.tableHealth")}</TableHead>
             <TableHead className={TABLE_HEAD_LABEL}>{t(locale, "apps.tableCreator")}</TableHead>
-            <TableHead className={`text-right ${TABLE_HEAD_LABEL}`}>{t(locale, "apps.settings")}</TableHead>
+            <TableHead className={`text-right ${TABLE_HEAD_LABEL}`}>{t(locale, "apps.detail")}</TableHead>
           </TableRow>
         </TableHeader>
         <TableBody>
           {payload.apps.map((app) => {
-            const href = `/dashboard/apps/${app.slug}/settings`;
+            const href = `/dashboard/apps/${app.slug}`;
             const latest = app.health.latest;
             return (
               <TableRow
@@ -149,13 +149,13 @@ function AppsList({ locale, payload }: { locale: SpaBoot["locale"]; payload: App
                 <TableCell className="text-muted-foreground">{app.created_by}</TableCell>
                 <TableCell className="text-right">
                   {/* Visible destination: the row (and this link) open the
-                      App's settings — one workflow from list to detail. */}
+                      App's detail page — one workflow from list to detail. */}
                   <a
                     className="text-primary underline-offset-4 hover:underline"
                     href={href}
                     onClick={(event) => spaClick(href, event)}
                   >
-                    {t(locale, "apps.settings")}
+                    {t(locale, "apps.detail")}
                   </a>
                 </TableCell>
               </TableRow>

@@ -1,13 +1,16 @@
 /**
- * Enumerated client router (pathname + params).
+ * Enumerated client router (pathname + params). App detail IA:
+ * ONE page id (`app-detail`) serves both `/dashboard/apps/:slug` (default
+ * tab 应用设置) and the legacy `/dashboard/apps/:slug/settings` permanent
+ * settings-tab deep link.
  */
 import { describe, expect, test } from "bun:test";
 import { matchRoute } from "../../src/spa/router";
 import { SPA_PAGES, isSpaAssetPath, matchSpaRoute, wantsHtml } from "../../src/spa/routes";
 
 describe("SPA_PAGES enum", () => {
-  test("includes apps, members, login, settings (insights and home retired)", () => {
-    expect([...SPA_PAGES]).toEqual(["apps", "members", "login", "settings"]);
+  test("includes apps, members, login, app-detail (insights and home retired; settings folded into app-detail)", () => {
+    expect([...SPA_PAGES]).toEqual(["apps", "members", "login", "app-detail"]);
   });
 });
 
@@ -22,9 +25,22 @@ describe("matchSpaRoute", () => {
     expect(matchSpaRoute("/dashboard/login")).toEqual({ page: "login", pathname: "/dashboard/login" });
   });
 
-  test("captures /dashboard/apps/:slug/settings", () => {
+  test("/dashboard/apps/:slug is the detail page (default tab is query-derived, not route state)", () => {
+    expect(matchSpaRoute("/dashboard/apps/acme")).toEqual({
+      page: "app-detail",
+      pathname: "/dashboard/apps/acme",
+      slug: "acme",
+    });
+    expect(matchRoute("/dashboard/apps/acme")).toEqual({
+      page: "app-detail",
+      pathname: "/dashboard/apps/acme",
+      slug: "acme",
+    });
+  });
+
+  test("the legacy /dashboard/apps/:slug/settings path lands on the SAME detail page id (permanent settings-tab deep link)", () => {
     expect(matchSpaRoute("/dashboard/apps/acme/settings")).toEqual({
-      page: "settings",
+      page: "app-detail",
       pathname: "/dashboard/apps/acme/settings",
       slug: "acme",
     });
@@ -36,8 +52,7 @@ describe("matchSpaRoute", () => {
     expect(matchRoute("/dashboard")).toEqual({ page: "apps", pathname: "/dashboard" });
   });
 
-  test("does not match nested extras beyond settings", () => {
-    expect(matchSpaRoute("/dashboard/apps/acme")).toBeNull();
+  test("does not match nested extras beyond the detail paths", () => {
     expect(matchSpaRoute("/dashboard/apps/acme/settings/key/delete")).toBeNull();
     expect(matchSpaRoute("/dashboard/api/insights/summary")).toBeNull();
     // The global insights page is retired: its path is no longer a SPA page.

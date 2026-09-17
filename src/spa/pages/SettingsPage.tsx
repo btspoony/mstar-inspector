@@ -27,7 +27,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 import { ProviderCombobox } from "../components/provider-combobox";
 import { SectionCard, SectionCardTitle, SectionGroup } from "../components/SectionCard";
-import { fetchJson, postForm } from "../api";
+import { postForm } from "../api";
 import type { SpaBoot } from "../boot";
 import { deliveryOutcomeLabel } from "../delivery-outcome";
 import { formatRelativeTime } from "../relative-time";
@@ -38,8 +38,6 @@ import {
   isPaused,
   isReviewTriggerMode,
   modelChainTabs,
-  parseModels,
-  parseSettings,
   providerFormKind,
   REVIEW_TRIGGER_MODES,
   seatRoleValues,
@@ -52,14 +50,12 @@ import {
   type ModelOptionGroup,
   type ReviewTriggerMode,
   type SettingsAppMeta,
+  type SettingsIdentityAppMeta,
   type SettingsManagePayload,
   type SettingsPayload,
 } from "./data";
-import { StatusBadge } from "./AppsPage";
 import { GitHubMark } from "./LoginPage";
-import { PageNotice, type NoticeKind } from "./PageNotice";
-import { ErrorState } from "../components/state/ErrorState";
-import { PageSkeleton } from "../components/state/PageSkeleton";
+import { PageNotice } from "./PageNotice";
 
 type PendingAction =
   | { kind: "pause" | "resume" | "disable" | "enable" | "delete" }
@@ -90,113 +86,15 @@ function NoticeRegion({ notice }: { notice: OpNotice | null }) {
   return <PageNotice kind={notice.kind} message={notice.message} />;
 }
 
-export function SettingsPage({ boot, slug }: { boot: SpaBoot; slug: string }) {
-  const locale = boot.locale;
-  const [payload, setPayload] = useState<SettingsPayload | null>(null);
-  const [groups, setGroups] = useState<ModelOptionGroup[]>([]);
-  const [state, setState] = useState<"loading" | "ok" | "error">("loading");
-  const [notice, setNotice] = useState<{ kind: NoticeKind; message: string } | null>(null);
-  const cancelledRef = useRef(false);
-
-  // Background reloads (op-triggered refreshes) keep the loaded card tree
-  // mounted: they must not flip state back to "loading" — that unmount would
-  // destroy Add Provider's open/selection state and every form's typed input
-  // (QC fix wave 1, F-001). A failed background refresh surfaces the
-  // error through the notice channel instead of the page-level error state.
-  // Resolves whether a fresh payload landed, so callers can tell a completed
-  // refresh from a failed one (the draft create must not close on failure).
-  async function load({ background = false }: { background?: boolean } = {}): Promise<boolean> {
-    if (!background) setState("loading");
-    try {
-      const settingsRaw = await fetchJson(`/dashboard/api/apps/${encodeURIComponent(slug)}/settings`);
-      if (cancelledRef.current) return false;
-      const parsed = parseSettings(settingsRaw);
-      if (!parsed) {
-        if (background) setNotice({ kind: "error", message: t(locale, "common.loadFailed") });
-        else setState("error");
-        return false;
-      }
-      let nextGroups: ModelOptionGroup[] = [];
-      if (parsed.can_manage) {
-        try {
-          const modelsRaw = await fetchJson(`/dashboard/api/apps/${encodeURIComponent(slug)}/models`);
-          nextGroups = parseModels(modelsRaw)?.groups ?? [];
-        } catch {
-          nextGroups = [];
-        }
-      }
-      if (cancelledRef.current) return false;
-      setPayload(parsed);
-      setGroups(nextGroups);
-      setState("ok");
-      // A healthy page has no page-level failure: any successful load —
-      // foreground or background — clears the banner a failed background
-      // reload left behind (the bugbot fix).
-      setNotice(null);
-      return true;
-    } catch {
-      if (!cancelledRef.current) {
-        if (background) setNotice({ kind: "error", message: t(locale, "common.loadFailed") });
-        else setState("error");
-      }
-      return false;
-    }
-  }
-
-  useEffect(() => {
-    cancelledRef.current = false;
-    void load();
-    return () => {
-      cancelledRef.current = true;
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [slug]);
-
-  // Loading rides the shared skeleton as the page's full loading face —
-  // the component's heading placeholder stands in for the real h1 (AD-582),
-  // matching the Apps/Members idiom. Foreground only: `load` flips
-  // to "loading" solely on the initial/retry load, so op-triggered background
-  // reloads keep the card tree mounted and never flash this skeleton
-  // (the background-reload contract, unchanged above).
-  if (state === "loading") {
-    return <PageSkeleton locale={locale} kind="forms" />;
-  }
-
-  return (
-    <div className="flex flex-col gap-6">
-      {/* Wayfinding: the App settings page reads as one workflow
-          with the Apps list — a visible path back to the list it came from.
-          The decorative ArrowLeft rides the link (aria-hidden, so
-          the accessible name stays the backToApps text alone). */}
-      <div className="flex flex-col gap-1">
-        <a
-          className="inline-flex items-center gap-1.5 text-sm text-muted-foreground no-underline hover:text-foreground hover:underline"
-          href="/dashboard/apps"
-          onClick={(event) => spaClick("/dashboard/apps", event)}
-        >
-          <ArrowLeft className="size-4 shrink-0" aria-hidden="true" />
-          {t(locale, "settings.backToApps")}
-        </a>
-        <h1 className="font-semibold text-(length:--typo-heading-24-size) leading-(--typo-heading-24-line) tracking-(--typo-heading-24-tracking)">{t(locale, "settings.title")}</h1>
-      </div>
-      {state === "error" ? <ErrorState locale={locale} onRetry={() => void load()} /> : null}
-      {notice ? <PageNotice kind={notice.kind} message={notice.message} /> : null}
-      {state === "ok" && payload ? (
-        <SettingsView locale={locale} payload={payload} groups={groups} onReload={load} />
-      ) : null}
-      {/* Version footer: the deployment's current release from the
-          generated src/version.ts surface — the same `vX.Y.Z` form as the
-          /healthz field and release tags, so dashboard, health endpoint and
-          tag reconcile by eye. Static build-time value: it renders in every
-          payload state (ok / error), independent of the settings payload —
-          the foreground loading state rides the full-page skeleton above. */}
-      <p className="text-sm text-muted-foreground">
-        {t(locale, "settings.footer.version", { version: `v${APP_VERSION}` })}
-      </p>
-    </div>
-  );
-}
-
+/**
+ * The 应用设置 tab body of the App detail page (App detail IA):
+ * a pure-ish presentational component — the data load, the page notice
+ * channel, and the loading/error faces live on the AppDetailPage shell,
+ * which threads the parsed payload, the model groups, the reload
+ * callback, and the banner notice down here. The back link and version
+ * footer stay part of the settings tab (wayfinding + deployment stamp),
+ * unchanged from the pre-shell page.
+ */
 function verifyReasonMessage(locale: SpaBoot["locale"], reason: string): string {
   if (reason === "invalid_key") return t(locale, "settings.verify.invalid_key");
   if (reason === "unreachable") return t(locale, "settings.verify.unreachable");
@@ -236,7 +134,7 @@ function settingsErrorMessage(locale: SpaBoot["locale"], body: string): string {
   return body.trim() || t(locale, "common.loadFailed");
 }
 
-function SettingsView({
+export function SettingsView({
   locale,
   payload,
   groups,
@@ -467,39 +365,71 @@ function SettingsView({
 
   const confirmCopy = pendingConfirmCopy(locale, app.slug, pending);
 
+  // The page-level wayfinding block: the back link is the settings
+  // tab's visible path back to the Apps list (the decorative ArrowLeft
+  // rides the link aria-hidden, so the accessible name stays the
+  // backToApps text alone).
+  const wayfinding = (
+    <a
+      className="inline-flex items-center gap-1.5 text-sm text-muted-foreground no-underline hover:text-foreground hover:underline"
+      href="/dashboard/apps"
+      onClick={(event) => spaClick("/dashboard/apps", event)}
+    >
+      <ArrowLeft className="size-4 shrink-0" aria-hidden="true" />
+      {t(locale, "settings.backToApps")}
+    </a>
+  );
+
+  // Version footer: the deployment's current release from the
+  // generated src/version.ts surface — the same `vX.Y.Z` form as the
+  // /healthz field and release tags, so dashboard, health endpoint and
+  // tag reconcile by eye. Static build-time value.
+  const versionFooter = (
+    <p className="text-sm text-muted-foreground">
+      {t(locale, "settings.footer.version", { version: `v${APP_VERSION}` })}
+    </p>
+  );
+
+  // Identity-only non-manager face: the payload carries the D4 identity
+  // set ONLY (no ops stores), so the tab renders wayfinding + the GitHub
+  // identity card and nothing else — no slug row (the AppDetailPage shell
+  // owns the identity header), no ops/health/configuration surfaces.
+  if (!payload.can_manage) {
+    return (
+      <div className="flex flex-col gap-6">
+        {wayfinding}
+        <SectionGroup label={t(locale, "settings.group.identity")}>
+          <AppInfoCard locale={locale} app={payload.app} canManage={false} />
+        </SectionGroup>
+        {versionFooter}
+      </div>
+    );
+  }
+
   return (
-    <div className="flex flex-col gap-(--spacing-8)">
-      {/* AD-591 section rhythm: two tier groups — the identity/status zone
-          (Tier 1 primary surfaces) and the configuration zone (Tier 2
-          secondary surfaces), each headed by a group eyebrow. Block order
-          and data flow are unchanged (Non-Goal); the identity-card position
-          contract (identity card between the slug row and the manage
-          conditional) holds inside the group. */}
-      <SectionGroup label={t(locale, "settings.group.identity")}>
-        <div className="flex flex-wrap items-center gap-3">
-          <h2 className="font-semibold text-(length:--typo-heading-20-size) leading-(--typo-heading-20-line) tracking-(--typo-heading-20-tracking)">{app.slug}</h2>
-          <StatusBadge locale={locale} status={app.status} reviewEnabled={app.review_enabled} />
-          <span className="text-sm text-muted-foreground">{t(locale, "apps.by", { login: app.created_by })}</span>
-        </div>
+    <div className="flex flex-col gap-6">
+      {wayfinding}
+      <div className="flex flex-col gap-(--spacing-8)">
+        {/* AD-591 section rhythm: two tier groups — the identity/status zone
+            (Tier 1 primary surfaces) and the configuration zone (Tier 2
+            secondary surfaces), each headed by a group eyebrow. Block order
+            and data flow are unchanged (Non-Goal); the identity-card position
+            contract (identity card inside the identity group, before the
+            manage conditional) holds. The slug row is the shell's identity
+            header (AppDetailPage h1 + status), not a per-tab face. */}
+        <SectionGroup label={t(locale, "settings.group.identity")}>
+          {/* The GitHub identity card sits before the manage conditional in
+              the group (AC3); the viewer's authorization switches the name
+              link's destination (AD-623). */}
+          <AppInfoCard locale={locale} app={app} canManage={payload.can_manage} />
 
-        {/* The GitHub identity card sits between the slug row and
-            the manage conditional, so BOTH faces (OpsCard managers and
-            HealthCard members) see it (AC3). The viewer's
-            authorization switches the name link's destination (AD-623). */}
-        <AppInfoCard locale={locale} app={app} canManage={payload.can_manage} />
-
-        {payload.can_manage ? (
           <OpsCard locale={locale} payload={payload} onPending={setPending} notice={opsNotice} onTriggerMode={runTriggerMode} />
-        ) : (
-          <HealthCard locale={locale} payload={payload} />
-        )}
-      </SectionGroup>
-
-      <SectionGroup label={t(locale, "settings.group.configuration")}>
-        <RuntimeImageCard locale={locale} payload={payload} onSettings={submitSettings} />
+        </SectionGroup>
 
         {payload.can_manage ? (
-          <>
+          <SectionGroup label={t(locale, "settings.group.configuration")}>
+            <RuntimeImageCard locale={locale} payload={payload} onSettings={submitSettings} />
+
             <ProvidersCard
               locale={locale}
               payload={payload}
@@ -521,9 +451,9 @@ function SettingsView({
               onOutcome={setChainsNotice}
             />
             <SeatsCard locale={locale} payload={payload} onSettings={submitSettings} />
-          </>
+          </SectionGroup>
         ) : null}
-      </SectionGroup>
+      </div>
 
       <Dialog
         open={pending !== null}
@@ -556,6 +486,7 @@ function SettingsView({
           ) : null}
         </DialogContent>
       </Dialog>
+      {versionFooter}
     </div>
   );
 }
@@ -672,7 +603,8 @@ export function AppInfoCard({
   canManage,
 }: {
   locale: SpaBoot["locale"];
-  app: SettingsAppMeta;
+  /** Both faces — the identity and manage app shapes structurally share every field the card reads. */
+  app: SettingsIdentityAppMeta | SettingsAppMeta;
   /** Threaded from payload.can_manage at the call site — presentation only. */
   canManage: boolean;
 }) {
@@ -739,7 +671,7 @@ export function AppInfoCard({
   );
 }
 
-function HealthBody({ locale, payload }: { locale: SpaBoot["locale"]; payload: SettingsPayload }) {
+function HealthBody({ locale, payload }: { locale: SpaBoot["locale"]; payload: SettingsManagePayload }) {
   const { app } = payload;
   return (
     <div className="flex flex-col gap-4">
@@ -792,26 +724,13 @@ function HealthBody({ locale, payload }: { locale: SpaBoot["locale"]; payload: S
   );
 }
 
-function HealthCard({ locale, payload }: { locale: SpaBoot["locale"]; payload: SettingsPayload }) {
-  return (
-    <SectionCard tier="primary">
-      <CardHeader>
-        <SectionCardTitle>{t(locale, "settings.installHealth")}</SectionCardTitle>
-        <CardDescription>{t(locale, "settings.installHealthCopy")}</CardDescription>
-      </CardHeader>
-      <CardContent>
-        <HealthBody locale={locale} payload={payload} />
-      </CardContent>
-    </SectionCard>
-  );
-}
-
 /**
- * Runtime image: the App's sandbox runtime-image selection.
+ * Runtime image: the App's sandbox runtime-image selection (manage face
+ * only — the identity-only non-manager payload carries no sandbox_image_id).
  * Managers get the shadcn selector over the enabled registry entries (one
- * `omp` option for now) and save through op=save-sandbox-image;
- * other members get the read-only selected id. The payload carries registry
- * ids only — never image-local configuration or secrets.
+ * `omp` option for now) and save through op=save-sandbox-image.
+ * The payload carries registry ids only — never image-local configuration
+ * or secrets.
  */
 function RuntimeImageCard({
   locale,
@@ -819,7 +738,7 @@ function RuntimeImageCard({
   onSettings,
 }: {
   locale: SpaBoot["locale"];
-  payload: SettingsPayload;
+  payload: SettingsManagePayload;
   onSettings: (fields: Record<string, string>) => Promise<OpNotice>;
 }) {
   return (
@@ -906,7 +825,7 @@ function OpsCard({
   onTriggerMode,
 }: {
   locale: SpaBoot["locale"];
-  payload: SettingsPayload;
+  payload: SettingsManagePayload;
   onPending: (action: PendingAction) => void;
   /** The confirmed ops outcome (pause/resume/disable/enable/delete — delete carries its own copy). */
   notice: OpNotice | null;
