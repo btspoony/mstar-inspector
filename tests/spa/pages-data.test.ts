@@ -11,7 +11,6 @@ import {
   insightsRepoOptions,
   insightsRepoSelectValue,
   INSIGHTS_REPO_ALL,
-  insightsSummaryUrl,
   inviteLoginNoticeKey,
   isPaused,
   modelChainTabs,
@@ -53,23 +52,9 @@ describe("insights search wiring", () => {
     expect(parseInsightsSearch("?window=7&repo=acme/web")).toEqual({ window: "7", repo: "acme/web" });
   });
 
-  test("summary URL omits the default 30-day window", () => {
-    expect(insightsSummaryUrl({ window: "30", repo: "" })).toBe("/dashboard/api/insights/summary");
-    expect(insightsSummaryUrl({ window: "7", repo: "acme/web" })).toBe(
-      "/dashboard/api/insights/summary?window=7&repo=acme%2Fweb",
-    );
-  });
-
-  test("summary URL requests the repos aggregation only when opted in (QC F-001)", () => {
-    // Default summary read: no include param (only the records surface opts in).
-    expect(insightsSummaryUrl({ window: "7", repo: "" })).toBe("/dashboard/api/insights/summary?window=7");
-    // Records surface: include=repos appended.
-    expect(insightsSummaryUrl({ window: "7", repo: "acme/web" }, true)).toBe(
-      "/dashboard/api/insights/summary?window=7&repo=acme%2Fweb&include=repos",
-    );
-    expect(insightsSummaryUrl({ window: "30", repo: "" }, true)).toBe(
-      "/dashboard/api/insights/summary?include=repos",
-    );
+  test("the global summary URL builder is retired with the page", async () => {
+    expect("insightsSummaryUrl" in (await import("../../src/spa/pages/data"))).toBe(false);
+    expect("searchHref" in (await import("../../src/spa/pages/data"))).toBe(false);
   });
 
   test("repo Select maps 全部 ↔ empty filter and keeps out-of-set current values", () => {
@@ -632,8 +617,6 @@ describe("invite grammar + page copy", () => {
     const keys = [
       "members.adminOnly",
       "members.roleAdmin",
-      "insights.recordsHeading",
-      "insights.uncategorized",
       "apps.status.paused",
       "login.signIn",
       "settings.roleHintDeep",

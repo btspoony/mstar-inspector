@@ -190,12 +190,12 @@ describe("mstar_locale cookie serialization", () => {
 });
 
 describe("shared navbar contract", () => {
-  test("order is locked: Apps → Insights → Members", () => {
-    expect(NAV_ITEMS.map((item) => item.labelKey)).toEqual(["nav.apps", "nav.insights", "nav.members"]);
+  test("order is locked: Apps → Members (insights retired)", () => {
+    expect(NAV_ITEMS.map((item) => item.labelKey)).toEqual(["nav.apps", "nav.members"]);
   });
 
   test("Members is the only admin-only item", () => {
-    expect(NAV_ITEMS.map((item) => item.adminOnly ?? false)).toEqual([false, false, true]);
+    expect(NAV_ITEMS.map((item) => item.adminOnly ?? false)).toEqual([false, true]);
   });
 
   test("every labelKey resolves to a real dictionary string in both locales", () => {

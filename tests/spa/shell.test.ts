@@ -19,32 +19,29 @@ const member: SpaBoot = { locale: "en", login: "mallory", name: "Mallory", role:
 const admin: SpaBoot = { locale: "zh_CN", login: "octocat", name: "The Octocat", role: "admin" };
 
 describe("shell models", () => {
-  test("nav order is Apps → Insights → Members", () => {
+  test("nav order is Apps → Members (insights retired)", () => {
     expect(NAV_ITEMS.map((item) => item.href)).toEqual([
       "/dashboard/apps",
-      "/dashboard/insights",
       "/dashboard/members",
     ]);
   });
 
   test("member does not see Members in the sidebar", () => {
-    expect(visibleNavItems("member").map((item) => item.href)).toEqual([
-      "/dashboard/apps",
-      "/dashboard/insights",
-    ]);
-    const sidebar = buildSidebarModel(member, "/dashboard/insights");
-    expect(sidebar.items.map((item) => item.label)).toEqual(["Apps", "Insights"]);
+    expect(visibleNavItems("member").map((item) => item.href)).toEqual(["/dashboard/apps"]);
+    const sidebar = buildSidebarModel(member, "/dashboard/apps");
+    expect(sidebar.items.map((item) => item.label)).toEqual(["Apps"]);
     expect(sidebar.items.some((item) => item.href === "/dashboard/members")).toBe(false);
+    // The global insights page is retired: no sidebar entry renders for it.
+    expect(sidebar.items.some((item) => item.href === "/dashboard/insights")).toBe(false);
   });
 
   test("admin sees Members in the sidebar", () => {
     const sidebar = buildSidebarModel(admin, "/dashboard/members");
     expect(sidebar.items.map((item) => item.href)).toEqual([
       "/dashboard/apps",
-      "/dashboard/insights",
       "/dashboard/members",
     ]);
-    expect(sidebar.items.map((item) => item.label)).toEqual(["应用", "洞察", "成员"]);
+    expect(sidebar.items.map((item) => item.label)).toEqual(["应用", "成员"]);
   });
 
   test("navbar is slim: theme + Lang + account + logout only", () => {
@@ -82,22 +79,17 @@ describe("shell models", () => {
     expect(navbar.accountLabel).toBeNull();
   });
 
-  test("Apps current is /dashboard, /dashboard/apps and settings, not insights", () => {
+  test("Apps current is /dashboard, /dashboard/apps and settings", () => {
     expect(isNavCurrent("/dashboard/apps", "/dashboard")).toBe(true);
     expect(isNavCurrent("/dashboard/apps", "/dashboard/apps")).toBe(true);
     expect(isNavCurrent("/dashboard/apps", "/dashboard/apps/acme/settings")).toBe(true);
-    expect(isNavCurrent("/dashboard/apps", "/dashboard/insights")).toBe(false);
     const apps = buildSidebarModel(member, "/dashboard/apps");
     expect(apps.items.find((item) => item.href === "/dashboard/apps")?.current).toBe(true);
-    expect(apps.items.find((item) => item.href === "/dashboard/insights")?.current).toBe(false);
   });
 
-  test("root highlights Apps; Insights current is only /dashboard/insights", () => {
-    expect(isNavCurrent("/dashboard/insights", "/dashboard")).toBe(false);
-    expect(isNavCurrent("/dashboard/insights", "/dashboard/insights")).toBe(true);
+  test("root highlights Apps", () => {
     const root = buildSidebarModel(member, "/dashboard");
     expect(root.items.find((item) => item.href === "/dashboard/apps")?.current).toBe(true);
-    expect(root.items.find((item) => item.href === "/dashboard/insights")?.current).toBe(false);
   });
 });
 

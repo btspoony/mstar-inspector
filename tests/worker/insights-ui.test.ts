@@ -1,10 +1,9 @@
 /**
- * the insights HTML panel is retired — /dashboard/insights is
- * SPA-owned. The data contract lives on the JSON face
- * (GET /dashboard/api/insights/summary, tested in dashboard.test.ts); this
- * file pins the route-level behavior: an HTML navigation GET is served by
- * SPA dispatch, and the legacy SSR handler is gone (a non-HTML GET falls
- * through to the legacy app's membership guard).
+ * The global insights page is retired — /dashboard/insights is no longer a
+ * SPA page and no longer dispatches to the SPA shell. The data face moves
+ * per-App in the follow-up work; the legacy SSR handler is already gone.
+ * This file pins the route-level absence: neither an HTML navigation GET nor
+ * any other GET reaches the SPA boot document on this path.
  */
 import { describe, expect, test } from "bun:test";
 import worker from "../../src/worker/index";
@@ -40,8 +39,8 @@ function makeEnv(overrides: Partial<Env> = {}): Env {
   } as Env);
 }
 
-describe("GET /dashboard/insights (SPA-owned)", () => {
-  test("HTML navigation GET is served by SPA dispatch (boot-injected index)", async () => {
+describe("GET /dashboard/insights (retired)", () => {
+  test("an authenticated HTML navigation GET no longer serves the SPA shell", async () => {
     const session = await createSessionValue("octocat", null, SESSION_SECRET);
     const res = await worker.fetch(
       new Request("https://worker.local/dashboard/insights", {
@@ -49,13 +48,15 @@ describe("GET /dashboard/insights (SPA-owned)", () => {
       }),
       makeEnv({ DB: memberDbStub() }),
     );
-    expect(res.status).toBe(200);
+    // The route is gone from SPA_PAGES, so SPA dispatch never serves the
+    // boot-injected index on this path — the legacy app answers instead.
+    expect(res.status).toBe(404);
     const body = await res.text();
-    expect(body).toContain("window.__BOOT__=");
+    expect(body).not.toContain("window.__BOOT__=");
     expect(body).not.toContain(SPA_BOOT_MARKER);
   });
 
-  test("the legacy SSR handler is gone: a non-HTML GET falls through to the legacy app (guard 302, never the old HTML)", async () => {
+  test("a non-HTML GET falls through to the legacy app (guard 302, never the old HTML)", async () => {
     const res = await worker.fetch(new Request("https://worker.local/dashboard/insights"), makeEnv());
     // The mount-level membership guard answers before any route — the old
     // SSR handler would have rendered 200 HTML for a session-less request
