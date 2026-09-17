@@ -76,6 +76,13 @@ export type InsightsWindow = {
   /** Restrict every aggregation to one owner/repo pair. */
   repo?: { owner: string; repo: string };
   /**
+   * Restrict every aggregation (and the opt-in `repos` list) to one
+   * GitHub App — the `github_apps.id` row PK (string), not the numeric
+   * `github_app_id`. Rows with `app_id` NULL (legacy unattributed) are
+   * excluded when set; without the option every output is unchanged.
+   */
+  appId?: string;
+  /**
    * Opt-in window-scoped distinct `repos` aggregation (QC F-001).
    * Skipped (resolves to []) unless requested — only the insights records
    * surface opts in (its repo Select); default summary reads must not pay
@@ -182,11 +189,15 @@ const DISTRIBUTION_SEVERITY_KEYS = ["must-fix", "should-fix", "nit"] as const;
  *
  * @param db   a D1 handle (real D1Database or the bun:sqlite test double)
  * @param opts windowDays (default 30, >90 clamped to 90) + optional
- *             owner/repo filter applied to EVERY aggregation
+ *             owner/repo filter and optional `appId` (a `github_apps.id`
+ *             row PK string — not the numeric `github_app_id`), each
+ *             applied to EVERY aggregation; `appId` also scopes the
+ *             opt-in `repos` list and excludes legacy `app_id` NULL rows.
  */
 export async function createInsightsStore(db: InsightsD1, opts: InsightsWindow = {}): Promise<Insights> {
   const windowDays = clampWindow(opts.windowDays);
   const repo = opts.repo;
+  const appId = opts.appId;
   const includeRepos = opts.includeRepos ?? false;
 
   // (AD-652): the distribution granularity derives ONLY from the
@@ -213,6 +224,12 @@ export async function createInsightsStore(db: InsightsD1, opts: InsightsWindow =
     where.push("r.owner = ?", "r.repo = ?");
     binds.push(repo.owner, repo.repo);
   }
+  if (appId !== undefined) {
+    // Additive per-App predicate (the app-scoped filter): composed alongside — never
+    // inside — windowEraWhere, so the era gate and window stay untouched.
+    where.push("r.app_id = ?");
+    binds.push(appId);
+  }
   where.push(windowEraWhere);
   binds.push(windowDays);
   const whereSql = where.join(" AND ");
@@ -221,17 +238,22 @@ export async function createInsightsStore(db: InsightsD1, opts: InsightsWindow =
   // Opt-in (QC F-001) — skipped unless includeRepos, so the home
   // surface never pays the DISTINCT scan+sort. Deliberately ignores
   // opts.repo — the option set is the in-window universe, not the
-  // currently filtered subset. Shares windowEraWhere so the window + era
-  // gate predicates cannot drift from the other aggregations (F-003).
+  // currently filtered subset — but HONORS opts.appId (the app-scoped
+  // filter): the
+  // per-App repo selector must never offer another App's repos. Shares
+  // windowEraWhere so the window + era gate predicates cannot drift
+  // from the other aggregations (F-003).
+  const repoAppWhere = appId !== undefined ? "r.app_id = ? AND " : "";
+  const repoBinds = appId !== undefined ? [appId, windowDays] : [windowDays];
   const repoQuery = includeRepos
     ? db
         .prepare(
           `SELECT DISTINCT r.owner || '/' || r.repo AS repo
            FROM reviews r
-           WHERE ${windowEraWhere}
+           WHERE ${repoAppWhere}${windowEraWhere}
            ORDER BY repo ASC`,
         )
-        .bind(windowDays)
+        .bind(...repoBinds)
         .all<{ repo: string }>()
     : Promise.resolve({ results: [] as { repo: string }[] });
 
@@ -368,12 +390,14 @@ export async function createInsightsStore(db: InsightsD1, opts: InsightsWindow =
   for (const row of distributionSeverities.results) {
     const bucket = distributionBuckets.get(row.bucket_start)!;
     // Vocab coupling (qc fix-1): a future severity vocabulary must
-    // extend DISTRIBUTION_SEVERITY_KEYS (here), the page SEVERITY_SERIES
-    // (InsightsPage.tsx), and the wire-guard docblock (spa/pages/data.ts)
-    // together — this accumulation would otherwise grow keys the page's
-    // closed series silently ignore. Unreachable today: mergeClass is
-    // z.enum-locked at ingest (review/schema.ts) and the era gate excludes
-    // non-v1 rows.
+    // extend DISTRIBUTION_SEVERITY_KEYS (here) and the SPA-side wire
+    // vocabulary together — this accumulation would otherwise grow keys the
+    // UI's closed series silently ignore. The live pins for the series
+    // vocabulary live in tests/worker/insights-ui.test.ts (the
+    // findings_by_severity ordering/zero-fill cases) and in the wire-guard
+    // docblock + by_severity parse in src/spa/pages/data.ts. Unreachable
+    // today: mergeClass is z.enum-locked at ingest (review/schema.ts) and
+    // the era gate excludes non-v1 rows.
     bucket.by_severity[row.severity] = (bucket.by_severity[row.severity] ?? 0) + row.count;
   }
   for (const row of distributionCategories.results) {

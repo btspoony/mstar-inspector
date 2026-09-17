@@ -457,7 +457,6 @@ function shellHeader(
     <h1><a href="/dashboard">${escapeHtml(t(locale, "nav.brand"))}</a></h1>
     <span class="user">
       <a href="/dashboard">${escapeHtml(t(locale, "nav.apps"))}</a>
-      <a href="/dashboard/insights">${escapeHtml(t(locale, "nav.insights"))}</a>
       ${members}
       <span>${escapeHtml(t(locale, "nav.signedInAs", { name: display }))}</span>
       <a href="/dashboard/logout">${escapeHtml(t(locale, "nav.logout"))}</a>

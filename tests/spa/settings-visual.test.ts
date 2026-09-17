@@ -25,6 +25,7 @@ import { PageNotice } from "../../src/spa/pages/PageNotice";
 const spaRoot = join(import.meta.dir, "../../src/spa");
 const sectionCard = readFileSync(join(spaRoot, "components/SectionCard.tsx"), "utf8");
 const settingsPage = readFileSync(join(spaRoot, "pages/SettingsPage.tsx"), "utf8");
+const detailPage = readFileSync(join(spaRoot, "pages/AppDetailPage.tsx"), "utf8");
 const pagesCss = readFileSync(join(spaRoot, "pages.module.css"), "utf8");
 
 describe("SectionCard tier idiom (AD-591)", () => {
@@ -96,9 +97,6 @@ describe("settings section rhythm (AD-591)", () => {
     expect(cardBlock("export function AppInfoCard", "function HealthBody")).toContain(
       '<SectionCard tier="primary">',
     );
-    expect(cardBlock("function HealthCard", "function RuntimeImageCard")).toContain(
-      '<SectionCard tier="primary">',
-    );
     expect(cardBlock("function RuntimeImageCard", "function RuntimeImageEditor")).toContain(
       '<SectionCard tier="secondary">',
     );
@@ -128,14 +126,17 @@ describe("settings section rhythm (AD-591)", () => {
 });
 
 describe("settings heading idiom (QC convergence)", () => {
-  test("page title rides heading-24, the app slug rides heading-20 — no raw size utilities", () => {
-    expect(settingsPage).toContain("text-(length:--typo-heading-24-size)");
-    expect(settingsPage).toContain("leading-(--typo-heading-24-line)");
-    expect(settingsPage).toContain("tracking-(--typo-heading-24-tracking)");
-    expect(settingsPage).toContain("text-(length:--typo-heading-20-size)");
-    expect(settingsPage).toContain("leading-(--typo-heading-20-line)");
-    expect(settingsPage).toContain("tracking-(--typo-heading-20-tracking)");
-    // No raw Tailwind size utilities remain on the page headings.
+  test("the slug identity header rides heading-24 on the detail shell; no raw size utilities anywhere", () => {
+    // SUPERSEDE (App detail IA): the page h1 moved onto the AppDetailPage
+    // shell (identity header, heading-24, serving both tabs); the settings
+    // tab keeps the card-title heading-16 step only.
+    expect(detailPage).toContain("text-(length:--typo-heading-24-size)");
+    expect(detailPage).toContain("leading-(--typo-heading-24-line)");
+    expect(detailPage).toContain("tracking-(--typo-heading-24-tracking)");
+    // No raw Tailwind size utilities remain on either face.
+    expect(detailPage).not.toContain("text-2xl");
+    expect(detailPage).not.toContain("text-xl");
+    expect(detailPage).not.toContain("text-lg");
     expect(settingsPage).not.toContain("text-2xl");
     expect(settingsPage).not.toContain("text-xl");
     expect(settingsPage).not.toContain("text-lg");
@@ -156,7 +157,6 @@ describe("settings heading idiom (QC convergence)", () => {
     };
     for (const [card, next] of [
       ["export function AppInfoCard", "function HealthBody"],
-      ["function HealthCard", "function RuntimeImageCard"],
       ["function RuntimeImageCard", "function RuntimeImageEditor"],
       ["function OpsCard", "function ProvidersCard"],
     ] as const) {
@@ -304,19 +304,20 @@ describe("notice face (A5)", () => {
 });
 
 describe("composed load/error states (A6)", () => {
-  test("the foreground load gate rides the forms skeleton; retry wires the page's own load", () => {
-    // idiom: the skeleton is the page's full loading face (its
-    // heading placeholder stands in for the real h1); the settings kind is
-    // "forms" (AD-582). Retry binds the foreground load — which is the only
-    // path that flips state back to "loading", so op-triggered background
-    // reloads never flash the skeleton (unchanged).
-    expect(settingsPage).toContain('<PageSkeleton locale={locale} kind="forms" />');
-    expect(settingsPage).toContain('<ErrorState locale={locale} onRetry={() => void load()} />');
+  test("the foreground load gate rides the forms skeleton; retry wires the shell's load", () => {
+    // SUPERSEDE (App detail IA): the load machinery lives on the
+    // AppDetailPage shell now — the skeleton is the page's full loading face
+    // (its heading placeholder stands in for the real h1; the settings kind
+    // is "forms", AD-582), and retry binds the foreground load, the only
+    // path that flips state back to "loading" (the background-reload
+    // contract: op-triggered reloads never flash the skeleton).
+    expect(detailPage).toContain('<PageSkeleton locale={locale} kind="forms" />');
+    expect(detailPage).toContain('<ErrorState locale={locale} onRetry={() => void load()} />');
     // The old text-notice faces are retired from this page.
-    expect(settingsPage).not.toContain("LoadingNotice");
-    expect(settingsPage).not.toContain("LoadFailedNotice");
+    expect(detailPage).not.toContain("LoadingNotice");
+    expect(detailPage).not.toContain("LoadFailedNotice");
     // The background-reload failure channel stays the page banner.
-    expect(settingsPage).toContain('{notice ? <PageNotice kind={notice.kind} message={notice.message} /> : null}');
+    expect(detailPage).toContain('{notice ? <PageNotice kind={notice.kind} message={notice.message} /> : null}');
   });
 });
 

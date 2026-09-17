@@ -1,4 +1,4 @@
-import { LayoutGrid, LineChart, Users } from "lucide-react";
+import { LayoutGrid, Users } from "lucide-react";
 import {
   Sidebar,
   SidebarContent,
@@ -14,7 +14,6 @@ import { spaClick } from "../spa-click";
 
 const NAV_ICONS = {
   "/dashboard/apps": LayoutGrid,
-  "/dashboard/insights": LineChart,
   "/dashboard/members": Users,
 } as const;
 

@@ -267,3 +267,139 @@ describe("App write-route permission matrix (T1b, spec §2)", () => {
     });
   }
 });
+
+// --- Read-face matrix: GET /dashboard/api/apps/:slug/settings ---
+// Identity-only non-manager detail face: a member who is neither creator nor
+// admin gets the D4 identity set (the GET /api/apps list fields + created_at
+// + the cached public GitHub profile) and can_manage:false — NO health or
+// ops data (installations / deliveries / delivery_summary / last_webhook_at
+// / sandbox_image_id / review_trigger_mode). The manager face keeps the
+// full base+health payload unchanged. Read-only, so the status/shape
+// assertions are the matrix itself.
+describe("App detail read-face permission matrix (settings JSON)", () => {
+  const FACE = "/dashboard/api/apps/mallorys-app/settings";
+
+  async function getFace(login: string, env: Env): Promise<Response> {
+    return worker.fetch(
+      new Request(`https://worker.local${FACE}`, {
+        headers: { Cookie: `${SESSION_COOKIE}=${await createSessionValue(login, null, SESSION_SECRET)}` },
+      }),
+      env,
+    );
+  }
+
+  test("non-manager (other member) → exactly the identity-only payload", async () => {
+    const res = await getFace("hubot", makeEnv(await seededWorld()));
+    expect(res.status).toBe(200);
+    expect(res.headers.get("Content-Type")).toContain("application/json");
+    const body = (await res.json()) as { can_manage: unknown; app: Record<string, unknown> };
+    expect(Object.keys(body).sort()).toEqual(["app", "can_manage"]);
+    expect(body.can_manage).toBe(false);
+    expect(Object.keys(body.app).sort()).toEqual([
+      "created_at",
+      "created_by",
+      "github_app_id",
+      "github_avatar_url",
+      "github_description",
+      "github_html_url",
+      "github_metadata_synced_at",
+      "github_name",
+      "review_enabled",
+      "slug",
+      "status",
+    ]);
+    expect(body.app.slug).toBe("mallorys-app");
+    expect(body.app.github_app_id).toBe(1001);
+    expect(body.app.created_by).toBe("mallory");
+    expect(typeof body.app.created_at).toBe("string");
+    // ops fields never ride the non-manager payload
+    expect(JSON.stringify(body)).not.toContain("installations");
+    expect(JSON.stringify(body)).not.toContain("deliveries");
+    expect(JSON.stringify(body)).not.toContain("sandbox_image_id");
+    expect(JSON.stringify(body)).not.toContain("review_trigger_mode");
+    expect(JSON.stringify(body)).not.toContain("last_webhook_at");
+    expect(JSON.stringify(body)).not.toContain("private_key_enc");
+  });
+
+  for (const actor of [ACTORS[0], ACTORS[1]] as const) {
+    test(`manager (${actor.name}) → unchanged base+health shape`, async () => {
+      const res = await getFace(actor.login, makeEnv(await seededWorld()));
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as {
+        can_manage: boolean;
+        app: Record<string, unknown>;
+        installations: unknown[];
+        deliveries: unknown[];
+        delivery_summary: { rejected24h: number };
+        keys?: unknown;
+      };
+      expect(body.can_manage).toBe(true);
+      expect(body.app.sandbox_image_id).toBe("omp");
+      expect(body.app).toHaveProperty("last_webhook_at");
+      expect(body.app).toHaveProperty("review_trigger_mode");
+      expect(body.installations).toEqual([]);
+      expect(body.deliveries).toEqual([]);
+      expect(body.delivery_summary.rejected24h).toBe(0);
+      expect(body.keys).toEqual([]);
+    });
+  }
+
+  test("unknown slug → 404", async () => {
+    const res = await worker.fetch(
+      new Request("https://worker.local/dashboard/api/apps/no-such-app/settings", {
+        headers: { Cookie: `${SESSION_COOKIE}=${await createSessionValue("hubot", null, SESSION_SECRET)}` },
+      }),
+      makeEnv(await seededWorld()),
+    );
+    expect(res.status).toBe(404);
+  });
+});
+
+// --- Read-face matrix: GET /dashboard/api/apps/:slug/insights/summary ---
+// The per-App insights data face rides the SAME creator-or-admin rule
+// (canManageApp) as every write route above, plus the slug lookup
+// (unknown/soft-deleted → 404). Read-only, so no zero-mutation sweep is
+// needed — the assertions are the status matrix itself.
+describe("App insights read-face permission matrix", () => {
+  const FACE = "/dashboard/api/apps/mallorys-app/insights/summary";
+
+  async function getFace(login: string, env: Env): Promise<Response> {
+    return worker.fetch(
+      new Request(`https://worker.local${FACE}`, {
+        headers: { Cookie: `${SESSION_COOKIE}=${await createSessionValue(login, null, SESSION_SECRET)}` },
+      }),
+      env,
+    );
+  }
+
+  test("anonymous (no session) → 302 login", async () => {
+    const res = await worker.fetch(new Request(`https://worker.local${FACE}`), makeEnv(await seededWorld()));
+    expect(res.status).toBe(302);
+    expect(res.headers.get("Location")).toBe("/dashboard/login");
+  });
+
+  for (const actor of ACTORS) {
+    test(`read face: ${actor.name} (${actor.login}) → ${actor.expected}`, async () => {
+      const res = await getFace(actor.login, makeEnv(await seededWorld()));
+      expect(res.status).toBe(actor.expected);
+      if (actor.expected !== 200) {
+        // JSON-only deny body — this face never renders an HTML page.
+        const body = (await res.json()) as { error?: string };
+        expect(body.error).toBeDefined();
+      } else {
+        expect(res.headers.get("Content-Type")).toContain("application/json");
+      }
+    });
+  }
+
+  test("read face: unknown slug → 404 for a manager", async () => {
+    const db = await seededWorld();
+    const res = await worker.fetch(
+      new Request("https://worker.local/dashboard/api/apps/no-such-app/insights/summary", {
+        headers: { Cookie: `${SESSION_COOKIE}=${await createSessionValue("mallory", null, SESSION_SECRET)}` },
+      }),
+      makeEnv(db),
+    );
+    expect(res.status).toBe(404);
+  });
+});

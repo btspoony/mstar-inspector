@@ -33,8 +33,9 @@
  * footprint: 24px legend row + 166px chart = 190px, plot height 142.
  *
  * Numeric coexistence (a11y floor): per-week counts are not
- * labeled on the bars — the window totals ride the page-level summary line
- * (InsightsPage `trendSummary`, derived from the same weekly buckets)
+ * labeled on the bars — the window totals ride the consuming page's
+ * summary line (derived from the same weekly buckets the API returns in
+ * `weekly_trend`, see the per-App insights face in insights-ui.test.ts)
  * alongside the y ticks and date labels, so the chart is never the
  * numbers' only carrier (unchanged).
  *

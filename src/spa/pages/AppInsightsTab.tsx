@@ -8,111 +8,70 @@ import type { SpaBoot } from "../boot";
 import { SectionCard, SectionCardTitle } from "../components/SectionCard";
 import { EmptyState } from "../components/state/EmptyState";
 import { ErrorState } from "../components/state/ErrorState";
-import { PageSkeleton } from "../components/state/PageSkeleton";
 import {
   INSIGHTS_WINDOWS,
   INSIGHTS_REPO_ALL,
+  appInsightsSummaryUrl,
   insightsRepoFromSelect,
   insightsRepoOptions,
   insightsRepoSelectValue,
-  insightsSummaryUrl,
-  insightsWindow,
-  normalizeWindowSearch,
   parseInsights,
-  parseInsightsSearch,
-  searchHref,
   verdictLine,
+  type AppDetailSearch,
   type FindingsDistributionBucket,
-  type InsightsSearch,
   type InsightsSummary,
 } from "./data";
 import { StackedBarChart, type StackedSeries } from "@/components/charts/StackedBarChart";
 import { TrendChart } from "@/components/charts/TrendChart";
 
 /**
- * The filter state as the location states it — the one derivation shared by
- * the mount initializer and the popstate re-sync (F-15-02), built on
- * the pinned helpers (off-set windows resolve to the default segment).
+ * The 洞察 tab of the App detail page (App detail IA) — the per-App
+ * successor of the retired global insights page, rebuilt on the helpers
+ * kept (`parseInsights`, `INSIGHTS_WINDOWS` segments, repo-select
+ * helpers) and the shared charts. Closes the kept-helper consumer residual.
+ *
+ * Data plane: `GET /dashboard/api/apps/:slug/insights/summary`
+ * with `include=repos` for the repo Select (QC F-001 semantics unchanged).
+ * Filter state is CONTROLLED by the AppDetailPage shell: the shell derives
+ * `{ tab, window, repo }` from the location via `parseAppDetailSearch`
+ * (the one []-mounted popstate listener lives there), and every in-page
+ * edit flows back through `onSearch` → the shell's `replaceState` commit —
+ * loop-free by contract (knowledge spa-url-state-resync-popstate). This
+ * component therefore owns only the fetch + presentation; the window/repo
+ * segments reuse the 7/30/90 semantics and the repo filter is scoped to
+ * this App's repos.
+ * Toolbar first, then the four stat sections: severity / category as
+ * stacked bar time series from `findings_distribution` (AD-652/653 faces
+ * carried over verbatim), weekly trend as the grouped week-bucket chart,
+ * recurring findings as a list. QC fix-1 legend filter and the QC F-004
+ * ""→uncategorized merge are unchanged. No h1: the tab rides the shell's
+ * identity header (the shell mounts this only for managers — 403s cannot
+ * occur for an authorized viewer).
  */
-function insightsSearchFromLocation(): InsightsSearch {
-  return {
-    window: insightsWindow(window.location.search),
-    repo: parseInsightsSearch(window.location.search).repo,
-  };
-}
-
-/**
- * `/dashboard/insights` records page: review records with a
- * segmented window (INSIGHTS_WINDOWS 7/30/90) and a shadcn
- * Select repo filter (全部 + summary.repos). Free-text repo input retired.
- * Data plane: existing `/dashboard/api/insights/summary` plus the read-only
- * `repos` field (window-scoped distinct owner/repo, independent of `repo=`).
- * URL `repo=` shape is unchanged — out-of-set legal values stay applied.
- * F-15-02: after navigation the URL is the source of truth —
- * popstate re-derives the filter from the location (see the listener below);
- * in-page edits keep the reverse direction via commitSearch.
- * The three stat sections (severity / category / weekly trend)
- * render as charts from components/charts. (AD-652/653): the
- * severity and category cards are daily stacked bar time series —
- * x = day/week buckets from the additive `findings_distribution` API
- * field, one stacked `<Bar>` per closed-vocabulary series (severity
- * semantic family frozen; AD-653 category palette below) — the aggregate
- * BarChart retired with this migration; the weekly trend card stays a
- * grouped week-bucket chart and the recurring-findings card a list.
- * (A2-A5): the page joins the v0.3 language — heading-24 page
- * title, spacing-8 group rhythm, SectionCard tiers (overview = primary
- * surface, stat cards = secondary), and the shared state trio
- * (PageSkeleton on the initial load, ErrorState with retry, EmptyState for
- * the zero-review window). Filter logic and the URL↔filter pins are
- * untouched.
- * QC fix-1: legend entries render only for series with findings in
- * the window (zero-count series drop from the legend — legend-only; every
- * bucket stays on the axis per the time-continuity constraint).
- * PR fix (PR 41 bugbot): a filter refetch over retained data
- * renders a slim polite busy hint below the toolbar instead of a blank
- * main area — the skeleton stays initial-load-only and the toolbar never
- * unmounts (the no-flash contract); the content region also flips
- * aria-busy so the refetch is announced programmatically.
- */
-export function InsightsPage({ boot }: { boot: SpaBoot }) {
-  const locale = boot.locale;
-  const [search, setSearch] = useState<InsightsSearch>(insightsSearchFromLocation);
+export function AppInsightsTab({
+  locale,
+  slug,
+  search,
+  onSearch,
+}: {
+  locale: SpaBoot["locale"];
+  slug: string;
+  search: AppDetailSearch;
+  /** Shell-owned commit: replaceState + state update (never popstate). */
+  onSearch: (next: AppDetailSearch) => void;
+}) {
   const [data, setData] = useState<InsightsSummary | null>(null);
   const [state, setState] = useState<"loading" | "ok" | "error">("loading");
-  // ErrorState retry: bumping the nonce re-runs the load
-  // effect below for the current filter — the fetch body is unchanged.
+  // ErrorState retry: bumping the nonce re-runs the load effect below
+  // for the current filter — the fetch body is unchanged.
   const [reloadNonce, setReloadNonce] = useState(0);
-
-  // QC F-002: an off-set legal window deep link (e.g. ?window=60)
-  // resolves to the default segment 30 — rewrite the URL on mount so the
-  // address bar reflects the applied filter.
-  useEffect(() => {
-    const normalized = normalizeWindowSearch(window.location.search);
-    if (normalized !== window.location.search) {
-      window.history.replaceState(null, "", `${window.location.pathname}${normalized}`);
-    }
-  }, []);
-
-  // F-15-02: navigation re-sync. `navigate()` pushStates then
-  // dispatches a synthetic popstate (router.tsx), so a same-route sidebar
-  // click on a filtered view lands here with the now-bare location — the
-  // filter resets along with the address bar. History back/forward fires a
-  // native popstate carrying the entry's ?window=/?repo= — the filter is
-  // restored to match. In-page edits go through commitSearch (replaceState —
-  // never popstate), so this listener cannot loop against them; mount init
-  // and the normalize rewrite above are untouched (registration only).
-  useEffect(() => {
-    const onPop = () => setSearch(insightsSearchFromLocation());
-    window.addEventListener("popstate", onPop);
-    return () => window.removeEventListener("popstate", onPop);
-  }, []);
 
   useEffect(() => {
     let cancelled = false;
     setState("loading");
     // include=repos: the records Select needs the window-scoped distinct
     // repo set (QC F-001); default summary reads stay cheap.
-    fetchJson(insightsSummaryUrl(search, true))
+    fetchJson(appInsightsSummaryUrl(slug, search.window, search.repo))
       .then((raw) => {
         if (cancelled) return;
         const parsed = parseInsights(raw);
@@ -129,92 +88,89 @@ export function InsightsPage({ boot }: { boot: SpaBoot }) {
     return () => {
       cancelled = true;
     };
-  }, [search.window, search.repo, reloadNonce]);
-
-  function commitSearch(next: InsightsSearch): void {
-    window.history.replaceState(null, "", searchHref("/dashboard/insights", next));
-    setSearch(next);
-  }
+  }, [slug, search.window, search.repo, reloadNonce]);
 
   function onWindowChange(next: string): void {
     // Radix fires "" when the active segment is re-clicked — keep the window.
     if (!(INSIGHTS_WINDOWS as readonly string[]).includes(next)) return;
-    commitSearch({ window: next, repo: search.repo });
+    onSearch({ ...search, window: next as AppDetailSearch["window"] });
   }
 
   function onRepoChange(next: string): void {
     if (next === "") return;
-    commitSearch({ window: search.window, repo: insightsRepoFromSelect(next) });
+    onSearch({ ...search, repo: insightsRepoFromSelect(next) });
   }
 
   const repoChoices = insightsRepoOptions(data?.repos ?? [], search.repo);
   const repoSelectDisabled = state === "ok" && repoChoices.length === 0;
 
-  // Loading rides the shared skeleton as the page's full loading face —
-  // the component's heading placeholder stands in for the real h1 (AD-582).
-  // Initial load only: `data === null` gates it, so filter-change reloads
-  // keep the page (and keyboard focus) mounted per the
-  // background-reload contract; the refreshed data swaps in when it lands.
-  if (state === "loading" && data === null) {
-    return <PageSkeleton locale={locale} kind="cards" />;
-  }
-
-  // WCAG 4.1.3 (PR 41 bugbot): the region renders only past the initial-load
-  // skeleton gate, so aria-busy=true here always means "refetch over
-  // retained data" — the programmatic face for the busy hint below.
   return (
-    <div className="flex flex-col gap-(--spacing-8)" aria-busy={state === "loading"}>
-      <div className="flex flex-wrap items-end justify-between gap-3">
-        <h1 className="font-semibold text-(length:--typo-heading-24-size) leading-(--typo-heading-24-line) tracking-(--typo-heading-24-tracking)">
-          {t(locale, "insights.recordsHeading")}
-        </h1>
-        <div className="flex flex-wrap items-center gap-3">
-          <ToggleGroup
-            type="single"
-            variant="outline"
-            size="sm"
-            value={search.window}
-            onValueChange={onWindowChange}
-            aria-label={t(locale, "insights.windowSegment")}
-          >
-            {INSIGHTS_WINDOWS.map((days) => (
-              <ToggleGroupItem key={days} value={days}>
-                {t(locale, "insights.daysShort", { count: Number(days) })}
-              </ToggleGroupItem>
+    <div className="flex flex-col gap-6" aria-busy={state === "loading"}>
+      <div className="flex flex-wrap items-center justify-end gap-3">
+        <ToggleGroup
+          type="single"
+          variant="outline"
+          size="sm"
+          value={search.window}
+          onValueChange={onWindowChange}
+          aria-label={t(locale, "insights.windowSegment")}
+        >
+          {INSIGHTS_WINDOWS.map((days) => (
+            <ToggleGroupItem key={days} value={days}>
+              {t(locale, "insights.daysShort", { count: Number(days) })}
+            </ToggleGroupItem>
+          ))}
+        </ToggleGroup>
+        <Select
+          value={insightsRepoSelectValue(search.repo)}
+          onValueChange={onRepoChange}
+          disabled={repoSelectDisabled}
+        >
+          <SelectTrigger className="min-w-48" size="sm" aria-label={t(locale, "insights.filterRepo")}>
+            <SelectValue placeholder={t(locale, "insights.filterRepoAll")} />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value={INSIGHTS_REPO_ALL}>{t(locale, "insights.filterRepoAll")}</SelectItem>
+            {repoChoices.map((repo) => (
+              <SelectItem key={repo} value={repo}>
+                {repo}
+              </SelectItem>
             ))}
-          </ToggleGroup>
-          <Select
-            value={insightsRepoSelectValue(search.repo)}
-            onValueChange={onRepoChange}
-            disabled={repoSelectDisabled}
-          >
-            <SelectTrigger className="min-w-48" size="sm" aria-label={t(locale, "insights.filterRepo")}>
-              <SelectValue placeholder={t(locale, "insights.filterRepoAll")} />
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem value={INSIGHTS_REPO_ALL}>{t(locale, "insights.filterRepoAll")}</SelectItem>
-              {repoChoices.map((repo) => (
-                <SelectItem key={repo} value={repo}>
-                  {repo}
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
-        </div>
+          </SelectContent>
+        </Select>
       </div>
-      {state === "loading" && data !== null ? (
-        // Filter refetch over retained data (background reload): a
-        // one-line polite hint replaces the blank main area; the toolbar
-        // above stays mounted and interactive. The retired PageNotice text
-        // faces stay off this page (v0.3 pin).
+      {state === "loading" && data === null ? (
+        // Initial load (deep link or first fetch): no retained data yet,
+        // so the records face below is still unmounted — render a polite
+        // loading face (same role="status" pattern as the retained-data
+        // hint) instead of a bare filter toolbar (bugbot fix).
         <p role="status" className="text-sm text-muted-foreground">
           {t(locale, "common.loading")}
         </p>
       ) : null}
-      {state === "error" ? (
+      {state === "loading" && data !== null ? (
+        // Filter refetch over retained data (background reload): a
+        // one-line polite hint; the toolbar above and the previous
+        // sections below stay mounted — the refetch never blanks the
+        // stat cards (the no-flash contract, honored literally: content
+        // renders on `data !== null`, not on `state === "ok"`).
+        <p role="status" className="text-sm text-muted-foreground">
+          {t(locale, "common.loading")}
+        </p>
+      ) : null}
+      {/* ErrorState is the INITIAL-load face only (no retained data). A
+          refetch failure over retained data keeps the previous sections
+          and reports the failure in a slim alert line instead of blanking
+          the tab. */}
+      {state === "error" && data === null ? (
         <ErrorState locale={locale} onRetry={() => setReloadNonce((nonce) => nonce + 1)} />
       ) : null}
-      {state === "ok" && data ? <InsightsRecordsView locale={locale} data={data} /> : null}
+      {state === "error" && data !== null ? (
+        <p role="alert" className="text-sm text-muted-foreground">
+          {t(locale, "common.loadFailed")}
+        </p>
+      ) : null}
+      {data !== null ? <InsightsRecordsView locale={locale} data={data} /> : null}
     </div>
   );
 }
@@ -222,16 +178,13 @@ export function InsightsPage({ boot }: { boot: SpaBoot }) {
 /**
  * AD-561/AD-601: severity → DESIGN.md token series fills as
  * charts.css fill classes consumed by StackedBarChart — the AD-601-frozen
- * semantic family is unchanged (must-fix=red-700 / should-fix=amber-700 /
- * nit=gray-700); colors ride class rules into the token layer (never
- * presentation attributes, never raw hex; dark/light both resolve through
- * the :root[data-theme] var chain). The vocabulary is this fixed map — the
- * the API zero-fills exactly these three merge-class keys per bucket,
- * so unknown severity keys never enter the series. Labels stay the raw
- * engine slugs — the aggregate card's visible face carried them unlocalized
- * already (same product ruling as the category slugs below).
- * Exported for the SSR pins (the AppInfoCard idiom) — the
- * severity/category disjointness pin reads this vocabulary.
+ * semantic family (must-fix=red-700 / should-fix=amber-700 / nit=gray-700);
+ * colors ride class rules into the token layer (never presentation
+ * attributes, never raw hex). The API zero-fills exactly these three
+ * merge-class keys per bucket, so unknown severity keys never enter the
+ * series. Labels stay the raw engine slugs — the aggregate card's visible
+ * face carried them unlocalized already (same product ruling as the
+ * category slugs below).
  */
 export const SEVERITY_BAR_COLORS: Record<string, string> = {
   "must-fix": "chart-fill-red-700",
@@ -250,15 +203,10 @@ const SEVERITY_SERIES: StackedSeries[] = Object.entries(SEVERITY_BAR_COLORS).map
  * AD-653 category palette: the known engine slugs take Δhue-distinct
  * families from the 700-step {teal, purple, pink} candidates (red/amber
  * stay severity-owned; blue-700 keeps its neutral data-series duty and is
- * deliberately NOT assigned to a single known category). Alphabetically
- * stable assignment: DEBT=teal-700, DOCS=purple-700,
- * SEC=pink-700 (dark Δhue 172°/270°/329°; light 175°/271°/333° — every
- * adjacent pair ≥55°). Slugs outside this map (long-tail vocabulary; the
- * >8 top-N trigger stays a product escalation) ride the neutral blue-700
- * tone; the "uncategorized" fallback (NULL/unknown) is the
- * gray-700 series, stacked last. Exported for the SSR pins (the
- * AppInfoCard idiom) — the severity/category disjointness pin reads this
- * vocabulary alongside SEVERITY_BAR_COLORS.
+ * deliberately NOT assigned to a single known category). Slugs outside this
+ * map (long-tail vocabulary) ride the neutral blue-700 tone; the
+ * "uncategorized" fallback (NULL/unknown) is the gray-700 series, stacked
+ * last.
  */
 export const CATEGORY_FILL_CLASSES: Record<string, string> = {
   DEBT: "chart-fill-teal-700",
@@ -277,9 +225,7 @@ const UNCATEGORIZED_FILL_CLASS = "chart-fill-gray-700";
  * present somewhere in the window, in stack order: known slugs (palette
  * order), remaining slugs (payload ASC order) on the neutral tone, the
  * gray fallback last (topmost segment). Key presence is the derivation
- * face; seriesWithFindings applies the zero-count legend filter on top
- * (the store's always-present "uncategorized" key can hold a window total
- * of 0).
+ * face; seriesWithFindings applies the zero-count legend filter on top.
  */
 function categorySeries(buckets: readonly FindingsDistributionBucket[], locale: SpaBoot["locale"]): StackedSeries[] {
   const observed = new Set<string>();
@@ -310,7 +256,7 @@ function categorySeries(buckets: readonly FindingsDistributionBucket[], locale: 
  * The chart buckets: the payload grid with the schema-permitted ""
  * category key merged into "uncategorized" per bucket (counts summed) so
  * the gray fallback series reads the honest total — the same
- * QC F-004 merge the aggregate card performed, now one layer down.
+ * QC F-004 merge the aggregate card performed, one layer down.
  */
 function chartBuckets(buckets: readonly FindingsDistributionBucket[]): FindingsDistributionBucket[] {
   return buckets.map((bucket) => {
@@ -328,15 +274,10 @@ function chartBuckets(buckets: readonly FindingsDistributionBucket[]): FindingsD
 
 /**
  * QC fix-1 (QC F-004 ×3 seats): legend entries only for series
- * with findings in the window (AD-653 「图例仅列窗口内出现分类」) — a series
- * whose window total is 0 (e.g. the store's always-present "uncategorized"
- * grid key, AD-652 恒在) drops from the legend instead of rendering a
- * zero-count swatch. Legend-only filtering: every bucket stays on the
- * axis/stack (time continuity, AC-C) and zero-height segments render no
- * geometry either way. Reads the component's grid lookup
- * (`by_severity[key] ?? by_category[key] ?? 0`) over the MERGED buckets
- * (chartBuckets owns the "" merge) so the filter sees exactly what the
- * chart would render.
+ * with findings in the window — a series whose window total is 0 drops
+ * from the legend instead of rendering a zero-count swatch. Legend-only
+ * filtering: every bucket stays on the axis/stack (time continuity) and
+ * zero-height segments render no geometry either way.
  */
 function seriesWithFindings(
   series: readonly StackedSeries[],
@@ -348,8 +289,9 @@ function seriesWithFindings(
 }
 
 /**
- * Exported for the SSR pins (the AppInfoCard idiom): pure `t()` + data
- * rendering, no window/router access, so tests can static-render it.
+ * The four insights stat sections — pure `t()` + data rendering, no
+ * window/router access, so tests can static-render it (the AppInfoCard
+ * idiom). Faces carried over verbatim from the retired global page.
  */
 export function InsightsRecordsView({ locale, data }: { locale: SpaBoot["locale"]; data: InsightsSummary }) {
   const windowLabel = t(locale, data.window_days === 1 ? "insights.lastDay" : "insights.lastDays", {
@@ -379,11 +321,8 @@ export function InsightsRecordsView({ locale, data }: { locale: SpaBoot["locale"
   return (
     <>
       {empty ? (
-        // AD-601 presentation supersede: the
-        // heading-card-only empty face is replaced by the composed
-        // EmptyState. The judgment (`reviews_total === 0`) and the chart
-        // layer contract are untouched, and no in-page action exists —
-        // reviews arrive via installed Apps (no-action variant).
+        // The composed zero-review empty state — no-action variant
+        // (reviews arrive via installed Apps).
         <EmptyState
           title={t(locale, "insights.emptyTitle")}
           description={t(locale, "insights.emptyDescription")}
@@ -402,8 +341,7 @@ export function InsightsRecordsView({ locale, data }: { locale: SpaBoot["locale"
               <p className="tabular-nums">{t(locale, "insights.verdicts", { line: verdictLine(data) })}</p>
             </CardContent>
           </SectionCard>
-          {/* AD-591 rhythm: the four stat cards are one Tier 2 group —
-              spacing-6 inside, spacing-8 to the rest of the page. */}
+          {/* AD-591 rhythm: the four stat cards are one Tier 2 group. */}
           <div className="flex flex-col gap-6">
             <SectionCard tier="secondary">
               <CardHeader>
