@@ -57,7 +57,7 @@ RUN curl -fsSL https://github.com/cli/cli/releases/download/v2.98.0/gh_2.98.0_li
     && chmod +x /usr/local/bin/gh \
     && rm -rf /tmp/gh_2.98.0_linux_amd64 /tmp/gh.tar.gz
 
-# mstar-harness plugin, pinned ref 23d2c78c481e3571bf3e975886ace5f8c1f9f905 (tag v3.9.2, bumped 2026-09-14).
+# mstar-harness plugin, pinned ref 65399624b5951bcf6478cb4d71e0dbb84f24acec (tag v3.10.2, bumped 2026-09-17).
 # Choice: build-time shallow clone (NOT a git submodule, NOT COPY):
 #   - the harness is a separate PUBLIC repo — a submodule would couple this
 #     repo's git metadata to it and require submodule state inside the build
@@ -68,7 +68,7 @@ RUN curl -fsSL https://github.com/cli/cli/releases/download/v2.98.0/gh_2.98.0_li
 # .git is removed after checkout to keep the image lean.
 RUN git init /opt/mstar-harness \
     && git -C /opt/mstar-harness remote add origin https://github.com/btspoony/mstar-harness.git \
-    && git -C /opt/mstar-harness fetch --depth 1 origin 23d2c78c481e3571bf3e975886ace5f8c1f9f905 \
+    && git -C /opt/mstar-harness fetch --depth 1 origin 65399624b5951bcf6478cb4d71e0dbb84f24acec \
     && git -C /opt/mstar-harness checkout FETCH_HEAD \
     && rm -rf /opt/mstar-harness/.git
 
@@ -79,12 +79,12 @@ RUN git init /opt/mstar-harness \
 # canNOT invoke the `mstar` CLI today; absent a wired invocation path, review
 # behavior is unchanged (legacy, non-CLI). Wiring a sanctioned session
 # toolcall path is a tracked follow-up — no such mechanism
-# exists in this image. Exact pin `@mstar-harness/cli@3.9.2`: image pinning
-# discipline — the repo manifest `^3.9.2` exception does NOT extend to the
+# exists in this image. Exact pin `@mstar-harness/cli@3.10.2`: image pinning
+# discipline — the repo manifest `^3.10.2` exception does NOT extend to the
 # image. The CLI dist ships `#!/usr/bin/env bun` (verified) and the Bun 1.4.0
 # installed above executes it directly, so no node is added. The global bin
 # dir is put on PATH so sandbox exec resolves the `mstar` shim.
-RUN bun add --global @mstar-harness/cli@3.9.2
+RUN bun add --global @mstar-harness/cli@3.10.2
 ENV PATH="/root/.bun/bin:${PATH}"
 
 # omp agent dir: PI_CODING_AGENT_DIR points at an EMPTY directory (no baked

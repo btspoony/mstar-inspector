@@ -1,22 +1,22 @@
 /**
  * Pin assertions for the sandbox image harness ref, engine dep, and the
- * preinstalled @mstar-harness/cli (bumped 2026-09-14 — supersedes the
- * previous 3.8.1 pin).
+ * preinstalled @mstar-harness/cli (bumped 2026-09-17 — supersedes the
+ * previous 3.9.2 pin).
  *
  * POLICY CHANGE (user instruction 2026-09-06; range carried forward
- * at `^3.9.2`, 2026-09-14): the repo manifest
- * `@mstar-harness/engine` range is now `^3.9.2` — the only range allowed in
+ * at `^3.10.2`, 2026-09-17): the repo manifest
+ * `@mstar-harness/engine` range is now `^3.10.2` — the only range allowed in
  * package.json. This supersedes the earlier "exact pin, no
  * `^`/`~`/`latest`" discipline for the manifest ONLY. The sandbox image side
  * stays exact: the Dockerfile fetches a pinned deref commit, and reproducibility is frozen
- * by bun.lock (packages row must resolve to exact 3.9.2) +
+ * by bun.lock (packages row must resolve to exact 3.10.2) +
  * `bun install --frozen-lockfile` in the image build. The image CLI install
- * is exact too (`@mstar-harness/cli@3.9.2`) — the manifest range exception
+ * is exact too (`@mstar-harness/cli@3.10.2`) — the manifest range exception
  * does NOT extend to the image.
  *
- * These tests fail if the harness image ref drifts off the 3.9.2 commit, if
+ * These tests fail if the harness image ref drifts off the 3.10.2 commit, if
  * the manifest range or the lockfile resolution drifts, if the image CLI
- * install drifts off the exact 3.9.2 pin, loses its PATH exposure, or
+ * install drifts off the exact 3.10.2 pin, loses its PATH exposure, or
  * desyncs from the `REVIEW_SKILL_VERSION` version prefix, or if the test
  * fixture plugin root stops mirroring the pinned layout
  * (`commands/amazing-pr-review.md` + `skills/mstar-audit`).
@@ -29,17 +29,23 @@ import { join } from "node:path";
 import { PLUGIN_ROOT_FIXTURE } from "./plugin-root-fixture";
 import { REVIEW_SKILL_VERSION } from "../../src/store/artifact-store";
 
-/** Harness 3.9.2 git ref fetched into the sandbox image (bumped 2026-09-14). */
-const HARNESS_392_REF = "23d2c78c481e3571bf3e975886ace5f8c1f9f905";
-/** Superseded refs that must no longer appear in the Dockerfile. */
+/** Harness 3.10.2 git ref fetched into the sandbox image (bumped 2026-09-17). */
+const HARNESS_3102_REF = "65399624b5951bcf6478cb4d71e0dbb84f24acec";
+/** Harness 3.9.2 git ref — superseded by the 3.10.2 bump (2026-09-17). */
+const SUPERSEDED_392_REF = "23d2c78c481e3571bf3e975886ace5f8c1f9f905";
 /** Harness 3.8.1 git ref — superseded by the 3.9.2 bump (2026-09-14). */
 const SUPERSEDED_381_REF = "4c8fbb216c444df832b1943d68e4eee76261bbd2";
 /** Harness 3.6.3 git ref — superseded by the 3.8.1 bump (2026-09-12). */
 const SUPERSEDED_363_REF = "6cbeea67179a82483429cc6476111bfdbb959c7e";
+/** Harness 3.6.2 git ref — superseded by the 3.6.3 bump (2026-09-07). */
 const SUPERSEDED_362_REF = "3436ddcaf03ddec693dc7059395e9ccf92e5d005";
+/** Harness 3.6.0 git ref — superseded by the 3.6.2 bump (2026-09-06). */
 const SUPERSEDED_360_REF = "ad76f0c6600acd5040464248085ad7d22af93e9f";
+/** Harness 3.5.1 git ref — superseded by the 3.6.0 bump (2026-09-03). */
 const SUPERSEDED_351_REF = "bde437075aeefd4cdb4e87060c6c44149968c3b0";
+/** Pre-3.5.0 harness pin git ref — superseded by the 3.5.0 pin (2026-08-28). */
 const SUPERSEDED_REF = "c188934c807184f416656a80ca50adb61ccbd525";
+/** Harness 3.5.0 git ref — superseded by the 3.5.1 bump (2026-09-01). */
 const SUPERSEDED_350_REF = "f1b60df0b3b2e29b9a904edb4077e52cf6d7ca66";
 
 const REPO_ROOT = join(import.meta.dir, "..", "..");
@@ -49,11 +55,12 @@ const OMP_DOCKERFILE = join(REPO_ROOT, "sandbox-image", "omp", "Dockerfile");
 describe("sandbox image harness pin", () => {
   const dockerfile = readFileSync(OMP_DOCKERFILE, "utf8");
 
-  test("Dockerfile fetches the 3.9.2 harness commit", () => {
-    expect(dockerfile).toContain(`fetch --depth 1 origin ${HARNESS_392_REF}`);
+  test("Dockerfile fetches the 3.10.2 harness commit", () => {
+    expect(dockerfile).toContain(`fetch --depth 1 origin ${HARNESS_3102_REF}`);
   });
 
   test("Dockerfile no longer references the superseded refs", () => {
+    expect(dockerfile).not.toContain(SUPERSEDED_392_REF);
     expect(dockerfile).not.toContain(SUPERSEDED_381_REF);
     expect(dockerfile).not.toContain(SUPERSEDED_363_REF);
     expect(dockerfile).not.toContain(SUPERSEDED_362_REF);
@@ -63,19 +70,19 @@ describe("sandbox image harness pin", () => {
     expect(dockerfile).not.toContain(SUPERSEDED_350_REF);
   });
 
-  test("Dockerfile comment records the tag v3.9.2 double-write", () => {
-    expect(dockerfile).toContain("tag v3.9.2");
+  test("Dockerfile comment records the tag v3.10.2 double-write", () => {
+    expect(dockerfile).toContain("tag v3.10.2");
   });
 });
 
 describe("sandbox image CLI pin", () => {
   const dockerfile = readFileSync(OMP_DOCKERFILE, "utf8");
 
-  test("Dockerfile preinstalls @mstar-harness/cli at the exact 3.9.2 pin (bun global)", () => {
+  test("Dockerfile preinstalls @mstar-harness/cli at the exact 3.10.2 pin (bun global)", () => {
     // bun global install of the exact pin — image pinning discipline; the
-    // repo manifest `^3.9.2` exception (2026-09-06 policy change) does NOT
+    // repo manifest `^3.10.2` exception (2026-09-06 policy change) does NOT
     // extend to the image.
-    expect(dockerfile).toContain("bun add --global @mstar-harness/cli@3.9.2");
+    expect(dockerfile).toContain("bun add --global @mstar-harness/cli@3.10.2");
   });
 
   test("Dockerfile puts the bun global bin on PATH for sandbox exec", () => {
@@ -95,17 +102,17 @@ describe("engine dependency pin", () => {
     dependencies: Record<string, string>;
   };
 
-  test("@mstar-harness/engine manifest declares the ^3.9.2 range (2026-09-06 policy change)", () => {
-    expect(pkg.dependencies["@mstar-harness/engine"]).toBe("^3.9.2");
+  test("@mstar-harness/engine manifest declares the ^3.10.2 range (2026-09-06 policy change)", () => {
+    expect(pkg.dependencies["@mstar-harness/engine"]).toBe("^3.10.2");
   });
 
-  test("@mstar-harness/engine bun.lock packages row resolves to exact 3.9.2", () => {
+  test("@mstar-harness/engine bun.lock packages row resolves to exact 3.10.2", () => {
     const lockfile = readFileSync(join(REPO_ROOT, "bun.lock"), "utf8");
-    // The packages row names the RESOLVED version verbatim (exact 3.9.2, no
+    // The packages row names the RESOLVED version verbatim (exact 3.10.2, no
     // range prefix) — this is what `bun install --frozen-lockfile` in the
     // image build installs. A bad resolution (e.g. 3.6.3, or the range
     // leaking into the resolved name) fails this anchor.
-    expect(lockfile).toContain('"@mstar-harness/engine": ["@mstar-harness/engine@3.9.2"');
+    expect(lockfile).toContain('"@mstar-harness/engine": ["@mstar-harness/engine@3.10.2"');
   });
 
   test("@mstar-harness/engine bun.lock workspaces row mirrors the manifest range", () => {
@@ -113,13 +120,13 @@ describe("engine dependency pin", () => {
     // The workspaces dependencies row (bun.lock:9) mirrors the package.json
     // range declaration; drift here would desync the workspace root from the
     // manifest.
-    expect(lockfile).toContain('"@mstar-harness/engine": "^3.9.2"');
+    expect(lockfile).toContain('"@mstar-harness/engine": "^3.10.2"');
   });
 });
 
 describe("review skill version pin", () => {
-  test("REVIEW_SKILL_VERSION carries the exact 3.9.2+23d2c78c value", () => {
-    expect(REVIEW_SKILL_VERSION).toBe("3.9.2+23d2c78c");
+  test("REVIEW_SKILL_VERSION carries the exact 3.10.2+65399624 value", () => {
+    expect(REVIEW_SKILL_VERSION).toBe("3.10.2+65399624");
   });
 
   test("REVIEW_SKILL_VERSION + suffix binds to the Dockerfile fetch sha prefix", () => {
