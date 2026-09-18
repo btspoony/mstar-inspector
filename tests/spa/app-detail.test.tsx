@@ -180,6 +180,26 @@ describe("tab shell source contracts", () => {
     expect(detailPage.indexOf('href="/dashboard/apps"', viewAt)).toBe(-1);
   });
 
+  test("page tab face: the shell tab bar rides the line variant with hairline + sized-up left-aligned triggers", () => {
+    // Page-level face (DESIGN.md ### Tabs): the shell's 应用设置/洞察 bar is
+    // the line-tab idiom — full-width, bottom hairline on the border-border
+    // token, larger triggers (16px heading-16 token step, taller bar) — while
+    // the chains-panel segmented pill keeps the component default (its face
+    // stays generic; the variant prop is only set at this consumption site).
+    const bar = detailPage.slice(detailPage.indexOf("<TabsList"), detailPage.indexOf("</TabsList>"));
+    expect(bar).toMatch(/<TabsList\s+variant="line"/);
+    expect(bar).toContain("w-full");
+    expect(bar).toContain("border-b border-border");
+    expect(bar).toContain("justify-start");
+    expect(detailPage).toContain("text-(length:--typo-heading-16-size)");
+    expect(detailPage).toContain("leading-(--typo-heading-16-line)");
+    expect(detailPage).toContain("tracking-(--typo-heading-16-tracking)");
+    // The line variant is set exactly once — this shell bar; no other face
+    // in the page opts in (the chains panel keeps the component default).
+    expect(detailPage.match(/variant="line"/g)?.length).toBe(1);
+    expect(tabsWrapper).toContain('defaultVariants: {\n      variant: "default",');
+  });
+
   test("forceMount knowledge: the ui wrapper hides inactive panels via data-[state=inactive]:hidden", () => {
     expect(tabsWrapper).toContain("data-[state=inactive]:hidden");
   });

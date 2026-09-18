@@ -276,11 +276,32 @@ export function AppDetailView({
       </div>
       {notice ? <PageNotice kind={notice.kind} message={notice.message} /> : null}
       <Tabs value={tab} onValueChange={onTabChange}>
-        <TabsList>
-          <TabsTrigger value="settings">{t(locale, "appDetail.tabSettings")}</TabsTrigger>
+        {/* Page-level tab face (DESIGN.md ### Tabs, line-tab idiom): the
+            shell's bar is full-width over a bottom hairline (border-border
+            → gray-alpha-400) with left-aligned, sized-up triggers — 16px
+            heading-16 token step on a 40px bar. The component defaults stay
+            generic: the chains-panel segmented pill keeps variant="default";
+            the face lives at this consumption site only. */}
+        <TabsList
+          variant="line"
+          className="h-10 w-full justify-start gap-4 border-b border-border p-0"
+        >
+          <TabsTrigger
+            value="settings"
+            className="flex-none px-3 text-(length:--typo-heading-16-size) leading-(--typo-heading-16-line) tracking-(--typo-heading-16-tracking)"
+          >
+            {t(locale, "appDetail.tabSettings")}
+          </TabsTrigger>
           {/* The 洞察 tab exists ONLY on the manage face — absence is the
               non-manager contract, pinned by test. */}
-          {canManage ? <TabsTrigger value="insights">{t(locale, "appDetail.tabInsights")}</TabsTrigger> : null}
+          {canManage ? (
+            <TabsTrigger
+              value="insights"
+              className="flex-none px-3 text-(length:--typo-heading-16-size) leading-(--typo-heading-16-line) tracking-(--typo-heading-16-tracking)"
+            >
+              {t(locale, "appDetail.tabInsights")}
+            </TabsTrigger>
+          ) : null}
         </TabsList>
         {/* forceMount on BOTH panels (mount-once tab switching): the
             settings form state (typed inputs, Add Provider panel, op

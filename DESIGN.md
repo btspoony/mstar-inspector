@@ -608,6 +608,21 @@ components:
     typography: "{typography.copy-14}"
     rounded: "{rounded.sm}"
     padding: 16px
+  tabs-page-line:
+    textColor: "{colors.gray-1000}"
+    mutedTextColor: "{colors.gray-700}"
+    activeUnderline: "{colors.gray-1000}"
+    borderColor: "{colors.gray-alpha-400}"
+    typography: "{typography.heading-16}"
+    height: 40px
+  tabs-segmented-pill:
+    backgroundColor: "{colors.gray-100}"
+    activeBackgroundColor: "{colors.background-100}"
+    textColor: "{colors.gray-700}"
+    activeTextColor: "{colors.gray-1000}"
+    typography: "{typography.label-14}"
+    rounded: "{rounded.sm}"
+    height: 36px
 ---
 
 <!-- COMPLETENESS_LEVEL: 3 — last audited 2026-09-09 -->
@@ -902,6 +917,26 @@ medium weight; no edge marker (AD-641 — the brand
 accent edge is retired). Hover and open-hover keep the neutral
 `background-300` 40% tint (AD-622); the press face keeps the
 full `background-300` fill. Muted meta uses `gray-900`.
+
+### Tabs
+
+Two faces, one generic component (`ui/tabs.tsx`) — the face is chosen at the
+consumption site through the `variant` prop, never by restyling the
+component defaults.
+
+- **Page-level line tab** (`tabs-page-line`) — top-level page navigation
+  (the App detail shell's 应用设置 / 洞察 bar). Full-width list over a
+  bottom hairline (`gray-alpha-400` via `border-border`), left-aligned
+  triggers on `heading-16` (16px) with a 40px bar; the active trigger wears
+  `gray-1000` text and a 2px `gray-1000` underline; inactive is the muted
+  tone. No fill, no pill.
+- **Embedded segmented pill** (`tabs-segmented-pill`) — switching inside a
+  card (the model chains panel). Muted `gray-100` pill strip, 36px bar,
+  `label-14` triggers on the control radius; the active segment is the
+  card-surface `background-100` fill with `gray-1000` text.
+
+Rule: page IA navigates with the line face; intra-card segmentation keeps
+the pill. A face never mixes the two vocabularies on one surface.
 
 ### Notice (PageNotice)
 
