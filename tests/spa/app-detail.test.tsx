@@ -191,6 +191,12 @@ describe("tab shell source contracts", () => {
     expect(bar).toContain("w-full");
     expect(bar).toContain("border-b border-border");
     expect(bar).toContain("justify-start");
+    // 40px bar is load-bearing: the class must carry the same variant-scoped
+    // prefix as the component base (`group-data-[orientation=horizontal]/tabs:h-9`)
+    // so tailwind-merge dedupes the 36px default — a plain `h-10` loses the
+    // Tailwind v4 cascade and would ship a 36px bar.
+    expect(bar).toContain("group-data-[orientation=horizontal]/tabs:h-10");
+    expect(bar).not.toMatch(/(^|\s)h-10(\s|$)/);
     expect(detailPage).toContain("text-(length:--typo-heading-16-size)");
     expect(detailPage).toContain("leading-(--typo-heading-16-line)");
     expect(detailPage).toContain("tracking-(--typo-heading-16-tracking)");

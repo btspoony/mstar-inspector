@@ -105,12 +105,12 @@ describe("settings section rhythm (AD-591)", () => {
     );
   });
 
-  test("the two tier groups head the view: identity first, configuration second, spacing-8 apart", () => {
+  test("the two tier groups head the view: appInfo first, configuration second, spacing-8 apart", () => {
     // Group eyebrows resolve through the dictionary, in AD-591 zone order.
-    const identityPos = settingsPage.indexOf('label={t(locale, "settings.group.appInfo")}');
+    const appInfoPos = settingsPage.indexOf('label={t(locale, "settings.group.appInfo")}');
     const configurationPos = settingsPage.indexOf('label={t(locale, "settings.group.configuration")}');
-    expect(identityPos).toBeGreaterThan(-1);
-    expect(configurationPos).toBeGreaterThan(identityPos);
+    expect(appInfoPos).toBeGreaterThan(-1);
+    expect(configurationPos).toBeGreaterThan(appInfoPos);
     // Group-to-group rhythm rides the spacing token (DESIGN.md: large
     // between sections = spacing-8+).
     expect(settingsPage).toContain('gap-(--spacing-8)');
@@ -118,7 +118,7 @@ describe("settings section rhythm (AD-591)", () => {
     // identity group (before the configuration eyebrow), and the runtime
     // image card moves into the configuration group.
     const managePos = settingsPage.indexOf("{payload.can_manage ? (");
-    expect(managePos).toBeGreaterThan(identityPos);
+    expect(managePos).toBeGreaterThan(appInfoPos);
     expect(managePos).toBeLessThan(configurationPos);
     const runtimePos = settingsPage.indexOf("<RuntimeImageCard");
     expect(runtimePos).toBeGreaterThan(configurationPos);

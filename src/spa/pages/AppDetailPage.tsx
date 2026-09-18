@@ -284,7 +284,7 @@ export function AppDetailView({
             the face lives at this consumption site only. */}
         <TabsList
           variant="line"
-          className="h-10 w-full justify-start gap-4 border-b border-border p-0"
+          className="group-data-[orientation=horizontal]/tabs:h-10 w-full justify-start gap-4 border-b border-border p-0"
         >
           <TabsTrigger
             value="settings"

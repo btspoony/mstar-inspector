@@ -610,6 +610,8 @@ components:
     padding: 16px
   tabs-page-line:
     textColor: "{colors.gray-1000}"
+    # mutedTextColor: token intent; shipped face is `foreground/60`
+    # (gray-1000 at 60% opacity) — see ### Tabs body for the split.
     mutedTextColor: "{colors.gray-700}"
     activeUnderline: "{colors.gray-1000}"
     borderColor: "{colors.gray-alpha-400}"
@@ -932,7 +934,12 @@ component defaults.
   tone. Rendered face: triggers keep the component's `font-medium` (500) —
   the frontmatter `heading-16` records the token intent, not the shipped
   weight — and the inactive tone is `foreground/60` (`gray-1000` at 60%),
-  not `gray-700`. No fill, no pill.
+  not `gray-700`. No fill, no pill. The consumption site also seats the
+  indicator on the hairline: triggers carry
+  `group-data-[orientation=horizontal]/tabs:after:bottom-[-2px]`, overriding
+  the component's detached underline offset; the bar height rides the same
+  variant-scoped prefix (`group-data-[orientation=horizontal]/tabs:h-10`) so
+  it wins over the component's 36px default.
 - **Embedded segmented pill** (`tabs-segmented-pill`) — switching inside a
   card (the model chains panel). Muted `gray-100` pill strip, 36px bar,
   `label-14` triggers on the control radius; the active segment is the
