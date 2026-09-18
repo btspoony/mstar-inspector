@@ -271,6 +271,13 @@ describe("App detail IA copy", () => {
     expect(isDictionaryKey("settings.backToApps")).toBe(false);
   });
 
+  test("the app-info group eyebrow key is renamed atomically; the old identity key is removed, not aliased", () => {
+    expect(t("en", "settings.group.appInfo")).toBe("App info");
+    expect(t("zh_CN", "settings.group.appInfo")).toBe("应用信息");
+    expect(isDictionaryKey("settings.group.appInfo")).toBe(true);
+    expect(isDictionaryKey("settings.group.identity")).toBe(false);
+  });
+
   test("the insights tab copy returns with the per-App view — window segments keep the 7/30/90 semantics", () => {
     // The records page's window/repo vocabulary is reused verbatim by the
     // per-App insights tab (the segments label the same day counts).

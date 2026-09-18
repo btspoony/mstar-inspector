@@ -381,7 +381,7 @@ export function SettingsView({
   if (!payload.can_manage) {
     return (
       <div className="flex flex-col gap-6">
-        <SectionGroup label={t(locale, "settings.group.identity")}>
+        <SectionGroup label={t(locale, "settings.group.appInfo")}>
           <AppInfoCard locale={locale} app={payload.app} canManage={false} />
         </SectionGroup>
         {versionFooter}
@@ -392,14 +392,14 @@ export function SettingsView({
   return (
     <div className="flex flex-col gap-6">
       <div className="flex flex-col gap-(--spacing-8)">
-        {/* AD-591 section rhythm: two tier groups — the identity/status zone
+        {/* AD-591 section rhythm: two tier groups — the app-info/status zone
             (Tier 1 primary surfaces) and the configuration zone (Tier 2
             secondary surfaces), each headed by a group eyebrow. Block order
             and data flow are unchanged (Non-Goal); the identity-card position
-            contract (identity card inside the identity group, before the
+            contract (identity card inside the app-info group, before the
             manage conditional) holds. The slug row is the shell's identity
             header (AppDetailPage h1 + status), not a per-tab face. */}
-        <SectionGroup label={t(locale, "settings.group.identity")}>
+        <SectionGroup label={t(locale, "settings.group.appInfo")}>
           {/* The GitHub identity card sits before the manage conditional in
               the group (AC3); the viewer's authorization switches the name
               link's destination (AD-623). */}

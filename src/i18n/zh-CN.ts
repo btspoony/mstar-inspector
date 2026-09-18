@@ -187,9 +187,9 @@ export const zhCN: Dictionary = {
     emptyDescription: "使用上方表单邀请第一位成员。",
   },
   settings: {
-    /** (AD-591) 分组 eyebrow 标签——身份/状态区与配置区（双语原子）。 */
+    /** (AD-591) 分组 eyebrow 标签——应用信息/状态区与配置区（双语原子）。 */
     group: {
-      identity: "身份",
+      appInfo: "应用信息",
       configuration: "配置",
     },
     changesSaved: "更改已保存。",

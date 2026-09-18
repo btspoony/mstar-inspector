@@ -205,10 +205,10 @@ export const en = {
   settings: {
     /**
      * (AD-591): section-group eyebrow labels for the two tier
-     * zones — identity/status (Tier 1) and configuration (Tier 2).
+     * zones — app info/status (Tier 1) and configuration (Tier 2).
      */
     group: {
-      identity: "Identity",
+      appInfo: "App info",
       configuration: "Configuration",
     },
     changesSaved: "Changes saved.",
