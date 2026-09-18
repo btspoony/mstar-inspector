@@ -197,7 +197,7 @@ describe("tab shell source contracts", () => {
     // The line variant is set exactly once — this shell bar; no other face
     // in the page opts in (the chains panel keeps the component default).
     expect(detailPage.match(/variant="line"/g)?.length).toBe(1);
-    expect(tabsWrapper).toContain('defaultVariants: {\n      variant: "default",');
+    expect(tabsWrapper).toMatch(/defaultVariants:\s*\{\s*variant:\s*"default"/);
   });
 
   test("forceMount knowledge: the ui wrapper hides inactive panels via data-[state=inactive]:hidden", () => {

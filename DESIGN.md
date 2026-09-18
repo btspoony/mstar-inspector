@@ -929,7 +929,10 @@ component defaults.
   bottom hairline (`gray-alpha-400` via `border-border`), left-aligned
   triggers on `heading-16` (16px) with a 40px bar; the active trigger wears
   `gray-1000` text and a 2px `gray-1000` underline; inactive is the muted
-  tone. No fill, no pill.
+  tone. Rendered face: triggers keep the component's `font-medium` (500) —
+  the frontmatter `heading-16` records the token intent, not the shipped
+  weight — and the inactive tone is `foreground/60` (`gray-1000` at 60%),
+  not `gray-700`. No fill, no pill.
 - **Embedded segmented pill** (`tabs-segmented-pill`) — switching inside a
   card (the model chains panel). Muted `gray-100` pill strip, 36px bar,
   `label-14` triggers on the control radius; the active segment is the

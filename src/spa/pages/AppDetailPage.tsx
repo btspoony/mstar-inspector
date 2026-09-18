@@ -288,7 +288,7 @@ export function AppDetailView({
         >
           <TabsTrigger
             value="settings"
-            className="flex-none px-3 text-(length:--typo-heading-16-size) leading-(--typo-heading-16-line) tracking-(--typo-heading-16-tracking)"
+            className="flex-none px-3 text-(length:--typo-heading-16-size) leading-(--typo-heading-16-line) tracking-(--typo-heading-16-tracking) group-data-[orientation=horizontal]/tabs:after:bottom-[-2px]"
           >
             {t(locale, "appDetail.tabSettings")}
           </TabsTrigger>
@@ -297,7 +297,7 @@ export function AppDetailView({
           {canManage ? (
             <TabsTrigger
               value="insights"
-              className="flex-none px-3 text-(length:--typo-heading-16-size) leading-(--typo-heading-16-line) tracking-(--typo-heading-16-tracking)"
+              className="flex-none px-3 text-(length:--typo-heading-16-size) leading-(--typo-heading-16-line) tracking-(--typo-heading-16-tracking) group-data-[orientation=horizontal]/tabs:after:bottom-[-2px]"
             >
               {t(locale, "appDetail.tabInsights")}
             </TabsTrigger>
