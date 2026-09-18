@@ -173,7 +173,10 @@ describe("spaClick single-implementation source contract", () => {
   test("the three surfaces import the shared handler from the spa-click module", () => {
     // Specifier as the surfaces actually use it: pages/ and components/ are
     // one level under src/spa/, so all three import `../spa-click`.
-    for (const rel of ["pages/AppsPage.tsx", "pages/SettingsPage.tsx", "components/AppSidebar.tsx"]) {
+    // The wayfinding back link moved from SettingsView into the
+    // AppDetailPage shell, so AppDetailPage replaces SettingsPage here —
+    // SettingsPage renders no spa-nav links of its own any more.
+    for (const rel of ["pages/AppsPage.tsx", "pages/AppDetailPage.tsx", "components/AppSidebar.tsx"]) {
       const source = readFileSync(join(spaRoot, rel), "utf8");
       expect(source, rel).toContain('import { spaClick } from "../spa-click"');
     }

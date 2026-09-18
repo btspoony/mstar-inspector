@@ -12,13 +12,14 @@ tags:
   - dead-classes
   - preflight
   - built-css-pins
-title: "Tailwind v4 compiled-CSS traps: dead utilities without theme keys + bare border currentColor"
+title: "Tailwind v4 compiled-CSS traps: dead utilities without theme keys + bare border currentColor + variant-prefix dedupe defeat"
 symptoms:
   - "visual feedback missing/incorrect while component tests stay green"
   - "rules absent from (or wrong-valued in) dist/spa/assets/index-*.css"
-root_cause: "Tailwind v4 generates utilities only from @theme keys (missing --color-* mapping = dead class); bare width-only border inherits border-color from currentColor under preflight"
+  - "consumption-site override class present in source and compiled CSS, yet the copy-in component's default value still renders (cascade loses to the variant-scoped base)"
+root_cause: "Tailwind v4 generates utilities only from @theme keys (missing --color-* mapping = dead class); bare width-only border inherits border-color from currentColor under preflight; an override whose variant prefix differs from the copy-in base class survives tailwind-merge (prefixes differ) and loses the cascade (variant-scoped specificity wins)"
 resolution_type: code_fix
-last_updated: 2026-09-12
+last_updated: 2026-09-18
 source: design language v2
 ---
 
@@ -64,3 +65,13 @@ Theme key 是 Tailwind v4 生成 utility 的唯一依据；编译产物 grep 直
 - **命名形 `bg-sidebar-primary/12`（有 `@theme inline` 键 `--color-sidebar-primary`）编译为** `background-color: color-mix(in oklab, var(--sidebar-primary) 12%, transparent)`，且编译器前置一行 `background-color: var(--sidebar-primary)` fallback + `@supports (color-mix(...))` 包裹——fallback 在前 = 无 color-mix 支持的浏览器吃全强度 var（与已上线 `hover:bg-sidebar-accent/40`、`.bg-muted/50` 同机制同暴露）。任意值形 `bg-(--sidebar-primary)/12` 输出逐字节一致。
 - **data-attribute 变体的编译选择器是无引号形态** `[data-active=true]`（grep/pin 文本以 `.data-\[active\=true\]\:bg-sidebar-primary\/12[data-active=true]` 为准——带引号形式 grep 不到，扩展初稿曾按引号形写锚点被实测纠正）。
 - **档位裁决方法**：tint 显著度用 fill-vs-bg 对比 + active-vs-hover 色相/强度双维实测（dark `#22d3ee` / light `#0e7490` 双主题 token 分档），不要靠目测拍档位。
+
+## Extension（2026-09-18）：变体前缀错位击败 tailwind-merge 去重（第三类失效）
+
+app detail 反馈轮（页面级 line tab face）实测第三类「源码看着对、编译有 CSS、但被级联击败」的静默失败——这次不是死类（CSS 存在），而是**两条规则都活着、错的那条赢**：
+
+- **机制**：copy-in 组件基础类带变体作用域（`group-data-[orientation=horizontal]/tabs:h-9`），消费点覆盖写**裸形** `h-10`。tailwind-merge 只去重「同 variant 前缀 + 同 property」的对——前缀不同（一个带 `group-data-[...]/tabs:`、一个裸）→ **两个类都保留**；Tailwind v4 级联里变体作用域选择器特异性更高（`:is(:where(...))` 包装 + variant-after-plain 层序）→ 基础类的 36px 赢，覆盖的 40px 永远不生效。与第一类（零输出）互补：这是「有输出、输错了」。
+- **症状**：消费点类写了值、DESIGN.md/plan 声明了值、渲染却是组件默认值；源码 pin（只断言覆盖类存在）全绿。plan QC tri 三席独立同判（本仓首次三席互证同一 Warning）。
+- **修**：覆盖类**复制基础类的完整 variant 前缀**（`group-data-[orientation=horizontal]/tabs:h-10`），同前缀同 property → tailwind-merge 正确去重，只编译一条 40px。同轮已验证的同型先例：`after:bottom-[-5px]` → `after:bottom-[-2px]` 的指示器落位覆盖（带 `group-data-[orientation=horizontal]/tabs:after:` 全前缀）。
+- **防（pin 层）**：覆盖类 pin 必须双断言——**要求变体全前缀类存在 + 禁止裸形残留**（负向 regex 不得误伤带前缀形态）；凡「覆盖 copy-in 组件默认值」的 diff，review 对「裸类 vs 组件内变体作用域类」同 property 对撞保持警惕。
+- **防（验证层）**：新覆盖类进 built CSS grep kill proof 时，grep 的是**变体全前缀选择器**且确认同名 property 只剩一条规则（两条并存 = 去重被击败的直接证据）。

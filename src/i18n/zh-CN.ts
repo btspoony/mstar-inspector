@@ -84,6 +84,7 @@ export const zhCN: Dictionary = {
   },
   /** App 详情页（App detail IA）：双标签页外壳。 */
   appDetail: {
+    backToApps: "返回应用",
     tabSettings: "应用设置",
     tabInsights: "洞察",
   },
@@ -186,10 +187,9 @@ export const zhCN: Dictionary = {
     emptyDescription: "使用上方表单邀请第一位成员。",
   },
   settings: {
-    backToApps: "返回应用",
-    /** (AD-591) 分组 eyebrow 标签——身份/状态区与配置区（双语原子）。 */
+    /** (AD-591) 分组 eyebrow 标签——应用信息/状态区与配置区（双语原子）。 */
     group: {
-      identity: "身份",
+      appInfo: "应用信息",
       configuration: "配置",
     },
     changesSaved: "更改已保存。",

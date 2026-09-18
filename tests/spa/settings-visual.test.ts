@@ -105,12 +105,12 @@ describe("settings section rhythm (AD-591)", () => {
     );
   });
 
-  test("the two tier groups head the view: identity first, configuration second, spacing-8 apart", () => {
+  test("the two tier groups head the view: appInfo first, configuration second, spacing-8 apart", () => {
     // Group eyebrows resolve through the dictionary, in AD-591 zone order.
-    const identityPos = settingsPage.indexOf('label={t(locale, "settings.group.identity")}');
+    const appInfoPos = settingsPage.indexOf('label={t(locale, "settings.group.appInfo")}');
     const configurationPos = settingsPage.indexOf('label={t(locale, "settings.group.configuration")}');
-    expect(identityPos).toBeGreaterThan(-1);
-    expect(configurationPos).toBeGreaterThan(identityPos);
+    expect(appInfoPos).toBeGreaterThan(-1);
+    expect(configurationPos).toBeGreaterThan(appInfoPos);
     // Group-to-group rhythm rides the spacing token (DESIGN.md: large
     // between sections = spacing-8+).
     expect(settingsPage).toContain('gap-(--spacing-8)');
@@ -118,7 +118,7 @@ describe("settings section rhythm (AD-591)", () => {
     // identity group (before the configuration eyebrow), and the runtime
     // image card moves into the configuration group.
     const managePos = settingsPage.indexOf("{payload.can_manage ? (");
-    expect(managePos).toBeGreaterThan(identityPos);
+    expect(managePos).toBeGreaterThan(appInfoPos);
     expect(managePos).toBeLessThan(configurationPos);
     const runtimePos = settingsPage.indexOf("<RuntimeImageCard");
     expect(runtimePos).toBeGreaterThan(configurationPos);
@@ -166,8 +166,8 @@ describe("settings heading idiom (QC convergence)", () => {
 });
 
 describe("group eyebrow copy (A8)", () => {
-  test("identity/configuration keys exist atomically in both locales", () => {
-    for (const key of ["settings.group.identity", "settings.group.configuration"] as const) {
+  test("appInfo/configuration keys exist atomically in both locales", () => {
+    for (const key of ["settings.group.appInfo", "settings.group.configuration"] as const) {
       const en = t("en", key);
       const zh = t("zh_CN", key);
       expect(en.length, key).toBeGreaterThan(0);
@@ -176,8 +176,8 @@ describe("group eyebrow copy (A8)", () => {
       expect(en, key).not.toContain("{");
       expect(zh, key).not.toContain("{");
     }
-    expect(t("en", "settings.group.identity")).toBe("Identity");
-    expect(t("zh_CN", "settings.group.identity")).toBe("身份");
+    expect(t("en", "settings.group.appInfo")).toBe("App info");
+    expect(t("zh_CN", "settings.group.appInfo")).toBe("应用信息");
     expect(t("en", "settings.group.configuration")).toBe("Configuration");
     expect(t("zh_CN", "settings.group.configuration")).toBe("配置");
   });

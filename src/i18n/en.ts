@@ -96,6 +96,7 @@ export const en = {
   },
   /** App detail page (App detail IA): the two-tab shell. */
   appDetail: {
+    backToApps: "Back to Apps",
     tabSettings: "Settings",
     tabInsights: "Insights",
   },
@@ -202,13 +203,12 @@ export const en = {
     emptyDescription: "Invite the first member with the form above.",
   },
   settings: {
-    backToApps: "Back to Apps",
     /**
      * (AD-591): section-group eyebrow labels for the two tier
-     * zones — identity/status (Tier 1) and configuration (Tier 2).
+     * zones — app info/status (Tier 1) and configuration (Tier 2).
      */
     group: {
-      identity: "Identity",
+      appInfo: "App info",
       configuration: "Configuration",
     },
     changesSaved: "Changes saved.",

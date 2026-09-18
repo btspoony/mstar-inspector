@@ -148,6 +148,64 @@ describe("tab shell rendering (static SSR)", () => {
 });
 
 describe("tab shell source contracts", () => {
+  test("wayfinding: the back link is the shell's first element on both faces — before the identity-header h1", () => {
+    // The back link moved out of the settings tab body (SettingsView) to
+    // the stateful AppDetailPage shell, so it renders on the error face
+    // AND the ok face (both roles — the shell serves managers and
+    // non-managers alike) as the page's first element. The loading
+    // skeleton early returns stay excluded (transient faces). The link
+    // face is the SettingsPage idiom: ArrowLeft aria-hidden + label.
+    const wayfindingAt = detailPage.indexOf('href="/dashboard/apps"');
+    expect(wayfindingAt).toBeGreaterThan(-1);
+    expect(detailPage).toContain('t(locale, "appDetail.backToApps")');
+    expect(detailPage).toContain("spaClick");
+    const h1At = detailPage.indexOf("{slug}</h1>");
+    expect(h1At).toBeGreaterThan(wayfindingAt);
+    // The link-face window spans the whole anchor — open tag through the
+    // label call — so the ArrowLeft (which follows the href in source)
+    // is covered (the settings-layout idiom).
+    const labelAt = detailPage.indexOf('t(locale, "appDetail.backToApps")');
+    expect(labelAt).toBeGreaterThan(wayfindingAt);
+    const wayfinding = detailPage.slice(detailPage.lastIndexOf("<a", wayfindingAt), labelAt);
+    expect(wayfinding).toContain("<ArrowLeft");
+    expect(wayfinding).toContain('aria-hidden="true"');
+    expect(wayfinding).toContain("inline-flex items-center gap-1.5");
+    // The shell's returned fragment carries the link before both faces:
+    // error face (ErrorState) and ok face (AppDetailView).
+    const returnAt = detailPage.indexOf('state === "error" ? <ErrorState');
+    expect(returnAt).toBeGreaterThan(-1);
+    expect(detailPage.lastIndexOf('href="/dashboard/apps"', returnAt)).toBeGreaterThan(-1);
+    // The pure view gained nothing: no back link inside AppDetailView.
+    const viewAt = detailPage.indexOf("export function AppDetailView");
+    expect(detailPage.indexOf('href="/dashboard/apps"', viewAt)).toBe(-1);
+  });
+
+  test("page tab face: the shell tab bar rides the line variant with hairline + sized-up left-aligned triggers", () => {
+    // Page-level face (DESIGN.md ### Tabs): the shell's 应用设置/洞察 bar is
+    // the line-tab idiom — full-width, bottom hairline on the border-border
+    // token, larger triggers (16px heading-16 token step, taller bar) — while
+    // the chains-panel segmented pill keeps the component default (its face
+    // stays generic; the variant prop is only set at this consumption site).
+    const bar = detailPage.slice(detailPage.indexOf("<TabsList"), detailPage.indexOf("</TabsList>"));
+    expect(bar).toMatch(/<TabsList\s+variant="line"/);
+    expect(bar).toContain("w-full");
+    expect(bar).toContain("border-b border-border");
+    expect(bar).toContain("justify-start");
+    // 40px bar is load-bearing: the class must carry the same variant-scoped
+    // prefix as the component base (`group-data-[orientation=horizontal]/tabs:h-9`)
+    // so tailwind-merge dedupes the 36px default — a plain `h-10` loses the
+    // Tailwind v4 cascade and would ship a 36px bar.
+    expect(bar).toContain("group-data-[orientation=horizontal]/tabs:h-10");
+    expect(bar).not.toMatch(/(^|\s)h-10(\s|$)/);
+    expect(detailPage).toContain("text-(length:--typo-heading-16-size)");
+    expect(detailPage).toContain("leading-(--typo-heading-16-line)");
+    expect(detailPage).toContain("tracking-(--typo-heading-16-tracking)");
+    // The line variant is set exactly once — this shell bar; no other face
+    // in the page opts in (the chains panel keeps the component default).
+    expect(detailPage.match(/variant="line"/g)?.length).toBe(1);
+    expect(tabsWrapper).toMatch(/defaultVariants:\s*\{\s*variant:\s*"default"/);
+  });
+
   test("forceMount knowledge: the ui wrapper hides inactive panels via data-[state=inactive]:hidden", () => {
     expect(tabsWrapper).toContain("data-[state=inactive]:hidden");
   });
