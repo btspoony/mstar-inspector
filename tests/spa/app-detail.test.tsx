@@ -148,6 +148,38 @@ describe("tab shell rendering (static SSR)", () => {
 });
 
 describe("tab shell source contracts", () => {
+  test("wayfinding: the back link is the shell's first element on both faces — before the identity-header h1", () => {
+    // The back link moved out of the settings tab body (SettingsView) to
+    // the stateful AppDetailPage shell, so it renders on the error face
+    // AND the ok face (both roles — the shell serves managers and
+    // non-managers alike) as the page's first element. The loading
+    // skeleton early returns stay excluded (transient faces). The link
+    // face is the SettingsPage idiom: ArrowLeft aria-hidden + label.
+    const wayfindingAt = detailPage.indexOf('href="/dashboard/apps"');
+    expect(wayfindingAt).toBeGreaterThan(-1);
+    expect(detailPage).toContain('t(locale, "appDetail.backToApps")');
+    expect(detailPage).toContain("spaClick");
+    const h1At = detailPage.indexOf("{slug}</h1>");
+    expect(h1At).toBeGreaterThan(wayfindingAt);
+    // The link-face window spans the whole anchor — open tag through the
+    // label call — so the ArrowLeft (which follows the href in source)
+    // is covered (the settings-layout idiom).
+    const labelAt = detailPage.indexOf('t(locale, "appDetail.backToApps")');
+    expect(labelAt).toBeGreaterThan(wayfindingAt);
+    const wayfinding = detailPage.slice(detailPage.lastIndexOf("<a", wayfindingAt), labelAt);
+    expect(wayfinding).toContain("<ArrowLeft");
+    expect(wayfinding).toContain('aria-hidden="true"');
+    expect(wayfinding).toContain("inline-flex items-center gap-1.5");
+    // The shell's returned fragment carries the link before both faces:
+    // error face (ErrorState) and ok face (AppDetailView).
+    const returnAt = detailPage.indexOf('state === "error" ? <ErrorState');
+    expect(returnAt).toBeGreaterThan(-1);
+    expect(detailPage.lastIndexOf('href="/dashboard/apps"', returnAt)).toBeGreaterThan(-1);
+    // The pure view gained nothing: no back link inside AppDetailView.
+    const viewAt = detailPage.indexOf("export function AppDetailView");
+    expect(detailPage.indexOf('href="/dashboard/apps"', viewAt)).toBe(-1);
+  });
+
   test("forceMount knowledge: the ui wrapper hides inactive panels via data-[state=inactive]:hidden", () => {
     expect(tabsWrapper).toContain("data-[state=inactive]:hidden");
   });

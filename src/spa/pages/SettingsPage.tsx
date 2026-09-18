@@ -1,5 +1,5 @@
 import { Fragment, useEffect, useRef, useState, type ReactNode } from "react";
-import { ArrowLeft, ExternalLink, Plus } from "lucide-react";
+import { ExternalLink, Plus } from "lucide-react";
 import { isDictionaryKey, t, type DictionaryKey } from "../../i18n";
 import { APP_VERSION } from "../../version";
 import { Button } from "@/components/ui/button";
@@ -31,7 +31,6 @@ import { postForm } from "../api";
 import type { SpaBoot } from "../boot";
 import { deliveryOutcomeLabel } from "../delivery-outcome";
 import { formatRelativeTime } from "../relative-time";
-import { spaClick } from "../spa-click";
 import {
   activeChainTabId,
   DEFAULT_CHAIN_NAME,
@@ -91,9 +90,9 @@ function NoticeRegion({ notice }: { notice: OpNotice | null }) {
  * a pure-ish presentational component — the data load, the page notice
  * channel, and the loading/error faces live on the AppDetailPage shell,
  * which threads the parsed payload, the model groups, the reload
- * callback, and the banner notice down here. The back link and version
- * footer stay part of the settings tab (wayfinding + deployment stamp),
- * unchanged from the pre-shell page.
+ * callback, and the banner notice down here. The version footer stays
+ * part of the settings tab; page wayfinding (the back link) moved to
+ * the AppDetailPage shell.
  */
 function verifyReasonMessage(locale: SpaBoot["locale"], reason: string): string {
   if (reason === "invalid_key") return t(locale, "settings.verify.invalid_key");
@@ -365,21 +364,6 @@ export function SettingsView({
 
   const confirmCopy = pendingConfirmCopy(locale, app.slug, pending);
 
-  // The page-level wayfinding block: the back link is the settings
-  // tab's visible path back to the Apps list (the decorative ArrowLeft
-  // rides the link aria-hidden, so the accessible name stays the
-  // backToApps text alone).
-  const wayfinding = (
-    <a
-      className="inline-flex items-center gap-1.5 text-sm text-muted-foreground no-underline hover:text-foreground hover:underline"
-      href="/dashboard/apps"
-      onClick={(event) => spaClick("/dashboard/apps", event)}
-    >
-      <ArrowLeft className="size-4 shrink-0" aria-hidden="true" />
-      {t(locale, "settings.backToApps")}
-    </a>
-  );
-
   // Version footer: the deployment's current release from the
   // generated src/version.ts surface — the same `vX.Y.Z` form as the
   // /healthz field and release tags, so dashboard, health endpoint and
@@ -391,13 +375,12 @@ export function SettingsView({
   );
 
   // Identity-only non-manager face: the payload carries the D4 identity
-  // set ONLY (no ops stores), so the tab renders wayfinding + the GitHub
+  // set ONLY (no ops stores), so the tab renders the GitHub
   // identity card and nothing else — no slug row (the AppDetailPage shell
   // owns the identity header), no ops/health/configuration surfaces.
   if (!payload.can_manage) {
     return (
       <div className="flex flex-col gap-6">
-        {wayfinding}
         <SectionGroup label={t(locale, "settings.group.identity")}>
           <AppInfoCard locale={locale} app={payload.app} canManage={false} />
         </SectionGroup>
@@ -408,7 +391,6 @@ export function SettingsView({
 
   return (
     <div className="flex flex-col gap-6">
-      {wayfinding}
       <div className="flex flex-col gap-(--spacing-8)">
         {/* AD-591 section rhythm: two tier groups — the identity/status zone
             (Tier 1 primary surfaces) and the configuration zone (Tier 2

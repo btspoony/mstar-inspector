@@ -12,7 +12,7 @@ import { join } from "node:path";
 import { en, type Dictionary } from "../../src/i18n/en";
 import { zhCN } from "../../src/i18n/zh-CN";
 import { LOCALE_COOKIE, LOCALES, resolveLocale, serializeLocaleCookie, type Locale } from "../../src/i18n/resolve";
-import { dictionaries, t, type DictionaryKey } from "../../src/i18n/t";
+import { dictionaries, isDictionaryKey, t, type DictionaryKey } from "../../src/i18n/t";
 import { NAV_ITEMS } from "../../src/i18n/nav";
 
 /** All leaf values as dotted paths — the runtime parity key set. */
@@ -262,6 +262,13 @@ describe("App detail IA copy", () => {
     expect(t("zh_CN", "appDetail.tabSettings")).toBe("应用设置");
     expect(t("en", "appDetail.tabInsights")).toBe("Insights");
     expect(t("zh_CN", "appDetail.tabInsights")).toBe("洞察");
+  });
+
+  test("the back-to-apps wayfinding key lives under appDetail atomically; the old settings key is removed, not aliased", () => {
+    expect(t("en", "appDetail.backToApps")).toBe("Back to Apps");
+    expect(t("zh_CN", "appDetail.backToApps")).toBe("返回应用");
+    expect(isDictionaryKey("appDetail.backToApps")).toBe(true);
+    expect(isDictionaryKey("settings.backToApps")).toBe(false);
   });
 
   test("the insights tab copy returns with the per-App view — window segments keep the 7/30/90 semantics", () => {

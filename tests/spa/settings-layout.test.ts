@@ -1191,18 +1191,20 @@ describe("operational action hierarchy", () => {
 
 describe("App workflow boundaries", () => {
   test("App settings reads as one workflow with the Apps list: a visible path back", () => {
-    const source = readFileSync(join(import.meta.dir, "../../src/spa/pages/SettingsPage.tsx"), "utf8");
+    // The wayfinding lives on the AppDetailPage shell (both faces), not
+    // the settings tab body — the source pin re-pointed with the move.
+    const source = readFileSync(join(import.meta.dir, "../../src/spa/pages/AppDetailPage.tsx"), "utf8");
     // The back link targets the enumerated Apps route (the /dashboard surface).
     expect(source).toContain('href="/dashboard/apps"');
-    expect(source).toContain('t(locale, "settings.backToApps")');
-    expect(t("en", "settings.backToApps")).toBe("Back to Apps");
-    expect(t("zh_CN", "settings.backToApps")).toBe("返回应用");
+    expect(source).toContain('t(locale, "appDetail.backToApps")');
+    expect(t("en", "appDetail.backToApps")).toBe("Back to Apps");
+    expect(t("zh_CN", "appDetail.backToApps")).toBe("返回应用");
     // A decorative ArrowLeft rides the link — aria-hidden keeps
     // the accessible name at the backToApps text alone; inline-flex aligns
     // icon + label. Copy and target unchanged (AC3).
     const wayfinding = source.slice(
       source.lastIndexOf("<a", source.indexOf('href="/dashboard/apps"')),
-      source.indexOf('t(locale, "settings.backToApps")'),
+      source.indexOf('t(locale, "appDetail.backToApps")'),
     );
     expect(wayfinding).toContain("<ArrowLeft");
     expect(wayfinding).toContain('aria-hidden="true"');

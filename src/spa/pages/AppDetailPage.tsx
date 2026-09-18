@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { ArrowLeft } from "lucide-react";
 import { t } from "../../i18n";
 import { StatusBadge } from "./AppsPage";
 import { SettingsView } from "./SettingsPage";
@@ -6,6 +7,7 @@ import { AppInsightsTab } from "./AppInsightsTab";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { fetchJson } from "../api";
 import type { SpaBoot } from "../boot";
+import { spaClick } from "../spa-click";
 import { PageNotice, type NoticeKind } from "./PageNotice";
 import { ErrorState } from "../components/state/ErrorState";
 import { PageSkeleton } from "../components/state/PageSkeleton";
@@ -27,6 +29,10 @@ import {
  * settings capability, {@link SettingsView}); the 洞察 tab
  * ({@link AppInsightsTab}, per-App insights) renders ONLY when the payload
  * says `can_manage` — a non-manager never sees the tab at all.
+ *
+ * Page wayfinding (the back link to the Apps list) is the shell's —
+ * rendered as the first element on the error and ok faces; the settings
+ * tab body keeps only the version footer.
  *
  * Data plane: the shell owns the settings fetch (both faces — the
  * identity-only `can_manage: false` shape parses through the D4 identity
@@ -189,8 +195,24 @@ export function AppDetailPage({ boot, slug }: { boot: SpaBoot; slug: string }) {
     return <PageSkeleton locale={locale} kind="forms" />;
   }
 
+  // Page wayfinding: the back link is the shell's first element on both
+  // faces (error + ok — it serves both roles), moved here from the
+  // settings tab body. The decorative ArrowLeft rides the link
+  // aria-hidden, so the accessible name stays the backToApps text alone.
+  const wayfinding = (
+    <a
+      className="inline-flex items-center gap-1.5 text-sm text-muted-foreground no-underline hover:text-foreground hover:underline"
+      href="/dashboard/apps"
+      onClick={(event) => spaClick("/dashboard/apps", event)}
+    >
+      <ArrowLeft className="size-4 shrink-0" aria-hidden="true" />
+      {t(locale, "appDetail.backToApps")}
+    </a>
+  );
+
   return (
     <div className="flex flex-col gap-6">
+      {wayfinding}
       {state === "error" ? <ErrorState locale={locale} onRetry={() => void load()} /> : null}
       {state === "ok" && payload ? (
         <AppDetailView
@@ -212,8 +234,8 @@ export function AppDetailPage({ boot, slug }: { boot: SpaBoot; slug: string }) {
  * The tabbed face — pure `t()` + data rendering, no window/router
  * access, so tests can static-render it (the AppInfoCard idiom). The
  * identity header (slug h1 + status + creator) belongs to the shell and
- * serves BOTH tabs; the settings tab body keeps its own wayfinding
- * (back link) and version footer.
+ * serves BOTH tabs; the settings tab body keeps only the version footer
+ * (page wayfinding — the back link — moved to the shell).
  */
 export function AppDetailView({
   locale,
