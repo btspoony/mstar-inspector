@@ -734,7 +734,7 @@ controls are installed (the Dockerfile carries the documentation block only).
   - `github.com` / `api.github.com` — git clone/fetch of the PR head (token
     via scoped extraheader exec env) and gh CLI.
   - Provider API hosts by active provider config — the 18 built-in provider
-    hosts resolve in omp's runtime registry (omp SDK 18.0.4, outside this
+    hosts resolve in omp's runtime registry (omp SDK 18.2.6, outside this
     repo — NOT the Worker-side `PROVIDERS` allowlist, which is a separate
     19-entry list, `ark` included); the ark capability host
     `ark.cn-beijing.volces.com` is declared in the omp registry entry
@@ -750,10 +750,10 @@ controls are installed (the Dockerfile carries the documentation block only).
 
 ## Image pins and digest record
 
-Five pins — mstar-harness bumped to **3.10.2** (2026-09-17, superseding
-the 3.9.2 pin); the `mstar` CLI (`@mstar-harness/cli`) preinstall
+Five pins — mstar-harness bumped to **3.11.2** (2026-09-20, superseding
+the 3.10.2 pin); the `mstar` CLI (`@mstar-harness/cli`) preinstall
 is the container-level mechanism, carried
-forward at the exact `@3.10.2` pin. The CLI
+forward at the exact `@3.11.2` pin. The CLI
 preinstall is container-level only (`sandbox exec` resolves the `mstar`
 shim): review sessions stay restricted to the read-only `read` / `grep` /
 `glob` whitelist (Runner tool whitelist above), so the review-session model
@@ -766,8 +766,8 @@ Bun / gh re-verified, no bump:
 | base image | `docker.io/cloudflare/sandbox:0.12.8` | `sandbox-image/omp/Dockerfile` FROM |
 | Bun | `1.4.0` | `sandbox-image/omp/Dockerfile` |
 | gh CLI | `2.98.0` | `sandbox-image/omp/Dockerfile` |
-| mstar-harness | `65399624b5951bcf6478cb4d71e0dbb84f24acec` (3.10.2) | `sandbox-image/omp/Dockerfile` |
-| mstar-harness CLI | `@mstar-harness/cli@3.10.2` | `sandbox-image/omp/Dockerfile` |
+| mstar-harness | `2cae49faaa9a7652479f8ad859999fe6da7dbc22` (3.11.2) | `sandbox-image/omp/Dockerfile` |
+| mstar-harness CLI | `@mstar-harness/cli@3.11.2` | `sandbox-image/omp/Dockerfile` |
 
 **In-image DEFAULT model selector: `ark-plan/deepseek-v4-flash`** (pins:
 `src/review/runtime-omp.ts` `DEFAULT_MODEL_PATTERN` + the omp registry entry's

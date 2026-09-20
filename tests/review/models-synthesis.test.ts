@@ -2,7 +2,7 @@
  * Per-review omp models.yml synthesis tests (AL-23-1;
  * capability-host base, always synthesize).
  *
- * The omp SDK (18.0.4) has NO include semantics: the ModelRegistry reads ONE
+ * The omp SDK (18.2.6) has NO include semantics: the ModelRegistry reads ONE
  * models.yml — `path.join(getAgentDir(), "models.yml")` (or the
  * createAgentSession `agentDir` override) — so a provider can only reach the
  * runtime through a COMPLETE synthesized file. The image ships no baked
