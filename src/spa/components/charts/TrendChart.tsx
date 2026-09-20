@@ -1,6 +1,10 @@
 /**
- * (AD-621): weekly trend chart on recharts — grouped
- * vertical bars (reviews + findings) per week_start bucket; recharts owns
+ * (AD-621): trend chart on recharts — grouped
+ * vertical bars (reviews + findings) per time bucket. The `week` field of
+ * TrendPoint carries the bucket start — a day or a Monday depending on the
+ * window's granularity (the name predates the per-window buckets and
+ * stays for prop stability; the consuming page derives the buckets via
+ * insightsTrendPoints). recharts owns
  * the band/grouped-offset/tick geometry that charts/layout.ts used to
  * hand-compute (that module retires with this migration, no compat shims).
  * The public API is unchanged: `{ points, seriesLabels, ariaLabel }`
@@ -16,11 +20,11 @@
  * swatch + weight-500 label); the swatches are HTML spans carrying the
  * charts.css background-color twins of the series fills.
  *
- * Axes (AC1): x = week_start categories formatted by the shared
- * formatDateLabel (dateLabel.ts) — the pinned numeric `M/D` form in every
- * locale (2026-09-16 user-feedback pin); more than 8 weeks thin
- * to every-other labels via the axis interval (even indices — the first
- * week always stays labeled). y = integer counts
+ * Axes (AC1): x = bucket-start categories (the `week` field) formatted by
+ * the shared formatDateLabel (dateLabel.ts) — the pinned numeric `M/D`
+ * form in every locale (2026-09-16 user-feedback pin); more than 8 buckets
+ * thin to every-other labels via the axis interval (even indices — the
+ * first bucket always stays labeled). y = integer counts
  * (allowDecimals={false}). Both axis lines ride the gray-alpha-400 token
  * through charts.css.
  *
@@ -32,16 +36,17 @@
  * fluid face of the old h-auto w-full svg. The block keeps the original
  * footprint: 24px legend row + 166px chart = 190px, plot height 142.
  *
- * Numeric coexistence (a11y floor): per-week counts are not
+ * Numeric coexistence (a11y floor): per-bucket counts are not
  * labeled on the bars — the window totals ride the consuming page's
- * summary line (derived from the same weekly buckets the API returns in
- * `weekly_trend`, see the per-App insights face in insights-ui.test.ts)
+ * summary line (derived from the same trend buckets the chart renders —
+ * `daily_trend` on day windows, `weekly_trend` zero-filled over the
+ * distribution grid on week windows; see insightsTrendPoints)
  * alongside the y ticks and date labels, so the chart is never the
  * numbers' only carrier (unchanged).
  *
  * Tooltip (AC1): recharts default content with token-styled styles
  * (contentStyle/labelStyle/itemStyle — itemStyle overrides the recharts
- * default black text, dark-theme readability); the week label rides
+ * default black text, dark-theme readability); the bucket label rides
  * labelFormatter → formatDateLabel, and the series names come from the
  * seriesLabels prop.
  *

@@ -77,6 +77,10 @@ describe("insights search wiring", () => {
       findings_by_category: [],
       verdict_distribution: [],
       weekly_trend: [],
+      // (window-bucketing contract 2026-09-20): the day-bucket trend grid
+      // is REQUIRED like the other aggregations — week-window payloads
+      // carry exactly [] (this fixture's shape, window 30 = day window).
+      daily_trend: [],
       // (AD-652): the distribution grid is REQUIRED like the other
       // aggregations — one realistic day bucket (the task-1 store shape:
       // fixed severity key set + window-union category keys + fallback).
@@ -129,6 +133,11 @@ describe("insights search wiring", () => {
         ],
       }),
     ).toBeNull();
+    // daily_trend is NOT opt-in either (same AD-652 precedent): a missing
+    // field (rolled-back Worker) or a drifted row takes the null fallback.
+    expect(parseInsights({ ...body, daily_trend: undefined })).toBeNull();
+    expect(parseInsights({ ...body, daily_trend: [{ day_start: 3, reviews: 0, findings: 0 }] })).toBeNull();
+    expect(parseInsights({ ...body, daily_trend: [{ day_start: "2026-08-17" }] })).toBeNull();
   });
 });
 
