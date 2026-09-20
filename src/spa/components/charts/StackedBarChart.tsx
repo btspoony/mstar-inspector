@@ -26,9 +26,8 @@
  * the measured container width client-side, the designed 560 default on
  * the static/SSR face (v0.3.4 round: true-size rendering, no viewBox
  * upscale on wide cards). Series colors ride charts.css `.chart-fill-*`
- * class
- * rules only — never presentation-attribute var(), never raw hex. Legend =
- * the HTML legend row (`.chart-legend` + `.chart-swatch-*`
+ * class rules only — never presentation-attribute var(), never raw hex.
+ * Legend = the HTML legend row (`.chart-legend` + `.chart-swatch-*`
  * background-color twins derived from the series fill classes), NOT
  * recharts `<Legend>` (architect ruling — same face as
  * TrendChart). The tooltip is the recharts default content token-styled
