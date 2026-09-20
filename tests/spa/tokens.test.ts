@@ -455,6 +455,19 @@ describe("DESIGN.md v0.3 bridge re-point + base-component restyle", () => {
     const skeleton = await Bun.file(join(UI_DIR, "skeleton.tsx")).text();
     expect(skeleton).toContain("motion-reduce:animate-none");
   });
+
+  test("further locally revised copy-ins carry the supersede marker (banned-free pin)", async () => {
+    // Coverage strengthening for the shadcn copy-in marker (QC S-2 follow-up,
+    // 2026-09-20): toggle/sheet were revised in the motion-token sweep,
+    // outside the v0.3 subset above, so their supersede markers were
+    // unpinned. The pin is banned-free by construction — it asserts the
+    // sanitized marker wording, never the process-id literal the deleted
+    // negative assertion carried.
+    for (const name of ["toggle", "sheet"] as const) {
+      const source = await Bun.file(join(UI_DIR, `${name}.tsx`)).text();
+      expect(source, name).toContain("Locally revised shadcn/ui copy-in (motion-token sweep");
+    }
+  });
 });
 
 describe("DESIGN.md self-hosted Geist Sans typeface (AD-572)", () => {
