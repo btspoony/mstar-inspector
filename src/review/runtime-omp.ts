@@ -55,8 +55,9 @@
  * Facts not matching these shapes pass through to the seat prompts verbatim.
  *
  * MCP note: `runStructuredSubagent` has no `enableMCP` field in 18.2.6 — MCP
- * is derived as `!restrictToolNames && …` (structured-subagent.ts:387), so the
- * restricted parent session structurally disables MCP for every seat.
+ * is derived as `!restrictToolNames && …` (tsc-verified against the published
+ * 18.2.6 type surface), so the restricted parent session structurally disables
+ * MCP for every seat.
  */
 import { existsSync } from "node:fs";
 import { mkdir, readFile, rm, rmdir, writeFile } from "node:fs/promises";
