@@ -2,7 +2,7 @@
  * Per-review omp models.yml synthesis (AL-23-1; the
  * capability-host base, always synthesize).
  *
- * omp 18.0.4 has NO include semantics: the SDK's ModelRegistry reads exactly
+ * omp 18.2.6 has NO include semantics: the SDK's ModelRegistry reads exactly
  * ONE models.yml — `path.join(getAgentDir(), "models.yml")` unless
  * `createAgentSession({ agentDir })` overrides the directory. Since the
  * baked in-image models.yml was removed, EVERY omp review synthesizes its own

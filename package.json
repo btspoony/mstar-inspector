@@ -17,11 +17,11 @@
   },
   "dependencies": {
     "@cloudflare/sandbox": "0.12.8",
-    "@mstar-harness/engine": "^3.10.2",
+    "@mstar-harness/engine": "^3.11.2",
     "@octokit/auth-app": "8.3.0",
     "@octokit/rest": "22.0.1",
     "@octokit/webhooks": "14.2.0",
-    "@oh-my-pi/pi-coding-agent": "18.0.4",
+    "@oh-my-pi/pi-coding-agent": "18.2.6",
     "hono": "4.13.4",
     "react": "19.2.7",
     "react-dom": "19.2.7",

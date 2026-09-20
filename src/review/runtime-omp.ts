@@ -54,7 +54,7 @@
  *   - git-numstat lines `"<add>\t<del>\t<path>"` → the seat-partition universe.
  * Facts not matching these shapes pass through to the seat prompts verbatim.
  *
- * MCP note: `runStructuredSubagent` has no `enableMCP` field in 18.0.4 — MCP
+ * MCP note: `runStructuredSubagent` has no `enableMCP` field in 18.2.6 — MCP
  * is derived as `!restrictToolNames && …` (structured-subagent.ts:387), so the
  * restricted parent session structurally disables MCP for every seat.
  */
@@ -222,7 +222,7 @@ export function buildSessionOptions(opts: {
 
 /**
  * The parent AgentSession is not a ToolSession (missing cwd / hasUI /
- * getSessionFile / getSessionSpawns — tsc-verified against 18.0.4). Shim the
+ * getSessionFile / getSessionSpawns — tsc-verified against 18.2.6). Shim the
  * four members over a Proxy and delegate everything else, bound to the real
  * session so private internal state keeps working:
  *   - cwd = the PR clone (input.worktreePath) — drives .omp/agents
