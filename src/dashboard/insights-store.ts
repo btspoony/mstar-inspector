@@ -44,6 +44,16 @@
  *   categories plus the single "uncategorized" fallback for NULL categories
  *   — series keys are stable across buckets, so the SPA never re-unions.
  *
+ * Daily trend (`daily_trend` — additive, window-bucketing contract
+ *   2026-09-20): the weekly_trend query mirrored at day granularity —
+ *   `COUNT(DISTINCT r.id)` reviews + LEFT JOIN `COUNT(f.id)` findings, over
+ *   the SAME day expression the distribution uses (`date(r.reviewed_at)`,
+ *   never a second day definition). It runs ONLY for day windows (clamped
+ *   <= 30); week windows return [] and prepare no extra query — the 90d
+ *   trend stays on the frozen weekly_trend key. Assembly reuses the
+ *   distribution grid idiom: dayGrid ∪ observed day starts, zero-filled,
+ *   grid-ordered.
+ *
  * Bounded top (QC W-E): the insights face adds `LIMIT 10` — "top" is a
  * bounded list by product definition, and the bound caps the JSON payload
  * and the panel's rendered rows. `recurrenceByFingerprint` stays unbounded
@@ -60,8 +70,9 @@
  * Determinism: every aggregation orders by count DESC then key ASC (NULL
  * keys sort first in SQLite ASC — findingsByCategory surfaces NULL
  * categories as `category: null`), weeklyTrend by week_start ASC,
- * recurringTop by count DESC then fingerprint ASC. The distribution
- * buckets ascend by bucket_start (the JS-generated grid defines the order).
+ * recurringTop by count DESC then fingerprint ASC. The distribution and
+ * dailyTrend buckets ascend by bucket/day start (the JS-generated grid
+ * defines the order).
  *
  * The bucket-grid generators (dayGrid / weekGrid) come from
  * src/dashboard/insights-dates.ts — the single copy of the bucket-boundary
@@ -100,6 +111,12 @@ export type VerdictCount = { verdict: string; count: number };
 /** One Monday-anchored UTC week bucket of weeklyTrend. */
 export type WeekBucket = { week_start: string; reviews: number; findings: number };
 /**
+ * One UTC day bucket of dailyTrend (additive `daily_trend`, window-bucketing
+ * contract 2026-09-20) — the day-granularity mirror of WeekBucket: the same
+ * count semantics, bucketed by day.
+ */
+export type DayBucket = { day_start: string; reviews: number; findings: number };
+/**
  * One per-bucket distribution row of findingsDistribution (AD-652).
  * Wire shape is snake_case and passes through the route untouched, mirroring
  * the other store types.
@@ -136,6 +153,14 @@ export type Insights = {
   findingsByCategory: CategoryCount[];
   verdictDistribution: VerdictCount[];
   weeklyTrend: WeekBucket[];
+  /**
+   * Day-bucketed trend (additive `daily_trend`, window-bucketing contract
+   * 2026-09-20): weeklyTrend's count semantics at day granularity,
+   * zero-filled over the day grid (day_start ASC). Produced ONLY for day
+   * windows (clamped <= 30); week windows return [] — the 90d trend card
+   * reads the frozen weeklyTrend key instead.
+   */
+  dailyTrend: DayBucket[];
   recurringTop: RecurringGroup[];
   /**
    * Window-scoped distinct `owner/repo` values with at least one v1 review
@@ -257,7 +282,34 @@ export async function createInsightsStore(db: InsightsD1, opts: InsightsWindow =
         .all<{ repo: string }>()
     : Promise.resolve({ results: [] as { repo: string }[] });
 
-  const [total, severities, categories, verdicts, trend, recurring, distributionSeverities, distributionCategories, repoRows] =
+  // (additive `daily_trend`, window-bucketing contract 2026-09-20): the
+  // day-bucketed trend query runs ONLY for day windows — week windows
+  // resolve to [] and prepare no extra query (the 90d trend card reads the
+  // frozen weekly_trend key instead). The SQL mirrors the weekly_trend
+  // query (COUNT(DISTINCT r.id) reviews + LEFT JOIN COUNT(f.id) findings);
+  // the bucket expression is bucketSql — the same `date(r.reviewed_at)`
+  // day definition the distribution uses, never a second one. No ORDER BY:
+  // the JS grid assembles and orders the buckets below (distribution
+  // idiom).
+  type DayTrendRow = { day_start: string; reviews: number; findings: number };
+  const dailyTrendQuery =
+    granularity === "day"
+      ? db
+          .prepare(
+            `SELECT
+               ${bucketSql} AS day_start,
+               COUNT(DISTINCT r.id) AS reviews,
+               COUNT(f.id) AS findings
+             FROM reviews r
+             LEFT JOIN findings f ON f.review_id = r.id
+             WHERE ${whereSql}
+             GROUP BY day_start`,
+          )
+          .bind(...binds)
+          .all<DayTrendRow>()
+      : Promise.resolve({ results: [] as DayTrendRow[] });
+
+  const [total, severities, categories, verdicts, trend, recurring, distributionSeverities, distributionCategories, repoRows, dailyTrendRows] =
     await Promise.all([
     db
       .prepare(`SELECT COUNT(*) AS total FROM reviews r WHERE ${whereSql}`)
@@ -352,6 +404,7 @@ export async function createInsightsStore(db: InsightsD1, opts: InsightsWindow =
       .bind(...binds)
       .all<{ bucket_start: string; category: string | null; count: number }>(),
     repoQuery,
+    dailyTrendQuery,
   ]);
 
   // (AD-652): assemble the zero-filled distribution grid. The grid
@@ -406,12 +459,33 @@ export async function createInsightsStore(db: InsightsD1, opts: InsightsWindow =
     bucket.by_category[key] = (bucket.by_category[key] ?? 0) + row.count;
   }
 
+  // (additive `daily_trend`): assemble the zero-filled day grid — the same
+  // distribution idiom (dayGrid ∪ observed day starts, honest zero buckets,
+  // grid-defined order; the `get()!` below is safe because of the union).
+  // Week windows skip both the query and the grid: dailyTrend is exactly [].
+  let dailyTrend: DayBucket[] = [];
+  if (granularity === "day") {
+    const dayStarts = [
+      ...new Set([...dayGrid(windowDays), ...dailyTrendRows.results.map((row) => row.day_start)]),
+    ].sort();
+    const dailyBuckets = new Map(
+      dayStarts.map((day_start) => [day_start, { day_start, reviews: 0, findings: 0 }]),
+    );
+    for (const row of dailyTrendRows.results) {
+      const bucket = dailyBuckets.get(row.day_start)!;
+      bucket.reviews = row.reviews;
+      bucket.findings = row.findings;
+    }
+    dailyTrend = dayStarts.map((day_start) => dailyBuckets.get(day_start)!);
+  }
+
   return {
     reviewsTotal: total?.total ?? 0,
     findingsBySeverity: severities.results,
     findingsByCategory: categories.results,
     verdictDistribution: verdicts.results,
     weeklyTrend: trend.results,
+    dailyTrend,
     recurringTop: recurring.results.map((row) => ({
       fingerprint: row.fingerprint,
       title_sample: row.title_sample,

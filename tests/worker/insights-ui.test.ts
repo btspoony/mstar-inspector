@@ -91,7 +91,13 @@ const API_TEST_KEY = Buffer.alloc(32, 7).toString("base64");
  * 10d approve in the app's second repo acme/portal), one attributed to a
  * DIFFERENT app (5d ago) that must never leak into widgets-app's numbers.
  */
-async function insightsWorld(): Promise<{ db: TestD1; env: Env; appId: string }> {
+async function insightsWorld(): Promise<{
+  db: TestD1;
+  env: Env;
+  appId: string;
+  /** Same seed-time helper used for the fixture's reviewed_at values. */
+  daysAgo: (n: number) => string;
+}> {
   const db = createMigratedTestD1();
   await createUser(db, { login: "octocat", role: "admin" });
   await createUser(db, { login: "mallory", role: "member" });
@@ -147,7 +153,7 @@ async function insightsWorld(): Promise<{ db: TestD1; env: Env; appId: string }>
     DASHBOARD_SESSION_SECRET: SESSION_SECRET_API,
     DB: db,
   } as unknown as Env;
-  return { db, env, appId };
+  return { db, env, appId, daysAgo };
 }
 
 function apiCookie(sessionSecret: string, login: string): Promise<string> {
@@ -165,7 +171,7 @@ function appsInsightsGet(env: Env, slug: string, cookie: string, query = "") {
 
 describe("GET /dashboard/api/apps/:slug/insights/summary", () => {
   test("manager sees the app-scoped summary: full JSON shape, own-App reviews only", async () => {
-    const { env } = await insightsWorld();
+    const { env, daysAgo } = await insightsWorld();
     const res = await appsInsightsGet(env, "widgets-app", await apiCookie(SESSION_SECRET_API, "mallory"));
     expect(res.status).toBe(200);
     const body = (await res.json()) as {
@@ -175,6 +181,7 @@ describe("GET /dashboard/api/apps/:slug/insights/summary", () => {
       findings_by_category: Array<{ category: string | null; count: number }>;
       verdict_distribution: Array<{ verdict: string; count: number }>;
       weekly_trend: unknown[];
+      daily_trend: Array<{ day_start: string; reviews: number; findings: number }>;
       findings_distribution: unknown[];
       recurring_top: Array<{ fingerprint: string; title_sample: string; count: number; repos: string[] }>;
       repos: string[];
@@ -188,6 +195,7 @@ describe("GET /dashboard/api/apps/:slug/insights/summary", () => {
         "findings_by_category",
         "verdict_distribution",
         "weekly_trend",
+        "daily_trend",
         "findings_distribution",
         "recurring_top",
         "repos",
@@ -214,6 +222,16 @@ describe("GET /dashboard/api/apps/:slug/insights/summary", () => {
     ]);
     // repos is opt-in: without include=repos the field is empty.
     expect(body.repos).toEqual([]);
+    // daily_trend (additive): a zero-filled day grid on the default 30-day
+    // window — 31 day rows (today-30 .. today) shaped {day_start, reviews,
+    // findings}. The app's three in-window reviews distribute onto their own
+    // days; r-d is the zero-findings approve (LEFT JOIN counts the review).
+    expect(body.daily_trend).toHaveLength(31);
+    expect(body.daily_trend.reduce((acc, row) => acc + row.reviews, 0)).toBe(3);
+    expect(body.daily_trend.reduce((acc, row) => acc + row.findings, 0)).toBe(3);
+    const dayAt = (days: number) => body.daily_trend.find((row) => row.day_start === daysAgo(days).slice(0, 10))!;
+    expect(dayAt(10)).toEqual({ day_start: daysAgo(10).slice(0, 10), reviews: 1, findings: 0 });
+    expect(dayAt(25)).toEqual({ day_start: daysAgo(25).slice(0, 10), reviews: 1, findings: 2 });
   });
 
   test("include=repos is app-scoped: another App's repo never appears", async () => {
@@ -293,6 +311,22 @@ describe("GET /dashboard/api/apps/:slug/insights/summary", () => {
     const clamped = await appsInsightsGet(env, "widgets-app", cookie, "window=400");
     expect(clamped.status).toBe(200);
     expect(((await clamped.json()) as { window_days: number }).window_days).toBe(90);
+  });
+
+  test("daily_trend is [] on a week window while weekly_trend keeps its raw buckets", async () => {
+    const { env } = await insightsWorld();
+    const res = await appsInsightsGet(env, "widgets-app", await apiCookie(SESSION_SECRET_API, "mallory"), "window=90");
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      window_days: number;
+      daily_trend: unknown[];
+      weekly_trend: Array<{ week_start: string; reviews: number; findings: number }>;
+    };
+    expect(body.window_days).toBe(90);
+    // The additive key returns exactly [] on week windows (no query, no
+    // buckets) — the 90d trend card reads the frozen weekly_trend key.
+    expect(body.daily_trend).toEqual([]);
+    expect(body.weekly_trend.length).toBeGreaterThan(0);
   });
 
   test("the cross-App global endpoint is removed: member GET → 404, never a summary", async () => {

@@ -2421,6 +2421,9 @@ dashboardApp.get("/api/apps/:slug/insights/summary", async (c) => {
     findings_by_category: insights.findingsByCategory,
     verdict_distribution: insights.verdictDistribution,
     weekly_trend: insights.weeklyTrend,
+    // Additive day-bucketed trend (window-bucketing contract, 2026-09-20):
+    // [] on week windows — the frozen weekly_trend key above is untouched.
+    daily_trend: insights.dailyTrend,
     // (AD-652): additive per-bucket findings distribution for the
     // stacked charts. Existing fields are untouched — the only change on
     // this face is the new key.
