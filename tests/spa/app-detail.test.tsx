@@ -323,6 +323,9 @@ describe("insights tab face (static SSR over the kept charts)", () => {
     findings_by_category: [{ category: "DEBT", count: 2 }],
     verdict_distribution: [{ verdict: "approve", count: 3 }],
     weekly_trend: [{ week_start: "2026-09-07", reviews: 3, findings: 2 }],
+    // (window-bucketing contract 2026-09-20): the 7-day window's trend
+    // card reads the zero-filled day grid, not weekly_trend.
+    daily_trend: [{ day_start: "2026-09-10", reviews: 3, findings: 2 }],
     findings_distribution: [
       {
         bucket_start: "2026-09-10",
@@ -339,7 +342,9 @@ describe("insights tab face (static SSR over the kept charts)", () => {
     const html = renderToStaticMarkup(createElement(InsightsRecordsView, { locale: "en", data }));
     expect(html).toContain("Review health");
     expect(html).toContain("Findings by severity");
-    expect(html).toContain("Weekly trend");
+    // Window-neutral trend card title (window-bucketing contract
+    // 2026-09-20) — day windows no longer claim "Weekly".
+    expect(html).toContain("Trend");
     expect(html).toContain("Recurring findings");
     expect(html).toContain("recharts-surface");
   });

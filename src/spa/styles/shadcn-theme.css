@@ -97,10 +97,14 @@
   --font-mono: var(--font-mono);
 }
 
-/* Body canvas (v0.3.4): the SPA paints the page canvas itself, mirroring
-   the views.ts SSR body idiom — the browser-default canvas (white, or dark
-   under color-scheme) can otherwise bleed through pre-paint / overscroll /
-   uncovered regions and diverge per browser. */
+/* Body canvas (v0.3.4): the SPA paints the page canvas itself. Deliberate
+   divergence from the views.ts SSR body idiom, not a mirror: the SPA canvas
+   uses min-height: 100svh — the small-viewport unit stays stable under
+   mobile dynamic browser chrome — while the SSR body keeps 100vh. The two
+   faces render different document trees (SPA shell vs SSR chrome page), so
+   the value split has no rendering consequence. The browser-default canvas
+   (white, or dark under color-scheme) can otherwise bleed through
+   pre-paint / overscroll / uncovered regions and diverge per browser. */
 body {
   margin: 0;
   min-height: 100svh;

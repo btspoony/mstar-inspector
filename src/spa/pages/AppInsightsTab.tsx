@@ -15,6 +15,7 @@ import {
   insightsRepoFromSelect,
   insightsRepoOptions,
   insightsRepoSelectValue,
+  insightsTrendPoints,
   parseInsights,
   verdictLine,
   type AppDetailSearch,
@@ -42,11 +43,14 @@ import { TrendChart } from "@/components/charts/TrendChart";
  * this App's repos.
  * Toolbar first, then the four stat sections: severity / category as
  * stacked bar time series from `findings_distribution` (AD-652/653 faces
- * carried over verbatim), weekly trend as the grouped week-bucket chart,
- * recurring findings as a list. QC fix-1 legend filter and the QC F-004
- * ""→uncategorized merge are unchanged. No h1: the tab rides the shell's
- * identity header (the shell mounts this only for managers — 403s cannot
- * occur for an authorized viewer).
+ * carried over verbatim), the trend card as the grouped bucket chart at
+ * the window's granularity (window-bucketing contract 2026-09-20 —
+ * `insightsTrendPoints`: day buckets via `daily_trend` on 7/30-day
+ * windows, week buckets via `weekly_trend` zero-filled over the
+ * distribution grid on 90 days), recurring findings as a list. QC fix-1
+ * legend filter and the QC F-004 ""→uncategorized merge are unchanged. No
+ * h1: the tab rides the shell's identity header (the shell mounts this
+ * only for managers — 403s cannot occur for an authorized viewer).
  */
 export function AppInsightsTab({
   locale,
@@ -299,9 +303,13 @@ export function InsightsRecordsView({ locale, data }: { locale: SpaBoot["locale"
   });
   const repoLabel = data.repo ? ` · ${t(locale, "insights.repo", { repo: data.repo })}` : "";
   const empty = data.reviews_total === 0;
-  // Window totals recomputed from the weekly buckets (the summary
-  // line — text counts coexisting with the trend chart).
-  const trendTotals = data.weekly_trend.reduce(
+  // Trend buckets at the window's granularity (day windows: `daily_trend`;
+  // week windows: `weekly_trend` zero-filled over the distribution grid) —
+  // the summary line, the empty-state check and the chart all evaluate the
+  // SAME derivation, so the text counts always coexist with the rendered
+  // bars (window-bucketing contract 2026-09-20).
+  const trendPoints = insightsTrendPoints(data);
+  const trendTotals = trendPoints.reduce(
     (totals, row) => ({ reviews: totals.reviews + row.reviews, findings: totals.findings + row.findings }),
     { reviews: 0, findings: 0 },
   );
@@ -377,22 +385,25 @@ export function InsightsRecordsView({ locale, data }: { locale: SpaBoot["locale"
             </SectionCard>
             <SectionCard tier="secondary">
               <CardHeader>
-                <SectionCardTitle>{t(locale, "insights.weeklyTrend")}</SectionCardTitle>
+                <SectionCardTitle>{t(locale, "insights.trend")}</SectionCardTitle>
               </CardHeader>
               <CardContent>
-                {data.weekly_trend.length === 0 ? (
+                {/* Defensive: reviews_total > 0 implies a non-empty grid on
+                    both windows (zero-filled), so this face is reachable
+                    only on a drifted payload — the readable empty state stays. */}
+                {trendPoints.length === 0 ? (
                   <p className="text-sm text-muted-foreground">{t(locale, "insights.noReviews")}</p>
                 ) : (
                   <div className="flex flex-col gap-3">
                     <p className="text-sm text-muted-foreground">{trendSummary}</p>
                     <TrendChart
-                      ariaLabel={t(locale, "insights.weeklyTrend")}
+                      ariaLabel={t(locale, "insights.trend")}
                       seriesLabels={{
                         reviews: t(locale, "insights.seriesReviews"),
                         findings: t(locale, "insights.seriesFindings"),
                       }}
-                      points={data.weekly_trend.map((row) => ({
-                        week: row.week_start,
+                      points={trendPoints.map((row) => ({
+                        week: row.bucket_start,
                         reviews: row.reviews,
                         findings: row.findings,
                       }))}
