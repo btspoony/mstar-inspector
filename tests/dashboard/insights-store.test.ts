@@ -5,7 +5,8 @@
  * Locked surface (AL-22-1):
  *   - createInsightsStore(db, { windowDays, repo? }) resolves to
  *     { reviewsTotal, findingsBySeverity, findingsByCategory,
- *       verdictDistribution, weeklyTrend, recurringTop, findingsDistribution }.
+ *       verdictDistribution, weeklyTrend, dailyTrend, recurringTop,
+ *       findingsDistribution }.
  *   - windowDays: integer days, default 30; >90 is CLAMPED to 90 at the
  *     store entry (the single clamp point); non-integer/negative values are
  *     the ROUTE's 400 (T2) — the store never sees them in production.
@@ -15,6 +16,10 @@
  * - findingsDistribution (AD-652 — additive): zero-filled
  *     day/week grid derived ONLY from the clamped window (<= 30 → day,
  *     else week); week buckets reuse the weeklyTrend week definition.
+ * - dailyTrend (additive `daily_trend`, window-bucketing contract
+ *     2026-09-20): weeklyTrend's count semantics at day granularity,
+ *     zero-filled over dayGrid — only for day windows (clamped <= 30);
+ *     week windows return [] and prepare no extra query.
  * - recurringTop inlines the recurrence semantics (count >= 2
  *     distinct reviews, NULL fingerprints excluded) — parity-locked against
  *     store.recurrenceByFingerprint below (bidirectional anchor with
@@ -337,6 +342,9 @@ describe("createInsightsStore", () => {
       findingsByCategory: [],
       verdictDistribution: [],
       weeklyTrend: [],
+      // the daily trend (additive `daily_trend`) is the same zero-filled
+      // day grid on the empty day window.
+      dailyTrend: dayGrid(30).map((day_start) => ({ day_start, reviews: 0, findings: 0 })),
       recurringTop: [],
       repos: [],
       // the distribution grid is zero-count-honest, not empty —
@@ -483,6 +491,114 @@ describe("createInsightsStore", () => {
       { week_start: "2026-08-31", reviews: 1, findings: 1 },
       { week_start: "2026-09-07", reviews: 1, findings: 1 },
     ]);
+  });
+
+  test("dailyTrend day boundary pinned to concrete UTC dates (S-1 extension)", async () => {
+    const db = createMigratedTestD1();
+    // The same concrete boundary timestamps as the weekly S-1 pin: the day
+    // bucket is the plain UTC date (`date(r.reviewed_at)` — the distribution
+    // day expression, never a second one), so the last second of Sunday
+    // 2026-09-06 lands on 2026-09-06 and the first second of Monday
+    // 2026-09-07 on 2026-09-07. A shared day-expression mistake would pass a
+    // mirror-only test, exactly like the weekly pin above.
+    insertReview(db, {
+      id: "r-dsun",
+      owner: "acme",
+      repo: "widgets",
+      pr_number: 1,
+      reviewedAt: "2026-09-06 23:59:59",
+      verdict: "needs fixes",
+      findings: [{ id: "f-dsun", severity: "must-fix", category: "logic", title: "Null deref risk", fingerprint: FP_X }],
+    });
+    insertReview(db, {
+      id: "r-dmon",
+      owner: "acme",
+      repo: "widgets",
+      pr_number: 2,
+      reviewedAt: "2026-09-07 00:00:00",
+      verdict: "needs fixes",
+      findings: [{ id: "f-dmon", severity: "must-fix", category: "logic", title: "Null deref risk", fingerprint: FP_X }],
+    });
+
+    const insights = await createInsightsStore(db);
+    expect(insights.dailyTrend.find((b) => b.day_start === "2026-09-06")).toEqual({
+      day_start: "2026-09-06",
+      reviews: 1,
+      findings: 1,
+    });
+    expect(insights.dailyTrend.find((b) => b.day_start === "2026-09-07")).toEqual({
+      day_start: "2026-09-07",
+      reviews: 1,
+      findings: 1,
+    });
+  });
+
+  // --- (additive `daily_trend`) ---------------------------------------
+
+  test("dailyTrend: zero-filled day grid on a day window, ascending, page-total parity", async () => {
+    const db = createMigratedTestD1();
+    seedFixture(db);
+
+    const insights = await createInsightsStore(db, { windowDays: 7 });
+
+    // Day window → the full N+1 grid (today-7 .. today, both ends inclusive),
+    // ascending — every day the window predicate can return, zero-filled.
+    expect(insights.dailyTrend.map((b) => b.day_start)).toEqual(dayGrid(7));
+    // Only r-a (1d ago) is in-window: its day carries reviews 1 / findings 2
+    // (era-gated r-m1 shares the timestamp and adds nothing); every other day
+    // is honestly zero. r-b (8d) and r-c (15d) sit outside the 7-day window.
+    const at = (daysAgo: number) =>
+      insights.dailyTrend.find((b) => b.day_start === reviewedAt(daysAgo).slice(0, 10))!;
+    expect(at(1)).toEqual({ day_start: reviewedAt(1).slice(0, 10), reviews: 1, findings: 2 });
+    expect(at(0)).toEqual({ day_start: reviewedAt(0).slice(0, 10), reviews: 0, findings: 0 });
+    expect(at(7)).toEqual({ day_start: reviewedAt(7).slice(0, 10), reviews: 0, findings: 0 });
+    // Zero-loss invariant: grid totals == page totals.
+    expect(insights.reviewsTotal).toBe(1);
+    expect(insights.dailyTrend.reduce((acc, b) => acc + b.reviews, 0)).toBe(insights.reviewsTotal);
+    expect(insights.dailyTrend.reduce((acc, b) => acc + b.findings, 0)).toBe(2);
+  });
+
+  test("dailyTrend: week window returns [] with no day-bucket query; weekly_trend pin unchanged", async () => {
+    const db = createMigratedTestD1();
+    seedFixture(db);
+
+    // Counting wrappers around the same D1 double — one run per window.
+    const dayQueries: string[] = [];
+    const dayInsights = await createInsightsStore(
+      {
+        prepare: (query: string) => {
+          dayQueries.push(query);
+          return db.prepare(query);
+        },
+      },
+      { windowDays: 30 },
+    );
+    const weekQueries: string[] = [];
+    const weekInsights = await createInsightsStore(
+      {
+        prepare: (query: string) => {
+          weekQueries.push(query);
+          return db.prepare(query);
+        },
+      },
+      { windowDays: 90 },
+    );
+
+    // Week windows produce exactly [] — the 90d trend card reads the frozen
+    // weekly_trend key instead.
+    expect(weekInsights.dailyTrend).toEqual([]);
+    // weekly_trend output is byte-identical to its long-standing pin on the
+    // same window: the frozen key is untouched by the new face.
+    expect(weekInsights.weeklyTrend).toEqual([
+      { week_start: mondayOf(reviewedAt(15)), reviews: 1, findings: 1 },
+      { week_start: mondayOf(reviewedAt(8)), reviews: 1, findings: 2 },
+      { week_start: mondayOf(reviewedAt(1)), reviews: 1, findings: 2 },
+    ]);
+    // Zero added query cost: the week run prepares exactly the day run's
+    // statements MINUS the one additive day-bucket query.
+    expect(dayQueries.some((query) => query.includes("AS day_start"))).toBe(true);
+    expect(weekQueries.every((query) => !query.includes("AS day_start"))).toBe(true);
+    expect(weekQueries.length).toBe(dayQueries.length - 1);
   });
 
   test("repos aggregation is opt-in: skipped ([]) without includeRepos, populated with it (QC F-001)", async () => {

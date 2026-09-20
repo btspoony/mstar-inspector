@@ -113,7 +113,7 @@ export const en = {
     noReviews: "No reviews in this window.",
     findingsBySeverity: "Findings by severity",
     findingsByCategory: "Findings by category",
-    weeklyTrend: "Weekly trend",
+    trend: "Trend",
     recurringFindings: "Recurring findings",
     noFindings: "No findings in this window.",
     noRecurring: "No recurring findings in this window.",

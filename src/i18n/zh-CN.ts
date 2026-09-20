@@ -97,7 +97,7 @@ export const zhCN: Dictionary = {
     noReviews: "此窗口内没有审查。",
     findingsBySeverity: "按严重程度统计的发现",
     findingsByCategory: "按类别统计的发现",
-    weeklyTrend: "每周趋势",
+    trend: "趋势",
     recurringFindings: "重复出现的发现",
     noFindings: "此窗口内没有发现。",
     noRecurring: "此窗口内没有重复出现的发现。",

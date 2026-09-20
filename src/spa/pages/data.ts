@@ -34,6 +34,16 @@ export type InsightsSummary = {
   verdict_distribution: Array<{ verdict: string; count: number }>;
   weekly_trend: Array<{ week_start: string; reviews: number; findings: number }>;
   /**
+   * Day-bucketed trend (additive `daily_trend`, window-bucketing contract
+   * 2026-09-20): `weekly_trend`'s count semantics at day granularity,
+   * zero-filled over the day grid. Produced only for day windows (clamped
+   * `window_days <= 30`); week windows carry exactly [] — the week-window
+   * trend card falls back to `weekly_trend` zero-filled over the
+   * `findings_distribution` grid ({@link insightsTrendPoints}). REQUIRED
+   * like the other aggregations (AD-652 precedent).
+   */
+  daily_trend: Array<{ day_start: string; reviews: number; findings: number }>;
+  /**
    * Per-bucket findings distribution (AD-652 — additive): the
    * severity/category cards' stacked time-series grid. REQUIRED like the
    * other aggregations — a payload missing it (or carrying malformed rows)
@@ -385,6 +395,28 @@ function isDistributionList(value: unknown): value is FindingsDistributionBucket
   );
 }
 
+/**
+ * Row-level guard for the daily trend grid (mirror of
+ * {@link isDistributionList}): every row must carry the day start and
+ * both counts — the trend chart reads these shapes directly, so a drifted
+ * row fails the parse into the page's error face instead of rendering
+ * NaN/undefined bars.
+ */
+function isDailyTrendList(
+  value: unknown,
+): value is Array<{ day_start: string; reviews: number; findings: number }> {
+  return (
+    Array.isArray(value) &&
+    value.every(
+      (row) =>
+        isRecord(row) &&
+        typeof row.day_start === "string" &&
+        typeof row.reviews === "number" &&
+        typeof row.findings === "number",
+    )
+  );
+}
+
 export function parseInsights(data: unknown): InsightsSummary | null {
   if (!isRecord(data) || typeof data.window_days !== "number" || typeof data.reviews_total !== "number") return null;
   if (!Array.isArray(data.findings_by_severity) || !Array.isArray(data.findings_by_category)) return null;
@@ -395,6 +427,10 @@ export function parseInsights(data: unknown): InsightsSummary | null {
   // or any drifted row takes the same null fallback as the fields above.
   // Not tolerate-absent: that face is the opt-in `repos` field only.
   if (!isDistributionList(data.findings_distribution)) return null;
+  // (window-bucketing contract 2026-09-20): required along the same
+  // AD-652 precedent — a rolled-back Worker's payload (no field) or any
+  // drifted row takes the same null fallback; never tolerate-absent.
+  if (!isDailyTrendList(data.daily_trend)) return null;
   // `repos` is opt-in (QC F-001): absent on payloads that did not
   // request include=repos (and on rolled-back Workers) — tolerate missing,
   // reject malformed.
@@ -446,6 +482,38 @@ export function normalizeWindowSearch(search: string): string {
 /** One-line verdict distribution for the summary card. */
 export function verdictLine(data: InsightsSummary): string {
   return data.verdict_distribution.map((row) => `${row.verdict} ${row.count}`).join(" · ");
+}
+
+/** One trend-bucket row the trend card renders — a day (day windows) or a Monday (week windows). */
+export type InsightsTrendPoint = { bucket_start: string; reviews: number; findings: number };
+
+/**
+ * The trend card's buckets for the payload's window (window-bucketing
+ * contract 2026-09-20): day windows (clamped `window_days <= 30`) map
+ * `daily_trend` directly; week windows read the frozen `weekly_trend`
+ * zero-filled over the `findings_distribution` bucket grid (the store's
+ * weekGrid — every `weekly_trend` bucket start is on it by construction),
+ * so each window carries exactly as many buckets as the stacked charts.
+ * The `> 30` predicate deliberately mirrors the store's granularity
+ * derivation (insights-store.ts, clamped window): the wire echoes the
+ * clamped window and the SPA re-derives from it by contract, not by
+ * import — the dashboard leaf exports no types.
+ */
+export function insightsTrendPoints(data: InsightsSummary): InsightsTrendPoint[] {
+  if (data.window_days <= 30) {
+    return data.daily_trend.map((row) => ({
+      bucket_start: row.day_start,
+      reviews: row.reviews,
+      findings: row.findings,
+    }));
+  }
+  const countsByWeekStart = new Map<string, { reviews: number; findings: number }>(
+    data.weekly_trend.map((row) => [row.week_start, { reviews: row.reviews, findings: row.findings }]),
+  );
+  return data.findings_distribution.map((bucket) => {
+    const row = countsByWeekStart.get(bucket.bucket_start);
+    return { bucket_start: bucket.bucket_start, reviews: row?.reviews ?? 0, findings: row?.findings ?? 0 };
+  });
 }
 
 /**
