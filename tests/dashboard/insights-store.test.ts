@@ -460,19 +460,61 @@ describe("createInsightsStore", () => {
     });
   });
 
-  test("weeklyTrend Monday anchor pinned to concrete UTC dates (S-1)", async () => {
+  /**
+   * Relative week-boundary anchor (S-1 residual remedy): the most recent
+   * Sunday strictly before today, in UTC. Independent calendar arithmetic on
+   * the real clock — platform `getUTCDay()` (0 = Sunday) plus epoch-day math;
+   * it neither calls the store's `mondayOf` mirror nor replicates the SQL
+   * `strftime('%w')` expression, so a shared off-by-one cannot hide in the
+   * helper either. The pair is exact to the second: `sundayLast` is the final
+   * second of that Sunday, `mondayFirst` the first second of the following
+   * Monday — always 1..7 days in the past, so the pair stays inside the
+   * default 30-day window for every "today" (today-is-Sunday and
+   * today-is-Monday included).
+   */
+  function weekBoundaryAnchor(): {
+    sundayLast: string;
+    mondayFirst: string;
+    prevWeekStart: string;
+    nextWeekStart: string;
+    prevDayStart: string;
+    nextDayStart: string;
+  } {
+    const DAY_MS = 86_400_000;
+    const now = new Date();
+    const utcMidnight = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate());
+    // 1..7 days back to the most recent Sunday (7 when today IS Sunday, so
+    // the anchor is never "today" and both timestamps are strictly past).
+    const sundayDaysAgo = ((now.getUTCDay() + 6) % 7) + 1;
+    const sunday = utcMidnight - sundayDaysAgo * DAY_MS;
+    const isoDate = (ms: number): string => new Date(ms).toISOString().slice(0, 10);
+    const isoStamp = (ms: number): string => new Date(ms).toISOString().slice(0, 19).replace("T", " ");
+    return {
+      sundayLast: isoStamp(sunday + DAY_MS - 1000), // 23:59:59 that Sunday
+      mondayFirst: isoStamp(sunday + DAY_MS), // 00:00:00 the following Monday
+      prevWeekStart: isoDate(sunday - 6 * DAY_MS), // Monday opening that Sunday's week
+      nextWeekStart: isoDate(sunday + DAY_MS), // the boundary Monday itself
+      prevDayStart: isoDate(sunday),
+      nextDayStart: isoDate(sunday + DAY_MS),
+    };
+  }
+
+  test("weeklyTrend Monday anchor at the live week boundary (S-1)", async () => {
     const db = createMigratedTestD1();
-    // Hard-coded boundary pin (no JS mirror involved): the last second of
-    // Sunday 2026-09-06 23:59:59 UTC lands in the week starting Monday
-    // 2026-08-31, and the first second of Monday 2026-09-07 00:00:00 UTC
-    // starts the NEXT week (2026-09-07) — a shared off-by-one in the SQL
-    // expression AND its JS mirror would both pass a mirror-only test.
+    // Relative boundary anchor (the old hard-coded 2026-09-06/07 pair slides
+    // out of the 30d window every ~30 days): the pair is the most recent past
+    // Sunday's LAST second and the following Monday's FIRST second. The last
+    // second of Sunday belongs to the week starting the previous Monday; the
+    // first second of Monday starts the NEXT week — two ADJACENT weeks — so
+    // an off-by-one in the SQL weekday expression still fails this exact
+    // two-row key match, and so does the same mistake mirrored into JS.
+    const a = weekBoundaryAnchor();
     insertReview(db, {
       id: "r-sun",
       owner: "acme",
       repo: "widgets",
       pr_number: 1,
-      reviewedAt: "2026-09-06 23:59:59",
+      reviewedAt: a.sundayLast,
       verdict: "needs fixes",
       findings: [{ id: "f-sun", severity: "must-fix", category: "logic", title: "Null deref risk", fingerprint: FP_X }],
     });
@@ -481,32 +523,33 @@ describe("createInsightsStore", () => {
       owner: "acme",
       repo: "widgets",
       pr_number: 2,
-      reviewedAt: "2026-09-07 00:00:00",
+      reviewedAt: a.mondayFirst,
       verdict: "needs fixes",
       findings: [{ id: "f-mon", severity: "must-fix", category: "logic", title: "Null deref risk", fingerprint: FP_X }],
     });
 
     const insights = await createInsightsStore(db);
     expect(insights.weeklyTrend).toEqual([
-      { week_start: "2026-08-31", reviews: 1, findings: 1 },
-      { week_start: "2026-09-07", reviews: 1, findings: 1 },
+      { week_start: a.prevWeekStart, reviews: 1, findings: 1 },
+      { week_start: a.nextWeekStart, reviews: 1, findings: 1 },
     ]);
   });
 
-  test("dailyTrend day boundary pinned to concrete UTC dates (S-1 extension)", async () => {
+  test("dailyTrend day boundary at the live day boundary (S-1 extension)", async () => {
     const db = createMigratedTestD1();
-    // The same concrete boundary timestamps as the weekly S-1 pin: the day
+    // The same relative boundary pair as the weekly S-1 pin above: the day
     // bucket is the plain UTC date (`date(r.reviewed_at)` — the distribution
-    // day expression, never a second one), so the last second of Sunday
-    // 2026-09-06 lands on 2026-09-06 and the first second of Monday
-    // 2026-09-07 on 2026-09-07. A shared day-expression mistake would pass a
-    // mirror-only test, exactly like the weekly pin above.
+    // day expression, never a second one), so the Sunday's last second lands
+    // on the Sunday and the Monday's first second on the Monday — adjacent
+    // day buckets. The exact per-key match still catches a shared
+    // day-expression mistake that a mirror-only test would pass.
+    const a = weekBoundaryAnchor();
     insertReview(db, {
       id: "r-dsun",
       owner: "acme",
       repo: "widgets",
       pr_number: 1,
-      reviewedAt: "2026-09-06 23:59:59",
+      reviewedAt: a.sundayLast,
       verdict: "needs fixes",
       findings: [{ id: "f-dsun", severity: "must-fix", category: "logic", title: "Null deref risk", fingerprint: FP_X }],
     });
@@ -515,19 +558,19 @@ describe("createInsightsStore", () => {
       owner: "acme",
       repo: "widgets",
       pr_number: 2,
-      reviewedAt: "2026-09-07 00:00:00",
+      reviewedAt: a.mondayFirst,
       verdict: "needs fixes",
       findings: [{ id: "f-dmon", severity: "must-fix", category: "logic", title: "Null deref risk", fingerprint: FP_X }],
     });
 
     const insights = await createInsightsStore(db);
-    expect(insights.dailyTrend.find((b) => b.day_start === "2026-09-06")).toEqual({
-      day_start: "2026-09-06",
+    expect(insights.dailyTrend.find((b) => b.day_start === a.prevDayStart)).toEqual({
+      day_start: a.prevDayStart,
       reviews: 1,
       findings: 1,
     });
-    expect(insights.dailyTrend.find((b) => b.day_start === "2026-09-07")).toEqual({
-      day_start: "2026-09-07",
+    expect(insights.dailyTrend.find((b) => b.day_start === a.nextDayStart)).toEqual({
+      day_start: a.nextDayStart,
       reviews: 1,
       findings: 1,
     });
