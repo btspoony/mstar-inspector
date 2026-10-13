@@ -33,7 +33,8 @@
  *   would be ambiguous); it also passes the release tag as `--ref "$TAG"`
  *   (shell-derived from VERSION) so a same-commit manual rollback run cannot
  *   be cited as this Release's deploy evidence (T3-3); the prep PR-body
- *   sentence promises the production deploy;
+ *   sentence promises production only for a non-prerelease version while
+ *   staging always deploys (QC1-F003);
  * - timeout-minutes on both jobs.
  *
  * Parsing uses python3 + PyYAML (the method validated in task 4; preinstalled
@@ -120,10 +121,12 @@ describe("release-prep.yml guards", () => {
     expect(runs).toContain("jq -er .version package.json");
     expect(runs).toContain("gh pr create");
     expect(runs).toContain("gh pr edit");
-    // the PR body must promise the release-triggered production deploy, not a
-    // bare staging deploy (AC4 surface)
-    expect(runs).toContain("deploys to production");
-    expect(runs).not.toContain("deploys to staging");
+    // the PR body must state the real consequence for both version shapes:
+    // staging always, production only for a version with no `-` (QC1-F003 —
+    // an unqualified production promise must not come back)
+    expect(runs).toContain("always deploys staging");
+    expect(runs).toContain("only for a stable version (no hyphen in the version)");
+    expect(runs).toContain("never dispatched to production automatically");
     expect(runs).not.toContain("gh label");
   });
 });
