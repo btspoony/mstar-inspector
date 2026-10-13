@@ -12,4 +12,8 @@
  * runtime import point remains src/pipeline/sandbox.ts (compass contracts A).
  */
 export { default } from "./index";
-export { SandboxV1 } from "../pipeline/sandbox";
+// `SandboxV1` is the live review-sandbox implementation; `Sandbox` is the
+// compatibility class that keeps the legacy `v1` migration replayable on a
+// fresh deploy (see src/pipeline/sandbox.ts — both class_names are declared
+// in wrangler.jsonc, so BOTH must be exported from this entry module).
+export { Sandbox, SandboxV1 } from "../pipeline/sandbox";

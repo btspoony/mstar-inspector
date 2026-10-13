@@ -18,7 +18,7 @@ import { createFailureStore } from "../../src/store/failure-store";
 import { createMigratedTestD1 } from "../store/helpers";
 import { defaultSweepLog } from "../../src/worker/sweep";
 
-const { default: worker, SandboxV1 } = await import("../../src/worker/entry");
+const { default: worker, Sandbox, SandboxV1 } = await import("../../src/worker/entry");
 import { APP_VERSION } from "../../src/version";
 import type { Env } from "../../src/worker/env";
 
@@ -36,6 +36,15 @@ function makeEnv(overrides: Partial<Env> = {}): Env {
 describe("worker entry (deploy)", () => {
   test("exports the SandboxV1 DO class for the containers binding", () => {
     expect(typeof SandboxV1).toBe("function");
+  });
+
+  test("exports BOTH DO classes the config declares — SandboxV1 plus the compatibility Sandbox (fresh-deploy migration replay)", () => {
+    // The retained legacy `v1` migration names `new_sqlite_classes: ["Sandbox"]`;
+    // a fresh worker replays every unapplied migration, so the compatibility
+    // class MUST stay exported or the first deploy fails. Pinning the pair so a
+    // rename cannot silently drop it again.
+    expect(typeof Sandbox).toBe("function");
+    expect(Sandbox).not.toBe(SandboxV1);
   });
 
   test("re-exports the fetch handler (healthz)", async () => {

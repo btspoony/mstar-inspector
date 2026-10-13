@@ -30,12 +30,14 @@
  */
 
 import { runnerCommand, writeJsonCommand } from "./gitops";
-import { getSandbox, SandboxV1, shellCommand, type ReviewSandbox, type SandboxBinding } from "./sandbox";
+import { getSandbox, Sandbox, SandboxV1, shellCommand, type ReviewSandbox, type SandboxBinding } from "./sandbox";
 import { DEFAULT_SANDBOX_IMAGE_ID, getSandboxImage } from "../contracts/sandbox-images";
 import { APP_VERSION } from "../version";
 import { parseReviewOutput } from "../review/schema";
 
-export { SandboxV1 };
+// `SandboxV1` is the live implementation; `Sandbox` keeps the legacy `v1`
+// migration replayable on a fresh smoke worker (see src/pipeline/sandbox.ts).
+export { Sandbox, SandboxV1 };
 
 type SmokeEnv = {
   SANDBOX: SandboxBinding;

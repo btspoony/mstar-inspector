@@ -178,6 +178,23 @@ export class SandboxV1 extends DurableObject {
 }
 
 /**
+ * Compatibility class for the RETAINED legacy `v1` migration
+ * (`new_sqlite_classes: ["Sandbox"]` in wrangler.jsonc). Wrangler replays
+ * every unapplied migration on a first deploy, and a fresh account / DR
+ * rebuild / recreated smoke Worker has no prior script — so the class the
+ * migration names must stay exported from the Worker entry or the upload
+ * fails. It serves no requests and configures nothing: no container, no
+ * `this.ctx` use, no traffic path (the durable_objects binding points at
+ * `SandboxV1` only) — `SandboxV1` is the only live implementation.
+ * Retirement path (docs/deploy.md § Cloudflare resources): ops deletes the
+ * orphaned `mstar-inspector-sandbox` container application, a `v3` tag adds
+ * `deleted_classes: ["Sandbox"]`, and this class is deleted.
+ */
+export class Sandbox extends DurableObject {
+  // Intentionally empty — the legacy `v1` migration's name holder only.
+}
+
+/**
  * Get (or create) a sandbox instance by id. The id MUST be unique per
  * attempt: a destroyed sandbox's id must never be reused
  * (attach-after-destroy behavior is unknown = ASSUMPTION; uniqueness wins).
