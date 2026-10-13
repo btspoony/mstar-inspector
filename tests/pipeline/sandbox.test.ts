@@ -182,6 +182,19 @@ describe("Sandbox Durable Object", () => {
     });
   });
 
+  test("a zero or negative explicit timeout is clamped to the 1 ms floor (never a disarming zero duration)", async () => {
+    reset();
+    const { sandbox } = makeDo();
+
+    await sandbox.runCommand(shellCommand("gh pr view 1"), { timeout: 0 });
+    await sandbox.runCommand(shellCommand("gh pr view 2"), { timeout: -5_000 });
+
+    expect(execCalls.map((call) => call.cmd)).toEqual([
+      ["timeout", "--kill-after=5", "0.001", "/bin/sh", "-lc", "gh pr view 1"],
+      ["timeout", "--kill-after=5", "0.001", "/bin/sh", "-lc", "gh pr view 2"],
+    ]);
+  });
+
   test("a sub-second explicit timeout is forwarded exactly (fractional seconds, never rounded up)", async () => {
     reset();
     const { sandbox } = makeDo();

@@ -133,7 +133,10 @@ export class Sandbox extends DurableObject {
     opts?: { env?: Record<string, string>; cwd?: string; timeout?: number },
   ): Promise<{ stdout: string; stderr: string; exitCode: number }> {
     await this.ensureRunning();
-    const timeoutSeconds = (opts?.timeout ?? DEFAULT_EXEC_TIMEOUT_MS) / 1000;
+    // Clamp before converting: a zero/negative value must never reach the argv
+    // as a zero or negative duration (GNU `timeout 0` DISABLES the bound).
+    const timeoutMs = Math.max(1, opts?.timeout ?? DEFAULT_EXEC_TIMEOUT_MS);
+    const timeoutSeconds = timeoutMs / 1000;
     const process = await this.container.exec(
       ["timeout", "--kill-after=5", String(timeoutSeconds), "/bin/sh", "-lc", command],
       { cwd: opts?.cwd, env: opts?.env },
