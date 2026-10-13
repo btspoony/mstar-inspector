@@ -182,6 +182,15 @@ describe("Sandbox Durable Object", () => {
     });
   });
 
+  test("a sub-second explicit timeout is forwarded exactly (fractional seconds, never rounded up)", async () => {
+    reset();
+    const { sandbox } = makeDo();
+
+    await sandbox.runCommand(shellCommand("gh pr view 1"), { timeout: 250 });
+
+    expect(execCalls[0]!.cmd).toEqual(["timeout", "--kill-after=5", "0.25", "/bin/sh", "-lc", "gh pr view 1"]);
+  });
+
   test("a non-zero exit (timeout bound = 124) resolves normally — the caller decides retry/DLQ", async () => {
     reset();
     execResult = { stdout: new ArrayBuffer(0), stderr: bytes("Terminated\n"), exitCode: 124 };

@@ -123,14 +123,17 @@ export class Sandbox extends DurableObject {
   /**
    * THE shell sink. `command` is a branded `ShellCommand`; it reaches a shell
    * exactly once, as the `-c` payload of `/bin/sh` under the GNU `timeout`
-   * bound. Exit code 124 = the bound fired.
+   * bound. The bound is forwarded in seconds WITHOUT rounding — GNU `timeout`
+   * takes fractional durations, so an explicit millisecond override keeps the
+   * caller's exact bound (`{ timeout: 250 }` → `0.25`). Exit code 124 = the
+   * bound fired.
    */
   async runCommand(
     command: ShellCommand,
     opts?: { env?: Record<string, string>; cwd?: string; timeout?: number },
   ): Promise<{ stdout: string; stderr: string; exitCode: number }> {
     await this.ensureRunning();
-    const timeoutSeconds = Math.ceil((opts?.timeout ?? DEFAULT_EXEC_TIMEOUT_MS) / 1000);
+    const timeoutSeconds = (opts?.timeout ?? DEFAULT_EXEC_TIMEOUT_MS) / 1000;
     const process = await this.container.exec(
       ["timeout", "--kill-after=5", String(timeoutSeconds), "/bin/sh", "-lc", command],
       { cwd: opts?.cwd, env: opts?.env },
