@@ -12,6 +12,11 @@
  *   release through only when the tag carries no `-`; the dispatch arm is
  *   evaluated FIRST so an absent `github.event.release` on dispatch cannot blow
  *   up the expression;
+ * - a SECRETS-FREE `guard-tag-ref` job that asserts `github.ref_type == 'tag'`,
+ *   carries no `environment:`/`env:`, and holds no step that runs a ref's code;
+ *   the `deploy` job (the one with `environment: production` and the production
+ *   secrets) carries `needs: guard-tag-ref`, so a non-tag ref can neither reach
+ *   a job holding production secrets nor run repository code with them in scope;
  * - `environment: production`, concurrency group `deploy-prod-mstar-inspector`,
  *   `permissions: { contents: read }`, `timeout-minutes: 30`;
  * - the run-ref checkout (`github.ref_name`, full history) and the tag-ref
@@ -80,9 +85,62 @@ const stepRuns = steps.map((s) => s.run).filter((r): r is string => typeof r ===
 const runsText = stepRuns.join("\n---step---\n");
 
 describe("deploy-prod.yml guards", () => {
-  test("workflow name + exactly one job (no separate test fan-out)", () => {
+  test("workflow name + exactly two jobs: the secrets-free guard, then deploy", () => {
     expect(wf.name).toBe("Deploy prod");
-    expect(Object.keys(wf.jobs)).toEqual(["deploy"]);
+    // ORDER matters: the guard job is declared first, and the secret-holding
+    // deploy job declares `needs: guard-tag-ref` (pinned below).
+    expect(Object.keys(wf.jobs)).toEqual(["guard-tag-ref", "deploy"]);
+  });
+
+  test("guard-tag-ref: secrets-free (no environment/env), checkout-free, asserts the run is on a tag", () => {
+    const guard = wf.jobs["guard-tag-ref"];
+    // LOAD-BEARING: no `environment:` means GitHub attaches no production
+    // secret to this job, and no checkout means no ref's code runs here.
+    expect(guard.environment).toBeUndefined();
+    expect(guard.env).toBeUndefined();
+    expect(guard.needs).toBeUndefined();
+    expect(guard.permissions).toEqual({ contents: "read" });
+    expect(guard["timeout-minutes"]).toBe(5);
+    const gsteps = guard.steps as Step[];
+    expect(gsteps.length).toBe(1);
+    // no step pulls the ref's tree or uses an action at all
+    expect(gsteps.every((s) => s.uses === undefined && typeof s.run === "string")).toBe(true);
+    const g = gsteps[0]!;
+    expect(g.env?.REF_TYPE).toBe("${{ github.ref_type }}");
+    expect(g.env?.REF_NAME).toBe("${{ github.ref_name }}");
+    expect(g.run).toContain('if [ "$REF_TYPE" != "tag" ]; then');
+    expect(g.run).toContain("::error::");
+    expect(g.run).toContain("exit 1");
+    // `${{ }}` must not be interpolated straight into the guard's run script
+    expect(g.run).not.toContain("${{");
+  });
+
+  test("deploy job is gated on the guard (`needs`) and keeps environment: production", () => {
+    expect(wf.jobs.deploy.needs).toEqual("guard-tag-ref");
+    expect(wf.jobs.deploy.environment).toBe("production");
+  });
+
+  test("mutation: removing `needs` from deploy must fail the suite (the gate is load-bearing)", () => {
+    // Demonstrate the guard's job-boundary gate rather than merely asserting its
+    // presence: strip `needs` from a copy of the workflow and show the same
+    // check the pin above uses now fails. Guards against a refactor that drops
+    // `needs` while the guard job itself survives.
+    const src = readFileSync(join(REPO_ROOT, ".github", "workflows", WORKFLOW), "utf8");
+    const mutated = src.replace(/^\s*needs: guard-tag-ref.*$/m, "");
+    expect(mutated).not.toBe(src);
+    const dir = mkdtempSync(join(tmpdir(), "wf-"));
+    try {
+      const path = join(dir, "deploy-prod.yml");
+      writeFileSync(path, mutated);
+      const proc = Bun.spawnSync(["python3", "-c", PY_DUMP, path], { stdout: "pipe", stderr: "pipe" });
+      expect(proc.exitCode).toBe(0);
+      const mwf = JSON.parse(proc.stdout.toString());
+      expect(mwf.jobs.deploy.needs).toBeUndefined();
+      // i.e. the pin in the test above would now fail — gate is load-bearing.
+      expect(mwf.jobs.deploy.needs).not.toEqual("guard-tag-ref");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   test("triggers: release published + workflow_dispatch with NO inputs (run ref is the deploy ref)", () => {

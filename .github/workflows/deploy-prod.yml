@@ -7,9 +7,13 @@ name: Deploy prod
 #
 # `workflow_dispatch` is the bring-up/rollback door: the dispatch ref IS the
 # deploy ref, so `gh workflow run deploy-prod.yml --ref <tag>` (a release event
-# has no ref of its own to choose). Because the first prod deploy happens while
-# the current version is the prerelease v1.0.0-alpha.2, the release-event guard
-# cannot be the only way in — so a manual dispatch may deploy a prerelease tag.
+# has no ref of its own to choose). The dispatched tag MUST contain this
+# workflow: a dispatch runs the file AS DEFINED AT that ref, so a tag cut before
+# this workflow existed has no `deploy-prod.yml` to run and the dispatch fails
+# before it starts. Bring-up therefore dispatches the first tag released after
+# this change — a post-merge prerelease tag is allowed, because the release-event
+# guard deploys only non-prerelease tags and so cannot be the only way in — and a
+# rollback dispatches the tag it rolls back to.
 #
 # The run's ref and its deployed checkout are the SAME thing: there is no `ref`
 # input, so a run can never deploy a tag other than the one it runs on. T3-3's
@@ -46,7 +50,32 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  # Secrets-free tag guard. This job runs FIRST and holds nothing worth stealing:
+  # no `environment:` (so GitHub attaches no production secret to it), no
+  # job-level `env:`, no checkout (so no ref's code executes in it). Its only job
+  # is to assert the run is on a tag. The deploy job below `needs:` it, so a
+  # branch ref fails here and the secret-holding job never starts — a non-tag ref
+  # can neither receive production secrets nor run its own code with them.
+  # The `production` environment's own `v*`-tag deployment policy is defense in
+  # depth, not a replacement for this structural gate.
+  guard-tag-ref:
+    permissions: { contents: read }
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Assert the run is on a tag
+        env:
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          if [ "$REF_TYPE" != "tag" ]; then
+            echo "::error::deploy-prod deploys a tag, but this run is on ref '$REF_NAME' ($REF_TYPE) — dispatch with --ref <tag>"
+            exit 1
+          fi
+
   deploy:
+    needs: guard-tag-ref   # the tag gate above holds no secrets; this job does — so it must depend on it
     # A dispatch always deploys; a release deploys only for a non-prerelease tag.
     # `github.event.release` is absent on dispatch, so it is read only behind the
     # `||` short-circuit.
