@@ -16,10 +16,11 @@
     // only this root tsconfig, so component-level tests resolving the SPA's
     // "@/..." aliases need the mapping here. Root tsc itself is inert for
     // SPA sources (include/exclude below keep src/spa and tests/spa out of
-    // the root program) — keep the two paths blocks in sync.
-    "baseUrl": ".",
+    // the root program) — keep the two paths blocks in sync. Targets are
+    // written relative to this file ("."-prefixed): TypeScript 7 accepts no
+    // other form and rejects a bare target with TS5090.
     "paths": {
-      "@/*": ["src/spa/*"]
+      "@/*": ["./src/spa/*"]
     }
   },
   "include": ["src", "tests"],
