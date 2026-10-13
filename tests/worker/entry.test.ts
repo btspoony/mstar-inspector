@@ -3,25 +3,22 @@
  *
  * The entry module (src/worker/entry.ts) is what wrangler.jsonc `main` points
  * at: it must export BOTH the fetch/queue handler (re-exported from ./index)
- * AND the Sandbox Durable Object class so the containers binding resolves
- * (`class_name: "Sandbox"` in wrangler.jsonc). The entry statically imports
+ * AND the SandboxV1 Durable Object class so the containers binding resolves
+ * (`class_name: "SandboxV1"` in wrangler.jsonc). The entry statically imports
  * the workerd-only `cloudflare:workers` builtin (via the sandbox adapter), so
  * the builtin is mocked here (same technique as
  * tests/pipeline/sandbox.test.ts) and the entry is imported dynamically after
  * the mock is registered.
  */
 
-import { describe, expect, mock, test } from "bun:test";
+import { describe, expect, test } from "bun:test";
 import type { D1Database, ExecutionContext, ScheduledController } from "@cloudflare/workers-types";
+import "../helpers/cloudflare-workers-mock";
 import { createFailureStore } from "../../src/store/failure-store";
 import { createMigratedTestD1 } from "../store/helpers";
 import { defaultSweepLog } from "../../src/worker/sweep";
 
-mock.module("cloudflare:workers", () => ({
-  DurableObject: class {},
-}));
-
-const { default: worker, Sandbox } = await import("../../src/worker/entry");
+const { default: worker, SandboxV1 } = await import("../../src/worker/entry");
 import { APP_VERSION } from "../../src/version";
 import type { Env } from "../../src/worker/env";
 
@@ -37,8 +34,8 @@ function makeEnv(overrides: Partial<Env> = {}): Env {
 }
 
 describe("worker entry (deploy)", () => {
-  test("exports the Sandbox DO class for the containers binding", () => {
-    expect(typeof Sandbox).toBe("function");
+  test("exports the SandboxV1 DO class for the containers binding", () => {
+    expect(typeof SandboxV1).toBe("function");
   });
 
   test("re-exports the fetch handler (healthz)", async () => {

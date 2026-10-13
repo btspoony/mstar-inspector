@@ -156,9 +156,7 @@ const fakeSandbox = {
 // builtin `cloudflare:workers` (unresolvable in Bun's test runner). Every test
 // injects the fake via createReviewConsumer overrides — this mock is never
 // called.
-mock.module("cloudflare:workers", () => ({
-  DurableObject: class {},
-}));
+import "../helpers/cloudflare-workers-mock";
 
 // --- commenter fakes --------------------------------------------------------
 

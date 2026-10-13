@@ -83,19 +83,12 @@ function makeContainer(): FakeContainer {
 }
 
 
-mock.module("cloudflare:workers", () => ({
-  // The real base only stores (ctx, env) — the adapter reads this.ctx.
-  DurableObject: class {
-    ctx: unknown;
-    env: unknown;
-    constructor(ctx: unknown, env: unknown) {
-      this.ctx = ctx;
-      this.env = env;
-    }
-  },
-}));
+// The ONE builtin registration lives in the shared helper — importing it here
+// (before the adapter loads) keeps the `cloudflare:workers` mock deterministic
+// no matter which test file's registration a shared process saw first.
+import "../helpers/cloudflare-workers-mock";
 
-const { Sandbox, getSandbox, DEFAULT_EXEC_TIMEOUT_MS, shellCommand } =
+const { SandboxV1, getSandbox, DEFAULT_EXEC_TIMEOUT_MS, shellCommand } =
   await import("../../src/pipeline/sandbox");
 import type { ReviewSandbox } from "../../src/pipeline/sandbox";
 
@@ -107,7 +100,7 @@ function makeDo(): { sandbox: ReviewSandbox; container: FakeContainer } {
   // ctx double: the real DurableObjectState's blockConcurrencyWhile runs the
   // callback behind the concurrency gate and resolves with its result.
   const ctx = { container, blockConcurrencyWhile: (fn: () => Promise<unknown>) => fn() };
-  const sandbox = new Sandbox(ctx as never, {}) as unknown as ReviewSandbox;
+  const sandbox = new SandboxV1(ctx as never, {}) as unknown as ReviewSandbox;
   return { sandbox, container };
 }
 
@@ -122,7 +115,7 @@ function reset() {
   destroyError = undefined;
 }
 
-describe("Sandbox Durable Object", () => {
+describe("SandboxV1 Durable Object", () => {
   test("runCommand starts the container once, keeps the lite instance, internet on, and bounds the idle lifetime", async () => {
     reset();
     const { sandbox, container } = makeDo();
@@ -208,7 +201,7 @@ describe("Sandbox Durable Object", () => {
     reset();
     const container = { ...makeContainer(), images: {} };
     const ctx = { container, blockConcurrencyWhile: (fn: () => Promise<unknown>) => fn() };
-    const sandbox = new Sandbox(ctx as never, {}) as unknown as ReviewSandbox;
+    const sandbox = new SandboxV1(ctx as never, {}) as unknown as ReviewSandbox;
 
     await expect(sandbox.runCommand(shellCommand("echo hi"))).rejects.toThrow(
       'container image "sandbox" is not configured',
@@ -277,7 +270,7 @@ describe("Sandbox Durable Object", () => {
 
   test("a missing container binding fails loud (misconfigured wrangler, not a silent no-op)", async () => {
     reset();
-    const sandbox = new Sandbox({} as never, {}) as unknown as ReviewSandbox;
+    const sandbox = new SandboxV1({} as never, {}) as unknown as ReviewSandbox;
 
     await expect(sandbox.runCommand(shellCommand("echo hi"))).rejects.toThrow(
       "container binding is not configured",
