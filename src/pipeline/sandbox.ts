@@ -1,47 +1,52 @@
 /**
- * Sandbox thin adapter (STOP gate) — the ONLY module in the
- * repo that imports `@cloudflare/sandbox` (compass contracts A / the Global
- * Constraints). Wraps the SDK behind the locked `ReviewSandbox` contract so
- * the consumer and the smoke never touch the SDK surface directly.
+ * Sandbox adapter (STOP gate) — the ONLY module in the repo that reaches the
+ * sandbox runtime (compass contracts A / the Global Constraints). Wraps it
+ * behind the locked `ReviewSandbox` contract so the consumer and the smoke
+ * never touch the runtime surface directly.
  *
- * Verified SDK surface (@cloudflare/sandbox 0.12.8, dist types + live smoke):
- *   - getSandbox(ns, id, options?) -> Sandbox (sync; container starts lazily
- *     on first operation)
- *   - shell runner: `Sandbox` exposes a STRING-FORM-ONLY shell runner (no
- *     argv-array variant in 0.12.8) -> Promise<ExecResult>, options
- *     { env?: Record<string, string | undefined>, cwd?: string,
- *     timeout?: number, ... } — per-call env/cwd, buffered result
- *   - Sandbox.destroy() -> Promise<void> (terminates container, deletes state)
+ * `@cloudflare/sandbox` 1.0.0 removed the `Sandbox` class and `getSandbox()`
+ * (the package now ships only `Files`/`S3Mount`/`DirectoryBackup` + error
+ * classes, none used here). The Durable Object below is written in-repo and
+ * drives the container itself through the workerd-only `cloudflare:workers`
+ * builtin (`DurableObject` base + `this.ctx.container`); the package stays
+ * pinned at 1.0.0 as the version anchor for the image's `sandbox-shim`
+ * (`sandbox-image/omp/Dockerfile` must copy it from the same 1.0 line).
  *
- * Command-string boundary (scanner CWE-78 / qc2 F-001): because the SDK sink
- * is a single shell string, the wrapper funnels it through ONE bound call
- * below and types the contract input as `ShellCommand` — a branded string
- * minted ONLY by the validated pipeline/gitops.ts builders (allowlist +
- * fail-closed + single-quote discipline) or audited in-repo constants
- * (smoke). A raw string — webhook/HTTP-derived or otherwise unvalidated —
- * is a type error at the sink.
+ * Container model (1.0):
+ *   - the DO starts its own container: `container.start({ image:
+ *     container.images.<key>, instance, enableInternet })` — `start()` returns
+ *     before readiness and the first `exec()` waits for it;
+ *   - every request path calls `ensureRunning()` first, and every step after
+ *     `start()` is safe to repeat (a deploy restarts the DO; the inactivity
+ *     timeout does not survive a restart, so it is (re)set on every guard);
+ *   - `container.exec(argv, { cwd, env })` runs ONE process — no implicit
+ *     shell, no session state (0.12's `enableDefaultSession: false`
+ *     becomes the platform default). `env` is per-call and does not inherit
+ *     image `ENV` lines except `PATH`.
  *
- * `timeout` (ms) is the SDK's max execution time per command. Every run is
- * bounded: a caller-provided timeout wins, otherwise DEFAULT_EXEC_TIMEOUT_MS
+ * Command-string boundary (scanner CWE-78 / qc2 F-001): 1.0 has no string-form
+ * shell runner, so the validated shell string is wrapped ONCE below into the
+ * explicit `["/bin/sh", "-lc", command]` argv — still a single sink, still
+ * gated by the `ShellCommand` brand minted ONLY by the validated
+ * pipeline/gitops.ts builders (allowlist + fail-closed + single-quote
+ * discipline) or audited in-repo constants (smoke). A raw string —
+ * webhook/HTTP-derived or otherwise unvalidated — is a type error at the sink.
+ *
+ * `timeout` (ms) keeps its meaning: the 0.12 SDK option is gone, so every run
+ * is bounded by GNU coreutils `timeout` in the argv (`--kill-after=5` then
+ * SIGKILL). A caller-provided timeout wins, otherwise DEFAULT_EXEC_TIMEOUT_MS
  * applies — a hung gh/git/model call can never outlive the container silently
- * (qc3 F-001).
- *
- * `enableDefaultSession: false` (lifecycle docs recommendation): each run
- * executes in isolation — no shell state carries between calls. The consumer
- * passes cwd/env per call, so no session state is needed.
+ * (qc3 F-001). Exit code 124 means the bound fired (0.12 threw instead; the
+ * consumer fails the stage on either path).
  *
  * The binding is typed `unknown` per the consumer contract
  * (`PipelineEnv.SANDBOX: unknown` — the binding shape is pinned by tests and
- * cast here). The SDK's own `DurableObjectNamespace` type is ambient
- * (capnweb) and does not satisfy @cloudflare/workers-types' branded
- * constraint, so the cast is the single, documented boundary.
+ * cast here). The cast boundary stays: consumers never see the namespace.
  */
 
-import { getSandbox as cfGetSandbox, type Sandbox } from "@cloudflare/sandbox";
+import { DurableObject } from "cloudflare:workers";
+import type { Container } from "@cloudflare/workers-types";
 import { shellCommand, type ShellCommand } from "./shell-command";
-
-/** Re-export for Durable Object registration from the Worker entry point. */
-export { Sandbox } from "@cloudflare/sandbox";
 
 /** The Worker binding shape (pinned; `PipelineEnv.SANDBOX`). */
 export type SandboxBinding = unknown;
@@ -68,33 +73,92 @@ export type ReviewSandbox = {
   destroy(): Promise<void>;
 };
 
+/** Container image key in `wrangler.jsonc` → `containers[].images`. */
+const CONTAINER_IMAGE_KEY = "sandbox";
+/** Instance size carried over from the 0.12 `instance_type: "lite"` pin. */
+const CONTAINER_INSTANCE = "lite" as const;
+/**
+ * Container inactivity bound. The DO stays active while a `runCommand` RPC is
+ * in flight, so this guards the gaps BETWEEN calls — it must outlive the
+ * longest single review (deep: 14 min runner + git steps, src/pipeline/
+ * consumer.ts runnerTimeoutMs + the 15-min queue wall-clock cap).
+ */
+const INACTIVITY_TIMEOUT_MS = 30 * 60 * 1000;
+
+const utf8 = new TextDecoder();
+
+/**
+ * The review-sandbox Durable Object (wrangler `class_name: "Sandbox"` — the
+ * exported name must match wrangler.jsonc's containers/durable_objects/
+ * migrations entries). Owns and starts its own container; the Worker reaches
+ * its RPC methods through `getSandbox()`.
+ */
+export class Sandbox extends DurableObject {
+  /** The container bound to this DO (absent only when the binding is misconfigured). */
+  private get container(): Container {
+    const container = this.ctx.container;
+    if (!container) throw new Error("The container binding is not configured");
+    return container;
+  }
+
+  /**
+   * Start the container when needed and (re)set the inactivity timeout —
+   * idempotent by construction: `running` is true as soon as `start()`
+   * returns, the check→start sequence has no await in between (concurrent
+   * calls cannot double-start), and every step after `start()` is safe to
+   * repeat because a deploy restarts the DO.
+   */
+  private async ensureRunning(): Promise<void> {
+    const container = this.container;
+    if (!container.running) {
+      const image = container.images[CONTAINER_IMAGE_KEY];
+      if (image === undefined) {
+        throw new Error(`container image "${CONTAINER_IMAGE_KEY}" is not configured`);
+      }
+      container.start({ image, instance: CONTAINER_INSTANCE, enableInternet: true });
+    }
+    await container.setInactivityTimeout(INACTIVITY_TIMEOUT_MS);
+  }
+
+  /**
+   * THE shell sink. `command` is a branded `ShellCommand`; it reaches a shell
+   * exactly once, as the `-c` payload of `/bin/sh` under the GNU `timeout`
+   * bound. Exit code 124 = the bound fired.
+   */
+  async runCommand(
+    command: ShellCommand,
+    opts?: { env?: Record<string, string>; cwd?: string; timeout?: number },
+  ): Promise<{ stdout: string; stderr: string; exitCode: number }> {
+    await this.ensureRunning();
+    const timeoutSeconds = Math.ceil((opts?.timeout ?? DEFAULT_EXEC_TIMEOUT_MS) / 1000);
+    const process = await this.container.exec(
+      ["timeout", "--kill-after=5", String(timeoutSeconds), "/bin/sh", "-lc", command],
+      { cwd: opts?.cwd, env: opts?.env },
+    );
+    const output = await process.output();
+    return {
+      stdout: utf8.decode(output.stdout),
+      stderr: utf8.decode(output.stderr),
+      exitCode: output.exitCode,
+    };
+  }
+
+  /** Terminate the container. Ids are never reused (see getSandbox). */
+  async destroy(): Promise<void> {
+    await this.container.destroy();
+  }
+}
+
 /**
  * Get (or create) a sandbox instance by id. The id MUST be unique per
  * attempt: a destroyed sandbox's id must never be reused
  * (attach-after-destroy behavior is unknown = ASSUMPTION; uniqueness wins).
+ * DO names are case-sensitive-rejected by the platform — lowercase here
+ * (0.12's `normalizeId` is gone).
  */
 export async function getSandbox(binding: SandboxBinding, id: string): Promise<ReviewSandbox> {
-  const sandbox = cfGetSandbox(
-    binding as Parameters<typeof cfGetSandbox>[0],
-    id,
-    { enableDefaultSession: false },
-  );
-  // The SDK shell runner is string-form only (no argv array), so the sink
-  // stays a single string — bound once here: this is the ONE line in the
-  // repo that reaches it, and every command arrives as a pre-validated
-  // ShellCommand minted by the gitops builders.
-  const sdkRun = sandbox.exec.bind(sandbox);
-  return {
-    async runCommand(command, opts) {
-      const result = await sdkRun(command, {
-        env: opts?.env,
-        cwd: opts?.cwd,
-        timeout: opts?.timeout ?? DEFAULT_EXEC_TIMEOUT_MS,
-      });
-      return { stdout: result.stdout, stderr: result.stderr, exitCode: result.exitCode };
-    },
-    async destroy() {
-      await sandbox.destroy();
-    },
-  };
+  // The stub exposes exactly the RPC methods the DO class defines
+  // (runCommand/destroy) — the ReviewSandbox shape.
+  const namespace = binding as { getByName(name: string): ReviewSandbox };
+  return namespace.getByName(id.toLowerCase());
 }

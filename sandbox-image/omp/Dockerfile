@@ -11,19 +11,16 @@
 # — no key value is ever in the image or its build context.
 #
 # Outbound egress (architect verdict AL-4 — DOCUMENTED, NOT
-# enforced): a REAL egress control surface exists but is deliberately NOT
-# activated. @cloudflare/sandbox 0.12.8's pinned dependency
-# @cloudflare/containers 0.3.7 (bun.lock) ships an egress face on the
-# `Container` superclass the Sandbox DO extends: `allowedHosts` (non-empty =
-# allowlist gate, a miss fails the request with HTTP 520), `deniedHosts`,
-# `enableInternet` (default true), `interceptHttps` (default false; requires
-# the container to trust the Cloudflare CA — unverified on this base image),
-# enforced in `ContainerProxy.fetch`. Activation is deferred: the host
+# enforced): the Sandbox SDK 1.0 container takes its egress posture from
+# `container.start({ enableInternet: true })` (src/pipeline/sandbox.ts) — this
+# repo relies on provider egress, so it is explicitly ON. The 1.0 DO Container
+# API's finer control surface (`interceptOutboundHttp` /
+# `interceptAllOutboundHttp`) is NOT activated: the host
 # inventory has no SSOT in this repo (18 built-in provider API hosts resolve
 # in omp's registry, outside the repo; the ark capability host is declared in
 # src/contracts/sandbox-images.ts — the omp registry entry, synthesized at
 # review time), per-App BYOK keeps the provider set open,
-# and a missing host fails CLOSED (520 → review failure → DLQ) — a worse
+# and a missing host fails CLOSED (review failure → DLQ) — a worse
 # failure mode than the documented de-facto boundary. See docs/deploy.md
 # § Network egress for the de-facto allowlist and the activation prerequisite
 # (provider-host SSOT + staging verification). No fake controls are installed
@@ -37,13 +34,30 @@
 #     models.yml (capability hosts + App custom providers) at execution time;
 #   - runner + omp SDK deps installed via `bun install --frozen-lockfile`.
 #
-# Build context: repo root (wrangler containers `image_build_context: "."`), so
+# Build context: repo root (wrangler containers `images.sandbox.build_context`), so
 # the Dockerfile can COPY package.json/bun.lock and src/review from the repo.
 # A repo-root .dockerignore keeps the context lean (node_modules excluded).
 
-FROM docker.io/cloudflare/sandbox:0.12.8
+# Sandbox SDK 1.0: the 0.12 `FROM docker.io/cloudflare/sandbox:<ver>` base is
+# gone (1.0 ships no runtime base image — the 1.0 image is only a BLOCK source
+# for the shim below). Base we control
+# (Debian trixie — the distro the official 1.0 examples target; glibc for the
+# pinned bun-linux-x64 / gh amd64 tarballs) + the `sandbox-shim` helper copied
+# from the SAME 1.0.0 line as the `@cloudflare/sandbox` pin (package.json /
+# bun.lock — the shim tag must match, `Files` needs it).
+FROM docker.io/library/debian:trixie-slim
 
-# Bun 1.4.0 pinned (base image ships Bun 1.3.12; omp requires >=1.3.14).
+# Tools the pinned steps below need (coreutils incl. `timeout`, tar and the
+# POSIX shell are Essential in the Debian base): curl + ca-certificates for
+# the Bun/gh downloads, unzip for the Bun zip, git for the harness clone and
+# the PR-head fetch at review time.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates curl git unzip \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --from=docker.io/cloudflare/sandbox:1.0.0 /usr/local/bin/sandbox-shim /usr/local/bin/sandbox-shim
+
+# Bun 1.4.0 pinned (base ships no Bun; omp requires >=1.3.14).
 RUN curl -fsSL https://github.com/oven-sh/bun/releases/download/bun-v1.4.0/bun-linux-x64.zip -o /tmp/bun.zip \
     && unzip -o /tmp/bun.zip -d /tmp/bun \
     && mv /tmp/bun/bun-linux-x64/bun /usr/local/bin/bun \
@@ -128,3 +142,8 @@ ENV HARNESS_PLUGIN_ROOT=/opt/mstar-harness
 #   docker run --rm --entrypoint /opt/verify-synthesis.sh <image>
 COPY sandbox-image/verify-synthesis.sh /opt/verify-synthesis.sh
 RUN chmod +x /opt/verify-synthesis.sh
+
+# 1.0 container model: the DO-managed container's MAIN process is the image
+# default command — it must be long-lived (main exit stops the instance and
+# every exec'd process with it).
+CMD ["sleep", "infinity"]

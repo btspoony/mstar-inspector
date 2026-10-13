@@ -6,9 +6,10 @@
  * in wrangler.jsonc must be exported from the entry module or deploy fails).
  *
  * Kept as a separate file so the fetch hot path (src/worker/index.ts) never
- * imports the workerd-only @cloudflare/sandbox SDK: the fetch-path tests
- * import ./index directly and stay Bun-runnable without SDK mocks. The SDK
- * import point remains src/pipeline/sandbox.ts (compass contracts A).
+ * imports the workerd-only `cloudflare:workers` builtin (via the sandbox
+ * adapter): the fetch-path tests
+ * import ./index directly and stay Bun-runnable without builtin mocks. The
+ * runtime import point remains src/pipeline/sandbox.ts (compass contracts A).
  */
 export { default } from "./index";
 export { Sandbox } from "../pipeline/sandbox";

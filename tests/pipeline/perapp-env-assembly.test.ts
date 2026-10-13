@@ -32,7 +32,7 @@
  *
  * Same technique as tests/pipeline/consumer.test.ts: sandbox + commenters
  * injected via createReviewConsumer overrides (no process-wide relative-path
- * mock.module); the @cloudflare/sandbox mock is a load shim only. Config is
+ * mock.module); the `cloudflare:workers` mock is a load shim only. Config is
  * seeded through the REAL createAppConfigStore over the fully-migrated bun:sqlite
  * D1 double, so the decrypt path is exercised for real.
  */
@@ -174,15 +174,12 @@ const fakeSandbox = {
   destroy: mock(async () => {}),
 };
 
-// Load-shim only: consumer.ts statically imports ./sandbox → @cloudflare/sandbox,
-// whose real dist references the workerd builtin `cloudflare:workers`,
-// unresolvable in Bun's test runner. Every test injects the fake via
-// createReviewConsumer overrides — this mock is never called.
-mock.module("@cloudflare/sandbox", () => ({
-  getSandbox: mock(async () => {
-    throw new Error("unexpected: assembly tests inject getSandbox via overrides");
-  }),
-  Sandbox: class Sandbox {},
+// Load-shim only: consumer.ts statically imports ./sandbox → the workerd
+// builtin `cloudflare:workers` (unresolvable in Bun's test runner). Every test
+// injects the fake via createReviewConsumer overrides — this mock is never
+// called.
+mock.module("cloudflare:workers", () => ({
+  DurableObject: class {},
 }));
 
 // --- commenter fakes (app-path messages construct via the factory seam) -----

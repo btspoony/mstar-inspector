@@ -19,9 +19,8 @@
  *
  * Same technique as tests/pipeline/consumer.test.ts: sandbox + commenters
  * injected via createReviewConsumer overrides (no process-wide relative-path
- * mock.module); the @cloudflare/sandbox mock is a load shim only (the real
- * dist references the workerd builtin `cloudflare:workers`, unresolvable in
- * Bun's test runner).
+ * mock.module); the `cloudflare:workers` mock is a load shim only (the
+ * workerd builtin is unresolvable in Bun's test runner).
  */
 
 import { describe, expect, mock, test } from "bun:test";
@@ -153,15 +152,12 @@ const fakeSandbox = {
   destroy: mock(async () => {}),
 };
 
-// Load-shim only: consumer.ts statically imports ./sandbox → @cloudflare/sandbox,
-// whose real dist references the workerd builtin `cloudflare:workers`
-// (unresolvable in Bun's test runner). Every test injects the fake via
-// createReviewConsumer overrides — this mock is never called.
-mock.module("@cloudflare/sandbox", () => ({
-  getSandbox: mock(async () => {
-    throw new Error("unexpected: resolution tests inject getSandbox via overrides");
-  }),
-  Sandbox: class Sandbox {},
+// Load-shim only: consumer.ts statically imports ./sandbox → the workerd
+// builtin `cloudflare:workers` (unresolvable in Bun's test runner). Every test
+// injects the fake via createReviewConsumer overrides — this mock is never
+// called.
+mock.module("cloudflare:workers", () => ({
+  DurableObject: class {},
 }));
 
 // --- commenter fakes --------------------------------------------------------

@@ -114,11 +114,11 @@ jobs:
       - name: "Smoke: image digest"
         run: |
           bunx wrangler containers list --json \
-            | jq -r '.[] | select(.name == "mstar-inspector-sandbox") | .image' \
+            | jq -r '.[] | select(.name == "mstar-inspector-sandbox-v2") | .image' \
             | grep -oE 'sha256:[0-9a-f]{64}' > image_digest.txt
           test -s image_digest.txt
           # 备源（首次实跑若 .name 与预期不符，以部署日志锚定行兜底）：
-          # grep -oE "registry\.cloudflare\.com/${CLOUDFLARE_ACCOUNT_ID}/mstar-inspector-sandbox@sha256:[0-9a-f]{64}" deploy.log
+          # grep -oE "registry\.cloudflare\.com/${CLOUDFLARE_ACCOUNT_ID}/mstar-inspector-sandbox-v2@sha256:[0-9a-f]{64}" deploy.log
 
       # ADMIN_LOGINS is a dashboard-managed plain var (keep_vars), never a
       # Worker secret — `wrangler secret list` cannot observe it. Read the

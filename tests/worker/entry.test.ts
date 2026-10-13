@@ -5,9 +5,10 @@
  * at: it must export BOTH the fetch/queue handler (re-exported from ./index)
  * AND the Sandbox Durable Object class so the containers binding resolves
  * (`class_name: "Sandbox"` in wrangler.jsonc). The entry statically imports
- * the workerd-only @cloudflare/sandbox SDK, so the SDK is mocked here (same
- * technique as tests/pipeline/sandbox.test.ts) and the entry is imported
- * dynamically after the mock is registered.
+ * the workerd-only `cloudflare:workers` builtin (via the sandbox adapter), so
+ * the builtin is mocked here (same technique as
+ * tests/pipeline/sandbox.test.ts) and the entry is imported dynamically after
+ * the mock is registered.
  */
 
 import { describe, expect, mock, test } from "bun:test";
@@ -16,9 +17,8 @@ import { createFailureStore } from "../../src/store/failure-store";
 import { createMigratedTestD1 } from "../store/helpers";
 import { defaultSweepLog } from "../../src/worker/sweep";
 
-mock.module("@cloudflare/sandbox", () => ({
-  getSandbox: mock(() => ({})),
-  Sandbox: class Sandbox {},
+mock.module("cloudflare:workers", () => ({
+  DurableObject: class {},
 }));
 
 const { default: worker, Sandbox } = await import("../../src/worker/entry");

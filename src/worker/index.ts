@@ -384,8 +384,9 @@ app.post("/webhook/:appSlug", async (c) => {
 export default {
   fetch: app.fetch,
   // 06 queue wiring — the ONLY legal worker → pipeline edge (compass A).
-  // Dynamic import: the consumer statically loads the workerd-only
-  // @cloudflare/sandbox SDK, which Bun's test runner cannot resolve — a
+  // Dynamic import: the consumer statically loads the sandbox adapter, which
+  // imports the workerd-only `cloudflare:workers` builtin — Bun's test runner
+  // cannot resolve it, so a
   // static import would break the fetch-path tests (platform-specific
   // module exception to the static-import rule).
   async queue(batch: MessageBatch<ReviewJobPayload>, env: Env & PipelineEnv): Promise<void> {

@@ -39,12 +39,17 @@ describe("registry build-definition parity (qc1 F-001)", () => {
     const enabledPaths = new Set(enabledSandboxImages().map((entry) => entry.wranglerImagePath));
     for (const config of ["wrangler.jsonc", "wrangler.smoke.jsonc"]) {
       const text = readFileSync(join(REPO_ROOT, config), "utf8");
-      // "image": does not overlap "image_build_context": (the closing quote
-      // of the key name differs), so each regex collects exactly its own key.
-      const images = new Set([...text.matchAll(/"image":\s*"([^"]+)"/g)].map((match) => match[1]));
-      expect(images).toEqual(enabledPaths);
+      // Sandbox SDK 1.0 shape: the image rides the DO scheduling policy's
+      // named-images map (`images.sandbox.dockerfile`, built from the repo
+      // root `build_context` the Dockerfile COPYs package.json + src/review
+      // from). Collecting EVERY match (not just the first) pins the full set:
+      // a second, unregistered image entry fails the lock instead of hiding
+      // behind the first match. "dockerfile"/"build_context" are distinct
+      // keys, so each regex collects exactly its own key.
+      const dockerfiles = new Set([...text.matchAll(/"dockerfile":\s*"([^"]+)"/g)].map((match) => match[1]));
+      expect(dockerfiles).toEqual(enabledPaths);
       const buildContexts = new Set(
-        [...text.matchAll(/"image_build_context":\s*"([^"]+)"/g)].map((match) => match[1]),
+        [...text.matchAll(/"build_context":\s*"([^"]+)"/g)].map((match) => match[1]),
       );
       expect(buildContexts).toEqual(new Set(["."]));
     }

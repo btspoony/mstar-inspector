@@ -70,7 +70,7 @@ export type SandboxImageDefinition = {
   enabled: boolean;
   /** Dockerfile path relative to repo root. */
   dockerfilePath: string;
-  /** wrangler `containers[].image` path (image_build_context stays repo root). */
+  /** wrangler `containers[].images.sandbox.dockerfile` path (build_context stays repo root). */
   wranglerImagePath: string;
   /** Runtime kind — names the runner/synthesizer implementation this entry executes under. */
   runtime: "omp";

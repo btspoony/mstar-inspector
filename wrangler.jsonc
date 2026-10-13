@@ -73,15 +73,28 @@
   ],
   // 06: Sandbox container binding (shape verified at T1 — containers[].class_name
   // == durable_objects.bindings[].class_name == migrations[].new_sqlite_classes[0]
-  // == "Sandbox"). image_build_context "." lets the Dockerfile COPY
-  // package.json/bun.lock and src/review into the image (T2 finding).
+  // == "Sandbox"). Sandbox SDK 1.0: the in-repo DO starts its own container, so
+  // the entry carries `scheduling_policy: "durable_object"` + named `images`
+  // (`container.images.sandbox`, src/pipeline/sandbox.ts); `image`,
+  // `instance_type` and `max_instances` are NOT accepted under that policy —
+  // the instance size moves into `container.start()` (lite) and concurrency is
+  // bounded by the queue consumer's max_concurrency: 1 above. `build_context`
+  // "." lets the Dockerfile COPY package.json/bun.lock and src/review into the
+  // image (T2 finding). The application `name` must NOT reuse the account's
+  // existing 0.12-era app name (mstar-inspector-sandbox) — reusing it fails
+  // the deploy after the new Worker version is already live (sandbox-sdk 1.0
+  // migration guide).
   "containers": [
     {
       "class_name": "Sandbox",
-      "image": "./sandbox-image/omp/Dockerfile",
-      "image_build_context": ".",
-      "instance_type": "lite",
-      "max_instances": 1
+      "name": "mstar-inspector-sandbox-v2",
+      "scheduling_policy": "durable_object",
+      "images": {
+        "sandbox": {
+          "dockerfile": "./sandbox-image/omp/Dockerfile",
+          "build_context": "."
+        }
+      }
     }
   ],
   "durable_objects": {

@@ -6,8 +6,8 @@
  * (allowlist + fail-closed + single-quote discipline before any shell string
  * exists) and audited in-repo constants mint the brand via `shellCommand()`.
  *
- * Deliberately dependency-free (no SDK import) so pure-builder tests and the
- * review runtime can import it without pulling the @cloudflare/sandbox graph.
+ * Deliberately dependency-free (no sandbox-adapter import) so pure-builder tests and the
+ * review runtime can import it without pulling the sandbox runtime graph.
  */
 
 declare const shellCommandBrand: unique symbol;
