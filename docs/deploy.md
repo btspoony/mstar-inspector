@@ -391,20 +391,22 @@ smoke → record the digest.
    the manual equivalent is to copy the digest from the `wrangler deploy`
    output's container summary block (the `registry.cloudflare.com/…@sha256:`
    line).
-   **Digest drift check (DOCS-01):** after every deploy, verify the live
-   version — and image — against the recorded baseline —
+   **Digest drift check (DOCS-01):** after every deploy, check the live
+   version against the recorded baseline —
    ```bash
    wrangler deployments list   # or: wrangler versions list
-   wrangler containers list --json   # container apps; the 1.0 durable_object
-                                     # app reports `"image": ""` (see below)
    ```
    The **baseline** is the latest successful run's summary / `deploy-evidence`
-   artifact (see § Image pins and digest record). `wrangler containers list
-   --json` is **not** a digest source for the 1.0 app — its `image` is empty
-   and only the orphaned default-policy `mstar-inspector-sandbox` app still
-   carries a reference — so the live truth is the reference the deploying
-   `wrangler deploy` printed; a stale baseline makes the "which image is
-   live" audit wrong.
+   artifact (see § Image pins and digest record) — its digest is the
+   `registry.cloudflare.com/…@sha256:` reference that run's `wrangler deploy`
+   printed. There is **no independent live-digest source** to compare it
+   against: `wrangler containers list --json` reports an empty `image` for
+   this Worker's 1.0 `durable_object` application (only the orphaned
+   default-policy `mstar-inspector-sandbox` app still carries a reference) —
+   it remains useful for application **state** (`name` / `state` /
+   `instances` / `version`), not for the digest. Drift is therefore detected by
+   deploying and diffing the new run's digest against the baseline; a stale
+   baseline makes the "which image is live" audit wrong.
 
 ### Sandbox image — U-001 synthesis verification
 
@@ -823,14 +825,14 @@ Deployed image record (DOCS-01 baseline):
 > and uploads per-run evidence (deploy.log / version_id.txt /
 > image_digest.txt) as the `deploy-evidence` Actions artifact. The GitHub
 > **Environments → staging** page shows the deployment history (commit,
-> actor, timestamp). The **live truth** for the image is the container
-> reference the deploying `wrangler deploy` printed — `wrangler containers
-> list --json` does **not** carry it for the 1.0 `durable_object` app (the
-> record reports `"image": ""`; only the orphaned default-policy
-> `mstar-inspector-sandbox` app still shows a reference). The run summary is
-> the deploy-time baseline for the DOCS-01 drift check — compare the live
-> image against the latest run's digest after any deploy. Historical record
-> (2026-08-31 manual deploy):
+> actor, timestamp). The digest is the container reference the deploying
+> `wrangler deploy` printed — `wrangler containers list --json` does **not**
+> carry it for the 1.0 `durable_object` app (the record reports
+> `"image": ""`; only the orphaned default-policy `mstar-inspector-sandbox`
+> app still shows a reference), which is why no side-by-side live compare is
+> possible: the run summary is the deploy-time baseline for the DOCS-01
+> drift check — diff the new run's digest against it after any deploy.
+> Historical record (2026-08-31 manual deploy):
 > digest `sha256:09724a204ef38dab02b88a6537bdd3f051997ac144f0aeff7d5901d9d75aa57d`,
 > Worker version `62c18d0a`.
 

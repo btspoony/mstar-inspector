@@ -187,7 +187,7 @@ jobs:
           if-no-files-found: error
         if: always()   # keep per-run evidence even when a later step fails
 
-      - name: Record live image digest (DOCS-01 baseline)
+      - name: Record image digest (DOCS-01 baseline)
         run: |
           set -euo pipefail
           DIGEST=$(cat image_digest.txt); VERSION=$(cat version_id.txt)
@@ -196,6 +196,6 @@ jobs:
             echo "- Image digest: \`$DIGEST\`"
             echo "- Worker version: \`$VERSION\`"
             echo "- Actions run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
-            echo "- Source: \`registry.cloudflare.com\` container reference in this run's deploy output (the 1.0 durable_object app exposes no digest via \`containers list --json\`)"
+            echo "- Source: \`registry.cloudflare.com\` container reference printed by this run's \`wrangler deploy\` — \`wrangler containers list --json\` reports an empty \`image\` for the 1.0 durable_object application"
           } >> "$GITHUB_STEP_SUMMARY"
           echo "::notice::DOCS-01 baseline: digest=$DIGEST version=$VERSION (run summary + deploy-evidence artifact)"
