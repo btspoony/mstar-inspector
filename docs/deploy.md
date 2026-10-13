@@ -58,6 +58,19 @@ exist before the first deploy:
   (`images.sandbox.build_context: "."`, lite instance via `container.start()`,
   `scheduling_policy: "durable_object"`, container app `mstar-inspector-sandbox-v2`). The old
   `mstar-inspector-sandbox` app is orphaned by the cutover — delete it after the switch.
+  - **Fresh workers (new account, DR rebuild, recreated smoke worker) cannot deploy this config
+    as-is.** The retained `v1` tag still declares `new_sqlite_classes: ["Sandbox"]` while the
+    `Sandbox` class is no longer exported, and wrangler 4.147.0 does NOT filter migration steps
+    against the exported classes on a first deploy: with no published script yet
+    (`getMigrationsToUpload` swallows the worker-not-found error), it sends **every** step
+    unapplied — so the API receives a namespace request for the absent `Sandbox` class and the
+    first deploy fails. On the existing worker this is inert (`migration_tag: v1` is already
+    applied; only the `v2` step is sent).
+  - **Ordered remedy for a fresh environment** (do NOT skip steps): 1) confirm ops has deleted the
+    orphaned `mstar-inspector-sandbox` container application; 2) add a `v3` migration tag with
+    `deleted_classes: ["Sandbox"]` (this PR deliberately ships none — the remote application
+    still exists); 3) deploy — the full step list then creates and retires the legacy class
+    self-contained. Existing deployments need no action.
 
 ### D1 migrations (0001–0022, forward-only)
 

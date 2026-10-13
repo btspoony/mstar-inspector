@@ -3,7 +3,7 @@
  * boundary (Bun's test runner cannot resolve it; same technique the tests
  * used for the @cloudflare/sandbox SDK dist) so they stay deterministic.
  * Contract under test (plan interface section):
- *   - the in-repo `Sandbox` Durable Object starts its own container (image
+ *   - the in-repo `SandboxV1` Durable Object starts its own container (image
  *     from `container.images.sandbox`, lite instance, internet on), (re)sets
  *     the inactivity timeout on every guard, and never restarts a running
  *     container;
