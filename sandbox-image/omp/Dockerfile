@@ -47,8 +47,9 @@
 # bun.lock — the shim tag must match, `Files` needs it). The Debian base is
 # pinned by DIGEST for linux/amd64 (the platform the pinned bun-linux-x64 /
 # gh amd64 artifacts build for) — the rolling `trixie-slim` alias would let a
-# rebuild silently change libc / coreutils / CA packages inside the
-# production review executor. Digest taken 2026-10-13 (Debian build revision
+# rebuild silently change the base layer (libc and everything it carries)
+# inside the production review executor; the apt-installed tools below still
+# resolve from the rolling suite at build time. Digest taken 2026-10-13 (Debian build revision
 # 2026-10-05); bump deliberately, never incidentally. Re-resolve with the
 # read-only Docker Hub flow:
 #   TOKEN=$(curl -fsS "https://auth.docker.io/token?service=registry.docker.io&scope=repository:library/debian:pull" | jq -r .token)
