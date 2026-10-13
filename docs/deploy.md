@@ -52,9 +52,28 @@ exist before the first deploy:
 - D1 database `mstar-inspector-db` (id
   `7a737173-e202-430f-8b47-e087d5e885c4`, already in `wrangler.jsonc`) with
   migrations applied — see below.
-- Containers: no separate setup — the `Sandbox` DO class builds from
-  `sandbox-image/omp/Dockerfile` at deploy time (`image_build_context: "."`,
-  `instance_type: lite`, `max_instances: 1`).
+- Containers: no separate setup — the `SandboxV1` DO class (NEW class + namespace +
+  `v2` `new_sqlite_classes` tag; a container application cannot change scheduling policy in
+  place or reuse the 0.12 namespace) builds from `sandbox-image/omp/Dockerfile` at deploy time
+  (`images.sandbox.build_context: "."`, lite instance via `container.start()`,
+  `scheduling_policy: "durable_object"`, container app `mstar-inspector-sandbox-v2`). The old
+  `mstar-inspector-sandbox` app is orphaned by the cutover — delete it after the switch.
+  - **Fresh workers (new account, DR rebuild, recreated smoke worker)**: the retained `v1` tag still
+    declares `new_sqlite_classes: ["Sandbox"]`, and wrangler 4.147.0 replays every unapplied migration
+    on a first deploy. The worker entry therefore keeps exporting a MINIMAL compatibility `Sandbox`
+    class — empty, serves no requests, no container, no binding traffic (`SandboxV1` is the only live
+    implementation) — so the legacy migration stays replayable and a fresh deploy succeeds.
+  - **The compatibility `Sandbox` export is a PERSISTENT requirement, not a temporary shim.** The retained
+    `v1` tag (`new_sqlite_classes: ["Sandbox"]`) must stay declared forever (migration history is never
+    edited), and any worker created from scratch replays *every* unapplied step — so this module must always
+    export `Sandbox` for that replay to validate, whether or not a later `v3` tag unmounts the class from
+    NEW namespaces. Ordered sequence: 1) ops deletes the orphaned `mstar-inspector-sandbox` container
+    application; 2) a later `v3` tag with `deleted_classes: ["Sandbox"]` stops new namespaces from carrying
+    it; 3) **the `Sandbox` class export stays** — it is what keeps `v1` replayable for any future fresh
+    worker, and removing it re-arms the upload rejection this section exists to prevent. Removing the
+    export would first require rewriting the retained `v1` history into a single consolidated migration
+    chain and re-verifying BOTH an existing worker and a fresh one — explicitly out of scope for this
+    change, not a casual follow-up.
 
 ### D1 migrations (0001–0022, forward-only)
 
@@ -289,7 +308,7 @@ runs through the flows below instead of a staging domain.
 
 ### Pre-production verification (this Worker's real options)
 
-**No versioned Preview URLs.** The Worker implements the `Sandbox` Durable
+**No versioned Preview URLs.** The Worker implements the `SandboxV1` Durable
 Object (container binding) — Cloudflare does NOT generate preview URLs for
 Workers implementing a DO (docs: Preview URLs → Limitations; verified live:
 every version row reports `has_preview:false` and versioned
@@ -317,7 +336,7 @@ flows that DO work:
 3. **Dashboard** — Workers & Pages → mstar-inspector → Deployments: promote
    a version or adjust the split graphically.
 
-Caveats for this container Worker: only ONE version of the Sandbox DO runs
+Caveats for this container Worker: only ONE version of the SandboxV1 DO runs
 at a time (per-DO assignment, single global class) — a 0% version pinned via
 override still boots the container; keep DO-class lifecycle changes out of
 verified versions (uploads with lifecycle changes are rejected; deploy them
@@ -397,8 +416,8 @@ gate; run manually after a build/deploy:
 ```bash
 docker run --rm --entrypoint /opt/verify-synthesis.sh <image>
 # expect U001_VERIFY=pass and exit 0 (KEY=VALUE evidence lines per layer)
-# --entrypoint is required — the sandbox default entrypoint is long-lived
-# (it keeps the server alive after the user command) and would never
+# --entrypoint is required — the image's default command is long-lived
+# (`sleep infinity` keeps the container alive) and would never
 # surface this one-shot script's exit code.
 ```
 
@@ -695,15 +714,16 @@ on a positively observed unset.
 
 ### Verified control surface (real, NOT activated this iteration)
 
-A real egress control surface exists and is verified: `@cloudflare/sandbox`
-0.12.8's pinned dependency `@cloudflare/containers` 0.3.7 (bun.lock) ships an
-egress face on the `Container` superclass the Sandbox DO extends —
-`allowedHosts` (non-empty = allowlist gate, a miss fails the request with
-HTTP 520), `deniedHosts` (unconditional block), `enableInternet` (default
-true), `interceptHttps` (default false; requires the container to trust the
-Cloudflare CA), plus the static `outbound*` handler chain; enforcement lives
-in `ContainerProxy.fetch` (denied → allowed gate → handlers → direct).
-Evidence: iteration spec m3-production-grade
+A real egress control surface exists and is verified: the Sandbox SDK 1.0
+DO Container API (`this.ctx.container`,
+`developers.cloudflare.com/containers/api/durable-object-container/`) exposes
+the outbound face — `interceptOutboundHttp(addr, binding)` /
+`interceptAllOutboundHttp(binding)` (deny-by-default once wired), plus
+`enableInternet` on `container.start()` (set explicitly `true` in
+src/pipeline/sandbox.ts — this repo relies on provider egress; 0.12's
+`allowedHosts`/`deniedHosts`/`interceptHttps` superclass fields are gone with
+the SDK's `Container` class). Enforcement lives in the runtime's
+container-proxy fetch chain. Evidence: iteration spec m3-production-grade
 §1.3 + §4 AL-4.
 
 It is deliberately NOT activated. Reasons (AL-4):
@@ -716,10 +736,11 @@ It is deliberately NOT activated. Reasons (AL-4):
   (`src/contracts/sandbox-images.ts`, synthesized at review time).
 - Per-App BYOK keeps the provider set open — the host set is a product
   surface, not a constant.
-- A missing host fails CLOSED (520 → review failure → retry → DLQ) — a worse
+- A missing host fails CLOSED (review failure → retry → DLQ) — a worse
   failure mode than the documented status quo.
-- The beta SDK's `interceptHttps` CA behavior on the sandbox base image is
-  unverified.
+- The 1.0 outbound-rule API's TLS/CA interception behavior on this base image
+  is unverified (0.12's `interceptHttps` counterpart is gone; the 1.0
+  `interceptOutboundHttps` face is not activated either).
 
 Activation prerequisite (Roadmap next): provider-host SSOT + staging
 verification. Until then the boundary below is the contract — no fake
@@ -754,16 +775,18 @@ Five pins — mstar-harness bumped to **3.11.2** (2026-09-20, superseding
 the 3.10.2 pin); the `mstar` CLI (`@mstar-harness/cli`) preinstall
 is the container-level mechanism, carried
 forward at the exact `@3.11.2` pin. The CLI
-preinstall is container-level only (`sandbox exec` resolves the `mstar`
+preinstall is container-level only (`container exec` resolves the `mstar`
 shim): review sessions stay restricted to the read-only `read` / `grep` /
 `glob` whitelist (Runner tool whitelist above), so the review-session model
 cannot invoke the CLI today — a sanctioned session toolcall path is a
-tracked follow-up, not a shipped mechanism. Base image /
-Bun / gh re-verified, no bump:
+tracked follow-up, not a shipped mechanism. Bun / gh pins carried forward
+unchanged; the base image moved with the Sandbox SDK 1.0 migration (the SDK no
+longer ships a runtime base — controlled Debian base + the 1.0.0
+`sandbox-shim`):
 
 | Pin | Value | Where |
 |---|---|---|
-| base image | `docker.io/cloudflare/sandbox:0.12.8` | `sandbox-image/omp/Dockerfile` FROM |
+| base image | `docker.io/library/debian:trixie-slim@sha256:918311b7b6c4c6f68b232ba516584925f6c78ad82b6fd534b98979df6438e483` (linux/amd64; + `sandbox-shim` from `docker.io/cloudflare/sandbox:1.0.0`) | `sandbox-image/omp/Dockerfile` FROM / COPY --from |
 | Bun | `1.4.0` | `sandbox-image/omp/Dockerfile` |
 | gh CLI | `2.98.0` | `sandbox-image/omp/Dockerfile` |
 | mstar-harness | `2cae49faaa9a7652479f8ad859999fe6da7dbc22` (3.11.2) | `sandbox-image/omp/Dockerfile` |
@@ -828,10 +851,10 @@ Contract:
 
 - `wrangler.jsonc → queues.consumers[review-queue].max_concurrency: 1` —
   protective fix: UNSET means the platform auto-scales consumer concurrency
-  by backlog. With a unique sandbox id per attempt against
-  `containers[].max_instances: 1`, >1 concurrency only blocks on container
-  acquisition (timeout → retry storm → DLQ). Pinned, NOT env-configurable;
-  raising it requires raising `max_instances` first.
+  by backlog. With a unique sandbox id per attempt (each attempt gets its own
+  Durable-Object-managed container — `scheduling_policy: "durable_object"`
+  has no `max_instances` cap), >1 concurrency would run containers
+  concurrently. Pinned, NOT env-configurable.
 
 ### Cron failure sweep (architect verdict AL-6)
 

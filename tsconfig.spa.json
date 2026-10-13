@@ -13,9 +13,8 @@
     "verbatimModuleSyntax": true,
     "noUncheckedIndexedAccess": true,
     "types": ["vite/client", "bun"],
-    "baseUrl": ".",
     "paths": {
-      "@/*": ["src/spa/*"]
+      "@/*": ["./src/spa/*"]
     }
   },
   "include": ["src/spa", "src/i18n", "src/version.ts", "tests/spa"]

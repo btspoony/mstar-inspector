@@ -156,17 +156,19 @@ describe("runSweep", () => {
          VALUES ('app-1', 'retention-app', 9001, 'retention-app', 'enc', 'enc', 'tester', datetime('now'), datetime('now'))`,
       )
       .run();
-    const insertDelivery = (id: string, created_at: string): void => {
+    // Ages are relative to the real clock — a hard-coded calendar date slides
+    // out of the 30-day window and turns this test into a date bomb.
+    const insertDelivery = (id: string, ageDays: number): void => {
       db.raw
         .query(
           `INSERT INTO webhook_deliveries (id, app_id, event_name, outcome, created_at)
-           VALUES (?, 'app-1', 'pull_request', 'ok', ?)`,
+           VALUES (?, 'app-1', 'pull_request', 'ok', datetime('now', ?))`,
         )
-        .run(id, created_at);
+        .run(id, `-${ageDays} days`);
     };
-    insertDelivery("old-1", "2026-07-01 00:00:00"); // 61 days old — swept
-    insertDelivery("old-2", "2026-07-31 00:00:00"); // 31 days old — swept
-    insertDelivery("fresh", "2026-08-30 00:00:00"); // 1 day old — kept
+    insertDelivery("old-1", 61); // 61 days old — swept
+    insertDelivery("old-2", 31); // 31 days old (just past the boundary) — swept
+    insertDelivery("fresh", 1); // 1 day old — kept
     const { log } = captureLog();
     const result = await runSweep(db, { log });
     const remaining = db.raw.query("SELECT id FROM webhook_deliveries ORDER BY id").all() as Array<{ id: string }>;

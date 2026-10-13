@@ -235,16 +235,11 @@ const fakeSandbox = {
   }),
 };
 
-// Load-shim only: consumer.ts statically imports ./sandbox → @cloudflare/sandbox,
-// whose real dist references the workerd builtin `cloudflare:workers`
-// (unresolvable in Bun's test runner). The consumer never calls this
-// getSandbox — every test injects the fake via createReviewConsumer overrides.
-mock.module("@cloudflare/sandbox", () => ({
-  getSandbox: mock(async () => {
-    throw new Error("unexpected: consumer tests inject getSandbox via overrides");
-  }),
-  Sandbox: class Sandbox {},
-}));
+// Load-shim only: consumer.ts statically imports ./sandbox → the workerd
+// builtin `cloudflare:workers` (unresolvable in Bun's test runner). The
+// consumer never calls the sandbox — every test injects the fake via
+// createReviewConsumer overrides.
+import "../helpers/cloudflare-workers-mock";
 
 // --- commenter fake (injected via createReviewConsumer overrides) -----------
 // the shared double (tests/helpers/review-commenter.ts) records

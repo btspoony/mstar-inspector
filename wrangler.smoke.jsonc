@@ -2,28 +2,34 @@
   // T1/T2 smoke config — dedicated entry src/pipeline/smoke-entry.ts.
   // NOT the production config: the production worker (src/worker/index.ts)
   // gains the consumer + sandbox wiring at T3.
-  // Binding shape verified against @cloudflare/sandbox 0.12.8 docs + types:
-  //   containers[].class_name == durable_objects.bindings[].class_name ==
-  //   migrations[].new_sqlite_classes[0] == "Sandbox" (the SDK's DO class).
-  // image_build_context: "." = repo root, so the Dockerfile can COPY
-  // package.json/bun.lock and src/review into the image (T2 runner deps).
+  // Sandbox SDK 1.0 shape (mirrors wrangler.jsonc): the 1.0 implementation is
+  // the in-repo `SandboxV1` Durable Object (src/pipeline/sandbox.ts) in a NEW
+  // class/namespace (a container application canNOT change scheduling policy
+  // in place), so `scheduling_policy: "durable_object"` + named `images`
+  // (container.images.sandbox) and a `v2` `new_sqlite_classes` migration tag.
+  // build_context "." = repo root, so the
+  // Dockerfile can COPY package.json/bun.lock and src/review into the image.
   "name": "mstar-inspector-smoke",
   "main": "src/pipeline/smoke-entry.ts",
   "compatibility_date": "2026-08-20",
   "compatibility_flags": ["nodejs_compat"],
   "containers": [
     {
-      "class_name": "Sandbox",
-      "image": "./sandbox-image/omp/Dockerfile",
-      "image_build_context": ".",
-      "instance_type": "lite",
-      "max_instances": 1
+      "class_name": "SandboxV1",
+      "name": "mstar-inspector-smoke-sandbox-v2",
+      "scheduling_policy": "durable_object",
+      "images": {
+        "sandbox": {
+          "dockerfile": "./sandbox-image/omp/Dockerfile",
+          "build_context": "."
+        }
+      }
     }
   ],
   "durable_objects": {
     "bindings": [
       {
-        "class_name": "Sandbox",
+        "class_name": "SandboxV1",
         "name": "SANDBOX"
       }
     ]
@@ -32,6 +38,10 @@
     {
       "new_sqlite_classes": ["Sandbox"],
       "tag": "v1"
+    },
+    {
+      "new_sqlite_classes": ["SandboxV1"],
+      "tag": "v2"
     }
   ]
 }

@@ -3,25 +3,22 @@
  *
  * The entry module (src/worker/entry.ts) is what wrangler.jsonc `main` points
  * at: it must export BOTH the fetch/queue handler (re-exported from ./index)
- * AND the Sandbox Durable Object class so the containers binding resolves
- * (`class_name: "Sandbox"` in wrangler.jsonc). The entry statically imports
- * the workerd-only @cloudflare/sandbox SDK, so the SDK is mocked here (same
- * technique as tests/pipeline/sandbox.test.ts) and the entry is imported
- * dynamically after the mock is registered.
+ * AND the SandboxV1 Durable Object class so the containers binding resolves
+ * (`class_name: "SandboxV1"` in wrangler.jsonc). The entry statically imports
+ * the workerd-only `cloudflare:workers` builtin (via the sandbox adapter), so
+ * the builtin is mocked here (same technique as
+ * tests/pipeline/sandbox.test.ts) and the entry is imported dynamically after
+ * the mock is registered.
  */
 
-import { describe, expect, mock, test } from "bun:test";
+import { describe, expect, test } from "bun:test";
 import type { D1Database, ExecutionContext, ScheduledController } from "@cloudflare/workers-types";
+import "../helpers/cloudflare-workers-mock";
 import { createFailureStore } from "../../src/store/failure-store";
 import { createMigratedTestD1 } from "../store/helpers";
 import { defaultSweepLog } from "../../src/worker/sweep";
 
-mock.module("@cloudflare/sandbox", () => ({
-  getSandbox: mock(() => ({})),
-  Sandbox: class Sandbox {},
-}));
-
-const { default: worker, Sandbox } = await import("../../src/worker/entry");
+const { default: worker, Sandbox, SandboxV1 } = await import("../../src/worker/entry");
 import { APP_VERSION } from "../../src/version";
 import type { Env } from "../../src/worker/env";
 
@@ -37,8 +34,27 @@ function makeEnv(overrides: Partial<Env> = {}): Env {
 }
 
 describe("worker entry (deploy)", () => {
-  test("exports the Sandbox DO class for the containers binding", () => {
+  test("exports the SandboxV1 DO class for the containers binding", () => {
+    expect(typeof SandboxV1).toBe("function");
+  });
+
+  test("exports BOTH DO classes the config declares — SandboxV1 plus the compatibility Sandbox (fresh-deploy migration replay)", () => {
+    // The retained legacy `v1` migration names `new_sqlite_classes: ["Sandbox"]`;
+    // a fresh worker replays every unapplied migration, so the compatibility
+    // class MUST stay exported or the first deploy fails. Pinning the pair so a
+    // rename cannot silently drop it again.
     expect(typeof Sandbox).toBe("function");
+    expect(Sandbox).not.toBe(SandboxV1);
+  });
+
+  test("the smoke entry re-exports the SAME DO class pair (its config carries the same v1 migration)", async () => {
+    // wrangler.smoke.jsonc's `main` is src/pipeline/smoke-entry.ts and it
+    // carries the same `v1` `new_sqlite_classes: ["Sandbox"]` tag, so dropping
+    // either re-export there re-arms the fresh-worker rejection on the smoke
+    // worker. Identity-pinned: same module graph, same class objects.
+    const smoke = await import("../../src/pipeline/smoke-entry");
+    expect(smoke.Sandbox).toBe(Sandbox);
+    expect(smoke.SandboxV1).toBe(SandboxV1);
   });
 
   test("re-exports the fetch handler (healthz)", async () => {

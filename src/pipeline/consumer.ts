@@ -154,7 +154,7 @@ import { createCheckBeginLatch, createCheckLifecycle, type CheckBeginLatch } fro
 export type PipelineEnv = {
   DB: D1Database;
   IDEMPOTENCY_KV: KVNamespace;
-  SANDBOX: unknown; // binding shape = DurableObjectNamespace<Sandbox> (pinned)
+  SANDBOX: unknown; // binding shape = DurableObjectNamespace<SandboxV1> (pinned; the adapter casts)
   /**
    * Envelope master key for the per-App credential resolution (lock L4):
    * base64 of exactly 32 bytes (the same DASHBOARD_ENCRYPTION_KEY
