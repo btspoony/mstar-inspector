@@ -12,8 +12,9 @@
  * runtime import point remains src/pipeline/sandbox.ts (compass contracts A).
  */
 export { default } from "./index";
-// `SandboxV1` is the live review-sandbox implementation; `Sandbox` is the
-// compatibility class that keeps the legacy `v1` migration replayable on a
-// fresh deploy (see src/pipeline/sandbox.ts — both class_names are declared
-// in wrangler.jsonc, so BOTH must be exported from this entry module).
+// `SandboxV1` is the live review-sandbox implementation and the ONLY class the
+// wrangler CONTAINER config names (`class_name`); `Sandbox` exists solely so
+// the retained `v1` `new_sqlite_classes` entry stays replayable on a fresh
+// deploy (it has no container entry). Both must be exported from this entry
+// module — see src/pipeline/sandbox.ts for the compatibility class contract.
 export { Sandbox, SandboxV1 } from "../pipeline/sandbox";

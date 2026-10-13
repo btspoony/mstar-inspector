@@ -47,6 +47,16 @@ describe("worker entry (deploy)", () => {
     expect(Sandbox).not.toBe(SandboxV1);
   });
 
+  test("the smoke entry re-exports the SAME DO class pair (its config carries the same v1 migration)", async () => {
+    // wrangler.smoke.jsonc's `main` is src/pipeline/smoke-entry.ts and it
+    // carries the same `v1` `new_sqlite_classes: ["Sandbox"]` tag, so dropping
+    // either re-export there re-arms the fresh-worker rejection on the smoke
+    // worker. Identity-pinned: same module graph, same class objects.
+    const smoke = await import("../../src/pipeline/smoke-entry");
+    expect(smoke.Sandbox).toBe(Sandbox);
+    expect(smoke.SandboxV1).toBe(SandboxV1);
+  });
+
   test("re-exports the fetch handler (healthz)", async () => {
     const res = await worker.fetch(new Request("https://worker.local/healthz"), makeEnv());
     expect(res.status).toBe(200);

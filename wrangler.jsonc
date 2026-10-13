@@ -77,7 +77,9 @@
   // Durable Object namespace the 0.12-era `Sandbox` application already owns —
   // so the 1.0 implementation is a NEW class (`SandboxV1`,
   // src/pipeline/sandbox.ts) in a NEW namespace, declared through a NEW
-  // `new_sqlite_classes` migration tag (v2; the v1 tag is history and stays).
+  // `new_sqlite_classes` migration tag (v2; the v1 tag is history and stays —
+  // src/pipeline/sandbox.ts therefore keeps exporting a minimal compatibility
+  // `Sandbox` class, because every fresh worker replays v1).
   // The old `Sandbox` containers entry/binding is therefore REMOVED, not
   // mutated — mutating it would deploy the new Worker version with no
   // durable_object application behind it. The container application name is

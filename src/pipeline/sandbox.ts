@@ -186,9 +186,11 @@ export class SandboxV1 extends DurableObject {
  * fails. It serves no requests and configures nothing: no container, no
  * `this.ctx` use, no traffic path (the durable_objects binding points at
  * `SandboxV1` only) — `SandboxV1` is the only live implementation.
- * Retirement path (docs/deploy.md § Cloudflare resources): ops deletes the
- * orphaned `mstar-inspector-sandbox` container application, a `v3` tag adds
- * `deleted_classes: ["Sandbox"]`, and this class is deleted.
+ * This export is PERSISTENT: the `v1` tag must stay declared forever and every
+ * fresh worker replays it, so removing the class re-arms the upload rejection.
+ * ops deletes the orphaned `mstar-inspector-sandbox` container application and
+ * a later `v3` tag adds `deleted_classes: ["Sandbox"]` to stop NEW namespaces
+ * carrying it — but the export stays (docs/deploy.md § Cloudflare resources).
  */
 export class Sandbox extends DurableObject {
   // Intentionally empty — the legacy `v1` migration's name holder only.

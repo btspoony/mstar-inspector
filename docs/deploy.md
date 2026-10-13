@@ -63,10 +63,17 @@ exist before the first deploy:
     on a first deploy. The worker entry therefore keeps exporting a MINIMAL compatibility `Sandbox`
     class — empty, serves no requests, no container, no binding traffic (`SandboxV1` is the only live
     implementation) — so the legacy migration stays replayable and a fresh deploy succeeds.
-  - **Retirement path for the legacy class (ordered; do NOT skip steps)**: 1) ops deletes the orphaned
-    `mstar-inspector-sandbox` container application; 2) add a `v3` migration tag with
-    `deleted_classes: ["Sandbox"]`; 3) delete the compatibility `Sandbox` class from
-    `src/pipeline/sandbox.ts` and its re-exports. Existing deployments need no action.
+  - **The compatibility `Sandbox` export is a PERSISTENT requirement, not a temporary shim.** The retained
+    `v1` tag (`new_sqlite_classes: ["Sandbox"]`) must stay declared forever (migration history is never
+    edited), and any worker created from scratch replays *every* unapplied step — so this module must always
+    export `Sandbox` for that replay to validate, whether or not a later `v3` tag unmounts the class from
+    NEW namespaces. Ordered sequence: 1) ops deletes the orphaned `mstar-inspector-sandbox` container
+    application; 2) a later `v3` tag with `deleted_classes: ["Sandbox"]` stops new namespaces from carrying
+    it; 3) **the `Sandbox` class export stays** — it is what keeps `v1` replayable for any future fresh
+    worker, and removing it re-arms the upload rejection this section exists to prevent. Removing the
+    export would first require rewriting the retained `v1` history into a single consolidated migration
+    chain and re-verifying BOTH an existing worker and a fresh one — explicitly out of scope for this
+    change, not a casual follow-up.
 
 ### D1 migrations (0001–0022, forward-only)
 
