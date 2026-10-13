@@ -170,7 +170,8 @@ stale-account trap this guards).
 Token** scoped to the deploy account (`f68fcd78e7c5c10f0466788bb9e85b8e`)
 with at least: **D1 → Edit** (migrations apply), **Workers Scripts → Edit**
 (`wrangler deploy` + `secret bulk`), **Workers Containers → Edit**
-(`containers list` digest extraction). A token that passes `wrangler whoami`
+(`wrangler deploy` builds and pushes the sandbox image; the digest smoke
+itself only reads `deploy.log`). A token that passes `wrangler whoami`
 but lacks D1 access fails the migration step with
 `The given account is not valid or is not authorized to access this service
 [code: 7403]` — the account id is correct; the token's permissions are not.
@@ -384,20 +385,26 @@ smoke → record the digest.
    consumer + cron trigger). The step also rebuilds/pushes the container
    image when the build context changed. **Copy the image digest from the
    deploy output.**
-5. Record the digest baseline — on the automated path the workflow writes it
-   to the run summary (`$GITHUB_STEP_SUMMARY`) and uploads `deploy-evidence`
-   artifacts; the manual equivalent is to note the digest from the deploy
-   output (or `wrangler containers list --json`).
+5. Record the digest baseline — on the automated path the workflow greps it
+   out of the deploy log (`Smoke: image digest`), then writes it to the run
+   summary (`$GITHUB_STEP_SUMMARY`) and uploads `deploy-evidence` artifacts;
+   the manual equivalent is to copy the digest from the `wrangler deploy`
+   output's container summary block (the `registry.cloudflare.com/…@sha256:`
+   line).
    **Digest drift check (DOCS-01):** after every deploy, verify the live
-   version + image against the recorded baseline —
+   version — and image — against the recorded baseline —
    ```bash
    wrangler deployments list   # or: wrangler versions list
-   wrangler containers list --json   # live image digest
+   wrangler containers list --json   # container apps; the 1.0 durable_object
+                                     # app reports `"image": ""` (see below)
    ```
    The **baseline** is the latest successful run's summary / `deploy-evidence`
-   artifact (see § Image pins and digest record); the **live truth** is
-   `wrangler containers list --json` — a stale baseline makes the "which
-   image is live" audit wrong.
+   artifact (see § Image pins and digest record). `wrangler containers list
+   --json` is **not** a digest source for the 1.0 app — its `image` is empty
+   and only the orphaned default-policy `mstar-inspector-sandbox` app still
+   carries a reference — so the live truth is the reference the deploying
+   `wrangler deploy` printed; a stale baseline makes the "which image is
+   live" audit wrong.
 
 ### Sandbox image — U-001 synthesis verification
 
@@ -425,10 +432,13 @@ docker run --rm --entrypoint /opt/verify-synthesis.sh <image>
 
 > The Deploy workflow runs the automated smoke on every deploy: healthz
 > (3 attempts, 5s apart), cron registration (grep of the deploy log for
-> `schedule: */15 * * * *`), and image-digest extraction (live container
-> state). Any failure turns the run red and stops. The manual checks below
-> are extra / local investigation steps, not the workflow smoke — for local
-> runs and for investigating a red run.
+> `schedule: */15 * * * *`), and image-digest extraction (grep of the same
+> deploy log for the container summary's
+> `registry.cloudflare.com/<account>/mstar-inspector…@sha256:<64hex>`
+> reference, sorted unique — zero matches or several distinct digests fail
+> the run red). Any failure turns the run red and stops. The manual checks
+> below are extra / local investigation steps, not the workflow smoke — for
+> local runs and for investigating a red run.
 >
 > **URL permanence:** `/dashboard/apps` — and `/dashboard/apps/` —
 > are permanently retired → 301 `/dashboard`; do not re-introduce the path
@@ -813,10 +823,14 @@ Deployed image record (DOCS-01 baseline):
 > and uploads per-run evidence (deploy.log / version_id.txt /
 > image_digest.txt) as the `deploy-evidence` Actions artifact. The GitHub
 > **Environments → staging** page shows the deployment history (commit,
-> actor, timestamp). The **live truth** is `wrangler containers list --json`
-> (Cloudflare state); the run summary is the deploy-time baseline for the
-> DOCS-01 drift check — compare the live image against the latest run's
-> digest after any deploy. Historical record (2026-08-31 manual deploy):
+> actor, timestamp). The **live truth** for the image is the container
+> reference the deploying `wrangler deploy` printed — `wrangler containers
+> list --json` does **not** carry it for the 1.0 `durable_object` app (the
+> record reports `"image": ""`; only the orphaned default-policy
+> `mstar-inspector-sandbox` app still shows a reference). The run summary is
+> the deploy-time baseline for the DOCS-01 drift check — compare the live
+> image against the latest run's digest after any deploy. Historical record
+> (2026-08-31 manual deploy):
 > digest `sha256:09724a204ef38dab02b88a6537bdd3f051997ac144f0aeff7d5901d9d75aa57d`,
 > Worker version `62c18d0a`.
 
