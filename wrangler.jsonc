@@ -71,22 +71,28 @@
       "database_id": "7a737173-e202-430f-8b47-e087d5e885c4"
     }
   ],
-  // 06: Sandbox container binding (shape verified at T1 — containers[].class_name
-  // == durable_objects.bindings[].class_name == migrations[].new_sqlite_classes[0]
-  // == "Sandbox"). Sandbox SDK 1.0: the in-repo DO starts its own container, so
-  // the entry carries `scheduling_policy: "durable_object"` + named `images`
-  // (`container.images.sandbox`, src/pipeline/sandbox.ts); `image`,
-  // `instance_type` and `max_instances` are NOT accepted under that policy —
-  // the instance size moves into `container.start()` (lite) and concurrency is
-  // bounded by the queue consumer's max_concurrency: 1 above. `build_context`
-  // "." lets the Dockerfile COPY package.json/bun.lock and src/review into the
-  // image (T2 finding). The application `name` must NOT reuse the account's
-  // existing 0.12-era app name (mstar-inspector-sandbox) — reusing it fails
-  // the deploy after the new Worker version is already live (sandbox-sdk 1.0
-  // migration guide).
+  // 06: Sandbox container binding. Sandbox SDK 1.0 migration (containers
+  // guide, migrate-to-durable-object-scheduling-policy): a container
+  // application canNOT change its scheduling policy in place or attach to a
+  // Durable Object namespace the 0.12-era `Sandbox` application already owns —
+  // so the 1.0 implementation is a NEW class (`SandboxV1`,
+  // src/pipeline/sandbox.ts) in a NEW namespace, declared through a NEW
+  // `new_sqlite_classes` migration tag (v2; the v1 tag is history and stays).
+  // The old `Sandbox` containers entry/binding is therefore REMOVED, not
+  // mutated — mutating it would deploy the new Worker version with no
+  // durable_object application behind it. The container application name is
+  // also new (the account's 0.12-era `mstar-inspector-sandbox` app cannot be
+  // reused; it is ORPHANED by this cutover and must be deleted by ops after
+  // the switch). `image`, `instance_type`, `max_instances` and
+  // `image_build_context` have no equivalent under this policy — the instance
+  // size moves into `container.start()` (lite) and concurrency is bounded by
+  // the queue consumer's max_concurrency: 1 above. `build_context` "." lets
+  // the Dockerfile COPY package.json/bun.lock and src/review into the image
+  // (T2 finding). The binding name stays `SANDBOX` so `PipelineEnv` and every
+  // consumer call site keep their `env.SANDBOX` usage.
   "containers": [
     {
-      "class_name": "Sandbox",
+      "class_name": "SandboxV1",
       "name": "mstar-inspector-sandbox-v2",
       "scheduling_policy": "durable_object",
       "images": {
@@ -100,7 +106,7 @@
   "durable_objects": {
     "bindings": [
       {
-        "class_name": "Sandbox",
+        "class_name": "SandboxV1",
         "name": "SANDBOX"
       }
     ]
@@ -109,6 +115,10 @@
     {
       "new_sqlite_classes": ["Sandbox"],
       "tag": "v1"
+    },
+    {
+      "new_sqlite_classes": ["SandboxV1"],
+      "tag": "v2"
     }
   ],
   // Observability (dashboard-managed; matched to the live Worker via

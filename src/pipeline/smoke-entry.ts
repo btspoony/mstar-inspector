@@ -2,7 +2,7 @@
  * Sandbox smoke entry (STOP-gate + runner falsification)
  * — a dedicated Worker entry that exercises the real sandbox path locally via
  * `wrangler dev`. Not the production worker entry: the production consumer
- * wiring lives in `src/worker/index.ts`. The `Sandbox` Durable Object
+ * wiring lives in `src/worker/index.ts`. The `SandboxV1` Durable Object
  * class is re-exported here (and only here) so the containers binding
  * resolves; the SDK import point stays `src/pipeline/sandbox.ts`.
  *
@@ -30,12 +30,12 @@
  */
 
 import { runnerCommand, writeJsonCommand } from "./gitops";
-import { getSandbox, Sandbox, shellCommand, type ReviewSandbox, type SandboxBinding } from "./sandbox";
+import { getSandbox, SandboxV1, shellCommand, type ReviewSandbox, type SandboxBinding } from "./sandbox";
 import { DEFAULT_SANDBOX_IMAGE_ID, getSandboxImage } from "../contracts/sandbox-images";
 import { APP_VERSION } from "../version";
 import { parseReviewOutput } from "../review/schema";
 
-export { Sandbox };
+export { SandboxV1 };
 
 type SmokeEnv = {
   SANDBOX: SandboxBinding;

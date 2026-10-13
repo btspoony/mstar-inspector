@@ -52,10 +52,12 @@ exist before the first deploy:
 - D1 database `mstar-inspector-db` (id
   `7a737173-e202-430f-8b47-e087d5e885c4`, already in `wrangler.jsonc`) with
   migrations applied — see below.
-- Containers: no separate setup — the `Sandbox` DO class builds from
-  `sandbox-image/omp/Dockerfile` at deploy time (`images.sandbox.build_context: "."`,
-  lite instance via `container.start()`, `scheduling_policy: "durable_object"`,
-  container app `mstar-inspector-sandbox-v2`).
+- Containers: no separate setup — the `SandboxV1` DO class (NEW class + namespace +
+  `v2` `new_sqlite_classes` tag; a container application cannot change scheduling policy in
+  place or reuse the 0.12 namespace) builds from `sandbox-image/omp/Dockerfile` at deploy time
+  (`images.sandbox.build_context: "."`, lite instance via `container.start()`,
+  `scheduling_policy: "durable_object"`, container app `mstar-inspector-sandbox-v2`). The old
+  `mstar-inspector-sandbox` app is orphaned by the cutover — delete it after the switch.
 
 ### D1 migrations (0001–0022, forward-only)
 
@@ -290,7 +292,7 @@ runs through the flows below instead of a staging domain.
 
 ### Pre-production verification (this Worker's real options)
 
-**No versioned Preview URLs.** The Worker implements the `Sandbox` Durable
+**No versioned Preview URLs.** The Worker implements the `SandboxV1` Durable
 Object (container binding) — Cloudflare does NOT generate preview URLs for
 Workers implementing a DO (docs: Preview URLs → Limitations; verified live:
 every version row reports `has_preview:false` and versioned
@@ -318,7 +320,7 @@ flows that DO work:
 3. **Dashboard** — Workers & Pages → mstar-inspector → Deployments: promote
    a version or adjust the split graphically.
 
-Caveats for this container Worker: only ONE version of the Sandbox DO runs
+Caveats for this container Worker: only ONE version of the SandboxV1 DO runs
 at a time (per-DO assignment, single global class) — a 0% version pinned via
 override still boots the container; keep DO-class lifecycle changes out of
 verified versions (uploads with lifecycle changes are rejected; deploy them

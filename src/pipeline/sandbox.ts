@@ -88,12 +88,19 @@ const INACTIVITY_TIMEOUT_MS = 30 * 60 * 1000;
 const utf8 = new TextDecoder();
 
 /**
- * The review-sandbox Durable Object (wrangler `class_name: "Sandbox"` — the
+ * The review-sandbox Durable Object (wrangler `class_name: "SandboxV1"` — the
  * exported name must match wrangler.jsonc's containers/durable_objects/
  * migrations entries). Owns and starts its own container; the Worker reaches
  * its RPC methods through `getSandbox()`.
+ *
+ * The class carries a NEW name (and a new `new_sqlite_classes` migration tag)
+ * on purpose: a container application cannot change its scheduling policy in
+ * place or attach to a Durable Object namespace the 0.12-era application
+ * already owns — the 1.0 replacement must be a new class/namespace, or the
+ * deploy lands the new Worker version with no durable_object application
+ * behind it (containers migration guide, migrate-to-durable-object-scheduling-policy).
  */
-export class Sandbox extends DurableObject {
+export class SandboxV1 extends DurableObject {
   /**
    * A restarted DO (deploy, eviction) loses the container's inactivity
    * timeout while the container keeps running, so the timeout is armed again

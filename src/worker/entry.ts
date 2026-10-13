@@ -1,8 +1,8 @@
 /**
  * Production Worker entry (deploy) — re-exports the fetch/queue/scheduled
- * handler from ./index and the Sandbox Durable Object class so the wrangler
+ * handler from ./index and the SandboxV1 Durable Object class so the wrangler
  * containers
- * binding resolves (review Important 2: `class_name: "Sandbox"`
+ * binding resolves (review Important 2: `class_name: "SandboxV1"`
  * in wrangler.jsonc must be exported from the entry module or deploy fails).
  *
  * Kept as a separate file so the fetch hot path (src/worker/index.ts) never
@@ -12,4 +12,4 @@
  * runtime import point remains src/pipeline/sandbox.ts (compass contracts A).
  */
 export { default } from "./index";
-export { Sandbox } from "../pipeline/sandbox";
+export { SandboxV1 } from "../pipeline/sandbox";
