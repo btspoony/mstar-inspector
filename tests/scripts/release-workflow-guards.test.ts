@@ -9,18 +9,31 @@
  *   release = pull_request closed + branches [main];
  * - release job guard: merged == true AND title prefix `release v`;
  * - permission faces (AD-4): prep = contents + pull-requests write, no
- *   issues; release = contents write + actions read (the deploy-evidence
- * `gh run list`/`gh run download` face) and nothing else;
+ *   issues; release = contents write + actions write (the `gh workflow run`
+ *   dispatch face plus the deploy-evidence `gh run list`/`gh run download`
+ *   face) and nothing else;
  * - concurrency: prep group `release-prep`, cancel-in-progress: false;
  * - checkout ref pins merge_commit_sha (release side);
  * - softprops/action-gh-release SHA pin string (byte-exact, sole
  *   third-party action; new-to-repo actions are SHA-pinned — pin convention);
+ * - production dispatch step: `gh workflow run deploy-prod.yml --ref "$TAG"`
+ *   only (the production workflow has no `ref` input — a run deploys exactly
+ *   the ref it runs on) after Release creation and before the evidence step —
+ *   a GITHUB_TOKEN-created Release does not fire `release: published`, so the
+ *   explicit dispatch is the only production trigger (T3-2);
  * - deploy-evidence append step: exactly one `gh release edit`
  *   workflow-wide (count across ALL step runs, not mere containment), its own
  *   step-level timeout budget bounded below the job cap, edit failure loud at
  *   the step level (::error + exit 1) while continue-on-error keeps the job
  *   green, and the notes file handed off from the extract step's
  *   `notes_file` output — never rebuilt from RUNNER_TEMP;
+ * - evidence reads the PRODUCTION deploy workflow: the step's env carries
+ *   `DEPLOY_WORKFLOW: deploy-prod.yml` and passes it as the collector's
+ *   `--workflow` argument (staging deploys on the same push, so deploy.yml
+ *   would be ambiguous); it also passes the release tag as `--ref "$TAG"`
+ *   (shell-derived from VERSION) so a same-commit manual rollback run cannot
+ *   be cited as this Release's deploy evidence (T3-3); the prep PR-body
+ *   sentence promises the production deploy;
  * - timeout-minutes on both jobs.
  *
  * Parsing uses python3 + PyYAML (the method validated in task 4; preinstalled
@@ -107,6 +120,10 @@ describe("release-prep.yml guards", () => {
     expect(runs).toContain("jq -er .version package.json");
     expect(runs).toContain("gh pr create");
     expect(runs).toContain("gh pr edit");
+    // the PR body must promise the release-triggered production deploy, not a
+    // bare staging deploy (AC4 surface)
+    expect(runs).toContain("deploys to production");
+    expect(runs).not.toContain("deploys to staging");
     expect(runs).not.toContain("gh label");
   });
 });
@@ -124,8 +141,8 @@ describe("release.yml guards", () => {
     expect(cond).toContain("startsWith(github.event.pull_request.title, 'release v')");
   });
 
-  test("permissions (AD-4): contents write + actions read (evidence face), nothing else", () => {
-    expect(wf.permissions).toEqual({ contents: "write", actions: "read" });
+  test("permissions (AD-4): contents write + actions write (dispatch + evidence face), nothing else", () => {
+    expect(wf.permissions).toEqual({ contents: "write", actions: "write" });
   });
 
   test("job: timeout-minutes 30", () => {
@@ -160,6 +177,36 @@ describe("release.yml guards", () => {
     expect(runs).toContain("--lang en");
     expect(runs).toContain("--lang cn");
     expect(runs).toContain("printf '\\n\\n---\\n\\n'");
+  });
+
+  test("dispatch step: production workflow dispatched on the tag, after Release and before evidence (T3-2)", () => {
+    const steps = wf.jobs.release.steps as {
+      uses?: string;
+      run?: string;
+      if?: string;
+      env?: Record<string, string>;
+      "continue-on-error"?: boolean;
+    }[];
+    const createIdx = steps.findIndex((s) => s.uses?.startsWith("softprops/action-gh-release"));
+    const dispatchIdx = steps.findIndex((s) => s.run?.includes("gh workflow run"));
+    const evidIdx = steps.findIndex((s) => s.run?.includes("collect-deploy-evidence"));
+    expect(dispatchIdx).toBeGreaterThan(createIdx); // tag + Release exist first
+    expect(dispatchIdx).toBeLessThan(evidIdx); // the collector's bounded wait must see the run
+
+    const dispatch = steps[dispatchIdx]!;
+    // tag as `--ref` only: deploy-prod.yml takes no `ref` input, so the run
+    // deploys exactly the ref it runs on (its guard refuses a non-tag ref)
+    expect(dispatch.run).toContain('gh workflow run deploy-prod.yml --ref "$TAG"');
+    expect(dispatch.run).not.toContain("-f ref=");
+    expect(dispatch.env).toEqual({
+      GH_TOKEN: "${{ secrets.GITHUB_TOKEN }}",
+      VERSION: "${{ steps.ver.outputs.version }}",
+    });
+    expect(dispatch.run).not.toContain("${{");
+    // fail-fast: a dispatch failure reds the step (unlike the evidence step)
+    expect(dispatch["continue-on-error"]).toBeUndefined();
+    // a dispatch always deploys, so a prerelease must not dispatch at all
+    expect(dispatch.if).toBe("${{ !contains(steps.ver.outputs.version, '-') }}");
   });
 
   test("deploy-evidence append step: after release creation, never fails the release, env-indirected", () => {
@@ -200,7 +247,19 @@ describe("release.yml guards", () => {
       // folded T2 review: the notes path is handed off from the extract step's
       // output (single shared path), not rebuilt here
       NOTES_FILE: "${{ steps.changelog.outputs.notes_file }}",
+      // AC4: the evidence section must cite the PRODUCTION deploy run —
+      // deploy.yml runs on the same main push and would be ambiguous
+      DEPLOY_WORKFLOW: "deploy-prod.yml",
     });
+    // … and the value reaches the collector as the `--workflow` argument
+    expect(evidRun).toContain(
+      'bun run scripts/collect-deploy-evidence.ts --workflow "$DEPLOY_WORKFLOW"',
+    );
+    // T3-3: the release tag is passed as `--ref` (derived from VERSION inside
+    // the script, no inline ${{ }}) so a manual rollback run that merely shares
+    // the merge commit cannot be selected as this Release's evidence
+    expect(evidRun).toContain('TAG="v${VERSION}"');
+    expect(evidRun).toContain('--ref "$TAG"');
     // shared-path handoff: the extract step exports the path exactly once …
     const extract = steps.find((s) => s.id === "changelog");
     expect(extract?.run).toContain('echo "notes_file=${NOTES_FILE}" >> "$GITHUB_OUTPUT"');

@@ -21,10 +21,12 @@
  */
 import { describe, expect, test } from "bun:test";
 import {
+  DEFAULT_DEPLOY_WORKFLOW,
   DEPLOY_EVIDENCE_ARTIFACT,
   type CliDeps,
   collectDeployEvidence,
   type CollectOptions,
+  createGhRunner,
   type GhRun,
   type GhRunner,
   parseArgs,
@@ -40,18 +42,21 @@ const IN_FLIGHT: GhRun = {
   status: "in_progress",
   conclusion: null,
   displayTitle: "Deploy main",
+  headBranch: "main",
 };
 const SUCCESS: GhRun = {
   databaseId: 123456,
   status: "completed",
   conclusion: "success",
   displayTitle: "Deploy main",
+  headBranch: "main",
 };
 const FAILED: GhRun = {
   databaseId: 123456,
   status: "completed",
   conclusion: "failure",
   displayTitle: "Deploy main",
+  headBranch: "main",
 };
 
 const VERSION_ID = "11112222-3333-4444-5555-666677778888";
@@ -62,19 +67,27 @@ const GH_ENV = {
   GITHUB_REPOSITORY: "acme/mstar-inspector",
 };
 
-/** Recording fake: `listRuns(poll, sha)` decides per poll; `download` materializes artifact files. */
+/** Recording fake: `listRuns(poll, sha, workflow)` decides per poll; `download` materializes artifact files. */
 function makeRunner(
   listRuns: (poll: number, sha: string) => GhRun[],
   download?: (runId: number, destDir: string) => void,
-): { runner: GhRunner; polls: string[]; downloads: { runId: number; destDir: string }[] } {
+): {
+  runner: GhRunner;
+  polls: string[];
+  workflows: string[];
+  downloads: { runId: number; destDir: string }[];
+} {
   const polls: string[] = [];
+  const workflows: string[] = [];
   const downloads: { runId: number; destDir: string }[] = [];
   return {
     polls,
+    workflows,
     downloads,
     runner: {
-      listRuns(sha: string): GhRun[] {
+      listRuns(sha: string, workflow: string): GhRun[] {
         polls.push(sha);
+        workflows.push(workflow);
         return listRuns(polls.length, sha);
       },
       downloadArtifact(runId: number, destDir: string): void {
@@ -105,6 +118,7 @@ function baseOpts(over: Partial<CollectOptions> & { runner: GhRunner }): Collect
   const clock = fakeClock();
   return {
     sha: SHA,
+    workflow: DEFAULT_DEPLOY_WORKFLOW,
     waitMs: 90_000,
     intervalMs: 30_000,
     env: {},
@@ -239,7 +253,7 @@ describe("collectDeployEvidence — no-run branch", () => {
     expect(result.section).toBe(
       [
         "### Deploy evidence",
-        `- Status: no deploy run for commit \`${SHA}\` after the ~2 min bounded wait (deploy.yml paths-ignore may have skipped this commit)`,
+        `- Status: no deploy run for commit \`${SHA}\` after the ~2 min bounded wait (no deploy.yml run was created for this commit)`,
       ].join("\n"),
     );
     expect(result.section).not.toContain("Actions run:");
@@ -379,6 +393,89 @@ describe("collectDeployEvidence — multiple runs for one SHA (newest wins)", ()
   });
 });
 
+describe("collectDeployEvidence — release identity (--ref prefers the release's own run)", () => {
+  // deploy-prod.yml takes no `ref` input and refuses a non-tag ref, so a run's
+  // own headBranch IS the ref it deployed — the preference proves identity.
+  const TAG = "v1.2.3";
+  // gh reports newest-first: the manual rollback (dispatched on `main` at the
+  // release merge commit) is NEWER than the release's own tag-bound run.
+  const ROLLBACK: GhRun = {
+    databaseId: 999,
+    status: "completed",
+    conclusion: "success",
+    displayTitle: "Deploy prod rollback",
+    headBranch: "main",
+  };
+  const TAG_RUN: GhRun = { ...SUCCESS, databaseId: 4242, headBranch: TAG };
+
+  test("same SHA: the tag-bound run is selected over the newer rollback run", () => {
+    const root = makeTempRoot();
+    try {
+      const { runner, downloads } = makeRunner(() => [ROLLBACK, TAG_RUN], (_id, d) =>
+        writeArtifact(d),
+      );
+      const result = collectDeployEvidence(
+        baseOpts({ runner, ref: TAG, artifactDir: root, env: { ...GH_ENV } }),
+      );
+      expect(result.kind).toBe("success");
+      expect(result.section).toContain(`- Actions run: ${RUN_URL.replace("123456", "4242")}`);
+      expect(result.section).not.toContain("- Actions run: 999");
+      // the rollback's artifact is never read for the release's evidence
+      expect(downloads).toEqual([{ runId: 4242, destDir: root }]);
+      // the preference HIT is not an ambiguity — no fallback notice
+      expect(result.section).not.toContain("Run identity:");
+    } finally {
+      disposeTempRoot(root);
+    }
+  });
+
+  test("no run matches the ref: fallback keeps the newest-for-SHA pick and discloses it", () => {
+    const root = makeTempRoot();
+    try {
+      const { runner, downloads } = makeRunner(() => [ROLLBACK], (_id, d) => writeArtifact(d));
+      const result = collectDeployEvidence(
+        baseOpts({ runner, ref: TAG, artifactDir: root, env: {} }),
+      );
+      expect(result.kind).toBe("success"); // never degrades to "no run"
+      expect(result.section).toContain("- Actions run: 999");
+      // the fallback is what discloses that the cited run is not the release's own deploy
+      expect(result.section).toContain(
+        `- Run identity: no run on ref \`${TAG}\` for commit \`${SHA}\` — the newest run for the commit is reported instead, which is not that ref's deploy`,
+      );
+      expect(downloads).toEqual([{ runId: 999, destDir: root }]);
+    } finally {
+      disposeTempRoot(root);
+    }
+  });
+
+  test("fallback on a pending run still yields a section with the fallback notice", () => {
+    const { runner } = makeRunner(() => [{ ...ROLLBACK, status: "in_progress", conclusion: null }]);
+    const clock = fakeClock();
+    const result = collectDeployEvidence(
+      baseOpts({ runner, ref: TAG, now: clock.now, sleep: clock.sleep }),
+    );
+    expect(result.kind).toBe("pending");
+    expect(result.section).toContain("- Actions run: 999");
+    expect(result.section).toContain("Run identity:");
+  });
+
+  test("no --ref keeps the plain newest-for-SHA pick (unchanged behavior)", () => {
+    const root = makeTempRoot();
+    try {
+      const { runner, downloads } = makeRunner(() => [ROLLBACK, TAG_RUN], (_id, d) =>
+        writeArtifact(d),
+      );
+      const result = collectDeployEvidence(baseOpts({ runner, artifactDir: root }));
+      expect(result.kind).toBe("success");
+      expect(result.section).toContain("- Actions run: 999");
+      expect(result.section).not.toContain("Run identity:");
+      expect(downloads).toEqual([{ runId: 999, destDir: root }]);
+    } finally {
+      disposeTempRoot(root);
+    }
+  });
+});
+
 describe("collectDeployEvidence — sanitization + shape gates (QC round A1)", () => {
   test("multi-line error text is collapsed to one line; `- ` bullet shape preserved", () => {
     const { runner } = makeRunner(() => {
@@ -478,6 +575,73 @@ describe("section markdown shape (every branch keeps the explicit heading)", () 
     } finally {
       disposeTempRoot(root);
     }
+  });
+});
+
+describe("collectDeployEvidence — deploy workflow selection (--workflow)", () => {
+  test("defaults to deploy.yml; the explicit workflow reaches listRuns verbatim on every poll", () => {
+    const root = makeTempRoot();
+    try {
+      const def = makeRunner(() => [SUCCESS], (_id, d) => writeArtifact(d));
+      collectDeployEvidence(baseOpts({ runner: def.runner, artifactDir: root }));
+      expect(def.workflows).toEqual([DEFAULT_DEPLOY_WORKFLOW]);
+      expect(def.workflows[0]).toBe("deploy.yml");
+
+      const explicit = makeRunner(() => [SUCCESS], (_id, d) => writeArtifact(d));
+      collectDeployEvidence(
+        baseOpts({ runner: explicit.runner, workflow: "deploy-prod.yml", artifactDir: root }),
+      );
+      expect(explicit.workflows).toEqual(["deploy-prod.yml"]);
+    } finally {
+      disposeTempRoot(root);
+    }
+  });
+
+  test("no-run section names the collected workflow, not a hardcoded deploy.yml", () => {
+    const { runner } = makeRunner(() => []);
+    const clock = fakeClock();
+    const result = collectDeployEvidence(
+      baseOpts({
+        runner,
+        workflow: "deploy-prod.yml",
+        now: clock.now,
+        sleep: clock.sleep,
+      }),
+    );
+    expect(result.kind).toBe("no-run");
+    expect(result.section).toContain("(no deploy-prod.yml run was created for this commit)");
+  });
+
+  test("createGhRunner builds `gh run list --workflow <file> --commit <sha> …` argv", () => {
+    const calls: string[][] = [];
+    const orig = Bun.spawnSync;
+    // test seam: swap the process spawner for a recorder
+    Bun.spawnSync = ((args: string[]) => {
+      calls.push(args);
+      return {
+        exitCode: 0,
+        stdout: Buffer.from("[]"),
+        stderr: Buffer.from(""),
+      };
+    }) as typeof Bun.spawnSync;
+    try {
+      createGhRunner().listRuns(SHA, "deploy-prod.yml");
+    } finally {
+      Bun.spawnSync = orig;
+    }
+    expect(calls).toEqual([
+      [
+        "gh",
+        "run",
+        "list",
+        "--workflow",
+        "deploy-prod.yml",
+        "--commit",
+        SHA,
+        "--json",
+        "status,conclusion,databaseId,displayTitle,headBranch",
+      ],
+    ]);
   });
 });
 
@@ -593,21 +757,116 @@ describe("runCli — exit-code invariant and wiring", () => {
     expect(junk.err[0]).toMatch(/^Unknown argument: --wat/);
   });
 
+  test("--workflow missing its value before another flag is a usage error (T3-1 regression)", () => {
+    const { runner, workflows } = makeRunner(() => []);
+    const stdout: string[] = [];
+    const cap = captureConsole(() =>
+      runCli(["bun", "script", SHA, "--workflow", "--help"], {}, {
+        runner,
+        now: () => 0,
+        sleep: () => {},
+        stdout: (s) => void stdout.push(s),
+      }),
+    );
+    expect(cap.value).toBe(1);
+    expect(cap.err[0]).toMatch(/^Invalid --workflow value: --help/);
+    // usage text reaches the caller, and the runner is never consulted
+    expect(cap.out.join("\n")).toContain("MERGE_SHA=<merge-sha>");
+    expect(stdout).toEqual([]);
+    expect(workflows).toEqual([]);
+
+    const empty = drive({ runs: () => [] }, [SHA, "--workflow="]);
+    expect(empty.code).toBe(1);
+    expect(empty.err[0]).toMatch(/^Invalid --workflow value: <none>/);
+
+    const nextFlag = drive({ runs: () => [] }, [SHA, "--workflow", "--wait-minutes=0"]);
+    expect(nextFlag.code).toBe(1);
+    expect(nextFlag.err[0]).toMatch(/^Invalid --workflow value: --wait-minutes=0/);
+  });
+
+  test("--workflow reaches listRuns verbatim through runCli; default stays deploy.yml", () => {
+    const explicit = makeRunner(() => []);
+    const explicitClock = fakeClock();
+    const explicitCode = captureConsole(() =>
+      runCli(["bun", "script", SHA, "--workflow", "deploy-prod.yml"], {}, {
+        runner: explicit.runner,
+        now: explicitClock.now,
+        sleep: explicitClock.sleep,
+        stdout: () => {},
+      }),
+    ).value;
+    expect(explicitCode).toBe(0);
+    expect(explicit.workflows.length).toBeGreaterThan(0);
+    expect(explicit.workflows.every((w) => w === "deploy-prod.yml")).toBe(true);
+
+    const fallback = makeRunner(() => []);
+    const fallbackClock = fakeClock();
+    captureConsole(() =>
+      runCli(["bun", "script", SHA], {}, {
+        runner: fallback.runner,
+        now: fallbackClock.now,
+        sleep: fallbackClock.sleep,
+        stdout: () => {},
+      }),
+    );
+    expect(fallback.workflows.every((w) => w === DEFAULT_DEPLOY_WORKFLOW)).toBe(true);
+  });
+
   test("--help exits 0 and prints usage", () => {
     const { code, log } = drive({ runs: () => [] }, ["--help"]);
     expect(code).toBe(0);
     expect(log.join("\n")).toContain("MERGE_SHA=<merge-sha>");
   });
+
+  test("--ref reaches the selection: the tag-bound run outranks the newer rollback via runCli", () => {
+    const rollback: GhRun = { ...SUCCESS, databaseId: 999, headBranch: "main" };
+    const tagRun: GhRun = { ...SUCCESS, databaseId: 4242, headBranch: "v1.2.3" };
+    const { code, stdout } = drive(
+      { runs: () => [rollback, tagRun], download: downloadOk },
+      [SHA, "--workflow", "deploy-prod.yml", "--ref", "v1.2.3"],
+    );
+    expect(code).toBe(0);
+    expect(stdout).toContain("- Actions run: 4242");
+    expect(stdout).not.toContain("999");
+  });
 });
 
 describe("parseArgs", () => {
-  test("defaults: 15 min bounded wait, 30 s interval", () => {
+  test("defaults: deploy.yml workflow, 15 min bounded wait, 30 s interval", () => {
     expect(parseArgs(["bun", "script", SHA])).toEqual({
       sha: SHA,
+      workflow: DEFAULT_DEPLOY_WORKFLOW,
+      ref: undefined,
       waitMinutes: 15,
       intervalSeconds: 30,
       help: false,
     });
+  });
+
+  test("--workflow in both flag forms selects the deploy workflow file", () => {
+    expect(parseArgs(["bun", "script", SHA, "--workflow", "deploy-prod.yml"])).toMatchObject({
+      workflow: "deploy-prod.yml",
+    });
+    expect(parseArgs(["bun", "script", SHA, "--workflow=deploy-prod.yml"])).toMatchObject({
+      workflow: "deploy-prod.yml",
+    });
+  });
+
+  test("--ref in both flag forms selects the expected run ref (T3-3)", () => {
+    expect(parseArgs(["bun", "script", SHA, "--ref", "v1.2.3"])).toMatchObject({ ref: "v1.2.3" });
+    expect(parseArgs(["bun", "script", SHA, "--ref=v1.2.3"])).toMatchObject({ ref: "v1.2.3" });
+  });
+
+  test("--ref rejects a missing value, a swallowed flag, and an unquotable value", () => {
+    expect(() => parseArgs(["bun", "script", SHA, "--ref"])).toThrow(/Invalid --ref value/);
+    expect(() => parseArgs(["bun", "script", SHA, "--ref", "--help"])).toThrow(
+      /Invalid --ref value: --help/,
+    );
+    expect(() => parseArgs(["bun", "script", SHA, "--ref="])).toThrow(/Invalid --ref value/);
+    // whitespace / backticks would break the `- ` bullet the value lands in
+    expect(() => parseArgs(["bun", "script", SHA, "--ref", "v1 `x`"])).toThrow(
+      /Invalid --ref value/,
+    );
   });
 
   test("tunable via both flag forms; uppercase SHA normalized to lowercase", () => {
@@ -629,6 +888,9 @@ describe("parseArgs", () => {
     );
     expect(() => parseArgs(["bun", "script", SHA, "--interval-seconds", "0"])).toThrow(
       /minimum 1/,
+    );
+    expect(() => parseArgs(["bun", "script", SHA, "--workflow"])).toThrow(
+      /Invalid --workflow value/,
     );
     expect(() => parseArgs(["bun", "script", "zzz"])).toThrow(/Unknown argument: zzz/);
   });

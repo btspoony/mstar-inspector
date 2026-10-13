@@ -1,14 +1,17 @@
 #!/usr/bin/env bun
 /**
  * collect-deploy-evidence.ts — bounded-wait deploy evidence collector.
- * Consumes the existing deploy.yml evidence chain: for the
- * release PR's merge commit SHA, wait for the Deploy workflow run to reach a
+ * Consumes the evidence chain of one deploy workflow (`--workflow`, default
+ * `deploy.yml`; the Release workflow passes `deploy-prod.yml` so the section
+ * cites the production deploy): for the
+ * release PR's merge commit SHA, wait for that workflow's run to reach a
  * terminal state, download its `deploy-evidence` artifact, and print the
- * markdown section task 2 appends to the release notes.
+ * markdown section the Release workflow appends to the release notes.
  *
  * Usage:
  *   bun run scripts/collect-deploy-evidence.ts <merge-sha>
  *   MERGE_SHA=<sha> bun run scripts/collect-deploy-evidence.ts
+ *   bun run scripts/collect-deploy-evidence.ts <sha> --workflow deploy-prod.yml --ref v1.2.3
  *   bun run scripts/collect-deploy-evidence.ts <sha> --wait-minutes 15 --interval-seconds 30
  *   bun run scripts/collect-deploy-evidence.ts --help
  *
@@ -18,7 +21,19 @@
  *   - run concludes failure -> explicit failed section (run link);
  *   - timeout with run still in flight -> explicit pending section (run link);
  *   - no run for the SHA after the wait window -> explicit no-run section
- *     (deploy.yml paths-ignore can legitimately skip a commit).
+ *     (a workflow's paths-ignore can legitimately skip a commit, so the
+ *     section states only that no run was created for it).
+ *
+ * Release identity (`--ref <tag>`): the run set is filtered by workflow +
+ * head SHA, which a manual rollback dispatched on the same SHA also matches.
+ * `--ref` (the release tag) therefore PREFERS the first (newest) run whose own
+ * `headBranch` equals it — and for `deploy-prod.yml` that match is proof of
+ * identity, not just of the run's dispatch ref: the workflow takes no `ref`
+ * input and refuses a non-tag ref before mutating anything, so a run whose
+ * `headBranch` is this tag deployed exactly that tag. When no run matches, the
+ * plain newest-for-SHA pick is used and the section says so — the fallback
+ * line is what discloses that the reported run did not match the expected ref.
+ * Evidence must never degrade to "no run" because of the preference.
  *
  * Exit code: 0 for EVERY runtime outcome above, including collection errors
  * (`gh` missing, artifact download failure) which degrade to a section noting
@@ -41,13 +56,21 @@ import { join } from "node:path";
 export const DEPLOY_EVIDENCE_ARTIFACT = "deploy-evidence";
 export const DEFAULT_WAIT_MINUTES = 15;
 export const DEFAULT_INTERVAL_SECONDS = 30;
+/** Deploy workflow the collector reads when `--workflow` is not given (staging). */
+export const DEFAULT_DEPLOY_WORKFLOW = "deploy.yml";
 
-/** One deploy.yml run as reported by `gh run list --json` (null conclusion until completed). */
+/** One run of the collected deploy workflow as reported by `gh run list --json` (null conclusion until completed). */
 export type GhRun = {
   databaseId: number;
   status: string;
   conclusion: string | null;
   displayTitle: string;
+  /**
+   * The ref the run was dispatched/pushed on (`gh run list --json headBranch`).
+   * This is what separates the release's own tag-bound run from a manual
+   * rollback dispatched on the same commit (see `--ref`).
+   */
+  headBranch: string;
 };
 
 /**
@@ -55,14 +78,22 @@ export type GhRun = {
  * decision logic without network or the `gh` binary.
  */
 export type GhRunner = {
-  /** `gh run list --workflow deploy.yml --commit <sha> --json ...`; throws on gh failure. */
-  listRuns(sha: string): GhRun[];
+  /** `gh run list --workflow <workflow> --commit <sha> --json ...`; throws on gh failure. */
+  listRuns(sha: string, workflow: string): GhRun[];
   /** `gh run download <id> -n deploy-evidence -D <dir>`; throws on failure. */
   downloadArtifact(runId: number, destDir: string): void;
 };
 
 export type CollectOptions = {
   sha: string;
+  /** Deploy workflow file whose runs are collected (e.g. `deploy.yml`, `deploy-prod.yml`). */
+  workflow: string;
+  /**
+   * Expected run ref (the release tag). Preferred when selecting among the
+   * runs for `sha`: a manual rollback dispatched on the same commit carries a
+   * different `headBranch`. A preference, never a restriction.
+   */
+  ref?: string;
   /** Total bounded-wait budget. Default via CLI: 15 min. */
   waitMs: number;
   /** Poll interval. Default via CLI: 30 s. */
@@ -118,12 +149,16 @@ function oneLine(text: string): string {
 
 export function parseArgs(argv: string[]): {
   sha?: string;
+  workflow: string;
+  ref?: string;
   waitMinutes: number;
   intervalSeconds: number;
   help: boolean;
 } {
   const rest = argv.slice(2).filter((a) => a !== "--");
   let sha: string | undefined;
+  let workflow = DEFAULT_DEPLOY_WORKFLOW;
+  let ref: string | undefined;
   let waitMinutes = DEFAULT_WAIT_MINUTES;
   let intervalSeconds = DEFAULT_INTERVAL_SECONDS;
   let help = false;
@@ -137,7 +172,28 @@ export function parseArgs(argv: string[]): {
   for (let i = 0; i < rest.length; i++) {
     const a = rest[i] ?? "";
     if (a === "--help" || a === "-h") help = true;
-    else if (a === "--wait-minutes" || a.startsWith("--wait-minutes=")) {
+    else if (a === "--workflow" || a.startsWith("--workflow=")) {
+      const value = a === "--workflow" ? rest[++i] : a.slice("--workflow=".length);
+      // A missing value must never swallow the next flag (`--workflow --help`),
+      // and a flag token is never a workflow file name.
+      if (!value || value.startsWith("-")) {
+        throw new Error(
+          `Invalid --workflow value: ${value || "<none>"} (expected a workflow file name)`,
+        );
+      }
+      workflow = value;
+    } else if (a === "--ref" || a.startsWith("--ref=")) {
+      const value = a === "--ref" ? rest[++i] : a.slice("--ref=".length);
+      // Same contract as --workflow: never swallow the next flag. Whitespace
+      // and backticks are rejected here because this value is interpolated
+      // into a `- ` bullet (see the output contract above).
+      if (!value || value.startsWith("-") || /[\s`]/.test(value)) {
+        throw new Error(
+          `Invalid --ref value: ${value || "<none>"} (expected a ref name, e.g. a release tag)`,
+        );
+      }
+      ref = value;
+    } else if (a === "--wait-minutes" || a.startsWith("--wait-minutes=")) {
       waitMinutes = numeric(
         "--wait-minutes",
         a === "--wait-minutes" ? rest[++i] : a.slice("--wait-minutes=".length),
@@ -157,7 +213,7 @@ export function parseArgs(argv: string[]): {
   if (intervalSeconds < 1) {
     throw new Error(`Invalid --interval-seconds value: ${intervalSeconds} (minimum 1)`);
   }
-  return { sha, waitMinutes, intervalSeconds, help };
+  return { sha, workflow, ref, waitMinutes, intervalSeconds, help };
 }
 
 /** Run link: `$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/<id>`, bare id without the env pair. */
@@ -168,9 +224,30 @@ export function runLink(runId: number, env: Record<string, string | undefined>):
   return String(runId);
 }
 
-/** `gh run list` is newest-first; with several runs for one SHA (e.g. a manual re-dispatch), the newest is the live one. */
-function pickRun(runs: GhRun[]): GhRun | undefined {
-  return runs[0];
+/**
+ * `gh run list` is newest-first. Among the runs for the SHA, prefer the first
+ * (newest) run whose own dispatch ref (`headBranch`) equals `ref`: a manual
+ * rollback dispatched on the same commit carries a different ref. A match is
+ * proof the run deployed exactly `ref` — deploy-prod.yml takes no `ref` input
+ * and refuses a non-tag ref, so the ref it runs on is the ref it deploys. When
+ * no run matches — or no `ref` was given — fall back to the newest run for the
+ * SHA; the preference must never degrade evidence into "no run". `refFallback`
+ * records that the fallback happened, so the section can say so.
+ */
+function pickRun(runs: GhRun[], ref?: string): { run: GhRun; refFallback: boolean } | undefined {
+  const newest = runs[0];
+  if (!newest) return undefined;
+  if (ref) {
+    const matching = runs.find((r) => r.headBranch === ref);
+    if (matching) return { run: matching, refFallback: false };
+    return { run: newest, refFallback: true };
+  }
+  return { run: newest, refFallback: false };
+}
+
+/** States the preference miss explicitly — the cited run did not match the ref the release deployed, so it may not be the release's own deploy. */
+function refFallbackLine(ref: string, sha: string): string {
+  return `- Run identity: no run on ref \`${ref}\` for commit \`${sha}\` — the newest run for the commit is reported instead, which is not that ref's deploy`;
 }
 
 function waitMinutesLabel(waitMs: number): string {
@@ -186,31 +263,49 @@ function successSection(
   digest: string,
   run: GhRun,
   env: Record<string, string | undefined>,
+  extra: string[] = [],
 ): string {
   return section([
     `- Worker version: \`${versionId}\``,
     `- Image digest: \`${digest}\``,
     `- Actions run: ${runLink(run.databaseId, env)}`,
+    ...extra,
   ]);
 }
 
-function pendingSection(run: GhRun, waitMs: number, env: Record<string, string | undefined>): string {
+function pendingSection(
+  run: GhRun,
+  waitMs: number,
+  env: Record<string, string | undefined>,
+  extra: string[] = [],
+): string {
   return section([
     `- Status: pending — deploy run still in flight after the ${waitMinutesLabel(waitMs)} bounded wait`,
     `- Actions run: ${runLink(run.databaseId, env)}`,
+    ...extra,
   ]);
 }
 
-function failedSection(run: GhRun, env: Record<string, string | undefined>): string {
+function failedSection(
+  run: GhRun,
+  env: Record<string, string | undefined>,
+  extra: string[] = [],
+): string {
   return section([
     `- Status: deploy failed — run concluded "${run.conclusion ?? "unknown"}"; see the run log`,
     `- Actions run: ${runLink(run.databaseId, env)}`,
+    ...extra,
   ]);
 }
 
-function noRunSection(sha: string, waitMs: number): string {
+/**
+ * No-run cause is workflow-agnostic: `deploy-prod.yml` has no `paths-ignore`,
+ * so a filter skip must never be claimed for it (the Release workflow
+ * dispatches that run explicitly; absence means no run was created).
+ */
+function noRunSection(sha: string, workflow: string, waitMs: number): string {
   return section([
-    `- Status: no deploy run for commit \`${sha}\` after the ${waitMinutesLabel(waitMs)} bounded wait (deploy.yml paths-ignore may have skipped this commit)`,
+    `- Status: no deploy run for commit \`${sha}\` after the ${waitMinutesLabel(waitMs)} bounded wait (no ${workflow} run was created for this commit)`,
   ]);
 }
 
@@ -218,11 +313,13 @@ function degradedSection(
   err: unknown,
   run: GhRun | undefined,
   env: Record<string, string | undefined>,
+  extra: string[] = [],
 ): string {
   const lines = [
     `- Status: unavailable — ${oneLine(err instanceof Error ? err.message : String(err))}`,
   ];
   if (run) lines.push(`- Actions run: ${runLink(run.databaseId, env)}`);
+  lines.push(...extra);
   return section(lines);
 }
 
@@ -231,11 +328,12 @@ function degradedSection(
  * `deploy-evidence` artifact and reads `version_id.txt` + `image_digest.txt`;
  * any artifact-side failure degrades (never fails the release).
  */
-function concludeRun(run: GhRun, opts: CollectOptions): CollectResult {
-  if (run.conclusion !== "success") {
-    return { kind: "deploy-failed", section: failedSection(run, opts.env ?? process.env) };
-  }
+function concludeRun(run: GhRun, opts: CollectOptions, refFallback: boolean): CollectResult {
   const env = opts.env ?? process.env;
+  const extra = opts.ref && refFallback ? [refFallbackLine(opts.ref, opts.sha)] : [];
+  if (run.conclusion !== "success") {
+    return { kind: "deploy-failed", section: failedSection(run, env, extra) };
+  }
   const ownDir = opts.artifactDir === undefined;
   const dir = opts.artifactDir ?? mkdtempSync(join(tmpdir(), "deploy-evidence-"));
   try {
@@ -253,9 +351,9 @@ function concludeRun(run: GhRun, opts: CollectOptions): CollectResult {
         `artifact ${DEPLOY_EVIDENCE_ARTIFACT} has empty version_id.txt / image_digest.txt`,
       );
     }
-    return { kind: "success", section: successSection(versionId, digest, run, env) };
+    return { kind: "success", section: successSection(versionId, digest, run, env, extra) };
   } catch (err) {
-    return { kind: "degraded", section: degradedSection(err, run, env) };
+    return { kind: "degraded", section: degradedSection(err, run, env, extra) };
   } finally {
     if (ownDir) rmSync(dir, { recursive: true, force: true });
   }
@@ -273,21 +371,29 @@ export function collectDeployEvidence(opts: CollectOptions): CollectResult {
   const env = opts.env ?? process.env;
   const deadline = now() + opts.waitMs;
   let seen: GhRun | undefined;
+  let seenRefFallback = false;
   for (;;) {
-    let run: GhRun | undefined;
+    let picked: { run: GhRun; refFallback: boolean } | undefined;
     try {
-      run = pickRun(opts.runner.listRuns(opts.sha));
+      picked = pickRun(opts.runner.listRuns(opts.sha, opts.workflow), opts.ref);
     } catch (err) {
       // gh missing / auth / network — deterministic enough to surface now
       // rather than burn the whole window retrying (evidence is not a gate).
-      return { kind: "degraded", section: degradedSection(err, seen, env) };
+      const extra = opts.ref && seenRefFallback ? [refFallbackLine(opts.ref, opts.sha)] : [];
+      return { kind: "degraded", section: degradedSection(err, seen, env, extra) };
     }
-    if (run) seen = run;
-    if (run?.status === "completed") return concludeRun(run, opts);
+    const run = picked?.run;
+    if (run) {
+      seen = run;
+      seenRefFallback = picked?.refFallback ?? false;
+    }
+    if (run?.status === "completed") return concludeRun(run, opts, picked?.refFallback ?? false);
     if (now() >= deadline) {
-      return seen
-        ? { kind: "pending", section: pendingSection(seen, opts.waitMs, env) }
-        : { kind: "no-run", section: noRunSection(opts.sha, opts.waitMs) };
+      if (!seen) {
+        return { kind: "no-run", section: noRunSection(opts.sha, opts.workflow, opts.waitMs) };
+      }
+      const extra = opts.ref && seenRefFallback ? [refFallbackLine(opts.ref, opts.sha)] : [];
+      return { kind: "pending", section: pendingSection(seen, opts.waitMs, env, extra) };
     }
     sleep(Math.min(opts.intervalMs, deadline - now()));
   }
@@ -304,16 +410,16 @@ export function createGhRunner(): GhRunner {
     };
   };
   return {
-    listRuns(sha: string): GhRun[] {
+    listRuns(sha: string, workflow: string): GhRun[] {
       const proc = gh([
         "run",
         "list",
         "--workflow",
-        "deploy.yml",
+        workflow,
         "--commit",
         sha,
         "--json",
-        "status,conclusion,databaseId,displayTitle",
+        "status,conclusion,databaseId,displayTitle,headBranch",
       ]);
       if (proc.code !== 0) {
         throw new Error(`gh run list failed (${proc.code}): ${proc.stderr.trim()}`);
@@ -331,7 +437,7 @@ export function createGhRunner(): GhRunner {
 
 function printUsage(): void {
   console.log(`Usage:
-  bun run scripts/collect-deploy-evidence.ts <merge-sha> [--wait-minutes 15] [--interval-seconds 30]
+  bun run scripts/collect-deploy-evidence.ts <merge-sha> [--workflow deploy.yml] [--ref <tag>] [--wait-minutes 15] [--interval-seconds 30]
   MERGE_SHA=<merge-sha> bun run scripts/collect-deploy-evidence.ts`);
 }
 
@@ -357,6 +463,7 @@ export function runCli(
     parsed = parseArgs(argv);
   } catch (err) {
     console.error(err instanceof Error ? err.message : err);
+    printUsage();
     return 1;
   }
   if (parsed.help) {
@@ -381,6 +488,8 @@ export function runCli(
   try {
     result = collectDeployEvidence({
       sha,
+      workflow: parsed.workflow,
+      ref: parsed.ref,
       waitMs: parsed.waitMinutes * 60_000,
       intervalMs: parsed.intervalSeconds * 1000,
       runner: deps.runner ?? createGhRunner(),

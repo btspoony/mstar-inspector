@@ -152,5 +152,130 @@
     "directory": "dist/spa",
     "binding": "ASSETS",
     "run_worker_first": true
+  },
+  // Production: one release-gated Worker served at inspector.mstar.page, built
+  // only by the non-prerelease release workflow; the top-level Worker above
+  // stays the staging instance on every main push. A named environment does
+  // NOT inherit resource keys — only name/main/compatibility_* flow down — so
+  // every binding is restated here against prod-only resources (own D1, KV,
+  // queue pair and container application; nothing shared with staging).
+  // `keep_vars` is rejected inside an env block (wrangler 4.147.0:
+  // "Unexpected fields found in env.production field"), so this Worker must
+  // not depend on dashboard-managed plaintext vars: ADMIN_LOGINS is declared
+  // below, and REVIEW_ENABLED stays unset (per-App Pause/Resume is the real
+  // control). Any future binding added above MUST be duplicated here.
+  "env": {
+    "production": {
+      "name": "mstar-inspector-production",
+      "kv_namespaces": [
+        {
+          "binding": "IDEMPOTENCY_KV",
+          "id": "7bd2996bf0a44704950371ed75a35ecc"
+        }
+      ],
+      "queues": {
+        "producers": [
+          {
+            "binding": "REVIEW_QUEUE",
+            "queue": "review-queue-prod"
+          }
+        ],
+        // Same protective consumer shape as staging (see the top-level
+        // rationale), against the prod queue pair; the 15 min consumer
+        // wall-clock cap applies here identically.
+        "consumers": [
+          {
+            "queue": "review-queue-prod",
+            "max_batch_size": 1,
+            "max_concurrency": 1,
+            "max_retries": 3,
+            "dead_letter_queue": "review-dlq-prod"
+          }
+        ]
+      },
+      "triggers": {
+        "crons": ["*/15 * * * *"]
+      },
+      "d1_databases": [
+        {
+          "binding": "DB",
+          "database_name": "mstar-inspector-prod-db",
+          "database_id": "7c06fce1-6126-49e9-aeac-e92d527ff1c4"
+        }
+      ],
+      // Same 1.0 container as the top level (same Dockerfile, same
+      // build_context) under this Worker's own application. `name` is set
+      // explicitly to the value wrangler would derive
+      // (<worker>-<class>-<image key>) so the digest anchor in the deploy log
+      // stays readable without recomputing it.
+      "containers": [
+        {
+          "class_name": "SandboxV1",
+          "name": "mstar-inspector-production-sandboxv1-sandbox",
+          "scheduling_policy": "durable_object",
+          "images": {
+            "sandbox": {
+              "dockerfile": "./sandbox-image/omp/Dockerfile",
+              "build_context": "."
+            }
+          }
+        }
+      ],
+      "durable_objects": {
+        "bindings": [
+          {
+            "class_name": "SandboxV1",
+            "name": "SANDBOX"
+          }
+        ]
+      },
+      // A fresh Worker replays both migrations, which is why
+      // src/pipeline/sandbox.ts keeps exporting the compatibility `Sandbox`
+      // class.
+      "migrations": [
+        {
+          "new_sqlite_classes": ["Sandbox"],
+          "tag": "v1"
+        },
+        {
+          "new_sqlite_classes": ["SandboxV1"],
+          "tag": "v2"
+        }
+      ],
+      "observability": {
+        "enabled": true,
+        "head_sampling_rate": 1,
+        "logs": {
+          "enabled": true,
+          "head_sampling_rate": 1,
+          "invocation_logs": true,
+          "persist": true
+        },
+        "traces": {
+          "enabled": true,
+          "head_sampling_rate": 1,
+          "persist": true
+        }
+      },
+      "assets": {
+        "directory": "dist/spa",
+        "binding": "ASSETS",
+        "run_worker_first": true
+      },
+      // Custom Domain: the prod Worker owns the apex of its own hostname, so
+      // no `zone_name`/`workers_dev` juggling is needed. The zone must live in
+      // the deploy account.
+      "routes": [
+        {
+          "pattern": "inspector.mstar.page",
+          "custom_domain": true
+        }
+      ],
+      // Prod D1 starts empty, so without this the first OAuth login would
+      // self-promote to admin.
+      "vars": {
+        "ADMIN_LOGINS": "btspoony"
+      }
+    }
   }
 }

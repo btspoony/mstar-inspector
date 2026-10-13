@@ -19,13 +19,15 @@ name: Release
 # workflow's GITHUB_TOKEN).
 #
 # Deploy-evidence reconciliation: after the Release is created, one
-# extra step rebuilds the body from the workspace notes file plus a
+# step dispatches the production Deploy workflow on the release tag
+# (GITHUB_TOKEN-created Releases cannot trigger `release: published`), then a
+# second step rebuilds the body from the workspace notes file plus a
 # deploy-evidence section and rewrites the Release with a single idempotent
 # `gh release edit --notes-file` (AD-3 — no live read-modify-write). The
 # section records the Worker Version ID + image digest + run link of the
-# Deploy run for the merge commit, or states its absence explicitly. Evidence
-# is a recording surface, never a gate: it can neither postpone the tag nor
-# fail this workflow.
+# production Deploy run (`deploy-prod.yml`) for the merge commit, or states
+# its absence explicitly. Evidence is a recording surface, never a gate: it
+# can neither postpone the tag nor fail this workflow.
 #
 # Action pin convention: actions NEW to this repo are SHA-pinned
 # (softprops/action-gh-release below, byte-identical to the sibling repo);
@@ -39,7 +41,7 @@ on:
 
 permissions:
   contents: write   # push the tag + create the GitHub Release (no id-token:write — no npm publish, AD-4)
-  actions: read     # `gh run list` / `gh run download` of the deploy-evidence artifact — nothing else added
+  actions: write    # dispatch deploy-prod.yml (`gh workflow run`) + `gh run list`/`gh run download` for the deploy-evidence artifact
 
 jobs:
   release:
@@ -128,6 +130,31 @@ jobs:
           draft: false
           prerelease: ${{ contains(steps.ver.outputs.version, '-') }}
 
+      # A Release created with the workflow `GITHUB_TOKEN` does NOT trigger a
+      # `release: published` workflow (documented token-event suppression), so
+      # the production workflow must be dispatched explicitly. This step runs
+      # AFTER the Release (a dispatch failure leaves tag + Release in place and
+      # converges on re-run) and BEFORE the evidence step, whose bounded wait
+      # must be able to see the dispatched run. The tag is passed as `--ref`
+      # only: deploy-prod.yml has no `ref` input, so the run deploys exactly the
+      # ref it runs on (its own guard refuses a non-tag ref) — the collector
+      # matches runs by `--commit <merge sha>` and the run's headBranch is the
+      # tag.
+      #
+      # A dispatch always deploys (deploy-prod.yml's guard), so a prerelease
+      # must not dispatch at all: same `-` test as the Create step's
+      # `prerelease:` flag above, keeping the accepted "prereleases never reach
+      # production" contract with deploy-prod.yml untouched.
+      - name: Dispatch production deploy on the release tag
+        if: ${{ !contains(steps.ver.outputs.version, '-') }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ steps.ver.outputs.version }}
+        run: |
+          set -euo pipefail
+          TAG="v${VERSION}"
+          gh workflow run deploy-prod.yml --ref "$TAG"
+
       # Evidence append (AD-3): rebuild the complete body in the workspace — the
       # bilingual notes file above, this `---` separator (same form as the
       # EN/CN one), then the collector's section — and rewrite the Release
@@ -156,10 +183,18 @@ jobs:
           VERSION: ${{ steps.ver.outputs.version }}
           MERGE_SHA: ${{ github.event.pull_request.merge_commit_sha }}
           NOTES_FILE: ${{ steps.changelog.outputs.notes_file }}
+          # The section must cite the PRODUCTION deploy (release-triggered);
+          # staging deploys on the same main push, so deploy.yml would be ambiguous here.
+          DEPLOY_WORKFLOW: deploy-prod.yml
         run: |
           set -euo pipefail
+          TAG="v${VERSION}"
           printf '\n\n---\n\n' >> "$NOTES_FILE"
-          bun run scripts/collect-deploy-evidence.ts >> "$NOTES_FILE"
+          # --ref selects the run dispatched on this tag over a manual rollback
+          # run that merely shares the merge commit (T3-3); deploy-prod.yml
+          # deploys exactly the ref it runs on, so a match proves identity, and
+          # a miss falls back to the newest run for the commit and says so.
+          bun run scripts/collect-deploy-evidence.ts --workflow "$DEPLOY_WORKFLOW" --ref "$TAG" >> "$NOTES_FILE"
           if ! gh release edit "v${VERSION}" --notes-file "$NOTES_FILE"; then
             echo "::error::deploy-evidence append failed — Release notes left without the evidence section; re-run the Release workflow to converge (idempotent)"
             exit 1   # step visibly red; continue-on-error keeps the job green
