@@ -460,19 +460,52 @@ describe("createInsightsStore", () => {
     });
   });
 
+  /**
+   * The most recent UTC Monday 00:00:00 at or before now, plus the last second
+   * of the Sunday before it. Derived by stepping real UTC calendar days one at
+   * a time — deliberately NOT the store's `(strftime('%w')+6)%7` week formula
+   * nor its `mondayOf` JS duplicate, so a shared off-by-one in either cannot
+   * hide behind the expectation.
+   */
+  function recentMondayBoundary(): {
+    sundayEnd: string;
+    mondayStart: string;
+    sundayWeekStart: string;
+    mondayWeekStart: string;
+    sundayDate: string;
+    mondayDate: string;
+  } {
+    const DAY_MS = 86_400_000;
+    const now = new Date();
+    let mondayMs = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate());
+    while (new Date(mondayMs).getUTCDay() !== 1) mondayMs -= DAY_MS;
+    const iso = (ms: number): string => new Date(ms).toISOString().slice(0, 10);
+    const mondayDate = iso(mondayMs);
+    const sundayDate = iso(mondayMs - DAY_MS);
+    return {
+      sundayEnd: `${sundayDate} 23:59:59`,
+      mondayStart: `${mondayDate} 00:00:00`,
+      sundayWeekStart: iso(mondayMs - 7 * DAY_MS),
+      mondayWeekStart: mondayDate,
+      sundayDate,
+      mondayDate,
+    };
+  }
+
   test("weeklyTrend Monday anchor pinned to concrete UTC dates (S-1)", async () => {
     const db = createMigratedTestD1();
-    // Hard-coded boundary pin (no JS mirror involved): the last second of
-    // Sunday 2026-09-06 23:59:59 UTC lands in the week starting Monday
-    // 2026-08-31, and the first second of Monday 2026-09-07 00:00:00 UTC
-    // starts the NEXT week (2026-09-07) — a shared off-by-one in the SQL
-    // expression AND its JS mirror would both pass a mirror-only test.
+    // Boundary pin on the most recent real Monday boundary (no JS mirror
+    // involved): the last second of the preceding Sunday lands in the week
+    // starting the Monday BEFORE it, and the first second of that Monday
+    // starts the NEXT week — a shared off-by-one in the SQL expression AND
+    // its JS mirror would both pass a mirror-only test.
+    const boundary = recentMondayBoundary();
     insertReview(db, {
       id: "r-sun",
       owner: "acme",
       repo: "widgets",
       pr_number: 1,
-      reviewedAt: "2026-09-06 23:59:59",
+      reviewedAt: boundary.sundayEnd,
       verdict: "needs fixes",
       findings: [{ id: "f-sun", severity: "must-fix", category: "logic", title: "Null deref risk", fingerprint: FP_X }],
     });
@@ -481,32 +514,33 @@ describe("createInsightsStore", () => {
       owner: "acme",
       repo: "widgets",
       pr_number: 2,
-      reviewedAt: "2026-09-07 00:00:00",
+      reviewedAt: boundary.mondayStart,
       verdict: "needs fixes",
       findings: [{ id: "f-mon", severity: "must-fix", category: "logic", title: "Null deref risk", fingerprint: FP_X }],
     });
 
     const insights = await createInsightsStore(db);
     expect(insights.weeklyTrend).toEqual([
-      { week_start: "2026-08-31", reviews: 1, findings: 1 },
-      { week_start: "2026-09-07", reviews: 1, findings: 1 },
+      { week_start: boundary.sundayWeekStart, reviews: 1, findings: 1 },
+      { week_start: boundary.mondayWeekStart, reviews: 1, findings: 1 },
     ]);
   });
 
   test("dailyTrend day boundary pinned to concrete UTC dates (S-1 extension)", async () => {
     const db = createMigratedTestD1();
-    // The same concrete boundary timestamps as the weekly S-1 pin: the day
-    // bucket is the plain UTC date (`date(r.reviewed_at)` — the distribution
-    // day expression, never a second one), so the last second of Sunday
-    // 2026-09-06 lands on 2026-09-06 and the first second of Monday
-    // 2026-09-07 on 2026-09-07. A shared day-expression mistake would pass a
-    // mirror-only test, exactly like the weekly pin above.
+    // The same boundary pair as the weekly S-1 pin: the day bucket is the
+    // plain UTC date (`date(r.reviewed_at)` — the distribution day
+    // expression, never a second one), so the last second of that Sunday
+    // lands on the Sunday date and the first second of Monday on the Monday
+    // date. A shared day-expression mistake would pass a mirror-only test,
+    // exactly like the weekly pin above.
+    const boundary = recentMondayBoundary();
     insertReview(db, {
       id: "r-dsun",
       owner: "acme",
       repo: "widgets",
       pr_number: 1,
-      reviewedAt: "2026-09-06 23:59:59",
+      reviewedAt: boundary.sundayEnd,
       verdict: "needs fixes",
       findings: [{ id: "f-dsun", severity: "must-fix", category: "logic", title: "Null deref risk", fingerprint: FP_X }],
     });
@@ -515,19 +549,19 @@ describe("createInsightsStore", () => {
       owner: "acme",
       repo: "widgets",
       pr_number: 2,
-      reviewedAt: "2026-09-07 00:00:00",
+      reviewedAt: boundary.mondayStart,
       verdict: "needs fixes",
       findings: [{ id: "f-dmon", severity: "must-fix", category: "logic", title: "Null deref risk", fingerprint: FP_X }],
     });
 
     const insights = await createInsightsStore(db);
-    expect(insights.dailyTrend.find((b) => b.day_start === "2026-09-06")).toEqual({
-      day_start: "2026-09-06",
+    expect(insights.dailyTrend.find((b) => b.day_start === boundary.sundayDate)).toEqual({
+      day_start: boundary.sundayDate,
       reviews: 1,
       findings: 1,
     });
-    expect(insights.dailyTrend.find((b) => b.day_start === "2026-09-07")).toEqual({
-      day_start: "2026-09-07",
+    expect(insights.dailyTrend.find((b) => b.day_start === boundary.mondayDate)).toEqual({
+      day_start: boundary.mondayDate,
       reviews: 1,
       findings: 1,
     });
