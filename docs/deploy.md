@@ -761,8 +761,10 @@ preinstall is container-level only (`container exec` resolves the `mstar`
 shim): review sessions stay restricted to the read-only `read` / `grep` /
 `glob` whitelist (Runner tool whitelist above), so the review-session model
 cannot invoke the CLI today — a sanctioned session toolcall path is a
-tracked follow-up, not a shipped mechanism. Base image /
-Bun / gh re-verified, no bump:
+tracked follow-up, not a shipped mechanism. Bun / gh pins carried forward
+unchanged; the base image moved with the Sandbox SDK 1.0 migration (the SDK no
+longer ships a runtime base — controlled Debian base + the 1.0.0
+`sandbox-shim`):
 
 | Pin | Value | Where |
 |---|---|---|

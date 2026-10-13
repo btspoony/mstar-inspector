@@ -104,7 +104,10 @@ const INACTIVITY_TIMEOUT_MS = 30 * 60 * 1000;
 
 function makeDo(): { sandbox: ReviewSandbox; container: FakeContainer } {
   const container = makeContainer();
-  const sandbox = new Sandbox({ container } as never, {}) as unknown as ReviewSandbox;
+  // ctx double: the real DurableObjectState's blockConcurrencyWhile runs the
+  // callback behind the concurrency gate and resolves with its result.
+  const ctx = { container, blockConcurrencyWhile: (fn: () => Promise<unknown>) => fn() };
+  const sandbox = new Sandbox(ctx as never, {}) as unknown as ReviewSandbox;
   return { sandbox, container };
 }
 
@@ -113,6 +116,7 @@ function reset() {
   inactivityCalls.length = 0;
   execCalls.length = 0;
   destroyCalls.length = 0;
+  execResult = { stdout: new ArrayBuffer(0), stderr: new ArrayBuffer(0), exitCode: 0 };
   running = false;
   execError = undefined;
   destroyError = undefined;
@@ -180,6 +184,36 @@ describe("Sandbox Durable Object", () => {
       stderr: "review mode: structured\n",
       exitCode: 0,
     });
+  });
+
+  test("a restarted DO re-arms the inactivity timeout in its constructor when the container is already running", () => {
+    reset();
+    running = true; // the container outlived the DO instance (deploy / eviction)
+    const { container } = makeDo();
+
+    expect(inactivityCalls).toEqual([INACTIVITY_TIMEOUT_MS]);
+    expect(startCalls).toEqual([]); // a running container is never restarted
+    expect(container.setInactivityTimeout).toHaveBeenCalledTimes(1);
+  });
+
+  test("constructor leaves a stopped container alone (the request path starts it)", () => {
+    reset();
+    const { container } = makeDo();
+
+    expect(inactivityCalls).toEqual([]);
+    expect(container.setInactivityTimeout).toHaveBeenCalledTimes(0);
+  });
+
+  test("a missing container image key fails loud (wrangler/DO drift, not a silent no-op)", async () => {
+    reset();
+    const container = { ...makeContainer(), images: {} };
+    const ctx = { container, blockConcurrencyWhile: (fn: () => Promise<unknown>) => fn() };
+    const sandbox = new Sandbox(ctx as never, {}) as unknown as ReviewSandbox;
+
+    await expect(sandbox.runCommand(shellCommand("echo hi"))).rejects.toThrow(
+      'container image "sandbox" is not configured',
+    );
+    expect(execCalls).toEqual([]);
   });
 
   test("a zero or negative explicit timeout is clamped to the 1 ms floor (never a disarming zero duration)", async () => {

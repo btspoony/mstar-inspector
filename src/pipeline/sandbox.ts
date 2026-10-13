@@ -45,7 +45,7 @@
  */
 
 import { DurableObject } from "cloudflare:workers";
-import type { Container } from "@cloudflare/workers-types";
+import type { Container, DurableObjectState } from "@cloudflare/workers-types";
 import { shellCommand, type ShellCommand } from "./shell-command";
 
 /** The Worker binding shape (pinned; `PipelineEnv.SANDBOX`). */
@@ -94,6 +94,21 @@ const utf8 = new TextDecoder();
  * its RPC methods through `getSandbox()`.
  */
 export class Sandbox extends DurableObject {
+  /**
+   * A restarted DO (deploy, eviction) loses the container's inactivity
+   * timeout while the container keeps running, so the timeout is armed again
+   * here — before any request — for a container this DO finds already
+   * running. `blockConcurrencyWhile` keeps requests behind the re-arm. The
+   * request-path guard re-arms it as well (both are idempotent).
+   */
+  constructor(ctx: DurableObjectState, env: unknown) {
+    super(ctx, env);
+    const container = ctx.container;
+    if (container?.running) {
+      void ctx.blockConcurrencyWhile(() => container.setInactivityTimeout(INACTIVITY_TIMEOUT_MS));
+    }
+  }
+
   /** The container bound to this DO (absent only when the binding is misconfigured). */
   private get container(): Container {
     const container = this.ctx.container;

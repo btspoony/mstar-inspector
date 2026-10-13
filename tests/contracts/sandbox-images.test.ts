@@ -4,7 +4,7 @@
  * three consumers mirror it by hand across boundaries a runtime import cannot
  * cross — each lock below turns that drift into a failing gate:
  *   - qc1 F-001: the omp build definition (Dockerfile path) must exist and be
- *     referenced verbatim by BOTH wrangler configs' `containers[].image`;
+ *     referenced verbatim by BOTH wrangler configs' `containers[].images.sandbox`;
  *   - qc1 F-003 / qc2 S1 / qc3 S-3: the in-image verify-synthesis.sh
  *     ARK_PLAN_HOST literal (the image COPYs only src/review, so the script
  *     cannot import the registry) must mirror the omp entry's scalars;
@@ -31,11 +31,12 @@ describe("registry build-definition parity (qc1 F-001)", () => {
     // ...and the two registry path fields are the same file (wrangler form is
     // the ./-prefixed spelling of dockerfilePath).
     expect(OMP_IMAGE.wranglerImagePath).toBe(`./${OMP_IMAGE.dockerfilePath}`);
-    // Both wrangler configs' containers[].image point at THAT path, with the
-    // repo-root build context unchanged (the Dockerfile COPYs package.json +
-    // src/review from the repo root). Collecting EVERY match (not just the
-    // first) pins the full set: a second, unregistered containers[].image
-    // entry fails the lock instead of hiding behind the first match.
+    // Both wrangler configs' `containers[].images.sandbox.dockerfile` point at
+    // THAT path, with the repo-root build context unchanged (the Dockerfile
+    // COPYs package.json + src/review from the repo root). Collecting EVERY
+    // match (not just the
+    // first) pins the full set: a second, unregistered image entry fails the
+    // lock instead of hiding behind the first match.
     const enabledPaths = new Set(enabledSandboxImages().map((entry) => entry.wranglerImagePath));
     for (const config of ["wrangler.jsonc", "wrangler.smoke.jsonc"]) {
       const text = readFileSync(join(REPO_ROOT, config), "utf8");
