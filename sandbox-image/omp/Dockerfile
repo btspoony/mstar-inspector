@@ -1,6 +1,6 @@
 # mstar-inspector review sandbox image (review-runner containerization).
 #
-# Version pinning (compass contracts E): base tag, Bun, gh, mstar-harness ref,
+# Version pinning (compass contracts E): base digest, Bun, gh, mstar-harness ref,
 # the mstar-harness CLI, and the omp SDK (via package.json/bun.lock) are all
 # pinned to exact versions.
 #
@@ -44,8 +44,20 @@
 # (Debian trixie — the distro the official 1.0 examples target; glibc for the
 # pinned bun-linux-x64 / gh amd64 tarballs) + the `sandbox-shim` helper copied
 # from the SAME 1.0.0 line as the `@cloudflare/sandbox` pin (package.json /
-# bun.lock — the shim tag must match, `Files` needs it).
-FROM docker.io/library/debian:trixie-slim
+# bun.lock — the shim tag must match, `Files` needs it). The Debian base is
+# pinned by DIGEST for linux/amd64 (the platform the pinned bun-linux-x64 /
+# gh amd64 artifacts build for) — the rolling `trixie-slim` alias would let a
+# rebuild silently change libc / coreutils / CA packages inside the
+# production review executor. Digest taken 2026-10-13 (Debian build revision
+# 2026-10-05); bump deliberately, never incidentally. Re-resolve with the
+# read-only Docker Hub flow:
+#   TOKEN=$(curl -fsS "https://auth.docker.io/token?service=registry.docker.io&scope=repository:library/debian:pull" | jq -r .token)
+#   curl -fsS -H "Authorization: Bearer $TOKEN" \
+#     -H "Accept: application/vnd.oci.image.index.v1+json" \
+#     https://registry-1.docker.io/v2/library/debian/manifests/trixie-slim
+# (the response's docker-content-digest is the multi-arch index; read the
+# linux/amd64 entry's .manifests[].digest from it for this pin).
+FROM docker.io/library/debian:trixie-slim@sha256:918311b7b6c4c6f68b232ba516584925f6c78ad82b6fd534b98979df6438e483
 
 # Tools the pinned steps below need (coreutils incl. `timeout`, tar and the
 # POSIX shell are Essential in the Debian base): curl + ca-certificates for

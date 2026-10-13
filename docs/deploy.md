@@ -783,7 +783,7 @@ longer ships a runtime base — controlled Debian base + the 1.0.0
 
 | Pin | Value | Where |
 |---|---|---|
-| base image | `docker.io/library/debian:trixie-slim` (+ `sandbox-shim` from `docker.io/cloudflare/sandbox:1.0.0`) | `sandbox-image/omp/Dockerfile` FROM / COPY --from |
+| base image | `docker.io/library/debian:trixie-slim@sha256:918311b7b6c4c6f68b232ba516584925f6c78ad82b6fd534b98979df6438e483` (linux/amd64; + `sandbox-shim` from `docker.io/cloudflare/sandbox:1.0.0`) | `sandbox-image/omp/Dockerfile` FROM / COPY --from |
 | Bun | `1.4.0` | `sandbox-image/omp/Dockerfile` |
 | gh CLI | `2.98.0` | `sandbox-image/omp/Dockerfile` |
 | mstar-harness | `2cae49faaa9a7652479f8ad859999fe6da7dbc22` (3.11.2) | `sandbox-image/omp/Dockerfile` |
