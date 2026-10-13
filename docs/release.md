@@ -24,7 +24,9 @@
 > dispatched by the automated chain, which starts no production deploy for it;
 > staging verifies those. A manual `workflow_dispatch` on a prerelease tag ref
 > is the supported exception and may deploy one — the first production bring-up
-> does exactly that. The `release: published` trigger stays declared and deploys
+> does exactly that, on a tag cut **after** this workflow ships (a tag that
+> predates it has no `deploy-prod.yml` at that ref to run); see
+> [production bring-up](deploy.md#one-time-bring-up-operator). The `release: published` trigger stays declared and deploys
 > a Release a human (or any non-`GITHUB_TOKEN` actor) publishes; on that path
 > the job-level tag guard skips a prerelease tag.
 > Independently, the same merge pushes to `main`, so the
@@ -228,6 +230,22 @@ the live body). Data comes entirely from the production run's
 `GITHUB_TOKEN`, declared with `actions: write` (the dispatch of
 `deploy-prod.yml` requires it, and it covers the collector's `gh run list` /
 `gh run download` reads).
+
+What the production run itself publishes: its own run summary carries the
+heading **`## Production deploy evidence`** with the Worker, the Worker
+version, the image digest and the run link, and its `deploy-evidence` artifact
+holds the raw `deploy.log` / `version_id.txt` / `image_digest.txt` the
+collector reads. The digest there is the account-scoped
+`registry.cloudflare.com/<account>/<image>@sha256:<hex>` reference that run's
+`wrangler deploy` printed — or the literal `unchanged (no push in this
+deploy)` when that deploy pushed no container image (the digest step never
+fails the run).
+
+**Only the Release workflow appends this section.** A Release published by
+hand in the UI deploys production through the retained `release: published`
+trigger, but it starts no `pull_request: closed` run — so no collector runs for
+it and its notes carry **no evidence section**. Reconcile such a Release by
+hand (§ Manual reconciliation).
 
 **Body ownership window:** between Release creation and the evidence rewrite
 (a minutes-scale window while the bounded wait runs), the body belongs to the

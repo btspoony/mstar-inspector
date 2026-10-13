@@ -64,7 +64,8 @@ A tag containing `-` (a prerelease) is never dispatched to production by the
 version without `-` — and staging verifies those. A **manual**
 `workflow_dispatch` on a prerelease tag ref is the supported exception: the
 deploy job's guard passes a dispatch through unconditionally, and the first
-production bring-up (`v1.0.0-alpha.2`) depends on exactly that
+production bring-up depends on exactly that — against a tag cut **after** this
+change ships, because the workflow must exist at the dispatched ref
 (§ One-time bring-up step 5). The production workflow has **no `paths-ignore`**;
 it runs from the Release workflow's dispatch (the normal path), from a
 `release: published` event for a Release published by a human or any actor
@@ -112,6 +113,14 @@ section's run match on the release tag proof of what shipped.
    wrangler queues create review-dlq-prod
    ```
 
+   **The D1 primary region is fixed at creation.** `wrangler d1 create`
+   takes a `--location` hint (`weur` / `eeur` / `apac` / `oc` / `wnam` /
+   `enam`) and Cloudflare cannot change it afterwards; this account's
+   `mstar-inspector-prod-db` was created in **APAC**. A locality requirement
+   (the data must sit near the Workers traffic) therefore means creating a new
+   database and re-pointing `env.production` at it — not altering this one; so
+   choose the location deliberately at create time (`--location apac`).
+
    Then apply the migration chain to the new D1
    (`wrangler d1 migrations apply mstar-inspector-prod-db --remote --env
    production`, forward-only — the same chain as staging). `--env production`
@@ -119,11 +128,20 @@ section's run match on the release tag proof of what shipped.
    `env.production` block of `wrangler.jsonc`, so without it the command
    resolves the top-level (staging) database.
 
-2. **GitHub environment `production`** — Settings → Environments → New
-   environment. Create it **WITHOUT a deployment branch policy**: a
-   branch-only policy (staging's `main` policy is the example) rejects a
-   tag-ref deployment, and that is exactly what the production workflow
-   triggers. Leave the policy empty, or use an explicit `v*` **tag** policy.
+2. **GitHub environment `production`** — Settings → Environments. On this
+   repo the environment is **already configured with a deployment policy that
+   allows `v*` tags only** (no branch policies), applied through the
+   environments API. That is what the production
+   workflow needs: a branch-only policy (staging's `main` policy is the
+   example) rejects a tag-ref deployment, while an unrestricted environment
+   would let a branch dispatch start the secret-bearing job before the
+   workflow's own tag gate. When mirroring this chain on a fork, create the
+   environment with that same `v*` **tag** policy. Keep that policy: it
+   refuses a non-tag ref before any `production` secret is injected, and it
+   still admits every `v*` release, prerelease and rollback tag. The policy is
+   defense in depth — the workflow's own ref gate (§ The run's ref is the
+   deployed checkout) is the structural check that a policy change cannot
+   remove.
 
 3. **Variables and secrets** — the repository **variables**
    `CLOUDFLARE_ACCOUNT_ID` (`f68fcd78e7c5c10f0466788bb9e85b8e`) and
@@ -134,7 +152,7 @@ section's run match on the release tag proof of what shipped.
    | Name | Kind | Value |
    |---|---|---|
    | `CLOUDFLARE_API_TOKEN` | secret | CI credential, never injected into the Worker — reuse the staging token (§ CI credentials) |
-   | `OAUTH_CLIENT_SECRET` | secret | the same OAuth App as staging |
+   | `OAUTH_CLIENT_SECRET` | secret | **copy** the secret issued by the same OAuth App as staging — it is a provider credential, not a generated value (step 4 uses that App) |
    | `DASHBOARD_SESSION_SECRET` | secret | **new** random (`openssl rand -base64 32`) |
    | `DASHBOARD_ENCRYPTION_KEY` | secret | **new** random (`openssl rand -base64 32`) — production D1 starts empty (step 1) |
    | `ALERT_WEBHOOK_URL` | secret | optional; unset = log-only alerting (§ Ops config) |
@@ -150,14 +168,36 @@ section's run match on the release tag proof of what shipped.
    (`.github/workflows/deploy-prod.yml`) on the tag itself:
 
    ```bash
-   gh workflow run deploy-prod.yml --ref <tag>   # the prerelease tag during bring-up
+   gh workflow run deploy-prod.yml --ref <tag>   # a tag cut after this change shipped
    ```
+
+   **`<tag>` must be created after this change ships.** `gh workflow run`
+   runs the workflow **as defined at that ref**, and the repository's existing
+   prerelease tag `v1.0.0-alpha.2` predates this change: its tree has no
+   `deploy-prod.yml` and no `env.production`, so `gh workflow run
+   deploy-prod.yml --ref v1.0.0-alpha.2` cannot start this workflow at all.
+   The bring-up tag must therefore be a tag whose tree contains the workflow —
+   cut a fresh prerelease after the merge (e.g. Release prep with
+   `1.0.0-alpha.3`), or any tag created on or after the merge commit. The
+   release chain will not move the old tag onto the merge commit either
+   (`release:validate` fails when `v<version>` already points at a different
+   commit), so `v1.0.0-alpha.2` cannot be reused.
 
    A manual dispatch is explicit human intent and **may** deploy a prerelease
    tag; the run deploys exactly the tag it runs on, and a dispatch on a branch
    is refused before any mutation (§ The run's ref is the deployed checkout).
    Its own smoke asserts `https://inspector.mstar.page/healthz` returns
    `{"ok":true,"version":"v<tag>"}`.
+
+   **If the first run reds at that smoke, the deploy itself still
+   succeeded.** This first run also creates the `inspector.mstar.page`
+   Workers Custom Domain, and certificate/DNS provisioning can outlast the
+   smoke's ~3.5-minute budget (5 attempts × `curl --max-time 30` + 10s
+   sleeps), so healthz can still be unreachable when the loop gives up.
+   Recovery is to re-dispatch the same tag
+   (`gh workflow run deploy-prod.yml --ref <tag>`): the migrations are a
+   no-op against the already-migrated database and the secrets are re-injected
+   idempotently, and the smoke then sees the provisioned domain.
 
 ### `ADMIN_LOGINS` lives in the config, not the dashboard
 
@@ -191,7 +231,12 @@ restores by hand.
 
 - **Code/config** — `wrangler versions deploy --env production
   <version-id>@100%` **is version-only**: it re-points production at an
-  already-uploaded version and changes no secret, var or migration. Version ids
+  already-uploaded version and changes no secret, var or migration. It
+  re-points the **Worker version only** — the sandbox **container image**
+  keeps whatever the last `wrangler deploy` pushed, so a version-only rollback
+  across a container-affecting release pairs the old Worker with the newer
+  image. Use the re-dispatch door below (it ships the older tag's container
+  image too) when the rollback spans such a release. Version ids
   come from `wrangler deployments list --env production` or the run's summary /
   `deploy-evidence` artifact.
 - **Re-dispatching `deploy-prod.yml` on an older tag is NOT version-only** —
