@@ -230,6 +230,26 @@ function createDeclarationRaceD1(inner: AppConfigD1, removeDeclaration: () => vo
   };
 }
 
+/**
+ * D1 double that injects a CONCURRENT same-id save at the one moment that
+ * matters: after this caller's `isNew` / count pre-checks have already passed,
+ * and BEFORE its batch executes. The injected save takes the App's LAST
+ * declaration slot under the very id this caller is declaring.
+ */
+function createLastSlotRaceD1(inner: AppConfigD1, winLastSlot: () => Promise<void>): AppConfigD1 {
+  let fired = false;
+  return {
+    prepare: (query: string) => inner.prepare(query),
+    batch: async (statements) => {
+      if (!fired) {
+        fired = true;
+        await winLastSlot();
+      }
+      return await inner.batch(statements);
+    },
+  };
+}
+
 /** Seed a github_apps row with genuinely decryptable encrypted columns. */
 async function seedApp(
   db: DashboardD1,
@@ -1714,6 +1734,87 @@ describe("app-config store (createAppConfigStore) — custom providers", () => {
     expect(rawCount(db, "app_custom_provider_keys")).toBe(0);
   });
 
+  test("a lost last-declaration-slot race leaves the losing save's key uncommitted (same-id concurrent create)", async () => {
+    const { db, app } = await seededWorld();
+    const store = configStore(db);
+    // Seven declarations, so the App sits ONE slot below the cap.
+    for (let i = 1; i < MAX_CUSTOM_PROVIDER_COUNT; i++) {
+      await store.upsertCustomProvider(app.id, { ...CUSTOM, provider_id: `prov-${i}` }, PLAIN_CUSTOM_KEY);
+    }
+    expect(rawCount(db, "app_custom_providers")).toBe(MAX_CUSTOM_PROVIDER_COUNT - 1);
+    const LOSING = sk("custom-losing-8282");
+    const WINNING = sk("custom-winning-9292");
+    const target = "prov-last";
+    // The concurrent save wins the LAST slot under the SAME id "prov-last",
+    // after this caller's absence/count reads passed and before its batch.
+    const racing = configStore(
+      createLastSlotRaceD1(db, async () => {
+        await configStore(db).upsertCustomProvider(
+          app.id,
+          { ...CUSTOM, provider_id: target, base_url: "https://winner.example.com/v1", model_ids: ["winner-model"] },
+          WINNING,
+        );
+      }),
+    );
+    await expect(
+      racing.upsertCustomProvider(
+        app.id,
+        { ...CUSTOM, provider_id: target, base_url: "https://loser.example.com/v1", model_ids: ["loser-model"] },
+        LOSING,
+      ),
+    ).rejects.toThrow("custom provider cap (8) reached");
+    // The winner's declaration is intact — the loser's refused write committed
+    // NEITHER a declaration change NOR a credential.
+    expect(rawCount(db, "app_custom_providers")).toBe(MAX_CUSTOM_PROVIDER_COUNT);
+    const decl = db.raw
+      .query("SELECT base_url, model_ids FROM app_custom_providers WHERE app_id = ? AND provider_id = ?")
+      .get(app.id, target) as { base_url: string; model_ids: string };
+    expect(decl.base_url).toBe("https://winner.example.com/v1");
+    expect(JSON.parse(decl.model_ids)).toEqual(["winner-model"]);
+    // Exactly the winner's key — no losing row, hence no verification or
+    // ciphertext update for the loser either. (One key per declaration: the
+    // seven earlier ones plus the winner's.)
+    expect(rawCount(db, "app_custom_provider_keys")).toBe(MAX_CUSTOM_PROVIDER_COUNT);
+    const consumer = await store.getCustomProvidersForConsumer(app.id);
+    expect(consumer.find((row) => row.provider_id === target)!.api_keys).toEqual([WINNING]);
+
+    // Same-key variant: the re-submitted identity already sits in the pool, so
+    // pool admission's "key already there" branch passes — the growth gate is
+    // the ONLY thing refusing it. The winner's ciphertext and verification
+    // bookkeeping must survive byte-identical (a conflict-update would have
+    // rewritten the envelope).
+    const { db: db2, app: app2 } = await seededWorld();
+    const store2 = configStore(db2);
+    for (let i = 1; i < MAX_CUSTOM_PROVIDER_COUNT; i++) {
+      await store2.upsertCustomProvider(app2.id, { ...CUSTOM, provider_id: `prov-${i}` }, PLAIN_CUSTOM_KEY);
+    }
+    let winnerRow: unknown = null;
+    const racing2 = configStore(
+      createLastSlotRaceD1(db2, async () => {
+        await configStore(db2).upsertCustomProvider(
+          app2.id,
+          { ...CUSTOM, provider_id: target, base_url: "https://winner.example.com/v1", model_ids: ["winner-model"] },
+          WINNING,
+        );
+        // Snapshot the winner's committed row the instant it lands: the
+        // loser's refused re-submit must leave these columns byte-identical.
+        winnerRow = db2.raw
+          .query("SELECT key_enc, verified_at, verified_status FROM app_custom_provider_keys WHERE app_id = ? AND provider = ?")
+          .get(app2.id, target);
+      }),
+    );
+    await expect(
+      racing2.upsertCustomProvider(app2.id, { ...CUSTOM, provider_id: target }, WINNING),
+    ).rejects.toThrow("custom provider cap (8) reached");
+    expect(winnerRow).not.toBeNull();
+    expect(
+      db2.raw
+        .query("SELECT key_enc, verified_at, verified_status FROM app_custom_provider_keys WHERE app_id = ? AND provider = ?")
+        .get(app2.id, target),
+    ).toEqual(winnerRow);
+    expect(rawCount(db2, "app_custom_provider_keys")).toBe(MAX_CUSTOM_PROVIDER_COUNT);
+  });
+
   test("deleteCustomProviderKey removes a migrated (not-yet-promoted) key by its derived id — no prior read needed", async () => {
     const db = createPreProviderPoolD1();
     const app = await seedApp(db, { slug: "a", createdBy: "mallory" });
@@ -2845,8 +2946,14 @@ describe("POST /dashboard/apps/:slug/settings — custom providers (op=add-custo
         if (query.includes("SELECT COUNT(*) AS n FROM app_custom_providers")) {
           return fakeStmt({ first: { n: 7 } }); // store pre-check passes
         }
+        // The race lost: a concurrent save took the last slot, so BOTH
+        // statements of the batch — the key, which runs first, and the
+        // declaration, which shares its growth gate — match zero rows.
+        if (query.includes("INSERT INTO app_custom_provider_keys")) {
+          return fakeStmt({ run: { changes: 0 } });
+        }
         if (query.includes("INSERT INTO app_custom_providers")) {
-          return fakeStmt({ run: { changes: 0 } }); // race lost → cap error
+          return fakeStmt({ run: { changes: 0 } });
         }
         return db.prepare(query);
       },

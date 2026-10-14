@@ -964,6 +964,20 @@ export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | un
   }
 
   /**
+   * The admission a NEW custom-provider declaration shares with its key: the
+   * write lands only while the App holds fewer than MAX_CUSTOM_PROVIDER_COUNT
+   * declarations. Both statements of a new-id batch carry it, and the KEY
+   * statement runs FIRST — the declaration's own INSERT raises the counted
+   * rows, so a gate evaluated after it cannot tell a WON slot (the row is
+   * ours) from a LOST one (a concurrent save took it): either way the count
+   * sits AT the cap, and the loser's key would commit under the winner's
+   * declaration.
+   */
+  function declarationGrowthAdmission(): string {
+    return `(SELECT COUNT(*) FROM app_custom_providers WHERE app_id = ?) < ${MAX_CUSTOM_PROVIDER_COUNT}`;
+  }
+
+  /**
    * One pool row's conditional upsert, prepared but NOT run: the cap, the
    * identity and (for an owned pool) the declaration's existence all live in
    * its WHERE, so an insert matching ZERO rows is a refusal, never a silent
@@ -977,26 +991,33 @@ export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | un
     provider: string,
     keyId: string,
     keyEnc: string,
-    opts: { verified: boolean },
+    opts: { verified: boolean; newDeclaration?: boolean },
   ): AppConfigStatement {
     const verifiedAt = opts.verified ? "(SELECT ts FROM now)" : "NULL";
     const verifiedStatus = opts.verified ? "'ok'" : "NULL";
     // A declaration-OWNED pool additionally requires its declaration row to
     // still exist, so a declaration removal racing this write matches zero
     // rows instead of stranding an orphan credential a re-declaration would
-    // revive.
-    const ownership =
-      spec.owner === undefined
-        ? ""
-        : ` AND EXISTS (SELECT 1 FROM ${spec.owner.table} WHERE app_id = ? AND ${spec.owner.column} = ?)`;
+    // revive — and the pool write is gated by the SAME declaration admission
+    // the declaration statement carries, so neither can land without the
+    // other, whatever the concurrent saves did in between.
+    const owned = spec.owner !== undefined && opts.newDeclaration !== true;
+    const ownership = owned
+      ? ` AND EXISTS (SELECT 1 FROM ${spec.owner.table} WHERE app_id = ? AND ${spec.owner.column} = ?)`
+      : "";
+    // A key riding a declaration CREATED BY THE SAME BATCH has no row to check
+    // yet; the declaration's own INSERT is gated on this very predicate, so
+    // the batch still commits the key only together with its declaration.
+    const growth = opts.newDeclaration === true ? ` AND ${declarationGrowthAdmission()}` : "";
     const bind = [appId, provider, keyId, keyEnc, appId, provider, appId, provider, keyId];
-    if (spec.owner !== undefined) bind.push(appId, provider);
+    if (owned) bind.push(appId, provider);
+    if (opts.newDeclaration === true) bind.push(appId);
     return db
       .prepare(
         `WITH now AS (SELECT datetime('now') AS ts)
          INSERT INTO ${spec.table} (app_id, provider, key_id, key_enc, created_at, updated_at, verified_at, verified_status)
          SELECT ?, ?, ?, ?, (SELECT ts FROM now), (SELECT ts FROM now), ${verifiedAt}, ${verifiedStatus}
-         WHERE ${poolAdmission(spec)}${ownership}
+         WHERE ${poolAdmission(spec)}${ownership}${growth}
          ON CONFLICT (app_id, provider, key_id) DO UPDATE SET
            key_enc = excluded.key_enc,
            updated_at = excluded.updated_at,
@@ -1603,10 +1624,16 @@ export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | un
      * zero rows and throws the cap error. The pre-check below stays as the
      * fast 400 path (defense in depth, both layers).
      * The declaration and its key commit TOGETHER or not at all: both ride ONE
-     * `db.batch` whose statements carry the SAME pool-admission predicate, so a
-     * refused key (a ninth) refuses the declaration write with it, and the key
+     * `db.batch` whose two statements carry the SAME pool-admission predicate, so
+     * a refused key (a ninth) refuses the declaration write with it, and the key
      * statement additionally requires the declaration — a declaration removal
-     * racing this call matches zero rows on BOTH. The key is encrypted BEFORE
+     * racing this call matches zero rows on BOTH.
+     * A NEW declaration's batch additionally shares the declaration-COUNT gate
+     * (the cap): its key statement carries it too, and runs FIRST, before the
+     * declaration's own INSERT raises the counted rows. A lost last-slot race
+     * therefore refuses the key instead of committing a credential under the
+     * declaration the concurrent save created (see `declarationGrowthAdmission`).
+     * The key is encrypted BEFORE
      * the batch, so a crypto failure (missing / malformed master key) leaves no
      * declaration behind either.
      * A fresh insert writes updated_at == created_at from ONE clock read (the
@@ -1638,10 +1665,8 @@ export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | un
           throw new InvalidCustomProviderError(`custom provider cap (${MAX_CUSTOM_PROVIDER_COUNT}) reached`);
         }
       }
-      // Promote the pool FIRST (the cap must count real slots, and a
-      // re-submitted key must collapse onto its promoted row), then encrypt —
-      // both BEFORE anything is written, so a crypto failure (a missing /
-      // malformed master key) can never leave a declaration behind.
+      // The key is encrypted BEFORE the batch, so a crypto failure (a missing /
+      // malformed master key) leaves no declaration behind.
       await readKeyRows(CUSTOM_KEY_TABLE, appId, decl.provider_id);
       const keyId = await providerKeyId(plainKey);
       const keyEnc = await box.encryptSecret(plainKey, CUSTOM_KEY_TABLE.aad(appId, decl.provider_id, keyId));
@@ -1658,7 +1683,7 @@ export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | un
               `WITH now AS (SELECT datetime('now') AS ts)
                INSERT INTO app_custom_providers (app_id, provider_id, base_url, api, model_ids, created_at, updated_at)
                SELECT ?, ?, ?, ?, ?, (SELECT ts FROM now), (SELECT ts FROM now)
-               WHERE (SELECT COUNT(*) FROM app_custom_providers WHERE app_id = ?) < ${MAX_CUSTOM_PROVIDER_COUNT}
+               WHERE ${declarationGrowthAdmission()}
                  AND ${poolAdmission(CUSTOM_KEY_TABLE)}`,
             )
             .bind(
@@ -1678,14 +1703,29 @@ export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | un
                  AND ${poolAdmission(CUSTOM_KEY_TABLE)}`,
             )
             .bind(decl.base_url, decl.api, JSON.stringify(decl.model_ids), appId, decl.provider_id, ...admissionBinds);
-      const res = await db.batch([
-        declaration,
-        keyInsertStatement(CUSTOM_KEY_TABLE, appId, decl.provider_id, keyId, keyEnc, { verified: true }),
-      ]);
-      if (isNew && res[0]!.meta.changes === 0) {
+      const key = keyInsertStatement(CUSTOM_KEY_TABLE, appId, decl.provider_id, keyId, keyEnc, {
+        verified: true,
+        newDeclaration: isNew,
+      });
+      // ORDER: for a NEW declaration the KEY runs FIRST. Both statements
+      // evaluate the declaration-count gate, so it must be read before the
+      // declaration's own INSERT raises the count — otherwise a WON slot (the
+      // row is ours) looks identical to a LOST one and a lost race would
+      // commit its key under the concurrent winner's declaration.
+      const res = isNew ? await db.batch([key, declaration]) : await db.batch([declaration, key]);
+      if (!isNew) {
+        if (res[1]!.meta.changes === 0) await throwKeyRefusal(CUSTOM_KEY_TABLE, appId, decl.provider_id);
+        return;
+      }
+      // The key ran FIRST and the declaration carries the SAME growth + pool
+      // gate, over a state that inserting a key row cannot loosen (the pool's
+      // EXISTS branch covers the row just written) — one transaction, so the
+      // two match together or not at all. A zero-change key therefore means
+      // the declaration lost too: nothing was committed, and a lost last-slot
+      // race leaves neither a key row nor a declaration behind.
+      if (res[0]!.meta.changes === 0) {
         throw new InvalidCustomProviderError(`custom provider cap (${MAX_CUSTOM_PROVIDER_COUNT}) reached`);
       }
-      if (res[1]!.meta.changes === 0) await throwKeyRefusal(CUSTOM_KEY_TABLE, appId, decl.provider_id);
     },
 
     /**
