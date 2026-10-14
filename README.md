@@ -96,7 +96,19 @@ Two deployment paths — pick the one that matches who you are:
 
 ### Path B — this repo's staging (maintainers)
 
-1. **Deploy** — merging to `main` deploys automatically via the [Deploy workflow](.github/workflows/deploy.yml) (secrets → D1 migrations → `wrangler deploy` → smoke → digest record). For a manual/local deploy:
+This repo runs two instances: **production** at
+`https://inspector.mstar.page` — deployed when the Release workflow dispatches
+the production workflow on a non-prerelease tag (a Release published with the
+workflow's own `GITHUB_TOKEN` fires no `release: published` run, so that
+dispatch is the normal path; a Release published by hand in the UI deploys
+through the retained `release: published` trigger, whose job-level tag guard
+skips a prerelease tag) — and
+**staging** at `mstar-inspector.42ch.dev`, deployed on every push to
+`main`. This path sets up staging; production's one-time bring-up (its own
+Cloudflare resources, GitHub `production` environment, OAuth callback) is in
+[`docs/deploy.md`](docs/deploy.md#production-environment).
+
+1. **Deploy** — merging to `main` deploys staging automatically via the [Deploy workflow](.github/workflows/deploy.yml) (secrets → D1 migrations → `wrangler deploy` → smoke → digest record). For a manual/local deploy:
 
    ```bash
    bun install
@@ -169,7 +181,7 @@ Everything a review needs is configured **per App** on the dashboard Settings pa
 
 - **Emergency brake**: per-App `review_enabled` (dashboard Pause/Resume) is the primary review control. The Worker var `REVIEW_ENABLED` stops ALL reviews platform-wide only when set to exactly `"false"` (case-sensitive, untrimmed); unset / `""` / `"true"` / other → per-App governs. Leave it unset.
 - **Deploys are automated on this repo**: merging to `main` runs the [Deploy workflow](.github/workflows/deploy.yml) — secrets injection, D1 migrations, `wrangler deploy`, post-deploy smoke, and the image-digest record. A failed run stops red (no auto-rollback); see [`docs/deploy.md`](docs/deploy.md) for failure semantics and the manual rollback path. Self-hosting your own copy? You deploy manually (or wire your own pipeline) — see [Path A](#path-a--deploy-your-own-copy-pinned-release).
-- **Releases are versioned**: a release is cut by merging a `release vX.Y.Z` PR, which tags the release and publishes a GitHub Release with bilingual changelog and deploy evidence — see [`docs/release.md`](docs/release.md) and the [Releases page](https://github.com/btspoony/mstar-inspector/releases).
+- **Releases are versioned**: a release is cut by merging a `release vX.Y.Z` PR, which tags the release and publishes a GitHub Release with bilingual changelog and deploy evidence — and for a non-prerelease tag the Release workflow **dispatches** the production deploy to `https://inspector.mstar.page` (explicitly: a Release created with the workflow's `GITHUB_TOKEN` triggers no `release: published` run, so the dispatch is the normal path — a Release published by hand deploys through that retained trigger, whose job-level tag guard skips a prerelease tag; the release chain never dispatches a prerelease, while a manual dispatch on a tag ref — the bring-up/rollback door — may deploy one) — see [`docs/release.md`](docs/release.md) and the [Releases page](https://github.com/btspoony/mstar-inspector/releases).
 - **Secrets inventory, deploy steps, rollback, and the full Multi-App go-live checklist** → [`docs/deploy.md`](docs/deploy.md).
 
 ## Local development

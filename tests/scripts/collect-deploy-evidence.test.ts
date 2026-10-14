@@ -20,11 +20,15 @@
  * absence never fails the release); 1 is usage-errors only.
  */
 import { describe, expect, test } from "bun:test";
+import { readFileSync } from "node:fs";
 import {
+  DEFAULT_DEPLOY_WORKFLOW,
   DEPLOY_EVIDENCE_ARTIFACT,
   type CliDeps,
   collectDeployEvidence,
   type CollectOptions,
+  type CollectResult,
+  createGhRunner,
   type GhRun,
   type GhRunner,
   parseArgs,
@@ -40,18 +44,21 @@ const IN_FLIGHT: GhRun = {
   status: "in_progress",
   conclusion: null,
   displayTitle: "Deploy main",
+  headBranch: "main",
 };
 const SUCCESS: GhRun = {
   databaseId: 123456,
   status: "completed",
   conclusion: "success",
   displayTitle: "Deploy main",
+  headBranch: "main",
 };
 const FAILED: GhRun = {
   databaseId: 123456,
   status: "completed",
   conclusion: "failure",
   displayTitle: "Deploy main",
+  headBranch: "main",
 };
 
 const VERSION_ID = "11112222-3333-4444-5555-666677778888";
@@ -62,19 +69,27 @@ const GH_ENV = {
   GITHUB_REPOSITORY: "acme/mstar-inspector",
 };
 
-/** Recording fake: `listRuns(poll, sha)` decides per poll; `download` materializes artifact files. */
+/** Recording fake: `listRuns(poll, sha, workflow)` decides per poll; `download` materializes artifact files. */
 function makeRunner(
   listRuns: (poll: number, sha: string) => GhRun[],
   download?: (runId: number, destDir: string) => void,
-): { runner: GhRunner; polls: string[]; downloads: { runId: number; destDir: string }[] } {
+): {
+  runner: GhRunner;
+  polls: string[];
+  workflows: string[];
+  downloads: { runId: number; destDir: string }[];
+} {
   const polls: string[] = [];
+  const workflows: string[] = [];
   const downloads: { runId: number; destDir: string }[] = [];
   return {
     polls,
+    workflows,
     downloads,
     runner: {
-      listRuns(sha: string): GhRun[] {
+      listRuns(sha: string, workflow: string): GhRun[] {
         polls.push(sha);
+        workflows.push(workflow);
         return listRuns(polls.length, sha);
       },
       downloadArtifact(runId: number, destDir: string): void {
@@ -105,6 +120,7 @@ function baseOpts(over: Partial<CollectOptions> & { runner: GhRunner }): Collect
   const clock = fakeClock();
   return {
     sha: SHA,
+    workflow: DEFAULT_DEPLOY_WORKFLOW,
     waitMs: 90_000,
     intervalMs: 30_000,
     env: {},
@@ -227,6 +243,31 @@ describe("collectDeployEvidence — timeout / pending branch", () => {
     const result = collectDeployEvidence(baseOpts({ runner, waitMs: 45_000, intervalMs: 30_000 }));
     expect(result.section).toContain("after the ~1 min bounded wait");
   });
+
+  test("zero wait polls exactly once and reports an immediate check, never a rounded-up wait", () => {
+    // The Release workflow passes --wait-minutes 0 for a prerelease version
+    // (it never dispatches, so there is nothing to wait for): the section must
+    // be written after ONE poll and must not claim a ~1 min wait that never
+    // happened.
+    const { runner, polls } = makeRunner(() => []);
+    const result = collectDeployEvidence(baseOpts({ runner, waitMs: 0, env: {} }));
+    expect(result.kind).toBe("no-run");
+    expect(result.section).toBe(
+      [
+        "### Deploy evidence",
+        `- Status: no deploy run for commit \`${SHA}\` after the immediate check (no deploy.yml run was created for this commit)`,
+      ].join("\n"),
+    );
+    expect(polls).toHaveLength(1);
+  });
+
+  test("zero wait with a run still in flight yields the pending section after one poll", () => {
+    const { runner, polls } = makeRunner(() => [IN_FLIGHT]);
+    const result = collectDeployEvidence(baseOpts({ runner, waitMs: 0, env: {} }));
+    expect(result.kind).toBe("pending");
+    expect(result.section).toContain("still in flight after the immediate check");
+    expect(polls).toHaveLength(1);
+  });
 });
 
 describe("collectDeployEvidence — no-run branch", () => {
@@ -239,7 +280,7 @@ describe("collectDeployEvidence — no-run branch", () => {
     expect(result.section).toBe(
       [
         "### Deploy evidence",
-        `- Status: no deploy run for commit \`${SHA}\` after the ~2 min bounded wait (deploy.yml paths-ignore may have skipped this commit)`,
+        `- Status: no deploy run for commit \`${SHA}\` after the ~2 min bounded wait (no deploy.yml run was created for this commit)`,
       ].join("\n"),
     );
     expect(result.section).not.toContain("Actions run:");
@@ -379,6 +420,509 @@ describe("collectDeployEvidence — multiple runs for one SHA (newest wins)", ()
   });
 });
 
+describe("collectDeployEvidence — release identity (--ref prefers the release's own run)", () => {
+  // deploy-prod.yml takes no `ref` input and refuses a non-tag ref, so a run's
+  // own headBranch IS the ref it deployed — the preference proves identity.
+  const TAG = "v1.2.3";
+  // gh reports newest-first: the manual rollback (dispatched on `main` at the
+  // release merge commit) is NEWER than the release's own tag-bound run.
+  const ROLLBACK: GhRun = {
+    databaseId: 999,
+    status: "completed",
+    conclusion: "success",
+    displayTitle: "Deploy prod rollback",
+    headBranch: "main",
+  };
+  const TAG_RUN: GhRun = { ...SUCCESS, databaseId: 4242, headBranch: TAG };
+
+  test("same SHA: the tag-bound run is selected over the newer rollback run", () => {
+    const root = makeTempRoot();
+    try {
+      const { runner, downloads } = makeRunner(() => [ROLLBACK, TAG_RUN], (_id, d) =>
+        writeArtifact(d),
+      );
+      const result = collectDeployEvidence(
+        baseOpts({ runner, ref: TAG, artifactDir: root, env: { ...GH_ENV } }),
+      );
+      expect(result.kind).toBe("success");
+      expect(result.section).toContain(`- Actions run: ${RUN_URL.replace("123456", "4242")}`);
+      expect(result.section).not.toContain("- Actions run: 999");
+      // the rollback's artifact is never read for the release's evidence
+      expect(downloads).toEqual([{ runId: 4242, destDir: root }]);
+      // the preference HIT is not an ambiguity — no fallback notice
+      expect(result.section).not.toContain("Run identity:");
+    } finally {
+      disposeTempRoot(root);
+    }
+  });
+
+  test("no run matches the ref: fallback keeps the newest-for-SHA pick and discloses it", () => {
+    const root = makeTempRoot();
+    try {
+      const { runner, downloads } = makeRunner(() => [ROLLBACK], (_id, d) => writeArtifact(d));
+      const result = collectDeployEvidence(
+        baseOpts({ runner, ref: TAG, artifactDir: root, env: {} }),
+      );
+      expect(result.kind).toBe("success"); // never degrades to "no run"
+      expect(result.section).toContain("- Actions run: 999");
+      // the fallback is what discloses that the cited run is not the release's own deploy
+      expect(result.section).toContain(
+        `- Run identity: no run on ref \`${TAG}\` for commit \`${SHA}\` — the newest run for the commit is reported instead, which is not that ref's deploy`,
+      );
+      expect(downloads).toEqual([{ runId: 999, destDir: root }]);
+    } finally {
+      disposeTempRoot(root);
+    }
+  });
+
+  test("fallback on a pending run still yields a section with the fallback notice", () => {
+    const { runner } = makeRunner(() => [{ ...ROLLBACK, status: "in_progress", conclusion: null }]);
+    const clock = fakeClock();
+    const result = collectDeployEvidence(
+      baseOpts({ runner, ref: TAG, now: clock.now, sleep: clock.sleep }),
+    );
+    expect(result.kind).toBe("pending");
+    expect(result.section).toContain("- Actions run: 999");
+    expect(result.section).toContain("Run identity:");
+  });
+
+  test("no --ref keeps the plain newest-for-SHA pick (unchanged behavior)", () => {
+    const root = makeTempRoot();
+    try {
+      const { runner, downloads } = makeRunner(() => [ROLLBACK, TAG_RUN], (_id, d) =>
+        writeArtifact(d),
+      );
+      const result = collectDeployEvidence(baseOpts({ runner, artifactDir: root }));
+      expect(result.kind).toBe("success");
+      expect(result.section).toContain("- Actions run: 999");
+      expect(result.section).not.toContain("Run identity:");
+      expect(downloads).toEqual([{ runId: 999, destDir: root }]);
+    } finally {
+      disposeTempRoot(root);
+    }
+  });
+});
+
+describe("collectDeployEvidence — dispatch boundary (--since-run)", () => {
+  const TAG = "v1.2.3";
+  // The run this release's rerun replaced: a terminal failure on this tag.
+  const SUPERSEDED: GhRun = { ...FAILED, databaseId: 5150, headBranch: TAG };
+  // The trap this boundary exists for: an OLDER success on the same tag. A
+  // single-id exclusion drops only 5150 and leaves 42 selectable, so the
+  // collector would immediately return 42's artifact as this release's
+  // evidence instead of waiting for the run the rerun just dispatched.
+  const OLDER_SUCCESS: GhRun = { ...SUCCESS, databaseId: 42, headBranch: TAG };
+  const FRESH: GhRun = { ...SUCCESS, databaseId: 5250, headBranch: TAG };
+  // gh lists newest-first: the fresh dispatch leads once it registers.
+  const FRESH_IN_FLIGHT: GhRun = { ...FRESH, status: "waiting", conclusion: null };
+  /** The highest id visible at dispatch time — what the dispatch step captured. */
+  const BOUNDARY = SUPERSEDED.databaseId;
+
+  test("older success + superseded failure: waits past the boundary instead of backfilling the older success", () => {
+    const root = makeTempRoot();
+    try {
+      // poll 1: only pre-boundary runs are visible (the fresh dispatch has not
+      // registered yet); poll 2+: it leads the newest-first list.
+      const { runner, polls, downloads } = makeRunner(
+        (poll) => (poll === 1 ? [SUPERSEDED, OLDER_SUCCESS] : [FRESH, SUPERSEDED, OLDER_SUCCESS]),
+        (_id, destDir) => writeArtifact(destDir),
+      );
+      const clock = fakeClock();
+      const result = collectDeployEvidence(
+        baseOpts({
+          runner,
+          ref: TAG,
+          sinceRun: BOUNDARY,
+          now: clock.now,
+          sleep: clock.sleep,
+          artifactDir: root,
+          env: { ...GH_ENV },
+        }),
+      );
+      expect(result.kind).toBe("success");
+      expect(result.section).toContain(`- Actions run: ${RUN_URL.replace("123456", "5250")}`);
+      // neither pre-boundary run is cited, and the older success' artifact is
+      // never read
+      expect(result.section).not.toContain("5150");
+      expect(result.section).not.toContain("- Actions run: 42");
+      expect(downloads).toEqual([{ runId: 5250, destDir: root }]);
+      // a completed failure at poll 1 did NOT conclude the wait
+      expect(polls).toHaveLength(2);
+    } finally {
+      disposeTempRoot(root);
+    }
+  });
+
+  test("MUTATION/dropping the boundary filter: the same sequence concludes on a pre-boundary run at the first poll", async () => {
+    // A real source mutation, not a re-implementation: the collector has no
+    // relative imports, so the mutated copy runs from a temp tree against the
+    // same fixture — proving the boundary is what keeps the older success out.
+    const src = readFileSync(`${import.meta.dir}/../../scripts/collect-deploy-evidence.ts`, "utf8");
+    const mutated = src.replace(
+      "sinceRun === undefined ? runs : runs.filter((r) => r.databaseId > sinceRun)",
+      "runs",
+    );
+    expect(mutated).not.toBe(src);
+    const root = makeTempRoot();
+    try {
+      const file = writeAt(root, "collect-deploy-evidence.mutated.ts", mutated);
+      // Deliberate runtime-selected specifier: a static import cannot reach a
+      // file generated during the test, and exercising that loader boundary is
+      // the point of the mutation.
+      const mutant: { collectDeployEvidence: (opts: CollectOptions) => CollectResult } =
+        await import(file);
+      const { runner, polls, downloads } = makeRunner(
+        () => [SUPERSEDED, OLDER_SUCCESS],
+        (_id, destDir) => writeArtifact(destDir),
+      );
+      const result = mutant.collectDeployEvidence(
+        baseOpts({
+          runner,
+          ref: TAG,
+          sinceRun: BOUNDARY,
+          artifactDir: root,
+          env: {},
+        }),
+      );
+      // The newest pre-boundary run is the failure, so without the filter the
+      // wait concludes immediately on it — the very outcome the boundary
+      // prevents (with only that id excluded, the older success would be
+      // selected instead, which is the reviewed bug).
+      expect(result.kind).toBe("deploy-failed");
+      expect(result.section).toContain("- Actions run: 5150");
+      expect(polls).toHaveLength(1);
+      expect(downloads).toEqual([]);
+    } finally {
+      disposeTempRoot(root);
+    }
+  });
+
+  test("an in-flight post-boundary run is selected and awaited", () => {
+    const { runner } = makeRunner(() => [FRESH_IN_FLIGHT, SUPERSEDED, OLDER_SUCCESS]);
+    const clock = fakeClock();
+    const result = collectDeployEvidence(
+      baseOpts({
+        runner,
+        ref: TAG,
+        sinceRun: BOUNDARY,
+        now: clock.now,
+        sleep: clock.sleep,
+        env: { ...GH_ENV },
+      }),
+    );
+    expect(result.kind).toBe("pending");
+    expect(result.section).toContain(`- Actions run: ${RUN_URL.replace("123456", "5250")}`);
+    expect(result.section).not.toContain("5150");
+    expect(result.section).not.toContain("- Actions run: 42");
+  });
+
+  // Codex P2: the boundary is taken over the WHOLE page (any ref), so a
+  // foreign tag's run can also start ABOVE it. Such a run is not this
+  // release's deploy even when it is already complete, so with a boundary the
+  // newest-for-SHA fallback is withheld: the collector waits for the tag's own
+  // post-boundary run.
+  const FOREIGN_ABOVE: GhRun = { ...SUCCESS, databaseId: 5255, headBranch: "v1.2.4" };
+
+  test("a completed run of another ref above the boundary is never selected — the tag's own dispatched run is awaited", () => {
+    const root = makeTempRoot();
+    try {
+      // poll 1: only the foreign tag's completed run is above the boundary
+      // (this release's dispatch has not registered yet); poll 2+: it leads.
+      const { runner, polls, downloads } = makeRunner(
+        (poll) =>
+          poll === 1
+            ? [FOREIGN_ABOVE, SUPERSEDED, OLDER_SUCCESS]
+            : [FRESH, FOREIGN_ABOVE, SUPERSEDED, OLDER_SUCCESS],
+        (_id, destDir) => writeArtifact(destDir),
+      );
+      const clock = fakeClock();
+      const result = collectDeployEvidence(
+        baseOpts({
+          runner,
+          ref: TAG,
+          sinceRun: BOUNDARY,
+          now: clock.now,
+          sleep: clock.sleep,
+          artifactDir: root,
+          env: { ...GH_ENV },
+        }),
+      );
+      expect(result.kind).toBe("success");
+      expect(result.section).toContain(`- Actions run: ${RUN_URL.replace("123456", "5250")}`);
+      expect(result.section).not.toContain("5255");
+      // no disclosed fallback either: a foreign ref above the boundary is not
+      // even a candidate, so there is nothing to disclose
+      expect(result.section).not.toContain("Run identity:");
+      expect(downloads).toEqual([{ runId: 5250, destDir: root }]);
+      // the completed foreign run at poll 1 did NOT conclude the wait
+      expect(polls).toHaveLength(2);
+    } finally {
+      disposeTempRoot(root);
+    }
+  });
+
+  test("only another ref's post-boundary run for the whole window: truthful timeout naming the ref requirement, artifact never read", () => {
+    const { runner, polls, downloads } = makeRunner(() => [
+      FOREIGN_ABOVE,
+      SUPERSEDED,
+      OLDER_SUCCESS,
+    ]);
+    const clock = fakeClock();
+    const result = collectDeployEvidence(
+      baseOpts({
+        runner,
+        ref: TAG,
+        sinceRun: BOUNDARY,
+        now: clock.now,
+        sleep: clock.sleep,
+        env: { ...GH_ENV },
+      }),
+    );
+    expect(result.kind).toBe("no-run");
+    // truthful: runs newer than the boundary exist, but none on this ref —
+    // and the section states exactly that without citing one
+    expect(result.section).toBe(
+      [
+        "### Deploy evidence",
+        `- Status: no new deploy run for commit \`${SHA}\` on ref \`${TAG}\` after the ~2 min bounded wait (no run on that ref newer than the dispatch boundary 5150 appeared — the superseding deploy.yml run was not yet visible; no pre-boundary or foreign-ref run was cited)`,
+      ].join("\n"),
+    );
+    expect(result.section).not.toContain("- Actions run:");
+    expect(downloads).toEqual([]);
+    expect(polls).toHaveLength(4);
+  });
+
+  test("MUTATION/keeping the newest-for-SHA fallback above the boundary: the foreign tag's completed run is published as this release's evidence", async () => {
+    // Real source mutation, run from a temp tree against the same fixture: the
+    // ref requirement above a boundary is what keeps another tag's run out.
+    const src = readFileSync(`${import.meta.dir}/../../scripts/collect-deploy-evidence.ts`, "utf8");
+    const mutated = src.replace("    if (sinceRun !== undefined) return undefined;\n", "");
+    expect(mutated).not.toBe(src);
+    const root = makeTempRoot();
+    try {
+      const file = writeAt(root, "collect-deploy-evidence.mutated-fallback.ts", mutated);
+      // Runtime-selected specifier: a static import cannot reach a file this
+      // test generates, and exercising that loader boundary is the mutation's point.
+      const mutant: { collectDeployEvidence: (opts: CollectOptions) => CollectResult } =
+        await import(file);
+      const { runner, polls, downloads } = makeRunner(
+        () => [FOREIGN_ABOVE, SUPERSEDED, OLDER_SUCCESS],
+        (_id, destDir) => writeArtifact(destDir),
+      );
+      const result = mutant.collectDeployEvidence(
+        baseOpts({ runner, ref: TAG, sinceRun: BOUNDARY, artifactDir: root, env: {} }),
+      );
+      // concludes on the FIRST poll and reads the foreign run's artifact
+      expect(result.kind).toBe("success");
+      expect(result.section).toContain("- Actions run: 5255");
+      expect(result.section).toContain("Run identity:");
+      expect(downloads.map((d) => d.runId)).toEqual([5255]);
+      expect(polls).toHaveLength(1);
+    } finally {
+      disposeTempRoot(root);
+    }
+  });
+
+  test("only pre-boundary runs for the whole window: truthful boundary timeout, never cited", () => {
+    const { runner, polls } = makeRunner(() => [SUPERSEDED, OLDER_SUCCESS]);
+    const clock = fakeClock();
+    const result = collectDeployEvidence(
+      baseOpts({
+        runner,
+        ref: TAG,
+        sinceRun: BOUNDARY,
+        now: clock.now,
+        sleep: clock.sleep,
+        env: { ...GH_ENV },
+      }),
+    );
+    expect(result.kind).toBe("no-run");
+    // truthful: the commit does have runs, but none is this ref's and newer
+    // than the boundary — and the section says exactly that without citing one
+    expect(result.section).toBe(
+      [
+        "### Deploy evidence",
+        `- Status: no new deploy run for commit \`${SHA}\` on ref \`${TAG}\` after the ~2 min bounded wait (no run on that ref newer than the dispatch boundary 5150 appeared — the superseding deploy.yml run was not yet visible; no pre-boundary or foreign-ref run was cited)`,
+      ].join("\n"),
+    );
+    expect(result.section).not.toContain("- Actions run:");
+    // polled the whole window rather than concluding on a pre-boundary run
+    expect(polls).toHaveLength(4);
+    expect(clock.sleeps).toEqual([30_000, 30_000, 30_000]);
+  });
+
+  test("boundary run appearing later in the window is awaited, not skipped", () => {
+    const root = makeTempRoot();
+    try {
+      // polls 1-2: only pre-boundary runs; poll 3+: the dispatched run lands.
+      const { runner, polls } = makeRunner(
+        (poll) => (poll >= 3 ? [FRESH, SUPERSEDED, OLDER_SUCCESS] : [SUPERSEDED, OLDER_SUCCESS]),
+        (_id, destDir) => writeArtifact(destDir),
+      );
+      const clock = fakeClock();
+      const result = collectDeployEvidence(
+        baseOpts({
+          runner,
+          ref: TAG,
+          sinceRun: BOUNDARY,
+          now: clock.now,
+          sleep: clock.sleep,
+          artifactDir: root,
+          env: {},
+        }),
+      );
+      expect(result.kind).toBe("success");
+      expect(result.section).toContain("- Actions run: 5250");
+      expect(polls).toHaveLength(3);
+    } finally {
+      disposeTempRoot(root);
+    }
+  });
+
+  test("no boundary keeps the plain nearest-first selection (reuse path regression)", () => {
+    // The reuse path passes no --since-run: the newest-for-SHA pick is
+    // unchanged, including when an older success sits behind it.
+    const root = makeTempRoot();
+    try {
+      const { runner, downloads } = makeRunner(
+        () => [SUPERSEDED, OLDER_SUCCESS],
+        (_id, destDir) => writeArtifact(destDir),
+      );
+      const result = collectDeployEvidence(
+        baseOpts({ runner, ref: TAG, artifactDir: root, env: {} }),
+      );
+      expect(result.kind).toBe("deploy-failed");
+      expect(result.section).toContain("- Actions run: 5150");
+      expect(downloads).toEqual([]);
+    } finally {
+      disposeTempRoot(root);
+    }
+  });
+
+  test("no boundary with only the older success visible cites it (boundless fallback unchanged)", () => {
+    const root = makeTempRoot();
+    try {
+      const { runner, downloads } = makeRunner(() => [OLDER_SUCCESS], (_id, destDir) =>
+        writeArtifact(destDir),
+      );
+      const result = collectDeployEvidence(
+        baseOpts({ runner, ref: TAG, artifactDir: root, env: {} }),
+      );
+      expect(result.kind).toBe("success");
+      expect(result.section).toContain("- Actions run: 42");
+      expect(downloads).toEqual([{ runId: 42, destDir: root }]);
+    } finally {
+      disposeTempRoot(root);
+    }
+  });
+
+  test("no boundary and no run at all keeps the original no-run wording", () => {
+    const { runner } = makeRunner(() => []);
+    const result = collectDeployEvidence(baseOpts({ runner, waitMs: 0, env: {} }));
+    expect(result.kind).toBe("no-run");
+    expect(result.section).toBe(
+      [
+        "### Deploy evidence",
+        `- Status: no deploy run for commit \`${SHA}\` after the immediate check (no deploy.yml run was created for this commit)`,
+      ].join("\n"),
+    );
+  });
+
+  test("a zero window with only pre-boundary runs still states the boundary, never a run", () => {
+    const { runner, polls } = makeRunner(() => [SUPERSEDED, OLDER_SUCCESS]);
+    const result = collectDeployEvidence(
+      baseOpts({ runner, ref: TAG, sinceRun: BOUNDARY, waitMs: 0, env: {} }),
+    );
+    expect(result.kind).toBe("no-run");
+    expect(result.section).toContain("dispatch boundary 5150");
+    expect(result.section).not.toContain("- Actions run:");
+    expect(polls).toHaveLength(1);
+  });
+
+  // Codex P2, the rollback alias: this tag's FIRST deploy on a commit already
+  // deployed under ANOTHER tag. The boundary is taken over the whole page, so
+  // the foreign completed run is pre-boundary — the collector may never cite
+  // its artifact as this release's evidence.
+  const FOREIGN_DONE: GhRun = { ...SUCCESS, databaseId: 72, headBranch: "v1.2.4" };
+  const FRESH_SAME_TAG: GhRun = { ...SUCCESS, databaseId: 80, headBranch: TAG };
+
+  test("rollback alias: a completed run for another tag is never cited — the dispatched run is awaited and wins", () => {
+    const root = makeTempRoot();
+    try {
+      // poll 1: only the foreign completed run is visible (this release's
+      // dispatch has not registered); poll 2+: it leads the newest-first list.
+      const { runner, polls, downloads } = makeRunner(
+        (poll) => (poll === 1 ? [FOREIGN_DONE] : [FRESH_SAME_TAG, FOREIGN_DONE]),
+        (_id, destDir) => writeArtifact(destDir),
+      );
+      const clock = fakeClock();
+      const result = collectDeployEvidence(
+        baseOpts({
+          runner,
+          ref: TAG,
+          sinceRun: FOREIGN_DONE.databaseId,
+          now: clock.now,
+          sleep: clock.sleep,
+          artifactDir: root,
+          env: { ...GH_ENV },
+        }),
+      );
+      expect(result.kind).toBe("success");
+      expect(result.section).toContain(`- Actions run: ${RUN_URL.replace("123456", "80")}`);
+      expect(result.section).not.toContain("- Actions run: 72");
+      // the foreign run is not even a fallback candidate: no identity notice
+      expect(result.section).not.toContain("Run identity:");
+      expect(downloads).toEqual([{ runId: 80, destDir: root }]);
+      // a completed foreign run at poll 1 did NOT conclude the wait
+      expect(polls).toHaveLength(2);
+    } finally {
+      disposeTempRoot(root);
+    }
+  });
+
+  test("rollback alias, foreign run only for the whole window: truthful boundary timeout, artifact never read", () => {
+    const { runner, polls, downloads } = makeRunner(() => [FOREIGN_DONE]);
+    const clock = fakeClock();
+    const result = collectDeployEvidence(
+      baseOpts({
+        runner,
+        ref: TAG,
+        sinceRun: FOREIGN_DONE.databaseId,
+        now: clock.now,
+        sleep: clock.sleep,
+        env: { ...GH_ENV },
+      }),
+    );
+    expect(result.kind).toBe("no-run");
+    expect(result.section).toContain(`- Status: no new deploy run for commit \`${SHA}\``);
+    expect(result.section).toContain("dispatch boundary 72");
+    expect(result.section).not.toContain("- Actions run:");
+    expect(downloads).toEqual([]);
+    expect(polls).toHaveLength(4);
+  });
+
+  test("rollback alias without a boundary (reuse path): the foreign run is cited only with the identity disclosure", () => {
+    // The boundless path is unchanged: a foreign-ref run cannot be excluded
+    // when nothing was dispatched, so the section must SAY the cited run is not
+    // this release's deploy rather than present it as this release's evidence.
+    const root = makeTempRoot();
+    try {
+      const { runner, downloads } = makeRunner(() => [FOREIGN_DONE], (_id, d) => writeArtifact(d));
+      const result = collectDeployEvidence(
+        baseOpts({ runner, ref: TAG, artifactDir: root, env: {} }),
+      );
+      expect(result.kind).toBe("success");
+      expect(result.section).toContain("- Actions run: 72");
+      expect(result.section).toContain(
+        `- Run identity: no run on ref \`${TAG}\` for commit \`${SHA}\` — the newest run for the commit is reported instead, which is not that ref's deploy`,
+      );
+      expect(downloads).toEqual([{ runId: 72, destDir: root }]);
+    } finally {
+      disposeTempRoot(root);
+    }
+  });
+});
+
 describe("collectDeployEvidence — sanitization + shape gates (QC round A1)", () => {
   test("multi-line error text is collapsed to one line; `- ` bullet shape preserved", () => {
     const { runner } = makeRunner(() => {
@@ -474,6 +1018,195 @@ describe("section markdown shape (every branch keeps the explicit heading)", () 
         expect(lines.length).toBeGreaterThan(1);
         for (const line of lines.slice(1)) expect(line).toMatch(/^- /);
         expect(result.section.endsWith("\n")).toBe(false);
+      }
+    } finally {
+      disposeTempRoot(root);
+    }
+  });
+});
+
+describe("collectDeployEvidence — deploy workflow selection (--workflow)", () => {
+  test("defaults to deploy.yml; the explicit workflow reaches listRuns verbatim on every poll", () => {
+    const root = makeTempRoot();
+    try {
+      const def = makeRunner(() => [SUCCESS], (_id, d) => writeArtifact(d));
+      collectDeployEvidence(baseOpts({ runner: def.runner, artifactDir: root }));
+      expect(def.workflows).toEqual([DEFAULT_DEPLOY_WORKFLOW]);
+      expect(def.workflows[0]).toBe("deploy.yml");
+
+      const explicit = makeRunner(() => [SUCCESS], (_id, d) => writeArtifact(d));
+      collectDeployEvidence(
+        baseOpts({ runner: explicit.runner, workflow: "deploy-prod.yml", artifactDir: root }),
+      );
+      expect(explicit.workflows).toEqual(["deploy-prod.yml"]);
+    } finally {
+      disposeTempRoot(root);
+    }
+  });
+
+  test("no-run section names the collected workflow, not a hardcoded deploy.yml", () => {
+    const { runner } = makeRunner(() => []);
+    const clock = fakeClock();
+    const result = collectDeployEvidence(
+      baseOpts({
+        runner,
+        workflow: "deploy-prod.yml",
+        now: clock.now,
+        sleep: clock.sleep,
+      }),
+    );
+    expect(result.kind).toBe("no-run");
+    expect(result.section).toContain("(no deploy-prod.yml run was created for this commit)");
+  });
+
+  test("createGhRunner builds `gh run list --workflow <file> --commit <sha> …` argv, page size pinned", () => {
+    const calls: string[][] = [];
+    const orig = Bun.spawnSync;
+    // test seam: swap the process spawner for a recorder
+    Bun.spawnSync = ((args: string[]) => {
+      calls.push(args);
+      return {
+        exitCode: 0,
+        stdout: Buffer.from("[]"),
+        stderr: Buffer.from(""),
+      };
+    }) as typeof Bun.spawnSync;
+    try {
+      createGhRunner().listRuns(SHA, "deploy-prod.yml");
+    } finally {
+      Bun.spawnSync = orig;
+    }
+    expect(calls).toEqual([
+      [
+        "gh",
+        "run",
+        "list",
+        "--workflow",
+        "deploy-prod.yml",
+        "--commit",
+        SHA,
+        // codex P2 (round 5): explicit page size, never gh's 20-row default —
+        // the same commit-keyed lookup the Release step performs, which must
+        // see a same-tag run hidden behind newer foreign-ref runs. The limit is
+        // part of the EXACT argv, so dropping it (or any value change) fails.
+        "--limit",
+        "100",
+        "--json",
+        "status,conclusion,databaseId,displayTitle,headBranch",
+      ],
+    ]);
+  });
+});
+
+describe("collectDeployEvidence — lookup page size (real gh argv, paged stub)", () => {
+  const TAG = "v1.2.3";
+  // A commit rolled back to repeatedly: 24 completed runs of OTHER tags
+  // (newest-first) ahead of this tag's own successful run on row 25. The
+  // collector's own `gh run list` must ask for a page deep enough to see it —
+  // gh's 20-row default would hide it and the ref preference would miss.
+  const FOREIGN_PAGE: GhRun[] = Array.from({ length: 24 }, (_, i) => ({
+    databaseId: 2000 - i,
+    status: "completed",
+    conclusion: "success",
+    displayTitle: "Deploy prod",
+    headBranch: `v1.2.${30 - i}`,
+  }));
+  const DEEP_TAG_RUN: GhRun = { ...SUCCESS, databaseId: 1900, headBranch: TAG };
+
+  /**
+   * Swap Bun's spawner for a stub that implements gh's documented page size
+   * (parse `--limit`, slice; 20 rows when the flag is absent), so the argv the
+   * real `createGhRunner` builds is what decides what the collector can see.
+   */
+  function withPagedGhStub<T>(
+    runs: GhRun[],
+    fn: () => T,
+  ): { value: T; argv: string[][] } {
+    const argv: string[][] = [];
+    const orig = Bun.spawnSync;
+    Bun.spawnSync = ((args: string[]) => {
+      argv.push(args);
+      // argv is `gh run list …` / `gh run download …`: the subcommand is args[2]
+      if (args[2] === "list") {
+        const i = args.indexOf("--limit");
+        const limit = i >= 0 ? Number(args[i + 1]) : 20;
+        return {
+          exitCode: 0,
+          stdout: Buffer.from(JSON.stringify(runs.slice(0, limit))),
+          stderr: Buffer.from(""),
+        };
+      }
+      if (args[2] === "download") {
+        writeArtifact(args[args.indexOf("-D") + 1]!);
+        return { exitCode: 0, stdout: Buffer.from(""), stderr: Buffer.from("") };
+      }
+      return { exitCode: 1, stdout: Buffer.from(""), stderr: Buffer.from("unexpected gh call") };
+    }) as typeof Bun.spawnSync;
+    try {
+      return { value: fn(), argv };
+    } finally {
+      Bun.spawnSync = orig;
+    }
+  }
+
+  test("a same-tag run behind 24 newer foreign-ref runs is selected, with no fallback disclosure", () => {
+    const root = makeTempRoot();
+    try {
+      const { value: result, argv } = withPagedGhStub([...FOREIGN_PAGE, DEEP_TAG_RUN], () =>
+        collectDeployEvidence(
+          baseOpts({ runner: createGhRunner(), ref: TAG, artifactDir: root, env: { ...GH_ENV } }),
+        ),
+      );
+      // the page size is part of the argv the real runner spawns
+      expect(argv[0]).toContain("--limit");
+      expect(argv[0]![argv[0]!.indexOf("--limit") + 1]).toBe("100");
+      expect(result.kind).toBe("success");
+      expect(result.section).toContain(`- Actions run: ${RUN_URL.replace("123456", "1900")}`);
+      // the preference HIT: this release's own deploy, not a disclosed fallback
+      expect(result.section).not.toContain("Run identity:");
+      expect(result.section).not.toContain("- Actions run: 2000");
+    } finally {
+      disposeTempRoot(root);
+    }
+  });
+
+  test("MUTATION/dropping the collector's page size (or reverting to --limit 1): the tag run is hidden and a foreign run is published as the evidence", async () => {
+    // Real source mutation, run from a temp tree against the same paged stub:
+    // without the explicit limit gh's 20-row default hides row 25, the ref
+    // preference misses, and the disclosed fallback publishes the newest FOREIGN
+    // run's artifact as this release's evidence.
+    const src = readFileSync(`${import.meta.dir}/../../scripts/collect-deploy-evidence.ts`, "utf8");
+    const dropped = src.replace(/"--limit",\s*\n\s*"100",\s*\n/, "");
+    expect(dropped).not.toBe(src);
+    const one = src.replace(/("--limit",\s*\n\s*)"100",/, '$1"1",');
+    expect(one).not.toBe(src);
+
+    const root = makeTempRoot();
+    try {
+      for (const [label, mutated] of [
+        ["no --limit (gh default 20)", dropped],
+        ["reverted to --limit 1", one],
+      ] as const) {
+        const file = writeAt(root, `collect-deploy-evidence.${label.replace(/\W+/g, "-")}.ts`, mutated);
+        // BOTH faces come from the mutant: the argv is built by the mutated
+        // module's own `createGhRunner`, so the removed flag is what gh sees.
+        const mutant: {
+          collectDeployEvidence: (opts: CollectOptions) => CollectResult;
+          createGhRunner: () => GhRunner;
+        } = await import(file);
+        const { value: result, argv } = withPagedGhStub([...FOREIGN_PAGE, DEEP_TAG_RUN], () =>
+          mutant.collectDeployEvidence(
+            baseOpts({ runner: mutant.createGhRunner(), ref: TAG, artifactDir: root, env: {} }),
+          ),
+        );
+        expect(argv[0], label).not.toContain("100");
+        expect(result.kind, label).toBe("success");
+        // the newest FOREIGN run is cited (bare id: no GitHub env pair), and the
+        // section admits it is not this ref's deploy — the very outcome the
+        // boundary/all-refs work was built to avoid
+        expect(result.section, label).toContain("- Actions run: 2000");
+        expect(result.section, label).toContain("Run identity:");
+        expect(result.section, label).not.toContain("- Actions run: 1900");
       }
     } finally {
       disposeTempRoot(root);
@@ -593,21 +1326,163 @@ describe("runCli — exit-code invariant and wiring", () => {
     expect(junk.err[0]).toMatch(/^Unknown argument: --wat/);
   });
 
+  test("--workflow missing its value before another flag is a usage error (T3-1 regression)", () => {
+    const { runner, workflows } = makeRunner(() => []);
+    const stdout: string[] = [];
+    const cap = captureConsole(() =>
+      runCli(["bun", "script", SHA, "--workflow", "--help"], {}, {
+        runner,
+        now: () => 0,
+        sleep: () => {},
+        stdout: (s) => void stdout.push(s),
+      }),
+    );
+    expect(cap.value).toBe(1);
+    expect(cap.err[0]).toMatch(/^Invalid --workflow value: --help/);
+    // usage text reaches the caller, and the runner is never consulted
+    expect(cap.out.join("\n")).toContain("MERGE_SHA=<merge-sha>");
+    expect(stdout).toEqual([]);
+    expect(workflows).toEqual([]);
+
+    const empty = drive({ runs: () => [] }, [SHA, "--workflow="]);
+    expect(empty.code).toBe(1);
+    expect(empty.err[0]).toMatch(/^Invalid --workflow value: <none>/);
+
+    const nextFlag = drive({ runs: () => [] }, [SHA, "--workflow", "--wait-minutes=0"]);
+    expect(nextFlag.code).toBe(1);
+    expect(nextFlag.err[0]).toMatch(/^Invalid --workflow value: --wait-minutes=0/);
+  });
+
+  test("--workflow reaches listRuns verbatim through runCli; default stays deploy.yml", () => {
+    const explicit = makeRunner(() => []);
+    const explicitClock = fakeClock();
+    const explicitCode = captureConsole(() =>
+      runCli(["bun", "script", SHA, "--workflow", "deploy-prod.yml"], {}, {
+        runner: explicit.runner,
+        now: explicitClock.now,
+        sleep: explicitClock.sleep,
+        stdout: () => {},
+      }),
+    ).value;
+    expect(explicitCode).toBe(0);
+    expect(explicit.workflows.length).toBeGreaterThan(0);
+    expect(explicit.workflows.every((w) => w === "deploy-prod.yml")).toBe(true);
+
+    const fallback = makeRunner(() => []);
+    const fallbackClock = fakeClock();
+    captureConsole(() =>
+      runCli(["bun", "script", SHA], {}, {
+        runner: fallback.runner,
+        now: fallbackClock.now,
+        sleep: fallbackClock.sleep,
+        stdout: () => {},
+      }),
+    );
+    expect(fallback.workflows.every((w) => w === DEFAULT_DEPLOY_WORKFLOW)).toBe(true);
+  });
+
   test("--help exits 0 and prints usage", () => {
     const { code, log } = drive({ runs: () => [] }, ["--help"]);
     expect(code).toBe(0);
     expect(log.join("\n")).toContain("MERGE_SHA=<merge-sha>");
   });
+
+  test("--ref reaches the selection: the tag-bound run outranks the newer rollback via runCli", () => {
+    const rollback: GhRun = { ...SUCCESS, databaseId: 999, headBranch: "main" };
+    const tagRun: GhRun = { ...SUCCESS, databaseId: 4242, headBranch: "v1.2.3" };
+    const { code, stdout } = drive(
+      { runs: () => [rollback, tagRun], download: downloadOk },
+      [SHA, "--workflow", "deploy-prod.yml", "--ref", "v1.2.3"],
+    );
+    expect(code).toBe(0);
+    expect(stdout).toContain("- Actions run: 4242");
+    expect(stdout).not.toContain("999");
+  });
+
+  test("--since-run reaches the selection: a pre-boundary run is never cited via runCli", () => {
+    const olderSuccess: GhRun = { ...SUCCESS, databaseId: 42, headBranch: "v1.2.3" };
+    const { code, stdout, err } = drive(
+      { runs: () => [olderSuccess] },
+      [
+        SHA,
+        "--workflow",
+        "deploy-prod.yml",
+        "--ref",
+        "v1.2.3",
+        "--since-run",
+        "42",
+        "--wait-minutes",
+        "1",
+      ],
+    );
+    expect(code).toBe(0);
+    expect(stdout).toContain("dispatch boundary 42");
+    expect(stdout).not.toContain("Actions run:");
+    expect(err[0]).toBe("collect-deploy-evidence: no-run");
+  });
 });
 
 describe("parseArgs", () => {
-  test("defaults: 15 min bounded wait, 30 s interval", () => {
+  test("defaults: deploy.yml workflow, 15 min bounded wait, 30 s interval", () => {
     expect(parseArgs(["bun", "script", SHA])).toEqual({
       sha: SHA,
+      workflow: DEFAULT_DEPLOY_WORKFLOW,
+      ref: undefined,
+      sinceRun: undefined,
       waitMinutes: 15,
       intervalSeconds: 30,
       help: false,
     });
+  });
+
+  test("--workflow in both flag forms selects the deploy workflow file", () => {
+    expect(parseArgs(["bun", "script", SHA, "--workflow", "deploy-prod.yml"])).toMatchObject({
+      workflow: "deploy-prod.yml",
+    });
+    expect(parseArgs(["bun", "script", SHA, "--workflow=deploy-prod.yml"])).toMatchObject({
+      workflow: "deploy-prod.yml",
+    });
+  });
+
+  test("--ref in both flag forms selects the expected run ref (T3-3)", () => {
+    expect(parseArgs(["bun", "script", SHA, "--ref", "v1.2.3"])).toMatchObject({ ref: "v1.2.3" });
+    expect(parseArgs(["bun", "script", SHA, "--ref=v1.2.3"])).toMatchObject({ ref: "v1.2.3" });
+  });
+
+  test("--ref rejects a missing value, a swallowed flag, and an unquotable value", () => {
+    expect(() => parseArgs(["bun", "script", SHA, "--ref"])).toThrow(/Invalid --ref value/);
+    expect(() => parseArgs(["bun", "script", SHA, "--ref", "--help"])).toThrow(
+      /Invalid --ref value: --help/,
+    );
+    expect(() => parseArgs(["bun", "script", SHA, "--ref="])).toThrow(/Invalid --ref value/);
+    // whitespace / backticks would break the `- ` bullet the value lands in
+    expect(() => parseArgs(["bun", "script", SHA, "--ref", "v1 `x`"])).toThrow(
+      /Invalid --ref value/,
+    );
+  });
+
+  test("--since-run in both flag forms selects the dispatch boundary run id", () => {
+    expect(parseArgs(["bun", "script", SHA, "--since-run", "123456"])).toMatchObject({
+      sinceRun: 123456,
+    });
+    expect(parseArgs(["bun", "script", SHA, "--since-run=123456"])).toMatchObject({
+      sinceRun: 123456,
+    });
+  });
+
+  test("--since-run rejects a missing value, a swallowed flag, and a non-id value", () => {
+    // A silently ignored boundary would let a pre-boundary run be cited as this
+    // release's evidence, so every malformed form is a loud usage error.
+    for (const argv of [
+      ["bun", "script", SHA, "--since-run"],
+      ["bun", "script", SHA, "--since-run", "--help"],
+      ["bun", "script", SHA, "--since-run="],
+      ["bun", "script", SHA, "--since-run", "abc"],
+      ["bun", "script", SHA, "--since-run", "0"],
+      ["bun", "script", SHA, "--since-run", "-1"],
+    ]) {
+      expect(() => parseArgs(argv), argv.join(" ")).toThrow(/Invalid --since-run value/);
+    }
   });
 
   test("tunable via both flag forms; uppercase SHA normalized to lowercase", () => {
@@ -629,6 +1504,9 @@ describe("parseArgs", () => {
     );
     expect(() => parseArgs(["bun", "script", SHA, "--interval-seconds", "0"])).toThrow(
       /minimum 1/,
+    );
+    expect(() => parseArgs(["bun", "script", SHA, "--workflow"])).toThrow(
+      /Invalid --workflow value/,
     );
     expect(() => parseArgs(["bun", "script", "zzz"])).toThrow(/Unknown argument: zzz/);
   });
