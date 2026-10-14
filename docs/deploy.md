@@ -43,7 +43,7 @@ Two Workers, two deploy paths, nothing shared — both in Cloudflare account
 |---|---|---|
 | Worker | `mstar-inspector` | `mstar-inspector-production` |
 | URL | `https://mstar-inspector.42ch.dev` (Workers Custom Domain) | `https://inspector.mstar.page` (Workers Custom Domain) |
-| Deploy trigger | every push to `main` — [`.github/workflows/deploy.yml`](../.github/workflows/deploy.yml) | the Release workflow **dispatches** [`.github/workflows/deploy-prod.yml`](../.github/workflows/deploy-prod.yml) on a **non-prerelease** tag; a human-published non-prerelease Release triggers it directly, and `workflow_dispatch` on a **tag** ref serves bring-up / rollback |
+| Deploy trigger | every push to `main` — [`.github/workflows/deploy.yml`](../.github/workflows/deploy.yml) | the Release workflow **dispatches** [`.github/workflows/deploy-prod.yml`](../.github/workflows/deploy-prod.yml) on a **non-prerelease** tag; a human-published non-prerelease Release triggers it directly, and `workflow_dispatch` on a **tag** ref serves bring-up / rollback — every run then **pauses for the owner's approval** before the first step (§ Production approval gate and the tag gate) |
 | GitHub environment | `staging` | `production` |
 | Config block | top level of `wrangler.jsonc` | `env.production` (`wrangler deploy --env production`) |
 | D1 (`DB`) | `mstar-inspector-db` (`7a737173-e202-430f-8b47-e087d5e885c4`) | `mstar-inspector-prod-db` (`7c06fce1-6126-49e9-aeac-e92d527ff1c4`) |
@@ -75,13 +75,21 @@ deployed checkout). Its job-level tag guard rejects a tag containing `-` on that
 release-event path, so a prerelease published that way starts a run whose deploy
 job is skipped — never a production deploy.
 
+Whatever the trigger, an admitted run then **pauses at job start for the
+owner's approval** on the `production` environment: no step runs and no
+`production` secret is injected until it is granted
+(§ Production approval gate and the tag gate). The release→production path is
+therefore release-gated **and** human-approved — it never proceeds unattended.
+
 **Why the dispatch:** a Release published with the Release workflow's
 `GITHUB_TOKEN` does **not** create a `release: published` run — GitHub
 suppresses workflow events caused by `GITHUB_TOKEN` (`workflow_dispatch` and
 `repository_dispatch` are the exempt trigger types) — so the Release workflow
 runs `gh workflow run deploy-prod.yml --ref <tag>` itself, and the dispatched
 run's head SHA is the tag's commit. That step is fail-fast **after** the tag and
-Release are created, and it needs `actions: write` on the release job. The
+Release are created, and it needs `actions: write` on the release job; the
+dispatched run is then approved like any other production run
+(§ Production approval gate and the tag gate). The
 `release: published` trigger stays declared and **does** deploy when a human
 publishes a non-prerelease Release in the UI (its job-level guard skips a
 prerelease tag). The release chain, the prerelease guard and the
@@ -101,51 +109,54 @@ That structural identity, not a match heuristic, is what makes the
 [Deploy evidence](release.md#deploy-evidence-release--deploy-reconciliation)
 section's run match on the release tag proof of what shipped.
 
-### What the tag gate proves — and what it does not
+### Production approval gate and the tag gate
 
-The secrets-free `guard-tag-ref` job runs first (no `environment`, no secrets,
-no repository checkout, so no dispatched ref's code executes in it) and the
-secret-holding `deploy` job `needs:` it. It asserts the run is on a **tag**
-ref, and the `production` environment's `v*` tag policy (step 2) admits only
-tag refs; together with the workflow's own checks (prerelease guard, dispatch
+Two independent layers gate a production deploy. They are not substitutes:
+the approval gate decides **who authorizes** a run, the tag gate decides
+**which ref shape** may be admitted.
+
+**The approval gate (applied).** The `production` environment carries a
+**required reviewers** protection rule with the owner (`btspoony`) as
+reviewer (`prevent_self_review: false`), alongside its `v*` **tag**
+deployment policy (both applied through the environments API). Every
+production run — including the one the release chain dispatches
+automatically — **pauses at job start for the owner's approval** before any
+step runs and before any `production` secret is injected. No production
+deploy proceeds unattended.
+
+**The tag gate.** The secrets-free `guard-tag-ref` job runs first (no
+`environment`, no secrets, no repository checkout, so no dispatched ref's code
+executes in it) and the secret-holding `deploy` job `needs:` it. It asserts
+the run is on a **tag** ref, and the environment's `v*` tag policy admits only
+tag refs — together with the workflow's own checks (prerelease guard, dispatch
 rules, run-ref identity) they constrain the **shape** of an admitted ref.
 
-They do **not** constrain *which commit* a tag may point at, and they cannot:
-the workflow that runs is read from the dispatched tag, so on a repository
-with write collaborators that file is itself attacker-controlled. Any writer
-can push a `v*` tag at an arbitrary commit, carry a modified `deploy-prod.yml`
-in it, dispatch it, and the `deploy` job receives every `production` secret.
-**No in-workflow check can close this class of risk** — which is exactly why
-the enforceable layer has to be repository settings or access control.
+**What neither layer constrains.** They do not decide *which commit* a tag may
+point at, and an in-workflow check cannot: the workflow that runs is read from
+the dispatched tag, so on a repository with write collaborators that file is
+itself attacker-controlled. A writer can push a `v*` tag at an arbitrary
+commit carrying a modified `deploy-prod.yml` and dispatch it — but such a run
+still cannot obtain the `production` secrets without the owner's approval.
+That approval gate is the enforceable control for this class of risk, which
+includes a tampered workflow, a compromised credential and a compromised
+third-party action inside the workflow.
 
-Current exposure: exactly two accounts have write access — the owner
-(`btspoony`, a User account) and one automation account (`auto-wood`). The
-`default` branch ruleset protects the default branch (`non_fast_forward`, no
-deletion, pull request with **0** required approvals); tags are unprotected.
-
-Closing the residual is the repository's decision; the real options and their
-tradeoffs:
-
-- **Trim write access** — remove write permission from any account that does
-  not need it (today that is `auto-wood`, the one non-owner writer). Raising
-  the default branch's required approving-review count above **0** also makes
-  a main-line workflow change need a second writer's approval before it can be
-  tagged.
-- **Required reviewer on the `production` environment** — closes the hole, at
-  the cost that every production deploy, including the automated release
-  dispatch, then waits for a human approval.
-- **A `v*` tag-creation ruleset** — not available on this repository as it
-  stands: it is owned by a User account, and keeping the release chain working
-  requires the GitHub Actions app as a bypass actor, which the API refuses for
-  a user-owned repository (`422 Actor GitHub Actions integration must be part
-  of the ruleset source or owner organization`); a restriction without that
-  bypass would block the release chain's own `git push origin "$TAG"`. It
-  becomes available after moving the repository into an organization (then the
-  Actions app can be an allowed bypass actor) or by switching the release
-  chain's tag push to a user-attributable token the ruleset bypasses — both
-  larger changes than this plan.
-- **Accept the residual** — allowed, but it must then be recorded as
-  **accepted**, not as mitigated.
+**Current exposure and the remaining alternative.** Exactly two accounts have
+write access — the owner (`btspoony`, a User account) and one automation
+account (`auto-wood`). The `default` branch ruleset protects the default
+branch (`non_fast_forward`, no deletion, pull request with **0** required
+approvals); tags are unprotected. **Trimming write access** for accounts that
+do not need it remains the live alternative for shrinking the same surface. A
+`v*` tag-creation ruleset is **not available** on this repository: it is owned
+by a User account, and keeping the release chain working requires the GitHub
+Actions app as a bypass actor, which the API refuses for a user-owned
+repository (`422 Actor GitHub Actions integration must be part of the ruleset
+source or owner organization`); a restriction without that bypass would block
+the release chain's own `git push origin "$TAG"`. It becomes available only by
+moving the repository into an organization (then the Actions app can be an
+allowed bypass actor) or by switching the release chain's tag push to a
+user-attributable token the ruleset bypasses — both larger changes than this
+plan, and both rejected for now in favour of the applied approval gate.
 
 ### One-time bring-up (operator)
 
@@ -176,19 +187,25 @@ tradeoffs:
 
 2. **GitHub environment `production`** — Settings → Environments. On this
    repo the environment is **already configured with a deployment policy that
-   allows `v*` tags only** (no branch policies), applied through the
-   environments API. That is what the production
+   allows `v*` tags only** (no branch policies) **and a required reviewers
+   protection rule** (reviewer: the owner `btspoony`,
+   `prevent_self_review: false`), both applied through the environments API.
+   That is what the production
    workflow needs: a branch-only policy (staging's `main` policy is the
    example) rejects a tag-ref deployment, while an unrestricted environment
    would let a branch dispatch start the secret-bearing job before the
-   workflow's own tag gate. When mirroring this chain on a fork, create the
-   environment with that same `v*` **tag** policy. Keep that policy: it
+   workflow's own tag gate. The required reviewer makes every admitted run
+   pause for the owner's approval before any step runs (§ Production approval
+   gate and the tag gate). When mirroring this chain on a fork, create the
+   environment with that same `v*` **tag** policy and the reviewer rule. Keep
+   that policy: it
    refuses a non-tag ref before any `production` secret is injected, and it
    still admits every `v*` release, prerelease and rollback tag. The policy is
    defense in depth — the workflow's own ref gate (§ The run's ref is the
    deployed checkout) is the structural check that a policy change cannot
-   remove; § What the tag gate proves — and what it does not states what
-   neither layer protects against.
+   remove. § Production approval gate and the tag gate states what neither
+   layer protects against and why the approval is the enforceable control for
+   it.
 
 3. **Variables and secrets** — the repository **variables**
    `CLOUDFLARE_ACCOUNT_ID` (`f68fcd78e7c5c10f0466788bb9e85b8e`) and
@@ -239,6 +256,12 @@ tradeoffs:
    ```bash
    gh workflow run deploy-prod.yml --ref <tag>   # a tag cut after this change shipped
    ```
+
+   The dispatch only queues the run: it **pauses for the owner's approval** on
+   the `production` environment before any step runs or any secret is injected,
+   so bring-up needs the owner to approve it in the run's UI
+   (§ Production approval gate and the tag gate). Every later re-dispatch
+   pauses the same way.
 
    **`<tag>` must be created after this change ships.** `gh workflow run`
    runs the workflow **as defined at that ref**, and the repository's existing
@@ -310,7 +333,9 @@ restores by hand.
   `deploy-evidence` artifact.
 - **Re-dispatching `deploy-prod.yml` on an older tag is NOT version-only** —
   `gh workflow run deploy-prod.yml --ref <older-tag>` ships exactly that tag
-  (§ The run's ref is the deployed checkout) and re-runs the whole job: it
+  (§ The run's ref is the deployed checkout) and re-runs the whole job (after
+  pausing for the owner's approval — § Production approval gate and the tag
+  gate): it
   re-injects the **current `production` environment secrets** (all four
   required ones, plus
   `ALERT_WEBHOOK_URL` written when that secret is set and **deleted** when it is
