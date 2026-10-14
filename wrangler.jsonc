@@ -40,14 +40,15 @@
         // current behavior): UNSET max_concurrency = the platform
         // auto-scales consumer concurrency by backlog (wrangler 4.125.0
         // schema); today's serial processing is a low-traffic accident.
-        // >1 buys zero parallelism here — every attempt acquires a UNIQUE
-        // sandbox id (src/pipeline/consumer.ts) against `max_instances: 1`,
-        // so concurrent invocations block on container acquisition
-        // (instanceGetTimeoutMS can time out → retry storm → DLQ) and deep
-        // reviews (14 min in-flight) flirt with the 15-min consumer
-        // wall-clock cap. Pinned at 1; deliberately NOT env-configurable —
-        // raising concurrency requires raising max_instances first (a
-        // future explicit decision).
+        // Under scheduling_policy: "durable_object" each attempt's unique
+        // sandbox id (src/pipeline/consumer.ts) starts its OWN container —
+        // the 0.12 max_instances cap is gone (see the containers comment
+        // below), so >1 concurrency runs that many containers at once
+        // against the account's container limits, and deep reviews (14 min
+        // in-flight) flirt with the 15-min consumer wall-clock cap. Pinned
+        // at 1; deliberately NOT env-configurable — raising concurrency is
+        // a future explicit decision to be re-validated against the
+        // durable-object container model first.
         "max_concurrency": 1,
         "max_retries": 3,
         "dead_letter_queue": "review-dlq"

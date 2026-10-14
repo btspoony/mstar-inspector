@@ -231,6 +231,20 @@ describe("SandboxV1 Durable Object", () => {
     expect(execCalls[0]!.cmd).toEqual(["timeout", "--kill-after=5", "0.25", "/bin/sh", "-lc", "gh pr view 1"]);
   });
 
+  test("a non-finite explicit timeout (NaN / Infinity) falls back to the default bound", async () => {
+    reset();
+    const { sandbox } = makeDo();
+
+    await sandbox.runCommand(shellCommand("gh pr view 1"), { timeout: Number.NaN });
+    await sandbox.runCommand(shellCommand("gh pr view 2"), { timeout: Number.POSITIVE_INFINITY });
+
+    expect(execCalls.map((call) => call.cmd)).toEqual([
+      ["timeout", "--kill-after=5", "600", "/bin/sh", "-lc", "gh pr view 1"],
+      ["timeout", "--kill-after=5", "600", "/bin/sh", "-lc", "gh pr view 2"],
+    ]);
+    expect(DEFAULT_EXEC_TIMEOUT_MS / 1000).toBe(600);
+  });
+
   test("a non-zero exit (timeout bound = 124) resolves normally — the caller decides retry/DLQ", async () => {
     reset();
     execResult = { stdout: new ArrayBuffer(0), stderr: bytes("Terminated\n"), exitCode: 124 };
