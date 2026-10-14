@@ -272,7 +272,11 @@ describe("multi-key provider rows (one row per key, no client-side fold)", () =>
     // …and the confirmed POST sends that identity (never a provider-only delete,
     // which would take the provider's other keys with it).
     expect(page).toContain("key_id: action.keyId");
-    expect(page).toContain("const slot = configured.findIndex(");
+    // The feedback slot resolves through the SAME composite identity: match on
+    // the id alone and one key stored under two providers (ids hash the
+    // plaintext) reports the outcome beside the wrong provider's row. The
+    // lookup itself is pinned behaviourally in pages-data.test.ts.
+    expect(page).toContain("const slot = configuredKeySlot(configured, action.provider, action.keyId);");
   });
 
   test("the key row renders the per-key verification state", () => {
@@ -1442,7 +1446,11 @@ describe("section-scoped op feedback", () => {
     // while the card (and the region it renders) stay mounted.
     const confirmBody = source.slice(source.indexOf("async function onConfirm"), source.indexOf("const confirmCopy"));
     expect(confirmBody).toContain("const configured = payload.can_manage ? payload.configured_providers : [];");
-    expect(confirmBody).toContain("configured.findIndex(");
+    // The captured slot is the row's own identity's — the key path matches the
+    // (provider, key_id) pair the POST carries, the custom path its
+    // provider_id (both pinned in the multi-key describe / pages-data suite).
+    expect(confirmBody).toContain("const slot = configuredKeySlot(configured, action.provider, action.keyId);");
+    expect(confirmBody).toContain("configured.findIndex((row) => row.kind === \"custom\"");
     expect(confirmBody).toContain("slot: slot >= 0 ? slot : configured.length");
     // The card renders the outcome inside the rows list at that position —
     // through the shared NoticeRegion, so the row-local region inherits the

@@ -1129,7 +1129,9 @@ describe("app-config store (createAppConfigStore) — model chain + getAppConfig
   test("getAppConfig returns the decrypted keys + chain; an app without config is an EMPTY config", async () => {
     const db = createAppConfigD1();
     const bare = await seedApp(db, { slug: "bare", createdBy: "mallory" });
-    // Zero-config compatibility: the consumer falls back to global env.
+    // Zero-config is an EMPTY config, not a fallback: there is no global env
+    // chain or key anymore — the consumer's assertAppConfigComplete
+    // fail-closes such an App (missing model chain).
     expect(await configStore(db).getAppConfig(bare.id)).toEqual({
       appId: bare.id,
       keys: {},

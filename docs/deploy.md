@@ -196,8 +196,10 @@ but lacks D1 access fails the migration step with
 [code: 7403]` — the account id is correct; the token's permissions are not.
 
 Provider API keys and the review model chain are **not** Worker env — they
-live per App in D1 (`app_provider_keys` / `app_model_config`, migration
-0006), configured on each App's dashboard Settings page and injected into the
+live per App in D1 (`app_provider_keys` per-key pools since `0023`, custom
+credentials in `app_custom_provider_keys`; the chains in `app_model_chains` /
+`app_model_chain_seats` since `0017`), configured on each App's dashboard
+Settings page and injected into the
 review container from the App's config only (AL-24-5: the
 `OMP_MODEL_KEY` / `OMP_REVIEW_MODEL` / `bun run keys` Worker-secret surface
 was retired with the global fallback — an App missing its chain or a chain
@@ -478,8 +480,10 @@ docker run --rm --entrypoint /opt/verify-synthesis.sh <image>
    event — the default `every_push` auto-triggers on open/update; from any
    mode, a PR comment @mentioning the App's bot forces a run —
    § Review triggers (per App)). To pin per-role overrides end-to-end,
-   first configure a role chain on the dashboard (`app_model_roles`, 0009)
-   for the test App: the consumer materializes it into the runner input JSON
+   first configure a seat chain on the dashboard (a named chain in
+   `app_model_chains` plus the seat's reference row in
+   `app_model_chain_seats`, 0017) for the test App: the consumer
+   materializes it into the runner input JSON
    (`src/pipeline/consumer.ts` `resolveModelOverrides`) and the in-image
    runner resolves it (`src/review/runner.ts`). Runner code is baked into the
    image (`COPY src/review`), so this check is what proves the rebuilt image
@@ -642,7 +646,9 @@ survives only on pre-cutover historical rows — AL-24-4; see
 `chainHeadSelector`). The same gate checks every per-role override selector
 chain: an override referencing a provider with no configured key fails
 closed the same way (Bugbot 7aaf18f4).
-Per-role overrides (`app_model_roles`, migration 0009) are deliberately NOT
+Per-role overrides (the seat references in `app_model_chain_seats`, 0017; the
+pre-`0017` `app_model_roles` rows were backfilled into named chains and are
+read-retired) are deliberately NOT
 column-reflected — pin those with the completed review + `wrangler tail`
 runner evidence, not the column.
 

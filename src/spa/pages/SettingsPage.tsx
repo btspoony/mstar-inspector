@@ -33,6 +33,7 @@ import { deliveryOutcomeLabel } from "../delivery-outcome";
 import { formatRelativeTime } from "../relative-time";
 import {
   activeChainTabId,
+  configuredKeySlot,
   DEFAULT_CHAIN_NAME,
   isPaused,
   isReviewTriggerMode,
@@ -357,7 +358,7 @@ export function SettingsView({
       } else if (action.kind === "remove-key") {
         // Same position capture as remove-custom (see above) — the row is the
         // identity's, so a pool with a sibling key keeps it.
-        const slot = configured.findIndex((row) => row.kind === "key" && row.key_id === action.keyId);
+        const slot = configuredKeySlot(configured, action.provider, action.keyId);
         setProvidersRemoveOutcome({
           notice: await runPinnedWithBody(`/dashboard/apps/${app.slug}/settings/key/delete`, {
             provider: action.provider,

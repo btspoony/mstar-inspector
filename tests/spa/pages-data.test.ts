@@ -6,6 +6,7 @@ import { t } from "../../src/i18n";
 import {
   activeChainTabId,
   canViewMembers,
+  configuredKeySlot,
   DEFAULT_CHAIN_NAME,
   insightsRepoFromSelect,
   insightsRepoOptions,
@@ -25,6 +26,7 @@ import {
   REVIEW_TRIGGER_MODES,
   selectedCatalogProvider,
   type CatalogProvider,
+  type ConfiguredProvider,
   type ModelChainEntry,
   type ProviderKeyRow,
 } from "../../src/spa/pages/data";
@@ -725,6 +727,52 @@ describe("provider catalog rows + add selection", () => {
     };
     const parsed = parseSettings({ ...manageBase, configured_providers: [customKeyRow] });
     expect(parsed === null || !parsed.can_manage ? null : parsed.configured_providers).toEqual([customKeyRow]);
+  });
+
+  test("removal feedback locates the row by the full (provider, key_id) identity, not the id alone", () => {
+    // Key ids are derived from the plaintext only, so ONE key stored under two
+    // providers legitimately shares its id. The delete POST carries both, so
+    // the feedback slot must match both — an id-only match resolves the FIRST
+    // provider's row and renders the outcome beside a row that is still there.
+    const shared = "a".repeat(16);
+    const rows: ConfiguredProvider[] = [
+      {
+        kind: "key",
+        provider: "anthropic",
+        key_id: shared,
+        last4: "1111",
+        updated_at: null,
+        verified_at: null,
+        verified_status: null,
+      },
+      {
+        kind: "key",
+        provider: "openai",
+        key_id: shared,
+        last4: "2222",
+        updated_at: null,
+        verified_at: null,
+        verified_status: null,
+      },
+      {
+        kind: "custom",
+        provider_id: "workers-ai",
+        base_url: "https://example.test/v1",
+        api: "openai-completions",
+        model_ids: ["m"],
+      },
+    ];
+    const slot = configuredKeySlot(rows, "openai", shared);
+    expect(slot).toBe(1);
+    // …and the row at that slot is the one the POST names.
+    expect(rows[slot]).toMatchObject({ kind: "key", provider: "openai", key_id: shared });
+    // The earlier provider's row keeps its own slot.
+    expect(configuredKeySlot(rows, "anthropic", shared)).toBe(0);
+    // A row the payload no longer holds (or a provider-less id) is not found.
+    expect(configuredKeySlot(rows, "openai", "b".repeat(16))).toBe(-1);
+    expect(configuredKeySlot(rows, "google", shared)).toBe(-1);
+    // The custom declaration's provider_id is never a key handle.
+    expect(configuredKeySlot(rows, "workers-ai", shared)).toBe(-1);
   });
 
   test("removeChanged reads the remove routes' outcome flag — a no-op never resolves as a change", () => {

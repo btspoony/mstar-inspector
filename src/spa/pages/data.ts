@@ -165,6 +165,22 @@ export function providerKeyRows(keys: readonly ProviderKeyRow[], provider: strin
 }
 
 /**
+ * The slot a dialog-confirmed key removal's outcome renders at: the configured
+ * row the delete POST targets, matched on the SAME composite identity the
+ * store's primary key `(app_id, provider, key_id)` and the POST body carry.
+ * Key ids hash the plaintext alone, so one key stored under two providers
+ * shares its id — the provider is part of the match. `-1` when the payload
+ * holds no such row (the caller clamps the outcome to the list's end).
+ */
+export function configuredKeySlot(
+  rows: readonly ConfiguredProvider[],
+  provider: string,
+  keyId: string,
+): number {
+  return rows.findIndex((row) => row.kind === "key" && row.provider === provider && row.key_id === keyId);
+}
+
+/**
  * The tolerant remove routes (key delete / custom provider remove) answer
  * their no-op case as a 2xx `{ changed: false, message }` — nothing matched,
  * so nothing was removed. `false` is the SPA's no-change outcome (it must not
