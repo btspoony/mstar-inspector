@@ -2043,9 +2043,9 @@ async function processMessage(payload: ReviewJobPayload, deps: ProcessDeps): Pro
     // Custom-provider declarations: hangs off the SAME
     // appRef gate, before the guard like the config/overrides above —
     // undefined (no declarations) → the runner input JSON stays
-    // byte-identical and no CUSTOM_* env is injected. The decrypt face is
-    // fail-loud (tamper never swallowed): a broken envelope throws here
-    // with zero side effects, never a silently-skipped provider.
+    // byte-identical and no custom-provider pool env is injected. The
+    // decrypt face is fail-loud (tamper never swallowed): a broken envelope
+    // throws here with zero side effects, never a silently-skipped provider.
     const customProviders = await resolveCustomProviders(payload, deps);
     // The App's sandbox image: resolves the stored
     // github_apps.sandbox_image_id through the CLOSED registry and fails

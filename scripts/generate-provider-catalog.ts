@@ -332,8 +332,8 @@ export type ProviderCatalogEntry = {
   /** builtin = runner-consumable env-name entry; template = metadata + prefill only. */
   tier: ProviderTier;
   /** Env var name the key is injected under inside the review container
-   *  (builtin tier only; null for template — materialized via
-   *  customProviderEnvName). */
+   *  (builtin tier only; null for template — materialized as a custom-provider
+   *  declaration). */
   envName: string | null;
   /** Default API base URL. Template entries may carry a {account_id}
    *  placeholder the save flow substitutes. */

@@ -64,9 +64,10 @@ import { readFileSync, rmSync } from "node:fs";
 // deployed image. Declared inline (NOT imported from
 // src/contracts/sandbox-images.ts): the image COPYs only src/review, so the
 // in-image module graph cannot see the registry; this literal mirrors the
-// source-controlled omp entry (ark-plan). `apiKeyEnv` is registry metadata the
-// pool contract uses as the env-name prefix — the synthesized block itself
-// pins no apiKey.
+// source-controlled omp entry (ark-plan). `apiKeyEnv` and `auth` are retained
+// registry metadata — the pool env prefix derives from the provider id
+// (catalogProviderId), not from `apiKeyEnv` — and the synthesized block pins
+// no apiKey.
 const ARK_PLAN_HOST = {
   id: "ark-plan",
   catalogProviderId: "ark",

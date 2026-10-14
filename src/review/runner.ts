@@ -13,7 +13,8 @@
  *       - `capabilityHosts` — REQUIRED array of the App's
  *         selected sandbox image's capability hosts (the consumer resolves
  *         them from the source-controlled registry and passes them verbatim;
- *         keyless — `apiKeyEnv` is an env-var NAME). The runner ALWAYS
+ *         keyless — `apiKeyEnv`/`auth` are retained registry metadata, not
+ *         active key-resolution inputs). The runner ALWAYS
  *         synthesizes a COMPLETE per-review models.yml
  *         (/tmp/omp-agent-<uuid>/models.yml) with the capability hosts as the
  *         base — the baked in-image models.yml was removed — and rides
@@ -299,28 +300,60 @@ function parseRunnerInput(parsed: unknown): RunnerInputJson {
 
 /**
  * The provider pools one run must load, keyed by the models.yml provider id
- * the session will resolve credentials under: capability-host blocks pool
- * under their catalog provider id (omp's `ark-plan` ↔ `MSTAR_POOL_ARK_*`),
- * custom declarations under their own id — exactly the names the consumer's
- * `buildRunnerEnv` emits. A custom id colliding with a capability host is
- * skipped here too (capability/base wins, same rule as the synthesis).
+ * the session will resolve credentials under. Two identity sources, in order:
+ *
+ *   1. DECLARED identity (what the synthesis itself puts in models.yml) —
+ *      capability-host blocks pool under their catalog provider id (omp's
+ *      `ark-plan` ↔ `MSTAR_POOL_ARK_*`), custom declarations under their own
+ *      id. A custom id colliding with a capability host is skipped here too
+ *      (capability/base wins, same rule as the synthesis).
+ *   2. THE EXEC ENV ITSELF — a BUILT-IN catalog provider (`openai`,
+ *      `azure-openai`, …) is neither a capability host nor a custom
+ *      declaration, so its transported pool arrives with no declared
+ *      identity and is discovered from the `_COUNT` names present. The
+ *      consumer's prefix rule inverts exactly (upper-snake → lower, `_` → `-`):
+ *      every provider id the allowlist or the store admits is `[a-z0-9-]`
+ *      with no underscore, so an underscore in a prefix can only come from a
+ *      hyphen. A prefix or provider id already claimed above is never loaded
+ *      twice.
+ *
+ * The enumerated set therefore covers EXACTLY the names the consumer's
+ * `buildRunnerEnv` emitted, which is also what the fail-closed validation
+ * below ranges over.
  */
-function poolProviders(json: RunnerInputJson): Array<{ providerId: string; prefix: string }> {
+function poolProviders(
+  json: RunnerInputJson,
+  env: Record<string, string | undefined>,
+): Array<{ providerId: string; prefix: string }> {
   const baseIds = new Set(json.capabilityHosts.map((host) => host.id));
-  const providers = json.capabilityHosts.map((host) => ({
-    providerId: host.id,
-    prefix: host.catalogProviderId,
-  }));
+  const byPrefix = new Map<string, string>();
+  const byProviderId = new Set<string>();
+  const add = (rawPrefix: string, providerId: string): void => {
+    const prefix = poolPrefix(rawPrefix);
+    if (byPrefix.has(prefix) || byProviderId.has(providerId)) return;
+    byPrefix.set(prefix, providerId);
+    byProviderId.add(providerId);
+  };
+  for (const host of json.capabilityHosts) add(host.catalogProviderId, host.id);
   for (const decl of json.customProviders ?? []) {
     if (baseIds.has(decl.provider_id)) continue;
-    providers.push({ providerId: decl.provider_id, prefix: decl.provider_id });
+    add(decl.provider_id, decl.provider_id);
   }
-  return providers.map((entry) => ({ providerId: entry.providerId, prefix: poolPrefix(entry.prefix) }));
+  for (const name of Object.keys(env)) {
+    const prefix = /^MSTAR_POOL_(.+)_COUNT$/.exec(name)?.[1];
+    if (prefix !== undefined) add(prefix, prefix.toLowerCase().replace(/_/g, "-"));
+  }
+  return [...byPrefix].map(([prefix, providerId]) => ({ providerId, prefix }));
 }
 
 /** Upper-snake pool env fragment for a provider id (the consumer's own rule). */
 function poolPrefix(providerId: string): string {
   return providerId.toUpperCase().replace(/-/g, "_");
+}
+
+/** A pool prefix as a literal inside a RegExp (env-derived fragments). */
+function escapeRegExp(literal: string): string {
+  return literal.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 /**
@@ -342,7 +375,7 @@ async function loadCredentialPool(
   env: Record<string, string | undefined>,
 ): Promise<void> {
   const pools: Array<{ providerId: string; keys: string[] }> = [];
-  for (const { providerId, prefix } of poolProviders(json)) {
+  for (const { providerId, prefix } of poolProviders(json, env)) {
     const countRaw = env[`MSTAR_POOL_${prefix}_COUNT`];
     if (countRaw === undefined) continue; // no pool transported for this provider
     const count = Number(countRaw);
@@ -364,7 +397,7 @@ async function loadCredentialPool(
     }
     // COUNT must equal the number of value slots actually present: an extra
     // slot beyond COUNT (a stray key the pool would silently drop) fails here.
-    const slotRe = new RegExp(`^MSTAR_POOL_${prefix}_\\d{2,}$`);
+    const slotRe = new RegExp(`^MSTAR_POOL_${escapeRegExp(prefix)}_\\d{2,}$`);
     const present = Object.keys(env).filter((name) => slotRe.test(name) && env[name] !== undefined);
     if (present.length !== count) {
       throw new Error(

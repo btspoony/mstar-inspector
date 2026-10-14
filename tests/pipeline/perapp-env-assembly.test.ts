@@ -1036,7 +1036,7 @@ describe("per-role override provider key gate (Bugbot 7aaf18f4)", () => {
 });
 
 describe("custom provider env injection + runner input threading (AL-23-1)", () => {
-  test("app with custom providers: env carries CUSTOM_<ID>_API_KEY values, input JSON carries keyless declarations", async () => {
+  test("app with custom providers: env carries MSTAR_POOL_<ID> pool values, input JSON carries keyless declarations", async () => {
     reset();
     const db = createMigratedTestD1();
     const appX = await seedApp(db, "app-x");
@@ -1095,14 +1095,13 @@ describe("custom provider env injection + runner input threading (AL-23-1)", () 
     expect(serialized).not.toContain(sk("custom-fixture"));
   });
 
-  test("chain referencing a custom provider id passes the fail-closed gate and injects CUSTOM_<ID>_API_KEY (qc3 F-001 — neededEnvName custom branch)", async () => {
+  test("chain referencing a custom provider id passes the fail-closed gate and injects its pool env (qc3 F-001 — custom branch)", async () => {
     reset();
     const db = createMigratedTestD1();
     const appX = await seedApp(db, "app-x");
     // The chain references the custom provider id directly — the gate's
-    // neededEnvName third branch (neither a PROVIDERS allowlisted id nor a
-    // capability host of the App's resolved sandbox image) resolves it to
-    // CUSTOM_MY_PROVIDER_API_KEY, the same env name buildRunnerEnv injects.
+    // custom branch matches a declaration with a non-blank key pool and
+    // buildRunnerEnv pools it under MSTAR_POOL_MY_PROVIDER_*.
     await configureApp(db, appX.id, "my-provider/model-1");
     const store = createAppConfigStore(db, TEST_KEY);
     await store.upsertCustomProvider(
@@ -1172,10 +1171,13 @@ describe("custom provider env injection + runner input threading (AL-23-1)", () 
     const [appInput] = runnerInputs();
     const [appEnv] = runnerEnvs();
     // No declarations → the runner input JSON omits the field entirely and
-    // no CUSTOM_* env name is injected (byte-compat pin). The
+    // no custom-provider pool env is injected (byte-compat pin). The
     // capability hosts ride ALWAYS (keyless registry data).
     expect(Object.keys(appInput!)).toEqual(["worktreePath", "reconFacts", "capabilityHosts"]);
-    expect(JSON.stringify(appEnv)).not.toContain("CUSTOM_");
+    // The seeded App's own ark key still pools; nothing else does.
+    for (const name of Object.keys(appEnv!)) {
+      if (name.startsWith("MSTAR_POOL_")) expect(name).toStartWith("MSTAR_POOL_ARK_");
+    }
   });
 
   test("custom providers are re-read per message: a dashboard declaration update applies to the very next review", async () => {

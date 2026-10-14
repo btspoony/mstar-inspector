@@ -27,12 +27,14 @@ export const REVIEW_SEATS: Record<Exclude<ReviewLevel, "deep">, number> = { quic
 
 /**
  * One custom-provider declaration as the runner input JSON carries it
- * (AL-23-1): the SETTINGS declaration, keyless — the API key rides
- * ONLY the container exec env under CUSTOM_<UPPER_SNAKE(id)>_API_KEY (never
- * the input JSON, never a synthesized models.yml, never a log line). The
- * `api` vocabulary (anthropic-messages | openai-completions |
- * openai-responses) and the id/baseUrl bounds live dashboard-side
- * (assertCustomProvider); the runner guard validates shape only.
+ * (AL-23-1): the SETTINGS declaration, keyless — the API key rides ONLY the
+ * container exec env, pooled per provider as
+ * MSTAR_POOL_<UPPER_SNAKE(id)>_COUNT + _01.._NN, and the runner writes the
+ * pool into the run's credential store before the session starts (never the
+ * input JSON, never a synthesized models.yml, never a log line). The `api`
+ * vocabulary (anthropic-messages | openai-completions | openai-responses) and
+ * the id/baseUrl bounds live dashboard-side (assertCustomProvider); the runner
+ * guard validates shape only.
  */
 export type CustomProviderDeclaration = {
   provider_id: string;
@@ -40,19 +42,6 @@ export type CustomProviderDeclaration = {
   api: string;
   model_ids: string[];
 };
-
-/**
- * AL-23-1 env-name contract fragments for custom-provider API keys. The full
- * mapping is CUSTOM_<UPPER_SNAKE(provider_id)>_API_KEY — provider ids are
- * store-enforced `[a-z0-9][a-z0-9-]{0,63}` (hyphen → underscore, uppercased).
- * Lives HERE (next to CustomProviderDeclaration) because the sandbox image
- * COPYs only src/review (sandbox-image/omp/Dockerfile:96): the in-image runner
- * module graph must never import outside this directory. The Worker-side
- * SSOT stays single-source — src/pipeline/provider-catalog.ts re-exports
- * these (zero duplicated literals).
- */
-export const CUSTOM_PROVIDER_ENV_PREFIX = "CUSTOM_";
-export const CUSTOM_PROVIDER_ENV_SUFFIX = "_API_KEY";
 
 /**
  * One capability-host model the runtime synthesizer materializes into the
@@ -72,10 +61,13 @@ export type CapabilityHostModel = {
 /**
  * One capability host of the App's selected sandbox image, as the runner input
  * JSON carries it: the runner materializes these into the
- * base of every synthesized per-review models.yml. KEYLESS static data —
- * `apiKeyEnv` is the ENV VAR NAME the host's key resolves from at request
- * time; host ids are runtime capabilities, NOT Providers catalog ids (omp's
- * `ark-plan` resolves its key through catalogProviderId `ark` / ARK_API_KEY).
+ * base of every synthesized per-review models.yml. KEYLESS static data; host
+ * ids are runtime capabilities, NOT Providers catalog ids (omp's `ark-plan`
+ * resolves its key through catalogProviderId `ark`, whose transported pool is
+ * MSTAR_POOL_ARK_*). `apiKeyEnv` and `auth` are RETAINED wire/registry
+ * metadata — the locked host shape carries them; neither determines the pool
+ * env prefix (derived from the provider id) nor the active credential
+ * resolution (the stored pool does).
  *
  * Structurally mirrors the registry's `SandboxImageHost` (src/contracts/
  * sandbox-images.ts): the consumer passes the resolved registry entry's hosts
@@ -87,26 +79,16 @@ export type CapabilityHostModel = {
 export type CapabilityHost = {
   /** Host id — the selector prefix (e.g. `ark-plan/deepseek-v4-flash`). */
   id: string;
-  /** Providers/BYOK catalog id whose env name carries this host's key. */
+  /** Providers/BYOK catalog id whose transported pool this host resolves from. */
   catalogProviderId: string;
+  /** Retained registry metadata — no longer an active key-resolution input. */
   apiKeyEnv: string;
   baseUrl: string;
   api: string;
+  /** Retained registry metadata — synthesis emits `auth: oauth` for every block. */
   auth: string;
   models: readonly CapabilityHostModel[];
 };
-
-/**
- * Env var name for a custom-provider API key (AL-23-1): a
- * total function — any id maps to a syntactically valid env var name. The
- * queue consumer injects the decrypted key under this name and the runner's
- * synthesized per-review models.yml references the SAME name (`apiKey:
- * CUSTOM_<ID>_API_KEY` — omp resolves env first, literal fallback, so the
- * consumer-side injection closes the "declaration ⇒ key ⇒ env" loop).
- */
-export function customProviderEnvName(providerId: string): string {
-  return `${CUSTOM_PROVIDER_ENV_PREFIX}${providerId.toUpperCase().replace(/-/g, "_")}${CUSTOM_PROVIDER_ENV_SUFFIX}`;
-}
 
 export type AgentRuntimeRunInput = {
   level: ReviewLevel;

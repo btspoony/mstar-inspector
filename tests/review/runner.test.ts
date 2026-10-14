@@ -352,7 +352,7 @@ describe("runner entry (src/review/runner.ts)", () => {
     const input = runInputs[0] as Record<string, unknown>;
     expect(input.agentDir).toMatch(/^\/tmp\/omp-agent-/);
     // The zero-custom equivalence lock: the file is EXACTLY the capability
-    // base (ark-plan included) — byte-identical to the deleted baked body.
+    // base (ark-plan included) — the poolized base, byte-for-byte.
     const yaml = readFileSync(join(input.agentDir as string, "models.yml"), "utf8");
     expect(yaml).toBe(OMP_BASE_YAML);
     expect(yaml).toContain("ark-plan:");
@@ -660,6 +660,71 @@ describe("runner entry — transported credential pool", () => {
     expect(stderr).toBe("");
     const input = runInputs[0] as Record<string, unknown>;
     expect(existsSync(join(input.agentDir as string, "agent.db"))).toBe(false);
+  });
+
+  test("a built-in catalog provider pool lands under its own provider id — no capability/custom identity needed", async () => {
+    // `openai` is an allowlisted built-in: the consumer pools its App key as
+    // MSTAR_POOL_OPENAI_* and the session resolves it under the `openai`
+    // provider id. Neither a capability host nor a custom declaration covers
+    // that prefix, so the pool is discovered from the exec env itself.
+    process.env.MSTAR_POOL_OPENAI_COUNT = "1";
+    process.env.MSTAR_POOL_OPENAI_01 = sk("builtin-one");
+    const inputPath = writeInput({ capabilityHosts: OMP_HOSTS, worktreePath: "/workspace/clone" });
+    const { code, stdout, stderr } = await runCli(["--level", "quick", "--input", inputPath]);
+
+    expect(code).toBe(0);
+    expect(JSON.parse(stdout)).toEqual(ENVELOPE);
+    const input = runInputs[0] as Record<string, unknown>;
+    expect(await storedPool(input.agentDir as string, "openai")).toEqual([
+      { type: "api_key", key: sk("builtin-one"), source: "login" },
+    ]);
+    const log = JSON.parse(stderr) as { event: string; provider: string; pool_size: number };
+    expect(log).toEqual({ event: "credential_pool", provider: "openai", pool_size: 1 });
+    expect(stderr).not.toContain(sk("builtin-one"));
+    const storage = await AuthStorage.create(join(input.agentDir as string, "agent.db"));
+    try {
+      await storage.reload();
+      expect(await storage.getApiKey("openai")).toBe(sk("builtin-one"));
+    } finally {
+      storage.close();
+    }
+  });
+
+  test("a hyphenated built-in provider pools several keys in env order alongside a capability host pool", async () => {
+    // `azure-openai` → MSTAR_POOL_AZURE_OPENAI_*: the prefix inverts to the
+    // catalog provider id (the only underscore source is a hyphen). The
+    // capability host pool keeps its own catalog→host identity in the same run.
+    process.env.MSTAR_POOL_ARK_COUNT = "1";
+    process.env.MSTAR_POOL_ARK_01 = sk("ark-one");
+    process.env.MSTAR_POOL_AZURE_OPENAI_COUNT = "2";
+    process.env.MSTAR_POOL_AZURE_OPENAI_01 = sk("builtin-one");
+    process.env.MSTAR_POOL_AZURE_OPENAI_02 = sk("builtin-two");
+    const inputPath = writeInput({ capabilityHosts: OMP_HOSTS, worktreePath: "/workspace/clone" });
+    const { code } = await runCli(["--level", "quick", "--input", inputPath]);
+
+    expect(code).toBe(0);
+    const input = runInputs[0] as Record<string, unknown>;
+    expect(await storedPool(input.agentDir as string, "azure-openai")).toEqual([
+      { type: "api_key", key: sk("builtin-one"), source: "login" },
+      { type: "api_key", key: sk("builtin-two"), source: "login" },
+    ]);
+    expect(await storedPool(input.agentDir as string, "ark-plan")).toEqual([
+      { type: "api_key", key: sk("ark-one"), source: "login" },
+    ]);
+  });
+
+  test("a malformed built-in pool → fail closed before the runtime runs (exit 1, no run)", async () => {
+    process.env.MSTAR_POOL_OPENAI_COUNT = "2";
+    process.env.MSTAR_POOL_OPENAI_01 = sk("only-one");
+    const inputPath = writeInput({ capabilityHosts: OMP_HOSTS, worktreePath: "/workspace/clone" });
+    const { code, stdout, stderr } = await runCli(["--level", "quick", "--input", inputPath]);
+
+    expect(code).toBe(1);
+    expect(stdout).toBe("");
+    expect(runInputs).toHaveLength(0);
+    expect(stderr).toContain("openai");
+    expect(stderr).toContain("MSTAR_POOL_OPENAI_02");
+    expect(stderr).not.toContain(sk("only-one"));
   });
 
   test("a custom id colliding with a capability host pools only once (base wins, same rule as the synthesis)", async () => {
