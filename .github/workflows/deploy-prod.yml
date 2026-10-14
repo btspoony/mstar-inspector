@@ -41,9 +41,13 @@ name: Deploy prod
 # This is a SEPARATE Worker from `mstar-inspector` (mstar-inspector.42ch.dev),
 # which stays the staging instance and keeps deploying on every main push.
 #
-# Env indirection: job-level `env:` carries the credentials, steps read them as
-# shell variables. `${{ }}` never appears inside a `run:` script (repo guard
-# convention — see tests/scripts/deploy-prod-workflow-guards.test.ts).
+# Env indirection: job-level `env:` carries ONLY the non-secret account/client
+# identifiers, and every production SECRET is declared on the exact step that
+# consumes it. A step running third-party action code (`uses:`) therefore never
+# has a credential in its environment — a compromised action revision cannot
+# read what its step was never given. Steps read the values as shell variables;
+# `${{ }}` never appears inside a `run:` script (repo guard convention — see
+# tests/scripts/deploy-prod-workflow-guards.test.ts).
 
 on:
   release:
@@ -92,17 +96,16 @@ jobs:
     runs-on: ubuntu-latest
     environment: production
     timeout-minutes: 30
+    # NON-SECRET only. The five production secrets are declared on the steps
+    # that consume them (see each step's `env:`): a job-level secret is in the
+    # environment of EVERY step, including the SHA-pinned third-party actions,
+    # so one compromised action revision would read the whole credential set.
     env:
-      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
       CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}   # account id is public — configured as a variable
       OAUTH_CLIENT_ID: ${{ vars.OAUTH_CLIENT_ID }}   # client id is not sensitive — configured as a variable
-      OAUTH_CLIENT_SECRET: ${{ secrets.OAUTH_CLIENT_SECRET }}
-      DASHBOARD_SESSION_SECRET: ${{ secrets.DASHBOARD_SESSION_SECRET }}
-      DASHBOARD_ENCRYPTION_KEY: ${{ secrets.DASHBOARD_ENCRYPTION_KEY }}
-      ALERT_WEBHOOK_URL: ${{ secrets.ALERT_WEBHOOK_URL }}
     steps:
       - name: Checkout deploy ref
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           # The run's DISPATCH-TIME SHA, not `github.ref_name`: checkout
           # resolves a ref NAME at fetch time, so a tag moved during the
@@ -146,12 +149,18 @@ jobs:
       # deployed. The `wrangler secret bulk` WRITES stay after `wrangler
       # deploy`; this step only asserts they are non-empty.
       - name: Assert required secrets are set
+        env:
+          # The three secrets asserted here live on THIS step only: the
+          # preflight is pure shell (no `uses:`) and reads no third-party code.
+          OAUTH_CLIENT_SECRET: ${{ secrets.OAUTH_CLIENT_SECRET }}
+          DASHBOARD_SESSION_SECRET: ${{ secrets.DASHBOARD_SESSION_SECRET }}
+          DASHBOARD_ENCRYPTION_KEY: ${{ secrets.DASHBOARD_ENCRYPTION_KEY }}
         run: |
           : "${OAUTH_CLIENT_ID:?required}" "${OAUTH_CLIENT_SECRET:?required}" \
             "${DASHBOARD_SESSION_SECRET:?required}" "${DASHBOARD_ENCRYPTION_KEY:?required}"
 
       - name: Setup Bun
-        uses: oven-sh/setup-bun@v2
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
           bun-version: 1.4.0
 
@@ -168,6 +177,8 @@ jobs:
         run: bun run build:spa
 
       - name: Verify Cloudflare account
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
         run: |
           test -n "$CLOUDFLARE_ACCOUNT_ID"   # account id is a variable — must be configured
           bunx wrangler whoami    # token/账户名佐证，输出进 run log（人工核对账户）
@@ -195,12 +206,29 @@ jobs:
           echo "version=v${REF_NAME#v}" >> "$GITHUB_OUTPUT"
           echo "Deploying $REF_NAME to production; expected healthz version: v${REF_NAME#v}"
 
+      # LOAD-BEARING: the tag must match the tree it names BEFORE production is
+      # touched. A human-published Release or a hand-cut/re-pointed `v*` tag can
+      # point at a commit whose version surfaces differ from the tag; without
+      # this gate the workflow applies forward-only migrations and deploys that
+      # commit, and only the post-deploy healthz smoke notices — production has
+      # already changed. `release:validate` is the repository's own release gate
+      # (the same one the release workflow runs), pinning every version surface
+      # to the tag's bare version, and it fails loudly.
+      - name: Validate the tag against the checked-out version surfaces
+        env:
+          TAG: ${{ github.ref_name }}
+        run: bun run release:validate -- "$TAG"
+
       # Prod D1 starts empty and migrations are forward-only — apply before deploy.
       - name: Apply prod D1 migrations (remote)
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
         run: bunx wrangler d1 migrations apply mstar-inspector-prod-db --remote --env production
 
       - name: Deploy Worker (prod)
         shell: bash
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
         run: |
           set -euo pipefail
           bunx wrangler deploy --env production 2>&1 | tee deploy.log
@@ -230,6 +258,13 @@ jobs:
       # The required secrets were asserted non-empty in the preflight above,
       # BEFORE any mutation. This step only writes them.
       - name: Write required secrets
+        env:
+          # Secret-bulk only: the values are read on THIS step, which runs no
+          # third-party action code. The token authenticates the wrangler call.
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          OAUTH_CLIENT_SECRET: ${{ secrets.OAUTH_CLIENT_SECRET }}
+          DASHBOARD_SESSION_SECRET: ${{ secrets.DASHBOARD_SESSION_SECRET }}
+          DASHBOARD_ENCRYPTION_KEY: ${{ secrets.DASHBOARD_ENCRYPTION_KEY }}
         run: |
           jq -n '{GITHUB_OAUTH_CLIENT_ID: env.OAUTH_CLIENT_ID,
                   GITHUB_OAUTH_CLIENT_SECRET: env.OAUTH_CLIENT_SECRET,
@@ -237,13 +272,21 @@ jobs:
                   DASHBOARD_ENCRYPTION_KEY: env.DASHBOARD_ENCRYPTION_KEY}' \
             | bunx wrangler secret bulk --env production
 
-      - name: Write optional ALERT_WEBHOOK_URL secret
-        if: env.ALERT_WEBHOOK_URL != ''
-        run: "jq -n '{ALERT_WEBHOOK_URL: env.ALERT_WEBHOOK_URL}' | bunx wrangler secret bulk --env production"
-
-      - name: Remove ALERT_WEBHOOK_URL secret (unset = log-only)
-        if: env.ALERT_WEBHOOK_URL == ''
-        run: "jq -n '{ALERT_WEBHOOK_URL: null}' | bunx wrangler secret bulk --env production"
+      # One step for both arms: a step-level env is NOT visible to that step's
+      # own `if:`, and keeping the value job-level to test it would put the
+      # secret back in every step's environment. `secret bulk` mutates the prod
+      # Worker either way — a non-empty value binds the webhook, an explicit
+      # null removes it (unset = log-only) — so the branch lives in the shell.
+      - name: Write ALERT_WEBHOOK_URL secret (bind, or null-delete when unset)
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          ALERT_WEBHOOK_URL: ${{ secrets.ALERT_WEBHOOK_URL }}
+        run: |
+          if [ -n "$ALERT_WEBHOOK_URL" ]; then
+            jq -n '{ALERT_WEBHOOK_URL: env.ALERT_WEBHOOK_URL}' | bunx wrangler secret bulk --env production
+          else
+            jq -n '{ALERT_WEBHOOK_URL: null}' | bunx wrangler secret bulk --env production
+          fi
 
       # Every `secret bulk` above creates AND immediately deploys a new Worker
       # version, so the id captured from the `wrangler deploy` log names a
@@ -266,6 +309,8 @@ jobs:
       # smoke below proves the release identity independently.
       - name: Re-capture live Worker version
         shell: bash
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}   # `wrangler deployments list` authenticates
         run: |
           set -uo pipefail
           DEPLOY_LOG_VERSION=$(cat version_id.txt 2>/dev/null || true)
@@ -322,7 +367,7 @@ jobs:
           fi
 
       - name: Upload deploy evidence artifacts
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: deploy-evidence
           path: |

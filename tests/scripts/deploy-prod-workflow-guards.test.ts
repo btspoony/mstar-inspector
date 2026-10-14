@@ -25,10 +25,20 @@
  *   HEAD == run-SHA assertion and the production-environment marker
  *   (`vars.PROD_ENV_MARKER`) assertion, the tag-ref assertion that fails a
  *   non-tag run loudly before any mutation (T3-3: the deployed checkout can
- *   never differ from the run SHA), the secret-injection step shape (job-level
- *   env, `jq -n` payload, `--env production` so the prod Worker — never staging
- *   — receives the secrets) placed AFTER the deploy, prod D1 migrations,
+ *   never differ from the run SHA), the secret-injection step shape (SECRETS
+ *   declared on each consuming step, `jq -n` payload, `--env production` so the
+ *   prod Worker — never staging — receives the secrets) placed AFTER the
+ *   deploy, prod D1 migrations,
  *   `wrangler deploy --env production`;
+ * - the tag↔version validation step (`release:validate` against the run's tag)
+ *   placed AFTER tag resolution and BEFORE the first mutating command — a `v*`
+ *   tag naming a commit whose version surfaces differ must red the run before
+ *   forward-only migrations are applied;
+ * - the job-level `env:` carries NO `secrets.` — every production secret is
+ *   declared on the exact step that consumes it, and no `uses:` step carries
+ *   one (a third-party action revision can only read what its step was given);
+ * - the three third-party actions are pinned to commit SHAs (mutable tag only
+ *   in a trailing comment);
  * - the PURE required-secret preflight (`:?required`, no mutation) next to the
  *   marker assertion, BEFORE the first mutating wrangler step — a missing
  *   credential must red the run before production is migrated or deployed —
@@ -285,16 +295,95 @@ describe("deploy-prod.yml guards", () => {
     expect(wf.jobs.deploy["timeout-minutes"]).toBe(30);
   });
 
-  test("job env: five secrets + two vars, passed through step env (no inline interpolation)", () => {
+  test("job env: NON-SECRET only — no `secrets.` at job level; credentials are step-scoped", () => {
+    // LOAD-BEARING: a job-level secret lands in the environment of EVERY step,
+    // including the SHA-pinned third-party actions. Only the two public
+    // identifiers stay job-level.
     expect(wf.jobs.deploy.env).toEqual({
-      CLOUDFLARE_API_TOKEN: "${{ secrets.CLOUDFLARE_API_TOKEN }}",
       CLOUDFLARE_ACCOUNT_ID: "${{ vars.CLOUDFLARE_ACCOUNT_ID }}",
       OAUTH_CLIENT_ID: "${{ vars.OAUTH_CLIENT_ID }}",
-      OAUTH_CLIENT_SECRET: "${{ secrets.OAUTH_CLIENT_SECRET }}",
-      DASHBOARD_SESSION_SECRET: "${{ secrets.DASHBOARD_SESSION_SECRET }}",
-      DASHBOARD_ENCRYPTION_KEY: "${{ secrets.DASHBOARD_ENCRYPTION_KEY }}",
-      ALERT_WEBHOOK_URL: "${{ secrets.ALERT_WEBHOOK_URL }}",
     });
+    expect(JSON.stringify(wf.jobs.deploy.env)).not.toContain("secrets.");
+  });
+
+  test("every production secret is declared ONLY on the steps that consume it; no `uses:` step carries one", () => {
+    const secretsOf = (s: Step) =>
+      Object.entries(s.env ?? {})
+        .filter(([, v]) => v.includes("secrets."))
+        .map(([k]) => k)
+        .sort();
+    const byName = (n: string) => steps.find((s) => s.name === n)!;
+    const TOKEN = "CLOUDFLARE_API_TOKEN";
+    const expectSecrets = (name: string, keys: string[]) =>
+      expect([name, secretsOf(byName(name))]).toEqual([name, [...keys].sort()]);
+
+    // the preflight reads the three credentials it asserts (pure shell, no `uses:`)
+    expectSecrets("Assert required secrets are set", [
+      "OAUTH_CLIENT_SECRET",
+      "DASHBOARD_SESSION_SECRET",
+      "DASHBOARD_ENCRYPTION_KEY",
+    ]);
+    // the secret-bulk writes read the values they upload + the token that authenticates
+    expectSecrets("Write required secrets", [
+      TOKEN,
+      "OAUTH_CLIENT_SECRET",
+      "DASHBOARD_SESSION_SECRET",
+      "DASHBOARD_ENCRYPTION_KEY",
+    ]);
+    expectSecrets("Write ALERT_WEBHOOK_URL secret (bind, or null-delete when unset)", [
+      TOKEN,
+      "ALERT_WEBHOOK_URL",
+    ]);
+    // every wrangler-authenticating step declares the token itself
+    for (const n of [
+      "Verify Cloudflare account",
+      "Apply prod D1 migrations (remote)",
+      "Deploy Worker (prod)",
+      "Re-capture live Worker version",
+    ]) {
+      expectSecrets(n, [TOKEN]);
+    }
+
+    // LOAD-BEARING: a step that runs THIRD-PARTY action code must be
+    // secret-free — a compromised action revision can only read what its step
+    // was given, so the tag guard / approval cannot be the last line of defense.
+    const actionSteps = steps.filter((s) => s.uses !== undefined);
+    expect(actionSteps.length).toBe(3);
+    for (const s of actionSteps) expect([s.uses, secretsOf(s)]).toEqual([s.uses, []]);
+
+    // and no OTHER step smuggles one in: the seven above are the full carrier set
+    expect(
+      steps
+        .filter((s) => secretsOf(s).length > 0)
+        .map((s) => s.name)
+        .sort(),
+    ).toEqual(
+      [
+        "Apply prod D1 migrations (remote)",
+        "Assert required secrets are set",
+        "Deploy Worker (prod)",
+        "Re-capture live Worker version",
+        "Verify Cloudflare account",
+        "Write ALERT_WEBHOOK_URL secret (bind, or null-delete when unset)",
+        "Write required secrets",
+      ].sort(),
+    );
+  });
+
+  test("third-party actions are pinned to commit SHAs with the mutable tag only in a trailing comment", () => {
+    const uses = steps.map((s) => s.uses).filter((u): u is string => !!u);
+    // a mutable tag here would let a later publish of that tag decide which code
+    // runs on the approved production deploy
+    for (const u of uses) expect(u).toMatch(/^[\w.-]+\/[\w.-]+@[0-9a-f]{40}$/);
+    expect(uses).toContain("actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1");
+    expect(uses).toContain("oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6");
+    expect(uses).toContain("actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9");
+    // the human-readable tag survives as a trailing comment only
+    const text = readFileSync(join(REPO_ROOT, ".github", "workflows", WORKFLOW), "utf8");
+    for (const line of text.split("\n").filter((l) => l.trimStart().startsWith("uses:"))) {
+      expect(line).toMatch(/# v\d/);
+      expect(line).not.toMatch(/@v\d/);
+    }
   });
 
   test("checkout pins the run's immutable SHA (github.sha) with full history", () => {
@@ -388,9 +477,132 @@ describe("deploy-prod.yml guards", () => {
     // the secrets land. The reverse order used to materialise a bound-less
     // draft Worker holding production secrets.
     expect(idx("Write required secrets")).toBeGreaterThan(idx("Deploy Worker"));
-    expect(idx("Write optional ALERT_WEBHOOK_URL secret")).toBeGreaterThan(idx("Write required secrets"));
-    expect(idx("healthz")).toBeGreaterThan(idx("Remove ALERT_WEBHOOK_URL"));
+    expect(idx("Write ALERT_WEBHOOK_URL secret")).toBeGreaterThan(idx("Write required secrets"));
+    expect(idx("healthz")).toBeGreaterThan(idx("Write ALERT_WEBHOOK_URL secret"));
     expect(idx("Upload deploy evidence")).toBeGreaterThan(idx("healthz"));
+  });
+
+  test("the tag↔version validation runs after tag resolution and before the FIRST mutating command", () => {
+    const validate = steps.find(
+      (s) => s.name === "Validate the tag against the checked-out version surfaces",
+    )!;
+    expect(validate).toBeDefined();
+    // the repository's own release gate, against the run's tag — a `v*` tag can
+    // point at a commit whose version surfaces differ, and forward-only
+    // migrations would already have been applied by the time healthz noticed.
+    expect(validate.env?.TAG).toBe("${{ github.ref_name }}");
+    expect(validate.run).toBe('bun run release:validate -- "$TAG"');
+    expect(validate.if).toBeUndefined();   // never skipped — a skip re-opens the hole
+    expect(validate.run).not.toContain("${{");
+    const idx = (needle: string) => steps.findIndex((s) => (s.name ?? "").includes(needle));
+    expect(idx("Validate the tag")).toBeGreaterThan(idx("Resolve deploy tag"));
+    // strictly before EVERY mutating wrangler step (the D1 migration is first)
+    const validateIdx = steps.indexOf(validate);
+    const mutatingIdx = steps
+      .map((s, i) => (/bunx wrangler (secret bulk|d1 migrations apply|deploy)\b/.test(s.run ?? "") ? i : -1))
+      .filter((i) => i >= 0);
+    expect(mutatingIdx.length).toBe(4);
+    for (const i of mutatingIdx) expect(validateIdx).toBeLessThan(i);
+  });
+
+  test("validation script EXECUTES: a mismatched tag exits non-zero, an aligned tag exits 0", () => {
+    // Substring pins cannot see a wrong invocation. Run the step's own body in a
+    // synthetic repo whose HEAD carries a real tag, so both directions are
+    // observable: the aligned tag passes (the gate's own self-heal case) and a
+    // tag naming any other version fails loudly — the hole a hand-cut/re-pointed
+    // tag would otherwise reach production through.
+    const validate = steps.find(
+      (s) => s.name === "Validate the tag against the checked-out version surfaces",
+    )!;
+    const pkg: unknown = JSON.parse(readFileSync(join(REPO_ROOT, "package.json"), "utf8"));
+    if (typeof pkg !== "object" || pkg === null || !("version" in pkg) || typeof pkg.version !== "string") {
+      throw new Error("package.json carries no string `version` field");
+    }
+    const version = pkg.version;
+    const dir = mkdtempSync(join(tmpdir(), "validate-tag-run-"));
+    try {
+      // the gate reads package.json + src/version.ts and resolves the tag via
+      // git — copy those four files, then tag HEAD.
+      for (const rel of [
+        "package.json",
+        "src/version.ts",
+        "scripts/release-surfaces.ts",
+        "scripts/validate-release-version.ts",
+      ]) {
+        const dest = join(dir, rel);
+        const parent = dest.slice(0, dest.lastIndexOf("/"));
+        Bun.spawnSync(["mkdir", "-p", parent]);
+        writeFileSync(dest, readFileSync(join(REPO_ROOT, rel)));
+      }
+      for (const args of [
+        ["init", "-q"],
+        ["add", "-A"],
+        ["-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "-m", "x"],
+        ["-c", "tag.gpgsign=false", "tag", `v${version}`],
+      ]) {
+        const proc = Bun.spawnSync(["git", ...args], { cwd: dir, stdout: "pipe", stderr: "pipe" });
+        expect(proc.exitCode).toBe(0);
+      }
+      const runOnce = (tag: string) =>
+        Bun.spawnSync(["bash", "-e", "-c", validate.run!], {
+          cwd: dir,
+          env: { ...process.env, TAG: tag },
+        });
+      // the tag that names this tree's version surfaces: validated
+      const aligned = runOnce(`v${version}`);
+      expect(aligned.stdout.toString()).toContain("all surfaces aligned");
+      expect(aligned.exitCode).toBe(0);
+      // a tag whose version surface differs: loud, non-zero
+      const mismatch = runOnce("v9.9.9");
+      expect(mismatch.exitCode).not.toBe(0);
+      const log = mismatch.stdout.toString() + mismatch.stderr.toString();
+      expect(log).toContain(`MISMATCH package.json (package.json): tag v9.9.9, file has ${version}`);
+      expect(log).toContain("failed validation");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("mutation: dropping the validation step (or moving it after the migration) must fail the pin above", () => {
+    // Show both edits that reopen it — removal, and relocation past the D1
+    // migration — make the pinned assertions fail.
+    const src = readFileSync(join(REPO_ROOT, ".github", "workflows", WORKFLOW), "utf8");
+    const dir = mkdtempSync(join(tmpdir(), "validate-tag-"));
+    const parse = (text: string) => {
+      const path = join(dir, "deploy-prod.yml");
+      writeFileSync(path, text);
+      const proc = Bun.spawnSync(["python3", "-c", PY_DUMP, path], { stdout: "pipe", stderr: "pipe" });
+      expect(proc.exitCode).toBe(0);
+      return JSON.parse(proc.stdout.toString()).jobs.deploy.steps as Step[];
+    };
+    const mutates = (s: Step) =>
+      /bunx wrangler (secret bulk|d1 migrations apply|deploy)\b/.test(s.run ?? "");
+    try {
+      const block = src.slice(
+        src.indexOf("      # LOAD-BEARING: the tag must match the tree it names"),
+        src.indexOf("      # Prod D1 starts empty"),
+      );
+      const stepBlock = block.slice(block.indexOf("      - name: Validate the tag"));
+      expect(stepBlock).toContain("release:validate");
+      // 1. removed entirely
+      const removed = parse(src.replace(block, ""));
+      expect(
+        removed.find((s) => s.name === "Validate the tag against the checked-out version surfaces"),
+      ).toBeUndefined();
+      // 2. relocated to AFTER the D1 migration (position pin now fails)
+      const relocated = parse(
+        src.replace(block, "").replace(
+          "      - name: Deploy Worker (prod)",
+          stepBlock + "      - name: Deploy Worker (prod)",
+        ),
+      );
+      const rvIdx = relocated.findIndex(
+        (s) => s.name === "Validate the tag against the checked-out version surfaces",
+      );
+      expect(rvIdx).toBeGreaterThan(relocated.findIndex(mutates));
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   test("typecheck + test + build:spa run before deploy (self-verification)", () => {
@@ -418,12 +630,13 @@ describe("deploy-prod.yml guards", () => {
     const markerIdx = steps.findIndex((s) => s.name?.includes("production environment marker"));
     const preflightIdx = steps.indexOf(preflight);
     expect(preflightIdx).toBeGreaterThan(markerIdx);
-    // every mutating invocation — the required-secret write, both ALERT arms,
-    // the D1 migration and the deploy — comes strictly after the preflight.
+    // every mutating invocation — the required-secret write, the ALERT
+    // write/delete arm, the D1 migration and the deploy — comes strictly after
+    // the preflight.
     const mutatingIdx = steps
       .map((s, i) => (/bunx wrangler (secret bulk|d1 migrations apply|deploy)\b/.test(s.run ?? "") ? i : -1))
       .filter((i) => i >= 0);
-    expect(mutatingIdx.length).toBe(5);
+    expect(mutatingIdx.length).toBe(4);
     for (const i of mutatingIdx) expect(preflightIdx).toBeLessThan(i);
     // and the writer no longer carries the assertion itself.
     const writer = steps.find((s) => s.name === "Write required secrets")!;
@@ -440,12 +653,11 @@ describe("deploy-prod.yml guards", () => {
     expect(start).toBeGreaterThan(-1);
     expect(end).toBeGreaterThan(start);
     const mutation =
-      '      - name: Write required secrets\n        run: |\n          : "${OAUTH_CLIENT_ID:?required}" "${OAUTH_CLIENT_SECRET:?required}" \\\n            "${DASHBOARD_SESSION_SECRET:?required}" "${DASHBOARD_ENCRYPTION_KEY:?required}"\n          jq -n\n';
-    const mutated =
-      (src.slice(0, start) + src.slice(end)).replace(
-        "      - name: Write required secrets\n        run: |\n          jq -n",
-        mutation.replace(/\n$/, ""),
-      );
+      '        run: |\n          : "${OAUTH_CLIENT_ID:?required}" "${OAUTH_CLIENT_SECRET:?required}" \\\n            "${DASHBOARD_SESSION_SECRET:?required}" "${DASHBOARD_ENCRYPTION_KEY:?required}"\n          jq -n \'';
+    const mutated = (src.slice(0, start) + src.slice(end)).replace(
+      "        run: |\n          jq -n '{",
+      mutation + "{",
+    );
     expect(mutated).not.toBe(src);
     const dir = mkdtempSync(join(tmpdir(), "preflight-"));
     try {
@@ -674,19 +886,23 @@ describe("deploy-prod.yml guards", () => {
     // `--env production` is load-bearing: without it the command targets the
     // top-level Worker, i.e. staging, and overwrites its secrets.
     expect(run).toContain("bunx wrangler secret bulk --env production");
-    // optional alert pair: set when present, explicit null-delete when unset
-    const alertSet = steps.find((s) => s.name === "Write optional ALERT_WEBHOOK_URL secret");
-    const alertUnset = steps.find((s) => s.name?.includes("Remove ALERT_WEBHOOK_URL"));
-    expect(alertSet?.if).toBe("env.ALERT_WEBHOOK_URL != ''");
-    expect(alertSet?.run).toContain("bunx wrangler secret bulk --env production");
-    expect(alertUnset?.if).toBe("env.ALERT_WEBHOOK_URL == ''");
-    expect(alertUnset?.run).toContain("{ALERT_WEBHOOK_URL: null}");
-    // the deletion mutates a Worker too — same `--env production` pin, else it
-    // would delete staging's alert secret.
-    expect(alertUnset?.run).toContain("bunx wrangler secret bulk --env production");
+    // the alert pair is ONE step: a step-level env is not visible to that
+    // step's own `if:`, so the set/unset branch lives in the shell — both arms
+    // must still call the prod-scoped bulk write.
+    const alert = steps.find((s) => s.name === "Write ALERT_WEBHOOK_URL secret (bind, or null-delete when unset)")!;
+    expect(alert).toBeDefined();
+    expect(alert.if).toBeUndefined();
+    expect(alert.env?.ALERT_WEBHOOK_URL).toBe("${{ secrets.ALERT_WEBHOOK_URL }}");
+    expect(alert.run).toContain('if [ -n "$ALERT_WEBHOOK_URL" ]; then');
+    expect(alert.run).toContain("jq -n '{ALERT_WEBHOOK_URL: env.ALERT_WEBHOOK_URL}' | bunx wrangler secret bulk --env production");
+    expect(alert.run).toContain("{ALERT_WEBHOOK_URL: null}");
+    expect(alert.run).toContain("fi");
+    expect(alert.run).not.toContain("${{");
+    // the null-delete arm mutates the Worker too, and the set arm binds the
+    // webhook — both carry `--env production` on the SAME line as the write.
     // every mutating Wrangler invocation in this workflow carries the flag.
     const mutating = stepRuns.filter((r) => /bunx wrangler (secret bulk|d1 migrations apply|deploy)\b/.test(r));
-    expect(mutating.length).toBeGreaterThan(0);
+    expect(mutating.length).toBe(4);
     for (const r of mutating) expect(r).toMatch(/--env production/);
   });
 
@@ -706,7 +922,7 @@ describe("deploy-prod.yml guards", () => {
     // the v-normalized tag is the expected healthz version
     expect(run).toContain('echo "version=v${REF_NAME#v}" >> "$GITHUB_OUTPUT"');
     // the tag-ref gate must precede EVERY mutating Wrangler step — the
-    // required-secret write, both optional alert arms, the D1 migration and the
+    // required-secret write, the ALERT write/delete, the D1 migration and the
     // deploy — not merely account verification. Moving any one of them above
     // the resolver would let a branch run reach a production mutation before it
     // is rejected.
@@ -714,7 +930,7 @@ describe("deploy-prod.yml guards", () => {
     const mutatingIdx = steps
       .map((s, i) => (/bunx wrangler (secret bulk|d1 migrations apply|deploy)\b/.test(s.run ?? "") ? i : -1))
       .filter((i) => i >= 0);
-    expect(mutatingIdx.length).toBe(5);
+    expect(mutatingIdx.length).toBe(4);
     for (const i of mutatingIdx) expect(verIdx).toBeLessThan(i);
   });
 
