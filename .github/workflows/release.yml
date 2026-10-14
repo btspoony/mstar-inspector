@@ -186,8 +186,20 @@ jobs:
           # (hence the whole page, never a single newest run). The assignment
           # form keeps a lookup failure loud under `set -e` (a failed lookup
           # must not be mistaken for "no run").
+          #
+          # `--limit 100` is deliberate, not the 20-row default: this ONE call
+          # feeds BOTH decisions below, and it must see a reusable run of this
+          # tag that can sit behind many newer runs of OTHER tags for the same
+          # commit (a commit that has been rolled back to repeatedly accumulates
+          # them) — a hidden same-tag run would leave the lookup empty and queue
+          # a duplicate production deploy, reapplying forward-only migrations
+          # and rewriting secrets. `gh` returns runs NEWEST-FIRST, so
+          # `max(databaseId)` over the page is the newest run id for the commit
+          # even if the page were ever truncated; the page size is what protects
+          # the reuse decision, and 100 is far above any plausible count of
+          # production runs for one commit.
           RUNS_JSON="$(gh run list --workflow deploy-prod.yml --commit "$SHA" \
-            --json status,conclusion,databaseId,headBranch)"
+            --limit 100 --json status,conclusion,databaseId,headBranch)"
           LOOKUP="$(printf '%s' "$RUNS_JSON" \
             | jq -r --arg tag "$TAG" 'first(.[] | select(.headBranch == $tag)) // empty | "\(.databaseId) \(.status) \(.conclusion // "-")"')"
           REUSE_ID=""

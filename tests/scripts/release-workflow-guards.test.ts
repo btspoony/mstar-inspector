@@ -25,13 +25,18 @@
  *   queueing a duplicate on a release rerun (P2) — the lookup is scoped to a run
  *   whose own `headBranch` is THIS tag (the collector's identity rule), so a
  *   run for another tag on the same commit is never reused and cannot mask a
- *   reusable same-tag run; reuse only for an in-flight or successful run, any
+ *   reusable same-tag run; the call asks for an EXPLICIT page size
+ *   (`--limit 100`, never gh's 20-row default) because that one page feeds both
+ *   the reuse decision and the boundary — a same-tag run buried under 20+ runs
+ *   of other tags would otherwise be invisible and queue a duplicate deploy;
+ *   reuse only for an in-flight or successful run, any
  *   other terminal outcome dispatching fresh, and the pre-dispatch boundary id
  *   leaving the step as the `since_run` output — that boundary is taken over
  *   the WHOLE page (any ref, the collector's exclusion scope), so a completed
  *   run under another tag for the same commit is excluded too — with the step
- *   body executed against a stubbed `gh` for the full case table (plus
- *   mutations dropping the reuse identity filter and narrowing the boundary);
+ *   body executed against a stubbed `gh` that honours `--limit` (20-row default
+ *   when absent) for the full case table, plus mutations dropping the reuse
+ *   identity filter, narrowing the boundary, and reverting the page size;
  * - deploy-evidence append step: exactly one `gh release edit`
  *   workflow-wide (count across ALL step runs, not mere containment), its own
  *   step-level timeout budget bounded below the job cap, edit failure loud at
@@ -240,9 +245,22 @@ describe("release.yml guards", () => {
     // let a foreign run hide a reusable same-tag run behind it
     expect(dispatch.run).toContain("--json status,conclusion,databaseId,headBranch");
     expect(dispatch.run).toContain("select(.headBranch == $tag)");
-    // the whole page is scanned: a run limit could hide a reusable same-tag run
-    expect(dispatch.run).not.toContain("--limit");
+    // Codex P2 (round 4): dropping `--limit 1` left gh's 20-row DEFAULT in
+    // charge, and this single call feeds both the reuse decision and the
+    // boundary — a same-tag run sitting behind 20+ foreign-ref runs for the
+    // commit would be invisible, the lookup would read empty, and a duplicate
+    // production deploy would be queued. The page size is now explicit.
+    expect(dispatch.run).toContain("--limit 100");
+    // the value is pinned ON THE COMMAND, not merely somewhere in the body: the
+    // step comment quotes the flag too, so a bare containment/max-length check
+    // could be satisfied by prose while the real call fell back to the default
+    expect(dispatch.run!.match(/gh run list[^\n]*\n[^\n]*--limit 100 --json/) !== null).toBe(true);
     expect(dispatch.run).not.toContain(".[0] // empty");
+    // one lookup call only: a second `gh run list` would double the API face
+    expect(dispatch.run!.match(/gh run list/g)).toHaveLength(1);
+    // gh returns runs newest-first, so the highest id on the page is the newest
+    // run id for the commit — that is what the boundary must export
+    expect(dispatch.run).toContain("map(.databaseId) | max // empty");
     // finding 2: the pre-dispatch boundary id leaves the step as an output (the
     // evidence step forwards it to the collector as --since-run)
     expect(dispatch.run).toContain('echo "since_run=${BOUNDARY}" >> "$GITHUB_OUTPUT"');
@@ -259,11 +277,19 @@ describe("release.yml guards", () => {
 
   /**
    * Throwaway repo carrying the real `v9.9.9` tag (the body runs
-   * `git rev-list -n1`) plus a stubbed `gh`: `run list` hands the fixture JSON
-   * to the STEP'S OWN jq pipeline (so the real headBranch filter is what runs),
-   * `workflow run` records the dispatch instead of mutating the repo.
+   * `git rev-list -n1`) plus a stubbed `gh`: `run list` page-slices the fixture
+   * JSON exactly as `gh` does — honouring `--limit`/`-L`, and gh's documented
+   * 20-row DEFAULT when neither is passed — before handing it to the STEP'S OWN
+   * jq pipeline (so the real headBranch filter and the real page size are what
+   * run); it also records the argv it was called with. `workflow run` records
+   * the dispatch instead of mutating the repo.
    */
-  function makeDispatchFixture(): { dir: string; log: string; output: string } {
+  function makeDispatchFixture(): {
+    dir: string;
+    log: string;
+    argv: string;
+    output: string;
+  } {
     const dir = mkdtempSync(join(tmpdir(), "release-dispatch-"));
     git(dir, "init", "-q");
     git(dir, "config", "user.email", "t@example.com");
@@ -274,15 +300,30 @@ describe("release.yml guards", () => {
     git(dir, "tag", "-a", "-m", "v9.9.9", "v9.9.9");
 
     const log = join(dir, "gh.log");
+    const argv = join(dir, "gh-argv.log");
     const output = join(dir, "output.txt");
     writeFileSync(log, "");
+    writeFileSync(argv, "");
     writeFileSync(output, "");
     writeFileSync(
       join(dir, "gh"),
       `#!/usr/bin/env bash
 set -euo pipefail
 if [ "\${1:-}" = "run" ] && [ "\${2:-}" = "list" ]; then
-  printf '%s' "$GH_STUB_RUNS_JSON"
+  printf 'run list %s\\n' "$*" >> "$GH_STUB_ARGV_LOG"
+  # gh's page size: --limit N / -L N / --limit=N, else its 20-row default.
+  limit=20
+  args=("$@")
+  i=0
+  while [ "$i" -lt "\${#args[@]}" ]; do
+    a="\${args[$i]}"
+    case "$a" in
+      --limit|-L) i=$((i+1)); limit="\${args[$i]:-20}" ;;
+      --limit=*) limit="\${a#--limit=}" ;;
+    esac
+    i=$((i+1))
+  done
+  printf '%s' "$GH_STUB_RUNS_JSON" | jq --argjson n "\${limit:-20}" 'if length > $n then .[0:$n] else . end'
   exit 0
 fi
 if [ "\${1:-}" = "workflow" ] && [ "\${2:-}" = "run" ]; then
@@ -294,16 +335,17 @@ exit 7
 `,
     );
     Bun.spawnSync(["chmod", "+x", join(dir, "gh")]);
-    return { dir, log, output };
+    return { dir, log, argv, output };
   }
 
   /** Run one dispatch-step body against a prepared fixture. */
   function runDispatchBody(
-    fixture: { dir: string; log: string; output: string },
+    fixture: { dir: string; log: string; argv: string; output: string },
     body: string,
     runsJson: string,
-  ): { code: number; out: string; log: string; exported: string } {
+  ): { code: number; out: string; log: string; argv: string; exported: string } {
     writeFileSync(fixture.log, "");
+    writeFileSync(fixture.argv, "");
     writeFileSync(fixture.output, "");
     const proc = Bun.spawnSync(["bash", "-e", "-c", body], {
       cwd: fixture.dir,
@@ -314,6 +356,7 @@ exit 7
         VERSION: "9.9.9",
         GH_STUB_RUNS_JSON: runsJson,
         GH_STUB_LOG: fixture.log,
+        GH_STUB_ARGV_LOG: fixture.argv,
         GITHUB_OUTPUT: fixture.output,
       },
     });
@@ -321,6 +364,7 @@ exit 7
       code: proc.exitCode,
       out: proc.stdout.toString() + proc.stderr.toString(),
       log: readFileSync(fixture.log, "utf8"),
+      argv: readFileSync(fixture.argv, "utf8"),
       exported: readFileSync(fixture.output, "utf8"),
     };
   }
@@ -338,6 +382,25 @@ exit 7
     // completed run, from being cited as this release's evidence.
     const REUSE = true;
     const DISPATCH = false;
+    // A commit rolled back to repeatedly: 24 runs of OTHER tags (newest-first)
+    // with THIS tag's reusable run on row 25 and older foreign runs behind it —
+    // 31 rows in all. gh's 20-row default drops row 25 and the lookup reads
+    // empty, queueing a duplicate production deploy; `--limit 100` sees it.
+    const deepPageRuns = JSON.stringify([
+      ...Array.from({ length: 24 }, (_, i) => ({
+        databaseId: 2000 - i,
+        status: "completed",
+        conclusion: "success",
+        headBranch: `v9.8.${30 - i}`,
+      })),
+      { databaseId: 1900, status: "waiting", conclusion: null, headBranch: "v9.9.9" },
+      ...Array.from({ length: 6 }, (_, i) => ({
+        databaseId: 1800 - i,
+        status: "completed",
+        conclusion: "success",
+        headBranch: `v9.8.${20 - i}`,
+      })),
+    ]);
     const cases: {
       runs: string;
       reuse: boolean;
@@ -427,6 +490,16 @@ exit 7
         label: "superseded failure ahead of an older success on this tag",
         boundary: 80,
       },
+      // DEEP PAGE (Codex P2, round 4): the reusable same-tag run sits on row 25
+      // of 31. Reused — proving the explicit page size reaches gh, since the
+      // stub applies gh's real 20-row default and would slice it away.
+      {
+        runs: deepPageRuns,
+        reuse: REUSE,
+        label: "reusable same-tag run on row 25 of a 31-row page",
+        boundary: null,
+        reuseId: 1900,
+      },
     ];
 
     const fixture = makeDispatchFixture();
@@ -506,6 +579,51 @@ exit 7
       const narrowed = runDispatchBody(fixture, mutated, aliasPage);
       expect(narrowed.code).toBe(0);
       expect(narrowed.exported).toBe("since_run=\n"); // the reviewed gap
+    } finally {
+      rmSync(fixture.dir, { recursive: true, force: true });
+    }
+  });
+
+  test("MUTATION/reverting the page size to gh's default: a reusable run on row 25 is missed and a duplicate deploy is queued (Codex P2 round 4)", () => {
+    // The explicit page size is load-bearing, so it is demonstrated on the real
+    // step body: the stub applies gh's documented 20-row default and slices the
+    // deep page the same way gh would, so dropping `--limit 100` (or reverting
+    // to `--limit 1`) hides the same-tag run and re-dispatches a live deploy.
+    const steps = wf.jobs.release.steps as { run?: string }[];
+    const src = steps.find((s) => s.run?.includes("gh workflow run deploy-prod.yml"))!.run!;
+    // Drop the flag entirely (gh then applies its 20-row default) and, second,
+    // reproduce the older `--limit 1` shape — both must lose the row-25 run.
+    // Anchored to the command's own flag pair, not the comment mentioning it.
+    const dropped = src.replace(" --limit 100 --json", " --json");
+    expect(dropped).not.toBe(src);
+    const narrowed = src.replace("--limit 100 --json", "--limit 1 --json");
+    expect(narrowed).not.toBe(src);
+
+    const deepPage = JSON.stringify([
+      ...Array.from({ length: 24 }, (_, i) => ({
+        databaseId: 2000 - i,
+        status: "completed",
+        conclusion: "success",
+        headBranch: `v9.8.${30 - i}`,
+      })),
+      { databaseId: 1900, status: "completed", conclusion: "success", headBranch: "v9.9.9" },
+    ]);
+
+    const fixture = makeDispatchFixture();
+    try {
+      const fixed = runDispatchBody(fixture, src, deepPage);
+      expect(fixed.code).toBe(0);
+      expect(fixed.argv).toContain("--limit 100");
+      expect(fixed.out).toContain("reusing existing deploy-prod.yml run 1900 for v9.9.9");
+      expect(fixed.log).toBe(""); // no duplicate production deploy
+
+      const defaulted = runDispatchBody(fixture, dropped, deepPage);
+      expect(defaulted.code).toBe(0);
+      expect(defaulted.log).toContain("DISPATCH workflow run deploy-prod.yml --ref v9.9.9");
+      expect(defaulted.exported).toBe("since_run=2000\n");
+
+      const one = runDispatchBody(fixture, narrowed, deepPage);
+      expect(one.log).toContain("DISPATCH workflow run deploy-prod.yml --ref v9.9.9");
     } finally {
       rmSync(fixture.dir, { recursive: true, force: true });
     }
