@@ -15,13 +15,17 @@ name: Deploy prod
 # guard deploys only non-prerelease tags and so cannot be the only way in — and a
 # rollback dispatches the tag it rolls back to.
 #
-# The run's ref and its deployed checkout are the SAME thing: there is no `ref`
-# input, so a run can never deploy a tag other than the one it runs on. T3-3's
-# failure mode — a run whose dispatch ref is the release tag while an input
-# points checkout at an older rollback tag — is removed rather than detected.
-# A run that is not on a tag (e.g. dispatched on a branch) fails at the
-# tag-ref assertion before any mutation; a rollback dispatches on the rollback
-# tag itself.
+# The run's ref NAMES the release; the deployed tree is the run's DISPATCH-TIME
+# SHA. There is no `ref` input, so a run can never deploy a tag other than the
+# one it runs on, and checkout is pinned to `github.sha` rather than the tag
+# name — `actions/checkout` resolves a name at fetch time, so a tag moved during
+# the owner's approval wait would otherwise change what the approved run
+# executes. The checked-out HEAD is asserted against that SHA before any
+# repository code (install/test/build) runs. T3-3's failure mode — a run whose
+# dispatch ref is the release tag while an input points checkout at an older
+# rollback tag — is removed rather than detected. A run that is not on a tag
+# (e.g. dispatched on a branch) fails at the tag-ref assertion before any
+# mutation; a rollback dispatches on the rollback tag itself.
 #
 # LOAD-BEARING: a Release published by a workflow using the repository
 # `GITHUB_TOKEN` DOES NOT create a `release: published` workflow run — GitHub
@@ -96,10 +100,41 @@ jobs:
       - name: Checkout deploy ref
         uses: actions/checkout@v7
         with:
-          # the run's own ref: the published tag on a release event, the
-          # dispatched tag on a dispatch — deployed checkout == run ref.
-          ref: ${{ github.ref_name }}
+          # The run's DISPATCH-TIME SHA, not `github.ref_name`: checkout
+          # resolves a ref NAME at fetch time, so a tag moved during the
+          # approval wait would silently change the deployed tree. The SHA is
+          # immutable; the assertion step below proves it is what landed.
+          ref: ${{ github.sha }}
           fetch-depth: 0   # full history — the tag is the deploy identity, never a shallow tip
+
+      # Runs BEFORE any repository code (no install/test/build yet): the tree on
+      # disk must be the run's SHA. `git rev-parse HEAD` in the just-checked-out
+      # worktree — nothing from the ref executes here.
+      - name: Assert checkout matches the run SHA
+        env:
+          RUN_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          HEAD_SHA=$(git rev-parse HEAD)
+          if [ "$HEAD_SHA" != "$RUN_SHA" ]; then
+            echo "::error::checked-out HEAD $HEAD_SHA != run SHA $RUN_SHA — the approved run must execute the tree it was approved for"
+            exit 1
+          fi
+
+      # The `production` environment's marker variable exists ONLY at that
+      # environment level, so a run resolving repository- or organization-level
+      # values fails here before any mutation. It proves the job ran under the
+      # `production` environment; it canNOT prove secret provenance —
+      # `secrets.X` still falls back environment → repository → organization.
+      - name: Assert production environment marker
+        env:
+          PROD_ENV_MARKER: ${{ vars.PROD_ENV_MARKER }}
+        run: |
+          set -euo pipefail
+          if [ "$PROD_ENV_MARKER" != "production" ]; then
+            echo "::error::PROD_ENV_MARKER is not 'production' — this job did not resolve the production environment's variables"
+            exit 1
+          fi
 
       - name: Setup Bun
         uses: oven-sh/setup-bun@v2
@@ -124,9 +159,11 @@ jobs:
           bunx wrangler whoami    # token/账户名佐证，输出进 run log（人工核对账户）
 
       # LOAD-BEARING gate: production deploys a TAG or nothing. Without the
-      # `ref` input the run's own ref is the deploy identity, but a dispatch can
-      # still be aimed at a branch — that must fail loudly here, before any
-      # mutation below. `github.ref_name` is then always the tag.
+      # `ref` input the run's own ref names the release — and, because checkout
+      # is pinned to the dispatch-time SHA, the tag is only the identity the
+      # smoke asserts, never what gets fetched later. A dispatch can still be
+      # aimed at a branch — that must fail loudly here, before any mutation
+      # below. `github.ref_name` is then always the tag.
       - name: Resolve deploy tag
         id: ver
         env:
@@ -144,6 +181,23 @@ jobs:
           echo "version=v${REF_NAME#v}" >> "$GITHUB_OUTPUT"
           echo "Deploying $REF_NAME to production; expected healthz version: v${REF_NAME#v}"
 
+      # Prod D1 starts empty and migrations are forward-only — apply before deploy.
+      - name: Apply prod D1 migrations (remote)
+        run: bunx wrangler d1 migrations apply mstar-inspector-prod-db --remote --env production
+
+      - name: Deploy Worker (prod)
+        shell: bash
+        run: |
+          bunx wrangler deploy --env production 2>&1 | tee deploy.log
+          grep -oE 'Current Version ID: .+' deploy.log | tail -1 | cut -d' ' -f4 > version_id.txt
+          test -s version_id.txt
+
+      # Secrets AFTER the deploy: on a first bring-up the old order let
+      # `secret bulk` materialise a bound-less draft Worker holding production
+      # secrets until the deploy step landed; deploying first creates the Worker
+      # with its real bindings and no secrets. The deploy does not depend on
+      # these secrets (they are read at request time), and the smoke stays last.
+      #
       # `--env production` is mandatory: without it `secret bulk` resolves the
       # TOP-LEVEL worker (the staging instance) and would overwrite staging's
       # dashboard secrets with the fresh prod values.
@@ -164,17 +218,6 @@ jobs:
       - name: Remove ALERT_WEBHOOK_URL secret (unset = log-only)
         if: env.ALERT_WEBHOOK_URL == ''
         run: "jq -n '{ALERT_WEBHOOK_URL: null}' | bunx wrangler secret bulk --env production"
-
-      # Prod D1 starts empty and migrations are forward-only — apply before deploy.
-      - name: Apply prod D1 migrations (remote)
-        run: bunx wrangler d1 migrations apply mstar-inspector-prod-db --remote --env production
-
-      - name: Deploy Worker (prod)
-        shell: bash
-        run: |
-          bunx wrangler deploy --env production 2>&1 | tee deploy.log
-          grep -oE 'Current Version ID: .+' deploy.log | tail -1 | cut -d' ' -f4 > version_id.txt
-          test -s version_id.txt
 
       # Release identity, not mere liveness: healthz must report the version the
       # deployed tag carries (v-prefixed, the tag's own shape). A fresh Worker

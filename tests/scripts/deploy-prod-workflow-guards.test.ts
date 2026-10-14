@@ -19,12 +19,14 @@
  *   a job holding production secrets nor run repository code with them in scope;
  * - `environment: production`, concurrency group `deploy-prod-mstar-inspector`,
  *   `permissions: { contents: read }`, `timeout-minutes: 30`;
- * - the run-ref checkout (`github.ref_name`, full history) and the tag-ref
- *   assertion that fails a non-tag run loudly before any mutation (T3-3: the
- *   deployed checkout can never differ from the dispatch ref), the
- *   secret-injection step shape (job-level env, `jq -n` payload,
- *   `--env production` so the prod Worker — never staging — receives the
- *   secrets), prod D1 migrations, `wrangler deploy --env production`;
+ * - the run-SHA checkout (`github.sha`, full history), the pre-repository-code
+ *   HEAD == run-SHA assertion and the production-environment marker
+ *   (`vars.PROD_ENV_MARKER`) assertion, the tag-ref assertion that fails a
+ *   non-tag run loudly before any mutation (T3-3: the deployed checkout can
+ *   never differ from the run SHA), the secret-injection step shape (job-level
+ *   env, `jq -n` payload, `--env production` so the prod Worker — never staging
+ *   — receives the secrets) placed AFTER the deploy, prod D1 migrations,
+ *   `wrangler deploy --env production`;
  * - the healthz smoke comparing the live version to the deployed tag;
  * - the digest-from-deploy-log rule and its never-fatal property (a no-push
  *   deploy records the literal `unchanged (no push in this deploy)` and exits 0);
@@ -115,6 +117,55 @@ describe("deploy-prod.yml guards", () => {
     expect(g.run).not.toContain("${{");
   });
 
+  test("guard-tag-ref: `continue-on-error` is absent at job and step level (the tag gate is load-bearing)", () => {
+    // `needs: guard-tag-ref` is the only thing stopping a non-tag ref's code
+    // from reaching the secret-bearing job. `continue-on-error: true` at either
+    // level keeps every other assertion green while un-gating that path, so its
+    // ABSENCE is pinned here — the same field the sibling release guard test
+    // pins for the analogous step.
+    const guard = wf.jobs["guard-tag-ref"];
+    expect(guard["continue-on-error"]).toBeUndefined();
+    const gsteps = guard.steps as Step[];
+    expect(gsteps).toHaveLength(1);
+    expect(gsteps[0]!["continue-on-error"]).toBeUndefined();
+  });
+
+  test("guard-tag-ref script: tag ref exits 0, branch ref exits non-zero with the ::error:: text", () => {
+    const g = (wf.jobs["guard-tag-ref"].steps as Step[])[0]!;
+    // GitHub's default `run:` shell is `bash -e {0}` — reproduce fail-fast.
+    const runOnce = (refType: string, refName: string) =>
+      Bun.spawnSync(["bash", "-e", "-c", g.run!], {
+        env: { ...process.env, REF_TYPE: refType, REF_NAME: refName },
+      });
+    const tag = runOnce("tag", "v1.2.3");
+    expect(tag.exitCode).toBe(0);
+    const branch = runOnce("branch", "main");
+    expect(branch.exitCode).not.toBe(0);
+    expect(branch.stdout.toString() + branch.stderr.toString()).toContain("deploys a tag");
+  });
+
+  test("mutation: `continue-on-error: true` on the guard step must fail the absence pin", () => {
+    // The pin above asserts the field is ABSENT. Show that adding it (the one
+    // edit that silently un-gates a branch ref) is what the pin catches.
+    const src = readFileSync(join(REPO_ROOT, ".github", "workflows", WORKFLOW), "utf8");
+    const mutated = src.replace(
+      "      - name: Assert the run is on a tag\n",
+      "      - name: Assert the run is on a tag\n        continue-on-error: true\n",
+    );
+    expect(mutated).not.toBe(src);
+    const dir = mkdtempSync(join(tmpdir(), "coe-"));
+    try {
+      const path = join(dir, "deploy-prod.yml");
+      writeFileSync(path, mutated);
+      const proc = Bun.spawnSync(["python3", "-c", PY_DUMP, path], { stdout: "pipe", stderr: "pipe" });
+      expect(proc.exitCode).toBe(0);
+      const mwf = JSON.parse(proc.stdout.toString());
+      expect((mwf.jobs["guard-tag-ref"].steps as Step[])[0]!["continue-on-error"]).toBe(true);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   test("deploy job is gated on the guard (`needs`) and keeps environment: production", () => {
     expect(wf.jobs.deploy.needs).toEqual("guard-tag-ref");
     expect(wf.jobs.deploy.environment).toBe("production");
@@ -188,26 +239,99 @@ describe("deploy-prod.yml guards", () => {
     });
   });
 
-  test("checkout pins the run's own ref (github.ref_name) with full history", () => {
+  test("checkout pins the run's immutable SHA (github.sha) with full history", () => {
     const checkout = steps.find((s) => s.uses?.startsWith("actions/checkout"));
-    // T3-3: the deployed checkout IS the run ref — never an independent input.
-    expect(checkout?.with?.ref).toBe("${{ github.ref_name }}");
+    // A ref NAME is resolved at fetch time — a tag moved during the approval
+    // wait would change the deployed tree. The SHA cannot move.
+    expect(checkout?.with?.ref).toBe("${{ github.sha }}");
     expect(checkout?.with?.["fetch-depth"]).toBe(0);
+    // T3-3: the deployed checkout IS the run — never an independent input.
     expect(String(checkout?.with?.ref)).not.toContain("inputs.");
   });
 
-  test("step order: verify before deploy, smoke after deploy", () => {
+  test("HEAD is asserted equal to the run SHA before any repository code runs", () => {
+    const assertStep = steps.find((s) => s.name?.includes("matches the run SHA"))!;
+    expect(assertStep).toBeDefined();
+    expect(assertStep.env?.RUN_SHA).toBe("${{ github.sha }}");
+    expect(assertStep.run).toContain("git rev-parse HEAD");
+    expect(assertStep.run).toContain('if [ "$HEAD_SHA" != "$RUN_SHA" ]; then');
+    expect(assertStep.run).toContain("::error::");
+    expect(assertStep.run).toContain("exit 1");
+    expect(assertStep.run).not.toContain("${{");
+    // MUST precede every step that executes repository code or mutates.
+    const idx = (needle: string) => steps.findIndex((s) => (s.name ?? "").includes(needle));
+    const assertIdx = steps.findIndex((s) => s.name?.includes("matches the run SHA"));
+    for (const later of [
+      "Install dependencies",
+      "Typecheck",
+      "Test",
+      "Build SPA",
+      "Verify Cloudflare account",
+      "Deploy Worker",
+    ]) {
+      expect(idx(later)).toBeGreaterThan(assertIdx);
+    }
+  });
+
+  test("mutation: a checkout that does NOT pin the run SHA fails the pin (immutability is load-bearing)", () => {
+    // Revert the must-fix in the parsed copy and show the pin above now fails:
+    // `ref: github.ref_name` (fetch-time name resolution) must not pass.
+    const src = readFileSync(join(REPO_ROOT, ".github", "workflows", WORKFLOW), "utf8");
+    const mutated = src.replace("ref: ${{ github.sha }}", "ref: ${{ github.ref_name }}");
+    expect(mutated).not.toBe(src);
+    const dir = mkdtempSync(join(tmpdir(), "sha-"));
+    try {
+      const path = join(dir, "deploy-prod.yml");
+      writeFileSync(path, mutated);
+      const proc = Bun.spawnSync(["python3", "-c", PY_DUMP, path], { stdout: "pipe", stderr: "pipe" });
+      expect(proc.exitCode).toBe(0);
+      const mwf = JSON.parse(proc.stdout.toString());
+      const mcheckout = (mwf.jobs.deploy.steps as Step[]).find((s) =>
+        s.uses?.startsWith("actions/checkout"),
+      );
+      expect(mcheckout?.with?.ref).not.toBe("${{ github.sha }}");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("production environment marker is asserted before any mutation", () => {
+    const marker = steps.find((s) => s.name?.includes("production environment marker"))!;
+    expect(marker).toBeDefined();
+    expect(marker.env?.PROD_ENV_MARKER).toBe("${{ vars.PROD_ENV_MARKER }}");
+    expect(marker.run).toContain('if [ "$PROD_ENV_MARKER" != "production" ]; then');
+    expect(marker.run).toContain("::error::");
+    expect(marker.run).toContain("exit 1");
+    // the marker is NOT a job-level env passthrough — it is read in-step only,
+    // so the job env pin below stays at the credential set.
+    expect(wf.jobs.deploy.env.PROD_ENV_MARKER).toBeUndefined();
+    const markerIdx = steps.findIndex((s) => s.name?.includes("production environment marker"));
+    const firstMutation = steps.findIndex((s) =>
+      /bunx wrangler (secret bulk|d1 migrations apply|deploy)\b/.test(s.run ?? ""),
+    );
+    expect(firstMutation).toBeGreaterThan(markerIdx);
+  });
+
+  test("step order: assert+verify before deploy, secrets after deploy, smoke last", () => {
     const names = steps.map((s) => s.name ?? "");
     const idx = (needle: string) => names.findIndex((n) => n.includes(needle));
-    expect(idx("Install dependencies")).toBeGreaterThan(-1);
+    expect(idx("matches the run SHA")).toBeGreaterThan(-1);
+    expect(idx("production environment marker")).toBeGreaterThan(idx("matches the run SHA"));
+    expect(idx("Setup Bun")).toBeGreaterThan(idx("production environment marker"));
+    expect(idx("Install dependencies")).toBeGreaterThan(idx("Setup Bun"));
     expect(idx("Typecheck")).toBeGreaterThan(idx("Install dependencies"));
     expect(idx("Test")).toBeGreaterThan(idx("Typecheck"));
     expect(idx("Build SPA")).toBeGreaterThan(idx("Test"));
     expect(idx("Verify Cloudflare account")).toBeGreaterThan(idx("Build SPA"));
-    expect(idx("Write required secrets")).toBeGreaterThan(idx("Verify Cloudflare account"));
-    expect(idx("Apply prod D1 migrations")).toBeGreaterThan(idx("Write required secrets"));
+    expect(idx("Resolve deploy tag")).toBeGreaterThan(idx("Verify Cloudflare account"));
+    expect(idx("Apply prod D1 migrations")).toBeGreaterThan(idx("Resolve deploy tag"));
     expect(idx("Deploy Worker")).toBeGreaterThan(idx("Apply prod D1 migrations"));
-    expect(idx("healthz")).toBeGreaterThan(idx("Deploy Worker"));
+    // Bring-up order: the Worker is created WITH its real bindings first, then
+    // the secrets land. The reverse order used to materialise a bound-less
+    // draft Worker holding production secrets.
+    expect(idx("Write required secrets")).toBeGreaterThan(idx("Deploy Worker"));
+    expect(idx("Write optional ALERT_WEBHOOK_URL secret")).toBeGreaterThan(idx("Write required secrets"));
+    expect(idx("healthz")).toBeGreaterThan(idx("Remove ALERT_WEBHOOK_URL"));
     expect(idx("Upload deploy evidence")).toBeGreaterThan(idx("healthz"));
   });
 
@@ -349,6 +473,40 @@ describe("deploy-prod.yml guards", () => {
     // the expected value comes from the tag resolved in the earlier step
     expect(smoke!.env?.EXPECTED_VERSION).toBe("${{ steps.ver.outputs.version }}");
     expect(smoke!.if).toBeUndefined();
+  });
+
+  test("healthz smoke script EXECUTES: matching version exits 0, mismatching version exits non-zero", () => {
+    // Substring pins above cannot see a flipped comparison (`ok=0` → `ok=1`
+    // would still pass). Execute the extracted script with a stubbed `curl` /
+    // `sleep` so both directions are observable without touching the network.
+    const smoke = steps.find((s) => s.name?.includes("healthz"))!;
+    const dir = mkdtempSync(join(tmpdir(), "healthz-"));
+    try {
+      writeFileSync(
+        join(dir, "curl"),
+        '#!/bin/sh\nprintf \'{"ok":true,"version":"%s"}\\n\' "$HEALTHZ_VERSION"\n',
+      );
+      writeFileSync(join(dir, "sleep"), "#!/bin/sh\nexit 0\n");
+      Bun.spawnSync(["chmod", "+x", join(dir, "curl"), join(dir, "sleep")]);
+      const runOnce = (live: string) =>
+        Bun.spawnSync(["bash", "-e", "-c", smoke.run!], {
+          cwd: dir,
+          env: {
+            ...process.env,
+            PATH: `${dir}:${process.env.PATH}`,
+            EXPECTED_VERSION: "v1.2.3",
+            HEALTHZ_VERSION: live,
+          },
+        });
+      expect(runOnce("v1.2.3").exitCode).toBe(0);
+      const mismatch = runOnce("v9.9.9");
+      expect(mismatch.exitCode).not.toBe(0);
+      expect(mismatch.stdout.toString() + mismatch.stderr.toString()).toContain(
+        "did not report version v1.2.3",
+      );
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   test("cron smoke reads the deploy log", () => {
