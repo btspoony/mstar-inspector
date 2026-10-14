@@ -1291,10 +1291,14 @@ describe("multi-key provider pools (routes)", () => {
     expect(pools.filter((row) => row.provider === "my-custom")).toHaveLength(MAX_KEYS_PER_PROVIDER);
     expect(pools.filter((row) => row.provider === "workers-ai")).toHaveLength(MAX_KEYS_PER_PROVIDER);
 
+    // The ENDPOINT stays put on purpose: with a populated pool an endpoint
+    // change is refused earlier (A1, settings.error.providerEndpointLocked —
+    // pinned in tests/worker/app-config.test.ts), so this case isolates the
+    // pool-cap face of the same route.
     const custom = await postForm(SETTINGS, "mallory", env, {
       op: "add-custom-provider",
       provider_id: "my-custom",
-      base_url: "https://changed.example.com/v1",
+      base_url: "https://example.com/v1",
       api: "openai-completions",
       model_ids: "local-7b",
       key: sk("custom-cap-over-9999"),
@@ -1315,8 +1319,8 @@ describe("multi-key provider pools (routes)", () => {
       key: "settings.error.providerKeyLimit",
       params: { provider: "workers-ai", limit: MAX_KEYS_PER_PROVIDER },
     });
-    // Both refusals are zero-write: the declarations (the attempted base_url
-    // change included) and every existing pool row are exactly as they were.
+    // Both refusals are zero-write: the declarations and every existing pool
+    // row are exactly as they were.
     expect(await store.listCustomProviders(app.id)).toEqual(declarations);
     expect(await store.listCustomProviderKeys(app.id)).toEqual(pools);
   });

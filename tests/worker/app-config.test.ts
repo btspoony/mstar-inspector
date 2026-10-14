@@ -43,6 +43,7 @@ import {
   MODEL_ROLE_IDS,
   PROVIDER_IDS,
   PROVIDER_META,
+  ProviderEndpointLockedError,
   ProviderKeyLimitError,
   ProviderKeyTooLongError,
   UnknownModelChainError,
@@ -250,6 +251,47 @@ function createLastSlotRaceD1(inner: AppConfigD1, winLastSlot: () => Promise<voi
       }
       return await inner.batch(statements);
     },
+  };
+}
+
+/**
+ * D1 double that commits a concurrent remove + re-declaration at ANOTHER
+ * endpoint just before the FIRST statement that reads the custom-provider key
+ * pool runs — the interleaving a two-statement consumer read splits on (the
+ * declaration read has already happened when the pool statement executes).
+ */
+function createPoolReadRaceD1(inner: AppConfigD1, race: () => Promise<void>): AppConfigD1 {
+  let fired = false;
+  const fire = async () => {
+    if (fired) return;
+    fired = true;
+    await race();
+  };
+  return {
+    prepare: (query: string) => {
+      const stmt = inner.prepare(query);
+      if (fired || !query.includes("app_custom_provider_keys")) return stmt;
+      const raced: AppConfigStatement = {
+        bind: (...values: unknown[]) => {
+          stmt.bind(...values);
+          return raced;
+        },
+        first: async () => {
+          await fire();
+          return stmt.first();
+        },
+        all: async () => {
+          await fire();
+          return stmt.all();
+        },
+        run: async () => {
+          await fire();
+          return stmt.run();
+        },
+      };
+      return raced;
+    },
+    batch: (statements) => inner.batch(statements),
   };
 }
 
@@ -921,7 +963,7 @@ describe("app-config store (createAppConfigStore) — provider keys", () => {
     expect(await store.removeProviderKey(app.id, "never-stored")).toBe(false);
   });
 
-  test("deleteProviderKey removes ONE pool slot and keeps the siblings (the cache goes with the last key)", async () => {
+  test("deleteProviderKey removes ONE pool slot and CLEARS the provider's cached models on ANY per-key delete", async () => {
     const db = createAppConfigD1();
     const app = await seedApp(db, { slug: "a", createdBy: "mallory" });
     const store = configStore(db);
@@ -929,14 +971,19 @@ describe("app-config store (createAppConfigStore) — provider keys", () => {
     const two = sk("second-key-bbbb");
     await store.saveVerifiedKey(app.id, "anthropic", one, ["claude-sonnet-4-6"]);
     await store.addProviderKey(app.id, "anthropic", two);
+    expect(rawCount(db, "app_provider_models")).toBe(1);
     expect(await store.deleteProviderKey(app.id, "anthropic", await keyIdOf(one))).toBe(true);
     expect(rawCount(db, "app_provider_keys")).toBe(1);
-    // The verified-model cache belongs to the PROVIDER: it stays while a
-    // sibling key remains…
-    expect(rawCount(db, "app_provider_models")).toBe(1);
+    // The cached model list is PROVIDER-scoped — it cannot be attributed to one
+    // key — so deleting ANY key drops it (models only the deleted credential
+    // could serve must not stay selectable). The sibling key itself survives…
+    expect(rawCount(db, "app_provider_models")).toBe(0);
     expect((await store.getAppConfig(app.id)).keys.anthropic).toEqual([two]);
-    // …and goes with the last key (a cache row for a keyless provider is
-    // exactly the stale state the settings dropdown must never show).
+    // …and a re-verification of the surviving key rebuilds the cache.
+    await store.saveVerifiedKey(app.id, "anthropic", two, ["claude-sonnet-4-6"]);
+    expect(rawCount(db, "app_provider_models")).toBe(1);
+    // The last key's delete clears it too (a cache row for a keyless provider
+    // is exactly the stale state the settings dropdown must never show).
     expect(await store.deleteProviderKey(app.id, "anthropic", await keyIdOf(two))).toBe(true);
     expect(rawCount(db, "app_provider_keys")).toBe(0);
     expect(rawCount(db, "app_provider_models")).toBe(0);
@@ -1595,6 +1642,62 @@ describe("app-config store (createAppConfigStore) — custom providers", () => {
     expect(keys.map((key) => key.last4).sort()).toEqual(["7777", "9988"]);
   });
 
+  test("an endpoint change is refused while the pool holds a key (A1) — zero writes; an emptied pool re-declares freely", async () => {
+    const { db, app } = await seededWorld();
+    const store = configStore(db);
+    await store.upsertCustomProvider(app.id, CUSTOM, PLAIN_CUSTOM_KEY);
+    await store.addCustomProviderKey(app.id, CUSTOM.provider_id, sk("custom-ark-7777"));
+    const selectDeclaration = `SELECT base_url, api, model_ids, created_at, updated_at
+       FROM app_custom_providers WHERE app_id = ? AND provider_id = ?`;
+    const before = db.raw.query(selectDeclaration).get(app.id, CUSTOM.provider_id);
+    // Both endpoint columns are locked while the pool carries credentials the
+    // declaration flow verified for the CURRENT endpoint.
+    for (const moved of [
+      { ...CUSTOM, base_url: "https://elsewhere.example.com/v1" },
+      { ...CUSTOM, api: "anthropic-messages" as const },
+    ]) {
+      await expect(store.upsertCustomProvider(app.id, moved, sk("custom-ark-8888"))).rejects.toThrow(
+        ProviderEndpointLockedError,
+      );
+    }
+    // Byte-identical declaration, untouched pool: the refusal wrote nothing.
+    expect(db.raw.query(selectDeclaration).get(app.id, CUSTOM.provider_id)).toEqual(before);
+    expect(rawCount(db, "app_custom_provider_keys")).toBe(2);
+    // model_ids still move while the endpoint does not (declaration config,
+    // never a credential binding).
+    await store.upsertCustomProvider(app.id, { ...CUSTOM, model_ids: ["deepseek-r1"] }, PLAIN_CUSTOM_KEY);
+    // An EMPTIED pool frees the endpoint: remove the credentials, re-declare.
+    await store.deleteCustomProviderKey(app.id, CUSTOM.provider_id, await keyIdOf(PLAIN_CUSTOM_KEY));
+    await store.deleteCustomProviderKey(app.id, CUSTOM.provider_id, await keyIdOf(sk("custom-ark-7777")));
+    expect(rawCount(db, "app_custom_provider_keys")).toBe(0);
+    await expect(
+      store.upsertCustomProvider(app.id, { ...CUSTOM, base_url: "https://elsewhere.example.com/v1" }, PLAIN_CUSTOM_KEY),
+    ).resolves.toBeUndefined();
+    expect((await store.listCustomProviders(app.id))[0]!.base_url).toBe("https://elsewhere.example.com/v1");
+  });
+
+  test("the consumer face reads a declaration and its pool from ONE snapshot (A2): a remove + re-declare cannot pair endpoint A with key B", async () => {
+    const { db, app } = await seededWorld();
+    const store = configStore(db);
+    await store.upsertCustomProvider(app.id, CUSTOM, PLAIN_CUSTOM_KEY);
+    const MOVED: AppCustomProvider = { ...CUSTOM, base_url: "https://elsewhere.example.com/v1" };
+    const MOVED_KEY = sk("custom-moved-6161");
+    // Controlled interleaving: a concurrent remove + re-declaration commits at
+    // the moment the OLD two-statement read had already taken the declaration
+    // and not yet the pool (the first statement that reads the pool table).
+    const racing = configStore(
+      createPoolReadRaceD1(db, async () => {
+        await configStore(db).removeCustomProvider(app.id, CUSTOM.provider_id);
+        await configStore(db).upsertCustomProvider(app.id, MOVED, MOVED_KEY);
+      }),
+    );
+    // Endpoint and credentials are ONE view: the snapshot is either {A, keyA} or
+    // {B, keyB}, never {A, keyB}.
+    await expect(racing.getCustomProvidersForConsumer(app.id)).resolves.toEqual([
+      { ...MOVED, api_keys: [MOVED_KEY] },
+    ]);
+  });
+
   test("custom-provider keys resolve through the new pool table: ordered, maskable, deletable, legacy rows promoted", async () => {
     // A pre-pool DB: the declaration's key material still sits in the old column.
     const db = createPreProviderPoolD1();
@@ -1693,7 +1796,10 @@ describe("app-config store (createAppConfigStore) — custom providers", () => {
     await expect(
       store.upsertCustomProvider(
         app.id,
-        { ...CUSTOM, base_url: "https://changed.example.com/v1", model_ids: ["changed-model"] },
+        // The ENDPOINT stays put on purpose: an endpoint change with a populated
+        // pool is refused earlier (A1, ProviderEndpointLockedError) — this case
+        // pins the POOL-CAP refusal and its atomicity.
+        { ...CUSTOM, model_ids: ["changed-model"] },
         ninth,
       ),
     ).rejects.toThrow(ProviderKeyLimitError);
@@ -1839,6 +1945,61 @@ describe("app-config store (createAppConfigStore) — custom providers", () => {
         .get(app2.id, target),
     ).toEqual(winnerRow);
     expect(rawCount(db2, "app_custom_provider_keys")).toBe(MAX_CUSTOM_PROVIDER_COUNT);
+  });
+
+  test("a concurrent first-time save of the SAME provider id adds its key instead of 500ing (A4)", async () => {
+    const { db, app } = await seededWorld();
+    const WINNING = sk("custom-winning-8282");
+    const LOSING = sk("custom-losing-9292");
+    // The concurrent save commits between this caller's absence read and its
+    // batch: the caller's plain INSERT used to hit the (app_id, provider_id)
+    // primary-key conflict and roll the whole batch back as a generic 500.
+    const racing = configStore(
+      createLastSlotRaceD1(db, async () => {
+        await configStore(db).upsertCustomProvider(app.id, CUSTOM, WINNING);
+      }),
+    );
+    await expect(racing.upsertCustomProvider(app.id, CUSTOM, LOSING)).resolves.toBeUndefined();
+    // One declaration, BOTH keys: the loser's credential joins the declaration
+    // that already carries its endpoint — no half state, no dropped key.
+    expect(rawCount(db, "app_custom_providers")).toBe(1);
+    const consumer = await configStore(db).getCustomProvidersForConsumer(app.id);
+    expect(consumer).toHaveLength(1);
+    expect(consumer[0]!.base_url).toBe(CUSTOM.base_url);
+    expect([...consumer[0]!.api_keys].sort()).toEqual([WINNING, LOSING].sort());
+
+    // Same-race variant at ANOTHER endpoint: the loser's credential was
+    // verified for an endpoint the surviving declaration does not carry, so
+    // the credit is refused loudly — and still commits nothing.
+    const { db: db2, app: app2 } = await seededWorld();
+    const winnerSnap = async () =>
+      db2.raw.query("SELECT base_url, model_ids FROM app_custom_providers WHERE app_id = ?").get(app2.id);
+    const racing2 = configStore(
+      createLastSlotRaceD1(db2, async () => {
+        await configStore(db2).upsertCustomProvider(
+          app2.id,
+          { ...CUSTOM, base_url: "https://winner.example.com/v1", model_ids: ["winner-model"] },
+          WINNING,
+        );
+      }),
+    );
+    await expect(
+      racing2.upsertCustomProvider(app2.id, { ...CUSTOM, base_url: "https://loser.example.com/v1" }, LOSING),
+    ).rejects.toThrow(ProviderEndpointLockedError);
+    expect(await winnerSnap()).toEqual({
+      base_url: "https://winner.example.com/v1",
+      model_ids: JSON.stringify(["winner-model"]),
+    });
+    expect(rawCount(db2, "app_custom_provider_keys")).toBe(1);
+    expect(await configStore(db2).getCustomProvidersForConsumer(app2.id)).toEqual([
+      {
+        provider_id: CUSTOM.provider_id,
+        base_url: "https://winner.example.com/v1",
+        api: CUSTOM.api,
+        model_ids: ["winner-model"],
+        api_keys: [WINNING],
+      },
+    ]);
   });
 
   test("deleteCustomProviderKey removes a migrated (not-yet-promoted) key by its derived id — no prior read needed", async () => {
@@ -3009,6 +3170,47 @@ describe("POST /dashboard/apps/:slug/settings — custom providers (op=add-custo
     const raceBody = (await res.json()) as { key: string; message: string };
     expect(raceBody.key).toBe("settings.error.customProviderDeclRejected");
     expect(raceBody.message).toContain("The custom provider was rejected");
+  });
+
+  test("400 keyed: an endpoint change on a provider whose pool holds a key is refused — custom and template save paths (A1)", async () => {
+    const { db } = await seededWorld();
+    const declared = await postForm(SETTINGS, await mallory(), makeEnv(db), CUSTOM_FORM);
+    expect(declared.status).toBe(200);
+    const moved = await postForm(SETTINGS, await mallory(), makeEnv(db), {
+      ...CUSTOM_FORM,
+      base_url: "https://elsewhere.example.com/v1",
+      key: sk("custom-ark-7777"),
+    });
+    expect(moved.status).toBe(400);
+    expect(await moved.json()).toEqual({
+      key: "settings.error.providerEndpointLocked",
+      message:
+        "my-custom already stores keys for its current endpoint — remove them before changing its base URL or API protocol. Nothing was stored.",
+      params: { provider: "my-custom" },
+    });
+    expect(rawCount(db, "app_custom_provider_keys")).toBe(1);
+    // The template save path carries the same guard (its own provider id).
+    const tpl = await postForm(SETTINGS, await mallory(), makeEnv(db), {
+      op: "add-template-provider",
+      template_id: "subconscious",
+      key: sk("sub-template-0001"),
+    });
+    expect(tpl.status).toBe(200);
+    const tplMoved = await postForm(SETTINGS, await mallory(), makeEnv(db), {
+      op: "add-template-provider",
+      template_id: "subconscious",
+      base_url: "https://gateway.example.com/v1",
+      key: sk("sub-template-0002"),
+    });
+    expect(tplMoved.status).toBe(400);
+    expect(await tplMoved.json()).toEqual({
+      key: "settings.error.providerEndpointLocked",
+      message:
+        "subconscious already stores keys for its current endpoint — remove them before changing its base URL or API protocol. Nothing was stored.",
+      params: { provider: "subconscious" },
+    });
+    expect(rawCount(db, "app_custom_providers")).toBe(2);
+    expect(rawCount(db, "app_custom_provider_keys")).toBe(2);
   });
 
   test("remove-custom-provider deletes the row; an unknown id is a tolerant no-op", async () => {

@@ -279,6 +279,8 @@ export const zhCN: Dictionary = {
       modelIdsTooMany: "模型 id 过多（{count} 个）— 最多 {limit} 个。未存储任何内容。",
       modelIdTooLong: "每个模型 id 最多 {limit} 个字符。未存储任何内容。",
       customProviderDeclRejected: "该自定义 provider 被拒绝 — 未存储任何内容。",
+      providerEndpointLocked:
+        "{provider} 已为其当前端点存储了密钥 — 请先移除这些密钥再更改其 Base URL 或 API 协议。未存储任何内容。",
       templateUnknown: "未知的 provider 模板 — 未存储任何内容。",
       templateIncomplete: "该 provider 模板不完整 — 未存储任何内容。",
       accountIdRequired: "请输入你的 Cloudflare 账户 id 以补全 Workers AI Base URL。",

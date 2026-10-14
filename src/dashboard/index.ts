@@ -84,6 +84,7 @@ import {
   MODEL_ROLE_IDS,
   PROVIDER_IDS,
   PROVIDER_META,
+  ProviderEndpointLockedError,
   ProviderKeyLimitError,
   createAppConfigStore,
   parseModelChain,
@@ -1345,6 +1346,7 @@ const SETTINGS_400_KEYS = {
   modelIdsTooMany: "settings.error.modelIdsTooMany",
   modelIdTooLong: "settings.error.modelIdTooLong",
   customProviderDeclRejected: "settings.error.customProviderDeclRejected",
+  providerEndpointLocked: "settings.error.providerEndpointLocked",
   templateUnknown: "settings.error.templateUnknown",
   templateIncomplete: "settings.error.templateIncomplete",
   accountIdRequired: "settings.error.accountIdRequired",
@@ -2164,6 +2166,14 @@ dashboardApp.post("/apps/:slug/settings", async (c) => {
       );
     } catch (err) {
       logSettingsFailure("add_custom_provider", gate.app.id, err);
+      // A1: an endpoint change while the pool still holds keys verified for the
+      // current endpoint is refused by the store — the keyed 400 the SPA
+      // replays in the operator's locale (nothing was written).
+      if (err instanceof ProviderEndpointLockedError) {
+        return settings400Response(c, gate.app.slug, SETTINGS_400_KEYS.providerEndpointLocked, {
+          provider: providerId,
+        });
+      }
       // PR #10 cap-race fix: the store's atomic cap check can legitimately
       // throw InvalidCustomProviderError AFTER the route pre-check passed
       // (a concurrent save won the last slot) — that is a 400, not a 500.
@@ -2301,6 +2311,13 @@ dashboardApp.post("/apps/:slug/settings", async (c) => {
       );
     } catch (err) {
       logSettingsFailure("add_template_provider", gate.app.id, err);
+      // A1: the template save path materializes the SAME custom-provider
+      // declaration, so it carries the same endpoint lock.
+      if (err instanceof ProviderEndpointLockedError) {
+        return settings400Response(c, gate.app.slug, SETTINGS_400_KEYS.providerEndpointLocked, {
+          provider: templateId,
+        });
+      }
       if (err instanceof InvalidCustomProviderError) {
         return settings400Response(c, gate.app.slug, SETTINGS_400_KEYS.customProviderDeclRejected);
       }

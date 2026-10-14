@@ -318,6 +318,8 @@ export const en = {
       modelIdsTooMany: "Too many model ids ({count}) — at most {limit}. Nothing was stored.",
       modelIdTooLong: "Model ids are limited to {limit} characters each. Nothing was stored.",
       customProviderDeclRejected: "The custom provider was rejected — nothing was stored.",
+      providerEndpointLocked:
+        "{provider} already stores keys for its current endpoint — remove them before changing its base URL or API protocol. Nothing was stored.",
       templateUnknown: "Unknown provider template — nothing was stored.",
       templateIncomplete: "This provider template is incomplete — nothing was stored.",
       accountIdRequired: "Enter your Cloudflare account id to complete the Workers AI base URL.",

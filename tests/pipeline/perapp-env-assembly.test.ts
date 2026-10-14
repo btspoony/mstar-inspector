@@ -1194,6 +1194,10 @@ describe("custom provider env injection + runner input threading (AL-23-1)", () 
     const consumer = createReviewConsumer(makeEnv({ DB: db as never }), testLog, testOverrides);
 
     await consumer(makeBatch(makePayload({ pr_number: 42, appRef: { appId: appX.id } })));
+    // The endpoint may only move while the pool is EMPTY (A1), so the edit is
+    // the same remove-then-re-declare an operator performs — the declaration
+    // this consumer must re-read is wholesale new.
+    await store.removeCustomProvider(appX.id, "my-provider");
     await store.upsertCustomProvider(
       appX.id,
       { provider_id: "my-provider", base_url: "https://two.example.com/v1", api: "openai-completions", model_ids: ["m2"] },
