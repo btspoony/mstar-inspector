@@ -991,6 +991,29 @@ describe("app-config store (createAppConfigStore) — provider keys", () => {
     expect(await store.deleteProviderKey(app.id, "anthropic", "0".repeat(16))).toBe(false);
   });
 
+  test("a MISSED per-key delete leaves the cache and every row untouched (the cache clears only on a real removal)", async () => {
+    const db = createAppConfigD1();
+    const app = await seedApp(db, { slug: "a", createdBy: "mallory" });
+    const store = configStore(db);
+    const one = sk("first-key-aaaa");
+    const two = sk("second-key-bbbb");
+    await store.saveVerifiedKey(app.id, "anthropic", one, ["claude-sonnet-4-6"]);
+    await store.addProviderKey(app.id, "anthropic", two);
+    const poolBefore = db.raw.query("SELECT * FROM app_provider_keys WHERE app_id = ? ORDER BY key_id").all(app.id);
+    // A STALE / unmatched key id while a sibling key still exists: the delete
+    // statement matches nothing, so the provider's model cache must survive —
+    // wiping it here would contradict the route's own "nothing changed" report
+    // and cost the surviving key its dropdown models.
+    expect(await store.deleteProviderKey(app.id, "anthropic", "0".repeat(16))).toBe(false);
+    expect(rawCount(db, "app_provider_models")).toBe(1);
+    expect(db.raw.query("SELECT * FROM app_provider_keys WHERE app_id = ? ORDER BY key_id").all(app.id)).toEqual(
+      poolBefore,
+    );
+    expect((await store.getVerifiedModels(app.id)).map((row) => ({ provider: row.provider, models: row.models }))).toEqual([
+      { provider: "anthropic", models: ["claude-sonnet-4-6"] },
+    ]);
+  });
+
   test("deleteProviderKey removes a migrated (not-yet-promoted) key by its derived id — no prior read needed", async () => {
     const db = createPreProviderPoolD1();
     const app = await seedApp(db, { slug: "a", createdBy: "mallory" });
@@ -1581,7 +1604,7 @@ describe("app-config store (createAppConfigStore) — custom providers", () => {
     expect(keyRow.verified_status).toBe("ok");
     expect(keyRow.verified_at).toMatch(SQLITE_TS_RE);
     // The list faces are decrypt-free: declaration + masked tail, never keys.
-    await expect(configStore(db).listCustomProviders(app.id)).resolves.toEqual([CUSTOM]);
+    await expect(configStore(db).listCustomProviders(app.id)).resolves.toEqual([{ ...CUSTOM, has_keys: true }]);
     const keys = await configStore(db).listCustomProviderKeys(app.id);
     expect(keys.map((key) => ({ provider: key.provider, last4: key.last4, verifiedStatus: key.verifiedStatus }))).toEqual([
       { provider: CUSTOM.provider_id, last4: "9988", verifiedStatus: "ok" },

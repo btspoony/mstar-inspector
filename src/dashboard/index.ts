@@ -1633,7 +1633,15 @@ dashboardApp.get("/api/apps/:slug/settings", async (c) => {
       // chain (default + named) for the chains management UI.
       model_roles: modelChainSeats,
       model_chains: modelChains,
-      custom_providers: customProviders,
+      // The declaration face of the settings payload keeps its existing shape:
+      // `has_keys` is a membership-gate input for the models / chain faces, not
+      // a UI field, so it never rides this response (the store read is shared).
+      custom_providers: customProviders.map(({ provider_id, base_url, api, model_ids }) => ({
+        provider_id,
+        base_url,
+        api,
+        model_ids: [...model_ids],
+      })),
       // Clean cutover: the App's PERSISTED provider state only — a stored
       // key (masked tail) or a saved custom-provider declaration. No
       // plaintext keys, and catalog rows never appear here; an empty array is

@@ -77,7 +77,7 @@ describe("settings dropdowns", () => {
   test("composeModelOptions prefixes the cache provider (including ark-plan) and custom ids", () => {
     const groups = composeModelOptions(
       [{ provider: "ark-plan", models: ["doubao"], fetched_at: "t" }],
-      [{ provider_id: "acme", model_ids: ["fast"] }],
+      [{ provider_id: "acme", model_ids: ["fast"], has_keys: true }],
     );
     expect(groups.map((g) => g.selectors).flat()).toEqual(["ark-plan/doubao", "acme/fast"]);
   });

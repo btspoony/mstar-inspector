@@ -90,12 +90,15 @@
  *   - saveVerifiedKey is the verified analogue: the same per-key upsert with
  *     verified_at = now + verified_status = 'ok', plus the App's verified
  *     model cache row, as ONE atomic db.batch.
- *   - deleteProviderKey removes ONE slot — and the verified-model cache row
- *     when it removed the provider's LAST key (a cache row for a keyless
- *     provider would keep offering models). removeProviderKey removes the
+ *   - deleteProviderKey removes ONE slot — and, when it actually removed that
+ *     row, the provider's verified-model cache row (a model only the removed
+ *     credential could reach must not stay selectable; the cache is
+ *     provider-scoped, so any real per-key removal drops it). A MISSED delete
+ *     (unknown key id / unconfigured provider) changes nothing at all — it is
+ *     an idempotent no-op returning false, and the surviving keys keep their
+ *     cached models. removeProviderKey removes the
  *     WHOLE pool of a provider plus its cache row (the provider-level
- *     delete). Both return whether they removed a key row; an unknown key id
- *     / unconfigured provider is an idempotent no-op, like setAppStatus.
+ *     delete). Both return whether they removed a key row, like setAppStatus.
  *   - listProviderKeys is the settings-page face: one row per stored key —
  *     provider + derived key id + masked tail + the per-key bookkeeping,
  *     provider-ascending then pool order (created_at, key_id). The optional
@@ -254,6 +257,19 @@ export type AppCustomProvider = {
   base_url: string;
   api: CustomProviderApi;
   model_ids: string[];
+};
+/**
+ * A declaration as the settings / model faces read it: the declaration PLUS
+ * whether its pool currently holds a credential. A drained pool leaves the
+ * declaration (intact and re-keyable) but makes every model id it names
+ * unusable — a run against it fails in assertAppConfigComplete — so both the
+ * model-option composition and the chain membership layer gate on this flag
+ * (listCustomProviders is the only producer). The write face stays
+ * AppCustomProvider: has_keys is derived from the pool, never submitted.
+ */
+export type AppCustomProviderRead = AppCustomProvider & {
+  /** True while app_custom_provider_keys holds ≥1 row for (app, provider). */
+  has_keys: boolean;
 };
 /**
  * One custom-provider declaration as the consumer sees it (the
@@ -1380,9 +1396,13 @@ export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | un
      * settings dropdown). The next verification rebuilds it. The cache row
      * lives under the SELECTOR-FACING provider key — modelCacheProviderKey maps
      * an `ark` BYOK key to its "ark-plan" cache row (spec §6.1). Returns
-     * whether THIS call removed the key row (an unknown key id — or any
+     * whether THIS call removed the key row; an unknown key id — or any
      * provider the allowlist could never have stored — is a no-op returning
-     * false; it still drops a stale cache row, which is the state we want).
+     * false that leaves the cache UNTOUCHED, because the route reports
+     * `changed: false` / "nothing changed" and must not have destroyed the
+     * surviving keys' dropdown models behind that claim (the cache statement's
+     * `changes() > 0` reads the row count of the DELETE that runs first in this
+     * very transaction, so a miss clears nothing).
      */
     async deleteProviderKey(appId: string, provider: string, keyId: string): Promise<boolean> {
       // Promote the pool FIRST: a row 0024 carried across still wears the
@@ -1393,7 +1413,7 @@ export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | un
           .prepare(`DELETE FROM app_provider_keys WHERE app_id = ? AND provider = ? AND key_id = ?`)
           .bind(appId, provider, keyId),
         db
-          .prepare(`DELETE FROM app_provider_models WHERE app_id = ? AND provider = ?`)
+          .prepare(`DELETE FROM app_provider_models WHERE app_id = ? AND provider = ? AND changes() > 0`)
           .bind(appId, modelCacheProviderKey(provider)),
       ]);
       return res[0]!.meta.changes > 0;
@@ -1901,22 +1921,31 @@ export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | un
 
     /**
      * The settings-page declaration list: every declaration for the
-     * App, provider_id-ascending, as the decrypt-free AppCustomProvider
+     * App, provider_id-ascending, as the decrypt-free AppCustomProviderRead
      * shape. model_ids is parsed from the stored TEXT JSON array; a malformed
      * row throws (fail-loud, the getAppConfig tamper convention). The keys of
      * each declaration are a SEPARATE masked read (listCustomProviderKeys) —
-     * this face never touches key material.
+     * this face never touches key material, and `has_keys` is derived inside
+     * the statement (EXISTS on the pool), so a DRAINED declaration is still
+     * listed here — intact and re-keyable — while the model-option and
+     * membership faces can tell it offers nothing a run could use.
      */
-    async listCustomProviders(appId: string): Promise<AppCustomProvider[]> {
+    async listCustomProviders(appId: string): Promise<AppCustomProviderRead[]> {
       const res = await db
-        .prepare(`SELECT * FROM app_custom_providers WHERE app_id = ? ORDER BY provider_id ASC`)
+        .prepare(
+          `SELECT d.*,
+                  EXISTS (SELECT 1 FROM app_custom_provider_keys k
+                           WHERE k.app_id = d.app_id AND k.provider = d.provider_id) AS has_keys
+             FROM app_custom_providers d WHERE d.app_id = ? ORDER BY d.provider_id ASC`,
+        )
         .bind(appId)
-        .all<AppCustomProviderRow>();
+        .all<AppCustomProviderRow & { has_keys: number }>();
       return res.results.map((row) => ({
         provider_id: row.provider_id,
         base_url: row.base_url,
         api: row.api as CustomProviderApi,
         model_ids: parseModelIdsJson(row.model_ids, "app_custom_providers.model_ids"),
+        has_keys: row.has_keys > 0,
       }));
     },
 

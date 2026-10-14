@@ -713,7 +713,13 @@ describe("store wiring — saveVerifiedKey + getVerifiedModels", () => {
     );
     const list = await store.listCustomProviders(app.id);
     expect(list).toEqual([
-      { provider_id: "my-custom", base_url: "https://example.com/v1", api: "openai-completions", model_ids: ["m1"] },
+      {
+        provider_id: "my-custom",
+        base_url: "https://example.com/v1",
+        api: "openai-completions",
+        model_ids: ["m1"],
+        has_keys: true,
+      },
     ]);
     // Custom providers never write app_provider_models rows (spec §6.1).
     expect(await store.getVerifiedModels(app.id)).toEqual([]);

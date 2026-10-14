@@ -111,6 +111,12 @@ async function getJson(path: string, login: string, env: Env): Promise<Response>
   );
 }
 
+/** First 16 hex chars of SHA-256(plaintext) — the pool id the store derives. */
+async function keyIdOf(plainKey: string): Promise<string> {
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(plainKey));
+  return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("").slice(0, 16);
+}
+
 function mockModelsOk(ids: string[]): ReturnType<typeof spyOn> {
   return spyOn(globalThis, "fetch").mockImplementation(
     (async () =>
@@ -148,7 +154,7 @@ describe("selector membership helpers (spec §6.3)", () => {
         { provider: "copilot", models: [], fetched_at: "now" },
         { provider: "ark-plan", models: ["doubao-seed-2-1-pro"], fetched_at: "now" },
       ],
-      [{ provider_id: "my-custom", model_ids: ["local-7b"] }],
+      [{ provider_id: "my-custom", model_ids: ["local-7b"], has_keys: true }],
     );
     expect(groups).toEqual([
       { provider: "anthropic", source: "verified", selectors: ["anthropic/claude-sonnet-4-6", "anthropic/claude-opus-4-7"] },
@@ -163,13 +169,24 @@ describe("selector membership helpers (spec §6.3)", () => {
       { provider: "anthropic", models: ["claude-sonnet-4-6"], fetched_at: "now" },
       { provider: "copilot", models: [], fetched_at: "now" },
     ];
-    const custom = [{ provider_id: "my-custom", model_ids: ["local-7b"] }];
+    const custom = [{ provider_id: "my-custom", model_ids: ["local-7b"], has_keys: true }];
     expect(findFailingSelector(["anthropic/claude-sonnet-4-6:thinking"], verified, custom)).toBeNull();
     expect(findFailingSelector(["anthropic/claude-opus-4-7"], verified, custom)).toBe("anthropic/claude-opus-4-7");
     expect(findFailingSelector(["copilot/anything"], verified, custom)).toBeNull();
     expect(findFailingSelector(["openai/gpt-5"], verified, custom)).toBeNull();
     expect(findFailingSelector(["my-custom/local-7b"], verified, custom)).toBeNull();
     expect(findFailingSelector(["my-custom/nope"], verified, custom)).toBe("my-custom/nope");
+  });
+
+  test("a KEYLESS custom declaration is offered nothing and rejected everywhere — an unknown provider still stays syntax-only", () => {
+    const drained = [{ provider_id: "my-custom", model_ids: ["local-7b"], has_keys: false }];
+    // (a) nothing to offer: the group is absent, not an empty one.
+    expect(composeModelOptions([], drained)).toEqual([]);
+    // (b) its declared model ids are NOT usable — the pool has no credential.
+    expect(findFailingSelector(["my-custom/local-7b"], [], drained)).toBe("my-custom/local-7b");
+    // The contrast that keeps (b) from over-reaching: a provider the App never
+    // declared has no cache row either, and stays syntax-only (unchanged).
+    expect(findFailingSelector(["openai/gpt-5"], [], drained)).toBeNull();
   });
 });
 
@@ -270,6 +287,70 @@ describe("GET /dashboard/api/apps/:slug/models", () => {
     expect(JSON.stringify(body)).not.toContain(PLAIN_KEY);
     expect(JSON.stringify(body)).not.toContain(sk("custom"));
     expect(res.headers.get("cache-control")).toBe("private, no-store");
+  });
+
+  test("a drained custom pool stops offering models and stops validating chains, while the declaration stays editable", async () => {
+    const { db, app } = await seededWorld();
+    const store = createAppConfigStore(db, TEST_KEY);
+    const env = makeEnv(db);
+    const decl = {
+      provider_id: "my-custom",
+      base_url: "https://example.com/v1",
+      api: "openai-completions" as const,
+      model_ids: ["local-7b"],
+    };
+    await store.upsertCustomProvider(app.id, decl, PLAIN_KEY);
+
+    // The keyed state: both faces carry the declaration's models.
+    type ModelsBody = { groups: Array<{ provider: string; selectors: string[] }> };
+    const before = await getJson(MODELS, "mallory", env);
+    const beforeBody = (await before.json()) as ModelsBody;
+    expect(beforeBody.groups.map((group) => group.provider)).toContain("my-custom");
+    const keyedChain = await postForm(SETTINGS, "mallory", env, { op: "save-chain", model_chain: "my-custom/local-7b" });
+    expect(keyedChain.status).toBe(200);
+
+    // Drain the pool: the declaration survives, the pool is empty.
+    await store.deleteCustomProviderKey(app.id, "my-custom", await keyIdOf(PLAIN_KEY));
+    expect(await store.listCustomProviderKeys(app.id, "my-custom")).toEqual([]);
+
+    // (a) the model-options face no longer offers this provider's models.
+    const after = await getJson(MODELS, "mallory", env);
+    const afterBody = (await after.json()) as ModelsBody;
+    expect(afterBody.groups.map((group) => group.provider)).not.toContain("my-custom");
+    expect(afterBody.groups.flatMap((group) => group.selectors)).not.toContain("my-custom/local-7b");
+
+    // (b) the membership face rejects a chain referencing it.
+    const rejected = await postForm(SETTINGS, "mallory", env, {
+      op: "save-chain",
+      model_chain: "my-custom/local-7b",
+    });
+    expect(rejected.status).toBe(400);
+    expect(await rejected.json()).toEqual({
+      code: "not_in_verified_models",
+      message: "Selector my-custom/local-7b is not in this App's verified models.",
+      selector: "my-custom/local-7b",
+    });
+    // The earlier saved chain is untouched by the refused write.
+    expect(await store.getModelChain(app.id)).toBe("my-custom/local-7b");
+
+    // (c) the declaration itself is still listed — present and re-keyable.
+    const settings = await getJson(SETTINGS_JSON, "mallory", env);
+    const payload = (await settings.json()) as { configured_providers: ConfiguredRow[] };
+    expect(payload.configured_providers.filter((row) => row.kind === "custom")).toEqual([
+      { kind: "custom", ...decl },
+    ]);
+
+    // (d) re-adding a key restores BOTH faces.
+    await store.addCustomProviderKey(app.id, "my-custom", sk("custom-ark-5555"));
+    const restored = await getJson(MODELS, "mallory", env);
+    const restoredBody = (await restored.json()) as ModelsBody;
+    expect(restoredBody.groups.flatMap((group) => group.selectors)).toContain("my-custom/local-7b");
+    const restoredChain = await postForm(SETTINGS, "mallory", env, {
+      op: "add-chain",
+      name: "fast",
+      chain: "my-custom/local-7b",
+    });
+    expect(restoredChain.status).toBe(200);
   });
 });
 
@@ -1006,12 +1087,6 @@ describe("multi-key provider pools (routes)", () => {
 
   const SECOND_KEY = sk("ant-mallory-second-7766");
   const ACCOUNT_ID = "1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d";
-
-  /** First 16 hex chars of SHA-256(plaintext) — the pool id the store derives. */
-  async function keyIdOf(plainKey: string): Promise<string> {
-    const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(plainKey));
-    return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("").slice(0, 16);
-  }
 
   /** One row of the payload's `keys` face (the store's ProviderKeySummary). */
   type KeyRow = {
