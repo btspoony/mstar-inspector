@@ -94,6 +94,21 @@ const config: Json = JSON.parse(stripJsonComments(readFileSync(CONFIG_PATH, "utf
 const staging: Json = config;
 const production: Json = asObject(asObject(config.env).production);
 
+/**
+ * Leaf fingerprint of a nested block as `key.path=value` strings, so a
+ * one-sided change to any depth (e.g. `observability.traces.head_sampling_rate`
+ * or `assets.directory`) shows up as a differing key path instead of passing
+ * silently. Arrays are opaque leaves — nothing here restates one.
+ */
+function leafFingerprints(value: unknown, prefix: string): string[] {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    return [`${prefix}=${JSON.stringify(value)}`];
+  }
+  return Object.entries(value as Json).flatMap(([key, child]) =>
+    leafFingerprints(child, `${prefix}.${key}`),
+  );
+}
+
 /** Binding NAMES each block declares, per binding kind. */
 function bindingNames(block: Json): Record<string, string[]> {
   return {
@@ -277,6 +292,24 @@ describe("wrangler env.production parity (PR #63 should-fix)", () => {
    * the first. Image values stay owned by `sandbox-images.test.ts`. */
   test("containers (class_name + scheduling_policy + images keys) match between the top level and env.production", () => {
     expectSameSet("containers[]", containerFingerprints);
+  });
+
+  /** The lock previously compared `assets` by `binding` only: a staging-only
+   * `directory` or `run_worker_first` change would ship silently. Fingerprints
+   * carry the `assets.<key>` path, so the failure names the differing key. */
+  test("assets (directory, binding, run_worker_first) match between the top level and env.production", () => {
+    expectSameSet("assets", (block) => leafFingerprints(asObject(block.assets), "assets"));
+  });
+
+  /** Nothing read `observability` before: the legacy top-level `enabled` plus
+   * the `logs`/`traces` sub-toggles (their enabled flags, sampling rates and
+   * persist) were only guarded by hand. A one-sided sub-toggle change would
+   * silently alter prod log/trace volume; fingerprints carry the full
+   * `observability.<sub>.<key>` path. */
+  test("observability (top-level flags, logs/traces sub-toggles) match between the top level and env.production", () => {
+    expectSameSet("observability", (block) =>
+      leafFingerprints(asObject(block.observability), "observability"),
+    );
   });
 
   /** The prod-only resources `wrangler deploy --env production` resolves to.
