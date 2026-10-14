@@ -144,7 +144,12 @@ jobs:
       # is not this release's deploy: it is never reused, and it cannot hide a
       # reusable same-tag run listed behind it. Reuse applies only
       # to an in-flight run (waiting for approval, or otherwise not concluded) or
-      # one that succeeded; ANY other terminal outcome (failure, cancelled,
+      # one that actually DEPLOYED — a completed `success` is only reused when
+      # the run's own production job (the one deploy-prod.yml puts under the
+      # `production` environment) also concluded `success`, because a dashless
+      # tag first published as a prerelease leaves a run whose deploy job was
+      # skipped and GitHub still reports that run `success`; ANY other terminal
+      # outcome (failure, cancelled,
       # timed_out, startup_failure, action_required, stale, neutral, skipped)
       # dispatches a fresh run, so a rerun after a failed deploy retries — and
       # the highest run id it observed on the WHOLE page (any ref) before
@@ -223,11 +228,46 @@ jobs:
             | jq -r 'map(.databaseId) | max // empty')"
 
           # Reuse ONLY an in-flight run (status != completed, which includes the
-          # approval-waiting `waiting` state) or one that actually succeeded.
+          # approval-waiting `waiting` state) or one that actually DEPLOYED.
           # Every other terminal conclusion (failure, cancelled, timed_out,
           # startup_failure, action_required, stale, neutral, skipped) dispatches
           # a fresh run — otherwise a rerun could never recover production.
-          if [ -n "$REUSE_ID" ] && { [ "$REUSE_STATUS" != "completed" ] || [ "$REUSE_CONCLUSION" = "success" ]; }; then
+          #
+          # A completed `success` is NOT enough (Codex P2): a dashless tag first
+          # published as a PRERELEASE makes deploy-prod.yml create a run whose
+          # `deploy` job the release predicate SKIPS, and GitHub reports a
+          # conditionally skipped job as `success` — the run's own conclusion is
+          # `success` while production never changed. Reusing it would leave the
+          # later stable publish (or an updated Release) of that tag with no
+          # dispatch at all, so a rerun converges on nothing. A completed-success
+          # run is therefore reused only when its deploy job — the job id read
+          # from deploy-prod.yml, never a display name — concluded `success`;
+          # `skipped` or an absent job means guard-only: dispatch. The in-flight
+          # arm stays unconditional: an approval-waiting run has no job
+          # conclusions to inspect yet.
+          DEPLOY_JOB_RAN="false"
+          if [ -n "$REUSE_ID" ] && [ "$REUSE_STATUS" = "completed" ] && [ "$REUSE_CONCLUSION" = "success" ]; then
+            # The job that actually deploys: the production-environment job OF
+            # deploy-prod.yml, read from the file (never a hard-coded name).
+            # `gh run view` reports a job by its own `name:` when it has one and
+            # by its job id otherwise.
+            DEPLOY_JOB="$(bun -e '
+              const wf = Bun.YAML.parse(await Bun.file(".github/workflows/deploy-prod.yml").text());
+              const entry = Object.entries(wf.jobs ?? {}).find(([, job]) => job?.environment === "production");
+              if (!entry) throw new Error("deploy-prod.yml has no production-environment job");
+              const [id, job] = entry;
+              console.log(job.name ?? id);
+            ')"
+            DEPLOY_JOB_CONCLUSION="$(gh run view "$REUSE_ID" --json jobs \
+              | jq -r --arg job "$DEPLOY_JOB" 'first(.jobs[]? | select(.name == $job) | .conclusion) // empty')"
+            if [ "$DEPLOY_JOB_CONCLUSION" = "success" ]; then
+              DEPLOY_JOB_RAN="true"
+            else
+              echo "::notice::existing deploy-prod.yml run ${REUSE_ID} for ${TAG} concluded success but its '${DEPLOY_JOB}' job was ${DEPLOY_JOB_CONCLUSION:-absent} (guard-only run — the deploy job never started); dispatching a fresh deploy"
+            fi
+          fi
+
+          if [ -n "$REUSE_ID" ] && { [ "$REUSE_STATUS" != "completed" ] || [ "$DEPLOY_JOB_RAN" = "true" ]; }; then
             echo "::notice::reusing existing deploy-prod.yml run ${REUSE_ID} for ${TAG} (${SHA}) — status ${REUSE_STATUS}, conclusion ${REUSE_CONCLUSION}; no new deploy queued"
             exit 0
           fi
