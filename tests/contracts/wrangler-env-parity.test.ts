@@ -1,0 +1,171 @@
+/**
+ * `env.production` ↔ top-level resource parity lock (PR #63 review, should-fix:
+ * "`env.production` is hand-duplicated with no parity guard").
+ *
+ * A wrangler named environment does NOT inherit resource keys — only
+ * name/main/compatibility_* flow down — so `wrangler.jsonc`'s `env.production`
+ * restates every binding/trigger/migration by hand against prod-only
+ * resources. Until now the only machine guard was the sandbox-image contract
+ * test, which pins just the container `dockerfile`/`build_context` values
+ * (that ownership stays there; this file never re-pins them). A binding, cron
+ * or migration added at the top level would deploy fine to staging and be
+ * silently missing in production, where the smoke asserts only healthz, the
+ * cron string and the image digest — the drift would surface as a production
+ * runtime failure.
+ *
+ * The expected key list is DERIVED from the top level (minus the fields
+ * wrangler inherits or rejects inside an env block), so a future top-level
+ * resource key fails this lock loudly instead of being ignored.
+ */
+
+import { describe, expect, test } from "bun:test";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
+
+const REPO_ROOT = join(import.meta.dir, "..", "..");
+const CONFIG_PATH = join(REPO_ROOT, "wrangler.jsonc");
+
+/**
+ * Top-level keys a named environment must NOT restate: name/main/compatibility_*
+ * are inherited by wrangler, `keep_vars` is rejected inside an env block
+ * (wrangler 4.147.0: `Unexpected fields found in env.production field`), and
+ * `env` is the environments container itself.
+ */
+const NOT_RESTATED: Record<string, true> = {
+  name: true,
+  main: true,
+  compatibility_date: true,
+  compatibility_flags: true,
+  keep_vars: true,
+  env: true,
+};
+
+type Json = Record<string, unknown>;
+
+/**
+ * Strip JSONC comments before JSON.parse — no dependency. A scanner (not a
+ * regex) so a `//` inside a string value is never mistaken for a comment.
+ */
+function stripJsonComments(text: string): string {
+  let out = "";
+  let inString = false;
+  for (let i = 0; i < text.length; i++) {
+    const ch = text.charAt(i);
+    if (inString) {
+      out += ch;
+      if (ch === "\\") {
+        out += text.charAt(i + 1);
+        i++;
+      } else if (ch === '"') {
+        inString = false;
+      }
+      continue;
+    }
+    if (ch === '"') {
+      inString = true;
+      out += ch;
+      continue;
+    }
+    if (ch === "/" && text.charAt(i + 1) === "/") {
+      while (i < text.length && text.charAt(i) !== "\n") i++;
+      out += "\n";
+      continue;
+    }
+    if (ch === "/" && text.charAt(i + 1) === "*") {
+      i += 2;
+      while (i < text.length && !(text.charAt(i) === "*" && text.charAt(i + 1) === "/")) i++;
+      i++;
+      continue;
+    }
+    out += ch;
+  }
+  return out;
+}
+
+function asObject(value: unknown): Json {
+  return typeof value === "object" && value !== null ? (value as Json) : {};
+}
+
+function asArray(value: unknown): Json[] {
+  return Array.isArray(value) ? (value as Json[]) : [];
+}
+
+const config: Json = JSON.parse(stripJsonComments(readFileSync(CONFIG_PATH, "utf8")));
+const staging: Json = config;
+const production: Json = asObject(asObject(config.env).production);
+
+/** Binding NAMES each block declares, per binding kind. */
+function bindingNames(block: Json): Record<string, string[]> {
+  return {
+    "kv_namespaces[].binding": asArray(block.kv_namespaces).map((entry) => String(entry.binding)),
+    "d1_databases[].binding": asArray(block.d1_databases).map((entry) => String(entry.binding)),
+    "queues.producers[].binding": asArray(asObject(block.queues).producers).map((entry) =>
+      String(entry.binding),
+    ),
+    "durable_objects.bindings[].name": asArray(asObject(block.durable_objects).bindings).map(
+      (entry) => String(entry.name),
+    ),
+    "assets.binding": [String(asObject(block.assets).binding)],
+  };
+}
+
+/** Backing-resource identities each block points at, per resource kind. */
+function resourceIdentities(block: Json): Record<string, string[]> {
+  const consumers = asArray(asObject(block.queues).consumers);
+  return {
+    "kv_namespaces[].id": asArray(block.kv_namespaces).map((entry) => String(entry.id)),
+    "d1_databases[].database_name": asArray(block.d1_databases).map((entry) =>
+      String(entry.database_name),
+    ),
+    "d1_databases[].database_id": asArray(block.d1_databases).map((entry) =>
+      String(entry.database_id),
+    ),
+    "queues.producers[].queue": asArray(asObject(block.queues).producers).map((entry) =>
+      String(entry.queue),
+    ),
+    "queues.consumers[].queue": consumers.map((entry) => String(entry.queue)),
+    "queues.consumers[].dead_letter_queue": consumers.map((entry) =>
+      String(entry.dead_letter_queue),
+    ),
+    "containers[].name": asArray(block.containers).map((entry) => String(entry.name)),
+  };
+}
+
+describe("wrangler env.production parity (PR #63 should-fix)", () => {
+  test("env.production exists and every restatable top-level resource key is restated", () => {
+    expect(Object.keys(production).length, `wrangler.jsonc: env.production is missing`).toBeGreaterThan(0);
+
+    const expected = Object.keys(config).filter((key) => NOT_RESTATED[key] !== true);
+    // A restatement with nothing to compare against would pass vacuously.
+    expect(expected.length, "wrangler.jsonc: no restatable top-level keys found").toBeGreaterThan(0);
+
+    const missing = expected.filter((key) => !(key in production));
+    expect(
+      missing,
+      `wrangler.jsonc: env.production does not restate top-level key(s); a named environment ` +
+        `does not inherit resource keys, so staging would drift from production`,
+    ).toEqual([]);
+  });
+
+  test("binding NAMES match between the top level and env.production", () => {
+    for (const [kind, stagingNames] of Object.entries(bindingNames(staging))) {
+      expect(bindingNames(production)[kind], `wrangler.jsonc: binding names differ for ${kind}`).toEqual(
+        stagingNames,
+      );
+    }
+  });
+
+  test("env.production points at distinct resources from the top-level (staging) block", () => {
+    for (const [kind, stagingValues] of Object.entries(resourceIdentities(staging))) {
+      const stagingSet = new Set(stagingValues);
+      const shared = (resourceIdentities(production)[kind] ?? []).filter((value) =>
+        stagingSet.has(value),
+      );
+      expect(
+        shared,
+        `wrangler.jsonc: env.production shares ${kind} with the staging block (a copy-paste ` +
+          `left a staging resource behind)`,
+      ).toEqual([]);
+    }
+  });
+});
