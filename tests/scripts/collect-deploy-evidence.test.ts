@@ -745,6 +745,89 @@ describe("collectDeployEvidence — dispatch boundary (--since-run)", () => {
     expect(result.section).not.toContain("- Actions run:");
     expect(polls).toHaveLength(1);
   });
+
+  // Codex P2, the rollback alias: this tag's FIRST deploy on a commit already
+  // deployed under ANOTHER tag. The boundary is taken over the whole page, so
+  // the foreign completed run is pre-boundary — the collector may never cite
+  // its artifact as this release's evidence.
+  const FOREIGN_DONE: GhRun = { ...SUCCESS, databaseId: 72, headBranch: "v1.2.4" };
+  const FRESH_SAME_TAG: GhRun = { ...SUCCESS, databaseId: 80, headBranch: TAG };
+
+  test("rollback alias: a completed run for another tag is never cited — the dispatched run is awaited and wins", () => {
+    const root = makeTempRoot();
+    try {
+      // poll 1: only the foreign completed run is visible (this release's
+      // dispatch has not registered); poll 2+: it leads the newest-first list.
+      const { runner, polls, downloads } = makeRunner(
+        (poll) => (poll === 1 ? [FOREIGN_DONE] : [FRESH_SAME_TAG, FOREIGN_DONE]),
+        (_id, destDir) => writeArtifact(destDir),
+      );
+      const clock = fakeClock();
+      const result = collectDeployEvidence(
+        baseOpts({
+          runner,
+          ref: TAG,
+          sinceRun: FOREIGN_DONE.databaseId,
+          now: clock.now,
+          sleep: clock.sleep,
+          artifactDir: root,
+          env: { ...GH_ENV },
+        }),
+      );
+      expect(result.kind).toBe("success");
+      expect(result.section).toContain(`- Actions run: ${RUN_URL.replace("123456", "80")}`);
+      expect(result.section).not.toContain("- Actions run: 72");
+      // the foreign run is not even a fallback candidate: no identity notice
+      expect(result.section).not.toContain("Run identity:");
+      expect(downloads).toEqual([{ runId: 80, destDir: root }]);
+      // a completed foreign run at poll 1 did NOT conclude the wait
+      expect(polls).toHaveLength(2);
+    } finally {
+      disposeTempRoot(root);
+    }
+  });
+
+  test("rollback alias, foreign run only for the whole window: truthful boundary timeout, artifact never read", () => {
+    const { runner, polls, downloads } = makeRunner(() => [FOREIGN_DONE]);
+    const clock = fakeClock();
+    const result = collectDeployEvidence(
+      baseOpts({
+        runner,
+        ref: TAG,
+        sinceRun: FOREIGN_DONE.databaseId,
+        now: clock.now,
+        sleep: clock.sleep,
+        env: { ...GH_ENV },
+      }),
+    );
+    expect(result.kind).toBe("no-run");
+    expect(result.section).toContain(`- Status: no new deploy run for commit \`${SHA}\``);
+    expect(result.section).toContain("dispatch boundary 72");
+    expect(result.section).not.toContain("- Actions run:");
+    expect(downloads).toEqual([]);
+    expect(polls).toHaveLength(4);
+  });
+
+  test("rollback alias without a boundary (reuse path): the foreign run is cited only with the identity disclosure", () => {
+    // The boundless path is unchanged: a foreign-ref run cannot be excluded
+    // when nothing was dispatched, so the section must SAY the cited run is not
+    // this release's deploy rather than present it as this release's evidence.
+    const root = makeTempRoot();
+    try {
+      const { runner, downloads } = makeRunner(() => [FOREIGN_DONE], (_id, d) => writeArtifact(d));
+      const result = collectDeployEvidence(
+        baseOpts({ runner, ref: TAG, artifactDir: root, env: {} }),
+      );
+      expect(result.kind).toBe("success");
+      expect(result.section).toContain("- Actions run: 72");
+      expect(result.section).toContain(
+        `- Run identity: no run on ref \`${TAG}\` for commit \`${SHA}\` — the newest run for the commit is reported instead, which is not that ref's deploy`,
+      );
+      expect(downloads).toEqual([{ runId: 72, destDir: root }]);
+    } finally {
+      disposeTempRoot(root);
+    }
+  });
 });
 
 describe("collectDeployEvidence — sanitization + shape gates (QC round A1)", () => {

@@ -37,16 +37,20 @@
  * Evidence must never degrade to "no run" because of the preference.
  *
  * Dispatch boundary (`--since-run <id>`): when the Release dispatches a fresh
- * production deploy it records the highest run id it observed for the release
- * tag (the pre-dispatch boundary) and passes it here. Run ids increase
- * monotonically, so the run it just queued is NEWER than every run that existed
- * at dispatch time. The collector then considers ONLY runs whose id is greater
- * than the boundary, and keeps polling while none is visible — excluding the
- * single newest run is not enough: a superseding dispatch on a tag whose older
- * run succeeded would leave that older success selectable and its artifact
- * would be recorded as this release's evidence. With no boundary (the reuse
- * path, a first release) selection is unchanged. On expiry with nothing past
- * the boundary the section says so truthfully and cites no run.
+ * production deploy it records the highest run id it saw for the commit —
+ * ANY ref (the pre-dispatch boundary) — and passes it here. Every ref matters:
+ * deploy-prod.yml runs for several tags can share one merge commit (a
+ * rollback alias re-deploys a commit another tag already deployed), and only
+ * a run this dispatch queued may be cited. Run ids increase monotonically, so
+ * the run it just queued is NEWER than every run that existed at dispatch
+ * time. The collector then considers ONLY runs whose id is greater than the
+ * boundary, and keeps polling while none is visible — excluding the single
+ * newest run is not enough: a superseding dispatch whose older run succeeded
+ * would leave that older success selectable and its artifact would be
+ * recorded as this release's evidence. With no boundary (the reuse path, a
+ * first release with no run for the commit) selection is unchanged. On expiry
+ * with nothing past the boundary the section says so truthfully and cites no
+ * run.
  *
  * Exit code: 0 for EVERY runtime outcome above, including collection errors
  * (`gh` missing, artifact download failure) which degrade to a section noting
@@ -110,8 +114,10 @@ export type CollectOptions = {
   /**
    * Dispatch boundary: run ids are monotonically increasing, so only runs with
    * a greater id can belong to a deploy dispatched after this boundary was
-   * captured. While none is visible the wait keeps polling. Unset (the reuse
-   * path) leaves selection unchanged.
+   * captured. The boundary spans every ref of the commit — a run for another
+   * tag on the same commit predates this dispatch too and must not be cited.
+   * While none is visible the wait keeps polling. Unset (the reuse path) leaves
+   * selection unchanged.
    */
   sinceRun?: number;
   /** Total bounded-wait budget. Default via CLI: 15 min. */
@@ -272,7 +278,9 @@ export function runLink(runId: number, env: Record<string, string | undefined>):
  * `sinceRun` (the pre-dispatch boundary) filters BOTH selections: a run that
  * already existed when this release dispatched its deploy is not this
  * release's evidence, however successful — a superseding dispatch on a tag
- * whose older run succeeded must not backfill that older success. Returning
+ * whose older run succeeded must not backfill that older success, and a
+ * foreign tag's completed run for the same commit (the rollback alias) must
+ * not be cited either. Returning
  * `undefined` while only pre-boundary runs are visible is what makes the wait
  * keep polling for the just-dispatched run.
  */

@@ -147,10 +147,11 @@ jobs:
       # one that succeeded; ANY other terminal outcome (failure, cancelled,
       # timed_out, startup_failure, action_required, stale, neutral, skipped)
       # dispatches a fresh run, so a rerun after a failed deploy retries — and
-      # the highest run id it observed for THIS TAG before dispatching is
+      # the highest run id it observed on the WHOLE page (any ref) before
+      # dispatching is
       # handed to the evidence step (the `since_run` output, run ids increase
       # monotonically) so the collector resolves the run this dispatch queued
-      # rather than an older success. This
+      # rather than an older success or a foreign tag's completed run. This
       # step runs
       # AFTER the Release (a dispatch failure leaves tag + Release in place and
       # converges on re-run) and BEFORE the evidence step, whose bounded wait
@@ -194,15 +195,20 @@ jobs:
           REUSE_CONCLUSION=""
           read -r REUSE_ID REUSE_STATUS REUSE_CONCLUSION <<<"$LOOKUP"
 
-          # Evidence boundary: the highest run id observed for THIS TAG before the
-          # dispatch below. Run ids increase monotonically, so the run `gh
-          # workflow run` is about to queue is newer than it, while nothing
-          # already visible on this tag may be backfilled as this release's
-          # evidence — an OLDER success on this tag is exactly what a single-id
-          # exclusion let slip through. Empty when the tag has no run at all; the
-          # evidence step then passes no boundary.
+          # Evidence boundary — deliberately WIDER than the reuse lookup above:
+          # the highest run id in the whole page, ANY ref. Run ids increase
+          # monotonically, so the run `gh workflow run` is about to queue is
+          # newer than it, while nothing already visible for the COMMIT may be
+          # backfilled as this release's evidence — an OLDER success on this
+          # tag is what a single-id exclusion let slip through, and a completed
+          # run for ANOTHER tag on the same commit (the rollback alias: this
+          # tag's first deploy, the commit already deployed under another tag)
+          # would otherwise be cited as this release's deploy. The two scopes
+          # differ on purpose: only a same-tag run may ever be REUSED, but any
+          # pre-dispatch run must be excluded. Empty when the commit has no run
+          # at all; the evidence step then passes no boundary.
           BOUNDARY="$(printf '%s' "$RUNS_JSON" \
-            | jq -r --arg tag "$TAG" 'map(select(.headBranch == $tag) | .databaseId) | max // empty')"
+            | jq -r 'map(.databaseId) | max // empty')"
 
           # Reuse ONLY an in-flight run (status != completed, which includes the
           # approval-waiting `waiting` state) or one that actually succeeded.
@@ -252,10 +258,11 @@ jobs:
           VERSION: ${{ steps.ver.outputs.version }}
           MERGE_SHA: ${{ github.event.pull_request.merge_commit_sha }}
           NOTES_FILE: ${{ steps.changelog.outputs.notes_file }}
-          # The highest run id the dispatch step observed for THIS TAG before it
-          # dispatched (empty when it reused a run, dispatched nothing, or the
-          # tag had no run): every id at or below it predates this release's
-          # deploy, so the collector must not backfill one of them as evidence.
+          # The highest run id the dispatch step observed for the COMMIT, any
+          # ref, before it dispatched (empty when it reused a run, dispatched
+          # nothing, or the commit had no run): every id at or below it predates
+          # this release's deploy, so the collector must not backfill one of
+          # them as evidence — including a foreign tag's completed run.
           SINCE_RUN: ${{ steps.dispatch.outputs.since_run }}
           # The section must cite the PRODUCTION deploy (release-triggered);
           # staging deploys on the same main push, so deploy.yml would be ambiguous here.

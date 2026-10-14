@@ -27,9 +27,11 @@
  *   run for another tag on the same commit is never reused and cannot mask a
  *   reusable same-tag run; reuse only for an in-flight or successful run, any
  *   other terminal outcome dispatching fresh, and the pre-dispatch boundary id
- *   leaving the step as the `since_run` output — with the step body executed
- *   against a stubbed `gh` for the full case table (plus a mutation dropping the
- *   identity filter);
+ *   leaving the step as the `since_run` output — that boundary is taken over
+ *   the WHOLE page (any ref, the collector's exclusion scope), so a completed
+ *   run under another tag for the same commit is excluded too — with the step
+ *   body executed against a stubbed `gh` for the full case table (plus
+ *   mutations dropping the reuse identity filter and narrowing the boundary);
  * - deploy-evidence append step: exactly one `gh release edit`
  *   workflow-wide (count across ALL step runs, not mere containment), its own
  *   step-level timeout budget bounded below the job cap, edit failure loud at
@@ -244,10 +246,15 @@ describe("release.yml guards", () => {
     // finding 2: the pre-dispatch boundary id leaves the step as an output (the
     // evidence step forwards it to the collector as --since-run)
     expect(dispatch.run).toContain('echo "since_run=${BOUNDARY}" >> "$GITHUB_OUTPUT"');
-    // the boundary is the HIGHEST same-tag id — not the reuse id alone, which
-    // would leave an older success on this tag selectable
-    expect(dispatch.run).toContain("map(select(.headBranch == $tag) | .databaseId) | max // empty");
+    // the boundary is the HIGHEST id on the WHOLE page, any ref (Codex P2):
+    // same-tag only would leave an older success on this tag — and a foreign
+    // tag's completed run for the same commit, the rollback alias — selectable
+    expect(dispatch.run).toContain("map(.databaseId) | max // empty");
     expect(dispatch.run).toContain('BOUNDARY="$(printf');
+    // the reuse lookup keeps its OWN, narrower scope (headBranch == $tag)
+    expect(dispatch.run).toContain(
+      "first(.[] | select(.headBranch == $tag)) // empty |",
+    );
   });
 
   /**
@@ -325,9 +332,10 @@ exit 7
     // gh reports newest-first and `headBranch` is the run's OWN ref: only a run
     // on v9.9.9 is this release's deploy. `reuse` cases must leave the dispatch
     // log empty; every other outcome dispatches a fresh run and exports the
-    // highest run id visible on the WHOLE page as `since_run` (empty when the
-    // commit has no run at all). That boundary — not the same-tag reuse id — is
-    // what stops an older success on this tag from being backfilled.
+    // highest run id visible on the WHOLE page (ANY ref) as `since_run` (empty
+    // only when the commit has no run at all). That boundary — not the same-tag
+    // reuse id — is what stops an older success on this tag, or a foreign tag's
+    // completed run, from being cited as this release's evidence.
     const REUSE = true;
     const DISPATCH = false;
     const cases: {
@@ -387,14 +395,17 @@ exit 7
         boundary: null,
         reuseId: 71,
       },
-      // another tag's run only: not this release's deploy — dispatch fresh, and
-      // this tag has no run, so no boundary is captured (nothing of this tag can
-      // be backfilled)
+      // ROLLBACK ALIAS (Codex P2): this tag has NO run of its own, while the
+      // commit already carries a COMPLETED run under another tag. Nothing may
+      // be reused (the foreign run is not this release's deploy) and the
+      // boundary must cover that foreign run — 72, not empty — else the
+      // collector could cite its artifact as this release's evidence before
+      // the dispatched run registers.
       {
         runs: '[{"databaseId":72,"status":"completed","conclusion":"success","headBranch":"v9.9.8"}]',
         reuse: DISPATCH,
-        label: "another tag's run only",
-        boundary: null,
+        label: "rollback alias: another tag's completed run only",
+        boundary: 72,
       },
       {
         runs:
@@ -466,6 +477,35 @@ exit 7
       const unfiltered = runDispatchBody(fixture, mutated, foreignOnly);
       expect(unfiltered.out).toContain("reusing existing deploy-prod.yml run 72 for v9.9.9");
       expect(unfiltered.log).toBe("");
+    } finally {
+      rmSync(fixture.dir, { recursive: true, force: true });
+    }
+  });
+
+  test("MUTATION/narrowing the boundary to this tag: the foreign-ref run is left outside it (Codex P2)", () => {
+    // The widened jq is load-bearing. Narrow it back to the same-tag scope the
+    // reviewed state had (the literal tag the fixture releases) and the
+    // rollback-alias page exports an EMPTY boundary, so the collector could fall
+    // back to the completed foreign run before the dispatched one registers.
+    const steps = wf.jobs.release.steps as { run?: string }[];
+    const src = steps.find((s) => s.run?.includes("gh workflow run deploy-prod.yml"))!.run!;
+    const mutated = src.replace(
+      "map(.databaseId) | max // empty",
+      'map(select(.headBranch == "v9.9.9") | .databaseId) | max // empty',
+    );
+    expect(mutated).not.toBe(src);
+
+    const aliasPage =
+      '[{"databaseId":72,"status":"completed","conclusion":"success","headBranch":"v9.9.8"}]';
+    const fixture = makeDispatchFixture();
+    try {
+      const fixed = runDispatchBody(fixture, src, aliasPage);
+      expect(fixed.code).toBe(0);
+      expect(fixed.exported).toBe("since_run=72\n");
+
+      const narrowed = runDispatchBody(fixture, mutated, aliasPage);
+      expect(narrowed.code).toBe(0);
+      expect(narrowed.exported).toBe("since_run=\n"); // the reviewed gap
     } finally {
       rmSync(fixture.dir, { recursive: true, force: true });
     }
