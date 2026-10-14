@@ -85,26 +85,33 @@ therefore release-gated **and** human-approved — it never proceeds unattended.
 **What an admitted run checks before it mutates.** Two guards sit on the
 production path itself, both ahead of its first mutating command:
 
-- **Tag↔version validation.** After resolving the deploy tag and before the D1
-  migration, the run re-runs the repository's release validation
-  (`bun run release:validate -- "$TAG"`, `scripts/validate-release-version.ts`)
-  against the checked-out tree: every version surface (`package.json#version`,
-  `src/version.ts`) must carry exactly the tag's bare version. A hand-cut or
-  re-pointed `v*` tag whose commit does not carry that version — the paths that
-  never pass through the release chain's own validation — fails the run
-  **before** any migration or deploy, so a tag that lies about its contents
-  never half-mutates production. The post-deploy healthz smoke confirms the
-  same identity on the live Worker afterwards.
-- **Step-scoped secrets and SHA-pinned actions.** The `production` secrets
-  (`CLOUDFLARE_API_TOKEN`, `OAUTH_CLIENT_SECRET`, `DASHBOARD_SESSION_SECRET`,
-  `DASHBOARD_ENCRYPTION_KEY`, `ALERT_WEBHOOK_URL`) are declared on the
-  individual steps that consume them — the required-secret preflight, the
-  `wrangler secret bulk` writes and every wrangler-authenticating step — never
-  on the job, so no step that runs third-party action code has a secret in its
-  environment. The workflow's third-party actions (`actions/checkout`,
-  `oven-sh/setup-bun`, `actions/upload-artifact`) are pinned to commit SHAs —
-  the mutable tag kept in a trailing comment — so a re-pointed upstream tag
-  cannot substitute the code that runs beside those secrets.
+- **Tag↔version validation.** The `Validate the tag against the checked-out
+  version surfaces` step runs directly after `Resolve deploy tag` and before
+  `Apply prod D1 migrations (remote)`: it re-runs the repository's own release
+  gate (`bun run release:validate -- "$TAG"`,
+  `scripts/validate-release-version.ts`) against the checked-out tree, so every
+  version surface (`package.json#version`, `src/version.ts`) must carry exactly
+  the tag's bare version. A hand-cut or re-pointed `v*` tag whose commit does
+  not carry that version — the paths that never pass through the release
+  chain's own validation — fails the run **before** any migration or deploy, so
+  a tag that lies about its contents never half-mutates production. The
+  post-deploy healthz smoke confirms the same identity on the live Worker
+  afterwards.
+- **Step-scoped secrets and SHA-pinned actions.** No `production` secret sits
+  on the job: the job-level `env` carries only the two public variables
+  (`CLOUDFLARE_ACCOUNT_ID`, `OAUTH_CLIENT_ID`). Each secret is declared on
+  exactly the steps that consume it — `CLOUDFLARE_API_TOKEN` on the
+  wrangler-authenticating steps (account verification, D1 migrations, the
+  deploy, both `wrangler secret bulk` steps, the post-secret version
+  re-capture), `OAUTH_CLIENT_SECRET` / `DASHBOARD_SESSION_SECRET` /
+  `DASHBOARD_ENCRYPTION_KEY` on the required-secret preflight and the
+  required-secrets write, and `ALERT_WEBHOOK_URL` on its single
+  bind-or-null-delete step — never on the job. No step that runs third-party
+  action code (`actions/checkout`, `oven-sh/setup-bun`,
+  `actions/upload-artifact`) therefore has a secret in its environment, and
+  those three actions are pinned to commit SHAs — the release tag kept in a
+  trailing comment — so a re-pointed upstream tag cannot substitute the code
+  that runs beside those secrets.
 
 **Why the dispatch:** a Release published with the Release workflow's
 `GITHUB_TOKEN` does **not** create a `release: published` run — GitHub
