@@ -274,8 +274,16 @@ proof of identity, not a heuristic**: the
 production workflow takes no `ref` input, checks out the run's own immutable
 SHA and refuses a non-tag ref, so a run dispatched on this tag deployed
 exactly the commit it was dispatched on. When instead no run carries the tag
-ref, the collector falls back to the newest run for the commit and **says so**
-with a `- Run identity: no run on ref \`vX.Y.Z\` for commit \`<sha>\` — the
+ref, the outcome depends on whether a dispatch boundary was set. On a
+dispatched release the boundary (`--since-run <run-id>`, § Section semantics)
+enforces the ref preference **above** it: the collector keeps polling for the
+requested tag's own run and, when none appears, cites **nothing** — never a
+newer foreign-ref run above the boundary (a rollback alias for the same
+commit) and never a pre-boundary run. The newest-for-commit fallback is a
+**boundless-path** disclosure only (the reuse path, or a first release with no
+prior run for the commit): there the collector reports the newest run for the
+commit and **says so** with a
+`- Run identity: no run on ref \`vX.Y.Z\` for commit \`<sha>\` — the
 newest run for the commit is reported instead, which is not that ref's deploy`
 bullet: identity is then unproven, the cited run may not be this release's own
 deploy, and the section should be confirmed per
