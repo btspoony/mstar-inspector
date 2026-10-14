@@ -1797,11 +1797,13 @@ export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | un
       const keyId = await providerKeyId(plainKey);
       const keyEnc = await box.encryptSecret(plainKey, CUSTOM_KEY_TABLE.aad(appId, decl.provider_id, keyId));
       // ONE atomic batch: the declaration and its key commit together or not
-      // at all. Each statement carries the SAME pool-admission predicate, so a
-      // refused key write (a ninth key) refuses the declaration write with it,
-      // and the key statement additionally requires the declaration — a
-      // removal racing this call matches zero rows on BOTH, so neither a
-      // changed declaration nor an orphan credential can survive a refusal.
+      // at all. Each statement carries the SAME pool-admission predicate AND
+      // the endpoint condition (the two forms documented on keyInsertStatement),
+      // so a refused key write (a ninth, or a create whose endpoint another save
+      // won) refuses the declaration write with it, and the key statement
+      // additionally requires the declaration to carry the submitted endpoint —
+      // so neither a rebound declaration nor a mismatched credential can
+      // survive a refusal.
       const admissionBinds = [appId, decl.provider_id, appId, decl.provider_id, keyId];
       const declaration = isNew
         ? db
