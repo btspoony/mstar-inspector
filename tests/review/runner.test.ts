@@ -24,9 +24,17 @@
  * - the optional `modelOverrides` map is shape-guarded and
  *     rides into the runtime input verbatim; absent = the legacy shape.
  * - the optional `customProviders` list (AL-23-1) is
- *     shape-guarded; merged INTO the capability-host base with custom keys
- *     referenced as CUSTOM_<ID>_API_KEY env names (never literals); absent or
- *     empty = the capability base alone (byte-identical zero-custom path).
+ *     shape-guarded; merged INTO the capability-host base. The synthesized
+ *     blocks pin NO scalar `apiKey` (a models.yml apiKey is a tier-2 config
+ *     override that would suppress the stored pool) and authenticate via
+ *     `auth: oauth`; absent or empty = the capability base alone
+ *     (byte-identical zero-custom path).
+ * - the credential pool: the runner writes the `MSTAR_POOL_*` env keys into
+ *     `<agentDir>/agent.db` as `{type:"api_key", source:"login"}` rows before
+ *     the runtime starts, under the MODELS.YML provider id (capability host id
+ *     — resolved through its catalogProviderId — or the custom provider id),
+ *     and fails the run closed when `_COUNT` disagrees with the `_01.._NN`
+ *     values actually present.
  * - the optional recheck channel (spec review-lifecycle
  *     §7.8): the input's `recheck` document is shape-guarded and forwarded
  *     verbatim; the optional `--recheck-out <path>` flag writes the runtime's
@@ -40,6 +48,7 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "no
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
+import { AuthStorage } from "@oh-my-pi/pi-coding-agent";
 import type { MstarReviewV1 } from "@mstar-harness/engine";
 import type { AgentRuntime, AgentRuntimeRunInput, CustomProviderDeclaration, ReviewRunResult } from "../../src/review/runtime";
 import { getSandboxImage } from "../../src/contracts/sandbox-images";
@@ -117,6 +126,9 @@ afterEach(() => {
   cleanupAgentDirs();
   runInputs.length = 0;
   delete process.env.OMP_REVIEW_MODEL;
+  for (const name of Object.keys(process.env)) {
+    if (name.startsWith("MSTAR_POOL_")) delete process.env[name];
+  }
 });
 
 /** A shape-valid recheck INPUT document (the runner guards shape only). */
@@ -373,11 +385,11 @@ describe("runner entry (src/review/runner.ts)", () => {
     expect(input.agentDir).toMatch(/^\/tmp\/omp-agent-/);
     expect(input.worktreePath).toBe("/workspace/clone");
     const yaml = readFileSync(join(input.agentDir as string, "models.yml"), "utf8");
-    // Capability base + custom merge, zero key literals.
+    // Capability base + custom merge, zero apiKey pins, zero key literals.
     expect(yaml).toContain("ark-plan:");
-    expect(yaml).toContain("apiKey: ARK_API_KEY");
+    expect(yaml).not.toMatch(/^\s*apiKey:/m);
     expect(yaml).toContain('"my-provider":');
-    expect(yaml).toContain("apiKey: CUSTOM_MY_PROVIDER_API_KEY");
+    expect(yaml).toContain("auth: oauth");
     expect(yaml).not.toContain(sk("live"));
     rmSync(input.agentDir as string, { recursive: true, force: true });
   });
@@ -513,5 +525,170 @@ describe("runner entry — --recheck-out channel", () => {
     expect(code).toBe(2);
     expect(stdout).toBe("");
     expect(runInputs).toHaveLength(0);
+  });
+});
+
+describe("runner entry — transported credential pool", () => {
+  /** Read the stored pool rows the run wrote into <agentDir>/agent.db. */
+  async function storedPool(agentDir: string, provider: string) {
+    const storage = await AuthStorage.create(join(agentDir, "agent.db"));
+    try {
+      // The SDK's discovery path loads the store on open (reload); the bare
+      // factory caches nothing, so reload here mirrors it.
+      await storage.reload();
+      return storage.listStoredCredentials(provider).map((row) => row.credential);
+    } finally {
+      storage.close();
+    }
+  }
+
+  test("MSTAR_POOL_<CATALOG_ID> keys land as login api_key rows under the capability host id", async () => {
+    // The consumer pools a capability host under its catalogProviderId
+    // (`ark-plan` ↔ `ark`); the session resolves credentials under the
+    // models.yml provider id (`ark-plan`).
+    process.env.MSTAR_POOL_ARK_COUNT = "2";
+    process.env.MSTAR_POOL_ARK_01 = sk("pool-one");
+    process.env.MSTAR_POOL_ARK_02 = sk("pool-two");
+    const inputPath = writeInput({ capabilityHosts: OMP_HOSTS, worktreePath: "/workspace/clone" });
+    const { code, stdout, stderr } = await runCli(["--level", "quick", "--input", inputPath]);
+
+    expect(code).toBe(0);
+    expect(JSON.parse(stdout)).toEqual(ENVELOPE);
+    const input = runInputs[0] as Record<string, unknown>;
+    expect(input.agentDir).toMatch(/^\/tmp\/omp-agent-/);
+    const rows = await storedPool(input.agentDir as string, "ark-plan");
+    expect(rows).toEqual([
+      { type: "api_key", key: sk("pool-one"), source: "login" },
+      { type: "api_key", key: sk("pool-two"), source: "login" },
+    ]);
+    // The log line carries provider + pool_size only — never a key value.
+    const log = JSON.parse(stderr) as { event: string; provider: string; pool_size: number };
+    expect(log).toEqual({ event: "credential_pool", provider: "ark-plan", pool_size: 2 });
+    expect(stderr).not.toContain(sk("pool-one"));
+    expect(stderr).not.toContain(sk("pool-two"));
+    // The pool rows are live via the pinned auth storage, not just persisted.
+    const storage = await AuthStorage.create(join(input.agentDir as string, "agent.db"));
+    try {
+      await storage.reload();
+      expect(await storage.getApiKey("ark-plan")).toBe(sk("pool-one"));
+    } finally {
+      storage.close();
+    }
+  });
+
+  test("custom providers pool under their own id, in env order", async () => {
+    process.env.MSTAR_POOL_MY_PROVIDER_COUNT = "2";
+    process.env.MSTAR_POOL_MY_PROVIDER_01 = sk("custom-one");
+    process.env.MSTAR_POOL_MY_PROVIDER_02 = sk("custom-two");
+    const inputPath = writeInput({
+      capabilityHosts: OMP_HOSTS,
+      worktreePath: "/workspace/clone",
+      customProviders: [
+        {
+          provider_id: "my-provider",
+          base_url: "https://my-provider.example.com/v1",
+          api: "openai-completions",
+          model_ids: ["my-model-1"],
+        },
+      ],
+    });
+    const { code } = await runCli(["--level", "quick", "--input", inputPath]);
+
+    expect(code).toBe(0);
+    const input = runInputs[0] as Record<string, unknown>;
+    expect(await storedPool(input.agentDir as string, "my-provider")).toEqual([
+      { type: "api_key", key: sk("custom-one"), source: "login" },
+      { type: "api_key", key: sk("custom-two"), source: "login" },
+    ]);
+  });
+
+  test("COUNT greater than the values present → fail closed (exit 1, no run, named counts)", async () => {
+    process.env.MSTAR_POOL_ARK_COUNT = "2";
+    process.env.MSTAR_POOL_ARK_01 = sk("only-one");
+    const inputPath = writeInput({ capabilityHosts: OMP_HOSTS, worktreePath: "/workspace/clone" });
+    const { code, stdout, stderr } = await runCli(["--level", "quick", "--input", inputPath]);
+
+    expect(code).toBe(1);
+    expect(stdout).toBe("");
+    expect(runInputs).toHaveLength(0);
+    expect(stderr).toContain("ark-plan");
+    expect(stderr).toContain("MSTAR_POOL_ARK_02");
+    expect(stderr).not.toContain(sk("only-one"));
+  });
+
+  test("COUNT less than the values present → fail closed (never a partial pool)", async () => {
+    process.env.MSTAR_POOL_ARK_COUNT = "1";
+    process.env.MSTAR_POOL_ARK_01 = sk("pool-one");
+    process.env.MSTAR_POOL_ARK_02 = sk("pool-two");
+    const inputPath = writeInput({ capabilityHosts: OMP_HOSTS, worktreePath: "/workspace/clone" });
+    const { code, stdout, stderr } = await runCli(["--level", "quick", "--input", inputPath]);
+
+    expect(code).toBe(1);
+    expect(stdout).toBe("");
+    expect(runInputs).toHaveLength(0);
+    expect(stderr).toContain("MSTAR_POOL_ARK_COUNT=1");
+  });
+
+  test("an empty pooled value → fail closed (exit 1, no run)", async () => {
+    process.env.MSTAR_POOL_ARK_COUNT = "2";
+    process.env.MSTAR_POOL_ARK_01 = sk("pool-one");
+    process.env.MSTAR_POOL_ARK_02 = "";
+    const inputPath = writeInput({ capabilityHosts: OMP_HOSTS, worktreePath: "/workspace/clone" });
+    const { code, stdout, stderr } = await runCli(["--level", "quick", "--input", inputPath]);
+
+    expect(code).toBe(1);
+    expect(stdout).toBe("");
+    expect(runInputs).toHaveLength(0);
+    expect(stderr).toContain("MSTAR_POOL_ARK_02 is empty");
+  });
+
+  test("a non-positive COUNT → fail closed (exit 1, no run)", async () => {
+    process.env.MSTAR_POOL_ARK_COUNT = "0";
+    const inputPath = writeInput({ capabilityHosts: OMP_HOSTS, worktreePath: "/workspace/clone" });
+    const { code, stdout } = await runCli(["--level", "quick", "--input", inputPath]);
+
+    expect(code).toBe(1);
+    expect(stdout).toBe("");
+    expect(runInputs).toHaveLength(0);
+  });
+
+  test("no pool env → no credential rows written (keyless run shape)", async () => {
+    const inputPath = writeInput({ capabilityHosts: OMP_HOSTS, worktreePath: "/workspace/clone" });
+    const { code, stderr } = await runCli(["--level", "quick", "--input", inputPath]);
+
+    expect(code).toBe(0);
+    expect(stderr).toBe("");
+    const input = runInputs[0] as Record<string, unknown>;
+    expect(existsSync(join(input.agentDir as string, "agent.db"))).toBe(false);
+  });
+
+  test("a custom id colliding with a capability host pools only once (base wins, same rule as the synthesis)", async () => {
+    // `ark-plan` is a capability host id; the consumer pools the capability
+    // host under catalog id `ark`. A custom declaration reusing the same id is
+    // skipped by the synthesis, so its pool must not be loaded either — the
+    // provider id would otherwise resolve credentials the file never declares.
+    process.env.MSTAR_POOL_ARK_COUNT = "1";
+    process.env.MSTAR_POOL_ARK_01 = sk("base-key");
+    process.env.MSTAR_POOL_ARK_PLAN_COUNT = "1";
+    process.env.MSTAR_POOL_ARK_PLAN_01 = sk("shadow-key");
+    const inputPath = writeInput({
+      capabilityHosts: OMP_HOSTS,
+      worktreePath: "/workspace/clone",
+      customProviders: [
+        {
+          provider_id: "ark-plan",
+          base_url: "https://evil.example.com/",
+          api: "openai-completions",
+          model_ids: ["m1"],
+        },
+      ],
+    });
+    const { code } = await runCli(["--level", "quick", "--input", inputPath]);
+
+    expect(code).toBe(0);
+    const input = runInputs[0] as Record<string, unknown>;
+    expect(await storedPool(input.agentDir as string, "ark-plan")).toEqual([
+      { type: "api_key", key: sk("base-key"), source: "login" },
+    ]);
   });
 });

@@ -23,10 +23,11 @@
  *                          controlled registry the consumer uses), exec
  *                          the in-image runner (src/review/runner.ts) on its
  *                          current `--level quick --input <file>` CLI with
- *                          ARK_API_KEY via exec env, parse the stdout with
- *                          parseReviewOutput, then destroy. The model key is
- *                          never baked into the image and never echoed in the
- *                          response (only a pass/fail + review shape).
+ *                          the MSTAR_POOL_ARK_COUNT/_01 pool env, parse the
+ *                          stdout with parseReviewOutput, then destroy. The
+ *                          model key is never baked into the image and never
+ *                          echoed in the response (only a pass/fail + review
+ *                          shape).
  */
 
 import { runnerCommand, writeJsonCommand } from "./gitops";
@@ -43,8 +44,14 @@ type SmokeEnv = {
   SANDBOX: SandboxBinding;
   /** Installation token minted by the orchestrator (scripts/sandbox-smoke.ts). */
   GH_TOKEN: string;
-  /** omp model key for the ark-plan provider (runner smoke; injected per exec). */
-  ARK_API_KEY?: string;
+  /**
+   * omp credential pool for the ark-plan provider (runner smoke; injected per
+   * exec). The smoke transports ONE key under MSTAR_POOL_ARK_01 (COUNT=1 set
+   * with it) — the same pool env contract the production consumer builds
+   * (buildRunnerEnv), which the in-image runner turns into stored `login`
+   * credential rows. Never a scalar provider env name.
+   */
+  MSTAR_POOL_ARK_01?: string;
 };
 
 const GH_REPO = "btspoony/todo-bots";
@@ -156,19 +163,20 @@ export default {
 };
 
 /**
- * Runner falsification: real SDK, real model key (ARK_API_KEY via exec env),
- * real PR clone (btspoony/todo-bots#1). The runner inside the image reads the
- * diff file, runs the omp review session, and prints ONLY the ReviewOutput JSON
- * to stdout. We parse that stdout with parseReviewOutput and return the verdict
- * shape — never the key, never the raw model text.
+ * Runner falsification: real SDK, real model key (the MSTAR_POOL_ARK_* pool via
+ * exec env), real PR clone (btspoony/todo-bots#1). The runner inside the image
+ * reads the diff file, writes the pool into the run's credential store, runs
+ * the omp review session, and prints ONLY the ReviewOutput JSON to stdout. We
+ * parse that stdout with parseReviewOutput and return the verdict shape —
+ * never the key, never the raw model text.
  */
 async function runReviewSmoke(env: SmokeEnv): Promise<Response> {
   const sandbox = await getSandbox(env.SANDBOX, `smoke-review-${crypto.randomUUID()}`);
   const startedAt = Date.now();
   let result: Record<string, unknown>;
   try {
-    if (!env.ARK_API_KEY) {
-      throw new Error("ARK_API_KEY env is required for /smoke-review");
+    if (!env.MSTAR_POOL_ARK_01) {
+      throw new Error("the MSTAR_POOL_ARK_01 key env is required for /smoke-review");
     }
 
     // 1. Clone the real PR head + base into the container.
@@ -191,7 +199,7 @@ async function runReviewSmoke(env: SmokeEnv): Promise<Response> {
         latencyMs: Date.now() - startedAt,
       };
     } else {
-      result = await execInImageReview(sandbox, env.ARK_API_KEY, startedAt);
+      result = await execInImageReview(sandbox, env.MSTAR_POOL_ARK_01, startedAt);
     }
   } catch (error) {
     result = {
@@ -224,7 +232,7 @@ async function runReviewSmoke(env: SmokeEnv): Promise<Response> {
  */
 async function execInImageReview(
   sandbox: ReviewSandbox,
-  arkApiKey: string,
+  arkPoolKey: string,
   startedAt: number,
 ): Promise<Record<string, unknown>> {
   // The runner input REQUIRES the capability hosts (the in-image
@@ -274,7 +282,9 @@ async function execInImageReview(
     env: {
       HARNESS_PLUGIN_ROOT: HARNESS_ROOT,
       PI_CODING_AGENT_DIR: OMP_AGENT_DIR,
-      ARK_API_KEY: arkApiKey,
+      // The pool env contract the runner consumes — one key, COUNT=1.
+      MSTAR_POOL_ARK_COUNT: "1",
+      MSTAR_POOL_ARK_01: arkPoolKey,
     },
   });
   const parsed = parseReviewOutput(run.stdout);

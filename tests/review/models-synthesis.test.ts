@@ -15,8 +15,10 @@
  *     equivalence lock: a defaulted (zero-custom) App receives exactly the
  *     provider declarations today's base+custom merge produced, including
  *     `ark-plan`;
- *   - custom provider blocks carry baseUrl + `apiKey: CUSTOM_<ID>_API_KEY`
- *     (env-var-name reference form) + api + auth + the declared model ids;
+ *   - NO provider block pins a scalar `apiKey` (a models.yml apiKey registers
+ *     as a tier-2 config override and would suppress the stored credential
+ *     pool the runtime is supposed to use); poolized blocks authenticate via
+ *     `auth: oauth`, and the keys ride the exec env into `<agentDir>/agent.db`;
  *   - provider KEYS and the api value are double-quoted (yamlQuote — every
  *     user-derived scalar carries the same defensive quoting); capability
  *     hosts are source-controlled and emit bare (like the old baked file);
@@ -51,9 +53,8 @@ import { sk } from "../helpers/fake-secrets";
 const EXPECTED_OMP_BASE = `providers:
   ark-plan:
     baseUrl: https://ark.cn-beijing.volces.com/api/plan
-    apiKey: ARK_API_KEY
     api: anthropic-messages
-    auth: apiKey
+    auth: oauth
     models:
       - id: deepseek-v4-flash
         name: Deepseek v4 flash 0731
@@ -81,8 +82,9 @@ describe("capabilityHostsYaml (the registry-generated base)", () => {
     expect(BASE_YAML).toBe(EXPECTED_OMP_BASE);
   });
 
-  test("zero key literals: the base carries env-var-NAME references only", () => {
-    expect(BASE_YAML).toContain("apiKey: ARK_API_KEY");
+  test("the base pins NO scalar apiKey — poolized blocks authenticate via the stored pool", () => {
+    expect(BASE_YAML).not.toMatch(/^\s*apiKey:/m);
+    expect(BASE_YAML).toContain("    auth: oauth");
     expect(BASE_YAML).not.toContain(FIXTURE_KEY);
     expect(BASE_YAML).not.toContain("sk-");
   });
@@ -111,7 +113,8 @@ describe("capabilityHostsYaml (the registry-generated base)", () => {
     ];
     const yaml = capabilityHostsYaml(hosts);
     expect(yaml).toContain("  future-host:");
-    expect(yaml).toContain("apiKey: FUTURE_API_KEY");
+    expect(yaml).not.toMatch(/^\s*apiKey:/m);
+    expect(yaml.match(/^    auth: oauth$/gm)).toHaveLength(2);
     expect(yaml).toContain("input: [text, image]");
     expect(yaml).toContain("reasoning: false");
     expect(yaml.indexOf("ark-plan:")).toBeLessThan(yaml.indexOf("future-host:"));
@@ -125,19 +128,17 @@ describe("synthesizeModelsYaml (AL-23-1 merged-complete file)", () => {
     // Base preserved verbatim (the merge must be complete, not destructive).
     expect(yaml).toContain("ark-plan:");
     expect(yaml).toContain("baseUrl: https://ark.cn-beijing.volces.com/api/plan");
-    expect(yaml).toContain("apiKey: ARK_API_KEY");
     expect(yaml).toContain("api: anthropic-messages");
-    expect(yaml).toContain("auth: apiKey");
     expect(yaml).toContain("id: deepseek-v4-flash");
-    // Custom provider block: quoted id key, baseUrl, env-var-name reference,
-    // api, auth, declared model ids.
+    // Custom provider block: quoted id key, baseUrl, api, auth, declared model ids.
     expect(yaml).toContain('"my-provider":');
     expect(yaml).toContain(`baseUrl: "${CUSTOM.base_url}"`);
-    expect(yaml).toContain("apiKey: CUSTOM_MY_PROVIDER_API_KEY");
     expect(yaml).toContain('api: "openai-completions"');
-    expect(yaml).toContain("auth: apiKey");
     expect(yaml).toContain(`- id: "my-model-1"`);
     expect(yaml).toContain(`- id: "my-model-2"`);
+    // NO block pins a scalar apiKey; every poolized block authenticates oauth.
+    expect(yaml).not.toMatch(/^\s*apiKey:/m);
+    expect(yaml.match(/^    auth: oauth$/gm)).toHaveLength(2);
   });
 
   test("ZERO custom declarations → the base text unchanged (byte-identical zero-custom path)", () => {
@@ -150,7 +151,7 @@ describe("synthesizeModelsYaml (AL-23-1 merged-complete file)", () => {
     expect(yaml).not.toContain(sk("live"));
   });
 
-  test("multiple custom providers merge in declaration order, each with its own env reference", () => {
+  test("multiple custom providers merge in declaration order", () => {
     const second: CustomProviderDeclaration = {
       provider_id: "second-one",
       base_url: "https://second.example.com/v1",
@@ -159,9 +160,8 @@ describe("synthesizeModelsYaml (AL-23-1 merged-complete file)", () => {
     };
     const yaml = synthesizeModelsYaml(BASE_YAML, [CUSTOM, second]);
     expect(yaml.indexOf('"my-provider":')).toBeLessThan(yaml.indexOf('"second-one":'));
-    expect(yaml).toContain("apiKey: CUSTOM_MY_PROVIDER_API_KEY");
-    expect(yaml).toContain("apiKey: CUSTOM_SECOND_ONE_API_KEY");
     expect(yaml).toContain('api: "anthropic-messages"'); // the second custom block, quoted form
+    expect(yaml).not.toMatch(/^\s*apiKey:/m);
     expect(yaml).not.toContain(FIXTURE_KEY);
   });
 
@@ -205,7 +205,7 @@ describe("synthesizeModelsYaml (AL-23-1 merged-complete file)", () => {
     // YAML 1.1 — a strict parser then rejects the providers map shape).
     expect(yaml).toContain('  "on":');
     expect(yaml).not.toMatch(/^  on:/m);
-    expect(yaml).toContain("apiKey: CUSTOM_ON_API_KEY");
+    expect(yaml).not.toMatch(/^\s*apiKey:/m);
     expect(yaml).toContain(`- id: "pin-model"`);
   });
 
@@ -264,7 +264,7 @@ describe("writePerReviewModelsYaml (always synthesizes from capability hosts)", 
     // defaulted App produced EXACTLY this provider surface (ark-plan et al).
     expect(written).toBe(EXPECTED_OMP_BASE);
     expect(written).toContain("ark-plan:");
-    expect(written).toContain("apiKey: ARK_API_KEY");
+    expect(written).not.toMatch(/^\s*apiKey:/m);
     expect(existsSync(join(agentDir, "models.yml"))).toBe(true);
     rmSync(agentDir, { recursive: true, force: true });
   });
@@ -274,9 +274,8 @@ describe("writePerReviewModelsYaml (always synthesizes from capability hosts)", 
     const written = readFileSync(join(agentDir, "models.yml"), "utf8");
     // Complete merged file: capability base + custom, zero key material.
     expect(written).toContain("ark-plan:");
-    expect(written).toContain("apiKey: ARK_API_KEY");
     expect(written).toContain('"my-provider":');
-    expect(written).toContain("apiKey: CUSTOM_MY_PROVIDER_API_KEY");
+    expect(written).not.toMatch(/^\s*apiKey:/m);
     expect(written).not.toContain(FIXTURE_KEY);
     rmSync(agentDir, { recursive: true, force: true });
   });

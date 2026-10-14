@@ -20,21 +20,20 @@
  *   3. write /tmp/omp-agent-<uuid>/models.yml and hand the directory to the
  *      runner input as `agentDir` (createAgentSession public option).
  *
- * ZERO secret material: `apiKey:` is always an env-var-name reference —
- * the capability host's `apiKeyEnv` (e.g. ARK_API_KEY) or the
- * CUSTOM_<UPPER_SNAKE(id)>_API_KEY form (consumer injects the decrypted key
- * under that exact name); key literals never enter this module, the
- * synthesized text, or any log line. No environment mutation, no in-image
- * file reads or writes outside the per-review /tmp directory.
+ * ZERO secret material: NO provider block pins a scalar `apiKey` — a
+ * models.yml apiKey registers as a tier-2 config override and would suppress
+ * the stored credential pool the runtime is supposed to rotate across. Every
+ * block authenticates via `auth: oauth`; the keys ride the container exec env
+ * as `MSTAR_POOL_<UPPER_SNAKE(provider)>_COUNT` + `_01.._NN` and the runner
+ * writes them into `<agentDir>/agent.db` before the session starts. Key
+ * literals never enter this module, the synthesized text, or any log line. No
+ * environment mutation, no in-image file reads or writes outside the
+ * per-review /tmp directory.
  */
 
 import { mkdir, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import {
-  customProviderEnvName,
-  type CapabilityHost,
-  type CustomProviderDeclaration,
-} from "./runtime";
+import { type CapabilityHost, type CustomProviderDeclaration } from "./runtime";
 
 /** File name the SDK loads from the agentDir (model-registry single-file). */
 const MODELS_YAML_NAME = "models.yml";
@@ -58,18 +57,18 @@ function yamlQuote(value: string): string {
 
 /**
  * One capability-host block, 2-space-indented under `providers:` — byte-shape
- * identical to the baked in-image models.yml body this generator replaced
- * (equivalence: a defaulted App's synthesized file is
- * runner-consumable-equivalent to the old base+custom merge). Registry values
- * are source-controlled trusted scalars and emit BARE (like the old baked
- * file); only user-derived custom blocks carry the defensive yamlQuote form.
+ * identical to the baked in-image models.yml body this generator replaced,
+ * MINUS the scalar `apiKey` and with `auth: oauth`. A models.yml `apiKey` is
+ * registered as a tier-2 config override and would suppress the stored
+ * credential pool the runtime is supposed to use, so every poolized block
+ * authenticates oauth and the keys ride the exec env into <agentDir>/agent.db
+ * (the runner writes them before the session starts).
  */
 function capabilityHostBlock(host: CapabilityHost): string {
   const lines = [`  ${host.id}:`];
   lines.push(`    baseUrl: ${host.baseUrl}`);
-  lines.push(`    apiKey: ${host.apiKeyEnv}`);
   lines.push(`    api: ${host.api}`);
-  lines.push(`    auth: ${host.auth}`);
+  lines.push("    auth: oauth");
   lines.push("    models:");
   for (const model of host.models) {
     lines.push(`      - id: ${model.id}`);
@@ -101,12 +100,13 @@ function providerBlock(decl: CustomProviderDeclaration): string {
   // providers map (values are already quoted via yamlQuote).
   const lines = [`  ${yamlQuote(decl.provider_id)}:`];
   lines.push(`    baseUrl: ${yamlQuote(decl.base_url)}`);
-  lines.push(`    apiKey: ${customProviderEnvName(decl.provider_id)}`);
   // The api enum value is quoted like every other user-derived scalar (QC
   // wave-1 S-003): the runner input is the in-image trust edge, and a hostile
   // `api` carrying a newline would otherwise break the YAML shape.
   lines.push(`    api: ${yamlQuote(decl.api)}`);
-  lines.push("    auth: apiKey");
+  // Same poolized shape as the capability blocks: no apiKey pin (it would be a
+  // tier-2 config override suppressing the stored pool), auth oauth.
+  lines.push("    auth: oauth");
   lines.push("    models:");
   for (const id of decl.model_ids) {
     lines.push(`      - id: ${yamlQuote(id)}`);

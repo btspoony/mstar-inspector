@@ -12,15 +12,17 @@
  *   3. GET the selected route:
  *        /smoke         → T1: getSandbox → exec gh pr diff → destroy.
  *        /smoke-review  → T2: real PR clone → in-image review runner with
- *                         ARK_API_KEY (exec env only) → parseReviewOutput →
+ *                         the MSTAR_POOL_ARK_* pool env (exec env only,
+ *                         one key → COUNT=1 + _01) → parseReviewOutput →
  *                         destroy.
  *   4. Print the JSON evidence (no secrets) and exit with the verdict.
  *
  * Usage: bun run scripts/sandbox-smoke.ts
  * Env:  SMOKE_APP_ID, SMOKE_PRIVATE_KEY (inline PEM or path),
  *       INSTALLATION_ID (default 156621513), GH_REPO (default btspoony/todo-bots),
- *       GH_PR (default 1), SMOKE_ROUTE (default /smoke), ARK_API_KEY (required
- *       when SMOKE_ROUTE=/smoke-review).
+ *       GH_PR (default 1), SMOKE_ROUTE (default /smoke), ARK_API_KEY (the
+ *       operator's local key; required when SMOKE_ROUTE=/smoke-review and
+ *       forwarded into the container as the pool slot MSTAR_POOL_ARK_01).
  *
  * The token and model key are held only in this process's memory and passed to
  * the Worker via `--var` (wrangler dev local only — never committed, never
@@ -100,7 +102,10 @@ console.log("TOKEN_MINTED=yes");
 const port = 8791;
 const varFlags = [`GH_TOKEN:${token}`];
 if (ARK_API_KEY) {
-  varFlags.push(`ARK_API_KEY:${ARK_API_KEY}`);
+  // The smoke transports the operator's single key through the SAME pool env
+  // contract the production consumer builds (one key → the _01 slot; the
+  // smoke entry pins COUNT=1 alongside it).
+  varFlags.push(`MSTAR_POOL_ARK_01:${ARK_API_KEY}`);
 }
 
 const child = spawn(

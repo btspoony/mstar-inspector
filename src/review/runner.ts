@@ -28,9 +28,10 @@
  *         input shape;
  *       - `customProviders` — an OPTIONAL array of keyless
  *         declarations `{ provider_id, base_url, api, model_ids }`; merged
- *         INTO the capability-host base of the synthesized models.yml with
- *         every custom key as a CUSTOM_<ID>_API_KEY env-name reference (the
- *         consumer injects the decrypted values into the exec env); a
+ *         INTO the capability-host base of the synthesized models.yml (no
+ *         apiKey pin, `auth: oauth`); each provider's key pool rides the exec
+ *         env as MSTAR_POOL_<UPPER_SNAKE(id)>_COUNT + _01.._NN and is written
+ *         into the run's credential store; a
  *         declaration whose id collides with a capability host is skipped
  *         (capability/base wins, AL-23-1) with a structured stderr warn
  *         (id + count, no keys); absent/empty = the capability base alone.
@@ -52,9 +53,16 @@
  *                                                   the session reads is the synthesized
  *                                                   per-review file under `agentDir`)
  *   - OMP_REVIEW_MODEL                             (comma-separated selector chain)
- *   - ARK_API_KEY                                  (injected per exec by the consumer)
+ *   - MSTAR_POOL_<UPPER_SNAKE(provider)>_COUNT + _01.._NN
+ *                                                 (per-provider credential pool;
+ *                                                  the runner writes these into
+ *                                                  <agentDir>/agent.db as stored
+ *                                                  `login` api_key rows before the
+ *                                                  session starts — never logged)
  */
 import { readFileSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+import { AuthStorage } from "@oh-my-pi/pi-coding-agent";
 import {
   isReviewLevel,
   REVIEW_LEVELS,
@@ -225,13 +233,14 @@ function parseRunnerInput(parsed: unknown): RunnerInputJson {
     // (AL-23-1): shape validation ONLY here — the id
     // pattern/baseUrl/api-enum/model bounds live dashboard-side
     // (assertCustomProvider). The declarations carry NO keys: each key rides
-    // the container exec env under CUSTOM_<id>_API_KEY (the synthesized
-    // models.yml references that env name; zero key literals in any file).
+    // the container exec env as MSTAR_POOL_<UPPER_SNAKE(id)>_COUNT + _01.._NN
+    // and the runner loads it into the run's credential store (zero key
+    // literals in any file).
     const list = record.customProviders;
     if (!Array.isArray(list)) {
       throw new Error(
         "input JSON field `customProviders` must be an array of declarations when present " +
-          "(keys ride the exec env under CUSTOM_<id>_API_KEY, never the input)",
+          "(keys ride the exec env under MSTAR_POOL_<UPPER_SNAKE(id)>_*, never the input)",
       );
     }
     input.customProviders = list.map((entry, index) => {
@@ -289,6 +298,99 @@ function parseRunnerInput(parsed: unknown): RunnerInputJson {
 }
 
 /**
+ * The provider pools one run must load, keyed by the models.yml provider id
+ * the session will resolve credentials under: capability-host blocks pool
+ * under their catalog provider id (omp's `ark-plan` ↔ `MSTAR_POOL_ARK_*`),
+ * custom declarations under their own id — exactly the names the consumer's
+ * `buildRunnerEnv` emits. A custom id colliding with a capability host is
+ * skipped here too (capability/base wins, same rule as the synthesis).
+ */
+function poolProviders(json: RunnerInputJson): Array<{ providerId: string; prefix: string }> {
+  const baseIds = new Set(json.capabilityHosts.map((host) => host.id));
+  const providers = json.capabilityHosts.map((host) => ({
+    providerId: host.id,
+    prefix: host.catalogProviderId,
+  }));
+  for (const decl of json.customProviders ?? []) {
+    if (baseIds.has(decl.provider_id)) continue;
+    providers.push({ providerId: decl.provider_id, prefix: decl.provider_id });
+  }
+  return providers.map((entry) => ({ providerId: entry.providerId, prefix: poolPrefix(entry.prefix) }));
+}
+
+/** Upper-snake pool env fragment for a provider id (the consumer's own rule). */
+function poolPrefix(providerId: string): string {
+  return providerId.toUpperCase().replace(/-/g, "_");
+}
+
+/**
+ * Load the transported credential pool into the run's credential store:
+ * `<agentDir>/agent.db` gains one `{type:"api_key", source:"login"}` row per
+ * transported key, in env order. `source: "login"` ranks ABOVE the provider
+ * env var in the SDK's credential cascade, which is what lets the runtime
+ * rotate across the pool — the synthesized models.yml deliberately pins no
+ * `apiKey` (a tier-2 config override would suppress this pool entirely).
+ *
+ * Fail-closed: a `_COUNT` that disagrees with the `_01.._NN` values actually
+ * present, or a listed value that is empty, aborts the run before any session
+ * exists — never a partial pool. Diagnostics carry provider id + counts only;
+ * key VALUES are never logged or thrown.
+ */
+async function loadCredentialPool(
+  agentDir: string,
+  json: RunnerInputJson,
+  env: Record<string, string | undefined>,
+): Promise<void> {
+  const pools: Array<{ providerId: string; keys: string[] }> = [];
+  for (const { providerId, prefix } of poolProviders(json)) {
+    const countRaw = env[`MSTAR_POOL_${prefix}_COUNT`];
+    if (countRaw === undefined) continue; // no pool transported for this provider
+    const count = Number(countRaw);
+    if (!Number.isInteger(count) || count < 1) {
+      throw new Error(
+        `credential pool for provider ${providerId}: MSTAR_POOL_${prefix}_COUNT must be a positive integer, got ${JSON.stringify(countRaw)}`,
+      );
+    }
+    const keys: string[] = [];
+    for (let index = 1; index <= count; index++) {
+      const slot = `MSTAR_POOL_${prefix}_${String(index).padStart(2, "0")}`;
+      const value = env[slot];
+      if (value === undefined || value === "") {
+        throw new Error(
+          `credential pool for provider ${providerId}: MSTAR_POOL_${prefix}_COUNT=${count} but ${slot} is ${value === undefined ? "missing" : "empty"}`,
+        );
+      }
+      keys.push(value);
+    }
+    // COUNT must equal the number of value slots actually present: an extra
+    // slot beyond COUNT (a stray key the pool would silently drop) fails here.
+    const slotRe = new RegExp(`^MSTAR_POOL_${prefix}_\\d{2,}$`);
+    const present = Object.keys(env).filter((name) => slotRe.test(name) && env[name] !== undefined);
+    if (present.length !== count) {
+      throw new Error(
+        `credential pool for provider ${providerId}: MSTAR_POOL_${prefix}_COUNT=${count} but ${present.length} value slot(s) present`,
+      );
+    }
+    pools.push({ providerId, keys });
+  }
+  if (pools.length === 0) return; // no credentials transported (keyless run shape)
+
+  const storage = await AuthStorage.create(join(agentDir, "agent.db"));
+  try {
+    for (const { providerId, keys } of pools) {
+      await storage.set(
+        providerId,
+        keys.map((key) => ({ type: "api_key" as const, key, source: "login" as const })),
+      );
+      // Provider id + pool size only — never a key value.
+      console.error(JSON.stringify({ event: "credential_pool", provider: providerId, pool_size: keys.length }));
+    }
+  } finally {
+    storage.close();
+  }
+}
+
+/**
  * Run the CLI. Returns the process exit code; prints the mstar.review/v1
  * envelope JSON to stdout and diagnostics to stderr. Exported for
  * deterministic tests, which inject a fake `runtime` (mock.module on this
@@ -341,6 +443,18 @@ export async function main(argv: string[], runtime: AgentRuntime = ompAgentRunti
         }),
       );
     }
+    // The transported credential pool lands in THIS run's credential store
+    // (agent.db) before any session exists: the synthesized models.yml pins no
+    // apiKey, so the stored `login` rows are what the runtime rotates across.
+    // Fail-closed — a COUNT/slot disagreement aborts the run here (exit 1),
+    // with its own diagnostic (not the input-read label).
+    try {
+      await loadCredentialPool(agentDir, json, Bun.env);
+    } catch (error) {
+      console.error(`review: credential pool rejected: ${(error as Error).message}`);
+      return 1;
+    }
+
     input = {
       level,
       worktreePath: json.worktreePath ?? process.cwd(),
