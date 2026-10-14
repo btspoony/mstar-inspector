@@ -734,7 +734,10 @@ describe("app-config store (createAppConfigStore) — provider keys", () => {
     const one = sk("first-key-aaaa");
     const two = sk("second-key-bbbb");
     await store.addProviderKey(app.id, "anthropic", one);
-    const before = db.raw.query("SELECT key_enc FROM app_provider_keys").get() as { key_enc: string };
+    const before = db.raw.query("SELECT key_enc, created_at FROM app_provider_keys").get() as {
+      key_enc: string;
+      created_at: string;
+    };
     await store.addProviderKey(app.id, "anthropic", one);
     expect(rawCount(db, "app_provider_keys")).toBe(1);
     const after = db.raw.query("SELECT key_id, key_enc, created_at, updated_at FROM app_provider_keys").get() as {
@@ -745,7 +748,14 @@ describe("app-config store (createAppConfigStore) — provider keys", () => {
     };
     expect(after.key_id).toBe(await keyIdOf(one));
     expect(after.key_enc).not.toBe(before.key_enc); // rewritten: a fresh IV
-    expect(after.updated_at).toBe(after.created_at); // one clock read (0012 semantics)
+    // The shipped re-submission contract (asserted precisely by the backdated
+    // case below): created_at is the key's ENTRY time and stays; updated_at
+    // moves forward from a fresh clock read. Two fast calls may straddle a
+    // wall-clock second, so this is a contract assertion — never the
+    // same-second coincidence of `updated_at === created_at`.
+    expect(after.created_at).toBe(before.created_at);
+    expect(after.updated_at).toMatch(SQLITE_TS_RE);
+    expect(after.updated_at >= after.created_at).toBe(true); // same-format string compare
     // A DIFFERENT key is a new pool slot, never an overwrite of the first.
     await store.addProviderKey(app.id, "anthropic", two);
     expect(rawCount(db, "app_provider_keys")).toBe(2);
