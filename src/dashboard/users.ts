@@ -65,9 +65,9 @@ export type DashboardD1 = {
  * case — matching lowercases both sides instead (GitHub logins are
  * case-insensitive).
  *
- * Twin rule: the `.github/workflows/deploy.yml` ADMIN_LOGINS smoke check
- * and `docs/deploy.md` §6 (ADMIN_LOGINS bootstrap warning) mirror this
- * parse — a rule change here must update both.
+ * Twin rule: the `.github/workflows/deploy.yml` required-input check and the
+ * deployed-Worker assertion, plus `docs/deploy.md` § 6 (ADMIN_LOGINS is
+ * required), mirror this parse — a rule change here must update all three.
  */
 export function parseAdminLogins(value: string | undefined): string[] {
   if (!value) return [];

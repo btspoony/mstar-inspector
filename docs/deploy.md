@@ -185,12 +185,13 @@ was retired with the global fallback — an App missing its chain or a chain
 provider's key fails its reviews closed).
 
 Plain vars — `wrangler.jsonc` `vars` or the dashboard's Worker variable
-settings; redeploy to change:
+settings; redeploy to change (except `ADMIN_LOGINS`, which the Deploy workflow
+sources from a GitHub Actions variable — see below):
 
 | Name | Default | Purpose |
 |---|---|---|
 | `REVIEW_ENABLED` | unset | **emergency brake only**: per-App `github_apps.review_enabled` is the primary review control; only the exact `"false"` (case-sensitive, untrimmed) stops ALL reviews — unset / `""` / `"true"` / `"TRUE"` / other → per-App governs |
-| `ADMIN_LOGINS` | unset | comma-separated GitHub logins bootstrapped as dashboard admin |
+| `ADMIN_LOGINS` | **required** | comma-separated GitHub logins bootstrapped as dashboard admin; sourced from the GitHub Actions **variable** `ADMIN_LOGINS` (`staging` env or repo-level) and injected by the Deploy workflow with `wrangler deploy --var`. Missing/blank/comma-only fails the deploy **before** it ships — see § 6 |
 
 > **REVIEW_ENABLED cutover checklist (上线即生效 — run BEFORE the deploy that
 > flips the semantics; the semantic inversion takes effect the moment the Worker lands):**
@@ -368,17 +369,21 @@ smoke → record the digest.
    `sandbox-read` installation-token mint — restricted to the one GH_REPO
    repository and asserted read-only against the **returned** grant
    (`assertSandboxGrant`), so a broader or unscoped capability fails the smoke
-   closed — plus the optional
-   `INSTALLATION_ID` (default 156621513), `GH_REPO` (default
-   btspoony/todo-bots), `GH_PR` (default 1), `SMOKE_ROUTE` (default `/smoke`),
-   and `ARK_API_KEY` (required when `SMOKE_ROUTE=/smoke-review`):
+   closed — plus the required
+   `INSTALLATION_ID` (the App installation id to mint the token for), `GH_REPO`
+   (the `owner/repo` whose PR is diffed), `GH_PR` (the PR number), and the
+   optional `SMOKE_ROUTE` (default `/smoke`),
+   `ARK_API_KEY` (required when `SMOKE_ROUTE=/smoke-review`):
    ```bash
-   SMOKE_APP_ID=… SMOKE_PRIVATE_KEY=… bun run scripts/sandbox-smoke.ts
-   # /smoke: getSandbox → runCommand(gh pr diff) → destroy
-   SMOKE_APP_ID=… SMOKE_PRIVATE_KEY=… SMOKE_ROUTE=/smoke-review ARK_API_KEY=… \
+   SMOKE_APP_ID=… SMOKE_PRIVATE_KEY=… INSTALLATION_ID=… GH_REPO=owner/repo GH_PR=1 \
      bun run scripts/sandbox-smoke.ts
+   # /smoke: getSandbox → runCommand(gh pr diff) → destroy
+   SMOKE_APP_ID=… SMOKE_PRIVATE_KEY=… INSTALLATION_ID=… GH_REPO=owner/repo GH_PR=1 \
+     SMOKE_ROUTE=/smoke-review ARK_API_KEY=… bun run scripts/sandbox-smoke.ts
    # /smoke-review: full in-image runner (clone + omp review + parse) → destroy
    ```
+   `INSTALLATION_ID` / `GH_REPO` are required inputs with no default — pick any
+   installation/repository your test App is installed on.
 4. `bun run build:spa && wrangler deploy` — build the SPA assets first
    (`dist/spa` is gitignored — a fresh clone has none, and `wrangler.jsonc`
    serves them via `assets`), then deploy the Worker (webhook face + queue
@@ -675,34 +680,45 @@ Worker rollback.
   security-motivated. A registered App's encrypted credentials stay valid
   across a Worker rollback (the key is unchanged).
 
-### 6. ADMIN_LOGINS bootstrap warning (deploy-time)
+### 6. ADMIN_LOGINS is required (deploy-time gate + assertion)
 
-The Deploy workflow's post-deploy smoke emits a **`::warning`** run
-annotation when the deployed Worker has **no usable `ADMIN_LOGINS` value**.
-The step reads the Worker's live settings via the Cloudflare API (NOT
-`wrangler secret list` — `ADMIN_LOGINS` is a plain var, so a secret listing
-never shows it) and treats a missing `ADMIN_LOGINS` binding, or one whose
-value is blank/comma-only, as unset — mirroring `parseAdminLogins`
-(`src/dashboard/users.ts`) and its blank/comma-only rule, modulo whitespace
-trimming, which the smoke check additionally strips.
+`ADMIN_LOGINS` is **required**. It is a GitHub Actions **variable** (login
+names are public identity, so never a secret), configured for the `staging`
+environment or repo-wide (Settings → Environments → `staging` → **Variables**,
+or Settings → Secrets and variables → Actions → Variables). The Deploy
+workflow:
 
-What the warning means: with `ADMIN_LOGINS` unset and an **empty
-`dashboard_users` table**, the first OAuth login becomes admin (the
-first-login fallback, `bootstrapDashboardAccess`). The fallback is
-**self-disarming** — once any user row exists, unknown logins are denied
-(403, zero cookies) until an admin invites them. The warning exists so the
-fallback is never silently armed: at go-live, either set `ADMIN_LOGINS`
-first or knowingly claim the first-login admin identity.
+1. **Fails closed before deploying** when the variable is missing, blank, or
+   comma-only — the `Verify required ADMIN_LOGINS variable` step runs before
+   `wrangler deploy`, so a misconfigured operator never ships a Worker with the
+   first-login-becomes-admin fallback silently armed. The value is split on
+   commas, each entry trimmed, empty entries dropped — exactly the
+   `parseAdminLogins` rule (`src/dashboard/users.ts`).
+2. **Injects it into the Worker** at deploy time via
+   `wrangler deploy --var "ADMIN_LOGINS:$ADMIN_LOGINS"`, so the value no longer
+   depends on the Cloudflare dashboard (a comma-separated multi-login value
+   survives intact: wrangler splits `--var` on the first colon only).
+3. **Asserts it on the deployed Worker** after the deploy: the step reads the
+   Worker's live settings via the Cloudflare API (NOT `wrangler secret list` —
+   `ADMIN_LOGINS` is a plain var, so a secret listing never shows it) and
+   fails the job (`::error::` + non-zero exit) when the binding is absent or
+   blank/comma-only. The curl is bounded (`--max-time 30 --connect-timeout 5`)
+   and a `jq -e '.success == true'` guard ensures a malformed payload is never
+   read as a positive observation. A **transport failure fails the job** —
+   failing to read the settings means the value cannot be confirmed, and a
+   silent pass there would turn a flaky API read into a false green.
 
-It is visibility, not a gate — the deploy succeeds either way, at most one
-warning per deploy. To clear it, set `ADMIN_LOGINS` (plain Worker **var,
-not a secret** — login names are public identity; § Secrets and vars
-inventory) in the dashboard's Worker variable settings or `wrangler.jsonc`
-`vars` and redeploy (`keep_vars` preserves dashboard-managed values across
-automated deploys). Transport/API errors inside the check stay silent, and
-a 200 response whose body fails the success-payload check (malformed JSON
-or `success != true`) degrades to the same silence: the warning fires only
-on a positively observed unset.
+Why it matters: with `ADMIN_LOGINS` blank and an **empty `dashboard_users`
+table**, the first OAuth login becomes admin (the first-login fallback,
+`bootstrapDashboardAccess`). The fallback is **self-disarming** — once any user
+row exists, unknown logins are denied (403, zero cookies) until an admin
+invites them. The deploy-time requirement exists so the fallback is never
+silently armed: ship with `ADMIN_LOGINS` set, or knowingly claim the
+first-login admin identity.
+
+To change the value, update the GitHub Actions variable and re-run the deploy
+(the workflow injects it again); `keep_vars: true` in `wrangler.jsonc` only
+preserves the other dashboard-managed var (`REVIEW_ENABLED`) across deploys.
 
 ## Rollback
 
