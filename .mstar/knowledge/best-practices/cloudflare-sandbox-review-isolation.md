@@ -61,5 +61,5 @@ Sandbox 是 M1 审查隔离的耐久指针；适配层（`src/pipeline/sandbox.t
 
 ## Examples
 
-- 证伪冒烟（`src/pipeline/smoke-entry.ts` T1）：`getSandbox(env.SANDBOX, "smoke-<uuid>")` → `sandbox.runCommand(shellCommand("gh pr diff …"), { env: { GH_TOKEN } })` → 判定成功 = `exitCode === 0 && stdout.trim().length > 0`（只打印前 40 字符，不断言 `diff --git`；git 失败腿同判据）→ `sandbox.destroy()`；`destroyEvidence.ok=true`。非空 `diff --git` 前缀断言属另一条独立 API 检查（`fetchPrDiff`，见 `github-app-headless-verification.md`），不在冒烟里。
+- 证伪冒烟（`src/pipeline/smoke-entry.ts` T1）：`getSandbox(env.SANDBOX, "smoke-<uuid>")` → `sandbox.runCommand(shellCommand("gh pr diff …"), { env: { GH_TOKEN } })` → 判定成功 = `exitCode === 0 && stdout.trim().length > 0`（只打印前 40 字符，不断言 `diff --git`；git 失败腿同判据）→ `sandbox.destroy()`；`destroyEvidence.ok=true`。
 - 失败路径：4 次坏 payload 演练 → 4 个 sandbox 全部 destroy（日志逐条含 idempotency_key + sandbox_id）。
