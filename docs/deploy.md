@@ -370,7 +370,10 @@ smoke → record the digest.
    closed — plus the optional
    `INSTALLATION_ID` (default 156621513), `GH_REPO` (default
    btspoony/todo-bots), `GH_PR` (default 1), `SMOKE_ROUTE` (default `/smoke`),
-   and `ARK_API_KEY` (required when `SMOKE_ROUTE=/smoke-review`):
+   and `ARK_API_KEY` (the operator's own key; required when
+   `SMOKE_ROUTE=/smoke-review`, where the orchestrator forwards it into the
+   container as the `MSTAR_POOL_ARK_01` slot with `MSTAR_POOL_ARK_COUNT=1` —
+   the same pool env the production consumer builds):
    ```bash
    SMOKE_APP_ID=… SMOKE_PRIVATE_KEY=… bun run scripts/sandbox-smoke.ts
    # /smoke: getSandbox → exec gh pr diff → destroy

@@ -4,16 +4,18 @@
  * source-controlled list of runtime images an App can select. Every entry is
  * static build-time data: this module must never import dashboard/pipeline/
  * review code, read D1, or touch secrets (dashboard Q2 isolation + the
- * zero-secrets constraint — capability hosts reference env VAR NAMES, never
- * key values).
+ * zero-secrets constraint — capability hosts carry registry metadata only,
+ * never key values).
  *
  * An entry carries its build definition (Dockerfile + wrangler
  * `containers[].image` paths, relative to repo root) and its CAPABILITY
  * HOSTS — the provider declarations the runtime synthesizer materializes
  * into every per-review models.yml. Hosts are runtime capabilities of the
  * image, NOT App configuration and NOT Providers catalog ids: `omp`'s
- * `ark-plan` host resolves its key through `catalogProviderId: "ark"`
- * (ARK_API_KEY), while the catalog/BYOK id stays `ark`.
+ * `ark-plan` host resolves its keys from the transported pool of its
+ * `catalogProviderId` (`"ark"` → the `MSTAR_POOL_ARK_COUNT` + `_01.._NN` env
+ * the runner writes into the run's `agent.db` as `source:"login"` api_key
+ * rows), while the catalog/BYOK id stays `ark`.
  *
  * `omp` is the only entry for now and the only enabled one — a future
  * runtime ships its own Dockerfile, registry entry, and synthesizer. Enabling
@@ -42,8 +44,11 @@ export type SandboxImageHostModel = {
 
 /**
  * One capability host the image's synthesizer materializes into models.yml.
- * `apiKeyEnv` is the ENV VAR NAME the host's apiKey reference resolves from
- * process environment at request time — never a key value.
+ * `apiKeyEnv` and `auth` are retained registry metadata carried by the locked
+ * host shape — the synthesized block pins no scalar `apiKey` (every block
+ * emits `auth: oauth`) and the host's keys arrive as the transported pool its
+ * `catalogProviderId` names, so neither field selects the active credential.
+ * Never a key value.
  *
  * Bare-YAML anchor (qc1 F-006): these registry-trusted scalars (host/model
  * ids, baseUrl, …) are emitted as BARE YAML scalars to keep the omp base
@@ -53,11 +58,13 @@ export type SandboxImageHostModel = {
 export type SandboxImageHost = {
   /** Host id — the selector prefix (e.g. `ark-plan/deepseek-v4-flash`). */
   id: string;
-  /** Providers/BYOK catalog id whose env name carries this host's key. */
+  /** Providers/BYOK catalog id whose transported pool this host resolves from. */
   catalogProviderId: string;
+  /** Retained registry metadata — no longer an active key-resolution input. */
   apiKeyEnv: string;
   baseUrl: string;
   api: string;
+  /** Retained registry metadata — synthesis emits `auth: oauth` for every block. */
   auth: string;
   models: readonly SandboxImageHostModel[];
 };

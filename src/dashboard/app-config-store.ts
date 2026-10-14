@@ -319,8 +319,8 @@ export function modelCacheProviderKey(provider: string): string {
 /**
  * The provider id allowlist — the builtin tier of the generated provider
  * catalog (19 builtin-tier provider ids incl. `ark`, same order — AL-24-5
- * added `ark` so the in-image ark-plan base provider's
- * ARK_API_KEY rides the per-App BYOK keys map like every other provider).
+ * added `ark` so the in-image ark-plan base provider's key rides the per-App
+ * BYOK key pool like every other provider).
  * Re-exported from the generated contract: the catalog SSOT
  * lives in src/contracts/provider-catalog.generated.ts — a
  * dashboard-importable pure-data module (Q2 forbids dashboard → pipeline
@@ -435,9 +435,11 @@ const LEGACY_KEY_ID = "";
 /** UTF-8 encoder for the SHA-256 key-id derivation (one per module, not per call). */
 const keyIdEncoder = new TextEncoder();
 /**
- * Custom-provider declaration bounds (AL-23-2 verdict): provider id `[a-z0-9][a-z0-9-]{0,63}` (the env-name mapping
- * `CUSTOM_<UPPER_SNAKE>_API_KEY` the consumer injects), baseUrl
- * https-only ≤2048, model_ids 1..32 entries × ≤128 characters (AL-23-1).
+ * Custom-provider declaration bounds (AL-23-2 verdict): provider id
+ * `[a-z0-9][a-z0-9-]{0,63}` (the pool env mapping
+ * `MSTAR_POOL_<UPPER_SNAKE>_COUNT` + `_01.._NN` the consumer injects),
+ * baseUrl https-only ≤2048, model_ids 1..32 entries × ≤128 characters
+ * (AL-23-1).
  * The route answers 400 first; the store re-validates as the backstop for
  * direct callers (the ProviderKeyTooLongError pattern).
  */

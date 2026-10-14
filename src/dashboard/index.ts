@@ -2057,8 +2057,8 @@ dashboardApp.post("/apps/:slug/settings", async (c) => {
     // Declare a NON-built-in model provider for the App. Every
     // AL-23-1/AL-23-2 bound is checked here (400, zero writes —
     // the store re-validates as the backstop): provider id grammar
-    // `[a-z0-9][a-z0-9-]{0,63}` (the env-name mapping the consumer
-    // injects), no collision with a built-in OR in-image base provider id
+    // `[a-z0-9][a-z0-9-]{0,63}` (uppercased into the consumer's pool env
+    // prefix), no collision with a built-in OR in-image base provider id
     // (QC wave-1 W-1 — ark-plan would be silently dead at synthesis), at
     // most MAX_CUSTOM_PROVIDER_COUNT declarations per App (QC wave-1 W-2,
     // growth-only — updating an existing id always proceeds), baseUrl
@@ -2186,10 +2186,11 @@ dashboardApp.post("/apps/:slug/settings", async (c) => {
     // when the effective base URL carries the {account_id} placeholder
     // (Workers-AI-shaped URLs) and is substituted into it. The save flow
     // pins the template's api protocol, prefills model_ids from the
-    // template's representative models, and stores the key under
-    // CUSTOM_<UPPER_SNAKE(id)>_API_KEY via the same upsertCustomProvider
-    // path as add-custom-provider (verify-first custom probe —
-    // every bound below mirrors the add-custom-provider checks).
+    // template's representative models, and stores the key under the
+    // provider's pool env (MSTAR_POOL_<UPPER_SNAKE(id)>_COUNT + `_01.._NN`)
+    // via the same upsertCustomProvider path as add-custom-provider
+    // (verify-first custom probe — every bound below mirrors the
+    // add-custom-provider checks).
     const templateId = typeof form.template_id === "string" ? form.template_id.trim() : "";
     const accountId = typeof form.account_id === "string" ? form.account_id.trim() : "";
     const formBaseUrl = typeof form.base_url === "string" ? form.base_url.trim() : "";
