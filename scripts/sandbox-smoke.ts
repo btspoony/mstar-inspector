@@ -18,7 +18,8 @@
  *
  * Usage: bun run scripts/sandbox-smoke.ts
  * Env:  SMOKE_APP_ID, SMOKE_PRIVATE_KEY (inline PEM or path),
- *       INSTALLATION_ID (default 156621513), GH_REPO (default btspoony/todo-bots),
+ *       INSTALLATION_ID (required — the App installation to mint a token for),
+ *       GH_REPO (required — the owner/repo whose PR is diffed),
  *       GH_PR (default 1), SMOKE_ROUTE (default /smoke), ARK_API_KEY (required
  *       when SMOKE_ROUTE=/smoke-review).
  *
@@ -40,8 +41,18 @@ if (!SMOKE_APP_ID || !SMOKE_PRIVATE_KEY) {
   process.exit(2);
 }
 
-const INSTALLATION_ID = Number(Bun.env.INSTALLATION_ID ?? "156621513");
-const GH_REPO = Bun.env.GH_REPO ?? "btspoony/todo-bots";
+// No personal defaults: the installation id and the target repository are the
+// caller's own fixture, so both must be supplied explicitly.
+const INSTALLATION_ID = Number(Bun.env.INSTALLATION_ID ?? "");
+const GH_REPO = Bun.env.GH_REPO ?? "";
+if (GH_REPO.split("/").length !== 2 || GH_REPO.split("/").some((part) => part.length === 0)) {
+  console.error(`sandbox-smoke: GH_REPO env var is required and must be owner/repo, got ${JSON.stringify(GH_REPO)}`);
+  process.exit(2);
+}
+if (!Number.isInteger(INSTALLATION_ID) || INSTALLATION_ID <= 0) {
+  console.error("sandbox-smoke: INSTALLATION_ID env var is required and must be a positive integer");
+  process.exit(2);
+}
 const GH_PR = Bun.env.GH_PR ?? "1";
 const SMOKE_ROUTE = Bun.env.SMOKE_ROUTE ?? "/smoke";
 const ARK_API_KEY = Bun.env.ARK_API_KEY;
@@ -98,7 +109,7 @@ const token = await mintInstallationToken();
 console.log("TOKEN_MINTED=yes");
 
 const port = 8791;
-const varFlags = [`GH_TOKEN:${token}`];
+const varFlags = [`GH_TOKEN:${token}`, `GH_REPO:${GH_REPO}`, `GH_PR:${GH_PR}`];
 if (ARK_API_KEY) {
   varFlags.push(`ARK_API_KEY:${ARK_API_KEY}`);
 }

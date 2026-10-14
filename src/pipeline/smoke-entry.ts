@@ -14,8 +14,9 @@
  *                          destroy. Path 2 falls back to a git clone + diff
  *                          (token injected via git env config, never in the
  *                          command string). Returns JSON evidence, no secrets.
- *   GET /smoke-review    → clone the real PR head (btspoony/todo-bots#1),
- *                          write the runner --input JSON (reconFacts: PR fact
+ *   GET /smoke-review    → clone the real PR head of the configured smoke
+ *                          repository, write the runner --input JSON
+ *                          (reconFacts: PR fact
  *                          + checked-out head sha + numstat universe — the
  *                          same shape src/pipeline/consumer.ts writes, plus
  *                          the required capabilityHosts: the deployed omp
@@ -43,12 +44,38 @@ type SmokeEnv = {
   SANDBOX: SandboxBinding;
   /** Installation token minted by the orchestrator (scripts/sandbox-smoke.ts). */
   GH_TOKEN: string;
+  /** Smoke target repository `owner/repo` (orchestrator `--var`, no default). */
+  GH_REPO: string;
+  /** Smoke target PR number (orchestrator `--var`, default 1). */
+  GH_PR?: string;
   /** omp model key for the ark-plan provider (runner smoke; injected per exec). */
   ARK_API_KEY?: string;
 };
 
-const GH_REPO = "btspoony/todo-bots";
-const GH_PR = "1";
+// GitHub name charset (owner/repo) — the orchestrator supplies these per run,
+// so validate before minting the shellCommand brand (same allowlist gitops.ts
+// applies to payload-derived fields).
+const GITHUB_NAME_RE = /^[A-Za-z0-9._-]+$/;
+const PR_NUMBER_RE = /^[0-9]+$/;
+
+/** Validated `owner/repo` + PR number for the smoke target, or null when malformed. */
+function smokeTarget(env: SmokeEnv): { repo: string; pr: string } | null {
+  const repo = env.GH_REPO ?? "";
+  const pr = env.GH_PR ?? "1";
+  const [owner, name, ...rest] = repo.split("/");
+  if (
+    rest.length > 0 ||
+    !owner ||
+    !name ||
+    !GITHUB_NAME_RE.test(owner) ||
+    !GITHUB_NAME_RE.test(name) ||
+    !PR_NUMBER_RE.test(pr)
+  ) {
+    return null;
+  }
+  return { repo, pr };
+}
+
 const CLONE_DIR = "/workspace/repo";
 /** Runner --input JSON path (same constant as the production consumer). */
 const INPUT_PATH = "/workspace/review-input.json";
@@ -72,14 +99,21 @@ export default {
       return new Response("not found", { status: 404 });
     }
 
+    const target = smokeTarget(env);
+    if (!target) {
+      return Response.json(
+        { ok: false, error: "GH_REPO must be owner/repo and GH_PR a number (passed via --var by scripts/sandbox-smoke.ts)" },
+        { status: 500 },
+      );
+    }
     const sandbox = await getSandbox(env.SANDBOX, `smoke-${crypto.randomUUID()}`);
     const startedAt = Date.now();
     let result: Record<string, unknown>;
     try {
       // Path 1 (primary hypothesis): gh CLI with GH_TOKEN env injection.
-      // GH_PR/GH_REPO are compile-time constants — audited in-repo values,
-      // cleared for the sink via the shellCommand brand mint.
-      const gh = await sandbox.runCommand(shellCommand(`gh pr diff ${GH_PR} --repo ${GH_REPO}`), {
+      // GH_PR/GH_REPO were allowlist-validated in smokeTarget, and the string
+      // is cleared for the sink via the shellCommand brand mint.
+      const gh = await sandbox.runCommand(shellCommand(`gh pr diff ${target.pr} --repo ${target.repo}`), {
         env: { GH_TOKEN: env.GH_TOKEN },
       });
       if (gh.exitCode === 0 && gh.stdout.trim().length > 0) {
@@ -97,7 +131,7 @@ export default {
         const git = await sandbox.runCommand(
           shellCommand(
             [
-              `git clone --depth 1 --branch mstar-inspector-seed https://github.com/${GH_REPO}.git ${CLONE_DIR}`,
+              `git clone --depth 1 --branch mstar-inspector-seed https://github.com/${target.repo}.git ${CLONE_DIR}`,
               `cd ${CLONE_DIR}`,
               "git fetch --depth 1 origin main",
               "git diff FETCH_HEAD HEAD",
@@ -157,7 +191,7 @@ export default {
 
 /**
  * Runner falsification: real SDK, real model key (ARK_API_KEY via exec env),
- * real PR clone (btspoony/todo-bots#1). The runner inside the image reads the
+ * real PR clone of the configured smoke repository. The runner inside the image reads the
  * diff file, runs the omp review session, and prints ONLY the ReviewOutput JSON
  * to stdout. We parse that stdout with parseReviewOutput and return the verdict
  * shape — never the key, never the raw model text.
@@ -165,10 +199,14 @@ export default {
 async function runReviewSmoke(env: SmokeEnv): Promise<Response> {
   const sandbox = await getSandbox(env.SANDBOX, `smoke-review-${crypto.randomUUID()}`);
   const startedAt = Date.now();
+  const target = smokeTarget(env);
   let result: Record<string, unknown>;
   try {
     if (!env.ARK_API_KEY) {
       throw new Error("ARK_API_KEY env is required for /smoke-review");
+    }
+    if (!target) {
+      throw new Error("GH_REPO must be owner/repo and GH_PR a number (passed via --var by scripts/sandbox-smoke.ts)");
     }
 
     // 1. Clone the real PR head + base into the container.
@@ -176,7 +214,7 @@ async function runReviewSmoke(env: SmokeEnv): Promise<Response> {
       shellCommand(
         [
           `rm -rf ${CLONE_DIR}`,
-          `git clone --depth 1 --branch mstar-inspector-seed https://github.com/${GH_REPO}.git ${CLONE_DIR}`,
+          `git clone --depth 1 --branch mstar-inspector-seed https://github.com/${target.repo}.git ${CLONE_DIR}`,
           `cd ${CLONE_DIR}`,
           "git fetch --depth 1 origin main",
         ].join(" && "),
@@ -191,7 +229,7 @@ async function runReviewSmoke(env: SmokeEnv): Promise<Response> {
         latencyMs: Date.now() - startedAt,
       };
     } else {
-      result = await execInImageReview(sandbox, env.ARK_API_KEY, startedAt);
+      result = await execInImageReview(sandbox, env.ARK_API_KEY, startedAt, target);
     }
   } catch (error) {
     result = {
@@ -226,6 +264,7 @@ async function execInImageReview(
   sandbox: ReviewSandbox,
   arkApiKey: string,
   startedAt: number,
+  target: { repo: string; pr: string },
 ): Promise<Record<string, unknown>> {
   // The runner input REQUIRES the capability hosts (the in-image
   // synthesizer base — there is no baked models.yml to fall back to). The
@@ -254,7 +293,7 @@ async function execInImageReview(
   const inputB64 = Buffer.from(
     JSON.stringify({
       worktreePath: CLONE_DIR,
-      reconFacts: [`${GH_REPO}#${GH_PR}`, `head ${headSha}`, ...numstat],
+      reconFacts: [`${target.repo}#${target.pr}`, `head ${headSha}`, ...numstat],
       capabilityHosts: sandboxImage.hosts,
     }),
     "utf8",
