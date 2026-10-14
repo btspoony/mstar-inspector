@@ -131,6 +131,47 @@ function resourceIdentities(block: Json): Record<string, string[]> {
   };
 }
 
+/**
+ * Fingerprint of one `migrations[]` entry: its `tag` plus whichever class
+ * lists it carries (`new_sqlite_classes` / `deleted_classes`). A staging-only
+ * `v3` tag or class addition changes a fingerprint, so the set-equality below
+ * fails instead of shipping a production Worker that replays a different
+ * migration history.
+ */
+function migrationFingerprints(block: Json): string[] {
+  return asArray(block.migrations).map((entry) =>
+    [
+      `tag=${String(entry.tag)}`,
+      ...["new_sqlite_classes", "deleted_classes"]
+        .filter((key) => key in entry)
+        .map((key) => `${key}=${asArray(entry[key]).map(String).sort().join(",")}`),
+    ].join("|"),
+  );
+}
+
+/**
+ * Fingerprint of one `containers[]` entry: its `class_name` plus the image
+ * keys it declares. The image `dockerfile`/`build_context` VALUES stay owned
+ * by `sandbox-images.test.ts`; only the shape is locked here.
+ */
+function containerFingerprints(block: Json): string[] {
+  return asArray(block.containers).map(
+    (entry) =>
+      `class_name=${String(entry.class_name)}|images=${Object.keys(asObject(entry.images))
+        .sort()
+        .join(",")}`,
+  );
+}
+
+/** Set-equality between the two blocks for one projection (order-irrelevant). */
+function expectSameSet(kind: string, values: (block: Json) => string[]): void {
+  expect(
+    new Set(values(production)),
+    `wrangler.jsonc: ${kind} differs between the top level (staging) and env.production; a ` +
+      `restatement with nothing to compare against would pass vacuously`,
+  ).toEqual(new Set(values(staging)));
+}
+
 describe("wrangler env.production parity (PR #63 should-fix)", () => {
   test("env.production exists and every restatable top-level resource key is restated", () => {
     expect(Object.keys(production).length, `wrangler.jsonc: env.production is missing`).toBeGreaterThan(0);
@@ -167,5 +208,78 @@ describe("wrangler env.production parity (PR #63 should-fix)", () => {
           `left a staging resource behind)`,
       ).toEqual([]);
     }
+  });
+
+  /**
+   * The prod Worker name is a named environment's ONLY non-inherited identity
+   * key wrangler honours, and every resource name derives from it (the
+   * container application name is `<worker>-<class>-<image key>`). `name` sits
+   * in `NOT_RESTATED` because wrangler inherits it — so without this pin a
+   * deleted/mistyped value would silently redeploy the STAGING Worker against
+   * prod D1/KV/queues, orphaning the container application, before the
+   * post-deploy healthz smoke notices.
+   */
+  test("env.production.name is the production Worker, distinct from the staging name", () => {
+    expect(production.name, `wrangler.jsonc: env.production.name must be pinned`).toBe(
+      "mstar-inspector-production",
+    );
+    expect(
+      production.name,
+      `wrangler.jsonc: env.production.name must differ from the top-level staging worker ` +
+        `(re-pointing it would deploy the staging Worker at prod bindings)`,
+    ).not.toBe(staging.name);
+  });
+
+  /** A cron added/removed at the top level would ship silently (the prod smoke
+   * greps only the literal schedule). */
+  test("triggers.crons match between the top level and env.production", () => {
+    expectSameSet("triggers.crons", (block) => asArray(asObject(block.triggers).crons).map(String));
+  });
+
+  /** A staging-only `v3` tag or class addition changes the replayed history;
+   * every restatable block must restate it identically. */
+  test("migrations (tag + class lists) match between the top level and env.production", () => {
+    expectSameSet("migrations", migrationFingerprints);
+  });
+
+  /** A second/unregistered container entry must fail the lock, not hide behind
+   * the first. Image values stay owned by `sandbox-images.test.ts`. */
+  test("containers (class_name + images keys) match between the top level and env.production", () => {
+    expectSameSet("containers[]", containerFingerprints);
+  });
+
+  /** The prod-only resources `wrangler deploy --env production` resolves to.
+   * Pinned here (once) so a copy-paste staging value fails loudly; the smoke
+   * workflow's own literal grep is a different artifact. */
+  test("env.production resolves to the prod-only resources and route", () => {
+    const d1 = asArray(production.d1_databases)[0] ?? {};
+    expect(d1.database_name, `wrangler.jsonc: prod D1 database name`).toBe(
+      "mstar-inspector-prod-db",
+    );
+
+    expect(
+      asArray(asObject(production.queues).producers).map((entry) => String(entry.queue)),
+      `wrangler.jsonc: prod queue names`,
+    ).toEqual(["review-queue-prod"]);
+    expect(
+      asArray(asObject(production.queues).consumers).map((entry) => String(entry.queue)),
+      `wrangler.jsonc: prod consumer queue names`,
+    ).toEqual(["review-queue-prod"]);
+    expect(
+      asArray(asObject(production.queues).consumers).map((entry) =>
+        String(entry.dead_letter_queue),
+      ),
+      `wrangler.jsonc: prod dead-letter queue`,
+    ).toEqual(["review-dlq-prod"]);
+
+    const routes = asArray(production.routes);
+    expect(
+      routes.map((entry) => String(entry.pattern)),
+      `wrangler.jsonc: prod route host`,
+    ).toEqual(["inspector.mstar.page"]);
+    expect(
+      routes.map((entry) => entry.custom_domain),
+      `wrangler.jsonc: prod route must be a Custom Domain`,
+    ).toEqual([true]);
   });
 });

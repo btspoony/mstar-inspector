@@ -168,11 +168,13 @@ permissions), and the staging workflow runs repository code with it on every
 `main` push. An actor who can merge to `main`, or who compromises the
 automation writer, therefore already holds a credential that can replace the
 production Worker or mutate production D1 **directly** — no `v*` tag, no
-production run and no approval involved. Scope the provider credential per
-environment to close that: a **production-only token** (ideally in a separate
-Cloudflare account) with the same scopes, and rotate the shared one once
-production has its own. Until then, read the account token as production
-authority regardless of how the approval gate is configured.
+production run and no approval involved. The **recorded alternative** (owner
+decision of 2026-10-14, step 3) is to scope the provider credential per
+environment — a **production-only token** (ideally in a separate Cloudflare
+account) with the same scopes, rotating the shared one once production has its
+own — but the shared token's residual is **accepted, not applied**: the tag gate
+and the required reviewer protect the deploy path only. Read the account token
+as production authority regardless of how the approval gate is configured.
 
 **Current exposure and the remaining alternative.** Exactly two accounts have
 write access — the owner (`btspoony`, a User account) and one automation
@@ -248,7 +250,7 @@ plan, and both rejected for now in favour of the applied approval gate.
 
    | Name | Kind | Value |
    |---|---|---|
-   | `CLOUDFLARE_API_TOKEN` | secret | CI credential, never injected into the Worker — **recommended:** a production-only token with the same scopes in its own Cloudflare account; today the staging token reused (§ CI credentials — the account-scoped authority it carries is not mediated by the approval gate: § Production approval gate and the tag gate) |
+   | `CLOUDFLARE_API_TOKEN` | secret | CI credential, never injected into the Worker — **the account-level token is reused from staging, and that residual is accepted** (owner decision, 2026-10-14): Cloudflare has no per-script scoping for Workers Scripts, so staging and production cannot be separated inside the one account both Workers live in. Compensating controls in force: the release/tag gate and the required reviewer on the `production` environment. Recorded alternative if the decision is revisited: a production-only token (ideally in a separate Cloudflare account) with the same scopes, then rotate the shared one (§ CI credentials — the account-scoped authority it carries is not mediated by the approval gate: § Production approval gate and the tag gate) |
    | `OAUTH_CLIENT_SECRET` | secret | **copy** the secret of whichever OAuth App production's `OAUTH_CLIENT_ID` names — the shared App by default, or production's own App (step 4) — it is a provider credential, not a generated value |
    | `DASHBOARD_SESSION_SECRET` | secret | **new** random (`openssl rand -base64 32`) |
    | `DASHBOARD_ENCRYPTION_KEY` | secret | **new** random (`openssl rand -base64 32`) — production D1 starts empty (step 1) |
@@ -381,7 +383,12 @@ Production D1 starts empty, and with `ADMIN_LOGINS` unset the first OAuth
 login against that empty `dashboard_users` table self-promotes to admin
 (§ Multi-App go-live, step 6). The value is therefore part of the config:
 changing it means editing `env.production.vars` and redeploying.
-`REVIEW_ENABLED` stays unset — per-App Pause/Resume is the review control.
+`REVIEW_ENABLED` stays unset — per-App Pause/Resume is the review control. The
+same `keep_vars` limitation applies to that emergency brake: a
+`REVIEW_ENABLED=false` set on the production Worker from the dashboard is wiped
+by the next `wrangler deploy --env production`, so it cannot be relied on until
+it is declared in `env.production.vars` and redeployed. Per-App Pause/Resume is
+the primary review control and is unaffected (`.env.example`).
 
 ### Maintenance: `env.production` duplicates the resource keys
 
@@ -390,9 +397,17 @@ repeats every one of them (KV, D1, queues, containers, Durable Objects +
 migrations, cron triggers, assets, observability) with the production values.
 **Every new binding, migration tag, cron or asset change made for staging must
 be repeated inside `env.production` in the same change**, or production
-deploys without it. Only the container `dockerfile` / `build_context` values
-are machine-guarded today (`tests/contracts/sandbox-images.test.ts` scans
-every occurrence in the file); the rest is review discipline.
+deploys without it — `tests/contracts/wrangler-env-parity.test.ts` fails when a
+restatable top-level key is not restated. That lock also pins the
+`env.production` Worker **name** (`mstar-inspector-production`, distinct from
+staging's), the binding **names**, crons and migration tags + class lists (set
+equality with the top level), the container `class_name` and image keys, and the
+prod-only D1 database / queue / route host values it points at, and rejects any
+resource identity the two blocks share. The container image `dockerfile` /
+`build_context` **values** stay guarded by `tests/contracts/sandbox-images.test.ts`.
+What no test can see is value drift **inside** a restated key that stays distinct
+from staging — a prod id or cron string edited by hand — so that residue remains
+review discipline.
 
 ### Rollback (production)
 
@@ -600,15 +615,17 @@ but lacks D1 access fails the migration step with
 `The given account is not valid or is not authorized to access this service
 [code: 7403]` — the account id is correct; the token's permissions are not.
 
-**Scope the token per environment.** These scopes are account-wide and both
+**Token scoping (recorded alternative).** These scopes are account-wide and both
 Workers live in the one account, so the token above — the staging one the
 production run reuses today (§ One-time bring-up step 3) — is full authority
 over **both** instances: it can replace the production Worker or mutate
-production D1 with no tag, no production run and no approval. The recommended
-remedy is a **production-only token** (same scopes, ideally in a separate
-Cloudflare account) set as the `production` environment secret, with the
-shared token rotated once production no longer uses it; the deployment
-approval governs the workflow run, never the credential
+production D1 with no tag, no production run and no approval. The **recorded
+alternative** — not the standing recommendation — is a **production-only token**
+(same scopes, ideally in a separate Cloudflare account) set as the `production`
+environment secret, with the shared token rotated once production no longer uses
+it; the owner **accepted the shared token's residual on 2026-10-14**, and the
+tag gate plus the required reviewer are the compensating controls. The
+deployment approval governs the workflow run, never the credential
 (§ Production approval gate and the tag gate).
 
 Provider API keys and the review model chain are **not** Worker env — they
