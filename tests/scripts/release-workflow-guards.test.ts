@@ -22,8 +22,9 @@
  *   a GITHUB_TOKEN-created Release does not fire `release: published`, so the
  *   explicit dispatch is the only production trigger (T3-2); the lookup for an
  *   existing run for the commit precedes that dispatch and reuses it instead of
- *   queueing a duplicate on a release rerun (P2), with the step body executed
- *   against a stubbed `gh` for the reuse/fresh-dispatch paths;
+ *   queueing a duplicate on a release rerun (P2) — reuse only for an in-flight
+ *   or successful run, any other terminal outcome dispatching fresh — with the
+ *   step body executed against a stubbed `gh` for the full case table;
  * - deploy-evidence append step: exactly one `gh release edit`
  *   workflow-wide (count across ALL step runs, not mere containment), its own
  *   step-level timeout budget bounded below the job cap, edit failure loud at
@@ -223,7 +224,7 @@ describe("release.yml guards", () => {
     expect(lookupIdx).toBeLessThan(dispatch.run!.indexOf("gh workflow run"));
   });
 
-  test("dispatch step body EXECUTES: rerun reuses a completed/in-flight run, dispatches when none or after failure", () => {
+  test("dispatch step body EXECUTES: reuse only an in-flight or successful run, dispatch for every other terminal outcome", () => {
     const steps = wf.jobs.release.steps as { run?: string }[];
     const run = steps.find((s) => s.run?.includes("gh workflow run deploy-prod.yml"))!.run!;
 
@@ -288,40 +289,58 @@ exit 7
         };
       };
 
-      // 1) completed run for the commit → reuse, no dispatch (the rerun path)
-      const completed = runOnce(
-        '[{"databaseId":111,"status":"completed","conclusion":"success"}]',
-      );
-      expect(completed.code).toBe(0);
-      expect(completed.out).toContain("::notice::reusing existing deploy-prod.yml run 111");
-      expect(completed.log).toBe("");
+      // The newest run is the only input the step reads, so each case IS the
+      // gh output for the release commit. `reuse` cases must leave the dispatch
+      // log empty; every other terminal outcome must dispatch a fresh run.
+      const REUSE = true;
+      const DISPATCH = false;
+      const cases: { runs: string; reuse: boolean; label: string }[] = [
+        { runs: "[]", reuse: DISPATCH, label: "no run for the commit" },
+        {
+          runs: '[{"databaseId":1,"status":"completed","conclusion":"success"}]',
+          reuse: REUSE,
+          label: "success",
+        },
+        {
+          runs: '[{"databaseId":2,"status":"waiting","conclusion":null}]',
+          reuse: REUSE,
+          label: "in-flight (waiting for approval)",
+        },
+        {
+          runs: '[{"databaseId":3,"status":"in_progress","conclusion":null}]',
+          reuse: REUSE,
+          label: "in-flight (in_progress)",
+        },
+        ...[
+          "failure",
+          "cancelled",
+          "timed_out",
+          "startup_failure",
+          "action_required",
+          "stale",
+          "neutral",
+          "skipped",
+        ].map((conclusion, i) => ({
+          runs: `[{"databaseId":${10 + i},"status":"completed","conclusion":"${conclusion}"}]`,
+          reuse: DISPATCH,
+          label: `terminal ${conclusion}`,
+        })),
+      ];
 
-      // 2) in-flight run (waiting for the owner's approval) → reuse, no dispatch
-      const inFlight = runOnce(
-        '[{"databaseId":222,"status":"waiting","conclusion":null}]',
-      );
-      expect(inFlight.code).toBe(0);
-      expect(inFlight.out).toContain("::notice::reusing existing deploy-prod.yml run 222");
-      expect(inFlight.log).toBe("");
-
-      // 3) no run for the commit → fresh dispatch
-      const none = runOnce("[]");
-      expect(none.code).toBe(0);
-      expect(none.log).toContain("DISPATCH workflow run deploy-prod.yml --ref v9.9.9");
-
-      // 4) newest run failed → a rerun after a failed deploy must retry
-      const failed = runOnce(
-        '[{"databaseId":333,"status":"completed","conclusion":"failure"}]',
-      );
-      expect(failed.code).toBe(0);
-      expect(failed.log).toContain("DISPATCH workflow run deploy-prod.yml --ref v9.9.9");
-
-      // 5) newest run cancelled → also a retry, not a reuse
-      const cancelled = runOnce(
-        '[{"databaseId":444,"status":"completed","conclusion":"cancelled"}]',
-      );
-      expect(cancelled.code).toBe(0);
-      expect(cancelled.log).toContain("DISPATCH workflow run deploy-prod.yml --ref v9.9.9");
+      for (const c of cases) {
+        const result = runOnce(c.runs);
+        expect(result.code, `${c.label}: exit code`).toBe(0);
+        if (c.reuse) {
+          expect(result.out, `${c.label}: reuse notice`).toContain(
+            "::notice::reusing existing deploy-prod.yml run",
+          );
+          expect(result.log, `${c.label}: no dispatch`).toBe("");
+        } else {
+          expect(result.log, `${c.label}: dispatches`).toContain(
+            "DISPATCH workflow run deploy-prod.yml --ref v9.9.9",
+          );
+        }
+      }
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

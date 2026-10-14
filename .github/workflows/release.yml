@@ -138,10 +138,12 @@ jobs:
       # looks for an existing `deploy-prod.yml` run for the release commit and
       # reuses it (notice, no dispatch) — the collector resolves the production
       # run for the tag, so a duplicate would make the evidence wait on the new
-      # run instead of backfilling the already-completed one. An existing run
-      # that concluded failure/cancelled is NOT reused: a rerun after a failed
-      # deploy retries (conclusion is empty while the run is in flight, i.e.
-      # still waiting for approval, which reuses). This step runs
+      # run instead of backfilling the already-completed one. Reuse applies only
+      # to an in-flight run (waiting for approval, or otherwise not concluded) or
+      # one that succeeded; ANY other terminal outcome (failure, cancelled,
+      # timed_out, startup_failure, action_required, stale, neutral, skipped)
+      # dispatches a fresh run, so a rerun after a failed deploy retries. This
+      # step runs
       # AFTER the Release (a dispatch failure leaves tag + Release in place and
       # converges on re-run) and BEFORE the evidence step, whose bounded wait
       # must be able to see the run. The tag is passed as `--ref`
@@ -177,10 +179,12 @@ jobs:
           REUSE_CONCLUSION=""
           read -r REUSE_ID REUSE_STATUS REUSE_CONCLUSION <<<"$LOOKUP"
 
-          # Reuse covers the in-flight approval-waiting run and the
-          # completed/successful one; a newest run that failed or was cancelled
-          # is retried (dispatch below).
-          if [ -n "$REUSE_ID" ] && [ "$REUSE_CONCLUSION" != "failure" ] && [ "$REUSE_CONCLUSION" != "cancelled" ]; then
+          # Reuse ONLY an in-flight run (status != completed, which includes the
+          # approval-waiting `waiting` state) or one that actually succeeded.
+          # Every other terminal conclusion (failure, cancelled, timed_out,
+          # startup_failure, action_required, stale, neutral, skipped) dispatches
+          # a fresh run — otherwise a rerun could never recover production.
+          if [ -n "$REUSE_ID" ] && { [ "$REUSE_STATUS" != "completed" ] || [ "$REUSE_CONCLUSION" = "success" ]; }; then
             echo "::notice::reusing existing deploy-prod.yml run ${REUSE_ID} for ${TAG} (${SHA}) — status ${REUSE_STATUS}, conclusion ${REUSE_CONCLUSION}; no new deploy queued"
             exit 0
           fi

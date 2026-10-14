@@ -98,12 +98,14 @@ their repo.
    it — and that run then **pauses at job start for the owner's approval** on
    the `production` environment before a single step runs or any secret is
    injected ([production environment](deploy.md#production-environment)).
-   **A rerun of the Release workflow reuses the existing production run for
-   the tag's commit instead of queueing a second deploy** (the dispatch step
-   looks the run up first and emits a `::notice::` naming it), so the evidence
-   collector keeps pointing at the same run across reruns; only when no run
-   exists yet — or the newest one concluded `failure`/`cancelled` — is a fresh
-   run dispatched (a rerun after a failed deploy retries).
+   **A rerun of the Release workflow reuses an in-flight or successful
+   production run for the tag's commit instead of queueing a second deploy**
+   (the dispatch step looks the run up first and emits a `::notice::` naming
+   it), so the evidence collector keeps pointing at the same run across reruns;
+   **any other terminal outcome** (a run that concluded `failure`, `cancelled`,
+   `timed_out`, `startup_failure`, `action_required`, `stale`, `neutral` or
+   `skipped`) — or no run at all — **dispatches a fresh production run**, so a
+   rerun after a failed deploy retries.
    Once approved it re-verifies the tag, applies the prod D1 migrations,
    deploys the prod Worker, writes the `production` secrets and asserts
    `https://inspector.mstar.page/healthz` returns `v<tag>`. **Nothing reaches
@@ -172,14 +174,15 @@ de-scope it into a "known issue".**
 
 - **Rerunning the Release workflow** (the recovery step named by most bullets
   below) — the dispatch step looks up the existing `deploy-prod.yml` run for the
-  tag's commit **before** dispatching and **reuses** it (a `::notice::` names
-  the run), so a rerun queues **no second approval-gated deploy** and the
-  evidence collector keeps resolving the same run instead of waiting on a new
-  one. A fresh run is dispatched only when **no** run exists for the commit yet
-  (e.g. the original dispatch failed) or the newest run concluded
-  `failure`/`cancelled` — so a rerun after a *failed* production deploy still
-  retries. The tag, the Release, and the notes-file rebuild are idempotent
-  regardless.
+  tag's commit **before** dispatching and **reuses an in-flight or successful
+  run** (a `::notice::` names the run), so a rerun queues **no second
+  approval-gated deploy** and the evidence collector keeps resolving the same
+  run instead of waiting on a new one. **Any other terminal outcome
+  dispatches a fresh production run** — `failure`, `cancelled`, `timed_out`,
+  `startup_failure`, `action_required`, `stale`, `neutral`, `skipped` — as does
+  **no run at all** (e.g. the original dispatch failed). A rerun after a
+  *failed* production deploy therefore still retries. The tag, the Release, and
+  the notes-file rebuild are idempotent regardless.
 - **Requested version already released** — Release prep fails early with
   `Tag vX.Y.Z already exists`. Pick a different version; re-releasing an
   existing version is a bug, not an operation.
