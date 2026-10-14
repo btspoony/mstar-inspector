@@ -156,8 +156,10 @@ export class SandboxV1 extends DurableObject {
   ): Promise<{ stdout: string; stderr: string; exitCode: number }> {
     await this.ensureRunning();
     // Clamp before converting: a zero/negative value must never reach the argv
-    // as a zero or negative duration (GNU `timeout 0` DISABLES the bound).
-    const timeoutMs = Math.max(1, opts?.timeout ?? DEFAULT_EXEC_TIMEOUT_MS);
+    // as a zero or negative duration (GNU `timeout 0` DISABLES the bound), and a
+    // non-finite override (NaN/Infinity) is not a duration at all — default.
+    const requestedMs = opts?.timeout ?? DEFAULT_EXEC_TIMEOUT_MS;
+    const timeoutMs = Number.isFinite(requestedMs) ? Math.max(1, requestedMs) : DEFAULT_EXEC_TIMEOUT_MS;
     const timeoutSeconds = timeoutMs / 1000;
     const process = await this.container.exec(
       ["timeout", "--kill-after=5", String(timeoutSeconds), "/bin/sh", "-lc", command],
