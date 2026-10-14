@@ -1312,7 +1312,12 @@ describe("multi-key provider pools (routes)", () => {
   test("the delete route answers a machine-readable outcome: a removal vs the tolerant no-op", async () => {
     const { db, app } = await seededWorld();
     const store = createAppConfigStore(db, TEST_KEY);
-    await store.addProviderKey(app.id, "anthropic", PLAIN_KEY);
+    // A VERIFIED key, so the provider carries a model-cache row: the no-op
+    // branch's promise ("nothing changed") must cover the cache too.
+    await store.saveVerifiedKey(app.id, "anthropic", PLAIN_KEY, ["claude-sonnet-4-6"]);
+    const cacheRows = () =>
+      (db.raw.query("SELECT COUNT(*) AS n FROM app_provider_models WHERE app_id = ?").get(app.id) as { n: number }).n;
+    expect(cacheRows()).toBe(1);
     const env = makeEnv(db);
     const unmatched = await postForm(SETTINGS + "/key/delete", "mallory", env, {
       provider: "anthropic",
@@ -1321,9 +1326,12 @@ describe("multi-key provider pools (routes)", () => {
     expect(unmatched.status).toBe(200);
     const unmatchedBody = (await unmatched.json()) as { changed: boolean; message: string };
     // `changed: false` is the SPA's no-change face: a stale dialog must not
-    // render "Changes saved." for a row that was already gone.
+    // render "Changes saved." for a row that was already gone — and the claim
+    // is literal, so the surviving key keeps its cached models.
     expect(unmatchedBody.changed).toBe(false);
     expect(unmatchedBody.message).toContain("nothing changed");
+    expect(cacheRows()).toBe(1);
+    expect(await store.listProviderKeys(app.id, "anthropic")).toHaveLength(1);
     const matched = await postForm(SETTINGS + "/key/delete", "mallory", env, {
       provider: "anthropic",
       key_id: await keyIdOf(PLAIN_KEY),
@@ -1332,6 +1340,8 @@ describe("multi-key provider pools (routes)", () => {
     const matchedBody = (await matched.json()) as { changed: boolean; message: string };
     expect(matchedBody.changed).toBe(true);
     expect(matchedBody.message).toContain("Removed the stored anthropic key for mallorys-app");
+    // A real removal does clear the cache (its model list is unattributable).
+    expect(cacheRows()).toBe(0);
   });
 
   test("the ninth key is a clear 400 on the custom entry points — declaration and pool unchanged", async () => {
