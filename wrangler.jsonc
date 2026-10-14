@@ -9,7 +9,8 @@
   // Bugbot #14: keep dashboard-managed plaintext vars (REVIEW_ENABLED)
   // across automated `wrangler deploy` — without keep_vars, deploy wipes them.
   // (ADMIN_LOGINS is no longer dashboard-managed: the Deploy workflow requires
-  // the GitHub Actions variable and injects it with `wrangler deploy --var`.)
+  // the GitHub Actions variable and injects it with `wrangler deploy --var`;
+  // the documented manual deploys pass the same `--var`.)
   "keep_vars": true,
   "kv_namespaces": [
     {
