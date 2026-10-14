@@ -11,15 +11,17 @@
  *      and the sandbox containers binding (wrangler.smoke.jsonc).
  *   3. GET the selected route:
  *        /smoke         → T1: getSandbox → exec gh pr diff → destroy.
- *        /smoke-review  → T2: real PR clone → in-image review runner with
+ *        /smoke-review  → T2: seed-branch clone → in-image review runner with
  *                         ARK_API_KEY (exec env only) → parseReviewOutput →
  *                         destroy.
  *   4. Print the JSON evidence (no secrets) and exit with the verdict.
  *
  * Usage: bun run scripts/sandbox-smoke.ts
  * Env:  SMOKE_APP_ID, SMOKE_PRIVATE_KEY (inline PEM or path),
- *       INSTALLATION_ID (default 156621513), GH_REPO (default btspoony/todo-bots),
- *       GH_PR (default 1), SMOKE_ROUTE (default /smoke), ARK_API_KEY (required
+ *       INSTALLATION_ID (required — the App installation to mint a token for),
+ *       GH_REPO (required — the owner/repo whose PR is diffed; it must carry
+ *       the `mstar-inspector-seed` branch and a diffable PR #1),
+ *       SMOKE_ROUTE (default /smoke), ARK_API_KEY (required
  *       when SMOKE_ROUTE=/smoke-review).
  *
  * The token and model key are held only in this process's memory and passed to
@@ -40,9 +42,21 @@ if (!SMOKE_APP_ID || !SMOKE_PRIVATE_KEY) {
   process.exit(2);
 }
 
-const INSTALLATION_ID = Number(Bun.env.INSTALLATION_ID ?? "156621513");
-const GH_REPO = Bun.env.GH_REPO ?? "btspoony/todo-bots";
-const GH_PR = Bun.env.GH_PR ?? "1";
+// No personal defaults: the installation id and the target repository are the
+// caller's own fixture, so both must be supplied explicitly.
+const INSTALLATION_ID = Number(Bun.env.INSTALLATION_ID ?? "");
+const GH_REPO = Bun.env.GH_REPO ?? "";
+if (GH_REPO.split("/").length !== 2 || GH_REPO.split("/").some((part) => part.length === 0)) {
+  console.error(`sandbox-smoke: GH_REPO env var is required and must be owner/repo, got ${JSON.stringify(GH_REPO)}`);
+  process.exit(2);
+}
+if (!Number.isInteger(INSTALLATION_ID) || INSTALLATION_ID <= 0) {
+  console.error("sandbox-smoke: INSTALLATION_ID env var is required and must be a positive integer");
+  process.exit(2);
+}
+// The smoke entry pins the target PR at #1 (its seed branch carries exactly
+// that diffable PR); mirror the same constant when scoping the grant.
+const GH_PR = "1";
 const SMOKE_ROUTE = Bun.env.SMOKE_ROUTE ?? "/smoke";
 const ARK_API_KEY = Bun.env.ARK_API_KEY;
 
@@ -67,10 +81,10 @@ function resolvePrivateKey(value: string): string {
  */
 async function mintInstallationToken(): Promise<string> {
   const commenter = createReviewCommenter({ APP_ID: SMOKE_APP_ID, PRIVATE_KEY: resolvePrivateKey(SMOKE_PRIVATE_KEY) });
-  const [owner, repo] = GH_REPO.split("/");
-  if (!repo) throw new Error(`sandbox-smoke: GH_REPO must be owner/repo, got ${JSON.stringify(GH_REPO)}`);
+  // GH_REPO was validated as owner/repo at startup — `repo` is always present.
+  const [owner, repo] = GH_REPO.split("/") as [string, string];
   const grant = await commenter.getInstallationToken({
-    scope: { appId: SMOKE_APP_ID, installationId: INSTALLATION_ID, owner: owner ?? "", repo, prNumber: Number(GH_PR) },
+    scope: { appId: SMOKE_APP_ID, installationId: INSTALLATION_ID, owner, repo, prNumber: Number(GH_PR) },
     purpose: "sandbox-read",
   });
   assertSandboxGrant(grant, repo);
@@ -98,7 +112,7 @@ const token = await mintInstallationToken();
 console.log("TOKEN_MINTED=yes");
 
 const port = 8791;
-const varFlags = [`GH_TOKEN:${token}`];
+const varFlags = [`GH_TOKEN:${token}`, `GH_REPO:${GH_REPO}`];
 if (ARK_API_KEY) {
   varFlags.push(`ARK_API_KEY:${ARK_API_KEY}`);
 }

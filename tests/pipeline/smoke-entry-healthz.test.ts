@@ -20,3 +20,33 @@ describe("smoke-entry healthz face", () => {
     expect(smokeEntry).toContain("Response.json({ ok: true, version: `v${APP_VERSION}` })");
   });
 });
+
+/**
+ * The smoke target repository is a per-run config input, not a baked
+ * constant — pin that the module carries no personal default, that GH_REPO
+ * comes from the orchestrator's `--var` path, and that the PR number stays
+ * the fixed seed constant.
+ */
+describe("smoke-entry smoke target configuration", () => {
+  test("no hardcoded personal repository (target comes from configuration)", () => {
+    // The target only ever arrives through env.GH_REPO: the sole permitted
+    // github.com occurrence is the `${repo}` template.
+    expect(smokeEntry).not.toMatch(/github\.com\/(?!\$\{repo\})/);
+    expect(smokeEntry).not.toMatch(/const GH_REPO = "/);
+  });
+
+  test("reads GH_REPO from the env and validates it before the shell sink", () => {
+    expect(smokeEntry).toContain("GH_REPO: string;");
+    expect(smokeEntry).toContain("function smokeRepo(env: SmokeEnv)");
+    expect(smokeEntry).toContain("GITHUB_NAME_RE.test(owner)");
+    expect(smokeEntry).toContain("GH_REPO must be owner/repo");
+    // Both routes reject a malformed target instead of shell-interpolating it.
+    expect(smokeEntry).toContain('if (url.pathname !== "/smoke" && url.pathname !== "/smoke-review")');
+  });
+
+  test("GH_PR stays the fixed seed PR (no env input)", () => {
+    expect(smokeEntry).toContain('const GH_PR = "1";');
+    expect(smokeEntry).not.toContain("GH_PR?:");
+    expect(smokeEntry).not.toContain("env.GH_PR");
+  });
+});

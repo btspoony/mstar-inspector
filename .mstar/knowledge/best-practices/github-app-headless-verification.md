@@ -40,5 +40,5 @@ GitHub App 的 live 验收不依赖 smee 隧道：用 App 凭据（APP_ID + PRIV
 
 ## Examples
 
-- 实测：installation 156621513（btspoony）→ 30 repos → 种子 PR `btspoony/todo-bots#1` → 391B unified diff（`diff --git a/docs/...`）。
+- 实测：一个测试 App 的 installation（形如 `<installation_id>`）→ 数十个可访问仓库 → 选其中一个仓库开种子 PR → 拉到的 unified diff 非空（`diff --git a/...` 前缀）。具体 installation id / 仓库名 / PR 号属于当次测试环境的本地配置，不写入仓库。
 - 种子 PR 技巧：归档仓库不可推；选非归档仓库，`gh api` 建分支 + PUT contents + `gh pr create`（App 权限只读时用用户 gh 登录态）。

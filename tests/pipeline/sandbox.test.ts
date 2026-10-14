@@ -145,14 +145,14 @@ describe("SandboxV1 Durable Object", () => {
     running = true; // start() already returned (deploy restart mid-flight)
     const { sandbox } = makeDo();
 
-    const result = await sandbox.runCommand(shellCommand("gh pr diff 1 --repo btspoony/todo-bots"), {
+    const result = await sandbox.runCommand(shellCommand("gh pr diff 1 --repo acme/widgets"), {
       env: { GH_TOKEN: "tok" },
       cwd: "/workspace/repo",
     });
 
     expect(execCalls).toEqual([
       {
-        cmd: ["timeout", "--kill-after=5", "600", "/bin/sh", "-lc", "gh pr diff 1 --repo btspoony/todo-bots"],
+        cmd: ["timeout", "--kill-after=5", "600", "/bin/sh", "-lc", "gh pr diff 1 --repo acme/widgets"],
         opts: { cwd: "/workspace/repo", env: { GH_TOKEN: "tok" } },
       },
     ]);
