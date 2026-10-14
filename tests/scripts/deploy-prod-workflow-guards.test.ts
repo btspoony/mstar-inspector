@@ -36,9 +36,10 @@
  * - the post-mutation live-version re-capture: after the last mutating step,
  *   `wrangler deployments list --env production --json` overrides the
  *   deploy-log `version_id.txt` with the version the secret uploads actually
- *   created (defensively reading both `[0].versions[0].version_id` and
- *   `[0].version_id`), keeping the deploy-log value as a non-fatal
- *   `::notice::` fallback;
+ *   created, reading exactly the shape verified against the live CLI
+ *   (`[0].versions[0].version_id`) and recording the explicit
+ *   `unavailable (post-secret lookup failed)` marker — never the deploy-log
+ *   predecessor — when that lookup cannot confirm the version;
  * - the healthz smoke comparing the live version to the deployed tag;
  * - the digest-from-deploy-log rule and its never-fatal property (a no-push
  *   deploy records the literal `unchanged (no push in this deploy)` and exits 0);
@@ -462,18 +463,23 @@ describe("deploy-prod.yml guards", () => {
     }
   });
 
-  test("live version is re-captured after the last mutation: both JSON shapes, non-fatal fallback", () => {
+  test("live version is re-captured after the last mutation: verified shape, never a predecessor fallback", () => {
     const recap = steps.find((s) => s.name === "Re-capture live Worker version")!;
     expect(recap).toBeDefined();
     const run = recap.run!;
-    // defensive read of the live deployment, prod-scoped and JSON
+    // read of the live deployment, prod-scoped and JSON
     expect(run).toContain("bunx wrangler deployments list --env production --json");
-    // accepts BOTH the nested and the flat shape
-    expect(run.replace(/[ \t]+/g, " ")).toContain(
-      "((.[0].versions // [])[0].version_id) // .[0].version_id // empty",
-    );
+    // the extraction is EXACTLY the shape verified against the live CLI
+    // (`[ { versions: [ { version_id, percentage } ] } ]`): the flat
+    // `.[0].version_id` form does not exist and must not be accepted, since a
+    // stale/other payload shape must not be silently read as a live version.
+    const filter = run.replace(/[ \t]+/g, " ");
+    expect(filter).toContain("'((.[0].versions // [])[0].version_id) // empty'");
+    expect(run).not.toContain(".[0].version_id");
+    // the deploy-log predecessor is never written back as if it were live
+    expect(run).toContain('"unavailable (post-secret lookup failed)"');
     expect(run).toContain("> version_id.txt");
-    // fallback is explicitly noticed and the step has no failure path
+    // the fallback is explicitly noticed and the step has no failure path
     expect(run).toContain("::notice::");
     expect(run).not.toContain("exit 1");
     expect(run).not.toContain("::error");
@@ -489,7 +495,7 @@ describe("deploy-prod.yml guards", () => {
     expect(steps[steps.length - 1]!.name).toContain("Record prod deploy evidence");
   });
 
-  test("live version re-capture script EXECUTES: override on both shapes, keeps the deploy-log value and exits 0 on failure", () => {
+  test("live version re-capture script EXECUTES: resolves / empty / CLI failure (never the predecessor)", () => {
     const recap = steps.find((s) => s.name === "Re-capture live Worker version")!;
     const dir = mkdtempSync(join(tmpdir(), "recap-"));
     try {
@@ -503,8 +509,8 @@ describe("deploy-prod.yml guards", () => {
         );
         Bun.spawnSync(["chmod", "+x", join(dir, "bunx")]);
       };
-      const runOnce = (expectedVersion: string) => {
-        writeFileSync(join(dir, "version_id.txt"), expectedVersion);
+      const runOnce = (deployLogVersion: string) => {
+        writeFileSync(join(dir, "version_id.txt"), deployLogVersion);
         const proc = Bun.spawnSync(["bash", "-e", "-c", recap.run!], {
           cwd: dir,
           env: { ...process.env, PATH: `${dir}:${process.env.PATH}` },
@@ -515,25 +521,61 @@ describe("deploy-prod.yml guards", () => {
           log: proc.stdout.toString() + proc.stderr.toString(),
         };
       };
-      // nested shape: `[{"versions":[{"version_id":"…"}]}]`
-      bunx('[{"versions":[{"version_id":"cafe0123"}]}]');
-      expect(runOnce("deadbeef").code).toBe(0);
-      expect(runOnce("deadbeef").out).toBe("cafe0123");
-      // flat shape: `[{"version_id":"…"}]`
-      bunx('[{"version_id":"beef4567"}]');
-      expect(runOnce("deadbeef").out).toBe("beef4567");
-      // empty array → keep the deploy-log value, notice, still exit 0
+      // path 1 — resolved: the live CLI shape, a newest entry carrying
+      // `versions[0].version_id`.
+      bunx('[{"versions":[{"version_id":"451dc81c-0a75-4c1e-8e7d-eb5a4d88aedd","percentage":100}]}]');
+      const resolved = runOnce("deadbeef");
+      expect(resolved.code).toBe(0);
+      expect(resolved.out).toBe("451dc81c-0a75-4c1e-8e7d-eb5a4d88aedd");
+      // the deploy-log predecessor is gone from the file, not merely overridden
+      expect(resolved.out).not.toContain("deadbeef");
+      // path 2 — empty deployment list: the unavailable marker, NOT the
+      // predecessor
       bunx("[]");
-      const kept = runOnce("deadbeef");
-      expect(kept.code).toBe(0);
-      expect(kept.out).toBe("deadbeef");
-      expect(kept.log).toContain("::notice::");
-      // wrangler itself failed (non-zero, no JSON) → same non-fatal fallback
+      const empty = runOnce("deadbeef");
+      expect(empty.code).toBe(0);
+      expect(empty.out).toBe("unavailable (post-secret lookup failed)");
+      expect(empty.out).not.toContain("deadbeef");
+      expect(empty.log).toContain("::notice::");
+      // path 3 — the CLI itself fails (non-zero, no JSON): same marker, still
+      // exit 0
       bunx("", 1);
       const failed = runOnce("deadbeef");
       expect(failed.code).toBe(0);
-      expect(failed.out).toBe("deadbeef");
+      expect(failed.out).toBe("unavailable (post-secret lookup failed)");
+      expect(failed.out).not.toContain("deadbeef");
       expect(failed.log).toContain("::notice::");
+      // path 3b — a payload of the wrong shape (flat, the form that does not
+      // exist) is not read as a live version either.
+      bunx('[{"version_id":"beef4567"}]');
+      const flat = runOnce("deadbeef");
+      expect(flat.code).toBe(0);
+      expect(flat.out).toBe("unavailable (post-secret lookup failed)");
+      expect(flat.out).not.toContain("beef4567");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("mutation: a predecessor fallback in the re-capture must fail the pin", () => {
+    // The reviewed bug in its second form: the step exists but leaves the
+    // deploy-log value in place when the lookup fails — evidence then names a
+    // predecessor as if it were live. Show the pin above now fails.
+    const src = readFileSync(join(REPO_ROOT, ".github", "workflows", WORKFLOW), "utf8");
+    const mutated = src.replace(
+      'printf \'%s\\n\' "unavailable (post-secret lookup failed)" > version_id.txt',
+      "true",
+    );
+    expect(mutated).not.toBe(src);
+    const dir = mkdtempSync(join(tmpdir(), "recap-fallback-"));
+    try {
+      const path = join(dir, "deploy-prod.yml");
+      writeFileSync(path, mutated);
+      const proc = Bun.spawnSync(["python3", "-c", PY_DUMP, path], { stdout: "pipe", stderr: "pipe" });
+      expect(proc.exitCode).toBe(0);
+      const msteps = JSON.parse(proc.stdout.toString()).jobs.deploy.steps as Step[];
+      const mrecap = msteps.find((s) => s.name === "Re-capture live Worker version")!;
+      expect(mrecap.run).not.toContain("unavailable (post-secret lookup failed)");
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

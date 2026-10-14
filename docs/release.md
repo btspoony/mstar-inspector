@@ -98,6 +98,12 @@ their repo.
    it — and that run then **pauses at job start for the owner's approval** on
    the `production` environment before a single step runs or any secret is
    injected ([production environment](deploy.md#production-environment)).
+   **A rerun of the Release workflow reuses the existing production run for
+   the tag's commit instead of queueing a second deploy** (the dispatch step
+   looks the run up first and emits a `::notice::` naming it), so the evidence
+   collector keeps pointing at the same run across reruns; only when no run
+   exists yet — or the newest one concluded `failure`/`cancelled` — is a fresh
+   run dispatched (a rerun after a failed deploy retries).
    Once approved it re-verifies the tag, applies the prod D1 migrations,
    deploys the prod Worker, writes the `production` secrets and asserts
    `https://inspector.mstar.page/healthz` returns `v<tag>`. **Nothing reaches
@@ -164,6 +170,16 @@ de-scope it into a "known issue".**
 
 ## Failure paths
 
+- **Rerunning the Release workflow** (the recovery step named by most bullets
+  below) — the dispatch step looks up the existing `deploy-prod.yml` run for the
+  tag's commit **before** dispatching and **reuses** it (a `::notice::` names
+  the run), so a rerun queues **no second approval-gated deploy** and the
+  evidence collector keeps resolving the same run instead of waiting on a new
+  one. A fresh run is dispatched only when **no** run exists for the commit yet
+  (e.g. the original dispatch failed) or the newest run concluded
+  `failure`/`cancelled` — so a rerun after a *failed* production deploy still
+  retries. The tag, the Release, and the notes-file rebuild are idempotent
+  regardless.
 - **Requested version already released** — Release prep fails early with
   `Tag vX.Y.Z already exists`. Pick a different version; re-releasing an
   existing version is a bug, not an operation.
@@ -279,11 +295,14 @@ and immediately deploys another version, so a capture taken from the deploy log
 alone would name a predecessor of what is serving traffic. After the last
 mutating step the run re-reads the live deployment
 (`bunx wrangler deployments list --env production --json`) and writes that
-version id over `version_id.txt`, keeping the deploy-log value only as a
-noticed fallback (a failed read emits a `::notice::` and never fails the
-deploy). The section's `Worker version` bullet is therefore the version to
-compare against a live `deployments list` in
-[manual reconciliation](#manual-reconciliation).
+version id over `version_id.txt` — or, when the lookup cannot confirm it, the
+explicit marker `unavailable (post-secret lookup failed)`; the deploy-log
+predecessor is never recorded as if it were live. The fallback is noticed
+(`::notice::`) and never fails the deploy, and the healthz smoke proves the
+release identity independently. The section's `Worker version` bullet is
+therefore either the version to compare against a live `deployments list` in
+[manual reconciliation](#manual-reconciliation), or that explicit
+unavailable marker.
 
 **Only the Release workflow appends this section.** A Release published by
 hand in the UI deploys production through the retained `release: published`

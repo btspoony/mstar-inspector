@@ -566,11 +566,15 @@ taken from that log alone would misreport the live version in the
 `deploy-evidence` artifact and the Release notes. After the **last** mutating
 step (the optional `ALERT_WEBHOOK_URL` write / delete) the workflow therefore
 re-reads the live deployment with
-`bunx wrangler deployments list --env production --json`, extracts the newest
-version id defensively (both the nested `[0].versions[0].version_id` and the
-flat `[0].version_id` shapes), and overwrites `version_id.txt`. If the read
-yields nothing the deploy-log value is kept and the step emits a `::notice::` —
-the re-capture can never fail the deploy.
+`bunx wrangler deployments list --env production --json` and overwrites
+`version_id.txt` with its newest version id (`[0].versions[0].version_id` — the
+shape verified against the live CLI; there is no flat `[0].version_id` form).
+When that lookup cannot confirm the version — an empty list, a missing field,
+or the CLI itself failing — the file records the explicit marker
+`unavailable (post-secret lookup failed)` and the step emits a `::notice::`; the
+deploy-log predecessor is **never** left in place as if it were live. The
+re-capture can never fail the deploy, and the healthz smoke proves the release
+identity independently (`healthz.version == v<tag>`).
 
 **CI credentials** — the workflow authenticates wrangler with one GitHub
 **Secret** that is never injected into the Worker: `CLOUDFLARE_API_TOKEN`
