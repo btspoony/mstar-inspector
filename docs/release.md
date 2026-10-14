@@ -175,9 +175,11 @@ de-scope it into a "known issue".**
 - **Rerunning the Release workflow** (the recovery step named by most bullets
   below) — the dispatch step looks up the existing `deploy-prod.yml` run for the
   tag's commit **before** dispatching and **reuses an in-flight or successful
-  run** (a `::notice::` names the run), so a rerun queues **no second
-  approval-gated deploy** and the evidence collector keeps resolving the same
-  run instead of waiting on a new one. **Any other terminal outcome
+  run** (a `::notice::` names the run) — reading one explicitly large page for
+  the commit (`--limit 100`, not the 20-row default, so a reusable same-tag run
+  cannot hide behind many newer runs of other tags) — so a rerun queues **no
+  second approval-gated deploy** and the evidence collector keeps resolving the
+  same run instead of waiting on a new one. **Any other terminal outcome
   dispatches a fresh production run** — `failure`, `cancelled`, `timed_out`,
   `startup_failure`, `action_required`, `stale`, `neutral`, `skipped` — as does
   **no run at all** (e.g. the original dispatch failed). A rerun after a
@@ -340,10 +342,11 @@ absence stated now, without burning the window); and when this Release
 dispatched a fresh run, the collector receives the highest run id observed for
 the commit before that dispatch as a boundary (`--since-run <run-id>`) and may
 cite **only** runs newer than it. A run at or below the boundary — a superseded
-run, an older success on the tag, or a run under another ref — is never
-republished as this release's evidence, and when nothing newer appears the
-section states exactly that. Nothing here can postpone the tag or fail the
-Release workflow — a missing section is always *stated*, never silent:
+failure, an older success on the tag, or a run started by another tag on the
+same commit (the rollback-alias case) — is never republished as this release's
+evidence, and when nothing newer appears the section states exactly that.
+Nothing here can postpone the tag or fail the Release workflow — a missing
+section is always *stated*, never silent:
 
 | Section says | Meaning / operator action |
 |---|---|
