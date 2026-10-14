@@ -224,6 +224,16 @@ de-scope it into a "known issue".**
   is rolled back. Follow the
   [production rollback](deploy.md#rollback-production) — note what a
   re-dispatch re-runs — or re-dispatch the workflow on an older tag.
+- **Production run red before any mutation — tag/version mismatch** — the
+  production workflow validates the dispatched tag against the checked-out
+  version surfaces **before** its first mutating command
+  ([production environment](deploy.md#production-environment)), so a tag whose
+  commit does not carry that version — a hand-cut or re-pointed `v*` tag that
+  bypassed the release chain — fails there, after tag resolution and before the
+  D1 migration or the deploy: **nothing reached production**. Re-cut the version
+  through Release prep so the tag and its version surfaces agree; do not
+  hand-fix a tag's target commit, and an ad-hoc `v*` tag is not a supported
+  production path.
 - **Production dispatch failed** (the "Dispatch production deploy on the
   release tag" step goes red — `gh workflow run` was refused, e.g. the dispatch
   permission is missing): the tag and the Release were both created **before**

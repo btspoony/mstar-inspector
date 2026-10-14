@@ -82,6 +82,30 @@ owner's approval** on the `production` environment: no step runs and no
 (§ Production approval gate and the tag gate). The release→production path is
 therefore release-gated **and** human-approved — it never proceeds unattended.
 
+**What an admitted run checks before it mutates.** Two guards sit on the
+production path itself, both ahead of its first mutating command:
+
+- **Tag↔version validation.** After resolving the deploy tag and before the D1
+  migration, the run re-runs the repository's release validation
+  (`bun run release:validate -- "$TAG"`, `scripts/validate-release-version.ts`)
+  against the checked-out tree: every version surface (`package.json#version`,
+  `src/version.ts`) must carry exactly the tag's bare version. A hand-cut or
+  re-pointed `v*` tag whose commit does not carry that version — the paths that
+  never pass through the release chain's own validation — fails the run
+  **before** any migration or deploy, so a tag that lies about its contents
+  never half-mutates production. The post-deploy healthz smoke confirms the
+  same identity on the live Worker afterwards.
+- **Step-scoped secrets and SHA-pinned actions.** The `production` secrets
+  (`CLOUDFLARE_API_TOKEN`, `OAUTH_CLIENT_SECRET`, `DASHBOARD_SESSION_SECRET`,
+  `DASHBOARD_ENCRYPTION_KEY`, `ALERT_WEBHOOK_URL`) are declared on the
+  individual steps that consume them — the required-secret preflight, the
+  `wrangler secret bulk` writes and every wrangler-authenticating step — never
+  on the job, so no step that runs third-party action code has a secret in its
+  environment. The workflow's third-party actions (`actions/checkout`,
+  `oven-sh/setup-bun`, `actions/upload-artifact`) are pinned to commit SHAs —
+  the mutable tag kept in a trailing comment — so a re-pointed upstream tag
+  cannot substitute the code that runs beside those secrets.
+
 **Why the dispatch:** a Release published with the Release workflow's
 `GITHUB_TOKEN` does **not** create a `release: published` run — GitHub
 suppresses workflow events caused by `GITHUB_TOKEN` (`workflow_dispatch` and
@@ -168,13 +192,17 @@ permissions), and the staging workflow runs repository code with it on every
 `main` push. An actor who can merge to `main`, or who compromises the
 automation writer, therefore already holds a credential that can replace the
 production Worker or mutate production D1 **directly** — no `v*` tag, no
-production run and no approval involved. The **recorded alternative** (owner
-decision of 2026-10-14, step 3) is to scope the provider credential per
-environment — a **production-only token** (ideally in a separate Cloudflare
-account) with the same scopes, rotating the shared one once production has its
-own — but the shared token's residual is **accepted, not applied**: the tag gate
-and the required reviewer protect the deploy path only. Read the account token
-as production authority regardless of how the approval gate is configured.
+production run and no approval involved. The shared token is therefore an
+**accepted residual with no technical mitigation currently applied** (owner
+decision, 2026-10-14): neither the tag gate nor the production approval
+compensates, because the staging workflow holds the same token on every `main`
+push and that path can target production **directly** — without the production
+environment approval and without any tag. The **future remedy only** (not
+applied today) is to scope the provider credential per environment — a
+**production-only token** (ideally in a separate Cloudflare account) with the
+same account-level groups (§ CI credentials — token permissions), rotating the
+shared one once production has its own. Read the account token as production
+authority regardless of how the approval gate is configured.
 
 **Current exposure and the remaining alternative.** Exactly two accounts have
 write access — the owner (`btspoony`, a User account) and one automation
@@ -250,7 +278,7 @@ plan, and both rejected for now in favour of the applied approval gate.
 
    | Name | Kind | Value |
    |---|---|---|
-   | `CLOUDFLARE_API_TOKEN` | secret | CI credential, never injected into the Worker — **the account-level token is reused from staging, and that residual is accepted** (owner decision, 2026-10-14): Cloudflare has no per-script scoping for Workers Scripts, so staging and production cannot be separated inside the one account both Workers live in. Compensating controls in force: the release/tag gate and the required reviewer on the `production` environment. Recorded alternative if the decision is revisited: a production-only token (ideally in a separate Cloudflare account) with the same scopes, then rotate the shared one (§ CI credentials — the account-scoped authority it carries is not mediated by the approval gate: § Production approval gate and the tag gate) |
+   | `CLOUDFLARE_API_TOKEN` | secret | CI credential, never injected into the Worker — **the account-level token is reused from staging, and that residual is accepted** (owner decision, 2026-10-14): Cloudflare has no per-script scoping for Workers Scripts, so staging and production cannot be separated inside the one account both Workers live in, and **no technical mitigation is currently applied** — neither the release/tag gate nor the required reviewer on the `production` environment compensates, because the staging workflow holds the same token on every `main` push and can target production directly. Future remedy only if the decision is revisited: a production-only token (ideally in a separate Cloudflare account) with the same account-level groups, then rotate the shared one (§ CI credentials — the account-scoped authority it carries is not mediated by the approval gate: § Production approval gate and the tag gate) |
    | `OAUTH_CLIENT_SECRET` | secret | **copy** the secret of whichever OAuth App production's `OAUTH_CLIENT_ID` names — the shared App by default, or production's own App (step 4) — it is a provider credential, not a generated value |
    | `DASHBOARD_SESSION_SECRET` | secret | **new** random (`openssl rand -base64 32`) |
    | `DASHBOARD_ENCRYPTION_KEY` | secret | **new** random (`openssl rand -base64 32`) — production D1 starts empty (step 1) |
@@ -326,7 +354,9 @@ plan, and both rejected for now in favour of the applied approval gate.
    pauses the same way.
 
    **Once approved, the run mutates in this order: assert the required
-   `production` secrets (pure preflight, no mutation) → apply the prod D1
+   `production` secrets (pure preflight, no mutation) → resolve the deploy tag
+   and validate it against the checked-out version surfaces (pre-mutation,
+   § Production environment) → apply the prod D1
    migrations → `wrangler deploy --env production` → write the `production`
    secrets → re-read the live Worker version → smoke.** Deploying *before* the
    secrets is deliberate: the
@@ -619,12 +649,16 @@ but lacks D1 access fails the migration step with
 Workers live in the one account, so the token above — the staging one the
 production run reuses today (§ One-time bring-up step 3) — is full authority
 over **both** instances: it can replace the production Worker or mutate
-production D1 with no tag, no production run and no approval. The **recorded
-alternative** — not the standing recommendation — is a **production-only token**
-(same scopes, ideally in a separate Cloudflare account) set as the `production`
-environment secret, with the shared token rotated once production no longer uses
-it; the owner **accepted the shared token's residual on 2026-10-14**, and the
-tag gate plus the required reviewer are the compensating controls. The
+production D1 with no tag, no production run and no approval. The owner
+**accepted the shared token's residual on 2026-10-14, with no technical
+mitigation currently applied** — the tag gate and the required reviewer
+constrain the production deploy path only, while the staging workflow runs
+repository code with the same token on every `main` push and that path can
+target production **directly**; they do not compensate for the credential.
+The **future remedy only** (not applied today) is a **production-only token**
+(the same account-level groups, ideally in a separate Cloudflare account) set as
+the `production` environment secret, with the shared token rotated once
+production no longer uses it. The
 deployment approval governs the workflow run, never the credential
 (§ Production approval gate and the tag gate).
 
