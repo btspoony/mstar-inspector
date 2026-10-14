@@ -777,6 +777,10 @@ while the list still spells it: the removal is recorded in `removed_logins`
 (migration `0023`, written in the same transaction as the row delete) and the
 bootstrap consults it before the allowlist, so the record survives every later
 deploy until an admin deliberately re-invites the login on the Members page.
+The bootstrap insert itself refuses while the record exists — a write-boundary
+check inside the `INSERT` (`WHERE NOT EXISTS (removal record)`), not a
+read-then-write window — so a sign-in already in flight when the removal lands
+is denied instead of resurrecting the login.
 The empty-table first-login fallback needs a
 genuinely empty parsed list, which this required gate prevents — so the
 fallback can no longer be silently armed by a blank value. Logins that are

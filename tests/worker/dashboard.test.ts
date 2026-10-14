@@ -2477,6 +2477,47 @@ function removedRows(
 
 type DashboardTestDb = DashboardD1 & { raw: Database };
 
+/**
+ * SEC-01 race harness: the removal-record read answers from the snapshot taken
+ * BEFORE `interleave` runs, and only then does the interleaving land — so the
+ * caller resumes holding reads that were true before it. That is exactly the
+ * window the reviewer reproduced (a create + removal landing between
+ * bootstrap's reads and its insert), and it proves the refusal comes from the
+ * write boundary rather than from the earlier read.
+ */
+function bootstrapRaceD1(inner: DashboardTestDb, interleave: () => Promise<void>): DashboardTestDb {
+  let fired = false;
+  const thenInterleave = async <T>(value: T): Promise<T> => {
+    if (!fired) {
+      fired = true;
+      await interleave();
+    }
+    return value;
+  };
+  const race = (stmt: DashboardD1Statement): DashboardD1Statement => ({
+    bind(...values: unknown[]) {
+      const bound = stmt.bind(...values);
+      return {
+        bind: (...more: unknown[]) => bound.bind(...more),
+        first: async <T = Record<string, unknown>>() => thenInterleave(await bound.first<T>()),
+        all: <T = Record<string, unknown>>() => bound.all<T>(),
+        run: <T = Record<string, unknown>>() => bound.run<T>(),
+      };
+    },
+    first: async <T = Record<string, unknown>>() => thenInterleave(await stmt.first<T>()),
+    all: <T = Record<string, unknown>>() => stmt.all<T>(),
+    run: <T = Record<string, unknown>>() => stmt.run<T>(),
+  });
+  return {
+    raw: inner.raw,
+    prepare(query: string): DashboardD1Statement {
+      const stmt = inner.prepare(query);
+      return query.includes("FROM removed_logins") ? race(stmt) : stmt;
+    },
+    batch: (statements: DashboardD1Statement[]) => inner.batch(statements),
+  };
+}
+
 /** Commit-flow envs carry a full DB — pull it back out for asserts. */
 function dbOf(env: Env): DashboardTestDb {
   return (env as Env & { DB: DashboardTestDb }).DB;
@@ -2950,6 +2991,28 @@ describe("bootstrapDashboardAccess precedence matrix (spec § AuthZ)", () => {
     });
   });
 
+  test("2f. SEC-01: a bootstrap paused after its reads cannot resurrect a login removed in between", async () => {
+    const db = createDashboardTestD1();
+    await createUser(db, { login: "root-admin", role: "admin" });
+    const interleaving = async () => {
+      // The reviewer's interleaving: the login is created, then an admin
+      // removes it — both landing AFTER bootstrap's reads returned.
+      const created = await createUser(db, { login: "octocat", role: "member" });
+      expect(await deleteUserUnlessLastAdmin(db, created.id, "root-admin")).toBe(true);
+    };
+    // Exact case and a case variant: the refusal comes from the insert's own
+    // NOCASE guard, not from the read the interleaving raced past.
+    for (const login of ["octocat", "OCTOCAT"]) {
+      expect(await bootstrapDashboardAccess(bootstrapRaceD1(db, interleaving), login, "octocat")).toEqual({
+        outcome: "deny",
+      });
+      expect(await getUserByLogin(db, login)).toBeNull(); // no resurrected row
+      expect(await isLoginRemoved(db, login)).toBe(true); // record survives
+    }
+    expect(removedRows(db).map((r) => r.github_login)).toEqual(["octocat"]);
+    expect(userCount(db)).toBe(1); // the acting admin only
+  });
+
   test("3. empty table && ADMIN_LOGINS unset → first login bootstraps as admin", async () => {
     const db = createDashboardTestD1();
     const decision = await bootstrapDashboardAccess(db, "deployer", undefined);
@@ -3033,6 +3096,24 @@ describe("/dashboard/oauth/callback bootstrap + deny", () => {
     // Zero cookies — not even the single-use state expiry (spec: 零 cookie、零写入).
     expect(res.headers.getSetCookie()).toHaveLength(0);
     // Zero D1 writes on deny.
+    expect(userCount(db)).toBe(1);
+  });
+
+  test("SEC-01: a removal landing inside the callback's read→insert window → 403, ZERO Set-Cookie, no resurrected row", async () => {
+    const db = createDashboardTestD1();
+    await createUser(db, { login: "root-admin", role: "admin" });
+    stubGitHubIdentity("octocat");
+    const racy = bootstrapRaceD1(db, async () => {
+      const created = await createUser(db, { login: "octocat", role: "member" });
+      expect(await deleteUserUnlessLastAdmin(db, created.id, "root-admin")).toBe(true);
+    });
+    const res = await oauthCallback("octocat", makeDbEnv(racy, { ADMIN_LOGINS: "octocat" }));
+    // The ordinary deny shape (spec: 零 cookie、零写入): no session is minted
+    // for a login whose removal landed after the callback's reads.
+    expect(res.status).toBe(403);
+    expect(res.headers.getSetCookie()).toHaveLength(0);
+    expect(await getUserByLogin(db, "octocat")).toBeNull();
+    expect(await isLoginRemoved(db, "octocat")).toBe(true);
     expect(userCount(db)).toBe(1);
   });
 
