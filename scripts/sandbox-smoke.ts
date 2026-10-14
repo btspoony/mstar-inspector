@@ -78,10 +78,10 @@ function resolvePrivateKey(value: string): string {
  */
 async function mintInstallationToken(): Promise<string> {
   const commenter = createReviewCommenter({ APP_ID: SMOKE_APP_ID, PRIVATE_KEY: resolvePrivateKey(SMOKE_PRIVATE_KEY) });
-  const [owner, repo] = GH_REPO.split("/");
-  if (!repo) throw new Error(`sandbox-smoke: GH_REPO must be owner/repo, got ${JSON.stringify(GH_REPO)}`);
+  // GH_REPO was validated as owner/repo at startup — `repo` is always present.
+  const [owner, repo] = GH_REPO.split("/") as [string, string];
   const grant = await commenter.getInstallationToken({
-    scope: { appId: SMOKE_APP_ID, installationId: INSTALLATION_ID, owner: owner ?? "", repo, prNumber: Number(GH_PR) },
+    scope: { appId: SMOKE_APP_ID, installationId: INSTALLATION_ID, owner, repo, prNumber: Number(GH_PR) },
     purpose: "sandbox-read",
   });
   assertSandboxGrant(grant, repo);
