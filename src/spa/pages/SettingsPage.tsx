@@ -38,6 +38,7 @@ import {
   isReviewTriggerMode,
   modelChainTabs,
   providerFormKind,
+  providerKeyRows,
   REVIEW_TRIGGER_MODES,
   seatRoleValues,
   seatSelectValue,
@@ -47,6 +48,7 @@ import {
   type ChainTab,
   type ConfiguredProvider,
   type ModelOptionGroup,
+  type ProviderKeyRow,
   type ReviewTriggerMode,
   type SettingsAppMeta,
   type SettingsIdentityAppMeta,
@@ -59,7 +61,7 @@ import { PageNotice } from "./PageNotice";
 type PendingAction =
   | { kind: "pause" | "resume" | "disable" | "enable" | "delete" }
   | { kind: "remove-chain"; name: string }
-  | { kind: "remove-key"; provider: string }
+  | { kind: "remove-key"; provider: string; keyId: string; last4: string }
   | { kind: "remove-custom"; providerId: string };
 
 /**
@@ -334,11 +336,13 @@ export function SettingsView({
           slot: slot >= 0 ? slot : configured.length,
         });
       } else if (action.kind === "remove-key") {
-        // Same position capture as remove-custom (see above).
-        const slot = configured.findIndex((row) => row.kind === "key" && row.provider === action.provider);
+        // Same position capture as remove-custom (see above) — the row is the
+        // identity's, so a pool with a sibling key keeps it.
+        const slot = configured.findIndex((row) => row.kind === "key" && row.key_id === action.keyId);
         setProvidersRemoveOutcome({
           notice: await runPinnedWithBody(`/dashboard/apps/${app.slug}/settings/key/delete`, {
             provider: action.provider,
+            key_id: action.keyId,
           }),
           slot: slot >= 0 ? slot : configured.length,
         });
@@ -489,7 +493,10 @@ function pendingConfirmCopy(
   }
   if (pending.kind === "remove-key") {
     return {
-      title: t(locale, "settings.confirmRemoveKeyTitle", { provider: pending.provider }),
+      title: t(locale, "settings.confirmRemoveKeyTitle", {
+        provider: pending.provider,
+        last4: pending.last4 === "" ? t(locale, "settings.keyTooShort") : pending.last4,
+      }),
       body: t(locale, "settings.confirmRemoveKeyBody", { provider: pending.provider }),
       action: t(locale, "settings.remove"),
       destructive: true,
@@ -1060,7 +1067,7 @@ function ProvidersCard({
           <p className="text-sm text-muted-foreground">{t(locale, "settings.noConfiguredProviders")}</p>
         ) : (
           payload.configured_providers.map((row, index) => (
-            <Fragment key={row.kind === "key" ? row.provider : row.provider_id}>
+            <Fragment key={row.kind === "key" ? `${row.provider}:${row.key_id}` : row.provider_id}>
               {/* (audit UI-45-05): the remove outcome renders in
                   the removed row's position — at catalog scale the feedback
                   is visible without scrolling away from the Remove control
@@ -1122,13 +1129,21 @@ function ConfiguredKeyRow({
           {row.updated_at
             ? ` · ${t(locale, "settings.updated", { time: formatRelativeTime(row.updated_at, locale) })}`
             : ""}
+          {/* One row per stored key: the verification state is the row's own. */}
+          {row.verified_status === "ok" && row.verified_at
+            ? ` · ${t(locale, "settings.keyVerifiedAt", { time: formatRelativeTime(row.verified_at, locale) })}`
+            : row.verified_status === "failed"
+              ? ` · ${t(locale, "settings.keyVerifyFailed")}`
+              : ""}
         </div>
       </div>
       <Button
         type="button"
         variant="destructive"
         size="sm"
-        onClick={() => onPending({ kind: "remove-key", provider: row.provider })}
+        onClick={() =>
+          onPending({ kind: "remove-key", provider: row.provider, keyId: row.key_id, last4: row.last4 })
+        }
       >
         {t(locale, "settings.remove")}
       </Button>
@@ -1203,8 +1218,6 @@ function AddProviderSection({
   const [selectedId, setSelectedId] = useState<string | undefined>(undefined);
   const selected = selectedCatalogProvider(payload.provider_catalog, selectedId);
   const imageId = payload.app.sandbox_image_id;
-  const keyByProvider: Record<string, SettingsManagePayload["keys"][number]> = {};
-  for (const key of payload.keys) keyByProvider[key.provider] = key;
   const customById: Record<string, SettingsManagePayload["custom_providers"][number]> = {};
   for (const row of payload.custom_providers) customById[row.provider_id] = row;
 
@@ -1251,7 +1264,7 @@ function AddProviderSection({
                 key={selected.id}
                 locale={locale}
                 provider={selected}
-                storedKey={keyByProvider[selected.id]}
+                storedKeys={providerKeyRows(payload.keys, selected.id)}
                 custom={customById[selected.id]}
                 onVerify={onVerify}
                 onSettings={onSettings}
@@ -1285,7 +1298,7 @@ function AddProviderSection({
 function ProviderConfigForm({
   locale,
   provider,
-  storedKey,
+  storedKeys,
   custom,
   onVerify,
   onSettings,
@@ -1294,7 +1307,8 @@ function ProviderConfigForm({
 }: {
   locale: SpaBoot["locale"];
   provider: CatalogProvider;
-  storedKey: SettingsManagePayload["keys"][number] | undefined;
+  /** EVERY stored key of the selected provider — one masked line per row. */
+  storedKeys: ProviderKeyRow[];
   custom: SettingsManagePayload["custom_providers"][number] | undefined;
   onVerify: (fields: Record<string, string>) => Promise<OpNotice>;
   onSettings: (fields: Record<string, string>) => Promise<OpNotice>;
@@ -1413,11 +1427,16 @@ function ProviderConfigForm({
         void submitKey();
       }}
     >
-      {storedKey ? (
-        <p className="text-sm text-muted-foreground">
-          {t(locale, "settings.keyEnding", { last4: storedKey.last4 })}
+      {/* The pool's rows, one line per stored key: submitting the field below
+          APPENDS to this pool (re-submitting a listed key updates its row in
+          place) — no client-side fold, so a second key stays visible. */}
+      {storedKeys.map((stored) => (
+        <p key={stored.keyId} className="text-sm text-muted-foreground">
+          {stored.last4
+            ? t(locale, "settings.keyEnding", { last4: stored.last4 })
+            : t(locale, "settings.keyTooShort")}
         </p>
-      ) : null}
+      ))}
       <label className="flex flex-col gap-1.5 text-sm font-medium">
         {t(locale, "settings.apiKey")}
         <Input

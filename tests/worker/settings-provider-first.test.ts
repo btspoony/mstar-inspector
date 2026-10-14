@@ -2,11 +2,12 @@
  * provider-first settings routes — JSON verify, models
  * dropdown source, and save-chain/save-roles membership (spec §6.3).
  */
-import { afterEach, describe, expect, spyOn, test } from "bun:test";
+import { afterEach, describe, expect, mock, spyOn, test } from "bun:test";
 import { createMigratedTestD1 } from "../store/helpers";
 import { createAppsStore } from "../../src/dashboard/apps-store";
 import { createSecretbox } from "../../src/dashboard/secretbox";
 import {
+  MAX_KEYS_PER_PROVIDER,
   createAppConfigStore,
   MODEL_ROLE_IDS,
 } from "../../src/dashboard/app-config-store";
@@ -25,6 +26,25 @@ const PLAIN_KEY = sk("ant-mallory-verify-9988");
 const SETTINGS = "/dashboard/apps/mallorys-app/settings";
 const VERIFY = "/dashboard/api/apps/mallorys-app/keys/verify";
 const MODELS = "/dashboard/api/apps/mallorys-app/models";
+const SETTINGS_JSON = "/dashboard/api/apps/mallorys-app/settings";
+
+/**
+ * One `configured_providers` wire row: a stored key (provider + pool identity +
+ * masked tail + per-key verification) or a custom-provider declaration.
+ */
+type ConfiguredRow = {
+  kind: string;
+  provider?: string;
+  key_id?: string;
+  last4?: string;
+  updated_at?: string | null;
+  verified_at?: string | null;
+  verified_status?: string | null;
+  provider_id?: string;
+  base_url?: string;
+  api?: string;
+  model_ids?: string[];
+};
 
 async function seededWorld() {
   const db = createMigratedTestD1();
@@ -857,17 +877,6 @@ describe("GET settings configured_providers vs provider_catalog", () => {
 
   const ACCOUNT_ID = "1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d";
 
-  type ConfiguredRow = {
-    kind: string;
-    provider?: string;
-    last4?: string;
-    updated_at?: string | null;
-    provider_id?: string;
-    base_url?: string;
-    api?: string;
-    model_ids?: string[];
-  };
-
   async function getConfigured(env: Env): Promise<{
     configured_providers: ConfiguredRow[];
     provider_catalog: Array<{ id: string; tier: string; eligibility: string }>;
@@ -890,9 +899,18 @@ describe("GET settings configured_providers vs provider_catalog", () => {
     });
     expect(stored.status).toBe(200);
     const body = await getConfigured(makeEnv(db));
-    // The masked key row — masked tail only, never plaintext.
+    // The masked key row — masked tail only, never plaintext — plus its pool
+    // identity (the per-key delete handle) and the verification bookkeeping.
     expect(body.configured_providers).toEqual([
-      { kind: "key", provider: "anthropic", last4: PLAIN_KEY.slice(-4), updated_at: expect.any(String) },
+      {
+        kind: "key",
+        provider: "anthropic",
+        key_id: expect.any(String),
+        last4: PLAIN_KEY.slice(-4),
+        updated_at: expect.any(String),
+        verified_at: expect.any(String),
+        verified_status: "ok",
+      },
     ]);
     // The same id still lives in the catalog as DISCOVERY metadata: an
     // anthropic catalog row exists, but nothing catalog-shaped leaked into
@@ -956,6 +974,183 @@ describe("GET settings configured_providers vs provider_catalog", () => {
     // "my-custom" is NOT a catalog id — only the configured row exists.
     expect(body.provider_catalog.some((p) => p.id === "my-custom")).toBe(false);
     expect(JSON.stringify(body)).not.toContain(PLAIN_KEY);
+  });
+});
+
+describe("multi-key provider pools (routes)", () => {
+  afterEach(() => {
+    mock.restore();
+  });
+
+  const SECOND_KEY = sk("ant-mallory-second-7766");
+
+  /** First 16 hex chars of SHA-256(plaintext) — the pool id the store derives. */
+  async function keyIdOf(plainKey: string): Promise<string> {
+    const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(plainKey));
+    return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("").slice(0, 16);
+  }
+
+  /** One row of the payload's `keys` face (the store's ProviderKeySummary). */
+  type KeyRow = {
+    provider: string;
+    keyId: string;
+    last4: string;
+    updatedAt: string | null;
+    verifiedAt: string | null;
+    verifiedStatus: string | null;
+  };
+
+  async function getSettings(
+    env: Env,
+  ): Promise<{ keys: KeyRow[]; configured_providers: ConfiguredRow[] }> {
+    const res = await getJson(SETTINGS_JSON, "mallory", env);
+    expect(res.status).toBe(200);
+    return (await res.json()) as { keys: KeyRow[]; configured_providers: ConfiguredRow[] };
+  }
+
+  test("a second key for one provider is a new row — both add paths append, a re-submitted key stays one row", async () => {
+    const { db, app } = await seededWorld();
+    mockModelsOk(["claude-sonnet-4-6"]);
+    const env = makeEnv(db);
+    // The settings POST family and the SPA verify route write the same pool.
+    const first = await postForm(VERIFY, "mallory", env, { provider: "anthropic", key: PLAIN_KEY });
+    expect(first.status).toBe(200);
+    const second = await postForm(SETTINGS, "mallory", env, {
+      op: "add-key",
+      provider: "anthropic",
+      key: SECOND_KEY,
+    });
+    expect(second.status).toBe(200);
+    // Re-submitting the FIRST key updates in place — it never opens a third slot.
+    const resubmit = await postForm(VERIFY, "mallory", env, { provider: "anthropic", key: PLAIN_KEY });
+    expect(resubmit.status).toBe(200);
+    const store = createAppConfigStore(db, TEST_KEY);
+    expect((await store.listProviderKeys(app.id, "anthropic")).length).toBe(2);
+  });
+
+  test("the settings payload carries every row of the provider with its key identity", async () => {
+    const { db, app } = await seededWorld();
+    const store = createAppConfigStore(db, TEST_KEY);
+    await store.addProviderKey(app.id, "anthropic", PLAIN_KEY);
+    await store.addProviderKey(app.id, "anthropic", SECOND_KEY);
+    mockModelsOk(["claude-sonnet-4-6"]);
+    const res = await postForm(VERIFY, "mallory", makeEnv(db), { provider: "anthropic", key: PLAIN_KEY });
+    expect(res.status).toBe(200);
+
+    const body = await getSettings(makeEnv(db));
+    const firstId = await keyIdOf(PLAIN_KEY);
+    const secondId = await keyIdOf(SECOND_KEY);
+    // keys[]: one row per stored key — identity, mask, per-key bookkeeping.
+    expect(body.keys).toHaveLength(2);
+    expect(body.keys.every((row) => row.provider === "anthropic")).toBe(true);
+    expect(body.keys.map((row) => row.keyId).sort()).toEqual([firstId, secondId].sort());
+    expect(body.keys.map((row) => row.last4).sort()).toEqual([PLAIN_KEY.slice(-4), SECOND_KEY.slice(-4)].sort());
+    const verifiedOnce = body.keys.find((row) => row.keyId === firstId)!;
+    const neverVerified = body.keys.find((row) => row.keyId === secondId)!;
+    expect(verifiedOnce.verifiedStatus).toBe("ok");
+    expect(verifiedOnce.verifiedAt).toEqual(expect.any(String));
+    expect(neverVerified).toMatchObject({ verifiedAt: null, verifiedStatus: null });
+    // configured_providers carries the same two rows, each addressable by key_id.
+    const keyRows = body.configured_providers.filter((row) => row.kind === "key");
+    expect(keyRows).toHaveLength(2);
+    expect(keyRows.map((row) => row.key_id).sort()).toEqual([firstId, secondId].sort());
+    expect(keyRows.every((row) => row.provider === "anthropic")).toBe(true);
+    expect(JSON.stringify(body)).not.toContain(PLAIN_KEY);
+    expect(JSON.stringify(body)).not.toContain(SECOND_KEY);
+    expect(JSON.stringify(body)).not.toContain("key_enc");
+  });
+
+  test("verification is per key: verifying one row leaves its sibling untouched", async () => {
+    const { db, app } = await seededWorld();
+    const store = createAppConfigStore(db, TEST_KEY);
+    await store.addProviderKey(app.id, "anthropic", PLAIN_KEY);
+    await store.addProviderKey(app.id, "anthropic", SECOND_KEY);
+    mockModelsOk(["claude-sonnet-4-6"]);
+    const res = await postForm(VERIFY, "mallory", makeEnv(db), { provider: "anthropic", key: PLAIN_KEY });
+    expect(res.status).toBe(200);
+    const rows = await store.listProviderKeys(app.id, "anthropic");
+    expect(rows).toHaveLength(2);
+    const firstId = await keyIdOf(PLAIN_KEY);
+    const secondId = await keyIdOf(SECOND_KEY);
+    const verifiedRow = rows.find((row) => row.keyId === firstId)!;
+    const sibling = rows.find((row) => row.keyId === secondId)!;
+    expect(verifiedRow.verifiedStatus).toBe("ok");
+    expect(verifiedRow.verifiedAt).toEqual(expect.any(String));
+    expect(sibling).toMatchObject({ verifiedAt: null, verifiedStatus: null });
+  });
+
+  test("delete takes the key identity: exactly one row goes and the sibling stays", async () => {
+    const { db, app } = await seededWorld();
+    const store = createAppConfigStore(db, TEST_KEY);
+    await store.addProviderKey(app.id, "anthropic", PLAIN_KEY);
+    await store.addProviderKey(app.id, "anthropic", SECOND_KEY);
+    const res = await postForm(SETTINGS + "/key/delete", "mallory", makeEnv(db), {
+      provider: "anthropic",
+      key_id: await keyIdOf(PLAIN_KEY),
+    });
+    expect(res.status).toBe(200);
+    expect(await res.text()).toContain("Removed the stored anthropic key for mallorys-app");
+    const remaining = await store.listProviderKeys(app.id, "anthropic");
+    expect(remaining.map((row) => row.keyId)).toEqual([await keyIdOf(SECOND_KEY)]);
+  });
+
+  test("a delete without a key identity is a zero-write no-op — never a pool wipe", async () => {
+    const { db, app } = await seededWorld();
+    const store = createAppConfigStore(db, TEST_KEY);
+    await store.addProviderKey(app.id, "anthropic", PLAIN_KEY);
+    await store.addProviderKey(app.id, "anthropic", SECOND_KEY);
+    const res = await postForm(SETTINGS + "/key/delete", "mallory", makeEnv(db), { provider: "anthropic" });
+    expect(res.status).toBe(200);
+    expect(await res.text()).toContain("nothing changed");
+    expect((await store.listProviderKeys(app.id, "anthropic")).length).toBe(2);
+  });
+
+  test("an unknown key identity is a tolerant no-op", async () => {
+    const { db, app } = await seededWorld();
+    const store = createAppConfigStore(db, TEST_KEY);
+    await store.addProviderKey(app.id, "anthropic", PLAIN_KEY);
+    const res = await postForm(SETTINGS + "/key/delete", "mallory", makeEnv(db), {
+      provider: "anthropic",
+      key_id: "0".repeat(16),
+    });
+    expect(res.status).toBe(200);
+    expect(await res.text()).toContain("nothing changed");
+    expect((await store.listProviderKeys(app.id, "anthropic")).length).toBe(1);
+  });
+
+  test("the ninth key is a clear 400 on both add paths — the pool cap is never a silent no-op", async () => {
+    const { db, app } = await seededWorld();
+    const store = createAppConfigStore(db, TEST_KEY);
+    for (let i = 0; i < MAX_KEYS_PER_PROVIDER; i++) {
+      await store.addProviderKey(app.id, "anthropic", sk(`ant-pool-cap-${i}-${i}${i}${i}${i}`));
+    }
+    mockModelsOk(["claude-sonnet-4-6"]);
+    const ninth = sk("ant-pool-cap-over-9999");
+    const verified = await postForm(VERIFY, "mallory", makeEnv(db), { provider: "anthropic", key: ninth });
+    expect(verified.status).toBe(400);
+    const verifiedBody = (await verified.json()) as {
+      ok: boolean;
+      reason: string;
+      key: string;
+      params: Record<string, string | number>;
+    };
+    expect(verifiedBody).toMatchObject({
+      ok: false,
+      key: "settings.error.providerKeyLimit",
+      params: { provider: "anthropic", limit: MAX_KEYS_PER_PROVIDER },
+    });
+    const added = await postForm(SETTINGS, "mallory", makeEnv(db), {
+      op: "add-key",
+      provider: "anthropic",
+      key: ninth,
+    });
+    expect(added.status).toBe(400);
+    const addedBody = (await added.json()) as { key: string; params: Record<string, string | number> };
+    expect(addedBody.key).toBe("settings.error.providerKeyLimit");
+    expect(addedBody.params).toEqual({ provider: "anthropic", limit: MAX_KEYS_PER_PROVIDER });
+    expect(db.raw.query("SELECT COUNT(*) AS n FROM app_provider_keys").get() as { n: number }).toEqual({
+      n: MAX_KEYS_PER_PROVIDER,
+    });
   });
 });
 

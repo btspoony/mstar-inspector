@@ -2765,23 +2765,31 @@ describe("POST /dashboard/apps/:slug/settings — named chains (op=add-chain / r
   });
 });
 
-describe("POST /dashboard/apps/:slug/settings/key/delete (delete-key route)", () => {
-  test("owner removes a stored key: row gone, notice confirms", async () => {
+describe("POST /dashboard/apps/:slug/settings/key/delete (per-key delete route)", () => {
+  const SECOND_ANTHROPIC_KEY = sk("ant-mallory-second-7766");
+
+  test("owner removes ONE stored key by its id: that row goes, its sibling stays", async () => {
     const { db, app } = await seededWorld();
-    await configStore(db).addProviderKey(app.id, "anthropic", PLAIN_ANTHROPIC_KEY);
+    const store = configStore(db);
+    await store.addProviderKey(app.id, "anthropic", PLAIN_ANTHROPIC_KEY);
+    await store.addProviderKey(app.id, "anthropic", SECOND_ANTHROPIC_KEY);
     const res = await postForm(SETTINGS + "/key/delete", `${SESSION_COOKIE}=${await sessionCookie("mallory")}`, makeEnv(db), {
       provider: "anthropic",
+      key_id: await keyIdOf(PLAIN_ANTHROPIC_KEY),
     });
     expect(res.status).toBe(200);
     expect(await res.text()).toContain("Removed the stored anthropic key for mallorys-app");
-    expect(rawCount(db, "app_provider_keys")).toBe(0);
+    const remaining = await store.listProviderKeys(app.id, "anthropic");
+    expect(remaining.map((key) => key.keyId)).toEqual([await keyIdOf(SECOND_ANTHROPIC_KEY)]);
   });
 
-  test("removing a never-stored provider is a tolerant warn — zero mutation", async () => {
+  test("an unmatched key id (or a never-stored provider) is a tolerant warn — zero mutation", async () => {
     const { db, app } = await seededWorld();
-    await configStore(db).addProviderKey(app.id, "anthropic", PLAIN_ANTHROPIC_KEY);
+    const store = configStore(db);
+    await store.addProviderKey(app.id, "anthropic", PLAIN_ANTHROPIC_KEY);
     const res = await postForm(SETTINGS + "/key/delete", `${SESSION_COOKIE}=${await sessionCookie("mallory")}`, makeEnv(db), {
       provider: "openai",
+      key_id: await keyIdOf(PLAIN_ANTHROPIC_KEY),
     });
     expect(res.status).toBe(200);
     expect(await res.text()).toContain("nothing changed");
@@ -2793,6 +2801,7 @@ describe("POST /dashboard/apps/:slug/settings/key/delete (delete-key route)", ()
     await configStore(db).addProviderKey(app.id, "anthropic", PLAIN_ANTHROPIC_KEY);
     const res = await postForm(SETTINGS + "/key/delete", `${SESSION_COOKIE}=${await sessionCookie("hubot")}`, makeEnv(db), {
       provider: "anthropic",
+      key_id: await keyIdOf(PLAIN_ANTHROPIC_KEY),
     });
     expect(res.status).toBe(403);
     expect(rawCount(db, "app_provider_keys")).toBe(1);
@@ -2803,6 +2812,7 @@ describe("POST /dashboard/apps/:slug/settings/key/delete (delete-key route)", ()
     await configStore(db).addProviderKey(app.id, "anthropic", PLAIN_ANTHROPIC_KEY);
     const res = await postForm(SETTINGS + "/key/delete", `${SESSION_COOKIE}=${await sessionCookie("octocat")}`, makeEnv(db), {
       provider: "anthropic",
+      key_id: await keyIdOf(PLAIN_ANTHROPIC_KEY),
     });
     expect(res.status).toBe(200);
     expect(rawCount(db, "app_provider_keys")).toBe(0);

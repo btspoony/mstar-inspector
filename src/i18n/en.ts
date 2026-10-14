@@ -218,6 +218,8 @@ export const en = {
     apiKeyPlaceholder: "Paste the provider API key",
     keyEnding: "key ending {last4}",
     keyTooShort: "key too short to show a tail",
+    keyVerifiedAt: "verified {time}",
+    keyVerifyFailed: "verification failed",
     updated: "updated {time}",
     remove: "Remove",
     selectProvider: "Search model providers…",
@@ -278,6 +280,8 @@ export const en = {
       apiKeyRequired: "Enter an API key to store.",
       apiKeyTooLong:
         "That API key is too long ({count} characters) — keys are limited to {limit} characters. Nothing was stored.",
+      providerKeyLimit:
+        "{provider} already holds the maximum of {limit} keys — remove one before adding another. Nothing was stored.",
       chainFieldDuplicated: "The model chain field was submitted more than once — resubmit the form. Nothing was saved.",
       chainTooLong: "That model chain is too long ({count} characters) — limited to {limit} characters. Nothing was saved.",
       chainEmpty: "Enter at least one comma-separated model selector.",
@@ -393,8 +397,9 @@ export const en = {
     confirmRemoveChainTitle: "Remove chain {name}?",
     confirmRemoveChainBody: "Seats using {name} fall back to the default chain.",
     consoleOnly: "This provider can't be verified here — manage the key in the provider console.",
-    confirmRemoveKeyTitle: "Remove the {provider} key?",
-    confirmRemoveKeyBody: "Selectors that need {provider} will fail until you verify a new key.",
+    confirmRemoveKeyTitle: "Remove the {provider} key ending {last4}?",
+    confirmRemoveKeyBody:
+      "The App's other {provider} keys stay. Selectors that depend on this key alone fail until you verify a replacement.",
     confirmRemoveCustomTitle: "Remove provider {provider}?",
     confirmRemoveCustomBody: "The provider and its stored key are removed. Chains referencing its models fail on save.",
     runtimeImage: "Runtime image",

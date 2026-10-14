@@ -20,10 +20,12 @@ import {
   parseMembers,
   parseSettings,
   providerFormKind,
+  providerKeyRows,
   REVIEW_TRIGGER_MODES,
   selectedCatalogProvider,
   type CatalogProvider,
   type ModelChainEntry,
+  type ProviderKeyRow,
 } from "../../src/spa/pages/data";
 import { DEFAULT_CHAIN_NAME as STORE_DEFAULT_CHAIN_NAME } from "../../src/dashboard/app-config-store";
 
@@ -373,15 +375,34 @@ describe("members/apps/settings parsers", () => {
     expect(parseSettings({ ...manageBase, provider_catalog: [{ ...catalogRow, eligibility: "maybe" }] })).toBeNull();
     // A configured row without the `kind` discriminator (catalog-shaped) is rejected.
     expect(parseSettings({ ...manageBase, configured_providers: [{ ...catalogRow }] })).toBeNull();
-    // Key rows need the masked tail (never plaintext) and a nullable timestamp.
+    // Key rows need their identity, the masked tail (never plaintext) and the
+    // nullable bookkeeping columns.
+    expect(
+      parseSettings({
+        ...manageBase,
+        configured_providers: [
+          {
+            kind: "key",
+            provider: "anthropic",
+            key_id: "a".repeat(16),
+            last4: "9988",
+            updated_at: null,
+            verified_at: null,
+            verified_status: null,
+          },
+        ],
+      }),
+    ).not.toBeNull();
+    expect(
+      parseSettings({ ...manageBase, configured_providers: [{ kind: "key", provider: "anthropic" }] }),
+    ).toBeNull();
+    // A key row without its identity (the pre-multi-key shape) is rejected —
+    // the row could not be deleted or re-verified without it.
     expect(
       parseSettings({
         ...manageBase,
         configured_providers: [{ kind: "key", provider: "anthropic", last4: "9988", updated_at: null }],
       }),
-    ).not.toBeNull();
-    expect(
-      parseSettings({ ...manageBase, configured_providers: [{ kind: "key", provider: "anthropic" }] }),
     ).toBeNull();
     // Custom declaration rows need base_url/api and a string model list.
     expect(
@@ -599,8 +620,26 @@ describe("provider catalog rows + add selection", () => {
   test("saved provider refresh: stored keys and custom declarations parse as the configured list", () => {
     const saved = parseSettings({
       ...manageBase,
+      keys: [
+        {
+          provider: "anthropic",
+          keyId: "a".repeat(16),
+          last4: "9988",
+          updatedAt: "2026-09-04 10:00:00",
+          verifiedAt: "2026-09-04 10:05:00",
+          verifiedStatus: "ok",
+        },
+      ],
       configured_providers: [
-        { kind: "key", provider: "anthropic", last4: "9988", updated_at: "2026-09-04 10:00:00" },
+        {
+          kind: "key",
+          provider: "anthropic",
+          key_id: "a".repeat(16),
+          last4: "9988",
+          updated_at: "2026-09-04 10:00:00",
+          verified_at: "2026-09-04 10:05:00",
+          verified_status: "ok",
+        },
         {
           kind: "custom",
           provider_id: "workers-ai",
@@ -617,12 +656,57 @@ describe("provider catalog rows + add selection", () => {
     const rows = saved && saved.can_manage ? saved.configured_providers : [];
     expect(rows).toHaveLength(2);
     const [keyRow, customRow] = rows;
-    expect(keyRow).toEqual({ kind: "key", provider: "anthropic", last4: "9988", updated_at: "2026-09-04 10:00:00" });
+    expect(keyRow).toMatchObject({ kind: "key", provider: "anthropic", last4: "9988" });
     expect(customRow && customRow.kind === "custom" && customRow.provider_id).toBe("workers-ai");
     // The refreshed payload keeps catalog vs configured disjoint even after
     // a save: both catalog rows remain discovery-only.
     const catalogRows = saved && saved.can_manage ? saved.provider_catalog : [];
     expect(catalogRows).toHaveLength(2);
+  });
+
+  test("multi-key rows stay one row each — a second key of one provider never overwrites the first", () => {
+    const first: ProviderKeyRow = {
+      provider: "anthropic",
+      keyId: "a".repeat(16),
+      last4: "1111",
+      updatedAt: "2026-09-04 10:00:00",
+      verifiedAt: null,
+      verifiedStatus: null,
+    };
+    const second: ProviderKeyRow = { ...first, keyId: "b".repeat(16), last4: "2222" };
+    const other: ProviderKeyRow = { ...first, provider: "openai", keyId: "c".repeat(16), last4: "3333" };
+    // The provider's rows come back whole, in payload order — the client map
+    // that used to fold them by provider id dropped the second row.
+    expect(providerKeyRows([first, second, other], "anthropic").map((row) => row.keyId)).toEqual([
+      first.keyId,
+      second.keyId,
+    ]);
+    expect(providerKeyRows([first, second, other], "anthropic").map((row) => row.last4)).toEqual(["1111", "2222"]);
+    expect(providerKeyRows([first, second, other], "never-stored")).toEqual([]);
+  });
+
+  test("parseSettings row-validates the keys face: identity, mask and both nullable bookkeeping columns", () => {
+    const keyRow: ProviderKeyRow = {
+      provider: "anthropic",
+      keyId: "a".repeat(16),
+      last4: "1111",
+      updatedAt: null,
+      verifiedAt: null,
+      verifiedStatus: null,
+    };
+    expect(parseSettings({ ...manageBase, keys: [keyRow] })).not.toBeNull();
+    // A drifted row (no key identity, no mask) fails the parse instead of
+    // rendering a row nothing can address.
+    const { keyId: _droppedId, ...withoutId } = keyRow;
+    expect(parseSettings({ ...manageBase, keys: [withoutId] })).toBeNull();
+    expect(parseSettings({ ...manageBase, keys: [{ provider: "anthropic", last4: "1111" }] })).toBeNull();
+    // The verification vocabulary is closed (store-enforced ok|failed) — an
+    // off-vocabulary status fails the parse instead of rendering a state the
+    // row can never hold.
+    expect(
+      parseSettings({ ...manageBase, keys: [{ ...keyRow, verifiedStatus: "maybe" }] }),
+    ).toBeNull();
+    expect(parseSettings({ ...manageBase, keys: [{ ...keyRow, verifiedStatus: "failed" }] })).not.toBeNull();
   });
 });
 

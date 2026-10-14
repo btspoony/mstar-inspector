@@ -78,11 +78,13 @@ import {
   MAX_CUSTOM_PROVIDER_MODEL_IDS,
   MAX_MODEL_CHAIN_NAME_LENGTH,
   MAX_MODEL_SELECTOR_LENGTH,
+  MAX_KEYS_PER_PROVIDER,
   MAX_PROVIDER_KEY_LENGTH,
   MODEL_CHAIN_NAME_PATTERN,
   MODEL_ROLE_IDS,
   PROVIDER_IDS,
   PROVIDER_META,
+  ProviderKeyLimitError,
   createAppConfigStore,
   parseModelChain,
   type AppConfigBatchFace,
@@ -1294,6 +1296,7 @@ const SETTINGS_400_KEYS = {
   providerUnavailableOnImage: "settings.error.providerUnavailableOnImage",
   apiKeyRequired: "settings.error.apiKeyRequired",
   apiKeyTooLong: "settings.error.apiKeyTooLong",
+  providerKeyLimit: "settings.error.providerKeyLimit",
   chainFieldDuplicated: "settings.error.chainFieldDuplicated",
   chainTooLong: "settings.error.chainTooLong",
   chainEmpty: "settings.error.chainEmpty",
@@ -1354,13 +1357,29 @@ function settings400Response(
   return c.json({ key, message: t("en", key, params), ...(params ? { params } : {}) }, 400);
 }
 
+/**
+ * The pool-bound rejection (`MAX_KEYS_PER_PROVIDER`, thrown by the store when a
+ * NEW key would exceed the (App, provider) pool) as the keyed 400 the SPA
+ * replays in the operator's locale. ONE mapping shared by every settings path
+ * that stores a key, so the cap can never surface as a generic 500.
+ */
+function settingsKeyLimitResponse(
+  c: Context<{ Bindings: Env }>,
+  slug: string,
+  provider: string,
+): Response {
+  return settings400Response(c, slug, SETTINGS_400_KEYS.providerKeyLimit, {
+    provider,
+    limit: MAX_KEYS_PER_PROVIDER,
+  });
+}
+
 function mapVerifyReason(
   reason: VerifyFailureReason,
 ): "invalid_key" | "unreachable" | "unexpected" | "unsupported_provider" {
   if (reason === "invalid_key" || reason === "unreachable" || reason === "unsupported_provider") return reason;
   return "unexpected";
 }
-
 function verifyFailCopy(reason: ReturnType<typeof mapVerifyReason>): string {
   if (reason === "invalid_key") return "That API key was rejected by the provider — nothing was stored.";
   if (reason === "unreachable") return "The provider could not be reached — nothing was stored.";
@@ -1588,8 +1607,11 @@ dashboardApp.get("/api/apps/:slug/settings", async (c) => {
         ...maskedKeys.map((key) => ({
           kind: "key" as const,
           provider: key.provider,
+          key_id: key.keyId,
           last4: key.last4,
           updated_at: key.updatedAt,
+          verified_at: key.verifiedAt,
+          verified_status: key.verifiedStatus,
         })),
         ...customProviders.map((row) => ({
           kind: "custom" as const,
@@ -1717,6 +1739,22 @@ dashboardApp.post("/api/apps/:slug/keys/verify", async (c) => {
     return c.json({ ok: true, provider, models: verified.models });
   } catch (err) {
     logSettingsFailure("verify_key", gate.app.id, err);
+    // The pool cap (MAX_KEYS_PER_PROVIDER) is a client-side precondition, not a
+    // provider failure: the reason enum stays closed, the keyed face carries
+    // the clear message the SPA resolves in the operator's locale.
+    if (err instanceof ProviderKeyLimitError) {
+      const params = { provider, limit: MAX_KEYS_PER_PROVIDER };
+      return c.json(
+        {
+          ok: false,
+          reason: "unexpected" as const,
+          key: SETTINGS_400_KEYS.providerKeyLimit,
+          message: t("en", SETTINGS_400_KEYS.providerKeyLimit, params),
+          params,
+        },
+        400,
+      );
+    }
     return c.json({ ok: false, reason: "unexpected" as const }, 500);
   }
 });
@@ -1806,6 +1844,9 @@ dashboardApp.post("/apps/:slug/settings", async (c) => {
       await store.saveVerifiedKey(gate.app.id, provider, plainKey, verified.models);
     } catch (err) {
       logSettingsFailure("add_key", gate.app.id, err);
+      if (err instanceof ProviderKeyLimitError) {
+        return settingsKeyLimitResponse(c, gate.app.slug, provider);
+      }
       return settingsPostResponse(c, gate.app.slug, settingsFailureNotice(err), 500);
     }
     return settingsPostResponse(c, gate.app.slug, `Stored the ${provider} key for ${gate.app.slug} — it is only ever shown masked.`,
@@ -2094,6 +2135,10 @@ dashboardApp.post("/apps/:slug/settings", async (c) => {
       if (err instanceof InvalidCustomProviderError) {
         return settings400Response(c, gate.app.slug, SETTINGS_400_KEYS.customProviderDeclRejected);
       }
+      // The declaration's key POOL can be full (the cap is per (App, provider)).
+      if (err instanceof ProviderKeyLimitError) {
+        return settingsKeyLimitResponse(c, gate.app.slug, providerId);
+      }
       return settingsPostResponse(c, gate.app.slug, settingsFailureNotice(err), 500);
     }
     return settingsPostResponse(c, gate.app.slug, `Declared custom provider ${providerId} for ${gate.app.slug} — its key is stored encrypted and injected by environment variable name.`,
@@ -2223,6 +2268,9 @@ dashboardApp.post("/apps/:slug/settings", async (c) => {
       if (err instanceof InvalidCustomProviderError) {
         return settings400Response(c, gate.app.slug, SETTINGS_400_KEYS.customProviderDeclRejected);
       }
+      if (err instanceof ProviderKeyLimitError) {
+        return settingsKeyLimitResponse(c, gate.app.slug, templateId);
+      }
       return settingsPostResponse(c, gate.app.slug, settingsFailureNotice(err), 500);
     }
     return settingsPostResponse(c, gate.app.slug, `Materialized the ${template.label} template as custom provider ${templateId} for ${gate.app.slug} — its key is stored encrypted and injected by environment variable name.`,
@@ -2279,16 +2327,20 @@ dashboardApp.post("/apps/:slug/settings/key/delete", async (c) => {
   if (!gate.ok) return gate.response;
   const form = await c.req.parseBody();
   const provider = typeof form.provider === "string" ? form.provider.trim() : "";
+  // The key identity is the delete target: the (App, provider) pool holds one
+  // row per key, so a provider-only delete would take the sibling keys with it.
+  const keyId = typeof form.key_id === "string" ? form.key_id.trim() : "";
   const store = createAppConfigStore(gate.db, c.env.DASHBOARD_ENCRYPTION_KEY);
   let removed: boolean;
   try {
-    removed = await store.removeProviderKey(gate.app.id, provider);
+    removed = await store.deleteProviderKey(gate.app.id, provider, keyId);
   } catch (err) {
     logSettingsFailure("remove_key", gate.app.id, err);
     return settingsPostResponse(c, gate.app.slug, settingsFailureNotice(err), 500);
   }
   // Tolerant no-op (the allowlist already bounds what can ever be stored):
-  // an unknown provider simply has no row — a 2xx, not a 400.
+  // an unknown provider — or a key id no row matches, including an absent one —
+  // simply has no row: a 2xx, not a 400.
   return settingsPostResponse(
     c,
     gate.app.slug,

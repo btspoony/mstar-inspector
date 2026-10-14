@@ -257,6 +257,38 @@ describe("configured providers + catalog add flow", () => {
   });
 });
 
+describe("multi-key provider rows (one row per key, no client-side fold)", () => {
+  const page = readFileSync(join(import.meta.dir, "../../src/spa/pages/SettingsPage.tsx"), "utf8");
+
+  test("every configured key row is keyed by its key identity — two keys of one provider are two rows", () => {
+    // React key: provider + key id. The bare provider collided as soon as a
+    // (App, provider) pool held a second key.
+    expect(page).toContain('key={row.kind === "key" ? `${row.provider}:${row.key_id}` : row.provider_id}');
+    // Per-row delete carries the identity the route deletes by (plus the row's
+    // tail for the confirm copy).
+    expect(page).toContain(
+      'onPending({ kind: "remove-key", provider: row.provider, keyId: row.key_id, last4: row.last4 })',
+    );
+    // …and the confirmed POST sends that identity (never a provider-only delete,
+    // which would take the provider's other keys with it).
+    expect(page).toContain("key_id: action.keyId");
+    expect(page).toContain("const slot = configured.findIndex(");
+  });
+
+  test("the key row renders the per-key verification state", () => {
+    expect(page).toContain("settings.keyVerifiedAt");
+    expect(page).toContain("settings.keyVerifyFailed");
+    const keyRow = page.slice(page.indexOf("function ConfiguredKeyRow"), page.indexOf("function ConfiguredCustomRow"));
+    expect(keyRow).toContain("row.verified_status");
+  });
+
+  test("a provider's stored keys are listed whole — the add form never folds keys[] into one slot", () => {
+    expect(page).not.toContain("keyByProvider[key.provider] = key");
+    expect(page).toContain("providerKeyRows(payload.keys, selected.id)");
+    expect(page).toContain("storedKeys.map(");
+  });
+});
+
 describe("catalog provenance + eligibility messaging", () => {
   test("Add Provider discloses provenance and per-entry eligibility vs the selected runtime image", () => {
     const source = readFileSync(join(import.meta.dir, "../../src/spa/pages/SettingsPage.tsx"), "utf8");
