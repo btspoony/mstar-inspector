@@ -52,10 +52,13 @@
  *   `unavailable (post-secret lookup failed)` marker — never the deploy-log
  *   predecessor — when that lookup cannot confirm the version;
  * - the healthz smoke comparing the live version to the deployed tag;
- * - the deploy step's version-id gate: the recorded value must be a UUID
- *   (`wrangler deploy` prints one) — a bare non-emptiness test passes on a lone
- *   newline, so the shape is asserted and the step fails loudly, while the
- *   deliberately non-fatal re-capture step keeps its own `unavailable …` marker;
+ * - the deploy step's version-id RECORDING (never a gate): the value recorded
+ *   as this release's evidence is shape-asserted (a UUID — bare non-emptiness
+ *   passes on a lone newline); a non-UUID payload writes the explicit
+ *   `unavailable (deploy log had no version id)` marker plus a `::warning::`
+ *   and the run continues, because the Worker is already live and the secret
+ *   writes have not run yet — and the deliberate post-mutation re-capture
+ *   supersedes whatever lands there;
  * - the digest-from-deploy-log rule and its never-fatal property (a no-push
  *   deploy records the literal `unchanged (no push in this deploy)` and exits 0);
  * - evidence artifact + run summary;
@@ -1015,22 +1018,30 @@ printf 'Uploaded mstar-inspector-production\\nCurrent Version ID: %s\\n' "$WRANG
     }
   }
 
-  test("version-id gate asserts the UUID shape, not bare non-emptiness (nit e)", () => {
+  test("deploy-log version recording asserts the UUID shape and is NEVER fatal (nit e)", () => {
     const deploy = steps.find((s) => s.name === "Deploy Worker (prod)")!;
     const run = deploy.run!;
     // `test -s` passes on a lone newline — the value is this release's evidence,
-    // so the SHAPE is what gets asserted, and only the deploy step's own
-    // extraction fails loudly on it.
+    // so the SHAPE is asserted.
     expect(run).not.toContain("test -s version_id.txt");
     expect(run).toContain("'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'");
-    expect(run).toContain("::error::");
-    expect(run).toContain("exit 1");
-    // the deliberately non-fatal re-capture step keeps its own marker instead
+    // Recording only. The Worker is LIVE before this line and the secret writes
+    // come after it: a log-shape problem must never strand the run — it records
+    // the explicit marker + a warning, and the post-secret re-capture overwrites
+    // it.
+    expect(run).toContain('"unavailable (deploy log had no version id)"');
+    expect(run).toContain("::warning::");
+    expect(run).not.toContain("::error");
+    expect(run).not.toContain("exit 1");
+    // the narration states why: the re-capture supersedes this value.
+    const text = readFileSync(join(REPO_ROOT, ".github", "workflows", WORKFLOW), "utf8");
+    expect(text).toContain("the post-secret re-capture overwrites it");
+    // the re-capture step keeps its own, distinct marker
     const recap = steps.find((s) => s.name === "Re-capture live Worker version")!;
     expect(recap.run).not.toContain("no Worker version id");
   });
 
-  test("version-id gate script EXECUTES: a UUID is recorded, a non-UUID payload fails loudly", () => {
+  test("version-id recording script EXECUTES: a UUID is recorded, a non-UUID payload records the marker and exits 0", () => {
     const deploy = steps.find((s) => s.name === "Deploy Worker (prod)")!;
     const uuid = "40a71ea8-1111-2222-3333-444455556666";
 
@@ -1038,37 +1049,39 @@ printf 'Uploaded mstar-inspector-production\\nCurrent Version ID: %s\\n' "$WRANG
     expect(ok.code).toBe(0);
     expect(ok.recorded).toBe(uuid);
 
-    // a short/non-UUID token: the pre-fix gate (`test -s`) accepted it
+    // a short/non-UUID token: the pre-fix gate (`test -s`) accepted it, and the
+    // round-3 fix must not `exit 1` on it either — the marker is recorded.
     const short = runDeployStep(deploy.run!, "deadbeef");
-    expect(short.code).not.toBe(0);
-    expect(short.out).toContain("no Worker version id");
+    expect(short.code).toBe(0);
+    expect(short.recorded).toBe("unavailable (deploy log had no version id)");
+    expect(short.out).toContain("::warning::");
 
     // a value-less log line (trailing spaces): `cut` yields an empty field, the
-    // file gets a lone newline — the exact hole `test -s` left open
+    // file got a lone newline — the exact hole `test -s` left open — and the run
+    // still continues.
     const blank = runDeployStep(deploy.run!, "  ");
-    expect(blank.code).not.toBe(0);
-    expect(blank.out).toContain("no Worker version id");
+    expect(blank.code).toBe(0);
+    expect(blank.recorded).toBe("unavailable (deploy log had no version id)");
+    expect(blank.out).toContain("::warning::");
   });
 
-  test("MUTATION/reverting to `test -s version_id.txt`: the value-less payload passes the old gate", () => {
-    // The pin above is load-bearing: swap the shape gate back for the reviewed
-    // bare non-emptiness test and the lone-newline payload sails through.
+  test("MUTATION/reintroducing `exit 1` in the deploy-log recording: a first bring-up would strand the run", () => {
+    // Round-3 nit 1's failure mode: the Worker is already live and the secrets
+    // are not written yet, so exiting on a log-shape problem leaves production
+    // serving without them. Show the non-fatal pin above fails on that edit.
     const deploy = steps.find((s) => s.name === "Deploy Worker (prod)")!;
     const src = deploy.run!;
-    const write = "printf '%s\\n' \"$VERSION_ID\" > version_id.txt";
-    const start = src.indexOf("if ! printf '%s' \"$VERSION_ID\"");
-    const end = src.indexOf(write);
-    expect(start).toBeGreaterThanOrEqual(0);
-    expect(end).toBeGreaterThan(start);
-    const mutated =
-      src.slice(0, start) + write + "\n          test -s version_id.txt\n          " + src.slice(end + write.length);
+    const marker = 'printf \'%s\\n\' "unavailable (deploy log had no version id)" > version_id.txt';
+    expect(src).toContain(marker);
+    const mutated = src.replace(marker, "exit 1");
     expect(mutated).not.toBe(src);
 
     const fixed = runDeployStep(src, "  ");
-    expect(fixed.code).not.toBe(0);
+    expect(fixed.code).toBe(0);
+    expect(fixed.recorded).toBe("unavailable (deploy log had no version id)");
     const unfixed = runDeployStep(mutated, "  ");
-    expect(unfixed.code).toBe(0);
-    expect(unfixed.recorded).toBe("");
+    expect(unfixed.code).not.toBe(0);
+    expect(unfixed.recorded).toBe("<absent>");
   });
 
   test("healthz smoke asserts the deployed tag's version, not mere liveness", () => {

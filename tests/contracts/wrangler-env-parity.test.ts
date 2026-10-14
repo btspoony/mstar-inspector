@@ -150,16 +150,40 @@ function migrationFingerprints(block: Json): string[] {
 }
 
 /**
- * Fingerprint of one `containers[]` entry: its `class_name` plus the image
- * keys it declares. The image `dockerfile`/`build_context` VALUES stay owned
- * by `sandbox-images.test.ts`; only the shape is locked here.
+ * Fingerprint of one `containers[]` entry: its `class_name`, its
+ * `scheduling_policy` and the image keys it declares. The scheduling policy is
+ * pinned here because a container application canNOT change it in place
+ * (Sandbox 1.0 migration), so a staging-only change would deploy a production
+ * Worker whose DO namespace shape no longer matches. The image
+ * `dockerfile`/`build_context` VALUES stay owned by `sandbox-images.test.ts`;
+ * only the shape is locked here.
  */
 function containerFingerprints(block: Json): string[] {
   return asArray(block.containers).map(
     (entry) =>
-      `class_name=${String(entry.class_name)}|images=${Object.keys(asObject(entry.images))
+      `class_name=${String(entry.class_name)}|scheduling_policy=${String(entry.scheduling_policy)}|images=${Object.keys(asObject(entry.images))
         .sort()
         .join(",")}`,
+  );
+}
+
+/**
+ * Fingerprint of the protective tuning each `queues.consumers[]` entry
+ * declares. `dead_letter_queue` enters as PRESENCE, never as a value: staging
+ * and production each point at their OWN DLQ (`review-dlq` vs
+ * `review-dlq-prod` — their distinctness is asserted above), but a consumer
+ * that declares no DLQ at all, or drops its retry batch bounds, is exactly the
+ * drift this lock catches. Both consumers are pinned at max_batch_size 1,
+ * max_concurrency 1 and max_retries 3 (see the wrangler.jsonc rationale).
+ */
+function consumerTuningFingerprints(block: Json): string[] {
+  return asArray(asObject(block.queues).consumers).map((entry) =>
+    [
+      `max_batch_size=${String(entry.max_batch_size)}`,
+      `max_concurrency=${String(entry.max_concurrency)}`,
+      `max_retries=${String(entry.max_retries)}`,
+      `dead_letter_queue=${"dead_letter_queue" in entry ? "set" : "none"}`,
+    ].join("|"),
   );
 }
 
@@ -242,9 +266,16 @@ describe("wrangler env.production parity (PR #63 should-fix)", () => {
     expectSameSet("migrations", migrationFingerprints);
   });
 
+  /** The consumer tuning is the protective fix (max_concurrency 1 against
+   * `max_instances: 1`): a staging-only loosening would silently open a retry
+   * storm → DLQ path in production. */
+  test("queues.consumers[] tuning (batch size, concurrency, retries, DLQ presence) matches between the top level and env.production", () => {
+    expectSameSet("queues.consumers[] tuning", consumerTuningFingerprints);
+  });
+
   /** A second/unregistered container entry must fail the lock, not hide behind
    * the first. Image values stay owned by `sandbox-images.test.ts`. */
-  test("containers (class_name + images keys) match between the top level and env.production", () => {
+  test("containers (class_name + scheduling_policy + images keys) match between the top level and env.production", () => {
     expectSameSet("containers[]", containerFingerprints);
   });
 

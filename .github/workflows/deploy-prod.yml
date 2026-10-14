@@ -128,11 +128,15 @@ jobs:
             exit 1
           fi
 
-      # The `production` environment's marker variable exists ONLY at that
-      # environment level, so a run resolving repository- or organization-level
-      # values fails here before any mutation. It proves the job ran under the
-      # `production` environment; it canNOT prove secret provenance —
-      # `secrets.X` still falls back environment → repository → organization.
+      # `vars` resolves environment → repository → organization, so a
+      # repository- or organization-level `PROD_ENV_MARKER=production` would
+      # satisfy this assertion too. What it proves is that the EFFECTIVE value
+      # for this step resolved to `production` — NOT which level supplied it,
+      # and not secret provenance either (`secrets.X` falls back the same way).
+      # The variable must NEVER be defined outside the `production` environment:
+      # the assertion is a bring-up aid, not a provenance proof. It still runs
+      # before any mutation, so a run whose variables simply do not resolve
+      # reds here.
       - name: Assert production environment marker
         env:
           PROD_ENV_MARKER: ${{ vars.PROD_ENV_MARKER }}
@@ -233,18 +237,23 @@ jobs:
           set -euo pipefail
           bunx wrangler deploy --env production 2>&1 | tee deploy.log
           VERSION_ID="$(grep -oE 'Current Version ID: .+' deploy.log | tail -1 | cut -d' ' -f4 || true)"
-          # The value is recorded as this release's evidence, so bare
-          # non-emptiness is no gate at all: `test -s` passes on a lone newline,
-          # which is exactly what a log line without a value leaves behind.
-          # Assert wrangler's shape — a UUID — and fail loudly only on THIS
-          # step's own extraction. The re-capture step below writes its own
-          # explicit `unavailable …` marker for a missing value and stays
-          # deliberately non-fatal (evidence is a recording surface).
-          if ! printf '%s' "$VERSION_ID" | grep -qiE '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'; then
-            echo "::error::wrangler deploy reported no Worker version id in deploy.log (got '${VERSION_ID}') — refusing to record it as the deployed version"
-            exit 1
+          # Recording only — NEVER a gate. The Worker is already LIVE here and
+          # the secret writes below have not run yet: a log-shape problem that
+          # exited now would strand a first bring-up serving without its
+          # OAuth/session secrets, and a rerun reading the same log shape could
+          # not converge. Bare non-emptiness is no gate either — `test -s` passes
+          # on a lone newline, exactly what a value-less log line leaves behind —
+          # so wrangler's shape (a UUID) is asserted, and a non-UUID payload
+          # records the explicit marker + a ::warning:: instead of failing. The
+          # live re-capture step below SUPERSEDES whatever lands here once the
+          # secrets have been written, which is why a log-shape problem must not
+          # strand the run.
+          if printf '%s' "$VERSION_ID" | grep -qiE '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'; then
+            printf '%s\n' "$VERSION_ID" > version_id.txt
+          else
+            printf '%s\n' "unavailable (deploy log had no version id)" > version_id.txt
+            echo "::warning::wrangler deploy reported no Worker version id in deploy.log (got '${VERSION_ID}') — recorded the unavailable marker; the post-secret re-capture overwrites it"
           fi
-          printf '%s\n' "$VERSION_ID" > version_id.txt
 
       # Secrets AFTER the deploy: on a first bring-up the old order let
       # `secret bulk` materialise a bound-less draft Worker holding production
