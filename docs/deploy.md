@@ -347,9 +347,10 @@ only via `wrangler deploy`).
 ## Deploy steps (manual reference)
 
 > The automated path (§ Automated deploy) runs the same sequence in CI —
-> typecheck/test → secrets → D1 migrations → `wrangler deploy` → smoke →
-> digest record. The steps below are the manual equivalent, kept as reference
-> for local runs and for recovering from a failed automated deploy.
+> typecheck/test → required-input gate → secrets → D1 migrations →
+> `wrangler deploy` → smoke → digest record. The steps below are the manual
+> equivalent, kept as reference for local runs and for recovering from a
+> failed automated deploy.
 
 Order lock (plan Clarify #5): code merge → `wrangler deploy` (the container
 image auto-rebuilds when the Dockerfile/build context changed) → post-deploy
@@ -391,12 +392,16 @@ smoke → record the digest.
    branch, fetches `main`, and diffs against it. `/smoke` only reaches the
    clone in its **fallback** path; its primary path runs
    `gh pr diff 1 --repo <repo>` on the same PR.
-4. `bun run build:spa && wrangler deploy` — build the SPA assets first
+4. `bun run build:spa && wrangler deploy --var "ADMIN_LOGINS:alice,bob"` —
+   build the SPA assets first
    (`dist/spa` is gitignored — a fresh clone has none, and `wrangler.jsonc`
    serves them via `assets`), then deploy the Worker (webhook face + queue
    consumer + cron trigger). The step also rebuilds/pushes the container
    image when the build context changed. **Copy the image digest from the
-   deploy output.**
+   deploy output.** The `--var` is required and carries the same value the
+   Deploy workflow injects (`--var "ADMIN_LOGINS:$ADMIN_LOGINS"`): a manual
+   `wrangler deploy` that omits it leaves the first OAuth login on an empty
+   `users` table as admin (§ 6).
 5. Record the digest baseline — on the automated path the workflow greps it
    out of the deploy log (`Smoke: image digest`), then writes it to the run
    summary (`$GITHUB_STEP_SUMMARY`) and uploads `deploy-evidence` artifacts;
@@ -713,16 +718,28 @@ The Deploy workflow:
 
 1. **Fails closed before deploying** when the variable is missing, blank,
    whitespace-only, or comma-only — the `Verify required ADMIN_LOGINS variable`
-   step runs before `wrangler deploy`, so a misconfigured operator never ships
-   a Worker with the first-login-becomes-admin fallback silently armed. The
+   step runs before the **first** `wrangler` invocation of any kind
+   (`wrangler whoami`, the secret writes, and the final `wrangler deploy`):
+   `wrangler secret bulk` publishes a Worker version of its own, so a gate
+   placed after it would already have shipped a version without the required
+   binding. A misconfigured operator therefore never ships a Worker with the
+   first-login-becomes-admin fallback silently armed. The
    step imports and calls the runtime parser itself
    (`parseAdminLogins`, `src/dashboard/users.ts`) and fails when it yields zero
    logins, so the deploy gate cannot drift from the Worker's own rule.
-2. **Injects it into the Worker** at deploy time via
+2. **Is passed explicitly on every manual deploy too** — the documented
+   manual paths ([`README.md`](../README.md) Path A step 5 / Path B step 1 and
+   § Deploy steps step 4 above) deploy with
+   `wrangler deploy --var "ADMIN_LOGINS:<comma-separated logins>"`, the same
+   value this workflow injects. `wrangler.jsonc` defines no `ADMIN_LOGINS`, so
+   a bare `wrangler deploy` is **not** a supported deploy path: it would ship
+   with the fallback armed. There is no second deployment path — the manual
+   commands are the workflow's equivalent, not an alternative to it.
+3. **Injects it into the Worker** at deploy time via
    `wrangler deploy --var "ADMIN_LOGINS:$ADMIN_LOGINS"`, so the value no longer
    depends on the Cloudflare dashboard (a comma-separated multi-login value
    survives intact: wrangler splits `--var` on the first colon only).
-3. **Asserts it on the deployed Worker** after the deploy: the step reads the
+4. **Asserts it on the deployed Worker** after the deploy: the step reads the
    Worker's live settings via the Cloudflare API (NOT `wrangler secret list` —
    `ADMIN_LOGINS` is a plain var, so a secret listing never shows it), feeds the
    observed value through the same `parseAdminLogins` runtime rule, and fails
