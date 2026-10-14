@@ -62,9 +62,16 @@
  * provider id it serves, and writes those keys into <agentDir>/agent.db as
  * stored `login` api_key rows before the session starts. Diagnostics carry the
  * provider id and the pool size only — never a key value, never the payload.
- * An absent payload (empty stdin) is the keyless run shape.
+ * An absent payload (empty stdin) is the keyless run shape — and so is an
+ * interactive terminal: the documented local
+ * `bun run src/review/runner.ts --level <tier> --input <json-file>` has no pipe,
+ * so its TTY would never send EOF; the read is skipped there instead of
+ * blocking.
+ * The credential directory is per-run and holds plaintext key material, so it
+ * is removed once the runtime has settled, on both the success and the failure
+ * path (best-effort; a removal failure never replaces the run's own outcome).
  */
-import { readFileSync, writeFileSync } from "node:fs";
+import { readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent";
 import {
@@ -389,9 +396,12 @@ async function loadCredentialPool(agentDir: string, json: RunnerInputJson, paylo
  * The credential payload source: this process's STDIN — the exec pipe the
  * consumer writes the payload into and then closes (that close is the EOF this
  * read waits for). `Bun.stdin.text()` reads to EOF; an empty result is the
- * keyless run shape.
+ * keyless run shape. With no pipe (an interactive TTY) there is no EOF to
+ * wait for, so the read is skipped and the run is keyless — the interactive
+ * case never blocks.
  */
-const readCredentialStdin = (): Promise<string> => Bun.stdin.text();
+const readCredentialStdin = (): Promise<string> =>
+  process.stdin.isTTY ? Promise.resolve("") : Bun.stdin.text();
 
 /**
  * Run the CLI. Returns the process exit code; prints the mstar.review/v1
@@ -426,85 +436,105 @@ export async function main(
   // never outlive (or restart past) the review's own wall-clock cap.
   anchorRecheckDeadline(Date.now(), level);
 
-  let input: AgentRuntimeRunInput;
-  try {
-    const parsed: unknown = JSON.parse(readFileSync(inputPath, "utf8"));
-    const json = parseRunnerInput(parsed);
-    // (AL-23-1): EVERY run synthesizes the
-    // COMPLETE per-review models.yml (/tmp/omp-agent-<uuid>/) — the App's
-    // selected image's capability hosts are the base, the custom-provider
-    // declarations merge into it — and the directory rides as `agentDir` (the
-    // SDK reads <agentDir>/models.yml instead of the retired in-image file).
-    const skippedCollisions: string[] = [];
-    const agentDir = await writePerReviewModelsYaml(json.capabilityHosts, json.customProviders ?? [], (providerId) => {
-      skippedCollisions.push(providerId);
-    });
-    // A custom id colliding with a capability host is skipped (capability/base
-    // wins, AL-23-1) — never silent: one structured stderr warn per colliding
-    // id (id + total count; zero key material).
-    for (const providerId of skippedCollisions) {
-      console.error(
-        JSON.stringify({
-          event: "custom_provider_collision",
-          provider_id: providerId,
-          count: skippedCollisions.length,
-        }),
-      );
-    }
-    // The transported credential pool arrives on STDIN and lands in THIS run's
-    // credential store (agent.db) before any session exists: the synthesized
-    // models.yml pins no apiKey, so the stored `login` rows are what the
-    // runtime rotates across. Fail-closed — a payload that does not decode
-    // aborts the run here (exit 1), with its own diagnostic (not the
-    // input-read label).
+  // The per-run directory carries the synthesized models.yml AND the stored
+  // credential rows (agent.db) — it exists only for this run, so it is removed
+  // once the runtime has settled, on every path (success, credential
+  // rejection, runtime failure). Best-effort: a removal failure is reported and
+  // never replaces the run's own outcome.
+  let agentDir: string | undefined;
+  const removeAgentDir = (): void => {
+    if (agentDir === undefined) return;
     try {
-      await loadCredentialPool(agentDir, json, await readStdin());
+      rmSync(agentDir, { recursive: true, force: true });
     } catch (error) {
-      console.error(`review: credential pool rejected: ${(error as Error).message}`);
+      console.error(`review: cannot remove credential directory ${agentDir}: ${(error as Error).message}`);
+    }
+  };
+
+  try {
+    let input: AgentRuntimeRunInput;
+    try {
+      const parsed: unknown = JSON.parse(readFileSync(inputPath, "utf8"));
+      const json = parseRunnerInput(parsed);
+      // (AL-23-1): EVERY run synthesizes the
+      // COMPLETE per-review models.yml (/tmp/omp-agent-<uuid>/) — the App's
+      // selected image's capability hosts are the base, the custom-provider
+      // declarations merge into it — and the directory rides as `agentDir` (the
+      // SDK reads <agentDir>/models.yml instead of the retired in-image file).
+      const skippedCollisions: string[] = [];
+      const dir = await writePerReviewModelsYaml(json.capabilityHosts, json.customProviders ?? [], (providerId) => {
+        skippedCollisions.push(providerId);
+      });
+      agentDir = dir;
+      // A custom id colliding with a capability host is skipped (capability/base
+      // wins, AL-23-1) — never silent: one structured stderr warn per colliding
+      // id (id + total count; zero key material).
+      for (const providerId of skippedCollisions) {
+        console.error(
+          JSON.stringify({
+            event: "custom_provider_collision",
+            provider_id: providerId,
+            count: skippedCollisions.length,
+          }),
+        );
+      }
+      // The transported credential pool arrives on STDIN and lands in THIS run's
+      // credential store (agent.db) before any session exists: the synthesized
+      // models.yml pins no apiKey, so the stored `login` rows are what the
+      // runtime rotates across. Fail-closed — a payload that does not decode
+      // aborts the run here (exit 1), with its own diagnostic (not the
+      // input-read label).
+      try {
+        await loadCredentialPool(dir, json, await readStdin());
+      } catch (error) {
+        console.error(`review: credential pool rejected: ${(error as Error).message}`);
+        return 1;
+      }
+
+      input = {
+        level,
+        worktreePath: json.worktreePath ?? process.cwd(),
+        reconFacts: json.reconFacts ?? [],
+        modelSelectors: parseModelSelectors(Bun.env.OMP_REVIEW_MODEL),
+        // Optional per-role overrides: included ONLY when the map
+        // is present, so legacy input builds a byte-identical runtime input.
+        ...(json.modelOverrides !== undefined ? { modelOverrides: json.modelOverrides } : {}),
+        // Optional typed recheck input: included ONLY when
+        // present — same byte-identical legacy rule as modelOverrides.
+        ...(json.recheck !== undefined ? { recheck: json.recheck } : {}),
+        // The synthesized per-review models dir (present
+        // on EVERY run — there is no baked models.yml to fall back to).
+        agentDir: dir,
+      };
+    } catch (error) {
+      console.error(`review: cannot read runner input ${inputPath}: ${(error as Error).message}`);
       return 1;
     }
 
-    input = {
-      level,
-      worktreePath: json.worktreePath ?? process.cwd(),
-      reconFacts: json.reconFacts ?? [],
-      modelSelectors: parseModelSelectors(Bun.env.OMP_REVIEW_MODEL),
-      // Optional per-role overrides: included ONLY when the map
-      // is present, so legacy input builds a byte-identical runtime input.
-      ...(json.modelOverrides !== undefined ? { modelOverrides: json.modelOverrides } : {}),
-      // Optional typed recheck input: included ONLY when
-      // present — same byte-identical legacy rule as modelOverrides.
-      ...(json.recheck !== undefined ? { recheck: json.recheck } : {}),
-      // The synthesized per-review models dir (present
-      // on EVERY run — there is no baked models.yml to fall back to).
-      agentDir,
-    };
-  } catch (error) {
-    console.error(`review: cannot read runner input ${inputPath}: ${(error as Error).message}`);
-    return 1;
-  }
-
-  try {
-    const { envelope, recheck } = await runtime.runReview(input);
-    // The optional --recheck-out file is written only when a
-    // recheck result exists, and BEFORE the envelope reaches stdout — a
-    // write failure is a genuine I-O failure (exit 1, no stdout), not a
-    // silent lie about the file. No flag / no result writes nothing; stdout
-    // stays envelope-only and exit codes are unchanged.
-    if (recheckOutPath !== undefined && recheck !== null) {
-      try {
-        writeFileSync(recheckOutPath, JSON.stringify(recheck));
-      } catch (error) {
-        console.error(`review: cannot write recheck output ${recheckOutPath}: ${(error as Error).message}`);
-        return 1;
+    try {
+      const { envelope, recheck } = await runtime.runReview(input);
+      // The optional --recheck-out file is written only when a
+      // recheck result exists, and BEFORE the envelope reaches stdout — a
+      // write failure is a genuine I-O failure (exit 1, no stdout), not a
+      // silent lie about the file. No flag / no result writes nothing; stdout
+      // stays envelope-only and exit codes are unchanged.
+      if (recheckOutPath !== undefined && recheck !== null) {
+        try {
+          writeFileSync(recheckOutPath, JSON.stringify(recheck));
+        } catch (error) {
+          console.error(`review: cannot write recheck output ${recheckOutPath}: ${(error as Error).message}`);
+          return 1;
+        }
       }
+      // stdout carries ONLY the envelope JSON (plan Module contracts).
+      console.log(JSON.stringify(envelope));
+      return 0;
+    } catch (error) {
+      console.error(`review: runtime failed: ${(error as Error).message}`);
+      return 1;
     }
-    // stdout carries ONLY the envelope JSON (plan Module contracts).
-    console.log(JSON.stringify(envelope));
-    return 0;
-  } catch (error) {
-    console.error(`review: runtime failed: ${(error as Error).message}`);
-    return 1;
+  } finally {
+    removeAgentDir();
   }
 }
 

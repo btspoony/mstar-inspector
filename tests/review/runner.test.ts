@@ -47,7 +47,7 @@
  */
 
 import { afterEach, describe, expect, mock, test } from "bun:test";
-import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -67,12 +67,45 @@ let fakeRecheck: Record<string, unknown> | null = null;
 /** Error the fake runtime rejects with; takes precedence when set. */
 let runtimeError: Error | undefined;
 /** Captured runReview inputs. */
-const runInputs: unknown[] = [];
+const runInputs: AgentRuntimeRunInput[] = [];
+/** Per-run directories the runs under test handed to the runtime. */
+const runDirs: string[] = [];
+/**
+ * What the per-run directory held while the runtime was in flight: the path
+ * the run handed over plus whether it carried the credential store at that
+ * moment. A run removes the directory once the runtime settles, so this is the
+ * only observable proof that the removal discarded real credential material.
+ */
+let inFlight: { dir: string; hadStore: boolean } | undefined;
+/** Temp copies of the in-flight per-run directories (see `preserveAgentDir`). */
+const preserved: { dir: string; parent: string }[] = [];
+
+/**
+ * Copy the run's per-run directory while it is still in flight: the run
+ * deletes it once the runtime settles, so a test that inspects the synthesized
+ * models.yml or the credential rows must read the copy this leaves behind.
+ */
+function preserveAgentDir(dir: string): void {
+  const parent = mkdtempSync(join(tmpdir(), "runner-preserved-"));
+  const copy = join(parent, "omp-agent-preserved");
+  cpSync(dir, copy, { recursive: true });
+  preserved.push({ dir: copy, parent });
+}
+
+/** The preserved copy of the most recent run's per-run directory. */
+function preservedAgentDir(): string {
+  const latest = preserved.at(-1);
+  if (latest === undefined) throw new Error("no per-run directory was captured");
+  return latest.dir;
+}
 
 /** Injected AgentRuntime double: records inputs, then rejects or resolves. */
 const fakeRuntime: AgentRuntime = {
   runReview: mock(async (input: AgentRuntimeRunInput): Promise<ReviewRunResult> => {
     runInputs.push(input);
+    runDirs.push(input.agentDir);
+    inFlight = { dir: input.agentDir, hadStore: existsSync(join(input.agentDir, "agent.db")) };
+    preserveAgentDir(input.agentDir);
     if (runtimeError) throw runtimeError;
     return { envelope: fakeEnvelope as MstarReviewV1, recheck: fakeRecheck as ReviewRunResult["recheck"] };
   }),
@@ -120,6 +153,96 @@ async function runCli(
   }
 }
 
+/** What the pty fixture reported back about one interactive run. */
+type PtyRun = {
+  /** The process ended within the harness budget (a hang reports false). */
+  ended: boolean;
+  code: number | null;
+  /** Whether the child's stdin really was a terminal. */
+  isTTY: boolean | null;
+  /** The per-run directory the runtime received. */
+  dir: string | null;
+  /** Whether that directory held the credential store while the runtime ran. */
+  hadStore: boolean | null;
+  /** Whether that directory still existed after main() returned. */
+  dirAfterRun: boolean | null;
+  output: string;
+};
+
+/**
+ * Narrow one fixture line's JSON into the fields the test asserts on. The
+ * fixture is a sibling process over a pty, so its report is untrusted input.
+ */
+function parseFixtureResult(value: unknown): Omit<PtyRun, "ended" | "output"> | undefined {
+  if (typeof value !== "object" || value === null) return undefined;
+  if (!("code" in value) || !("isTTY" in value) || !("dir" in value)) return undefined;
+  if (!("hadStore" in value) || !("dirAfterRun" in value)) return undefined;
+  const { code, isTTY, dir, hadStore, dirAfterRun } = value;
+  if (code !== null && typeof code !== "number") return undefined;
+  if (typeof isTTY !== "boolean") return undefined;
+  if (dir !== null && typeof dir !== "string") return undefined;
+  if (typeof hadStore !== "boolean") return undefined;
+  if (typeof dirAfterRun !== "boolean") return undefined;
+  return { code, isTTY, dir, hadStore, dirAfterRun };
+}
+
+/**
+ * Drive the REAL runner entry (the default stdin reader) inside a real pty, so
+ * the child genuinely sees `process.stdin.isTTY === true` — the documented
+ * local `bun run src/review/runner.ts …` path, which has no pipe and therefore
+ * no EOF. The fixture reports the resulting exit code, that the stdin really
+ * was a terminal, and what the per-run credential directory held while the
+ * runtime ran versus after main() returned. A run that never ends (the pre-fix
+ * read waiting for Ctrl-D) reports `ended: false`.
+ * shortcut: POSIX pty only — the interactive path this guards exists on
+ * macOS/Linux; upgrade if a Windows CI target ever appears.
+ */
+async function runRealStdinInPty(inputPath: string): Promise<PtyRun> {
+  const chunks: string[] = [];
+  const fixture = [
+    `import { existsSync } from "node:fs";`,
+    `import { join } from "node:path";`,
+    `const { main } = await import(${JSON.stringify(join(import.meta.dir, "..", "..", "src", "review", "runner.ts"))});`,
+    `const seen = { dir: null, hadStore: false };`,
+    `const runtime = { runReview: async (input) => {`,
+    `  seen.dir = input.agentDir;`,
+    `  seen.hadStore = existsSync(join(input.agentDir, "agent.db"));`,
+    `  return { envelope: { schema: "mstar.review/v1", verdict: "blocked", summary_md: "s", findings: [] }, recheck: null };`,
+    `} };`,
+    `const code = await main(["--level", "quick", "--input", ${JSON.stringify(inputPath)}], runtime);`,
+    `console.log("FIXTURE_RESULT " + JSON.stringify({ code, isTTY: process.stdin.isTTY,`,
+    `  dir: seen.dir, hadStore: seen.hadStore, dirAfterRun: seen.dir === null ? false : existsSync(seen.dir) }));`,
+    `process.exit(0);`,
+  ].join("\n");
+  const proc = Bun.spawn(["bun", "-e", fixture], {
+    cwd: join(import.meta.dir, "..", ".."),
+    terminal: { cols: 120, rows: 40, data: (_terminal, data) => chunks.push(data.toString()) },
+  });
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const exited = await Promise.race([
+    proc.exited.then(() => true),
+    new Promise<boolean>((resolve) => {
+      timer = setTimeout(() => {
+        proc.kill();
+        resolve(false);
+      }, 10_000);
+    }),
+  ]);
+  clearTimeout(timer);
+  const output = chunks.join("");
+  if (!exited) {
+    proc.terminal?.close();
+    return { ended: false, code: null, isTTY: null, dir: null, hadStore: null, dirAfterRun: null, output };
+  }
+  proc.terminal?.close();
+  const line = output.split("\n").find((candidate) => candidate.includes("FIXTURE_RESULT "));
+  const raw = line?.slice(line.indexOf("FIXTURE_RESULT ") + "FIXTURE_RESULT ".length).replace(/\r/g, "");
+  const parsed: unknown = raw === undefined ? undefined : JSON.parse(raw);
+  const result = parseFixtureResult(parsed);
+  if (result === undefined) throw new Error(`pty fixture reported no result: ${JSON.stringify(output)}`);
+  return { ended: true, ...result, output };
+}
+
 /** Every synthesized per-review agent dir under the OS temp dir. */
 function agentDirs(): string[] {
   return readdirSync(tmpdir())
@@ -143,12 +266,10 @@ async function runCliWithoutStore(
   return result;
 }
 
-/** Clean up the synthesized /tmp/omp-agent-<uuid> dir a run produced. */
+/** Clean up the synthesized /tmp/omp-agent-<uuid> dir each run produced. */
 function cleanupAgentDirs(): void {
-  for (const input of runInputs) {
-    const agentDir = (input as { agentDir?: string }).agentDir;
-    if (typeof agentDir === "string") rmSync(agentDir, { recursive: true, force: true });
-  }
+  for (const dir of runDirs) rmSync(dir, { recursive: true, force: true });
+  runDirs.length = 0;
 }
 
 afterEach(() => {
@@ -157,6 +278,9 @@ afterEach(() => {
   runtimeError = undefined;
   cleanupAgentDirs();
   runInputs.length = 0;
+  inFlight = undefined;
+  for (const copy of preserved) rmSync(copy.parent, { recursive: true, force: true });
+  preserved.length = 0;
   delete process.env.OMP_REVIEW_MODEL;
   for (const name of Object.keys(process.env)) {
     if (name.startsWith("MSTAR_POOL_")) delete process.env[name];
@@ -193,7 +317,7 @@ describe("runner entry (src/review/runner.ts)", () => {
     expect(JSON.parse(stdout)).toEqual(ENVELOPE);
     expect(stderr).toBe("");
     expect(runInputs).toHaveLength(1);
-    const input = runInputs[0] as Record<string, unknown>;
+    const input = runInputs[0]!;
     expect(input.level).toBe("quick");
     expect(input.worktreePath).toBe("/workspace/clone");
     expect(input.reconFacts).toEqual(["acme/widgets#7"]);
@@ -210,7 +334,7 @@ describe("runner entry (src/review/runner.ts)", () => {
     const { code } = await runCli(["--level", "default", "--input", inputPath]);
 
     expect(code).toBe(0);
-    const input = runInputs[0] as Record<string, unknown>;
+    const input = runInputs[0]!;
     expect(input.level).toBe("default");
     expect(input.worktreePath).toBe(process.cwd());
     expect(input.reconFacts).toEqual([]);
@@ -358,7 +482,7 @@ describe("runner entry (src/review/runner.ts)", () => {
 
     expect(code).toBe(0);
     expect(stderr).toBe("");
-    const input = runInputs[0] as Record<string, unknown>;
+    const input = runInputs[0]!;
     expect(input.modelOverrides).toEqual(overrides);
     expect(input.agentDir).toMatch(/^\/tmp\/omp-agent-/);
   });
@@ -381,11 +505,11 @@ describe("runner entry (src/review/runner.ts)", () => {
     expect(code).toBe(0);
     expect(stderr).toBe("");
     expect(runInputs).toHaveLength(1);
-    const input = runInputs[0] as Record<string, unknown>;
+    const input = runInputs[0]!;
     expect(input.agentDir).toMatch(/^\/tmp\/omp-agent-/);
     // The zero-custom equivalence lock: the file is EXACTLY the capability
     // base (ark-plan included) — the poolized base, byte-for-byte.
-    const yaml = readFileSync(join(input.agentDir as string, "models.yml"), "utf8");
+    const yaml = readFileSync(join(preservedAgentDir(), "models.yml"), "utf8");
     expect(yaml).toBe(OMP_BASE_YAML);
     expect(yaml).toContain("ark-plan:");
   });
@@ -410,20 +534,19 @@ describe("runner entry (src/review/runner.ts)", () => {
     expect(code).toBe(0);
     expect(stderr).toBe("");
     expect(runInputs).toHaveLength(1);
-    const input = runInputs[0] as Record<string, unknown>;
+    const input = runInputs[0]!;
     // The declarations themselves do NOT ride the runtime input — only the
     // synthesized per-review directory (the keys ride the exec env).
     expect(Object.keys(input)).not.toContain("customProviders");
     expect(input.agentDir).toMatch(/^\/tmp\/omp-agent-/);
     expect(input.worktreePath).toBe("/workspace/clone");
-    const yaml = readFileSync(join(input.agentDir as string, "models.yml"), "utf8");
+    const yaml = readFileSync(join(preservedAgentDir(), "models.yml"), "utf8");
     // Capability base + custom merge, zero apiKey pins, zero key literals.
     expect(yaml).toContain("ark-plan:");
     expect(yaml).not.toMatch(/^\s*apiKey:/m);
     expect(yaml).toContain('"my-provider":');
     expect(yaml).toContain("auth: oauth");
     expect(yaml).not.toContain(sk("live"));
-    rmSync(input.agentDir as string, { recursive: true, force: true });
   });
 
   test("customProviders colliding with a capability host id: skipped with a structured stderr warn (id + count, no keys)", async () => {
@@ -456,12 +579,11 @@ describe("runner entry (src/review/runner.ts)", () => {
     expect(stderr).not.toContain("sk-");
     // The synthesized file keeps the CAPABILITY ark-plan block (capability/base
     // wins) and appends the non-colliding custom provider.
-    const input = runInputs[0] as Record<string, unknown>;
-    const yaml = readFileSync(join(input.agentDir as string, "models.yml"), "utf8");
+    const input = runInputs[0]!;
+    const yaml = readFileSync(join(preservedAgentDir(), "models.yml"), "utf8");
     expect(yaml).toContain("baseUrl: https://ark.cn-beijing.volces.com/api/plan");
     expect(yaml).not.toContain("https://evil.example.com/");
     expect(yaml).toContain('"my-provider":');
-    rmSync(input.agentDir as string, { recursive: true, force: true });
   });
 });
 
@@ -526,7 +648,7 @@ describe("runner entry — --recheck-out channel", () => {
     const { code } = await runCli(["--level", "quick", "--input", inputPath, "--recheck-out", outPath]);
 
     expect(code).toBe(0);
-    expect(Object.keys(runInputs[0] as Record<string, unknown>)).not.toContain("recheck");
+    expect(Object.keys(runInputs[0]!)).not.toContain("recheck");
     expect(existsSync(outPath)).toBe(false);
   });
 
@@ -586,9 +708,9 @@ describe("runner entry — transported credential pool", () => {
 
     expect(code).toBe(0);
     expect(JSON.parse(stdout)).toEqual(ENVELOPE);
-    const input = runInputs[0] as Record<string, unknown>;
+    const input = runInputs[0]!;
     expect(input.agentDir).toMatch(/^\/tmp\/omp-agent-/);
-    const rows = await storedPool(input.agentDir as string, "ark-plan");
+    const rows = await storedPool(preservedAgentDir(), "ark-plan");
     expect(rows).toEqual([
       { type: "api_key", key: sk("pool-one"), source: "login" },
       { type: "api_key", key: sk("pool-two"), source: "login" },
@@ -599,7 +721,7 @@ describe("runner entry — transported credential pool", () => {
     expect(stderr).not.toContain(sk("pool-one"));
     expect(stderr).not.toContain(sk("pool-two"));
     // The pool rows are live via the pinned auth storage, not just persisted.
-    const storage = await AuthStorage.create(join(input.agentDir as string, "agent.db"));
+    const storage = await AuthStorage.create(join(preservedAgentDir(), "agent.db"));
     try {
       await storage.reload();
       expect(await storage.getApiKey("ark-plan")).toBe(sk("pool-one"));
@@ -627,8 +749,8 @@ describe("runner entry — transported credential pool", () => {
     );
 
     expect(code).toBe(0);
-    const input = runInputs[0] as Record<string, unknown>;
-    expect(await storedPool(input.agentDir as string, "my-provider")).toEqual([
+    const input = runInputs[0]!;
+    expect(await storedPool(preservedAgentDir(), "my-provider")).toEqual([
       { type: "api_key", key: sk("custom-one"), source: "login" },
       { type: "api_key", key: sk("custom-two"), source: "login" },
     ]);
@@ -706,8 +828,8 @@ describe("runner entry — transported credential pool", () => {
 
     expect(code).toBe(0);
     expect(stderr).toBe("");
-    const input = runInputs[0] as Record<string, unknown>;
-    expect(existsSync(join(input.agentDir as string, "agent.db"))).toBe(false);
+    const input = runInputs[0]!;
+    expect(existsSync(join(preservedAgentDir(), "agent.db"))).toBe(false);
   });
 
   test("a built-in catalog provider pool resolves under its own provider id — no declared identity needed", async () => {
@@ -722,14 +844,14 @@ describe("runner entry — transported credential pool", () => {
 
     expect(code).toBe(0);
     expect(JSON.parse(stdout)).toEqual(ENVELOPE);
-    const input = runInputs[0] as Record<string, unknown>;
-    expect(await storedPool(input.agentDir as string, "openai")).toEqual([
+    const input = runInputs[0]!;
+    expect(await storedPool(preservedAgentDir(), "openai")).toEqual([
       { type: "api_key", key: sk("builtin-one"), source: "login" },
     ]);
     const log = JSON.parse(stderr) as { event: string; provider: string; pool_size: number };
     expect(log).toEqual({ event: "credential_pool", provider: "openai", pool_size: 1 });
     expect(stderr).not.toContain(sk("builtin-one"));
-    const storage = await AuthStorage.create(join(input.agentDir as string, "agent.db"));
+    const storage = await AuthStorage.create(join(preservedAgentDir(), "agent.db"));
     try {
       await storage.reload();
       expect(await storage.getApiKey("openai")).toBe(sk("builtin-one"));
@@ -749,12 +871,12 @@ describe("runner entry — transported credential pool", () => {
     );
 
     expect(code).toBe(0);
-    const input = runInputs[0] as Record<string, unknown>;
-    expect(await storedPool(input.agentDir as string, "azure-openai")).toEqual([
+    const input = runInputs[0]!;
+    expect(await storedPool(preservedAgentDir(), "azure-openai")).toEqual([
       { type: "api_key", key: sk("builtin-one"), source: "login" },
       { type: "api_key", key: sk("builtin-two"), source: "login" },
     ]);
-    expect(await storedPool(input.agentDir as string, "ark-plan")).toEqual([
+    expect(await storedPool(preservedAgentDir(), "ark-plan")).toEqual([
       { type: "api_key", key: sk("ark-one"), source: "login" },
     ]);
   });
@@ -772,9 +894,9 @@ describe("runner entry — transported credential pool", () => {
 
     expect(code).toBe(0);
     expect(JSON.parse(stdout)).toEqual(ENVELOPE);
-    const input = runInputs[0] as Record<string, unknown>;
+    const input = runInputs[0]!;
     // Assert the store's absence BEFORE opening it (the factory would create it).
-    expect(existsSync(join(input.agentDir as string, "agent.db"))).toBe(false);
+    expect(existsSync(join(preservedAgentDir(), "agent.db"))).toBe(false);
     expect(stderr).not.toContain(sk("retired-env-key"));
   });
 
@@ -800,6 +922,47 @@ describe("runner entry — transported credential pool", () => {
     expect(stderr).not.toContain(sk("leaky"));
   });
 
+  test("an INTERACTIVE stdin (no pipe) resolves to the keyless run instead of blocking on EOF", async () => {
+    // The documented local path — `bun run src/review/runner.ts --level …
+    // --input …` from a terminal — has no pipe: the pre-fix `Bun.stdin.text()`
+    // waited for an EOF a TTY never sends, so even a keyless run hung until
+    // Ctrl-D. The real entry runs here inside a real pty, with the runtime
+    // injected so no session starts.
+    const inputPath = writeInput({ capabilityHosts: OMP_HOSTS, worktreePath: "/workspace/clone" });
+    const run = await runRealStdinInPty(inputPath);
+
+    // A hang reports ended:false — this is the assertion the pre-fix code fails.
+    expect(run.ended).toBe(true);
+    expect(run.code).toBe(0);
+    expect(run.isTTY).toBe(true); // the child really did have a terminal
+    expect(run.output).toContain('"schema":"mstar.review/v1"');
+    // The interactive run rides the same per-run directory, and removes it too.
+    expect(run.dir).toMatch(/^\/tmp\/omp-agent-/);
+    expect(run.dirAfterRun).toBe(false);
+  });
+
+  test("the credential directory is removed once the runtime settles — success and failure", async () => {
+    // The per-run directory holds the plaintext keys: with a non-empty payload
+    // the runtime must see the store in place, and no exit path may leave the
+    // directory behind — on the documented local path it would otherwise
+    // outlive the run on the host.
+    const payload = encodeCredentialPayload({ ark: [sk("cleanup-key")] });
+
+    const okInput = writeInput({ capabilityHosts: OMP_HOSTS, worktreePath: "/workspace/clone" });
+    const ok = await runCli(["--level", "quick", "--input", okInput], payload);
+    expect(ok.code).toBe(0);
+    expect(inFlight?.hadStore).toBe(true); // the runtime really did hold credential material
+    expect(existsSync(inFlight!.dir)).toBe(false); // ...and the run removed it
+
+    runtimeError = new Error("seat 0 failed: provider boom");
+    const failInput = writeInput({ capabilityHosts: OMP_HOSTS, worktreePath: "/workspace/clone" });
+    const failed = await runCli(["--level", "quick", "--input", failInput], payload);
+    expect(failed.code).toBe(1);
+    expect(failed.stderr).toContain("provider boom"); // the original failure is not masked
+    expect(inFlight?.hadStore).toBe(true);
+    expect(existsSync(inFlight!.dir)).toBe(false);
+  });
+
   test("a custom id colliding with a capability host pools only once (base wins, same rule as the synthesis)", async () => {
     // `ark-plan` is a capability host id; the consumer keys the capability
     // host's pool by catalog id `ark`. A custom declaration reusing the same id
@@ -823,8 +986,8 @@ describe("runner entry — transported credential pool", () => {
     );
 
     expect(code).toBe(0);
-    const input = runInputs[0] as Record<string, unknown>;
-    expect(await storedPool(input.agentDir as string, "ark-plan")).toEqual([
+    const input = runInputs[0]!;
+    expect(await storedPool(preservedAgentDir(), "ark-plan")).toEqual([
       { type: "api_key", key: sk("base-key"), source: "login" },
     ]);
   });
