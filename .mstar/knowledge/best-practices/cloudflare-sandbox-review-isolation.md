@@ -34,7 +34,7 @@ mstar-inspector 在 Cloudflare Workers 上编排每 PR 隔离的代码审查：Q
 - clone / `gh pr view` / `gh pr diff` 是 **Worker→exec 的受信任编排**，不是 agent 工具。
 - `gh` 认证：`GH_TOKEN` 经 `exec` 的 `env` 注入（实测 `gh pr diff` 对真实 PR 返回非空 diff）；**密钥不进镜像**（含 build args）。**该命令用的就是 `sandbox-read` 授权**，所以该授权必须含 `pull_requests: read`（其余仍只读、仅限单仓）——否则 diff 步会 403，review 直接失败。
 - 每消息一个 sandbox，id 用 `randomUUID()`（per-attempt 唯一），`finally` 中 `destroy()`；禁止跨消息复用。
-- 容器内 omp：`HARNESS_PLUGIN_ROOT` 指向镜像预装根（env 注入）；模型 key 仅来自 per-App BYOK：`resolveAppConfig` 产出的 keys 经 PROVIDERS 注册表映射注入（`ark` → `ARK_API_KEY`），`key_source` ∈ `app|custom`（`buildRunnerEnv` 装配，无 env 参数）——全局 `OMP_MODEL_KEY` 单一映射点已随 v0.9 / AL-24-5 退役（零全局回退，见 `perapp-zero-global-fallback.md`）。
+- 容器内 omp：`HARNESS_PLUGIN_ROOT` 指向镜像预装根（env 注入）；模型 key 仅来自 per-App BYOK：`resolveAppConfig` 产出的 keys 按 provider 装进凭据池 env（`MSTAR_POOL_<UPPER_SNAKE(id)>_COUNT` + `_01.._NN`），runner 在会话创建前写成 `<agentDir>/agent.db` 的 `source:"login"` 行；`key_source` ∈ `app|custom`（`buildRunnerEnv` 装配，无 env 参数）。注册表里的 env 名（`ark → ARK_API_KEY`）已退为白名单元数据，不再是注入变量——全局 `OMP_MODEL_KEY` 单一映射点已随 v0.9 / AL-24-5 退役（零全局回退，见 `perapp-zero-global-fallback.md`）。
 
 ### 网络出站控制面（v0.7, AL-4 核实）
 

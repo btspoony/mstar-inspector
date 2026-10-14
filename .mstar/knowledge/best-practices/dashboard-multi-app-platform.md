@@ -33,15 +33,15 @@ v0.5 turned the single-App dashboard into a platform: invite-only members, N aud
 
 ## Guidance (durable contract)
 
-- **Data model** (migrations 0003–0006, append-only, no ON DELETE — soft-delete-only):
+- **Data model** (migrations 0003–0006, then the 0023 per-key rebuild — no ON DELETE clause, soft-delete-only):
   - `users(github_login UNIQUE, role admin|member)` — removal = delete row; guard re-reads per request.
   - `github_apps(id UUID PK, slug UNIQUE, github_app_id UNIQUE, private_key_enc, webhook_secret_enc, status active|disabled, deleted_at)`.
   - `app_installations(app_id, installation_id)` — upserted on per-App webhooks; legacy route writes nothing (no app row).
   - `reviews.app_id` (NULL = legacy global App); findings join via `review_id`.
-  - `app_provider_keys(app_id, provider, key_enc, PK(app_id, provider))`; `app_model_config(app_id PK, model_chain)`.
-- **Crypto**: AES-256-GCM envelope via `secretbox`, master key `DASHBOARD_ENCRYPTION_KEY`, AAD rowKey = row PK (composite for provider keys) — see `d1-secretbox-credential-envelope.md`.
+  - `app_provider_keys(app_id, provider, key_id, key_enc, PK(app_id, provider, key_id))`; `app_custom_provider_keys` (custom/template key material, same shape); `app_model_config(app_id PK, model_chain)`.
+- **Crypto**: AES-256-GCM envelope via `secretbox`, master key `DASHBOARD_ENCRYPTION_KEY`, AAD rowKey = row PK (the full composite, so provider-key rows bind `<appId>:<provider>:<keyId>`) — see `d1-secretbox-credential-envelope.md`.
 - **Webhook routing**: per-App `POST /webhook/:appSlug` is the ONLY entry (resolve slug → verify with that App's secret) — the legacy bare `POST /webhook` face was retired in v0.9 (route deleted); queue messages always carry `appRef` (required — single shape since v0.9).
-- **Consumer**: per-App Octokit instance cache + per-message app-row re-read; `buildRunnerEnv(appCfg, …)` takes NO env argument — keys and the model chain come exclusively from the App's per-App config (`key_source` ∈ `app|custom` only, no global fallback since v0.9 / AL-24-5), and a missing/tampered key or chain fails that App's reviews closed at `assertAppConfigComplete` (F-001 channel) — see `perapp-zero-global-fallback.md`.
+- **Consumer**: per-App Octokit instance cache + per-message app-row re-read; `buildRunnerEnv(appCfg, …)` takes NO env argument — keys and the model chain come exclusively from the App's per-App config (`key_source` ∈ `app|custom` only, no global fallback since v0.9 / AL-24-5), a missing/tampered key or chain fails that App's reviews closed at `assertAppConfigComplete` (F-001 channel), and each provider holding keys is transported as the credential pool `MSTAR_POOL_<UPPER_SNAKE(id)>_COUNT` + `_01.._NN` (the runner writes it into the run's `agent.db` as `source:"login"` rows) — see `perapp-zero-global-fallback.md`.
 - **Manifest flow**: writes D1 (secrets-bulk retired; CLOUDFLARE_* env gone); slug minted at start, carried via signed state; webhook URL `{origin}/webhook/{slug}`.
 - **Known accepted trade-offs** (do not re-litigate without a decision): resolution-before-done-check → DLQ noise on disabled-App redelivery; secret-keyed caches without eviction (rotation = non-goal until B3+); no `reviews.app_id` index yet; one undecryptable key row fails that App's reviews closed.
 
