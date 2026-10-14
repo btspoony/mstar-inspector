@@ -113,29 +113,46 @@ jobs:
 
       - name: "Smoke: image digest"
         run: |
-          # Sandbox SDK 1.0 (durable_object policy). The digest still comes
-          # from `wrangler containers list --json`: wrangler 4.147.0 maps EVERY
-          # listed application to an `image` field (appsToJsonOutput in
-          # wrangler-dist/cli.js), and the deploy request stores the resolved
-          # `registry.cloudflare.com/<account>/<app>@sha256:<64hex>` reference
-          # (containerConfigToCreateRequest → configuration.image). The
-          # application record is read through BOTH observed shapes (.image and
-          # .configuration.image) because the Dash listing shape differs
-          # between the default and durable_object policies. The deploy LOG is
-          # NOT a digest source: the digest is debug-level only, and the
-          # container section prints nothing at all ("No changes to be made")
-          # when the image did not change.
-          bunx wrangler containers list --json > containers_raw.json
-          jq -r '.[] | select(.name == "mstar-inspector-sandbox-v2") | (.image // .configuration.image // empty)' \
-            containers_raw.json | grep -oE 'sha256:[0-9a-f]{64}' > image_digest.txt || true
-          if ! test -s image_digest.txt; then
-            echo "::error::no sha256 image digest for container app mstar-inspector-sandbox-v2 — raw \`wrangler containers list --json\` follows"
-            head -c 4000 containers_raw.json
+          set -euo pipefail
+          # Sandbox SDK 1.0 (durable_object policy). The digest comes from the
+          # `wrangler deploy` STDOUT already captured in deploy.log by
+          # `tee deploy.log`: the container summary block prints the resolved
+          # reference twice, on the "Preparing sandbox for Cloudflare
+          # Containers" and "sandbox is ready to run" lines —
+          #   registry.cloudflare.com/<account>/<repo>@sha256:<64hex>
+          # `wrangler containers list --json` is NOT usable for this app: the
+          # durable_object application record carries no usable image (the real
+          # deploy shows `"image": ""` for mstar-inspector-sandbox-v2 and no
+          # `.configuration.image` field) — the `image` shape belongs to the
+          # default-policy app `mstar-inspector-sandbox`, orphaned by the 1.0
+          # cutover. A second source would add an API call + token permission
+          # and an equality branch for no gain, so the deploy log is the single
+          # source; DOCS-01 wants the digest of what this deploy shipped.
+          #
+          # The registry repo name is wrangler-DERIVED
+          # (`<worker>-<class_name lowercase>-sandbox` →
+          # mstar-inspector-sandboxv1-sandbox) and is NOT the container
+          # application name (mstar-inspector-sandbox-v2); matching on the
+          # application name finds nothing — only the Worker prefix
+          # (mstar-inspector) is shared by both names.
+          : > image_digest.txt   # must exist even on the fail-loud path (upload-artifact if-no-files-found: error)
+          grep -oE 'registry\.cloudflare\.com/[^@[:space:]]*mstar-inspector[^@[:space:]]*@sha256:[0-9a-f]{64}' \
+            deploy.log | sort -u > digest_refs.txt || true
+          grep -oE 'sha256:[0-9a-f]{64}' digest_refs.txt | sort -u > digest_candidates.txt || true
+          count=$(wc -l < digest_candidates.txt | tr -d ' ')
+          if [ "$count" -eq 0 ]; then
+            echo "::error::no image digest for worker mstar-inspector in deploy.log (expected registry.cloudflare.com/<account>/mstar-inspector…@sha256:<64hex>) — log tail follows"
+            tail -40 deploy.log
             exit 1
           fi
-          rm containers_raw.json
-          # 备源（若列表形状再变，以部署日志锚定行兜底）：
-          # grep -oE "registry\.cloudflare\.com/${CLOUDFLARE_ACCOUNT_ID}/mstar-inspector-sandbox-v2@sha256:[0-9a-f]{64}" deploy.log
+          if [ "$count" -gt 1 ]; then
+            echo "::error::$count distinct image digests for worker mstar-inspector in deploy.log — cannot pick a DOCS-01 baseline; raw matches follow"
+            cat digest_refs.txt
+            exit 1
+          fi
+          rm -f digest_refs.txt
+          mv digest_candidates.txt image_digest.txt
+          test -s image_digest.txt
 
       # ADMIN_LOGINS is a dashboard-managed plain var (keep_vars), never a
       # Worker secret — `wrangler secret list` cannot observe it. Read the
@@ -170,7 +187,7 @@ jobs:
           if-no-files-found: error
         if: always()   # keep per-run evidence even when a later step fails
 
-      - name: Record live image digest (DOCS-01 baseline)
+      - name: Record image digest (DOCS-01 baseline)
         run: |
           set -euo pipefail
           DIGEST=$(cat image_digest.txt); VERSION=$(cat version_id.txt)
@@ -179,6 +196,6 @@ jobs:
             echo "- Image digest: \`$DIGEST\`"
             echo "- Worker version: \`$VERSION\`"
             echo "- Actions run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
-            echo "- Live truth: \`wrangler containers list --json\` (compare for drift)"
+            echo "- Source: \`registry.cloudflare.com\` container reference printed by this run's \`wrangler deploy\` — \`wrangler containers list --json\` reports an empty \`image\` for the 1.0 durable_object application"
           } >> "$GITHUB_STEP_SUMMARY"
           echo "::notice::DOCS-01 baseline: digest=$DIGEST version=$VERSION (run summary + deploy-evidence artifact)"

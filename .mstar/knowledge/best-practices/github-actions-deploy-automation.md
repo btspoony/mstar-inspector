@@ -51,14 +51,14 @@ mstar-inspector 的 live 部署从手动 runbook（`docs/deploy.md`：D1 migrati
 
 - healthz：重试 3×5s，最后一次失败才红。
 - cron 注册：**grep deploy 输出** `schedule: */15 * * * *` 行（wrangler 4.125.0 在 cron PUT 成功后打印于 `Deployed … triggers` 块；`wrangler deployments list` 无 cron 面、`wrangler triggers` 仅实验性 deploy 子命令——均不可用）。
-- digest 提取：主源 = `wrangler containers list --json` jq 取 `mstar-inspector-sandbox` 应用 image 的 `@sha256:<64hex>`（container app name = `<worker>-<class>` 小写，wrangler 默认生成；live 状态对「镜像未重建」也准确）；备源 = deploy.log 锚定 `registry.cloudflare.com/<account>/<worker>-<class>@sha256:...` 行。
+- digest 提取（**2026-10-13 修订，容器切到 `scheduling_policy: "durable_object"` 之后**）：主源 = **`wrangler deploy` 自身输出**（已被 `tee deploy.log` 捕获）里 `registry.cloudflare.com/<account>/<worker>-<class 小写>-sandbox@sha256:<64hex>` 行 —— wrangler 在 `Preparing sandbox for Cloudflare Containers` 与 `sandbox is ready to run` 两处各打印一次（`sort -u` 去重），首次部署与「镜像未重建」都出现。**`wrangler containers list --json` 不再是来源**：durable_object 应用的记录 `image` 为空串且无 `configuration.image`（真实部署实测：`mstar-inspector-sandbox-v2` → `"image": ""`），只有 0.x 时代的 default-policy 应用才带应用级 image。注意 registry 仓库名是 wrangler **派生**的（`<worker>-<class 小写>-sandbox`），**不等于**容器应用 `name`（`mstar-inspector-sandbox-v2`）—— 按应用名过滤永远取不到值（曾因此让一次部署的 digest smoke 变红，而部署本身成功）。
 
 ### Digest 记录（DOCS-01 基线）
 
 - **digest 是操作状态，不是文档**——2026-09-01 修订：不再写回 `docs/deploy.md`（分支保护 `pull_request` 规则拒绝 bot 直接 push，且每次部署一个 doc PR 是噪音）。
 - 部署后写入 **run summary**（`$GITHUB_STEP_SUMMARY`：digest + Worker version + run 链接）+ `deploy-evidence` artifact（deploy.log / version_id.txt / image_digest.txt，`actions/upload-artifact@v4`，`if: always()` 保留失败现场）。GitHub Environments → staging 页有部署历史。
 - **GITHUB_TOKEN 无法访问 Actions variables API**——`gh variable set` 报 `HTTP 403: Resource not accessible by integration`（即使 `actions: write` 权限；integration token 的已知限制）。不要用 GITHUB_TOKEN 写 variables/secrets；用 run summary + artifacts 替代（零 API）。
-- **live 真相 = `wrangler containers list --json`**（CF 实时状态）；run summary 是部署时基线，DOCS-01 漂移检查 = 实时值 vs 最新 run 的 digest。
+- **live 真相（2026-10-13 修订）**：容器镜像 digest 以 deploy 输出为**部署时基线**（见上条），run summary 记录之；DOCS-01 漂移检查 = 「该基线」 vs 后续部署的 digest。`wrangler containers list --json` 仍可用于**应用状态**（`state` / `instances` / `version` / 应用名），但 durable_object 应用不从中返回镜像 digest —— 不要再用它做 digest 漂移比对。
 - `paths-ignore` 保留（doc-only push 无需重部署），但不再承担防递归职责。
 
 ## Why This Matters

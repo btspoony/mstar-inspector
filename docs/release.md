@@ -198,10 +198,18 @@ the two checks the automation performs, runnable directly:
 1. **Worker Version ID** — `bunx wrangler deployments list`: the newest
    deployment's Version ID (and its source commit) must match the tagged
    merge commit and the section's `Worker version` bullet.
-2. **Image digest** — open the Deploy run's summary (the section's run link)
-   and compare its "Deploy evidence (DOCS-01 baseline)" bullets against the
-   Release section; live truth is `bunx wrangler containers list --json`
-   (the sandbox image digest).
+2. **Image digest** — open the Deploy run's summary (the section's run link,
+   or the run's `deploy-evidence` artifact) and compare its "Deploy evidence
+   (DOCS-01 baseline)" bullets against the Release section. That baseline —
+   the `registry.cloudflare.com/…@sha256:` reference `wrangler deploy` printed
+   — is the only recorded digest: `bunx wrangler containers list --json`
+   returns an **empty** `image` for this Worker's 1.0 `durable_object`
+   application, so the digest cannot be re-read from live container state and
+   an independent live-digest comparison is not available. To re-derive the
+   digest, deploy again and read the reference from the new run's summary; to
+   confirm what is *live* at all, use the check in step 1 (`wrangler
+   deployments list` → Worker Version ID) against the section's
+   `Worker version` bullet.
 
 If the section needs fixing, either re-run the Release workflow (idempotent
 converge — simplest), or edit the Release directly:
