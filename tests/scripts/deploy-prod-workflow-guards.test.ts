@@ -19,8 +19,11 @@
  *   the `deploy` job (the one with `environment: production` and the production
  *   secrets) carries `needs: guard-tag-ref`, so a non-tag ref can neither reach
  *   a job holding production secrets nor run repository code with them in scope;
- * - `environment: production`, concurrency group `deploy-prod-mstar-inspector`,
- *   `permissions: { contents: read }`, `timeout-minutes: 30`;
+ * - `environment: production`, concurrency group `deploy-prod-mstar-inspector`
+ *   with `cancel-in-progress: false` and `queue: max` (GitHub otherwise keeps
+ *   only ONE pending run per group and silently replaces it, so a release
+ *   waiting on approval would be displaced by a newer dispatch and never
+ *   deploy), `permissions: { contents: read }`, `timeout-minutes: 30`;
  * - the run-SHA checkout (`github.sha`, full history), the pre-repository-code
  *   HEAD == run-SHA assertion and the production-environment marker
  *   (`vars.PROD_ENV_MARKER`) assertion, the tag-ref assertion that fails a
@@ -288,14 +291,46 @@ describe("deploy-prod.yml guards", () => {
     }
   });
 
-  test("environment: production, concurrency group, permissions, timeout", () => {
+  test("environment: production, concurrency group with `queue: max`, permissions, timeout", () => {
     expect(wf.jobs.deploy.environment).toBe("production");
+    // LOAD-BEARING: all THREE concurrency keys. `group` serialises production,
+    // `cancel-in-progress: false` keeps the RUNNING deploy alive, and
+    // `queue: max` is what stops GitHub replacing the single pending run — a
+    // release waiting on approval would otherwise be displaced by a newer
+    // dispatch and never reach production.
     expect(wf.concurrency).toEqual({
       group: "deploy-prod-mstar-inspector",
       "cancel-in-progress": false,
+      queue: "max",
     });
     expect(wf.jobs.deploy.permissions).toEqual({ contents: "read" });
     expect(wf.jobs.deploy["timeout-minutes"]).toBe(30);
+  });
+
+  test("mutation: dropping `queue: max` must fail the concurrency pin (pending deploys are preserved)", () => {
+    // The pin above asserts all three keys. Show that removing `queue: max` —
+    // the one edit that silently returns the group to GitHub's default of a
+    // single replaceable pending run — is what the pin catches.
+    const src = readFileSync(join(REPO_ROOT, ".github", "workflows", WORKFLOW), "utf8");
+    const mutated = src.replace(/^  queue: max\n/m, "");
+    expect(mutated).not.toBe(src);
+    const dir = mkdtempSync(join(tmpdir(), "qmax-"));
+    try {
+      const path = join(dir, "deploy-prod.yml");
+      writeFileSync(path, mutated);
+      const proc = Bun.spawnSync(["python3", "-c", PY_DUMP, path], { stdout: "pipe", stderr: "pipe" });
+      expect(proc.exitCode).toBe(0);
+      const mwf = JSON.parse(proc.stdout.toString());
+      // i.e. the pin above would now fail — the displacement guard is load-bearing.
+      expect(mwf.concurrency.queue).toBeUndefined();
+      expect(mwf.concurrency).not.toEqual({
+        group: "deploy-prod-mstar-inspector",
+        "cancel-in-progress": false,
+        queue: "max",
+      });
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   test("job env: NON-SECRET only — no `secrets.` at job level; credentials are step-scoped", () => {

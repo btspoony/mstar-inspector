@@ -57,6 +57,15 @@ on:
 concurrency:
   group: deploy-prod-mstar-inspector
   cancel-in-progress: false
+  # LOAD-BEARING: an approval-gated production deploy must not be displaced by a
+  # newer dispatch. GitHub keeps only ONE pending run per group by default and
+  # silently REPLACES it with the newest one — a release waiting on approval (or
+  # queued behind the running deploy) would then never reach approval or
+  # production, and if the newest run later fails or is rejected NEITHER queued
+  # release ships. `queue: max` raises that ceiling to 100 pending runs, so every
+  # dispatch is preserved; the group still serialises them, and
+  # `cancel-in-progress: false` keeps the RUNNING deploy alive.
+  queue: max
 
 jobs:
   # Secrets-free tag guard. This job runs FIRST and holds nothing worth stealing:
