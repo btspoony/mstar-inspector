@@ -294,10 +294,11 @@ not the one `wrangler deploy` printed: each `wrangler secret bulk` call creates
 and immediately deploys another version, so a capture taken from the deploy log
 alone would name a predecessor of what is serving traffic. After the last
 mutating step the run re-reads the live deployment
-(`bunx wrangler deployments list --env production --json`) and writes that
-version id over `version_id.txt` — or, when the lookup cannot confirm it, the
-explicit marker `unavailable (post-secret lookup failed)`; the deploy-log
-predecessor is never recorded as if it were live. The fallback is noticed
+(`bunx wrangler deployments list --env production --json`), takes the **newest**
+by `created_on` (the CLI lists them ascending, so the first entry is the oldest)
+and writes that version id over `version_id.txt` — or, when the lookup cannot
+confirm it, the explicit marker `unavailable (post-secret lookup failed)`; the
+deploy-log predecessor is never recorded as if it were live. The fallback is noticed
 (`::notice::`) and never fails the deploy, and the healthz smoke proves the
 release identity independently. The section's `Worker version` bullet is
 therefore either the version to compare against a live `deployments list` in

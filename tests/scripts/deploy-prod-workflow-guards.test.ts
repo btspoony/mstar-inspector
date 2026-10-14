@@ -36,8 +36,9 @@
  * - the post-mutation live-version re-capture: after the last mutating step,
  *   `wrangler deployments list --env production --json` overrides the
  *   deploy-log `version_id.txt` with the version the secret uploads actually
- *   created, reading exactly the shape verified against the live CLI
- *   (`[0].versions[0].version_id`) and recording the explicit
+ *   created, selecting the NEWEST deployment by `created_on` (the CLI lists
+ *   them ascending, so index 0 is the oldest) and reading the live-verified
+ *   `versions[0].version_id` shape; it records the explicit
  *   `unavailable (post-secret lookup failed)` marker — never the deploy-log
  *   predecessor — when that lookup cannot confirm the version;
  * - the healthz smoke comparing the live version to the deployed tag;
@@ -469,13 +470,15 @@ describe("deploy-prod.yml guards", () => {
     const run = recap.run!;
     // read of the live deployment, prod-scoped and JSON
     expect(run).toContain("bunx wrangler deployments list --env production --json");
-    // the extraction is EXACTLY the shape verified against the live CLI
-    // (`[ { versions: [ { version_id, percentage } ] } ]`): the flat
-    // `.[0].version_id` form does not exist and must not be accepted, since a
-    // stale/other payload shape must not be silently read as a live version.
+    // the extraction selects the NEWEST deployment by `created_on` — the CLI
+    // lists deployments ASCENDING, so `.[0]` is the oldest of the returned page
+    // and would report a stale version as live.
     const filter = run.replace(/[ \t]+/g, " ");
-    expect(filter).toContain("'((.[0].versions // [])[0].version_id) // empty'");
+    expect(filter).toContain(
+      "'max_by(.created_on) | ((.versions // [])[0].version_id) // empty'",
+    );
     expect(run).not.toContain(".[0].version_id");
+    expect(run).not.toContain("((.[0].versions");
     // the deploy-log predecessor is never written back as if it were live
     expect(run).toContain('"unavailable (post-secret lookup failed)"');
     expect(run).toContain("> version_id.txt");
@@ -521,14 +524,22 @@ describe("deploy-prod.yml guards", () => {
           log: proc.stdout.toString() + proc.stderr.toString(),
         };
       };
-      // path 1 — resolved: the live CLI shape, a newest entry carrying
-      // `versions[0].version_id`.
-      bunx('[{"versions":[{"version_id":"451dc81c-0a75-4c1e-8e7d-eb5a4d88aedd","percentage":100}]}]');
+      // path 1 — resolved: the live CLI shape — an ASCENDING multi-entry page
+      // where the newest is NOT first (index 0 is the oldest, exactly as the
+      // CLI returns it). The newest must win, so a `.[0]` read is caught here.
+      bunx(
+        '[{"created_on":"2026-09-22T04:46:18Z","versions":[{"version_id":"451dc81c-0a75-4c1e-8e7d-eb5a4d88aedd","percentage":100}]},' +
+          '{"created_on":"2026-10-01T09:12:00Z","versions":[{"version_id":"aaaa1111-0000-0000-0000-000000000000","percentage":100}]},' +
+          '{"created_on":"2026-10-14T05:28:48Z","versions":[{"version_id":"40a71ea8-1111-2222-3333-444455556666","percentage":100}]}]',
+      );
       const resolved = runOnce("deadbeef");
       expect(resolved.code).toBe(0);
-      expect(resolved.out).toBe("451dc81c-0a75-4c1e-8e7d-eb5a4d88aedd");
-      // the deploy-log predecessor is gone from the file, not merely overridden
+      expect(resolved.out).toBe("40a71ea8-1111-2222-3333-444455556666");
+      // the deployed predecessor is gone from the file, not merely overridden
       expect(resolved.out).not.toContain("deadbeef");
+      // and NOT the oldest entry (the `.[0]` read the CLI's ascending order
+      // used to make look correct)
+      expect(resolved.out).not.toBe("451dc81c-0a75-4c1e-8e7d-eb5a4d88aedd");
       // path 2 — empty deployment list: the unavailable marker, NOT the
       // predecessor
       bunx("[]");
@@ -552,6 +563,45 @@ describe("deploy-prod.yml guards", () => {
       expect(flat.code).toBe(0);
       expect(flat.out).toBe("unavailable (post-secret lookup failed)");
       expect(flat.out).not.toContain("beef4567");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("mutation: reverting the extraction to `.[0]` fails the pin (ascending order makes index 0 stale)", () => {
+    // The reviewed bug's third form: `.[0]` is the OLDEST of the page the CLI
+    // returns, so a run would record a stale deployment's version as live.
+    // Show the pinned filter expression no longer matches, and that the same
+    // payload really does resolve differently under it.
+    const src = readFileSync(join(REPO_ROOT, ".github", "workflows", WORKFLOW), "utf8");
+    const mutated = src.replace(
+      "max_by(.created_on) | ((.versions // [])[0].version_id) // empty",
+      "((.[0].versions // [])[0].version_id) // empty",
+    );
+    expect(mutated).not.toBe(src);
+    const dir = mkdtempSync(join(tmpdir(), "recap-idx0-"));
+    try {
+      const path = join(dir, "deploy-prod.yml");
+      writeFileSync(path, mutated);
+      const proc = Bun.spawnSync(["python3", "-c", PY_DUMP, path], { stdout: "pipe", stderr: "pipe" });
+      expect(proc.exitCode).toBe(0);
+      const msteps = JSON.parse(proc.stdout.toString()).jobs.deploy.steps as Step[];
+      const mrecap = msteps.find((s) => s.name === "Re-capture live Worker version")!;
+      // i.e. the pin above (`toContain("'max_by(.created_on) | …'")`) now fails.
+      expect(mrecap.run).not.toContain("max_by(.created_on) | ((.versions // [])[0].version_id)");
+      // and the mutated expression genuinely picks the stale first entry.
+      const payload = JSON.stringify([
+        { created_on: "2026-09-22T04:46:18Z", versions: [{ version_id: "451dc81c" }] },
+        { created_on: "2026-10-14T05:28:48Z", versions: [{ version_id: "40a71ea8" }] },
+      ]);
+      const pick = (expr: string) =>
+        Bun.spawnSync(["jq", "-r", expr], { stdin: new TextEncoder().encode(payload) })
+          .stdout.toString()
+          .trim();
+      expect(pick("((.[0].versions // [])[0].version_id) // empty")).toBe("451dc81c");
+      expect(pick("max_by(.created_on) | ((.versions // [])[0].version_id) // empty")).toBe(
+        "40a71ea8",
+      );
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

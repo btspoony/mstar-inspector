@@ -566,9 +566,12 @@ taken from that log alone would misreport the live version in the
 `deploy-evidence` artifact and the Release notes. After the **last** mutating
 step (the optional `ALERT_WEBHOOK_URL` write / delete) the workflow therefore
 re-reads the live deployment with
-`bunx wrangler deployments list --env production --json` and overwrites
-`version_id.txt` with its newest version id (`[0].versions[0].version_id` — the
-shape verified against the live CLI; there is no flat `[0].version_id` form).
+`bunx wrangler deployments list --env production --json`, selects the **newest**
+deployment by `created_on` — the CLI lists deployments **ascending**, so index 0
+of the returned page is the *oldest*, not the live one — and overwrites
+`version_id.txt` with that deployment's version id
+(`[0].versions[0].version_id`, the shape verified against the live CLI; there is
+no flat `[0].version_id` form).
 When that lookup cannot confirm the version — an empty list, a missing field,
 or the CLI itself failing — the file records the explicit marker
 `unavailable (post-secret lookup failed)` and the step emits a `::notice::`; the

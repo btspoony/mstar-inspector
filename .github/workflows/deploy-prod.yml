@@ -238,9 +238,13 @@ jobs:
       # PREDECESSOR of the version actually serving traffic. This is the LAST
       # mutating step's follow-up: re-read the live deployment so the evidence
       # (artifact + Release notes) identifies the version that is really live.
-      # Payload shape verified against the live CLI: an array whose newest entry
-      # carries `versions: [{ version_id, percentage }]`; there is no flat
-      # `.[0].version_id` form.
+      # Payload shape verified against the live CLI: an array of deployments,
+      # each entry carrying `versions: [{ version_id, percentage }]`; there is
+      # no flat `.[0].version_id` form. The CLI lists deployments in
+      # ASCENDING `created_on` order — `.[0]` is the OLDEST of the ten returned,
+      # not the live one (verified on the live account: index 0 held a
+      # 2026-09-22 deployment while the live version came from index 9,
+      # 2026-10-14) — so the newest is selected with `max_by(.created_on)`.
       #
       # The deploy-log predecessor is NEVER written back as if it were live:
       # when the lookup cannot confirm the version (empty list, missing field,
@@ -254,14 +258,14 @@ jobs:
           set -uo pipefail
           DEPLOY_LOG_VERSION=$(cat version_id.txt 2>/dev/null || true)
           LIVE_VERSION=$(bunx wrangler deployments list --env production --json 2>/dev/null \
-            | jq -r '((.[0].versions // [])[0].version_id) // empty' \
+            | jq -r 'max_by(.created_on) | ((.versions // [])[0].version_id) // empty' \
             2>/dev/null || true)
           if [ -n "$LIVE_VERSION" ] && [ "$LIVE_VERSION" != "null" ]; then
             printf '%s\n' "$LIVE_VERSION" > version_id.txt
             echo "Live Worker version after the secret uploads: $LIVE_VERSION (deploy-log value was $DEPLOY_LOG_VERSION)"
           else
             printf '%s\n' "unavailable (post-secret lookup failed)" > version_id.txt
-            echo "::notice::post-secret lookup of the live Worker version failed (deploy-log value $DEPLOY_LOG_VERSION names a predecessor and is NOT recorded as live) — recorded the unavailable marker instead"
+            echo "::notice::post-secret lookup of the live Worker version failed (the newest deployment by created_on yielded no version id — the deploy-log value $DEPLOY_LOG_VERSION names a predecessor and is NOT recorded as live) — recorded the unavailable marker instead"
           fi
 
       # Release identity, not mere liveness: healthz must report the version the
