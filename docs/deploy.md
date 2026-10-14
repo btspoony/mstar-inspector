@@ -97,17 +97,25 @@ Deploy evidence section are in [`docs/release.md`](release.md).
 
 ### The run's ref is the deployed checkout
 
-The production workflow takes **no `ref` input**: it checks out
-`github.ref_name`, and a run whose ref is not a tag (e.g. a bare dispatch on a
-branch) fails with an `::error::` and a non-zero exit **before any mutating
-step**. A production run therefore deploys exactly the tag it runs on — nothing
-else can be selected — and a manual `workflow_dispatch` is explicit human
+The production workflow takes **no `ref` input**. It checks out the run's own
+**immutable SHA** — `github.sha`, the commit the tag pointed at when the run
+was created — not the tag name, and an assertion step before any repository
+code runs (install / test / build) fails the run unless the checked-out `HEAD`
+equals that SHA. A tag moved during the approval wait can therefore no longer
+change what the approved run executes.
+A run whose ref is not a tag (e.g. a bare dispatch on a branch) fails with an
+`::error::` and a non-zero exit **before any mutating
+step**. A production run therefore deploys exactly the commit it was dispatched
+on — nothing else can be selected, and nothing can be substituted afterwards —
+and a manual `workflow_dispatch` is explicit human
 intent: it **may** deploy a prerelease tag, which is how the first production
 bring-up happens (§ One-time bring-up step 5).
 
 That structural identity, not a match heuristic, is what makes the
 [Deploy evidence](release.md#deploy-evidence-release--deploy-reconciliation)
-section's run match on the release tag proof of what shipped.
+section's run match on the release tag proof of what shipped — and the
+collector states the opposite explicitly (a `- Run identity:` bullet) whenever
+no run carries that ref.
 
 ### Production approval gate and the tag gate
 
@@ -131,15 +139,38 @@ the run is on a **tag** ref, and the environment's `v*` tag policy admits only
 tag refs — together with the workflow's own checks (prerelease guard, dispatch
 rules, run-ref identity) they constrain the **shape** of an admitted ref.
 
+**The environment marker (applied).** The workflow asserts the
+`production`-only environment **variable** `PROD_ENV_MARKER` (`production`)
+before its first mutating step, so a run that resolved repository-level values
+instead of the `production` environment fails loudly there. It proves the job
+ran under that environment; it says nothing about where a *secret value* came
+from, which is not observable from inside the run — see
+§ One-time bring-up step 3.
+
 **What neither layer constrains.** They do not decide *which commit* a tag may
 point at, and an in-workflow check cannot: the workflow that runs is read from
 the dispatched tag, so on a repository with write collaborators that file is
 itself attacker-controlled. A writer can push a `v*` tag at an arbitrary
 commit carrying a modified `deploy-prod.yml` and dispatch it — but such a run
-still cannot obtain the `production` secrets without the owner's approval.
-That approval gate is the enforceable control for this class of risk, which
-includes a tampered workflow, a compromised credential and a compromised
-third-party action inside the workflow.
+still cannot obtain the `production` secrets without the owner's approval. That
+approval gate is the enforceable control for this class of risk, which includes
+a tampered workflow and a compromised third-party action inside the workflow.
+
+**What the approval gate does not constrain: the provider credential.** The
+approval authorizes *this workflow's job*; it does not reduce the authority of
+the Cloudflare API token that job authenticates with. That token is the
+staging one reused today (step 3) — an
+**account-scoped** token with Workers Scripts / D1 / Workers Containers
+**Edit** in the single account both Workers live in (§ CI credentials — token
+permissions), and the staging workflow runs repository code with it on every
+`main` push. An actor who can merge to `main`, or who compromises the
+automation writer, therefore already holds a credential that can replace the
+production Worker or mutate production D1 **directly** — no `v*` tag, no
+production run and no approval involved. Scope the provider credential per
+environment to close that: a **production-only token** (ideally in a separate
+Cloudflare account) with the same scopes, and rotate the shared one once
+production has its own. Until then, read the account token as production
+authority regardless of how the approval gate is configured.
 
 **Current exposure and the remaining alternative.** Exactly two accounts have
 write access — the owner (`btspoony`, a User account) and one automation
@@ -165,7 +196,7 @@ plan, and both rejected for now in favour of the applied approval gate.
 
    ```bash
    wrangler kv namespace create mstar-inspector-prod-IDEMPOTENCY_KV
-   wrangler d1 create mstar-inspector-prod-db
+   wrangler d1 create mstar-inspector-prod-db --location apac
    wrangler queues create review-queue-prod
    wrangler queues create review-dlq-prod
    ```
@@ -203,9 +234,9 @@ plan, and both rejected for now in favour of the applied approval gate.
    still admits every `v*` release, prerelease and rollback tag. The policy is
    defense in depth — the workflow's own ref gate (§ The run's ref is the
    deployed checkout) is the structural check that a policy change cannot
-   remove. § Production approval gate and the tag gate states what neither
-   layer protects against and why the approval is the enforceable control for
-   it.
+   remove. § Production approval gate and the tag gate states what those layers
+   do not protect against — and which risk the approval controls versus which
+   one only a per-environment provider credential can close.
 
 3. **Variables and secrets** — the repository **variables**
    `CLOUDFLARE_ACCOUNT_ID` (`f68fcd78e7c5c10f0466788bb9e85b8e`) and
@@ -215,11 +246,38 @@ plan, and both rejected for now in favour of the applied approval gate.
 
    | Name | Kind | Value |
    |---|---|---|
-   | `CLOUDFLARE_API_TOKEN` | secret | CI credential, never injected into the Worker — reuse the staging token (§ CI credentials) |
+   | `CLOUDFLARE_API_TOKEN` | secret | CI credential, never injected into the Worker — **recommended:** a production-only token with the same scopes in its own Cloudflare account; today the staging token reused (§ CI credentials — the account-scoped authority it carries is not mediated by the approval gate: § Production approval gate and the tag gate) |
    | `OAUTH_CLIENT_SECRET` | secret | **copy** the secret of whichever OAuth App production's `OAUTH_CLIENT_ID` names — the shared App by default, or production's own App (step 4) — it is a provider credential, not a generated value |
    | `DASHBOARD_SESSION_SECRET` | secret | **new** random (`openssl rand -base64 32`) |
    | `DASHBOARD_ENCRYPTION_KEY` | secret | **new** random (`openssl rand -base64 32`) — production D1 starts empty (step 1) |
    | `ALERT_WEBHOOK_URL` | secret | optional; unset = log-only alerting (§ Ops config) |
+
+   **Resolution order — environment, then repository, then organization.**
+   GitHub resolves `secrets.X` for a job under `environment: production` as
+   the `production` environment secret if one exists, else a **repository**
+   secret of the same name, else an organization secret. A
+   `DASHBOARD_SESSION_SECRET` left at the repository level alone would
+   therefore satisfy the prod job silently — its session payload carries no
+   host binding, so staging-issued cookies would verify on production, and
+   reusing `DASHBOARD_ENCRYPTION_KEY` would break the per-instance envelope
+   isolation. The workflow's non-emptiness assertions (`:?required`) cannot
+   see this: they check a value is present, never where it came from.
+
+   **The applied guard, and what it cannot prove.** The workflow asserts the
+   `production`-only environment variable `PROD_ENV_MARKER` (`production`)
+   before its first mutating step, so a job that resolved repository-level
+   values fails loudly
+   (§ Production approval gate and the tag gate). Secret **provenance** is
+   still not observable from inside the run: a same-named repository-level
+   secret is indistinguishable from the environment one by any assertion the
+   workflow can make. Confirm at bring-up — and on any later secret rotation —
+   that the three secrets above (`OAUTH_CLIENT_SECRET`,
+   `DASHBOARD_SESSION_SECRET`, `DASHBOARD_ENCRYPTION_KEY`) are defined under
+   **Settings → Environments → `production` → Secrets**, not merely at the
+   repository level; and if a repository-level (or organization-level)
+   fallback ever fired, **rotate both keys** — the session secret invalidates
+   the cookies it signed, the encryption key needs the stored App credentials
+   re-encrypted — because the two environments would have shared them.
 
 4. **Production OAuth callback — required before the first production
    login.** The dashboard derives its callback from the request origin
@@ -258,10 +316,25 @@ plan, and both rejected for now in favour of the applied approval gate.
    ```
 
    The dispatch only queues the run: it **pauses for the owner's approval** on
-   the `production` environment before any step runs or any secret is injected,
-   so bring-up needs the owner to approve it in the run's UI
+   the `production` environment before any step runs or any `production` secret
+   is injected, so bring-up needs the owner to approve it in the run's UI
    (§ Production approval gate and the tag gate). Every later re-dispatch
    pauses the same way.
+
+   **Once approved, the run mutates in this order: apply the prod D1
+   migrations → `wrangler deploy --env production` → write the `production`
+   secrets → smoke.** Deploying *before* the secrets is deliberate: the
+   earlier order wrote them first, and on a first bring-up that made wrangler
+   materialise a **bound-less draft Worker** (`mstar-inspector-production`
+   without its bindings) holding the production secrets until the deploy step
+   landed in the same run. Deploying first creates the Worker with its real
+   bindings and no secrets; neither the deploy nor the migrations read the
+   Worker secrets (they authenticate with the CI token), and the smoke stays
+   last. No step of the run depends on the secrets being written earlier.
+   One consequence to respect: the required-secret assertion (`:?required`)
+   runs at that later point, so a missing `production` secret reds a run that
+   has **already deployed** — finish step 3 (including the `ALERT_WEBHOOK_URL`
+   decision) before dispatching.
 
    **`<tag>` must be created after this change ships.** `gh workflow run`
    runs the workflow **as defined at that ref**, and the repository's existing
@@ -276,7 +349,8 @@ plan, and both rejected for now in favour of the applied approval gate.
    commit), so `v1.0.0-alpha.2` cannot be reused.
 
    A manual dispatch is explicit human intent and **may** deploy a prerelease
-   tag; the run deploys exactly the tag it runs on, and a dispatch on a branch
+   tag; the run deploys exactly the commit it was dispatched on — the tag's
+   commit, pinned as the run's SHA — and a dispatch on a branch
    is refused before any mutation (§ The run's ref is the deployed checkout).
    Its own smoke asserts `https://inspector.mstar.page/healthz` returns
    `{"ok":true,"version":"v<tag>"}`.
@@ -332,18 +406,20 @@ restores by hand.
   come from `wrangler deployments list --env production` or the run's summary /
   `deploy-evidence` artifact.
 - **Re-dispatching `deploy-prod.yml` on an older tag is NOT version-only** —
-  `gh workflow run deploy-prod.yml --ref <older-tag>` ships exactly that tag
+  `gh workflow run deploy-prod.yml --ref <older-tag>` deploys exactly the
+  commit that tag pointed at when the run was created
   (§ The run's ref is the deployed checkout) and re-runs the whole job (after
   pausing for the owner's approval — § Production approval gate and the tag
   gate): it
+  applies the D1 migrations (`--remote --env production`, forward-only),
+  deploys the older tag's code, container image and
+  `wrangler.jsonc` `env.production` **vars** — which overwrite every plain var
+  set in the dashboard (§ `ADMIN_LOGINS` lives in the config, not the
+  dashboard) — and then
   re-injects the **current `production` environment secrets** (all four
   required ones, plus
   `ALERT_WEBHOOK_URL` written when that secret is set and **deleted** when it is
-  not), applies the D1 migrations (`--remote --env production`, forward-only),
-  and deploys the older tag's code, container image and
-  `wrangler.jsonc` `env.production` **vars** — which overwrite every plain var
-  set in the dashboard (§ `ADMIN_LOGINS` lives in the config, not the
-  dashboard). Before dispatching, review the `production` environment's secrets
+  not). Before dispatching, review the `production` environment's secrets
   and `env.production.vars` **at that tag**; rotate anything the older values
   would silently restore.
 - **D1 migrations are forward-only** — roll back code, never the schema; a
@@ -494,6 +570,17 @@ itself only reads `deploy.log`). A token that passes `wrangler whoami`
 but lacks D1 access fails the migration step with
 `The given account is not valid or is not authorized to access this service
 [code: 7403]` — the account id is correct; the token's permissions are not.
+
+**Scope the token per environment.** These scopes are account-wide and both
+Workers live in the one account, so the token above — the staging one the
+production run reuses today (§ One-time bring-up step 3) — is full authority
+over **both** instances: it can replace the production Worker or mutate
+production D1 with no tag, no production run and no approval. The recommended
+remedy is a **production-only token** (same scopes, ideally in a separate
+Cloudflare account) set as the `production` environment secret, with the
+shared token rotated once production no longer uses it; the deployment
+approval governs the workflow run, never the credential
+(§ Production approval gate and the tag gate).
 
 Provider API keys and the review model chain are **not** Worker env — they
 live per App in D1 (`app_provider_keys` / `app_model_config`, migration
@@ -716,9 +803,12 @@ smoke → record the digest.
    wrangler deployments list   # or: wrangler versions list
    ```
    The **baseline** is the latest successful run's summary / `deploy-evidence`
-   artifact (see § Image pins and digest record) — its digest is the
+   artifact (see § Image pins and digest record) — its digest is the bare
+   `sha256:<hex>` the run records; the
    `registry.cloudflare.com/…@sha256:` reference that run's `wrangler deploy`
-   printed. There is **no independent live-digest source** to compare it
+   printed survives in that run's `deploy.log` (the workflow strips the prefix
+   when it writes `image_digest.txt`). There is **no independent live-digest
+   source** to compare it
    against: `wrangler containers list --json` reports an empty `image` for
    this Worker's 1.0 `durable_object` application (only the orphaned
    default-policy `mstar-inspector-sandbox` app still carries a reference) —
@@ -1145,7 +1235,9 @@ Deployed image record (DOCS-01 baseline):
 > image_digest.txt) as the `deploy-evidence` Actions artifact. The GitHub
 > **Environments → staging** page shows the deployment history (commit,
 > actor, timestamp). The digest is the container reference the deploying
-> `wrangler deploy` printed — `wrangler containers list --json` does **not**
+> `wrangler deploy` printed, recorded in its bare `sha256:<hex>` form (the
+> account-scoped `registry.cloudflare.com/…@sha256:` line stays in that run's
+> `deploy.log`) — `wrangler containers list --json` does **not**
 > carry it for the 1.0 `durable_object` app (the record reports
 > `"image": ""`; only the orphaned default-policy `mstar-inspector-sandbox`
 > app still shows a reference), which is why no side-by-side live compare is
@@ -1309,6 +1401,13 @@ never created while paused. The same-name duplicate-run possibility above
   the Worker when set and deletes it when unset, so removing the GitHub
   Secret returns the Worker to log-only alerting; `.dev.vars` locally).
   Unset = log-only alerting.
+- `PROD_ENV_MARKER` (NEW, environment **variable** — not a secret, never
+  Worker env): the `production` environment carries it with the value
+  `production` and no other scope defines it. The production workflow asserts
+  it before its first mutating step, so a run that resolved repository-level
+  values fails loudly instead of silently; it does not prove where a secret
+  *value* came from (§ Production approval gate and the tag gate,
+  § One-time bring-up step 3).
 
 ## Maintenance (DEBT-01)
 
