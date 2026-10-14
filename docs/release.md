@@ -1,15 +1,40 @@
 # Release — mstar-inspector
 
-> **Releasing is a reviewable GitHub Actions chain, decoupled from deploying.**
+> **Releasing is a reviewable GitHub Actions chain that runs no deploy — it
+> hands production off to its own workflow.**
 > A human triggers **Release prep** → the workflow assembles the bilingual
 > changelog, bumps the version surface, and opens a `release vX.Y.Z` PR →
 > merging that PR makes the **Release** workflow tag the verified merge commit
 > and publish the GitHub Release. Tags are only ever created by CI on an
 > already-verified commit — never by hand.
 >
-> Deploying is untouched: the same merge pushes to `main`, so the
-> [Deploy workflow](deploy.md) ships the version bump to staging exactly as
-> for any other change. A release never deploys anything itself.
+> The release **also triggers the production deploy**: once the Release is
+> created, the Release workflow **dispatches** the production workflow
+> ([`.github/workflows/deploy-prod.yml`](../.github/workflows/deploy-prod.yml))
+> on the tag (`gh workflow run deploy-prod.yml --ref <tag>` — the job's
+> `actions: write` permission is what allows it, and the dispatched run deploys
+> exactly the commit it was dispatched on: the workflow takes no `ref` input,
+> checks out the run's own immutable SHA and refuses a non-tag ref). The
+> dispatched run then **pauses for the owner's approval** before it deploys
+> (step 5). The dispatch is required
+> because a Release published with the workflow's `GITHUB_TOKEN` does **not**
+> create a `release: published` run: GitHub suppresses workflow events caused
+> by `GITHUB_TOKEN` (`workflow_dispatch` / `repository_dispatch` are the
+> exempt trigger types). The dispatched run ships the tagged commit to the
+> production Worker `mstar-inspector-production` at
+> `https://inspector.mstar.page`. A prerelease (`-` in the version) is never
+> dispatched by the automated chain, which starts no production deploy for it;
+> staging verifies those. A manual `workflow_dispatch` on a prerelease tag ref
+> is the supported exception and may deploy one — the first production bring-up
+> does exactly that, on a tag cut **after** this workflow ships (a tag that
+> predates it has no `deploy-prod.yml` at that ref to run); see
+> [production bring-up](deploy.md#one-time-bring-up-operator). The `release: published` trigger stays declared and deploys
+> a Release a human (or any non-`GITHUB_TOKEN` actor) publishes; on that path
+> the job-level guard requires the Release to be non-prerelease **and** its tag
+> to carry no `-`.
+> Independently, the same merge pushes to `main`, so the
+> [Deploy workflow](deploy.md) ships the version bump to **staging** exactly
+> as for any other change.
 
 This document is the **living home of the cut-a-release steps** (including the
 first-cut checklist and failure paths). The day-to-day changelog fragment
@@ -61,10 +86,44 @@ their repo.
    prerelease). A final step then appends the [Deploy evidence
    section](#deploy-evidence-release--deploy-reconciliation) — it never
    postpones the tag and never fails the workflow.
-5. **Deploy happens automatically.** The merge's `main` push triggers the
-   Deploy workflow (`package.json` is not in its `paths-ignore` set), so the
-   version bump ships to staging; after it completes, `/healthz` and the
-   dashboard report the new version.
+5. **Staging deploys automatically; production is dispatched automatically but
+   waits for the owner's approval.** *Staging*: the merge's `main` push
+   triggers the Deploy workflow (`package.json` is not in its `paths-ignore`
+   set), so the version bump ships to staging; after it completes, `/healthz`
+   and the dashboard report the new version. *Production*: the Release workflow
+   dispatches the production workflow
+   ([`deploy-prod.yml`](../.github/workflows/deploy-prod.yml)) on the tag — no
+   `release: published` run is created by the bot's own Release (GITHUB_TOKEN
+   event suppression), so the dispatch is what starts the production run for
+   it — and that run then **pauses at job start for the owner's approval** on
+   the `production` environment before a single step runs or any secret is
+   injected ([production environment](deploy.md#production-environment)).
+   **A rerun of the Release workflow reuses an in-flight or successful
+   production run for the tag's commit instead of queueing a second deploy**
+   (the dispatch step looks the run up first and emits a `::notice::` naming
+   it), so the evidence collector keeps pointing at the same run across reruns;
+   **any other terminal outcome** (a run that concluded `failure`, `cancelled`,
+   `timed_out`, `startup_failure`, `action_required`, `stale`, `neutral` or
+   `skipped`) — or no run at all — **dispatches a fresh production run**, so a
+   rerun after a failed deploy retries.
+   Once approved it re-verifies the tag, applies the prod D1 migrations,
+   deploys the prod Worker, writes the `production` secrets and asserts
+   `https://inspector.mstar.page/healthz` returns `v<tag>`. **Nothing reaches
+   production unattended**, so a release cut outside the owner's working hours
+   sits at the approval prompt until it is granted — and the Release's Deploy
+   evidence section records `pending` in the meantime (§ Deploy evidence).
+   A prerelease is
+   never dispatched by the automated chain — it starts no run for it (a
+   prerelease published by hand in the UI does create a `release: published`
+   run, but the job's guard requires the Release to be non-prerelease **and** its
+   tag to carry no `-`, so it skips that deploy); bring-up and rollback
+   dispatch it on a **tag** ref instead — the run's ref names the released tag
+   and its checkout is pinned to the run's own SHA, so a non-tag ref is refused
+   before any mutation — and a manual dispatch may
+   deploy a prerelease tag
+   ([production environment](deploy.md#production-environment)). A red
+   dispatch step fails the release run **after** the tag and Release exist —
+   see [Failure paths](#failure-paths).
 
 ## Changelog fragment discipline
 
@@ -89,12 +148,22 @@ explicit version `1.0.0` (not auto). Every item below must pass:
    version-surface bump `0.1.0 → 1.0.0`.
 3. **Merge → tag + Release** — the `v1.0.0` annotated tag lands on the merge
    commit; the GitHub Release `v1.0.0` is published with bilingual notes plus
-   the Deploy evidence section (Worker Version ID + image digest + deploy run
-   link — or an explicit pending/failed/no-run status; never silently
-   missing).
+   the Deploy evidence section for the **production** run (Worker Version ID +
+   image digest + deploy run link — or an explicit pending/failed/no-run
+   status; never silently missing). **`Status: pending` is the normal state
+   here, not a defect**: the production run pauses for the owner's approval,
+   and unless that approval is granted inside the collector's ~15-minute
+   bounded wait the section is written while the run is still waiting.
+   Approve the production run, then complete this item through
+   [manual reconciliation](#manual-reconciliation) — that backfill is the
+   ordinary completion path for a release whose production deploy is approved
+   after the wait.
 4. **Live version** — after the post-merge deploy completes, staging
    `/healthz` returns the new `version` field and the SPA displays it
-   (surface lands with the `src/version.ts` VERSION_SURFACES entry).
+   (surface lands with the `src/version.ts` VERSION_SURFACES entry); once the
+   **approved** production run finishes,
+   `https://inspector.mstar.page/healthz` returns the
+   same version — the run's own smoke gate asserts it.
 5. **Fragments archived** — `.changes/unreleased/` is empty and the consumed
    fragments live under `.changes/archive/1.0.0/`.
 
@@ -103,6 +172,19 @@ de-scope it into a "known issue".**
 
 ## Failure paths
 
+- **Rerunning the Release workflow** (the recovery step named by most bullets
+  below) — the dispatch step looks up the existing `deploy-prod.yml` run for the
+  tag's commit **before** dispatching and **reuses an in-flight or successful
+  run** (a `::notice::` names the run) — reading one explicitly large page for
+  the commit (`--limit 100`, not the 20-row default, so a reusable same-tag run
+  cannot hide behind many newer runs of other tags) — so a rerun queues **no
+  second approval-gated deploy** and the evidence collector keeps resolving the
+  same run instead of waiting on a new one. **Any other terminal outcome
+  dispatches a fresh production run** — `failure`, `cancelled`, `timed_out`,
+  `startup_failure`, `action_required`, `stale`, `neutral`, `skipped` — as does
+  **no run at all** (e.g. the original dispatch failed). A rerun after a
+  *failed* production deploy therefore still retries. The tag, the Release, and
+  the notes-file rebuild are idempotent regardless.
 - **Requested version already released** — Release prep fails early with
   `Tag vX.Y.Z already exists`. Pick a different version; re-releasing an
   existing version is a bug, not an operation.
@@ -136,15 +218,38 @@ de-scope it into a "known issue".**
 - **Re-dispatching prep for the same version** — the `release/vX.Y.Z` branch
   is force-pushed (`--force-with-lease`) and the existing PR is updated in
   place (`gh pr edit`).
-- **Deploy fails after merge** — independent of the release chain (tag and
-  Release are already cut); follow the [deploy runbook](deploy.md) failure
+- **Staging deploy fails after merge** — independent of the release chain (tag
+  and Release are already cut); follow the [deploy runbook](deploy.md) failure
   semantics. A failed deploy never rolls back a tag.
+- **Production deploy fails** — the dispatched `deploy-prod.yml` run for the
+  tag is red with the failing step named; the tag and Release stand and nothing
+  is rolled back. Follow the
+  [production rollback](deploy.md#rollback-production) — note what a
+  re-dispatch re-runs — or re-dispatch the workflow on an older tag.
+- **Production run red before any mutation — tag/version mismatch** — the
+  production workflow validates the dispatched tag against the checked-out
+  version surfaces **before** its first mutating command
+  ([production environment](deploy.md#production-environment)), so a tag whose
+  commit does not carry that version — a hand-cut or re-pointed `v*` tag that
+  bypassed the release chain — fails there, after tag resolution and before the
+  D1 migration or the deploy: **nothing reached production**. Re-cut the version
+  through Release prep so the tag and its version surfaces agree; do not
+  hand-fix a tag's target commit, and an ad-hoc `v*` tag is not a supported
+  production path.
+- **Production dispatch failed** (the "Dispatch production deploy on the
+  release tag" step goes red — `gh workflow run` was refused, e.g. the dispatch
+  permission is missing): the tag and the Release were both created **before**
+  that step, so they stand, but **no production run was started**. Re-run the
+  Release workflow (it converges idempotently), or dispatch by hand —
+  `gh workflow run deploy-prod.yml --ref vX.Y.Z` (the run's own ref is the
+  deploy tag, so its head SHA and its deployed checkout are both the tag's
+  commit).
 - **Deploy-evidence append failed** (the evidence **step** goes red —
   `::error::` annotation plus non-zero exit — while the job stays green via
   step-level `continue-on-error`, so evidence can never fail the release): a
   transient `gh release edit` failure left the Release without the evidence
   section. Re-run the Release workflow (it converges idempotently), or append
-  the section by hand per [manual reconciliation](#manual-reconciliation-fallback).
+  the section by hand per [manual reconciliation](#manual-reconciliation).
 - **Job timeout preempted the evidence step** (extreme case only: slow
   pre-steps plus a full-length bounded wait — the evidence step carries its
   own `timeout-minutes: 18` budget, 15-min wait default + margin, bounded
@@ -157,17 +262,77 @@ de-scope it into a "known issue".**
 ## Deploy evidence (release ↔ deploy reconciliation)
 
 Every GitHub Release carries a **Deploy evidence** section pinning the tagged
-commit to what actually shipped: the Worker Version ID, the sandbox image
-digest, and the deploy Actions run link of the Deploy run for the merge
-commit. Notes are assembled in the Release workflow's `$RUNNER_TEMP` as: EN
-changelog section, blank line, `---`, blank line, CN changelog section — and
-after Release creation, the evidence section is appended behind the same
-`---` separator. The step then rewrites the Release **once** with a single
-idempotent `gh release edit --notes-file` (AD-3: the body is recomposed from
-workspace artifacts, never read-modify-written from the live body). Data comes
-entirely from the existing Deploy workflow's `deploy-evidence` artifact — no
-new credentials beyond the workflow's `GITHUB_TOKEN` (`actions: read` for the
-artifact download).
+commit to what actually shipped to **production**: the prod Worker Version ID,
+the sandbox image digest, and the Actions run link of the
+[production deploy workflow](../.github/workflows/deploy-prod.yml) run for the
+tagged commit. The collector resolves that run — not staging's — for the tag
+(`gh run list --workflow deploy-prod.yml --commit <sha>`); with both workflows
+able to produce a run for the same commit, naming the workflow is what keeps
+the match unambiguous, and it prefers the newest run whose own dispatch ref
+(`headBranch`) equals the release tag. **When the refs match, that match is
+proof of identity, not a heuristic**: the
+production workflow takes no `ref` input, checks out the run's own immutable
+SHA and refuses a non-tag ref, so a run dispatched on this tag deployed
+exactly the commit it was dispatched on. When instead no run carries the tag
+ref, the outcome depends on whether a dispatch boundary was set. On a
+dispatched release the boundary (`--since-run <run-id>`, § Section semantics)
+enforces the ref preference **above** it: the collector keeps polling for the
+requested tag's own run and, when none appears, cites **nothing** — never a
+newer foreign-ref run above the boundary (a rollback alias for the same
+commit) and never a pre-boundary run. The newest-for-commit fallback is a
+**boundless-path** disclosure only (the reuse path, or a first release with no
+prior run for the commit): there the collector reports the newest run for the
+commit and **says so** with a
+`- Run identity: no run on ref \`vX.Y.Z\` for commit \`<sha>\` — the
+newest run for the commit is reported instead, which is not that ref's deploy`
+bullet: identity is then unproven, the cited run may not be this release's own
+deploy, and the section should be confirmed per
+[manual reconciliation](#manual-reconciliation). Notes are assembled in the
+Release workflow's `$RUNNER_TEMP` as: EN changelog section, blank line, `---`,
+blank line, CN changelog section — and after Release creation, the evidence
+section is appended behind the same `---` separator. The step then rewrites
+the Release **once** with a single idempotent `gh release edit --notes-file`
+(AD-3: the body is recomposed from workspace artifacts, never read-modify-written from
+the live body). Data comes entirely from the production run's
+`deploy-evidence` artifact — no new credentials beyond the workflow's
+`GITHUB_TOKEN`, declared with `actions: write` (the dispatch of
+`deploy-prod.yml` requires it, and it covers the collector's `gh run list` /
+`gh run download` reads).
+
+What the production run itself publishes: its own run summary carries the
+heading **`## Production deploy evidence`** with the Worker, the Worker
+version, the image digest and the run link, and its `deploy-evidence` artifact
+holds the raw `deploy.log` / `version_id.txt` / `image_digest.txt` the
+collector reads. The digest recorded — in `image_digest.txt`, in the run
+summary and so in this section — is the **bare** `sha256:<hex>`: the workflow
+strips the prefix off the account-scoped
+`registry.cloudflare.com/<account>/<image>@sha256:<hex>` reference that run's
+`wrangler deploy` printed, and that account-scoped form survives only in the
+run's `deploy.log` — or the recorded digest is the literal
+`unchanged (no push in this deploy)` when that deploy pushed no container
+image (the digest step never fails the run).
+
+The recorded **Worker version** is the one **live after the secret uploads**,
+not the one `wrangler deploy` printed: each `wrangler secret bulk` call creates
+and immediately deploys another version, so a capture taken from the deploy log
+alone would name a predecessor of what is serving traffic. After the last
+mutating step the run re-reads the live deployment
+(`bunx wrangler deployments list --env production --json`), takes the **newest**
+by `created_on` (the CLI lists them ascending, so the first entry is the oldest)
+and writes that version id over `version_id.txt` — or, when the lookup cannot
+confirm it, the explicit marker `unavailable (post-secret lookup failed)`; the
+deploy-log predecessor is never recorded as if it were live. The fallback is noticed
+(`::notice::`) and never fails the deploy, and the healthz smoke proves the
+release identity independently. The section's `Worker version` bullet is
+therefore either the version to compare against a live `deployments list` in
+[manual reconciliation](#manual-reconciliation), or that explicit
+unavailable marker.
+
+**Only the Release workflow appends this section.** A Release published by
+hand in the UI deploys production through the retained `release: published`
+trigger, but it starts no `pull_request: closed` run — so no collector runs for
+it and its notes carry **no evidence section**. Reconcile such a Release by
+hand (§ Manual reconciliation).
 
 **Body ownership window:** between Release creation and the evidence rewrite
 (a minutes-scale window while the bounded wait runs), the body belongs to the
@@ -178,38 +343,56 @@ scratch each run and the same-body rewrite is idempotent.
 ### Section semantics — a recording surface, never a gate
 
 The collector (`scripts/collect-deploy-evidence.ts`) waits a bounded ~15 min
-for the Deploy run of the merge commit, then states one of these explicitly.
+for the production deploy run of the tagged commit, then states one of these
+explicitly. Two arms narrow that description: a **prerelease** never dispatches
+a deploy, so it gets an **immediate check** instead of the wait (the same
+absence stated now, without burning the window); and when this Release
+dispatched a fresh run, the collector receives the highest run id observed for
+the commit before that dispatch as a boundary (`--since-run <run-id>`) and may
+cite **only** runs newer than it. A run at or below the boundary — a superseded
+failure, an older success on the tag, or a run started by another tag on the
+same commit (the rollback-alias case) — is never republished as this release's
+evidence, and when nothing newer appears the section states exactly that.
 Nothing here can postpone the tag or fail the Release workflow — a missing
 section is always *stated*, never silent:
 
 | Section says | Meaning / operator action |
 |---|---|
-| `Worker version` + `Image digest` + `Actions run` | The Deploy run concluded successfully; IDs come from its `deploy-evidence` artifact. Nothing to do. |
-| `Status: deploy failed` | The Deploy run concluded non-success (conclusion is quoted). Follow the run link; see the [deploy runbook](deploy.md). The tag and Release stand — a failed deploy never rolls them back. |
-| `Status: pending` | Deploy still in flight when the bounded wait expired. The deploy usually finishes shortly after; see [manual reconciliation](#manual-reconciliation-fallback) to backfill or confirm. |
-| `Status: no deploy run for commit …` | No Deploy run matched the merge commit (e.g. everything it touched is in `paths-ignore`). Expected for changelog-only cuts. |
-| `Status: unavailable` | Evidence collection itself errored (the error is quoted in the section). Rare; reconcile manually. |
+| `Worker version` + `Image digest` + `Actions run` | The production deploy run concluded successfully; IDs come from its `deploy-evidence` artifact. Nothing to do. |
+| `Status: deploy failed` | The production deploy run concluded non-success (conclusion is quoted). Follow the run link; see the [deploy runbook](deploy.md) and the [production rollback](deploy.md#rollback-production). The tag and Release stand — a failed deploy never rolls them back. A **skipped** deploy job does not land here: the run still concludes `success` (it surfaces as `Status: unavailable`, below). |
+| `Status: pending` | The production deploy run had not concluded when the wait expired — normally because it is still **waiting for the owner's approval** (step 5), which lands after the wait far more often than inside it. This is the expected state for a release approved late; approve the run, then follow [manual reconciliation](#manual-reconciliation) to backfill or confirm. |
+| `Status: no [new] deploy run for commit …` | **No** run of the production workflow was created for the tagged commit after the wait — nothing dispatched it and no `release: published` run appeared. When runs for the commit do exist but all predate the dispatch boundary, the section states that instead (`no new deploy run … — no run newer than the dispatch boundary <id> appeared; no pre-boundary run was cited`): the superseded / older-success run was not yet joined by the freshly dispatched one and is never republished as this release's evidence. The production workflow has **no `paths-ignore`**, so a path filter is never the cause; a tag reaches production through the Release workflow's dispatch, a `release: published` event for a Release a human (or another non-`GITHUB_TOKEN` actor) published, or a manual `workflow_dispatch` ([production environment](deploy.md#production-environment)). Expected for a prerelease the automated chain never dispatches and which thus gets no run of its own (a manual dispatch on a prerelease tag ref **does** start a run — that is the bring-up path — while a prerelease published by hand creates a run whose deploy job the guard skips (it requires the Release to be non-prerelease **and** its tag to carry no `-`): that run still concludes `success`, so it lands in the `unavailable` row below, not here). Recover by dispatching the workflow for that tag. |
+| `Status: unavailable` | Evidence collection itself errored (the error is quoted in the section). That includes a run which concluded `success` but carries no `deploy-evidence` artifact — how a **skipped** deploy job (a prerelease published by hand in the UI) surfaces: no deploy ran, so there is nothing to read. Otherwise rare; reconcile manually. |
 
-### Manual reconciliation (fallback)
+### Manual reconciliation
 
-When the section is pending, unavailable, or looks stale, reconcile by hand —
-the two checks the automation performs, runnable directly:
+**Pending is the normal evidence state for a production deploy approved after
+the collector's wait, so this section is the usual completion path for such a
+release — not an exception.** When the section is pending, unavailable, or
+looks stale, reconcile by hand — the two checks the automation performs,
+runnable directly:
 
-1. **Worker Version ID** — `bunx wrangler deployments list`: the newest
+1. **Worker Version ID** — `bunx wrangler deployments list --env production`: the newest
    deployment's Version ID (and its source commit) must match the tagged
    merge commit and the section's `Worker version` bullet.
-2. **Image digest** — open the Deploy run's summary (the section's run link,
-   or the run's `deploy-evidence` artifact) and compare its "Deploy evidence
-   (DOCS-01 baseline)" bullets against the Release section. That baseline —
-   the `registry.cloudflare.com/…@sha256:` reference `wrangler deploy` printed
-   — is the only recorded digest: `bunx wrangler containers list --json`
+2. **Image digest** — open the production Deploy run's summary (the section's run link,
+   or the run's `deploy-evidence` artifact) and compare its "Production deploy
+   evidence" bullets against the Release section. That baseline —
+   the bare `sha256:<hex>` those bullets record, i.e. the account-scoped
+   `registry.cloudflare.com/…@sha256:` reference `wrangler deploy` printed in
+   that run's `deploy.log` — is the only recorded digest: `bunx wrangler containers list --json`
    returns an **empty** `image` for this Worker's 1.0 `durable_object`
    application, so the digest cannot be re-read from live container state and
    an independent live-digest comparison is not available. To re-derive the
-   digest, deploy again and read the reference from the new run's summary; to
+   digest, deploy again and read it from the new run's summary (or the
+   account-scoped reference out of that run's `deploy.log`); to
    confirm what is *live* at all, use the check in step 1 (`wrangler
    deployments list` → Worker Version ID) against the section's
    `Worker version` bullet.
+
+The collector's boundary flag is `--since-run <run-id>`: only runs newer than
+that id may be cited, so a pre-boundary (superseded or older-success) run is
+never published as this release's evidence.
 
 If the section needs fixing, either re-run the Release workflow (idempotent
 converge — simplest), or edit the Release directly:

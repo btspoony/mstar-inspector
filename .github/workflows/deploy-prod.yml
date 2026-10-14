@@ -1,0 +1,410 @@
+name: Deploy prod
+
+# Production deploy. A NON-prerelease GitHub Release (a tag without `-`) deploys
+# the prod stack (Worker `mstar-inspector-production`, served at
+# https://inspector.mstar.page, its own D1/KV/queue pair/container application).
+# Pre-releases never reach production — staging verifies those.
+#
+# `workflow_dispatch` is the bring-up/rollback door: the dispatch ref IS the
+# deploy ref, so `gh workflow run deploy-prod.yml --ref <tag>` (a release event
+# has no ref of its own to choose). The dispatched tag MUST contain this
+# workflow: a dispatch runs the file AS DEFINED AT that ref, so a tag cut before
+# this workflow existed has no `deploy-prod.yml` to run and the dispatch fails
+# before it starts. Bring-up therefore dispatches the first tag released after
+# this change — a post-merge prerelease tag is allowed, because the release-event
+# guard deploys only releases that are non-prerelease AND carry no `-` in the
+# tag, so it cannot be the only way in — and a rollback dispatches the tag it
+# rolls back to.
+#
+# The run's ref NAMES the release; the deployed tree is the run's DISPATCH-TIME
+# SHA. There is no `ref` input, so a run can never deploy a tag other than the
+# one it runs on, and checkout is pinned to `github.sha` rather than the tag
+# name — `actions/checkout` resolves a name at fetch time, so a tag moved during
+# the owner's approval wait would otherwise change what the approved run
+# executes. The checked-out HEAD is asserted against that SHA before any
+# repository code (install/test/build) runs. T3-3's failure mode — a run whose
+# dispatch ref is the release tag while an input points checkout at an older
+# rollback tag — is removed rather than detected. A run that is not on a tag
+# (e.g. dispatched on a branch) fails at the tag-ref assertion before any
+# mutation; a rollback dispatches on the rollback tag itself.
+#
+# LOAD-BEARING: a Release published by a workflow using the repository
+# `GITHUB_TOKEN` DOES NOT create a `release: published` workflow run — GitHub
+# suppresses the resulting events to prevent recursive runs (only
+# `workflow_dispatch` and `repository_dispatch` are exempt). So the Release
+# workflow dispatches THIS workflow explicitly with `--ref <tag>` (the run's
+# head SHA is then the tag's commit, which the evidence collector matches with
+# `--commit <sha>`), while the `release: published` trigger below remains the
+# belt for human/UI-created releases. Docs must describe the explicit dispatch
+# — never promise the event fires by itself.
+#
+# This is a SEPARATE Worker from `mstar-inspector` (mstar-inspector.42ch.dev),
+# which stays the staging instance and keeps deploying on every main push.
+#
+# Env indirection: job-level `env:` carries ONLY the non-secret account/client
+# identifiers, and every production SECRET is declared on the exact step that
+# consumes it. A step running third-party action code (`uses:`) therefore never
+# has a credential in its environment — a compromised action revision cannot
+# read what its step was never given. Steps read the values as shell variables;
+# `${{ }}` never appears inside a `run:` script (repo guard convention — see
+# tests/scripts/deploy-prod-workflow-guards.test.ts).
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:   # the dispatch ref is the deploy tag — no `ref` input
+
+concurrency:
+  group: deploy-prod-mstar-inspector
+  cancel-in-progress: false
+  # LOAD-BEARING: an approval-gated production deploy must not be displaced by a
+  # newer dispatch. GitHub keeps only ONE pending run per group by default and
+  # silently REPLACES it with the newest one — a release waiting on approval (or
+  # queued behind the running deploy) would then never reach approval or
+  # production, and if the newest run later fails or is rejected NEITHER queued
+  # release ships. `queue: max` raises that ceiling to 100 pending runs, so every
+  # dispatch is preserved; the group still serialises them, and
+  # `cancel-in-progress: false` keeps the RUNNING deploy alive.
+  queue: max
+
+jobs:
+  # Secrets-free tag guard. This job runs FIRST and holds nothing worth stealing:
+  # no `environment:` (so GitHub attaches no production secret to it), no
+  # job-level `env:`, no checkout (so no ref's code executes in it). Its only job
+  # is to assert the run is on a tag. The deploy job below `needs:` it, so a
+  # branch ref fails here and the secret-holding job never starts — a non-tag ref
+  # can neither receive production secrets nor run its own code with them.
+  # The `production` environment's own `v*`-tag deployment policy is defense in
+  # depth, not a replacement for this structural gate.
+  guard-tag-ref:
+    permissions: { contents: read }
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Assert the run is on a tag
+        env:
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          if [ "$REF_TYPE" != "tag" ]; then
+            echo "::error::deploy-prod deploys a tag, but this run is on ref '$REF_NAME' ($REF_TYPE) — dispatch with --ref <tag>"
+            exit 1
+          fi
+
+  deploy:
+    needs: guard-tag-ref   # the tag gate above holds no secrets; this job does — so it must depend on it
+    # A dispatch always deploys; a release deploys only when the Release is not
+    # flagged prerelease AND its tag carries no `-`. The two are INDEPENDENT
+    # release properties — a Release flagged prerelease under a dashless tag
+    # (human/UI publish) has the tag shape without the status — so the tag alone
+    # does not prove non-prerelease. `github.event.release` is absent on dispatch,
+    # so it is read only behind the `||` short-circuit.
+    if: github.event_name == 'workflow_dispatch' || (github.event.release.prerelease == false && !contains(github.event.release.tag_name, '-'))
+    permissions: { contents: read }   # no git push / API writes — evidence lands in the run summary + artifacts
+    runs-on: ubuntu-latest
+    environment: production
+    timeout-minutes: 30
+    # NON-SECRET only. The five production secrets are declared on the steps
+    # that consume them (see each step's `env:`): a job-level secret is in the
+    # environment of EVERY step, including the SHA-pinned third-party actions,
+    # so one compromised action revision would read the whole credential set.
+    env:
+      CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}   # account id is public — configured as a variable
+      OAUTH_CLIENT_ID: ${{ vars.OAUTH_CLIENT_ID }}   # client id is not sensitive — configured as a variable
+    steps:
+      - name: Checkout deploy ref
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # The run's DISPATCH-TIME SHA, not `github.ref_name`: checkout
+          # resolves a ref NAME at fetch time, so a tag moved during the
+          # approval wait would silently change the deployed tree. The SHA is
+          # immutable; the assertion step below proves it is what landed.
+          ref: ${{ github.sha }}
+          fetch-depth: 0   # full history — the tag is the deploy identity, never a shallow tip
+
+      # Runs BEFORE any repository code (no install/test/build yet): the tree on
+      # disk must be the run's SHA. `git rev-parse HEAD` in the just-checked-out
+      # worktree — nothing from the ref executes here.
+      - name: Assert checkout matches the run SHA
+        env:
+          RUN_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          HEAD_SHA=$(git rev-parse HEAD)
+          if [ "$HEAD_SHA" != "$RUN_SHA" ]; then
+            echo "::error::checked-out HEAD $HEAD_SHA != run SHA $RUN_SHA — the approved run must execute the tree it was approved for"
+            exit 1
+          fi
+
+      # `vars` resolves environment → repository → organization, so a
+      # repository- or organization-level `PROD_ENV_MARKER=production` would
+      # satisfy this assertion too. What it proves is that the EFFECTIVE value
+      # for this step resolved to `production` — NOT which level supplied it,
+      # and not secret provenance either (`secrets.X` falls back the same way).
+      # The variable must NEVER be defined outside the `production` environment:
+      # the assertion is a bring-up aid, not a provenance proof. It still runs
+      # before any mutation, so a run whose variables simply do not resolve
+      # reds here.
+      - name: Assert production environment marker
+        env:
+          PROD_ENV_MARKER: ${{ vars.PROD_ENV_MARKER }}
+        run: |
+          set -euo pipefail
+          if [ "$PROD_ENV_MARKER" != "production" ]; then
+            echo "::error::PROD_ENV_MARKER is not 'production' — this job did not resolve the production environment's variables"
+            exit 1
+          fi
+
+      # PURE preflight — no mutation. Hoisted here (next to the marker
+      # assertion, before the D1 migration and the deploy) so a missing
+      # `production` credential reds the run BEFORE production is migrated or
+      # deployed. The `wrangler secret bulk` WRITES stay after `wrangler
+      # deploy`; this step only asserts they are non-empty.
+      - name: Assert required secrets are set
+        env:
+          # The three secrets asserted here live on THIS step only: the
+          # preflight is pure shell (no `uses:`) and reads no third-party code.
+          OAUTH_CLIENT_SECRET: ${{ secrets.OAUTH_CLIENT_SECRET }}
+          DASHBOARD_SESSION_SECRET: ${{ secrets.DASHBOARD_SESSION_SECRET }}
+          DASHBOARD_ENCRYPTION_KEY: ${{ secrets.DASHBOARD_ENCRYPTION_KEY }}
+        run: |
+          : "${OAUTH_CLIENT_ID:?required}" "${OAUTH_CLIENT_SECRET:?required}" \
+            "${DASHBOARD_SESSION_SECRET:?required}" "${DASHBOARD_ENCRYPTION_KEY:?required}"
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: 1.4.0
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Typecheck
+        run: bun run typecheck
+
+      - name: Test
+        run: bun test
+
+      - name: Build SPA
+        run: bun run build:spa
+
+      - name: Verify Cloudflare account
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: |
+          test -n "$CLOUDFLARE_ACCOUNT_ID"   # account id is a variable — must be configured
+          bunx wrangler whoami    # token/账户名佐证，输出进 run log（人工核对账户）
+
+      # LOAD-BEARING gate: production deploys a TAG or nothing. Without the
+      # `ref` input the run's own ref names the release — and, because checkout
+      # is pinned to the dispatch-time SHA, the tag is only the identity the
+      # smoke asserts, never what gets fetched later. A dispatch can still be
+      # aimed at a branch — that must fail loudly here, before any mutation
+      # below. `github.ref_name` is then always the tag.
+      - name: Resolve deploy tag
+        id: ver
+        env:
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          if [ "$REF_TYPE" != "tag" ]; then
+            echo "::error::deploy-prod deploys a tag, but this run is on ref '$REF_NAME' ($REF_TYPE) — dispatch with --ref <tag>"
+            exit 1
+          fi
+          # The release tag minus its leading `v` is src/version.ts#APP_VERSION
+          # (`release:validate` pins it to package.json#version), so the tag IS
+          # the identity the healthz smoke asserts below.
+          echo "version=v${REF_NAME#v}" >> "$GITHUB_OUTPUT"
+          echo "Deploying $REF_NAME to production; expected healthz version: v${REF_NAME#v}"
+
+      # LOAD-BEARING: the tag must match the tree it names BEFORE production is
+      # touched. A human-published Release or a hand-cut/re-pointed `v*` tag can
+      # point at a commit whose version surfaces differ from the tag; without
+      # this gate the workflow applies forward-only migrations and deploys that
+      # commit, and only the post-deploy healthz smoke notices — production has
+      # already changed. `release:validate` is the repository's own release gate
+      # (the same one the release workflow runs), pinning every version surface
+      # to the tag's bare version, and it fails loudly.
+      - name: Validate the tag against the checked-out version surfaces
+        env:
+          TAG: ${{ github.ref_name }}
+        run: bun run release:validate -- "$TAG"
+
+      # Prod D1 starts empty and migrations are forward-only — apply before deploy.
+      - name: Apply prod D1 migrations (remote)
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: bunx wrangler d1 migrations apply mstar-inspector-prod-db --remote --env production
+
+      - name: Deploy Worker (prod)
+        shell: bash
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: |
+          set -euo pipefail
+          bunx wrangler deploy --env production 2>&1 | tee deploy.log
+          VERSION_ID="$(grep -oE 'Current Version ID: .+' deploy.log | tail -1 | cut -d' ' -f4 || true)"
+          # Recording only — NEVER a gate. The Worker is already LIVE here and
+          # the secret writes below have not run yet: a log-shape problem that
+          # exited now would strand a first bring-up serving without its
+          # OAuth/session secrets, and a rerun reading the same log shape could
+          # not converge. Bare non-emptiness is no gate either — `test -s` passes
+          # on a lone newline, exactly what a value-less log line leaves behind —
+          # so wrangler's shape (a UUID) is asserted, and a non-UUID payload
+          # records the explicit marker + a ::warning:: instead of failing. The
+          # live re-capture step below SUPERSEDES whatever lands here once the
+          # secrets have been written, which is why a log-shape problem must not
+          # strand the run.
+          if printf '%s' "$VERSION_ID" | grep -qiE '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'; then
+            printf '%s\n' "$VERSION_ID" > version_id.txt
+          else
+            printf '%s\n' "unavailable (deploy log had no version id)" > version_id.txt
+            echo "::warning::wrangler deploy reported no Worker version id in deploy.log (got '${VERSION_ID}') — recorded the unavailable marker; the post-secret re-capture overwrites it"
+          fi
+
+      # Secrets AFTER the deploy: on a first bring-up the old order let
+      # `secret bulk` materialise a bound-less draft Worker holding production
+      # secrets until the deploy step landed; deploying first creates the Worker
+      # with its real bindings and no secrets. The deploy does not depend on
+      # these secrets (they are read at request time), and the smoke stays last.
+      #
+      # `--env production` is mandatory: without it `secret bulk` resolves the
+      # TOP-LEVEL worker (the staging instance) and would overwrite staging's
+      # dashboard secrets with the fresh prod values.
+      # The required secrets were asserted non-empty in the preflight above,
+      # BEFORE any mutation. This step only writes them.
+      - name: Write required secrets
+        env:
+          # Secret-bulk only: the values are read on THIS step, which runs no
+          # third-party action code. The token authenticates the wrangler call.
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          OAUTH_CLIENT_SECRET: ${{ secrets.OAUTH_CLIENT_SECRET }}
+          DASHBOARD_SESSION_SECRET: ${{ secrets.DASHBOARD_SESSION_SECRET }}
+          DASHBOARD_ENCRYPTION_KEY: ${{ secrets.DASHBOARD_ENCRYPTION_KEY }}
+        run: |
+          jq -n '{GITHUB_OAUTH_CLIENT_ID: env.OAUTH_CLIENT_ID,
+                  GITHUB_OAUTH_CLIENT_SECRET: env.OAUTH_CLIENT_SECRET,
+                  DASHBOARD_SESSION_SECRET: env.DASHBOARD_SESSION_SECRET,
+                  DASHBOARD_ENCRYPTION_KEY: env.DASHBOARD_ENCRYPTION_KEY}' \
+            | bunx wrangler secret bulk --env production
+
+      # One step for both arms: a step-level env is NOT visible to that step's
+      # own `if:`, and keeping the value job-level to test it would put the
+      # secret back in every step's environment. `secret bulk` mutates the prod
+      # Worker either way — a non-empty value binds the webhook, an explicit
+      # null removes it (unset = log-only) — so the branch lives in the shell.
+      - name: Write ALERT_WEBHOOK_URL secret (bind, or null-delete when unset)
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          ALERT_WEBHOOK_URL: ${{ secrets.ALERT_WEBHOOK_URL }}
+        run: |
+          if [ -n "$ALERT_WEBHOOK_URL" ]; then
+            jq -n '{ALERT_WEBHOOK_URL: env.ALERT_WEBHOOK_URL}' | bunx wrangler secret bulk --env production
+          else
+            jq -n '{ALERT_WEBHOOK_URL: null}' | bunx wrangler secret bulk --env production
+          fi
+
+      # Every `secret bulk` above creates AND immediately deploys a new Worker
+      # version, so the id captured from the `wrangler deploy` log names a
+      # PREDECESSOR of the version actually serving traffic. This is the LAST
+      # mutating step's follow-up: re-read the live deployment so the evidence
+      # (artifact + Release notes) identifies the version that is really live.
+      # Payload shape verified against the live CLI: an array of deployments,
+      # each entry carrying `versions: [{ version_id, percentage }]`; there is
+      # no flat `.[0].version_id` form. The CLI lists deployments in
+      # ASCENDING `created_on` order — `.[0]` is the OLDEST of the ten returned,
+      # not the live one (verified on the live account: index 0 held a
+      # 2026-09-22 deployment while the live version came from index 9,
+      # 2026-10-14) — so the newest is selected with `max_by(.created_on)`.
+      #
+      # The deploy-log predecessor is NEVER written back as if it were live:
+      # when the lookup cannot confirm the version (empty list, missing field,
+      # or the CLI itself fails) the file records the explicit `unavailable
+      # (post-secret lookup failed)` marker instead and a `::notice::` says
+      # why. Evidence only — the step never fails the deploy, and the healthz
+      # smoke below proves the release identity independently.
+      - name: Re-capture live Worker version
+        shell: bash
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}   # `wrangler deployments list` authenticates
+        run: |
+          set -uo pipefail
+          DEPLOY_LOG_VERSION=$(cat version_id.txt 2>/dev/null || true)
+          LIVE_VERSION=$(bunx wrangler deployments list --env production --json 2>/dev/null \
+            | jq -r 'max_by(.created_on) | ((.versions // [])[0].version_id) // empty' \
+            2>/dev/null || true)
+          if [ -n "$LIVE_VERSION" ] && [ "$LIVE_VERSION" != "null" ]; then
+            printf '%s\n' "$LIVE_VERSION" > version_id.txt
+            echo "Live Worker version after the secret uploads: $LIVE_VERSION (deploy-log value was $DEPLOY_LOG_VERSION)"
+          else
+            printf '%s\n' "unavailable (post-secret lookup failed)" > version_id.txt
+            echo "::notice::post-secret lookup of the live Worker version failed (the newest deployment by created_on yielded no version id — the deploy-log value $DEPLOY_LOG_VERSION names a predecessor and is NOT recorded as live) — recorded the unavailable marker instead"
+          fi
+
+      # Release identity, not mere liveness: healthz must report the version the
+      # deployed tag carries (v-prefixed, the tag's own shape). A fresh Worker
+      # version needs a few seconds to reach the edge.
+      - name: "Smoke: healthz reports the deployed tag"
+        env:
+          EXPECTED_VERSION: ${{ steps.ver.outputs.version }}
+        run: |
+          ok=0
+          for _ in 1 2 3 4 5; do
+            body=$(curl -sf --max-time 30 --connect-timeout 5 https://inspector.mstar.page/healthz) || body=""
+            if [ -n "$body" ] \
+               && [ "$(printf '%s' "$body" | jq -r '.ok')" = "true" ] \
+               && [ "$(printf '%s' "$body" | jq -r '.version')" = "$EXPECTED_VERSION" ]; then
+              ok=1
+              break
+            fi
+            sleep 10
+          done
+          if [ "$ok" != 1 ]; then
+            echo "::error::healthz did not report version $EXPECTED_VERSION within 5 attempts"
+            exit 1
+          fi
+
+      - name: "Smoke: cron registration"
+        run: 'grep -F "schedule: */15 * * * *" deploy.log'
+
+      # Evidence is a recording surface, NEVER a gate: a deploy that pushes no
+      # image prints no digest (the container section says "No changes to be
+      # made"), so the literal "unchanged" value is recorded and the step still
+      # exits 0. Under the Sandbox 1.0 `durable_object` scheduling policy
+      # `wrangler containers list --json` reports an empty `image` (verified on
+      # the live account), so the account-scoped deploy-log anchor is the only
+      # digest source.
+      - name: "Smoke: image digest (evidence only — never fails the deploy)"
+        run: |
+          grep -oE "registry\.cloudflare\.com/${CLOUDFLARE_ACCOUNT_ID}/[a-z0-9-]+@sha256:[0-9a-f]{64}" deploy.log \
+            | tail -1 | grep -oE 'sha256:[0-9a-f]{64}' > image_digest.txt || true
+          if ! test -s image_digest.txt; then
+            echo "unchanged (no push in this deploy)" > image_digest.txt
+          fi
+
+      - name: Upload deploy evidence artifacts
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: deploy-evidence
+          path: |
+            deploy.log
+            version_id.txt
+            image_digest.txt
+          if-no-files-found: error
+        if: always()   # keep per-run evidence even when a later step fails
+
+      - name: Record prod deploy evidence
+        if: always()
+        run: |
+          VERSION=$(cat version_id.txt 2>/dev/null || echo "unavailable")
+          DIGEST=$(cat image_digest.txt 2>/dev/null || echo "unavailable")
+          {
+            echo "## Production deploy evidence"
+            echo "- Worker: \`mstar-inspector-production\` — https://inspector.mstar.page"
+            echo "- Worker version: \`$VERSION\`"
+            echo "- Image digest: \`$DIGEST\`"
+            echo "- Actions run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "::notice::prod deploy: version=$VERSION digest=$DIGEST (run summary + deploy-evidence artifact)"
