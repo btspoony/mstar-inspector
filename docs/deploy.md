@@ -374,7 +374,7 @@ smoke → record the digest.
    and `ARK_API_KEY` (required when `SMOKE_ROUTE=/smoke-review`):
    ```bash
    SMOKE_APP_ID=… SMOKE_PRIVATE_KEY=… bun run scripts/sandbox-smoke.ts
-   # /smoke: getSandbox → exec gh pr diff → destroy
+   # /smoke: getSandbox → runCommand(gh pr diff) → destroy
    SMOKE_APP_ID=… SMOKE_PRIVATE_KEY=… SMOKE_ROUTE=/smoke-review ARK_API_KEY=… \
      bun run scripts/sandbox-smoke.ts
    # /smoke-review: full in-image runner (clone + omp review + parse) → destroy
