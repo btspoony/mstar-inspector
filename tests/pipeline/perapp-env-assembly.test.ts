@@ -4,10 +4,11 @@
  * The consumer resolves the App's AI config (`getAppConfig` decrypt face, ONE
  * read per message) off the SAME appRef resolution as the commenter and feeds
  * it into `buildRunnerEnv(appCfg, log, fields)` at the runner exec step:
- *   - the App's OWN keys are injected under the PROVIDERS-mapped env name
- *     (empty/whitespace keys and unknown provider ids never inject); the
- *     `ark` entry maps the in-image ark-plan base provider's ARK_API_KEY, so
- *     that key rides the same per-App keys map (AL-24-5);
+ *   - the App's OWN keys are injected as the provider's pool env
+ *     (`MSTAR_POOL_<PROVIDER>_COUNT` + `_01.._NN`; empty/whitespace keys and
+ *     unknown provider ids never inject); the `ark` entry feeds the in-image
+ *     ark-plan base provider's pool (`MSTAR_POOL_ARK_*`), so that key rides
+ *     the same per-App pool (AL-24-5);
  *   - an App model chain becomes the runner's OMP_REVIEW_MODEL verbatim;
  *     null/""/whitespace-only = unset → the App's reviews FAIL CLOSED
  *     (assertAppConfigComplete — no deployment-level chain exists);
@@ -53,7 +54,7 @@ import type { ConsumerLog, ConsumerLogFields, PipelineEnv } from "../../src/pipe
 const TEST_KEY = Buffer.alloc(32, 11).toString("base64");
 const PEM_X = fakePem("FAKE-APP-X-PEM");
 const SHA = "0123456789abcdef0123456789abcdef01234567";
-/** The seeded `ark` BYOK key — ARK_API_KEY for the in-image ark-plan provider (AL-24-5). */
+/** The seeded `ark` BYOK key — the `MSTAR_POOL_ARK_01` slot for the in-image ark-plan provider (AL-24-5). */
 const ARK_KEY = "ark-key";
 
 const VALID_OUTPUT: ReviewOutput = {
@@ -100,9 +101,9 @@ async function seedApp(
 /**
  * Seed the per-App AI-config health baseline (AL-24-5): a model chain
  * (`ark-plan/deepseek-v4-flash` — the in-image base provider) plus the `ark`
- * BYOK key (ARK_API_KEY) its chain needs. `extraKeys` adds more per-App keys
- * (e.g. a chain that also references openai/anthropic). Uses the REAL store
- * so encrypt/decrypt exercise the composite-PK AAD path.
+ * BYOK key (`MSTAR_POOL_ARK_01`) its chain needs. `extraKeys` adds further
+ * per-App keys (e.g. a chain that also references openai/anthropic). Uses
+ * the REAL store so encrypt/decrypt exercise the composite-PK AAD path.
  */
 async function configureApp(
   db: ReturnType<typeof createMigratedTestD1>,
@@ -340,7 +341,7 @@ function keySourceLines(): Array<{ fields: ConsumerLogFields; msg: string }> {
 }
 
 describe("per-App runner env assembly (spec § Per-App BYOK)", () => {
-  test("app-key: the App's own keys inject under their PROVIDERS env names (per-App BYOK, incl. ark → ARK_API_KEY)", async () => {
+  test("app-key: the App's own keys inject into their provider's pool env (per-App BYOK, incl. ark → MSTAR_POOL_ARK_01)", async () => {
     reset();
     const db = createMigratedTestD1();
     const appX = await seedApp(db, "app-x");
@@ -1001,7 +1002,7 @@ describe("per-role override provider key gate (Bugbot 7aaf18f4)", () => {
     await consumer(makeBatch(makePayload({ appRef: { appId: appX.id } })));
 
     // The override passed the gate and reaches the runner input verbatim;
-    // the app key rides the exec env under the mapped env name.
+    // the app key rides the exec env in the provider's pool env.
     const input = runnerInputs()[0]!;
     expect(input.modelOverrides).toEqual({ "code-reviewer": "openai/gpt-5:thinking, openai/gpt-5-mini" });
     expect(runnerEnvs()[0]!.MSTAR_POOL_OPENAI_01).toBe(sk("x-openai"));
@@ -1065,7 +1066,7 @@ describe("custom provider env injection + runner input threading (AL-23-1)", () 
 
     await consumer(makeBatch(makePayload({ appRef: { appId: appX.id } })));
 
-    // Env injection: decrypted keys under the mapped env names.
+    // Env injection: decrypted keys into their provider pool env.
     const env = runnerEnvs()[0]!;
     expect(env.MSTAR_POOL_MY_PROVIDER_01).toBe(sk("custom-fixture-AAA"));
     expect(env.MSTAR_POOL_SECOND_ONE_01).toBe(sk("custom-fixture-BBB"));

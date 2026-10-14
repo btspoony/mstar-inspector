@@ -125,10 +125,11 @@ const TEST_APP_WEBHOOK_SECRET_ENC = await createSecretbox(TEST_KEY).encryptSecre
  * (appRef is required, the env-App branch is retired).
  * AL-24-5: the App is also given its AI-config health
  * baseline — a model chain (`ark-plan/deepseek-v4-flash`, the in-image
- * base provider) + the `ark` BYOK key (ARK_API_KEY) whose env the chain's
- * provider reads — so a zero-extra-env message passes the fail-closed gate
- * and every success-path test sees ARK_API_KEY + OMP_REVIEW_MODEL from the
- * App config (no Worker-env OMP_MODEL_KEY / OMP_REVIEW_MODEL exists).
+ * base provider) + the `ark` BYOK key carried in the provider's pool env
+ * (`MSTAR_POOL_ARK_*`) the chain's provider reads — so a zero-extra-env
+ * message passes the fail-closed gate and every success-path test sees the
+ * ark pool env + OMP_REVIEW_MODEL from the App config (no Worker-env
+ * OMP_MODEL_KEY / OMP_REVIEW_MODEL exists).
  */
 async function createSeededTestD1(): Promise<TestD1> {
   const db = createMigratedTestD1();
@@ -1788,12 +1789,12 @@ describe("createReviewConsumer", () => {
     expect(runnerExecEnv().OMP_REVIEW_MODEL).toBe(preChain);
   });
 
-  test("BB-2: the App's stored keys are forwarded under their PROVIDERS env names; blank rows never inject (per-App BYOK)", async () => {
+  test("BB-2: the App's stored keys are forwarded as their provider pool env; blank rows never inject (per-App BYOK)", async () => {
     reset();
     runnerStdout = JSON.stringify(VALID_OUTPUT);
     const db = await createSeededTestD1();
     // A chain needing openai + groq; anthropic/openrouter key rows ride along
-    // under their allowlisted env names; an empty mistral row never injects.
+    // in their provider pools; an empty mistral row never injects.
     await seedAppConfig(db, TEST_APP_ID, "openai/gpt-app,groq/query", {
       anthropic: sk("ant-test"),
       openrouter: sk("or-test"),

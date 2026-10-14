@@ -1974,8 +1974,8 @@ describe("duplication locks", () => {
     expect([...PROVIDER_IDS]).toEqual(Object.keys(PROVIDERS));
     expect([...PROVIDER_IDS]).toEqual([...PROVIDER_IDS_BUILTIN]);
     // 19 ids: the 18 built-in omp providers + `ark` (the
-    // AL-24-5 entry — the in-image ark-plan base provider's ARK_API_KEY rides the
-    // per-App BYOK keys map under this id).
+    // AL-24-5 entry — the in-image ark-plan base provider's keys ride the
+    // per-App BYOK pool under this id as MSTAR_POOL_ARK_COUNT + `_01.._NN`).
     expect(PROVIDER_IDS).toHaveLength(19);
   });
 
@@ -2037,8 +2037,10 @@ describe("duplication locks", () => {
     // src/contracts/sandbox-images.ts registry. Lock the registry shape the
     // refusal (and the consumer's neededEnvName mapping) rides on: omp is
     // the single enabled entry, and its capability host `ark-plan` resolves
-    // its key through catalog id `ark` (ARK_API_KEY) — the same semantics
-    // the synthesizer materializes into every per-review models.yml.
+    // its keys from catalog id `ark`'s provider pool (the `apiKeyEnv`
+    // registry field is retained metadata, no longer a resolution input) —
+    // the same semantics the synthesizer materializes into every per-review
+    // models.yml.
     expect(enabledSandboxImages().map((image) => image.id)).toEqual(["omp"]);
     expect(sandboxImageHostIds("omp")).toEqual(["ark-plan"]);
     expect(sandboxImageHostIds("no-such-image")).toEqual([]);

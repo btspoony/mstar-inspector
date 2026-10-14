@@ -75,7 +75,7 @@ exist before the first deploy:
     chain and re-verifying BOTH an existing worker and a fresh one — explicitly out of scope for this
     change, not a casual follow-up.
 
-### D1 migrations (0001–0022, forward-only)
+### D1 migrations (0001–0023, forward-only)
 
 ```bash
 wrangler d1 migrations apply mstar-inspector-db --remote   # production
@@ -106,6 +106,7 @@ wrangler d1 migrations apply mstar-inspector-db            # local dev
 | `0020_finding_lifecycle` | the finding-lifecycle and private pre-publication journal tables (`review_publications`, `review_findings`, `review_finding_rounds`, `review_threads`) — publication proof, closure and thread-resolution state (spec §7.1) |
 | `0021_review_checks` | the per-attempt Check registry (`review_checks`) behind the advisory Check Runs, with `UNIQUE(attempt_key, generation)` and the partial unique index keeping at most one nonterminal generation per attempt key (spec §7.1/§7.9) |
 | `0022_app_trigger_mode` | `github_apps.review_trigger_mode` TEXT NOT NULL DEFAULT 'every_push' CHECK (review_trigger_mode IN ('open','every_push','manual')) — the per-App review trigger mode (spec `review-trigger-policy.md` §2); metadata-only ADD COLUMN, existing rows (live and soft-deleted) materialize to the `every_push` default, no manager visit needed |
+| `0023_provider_multi_key` | `app_provider_keys` moves to the per-key pool primary key `(app_id, provider, key_id)`, and the new `app_custom_provider_keys` table takes over the custom-provider key material `app_custom_providers` no longer holds. SQLite cannot change a primary key in place, so both tables are rebuilt (create → copy → drop → rename); existing rows are carried across verbatim under the empty-string `key_id` sentinel and the store promotes each row on its first touch. Forward-only: a rollback means reverting the deploy AND restoring the D1 snapshot taken before the apply. Must apply after `0004`/`0006`/`0012`/`0015` |
 
 Migrations are **forward-only** (0002 precedent): never hand-edit an applied
 migration; add the next file.
@@ -481,10 +482,11 @@ docker run --rm --entrypoint /opt/verify-synthesis.sh <image>
 > `DASHBOARD_ENCRYPTION_KEY`, the dashboard registration flow, the per-App
 > webhook repoint, and the R1/R2 verification pins. Run AFTER § Deploy steps
 > and § Post-deploy smoke (the base Worker and D1 migrations **through
-> `0022`** must be live); the live execution is QA-coordinated. Historical
+> `0023`** must be live); the live execution is QA-coordinated. Historical
 > note: the go-live originally required `0001–0011`; the chain now extends
-> to `0022` (`0019` profile columns, `0020`
-> finding lifecycle, `0021` Check registry, `0022` per-App trigger mode).
+> to `0023` (`0019` profile columns, `0020`
+> finding lifecycle, `0021` Check registry, `0022` per-App trigger mode,
+> `0023` the per-key provider pool).
 
 ### 1. Set DASHBOARD_ENCRYPTION_KEY
 
@@ -523,10 +525,12 @@ Prerequisites: dashboard OAuth (`OAUTH_CLIENT_ID` /
 `OAUTH_CLIENT_SECRET`), `DASHBOARD_SESSION_SECRET`, an admin login
 (`ADMIN_LOGINS` bootstrap or the first-login fallback),
 `DASHBOARD_ENCRYPTION_KEY` set, and D1 migrations applied **through
-`0022`** — the full forward-only chain above, not a historical prefix.
+`0023`** — the full forward-only chain above, not a historical prefix.
 `0020` supplies the finding-lifecycle/publication journal, `0021` the
 Check registry, and `0022` the per-App trigger-mode column the webhook
-face reads on every delivery. A missing `0022` does NOT stop reviews:
+face reads on every delivery, and `0023` the per-key provider pool
+(`app_provider_keys` + `app_custom_provider_keys`) every App's provider
+keys are stored in. A missing `0022` does NOT stop reviews:
 the webhook face degrades to `every_push` semantics (the row's mode
 reads as `undefined`, which the classifier treats as every_push). What
 fails closed instead is the dashboard: the Settings page
@@ -659,8 +663,8 @@ face to repoint to; the per-App webhook URL on GitHub is unchanged by a
 Worker rollback.
 
 - **D1 is forward-only** — never reverse an applied migration on rollback
-  (the chain head is `0022`); new code tolerates the prior schema (0002
-  precedent), roll back code only.
+  (the chain head is `0023`); new code tolerates the prior schema (0002
+  precedent), roll back code only (the `0023` caveat is under § Rollback).
 - **Secrets untouched** — rollback does not remove
   `DASHBOARD_ENCRYPTION_KEY`; rotate it explicitly when the rollback is
   security-motivated. A registered App's encrypted credentials stay valid
@@ -709,7 +713,8 @@ on a positively observed unset.
   (0002 precedent — new code tolerates the prior schema; roll back code
   only). Because migrations apply before deploy in the automated path, a
   failed run may have already applied them — roll back code only, never the
-  schema.
+  schema. A migration that rebuilt a table (`0023`) is the exception: its
+  only undo is the D1 snapshot taken before the apply.
 - Secrets/vars are untouched by rollback — rotate explicitly when the
   rollback is security-motivated.
 
