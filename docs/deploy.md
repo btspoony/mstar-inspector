@@ -101,6 +101,52 @@ That structural identity, not a match heuristic, is what makes the
 [Deploy evidence](release.md#deploy-evidence-release--deploy-reconciliation)
 section's run match on the release tag proof of what shipped.
 
+### What the tag gate proves — and what it does not
+
+The secrets-free `guard-tag-ref` job runs first (no `environment`, no secrets,
+no repository checkout, so no dispatched ref's code executes in it) and the
+secret-holding `deploy` job `needs:` it. It asserts the run is on a **tag**
+ref, and the `production` environment's `v*` tag policy (step 2) admits only
+tag refs; together with the workflow's own checks (prerelease guard, dispatch
+rules, run-ref identity) they constrain the **shape** of an admitted ref.
+
+They do **not** constrain *which commit* a tag may point at, and they cannot:
+the workflow that runs is read from the dispatched tag, so on a repository
+with write collaborators that file is itself attacker-controlled. Any writer
+can push a `v*` tag at an arbitrary commit, carry a modified `deploy-prod.yml`
+in it, dispatch it, and the `deploy` job receives every `production` secret.
+**No in-workflow check can close this class of risk** — which is exactly why
+the enforceable layer has to be repository settings or access control.
+
+Current exposure: exactly two accounts have write access — the owner
+(`btspoony`, a User account) and one automation account (`auto-wood`). The
+`default` branch ruleset protects the default branch (`non_fast_forward`, no
+deletion, pull request with **0** required approvals); tags are unprotected.
+
+Closing the residual is the repository's decision; the real options and their
+tradeoffs:
+
+- **Trim write access** — remove write permission from any account that does
+  not need it (today that is `auto-wood`, the one non-owner writer). Raising
+  the default branch's required approving-review count above **0** also makes
+  a main-line workflow change need a second writer's approval before it can be
+  tagged.
+- **Required reviewer on the `production` environment** — closes the hole, at
+  the cost that every production deploy, including the automated release
+  dispatch, then waits for a human approval.
+- **A `v*` tag-creation ruleset** — not available on this repository as it
+  stands: it is owned by a User account, and keeping the release chain working
+  requires the GitHub Actions app as a bypass actor, which the API refuses for
+  a user-owned repository (`422 Actor GitHub Actions integration must be part
+  of the ruleset source or owner organization`); a restriction without that
+  bypass would block the release chain's own `git push origin "$TAG"`. It
+  becomes available after moving the repository into an organization (then the
+  Actions app can be an allowed bypass actor) or by switching the release
+  chain's tag push to a user-attributable token the ruleset bypasses — both
+  larger changes than this plan.
+- **Accept the residual** — allowed, but it must then be recorded as
+  **accepted**, not as mitigated.
+
 ### One-time bring-up (operator)
 
 1. **Cloudflare resources** — created once in the deploy account;
@@ -141,7 +187,8 @@ section's run match on the release tag proof of what shipped.
    still admits every `v*` release, prerelease and rollback tag. The policy is
    defense in depth — the workflow's own ref gate (§ The run's ref is the
    deployed checkout) is the structural check that a policy change cannot
-   remove.
+   remove; § What the tag gate proves — and what it does not states what
+   neither layer protects against.
 
 3. **Variables and secrets** — the repository **variables**
    `CLOUDFLARE_ACCOUNT_ID` (`f68fcd78e7c5c10f0466788bb9e85b8e`) and
@@ -152,16 +199,38 @@ section's run match on the release tag proof of what shipped.
    | Name | Kind | Value |
    |---|---|---|
    | `CLOUDFLARE_API_TOKEN` | secret | CI credential, never injected into the Worker — reuse the staging token (§ CI credentials) |
-   | `OAUTH_CLIENT_SECRET` | secret | **copy** the secret issued by the same OAuth App as staging — it is a provider credential, not a generated value (step 4 uses that App) |
+   | `OAUTH_CLIENT_SECRET` | secret | **copy** the secret of whichever OAuth App production's `OAUTH_CLIENT_ID` names — the shared App by default, or production's own App (step 4) — it is a provider credential, not a generated value |
    | `DASHBOARD_SESSION_SECRET` | secret | **new** random (`openssl rand -base64 32`) |
    | `DASHBOARD_ENCRYPTION_KEY` | secret | **new** random (`openssl rand -base64 32`) — production D1 starts empty (step 1) |
    | `ALERT_WEBHOOK_URL` | secret | optional; unset = log-only alerting (§ Ops config) |
 
-4. **OAuth callback** — add
-   `https://inspector.mstar.page/dashboard/oauth/callback` as a **second**
-   callback URL on the existing dashboard OAuth App (GitHub allows several;
-   the login flow derives its callback from the request origin, so this needs
-   no code or config change).
+4. **Production OAuth callback — required before the first production
+   login.** The dashboard derives its callback from the request origin
+   (`src/dashboard/index.ts` builds it as
+   `new URL(request.url).origin + "/dashboard/oauth/callback"`), so on
+   `https://inspector.mstar.page` the login flow sends GitHub
+   `https://inspector.mstar.page/dashboard/oauth/callback`. That URL must be
+   authorized on whichever OAuth App production's `OAUTH_CLIENT_ID` /
+   `OAUTH_CLIENT_SECRET` belong to; no other value makes production login
+   succeed. Pick one route and apply it before the first login:
+
+   - **Shared App (current default)** — add
+     `https://inspector.mstar.page/dashboard/oauth/callback` as a **second**
+     callback URL on the staging dashboard OAuth App (GitHub allows several)
+     and keep the repository-shared `OAUTH_CLIENT_ID` with the copied
+     `OAUTH_CLIENT_SECRET` (step 3). No code or config change is needed.
+   - **Production-only App** — create a separate OAuth App for production,
+     register `https://inspector.mstar.page/dashboard/oauth/callback` on it,
+     and set **environment-level** `OAUTH_CLIENT_ID` (variable) and
+     `OAUTH_CLIENT_SECRET` (secret) under `production`; those override the
+     repository-level values. Copy **that App's** secret — never generate one
+     (step 3).
+
+   Callback matching is **host-bound**: the registered URLs (and the wildcard
+   toggle GitHub exposes per URL) permit subdomains and subdirectories of the
+   registered host only, so a callback registered on the staging host can
+   never match production, nor the reverse — `42ch.dev` and `mstar.page` are
+   different registrable domains and no wildcard bridges them.
 
 5. **First deploy** — the release chain never dispatches a prerelease, so
    bring-up dispatches the production workflow
