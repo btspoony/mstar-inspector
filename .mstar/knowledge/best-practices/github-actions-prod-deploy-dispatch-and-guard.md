@@ -48,15 +48,17 @@ applies_when:
 
 **证据**：gh 手册 [`gh workflow run`](https://cli.github.com/manual/gh_workflow_run)（`-r, --ref <string>`：Branch or tag name which **contains the version of the workflow file** you'd like to run）；本仓 `docs/deploy.md` § One-time bring-up、`.github/workflows/deploy-prod.yml:8-17,19-29`、`tests/scripts/deploy-prod-workflow-guards.test.ts` 的 triggers 钉。
 
-### 3. 无 secrets 守卫 job：`environment:` 的 secrets 从 job 启动那一刻就在场
+### 3. 无 secrets 守卫 job：标签门禁要早于持有 secrets 的 job 里的任何代码
 
-一个声明了 `environment:` 的 job，其 environment secrets 属于**整个 job**（官方：environment secrets 只对引用该 environment 的 workflow job 可用）。因此 job 里**第一个** checkout / install / test 步骤，就已经在跑「这个 ref 的代码」，而该 job 的 secrets 已在环境变量里 —— 任何**放在 job 内部、且晚于这些步骤**的信任门禁，都已经把代码执行权让出去了。
+一个声明了 `environment:` 的 job，其 **job 级** environment secrets 属于**整个 job**（官方：environment secrets 只对引用该 environment 的 workflow job 可用）。所以只要 secret 落在 job 级，job 里**第一个** checkout / install / test 步骤就已经在跑「这个 ref 的代码」，而 secrets 已在它的环境变量里 —— 任何**放在 job 内部、且晚于这些步骤**的信任门禁，都已经把代码执行权让出去了。
 
-**模式**：把信任门禁放进**独立 job**，该 job 不声明 `environment:`、不带 job 级 `env:`、**不 checkout**（也就没有任何 ref 的代码在其中执行），只做一件事：断言「本次 run 位于 tag 上」。持有生产 secrets 的部署 job 用 `needs:` 依赖它，于是非 tag ref 连启动都不会启动那个 job —— 既拿不到生产 secrets，也无法让自己的代码在 secrets 在场的环境里运行（`.github/workflows/deploy-prod.yml:66-80`）。本仓 deploy job 自身的 job 级 `if` **不能**替代它：那个 `if` 只表达「release 事件只放行非 prerelease tag」，dispatch 分支恒真，真正的标签断言落在部署 job 内部的 step 里（`deploy-prod.yml:181-196`），晚于 checkout / install / typecheck / test / build。
+**本仓（已交付的 workflow）把这一层收窄了，守卫 job 仍然载重**：`deploy-prod.yml` 的 deploy job 在 job 级 `env:` 里只放两个**公开**变量（`CLOUDFLARE_ACCOUNT_ID`、`OAUTH_CLIENT_ID`，`deploy-prod.yml:112-114`），每个生产 secret 都声明在**消费它的那一步**（各步自己的 `env:`），checkout / setup-bun / upload-artifact 三个第三方 action 都钉到 commit SHA（`deploy-prod.yml:117,176,388`）——因此没有任何一步在跑第三方 action 代码时带着凭据。守卫 job 的价值因此是**结构性的**：非 tag ref 在 `guard-tag-ref` 就失败，`needs:` 让持有 secrets 的 deploy job 根本不启动 —— 它既拿不到生产 secrets，也不会让那些消费 secret 的步骤执行。
+
+**模式**：把信任门禁放进**独立 job**，该 job 不声明 `environment:`、不带 job 级 `env:`、**不 checkout**（也就没有任何 ref 的代码在其中执行），只做一件事：断言「本次 run 位于 tag 上」。持有生产 secrets 的部署 job 用 `needs:` 依赖它，于是非 tag ref 连启动都不会启动那个 job —— 它既拿不到生产 secrets，也不会让那些消费 secret 的步骤执行（`.github/workflows/deploy-prod.yml:79-93`）。把 secrets 收窄到消费它的 step、把第三方 action 钉到 SHA 是同一门禁的**纵深**：即便 tag 门禁被绕过，job 内也只有那几步拿得到凭据。本仓 deploy job 自身的 job 级 `if` **不能**替代它：那个 `if` 只表达「release 事件只放行非 prerelease tag」，dispatch 分支恒真，真正的标签断言落在部署 job 内部的 step 里（`deploy-prod.yml:205-220`），晚于 checkout / install / typecheck / test / build。
 
 environment 上「只允许 `v*` tag」的部署策略是**纵深防御，不是替代品**：它由设置页/API 维护，改它不需要过代码 review；而 workflow 自身的结构门禁是随 PR 一起被审的逻辑（`docs/deploy.md` § One-time bring-up 步骤 2 明确写了这层关系）。
 
-**证据**：官方 [Deployments and environments](https://docs.github.com/en/actions/reference/workflows-and-actions/deployments-and-environments) § Environment secrets / § Deployment branches and tags（规则按 run 的 `GITHUB_REF` 匹配）；本仓 `deploy-prod.yml:66-80`，守卫测试 `guard-tag-ref: secrets-free (no environment/env), checkout-free, asserts the run is on a tag`、`deploy job is gated on the guard (needs)`、以及 `mutation: removing needs from deploy must fail the suite`（结构断言 + 变异证明，门禁是「载重」的）。对照面：staging 的 `deploy.yml` 里守门是 job 级 `if: github.ref == 'refs/heads/main'`（`deploy.yml:37`，在 job 启动前求值），且它的 `test` job 本来就无 secrets（`deploy.yml:14-33`）—— 所以同样的隐患在 push-to-main 形状上不出现，这也是该形状不会暴露本事实的原因。
+**证据**：官方 [Deployments and environments](https://docs.github.com/en/actions/reference/workflows-and-actions/deployments-and-environments) § Environment secrets / § Deployment branches and tags（规则按 run 的 `GITHUB_REF` 匹配）；本仓 `deploy-prod.yml:79-93`（守卫 job：无 `environment:` / job 级 `env:` / checkout）、`deploy-prod.yml:112-114`（job 级 `env:` 只有公开变量）、各消费步自己的 `env:`（step-scoped secrets）、`deploy-prod.yml:117,176,388`（三个第三方 action 钉 SHA），守卫测试 `guard-tag-ref: secrets-free (no environment/env), checkout-free, asserts the run is on a tag`、`deploy job is gated on the guard (needs)`、以及 `mutation: removing needs from deploy must fail the suite`（结构断言 + 变异证明，门禁是「载重」的）。对照面：staging 的 `deploy.yml` 里守门是 job 级 `if: github.ref == 'refs/heads/main'`（`deploy.yml:37`，在 job 启动前求值），且它的 `test` job 本来就无 secrets（`deploy.yml:14-33`）—— 所以同样的隐患在 push-to-main 形状上不出现，这也是该形状不会暴露本事实的原因。
 
 ### 4. 证据身份：让 run 的 ref **就是**部署的 checkout
 
@@ -71,7 +73,7 @@ environment 上「只允许 `v*` tag」的部署策略是**纵深防御，不是
 
 ## Why This Matters
 
-- 这四条都**不是**读一遍 GitHub Actions 文档就能直觉得到的：事件抑制让「天然的事件链」根本不成立；dispatch 的 ref 语义决定 bring-up 能不能启动；`environment:` 的作用域把「step 级门禁」变成纸门；证据反查的可信度取决于是否删掉了冗余输入而非加了多少启发式。
+- 这四条都**不是**读一遍 GitHub Actions 文档就能直觉得到的：事件抑制让「天然的事件链」根本不成立；dispatch 的 ref 语义决定 bring-up 能不能启动；`environment:` 的 **job 级** secret 作用域让「job 内、晚于 checkout 的标签门禁」形同虚设（除非把 secrets 收窄到消费它的 step）；证据反查的可信度取决于是否删掉了冗余输入而非加了多少启发式。
 - 每条都有可核对的落点（workflow 行号 / 守卫测试断言 / 官方文档 URL），因此复用它不需要重新做一遍 review 轮次：直接抄结构，让守卫测试在格式化或重构后仍然拦得住。
 
 ## When to Apply

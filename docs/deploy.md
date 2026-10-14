@@ -173,12 +173,16 @@ tag refs — together with the workflow's own checks (prerelease guard, dispatch
 rules, run-ref identity) they constrain the **shape** of an admitted ref.
 
 **The environment marker (applied).** The workflow asserts the
-`production`-only environment **variable** `PROD_ENV_MARKER` (`production`)
-before its first mutating step, so a run that resolved repository-level values
-instead of the `production` environment fails loudly there. It proves the job
-ran under that environment; it says nothing about where a *secret value* came
-from, which is not observable from inside the run — see
-§ One-time bring-up step 3.
+environment **variable** `PROD_ENV_MARKER` (`production`) before its first
+mutating step; that proves the **effective** value resolved to `production`,
+not which level supplied it — `vars` resolves environment → repository →
+organization, so a repository- or organization-level
+`PROD_ENV_MARKER=production` satisfies the same assertion, and a run that
+resolved repository-level values does **not** fail here. It says nothing about
+where a *secret value* came from either, which is not observable from inside
+the run — see § One-time bring-up step 3. **Operational rule: never define
+`PROD_ENV_MARKER` outside the `production` environment**, so the assertion
+stays a bring-up aid rather than a value another scope can satisfy.
 
 **What neither layer constrains.** They do not decide *which commit* a tag may
 point at, and an in-workflow check cannot: the workflow that runs is read from
@@ -303,9 +307,12 @@ plan, and both rejected for now in favour of the applied approval gate.
    see this: they check a value is present, never where it came from.
 
    **The applied guard, and what it cannot prove.** The workflow asserts the
-   `production`-only environment variable `PROD_ENV_MARKER` (`production`)
-   before its first mutating step, so a job that resolved repository-level
-   values fails loudly
+   environment variable `PROD_ENV_MARKER` (`production`) before its first
+   mutating step; that proves the **effective** value resolved to
+   `production`, not which level supplied it — `vars` resolves environment →
+   repository → organization, so a repository- or organization-level
+   `PROD_ENV_MARKER=production` satisfies the same assertion. **Never define
+   `PROD_ENV_MARKER` outside the `production` environment**
    (§ Production approval gate and the tag gate). Secret **provenance** is
    still not observable from inside the run: a same-named repository-level
    secret is indistinguishable from the environment one by any assertion the
@@ -1493,11 +1500,13 @@ never created while paused. The same-name duplicate-run possibility above
   Unset = log-only alerting.
 - `PROD_ENV_MARKER` (NEW, environment **variable** — not a secret, never
   Worker env): the `production` environment carries it with the value
-  `production` and no other scope defines it. The production workflow asserts
-  it before its first mutating step, so a run that resolved repository-level
-  values fails loudly instead of silently; it does not prove where a secret
-  *value* came from (§ Production approval gate and the tag gate,
-  § One-time bring-up step 3).
+  `production`, and no other scope may define it. The production workflow
+  asserts it before its first mutating step, which proves the **effective**
+  value resolved to `production` — not which level supplied it (`vars`
+  resolves environment → repository → organization, so another scope's
+  `PROD_ENV_MARKER=production` would satisfy the assertion); it does not prove
+  where a secret *value* came from either
+  (§ Production approval gate and the tag gate, § One-time bring-up step 3).
 
 ## Maintenance (DEBT-01)
 
