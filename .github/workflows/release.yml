@@ -147,8 +147,10 @@ jobs:
       # one that succeeded; ANY other terminal outcome (failure, cancelled,
       # timed_out, startup_failure, action_required, stale, neutral, skipped)
       # dispatches a fresh run, so a rerun after a failed deploy retries — and
-      # the id of the run it supersedes is handed to the evidence step (the
-      # `superseded_run` output) so the collector never cites it. This
+      # the highest run id it observed for THIS TAG before dispatching is
+      # handed to the evidence step (the `since_run` output, run ids increase
+      # monotonically) so the collector resolves the run this dispatch queued
+      # rather than an older success. This
       # step runs
       # AFTER the Release (a dispatch failure leaves tag + Release in place and
       # converges on re-run) and BEFORE the evidence step, whose bounded wait
@@ -183,13 +185,24 @@ jobs:
           # (hence the whole page, never a single newest run). The assignment
           # form keeps a lookup failure loud under `set -e` (a failed lookup
           # must not be mistaken for "no run").
-          LOOKUP="$(gh run list --workflow deploy-prod.yml --commit "$SHA" \
-            --json status,conclusion,databaseId,headBranch \
+          RUNS_JSON="$(gh run list --workflow deploy-prod.yml --commit "$SHA" \
+            --json status,conclusion,databaseId,headBranch)"
+          LOOKUP="$(printf '%s' "$RUNS_JSON" \
             | jq -r --arg tag "$TAG" 'first(.[] | select(.headBranch == $tag)) // empty | "\(.databaseId) \(.status) \(.conclusion // "-")"')"
           REUSE_ID=""
           REUSE_STATUS=""
           REUSE_CONCLUSION=""
           read -r REUSE_ID REUSE_STATUS REUSE_CONCLUSION <<<"$LOOKUP"
+
+          # Evidence boundary: the highest run id observed for THIS TAG before the
+          # dispatch below. Run ids increase monotonically, so the run `gh
+          # workflow run` is about to queue is newer than it, while nothing
+          # already visible on this tag may be backfilled as this release's
+          # evidence — an OLDER success on this tag is exactly what a single-id
+          # exclusion let slip through. Empty when the tag has no run at all; the
+          # evidence step then passes no boundary.
+          BOUNDARY="$(printf '%s' "$RUNS_JSON" \
+            | jq -r --arg tag "$TAG" 'map(select(.headBranch == $tag) | .databaseId) | max // empty')"
 
           # Reuse ONLY an in-flight run (status != completed, which includes the
           # approval-waiting `waiting` state) or one that actually succeeded.
@@ -203,11 +216,11 @@ jobs:
 
           if [ -n "$REUSE_ID" ]; then
             echo "::notice::newest deploy-prod.yml run ${REUSE_ID} for ${TAG} concluded ${REUSE_CONCLUSION}; dispatching a fresh deploy"
-            # The superseded run must never become this release's evidence: the
-            # evidence step forwards the id so the collector drops it and keeps
-            # waiting for the run this dispatch is queuing.
-            echo "superseded_run=${REUSE_ID}" >> "$GITHUB_OUTPUT"
           fi
+          # Whatever is visible now is superseded by the dispatch below: the
+          # evidence step forwards the boundary so the collector resolves only
+          # the run this dispatch is queuing.
+          echo "since_run=${BOUNDARY}" >> "$GITHUB_OUTPUT"
           gh workflow run deploy-prod.yml --ref "$TAG"
 
       # Evidence append (AD-3): rebuild the complete body in the workspace — the
@@ -239,10 +252,11 @@ jobs:
           VERSION: ${{ steps.ver.outputs.version }}
           MERGE_SHA: ${{ github.event.pull_request.merge_commit_sha }}
           NOTES_FILE: ${{ steps.changelog.outputs.notes_file }}
-          # The run the dispatch step just superseded (empty when nothing was
-          # superseded — a first release, a reused run, or a prerelease that
-          # dispatches nothing): the collector must never cite it.
-          SUPERSEDED_RUN: ${{ steps.dispatch.outputs.superseded_run }}
+          # The highest run id the dispatch step observed for THIS TAG before it
+          # dispatched (empty when it reused a run, dispatched nothing, or the
+          # tag had no run): every id at or below it predates this release's
+          # deploy, so the collector must not backfill one of them as evidence.
+          SINCE_RUN: ${{ steps.dispatch.outputs.since_run }}
           # The section must cite the PRODUCTION deploy (release-triggered);
           # staging deploys on the same main push, so deploy.yml would be ambiguous here.
           DEPLOY_WORKFLOW: deploy-prod.yml
@@ -251,11 +265,12 @@ jobs:
           TAG="v${VERSION}"
           printf '\n\n---\n\n' >> "$NOTES_FILE"
           EXTRA_ARGS=()
-          # A rerun that superseded a failed run excludes it: the section must
-          # describe the run this release now deploys, never the one it replaced
-          # (the collector drops the id and keeps polling for the fresh run).
-          if [ -n "$SUPERSEDED_RUN" ]; then
-            EXTRA_ARGS+=(--exclude-run "$SUPERSEDED_RUN")
+          # The dispatch step just queued a fresh run: only a run newer than the
+          # boundary it captured may be cited, so an OLDER success on this tag is
+          # never backfilled as this release's evidence (the collector keeps
+          # polling until a post-boundary run appears).
+          if [ -n "$SINCE_RUN" ]; then
+            EXTRA_ARGS+=(--since-run "$SINCE_RUN")
           fi
           # A prerelease never dispatches (the dispatch step above is skipped),
           # so the full bounded wait would burn ~15 min to state the same

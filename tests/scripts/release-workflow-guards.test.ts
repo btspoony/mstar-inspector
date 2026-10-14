@@ -26,17 +26,17 @@
  *   whose own `headBranch` is THIS tag (the collector's identity rule), so a
  *   run for another tag on the same commit is never reused and cannot mask a
  *   reusable same-tag run; reuse only for an in-flight or successful run, any
- *   other terminal outcome dispatching fresh, and the superseded id leaving the
- *   step as the `superseded_run` output — with the step body executed against a
- *   stubbed `gh` for the full case table (plus a mutation dropping the identity
- *   filter);
+ *   other terminal outcome dispatching fresh, and the pre-dispatch boundary id
+ *   leaving the step as the `since_run` output — with the step body executed
+ *   against a stubbed `gh` for the full case table (plus a mutation dropping the
+ *   identity filter);
  * - deploy-evidence append step: exactly one `gh release edit`
  *   workflow-wide (count across ALL step runs, not mere containment), its own
  *   step-level timeout budget bounded below the job cap, edit failure loud at
  *   the step level (::error + exit 1) while continue-on-error keeps the job
  *   green, and the notes file handed off from the extract step's
- *   `notes_file` output — never rebuilt from RUNNER_TEMP; the superseded run id
- *   reaches the collector as `--exclude-run` (only when set) and a prerelease
+ *   `notes_file` output — never rebuilt from RUNNER_TEMP; the pre-dispatch
+ *   boundary id reaches the collector as `--since-run` (only when set) and a prerelease
  *   version zeroes the bounded wait, both observed by executing the step body
  *   against stubbed `bun`/`gh`;
  * - evidence reads the PRODUCTION deploy workflow: the step's env carries
@@ -241,9 +241,13 @@ describe("release.yml guards", () => {
     // the whole page is scanned: a run limit could hide a reusable same-tag run
     expect(dispatch.run).not.toContain("--limit");
     expect(dispatch.run).not.toContain(".[0] // empty");
-    // finding 2: the superseded run id leaves the step as an output (the
-    // evidence step forwards it to the collector as --exclude-run)
-    expect(dispatch.run).toContain('echo "superseded_run=${REUSE_ID}" >> "$GITHUB_OUTPUT"');
+    // finding 2: the pre-dispatch boundary id leaves the step as an output (the
+    // evidence step forwards it to the collector as --since-run)
+    expect(dispatch.run).toContain('echo "since_run=${BOUNDARY}" >> "$GITHUB_OUTPUT"');
+    // the boundary is the HIGHEST same-tag id — not the reuse id alone, which
+    // would leave an older success on this tag selectable
+    expect(dispatch.run).toContain("map(select(.headBranch == $tag) | .databaseId) | max // empty");
+    expect(dispatch.run).toContain('BOUNDARY="$(printf');
   });
 
   /**
@@ -320,36 +324,41 @@ exit 7
 
     // gh reports newest-first and `headBranch` is the run's OWN ref: only a run
     // on v9.9.9 is this release's deploy. `reuse` cases must leave the dispatch
-    // log empty; every other outcome dispatches a fresh run and exports the id
-    // it superseded (empty when nothing of this tag was superseded).
+    // log empty; every other outcome dispatches a fresh run and exports the
+    // highest run id visible on the WHOLE page as `since_run` (empty when the
+    // commit has no run at all). That boundary — not the same-tag reuse id — is
+    // what stops an older success on this tag from being backfilled.
     const REUSE = true;
     const DISPATCH = false;
     const cases: {
       runs: string;
       reuse: boolean;
       label: string;
-      /** The id the step must hand to the collector as superseded, if any. */
-      superseded?: number;
+      /** The boundary the step must export; null → empty value. */
+      boundary: number | null;
       /** Reuse cases: the id the reuse notice must name. */
       reuseId?: number;
     }[] = [
-      { runs: "[]", reuse: DISPATCH, label: "no run for the commit" },
+      { runs: "[]", reuse: DISPATCH, label: "no run for the commit", boundary: null },
       {
         runs: '[{"databaseId":1,"status":"completed","conclusion":"success","headBranch":"v9.9.9"}]',
         reuse: REUSE,
         label: "success",
+        boundary: null,
         reuseId: 1,
       },
       {
         runs: '[{"databaseId":2,"status":"waiting","conclusion":null,"headBranch":"v9.9.9"}]',
         reuse: REUSE,
         label: "in-flight (waiting for approval)",
+        boundary: null,
         reuseId: 2,
       },
       {
         runs: '[{"databaseId":3,"status":"in_progress","conclusion":null,"headBranch":"v9.9.9"}]',
         reuse: REUSE,
         label: "in-flight (in_progress)",
+        boundary: null,
         reuseId: 3,
       },
       ...[
@@ -365,7 +374,7 @@ exit 7
         runs: `[{"databaseId":${10 + i},"status":"completed","conclusion":"${conclusion}","headBranch":"v9.9.9"}]`,
         reuse: DISPATCH,
         label: `terminal ${conclusion}`,
-        superseded: 10 + i,
+        boundary: 10 + i,
       })),
       // foreign run listed FIRST: it must not mask the reusable same-tag run
       // behind it (gh's newest-first order is what `--limit 1` used to hide)
@@ -375,14 +384,17 @@ exit 7
           '{"databaseId":71,"status":"completed","conclusion":"success","headBranch":"v9.9.9"}]',
         reuse: REUSE,
         label: "foreign newer run listed first, same-tag run behind it",
+        boundary: null,
         reuseId: 71,
       },
       // another tag's run only: not this release's deploy — dispatch fresh, and
-      // nothing of THIS tag was superseded (the id stays empty)
+      // this tag has no run, so no boundary is captured (nothing of this tag can
+      // be backfilled)
       {
         runs: '[{"databaseId":72,"status":"completed","conclusion":"success","headBranch":"v9.9.8"}]',
         reuse: DISPATCH,
         label: "another tag's run only",
+        boundary: null,
       },
       {
         runs:
@@ -390,7 +402,19 @@ exit 7
           '{"databaseId":74,"status":"completed","conclusion":"failure","headBranch":"v9.9.9"}]',
         reuse: DISPATCH,
         label: "another tag's failure ahead of this tag's failure",
-        superseded: 74,
+        boundary: 74,
+      },
+      // THE reviewed trap: a newer same-tag failure ahead of an OLDER same-tag
+      // success. The old step exported only the failure id (80), so the
+      // collector could still select run 20's successful artifact as this
+      // release's evidence. The boundary must be 80, so run 20 is out too.
+      {
+        runs:
+          '[{"databaseId":80,"status":"completed","conclusion":"failure","headBranch":"v9.9.9"},' +
+          '{"databaseId":20,"status":"completed","conclusion":"success","headBranch":"v9.9.9"}]',
+        reuse: DISPATCH,
+        label: "superseded failure ahead of an older success on this tag",
+        boundary: 80,
       },
     ];
 
@@ -407,15 +431,14 @@ exit 7
             `reusing existing deploy-prod.yml run ${c.reuseId} for v9.9.9`,
           );
           expect(result.log, `${c.label}: no dispatch`).toBe("");
-          expect(result.exported, `${c.label}: nothing superseded`).not.toContain(
-            "superseded_run=",
-          );
+          // the reuse path exits before the boundary line: no --since-run
+          expect(result.exported, `${c.label}: no boundary`).not.toContain("since_run=");
         } else {
           expect(result.log, `${c.label}: dispatches`).toContain(
             "DISPATCH workflow run deploy-prod.yml --ref v9.9.9",
           );
-          expect(result.exported, `${c.label}: superseded id`).toBe(
-            c.superseded === undefined ? "" : `superseded_run=${c.superseded}\n`,
+          expect(result.exported, `${c.label}: boundary`).toBe(
+            `since_run=${c.boundary ?? ""}\n`,
           );
         }
       }
@@ -486,17 +509,19 @@ exit 7
       // folded T2 review: the notes path is handed off from the extract step's
       // output (single shared path), not rebuilt here
       NOTES_FILE: "${{ steps.changelog.outputs.notes_file }}",
-      // finding 2: the dispatch step's superseded run id (empty when nothing
-      // was superseded) must reach the collector, which never cites it
-      SUPERSEDED_RUN: "${{ steps.dispatch.outputs.superseded_run }}",
+      // boundary: the highest run id the dispatch step saw before it dispatched
+      // (empty when it reused a run, dispatched nothing, or had no run) — every
+      // id at or below it predates this release's deploy
+      SINCE_RUN: "${{ steps.dispatch.outputs.since_run }}",
       // AC4: the evidence section must cite the PRODUCTION deploy run —
       // deploy.yml runs on the same main push and would be ambiguous
       DEPLOY_WORKFLOW: "deploy-prod.yml",
     });
-    // finding 2: the id is forwarded as `--exclude-run` — only when set, so a
-    // first release that superseded nothing passes no flag at all
-    expect(evidRun).toContain('[ -n "$SUPERSEDED_RUN" ]');
-    expect(evidRun).toContain('EXTRA_ARGS+=(--exclude-run "$SUPERSEDED_RUN")');
+    // the boundary is forwarded as `--since-run` — only when set, so the reuse
+    // path (and a first release with no run) passes no flag at all and keeps the
+    // normal ref-preference behaviour
+    expect(evidRun).toContain('[ -n "$SINCE_RUN" ]');
+    expect(evidRun).toContain('EXTRA_ARGS+=(--since-run "$SINCE_RUN")');
     // nit d: a prerelease version carries no dispatch, so the wait is zeroed —
     // the section is written at once instead of burning the bounded wait
     expect(evidRun).toContain("case \"$VERSION\" in");
@@ -575,7 +600,7 @@ exit 0
     }
   }
 
-  test("evidence step body EXECUTES: prerelease zeroes the wait, a superseded run is excluded, a clean release passes neither", () => {
+  test("evidence step body EXECUTES: prerelease zeroes the wait, a boundary is forwarded, a clean release passes neither", () => {
     const steps = wf.jobs.release.steps as { run?: string }[];
     const body = steps.find((s) => s.run?.includes("collect-deploy-evidence.ts"))!.run!;
     const base = {
@@ -583,29 +608,30 @@ exit 0
       DEPLOY_WORKFLOW: "deploy-prod.yml",
     };
 
-    // A normal release that superseded nothing: no exclusion, no explicit wait
+    // A normal release that dispatched nothing: no boundary, no explicit wait
     // (the collector's 15-min default), section appended to the shared notes
     // file, one rewrite of the Release from that file.
-    const release = runEvidenceBody(body, { ...base, VERSION: "9.9.9", SUPERSEDED_RUN: "" });
+    const release = runEvidenceBody(body, { ...base, VERSION: "9.9.9", SINCE_RUN: "" });
     expect(release.code).toBe(0);
     expect(release.argv).toContain("--workflow deploy-prod.yml --ref v9.9.9");
-    expect(release.argv).not.toContain("--exclude-run");
+    expect(release.argv).not.toContain("--since-run");
     expect(release.argv).not.toContain("--wait-minutes");
     expect(release.notes).toContain("### Deploy evidence");
     expect(release.edited).toContain("release edit v9.9.9 --notes-file");
 
-    // a rerun that superseded a run: the collector is told which one to drop
-    const superseded = runEvidenceBody(body, {
+    // a rerun that dispatched a fresh run: the collector is told only runs past
+    // the boundary it captured may be cited
+    const bounded = runEvidenceBody(body, {
       ...base,
       VERSION: "9.9.9",
-      SUPERSEDED_RUN: "4242",
+      SINCE_RUN: "4242",
     });
-    expect(superseded.code).toBe(0);
-    expect(superseded.argv).toContain("--exclude-run 4242");
+    expect(bounded.code).toBe(0);
+    expect(bounded.argv).toContain("--since-run 4242");
 
     // a prerelease never dispatches, so the bounded wait is zeroed and the
     // section is written at once (with the same collector, same wording)
-    const prerelease = runEvidenceBody(body, { ...base, VERSION: "9.9.9-alpha.1", SUPERSEDED_RUN: "" });
+    const prerelease = runEvidenceBody(body, { ...base, VERSION: "9.9.9-alpha.1", SINCE_RUN: "" });
     expect(prerelease.code).toBe(0);
     expect(prerelease.argv).toContain("--wait-minutes 0");
     expect(prerelease.notes).toContain("### Deploy evidence");
@@ -617,7 +643,7 @@ exit 0
     const unzeroed = runEvidenceBody(mutated, {
       ...base,
       VERSION: "9.9.9-alpha.1",
-      SUPERSEDED_RUN: "",
+      SINCE_RUN: "",
     });
     expect(unzeroed.argv).not.toContain("--wait-minutes");
   });
