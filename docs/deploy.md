@@ -561,8 +561,10 @@ trigger-mode POST (its D1 UPDATE errors on the missing column).
    login on the `ADMIN_LOGINS` list gets an admin row; the empty-table
    first-login fallback applies **only** when the parsed list is empty — which
    the required deploy gate prevents — so any other login is denied
-   (invite-only, zero cookies). `ADMIN_LOGINS` only bootstraps this first
-   admin; from then on the Members page is the membership SSOT.
+   (invite-only, zero cookies). `ADMIN_LOGINS` exists so this first admin can
+   reach the dashboard at all — that is its purpose, not its only effect: the
+   Members page is the membership SSOT, while a listed login with no `users`
+   row remains eligible for admin bootstrap.
 2. **Create GitHub App** — on the dashboard workbench (`/dashboard`, the
    Apps-first home) click **Create GitHub App**. The dashboard mints the webhook slug
    (`mstar-inspector-<login>`-derived, DB pre-resolved) and POSTs the App
@@ -731,11 +733,12 @@ The Deploy workflow:
    failing to read the settings means the value cannot be confirmed, and a
    silent pass there would turn a flaky API read into a false green.
 
-Why it matters: `ADMIN_LOGINS` is the **"at least one" bootstrap list** — it
-admits the first admin and nothing else. It is not the membership SSOT (the
-`users` table / Members page is), and it is not consumed once: a listed login
-with no `users` row is still bootstrapped as admin, while an existing row
-always wins without promotion. The empty-table first-login fallback needs a
+Why it matters: `ADMIN_LOGINS` is the **"at least one" bootstrap list** — its
+purpose is to ensure the first admin can access the dashboard. It is not
+ongoing membership management: the `users` table / Members page is the
+membership SSOT, and the list is not consumed once — a listed login with no
+`users` row remains eligible for admin bootstrap, while an existing row always
+wins without promotion. The empty-table first-login fallback needs a
 genuinely empty parsed list, which this required gate prevents — so the
 fallback can no longer be silently armed by a blank value. Logins that are
 neither on the list nor in the table are denied (403, zero cookies) until an
