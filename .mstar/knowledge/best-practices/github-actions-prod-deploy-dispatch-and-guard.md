@@ -28,7 +28,7 @@ applies_when:
 - **staging** = push-to-main 自动部署（`.github/workflows/deploy.yml`），一条 `push: branches: [main]` + 紧急 `workflow_dispatch` 通道；
 - **production** = 定版驱动（`.github/workflows/deploy-prod.yml`），由 Release workflow（`.github/workflows/release.yml`）在打 tag / 建 Release 之后**显式 dispatch**，另保留 `release: published` 作为人工发 Release 的兜底触发器。
 
-这条链上四个「非显而易见」的约束都在 review 中被抓出并固化成守卫测试（`tests/scripts/deploy-prod-workflow-guards.test.ts`），且不限于本仓：任何「Release/tag → 持生产 secrets 的部署」的仓库都会撞上同样的四处。四条事实各自给出可核对证据（行号对齐 PR #63 head `afc20f0` 的交付文件）。
+这条链上四个「非显而易见」的约束都在 review 中被抓出并固化成守卫测试（`tests/scripts/deploy-prod-workflow-guards.test.ts`），且不限于本仓：任何「Release/tag → 持生产 secrets 的部署」的仓库都会撞上同样的四处。四条事实各自给出可核对证据（行号为交付时对应文件的行号）。
 
 ## Guidance
 
