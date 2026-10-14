@@ -149,6 +149,9 @@ function createAppConfigD1(): ReturnType<typeof createTestD1> {
   // (the SPA mode control's value) and the trigger-mode route validates
   // against the CHECK enum — the route tests run on the production shape.
   applyMigration(db, "0022_app_trigger_mode.sql");
+  // 0023: createUser clears a removal record in the same batch as its insert,
+  // so every membership-creating fixture needs the tombstone table too.
+  applyMigration(db, "0023_removed_logins.sql");
   return db;
 }
 

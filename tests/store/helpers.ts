@@ -66,6 +66,7 @@ const ALL_MIGRATIONS = [
   "0020_finding_lifecycle.sql",
   "0021_review_checks.sql",
   "0022_app_trigger_mode.sql",
+  "0023_removed_logins.sql",
 ];
 
 /** Execute the migration DDL on a fresh in-memory database. */

@@ -26,6 +26,7 @@ function createD1(): ReturnType<typeof createTestD1> {
     "0008_github_apps_ops.sql",
     "0009_app_model_roles.sql",
     "0012_custom_providers_and_key_updated_at.sql",
+    "0023_removed_logins.sql",
   ]) {
     db.raw.exec(readFileSync(join(MIGRATIONS_DIR, name), "utf8"));
   }

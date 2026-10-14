@@ -343,10 +343,13 @@ dashboardApp.get("/oauth/callback", async (c) => {
     return c.html(errorPage(t(requestLocale(c), "common.oauth.profileFailed"), requestLocale(c)), 502);
   }
   // Invite-only bootstrap decision (spec § AuthZ precedence:
-  // row → ADMIN_LOGINS → empty-table fallback → deny) BEFORE any session is
-  // minted. Deny = 403 page with ZERO Set-Cookie (spec: 零 cookie、零写入) —
-  // the single-use state-expiry header set above is withdrawn here — and
-  // zero D1 writes (the deny branch never inserts).
+  // row → recorded removal → ADMIN_LOGINS → empty-table fallback → deny)
+  // BEFORE any session is minted. A recorded removal denies even when the
+  // login is still on ADMIN_LOGINS (migration 0023 — an operator's removal is
+  // authoritative) and is cleared only by an explicit re-invite. Deny = 403
+  // page with ZERO Set-Cookie (spec: 零 cookie、零写入) — the single-use
+  // state-expiry header set above is withdrawn here — and zero D1 writes (the
+  // deny branch never inserts).
   const db = dashboardD1(c.env);
   if (!db) return c.text("dashboard storage is not configured", 500);
   const decision = await bootstrapDashboardAccess(db, user.login, c.env.ADMIN_LOGINS);
@@ -887,7 +890,7 @@ dashboardApp.post("/members/remove", async (c) => {
   // "last admin" pre-check would be unreachable — when countAdmins === 1
   // the actor IS the sole admin and the self-removal refusal above fires
   // first; qc3 S-003.)
-  if (!(await deleteUserUnlessLastAdmin(gate.db, target.id))) {
+  if (!(await deleteUserUnlessLastAdmin(gate.db, target.id, gate.admin.github_login))) {
     // Lost a race (the row vanished or just became the last admin between
     // the reads above and this delete): 400 with a retry message —
     // zero partial state either way.

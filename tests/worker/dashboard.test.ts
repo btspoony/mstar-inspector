@@ -31,10 +31,12 @@ import {
   deleteUserUnlessLastAdmin,
   DuplicateLoginError,
   getUserByLogin,
+  isLoginRemoved,
   listUsers,
   parseAdminLogins,
   updateUserRoleUnlessLastAdmin,
   type DashboardD1,
+  type DashboardD1BatchResult,
   type DashboardD1Statement,
 } from "../../src/dashboard/users";
 import {
@@ -2391,6 +2393,7 @@ const DASHBOARD_MIGRATION_SEQUENCE = [
   "0004_github_apps.sql",
   "0005_reviews_app_id.sql",
   "0016_users_login_nocase_unique.sql",
+  "0023_removed_logins.sql",
 ] as const;
 
 function createDashboardTestD1(
@@ -2437,11 +2440,39 @@ function createDashboardTestD1(
         },
       };
     },
+    /**
+     * D1 `batch()` runs the statements sequentially as ONE transaction ("if
+     * any statement fails, the entire sequence is aborted or rolled back").
+     * bun:sqlite's async `db.transaction()` does not roll back (probed), so
+     * the transaction is bracketed manually — the same double as
+     * tests/store/helpers.ts.
+     */
+    async batch(statements: DashboardD1Statement[]): Promise<DashboardD1BatchResult[]> {
+      db.exec("BEGIN");
+      try {
+        const results: DashboardD1BatchResult[] = [];
+        for (const stmt of statements) results.push(await stmt.run());
+        db.exec("COMMIT");
+        return results;
+      } catch (error) {
+        db.exec("ROLLBACK");
+        throw error;
+      }
+    },
   };
 }
 
 function userCount(db: DashboardD1 & { raw: Database }): number {
   return (db.raw.query("SELECT COUNT(*) AS n FROM users").get() as { n: number }).n;
+}
+
+/** The removal tombstones (migration 0023), login-ordered for stable asserts. */
+function removedRows(
+  db: DashboardD1 & { raw: Database },
+): Array<{ github_login: string; removed_at: string; removed_by: string | null }> {
+  return db.raw
+    .query("SELECT github_login, removed_at, removed_by FROM removed_logins ORDER BY github_login")
+    .all() as Array<{ github_login: string; removed_at: string; removed_by: string | null }>;
 }
 
 type DashboardTestDb = DashboardD1 & { raw: Database };
@@ -2630,6 +2661,52 @@ describe("migrations/0003_dashboard_users.sql", () => {
   });
 });
 
+describe("migrations/0023_removed_logins.sql", () => {
+  test("keys removals by github_login — removed_at required, removed_by nullable", () => {
+    const db = createDashboardTestD1();
+    const cols = db.raw.query("PRAGMA table_info(removed_logins)").all() as Array<{
+      name: string;
+      notnull: number;
+    }>;
+    const byName: Record<string, { notnull: number }> = Object.fromEntries(
+      cols.map((c) => [c.name, { notnull: c.notnull }]),
+    );
+    expect(Object.keys(byName).sort()).toEqual(["github_login", "removed_at", "removed_by"]);
+    expect(byName["github_login"]?.notnull).toBe(1);
+    expect(byName["removed_at"]?.notnull).toBe(1);
+    expect(byName["removed_by"]?.notnull).toBe(0); // NULL = no actor in scope
+  });
+
+  test("login comparison is NOCASE, like users.github_login (migration 0016)", async () => {
+    const db = createDashboardTestD1();
+    await createUser(db, { login: "OctoCat", role: "member" });
+    const row = await getUserByLogin(db, "octocat");
+    expect(await deleteUser(db, row!.id, "ada")).toBe(true);
+    // The removal is readable under any casing …
+    expect(await isLoginRemoved(db, "octocat")).toBe(true);
+    expect(await isLoginRemoved(db, "OCTOCAT")).toBe(true);
+    // … and the row keeps the exact casing that was removed.
+    expect(removedRows(db).map((r) => r.github_login)).toEqual(["OctoCat"]);
+    // A case-variant second removal row is impossible (NOCASE unique index).
+    db.raw.exec("DELETE FROM removed_logins");
+    db.raw.exec("INSERT INTO removed_logins (github_login, removed_at) VALUES ('octocat', 't1')");
+    expect(() =>
+      db.raw.exec("INSERT INTO removed_logins (github_login, removed_at) VALUES ('OCTOCAT', 't2')"),
+    ).toThrow(/UNIQUE constraint failed/);
+    // The upsert form the store uses updates that one row in place.
+    db.raw
+      .prepare(
+        `INSERT INTO removed_logins (github_login, removed_at, removed_by) VALUES (?, ?, ?)
+         ON CONFLICT (github_login) DO UPDATE
+           SET removed_at = excluded.removed_at, removed_by = excluded.removed_by`,
+      )
+      .run("OCTOCAT", "t3", "ada");
+    expect(removedRows(db)).toEqual([
+      { github_login: "octocat", removed_at: "t3", removed_by: "ada" },
+    ]);
+  });
+});
+
 describe("dashboard users store (users.ts)", () => {
   test("createUser + getUserByLogin round trip (bootstrapped admin shape)", async () => {
     const db = createDashboardTestD1();
@@ -2690,6 +2767,23 @@ describe("dashboard users store (users.ts)", () => {
     expect((await getUserByLogin(db, admin.github_login))?.id).toBe(admin.id);
   });
 
+  test("removal records the tombstone in the SAME batch as the row delete (row gone ⇔ removal recorded)", async () => {
+    const db = createDashboardTestD1();
+    const member = await createUser(db, { login: "hubot", role: "member" });
+    expect(await deleteUser(db, member.id, "octocat")).toBe(true);
+    expect(await getUserByLogin(db, "hubot")).toBeNull();
+    expect(removedRows(db)).toEqual([
+      { github_login: "hubot", removed_at: expect.any(String), removed_by: "octocat" },
+    ]);
+    // Case-insensitive read, like users.github_login (migration 0016 parity).
+    expect(await isLoginRemoved(db, "HUBOT")).toBe(true);
+    expect(await isLoginRemoved(db, "octocat")).toBe(false);
+    // Already-gone / unknown ids write nothing — no tombstone without a delete.
+    expect(await deleteUser(db, member.id, "octocat")).toBe(false);
+    expect(await deleteUser(db, "missing-id")).toBe(false);
+    expect(removedRows(db)).toHaveLength(1);
+  });
+
   test("deleteUserUnlessLastAdmin: members and non-last admins delete; the sole admin is refused (qc1 hardening)", async () => {
     const db = createDashboardTestD1();
     const admin = await createUser(db, { login: "octocat", role: "admin" });
@@ -2697,10 +2791,15 @@ describe("dashboard users store (users.ts)", () => {
     // Member row: unconditional delete.
     expect(await deleteUserUnlessLastAdmin(db, member.id)).toBe(true);
     expect(await getUserByLogin(db, "hubot")).toBeNull();
-    // Sole admin: the conditional statement refuses, row intact.
+    expect(removedRows(db).map((r) => r.github_login)).toEqual(["hubot"]);
+    // Sole admin: the conditional statement refuses, row intact — and the
+    // refusal records NO tombstone, because both statements of the removal
+    // batch carry the same guard (a removal can never be recorded without the
+    // row actually being gone).
     expect(await deleteUserUnlessLastAdmin(db, admin.id)).toBe(false);
     expect((await getUserByLogin(db, "octocat"))?.id).toBe(admin.id);
     expect(await countAdmins(db)).toBe(1);
+    expect(removedRows(db).map((r) => r.github_login)).toEqual(["hubot"]);
     // With a second admin present, either row is deletable again.
     await createUser(db, { login: "ada", role: "admin" });
     expect(await deleteUserUnlessLastAdmin(db, admin.id)).toBe(true);
@@ -2799,6 +2898,58 @@ describe("bootstrapDashboardAccess precedence matrix (spec § AuthZ)", () => {
     expect(decision.outcome).toBe("allow");
   });
 
+  test("2c. recorded removal → deny even when the login is still on ADMIN_LOGINS", async () => {
+    const db = createDashboardTestD1();
+    const removed = await createUser(db, { login: "octocat", role: "admin" });
+    await createUser(db, { login: "ada", role: "admin" });
+    expect(await deleteUserUnlessLastAdmin(db, removed.id, "ada")).toBe(true);
+    // Denied case-insensitively — the tombstone keys the login like
+    // users.github_login (NOCASE), so a case variant cannot slip past it.
+    expect(await bootstrapDashboardAccess(db, "octocat", "octocat")).toEqual({ outcome: "deny" });
+    expect(await bootstrapDashboardAccess(db, "OCTOCAT", "ada, octocat")).toEqual({ outcome: "deny" });
+    expect(userCount(db)).toBe(1); // deny path: ZERO writes (no resurrected row)
+  });
+
+  test("2d. re-invited removed login is allowed normally afterwards (createUser clears the record)", async () => {
+    const db = createDashboardTestD1();
+    const removed = await createUser(db, { login: "octocat", role: "admin" });
+    await createUser(db, { login: "ada", role: "admin" });
+    expect(await deleteUserUnlessLastAdmin(db, removed.id, "ada")).toBe(true);
+    expect(await bootstrapDashboardAccess(db, "octocat", "octocat")).toEqual({ outcome: "deny" });
+    // Deliberate re-invite: the insert clears the removal record in the same
+    // transaction, so the login bootstraps normally again — as the role the
+    // admin chose, NOT re-promoted to admin by the allowlist.
+    const reinvited = await createUser(db, { login: "octocat", role: "member", invitedBy: "ada" });
+    expect(removedRows(db)).toEqual([]);
+    expect(await bootstrapDashboardAccess(db, "octocat", "octocat")).toEqual({
+      outcome: "allow",
+      user: reinvited,
+      created: false,
+    });
+    expect((await getUserByLogin(db, "octocat"))?.role).toBe("member");
+  });
+
+  test("2e. an existing row still wins over the list and over a stale tombstone", async () => {
+    const db = createDashboardTestD1();
+    const existing = await createUser(db, { login: "octocat", role: "member" });
+    // A tombstone left next to a live row (crash between nothing — the
+    // removal batch cannot produce it; a manual D1 write can) is inert: the
+    // row check runs first, so membership wins.
+    db.raw
+      .prepare("INSERT INTO removed_logins (github_login, removed_at, removed_by) VALUES (?, ?, NULL)")
+      .run("octocat", new Date().toISOString());
+    expect(await bootstrapDashboardAccess(db, "octocat", "octocat")).toEqual({
+      outcome: "allow",
+      user: existing,
+      created: false,
+    });
+    expect(await bootstrapDashboardAccess(db, "octocat", undefined)).toEqual({
+      outcome: "allow",
+      user: existing,
+      created: false,
+    });
+  });
+
   test("3. empty table && ADMIN_LOGINS unset → first login bootstraps as admin", async () => {
     const db = createDashboardTestD1();
     const decision = await bootstrapDashboardAccess(db, "deployer", undefined);
@@ -2807,6 +2958,19 @@ describe("bootstrapDashboardAccess precedence matrix (spec § AuthZ)", () => {
     // Whitespace-only counts as unset for the fallback.
     const blank = createDashboardTestD1();
     expect((await bootstrapDashboardAccess(blank, "deployer", "   ")).outcome).toBe("allow");
+  });
+
+  test("3b. a removal record does not disturb the empty-table fallback for other logins", async () => {
+    const db = createDashboardTestD1();
+    const member = await createUser(db, { login: "octocat", role: "member" });
+    expect(await deleteUser(db, member.id)).toBe(true);
+    // Table empty + list unset: a login with no removal record still
+    // bootstraps as the first admin (the fallback is unchanged) …
+    const decision = await bootstrapDashboardAccess(db, "deployer", undefined);
+    expect(decision.outcome).toBe("allow");
+    // … while the removed login stays denied, even on an empty table.
+    expect(await bootstrapDashboardAccess(db, "octocat", undefined)).toEqual({ outcome: "deny" });
+    expect(removedRows(db).map((r) => r.github_login)).toEqual(["octocat"]);
   });
 
   test("4. deny: populated table, unknown login → deny with ZERO writes", async () => {
