@@ -734,9 +734,19 @@ describe("app-config store (createAppConfigStore) — provider keys", () => {
     const one = sk("first-key-aaaa");
     const two = sk("second-key-bbbb");
     await store.addProviderKey(app.id, "anthropic", one);
-    const before = db.raw.query("SELECT key_enc, created_at FROM app_provider_keys").get() as {
+    // Backdate BOTH stored timestamps to DISTINCT past values so the second
+    // save's fresh clock read is observably later than the previous update,
+    // not merely later than creation time. Deterministic: no sleeps, no fake
+    // timers (the backdated-row case below uses the same mechanism).
+    rawRun(
+      db,
+      "UPDATE app_provider_keys SET created_at = '2026-01-01 00:00:00', updated_at = '2026-02-01 00:00:00' WHERE app_id = ? AND provider = 'anthropic'",
+      app.id,
+    );
+    const before = db.raw.query("SELECT key_enc, created_at, updated_at FROM app_provider_keys").get() as {
       key_enc: string;
       created_at: string;
+      updated_at: string;
     };
     await store.addProviderKey(app.id, "anthropic", one);
     expect(rawCount(db, "app_provider_keys")).toBe(1);
@@ -748,14 +758,15 @@ describe("app-config store (createAppConfigStore) — provider keys", () => {
     };
     expect(after.key_id).toBe(await keyIdOf(one));
     expect(after.key_enc).not.toBe(before.key_enc); // rewritten: a fresh IV
-    // The shipped re-submission contract (asserted precisely by the backdated
-    // case below): created_at is the key's ENTRY time and stays; updated_at
-    // moves forward from a fresh clock read. Two fast calls may straddle a
-    // wall-clock second, so this is a contract assertion — never the
-    // same-second coincidence of `updated_at === created_at`.
+    // The shipped re-submission contract: created_at is the key's ENTRY time
+    // and stays; updated_at moves FORWARD from a fresh clock read — strictly
+    // past the previous update, which the distinct backdated fixture is the
+    // counterexample guard for. `SQLITE_TS_RE` checks shape only, so the
+    // strict `>` against the captured prior update (not against creation
+    // time) is what rejects a stale or backwards update.
     expect(after.created_at).toBe(before.created_at);
     expect(after.updated_at).toMatch(SQLITE_TS_RE);
-    expect(after.updated_at >= after.created_at).toBe(true); // same-format string compare
+    expect(after.updated_at > before.updated_at).toBe(true); // same-format string compare
     // A DIFFERENT key is a new pool slot, never an overwrite of the first.
     await store.addProviderKey(app.id, "anthropic", two);
     expect(rawCount(db, "app_provider_keys")).toBe(2);
