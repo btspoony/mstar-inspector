@@ -81,15 +81,19 @@ jobs:
 
       - name: Verify required ADMIN_LOGINS variable
         run: |
-          # Mirror src/dashboard/users.ts parseAdminLogins: split on commas, trim
-          # each entry, drop empties — whitespace-/comma-only values count as
-          # NOT configured and must fail closed BEFORE any deploy happens.
+          # The RUNTIME rule itself, imported (src/dashboard/users.ts
+          # parseAdminLogins) — not a shell approximation of it: split on
+          # commas, JS String.trim() each entry, drop empties. Unset / blank /
+          # whitespace-only / comma-only / U+FEFF+"," all parse to zero logins
+          # and must fail closed BEFORE any deploy happens.
           : "${ADMIN_LOGINS:?required — set the GitHub Actions variable ADMIN_LOGINS to a comma-separated list of GitHub logins (login names are public identity, so a variable, not a secret)}"
-          logins=$(printf '%s' "$ADMIN_LOGINS" | tr ',' '\n' | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' -e '/^$/d')
-          test -n "$logins" || {
-            echo "::error::ADMIN_LOGINS is blank or comma-only — set the GitHub Actions variable ADMIN_LOGINS to a comma-separated list of GitHub logins (e.g. alice,bob)"
-            exit 1
-          }
+          bun -e '
+            import { parseAdminLogins } from "./src/dashboard/users.ts";
+            if (parseAdminLogins(process.env.ADMIN_LOGINS).length === 0) {
+              console.error("::error::ADMIN_LOGINS is blank, whitespace-only or comma-only — set the GitHub Actions variable ADMIN_LOGINS to a comma-separated list of GitHub logins (e.g. alice,bob)");
+              process.exit(1);
+            }
+          '
 
       - name: Write optional ALERT_WEBHOOK_URL secret
         if: env.ALERT_WEBHOOK_URL != ''
@@ -175,11 +179,12 @@ jobs:
       # ADMIN_LOGINS is a plain Worker var injected by this workflow's
       # `wrangler deploy --var ADMIN_LOGINS:…` (login names are public
       # identity, hence a variable, not a secret). `wrangler secret list`
-      # cannot observe it, so read the Worker settings instead; blank/comma-only
-      # parses to zero logins, the same rule as src/dashboard/users.ts
-      # parseAdminLogins. This is an ASSERTION: the deploy is already live
-      # (containers/versions have no pre-flight dry run), so a missing value
-      # must fail the run red rather than warn.
+      # cannot observe it, so read the Worker settings instead; the observed
+      # value is fed through the RUNTIME parser itself (parseAdminLogins in
+      # src/dashboard/users.ts) rather than a shell approximation of it. This
+      # is an ASSERTION: the deploy is already live (containers/versions have
+      # no pre-flight dry run), so a missing/blank value must fail the run red
+      # rather than warn.
       - name: "Assert ADMIN_LOGINS is set on the deployed Worker (first-login admin fallback)"
         run: |
           # Transport failure (no payload at all) FAILS the job: we cannot
@@ -198,12 +203,14 @@ jobs:
             exit 1
           fi
           value=$(printf '%s' "$settings" \
-            | jq -r '[.result.bindings[]? | select(.name == "ADMIN_LOGINS") | if .type == "secret_text" then "set" else (.text // "") end] | join("")' \
-            | tr -d ' \t\n\r,')
-          if [ -z "$value" ]; then
-            echo "::error::ADMIN_LOGINS is unset or blank/comma-only on the deployed Worker — set the GitHub Actions variable ADMIN_LOGINS (comma-separated GitHub logins) and re-run the deploy; with an empty dashboard_users table the first OAuth login would become admin (self-disarming once any user row exists). See docs/deploy.md § 6."
-            exit 1
-          fi
+            | jq -r '[.result.bindings[]? | select(.name == "ADMIN_LOGINS") | if .type == "secret_text" then "set" else (.text // "") end] | join("")')
+          ADMIN_LOGINS_DEPLOYED="$value" bun -e '
+            import { parseAdminLogins } from "./src/dashboard/users.ts";
+            if (parseAdminLogins(process.env.ADMIN_LOGINS_DEPLOYED).length === 0) {
+              console.error("::error::ADMIN_LOGINS is unset or blank/whitespace-only/comma-only on the deployed Worker — set the GitHub Actions variable ADMIN_LOGINS (comma-separated GitHub logins) and re-run the deploy; with an empty dashboard_users table the first OAuth login would become admin (self-disarming once any user row exists). See docs/deploy.md § 6.");
+              process.exit(1);
+            }
+          '
           echo "ADMIN_LOGINS is set on the deployed Worker — the first-login admin fallback is disarmed"
 
       - name: Upload deploy evidence artifacts

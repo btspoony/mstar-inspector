@@ -65,9 +65,11 @@ export type DashboardD1 = {
  * case — matching lowercases both sides instead (GitHub logins are
  * case-insensitive).
  *
- * Twin rule: the `.github/workflows/deploy.yml` required-input check and the
- * deployed-Worker assertion, plus `docs/deploy.md` § 6 (ADMIN_LOGINS is
- * required), mirror this parse — a rule change here must update all three.
+ * Twin rule: the `.github/workflows/deploy.yml` pre-deploy required-input
+ * check and the deployed-Worker assertion both import and call THIS function
+ * (via `bun -e`), so they apply the runtime rule itself rather than a shell
+ * approximation of it — a rule change here reaches all three sites.
+ * `docs/deploy.md` § 6 documents the same contract.
  */
 export function parseAdminLogins(value: string | undefined): string[] {
   if (!value) return [];

@@ -370,20 +370,24 @@ smoke → record the digest.
    repository and asserted read-only against the **returned** grant
    (`assertSandboxGrant`), so a broader or unscoped capability fails the smoke
    closed — plus the required
-   `INSTALLATION_ID` (the App installation id to mint the token for), `GH_REPO`
-   (the `owner/repo` whose PR is diffed), `GH_PR` (the PR number), and the
+   `INSTALLATION_ID` (the App installation id to mint the token for) and
+   `GH_REPO` (the `owner/repo` the smoke runs against), and the
    optional `SMOKE_ROUTE` (default `/smoke`),
    `ARK_API_KEY` (required when `SMOKE_ROUTE=/smoke-review`):
    ```bash
-   SMOKE_APP_ID=… SMOKE_PRIVATE_KEY=… INSTALLATION_ID=… GH_REPO=owner/repo GH_PR=1 \
+   SMOKE_APP_ID=… SMOKE_PRIVATE_KEY=… INSTALLATION_ID=… GH_REPO=owner/repo \
      bun run scripts/sandbox-smoke.ts
    # /smoke: getSandbox → runCommand(gh pr diff) → destroy
-   SMOKE_APP_ID=… SMOKE_PRIVATE_KEY=… INSTALLATION_ID=… GH_REPO=owner/repo GH_PR=1 \
+   SMOKE_APP_ID=… SMOKE_PRIVATE_KEY=… INSTALLATION_ID=… GH_REPO=owner/repo \
      SMOKE_ROUTE=/smoke-review ARK_API_KEY=… bun run scripts/sandbox-smoke.ts
    # /smoke-review: full in-image runner (clone + omp review + parse) → destroy
    ```
-   `INSTALLATION_ID` / `GH_REPO` are required inputs with no default — pick any
-   installation/repository your test App is installed on.
+   `INSTALLATION_ID` / `GH_REPO` are required inputs with no default.
+   **The smoke target is fixed, not arbitrary**: the PR number is the constant
+   `#1` and both routes clone the fixed `mstar-inspector-seed` branch, so the
+   configured repository must actually carry that branch and a diffable PR #1
+   (there is no "works for any accessible repository" behaviour). The runner
+   smoke clones the seed branch, fetches `main`, and diffs against it.
 4. `bun run build:spa && wrangler deploy` — build the SPA assets first
    (`dist/spa` is gitignored — a fresh clone has none, and `wrangler.jsonc`
    serves them via `assets`), then deploy the Worker (webhook face + queue
@@ -688,21 +692,23 @@ environment or repo-wide (Settings → Environments → `staging` → **Variable
 or Settings → Secrets and variables → Actions → Variables). The Deploy
 workflow:
 
-1. **Fails closed before deploying** when the variable is missing, blank, or
-   comma-only — the `Verify required ADMIN_LOGINS variable` step runs before
-   `wrangler deploy`, so a misconfigured operator never ships a Worker with the
-   first-login-becomes-admin fallback silently armed. The value is split on
-   commas, each entry trimmed, empty entries dropped — exactly the
-   `parseAdminLogins` rule (`src/dashboard/users.ts`).
+1. **Fails closed before deploying** when the variable is missing, blank,
+   whitespace-only, or comma-only — the `Verify required ADMIN_LOGINS variable`
+   step runs before `wrangler deploy`, so a misconfigured operator never ships
+   a Worker with the first-login-becomes-admin fallback silently armed. The
+   step imports and calls the runtime parser itself
+   (`parseAdminLogins`, `src/dashboard/users.ts`) and fails when it yields zero
+   logins, so the deploy gate cannot drift from the Worker's own rule.
 2. **Injects it into the Worker** at deploy time via
    `wrangler deploy --var "ADMIN_LOGINS:$ADMIN_LOGINS"`, so the value no longer
    depends on the Cloudflare dashboard (a comma-separated multi-login value
    survives intact: wrangler splits `--var` on the first colon only).
 3. **Asserts it on the deployed Worker** after the deploy: the step reads the
    Worker's live settings via the Cloudflare API (NOT `wrangler secret list` —
-   `ADMIN_LOGINS` is a plain var, so a secret listing never shows it) and
-   fails the job (`::error::` + non-zero exit) when the binding is absent or
-   blank/comma-only. The curl is bounded (`--max-time 30 --connect-timeout 5`)
+   `ADMIN_LOGINS` is a plain var, so a secret listing never shows it), feeds the
+   observed value through the same `parseAdminLogins` runtime rule, and fails
+   the job (`::error::` + non-zero exit) when it yields zero logins. The curl is
+   bounded (`--max-time 30 --connect-timeout 5`)
    and a `jq -e '.success == true'` guard ensures a malformed payload is never
    read as a positive observation. A **transport failure fails the job** —
    failing to read the settings means the value cannot be confirmed, and a
