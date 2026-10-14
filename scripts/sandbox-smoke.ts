@@ -11,7 +11,7 @@
  *      and the sandbox containers binding (wrangler.smoke.jsonc).
  *   3. GET the selected route:
  *        /smoke         → T1: getSandbox → exec gh pr diff → destroy.
- *        /smoke-review  → T2: real PR clone → in-image review runner with
+ *        /smoke-review  → T2: seed-branch clone → in-image review runner with
  *                         ARK_API_KEY (exec env only) → parseReviewOutput →
  *                         destroy.
  *   4. Print the JSON evidence (no secrets) and exit with the verdict.
@@ -19,8 +19,9 @@
  * Usage: bun run scripts/sandbox-smoke.ts
  * Env:  SMOKE_APP_ID, SMOKE_PRIVATE_KEY (inline PEM or path),
  *       INSTALLATION_ID (required — the App installation to mint a token for),
- *       GH_REPO (required — the owner/repo whose PR is diffed),
- *       GH_PR (default 1), SMOKE_ROUTE (default /smoke), ARK_API_KEY (required
+ *       GH_REPO (required — the owner/repo whose PR is diffed; it must carry
+ *       the `mstar-inspector-seed` branch and a diffable PR #1),
+ *       SMOKE_ROUTE (default /smoke), ARK_API_KEY (required
  *       when SMOKE_ROUTE=/smoke-review).
  *
  * The token and model key are held only in this process's memory and passed to
@@ -53,7 +54,9 @@ if (!Number.isInteger(INSTALLATION_ID) || INSTALLATION_ID <= 0) {
   console.error("sandbox-smoke: INSTALLATION_ID env var is required and must be a positive integer");
   process.exit(2);
 }
-const GH_PR = Bun.env.GH_PR ?? "1";
+// The smoke entry pins the target PR at #1 (its seed branch carries exactly
+// that diffable PR); mirror the same constant when scoping the grant.
+const GH_PR = "1";
 const SMOKE_ROUTE = Bun.env.SMOKE_ROUTE ?? "/smoke";
 const ARK_API_KEY = Bun.env.ARK_API_KEY;
 
@@ -109,7 +112,7 @@ const token = await mintInstallationToken();
 console.log("TOKEN_MINTED=yes");
 
 const port = 8791;
-const varFlags = [`GH_TOKEN:${token}`, `GH_REPO:${GH_REPO}`, `GH_PR:${GH_PR}`];
+const varFlags = [`GH_TOKEN:${token}`, `GH_REPO:${GH_REPO}`];
 if (ARK_API_KEY) {
   varFlags.push(`ARK_API_KEY:${ARK_API_KEY}`);
 }
