@@ -1316,7 +1316,7 @@ function AddProviderSection({
  * effective base URL carries the {account_id} placeholder, mirroring the
  * save flow's conditional demand (breadth rows are not all Workers-AI-shaped).
  */
-function ProviderConfigForm({
+export function ProviderConfigForm({
   locale,
   provider,
   storedKeys,
@@ -1338,7 +1338,11 @@ function ProviderConfigForm({
 }) {
   const [key, setKey] = useState("");
   const [accountId, setAccountId] = useState("");
-  const [baseUrl, setBaseUrl] = useState(provider.base_url ?? "");
+  // Seeded from the STORED declaration when the provider already has one: the
+  // pool is bound to that endpoint, and re-submitting the catalog default
+  // while adding a key would only trip the store's endpoint lock (the
+  // backstop for a hand-typed override). Catalog prefill covers the first key.
+  const [baseUrl, setBaseUrl] = useState(custom?.base_url ?? provider.base_url ?? "");
   const [busy, setBusy] = useState(false);
   const formKind = providerFormKind(provider);
 

@@ -22,7 +22,10 @@ import {
   filterCatalogProviders,
   groupCatalogProviders,
 } from "../../src/spa/components/provider-combobox";
-import { AppInfoCard, DraftChainPanel, draftChainTabLabel, githubAppSettingsUrl } from "../../src/spa/pages/SettingsPage";
+import { AppInfoCard, DraftChainPanel, ProviderConfigForm, draftChainTabLabel, githubAppSettingsUrl } from "../../src/spa/pages/SettingsPage";
+
+const noopSave = (): Promise<{ kind: "success" | "error"; message: string }> =>
+  Promise.resolve({ kind: "success", message: "unused" });
 
 describe("settings layout", () => {
   test("SettingsPage folds ops + health into an authorized ops zone; providers and chains are shadcn", () => {
@@ -687,9 +690,10 @@ describe("add-entry visibility + picker usability at breadth", () => {
 
   test("the template form carries an editable prefilled base URL and a {account_id}-conditional account-id field", () => {
     const source = readFileSync(join(import.meta.dir, "../../src/spa/pages/SettingsPage.tsx"), "utf8");
-    // The override field is prefilled from the catalog entry and posts the
-    // optional base_url override (empty string = use the catalog prefill).
-    expect(source).toContain("useState(provider.base_url ?? \"\")");
+    // The override field is prefilled from the STORED declaration when the
+    // provider already has one (else the catalog entry) and posts the optional
+    // base_url override (empty string = use the catalog prefill).
+    expect(source).toContain('useState(custom?.base_url ?? provider.base_url ?? "")');
     expect(source).toContain("base_url: baseUrl");
     // Required only when the entry's catalog base URL is null — a prefilled
     // entry may be saved as-is or overridden.
@@ -700,6 +704,80 @@ describe("add-entry visibility + picker usability at breadth", () => {
     expect(source).toContain("needsAccountId ? (");
     // Success resets the typed base URL along with key/account id.
     expect(source).toContain('setBaseUrl("")');
+  });
+
+  test("the template form initialises from a stored declaration, never the catalog default", () => {
+    // A stored declaration means the pool is already bound to that endpoint;
+    // re-submitting the catalog default would trip the store's endpoint lock
+    // with no visible cause. Seeding the field from the declaration makes an
+    // "add another key" submit a no-op on the endpoint.
+    const template: CatalogProvider = {
+      id: "workers-ai",
+      label: "Workers AI",
+      tier: "template",
+      base_url: "https://api.example.com/v1",
+      api: "openai-completions",
+      models: ["m1"],
+      verifiable: false,
+      eligibility: "template",
+      display_group: "catalog",
+    };
+    const stored = {
+      provider_id: "workers-ai",
+      base_url: "https://stored.example.com/v1",
+      api: "openai-completions",
+      model_ids: ["m1"],
+    };
+    const html = renderToStaticMarkup(
+      createElement(ProviderConfigForm, {
+        locale: "en",
+        provider: template,
+        storedKeys: [],
+        custom: stored,
+        onVerify: noopSave,
+        onSettings: noopSave,
+        onOutcome: () => {},
+        onDone: () => {},
+      }),
+    );
+    expect(html).toContain('value="https://stored.example.com/v1"');
+    expect(html).not.toContain('value="https://api.example.com/v1"');
+  });
+
+  test("a seeded {account_id} template is materialized already — appending a key demands no account id", () => {
+    const template: CatalogProvider = {
+      id: "workers-ai",
+      label: "Workers AI",
+      tier: "template",
+      base_url: "https://api.example.com/accounts/{account_id}/v1",
+      api: "openai-completions",
+      models: ["m1"],
+      verifiable: false,
+      eligibility: "template",
+      display_group: "catalog",
+    };
+    const html = renderToStaticMarkup(
+      createElement(ProviderConfigForm, {
+        locale: "en",
+        provider: template,
+        storedKeys: [],
+        custom: {
+          provider_id: "workers-ai",
+          base_url: "https://api.example.com/accounts/acct-1/v1",
+          api: "openai-completions",
+          model_ids: ["m1"],
+        },
+        onVerify: noopSave,
+        onSettings: noopSave,
+        onOutcome: () => {},
+        onDone: () => {},
+      }),
+    );
+    // The stored endpoint substitutes the placeholder already: no
+    // {account_id} demand, and the catalog placeholder never reaches submit.
+    expect(html).toContain('value="https://api.example.com/accounts/acct-1/v1"');
+    expect(html).not.toContain('value="https://api.example.com/accounts/{account_id}/v1"');
+    expect(html).not.toContain(t("en", "settings.accountId"));
   });
 
   test(" copy is dictionary-backed in both locales; account id is no longer Cloudflare-worded", () => {

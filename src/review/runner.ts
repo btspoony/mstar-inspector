@@ -365,15 +365,31 @@ function escapeRegExp(literal: string): string {
  * `apiKey` (a tier-2 config override would suppress this pool entirely).
  *
  * Fail-closed: a `_COUNT` that disagrees with the `_01.._NN` values actually
- * present, or a listed value that is empty, aborts the run before any session
- * exists — never a partial pool. Diagnostics carry provider id + counts only;
- * key VALUES are never logged or thrown.
+ * present, a listed value that is empty, or a populated `_NN` prefix with no
+ * `_COUNT` at all (a stray slot would otherwise be silently dropped) aborts
+ * the run before any session exists — never a partial pool. Diagnostics carry
+ * provider id + counts only; key VALUES are never logged or thrown.
  */
 async function loadCredentialPool(
   agentDir: string,
   json: RunnerInputJson,
   env: Record<string, string | undefined>,
 ): Promise<void> {
+  // Fail-closed boundary on the prefix itself: a POPULATED pool prefix with no
+  // `_COUNT` name would silently drop its keys from the session. The consumer
+  // always emits the pair, so this is a malformed transport — abort before any
+  // credential is written or the runtime starts. The scan is the exec env's own
+  // `_NN` names; `poolProviders` below covers the declared identities.
+  // (`\d{2,}` mirrors the consumer's `padStart(2, "0")` slot format.)
+  for (const name of Object.keys(env)) {
+    const prefix = /^MSTAR_POOL_(.+)_\d{2,}$/.exec(name)?.[1];
+    if (prefix === undefined || env[name] === undefined) continue;
+    if (env[`MSTAR_POOL_${prefix}_COUNT`] === undefined) {
+      throw new Error(
+        `credential pool: ${name} is set but MSTAR_POOL_${prefix}_COUNT is missing (a transported pool must carry its COUNT)`,
+      );
+    }
+  }
   const pools: Array<{ providerId: string; keys: string[] }> = [];
   for (const { providerId, prefix } of poolProviders(json, env)) {
     const countRaw = env[`MSTAR_POOL_${prefix}_COUNT`];

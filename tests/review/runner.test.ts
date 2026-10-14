@@ -34,7 +34,7 @@
  *     the runtime starts, under the MODELS.YML provider id (capability host id
  *     — resolved through its catalogProviderId — or the custom provider id),
  *     and fails the run closed when `_COUNT` disagrees with the `_01.._NN`
- *     values actually present.
+ *     values actually present, or when a populated prefix carries no `_COUNT`.
  * - the optional recheck channel (spec review-lifecycle
  *     §7.8): the input's `recheck` document is shape-guarded and forwarded
  *     verbatim; the optional `--recheck-out <path>` flag writes the runtime's
@@ -725,6 +725,37 @@ describe("runner entry — transported credential pool", () => {
     expect(stderr).toContain("openai");
     expect(stderr).toContain("MSTAR_POOL_OPENAI_02");
     expect(stderr).not.toContain(sk("only-one"));
+  });
+
+  test("a populated pool prefix with no COUNT → fail closed (exit 1, no run)", async () => {
+    // The consumer's buildRunnerEnv always emits COUNT with the slots, so a
+    // stray slot is not a shape it produces — but if one arrives, the session
+    // would silently drop that key. Discovered from the env itself: no
+    // capability host or custom declaration covers the `openai` prefix.
+    process.env.MSTAR_POOL_OPENAI_01 = sk("orphan-one");
+    const inputPath = writeInput({ capabilityHosts: OMP_HOSTS, worktreePath: "/workspace/clone" });
+    const { code, stdout, stderr } = await runCli(["--level", "quick", "--input", inputPath]);
+
+    expect(code).toBe(1);
+    expect(stdout).toBe("");
+    expect(runInputs).toHaveLength(0);
+    expect(stderr).toContain("MSTAR_POOL_OPENAI_COUNT");
+    expect(stderr).not.toContain(sk("orphan-one"));
+  });
+
+  test("a stray slot under a DECLARED capability pool with no COUNT → fail closed", async () => {
+    // The same boundary on the declared-identity path: `ark` is a capability
+    // host's catalog provider id, so its prefix is enumerated even without a
+    // COUNT name — the missing COUNT must still be rejected, never skipped.
+    process.env.MSTAR_POOL_ARK_01 = sk("declared-orphan");
+    const inputPath = writeInput({ capabilityHosts: OMP_HOSTS, worktreePath: "/workspace/clone" });
+    const { code, stdout, stderr } = await runCli(["--level", "quick", "--input", inputPath]);
+
+    expect(code).toBe(1);
+    expect(stdout).toBe("");
+    expect(runInputs).toHaveLength(0);
+    expect(stderr).toContain("MSTAR_POOL_ARK_COUNT");
+    expect(stderr).not.toContain(sk("declared-orphan"));
   });
 
   test("a custom id colliding with a capability host pools only once (base wins, same rule as the synthesis)", async () => {
