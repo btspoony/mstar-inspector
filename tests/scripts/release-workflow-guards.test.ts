@@ -37,17 +37,23 @@
  *   body executed against a stubbed `gh` that honours `--limit` (20-row default
  *   when absent) for the full case table, plus mutations dropping the reuse
  *   identity filter, narrowing the boundary, and reverting the page size;
- * - a completed `success` is not by itself a deployment (Codex P2 round 4): a
- *   dashless tag first published as a PRERELEASE leaves a run whose `deploy` job
- *   the release predicate skips, and GitHub reports a skipped job as `success`
- *   — so the reuse path reads the deploying job id from deploy-prod.yml (the
- *   production-environment job, never a hard-coded name), queries the run's jobs
- *   and requires that job to have concluded `success`; the in-flight arm is
- *   ungated (an approval-waiting run has no job conclusions). Executed cases
- *   cover skipped-deploy-job → dispatch, absent-deploy-job → dispatch,
- *   real-success → reuse, in-flight → reuse and the terminal-failure set, plus
- *   a mutation reverting the predicate to the bare-`success` shape that reuses
- *   the guard-only run;
+ * - a completed `success` is not by itself a deployment, and an in-flight run is
+ *   not automatically reuse-safe (Codex P2 rounds 4–5). A dashless tag first
+ *   published as a PRERELEASE leaves a run whose `deploy` job the release
+ *   predicate skips, and GitHub reports a skipped job as `success` — so the
+ *   reuse path reads the deploying job id from deploy-prod.yml (the
+ *   production-environment job, never a hard-coded name) and queries the run's
+ *   jobs. It reuses a completed run only when that job concluded `success`, and
+ *   an in-flight run only when its deploy job is under way (`in_progress`, or
+ *   `waiting` for the approval-gated environment) — the release-event run still
+ *   in its guard phase (deploy job `queued`/absent, no conclusion yet) is
+ *   dispatched afresh rather than reused, since that run is destined to be
+ *   skipped. Our own `workflow_dispatch` runs always deploy, so they are reused
+ *   in flight with no job query. Executed cases cover skipped-deploy-job →
+ *   dispatch, absent-deploy-job → dispatch, guard-phase in-flight → dispatch,
+ *   running/approval-waiting deploy job → reuse, dispatch in flight → reuse,
+ *   real-success → reuse and the terminal-failure set, plus mutations accepting
+ *   a bare `success` and treating an unstarted deploy job as reusable;
  * - deploy-evidence append step: exactly one `gh release edit`
  *   workflow-wide (count across ALL step runs, not mere containment), its own
  *   step-level timeout budget bounded below the job cap, edit failure loud at
@@ -297,19 +303,28 @@ describe("release.yml guards", () => {
     );
     expect(dispatch.run).toContain('job?.environment === "production"');
     expect(dispatch.run).toContain("console.log(job.name ?? id)");
-    // the derived job name is what the jq filter binds — a hard-coded display
-    // name would break the moment the job is renamed, so the binding is pinned
+    // the derived job is what the jq filter binds — a hard-coded display name
+    // would break the moment the job is renamed, so the binding is pinned
     expect(dispatch.run).toContain('--arg job "$DEPLOY_JOB"');
-    expect(dispatch.run).toContain("first(.jobs[]? | select(.name == $job) | .conclusion) // empty");
-    expect(dispatch.run).toContain('if [ "$DEPLOY_JOB_CONCLUSION" = "success" ]');
-    // the in-flight arm is untouched: an approval-waiting run has no job
-    // conclusions to inspect, so only the completed-success arm is gated
+    expect(dispatch.run).toContain('jq -c --arg job "$DEPLOY_JOB" \'first(.jobs[]? | select(.name == $job)) // {}\'');
+    expect(dispatch.run).toContain('jq -r \'.status // empty\'');
+    expect(dispatch.run).toContain('jq -r \'.conclusion // empty\'');
+    // the in-flight arm must prove the run CAN deploy: a release-event run whose
+    // deploy job has not started yet is the ambiguous guard phase that would be
+    // skipped, so only our own dispatch (which always deploys) skips the job
+    // evidence; a release-event run must show its deploy job under way.
     expect(dispatch.run).toContain(
-      '[ "$REUSE_STATUS" = "completed" ] && [ "$REUSE_CONCLUSION" = "success" ]',
+      '[ "$REUSE_STATUS" != "completed" ] && [ "$REUSE_EVENT" = "workflow_dispatch" ]',
     );
-    expect(dispatch.run).toContain(
-      '{ [ "$REUSE_STATUS" != "completed" ] || [ "$DEPLOY_JOB_RAN" = "true" ]; }',
-    );
+    expect(dispatch.run).toContain('[ "$DEPLOY_JOB_STATUS" = "in_progress" ] \\');
+    expect(dispatch.run).toContain('[ "$DEPLOY_JOB_STATUS" = "waiting" ]; then');
+    expect(dispatch.run).toContain('[ "$DEPLOY_JOB_CONCLUSION" = "success" ] \\');
+    expect(dispatch.run).toContain('if [ "$REUSE_RUN" = "true" ]; then');
+    // the run's `event` is part of the lookup's own field set — the predicate
+    // reads it off the same single call, never a second `gh run list`
+    expect(dispatch.run).toContain("--json status,conclusion,databaseId,headBranch,event");
+    expect(dispatch.run).toContain('"\\(.databaseId) \\(.status) \\(.conclusion // "-") \\(.event)"');
+    expect(dispatch.run).toContain("read -r REUSE_ID REUSE_STATUS REUSE_CONCLUSION REUSE_EVENT <<<");
   });
 
   /**
@@ -319,10 +334,10 @@ describe("release.yml guards", () => {
    * 20-row DEFAULT when neither is passed — before handing it to the STEP'S OWN
    * jq pipeline (so the real headBranch filter and the real page size are what
    * run); it also records the argv it was called with. `run view <id> --json
-   * jobs` answers with a job list whose deploy job conclusion is
-   * `GH_STUB_DEPLOY_JOB` (`absent` → no deploy job at all, i.e. a run that only
-   * ever started the guard). `workflow run` records the dispatch instead of
-   * mutating the repo.
+   * jobs` answers with the job list `GH_STUB_DEPLOY_STATUS`/`_CONCLUSION`
+   * describe — the deploy job's own status and conclusion — and omits the deploy
+   * job entirely when the status is `absent` (a run that only ever started the
+   * guard). `workflow run` records the dispatch instead of mutating the repo.
    *
    * The fixture also carries a copy of the REAL `deploy-prod.yml` under
    * `.github/workflows/`, because the step derives the deploying job from that
@@ -379,11 +394,15 @@ if [ "\${1:-}" = "run" ] && [ "\${2:-}" = "list" ]; then
 fi
 if [ "\${1:-}" = "run" ] && [ "\${2:-}" = "view" ]; then
   printf 'run view %s\\n' "$*" >> "$GH_STUB_ARGV_LOG"
-  if [ "\${GH_STUB_DEPLOY_JOB:-}" = "absent" ]; then
-    jq -n '{jobs:[{name:"guard-tag-ref",status:"completed",conclusion:"success"}]}'
+  # The deploy job as the workflow declares it (id + display name), plus the
+  # guard the run starts with. A job status is one of queued / in_progress /
+  # completed; "absent" means the deploy job was never created for this run.
+  if [ "\${GH_STUB_DEPLOY_STATUS:-}" = "absent" ]; then
+    jq -n '{jobs:[{name:"guard-tag-ref",status:"in_progress",conclusion:null}]}'
   else
-    jq -n --arg c "\${GH_STUB_DEPLOY_JOB:-success}" \
-      '{jobs:[{name:"guard-tag-ref",status:"completed",conclusion:"success"},{name:"deploy",status:"completed",conclusion:$c}]}'
+    jq -n --arg s "\${GH_STUB_DEPLOY_STATUS:-completed}" \
+      --arg c "\${GH_STUB_DEPLOY_CONCLUSION-success}" \
+      '{jobs:[{name:"guard-tag-ref",status:"completed",conclusion:"success"},{name:"deploy",status:$s,conclusion:(if $c == "" then null else $c end)}]}'
   fi
   exit 0
 fi
@@ -404,8 +423,11 @@ exit 7
     fixture: { dir: string; log: string; argv: string; output: string },
     body: string,
     runsJson: string,
-    /** `gh run view` deploy-job conclusion: `skipped`, `success`, or `absent`. */
-    deployJob = "success",
+    /**
+     * The deploy job as `gh run view` reports it: `status` (queued/in_progress/
+     * completed, or `absent` for no deploy job at all) and its `conclusion`.
+     */
+    deployJob: { status: string; conclusion?: string } = { status: "completed", conclusion: "success" },
   ): { code: number; out: string; log: string; argv: string; exported: string } {
     writeFileSync(fixture.log, "");
     writeFileSync(fixture.argv, "");
@@ -418,7 +440,8 @@ exit 7
         GH_TOKEN: "stub-token",
         VERSION: "9.9.9",
         GH_STUB_RUNS_JSON: runsJson,
-        GH_STUB_DEPLOY_JOB: deployJob,
+        GH_STUB_DEPLOY_STATUS: deployJob.status,
+        GH_STUB_DEPLOY_CONCLUSION: deployJob.conclusion ?? "",
         GH_STUB_LOG: fixture.log,
         GH_STUB_ARGV_LOG: fixture.argv,
         GITHUB_OUTPUT: fixture.output,
@@ -457,7 +480,7 @@ exit 7
         conclusion: "success",
         headBranch: `v9.8.${30 - i}`,
       })),
-      { databaseId: 1900, status: "waiting", conclusion: null, headBranch: "v9.9.9" },
+      { databaseId: 1900, status: "waiting", conclusion: null, headBranch: "v9.9.9", event: "release" },
       ...Array.from({ length: 6 }, (_, i) => ({
         databaseId: 1800 - i,
         status: "completed",
@@ -473,14 +496,14 @@ exit 7
       boundary: number | null;
       /** Reuse cases: the id the reuse notice must name. */
       reuseId?: number;
-      /** `gh run view` deploy-job conclusion; default `success`. */
-      deployJob?: string;
+      /** The deploy job `gh run view` reports; default completed/success. */
+      deployJob?: { status: string; conclusion?: string };
       /** Must the step query the run's jobs? Unset → no expectation. */
       jobCheck?: boolean;
     }[] = [
       { runs: "[]", reuse: DISPATCH, label: "no run for the commit", boundary: null },
       {
-        runs: '[{"databaseId":1,"status":"completed","conclusion":"success","headBranch":"v9.9.9"}]',
+        runs: '[{"databaseId":1,"status":"completed","conclusion":"success","headBranch":"v9.9.9","event":"workflow_dispatch"}]',
         reuse: REUSE,
         label: "success (deploy job ran)",
         boundary: null,
@@ -494,33 +517,92 @@ exit 7
       // so the later stable publish must dispatch afresh; and an ABSENT deploy
       // job (only the guard ever ran) is the same story.
       {
-        runs: '[{"databaseId":4,"status":"completed","conclusion":"success","headBranch":"v9.9.9"}]',
+        runs: '[{"databaseId":4,"status":"completed","conclusion":"success","headBranch":"v9.9.9","event":"release"}]',
         reuse: DISPATCH,
         label: "guard-only run (deploy job skipped) — success conclusion is not a deployment",
         boundary: 4,
-        deployJob: "skipped",
+        deployJob: { status: "completed", conclusion: "skipped" },
       },
       {
-        runs: '[{"databaseId":5,"status":"completed","conclusion":"success","headBranch":"v9.9.9"}]',
+        runs: '[{"databaseId":5,"status":"completed","conclusion":"success","headBranch":"v9.9.9","event":"release"}]',
         reuse: DISPATCH,
         label: "guard-only run (deploy job absent from the job list)",
         boundary: 5,
-        deployJob: "absent",
+        deployJob: { status: "absent" },
+      },
+      // THE reviewed in-flight window (Codex P2 round 5): the release-event run
+      // of the just-published prerelease is still executing `guard-tag-ref`, so
+      // its deploy job has no conclusion yet. `status != completed` alone reused
+      // it, nothing was dispatched, and the run then finished with `deploy`
+      // skipped — no deployment and no evidence. The run must prove it can
+      // deploy: a deploy job still `queued` (or absent) is that guard phase.
+      {
+        runs: '[{"databaseId":6,"status":"in_progress","conclusion":null,"headBranch":"v9.9.9","event":"release"}]',
+        reuse: DISPATCH,
+        label: "in-flight release run in the guard phase (deploy job queued)",
+        boundary: 6,
+        deployJob: { status: "queued" },
       },
       {
-        runs: '[{"databaseId":2,"status":"waiting","conclusion":null,"headBranch":"v9.9.9"}]',
+        runs: '[{"databaseId":7,"status":"in_progress","conclusion":null,"headBranch":"v9.9.9","event":"release"}]',
+        reuse: DISPATCH,
+        label: "in-flight release run in the guard phase (deploy job not yet created)",
+        boundary: 7,
+        deployJob: { status: "absent" },
+      },
+      // … whereas a deploy job already RUNNING has passed the release predicate,
+      // so that run will really deploy and is reusable (waiting = the
+      // approval-gated `production` environment, i.e. the job exists and is
+      // holding for approval).
+      {
+        runs: '[{"databaseId":8,"status":"in_progress","conclusion":null,"headBranch":"v9.9.9","event":"release"}]',
         reuse: REUSE,
-        label: "in-flight (waiting for approval)",
+        label: "in-flight release run, deploy job in_progress",
         boundary: null,
-        reuseId: 2,
-        jobCheck: false,
+        reuseId: 8,
+        deployJob: { status: "in_progress" },
+        jobCheck: true,
       },
       {
-        runs: '[{"databaseId":3,"status":"in_progress","conclusion":null,"headBranch":"v9.9.9"}]',
+        runs: '[{"databaseId":9,"status":"in_progress","conclusion":null,"headBranch":"v9.9.9","event":"release"}]',
         reuse: REUSE,
-        label: "in-flight (in_progress)",
+        label: "in-flight release run, deploy job waiting for approval",
         boundary: null,
-        reuseId: 3,
+        reuseId: 9,
+        deployJob: { status: "waiting" },
+        jobCheck: true,
+      },
+      // an in-flight run whose deploy job HAS finished successfully (the run is
+      // only winding down its `if: always()` evidence steps) already deployed —
+      // reuse it rather than queue a second production deploy
+      {
+        runs: '[{"databaseId":11,"status":"in_progress","conclusion":null,"headBranch":"v9.9.9","event":"release"}]',
+        reuse: REUSE,
+        label: "in-flight release run whose deploy job already succeeded",
+        boundary: null,
+        reuseId: 11,
+        deployJob: { status: "completed", conclusion: "success" },
+        jobCheck: true,
+      },
+      // an in-flight run whose deploy job FAILED also dispatches: the run's own
+      // conclusion is still `-`, but this release's deploy is not going to
+      // succeed, so a fresh run must be queued
+      {
+        runs: '[{"databaseId":12,"status":"in_progress","conclusion":null,"headBranch":"v9.9.9","event":"release"}]',
+        reuse: DISPATCH,
+        label: "in-flight release run whose deploy job already failed",
+        boundary: 12,
+        deployJob: { status: "completed", conclusion: "failure" },
+      },
+      // our OWN dispatch always deploys (deploy-prod.yml lets a dispatch through
+      // unconditionally), so an in-flight dispatch needs no job evidence
+      {
+        runs: '[{"databaseId":10,"status":"waiting","conclusion":null,"headBranch":"v9.9.9","event":"workflow_dispatch"}]',
+        reuse: REUSE,
+        label: "in-flight workflow_dispatch run (always deploys)",
+        boundary: null,
+        reuseId: 10,
+        deployJob: { status: "absent" },
         jobCheck: false,
       },
       ...[
@@ -590,17 +672,19 @@ exit 7
         label: "reusable same-tag run on row 25 of a 31-row page",
         boundary: null,
         reuseId: 1900,
+        deployJob: { status: "waiting" },
       },
     ];
 
     const fixture = makeDispatchFixture();
     try {
       for (const c of cases) {
-        const result = runDispatchBody(fixture, run, c.runs, c.deployJob ?? "success");
+        const result = runDispatchBody(fixture, run, c.runs, c.deployJob);
         expect(result.code, `${c.label}: exit code`).toBe(0);
         if (c.jobCheck !== undefined) {
-          // the run's jobs are inspected ONLY for a completed success (the
-          // guard-only shape); an in-flight run has no conclusions yet
+          // the run's jobs are inspected where the run's own fields cannot
+          // answer: a completed success claiming a deployment, or an in-flight
+          // run of an event other than our own dispatch
           expect(result.argv.includes("run view"), `${c.label}: job check`).toBe(c.jobCheck);
         }
         if (c.reuse) {
@@ -726,30 +810,64 @@ exit 7
   });
 
   test("MUTATION/dropping the deploy-job check: a guard-only run is reused and production never changes (Codex P2 round 4)", () => {
-    // The job check is load-bearing. Revert the predicate to the reviewed shape
-    // — a completed `success` conclusion reuses the run — and the guard-only run
-    // (deploy job skipped, run conclusion still `success`) is reused for the
-    // later stable publish, which therefore never dispatches: production stays
-    // on the previous release.
+    // The job check is load-bearing. Accept a completed `success` conclusion as
+    // proof enough — the reviewed shape — and the guard-only run (deploy job
+    // skipped, run conclusion still `success`) is reused for the later stable
+    // publish, which therefore never dispatches: production stays on the
+    // previous release.
     const steps = wf.jobs.release.steps as { run?: string }[];
     const src = steps.find((s) => s.run?.includes("gh workflow run deploy-prod.yml"))!.run!;
     const mutated = src.replace(
-      '[ "$REUSE_STATUS" != "completed" ] || [ "$DEPLOY_JOB_RAN" = "true" ]',
-      '[ "$REUSE_STATUS" != "completed" ] || [ "$REUSE_CONCLUSION" = "success" ]',
+      'if [ "$DEPLOY_JOB_CONCLUSION" = "success" ]; then',
+      "if true; then",
     );
     expect(mutated).not.toBe(src);
 
     const guardOnly =
-      '[{"databaseId":4,"status":"completed","conclusion":"success","headBranch":"v9.9.9"}]';
+      '[{"databaseId":4,"status":"completed","conclusion":"success","headBranch":"v9.9.9","event":"release"}]';
+    const skipped = { status: "completed", conclusion: "skipped" };
     const fixture = makeDispatchFixture();
     try {
-      const fixed = runDispatchBody(fixture, src, guardOnly, "skipped");
+      const fixed = runDispatchBody(fixture, src, guardOnly, skipped);
       expect(fixed.code).toBe(0);
       expect(fixed.out).toContain("was skipped");
       expect(fixed.log).toContain("DISPATCH workflow run deploy-prod.yml --ref v9.9.9");
 
-      const unfixed = runDispatchBody(fixture, mutated, guardOnly, "skipped");
+      const unfixed = runDispatchBody(fixture, mutated, guardOnly, skipped);
       expect(unfixed.out).toContain("reusing existing deploy-prod.yml run 4 for v9.9.9");
+      expect(unfixed.log).toBe(""); // the reviewed bug: no fresh deploy
+    } finally {
+      rmSync(fixture.dir, { recursive: true, force: true });
+    }
+  });
+
+  test("MUTATION/treating an unstarted deploy job as reusable: the guard-phase run is reused and never deploys (Codex P2 round 5)", () => {
+    // The in-flight arm's job evidence is load-bearing too. Widen it to "any job
+    // status other than completed" — i.e. count the guard phase as proof — and
+    // the release-event run of a just-published prerelease is reused while its
+    // deploy job is still `queued`. That run is then skipped by the release
+    // predicate, so nothing deploys and no evidence is ever produced.
+    const steps = wf.jobs.release.steps as { run?: string }[];
+    const src = steps.find((s) => s.run?.includes("gh workflow run deploy-prod.yml"))!.run!;
+    const mutated = src.replace(
+      'elif [ "$DEPLOY_JOB_CONCLUSION" = "success" ] \\\n' +
+        '      || [ "$DEPLOY_JOB_STATUS" = "in_progress" ] \\\n' +
+        '      || [ "$DEPLOY_JOB_STATUS" = "waiting" ]; then',
+      'elif [ "$DEPLOY_JOB_STATUS" != "completed" ]; then',
+    );
+    expect(mutated).not.toBe(src);
+
+    const guardPhase =
+      '[{"databaseId":6,"status":"in_progress","conclusion":null,"headBranch":"v9.9.9","event":"release"}]';
+    const fixture = makeDispatchFixture();
+    try {
+      const fixed = runDispatchBody(fixture, src, guardPhase, { status: "queued" });
+      expect(fixed.code).toBe(0);
+      expect(fixed.out).toContain("not yet deploying");
+      expect(fixed.log).toContain("DISPATCH workflow run deploy-prod.yml --ref v9.9.9");
+
+      const unfixed = runDispatchBody(fixture, mutated, guardPhase, { status: "queued" });
+      expect(unfixed.out).toContain("reusing existing deploy-prod.yml run 6 for v9.9.9");
       expect(unfixed.log).toBe(""); // the reviewed bug: no fresh deploy
     } finally {
       rmSync(fixture.dir, { recursive: true, force: true });
