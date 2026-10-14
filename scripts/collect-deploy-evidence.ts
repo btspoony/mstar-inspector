@@ -12,6 +12,7 @@
  *   bun run scripts/collect-deploy-evidence.ts <merge-sha>
  *   MERGE_SHA=<sha> bun run scripts/collect-deploy-evidence.ts
  *   bun run scripts/collect-deploy-evidence.ts <sha> --workflow deploy-prod.yml --ref v1.2.3
+ *   bun run scripts/collect-deploy-evidence.ts <sha> --ref v1.2.3 --exclude-run 12345
  *   bun run scripts/collect-deploy-evidence.ts <sha> --wait-minutes 15 --interval-seconds 30
  *   bun run scripts/collect-deploy-evidence.ts --help
  *
@@ -34,6 +35,15 @@
  * plain newest-for-SHA pick is used and the section says so — the fallback
  * line is what discloses that the reported run did not match the expected ref.
  * Evidence must never degrade to "no run" because of the preference.
+ *
+ * Superseded runs (`--exclude-run <id>`): a Release rerun that dispatched a
+ * FRESH deploy on a terminal non-success replaced the run it read — that run
+ * is no longer this release's deploy and must not become its evidence. The id
+ * is dropped from every selection (ref preference AND newest-for-SHA
+ * fallback), and the wait keeps polling while only excluded runs are visible —
+ * the fresh run may not have registered yet — until a non-excluded run appears
+ * or the bounded wait expires. On expiry with nothing but the excluded run
+ * visible the section states the exclusion; the superseded run is never cited.
  *
  * Exit code: 0 for EVERY runtime outcome above, including collection errors
  * (`gh` missing, artifact download failure) which degrade to a section noting
@@ -94,6 +104,12 @@ export type CollectOptions = {
    * different `headBranch`. A preference, never a restriction.
    */
   ref?: string;
+  /**
+   * A run id that must never be selected (the run a rerun superseded). Dropped
+   * BEFORE the ref preference and the newest-for-SHA fallback; while only
+   * excluded runs are visible the wait keeps polling.
+   */
+  excludeRun?: number;
   /** Total bounded-wait budget. Default via CLI: 15 min. */
   waitMs: number;
   /** Poll interval. Default via CLI: 30 s. */
@@ -151,6 +167,7 @@ export function parseArgs(argv: string[]): {
   sha?: string;
   workflow: string;
   ref?: string;
+  excludeRun?: number;
   waitMinutes: number;
   intervalSeconds: number;
   help: boolean;
@@ -159,6 +176,7 @@ export function parseArgs(argv: string[]): {
   let sha: string | undefined;
   let workflow = DEFAULT_DEPLOY_WORKFLOW;
   let ref: string | undefined;
+  let excludeRun: number | undefined;
   let waitMinutes = DEFAULT_WAIT_MINUTES;
   let intervalSeconds = DEFAULT_INTERVAL_SECONDS;
   let help = false;
@@ -193,6 +211,18 @@ export function parseArgs(argv: string[]): {
         );
       }
       ref = value;
+    } else if (a === "--exclude-run" || a.startsWith("--exclude-run=")) {
+      const value = a === "--exclude-run" ? rest[++i] : a.slice("--exclude-run=".length);
+      // Same contract as --workflow/--ref: never swallow the next flag. Run ids
+      // are positive integers — a non-numeric value is a usage error, not a
+      // silently ignored exclusion (the run it names must never be cited).
+      const id = Number(value);
+      if (!/^[0-9]+$/.test(value ?? "") || !Number.isSafeInteger(id) || id <= 0) {
+        throw new Error(
+          `Invalid --exclude-run value: ${value || "<none>"} (expected a positive run id)`,
+        );
+      }
+      excludeRun = id;
     } else if (a === "--wait-minutes" || a.startsWith("--wait-minutes=")) {
       waitMinutes = numeric(
         "--wait-minutes",
@@ -213,7 +243,7 @@ export function parseArgs(argv: string[]): {
   if (intervalSeconds < 1) {
     throw new Error(`Invalid --interval-seconds value: ${intervalSeconds} (minimum 1)`);
   }
-  return { sha, workflow, ref, waitMinutes, intervalSeconds, help };
+  return { sha, workflow, ref, excludeRun, waitMinutes, intervalSeconds, help };
 }
 
 /** Run link: `$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/<id>`, bare id without the env pair. */
@@ -233,12 +263,23 @@ export function runLink(runId: number, env: Record<string, string | undefined>):
  * no run matches — or no `ref` was given — fall back to the newest run for the
  * SHA; the preference must never degrade evidence into "no run". `refFallback`
  * records that the fallback happened, so the section can say so.
+ *
+ * `excludeRun` (the run a rerun superseded) is dropped before BOTH selections:
+ * neither the preference nor the fallback may cite a run that is no longer this
+ * release's deploy. Returning `undefined` while only excluded runs are visible
+ * is what makes the wait keep polling for the fresh run.
  */
-function pickRun(runs: GhRun[], ref?: string): { run: GhRun; refFallback: boolean } | undefined {
-  const newest = runs[0];
+function pickRun(
+  runs: GhRun[],
+  ref?: string,
+  excludeRun?: number,
+): { run: GhRun; refFallback: boolean } | undefined {
+  const selectable =
+    excludeRun === undefined ? runs : runs.filter((r) => r.databaseId !== excludeRun);
+  const newest = selectable[0];
   if (!newest) return undefined;
   if (ref) {
-    const matching = runs.find((r) => r.headBranch === ref);
+    const matching = selectable.find((r) => r.headBranch === ref);
     if (matching) return { run: matching, refFallback: false };
     return { run: newest, refFallback: true };
   }
@@ -250,8 +291,15 @@ function refFallbackLine(ref: string, sha: string): string {
   return `- Run identity: no run on ref \`${ref}\` for commit \`${sha}\` — the newest run for the commit is reported instead, which is not that ref's deploy`;
 }
 
-function waitMinutesLabel(waitMs: number): string {
-  return `~${Math.max(1, Math.round(waitMs / 60000))} min`;
+/**
+ * The wait each section attributes to itself: the bounded window the collector
+ * actually spent, or — for a zero window (a prerelease Release never dispatches,
+ * so there is nothing to wait for) — an honest immediate check instead of a
+ * rounded-up `~1 min` that never happened.
+ */
+function waitClause(waitMs: number): string {
+  if (waitMs <= 0) return "immediate check";
+  return `~${Math.max(1, Math.round(waitMs / 60000))} min bounded wait`;
 }
 
 function section(lines: string[]): string {
@@ -280,7 +328,7 @@ function pendingSection(
   extra: string[] = [],
 ): string {
   return section([
-    `- Status: pending — deploy run still in flight after the ${waitMinutesLabel(waitMs)} bounded wait`,
+    `- Status: pending — deploy run still in flight after the ${waitClause(waitMs)}`,
     `- Actions run: ${runLink(run.databaseId, env)}`,
     ...extra,
   ]);
@@ -302,11 +350,23 @@ function failedSection(
  * No-run cause is workflow-agnostic: `deploy-prod.yml` has no `paths-ignore`,
  * so a filter skip must never be claimed for it (the Release workflow
  * dispatches that run explicitly; absence means no run was created).
+ *
+ * When the only run for the commit is the one this rerun superseded
+ * (`excludeRunId`), "no run was created for this commit" would be false: that
+ * run exists — it is deliberately excluded and never cited — and what is
+ * missing is the fresh one. State the exclusion instead.
  */
-function noRunSection(sha: string, workflow: string, waitMs: number): string {
-  return section([
-    `- Status: no deploy run for commit \`${sha}\` after the ${waitMinutesLabel(waitMs)} bounded wait (no ${workflow} run was created for this commit)`,
-  ]);
+function noRunSection(
+  sha: string,
+  workflow: string,
+  waitMs: number,
+  excludeRunId?: number,
+): string {
+  const status =
+    excludeRunId === undefined
+      ? `no deploy run for commit \`${sha}\` after the ${waitClause(waitMs)} (no ${workflow} run was created for this commit)`
+      : `no new deploy run for commit \`${sha}\` after the ${waitClause(waitMs)} (run ${excludeRunId} is the superseded run this rerun replaced and is excluded; no further ${workflow} run was created for this commit)`;
+  return section([`- Status: ${status}`]);
 }
 
 function degradedSection(
@@ -372,10 +432,17 @@ export function collectDeployEvidence(opts: CollectOptions): CollectResult {
   const deadline = now() + opts.waitMs;
   let seen: GhRun | undefined;
   let seenRefFallback = false;
+  // An excluded run was visible at some point while nothing selectable was:
+  // the commit does have a run (the superseded one) — it is just never cited.
+  let sawExcluded = false;
   for (;;) {
     let picked: { run: GhRun; refFallback: boolean } | undefined;
     try {
-      picked = pickRun(opts.runner.listRuns(opts.sha, opts.workflow), opts.ref);
+      const runs = opts.runner.listRuns(opts.sha, opts.workflow);
+      if (opts.excludeRun !== undefined && runs.some((r) => r.databaseId === opts.excludeRun)) {
+        sawExcluded = true;
+      }
+      picked = pickRun(runs, opts.ref, opts.excludeRun);
     } catch (err) {
       // gh missing / auth / network — deterministic enough to surface now
       // rather than burn the whole window retrying (evidence is not a gate).
@@ -390,7 +457,15 @@ export function collectDeployEvidence(opts: CollectOptions): CollectResult {
     if (run?.status === "completed") return concludeRun(run, opts, picked?.refFallback ?? false);
     if (now() >= deadline) {
       if (!seen) {
-        return { kind: "no-run", section: noRunSection(opts.sha, opts.workflow, opts.waitMs) };
+        return {
+          kind: "no-run",
+          section: noRunSection(
+            opts.sha,
+            opts.workflow,
+            opts.waitMs,
+            sawExcluded ? opts.excludeRun : undefined,
+          ),
+        };
       }
       const extra = opts.ref && seenRefFallback ? [refFallbackLine(opts.ref, opts.sha)] : [];
       return { kind: "pending", section: pendingSection(seen, opts.waitMs, env, extra) };
@@ -437,7 +512,7 @@ export function createGhRunner(): GhRunner {
 
 function printUsage(): void {
   console.log(`Usage:
-  bun run scripts/collect-deploy-evidence.ts <merge-sha> [--workflow deploy.yml] [--ref <tag>] [--wait-minutes 15] [--interval-seconds 30]
+  bun run scripts/collect-deploy-evidence.ts <merge-sha> [--workflow deploy.yml] [--ref <tag>] [--exclude-run <id>] [--wait-minutes 15] [--interval-seconds 30]
   MERGE_SHA=<merge-sha> bun run scripts/collect-deploy-evidence.ts`);
 }
 
@@ -490,6 +565,7 @@ export function runCli(
       sha,
       workflow: parsed.workflow,
       ref: parsed.ref,
+      excludeRun: parsed.excludeRun,
       waitMs: parsed.waitMinutes * 60_000,
       intervalMs: parsed.intervalSeconds * 1000,
       runner: deps.runner ?? createGhRunner(),

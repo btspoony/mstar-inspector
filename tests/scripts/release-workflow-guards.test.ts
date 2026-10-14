@@ -22,15 +22,23 @@
  *   a GITHUB_TOKEN-created Release does not fire `release: published`, so the
  *   explicit dispatch is the only production trigger (T3-2); the lookup for an
  *   existing run for the commit precedes that dispatch and reuses it instead of
- *   queueing a duplicate on a release rerun (P2) — reuse only for an in-flight
- *   or successful run, any other terminal outcome dispatching fresh — with the
- *   step body executed against a stubbed `gh` for the full case table;
+ *   queueing a duplicate on a release rerun (P2) — the lookup is scoped to a run
+ *   whose own `headBranch` is THIS tag (the collector's identity rule), so a
+ *   run for another tag on the same commit is never reused and cannot mask a
+ *   reusable same-tag run; reuse only for an in-flight or successful run, any
+ *   other terminal outcome dispatching fresh, and the superseded id leaving the
+ *   step as the `superseded_run` output — with the step body executed against a
+ *   stubbed `gh` for the full case table (plus a mutation dropping the identity
+ *   filter);
  * - deploy-evidence append step: exactly one `gh release edit`
  *   workflow-wide (count across ALL step runs, not mere containment), its own
  *   step-level timeout budget bounded below the job cap, edit failure loud at
  *   the step level (::error + exit 1) while continue-on-error keeps the job
  *   green, and the notes file handed off from the extract step's
- *   `notes_file` output — never rebuilt from RUNNER_TEMP;
+ *   `notes_file` output — never rebuilt from RUNNER_TEMP; the superseded run id
+ *   reaches the collector as `--exclude-run` (only when set) and a prerelease
+ *   version zeroes the bounded wait, both observed by executing the step body
+ *   against stubbed `bun`/`gh`;
  * - evidence reads the PRODUCTION deploy workflow: the step's env carries
  *   `DEPLOY_WORKFLOW: deploy-prod.yml` and passes it as the collector's
  *   `--workflow` argument (staging deploys on the same push, so deploy.yml
@@ -190,6 +198,7 @@ describe("release.yml guards", () => {
 
   test("dispatch step: production workflow dispatched on the tag, after Release and before evidence (T3-2)", () => {
     const steps = wf.jobs.release.steps as {
+      id?: string;
       uses?: string;
       run?: string;
       if?: string;
@@ -203,6 +212,8 @@ describe("release.yml guards", () => {
     expect(dispatchIdx).toBeLessThan(evidIdx); // the collector's bounded wait must see the run
 
     const dispatch = steps[dispatchIdx]!;
+    // the evidence step reads the superseded run id from this step's output
+    expect(dispatch.id).toBe("dispatch");
     // tag as `--ref` only: deploy-prod.yml takes no `ref` input, so the run
     // deploys exactly the ref it runs on (its guard refuses a non-tag ref)
     expect(dispatch.run).toContain('gh workflow run deploy-prod.yml --ref "$TAG"');
@@ -222,41 +233,45 @@ describe("release.yml guards", () => {
     const lookupIdx = dispatch.run!.indexOf("gh run list --workflow deploy-prod.yml --commit");
     expect(lookupIdx).toBeGreaterThanOrEqual(0);
     expect(lookupIdx).toBeLessThan(dispatch.run!.indexOf("gh workflow run"));
+    // finding 1: the lookup reads the run's OWN branch and keeps only THIS tag —
+    // the collector's identity rule — and scans the page, because `--limit 1`
+    // let a foreign run hide a reusable same-tag run behind it
+    expect(dispatch.run).toContain("--json status,conclusion,databaseId,headBranch");
+    expect(dispatch.run).toContain("select(.headBranch == $tag)");
+    // the whole page is scanned: a run limit could hide a reusable same-tag run
+    expect(dispatch.run).not.toContain("--limit");
+    expect(dispatch.run).not.toContain(".[0] // empty");
+    // finding 2: the superseded run id leaves the step as an output (the
+    // evidence step forwards it to the collector as --exclude-run)
+    expect(dispatch.run).toContain('echo "superseded_run=${REUSE_ID}" >> "$GITHUB_OUTPUT"');
   });
 
-  test("dispatch step body EXECUTES: reuse only an in-flight or successful run, dispatch for every other terminal outcome", () => {
-    const steps = wf.jobs.release.steps as { run?: string }[];
-    const run = steps.find((s) => s.run?.includes("gh workflow run deploy-prod.yml"))!.run!;
-
+  /**
+   * Throwaway repo carrying the real `v9.9.9` tag (the body runs
+   * `git rev-list -n1`) plus a stubbed `gh`: `run list` hands the fixture JSON
+   * to the STEP'S OWN jq pipeline (so the real headBranch filter is what runs),
+   * `workflow run` records the dispatch instead of mutating the repo.
+   */
+  function makeDispatchFixture(): { dir: string; log: string; output: string } {
     const dir = mkdtempSync(join(tmpdir(), "release-dispatch-"));
-    try {
-      // real tag so the step's own `git rev-list -n1 "$TAG"` resolves
-      git(dir, "init", "-q");
-      git(dir, "config", "user.email", "t@example.com");
-      git(dir, "config", "user.name", "t");
-      writeFileSync(join(dir, "f.txt"), "x\n");
-      git(dir, "add", "f.txt");
-      git(dir, "commit", "-qm", "x");
-      git(dir, "tag", "-a", "-m", "v9.9.9", "v9.9.9");
+    git(dir, "init", "-q");
+    git(dir, "config", "user.email", "t@example.com");
+    git(dir, "config", "user.name", "t");
+    writeFileSync(join(dir, "f.txt"), "x\n");
+    git(dir, "add", "f.txt");
+    git(dir, "commit", "-qm", "x");
+    git(dir, "tag", "-a", "-m", "v9.9.9", "v9.9.9");
 
-      // stub `gh`: `run list` applies the --jq expression the STEP passes to the
-      // fixture JSON (so the real filter is under test); `workflow run` records
-      // the dispatch instead of mutating the real repo.
-      const log = join(dir, "gh.log");
-      writeFileSync(log, "");
-      writeFileSync(
-        join(dir, "gh"),
-        `#!/usr/bin/env bash
+    const log = join(dir, "gh.log");
+    const output = join(dir, "output.txt");
+    writeFileSync(log, "");
+    writeFileSync(output, "");
+    writeFileSync(
+      join(dir, "gh"),
+      `#!/usr/bin/env bash
 set -euo pipefail
 if [ "\${1:-}" = "run" ] && [ "\${2:-}" = "list" ]; then
-  expr=""
-  while [ $# -gt 0 ]; do
-    case "$1" in
-      --jq) expr="$2"; shift 2 ;;
-      *) shift ;;
-    esac
-  done
-  printf '%s' "$GH_STUB_RUNS_JSON" | jq -r "$expr"
+  printf '%s' "$GH_STUB_RUNS_JSON"
   exit 0
 fi
 if [ "\${1:-}" = "workflow" ] && [ "\${2:-}" = "run" ]; then
@@ -266,83 +281,170 @@ fi
 echo "unexpected gh invocation: $*" >&2
 exit 7
 `,
-      );
-      Bun.spawnSync(["chmod", "+x", join(dir, "gh")]);
+    );
+    Bun.spawnSync(["chmod", "+x", join(dir, "gh")]);
+    return { dir, log, output };
+  }
 
-      const runOnce = (runsJson: string) => {
-        writeFileSync(log, "");
-        const proc = Bun.spawnSync(["bash", "-e", "-c", run], {
-          cwd: dir,
-          env: {
-            ...process.env,
-            PATH: `${dir}:${process.env.PATH}`,
-            GH_TOKEN: "stub-token",
-            VERSION: "9.9.9",
-            GH_STUB_RUNS_JSON: runsJson,
-            GH_STUB_LOG: log,
-          },
-        });
-        return {
-          code: proc.exitCode,
-          out: proc.stdout.toString() + proc.stderr.toString(),
-          log: readFileSync(log, "utf8"),
-        };
-      };
+  /** Run one dispatch-step body against a prepared fixture. */
+  function runDispatchBody(
+    fixture: { dir: string; log: string; output: string },
+    body: string,
+    runsJson: string,
+  ): { code: number; out: string; log: string; exported: string } {
+    writeFileSync(fixture.log, "");
+    writeFileSync(fixture.output, "");
+    const proc = Bun.spawnSync(["bash", "-e", "-c", body], {
+      cwd: fixture.dir,
+      env: {
+        ...process.env,
+        PATH: `${fixture.dir}:${process.env.PATH}`,
+        GH_TOKEN: "stub-token",
+        VERSION: "9.9.9",
+        GH_STUB_RUNS_JSON: runsJson,
+        GH_STUB_LOG: fixture.log,
+        GITHUB_OUTPUT: fixture.output,
+      },
+    });
+    return {
+      code: proc.exitCode,
+      out: proc.stdout.toString() + proc.stderr.toString(),
+      log: readFileSync(fixture.log, "utf8"),
+      exported: readFileSync(fixture.output, "utf8"),
+    };
+  }
 
-      // The newest run is the only input the step reads, so each case IS the
-      // gh output for the release commit. `reuse` cases must leave the dispatch
-      // log empty; every other terminal outcome must dispatch a fresh run.
-      const REUSE = true;
-      const DISPATCH = false;
-      const cases: { runs: string; reuse: boolean; label: string }[] = [
-        { runs: "[]", reuse: DISPATCH, label: "no run for the commit" },
-        {
-          runs: '[{"databaseId":1,"status":"completed","conclusion":"success"}]',
-          reuse: REUSE,
-          label: "success",
-        },
-        {
-          runs: '[{"databaseId":2,"status":"waiting","conclusion":null}]',
-          reuse: REUSE,
-          label: "in-flight (waiting for approval)",
-        },
-        {
-          runs: '[{"databaseId":3,"status":"in_progress","conclusion":null}]',
-          reuse: REUSE,
-          label: "in-flight (in_progress)",
-        },
-        ...[
-          "failure",
-          "cancelled",
-          "timed_out",
-          "startup_failure",
-          "action_required",
-          "stale",
-          "neutral",
-          "skipped",
-        ].map((conclusion, i) => ({
-          runs: `[{"databaseId":${10 + i},"status":"completed","conclusion":"${conclusion}"}]`,
-          reuse: DISPATCH,
-          label: `terminal ${conclusion}`,
-        })),
-      ];
+  test("dispatch step body EXECUTES: reuse only an in-flight or successful run OF THIS TAG, dispatch for every other outcome", () => {
+    const steps = wf.jobs.release.steps as { run?: string }[];
+    const run = steps.find((s) => s.run?.includes("gh workflow run deploy-prod.yml"))!.run!;
 
+    // gh reports newest-first and `headBranch` is the run's OWN ref: only a run
+    // on v9.9.9 is this release's deploy. `reuse` cases must leave the dispatch
+    // log empty; every other outcome dispatches a fresh run and exports the id
+    // it superseded (empty when nothing of this tag was superseded).
+    const REUSE = true;
+    const DISPATCH = false;
+    const cases: {
+      runs: string;
+      reuse: boolean;
+      label: string;
+      /** The id the step must hand to the collector as superseded, if any. */
+      superseded?: number;
+      /** Reuse cases: the id the reuse notice must name. */
+      reuseId?: number;
+    }[] = [
+      { runs: "[]", reuse: DISPATCH, label: "no run for the commit" },
+      {
+        runs: '[{"databaseId":1,"status":"completed","conclusion":"success","headBranch":"v9.9.9"}]',
+        reuse: REUSE,
+        label: "success",
+        reuseId: 1,
+      },
+      {
+        runs: '[{"databaseId":2,"status":"waiting","conclusion":null,"headBranch":"v9.9.9"}]',
+        reuse: REUSE,
+        label: "in-flight (waiting for approval)",
+        reuseId: 2,
+      },
+      {
+        runs: '[{"databaseId":3,"status":"in_progress","conclusion":null,"headBranch":"v9.9.9"}]',
+        reuse: REUSE,
+        label: "in-flight (in_progress)",
+        reuseId: 3,
+      },
+      ...[
+        "failure",
+        "cancelled",
+        "timed_out",
+        "startup_failure",
+        "action_required",
+        "stale",
+        "neutral",
+        "skipped",
+      ].map((conclusion, i) => ({
+        runs: `[{"databaseId":${10 + i},"status":"completed","conclusion":"${conclusion}","headBranch":"v9.9.9"}]`,
+        reuse: DISPATCH,
+        label: `terminal ${conclusion}`,
+        superseded: 10 + i,
+      })),
+      // foreign run listed FIRST: it must not mask the reusable same-tag run
+      // behind it (gh's newest-first order is what `--limit 1` used to hide)
+      {
+        runs:
+          '[{"databaseId":70,"status":"completed","conclusion":"success","headBranch":"v9.9.8"},' +
+          '{"databaseId":71,"status":"completed","conclusion":"success","headBranch":"v9.9.9"}]',
+        reuse: REUSE,
+        label: "foreign newer run listed first, same-tag run behind it",
+        reuseId: 71,
+      },
+      // another tag's run only: not this release's deploy — dispatch fresh, and
+      // nothing of THIS tag was superseded (the id stays empty)
+      {
+        runs: '[{"databaseId":72,"status":"completed","conclusion":"success","headBranch":"v9.9.8"}]',
+        reuse: DISPATCH,
+        label: "another tag's run only",
+      },
+      {
+        runs:
+          '[{"databaseId":73,"status":"completed","conclusion":"failure","headBranch":"v9.9.8"},' +
+          '{"databaseId":74,"status":"completed","conclusion":"failure","headBranch":"v9.9.9"}]',
+        reuse: DISPATCH,
+        label: "another tag's failure ahead of this tag's failure",
+        superseded: 74,
+      },
+    ];
+
+    const fixture = makeDispatchFixture();
+    try {
       for (const c of cases) {
-        const result = runOnce(c.runs);
+        const result = runDispatchBody(fixture, run, c.runs);
         expect(result.code, `${c.label}: exit code`).toBe(0);
         if (c.reuse) {
           expect(result.out, `${c.label}: reuse notice`).toContain(
             "::notice::reusing existing deploy-prod.yml run",
           );
+          expect(result.out, `${c.label}: reuses the same-tag run`).toContain(
+            `reusing existing deploy-prod.yml run ${c.reuseId} for v9.9.9`,
+          );
           expect(result.log, `${c.label}: no dispatch`).toBe("");
+          expect(result.exported, `${c.label}: nothing superseded`).not.toContain(
+            "superseded_run=",
+          );
         } else {
           expect(result.log, `${c.label}: dispatches`).toContain(
             "DISPATCH workflow run deploy-prod.yml --ref v9.9.9",
           );
+          expect(result.exported, `${c.label}: superseded id`).toBe(
+            c.superseded === undefined ? "" : `superseded_run=${c.superseded}\n`,
+          );
         }
       }
     } finally {
-      rmSync(dir, { recursive: true, force: true });
+      rmSync(fixture.dir, { recursive: true, force: true });
+    }
+  });
+
+  test("MUTATION/dropping the headBranch filter: a foreign run is reused for this tag (the reviewed bug)", () => {
+    // The pin above is load-bearing: remove the identity filter — the reviewed
+    // state, where the lookup had no ref scope — and the newest run for the
+    // commit, whatever tag it belongs to, is reused as this release's deploy.
+    const steps = wf.jobs.release.steps as { run?: string }[];
+    const src = steps.find((s) => s.run?.includes("gh workflow run deploy-prod.yml"))!.run!;
+    const mutated = src.replace("select(.headBranch == $tag)", ".");
+    expect(mutated).not.toBe(src);
+
+    const foreignOnly =
+      '[{"databaseId":72,"status":"completed","conclusion":"success","headBranch":"v9.9.8"}]';
+    const fixture = makeDispatchFixture();
+    try {
+      const fixed = runDispatchBody(fixture, src, foreignOnly);
+      expect(fixed.log).toContain("DISPATCH workflow run deploy-prod.yml --ref v9.9.9");
+
+      const unfiltered = runDispatchBody(fixture, mutated, foreignOnly);
+      expect(unfiltered.out).toContain("reusing existing deploy-prod.yml run 72 for v9.9.9");
+      expect(unfiltered.log).toBe("");
+    } finally {
+      rmSync(fixture.dir, { recursive: true, force: true });
     }
   });
 
@@ -384,14 +486,26 @@ exit 7
       // folded T2 review: the notes path is handed off from the extract step's
       // output (single shared path), not rebuilt here
       NOTES_FILE: "${{ steps.changelog.outputs.notes_file }}",
+      // finding 2: the dispatch step's superseded run id (empty when nothing
+      // was superseded) must reach the collector, which never cites it
+      SUPERSEDED_RUN: "${{ steps.dispatch.outputs.superseded_run }}",
       // AC4: the evidence section must cite the PRODUCTION deploy run —
       // deploy.yml runs on the same main push and would be ambiguous
       DEPLOY_WORKFLOW: "deploy-prod.yml",
     });
+    // finding 2: the id is forwarded as `--exclude-run` — only when set, so a
+    // first release that superseded nothing passes no flag at all
+    expect(evidRun).toContain('[ -n "$SUPERSEDED_RUN" ]');
+    expect(evidRun).toContain('EXTRA_ARGS+=(--exclude-run "$SUPERSEDED_RUN")');
+    // nit d: a prerelease version carries no dispatch, so the wait is zeroed —
+    // the section is written at once instead of burning the bounded wait
+    expect(evidRun).toContain("case \"$VERSION\" in");
+    expect(evidRun).toContain("*-*) EXTRA_ARGS+=(--wait-minutes 0)");
     // … and the value reaches the collector as the `--workflow` argument
     expect(evidRun).toContain(
       'bun run scripts/collect-deploy-evidence.ts --workflow "$DEPLOY_WORKFLOW"',
     );
+    expect(evidRun).toContain('"${EXTRA_ARGS[@]}"');
     // T3-3: the release tag is passed as `--ref` (derived from VERSION inside
     // the script, no inline ${{ }}) so a manual rollback run that merely shares
     // the merge commit cannot be selected as this Release's evidence
@@ -402,6 +516,110 @@ exit 7
     expect(extract?.run).toContain('echo "notes_file=${NOTES_FILE}" >> "$GITHUB_OUTPUT"');
     // … and this step consumes it without re-deriving it from RUNNER_TEMP/VERSION
     expect(evidRun).not.toContain("RUNNER_TEMP");
+  });
+
+  /**
+   * Execute the evidence step body with stubbed `bun` (records the collector
+   * argv it is handed) and `gh` (`release edit` recorded instead of mutating
+   * anything), so the flag pairing is observed rather than pattern-matched.
+   */
+  function runEvidenceBody(
+    body: string,
+    env: Record<string, string>,
+  ): { code: number; argv: string; notes: string; edited: string } {
+    const dir = mkdtempSync(join(tmpdir(), "release-evidence-"));
+    try {
+      const notes = join(dir, "notes.txt");
+      const argvLog = join(dir, "bun.log");
+      const editLog = join(dir, "gh.log");
+      writeFileSync(notes, "EN\n\n---\n\nCN");
+      writeFileSync(argvLog, "");
+      writeFileSync(editLog, "");
+      writeFileSync(
+        join(dir, "bun"),
+        `#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\\n' "$*" >> "$BUN_STUB_LOG"
+printf '### Deploy evidence\\n- Status: stub\\n'
+`,
+      );
+      writeFileSync(
+        join(dir, "gh"),
+        `#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\\n' "$*" >> "$GH_STUB_LOG"
+exit 0
+`,
+      );
+      Bun.spawnSync(["chmod", "+x", join(dir, "bun"), join(dir, "gh")]);
+      const proc = Bun.spawnSync(["bash", "-e", "-c", body], {
+        cwd: dir,
+        env: {
+          ...process.env,
+          PATH: `${dir}:${process.env.PATH}`,
+          NOTES_FILE: notes,
+          GH_TOKEN: "stub-token",
+          BUN_STUB_LOG: argvLog,
+          GH_STUB_LOG: editLog,
+          ...env,
+        },
+      });
+      return {
+        code: proc.exitCode,
+        argv: readFileSync(argvLog, "utf8"),
+        notes: readFileSync(notes, "utf8"),
+        edited: readFileSync(editLog, "utf8"),
+      };
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+
+  test("evidence step body EXECUTES: prerelease zeroes the wait, a superseded run is excluded, a clean release passes neither", () => {
+    const steps = wf.jobs.release.steps as { run?: string }[];
+    const body = steps.find((s) => s.run?.includes("collect-deploy-evidence.ts"))!.run!;
+    const base = {
+      MERGE_SHA: "a".repeat(40),
+      DEPLOY_WORKFLOW: "deploy-prod.yml",
+    };
+
+    // A normal release that superseded nothing: no exclusion, no explicit wait
+    // (the collector's 15-min default), section appended to the shared notes
+    // file, one rewrite of the Release from that file.
+    const release = runEvidenceBody(body, { ...base, VERSION: "9.9.9", SUPERSEDED_RUN: "" });
+    expect(release.code).toBe(0);
+    expect(release.argv).toContain("--workflow deploy-prod.yml --ref v9.9.9");
+    expect(release.argv).not.toContain("--exclude-run");
+    expect(release.argv).not.toContain("--wait-minutes");
+    expect(release.notes).toContain("### Deploy evidence");
+    expect(release.edited).toContain("release edit v9.9.9 --notes-file");
+
+    // a rerun that superseded a run: the collector is told which one to drop
+    const superseded = runEvidenceBody(body, {
+      ...base,
+      VERSION: "9.9.9",
+      SUPERSEDED_RUN: "4242",
+    });
+    expect(superseded.code).toBe(0);
+    expect(superseded.argv).toContain("--exclude-run 4242");
+
+    // a prerelease never dispatches, so the bounded wait is zeroed and the
+    // section is written at once (with the same collector, same wording)
+    const prerelease = runEvidenceBody(body, { ...base, VERSION: "9.9.9-alpha.1", SUPERSEDED_RUN: "" });
+    expect(prerelease.code).toBe(0);
+    expect(prerelease.argv).toContain("--wait-minutes 0");
+    expect(prerelease.notes).toContain("### Deploy evidence");
+
+    // mutation: without the zero-wait arm the prerelease would wait the full
+    // window — the pin above is what stops that
+    const mutated = body.replace("*-*) EXTRA_ARGS+=(--wait-minutes 0)", "*-*) :");
+    expect(mutated).not.toBe(body);
+    const unzeroed = runEvidenceBody(mutated, {
+      ...base,
+      VERSION: "9.9.9-alpha.1",
+      SUPERSEDED_RUN: "",
+    });
+    expect(unzeroed.argv).not.toContain("--wait-minutes");
   });
 
   test("workflow-wide single-edit guard (QC A2, AD-3): exactly one `gh release edit` across ALL step runs", () => {

@@ -202,9 +202,21 @@ jobs:
       - name: Deploy Worker (prod)
         shell: bash
         run: |
+          set -euo pipefail
           bunx wrangler deploy --env production 2>&1 | tee deploy.log
-          grep -oE 'Current Version ID: .+' deploy.log | tail -1 | cut -d' ' -f4 > version_id.txt
-          test -s version_id.txt
+          VERSION_ID="$(grep -oE 'Current Version ID: .+' deploy.log | tail -1 | cut -d' ' -f4 || true)"
+          # The value is recorded as this release's evidence, so bare
+          # non-emptiness is no gate at all: `test -s` passes on a lone newline,
+          # which is exactly what a log line without a value leaves behind.
+          # Assert wrangler's shape — a UUID — and fail loudly only on THIS
+          # step's own extraction. The re-capture step below writes its own
+          # explicit `unavailable …` marker for a missing value and stays
+          # deliberately non-fatal (evidence is a recording surface).
+          if ! printf '%s' "$VERSION_ID" | grep -qiE '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'; then
+            echo "::error::wrangler deploy reported no Worker version id in deploy.log (got '${VERSION_ID}') — refusing to record it as the deployed version"
+            exit 1
+          fi
+          printf '%s\n' "$VERSION_ID" > version_id.txt
 
       # Secrets AFTER the deploy: on a first bring-up the old order let
       # `secret bulk` materialise a bound-less draft Worker holding production

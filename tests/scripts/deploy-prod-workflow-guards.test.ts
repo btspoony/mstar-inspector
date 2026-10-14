@@ -42,6 +42,10 @@
  *   `unavailable (post-secret lookup failed)` marker — never the deploy-log
  *   predecessor — when that lookup cannot confirm the version;
  * - the healthz smoke comparing the live version to the deployed tag;
+ * - the deploy step's version-id gate: the recorded value must be a UUID
+ *   (`wrangler deploy` prints one) — a bare non-emptiness test passes on a lone
+ *   newline, so the shape is asserted and the step fails loudly, while the
+ *   deliberately non-fatal re-capture step keeps its own `unavailable …` marker;
  * - the digest-from-deploy-log rule and its never-fatal property (a no-push
  *   deploy records the literal `unchanged (no push in this deploy)` and exits 0);
  * - evidence artifact + run summary;
@@ -51,7 +55,7 @@
  * method as tests/scripts/release-workflow-guards.test.ts. Structural assertions
  * only: a formatting change cannot silently drop a guard.
  */
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, test } from "bun:test";
@@ -759,6 +763,96 @@ describe("deploy-prod.yml guards", () => {
     expect(runsText).toContain("bunx wrangler deploy --env production 2>&1 | tee deploy.log");
     expect(runsText).toContain("Current Version ID:");
     expect(runsText).toContain("version_id.txt");
+  });
+
+  /**
+   * Execute a deploy-step body with a stubbed `bunx` (the step's only external
+   * command) that prints a wrangler deploy log carrying `WRANGLER_VERSION_ID`:
+   * `tee deploy.log` lands it on disk, so the extraction and its gate run for
+   * real. `bash -eo pipefail` mirrors the step's `shell: bash`.
+   */
+  function runDeployStep(
+    body: string,
+    payload: string,
+  ): { code: number; out: string; recorded: string } {
+    const dir = mkdtempSync(join(tmpdir(), "deploy-step-"));
+    try {
+      writeFileSync(
+        join(dir, "bunx"),
+        `#!/usr/bin/env bash
+printf 'Uploaded mstar-inspector-production\\nCurrent Version ID: %s\\n' "$WRANGLER_VERSION_ID"
+`,
+      );
+      Bun.spawnSync(["chmod", "+x", join(dir, "bunx")]);
+      const proc = Bun.spawnSync(["bash", "-eo", "pipefail", "-c", body], {
+        cwd: dir,
+        env: { ...process.env, PATH: `${dir}:${process.env.PATH}`, WRANGLER_VERSION_ID: payload },
+      });
+      const file = join(dir, "version_id.txt");
+      return {
+        code: proc.exitCode,
+        out: proc.stdout.toString() + proc.stderr.toString(),
+        recorded: existsSync(file) ? readFileSync(file, "utf8").trim() : "<absent>",
+      };
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+
+  test("version-id gate asserts the UUID shape, not bare non-emptiness (nit e)", () => {
+    const deploy = steps.find((s) => s.name === "Deploy Worker (prod)")!;
+    const run = deploy.run!;
+    // `test -s` passes on a lone newline — the value is this release's evidence,
+    // so the SHAPE is what gets asserted, and only the deploy step's own
+    // extraction fails loudly on it.
+    expect(run).not.toContain("test -s version_id.txt");
+    expect(run).toContain("'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'");
+    expect(run).toContain("::error::");
+    expect(run).toContain("exit 1");
+    // the deliberately non-fatal re-capture step keeps its own marker instead
+    const recap = steps.find((s) => s.name === "Re-capture live Worker version")!;
+    expect(recap.run).not.toContain("no Worker version id");
+  });
+
+  test("version-id gate script EXECUTES: a UUID is recorded, a non-UUID payload fails loudly", () => {
+    const deploy = steps.find((s) => s.name === "Deploy Worker (prod)")!;
+    const uuid = "40a71ea8-1111-2222-3333-444455556666";
+
+    const ok = runDeployStep(deploy.run!, uuid);
+    expect(ok.code).toBe(0);
+    expect(ok.recorded).toBe(uuid);
+
+    // a short/non-UUID token: the pre-fix gate (`test -s`) accepted it
+    const short = runDeployStep(deploy.run!, "deadbeef");
+    expect(short.code).not.toBe(0);
+    expect(short.out).toContain("no Worker version id");
+
+    // a value-less log line (trailing spaces): `cut` yields an empty field, the
+    // file gets a lone newline — the exact hole `test -s` left open
+    const blank = runDeployStep(deploy.run!, "  ");
+    expect(blank.code).not.toBe(0);
+    expect(blank.out).toContain("no Worker version id");
+  });
+
+  test("MUTATION/reverting to `test -s version_id.txt`: the value-less payload passes the old gate", () => {
+    // The pin above is load-bearing: swap the shape gate back for the reviewed
+    // bare non-emptiness test and the lone-newline payload sails through.
+    const deploy = steps.find((s) => s.name === "Deploy Worker (prod)")!;
+    const src = deploy.run!;
+    const write = "printf '%s\\n' \"$VERSION_ID\" > version_id.txt";
+    const start = src.indexOf("if ! printf '%s' \"$VERSION_ID\"");
+    const end = src.indexOf(write);
+    expect(start).toBeGreaterThanOrEqual(0);
+    expect(end).toBeGreaterThan(start);
+    const mutated =
+      src.slice(0, start) + write + "\n          test -s version_id.txt\n          " + src.slice(end + write.length);
+    expect(mutated).not.toBe(src);
+
+    const fixed = runDeployStep(src, "  ");
+    expect(fixed.code).not.toBe(0);
+    const unfixed = runDeployStep(mutated, "  ");
+    expect(unfixed.code).toBe(0);
+    expect(unfixed.recorded).toBe("");
   });
 
   test("healthz smoke asserts the deployed tag's version, not mere liveness", () => {

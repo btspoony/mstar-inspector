@@ -135,14 +135,20 @@ jobs:
       # the production workflow must be dispatched explicitly. A rerun of THIS
       # workflow (the documented recovery path after an evidence failure or a
       # timeout) must not queue a SECOND approval-gated deploy: the step first
-      # looks for an existing `deploy-prod.yml` run for the release commit and
-      # reuses it (notice, no dispatch) — the collector resolves the production
-      # run for the tag, so a duplicate would make the evidence wait on the new
-      # run instead of backfilling the already-completed one. Reuse applies only
+      # looks for an existing `deploy-prod.yml` run OF THIS TAG for the release
+      # commit and reuses it (notice, no dispatch) — the collector resolves the
+      # production run for the tag, so a duplicate would make the evidence wait
+      # on the new run instead of backfilling the already-completed one. The
+      # lookup applies the collector's own identity rule — the run's headBranch
+      # IS the tag — so a run for ANOTHER tag on the same commit (a rollback)
+      # is not this release's deploy: it is never reused, and it cannot hide a
+      # reusable same-tag run listed behind it. Reuse applies only
       # to an in-flight run (waiting for approval, or otherwise not concluded) or
       # one that succeeded; ANY other terminal outcome (failure, cancelled,
       # timed_out, startup_failure, action_required, stale, neutral, skipped)
-      # dispatches a fresh run, so a rerun after a failed deploy retries. This
+      # dispatches a fresh run, so a rerun after a failed deploy retries — and
+      # the id of the run it supersedes is handed to the evidence step (the
+      # `superseded_run` output) so the collector never cites it. This
       # step runs
       # AFTER the Release (a dispatch failure leaves tag + Release in place and
       # converges on re-run) and BEFORE the evidence step, whose bounded wait
@@ -157,6 +163,7 @@ jobs:
       # `prerelease:` flag above, keeping the accepted "prereleases never reach
       # production" contract with deploy-prod.yml untouched.
       - name: Dispatch production deploy on the release tag
+        id: dispatch
         if: ${{ !contains(steps.ver.outputs.version, '-') }}
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -166,14 +173,19 @@ jobs:
           TAG="v${VERSION}"
           SHA="$(git rev-list -n1 "$TAG")"
           # Rerun convergence: never queue a second production run for a commit
-          # that already has one. The lookup emits "<id> <status> <conclusion>"
-          # (conclusion `-` while a run is in flight) and nothing at all when
-          # there is no run; gh's built-in --jq needs no system jq. The
-          # assignment form keeps a lookup failure loud under `set -e` (a
-          # failed lookup must not be mistaken for "no run").
-          LOOKUP="$(gh run list --workflow deploy-prod.yml --commit "$SHA" --limit 1 \
-            --json status,conclusion,databaseId \
-            --jq '.[0] // empty | "\(.databaseId) \(.status) \(.conclusion // "-")"')"
+          # AND tag that already has one. The lookup emits "<id> <status>
+          # <conclusion>" (conclusion `-` while a run is in flight) for the
+          # newest run whose own branch is THIS tag, and nothing when the tag
+          # has no run. It matches on headBranch — the collector's identity
+          # rule: deploy-prod.yml deploys exactly the ref it runs on, so a run
+          # for another tag on the same commit is not this release's deploy and
+          # must neither be reused nor mask a same-tag run listed behind it
+          # (hence the whole page, never a single newest run). The assignment
+          # form keeps a lookup failure loud under `set -e` (a failed lookup
+          # must not be mistaken for "no run").
+          LOOKUP="$(gh run list --workflow deploy-prod.yml --commit "$SHA" \
+            --json status,conclusion,databaseId,headBranch \
+            | jq -r --arg tag "$TAG" 'first(.[] | select(.headBranch == $tag)) // empty | "\(.databaseId) \(.status) \(.conclusion // "-")"')"
           REUSE_ID=""
           REUSE_STATUS=""
           REUSE_CONCLUSION=""
@@ -191,6 +203,10 @@ jobs:
 
           if [ -n "$REUSE_ID" ]; then
             echo "::notice::newest deploy-prod.yml run ${REUSE_ID} for ${TAG} concluded ${REUSE_CONCLUSION}; dispatching a fresh deploy"
+            # The superseded run must never become this release's evidence: the
+            # evidence step forwards the id so the collector drops it and keeps
+            # waiting for the run this dispatch is queuing.
+            echo "superseded_run=${REUSE_ID}" >> "$GITHUB_OUTPUT"
           fi
           gh workflow run deploy-prod.yml --ref "$TAG"
 
@@ -211,7 +227,8 @@ jobs:
       # the wait so it can never starve the pre-steps of the job's 30-min
       # budget — 15 min (collector's bounded-wait default) + margin for the
       # artifact download + the single `gh release edit` + bun startup
-      # = 18 min, leaving ≥12 min for everything above. In the extreme case
+      # = 18 min, leaving ≥12 min for everything above. A prerelease version
+      # never pays that wait (see the zero-wait arm below). In the extreme case
       # where slow pre-steps + this budget still hit the job cap, the run
       # goes red without losing the tag/Release; a rerun converges (runbook).
       - name: Append deploy evidence to release notes
@@ -222,6 +239,10 @@ jobs:
           VERSION: ${{ steps.ver.outputs.version }}
           MERGE_SHA: ${{ github.event.pull_request.merge_commit_sha }}
           NOTES_FILE: ${{ steps.changelog.outputs.notes_file }}
+          # The run the dispatch step just superseded (empty when nothing was
+          # superseded — a first release, a reused run, or a prerelease that
+          # dispatches nothing): the collector must never cite it.
+          SUPERSEDED_RUN: ${{ steps.dispatch.outputs.superseded_run }}
           # The section must cite the PRODUCTION deploy (release-triggered);
           # staging deploys on the same main push, so deploy.yml would be ambiguous here.
           DEPLOY_WORKFLOW: deploy-prod.yml
@@ -229,11 +250,24 @@ jobs:
           set -euo pipefail
           TAG="v${VERSION}"
           printf '\n\n---\n\n' >> "$NOTES_FILE"
+          EXTRA_ARGS=()
+          # A rerun that superseded a failed run excludes it: the section must
+          # describe the run this release now deploys, never the one it replaced
+          # (the collector drops the id and keeps polling for the fresh run).
+          if [ -n "$SUPERSEDED_RUN" ]; then
+            EXTRA_ARGS+=(--exclude-run "$SUPERSEDED_RUN")
+          fi
+          # A prerelease never dispatches (the dispatch step above is skipped),
+          # so the full bounded wait would burn ~15 min to state the same
+          # absence: one immediate poll writes the same section now.
+          case "$VERSION" in
+            *-*) EXTRA_ARGS+=(--wait-minutes 0) ;;
+          esac
           # --ref selects the run dispatched on this tag over a manual rollback
           # run that merely shares the merge commit (T3-3); deploy-prod.yml
           # deploys exactly the ref it runs on, so a match proves identity, and
           # a miss falls back to the newest run for the commit and says so.
-          bun run scripts/collect-deploy-evidence.ts --workflow "$DEPLOY_WORKFLOW" --ref "$TAG" >> "$NOTES_FILE"
+          bun run scripts/collect-deploy-evidence.ts --workflow "$DEPLOY_WORKFLOW" --ref "$TAG" "${EXTRA_ARGS[@]}" >> "$NOTES_FILE"
           if ! gh release edit "v${VERSION}" --notes-file "$NOTES_FILE"; then
             echo "::error::deploy-evidence append failed — Release notes left without the evidence section; re-run the Release workflow to converge (idempotent)"
             exit 1   # step visibly red; continue-on-error keeps the job green

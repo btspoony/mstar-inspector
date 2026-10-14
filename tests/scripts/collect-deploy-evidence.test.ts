@@ -20,12 +20,14 @@
  * absence never fails the release); 1 is usage-errors only.
  */
 import { describe, expect, test } from "bun:test";
+import { readFileSync } from "node:fs";
 import {
   DEFAULT_DEPLOY_WORKFLOW,
   DEPLOY_EVIDENCE_ARTIFACT,
   type CliDeps,
   collectDeployEvidence,
   type CollectOptions,
+  type CollectResult,
   createGhRunner,
   type GhRun,
   type GhRunner,
@@ -240,6 +242,31 @@ describe("collectDeployEvidence — timeout / pending branch", () => {
     const { runner } = makeRunner(() => [IN_FLIGHT]);
     const result = collectDeployEvidence(baseOpts({ runner, waitMs: 45_000, intervalMs: 30_000 }));
     expect(result.section).toContain("after the ~1 min bounded wait");
+  });
+
+  test("zero wait polls exactly once and reports an immediate check, never a rounded-up wait", () => {
+    // The Release workflow passes --wait-minutes 0 for a prerelease version
+    // (it never dispatches, so there is nothing to wait for): the section must
+    // be written after ONE poll and must not claim a ~1 min wait that never
+    // happened.
+    const { runner, polls } = makeRunner(() => []);
+    const result = collectDeployEvidence(baseOpts({ runner, waitMs: 0, env: {} }));
+    expect(result.kind).toBe("no-run");
+    expect(result.section).toBe(
+      [
+        "### Deploy evidence",
+        `- Status: no deploy run for commit \`${SHA}\` after the immediate check (no deploy.yml run was created for this commit)`,
+      ].join("\n"),
+    );
+    expect(polls).toHaveLength(1);
+  });
+
+  test("zero wait with a run still in flight yields the pending section after one poll", () => {
+    const { runner, polls } = makeRunner(() => [IN_FLIGHT]);
+    const result = collectDeployEvidence(baseOpts({ runner, waitMs: 0, env: {} }));
+    expect(result.kind).toBe("pending");
+    expect(result.section).toContain("still in flight after the immediate check");
+    expect(polls).toHaveLength(1);
   });
 });
 
@@ -470,6 +497,148 @@ describe("collectDeployEvidence — release identity (--ref prefers the release'
       expect(result.section).toContain("- Actions run: 999");
       expect(result.section).not.toContain("Run identity:");
       expect(downloads).toEqual([{ runId: 999, destDir: root }]);
+    } finally {
+      disposeTempRoot(root);
+    }
+  });
+});
+
+describe("collectDeployEvidence — superseded-run exclusion (--exclude-run)", () => {
+  const TAG = "v1.2.3";
+  /** The run a Release rerun replaced: completed non-success, on this tag. */
+  const SUPERSEDED: GhRun = { ...FAILED, databaseId: 5150, headBranch: TAG };
+  const FRESH: GhRun = { ...SUCCESS, databaseId: 888, headBranch: TAG };
+  // gh lists newest-first: the fresh dispatch leads once it registers.
+  const FRESH_IN_FLIGHT: GhRun = { ...FRESH, status: "waiting", conclusion: null };
+
+  test("the superseded run is never selected: polling continues until the fresh run completes", () => {
+    const root = makeTempRoot();
+    try {
+      // poll 1: only the superseded run is visible (the fresh dispatch has not
+      // registered yet); poll 2+: it leads the newest-first list.
+      const { runner, polls, downloads } = makeRunner(
+        (poll) => (poll === 1 ? [SUPERSEDED] : [FRESH, SUPERSEDED]),
+        (_id, destDir) => writeArtifact(destDir),
+      );
+      const clock = fakeClock();
+      const result = collectDeployEvidence(
+        baseOpts({
+          runner,
+          ref: TAG,
+          excludeRun: SUPERSEDED.databaseId,
+          now: clock.now,
+          sleep: clock.sleep,
+          artifactDir: root,
+          env: { ...GH_ENV },
+        }),
+      );
+      expect(result.kind).toBe("success");
+      expect(result.section).toContain(`- Actions run: ${RUN_URL.replace("123456", "888")}`);
+      // the superseded run id appears nowhere in the section
+      expect(result.section).not.toContain("5150");
+      expect(downloads).toEqual([{ runId: 888, destDir: root }]);
+      // terminal failure at poll 1 did NOT conclude the wait
+      expect(polls).toHaveLength(2);
+    } finally {
+      disposeTempRoot(root);
+    }
+  });
+
+  test("MUTATION/dropping --exclude-run: the same sequence cites the superseded run at the first poll", () => {
+    // Load-bearing demonstration: without the exclusion (the pre-fix
+    // behaviour) the superseded terminal run concludes the wait immediately
+    // and the section is built from it.
+    const { runner, polls } = makeRunner(() => [SUPERSEDED]);
+    const result = collectDeployEvidence(baseOpts({ runner, ref: TAG, env: {} }));
+    expect(result.kind).toBe("deploy-failed");
+    expect(result.section).toContain("- Actions run: 5150");
+    expect(polls).toHaveLength(1);
+  });
+
+  test("an in-flight fresh run is selected over the excluded one", () => {
+    const { runner } = makeRunner(() => [FRESH_IN_FLIGHT, SUPERSEDED]);
+    const clock = fakeClock();
+    const result = collectDeployEvidence(
+      baseOpts({
+        runner,
+        ref: TAG,
+        excludeRun: SUPERSEDED.databaseId,
+        now: clock.now,
+        sleep: clock.sleep,
+        env: { ...GH_ENV },
+      }),
+    );
+    expect(result.kind).toBe("pending");
+    expect(result.section).toContain(`- Actions run: ${RUN_URL.replace("123456", "888")}`);
+    expect(result.section).not.toContain("5150");
+  });
+
+  test("the excluded run is dropped from the newest-for-SHA fallback too", () => {
+    // Only a foreign run is left after the exclusion, so the disclosed
+    // fallback applies — and it can only ever name that foreign run.
+    const foreign: GhRun = { ...FAILED, databaseId: 555, headBranch: "main" };
+    const { runner } = makeRunner(() => [SUPERSEDED, foreign]);
+    const result = collectDeployEvidence(
+      baseOpts({ runner, ref: TAG, excludeRun: SUPERSEDED.databaseId, env: { ...GH_ENV } }),
+    );
+    expect(result.kind).toBe("deploy-failed");
+    expect(result.section).toContain(`- Actions run: ${RUN_URL.replace("123456", "555")}`);
+    expect(result.section).not.toContain("5150");
+    expect(result.section).toContain("Run identity:");
+  });
+
+  test("only the excluded run for the whole window: truthful no-run section, never cited", () => {
+    const { runner, polls } = makeRunner(() => [SUPERSEDED]);
+    const clock = fakeClock();
+    const result = collectDeployEvidence(
+      baseOpts({
+        runner,
+        ref: TAG,
+        excludeRun: SUPERSEDED.databaseId,
+        now: clock.now,
+        sleep: clock.sleep,
+        env: { ...GH_ENV },
+      }),
+    );
+    expect(result.kind).toBe("no-run");
+    // truthful: the commit does have a run (the superseded one) and the section
+    // says so instead of claiming no run exists — without citing it as evidence
+    expect(result.section).toBe(
+      [
+        "### Deploy evidence",
+        `- Status: no new deploy run for commit \`${SHA}\` after the ~2 min bounded wait (run 5150 is the superseded run this rerun replaced and is excluded; no further deploy.yml run was created for this commit)`,
+      ].join("\n"),
+    );
+    expect(result.section).not.toContain("- Actions run:");
+    // polled the whole window rather than concluding on the excluded run
+    expect(polls).toHaveLength(4);
+    expect(clock.sleeps).toEqual([30_000, 30_000, 30_000]);
+  });
+  test("MUTATION/removing the exclusion filter: the selection cites the superseded run again", async () => {
+    // A real source mutation, not a re-implementation: the collector has no
+    // relative imports, so the mutated copy runs from a temp tree against the
+    // same fixture — proving the filter is what keeps the superseded run out.
+    const src = readFileSync(`${import.meta.dir}/../../scripts/collect-deploy-evidence.ts`, "utf8");
+    const mutated = src.replace(
+      "excludeRun === undefined ? runs : runs.filter((r) => r.databaseId !== excludeRun)",
+      "runs",
+    );
+    expect(mutated).not.toBe(src);
+    const root = makeTempRoot();
+    try {
+      const file = writeAt(root, "collect-deploy-evidence.mutated.ts", mutated);
+      // Deliberate runtime-selected specifier: a static import cannot reach a
+      // file generated during the test, and exercising that loader boundary is
+      // the point of the mutation.
+      const mutant: { collectDeployEvidence: (opts: CollectOptions) => CollectResult } =
+        await import(file);
+      const { runner, polls } = makeRunner(() => [SUPERSEDED]);
+      const result = mutant.collectDeployEvidence(
+        baseOpts({ runner, ref: TAG, excludeRun: SUPERSEDED.databaseId, env: {} }),
+      );
+      expect(result.kind).toBe("deploy-failed");
+      expect(result.section).toContain("- Actions run: 5150");
+      expect(polls).toHaveLength(1);
     } finally {
       disposeTempRoot(root);
     }
@@ -829,6 +998,28 @@ describe("runCli — exit-code invariant and wiring", () => {
     expect(stdout).toContain("- Actions run: 4242");
     expect(stdout).not.toContain("999");
   });
+
+  test("--exclude-run reaches the selection: the superseded run is never cited via runCli", () => {
+    const superseded: GhRun = { ...FAILED, databaseId: 5150, headBranch: "v1.2.3" };
+    const { code, stdout, err } = drive(
+      { runs: () => [superseded] },
+      [
+        SHA,
+        "--workflow",
+        "deploy-prod.yml",
+        "--ref",
+        "v1.2.3",
+        "--exclude-run",
+        "5150",
+        "--wait-minutes",
+        "1",
+      ],
+    );
+    expect(code).toBe(0);
+    expect(stdout).toContain("run 5150 is the superseded run");
+    expect(stdout).not.toContain("Actions run:");
+    expect(err[0]).toBe("collect-deploy-evidence: no-run");
+  });
 });
 
 describe("parseArgs", () => {
@@ -837,6 +1028,7 @@ describe("parseArgs", () => {
       sha: SHA,
       workflow: DEFAULT_DEPLOY_WORKFLOW,
       ref: undefined,
+      excludeRun: undefined,
       waitMinutes: 15,
       intervalSeconds: 30,
       help: false,
@@ -867,6 +1059,30 @@ describe("parseArgs", () => {
     expect(() => parseArgs(["bun", "script", SHA, "--ref", "v1 `x`"])).toThrow(
       /Invalid --ref value/,
     );
+  });
+
+  test("--exclude-run in both flag forms selects the superseded run id", () => {
+    expect(parseArgs(["bun", "script", SHA, "--exclude-run", "123456"])).toMatchObject({
+      excludeRun: 123456,
+    });
+    expect(parseArgs(["bun", "script", SHA, "--exclude-run=123456"])).toMatchObject({
+      excludeRun: 123456,
+    });
+  });
+
+  test("--exclude-run rejects a missing value, a swallowed flag, and a non-id value", () => {
+    // A silently ignored exclusion would let the superseded run be cited again,
+    // so every malformed form is a loud usage error.
+    for (const argv of [
+      ["bun", "script", SHA, "--exclude-run"],
+      ["bun", "script", SHA, "--exclude-run", "--help"],
+      ["bun", "script", SHA, "--exclude-run="],
+      ["bun", "script", SHA, "--exclude-run", "abc"],
+      ["bun", "script", SHA, "--exclude-run", "0"],
+      ["bun", "script", SHA, "--exclude-run", "-1"],
+    ]) {
+      expect(() => parseArgs(argv), argv.join(" ")).toThrow(/Invalid --exclude-run value/);
+    }
   });
 
   test("tunable via both flag forms; uppercase SHA normalized to lowercase", () => {
