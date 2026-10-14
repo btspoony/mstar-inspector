@@ -966,7 +966,7 @@ describe("collectDeployEvidence — deploy workflow selection (--workflow)", () 
     expect(result.section).toContain("(no deploy-prod.yml run was created for this commit)");
   });
 
-  test("createGhRunner builds `gh run list --workflow <file> --commit <sha> …` argv", () => {
+  test("createGhRunner builds `gh run list --workflow <file> --commit <sha> …` argv, page size pinned", () => {
     const calls: string[][] = [];
     const orig = Bun.spawnSync;
     // test seam: swap the process spawner for a recorder
@@ -992,10 +992,132 @@ describe("collectDeployEvidence — deploy workflow selection (--workflow)", () 
         "deploy-prod.yml",
         "--commit",
         SHA,
+        // codex P2 (round 5): explicit page size, never gh's 20-row default —
+        // the same commit-keyed lookup the Release step performs, which must
+        // see a same-tag run hidden behind newer foreign-ref runs. The limit is
+        // part of the EXACT argv, so dropping it (or any value change) fails.
+        "--limit",
+        "100",
         "--json",
         "status,conclusion,databaseId,displayTitle,headBranch",
       ],
     ]);
+  });
+});
+
+describe("collectDeployEvidence — lookup page size (real gh argv, paged stub)", () => {
+  const TAG = "v1.2.3";
+  // A commit rolled back to repeatedly: 24 completed runs of OTHER tags
+  // (newest-first) ahead of this tag's own successful run on row 25. The
+  // collector's own `gh run list` must ask for a page deep enough to see it —
+  // gh's 20-row default would hide it and the ref preference would miss.
+  const FOREIGN_PAGE: GhRun[] = Array.from({ length: 24 }, (_, i) => ({
+    databaseId: 2000 - i,
+    status: "completed",
+    conclusion: "success",
+    displayTitle: "Deploy prod",
+    headBranch: `v1.2.${30 - i}`,
+  }));
+  const DEEP_TAG_RUN: GhRun = { ...SUCCESS, databaseId: 1900, headBranch: TAG };
+
+  /**
+   * Swap Bun's spawner for a stub that implements gh's documented page size
+   * (parse `--limit`, slice; 20 rows when the flag is absent), so the argv the
+   * real `createGhRunner` builds is what decides what the collector can see.
+   */
+  function withPagedGhStub<T>(
+    runs: GhRun[],
+    fn: () => T,
+  ): { value: T; argv: string[][] } {
+    const argv: string[][] = [];
+    const orig = Bun.spawnSync;
+    Bun.spawnSync = ((args: string[]) => {
+      argv.push(args);
+      // argv is `gh run list …` / `gh run download …`: the subcommand is args[2]
+      if (args[2] === "list") {
+        const i = args.indexOf("--limit");
+        const limit = i >= 0 ? Number(args[i + 1]) : 20;
+        return {
+          exitCode: 0,
+          stdout: Buffer.from(JSON.stringify(runs.slice(0, limit))),
+          stderr: Buffer.from(""),
+        };
+      }
+      if (args[2] === "download") {
+        writeArtifact(args[args.indexOf("-D") + 1]!);
+        return { exitCode: 0, stdout: Buffer.from(""), stderr: Buffer.from("") };
+      }
+      return { exitCode: 1, stdout: Buffer.from(""), stderr: Buffer.from("unexpected gh call") };
+    }) as typeof Bun.spawnSync;
+    try {
+      return { value: fn(), argv };
+    } finally {
+      Bun.spawnSync = orig;
+    }
+  }
+
+  test("a same-tag run behind 24 newer foreign-ref runs is selected, with no fallback disclosure", () => {
+    const root = makeTempRoot();
+    try {
+      const { value: result, argv } = withPagedGhStub([...FOREIGN_PAGE, DEEP_TAG_RUN], () =>
+        collectDeployEvidence(
+          baseOpts({ runner: createGhRunner(), ref: TAG, artifactDir: root, env: { ...GH_ENV } }),
+        ),
+      );
+      // the page size is part of the argv the real runner spawns
+      expect(argv[0]).toContain("--limit");
+      expect(argv[0]![argv[0]!.indexOf("--limit") + 1]).toBe("100");
+      expect(result.kind).toBe("success");
+      expect(result.section).toContain(`- Actions run: ${RUN_URL.replace("123456", "1900")}`);
+      // the preference HIT: this release's own deploy, not a disclosed fallback
+      expect(result.section).not.toContain("Run identity:");
+      expect(result.section).not.toContain("- Actions run: 2000");
+    } finally {
+      disposeTempRoot(root);
+    }
+  });
+
+  test("MUTATION/dropping the collector's page size (or reverting to --limit 1): the tag run is hidden and a foreign run is published as the evidence", async () => {
+    // Real source mutation, run from a temp tree against the same paged stub:
+    // without the explicit limit gh's 20-row default hides row 25, the ref
+    // preference misses, and the disclosed fallback publishes the newest FOREIGN
+    // run's artifact as this release's evidence.
+    const src = readFileSync(`${import.meta.dir}/../../scripts/collect-deploy-evidence.ts`, "utf8");
+    const dropped = src.replace(/"--limit",\s*\n\s*"100",\s*\n/, "");
+    expect(dropped).not.toBe(src);
+    const one = src.replace(/("--limit",\s*\n\s*)"100",/, '$1"1",');
+    expect(one).not.toBe(src);
+
+    const root = makeTempRoot();
+    try {
+      for (const [label, mutated] of [
+        ["no --limit (gh default 20)", dropped],
+        ["reverted to --limit 1", one],
+      ] as const) {
+        const file = writeAt(root, `collect-deploy-evidence.${label.replace(/\W+/g, "-")}.ts`, mutated);
+        // BOTH faces come from the mutant: the argv is built by the mutated
+        // module's own `createGhRunner`, so the removed flag is what gh sees.
+        const mutant: {
+          collectDeployEvidence: (opts: CollectOptions) => CollectResult;
+          createGhRunner: () => GhRunner;
+        } = await import(file);
+        const { value: result, argv } = withPagedGhStub([...FOREIGN_PAGE, DEEP_TAG_RUN], () =>
+          mutant.collectDeployEvidence(
+            baseOpts({ runner: mutant.createGhRunner(), ref: TAG, artifactDir: root, env: {} }),
+          ),
+        );
+        expect(argv[0], label).not.toContain("100");
+        expect(result.kind, label).toBe("success");
+        // the newest FOREIGN run is cited (bare id: no GitHub env pair), and the
+        // section admits it is not this ref's deploy — the very outcome the
+        // boundary/all-refs work was built to avoid
+        expect(result.section, label).toContain("- Actions run: 2000");
+        expect(result.section, label).toContain("Run identity:");
+        expect(result.section, label).not.toContain("- Actions run: 1900");
+      }
+    } finally {
+      disposeTempRoot(root);
+    }
   });
 });
 

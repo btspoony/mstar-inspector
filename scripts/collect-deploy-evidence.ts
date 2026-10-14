@@ -35,6 +35,10 @@
  * plain newest-for-SHA pick is used and the section says so — the fallback
  * line is what discloses that the reported run did not match the expected ref.
  * Evidence must never degrade to "no run" because of the preference.
+ * The `gh run list` lookup asks for an explicit page size (100 rows, never gh's
+ * 20-row default): the run set is commit-keyed, and this tag's own run can sit
+ * behind many newer runs of other tags for the same commit, so a short page
+ * would defeat the preference and publish a foreign-ref run as the evidence.
  *
  * Dispatch boundary (`--since-run <id>`): when the Release dispatches a fresh
  * production deploy it records the highest run id it saw for the commit —
@@ -509,6 +513,16 @@ export function createGhRunner(): GhRunner {
         workflow,
         "--commit",
         sha,
+        // Explicit page size, never gh's 20-row default: this is the same
+        // commit-keyed lookup the Release step performs, and it must see a
+        // same-tag run that can sit behind many newer runs of OTHER tags for
+        // the commit (a commit rolled back to repeatedly accumulates them). A
+        // hidden same-tag run would leave the ref preference unmatched, so the
+        // section would cite a foreign-ref run through the disclosed fallback
+        // instead of this release's own deploy. `gh` returns runs newest-first,
+        // so the page is also what `--since-run` reads as the newest run id.
+        "--limit",
+        "100",
         "--json",
         "status,conclusion,databaseId,displayTitle,headBranch",
       ]);
