@@ -34,7 +34,8 @@
  * `headBranch` is this tag deployed exactly that tag. When no run matches, the
  * plain newest-for-SHA pick is used and the section says so — the fallback
  * line is what discloses that the reported run did not match the expected ref.
- * Evidence must never degrade to "no run" because of the preference.
+ * Evidence must never degrade to "no run" because of the preference — except
+ * above a dispatch boundary, where the fallback is withheld (see below).
  * The `gh run list` lookup asks for an explicit page size (100 rows, never gh's
  * 20-row default): the run set is commit-keyed, and this tag's own run can sit
  * behind many newer runs of other tags for the same commit, so a short page
@@ -48,13 +49,17 @@
  * a run this dispatch queued may be cited. Run ids increase monotonically, so
  * the run it just queued is NEWER than every run that existed at dispatch
  * time. The collector then considers ONLY runs whose id is greater than the
- * boundary, and keeps polling while none is visible — excluding the single
- * newest run is not enough: a superseding dispatch whose older run succeeded
- * would leave that older success selectable and its artifact would be
- * recorded as this release's evidence. With no boundary (the reuse path, a
- * first release with no run for the commit) selection is unchanged. On expiry
- * with nothing past the boundary the section says so truthfully and cites no
- * run.
+ * boundary AND — `ref` being set on this path too — whose own `headBranch`
+ * equals it: the boundary alone cannot exclude a FOREIGN tag's run that
+ * started between the boundary capture and this dispatch (another release of
+ * the same commit), and citing such a run's artifact as this release's
+ * evidence would be false. It keeps polling while no matching run is visible —
+ * excluding the single newest run is not enough: a superseding dispatch whose
+ * older run succeeded would leave that older success selectable and its
+ * artifact would be recorded as this release's evidence. With no boundary (the
+ * reuse path, a first release with no run for the commit) selection is
+ * unchanged, disclosed fallback included. On expiry with nothing matching past
+ * the boundary the section says so truthfully and cites no run.
  *
  * Exit code: 0 for EVERY runtime outcome above, including collection errors
  * (`gh` missing, artifact download failure) which degrade to a section noting
@@ -112,7 +117,8 @@ export type CollectOptions = {
   /**
    * Expected run ref (the release tag). Preferred when selecting among the
    * runs for `sha`: a manual rollback dispatched on the same commit carries a
-   * different `headBranch`. A preference, never a restriction.
+   * different `headBranch`. A preference — except alongside `sinceRun`, where
+   * it becomes a requirement (only this ref's post-boundary run may be cited).
    */
   ref?: string;
   /**
@@ -120,7 +126,10 @@ export type CollectOptions = {
    * a greater id can belong to a deploy dispatched after this boundary was
    * captured. The boundary spans every ref of the commit — a run for another
    * tag on the same commit predates this dispatch too and must not be cited.
-   * While none is visible the wait keeps polling. Unset (the reuse path) leaves
+   * With `ref` set as well (the dispatch path sets both) a candidate must also
+   * be on that ref: a foreign-ref run started above the boundary is not this
+   * release's evidence and is never selected, even when already complete.
+   * While none matches the wait keeps polling. Unset (the reuse path) leaves
    * selection unchanged.
    */
   sinceRun?: number;
@@ -287,6 +296,15 @@ export function runLink(runId: number, env: Record<string, string | undefined>):
  * not be cited either. Returning
  * `undefined` while only pre-boundary runs are visible is what makes the wait
  * keep polling for the just-dispatched run.
+ *
+ * With a boundary set a candidate must also match `ref` (the dispatch path
+ * always sets both): the newest-for-SHA fallback is a boundless-path
+ * behaviour, because the run ids alone cannot exclude a FOREIGN-REF run that
+ * started between the boundary capture and the dispatch — a newer run of
+ * another tag for the same commit (a rollback alias) is above the boundary
+ * too, and citing its artifact as this release's evidence would be a lie. So
+ * the fallback is used only when there is no boundary; above one, the
+ * collector waits for the requested tag's own run.
  */
 function pickRun(
   runs: GhRun[],
@@ -300,6 +318,9 @@ function pickRun(
   if (ref) {
     const matching = selectable.find((r) => r.headBranch === ref);
     if (matching) return { run: matching, refFallback: false };
+    // Above the boundary only the requested ref's run may be cited; never
+    // fall back to a run whose identity is unproven.
+    if (sinceRun !== undefined) return undefined;
     return { run: newest, refFallback: true };
   }
   return { run: newest, refFallback: false };
@@ -370,21 +391,27 @@ function failedSection(
  * so a filter skip must never be claimed for it (the Release workflow
  * dispatches that run explicitly; absence means no run was created).
  *
- * When runs for the commit exist but all predate the dispatch boundary
- * (`sinceRunId`), "no run was created for this commit" would be false: those
- * runs exist — they are the deploys this release superseded, never cited — and
- * what is missing is the run dispatched after them. State the boundary instead.
+ * When runs for the commit exist but none was selectable (`sinceRunId`), "no
+ * run was created for this commit" would be false: those runs exist (the
+ * superseded deploys, or runs of another ref above the boundary), they are
+ * never cited, and what is missing is the run this release dispatched. State
+ * the boundary instead — and, with the ref the dispatch always passes, that
+ * the awaited run had to be ON it, so a foreign-ref run above the boundary is
+ * never presented as this release's evidence.
  */
 function noRunSection(
   sha: string,
   workflow: string,
   waitMs: number,
   sinceRunId?: number,
+  ref?: string,
 ): string {
   const status =
     sinceRunId === undefined
       ? `no deploy run for commit \`${sha}\` after the ${waitClause(waitMs)} (no ${workflow} run was created for this commit)`
-      : `no new deploy run for commit \`${sha}\` after the ${waitClause(waitMs)} (no run newer than the dispatch boundary ${sinceRunId} appeared — the superseding ${workflow} run was not yet visible; no pre-boundary run was cited)`;
+      : ref === undefined
+        ? `no new deploy run for commit \`${sha}\` after the ${waitClause(waitMs)} (no run newer than the dispatch boundary ${sinceRunId} appeared — the superseding ${workflow} run was not yet visible; no pre-boundary run was cited)`
+        : `no new deploy run for commit \`${sha}\` on ref \`${ref}\` after the ${waitClause(waitMs)} (no run on that ref newer than the dispatch boundary ${sinceRunId} appeared — the superseding ${workflow} run was not yet visible; no pre-boundary or foreign-ref run was cited)`;
   return section([`- Status: ${status}`]);
 }
 
@@ -451,18 +478,17 @@ export function collectDeployEvidence(opts: CollectOptions): CollectResult {
   const deadline = now() + opts.waitMs;
   let seen: GhRun | undefined;
   let seenRefFallback = false;
-  // Runs for the commit existed but all predated the dispatch boundary: the
-  // commit does have runs (the superseded deploys) — none is newer than the
-  // boundary, and none is cited.
-  let sawPreBoundary = false;
+  // Runs for the commit existed but none was selectable — they predate the
+  // dispatch boundary, or they are another ref's runs above it: either way the
+  // commit does have runs, none may be cited, and the section must say which
+  // (never "no run was created").
+  let sawExcludedRuns = false;
   for (;;) {
     let picked: { run: GhRun; refFallback: boolean } | undefined;
     try {
       const runs = opts.runner.listRuns(opts.sha, opts.workflow);
-      if (opts.sinceRun !== undefined && runs.some((r) => r.databaseId <= opts.sinceRun!)) {
-        sawPreBoundary = true;
-      }
       picked = pickRun(runs, opts.ref, opts.sinceRun);
+      if (picked === undefined && runs.length > 0) sawExcludedRuns = true;
     } catch (err) {
       // gh missing / auth / network — deterministic enough to surface now
       // rather than burn the whole window retrying (evidence is not a gate).
@@ -483,7 +509,8 @@ export function collectDeployEvidence(opts: CollectOptions): CollectResult {
             opts.sha,
             opts.workflow,
             opts.waitMs,
-            sawPreBoundary ? opts.sinceRun : undefined,
+            sawExcludedRuns ? opts.sinceRun : undefined,
+            opts.ref,
           ),
         };
       }

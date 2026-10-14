@@ -616,18 +616,111 @@ describe("collectDeployEvidence — dispatch boundary (--since-run)", () => {
     expect(result.section).not.toContain("- Actions run: 42");
   });
 
-  test("the boundary is dropped from the newest-for-SHA fallback too", () => {
-    // The fresh run did not run on this tag: the disclosed fallback must still
-    // apply — and it can only ever name a POST-boundary run.
-    const freshForeign: GhRun = { ...FAILED, databaseId: 5255, headBranch: "main" };
-    const { runner } = makeRunner(() => [freshForeign, SUPERSEDED, OLDER_SUCCESS]);
+  // Codex P2: the boundary is taken over the WHOLE page (any ref), so a
+  // foreign tag's run can also start ABOVE it. Such a run is not this
+  // release's deploy even when it is already complete, so with a boundary the
+  // newest-for-SHA fallback is withheld: the collector waits for the tag's own
+  // post-boundary run.
+  const FOREIGN_ABOVE: GhRun = { ...SUCCESS, databaseId: 5255, headBranch: "v1.2.4" };
+
+  test("a completed run of another ref above the boundary is never selected — the tag's own dispatched run is awaited", () => {
+    const root = makeTempRoot();
+    try {
+      // poll 1: only the foreign tag's completed run is above the boundary
+      // (this release's dispatch has not registered yet); poll 2+: it leads.
+      const { runner, polls, downloads } = makeRunner(
+        (poll) =>
+          poll === 1
+            ? [FOREIGN_ABOVE, SUPERSEDED, OLDER_SUCCESS]
+            : [FRESH, FOREIGN_ABOVE, SUPERSEDED, OLDER_SUCCESS],
+        (_id, destDir) => writeArtifact(destDir),
+      );
+      const clock = fakeClock();
+      const result = collectDeployEvidence(
+        baseOpts({
+          runner,
+          ref: TAG,
+          sinceRun: BOUNDARY,
+          now: clock.now,
+          sleep: clock.sleep,
+          artifactDir: root,
+          env: { ...GH_ENV },
+        }),
+      );
+      expect(result.kind).toBe("success");
+      expect(result.section).toContain(`- Actions run: ${RUN_URL.replace("123456", "5250")}`);
+      expect(result.section).not.toContain("5255");
+      // no disclosed fallback either: a foreign ref above the boundary is not
+      // even a candidate, so there is nothing to disclose
+      expect(result.section).not.toContain("Run identity:");
+      expect(downloads).toEqual([{ runId: 5250, destDir: root }]);
+      // the completed foreign run at poll 1 did NOT conclude the wait
+      expect(polls).toHaveLength(2);
+    } finally {
+      disposeTempRoot(root);
+    }
+  });
+
+  test("only another ref's post-boundary run for the whole window: truthful timeout naming the ref requirement, artifact never read", () => {
+    const { runner, polls, downloads } = makeRunner(() => [
+      FOREIGN_ABOVE,
+      SUPERSEDED,
+      OLDER_SUCCESS,
+    ]);
+    const clock = fakeClock();
     const result = collectDeployEvidence(
-      baseOpts({ runner, ref: TAG, sinceRun: BOUNDARY, env: { ...GH_ENV } }),
+      baseOpts({
+        runner,
+        ref: TAG,
+        sinceRun: BOUNDARY,
+        now: clock.now,
+        sleep: clock.sleep,
+        env: { ...GH_ENV },
+      }),
     );
-    expect(result.kind).toBe("deploy-failed");
-    expect(result.section).toContain(`- Actions run: ${RUN_URL.replace("123456", "5255")}`);
-    expect(result.section).not.toContain("5150");
-    expect(result.section).toContain("Run identity:");
+    expect(result.kind).toBe("no-run");
+    // truthful: runs newer than the boundary exist, but none on this ref —
+    // and the section states exactly that without citing one
+    expect(result.section).toBe(
+      [
+        "### Deploy evidence",
+        `- Status: no new deploy run for commit \`${SHA}\` on ref \`${TAG}\` after the ~2 min bounded wait (no run on that ref newer than the dispatch boundary 5150 appeared — the superseding deploy.yml run was not yet visible; no pre-boundary or foreign-ref run was cited)`,
+      ].join("\n"),
+    );
+    expect(result.section).not.toContain("- Actions run:");
+    expect(downloads).toEqual([]);
+    expect(polls).toHaveLength(4);
+  });
+
+  test("MUTATION/keeping the newest-for-SHA fallback above the boundary: the foreign tag's completed run is published as this release's evidence", async () => {
+    // Real source mutation, run from a temp tree against the same fixture: the
+    // ref requirement above a boundary is what keeps another tag's run out.
+    const src = readFileSync(`${import.meta.dir}/../../scripts/collect-deploy-evidence.ts`, "utf8");
+    const mutated = src.replace("    if (sinceRun !== undefined) return undefined;\n", "");
+    expect(mutated).not.toBe(src);
+    const root = makeTempRoot();
+    try {
+      const file = writeAt(root, "collect-deploy-evidence.mutated-fallback.ts", mutated);
+      // Runtime-selected specifier: a static import cannot reach a file this
+      // test generates, and exercising that loader boundary is the mutation's point.
+      const mutant: { collectDeployEvidence: (opts: CollectOptions) => CollectResult } =
+        await import(file);
+      const { runner, polls, downloads } = makeRunner(
+        () => [FOREIGN_ABOVE, SUPERSEDED, OLDER_SUCCESS],
+        (_id, destDir) => writeArtifact(destDir),
+      );
+      const result = mutant.collectDeployEvidence(
+        baseOpts({ runner, ref: TAG, sinceRun: BOUNDARY, artifactDir: root, env: {} }),
+      );
+      // concludes on the FIRST poll and reads the foreign run's artifact
+      expect(result.kind).toBe("success");
+      expect(result.section).toContain("- Actions run: 5255");
+      expect(result.section).toContain("Run identity:");
+      expect(downloads.map((d) => d.runId)).toEqual([5255]);
+      expect(polls).toHaveLength(1);
+    } finally {
+      disposeTempRoot(root);
+    }
   });
 
   test("only pre-boundary runs for the whole window: truthful boundary timeout, never cited", () => {
@@ -644,12 +737,12 @@ describe("collectDeployEvidence — dispatch boundary (--since-run)", () => {
       }),
     );
     expect(result.kind).toBe("no-run");
-    // truthful: the commit does have runs, but none newer than the boundary —
-    // and the section says exactly that without citing one
+    // truthful: the commit does have runs, but none is this ref's and newer
+    // than the boundary — and the section says exactly that without citing one
     expect(result.section).toBe(
       [
         "### Deploy evidence",
-        `- Status: no new deploy run for commit \`${SHA}\` after the ~2 min bounded wait (no run newer than the dispatch boundary 5150 appeared — the superseding deploy.yml run was not yet visible; no pre-boundary run was cited)`,
+        `- Status: no new deploy run for commit \`${SHA}\` on ref \`${TAG}\` after the ~2 min bounded wait (no run on that ref newer than the dispatch boundary 5150 appeared — the superseding deploy.yml run was not yet visible; no pre-boundary or foreign-ref run was cited)`,
       ].join("\n"),
     );
     expect(result.section).not.toContain("- Actions run:");
