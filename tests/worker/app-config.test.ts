@@ -2162,7 +2162,7 @@ describe("duplication locks", () => {
     expect([...PROVIDER_IDS]).toEqual([...PROVIDER_IDS_BUILTIN]);
     // 19 ids: the 18 built-in omp providers + `ark` (the
     // AL-24-5 entry — the in-image ark-plan base provider's keys ride the
-    // per-App BYOK pool under this id as MSTAR_POOL_ARK_COUNT + `_01.._NN`).
+    // per-App BYOK pool under this id in the credential payload).
     expect(PROVIDER_IDS).toHaveLength(19);
   });
 

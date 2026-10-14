@@ -161,7 +161,7 @@ export type ReviewArtifactDoc = ArtifactDoc & {
    * Version record: the HEAD (primary) selector of the
    * effective chain the review ran with — `chainHeadSelector` (consumer.ts)
    * on the `effectiveModelChain` result (comma-separated, trimmed, empty
-   * segments dropped; single-sourced with `buildRunnerEnv`). Omitted/NULL
+   * segments dropped; single-sourced with `effectiveModelChain`). Omitted/NULL
    * is historical rows (pre-AL-24-5) or direct unit callers only: on the
    * production path `assertAppConfigComplete` fail-closes any App whose
    * chain is missing or parses to zero selectors, so a successful put never

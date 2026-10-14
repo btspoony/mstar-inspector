@@ -123,7 +123,7 @@
  *     referencing the default chain or with no reference row are omitted).
  *   - getAppConfig decrypts for the consumer face: provider id → that
  *     provider's DECRYPTED keys in pool order (created_at, then key_id — the
- *     order the consumer's MSTAR_POOL_*_01.._NN env indexes follow). A
+ *     order the consumer's credential-payload key arrays follow). A
  *     provider holding at least one key ALWAYS has an entry (the fail-closed
  *     read contract the pipeline relies on); an App with no config yields an
  *     EMPTY keys map and a null chain (a chain referring to a provider
@@ -434,9 +434,9 @@ function parseModelIdsJson(raw: string, source: string): string[] {
  */
 export const MAX_PROVIDER_KEY_LENGTH = 4096;
 /**
- * Keys per (App, provider) pool: the pool rides the container exec env as
- * `MSTAR_POOL_<PROVIDER>_COUNT` + `_01.._NN` (one two-digit index per key),
- * so this bound is what keeps the assembled env and the settings list
+ * Keys per (App, provider) pool: the pool rides the runner's stdin credential
+ * payload as one ordered array per provider, so this bound is what keeps the
+ * payload and the settings list
  * bounded. Growth-only: replacing an already-stored key never counts against
  * the cap. Enforced producer-side by the store, which refuses a new slot at
  * the cap with ProviderKeyLimitError and keeps the bound exact under
@@ -455,8 +455,8 @@ const LEGACY_KEY_ID = "";
 const keyIdEncoder = new TextEncoder();
 /**
  * Custom-provider declaration bounds (AL-23-2 verdict): provider id
- * `[a-z0-9][a-z0-9-]{0,63}` (the pool env mapping
- * `MSTAR_POOL_<UPPER_SNAKE>_COUNT` + `_01.._NN` the consumer injects),
+ * `[a-z0-9][a-z0-9-]{0,63}` (the credential-payload pool key the consumer
+ * emits),
  * baseUrl https-only ≤2048, model_ids 1..32 entries × ≤128 characters
  * (AL-23-1).
  * The route answers 400 first; the store re-validates as the backstop for
@@ -827,7 +827,7 @@ export type AppConfig = {
    * provider id → that provider's DECRYPTED keys, in pool order (created_at,
    * then key_id). Only providers holding at least one key appear — the
    * fail-closed read contract the pipeline's assertAppConfigComplete relies
-   * on. The arrays are what the consumer indexes into MSTAR_POOL_*_01.._NN.
+   * on. The arrays ARE the credential payload's per-provider pools, verbatim.
    */
   keys: Record<string, string[]>;
   /** Verbatim stored chain; null = unset (missing/empty = that App's reviews fail closed — AL-24-5). */
@@ -1484,8 +1484,8 @@ export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | un
     /**
      * Decrypt the App's full configuration for the consumer (env assembly):
      * provider id → that provider's plaintext keys in pool order (created_at,
-     * then key_id — the order the consumer's MSTAR_POOL_*_01.._NN env indexes
-     * follow), plus the model chain. A provider holding at least one key ALWAYS
+     * then key_id — the order the credential payload's arrays follow), plus
+     * the model chain. A provider holding at least one key ALWAYS
      * has an entry: that is the fail-closed read contract the pipeline relies
      * on (a chain provider with no entry must be visible as missing). No
      * config → `{ keys: {}, modelChain: null }`. An undecryptable row throws

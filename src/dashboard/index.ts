@@ -2200,7 +2200,7 @@ dashboardApp.post("/apps/:slug/settings", async (c) => {
     // (Workers-AI-shaped URLs) and is substituted into it. The save flow
     // pins the template's api protocol, prefills model_ids from the
     // template's representative models, and stores the key under the
-    // provider's pool env (MSTAR_POOL_<UPPER_SNAKE(id)>_COUNT + `_01.._NN`)
+    // provider's credential-payload pool (under its provider id)
     // via the same upsertCustomProvider path as add-custom-provider
     // (verify-first custom probe — every bound below mirrors the
     // add-custom-provider checks).

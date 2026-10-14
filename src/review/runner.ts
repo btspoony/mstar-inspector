@@ -30,8 +30,8 @@
  *       - `customProviders` — an OPTIONAL array of keyless
  *         declarations `{ provider_id, base_url, api, model_ids }`; merged
  *         INTO the capability-host base of the synthesized models.yml (no
- *         apiKey pin, `auth: oauth`); each provider's key pool rides the exec
- *         env as MSTAR_POOL_<UPPER_SNAKE(id)>_COUNT + _01.._NN and is written
+ *         apiKey pin, `auth: oauth`); each provider's key pool rides the STDIN
+ *         credential payload under its own provider id and is written
  *         into the run's credential store; a
  *         declaration whose id collides with a capability host is skipped
  *         (capability/base wins, AL-23-1) with a structured stderr warn
@@ -47,19 +47,22 @@
  *     no summary-degrade path: any seat/parse/validation failure exits 1 and
  *     the consumer must not post or persist.
  *
- * Container environment (zero secrets in the image — keys arrive only via
- * exec env injection):
+ * Container environment (zero secrets in the image — the process environment
+ * carries NO credential):
  *   - HARNESS_PLUGIN_ROOT=/opt/mstar-harness      (image-preinstalled harness)
  *   - PI_CODING_AGENT_DIR=/opt/omp-agent           (empty agent dir; the models.yml
  *                                                   the session reads is the synthesized
  *                                                   per-review file under `agentDir`)
  *   - OMP_REVIEW_MODEL                             (comma-separated selector chain)
- *   - MSTAR_POOL_<UPPER_SNAKE(provider)>_COUNT + _01.._NN
- *                                                 (per-provider credential pool;
- *                                                  the runner writes these into
- *                                                  <agentDir>/agent.db as stored
- *                                                  `login` api_key rows before the
- *                                                  session starts — never logged)
+ *
+ * Credential transport: the consumer streams a versioned JSON payload
+ * (`{"version":1,"pools":{"<providerId>":["k1",…]}}` — ./credential-payload.ts)
+ * into this process's STDIN and closes the stream. The runner validates it
+ * BEFORE any credential is written, resolves each pool key to the models.yml
+ * provider id it serves, and writes those keys into <agentDir>/agent.db as
+ * stored `login` api_key rows before the session starts. Diagnostics carry the
+ * provider id and the pool size only — never a key value, never the payload.
+ * An absent payload (empty stdin) is the keyless run shape.
  */
 import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -75,6 +78,7 @@ import {
 import { anchorRecheckDeadline } from "./recheck";
 import { ompAgentRuntime, parseModelSelectors } from "./runtime-omp";
 import { writePerReviewModelsYaml } from "./models-synthesis";
+import { decodeCredentialPayload } from "./credential-payload";
 import type { RecheckInput } from "../contracts/recheck";
 
 const USAGE =
@@ -234,14 +238,14 @@ function parseRunnerInput(parsed: unknown): RunnerInputJson {
     // (AL-23-1): shape validation ONLY here — the id
     // pattern/baseUrl/api-enum/model bounds live dashboard-side
     // (assertCustomProvider). The declarations carry NO keys: each key rides
-    // the container exec env as MSTAR_POOL_<UPPER_SNAKE(id)>_COUNT + _01.._NN
+    // the STDIN credential payload under its provider id (./credential-payload)
     // and the runner loads it into the run's credential store (zero key
     // literals in any file).
     const list = record.customProviders;
     if (!Array.isArray(list)) {
       throw new Error(
         "input JSON field `customProviders` must be an array of declarations when present " +
-          "(keys ride the exec env under MSTAR_POOL_<UPPER_SNAKE(id)>_*, never the input)",
+          "(keys ride the stdin credential payload, never the input)",
       );
     }
     input.customProviders = list.map((entry, index) => {
@@ -300,133 +304,75 @@ function parseRunnerInput(parsed: unknown): RunnerInputJson {
 
 /**
  * The provider pools one run must load, keyed by the models.yml provider id
- * the session will resolve credentials under. Two identity sources, in order:
+ * the session resolves credentials under. Two identity sources, in order:
  *
  *   1. DECLARED identity (what the synthesis itself puts in models.yml) —
  *      capability-host blocks pool under their catalog provider id (omp's
- *      `ark-plan` ↔ `MSTAR_POOL_ARK_*`), custom declarations under their own
- *      id. A custom id colliding with a capability host is skipped here too
+ *      `ark-plan` ↔ the payload's `ark` entry: the consumer's key space is the
+ *      App-config provider id), custom declarations under their own id. A
+ *      custom id colliding with a capability host is skipped here too
  *      (capability/base wins, same rule as the synthesis).
- *   2. THE EXEC ENV ITSELF — a BUILT-IN catalog provider (`openai`,
+ *   2. THE PAYLOAD'S OWN ENTRIES — a BUILT-IN catalog provider (`openai`,
  *      `azure-openai`, …) is neither a capability host nor a custom
- *      declaration, so its transported pool arrives with no declared
- *      identity and is discovered from the `_COUNT` names present. The
- *      consumer's prefix rule inverts exactly (upper-snake → lower, `_` → `-`):
- *      every provider id the allowlist or the store admits is `[a-z0-9-]`
- *      with no underscore, so an underscore in a prefix can only come from a
- *      hyphen. A prefix or provider id already claimed above is never loaded
- *      twice.
+ *      declaration, so its transported pool carries no declared identity and
+ *      resolves under its own provider id. A pool key or provider id already
+ *      claimed above is never loaded twice.
  *
- * The enumerated set therefore covers EXACTLY the names the consumer's
- * `buildRunnerEnv` emitted, which is also what the fail-closed validation
- * below ranges over.
+ * The enumerated set therefore covers EXACTLY the payload the consumer built. A
+ * declared provider with no payload entry simply has no transported credentials
+ * and is skipped by the caller, so a keyless chain still runs.
  */
 function poolProviders(
   json: RunnerInputJson,
-  env: Record<string, string | undefined>,
-): Array<{ providerId: string; prefix: string }> {
+  poolKeys: readonly string[],
+): Array<{ providerId: string; poolKey: string }> {
   const baseIds = new Set(json.capabilityHosts.map((host) => host.id));
-  const byPrefix = new Map<string, string>();
-  const byProviderId = new Set<string>();
-  const add = (rawPrefix: string, providerId: string): void => {
-    const prefix = poolPrefix(rawPrefix);
-    if (byPrefix.has(prefix) || byProviderId.has(providerId)) return;
-    byPrefix.set(prefix, providerId);
-    byProviderId.add(providerId);
+  const claimedKeys = new Set<string>();
+  const claimedProviderIds = new Set<string>();
+  const providers: Array<{ providerId: string; poolKey: string }> = [];
+  const add = (poolKey: string, providerId: string): void => {
+    if (claimedKeys.has(poolKey) || claimedProviderIds.has(providerId)) return;
+    claimedKeys.add(poolKey);
+    claimedProviderIds.add(providerId);
+    providers.push({ providerId, poolKey });
   };
   for (const host of json.capabilityHosts) add(host.catalogProviderId, host.id);
   for (const decl of json.customProviders ?? []) {
     if (baseIds.has(decl.provider_id)) continue;
     add(decl.provider_id, decl.provider_id);
   }
-  for (const name of Object.keys(env)) {
-    const prefix = /^MSTAR_POOL_(.+)_COUNT$/.exec(name)?.[1];
-    if (prefix !== undefined) add(prefix, prefix.toLowerCase().replace(/_/g, "-"));
-  }
-  return [...byPrefix].map(([prefix, providerId]) => ({ providerId, prefix }));
-}
-
-/** Upper-snake pool env fragment for a provider id (the consumer's own rule). */
-function poolPrefix(providerId: string): string {
-  return providerId.toUpperCase().replace(/-/g, "_");
-}
-
-/** A pool prefix as a literal inside a RegExp (env-derived fragments). */
-function escapeRegExp(literal: string): string {
-  return literal.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  for (const poolKey of poolKeys) add(poolKey, poolKey);
+  return providers;
 }
 
 /**
  * Load the transported credential pool into the run's credential store:
  * `<agentDir>/agent.db` gains one `{type:"api_key", source:"login"}` row per
- * transported key, in env order. `source: "login"` ranks ABOVE the provider
- * env var in the SDK's credential cascade, which is what lets the runtime
- * rotate across the pool — the synthesized models.yml deliberately pins no
- * `apiKey` (a tier-2 config override would suppress this pool entirely).
+ * transported key, in payload order. `source: "login"` ranks ABOVE the
+ * provider env var in the SDK's credential cascade, which is what lets the
+ * runtime rotate across the pool — the synthesized models.yml deliberately pins
+ * no `apiKey` (a tier-2 config override would suppress this pool entirely).
  *
- * Fail-closed: a `_COUNT` that disagrees with the `_01.._NN` values actually
- * present, a listed value that is empty, or a populated `_NN` prefix with no
- * `_COUNT` at all (a stray slot would otherwise be silently dropped) aborts
- * the run before any session exists — never a partial pool. Diagnostics carry
- * provider id + counts only; key VALUES are never logged or thrown.
+ * Fail-closed, and BEFORE anything is written: the stdin payload is validated
+ * (./credential-payload) as the first statement, so an unreadable payload, a
+ * missing/empty pool array or a non-string/empty entry aborts the run before
+ * any credential exists and before the runtime starts — never a partial pool.
+ * Diagnostics carry provider id + pool size only; key VALUES are never logged
+ * or thrown.
  */
-async function loadCredentialPool(
-  agentDir: string,
-  json: RunnerInputJson,
-  env: Record<string, string | undefined>,
-): Promise<void> {
-  // Fail-closed boundary on the prefix itself: a POPULATED pool prefix with no
-  // `_COUNT` name would silently drop its keys from the session. The consumer
-  // always emits the pair, so this is a malformed transport — abort before any
-  // credential is written or the runtime starts. The scan is the exec env's own
-  // `_NN` names; `poolProviders` below covers the declared identities.
-  // (`\d{2,}` mirrors the consumer's `padStart(2, "0")` slot format.)
-  for (const name of Object.keys(env)) {
-    const prefix = /^MSTAR_POOL_(.+)_\d{2,}$/.exec(name)?.[1];
-    if (prefix === undefined || env[name] === undefined) continue;
-    if (env[`MSTAR_POOL_${prefix}_COUNT`] === undefined) {
-      throw new Error(
-        `credential pool: ${name} is set but MSTAR_POOL_${prefix}_COUNT is missing (a transported pool must carry its COUNT)`,
-      );
-    }
+async function loadCredentialPool(agentDir: string, json: RunnerInputJson, payload: string): Promise<void> {
+  const pools = decodeCredentialPayload(payload);
+  const loaded: Array<{ providerId: string; keys: string[] }> = [];
+  for (const { providerId, poolKey } of poolProviders(json, Object.keys(pools))) {
+    const keys = pools[poolKey];
+    if (keys === undefined) continue; // no pool transported for this provider
+    loaded.push({ providerId, keys });
   }
-  const pools: Array<{ providerId: string; keys: string[] }> = [];
-  for (const { providerId, prefix } of poolProviders(json, env)) {
-    const countRaw = env[`MSTAR_POOL_${prefix}_COUNT`];
-    if (countRaw === undefined) continue; // no pool transported for this provider
-    const count = Number(countRaw);
-    if (!Number.isInteger(count) || count < 1) {
-      throw new Error(
-        `credential pool for provider ${providerId}: MSTAR_POOL_${prefix}_COUNT must be a positive integer, got ${JSON.stringify(countRaw)}`,
-      );
-    }
-    const keys: string[] = [];
-    for (let index = 1; index <= count; index++) {
-      const slot = `MSTAR_POOL_${prefix}_${String(index).padStart(2, "0")}`;
-      const value = env[slot];
-      if (value === undefined || value === "") {
-        throw new Error(
-          `credential pool for provider ${providerId}: MSTAR_POOL_${prefix}_COUNT=${count} but ${slot} is ${value === undefined ? "missing" : "empty"}`,
-        );
-      }
-      keys.push(value);
-    }
-    // COUNT must equal the number of value slots actually present: an extra
-    // slot beyond COUNT (a stray key the pool would silently drop) fails here.
-    const slotRe = new RegExp(`^MSTAR_POOL_${escapeRegExp(prefix)}_\\d{2,}$`);
-    const present = Object.keys(env).filter((name) => slotRe.test(name) && env[name] !== undefined);
-    if (present.length !== count) {
-      throw new Error(
-        `credential pool for provider ${providerId}: MSTAR_POOL_${prefix}_COUNT=${count} but ${present.length} value slot(s) present`,
-      );
-    }
-    pools.push({ providerId, keys });
-  }
-  if (pools.length === 0) return; // no credentials transported (keyless run shape)
+  if (loaded.length === 0) return; // no credentials transported (keyless run shape)
 
   const storage = await AuthStorage.create(join(agentDir, "agent.db"));
   try {
-    for (const { providerId, keys } of pools) {
+    for (const { providerId, keys } of loaded) {
       await storage.set(
         providerId,
         keys.map((key) => ({ type: "api_key" as const, key, source: "login" as const })),
@@ -440,12 +386,25 @@ async function loadCredentialPool(
 }
 
 /**
+ * The credential payload source: this process's STDIN — the exec pipe the
+ * consumer writes the payload into and then closes (that close is the EOF this
+ * read waits for). `Bun.stdin.text()` reads to EOF; an empty result is the
+ * keyless run shape.
+ */
+const readCredentialStdin = (): Promise<string> => Bun.stdin.text();
+
+/**
  * Run the CLI. Returns the process exit code; prints the mstar.review/v1
  * envelope JSON to stdout and diagnostics to stderr. Exported for
- * deterministic tests, which inject a fake `runtime` (mock.module on this
- * shared specifier is process-global and leaks across bun test files).
+ * deterministic tests, which inject a fake `runtime` AND a fake credential
+ * source (mock.module on this shared specifier is process-global and leaks
+ * across bun test files).
  */
-export async function main(argv: string[], runtime: AgentRuntime = ompAgentRuntime): Promise<number> {
+export async function main(
+  argv: string[],
+  runtime: AgentRuntime = ompAgentRuntime,
+  readStdin: () => Promise<string> = readCredentialStdin,
+): Promise<number> {
   let level: string;
   let inputPath: string;
   let recheckOutPath: string | undefined;
@@ -492,13 +451,14 @@ export async function main(argv: string[], runtime: AgentRuntime = ompAgentRunti
         }),
       );
     }
-    // The transported credential pool lands in THIS run's credential store
-    // (agent.db) before any session exists: the synthesized models.yml pins no
-    // apiKey, so the stored `login` rows are what the runtime rotates across.
-    // Fail-closed — a COUNT/slot disagreement aborts the run here (exit 1),
-    // with its own diagnostic (not the input-read label).
+    // The transported credential pool arrives on STDIN and lands in THIS run's
+    // credential store (agent.db) before any session exists: the synthesized
+    // models.yml pins no apiKey, so the stored `login` rows are what the
+    // runtime rotates across. Fail-closed — a payload that does not decode
+    // aborts the run here (exit 1), with its own diagnostic (not the
+    // input-read label).
     try {
-      await loadCredentialPool(agentDir, json, Bun.env);
+      await loadCredentialPool(agentDir, json, await readStdin());
     } catch (error) {
       console.error(`review: credential pool rejected: ${(error as Error).message}`);
       return 1;

@@ -314,11 +314,11 @@ async function main(): Promise<void> {
  * save flow substitutes.
  *
  * Credential transport: an \`envName\` is RETAINED mapping metadata, never the
- * variable the key rides. A configured pool reaches the review container as
- * \`MSTAR_POOL_<UPPER_SNAKE(provider id)>_COUNT\` + \`_01.._NN\` (consumer.ts
- * buildRunnerEnv), and the in-image runner writes those slots into the run's
- * \`agent.db\` as \`source:"login"\` api_key rows. \`envName\` only marks allowlist
- * membership (providerEnvName).
+ * variable the key rides. A configured pool reaches the review container as the
+ * runner's STDIN credential payload (consumer.ts buildRunnerCredentials,
+ * src/review/credential-payload.ts), and the in-image runner writes it into the
+ * run's \`agent.db\` as \`source:"login"\` api_key rows. \`envName\` only marks
+ * allowlist membership (providerEnvName).
  *
  * Display grouping (AD-547): \`PROVIDER_IDS_COMMON\` is a
  * DISPLAY-ONLY regroup of the settings picker (常用 providers first, the
@@ -337,7 +337,7 @@ export type ProviderCatalogEntry = {
   /** builtin = allowlisted BYOK provider (pool-transported); template = metadata + prefill only. */
   tier: ProviderTier;
   /** RETAINED mapping metadata — NOT the container injection variable. The key
-   *  rides the pool transport (\`MSTAR_POOL_<UPPER_SNAKE(id)>_COUNT\` + \`_01.._NN\`);
+   *  rides the stdin credential payload under the provider id;
    *  this scalar only marks builtin allowlist membership (providerEnvName).
    *  Null for template — materialized as a custom-provider declaration. */
   envName: string | null;
@@ -355,7 +355,7 @@ export type ProviderCatalogEntry = {
 
 export type ProviderInfo = {
   /** RETAINED mapping metadata — the legacy scalar name of a provider that is
-   *  on the BYOK allowlist; the key itself rides the \`MSTAR_POOL_*\` transport. */
+   *  on the BYOK allowlist; the key itself rides the credential payload. */
   envName: string;
   /** Human-readable provider label for the picker/table. */
   label: string;

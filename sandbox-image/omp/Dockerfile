@@ -5,11 +5,11 @@
 # pinned to exact versions.
 #
 # NO SECRETS (HARD): this image is built with no build args, no env values, no
-# credentials. Tokens/keys enter only via ReviewSandbox.exec env injection at
-# runtime (compass contracts D). The runner turns the transported
-# MSTAR_POOL_<PROVIDER>_COUNT + _01.._NN pool env into stored credential rows
-# under the per-review agent dir — no key value is ever in the image or its
-# build context.
+# credentials. Tokens/keys enter only at runtime — the sandbox-read token via
+# exec env, the provider keys as the runner's STDIN credential payload (compass
+# contracts D). The runner turns that payload into stored credential rows under
+# the per-review agent dir — no key value is ever in the image, its build
+# context, or any exec process environment.
 #
 # Outbound egress (architect verdict AL-4 — DOCUMENTED, NOT
 # enforced): the Sandbox SDK 1.0 container takes its egress posture from
@@ -121,7 +121,7 @@ ENV PATH="/root/.bun/bin:${PATH}"
 # /tmp/omp-agent-<uuid>/ (capability hosts from the App's selected registry
 # entry, src/contracts/sandbox-images.ts, + App custom providers), rides that
 # directory as the session agentDir, and writes the transported credential
-# pool (MSTAR_POOL_<PROVIDER>_COUNT + _01.._NN exec env) into that same
+# payload (the runner's STDIN, src/review/credential-payload.ts) into that same
 # directory's agent.db as stored `login` api_key rows before the session
 # starts. The synthesized provider blocks pin NO apiKey (a tier-2 config
 # override would suppress that pool) and authenticate via `auth: oauth`.
@@ -150,8 +150,8 @@ COPY src/review /opt/runner/src/review
 # COPY lines and re-asserts dependency freedom per admitted file).
 COPY src/contracts/recheck.ts /opt/runner/src/contracts/recheck.ts
 
-# The runner resolves the harness root from this env (plan Clarify #5). The
-# provider keys (MSTAR_POOL_*) are injected per exec — never baked in.
+# The runner resolves the harness root from this env (plan Clarify #5). Provider
+# keys arrive as the runner's STDIN payload — never baked in, never in the env.
 ENV HARNESS_PLUGIN_ROOT=/opt/mstar-harness
 # U-001 in-image models.yml synthesis verification (AL-25-3):
 # the script ships inside the image so the evidence replays on the exact

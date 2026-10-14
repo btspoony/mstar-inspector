@@ -29,12 +29,15 @@
  *     override that would suppress the stored pool) and authenticate via
  *     `auth: oauth`; absent or empty = the capability base alone
  *     (byte-identical zero-custom path).
- * - the credential pool: the runner writes the `MSTAR_POOL_*` env keys into
+ * - the credential payload (the ONLY credential channel): the runner reads a
+ *     versioned JSON payload from STDIN and writes its pools into
  *     `<agentDir>/agent.db` as `{type:"api_key", source:"login"}` rows before
- *     the runtime starts, under the MODELS.YML provider id (capability host id
- *     — resolved through its catalogProviderId — or the custom provider id),
- *     and fails the run closed when `_COUNT` disagrees with the `_01.._NN`
- *     values actually present, or when a populated prefix carries no `_COUNT`.
+ *     the runtime starts, under the MODELS.YML provider id (a capability host
+ *     id — resolved through its catalogProviderId — or the provider id itself),
+ *     and fails the run closed (exit 1, no session, nothing written) when the
+ *     payload does not decode, carries an empty pool array, or carries a
+ *     non-string/empty entry. A `MSTAR_POOL_*` name in the process environment
+ *     is INERT — never a credential source.
  * - the optional recheck channel (spec review-lifecycle
  *     §7.8): the input's `recheck` document is shape-guarded and forwarded
  *     verbatim; the optional `--recheck-out <path>` flag writes the runtime's
@@ -44,7 +47,7 @@
  */
 
 import { afterEach, describe, expect, mock, test } from "bun:test";
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -53,6 +56,7 @@ import type { MstarReviewV1 } from "@mstar-harness/engine";
 import type { AgentRuntime, AgentRuntimeRunInput, CustomProviderDeclaration, ReviewRunResult } from "../../src/review/runtime";
 import { getSandboxImage } from "../../src/contracts/sandbox-images";
 import { capabilityHostsYaml } from "../../src/review/models-synthesis";
+import { encodeCredentialPayload } from "../../src/review/credential-payload";
 import { main } from "../../src/review/runner";
 import { sk } from "../helpers/fake-secrets";
 
@@ -95,7 +99,10 @@ function writeInput(json: unknown): string {
 }
 
 /** Capture console.log / console.error while a runner main() call runs. */
-async function runCli(argv: string[]): Promise<{ code: number; stdout: string; stderr: string }> {
+async function runCli(
+  argv: string[],
+  payload = encodeCredentialPayload({}),
+): Promise<{ code: number; stdout: string; stderr: string }> {
   const logs: string[] = [];
   const errors: string[] = [];
   const originalLog = console.log;
@@ -103,12 +110,37 @@ async function runCli(argv: string[]): Promise<{ code: number; stdout: string; s
   console.log = (...args: unknown[]) => logs.push(args.join(" "));
   console.error = (...args: unknown[]) => errors.push(args.join(" "));
   try {
-    const code = await main(argv, fakeRuntime);
+    // The credential payload rides STDIN in production; the injected reader is
+    // the same seam the runtime double uses.
+    const code = await main(argv, fakeRuntime, async () => payload);
     return { code, stdout: logs.join("\n"), stderr: errors.join("\n") };
   } finally {
     console.log = originalLog;
     console.error = originalError;
   }
+}
+
+/** Every synthesized per-review agent dir under the OS temp dir. */
+function agentDirs(): string[] {
+  return readdirSync(tmpdir())
+    .filter((name) => name.startsWith("omp-agent-"))
+    .map((name) => join(tmpdir(), name));
+}
+
+/**
+ * Run one CLI call that must fail closed, asserting it wrote NO credential
+ * store: the agent dirs are snapshotted first, and no dir this call created may
+ * carry an `agent.db` (the store a credential write would produce).
+ */
+async function runCliWithoutStore(
+  argv: string[],
+  payload: string,
+): Promise<{ code: number; stdout: string; stderr: string }> {
+  const before = new Set(agentDirs());
+  const result = await runCli(argv, payload);
+  const created = agentDirs().filter((dir) => !before.has(dir));
+  expect(created.filter((dir) => existsSync(join(dir, "agent.db")))).toEqual([]);
+  return result;
 }
 
 /** Clean up the synthesized /tmp/omp-agent-<uuid> dir a run produced. */
@@ -542,15 +574,15 @@ describe("runner entry — transported credential pool", () => {
     }
   }
 
-  test("MSTAR_POOL_<CATALOG_ID> keys land as login api_key rows under the capability host id", async () => {
-    // The consumer pools a capability host under its catalogProviderId
-    // (`ark-plan` ↔ `ark`); the session resolves credentials under the
-    // models.yml provider id (`ark-plan`).
-    process.env.MSTAR_POOL_ARK_COUNT = "2";
-    process.env.MSTAR_POOL_ARK_01 = sk("pool-one");
-    process.env.MSTAR_POOL_ARK_02 = sk("pool-two");
+  test("the payload's app-provider pool lands as login api_key rows under the capability host id", async () => {
+    // The consumer keys the payload by the App's provider id (`ark`); the
+    // capability host serving it is `ark-plan`, which is the models.yml
+    // provider id the session resolves credentials under.
     const inputPath = writeInput({ capabilityHosts: OMP_HOSTS, worktreePath: "/workspace/clone" });
-    const { code, stdout, stderr } = await runCli(["--level", "quick", "--input", inputPath]);
+    const { code, stdout, stderr } = await runCli(
+      ["--level", "quick", "--input", inputPath],
+      encodeCredentialPayload({ ark: [sk("pool-one"), sk("pool-two")] }),
+    );
 
     expect(code).toBe(0);
     expect(JSON.parse(stdout)).toEqual(ENVELOPE);
@@ -576,10 +608,7 @@ describe("runner entry — transported credential pool", () => {
     }
   });
 
-  test("custom providers pool under their own id, in env order", async () => {
-    process.env.MSTAR_POOL_MY_PROVIDER_COUNT = "2";
-    process.env.MSTAR_POOL_MY_PROVIDER_01 = sk("custom-one");
-    process.env.MSTAR_POOL_MY_PROVIDER_02 = sk("custom-two");
+  test("custom providers pool under their own id, in payload order", async () => {
     const inputPath = writeInput({
       capabilityHosts: OMP_HOSTS,
       worktreePath: "/workspace/clone",
@@ -592,7 +621,10 @@ describe("runner entry — transported credential pool", () => {
         },
       ],
     });
-    const { code } = await runCli(["--level", "quick", "--input", inputPath]);
+    const { code } = await runCli(
+      ["--level", "quick", "--input", inputPath],
+      encodeCredentialPayload({ "my-provider": [sk("custom-one"), sk("custom-two")] }),
+    );
 
     expect(code).toBe(0);
     const input = runInputs[0] as Record<string, unknown>;
@@ -602,59 +634,75 @@ describe("runner entry — transported credential pool", () => {
     ]);
   });
 
-  test("COUNT greater than the values present → fail closed (exit 1, no run, named counts)", async () => {
-    process.env.MSTAR_POOL_ARK_COUNT = "2";
-    process.env.MSTAR_POOL_ARK_01 = sk("only-one");
+  test("an unparseable payload → fail closed (exit 1, no run, nothing written)", async () => {
     const inputPath = writeInput({ capabilityHosts: OMP_HOSTS, worktreePath: "/workspace/clone" });
-    const { code, stdout, stderr } = await runCli(["--level", "quick", "--input", inputPath]);
+    const { code, stdout, stderr } = await runCliWithoutStore(
+      ["--level", "quick", "--input", inputPath],
+      '{"version":1,"pools":{"ark":',
+    );
+
+    expect(code).toBe(1);
+    expect(stdout).toBe("");
+    expect(runInputs).toHaveLength(0); // the runtime never started
+    expect(stderr).toContain("credential pool rejected: the credential payload is not valid JSON");
+  });
+
+  test("an unsupported payload version → fail closed before anything is written", async () => {
+    const inputPath = writeInput({ capabilityHosts: OMP_HOSTS, worktreePath: "/workspace/clone" });
+    const { code, stdout, stderr } = await runCliWithoutStore(
+      ["--level", "quick", "--input", inputPath],
+      '{"version":2,"pools":{"ark":["k"]}}',
+    );
 
     expect(code).toBe(1);
     expect(stdout).toBe("");
     expect(runInputs).toHaveLength(0);
-    expect(stderr).toContain("ark-plan");
-    expect(stderr).toContain("MSTAR_POOL_ARK_02");
-    expect(stderr).not.toContain(sk("only-one"));
+    expect(stderr).toContain("the credential payload version must be 1");
   });
 
-  test("COUNT less than the values present → fail closed (never a partial pool)", async () => {
-    process.env.MSTAR_POOL_ARK_COUNT = "1";
-    process.env.MSTAR_POOL_ARK_01 = sk("pool-one");
-    process.env.MSTAR_POOL_ARK_02 = sk("pool-two");
+  test("a payload with no pools object → fail closed", async () => {
     const inputPath = writeInput({ capabilityHosts: OMP_HOSTS, worktreePath: "/workspace/clone" });
-    const { code, stdout, stderr } = await runCli(["--level", "quick", "--input", inputPath]);
+    const { code, stdout, stderr } = await runCliWithoutStore(
+      ["--level", "quick", "--input", inputPath],
+      '{"version":1}',
+    );
 
     expect(code).toBe(1);
     expect(stdout).toBe("");
     expect(runInputs).toHaveLength(0);
-    expect(stderr).toContain("MSTAR_POOL_ARK_COUNT=1");
+    expect(stderr).toContain('must carry a "pools" object');
   });
 
-  test("an empty pooled value → fail closed (exit 1, no run)", async () => {
-    process.env.MSTAR_POOL_ARK_COUNT = "2";
-    process.env.MSTAR_POOL_ARK_01 = sk("pool-one");
-    process.env.MSTAR_POOL_ARK_02 = "";
+  test("an empty pool array → fail closed (never a partial pool)", async () => {
     const inputPath = writeInput({ capabilityHosts: OMP_HOSTS, worktreePath: "/workspace/clone" });
-    const { code, stdout, stderr } = await runCli(["--level", "quick", "--input", inputPath]);
+    const { code, stdout, stderr } = await runCliWithoutStore(
+      ["--level", "quick", "--input", inputPath],
+      '{"version":1,"pools":{"ark":[]}}',
+    );
 
     expect(code).toBe(1);
     expect(stdout).toBe("");
     expect(runInputs).toHaveLength(0);
-    expect(stderr).toContain("MSTAR_POOL_ARK_02 is empty");
+    expect(stderr).toContain("credential pool ark is empty");
   });
 
-  test("a non-positive COUNT → fail closed (exit 1, no run)", async () => {
-    process.env.MSTAR_POOL_ARK_COUNT = "0";
+  test("a non-string entry → fail closed, never echoing the entry", async () => {
     const inputPath = writeInput({ capabilityHosts: OMP_HOSTS, worktreePath: "/workspace/clone" });
-    const { code, stdout } = await runCli(["--level", "quick", "--input", inputPath]);
+    const { code, stdout, stderr } = await runCliWithoutStore(
+      ["--level", "quick", "--input", inputPath],
+      `{"version":1,"pools":{"ark":["${sk("leaky")}",7]}}`,
+    );
 
     expect(code).toBe(1);
     expect(stdout).toBe("");
     expect(runInputs).toHaveLength(0);
+    expect(stderr).toContain("credential pool ark entry 1 must be a non-empty string");
+    expect(stderr).not.toContain(sk("leaky"));
   });
 
-  test("no pool env → no credential rows written (keyless run shape)", async () => {
+  test("an absent payload (empty stdin) → no credential rows written (keyless run shape)", async () => {
     const inputPath = writeInput({ capabilityHosts: OMP_HOSTS, worktreePath: "/workspace/clone" });
-    const { code, stderr } = await runCli(["--level", "quick", "--input", inputPath]);
+    const { code, stderr } = await runCli(["--level", "quick", "--input", inputPath], "");
 
     expect(code).toBe(0);
     expect(stderr).toBe("");
@@ -662,15 +710,15 @@ describe("runner entry — transported credential pool", () => {
     expect(existsSync(join(input.agentDir as string, "agent.db"))).toBe(false);
   });
 
-  test("a built-in catalog provider pool lands under its own provider id — no capability/custom identity needed", async () => {
-    // `openai` is an allowlisted built-in: the consumer pools its App key as
-    // MSTAR_POOL_OPENAI_* and the session resolves it under the `openai`
-    // provider id. Neither a capability host nor a custom declaration covers
-    // that prefix, so the pool is discovered from the exec env itself.
-    process.env.MSTAR_POOL_OPENAI_COUNT = "1";
-    process.env.MSTAR_POOL_OPENAI_01 = sk("builtin-one");
+  test("a built-in catalog provider pool resolves under its own provider id — no declared identity needed", async () => {
+    // `openai` is an allowlisted built-in: neither a capability host nor a
+    // custom declaration covers it, so the payload key IS the models.yml
+    // provider id the session resolves credentials under.
     const inputPath = writeInput({ capabilityHosts: OMP_HOSTS, worktreePath: "/workspace/clone" });
-    const { code, stdout, stderr } = await runCli(["--level", "quick", "--input", inputPath]);
+    const { code, stdout, stderr } = await runCli(
+      ["--level", "quick", "--input", inputPath],
+      encodeCredentialPayload({ openai: [sk("builtin-one")] }),
+    );
 
     expect(code).toBe(0);
     expect(JSON.parse(stdout)).toEqual(ENVELOPE);
@@ -690,17 +738,15 @@ describe("runner entry — transported credential pool", () => {
     }
   });
 
-  test("a hyphenated built-in provider pools several keys in env order alongside a capability host pool", async () => {
-    // `azure-openai` → MSTAR_POOL_AZURE_OPENAI_*: the prefix inverts to the
-    // catalog provider id (the only underscore source is a hyphen). The
-    // capability host pool keeps its own catalog→host identity in the same run.
-    process.env.MSTAR_POOL_ARK_COUNT = "1";
-    process.env.MSTAR_POOL_ARK_01 = sk("ark-one");
-    process.env.MSTAR_POOL_AZURE_OPENAI_COUNT = "2";
-    process.env.MSTAR_POOL_AZURE_OPENAI_01 = sk("builtin-one");
-    process.env.MSTAR_POOL_AZURE_OPENAI_02 = sk("builtin-two");
+  test("a hyphenated built-in provider keeps its id verbatim (no prefix inversion) beside a capability host pool", async () => {
     const inputPath = writeInput({ capabilityHosts: OMP_HOSTS, worktreePath: "/workspace/clone" });
-    const { code } = await runCli(["--level", "quick", "--input", inputPath]);
+    const { code } = await runCli(
+      ["--level", "quick", "--input", inputPath],
+      encodeCredentialPayload({
+        ark: [sk("ark-one")],
+        "azure-openai": [sk("builtin-one"), sk("builtin-two")],
+      }),
+    );
 
     expect(code).toBe(0);
     const input = runInputs[0] as Record<string, unknown>;
@@ -713,60 +759,52 @@ describe("runner entry — transported credential pool", () => {
     ]);
   });
 
-  test("a malformed built-in pool → fail closed before the runtime runs (exit 1, no run)", async () => {
+  test("MSTAR_POOL_* env names are INERT — the retired channel is never a credential source", async () => {
+    // The retired transport: a pool that still arrives as `MSTAR_POOL_*` env
+    // names (with or without a COUNT, declared identity or not) must produce
+    // ZERO stored credentials and must not fail the run. The payload is the
+    // only credential channel, so this run is simply keyless.
     process.env.MSTAR_POOL_OPENAI_COUNT = "2";
-    process.env.MSTAR_POOL_OPENAI_01 = sk("only-one");
+    process.env.MSTAR_POOL_OPENAI_01 = sk("retired-env-key");
+    process.env.MSTAR_POOL_ARK_01 = sk("retired-env-key");
     const inputPath = writeInput({ capabilityHosts: OMP_HOSTS, worktreePath: "/workspace/clone" });
     const { code, stdout, stderr } = await runCli(["--level", "quick", "--input", inputPath]);
 
-    expect(code).toBe(1);
-    expect(stdout).toBe("");
-    expect(runInputs).toHaveLength(0);
-    expect(stderr).toContain("openai");
-    expect(stderr).toContain("MSTAR_POOL_OPENAI_02");
-    expect(stderr).not.toContain(sk("only-one"));
+    expect(code).toBe(0);
+    expect(JSON.parse(stdout)).toEqual(ENVELOPE);
+    const input = runInputs[0] as Record<string, unknown>;
+    // Assert the store's absence BEFORE opening it (the factory would create it).
+    expect(existsSync(join(input.agentDir as string, "agent.db"))).toBe(false);
+    expect(stderr).not.toContain(sk("retired-env-key"));
   });
 
-  test("a populated pool prefix with no COUNT → fail closed (exit 1, no run)", async () => {
-    // The consumer's buildRunnerEnv always emits COUNT with the slots, so a
-    // stray slot is not a shape it produces — but if one arrives, the session
-    // would silently drop that key. Discovered from the env itself: no
-    // capability host or custom declaration covers the `openai` prefix.
-    process.env.MSTAR_POOL_OPENAI_01 = sk("orphan-one");
+  test("over a REAL stdin pipe: the payload is read, and an unparseable one fails closed", () => {
+    // The cases above inject the reader; this one runs the ACTUAL CLI with the
+    // payload on a real pipe, so `Bun.stdin` — the production read — is
+    // exercised end to end. The payload fails closed BEFORE the runtime, so
+    // there is no session and no network.
     const inputPath = writeInput({ capabilityHosts: OMP_HOSTS, worktreePath: "/workspace/clone" });
-    const { code, stdout, stderr } = await runCli(["--level", "quick", "--input", inputPath]);
+    const proc = Bun.spawnSync(["bun", "run", "src/review/runner.ts", "--level", "quick", "--input", inputPath], {
+      stdin: new Blob([`{"version":1,"pools":{"ark":["${sk("leaky")}"}`]),
+      stdout: "pipe",
+      stderr: "pipe",
+      cwd: join(import.meta.dir, "..", ".."),
+    });
+    const stderr = proc.stderr.toString();
 
-    expect(code).toBe(1);
-    expect(stdout).toBe("");
-    expect(runInputs).toHaveLength(0);
-    expect(stderr).toContain("MSTAR_POOL_OPENAI_COUNT");
-    expect(stderr).not.toContain(sk("orphan-one"));
-  });
-
-  test("a stray slot under a DECLARED capability pool with no COUNT → fail closed", async () => {
-    // The same boundary on the declared-identity path: `ark` is a capability
-    // host's catalog provider id, so its prefix is enumerated even without a
-    // COUNT name — the missing COUNT must still be rejected, never skipped.
-    process.env.MSTAR_POOL_ARK_01 = sk("declared-orphan");
-    const inputPath = writeInput({ capabilityHosts: OMP_HOSTS, worktreePath: "/workspace/clone" });
-    const { code, stdout, stderr } = await runCli(["--level", "quick", "--input", inputPath]);
-
-    expect(code).toBe(1);
-    expect(stdout).toBe("");
-    expect(runInputs).toHaveLength(0);
-    expect(stderr).toContain("MSTAR_POOL_ARK_COUNT");
-    expect(stderr).not.toContain(sk("declared-orphan"));
+    expect(proc.exitCode).toBe(1);
+    expect(proc.stdout.toString()).toBe("");
+    // The specific diagnostic proves the payload text CROSSED the pipe: the
+    // reader saw it (and did not echo it).
+    expect(stderr).toContain("credential pool rejected: the credential payload is not valid JSON");
+    expect(stderr).not.toContain(sk("leaky"));
   });
 
   test("a custom id colliding with a capability host pools only once (base wins, same rule as the synthesis)", async () => {
-    // `ark-plan` is a capability host id; the consumer pools the capability
-    // host under catalog id `ark`. A custom declaration reusing the same id is
-    // skipped by the synthesis, so its pool must not be loaded either — the
+    // `ark-plan` is a capability host id; the consumer keys the capability
+    // host's pool by catalog id `ark`. A custom declaration reusing the same id
+    // is skipped by the synthesis, so its pool must not be loaded either — the
     // provider id would otherwise resolve credentials the file never declares.
-    process.env.MSTAR_POOL_ARK_COUNT = "1";
-    process.env.MSTAR_POOL_ARK_01 = sk("base-key");
-    process.env.MSTAR_POOL_ARK_PLAN_COUNT = "1";
-    process.env.MSTAR_POOL_ARK_PLAN_01 = sk("shadow-key");
     const inputPath = writeInput({
       capabilityHosts: OMP_HOSTS,
       worktreePath: "/workspace/clone",
@@ -779,7 +817,10 @@ describe("runner entry — transported credential pool", () => {
         },
       ],
     });
-    const { code } = await runCli(["--level", "quick", "--input", inputPath]);
+    const { code } = await runCli(
+      ["--level", "quick", "--input", inputPath],
+      encodeCredentialPayload({ ark: [sk("base-key")], "ark-plan": [sk("shadow-key")] }),
+    );
 
     expect(code).toBe(0);
     const input = runInputs[0] as Record<string, unknown>;

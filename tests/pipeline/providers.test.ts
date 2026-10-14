@@ -84,7 +84,7 @@ describe("provider catalog tiers (spec §5; breadth)", () => {
     expect(entry!.baseUrl).toBe("https://api.cloudflare.com/client/v4/accounts/{account_id}/ai/v1");
     expect(entry!.api).toBe("openai-completions");
     // The template materializes into a custom-provider declaration at save
-    // time; its key then rides the custom pool env (MSTAR_POOL_WORKERS_AI_*).
+    // time; its key then rides the credential payload under its own id.
     expect(entry!.models.length).toBeGreaterThan(0);
     expect(entry!.doc).toBe("https://developers.cloudflare.com/workers-ai/models/");
   });

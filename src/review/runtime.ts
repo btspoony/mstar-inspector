@@ -28,8 +28,8 @@ export const REVIEW_SEATS: Record<Exclude<ReviewLevel, "deep">, number> = { quic
 /**
  * One custom-provider declaration as the runner input JSON carries it
  * (AL-23-1): the SETTINGS declaration, keyless — the API key rides ONLY the
- * container exec env, pooled per provider as
- * MSTAR_POOL_<UPPER_SNAKE(id)>_COUNT + _01.._NN, and the runner writes the
+ * runner's STDIN credential payload, pooled per provider under its own id,
+ * and the runner writes the
  * pool into the run's credential store before the session starts (never the
  * input JSON, never a synthesized models.yml, never a log line). The `api`
  * vocabulary (anthropic-messages | openai-completions | openai-responses) and
@@ -63,11 +63,11 @@ export type CapabilityHostModel = {
  * JSON carries it: the runner materializes these into the
  * base of every synthesized per-review models.yml. KEYLESS static data; host
  * ids are runtime capabilities, NOT Providers catalog ids (omp's `ark-plan`
- * resolves its key through catalogProviderId `ark`, whose transported pool is
- * MSTAR_POOL_ARK_*). `apiKeyEnv` and `auth` are RETAINED wire/registry
- * metadata — the locked host shape carries them; neither determines the pool
- * env prefix (derived from the provider id) nor the active credential
- * resolution (the stored pool does).
+ * resolves its key through catalogProviderId `ark`, whose transported pool
+ * arrives under that id in the credential payload). `apiKeyEnv` and `auth`
+ * are RETAINED wire/registry metadata — the locked host shape carries them;
+ * neither determines the payload pool key (derived from the provider id) nor
+ * the active credential resolution (the stored pool does).
  *
  * Structurally mirrors the registry's `SandboxImageHost` (src/contracts/
  * sandbox-images.ts): the consumer passes the resolved registry entry's hosts

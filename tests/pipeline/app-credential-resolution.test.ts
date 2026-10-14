@@ -332,11 +332,13 @@ describe("consumer appRef resolution (lock L4)", () => {
 
     const runnerCall = sandboxCalls.find((call) => call.cmd.includes("--input"));
     expect(runnerCall).toBeDefined();
-    const runnerOptions = runnerCall!.opts as { env: Record<string, string> };
-    expect(runnerOptions.env.MSTAR_POOL_ARK_COUNT).toBe("2");
-    expect(runnerOptions.env.MSTAR_POOL_ARK_01).toBeDefined();
-    expect(runnerOptions.env.MSTAR_POOL_ARK_02).toBeDefined();
+    const runnerOptions = runnerCall!.opts as { env: Record<string, string>; stdin?: string };
     expect(runnerOptions.env.ARK_API_KEY).toBeUndefined();
+    // Both of the App's keys ride the credential payload — and no pool name
+    // reaches the process environment (the retired channel).
+    const { pools } = JSON.parse(runnerOptions.stdin!) as { pools: Record<string, string[]> };
+    expect(pools.ark).toHaveLength(2);
+    expect(Object.keys(runnerOptions.env).filter((name) => name.startsWith("MSTAR_POOL_"))).toEqual([]);
     // Exactly one App instance, built from X's DECRYPTED PEM + X's github_app_id.
     expect(factoryCreds).toHaveLength(1);
     expect(factoryCreds[0]!.cred).toEqual({ APP_ID: "111222", PRIVATE_KEY: PEM_X });

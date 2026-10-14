@@ -81,6 +81,7 @@ import { parseReviewOutput, capFindings, clampFindingSizes } from "../review/sch
 import type { ReviewFinding, ReviewOutput } from "../review/schema";
 import { isReviewLevel, REVIEW_LEVELS, type CustomProviderDeclaration, type ReviewLevel } from "../review/runtime";
 import { providerEnvName } from "./provider-catalog";
+import { encodeCredentialPayload, type CredentialPools } from "../review/credential-payload";
 import { redactExactSecrets, redactReviewOutput, redactReviewOutputExact, redactSecrets } from "./redact";
 import { createArtifactStore, previousRoundFingerprints, type D1ArtifactStore } from "../store/artifact-store";
 import { createFailureStore, type FailureStage, type FailureStore } from "../store/failure-store";
@@ -1548,8 +1549,8 @@ async function resolveSandboxImage(payload: ReviewJobPayload, deps: ProcessDeps)
 
 /**
  * The runner-input projection of one consumer config: the declaration with
- * the API keys stripped. Provider keys ride only the container exec env as
- * `MSTAR_POOL_<UPPER_SNAKE(id)>_COUNT` and indexed pool values.
+ * the API keys stripped. Provider keys ride only the runner's stdin credential
+ * payload (under the declaration's own provider id).
  */
 function toRunnerCustomProvider(provider: CustomProviderConsumerConfig): CustomProviderDeclaration {
   return {
@@ -1573,7 +1574,7 @@ function toRunnerCustomProvider(provider: CustomProviderConsumerConfig): CustomP
  * the only contributor left. This is THE chain single source — used by BOTH
  * `buildRunnerEnv` (step 3) and the version-record put below, so the
  * recorded model can never drift from the chain the runner actually saw
- * (the chain rides the exec env, never the runner input JSON).
+ * (the chain rides the exec env — a non-secret — never the runner input JSON).
  */
 export function effectiveModelChain(
   appCfg: RunnerAppConfig | undefined,
@@ -1707,35 +1708,61 @@ function assertAppConfigComplete(
 }
 
 /**
- * Build the runner exec env from per-App credential pools and model chain.
- * Provider key values remain only in this env and are never logged.
+ * Build the runner exec env: harness paths + the App's verbatim model chain.
+ * It carries NO credential — provider keys ride the stdin payload
+ * (`buildRunnerCredentials`), never the process environment.
  */
-export function buildRunnerEnv(
-  appCfg: RunnerAppConfig,
-  log?: ConsumerLog,
-  fields?: ConsumerLogFields,
-  customProviders?: readonly CustomProviderConsumerConfig[],
-): Record<string, string> {
+export function buildRunnerEnv(appCfg: RunnerAppConfig): Record<string, string> {
   const runnerEnv: Record<string, string> = {
     HARNESS_PLUGIN_ROOT: HARNESS_ROOT,
     PI_CODING_AGENT_DIR: OMP_AGENT_DIR,
   };
+  // The App's verbatim chain forwards VERBATIM (the guard only decides
+  // unset-vs-set; it never mutates the value; the runner-side selector parse
+  // trims segments). A blank chain cannot reach production — the
+  // assertAppConfigComplete gate fails the message before the guard. The
+  // precedence lives in effectiveModelChain (ONE resolution shared with the
+  // version-record put — no re-resolution split-brain).
+  const { chain } = effectiveModelChain(appCfg);
+  if (chain !== undefined) {
+    runnerEnv.OMP_REVIEW_MODEL = chain;
+  }
+  return runnerEnv;
+}
+
+/**
+ * Build the runner's credential transport: the versioned stdin payload
+ * (./../review/credential-payload) plus the exact key VALUES it carries — the
+ * SEC-01 exact-redaction list. ONE resolution serves both, so the recorded
+ * secret list can never drift from the keys the session actually saw.
+ *
+ * Provider id (the App-config key space) → ordered pool, in store order: the
+ * allowlisted BYOK ids first, then the App's custom declarations. Blank values
+ * never ride, and a pool with none left is not transported at all. `payload`
+ * is `undefined` when nothing was transported (the keyless run shape). Key
+ * values live only in this payload and are never logged.
+ */
+export function buildRunnerCredentials(
+  appCfg: RunnerAppConfig,
+  log?: ConsumerLog,
+  fields?: ConsumerLogFields,
+  customProviders?: readonly CustomProviderConsumerConfig[],
+): { payload: string | undefined; keyValues: string[] } {
   // Log only when the caller supplied BOTH the sink and the identity fields
   // (the consumer flow does; direct unit calls may omit them).
   const emit = log !== undefined && fields !== undefined;
+  const pools: CredentialPools = {};
+  const keyValues: string[] = [];
   let appKeys = 0;
   const addPool = (provider: string, rawKeys: readonly string[], source: "app" | "custom"): number => {
     const keys = rawKeys.filter((key) => key.trim() !== "");
     if (keys.length === 0) return 0;
-    const prefix = `MSTAR_POOL_${provider.toUpperCase().replace(/-/g, "_")}`;
-    runnerEnv[`${prefix}_COUNT`] = String(keys.length);
-    keys.forEach((key, index) => {
-      runnerEnv[`${prefix}_${String(index + 1).padStart(2, "0")}`] = key;
-    });
+    pools[provider] = keys;
+    keyValues.push(...keys);
     if (emit) {
       log.info(
         { ...fields, provider, key_source: source },
-        `provider key pool from App config: ${prefix} (${keys.length} key(s))`,
+        `provider key pool from App config: ${provider} (${keys.length} key(s))`,
       );
     }
     return keys.length;
@@ -1756,36 +1783,27 @@ export function buildRunnerEnv(
     if (addPool(decl.provider_id, decl.api_keys, "custom") === 0 && emit) {
       log.warn(
         { ...fields, provider: decl.provider_id, key_source: "custom" },
-        "custom provider key pool is empty — no keys injected",
+        "custom provider key pool is empty — no keys transported",
       );
     }
-  }
-  // 3. Model chain: the App's verbatim chain forwards VERBATIM (the guard
-  //    only decides unset-vs-set; it never mutates the value; the runner-side
-  //    selector parse trims segments). A blank chain cannot reach production
-  //    — assertAppConfigComplete fails the message before the guard — but
-  //    direct unit calls keep the unset→omit guard (the in-image runner then
-  //    falls back to its DEFAULT_MODEL_PATTERN scaffold). The precedence
-  //    lives in effectiveModelChain (ONE resolution shared
-  //    with the version-record put — no re-resolution split-brain).
-  const { chain } = effectiveModelChain(appCfg);
-  if (chain !== undefined) {
-    runnerEnv.OMP_REVIEW_MODEL = chain;
   }
   if (emit) {
     const customCount = customProviders?.length ?? 0;
     log.info(
       { ...fields, config_source: "app" },
-      `per-App env assembly: ${appKeys} provider key(s) from App config, ${customCount} custom` +
-        `${chain !== undefined ? ", model chain from App config" : ""}`,
+      `per-App credential payload: ${appKeys} provider key(s) from App config, ${customCount} custom` +
+        `${effectiveModelChain(appCfg).chain !== undefined ? ", model chain from App config" : ""}`,
     );
   }
-  return runnerEnv;
+  return {
+    payload: Object.keys(pools).length === 0 ? undefined : encodeCredentialPayload(pools),
+    keyValues,
+  };
 }
 
 /**
- * Exec-env names that are configuration/paths, not credentials. Pool count
- * variables are excluded dynamically because they are metadata, not secrets.
+ * Exec-env names that are configuration/paths, not credentials — the only
+ * values the runner exec env carries now that keys ride the stdin payload.
  */
 const RUNNER_EXEC_ENV_PASSTHROUGH_NAMES: readonly string[] = [
   "OMP_REVIEW_MODEL",
@@ -1794,24 +1812,17 @@ const RUNNER_EXEC_ENV_PASSTHROUGH_NAMES: readonly string[] = [
 ];
 
 /**
- * The ACTUAL secret values one review session used (SEC-01 exact-value
- * defense): every credential-shaped value the runner env carried — the App's
- * provider-key entries from the App's pool env — AL-24-5: there are no global
- * keys; the exact-redact mechanism is unchanged — plus the installation token
- * minted for the session. These are the values a prompt-injected model could
- * echo verbatim; redactExactSecrets removes them even when they evade every
- * shape pattern. The list is derived from the SAME buildRunnerEnv result the
- * runner exec used (no re-resolution split-brain) and the token minted above.
+ * The ACTUAL secret values one review session carried (SEC-01 exact-value
+ * defense): every provider key the credential payload transported — the values
+ * a prompt-injected model could echo verbatim — plus the installation token
+ * minted for the session. `redactExactSecrets` removes them even when they
+ * evade every shape pattern. The key list is the SAME resolution the runner
+ * exec used (no re-resolution split-brain).
  */
-function sessionSecretValues(runnerEnv: Record<string, string>, token: string): string[] {
-  const values: string[] = [token];
+function sessionSecretValues(runnerEnv: Record<string, string>, keyValues: readonly string[], token: string): string[] {
+  const values: string[] = [token, ...keyValues];
   for (const [name, value] of Object.entries(runnerEnv)) {
-    if (
-      RUNNER_EXEC_ENV_PASSTHROUGH_NAMES.includes(name) ||
-      (name.startsWith("MSTAR_POOL_") && name.endsWith("_COUNT"))
-    ) {
-      continue;
-    }
+    if (RUNNER_EXEC_ENV_PASSTHROUGH_NAMES.includes(name)) continue;
     if (value !== "") values.push(value);
   }
   return values;
@@ -2420,21 +2431,23 @@ async function processMessage(payload: ReviewJobPayload, deps: ProcessDeps): Pro
       throw new Error(`runner input write failed: exit ${writeInput.exitCode}`);
     }
 
-    // 8. In-image runner: cwd = clone dir; harness paths + the App's own
-    // provider keys and model chain via exec env (buildRunnerEnv — compass
-    // D, AL-24-5: per-App BYOK only, zero global fallback; key_source
-    // app|custom logging; secrets never baked into the image, never in
-    // logs). The runtime runner has NO summary-degrade path: exit 0 ⇒ stdout
-    // is the engine-validated mstar.review/v1 envelope.
+    // 8. In-image runner: cwd = clone dir; harness paths + the App's model
+    // chain via exec env, and the App's own provider keys via the exec STDIN
+    // credential payload (compass D, AL-24-5: per-App BYOK only, zero global
+    // fallback; key_source app|custom logging; secrets never baked into the
+    // image, never in logs, never in the process environment). The runtime
+    // runner has NO summary-degrade path: exit 0 ⇒ stdout is the
+    // engine-validated mstar.review/v1 envelope.
     // AL-6 stage window: the review run itself — a non-zero exit or an exec
     // exception (timeout / container error) here classifies "runner".
     failureStage = "runner";
     runnerStartedAt = Date.now();
-    // SEC-01 exact-value defense: the SAME env object the runner exec used
-    // is captured here (single source — no re-resolution split-brain) so
-    // the session's actual secret values can be exact-redacted from any
-    // model-echoed output below.
-    const runnerEnv = buildRunnerEnv(appCfg, deps.log, fields, customProviders);
+    // SEC-01 exact-value defense: the SAME credential resolution the runner
+    // exec used is captured here (single source — no re-resolution
+    // split-brain) so the session's actual secret values can be
+    // exact-redacted from any model-echoed output below.
+    const runnerEnv = buildRunnerEnv(appCfg);
+    const credentials = buildRunnerCredentials(appCfg, deps.log, fields, customProviders);
     // §7.8: with a recheck input the runner gains `--recheck-out` — the seat
     // writes its validated document to the audited fixed path before the
     // envelope reaches stdout.
@@ -2445,6 +2458,9 @@ async function processMessage(payload: ReviewJobPayload, deps: ProcessDeps): Pro
     const run = await sandbox.runCommand(runnerCmd, {
       cwd: CLONE_DIR,
       env: runnerEnv,
+      // The credential payload rides the exec STDIN pipe — present only when
+      // the App actually transported a key (keyless run shape = no stdin).
+      ...(credentials.payload === undefined ? {} : { stdin: credentials.payload }),
       timeout: runnerTimeoutMs(level),
     });
     const runnerElapsedMs = Date.now() - runnerStartedAt;
@@ -2460,9 +2476,9 @@ async function processMessage(payload: ReviewJobPayload, deps: ProcessDeps): Pro
       `runner finished in ${runnerElapsedMs}ms (budget ${runnerTimeoutMs(level)}ms)`,
     );
     // SEC-01 exact-value defense: the session's ACTUAL secret values
-    // (runner env provider keys + the minted installation token) — shared
-    // by the degrade path and the success path below.
-    secretValues = sessionSecretValues(runnerEnv, token);
+    // (the transported provider keys + the minted installation token) —
+    // shared by the degrade path and the success path below.
+    secretValues = sessionSecretValues(runnerEnv, credentials.keyValues, token);
 
     // AL-6 stage window: post-runner steps (parse has its own branch; the
     // post/KV/put orchestration is worker-side) are "pipeline" again.

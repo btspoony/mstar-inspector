@@ -13,7 +13,7 @@
  * into every per-review models.yml. Hosts are runtime capabilities of the
  * image, NOT App configuration and NOT Providers catalog ids: `omp`'s
  * `ark-plan` host resolves its keys from the transported pool of its
- * `catalogProviderId` (`"ark"` → the `MSTAR_POOL_ARK_COUNT` + `_01.._NN` env
+ * `catalogProviderId` (`"ark"` → the credential payload's `ark` pool, which
  * the runner writes into the run's `agent.db` as `source:"login"` api_key
  * rows), while the catalog/BYOK id stays `ark`.
  *

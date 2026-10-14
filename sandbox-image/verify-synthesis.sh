@@ -33,8 +33,8 @@
 # Load-level only: NO provider call, NO network. The registry from (b) is
 # passed to createAgentSession explicitly so the SDK's background provider
 # refresh (online-if-uncached) never fires — this verification must not depend
-# on egress. Real provider calls are an operator-side extension (exec env key
-# injection), never part of this script's pass/fail (AL-25-1).
+# on egress. Real provider calls are an operator-side extension (the runner's
+# stdin credential payload), never part of this script's pass/fail (AL-25-1).
 #
 # Zero secrets: the declaration is keyless and the synthesized file pins no
 # apiKey at all (every block authenticates via `auth: oauth` against the

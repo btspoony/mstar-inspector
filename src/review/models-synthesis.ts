@@ -23,8 +23,8 @@
  * ZERO secret material: NO provider block pins a scalar `apiKey` — a
  * models.yml apiKey registers as a tier-2 config override and would suppress
  * the stored credential pool the runtime is supposed to rotate across. Every
- * block authenticates via `auth: oauth`; the keys ride the container exec env
- * as `MSTAR_POOL_<UPPER_SNAKE(provider)>_COUNT` + `_01.._NN` and the runner
+ * block authenticates via `auth: oauth`; the keys ride the runner's STDIN
+ * credential payload (provider id → ordered pool) and the runner
  * writes them into `<agentDir>/agent.db` before the session starts. Key
  * literals never enter this module, the synthesized text, or any log line. No
  * environment mutation, no in-image file reads or writes outside the

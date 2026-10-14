@@ -31,11 +31,17 @@ type FakeContainer = {
   images: Record<string, string>;
   start: Mock<(opts: Record<string, unknown>) => void>;
   setInactivityTimeout: Mock<(ms: number) => Promise<void>>;
-  exec: Mock<(cmd: string[], opts?: unknown) => Promise<{ output: () => Promise<ExecOutput> }>>;
+  exec: Mock<
+    (
+      cmd: string[],
+      opts?: unknown,
+    ) => Promise<{ output: () => Promise<ExecOutput>; stdin?: WritableStream | null }>
+  >;
   destroy: Mock<() => Promise<void>>;
 };
 
 const encoder = new TextEncoder();
+const decoder = new TextDecoder();
 
 /** Test bytes as the ArrayBuffer the real `ExecOutput.stdout` carries. */
 function bytes(text: string): ArrayBuffer {
@@ -54,6 +60,29 @@ let execResult: { stdout: ArrayBuffer; stderr: ArrayBuffer; exitCode: number } =
 let running = false;
 let execError: Error | undefined;
 let destroyError: Error | undefined;
+/**
+ * The fake child's stdin surface: `undefined` = no stream (a command that
+ * passes no `stdin` option), `"reader"` = a `cat`-like reader whose output
+ * exists only once stdin reached EOF, `"error-on-write"` = a child that died
+ * before reading (the sink rejects).
+ */
+let execStdin: "reader" | "error-on-write" | undefined;
+/** Bytes the fake child read from stdin (decoded). */
+let execStdinBytes = "";
+/** Whether the fake child saw EOF (the writer closed the stream). */
+let execStdinEof = false;
+
+/** Concatenate the chunks a fake child read from stdin. */
+function concatChunks(chunks: Uint8Array[]): Uint8Array {
+  const total = chunks.reduce((sum, chunk) => sum + chunk.byteLength, 0);
+  const out = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    out.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return out;
+}
 
 /** The fake container the DO drives (the `this.ctx.container` surface). */
 function makeContainer(): FakeContainer {
@@ -72,7 +101,40 @@ function makeContainer(): FakeContainer {
     exec: mock(async (cmd: string[], opts?: unknown) => {
       execCalls.push({ cmd, opts });
       if (execError) throw execError;
-      return { output: async () => execResult };
+      if (execStdin === undefined) return { output: async () => execResult, stdin: null };
+      const chunks: Uint8Array[] = [];
+      let eof = false;
+      const { promise: closed, resolve: onClose } = Promise.withResolvers<void>();
+      const stream = new WritableStream<Uint8Array>({
+        write(chunk) {
+          if (execStdin === "error-on-write") {
+            // A child that exited before reading: the platform errors the pipe.
+            onClose();
+            throw new Error("EPIPE");
+          }
+          chunks.push(chunk);
+        },
+        close() {
+          eof = true;
+          onClose();
+        },
+        abort() {
+          eof = true;
+          onClose();
+        },
+      });
+      return {
+        stdin: stream,
+        // A reader that consumes stdin to the END before producing output: the
+        // adapter must close the stream (EOF) AND drain output concurrently, or
+        // this promise never settles.
+        output: async () => {
+          await closed;
+          execStdinBytes = decoder.decode(concatChunks(chunks));
+          execStdinEof = eof;
+          return execResult;
+        },
+      };
     }),
     destroy: mock(async () => {
       destroyCalls.push("container");
@@ -88,7 +150,7 @@ function makeContainer(): FakeContainer {
 // no matter which test file's registration a shared process saw first.
 import "../helpers/cloudflare-workers-mock";
 
-const { SandboxV1, getSandbox, DEFAULT_EXEC_TIMEOUT_MS, shellCommand } =
+const { SandboxV1, getSandbox, DEFAULT_EXEC_TIMEOUT_MS, MAX_EXEC_STDIN_BYTES, shellCommand } =
   await import("../../src/pipeline/sandbox");
 import type { ReviewSandbox } from "../../src/pipeline/sandbox";
 
@@ -113,6 +175,9 @@ function reset() {
   running = false;
   execError = undefined;
   destroyError = undefined;
+  execStdin = undefined;
+  execStdinBytes = "";
+  execStdinEof = false;
 }
 
 describe("SandboxV1 Durable Object", () => {
@@ -308,5 +373,95 @@ describe("getSandbox", () => {
     expect(await sandbox.runCommand(shellCommand("echo hi"))).toEqual({ stdout: "out", stderr: "", exitCode: 0 });
     await sandbox.destroy();
     expect(destroyCalls).toEqual([]); // stub-level: destroy runs in the DO, not the fake namespace
+  });
+});
+
+/**
+ * The credential channel: `stdin` on the exec path. The payload is the ONLY
+ * way a key reaches the container, so the lifecycle matters as much as the
+ * bytes — a run that waits for EOF must see the stream closed, output must be
+ * drained concurrently with the write, and an oversized or undelivered payload
+ * must fail closed with a REDACTED error (never the payload itself).
+ */
+describe("SandboxV1 stdin transport (the credential channel)", () => {
+  const PAYLOAD = '{"version":1,"pools":{"ark":["secret-key"]}}';
+
+  test("a stdin payload is written through the exec pipe and the stream is CLOSED (a reader waiting for EOF completes)", async () => {
+    reset();
+    execStdin = "reader";
+    execResult = { stdout: bytes("envelope\n"), stderr: new ArrayBuffer(0), exitCode: 0 };
+    const { sandbox } = makeDo();
+
+    const result = await sandbox.runCommand(shellCommand("bun run runner.ts"), {
+      cwd: "/workspace/repo",
+      env: { OMP_REVIEW_MODEL: "ark-plan/deepseek-v4-flash" },
+      stdin: PAYLOAD,
+    });
+
+    // The per-call {cwd, env} contract is untouched; the payload rides the pipe.
+    expect(execCalls).toEqual([
+      {
+        cmd: ["timeout", "--kill-after=5", "600", "/bin/sh", "-lc", "bun run runner.ts"],
+        opts: { cwd: "/workspace/repo", env: { OMP_REVIEW_MODEL: "ark-plan/deepseek-v4-flash" }, stdin: "pipe" },
+      },
+    ]);
+    expect(execStdinBytes).toBe(PAYLOAD);
+    expect(execStdinEof).toBe(true);
+    expect(result).toEqual({ stdout: "envelope\n", stderr: "", exitCode: 0 });
+  });
+
+  test("no stdin option → the exec starts with no stdin pipe (the platform sends EOF)", async () => {
+    reset();
+    const { sandbox } = makeDo();
+
+    await sandbox.runCommand(shellCommand("git status"), { timeout: 120_000 });
+
+    expect(Object.hasOwn(execCalls[0]!.opts as object, "stdin")).toBe(false);
+  });
+
+  test("an oversized payload fails closed BEFORE any process starts — and the error carries no payload", async () => {
+    reset();
+    const { sandbox } = makeDo();
+    const payload = `s${"e".repeat(MAX_EXEC_STDIN_BYTES)}`; // one byte past the cap
+
+    let message = "";
+    try {
+      await sandbox.runCommand(shellCommand("bun run runner.ts"), { stdin: payload });
+    } catch (error) {
+      message = (error as Error).message;
+    }
+
+    expect(message).toContain(`exceeds the ${MAX_EXEC_STDIN_BYTES}-byte`);
+    expect(message).not.toContain("seee");
+    expect(execCalls).toEqual([]);
+  });
+
+  test("a stdin write failure on a child that claims success is refused (never a keyless run reported as ok)", async () => {
+    reset();
+    execStdin = "error-on-write";
+    execResult = { stdout: new ArrayBuffer(0), stderr: new ArrayBuffer(0), exitCode: 0 };
+    const { sandbox } = makeDo();
+
+    let message = "";
+    try {
+      await sandbox.runCommand(shellCommand("bun run runner.ts"), { stdin: PAYLOAD });
+    } catch (error) {
+      message = (error as Error).message;
+    }
+
+    expect(message).toBe("exec stdin closed before the payload was delivered");
+    expect(message).not.toContain("secret-key");
+  });
+
+  test("a stdin write failure keeps the child's own non-zero exit code (its stderr is the diagnosis)", async () => {
+    reset();
+    execStdin = "error-on-write";
+    execResult = { stdout: new ArrayBuffer(0), stderr: bytes("review: cannot read runner input\n"), exitCode: 1 };
+    const { sandbox } = makeDo();
+
+    const result = await sandbox.runCommand(shellCommand("bun run runner.ts"), { stdin: PAYLOAD });
+
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr).toBe("review: cannot read runner input\n");
   });
 });

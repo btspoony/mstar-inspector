@@ -907,9 +907,10 @@ smoke → record the digest.
    `GH_REPO` (the `owner/repo` the smoke runs against), and the
    optional `SMOKE_ROUTE` (default `/smoke`),
    `ARK_API_KEY` (the operator's own key; required when
-   `SMOKE_ROUTE=/smoke-review`, where the orchestrator forwards it into the
-   container as the `MSTAR_POOL_ARK_01` slot with `MSTAR_POOL_ARK_COUNT=1` —
-   the same pool env the production consumer builds):
+   `SMOKE_ROUTE=/smoke-review`, where the orchestrator forwards it to the smoke
+   Worker as its `ARK_API_KEY` var and the entry streams it to the in-image
+   runner as the **stdin credential payload** — the same channel and shape the
+   production consumer builds, with no key in any process environment):
    ```bash
    SMOKE_APP_ID=… SMOKE_PRIVATE_KEY=… INSTALLATION_ID=… GH_REPO=owner/repo \
      bun run scripts/sandbox-smoke.ts

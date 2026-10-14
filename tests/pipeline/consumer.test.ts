@@ -80,6 +80,7 @@ import {
 import { createSecretbox } from "../../src/dashboard/secretbox";
 import { createAppConfigStore } from "../../src/dashboard/app-config-store";
 import { getSandboxImage } from "../../src/contracts/sandbox-images";
+import { encodeCredentialPayload } from "../../src/review/credential-payload";
 import type { Assessment, RecheckDoc, RecheckTarget } from "../../src/contracts/recheck";
 import { sk, gh, AWS_CANARY_KEY, fakePem } from "../helpers/fake-secrets";
 
@@ -125,10 +126,10 @@ const TEST_APP_WEBHOOK_SECRET_ENC = await createSecretbox(TEST_KEY).encryptSecre
  * (appRef is required, the env-App branch is retired).
  * AL-24-5: the App is also given its AI-config health
  * baseline — a model chain (`ark-plan/deepseek-v4-flash`, the in-image
- * base provider) + the `ark` BYOK key carried in the provider's pool env
- * (`MSTAR_POOL_ARK_*`) the chain's provider reads — so a zero-extra-env
+ * base provider) + the `ark` BYOK key carried in the provider's credential
+ * payload pool the chain's provider reads — so a zero-extra-env
  * message passes the fail-closed gate and every success-path test sees the
- * ark pool env + OMP_REVIEW_MODEL from the App config (no Worker-env
+ * ark pool + OMP_REVIEW_MODEL from the App config (no Worker-env
  * OMP_MODEL_KEY / OMP_REVIEW_MODEL exists).
  */
 async function createSeededTestD1(): Promise<TestD1> {
@@ -281,6 +282,12 @@ const testOverrides = {
 function runnerExecEnv(): Record<string, string> {
   const call = sandboxCalls.find((c) => c.cmd.includes("bun run"))!;
   return (call.opts as { env?: Record<string, string> }).env ?? {};
+}
+/** The credential pools the runner exec transported over STDIN (the only channel). */
+function runnerCredentialPools(): Record<string, string[]> | undefined {
+  const call = sandboxCalls.find((c) => c.cmd.includes("bun run"))!;
+  const stdin = (call.opts as { stdin?: string }).stdin;
+  return stdin === undefined ? undefined : (JSON.parse(stdin) as { pools: Record<string, string[]> }).pools;
 }
 /** Runner exec call's timeout (the sandbox fake stores opts as unknown). */
 function runnerExecTimeout(): number | undefined {
@@ -515,16 +522,17 @@ describe("createReviewConsumer", () => {
     // Numstat + input write: plain git/shell steps, git timeout.
     expect(sandboxCalls[3]!.opts).toEqual({ timeout: 120_000 });
     expect(sandboxCalls[4]!.opts).toEqual({ timeout: 120_000 });
-    // Runner: cwd = clone dir; model key + harness paths via exec env only.
+    // Runner: cwd = clone dir; harness paths + the model chain via exec env,
+    // and the App's key pool via the exec STDIN payload (the only credential
+    // channel — the env carries no key).
     expect(sandboxCalls[5]!.opts).toEqual({
       cwd: "/workspace/repo",
       env: {
-        MSTAR_POOL_ARK_COUNT: "1",
-        MSTAR_POOL_ARK_01: "ark-key",
         HARNESS_PLUGIN_ROOT: "/opt/mstar-harness",
         PI_CODING_AGENT_DIR: "/opt/omp-agent",
         OMP_REVIEW_MODEL: "ark-plan/deepseek-v4-flash",
       },
+      stdin: encodeCredentialPayload({ ark: ["ark-key"] }),
       timeout: 600_000,
     });
     // inside VALID_DIFF's right hunk [18,23]). §7.7 order: the
@@ -1471,18 +1479,19 @@ describe("createReviewConsumer", () => {
     await consumer(makeBatch(makePayload()));
 
     const runnerCall = sandboxCalls.find((c) => c.cmd.includes("bun run"))!;
-    expect(runnerCall.opts).toEqual({
+    const { stdin, ...runnerOpts } = runnerCall.opts as { stdin?: string; [key: string]: unknown };
+    expect(runnerOpts).toEqual({
       cwd: "/workspace/repo",
       env: {
-        MSTAR_POOL_ARK_COUNT: "1",
-        MSTAR_POOL_ARK_01: "ark-key",
-        MSTAR_POOL_OPENROUTER_COUNT: "1",
-        MSTAR_POOL_OPENROUTER_01: sk("or-app"),
         HARNESS_PLUGIN_ROOT: "/opt/mstar-harness",
         PI_CODING_AGENT_DIR: "/opt/omp-agent",
         OMP_REVIEW_MODEL: "ark-plan/deepseek-v4-flash,openrouter/anthropic/claude-sonnet-4",
       },
       timeout: 600_000,
+    });
+    expect(JSON.parse(stdin!)).toEqual({
+      version: 1,
+      pools: { ark: ["ark-key"], openrouter: [sk("or-app")] },
     });
     // Version record: the row records the App chain's HEAD
     // selector; provider stays NULL.
@@ -1807,22 +1816,18 @@ describe("createReviewConsumer", () => {
     await consumer(makeBatch(makePayload()));
 
     const runnerEnv = runnerExecEnv();
-    // Each configured provider gets its own pool env: a COUNT plus the
-    // one-based _NN slots the runner reads.
-    expect(runnerEnv).toMatchObject({
-      MSTAR_POOL_ARK_COUNT: "1",
-      MSTAR_POOL_ARK_01: "ark-key",
-      MSTAR_POOL_ANTHROPIC_COUNT: "1",
-      MSTAR_POOL_ANTHROPIC_01: sk("ant-test"),
-      MSTAR_POOL_OPENROUTER_COUNT: "1",
-      MSTAR_POOL_OPENROUTER_01: sk("or-test"),
-      MSTAR_POOL_OPENAI_COUNT: "1",
-      MSTAR_POOL_OPENAI_01: sk("openai-x"),
+    // Each configured provider gets its own pool in the credential payload.
+    expect(runnerCredentialPools()).toMatchObject({
+      ark: ["ark-key"],
+      anthropic: [sk("ant-test")],
+      openrouter: [sk("or-test")],
+      openai: [sk("openai-x")],
     });
-    // The blank mistral row injected no pool at all.
+    // The blank mistral row transported no pool at all, and the exec env
+    // carries no pool name (the retired channel).
     expect(runnerEnv.MISTRAL_API_KEY).toBeUndefined();
-    expect(runnerEnv.MSTAR_POOL_MISTRAL_COUNT).toBeUndefined();
-    expect(runnerEnv.MSTAR_POOL_MISTRAL_01).toBeUndefined();
+    expect(runnerCredentialPools()!.mistral).toBeUndefined();
+    expect(Object.keys(runnerEnv).filter((name) => name.startsWith("MSTAR_POOL_"))).toEqual([]);
   });
 
   test("BB-2: only App-config keys reach the container — arbitrary env is NEVER forwarded (allowlist)", async () => {
@@ -1843,18 +1848,18 @@ describe("createReviewConsumer", () => {
     const runnerEnv = runnerExecEnv();
     // The gemini key comes from the APP config, never the env duplicate.
     expect(runnerEnv).toEqual({
-      MSTAR_POOL_ARK_COUNT: "1",
-      MSTAR_POOL_ARK_01: "ark-key",
-      MSTAR_POOL_GEMINI_COUNT: "1",
-      MSTAR_POOL_GEMINI_01: ["gem", "test"].join("-"),
-      MSTAR_POOL_OPENAI_COUNT: "1",
-      MSTAR_POOL_OPENAI_01: sk("openai-x"),
       HARNESS_PLUGIN_ROOT: "/opt/mstar-harness",
       PI_CODING_AGENT_DIR: "/opt/omp-agent",
       OMP_REVIEW_MODEL: "openai/gpt-app",
     });
+    expect(runnerCredentialPools()).toEqual({
+      ark: ["ark-key"],
+      gemini: [["gem", "test"].join("-")],
+      openai: [sk("openai-x")],
+    });
     expect(Object.values(runnerEnv)).not.toContain("must-not-leak");
     expect(Object.values(runnerEnv)).not.toContain("env-gemini-not-app");
+    expect(JSON.stringify(runnerCredentialPools())).not.toContain("must-not-leak");
   });
 
   test("guard held on attempt 1 → per-message delayed retry (60s), no throw, no post/insert (BB-3)", async () => {
