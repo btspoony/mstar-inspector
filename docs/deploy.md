@@ -191,7 +191,7 @@ sources from a GitHub Actions variable — see below):
 | Name | Default | Purpose |
 |---|---|---|
 | `REVIEW_ENABLED` | unset | **emergency brake only**: per-App `github_apps.review_enabled` is the primary review control; only the exact `"false"` (case-sensitive, untrimmed) stops ALL reviews — unset / `""` / `"true"` / `"TRUE"` / other → per-App governs |
-| `ADMIN_LOGINS` | **required** | comma-separated GitHub logins bootstrapped as dashboard admin; sourced from the GitHub Actions **variable** `ADMIN_LOGINS` (`staging` env or repo-level) and injected by the Deploy workflow with `wrangler deploy --var`. Missing/blank/comma-only fails the deploy **before** it ships — see § 6 |
+| `ADMIN_LOGINS` | **required** | comma-separated GitHub logins **bootstrapped** as dashboard admin — the "at least one" list that lets the first admin reach the dashboard; sourced from the GitHub Actions **variable** `ADMIN_LOGINS` (`staging` env or repo-level) and injected by the Deploy workflow with `wrangler deploy --var`. It is **not** the membership SSOT and is not consumed once: after the first admin exists, membership lives in the dashboard's `users` table / Members page, and runtime still bootstraps any listed login that has no `users` row (an existing row always wins, without promotion). Missing/blank/comma-only fails the deploy **before** it ships — see § 6 |
 
 > **REVIEW_ENABLED cutover checklist (上线即生效 — run BEFORE the deploy that
 > flips the semantics; the semantic inversion takes effect the moment the Worker lands):**
@@ -383,11 +383,14 @@ smoke → record the digest.
    # /smoke-review: full in-image runner (clone + omp review + parse) → destroy
    ```
    `INSTALLATION_ID` / `GH_REPO` are required inputs with no default.
-   **The smoke target is fixed, not arbitrary**: the PR number is the constant
-   `#1` and both routes clone the fixed `mstar-inspector-seed` branch, so the
-   configured repository must actually carry that branch and a diffable PR #1
-   (there is no "works for any accessible repository" behaviour). The runner
-   smoke clones the seed branch, fetches `main`, and diffs against it.
+   **The smoke target is fixed, not arbitrary**, and the code *assumes* the
+   repository shape rather than verifying it: the PR number is the constant
+   `#1`, and the configured repository must carry PR **#1 whose head is the
+   `mstar-inspector-seed` branch, based against `main`** — there is no "works
+   for any accessible repository" behaviour. `/smoke-review` clones that seed
+   branch, fetches `main`, and diffs against it. `/smoke` only reaches the
+   clone in its **fallback** path; its primary path runs
+   `gh pr diff 1 --repo <repo>` on the same PR.
 4. `bun run build:spa && wrangler deploy` — build the SPA assets first
    (`dist/spa` is gitignored — a fresh clone has none, and `wrangler.jsonc`
    serves them via `assets`), then deploy the Worker (webhook face + queue
@@ -538,8 +541,9 @@ either key for the other duty (rotation stays decoupled).
 ### 2. Register an App from the dashboard
 
 Prerequisites: dashboard OAuth (`OAUTH_CLIENT_ID` /
-`OAUTH_CLIENT_SECRET`), `DASHBOARD_SESSION_SECRET`, an admin login
-(`ADMIN_LOGINS` bootstrap or the first-login fallback),
+`OAUTH_CLIENT_SECRET`), `DASHBOARD_SESSION_SECRET`, an admin login — a login
+on the required `ADMIN_LOGINS` bootstrap list (the empty-table fallback cannot
+arm: the Deploy gate requires the list to parse to at least one login),
 `DASHBOARD_ENCRYPTION_KEY` set, and D1 migrations applied **through
 `0022`** — the full forward-only chain above, not a historical prefix.
 `0020` supplies the finding-lifecycle/publication journal, `0021` the
@@ -552,8 +556,13 @@ fails closed instead is the dashboard: the Settings page
 trigger-mode POST (its D1 UPDATE errors on the missing column).
 
 1. **Admin login** — open `/dashboard/login` and complete the GitHub OAuth
-   flow. The first login against an empty `dashboard_users` table becomes
-   admin (or `ADMIN_LOGINS` bootstraps the listed logins).
+   flow. Precedence (`bootstrapDashboardAccess`, `src/dashboard/users.ts`):
+   an existing `dashboard_users` row wins (allow, no promotion); otherwise a
+   login on the `ADMIN_LOGINS` list gets an admin row; the empty-table
+   first-login fallback applies **only** when the parsed list is empty — which
+   the required deploy gate prevents — so any other login is denied
+   (invite-only, zero cookies). `ADMIN_LOGINS` only bootstraps this first
+   admin; from then on the Members page is the membership SSOT.
 2. **Create GitHub App** — on the dashboard workbench (`/dashboard`, the
    Apps-first home) click **Create GitHub App**. The dashboard mints the webhook slug
    (`mstar-inspector-<login>`-derived, DB pre-resolved) and POSTs the App
@@ -689,8 +698,16 @@ Worker rollback.
 `ADMIN_LOGINS` is **required**. It is a GitHub Actions **variable** (login
 names are public identity, so never a secret), configured for the `staging`
 environment or repo-wide (Settings → Environments → `staging` → **Variables**,
-or Settings → Secrets and variables → Actions → Variables). The Deploy
-workflow:
+or Settings → Secrets and variables → Actions → Variables).
+
+**What it is:** an **"at least one" bootstrap list** — its job is to let the
+first admin reach the dashboard at all. It is **not** a second
+membership-management surface, and it is **not** consumed once: the runtime
+still bootstraps any listed login that has **no `users` row** (an existing row
+always wins, without promotion). Once any user row exists, the dashboard's
+`users` table — the Members page — is the authorization SSOT.
+
+The Deploy workflow:
 
 1. **Fails closed before deploying** when the variable is missing, blank,
    whitespace-only, or comma-only — the `Verify required ADMIN_LOGINS variable`
@@ -714,13 +731,15 @@ workflow:
    failing to read the settings means the value cannot be confirmed, and a
    silent pass there would turn a flaky API read into a false green.
 
-Why it matters: with `ADMIN_LOGINS` blank and an **empty `dashboard_users`
-table**, the first OAuth login becomes admin (the first-login fallback,
-`bootstrapDashboardAccess`). The fallback is **self-disarming** — once any user
-row exists, unknown logins are denied (403, zero cookies) until an admin
-invites them. The deploy-time requirement exists so the fallback is never
-silently armed: ship with `ADMIN_LOGINS` set, or knowingly claim the
-first-login admin identity.
+Why it matters: `ADMIN_LOGINS` is the **"at least one" bootstrap list** — it
+admits the first admin and nothing else. It is not the membership SSOT (the
+`users` table / Members page is), and it is not consumed once: a listed login
+with no `users` row is still bootstrapped as admin, while an existing row
+always wins without promotion. The empty-table first-login fallback needs a
+genuinely empty parsed list, which this required gate prevents — so the
+fallback can no longer be silently armed by a blank value. Logins that are
+neither on the list nor in the table are denied (403, zero cookies) until an
+admin invites them on the Members page.
 
 To change the value, update the GitHub Actions variable and re-run the deploy
 (the workflow injects it again); `keep_vars: true` in `wrangler.jsonc` only
