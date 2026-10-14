@@ -77,10 +77,29 @@ exist before the first deploy:
 
 ### D1 migrations (0001–0023, forward-only)
 
+The apply is **preceded by a Time Travel bookmark** — the pre-apply snapshot
+every `0023` rollback refers to (§ Rollback). `0023` rebuilds
+`app_provider_keys` and `app_custom_providers` (create → copy → drop → rename)
+and the store promotes each carried-over row to the `key_id` pool key on its
+first touch, so pre-`0023` code cannot read the live schema afterwards; the
+bookmark is also the only recovery if the four-statement rebuild is
+interrupted mid-file. **Keep the bookmark string** — it is the rollback's
+restore point, and it expires 30 days after it was taken.
+
 ```bash
+# 1. Snapshot FIRST — record the pre-apply bookmark. Time Travel is always on
+#    and acts on the remote database; keep the printed bookmark string.
+wrangler d1 time-travel info mstar-inspector-db
+
+# 2. Then apply
 wrangler d1 migrations apply mstar-inspector-db --remote   # production
 wrangler d1 migrations apply mstar-inspector-db            # local dev
 ```
+
+Local dev has no Time Travel backend — the bookmark covers the remote
+(`--remote`) database. On the automated path the workflow applies the
+migrations, so take the bookmark **before pushing the merge** that carries
+`0023` (§ Automated deploy).
 
 | Migration | Contents |
 |---|---|
@@ -106,7 +125,7 @@ wrangler d1 migrations apply mstar-inspector-db            # local dev
 | `0020_finding_lifecycle` | the finding-lifecycle and private pre-publication journal tables (`review_publications`, `review_findings`, `review_finding_rounds`, `review_threads`) — publication proof, closure and thread-resolution state (spec §7.1) |
 | `0021_review_checks` | the per-attempt Check registry (`review_checks`) behind the advisory Check Runs, with `UNIQUE(attempt_key, generation)` and the partial unique index keeping at most one nonterminal generation per attempt key (spec §7.1/§7.9) |
 | `0022_app_trigger_mode` | `github_apps.review_trigger_mode` TEXT NOT NULL DEFAULT 'every_push' CHECK (review_trigger_mode IN ('open','every_push','manual')) — the per-App review trigger mode (spec `review-trigger-policy.md` §2); metadata-only ADD COLUMN, existing rows (live and soft-deleted) materialize to the `every_push` default, no manager visit needed |
-| `0023_provider_multi_key` | `app_provider_keys` moves to the per-key pool primary key `(app_id, provider, key_id)`, and the new `app_custom_provider_keys` table takes over the custom-provider key material `app_custom_providers` no longer holds. SQLite cannot change a primary key in place, so both tables are rebuilt (create → copy → drop → rename); existing rows are carried across verbatim under the empty-string `key_id` sentinel and the store promotes each row on its first touch. Forward-only: a rollback means reverting the deploy AND restoring the D1 snapshot taken before the apply. Must apply after `0004`/`0006`/`0012`/`0015` |
+| `0023_provider_multi_key` | `app_provider_keys` moves to the per-key pool primary key `(app_id, provider, key_id)`, and the new `app_custom_provider_keys` table takes over the custom-provider key material `app_custom_providers` no longer holds. SQLite cannot change a primary key in place, so both tables are rebuilt (create → copy → drop → rename); existing rows are carried across verbatim under the empty-string `key_id` sentinel and the store promotes each row on its first touch. Forward-only: a rollback means reverting the deploy AND restoring the Time Travel bookmark taken before the apply (§ Rollback). Must apply after `0004`/`0006`/`0012`/`0015` |
 
 Migrations are **forward-only** (0002 precedent): never hand-edit an applied
 migration; add the next file.
@@ -666,7 +685,8 @@ Worker rollback.
   (the chain head is `0023`). The code-only precedent (0002 — new code
   tolerates the prior schema) covers additive migrations; `0023` rebuilt
   tables, so pre-`0023` code does not run against the live schema and its
-  rollback needs the pre-apply D1 snapshot as well (see § Rollback).
+  rollback needs the pre-apply Time Travel bookmark as well (§ D1 migrations,
+  § Rollback).
 - **Secrets untouched** — rollback does not remove
   `DASHBOARD_ENCRYPTION_KEY`; rotate it explicitly when the rollback is
   security-motivated. A registered App's encrypted credentials stay valid
@@ -718,8 +738,18 @@ on a positively observed unset.
   and `0023` rebuilt `app_provider_keys` and `app_custom_providers`, so the
   current code needs the `key_id` column and `app_custom_provider_keys` that
   the pre-`0023` schema lacks. Reverting to pre-`0023` code therefore requires
-  restoring the D1 snapshot taken before the apply **as well as** reverting
+  restoring the pre-apply Time Travel bookmark **as well as** reverting
   the code; the schema is never reversed by hand.
+  ```bash
+  # Revert the code first (Worker rollback above), then restore the database
+  # to the pre-apply bookmark recorded in § D1 migrations. Destructive and
+  # in-place; prints an undo bookmark before it runs.
+  wrangler d1 time-travel restore mstar-inspector-db --bookmark=<pre-apply-bookmark>
+  ```
+  The bookmark is valid for 30 days after the apply and is the only restore
+  point for this migration — without it, a pre-`0023` rollback is a
+  credential-loss event for every App (the promoted rows are unreadable to the
+  old code: three-segment AAD + real `key_id`).
 - Secrets/vars are untouched by rollback — rotate explicitly when the
   rollback is security-motivated.
 
