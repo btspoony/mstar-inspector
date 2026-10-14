@@ -334,15 +334,23 @@ scratch each run and the same-body rewrite is idempotent.
 
 The collector (`scripts/collect-deploy-evidence.ts`) waits a bounded ~15 min
 for the production deploy run of the tagged commit, then states one of these
-explicitly. Nothing here can postpone the tag or fail the Release workflow — a
-missing section is always *stated*, never silent:
+explicitly. Two arms narrow that description: a **prerelease** never dispatches
+a deploy, so it gets an **immediate check** instead of the wait (the same
+absence stated now, without burning the window); and when this Release
+dispatched a fresh run, the collector receives the highest run id observed for
+the commit before that dispatch as a boundary (`--since-run <run-id>`) and may
+cite **only** runs newer than it. A run at or below the boundary — a superseded
+run, an older success on the tag, or a run under another ref — is never
+republished as this release's evidence, and when nothing newer appears the
+section states exactly that. Nothing here can postpone the tag or fail the
+Release workflow — a missing section is always *stated*, never silent:
 
 | Section says | Meaning / operator action |
 |---|---|
 | `Worker version` + `Image digest` + `Actions run` | The production deploy run concluded successfully; IDs come from its `deploy-evidence` artifact. Nothing to do. |
 | `Status: deploy failed` | The production deploy run concluded non-success (conclusion is quoted). Follow the run link; see the [deploy runbook](deploy.md) and the [production rollback](deploy.md#rollback-production). The tag and Release stand — a failed deploy never rolls them back. A **skipped** deploy job does not land here: the run still concludes `success` (it surfaces as `Status: unavailable`, below). |
-| `Status: pending` | The production deploy run had not concluded when the bounded wait expired — normally because it is still **waiting for the owner's approval** (step 5), which lands after the wait far more often than inside it. This is the expected state for a release approved late; approve the run, then follow [manual reconciliation](#manual-reconciliation) to backfill or confirm. |
-| `Status: no deploy run for commit …` | **No** production run exists for the tagged commit after the bounded wait — nothing dispatched the production workflow for it and no `release: published` run was created. The production workflow has **no `paths-ignore`**, so a path filter is never the cause; a tag reaches production through the Release workflow's dispatch, a `release: published` event for a Release a human (or another non-`GITHUB_TOKEN` actor) published, or a manual `workflow_dispatch` ([production environment](deploy.md#production-environment)). Expected for a prerelease the automated chain never dispatches and which thus gets no run of its own (a manual dispatch on a prerelease tag ref **does** start a run — that is the bring-up path — while a prerelease published by hand creates a run whose deploy job the guard skips (it requires the Release to be non-prerelease **and** its tag to carry no `-`): that run still concludes `success`, so it lands in the `unavailable` row below, not here). Recover by dispatching the workflow for that tag. |
+| `Status: pending` | The production deploy run had not concluded when the wait expired — normally because it is still **waiting for the owner's approval** (step 5), which lands after the wait far more often than inside it. This is the expected state for a release approved late; approve the run, then follow [manual reconciliation](#manual-reconciliation) to backfill or confirm. |
+| `Status: no [new] deploy run for commit …` | **No** run of the production workflow was created for the tagged commit after the wait — nothing dispatched it and no `release: published` run appeared. When runs for the commit do exist but all predate the dispatch boundary, the section states that instead (`no new deploy run … — no run newer than the dispatch boundary <id> appeared; no pre-boundary run was cited`): the superseded / older-success run was not yet joined by the freshly dispatched one and is never republished as this release's evidence. The production workflow has **no `paths-ignore`**, so a path filter is never the cause; a tag reaches production through the Release workflow's dispatch, a `release: published` event for a Release a human (or another non-`GITHUB_TOKEN` actor) published, or a manual `workflow_dispatch` ([production environment](deploy.md#production-environment)). Expected for a prerelease the automated chain never dispatches and which thus gets no run of its own (a manual dispatch on a prerelease tag ref **does** start a run — that is the bring-up path — while a prerelease published by hand creates a run whose deploy job the guard skips (it requires the Release to be non-prerelease **and** its tag to carry no `-`): that run still concludes `success`, so it lands in the `unavailable` row below, not here). Recover by dispatching the workflow for that tag. |
 | `Status: unavailable` | Evidence collection itself errored (the error is quoted in the section). That includes a run which concluded `success` but carries no `deploy-evidence` artifact — how a **skipped** deploy job (a prerelease published by hand in the UI) surfaces: no deploy ran, so there is nothing to read. Otherwise rare; reconcile manually. |
 
 ### Manual reconciliation
@@ -370,6 +378,10 @@ runnable directly:
    confirm what is *live* at all, use the check in step 1 (`wrangler
    deployments list` → Worker Version ID) against the section's
    `Worker version` bullet.
+
+The collector's boundary flag is `--since-run <run-id>`: only runs newer than
+that id may be cited, so a pre-boundary (superseded or older-success) run is
+never published as this release's evidence.
 
 If the section needs fixing, either re-run the Release workflow (idempotent
 converge — simplest), or edit the Release directly:

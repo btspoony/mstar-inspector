@@ -420,12 +420,14 @@ Production D1 starts empty, and with `ADMIN_LOGINS` unset the first OAuth
 login against that empty `dashboard_users` table self-promotes to admin
 (§ Multi-App go-live, step 6). The value is therefore part of the config:
 changing it means editing `env.production.vars` and redeploying.
-`REVIEW_ENABLED` stays unset — per-App Pause/Resume is the review control. The
-same `keep_vars` limitation applies to that emergency brake: a
-`REVIEW_ENABLED=false` set on the production Worker from the dashboard is wiped
-by the next `wrangler deploy --env production`, so it cannot be relied on until
-it is declared in `env.production.vars` and redeployed. Per-App Pause/Resume is
-the primary review control and is unaffected (`.env.example`).
+`REVIEW_ENABLED` stays unset — per-App Pause/Resume is the review control — and
+`REVIEW_LEVEL` (the review tier — `quick`/`default`/`deep`) is likewise unset and
+configured nowhere. The same `keep_vars` limitation applies to both: a
+`REVIEW_ENABLED=false` or a `REVIEW_LEVEL` set on the production Worker from the
+dashboard is wiped by the next `wrangler deploy --env production`, so neither
+can be relied on until it is declared in `env.production.vars` and redeployed.
+Per-App Pause/Resume is the primary review control and is unaffected
+(`.env.example`).
 
 ### Maintenance: `env.production` duplicates the resource keys
 
@@ -442,9 +444,10 @@ equality with the top level), the container `class_name` and image keys, and the
 prod-only D1 database / queue / route host values it points at, and rejects any
 resource identity the two blocks share. The container image `dockerfile` /
 `build_context` **values** stay guarded by `tests/contracts/sandbox-images.test.ts`.
-What no test can see is value drift **inside** a restated key that stays distinct
-from staging — a prod id or cron string edited by hand — so that residue remains
-review discipline.
+What no test can see is value drift **inside** a restated key the lock compares
+only by identity: a prod KV namespace id or D1 `database_id` swapped for another
+value that is still distinct from staging passes both the set-equality and the
+shared-identity checks, so that residue remains review discipline.
 
 ### Rollback (production)
 
