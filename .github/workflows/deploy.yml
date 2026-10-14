@@ -64,6 +64,27 @@ jobs:
       - name: Build SPA
         run: bun run build:spa
 
+      # Runs before the FIRST wrangler invocation of any kind (`whoami` below,
+      # then every `wrangler secret bulk` and the final `wrangler deploy`): the
+      # secret write creates and deploys a Worker version, so a gate placed
+      # after it would already have published a version without the required
+      # binding — "fail before deploy" has to mean before the first one.
+      - name: Verify required ADMIN_LOGINS variable
+        run: |
+          # The RUNTIME rule itself, imported (src/dashboard/users.ts
+          # parseAdminLogins) — not a shell approximation of it: split on
+          # commas, JS String.trim() each entry, drop empties. Unset / blank /
+          # whitespace-only / comma-only / U+FEFF+"," all parse to zero logins
+          # and must fail closed BEFORE any deploy-capable step.
+          : "${ADMIN_LOGINS:?required — set the GitHub Actions variable ADMIN_LOGINS to a comma-separated list of GitHub logins (login names are public identity, so a variable, not a secret)}"
+          bun -e '
+            import { parseAdminLogins } from "./src/dashboard/users.ts";
+            if (parseAdminLogins(process.env.ADMIN_LOGINS).length === 0) {
+              console.error("::error::ADMIN_LOGINS is blank, whitespace-only or comma-only — set the GitHub Actions variable ADMIN_LOGINS to a comma-separated list of GitHub logins (e.g. alice,bob)");
+              process.exit(1);
+            }
+          '
+
       - name: Verify Cloudflare account
         run: |
           test -n "$CLOUDFLARE_ACCOUNT_ID"   # account id is a variable — must be configured
@@ -78,22 +99,6 @@ jobs:
                   DASHBOARD_SESSION_SECRET: env.DASHBOARD_SESSION_SECRET,
                   DASHBOARD_ENCRYPTION_KEY: env.DASHBOARD_ENCRYPTION_KEY}' \
             | bunx wrangler secret bulk
-
-      - name: Verify required ADMIN_LOGINS variable
-        run: |
-          # The RUNTIME rule itself, imported (src/dashboard/users.ts
-          # parseAdminLogins) — not a shell approximation of it: split on
-          # commas, JS String.trim() each entry, drop empties. Unset / blank /
-          # whitespace-only / comma-only / U+FEFF+"," all parse to zero logins
-          # and must fail closed BEFORE any deploy happens.
-          : "${ADMIN_LOGINS:?required — set the GitHub Actions variable ADMIN_LOGINS to a comma-separated list of GitHub logins (login names are public identity, so a variable, not a secret)}"
-          bun -e '
-            import { parseAdminLogins } from "./src/dashboard/users.ts";
-            if (parseAdminLogins(process.env.ADMIN_LOGINS).length === 0) {
-              console.error("::error::ADMIN_LOGINS is blank, whitespace-only or comma-only — set the GitHub Actions variable ADMIN_LOGINS to a comma-separated list of GitHub logins (e.g. alice,bob)");
-              process.exit(1);
-            }
-          '
 
       - name: Write optional ALERT_WEBHOOK_URL secret
         if: env.ALERT_WEBHOOK_URL != ''
