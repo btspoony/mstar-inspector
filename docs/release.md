@@ -30,7 +30,8 @@
 > predates it has no `deploy-prod.yml` at that ref to run); see
 > [production bring-up](deploy.md#one-time-bring-up-operator). The `release: published` trigger stays declared and deploys
 > a Release a human (or any non-`GITHUB_TOKEN` actor) publishes; on that path
-> the job-level tag guard skips a prerelease tag.
+> the job-level guard requires the Release to be non-prerelease **and** its tag
+> to carry no `-`.
 > Independently, the same merge pushes to `main`, so the
 > [Deploy workflow](deploy.md) ships the version bump to **staging** exactly
 > as for any other change.
@@ -106,7 +107,8 @@ their repo.
    A prerelease is
    never dispatched by the automated chain — it starts no run for it (a
    prerelease published by hand in the UI does create a `release: published`
-   run, but the job's tag guard skips its deploy); bring-up and rollback
+   run, but the job's guard requires the Release to be non-prerelease **and** its
+   tag to carry no `-`, so it skips that deploy); bring-up and rollback
    dispatch it on a **tag** ref instead — the run's ref names the released tag
    and its checkout is pinned to the run's own SHA, so a non-tag ref is refused
    before any mutation — and a manual dispatch may
@@ -295,7 +297,7 @@ missing section is always *stated*, never silent:
 | `Worker version` + `Image digest` + `Actions run` | The production deploy run concluded successfully; IDs come from its `deploy-evidence` artifact. Nothing to do. |
 | `Status: deploy failed` | The production deploy run concluded non-success (conclusion is quoted). Follow the run link; see the [deploy runbook](deploy.md) and the [production rollback](deploy.md#rollback-production). The tag and Release stand — a failed deploy never rolls them back. A **skipped** deploy job does not land here: the run still concludes `success` (it surfaces as `Status: unavailable`, below). |
 | `Status: pending` | The production deploy run had not concluded when the bounded wait expired — normally because it is still **waiting for the owner's approval** (step 5), which lands after the wait far more often than inside it. This is the expected state for a release approved late; approve the run, then follow [manual reconciliation](#manual-reconciliation) to backfill or confirm. |
-| `Status: no deploy run for commit …` | **No** production run exists for the tagged commit after the bounded wait — nothing dispatched the production workflow for it and no `release: published` run was created. The production workflow has **no `paths-ignore`**, so a path filter is never the cause; a tag reaches production through the Release workflow's dispatch, a `release: published` event for a Release a human (or another non-`GITHUB_TOKEN` actor) published, or a manual `workflow_dispatch` ([production environment](deploy.md#production-environment)). Expected for a prerelease the automated chain never dispatches and which thus gets no run of its own (a manual dispatch on a prerelease tag ref **does** start a run — that is the bring-up path — while a prerelease published by hand creates a run whose deploy job the tag guard skips: that run still concludes `success`, so it lands in the `unavailable` row below, not here). Recover by dispatching the workflow for that tag. |
+| `Status: no deploy run for commit …` | **No** production run exists for the tagged commit after the bounded wait — nothing dispatched the production workflow for it and no `release: published` run was created. The production workflow has **no `paths-ignore`**, so a path filter is never the cause; a tag reaches production through the Release workflow's dispatch, a `release: published` event for a Release a human (or another non-`GITHUB_TOKEN` actor) published, or a manual `workflow_dispatch` ([production environment](deploy.md#production-environment)). Expected for a prerelease the automated chain never dispatches and which thus gets no run of its own (a manual dispatch on a prerelease tag ref **does** start a run — that is the bring-up path — while a prerelease published by hand creates a run whose deploy job the guard skips (it requires the Release to be non-prerelease **and** its tag to carry no `-`): that run still concludes `success`, so it lands in the `unavailable` row below, not here). Recover by dispatching the workflow for that tag. |
 | `Status: unavailable` | Evidence collection itself errored (the error is quoted in the section). That includes a run which concluded `success` but carries no `deploy-evidence` artifact — how a **skipped** deploy job (a prerelease published by hand in the UI) surfaces: no deploy ran, so there is nothing to read. Otherwise rare; reconcile manually. |
 
 ### Manual reconciliation

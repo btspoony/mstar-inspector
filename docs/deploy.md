@@ -71,8 +71,9 @@ it runs from the Release workflow's dispatch (the normal path), from a
 `release: published` event for a Release published by a human or any actor
 other than the repository `GITHUB_TOKEN`, or from a manual `workflow_dispatch`
 on a **tag** ref (a dispatch on a branch is refused — § The run's ref is the
-deployed checkout). Its job-level tag guard rejects a tag containing `-` on that
-release-event path, so a prerelease published that way starts a run whose deploy
+deployed checkout). Its job-level guard requires **both** properties on that
+release-event path — the Release is not flagged prerelease **and** its tag
+carries no `-` — so a prerelease published that way starts a run whose deploy
 job is skipped — never a production deploy.
 
 Whatever the trigger, an admitted run then **pauses at job start for the
@@ -91,9 +92,10 @@ Release are created, and it needs `actions: write` on the release job; the
 dispatched run is then approved like any other production run
 (§ Production approval gate and the tag gate). The
 `release: published` trigger stays declared and **does** deploy when a human
-publishes a non-prerelease Release in the UI (its job-level guard skips a
-prerelease tag). The release chain, the prerelease guard and the
-Deploy evidence section are in [`docs/release.md`](release.md).
+publishes a non-prerelease Release in the UI (its job-level guard requires the
+Release to be non-prerelease **and** its tag to carry no `-`). The release chain,
+the prerelease guard and the Deploy evidence section are in
+[`docs/release.md`](release.md).
 
 ### The run's ref is the deployed checkout
 

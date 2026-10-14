@@ -12,8 +12,9 @@ name: Deploy prod
 # this workflow existed has no `deploy-prod.yml` to run and the dispatch fails
 # before it starts. Bring-up therefore dispatches the first tag released after
 # this change — a post-merge prerelease tag is allowed, because the release-event
-# guard deploys only non-prerelease tags and so cannot be the only way in — and a
-# rollback dispatches the tag it rolls back to.
+# guard deploys only releases that are non-prerelease AND carry no `-` in the
+# tag, so it cannot be the only way in — and a rollback dispatches the tag it
+# rolls back to.
 #
 # The run's ref NAMES the release; the deployed tree is the run's DISPATCH-TIME
 # SHA. There is no `ref` input, so a run can never deploy a tag other than the
@@ -80,10 +81,13 @@ jobs:
 
   deploy:
     needs: guard-tag-ref   # the tag gate above holds no secrets; this job does — so it must depend on it
-    # A dispatch always deploys; a release deploys only for a non-prerelease tag.
-    # `github.event.release` is absent on dispatch, so it is read only behind the
-    # `||` short-circuit.
-    if: github.event_name == 'workflow_dispatch' || !contains(github.event.release.tag_name, '-')
+    # A dispatch always deploys; a release deploys only when the Release is not
+    # flagged prerelease AND its tag carries no `-`. The two are INDEPENDENT
+    # release properties — a Release flagged prerelease under a dashless tag
+    # (human/UI publish) has the tag shape without the status — so the tag alone
+    # does not prove non-prerelease. `github.event.release` is absent on dispatch,
+    # so it is read only behind the `||` short-circuit.
+    if: github.event_name == 'workflow_dispatch' || (github.event.release.prerelease == false && !contains(github.event.release.tag_name, '-'))
     permissions: { contents: read }   # no git push / API writes — evidence lands in the run summary + artifacts
     runs-on: ubuntu-latest
     environment: production

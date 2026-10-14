@@ -9,9 +9,11 @@
  *   deploy-prod.yml --ref <tag>`), so bring-up / rollback on the current
  *   prerelease tag needs no separate input;
  * - the prerelease guard: one job-level `if` that dispatches always and lets a
- *   release through only when the tag carries no `-`; the dispatch arm is
- *   evaluated FIRST so an absent `github.event.release` on dispatch cannot blow
- *   up the expression;
+ *   release through only when the Release's own `prerelease` flag is `false`
+ *   AND its tag carries no `-` (the two are independent release properties, so
+ *   the tag shape alone is not the release's prerelease status); the dispatch
+ *   arm is evaluated FIRST so an absent `github.event.release` on dispatch
+ *   cannot blow up the expression;
  * - a SECRETS-FREE `guard-tag-ref` job that asserts `github.ref_type == 'tag'`,
  *   carries no `environment:`/`env:`, and holds no step that runs a ref's code;
  *   the `deploy` job (the one with `environment: production` and the production
@@ -208,13 +210,53 @@ describe("deploy-prod.yml guards", () => {
     expect(Object.keys(triggers(wf)).sort()).toEqual(["release", "workflow_dispatch"]);
   });
 
-  test("job guard: dispatch arm FIRST, release only for a tag without `-` (exact condition)", () => {
-    // Exact-normalized pin: swapping `||` for `&&`, or reordering the arms,
-    // must fail. The dispatch arm is evaluated FIRST because
-    // `github.event.release` is absent on a dispatch event.
+  test("job guard: dispatch arm FIRST, release only for a non-prerelease flag AND a tag without `-` (exact condition)", () => {
+    // Exact-normalized pin: swapping the release `&&` for `||`, dropping either
+    // half of it, or inverting the flag comparison must fail. The dispatch arm
+    // is evaluated FIRST because `github.event.release` is absent on a dispatch
+    // event.
     expect(String(wf.jobs.deploy.if).replace(/\s+/g, " ")).toBe(
-      "github.event_name == 'workflow_dispatch' || !contains(github.event.release.tag_name, '-')",
+      "github.event_name == 'workflow_dispatch' || (github.event.release.prerelease == false && !contains(github.event.release.tag_name, '-'))",
     );
+  });
+
+  test("mutation: `&&`→`||`, dropping either half, or inverting the flag comparison must fail the pin above", () => {
+    // The pin above is what stops a Release flagged prerelease under a dashless
+    // tag from reaching production. Show the pin catches each edit that reopens
+    // that hole — or its mirror.
+    const PINNED =
+      "github.event_name == 'workflow_dispatch' || (github.event.release.prerelease == false && !contains(github.event.release.tag_name, '-'))";
+    const RELEASE_ARM =
+      "github.event.release.prerelease == false && !contains(github.event.release.tag_name, '-')";
+    const mutations: [string, string][] = [
+      // `&&` → `||`: a prerelease-flagged Release under a dashless tag satisfies
+      // the release arm again (the exact P1 this guard closes).
+      [RELEASE_ARM, "github.event.release.prerelease == false || !contains(github.event.release.tag_name, '-')"],
+      // dropping the flag half: the tag shape alone admits it.
+      [RELEASE_ARM, "!contains(github.event.release.tag_name, '-')"],
+      // dropping the tag half: a prerelease-flagged `-` tag is admitted.
+      [RELEASE_ARM, "github.event.release.prerelease == false"],
+      // inverting the flag comparison: every prerelease Release is admitted and
+      // no ordinary release is.
+      ["github.event.release.prerelease == false", "github.event.release.prerelease != false"],
+    ];
+    const src = readFileSync(join(REPO_ROOT, ".github", "workflows", WORKFLOW), "utf8");
+    const dir = mkdtempSync(join(tmpdir(), "wf-if-"));
+    try {
+      for (const [from, to] of mutations) {
+        const mutated = src.replace(from, to);
+        expect(mutated).not.toBe(src);
+        const path = join(dir, "deploy-prod.yml");
+        writeFileSync(path, mutated);
+        const proc = Bun.spawnSync(["python3", "-c", PY_DUMP, path], { stdout: "pipe", stderr: "pipe" });
+        expect(proc.exitCode).toBe(0);
+        const mwf = JSON.parse(proc.stdout.toString());
+        // i.e. the exact-normalized pin in the test above would now fail.
+        expect(String(mwf.jobs.deploy.if).replace(/\s+/g, " ")).not.toBe(PINNED);
+      }
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   test("environment: production, concurrency group, permissions, timeout", () => {
