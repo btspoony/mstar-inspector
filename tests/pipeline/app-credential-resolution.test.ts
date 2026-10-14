@@ -62,7 +62,7 @@ function createMigratedD1(): ReturnType<typeof createTestD1> {
   // queries on every app-path message.
   // 0012: app_provider_keys.updated_at — the store's upsert writes
   // it, so the fixture must carry the column.
-  // 0015: the store's setProviderKey upsert now writes the
+  // 0015: the store's addProviderKey upsert now writes the
   // verified_* columns, so the fixture must carry them too.
   // 0017: the store's setModelChain now writes the default
   // app_model_chains row, so the fixture must carry the chains tables.
