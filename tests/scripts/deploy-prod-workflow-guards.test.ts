@@ -29,6 +29,16 @@
  *   env, `jq -n` payload, `--env production` so the prod Worker — never staging
  *   — receives the secrets) placed AFTER the deploy, prod D1 migrations,
  *   `wrangler deploy --env production`;
+ * - the PURE required-secret preflight (`:?required`, no mutation) next to the
+ *   marker assertion, BEFORE the first mutating wrangler step — a missing
+ *   credential must red the run before production is migrated or deployed —
+ *   while the `secret bulk` WRITES stay after `wrangler deploy`;
+ * - the post-mutation live-version re-capture: after the last mutating step,
+ *   `wrangler deployments list --env production --json` overrides the
+ *   deploy-log `version_id.txt` with the version the secret uploads actually
+ *   created (defensively reading both `[0].versions[0].version_id` and
+ *   `[0].version_id`), keeping the deploy-log value as a non-fatal
+ *   `::notice::` fallback;
  * - the healthz smoke comparing the live version to the deployed tag;
  * - the digest-from-deploy-log rule and its never-fatal property (a no-push
  *   deploy records the literal `unchanged (no push in this deploy)` and exits 0);
@@ -387,6 +397,172 @@ describe("deploy-prod.yml guards", () => {
     expect(runsText).toContain('test -n "$CLOUDFLARE_ACCOUNT_ID"');
     expect(runsText).toContain("bunx wrangler whoami");
     expect(runsText).toContain(":?required");
+  });
+
+  test("required-secret preflight is PURE and precedes every mutating wrangler step", () => {
+    // The assertion must live in its own step next to the environment-marker
+    // assertion, not inside the `secret bulk` writer: inside the writer it runs
+    // only AFTER the D1 migration and the Worker deploy, so a missing
+    // credential would red a run that has already mutated production.
+    const preflight = steps.find((s) => s.name === "Assert required secrets are set")!;
+    expect(preflight).toBeDefined();
+    // pure: no wrangler invocation, no mutation of any kind
+    expect(preflight.run).not.toMatch(/bunx wrangler/);
+    expect(preflight.if).toBeUndefined();
+    const markerIdx = steps.findIndex((s) => s.name?.includes("production environment marker"));
+    const preflightIdx = steps.indexOf(preflight);
+    expect(preflightIdx).toBeGreaterThan(markerIdx);
+    // every mutating invocation — the required-secret write, both ALERT arms,
+    // the D1 migration and the deploy — comes strictly after the preflight.
+    const mutatingIdx = steps
+      .map((s, i) => (/bunx wrangler (secret bulk|d1 migrations apply|deploy)\b/.test(s.run ?? "") ? i : -1))
+      .filter((i) => i >= 0);
+    expect(mutatingIdx.length).toBe(5);
+    for (const i of mutatingIdx) expect(preflightIdx).toBeLessThan(i);
+    // and the writer no longer carries the assertion itself.
+    const writer = steps.find((s) => s.name === "Write required secrets")!;
+    expect(writer.run).not.toContain(":?required");
+  });
+
+  test("mutation: folding the `:?required` assertion back into the writer fails the preflight pin", () => {
+    // Re-create the reviewed bug — the assertion only inside the post-deploy
+    // `secret bulk` step — and show the pin above now fails: there is no pure
+    // preflight step, and the first mutation precedes the (relocated) assertion.
+    const src = readFileSync(join(REPO_ROOT, ".github", "workflows", WORKFLOW), "utf8");
+    const start = src.indexOf("      # PURE preflight — no mutation.");
+    const end = src.indexOf("      - name: Setup Bun");
+    expect(start).toBeGreaterThan(-1);
+    expect(end).toBeGreaterThan(start);
+    const mutation =
+      '      - name: Write required secrets\n        run: |\n          : "${OAUTH_CLIENT_ID:?required}" "${OAUTH_CLIENT_SECRET:?required}" \\\n            "${DASHBOARD_SESSION_SECRET:?required}" "${DASHBOARD_ENCRYPTION_KEY:?required}"\n          jq -n\n';
+    const mutated =
+      (src.slice(0, start) + src.slice(end)).replace(
+        "      - name: Write required secrets\n        run: |\n          jq -n",
+        mutation.replace(/\n$/, ""),
+      );
+    expect(mutated).not.toBe(src);
+    const dir = mkdtempSync(join(tmpdir(), "preflight-"));
+    try {
+      const path = join(dir, "deploy-prod.yml");
+      writeFileSync(path, mutated);
+      const proc = Bun.spawnSync(["python3", "-c", PY_DUMP, path], { stdout: "pipe", stderr: "pipe" });
+      expect(proc.exitCode).toBe(0);
+      const msteps = JSON.parse(proc.stdout.toString()).jobs.deploy.steps as Step[];
+      // the pin's `name === "Assert required secrets are set"` lookup now finds
+      // nothing — i.e. the pin above would fail.
+      expect(msteps.find((s) => s.name === "Assert required secrets are set")).toBeUndefined();
+      // and the assertion is back after the first mutation (the D1 migration
+      // and the deploy precede it), which is the hole the pin closes.
+      const writerIdx = msteps.findIndex((s) => s.name === "Write required secrets");
+      const deployIdx = msteps.findIndex((s) => (s.name ?? "").includes("Deploy Worker"));
+      expect(msteps[writerIdx]!.run).toContain(":?required");
+      expect(deployIdx).toBeLessThan(writerIdx);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("live version is re-captured after the last mutation: both JSON shapes, non-fatal fallback", () => {
+    const recap = steps.find((s) => s.name === "Re-capture live Worker version")!;
+    expect(recap).toBeDefined();
+    const run = recap.run!;
+    // defensive read of the live deployment, prod-scoped and JSON
+    expect(run).toContain("bunx wrangler deployments list --env production --json");
+    // accepts BOTH the nested and the flat shape
+    expect(run.replace(/[ \t]+/g, " ")).toContain(
+      "((.[0].versions // [])[0].version_id) // .[0].version_id // empty",
+    );
+    expect(run).toContain("> version_id.txt");
+    // fallback is explicitly noticed and the step has no failure path
+    expect(run).toContain("::notice::");
+    expect(run).not.toContain("exit 1");
+    expect(run).not.toContain("::error");
+    // placement: after the LAST mutating step, still before the smoke
+    const recapIdx = steps.indexOf(recap);
+    const lastMutation = Math.max(
+      ...steps.map((s, i) =>
+        /bunx wrangler (secret bulk|d1 migrations apply|deploy)\b/.test(s.run ?? "") ? i : -1,
+      ),
+    );
+    expect(recapIdx).toBeGreaterThan(lastMutation);
+    expect(recapIdx).toBeLessThan(steps.findIndex((s) => (s.name ?? "").includes("healthz")));
+    expect(steps[steps.length - 1]!.name).toContain("Record prod deploy evidence");
+  });
+
+  test("live version re-capture script EXECUTES: override on both shapes, keeps the deploy-log value and exits 0 on failure", () => {
+    const recap = steps.find((s) => s.name === "Re-capture live Worker version")!;
+    const dir = mkdtempSync(join(tmpdir(), "recap-"));
+    try {
+      writeFileSync(join(dir, "version_id.txt"), "deadbeef\n");
+      // stub `bunx` only — the real `jq` does the extraction, so the pinned
+      // filter expression is what is under test.
+      const bunx = (out: string, code = 0) => {
+        writeFileSync(
+          join(dir, "bunx"),
+          `#!/bin/sh\n${out === "" ? "" : `printf '%s\\n' '${out}'\n`}exit ${code}\n`,
+        );
+        Bun.spawnSync(["chmod", "+x", join(dir, "bunx")]);
+      };
+      const runOnce = (expectedVersion: string) => {
+        writeFileSync(join(dir, "version_id.txt"), expectedVersion);
+        const proc = Bun.spawnSync(["bash", "-e", "-c", recap.run!], {
+          cwd: dir,
+          env: { ...process.env, PATH: `${dir}:${process.env.PATH}` },
+        });
+        return {
+          code: proc.exitCode,
+          out: readFileSync(join(dir, "version_id.txt"), "utf8").trim(),
+          log: proc.stdout.toString() + proc.stderr.toString(),
+        };
+      };
+      // nested shape: `[{"versions":[{"version_id":"…"}]}]`
+      bunx('[{"versions":[{"version_id":"cafe0123"}]}]');
+      expect(runOnce("deadbeef").code).toBe(0);
+      expect(runOnce("deadbeef").out).toBe("cafe0123");
+      // flat shape: `[{"version_id":"…"}]`
+      bunx('[{"version_id":"beef4567"}]');
+      expect(runOnce("deadbeef").out).toBe("beef4567");
+      // empty array → keep the deploy-log value, notice, still exit 0
+      bunx("[]");
+      const kept = runOnce("deadbeef");
+      expect(kept.code).toBe(0);
+      expect(kept.out).toBe("deadbeef");
+      expect(kept.log).toContain("::notice::");
+      // wrangler itself failed (non-zero, no JSON) → same non-fatal fallback
+      bunx("", 1);
+      const failed = runOnce("deadbeef");
+      expect(failed.code).toBe(0);
+      expect(failed.out).toBe("deadbeef");
+      expect(failed.log).toContain("::notice::");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("mutation: dropping the live re-capture leaves the deploy-log value as the only version source", () => {
+    // Deleting the re-capture step is the reviewed bug (evidence names a
+    // predecessor). Show the pin above now fails: no step reads the live
+    // deployment after the secret uploads.
+    const src = readFileSync(join(REPO_ROOT, ".github", "workflows", WORKFLOW), "utf8");
+    const start = src.indexOf("      # Every `secret bulk` above creates");
+    const end = src.indexOf("      # Release identity, not mere liveness");
+    expect(start).toBeGreaterThan(-1);
+    expect(end).toBeGreaterThan(start);
+    const mutated = src.slice(0, start) + src.slice(end);
+    expect(mutated).not.toBe(src);
+    const dir = mkdtempSync(join(tmpdir(), "recap-mut-"));
+    try {
+      const path = join(dir, "deploy-prod.yml");
+      writeFileSync(path, mutated);
+      const proc = Bun.spawnSync(["python3", "-c", PY_DUMP, path], { stdout: "pipe", stderr: "pipe" });
+      expect(proc.exitCode).toBe(0);
+      const msteps = JSON.parse(proc.stdout.toString()).jobs.deploy.steps as Step[];
+      expect(msteps.find((s) => s.name === "Re-capture live Worker version")).toBeUndefined();
+      const mtext = msteps.map((s) => s.run ?? "").join("\n");
+      expect(mtext).not.toContain("deployments list --env production --json");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   test("secret injection: jq -n payload renamed to GITHUB_OAUTH_* + four keys, piped to `secret bulk --env production`", () => {

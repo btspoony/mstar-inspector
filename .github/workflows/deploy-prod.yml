@@ -140,6 +140,16 @@ jobs:
             exit 1
           fi
 
+      # PURE preflight — no mutation. Hoisted here (next to the marker
+      # assertion, before the D1 migration and the deploy) so a missing
+      # `production` credential reds the run BEFORE production is migrated or
+      # deployed. The `wrangler secret bulk` WRITES stay after `wrangler
+      # deploy`; this step only asserts they are non-empty.
+      - name: Assert required secrets are set
+        run: |
+          : "${OAUTH_CLIENT_ID:?required}" "${OAUTH_CLIENT_SECRET:?required}" \
+            "${DASHBOARD_SESSION_SECRET:?required}" "${DASHBOARD_ENCRYPTION_KEY:?required}"
+
       - name: Setup Bun
         uses: oven-sh/setup-bun@v2
         with:
@@ -205,10 +215,10 @@ jobs:
       # `--env production` is mandatory: without it `secret bulk` resolves the
       # TOP-LEVEL worker (the staging instance) and would overwrite staging's
       # dashboard secrets with the fresh prod values.
+      # The required secrets were asserted non-empty in the preflight above,
+      # BEFORE any mutation. This step only writes them.
       - name: Write required secrets
         run: |
-          : "${OAUTH_CLIENT_ID:?required}" "${OAUTH_CLIENT_SECRET:?required}" \
-            "${DASHBOARD_SESSION_SECRET:?required}" "${DASHBOARD_ENCRYPTION_KEY:?required}"
           jq -n '{GITHUB_OAUTH_CLIENT_ID: env.OAUTH_CLIENT_ID,
                   GITHUB_OAUTH_CLIENT_SECRET: env.OAUTH_CLIENT_SECRET,
                   DASHBOARD_SESSION_SECRET: env.DASHBOARD_SESSION_SECRET,
@@ -222,6 +232,28 @@ jobs:
       - name: Remove ALERT_WEBHOOK_URL secret (unset = log-only)
         if: env.ALERT_WEBHOOK_URL == ''
         run: "jq -n '{ALERT_WEBHOOK_URL: null}' | bunx wrangler secret bulk --env production"
+
+      # Every `secret bulk` above creates AND immediately deploys a new Worker
+      # version, so the id captured from the `wrangler deploy` log names a
+      # PREDECESSOR of the version actually serving traffic. This is the LAST
+      # mutating step's follow-up: re-read the live deployment so the evidence
+      # (artifact + Release notes) identifies the version that is really live.
+      # Evidence only — a failed read keeps the deploy-log value and never
+      # fails the deploy.
+      - name: Re-capture live Worker version
+        shell: bash
+        run: |
+          set -uo pipefail
+          DEPLOY_LOG_VERSION=$(cat version_id.txt 2>/dev/null || true)
+          LIVE_VERSION=$(bunx wrangler deployments list --env production --json 2>/dev/null \
+            | jq -r '((.[0].versions // [])[0].version_id) // .[0].version_id // empty' \
+            2>/dev/null || true)
+          if [ -n "$LIVE_VERSION" ] && [ "$LIVE_VERSION" != "null" ]; then
+            printf '%s\n' "$LIVE_VERSION" > version_id.txt
+            echo "Live Worker version after the secret uploads: $LIVE_VERSION (deploy-log value was $DEPLOY_LOG_VERSION)"
+          else
+            echo "::notice::could not read the live Worker version after the secret uploads — keeping the deploy-log value $DEPLOY_LOG_VERSION"
+          fi
 
       # Release identity, not mere liveness: healthz must report the version the
       # deployed tag carries (v-prefixed, the tag's own shape). A fresh Worker

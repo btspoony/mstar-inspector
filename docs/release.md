@@ -273,6 +273,18 @@ run's `deploy.log` — or the recorded digest is the literal
 `unchanged (no push in this deploy)` when that deploy pushed no container
 image (the digest step never fails the run).
 
+The recorded **Worker version** is the one **live after the secret uploads**,
+not the one `wrangler deploy` printed: each `wrangler secret bulk` call creates
+and immediately deploys another version, so a capture taken from the deploy log
+alone would name a predecessor of what is serving traffic. After the last
+mutating step the run re-reads the live deployment
+(`bunx wrangler deployments list --env production --json`) and writes that
+version id over `version_id.txt`, keeping the deploy-log value only as a
+noticed fallback (a failed read emits a `::notice::` and never fails the
+deploy). The section's `Worker version` bullet is therefore the version to
+compare against a live `deployments list` in
+[manual reconciliation](#manual-reconciliation).
+
 **Only the Release workflow appends this section.** A Release published by
 hand in the UI deploys production through the retained `release: published`
 trigger, but it starts no `pull_request: closed` run — so no collector runs for

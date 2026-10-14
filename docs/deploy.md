@@ -323,9 +323,11 @@ plan, and both rejected for now in favour of the applied approval gate.
    (§ Production approval gate and the tag gate). Every later re-dispatch
    pauses the same way.
 
-   **Once approved, the run mutates in this order: apply the prod D1
+   **Once approved, the run mutates in this order: assert the required
+   `production` secrets (pure preflight, no mutation) → apply the prod D1
    migrations → `wrangler deploy --env production` → write the `production`
-   secrets → smoke.** Deploying *before* the secrets is deliberate: the
+   secrets → re-read the live Worker version → smoke.** Deploying *before* the
+   secrets is deliberate: the
    earlier order wrote them first, and on a first bring-up that made wrangler
    materialise a **bound-less draft Worker** (`mstar-inspector-production`
    without its bindings) holding the production secrets until the deploy step
@@ -333,10 +335,11 @@ plan, and both rejected for now in favour of the applied approval gate.
    bindings and no secrets; neither the deploy nor the migrations read the
    Worker secrets (they authenticate with the CI token), and the smoke stays
    last. No step of the run depends on the secrets being written earlier.
-   One consequence to respect: the required-secret assertion (`:?required`)
-   runs at that later point, so a missing `production` secret reds a run that
-   has **already deployed** — finish step 3 (including the `ALERT_WEBHOOK_URL`
-   decision) before dispatching.
+   The required-secret assertion (`:?required`) is a **pure preflight beside
+   the environment-marker assertion, before the first mutating command**: a
+   missing `production` secret reds the run before production is migrated or
+   deployed, never after. It is only the `wrangler secret bulk` **writes** that
+   stay after the deploy — the assertion is not repeated there.
 
    **`<tag>` must be created after this change ships.** `gh workflow run`
    runs the workflow **as defined at that ref**, and the repository's existing
@@ -544,13 +547,30 @@ variable / secret per the CI-credentials note below). Repository-level
 secrets keep working as the fallback for any name not set at the environment
 level.
 
-The four required secrets are asserted non-empty in the workflow (a missing
-value fails the run red — `wrangler secret bulk` treats a JSON `null` as a
-secret **deletion**, so empty values must never reach it). `ALERT_WEBHOOK_URL`
+The four required secrets are asserted non-empty in the workflow **before the
+first mutating command** (a pure preflight beside the environment-marker
+assertion — a missing value reds the run before production is migrated or
+deployed). The assertion must stay ahead of the mutations because
+`wrangler secret bulk` treats a JSON `null` as a
+secret **deletion**, so empty values must never reach it. `ALERT_WEBHOOK_URL`
 is optional: when the GitHub Secret is set the workflow writes it to the
 Worker; when it is absent the workflow **deletes** it from the Worker (a
 previously set webhook does not linger) and the Worker falls back to log-only
 alerting (§ Ops config).
+
+**Recorded Worker version = the one live after the secret uploads.** Every
+`wrangler secret bulk` call creates **and immediately deploys** a new Worker
+version, so the `Current Version ID` line `wrangler deploy` prints names a
+**predecessor** of the version actually serving traffic, and a `version_id.txt`
+taken from that log alone would misreport the live version in the
+`deploy-evidence` artifact and the Release notes. After the **last** mutating
+step (the optional `ALERT_WEBHOOK_URL` write / delete) the workflow therefore
+re-reads the live deployment with
+`bunx wrangler deployments list --env production --json`, extracts the newest
+version id defensively (both the nested `[0].versions[0].version_id` and the
+flat `[0].version_id` shapes), and overwrites `version_id.txt`. If the read
+yields nothing the deploy-log value is kept and the step emits a `::notice::` —
+the re-capture can never fail the deploy.
 
 **CI credentials** — the workflow authenticates wrangler with one GitHub
 **Secret** that is never injected into the Worker: `CLOUDFLARE_API_TOKEN`
