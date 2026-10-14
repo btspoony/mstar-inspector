@@ -47,7 +47,7 @@ mstar-inspector 在 Cloudflare Workers 上编排每 PR 隔离的代码审查：Q
 ### 性能口径（实测）
 
 - 热容器 exec ~2.6s；真实 omp 审查 ~52s；部署 e2e enqueue→Review ~90s。
-- `max_batch_size: 1` + `max_concurrency: 1`（`max_instances` 随 durable_object 策略取消）→ 吞吐上限 ~40 reviews/h（M1 可接受；并发限流属 M2）。
+- `max_batch_size: 1` + `max_concurrency: 1`，且 `scheduling_policy: "durable_object"` 下的容器应用已无 `max_instances` 上限（`wrangler.jsonc` containers 注释；并发只能靠这个 pin 约束）→ 吞吐上限 ~40 reviews/h（M1 可接受；并发限流属 M2）。
 
 ## Why This Matters
 
