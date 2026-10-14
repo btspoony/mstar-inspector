@@ -663,8 +663,10 @@ face to repoint to; the per-App webhook URL on GitHub is unchanged by a
 Worker rollback.
 
 - **D1 is forward-only** — never reverse an applied migration on rollback
-  (the chain head is `0023`); new code tolerates the prior schema (0002
-  precedent), roll back code only (the `0023` caveat is under § Rollback).
+  (the chain head is `0023`). The code-only precedent (0002 — new code
+  tolerates the prior schema) covers additive migrations; `0023` rebuilt
+  tables, so pre-`0023` code does not run against the live schema and its
+  rollback needs the pre-apply D1 snapshot as well (see § Rollback).
 - **Secrets untouched** — rollback does not remove
   `DASHBOARD_ENCRYPTION_KEY`; rotate it explicitly when the rollback is
   security-motivated. A registered App's encrypted credentials stay valid
@@ -709,12 +711,15 @@ on a positively observed unset.
   (or check out the previous commit and `wrangler deploy`). Rollback restores
   Worker code + cron triggers + consumer config; the container image follows
   the checked-out Dockerfile.
-- D1 migrations are **forward-only**: never reverse a migration on rollback
-  (0002 precedent — new code tolerates the prior schema; roll back code
-  only). Because migrations apply before deploy in the automated path, a
-  failed run may have already applied them — roll back code only, never the
-  schema. A migration that rebuilt a table (`0023`) is the exception: its
-  only undo is the D1 snapshot taken before the apply.
+- D1 migrations are **forward-only**: never reverse a migration on rollback.
+  The 0002 code-only precedent (new code tolerates the prior schema; roll back
+  code only) holds for additive migrations. Because migrations apply before
+  deploy in the automated path, a failed run may have already applied them —
+  and `0023` rebuilt `app_provider_keys` and `app_custom_providers`, so the
+  current code needs the `key_id` column and `app_custom_provider_keys` that
+  the pre-`0023` schema lacks. Reverting to pre-`0023` code therefore requires
+  restoring the D1 snapshot taken before the apply **as well as** reverting
+  the code; the schema is never reversed by hand.
 - Secrets/vars are untouched by rollback — rotate explicitly when the
   rollback is security-motivated.
 
