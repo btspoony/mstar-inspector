@@ -20,7 +20,10 @@
  *   only (the production workflow has no `ref` input — a run deploys exactly
  *   the ref it runs on) after Release creation and before the evidence step —
  *   a GITHUB_TOKEN-created Release does not fire `release: published`, so the
- *   explicit dispatch is the only production trigger (T3-2);
+ *   explicit dispatch is the only production trigger (T3-2); the lookup for an
+ *   existing run for the commit precedes that dispatch and reuses it instead of
+ *   queueing a duplicate on a release rerun (P2), with the step body executed
+ *   against a stubbed `gh` for the reuse/fresh-dispatch paths;
  * - deploy-evidence append step: exactly one `gh release edit`
  *   workflow-wide (count across ALL step runs, not mere containment), its own
  *   step-level timeout budget bounded below the job cap, edit failure loud at
@@ -41,9 +44,11 @@
  * on GitHub ubuntu runners) exported to JSON — no new dependencies. Structural
  * assertions only: a formatting change cannot silently drop a guard.
  */
-import { readFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, test } from "bun:test";
+import { git } from "./helpers";
 
 const REPO_ROOT = join(import.meta.dir, "..", "..");
 
@@ -210,6 +215,116 @@ describe("release.yml guards", () => {
     expect(dispatch["continue-on-error"]).toBeUndefined();
     // a dispatch always deploys, so a prerelease must not dispatch at all
     expect(dispatch.if).toBe("${{ !contains(steps.ver.outputs.version, '-') }}");
+    // P2 rerun-reuse: the existing-run lookup must precede the dispatch, else a
+    // release rerun queues a SECOND approval-gated deploy and the evidence
+    // collector waits on the new run instead of backfilling the completed one
+    const lookupIdx = dispatch.run!.indexOf("gh run list --workflow deploy-prod.yml --commit");
+    expect(lookupIdx).toBeGreaterThanOrEqual(0);
+    expect(lookupIdx).toBeLessThan(dispatch.run!.indexOf("gh workflow run"));
+  });
+
+  test("dispatch step body EXECUTES: rerun reuses a completed/in-flight run, dispatches when none or after failure", () => {
+    const steps = wf.jobs.release.steps as { run?: string }[];
+    const run = steps.find((s) => s.run?.includes("gh workflow run deploy-prod.yml"))!.run!;
+
+    const dir = mkdtempSync(join(tmpdir(), "release-dispatch-"));
+    try {
+      // real tag so the step's own `git rev-list -n1 "$TAG"` resolves
+      git(dir, "init", "-q");
+      git(dir, "config", "user.email", "t@example.com");
+      git(dir, "config", "user.name", "t");
+      writeFileSync(join(dir, "f.txt"), "x\n");
+      git(dir, "add", "f.txt");
+      git(dir, "commit", "-qm", "x");
+      git(dir, "tag", "-a", "-m", "v9.9.9", "v9.9.9");
+
+      // stub `gh`: `run list` applies the --jq expression the STEP passes to the
+      // fixture JSON (so the real filter is under test); `workflow run` records
+      // the dispatch instead of mutating the real repo.
+      const log = join(dir, "gh.log");
+      writeFileSync(log, "");
+      writeFileSync(
+        join(dir, "gh"),
+        `#!/usr/bin/env bash
+set -euo pipefail
+if [ "\${1:-}" = "run" ] && [ "\${2:-}" = "list" ]; then
+  expr=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --jq) expr="$2"; shift 2 ;;
+      *) shift ;;
+    esac
+  done
+  printf '%s' "$GH_STUB_RUNS_JSON" | jq -r "$expr"
+  exit 0
+fi
+if [ "\${1:-}" = "workflow" ] && [ "\${2:-}" = "run" ]; then
+  printf 'DISPATCH %s\\n' "$*" >> "$GH_STUB_LOG"
+  exit 0
+fi
+echo "unexpected gh invocation: $*" >&2
+exit 7
+`,
+      );
+      Bun.spawnSync(["chmod", "+x", join(dir, "gh")]);
+
+      const runOnce = (runsJson: string) => {
+        writeFileSync(log, "");
+        const proc = Bun.spawnSync(["bash", "-e", "-c", run], {
+          cwd: dir,
+          env: {
+            ...process.env,
+            PATH: `${dir}:${process.env.PATH}`,
+            GH_TOKEN: "stub-token",
+            VERSION: "9.9.9",
+            GH_STUB_RUNS_JSON: runsJson,
+            GH_STUB_LOG: log,
+          },
+        });
+        return {
+          code: proc.exitCode,
+          out: proc.stdout.toString() + proc.stderr.toString(),
+          log: readFileSync(log, "utf8"),
+        };
+      };
+
+      // 1) completed run for the commit → reuse, no dispatch (the rerun path)
+      const completed = runOnce(
+        '[{"databaseId":111,"status":"completed","conclusion":"success"}]',
+      );
+      expect(completed.code).toBe(0);
+      expect(completed.out).toContain("::notice::reusing existing deploy-prod.yml run 111");
+      expect(completed.log).toBe("");
+
+      // 2) in-flight run (waiting for the owner's approval) → reuse, no dispatch
+      const inFlight = runOnce(
+        '[{"databaseId":222,"status":"waiting","conclusion":null}]',
+      );
+      expect(inFlight.code).toBe(0);
+      expect(inFlight.out).toContain("::notice::reusing existing deploy-prod.yml run 222");
+      expect(inFlight.log).toBe("");
+
+      // 3) no run for the commit → fresh dispatch
+      const none = runOnce("[]");
+      expect(none.code).toBe(0);
+      expect(none.log).toContain("DISPATCH workflow run deploy-prod.yml --ref v9.9.9");
+
+      // 4) newest run failed → a rerun after a failed deploy must retry
+      const failed = runOnce(
+        '[{"databaseId":333,"status":"completed","conclusion":"failure"}]',
+      );
+      expect(failed.code).toBe(0);
+      expect(failed.log).toContain("DISPATCH workflow run deploy-prod.yml --ref v9.9.9");
+
+      // 5) newest run cancelled → also a retry, not a reuse
+      const cancelled = runOnce(
+        '[{"databaseId":444,"status":"completed","conclusion":"cancelled"}]',
+      );
+      expect(cancelled.code).toBe(0);
+      expect(cancelled.log).toContain("DISPATCH workflow run deploy-prod.yml --ref v9.9.9");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   test("deploy-evidence append step: after release creation, never fails the release, env-indirected", () => {
