@@ -66,13 +66,17 @@ export type Env = {
   /**
    * Invite-only dashboard bootstrap: comma-separated GitHub
    * logins that are created as `admin` at the OAuth callback when they have
-   * no users row yet (compared case-insensitively — GitHub logins are
+   * no users row yet and no removal record (compared case-insensitively —
+   * GitHub logins are
    * case-insensitive). A Worker VAR, NOT a secret (login names are public
-   * identity): set in wrangler.jsonc `vars` (or the Cloudflare dashboard's
-   * Worker variable settings) and redeploy; .dev.vars locally. Unset → the
+   * identity): present on every deploy via the Deploy workflow's
+   * `wrangler deploy --var` (or the same `--var` on a documented manual
+   * deploy); .dev.vars locally. Unset → the
    * first login against an EMPTY users table
    * bootstraps as admin (first-login fallback); every other unknown login
-   * is denied (403, zero cookies) until an admin invites it.
+   * is denied (403, zero cookies) until an admin invites it. A login whose
+   * removal an operator recorded (migration 0023) is denied even while the
+   * list still spells it — only a deliberate re-invite clears that record.
    */
   ADMIN_LOGINS?: string;
   /**

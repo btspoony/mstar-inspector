@@ -145,14 +145,14 @@ describe("SandboxV1 Durable Object", () => {
     running = true; // start() already returned (deploy restart mid-flight)
     const { sandbox } = makeDo();
 
-    const result = await sandbox.runCommand(shellCommand("gh pr diff 1 --repo btspoony/todo-bots"), {
+    const result = await sandbox.runCommand(shellCommand("gh pr diff 1 --repo acme/widgets"), {
       env: { GH_TOKEN: "tok" },
       cwd: "/workspace/repo",
     });
 
     expect(execCalls).toEqual([
       {
-        cmd: ["timeout", "--kill-after=5", "600", "/bin/sh", "-lc", "gh pr diff 1 --repo btspoony/todo-bots"],
+        cmd: ["timeout", "--kill-after=5", "600", "/bin/sh", "-lc", "gh pr diff 1 --repo acme/widgets"],
         opts: { cwd: "/workspace/repo", env: { GH_TOKEN: "tok" } },
       },
     ]);
@@ -229,6 +229,20 @@ describe("SandboxV1 Durable Object", () => {
     await sandbox.runCommand(shellCommand("gh pr view 1"), { timeout: 250 });
 
     expect(execCalls[0]!.cmd).toEqual(["timeout", "--kill-after=5", "0.25", "/bin/sh", "-lc", "gh pr view 1"]);
+  });
+
+  test("a non-finite explicit timeout (NaN / Infinity) falls back to the default bound", async () => {
+    reset();
+    const { sandbox } = makeDo();
+
+    await sandbox.runCommand(shellCommand("gh pr view 1"), { timeout: Number.NaN });
+    await sandbox.runCommand(shellCommand("gh pr view 2"), { timeout: Number.POSITIVE_INFINITY });
+
+    expect(execCalls.map((call) => call.cmd)).toEqual([
+      ["timeout", "--kill-after=5", "600", "/bin/sh", "-lc", "gh pr view 1"],
+      ["timeout", "--kill-after=5", "600", "/bin/sh", "-lc", "gh pr view 2"],
+    ]);
+    expect(DEFAULT_EXEC_TIMEOUT_MS / 1000).toBe(600);
   });
 
   test("a non-zero exit (timeout bound = 124) resolves normally — the caller decides retry/DLQ", async () => {

@@ -1,11 +1,11 @@
 /**
  * D1 store for per-App AI configuration: the `app_provider_keys` BYOK key
- * POOLS (one row per (App, provider, key_id) — migration 0023) and the
+ * POOLS (one row per (App, provider, key_id) — migration 0024) and the
  * `app_custom_provider_keys` pools of the custom-provider declarations, plus
  * the model chains (`app_model_chains` default + named chains and the
  * `app_model_chain_seats` seat references, migration 0017). Spec
  * dashboard-multi-app-platform § Per-App BYOK + § Crypto envelope; migration
- * 0023 is the DDL single source for the pool tables.
+ * 0024 is the DDL single source for the pool tables.
  *
  * Crypto (lock L1): every key write encrypts INSIDE the store via
  * src/dashboard/secretbox.ts — plaintext keys arrive only as the method
@@ -22,7 +22,7 @@
  * factory time; a missing/malformed key surfaces as SecretboxKeyError on the
  * first encrypt/decrypt call — routes map that to 5xx fail-closed.
  *
- * Migration 0023 is FORWARD-ONLY and split in two halves by what can run
+ * Migration 0024 is FORWARD-ONLY and split in two halves by what can run
  * where: the SQL migration rebuilds both key tables and carries the pre-pool
  * rows across VERBATIM — migrations are SQL, and SQL cannot decrypt, so a
  * carried row keeps its two-segment-AAD envelope under the LEGACY_KEY_ID
@@ -131,7 +131,7 @@
  *     assertAppConfigComplete — zero-config is NOT a valid review state
  *     anymore), and an undecryptable row is a loud throw
  *     (tamper/misconfiguration is never swallowed).
- *   - Custom providers (migration 0012, per-key pools since 0023):
+ *   - Custom providers (migration 0012, per-key pools since 0024):
  *     upsertCustomProvider / removeCustomProvider / listCustomProviders
  *     manage per-App declarations of NON-built-in model providers (base URL
  *     + AL-23-1 api enum + model ids); the declaration holds NO key material
@@ -157,7 +157,7 @@ import { PROVIDER_CATALOG, PROVIDER_IDS_BUILTIN } from "../contracts/provider-ca
 
 /**
  * A row of `app_provider_keys` — and, byte-identical in shape, of
- * `app_custom_provider_keys` (migration 0023: both tables hold ONE row per
+ * `app_custom_provider_keys` (migration 0024: both tables hold ONE row per
  * key, with the envelope and its bookkeeping belonging to the key rather
  * than to the provider).
  */
@@ -166,7 +166,7 @@ export type AppProviderKeyRow = {
   provider: string;
   /**
    * The key's identity inside the pool: the first 16 hex characters of
-   * SHA-256(plaintext). "" on a row migration 0023 carried across, until the
+   * SHA-256(plaintext). "" on a row migration 0024 carried across, until the
    * store promotes it (the plaintext-derived id needs the master key).
    */
   key_id: string;
@@ -227,7 +227,7 @@ export type CustomProviderApi = (typeof CUSTOM_PROVIDER_API_IDS)[number];
 /**
  * A row of `app_custom_providers` (migration 0012 — D1 column
  * names, snake_case). model_ids is a TEXT JSON array (AL-23-1 DDL). The API
- * key does NOT live here: migration 0023 moved it into
+ * key does NOT live here: migration 0024 moved it into
  * `app_custom_provider_keys` (an AppProviderKeyRow), so the declaration is
  * decrypt-free and the key carries its own identity and bookkeeping.
  */
@@ -245,7 +245,7 @@ export type AppCustomProviderRow = {
  * One custom-provider declaration (the settings-page face and the
  * consumer input): a NON-built-in model provider bound to a base URL, one
  * of the AL-23-1 protocol forms, and the model ids it serves. The API key
- * is NEVER part of this shape — since migration 0023 it lives in
+ * is NEVER part of this shape — since migration 0024 it lives in
  * app_custom_provider_keys (declaration-time input; the consumer decrypt
  * face reads it there).
  */
@@ -426,7 +426,7 @@ export const MAX_PROVIDER_KEY_LENGTH = 4096;
  */
 export const MAX_KEYS_PER_PROVIDER = 8;
 /**
- * The key id migration 0023 gives a row it carried across: SQL cannot derive
+ * The key id migration 0024 gives a row it carried across: SQL cannot derive
  * the real one (it needs the plaintext), so the row waits under this sentinel
  * until the store promotes it on first touch. A real key id is 16 hex
  * characters, so the empty string can never collide with one.
@@ -604,7 +604,7 @@ export class InvalidModelSelectorError extends Error {
 }
 
 /**
- * Per-key secretbox AAD rowKey (migration 0023): the envelope is bound to the
+ * Per-key secretbox AAD rowKey (migration 0024): the envelope is bound to the
  * FULL primary key of the row — both composite-PK columns of 0006 PLUS the
  * per-key id — joined in DDL order. A row's ciphertext is therefore useless in
  * any other slot of the same pool.
@@ -622,8 +622,8 @@ function customProviderKeyAad(appId: string, provider: string, keyId: string): s
   return `app_custom_provider_keys.key_enc:${appId}:${provider}:${keyId}`;
 }
 /**
- * The PRE-0023 (two-segment) AAD rowKeys, read-only. Kept ONLY for the
- * promotion path: a row migration 0023 carried across still holds its old
+ * The PRE-0024 (two-segment) AAD rowKeys, read-only. Kept ONLY for the
+ * promotion path: a row migration 0024 carried across still holds its old
  * envelope until the store re-encrypts it. Key material is NEVER written
  * under these again.
  */
@@ -860,9 +860,9 @@ export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | un
   const box = createSecretbox(encryptionKey);
 
   /**
-   * The two per-key tables are byte-identical (migration 0023), so every
+   * The two per-key tables are byte-identical (migration 0024), so every
    * read/write below is written ONCE against this spec and bound to one of
-   * them; `legacyAad` builds the PRE-0023 rowKey the promotion path needs.
+   * them; `legacyAad` builds the PRE-0024 rowKey the promotion path needs.
    */
   type KeyTable = {
     table: "app_provider_keys" | "app_custom_provider_keys";
@@ -896,7 +896,7 @@ export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | un
   }
 
   /**
-   * Promote ONE row the 0023 migration could only carry across verbatim: the
+   * Promote ONE row the 0024 migration could only carry across verbatim: the
    * old two-segment envelope is decrypted, the key id derived from the
    * plaintext and the row rewritten UNDER ITS OWN id with the three-segment
    * AAD — this runs where the master key lives, and only here. Timestamps and
@@ -926,7 +926,7 @@ export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | un
 
   /**
    * The App's — or one provider's — key rows in pool order, the single read
-   * path every face goes through so the 0023 promotion happens exactly once
+   * path every face goes through so the 0024 promotion happens exactly once
    * per carried row and no caller ever sees the sentinel id. Order:
    * provider-ascending, then (created_at, key_id) — the order the consumer's
    * pool env indexes and the settings list follow.
@@ -1283,7 +1283,7 @@ export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | un
      * no-op returning false).
      */
     async deleteProviderKey(appId: string, provider: string, keyId: string): Promise<boolean> {
-      // Promote the pool FIRST: a row 0023 carried across still wears the
+      // Promote the pool FIRST: a row 0024 carried across still wears the
       // sentinel id, so the derived id below matches nothing before promotion.
       await readKeyRows(PROVIDER_KEY_TABLE, appId, provider);
       const res = await db.batch([
@@ -1613,7 +1613,7 @@ export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | un
      * Store (or replace) one custom-provider declaration for the App:
      * validates the full AL-23-1/AL-23-2 shape, upserts the (app_id,
      * provider_id) DECLARATION row (base_url / api / model_ids — migration
-     * 0023 moved the key material into app_custom_provider_keys), then stores
+     * 0024 moved the key material into app_custom_provider_keys), then stores
      * the submitted key in that declaration's pool as a verified slot (the
      * declaration flow verifies before saving, so it lands
      * verified_at = now / verified_status = 'ok'; a key already in the pool is
@@ -1815,7 +1815,7 @@ export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | un
      * row (0015), so there is nothing else to sweep.
      */
     async deleteCustomProviderKey(appId: string, providerId: string, keyId: string): Promise<boolean> {
-      // Promote the pool FIRST — same 0023 sentinel reason as deleteProviderKey.
+      // Promote the pool FIRST — same 0024 sentinel reason as deleteProviderKey.
       await readKeyRows(CUSTOM_KEY_TABLE, appId, providerId);
       const res = await db
         .prepare(`DELETE FROM app_custom_provider_keys WHERE app_id = ? AND provider = ? AND key_id = ?`)

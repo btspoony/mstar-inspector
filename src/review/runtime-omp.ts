@@ -88,30 +88,30 @@ import type { RecheckDoc } from "../contracts/recheck";
 
 /**
  * Environment override for the mstar-harness plugin root — the primary,
- * documented configuration surface. It wins over the sibling-directory and
- * absolute-path defaults so tests and CI can inject a fixture root. The test
- * fixture mirrors this name (tests/review/plugin-root-fixture.ts).
+ * documented configuration surface. Tests and CI inject a fixture root
+ * through it; the test fixture mirrors this name
+ * (tests/review/plugin-root-fixture.ts).
  */
 const HARNESS_ROOT_ENV = "HARNESS_PLUGIN_ROOT";
-
-/** Verified absolute fallback for the plugin root (Global Constraints). */
-const ABSOLUTE_HARNESS_ROOT = "/Users/bibi/workspace/ai/mstar-harness";
 
 /**
  * Resolve the local mstar-harness plugin root, in priority order:
  *   1. $HARNESS_PLUGIN_ROOT — explicit configuration (primary surface);
  *   2. the sibling directory `../mstar-harness` relative to this package
- *      (the main-repo layout);
- *   3. the verified absolute path (local default fallback only).
- * M0 never installs from GitHub. Resolved lazily per call so tests can
- * inject a fixture root regardless of module evaluation order.
+ *      (the main-repo layout).
+ * There is no machine-absolute fallback: an unresolvable root fails closed
+ * and names the env var to set. M0 never installs from GitHub. Resolved
+ * lazily per call so tests can inject a fixture root regardless of module
+ * evaluation order.
  */
 export function resolveHarnessRoot(): string {
   const fromEnv = Bun.env[HARNESS_ROOT_ENV]?.trim();
   if (fromEnv) return fromEnv;
   const sibling = resolve(import.meta.dir, "../../../mstar-harness");
   if (existsSync(sibling)) return sibling;
-  return ABSOLUTE_HARNESS_ROOT;
+  throw new Error(
+    `mstar-harness plugin root not found: set ${HARNESS_ROOT_ENV} to the plugin checkout (no sibling checkout at ${sibling})`,
+  );
 }
 
 /** Read-only tool whitelist (Global Constraints — parent + seat). */

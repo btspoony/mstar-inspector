@@ -130,7 +130,7 @@ function createPopulatedPre0006D1(): ReturnType<typeof createTestD1> {
 /**
  * The pre-pool shape (0006 → 0022, filename order): app_provider_keys still
  * carries ONE row per (App, provider) under the two-segment AAD and
- * app_custom_providers still carries its key column. The 0023 migration tests
+ * app_custom_providers still carries its key column. The 0024 migration tests
  * seed this shape, then apply the migration, exactly like the wrangler order
  * on a live deployment.
  */
@@ -159,18 +159,21 @@ function createPreProviderPoolD1(): TestD1 {
   // (the SPA mode control's value) and the trigger-mode route validates
   // against the CHECK enum — the route tests run on the production shape.
   applyMigration(db, "0022_app_trigger_mode.sql");
+  // 0023: createUser clears a removal record in the same batch as its insert,
+  // so every membership-creating fixture needs the tombstone table too.
+  applyMigration(db, "0023_removed_logins.sql");
   return db;
 }
 
 /**
- * Fully-migrated shape: the pre-pool one plus 0023 (the per-key pools), i.e.
+ * Fully-migrated shape: the pre-pool one plus 0024 (the per-key pools), i.e.
  * what `wrangler d1 migrations apply` produces today. 0015 matters because the
  * store's key writes maintain the verified_* columns, so every config-store
  * test must run on the 0015-shaped schema.
  */
 function createAppConfigD1(): TestD1 {
   const db = createPreProviderPoolD1();
-  applyMigration(db, "0023_provider_multi_key.sql");
+  applyMigration(db, "0024_provider_multi_key.sql");
   return db;
 }
 
@@ -340,7 +343,7 @@ describe("migration 0006_app_provider_config.sql (on a seeded production-shaped 
 
   test("app_provider_keys: composite PK (app_id, provider) rejects a duplicate pair; other apps may repeat the provider", async () => {
     // The DDL this test pins belongs to 0006, so it runs on the PRE-pool
-    // shape: 0023 rebuilds the table onto the (app_id, provider, key_id) PK.
+    // shape: 0024 rebuilds the table onto the (app_id, provider, key_id) PK.
     const db = createPreProviderPoolD1();
     const app = await seedApp(db, { slug: "a", createdBy: "mallory" });
     const other = await seedApp(db, { slug: "b", createdBy: "ada", githubAppId: 1002 });
@@ -448,9 +451,9 @@ describe("migration 0012_custom_providers_and_key_updated_at.sql", () => {
     expect(() => applyMigration(db, "0012_custom_providers_and_key_updated_at.sql")).not.toThrow();
     // 0015 next (the real sequence for these tables): the store's key writes
     // maintain the verified_* columns, so the re-set below must run on the
-    // 0015-shaped schema; 0023 last — the pool shape the store now writes to.
+    // 0015-shaped schema; 0024 last — the pool shape the store now writes to.
     applyMigration(db, "0015_provider_verification.sql");
-    applyMigration(db, "0023_provider_multi_key.sql");
+    applyMigration(db, "0024_provider_multi_key.sql");
     const row = db.raw.query("SELECT created_at, updated_at FROM app_provider_keys").get() as {
       created_at: string;
       updated_at: string | null;
@@ -550,9 +553,9 @@ describe("migration 0017_app_model_chains.sql (spec §4.4)", () => {
   });
 });
 
-// --- migration 0023 (per-key provider pools) ---
+// --- migration 0024 (per-key provider pools) ---
 
-describe("migration 0023_provider_multi_key.sql (per-key provider pools)", () => {
+describe("migration 0024_provider_multi_key.sql (per-key provider pools)", () => {
   const LEGACY_KEY = sk("legacy-anthropic-4242");
   const LEGACY_CUSTOM_KEY = sk("legacy-custom-5151");
 
@@ -570,7 +573,7 @@ describe("migration 0023_provider_multi_key.sql (per-key provider pools)", () =>
       app.id,
       legacyEnc,
     );
-    expect(() => applyMigration(db, "0023_provider_multi_key.sql")).not.toThrow();
+    expect(() => applyMigration(db, "0024_provider_multi_key.sql")).not.toThrow();
     const cols = db.raw.query("PRAGMA table_info(app_provider_keys)").all() as Array<{ name: string; pk: number }>;
     expect(cols.filter((c) => c.pk > 0).map((c) => c.name)).toEqual(["app_id", "provider", "key_id"]);
     // The row is carried over UNCHANGED: D1 migrations are SQL, and SQL cannot
@@ -616,7 +619,7 @@ describe("migration 0023_provider_multi_key.sql (per-key provider pools)", () =>
       app.id,
       legacyEnc,
     );
-    expect(() => applyMigration(db, "0023_provider_multi_key.sql")).not.toThrow();
+    expect(() => applyMigration(db, "0024_provider_multi_key.sql")).not.toThrow();
     // The declaration keeps its shape MINUS the key material and its
     // verification bookkeeping (both now belong to the key row).
     const declCols = (db.raw.query("PRAGMA table_info(app_custom_providers)").all() as Array<{ name: string }>).map(
@@ -797,7 +800,7 @@ describe("app-config store (createAppConfigStore) — provider keys", () => {
   test("a legacy two-segment-AAD row still decrypts and is promoted to the three-segment form", async () => {
     const db = createPreProviderPoolD1();
     const app = await seedApp(db, { slug: "a", createdBy: "mallory" });
-    // The pre-pool row a live deployment carries across 0023.
+    // The pre-pool row a live deployment carries across 0024.
     const legacyEnc = await createSecretbox(TEST_KEY).encryptSecret(
       PLAIN_ANTHROPIC_KEY,
       `app_provider_keys.key_enc:${app.id}:anthropic`,
@@ -809,7 +812,7 @@ describe("app-config store (createAppConfigStore) — provider keys", () => {
       app.id,
       legacyEnc,
     );
-    applyMigration(db, "0023_provider_multi_key.sql");
+    applyMigration(db, "0024_provider_multi_key.sql");
     const store = configStore(db);
     // The first read decrypts with the OLD AAD and serves the plaintext …
     expect(await store.getAppConfig(app.id)).toEqual({
@@ -945,7 +948,7 @@ describe("app-config store (createAppConfigStore) — provider keys", () => {
     const db = createPreProviderPoolD1();
     const app = await seedApp(db, { slug: "a", createdBy: "mallory" });
     const legacy = sk("legacy-delete-me-4242");
-    // The pre-pool row a live deployment carries across 0023.
+    // The pre-pool row a live deployment carries across 0024.
     const legacyEnc = await createSecretbox(TEST_KEY).encryptSecret(
       legacy,
       `app_provider_keys.key_enc:${app.id}:anthropic`,
@@ -957,7 +960,7 @@ describe("app-config store (createAppConfigStore) — provider keys", () => {
       app.id,
       legacyEnc,
     );
-    applyMigration(db, "0023_provider_multi_key.sql");
+    applyMigration(db, "0024_provider_multi_key.sql");
     // Carried verbatim under the sentinel id: only the DELETE's OWN promotion
     // can make the derived id addressable — no list/config call ran before it.
     const carried = db.raw.query("SELECT key_id FROM app_provider_keys").get() as { key_id: string };
@@ -1612,7 +1615,7 @@ describe("app-config store (createAppConfigStore) — custom providers", () => {
       JSON.stringify(CUSTOM.model_ids),
       legacyEnc,
     );
-    applyMigration(db, "0023_provider_multi_key.sql");
+    applyMigration(db, "0024_provider_multi_key.sql");
     const store = configStore(db);
     // The legacy row still decrypts through the consumer face and is promoted
     // to the three-segment AAD under its derived id.
@@ -1858,7 +1861,7 @@ describe("app-config store (createAppConfigStore) — custom providers", () => {
       JSON.stringify(CUSTOM.model_ids),
       legacyEnc,
     );
-    applyMigration(db, "0023_provider_multi_key.sql");
+    applyMigration(db, "0024_provider_multi_key.sql");
     const carried = db.raw.query("SELECT key_id FROM app_custom_provider_keys").get() as { key_id: string };
     expect(carried.key_id).toBe("");
     expect(

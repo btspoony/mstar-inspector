@@ -41,6 +41,7 @@ jobs:
     env:
       CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
       CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}   # account id is public — configured as a variable
+      ADMIN_LOGINS: ${{ vars.ADMIN_LOGINS }}   # login names are public identity — configured as a variable, not a secret
       OAUTH_CLIENT_ID: ${{ vars.OAUTH_CLIENT_ID }}   # client id is not sensitive — configured as a variable
       OAUTH_CLIENT_SECRET: ${{ secrets.OAUTH_CLIENT_SECRET }}
       DASHBOARD_SESSION_SECRET: ${{ secrets.DASHBOARD_SESSION_SECRET }}
@@ -62,6 +63,27 @@ jobs:
 
       - name: Build SPA
         run: bun run build:spa
+
+      # Runs before the FIRST wrangler invocation of any kind (`whoami` below,
+      # then every `wrangler secret bulk` and the final `wrangler deploy`): the
+      # secret write creates and deploys a Worker version, so a gate placed
+      # after it would already have published a version without the required
+      # binding — "fail before deploy" has to mean before the first one.
+      - name: Verify required ADMIN_LOGINS variable
+        run: |
+          # The RUNTIME rule itself, imported (src/dashboard/users.ts
+          # parseAdminLogins) — not a shell approximation of it: split on
+          # commas, JS String.trim() each entry, drop empties. Unset / blank /
+          # whitespace-only / comma-only / U+FEFF+"," all parse to zero logins
+          # and must fail closed BEFORE any deploy-capable step.
+          : "${ADMIN_LOGINS:?required — set the GitHub Actions variable ADMIN_LOGINS to a comma-separated list of GitHub logins (login names are public identity, so a variable, not a secret)}"
+          bun -e '
+            import { parseAdminLogins } from "./src/dashboard/users.ts";
+            if (parseAdminLogins(process.env.ADMIN_LOGINS).length === 0) {
+              console.error("::error::ADMIN_LOGINS is blank, whitespace-only or comma-only — set the GitHub Actions variable ADMIN_LOGINS to a comma-separated list of GitHub logins (e.g. alice,bob)");
+              process.exit(1);
+            }
+          '
 
       - name: Verify Cloudflare account
         run: |
@@ -92,7 +114,12 @@ jobs:
       - name: Deploy Worker
         shell: bash
         run: |
-          bunx wrangler deploy 2>&1 | tee deploy.log
+          # ADMIN_LOGINS comes from the GitHub Actions variable and is injected
+          # here as a plain Worker var (`--var NAME:VALUE`, wrangler 4.147.0
+          # splits on the FIRST colon only, so a comma-separated login list
+          # survives intact). keep_vars: true in wrangler.jsonc still preserves
+          # the other dashboard-managed var (REVIEW_ENABLED).
+          bunx wrangler deploy --var "ADMIN_LOGINS:$ADMIN_LOGINS" 2>&1 | tee deploy.log
           grep -oE 'Current Version ID: .+' deploy.log | tail -1 | cut -d' ' -f4 > version_id.txt
           test -s version_id.txt
 
@@ -113,51 +140,83 @@ jobs:
 
       - name: "Smoke: image digest"
         run: |
-          # Sandbox SDK 1.0 (durable_object policy). The digest still comes
-          # from `wrangler containers list --json`: wrangler 4.147.0 maps EVERY
-          # listed application to an `image` field (appsToJsonOutput in
-          # wrangler-dist/cli.js), and the deploy request stores the resolved
-          # `registry.cloudflare.com/<account>/<app>@sha256:<64hex>` reference
-          # (containerConfigToCreateRequest → configuration.image). The
-          # application record is read through BOTH observed shapes (.image and
-          # .configuration.image) because the Dash listing shape differs
-          # between the default and durable_object policies. The deploy LOG is
-          # NOT a digest source: the digest is debug-level only, and the
-          # container section prints nothing at all ("No changes to be made")
-          # when the image did not change.
-          bunx wrangler containers list --json > containers_raw.json
-          jq -r '.[] | select(.name == "mstar-inspector-sandbox-v2") | (.image // .configuration.image // empty)' \
-            containers_raw.json | grep -oE 'sha256:[0-9a-f]{64}' > image_digest.txt || true
-          if ! test -s image_digest.txt; then
-            echo "::error::no sha256 image digest for container app mstar-inspector-sandbox-v2 — raw \`wrangler containers list --json\` follows"
-            head -c 4000 containers_raw.json
+          set -euo pipefail
+          # Sandbox SDK 1.0 (durable_object policy). The digest comes from the
+          # `wrangler deploy` STDOUT already captured in deploy.log by
+          # `tee deploy.log`: the container summary block prints the resolved
+          # reference twice, on the "Preparing sandbox for Cloudflare
+          # Containers" and "sandbox is ready to run" lines —
+          #   registry.cloudflare.com/<account>/<repo>@sha256:<64hex>
+          # `wrangler containers list --json` is NOT usable for this app: the
+          # durable_object application record carries no usable image (the real
+          # deploy shows `"image": ""` for mstar-inspector-sandbox-v2 and no
+          # `.configuration.image` field) — the `image` shape belongs to the
+          # default-policy app `mstar-inspector-sandbox`, orphaned by the 1.0
+          # cutover. A second source would add an API call + token permission
+          # and an equality branch for no gain, so the deploy log is the single
+          # source; DOCS-01 wants the digest of what this deploy shipped.
+          #
+          # The registry repo name is wrangler-DERIVED
+          # (`<worker>-<class_name lowercase>-sandbox` →
+          # mstar-inspector-sandboxv1-sandbox) and is NOT the container
+          # application name (mstar-inspector-sandbox-v2); matching on the
+          # application name finds nothing — only the Worker prefix
+          # (mstar-inspector) is shared by both names.
+          : > image_digest.txt   # must exist even on the fail-loud path (upload-artifact if-no-files-found: error)
+          grep -oE 'registry\.cloudflare\.com/[^@[:space:]]*mstar-inspector[^@[:space:]]*@sha256:[0-9a-f]{64}' \
+            deploy.log | sort -u > digest_refs.txt || true
+          grep -oE 'sha256:[0-9a-f]{64}' digest_refs.txt | sort -u > digest_candidates.txt || true
+          count=$(wc -l < digest_candidates.txt | tr -d ' ')
+          if [ "$count" -eq 0 ]; then
+            echo "::error::no image digest for worker mstar-inspector in deploy.log (expected registry.cloudflare.com/<account>/mstar-inspector…@sha256:<64hex>) — log tail follows"
+            tail -40 deploy.log
             exit 1
           fi
-          rm containers_raw.json
-          # 备源（若列表形状再变，以部署日志锚定行兜底）：
-          # grep -oE "registry\.cloudflare\.com/${CLOUDFLARE_ACCOUNT_ID}/mstar-inspector-sandbox-v2@sha256:[0-9a-f]{64}" deploy.log
-
-      # ADMIN_LOGINS is a dashboard-managed plain var (keep_vars), never a
-      # Worker secret — `wrangler secret list` cannot observe it. Read the
-      # Worker settings instead; blank/comma-only parses to zero logins, the
-      # same rule as src/dashboard/users.ts parseAdminLogins.
-      - name: "Smoke: warn if ADMIN_LOGINS unset (first-login admin fallback)"
-        run: |
-          settings=$(curl -sf --max-time 30 --connect-timeout 5 -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" \
-            "https://api.cloudflare.com/client/v4/accounts/$CLOUDFLARE_ACCOUNT_ID/workers/scripts/mstar-inspector/settings") || settings=""
-          # A 200 with a malformed / non-success body is NOT a positively
-          # observed unset: jq must never read a parse failure as an empty
-          # ADMIN_LOGINS, so an unparseable payload degrades to the same
-          # silent path as a transport error.
-          printf '%s' "$settings" | jq -e '.success == true' >/dev/null 2>&1 || settings=""
-          if [ -n "$settings" ]; then
-            value=$(printf '%s' "$settings" \
-              | jq -r '[.result.bindings[]? | select(.name == "ADMIN_LOGINS") | if .type == "secret_text" then "set" else (.text // "") end] | join("")' \
-              | tr -d ' \t\n\r,')
-            if [ -z "$value" ]; then
-              echo "::warning::ADMIN_LOGINS is unset on the deployed Worker — with an empty dashboard_users table the first OAuth login becomes admin (self-disarming once any user row exists). Set ADMIN_LOGINS (plain var: dashboard Worker variable settings or wrangler.jsonc vars, then redeploy) before go-live — see docs/deploy.md § Multi-App go-live."
-            fi
+          if [ "$count" -gt 1 ]; then
+            echo "::error::$count distinct image digests for worker mstar-inspector in deploy.log — cannot pick a DOCS-01 baseline; raw matches follow"
+            cat digest_refs.txt
+            exit 1
           fi
+          rm -f digest_refs.txt
+          mv digest_candidates.txt image_digest.txt
+          test -s image_digest.txt
+
+      # ADMIN_LOGINS is a plain Worker var injected by this workflow's
+      # `wrangler deploy --var ADMIN_LOGINS:…` (login names are public
+      # identity, hence a variable, not a secret). `wrangler secret list`
+      # cannot observe it, so read the Worker settings instead; the observed
+      # value is fed through the RUNTIME parser itself (parseAdminLogins in
+      # src/dashboard/users.ts) rather than a shell approximation of it. This
+      # is an ASSERTION: the deploy is already live (containers/versions have
+      # no pre-flight dry run), so a missing/blank value must fail the run red
+      # rather than warn.
+      - name: "Assert ADMIN_LOGINS is set on the deployed Worker (first-login admin fallback)"
+        run: |
+          # Transport failure (no payload at all) FAILS the job: we cannot
+          # positively confirm the value, and a silent pass here would turn a
+          # flaky API read into a false green for exactly the check that guards
+          # the first-login-becomes-admin fallback.
+          settings=$(curl -sf --max-time 30 --connect-timeout 5 -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" \
+            "https://api.cloudflare.com/client/v4/accounts/$CLOUDFLARE_ACCOUNT_ID/workers/scripts/mstar-inspector/settings") || {
+            echo "::error::could not read the deployed Worker settings (transport failure) — cannot confirm ADMIN_LOGINS; re-run the workflow"
+            exit 1
+          }
+          # A 200 with a malformed / non-success body is NOT a positively
+          # observed set: never read a parse failure as a configured value.
+          if ! printf '%s' "$settings" | jq -e '.success == true' >/dev/null 2>&1; then
+            echo "::error::deployed Worker settings payload failed the jq success check (malformed JSON or success != true) — cannot confirm ADMIN_LOGINS"
+            exit 1
+          fi
+          value=$(printf '%s' "$settings" \
+            | jq -r '[.result.bindings[]? | select(.name == "ADMIN_LOGINS") | if .type == "secret_text" then "set" else (.text // "") end] | join("")')
+          ADMIN_LOGINS_DEPLOYED="$value" bun -e '
+            import { parseAdminLogins } from "./src/dashboard/users.ts";
+            if (parseAdminLogins(process.env.ADMIN_LOGINS_DEPLOYED).length === 0) {
+              console.error("::error::ADMIN_LOGINS is unset or blank/whitespace-only/comma-only on the deployed Worker — set the GitHub Actions variable ADMIN_LOGINS (comma-separated GitHub logins) and re-run the deploy; with an empty dashboard_users table the first OAuth login would become admin (self-disarming once any user row exists). See docs/deploy.md § 6.");
+              process.exit(1);
+            }
+          '
+          echo "ADMIN_LOGINS is set on the deployed Worker — the first-login admin fallback is disarmed"
 
       - name: Upload deploy evidence artifacts
         uses: actions/upload-artifact@v7
@@ -170,7 +229,7 @@ jobs:
           if-no-files-found: error
         if: always()   # keep per-run evidence even when a later step fails
 
-      - name: Record live image digest (DOCS-01 baseline)
+      - name: Record image digest (DOCS-01 baseline)
         run: |
           set -euo pipefail
           DIGEST=$(cat image_digest.txt); VERSION=$(cat version_id.txt)
@@ -179,6 +238,6 @@ jobs:
             echo "- Image digest: \`$DIGEST\`"
             echo "- Worker version: \`$VERSION\`"
             echo "- Actions run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
-            echo "- Live truth: \`wrangler containers list --json\` (compare for drift)"
+            echo "- Source: \`registry.cloudflare.com\` container reference printed by this run's \`wrangler deploy\` — \`wrangler containers list --json\` reports an empty \`image\` for the 1.0 durable_object application"
           } >> "$GITHUB_STEP_SUMMARY"
           echo "::notice::DOCS-01 baseline: digest=$DIGEST version=$VERSION (run summary + deploy-evidence artifact)"

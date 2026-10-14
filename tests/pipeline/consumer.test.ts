@@ -1729,9 +1729,9 @@ describe("createReviewConsumer", () => {
     db.raw
       .prepare(`INSERT INTO app_model_roles (app_id, role, selector) VALUES (?, 'code-reviewer', ?)`)
       .run(appId, preOverrides["code-reviewer"]);
-    // The pre-pool BYOK rows this App carried: written with the pre-0023
+    // The pre-pool BYOK rows this App carried: written with the pre-0024
     // two-segment AAD and no key_id, exactly like a live deployment's rows
-    // when 0023 applies (the store API cannot write them — it is pool-shaped).
+    // when 0024 applies (the store API cannot write them — it is pool-shaped).
     for (const [provider, key] of [
       ["ark", "ark-key"],
       // The overrides reference openai/anthropic — the pre-migration App
@@ -1750,17 +1750,17 @@ describe("createReviewConsumer", () => {
     db.raw.exec(readFileSync(join(import.meta.dir, "../../migrations", "0017_app_model_chains.sql"), "utf8"));
     // 0018 ships with the consumer that resolves the App's sandbox
     // image — the row backfills to the 'omp' default exactly like a real
-    // pre-37 App under this deployment pair. 0019–0023 complete the current
+    // pre-37 App under this deployment pair. 0019–0024 complete the current
     // migration set (0019 metadata, 0020 the lifecycle journal the
     // consumer's step-2 read queries, 0021–0022 the check / trigger columns,
-    // 0023 the per-key provider pools the store now writes).
+    // 0024 the per-key provider pools the store now writes).
     for (const name of [
       "0018_app_sandbox_images.sql",
       "0019_github_apps_metadata.sql",
       "0020_finding_lifecycle.sql",
       "0021_review_checks.sql",
       "0022_app_trigger_mode.sql",
-      "0023_provider_multi_key.sql",
+      "0024_provider_multi_key.sql",
     ]) {
       db.raw.exec(readFileSync(join(import.meta.dir, "../../migrations", name), "utf8"));
     }

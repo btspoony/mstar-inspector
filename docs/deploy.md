@@ -75,13 +75,13 @@ exist before the first deploy:
     chain and re-verifying BOTH an existing worker and a fresh one — explicitly out of scope for this
     change, not a casual follow-up.
 
-### D1 migrations (0001–0023, forward-only)
+### D1 migrations (0001–0024, forward-only)
 
 The apply is **preceded by a Time Travel bookmark** — the pre-apply snapshot
-every `0023` rollback refers to (§ Rollback). `0023` rebuilds
+every `0024` rollback refers to (§ Rollback). `0024` rebuilds
 `app_provider_keys` and `app_custom_providers` (create → copy → drop → rename)
 and the store promotes each carried-over row to the `key_id` pool key on its
-first touch, so pre-`0023` code cannot read the live schema afterwards; the
+first touch, so pre-`0024` code cannot read the live schema afterwards; the
 bookmark is also the only recovery if the four-statement rebuild is
 interrupted mid-file. **Keep the bookmark string** — it is the rollback's
 restore point, and it expires 30 days after it was taken.
@@ -99,7 +99,7 @@ wrangler d1 migrations apply mstar-inspector-db            # local dev
 Local dev has no Time Travel backend — the bookmark covers the remote
 (`--remote`) database. On the automated path the workflow applies the
 migrations, so take the bookmark **before pushing the merge** that carries
-`0023` (§ Automated deploy).
+`0024` (§ Automated deploy).
 
 | Migration | Contents |
 |---|---|
@@ -125,10 +125,17 @@ migrations, so take the bookmark **before pushing the merge** that carries
 | `0020_finding_lifecycle` | the finding-lifecycle and private pre-publication journal tables (`review_publications`, `review_findings`, `review_finding_rounds`, `review_threads`) — publication proof, closure and thread-resolution state (spec §7.1) |
 | `0021_review_checks` | the per-attempt Check registry (`review_checks`) behind the advisory Check Runs, with `UNIQUE(attempt_key, generation)` and the partial unique index keeping at most one nonterminal generation per attempt key (spec §7.1/§7.9) |
 | `0022_app_trigger_mode` | `github_apps.review_trigger_mode` TEXT NOT NULL DEFAULT 'every_push' CHECK (review_trigger_mode IN ('open','every_push','manual')) — the per-App review trigger mode (spec `review-trigger-policy.md` §2); metadata-only ADD COLUMN, existing rows (live and soft-deleted) materialize to the `every_push` default, no manager visit needed |
-| `0023_provider_multi_key` | `app_provider_keys` moves to the per-key pool primary key `(app_id, provider, key_id)`, and the new `app_custom_provider_keys` table takes over the custom-provider key material `app_custom_providers` no longer holds. SQLite cannot change a primary key in place, so both tables are rebuilt (create → copy → drop → rename); existing rows are carried across verbatim under the empty-string `key_id` sentinel and the store promotes each row on its first touch. Forward-only: a rollback means reverting the deploy AND restoring the Time Travel bookmark taken before the apply (§ Rollback). Must apply after `0004`/`0006`/`0012`/`0015` |
+| `0023_removed_logins` | `removed_logins` — removal tombstones: the key is `github_login` with the same NOCASE comparison as `users.github_login` (0016 parity), `removed_at` is required, `removed_by` is the acting admin's login (NULL when no actor was in scope). Written in the SAME transaction as the membership row delete, so `bootstrapDashboardAccess` can deny a removed login even when the `ADMIN_LOGINS` allowlist still lists it — an operator's removal is authoritative — while `createUser` clears the record on a deliberate re-invite |
+| `0024_provider_multi_key` | `app_provider_keys` moves to the per-key pool primary key `(app_id, provider, key_id)`, and the new `app_custom_provider_keys` table takes over the custom-provider key material `app_custom_providers` no longer holds. SQLite cannot change a primary key in place, so both tables are rebuilt (create → copy → drop → rename); existing rows are carried across verbatim under the empty-string `key_id` sentinel and the store promotes each row on its first touch. Forward-only: a rollback means reverting the deploy AND restoring the Time Travel bookmark taken before the apply (§ Rollback). Must apply after `0004`/`0006`/`0012`/`0015` |
 
 Migrations are **forward-only** (0002 precedent): never hand-edit an applied
-migration; add the next file.
+migration; add the next file. Apply order matters for the newest pair: `0023`
+must exist before the code that reads `removed_logins` runs (the Deploy
+workflow applies migrations before deploying) — a code rollback to a version
+predating `0023` stays safe, because that version ignores the new table,
+while rolling the SCHEMA back is not supported. `0024` (the per-key provider
+pool) applies last of all, and its own rollback needs the pre-apply Time
+Travel bookmark (§ Rollback).
 Note: migration 0006's `app_model_config` comment ("NULL / absent row = unset → falls back to the global OMP_REVIEW_MODEL") is superseded by AL-24-5 — chain-less Apps fail closed, no global chain since v0.9.
 
 ### Secrets and vars inventory
@@ -190,13 +197,14 @@ stale-account trap this guards).
 Token** scoped to the deploy account (`f68fcd78e7c5c10f0466788bb9e85b8e`)
 with at least: **D1 → Edit** (migrations apply), **Workers Scripts → Edit**
 (`wrangler deploy` + `secret bulk`), **Workers Containers → Edit**
-(`containers list` digest extraction). A token that passes `wrangler whoami`
+(`wrangler deploy` builds and pushes the sandbox image; the digest smoke
+itself only reads `deploy.log`). A token that passes `wrangler whoami`
 but lacks D1 access fails the migration step with
 `The given account is not valid or is not authorized to access this service
 [code: 7403]` — the account id is correct; the token's permissions are not.
 
 Provider API keys and the review model chain are **not** Worker env — they
-live per App in D1 (`app_provider_keys` per-key pools since `0023`, custom
+live per App in D1 (`app_provider_keys` per-key pools since `0024`, custom
 credentials in `app_custom_provider_keys`; the chains in `app_model_chains` /
 `app_model_chain_seats` since `0017`), configured on each App's dashboard
 Settings page and injected into the
@@ -206,12 +214,13 @@ was retired with the global fallback — an App missing its chain or a chain
 provider's key fails its reviews closed).
 
 Plain vars — `wrangler.jsonc` `vars` or the dashboard's Worker variable
-settings; redeploy to change:
+settings; redeploy to change (except `ADMIN_LOGINS`, which the Deploy workflow
+sources from a GitHub Actions variable — see below):
 
 | Name | Default | Purpose |
 |---|---|---|
 | `REVIEW_ENABLED` | unset | **emergency brake only**: per-App `github_apps.review_enabled` is the primary review control; only the exact `"false"` (case-sensitive, untrimmed) stops ALL reviews — unset / `""` / `"true"` / `"TRUE"` / other → per-App governs |
-| `ADMIN_LOGINS` | unset | comma-separated GitHub logins bootstrapped as dashboard admin |
+| `ADMIN_LOGINS` | **required** | comma-separated GitHub logins **bootstrapped** as dashboard admin — the "at least one" list that lets the first admin reach the dashboard; sourced from the GitHub Actions **variable** `ADMIN_LOGINS` (`staging` env or repo-level), injected by the Deploy workflow with `wrangler deploy --var`, and passed explicitly by the documented manual deploys. It is **not** the membership SSOT and is not consumed once: after the first admin exists, membership lives in the dashboard's `users` table / Members page. It bootstraps a listed login that has **no `users` row and was never removed** — an existing row always wins (no promotion), and a login an operator removed stays denied even while the list still spells it; only an explicit re-invite on the Members page clears that record. Missing/blank/comma-only fails the deploy **before** it ships — see § 6 |
 
 > **REVIEW_ENABLED cutover checklist (上线即生效 — run BEFORE the deploy that
 > flips the semantics; the semantic inversion takes effect the moment the Worker lands):**
@@ -367,9 +376,10 @@ only via `wrangler deploy`).
 ## Deploy steps (manual reference)
 
 > The automated path (§ Automated deploy) runs the same sequence in CI —
-> typecheck/test → secrets → D1 migrations → `wrangler deploy` → smoke →
-> digest record. The steps below are the manual equivalent, kept as reference
-> for local runs and for recovering from a failed automated deploy.
+> typecheck/test → required-input gate → secrets → D1 migrations →
+> `wrangler deploy` → smoke → digest record. The steps below are the manual
+> equivalent, kept as reference for local runs and for recovering from a
+> failed automated deploy.
 
 Order lock (plan Clarify #5): code merge → `wrangler deploy` (the container
 image auto-rebuilds when the Dockerfile/build context changed) → post-deploy
@@ -389,40 +399,63 @@ smoke → record the digest.
    `sandbox-read` installation-token mint — restricted to the one GH_REPO
    repository and asserted read-only against the **returned** grant
    (`assertSandboxGrant`), so a broader or unscoped capability fails the smoke
-   closed — plus the optional
-   `INSTALLATION_ID` (default 156621513), `GH_REPO` (default
-   btspoony/todo-bots), `GH_PR` (default 1), `SMOKE_ROUTE` (default `/smoke`),
-   and `ARK_API_KEY` (the operator's own key; required when
+   closed — plus the required
+   `INSTALLATION_ID` (the App installation id to mint the token for) and
+   `GH_REPO` (the `owner/repo` the smoke runs against), and the
+   optional `SMOKE_ROUTE` (default `/smoke`),
+   `ARK_API_KEY` (the operator's own key; required when
    `SMOKE_ROUTE=/smoke-review`, where the orchestrator forwards it into the
    container as the `MSTAR_POOL_ARK_01` slot with `MSTAR_POOL_ARK_COUNT=1` —
    the same pool env the production consumer builds):
    ```bash
-   SMOKE_APP_ID=… SMOKE_PRIVATE_KEY=… bun run scripts/sandbox-smoke.ts
-   # /smoke: getSandbox → exec gh pr diff → destroy
-   SMOKE_APP_ID=… SMOKE_PRIVATE_KEY=… SMOKE_ROUTE=/smoke-review ARK_API_KEY=… \
+   SMOKE_APP_ID=… SMOKE_PRIVATE_KEY=… INSTALLATION_ID=… GH_REPO=owner/repo \
      bun run scripts/sandbox-smoke.ts
+   # /smoke: getSandbox → runCommand(gh pr diff) → destroy
+   SMOKE_APP_ID=… SMOKE_PRIVATE_KEY=… INSTALLATION_ID=… GH_REPO=owner/repo \
+     SMOKE_ROUTE=/smoke-review ARK_API_KEY=… bun run scripts/sandbox-smoke.ts
    # /smoke-review: full in-image runner (clone + omp review + parse) → destroy
    ```
-4. `bun run build:spa && wrangler deploy` — build the SPA assets first
+   `INSTALLATION_ID` / `GH_REPO` are required inputs with no default.
+   **The smoke target is fixed, not arbitrary**, and the code *assumes* the
+   repository shape rather than verifying it: the PR number is the constant
+   `#1`, and the configured repository must carry PR **#1 whose head is the
+   `mstar-inspector-seed` branch, based against `main`** — there is no "works
+   for any accessible repository" behaviour. `/smoke-review` clones that seed
+   branch, fetches `main`, and diffs against it. `/smoke` only reaches the
+   clone in its **fallback** path; its primary path runs
+   `gh pr diff 1 --repo <repo>` on the same PR.
+4. `bun run build:spa && wrangler deploy --var "ADMIN_LOGINS:alice,bob"` —
+   build the SPA assets first
    (`dist/spa` is gitignored — a fresh clone has none, and `wrangler.jsonc`
    serves them via `assets`), then deploy the Worker (webhook face + queue
    consumer + cron trigger). The step also rebuilds/pushes the container
    image when the build context changed. **Copy the image digest from the
-   deploy output.**
-5. Record the digest baseline — on the automated path the workflow writes it
-   to the run summary (`$GITHUB_STEP_SUMMARY`) and uploads `deploy-evidence`
-   artifacts; the manual equivalent is to note the digest from the deploy
-   output (or `wrangler containers list --json`).
-   **Digest drift check (DOCS-01):** after every deploy, verify the live
-   version + image against the recorded baseline —
+   deploy output.** The `--var` is required and carries the same value the
+   Deploy workflow injects (`--var "ADMIN_LOGINS:$ADMIN_LOGINS"`): a manual
+   `wrangler deploy` that omits it leaves the first OAuth login on an empty
+   `users` table as admin (§ 6).
+5. Record the digest baseline — on the automated path the workflow greps it
+   out of the deploy log (`Smoke: image digest`), then writes it to the run
+   summary (`$GITHUB_STEP_SUMMARY`) and uploads `deploy-evidence` artifacts;
+   the manual equivalent is to copy the digest from the `wrangler deploy`
+   output's container summary block (the `registry.cloudflare.com/…@sha256:`
+   line).
+   **Digest drift check (DOCS-01):** after every deploy, check the live
+   version against the recorded baseline —
    ```bash
    wrangler deployments list   # or: wrangler versions list
-   wrangler containers list --json   # live image digest
    ```
    The **baseline** is the latest successful run's summary / `deploy-evidence`
-   artifact (see § Image pins and digest record); the **live truth** is
-   `wrangler containers list --json` — a stale baseline makes the "which
-   image is live" audit wrong.
+   artifact (see § Image pins and digest record) — its digest is the
+   `registry.cloudflare.com/…@sha256:` reference that run's `wrangler deploy`
+   printed. There is **no independent live-digest source** to compare it
+   against: `wrangler containers list --json` reports an empty `image` for
+   this Worker's 1.0 `durable_object` application (only the orphaned
+   default-policy `mstar-inspector-sandbox` app still carries a reference) —
+   it remains useful for application **state** (`name` / `state` /
+   `instances` / `version`), not for the digest. Drift is therefore detected by
+   deploying and diffing the new run's digest against the baseline; a stale
+   baseline makes the "which image is live" audit wrong.
 
 ### Sandbox image — U-001 synthesis verification
 
@@ -450,10 +483,13 @@ docker run --rm --entrypoint /opt/verify-synthesis.sh <image>
 
 > The Deploy workflow runs the automated smoke on every deploy: healthz
 > (3 attempts, 5s apart), cron registration (grep of the deploy log for
-> `schedule: */15 * * * *`), and image-digest extraction (live container
-> state). Any failure turns the run red and stops. The manual checks below
-> are extra / local investigation steps, not the workflow smoke — for local
-> runs and for investigating a red run.
+> `schedule: */15 * * * *`), and image-digest extraction (grep of the same
+> deploy log for the container summary's
+> `registry.cloudflare.com/<account>/mstar-inspector…@sha256:<64hex>`
+> reference, sorted unique — zero matches or several distinct digests fail
+> the run red). Any failure turns the run red and stops. The manual checks
+> below are extra / local investigation steps, not the workflow smoke — for
+> local runs and for investigating a red run.
 >
 > **URL permanence:** `/dashboard/apps` — and `/dashboard/apps/` —
 > are permanently retired → 301 `/dashboard`; do not re-introduce the path
@@ -505,11 +541,11 @@ docker run --rm --entrypoint /opt/verify-synthesis.sh <image>
 > `DASHBOARD_ENCRYPTION_KEY`, the dashboard registration flow, the per-App
 > webhook repoint, and the R1/R2 verification pins. Run AFTER § Deploy steps
 > and § Post-deploy smoke (the base Worker and D1 migrations **through
-> `0023`** must be live); the live execution is QA-coordinated. Historical
+> `0024`** must be live); the live execution is QA-coordinated. Historical
 > note: the go-live originally required `0001–0011`; the chain now extends
-> to `0023` (`0019` profile columns, `0020`
+> to `0024` (`0019` profile columns, `0020`
 > finding lifecycle, `0021` Check registry, `0022` per-App trigger mode,
-> `0023` the per-key provider pool).
+> `0023` removal tombstones, `0024` the per-key provider pool).
 
 ### 1. Set DASHBOARD_ENCRYPTION_KEY
 
@@ -545,24 +581,43 @@ either key for the other duty (rotation stays decoupled).
 ### 2. Register an App from the dashboard
 
 Prerequisites: dashboard OAuth (`OAUTH_CLIENT_ID` /
-`OAUTH_CLIENT_SECRET`), `DASHBOARD_SESSION_SECRET`, an admin login
-(`ADMIN_LOGINS` bootstrap or the first-login fallback),
+`OAUTH_CLIENT_SECRET`), `DASHBOARD_SESSION_SECRET`, an admin login — a login
+on the required `ADMIN_LOGINS` bootstrap list that has **no removal record**
+(the empty-table fallback cannot
+arm: the Deploy gate requires the list to parse to at least one login),
 `DASHBOARD_ENCRYPTION_KEY` set, and D1 migrations applied **through
-`0023`** — the full forward-only chain above, not a historical prefix.
+`0024`** — the full forward-only chain above, not a historical prefix.
 `0020` supplies the finding-lifecycle/publication journal, `0021` the
-Check registry, and `0022` the per-App trigger-mode column the webhook
-face reads on every delivery, and `0023` the per-key provider pool
-(`app_provider_keys` + `app_custom_provider_keys`) every App's provider
+Check registry, `0022` the per-App trigger-mode column the webhook
+face reads on every delivery, `0023` the removal tombstones the
+OAuth bootstrap reads before the allowlist, and `0024` the per-key provider
+pool (`app_provider_keys` + `app_custom_provider_keys`) every App's provider
 keys are stored in. A missing `0022` does NOT stop reviews:
 the webhook face degrades to `every_push` semantics (the row's mode
 reads as `undefined`, which the classifier treats as every_push). What
 fails closed instead is the dashboard: the Settings page
 (`parseSettings` rejects the payload without the mode field) and the
-trigger-mode POST (its D1 UPDATE errors on the missing column).
+trigger-mode POST (its D1 UPDATE errors on the missing column). A missing
+`0023` also fails the dashboard closed, not open: the bootstrap's tombstone
+read and the members-remove batch both error out (500) instead of quietly
+dropping the removal record. A missing `0024` fails the provider faces
+closed instead: the per-key pool tables it creates are the only shape the
+store writes to.
 
 1. **Admin login** — open `/dashboard/login` and complete the GitHub OAuth
-   flow. The first login against an empty `dashboard_users` table becomes
-   admin (or `ADMIN_LOGINS` bootstraps the listed logins).
+   flow. Precedence (`bootstrapDashboardAccess`, `src/dashboard/users.ts`):
+   an existing `dashboard_users` row wins (allow, no promotion); a login
+   whose removal is on record is denied — the allowlist never resurrects it;
+   otherwise a
+   login on the `ADMIN_LOGINS` list gets an admin row; the empty-table
+   first-login fallback applies **only** when the parsed list is empty — which
+   the required deploy gate prevents — so any other login is denied
+   (invite-only, zero cookies). `ADMIN_LOGINS` exists so this first admin can
+   reach the dashboard at all — that is its purpose, not its only effect: the
+   Members page is the membership SSOT, a listed login with no `users`
+   row remains eligible for admin bootstrap, and a removal there is
+   authoritative (the record survives every later deploy until an admin
+   re-invites the login).
 2. **Create GitHub App** — on the dashboard workbench (`/dashboard`, the
    Apps-first home) click **Create GitHub App**. The dashboard mints the webhook slug
    (`mstar-inspector-<login>`-derived, DB pre-resolved) and POSTs the App
@@ -688,44 +743,90 @@ face to repoint to; the per-App webhook URL on GitHub is unchanged by a
 Worker rollback.
 
 - **D1 is forward-only** — never reverse an applied migration on rollback
-  (the chain head is `0023`). The code-only precedent (0002 — new code
-  tolerates the prior schema) covers additive migrations; `0023` rebuilt
-  tables, so pre-`0023` code does not run against the live schema and its
+  (the chain head is `0024`). The code-only precedent (0002 — new code
+  tolerates the prior schema) covers additive migrations; `0024` rebuilt
+  tables, so pre-`0024` code does not run against the live schema and its
   rollback needs the pre-apply Time Travel bookmark as well (§ D1 migrations,
-  § Rollback).
+  § Rollback). The `0023` removal tombstones stay safe on a code rollback: a
+  version predating `removed_logins` simply ignores the table.
 - **Secrets untouched** — rollback does not remove
   `DASHBOARD_ENCRYPTION_KEY`; rotate it explicitly when the rollback is
   security-motivated. A registered App's encrypted credentials stay valid
   across a Worker rollback (the key is unchanged).
 
-### 6. ADMIN_LOGINS bootstrap warning (deploy-time)
+### 6. ADMIN_LOGINS is required (deploy-time gate + assertion)
 
-The Deploy workflow's post-deploy smoke emits a **`::warning`** run
-annotation when the deployed Worker has **no usable `ADMIN_LOGINS` value**.
-The step reads the Worker's live settings via the Cloudflare API (NOT
-`wrangler secret list` — `ADMIN_LOGINS` is a plain var, so a secret listing
-never shows it) and treats a missing `ADMIN_LOGINS` binding, or one whose
-value is blank/comma-only, as unset — mirroring `parseAdminLogins`
-(`src/dashboard/users.ts`) and its blank/comma-only rule, modulo whitespace
-trimming, which the smoke check additionally strips.
+`ADMIN_LOGINS` is **required**. It is a GitHub Actions **variable** (login
+names are public identity, so never a secret), configured for the `staging`
+environment or repo-wide (Settings → Environments → `staging` → **Variables**,
+or Settings → Secrets and variables → Actions → Variables).
 
-What the warning means: with `ADMIN_LOGINS` unset and an **empty
-`dashboard_users` table**, the first OAuth login becomes admin (the
-first-login fallback, `bootstrapDashboardAccess`). The fallback is
-**self-disarming** — once any user row exists, unknown logins are denied
-(403, zero cookies) until an admin invites them. The warning exists so the
-fallback is never silently armed: at go-live, either set `ADMIN_LOGINS`
-first or knowingly claim the first-login admin identity.
+**What it is:** an **"at least one" bootstrap list** — its job is to let the
+first admin reach the dashboard at all. It is **not** a second
+membership-management surface, and it is **not** consumed once: the runtime
+still bootstraps any listed login that has **no `users` row** (an existing row
+always wins, without promotion). Once any user row exists, the dashboard's
+`users` table — the Members page — is the authorization SSOT.
 
-It is visibility, not a gate — the deploy succeeds either way, at most one
-warning per deploy. To clear it, set `ADMIN_LOGINS` (plain Worker **var,
-not a secret** — login names are public identity; § Secrets and vars
-inventory) in the dashboard's Worker variable settings or `wrangler.jsonc`
-`vars` and redeploy (`keep_vars` preserves dashboard-managed values across
-automated deploys). Transport/API errors inside the check stay silent, and
-a 200 response whose body fails the success-payload check (malformed JSON
-or `success != true`) degrades to the same silence: the warning fires only
-on a positively observed unset.
+The Deploy workflow:
+
+1. **Fails closed before any deploy-capable step** when the variable is missing, blank,
+   whitespace-only, or comma-only — the `Verify required ADMIN_LOGINS variable`
+   step runs before the **first** `wrangler` invocation of any kind
+   (`wrangler whoami`, the secret writes, and the final `wrangler deploy`):
+   `wrangler secret bulk` publishes a Worker version of its own, so a gate
+   placed after it would already have shipped a version without the required
+   binding. A misconfigured operator therefore never ships a Worker with the
+   first-login-becomes-admin fallback silently armed. The
+   step imports and calls the runtime parser itself
+   (`parseAdminLogins`, `src/dashboard/users.ts`) and fails when it yields zero
+   logins, so the deploy gate cannot drift from the Worker's own rule.
+2. **Is passed explicitly on every manual deploy too** — the documented
+   manual paths ([`README.md`](../README.md) Path A step 5 / Path B step 1 and
+   § Deploy steps step 4 above) deploy with
+   `wrangler deploy --var "ADMIN_LOGINS:<comma-separated logins>"`, the same
+   value this workflow injects. `wrangler.jsonc` defines no `ADMIN_LOGINS`, so
+   a bare `wrangler deploy` is **not** a supported deploy path: it would ship
+   with the fallback armed. There is no second deployment path — the manual
+   commands are the workflow's equivalent, not an alternative to it.
+3. **Injects it into the Worker** at deploy time via
+   `wrangler deploy --var "ADMIN_LOGINS:$ADMIN_LOGINS"`, so the value no longer
+   depends on the Cloudflare dashboard (a comma-separated multi-login value
+   survives intact: wrangler splits `--var` on the first colon only).
+4. **Asserts it on the deployed Worker** after the deploy: the step reads the
+   Worker's live settings via the Cloudflare API (NOT `wrangler secret list` —
+   `ADMIN_LOGINS` is a plain var, so a secret listing never shows it), feeds the
+   observed value through the same `parseAdminLogins` runtime rule, and fails
+   the job (`::error::` + non-zero exit) when it yields zero logins. The curl is
+   bounded (`--max-time 30 --connect-timeout 5`)
+   and a `jq -e '.success == true'` guard ensures a malformed payload is never
+   read as a positive observation. A **transport failure fails the job** —
+   failing to read the settings means the value cannot be confirmed, and a
+   silent pass there would turn a flaky API read into a false green.
+
+Why it matters: `ADMIN_LOGINS` is the **"at least one" bootstrap list** — its
+purpose is to ensure the first admin can access the dashboard. It is not
+ongoing membership management: the `users` table / Members page is the
+membership SSOT, and the list is not consumed once — it bootstraps a listed
+login that has no `users` row **and was never removed**, while an existing row
+always wins without promotion. A login an operator removed is denied even
+while the list still spells it: the removal is recorded in `removed_logins`
+(migration `0023`, written in the same transaction as the row delete) and the
+bootstrap consults it before the allowlist, so the record survives every later
+deploy until an admin deliberately re-invites the login on the Members page.
+The bootstrap insert itself refuses while the record exists — a write-boundary
+check inside the `INSERT` (`WHERE NOT EXISTS (removal record)`), not a
+read-then-write window — so a sign-in already in flight when the removal lands
+is denied instead of resurrecting the login.
+The empty-table first-login fallback needs a
+genuinely empty parsed list, which this required gate prevents — so the
+fallback can no longer be silently armed by a blank value. Logins that are
+neither on the list nor in the table are denied (403, zero cookies) until an
+admin invites them on the Members page.
+
+To change the value, update the GitHub Actions variable and re-run the deploy
+(the workflow injects it again); `keep_vars: true` in `wrangler.jsonc` only
+preserves the other dashboard-managed var (`REVIEW_ENABLED`) across deploys.
 
 ## Rollback
 
@@ -741,9 +842,9 @@ on a positively observed unset.
   The 0002 code-only precedent (new code tolerates the prior schema; roll back
   code only) holds for additive migrations. Because migrations apply before
   deploy in the automated path, a failed run may have already applied them —
-  and `0023` rebuilt `app_provider_keys` and `app_custom_providers`, so the
+  and `0024` rebuilt `app_provider_keys` and `app_custom_providers`, so the
   current code needs the `key_id` column and `app_custom_provider_keys` that
-  the pre-`0023` schema lacks. Reverting to pre-`0023` code therefore requires
+  the pre-`0024` schema lacks. Reverting to pre-`0024` code therefore requires
   restoring the pre-apply Time Travel bookmark **as well as** reverting
   the code; the schema is never reversed by hand.
   ```bash
@@ -753,7 +854,7 @@ on a positively observed unset.
   wrangler d1 time-travel restore mstar-inspector-db --bookmark=<pre-apply-bookmark>
   ```
   The bookmark is valid for 30 days after the apply and is the only restore
-  point for this migration — without it, a pre-`0023` rollback is a
+  point for this migration — without it, a pre-`0024` rollback is a
   credential-loss event for every App (the promoted rows are unreadable to the
   old code: three-segment AAD + real `key_id`).
 - Secrets/vars are untouched by rollback — rotate explicitly when the
@@ -862,10 +963,14 @@ Deployed image record (DOCS-01 baseline):
 > and uploads per-run evidence (deploy.log / version_id.txt /
 > image_digest.txt) as the `deploy-evidence` Actions artifact. The GitHub
 > **Environments → staging** page shows the deployment history (commit,
-> actor, timestamp). The **live truth** is `wrangler containers list --json`
-> (Cloudflare state); the run summary is the deploy-time baseline for the
-> DOCS-01 drift check — compare the live image against the latest run's
-> digest after any deploy. Historical record (2026-08-31 manual deploy):
+> actor, timestamp). The digest is the container reference the deploying
+> `wrangler deploy` printed — `wrangler containers list --json` does **not**
+> carry it for the 1.0 `durable_object` app (the record reports
+> `"image": ""`; only the orphaned default-policy `mstar-inspector-sandbox`
+> app still shows a reference), which is why no side-by-side live compare is
+> possible: the run summary is the deploy-time baseline for the DOCS-01
+> drift check — diff the new run's digest against it after any deploy.
+> Historical record (2026-08-31 manual deploy):
 > digest `sha256:09724a204ef38dab02b88a6537bdd3f051997ac144f0aeff7d5901d9d75aa57d`,
 > Worker version `62c18d0a`.
 

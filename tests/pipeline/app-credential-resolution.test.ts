@@ -95,7 +95,7 @@ function createMigratedD1(): ReturnType<typeof createTestD1> {
     "0020_finding_lifecycle.sql",
     "0021_review_checks.sql",
     "0022_app_trigger_mode.sql",
-    "0023_provider_multi_key.sql",
+    "0024_provider_multi_key.sql",
   ]) {
     db.raw.exec(readFileSync(join(MIGRATIONS_DIR, name), "utf8"));
   }

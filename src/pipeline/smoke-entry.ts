@@ -14,8 +14,9 @@
  *                          destroy. Path 2 falls back to a git clone + diff
  *                          (token injected via git env config, never in the
  *                          command string). Returns JSON evidence, no secrets.
- *   GET /smoke-review    → clone the real PR head (btspoony/todo-bots#1),
- *                          write the runner --input JSON (reconFacts: PR fact
+ *   GET /smoke-review    → clone the configured smoke repository's fixed
+ *                          `mstar-inspector-seed` branch, write the runner
+ *                          --input JSON (reconFacts: PR fact
  *                          + checked-out head sha + numstat universe — the
  *                          same shape src/pipeline/consumer.ts writes, plus
  *                          the required capabilityHosts: the deployed omp
@@ -52,10 +53,34 @@ type SmokeEnv = {
    * credential rows. Never a scalar provider env name.
    */
   MSTAR_POOL_ARK_01?: string;
+  /** Smoke target repository `owner/repo` (orchestrator `--var`, no default). */
+  GH_REPO: string;
 };
 
-const GH_REPO = "btspoony/todo-bots";
+/**
+ * Fixed smoke PR: the seed branch carries exactly this one diffable PR, so a
+ * configured repository must ship `mstar-inspector-seed` + PR #1 (docs/deploy.md
+ * § Sandbox smoke).
+ */
 const GH_PR = "1";
+/** Fixed clone branch of the smoke target (never configurable). */
+const SEED_BRANCH = "mstar-inspector-seed";
+
+// GitHub name charset (owner/repo). GH_REPO comes from the orchestrator and
+// reaches a shell command string, so validate before minting the shellCommand
+// brand (the same allowlist gitops.ts applies to payload-derived fields).
+const GITHUB_NAME_RE = /^[A-Za-z0-9._-]+$/;
+
+/** Validated `owner/repo` from GH_REPO, or null when missing/malformed. */
+function smokeRepo(env: SmokeEnv): string | null {
+  const repo = env.GH_REPO ?? "";
+  const [owner, name, ...rest] = repo.split("/");
+  if (rest.length > 0 || !owner || !name || !GITHUB_NAME_RE.test(owner) || !GITHUB_NAME_RE.test(name)) {
+    return null;
+  }
+  return repo;
+}
+
 const CLONE_DIR = "/workspace/repo";
 /** Runner --input JSON path (same constant as the production consumer). */
 const INPUT_PATH = "/workspace/review-input.json";
@@ -72,11 +97,21 @@ export default {
       // Same additive version field as the worker face.
       return Response.json({ ok: true, version: `v${APP_VERSION}` });
     }
-    if (url.pathname === "/smoke-review") {
-      return runReviewSmoke(env);
-    }
-    if (url.pathname !== "/smoke") {
+    if (url.pathname !== "/smoke" && url.pathname !== "/smoke-review") {
       return new Response("not found", { status: 404 });
+    }
+
+    // GH_REPO reaches a shell command string — validate before the first
+    // getSandbox call on EITHER route (missing/empty fails closed).
+    const repo = smokeRepo(env);
+    if (!repo) {
+      return Response.json(
+        { ok: false, error: "GH_REPO must be owner/repo (passed via --var by scripts/sandbox-smoke.ts)" },
+        { status: 400 },
+      );
+    }
+    if (url.pathname === "/smoke-review") {
+      return runReviewSmoke(env, repo);
     }
 
     const sandbox = await getSandbox(env.SANDBOX, `smoke-${crypto.randomUUID()}`);
@@ -84,9 +119,9 @@ export default {
     let result: Record<string, unknown>;
     try {
       // Path 1 (primary hypothesis): gh CLI with GH_TOKEN env injection.
-      // GH_PR/GH_REPO are compile-time constants — audited in-repo values,
-      // cleared for the sink via the shellCommand brand mint.
-      const gh = await sandbox.runCommand(shellCommand(`gh pr diff ${GH_PR} --repo ${GH_REPO}`), {
+      // GH_REPO was allowlist-validated in fetch(), and the string is cleared
+      // for the sink via the shellCommand brand mint.
+      const gh = await sandbox.runCommand(shellCommand(`gh pr diff ${GH_PR} --repo ${repo}`), {
         env: { GH_TOKEN: env.GH_TOKEN },
       });
       if (gh.exitCode === 0 && gh.stdout.trim().length > 0) {
@@ -104,7 +139,7 @@ export default {
         const git = await sandbox.runCommand(
           shellCommand(
             [
-              `git clone --depth 1 --branch mstar-inspector-seed https://github.com/${GH_REPO}.git ${CLONE_DIR}`,
+              `git clone --depth 1 --branch ${SEED_BRANCH} https://github.com/${repo}.git ${CLONE_DIR}`,
               `cd ${CLONE_DIR}`,
               "git fetch --depth 1 origin main",
               "git diff FETCH_HEAD HEAD",
@@ -164,13 +199,13 @@ export default {
 
 /**
  * Runner falsification: real SDK, real model key (the MSTAR_POOL_ARK_* pool via
- * exec env), real PR clone (btspoony/todo-bots#1). The runner inside the image
- * reads the diff file, writes the pool into the run's credential store, runs
- * the omp review session, and prints ONLY the ReviewOutput JSON to stdout. We
- * parse that stdout with parseReviewOutput and return the verdict shape —
- * never the key, never the raw model text.
+ * exec env), real clone of the configured smoke repository's seed branch. The
+ * runner inside the image reads the diff file, writes the pool into the run's
+ * credential store, runs the omp review session, and prints ONLY the
+ * ReviewOutput JSON to stdout. We parse that stdout with parseReviewOutput and
+ * return the verdict shape — never the key, never the raw model text.
  */
-async function runReviewSmoke(env: SmokeEnv): Promise<Response> {
+async function runReviewSmoke(env: SmokeEnv, repo: string): Promise<Response> {
   const sandbox = await getSandbox(env.SANDBOX, `smoke-review-${crypto.randomUUID()}`);
   const startedAt = Date.now();
   let result: Record<string, unknown>;
@@ -179,12 +214,12 @@ async function runReviewSmoke(env: SmokeEnv): Promise<Response> {
       throw new Error("the MSTAR_POOL_ARK_01 key env is required for /smoke-review");
     }
 
-    // 1. Clone the real PR head + base into the container.
+    // 1. Clone the seed branch + base into the container.
     const clone = await sandbox.runCommand(
       shellCommand(
         [
           `rm -rf ${CLONE_DIR}`,
-          `git clone --depth 1 --branch mstar-inspector-seed https://github.com/${GH_REPO}.git ${CLONE_DIR}`,
+          `git clone --depth 1 --branch ${SEED_BRANCH} https://github.com/${repo}.git ${CLONE_DIR}`,
           `cd ${CLONE_DIR}`,
           "git fetch --depth 1 origin main",
         ].join(" && "),
@@ -199,7 +234,7 @@ async function runReviewSmoke(env: SmokeEnv): Promise<Response> {
         latencyMs: Date.now() - startedAt,
       };
     } else {
-      result = await execInImageReview(sandbox, env.MSTAR_POOL_ARK_01, startedAt);
+      result = await execInImageReview(sandbox, env.MSTAR_POOL_ARK_01, startedAt, repo);
     }
   } catch (error) {
     result = {
@@ -234,6 +269,7 @@ async function execInImageReview(
   sandbox: ReviewSandbox,
   arkPoolKey: string,
   startedAt: number,
+  repo: string,
 ): Promise<Record<string, unknown>> {
   // The runner input REQUIRES the capability hosts (the in-image
   // synthesizer base — there is no baked models.yml to fall back to). The
@@ -262,7 +298,7 @@ async function execInImageReview(
   const inputB64 = Buffer.from(
     JSON.stringify({
       worktreePath: CLONE_DIR,
-      reconFacts: [`${GH_REPO}#${GH_PR}`, `head ${headSha}`, ...numstat],
+      reconFacts: [`${repo}#${GH_PR}`, `head ${headSha}`, ...numstat],
       capabilityHosts: sandboxImage.hosts,
     }),
     "utf8",

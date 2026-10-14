@@ -33,7 +33,7 @@ v0.5 turned the single-App dashboard into a platform: invite-only members, N aud
 
 ## Guidance (durable contract)
 
-- **Data model** (migrations 0003–0006, then the 0023 per-key rebuild — no ON DELETE clause, soft-delete-only):
+- **Data model** (migrations 0003–0006, then the 0024 per-key rebuild — no ON DELETE clause, soft-delete-only):
   - `users(github_login UNIQUE, role admin|member)` — removal = delete row; guard re-reads per request.
   - `github_apps(id UUID PK, slug UNIQUE, github_app_id UNIQUE, private_key_enc, webhook_secret_enc, status active|disabled, deleted_at)`.
   - `app_installations(app_id, installation_id)` — upserted on per-App webhooks; legacy route writes nothing (no app row).

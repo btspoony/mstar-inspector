@@ -53,4 +53,4 @@ omp 18.2.6（本仓 pin）的自定义 provider 声明只有两条路：烤进�
 
 - 实现：`src/review/models-synthesis.ts`（`capabilityHostsYaml` + `writePerReviewModelsYaml(capabilityHosts, customProviders?)`）+ `src/review/runner.ts`（会话前把 `MSTAR_POOL_*` 写成 `<agentDir>/agent.db` 的 `source:"login"` api_key 行，`COUNT`/槽位不符即 fail-closed）+ `runtime.ts` + `src/pipeline/consumer.ts`（`resolveSandboxImage` fail-closed 先于 guard/`getSandbox`）+ `src/contracts/sandbox-images.ts`（registry SSOT）
 - 测试：`tests/review/models-synthesis.test.ts`（合成/引号/碰撞/零自定义字节等价）、`tests/review/runtime-boundary.test.ts`（模块图守卫）、`tests/contracts/sandbox-images.test.ts`（registry↔verify-script/wrangler 漂移锁 + type-lock）
-- DDL：`migrations/0012` `app_custom_providers`（声明面）→ `0023` 拆出 per-key 行表 `app_custom_provider_keys(app_id, provider, key_id, key_enc, …)`，AAD 三段 `app_custom_provider_keys.key_enc:<app_id>:<provider>:<key_id>`（旧两段 `…<app_id>:<provider_id>` 仅存于 promotion 读取路径）
+- DDL：`migrations/0012` `app_custom_providers`（声明面）→ `0024` 拆出 per-key 行表 `app_custom_provider_keys(app_id, provider, key_id, key_enc, …)`，AAD 三段 `app_custom_provider_keys.key_enc:<app_id>:<provider>:<key_id>`（旧两段 `…<app_id>:<provider_id>` 仅存于 promotion 读取路径）

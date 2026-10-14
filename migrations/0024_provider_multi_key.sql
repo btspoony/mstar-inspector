@@ -1,4 +1,4 @@
--- 0023_provider_multi_key.sql — per-key provider pools.
+-- 0024_provider_multi_key.sql — per-key provider pools.
 --
 -- app_provider_keys moves from ONE row per (App, provider) to ONE row per
 -- (App, provider, key_id): the new third primary-key column is the first 16
@@ -6,7 +6,7 @@
 -- its own row and a second key takes a second slot (at most
 -- MAX_KEYS_PER_PROVIDER per pool, enforced producer-side by the store).
 -- The secretbox AAD rowKey gains the same column —
--- `app_provider_keys.key_enc:<app_id>:<provider>:<key_id>` (the pre-0023
+-- `app_provider_keys.key_enc:<app_id>:<provider>:<key_id>` (the pre-0024
 -- two-segment form stays readable ONLY by the promotion path below).
 --
 -- Why the tables are rebuilt instead of ALTERed: SQLite cannot change a
