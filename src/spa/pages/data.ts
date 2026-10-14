@@ -165,6 +165,22 @@ export function providerKeyRows(keys: readonly ProviderKeyRow[], provider: strin
 }
 
 /**
+ * The tolerant remove routes (key delete / custom provider remove) answer
+ * their no-op case as a 2xx `{ changed: false, message }` — nothing matched,
+ * so nothing was removed. `false` is the SPA's no-change outcome (it must not
+ * render the generic saved notice); `true` is a removal; `null` — any other
+ * body — keeps the caller's default (the plain-text 2xx faces).
+ */
+export function removeChanged(body: string): boolean | null {
+  try {
+    const parsed = JSON.parse(body) as { changed?: unknown };
+    return typeof parsed.changed === "boolean" ? parsed.changed : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
  * One row of the App's PERSISTED provider state: a stored builtin
  * key (masked tail only) or a saved custom-provider declaration. The `kind`
  * discriminator keeps this shape disjoint from {@link CatalogProvider} — a

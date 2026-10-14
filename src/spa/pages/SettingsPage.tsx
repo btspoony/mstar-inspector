@@ -39,6 +39,7 @@ import {
   modelChainTabs,
   providerFormKind,
   providerKeyRows,
+  removeChanged,
   REVIEW_TRIGGER_MODES,
   seatRoleValues,
   seatSelectValue,
@@ -67,10 +68,11 @@ type PendingAction =
 /**
  * One op's outcome, resolved back to the card (or form cluster)
  * that produced it. Op feedback never rides the page-level notice channel —
- * that stays reserved for background-reload failures. `warn` never
- * applies to op outcomes, so the kind narrows to success/error.
+ * that stays reserved for background-reload failures. `warn` is the tolerant
+ * no-op face: a remove that matched nothing is neither a saved change nor a
+ * failure, so it announces the no-change copy without claiming either.
  */
-type OpNotice = { kind: "success" | "error"; message: string };
+type OpNotice = { kind: "success" | "warn" | "error"; message: string };
 
 /**
  * A card's inline op-feedback region: the page banner's markup,
@@ -135,6 +137,28 @@ function settingsErrorMessage(locale: SpaBoot["locale"], body: string): string {
   return body.trim() || t(locale, "common.loadFailed");
 }
 
+/**
+ * Resolve a settings/pinned POST response to its op outcome: a mapped 4xx
+ * resolves through the keyed resolver; a 2xx whose body reports
+ * `changed: false` — the remove routes' tolerant no-op, where the row was
+ * already gone — is a WARNING carrying the localized no-change copy, never
+ * "Changes saved."; every other 2xx is the caller's success copy.
+ */
+function settingsOpOutcome(
+  locale: SpaBoot["locale"],
+  status: number,
+  body: string,
+  successMessage?: string,
+): OpNotice {
+  if (status >= 400) {
+    return { kind: "error", message: settingsErrorMessage(locale, body) };
+  }
+  if (removeChanged(body) === false) {
+    return { kind: "warn", message: t(locale, "settings.removeNoChange") };
+  }
+  return { kind: "success", message: successMessage ?? t(locale, "settings.changesSaved") };
+}
+
 export function SettingsView({
   locale,
   payload,
@@ -190,10 +214,7 @@ export function SettingsView({
     } catch {
       return { kind: "error", message: t(locale, "common.saveFailed"), reloaded: false };
     }
-    const outcome: OpNotice =
-      status >= 400
-        ? { kind: "error", message: settingsErrorMessage(locale, body) }
-        : { kind: "success", message: t(locale, "settings.changesSaved") };
+    const outcome: OpNotice = settingsOpOutcome(locale, status, body);
     const reloaded = await onReload({ background: true });
     return { ...outcome, reloaded };
   }
@@ -301,13 +322,11 @@ export function SettingsView({
     } catch {
       return { kind: "error", message: t(locale, "common.saveFailed") };
     }
-    const outcome: OpNotice =
-      status >= 400
-        ? // The pinned path resolves through the same resolver as
-          // the settings POST family — keyed JSON renders localized; raw
-          // text still displays (fail-visible, never blank).
-          { kind: "error", message: settingsErrorMessage(locale, body) }
-        : { kind: "success", message: successMessage ?? t(locale, "settings.changesSaved") };
+    // The pinned path resolves through the same resolver as the settings POST
+    // family — keyed JSON renders localized, the remove routes' no-change face
+    // becomes its warn notice, and raw text still displays (fail-visible,
+    // never blank).
+    const outcome: OpNotice = settingsOpOutcome(locale, status, body, successMessage);
     if (reload) await onReload({ background: true });
     return outcome;
   }
@@ -1023,15 +1042,16 @@ function ProvidersCard({
   const catalogById: Record<string, CatalogProvider> = {};
   for (const provider of payload.provider_catalog) catalogById[provider.id] = provider;
   // (audit UI-45-05): where the remove outcome renders inside the
-  // rows list. Success takes the row's former slot — the awaited reload has
-  // already dropped the row; a failure leaves the row in place, so the
-  // region renders directly below it (the field-error position). Clamped so
-  // a removed last row lands at the list's end, never out of bounds.
+  // rows list. Success took the row away — the awaited reload has already
+  // dropped it — so the outcome renders in its former slot; a failure OR the
+  // tolerant no-op (warn: nothing was removed, the row is still there) renders
+  // directly below it (the field-error position). Clamped so a removed last
+  // row lands at the list's end, never out of bounds.
   const removeSlot =
     removeOutcome === null
       ? -1
       : Math.min(
-          removeOutcome.notice.kind === "error" ? removeOutcome.slot + 1 : removeOutcome.slot,
+          removeOutcome.notice.kind === "success" ? removeOutcome.slot : removeOutcome.slot + 1,
           payload.configured_providers.length,
         );
 
@@ -1374,10 +1394,25 @@ function ProviderConfigForm({
           void submitTemplate();
         }}
       >
-        {custom ? (
-          <p className="text-sm text-muted-foreground">
-            {custom.base_url} · {custom.api} · {custom.model_ids.join(", ")}
-          </p>
+        {custom || storedKeys.length > 0 ? (
+          <div className="flex flex-col gap-1">
+            {custom ? (
+              <p className="text-sm text-muted-foreground">
+                {custom.base_url} · {custom.api} · {custom.model_ids.join(", ")}
+              </p>
+            ) : null}
+            {/* The pool's existing rows, one line per stored key: submitting
+                below APPENDS (re-submitting a listed key updates its row in
+                place), so the pool a template already holds is visible before
+                another key is added. */}
+            {storedKeys.map((stored) => (
+              <p key={stored.keyId} className="text-sm text-muted-foreground">
+                {stored.last4
+                  ? t(locale, "settings.keyEnding", { last4: stored.last4 })
+                  : t(locale, "settings.keyTooShort")}
+              </p>
+            ))}
+          </div>
         ) : null}
         <label className="flex flex-col gap-1.5 text-sm font-medium">
           {t(locale, "settings.baseUrl")}

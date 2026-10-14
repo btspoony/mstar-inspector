@@ -1455,14 +1455,34 @@ describe("section-scoped op feedback", () => {
     expect(providersBody).toContain(
       "{index === removeSlot && removeOutcome ? <NoticeRegion notice={removeOutcome.notice} /> : null}",
     );
-    // Success takes the row's former slot; a failure leaves the row in place,
-    // so the region renders directly below it (the field-error position).
+    // Success took the row away, so the region renders in its former slot; a
+    // failure OR the tolerant no-op (nothing was removed) leaves the row in
+    // place, so the region renders directly below it (the field-error position).
     expect(providersBody).toContain(
-      'removeOutcome.notice.kind === "error" ? removeOutcome.slot + 1 : removeOutcome.slot',
+      'removeOutcome.notice.kind === "success" ? removeOutcome.slot : removeOutcome.slot + 1',
     );
     // A removed last row's slot equals the list length — the trailing clamp
     // keeps the outcome visible at the list's end instead of dropping it.
     expect(providersBody).toContain("removeSlot >= payload.configured_providers.length");
+  });
+
+  test("a stale delete's no-change outcome is a localized warning, never 'Changes saved.'", () => {
+    const source = settingsSource();
+    // The remove routes answer the tolerant no-op as `changed: false`; the
+    // shared op-outcome resolver renders the localized no-change copy with
+    // warn styling (the row is still there — the region sits below it).
+    expect(source).toContain("removeChanged(body) === false");
+    expect(source).toContain('{ kind: "warn", message: t(locale, "settings.removeNoChange") }');
+    expect(t("en", "settings.removeNoChange")).toContain("Nothing changed");
+    expect(t("zh_CN", "settings.removeNoChange")).toContain("未做任何更改");
+    // The template form lists the pool it appends to — the materialized
+    // provider's stored rows come from the same keys face as a built-in's.
+    const templateForm = source.slice(
+      source.indexOf('if (formKind === "template")'),
+      source.indexOf('if (formKind === "console")'),
+    );
+    expect(templateForm).toContain("storedKeys.map");
+    expect(templateForm).toContain("settings.keyEnding");
   });
 
   test("save triggers carry a busy guard; every op replaces its region (stale-error rule)", () => {

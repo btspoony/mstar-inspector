@@ -933,6 +933,17 @@ describe("GET settings configured_providers vs provider_catalog", () => {
     expect(stored.status).toBe(200);
     const body = await getConfigured(makeEnv(db));
     expect(body.configured_providers).toEqual([
+      // The materialized pool's own rows: a template provider is managed per
+      // key exactly like a free-form custom declaration.
+      {
+        kind: "key",
+        provider: "workers-ai",
+        key_id: expect.any(String),
+        last4: PLAIN_KEY.slice(-4),
+        updated_at: expect.any(String),
+        verified_at: expect.any(String),
+        verified_status: "ok",
+      },
       {
         kind: "custom",
         provider_id: "workers-ai",
@@ -963,6 +974,17 @@ describe("GET settings configured_providers vs provider_catalog", () => {
     expect(stored.status).toBe(200);
     const body = await getConfigured(makeEnv(db));
     expect(body.configured_providers).toEqual([
+      // Its key is a row of its own — the delete handle the whole-provider
+      // removal deliberately is not.
+      {
+        kind: "key",
+        provider: "my-custom",
+        key_id: expect.any(String),
+        last4: PLAIN_KEY.slice(-4),
+        updated_at: expect.any(String),
+        verified_at: expect.any(String),
+        verified_status: "ok",
+      },
       {
         kind: "custom",
         provider_id: "my-custom",
@@ -983,6 +1005,7 @@ describe("multi-key provider pools (routes)", () => {
   });
 
   const SECOND_KEY = sk("ant-mallory-second-7766");
+  const ACCOUNT_ID = "1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d";
 
   /** First 16 hex chars of SHA-256(plaintext) — the pool id the store derives. */
   async function keyIdOf(plainKey: string): Promise<string> {
@@ -1118,12 +1141,193 @@ describe("multi-key provider pools (routes)", () => {
     expect((await store.listProviderKeys(app.id, "anthropic")).length).toBe(1);
   });
 
+  test("a custom provider's pool is configured state: one row per key beside its declaration", async () => {
+    const { db, app } = await seededWorld();
+    const store = createAppConfigStore(db, TEST_KEY);
+    const env = makeEnv(db);
+    mockStatus(200, { data: [] });
+    // The declaration lands with its first key; a second submission with a
+    // DIFFERENT key appends to the same pool instead of opening a declaration.
+    for (const key of [PLAIN_KEY, SECOND_KEY]) {
+      const stored = await postForm(SETTINGS, "mallory", env, {
+        op: "add-custom-provider",
+        provider_id: "my-custom",
+        base_url: "https://example.com/v1",
+        api: "openai-completions",
+        model_ids: "local-7b",
+        key,
+      });
+      expect(stored.status).toBe(200);
+    }
+    expect((await store.listCustomProviderKeys(app.id, "my-custom")).length).toBe(2);
+
+    const body = await getSettings(env);
+    const firstId = await keyIdOf(PLAIN_KEY);
+    const secondId = await keyIdOf(SECOND_KEY);
+    // One row per stored key, each carrying its own identity, mask and
+    // verification state — a pool size never renders as one declaration row.
+    const keyRows = body.configured_providers.filter((row) => row.kind === "key");
+    expect(keyRows.map((row) => row.key_id).sort()).toEqual([firstId, secondId].sort());
+    expect(keyRows.map((row) => row.last4).sort()).toEqual(
+      [PLAIN_KEY.slice(-4), SECOND_KEY.slice(-4)].sort(),
+    );
+    expect(keyRows.every((row) => row.provider === "my-custom")).toBe(true);
+    expect(keyRows.every((row) => row.verified_status === "ok")).toBe(true);
+    // The add flow's per-provider face carries them too — a materialized
+    // template's pool is listed there before another key is appended.
+    expect(
+      body.keys.filter((row) => row.provider === "my-custom").map((row) => row.keyId).sort(),
+    ).toEqual([firstId, secondId].sort());
+    // The declaration row survives as its own entry — the whole-provider
+    // action's target, next to the per-key rows.
+    expect(body.configured_providers.filter((row) => row.kind === "custom")).toEqual([
+      {
+        kind: "custom",
+        provider_id: "my-custom",
+        base_url: "https://example.com/v1",
+        api: "openai-completions",
+        model_ids: ["local-7b"],
+      },
+    ]);
+    expect(JSON.stringify(body)).not.toContain(PLAIN_KEY);
+    expect(JSON.stringify(body)).not.toContain(SECOND_KEY);
+  });
+
+  test("a custom per-key delete takes exactly that row: its sibling and the declaration stay", async () => {
+    const { db, app } = await seededWorld();
+    const store = createAppConfigStore(db, TEST_KEY);
+    const env = makeEnv(db);
+    mockStatus(200, { data: [] });
+    const declared = await postForm(SETTINGS, "mallory", env, {
+      op: "add-custom-provider",
+      provider_id: "my-custom",
+      base_url: "https://example.com/v1",
+      api: "openai-completions",
+      model_ids: "local-7b",
+      key: PLAIN_KEY,
+    });
+    expect(declared.status).toBe(200);
+    await store.addCustomProviderKey(app.id, "my-custom", SECOND_KEY);
+
+    const removed = await postForm(SETTINGS + "/key/delete", "mallory", env, {
+      provider: "my-custom",
+      key_id: await keyIdOf(PLAIN_KEY),
+    });
+    expect(removed.status).toBe(200);
+    expect(await removed.text()).toContain("Removed the stored my-custom key for mallorys-app");
+    expect(await store.listCustomProviderKeys(app.id, "my-custom")).toMatchObject([
+      { keyId: await keyIdOf(SECOND_KEY) },
+    ]);
+    // Only remove-custom-provider takes the declaration (and the whole pool).
+    expect((await store.listCustomProviders(app.id)).map((row) => row.provider_id)).toEqual(["my-custom"]);
+    // The App's built-in pool was never in play.
+    expect(await store.listProviderKeys(app.id)).toEqual([]);
+
+    // Draining the last key leaves the declaration in place (the editable,
+    // re-keyable state) instead of orphaning anything.
+    const drained = await postForm(SETTINGS + "/key/delete", "mallory", env, {
+      provider: "my-custom",
+      key_id: await keyIdOf(SECOND_KEY),
+    });
+    expect(drained.status).toBe(200);
+    expect(await store.listCustomProviderKeys(app.id, "my-custom")).toEqual([]);
+    expect((await store.listCustomProviders(app.id)).map((row) => row.provider_id)).toEqual(["my-custom"]);
+  });
+
+  test("the delete route answers a machine-readable outcome: a removal vs the tolerant no-op", async () => {
+    const { db, app } = await seededWorld();
+    const store = createAppConfigStore(db, TEST_KEY);
+    await store.addProviderKey(app.id, "anthropic", PLAIN_KEY);
+    const env = makeEnv(db);
+    const unmatched = await postForm(SETTINGS + "/key/delete", "mallory", env, {
+      provider: "anthropic",
+      key_id: "0".repeat(16),
+    });
+    expect(unmatched.status).toBe(200);
+    const unmatchedBody = (await unmatched.json()) as { changed: boolean; message: string };
+    // `changed: false` is the SPA's no-change face: a stale dialog must not
+    // render "Changes saved." for a row that was already gone.
+    expect(unmatchedBody.changed).toBe(false);
+    expect(unmatchedBody.message).toContain("nothing changed");
+    const matched = await postForm(SETTINGS + "/key/delete", "mallory", env, {
+      provider: "anthropic",
+      key_id: await keyIdOf(PLAIN_KEY),
+    });
+    expect(matched.status).toBe(200);
+    const matchedBody = (await matched.json()) as { changed: boolean; message: string };
+    expect(matchedBody.changed).toBe(true);
+    expect(matchedBody.message).toContain("Removed the stored anthropic key for mallorys-app");
+  });
+
+  test("the ninth key is a clear 400 on the custom entry points — declaration and pool unchanged", async () => {
+    const { db, app } = await seededWorld();
+    const store = createAppConfigStore(db, TEST_KEY);
+    const env = makeEnv(db);
+    mockStatus(200, { data: [] });
+    // Both custom paths (a free-form id and a materialized template) start
+    // with one stored key; the store's append API fills each pool to the cap.
+    const seededCustom = await postForm(SETTINGS, "mallory", env, {
+      op: "add-custom-provider",
+      provider_id: "my-custom",
+      base_url: "https://example.com/v1",
+      api: "openai-completions",
+      model_ids: "local-7b",
+      key: PLAIN_KEY,
+    });
+    expect(seededCustom.status).toBe(200);
+    const seededTemplate = await postForm(SETTINGS, "mallory", env, {
+      op: "add-template-provider",
+      template_id: "workers-ai",
+      account_id: ACCOUNT_ID,
+      key: PLAIN_KEY,
+    });
+    expect(seededTemplate.status).toBe(200);
+    for (let i = 1; i < MAX_KEYS_PER_PROVIDER; i++) {
+      await store.addCustomProviderKey(app.id, "my-custom", sk(`custom-cap-${i}-${i}${i}${i}`));
+      await store.addCustomProviderKey(app.id, "workers-ai", sk(`workers-cap-${i}-${i}${i}${i}`));
+    }
+    const declarations = await store.listCustomProviders(app.id);
+    const pools = await store.listCustomProviderKeys(app.id);
+    expect(pools.filter((row) => row.provider === "my-custom")).toHaveLength(MAX_KEYS_PER_PROVIDER);
+    expect(pools.filter((row) => row.provider === "workers-ai")).toHaveLength(MAX_KEYS_PER_PROVIDER);
+
+    const custom = await postForm(SETTINGS, "mallory", env, {
+      op: "add-custom-provider",
+      provider_id: "my-custom",
+      base_url: "https://changed.example.com/v1",
+      api: "openai-completions",
+      model_ids: "local-7b",
+      key: sk("custom-cap-over-9999"),
+    });
+    expect(custom.status).toBe(400);
+    expect(await custom.json()).toMatchObject({
+      key: "settings.error.providerKeyLimit",
+      params: { provider: "my-custom", limit: MAX_KEYS_PER_PROVIDER },
+    });
+    const template = await postForm(SETTINGS, "mallory", env, {
+      op: "add-template-provider",
+      template_id: "workers-ai",
+      account_id: ACCOUNT_ID,
+      key: sk("workers-cap-over-9999"),
+    });
+    expect(template.status).toBe(400);
+    expect(await template.json()).toMatchObject({
+      key: "settings.error.providerKeyLimit",
+      params: { provider: "workers-ai", limit: MAX_KEYS_PER_PROVIDER },
+    });
+    // Both refusals are zero-write: the declarations (the attempted base_url
+    // change included) and every existing pool row are exactly as they were.
+    expect(await store.listCustomProviders(app.id)).toEqual(declarations);
+    expect(await store.listCustomProviderKeys(app.id)).toEqual(pools);
+  });
+
   test("the ninth key is a clear 400 on both add paths — the pool cap is never a silent no-op", async () => {
     const { db, app } = await seededWorld();
     const store = createAppConfigStore(db, TEST_KEY);
     for (let i = 0; i < MAX_KEYS_PER_PROVIDER; i++) {
       await store.addProviderKey(app.id, "anthropic", sk(`ant-pool-cap-${i}-${i}${i}${i}${i}`));
     }
+    const before = (await store.listProviderKeys(app.id, "anthropic")).map((row) => row.keyId);
     mockModelsOk(["claude-sonnet-4-6"]);
     const ninth = sk("ant-pool-cap-over-9999");
     const verified = await postForm(VERIFY, "mallory", makeEnv(db), { provider: "anthropic", key: ninth });
@@ -1151,6 +1355,8 @@ describe("multi-key provider pools (routes)", () => {
     expect(db.raw.query("SELECT COUNT(*) AS n FROM app_provider_keys").get() as { n: number }).toEqual({
       n: MAX_KEYS_PER_PROVIDER,
     });
+    // Neither refusal moved an existing row: the pool is byte-identical.
+    expect((await store.listProviderKeys(app.id, "anthropic")).map((row) => row.keyId)).toEqual(before);
   });
 });
 

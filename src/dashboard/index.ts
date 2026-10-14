@@ -1281,6 +1281,25 @@ function settingsPostResponse(
 }
 
 /**
+ * A REMOVE route's 2xx face. Native form navigation keeps the pinned 302;
+ * every other caller gets `{ changed, message }`, because the tolerant no-op
+ * (nothing matched — a stale dialog's row was already gone) and a real removal
+ * are both 2xx and the SPA must not render "Changes saved." for the former.
+ * `message` keeps the English face the plain-text assertions pin.
+ */
+function settingsRemoveResponse(
+  c: Context<{ Bindings: Env }>,
+  slug: string,
+  changed: boolean,
+  message: string,
+): Response {
+  if (wantsHtmlFormNavigation(c)) {
+    return c.redirect(`/dashboard/apps/${slug}/settings`, 302);
+  }
+  return c.json({ changed, message }, 200);
+}
+
+/**
  * (audit UI-45-03): machine-readable 400 keys for the settings
  * POST family — ONE inventory of the site→key mapping. Values are
  * `settings.error.*` dictionary paths; settings400Response interpolates the
@@ -1580,6 +1599,13 @@ dashboardApp.get("/api/apps/:slug/settings", async (c) => {
     const modelChainSeats = await store.getModelChainSeats(gate.app.id);
     const modelChains = await store.getModelChains(gate.app.id);
     const customProviders = await store.listCustomProviders(gate.app.id);
+    // The custom/template pools' own masked rows — the declaration list above
+    // carries no key material, so without this read a custom provider rendered
+    // one declaration row whatever its pool size: no key identity, mask or
+    // per-key verification state, and no way to drop one key instead of the
+    // whole pool.
+    const customKeys = await store.listCustomProviderKeys(gate.app.id);
+    const keyRows = [...maskedKeys, ...customKeys];
     // (spec § Provider configuration contract): eligibility is judged
     // against the App's SELECTED runtime image, never an inferred filter. The
     // registry entry's runtime kind is the contract: an omp-selected App
@@ -1591,7 +1617,11 @@ dashboardApp.get("/api/apps/:slug/settings", async (c) => {
     return c.json({
       can_manage: true,
       ...base,
-      keys: maskedKeys,
+      // Every stored key row of the App — built-in and custom pools alike:
+      // the add flow lists a selected provider's rows from this face (a
+      // materialized template's pool included), so a custom pool's rows must
+      // ride it too.
+      keys: keyRows,
       model_chain: modelChain,
       // (spec §4.4): the role editor's data is now seat → chain
       // reference (blank = default chain); the chains list carries every
@@ -1599,12 +1629,14 @@ dashboardApp.get("/api/apps/:slug/settings", async (c) => {
       model_roles: modelChainSeats,
       model_chains: modelChains,
       custom_providers: customProviders,
-      // Clean cutover: the App's PERSISTED provider state only — a
-      // stored key (masked tail) or a saved custom-provider declaration. No
+      // Clean cutover: the App's PERSISTED provider state only — a stored
+      // key (masked tail) or a saved custom-provider declaration. No
       // plaintext keys, and catalog rows never appear here; an empty array is
-      // the valid unconfigured-App state.
+      // the valid unconfigured-App state. Key rows cover BOTH pools: a custom
+      // or template provider's rows are here, each with its own identity, so
+      // one key can be removed without removing the declaration.
       configured_providers: [
-        ...maskedKeys.map((key) => ({
+        ...keyRows.map((key) => ({
           kind: "key" as const,
           provider: key.provider,
           key_id: key.keyId,
@@ -2287,9 +2319,11 @@ dashboardApp.post("/apps/:slug/settings", async (c) => {
     }
     // Tolerant no-op (the id grammar already bounds what can ever be
     // stored): an unknown provider id simply has no row — a 2xx, not a 400.
-    return settingsPostResponse(
+    // The declaration and every key of its pool go together (removeCustomProvider).
+    return settingsRemoveResponse(
       c,
       gate.app.slug,
+      removed,
       removed
         ? `Removed the custom provider ${providerId} from ${gate.app.slug}.`
         : `No custom provider ${providerId === "" ? "(unspecified)" : providerId} on ${gate.app.slug} — nothing changed.`,
@@ -2333,7 +2367,17 @@ dashboardApp.post("/apps/:slug/settings/key/delete", async (c) => {
   const store = createAppConfigStore(gate.db, c.env.DASHBOARD_ENCRYPTION_KEY);
   let removed: boolean;
   try {
-    removed = await store.deleteProviderKey(gate.app.id, provider, keyId);
+    // The pool owner picks the table: a declared custom/template provider's
+    // rows live in the custom pool, every other provider id in the built-in
+    // one. The two id spaces are disjoint by construction (a declaration
+    // colliding with a built-in id or an in-image capability host is refused),
+    // so the declaration is an exact discriminator, never a guess.
+    const declaredCustom = (await store.listCustomProviders(gate.app.id)).some(
+      (row) => row.provider_id === provider,
+    );
+    removed = declaredCustom
+      ? await store.deleteCustomProviderKey(gate.app.id, provider, keyId)
+      : await store.deleteProviderKey(gate.app.id, provider, keyId);
   } catch (err) {
     logSettingsFailure("remove_key", gate.app.id, err);
     return settingsPostResponse(c, gate.app.slug, settingsFailureNotice(err), 500);
@@ -2341,9 +2385,10 @@ dashboardApp.post("/apps/:slug/settings/key/delete", async (c) => {
   // Tolerant no-op (the allowlist already bounds what can ever be stored):
   // an unknown provider — or a key id no row matches, including an absent one —
   // simply has no row: a 2xx, not a 400.
-  return settingsPostResponse(
+  return settingsRemoveResponse(
     c,
     gate.app.slug,
+    removed,
     removed
       ? `Removed the stored ${provider} key for ${gate.app.slug}.`
       : `No stored ${provider === "" ? "(unspecified)" : provider} key on ${gate.app.slug} — nothing changed.`,

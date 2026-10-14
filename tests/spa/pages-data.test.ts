@@ -21,6 +21,7 @@ import {
   parseSettings,
   providerFormKind,
   providerKeyRows,
+  removeChanged,
   REVIEW_TRIGGER_MODES,
   selectedCatalogProvider,
   type CatalogProvider,
@@ -707,6 +708,39 @@ describe("provider catalog rows + add selection", () => {
       parseSettings({ ...manageBase, keys: [{ ...keyRow, verifiedStatus: "maybe" }] }),
     ).toBeNull();
     expect(parseSettings({ ...manageBase, keys: [{ ...keyRow, verifiedStatus: "failed" }] })).not.toBeNull();
+  });
+
+  test("a custom pool's key row parses through the same configured key-row guard", () => {
+    // Built-in and custom pools share one row contract: provider + key
+    // identity + mask + per-key verification state (the providers card
+    // renders both through ConfiguredKeyRow).
+    const customKeyRow = {
+      kind: "key" as const,
+      provider: "workers-ai",
+      key_id: "d".repeat(16),
+      last4: "2211",
+      updated_at: "2026-10-14 10:00:00",
+      verified_at: null,
+      verified_status: null,
+    };
+    const parsed = parseSettings({ ...manageBase, configured_providers: [customKeyRow] });
+    expect(parsed === null || !parsed.can_manage ? null : parsed.configured_providers).toEqual([customKeyRow]);
+  });
+
+  test("removeChanged reads the remove routes' outcome flag — a no-op never resolves as a change", () => {
+    // The tolerant ops (key delete / custom provider remove) answer the
+    // no-change case as `changed: false`, which the SPA renders as its
+    // localized no-change notice instead of the generic "Changes saved.".
+    expect(
+      removeChanged(JSON.stringify({ changed: false, message: "No stored anthropic key — nothing changed." })),
+    ).toBe(false);
+    expect(removeChanged(JSON.stringify({ changed: true, message: "Removed the stored anthropic key." }))).toBe(true);
+    // Everything without the flag keeps the caller's default outcome: the
+    // plain-text 2xx faces (pause/resume/…) and a drifted body included.
+    expect(removeChanged("ok")).toBeNull();
+    expect(removeChanged("")).toBeNull();
+    expect(removeChanged(JSON.stringify({ message: "no flag here" }))).toBeNull();
+    expect(removeChanged(JSON.stringify({ changed: "false" }))).toBeNull();
   });
 });
 

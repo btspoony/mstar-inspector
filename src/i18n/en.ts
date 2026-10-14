@@ -212,6 +212,7 @@ export const en = {
       configuration: "Configuration",
     },
     changesSaved: "Changes saved.",
+    removeNoChange: "Nothing changed — there was nothing to remove.",
     addKey: "Add key",
     provider: "Model provider",
     apiKey: "API key",
@@ -401,7 +402,8 @@ export const en = {
     confirmRemoveKeyBody:
       "The App's other {provider} keys stay. Selectors that depend on this key alone fail until you verify a replacement.",
     confirmRemoveCustomTitle: "Remove provider {provider}?",
-    confirmRemoveCustomBody: "The provider and its stored key are removed. Chains referencing its models fail on save.",
+    confirmRemoveCustomBody:
+      "The provider and every key in its pool are removed. To free one slot only, remove that key's own row. Chains referencing its models fail on save.",
     runtimeImage: "Runtime image",
     runtimeImageCopy:
       "The sandbox runtime image that executes this App's reviews. Reviews read their model configuration at run time — nothing App-specific is baked into an image.",

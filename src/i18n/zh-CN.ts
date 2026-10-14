@@ -193,6 +193,7 @@ export const zhCN: Dictionary = {
       configuration: "配置",
     },
     changesSaved: "更改已保存。",
+    removeNoChange: "未做任何更改 — 没有可移除的内容。",
     addKey: "添加密钥",
     provider: "模型提供方",
     apiKey: "API 密钥",
@@ -354,7 +355,8 @@ export const zhCN: Dictionary = {
     confirmRemoveKeyTitle: "移除 {provider} 末尾为 {last4} 的密钥？",
     confirmRemoveKeyBody: "该 App 的其他 {provider} 密钥不受影响。仅依赖此密钥的选择器在你重新验证前会失败。",
     confirmRemoveCustomTitle: "移除 provider {provider}？",
-    confirmRemoveCustomBody: "该 provider 及其已存密钥将被移除。引用其模型的链在保存时会校验失败。",
+    confirmRemoveCustomBody:
+      "该 provider 及其密钥池中的全部密钥都将被移除。若只想腾出一个槽位，请移除该密钥所在的行。引用其模型的链在保存时会校验失败。",
     runtimeImage: "运行时镜像",
     runtimeImageCopy:
       "执行此 App 审查的沙盒运行时镜像。审查在运行时读取模型配置 — 任何 App 特定配置都不会烘焙进镜像。",
