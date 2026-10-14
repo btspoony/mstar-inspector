@@ -75,7 +75,7 @@ exist before the first deploy:
     chain and re-verifying BOTH an existing worker and a fresh one — explicitly out of scope for this
     change, not a casual follow-up.
 
-### D1 migrations (0001–0022, forward-only)
+### D1 migrations (0001–0023, forward-only)
 
 ```bash
 wrangler d1 migrations apply mstar-inspector-db --remote   # production
@@ -106,9 +106,14 @@ wrangler d1 migrations apply mstar-inspector-db            # local dev
 | `0020_finding_lifecycle` | the finding-lifecycle and private pre-publication journal tables (`review_publications`, `review_findings`, `review_finding_rounds`, `review_threads`) — publication proof, closure and thread-resolution state (spec §7.1) |
 | `0021_review_checks` | the per-attempt Check registry (`review_checks`) behind the advisory Check Runs, with `UNIQUE(attempt_key, generation)` and the partial unique index keeping at most one nonterminal generation per attempt key (spec §7.1/§7.9) |
 | `0022_app_trigger_mode` | `github_apps.review_trigger_mode` TEXT NOT NULL DEFAULT 'every_push' CHECK (review_trigger_mode IN ('open','every_push','manual')) — the per-App review trigger mode (spec `review-trigger-policy.md` §2); metadata-only ADD COLUMN, existing rows (live and soft-deleted) materialize to the `every_push` default, no manager visit needed |
+| `0023_removed_logins` | `removed_logins` — removal tombstones: the key is `github_login` with the same NOCASE comparison as `users.github_login` (0016 parity), `removed_at` is required, `removed_by` is the acting admin's login (NULL when no actor was in scope). Written in the SAME transaction as the membership row delete, so `bootstrapDashboardAccess` can deny a removed login even when the `ADMIN_LOGINS` allowlist still lists it — an operator's removal is authoritative — while `createUser` clears the record on a deliberate re-invite |
 
 Migrations are **forward-only** (0002 precedent): never hand-edit an applied
-migration; add the next file.
+migration; add the next file. Apply order matters for the newest pair: `0023`
+must exist before the code that reads `removed_logins` runs (the Deploy
+workflow applies migrations before deploying) — a code rollback to a version
+predating `0023` stays safe, because that version ignores the new table,
+while rolling the SCHEMA back is not supported.
 Note: migration 0006's `app_model_config` comment ("NULL / absent row = unset → falls back to the global OMP_REVIEW_MODEL") is superseded by AL-24-5 — chain-less Apps fail closed, no global chain since v0.9.
 
 ### Secrets and vars inventory
@@ -191,7 +196,7 @@ sources from a GitHub Actions variable — see below):
 | Name | Default | Purpose |
 |---|---|---|
 | `REVIEW_ENABLED` | unset | **emergency brake only**: per-App `github_apps.review_enabled` is the primary review control; only the exact `"false"` (case-sensitive, untrimmed) stops ALL reviews — unset / `""` / `"true"` / `"TRUE"` / other → per-App governs |
-| `ADMIN_LOGINS` | **required** | comma-separated GitHub logins **bootstrapped** as dashboard admin — the "at least one" list that lets the first admin reach the dashboard; sourced from the GitHub Actions **variable** `ADMIN_LOGINS` (`staging` env or repo-level) and injected by the Deploy workflow with `wrangler deploy --var`. It is **not** the membership SSOT and is not consumed once: after the first admin exists, membership lives in the dashboard's `users` table / Members page, and runtime still bootstraps any listed login that has no `users` row (an existing row always wins, without promotion). Missing/blank/comma-only fails the deploy **before** it ships — see § 6 |
+| `ADMIN_LOGINS` | **required** | comma-separated GitHub logins **bootstrapped** as dashboard admin — the "at least one" list that lets the first admin reach the dashboard; sourced from the GitHub Actions **variable** `ADMIN_LOGINS` (`staging` env or repo-level), injected by the Deploy workflow with `wrangler deploy --var`, and passed explicitly by the documented manual deploys. It is **not** the membership SSOT and is not consumed once: after the first admin exists, membership lives in the dashboard's `users` table / Members page. It bootstraps a listed login that has **no `users` row and was never removed** — an existing row always wins (no promotion), and a login an operator removed stays denied even while the list still spells it; only an explicit re-invite on the Members page clears that record. Missing/blank/comma-only fails the deploy **before** it ships — see § 6 |
 
 > **REVIEW_ENABLED cutover checklist (上线即生效 — run BEFORE the deploy that
 > flips the semantics; the semantic inversion takes effect the moment the Worker lands):**
@@ -347,9 +352,10 @@ only via `wrangler deploy`).
 ## Deploy steps (manual reference)
 
 > The automated path (§ Automated deploy) runs the same sequence in CI —
-> typecheck/test → secrets → D1 migrations → `wrangler deploy` → smoke →
-> digest record. The steps below are the manual equivalent, kept as reference
-> for local runs and for recovering from a failed automated deploy.
+> typecheck/test → required-input gate → secrets → D1 migrations →
+> `wrangler deploy` → smoke → digest record. The steps below are the manual
+> equivalent, kept as reference for local runs and for recovering from a
+> failed automated deploy.
 
 Order lock (plan Clarify #5): code merge → `wrangler deploy` (the container
 image auto-rebuilds when the Dockerfile/build context changed) → post-deploy
@@ -391,12 +397,16 @@ smoke → record the digest.
    branch, fetches `main`, and diffs against it. `/smoke` only reaches the
    clone in its **fallback** path; its primary path runs
    `gh pr diff 1 --repo <repo>` on the same PR.
-4. `bun run build:spa && wrangler deploy` — build the SPA assets first
+4. `bun run build:spa && wrangler deploy --var "ADMIN_LOGINS:alice,bob"` —
+   build the SPA assets first
    (`dist/spa` is gitignored — a fresh clone has none, and `wrangler.jsonc`
    serves them via `assets`), then deploy the Worker (webhook face + queue
    consumer + cron trigger). The step also rebuilds/pushes the container
    image when the build context changed. **Copy the image digest from the
-   deploy output.**
+   deploy output.** The `--var` is required and carries the same value the
+   Deploy workflow injects (`--var "ADMIN_LOGINS:$ADMIN_LOGINS"`): a manual
+   `wrangler deploy` that omits it leaves the first OAuth login on an empty
+   `users` table as admin (§ 6).
 5. Record the digest baseline — on the automated path the workflow greps it
    out of the deploy log (`Smoke: image digest`), then writes it to the run
    summary (`$GITHUB_STEP_SUMMARY`) and uploads `deploy-evidence` artifacts;
@@ -502,10 +512,11 @@ docker run --rm --entrypoint /opt/verify-synthesis.sh <image>
 > `DASHBOARD_ENCRYPTION_KEY`, the dashboard registration flow, the per-App
 > webhook repoint, and the R1/R2 verification pins. Run AFTER § Deploy steps
 > and § Post-deploy smoke (the base Worker and D1 migrations **through
-> `0022`** must be live); the live execution is QA-coordinated. Historical
+> `0023`** must be live); the live execution is QA-coordinated. Historical
 > note: the go-live originally required `0001–0011`; the chain now extends
-> to `0022` (`0019` profile columns, `0020`
-> finding lifecycle, `0021` Check registry, `0022` per-App trigger mode).
+> to `0023` (`0019` profile columns, `0020`
+> finding lifecycle, `0021` Check registry, `0022` per-App trigger mode,
+> `0023` removal tombstones).
 
 ### 1. Set DASHBOARD_ENCRYPTION_KEY
 
@@ -542,29 +553,39 @@ either key for the other duty (rotation stays decoupled).
 
 Prerequisites: dashboard OAuth (`OAUTH_CLIENT_ID` /
 `OAUTH_CLIENT_SECRET`), `DASHBOARD_SESSION_SECRET`, an admin login — a login
-on the required `ADMIN_LOGINS` bootstrap list (the empty-table fallback cannot
+on the required `ADMIN_LOGINS` bootstrap list that has **no removal record**
+(the empty-table fallback cannot
 arm: the Deploy gate requires the list to parse to at least one login),
 `DASHBOARD_ENCRYPTION_KEY` set, and D1 migrations applied **through
-`0022`** — the full forward-only chain above, not a historical prefix.
+`0023`** — the full forward-only chain above, not a historical prefix.
 `0020` supplies the finding-lifecycle/publication journal, `0021` the
-Check registry, and `0022` the per-App trigger-mode column the webhook
-face reads on every delivery. A missing `0022` does NOT stop reviews:
+Check registry, `0022` the per-App trigger-mode column the webhook
+face reads on every delivery, and `0023` the removal tombstones the
+OAuth bootstrap reads before the allowlist. A missing `0022` does NOT stop
+reviews:
 the webhook face degrades to `every_push` semantics (the row's mode
 reads as `undefined`, which the classifier treats as every_push). What
 fails closed instead is the dashboard: the Settings page
 (`parseSettings` rejects the payload without the mode field) and the
-trigger-mode POST (its D1 UPDATE errors on the missing column).
+trigger-mode POST (its D1 UPDATE errors on the missing column). A missing
+`0023` also fails the dashboard closed, not open: the bootstrap's tombstone
+read and the members-remove batch both error out (500) instead of quietly
+dropping the removal record.
 
 1. **Admin login** — open `/dashboard/login` and complete the GitHub OAuth
    flow. Precedence (`bootstrapDashboardAccess`, `src/dashboard/users.ts`):
-   an existing `dashboard_users` row wins (allow, no promotion); otherwise a
+   an existing `dashboard_users` row wins (allow, no promotion); a login
+   whose removal is on record is denied — the allowlist never resurrects it;
+   otherwise a
    login on the `ADMIN_LOGINS` list gets an admin row; the empty-table
    first-login fallback applies **only** when the parsed list is empty — which
    the required deploy gate prevents — so any other login is denied
    (invite-only, zero cookies). `ADMIN_LOGINS` exists so this first admin can
    reach the dashboard at all — that is its purpose, not its only effect: the
-   Members page is the membership SSOT, while a listed login with no `users`
-   row remains eligible for admin bootstrap.
+   Members page is the membership SSOT, a listed login with no `users`
+   row remains eligible for admin bootstrap, and a removal there is
+   authoritative (the record survives every later deploy until an admin
+   re-invites the login).
 2. **Create GitHub App** — on the dashboard workbench (`/dashboard`, the
    Apps-first home) click **Create GitHub App**. The dashboard mints the webhook slug
    (`mstar-inspector-<login>`-derived, DB pre-resolved) and POSTs the App
@@ -688,8 +709,9 @@ face to repoint to; the per-App webhook URL on GitHub is unchanged by a
 Worker rollback.
 
 - **D1 is forward-only** — never reverse an applied migration on rollback
-  (the chain head is `0022`); new code tolerates the prior schema (0002
-  precedent), roll back code only.
+  (the chain head is `0023`); roll back code only. Migrations are applied
+  before the Worker deploys, so rolling back to a version that predates
+  `0023` stays safe: that version ignores the new `removed_logins` table.
 - **Secrets untouched** — rollback does not remove
   `DASHBOARD_ENCRYPTION_KEY`; rotate it explicitly when the rollback is
   security-motivated. A registered App's encrypted credentials stay valid
@@ -711,18 +733,30 @@ always wins, without promotion). Once any user row exists, the dashboard's
 
 The Deploy workflow:
 
-1. **Fails closed before deploying** when the variable is missing, blank,
+1. **Fails closed before any deploy-capable step** when the variable is missing, blank,
    whitespace-only, or comma-only — the `Verify required ADMIN_LOGINS variable`
-   step runs before `wrangler deploy`, so a misconfigured operator never ships
-   a Worker with the first-login-becomes-admin fallback silently armed. The
+   step runs before the **first** `wrangler` invocation of any kind
+   (`wrangler whoami`, the secret writes, and the final `wrangler deploy`):
+   `wrangler secret bulk` publishes a Worker version of its own, so a gate
+   placed after it would already have shipped a version without the required
+   binding. A misconfigured operator therefore never ships a Worker with the
+   first-login-becomes-admin fallback silently armed. The
    step imports and calls the runtime parser itself
    (`parseAdminLogins`, `src/dashboard/users.ts`) and fails when it yields zero
    logins, so the deploy gate cannot drift from the Worker's own rule.
-2. **Injects it into the Worker** at deploy time via
+2. **Is passed explicitly on every manual deploy too** — the documented
+   manual paths ([`README.md`](../README.md) Path A step 5 / Path B step 1 and
+   § Deploy steps step 4 above) deploy with
+   `wrangler deploy --var "ADMIN_LOGINS:<comma-separated logins>"`, the same
+   value this workflow injects. `wrangler.jsonc` defines no `ADMIN_LOGINS`, so
+   a bare `wrangler deploy` is **not** a supported deploy path: it would ship
+   with the fallback armed. There is no second deployment path — the manual
+   commands are the workflow's equivalent, not an alternative to it.
+3. **Injects it into the Worker** at deploy time via
    `wrangler deploy --var "ADMIN_LOGINS:$ADMIN_LOGINS"`, so the value no longer
    depends on the Cloudflare dashboard (a comma-separated multi-login value
    survives intact: wrangler splits `--var` on the first colon only).
-3. **Asserts it on the deployed Worker** after the deploy: the step reads the
+4. **Asserts it on the deployed Worker** after the deploy: the step reads the
    Worker's live settings via the Cloudflare API (NOT `wrangler secret list` —
    `ADMIN_LOGINS` is a plain var, so a secret listing never shows it), feeds the
    observed value through the same `parseAdminLogins` runtime rule, and fails
@@ -736,9 +770,18 @@ The Deploy workflow:
 Why it matters: `ADMIN_LOGINS` is the **"at least one" bootstrap list** — its
 purpose is to ensure the first admin can access the dashboard. It is not
 ongoing membership management: the `users` table / Members page is the
-membership SSOT, and the list is not consumed once — a listed login with no
-`users` row remains eligible for admin bootstrap, while an existing row always
-wins without promotion. The empty-table first-login fallback needs a
+membership SSOT, and the list is not consumed once — it bootstraps a listed
+login that has no `users` row **and was never removed**, while an existing row
+always wins without promotion. A login an operator removed is denied even
+while the list still spells it: the removal is recorded in `removed_logins`
+(migration `0023`, written in the same transaction as the row delete) and the
+bootstrap consults it before the allowlist, so the record survives every later
+deploy until an admin deliberately re-invites the login on the Members page.
+The bootstrap insert itself refuses while the record exists — a write-boundary
+check inside the `INSERT` (`WHERE NOT EXISTS (removal record)`), not a
+read-then-write window — so a sign-in already in flight when the removal lands
+is denied instead of resurrecting the login.
+The empty-table first-login fallback needs a
 genuinely empty parsed list, which this required gate prevents — so the
 fallback can no longer be silently armed by a blank value. Logins that are
 neither on the list nor in the table are denied (403, zero cookies) until an

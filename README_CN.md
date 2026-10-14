@@ -85,9 +85,11 @@ flowchart LR
 
    ```bash
    bun run build:spa        # 必需——SPA 产物不进 git
-   wrangler deploy          # 同时构建/推送 sandbox 容器镜像
+   wrangler deploy --var "ADMIN_LOGINS:alice,bob"   # 同时构建/推送 sandbox 容器镜像
    curl https://<your-worker>/healthz   # {"ok":true,"version":"vX.Y.Z"}
    ```
+
+   `ADMIN_LOGINS`（逗号分隔的 GitHub 登录名，与 Deploy workflow 通过 `--var` 传入的是同一个值）是每次部署的必需输入：它让名单内的登录名能以管理员身份进入后台；若部署时省略，空 `users` 表上的首次 OAuth 登录就会成为管理员——见 [`docs/deploy.md`](docs/deploy.md) § 6。
 
 6. 继续**下方第 3 步**（登录并注册你的 GitHub App）。
 
@@ -98,8 +100,10 @@ flowchart LR
    ```bash
    bun install
    bun run build:spa
-   wrangler deploy
+   wrangler deploy --var "ADMIN_LOGINS:alice,bob"
    ```
+
+   手工部署必须显式携带 `ADMIN_LOGINS`，与 workflow 完全一致（`--var "ADMIN_LOGINS:$ADMIN_LOGINS"`）：省略时，空 `users` 表上的首次 OAuth 登录会成为管理员——见 [`docs/deploy.md`](docs/deploy.md) § 6。
 
 2. **设置 dashboard 密钥**（四个；审查凭据不放在 Worker 层）—— 在 **staging environment**（Settings → Environments → `staging` → Secrets）配置，Deploy workflow 在每次部署时注入 Worker。这套 staging-environment 映射只属于本仓库的自动化——自托管副本（路径 A）直接在 Worker 上设置同样的四个值：
 

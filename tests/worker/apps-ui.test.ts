@@ -65,6 +65,7 @@ function createAppsUiD1(): ReturnType<typeof createTestD1> {
     "0011_webhook_deliveries.sql",
     "0012_custom_providers_and_key_updated_at.sql",
     "0022_app_trigger_mode.sql",
+    "0023_removed_logins.sql",
   ]) {
     db.raw.exec(readFileSync(join(MIGRATIONS_DIR, name), "utf8"));
   }
