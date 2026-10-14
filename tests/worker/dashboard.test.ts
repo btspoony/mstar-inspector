@@ -2994,23 +2994,38 @@ describe("bootstrapDashboardAccess precedence matrix (spec § AuthZ)", () => {
   test("2f. SEC-01: a bootstrap paused after its reads cannot resurrect a login removed in between", async () => {
     const db = createDashboardTestD1();
     await createUser(db, { login: "root-admin", role: "admin" });
-    const interleaving = async () => {
+    const racy = bootstrapRaceD1(db, async () => {
       // The reviewer's interleaving: the login is created, then an admin
       // removes it — both landing AFTER bootstrap's reads returned.
       const created = await createUser(db, { login: "octocat", role: "member" });
       expect(await deleteUserUnlessLastAdmin(db, created.id, "root-admin")).toBe(true);
-    };
-    // Exact case and a case variant: the refusal comes from the insert's own
-    // NOCASE guard, not from the read the interleaving raced past.
-    for (const login of ["octocat", "OCTOCAT"]) {
-      expect(await bootstrapDashboardAccess(bootstrapRaceD1(db, interleaving), login, "octocat")).toEqual({
-        outcome: "deny",
-      });
-      expect(await getUserByLogin(db, login)).toBeNull(); // no resurrected row
-      expect(await isLoginRemoved(db, login)).toBe(true); // record survives
-    }
+    });
+    // Denied by the INSERT's own guard, not by the read the interleaving
+    // raced past (with a fresh fixture the read answered "no record").
+    expect(await bootstrapDashboardAccess(racy, "octocat", "octocat")).toEqual({ outcome: "deny" });
+    expect(await getUserByLogin(db, "octocat")).toBeNull(); // no resurrected row
+    expect(await isLoginRemoved(db, "octocat")).toBe(true); // record survives
     expect(removedRows(db).map((r) => r.github_login)).toEqual(["octocat"]);
     expect(userCount(db)).toBe(1); // the acting admin only
+  });
+
+  test("2g. SEC-01: the write-boundary refusal is case-insensitive (OCTOCAT login, octocat removal)", async () => {
+    // A fresh fixture per casing: a shared DB would leave 2f's tombstone in
+    // place, so this casing would deny at the removal-read fast path and never
+    // reach the guarded insert.
+    const db = createDashboardTestD1();
+    await createUser(db, { login: "root-admin", role: "admin" });
+    const racy = bootstrapRaceD1(db, async () => {
+      const created = await createUser(db, { login: "octocat", role: "member" });
+      expect(await deleteUserUnlessLastAdmin(db, created.id, "root-admin")).toBe(true);
+    });
+    // The bootstrap login differs from the recorded removal in casing only:
+    // the insert's NOT EXISTS must match NOCASE, like every other login lookup.
+    expect(await bootstrapDashboardAccess(racy, "OCTOCAT", "OCTOCAT")).toEqual({ outcome: "deny" });
+    expect(await getUserByLogin(db, "OCTOCAT")).toBeNull();
+    expect(await isLoginRemoved(db, "octocat")).toBe(true);
+    expect(removedRows(db).map((r) => r.github_login)).toEqual(["octocat"]);
+    expect(userCount(db)).toBe(1);
   });
 
   test("3. empty table && ADMIN_LOGINS unset → first login bootstraps as admin", async () => {
