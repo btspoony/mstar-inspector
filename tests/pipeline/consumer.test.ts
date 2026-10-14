@@ -162,9 +162,9 @@ async function seedAppConfig(
 ): Promise<void> {
   const store = createAppConfigStore(db, TEST_KEY);
   await store.setModelChain(appId, modelChain);
-  await store.setProviderKey(appId, "ark", "ark-key");
+  await store.addProviderKey(appId, "ark", "ark-key");
   for (const [provider, key] of Object.entries(extraKeys)) {
-    await store.setProviderKey(appId, provider, key);
+    await store.addProviderKey(appId, provider, key);
   }
 }
 
@@ -518,7 +518,8 @@ describe("createReviewConsumer", () => {
     expect(sandboxCalls[5]!.opts).toEqual({
       cwd: "/workspace/repo",
       env: {
-        ARK_API_KEY: "ark-key",
+        MSTAR_POOL_ARK_COUNT: "1",
+        MSTAR_POOL_ARK_01: "ark-key",
         HARNESS_PLUGIN_ROOT: "/opt/mstar-harness",
         PI_CODING_AGENT_DIR: "/opt/omp-agent",
         OMP_REVIEW_MODEL: "ark-plan/deepseek-v4-flash",
@@ -1472,11 +1473,13 @@ describe("createReviewConsumer", () => {
     expect(runnerCall.opts).toEqual({
       cwd: "/workspace/repo",
       env: {
-        ARK_API_KEY: "ark-key",
+        MSTAR_POOL_ARK_COUNT: "1",
+        MSTAR_POOL_ARK_01: "ark-key",
+        MSTAR_POOL_OPENROUTER_COUNT: "1",
+        MSTAR_POOL_OPENROUTER_01: sk("or-app"),
         HARNESS_PLUGIN_ROOT: "/opt/mstar-harness",
         PI_CODING_AGENT_DIR: "/opt/omp-agent",
         OMP_REVIEW_MODEL: "ark-plan/deepseek-v4-flash,openrouter/anthropic/claude-sonnet-4",
-        OPENROUTER_API_KEY: sk("or-app"),
       },
       timeout: 600_000,
     });
@@ -1725,33 +1728,53 @@ describe("createReviewConsumer", () => {
     db.raw
       .prepare(`INSERT INTO app_model_roles (app_id, role, selector) VALUES (?, 'code-reviewer', ?)`)
       .run(appId, preOverrides["code-reviewer"]);
-    const legacyStore = createAppConfigStore(db, TEST_KEY);
-    await legacyStore.setProviderKey(appId, "ark", "ark-key");
-    // The overrides reference openai/anthropic — the pre-migration App
-    // carried those keys too (the fail-closed gate requires them).
-    await legacyStore.setProviderKey(appId, "openai", sk("legacy-openai"));
-    await legacyStore.setProviderKey(appId, "anthropic", sk("legacy-anthropic"));
+    // The pre-pool BYOK rows this App carried: written with the pre-0023
+    // two-segment AAD and no key_id, exactly like a live deployment's rows
+    // when 0023 applies (the store API cannot write them — it is pool-shaped).
+    for (const [provider, key] of [
+      ["ark", "ark-key"],
+      // The overrides reference openai/anthropic — the pre-migration App
+      // carried those keys too (the fail-closed gate requires them).
+      ["openai", sk("legacy-openai")],
+      ["anthropic", sk("legacy-anthropic")],
+    ] as const) {
+      db.raw
+        .prepare(
+          `INSERT INTO app_provider_keys (app_id, provider, key_enc, created_at, updated_at, verified_at, verified_status)
+           VALUES (?, ?, ?, datetime('now'), datetime('now'), NULL, NULL)`,
+        )
+        .run(appId, provider, await box.encryptSecret(key, `app_provider_keys.key_enc:${appId}:${provider}`));
+    }
     // Apply 0017 (the backfill) — the migration under test.
     db.raw.exec(readFileSync(join(import.meta.dir, "../../migrations", "0017_app_model_chains.sql"), "utf8"));
     // 0018 ships with the consumer that resolves the App's sandbox
     // image — the row backfills to the 'omp' default exactly like a real
-    // pre-37 App under this deployment pair. 0019–0020 complete the current
+    // pre-37 App under this deployment pair. 0019–0023 complete the current
     // migration set (0019 metadata, 0020 the lifecycle journal the
-    // consumer's step-2 read queries).
+    // consumer's step-2 read queries, 0021–0022 the check / trigger columns,
+    // 0023 the per-key provider pools the store now writes).
     for (const name of [
       "0018_app_sandbox_images.sql",
       "0019_github_apps_metadata.sql",
       "0020_finding_lifecycle.sql",
+      "0021_review_checks.sql",
+      "0022_app_trigger_mode.sql",
+      "0023_provider_multi_key.sql",
     ]) {
       db.raw.exec(readFileSync(join(import.meta.dir, "../../migrations", name), "utf8"));
     }
     // Post-migration resolution is byte-identical: the default row holds
     // the chain verbatim; the seat-<role> chains + reference rows resolve
-    // to the same overrides map.
+    // to the same overrides map; every carried key row was promoted to its
+    // derived pool id and re-encrypted under the three-segment AAD.
     const store = createAppConfigStore(db, TEST_KEY);
     expect(await store.getAppConfig(appId)).toEqual({
       appId,
-      keys: { anthropic: sk("legacy-anthropic"), ark: "ark-key", openai: sk("legacy-openai") },
+      keys: {
+        anthropic: [sk("legacy-anthropic")],
+        ark: ["ark-key"],
+        openai: [sk("legacy-openai")],
+      },
       modelChain: preChain,
     });
     expect(await store.getModelOverridesForConsumer(appId)).toEqual(preOverrides);
@@ -1777,19 +1800,28 @@ describe("createReviewConsumer", () => {
       openai: sk("openai-x"),
       groq: sk("groq-x"),
     });
-    await createAppConfigStore(db, TEST_KEY).setProviderKey(TEST_APP_ID, "mistral", " ");
+    await createAppConfigStore(db, TEST_KEY).addProviderKey(TEST_APP_ID, "mistral", " ");
     const consumer = createReviewConsumer(await makeEnv({ DB: db as never }), undefined, testOverrides);
 
     await consumer(makeBatch(makePayload()));
 
     const runnerEnv = runnerExecEnv();
+    // Each configured provider gets its own pool env: a COUNT plus the
+    // one-based _NN slots the runner reads.
     expect(runnerEnv).toMatchObject({
-      ARK_API_KEY: "ark-key",
-      ANTHROPIC_API_KEY: sk("ant-test"),
-      OPENROUTER_API_KEY: sk("or-test"),
-      OPENAI_API_KEY: sk("openai-x"),
+      MSTAR_POOL_ARK_COUNT: "1",
+      MSTAR_POOL_ARK_01: "ark-key",
+      MSTAR_POOL_ANTHROPIC_COUNT: "1",
+      MSTAR_POOL_ANTHROPIC_01: sk("ant-test"),
+      MSTAR_POOL_OPENROUTER_COUNT: "1",
+      MSTAR_POOL_OPENROUTER_01: sk("or-test"),
+      MSTAR_POOL_OPENAI_COUNT: "1",
+      MSTAR_POOL_OPENAI_01: sk("openai-x"),
     });
+    // The blank mistral row injected no pool at all.
     expect(runnerEnv.MISTRAL_API_KEY).toBeUndefined();
+    expect(runnerEnv.MSTAR_POOL_MISTRAL_COUNT).toBeUndefined();
+    expect(runnerEnv.MSTAR_POOL_MISTRAL_01).toBeUndefined();
   });
 
   test("BB-2: only App-config keys reach the container — arbitrary env is NEVER forwarded (allowlist)", async () => {
@@ -1810,12 +1842,15 @@ describe("createReviewConsumer", () => {
     const runnerEnv = runnerExecEnv();
     // The gemini key comes from the APP config, never the env duplicate.
     expect(runnerEnv).toEqual({
-      ARK_API_KEY: "ark-key",
+      MSTAR_POOL_ARK_COUNT: "1",
+      MSTAR_POOL_ARK_01: "ark-key",
+      MSTAR_POOL_GEMINI_COUNT: "1",
+      MSTAR_POOL_GEMINI_01: ["gem", "test"].join("-"),
+      MSTAR_POOL_OPENAI_COUNT: "1",
+      MSTAR_POOL_OPENAI_01: sk("openai-x"),
       HARNESS_PLUGIN_ROOT: "/opt/mstar-harness",
       PI_CODING_AGENT_DIR: "/opt/omp-agent",
       OMP_REVIEW_MODEL: "openai/gpt-app",
-      GEMINI_API_KEY: ["gem", "test"].join("-"),
-      OPENAI_API_KEY: sk("openai-x"),
     });
     expect(Object.values(runnerEnv)).not.toContain("must-not-leak");
     expect(Object.values(runnerEnv)).not.toContain("env-gemini-not-app");

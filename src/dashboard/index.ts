@@ -1589,7 +1589,7 @@ dashboardApp.get("/api/apps/:slug/settings", async (c) => {
           kind: "key" as const,
           provider: key.provider,
           last4: key.last4,
-          updated_at: key.updated_at,
+          updated_at: key.updatedAt,
         })),
         ...customProviders.map((row) => ({
           kind: "custom" as const,

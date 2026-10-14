@@ -529,7 +529,7 @@ describe("store wiring — saveVerifiedKey + getVerifiedModels", () => {
     // The plaintext key is only recoverable through the real composite-PK AAD.
     const plain = await createSecretbox(TEST_KEY).decryptSecret(
       keyRow.key_enc!,
-      `app_provider_keys.key_enc:${app.id}:anthropic`,
+      `app_provider_keys.key_enc:${app.id}:anthropic:${keyRow.key_id!}`,
     );
     expect(plain).toBe(PLAIN_KEY);
 
@@ -587,7 +587,7 @@ describe("store wiring — saveVerifiedKey + getVerifiedModels", () => {
     expect(keyCount.n).toBe(0);
   });
 
-  test("setProviderKey overwriting a verified row resets verified_* to NULL (verification belongs to the (provider, key) pair)", async () => {
+  test("addProviderKey overwriting a verified row resets verified_* to NULL (verification belongs to the (provider, key) pair)", async () => {
     const db = createMigratedTestD1();
     const app = await seedApp(db, "overwrite-app");
     const store = configStore(db);
@@ -596,16 +596,19 @@ describe("store wiring — saveVerifiedKey + getVerifiedModels", () => {
       .query("SELECT verified_at, verified_status FROM app_provider_keys WHERE app_id = ?")
       .get(app.id) as { verified_at: string | null; verified_status: string | null };
     expect(row.verified_status).toBe("ok");
-    await store.setProviderKey(app.id, "openai", sk("overwrite-key-7777"));
+    // The SAME key re-submitted on the unverified path collapses onto its own
+    // pool row (a re-submission, not a second slot) and must reset the
+    // verified bookkeeping.
+    await store.addProviderKey(app.id, "openai", PLAIN_KEY);
     const after = db.raw
-      .query("SELECT verified_at, verified_status, key_enc FROM app_provider_keys WHERE app_id = ?")
-      .get(app.id) as { verified_at: string | null; verified_status: string | null; key_enc: string };
+      .query("SELECT verified_at, verified_status, key_enc, key_id FROM app_provider_keys WHERE app_id = ?")
+      .get(app.id) as { verified_at: string | null; verified_status: string | null; key_enc: string; key_id: string };
     expect(after.verified_at).toBeNull();
     expect(after.verified_status).toBeNull();
     // The unverified overwrite replaced the verified envelope (AAD round-trip).
     await expect(
-      createSecretbox(TEST_KEY).decryptSecret(after.key_enc, `app_provider_keys.key_enc:${app.id}:openai`),
-    ).resolves.toBe(sk("overwrite-key-7777"));
+      createSecretbox(TEST_KEY).decryptSecret(after.key_enc, `app_provider_keys.key_enc:${app.id}:openai:${after.key_id}`),
+    ).resolves.toBe(PLAIN_KEY);
   });
 
   test("getVerifiedModels fails loud on a malformed app_provider_models row, citing app_provider_models.models_json (not app_custom_providers.model_ids)", async () => {
@@ -626,7 +629,9 @@ describe("store wiring — saveVerifiedKey + getVerifiedModels", () => {
     const app = await seedApp(db, "resave-app");
     const store = configStore(db);
     await store.saveVerifiedKey(app.id, "openai", PLAIN_KEY, ["gpt-5"]);
-    await store.saveVerifiedKey(app.id, "openai", sk("new-key-9999"), ["gpt-5", "gpt-5-mini"]);
+    // Re-saving the SAME key upserts its row in place (no duplicate slot) and
+    // refreshes the provider's cached model list.
+    await store.saveVerifiedKey(app.id, "openai", PLAIN_KEY, ["gpt-5", "gpt-5-mini"]);
 
     const keyCount = db.raw.query("SELECT COUNT(*) AS n FROM app_provider_keys WHERE app_id = ?").get(app.id) as { n: number };
     const cacheCount = db.raw
@@ -637,11 +642,14 @@ describe("store wiring — saveVerifiedKey + getVerifiedModels", () => {
     const cached = await store.getVerifiedModels(app.id);
     expect(cached).toHaveLength(1);
     expect(cached[0]!.models).toEqual(["gpt-5", "gpt-5-mini"]);
-    // The new key replaced the old envelope (decryptable only with the AAD).
-    const row = db.raw.query("SELECT key_enc FROM app_provider_keys WHERE app_id = ?").get(app.id) as { key_enc: string };
+    // The row carries the same key envelope (decryptable only with the AAD).
+    const row = db.raw.query("SELECT key_enc, key_id FROM app_provider_keys WHERE app_id = ?").get(app.id) as {
+      key_enc: string;
+      key_id: string;
+    };
     await expect(
-      createSecretbox(TEST_KEY).decryptSecret(row.key_enc, `app_provider_keys.key_enc:${app.id}:openai`),
-    ).resolves.toBe(sk("new-key-9999"));
+      createSecretbox(TEST_KEY).decryptSecret(row.key_enc, `app_provider_keys.key_enc:${app.id}:openai:${row.key_id}`),
+    ).resolves.toBe(PLAIN_KEY);
   });
 
   test("getVerifiedModels orders by provider ascending and parses each models_json", async () => {
@@ -655,21 +663,31 @@ describe("store wiring — saveVerifiedKey + getVerifiedModels", () => {
     expect(cached.map((c) => c.provider)).toEqual(["ark-plan", "mistral", "openai"]);
   });
 
-  test("legacy setProviderKey still writes unverified rows (NULL verified columns) — old callers keep compiling", async () => {
+  test("addProviderKey writes unverified rows (NULL verified columns)", async () => {
     const db = createMigratedTestD1();
     const app = await seedApp(db, "legacy-write-app");
     const store = configStore(db);
-    await store.setProviderKey(app.id, "xai", PLAIN_KEY); // the unverified path Task 4 switches over
+    await store.addProviderKey(app.id, "xai", PLAIN_KEY);
     const row = db.raw
       .query("SELECT verified_at, verified_status FROM app_provider_keys WHERE app_id = ?")
       .get(app.id) as { verified_at: string | null; verified_status: string | null };
     expect(row.verified_at).toBeNull();
     expect(row.verified_status).toBeNull();
-    // The legacy read faces still work over the 0015 shape.
+    // The read faces work over the 0015 shape: the masked list carries the
+    // derived pool id, the tail and the update stamp — never key material.
     const masked = await store.listProviderKeys(app.id);
-    expect(masked).toEqual([{ provider: "xai", last4: "1234", updated_at: expect.stringMatching(SQLITE_TS_RE) }]);
+    expect(masked).toEqual([
+      {
+        provider: "xai",
+        keyId: expect.stringMatching(/^[0-9a-f]{16}$/),
+        last4: "1234",
+        updatedAt: expect.stringMatching(SQLITE_TS_RE),
+        verifiedAt: null,
+        verifiedStatus: null,
+      },
+    ]);
     const appConfig = await store.getAppConfig(app.id);
-    expect(appConfig.keys.xai).toBe(PLAIN_KEY);
+    expect(appConfig.keys.xai).toEqual([PLAIN_KEY]);
     expect(await store.getVerifiedModels(app.id)).toEqual([]); // no cache row yet
   });
 

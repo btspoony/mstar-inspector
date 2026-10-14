@@ -1001,16 +1001,21 @@ export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | un
     // revive — and the pool write is gated by the SAME declaration admission
     // the declaration statement carries, so neither can land without the
     // other, whatever the concurrent saves did in between.
-    const owned = spec.owner !== undefined && opts.newDeclaration !== true;
-    const ownership = owned
-      ? ` AND EXISTS (SELECT 1 FROM ${spec.owner.table} WHERE app_id = ? AND ${spec.owner.column} = ?)`
-      : "";
+    // `owner` is `spec.owner` UNLESS this batch writes the declaration itself —
+    // the one flag that suppresses the existence gate. Naming the narrowed
+    // value once keeps the three interpolations below type-safe by control
+    // flow (no assertion; `owner` is defined exactly when the gate applies).
+    const owner = opts.newDeclaration === true ? undefined : spec.owner;
+    const ownership =
+      owner === undefined
+        ? ""
+        : ` AND EXISTS (SELECT 1 FROM ${owner.table} WHERE app_id = ? AND ${owner.column} = ?)`;
     // A key riding a declaration CREATED BY THE SAME BATCH has no row to check
     // yet; the declaration's own INSERT is gated on this very predicate, so
     // the batch still commits the key only together with its declaration.
     const growth = opts.newDeclaration === true ? ` AND ${declarationGrowthAdmission()}` : "";
     const bind = [appId, provider, keyId, keyEnc, appId, provider, appId, provider, keyId];
-    if (owned) bind.push(appId, provider);
+    if (owner !== undefined) bind.push(appId, provider);
     if (opts.newDeclaration === true) bind.push(appId);
     return db
       .prepare(
