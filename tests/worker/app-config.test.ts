@@ -50,6 +50,7 @@ import {
   createAppConfigStore,
   parseModelChain,
   type AppConfigD1,
+  type AppConfigStatement,
   type AppCustomProvider,
 } from "../../src/dashboard/app-config-store";
 import { enabledSandboxImages, getSandboxImage, sandboxImageHostIds } from "../../src/contracts/sandbox-images";
@@ -192,6 +193,40 @@ function createBatchRejectingD1(inner: AppConfigD1): AppConfigD1 & { batchCalls(
       throw new Error("simulated D1 batch failure");
     },
     batchCalls: () => batchCalls,
+  };
+}
+
+/**
+ * D1 double that runs `removeDeclaration` the first time the store prepares a
+ * write into app_custom_provider_keys — the CONTROLLED interleaving the
+ * ownership gate must absorb: the caller's declaration read has already
+ * passed, the declaration (and its pool) is gone by the time the key write
+ * executes. Everything else delegates to the real migrated double.
+ */
+function createDeclarationRaceD1(inner: AppConfigD1, removeDeclaration: () => void): AppConfigD1 {
+  let fired = false;
+  return {
+    prepare: (query: string) => {
+      const stmt = inner.prepare(query);
+      if (fired || !query.includes("INSERT INTO app_custom_provider_keys")) return stmt;
+      const raced: AppConfigStatement = {
+        bind: (...values: unknown[]) => {
+          stmt.bind(...values);
+          return raced;
+        },
+        first: () => stmt.first(),
+        all: () => stmt.all(),
+        run: async () => {
+          if (!fired) {
+            fired = true;
+            removeDeclaration();
+          }
+          return await stmt.run();
+        },
+      };
+      return raced;
+    },
+    batch: (statements) => inner.batch(statements),
   };
 }
 
@@ -863,6 +898,31 @@ describe("app-config store (createAppConfigStore) — provider keys", () => {
     expect(rawCount(db, "app_provider_models")).toBe(0);
     // An unknown key id is an idempotent no-op.
     expect(await store.deleteProviderKey(app.id, "anthropic", "0".repeat(16))).toBe(false);
+  });
+
+  test("deleteProviderKey removes a migrated (not-yet-promoted) key by its derived id — no prior read needed", async () => {
+    const db = createPreProviderPoolD1();
+    const app = await seedApp(db, { slug: "a", createdBy: "mallory" });
+    const legacy = sk("legacy-delete-me-4242");
+    // The pre-pool row a live deployment carries across 0023.
+    const legacyEnc = await createSecretbox(TEST_KEY).encryptSecret(
+      legacy,
+      `app_provider_keys.key_enc:${app.id}:anthropic`,
+    );
+    rawRun(
+      db,
+      `INSERT INTO app_provider_keys (app_id, provider, key_enc, created_at, updated_at)
+       VALUES (?, 'anthropic', ?, '2026-01-01 00:00:00', '2026-01-02 00:00:00')`,
+      app.id,
+      legacyEnc,
+    );
+    applyMigration(db, "0023_provider_multi_key.sql");
+    // Carried verbatim under the sentinel id: only the DELETE's OWN promotion
+    // can make the derived id addressable — no list/config call ran before it.
+    const carried = db.raw.query("SELECT key_id FROM app_provider_keys").get() as { key_id: string };
+    expect(carried.key_id).toBe("");
+    expect(await configStore(db).deleteProviderKey(app.id, "anthropic", await keyIdOf(legacy))).toBe(true);
+    expect(rawCount(db, "app_provider_keys")).toBe(0);
   });
 
   test("cross-App isolation: App X's config never contains App Y's keys (full-object assert)", async () => {
@@ -1562,6 +1622,125 @@ describe("app-config store (createAppConfigStore) — custom providers", () => {
     // unreachable data (and would resurface on a re-declaration).
     expect(rawCount(db, "app_custom_provider_keys")).toBe(0);
     await expect(store.removeCustomProvider(app.id, CUSTOM.provider_id)).resolves.toBe(false);
+  });
+
+  test("a refused ninth custom key commits NEITHER the key nor the changed declaration", async () => {
+    const { db, app } = await seededWorld();
+    const store = configStore(db);
+    await store.upsertCustomProvider(app.id, CUSTOM, PLAIN_CUSTOM_KEY);
+    for (let i = 1; i < MAX_KEYS_PER_PROVIDER; i++) {
+      await store.addCustomProviderKey(app.id, CUSTOM.provider_id, sk(`custom-pool-key-${i}-${i}${i}${i}`));
+    }
+    expect(rawCount(db, "app_custom_provider_keys")).toBe(MAX_KEYS_PER_PROVIDER);
+    // Backdate the declaration so ANY write to it is visible: datetime('now')
+    // has one-second resolution, so a same-second rewrite could hide a commit.
+    rawRun(
+      db,
+      `UPDATE app_custom_providers SET updated_at = '2026-01-01 00:00:00' WHERE app_id = ? AND provider_id = ?`,
+      app.id,
+      CUSTOM.provider_id,
+    );
+    const selectDeclaration = `SELECT base_url, api, model_ids, created_at, updated_at
+       FROM app_custom_providers WHERE app_id = ? AND provider_id = ?`;
+    const before = db.raw.query(selectDeclaration).get(app.id, CUSTOM.provider_id);
+    const ninth = sk("custom-pool-key-ninth-9999");
+    await expect(
+      store.upsertCustomProvider(
+        app.id,
+        { ...CUSTOM, base_url: "https://changed.example.com/v1", model_ids: ["changed-model"] },
+        ninth,
+      ),
+    ).rejects.toThrow(ProviderKeyLimitError);
+    // Byte-identical declaration: the refusal committed neither write.
+    expect(db.raw.query(selectDeclaration).get(app.id, CUSTOM.provider_id)).toEqual(before);
+    expect(rawCount(db, "app_custom_provider_keys")).toBe(MAX_KEYS_PER_PROVIDER);
+    const consumer = await store.getCustomProvidersForConsumer(app.id);
+    expect(consumer[0]!.api_keys).toHaveLength(MAX_KEYS_PER_PROVIDER);
+    expect(consumer[0]!.api_keys).not.toContain(ninth);
+    expect(consumer[0]!.base_url).toBe(CUSTOM.base_url);
+  });
+
+  test("a crypto failure at declaration time leaves NO declaration behind", async () => {
+    const { db, app } = await seededWorld();
+    // No master key bound: the key can never be encrypted, so the declaration
+    // must not be committed either (it was, when the declaration wrote first).
+    const store = createAppConfigStore(db, undefined);
+    await expect(store.upsertCustomProvider(app.id, CUSTOM, PLAIN_CUSTOM_KEY)).rejects.toThrow(/secretbox/);
+    expect(rawCount(db, "app_custom_providers")).toBe(0);
+    expect(rawCount(db, "app_custom_provider_keys")).toBe(0);
+  });
+
+  test("a declaration removed between the ownership read and the key write leaves no orphan credential", async () => {
+    const { db, app } = await seededWorld();
+    const store = configStore(db);
+    await store.upsertCustomProvider(app.id, CUSTOM, PLAIN_CUSTOM_KEY);
+    // Controlled interleaving: the removal (the same two DELETEs
+    // removeCustomProvider runs as ONE batch) lands AFTER the caller's
+    // declaration read and BEFORE its key write.
+    const race = () => {
+      rawRun(db, "DELETE FROM app_custom_provider_keys WHERE app_id = ? AND provider = ?", app.id, CUSTOM.provider_id);
+      rawRun(db, "DELETE FROM app_custom_providers WHERE app_id = ? AND provider_id = ?", app.id, CUSTOM.provider_id);
+    };
+    await expect(
+      configStore(createDeclarationRaceD1(db, race)).addCustomProviderKey(
+        app.id,
+        CUSTOM.provider_id,
+        sk("custom-orphan-3131"),
+      ),
+    ).rejects.toThrow(InvalidCustomProviderError);
+    expect(rawCount(db, "app_custom_providers")).toBe(0);
+    expect(rawCount(db, "app_custom_provider_keys")).toBe(0);
+    // Re-declaring the SAME id must not revive the refused credential.
+    await store.upsertCustomProvider(app.id, CUSTOM, PLAIN_CUSTOM_KEY);
+    await expect(store.getCustomProvidersForConsumer(app.id)).resolves.toEqual([
+      { ...CUSTOM, api_keys: [PLAIN_CUSTOM_KEY] },
+    ]);
+  });
+
+  test("a declaration removed during upsertCustomProvider commits neither the declaration nor the key", async () => {
+    const { db, app } = await seededWorld();
+    const store = configStore(db);
+    await store.upsertCustomProvider(app.id, CUSTOM, PLAIN_CUSTOM_KEY);
+    const racing = configStore(
+      createDeclarationRaceD1(db, () => {
+        rawRun(db, "DELETE FROM app_custom_provider_keys WHERE app_id = ? AND provider = ?", app.id, CUSTOM.provider_id);
+        rawRun(db, "DELETE FROM app_custom_providers WHERE app_id = ? AND provider_id = ?", app.id, CUSTOM.provider_id);
+      }),
+    );
+    await expect(
+      racing.upsertCustomProvider(app.id, { ...CUSTOM, model_ids: ["changed-model"] }, sk("custom-race-4141")),
+    ).rejects.toThrow(InvalidCustomProviderError);
+    expect(rawCount(db, "app_custom_providers")).toBe(0);
+    expect(rawCount(db, "app_custom_provider_keys")).toBe(0);
+  });
+
+  test("deleteCustomProviderKey removes a migrated (not-yet-promoted) key by its derived id — no prior read needed", async () => {
+    const db = createPreProviderPoolD1();
+    const app = await seedApp(db, { slug: "a", createdBy: "mallory" });
+    const legacy = sk("custom-legacy-delete-5151");
+    const legacyEnc = await createSecretbox(TEST_KEY).encryptSecret(
+      legacy,
+      `app_custom_providers.api_key_enc:${app.id}:${CUSTOM.provider_id}`,
+    );
+    rawRun(
+      db,
+      `INSERT INTO app_custom_providers
+         (app_id, provider_id, base_url, api, model_ids, api_key_enc, created_at, updated_at, verified_at, verified_status)
+       VALUES (?, ?, ?, ?, ?, ?, '2026-01-01 00:00:00', '2026-01-01 00:00:00', '2026-01-01 00:00:00', 'ok')`,
+      app.id,
+      CUSTOM.provider_id,
+      CUSTOM.base_url,
+      CUSTOM.api,
+      JSON.stringify(CUSTOM.model_ids),
+      legacyEnc,
+    );
+    applyMigration(db, "0023_provider_multi_key.sql");
+    const carried = db.raw.query("SELECT key_id FROM app_custom_provider_keys").get() as { key_id: string };
+    expect(carried.key_id).toBe("");
+    expect(
+      await configStore(db).deleteCustomProviderKey(app.id, CUSTOM.provider_id, await keyIdOf(legacy)),
+    ).toBe(true);
+    expect(rawCount(db, "app_custom_provider_keys")).toBe(0);
   });
 
   test("store backstop: an invalid declaration throws InvalidCustomProviderError before any write", async () => {
