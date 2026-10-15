@@ -1464,7 +1464,7 @@ controls are installed (the Dockerfile carries the documentation block only).
   - `github.com` / `api.github.com` — git clone/fetch of the PR head (token
     via scoped extraheader exec env) and gh CLI.
   - Provider API hosts by active provider config — the 18 built-in provider
-    hosts resolve in omp's runtime registry (omp SDK 18.2.6, outside this
+    hosts resolve in omp's runtime registry (omp SDK 18.11.1, outside this
     repo — NOT the Worker-side `PROVIDERS` allowlist, which is a separate
     19-entry list, `ark` included); the ark capability host
     `ark.cn-beijing.volces.com` is declared in the omp registry entry

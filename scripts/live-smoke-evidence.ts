@@ -41,7 +41,9 @@ const agentDir = await writePerReviewModelsYaml(hosts);
 const authStorage = await createInMemoryAuthStorage();
 try {
   for (const { host, key } of keys) {
-    await authStorage.set(host.id, [{ type: "api_key" as const, key, source: "login" as const }]);
+    await authStorage.credentials.set(host.id, [
+      { type: "api_key" as const, key, source: "login" as const },
+    ]);
   }
   // runReview resolves { envelope, recheck } — the smoke captures
   // the envelope only (the optional recheck document rides its own file).

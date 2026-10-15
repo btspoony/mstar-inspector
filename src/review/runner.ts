@@ -409,7 +409,7 @@ async function loadCredentialPool(json: RunnerInputJson, payload: string): Promi
 
   try {
     for (const { providerId, keys } of loaded) {
-      await storage.set(
+      await storage.credentials.set(
         providerId,
         keys.map((key) => ({ type: "api_key" as const, key, source: "login" as const })),
       );

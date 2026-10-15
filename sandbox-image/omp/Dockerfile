@@ -132,7 +132,7 @@ ENV PATH="/root/.bun/bin:${PATH}"
 RUN mkdir -p /opt/omp-agent
 ENV PI_CODING_AGENT_DIR=/opt/omp-agent
 
-# lockfile (omp SDK 18.2.6 = package.json). `--omit=optional` is NOT used:
+# lockfile (omp SDK 18.11.1 = package.json). `--omit=optional` is NOT used:
 # pi-natives ships its platform binary as an optional dep, so omitting optionals
 # breaks the runner at load (T4 live smoke). Size control instead prunes the
 # transformers tree (local-embedding models only — the runner uses the remote
