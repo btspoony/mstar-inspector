@@ -797,6 +797,10 @@ describe("ompAgentRuntime.runReview — deep parent path", () => {
       const agent = parseAgent(name, content, "project");
       expect(agent.name).toBe(name.replace(/\.md$/, ""));
       expect(agent.tools).toEqual(["read", "grep", "glob", "yield"]);
+      // SDK >= 18.10.2 filters `yield` out again unless the definition opts
+      // into the structured result contract (the deep parent's task tool
+      // runs with `task.structured` off), so the seat must declare it.
+      expect(agent.structured).toBe(true);
       // Zero-copy: the role BODY is the fixture marker loaded from the
       // plugin root at runtime, not a pasted copy.
       expect(agent.systemPrompt).toContain(`# fixture agent: ${agent.name}`);

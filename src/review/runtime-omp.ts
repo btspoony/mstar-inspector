@@ -564,9 +564,15 @@ function stripFrontmatter(markdown: string): string {
  * as an object map), which the SDK `parseAgentFields` reads as NO tool list —
  * under the parent's restrictToolNames that spawns a yield-only seat that
  * cannot read the clone. The installed contract is the same as
- * ./seat-agent.md — name + description + `tools: [read, grep, glob]` — with
+ * ./seat-agent.md — name + description + the read-only seat tools — with
  * the harness role BODY kept verbatim (zero-copy: sourced from the plugin
  * root at runtime, never pasted into src/).
+ *
+ * `yield` is listed explicitly and `structured: true` is required: on SDK
+ * >= 18.10.2 the deep parent's `task` tool runs with `task.structured` off,
+ * so the child gets no yield tool and no output schema unless its own
+ * definition opts back in (`src/task/executor.ts` filters `yield` out when
+ * unstructured; `src/task/structured-subagent.ts` honours the agent flag).
  */
 function toOmpSeatDefinition(role: string, source: string): string {
   const body = stripFrontmatter(source);
@@ -574,7 +580,8 @@ function toOmpSeatDefinition(role: string, source: string): string {
     "---",
     `name: ${role}`,
     `description: Read-only deep-review seat for the ${role} harness role — collects and vets review findings for its assigned domain using only read, grep, and glob.`,
-    `tools: [${REVIEW_TOOL_NAMES.join(", ")}]`,
+    `tools: [${[...REVIEW_TOOL_NAMES, "yield"].join(", ")}]`,
+    "structured: true",
     "---",
     "",
     body,
