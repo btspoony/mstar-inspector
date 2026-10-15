@@ -357,9 +357,24 @@ function poolProviders(
 }
 
 /**
+ * The run's credential store — IN MEMORY, and the ONLY place it is constructed.
+ *
+ * Exported so every runtime entry point shares this one definition: the
+ * container runner (below) and `scripts/live-smoke-evidence.ts`. A caller that
+ * builds its own store can drift back to a file path, which is how the
+ * exposure returned once already. The signature takes NO path for that reason
+ * — there is no argument through which a caller could make it disk-backed.
+ * `:memory:` is SQLite's in-memory database: no `<agentDir>/agent.db`, no
+ * `-wal`/`-shm`, so the review agent's own read/grep/glob have nothing to find.
+ */
+export function createInMemoryAuthStorage(): Promise<AuthStorage> {
+  return AuthStorage.create(":memory:");
+}
+
+/**
  * Load the transported credential pool into the run's credential store.
  *
- * The store is IN MEMORY (`AuthStorage.create(":memory:")`): `<agentDir>` keeps
+ * The store is IN MEMORY (`createInMemoryAuthStorage`): `<agentDir>` keeps
  * only the synthesized models.yml, so there is no credential database for the
  * session's own read/grep/glob tools to find — the review agent cannot read
  * the App's key pool out of its own run directory. The returned instance is
@@ -389,7 +404,7 @@ async function loadCredentialPool(json: RunnerInputJson, payload: string): Promi
   }
   // A keyless run still gets an instance: the session must never fall back to
   // discoverAuthStorage(agentDir), which would create the database on disk.
-  const storage = await AuthStorage.create(":memory:");
+  const storage = await createInMemoryAuthStorage();
   if (loaded.length === 0) return storage;
 
   try {

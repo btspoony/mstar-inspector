@@ -128,6 +128,21 @@ const OMP_HOSTS = getSandboxImage("omp")!.hosts;
 /** The base those hosts generate — the zero-custom models.yml equivalence lock. */
 const OMP_BASE_YAML = capabilityHostsYaml(OMP_HOSTS);
 
+/**
+ * Child-process probe for the SHARED store definition: build a store through
+ * `createInMemoryAuthStorage`, write one row, read it back, close. Run in a
+ * child so `PI_CODING_AGENT_DIR` is in force when the SDK resolves its agent
+ * dir — a disk-backed helper would leave `agent.db` there. `__KEY__` is
+ * substituted at the call site.
+ */
+const HELPER_STORE_PROBE = `
+import { createInMemoryAuthStorage } from "./src/review/runner";
+const storage = await createInMemoryAuthStorage();
+await storage.set("openai", [{ type: "api_key", key: "__KEY__", source: "login" }]);
+console.log("KEY=" + (await storage.getApiKey("openai")));
+storage.close();
+`;
+
 /** Write a JSON input file into a fresh temp dir and return its path. */
 function writeInput(json: unknown): string {
   const dir = mkdtempSync(join(tmpdir(), "runner-input-"));
@@ -1012,6 +1027,29 @@ describe("runner entry — transported credential pool", () => {
     expect(failed.stderr).toContain("provider boom"); // the original failure is not masked
     expect(inFlight?.hadStore).toBe(false);
     expect(existsSync(inFlight!.dir)).toBe(false);
+
+    // ...and the ONE store definition both callers share is itself file-free.
+    // Both the runner and `scripts/live-smoke-evidence.ts` construct through
+    // `createInMemoryAuthStorage`, so proving it on the helper covers every
+    // caller — including the direct script entry that has no runner around it.
+    // A CHILD process is required: the SDK resolves its agent dir at module
+    // load, so redirecting it here is the only way a disk-backed store would
+    // reveal itself as `<agentDir>/agent.db`.
+    const childAgentDir = mkdtempSync(join(tmpdir(), "helper-agentdir-"));
+    try {
+      const probe = Bun.spawnSync(["bun", "-e", HELPER_STORE_PROBE.replace("__KEY__", sk("helper-probe"))], {
+        stdout: "pipe",
+        stderr: "pipe",
+        cwd: join(import.meta.dir, "..", ".."),
+        env: { ...process.env, PI_CODING_AGENT_DIR: childAgentDir },
+      });
+      // The store WORKS — so the absent file below is not just a dead probe.
+      expect(probe.exitCode).toBe(0);
+      expect(probe.stdout.toString()).toContain(`KEY=${sk("helper-probe")}`);
+      expect(readdirSync(childAgentDir).filter((name) => name.startsWith("agent.db"))).toEqual([]);
+    } finally {
+      rmSync(childAgentDir, { recursive: true, force: true });
+    }
   });
 
   test("with a real payload the pool is loaded and readable from memory, yet NO database exists anywhere the session's tools scan", async () => {
