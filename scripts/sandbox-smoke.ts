@@ -81,12 +81,12 @@ function resolvePrivateKey(value: string): string {
  * read-only, exactly the requested repository. `appId` is the smoke's local
  * numeric App-id stand-in (the mint itself binds installationId + repo).
  */
-async function mintInstallationToken(): Promise<string> {
-  const commenter = createReviewCommenter({ APP_ID: SMOKE_APP_ID, PRIVATE_KEY: resolvePrivateKey(SMOKE_PRIVATE_KEY) });
+async function mintInstallationToken(appId: string, privateKey: string): Promise<string> {
+  const commenter = createReviewCommenter({ APP_ID: appId, PRIVATE_KEY: resolvePrivateKey(privateKey) });
   // GH_REPO was validated as owner/repo at startup — `repo` is always present.
   const [owner, repo] = GH_REPO.split("/") as [string, string];
   const grant = await commenter.getInstallationToken({
-    scope: { appId: SMOKE_APP_ID, installationId: INSTALLATION_ID, owner, repo, prNumber: Number(GH_PR) },
+    scope: { appId, installationId: INSTALLATION_ID, owner, repo, prNumber: Number(GH_PR) },
     purpose: "sandbox-read",
   });
   assertSandboxGrant(grant, repo);
@@ -110,7 +110,7 @@ async function waitForPort(port: number, timeoutMs: number): Promise<void> {
   throw new Error(`wrangler dev did not become ready on port ${port} within ${timeoutMs}ms`);
 }
 
-const token = await mintInstallationToken();
+const token = await mintInstallationToken(SMOKE_APP_ID, SMOKE_PRIVATE_KEY);
 console.log("TOKEN_MINTED=yes");
 
 const port = 8791;

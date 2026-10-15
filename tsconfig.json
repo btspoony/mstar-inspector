@@ -23,6 +23,13 @@
       "@/*": ["./src/spa/*"]
     }
   },
-  "include": ["src", "tests"],
+  // `scripts` rides the root program for the same reason `tests` does: a
+  // standalone entry point that builds a runtime input must be type-checked
+  // against it. Without it, `scripts/live-smoke-evidence.ts` omitted the
+  // REQUIRED `AgentRuntimeRunInput.authStorage`, and Bun ran it anyway while
+  // `tsc` stayed green — the SDK then recreated the on-disk credential
+  // database this codebase removed. Any future omission in scripts/** now
+  // fails the same check CI runs.
+  "include": ["src", "tests", "scripts"],
   "exclude": ["src/spa", "tests/spa"]
 }
