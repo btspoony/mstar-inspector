@@ -149,6 +149,10 @@ COPY src/review /opt/runner/src/review
 # (tests/review/runtime-boundary.test.ts derives the admitted set from these
 # COPY lines and re-asserts dependency freedom per admitted file).
 COPY src/contracts/recheck.ts /opt/runner/src/contracts/recheck.ts
+# Same admission rule, same reason: the `!`-prefixed-key refusal is ONE
+# predicate shared by the runner's payload decoder and the dashboard's key
+# routes, so the zero-dependency contract file that holds it rides the image.
+COPY src/contracts/credential-key.ts /opt/runner/src/contracts/credential-key.ts
 
 # The runner resolves the harness root from this env (plan Clarify #5). Provider
 # keys arrive as the runner's STDIN payload — never baked in, never in the env.

@@ -55,6 +55,7 @@ import {
   type AppCustomProvider,
 } from "../../src/dashboard/app-config-store";
 import { enabledSandboxImages, getSandboxImage, sandboxImageHostIds } from "../../src/contracts/sandbox-images";
+import { composeModelOptions } from "../../src/dashboard/model-membership";
 import { PROVIDER_CATALOG, PROVIDER_IDS_BUILTIN } from "../../src/contracts/provider-catalog.generated";
 import { createSecretbox } from "../../src/dashboard/secretbox";
 import { PROVIDERS } from "../../src/pipeline/provider-catalog";
@@ -961,6 +962,55 @@ describe("app-config store (createAppConfigStore) — provider keys", () => {
     expect(rawCount(db, "app_provider_models")).toBe(0);
     expect(await store.removeProviderKey(app.id, "anthropic")).toBe(false);
     expect(await store.removeProviderKey(app.id, "never-stored")).toBe(false);
+  });
+
+  test("the provider model cache agrees with pool execution: one key verbatim, several keys intersected (F4)", async () => {
+    const db = createAppConfigD1();
+    const app = await seedApp(db, { slug: "a", createdBy: "mallory" });
+    const store = configStore(db);
+    const one = sk("first-key-aaaa");
+    const two = sk("second-key-bbbb");
+    const cachedModels = async () => (await store.getVerifiedModels(app.id)).map((row) => row.models);
+
+    // ONE key: the list is cached verbatim — the runtime loads a one-key pool,
+    // so there is nothing to reconcile, and a later upstream model launch must
+    // be able to land on the next re-verify.
+    await store.saveVerifiedKey(app.id, "anthropic", one, ["m1", "m2"]);
+    expect(await cachedModels()).toEqual([["m1", "m2"]]);
+    await store.saveVerifiedKey(app.id, "anthropic", one, ["m1", "m2", "m3"]);
+    expect(await cachedModels()).toEqual([["m1", "m2", "m3"]]);
+
+    // TWO keys AGREEING: the intersection is the list itself — unchanged.
+    await store.saveVerifiedKey(app.id, "anthropic", two, ["m2", "m3"]);
+    expect(await cachedModels()).toEqual([["m2", "m3"]]);
+
+    // TWO keys DISAGREEING: the cache narrows to what BOTH can serve, so the
+    // dropdown never offers a model the credential the runtime picks cannot.
+    await store.saveVerifiedKey(app.id, "anthropic", two, ["m3"]);
+    expect(await cachedModels()).toEqual([["m3"]]);
+
+    // A DELETE clears the provider-scoped row (existing rule) — and the
+    // surviving single key's next verification rebuilds it verbatim.
+    expect(await store.deleteProviderKey(app.id, "anthropic", await keyIdOf(two))).toBe(true);
+    expect(rawCount(db, "app_provider_models")).toBe(0);
+    await store.saveVerifiedKey(app.id, "anthropic", one, ["m1", "m2", "m3"]);
+    expect(await cachedModels()).toEqual([["m1", "m2", "m3"]]);
+  });
+
+  test("a disjoint multi-key pool caches an EMPTY list — the probe-only shape, never a phantom model (F4)", async () => {
+    const db = createAppConfigD1();
+    const app = await seedApp(db, { slug: "a", createdBy: "mallory" });
+    const store = configStore(db);
+    await store.saveVerifiedKey(app.id, "anthropic", sk("first-key-aaaa"), ["only-first"]);
+    await store.saveVerifiedKey(app.id, "anthropic", sk("second-key-bbbb"), ["only-second"]);
+    // Empty models IS the probe-only signal: composeModelOptions yields no
+    // options and findFailingSelector falls back to syntax-only for that
+    // provider, so a chain naming either model still saves and the runtime
+    // resolves it against the pool.
+    expect((await store.getVerifiedModels(app.id)).map((row) => row.models)).toEqual([[]]);
+    expect(composeModelOptions(await store.getVerifiedModels(app.id), [])).toEqual([
+      { provider: "anthropic", source: "probe", selectors: [] },
+    ]);
   });
 
   test("deleteProviderKey removes ONE pool slot and CLEARS the provider's cached models on ANY per-key delete", async () => {
@@ -3234,6 +3284,56 @@ describe("POST /dashboard/apps/:slug/settings — custom providers (op=add-custo
     });
     expect(rawCount(db, "app_custom_providers")).toBe(2);
     expect(rawCount(db, "app_custom_provider_keys")).toBe(2);
+  });
+
+  test("append against an EXISTING declaration keeps the STORED api/model_ids (F2)", async () => {
+    const { db, app } = await seededWorld();
+    const store = configStore(db);
+    // A template id may legitimately hold a declaration whose api/model_ids
+    // differ from the catalog's (only built-in and capability-host ids are
+    // refused at declaration). The catalog prefill is what the operator's
+    // FIRST save materialized; a later append must not rewrite it.
+    await store.upsertCustomProvider(
+      app.id,
+      {
+        provider_id: "subconscious",
+        base_url: "https://api.subconscious.dev/v1",
+        api: "anthropic-messages",
+        model_ids: ["operator-chosen-a", "operator-chosen-b"],
+      },
+      sk("sub-template-existing"),
+    );
+    // The append submits a base URL but no protocol/model ids (the template
+    // form has no control for either).
+    const appended = await postForm(SETTINGS, await mallory(), makeEnv(db), {
+      op: "add-template-provider",
+      template_id: "subconscious",
+      key: sk("sub-template-appended"),
+    });
+    expect(appended.status).toBe(200);
+    const [decl] = await store.listCustomProviders(app.id);
+    expect(decl).toEqual({
+      provider_id: "subconscious",
+      base_url: "https://api.subconscious.dev/v1",
+      api: "anthropic-messages",
+      model_ids: ["operator-chosen-a", "operator-chosen-b"],
+      has_keys: true,
+    });
+    expect(rawCount(db, "app_custom_provider_keys")).toBe(2);
+  });
+
+  test("the first-time template CREATE path still materializes the catalog's values (F2)", async () => {
+    const { db, app } = await seededWorld();
+    const store = configStore(db);
+    const created = await postForm(SETTINGS, await mallory(), makeEnv(db), {
+      op: "add-template-provider",
+      template_id: "subconscious",
+      key: sk("sub-template-first"),
+    });
+    expect(created.status).toBe(200);
+    const [decl] = await store.listCustomProviders(app.id);
+    expect(decl!.api).toBe("openai-completions"); // the catalog's protocol
+    expect(decl!.model_ids).toEqual(["subconscious/glm-5.2", "subconscious/tim-qwen3.6-27b"]);
   });
 
   test("remove-custom-provider deletes the row; an unknown id is a tolerant no-op", async () => {

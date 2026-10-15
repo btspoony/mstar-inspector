@@ -251,6 +251,8 @@ export const zhCN: Dictionary = {
       providerUnavailableOnImage: "{provider} 在此 App 选定的运行时镜像（{image}）上不可用 — 未存储任何内容。",
       apiKeyRequired: "请输入要存储的 API 密钥。",
       apiKeyTooLong: "该 API 密钥过长（{count} 个字符）— 密钥上限为 {limit} 个字符。未存储任何内容。",
+      apiKeyCommandPrefix:
+        "该 API 密钥以 “!” 开头 — 审查运行时会把它当作 shell 命令执行，因此这类密钥会被拒绝。未存储任何内容。",
       providerKeyLimit:
         "{provider} 已存满 {limit} 把密钥 — 请先移除一把再添加。未存储任何内容。",
       chainFieldDuplicated: "模型链字段被提交了多次 — 请重新提交表单。未保存任何内容。",

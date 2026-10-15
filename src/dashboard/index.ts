@@ -95,6 +95,7 @@ import {
 // the runner BYOK allowlist stays PROVIDER_IDS_BUILTIN / PROVIDER_ENV_NAMES.
 import { PROVIDER_IDS_COMMON } from "../contracts/provider-catalog.generated";
 import { enabledSandboxImages, getSandboxImage, sandboxImageHostIds } from "../contracts/sandbox-images";
+import { isCommandConfigKey } from "../contracts/credential-key";
 import { composeModelOptions, findFailingSelector } from "./model-membership";
 import { PROVIDER_VERIFY_ENDPOINTS, verifyProviderKey, type VerifyFailureReason } from "./provider-verify";
 import {
@@ -1319,6 +1320,7 @@ const SETTINGS_400_KEYS = {
   providerUnavailableOnImage: "settings.error.providerUnavailableOnImage",
   apiKeyRequired: "settings.error.apiKeyRequired",
   apiKeyTooLong: "settings.error.apiKeyTooLong",
+  apiKeyCommandPrefix: "settings.error.apiKeyCommandPrefix",
   providerKeyLimit: "settings.error.providerKeyLimit",
   chainFieldDuplicated: "settings.error.chainFieldDuplicated",
   chainTooLong: "settings.error.chainTooLong",
@@ -1752,6 +1754,22 @@ dashboardApp.post("/api/apps/:slug/keys/verify", async (c) => {
   if (!PROVIDER_IDS.includes(provider) || plainKey === "" || plainKey.length > MAX_PROVIDER_KEY_LENGTH) {
     return c.json({ ok: false, reason: "unexpected" as const }, 400);
   }
+  // A `!`-prefixed key would be run as a shell command by the review
+  // runtime's config-value resolver (../contracts/credential-key.ts) — the
+  // same rule the runner's payload decoder enforces fail-closed. The keyed
+  // face reuses the existing `unexpected` reason (the enum is closed; the
+  // ProviderKeyLimit path below sets the precedent).
+  if (isCommandConfigKey(plainKey)) {
+    return c.json(
+      {
+        ok: false,
+        reason: "unexpected" as const,
+        key: SETTINGS_400_KEYS.apiKeyCommandPrefix,
+        message: t("en", SETTINGS_400_KEYS.apiKeyCommandPrefix),
+      },
+      400,
+    );
+  }
   // Fail-closed server-side precheck: the App's selected runtime
   // image must carry an omp runtime for ANY provider key to be eligible —
   // the same gate the settings display face stamps into provider_catalog
@@ -1880,6 +1898,12 @@ dashboardApp.post("/apps/:slug/settings", async (c) => {
         count: plainKey.length,
         limit: MAX_PROVIDER_KEY_LENGTH,
       });
+    }
+    // A `!`-prefixed key would be run as a shell command by the review
+    // runtime's config-value resolver (../contracts/credential-key.ts) — the
+    // same rule the runner's payload decoder enforces fail-closed.
+    if (isCommandConfigKey(plainKey)) {
+      return settings400Response(c, gate.app.slug, SETTINGS_400_KEYS.apiKeyCommandPrefix);
     }
     try {
       const verified = await verifyProviderKey({ fetch: globalThis.fetch }, provider, plainKey);
@@ -2153,6 +2177,12 @@ dashboardApp.post("/apps/:slug/settings", async (c) => {
         limit: MAX_PROVIDER_KEY_LENGTH,
       });
     }
+    // A `!`-prefixed key would be run as a shell command by the review
+    // runtime's config-value resolver (../contracts/credential-key.ts) — the
+    // same rule the runner's payload decoder enforces fail-closed.
+    if (isCommandConfigKey(plainKey)) {
+      return settings400Response(c, gate.app.slug, SETTINGS_400_KEYS.apiKeyCommandPrefix);
+    }
     try {
       const verified = await verifyProviderKey(
         { fetch: globalThis.fetch },
@@ -2289,15 +2319,34 @@ dashboardApp.post("/apps/:slug/settings", async (c) => {
         limit: MAX_PROVIDER_KEY_LENGTH,
       });
     }
+    // A `!`-prefixed key would be run as a shell command by the review
+    // runtime's config-value resolver (../contracts/credential-key.ts) — the
+    // same rule the runner's payload decoder enforces fail-closed.
+    if (isCommandConfigKey(plainKey)) {
+      return settings400Response(c, gate.app.slug, SETTINGS_400_KEYS.apiKeyCommandPrefix);
+    }
     const declaredCustomProviders = await store.listCustomProviders(gate.app.id);
+    const storedDeclaration = declaredCustomProviders.find((p) => p.provider_id === templateId);
     if (
-      !declaredCustomProviders.some((p) => p.provider_id === templateId) &&
+      storedDeclaration === undefined &&
       declaredCustomProviders.length >= MAX_CUSTOM_PROVIDER_COUNT
     ) {
       return settings400Response(c, gate.app.slug, SETTINGS_400_KEYS.templateMaterializeMax, {
         limit: MAX_CUSTOM_PROVIDER_COUNT,
       });
     }
+    // Append against an EXISTING declaration: the stored api/model_ids are
+    // what the already-held keys were verified against and what saved chains
+    // reference, so the submit persists THEM — a catalog template id may
+    // legitimately hold a declaration with different values (only built-in and
+    // capability-host ids are refused at declaration). Re-materializing the
+    // catalog's values here would rewrite the declaration under the operator
+    // (chains referencing the stored ids then fail membership), and a stored
+    // protocol differing from the catalog's would trip the endpoint lock on a
+    // form that displays no protocol control at all. The first-time CREATE
+    // path keeps the catalog materialization.
+    const declApi = storedDeclaration?.api ?? (template.api as (typeof CUSTOM_PROVIDER_API_IDS)[number]);
+    const declModelIds = storedDeclaration?.model_ids ?? modelIds;
     try {
       const verified = await verifyProviderKey(
         { fetch: globalThis.fetch },
@@ -2305,8 +2354,8 @@ dashboardApp.post("/apps/:slug/settings", async (c) => {
         plainKey,
         {
           baseUrl,
-          api: template.api as (typeof CUSTOM_PROVIDER_API_IDS)[number],
-          modelIds,
+          api: declApi,
+          modelIds: declModelIds,
         },
       );
       if (!verified.ok) {
@@ -2314,7 +2363,7 @@ dashboardApp.post("/apps/:slug/settings", async (c) => {
       }
       await store.upsertCustomProvider(
         gate.app.id,
-        { provider_id: templateId, base_url: baseUrl, api: template.api as (typeof CUSTOM_PROVIDER_API_IDS)[number], model_ids: modelIds },
+        { provider_id: templateId, base_url: baseUrl, api: declApi, model_ids: declModelIds },
         plainKey,
       );
     } catch (err) {

@@ -1176,6 +1176,17 @@ export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | un
    * SAME atomic batch (built-in providers only — custom providers store no
    * cache row); that statement is itself gated on the key row existing, so a
    * cap-refused key cannot leave a cache row behind.
+   *
+   * The cache row is PROVIDER-scoped while the runtime loads the WHOLE pool and
+   * may resolve with any credential in it, so the cached set is kept in
+   * agreement with what the pool can actually serve: a MULTI-key pool caches
+   * the INTERSECTION of the lists its keys reported (a model only one key can
+   * reach must not be offered while another credential may answer the request
+   * — membership in findFailingSelector only requires the cache to be
+   * non-empty). A SINGLE-key pool caches its one list VERBATIM: there is no
+   * disagreement to reconcile, and intersecting a list with itself would
+   * freeze the provider's vocabulary at its first verification, so a re-verify
+   * after an upstream model launch could never add a model back.
    */
   async function addKey(
     spec: KeyTable,
@@ -1207,10 +1218,24 @@ export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | un
            SELECT ?, ?, ?, (SELECT ts FROM now)
            WHERE EXISTS (SELECT 1 FROM ${spec.table} WHERE app_id = ? AND provider = ? AND key_id = ?)
            ON CONFLICT (app_id, provider) DO UPDATE SET
-             models_json = excluded.models_json,
+             models_json = CASE
+               WHEN (SELECT COUNT(*) FROM ${spec.table} WHERE app_id = ? AND provider = ?) > 1
+                 THEN (SELECT json_group_array(value) FROM json_each(app_provider_models.models_json)
+                        WHERE value IN (SELECT value FROM json_each(excluded.models_json)))
+               ELSE excluded.models_json
+             END,
              fetched_at = excluded.fetched_at`,
         )
-        .bind(appId, modelCacheProviderKey(provider), JSON.stringify(opts.models), appId, provider, keyId),
+        .bind(
+          appId,
+          modelCacheProviderKey(provider),
+          JSON.stringify(opts.models),
+          appId,
+          provider,
+          keyId,
+          appId,
+          provider,
+        ),
     ]);
     if (res[0]!.meta.changes === 0) await throwKeyRefusal(spec, appId, provider);
   }

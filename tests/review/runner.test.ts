@@ -51,7 +51,7 @@ import { cpSync, existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, wri
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { AuthStorage } from "@oh-my-pi/pi-coding-agent";
+import { AuthStorage, ModelRegistry } from "@oh-my-pi/pi-coding-agent";
 import type { MstarReviewV1 } from "@mstar-harness/engine";
 import type { AgentRuntime, AgentRuntimeRunInput, CustomProviderDeclaration, ReviewRunResult } from "../../src/review/runtime";
 import { getSandboxImage } from "../../src/contracts/sandbox-images";
@@ -898,6 +898,61 @@ describe("runner entry — transported credential pool", () => {
     // Assert the store's absence BEFORE opening it (the factory would create it).
     expect(existsSync(join(preservedAgentDir(), "agent.db"))).toBe(false);
     expect(stderr).not.toContain(sk("retired-env-key"));
+  });
+
+  test("a `!`-prefixed entry → fail closed BEFORE any write, and the value never reaches the diagnostic", async () => {
+    // The stored `source:"login"` row is handed to the SDK's config-value
+    // resolver verbatim, and that resolver RUNS any `!`-prefixed value as a
+    // shell command (the next test pins that sink). A transported key of that
+    // shape therefore executes inside the review container on the first
+    // authenticating request, so the decoder refuses it — before AuthStorage
+    // exists, before the runtime starts, with nothing written.
+    const inputPath = writeInput({ capabilityHosts: OMP_HOSTS, worktreePath: "/workspace/clone" });
+    const { code, stdout, stderr } = await runCliWithoutStore(
+      ["--level", "quick", "--input", inputPath],
+      encodeCredentialPayload({ ark: [sk("plain-one"), "!touch /tmp/pwned"] }),
+    );
+
+    expect(code).toBe(1);
+    expect(stdout).toBe("");
+    expect(runInputs).toHaveLength(0); // the runtime never started
+    expect(stderr).toContain("credential pool ark entry 1 must not start with !");
+    // Provider + index only — never the entry.
+    expect(stderr).not.toContain("pwned");
+    expect(stderr).not.toContain(sk("plain-one"));
+  });
+
+  test("the sink the guard closes: the SDK's installed resolver runs a stored `!` value as a shell command", async () => {
+    // This is the real entry the runner's session uses — `ModelRegistry`
+    // installs `resolveConfigValue` over the credential store
+    // (`authStorage.setConfigValueResolver(resolveConfigValue)`), and
+    // `getApiKeyForProvider` resolves the stored pool row THROUGH it. The row
+    // below is written in exactly the shape `loadCredentialPool` writes, which
+    // is why the decoder — not the store — is the right place to refuse the
+    // prefix. A bare `AuthStorage.create` + `getApiKey` would NOT show this:
+    // the bare factory's default resolver is literal.
+    const dir = mkdtempSync(join(tmpdir(), "runner-resolver-sink-"));
+    const marker = join(dir, "PWNED");
+    writeFileSync(join(dir, "models.yml"), "providers: {}\n");
+    const dbPath = join(dir, "agent.db");
+    try {
+      const seeded = await AuthStorage.create(dbPath);
+      await seeded.set("openai", [
+        { type: "api_key" as const, key: `!touch ${marker}`, source: "login" as const },
+      ]);
+      seeded.close();
+
+      const storage = await AuthStorage.create(dbPath);
+      await storage.reload();
+      const registry = new ModelRegistry(storage, join(dir, "models.yml"));
+      // The command's stdout is empty (`touch` prints nothing), so the
+      // resolver yields undefined — the SIDE EFFECT is the proof.
+      expect(await registry.getApiKeyForProvider("openai")).toBeUndefined();
+      expect(existsSync(marker)).toBe(true);
+      storage.close();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   test("over a REAL stdin pipe: the payload is read, and an unparseable one fails closed", () => {

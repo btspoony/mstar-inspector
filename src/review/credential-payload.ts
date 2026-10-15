@@ -20,8 +20,11 @@
  *
  * Shim-free by construction: this module must stay importable from the in-image
  * runner graph (src/review only + the admitted src/contracts files) and from the
- * Worker, so it has ZERO imports.
+ * Worker, so it imports nothing but the zero-dependency shared credential-key
+ * contract (itself admitted to the image).
  */
+
+import { COMMAND_CONFIG_KEY_PREFIX, isCommandConfigKey } from "../contracts/credential-key";
 
 /** The only payload version this build produces and accepts. */
 export const CREDENTIAL_PAYLOAD_VERSION = 1;
@@ -82,6 +85,18 @@ export function decodeCredentialPayload(raw: string): CredentialPools {
     pools[providerId] = value.map((entry, index) => {
       if (typeof entry !== "string" || entry === "") {
         throw new Error(`credential pool ${providerId} entry ${index} must be a non-empty string`);
+      }
+      // The stored `login` api_key is handed to the SDK's config-value
+      // resolver verbatim, and THAT runs any `!`-prefixed value as a shell
+      // command (src/contracts/credential-key.ts) — a transported key of this
+      // shape would be remote code execution inside the review container on
+      // the first authenticating request. Refused here, before any credential
+      // exists. The diagnostic names the pool and the index only.
+      if (isCommandConfigKey(entry)) {
+        throw new Error(
+          `credential pool ${providerId} entry ${index} must not start with ${COMMAND_CONFIG_KEY_PREFIX} ` +
+            "(the credential store would resolve it as a shell command)",
+        );
       }
       return entry;
     });

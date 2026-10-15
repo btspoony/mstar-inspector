@@ -114,6 +114,24 @@ describe("credential payload — decode", () => {
     );
   });
 
+  test("a `!`-prefixed entry → reject (the credential store would run it as a shell command)", () => {
+    // The rule the decoder mirrors is the SDK's own config-value test:
+    // `valueConfig?.startsWith("!") === true` → `ptree.exec(["/bin/sh","-c",…])`.
+    expect(() => decodeCredentialPayload('{"version":1,"pools":{"ark":["!touch /tmp/x"]}}')).toThrow(
+      "credential pool ark entry 0 must not start with !",
+    );
+    // Only a LEADING `!` is the command shape — a key containing one is data.
+    expect(decodeCredentialPayload('{"version":1,"pools":{"ark":["sk-live-a!b"]}}')).toEqual({
+      ark: ["sk-live-a!b"],
+    });
+    try {
+      decodeCredentialPayload('{"version":1,"pools":{"ark":["!touch /tmp/pwned"]}}');
+    } catch (error) {
+      expect((error as Error).message).not.toContain("pwned");
+      expect((error as Error).message).toContain("ark");
+    }
+  });
+
   test("no declared pool is ever silently dropped (a `__proto__` key stays an own pool)", () => {
     // Assigning `__proto__` on a plain object literal re-targets the prototype,
     // so that pool would vanish from `Object.keys` — a transported credential

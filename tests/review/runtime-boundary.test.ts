@@ -109,8 +109,11 @@ function resolveModuleTarget(specifier: string, fromFile: string): string {
 describe("in-image module graph — the image ships src/review plus named contract files only", () => {
   const admittedContract = admittedContractFiles(dockerfileCopySources(OMP_DOCKERFILE));
 
-  test("the Dockerfile admits exactly the one dependency-free wire module", () => {
-    expect(admittedContract.map((file) => file.slice(REPO_ROOT.length + 1))).toEqual(["src/contracts/recheck.ts"]);
+  test("the Dockerfile admits exactly the dependency-free wire modules", () => {
+    expect(admittedContract.map((file) => file.slice(REPO_ROOT.length + 1))).toEqual([
+      "src/contracts/credential-key.ts",
+      "src/contracts/recheck.ts",
+    ]);
   });
 
   test("no src/review module imports outside src/review and the admitted files", () => {

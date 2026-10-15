@@ -281,6 +281,8 @@ export const en = {
       apiKeyRequired: "Enter an API key to store.",
       apiKeyTooLong:
         "That API key is too long ({count} characters) — keys are limited to {limit} characters. Nothing was stored.",
+      apiKeyCommandPrefix:
+        "That API key starts with \"!\" — the review runtime would run it as a shell command, so keys of that shape are refused. Nothing was stored.",
       providerKeyLimit:
         "{provider} already holds the maximum of {limit} keys — remove one before adding another. Nothing was stored.",
       chainFieldDuplicated: "The model chain field was submitted more than once — resubmit the form. Nothing was saved.",
