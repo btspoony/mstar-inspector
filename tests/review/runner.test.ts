@@ -59,7 +59,7 @@ import type { AgentRuntime, AgentRuntimeRunInput, CustomProviderDeclaration, Rev
 import { getSandboxImage } from "../../src/contracts/sandbox-images";
 import { capabilityHostsYaml } from "../../src/review/models-synthesis";
 import { encodeCredentialPayload } from "../../src/review/credential-payload";
-import { main } from "../../src/review/runner";
+import { createInMemoryAuthStorage, main } from "../../src/review/runner";
 import { sk } from "../helpers/fake-secrets";
 
 /** Envelope the fake runtime resolves with; overridden per test. */
@@ -1049,6 +1049,45 @@ describe("runner entry — transported credential pool", () => {
       expect(readdirSync(childAgentDir).filter((name) => name.startsWith("agent.db"))).toEqual([]);
     } finally {
       rmSync(childAgentDir, { recursive: true, force: true });
+    }
+  });
+
+  test("the shared store definition asks for the in-memory database by NAME — no file path can pass", async () => {
+    // The finding this closes: every assertion above watches a DIRECTORY, but
+    // `AuthStorage.create(dbPath)` takes an explicit path and hands it straight
+    // to `SqliteAuthCredentialStore.open(dbPath)`. `PI_CODING_AGENT_DIR` only
+    // redirects the SDK's own default, so a helper literal of `"agent.db"`
+    // would drop a credential-bearing file in the CHILD's cwd (the repo root)
+    // yet still resolve the key and leave `<agentDir>` empty — the whole
+    // regression above would stay green. Only the argument proves it, so
+    // observe it: a spy that records every path the static factory receives and
+    // then delegates to the real implementation (the store it returns must
+    // still work, or the assertion would be watching a fake).
+    const realCreate = AuthStorage.create;
+    const paths: string[] = [];
+    AuthStorage.create = async (dbPath: string) => {
+      paths.push(dbPath);
+      return realCreate(dbPath);
+    };
+    const cwd = process.cwd();
+    try {
+      const storage = await createInMemoryAuthStorage();
+      try {
+        await storage.set("probe", [{ type: "api_key", key: sk("probe-key"), source: "login" }]);
+        expect(await storage.getApiKey("probe")).toBe(sk("probe-key"));
+        expect(paths).toEqual([":memory:"]);
+      } finally {
+        storage.close();
+      }
+    } finally {
+      AuthStorage.create = realCreate;
+      // A disk-backed helper (the counterexample) writes its file relative to
+      // this process's cwd; remove it so a red run leaves no credential behind.
+      if (paths.some((path) => path !== ":memory:")) {
+        for (const name of ["agent.db", "agent.db-wal", "agent.db-shm"]) {
+          rmSync(join(cwd, name), { force: true });
+        }
+      }
     }
   });
 
