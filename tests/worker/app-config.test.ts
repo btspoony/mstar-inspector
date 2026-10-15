@@ -1034,7 +1034,8 @@ describe("app-config store (createAppConfigStore) — provider keys", () => {
     // dropdown never offers a model the credential the runtime picks cannot.
     await store.saveVerifiedKey(app.id, "anthropic", one, ["m1", "m2", "m3"]);
     expect(await cachedModels()).toEqual([["m2", "m3"]]);
-    // Disjoint reports leave NOTHING in common.
+    // Not disjoint: B becomes a SUBSET of A, so the shared model is what
+    // survives — the genuine disjoint case is "the disjoint path" below.
     await store.saveVerifiedKey(app.id, "anthropic", two, ["m3"]);
     expect(await cachedModels()).toEqual([["m3"]]);
   });
