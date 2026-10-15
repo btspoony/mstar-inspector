@@ -1489,7 +1489,8 @@ the Dockerfile cannot read the module) and derives `REVIEW_SKILL_VERSION` from
 the same source.
 
 Historical bumps, superseding chain, and digest provenance (records, not live
-values): mstar-harness **3.11.2** (2026-09-20, superseding the 3.10.2 pin);
+values): mstar-harness **4.0.0** (2026-10-15, superseding the 3.11.2 pin,
+which superseded the 3.10.2 pin);
 the `mstar` CLI (`@mstar-harness/cli`) preinstall is the container-level
 mechanism, carried forward at the exact pin. The CLI preinstall is
 container-level only (`container exec` resolves the `mstar` shim): review
