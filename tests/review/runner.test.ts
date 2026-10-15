@@ -904,9 +904,11 @@ describe("runner entry — transported credential pool", () => {
     // The stored `source:"login"` row is handed to the SDK's config-value
     // resolver verbatim, and that resolver RUNS any `!`-prefixed value as a
     // shell command (the next test pins that sink). A transported key of that
-    // shape therefore executes inside the review container on the first
-    // authenticating request, so the decoder refuses it — before AuthStorage
-    // exists, before the runtime starts, with nothing written.
+    // shape therefore executes inside the review container when the runtime
+    // selects that credential — selection-dependent, since the resolver caches
+    // a success and backs off after a failure — so the decoder refuses it,
+    // before AuthStorage exists, before the runtime starts, with nothing
+    // written.
     const inputPath = writeInput({ capabilityHosts: OMP_HOSTS, worktreePath: "/workspace/clone" });
     const { code, stdout, stderr } = await runCliWithoutStore(
       ["--level", "quick", "--input", inputPath],

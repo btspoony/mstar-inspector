@@ -46,13 +46,13 @@ export type CustomDeclarationView = {
 };
 
 /**
- * Settings dropdown source (the Interfaces face): verified-cache rows first
- * (the row's `provider` IS the selector prefix, including `ark-plan`), then
- * custom declarations that still hold a key. Probe-only rows (empty models)
- * yield no options — the UI shows the no-discovery hint instead of a
- * free-text box. A KEYLESS custom declaration is omitted entirely: every run
- * against its models fails closed in assertAppConfigComplete, so offering
- * them would be offering a chain the App cannot execute.
+ * Settings dropdown source (the Interfaces face): verified entries (whose
+ * `provider` IS the selector prefix, including `ark-plan`) first, then custom
+ * declarations that still hold a key. Probe-only entries (empty models) yield
+ * no options — the UI shows the no-discovery hint instead of a free-text box.
+ * A KEYLESS custom declaration is omitted entirely: every run against its
+ * models fails closed in assertAppConfigComplete, so offering them would be
+ * offering a chain the App cannot execute.
  */
 export function composeModelOptions(
   verified: VerifiedModels[],

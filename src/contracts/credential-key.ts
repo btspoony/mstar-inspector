@@ -8,8 +8,13 @@
  * `ptree.exec(["/bin/sh", "-c", command], …)`. `ModelRegistry` installs that
  * resolver over the credential store (`authStorage.setConfigValueResolver(
  * resolveConfigValue)`), and a stored `source: "login"` api_key is handed to
- * it verbatim — so a transported key of that shape executes as a shell command
- * inside the review container on the first authenticating request.
+ * it verbatim — so a transported key of that shape is executed as a shell
+ * command inside the review container by the session's own credential
+ * resolver. Execution is SELECTION-dependent, not guaranteed on the first
+ * request: the resolver caches a successful value and backs off 30s after a
+ * failure, and it only runs when the runtime actually selects that login
+ * credential. The execution capability itself is unconditional, which is what
+ * this rule closes.
  *
  * A provider key is DATA, never a config value, so both boundaries refuse the
  * shape:

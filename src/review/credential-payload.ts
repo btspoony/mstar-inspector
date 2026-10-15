@@ -89,9 +89,11 @@ export function decodeCredentialPayload(raw: string): CredentialPools {
       // The stored `login` api_key is handed to the SDK's config-value
       // resolver verbatim, and THAT runs any `!`-prefixed value as a shell
       // command (src/contracts/credential-key.ts) — a transported key of this
-      // shape would be remote code execution inside the review container on
-      // the first authenticating request. Refused here, before any credential
-      // exists. The diagnostic names the pool and the index only.
+      // shape would be remote code execution inside the review container when
+      // the runtime selects that credential (selection-dependent: the
+      // resolver caches a success and backs off after a failure). Refused
+      // here, before any credential exists. The diagnostic names the pool and
+      // the index only.
       if (isCommandConfigKey(entry)) {
         throw new Error(
           `credential pool ${providerId} entry ${index} must not start with ${COMMAND_CONFIG_KEY_PREFIX} ` +

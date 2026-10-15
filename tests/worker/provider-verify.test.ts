@@ -184,8 +184,8 @@ describe("migration 0015_provider_verification.sql (on a seeded production-shape
     }
   });
 
-  test("app_provider_models DDL: composite PK (app_id, provider), FK to github_apps, NO ON DELETE", () => {
-    const db = createMigratedTestD1(); // 0001 → 0015 in filename order
+  test("app_provider_models DDL: PK (app_id, provider, key_id), FK to github_apps, NO ON DELETE", () => {
+    const db = createMigratedTestD1(); // 0001 → 0025 in filename order
     const cols = db.raw.query("PRAGMA table_info(app_provider_models)").all() as Array<{
       name: string;
       type: string;
@@ -193,11 +193,15 @@ describe("migration 0015_provider_verification.sql (on a seeded production-shape
       pk: number;
     }>;
     const byName = Object.fromEntries(cols.map((c) => [c.name, c])) as Record<string, (typeof cols)[number]>;
-    expect(Object.keys(byName).sort()).toEqual(["app_id", "fetched_at", "models_json", "provider"]);
+    expect(Object.keys(byName).sort()).toEqual(["app_id", "fetched_at", "key_id", "models_json", "provider"]);
     expect(byName.app_id!.notnull).toBe(1);
     expect(byName.app_id!.pk).toBe(1);
     expect(byName.provider!.notnull).toBe(1);
     expect(byName.provider!.pk).toBe(2); // second column of the composite PK
+    // 0025 moved the table from one aggregate row per (app_id, provider) to one
+    // EVIDENCE row per key: the third PK column is the credential's own id.
+    expect(byName.key_id!.notnull).toBe(1);
+    expect(byName.key_id!.pk).toBe(3);
     expect(byName.models_json!.notnull).toBe(1);
     expect(byName.fetched_at!.notnull).toBe(1);
     const fks = db.raw.query("PRAGMA foreign_key_list(app_provider_models)").all() as Array<{

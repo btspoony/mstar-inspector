@@ -1312,8 +1312,8 @@ describe("multi-key provider pools (routes)", () => {
   test("the delete route answers a machine-readable outcome: a removal vs the tolerant no-op", async () => {
     const { db, app } = await seededWorld();
     const store = createAppConfigStore(db, TEST_KEY);
-    // A VERIFIED key, so the provider carries a model-cache row: the no-op
-    // branch's promise ("nothing changed") must cover the cache too.
+    // A VERIFIED key, so the provider carries model evidence: the no-op
+    // branch's promise ("nothing changed") must cover that evidence too.
     await store.saveVerifiedKey(app.id, "anthropic", PLAIN_KEY, ["claude-sonnet-4-6"]);
     const cacheRows = () =>
       (db.raw.query("SELECT COUNT(*) AS n FROM app_provider_models WHERE app_id = ?").get(app.id) as { n: number }).n;

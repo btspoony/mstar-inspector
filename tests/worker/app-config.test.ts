@@ -55,7 +55,7 @@ import {
   type AppCustomProvider,
 } from "../../src/dashboard/app-config-store";
 import { enabledSandboxImages, getSandboxImage, sandboxImageHostIds } from "../../src/contracts/sandbox-images";
-import { composeModelOptions } from "../../src/dashboard/model-membership";
+import { composeModelOptions, findFailingSelector } from "../../src/dashboard/model-membership";
 import { PROVIDER_CATALOG, PROVIDER_IDS_BUILTIN } from "../../src/contracts/provider-catalog.generated";
 import { createSecretbox } from "../../src/dashboard/secretbox";
 import { PROVIDERS } from "../../src/pipeline/provider-catalog";
@@ -176,6 +176,7 @@ function createPreProviderPoolD1(): TestD1 {
 function createAppConfigD1(): TestD1 {
   const db = createPreProviderPoolD1();
   applyMigration(db, "0024_provider_multi_key.sql");
+  applyMigration(db, "0025_provider_model_evidence.sql");
   return db;
 }
 
@@ -694,6 +695,42 @@ describe("migration 0024_provider_multi_key.sql (per-key provider pools)", () =>
   });
 });
 
+describe("migration 0025_provider_model_evidence.sql (per-key model evidence)", () => {
+  test("rebuilds app_provider_models onto (app_id, provider, key_id) and carries NO aggregate row forward", async () => {
+    const db = createPreProviderPoolD1();
+    const app = await seedApp(db, { slug: "a", createdBy: "mallory" });
+    applyMigration(db, "0024_provider_multi_key.sql");
+    // The pre-0025 aggregate: one un-attributable row per (App, provider).
+    rawRun(
+      db,
+      `INSERT INTO app_provider_models (app_id, provider, models_json, fetched_at)
+       VALUES (?, 'anthropic', '["m1","m2"]', '2026-01-01 00:00:00')`,
+      app.id,
+    );
+    expect(() => applyMigration(db, "0025_provider_model_evidence.sql")).not.toThrow();
+    const cols = db.raw.query("PRAGMA table_info(app_provider_models)").all() as Array<{ name: string; pk: number }>;
+    expect(cols.filter((c) => c.pk > 0).map((c) => c.name)).toEqual(["app_id", "provider", "key_id"]);
+    // The copy is deliberately EMPTY: an aggregate cannot say which key
+    // contributed which model, so carrying it forward would be dead data —
+    // the next verification rebuilds the evidence per key.
+    expect(rawCount(db, "app_provider_models")).toBe(0);
+    const fks = db.raw.query("PRAGMA foreign_key_list(app_provider_models)").all() as Array<{ table: string }>;
+    expect(fks).toHaveLength(1);
+    expect(fks[0]!.table).toBe("github_apps");
+  });
+
+  test("the (app_id, provider, key_id) PK admits one evidence row per key and rejects a duplicate", async () => {
+    const db = createAppConfigD1();
+    const app = await seedApp(db, { slug: "a", createdBy: "mallory" });
+    const sql = `INSERT INTO app_provider_models (app_id, provider, key_id, models_json, fetched_at)
+       VALUES (?, 'anthropic', ?, '["m1"]', '2026-01-01 00:00:00')`;
+    rawRun(db, sql, app.id, "aaaaaaaaaaaaaaaa");
+    rawRun(db, sql, app.id, "bbbbbbbbbbbbbbbb");
+    expect(rawCount(db, "app_provider_models")).toBe(2);
+    expect(() => rawRun(db, sql, app.id, "aaaaaaaaaaaaaaaa")).toThrow(/UNIQUE constraint failed/);
+  });
+});
+
 // --- store: provider keys ---
 
 describe("app-config store (createAppConfigStore) — provider keys", () => {
@@ -964,7 +1001,23 @@ describe("app-config store (createAppConfigStore) — provider keys", () => {
     expect(await store.removeProviderKey(app.id, "never-stored")).toBe(false);
   });
 
-  test("the provider model cache agrees with pool execution: one key verbatim, several keys intersected (F4)", async () => {
+  test("ONE key's own report is cached verbatim, and a re-verify refreshes it upward (F4)", async () => {
+    const db = createAppConfigD1();
+    const app = await seedApp(db, { slug: "a", createdBy: "mallory" });
+    const store = configStore(db);
+    const one = sk("first-key-aaaa");
+    const cachedModels = async () => (await store.getVerifiedModels(app.id)).map((row) => row.models);
+
+    // The runtime loads a one-key pool, so that key's own report IS the pool's
+    // vocabulary — nothing to reconcile, and a later upstream model launch
+    // must be able to land on the next re-verify.
+    await store.saveVerifiedKey(app.id, "anthropic", one, ["m1", "m2"]);
+    expect(await cachedModels()).toEqual([["m1", "m2"]]);
+    await store.saveVerifiedKey(app.id, "anthropic", one, ["m1", "m2", "m3"]);
+    expect(await cachedModels()).toEqual([["m1", "m2", "m3"]]);
+  });
+
+  test("a multi-key pool offers the INTERSECTION of the keys' OWN reports — identical lists included (F4)", async () => {
     const db = createAppConfigD1();
     const app = await seedApp(db, { slug: "a", createdBy: "mallory" });
     const store = configStore(db);
@@ -972,48 +1025,101 @@ describe("app-config store (createAppConfigStore) — provider keys", () => {
     const two = sk("second-key-bbbb");
     const cachedModels = async () => (await store.getVerifiedModels(app.id)).map((row) => row.models);
 
-    // ONE key: the list is cached verbatim — the runtime loads a one-key pool,
-    // so there is nothing to reconcile, and a later upstream model launch must
-    // be able to land on the next re-verify.
-    await store.saveVerifiedKey(app.id, "anthropic", one, ["m1", "m2"]);
-    expect(await cachedModels()).toEqual([["m1", "m2"]]);
-    await store.saveVerifiedKey(app.id, "anthropic", one, ["m1", "m2", "m3"]);
-    expect(await cachedModels()).toEqual([["m1", "m2", "m3"]]);
-
-    // TWO keys AGREEING: the intersection is the list itself — unchanged.
+    // TWO keys with IDENTICAL reports: the intersection IS that list.
+    await store.saveVerifiedKey(app.id, "anthropic", one, ["m2", "m3"]);
     await store.saveVerifiedKey(app.id, "anthropic", two, ["m2", "m3"]);
     expect(await cachedModels()).toEqual([["m2", "m3"]]);
 
-    // TWO keys DISAGREEING: the cache narrows to what BOTH can serve, so the
+    // A SUBSET: the offered set narrows to what BOTH can serve, so the
     // dropdown never offers a model the credential the runtime picks cannot.
+    await store.saveVerifiedKey(app.id, "anthropic", one, ["m1", "m2", "m3"]);
+    expect(await cachedModels()).toEqual([["m2", "m3"]]);
+    // Disjoint reports leave NOTHING in common.
     await store.saveVerifiedKey(app.id, "anthropic", two, ["m3"]);
     expect(await cachedModels()).toEqual([["m3"]]);
-
-    // A DELETE clears the provider-scoped row (existing rule) — and the
-    // surviving single key's next verification rebuilds it verbatim.
-    expect(await store.deleteProviderKey(app.id, "anthropic", await keyIdOf(two))).toBe(true);
-    expect(rawCount(db, "app_provider_models")).toBe(0);
-    await store.saveVerifiedKey(app.id, "anthropic", one, ["m1", "m2", "m3"]);
-    expect(await cachedModels()).toEqual([["m1", "m2", "m3"]]);
   });
 
-  test("a disjoint multi-key pool caches an EMPTY list — the probe-only shape, never a phantom model (F4)", async () => {
+  test("the stale path: a re-verify after a deletion never publishes a model the surviving pool cannot serve (F4 Critical)", async () => {
     const db = createAppConfigD1();
     const app = await seedApp(db, { slug: "a", createdBy: "mallory" });
     const store = configStore(db);
-    await store.saveVerifiedKey(app.id, "anthropic", sk("first-key-aaaa"), ["only-first"]);
-    await store.saveVerifiedKey(app.id, "anthropic", sk("second-key-bbbb"), ["only-second"]);
+    const one = sk("first-key-aaaa");
+    const two = sk("second-key-bbbb");
+    const three = sk("third-key-cccc");
+    const cachedModels = async () => (await store.getVerifiedModels(app.id)).map((row) => row.models);
+
+    // A and B serve only "shared"; removing C must not erase THEIR evidence —
+    // that erasure is what let the next INSERT cache ONE key's list verbatim
+    // for a two-key pool.
+    await store.saveVerifiedKey(app.id, "anthropic", one, ["shared"]);
+    await store.saveVerifiedKey(app.id, "anthropic", two, ["shared"]);
+    await store.saveVerifiedKey(app.id, "anthropic", three, ["shared"]);
+    expect(await store.deleteProviderKey(app.id, "anthropic", await keyIdOf(three))).toBe(true);
+    // B has since gained "b-only" while A still serves only "shared" — and the
+    // runtime may resolve with A, so "b-only" must NOT be offered.
+    await store.saveVerifiedKey(app.id, "anthropic", two, ["b-only", "shared"]);
+    expect(await cachedModels()).toEqual([["shared"]]);
+  });
+
+  test("the growth path: a model BOTH keys gain appears once both are re-verified (F4 Important)", async () => {
+    const db = createAppConfigD1();
+    const app = await seedApp(db, { slug: "a", createdBy: "mallory" });
+    const store = configStore(db);
+    const one = sk("first-key-aaaa");
+    const two = sk("second-key-bbbb");
+    const cachedModels = async () => (await store.getVerifiedModels(app.id)).map((row) => row.models);
+
+    await store.saveVerifiedKey(app.id, "anthropic", one, ["m1"]);
+    await store.saveVerifiedKey(app.id, "anthropic", two, ["m1"]);
+    expect(await cachedModels()).toEqual([["m1"]]);
+    // Both keys gained m2 upstream: each re-verify refreshes ITS OWN report, so
+    // the recomputed intersection adds m2 back — the historical aggregate could
+    // never do this.
+    await store.saveVerifiedKey(app.id, "anthropic", one, ["m1", "m2"]);
+    await store.saveVerifiedKey(app.id, "anthropic", two, ["m1", "m2"]);
+    expect(await cachedModels()).toEqual([["m1", "m2"]]);
+  });
+
+  test("the disjoint path: a pool narrowed to [] recovers when both keys gain a common model (F4 Important)", async () => {
+    const db = createAppConfigD1();
+    const app = await seedApp(db, { slug: "a", createdBy: "mallory" });
+    const store = configStore(db);
+    const one = sk("first-key-aaaa");
+    const two = sk("second-key-bbbb");
+    const cachedModels = async () => (await store.getVerifiedModels(app.id)).map((row) => row.models);
+
+    await store.saveVerifiedKey(app.id, "anthropic", one, ["only-first"]);
+    await store.saveVerifiedKey(app.id, "anthropic", two, ["only-second"]);
     // Empty models IS the probe-only signal: composeModelOptions yields no
     // options and findFailingSelector falls back to syntax-only for that
     // provider, so a chain naming either model still saves and the runtime
     // resolves it against the pool.
-    expect((await store.getVerifiedModels(app.id)).map((row) => row.models)).toEqual([[]]);
-    expect(composeModelOptions(await store.getVerifiedModels(app.id), [])).toEqual([
+    expect(await cachedModels()).toEqual([[]]);
+    const cached = await store.getVerifiedModels(app.id);
+    expect(composeModelOptions(cached, [])).toEqual([
       { provider: "anthropic", source: "probe", selectors: [] },
     ]);
+    expect(findFailingSelector(["anthropic/only-first", "anthropic/only-second"], cached, [])).toBeNull();
+    // Both keys gained the same model: the recomputed intersection surfaces it
+    // instead of staying stuck at the empty historical aggregate.
+    await store.saveVerifiedKey(app.id, "anthropic", one, ["common"]);
+    await store.saveVerifiedKey(app.id, "anthropic", two, ["common"]);
+    expect(await cachedModels()).toEqual([["common"]]);
   });
 
-  test("deleteProviderKey removes ONE pool slot and CLEARS the provider's cached models on ANY per-key delete", async () => {
+  test("a pool key with NO report of its own leaves the pool's vocabulary unknown (F4)", async () => {
+    const db = createAppConfigD1();
+    const app = await seedApp(db, { slug: "a", createdBy: "mallory" });
+    const store = configStore(db);
+    await store.saveVerifiedKey(app.id, "anthropic", sk("first-key-aaaa"), ["m1", "m2"]);
+    // The unverified sibling rides the same pool, so the runtime may resolve
+    // with it: its vocabulary is unknown, and offering the verified key's list
+    // is exactly the F4 failure. Unknown → nothing offered (probe face).
+    await store.addProviderKey(app.id, "anthropic", sk("second-key-bbbb"));
+    expect((await store.getVerifiedModels(app.id)).map((row) => row.models)).toEqual([[]]);
+  });
+
+  test("deleteProviderKey removes ONE pool slot and drops THAT key's evidence only", async () => {
     const db = createAppConfigD1();
     const app = await seedApp(db, { slug: "a", createdBy: "mallory" });
     const store = configStore(db);
@@ -1024,16 +1130,17 @@ describe("app-config store (createAppConfigStore) — provider keys", () => {
     expect(rawCount(db, "app_provider_models")).toBe(1);
     expect(await store.deleteProviderKey(app.id, "anthropic", await keyIdOf(one))).toBe(true);
     expect(rawCount(db, "app_provider_keys")).toBe(1);
-    // The cached model list is PROVIDER-scoped — it cannot be attributed to one
-    // key — so deleting ANY key drops it (models only the deleted credential
-    // could serve must not stay selectable). The sibling key itself survives…
+    // The evidence is keyed by the credential that produced it, so deleting a
+    // key drops only ITS evidence (models only the deleted credential could
+    // serve can no longer be offered; the survivor keeps what it reported).
+    // The sibling key itself survives…
     expect(rawCount(db, "app_provider_models")).toBe(0);
     expect((await store.getAppConfig(app.id)).keys.anthropic).toEqual([two]);
-    // …and a re-verification of the surviving key rebuilds the cache.
+    // …and a re-verification of the surviving key rebuilds its own evidence.
     await store.saveVerifiedKey(app.id, "anthropic", two, ["claude-sonnet-4-6"]);
     expect(rawCount(db, "app_provider_models")).toBe(1);
-    // The last key's delete clears it too (a cache row for a keyless provider
-    // is exactly the stale state the settings dropdown must never show).
+    // The last key's delete clears its evidence too (a verified list for a
+    // keyless provider is exactly the stale state the dropdown must never show).
     expect(await store.deleteProviderKey(app.id, "anthropic", await keyIdOf(two))).toBe(true);
     expect(rawCount(db, "app_provider_keys")).toBe(0);
     expect(rawCount(db, "app_provider_models")).toBe(0);
@@ -1051,16 +1158,17 @@ describe("app-config store (createAppConfigStore) — provider keys", () => {
     await store.addProviderKey(app.id, "anthropic", two);
     const poolBefore = db.raw.query("SELECT * FROM app_provider_keys WHERE app_id = ? ORDER BY key_id").all(app.id);
     // A STALE / unmatched key id while a sibling key still exists: the delete
-    // statement matches nothing, so the provider's model cache must survive —
-    // wiping it here would contradict the route's own "nothing changed" report
-    // and cost the surviving key its dropdown models.
+    // statement matches nothing, so every row survives — wiping anything here
+    // would contradict the route's own "nothing changed" report.
     expect(await store.deleteProviderKey(app.id, "anthropic", "0".repeat(16))).toBe(false);
     expect(rawCount(db, "app_provider_models")).toBe(1);
     expect(db.raw.query("SELECT * FROM app_provider_keys WHERE app_id = ? ORDER BY key_id").all(app.id)).toEqual(
       poolBefore,
     );
+    // The verified key keeps its own evidence (`two` was added unverified, so it
+    // has none — that is what makes the pool's vocabulary unknown).
     expect((await store.getVerifiedModels(app.id)).map((row) => ({ provider: row.provider, models: row.models }))).toEqual([
-      { provider: "anthropic", models: ["claude-sonnet-4-6"] },
+      { provider: "anthropic", models: [] },
     ]);
   });
 
@@ -1081,6 +1189,7 @@ describe("app-config store (createAppConfigStore) — provider keys", () => {
       legacyEnc,
     );
     applyMigration(db, "0024_provider_multi_key.sql");
+    applyMigration(db, "0025_provider_model_evidence.sql");
     // Carried verbatim under the sentinel id: only the DELETE's OWN promotion
     // can make the derived id addressable — no list/config call ran before it.
     const carried = db.raw.query("SELECT key_id FROM app_provider_keys").get() as { key_id: string };

@@ -69,6 +69,7 @@ const ALL_MIGRATIONS = [
   "0022_app_trigger_mode.sql",
   "0023_removed_logins.sql",
   "0024_provider_multi_key.sql",
+  "0025_provider_model_evidence.sql",
 ];
 
 /** Execute the migration DDL on a fresh in-memory database. */

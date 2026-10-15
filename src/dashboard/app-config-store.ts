@@ -88,17 +88,21 @@
  *     any crypto or write (input bounds; the settings route re-renders 400
  *     first — the guard here is the backstop for direct callers).
  *   - saveVerifiedKey is the verified analogue: the same per-key upsert with
- *     verified_at = now + verified_status = 'ok', plus the App's verified
- *     model cache row, as ONE atomic db.batch.
+ *     verified_at = now + verified_status = 'ok', plus THAT KEY's
+ *     verified-model evidence row, as ONE atomic db.batch.
  *   - deleteProviderKey removes ONE slot — and, when it actually removed that
- *     row, the provider's verified-model cache row (a model only the removed
- *     credential could reach must not stay selectable; the cache is
- *     provider-scoped, so any real per-key removal drops it). A MISSED delete
- *     (unknown key id / unconfigured provider) changes nothing at all — it is
- *     an idempotent no-op returning false, and the surviving keys keep their
- *     cached models. removeProviderKey removes the
- *     WHOLE pool of a provider plus its cache row (the provider-level
- *     delete). Both return whether they removed a key row, like setAppStatus.
+ *     row, that key's OWN evidence row (a model only the removed credential
+ *     could reach must not stay selectable; evidence is keyed by the
+ *     credential that produced it, so the surviving keys keep theirs). A
+ *     MISSED delete (unknown key id / unconfigured provider) changes nothing
+ *     at all — it is an idempotent no-op returning false. removeProviderKey
+ *     removes the WHOLE pool of a provider plus every evidence row (the
+ *     provider-level delete). Both return whether they removed a key row,
+ *     like setAppStatus.
+ *   - getVerifiedModels returns the models the CURRENT pool AGREES on,
+ *     recomputed per read as the intersection over the pool keys' own
+ *     evidence rows; a key with no evidence row (e.g. an unverified sibling)
+ *     leaves that provider's vocabulary unknown → [] and the probe face.
  *   - listProviderKeys is the settings-page face: one row per stored key —
  *     provider + derived key id + masked tail + the per-key bookkeeping,
  *     provider-ascending then pool order (created_at, key_id). The optional
@@ -307,34 +311,46 @@ type CustomProviderKeyJoinRow = {
 };
 
 /**
- * A row of `app_provider_models` (migration 0015): the per-App
- * verified-model cache for BUILT-IN providers. `provider` is the
+ * A row of `app_provider_models` (migration 0025): the verified-model
+ * EVIDENCE ONE KEY produced, for BUILT-IN providers. `provider` is the
  * SELECTOR-FACING key (spec §6.1) — `ark` BYOK keys verify under the BYOK id
- * "ark" but their cache rows are written under "ark-plan" (the in-image base
- * provider id the chain references). models_json is a TEXT JSON array of
+ * "ark" but their evidence rows are written under "ark-plan" (the in-image
+ * base provider id the chain references) — and `key_id` is the same
+ * plaintext-derived id `app_provider_keys` carries, so evidence is
+ * attributable to exactly one credential. models_json is a TEXT JSON array of
  * verified model ids — configuration, not a secret (0006 model_chain
  * rationale). Custom providers write NO rows here (their vocabulary is the
  * declared model_ids, 0012).
+ *
+ * The row is EVIDENCE, not the answer: what the settings faces offer is the
+ * intersection over the CURRENT pool's keys, recomputed on every read
+ * (getVerifiedModels), so no write has to know what the other keys report.
  */
 export type AppProviderModelsRow = {
   app_id: string;
   provider: string;
+  key_id: string;
   models_json: string;
   fetched_at: string;
 };
 
 /**
- * One verified-model cache entry as the settings loader sees it (the
+ * One provider's verified-model entry as the settings loader sees it (the
  * Interfaces face — the dropdown source for selector literal grammar
  * `provider/model`). `provider` is the selector-facing prefix of every
- * option built from this row.
+ * option built from this row, and `models` is the set the CURRENT pool
+ * AGREES on (getVerifiedModels recomputes it on read).
  */
 export type VerifiedModels = {
-  /** Selector-facing provider key (the row's `provider` — "ark-plan" for a verified `ark` BYOK key). */
+  /** Selector-facing provider key ("ark-plan" for a verified `ark` BYOK key). */
   provider: string;
-  /** Verified model ids, exactly as cached at save time ([] = probe-only verification). */
+  /**
+   * The models EVERY credential the runtime may select can serve — the
+   * intersection of the pool keys' own reports ([] = the pool's vocabulary
+   * is unknown: a key has no report yet, or they share no model).
+   */
   models: string[];
-  /** Cache write time (SQLite datetime('now') UTC). */
+  /** Freshest evidence write time feeding this entry (SQLite datetime('now') UTC). */
   fetched_at: string;
 };
 
@@ -1172,21 +1188,19 @@ export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | un
 
   /**
    * Add (or re-submit) ONE key in a pool whose declaration (when it has one)
-   * already exists. Pass `models` to land the verified-model cache row in the
-   * SAME atomic batch (built-in providers only — custom providers store no
-   * cache row); that statement is itself gated on the key row existing, so a
-   * cap-refused key cannot leave a cache row behind.
+   * already exists. Pass `models` to land THAT KEY's verified-model evidence
+   * row in the SAME atomic batch (built-in providers only — custom providers
+   * store no evidence row; their vocabulary is the declared model_ids). The
+   * statement is itself gated on the key row existing, so a cap-refused key
+   * cannot leave an evidence row behind.
    *
-   * The cache row is PROVIDER-scoped while the runtime loads the WHOLE pool and
-   * may resolve with any credential in it, so the cached set is kept in
-   * agreement with what the pool can actually serve: a MULTI-key pool caches
-   * the INTERSECTION of the lists its keys reported (a model only one key can
-   * reach must not be offered while another credential may answer the request
-   * — membership in findFailingSelector only requires the cache to be
-   * non-empty). A SINGLE-key pool caches its one list VERBATIM: there is no
-   * disagreement to reconcile, and intersecting a list with itself would
-   * freeze the provider's vocabulary at its first verification, so a re-verify
-   * after an upstream model launch could never add a model back.
+   * The row records what THIS key reported and nothing else: the runtime
+   * loads the WHOLE pool and may resolve with any credential in it, so the
+   * set the settings faces OFFER is the intersection over the current pool's
+   * keys — recomputed on every read, never stored (getVerifiedModels). A
+   * stored aggregate cannot express that: intersecting one is
+   * monotone-decreasing (a pool that gained a model on every key could never
+   * add it back) and it cannot say which key a re-verification speaks for.
    */
   async function addKey(
     spec: KeyTable,
@@ -1214,27 +1228,21 @@ export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | un
       db
         .prepare(
           `WITH now AS (SELECT datetime('now') AS ts)
-           INSERT INTO app_provider_models (app_id, provider, models_json, fetched_at)
-           SELECT ?, ?, ?, (SELECT ts FROM now)
+           INSERT INTO app_provider_models (app_id, provider, key_id, models_json, fetched_at)
+           SELECT ?, ?, ?, ?, (SELECT ts FROM now)
            WHERE EXISTS (SELECT 1 FROM ${spec.table} WHERE app_id = ? AND provider = ? AND key_id = ?)
-           ON CONFLICT (app_id, provider) DO UPDATE SET
-             models_json = CASE
-               WHEN (SELECT COUNT(*) FROM ${spec.table} WHERE app_id = ? AND provider = ?) > 1
-                 THEN (SELECT json_group_array(value) FROM json_each(app_provider_models.models_json)
-                        WHERE value IN (SELECT value FROM json_each(excluded.models_json)))
-               ELSE excluded.models_json
-             END,
+           ON CONFLICT (app_id, provider, key_id) DO UPDATE SET
+             models_json = excluded.models_json,
              fetched_at = excluded.fetched_at`,
         )
         .bind(
           appId,
           modelCacheProviderKey(provider),
+          keyId,
           JSON.stringify(opts.models),
           appId,
           provider,
           keyId,
-          appId,
-          provider,
         ),
     ]);
     if (res[0]!.meta.changes === 0) await throwKeyRefusal(spec, appId, provider);
@@ -1396,15 +1404,16 @@ export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | un
      * Store one provider key AFTER successful verification: the VERIFIED
      * analogue of addProviderKey — encrypts with the SAME per-key AAD,
      * upserts that key's row with the verification bookkeeping (migration
-     * 0015: verified_at = now + verified_status = 'ok'), and upserts the App's
-     * verified-model cache row under the SELECTOR-FACING provider key
-     * (modelCacheProviderKey — an `ark` BYOK key caches under "ark-plan",
+     * 0015: verified_at = now + verified_status = 'ok'), and upserts THAT
+     * KEY's verified-model evidence row under the SELECTOR-FACING provider key
+     * (modelCacheProviderKey — an `ark` BYOK key records under "ark-plan",
      * spec §6.1) as ONE atomic db.batch (D1 batch is transactional and the
-     * cache statement only fires once the key row is there, so a verified key
-     * with no cache row — or a cache row with no key — is impossible).
-     * `models` may be [] (a provider that only got an auth-probe has an empty
-     * cache — that is the "probe-only" signal the member validation falls
-     * back to syntax-only on). Bounds/cap contract identical to
+     * evidence statement only fires once the key row is there, so a verified
+     * key with no evidence row — or an evidence row with no key — is
+     * impossible). `models` may be [] (a provider that only got an auth-probe
+     * has empty evidence — the "probe-only" signal the member validation
+     * falls back to syntax-only on when the whole pool is empty).
+     * Bounds/cap contract identical to
      * addProviderKey: ProviderKeyTooLongError before any crypto or write and
      * ProviderKeyLimitError for a NEW slot past MAX_KEYS_PER_PROVIDER.
      */
@@ -1414,20 +1423,18 @@ export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | un
 
     /**
      * Delete ONE key slot of a provider's pool — and, in the SAME atomic
-     * batch, that provider's verified-model cache row: the cache is
-     * PROVIDER-scoped and cannot be attributed to one key, so a per-key delete
-     * cannot tell whether the surviving model list is still servable (a model
-     * only the removed credential could reach must not stay selectable in the
-     * settings dropdown). The next verification rebuilds it. The cache row
-     * lives under the SELECTOR-FACING provider key — modelCacheProviderKey maps
-     * an `ark` BYOK key to its "ark-plan" cache row (spec §6.1). Returns
-     * whether THIS call removed the key row; an unknown key id — or any
-     * provider the allowlist could never have stored — is a no-op returning
-     * false that leaves the cache UNTOUCHED, because the route reports
-     * `changed: false` / "nothing changed" and must not have destroyed the
-     * surviving keys' dropdown models behind that claim (the cache statement's
-     * `changes() > 0` reads the row count of the DELETE that runs first in this
-     * very transaction, so a miss clears nothing).
+     * batch, THAT KEY's verified-model evidence row: the evidence is keyed by
+     * the credential that produced it, so removing the credential removes only
+     * what it reported and the surviving keys keep theirs (the read face
+     * recomputes the offered set from the keys that remain — a model only the
+     * removed credential could reach can no longer be offered, and one the
+     * survivors still serve stays offered). The evidence row lives under the
+     * SELECTOR-FACING provider key — modelCacheProviderKey maps an `ark` BYOK
+     * key to its "ark-plan" evidence (spec §6.1). Returns whether THIS call
+     * removed the key row; an unknown key id — or any provider the allowlist
+     * could never have stored — is a no-op returning false (the delete
+     * statement's `changes() > 0` reads the row count of the DELETE that runs
+     * first in this very transaction, so a miss clears nothing).
      */
     async deleteProviderKey(appId: string, provider: string, keyId: string): Promise<boolean> {
       // Promote the pool FIRST: a row 0024 carried across still wears the
@@ -1438,19 +1445,21 @@ export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | un
           .prepare(`DELETE FROM app_provider_keys WHERE app_id = ? AND provider = ? AND key_id = ?`)
           .bind(appId, provider, keyId),
         db
-          .prepare(`DELETE FROM app_provider_models WHERE app_id = ? AND provider = ? AND changes() > 0`)
-          .bind(appId, modelCacheProviderKey(provider)),
+          .prepare(
+            `DELETE FROM app_provider_models WHERE app_id = ? AND provider = ? AND key_id = ? AND changes() > 0`,
+          )
+          .bind(appId, modelCacheProviderKey(provider), keyId),
       ]);
       return res[0]!.meta.changes > 0;
     },
 
     /**
      * Delete a provider's WHOLE pool — every key row of the (App, provider)
-     * pool, plus its verified-model cache row — in ONE atomic batch (a removed
-     * pool must not linger as "verified" in the settings dropdown). Returns
-     * whether THIS call removed a key row (an unconfigured provider — or any
-     * provider the allowlist could never have stored — is a no-op returning
-     * false, mirroring removeCustomProvider's tolerance).
+     * pool, plus every verified-model evidence row — in ONE atomic batch (a
+     * removed pool must not linger as "verified" in the settings dropdown).
+     * Returns whether THIS call removed a key row (an unconfigured provider —
+     * or any provider the allowlist could never have stored — is a no-op
+     * returning false, mirroring removeCustomProvider's tolerance).
      */
     async removeProviderKey(appId: string, provider: string): Promise<boolean> {
       const res = await db.batch([
@@ -1547,26 +1556,60 @@ export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | un
     },
 
     /**
-     * The App's verified-model cache (the Interfaces read face): every
-     * app_provider_models row for the App, provider-ascending — the settings
-     * loader's dropdown source (one cache row = one verified provider whose
-     * options render as selector literal grammar `provider/model`; the row's
-     * `provider` IS the selector prefix, "ark-plan" for a verified `ark`
-     * BYOK key). models_json parses fail-loud (the getAppConfig tamper
-     * convention): a malformed row throws in the store, never deferring to a
-     * caller. A provider absent here has never been verified through
-     * saveVerifiedKey (or its models were never cached).
+     * The App's verified models (the Interfaces read face): ONE entry per
+     * BUILT-IN provider whose pool holds at least one key, provider-ascending
+     * — the settings loader's dropdown source (one entry = one verified
+     * provider whose options render as selector literal grammar
+     * `provider/model`; the entry's `provider` IS the selector prefix,
+     * "ark-plan" for a verified `ark` BYOK key).
+     *
+     * The models are RECOMPUTED on every read as the INTERSECTION over the
+     * CURRENT pool's keys' own evidence rows, never stored: the runtime loads
+     * the whole pool and may answer with any credential in it, so a model only
+     * some keys can serve must not be offered. A key with NO evidence row
+     * leaves the whole pool's vocabulary unknown → `[]` (the probe-only face,
+     * where findFailingSelector falls back to syntax-only), because that
+     * credential may answer and nothing is known about what it serves.
+     * Recomputing is what makes a deletion and a re-verification both take
+     * effect immediately: the offered set shrinks to what remains and can GROW
+     * again when every surviving key gains the model.
+     *
+     * models_json parses fail-loud (the getAppConfig tamper convention): a
+     * malformed row throws in the store, never deferring to a caller.
      */
     async getVerifiedModels(appId: string): Promise<VerifiedModels[]> {
-      const res = await db
-        .prepare(`SELECT * FROM app_provider_models WHERE app_id = ? ORDER BY provider ASC`)
+      const evidence = await db
+        .prepare(`SELECT * FROM app_provider_models WHERE app_id = ? ORDER BY provider ASC, key_id ASC`)
         .bind(appId)
         .all<AppProviderModelsRow>();
-      return res.results.map((row) => ({
-        provider: row.provider,
-        models: parseModelIdsJson(row.models_json, "app_provider_models.models_json"),
-        fetched_at: row.fetched_at,
-      }));
+      const rows = await readKeyRows(PROVIDER_KEY_TABLE, appId);
+      const byProvider = new Map<string, Map<string, string[]>>();
+      for (const row of evidence.results) {
+        const perKey = byProvider.get(row.provider) ?? new Map<string, string[]>();
+        perKey.set(row.key_id, parseModelIdsJson(row.models_json, "app_provider_models.models_json"));
+        byProvider.set(row.provider, perKey);
+      }
+      const entries: VerifiedModels[] = [];
+      for (const [provider, perKey] of byProvider) {
+        const poolKeyIds = new Set(
+          rows.filter((row) => modelCacheProviderKey(row.provider) === provider).map((row) => row.key_id),
+        );
+        if (poolKeyIds.size === 0) continue;
+        let models: string[] | null = null;
+        for (const keyId of poolKeyIds) {
+          const report = perKey.get(keyId);
+          if (report === undefined) {
+            models = null;
+            break;
+          }
+          models = models === null ? report : models.filter((model) => report.includes(model));
+        }
+        const fetchedAt = evidence.results
+          .filter((row) => row.provider === provider)
+          .reduce((latest, row) => (row.fetched_at > latest ? row.fetched_at : latest), "");
+        entries.push({ provider, models: models ?? [], fetched_at: fetchedAt });
+      }
+      return entries;
     },
 
     /**
