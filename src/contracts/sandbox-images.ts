@@ -69,6 +69,44 @@ export type SandboxImageHost = {
   models: readonly SandboxImageHostModel[];
 };
 
+/**
+ * The periodically-upgraded build inputs of a runtime image — version-agnostic
+ * KEYS, the versions are the VALUES (nothing here is ever renamed on a bump).
+ *
+ * The Dockerfile cannot read this module: this image is built with no build
+ * args and no env (image contains runtime only, never App configuration), so
+ * its literals are a second, unavoidable copy. `tests/review/pin.test.ts`
+ * locks that copy to this declaration — a bump edits exactly here plus the
+ * matching Dockerfile line, and drift between the two fails the pin suite.
+ */
+export type SandboxImagePins = {
+  /** Debian base image manifest digest (linux/amd64). */
+  readonly baseImageDigest: string;
+  /** `docker.io/cloudflare/sandbox` shim tag the Dockerfile COPYs from. */
+  readonly sandboxShimTag: string;
+  /** Bun release tag (base ships none; omp needs a floor). */
+  readonly bunVersion: string;
+  /** gh CLI release version. */
+  readonly ghVersion: string;
+  /** mstar-harness tag the image clones (recorded in the Dockerfile comment). */
+  readonly harnessVersion: string;
+  /** mstar-harness deref commit fetched into the image. */
+  readonly harnessRef: string;
+  /** Exact `@mstar-harness/cli` version preinstalled at the container level. */
+  readonly harnessCliVersion: string;
+};
+
+/** The `omp` image's build pins — the single declaration of its versioned inputs. */
+export const OMP_SANDBOX_IMAGE_PINS: SandboxImagePins = Object.freeze({
+  baseImageDigest: "sha256:918311b7b6c4c6f68b232ba516584925f6c78ad82b6fd534b98979df6438e483",
+  sandboxShimTag: "1.0.0",
+  bunVersion: "1.4.0",
+  ghVersion: "2.98.0",
+  harnessVersion: "3.11.2",
+  harnessRef: "2cae49faaa9a7652479f8ad859999fe6da7dbc22",
+  harnessCliVersion: "3.11.2",
+});
+
 /** One selectable sandbox runtime image. */
 export type SandboxImageDefinition = {
   /** Stable registry id — the value stored on github_apps.sandbox_image_id. */
@@ -79,6 +117,8 @@ export type SandboxImageDefinition = {
   dockerfilePath: string;
   /** wrangler `containers[].images.sandbox.dockerfile` path (build_context stays repo root). */
   wranglerImagePath: string;
+  /** That image's build pins (see `SandboxImagePins`). */
+  pins: SandboxImagePins;
   /** Runtime kind — names the runner/synthesizer implementation this entry executes under. */
   runtime: "omp";
   /** Capability hosts synthesized into every per-review models.yml (base wins on collision). */
@@ -94,6 +134,7 @@ const SANDBOX_IMAGES: readonly SandboxImageDefinition[] = Object.freeze([
     enabled: true,
     dockerfilePath: "sandbox-image/omp/Dockerfile",
     wranglerImagePath: "./sandbox-image/omp/Dockerfile",
+    pins: OMP_SANDBOX_IMAGE_PINS,
     runtime: "omp",
     hosts: [
       Object.freeze({

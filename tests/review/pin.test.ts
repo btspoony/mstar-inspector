@@ -1,25 +1,27 @@
 /**
- * Pin assertions for the sandbox image harness ref, engine dep, and the
- * preinstalled @mstar-harness/cli (bumped 2026-09-20 — supersedes the
- * previous 3.10.2 pin).
+ * Pin assertions for the sandbox image build inputs, engine dep, and the
+ * preinstalled @mstar-harness/cli.
  *
- * POLICY CHANGE (user instruction 2026-09-06; range carried forward
- * at `^3.11.2`, 2026-09-20): the repo manifest
- * `@mstar-harness/engine` range is now `^3.11.2` — the only range allowed in
- * package.json. This supersedes the earlier "exact pin, no
- * `^`/`~`/`latest`" discipline for the manifest ONLY. The sandbox image side
- * stays exact: the Dockerfile fetches a pinned deref commit, and reproducibility is frozen
- * by bun.lock (packages row must resolve to exact 3.11.2) +
- * `bun install --frozen-lockfile` in the image build. The image CLI install
- * is exact too (`@mstar-harness/cli@3.11.2`) — the manifest range exception
- * does NOT extend to the image.
+ * Expected values come from `OMP_SANDBOX_IMAGE_PINS`
+ * (`src/contracts/sandbox-images.ts` — the single declaration of the image's
+ * versioned build inputs) and from `package.json` (the dependency authority),
+ * never from literals restated here. The Dockerfile cannot read that module
+ * (no build args, no env), so it is the one unavoidable second copy: the
+ * anchors below lock it to the declaration.
  *
- * These tests fail if the harness image ref drifts off the 3.11.2 commit, if
- * the manifest range or the lockfile resolution drifts, if the image CLI
- * install drifts off the exact 3.11.2 pin, loses its PATH exposure, or
- * desyncs from the `REVIEW_SKILL_VERSION` version prefix, or if the test
- * fixture plugin root stops mirroring the pinned layout
- * (`commands/amazing-pr-review.md` + `skills/mstar-audit`).
+ * POLICY CHANGE (user instruction 2026-09-06): the repo manifest
+ * `@mstar-harness/engine` range is the only range allowed in package.json.
+ * The sandbox image side stays exact: the Dockerfile fetches a pinned deref
+ * commit, the image CLI install is exact, and reproducibility is frozen by
+ * bun.lock (packages row resolves to the exact version) +
+ * `bun install --frozen-lockfile` in the image build.
+ *
+ * These tests fail if any Dockerfile pin drifts off the declared value, if the
+ * manifest range or the lockfile resolution drifts, if the image CLI install
+ * drifts off the exact pin, loses its PATH exposure, or desyncs from the
+ * `REVIEW_SKILL_VERSION` prefix — or if the fixture plugin root stops
+ * mirroring the pinned layout (`commands/amazing-pr-review.md` +
+ * `skills/mstar-audit`).
  */
 
 import { describe, expect, test } from "bun:test";
@@ -27,76 +29,89 @@ import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 
 import { PLUGIN_ROOT_FIXTURE } from "./plugin-root-fixture";
+import { OMP_SANDBOX_IMAGE_PINS } from "../../src/contracts/sandbox-images";
 import { REVIEW_SKILL_VERSION } from "../../src/store/artifact-store";
 
-/** Harness 3.11.2 git ref fetched into the sandbox image (bumped 2026-09-20). */
-const HARNESS_3112_REF = "2cae49faaa9a7652479f8ad859999fe6da7dbc22";
-/** Harness 3.10.2 git ref — superseded by the 3.11.2 bump (2026-09-20). */
-const SUPERSEDED_3102_REF = "65399624b5951bcf6478cb4d71e0dbb84f24acec";
-/** Harness 3.9.2 git ref — superseded by the 3.10.2 bump (2026-09-17). */
-const SUPERSEDED_392_REF = "23d2c78c481e3571bf3e975886ace5f8c1f9f905";
-/** Harness 3.8.1 git ref — superseded by the 3.9.2 bump (2026-09-14). */
-const SUPERSEDED_381_REF = "4c8fbb216c444df832b1943d68e4eee76261bbd2";
-/** Harness 3.6.3 git ref — superseded by the 3.8.1 bump (2026-09-12). */
-const SUPERSEDED_363_REF = "6cbeea67179a82483429cc6476111bfdbb959c7e";
-/** Harness 3.6.2 git ref — superseded by the 3.6.3 bump (2026-09-07). */
-const SUPERSEDED_362_REF = "3436ddcaf03ddec693dc7059395e9ccf92e5d005";
-/** Harness 3.6.0 git ref — superseded by the 3.6.2 bump (2026-09-06). */
-const SUPERSEDED_360_REF = "ad76f0c6600acd5040464248085ad7d22af93e9f";
-/** Harness 3.5.1 git ref — superseded by the 3.6.0 bump (2026-09-03). */
-const SUPERSEDED_351_REF = "bde437075aeefd4cdb4e87060c6c44149968c3b0";
-/** Pre-3.5.0 harness pin git ref — superseded by the 3.5.0 pin (2026-08-28). */
-const SUPERSEDED_REF = "c188934c807184f416656a80ca50adb61ccbd525";
-/** Harness 3.5.0 git ref — superseded by the 3.5.1 bump (2026-09-01). */
-const SUPERSEDED_350_REF = "f1b60df0b3b2e29b9a904edb4077e52cf6d7ca66";
+/**
+ * Every harness ref this image has previously pinned, plus the ref that
+ * superseded them — append-only data (a bump appends the outgoing ref;
+ * nothing is renamed or removed). Values are version-agnostic. The live ref
+ * is `OMP_SANDBOX_IMAGE_PINS.harnessRef`; the entry equal to it is the one
+ * the "no superseded ref" case below deliberately skips.
+ */
+const SUPERSEDED_HARNESS_REFS: readonly string[] = [
+  "c188934c807184f416656a80ca50adb61ccbd525",
+  "f1b60df0b3b2e29b9a904edb4077e52cf6d7ca66",
+  "bde437075aeefd4cdb4e87060c6c44149968c3b0",
+  "ad76f0c6600acd5040464248085ad7d22af93e9f",
+  "3436ddcaf03ddec693dc7059395e9ccf92e5d005",
+  "6cbeea67179a82483429cc6476111bfdbb959c7e",
+  "4c8fbb216c444df832b1943d68e4eee76261bbd2",
+  "23d2c78c481e3571bf3e975886ace5f8c1f9f905",
+  "65399624b5951bcf6478cb4d71e0dbb84f24acec",
+  "2cae49faaa9a7652479f8ad859999fe6da7dbc22",
+];
 
 const REPO_ROOT = join(import.meta.dir, "..", "..");
 /** The runtime-specific Dockerfile location (sandbox-image/omp/). */
 const OMP_DOCKERFILE = join(REPO_ROOT, "sandbox-image", "omp", "Dockerfile");
+const DOCKERFILE = readFileSync(OMP_DOCKERFILE, "utf8");
 
 describe("sandbox image harness pin", () => {
-  const dockerfile = readFileSync(OMP_DOCKERFILE, "utf8");
-
-  test("Dockerfile fetches the 3.11.2 harness commit", () => {
-    expect(dockerfile).toContain(`fetch --depth 1 origin ${HARNESS_3112_REF}`);
+  test("Dockerfile fetches the declared harness commit", () => {
+    expect(DOCKERFILE).toContain(`fetch --depth 1 origin ${OMP_SANDBOX_IMAGE_PINS.harnessRef}`);
   });
 
-  test("Dockerfile no longer references the superseded refs", () => {
-    expect(dockerfile).not.toContain(SUPERSEDED_3102_REF);
-    expect(dockerfile).not.toContain(SUPERSEDED_392_REF);
-    expect(dockerfile).not.toContain(SUPERSEDED_381_REF);
-    expect(dockerfile).not.toContain(SUPERSEDED_363_REF);
-    expect(dockerfile).not.toContain(SUPERSEDED_362_REF);
-    expect(dockerfile).not.toContain(SUPERSEDED_360_REF);
-    expect(dockerfile).not.toContain(SUPERSEDED_351_REF);
-    expect(dockerfile).not.toContain(SUPERSEDED_REF);
-    expect(dockerfile).not.toContain(SUPERSEDED_350_REF);
+  test("Dockerfile no longer references any superseded ref", () => {
+    for (const ref of SUPERSEDED_HARNESS_REFS) {
+      if (ref === OMP_SANDBOX_IMAGE_PINS.harnessRef) continue;
+      expect(DOCKERFILE).not.toContain(ref);
+    }
   });
 
-  test("Dockerfile comment records the tag v3.11.2 double-write", () => {
-    expect(dockerfile).toContain("tag v3.11.2");
+  test("Dockerfile comment records the declared tag", () => {
+    expect(DOCKERFILE).toContain(`tag v${OMP_SANDBOX_IMAGE_PINS.harnessVersion}`);
+  });
+});
+
+describe("sandbox image base / tool pins", () => {
+  test("Dockerfile FROM pins the declared base image digest", () => {
+    expect(DOCKERFILE).toContain(`@${OMP_SANDBOX_IMAGE_PINS.baseImageDigest}`);
+  });
+
+  test("Dockerfile COPYs the shim from the declared sandbox tag", () => {
+    expect(DOCKERFILE).toContain(
+      `COPY --from=docker.io/cloudflare/sandbox:${OMP_SANDBOX_IMAGE_PINS.sandboxShimTag} `,
+    );
+  });
+
+  test("Dockerfile downloads the declared Bun release", () => {
+    expect(DOCKERFILE).toContain(`bun-v${OMP_SANDBOX_IMAGE_PINS.bunVersion}`);
+  });
+
+  test("Dockerfile downloads the declared gh release", () => {
+    expect(DOCKERFILE).toContain(`gh_${OMP_SANDBOX_IMAGE_PINS.ghVersion}_linux_amd64`);
   });
 });
 
 describe("sandbox image CLI pin", () => {
-  const dockerfile = readFileSync(OMP_DOCKERFILE, "utf8");
-
-  test("Dockerfile preinstalls @mstar-harness/cli at the exact 3.11.2 pin (bun global)", () => {
+  test("Dockerfile preinstalls @mstar-harness/cli at the declared exact pin (bun global)", () => {
     // bun global install of the exact pin — image pinning discipline; the
-    // repo manifest `^3.11.2` exception (2026-09-06 policy change) does NOT
-    // extend to the image.
-    expect(dockerfile).toContain("bun add --global @mstar-harness/cli@3.11.2");
+    // repo manifest range exception does NOT extend to the image.
+    expect(DOCKERFILE).toContain(
+      `bun add --global @mstar-harness/cli@${OMP_SANDBOX_IMAGE_PINS.harnessCliVersion}`,
+    );
   });
 
   test("Dockerfile puts the bun global bin on PATH for sandbox exec", () => {
-    expect(dockerfile).toContain('ENV PATH="/root/.bun/bin:${PATH}"');
+    expect(DOCKERFILE).toContain('ENV PATH="/root/.bun/bin:${PATH}"');
   });
 
   test("Dockerfile has no unversioned / @latest CLI install", () => {
-    expect(dockerfile).not.toContain("@mstar-harness/cli@latest");
+    expect(DOCKERFILE).not.toContain("@mstar-harness/cli@latest");
     // Every `@mstar-harness/cli` occurrence in the file (comment included)
     // must be version-pinned — a bare, unversioned install reference fails.
-    expect(dockerfile.match(/@mstar-harness\/cli(?!@)/)).toBeNull();
+    expect(DOCKERFILE.match(/@mstar-harness\/cli(?!@)/)).toBeNull();
   });
 });
 
@@ -104,37 +119,42 @@ describe("engine dependency pin", () => {
   const pkg = JSON.parse(readFileSync(join(REPO_ROOT, "package.json"), "utf8")) as {
     dependencies: Record<string, string>;
   };
+  const lockfile = readFileSync(join(REPO_ROOT, "bun.lock"), "utf8");
+  const engineRange = pkg.dependencies["@mstar-harness/engine"]!;
+  const engineVersion = engineRange.replace(/^[\^~]/, "");
 
-  test("@mstar-harness/engine manifest declares the ^3.11.2 range (2026-09-06 policy change)", () => {
-    expect(pkg.dependencies["@mstar-harness/engine"]).toBe("^3.11.2");
+  test("@mstar-harness/engine manifest declares the range matching the declared CLI pin", () => {
+    // The manifest range tracks the image's CLI pin (policy change
+    // 2026-09-06): the range prefix is the manifest exception, the version
+    // itself is the declared pin — not a literal restated here.
+    expect(engineRange).toBe(`^${OMP_SANDBOX_IMAGE_PINS.harnessCliVersion}`);
   });
 
-  test("@mstar-harness/engine bun.lock packages row resolves to exact 3.11.2", () => {
-    const lockfile = readFileSync(join(REPO_ROOT, "bun.lock"), "utf8");
-    // The packages row names the RESOLVED version verbatim (exact 3.11.2, no
-    // range prefix) — this is what `bun install --frozen-lockfile` in the
-    // image build installs. A bad resolution (e.g. 3.6.3, or the range
+  test("@mstar-harness/engine bun.lock packages row resolves to the exact declared version", () => {
+    // The packages row names the RESOLVED version verbatim (exact, no range
+    // prefix) — this is what `bun install --frozen-lockfile` in the image
+    // build installs. A bad resolution (e.g. an older version, or the range
     // leaking into the resolved name) fails this anchor.
-    expect(lockfile).toContain('"@mstar-harness/engine": ["@mstar-harness/engine@3.11.2"');
+    expect(lockfile).toContain(`"@mstar-harness/engine": ["@mstar-harness/engine@${engineVersion}"`);
   });
 
   test("@mstar-harness/engine bun.lock workspaces row mirrors the manifest range", () => {
-    const lockfile = readFileSync(join(REPO_ROOT, "bun.lock"), "utf8");
-    // The workspaces dependencies row (bun.lock:9) mirrors the package.json
-    // range declaration; drift here would desync the workspace root from the
+    // The workspaces dependencies row mirrors the package.json range
+    // declaration; drift here would desync the workspace root from the
     // manifest.
-    expect(lockfile).toContain('"@mstar-harness/engine": "^3.11.2"');
+    expect(lockfile).toContain(`"@mstar-harness/engine": "${engineRange}"`);
   });
 });
 
 describe("review skill version pin", () => {
-  test("REVIEW_SKILL_VERSION carries the exact 3.11.2+2cae49fa value", () => {
-    expect(REVIEW_SKILL_VERSION).toBe("3.11.2+2cae49fa");
+  test("REVIEW_SKILL_VERSION is derived from the declared pins", () => {
+    expect(REVIEW_SKILL_VERSION).toBe(
+      `${OMP_SANDBOX_IMAGE_PINS.harnessVersion}+${OMP_SANDBOX_IMAGE_PINS.harnessRef.slice(0, 8)}`,
+    );
   });
 
   test("REVIEW_SKILL_VERSION + suffix binds to the Dockerfile fetch sha prefix", () => {
-    const dockerfile = readFileSync(OMP_DOCKERFILE, "utf8");
-    const fetchSha = dockerfile.match(/fetch --depth 1 origin ([0-9a-f]{40})/)?.[1];
+    const fetchSha = DOCKERFILE.match(/fetch --depth 1 origin ([0-9a-f]{40})/)?.[1];
     expect(fetchSha).toBeDefined();
     // The constant's "+" suffix is the short form of the Dockerfile fetch sha;
     // drift between the two anchors (image ref vs D1 attribution) fails here.
@@ -142,14 +162,13 @@ describe("review skill version pin", () => {
   });
 
   test("REVIEW_SKILL_VERSION version prefix binds to the Dockerfile CLI pin", () => {
-    const dockerfile = readFileSync(OMP_DOCKERFILE, "utf8");
     const versionPrefix = REVIEW_SKILL_VERSION.split("+")[0];
     expect(versionPrefix).toBeDefined();
     // The CLI exact pin and the D1 attribution anchor share the version
     // component: a future bump that updates one but not the other (e.g. a
     // fetch-sha + REVIEW_SKILL_VERSION bump leaving the image CLI at the old
     // version) fails here — same drift net as the fetch-sha binding above.
-    expect(dockerfile).toContain(`@mstar-harness/cli@${versionPrefix!}`);
+    expect(DOCKERFILE).toContain(`@mstar-harness/cli@${versionPrefix!}`);
   });
 });
 
