@@ -30,14 +30,16 @@
  *     `auth: oauth`; absent or empty = the capability base alone
  *     (byte-identical zero-custom path).
  * - the credential payload (the ONLY credential channel): the runner reads a
- *     versioned JSON payload from STDIN and writes its pools into
- *     `<agentDir>/agent.db` as `{type:"api_key", source:"login"}` rows before
+ *     versioned JSON payload from STDIN and loads its pools into an IN-MEMORY
+ *     credential store as `{type:"api_key", source:"login"}` rows before
  *     the runtime starts, under the MODELS.YML provider id (a capability host
  *     id — resolved through its catalogProviderId — or the provider id itself),
  *     and fails the run closed (exit 1, no session, nothing written) when the
  *     payload does not decode, carries an empty pool array, or carries a
- *     non-string/empty entry. A `MSTAR_POOL_*` name in the process environment
- *     is INERT — never a credential source.
+ *     non-string/empty entry. The store is never a file: `<agentDir>` holds only
+ *     the synthesized models.yml, so the review agent's own read/grep/glob have
+ *     no credential database to reach. A `MSTAR_POOL_*` name in the process
+ *     environment is INERT — never a credential source.
  * - the optional recheck channel (spec review-lifecycle
  *     §7.8): the input's `recheck` document is shape-guarded and forwarded
  *     verbatim; the optional `--recheck-out <path>` flag writes the runtime's
@@ -72,11 +74,13 @@ const runInputs: AgentRuntimeRunInput[] = [];
 const runDirs: string[] = [];
 /**
  * What the per-run directory held while the runtime was in flight: the path
- * the run handed over plus whether it carried the credential store at that
+ * the run handed over plus whether it carried a credential database at that
  * moment. A run removes the directory once the runtime settles, so this is the
- * only observable proof that the removal discarded real credential material.
+ * only observable proof that no credential file ever existed.
  */
 let inFlight: { dir: string; hadStore: boolean } | undefined;
+/** The credential store each run handed the runtime (the in-memory instance). */
+const runStores: unknown[] = [];
 /** Temp copies of the in-flight per-run directories (see `preserveAgentDir`). */
 const preserved: { dir: string; parent: string }[] = [];
 
@@ -104,6 +108,7 @@ const fakeRuntime: AgentRuntime = {
   runReview: mock(async (input: AgentRuntimeRunInput): Promise<ReviewRunResult> => {
     runInputs.push(input);
     runDirs.push(input.agentDir);
+    runStores.push(input.authStorage);
     inFlight = { dir: input.agentDir, hadStore: existsSync(join(input.agentDir, "agent.db")) };
     preserveAgentDir(input.agentDir);
     if (runtimeError) throw runtimeError;
@@ -162,7 +167,7 @@ type PtyRun = {
   isTTY: boolean | null;
   /** The per-run directory the runtime received. */
   dir: string | null;
-  /** Whether that directory held the credential store while the runtime ran. */
+  /** Whether that directory held a credential database while the runtime ran. */
   hadStore: boolean | null;
   /** Whether that directory still existed after main() returned. */
   dirAfterRun: boolean | null;
@@ -253,7 +258,8 @@ function agentDirs(): string[] {
 /**
  * Run one CLI call that must fail closed, asserting it wrote NO credential
  * store: the agent dirs are snapshotted first, and no dir this call created may
- * carry an `agent.db` (the store a credential write would produce).
+ * carry an `agent.db` (the credential database a credential write would
+ * produce).
  */
 async function runCliWithoutStore(
   argv: string[],
@@ -278,6 +284,7 @@ afterEach(() => {
   runtimeError = undefined;
   cleanupAgentDirs();
   runInputs.length = 0;
+  runStores.length = 0;
   inFlight = undefined;
   for (const copy of preserved) rmSync(copy.parent, { recursive: true, force: true });
   preserved.length = 0;
@@ -683,17 +690,15 @@ describe("runner entry — --recheck-out channel", () => {
 });
 
 describe("runner entry — transported credential pool", () => {
-  /** Read the stored pool rows the run wrote into <agentDir>/agent.db. */
-  async function storedPool(agentDir: string, provider: string) {
-    const storage = await AuthStorage.create(join(agentDir, "agent.db"));
-    try {
-      // The SDK's discovery path loads the store on open (reload); the bare
-      // factory caches nothing, so reload here mirrors it.
-      await storage.reload();
-      return storage.listStoredCredentials(provider).map((row) => row.credential);
-    } finally {
-      storage.close();
-    }
+  /**
+   * Read the pool rows the run loaded for `provider` off the store it handed
+   * the runtime. The store is in memory (no file exists to open), and the run
+   * closes it only after the injected runtime settled — which it already has
+   * by the time a test inspects the captured instance.
+   */
+  function storedPool(provider: string) {
+    const storage = runStores.at(-1) as AuthStorage;
+    return storage.listStoredCredentials(provider).map((row) => row.credential);
   }
 
   test("the payload's app-provider pool lands as login api_key rows under the capability host id", async () => {
@@ -710,7 +715,7 @@ describe("runner entry — transported credential pool", () => {
     expect(JSON.parse(stdout)).toEqual(ENVELOPE);
     const input = runInputs[0]!;
     expect(input.agentDir).toMatch(/^\/tmp\/omp-agent-/);
-    const rows = await storedPool(preservedAgentDir(), "ark-plan");
+    const rows = storedPool("ark-plan");
     expect(rows).toEqual([
       { type: "api_key", key: sk("pool-one"), source: "login" },
       { type: "api_key", key: sk("pool-two"), source: "login" },
@@ -720,14 +725,9 @@ describe("runner entry — transported credential pool", () => {
     expect(log).toEqual({ event: "credential_pool", provider: "ark-plan", pool_size: 2 });
     expect(stderr).not.toContain(sk("pool-one"));
     expect(stderr).not.toContain(sk("pool-two"));
-    // The pool rows are live via the pinned auth storage, not just persisted.
-    const storage = await AuthStorage.create(join(preservedAgentDir(), "agent.db"));
-    try {
-      await storage.reload();
-      expect(await storage.getApiKey("ark-plan")).toBe(sk("pool-one"));
-    } finally {
-      storage.close();
-    }
+    // The rows are live on the very instance the session received, resolvable
+    // through the SDK's own read path — no file involved.
+    expect(await (runStores.at(-1) as AuthStorage).getApiKey("ark-plan")).toBe(sk("pool-one"));
   });
 
   test("custom providers pool under their own id, in payload order", async () => {
@@ -750,7 +750,7 @@ describe("runner entry — transported credential pool", () => {
 
     expect(code).toBe(0);
     const input = runInputs[0]!;
-    expect(await storedPool(preservedAgentDir(), "my-provider")).toEqual([
+    expect(storedPool("my-provider")).toEqual([
       { type: "api_key", key: sk("custom-one"), source: "login" },
       { type: "api_key", key: sk("custom-two"), source: "login" },
     ]);
@@ -845,19 +845,13 @@ describe("runner entry — transported credential pool", () => {
     expect(code).toBe(0);
     expect(JSON.parse(stdout)).toEqual(ENVELOPE);
     const input = runInputs[0]!;
-    expect(await storedPool(preservedAgentDir(), "openai")).toEqual([
+    expect(storedPool("openai")).toEqual([
       { type: "api_key", key: sk("builtin-one"), source: "login" },
     ]);
     const log = JSON.parse(stderr) as { event: string; provider: string; pool_size: number };
     expect(log).toEqual({ event: "credential_pool", provider: "openai", pool_size: 1 });
     expect(stderr).not.toContain(sk("builtin-one"));
-    const storage = await AuthStorage.create(join(preservedAgentDir(), "agent.db"));
-    try {
-      await storage.reload();
-      expect(await storage.getApiKey("openai")).toBe(sk("builtin-one"));
-    } finally {
-      storage.close();
-    }
+    expect(await (runStores.at(-1) as AuthStorage).getApiKey("openai")).toBe(sk("builtin-one"));
   });
 
   test("a hyphenated built-in provider keeps its id verbatim (no prefix inversion) beside a capability host pool", async () => {
@@ -872,11 +866,11 @@ describe("runner entry — transported credential pool", () => {
 
     expect(code).toBe(0);
     const input = runInputs[0]!;
-    expect(await storedPool(preservedAgentDir(), "azure-openai")).toEqual([
+    expect(storedPool("azure-openai")).toEqual([
       { type: "api_key", key: sk("builtin-one"), source: "login" },
       { type: "api_key", key: sk("builtin-two"), source: "login" },
     ]);
-    expect(await storedPool(preservedAgentDir(), "ark-plan")).toEqual([
+    expect(storedPool("ark-plan")).toEqual([
       { type: "api_key", key: sk("ark-one"), source: "login" },
     ]);
   });
@@ -998,26 +992,70 @@ describe("runner entry — transported credential pool", () => {
     expect(run.dirAfterRun).toBe(false);
   });
 
-  test("the credential directory is removed once the runtime settles — success and failure", async () => {
-    // The per-run directory holds the plaintext keys: with a non-empty payload
-    // the runtime must see the store in place, and no exit path may leave the
-    // directory behind — on the documented local path it would otherwise
-    // outlive the run on the host.
+  test("no credential database is ever created, and the per-run directory is removed — success and failure", async () => {
+    // The finding this closes: the run's own read/grep/glob tools could reach
+    // the key pool through the credential database on disk. The pool now lives
+    // ONLY in the in-memory store, so `<agentDir>` never holds an `agent.db`
+    // (no `-wal`/`-shm` either) and no directory is left behind either way.
     const payload = encodeCredentialPayload({ ark: [sk("cleanup-key")] });
 
     const okInput = writeInput({ capabilityHosts: OMP_HOSTS, worktreePath: "/workspace/clone" });
     const ok = await runCli(["--level", "quick", "--input", okInput], payload);
     expect(ok.code).toBe(0);
-    expect(inFlight?.hadStore).toBe(true); // the runtime really did hold credential material
-    expect(existsSync(inFlight!.dir)).toBe(false); // ...and the run removed it
+    expect(inFlight?.hadStore).toBe(false); // no credential database, with a real payload
+    expect(existsSync(inFlight!.dir)).toBe(false); // ...and the run removed the directory
 
     runtimeError = new Error("seat 0 failed: provider boom");
     const failInput = writeInput({ capabilityHosts: OMP_HOSTS, worktreePath: "/workspace/clone" });
     const failed = await runCli(["--level", "quick", "--input", failInput], payload);
     expect(failed.code).toBe(1);
     expect(failed.stderr).toContain("provider boom"); // the original failure is not masked
-    expect(inFlight?.hadStore).toBe(true);
+    expect(inFlight?.hadStore).toBe(false);
     expect(existsSync(inFlight!.dir)).toBe(false);
+  });
+
+  test("with a real payload the pool is loaded and readable from memory, yet NO database exists anywhere the session's tools scan", async () => {
+    // The end-to-end shape of the fix: the credentials are USABLE for the run
+    // and UNREACHABLE as a file. The runner's own directory carries only
+    // models.yml, and a scan of every `omp-agent-*` directory in the temp root
+    // finds no credential database at all.
+    const inputPath = writeInput({ capabilityHosts: OMP_HOSTS, worktreePath: "/workspace/clone" });
+    const { code, stderr } = await runCli(
+      ["--level", "quick", "--input", inputPath],
+      encodeCredentialPayload({ ark: [sk("mem-only-key")] }),
+    );
+    expect(code).toBe(0);
+
+    // (a) usable: the rows are live on the exact store handed to the runtime.
+    const storage = runStores.at(-1) as AuthStorage;
+    expect(storage.listStoredCredentials("ark-plan").map((row) => row.credential)).toEqual([
+      { type: "api_key", key: sk("mem-only-key"), source: "login" },
+    ]);
+    expect(await storage.getApiKey("ark-plan")).toBe(sk("mem-only-key"));
+    // ...and the credential never leaked into the only diagnostic channel.
+    expect(stderr).not.toContain(sk("mem-only-key"));
+
+    // (b) unreachable: the preserved copy of the run directory holds no
+    // credential database — only the synthesized (non-secret) models.yml.
+    expect(existsSync(join(preservedAgentDir(), "agent.db"))).toBe(false);
+    expect(readdirSync(preservedAgentDir())).toContain("models.yml");
+  });
+
+  test("no per-run directory under /tmp/omp-agent-* ever carries a credential database", async () => {
+    // The scan a prompt-injected session would run: the predictable
+    // `/tmp/omp-agent-<uuid>` prefix. Every directory that exists while the
+    // run is live must be free of the store — this is the assertion that fails
+    // against the pre-fix tree, where the runner wrote `<agentDir>/agent.db`.
+    const inputPath = writeInput({ capabilityHosts: OMP_HOSTS, worktreePath: "/workspace/clone" });
+    const { code } = await runCli(
+      ["--level", "quick", "--input", inputPath],
+      encodeCredentialPayload({ ark: [sk("scan-key")] }),
+    );
+    expect(code).toBe(0);
+    // The run directory is gone by now; assert on the in-flight snapshot, which
+    // is what a session running inside the review would have been able to scan.
+    expect(inFlight?.hadStore).toBe(false);
+    expect(agentDirs().filter((dir) => existsSync(join(dir, "agent.db")))).toEqual([]);
   });
 
   test("a custom id colliding with a capability host pools only once (base wins, same rule as the synthesis)", async () => {
@@ -1044,7 +1082,7 @@ describe("runner entry — transported credential pool", () => {
 
     expect(code).toBe(0);
     const input = runInputs[0]!;
-    expect(await storedPool(preservedAgentDir(), "ark-plan")).toEqual([
+    expect(storedPool("ark-plan")).toEqual([
       { type: "api_key", key: sk("base-key"), source: "login" },
     ]);
   });

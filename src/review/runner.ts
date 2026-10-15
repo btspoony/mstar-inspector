@@ -31,8 +31,8 @@
  *         declarations `{ provider_id, base_url, api, model_ids }`; merged
  *         INTO the capability-host base of the synthesized models.yml (no
  *         apiKey pin, `auth: oauth`); each provider's key pool rides the STDIN
- *         credential payload under its own provider id and is written
- *         into the run's credential store; a
+ *         credential payload under its own provider id and is loaded into the
+ *         run's in-memory credential store; a
  *         declaration whose id collides with a capability host is skipped
  *         (capability/base wins, AL-23-1) with a structured stderr warn
  *         (id + count, no keys); absent/empty = the capability base alone.
@@ -59,20 +59,24 @@
  * (`{"version":1,"pools":{"<providerId>":["k1",…]}}` — ./credential-payload.ts)
  * into this process's STDIN and closes the stream. The runner validates it
  * BEFORE any credential is written, resolves each pool key to the models.yml
- * provider id it serves, and writes those keys into <agentDir>/agent.db as
- * stored `login` api_key rows before the session starts. Diagnostics carry the
- * provider id and the pool size only — never a key value, never the payload.
+ * provider id it serves, and loads those keys into an IN-MEMORY credential
+ * store as stored `login` api_key rows before the session starts; that exact
+ * instance rides `AgentRuntimeRunInput.authStorage` and is what every
+ * `createAgentSession` call receives. No credential database is ever written,
+ * so the session's own read/grep/glob (which the pinned SDK admits) have no
+ * file to find. Diagnostics carry the provider id and the pool size only —
+ * never a key value, never the payload.
  * An absent payload (empty stdin) is the keyless run shape — and so is an
  * interactive terminal: the documented local
  * `bun run src/review/runner.ts --level <tier> --input <json-file>` has no pipe,
  * so its TTY would never send EOF; the read is skipped there instead of
  * blocking.
- * The credential directory is per-run and holds plaintext key material, so it
- * is removed once the runtime has settled, on both the success and the failure
- * path (best-effort; a removal failure never replaces the run's own outcome).
+ * The credential directory is per-run and holds only the non-secret synthesized
+ * models.yml, so it is removed once the runtime has settled, on both the
+ * success and the failure path (best-effort; a removal failure never replaces
+ * the run's own outcome).
  */
 import { readFileSync, rmSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent";
 import {
   isReviewLevel,
@@ -246,8 +250,8 @@ function parseRunnerInput(parsed: unknown): RunnerInputJson {
     // pattern/baseUrl/api-enum/model bounds live dashboard-side
     // (assertCustomProvider). The declarations carry NO keys: each key rides
     // the STDIN credential payload under its provider id (./credential-payload)
-    // and the runner loads it into the run's credential store (zero key
-    // literals in any file).
+    // and the runner loads it into the run's in-memory credential store (zero
+    // key literals in any file).
     const list = record.customProviders;
     if (!Array.isArray(list)) {
       throw new Error(
@@ -353,10 +357,18 @@ function poolProviders(
 }
 
 /**
- * Load the transported credential pool into the run's credential store:
- * `<agentDir>/agent.db` gains one `{type:"api_key", source:"login"}` row per
- * transported key, in payload order. `source: "login"` ranks ABOVE the
- * provider env var in the SDK's credential cascade, which is what lets the
+ * Load the transported credential pool into the run's credential store.
+ *
+ * The store is IN MEMORY (`AuthStorage.create(":memory:")`): `<agentDir>` keeps
+ * only the synthesized models.yml, so there is no credential database for the
+ * session's own read/grep/glob tools to find — the review agent cannot read
+ * the App's key pool out of its own run directory. The returned instance is
+ * the one every `createAgentSession` call must receive; without it the SDK
+ * recreates `<agentDir>/agent.db` and the exposure returns.
+ *
+ * One `{type:"api_key", source:"login"}` row per transported key, in payload
+ * order (the entry is an array for a provider). `source: "login"` ranks ABOVE
+ * the provider env var in the SDK's credential cascade, which is what lets the
  * runtime rotate across the pool — the synthesized models.yml deliberately pins
  * no `apiKey` (a tier-2 config override would suppress this pool entirely).
  *
@@ -367,7 +379,7 @@ function poolProviders(
  * Diagnostics carry provider id + pool size only; key VALUES are never logged
  * or thrown.
  */
-async function loadCredentialPool(agentDir: string, json: RunnerInputJson, payload: string): Promise<void> {
+async function loadCredentialPool(json: RunnerInputJson, payload: string): Promise<AuthStorage> {
   const pools = decodeCredentialPayload(payload);
   const loaded: Array<{ providerId: string; keys: string[] }> = [];
   for (const { providerId, poolKey } of poolProviders(json, Object.keys(pools))) {
@@ -375,21 +387,20 @@ async function loadCredentialPool(agentDir: string, json: RunnerInputJson, paylo
     if (keys === undefined) continue; // no pool transported for this provider
     loaded.push({ providerId, keys });
   }
-  if (loaded.length === 0) return; // no credentials transported (keyless run shape)
+  // A keyless run still gets an instance: the session must never fall back to
+  // discoverAuthStorage(agentDir), which would create the database on disk.
+  const storage = await AuthStorage.create(":memory:");
+  if (loaded.length === 0) return storage;
 
-  const storage = await AuthStorage.create(join(agentDir, "agent.db"));
-  try {
-    for (const { providerId, keys } of loaded) {
-      await storage.set(
-        providerId,
-        keys.map((key) => ({ type: "api_key" as const, key, source: "login" as const })),
-      );
-      // Provider id + pool size only — never a key value.
-      console.error(JSON.stringify({ event: "credential_pool", provider: providerId, pool_size: keys.length }));
-    }
-  } finally {
-    storage.close();
+  for (const { providerId, keys } of loaded) {
+    await storage.set(
+      providerId,
+      keys.map((key) => ({ type: "api_key" as const, key, source: "login" as const })),
+    );
+    // Provider id + pool size only — never a key value.
+    console.error(JSON.stringify({ event: "credential_pool", provider: providerId, pool_size: keys.length }));
   }
+  return storage;
 }
 
 /**
@@ -436,11 +447,12 @@ export async function main(
   // never outlive (or restart past) the review's own wall-clock cap.
   anchorRecheckDeadline(Date.now(), level);
 
-  // The per-run directory carries the synthesized models.yml AND the stored
-  // credential rows (agent.db) — it exists only for this run, so it is removed
-  // once the runtime has settled, on every path (success, credential
-  // rejection, runtime failure). Best-effort: a removal failure is reported and
-  // never replaces the run's own outcome.
+  // The per-run directory carries only the synthesized models.yml — the
+  // credential rows live in an in-memory store (below), so no key material is
+  // ever written to disk. The directory still exists only for this run, so it
+  // is removed once the runtime has settled, on every path (success,
+  // credential rejection, runtime failure). Best-effort: a removal failure is
+  // reported and never replaces the run's own outcome.
   let agentDir: string | undefined;
   const removeAgentDir = (): void => {
     if (agentDir === undefined) return;
@@ -450,6 +462,9 @@ export async function main(
       console.error(`review: cannot remove credential directory ${agentDir}: ${(error as Error).message}`);
     }
   };
+  // Closed once the runtime has settled — the store must outlive every session
+  // the runtime creates (all three call sites receive this exact instance).
+  let authStorage: AuthStorage | undefined;
 
   try {
     let input: AgentRuntimeRunInput;
@@ -478,14 +493,14 @@ export async function main(
           }),
         );
       }
-      // The transported credential pool arrives on STDIN and lands in THIS run's
-      // credential store (agent.db) before any session exists: the synthesized
-      // models.yml pins no apiKey, so the stored `login` rows are what the
-      // runtime rotates across. Fail-closed — a payload that does not decode
-      // aborts the run here (exit 1), with its own diagnostic (not the
-      // input-read label).
+      // The transported credential pool arrives on STDIN and lands in an
+      // IN-MEMORY store before any session exists: the synthesized models.yml
+      // pins no apiKey, so the stored `login` rows are what the runtime rotates
+      // across, and no file exists for the session's own tools to read.
+      // Fail-closed — a payload that does not decode aborts the run here
+      // (exit 1), with its own diagnostic (not the input-read label).
       try {
-        await loadCredentialPool(dir, json, await readStdin());
+        authStorage = await loadCredentialPool(json, await readStdin());
       } catch (error) {
         console.error(`review: credential pool rejected: ${(error as Error).message}`);
         return 1;
@@ -503,8 +518,10 @@ export async function main(
         // present — same byte-identical legacy rule as modelOverrides.
         ...(json.recheck !== undefined ? { recheck: json.recheck } : {}),
         // The synthesized per-review models dir (present
-        // on EVERY run — there is no baked models.yml to fall back to).
+        // on EVERY run — there is no baked models.yml to fall back to), and the
+        // in-memory credential store the sessions must use.
         agentDir: dir,
+        authStorage,
       };
     } catch (error) {
       console.error(`review: cannot read runner input ${inputPath}: ${(error as Error).message}`);
@@ -534,6 +551,9 @@ export async function main(
       return 1;
     }
   } finally {
+    // The store is released only after the runtime has settled — every
+    // session it created held this instance for the whole run.
+    authStorage?.close();
     removeAgentDir();
   }
 }

@@ -4,8 +4,9 @@
  * This is the ONLY credential channel into the review container. The consumer
  * builds the payload from the App's decrypted key pools and streams it into the
  * runner exec's stdin (`container.exec(argv, { stdin: "pipe" })`); the in-image
- * runner validates it and writes the pools into the run's credential store
- * (`<agentDir>/agent.db`, `{type:"api_key", source:"login"}` rows). The process
+ * runner validates it and loads the pools into the run's IN-MEMORY credential
+ * store (`{type:"api_key", source:"login"}` rows) — no credential database is
+ * ever written, so the session's own tools have no file to read. The process
  * environment, argv, every log line and every error message stay key-free.
  *
  * Shape (self-describing and versioned):

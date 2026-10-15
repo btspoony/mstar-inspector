@@ -18,7 +18,8 @@
  *   - NO provider block pins a scalar `apiKey` (a models.yml apiKey registers
  *     as a tier-2 config override and would suppress the stored credential
  *     pool the runtime is supposed to use); poolized blocks authenticate via
- *     `auth: oauth`, and the keys ride the exec env into `<agentDir>/agent.db`;
+ *     `auth: oauth`, and the keys ride the STDIN credential payload into the
+ *     runner's in-memory credential store;
  *   - provider KEYS and the api value are double-quoted (yamlQuote — every
  *     user-derived scalar carries the same defensive quoting); capability
  *     hosts are source-controlled and emit bare (unquoted);

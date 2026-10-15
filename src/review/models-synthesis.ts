@@ -25,7 +25,8 @@
  * the stored credential pool the runtime is supposed to rotate across. Every
  * block authenticates via `auth: oauth`; the keys ride the runner's STDIN
  * credential payload (provider id → ordered pool) and the runner
- * writes them into `<agentDir>/agent.db` before the session starts. Key
+ * loads them into an in-memory credential store before the session starts
+ * (never `<agentDir>/agent.db`). Key
  * literals never enter this module, the synthesized text, or any log line. No
  * environment mutation, no in-image file reads or writes outside the
  * per-review /tmp directory.
@@ -61,8 +62,8 @@ function yamlQuote(value: string): string {
  * MINUS the scalar `apiKey` and with `auth: oauth`. A models.yml `apiKey` is
  * registered as a tier-2 config override and would suppress the stored
  * credential pool the runtime is supposed to use, so every poolized block
- * authenticates oauth and the keys ride the exec env into <agentDir>/agent.db
- * (the runner writes them before the session starts).
+ * authenticates oauth and the keys ride the STDIN credential payload into the
+ * runner's in-memory credential store (loaded before the session starts).
  */
 function capabilityHostBlock(host: CapabilityHost): string {
   const lines = [`  ${host.id}:`];

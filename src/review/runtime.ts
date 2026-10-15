@@ -2,12 +2,15 @@
  * AgentRuntime port — interface signature locked verbatim to the
  * agent-runtime spec § TypeScript 端口.
  *
- * Pure types + constants only: zero omp SDK import, zero I/O, safe to import
- * from BOTH runtime faces (container Bun and workerd — module import matrix,
- * spec § 模块 import 矩阵).
+ * Pure types + constants only: zero omp SDK RUNTIME import, zero I/O, safe to
+ * import from BOTH runtime faces (container Bun and workerd — module import
+ * matrix, spec § 模块 import 矩阵). The one SDK reference is the TYPE-ONLY
+ * `AuthStorage` import below: `verbatimModuleSyntax` erases it, so the
+ * workerd bundle keeps no dependency on the container-only package.
  */
 
 import type { MstarReviewV1 } from "@mstar-harness/engine";
+import type { AuthStorage } from "@oh-my-pi/pi-coding-agent";
 import type { RecheckDoc, RecheckInput } from "../contracts/recheck";
 
 /**
@@ -120,6 +123,17 @@ export type AgentRuntimeRunInput = {
    * without a synthesized directory has no models.yml at all.
    */
   agentDir: string;
+  /**
+   * The run's credential store, handed to the session IN MEMORY (never a
+   * file): the runner loads the transported pool into it and every
+   * `createAgentSession` call receives this exact instance. REQUIRED, even on
+   * a keyless run — omitting it makes the SDK fall back to
+   * `discoverAuthStorage(agentDir)`, which recreates `<agentDir>/agent.db` on
+   * disk and hands the review agent's own read/grep/glob tools the App's key
+   * pool. There is no file for a tool to find only because this instance is
+   * always the one passed.
+   */
+  authStorage: AuthStorage;
   /**
    * Optional typed recheck input (spec review-lifecycle
    * §7.3/§7.8): the worker-captured assessment targets, trusted evidence

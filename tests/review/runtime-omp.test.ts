@@ -267,12 +267,22 @@ const TWO_CLUSTER_FACTS = [
 /** The synthesized per-review models dir (REQUIRED on every run). */
 const AGENT_DIR = "/tmp/omp-agent-test";
 
+/**
+ * The run's in-memory credential store. The omp SDK root is mocked in this
+ * file, so `AuthStorage` is not importable here; the runtime only hands the
+ * instance through to `createAgentSession`, so an identity sentinel is the
+ * exact contract under test (the SDK's own type is nominal — a structural stub
+ * could never be passed for real).
+ */
+const TEST_AUTH_STORAGE = { close: () => {}, kind: "in-memory-credential-store" } as never;
+
 const BASE_INPUT = {
   level: "default" as const,
   worktreePath: TEST_WORKTREE,
   reconFacts: TWO_CLUSTER_FACTS,
   modelSelectors: ["ark-plan/deepseek-v4-flash", "ark-plan/backup-model"],
   agentDir: AGENT_DIR,
+  authStorage: TEST_AUTH_STORAGE,
 };
 
 /** The deep-tier input: same clone/facts/models, level deep. */
@@ -942,6 +952,36 @@ describe("ompAgentRuntime.runReview — per-review agentDir threading (AL-23-1; 
     await ompAgentRuntime.runReview(DEEP_INPUT);
     expect(createdOptions[0]!.agentDir).toBe(AGENT_DIR);
   });
+
+  test("input.authStorage reaches the session options on EVERY path — no discoverAuthStorage fallback", async () => {
+    // The credential store is the fix for the run's own tools reading the App's
+    // key pool: the SDK's default is `discoverAuthStorage(agentDir)`, which
+    // recreates `<agentDir>/agent.db` on disk. Omitting `authStorage` on ANY
+    // call site silently undoes that, so each is asserted by identity on the
+    // exact instance the runner loaded the pool into. The deep recheck session
+    // — the third call site — is asserted in the recheck block below, where
+    // both of that path's sessions are captured.
+    seatResults = [{ data: seatPayload() }];
+    await ompAgentRuntime.runReview({ ...BASE_INPUT, level: "quick" });
+    expect(createdOptions).toHaveLength(1);
+    expect(createdOptions[0]!.authStorage).toBe(TEST_AUTH_STORAGE);
+
+    createdOptions.length = 0;
+    parentYields = [deepEnvelope()];
+    await ompAgentRuntime.runReview(DEEP_INPUT);
+    expect(createdOptions).toHaveLength(1);
+    expect(createdOptions[0]!.authStorage).toBe(TEST_AUTH_STORAGE);
+  });
+
+  test("a distinct instance is passed through verbatim, never a re-created store", async () => {
+    // Guards the failure mode the SDK's own default would produce: the option
+    // must be the caller's instance, not a fresh `discoverAuthStorage` result.
+    const other = { close: () => {}, kind: "other-store" } as never;
+    seatResults = [{ data: seatPayload() }];
+    await ompAgentRuntime.runReview({ ...BASE_INPUT, level: "quick", authStorage: other });
+    expect(createdOptions[0]!.authStorage).toBe(other);
+    expect(createdOptions[0]!.authStorage).not.toBe(TEST_AUTH_STORAGE);
+  });
 });
 
 describe("ompAgentRuntime.runReview — recheck seat (spec §7.8)", () => {
@@ -1131,6 +1171,11 @@ describe("ompAgentRuntime.runReview — recheck seat (spec §7.8)", () => {
     expect(recheckSessionOptions.outputSchema).toBeUndefined();
     expect(recheckSessionOptions.cwd).toBe(TEST_WORKTREE);
     expect(recheckSessionOptions.agentDir).toBe(AGENT_DIR);
+    // Both deep-path sessions carry the run's credential store — the third of
+    // the three call sites; omitting it would let the SDK recreate the
+    // credential database on disk for the recheck session.
+    expect(parent.authStorage).toBe(TEST_AUTH_STORAGE);
+    expect(recheckSessionOptions.authStorage).toBe(TEST_AUTH_STORAGE);
 
     // Exactly one structured child: the recheck seat (never a second
     // prompt/yield stream on the parent session).
