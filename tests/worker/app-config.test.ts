@@ -3328,6 +3328,150 @@ describe("POST /dashboard/apps/:slug/settings — custom providers (op=add-custo
     expect(update.status).toBe(200);
     expect(rawCount(db, "app_custom_providers")).toBe(MAX_CUSTOM_PROVIDER_COUNT);
   });
+  test("a raced same-id create at the cap is NOT refused by the route cap pre-check — the concurrent winner's row exempts it (both orders)", async () => {
+    const decl = (providerId: string, modelIds = ["deepseek-v4-flash"]): AppCustomProvider => ({
+      provider_id: providerId,
+      base_url: "https://ark.cn-beijing.volces.com/api/v3",
+      api: "openai-completions",
+      model_ids: modelIds,
+    });
+    const target = "prov-last";
+
+    // Order 1 — the competing same-id save commits AFTER the route's
+    // listCustomProviders read and the store's absence/count reads, before the
+    // caller's write batch: the route read saw 7 rows (below the cap), so it
+    // admits; the store's growth gate admits it too because the row it wants
+    // already exists. Driven through the REAL request path.
+    const { db, app } = await seededWorld();
+    const store = configStore(db);
+    for (let i = 1; i < MAX_CUSTOM_PROVIDER_COUNT; i++) {
+      await store.upsertCustomProvider(app.id, decl(`prov-${i}`), sk("custom-ark-seed-1"));
+    }
+    const WINNING = sk("custom-winner-route-11");
+    const LOSING = sk("custom-loser-route-22");
+    const raced = createLastSlotRaceD1(db, async () => {
+      await configStore(db).upsertCustomProvider(app.id, decl(target, ["winner-model"]), WINNING);
+    });
+    const res = await postForm(SETTINGS, await mallory(), makeEnv(raced), {
+      ...CUSTOM_FORM,
+      provider_id: target,
+      model_ids: "loser-model",
+      key: LOSING,
+    });
+    expect(res.status).toBe(200);
+    expect(await res.text()).toContain(`Declared custom provider ${target}`);
+    // The declaration was updated in place (no ninth row) …
+    expect(rawCount(db, "app_custom_providers")).toBe(MAX_CUSTOM_PROVIDER_COUNT);
+    const row = db.raw
+      .query("SELECT model_ids FROM app_custom_providers WHERE app_id = ? AND provider_id = ?")
+      .get(app.id, target) as { model_ids: string };
+    expect(JSON.parse(row.model_ids)).toEqual(["loser-model"]);
+    // … and both credentials share the one pool (7 seeded + winner + loser).
+    expect(rawCount(db, "app_custom_provider_keys")).toBe(MAX_CUSTOM_PROVIDER_COUNT + 1);
+
+    // Order 2 — the competing save already committed when the request arrives:
+    // the read now sees 8 rows INCLUDING the target id, so the `.some()` arm
+    // exempts it (dropping that arm would 400 a legitimate update).
+    const { db: db2, app: app2 } = await seededWorld();
+    const store2 = configStore(db2);
+    for (let i = 1; i < MAX_CUSTOM_PROVIDER_COUNT; i++) {
+      await store2.upsertCustomProvider(app2.id, decl(`prov-${i}`), sk("custom-ark-seed-2"));
+    }
+    await store2.upsertCustomProvider(app2.id, decl(target, ["winner-model"]), sk("custom-winner-route-33"));
+    const late = await postForm(SETTINGS, await mallory(), makeEnv(db2), {
+      ...CUSTOM_FORM,
+      provider_id: target,
+      model_ids: "loser-model",
+      key: sk("custom-loser-route-44"),
+    });
+    expect(late.status).toBe(200);
+    expect(rawCount(db2, "app_custom_providers")).toBe(MAX_CUSTOM_PROVIDER_COUNT);
+
+    // The boundary still holds: a genuinely NEW id at the cap is 400 with the
+    // cap key and zero writes (the pre-check is not weakened to admit growth).
+    const over = await postForm(SETTINGS, await mallory(), makeEnv(db2), {
+      ...CUSTOM_FORM,
+      provider_id: "prov-over",
+    });
+    expect(over.status).toBe(400);
+    const overBody = (await over.json()) as { key: string };
+    expect(overBody.key).toBe("settings.error.customProviderMax");
+    expect(rawCount(db2, "app_custom_providers")).toBe(MAX_CUSTOM_PROVIDER_COUNT);
+  });
+
+  test("a raced same-id template create at the cap is NOT refused by the templateMaterializeMax pre-check", async () => {
+    const { db, app } = await seededWorld();
+    const store = configStore(db);
+    const decl = (providerId: string): AppCustomProvider => ({
+      provider_id: providerId,
+      base_url: "https://example.com/v1",
+      api: "openai-completions",
+      model_ids: ["m1"],
+    });
+    for (let i = 1; i < MAX_CUSTOM_PROVIDER_COUNT; i++) {
+      await store.upsertCustomProvider(app.id, decl(`prov-${i}`), sk("template-seed-key"));
+    }
+    // The competing save of the SAME template id lands after the route read and
+    // the store's reads, before this request's batch.
+    const raced = createLastSlotRaceD1(db, async () => {
+      await configStore(db).upsertCustomProvider(
+        app.id,
+        {
+          provider_id: "subconscious",
+          base_url: "https://api.subconscious.dev/v1",
+          api: "openai-completions",
+          model_ids: ["subconscious/glm-5.2"],
+        },
+        sk("template-winner-key"),
+      );
+    });
+    const res = await postForm(SETTINGS, await mallory(), makeEnv(raced), {
+      op: "add-template-provider",
+      template_id: "subconscious",
+      key: sk("template-loser-key"),
+    });
+    expect(res.status).toBe(200);
+    expect(rawCount(db, "app_custom_providers")).toBe(MAX_CUSTOM_PROVIDER_COUNT);
+
+    // Order 2 — the competing save already committed when the request arrives:
+    // the read sees 8 rows INCLUDING the template id, so the
+    // `storedDeclaration !== undefined` arm is the ONLY thing admitting this
+    // legitimate re-materialization (a plain `length >= cap` gate would 400 it).
+    const { db: db2, app: app2 } = await seededWorld();
+    const store2 = configStore(db2);
+    for (let i = 1; i < MAX_CUSTOM_PROVIDER_COUNT; i++) {
+      await store2.upsertCustomProvider(app2.id, decl(`prov-${i}`), sk("template-seed-key-2"));
+    }
+    await store2.upsertCustomProvider(
+      app2.id,
+      {
+        provider_id: "subconscious",
+        base_url: "https://api.subconscious.dev/v1",
+        api: "openai-completions",
+        model_ids: ["subconscious/glm-5.2"],
+      },
+      sk("template-winner-key-2"),
+    );
+    const late = await postForm(SETTINGS, await mallory(), makeEnv(db2), {
+      op: "add-template-provider",
+      template_id: "subconscious",
+      key: sk("template-late-key"),
+    });
+    expect(late.status).toBe(200);
+    expect(rawCount(db2, "app_custom_providers")).toBe(MAX_CUSTOM_PROVIDER_COUNT);
+
+    // The boundary: a genuinely NEW template id at the cap is still refused.
+    const over = await postForm(SETTINGS, await mallory(), makeEnv(db2), {
+      op: "add-template-provider",
+      template_id: "tokengo",
+      key: sk("template-over-key"),
+    });
+    expect(over.status).toBe(400);
+    const overBody = (await over.json()) as { key: string };
+    expect(overBody.key).toBe("settings.error.templateMaterializeMax");
+    expect(rawCount(db2, "app_custom_providers")).toBe(MAX_CUSTOM_PROVIDER_COUNT);
+  });
+
   test("400: the store's atomic cap throw (race — pre-check passed, insert lost) maps to 400, not 500 (PR #10)", async () => {
     const { db } = await seededWorld();
     // The route pre-check reads listCustomProviders (7 rows → passes); the
