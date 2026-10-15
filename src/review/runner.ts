@@ -392,13 +392,20 @@ async function loadCredentialPool(json: RunnerInputJson, payload: string): Promi
   const storage = await AuthStorage.create(":memory:");
   if (loaded.length === 0) return storage;
 
-  for (const { providerId, keys } of loaded) {
-    await storage.set(
-      providerId,
-      keys.map((key) => ({ type: "api_key" as const, key, source: "login" as const })),
-    );
-    // Provider id + pool size only — never a key value.
-    console.error(JSON.stringify({ event: "credential_pool", provider: providerId, pool_size: keys.length }));
+  try {
+    for (const { providerId, keys } of loaded) {
+      await storage.set(
+        providerId,
+        keys.map((key) => ({ type: "api_key" as const, key, source: "login" as const })),
+      );
+      // Provider id + pool size only — never a key value.
+      console.error(JSON.stringify({ event: "credential_pool", provider: providerId, pool_size: keys.length }));
+    }
+  } catch (error) {
+    // A failed write must not leave the half-loaded store open; the caller
+    // aborts the run on this throw, so nothing else holds it.
+    storage.close();
+    throw error;
   }
   return storage;
 }
