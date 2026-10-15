@@ -5,10 +5,12 @@
 # pinned to exact versions.
 #
 # NO SECRETS (HARD): this image is built with no build args, no env values, no
-# credentials. Tokens/keys enter only via ReviewSandbox.exec env injection at
-# runtime (compass contracts D). Capability-host declarations (synthesized into
-# every per-review models.yml) reference env var NAMES only (e.g. ARK_API_KEY)
-# — no key value is ever in the image or its build context.
+# credentials. Tokens/keys enter only at runtime — the sandbox-read token via
+# exec env, the provider keys as the runner's STDIN credential payload (compass
+# contracts D). The runner loads that payload into an IN-MEMORY credential
+# store for the run — the per-review agent dir holds only the non-secret
+# models.yml — no key value is ever in the image, its build
+# context, or any exec process environment.
 #
 # Outbound egress (architect verdict AL-4 — DOCUMENTED, NOT
 # enforced): the Sandbox SDK 1.0 container takes its egress posture from
@@ -118,10 +120,15 @@ ENV PATH="/root/.bun/bin:${PATH}"
 # models.yml is an App-configuration artifact). The in-image runner
 # (src/review/runner.ts) synthesizes the COMPLETE per-review models.yml under
 # /tmp/omp-agent-<uuid>/ (capability hosts from the App's selected registry
-# entry, src/contracts/sandbox-images.ts, + App custom providers) and rides
-# that directory as the session agentDir. apiKey references are ENV VAR NAMES
-# (ARK_API_KEY / CUSTOM_<ID>_API_KEY) — the SDK resolves values from process
-# env at request time. No secret material and no App model config lives here.
+# entry, src/contracts/sandbox-images.ts, + App custom providers), rides that
+# directory as the session agentDir, and loads the transported credential
+# payload (the runner's STDIN, src/review/credential-payload.ts) into the run's
+# IN-MEMORY credential store as stored `login` api_key rows before the session
+# starts. That directory holds only the non-secret models.yml and is removed
+# after the run (defence in depth). The synthesized provider blocks pin NO
+# apiKey (a tier-2 config override would suppress that pool) and authenticate
+# via `auth: oauth`.
+# No secret material and no App model config lives here.
 RUN mkdir -p /opt/omp-agent
 ENV PI_CODING_AGENT_DIR=/opt/omp-agent
 
@@ -145,9 +152,13 @@ COPY src/review /opt/runner/src/review
 # (tests/review/runtime-boundary.test.ts derives the admitted set from these
 # COPY lines and re-asserts dependency freedom per admitted file).
 COPY src/contracts/recheck.ts /opt/runner/src/contracts/recheck.ts
+# Same admission rule, same reason: the `!`-prefixed-key refusal is ONE
+# predicate shared by the runner's payload decoder and the dashboard's key
+# routes, so the zero-dependency contract file that holds it rides the image.
+COPY src/contracts/credential-key.ts /opt/runner/src/contracts/credential-key.ts
 
-# The runner resolves the harness root from this env (plan Clarify #5). Model
-# key (ARK_API_KEY) is injected per exec — never baked into the image.
+# The runner resolves the harness root from this env (plan Clarify #5). Provider
+# keys arrive as the runner's STDIN payload — never baked in, never in the env.
 ENV HARNESS_PLUGIN_ROOT=/opt/mstar-harness
 # U-001 in-image models.yml synthesis verification (AL-25-3):
 # the script ships inside the image so the evidence replays on the exact

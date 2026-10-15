@@ -1,21 +1,36 @@
 /**
- * D1 store for per-App AI configuration: the
- * `app_provider_keys` BYOK keys + the model chains (the
- * `app_model_chains` default + named chains and the `app_model_chain_seats`
- * seat references, migration 0017). Spec dashboard-multi-app-platform
- * § Per-App BYOK + § Crypto envelope; migration 0006 is the DDL single
- * source for the key tables.
+ * D1 store for per-App AI configuration: the `app_provider_keys` BYOK key
+ * POOLS (one row per (App, provider, key_id) — migration 0024) and the
+ * `app_custom_provider_keys` pools of the custom-provider declarations, plus
+ * the model chains (`app_model_chains` default + named chains and the
+ * `app_model_chain_seats` seat references, migration 0017). Spec
+ * dashboard-multi-app-platform § Per-App BYOK + § Crypto envelope; migration
+ * 0024 is the DDL single source for the pool tables.
  *
- * Crypto (lock L1): setProviderKey encrypts INSIDE the store via
+ * Crypto (lock L1): every key write encrypts INSIDE the store via
  * src/dashboard/secretbox.ts — plaintext keys arrive only as the method
- * argument and never come back out: listProviderKeys is masked (at most the
- * last 4 characters) and getAppConfig exists for the ONE legitimate decrypt
- * consumer, the per-App exec-env assembly. The envelope AAD is
- * the composite row key `app_provider_keys.key_enc:<appId>:<provider>`
- * (composite-PK rowKey, lock L1). The master key (the DASHBOARD_ENCRYPTION_KEY
- * env value) is bound at factory time; a missing/malformed key surfaces as
- * SecretboxKeyError on the first encrypt/decrypt call — routes map that to
- * 5xx fail-closed.
+ * argument and never come back out: the list faces are masked (at most the
+ * last 4 characters plus the derived key id) and getAppConfig /
+ * getCustomProvidersForConsumer exist for the ONE legitimate decrypt
+ * consumer, the per-App exec-env assembly. The envelope AAD is the FULL row
+ * key `app_provider_keys.key_enc:<appId>:<provider>:<keyId>` — the 0006
+ * composite-PK rowKey extended by the per-key id —
+ * with `app_custom_provider_keys.key_enc:<appId>:<provider>:<keyId>` the same
+ * form. `keyId` is the first 16 hex characters of SHA-256(plaintext), so
+ * re-submitting a key updates ITS row rather than the provider's single
+ * slot. The master key (the DASHBOARD_ENCRYPTION_KEY env value) is bound at
+ * factory time; a missing/malformed key surfaces as SecretboxKeyError on the
+ * first encrypt/decrypt call — routes map that to 5xx fail-closed.
+ *
+ * Migration 0024 is FORWARD-ONLY and split in two halves by what can run
+ * where: the SQL migration rebuilds both key tables and carries the pre-pool
+ * rows across VERBATIM — migrations are SQL, and SQL cannot decrypt, so a
+ * carried row keeps its two-segment-AAD envelope under the LEGACY_KEY_ID
+ * sentinel. The store, which holds the master key, completes the promotion on
+ * the first touch of that row: decrypt with the OLD AAD, derive the key id
+ * from the plaintext, re-encrypt under the three-segment AAD and rewrite the
+ * row in place (created_at / updated_at / verified_* preserved). Every read
+ * and write promotes first, so no caller ever sees the sentinel.
  *
  * model_chain is stored VERBATIM (a model selector is configuration, not a
  * secret) and is never parsed here beyond the route's ≥1-token validation —
@@ -60,17 +75,39 @@
  * retained, code no longer references them; no DROP).
  *
  * Semantics (the settings UI + consumer call sites rely on these):
- *   - setProviderKey upserts: re-setting a provider replaces the ciphertext
- *     (one row per (app_id, provider) — the composite PK). A key longer than
+ *   - addProviderKey upserts ONE key of a pool. The row's id is derived from
+ *     the plaintext, so re-submitting the same key updates in place
+ *     (created_at/updated_at rewritten from ONE clock read) while a DIFFERENT
+ *     key takes the next free slot; a NEW slot past MAX_KEYS_PER_PROVIDER
+ *     throws ProviderKeyLimitError before any write (a conditional INSERT
+ *     keeps the bound exact under concurrent saves). The upsert resets
+ *     verified_at/verified_status to NULL: addProviderKey is the UNVERIFIED
+ *     path, so a leftover caller must not inherit a stale verified_status
+ *     (saveVerifiedKey is the verified one). A key longer than
  *     MAX_PROVIDER_KEY_LENGTH (4096) throws ProviderKeyTooLongError before
- *     any crypto or write (input bounds; the settings route re-renders
- *     400 first — the guard here is the backstop for direct callers).
- *   - removeProviderKey returns whether a row was deleted (an unconfigured
- *     provider is an idempotent no-op, like setAppStatus).
- *   - listProviderKeys is the settings-page face: provider + masked tail +
- *     last-update time (migration 0012; NULL → the view's em dash),
- *     provider-ascending; a key of ≤4 characters reveals NOTHING (the mask
- *     must never render a whole key).
+ *     any crypto or write (input bounds; the settings route re-renders 400
+ *     first — the guard here is the backstop for direct callers).
+ *   - saveVerifiedKey is the verified analogue: the same per-key upsert with
+ *     verified_at = now + verified_status = 'ok', plus THAT KEY's
+ *     verified-model evidence row, as ONE atomic db.batch.
+ *   - deleteProviderKey removes ONE slot — and, when it actually removed that
+ *     row, that key's OWN evidence row (a model only the removed credential
+ *     could reach must not stay selectable; evidence is keyed by the
+ *     credential that produced it, so the surviving keys keep theirs). A
+ *     MISSED delete (unknown key id / unconfigured provider) changes nothing
+ *     at all — it is an idempotent no-op returning false. removeProviderKey
+ *     removes the WHOLE pool of a provider plus every evidence row (the
+ *     provider-level delete). Both return whether they removed a key row,
+ *     like setAppStatus.
+ *   - getVerifiedModels returns the models the CURRENT pool AGREES on,
+ *     recomputed per read as the intersection over the pool keys' own
+ *     evidence rows; a key with no evidence row (e.g. an unverified sibling)
+ *     leaves that provider's vocabulary unknown → [] and the probe face.
+ *   - listProviderKeys is the settings-page face: one row per stored key —
+ *     provider + derived key id + masked tail + the per-key bookkeeping,
+ *     provider-ascending then pool order (created_at, key_id). The optional
+ *     `provider` scopes it to one pool. A key of ≤4 characters reveals
+ *     NOTHING (the mask must never render a whole key).
  *   - setModelChain(null) — or any BLANK chain (empty / whitespace-only,
  *     aligned with the route's 空 = 清除) — REMOVES the default
  *     chain row (absent = unset; AL-24-5: a chain-less App's reviews FAIL
@@ -91,22 +128,32 @@
  *     blank or "default" clears the reference row (absent = default chain);
  *     getModelOverridesForConsumer resolves the runner-input map (seats
  *     referencing the default chain or with no reference row are omitted).
- *   - getAppConfig decrypts for the consumer face: an App with no config
- *     yields an EMPTY keys map and a null chain (a chain referring to a
- *     provider without a key is rejected fail-closed by the consumer's
- *     assertAppConfigComplete — zero-config is NOT a valid
- *     review state anymore), and an undecryptable row is a loud throw
+ *   - getAppConfig decrypts for the consumer face: provider id → that
+ *     provider's DECRYPTED keys in pool order (created_at, then key_id — the
+ *     order the consumer's credential-payload key arrays follow). A
+ *     provider holding at least one key ALWAYS has an entry (the fail-closed
+ *     read contract the pipeline relies on); an App with no config yields an
+ *     EMPTY keys map and a null chain (a chain referring to a provider
+ *     without a key is rejected fail-closed by the consumer's
+ *     assertAppConfigComplete — zero-config is NOT a valid review state
+ *     anymore), and an undecryptable row is a loud throw
  *     (tamper/misconfiguration is never swallowed).
- *   - Custom providers (migration 0012): upsertCustomProvider /
- *     removeCustomProvider / listCustomProviders manage per-App declarations
- *     of NON-built-in model providers (base URL + AL-23-1 api enum + model
- *     ids). The key is encrypted INSIDE the store with the composite-PK AAD
- *     `app_custom_providers.api_key_enc:<app_id>:<provider_id>` (0006 L1
- *     precedent) and never appears in the list face; the consumer
- *     decrypts it with the same AAD via getCustomProvidersForConsumer (the
- *     getAppConfig analogue — fail-loud on tamper). Declaration bounds
- *     (AL-23-1/AL-23-2) are enforced here as the backstop and by the
- *     settings route as 400.
+ *   - Custom providers (migration 0012, per-key pools since 0024):
+ *     upsertCustomProvider / removeCustomProvider / listCustomProviders
+ *     manage per-App declarations of NON-built-in model providers (base URL
+ *     + AL-23-1 api enum + model ids); the declaration holds NO key material
+ *     — the key lives in `app_custom_provider_keys` under the same per-key
+ *     AAD form, written by upsertCustomProvider (verified) or
+ *     addCustomProviderKey (unverified), listed by listCustomProviderKeys
+ *     (masked) and decrypted only by getCustomProvidersForConsumer (the
+ *     getAppConfig analogue — fail-loud on tamper). removeCustomProvider
+ *     deletes the declaration AND its whole pool in one batch. A custom key
+ *     write is additionally gated on the DECLARATION still existing, and the
+ *     declaration write of upsertCustomProvider rides the same admission
+ *     predicate as its key — so a refused key commits neither, and a
+ *     declaration removal racing a write can neither orphan nor revive a
+ *     credential. Declaration bounds (AL-23-1/AL-23-2) are enforced here as
+ *     the backstop and by the settings route as 400.
  *   - Timestamps are SQLite datetime('now') (UTC — the reviews.reviewed_at
  *     convention). UNIQUE / FK violations throw (fail-loud): an unknown
  *     app_id is a caller bug, never a silent no-op.
@@ -115,10 +162,21 @@ import { createSecretbox } from "./secretbox";
 import { sandboxImageHostIds } from "../contracts/sandbox-images";
 import { PROVIDER_CATALOG, PROVIDER_IDS_BUILTIN } from "../contracts/provider-catalog.generated";
 
-/** A row of `app_provider_keys` (D1 column names, snake_case; migration 0006). */
+/**
+ * A row of `app_provider_keys` — and, byte-identical in shape, of
+ * `app_custom_provider_keys` (migration 0024: both tables hold ONE row per
+ * key, with the envelope and its bookkeeping belonging to the key rather
+ * than to the provider).
+ */
 export type AppProviderKeyRow = {
   app_id: string;
   provider: string;
+  /**
+   * The key's identity inside the pool: the first 16 hex characters of
+   * SHA-256(plaintext). "" on a row migration 0024 carried across, until the
+   * store promotes it (the plaintext-derived id needs the master key).
+   */
+  key_id: string;
   /** secretbox envelope of the provider API key — opaque here (lock L1). */
   key_enc: string;
   created_at: string;
@@ -175,8 +233,10 @@ export type CustomProviderApi = (typeof CUSTOM_PROVIDER_API_IDS)[number];
 
 /**
  * A row of `app_custom_providers` (migration 0012 — D1 column
- * names, snake_case). model_ids is a TEXT JSON array (AL-23-1 DDL);
- * api_key_enc is a secretbox envelope (lock L1, composite-PK AAD).
+ * names, snake_case). model_ids is a TEXT JSON array (AL-23-1 DDL). The API
+ * key does NOT live here: migration 0024 moved it into
+ * `app_custom_provider_keys` (an AppProviderKeyRow), so the declaration is
+ * decrypt-free and the key carries its own identity and bookkeeping.
  */
 export type AppCustomProviderRow = {
   app_id: string;
@@ -184,22 +244,17 @@ export type AppCustomProviderRow = {
   base_url: string;
   api: string;
   model_ids: string;
-  api_key_enc: string;
   created_at: string;
   updated_at: string;
-  /** Verification time (migration 0015); NULL = never verified. */
-  verified_at: string | null;
-  /** Verification outcome ('ok' | 'failed', store-enforced; migration 0015); NULL = never verified. */
-  verified_status: string | null;
 };
 
 /**
  * One custom-provider declaration (the settings-page face and the
  * consumer input): a NON-built-in model provider bound to a base URL, one
  * of the AL-23-1 protocol forms, and the model ids it serves. The API key
- * is NEVER part of this shape — it exists only as the encrypted
- * api_key_enc column (declaration-time input; the consumer decrypt face
- * reads it).
+ * is NEVER part of this shape — since migration 0024 it lives in
+ * app_custom_provider_keys (declaration-time input; the consumer decrypt
+ * face reads it there).
  */
 export type AppCustomProvider = {
   provider_id: string;
@@ -208,48 +263,94 @@ export type AppCustomProvider = {
   model_ids: string[];
 };
 /**
+ * A declaration as the settings / model faces read it: the declaration PLUS
+ * whether its pool currently holds a credential. A drained pool leaves the
+ * declaration (intact and re-keyable) but makes every model id it names
+ * unusable — a run against it fails in assertAppConfigComplete — so both the
+ * model-option composition and the chain membership layer gate on this flag
+ * (listCustomProviders is the only producer). The write face stays
+ * AppCustomProvider: has_keys is derived from the pool, never submitted.
+ */
+export type AppCustomProviderRead = AppCustomProvider & {
+  /** True while app_custom_provider_keys holds ≥1 row for (app, provider). */
+  has_keys: boolean;
+};
+/**
  * One custom-provider declaration as the consumer sees it (the
  * getAppConfig analogue for app_custom_providers): the decrypt-free
- * declaration PLUS the decrypted API key. The key exists ONLY on this
- * face — the settings list (listCustomProviders) stays decrypt-free.
+ * declaration PLUS its DECRYPTED key pool, in pool order (created_at, then
+ * key_id — the order the consumer's pool env indexes follow). The keys exist
+ * ONLY on this face — the settings lists (listCustomProviders,
+ * listCustomProviderKeys) stay decrypt-free.
  */
 export type CustomProviderConsumerConfig = {
   provider_id: string;
   base_url: string;
   api: CustomProviderApi;
   model_ids: string[];
-  api_key: string;
+  api_keys: string[];
 };
 
 /**
- * A row of `app_provider_models` (migration 0015): the per-App
- * verified-model cache for BUILT-IN providers. `provider` is the
+ * One row of the consumer face's declaration ⋈ pool read: the declaration's
+ * columns plus ONE of its key rows, so the endpoint and the credentials it is
+ * returned with come from ONE statement (ONE snapshot). The key columns are
+ * NULL for a declaration whose pool is empty (LEFT JOIN).
+ */
+type CustomProviderKeyJoinRow = {
+  provider_id: string;
+  base_url: string;
+  api: string;
+  model_ids: string;
+  key_id: string | null;
+  key_enc: string | null;
+  key_created_at: string | null;
+  key_updated_at: string | null;
+  key_verified_at: string | null;
+  key_verified_status: string | null;
+};
+
+/**
+ * A row of `app_provider_models` (migration 0025): the verified-model
+ * EVIDENCE ONE KEY produced, for BUILT-IN providers. `provider` is the
  * SELECTOR-FACING key (spec §6.1) — `ark` BYOK keys verify under the BYOK id
- * "ark" but their cache rows are written under "ark-plan" (the in-image base
- * provider id the chain references). models_json is a TEXT JSON array of
+ * "ark" but their evidence rows are written under "ark-plan" (the in-image
+ * base provider id the chain references) — and `key_id` is the same
+ * plaintext-derived id `app_provider_keys` carries, so evidence is
+ * attributable to exactly one credential. models_json is a TEXT JSON array of
  * verified model ids — configuration, not a secret (0006 model_chain
  * rationale). Custom providers write NO rows here (their vocabulary is the
  * declared model_ids, 0012).
+ *
+ * The row is EVIDENCE, not the answer: what the settings faces offer is the
+ * intersection over the CURRENT pool's keys, recomputed on every read
+ * (getVerifiedModels), so no write has to know what the other keys report.
  */
 export type AppProviderModelsRow = {
   app_id: string;
   provider: string;
+  key_id: string;
   models_json: string;
   fetched_at: string;
 };
 
 /**
- * One verified-model cache entry as the settings loader sees it (the
+ * One provider's verified-model entry as the settings loader sees it (the
  * Interfaces face — the dropdown source for selector literal grammar
  * `provider/model`). `provider` is the selector-facing prefix of every
- * option built from this row.
+ * option built from this row, and `models` is the set the CURRENT pool
+ * AGREES on (getVerifiedModels recomputes it on read).
  */
 export type VerifiedModels = {
-  /** Selector-facing provider key (the row's `provider` — "ark-plan" for a verified `ark` BYOK key). */
+  /** Selector-facing provider key ("ark-plan" for a verified `ark` BYOK key). */
   provider: string;
-  /** Verified model ids, exactly as cached at save time ([] = probe-only verification). */
+  /**
+   * The models EVERY credential the runtime may select can serve — the
+   * intersection of the pool keys' own reports ([] = the pool's vocabulary
+   * is unknown: a key has no report yet, or they share no model).
+   */
   models: string[];
-  /** Cache write time (SQLite datetime('now') UTC). */
+  /** Freshest evidence write time feeding this entry (SQLite datetime('now') UTC). */
   fetched_at: string;
 };
 
@@ -269,8 +370,8 @@ export function modelCacheProviderKey(provider: string): string {
 /**
  * The provider id allowlist — the builtin tier of the generated provider
  * catalog (19 builtin-tier provider ids incl. `ark`, same order — AL-24-5
- * added `ark` so the in-image ark-plan base provider's
- * ARK_API_KEY rides the per-App BYOK keys map like every other provider).
+ * added `ark` so the in-image ark-plan base provider's key rides the per-App
+ * BYOK key pool like every other provider).
  * Re-exported from the generated contract: the catalog SSOT
  * lives in src/contracts/provider-catalog.generated.ts — a
  * dashboard-importable pure-data module (Q2 forbids dashboard → pipeline
@@ -365,9 +466,31 @@ function parseModelIdsJson(raw: string, source: string): string[] {
  */
 export const MAX_PROVIDER_KEY_LENGTH = 4096;
 /**
- * Custom-provider declaration bounds (AL-23-2 verdict): provider id `[a-z0-9][a-z0-9-]{0,63}` (the env-name mapping
- * `CUSTOM_<UPPER_SNAKE>_API_KEY` the consumer injects), baseUrl
- * https-only ≤2048, model_ids 1..32 entries × ≤128 characters (AL-23-1).
+ * Keys per (App, provider) pool: the pool rides the runner's stdin credential
+ * payload as one ordered array per provider, so this bound is what keeps the
+ * payload and the settings list
+ * bounded. Growth-only: replacing an already-stored key never counts against
+ * the cap. Enforced producer-side by the store, which refuses a new slot at
+ * the cap with ProviderKeyLimitError and keeps the bound exact under
+ * concurrent saves (a conditional INSERT — the custom-provider cap
+ * precedent); the settings route answers 400 first.
+ */
+export const MAX_KEYS_PER_PROVIDER = 8;
+/**
+ * The key id migration 0024 gives a row it carried across: SQL cannot derive
+ * the real one (it needs the plaintext), so the row waits under this sentinel
+ * until the store promotes it on first touch. A real key id is 16 hex
+ * characters, so the empty string can never collide with one.
+ */
+const LEGACY_KEY_ID = "";
+/** UTF-8 encoder for the SHA-256 key-id derivation (one per module, not per call). */
+const keyIdEncoder = new TextEncoder();
+/**
+ * Custom-provider declaration bounds (AL-23-2 verdict): provider id
+ * `[a-z0-9][a-z0-9-]{0,63}` (the credential-payload pool key the consumer
+ * emits),
+ * baseUrl https-only ≤2048, model_ids 1..32 entries × ≤128 characters
+ * (AL-23-1).
  * The route answers 400 first; the store re-validates as the backstop for
  * direct callers (the ProviderKeyTooLongError pattern).
  */
@@ -470,7 +593,8 @@ export class InvalidCustomProviderError extends Error {
 }
 
 /**
- * Input-bound error: the plaintext key passed to setProviderKey
+ * Input-bound error: the plaintext key passed to addProviderKey /
+ * addCustomProviderKey / saveVerifiedKey / upsertCustomProvider
  * exceeds MAX_PROVIDER_KEY_LENGTH. The settings route never surfaces it —
  * it validates the same bound first and re-renders 400 — so this typed throw
  * is the backstop for any caller that skips the route. Same class convention
@@ -480,6 +604,39 @@ export class ProviderKeyTooLongError extends Error {
   constructor() {
     super(`provider API key exceeds the ${MAX_PROVIDER_KEY_LENGTH}-character limit`);
     this.name = "ProviderKeyTooLongError";
+  }
+}
+
+/**
+ * Pool-bound error: an addProviderKey / addCustomProviderKey /
+ * saveVerifiedKey / upsertCustomProvider call would add a key to a
+ * (App, provider) pool that already holds MAX_KEYS_PER_PROVIDER of them.
+ * Re-submitting a stored key is an update, never growth, so it does not hit
+ * this. The settings route re-renders 400 first; this typed throw is the
+ * backstop for direct callers (the ProviderKeyTooLongError convention).
+ */
+export class ProviderKeyLimitError extends Error {
+  constructor(provider: string) {
+    super(`provider ${JSON.stringify(provider)} already holds the ${MAX_KEYS_PER_PROVIDER}-key limit`);
+    this.name = "ProviderKeyLimitError";
+  }
+}
+
+/**
+ * Endpoint-lock error: an upsertCustomProvider call would rewrite a
+ * declaration's base_url / api while its key pool still holds credentials
+ * that were verified against the CURRENT endpoint — those retained keys would
+ * then be sent to an endpoint they were never verified for. Removing the pool
+ * first (or declaring the endpoint before any key exists) stays allowed. The
+ * settings route answers a keyed 400 first; this typed throw is the backstop
+ * for direct callers (the ProviderKeyLimitError convention).
+ */
+export class ProviderEndpointLockedError extends Error {
+  constructor(provider: string) {
+    super(
+      `custom provider ${JSON.stringify(provider)} already holds keys for its current endpoint — remove them before changing its base URL or API protocol`,
+    );
+    this.name = "ProviderEndpointLockedError";
   }
 }
 
@@ -516,27 +673,53 @@ export class InvalidModelSelectorError extends Error {
 }
 
 /**
- * Composite-PK secretbox AAD rowKey (lock L1): the envelope is bound to BOTH
- * primary-key columns of app_provider_keys, joined in DDL order.
+ * Per-key secretbox AAD rowKey (migration 0024): the envelope is bound to the
+ * FULL primary key of the row — both composite-PK columns of 0006 PLUS the
+ * per-key id — joined in DDL order. A row's ciphertext is therefore useless in
+ * any other slot of the same pool.
  */
-function providerKeyAad(appId: string, provider: string): string {
-  return `app_provider_keys.key_enc:${appId}:${provider}`;
+function providerKeyAad(appId: string, provider: string, keyId: string): string {
+  return `app_provider_keys.key_enc:${appId}:${provider}:${keyId}`;
 }
 /**
- * Composite-PK secretbox AAD rowKey for app_custom_providers (lock L1, 0006
- * precedent): the envelope is bound to BOTH primary-key columns, joined in
- * DDL order — `app_custom_providers.api_key_enc:<app_id>:<provider_id>`.
- * The consumer decrypts with this exact string.
+ * The same form for app_custom_provider_keys: the envelope is bound to the
+ * declaration's provider id and the per-key id, joined in DDL order —
+ * `app_custom_provider_keys.key_enc:<app_id>:<provider>:<key_id>`. The
+ * consumer decrypts with this exact string.
  */
-function customProviderAad(appId: string, providerId: string): string {
+function customProviderKeyAad(appId: string, provider: string, keyId: string): string {
+  return `app_custom_provider_keys.key_enc:${appId}:${provider}:${keyId}`;
+}
+/**
+ * The PRE-0024 (two-segment) AAD rowKeys, read-only. Kept ONLY for the
+ * promotion path: a row migration 0024 carried across still holds its old
+ * envelope until the store re-encrypts it. Key material is NEVER written
+ * under these again.
+ */
+function legacyProviderKeyAad(appId: string, provider: string): string {
+  return `app_provider_keys.key_enc:${appId}:${provider}`;
+}
+function legacyCustomProviderAad(appId: string, providerId: string): string {
   return `app_custom_providers.api_key_enc:${appId}:${providerId}`;
+}
+/**
+ * The key's identity inside one (App, provider) pool: the first 16 hex
+ * characters of SHA-256(plaintext) over the UTF-8 bytes. Deterministic, so
+ * re-submitting a key updates its own row; stored as a primary-key column AND
+ * inside the AAD, so no row can be re-pointed at other key material. Plain
+ * SHA-256 (no salt, no KDF) is deliberate: the value is an identifier, not a
+ * verifier — the ciphertext is what is secret.
+ */
+async function providerKeyId(plainKey: string): Promise<string> {
+  const digest = await crypto.subtle.digest("SHA-256", keyIdEncoder.encode(plainKey));
+  return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("").slice(0, 16);
 }
 
 /**
  * Declaration-shape gate: every bound in the AL-23-1/AL-23-2
  * verdicts, checked BEFORE any crypto or write — an invalid declaration
  * throws InvalidCustomProviderError (or ProviderKeyTooLongError for an
- * over-length key, the setProviderKey convention) and touches zero rows.
+ * over-length key, the addProviderKey convention) and touches zero rows.
  * `capabilityHostIds` are the selected sandbox image's registry host ids —
  * passed in by upsertCustomProvider so this gate stays pure.
  * The settings route re-renders 400 first; this is the backstop for direct
@@ -649,20 +832,36 @@ function maskTail(plainKey: string): string {
   return plainKey.length > 4 ? plainKey.slice(-4) : "";
 }
 
-/** One masked list entry (the settings page shows exactly this — no more). */
-export type MaskedProviderKey = {
+/**
+ * One stored key as the settings faces see it (listProviderKeys /
+ * listCustomProviderKeys): the provider it belongs to, its derived key id
+ * (the handle a per-key delete or re-verify call takes), the masked tail and
+ * the per-key bookkeeping. The plaintext NEVER appears on this face.
+ */
+export type ProviderKeySummary = {
   provider: string;
+  /** First 16 hex characters of the key's SHA-256 — stable across re-submission. */
+  keyId: string;
   /** Last 4 plaintext characters; "" when the key is too short to mask safely. */
   last4: string;
   /** Last write time (migration 0012); NULL = pre-0012 row (em dash in the view). */
-  updated_at: string | null;
+  updatedAt: string | null;
+  /** Verification time (migration 0015); NULL = never verified. */
+  verifiedAt: string | null;
+  /** 'ok' | 'failed' (store-enforced); NULL = never verified. */
+  verifiedStatus: string | null;
 };
 
 /** The decrypted per-App configuration (the consumer face). */
 export type AppConfig = {
   appId: string;
-  /** provider id → decrypted key; only providers with a stored key appear. */
-  keys: Record<string, string>;
+  /**
+   * provider id → that provider's DECRYPTED keys, in pool order (created_at,
+   * then key_id). Only providers holding at least one key appear — the
+   * fail-closed read contract the pipeline's assertAppConfigComplete relies
+   * on. The arrays ARE the credential payload's per-provider pools, verbatim.
+   */
+  keys: Record<string, string[]>;
   /** Verbatim stored chain; null = unset (missing/empty = that App's reviews fail closed — AL-24-5). */
   modelChain: string | null;
 };
@@ -706,7 +905,7 @@ export type AppConfigBatchFace = {
  * `D1Database`, the bun:sqlite test double (tests/store/helpers.ts) and
  * the store layer's `D1Like` all satisfy it structurally.
  */
-type AppConfigStatement = {
+export type AppConfigStatement = {
   bind(...values: unknown[]): AppConfigStatement;
   first<T = Record<string, unknown>>(): Promise<T | null>;
   all<T = Record<string, unknown>>(): Promise<{ results: T[] }>;
@@ -728,6 +927,344 @@ export type AppConfigD1 = {
  */
 export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | undefined) {
   const box = createSecretbox(encryptionKey);
+
+  /**
+   * The two per-key tables are byte-identical (migration 0024), so every
+   * read/write below is written ONCE against this spec and bound to one of
+   * them; `legacyAad` builds the PRE-0024 rowKey the promotion path needs.
+   */
+  type KeyTable = {
+    table: "app_provider_keys" | "app_custom_provider_keys";
+    aad: (appId: string, provider: string, keyId: string) => string;
+    legacyAad: (appId: string, provider: string) => string;
+    /**
+     * The DECLARATION row that owns this pool, when one exists: a custom key
+     * row is only written while its declaration row is still there, so a
+     * declaration removal racing the write cannot leave an orphan credential
+     * behind (the ownership gate lives in the write itself). Built-in pools
+     * have no declaration.
+     */
+    owner?: { table: string; column: string };
+  };
+  const PROVIDER_KEY_TABLE: KeyTable = {
+    table: "app_provider_keys",
+    aad: providerKeyAad,
+    legacyAad: legacyProviderKeyAad,
+  };
+  const CUSTOM_KEY_TABLE: KeyTable = {
+    table: "app_custom_provider_keys",
+    aad: customProviderKeyAad,
+    legacyAad: legacyCustomProviderAad,
+    owner: { table: "app_custom_providers", column: "provider_id" },
+  };
+
+  /** Byte-order compare — SQLite's BINARY collation for these ASCII columns. */
+  function byAscii(left: string, right: string): number {
+    if (left === right) return 0;
+    return left < right ? -1 : 1;
+  }
+
+  /**
+   * Promote ONE row the 0024 migration could only carry across verbatim: the
+   * old two-segment envelope is decrypted, the key id derived from the
+   * plaintext and the row rewritten UNDER ITS OWN id with the three-segment
+   * AAD — this runs where the master key lives, and only here. Timestamps and
+   * verification bookkeeping belong to the key, so they are preserved. The
+   * update MOVES a primary-key column, so the batch first drops the carried
+   * row if the new path already stored the same key in the meantime (same
+   * plaintext, same id — the newer row wins) and only then promotes.
+   */
+  async function promoteLegacyKeyRow(spec: KeyTable, row: AppProviderKeyRow): Promise<AppProviderKeyRow> {
+    const plain = await box.decryptSecret(row.key_enc, spec.legacyAad(row.app_id, row.provider));
+    const keyId = await providerKeyId(plain);
+    const keyEnc = await box.encryptSecret(plain, spec.aad(row.app_id, row.provider, keyId));
+    await db.batch([
+      db
+        .prepare(
+          `DELETE FROM ${spec.table} WHERE app_id = ? AND provider = ? AND key_id = ? AND EXISTS (
+             SELECT 1 FROM ${spec.table} WHERE app_id = ? AND provider = ? AND key_id = ?
+           )`,
+        )
+        .bind(row.app_id, row.provider, LEGACY_KEY_ID, row.app_id, row.provider, keyId),
+      db
+        .prepare(`UPDATE ${spec.table} SET key_id = ?, key_enc = ? WHERE app_id = ? AND provider = ? AND key_id = ?`)
+        .bind(keyId, keyEnc, row.app_id, row.provider, LEGACY_KEY_ID),
+    ]);
+    return { ...row, key_id: keyId, key_enc: keyEnc };
+  }
+
+  /**
+   * The App's — or one provider's — key rows in pool order, the single read
+   * path every face goes through so the 0024 promotion happens exactly once
+   * per carried row and no caller ever sees the sentinel id. Order:
+   * provider-ascending, then (created_at, key_id) — the order the consumer's
+   * pool env indexes and the settings list follow.
+   */
+  async function readKeyRows(spec: KeyTable, appId: string, provider?: string): Promise<AppProviderKeyRow[]> {
+    const res =
+      provider === undefined
+        ? await db.prepare(`SELECT * FROM ${spec.table} WHERE app_id = ?`).bind(appId).all<AppProviderKeyRow>()
+        : await db
+            .prepare(`SELECT * FROM ${spec.table} WHERE app_id = ? AND provider = ?`)
+            .bind(appId, provider)
+            .all<AppProviderKeyRow>();
+    const rows: AppProviderKeyRow[] = [];
+    for (const row of res.results) {
+      rows.push(row.key_id === LEGACY_KEY_ID ? await promoteLegacyKeyRow(spec, row) : row);
+    }
+    rows.sort(
+      (left, right) =>
+        byAscii(left.provider, right.provider) ||
+        byAscii(left.created_at, right.created_at) ||
+        byAscii(left.key_id, right.key_id),
+    );
+    return rows;
+  }
+
+  /**
+   * The admission predicate EVERY pool write shares: the statement writes a
+   * row only while the pool has room OR the key is already in it. Evaluated
+   * inside the statement, so two concurrent writers can never both pass a
+   * read-then-write check — a zero-change result IS the refusal. The
+   * declaration writes of an owned pool carry the very same predicate, so a
+   * refused key write refuses (and commits) neither.
+   */
+  function poolAdmission(spec: KeyTable): string {
+    return `((SELECT COUNT(*) FROM ${spec.table} WHERE app_id = ? AND provider = ?) < ${MAX_KEYS_PER_PROVIDER}
+             OR EXISTS (SELECT 1 FROM ${spec.table} WHERE app_id = ? AND provider = ? AND key_id = ?))`;
+  }
+
+  /**
+   * The admission a NEW custom-provider declaration shares with its key: the
+   * write lands only while it ADDS no counted row — the App holds fewer than
+   * MAX_CUSTOM_PROVIDER_COUNT declarations, OR the row for this (app, provider)
+   * already exists, which an upsert replaces in place. The second branch is
+   * what makes the gate measure REAL growth instead of the caller's belief: two
+   * concurrent first-time saves of the SAME id both read "not declared", and a
+   * cap evaluated on that stale flag alone refuses the loser even though the
+   * winner's row is exactly the one it wanted to write. Both statements of a
+   * new-id batch carry this predicate, so a refusal still commits neither.
+   * Whether the existing row is COMPATIBLE is not this gate's business — the
+   * endpoint condition each statement also carries refuses a same-id row
+   * declaring another endpoint.
+   */
+  function declarationGrowthAdmission(): string {
+    return `((SELECT COUNT(*) FROM app_custom_providers WHERE app_id = ?) < ${MAX_CUSTOM_PROVIDER_COUNT}
+             OR EXISTS (SELECT 1 FROM app_custom_providers WHERE app_id = ? AND provider_id = ?))`;
+  }
+
+  /**
+   * One pool row's conditional upsert, prepared but NOT run: the cap, the
+   * identity and (for an owned pool) the declaration's existence all live in
+   * its WHERE, so an insert matching ZERO rows is a refusal, never a silent
+   * no-op. A conflicting row is UPDATEd in place with the caller's
+   * verification state — `verified: false` resets it, because an unverified
+   * write must never inherit a stale verified_status.
+   *
+   * `opts.endpoint` (custom-provider declarations only) is the endpoint the
+   * key was VERIFIED against; it pins the owning declaration to it:
+   *   - `newDeclaration: false` — the declaration row must exist and carry
+   *     exactly this endpoint (the batch's declaration write either landed it
+   *     or was refused by the endpoint lock);
+   *   - `newDeclaration: true` — the declaration is written BY this batch, so
+   *     the gate is the negative form: no declaration of that id may disagree
+   *     with this endpoint (a concurrent create at another endpoint refuses
+   *     the credential rather than adopting it).
+   * Either form is the mirror of the condition the declaration statement
+   * carries, so one batch refuses together. Omitting `endpoint` (the key-only
+   * faces) keeps the plain declaration-existence gate.
+   */
+  function keyInsertStatement(
+    spec: KeyTable,
+    appId: string,
+    provider: string,
+    keyId: string,
+    keyEnc: string,
+    opts: { verified: boolean; newDeclaration?: boolean; endpoint?: { base_url: string; api: string } },
+  ): AppConfigStatement {
+    const verifiedAt = opts.verified ? "(SELECT ts FROM now)" : "NULL";
+    const verifiedStatus = opts.verified ? "'ok'" : "NULL";
+    // A declaration-OWNED pool additionally requires its declaration row, so a
+    // declaration removal racing this write matches zero rows instead of
+    // stranding an orphan credential a re-declaration would revive.
+    let ownership = "";
+    if (spec.owner !== undefined) {
+      const declaration = `SELECT 1 FROM ${spec.owner.table} WHERE app_id = ? AND ${spec.owner.column} = ?`;
+      if (opts.endpoint === undefined) {
+        // A key riding a declaration CREATED BY THE SAME BATCH has no row to
+        // check yet (the declaration's own statement is gated on the same
+        // predicates, so the batch still commits the key only with it).
+        ownership = opts.newDeclaration === true ? "" : ` AND EXISTS (${declaration})`;
+      } else {
+        ownership =
+          opts.newDeclaration === true
+            ? ` AND NOT EXISTS (${declaration} AND (base_url <> ? OR api <> ?))`
+            : ` AND EXISTS (${declaration} AND base_url = ? AND api = ?)`;
+      }
+    }
+    const growth = opts.newDeclaration === true ? ` AND ${declarationGrowthAdmission()}` : "";
+    const bind = [appId, provider, keyId, keyEnc, appId, provider, appId, provider, keyId];
+    if (spec.owner !== undefined) {
+      bind.push(appId, provider);
+      if (opts.endpoint !== undefined) bind.push(opts.endpoint.base_url, opts.endpoint.api);
+    }
+    if (opts.newDeclaration === true) bind.push(appId, appId, provider);
+    return db
+      .prepare(
+        `WITH now AS (SELECT datetime('now') AS ts)
+         INSERT INTO ${spec.table} (app_id, provider, key_id, key_enc, created_at, updated_at, verified_at, verified_status)
+         SELECT ?, ?, ?, ?, (SELECT ts FROM now), (SELECT ts FROM now), ${verifiedAt}, ${verifiedStatus}
+         WHERE ${poolAdmission(spec)}${ownership}${growth}
+         ON CONFLICT (app_id, provider, key_id) DO UPDATE SET
+           key_enc = excluded.key_enc,
+           updated_at = excluded.updated_at,
+           verified_at = excluded.verified_at,
+           verified_status = excluded.verified_status`,
+      )
+      .bind(...bind);
+  }
+
+  /**
+   * A pool write that matched ZERO rows. A NEW key at MAX_KEYS_PER_PROVIDER is
+   * the common cause; for an OWNED pool the other cause is the declaration
+   * vanishing between the caller's read and this write — named explicitly so
+   * the removal race surfaces as a refusal instead of an orphan credential.
+   */
+  async function throwKeyRefusal(spec: KeyTable, appId: string, provider: string): Promise<never> {
+    if (spec.owner !== undefined) {
+      const decl = await db
+        .prepare(`SELECT ${spec.owner.column} FROM ${spec.owner.table} WHERE app_id = ? AND ${spec.owner.column} = ?`)
+        .bind(appId, provider)
+        .first<Record<string, string>>();
+      if (decl === null) {
+        throw new InvalidCustomProviderError(`custom provider ${JSON.stringify(provider)} is not declared for this app`);
+      }
+    }
+    throw new ProviderKeyLimitError(provider);
+  }
+
+  /**
+   * A custom-provider upsert whose batch matched ZERO rows, named by cause.
+   * The declaration cap can only refuse a CREATE, so it is read first there
+   * (which keeps the PR #10 cap-race contract); the key pool's cap outranks
+   * the endpoint lock because a ninth key is refused whatever else is wrong;
+   * what is left is the endpoint lock — credentials retained for an endpoint
+   * other than the submitted one — or a declaration that raced away.
+   */
+  async function throwCustomProviderRefusal(
+    appId: string,
+    decl: AppCustomProvider,
+    keyId: string,
+    creating: boolean,
+  ): Promise<never> {
+    if (creating) {
+      const countRow = await db
+        .prepare(`SELECT COUNT(*) AS n FROM app_custom_providers WHERE app_id = ?`)
+        .bind(appId)
+        .first<{ n: number }>();
+      if ((countRow?.n ?? 0) >= MAX_CUSTOM_PROVIDER_COUNT) {
+        throw new InvalidCustomProviderError(`custom provider cap (${MAX_CUSTOM_PROVIDER_COUNT}) reached`);
+      }
+    }
+    const pool = await db
+      .prepare(
+        `SELECT COUNT(*) AS n,
+                EXISTS (SELECT 1 FROM app_custom_provider_keys WHERE app_id = ? AND provider = ? AND key_id = ?) AS present
+           FROM app_custom_provider_keys WHERE app_id = ? AND provider = ?`,
+      )
+      .bind(appId, decl.provider_id, keyId, appId, decl.provider_id)
+      .first<{ n: number; present: number }>();
+    if ((pool?.n ?? 0) >= MAX_KEYS_PER_PROVIDER && (pool?.present ?? 0) === 0) {
+      throw new ProviderKeyLimitError(decl.provider_id);
+    }
+    const stored = await db
+      .prepare(`SELECT base_url, api FROM app_custom_providers WHERE app_id = ? AND provider_id = ?`)
+      .bind(appId, decl.provider_id)
+      .first<{ base_url: string; api: string }>();
+    if (stored === null) {
+      throw new InvalidCustomProviderError(
+        creating
+          ? `custom provider cap (${MAX_CUSTOM_PROVIDER_COUNT}) reached`
+          : `custom provider ${JSON.stringify(decl.provider_id)} is not declared for this app`,
+      );
+    }
+    throw new ProviderEndpointLockedError(decl.provider_id);
+  }
+
+  /**
+   * Add (or re-submit) ONE key in a pool whose declaration (when it has one)
+   * already exists. Pass `models` to land THAT KEY's verified-model evidence
+   * row in the SAME atomic batch (built-in providers only — custom providers
+   * store no evidence row; their vocabulary is the declared model_ids). The
+   * statement is itself gated on the key row existing, so a cap-refused key
+   * cannot leave an evidence row behind.
+   *
+   * The row records what THIS key reported and nothing else: the runtime
+   * loads the WHOLE pool and may resolve with any credential in it, so the
+   * set the settings faces OFFER is the intersection over the current pool's
+   * keys — recomputed on every read, never stored (getVerifiedModels). A
+   * stored aggregate cannot express that: intersecting one is
+   * monotone-decreasing (a pool that gained a model on every key could never
+   * add it back) and it cannot say which key a re-verification speaks for.
+   */
+  async function addKey(
+    spec: KeyTable,
+    appId: string,
+    provider: string,
+    plainKey: string,
+    opts: { verified: boolean; models?: string[] },
+  ): Promise<void> {
+    if (plainKey.length > MAX_PROVIDER_KEY_LENGTH) {
+      throw new ProviderKeyTooLongError();
+    }
+    // Promote first: the cap must count real slots, and a re-submitted key must
+    // collapse onto its promoted row instead of opening a second one.
+    await readKeyRows(spec, appId, provider);
+    const keyId = await providerKeyId(plainKey);
+    const keyEnc = await box.encryptSecret(plainKey, spec.aad(appId, provider, keyId));
+    const keyStatement = keyInsertStatement(spec, appId, provider, keyId, keyEnc, opts);
+    if (opts.models === undefined) {
+      const res = await keyStatement.run();
+      if (res.meta.changes === 0) await throwKeyRefusal(spec, appId, provider);
+      return;
+    }
+    const res = await db.batch([
+      keyStatement,
+      db
+        .prepare(
+          `WITH now AS (SELECT datetime('now') AS ts)
+           INSERT INTO app_provider_models (app_id, provider, key_id, models_json, fetched_at)
+           SELECT ?, ?, ?, ?, (SELECT ts FROM now)
+           WHERE EXISTS (SELECT 1 FROM ${spec.table} WHERE app_id = ? AND provider = ? AND key_id = ?)
+           ON CONFLICT (app_id, provider, key_id) DO UPDATE SET
+             models_json = excluded.models_json,
+             fetched_at = excluded.fetched_at`,
+        )
+        .bind(
+          appId,
+          modelCacheProviderKey(provider),
+          keyId,
+          JSON.stringify(opts.models),
+          appId,
+          provider,
+          keyId,
+        ),
+    ]);
+    if (res[0]!.meta.changes === 0) await throwKeyRefusal(spec, appId, provider);
+  }
+
+  /** Mask one stored key row for a settings list face: decrypt, keep ONLY the tail. */
+  async function summarizeKeyRow(spec: KeyTable, row: AppProviderKeyRow): Promise<ProviderKeySummary> {
+    const plain = await box.decryptSecret(row.key_enc, spec.aad(row.app_id, row.provider, row.key_id));
+    return {
+      provider: row.provider,
+      keyId: row.key_id,
+      last4: maskTail(plain),
+      updatedAt: row.updated_at,
+      verifiedAt: row.verified_at,
+      verifiedStatus: row.verified_status,
+    };
+  }
 
   /**
    * The App's stored sandbox image id (migration 0018) — the
@@ -847,109 +1384,87 @@ export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | un
 
   return {
     /**
-     * Store (or replace) one provider key for the App: encrypts INSIDE with
-     * the composite-PK AAD, then upserts the (app_id, provider) row. The
-     * plaintext is never persisted, logged, or returned. A key longer than
+     * Store one provider key in the App's pool for (appId, provider):
+     * encrypts INSIDE with the per-key AAD, then upserts THAT key's row. The
+     * plaintext is never persisted, logged, or returned. Re-submitting the
+     * same key updates its row in place: created_at is the key's entry time
+     * and STAYS (so the pool order (created_at, key_id) never shifts under a
+     * re-submission), updated_at moves forward from a fresh clock read (the
+     * migration-0012 convention), and verified_at/verified_status reset to
+     * NULL (migration 0015): verification
+     * belongs to the (provider, key) pair, and this is the UNVERIFIED path, so
+     * a leftover caller must not inherit a stale verified_status
+     * (saveVerifiedKey is the verified one). A DIFFERENT key takes the next
+     * free slot; a NEW slot past MAX_KEYS_PER_PROVIDER throws
+     * ProviderKeyLimitError with zero writes, and a key longer than
      * MAX_PROVIDER_KEY_LENGTH throws ProviderKeyTooLongError before any
-     * crypto or write (the route answers 400 first; this is the backstop).
-     * The upsert maintains the row's write time (migration 0012): a fresh
-     * insert writes updated_at == created_at from ONE clock read; re-setting
-     * moves both forward. Overwriting a previously verified row with a NEW
-     * key also resets verified_at/verified_status to NULL (migration 0015) —
-     * verification belongs to the (provider, key) pair, not the row; the new
-     * key has not been verified until saveVerifiedKey runs again. (The
-     * save-then-verify flow uses saveVerifiedKey; setProviderKey is the
-     * legacy unverified path and any leftover caller must not inherit a
-     * stale verified_status.)
+     * crypto or write (the route answers 400 first; these are the backstops
+     * for direct callers).
      */
-    async setProviderKey(appId: string, provider: string, plainKey: string): Promise<void> {
-      if (plainKey.length > MAX_PROVIDER_KEY_LENGTH) {
-        throw new ProviderKeyTooLongError();
-      }
-      const keyEnc = await box.encryptSecret(plainKey, providerKeyAad(appId, provider));
-      await db
-        .prepare(
-          // One clock read for BOTH timestamps (migration 0012): a fresh insert
-          // guarantees updated_at == created_at deterministically (SQLite cannot
-          // alias a VALUES expression, so the CTE holds the single read); the
-          // upsert moves both forward on re-set (today's created_at semantics).
-          `WITH now AS (SELECT datetime('now') AS ts)
-           INSERT INTO app_provider_keys (app_id, provider, key_enc, created_at, updated_at)
-           VALUES (?, ?, ?, (SELECT ts FROM now), (SELECT ts FROM now))
-           ON CONFLICT (app_id, provider) DO UPDATE SET
-             key_enc = excluded.key_enc,
-             created_at = (SELECT ts FROM now),
-             updated_at = (SELECT ts FROM now),
-             verified_at = NULL,
-             verified_status = NULL`,
-        )
-        .bind(appId, provider, keyEnc)
-        .run();
+    addProviderKey(appId: string, provider: string, plainKey: string): Promise<void> {
+      return addKey(PROVIDER_KEY_TABLE, appId, provider, plainKey, { verified: false });
     },
 
     /**
-     * Store one provider key AFTER successful verification: the
-     * verified analogue of setProviderKey — encrypts with the SAME
-     * composite-PK AAD, upserts the (app_id, provider) row with the
-     * verification bookkeeping (migration 0015: verified_at = now +
-     * verified_status = 'ok'), and upserts the App's verified-model cache row
-     * under the SELECTOR-FACING provider key (modelCacheProviderKey — an
-     * `ark` BYOK key caches under "ark-plan", spec §6.1) as ONE atomic
-     * db.batch (D1 batch is transactional; a mid-save failure rolls back both
-     * statements, so a verified key with no cache row is impossible).
-     * `models` may be [] (a provider that only got an auth-probe has an
-     * empty cache — that is the "probe-only" signal the member
-     * validation falls back to syntax-only on). Bounds/backstop contract
-     * identical to setProviderKey (a key longer than MAX_PROVIDER_KEY_LENGTH
-     * throws ProviderKeyTooLongError before any crypto or write; the callers
-     * that still write UNverified rows via setProviderKey keep compiling —
-     * the verify-first save cutover closes this path; until then those rows stay
-     * verified_status NULL = legacy unverified).
+     * Store one provider key AFTER successful verification: the VERIFIED
+     * analogue of addProviderKey — encrypts with the SAME per-key AAD,
+     * upserts that key's row with the verification bookkeeping (migration
+     * 0015: verified_at = now + verified_status = 'ok'), and upserts THAT
+     * KEY's verified-model evidence row under the SELECTOR-FACING provider key
+     * (modelCacheProviderKey — an `ark` BYOK key records under "ark-plan",
+     * spec §6.1) as ONE atomic db.batch (D1 batch is transactional and the
+     * evidence statement only fires once the key row is there, so a verified
+     * key with no evidence row — or an evidence row with no key — is
+     * impossible). `models` may be [] (a provider that only got an auth-probe
+     * has empty evidence — the "probe-only" signal the member validation
+     * falls back to syntax-only on when the whole pool is empty).
+     * Bounds/cap contract identical to
+     * addProviderKey: ProviderKeyTooLongError before any crypto or write and
+     * ProviderKeyLimitError for a NEW slot past MAX_KEYS_PER_PROVIDER.
      */
-    async saveVerifiedKey(appId: string, provider: string, plainKey: string, models: string[]): Promise<void> {
-      if (plainKey.length > MAX_PROVIDER_KEY_LENGTH) {
-        throw new ProviderKeyTooLongError();
-      }
-      const keyEnc = await box.encryptSecret(plainKey, providerKeyAad(appId, provider));
-      // modelCacheProviderKey maps the BYOK id to the selector-facing cache
-      // key (ark → ark-plan) — the ONLY place that relationship is applied.
-      const cacheProvider = modelCacheProviderKey(provider);
-      // One clock read per statement pair (the migration-0012 convention); the key
-      // upsert moves created_at/updated_at forward exactly like setProviderKey.
-      await db.batch([
-        db.prepare(
-          `WITH now AS (SELECT datetime('now') AS ts)
-           INSERT INTO app_provider_keys (app_id, provider, key_enc, created_at, updated_at, verified_at, verified_status)
-           VALUES (?, ?, ?, (SELECT ts FROM now), (SELECT ts FROM now), (SELECT ts FROM now), 'ok')
-           ON CONFLICT (app_id, provider) DO UPDATE SET
-             key_enc = excluded.key_enc,
-             created_at = (SELECT ts FROM now),
-             updated_at = (SELECT ts FROM now),
-             verified_at = excluded.verified_at,
-             verified_status = excluded.verified_status`,
-        ).bind(appId, provider, keyEnc),
-        db.prepare(
-          `WITH now AS (SELECT datetime('now') AS ts)
-           INSERT INTO app_provider_models (app_id, provider, models_json, fetched_at)
-           VALUES (?, ?, ?, (SELECT ts FROM now))
-           ON CONFLICT (app_id, provider) DO UPDATE SET
-             models_json = excluded.models_json,
-             fetched_at = (SELECT ts FROM now)`,
-        ).bind(appId, cacheProvider, JSON.stringify(models)),
+    saveVerifiedKey(appId: string, provider: string, plainKey: string, models: string[]): Promise<void> {
+      return addKey(PROVIDER_KEY_TABLE, appId, provider, plainKey, { verified: true, models });
+    },
+
+    /**
+     * Delete ONE key slot of a provider's pool — and, in the SAME atomic
+     * batch, THAT KEY's verified-model evidence row: the evidence is keyed by
+     * the credential that produced it, so removing the credential removes only
+     * what it reported and the surviving keys keep theirs (the read face
+     * recomputes the offered set from the keys that remain — a model only the
+     * removed credential could reach can no longer be offered, and one the
+     * survivors still serve stays offered). The evidence row lives under the
+     * SELECTOR-FACING provider key — modelCacheProviderKey maps an `ark` BYOK
+     * key to its "ark-plan" evidence (spec §6.1). Returns whether THIS call
+     * removed the key row; an unknown key id — or any provider the allowlist
+     * could never have stored — is a no-op returning false (the delete
+     * statement's `changes() > 0` reads the row count of the DELETE that runs
+     * first in this very transaction, so a miss clears nothing).
+     */
+    async deleteProviderKey(appId: string, provider: string, keyId: string): Promise<boolean> {
+      // Promote the pool FIRST: a row 0024 carried across still wears the
+      // sentinel id, so the derived id below matches nothing before promotion.
+      await readKeyRows(PROVIDER_KEY_TABLE, appId, provider);
+      const res = await db.batch([
+        db
+          .prepare(`DELETE FROM app_provider_keys WHERE app_id = ? AND provider = ? AND key_id = ?`)
+          .bind(appId, provider, keyId),
+        db
+          .prepare(
+            `DELETE FROM app_provider_models WHERE app_id = ? AND provider = ? AND key_id = ? AND changes() > 0`,
+          )
+          .bind(appId, modelCacheProviderKey(provider), keyId),
       ]);
+      return res[0]!.meta.changes > 0;
     },
 
     /**
-     * Delete one provider key row — and the App's verified-model cache row
-     * for the same provider, in ONE atomic batch (a removed key must not
-     * linger as "verified" in the settings dropdown; saveVerifiedKey writes
-     * both rows transactionally, so removal is transactional too). The cache
-     * row lives under the SELECTOR-FACING provider key — modelCacheProviderKey
-     * maps an `ark` BYOK key to its "ark-plan" cache row (spec §6.1), so
-     * `removeProviderKey(appId, "ark")` deletes that row as well. Returns
-     * whether THIS call removed the key row (an unconfigured provider — or
-     * any provider the allowlist could never have stored — is a no-op
-     * returning false).
+     * Delete a provider's WHOLE pool — every key row of the (App, provider)
+     * pool, plus every verified-model evidence row — in ONE atomic batch (a
+     * removed pool must not linger as "verified" in the settings dropdown).
+     * Returns whether THIS call removed a key row (an unconfigured provider —
+     * or any provider the allowlist could never have stored — is a no-op
+     * returning false, mirroring removeCustomProvider's tolerance).
      */
     async removeProviderKey(appId: string, provider: string): Promise<boolean> {
       const res = await db.batch([
@@ -962,23 +1477,22 @@ export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | un
     },
 
     /**
-     * Masked key list for the settings page: decrypts each row in memory and
-     * reduces it to provider + last-4 + last-update time (migration 0012;
-     * NULL for rows written before 0012 — the view's em dash placeholder).
-     * The plaintext NEVER appears in the return value — and because this is
-     * the only list face, it cannot leak into HTML either.
+     * The settings-page key list: one row per stored key — the provider, the
+     * derived key id (the handle a per-key delete / re-verify call takes), the
+     * masked tail and the per-key bookkeeping (migration 0012; NULL for rows
+     * written before 0012 — the view's em dash placeholder).
+     * Provider-ascending, then pool order (created_at, key_id); `provider`
+     * scopes the read to one pool. The plaintext NEVER appears in the return
+     * value — and because this is the only list face, it cannot leak into
+     * HTML either.
      */
-    async listProviderKeys(appId: string): Promise<MaskedProviderKey[]> {
-      const res = await db
-        .prepare(`SELECT * FROM app_provider_keys WHERE app_id = ? ORDER BY provider ASC`)
-        .bind(appId)
-        .all<AppProviderKeyRow>();
-      const masked: MaskedProviderKey[] = [];
-      for (const row of res.results) {
-        const plain = await box.decryptSecret(row.key_enc, providerKeyAad(row.app_id, row.provider));
-        masked.push({ provider: row.provider, last4: maskTail(plain), updated_at: row.updated_at });
+    async listProviderKeys(appId: string, provider?: string): Promise<ProviderKeySummary[]> {
+      const rows = await readKeyRows(PROVIDER_KEY_TABLE, appId, provider);
+      const summary: ProviderKeySummary[] = [];
+      for (const row of rows) {
+        summary.push(await summarizeKeyRow(PROVIDER_KEY_TABLE, row));
       }
-      return masked;
+      return summary;
     },
 
     /**
@@ -1027,44 +1541,80 @@ export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | un
     },
 
     /**
-     * Decrypt the App's full configuration for the consumer (env
-     * assembly): provider-id → plaintext key for every stored provider, plus
-     * the model chain. No config → `{ keys: {}, modelChain: null }`. An
-     * undecryptable row throws (tamper/misconfiguration is never swallowed).
+     * Decrypt the App's full configuration for the consumer (env assembly):
+     * provider id → that provider's plaintext keys in pool order (created_at,
+     * then key_id — the order the credential payload's arrays follow), plus
+     * the model chain. A provider holding at least one key ALWAYS
+     * has an entry: that is the fail-closed read contract the pipeline relies
+     * on (a chain provider with no entry must be visible as missing). No
+     * config → `{ keys: {}, modelChain: null }`. An undecryptable row throws
+     * (tamper/misconfiguration is never swallowed).
      */
     async getAppConfig(appId: string): Promise<AppConfig> {
-      const res = await db
-        .prepare(`SELECT * FROM app_provider_keys WHERE app_id = ? ORDER BY provider ASC`)
-        .bind(appId)
-        .all<AppProviderKeyRow>();
-      const keys: Record<string, string> = {};
-      for (const row of res.results) {
-        keys[row.provider] = await box.decryptSecret(row.key_enc, providerKeyAad(row.app_id, row.provider));
+      const rows = await readKeyRows(PROVIDER_KEY_TABLE, appId);
+      const keys: Record<string, string[]> = {};
+      for (const row of rows) {
+        const plain = await box.decryptSecret(row.key_enc, providerKeyAad(row.app_id, row.provider, row.key_id));
+        (keys[row.provider] ??= []).push(plain);
       }
       return { appId, keys, modelChain: await readModelChain(appId) };
     },
 
     /**
-     * The App's verified-model cache (the Interfaces read face): every
-     * app_provider_models row for the App, provider-ascending — the settings
-     * loader's dropdown source (one cache row = one verified provider whose
-     * options render as selector literal grammar `provider/model`; the row's
-     * `provider` IS the selector prefix, "ark-plan" for a verified `ark`
-     * BYOK key). models_json parses fail-loud (the getAppConfig tamper
-     * convention): a malformed row throws in the store, never deferring to a
-     * caller. A provider absent here has never been verified through
-     * saveVerifiedKey (or its models were never cached).
+     * The App's verified models (the Interfaces read face): ONE entry per
+     * BUILT-IN provider whose pool holds at least one key, provider-ascending
+     * — the settings loader's dropdown source (one entry = one verified
+     * provider whose options render as selector literal grammar
+     * `provider/model`; the entry's `provider` IS the selector prefix,
+     * "ark-plan" for a verified `ark` BYOK key).
+     *
+     * The models are RECOMPUTED on every read as the INTERSECTION over the
+     * CURRENT pool's keys' own evidence rows, never stored: the runtime loads
+     * the whole pool and may answer with any credential in it, so a model only
+     * some keys can serve must not be offered. A key with NO evidence row
+     * leaves the whole pool's vocabulary unknown → `[]` (the probe-only face,
+     * where findFailingSelector falls back to syntax-only), because that
+     * credential may answer and nothing is known about what it serves.
+     * Recomputing is what makes a deletion and a re-verification both take
+     * effect immediately: the offered set shrinks to what remains and can GROW
+     * again when every surviving key gains the model.
+     *
+     * models_json parses fail-loud (the getAppConfig tamper convention): a
+     * malformed row throws in the store, never deferring to a caller.
      */
     async getVerifiedModels(appId: string): Promise<VerifiedModels[]> {
-      const res = await db
-        .prepare(`SELECT * FROM app_provider_models WHERE app_id = ? ORDER BY provider ASC`)
+      const evidence = await db
+        .prepare(`SELECT * FROM app_provider_models WHERE app_id = ? ORDER BY provider ASC, key_id ASC`)
         .bind(appId)
         .all<AppProviderModelsRow>();
-      return res.results.map((row) => ({
-        provider: row.provider,
-        models: parseModelIdsJson(row.models_json, "app_provider_models.models_json"),
-        fetched_at: row.fetched_at,
-      }));
+      const rows = await readKeyRows(PROVIDER_KEY_TABLE, appId);
+      const byProvider = new Map<string, Map<string, string[]>>();
+      for (const row of evidence.results) {
+        const perKey = byProvider.get(row.provider) ?? new Map<string, string[]>();
+        perKey.set(row.key_id, parseModelIdsJson(row.models_json, "app_provider_models.models_json"));
+        byProvider.set(row.provider, perKey);
+      }
+      const entries: VerifiedModels[] = [];
+      for (const [provider, perKey] of byProvider) {
+        const poolKeyIds = new Set(
+          rows.filter((row) => modelCacheProviderKey(row.provider) === provider).map((row) => row.key_id),
+        );
+        if (poolKeyIds.size === 0) continue;
+        let models: string[] | null = null;
+        for (const keyId of poolKeyIds) {
+          const report = perKey.get(keyId);
+          if (report === undefined) {
+            models = null;
+            break;
+          }
+          models = models === null ? report : models.filter((model) => report.includes(model));
+        }
+        const fetchedAt = evidence.results
+          .filter((row) => row.provider === provider)
+          .reduce((latest, row) => (row.fetched_at > latest ? row.fetched_at : latest), "");
+        entries.push({ provider, models: models ?? [], fetched_at: fetchedAt });
+      }
+      return entries;
     },
 
     /**
@@ -1250,25 +1800,53 @@ export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | un
     },
     /**
      * Store (or replace) one custom-provider declaration for the App:
-     * validates the full AL-23-1/AL-23-2 shape, encrypts the key
-     * INSIDE with the composite-PK AAD, then upserts the (app_id,
-     * provider_id) row. The plaintext key is never persisted, logged, or
-     * returned — it exists only as the api_key_enc envelope (the
-     * consumer decrypts it with the same AAD). model_ids is stored as a
-     * TEXT JSON array (AL-23-1 DDL). An invalid declaration throws
-     * InvalidCustomProviderError / ProviderKeyTooLongError before any
-     * crypto or write (the route answers 400 first; this is the backstop).
+     * validates the full AL-23-1/AL-23-2 shape, upserts the (app_id,
+     * provider_id) DECLARATION row (base_url / api / model_ids — migration
+     * 0024 moved the key material into app_custom_provider_keys), then stores
+     * the submitted key in that declaration's pool as a verified slot (the
+     * declaration flow verifies before saving, so it lands
+     * verified_at = now / verified_status = 'ok'; a key already in the pool is
+     * updated in place, a NEW one takes the next free slot up to
+     * MAX_KEYS_PER_PROVIDER). model_ids is stored as a TEXT JSON array
+     * (AL-23-1 DDL). An invalid declaration throws
+     * InvalidCustomProviderError / ProviderKeyTooLongError before any crypto
+     * or write (the route answers 400 first; this is the backstop).
      * The declaration-count bound (MAX_CUSTOM_PROVIDER_COUNT, QC wave-1 W-2)
      * is growth-only: a NEW id at the cap throws before any crypto or write;
      * re-declaring an EXISTING id (an update, not growth) always proceeds.
-     * The cap is enforced ATOMICALLY (PR #10 cap-race fix): the new-id
-     * insert is conditional (`WHERE count < cap`), so two concurrent saves
-     * racing for the last slot cannot both land — the loser's insert matches
-     * zero rows and throws the cap error. The pre-check below stays as the
-     * fast 400 path (defense in depth, both layers).
-     * The upsert maintains the row's write time from ONE clock read (the
-     * migration-0012 convention): a fresh insert writes updated_at == created_at;
-     * re-declaring moves both forward.
+     * The ENDPOINT is locked while the pool holds a key (A1): base_url / api
+     * may only move under an EMPTY pool, because every retained credential was
+     * verified against the endpoint stored here — rewriting it would send that
+     * credential somewhere it was never verified for. Refused as
+     * ProviderEndpointLockedError before any write (the route answers a keyed
+     * 400 first), and the batch re-checks the same rule atomically.
+     * The cap is enforced ATOMICALLY (PR #10 cap-race fix): the new-id write is
+     * conditional (`WHERE count < cap`) and CONFLICT-SAFE (`ON CONFLICT … DO
+     * UPDATE`), so two concurrent FIRST-TIME saves of the same id — which used
+     * to hit the (app_id, provider_id) primary key and 500 — merge into the
+     * declaration that won it (a different endpoint there refuses instead).
+     * The pre-check below stays as the fast 400 path (defense in depth, both
+     * layers).
+     * The declaration and its key commit TOGETHER or not at all: both ride ONE
+     * `db.batch` whose two statements carry the SAME pool-admission predicate, so
+     * a refused key (a ninth) refuses the declaration write with it, and the key
+     * statement additionally requires the declaration to carry the SUBMITTED
+     * endpoint — a declaration removal, or a concurrent create at another
+     * endpoint, matches zero rows on BOTH, so a refusal commits neither.
+     * A NEW declaration's batch additionally shares the declaration-COUNT gate
+     * (the cap): its key statement carries it too, and runs FIRST, before the
+     * declaration's own INSERT raises the counted rows. A lost last-slot race
+     * for a genuinely NEW id therefore refuses the key instead of committing a
+     * credential under the declaration the concurrent save created, while a
+     * race the SAME id won at the SAME endpoint is admitted — the gate measures
+     * whether a row would actually be ADDED, not what the caller believed when
+     * it read (see `declarationGrowthAdmission`).
+     * The key is encrypted BEFORE
+     * the batch, so a crypto failure (missing / malformed master key) leaves no
+     * declaration behind either.
+     * A fresh insert writes updated_at == created_at from ONE clock read (the
+     * migration-0012 convention); re-declaring moves updated_at forward and
+     * keeps created_at (the declaration's birth time).
      */
     async upsertCustomProvider(appId: string, decl: AppCustomProvider, plainKey: string): Promise<void> {
       // The collision vocabulary is the App's SELECTED image's
@@ -1277,120 +1855,306 @@ export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | un
       // write, the same posture as the cap-count SELECT below).
       const imageId = await readSandboxImageId(appId);
       assertCustomProvider(decl, plainKey, sandboxImageHostIds(imageId ?? ""));
+      // The declaration AS STORED plus its pool, read before the write decides
+      // anything: the stored endpoint is what every retained credential was
+      // verified against, and the promoted pool is what the endpoint lock, the
+      // cap and the key identity below all measure.
+      const stored = await db
+        .prepare(`SELECT provider_id, base_url, api FROM app_custom_providers WHERE app_id = ? AND provider_id = ?`)
+        .bind(appId, decl.provider_id)
+        .first<{ provider_id: string; base_url: string; api: string }>();
+      const isNew = stored === null;
+      const pool = await readKeyRows(CUSTOM_KEY_TABLE, appId, decl.provider_id);
+      // THE ENDPOINT LOCK: a retained key was verified against the stored
+      // endpoint, so rewriting base_url / api under a populated pool would send
+      // it to an endpoint it was never verified for. Refused loudly with
+      // nothing written — removing the credentials first re-declares freely.
+      // The batch predicates below carry the same rule atomically, so a
+      // concurrent key write cannot slip under this read either.
+      if (!isNew && pool.length > 0 && (stored.base_url !== decl.base_url || stored.api !== decl.api)) {
+        throw new ProviderEndpointLockedError(decl.provider_id);
+      }
       // Growth-only cap: only a provider id with NO row yet can push the App
       // past MAX_CUSTOM_PROVIDER_COUNT declarations (an upsert of an existing
-      // id replaces the row in place — no count change). Two SELECTs on the
-      // new-declaration path, zero on the update path; small next to the
-      // encrypt (accepted — same posture as the consumer's no-cache re-reads).
-      const existing = await db
-        .prepare(`SELECT provider_id FROM app_custom_providers WHERE app_id = ? AND provider_id = ?`)
-        .bind(appId, decl.provider_id)
-        .first<{ provider_id: string }>();
-      const isNew = existing === null;
+      // id replaces the row in place — no count change). The pre-check answers
+      // the common case; the conditional statement below is the race backstop.
+      // The same-id existence is re-read HERE too, not taken from `isNew`: a
+      // concurrent save of this very id can land between that read and this
+      // one, and the row it created is the one this write replaces — refusing
+      // it on the stale flag would refuse a write that adds no declaration.
       if (isNew) {
         const countRow = await db
-          .prepare(`SELECT COUNT(*) AS n FROM app_custom_providers WHERE app_id = ?`)
-          .bind(appId)
-          .first<{ n: number }>();
-        if ((countRow?.n ?? 0) >= MAX_CUSTOM_PROVIDER_COUNT) {
-          throw new InvalidCustomProviderError(`custom provider cap (${MAX_CUSTOM_PROVIDER_COUNT}) reached`);
-        }
-      }
-      const keyEnc = await box.encryptSecret(plainKey, customProviderAad(appId, decl.provider_id));
-      if (isNew) {
-        // Atomic cap (PR #10 cap-race fix): the INSERT only fires while the
-        // App is under the cap — a concurrent save that won the last slot
-        // makes this one match zero rows (changes === 0) and the cap error
-        // is thrown instead of a silent over-cap insert. One clock read for
-        // both timestamps (the migration-0012 convention, same as the upsert).
-        const res = await db
           .prepare(
-            `WITH now AS (SELECT datetime('now') AS ts)
-             INSERT INTO app_custom_providers (app_id, provider_id, base_url, api, model_ids, api_key_enc, created_at, updated_at, verified_at, verified_status)
-             SELECT ?, ?, ?, ?, ?, ?, (SELECT ts FROM now), (SELECT ts FROM now), (SELECT ts FROM now), 'ok'
-             WHERE (SELECT COUNT(*) FROM app_custom_providers WHERE app_id = ?) < ${MAX_CUSTOM_PROVIDER_COUNT}`,
+            `SELECT COUNT(*) AS n,
+                    EXISTS (SELECT 1 FROM app_custom_providers WHERE app_id = ? AND provider_id = ?) AS present
+               FROM app_custom_providers WHERE app_id = ?`,
           )
-          .bind(appId, decl.provider_id, decl.base_url, decl.api, JSON.stringify(decl.model_ids), keyEnc, appId)
-          .run();
-        if (res.meta.changes === 0) {
+          .bind(appId, decl.provider_id, appId)
+          .first<{ n: number; present: number }>();
+        if ((countRow?.n ?? 0) >= MAX_CUSTOM_PROVIDER_COUNT && (countRow?.present ?? 0) === 0) {
           throw new InvalidCustomProviderError(`custom provider cap (${MAX_CUSTOM_PROVIDER_COUNT}) reached`);
         }
-        return;
       }
-      await db
-        .prepare(
-          `WITH now AS (SELECT datetime('now') AS ts)
-           INSERT INTO app_custom_providers (app_id, provider_id, base_url, api, model_ids, api_key_enc, created_at, updated_at, verified_at, verified_status)
-           VALUES (?, ?, ?, ?, ?, ?, (SELECT ts FROM now), (SELECT ts FROM now), (SELECT ts FROM now), 'ok')
-           ON CONFLICT (app_id, provider_id) DO UPDATE SET
-             base_url = excluded.base_url,
-             api = excluded.api,
-             model_ids = excluded.model_ids,
-             api_key_enc = excluded.api_key_enc,
-             created_at = (SELECT ts FROM now),
-             updated_at = (SELECT ts FROM now),
-             verified_at = excluded.verified_at,
-             verified_status = excluded.verified_status`,
-        )
-        .bind(appId, decl.provider_id, decl.base_url, decl.api, JSON.stringify(decl.model_ids), keyEnc)
-        .run();
+      // The key is encrypted BEFORE the batch, so a crypto failure (a missing /
+      // malformed master key) leaves no declaration behind.
+      const keyId = await providerKeyId(plainKey);
+      const keyEnc = await box.encryptSecret(plainKey, CUSTOM_KEY_TABLE.aad(appId, decl.provider_id, keyId));
+      // ONE atomic batch: the declaration and its key commit together or not
+      // at all. Each statement carries the SAME pool-admission predicate AND
+      // the endpoint condition (the two forms documented on keyInsertStatement),
+      // so a refused key write (a ninth, or a create whose endpoint another save
+      // won) refuses the declaration write with it, and the key statement
+      // additionally requires the declaration to carry the submitted endpoint —
+      // so neither a rebound declaration nor a mismatched credential can
+      // survive a refusal.
+      const admissionBinds = [appId, decl.provider_id, appId, decl.provider_id, keyId];
+      const declaration = isNew
+        ? db
+            .prepare(
+              `WITH now AS (SELECT datetime('now') AS ts)
+               INSERT INTO app_custom_providers (app_id, provider_id, base_url, api, model_ids, created_at, updated_at)
+               SELECT ?, ?, ?, ?, ?, (SELECT ts FROM now), (SELECT ts FROM now)
+               WHERE ${declarationGrowthAdmission()}
+                 AND ${poolAdmission(CUSTOM_KEY_TABLE)}
+                 AND NOT EXISTS (SELECT 1 FROM app_custom_providers
+                                  WHERE app_id = ? AND provider_id = ? AND (base_url <> ? OR api <> ?))
+               ON CONFLICT (app_id, provider_id) DO UPDATE SET
+                 base_url = excluded.base_url,
+                 api = excluded.api,
+                 model_ids = excluded.model_ids,
+                 updated_at = (SELECT ts FROM now)`,
+            )
+            .bind(
+              appId,
+              decl.provider_id,
+              decl.base_url,
+              decl.api,
+              JSON.stringify(decl.model_ids),
+              appId,
+              // growth admission: the count and the same-id existence branch.
+              appId,
+              decl.provider_id,
+              ...admissionBinds,
+              // The ENDPOINT form of a create: no row to compare yet, so the
+              // gate reads "no declaration of this id disagrees with the
+              // endpoint" — a concurrent save that won the id at ANOTHER
+              // endpoint refuses this write instead of losing its endpoint.
+              appId,
+              decl.provider_id,
+              decl.base_url,
+              decl.api,
+            )
+        : db
+            .prepare(
+              `WITH now AS (SELECT datetime('now') AS ts)
+               UPDATE app_custom_providers SET base_url = ?, api = ?, model_ids = ?, updated_at = (SELECT ts FROM now)
+               WHERE app_id = ? AND provider_id = ?
+                 AND ${poolAdmission(CUSTOM_KEY_TABLE)}
+                 AND (base_url = ? AND api = ?
+                      OR NOT EXISTS (SELECT 1 FROM app_custom_provider_keys WHERE app_id = ? AND provider = ?))`,
+            )
+            .bind(
+              decl.base_url,
+              decl.api,
+              JSON.stringify(decl.model_ids),
+              appId,
+              decl.provider_id,
+              ...admissionBinds,
+              // The endpoint lock, atomic: the row's own endpoint may only move
+              // while its pool is EMPTY (the pre-check above answers the common
+              // case; this one the concurrent key write).
+              decl.base_url,
+              decl.api,
+              appId,
+              decl.provider_id,
+            );
+      const key = keyInsertStatement(CUSTOM_KEY_TABLE, appId, decl.provider_id, keyId, keyEnc, {
+        verified: true,
+        newDeclaration: isNew,
+        endpoint: { base_url: decl.base_url, api: decl.api },
+      });
+      // ORDER: for a NEW declaration the KEY runs FIRST. Both statements
+      // evaluate the declaration-count gate, so it must be read before the
+      // declaration's own INSERT raises the count — otherwise a WON slot (the
+      // row is ours) looks identical to a LOST one and a lost race would
+      // commit its key under the concurrent winner's declaration.
+      const res = isNew ? await db.batch([key, declaration]) : await db.batch([declaration, key]);
+      // The KEY statement is the batch's last gate in either order, and both
+      // statements carry the SAME predicates (pool admission, the growth gate
+      // for a create, the declaration-endpoint condition), so a zero-change key
+      // IS the refusal: nothing was committed, and a lost race leaves neither a
+      // key row nor a changed declaration behind.
+      if (res[isNew ? 0 : 1]!.meta.changes === 0) {
+        await throwCustomProviderRefusal(appId, decl, keyId, isNew);
+      }
     },
 
     /**
-     * Delete one custom-provider declaration. Returns whether THIS call
-     * removed a row (an undeclared provider id is an idempotent no-op
-     * returning false, mirroring removeProviderKey's tolerance).
+     * Delete one custom-provider declaration — and EVERY key row of its pool,
+     * in ONE atomic batch (a leftover key row would be unreachable data, and
+     * would resurface on a re-declaration of the same id). Returns whether
+     * THIS call removed a declaration row (an undeclared provider id is an
+     * idempotent no-op returning false, mirroring removeProviderKey's
+     * tolerance).
      */
     async removeCustomProvider(appId: string, providerId: string): Promise<boolean> {
-      const res = await db
-        .prepare(`DELETE FROM app_custom_providers WHERE app_id = ? AND provider_id = ?`)
-        .bind(appId, providerId)
-        .run();
-      return res.meta.changes > 0;
+      const res = await db.batch([
+        db.prepare(`DELETE FROM app_custom_provider_keys WHERE app_id = ? AND provider = ?`).bind(appId, providerId),
+        db.prepare(`DELETE FROM app_custom_providers WHERE app_id = ? AND provider_id = ?`).bind(appId, providerId),
+      ]);
+      return res[1]!.meta.changes > 0;
     },
 
     /**
-     * The settings-page list face: every declaration for the
-     * App, provider_id-ascending, as the decrypt-free AppCustomProvider
-     * shape — the key material NEVER appears (it exists only as the
-     * api_key_enc envelope; the consumer decrypts it separately).
-     * model_ids is parsed from the stored TEXT JSON array; a malformed row
-     * throws (fail-loud, the getAppConfig tamper convention).
+     * The settings-page declaration list: every declaration for the
+     * App, provider_id-ascending, as the decrypt-free AppCustomProviderRead
+     * shape. model_ids is parsed from the stored TEXT JSON array; a malformed
+     * row throws (fail-loud, the getAppConfig tamper convention). The keys of
+     * each declaration are a SEPARATE masked read (listCustomProviderKeys) —
+     * this face never touches key material, and `has_keys` is derived inside
+     * the statement (EXISTS on the pool), so a DRAINED declaration is still
+     * listed here — intact and re-keyable — while the model-option and
+     * membership faces can tell it offers nothing a run could use.
      */
-    async listCustomProviders(appId: string): Promise<AppCustomProvider[]> {
+    async listCustomProviders(appId: string): Promise<AppCustomProviderRead[]> {
       const res = await db
-        .prepare(`SELECT * FROM app_custom_providers WHERE app_id = ? ORDER BY provider_id ASC`)
+        .prepare(
+          `SELECT d.*,
+                  EXISTS (SELECT 1 FROM app_custom_provider_keys k
+                           WHERE k.app_id = d.app_id AND k.provider = d.provider_id) AS has_keys
+             FROM app_custom_providers d WHERE d.app_id = ? ORDER BY d.provider_id ASC`,
+        )
         .bind(appId)
-        .all<AppCustomProviderRow>();
+        .all<AppCustomProviderRow & { has_keys: number }>();
       return res.results.map((row) => ({
         provider_id: row.provider_id,
         base_url: row.base_url,
         api: row.api as CustomProviderApi,
         model_ids: parseModelIdsJson(row.model_ids, "app_custom_providers.model_ids"),
+        has_keys: row.has_keys > 0,
       }));
     },
+
+    /**
+     * The settings-page key list of the custom-provider pools: the same
+     * per-key rows listCustomProviders' built-in counterpart serves —
+     * provider + derived key id + masked tail + bookkeeping, ordered by
+     * provider then pool order (created_at, key_id). `provider` scopes the
+     * read to one declaration's pool. Key material never appears here.
+     */
+    async listCustomProviderKeys(appId: string, provider?: string): Promise<ProviderKeySummary[]> {
+      const rows = await readKeyRows(CUSTOM_KEY_TABLE, appId, provider);
+      const summary: ProviderKeySummary[] = [];
+      for (const row of rows) {
+        summary.push(await summarizeKeyRow(CUSTOM_KEY_TABLE, row));
+      }
+      return summary;
+    },
+
+    /**
+     * Add one key to a DECLARED custom provider's pool — the unverified path
+     * (upsertCustomProvider is the declaration-time verified one). The
+     * declaration is read first: an undeclared provider id throws
+     * InvalidCustomProviderError, because a key row without its declaration is
+     * unreachable data and a silent orphan is worse than a loud refusal (the
+     * "an unknown app_id is a caller bug" convention). Bounds/cap contract
+     * identical to addProviderKey.
+     */
+    async addCustomProviderKey(appId: string, providerId: string, plainKey: string): Promise<void> {
+      const declared = await db
+        .prepare(`SELECT provider_id FROM app_custom_providers WHERE app_id = ? AND provider_id = ?`)
+        .bind(appId, providerId)
+        .first<{ provider_id: string }>();
+      if (declared === null) {
+        throw new InvalidCustomProviderError(`custom provider ${JSON.stringify(providerId)} is not declared for this app`);
+      }
+      await addKey(CUSTOM_KEY_TABLE, appId, providerId, plainKey, { verified: false });
+    },
+
+    /**
+     * Delete ONE key slot of a custom-provider pool. Returns whether THIS call
+     * removed a row (an unknown key id — or an undeclared provider — is an
+     * idempotent no-op returning false). Custom providers keep no model cache
+     * row (0015), so there is nothing else to sweep.
+     */
+    async deleteCustomProviderKey(appId: string, providerId: string, keyId: string): Promise<boolean> {
+      // Promote the pool FIRST — same 0024 sentinel reason as deleteProviderKey.
+      await readKeyRows(CUSTOM_KEY_TABLE, appId, providerId);
+      const res = await db
+        .prepare(`DELETE FROM app_custom_provider_keys WHERE app_id = ? AND provider = ? AND key_id = ?`)
+        .bind(appId, providerId, keyId)
+        .run();
+      return res.meta.changes > 0;
+    },
+
     /**
      * Decrypt the App's custom-provider declarations for the consumer
      * (the models-synthesis face): the getAppConfig analogue for
-     * app_custom_providers — every declaration plus its decrypted key,
-     * provider_id-ascending. An undecryptable row throws (tamper /
-     * misconfiguration is never swallowed, the getAppConfig convention).
-     * The settings list face (listCustomProviders) stays decrypt-free.
+     * app_custom_providers — every declaration plus its DECRYPTED key pool,
+     * provider_id-ascending and each pool in pool order (created_at, key_id).
+     * The declaration and its key rows come from ONE statement (ONE snapshot),
+     * so a concurrent remove + re-declaration at another endpoint can never
+     * pair the old base_url with the new credentials (A2); the legacy
+     * promotion below runs from that same captured snapshot. An undecryptable
+     * row throws (tamper / misconfiguration is never swallowed, the
+     * getAppConfig convention). The settings list faces (listCustomProviders /
+     * listCustomProviderKeys) stay decrypt-free.
      */
     async getCustomProvidersForConsumer(appId: string): Promise<CustomProviderConsumerConfig[]> {
       const res = await db
-        .prepare(`SELECT * FROM app_custom_providers WHERE app_id = ? ORDER BY provider_id ASC`)
+        .prepare(
+          `SELECT d.provider_id, d.base_url, d.api, d.model_ids,
+                  k.key_id, k.key_enc, k.created_at AS key_created_at, k.updated_at AS key_updated_at,
+                  k.verified_at AS key_verified_at, k.verified_status AS key_verified_status
+             FROM app_custom_providers d
+             LEFT JOIN app_custom_provider_keys k
+               ON k.app_id = d.app_id AND k.provider = d.provider_id
+            WHERE d.app_id = ?
+            ORDER BY d.provider_id ASC`,
+        )
         .bind(appId)
-        .all<AppCustomProviderRow>();
-      const out: CustomProviderConsumerConfig[] = [];
+        .all<CustomProviderKeyJoinRow>();
+      const pools = new Map<string, { decl: Omit<CustomProviderConsumerConfig, "api_keys">; keys: AppProviderKeyRow[] }>();
       for (const row of res.results) {
-        out.push({
-          provider_id: row.provider_id,
-          base_url: row.base_url,
-          api: row.api as CustomProviderApi,
-          model_ids: parseModelIdsJson(row.model_ids, "app_custom_providers.model_ids"),
-          api_key: await box.decryptSecret(row.api_key_enc, customProviderAad(row.app_id, row.provider_id)),
+        let entry = pools.get(row.provider_id);
+        if (entry === undefined) {
+          entry = {
+            decl: {
+              provider_id: row.provider_id,
+              base_url: row.base_url,
+              api: row.api as CustomProviderApi,
+              model_ids: parseModelIdsJson(row.model_ids, "app_custom_providers.model_ids"),
+            },
+            keys: [],
+          };
+          pools.set(row.provider_id, entry);
+        }
+        // A declaration with an empty pool carries no key columns (LEFT JOIN).
+        if (row.key_id === null) continue;
+        entry.keys.push({
+          app_id: appId,
+          provider: row.provider_id,
+          key_id: row.key_id,
+          key_enc: row.key_enc ?? "",
+          created_at: row.key_created_at ?? "",
+          updated_at: row.key_updated_at,
+          verified_at: row.key_verified_at,
+          verified_status: row.key_verified_status,
         });
+      }
+      const out: CustomProviderConsumerConfig[] = [];
+      for (const { decl, keys } of pools.values()) {
+        // Sorted AFTER promotion, so a 0024-carried row lands where its derived
+        // id puts it on every read (not where the empty sentinel sorted once).
+        keys.sort((left, right) => byAscii(left.created_at, right.created_at) || byAscii(left.key_id, right.key_id));
+        const apiKeys: string[] = [];
+        for (const row of keys) {
+          const promoted = row.key_id === LEGACY_KEY_ID ? await promoteLegacyKeyRow(CUSTOM_KEY_TABLE, row) : row;
+          apiKeys.push(
+            await box.decryptSecret(promoted.key_enc, CUSTOM_KEY_TABLE.aad(appId, row.provider, promoted.key_id)),
+          );
+        }
+        out.push({ ...decl, api_keys: apiKeys });
       }
       return out;
     },

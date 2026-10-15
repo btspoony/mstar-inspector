@@ -13,8 +13,8 @@
  * payload; plus the resolved image's capability hosts (the
  * in-image synthesis base) → exec the
  * in-image runner `--level <quick|default|deep>` (exec env =
- * ARK_API_KEY/PI_CODING_AGENT_DIR/HARNESS_PLUGIN_ROOT + OMP_REVIEW_MODEL and
- * configured provider keys — every key and the model chain come ONLY from
+ * provider credential pools + PI_CODING_AGENT_DIR/HARNESS_PLUGIN_ROOT +
+ * OMP_REVIEW_MODEL; all key material and the model chain come ONLY from
  * the App's own per-App config (AL-24-5 zero global fallback: an App missing
  * its model chain or a chain provider's key fails closed after App
  * resolution via the F-001 channel — review failed log + review_failures
@@ -80,7 +80,8 @@ import { idemKey, IDEMPOTENCY_SECONDS, type IdempotencyKey } from "../contracts/
 import { parseReviewOutput, capFindings, clampFindingSizes } from "../review/schema";
 import type { ReviewFinding, ReviewOutput } from "../review/schema";
 import { isReviewLevel, REVIEW_LEVELS, type CustomProviderDeclaration, type ReviewLevel } from "../review/runtime";
-import { providerEnvName, customProviderEnvName } from "./provider-catalog";
+import { providerEnvName } from "./provider-catalog";
+import { encodeCredentialPayload, type CredentialPools } from "../review/credential-payload";
 import { redactExactSecrets, redactReviewOutput, redactReviewOutputExact, redactSecrets } from "./redact";
 import { createArtifactStore, previousRoundFingerprints, type D1ArtifactStore } from "../store/artifact-store";
 import { createFailureStore, type FailureStage, type FailureStore } from "../store/failure-store";
@@ -1390,18 +1391,12 @@ function toBase64Utf8(text: string): string {
 }
 
 /**
- * Per-App AI configuration for the runner exec env — the
- * `getAppConfig` decrypt face of src/dashboard/app-config-store.ts narrowed
- * to what assembly consumes. `keys` maps provider id → DECRYPTED plaintext
- * key (only providers with a stored row appear); `modelChain` is the verbatim
- * stored selector chain. AL-24-5 zero global fallback: a missing/blank chain
- * or a chain provider without a key in THIS App's own config (BYOK allowlist
- * key or custom declaration) fails closed — assertAppConfigComplete throws
- * and the review never runs (F-001 channel); there is NO deployment-level
- * chain or key to fall back to (input bounds: falsy/blank = unset).
+ * Per-App AI configuration for the runner exec env. `keys` maps provider id
+ * to decrypted key pools in store order; modelChain is the verbatim stored
+ * selector chain. Missing chains or keyless chain providers fail closed.
  */
 export type RunnerAppConfig = {
-  keys: Record<string, string>;
+  keys: Record<string, string[]>;
   modelChain: string | null;
 };
 
@@ -1526,9 +1521,9 @@ async function resolveCustomProviders(
  * appear via a direct DB write or a registry contraction, and it must never
  * start a sandbox. Runs BEFORE the in-flight guard / sandbox (zero side
  * effects on failure, F-001 structured channel via the caller's catch) and
- * BEFORE `assertAppConfigComplete`, which consumes the resolved hosts for its
- * `neededEnvName` mapping; the definition's hosts also ride the runner input
- * as the synthesis base (`capabilityHosts`). Re-read per message (no cache)
+ * BEFORE `assertAppConfigComplete`, which resolves host ids to catalog
+ * provider ids; the definition's hosts also ride the runner input as the
+ * synthesis base (`capabilityHosts`). Re-read per message (no cache)
  * so a dashboard image update applies to the very next review.
  */
 async function resolveSandboxImage(payload: ReviewJobPayload, deps: ProcessDeps): Promise<SandboxImageDefinition> {
@@ -1554,9 +1549,8 @@ async function resolveSandboxImage(payload: ReviewJobPayload, deps: ProcessDeps)
 
 /**
  * The runner-input projection of one consumer config: the declaration with
- * the API key STRIPPED. Keys ride ONLY the container exec env under
- * CUSTOM_<UPPER_SNAKE(id)>_API_KEY — a key literal must never reach the
- * runner input JSON, the synthesized models.yml, or any log line.
+ * the API keys stripped. Provider keys ride only the runner's stdin credential
+ * payload (under the declaration's own provider id).
  */
 function toRunnerCustomProvider(provider: CustomProviderConsumerConfig): CustomProviderDeclaration {
   return {
@@ -1580,7 +1574,7 @@ function toRunnerCustomProvider(provider: CustomProviderConsumerConfig): CustomP
  * the only contributor left. This is THE chain single source — used by BOTH
  * `buildRunnerEnv` (step 3) and the version-record put below, so the
  * recorded model can never drift from the chain the runner actually saw
- * (the chain rides the exec env, never the runner input JSON).
+ * (the chain rides the exec env — a non-secret — never the runner input JSON).
  */
 export function effectiveModelChain(
   appCfg: RunnerAppConfig | undefined,
@@ -1616,10 +1610,8 @@ function chainHeadSelector(chain: string | undefined): string | null {
  * Fail-closed per-App configuration gate (AL-24-5 — zero
  * global fallback): the App's modelChain is the ONLY chain source and every
  * provider on the chain must have a key source in the App's OWN config — a
- * BYOK allowlist key (app_provider_keys, provider id → env name via the
- * PROVIDERS mapping, now including `ark` → ARK_API_KEY for the ark-plan
- * capability host) or a custom declaration with a non-blank key
- * (CUSTOM_<ID>_API_KEY). The SAME key-source requirement applies to every
+ * BYOK allowlist pool (app_provider_keys, provider id) or a custom
+ * declaration with a non-blank key pool. The SAME requirement applies to
  * selector of every per-role override chain (Bugbot 7aaf18f4): a role
  * override referencing a provider with no configured key must fail closed
  * here, never after the runner clones/starts (the F-001 channel is the
@@ -1633,9 +1625,8 @@ function chainHeadSelector(chain: string | undefined): string | null {
  *
  * `sandboxImage` is the App's resolved registry entry
  * (resolveSandboxImage): a chain provider id that is one of its capability
- * hosts (e.g. omp's `ark-plan`) maps to that host's catalog provider env
- * name (`catalogProviderId` → PROVIDERS envName, ARK_API_KEY) — capability
- * hosts are runtime capabilities of the selected image, not App config.
+ * hosts (e.g. omp's `ark-plan`) maps to that host's catalog provider id.
+ * Capability hosts are runtime capabilities of the selected image, not App
  */
 function assertAppConfigComplete(
   appCfg: RunnerAppConfig,
@@ -1657,33 +1648,17 @@ function assertAppConfigComplete(
   }
   // The env names the App's OWN config can supply: allowlisted BYOK keys
   // (provider id → envName — non-blank values only) + custom declarations.
-  const availableEnvNames = new Set<string>();
-  for (const [provider, plainKey] of Object.entries(appCfg.keys)) {
-    if (plainKey.trim() === "") continue;
-    const envName = providerEnvName(provider);
-    if (envName !== undefined) availableEnvNames.add(envName);
+  const availableProviders = new Set<string>();
+  for (const [provider, keys] of Object.entries(appCfg.keys)) {
+    if (providerEnvName(provider) !== undefined && keys.some((key) => key.trim() !== "")) {
+      availableProviders.add(provider);
+    }
   }
   for (const decl of customProviders ?? []) {
-    if (decl.api_key.trim() === "") continue;
-    availableEnvNames.add(customProviderEnvName(decl.provider_id));
+    if (decl.api_keys.some((key) => key.trim() !== "")) availableProviders.add(decl.provider_id);
   }
-  // The env name a chain provider's key must arrive under — the same chain
-  // grammar as the runner's parseModelSelectors (comma-separated selectors,
-  // provider = the segment before the first `/`): an allowlisted id → its
-  // mapped env name; a capability host of the App's RESOLVED sandbox image
-  // (the closed registry, e.g. omp's `ark-plan`, whose apiKeyEnv ARK_API_KEY
-  // rides catalogProviderId `ark`) → that catalog entry's env name;
-  // anything else → a custom provider's CUSTOM_<ID>_API_KEY env name.
-  const hostEnvNames = new Map(
-    sandboxImage.hosts.map((host) => [host.id, providerEnvName(host.catalogProviderId)]),
-  );
-  const neededEnvName = (provider: string): string => {
-    const allowlisted = providerEnvName(provider);
-    if (allowlisted !== undefined) return allowlisted;
-    const hostEnv = hostEnvNames.get(provider);
-    if (hostEnv !== undefined) return hostEnv;
-    return customProviderEnvName(provider);
-  };
+  const hostProviders = new Map(sandboxImage.hosts.map((host) => [host.id, host.catalogProviderId]));
+  const neededProvider = (provider: string): string => hostProviders.get(provider) ?? provider;
   // Every chain that must resolve to configured keys: the App's modelChain
   // plus each per-role override's selector chain (Bugbot 7aaf18f4 — the
   // app_model_roles selectors reach the runner as the `modelOverrides`
@@ -1722,7 +1697,7 @@ function assertAppConfigComplete(
       const selector = segment.trim();
       if (selector === "") continue; // the runner drops empty segments too
       const provider = selector.split("/")[0]!.trim();
-      if (!availableEnvNames.has(neededEnvName(provider))) {
+      if (!availableProviders.has(neededProvider(provider))) {
         const where = role === null ? "" : `role override \`${role}\` `;
         throw new Error(
           `per-App config incomplete: app ${appId}: ${where}provider ${provider} has no configured key`,
@@ -1733,63 +1708,67 @@ function assertAppConfigComplete(
 }
 
 /**
- * Build the in-image runner exec env (step 8): the harness paths (compass D
- * — secrets never baked into the image) plus the provider keys and the model
- * chain, which come from the App's per-App config ONLY (AL-24-5 — zero
- * global fallback: the OMP_MODEL_KEY / global OMP_REVIEW_MODEL /
- * per-provider Worker-secret forwarding surface is retired; there is no
- * Worker-env key to pick up).
- *
- * Per-App assembly (per-App messages only): every App-stored
- * key is injected under its PROVIDERS-mapped env name (skipped when
- * empty/whitespace; a provider id outside the allowlist is skipped with a
- * structured warn — log hygiene — that carries the id + app_id,
- * never key material). The `ark` entry maps the in-image ark-plan base
- * provider's ARK_API_KEY, so the ark key rides the SAME per-App keys map as
- * every other provider. The App's verbatim modelChain becomes the exec env
- * OMP_REVIEW_MODEL (the runner's only chain channel — transport unchanged
- * per the Interfaces contract); assertAppConfigComplete has already fail-closed any
- * App whose chain provider lacks a key, so a chain reaching this point is
- * complete. Every injected key is logged with `key_source: app|custom` (the
- * source, never the key), and the assembly logs `config_source: "app"` (the
- * only remaining source). The function builds a FRESH object per call and
- * never mutates its inputs or any module-level record, so key material
- * cannot leak across Apps structurally.
- *
- * Custom-provider keys (`customProviders` — the DECRYPTED
- * getCustomProvidersForConsumer configs, per-App messages only): each key is
- * injected under CUSTOM_<UPPER_SNAKE(provider_id)>_API_KEY — the exact env
- * name the runner's synthesized models.yml references (`apiKey:
- * CUSTOM_<ID>_API_KEY`; omp resolves env first, literal fallback, so the
- * injection closes the AL-23-1 "declaration ⇒ key ⇒ env" loop). A
- * blank/whitespace key (a direct-DB write the store never saw — the store
- * backstop rejects empty keys) is skipped with a structured warn: the
- * models.yml reference then dangles and the provider auth fails LOUD at call
- * time, never a junk key. Every custom injection logs `key_source: "custom"`
- * with the id + env name, NEVER the key.
+ * Build the runner exec env: harness paths + the App's verbatim model chain.
+ * It carries NO credential — provider keys ride the stdin payload
+ * (`buildRunnerCredentials`), never the process environment.
  */
-export function buildRunnerEnv(
-  appCfg: RunnerAppConfig,
-  log?: ConsumerLog,
-  fields?: ConsumerLogFields,
-  customProviders?: readonly CustomProviderConsumerConfig[],
-): Record<string, string> {
+export function buildRunnerEnv(appCfg: RunnerAppConfig): Record<string, string> {
   const runnerEnv: Record<string, string> = {
     HARNESS_PLUGIN_ROOT: HARNESS_ROOT,
     PI_CODING_AGENT_DIR: OMP_AGENT_DIR,
   };
+  // The App's verbatim chain forwards VERBATIM (the guard only decides
+  // unset-vs-set; it never mutates the value; the runner-side selector parse
+  // trims segments). A blank chain cannot reach production — the
+  // assertAppConfigComplete gate fails the message before the guard. The
+  // precedence lives in effectiveModelChain (ONE resolution shared with the
+  // version-record put — no re-resolution split-brain).
+  const { chain } = effectiveModelChain(appCfg);
+  if (chain !== undefined) {
+    runnerEnv.OMP_REVIEW_MODEL = chain;
+  }
+  return runnerEnv;
+}
+
+/**
+ * Build the runner's credential transport: the versioned stdin payload
+ * (./../review/credential-payload) plus the exact key VALUES it carries — the
+ * SEC-01 exact-redaction list. ONE resolution serves both, so the recorded
+ * secret list can never drift from the keys the session actually saw.
+ *
+ * Provider id (the App-config key space) → ordered pool, in store order: the
+ * allowlisted BYOK ids first, then the App's custom declarations. Blank values
+ * never ride, and a pool with none left is not transported at all. `payload`
+ * is `undefined` when nothing was transported (the keyless run shape). Key
+ * values live only in this payload and are never logged.
+ */
+export function buildRunnerCredentials(
+  appCfg: RunnerAppConfig,
+  log?: ConsumerLog,
+  fields?: ConsumerLogFields,
+  customProviders?: readonly CustomProviderConsumerConfig[],
+): { payload: string | undefined; keyValues: string[] } {
   // Log only when the caller supplied BOTH the sink and the identity fields
   // (the consumer flow does; direct unit calls may omit them).
   const emit = log !== undefined && fields !== undefined;
-  // 1. The App's own BYOK keys, mapped through the PROVIDERS allowlist. A
-  //    provider id without a mapping has no env name — it is never injected,
-  //    and the skip is no longer silent (log hygiene hardening item 3): the
-  //    rogue id rides a structured warn (an id + app_id, NEVER key material)
-  //    so the operator can see a stored credential going unused.
+  const pools: CredentialPools = {};
+  const keyValues: string[] = [];
   let appKeys = 0;
-  for (const [provider, plainKey] of Object.entries(appCfg.keys)) {
-    const envName = providerEnvName(provider);
-    if (envName === undefined) {
+  const addPool = (provider: string, rawKeys: readonly string[], source: "app" | "custom"): number => {
+    const keys = rawKeys.filter((key) => key.trim() !== "");
+    if (keys.length === 0) return 0;
+    pools[provider] = keys;
+    keyValues.push(...keys);
+    if (emit) {
+      log.info(
+        { ...fields, provider, key_source: source },
+        `provider key pool from App config: ${provider} (${keys.length} key(s))`,
+      );
+    }
+    return keys.length;
+  };
+  for (const [provider, keys] of Object.entries(appCfg.keys)) {
+    if (providerEnvName(provider) === undefined) {
       if (emit) {
         log.warn(
           { ...fields, provider },
@@ -1798,67 +1777,33 @@ export function buildRunnerEnv(
       }
       continue;
     }
-    if (plainKey.trim() === "") continue;
-    runnerEnv[envName] = plainKey;
-    appKeys += 1;
-    if (emit) {
-      log.info({ ...fields, provider, key_source: "app" }, `provider key from App config: ${envName}`);
-    }
+    appKeys += addPool(provider, keys, "app");
   }
-  // 2. Custom-provider keys (AL-23-1): each declaration's
-  //    decrypted key under CUSTOM_<UPPER_SNAKE(provider_id)>_API_KEY — the
-  //    env name the synthesized models.yml references. Only per-App
-  //    messages carry declarations (resolveCustomProviders).
-  //    key_source: "custom" logs the id + env name, NEVER the key.
-  if (customProviders !== undefined && customProviders.length > 0) {
-    for (const decl of customProviders) {
-      const envName = customProviderEnvName(decl.provider_id);
-      if (decl.api_key.trim() === "") {
-        if (emit) {
-          log.warn(
-            { ...fields, provider: decl.provider_id, key_source: "custom" },
-            `custom provider key is blank — ${envName} not injected (provider auth will fail loud)`,
-          );
-        }
-        continue;
-      }
-      runnerEnv[envName] = decl.api_key;
-      if (emit) {
-        log.info(
-          { ...fields, provider: decl.provider_id, key_source: "custom" },
-          `custom provider key from App config: ${envName}`,
-        );
-      }
+  for (const decl of customProviders ?? []) {
+    if (addPool(decl.provider_id, decl.api_keys, "custom") === 0 && emit) {
+      log.warn(
+        { ...fields, provider: decl.provider_id, key_source: "custom" },
+        "custom provider key pool is empty — no keys transported",
+      );
     }
-  }
-  // 3. Model chain: the App's verbatim chain forwards VERBATIM (the guard
-  //    only decides unset-vs-set; it never mutates the value; the runner-side
-  //    selector parse trims segments). A blank chain cannot reach production
-  //    — assertAppConfigComplete fails the message before the guard — but
-  //    direct unit calls keep the unset→omit guard (the in-image runner then
-  //    falls back to its DEFAULT_MODEL_PATTERN scaffold). The precedence
-  //    lives in effectiveModelChain (ONE resolution shared
-  //    with the version-record put — no re-resolution split-brain).
-  const { chain } = effectiveModelChain(appCfg);
-  if (chain !== undefined) {
-    runnerEnv.OMP_REVIEW_MODEL = chain;
   }
   if (emit) {
     const customCount = customProviders?.length ?? 0;
     log.info(
       { ...fields, config_source: "app" },
-      `per-App env assembly: ${appKeys} provider key(s) from App config, ${customCount} custom` +
-        `${chain !== undefined ? ", model chain from App config" : ""}`,
+      `per-App credential payload: ${appKeys} provider key(s) from App config, ${customCount} custom` +
+        `${effectiveModelChain(appCfg).chain !== undefined ? ", model chain from App config" : ""}`,
     );
   }
-  return runnerEnv;
+  return {
+    payload: Object.keys(pools).length === 0 ? undefined : encodeCredentialPayload(pools),
+    keyValues,
+  };
 }
 
 /**
- * Exec-env names that are configuration/paths, not credentials — the
- * exact-redact skip list (qc1 S-3): the model chain (OMP_REVIEW_MODEL) and
- * the two compile-time image paths. A future redaction-policy change
- * (e.g. redacting the chain string) edits this single list.
+ * Exec-env names that are configuration/paths, not credentials — the only
+ * values the runner exec env carries now that keys ride the stdin payload.
  */
 const RUNNER_EXEC_ENV_PASSTHROUGH_NAMES: readonly string[] = [
   "OMP_REVIEW_MODEL",
@@ -1867,22 +1812,17 @@ const RUNNER_EXEC_ENV_PASSTHROUGH_NAMES: readonly string[] = [
 ];
 
 /**
- * The ACTUAL secret values one review session used (SEC-01 exact-value
- * defense): every credential-shaped value the runner env carried — the App's
- * provider-key entries (BYOK keys incl. ARK_API_KEY, all injected from the
- * per-App keys map via buildRunnerEnv — AL-24-5: there are no global keys;
- * the exact-redact mechanism is unchanged) — plus the installation token
- * minted for the session. These are the values a prompt-injected model could
- * echo verbatim; redactExactSecrets removes them even when they evade every
- * shape pattern. The list is derived from the SAME buildRunnerEnv result the
- * runner exec used (no re-resolution split-brain) and the token minted above.
+ * The ACTUAL secret values one review session carried (SEC-01 exact-value
+ * defense): every provider key the credential payload transported — the values
+ * a prompt-injected model could echo verbatim — plus the installation token
+ * minted for the session. `redactExactSecrets` removes them even when they
+ * evade every shape pattern. The key list is the SAME resolution the runner
+ * exec used (no re-resolution split-brain).
  */
-function sessionSecretValues(runnerEnv: Record<string, string>, token: string): string[] {
-  const values: string[] = [token];
+function sessionSecretValues(runnerEnv: Record<string, string>, keyValues: readonly string[], token: string): string[] {
+  const values: string[] = [token, ...keyValues];
   for (const [name, value] of Object.entries(runnerEnv)) {
-    if (RUNNER_EXEC_ENV_PASSTHROUGH_NAMES.includes(name)) {
-      continue; // configuration/paths, not credentials
-    }
+    if (RUNNER_EXEC_ENV_PASSTHROUGH_NAMES.includes(name)) continue;
     if (value !== "") values.push(value);
   }
   return values;
@@ -2114,9 +2054,9 @@ async function processMessage(payload: ReviewJobPayload, deps: ProcessDeps): Pro
     // Custom-provider declarations: hangs off the SAME
     // appRef gate, before the guard like the config/overrides above —
     // undefined (no declarations) → the runner input JSON stays
-    // byte-identical and no CUSTOM_* env is injected. The decrypt face is
-    // fail-loud (tamper never swallowed): a broken envelope throws here
-    // with zero side effects, never a silently-skipped provider.
+    // byte-identical and no custom-provider pool env is injected. The
+    // decrypt face is fail-loud (tamper never swallowed): a broken envelope
+    // throws here with zero side effects, never a silently-skipped provider.
     const customProviders = await resolveCustomProviders(payload, deps);
     // The App's sandbox image: resolves the stored
     // github_apps.sandbox_image_id through the CLOSED registry and fails
@@ -2491,21 +2431,23 @@ async function processMessage(payload: ReviewJobPayload, deps: ProcessDeps): Pro
       throw new Error(`runner input write failed: exit ${writeInput.exitCode}`);
     }
 
-    // 8. In-image runner: cwd = clone dir; harness paths + the App's own
-    // provider keys and model chain via exec env (buildRunnerEnv — compass
-    // D, AL-24-5: per-App BYOK only, zero global fallback; key_source
-    // app|custom logging; secrets never baked into the image, never in
-    // logs). The runtime runner has NO summary-degrade path: exit 0 ⇒ stdout
-    // is the engine-validated mstar.review/v1 envelope.
+    // 8. In-image runner: cwd = clone dir; harness paths + the App's model
+    // chain via exec env, and the App's own provider keys via the exec STDIN
+    // credential payload (compass D, AL-24-5: per-App BYOK only, zero global
+    // fallback; key_source app|custom logging; secrets never baked into the
+    // image, never in logs, never in the process environment). The runtime
+    // runner has NO summary-degrade path: exit 0 ⇒ stdout is the
+    // engine-validated mstar.review/v1 envelope.
     // AL-6 stage window: the review run itself — a non-zero exit or an exec
     // exception (timeout / container error) here classifies "runner".
     failureStage = "runner";
     runnerStartedAt = Date.now();
-    // SEC-01 exact-value defense: the SAME env object the runner exec used
-    // is captured here (single source — no re-resolution split-brain) so
-    // the session's actual secret values can be exact-redacted from any
-    // model-echoed output below.
-    const runnerEnv = buildRunnerEnv(appCfg, deps.log, fields, customProviders);
+    // SEC-01 exact-value defense: the SAME credential resolution the runner
+    // exec used is captured here (single source — no re-resolution
+    // split-brain) so the session's actual secret values can be
+    // exact-redacted from any model-echoed output below.
+    const runnerEnv = buildRunnerEnv(appCfg);
+    const credentials = buildRunnerCredentials(appCfg, deps.log, fields, customProviders);
     // §7.8: with a recheck input the runner gains `--recheck-out` — the seat
     // writes its validated document to the audited fixed path before the
     // envelope reaches stdout.
@@ -2516,6 +2458,9 @@ async function processMessage(payload: ReviewJobPayload, deps: ProcessDeps): Pro
     const run = await sandbox.runCommand(runnerCmd, {
       cwd: CLONE_DIR,
       env: runnerEnv,
+      // The credential payload rides the exec STDIN pipe — present only when
+      // the App actually transported a key (keyless run shape = no stdin).
+      ...(credentials.payload === undefined ? {} : { stdin: credentials.payload }),
       timeout: runnerTimeoutMs(level),
     });
     const runnerElapsedMs = Date.now() - runnerStartedAt;
@@ -2531,9 +2476,9 @@ async function processMessage(payload: ReviewJobPayload, deps: ProcessDeps): Pro
       `runner finished in ${runnerElapsedMs}ms (budget ${runnerTimeoutMs(level)}ms)`,
     );
     // SEC-01 exact-value defense: the session's ACTUAL secret values
-    // (runner env provider keys + the minted installation token) — shared
-    // by the degrade path and the success path below.
-    secretValues = sessionSecretValues(runnerEnv, token);
+    // (the transported provider keys + the minted installation token) —
+    // shared by the degrade path and the success path below.
+    secretValues = sessionSecretValues(runnerEnv, credentials.keyValues, token);
 
     // AL-6 stage window: post-runner steps (parse has its own branch; the
     // post/KV/put orchestration is worker-side) are "pipeline" again.

@@ -3,11 +3,13 @@
  *
  * The consumer resolves the App's AI config (`getAppConfig` decrypt face, ONE
  * read per message) off the SAME appRef resolution as the commenter and feeds
- * it into `buildRunnerEnv(appCfg, log, fields)` at the runner exec step:
- *   - the App's OWN keys are injected under the PROVIDERS-mapped env name
- *     (empty/whitespace keys and unknown provider ids never inject); the
- *     `ark` entry maps the in-image ark-plan base provider's ARK_API_KEY, so
- *     that key rides the same per-App keys map (AL-24-5);
+ * it into the runner exec (buildRunnerEnv for the harness paths + chain,
+ * buildRunnerCredentials for the stdin credential payload):
+ *   - the App's OWN keys ride the credential payload as one pool per provider
+ *     under that provider id (empty/whitespace keys and unknown provider ids
+ *     never transport); the `ark` entry feeds the in-image
+ *     ark-plan base provider's pool, so that key rides
+ *     the same per-App pool (AL-24-5);
  *   - an App model chain becomes the runner's OMP_REVIEW_MODEL verbatim;
  *     null/""/whitespace-only = unset → the App's reviews FAIL CLOSED
  *     (assertAppConfigComplete — no deployment-level chain exists);
@@ -53,7 +55,7 @@ import type { ConsumerLog, ConsumerLogFields, PipelineEnv } from "../../src/pipe
 const TEST_KEY = Buffer.alloc(32, 11).toString("base64");
 const PEM_X = fakePem("FAKE-APP-X-PEM");
 const SHA = "0123456789abcdef0123456789abcdef01234567";
-/** The seeded `ark` BYOK key — ARK_API_KEY for the in-image ark-plan provider (AL-24-5). */
+/** The seeded `ark` BYOK key — the payload's `ark` pool for the in-image ark-plan provider (AL-24-5). */
 const ARK_KEY = "ark-key";
 
 const VALID_OUTPUT: ReviewOutput = {
@@ -100,9 +102,9 @@ async function seedApp(
 /**
  * Seed the per-App AI-config health baseline (AL-24-5): a model chain
  * (`ark-plan/deepseek-v4-flash` — the in-image base provider) plus the `ark`
- * BYOK key (ARK_API_KEY) its chain needs. `extraKeys` adds more per-App keys
- * (e.g. a chain that also references openai/anthropic). Uses the REAL store
- * so encrypt/decrypt exercise the composite-PK AAD path.
+ * BYOK key (the payload's `ark` pool) its chain needs. `extraKeys` adds further
+ * per-App keys (e.g. a chain that also references openai/anthropic). Uses
+ * the REAL store so encrypt/decrypt exercise the composite-PK AAD path.
  */
 async function configureApp(
   db: ReturnType<typeof createMigratedTestD1>,
@@ -112,9 +114,9 @@ async function configureApp(
 ): Promise<void> {
   const store = createAppConfigStore(db, TEST_KEY);
   await store.setModelChain(appId, chain);
-  await store.setProviderKey(appId, "ark", ARK_KEY);
+  await store.addProviderKey(appId, "ark", ARK_KEY);
   for (const [provider, key] of Object.entries(extraKeys)) {
-    await store.setProviderKey(appId, provider, key);
+    await store.addProviderKey(appId, provider, key);
   }
 }
 
@@ -150,8 +152,8 @@ async function seedTamperedKey(
   );
   db.raw
     .prepare(
-      `INSERT INTO app_provider_keys (app_id, provider, key_enc, created_at)
-       VALUES (?, ?, ?, datetime('now'))`,
+      `INSERT INTO app_provider_keys (app_id, provider, key_id, key_enc, created_at)
+       VALUES (?, ?, 'deadbeefdeadbeef', ?, datetime('now'))`,
     )
     .run(appId, provider, keyEnc);
 }
@@ -320,6 +322,21 @@ function runnerEnvs(): Array<Record<string, string>> {
 }
 
 /**
+ * The credential POOLS one runner exec transported over STDIN, in message order
+ * — the only credential channel. `undefined` = no pool transported (keyless).
+ */
+function runnerPools(): Array<Record<string, string[]> | undefined> {
+  return sandboxCalls
+    .filter((c) => c.cmd.includes("bun run"))
+    .map((c) => {
+      const stdin = (c.opts as { stdin?: string }).stdin;
+      return stdin === undefined
+        ? undefined
+        : (JSON.parse(stdin) as { version: number; pools: Record<string, string[]> }).pools;
+    });
+}
+
+/**
  * The DECODED runner input JSON payloads, in write order (one per
  * `printf … | base64 -d > '/workspace/review-input.json'` step — the runner
  * exec command references the same path but carries no base64 payload).
@@ -340,7 +357,7 @@ function keySourceLines(): Array<{ fields: ConsumerLogFields; msg: string }> {
 }
 
 describe("per-App runner env assembly (spec § Per-App BYOK)", () => {
-  test("app-key: the App's own keys inject under their PROVIDERS env names (per-App BYOK, incl. ark → ARK_API_KEY)", async () => {
+  test("app-key: the App's own keys ride the credential payload (per-App BYOK, incl. ark → the ark-plan pool)", async () => {
     reset();
     const db = createMigratedTestD1();
     const appX = await seedApp(db, "app-x");
@@ -353,12 +370,18 @@ describe("per-App runner env assembly (spec § Per-App BYOK)", () => {
     await consumer(makeBatch(makePayload({ appRef: { appId: appX.id } })));
 
     const env = runnerEnvs()[0]!;
-    expect(env.ANTHROPIC_API_KEY).toBe(sk("app-x-SECRET"));
-    expect(env.OPENAI_API_KEY).toBe(sk("app-x-openai-SECRET"));
-    expect(env.ARK_API_KEY).toBe(ARK_KEY); // the ark BYOK key rides the same keys map
+    const pools = runnerPools()[0]!;
+    expect(pools.anthropic).toEqual([sk("app-x-SECRET")]);
+    expect(pools.openai).toEqual([sk("app-x-openai-SECRET")]);
+    expect(pools.ark).toEqual([ARK_KEY]);
+    expect(env.ANTHROPIC_API_KEY).toBeUndefined();
+    expect(env.OPENAI_API_KEY).toBeUndefined();
+    expect(env.ARK_API_KEY).toBeUndefined();
     expect(env.OMP_REVIEW_MODEL).toBe("openai/gpt-app,anthropic/claude-app");
-    // No global surface: a provider the App never configured stays absent.
-    expect(env.MISTRAL_API_KEY).toBeUndefined();
+    // The retired env channel: no provider pool name may reach the exec env.
+    expect(env.MSTAR_POOL_ARK_01).toBeUndefined();
+    expect(env.MSTAR_POOL_ANTHROPIC_COUNT).toBeUndefined();
+    expect(pools.mistral).toBeUndefined();
     // key_source: app for every injected key; config_source: the only source left.
     const sources = Object.fromEntries(keySourceLines().map((l) => [l.fields.provider, l.fields.key_source]));
     expect(sources).toEqual({ anthropic: "app", openai: "app", ark: "app" });
@@ -395,6 +418,26 @@ describe("per-App runner env assembly (spec § Per-App BYOK)", () => {
     expect(rows[0]!.error).toContain("provider openai has no configured key");
   });
 
+  test("two keys for one provider ride the payload as an ordered pair, with no scalar env name", async () => {
+    reset();
+    const db = createMigratedTestD1();
+    const appX = await seedApp(db, "pool-app");
+    await configureApp(db, appX.id, "openai/gpt-app");
+    const store = createAppConfigStore(db, TEST_KEY);
+    const keys = [sk("pool-one"), sk("pool-two")];
+    for (const key of keys) await store.addProviderKey(appX.id, "openai", key);
+    const expected = (await store.getAppConfig(appX.id)).keys.openai!;
+    const consumer = createReviewConsumer(makeEnv({ DB: db as never }), testLog, testOverrides);
+
+    await consumer(makeBatch(makePayload({ appRef: { appId: appX.id } })));
+
+    const env = runnerEnvs()[0]!;
+    // Store order IS transport order: the payload array is exactly the order
+    // the session's credential rows are written in.
+    expect(runnerPools()[0]!.openai).toEqual(expected);
+    expect(env.OPENAI_API_KEY).toBeUndefined();
+  });
+
   test("mixed per-App keys: every configured provider injects; unconfigured providers stay absent", async () => {
     reset();
     const db = createMigratedTestD1();
@@ -407,11 +450,11 @@ describe("per-App runner env assembly (spec § Per-App BYOK)", () => {
 
     await consumer(makeBatch(makePayload({ appRef: { appId: appX.id } })));
 
-    const env = runnerEnvs()[0]!;
-    expect(env.ANTHROPIC_API_KEY).toBe(sk("app-x-SECRET"));
-    expect(env.OPENAI_API_KEY).toBe(sk("app-x-openai-SECRET"));
-    expect(env.ARK_API_KEY).toBe(ARK_KEY);
-    expect(env.GROQ_API_KEY).toBeUndefined(); // not configured → no env key at all
+    const pools = runnerPools()[0]!;
+    expect(pools.anthropic).toEqual([sk("app-x-SECRET")]);
+    expect(pools.openai).toEqual([sk("app-x-openai-SECRET")]);
+    expect(pools.ark).toEqual([ARK_KEY]);
+    expect(pools.groq).toBeUndefined();
     const sources = Object.fromEntries(keySourceLines().map((l) => [l.fields.provider, l.fields.key_source]));
     expect(sources).toEqual({ anthropic: "app", openai: "app", ark: "app" });
     const cfgLine = logLines.find((l) => l.fields.config_source !== undefined);
@@ -500,12 +543,11 @@ describe("per-App runner env assembly (spec § Per-App BYOK)", () => {
          VALUES (?, 'default', ?, 1, datetime('now'), datetime('now'))`,
       )
       .run(appY.id, padded);
+    const store = createAppConfigStore(db, TEST_KEY);
+    await store.addProviderKey(appY.id, "openai", sk("y-o"));
+    await store.addProviderKey(appY.id, "anthropic", sk("y-a"));
     // Y's padded chain references openai/anthropic — provide their keys so
     // the fail-closed gate passes; X's whitespace-only chain = missing.
-    const store = createAppConfigStore(db, TEST_KEY);
-    await store.setProviderKey(appY.id, "ark", ARK_KEY);
-    await store.setProviderKey(appY.id, "openai", sk("y-o"));
-    await store.setProviderKey(appY.id, "anthropic", sk("y-a"));
     const consumer = createReviewConsumer(makeEnv({ DB: db as never }), testLog, testOverrides);
 
     // Y (padded real chain) FIRST so its review completes; X's blank chain
@@ -524,7 +566,7 @@ describe("per-App runner env assembly (spec § Per-App BYOK)", () => {
     // stored (the guard only decides unset-vs-set; it never mutates the value;
     // the runner-side selector parse trims segments).
     expect(yEnv.OMP_REVIEW_MODEL).toBe(padded);
-    expect(yEnv.OPENAI_API_KEY).toBe(sk("y-o"));
+    expect(runnerPools()[0]!.openai).toEqual([sk("y-o")]);
     const cfgLines = logLines.filter((l) => l.fields.config_source !== undefined);
     expect(cfgLines[0]?.fields.config_source).toBe("app");
     // X failed closed; Y's success row records Y's chain head.
@@ -597,24 +639,26 @@ describe("per-App runner env assembly (spec § Per-App BYOK)", () => {
     );
 
     const [xEnv, yEnv, xEnvAgain] = runnerEnvs() as [Record<string, string>, Record<string, string>, Record<string, string>];
+    const [xPools, yPools, xPoolsAgain] = runnerPools();
     expect(xEnv).toEqual({
-      ARK_API_KEY: ARK_KEY,
       HARNESS_PLUGIN_ROOT: "/opt/mstar-harness",
-      PI_CODING_AGENT_DIR: "/opt/omp-agent",
-      OPENAI_API_KEY: sk("x-openai-SECRET"),
       OMP_REVIEW_MODEL: "openai/gpt-app",
-    });
-    expect(yEnv).toEqual({
-      ARK_API_KEY: ARK_KEY,
-      HARNESS_PLUGIN_ROOT: "/opt/mstar-harness",
       PI_CODING_AGENT_DIR: "/opt/omp-agent",
-      ANTHROPIC_API_KEY: sk("y-anthropic-SECRET"),
-      OMP_REVIEW_MODEL: "anthropic/claude-app",
     });
-    expect(xEnvAgain).toEqual(xEnv);
-    // Belt and braces: neither env's values contain the other App's key.
+    expect(xPools).toEqual({ ark: [ARK_KEY], openai: [sk("x-openai-SECRET")] });
+    expect(yEnv).toEqual({
+      HARNESS_PLUGIN_ROOT: "/opt/mstar-harness",
+      OMP_REVIEW_MODEL: "anthropic/claude-app",
+      PI_CODING_AGENT_DIR: "/opt/omp-agent",
+    });
+    expect(yPools).toEqual({ ark: [ARK_KEY], anthropic: [sk("y-anthropic-SECRET")] });
+    expect(xPoolsAgain).toEqual(xPools);
+    // Belt and braces: neither App's transport carries the other App's key —
+    // neither in the exec env nor in the credential payload.
     expect(Object.values(xEnv)).not.toContain(sk("y-anthropic-SECRET"));
     expect(Object.values(yEnv)).not.toContain(sk("x-openai-SECRET"));
+    expect(JSON.stringify(xPools)).not.toContain(sk("y-anthropic-SECRET"));
+    expect(JSON.stringify(yPools)).not.toContain(sk("x-openai-SECRET"));
   });
 
   test("secrets never logged: key_source/config_source lines carry ids only, never key material", async () => {
@@ -690,17 +734,18 @@ describe("per-App runner env assembly (spec § Per-App BYOK)", () => {
     const db = createMigratedTestD1();
     const appX = await seedApp(db, "app-x");
     const store = createAppConfigStore(db, TEST_KEY);
-    await store.setProviderKey(appX.id, "anthropic", sk("v1-SECRET"));
+    await store.addProviderKey(appX.id, "anthropic", sk("v1-SECRET"));
     const consumer = createReviewConsumer(makeEnv({ DB: db as never }), testLog, testOverrides);
 
     await consumer(makeBatch(makePayload({ pr_number: 42, appRef: { appId: appX.id } })));
-    expect(runnerEnvs()[0]?.ANTHROPIC_API_KEY).toBe(sk("v1-SECRET"));
+    expect(runnerPools()[0]!.anthropic).toEqual([sk("v1-SECRET")]);
 
-    // Rotate the key in the dashboard (upsert) — no redeploy, no cache.
-    await store.setProviderKey(appX.id, "anthropic", sk("v2-SECRET"));
+    await store.addProviderKey(appX.id, "anthropic", sk("v2-SECRET"));
     await consumer(makeBatch(makePayload({ pr_number: 43, appRef: { appId: appX.id } })));
-    expect(runnerEnvs()[1]?.ANTHROPIC_API_KEY).toBe(sk("v2-SECRET"));
-    expect(JSON.stringify(runnerEnvs()[1])).not.toContain(sk("v1-SECRET"));
+    const second = runnerPools()[1]!.anthropic!;
+    expect(second).toHaveLength(2);
+    expect(second).toContain(sk("v1-SECRET"));
+    expect(second).toContain(sk("v2-SECRET"));
   });
 
   test("a provider id outside the PROVIDERS allowlist is never injected (no env name, no crash)", async () => {
@@ -709,18 +754,17 @@ describe("per-App runner env assembly (spec § Per-App BYOK)", () => {
     const appX = await seedApp(db, "app-x");
     // The store itself does not validate provider ids (routes do) — seed a
     // rogue row directly to pin the consumer's allowlist discipline.
-    await createAppConfigStore(db, TEST_KEY).setProviderKey(appX.id, "not-a-provider", sk("rogue-SECRET"));
+    await createAppConfigStore(db, TEST_KEY).addProviderKey(appX.id, "not-a-provider", sk("rogue-SECRET"));
     const consumer = createReviewConsumer(makeEnv({ DB: db as never }), testLog, testOverrides);
 
     await consumer(makeBatch(makePayload({ appRef: { appId: appX.id } })));
 
     expect(runnerEnvs()[0]).toEqual({
-      ARK_API_KEY: ARK_KEY,
       HARNESS_PLUGIN_ROOT: "/opt/mstar-harness",
       PI_CODING_AGENT_DIR: "/opt/omp-agent",
       OMP_REVIEW_MODEL: "ark-plan/deepseek-v4-flash",
     });
-    expect(JSON.stringify(runnerEnvs()[0])).not.toContain(sk("rogue-SECRET"));
+    expect(runnerPools()[0]).toEqual({ ark: [ARK_KEY] });
     // log hygiene (硬化项 3): the rogue row's skip is a structured
     // warn carrying the provider id + app_id — never key material.
     const warn = logLines.find((l) => l.level === "warn" && l.fields.provider === "not-a-provider");
@@ -734,7 +778,7 @@ describe("per-App runner env assembly (spec § Per-App BYOK)", () => {
     const db = createMigratedTestD1();
     const appX = await seedApp(db, "app-x");
     await configureApp(db, appX.id, "openai/gpt-app,anthropic/claude-app", { openai: sk("x-openai") });
-    await createAppConfigStore(db, TEST_KEY).setProviderKey(appX.id, "anthropic", "   ");
+    await createAppConfigStore(db, TEST_KEY).addProviderKey(appX.id, "anthropic", "   ");
     const consumer = createReviewConsumer(makeEnv({ DB: db as never }), testLog, testOverrides);
 
     // A whitespace-only key = not configured — and there is NO global key to
@@ -774,9 +818,10 @@ describe("per-App runner env assembly (spec § Per-App BYOK)", () => {
 
     // The healthy sibling completed with ITS OWN keys + chain.
     const env = runnerEnvs()[0]!;
-    expect(env.OPENAI_API_KEY).toBe(sk("healthy-openai-SECRET"));
-    expect(env.ANTHROPIC_API_KEY).toBe(sk("healthy-anthropic-SECRET"));
-    expect(env.ARK_API_KEY).toBe(ARK_KEY);
+    const pools = runnerPools()[0]!;
+    expect(pools.openai).toEqual([sk("healthy-openai-SECRET")]);
+    expect(pools.anthropic).toEqual([sk("healthy-anthropic-SECRET")]);
+    expect(pools.ark).toEqual([ARK_KEY]);
     expect(env.OMP_REVIEW_MODEL).toBe("openai/gpt-app,anthropic/claude-app");
     expect(appCalls).toEqual(["token", "plan", "post"]);
     expect((db.raw.query("SELECT COUNT(*) AS n FROM reviews").get() as { n: number }).n).toBe(1);
@@ -943,8 +988,7 @@ describe("per-role override provider key gate (Bugbot 7aaf18f4)", () => {
     );
 
     // The healthy sibling completed with ITS OWN keys + chain.
-    const env = runnerEnvs()[0]!;
-    expect(env.OPENAI_API_KEY).toBe(sk("healthy-openai"));
+    expect(runnerPools()[0]!.openai).toEqual([sk("healthy-openai")]);
     expect(appCalls).toEqual(["token", "plan", "post"]); // only the healthy sibling reviewed
     // The misconfigured sibling failed structurally through the F-001
     // channel: one review_failures row at stage=pipeline (payload sha) plus
@@ -974,10 +1018,10 @@ describe("per-role override provider key gate (Bugbot 7aaf18f4)", () => {
     await consumer(makeBatch(makePayload({ appRef: { appId: appX.id } })));
 
     // The override passed the gate and reaches the runner input verbatim;
-    // the app key rides the exec env under the mapped env name.
+    // the App key rides the credential payload under its provider id.
     const input = runnerInputs()[0]!;
     expect(input.modelOverrides).toEqual({ "code-reviewer": "openai/gpt-5:thinking, openai/gpt-5-mini" });
-    expect(runnerEnvs()[0]!.OPENAI_API_KEY).toBe(sk("x-openai"));
+    expect(runnerPools()[0]!.openai).toEqual([sk("x-openai")]);
     expect(appCalls).toEqual(["token", "plan", "post"]);
   });
 
@@ -1008,8 +1052,8 @@ describe("per-role override provider key gate (Bugbot 7aaf18f4)", () => {
   });
 });
 
-describe("custom provider env injection + runner input threading (AL-23-1)", () => {
-  test("app with custom providers: env carries CUSTOM_<ID>_API_KEY values, input JSON carries keyless declarations", async () => {
+describe("custom provider credential transport + runner input threading (AL-23-1)", () => {
+  test("app with custom providers: the payload carries their pools, the input JSON carries keyless declarations", async () => {
     reset();
     const db = createMigratedTestD1();
     const appX = await seedApp(db, "app-x");
@@ -1038,12 +1082,13 @@ describe("custom provider env injection + runner input threading (AL-23-1)", () 
 
     await consumer(makeBatch(makePayload({ appRef: { appId: appX.id } })));
 
-    // Env injection: decrypted keys under the mapped env names.
+    // Credential transport: decrypted keys into their provider's pool.
     const env = runnerEnvs()[0]!;
-    expect(env.CUSTOM_MY_PROVIDER_API_KEY).toBe(sk("custom-fixture-AAA"));
-    expect(env.CUSTOM_SECOND_ONE_API_KEY).toBe(sk("custom-fixture-BBB"));
+    const pools = runnerPools()[0]!;
+    expect(pools["my-provider"]).toEqual([sk("custom-fixture-AAA")]);
+    expect(pools["second-one"]).toEqual([sk("custom-fixture-BBB")]);
     // The App key assembly is untouched (custom injection is additive).
-    expect(env.ARK_API_KEY).toBe(ARK_KEY);
+    expect(pools.ark).toEqual([ARK_KEY]);
     expect(env.PI_CODING_AGENT_DIR).toBe("/opt/omp-agent");
     // Runner input JSON: keyless declarations only (zero key material).
     const input = runnerInputs()[0]!;
@@ -1068,14 +1113,13 @@ describe("custom provider env injection + runner input threading (AL-23-1)", () 
     expect(serialized).not.toContain(sk("custom-fixture"));
   });
 
-  test("chain referencing a custom provider id passes the fail-closed gate and injects CUSTOM_<ID>_API_KEY (qc3 F-001 — neededEnvName custom branch)", async () => {
+  test("chain referencing a custom provider id passes the fail-closed gate and transports its pool (qc3 F-001 — custom branch)", async () => {
     reset();
     const db = createMigratedTestD1();
     const appX = await seedApp(db, "app-x");
     // The chain references the custom provider id directly — the gate's
-    // neededEnvName third branch (neither a PROVIDERS allowlisted id nor a
-    // capability host of the App's resolved sandbox image) resolves it to
-    // CUSTOM_MY_PROVIDER_API_KEY, the same env name buildRunnerEnv injects.
+    // custom branch matches a declaration with a non-blank key pool and the
+    // credential payload pools it under that same provider id.
     await configureApp(db, appX.id, "my-provider/model-1");
     const store = createAppConfigStore(db, TEST_KEY);
     await store.upsertCustomProvider(
@@ -1091,22 +1135,22 @@ describe("custom provider env injection + runner input threading (AL-23-1)", () 
     const consumer = createReviewConsumer(makeEnv({ DB: db as never }), testLog, testOverrides);
 
     // The gate passes (the custom declaration supplies the key) and the review
-    // completes — the key reaches the runner env under the SAME env name the
-    // synthesized models.yml references (AL-23-1 loop).
+    // completes — the key reaches the runner under the SAME provider id the
+    // synthesized models.yml declares (AL-23-1 loop).
     await consumer(makeBatch(makePayload({ appRef: { appId: appX.id } })));
 
     const env = runnerEnvs()[0]!;
-    expect(env.CUSTOM_MY_PROVIDER_API_KEY).toBe(sk("custom-fixture-AAA"));
+    expect(runnerPools()[0]!["my-provider"]).toEqual([sk("custom-fixture-AAA")]);
     expect(env.OMP_REVIEW_MODEL).toBe("my-provider/model-1");
     expect(appCalls).toEqual(["token", "plan", "post"]); // the review completed
-    // key_source: custom for the declaration (id + env name, never the key).
+    // key_source: custom for the declaration (id + count, never the key).
     const customLines = keySourceLines().filter((l) => l.fields.key_source === "custom");
     expect(customLines).toHaveLength(1);
     expect(customLines[0]!.fields.provider).toBe("my-provider");
-    expect(customLines[0]!.msg).toContain("CUSTOM_MY_PROVIDER_API_KEY");
+    expect(customLines[0]!.msg).toContain("my-provider");
   });
 
-  test("custom providers: keys never reach logs — key_source: custom lines carry ids and env names only", async () => {
+  test("custom providers: keys never reach logs — key_source: custom lines carry ids and counts only", async () => {
     reset();
     const db = createMigratedTestD1();
     const appX = await seedApp(db, "app-x");
@@ -1128,7 +1172,7 @@ describe("custom provider env injection + runner input threading (AL-23-1)", () 
     const customLines = keySourceLines().filter((l) => l.fields.key_source === "custom");
     expect(customLines).toHaveLength(1);
     expect(customLines[0]!.fields.provider).toBe("my-provider");
-    expect(customLines[0]!.msg).toContain("CUSTOM_MY_PROVIDER_API_KEY");
+    expect(customLines[0]!.msg).toContain("my-provider");
     // Zero key material in ANY log line (the key_source discipline).
     for (const line of logLines) {
       expect(JSON.stringify(line.fields)).not.toContain(sk("custom-fixture"));
@@ -1136,7 +1180,7 @@ describe("custom provider env injection + runner input threading (AL-23-1)", () 
     }
   });
 
-  test("app with NO custom providers: input JSON + env carry no custom-provider surface (byte-identical to a no-declaration run)", async () => {
+  test("app with NO custom providers: input JSON + payload carry no custom-provider surface (byte-identical to a no-declaration run)", async () => {
     reset();
     const appDb = createMigratedTestD1();
     const appX = await seedApp(appDb, "app-x"); // github_apps row, NO custom rows
@@ -1144,11 +1188,14 @@ describe("custom provider env injection + runner input threading (AL-23-1)", () 
     await appConsumer(makeBatch(makePayload({ pr_number: 42, appRef: { appId: appX.id } })));
     const [appInput] = runnerInputs();
     const [appEnv] = runnerEnvs();
-    // No declarations → the runner input JSON omits the field entirely and
-    // no CUSTOM_* env name is injected (byte-compat pin). The
-    // capability hosts ride ALWAYS (keyless registry data).
+    // No declarations → the runner input JSON omits the field entirely and no
+    // custom-provider pool is transported (byte-compat pin). The capability
+    // hosts ride ALWAYS (keyless registry data).
     expect(Object.keys(appInput!)).toEqual(["worktreePath", "reconFacts", "capabilityHosts"]);
-    expect(JSON.stringify(appEnv)).not.toContain("CUSTOM_");
+    // The seeded App's own ark key still pools; nothing else does — and the
+    // exec env carries no pool name at all (the retired channel).
+    expect(runnerPools()[0]).toEqual({ ark: [ARK_KEY] });
+    expect(Object.keys(appEnv!).filter((name) => name.startsWith("MSTAR_POOL_"))).toEqual([]);
   });
 
   test("custom providers are re-read per message: a dashboard declaration update applies to the very next review", async () => {
@@ -1164,6 +1211,10 @@ describe("custom provider env injection + runner input threading (AL-23-1)", () 
     const consumer = createReviewConsumer(makeEnv({ DB: db as never }), testLog, testOverrides);
 
     await consumer(makeBatch(makePayload({ pr_number: 42, appRef: { appId: appX.id } })));
+    // The endpoint may only move while the pool is EMPTY (A1), so the edit is
+    // the same remove-then-re-declare an operator performs — the declaration
+    // this consumer must re-read is wholesale new.
+    await store.removeCustomProvider(appX.id, "my-provider");
     await store.upsertCustomProvider(
       appX.id,
       { provider_id: "my-provider", base_url: "https://two.example.com/v1", api: "openai-completions", model_ids: ["m2"] },
@@ -1178,22 +1229,31 @@ describe("custom provider env injection + runner input threading (AL-23-1)", () 
     expect((second!.customProviders as Array<{ base_url: string; model_ids: string[] }>)[0]!.base_url).toBe(
       "https://two.example.com/v1",
     );
-    expect((runnerEnvs()[0] as Record<string, string>).CUSTOM_MY_PROVIDER_API_KEY).toBe(sk("custom-fixture-AAA"));
-    expect((runnerEnvs()[1] as Record<string, string>).CUSTOM_MY_PROVIDER_API_KEY).toBe(sk("custom-fixture-BBB"));
+    expect(runnerPools()[0]!["my-provider"]).toEqual([sk("custom-fixture-AAA")]);
+    expect(runnerPools()[1]!["my-provider"]).toEqual([sk("custom-fixture-BBB")]);
   });
 
   test("an undecryptable custom-provider row fails closed with the per-App wrapper, zero side effects", async () => {
     reset();
     const db = createMigratedTestD1();
     const appX = await seedApp(db, "app-x");
-    // Tamper the stored envelope so the decrypt face must throw.
-    const enc = await createSecretbox(TEST_KEY).encryptSecret(sk("custom-fixture-AAA"), "app_custom_providers.api_key_enc:wrong-aad");
     db.raw
       .prepare(
-        `INSERT INTO app_custom_providers (app_id, provider_id, base_url, api, model_ids, api_key_enc, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))`,
+        `INSERT INTO app_custom_providers (app_id, provider_id, base_url, api, model_ids, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, datetime('now'), datetime('now'))`,
       )
-      .run(appX.id, "my-provider", "https://my-provider.example.com/v1", "openai-completions", JSON.stringify(["m1"]), enc);
+      .run(appX.id, "my-provider", "https://my-provider.example.com/v1", "openai-completions", JSON.stringify(["m1"]));
+    // Tamper the stored envelope so the decrypt face must throw.
+    const enc = await createSecretbox(TEST_KEY).encryptSecret(
+      sk("custom-fixture-AAA"),
+      `app_custom_provider_keys.key_enc:${appX.id}:my-provider:deadbeefdeadbeef:wrong`,
+    );
+    db.raw
+      .prepare(
+        `INSERT INTO app_custom_provider_keys (app_id, provider, key_id, key_enc, created_at)
+         VALUES (?, ?, 'deadbeefdeadbeef', ?, datetime('now'))`,
+      )
+      .run(appX.id, "my-provider", enc);
     const consumer = createReviewConsumer(makeEnv({ DB: db as never }), testLog, testOverrides);
 
     await expect(

@@ -22,7 +22,10 @@ import {
   filterCatalogProviders,
   groupCatalogProviders,
 } from "../../src/spa/components/provider-combobox";
-import { AppInfoCard, DraftChainPanel, draftChainTabLabel, githubAppSettingsUrl } from "../../src/spa/pages/SettingsPage";
+import { AppInfoCard, DraftChainPanel, ProviderConfigForm, draftChainTabLabel, githubAppSettingsUrl } from "../../src/spa/pages/SettingsPage";
+
+const noopSave = (): Promise<{ kind: "success" | "error"; message: string }> =>
+  Promise.resolve({ kind: "success", message: "unused" });
 
 describe("settings layout", () => {
   test("SettingsPage folds ops + health into an authorized ops zone; providers and chains are shadcn", () => {
@@ -74,7 +77,7 @@ describe("settings dropdowns", () => {
   test("composeModelOptions prefixes the cache provider (including ark-plan) and custom ids", () => {
     const groups = composeModelOptions(
       [{ provider: "ark-plan", models: ["doubao"], fetched_at: "t" }],
-      [{ provider_id: "acme", model_ids: ["fast"] }],
+      [{ provider_id: "acme", model_ids: ["fast"], has_keys: true }],
     );
     expect(groups.map((g) => g.selectors).flat()).toEqual(["ark-plan/doubao", "acme/fast"]);
   });
@@ -254,6 +257,42 @@ describe("configured providers + catalog add flow", () => {
     expect(t("zh_CN", "settings.catalogTemplate")).toContain("模板");
     expect(t("en", "settings.configureProvider", { label: "Anthropic" })).toContain("Anthropic");
     expect(t("zh_CN", "settings.configureProvider", { label: "Anthropic" })).toContain("Anthropic");
+  });
+});
+
+describe("multi-key provider rows (one row per key, no client-side fold)", () => {
+  const page = readFileSync(join(import.meta.dir, "../../src/spa/pages/SettingsPage.tsx"), "utf8");
+
+  test("every configured key row is keyed by its key identity — two keys of one provider are two rows", () => {
+    // React key: provider + key id. The bare provider collided as soon as a
+    // (App, provider) pool held a second key.
+    expect(page).toContain('key={row.kind === "key" ? `${row.provider}:${row.key_id}` : row.provider_id}');
+    // Per-row delete carries the identity the route deletes by (plus the row's
+    // tail for the confirm copy).
+    expect(page).toContain(
+      'onPending({ kind: "remove-key", provider: row.provider, keyId: row.key_id, last4: row.last4 })',
+    );
+    // …and the confirmed POST sends that identity (never a provider-only delete,
+    // which would take the provider's other keys with it).
+    expect(page).toContain("key_id: action.keyId");
+    // The feedback slot resolves through the SAME composite identity: match on
+    // the id alone and one key stored under two providers (ids hash the
+    // plaintext) reports the outcome beside the wrong provider's row. The
+    // lookup itself is pinned behaviourally in pages-data.test.ts.
+    expect(page).toContain("const slot = configuredKeySlot(configured, action.provider, action.keyId);");
+  });
+
+  test("the key row renders the per-key verification state", () => {
+    expect(page).toContain("settings.keyVerifiedAt");
+    expect(page).toContain("settings.keyVerifyFailed");
+    const keyRow = page.slice(page.indexOf("function ConfiguredKeyRow"), page.indexOf("function ConfiguredCustomRow"));
+    expect(keyRow).toContain("row.verified_status");
+  });
+
+  test("a provider's stored keys are listed whole — the add form never folds keys[] into one slot", () => {
+    expect(page).not.toContain("keyByProvider[key.provider] = key");
+    expect(page).toContain("providerKeyRows(payload.keys, selected.id)");
+    expect(page).toContain("storedKeys.map(");
   });
 });
 
@@ -651,9 +690,10 @@ describe("add-entry visibility + picker usability at breadth", () => {
 
   test("the template form carries an editable prefilled base URL and a {account_id}-conditional account-id field", () => {
     const source = readFileSync(join(import.meta.dir, "../../src/spa/pages/SettingsPage.tsx"), "utf8");
-    // The override field is prefilled from the catalog entry and posts the
-    // optional base_url override (empty string = use the catalog prefill).
-    expect(source).toContain("useState(provider.base_url ?? \"\")");
+    // The override field is prefilled from the STORED declaration when the
+    // provider already has one (else the catalog entry) and posts the optional
+    // base_url override (empty string = use the catalog prefill).
+    expect(source).toContain('useState(custom?.base_url ?? provider.base_url ?? "")');
     expect(source).toContain("base_url: baseUrl");
     // Required only when the entry's catalog base URL is null — a prefilled
     // entry may be saved as-is or overridden.
@@ -664,6 +704,80 @@ describe("add-entry visibility + picker usability at breadth", () => {
     expect(source).toContain("needsAccountId ? (");
     // Success resets the typed base URL along with key/account id.
     expect(source).toContain('setBaseUrl("")');
+  });
+
+  test("the template form initialises from a stored declaration, never the catalog default", () => {
+    // A stored declaration means the pool is already bound to that endpoint;
+    // re-submitting the catalog default would trip the store's endpoint lock
+    // with no visible cause. Seeding the field from the declaration makes an
+    // "add another key" submit a no-op on the endpoint.
+    const template: CatalogProvider = {
+      id: "workers-ai",
+      label: "Workers AI",
+      tier: "template",
+      base_url: "https://api.example.com/v1",
+      api: "openai-completions",
+      models: ["m1"],
+      verifiable: false,
+      eligibility: "template",
+      display_group: "catalog",
+    };
+    const stored = {
+      provider_id: "workers-ai",
+      base_url: "https://stored.example.com/v1",
+      api: "openai-completions",
+      model_ids: ["m1"],
+    };
+    const html = renderToStaticMarkup(
+      createElement(ProviderConfigForm, {
+        locale: "en",
+        provider: template,
+        storedKeys: [],
+        custom: stored,
+        onVerify: noopSave,
+        onSettings: noopSave,
+        onOutcome: () => {},
+        onDone: () => {},
+      }),
+    );
+    expect(html).toContain('value="https://stored.example.com/v1"');
+    expect(html).not.toContain('value="https://api.example.com/v1"');
+  });
+
+  test("a seeded {account_id} template is materialized already — appending a key demands no account id", () => {
+    const template: CatalogProvider = {
+      id: "workers-ai",
+      label: "Workers AI",
+      tier: "template",
+      base_url: "https://api.example.com/accounts/{account_id}/v1",
+      api: "openai-completions",
+      models: ["m1"],
+      verifiable: false,
+      eligibility: "template",
+      display_group: "catalog",
+    };
+    const html = renderToStaticMarkup(
+      createElement(ProviderConfigForm, {
+        locale: "en",
+        provider: template,
+        storedKeys: [],
+        custom: {
+          provider_id: "workers-ai",
+          base_url: "https://api.example.com/accounts/acct-1/v1",
+          api: "openai-completions",
+          model_ids: ["m1"],
+        },
+        onVerify: noopSave,
+        onSettings: noopSave,
+        onOutcome: () => {},
+        onDone: () => {},
+      }),
+    );
+    // The stored endpoint substitutes the placeholder already: no
+    // {account_id} demand, and the catalog placeholder never reaches submit.
+    expect(html).toContain('value="https://api.example.com/accounts/acct-1/v1"');
+    expect(html).not.toContain('value="https://api.example.com/accounts/{account_id}/v1"');
+    expect(html).not.toContain(t("en", "settings.accountId"));
   });
 
   test(" copy is dictionary-backed in both locales; account id is no longer Cloudflare-worded", () => {
@@ -1410,7 +1524,11 @@ describe("section-scoped op feedback", () => {
     // while the card (and the region it renders) stay mounted.
     const confirmBody = source.slice(source.indexOf("async function onConfirm"), source.indexOf("const confirmCopy"));
     expect(confirmBody).toContain("const configured = payload.can_manage ? payload.configured_providers : [];");
-    expect(confirmBody).toContain("configured.findIndex(");
+    // The captured slot is the row's own identity's — the key path matches the
+    // (provider, key_id) pair the POST carries, the custom path its
+    // provider_id (both pinned in the multi-key describe / pages-data suite).
+    expect(confirmBody).toContain("const slot = configuredKeySlot(configured, action.provider, action.keyId);");
+    expect(confirmBody).toContain("configured.findIndex((row) => row.kind === \"custom\"");
     expect(confirmBody).toContain("slot: slot >= 0 ? slot : configured.length");
     // The card renders the outcome inside the rows list at that position —
     // through the shared NoticeRegion, so the row-local region inherits the
@@ -1423,14 +1541,34 @@ describe("section-scoped op feedback", () => {
     expect(providersBody).toContain(
       "{index === removeSlot && removeOutcome ? <NoticeRegion notice={removeOutcome.notice} /> : null}",
     );
-    // Success takes the row's former slot; a failure leaves the row in place,
-    // so the region renders directly below it (the field-error position).
+    // Success took the row away, so the region renders in its former slot; a
+    // failure OR the tolerant no-op (nothing was removed) leaves the row in
+    // place, so the region renders directly below it (the field-error position).
     expect(providersBody).toContain(
-      'removeOutcome.notice.kind === "error" ? removeOutcome.slot + 1 : removeOutcome.slot',
+      'removeOutcome.notice.kind === "success" ? removeOutcome.slot : removeOutcome.slot + 1',
     );
     // A removed last row's slot equals the list length — the trailing clamp
     // keeps the outcome visible at the list's end instead of dropping it.
     expect(providersBody).toContain("removeSlot >= payload.configured_providers.length");
+  });
+
+  test("a stale delete's no-change outcome is a localized warning, never 'Changes saved.'", () => {
+    const source = settingsSource();
+    // The remove routes answer the tolerant no-op as `changed: false`; the
+    // shared op-outcome resolver renders the localized no-change copy with
+    // warn styling (the row is still there — the region sits below it).
+    expect(source).toContain("removeChanged(body) === false");
+    expect(source).toContain('{ kind: "warn", message: t(locale, "settings.removeNoChange") }');
+    expect(t("en", "settings.removeNoChange")).toContain("Nothing changed");
+    expect(t("zh_CN", "settings.removeNoChange")).toContain("未做任何更改");
+    // The template form lists the pool it appends to — the materialized
+    // provider's stored rows come from the same keys face as a built-in's.
+    const templateForm = source.slice(
+      source.indexOf('if (formKind === "template")'),
+      source.indexOf('if (formKind === "console")'),
+    );
+    expect(templateForm).toContain("storedKeys.map");
+    expect(templateForm).toContain("settings.keyEnding");
   });
 
   test("save triggers carry a busy guard; every op replaces its region (stale-error rule)", () => {

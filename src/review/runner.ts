@@ -13,7 +13,8 @@
  *       - `capabilityHosts` — REQUIRED array of the App's
  *         selected sandbox image's capability hosts (the consumer resolves
  *         them from the source-controlled registry and passes them verbatim;
- *         keyless — `apiKeyEnv` is an env-var NAME). The runner ALWAYS
+ *         keyless — `apiKeyEnv`/`auth` are retained registry metadata, not
+ *         active key-resolution inputs). The runner ALWAYS
  *         synthesizes a COMPLETE per-review models.yml
  *         (/tmp/omp-agent-<uuid>/models.yml) with the capability hosts as the
  *         base — the baked in-image models.yml was removed — and rides
@@ -28,9 +29,10 @@
  *         input shape;
  *       - `customProviders` — an OPTIONAL array of keyless
  *         declarations `{ provider_id, base_url, api, model_ids }`; merged
- *         INTO the capability-host base of the synthesized models.yml with
- *         every custom key as a CUSTOM_<ID>_API_KEY env-name reference (the
- *         consumer injects the decrypted values into the exec env); a
+ *         INTO the capability-host base of the synthesized models.yml (no
+ *         apiKey pin, `auth: oauth`); each provider's key pool rides the STDIN
+ *         credential payload under its own provider id and is loaded into the
+ *         run's in-memory credential store; a
  *         declaration whose id collides with a capability host is skipped
  *         (capability/base wins, AL-23-1) with a structured stderr warn
  *         (id + count, no keys); absent/empty = the capability base alone.
@@ -45,16 +47,37 @@
  *     no summary-degrade path: any seat/parse/validation failure exits 1 and
  *     the consumer must not post or persist.
  *
- * Container environment (zero secrets in the image — keys arrive only via
- * exec env injection):
+ * Container environment (zero secrets in the image — the process environment
+ * carries NO credential):
  *   - HARNESS_PLUGIN_ROOT=/opt/mstar-harness      (image-preinstalled harness)
  *   - PI_CODING_AGENT_DIR=/opt/omp-agent           (empty agent dir; the models.yml
  *                                                   the session reads is the synthesized
  *                                                   per-review file under `agentDir`)
  *   - OMP_REVIEW_MODEL                             (comma-separated selector chain)
- *   - ARK_API_KEY                                  (injected per exec by the consumer)
+ *
+ * Credential transport: the consumer streams a versioned JSON payload
+ * (`{"version":1,"pools":{"<providerId>":["k1",…]}}` — ./credential-payload.ts)
+ * into this process's STDIN and closes the stream. The runner validates it
+ * BEFORE any credential is written, resolves each pool key to the models.yml
+ * provider id it serves, and loads those keys into an IN-MEMORY credential
+ * store as stored `login` api_key rows before the session starts; that exact
+ * instance rides `AgentRuntimeRunInput.authStorage` and is what every
+ * `createAgentSession` call receives. No credential database is ever written,
+ * so the session's own read/grep/glob (which the pinned SDK admits) have no
+ * file to find. Diagnostics carry the provider id and the pool size only —
+ * never a key value, never the payload.
+ * An absent payload (empty stdin) is the keyless run shape — and so is an
+ * interactive terminal: the documented local
+ * `bun run src/review/runner.ts --level <tier> --input <json-file>` has no pipe,
+ * so its TTY would never send EOF; the read is skipped there instead of
+ * blocking.
+ * The credential directory is per-run and holds only the non-secret synthesized
+ * models.yml, so it is removed once the runtime has settled, on both the
+ * success and the failure path (best-effort; a removal failure never replaces
+ * the run's own outcome).
  */
-import { readFileSync, writeFileSync } from "node:fs";
+import { readFileSync, rmSync, writeFileSync } from "node:fs";
+import { AuthStorage } from "@oh-my-pi/pi-coding-agent";
 import {
   isReviewLevel,
   REVIEW_LEVELS,
@@ -66,6 +89,7 @@ import {
 import { anchorRecheckDeadline } from "./recheck";
 import { ompAgentRuntime, parseModelSelectors } from "./runtime-omp";
 import { writePerReviewModelsYaml } from "./models-synthesis";
+import { decodeCredentialPayload } from "./credential-payload";
 import type { RecheckInput } from "../contracts/recheck";
 
 const USAGE =
@@ -225,13 +249,14 @@ function parseRunnerInput(parsed: unknown): RunnerInputJson {
     // (AL-23-1): shape validation ONLY here — the id
     // pattern/baseUrl/api-enum/model bounds live dashboard-side
     // (assertCustomProvider). The declarations carry NO keys: each key rides
-    // the container exec env under CUSTOM_<id>_API_KEY (the synthesized
-    // models.yml references that env name; zero key literals in any file).
+    // the STDIN credential payload under its provider id (./credential-payload)
+    // and the runner loads it into the run's in-memory credential store (zero
+    // key literals in any file).
     const list = record.customProviders;
     if (!Array.isArray(list)) {
       throw new Error(
         "input JSON field `customProviders` must be an array of declarations when present " +
-          "(keys ride the exec env under CUSTOM_<id>_API_KEY, never the input)",
+          "(keys ride the stdin credential payload, never the input)",
       );
     }
     input.customProviders = list.map((entry, index) => {
@@ -289,12 +314,140 @@ function parseRunnerInput(parsed: unknown): RunnerInputJson {
 }
 
 /**
+ * The provider pools one run must load, keyed by the models.yml provider id
+ * the session resolves credentials under. Two identity sources, in order:
+ *
+ *   1. DECLARED identity (what the synthesis itself puts in models.yml) —
+ *      capability-host blocks pool under their catalog provider id (omp's
+ *      `ark-plan` ↔ the payload's `ark` entry: the consumer's key space is the
+ *      App-config provider id), custom declarations under their own id. A
+ *      custom id colliding with a capability host is skipped here too
+ *      (capability/base wins, same rule as the synthesis).
+ *   2. THE PAYLOAD'S OWN ENTRIES — a BUILT-IN catalog provider (`openai`,
+ *      `azure-openai`, …) is neither a capability host nor a custom
+ *      declaration, so its transported pool carries no declared identity and
+ *      resolves under its own provider id. A pool key or provider id already
+ *      claimed above is never loaded twice.
+ *
+ * The enumerated set therefore covers EXACTLY the payload the consumer built. A
+ * declared provider with no payload entry simply has no transported credentials
+ * and is skipped by the caller, so a keyless chain still runs.
+ */
+function poolProviders(
+  json: RunnerInputJson,
+  poolKeys: readonly string[],
+): Array<{ providerId: string; poolKey: string }> {
+  const baseIds = new Set(json.capabilityHosts.map((host) => host.id));
+  const claimedKeys = new Set<string>();
+  const claimedProviderIds = new Set<string>();
+  const providers: Array<{ providerId: string; poolKey: string }> = [];
+  const add = (poolKey: string, providerId: string): void => {
+    if (claimedKeys.has(poolKey) || claimedProviderIds.has(providerId)) return;
+    claimedKeys.add(poolKey);
+    claimedProviderIds.add(providerId);
+    providers.push({ providerId, poolKey });
+  };
+  for (const host of json.capabilityHosts) add(host.catalogProviderId, host.id);
+  for (const decl of json.customProviders ?? []) {
+    if (baseIds.has(decl.provider_id)) continue;
+    add(decl.provider_id, decl.provider_id);
+  }
+  for (const poolKey of poolKeys) add(poolKey, poolKey);
+  return providers;
+}
+
+/**
+ * The run's credential store — IN MEMORY, and the ONLY place it is constructed.
+ *
+ * Exported so every runtime entry point shares this one definition: the
+ * container runner (below) and `scripts/live-smoke-evidence.ts`. A caller that
+ * builds its own store can drift back to a file path, which is how the
+ * exposure returned once already. The signature takes NO path for that reason
+ * — there is no argument through which a caller could make it disk-backed.
+ * `:memory:` is SQLite's in-memory database: no `<agentDir>/agent.db`, no
+ * `-wal`/`-shm`, so the review agent's own read/grep/glob have nothing to find.
+ */
+export function createInMemoryAuthStorage(): Promise<AuthStorage> {
+  return AuthStorage.create(":memory:");
+}
+
+/**
+ * Load the transported credential pool into the run's credential store.
+ *
+ * The store is IN MEMORY (`createInMemoryAuthStorage`): `<agentDir>` keeps
+ * only the synthesized models.yml, so there is no credential database for the
+ * session's own read/grep/glob tools to find — the review agent cannot read
+ * the App's key pool out of its own run directory. The returned instance is
+ * the one every `createAgentSession` call must receive; without it the SDK
+ * recreates `<agentDir>/agent.db` and the exposure returns.
+ *
+ * One `{type:"api_key", source:"login"}` row per transported key, in payload
+ * order (the entry is an array for a provider). `source: "login"` ranks ABOVE
+ * the provider env var in the SDK's credential cascade, which is what lets the
+ * runtime rotate across the pool — the synthesized models.yml deliberately pins
+ * no `apiKey` (a tier-2 config override would suppress this pool entirely).
+ *
+ * Fail-closed, and BEFORE anything is written: the stdin payload is validated
+ * (./credential-payload) as the first statement, so an unreadable payload, a
+ * missing/empty pool array or a non-string/empty entry aborts the run before
+ * any credential exists and before the runtime starts — never a partial pool.
+ * Diagnostics carry provider id + pool size only; key VALUES are never logged
+ * or thrown.
+ */
+async function loadCredentialPool(json: RunnerInputJson, payload: string): Promise<AuthStorage> {
+  const pools = decodeCredentialPayload(payload);
+  const loaded: Array<{ providerId: string; keys: string[] }> = [];
+  for (const { providerId, poolKey } of poolProviders(json, Object.keys(pools))) {
+    const keys = pools[poolKey];
+    if (keys === undefined) continue; // no pool transported for this provider
+    loaded.push({ providerId, keys });
+  }
+  // A keyless run still gets an instance: the session must never fall back to
+  // discoverAuthStorage(agentDir), which would create the database on disk.
+  const storage = await createInMemoryAuthStorage();
+  if (loaded.length === 0) return storage;
+
+  try {
+    for (const { providerId, keys } of loaded) {
+      await storage.set(
+        providerId,
+        keys.map((key) => ({ type: "api_key" as const, key, source: "login" as const })),
+      );
+      // Provider id + pool size only — never a key value.
+      console.error(JSON.stringify({ event: "credential_pool", provider: providerId, pool_size: keys.length }));
+    }
+  } catch (error) {
+    // A failed write must not leave the half-loaded store open; the caller
+    // aborts the run on this throw, so nothing else holds it.
+    storage.close();
+    throw error;
+  }
+  return storage;
+}
+
+/**
+ * The credential payload source: this process's STDIN — the exec pipe the
+ * consumer writes the payload into and then closes (that close is the EOF this
+ * read waits for). `Bun.stdin.text()` reads to EOF; an empty result is the
+ * keyless run shape. With no pipe (an interactive TTY) there is no EOF to
+ * wait for, so the read is skipped and the run is keyless — the interactive
+ * case never blocks.
+ */
+const readCredentialStdin = (): Promise<string> =>
+  process.stdin.isTTY ? Promise.resolve("") : Bun.stdin.text();
+
+/**
  * Run the CLI. Returns the process exit code; prints the mstar.review/v1
  * envelope JSON to stdout and diagnostics to stderr. Exported for
- * deterministic tests, which inject a fake `runtime` (mock.module on this
- * shared specifier is process-global and leaks across bun test files).
+ * deterministic tests, which inject a fake `runtime` AND a fake credential
+ * source (mock.module on this shared specifier is process-global and leaks
+ * across bun test files).
  */
-export async function main(argv: string[], runtime: AgentRuntime = ompAgentRuntime): Promise<number> {
+export async function main(
+  argv: string[],
+  runtime: AgentRuntime = ompAgentRuntime,
+  readStdin: () => Promise<string> = readCredentialStdin,
+): Promise<number> {
   let level: string;
   let inputPath: string;
   let recheckOutPath: string | undefined;
@@ -316,72 +469,114 @@ export async function main(argv: string[], runtime: AgentRuntime = ompAgentRunti
   // never outlive (or restart past) the review's own wall-clock cap.
   anchorRecheckDeadline(Date.now(), level);
 
-  let input: AgentRuntimeRunInput;
-  try {
-    const parsed: unknown = JSON.parse(readFileSync(inputPath, "utf8"));
-    const json = parseRunnerInput(parsed);
-    // (AL-23-1): EVERY run synthesizes the
-    // COMPLETE per-review models.yml (/tmp/omp-agent-<uuid>/) — the App's
-    // selected image's capability hosts are the base, the custom-provider
-    // declarations merge into it — and the directory rides as `agentDir` (the
-    // SDK reads <agentDir>/models.yml instead of the retired in-image file).
-    const skippedCollisions: string[] = [];
-    const agentDir = await writePerReviewModelsYaml(json.capabilityHosts, json.customProviders ?? [], (providerId) => {
-      skippedCollisions.push(providerId);
-    });
-    // A custom id colliding with a capability host is skipped (capability/base
-    // wins, AL-23-1) — never silent: one structured stderr warn per colliding
-    // id (id + total count; zero key material).
-    for (const providerId of skippedCollisions) {
-      console.error(
-        JSON.stringify({
-          event: "custom_provider_collision",
-          provider_id: providerId,
-          count: skippedCollisions.length,
-        }),
-      );
+  // The per-run directory carries only the synthesized models.yml — the
+  // credential rows live in an in-memory store (below), so no key material is
+  // ever written to disk. The directory still exists only for this run, so it
+  // is removed once the runtime has settled, on every path (success,
+  // credential rejection, runtime failure). Best-effort: a removal failure is
+  // reported and never replaces the run's own outcome.
+  let agentDir: string | undefined;
+  const removeAgentDir = (): void => {
+    if (agentDir === undefined) return;
+    try {
+      rmSync(agentDir, { recursive: true, force: true });
+    } catch (error) {
+      console.error(`review: cannot remove credential directory ${agentDir}: ${(error as Error).message}`);
     }
-    input = {
-      level,
-      worktreePath: json.worktreePath ?? process.cwd(),
-      reconFacts: json.reconFacts ?? [],
-      modelSelectors: parseModelSelectors(Bun.env.OMP_REVIEW_MODEL),
-      // Optional per-role overrides: included ONLY when the map
-      // is present, so legacy input builds a byte-identical runtime input.
-      ...(json.modelOverrides !== undefined ? { modelOverrides: json.modelOverrides } : {}),
-      // Optional typed recheck input: included ONLY when
-      // present — same byte-identical legacy rule as modelOverrides.
-      ...(json.recheck !== undefined ? { recheck: json.recheck } : {}),
-      // The synthesized per-review models dir (present
-      // on EVERY run — there is no baked models.yml to fall back to).
-      agentDir,
-    };
-  } catch (error) {
-    console.error(`review: cannot read runner input ${inputPath}: ${(error as Error).message}`);
-    return 1;
-  }
+  };
+  // Closed once the runtime has settled — the store must outlive every session
+  // the runtime creates (all three call sites receive this exact instance).
+  let authStorage: AuthStorage | undefined;
 
   try {
-    const { envelope, recheck } = await runtime.runReview(input);
-    // The optional --recheck-out file is written only when a
-    // recheck result exists, and BEFORE the envelope reaches stdout — a
-    // write failure is a genuine I-O failure (exit 1, no stdout), not a
-    // silent lie about the file. No flag / no result writes nothing; stdout
-    // stays envelope-only and exit codes are unchanged.
-    if (recheckOutPath !== undefined && recheck !== null) {
+    let input: AgentRuntimeRunInput;
+    try {
+      const parsed: unknown = JSON.parse(readFileSync(inputPath, "utf8"));
+      const json = parseRunnerInput(parsed);
+      // (AL-23-1): EVERY run synthesizes the
+      // COMPLETE per-review models.yml (/tmp/omp-agent-<uuid>/) — the App's
+      // selected image's capability hosts are the base, the custom-provider
+      // declarations merge into it — and the directory rides as `agentDir` (the
+      // SDK reads <agentDir>/models.yml instead of the retired in-image file).
+      const skippedCollisions: string[] = [];
+      const dir = await writePerReviewModelsYaml(json.capabilityHosts, json.customProviders ?? [], (providerId) => {
+        skippedCollisions.push(providerId);
+      });
+      agentDir = dir;
+      // A custom id colliding with a capability host is skipped (capability/base
+      // wins, AL-23-1) — never silent: one structured stderr warn per colliding
+      // id (id + total count; zero key material).
+      for (const providerId of skippedCollisions) {
+        console.error(
+          JSON.stringify({
+            event: "custom_provider_collision",
+            provider_id: providerId,
+            count: skippedCollisions.length,
+          }),
+        );
+      }
+      // The transported credential pool arrives on STDIN and lands in an
+      // IN-MEMORY store before any session exists: the synthesized models.yml
+      // pins no apiKey, so the stored `login` rows are what the runtime rotates
+      // across, and no file exists for the session's own tools to read.
+      // Fail-closed — a payload that does not decode aborts the run here
+      // (exit 1), with its own diagnostic (not the input-read label).
       try {
-        writeFileSync(recheckOutPath, JSON.stringify(recheck));
+        authStorage = await loadCredentialPool(json, await readStdin());
       } catch (error) {
-        console.error(`review: cannot write recheck output ${recheckOutPath}: ${(error as Error).message}`);
+        console.error(`review: credential pool rejected: ${(error as Error).message}`);
         return 1;
       }
+
+      input = {
+        level,
+        worktreePath: json.worktreePath ?? process.cwd(),
+        reconFacts: json.reconFacts ?? [],
+        modelSelectors: parseModelSelectors(Bun.env.OMP_REVIEW_MODEL),
+        // Optional per-role overrides: included ONLY when the map
+        // is present, so legacy input builds a byte-identical runtime input.
+        ...(json.modelOverrides !== undefined ? { modelOverrides: json.modelOverrides } : {}),
+        // Optional typed recheck input: included ONLY when
+        // present — same byte-identical legacy rule as modelOverrides.
+        ...(json.recheck !== undefined ? { recheck: json.recheck } : {}),
+        // The synthesized per-review models dir (present
+        // on EVERY run — there is no baked models.yml to fall back to), and the
+        // in-memory credential store the sessions must use.
+        agentDir: dir,
+        authStorage,
+      };
+    } catch (error) {
+      console.error(`review: cannot read runner input ${inputPath}: ${(error as Error).message}`);
+      return 1;
     }
-    // stdout carries ONLY the envelope JSON (plan Module contracts).
-    console.log(JSON.stringify(envelope));
-    return 0;
-  } catch (error) {
-    console.error(`review: runtime failed: ${(error as Error).message}`);
-    return 1;
+
+    try {
+      const { envelope, recheck } = await runtime.runReview(input);
+      // The optional --recheck-out file is written only when a
+      // recheck result exists, and BEFORE the envelope reaches stdout — a
+      // write failure is a genuine I-O failure (exit 1, no stdout), not a
+      // silent lie about the file. No flag / no result writes nothing; stdout
+      // stays envelope-only and exit codes are unchanged.
+      if (recheckOutPath !== undefined && recheck !== null) {
+        try {
+          writeFileSync(recheckOutPath, JSON.stringify(recheck));
+        } catch (error) {
+          console.error(`review: cannot write recheck output ${recheckOutPath}: ${(error as Error).message}`);
+          return 1;
+        }
+      }
+      // stdout carries ONLY the envelope JSON (plan Module contracts).
+      console.log(JSON.stringify(envelope));
+      return 0;
+    } catch (error) {
+      console.error(`review: runtime failed: ${(error as Error).message}`);
+      return 1;
+    }
+  } finally {
+    // The store is released only after the runtime has settled — every
+    // session it created held this instance for the whole run.
+    authStorage?.close();
+    removeAgentDir();
   }
 }
 

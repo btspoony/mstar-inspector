@@ -68,6 +68,7 @@ import {
   SessionManager,
   Settings,
   type AgentSession,
+  type AuthStorage,
   type CreateAgentSessionOptions,
   type Skill,
   type ToolSession,
@@ -202,6 +203,16 @@ export function buildSessionOptions(opts: {
    * must read that directory.
    */
   agentDir: string;
+  /**
+   * The run's in-memory credential store (AgentRuntimeRunInput.authStorage) —
+   * passed straight through to createAgentSession. REQUIRED: without it the
+   * SDK falls back to `discoverAuthStorage(agentDir)`, recreating
+   * `<agentDir>/agent.db` on disk and handing the review agent's own
+   * read/grep/glob the App's key pool (the finding this closes). The instance
+   * also reaches every spawned seat — the SDK copies the parent session's
+   * `authStorage` into each child.
+   */
+  authStorage: AuthStorage;
 }): CreateAgentSessionOptions {
   return {
     cwd: opts.cwd,
@@ -218,6 +229,7 @@ export function buildSessionOptions(opts: {
     requireYieldTool: false,
     autoApprove: true,
     agentDir: opts.agentDir,
+    authStorage: opts.authStorage,
   };
 }
 
@@ -659,6 +671,8 @@ function deepSessionOptions(opts: {
   agentModelOverrides?: Record<string, string>;
   /** Directory of the synthesized per-review models.yml — required. */
   agentDir: string;
+  /** The run's in-memory credential store — required (see buildSessionOptions). */
+  authStorage: AuthStorage;
 }): CreateAgentSessionOptions {
   const overrides = opts.agentModelOverrides;
   const hasOverrides = overrides !== undefined && Object.keys(overrides).length > 0;
@@ -786,6 +800,9 @@ async function runDeepReview(input: AgentRuntimeRunInput): Promise<ReviewRunResu
           // The synthesized per-review models.yml directory —
           // present on EVERY run (no baked in-image base remains).
           agentDir: input.agentDir,
+          // The in-memory credential store — without it the SDK would create
+          // <agentDir>/agent.db and expose the key pool to the session's tools.
+          authStorage: input.authStorage,
         }),
       );
       const parentSession = created.session;
@@ -805,6 +822,7 @@ async function runDeepReview(input: AgentRuntimeRunInput): Promise<ReviewRunResu
             modelPattern: input.modelSelectors[0] ?? DEFAULT_MODEL_PATTERN,
             fallbackChain: [...input.modelSelectors],
             agentDir: input.agentDir,
+            authStorage: input.authStorage,
           }),
         );
         const liveRecheckSession = recheckCreated.session;
@@ -967,6 +985,7 @@ export const ompAgentRuntime: AgentRuntime = {
           // The synthesized per-review models.yml directory —
           // present on EVERY run (no baked in-image base remains).
           agentDir: input.agentDir,
+          authStorage: input.authStorage,
         }),
       );
       session = created.session;

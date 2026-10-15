@@ -62,7 +62,7 @@ function createMigratedD1(): ReturnType<typeof createTestD1> {
   // queries on every app-path message.
   // 0012: app_provider_keys.updated_at — the store's upsert writes
   // it, so the fixture must carry the column.
-  // 0015: the store's setProviderKey upsert now writes the
+  // 0015: the store's addProviderKey upsert now writes the
   // verified_* columns, so the fixture must carry them too.
   // 0017: the store's setModelChain now writes the default
   // app_model_chains row, so the fixture must carry the chains tables.
@@ -94,6 +94,8 @@ function createMigratedD1(): ReturnType<typeof createTestD1> {
     "0019_github_apps_metadata.sql",
     "0020_finding_lifecycle.sql",
     "0021_review_checks.sql",
+    "0022_app_trigger_mode.sql",
+    "0024_provider_multi_key.sql",
   ]) {
     db.raw.exec(readFileSync(join(MIGRATIONS_DIR, name), "utf8"));
   }
@@ -130,7 +132,7 @@ async function seedApp(db: ReturnType<typeof createTestD1>, opts: SeedOptions): 
   // file pins credential resolution, not config completeness).
   const configStore = createAppConfigStore(db, TEST_KEY);
   await configStore.setModelChain(id, "ark-plan/deepseek-v4-flash");
-  await configStore.setProviderKey(id, "ark", "ark-key");
+  await configStore.addProviderKey(id, "ark", "ark-key");
   return { id };
 }
 
@@ -322,10 +324,21 @@ describe("consumer appRef resolution (lock L4)", () => {
     const db = createMigratedD1();
     const appX = await seedApp(db, { slug: "app-x", githubAppId: 111222, pem: PEM_X });
     await seedApp(db, { slug: "app-y", githubAppId: 333444, pem: PEM_Y }); // sibling, never used
+    const configStore = createAppConfigStore(db, TEST_KEY);
+    await configStore.addProviderKey(appX.id, "ark", "second-ark-key");
     const consumer = createReviewConsumer(makeEnv({ DB: db as never }), testLog, testOverrides);
 
     await consumer(makeBatch(makePayload({ appRef: { appId: appX.id } })));
 
+    const runnerCall = sandboxCalls.find((call) => call.cmd.includes("--input"));
+    expect(runnerCall).toBeDefined();
+    const runnerOptions = runnerCall!.opts as { env: Record<string, string>; stdin?: string };
+    expect(runnerOptions.env.ARK_API_KEY).toBeUndefined();
+    // Both of the App's keys ride the credential payload — and no pool name
+    // reaches the process environment (the retired channel).
+    const { pools } = JSON.parse(runnerOptions.stdin!) as { pools: Record<string, string[]> };
+    expect(pools.ark).toHaveLength(2);
+    expect(Object.keys(runnerOptions.env).filter((name) => name.startsWith("MSTAR_POOL_"))).toEqual([]);
     // Exactly one App instance, built from X's DECRYPTED PEM + X's github_app_id.
     expect(factoryCreds).toHaveLength(1);
     expect(factoryCreds[0]!.cred).toEqual({ APP_ID: "111222", PRIVATE_KEY: PEM_X });
@@ -588,7 +601,7 @@ describe("appCommenters fingerprint cache (hardening item 1, architect lock L1)"
     const appX = await seedApp(db, { slug: "app-x", githubAppId: 111222, pem: PEM_X });
     // The store itself does not validate provider ids (routes do) — seed a
     // rogue row the way a direct-DB write would.
-    await createAppConfigStore(db, TEST_KEY).setProviderKey(appX.id, "not-a-provider", sk("rogue-SECRET"));
+    await createAppConfigStore(db, TEST_KEY).addProviderKey(appX.id, "not-a-provider", sk("rogue-SECRET"));
     const consumer = createReviewConsumer(makeEnv({ DB: db as never }), testLog, testOverrides);
 
     await consumer(makeBatch(makePayload({ appRef: { appId: appX.id } })));
@@ -747,7 +760,7 @@ describe("per-App pause ack-skip (architect lock L4)", () => {
     // Re-seed the per-App AI config so the fail-closed gate passes again.
     const configStore = createAppConfigStore(db, TEST_KEY);
     await configStore.setModelChain(row.id, "ark-plan/deepseek-v4-flash");
-    await configStore.setProviderKey(row.id, "ark", "ark-key");
+    await configStore.addProviderKey(row.id, "ark", "ark-key");
     await consumer(makeBatch(makePayload({ pr_number: 44, appRef: { appId: appX.id } })));
     expect(factoryCreds).toHaveLength(2);
     expect(factoryCreds[1]!.cred).toEqual({ APP_ID: "111222", PRIVATE_KEY: PEM_X });

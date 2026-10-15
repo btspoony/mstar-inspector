@@ -33,11 +33,14 @@ import { deliveryOutcomeLabel } from "../delivery-outcome";
 import { formatRelativeTime } from "../relative-time";
 import {
   activeChainTabId,
+  configuredKeySlot,
   DEFAULT_CHAIN_NAME,
   isPaused,
   isReviewTriggerMode,
   modelChainTabs,
   providerFormKind,
+  providerKeyRows,
+  removeChanged,
   REVIEW_TRIGGER_MODES,
   seatRoleValues,
   seatSelectValue,
@@ -47,6 +50,7 @@ import {
   type ChainTab,
   type ConfiguredProvider,
   type ModelOptionGroup,
+  type ProviderKeyRow,
   type ReviewTriggerMode,
   type SettingsAppMeta,
   type SettingsIdentityAppMeta,
@@ -59,16 +63,17 @@ import { PageNotice } from "./PageNotice";
 type PendingAction =
   | { kind: "pause" | "resume" | "disable" | "enable" | "delete" }
   | { kind: "remove-chain"; name: string }
-  | { kind: "remove-key"; provider: string }
+  | { kind: "remove-key"; provider: string; keyId: string; last4: string }
   | { kind: "remove-custom"; providerId: string };
 
 /**
  * One op's outcome, resolved back to the card (or form cluster)
  * that produced it. Op feedback never rides the page-level notice channel —
- * that stays reserved for background-reload failures. `warn` never
- * applies to op outcomes, so the kind narrows to success/error.
+ * that stays reserved for background-reload failures. `warn` is the tolerant
+ * no-op face: a remove that matched nothing is neither a saved change nor a
+ * failure, so it announces the no-change copy without claiming either.
  */
-type OpNotice = { kind: "success" | "error"; message: string };
+type OpNotice = { kind: "success" | "warn" | "error"; message: string };
 
 /**
  * A card's inline op-feedback region: the page banner's markup,
@@ -133,6 +138,28 @@ function settingsErrorMessage(locale: SpaBoot["locale"], body: string): string {
   return body.trim() || t(locale, "common.loadFailed");
 }
 
+/**
+ * Resolve a settings/pinned POST response to its op outcome: a mapped 4xx
+ * resolves through the keyed resolver; a 2xx whose body reports
+ * `changed: false` — the remove routes' tolerant no-op, where the row was
+ * already gone — is a WARNING carrying the localized no-change copy, never
+ * "Changes saved."; every other 2xx is the caller's success copy.
+ */
+function settingsOpOutcome(
+  locale: SpaBoot["locale"],
+  status: number,
+  body: string,
+  successMessage?: string,
+): OpNotice {
+  if (status >= 400) {
+    return { kind: "error", message: settingsErrorMessage(locale, body) };
+  }
+  if (removeChanged(body) === false) {
+    return { kind: "warn", message: t(locale, "settings.removeNoChange") };
+  }
+  return { kind: "success", message: successMessage ?? t(locale, "settings.changesSaved") };
+}
+
 export function SettingsView({
   locale,
   payload,
@@ -188,10 +215,7 @@ export function SettingsView({
     } catch {
       return { kind: "error", message: t(locale, "common.saveFailed"), reloaded: false };
     }
-    const outcome: OpNotice =
-      status >= 400
-        ? { kind: "error", message: settingsErrorMessage(locale, body) }
-        : { kind: "success", message: t(locale, "settings.changesSaved") };
+    const outcome: OpNotice = settingsOpOutcome(locale, status, body);
     const reloaded = await onReload({ background: true });
     return { ...outcome, reloaded };
   }
@@ -299,13 +323,11 @@ export function SettingsView({
     } catch {
       return { kind: "error", message: t(locale, "common.saveFailed") };
     }
-    const outcome: OpNotice =
-      status >= 400
-        ? // The pinned path resolves through the same resolver as
-          // the settings POST family — keyed JSON renders localized; raw
-          // text still displays (fail-visible, never blank).
-          { kind: "error", message: settingsErrorMessage(locale, body) }
-        : { kind: "success", message: successMessage ?? t(locale, "settings.changesSaved") };
+    // The pinned path resolves through the same resolver as the settings POST
+    // family — keyed JSON renders localized, the remove routes' no-change face
+    // becomes its warn notice, and raw text still displays (fail-visible,
+    // never blank).
+    const outcome: OpNotice = settingsOpOutcome(locale, status, body, successMessage);
     if (reload) await onReload({ background: true });
     return outcome;
   }
@@ -334,11 +356,13 @@ export function SettingsView({
           slot: slot >= 0 ? slot : configured.length,
         });
       } else if (action.kind === "remove-key") {
-        // Same position capture as remove-custom (see above).
-        const slot = configured.findIndex((row) => row.kind === "key" && row.provider === action.provider);
+        // Same position capture as remove-custom (see above) — the row is the
+        // identity's, so a pool with a sibling key keeps it.
+        const slot = configuredKeySlot(configured, action.provider, action.keyId);
         setProvidersRemoveOutcome({
           notice: await runPinnedWithBody(`/dashboard/apps/${app.slug}/settings/key/delete`, {
             provider: action.provider,
+            key_id: action.keyId,
           }),
           slot: slot >= 0 ? slot : configured.length,
         });
@@ -489,7 +513,10 @@ function pendingConfirmCopy(
   }
   if (pending.kind === "remove-key") {
     return {
-      title: t(locale, "settings.confirmRemoveKeyTitle", { provider: pending.provider }),
+      title: t(locale, "settings.confirmRemoveKeyTitle", {
+        provider: pending.provider,
+        last4: pending.last4 === "" ? t(locale, "settings.keyTooShort") : pending.last4,
+      }),
       body: t(locale, "settings.confirmRemoveKeyBody", { provider: pending.provider }),
       action: t(locale, "settings.remove"),
       destructive: true,
@@ -1016,15 +1043,16 @@ function ProvidersCard({
   const catalogById: Record<string, CatalogProvider> = {};
   for (const provider of payload.provider_catalog) catalogById[provider.id] = provider;
   // (audit UI-45-05): where the remove outcome renders inside the
-  // rows list. Success takes the row's former slot — the awaited reload has
-  // already dropped the row; a failure leaves the row in place, so the
-  // region renders directly below it (the field-error position). Clamped so
-  // a removed last row lands at the list's end, never out of bounds.
+  // rows list. Success took the row away — the awaited reload has already
+  // dropped it — so the outcome renders in its former slot; a failure OR the
+  // tolerant no-op (warn: nothing was removed, the row is still there) renders
+  // directly below it (the field-error position). Clamped so a removed last
+  // row lands at the list's end, never out of bounds.
   const removeSlot =
     removeOutcome === null
       ? -1
       : Math.min(
-          removeOutcome.notice.kind === "error" ? removeOutcome.slot + 1 : removeOutcome.slot,
+          removeOutcome.notice.kind === "success" ? removeOutcome.slot : removeOutcome.slot + 1,
           payload.configured_providers.length,
         );
 
@@ -1060,7 +1088,7 @@ function ProvidersCard({
           <p className="text-sm text-muted-foreground">{t(locale, "settings.noConfiguredProviders")}</p>
         ) : (
           payload.configured_providers.map((row, index) => (
-            <Fragment key={row.kind === "key" ? row.provider : row.provider_id}>
+            <Fragment key={row.kind === "key" ? `${row.provider}:${row.key_id}` : row.provider_id}>
               {/* (audit UI-45-05): the remove outcome renders in
                   the removed row's position — at catalog scale the feedback
                   is visible without scrolling away from the Remove control
@@ -1122,13 +1150,21 @@ function ConfiguredKeyRow({
           {row.updated_at
             ? ` · ${t(locale, "settings.updated", { time: formatRelativeTime(row.updated_at, locale) })}`
             : ""}
+          {/* One row per stored key: the verification state is the row's own. */}
+          {row.verified_status === "ok" && row.verified_at
+            ? ` · ${t(locale, "settings.keyVerifiedAt", { time: formatRelativeTime(row.verified_at, locale) })}`
+            : row.verified_status === "failed"
+              ? ` · ${t(locale, "settings.keyVerifyFailed")}`
+              : ""}
         </div>
       </div>
       <Button
         type="button"
         variant="destructive"
         size="sm"
-        onClick={() => onPending({ kind: "remove-key", provider: row.provider })}
+        onClick={() =>
+          onPending({ kind: "remove-key", provider: row.provider, keyId: row.key_id, last4: row.last4 })
+        }
       >
         {t(locale, "settings.remove")}
       </Button>
@@ -1203,8 +1239,6 @@ function AddProviderSection({
   const [selectedId, setSelectedId] = useState<string | undefined>(undefined);
   const selected = selectedCatalogProvider(payload.provider_catalog, selectedId);
   const imageId = payload.app.sandbox_image_id;
-  const keyByProvider: Record<string, SettingsManagePayload["keys"][number]> = {};
-  for (const key of payload.keys) keyByProvider[key.provider] = key;
   const customById: Record<string, SettingsManagePayload["custom_providers"][number]> = {};
   for (const row of payload.custom_providers) customById[row.provider_id] = row;
 
@@ -1251,7 +1285,7 @@ function AddProviderSection({
                 key={selected.id}
                 locale={locale}
                 provider={selected}
-                storedKey={keyByProvider[selected.id]}
+                storedKeys={providerKeyRows(payload.keys, selected.id)}
                 custom={customById[selected.id]}
                 onVerify={onVerify}
                 onSettings={onSettings}
@@ -1282,10 +1316,10 @@ function AddProviderSection({
  * effective base URL carries the {account_id} placeholder, mirroring the
  * save flow's conditional demand (breadth rows are not all Workers-AI-shaped).
  */
-function ProviderConfigForm({
+export function ProviderConfigForm({
   locale,
   provider,
-  storedKey,
+  storedKeys,
   custom,
   onVerify,
   onSettings,
@@ -1294,7 +1328,8 @@ function ProviderConfigForm({
 }: {
   locale: SpaBoot["locale"];
   provider: CatalogProvider;
-  storedKey: SettingsManagePayload["keys"][number] | undefined;
+  /** EVERY stored key of the selected provider — one masked line per row. */
+  storedKeys: ProviderKeyRow[];
   custom: SettingsManagePayload["custom_providers"][number] | undefined;
   onVerify: (fields: Record<string, string>) => Promise<OpNotice>;
   onSettings: (fields: Record<string, string>) => Promise<OpNotice>;
@@ -1303,7 +1338,11 @@ function ProviderConfigForm({
 }) {
   const [key, setKey] = useState("");
   const [accountId, setAccountId] = useState("");
-  const [baseUrl, setBaseUrl] = useState(provider.base_url ?? "");
+  // Seeded from the STORED declaration when the provider already has one: the
+  // pool is bound to that endpoint, and re-submitting the catalog default
+  // while adding a key would only trip the store's endpoint lock (the
+  // backstop for a hand-typed override). Catalog prefill covers the first key.
+  const [baseUrl, setBaseUrl] = useState(custom?.base_url ?? provider.base_url ?? "");
   const [busy, setBusy] = useState(false);
   const formKind = providerFormKind(provider);
 
@@ -1360,10 +1399,25 @@ function ProviderConfigForm({
           void submitTemplate();
         }}
       >
-        {custom ? (
-          <p className="text-sm text-muted-foreground">
-            {custom.base_url} · {custom.api} · {custom.model_ids.join(", ")}
-          </p>
+        {custom || storedKeys.length > 0 ? (
+          <div className="flex flex-col gap-1">
+            {custom ? (
+              <p className="text-sm text-muted-foreground">
+                {custom.base_url} · {custom.api} · {custom.model_ids.join(", ")}
+              </p>
+            ) : null}
+            {/* The pool's existing rows, one line per stored key: submitting
+                below APPENDS (re-submitting a listed key updates its row in
+                place), so the pool a template already holds is visible before
+                another key is added. */}
+            {storedKeys.map((stored) => (
+              <p key={stored.keyId} className="text-sm text-muted-foreground">
+                {stored.last4
+                  ? t(locale, "settings.keyEnding", { last4: stored.last4 })
+                  : t(locale, "settings.keyTooShort")}
+              </p>
+            ))}
+          </div>
         ) : null}
         <label className="flex flex-col gap-1.5 text-sm font-medium">
           {t(locale, "settings.baseUrl")}
@@ -1413,11 +1467,16 @@ function ProviderConfigForm({
         void submitKey();
       }}
     >
-      {storedKey ? (
-        <p className="text-sm text-muted-foreground">
-          {t(locale, "settings.keyEnding", { last4: storedKey.last4 })}
+      {/* The pool's rows, one line per stored key: submitting the field below
+          APPENDS to this pool (re-submitting a listed key updates its row in
+          place) — no client-side fold, so a second key stays visible. */}
+      {storedKeys.map((stored) => (
+        <p key={stored.keyId} className="text-sm text-muted-foreground">
+          {stored.last4
+            ? t(locale, "settings.keyEnding", { last4: stored.last4 })
+            : t(locale, "settings.keyTooShort")}
         </p>
-      ) : null}
+      ))}
       <label className="flex flex-col gap-1.5 text-sm font-medium">
         {t(locale, "settings.apiKey")}
         <Input

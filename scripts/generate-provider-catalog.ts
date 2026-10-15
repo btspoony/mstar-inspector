@@ -307,13 +307,19 @@ async function main(): Promise<void> {
  * sandbox image only import this module. PURE DATA + pure derivations:
  * zero imports of any kind.
  *
- * Tiers: \`builtin\` = runner-consumable env-name entries (the per-App BYOK
- * allowlist, AL-24-5 — consumer.ts injects ONLY these env names
- * into the review container); \`template\` = metadata + prefill only,
- * materialized through the existing custom-provider machinery
- * (app_custom_providers) at save time (spec §5). The hand-curated
+ * Tiers: \`builtin\` = the per-App BYOK allowlist (AL-24-5); \`template\` =
+ * metadata + prefill only, materialized through the existing custom-provider
+ * machinery (app_custom_providers) at save time (spec §5). The hand-curated
  * \`workers-ai\` template carries the {account_id} base-URL placeholder the
  * save flow substitutes.
+ *
+ * Credential transport: an \`envName\` is RETAINED mapping metadata, never the
+ * variable the key rides. A configured pool reaches the review container as the
+ * runner's STDIN credential payload (consumer.ts buildRunnerCredentials,
+ * src/review/credential-payload.ts), and the in-image runner loads it into the
+ * run's IN-MEMORY credential store as \`source:"login"\` api_key rows — the
+ * per-run agent directory holds only the non-secret models.yml. \`envName\`
+ * only marks allowlist membership (providerEnvName).
  *
  * Display grouping (AD-547): \`PROVIDER_IDS_COMMON\` is a
  * DISPLAY-ONLY regroup of the settings picker (常用 providers first, the
@@ -329,11 +335,12 @@ export type ProviderTier = "builtin" | "template";
 export type ProviderCatalogEntry = {
   /** Human-readable provider label (picker/table). */
   label: string;
-  /** builtin = runner-consumable env-name entry; template = metadata + prefill only. */
+  /** builtin = allowlisted BYOK provider (pool-transported); template = metadata + prefill only. */
   tier: ProviderTier;
-  /** Env var name the key is injected under inside the review container
-   *  (builtin tier only; null for template — materialized via
-   *  customProviderEnvName). */
+  /** RETAINED mapping metadata — NOT the container injection variable. The key
+   *  rides the stdin credential payload under the provider id;
+   *  this scalar only marks builtin allowlist membership (providerEnvName).
+   *  Null for template — materialized as a custom-provider declaration. */
   envName: string | null;
   /** Default API base URL. Template entries may carry a {account_id}
    *  placeholder the save flow substitutes. */
@@ -348,7 +355,8 @@ export type ProviderCatalogEntry = {
 };
 
 export type ProviderInfo = {
-  /** The env var name the key is injected under inside the review container. */
+  /** RETAINED mapping metadata — the legacy scalar name of a provider that is
+   *  on the BYOK allowlist; the key itself rides the credential payload. */
   envName: string;
   /** Human-readable provider label for the picker/table. */
   label: string;
@@ -374,12 +382,12 @@ export const PROVIDERS: Record<string, ProviderInfo> = Object.fromEntries(
     .map(([id, entry]) => [id, { envName: entry.envName!, label: entry.label }]),
 ) as Record<string, ProviderInfo>;
 
-/** Resolve the env var name a provider key is injected under, or undefined if unknown. */
+/** Resolve a provider's RETAINED legacy env-name metadata (allowlist membership), or undefined if unknown. */
 export function providerEnvName(name: string): string | undefined {
   return PROVIDERS[name]?.envName;
 }
 
-/** Every provider key env name, in mapping order (frozen snapshot). */
+/** Every provider's retained legacy env name, in mapping order (frozen snapshot). */
 export const PROVIDER_ENV_NAMES: readonly string[] = Object.freeze(
   Object.values(PROVIDERS).map((info) => info.envName),
 );

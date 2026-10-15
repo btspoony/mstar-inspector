@@ -16,11 +16,12 @@
 #       baseUrl https://example.invalid/v1, model id verify-model — reserved
 #       domains; the .invalid TLD structurally excludes egress). Asserted:
 #       ark-plan is present WITHOUT any baked file (registry-trusted scalars
-#       emitted bare, apiKey = the ARK_API_KEY env-var NAME), the custom
-#       block is merged under the base (quoted provider id / baseUrl,
-#       apiKey = env-var-NAME reference CUSTOM_U001_VERIFY_API_KEY, model ids
-#       present), a zero-custom call yields the byte-identical capability
-#       base, and ZERO key literals anywhere in the file;
+#       emitted bare), the custom block is merged under the base (quoted
+#       provider id / baseUrl, model ids present), a zero-custom call yields
+#       the byte-identical capability base, the file pins ZERO scalar
+#       `apiKey` lines, and every provider block carries `auth: oauth` (a
+#       models.yml apiKey is a tier-2 config override that would suppress the
+#       stored credential pool the runtime rotates across);
 #   (b) the omp SDK ModelRegistry — the SAME eager loader createAgentSession
 #       constructs internally (new ModelRegistry(authStorage,
 #       <agentDir>/models.yml)) — resolves hasProvider for BOTH the
@@ -32,12 +33,12 @@
 # Load-level only: NO provider call, NO network. The registry from (b) is
 # passed to createAgentSession explicitly so the SDK's background provider
 # refresh (online-if-uncached) never fires — this verification must not depend
-# on egress. Real provider calls are an operator-side extension (exec env key
-# injection), never part of this script's pass/fail (AL-25-1).
+# on egress. Real provider calls are an operator-side extension (the runner's
+# stdin credential payload), never part of this script's pass/fail (AL-25-1).
 #
-# Zero secrets: the declaration is keyless; every apiKey line in the
-# synthesized file is an env-var-NAME reference (CUSTOM_U001_VERIFY_API_KEY /
-# ARK_API_KEY). No key material is read, written, or printed.
+# Zero secrets: the declaration is keyless and the synthesized file pins no
+# apiKey at all (every block authenticates via `auth: oauth` against the
+# stored pool). No key material is read, written, or printed.
 #
 # Idempotent: the only writes are /tmp/omp-agent-<uuid>/ (fresh per run via
 # crypto.randomUUID) and they are removed before exit on EVERY path — success,
@@ -63,7 +64,10 @@ import { readFileSync, rmSync } from "node:fs";
 // deployed image. Declared inline (NOT imported from
 // src/contracts/sandbox-images.ts): the image COPYs only src/review, so the
 // in-image module graph cannot see the registry; this literal mirrors the
-// source-controlled omp entry (ark-plan, keyless ARK_API_KEY reference).
+// source-controlled omp entry (ark-plan). `apiKeyEnv` and `auth` are retained
+// registry metadata — the pool env prefix derives from the provider id
+// (catalogProviderId), not from `apiKeyEnv` — and the synthesized block pins
+// no apiKey.
 const ARK_PLAN_HOST = {
   id: "ark-plan",
   catalogProviderId: "ark",
@@ -108,21 +112,15 @@ try {
   // (registry-trusted scalars emit bare, like the old baked body).
   assert(yaml.includes("  ark-plan:"), "U001_LAYER_A_CAPABILITY_HOST_ARK_PLAN");
   assert(yaml.includes("baseUrl: https://ark.cn-beijing.volces.com/api/plan"), "U001_LAYER_A_ARK_BASE_URL");
-  assert(yaml.includes("apiKey: ARK_API_KEY"), "U001_LAYER_A_ARK_ENV_NAME_API_KEY");
   assert(yaml.includes("- id: deepseek-v4-flash"), "U001_LAYER_A_ARK_MODEL_ID");
   // The custom-provider layer still merges under the capability base.
   assert(yaml.includes("\"u001-verify\":"), "U001_LAYER_A_QUOTED_PROVIDER_ID");
   assert(yaml.includes("baseUrl: \"https://example.invalid/v1\""), "U001_LAYER_A_QUOTED_BASE_URL");
-  assert(yaml.includes("apiKey: CUSTOM_U001_VERIFY_API_KEY"), "U001_LAYER_A_ENV_NAME_API_KEY");
   assert(yaml.includes("- id: \"verify-model\""), "U001_LAYER_A_MODEL_ID");
-  // ZERO key literals: every apiKey value in the whole file (capability
-  // hosts + custom) must be an env-var-NAME reference — uppercase start,
-  // [A-Z0-9_]+ body.
-  const badApiKeyLines = yaml.split("\n").filter((line) => {
-    const m = /^(\s*)apiKey:\s*(\S+)\s*$/.exec(line);
-    return m !== null && !/^[A-Z][A-Z0-9_]*$/.test(m[2]);
-  });
-  assert(badApiKeyLines.length === 0, "U001_LAYER_A_ZERO_KEY_LITERALS");
+  // No block pins a scalar apiKey (a tier-2 config override would suppress the
+  // stored credential pool); every block authenticates via auth: oauth.
+  assert(!/^\s*apiKey:/m.test(yaml), "U001_LAYER_A_ZERO_APIKEY_LINES");
+  assert(yaml.split("\n").filter((line) => /^    auth: oauth$/.test(line)).length === 2, "U001_LAYER_A_OAUTH_AUTH");
   // Zero-custom path: custom providers are OPTIONAL — zero declarations
   // yield the byte-identical capability base (ark-plan, no custom block).
   zeroCustomDir = await writePerReviewModelsYaml([ARK_PLAN_HOST]);

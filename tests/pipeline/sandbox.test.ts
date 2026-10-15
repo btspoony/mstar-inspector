@@ -31,11 +31,17 @@ type FakeContainer = {
   images: Record<string, string>;
   start: Mock<(opts: Record<string, unknown>) => void>;
   setInactivityTimeout: Mock<(ms: number) => Promise<void>>;
-  exec: Mock<(cmd: string[], opts?: unknown) => Promise<{ output: () => Promise<ExecOutput> }>>;
+  exec: Mock<
+    (
+      cmd: string[],
+      opts?: unknown,
+    ) => Promise<{ output: () => Promise<ExecOutput>; stdin?: WritableStream | null }>
+  >;
   destroy: Mock<() => Promise<void>>;
 };
 
 const encoder = new TextEncoder();
+const decoder = new TextDecoder();
 
 /** Test bytes as the ArrayBuffer the real `ExecOutput.stdout` carries. */
 function bytes(text: string): ArrayBuffer {
@@ -54,6 +60,41 @@ let execResult: { stdout: ArrayBuffer; stderr: ArrayBuffer; exitCode: number } =
 let running = false;
 let execError: Error | undefined;
 let destroyError: Error | undefined;
+/**
+ * The fake child's stdin surface: `undefined` = no stream (a command that
+ * passes no `stdin` option), `"reader"` = a `cat`-like reader whose output
+ * exists only once stdin reached EOF, `"error-on-write"` = a child that died
+ * before reading (the sink rejects), `"gated-write"` = a child that fills its
+ * output pipe, so the stdin pipe accepts the payload ONLY once output
+ * collection started (the drain-order deadlock), `"delayed-write"` = a pipe
+ * whose write settles only when the test opens the gate (the backpressure the
+ * adapter must await before the stream can close).
+ */
+let execStdin: "reader" | "error-on-write" | "gated-write" | "delayed-write" | undefined;
+/** Bytes the fake child read from stdin (decoded). */
+let execStdinBytes = "";
+/** Whether the fake child saw EOF (the writer closed the stream). */
+let execStdinEof = false;
+/** Order of the fake sink's own observations: `write` / `write-settled` / `close`. */
+let stdinEvents: string[] = [];
+/** Whether output collection had already started when `write()` was called. */
+let stdinWriteSawDrain = false;
+/** Whether the adapter has started collecting the child's output. */
+let drainStarted = false;
+/** Opens the `"delayed-write"` gate (the test, not the adapter, holds it). */
+let openWriteGate: () => void = () => {};
+
+/** Concatenate the chunks a fake child read from stdin. */
+function concatChunks(chunks: Uint8Array[]): Uint8Array {
+  const total = chunks.reduce((sum, chunk) => sum + chunk.byteLength, 0);
+  const out = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    out.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return out;
+}
 
 /** The fake container the DO drives (the `this.ctx.container` surface). */
 function makeContainer(): FakeContainer {
@@ -72,7 +113,77 @@ function makeContainer(): FakeContainer {
     exec: mock(async (cmd: string[], opts?: unknown) => {
       execCalls.push({ cmd, opts });
       if (execError) throw execError;
-      return { output: async () => execResult };
+      if (execStdin === undefined) return { output: async () => execResult, stdin: null };
+      const chunks: Uint8Array[] = [];
+      let eof = false;
+      const { promise: closed, resolve: onClose } = Promise.withResolvers<void>();
+      // The child's stdout pipe is FULL until someone drains it: with
+      // `gated-write` the stdin pipe therefore accepts the payload only once
+      // output collection started (writing first is a real deadlock), and with
+      // `delayed-write` the pipe accepts it only once the test opens the gate
+      // (the parent's buffer is slow — the adapter must await that write).
+      const { promise: drained, resolve: onDrain } = Promise.withResolvers<void>();
+      const { promise: writeGate, resolve: onWriteGate } = Promise.withResolvers<void>();
+      openWriteGate = () => onWriteGate();
+      drainStarted = false;
+      // The child's read is complete only when the stream ended (close/abort):
+      // recording there keeps `execStdinBytes`/`execStdinEof` truthful for the
+      // modes whose `output()` resolves before the write settles.
+      const record = () => {
+        execStdinBytes = decoder.decode(concatChunks(chunks));
+        execStdinEof = eof;
+      };
+      const stream = new WritableStream<Uint8Array>({
+        write(chunk) {
+          if (execStdin === "error-on-write") {
+            // A child that exited before reading: the platform errors the pipe.
+            onClose();
+            throw new Error("EPIPE");
+          }
+          stdinWriteSawDrain = drainStarted;
+          stdinEvents.push("write");
+          chunks.push(chunk);
+          if (execStdin === "delayed-write") {
+            return writeGate.then(() => {
+              stdinEvents.push("write-settled");
+            });
+          }
+          if (execStdin === "gated-write") {
+            // A real full output pipe blocks here forever; bounded so a
+            // reordered adapter fails the drain-order assertion instead of
+            // hanging the suite.
+            return Promise.race([drained, Bun.sleep(150)]).then(() => {
+              stdinEvents.push("write-settled");
+            });
+          }
+        },
+        close() {
+          eof = true;
+          stdinEvents.push("close");
+          record();
+          onClose();
+        },
+        abort() {
+          eof = true;
+          stdinEvents.push("close");
+          record();
+          onClose();
+        },
+      });
+      return {
+        stdin: stream,
+        // A reader that consumes stdin to the END before producing output: the
+        // adapter must close the stream (EOF) AND drain output concurrently, or
+        // this promise never settles. The gated/delayed modes resolve as soon
+        // as collection started — they model a child whose output pipe blocks
+        // the payload, not a child that reads stdin to EOF.
+        output: async () => {
+          drainStarted = true;
+          onDrain();
+          if (execStdin === "reader") await closed;
+          return execResult;
+        },
+      };
     }),
     destroy: mock(async () => {
       destroyCalls.push("container");
@@ -88,7 +199,7 @@ function makeContainer(): FakeContainer {
 // no matter which test file's registration a shared process saw first.
 import "../helpers/cloudflare-workers-mock";
 
-const { SandboxV1, getSandbox, DEFAULT_EXEC_TIMEOUT_MS, shellCommand } =
+const { SandboxV1, getSandbox, DEFAULT_EXEC_TIMEOUT_MS, MAX_EXEC_STDIN_BYTES, shellCommand } =
   await import("../../src/pipeline/sandbox");
 import type { ReviewSandbox } from "../../src/pipeline/sandbox";
 
@@ -113,6 +224,13 @@ function reset() {
   running = false;
   execError = undefined;
   destroyError = undefined;
+  execStdin = undefined;
+  execStdinBytes = "";
+  execStdinEof = false;
+  stdinEvents = [];
+  stdinWriteSawDrain = false;
+  drainStarted = false;
+  openWriteGate = () => {};
 }
 
 describe("SandboxV1 Durable Object", () => {
@@ -308,5 +426,147 @@ describe("getSandbox", () => {
     expect(await sandbox.runCommand(shellCommand("echo hi"))).toEqual({ stdout: "out", stderr: "", exitCode: 0 });
     await sandbox.destroy();
     expect(destroyCalls).toEqual([]); // stub-level: destroy runs in the DO, not the fake namespace
+  });
+});
+
+/**
+ * The credential channel: `stdin` on the exec path. The payload is the ONLY
+ * way a key reaches the container, so the lifecycle matters as much as the
+ * bytes — a run that waits for EOF must see the stream closed, output must be
+ * drained concurrently with the write (a child whose full output pipe blocks
+ * the stdin write deadlocks otherwise), the write must be AWAITED (the sink
+ * closes only after it settles), and an oversized or undelivered payload must
+ * fail closed with a REDACTED error (never the payload itself). The
+ * drain-order and backpressure guarantees are pinned by their own two cases
+ * below — both fail against an adapter that writes first / does not await the
+ * write.
+ */
+describe("SandboxV1 stdin transport (the credential channel)", () => {
+  const PAYLOAD = '{"version":1,"pools":{"ark":["secret-key"]}}';
+
+  test("a stdin payload is written through the exec pipe and the stream is CLOSED (a reader waiting for EOF completes)", async () => {
+    reset();
+    execStdin = "reader";
+    execResult = { stdout: bytes("envelope\n"), stderr: new ArrayBuffer(0), exitCode: 0 };
+    const { sandbox } = makeDo();
+
+    const result = await sandbox.runCommand(shellCommand("bun run runner.ts"), {
+      cwd: "/workspace/repo",
+      env: { OMP_REVIEW_MODEL: "ark-plan/deepseek-v4-flash" },
+      stdin: PAYLOAD,
+    });
+
+    // The per-call {cwd, env} contract is untouched; the payload rides the pipe.
+    expect(execCalls).toEqual([
+      {
+        cmd: ["timeout", "--kill-after=5", "600", "/bin/sh", "-lc", "bun run runner.ts"],
+        opts: { cwd: "/workspace/repo", env: { OMP_REVIEW_MODEL: "ark-plan/deepseek-v4-flash" }, stdin: "pipe" },
+      },
+    ]);
+    expect(execStdinBytes).toBe(PAYLOAD);
+    expect(execStdinEof).toBe(true);
+    expect(result).toEqual({ stdout: "envelope\n", stderr: "", exitCode: 0 });
+  });
+
+  test("no stdin option → the exec starts with no stdin pipe (the platform sends EOF)", async () => {
+    reset();
+    const { sandbox } = makeDo();
+
+    await sandbox.runCommand(shellCommand("git status"), { timeout: 120_000 });
+
+    expect(Object.hasOwn(execCalls[0]!.opts as object, "stdin")).toBe(false);
+  });
+
+  test("an oversized payload fails closed BEFORE any process starts — and the error carries no payload", async () => {
+    reset();
+    const { sandbox } = makeDo();
+    const payload = `s${"e".repeat(MAX_EXEC_STDIN_BYTES)}`; // one byte past the cap
+
+    let message = "";
+    try {
+      await sandbox.runCommand(shellCommand("bun run runner.ts"), { stdin: payload });
+    } catch (error) {
+      message = (error as Error).message;
+    }
+
+    expect(message).toContain(`exceeds the ${MAX_EXEC_STDIN_BYTES}-byte`);
+    expect(message).not.toContain("seee");
+    expect(execCalls).toEqual([]);
+  });
+
+  test("a stdin write failure on a child that claims success is refused (never a keyless run reported as ok)", async () => {
+    reset();
+    execStdin = "error-on-write";
+    execResult = { stdout: new ArrayBuffer(0), stderr: new ArrayBuffer(0), exitCode: 0 };
+    const { sandbox } = makeDo();
+
+    let message = "";
+    try {
+      await sandbox.runCommand(shellCommand("bun run runner.ts"), { stdin: PAYLOAD });
+    } catch (error) {
+      message = (error as Error).message;
+    }
+
+    expect(message).toBe("exec stdin closed before the payload was delivered");
+    expect(message).not.toContain("secret-key");
+  });
+
+  test("a stdin write failure keeps the child's own non-zero exit code (its stderr is the diagnosis)", async () => {
+    reset();
+    execStdin = "error-on-write";
+    execResult = { stdout: new ArrayBuffer(0), stderr: bytes("review: cannot read runner input\n"), exitCode: 1 };
+    const { sandbox } = makeDo();
+
+    const result = await sandbox.runCommand(shellCommand("bun run runner.ts"), { stdin: PAYLOAD });
+
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr).toBe("review: cannot read runner input\n");
+  });
+
+  test("output collection starts BEFORE the payload write (a child whose full output pipe blocks the stdin write cannot deadlock the run)", async () => {
+    reset();
+    // The child's stdout pipe is full until someone drains it, so the stdin
+    // pipe accepts the payload only once output collection started: an adapter
+    // that writes and only then calls output() never delivers the payload.
+    execStdin = "gated-write";
+    execResult = { stdout: bytes("envelope\n"), stderr: new ArrayBuffer(0), exitCode: 0 };
+    const { sandbox } = makeDo();
+
+    const result = await sandbox.runCommand(shellCommand("bun run runner.ts"), { stdin: PAYLOAD });
+
+    expect(stdinWriteSawDrain).toBe(true);
+    expect(stdinEvents).toEqual(["write", "write-settled", "close"]);
+    expect(execStdinEof).toBe(true);
+    expect(result).toEqual({ stdout: "envelope\n", stderr: "", exitCode: 0 });
+  });
+
+  test("runCommand does not settle until the delayed write does, and the sink closes only after it (awaited backpressure)", async () => {
+    reset();
+    // The pipe accepts the payload only once the test opens the gate: the
+    // adapter must await the write (and only then let the stream close), or a
+    // caller may tear the container down with the payload still in flight.
+    execStdin = "delayed-write";
+    const { sandbox } = makeDo();
+
+    let settled = false;
+    const run = sandbox
+      .runCommand(shellCommand("bun run runner.ts"), { stdin: PAYLOAD })
+      .then((value) => {
+        settled = true;
+        return value;
+      });
+
+    await Bun.sleep(10); // several turns with the write still gated
+    expect(settled).toBe(false);
+    expect(stdinEvents).toEqual(["write"]); // no close before the write settles
+    expect(execStdinEof).toBe(false);
+
+    openWriteGate();
+    await run;
+
+    expect(settled).toBe(true);
+    expect(stdinEvents).toEqual(["write", "write-settled", "close"]);
+    expect(execStdinBytes).toBe(PAYLOAD);
+    expect(execStdinEof).toBe(true);
   });
 });

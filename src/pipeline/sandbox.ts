@@ -19,10 +19,12 @@
  *   - every request path calls `ensureRunning()` first, and every step after
  *     `start()` is safe to repeat (a deploy restarts the DO; the inactivity
  *     timeout does not survive a restart, so it is (re)set on every guard);
- *   - `container.exec(argv, { cwd, env })` runs ONE process — no implicit
- *     shell, no session state (0.12's `enableDefaultSession: false`
+ *   - `container.exec(argv, { cwd, env, stdin })` runs ONE process — no
+ *     implicit shell, no session state (0.12's `enableDefaultSession: false`
  *     becomes the platform default). `env` is per-call and does not inherit
- *     image `ENV` lines except `PATH`.
+ *     image `ENV` lines except `PATH`. `stdin` is the credential channel:
+ *     `"pipe"` hands back the child's `WritableStream`, which the adapter
+ *     writes once and CLOSES (the close is the EOF a reader waits for).
  *
  * Command-string boundary (scanner CWE-78 / qc2 F-001): 1.0 has no string-form
  * shell runner, so the validated shell string is wrapped ONCE below into the
@@ -55,6 +57,16 @@ export type SandboxBinding = unknown;
 export const DEFAULT_EXEC_TIMEOUT_MS = 600_000;
 
 /**
+ * Upper bound on a `runCommand` `stdin` payload (the credential transport).
+ * The legal payload is bounded by the store's own limits — at most
+ * MAX_KEYS_PER_PROVIDER keys of MAX_PROVIDER_KEY_LENGTH per provider, over the
+ * BYOK allowlist plus MAX_CUSTOM_PROVIDER_COUNT custom declarations (~1 MB
+ * worst case). This cap sits above that and fails closed BEFORE a process
+ * starts, so a runaway payload can never reach the pipe.
+ */
+export const MAX_EXEC_STDIN_BYTES = 2 * 1024 * 1024;
+
+/**
  * A shell command cleared for the sandbox sink (CWE-78 boundary). Branded so
  * a raw `string` is a type error at `ReviewSandbox.runCommand`: only the
  * pipeline/gitops.ts builders (allowlist + fail-closed before any shell
@@ -68,7 +80,7 @@ export { shellCommand, type ShellCommand };
 export type ReviewSandbox = {
   runCommand(
     command: ShellCommand,
-    opts?: { env?: Record<string, string>; cwd?: string; timeout?: number },
+    opts?: { env?: Record<string, string>; cwd?: string; timeout?: number; stdin?: string },
   ): Promise<{ stdout: string; stderr: string; exitCode: number }>;
   destroy(): Promise<void>;
 };
@@ -86,6 +98,26 @@ const CONTAINER_INSTANCE = "lite" as const;
 const INACTIVITY_TIMEOUT_MS = 30 * 60 * 1000;
 
 const utf8 = new TextDecoder();
+const utf8Encoder = new TextEncoder();
+
+/**
+ * Write one payload into the child's stdin and CLOSE it.
+ *
+ * Closing is what sends **EOF**: a reader that consumes stdin to the end (the
+ * in-image runner reads its credential payload that way) would otherwise wait
+ * until the exec bound fires — which reads as a timeout instead of an input
+ * bug. The write is awaited, so the stream's own backpressure governs and a
+ * payload larger than the pipe buffer cannot outrun the child.
+ *
+ * Errors are REDACTED: the writer's own error is discarded rather than
+ * interpolated, so the payload can never surface in a diagnostic.
+ */
+async function writeExecStdin(stream: WritableStream | null, payload: Uint8Array): Promise<void> {
+  if (stream === null) throw new Error("the container exec opened no stdin stream");
+  const writer = stream.getWriter();
+  await writer.write(payload);
+  await writer.close();
+}
 
 /**
  * The review-sandbox Durable Object (wrangler `class_name: "SandboxV1"` — the
@@ -149,10 +181,15 @@ export class SandboxV1 extends DurableObject {
    * takes fractional durations, so an explicit millisecond override keeps the
    * caller's exact bound (`{ timeout: 250 }` → `0.25`). Exit code 124 = the
    * bound fired.
+   *
+   * `stdin` is the credential channel: when present it is written into the
+   * child's stdin pipe and the stream is closed (EOF). Nothing about it appears
+   * in `argv`, `env` or the return value, and an oversized payload fails closed
+   * before a process exists.
    */
   async runCommand(
     command: ShellCommand,
-    opts?: { env?: Record<string, string>; cwd?: string; timeout?: number },
+    opts?: { env?: Record<string, string>; cwd?: string; timeout?: number; stdin?: string },
   ): Promise<{ stdout: string; stderr: string; exitCode: number }> {
     await this.ensureRunning();
     // Clamp before converting: a zero/negative value must never reach the argv
@@ -161,11 +198,40 @@ export class SandboxV1 extends DurableObject {
     const requestedMs = opts?.timeout ?? DEFAULT_EXEC_TIMEOUT_MS;
     const timeoutMs = Number.isFinite(requestedMs) ? Math.max(1, requestedMs) : DEFAULT_EXEC_TIMEOUT_MS;
     const timeoutSeconds = timeoutMs / 1000;
+    // Fail closed BEFORE a process exists: an oversized payload never starts.
+    const stdinPayload = opts?.stdin === undefined ? undefined : utf8Encoder.encode(opts.stdin);
+    if (stdinPayload !== undefined && stdinPayload.byteLength > MAX_EXEC_STDIN_BYTES) {
+      throw new Error(`the exec stdin payload exceeds the ${MAX_EXEC_STDIN_BYTES}-byte bound`);
+    }
     const process = await this.container.exec(
       ["timeout", "--kill-after=5", String(timeoutSeconds), "/bin/sh", "-lc", command],
-      { cwd: opts?.cwd, env: opts?.env },
+      {
+        cwd: opts?.cwd,
+        env: opts?.env,
+        // No `stdin` option at all = the platform closes stdin and sends EOF.
+        ...(stdinPayload === undefined ? {} : { stdin: "pipe" as const }),
+      },
     );
-    const output = await process.output();
+    // Drain stdout/stderr CONCURRENTLY with the write: a child that emits ahead
+    // of reading its stdin would otherwise deadlock against a full output pipe.
+    // (`output()` is readable once, so it is started here and awaited once.)
+    const drained = process.output();
+    let stdinFailure: Error | undefined;
+    if (stdinPayload !== undefined) {
+      try {
+        await writeExecStdin(process.stdin, stdinPayload);
+      } catch {
+        stdinFailure = new Error("exec stdin closed before the payload was delivered");
+      }
+    }
+    const output = await drained;
+    // A child that exited while reporting its own failure keeps its result —
+    // that stderr is the real diagnosis. One that claims SUCCESS after the
+    // payload failed to land is refused: never report a credential-carrying run
+    // as completed when its credentials never arrived.
+    if (stdinFailure !== undefined && output.exitCode === 0) {
+      throw stdinFailure;
+    }
     return {
       stdout: utf8.decode(output.stdout),
       stderr: utf8.decode(output.stderr),

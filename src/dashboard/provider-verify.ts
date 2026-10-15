@@ -5,8 +5,9 @@
  * The settings save route verifies a freshly typed key BEFORE anything is
  * stored: built-in providers hit their list-models endpoint (or a documented
  * auth probe when no models endpoint exists), custom providers probe the
- * declared base URL, and only a successful probe returns `ok` with the model
- * list to cache (app_provider_models). Verification is outbound-only with
+ * declared base URL, and only a successful probe returns `ok` with THAT KEY's
+ * model list to record as evidence (app_provider_models). Verification is
+ * outbound-only with
  * the as-typed key (never stored, never logged); storage afterwards goes
  * through the existing secretbox envelope (src/dashboard/secretbox.ts).
  *

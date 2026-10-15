@@ -12,7 +12,8 @@
  *   3. GET the selected route:
  *        /smoke         → T1: getSandbox → exec gh pr diff → destroy.
  *        /smoke-review  → T2: seed-branch clone → in-image review runner with
- *                         ARK_API_KEY (exec env only) → parseReviewOutput →
+ *                         the ark key on its STDIN credential payload (one
+ *                         key → one pool) → parseReviewOutput →
  *                         destroy.
  *   4. Print the JSON evidence (no secrets) and exit with the verdict.
  *
@@ -21,8 +22,9 @@
  *       INSTALLATION_ID (required — the App installation to mint a token for),
  *       GH_REPO (required — the owner/repo whose PR is diffed; it must carry
  *       the `mstar-inspector-seed` branch and a diffable PR #1),
- *       SMOKE_ROUTE (default /smoke), ARK_API_KEY (required
- *       when SMOKE_ROUTE=/smoke-review).
+ *       SMOKE_ROUTE (default /smoke), ARK_API_KEY (the operator's local key;
+ *       required when SMOKE_ROUTE=/smoke-review, forwarded to the smoke Worker
+ *       as its own var and streamed to the runner on stdin).
  *
  * The token and model key are held only in this process's memory and passed to
  * the Worker via `--var` (wrangler dev local only — never committed, never
@@ -79,12 +81,12 @@ function resolvePrivateKey(value: string): string {
  * read-only, exactly the requested repository. `appId` is the smoke's local
  * numeric App-id stand-in (the mint itself binds installationId + repo).
  */
-async function mintInstallationToken(): Promise<string> {
-  const commenter = createReviewCommenter({ APP_ID: SMOKE_APP_ID, PRIVATE_KEY: resolvePrivateKey(SMOKE_PRIVATE_KEY) });
+async function mintInstallationToken(appId: string, privateKey: string): Promise<string> {
+  const commenter = createReviewCommenter({ APP_ID: appId, PRIVATE_KEY: resolvePrivateKey(privateKey) });
   // GH_REPO was validated as owner/repo at startup — `repo` is always present.
   const [owner, repo] = GH_REPO.split("/") as [string, string];
   const grant = await commenter.getInstallationToken({
-    scope: { appId: SMOKE_APP_ID, installationId: INSTALLATION_ID, owner, repo, prNumber: Number(GH_PR) },
+    scope: { appId, installationId: INSTALLATION_ID, owner, repo, prNumber: Number(GH_PR) },
     purpose: "sandbox-read",
   });
   assertSandboxGrant(grant, repo);
@@ -108,12 +110,16 @@ async function waitForPort(port: number, timeoutMs: number): Promise<void> {
   throw new Error(`wrangler dev did not become ready on port ${port} within ${timeoutMs}ms`);
 }
 
-const token = await mintInstallationToken();
+const token = await mintInstallationToken(SMOKE_APP_ID, SMOKE_PRIVATE_KEY);
 console.log("TOKEN_MINTED=yes");
 
 const port = 8791;
 const varFlags = [`GH_TOKEN:${token}`, `GH_REPO:${GH_REPO}`];
 if (ARK_API_KEY) {
+  // The smoke transports the operator's single key through the SAME stdin
+  // credential payload contract the production consumer builds (one key → the
+  // ark pool); it reaches the Worker as its own var and is never placed in the
+  // container's process environment.
   varFlags.push(`ARK_API_KEY:${ARK_API_KEY}`);
 }
 

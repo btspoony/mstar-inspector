@@ -24,10 +24,11 @@
  *                          controlled registry the consumer uses), exec
  *                          the in-image runner (src/review/runner.ts) on its
  *                          current `--level quick --input <file>` CLI with
- *                          ARK_API_KEY via exec env, parse the stdout with
- *                          parseReviewOutput, then destroy. The model key is
- *                          never baked into the image and never echoed in the
- *                          response (only a pass/fail + review shape).
+ *                          the ark credential payload on its stdin pipe, parse the
+ *                          stdout with parseReviewOutput, then destroy. The
+ *                          model key is never baked into the image and never
+ *                          echoed in the response (only a pass/fail + review
+ *                          shape).
  */
 
 import { runnerCommand, writeJsonCommand } from "./gitops";
@@ -35,6 +36,7 @@ import { getSandbox, Sandbox, SandboxV1, shellCommand, type ReviewSandbox, type 
 import { DEFAULT_SANDBOX_IMAGE_ID, getSandboxImage } from "../contracts/sandbox-images";
 import { APP_VERSION } from "../version";
 import { parseReviewOutput } from "../review/schema";
+import { encodeCredentialPayload } from "../review/credential-payload";
 
 // `SandboxV1` is the live implementation; `Sandbox` keeps the legacy `v1`
 // migration replayable on a fresh smoke worker (see src/pipeline/sandbox.ts).
@@ -44,10 +46,17 @@ type SmokeEnv = {
   SANDBOX: SandboxBinding;
   /** Installation token minted by the orchestrator (scripts/sandbox-smoke.ts). */
   GH_TOKEN: string;
+  /**
+   * The operator's ark key for the runner smoke (orchestrator `--var`; the
+   * Worker-side input, never a container env var). The smoke transports it
+   * through the SAME stdin credential payload the production consumer builds
+   * (buildRunnerCredentials), which the in-image runner turns into stored
+   * `login` credential rows. Never a scalar provider env name, never the
+   * container's process environment.
+   */
+  ARK_API_KEY?: string;
   /** Smoke target repository `owner/repo` (orchestrator `--var`, no default). */
   GH_REPO: string;
-  /** omp model key for the ark-plan provider (runner smoke; injected per exec). */
-  ARK_API_KEY?: string;
 };
 
 /**
@@ -191,12 +200,13 @@ export default {
 };
 
 /**
- * Runner falsification: real SDK, real model key (ARK_API_KEY via exec env),
- * real clone of the configured smoke repository's seed branch. The runner
- * inside the image reads the diff file, runs the omp review session, and
- * prints ONLY the ReviewOutput JSON to stdout. We parse that stdout with
- * parseReviewOutput and return the verdict shape — never the key, never the
- * raw model text.
+ * Runner falsification: real SDK, real model key (the ark credential payload
+ * over the exec stdin pipe), real clone of the configured smoke repository's
+ * seed branch. The runner inside the image reads the diff file, streams its
+ * credential payload, writes the pool into the run's credential store, runs the
+ * omp review session, and prints ONLY the ReviewOutput JSON to stdout. We parse
+ * that stdout with parseReviewOutput and return the verdict shape — never the
+ * key, never the raw model text.
  */
 async function runReviewSmoke(env: SmokeEnv, repo: string): Promise<Response> {
   const sandbox = await getSandbox(env.SANDBOX, `smoke-review-${crypto.randomUUID()}`);
@@ -204,7 +214,7 @@ async function runReviewSmoke(env: SmokeEnv, repo: string): Promise<Response> {
   let result: Record<string, unknown>;
   try {
     if (!env.ARK_API_KEY) {
-      throw new Error("ARK_API_KEY env is required for /smoke-review");
+      throw new Error("the ARK_API_KEY var is required for /smoke-review");
     }
 
     // 1. Clone the seed branch + base into the container.
@@ -255,12 +265,12 @@ async function runReviewSmoke(env: SmokeEnv, repo: string): Promise<Response> {
  * in-image review runner. The runner input is the same shape the production
  * consumer writes (src/pipeline/consumer.ts): PR fact + checked-out head sha
  * + the numstat universe + the required capabilityHosts, base64-transported
- * so the JSON never touches shell interpolation. The model key is injected
- * via exec env only (never baked into the image).
+ * so the JSON never touches shell interpolation. The model key rides the exec
+ * STDIN credential payload (never baked into the image, never the exec env).
  */
 async function execInImageReview(
   sandbox: ReviewSandbox,
-  arkApiKey: string,
+  arkKey: string,
   startedAt: number,
   repo: string,
 ): Promise<Record<string, unknown>> {
@@ -311,8 +321,10 @@ async function execInImageReview(
     env: {
       HARNESS_PLUGIN_ROOT: HARNESS_ROOT,
       PI_CODING_AGENT_DIR: OMP_AGENT_DIR,
-      ARK_API_KEY: arkApiKey,
     },
+    // The credential payload contract the runner consumes — one ark key, over
+    // the exec stdin pipe (never the process environment).
+    stdin: encodeCredentialPayload({ ark: [arkKey] }),
   });
   const parsed = parseReviewOutput(run.stdout);
   return {

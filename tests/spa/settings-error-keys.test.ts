@@ -63,10 +63,13 @@ describe("SPA 400-body resolution contract", () => {
     expect(settingsPage).toContain('body.trim() || t(locale, "common.loadFailed")');
   });
 
-  test("both 400 render paths route through the same resolver (settings POST + pinned ops)", () => {
-    // submitSettings AND runPinnedWithBody — the second was the raw
-    // body.trim() path the audit called out.
-    expect(settingsPage.match(/settingsErrorMessage\(locale, body\)/g)?.length).toBe(2);
+  test("both op channels route through the one shared outcome resolver (settings POST + pinned ops)", () => {
+    // submitSettings AND runPinnedWithBody resolve through settingsOpOutcome —
+    // a mapped 4xx, the remove routes' no-change 2xx face and the saved notice
+    // all take the same path (the second used to be the raw body.trim() path
+    // the audit called out).
+    expect(settingsPage.match(/settingsErrorMessage\(locale, body\)/g)?.length).toBe(1);
+    expect(settingsPage.match(/settingsOpOutcome\(locale, status, body/g)?.length).toBe(2);
     expect(settingsPage).not.toContain("message: body.trim()");
   });
 

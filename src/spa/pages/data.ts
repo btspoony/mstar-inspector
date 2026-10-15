@@ -133,6 +133,70 @@ export type CatalogProvider = {
 };
 
 /**
+ * The store-enforced verification vocabulary: `ok` / `failed` after a verify,
+ * NULL while a key was never verified (mirrors `app_provider_keys.verified_status`).
+ */
+export type KeyVerifiedStatus = "ok" | "failed" | null;
+
+/**
+ * One row of the settings `keys` face (the store's ProviderKeySummary): the
+ * provider it belongs to, its pool identity, the masked tail and the per-key
+ * bookkeeping. ONE ROW PER STORED KEY — the add flow lists every row of a
+ * provider, never a single slot per provider id. The plaintext never appears
+ * on this face.
+ */
+export type ProviderKeyRow = {
+  provider: string;
+  /** First 16 hex characters of the key's SHA-256 — the handle a delete takes. */
+  keyId: string;
+  last4: string;
+  updatedAt: string | null;
+  verifiedAt: string | null;
+  verifiedStatus: KeyVerifiedStatus;
+};
+
+/**
+ * The stored key rows of one provider, in payload order (provider-ascending,
+ * then pool order). Every row comes back — a second key of a provider is its
+ * own row, not an overwrite of the first.
+ */
+export function providerKeyRows(keys: readonly ProviderKeyRow[], provider: string): ProviderKeyRow[] {
+  return keys.filter((key) => key.provider === provider);
+}
+
+/**
+ * The slot a dialog-confirmed key removal's outcome renders at: the configured
+ * row the delete POST targets, matched on the SAME composite identity the
+ * store's primary key `(app_id, provider, key_id)` and the POST body carry.
+ * Key ids hash the plaintext alone, so one key stored under two providers
+ * shares its id — the provider is part of the match. `-1` when the payload
+ * holds no such row (the caller clamps the outcome to the list's end).
+ */
+export function configuredKeySlot(
+  rows: readonly ConfiguredProvider[],
+  provider: string,
+  keyId: string,
+): number {
+  return rows.findIndex((row) => row.kind === "key" && row.provider === provider && row.key_id === keyId);
+}
+
+/**
+ * The tolerant remove routes (key delete / custom provider remove) answer
+ * their no-op case as a 2xx `{ changed: false, message }` — nothing matched,
+ * so nothing was removed. `false` is the SPA's no-change outcome (it must not
+ * render the generic saved notice); `true` is a removal; `null` — any other
+ * body — keeps the caller's default (the plain-text 2xx faces).
+ */
+export function removeChanged(body: string): boolean | null {
+  try {
+    const parsed = JSON.parse(body) as { changed?: unknown };
+    return typeof parsed.changed === "boolean" ? parsed.changed : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
  * One row of the App's PERSISTED provider state: a stored builtin
  * key (masked tail only) or a saved custom-provider declaration. The `kind`
  * discriminator keeps this shape disjoint from {@link CatalogProvider} — a
@@ -140,7 +204,16 @@ export type CatalogProvider = {
  * configured state, and no plaintext key ever appears here.
  */
 export type ConfiguredProvider =
-  | { kind: "key"; provider: string; last4: string; updated_at: string | null }
+  | {
+      kind: "key";
+      provider: string;
+      /** The pool row's identity — the handle a per-key delete takes. */
+      key_id: string;
+      last4: string;
+      updated_at: string | null;
+      verified_at: string | null;
+      verified_status: KeyVerifiedStatus;
+    }
   | { kind: "custom"; provider_id: string; base_url: string; api: string; model_ids: string[] };
 
 export type ModelChainEntry = {
@@ -312,7 +385,7 @@ export type SettingsReadOnlyPayload = { can_manage: false; app: SettingsIdentity
 export type SettingsManagePayload = {
   can_manage: true;
   app: SettingsAppMeta;
-  keys: Array<{ provider: string; last4: string; updated_at: string | null }>;
+  keys: ProviderKeyRow[];
   model_chain: string | null;
   model_roles: Record<string, string>;
   model_chains: ModelChainEntry[];
@@ -602,7 +675,9 @@ export function parseApps(data: unknown): AppsPayload | null {
 /**
  * Row-level guard for the configured list: every row must carry the
  * `kind` discriminator, so a catalog-shaped entry (no `kind`) can never be
- * parsed as configured state.
+ * parsed as configured state. A key row also carries its pool identity plus
+ * the per-key verification columns — without the identity the row could be
+ * neither deleted nor re-verified.
  */
 function isConfiguredProviderList(value: unknown): value is ConfiguredProvider[] {
   return (
@@ -612,8 +687,11 @@ function isConfiguredProviderList(value: unknown): value is ConfiguredProvider[]
       if (row.kind === "key") {
         return (
           typeof row.provider === "string" &&
+          typeof row.key_id === "string" &&
           typeof row.last4 === "string" &&
-          (row.updated_at === null || typeof row.updated_at === "string")
+          isNullableString(row.updated_at) &&
+          isNullableString(row.verified_at) &&
+          isKeyVerifiedStatus(row.verified_status)
         );
       }
       if (row.kind === "custom") {
@@ -626,6 +704,32 @@ function isConfiguredProviderList(value: unknown): value is ConfiguredProvider[]
       }
       return false;
     })
+  );
+}
+
+/** The verification vocabulary is closed — an off-vocabulary value fails the parse. */
+function isKeyVerifiedStatus(value: unknown): value is KeyVerifiedStatus {
+  return value === null || value === "ok" || value === "failed";
+}
+
+/**
+ * Row-level guard for the `keys` face the add flow renders per provider:
+ * a drifted row (no pool identity, no masked tail, an off-vocabulary status)
+ * fails the parse instead of rendering a row nothing can address.
+ */
+function isProviderKeyRowList(value: unknown): value is ProviderKeyRow[] {
+  return (
+    Array.isArray(value) &&
+    value.every(
+      (row) =>
+        isRecord(row) &&
+        typeof row.provider === "string" &&
+        typeof row.keyId === "string" &&
+        typeof row.last4 === "string" &&
+        isNullableString(row.updatedAt) &&
+        isNullableString(row.verifiedAt) &&
+        isKeyVerifiedStatus(row.verifiedStatus),
+    )
   );
 }
 
@@ -721,7 +825,7 @@ export function parseSettings(data: unknown): SettingsPayload | null {
   // worker) fails the parse instead of rendering a dead selection.
   if (!isReviewTriggerMode(data.app.review_trigger_mode)) return null;
   if (!Array.isArray(data.installations) || !Array.isArray(data.deliveries)) return null;
-  if (!Array.isArray(data.keys)) return null;
+  if (!isProviderKeyRowList(data.keys)) return null;
   if (!Array.isArray(data.model_role_ids) || !isStringArray(data.model_role_ids)) return null;
   if (!Array.isArray(data.custom_provider_api_ids) || !isStringArray(data.custom_provider_api_ids)) return null;
   if (!Array.isArray(data.model_chains)) return null;

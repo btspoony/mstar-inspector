@@ -212,12 +212,15 @@ export const en = {
       configuration: "Configuration",
     },
     changesSaved: "Changes saved.",
+    removeNoChange: "Nothing changed — there was nothing to remove.",
     addKey: "Add key",
     provider: "Model provider",
     apiKey: "API key",
     apiKeyPlaceholder: "Paste the provider API key",
     keyEnding: "key ending {last4}",
     keyTooShort: "key too short to show a tail",
+    keyVerifiedAt: "verified {time}",
+    keyVerifyFailed: "verification failed",
     updated: "updated {time}",
     remove: "Remove",
     selectProvider: "Search model providers…",
@@ -278,6 +281,10 @@ export const en = {
       apiKeyRequired: "Enter an API key to store.",
       apiKeyTooLong:
         "That API key is too long ({count} characters) — keys are limited to {limit} characters. Nothing was stored.",
+      apiKeyCommandPrefix:
+        "That API key starts with \"!\" — the review runtime would run it as a shell command, so keys of that shape are refused. Nothing was stored.",
+      providerKeyLimit:
+        "{provider} already holds the maximum of {limit} keys — remove one before adding another. Nothing was stored.",
       chainFieldDuplicated: "The model chain field was submitted more than once — resubmit the form. Nothing was saved.",
       chainTooLong: "That model chain is too long ({count} characters) — limited to {limit} characters. Nothing was saved.",
       chainEmpty: "Enter at least one comma-separated model selector.",
@@ -313,6 +320,8 @@ export const en = {
       modelIdsTooMany: "Too many model ids ({count}) — at most {limit}. Nothing was stored.",
       modelIdTooLong: "Model ids are limited to {limit} characters each. Nothing was stored.",
       customProviderDeclRejected: "The custom provider was rejected — nothing was stored.",
+      providerEndpointLocked:
+        "{provider} already stores keys for its current endpoint — remove them before changing its base URL or API protocol. Nothing was stored.",
       templateUnknown: "Unknown provider template — nothing was stored.",
       templateIncomplete: "This provider template is incomplete — nothing was stored.",
       accountIdRequired: "Enter your Cloudflare account id to complete the Workers AI base URL.",
@@ -393,10 +402,12 @@ export const en = {
     confirmRemoveChainTitle: "Remove chain {name}?",
     confirmRemoveChainBody: "Seats using {name} fall back to the default chain.",
     consoleOnly: "This provider can't be verified here — manage the key in the provider console.",
-    confirmRemoveKeyTitle: "Remove the {provider} key?",
-    confirmRemoveKeyBody: "Selectors that need {provider} will fail until you verify a new key.",
+    confirmRemoveKeyTitle: "Remove the {provider} key ending {last4}?",
+    confirmRemoveKeyBody:
+      "The App's other {provider} keys stay. Selectors that depend on this key alone fail until you verify a replacement.",
     confirmRemoveCustomTitle: "Remove provider {provider}?",
-    confirmRemoveCustomBody: "The provider and its stored key are removed. Chains referencing its models fail on save.",
+    confirmRemoveCustomBody:
+      "The provider and every key in its pool are removed. To free one slot only, remove that key's own row. Chains referencing its models fail on save.",
     runtimeImage: "Runtime image",
     runtimeImageCopy:
       "The sandbox runtime image that executes this App's reviews. Reviews read their model configuration at run time — nothing App-specific is baked into an image.",

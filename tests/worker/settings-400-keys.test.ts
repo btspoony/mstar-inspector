@@ -6,7 +6,7 @@
  * CARRY-2 verify-route eligibility rejection gains the same keyed face with
  * no new reason value. Static-key bodies carry no `params` field.
  */
-import { describe, expect, test } from "bun:test";
+import { describe, expect, spyOn, test } from "bun:test";
 import { createMigratedTestD1 } from "../store/helpers";
 import { createAppsStore } from "../../src/dashboard/apps-store";
 import { createSecretbox } from "../../src/dashboard/secretbox";
@@ -55,6 +55,12 @@ function makeEnv(db: unknown): Env {
 
 function rawRun(db: ReturnType<typeof createMigratedTestD1>, sql: string, ...params: (string | number | null)[]): void {
   db.raw.prepare(sql).run(...params);
+}
+
+/** Row count of one table — the zero-writes assertion after a refused request. */
+function rawCount(db: ReturnType<typeof createMigratedTestD1>, table: string): number {
+  const row = db.raw.query(`SELECT COUNT(*) AS n FROM ${table}`).get() as { n: number };
+  return row.n;
 }
 
 async function postForm(
@@ -231,6 +237,90 @@ describe("settings 400 key transport", () => {
     );
     expect(res.status).toBe(302);
     expect(res.headers.get("Location")).toBe("/dashboard/apps/mallorys-app/settings");
+  });
+});
+
+describe("F1: a `!`-prefixed key is refused where the operator types it", () => {
+  // The review runtime's credential store is resolved through the SDK's
+  // config-value resolver, which RUNS any `!`-prefixed value as a shell
+  // command. The runner's payload decoder refuses the shape fail-closed; these
+  // pin the dashboard-side refusal so the operator sees the cause on the form
+  // instead of getting a failed review run later. Zero writes on every path.
+  const COMMAND_KEY = "!touch /tmp/pwned";
+
+  test("add-key → keyed 400, zero writes", async () => {
+    const { db } = await seededWorld();
+    const res = await postForm(SETTINGS, "mallory", makeEnv(db), {
+      op: "add-key",
+      provider: "anthropic",
+      key: COMMAND_KEY,
+    });
+    expect(res.status).toBe(400);
+    expect(await res.json()).toEqual({
+      key: "settings.error.apiKeyCommandPrefix",
+      message:
+        'That API key starts with "!" — the review runtime would run it as a shell command, so keys of that shape are refused. Nothing was stored.',
+    });
+    expect(rawCount(db, "app_provider_keys")).toBe(0);
+  });
+
+  test("keys/verify → keyed 400 on the closed reason enum, zero writes", async () => {
+    const { db } = await seededWorld();
+    const res = await postForm(VERIFY, "mallory", makeEnv(db), { provider: "anthropic", key: COMMAND_KEY });
+    expect(res.status).toBe(400);
+    expect(await res.json()).toEqual({
+      ok: false,
+      reason: "unexpected",
+      key: "settings.error.apiKeyCommandPrefix",
+      message:
+        'That API key starts with "!" — the review runtime would run it as a shell command, so keys of that shape are refused. Nothing was stored.',
+    });
+    expect(rawCount(db, "app_provider_keys")).toBe(0);
+  });
+
+  test("add-custom-provider and add-template-provider → keyed 400, zero writes", async () => {
+    const { db } = await seededWorld();
+    for (const fields of [
+      {
+        op: "add-custom-provider",
+        provider_id: "my-custom",
+        base_url: "https://example.com/v1",
+        api: "openai-completions",
+        model_ids: "local-7b",
+        key: COMMAND_KEY,
+      },
+      { op: "add-template-provider", template_id: "subconscious", key: COMMAND_KEY },
+    ] as Record<string, string>[]) {
+      const res = await postForm(SETTINGS, "mallory", makeEnv(db), fields);
+      expect(res.status, fields.op).toBe(400);
+      expect(await res.json()).toEqual({
+        key: "settings.error.apiKeyCommandPrefix",
+        message:
+          'That API key starts with "!" — the review runtime would run it as a shell command, so keys of that shape are refused. Nothing was stored.',
+      });
+    }
+    expect(rawCount(db, "app_custom_providers")).toBe(0);
+    expect(rawCount(db, "app_custom_provider_keys")).toBe(0);
+  });
+
+  test("a key that merely CONTAINS `!` still stores (only the leading prefix is the command shape)", async () => {
+    const { db } = await seededWorld();
+    // The refusal tests above never reach the network (the guard precedes the
+    // probe); this one does, so stub the provider's model-list endpoint.
+    const fetchSpy = spyOn(globalThis, "fetch").mockImplementation(
+      (async () => new Response(JSON.stringify({ data: [{ id: "claude-sonnet-4-6" }] }), { status: 200 })) as unknown as typeof fetch,
+    );
+    try {
+      const res = await postForm(SETTINGS, "mallory", makeEnv(db), {
+        op: "add-key",
+        provider: "anthropic",
+        key: sk("ant-mid!bang-1234"),
+      });
+      expect(res.status).toBe(200);
+      expect(rawCount(db, "app_provider_keys")).toBe(1);
+    } finally {
+      fetchSpy.mockRestore();
+    }
   });
 });
 

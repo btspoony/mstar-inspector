@@ -78,11 +78,14 @@ import {
   MAX_CUSTOM_PROVIDER_MODEL_IDS,
   MAX_MODEL_CHAIN_NAME_LENGTH,
   MAX_MODEL_SELECTOR_LENGTH,
+  MAX_KEYS_PER_PROVIDER,
   MAX_PROVIDER_KEY_LENGTH,
   MODEL_CHAIN_NAME_PATTERN,
   MODEL_ROLE_IDS,
   PROVIDER_IDS,
   PROVIDER_META,
+  ProviderEndpointLockedError,
+  ProviderKeyLimitError,
   createAppConfigStore,
   parseModelChain,
   type AppConfigBatchFace,
@@ -92,6 +95,7 @@ import {
 // the runner BYOK allowlist stays PROVIDER_IDS_BUILTIN / PROVIDER_ENV_NAMES.
 import { PROVIDER_IDS_COMMON } from "../contracts/provider-catalog.generated";
 import { enabledSandboxImages, getSandboxImage, sandboxImageHostIds } from "../contracts/sandbox-images";
+import { isCommandConfigKey } from "../contracts/credential-key";
 import { composeModelOptions, findFailingSelector } from "./model-membership";
 import { PROVIDER_VERIFY_ENDPOINTS, verifyProviderKey, type VerifyFailureReason } from "./provider-verify";
 import {
@@ -1282,6 +1286,25 @@ function settingsPostResponse(
 }
 
 /**
+ * A REMOVE route's 2xx face. Native form navigation keeps the pinned 302;
+ * every other caller gets `{ changed, message }`, because the tolerant no-op
+ * (nothing matched — a stale dialog's row was already gone) and a real removal
+ * are both 2xx and the SPA must not render "Changes saved." for the former.
+ * `message` keeps the English face the plain-text assertions pin.
+ */
+function settingsRemoveResponse(
+  c: Context<{ Bindings: Env }>,
+  slug: string,
+  changed: boolean,
+  message: string,
+): Response {
+  if (wantsHtmlFormNavigation(c)) {
+    return c.redirect(`/dashboard/apps/${slug}/settings`, 302);
+  }
+  return c.json({ changed, message }, 200);
+}
+
+/**
  * (audit UI-45-03): machine-readable 400 keys for the settings
  * POST family — ONE inventory of the site→key mapping. Values are
  * `settings.error.*` dictionary paths; settings400Response interpolates the
@@ -1297,6 +1320,8 @@ const SETTINGS_400_KEYS = {
   providerUnavailableOnImage: "settings.error.providerUnavailableOnImage",
   apiKeyRequired: "settings.error.apiKeyRequired",
   apiKeyTooLong: "settings.error.apiKeyTooLong",
+  apiKeyCommandPrefix: "settings.error.apiKeyCommandPrefix",
+  providerKeyLimit: "settings.error.providerKeyLimit",
   chainFieldDuplicated: "settings.error.chainFieldDuplicated",
   chainTooLong: "settings.error.chainTooLong",
   chainEmpty: "settings.error.chainEmpty",
@@ -1323,6 +1348,7 @@ const SETTINGS_400_KEYS = {
   modelIdsTooMany: "settings.error.modelIdsTooMany",
   modelIdTooLong: "settings.error.modelIdTooLong",
   customProviderDeclRejected: "settings.error.customProviderDeclRejected",
+  providerEndpointLocked: "settings.error.providerEndpointLocked",
   templateUnknown: "settings.error.templateUnknown",
   templateIncomplete: "settings.error.templateIncomplete",
   accountIdRequired: "settings.error.accountIdRequired",
@@ -1357,13 +1383,29 @@ function settings400Response(
   return c.json({ key, message: t("en", key, params), ...(params ? { params } : {}) }, 400);
 }
 
+/**
+ * The pool-bound rejection (`MAX_KEYS_PER_PROVIDER`, thrown by the store when a
+ * NEW key would exceed the (App, provider) pool) as the keyed 400 the SPA
+ * replays in the operator's locale. ONE mapping shared by every settings path
+ * that stores a key, so the cap can never surface as a generic 500.
+ */
+function settingsKeyLimitResponse(
+  c: Context<{ Bindings: Env }>,
+  slug: string,
+  provider: string,
+): Response {
+  return settings400Response(c, slug, SETTINGS_400_KEYS.providerKeyLimit, {
+    provider,
+    limit: MAX_KEYS_PER_PROVIDER,
+  });
+}
+
 function mapVerifyReason(
   reason: VerifyFailureReason,
 ): "invalid_key" | "unreachable" | "unexpected" | "unsupported_provider" {
   if (reason === "invalid_key" || reason === "unreachable" || reason === "unsupported_provider") return reason;
   return "unexpected";
 }
-
 function verifyFailCopy(reason: ReturnType<typeof mapVerifyReason>): string {
   if (reason === "invalid_key") return "That API key was rejected by the provider — nothing was stored.";
   if (reason === "unreachable") return "The provider could not be reached — nothing was stored.";
@@ -1564,6 +1606,13 @@ dashboardApp.get("/api/apps/:slug/settings", async (c) => {
     const modelChainSeats = await store.getModelChainSeats(gate.app.id);
     const modelChains = await store.getModelChains(gate.app.id);
     const customProviders = await store.listCustomProviders(gate.app.id);
+    // The custom/template pools' own masked rows — the declaration list above
+    // carries no key material, so without this read a custom provider rendered
+    // one declaration row whatever its pool size: no key identity, mask or
+    // per-key verification state, and no way to drop one key instead of the
+    // whole pool.
+    const customKeys = await store.listCustomProviderKeys(gate.app.id);
+    const keyRows = [...maskedKeys, ...customKeys];
     // (spec § Provider configuration contract): eligibility is judged
     // against the App's SELECTED runtime image, never an inferred filter. The
     // registry entry's runtime kind is the contract: an omp-selected App
@@ -1575,24 +1624,41 @@ dashboardApp.get("/api/apps/:slug/settings", async (c) => {
     return c.json({
       can_manage: true,
       ...base,
-      keys: maskedKeys,
+      // Every stored key row of the App — built-in and custom pools alike:
+      // the add flow lists a selected provider's rows from this face (a
+      // materialized template's pool included), so a custom pool's rows must
+      // ride it too.
+      keys: keyRows,
       model_chain: modelChain,
       // (spec §4.4): the role editor's data is now seat → chain
       // reference (blank = default chain); the chains list carries every
       // chain (default + named) for the chains management UI.
       model_roles: modelChainSeats,
       model_chains: modelChains,
-      custom_providers: customProviders,
-      // Clean cutover: the App's PERSISTED provider state only — a
-      // stored key (masked tail) or a saved custom-provider declaration. No
+      // The declaration face of the settings payload keeps its existing shape:
+      // `has_keys` is a membership-gate input for the models / chain faces, not
+      // a UI field, so it never rides this response (the store read is shared).
+      custom_providers: customProviders.map(({ provider_id, base_url, api, model_ids }) => ({
+        provider_id,
+        base_url,
+        api,
+        model_ids: [...model_ids],
+      })),
+      // Clean cutover: the App's PERSISTED provider state only — a stored
+      // key (masked tail) or a saved custom-provider declaration. No
       // plaintext keys, and catalog rows never appear here; an empty array is
-      // the valid unconfigured-App state.
+      // the valid unconfigured-App state. Key rows cover BOTH pools: a custom
+      // or template provider's rows are here, each with its own identity, so
+      // one key can be removed without removing the declaration.
       configured_providers: [
-        ...maskedKeys.map((key) => ({
+        ...keyRows.map((key) => ({
           kind: "key" as const,
           provider: key.provider,
+          key_id: key.keyId,
           last4: key.last4,
-          updated_at: key.updated_at,
+          updated_at: key.updatedAt,
+          verified_at: key.verifiedAt,
+          verified_status: key.verifiedStatus,
         })),
         ...customProviders.map((row) => ({
           kind: "custom" as const,
@@ -1688,6 +1754,22 @@ dashboardApp.post("/api/apps/:slug/keys/verify", async (c) => {
   if (!PROVIDER_IDS.includes(provider) || plainKey === "" || plainKey.length > MAX_PROVIDER_KEY_LENGTH) {
     return c.json({ ok: false, reason: "unexpected" as const }, 400);
   }
+  // A `!`-prefixed key would be run as a shell command by the review
+  // runtime's config-value resolver (../contracts/credential-key.ts) — the
+  // same rule the runner's payload decoder enforces fail-closed. The keyed
+  // face reuses the existing `unexpected` reason (the enum is closed; the
+  // ProviderKeyLimit path below sets the precedent).
+  if (isCommandConfigKey(plainKey)) {
+    return c.json(
+      {
+        ok: false,
+        reason: "unexpected" as const,
+        key: SETTINGS_400_KEYS.apiKeyCommandPrefix,
+        message: t("en", SETTINGS_400_KEYS.apiKeyCommandPrefix),
+      },
+      400,
+    );
+  }
   // Fail-closed server-side precheck: the App's selected runtime
   // image must carry an omp runtime for ANY provider key to be eligible —
   // the same gate the settings display face stamps into provider_catalog
@@ -1720,6 +1802,22 @@ dashboardApp.post("/api/apps/:slug/keys/verify", async (c) => {
     return c.json({ ok: true, provider, models: verified.models });
   } catch (err) {
     logSettingsFailure("verify_key", gate.app.id, err);
+    // The pool cap (MAX_KEYS_PER_PROVIDER) is a client-side precondition, not a
+    // provider failure: the reason enum stays closed, the keyed face carries
+    // the clear message the SPA resolves in the operator's locale.
+    if (err instanceof ProviderKeyLimitError) {
+      const params = { provider, limit: MAX_KEYS_PER_PROVIDER };
+      return c.json(
+        {
+          ok: false,
+          reason: "unexpected" as const,
+          key: SETTINGS_400_KEYS.providerKeyLimit,
+          message: t("en", SETTINGS_400_KEYS.providerKeyLimit, params),
+          params,
+        },
+        400,
+      );
+    }
     return c.json({ ok: false, reason: "unexpected" as const }, 500);
   }
 });
@@ -1801,6 +1899,12 @@ dashboardApp.post("/apps/:slug/settings", async (c) => {
         limit: MAX_PROVIDER_KEY_LENGTH,
       });
     }
+    // A `!`-prefixed key would be run as a shell command by the review
+    // runtime's config-value resolver (../contracts/credential-key.ts) — the
+    // same rule the runner's payload decoder enforces fail-closed.
+    if (isCommandConfigKey(plainKey)) {
+      return settings400Response(c, gate.app.slug, SETTINGS_400_KEYS.apiKeyCommandPrefix);
+    }
     try {
       const verified = await verifyProviderKey({ fetch: globalThis.fetch }, provider, plainKey);
       if (!verified.ok) {
@@ -1809,6 +1913,9 @@ dashboardApp.post("/apps/:slug/settings", async (c) => {
       await store.saveVerifiedKey(gate.app.id, provider, plainKey, verified.models);
     } catch (err) {
       logSettingsFailure("add_key", gate.app.id, err);
+      if (err instanceof ProviderKeyLimitError) {
+        return settingsKeyLimitResponse(c, gate.app.slug, provider);
+      }
       return settingsPostResponse(c, gate.app.slug, settingsFailureNotice(err), 500);
     }
     return settingsPostResponse(c, gate.app.slug, `Stored the ${provider} key for ${gate.app.slug} — it is only ever shown masked.`,
@@ -1987,8 +2094,8 @@ dashboardApp.post("/apps/:slug/settings", async (c) => {
     // Declare a NON-built-in model provider for the App. Every
     // AL-23-1/AL-23-2 bound is checked here (400, zero writes —
     // the store re-validates as the backstop): provider id grammar
-    // `[a-z0-9][a-z0-9-]{0,63}` (the env-name mapping the consumer
-    // injects), no collision with a built-in OR in-image base provider id
+    // `[a-z0-9][a-z0-9-]{0,63}` (uppercased into the consumer's pool env
+    // prefix), no collision with a built-in OR in-image base provider id
     // (QC wave-1 W-1 — ark-plan would be silently dead at synthesis), at
     // most MAX_CUSTOM_PROVIDER_COUNT declarations per App (QC wave-1 W-2,
     // growth-only — updating an existing id always proceeds), baseUrl
@@ -2070,6 +2177,12 @@ dashboardApp.post("/apps/:slug/settings", async (c) => {
         limit: MAX_PROVIDER_KEY_LENGTH,
       });
     }
+    // A `!`-prefixed key would be run as a shell command by the review
+    // runtime's config-value resolver (../contracts/credential-key.ts) — the
+    // same rule the runner's payload decoder enforces fail-closed.
+    if (isCommandConfigKey(plainKey)) {
+      return settings400Response(c, gate.app.slug, SETTINGS_400_KEYS.apiKeyCommandPrefix);
+    }
     try {
       const verified = await verifyProviderKey(
         { fetch: globalThis.fetch },
@@ -2091,11 +2204,23 @@ dashboardApp.post("/apps/:slug/settings", async (c) => {
       );
     } catch (err) {
       logSettingsFailure("add_custom_provider", gate.app.id, err);
+      // A1: an endpoint change while the pool still holds keys verified for the
+      // current endpoint is refused by the store — the keyed 400 the SPA
+      // replays in the operator's locale (nothing was written).
+      if (err instanceof ProviderEndpointLockedError) {
+        return settings400Response(c, gate.app.slug, SETTINGS_400_KEYS.providerEndpointLocked, {
+          provider: providerId,
+        });
+      }
       // PR #10 cap-race fix: the store's atomic cap check can legitimately
       // throw InvalidCustomProviderError AFTER the route pre-check passed
       // (a concurrent save won the last slot) — that is a 400, not a 500.
       if (err instanceof InvalidCustomProviderError) {
         return settings400Response(c, gate.app.slug, SETTINGS_400_KEYS.customProviderDeclRejected);
+      }
+      // The declaration's key POOL can be full (the cap is per (App, provider)).
+      if (err instanceof ProviderKeyLimitError) {
+        return settingsKeyLimitResponse(c, gate.app.slug, providerId);
       }
       return settingsPostResponse(c, gate.app.slug, settingsFailureNotice(err), 500);
     }
@@ -2112,10 +2237,11 @@ dashboardApp.post("/apps/:slug/settings", async (c) => {
     // when the effective base URL carries the {account_id} placeholder
     // (Workers-AI-shaped URLs) and is substituted into it. The save flow
     // pins the template's api protocol, prefills model_ids from the
-    // template's representative models, and stores the key under
-    // CUSTOM_<UPPER_SNAKE(id)>_API_KEY via the same upsertCustomProvider
-    // path as add-custom-provider (verify-first custom probe —
-    // every bound below mirrors the add-custom-provider checks).
+    // template's representative models, and stores the key under the
+    // provider's credential-payload pool (under its provider id)
+    // via the same upsertCustomProvider path as add-custom-provider
+    // (verify-first custom probe — every bound below mirrors the
+    // add-custom-provider checks).
     const templateId = typeof form.template_id === "string" ? form.template_id.trim() : "";
     const accountId = typeof form.account_id === "string" ? form.account_id.trim() : "";
     const formBaseUrl = typeof form.base_url === "string" ? form.base_url.trim() : "";
@@ -2193,15 +2319,34 @@ dashboardApp.post("/apps/:slug/settings", async (c) => {
         limit: MAX_PROVIDER_KEY_LENGTH,
       });
     }
+    // A `!`-prefixed key would be run as a shell command by the review
+    // runtime's config-value resolver (../contracts/credential-key.ts) — the
+    // same rule the runner's payload decoder enforces fail-closed.
+    if (isCommandConfigKey(plainKey)) {
+      return settings400Response(c, gate.app.slug, SETTINGS_400_KEYS.apiKeyCommandPrefix);
+    }
     const declaredCustomProviders = await store.listCustomProviders(gate.app.id);
+    const storedDeclaration = declaredCustomProviders.find((p) => p.provider_id === templateId);
     if (
-      !declaredCustomProviders.some((p) => p.provider_id === templateId) &&
+      storedDeclaration === undefined &&
       declaredCustomProviders.length >= MAX_CUSTOM_PROVIDER_COUNT
     ) {
       return settings400Response(c, gate.app.slug, SETTINGS_400_KEYS.templateMaterializeMax, {
         limit: MAX_CUSTOM_PROVIDER_COUNT,
       });
     }
+    // Append against an EXISTING declaration: the stored api/model_ids are
+    // what the already-held keys were verified against and what saved chains
+    // reference, so the submit persists THEM — a catalog template id may
+    // legitimately hold a declaration with different values (only built-in and
+    // capability-host ids are refused at declaration). Re-materializing the
+    // catalog's values here would rewrite the declaration under the operator
+    // (chains referencing the stored ids then fail membership), and a stored
+    // protocol differing from the catalog's would trip the endpoint lock on a
+    // form that displays no protocol control at all. The first-time CREATE
+    // path keeps the catalog materialization.
+    const declApi = storedDeclaration?.api ?? (template.api as (typeof CUSTOM_PROVIDER_API_IDS)[number]);
+    const declModelIds = storedDeclaration?.model_ids ?? modelIds;
     try {
       const verified = await verifyProviderKey(
         { fetch: globalThis.fetch },
@@ -2209,8 +2354,8 @@ dashboardApp.post("/apps/:slug/settings", async (c) => {
         plainKey,
         {
           baseUrl,
-          api: template.api as (typeof CUSTOM_PROVIDER_API_IDS)[number],
-          modelIds,
+          api: declApi,
+          modelIds: declModelIds,
         },
       );
       if (!verified.ok) {
@@ -2218,13 +2363,23 @@ dashboardApp.post("/apps/:slug/settings", async (c) => {
       }
       await store.upsertCustomProvider(
         gate.app.id,
-        { provider_id: templateId, base_url: baseUrl, api: template.api as (typeof CUSTOM_PROVIDER_API_IDS)[number], model_ids: modelIds },
+        { provider_id: templateId, base_url: baseUrl, api: declApi, model_ids: declModelIds },
         plainKey,
       );
     } catch (err) {
       logSettingsFailure("add_template_provider", gate.app.id, err);
+      // A1: the template save path materializes the SAME custom-provider
+      // declaration, so it carries the same endpoint lock.
+      if (err instanceof ProviderEndpointLockedError) {
+        return settings400Response(c, gate.app.slug, SETTINGS_400_KEYS.providerEndpointLocked, {
+          provider: templateId,
+        });
+      }
       if (err instanceof InvalidCustomProviderError) {
         return settings400Response(c, gate.app.slug, SETTINGS_400_KEYS.customProviderDeclRejected);
+      }
+      if (err instanceof ProviderKeyLimitError) {
+        return settingsKeyLimitResponse(c, gate.app.slug, templateId);
       }
       return settingsPostResponse(c, gate.app.slug, settingsFailureNotice(err), 500);
     }
@@ -2242,9 +2397,11 @@ dashboardApp.post("/apps/:slug/settings", async (c) => {
     }
     // Tolerant no-op (the id grammar already bounds what can ever be
     // stored): an unknown provider id simply has no row — a 2xx, not a 400.
-    return settingsPostResponse(
+    // The declaration and every key of its pool go together (removeCustomProvider).
+    return settingsRemoveResponse(
       c,
       gate.app.slug,
+      removed,
       removed
         ? `Removed the custom provider ${providerId} from ${gate.app.slug}.`
         : `No custom provider ${providerId === "" ? "(unspecified)" : providerId} on ${gate.app.slug} — nothing changed.`,
@@ -2282,19 +2439,34 @@ dashboardApp.post("/apps/:slug/settings/key/delete", async (c) => {
   if (!gate.ok) return gate.response;
   const form = await c.req.parseBody();
   const provider = typeof form.provider === "string" ? form.provider.trim() : "";
+  // The key identity is the delete target: the (App, provider) pool holds one
+  // row per key, so a provider-only delete would take the sibling keys with it.
+  const keyId = typeof form.key_id === "string" ? form.key_id.trim() : "";
   const store = createAppConfigStore(gate.db, c.env.DASHBOARD_ENCRYPTION_KEY);
   let removed: boolean;
   try {
-    removed = await store.removeProviderKey(gate.app.id, provider);
+    // The pool owner picks the table: a declared custom/template provider's
+    // rows live in the custom pool, every other provider id in the built-in
+    // one. The two id spaces are disjoint by construction (a declaration
+    // colliding with a built-in id or an in-image capability host is refused),
+    // so the declaration is an exact discriminator, never a guess.
+    const declaredCustom = (await store.listCustomProviders(gate.app.id)).some(
+      (row) => row.provider_id === provider,
+    );
+    removed = declaredCustom
+      ? await store.deleteCustomProviderKey(gate.app.id, provider, keyId)
+      : await store.deleteProviderKey(gate.app.id, provider, keyId);
   } catch (err) {
     logSettingsFailure("remove_key", gate.app.id, err);
     return settingsPostResponse(c, gate.app.slug, settingsFailureNotice(err), 500);
   }
   // Tolerant no-op (the allowlist already bounds what can ever be stored):
-  // an unknown provider simply has no row — a 2xx, not a 400.
-  return settingsPostResponse(
+  // an unknown provider — or a key id no row matches, including an absent one —
+  // simply has no row: a 2xx, not a 400.
+  return settingsRemoveResponse(
     c,
     gate.app.slug,
+    removed,
     removed
       ? `Removed the stored ${provider} key for ${gate.app.slug}.`
       : `No stored ${provider === "" ? "(unspecified)" : provider} key on ${gate.app.slug} — nothing changed.`,

@@ -6,6 +6,7 @@ import { t } from "../../src/i18n";
 import {
   activeChainTabId,
   canViewMembers,
+  configuredKeySlot,
   DEFAULT_CHAIN_NAME,
   insightsRepoFromSelect,
   insightsRepoOptions,
@@ -20,10 +21,14 @@ import {
   parseMembers,
   parseSettings,
   providerFormKind,
+  providerKeyRows,
+  removeChanged,
   REVIEW_TRIGGER_MODES,
   selectedCatalogProvider,
   type CatalogProvider,
+  type ConfiguredProvider,
   type ModelChainEntry,
+  type ProviderKeyRow,
 } from "../../src/spa/pages/data";
 import { DEFAULT_CHAIN_NAME as STORE_DEFAULT_CHAIN_NAME } from "../../src/dashboard/app-config-store";
 
@@ -373,15 +378,34 @@ describe("members/apps/settings parsers", () => {
     expect(parseSettings({ ...manageBase, provider_catalog: [{ ...catalogRow, eligibility: "maybe" }] })).toBeNull();
     // A configured row without the `kind` discriminator (catalog-shaped) is rejected.
     expect(parseSettings({ ...manageBase, configured_providers: [{ ...catalogRow }] })).toBeNull();
-    // Key rows need the masked tail (never plaintext) and a nullable timestamp.
+    // Key rows need their identity, the masked tail (never plaintext) and the
+    // nullable bookkeeping columns.
+    expect(
+      parseSettings({
+        ...manageBase,
+        configured_providers: [
+          {
+            kind: "key",
+            provider: "anthropic",
+            key_id: "a".repeat(16),
+            last4: "9988",
+            updated_at: null,
+            verified_at: null,
+            verified_status: null,
+          },
+        ],
+      }),
+    ).not.toBeNull();
+    expect(
+      parseSettings({ ...manageBase, configured_providers: [{ kind: "key", provider: "anthropic" }] }),
+    ).toBeNull();
+    // A key row without its identity (the pre-multi-key shape) is rejected —
+    // the row could not be deleted or re-verified without it.
     expect(
       parseSettings({
         ...manageBase,
         configured_providers: [{ kind: "key", provider: "anthropic", last4: "9988", updated_at: null }],
       }),
-    ).not.toBeNull();
-    expect(
-      parseSettings({ ...manageBase, configured_providers: [{ kind: "key", provider: "anthropic" }] }),
     ).toBeNull();
     // Custom declaration rows need base_url/api and a string model list.
     expect(
@@ -599,8 +623,26 @@ describe("provider catalog rows + add selection", () => {
   test("saved provider refresh: stored keys and custom declarations parse as the configured list", () => {
     const saved = parseSettings({
       ...manageBase,
+      keys: [
+        {
+          provider: "anthropic",
+          keyId: "a".repeat(16),
+          last4: "9988",
+          updatedAt: "2026-09-04 10:00:00",
+          verifiedAt: "2026-09-04 10:05:00",
+          verifiedStatus: "ok",
+        },
+      ],
       configured_providers: [
-        { kind: "key", provider: "anthropic", last4: "9988", updated_at: "2026-09-04 10:00:00" },
+        {
+          kind: "key",
+          provider: "anthropic",
+          key_id: "a".repeat(16),
+          last4: "9988",
+          updated_at: "2026-09-04 10:00:00",
+          verified_at: "2026-09-04 10:05:00",
+          verified_status: "ok",
+        },
         {
           kind: "custom",
           provider_id: "workers-ai",
@@ -617,12 +659,136 @@ describe("provider catalog rows + add selection", () => {
     const rows = saved && saved.can_manage ? saved.configured_providers : [];
     expect(rows).toHaveLength(2);
     const [keyRow, customRow] = rows;
-    expect(keyRow).toEqual({ kind: "key", provider: "anthropic", last4: "9988", updated_at: "2026-09-04 10:00:00" });
+    expect(keyRow).toMatchObject({ kind: "key", provider: "anthropic", last4: "9988" });
     expect(customRow && customRow.kind === "custom" && customRow.provider_id).toBe("workers-ai");
     // The refreshed payload keeps catalog vs configured disjoint even after
     // a save: both catalog rows remain discovery-only.
     const catalogRows = saved && saved.can_manage ? saved.provider_catalog : [];
     expect(catalogRows).toHaveLength(2);
+  });
+
+  test("multi-key rows stay one row each — a second key of one provider never overwrites the first", () => {
+    const first: ProviderKeyRow = {
+      provider: "anthropic",
+      keyId: "a".repeat(16),
+      last4: "1111",
+      updatedAt: "2026-09-04 10:00:00",
+      verifiedAt: null,
+      verifiedStatus: null,
+    };
+    const second: ProviderKeyRow = { ...first, keyId: "b".repeat(16), last4: "2222" };
+    const other: ProviderKeyRow = { ...first, provider: "openai", keyId: "c".repeat(16), last4: "3333" };
+    // The provider's rows come back whole, in payload order — the client map
+    // that used to fold them by provider id dropped the second row.
+    expect(providerKeyRows([first, second, other], "anthropic").map((row) => row.keyId)).toEqual([
+      first.keyId,
+      second.keyId,
+    ]);
+    expect(providerKeyRows([first, second, other], "anthropic").map((row) => row.last4)).toEqual(["1111", "2222"]);
+    expect(providerKeyRows([first, second, other], "never-stored")).toEqual([]);
+  });
+
+  test("parseSettings row-validates the keys face: identity, mask and both nullable bookkeeping columns", () => {
+    const keyRow: ProviderKeyRow = {
+      provider: "anthropic",
+      keyId: "a".repeat(16),
+      last4: "1111",
+      updatedAt: null,
+      verifiedAt: null,
+      verifiedStatus: null,
+    };
+    expect(parseSettings({ ...manageBase, keys: [keyRow] })).not.toBeNull();
+    // A drifted row (no key identity, no mask) fails the parse instead of
+    // rendering a row nothing can address.
+    const { keyId: _droppedId, ...withoutId } = keyRow;
+    expect(parseSettings({ ...manageBase, keys: [withoutId] })).toBeNull();
+    expect(parseSettings({ ...manageBase, keys: [{ provider: "anthropic", last4: "1111" }] })).toBeNull();
+    // The verification vocabulary is closed (store-enforced ok|failed) — an
+    // off-vocabulary status fails the parse instead of rendering a state the
+    // row can never hold.
+    expect(
+      parseSettings({ ...manageBase, keys: [{ ...keyRow, verifiedStatus: "maybe" }] }),
+    ).toBeNull();
+    expect(parseSettings({ ...manageBase, keys: [{ ...keyRow, verifiedStatus: "failed" }] })).not.toBeNull();
+  });
+
+  test("a custom pool's key row parses through the same configured key-row guard", () => {
+    // Built-in and custom pools share one row contract: provider + key
+    // identity + mask + per-key verification state (the providers card
+    // renders both through ConfiguredKeyRow).
+    const customKeyRow = {
+      kind: "key" as const,
+      provider: "workers-ai",
+      key_id: "d".repeat(16),
+      last4: "2211",
+      updated_at: "2026-10-14 10:00:00",
+      verified_at: null,
+      verified_status: null,
+    };
+    const parsed = parseSettings({ ...manageBase, configured_providers: [customKeyRow] });
+    expect(parsed === null || !parsed.can_manage ? null : parsed.configured_providers).toEqual([customKeyRow]);
+  });
+
+  test("removal feedback locates the row by the full (provider, key_id) identity, not the id alone", () => {
+    // Key ids are derived from the plaintext only, so ONE key stored under two
+    // providers legitimately shares its id. The delete POST carries both, so
+    // the feedback slot must match both — an id-only match resolves the FIRST
+    // provider's row and renders the outcome beside a row that is still there.
+    const shared = "a".repeat(16);
+    const rows: ConfiguredProvider[] = [
+      {
+        kind: "key",
+        provider: "anthropic",
+        key_id: shared,
+        last4: "1111",
+        updated_at: null,
+        verified_at: null,
+        verified_status: null,
+      },
+      {
+        kind: "key",
+        provider: "openai",
+        key_id: shared,
+        last4: "2222",
+        updated_at: null,
+        verified_at: null,
+        verified_status: null,
+      },
+      {
+        kind: "custom",
+        provider_id: "workers-ai",
+        base_url: "https://example.test/v1",
+        api: "openai-completions",
+        model_ids: ["m"],
+      },
+    ];
+    const slot = configuredKeySlot(rows, "openai", shared);
+    expect(slot).toBe(1);
+    // …and the row at that slot is the one the POST names.
+    expect(rows[slot]).toMatchObject({ kind: "key", provider: "openai", key_id: shared });
+    // The earlier provider's row keeps its own slot.
+    expect(configuredKeySlot(rows, "anthropic", shared)).toBe(0);
+    // A row the payload no longer holds (or a provider-less id) is not found.
+    expect(configuredKeySlot(rows, "openai", "b".repeat(16))).toBe(-1);
+    expect(configuredKeySlot(rows, "google", shared)).toBe(-1);
+    // The custom declaration's provider_id is never a key handle.
+    expect(configuredKeySlot(rows, "workers-ai", shared)).toBe(-1);
+  });
+
+  test("removeChanged reads the remove routes' outcome flag — a no-op never resolves as a change", () => {
+    // The tolerant ops (key delete / custom provider remove) answer the
+    // no-change case as `changed: false`, which the SPA renders as its
+    // localized no-change notice instead of the generic "Changes saved.".
+    expect(
+      removeChanged(JSON.stringify({ changed: false, message: "No stored anthropic key — nothing changed." })),
+    ).toBe(false);
+    expect(removeChanged(JSON.stringify({ changed: true, message: "Removed the stored anthropic key." }))).toBe(true);
+    // Everything without the flag keeps the caller's default outcome: the
+    // plain-text 2xx faces (pause/resume/…) and a drifted body included.
+    expect(removeChanged("ok")).toBeNull();
+    expect(removeChanged("")).toBeNull();
+    expect(removeChanged(JSON.stringify({ message: "no flag here" }))).toBeNull();
+    expect(removeChanged(JSON.stringify({ changed: "false" }))).toBeNull();
   });
 });
 
