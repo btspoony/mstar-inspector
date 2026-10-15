@@ -1,7 +1,7 @@
 ---
 module: review-runner-models
 date: 2026-08-31
-last_updated: 2026-10-14
+last_updated: 2026-10-16
 problem_type: best_practice
 category: best-practices
 severity: high
@@ -26,12 +26,12 @@ tags:
 
 ## Context
 
-omp 18.2.6（本仓 pin）的自定义 provider 声明只有两条路：烤进镜像或 per-App BYOK 动态声明。多 App BYOK 产品面下，镜像烤死不可扩展。**2026-09-04 烤制路线已退役**：`sandbox-image/omp-models.yml` 已删除，base 由源码内 registry（`src/contracts/sandbox-images.ts`）的 capability hosts 现场生成——**每次** review 都合成完整 models.yml（含零自定义 provider 的 App），不再有 skip-synthesis 路径。
+omp SDK（`@oh-my-pi/pi-coding-agent`，版本以 `package.json` 为准）的自定义 provider 声明只有一条可用路：per-App BYOK 动态声明。多 App BYOK 产品面下，把 provider 烤进镜像不可扩展，而镜像也不再携带 `models.yml`：base 由源码内 registry（`src/contracts/sandbox-images.ts`）的 capability hosts 现场生成——**每次** review 都合成完整 models.yml（含零自定义 provider 的 App），没有 skip-synthesis 路径。
 
-## Guidance（源码级核实的机制，AL-23-1；2026-09-04 cutover 后更新）
+## Guidance（源码级核实的机制，AL-23-1）
 
 1. **omp 无 include/merge 语义**：`ModelRegistry` 构造 `ModelsConfigFile.relocate(modelsPath ?? path.join(getAgentDir(), "models.yml"))`，`ConfigFile` 单文件解析（.yml/.yaml fallback）。任何「增量片段/include 指令」方案不成立——必须**合成完整 models.yml**。
-2. **`getAgentDir()` = `PI_CODING_AGENT_DIR` 环境覆盖（模块加载时快照）**；`CreateAgentSessionOptions.agentDir` 是公开选项（本仓 pin 18.2.6）→ 合成目录通过它注入。**2026-09-04 cutover 起 `agentDir` 与 runner input 的 `capabilityHosts` 均为必填**（shape guard 拒绝缺失/空数组/非有限数值）。
+2. **`getAgentDir()` = `PI_CODING_AGENT_DIR` 环境覆盖（模块加载时快照）**；`CreateAgentSessionOptions.agentDir` 是公开选项 → 合成目录通过它注入。**`agentDir` 与 runner input 的 `capabilityHosts` 均为必填**（shape guard 拒绝缺失/空数组/非有限数值）。
 3. **合成流程**（runner 内）：`capabilityHostsYaml`（capability hosts 来自 registry，随 runner input 进容器——in-image 模块图禁 import `src/contracts`，verify-synthesis.sh 内联 `ARK_PLAN_HOST` 字面量并有 source-contract 漂移锁）作 base → merge App 自定义 providers（**capability/base ids wins** 碰撞；计数走 `onCollision` 回调 → runner 结构化 stderr warn）→ 写 `/tmp/omp-agent-<uuid>/models.yml` → `createAgentSession({ agentDir })`。每审查独立目录。字节形态由三层测试锁（generator capability base、write helper、zero-custom 路径与 poolized base 常量逐字节相等——该常量本身即池化形态：无 `apiKey`、`auth: oauth`）。
 4. **零 secret 落盘（凭据池运输）**：provider 块**不含标量 `apiKey`**——`models.yml` 的 `apiKey` 属 tier-2 config override，会压过存储凭据池，故每块一律 `auth: oauth`。key 只走 runner 的 **stdin 凭据载荷**（版本化 JSON `{"version":1,"pools":{"<providerId>":[…]}}`，`src/review/credential-payload.ts`；按存储池稳定序），runner 在 `createAgentSession` **之前**把各池装入本次运行的**内存**凭据存储（`AuthStorage.create(":memory:")`，以 `{type:"api_key", source:"login"}` 行写入；per-run 目录只保留非密 `models.yml`）（cascade 高于 provider env），轮换/退避/会话亲和全部由 omp 内部完成。载荷无法解析、池数组缺失/为空、或条目非非空字符串即 fail-closed 退出，绝不半池。key 明文只存在于 consumer 解密后的内存、exec stdin 管道、沙箱内 runner 进程的内存；永不进 exec env、argv、合成文件、日志、runner input JSON 或任何落盘文件。SEC-01 exact-redaction 把载荷中的池值纳入脱敏。`apiKeyEnv` / `auth`（registry 与 runner input 字段）为保留元数据，已不参与密钥解析。
 5. **校验/边界**：provider id `^[a-z0-9][a-z0-9-]{0,63}$`；内置 PROVIDER_IDS **和** 所选镜像 capability host ids（如 `ark-plan`，经 `sandboxImageHostIds(selectedImageId)`）在声明时 400 拒绝（否则 base-wins 静默吞掉 + key 白注入）；每 App 声明数 ≤8；baseUrl https-only；模型 id 非空 ≤128 字符。
