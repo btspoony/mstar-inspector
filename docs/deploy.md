@@ -910,7 +910,13 @@ smoke → record the digest.
    `SMOKE_ROUTE=/smoke-review`, where the orchestrator forwards it to the smoke
    Worker as its `ARK_API_KEY` var and the entry streams it to the in-image
    runner as the **stdin credential payload** — the same channel and shape the
-   production consumer builds, with no key in any process environment):
+   production consumer builds, with no provider key in the **container exec
+   process environment**; the key rides the runner's stdin payload instead).
+   **Scope of that guarantee — the container exec process only:** the smoke
+   orchestrator itself runs on the operator's machine, holds that same key in
+   its own process environment (the `ARK_API_KEY=…` in the command below) and
+   forwards it to `wrangler` as a `--var` argv value, so this sentence must not
+   be read as protecting the local smoke process, its environment or its argv:
    ```bash
    SMOKE_APP_ID=… SMOKE_PRIVATE_KEY=… INSTALLATION_ID=… GH_REPO=owner/repo \
      bun run scripts/sandbox-smoke.ts
