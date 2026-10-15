@@ -1057,7 +1057,7 @@ describe("runner entry — transported credential pool", () => {
     // `AuthStorage.create(dbPath)` takes an explicit path and hands it straight
     // to `SqliteAuthCredentialStore.open(dbPath)`. `PI_CODING_AGENT_DIR` only
     // redirects the SDK's own default, so a helper literal of `"agent.db"`
-    // would drop a credential-bearing file in the CHILD's cwd (the repo root)
+    // would drop a credential-bearing file in the CHILD's cwd
     // yet still resolve the key and leave `<agentDir>` empty — the whole
     // regression above would stay green. Only the argument proves it, so
     // observe it: a spy that records every path the static factory receives and
@@ -1069,7 +1069,14 @@ describe("runner entry — transported credential pool", () => {
       paths.push(dbPath);
       return realCreate(dbPath);
     };
-    const cwd = process.cwd();
+    // Run from a FRESH, test-owned cwd: a disk-backed helper (the counterexample
+    // this test exists to catch) resolves a relative path against the process
+    // cwd, so the file it creates lands here and never in the caller's
+    // directory. Cleanup then removes only that directory — never fixed-name
+    // database files it does not own.
+    const dir = mkdtempSync(join(tmpdir(), "store-arg-cwd-"));
+    const origin = process.cwd();
+    process.chdir(dir);
     try {
       const storage = await createInMemoryAuthStorage();
       try {
@@ -1081,13 +1088,8 @@ describe("runner entry — transported credential pool", () => {
       }
     } finally {
       AuthStorage.create = realCreate;
-      // A disk-backed helper (the counterexample) writes its file relative to
-      // this process's cwd; remove it so a red run leaves no credential behind.
-      if (paths.some((path) => path !== ":memory:")) {
-        for (const name of ["agent.db", "agent.db-wal", "agent.db-shm"]) {
-          rmSync(join(cwd, name), { force: true });
-        }
-      }
+      process.chdir(origin);
+      rmSync(dir, { recursive: true, force: true });
     }
   });
 
