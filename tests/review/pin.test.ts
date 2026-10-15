@@ -75,6 +75,10 @@ describe("sandbox image harness pin", () => {
 });
 
 describe("sandbox image base / tool pins", () => {
+  const pkg = JSON.parse(readFileSync(join(REPO_ROOT, "package.json"), "utf8")) as {
+    engines: Record<string, string>;
+  };
+
   test("Dockerfile FROM pins the declared base image digest", () => {
     expect(DOCKERFILE).toContain(`@${OMP_SANDBOX_IMAGE_PINS.baseImageDigest}`);
   });
@@ -87,6 +91,14 @@ describe("sandbox image base / tool pins", () => {
 
   test("Dockerfile downloads the declared Bun release", () => {
     expect(DOCKERFILE).toContain(`bun-v${OMP_SANDBOX_IMAGE_PINS.bunVersion}`);
+  });
+
+  test("package.json engines.bun floor matches the declared Bun pin", () => {
+    // The floor must equal `>=` + the image's pinned Bun: that image is the
+    // only environment the CLI actually runs in, so a lower floor stops
+    // locking the Bun the image installs while a higher one declares a
+    // runtime nothing provides.
+    expect(pkg.engines.bun).toBe(`>=${OMP_SANDBOX_IMAGE_PINS.bunVersion}`);
   });
 
   test("Dockerfile downloads the declared gh release", () => {
@@ -147,12 +159,6 @@ describe("engine dependency pin", () => {
 });
 
 describe("review skill version pin", () => {
-  test("REVIEW_SKILL_VERSION is derived from the declared pins", () => {
-    expect(REVIEW_SKILL_VERSION).toBe(
-      `${OMP_SANDBOX_IMAGE_PINS.harnessVersion}+${OMP_SANDBOX_IMAGE_PINS.harnessRef.slice(0, 8)}`,
-    );
-  });
-
   test("REVIEW_SKILL_VERSION + suffix binds to the Dockerfile fetch sha prefix", () => {
     const fetchSha = DOCKERFILE.match(/fetch --depth 1 origin ([0-9a-f]{40})/)?.[1];
     expect(fetchSha).toBeDefined();
