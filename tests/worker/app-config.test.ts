@@ -2130,6 +2130,53 @@ describe("app-config store (createAppConfigStore) — custom providers", () => {
     expect(rawCount(db2, "app_custom_provider_keys")).toBe(MAX_CUSTOM_PROVIDER_COUNT);
   });
 
+  test("a raced same-id create that lost the last slot at the SAME endpoint still admits its key and declaration update", async () => {
+    const { db, app } = await seededWorld();
+    const store = configStore(db);
+    // Seven declarations → the App sits ONE slot below the cap.
+    for (let i = 1; i < MAX_CUSTOM_PROVIDER_COUNT; i++) {
+      await store.upsertCustomProvider(app.id, { ...CUSTOM, provider_id: `prov-${i}` }, PLAIN_CUSTOM_KEY);
+    }
+    const WINNING = sk("custom-winner-same-endpoint-7171");
+    const LOSING = sk("custom-loser-same-endpoint-6161");
+    const target = "prov-last";
+    // The concurrent save fills the LAST slot under the SAME id AND the SAME
+    // endpoint after this caller's absence/count reads have passed: the caller
+    // still carries `newDeclaration: true`, so its belief is stale — the row it
+    // wants already exists, and updating it raises no declaration count.
+    const racing = configStore(
+      createLastSlotRaceD1(db, async () => {
+        await configStore(db).upsertCustomProvider(
+          app.id,
+          { ...CUSTOM, provider_id: target, model_ids: ["winner-model"] },
+          WINNING,
+        );
+      }),
+    );
+    await expect(
+      racing.upsertCustomProvider(app.id, { ...CUSTOM, provider_id: target, model_ids: ["loser-model"] }, LOSING),
+    ).resolves.toBeUndefined();
+    // The declaration was UPDATEed in place (no ninth row) …
+    expect(rawCount(db, "app_custom_providers")).toBe(MAX_CUSTOM_PROVIDER_COUNT);
+    const decl = db.raw
+      .query("SELECT base_url, model_ids FROM app_custom_providers WHERE app_id = ? AND provider_id = ?")
+      .get(app.id, target) as { base_url: string; model_ids: string };
+    expect(decl.base_url).toBe(CUSTOM.base_url);
+    expect(JSON.parse(decl.model_ids)).toEqual(["loser-model"]);
+    // … and both credentials live in the one pool: 7 seeded + winner + loser.
+    expect(rawCount(db, "app_custom_provider_keys")).toBe(MAX_CUSTOM_PROVIDER_COUNT + 1);
+    const consumer = await store.getCustomProvidersForConsumer(app.id);
+    expect([...consumer.find((row) => row.provider_id === target)!.api_keys].sort()).toEqual(
+      [WINNING, LOSING].sort(),
+    );
+    // A GENUINELY new declaration at the cap is still refused: the gate admits
+    // exactly the writes that add no declaration row.
+    await expect(
+      store.upsertCustomProvider(app.id, { ...CUSTOM, provider_id: "prov-over" }, PLAIN_CUSTOM_KEY),
+    ).rejects.toThrow("custom provider cap (8) reached");
+    expect(rawCount(db, "app_custom_providers")).toBe(MAX_CUSTOM_PROVIDER_COUNT);
+  });
+
   test("a concurrent first-time save of the SAME provider id adds its key instead of 500ing (A4)", async () => {
     const { db, app } = await seededWorld();
     const WINNING = sk("custom-winning-8282");

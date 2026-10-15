@@ -1036,16 +1036,21 @@ export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | un
 
   /**
    * The admission a NEW custom-provider declaration shares with its key: the
-   * write lands only while the App holds fewer than MAX_CUSTOM_PROVIDER_COUNT
-   * declarations. Both statements of a new-id batch carry it, and the KEY
-   * statement runs FIRST — the declaration's own INSERT raises the counted
-   * rows, so a gate evaluated after it cannot tell a WON slot (the row is
-   * ours) from a LOST one (a concurrent save took it): either way the count
-   * sits AT the cap, and the loser's key would commit under the winner's
-   * declaration.
+   * write lands only while it ADDS no counted row — the App holds fewer than
+   * MAX_CUSTOM_PROVIDER_COUNT declarations, OR the row for this (app, provider)
+   * already exists, which an upsert replaces in place. The second branch is
+   * what makes the gate measure REAL growth instead of the caller's belief: two
+   * concurrent first-time saves of the SAME id both read "not declared", and a
+   * cap evaluated on that stale flag alone refuses the loser even though the
+   * winner's row is exactly the one it wanted to write. Both statements of a
+   * new-id batch carry this predicate, so a refusal still commits neither.
+   * Whether the existing row is COMPATIBLE is not this gate's business — the
+   * endpoint condition each statement also carries refuses a same-id row
+   * declaring another endpoint.
    */
   function declarationGrowthAdmission(): string {
-    return `(SELECT COUNT(*) FROM app_custom_providers WHERE app_id = ?) < ${MAX_CUSTOM_PROVIDER_COUNT}`;
+    return `((SELECT COUNT(*) FROM app_custom_providers WHERE app_id = ?) < ${MAX_CUSTOM_PROVIDER_COUNT}
+             OR EXISTS (SELECT 1 FROM app_custom_providers WHERE app_id = ? AND provider_id = ?))`;
   }
 
   /**
@@ -1103,7 +1108,7 @@ export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | un
       bind.push(appId, provider);
       if (opts.endpoint !== undefined) bind.push(opts.endpoint.base_url, opts.endpoint.api);
     }
-    if (opts.newDeclaration === true) bind.push(appId);
+    if (opts.newDeclaration === true) bind.push(appId, appId, provider);
     return db
       .prepare(
         `WITH now AS (SELECT datetime('now') AS ts)
@@ -1832,8 +1837,10 @@ export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | un
      * (the cap): its key statement carries it too, and runs FIRST, before the
      * declaration's own INSERT raises the counted rows. A lost last-slot race
      * for a genuinely NEW id therefore refuses the key instead of committing a
-     * credential under the declaration the concurrent save created (see
-     * `declarationGrowthAdmission`).
+     * credential under the declaration the concurrent save created, while a
+     * race the SAME id won at the SAME endpoint is admitted — the gate measures
+     * whether a row would actually be ADDED, not what the caller believed when
+     * it read (see `declarationGrowthAdmission`).
      * The key is encrypted BEFORE
      * the batch, so a crypto failure (missing / malformed master key) leaves no
      * declaration behind either.
@@ -1871,12 +1878,20 @@ export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | un
       // past MAX_CUSTOM_PROVIDER_COUNT declarations (an upsert of an existing
       // id replaces the row in place — no count change). The pre-check answers
       // the common case; the conditional statement below is the race backstop.
+      // The same-id existence is re-read HERE too, not taken from `isNew`: a
+      // concurrent save of this very id can land between that read and this
+      // one, and the row it created is the one this write replaces — refusing
+      // it on the stale flag would refuse a write that adds no declaration.
       if (isNew) {
         const countRow = await db
-          .prepare(`SELECT COUNT(*) AS n FROM app_custom_providers WHERE app_id = ?`)
-          .bind(appId)
-          .first<{ n: number }>();
-        if ((countRow?.n ?? 0) >= MAX_CUSTOM_PROVIDER_COUNT) {
+          .prepare(
+            `SELECT COUNT(*) AS n,
+                    EXISTS (SELECT 1 FROM app_custom_providers WHERE app_id = ? AND provider_id = ?) AS present
+               FROM app_custom_providers WHERE app_id = ?`,
+          )
+          .bind(appId, decl.provider_id, appId)
+          .first<{ n: number; present: number }>();
+        if ((countRow?.n ?? 0) >= MAX_CUSTOM_PROVIDER_COUNT && (countRow?.present ?? 0) === 0) {
           throw new InvalidCustomProviderError(`custom provider cap (${MAX_CUSTOM_PROVIDER_COUNT}) reached`);
         }
       }
@@ -1916,6 +1931,9 @@ export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | un
               decl.api,
               JSON.stringify(decl.model_ids),
               appId,
+              // growth admission: the count and the same-id existence branch.
+              appId,
+              decl.provider_id,
               ...admissionBinds,
               // The ENDPOINT form of a create: no row to compare yet, so the
               // gate reads "no declaration of this id disagrees with the
