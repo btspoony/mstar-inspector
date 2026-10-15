@@ -539,29 +539,43 @@ exist before the first deploy:
 
 ### D1 migrations (0001–0024, forward-only)
 
-The apply is **preceded by a Time Travel bookmark** — the pre-apply snapshot
+The apply is **preceded by a pre-apply snapshot** — the restore point
 every `0024` rollback refers to (§ Rollback). `0024` rebuilds
 `app_provider_keys` and `app_custom_providers` (create → copy → drop → rename)
 and the store promotes each carried-over row to the `key_id` pool key on its
 first touch, so pre-`0024` code cannot read the live schema afterwards; the
-bookmark is also the only recovery if the four-statement rebuild is
-interrupted mid-file. **Keep the bookmark string** — it is the rollback's
-restore point, and it expires 30 days after it was taken.
+snapshot is also the only recovery if the four-statement rebuild is
+interrupted mid-file. **Keep it** — it is the rollback's restore point, and a
+bookmark expires 30 days after it was taken.
+
+**Confirm the storage backend FIRST.** Time Travel only exists on the current
+(GA) backend: on a legacy `alpha` database `wrangler d1 time-travel info` fails
+outright ("Time travel is not available for alpha D1 databases"), so the
+bookmark path below cannot be followed at all — use the export fallback.
 
 ```bash
-# 1. Snapshot FIRST — record the pre-apply bookmark. Time Travel is always on
-#    and acts on the remote database; keep the printed bookmark string.
+# 1a. Which backend? `alpha` → skip to 1b (Time Travel is unavailable there).
+wrangler d1 info mstar-inspector-db --json | jq -r .version
+
+# 1b. GA backend: record the pre-apply bookmark. It acts on the remote
+#     database; keep the printed bookmark string.
 wrangler d1 time-travel info mstar-inspector-db
+
+# 1b'. alpha backend: export the whole database instead — this file IS the
+#      restore point. Restoring means importing it into a fresh database
+#      (an alpha database cannot be recovered in place).
+wrangler d1 export mstar-inspector-db --remote --output pre-0024-snapshot.sql
 
 # 2. Then apply
 wrangler d1 migrations apply mstar-inspector-db --remote   # remote (staging DB)
 wrangler d1 migrations apply mstar-inspector-db            # local dev
 ```
 
-Local dev has no Time Travel backend — the bookmark covers the remote
-(`--remote`) database. On the automated path the workflow applies the
-migrations, so take the bookmark **before pushing the merge** that carries
-`0024` (§ Automated deploy).
+Local dev has no Time Travel backend and no remote counterpart to export — the
+snapshot covers the remote (`--remote`) database only; recreate local dev from
+the migrations. On the automated path the workflow applies the migrations, so
+take the snapshot **before pushing the merge** that carries `0024`
+(§ Automated deploy).
 
 | Migration | Contents |
 |---|---|
@@ -588,7 +602,7 @@ migrations, so take the bookmark **before pushing the merge** that carries
 | `0021_review_checks` | the per-attempt Check registry (`review_checks`) behind the advisory Check Runs, with `UNIQUE(attempt_key, generation)` and the partial unique index keeping at most one nonterminal generation per attempt key (spec §7.1/§7.9) |
 | `0022_app_trigger_mode` | `github_apps.review_trigger_mode` TEXT NOT NULL DEFAULT 'every_push' CHECK (review_trigger_mode IN ('open','every_push','manual')) — the per-App review trigger mode (spec `review-trigger-policy.md` §2); metadata-only ADD COLUMN, existing rows (live and soft-deleted) materialize to the `every_push` default, no manager visit needed |
 | `0023_removed_logins` | `removed_logins` — removal tombstones: the key is `github_login` with the same NOCASE comparison as `users.github_login` (0016 parity), `removed_at` is required, `removed_by` is the acting admin's login (NULL when no actor was in scope). Written in the SAME transaction as the membership row delete, so `bootstrapDashboardAccess` can deny a removed login even when the `ADMIN_LOGINS` allowlist still lists it — an operator's removal is authoritative — while `createUser` clears the record on a deliberate re-invite |
-| `0024_provider_multi_key` | `app_provider_keys` moves to the per-key pool primary key `(app_id, provider, key_id)`, and the new `app_custom_provider_keys` table takes over the custom-provider key material `app_custom_providers` no longer holds. SQLite cannot change a primary key in place, so both tables are rebuilt (create → copy → drop → rename); existing rows are carried across verbatim under the empty-string `key_id` sentinel and the store promotes each row on its first touch. Forward-only: a rollback means reverting the deploy AND restoring the Time Travel bookmark taken before the apply (§ Rollback). Must apply after `0004`/`0006`/`0012`/`0015` |
+| `0024_provider_multi_key` | `app_provider_keys` moves to the per-key pool primary key `(app_id, provider, key_id)`, and the new `app_custom_provider_keys` table takes over the custom-provider key material `app_custom_providers` no longer holds. SQLite cannot change a primary key in place, so both tables are rebuilt (create → copy → drop → rename); existing rows are carried across verbatim under the empty-string `key_id` sentinel and the store promotes each row on its first touch. Forward-only: a rollback means reverting the deploy AND restoring the pre-apply snapshot taken before the apply (§ Rollback). Must apply after `0004`/`0006`/`0012`/`0015` |
 
 Migrations are **forward-only** (0002 precedent): never hand-edit an applied
 migration; add the next file. Apply order matters for the newest pair: `0023`
@@ -1259,7 +1273,7 @@ Worker rollback.
   (the chain head is `0024`). The code-only precedent (0002 — new code
   tolerates the prior schema) covers additive migrations; `0024` rebuilt
   tables, so pre-`0024` code does not run against the live schema and its
-  rollback needs the pre-apply Time Travel bookmark as well (§ D1 migrations,
+  rollback needs the pre-apply snapshot as well (§ D1 migrations,
   § Rollback). The `0023` removal tombstones stay safe on a code rollback: a
   version predating `removed_logins` simply ignores the table.
 - **Secrets untouched** — rollback does not remove
@@ -1362,14 +1376,24 @@ preserves the other dashboard-managed var (`REVIEW_ENABLED`) across deploys.
   the code; the schema is never reversed by hand.
   ```bash
   # Revert the code first (Worker rollback above), then restore the database
-  # to the pre-apply bookmark recorded in § D1 migrations. Destructive and
-  # in-place; prints an undo bookmark before it runs.
+  # to the pre-apply snapshot recorded in § D1 migrations. Destructive and
+  # in-place on a GA backend; prints an undo bookmark before it runs.
   wrangler d1 time-travel restore mstar-inspector-db --bookmark=<pre-apply-bookmark>
   ```
   The bookmark is valid for 30 days after the apply and is the only restore
   point for this migration — without it, a pre-`0024` rollback is a
   credential-loss event for every App (the promoted rows are unreadable to the
   old code: three-segment AAD + real `key_id`).
+- **Legacy `alpha` backend**: Time Travel does not exist there, so the
+  pre-apply snapshot is the § D1 migrations **export file** instead of a
+  bookmark. Restore by importing it into a NEW database, repointing the D1
+  binding at it and redeploying the pre-`0024` code — an alpha database cannot
+  be restored in place, and the two rebuilt credential tables are what make
+  this migration the one place where the distinction matters.
+  ```bash
+  wrangler d1 create mstar-inspector-db-restored
+  wrangler d1 execute mstar-inspector-db-restored --remote --file=pre-0024-snapshot.sql
+  ```
 - Secrets/vars are untouched by rollback — rotate explicitly when the
   rollback is security-motivated.
 
