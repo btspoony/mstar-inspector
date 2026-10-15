@@ -14,8 +14,8 @@
  * image, NOT App configuration and NOT Providers catalog ids: `omp`'s
  * `ark-plan` host resolves its keys from the transported pool of its
  * `catalogProviderId` (`"ark"` → the credential payload's `ark` pool, which
- * the runner writes into the run's `agent.db` as `source:"login"` api_key
- * rows), while the catalog/BYOK id stays `ark`.
+ * the runner loads into the run's in-memory credential store as
+ * `source:"login"` api_key rows), while the catalog/BYOK id stays `ark`.
  *
  * `omp` is the only entry for now and the only enabled one — a future
  * runtime ships its own Dockerfile, registry entry, and synthesizer. Enabling

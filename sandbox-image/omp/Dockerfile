@@ -7,8 +7,9 @@
 # NO SECRETS (HARD): this image is built with no build args, no env values, no
 # credentials. Tokens/keys enter only at runtime — the sandbox-read token via
 # exec env, the provider keys as the runner's STDIN credential payload (compass
-# contracts D). The runner turns that payload into stored credential rows under
-# the per-review agent dir — no key value is ever in the image, its build
+# contracts D). The runner loads that payload into an IN-MEMORY credential
+# store for the run — the per-review agent dir holds only the non-secret
+# models.yml — no key value is ever in the image, its build
 # context, or any exec process environment.
 #
 # Outbound egress (architect verdict AL-4 — DOCUMENTED, NOT
@@ -120,11 +121,13 @@ ENV PATH="/root/.bun/bin:${PATH}"
 # (src/review/runner.ts) synthesizes the COMPLETE per-review models.yml under
 # /tmp/omp-agent-<uuid>/ (capability hosts from the App's selected registry
 # entry, src/contracts/sandbox-images.ts, + App custom providers), rides that
-# directory as the session agentDir, and writes the transported credential
-# payload (the runner's STDIN, src/review/credential-payload.ts) into that same
-# directory's agent.db as stored `login` api_key rows before the session
-# starts. The synthesized provider blocks pin NO apiKey (a tier-2 config
-# override would suppress that pool) and authenticate via `auth: oauth`.
+# directory as the session agentDir, and loads the transported credential
+# payload (the runner's STDIN, src/review/credential-payload.ts) into the run's
+# IN-MEMORY credential store as stored `login` api_key rows before the session
+# starts. That directory holds only the non-secret models.yml and is removed
+# after the run (defence in depth). The synthesized provider blocks pin NO
+# apiKey (a tier-2 config override would suppress that pool) and authenticate
+# via `auth: oauth`.
 # No secret material and no App model config lives here.
 RUN mkdir -p /opt/omp-agent
 ENV PI_CODING_AGENT_DIR=/opt/omp-agent
