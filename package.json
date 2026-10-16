@@ -22,7 +22,7 @@
     "@octokit/rest": "22.0.1",
     "@octokit/webhooks": "14.2.0",
     "@oh-my-pi/pi-coding-agent": "18.11.1",
-    "hono": "4.13.4",
+    "hono": "4.13.13",
     "react": "19.3.0",
     "react-dom": "19.3.0",
     "zod": "4.6.5"
