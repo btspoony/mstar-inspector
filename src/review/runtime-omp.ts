@@ -644,26 +644,37 @@ function scopeSummary(plan: SeatPlan): string {
 }
 
 /**
+ * The SDK's own reason for a wall-clock stop: its abort-reason resolver returns
+ * exactly this wording — and only this wording — when the per-subagent runtime
+ * limit it was handed fires, and it carries the cap that fired. Every other
+ * abort (provider, session, shutdown) reports its own message or the caller's
+ * cancellation reason, so a match here IS positive evidence of the cap. The
+ * settled result exposes no typed abort kind to match instead.
+ */
+const RUNTIME_LIMIT_ABORT_RE = /Subagent runtime limit exceeded \(task\.maxRuntimeMs=[^)]+\)/;
+
+/**
  * Extract and guard the strict-validated seat payload.
  *
  * A seat the hard cap stopped is NOT a failure: whatever it collected is kept
  * (possibly nothing) and its unscanned scope is declared for the reader-visible
- * body, so the review still synthesizes — non-fatal is the contract. That is
- * the ONLY non-fatal shortfall: an SDK error, or an invalid/absent payload from
- * a seat no cap stopped, still throws.
+ * body, so the review still synthesizes — non-fatal is the contract. The cap is
+ * recognized ONLY by its own reason ({@link RUNTIME_LIMIT_ABORT_RE}): an SDK
+ * error, an invalid/absent payload, and every abort the runtime limit did not
+ * cause keep the fatal handling below.
  */
-function seatOutput(result: StructuredSubagentResult, index: number, plan: SeatPlan, capMs: number): SeatOutcome {
+function seatOutput(result: StructuredSubagentResult, index: number, plan: SeatPlan): SeatOutcome {
   const single = result.result;
   const structured = single.structuredOutput;
   const collected =
     structured?.status === "valid" && structured.data !== undefined ? (structured.data as SeatOutput) : null;
-  // Cap stop FIRST: an aborted run reports its stop through `error` too, so
-  // this branch must not fall into the failure path below.
-  if (single.aborted === true) {
-    const stoppedBy = single.abortReason?.trim() || `its ${Math.round(capMs / 1000)}s wall-clock cap`;
+  // Cap stop FIRST: a capped run reports its stop through `error` too, so this
+  // must precede the failure path — but only a confirmed cap may enter it.
+  const stoppedByCap = single.abortReason?.match(RUNTIME_LIMIT_ABORT_RE)?.[0];
+  if (stoppedByCap !== undefined) {
     return {
       output: collected,
-      gap: `seat ${plan.domain}-${plan.seat} was stopped by ${stoppedBy}; unscanned: ${scopeSummary(plan)}`,
+      gap: `seat ${plan.domain}-${plan.seat} was stopped by ${stoppedByCap}; unscanned: ${scopeSummary(plan)}`,
     };
   }
   if (single.error) {
@@ -1282,7 +1293,7 @@ export const ompAgentRuntime: AgentRuntime = {
               enableIrc: false,
               maxRuntimeMs: seatCapMs,
             });
-            return seatOutput(result, index, plan, seatCapMs);
+            return seatOutput(result, index, plan);
           } finally {
             settledSeats.add(id);
           }

@@ -288,8 +288,8 @@ mock.module("@oh-my-pi/pi-coding-agent/task/structured-subagent", () => ({
         output: "",
         stderr: plan.stderr ?? "",
         error: plan.error,
-        // A cap stop reaches the runtime as an abort on the settled result,
-        // exactly as the SDK's wall-clock watchdog reports one.
+        // The SDK's settled abort surface: a cap stop and a provider/session
+        // abort both set `aborted`, and only the reason separates them.
         aborted: plan.aborted,
         abortReason: plan.abortReason,
         structuredOutput:
@@ -773,6 +773,36 @@ describe("ompAgentRuntime.runReview — hard seat cap (collected vs uncollected)
     expect(envelope.findings.map((finding) => finding.title)).toEqual(["Missing null check"]);
     expect(envelope.summary_md).toContain("- notes:");
     expect(envelope.summary_md).toContain("changeset-1-src");
+  });
+
+  test("an abort the runtime limit did not cause stays fatal — the flag alone is not coverage", async () => {
+    // A provider/session abort with no valid output: `aborted` is set, but no
+    // cap stopped this seat, so it must reject exactly as before.
+    seatResults = [
+      { status: "absent", aborted: true, abortReason: "Provider stream closed unexpectedly" },
+      { data: seatPayload() },
+    ];
+
+    await expect(ompAgentRuntime.runReview(BASE_INPUT)).rejects.toThrow(/no valid structured output/);
+  });
+
+  test("an aborted seat with no reason at all stays fatal — never an inferred cap", async () => {
+    seatResults = [{ status: "absent", aborted: true }, { data: seatPayload() }];
+
+    await expect(ompAgentRuntime.runReview(BASE_INPUT)).rejects.toThrow(/no valid structured output/);
+  });
+
+  test("a confirmed cap that also carries an error is still non-fatal — read before the failure", async () => {
+    const reason = "Subagent runtime limit exceeded (task.maxRuntimeMs=540000)";
+    seatResults = [
+      { status: "absent", aborted: true, abortReason: reason, error: reason },
+      { data: seatPayload() },
+    ];
+
+    const { envelope } = await ompAgentRuntime.runReview(BASE_INPUT);
+
+    expect(envelope.findings.map((finding) => finding.title)).toEqual(["Unbounded loop"]);
+    expect(envelope.summary_md).toContain(`- notes: seat changeset-1-src was stopped by ${reason}`);
   });
 });
 
