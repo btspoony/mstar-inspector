@@ -301,50 +301,77 @@ describe("anchorRecheckDeadline / currentRecheckBudget (§7.8 outer caps)", () =
   });
 });
 
-describe("remainingSoftMinutes (plan 88 — the shared soft clock at dispatch)", () => {
+describe("remainingSoftMinutes (the shared soft clock at dispatch)", () => {
   /**
    * The tier's soft cap in minutes IS the engine's figure — reading it here
    * means the assertions below can never silently drift into a re-typed
-   * literal (plan § Numbers have one source).
+   * literal.
    */
   const QUICK_CAP = PR_REVIEW_TIER_BUDGETS.quick.wallClockMinutes;
   const DEEP_CAP = PR_REVIEW_TIER_BUDGETS.deep.wallClockMinutes;
 
-  test("derives cap minus elapsed for a fixed (anchor, now), shrinking across one run", () => {
+  test("derives cap minus elapsed: fractional sub-minute gaps, strictly decreasing", () => {
     const start = 1_000_000;
     anchorRecheckDeadline(start, "quick");
 
     expect(remainingSoftMinutes(start)).toBe(QUICK_CAP);
-    // A later 'now' in the SAME run is strictly smaller — never a fresh allowance.
-    const later = remainingSoftMinutes(start + 60_000);
-    expect(later).toBe(QUICK_CAP - 1);
-    expect(later).toBeLessThan(remainingSoftMinutes(start));
-    expect(remainingSoftMinutes(start + 150_000)).toBe(QUICK_CAP - 3);
+    // Sub-minute elapsed is NOT quantized away — the value stays a correct
+    // elapsed source for the supervision that consumes it.
+    expect(remainingSoftMinutes(start + 30_000)).toBe(QUICK_CAP - 0.5);
+    expect(remainingSoftMinutes(start + 150_000)).toBe(QUICK_CAP - 2.5);
   });
 
-  test("past the cap the figure is NEGATIVE (over budget), never clamped to zero", () => {
+  test("two closely spaced later instants: strictly smaller, never a plateau or fresh allowance", () => {
+    const start = 1_100_000;
+    anchorRecheckDeadline(start, "default");
+    const first = remainingSoftMinutes(start);
+    const shortlyAfter = remainingSoftMinutes(start + 1_000);
+    const laterStill = remainingSoftMinutes(start + 2_000);
+
+    expect(shortlyAfter).toBeLessThan(first);
+    expect(laterStill).toBeLessThan(shortlyAfter);
+  });
+
+  test("exactly at the cap → 0; immediately past it → negative (never clamped)", () => {
     const start = 2_000_000;
     anchorRecheckDeadline(start, "deep");
+    const atCap = start + DEEP_CAP * 60_000;
 
-    const over = remainingSoftMinutes(start + (DEEP_CAP + 2) * 60_000);
-    expect(over).toBe(-2);
-    expect(over).toBeLessThan(0);
-    // The recheck budget CLAMPS at this same instant (0 = skip); the soft
-    // clock reports the overrun — the two clocks are provably distinct.
-    expect(currentRecheckBudget(start + (DEEP_CAP + 2) * 60_000)).toBe(0);
+    expect(remainingSoftMinutes(atCap)).toBe(0);
+    // ONE SECOND past the cap is already an overrun — no minute bucket hides it.
+    expect(remainingSoftMinutes(atCap + 1_000)).toBeLessThan(0);
+    expect(remainingSoftMinutes(atCap + 1_000)).toBeCloseTo(-1 / 60, 10);
+    expect(remainingSoftMinutes(atCap + 120_000)).toBe(-2);
   });
 
-  test("the tier cap comes from the engine SSOT, per tier", () => {
+  test("the soft clock and the outer recheck budget stay independent (one anchor, no shared clamp)", () => {
+    const start = 4_000_000;
+    anchorRecheckDeadline(start, "deep");
+    // An instant past BOTH deadlines: the tier's soft cap AND the outer exec
+    // guard (840,000 ms deep). Derived from the engine cap with margin rather
+    // than re-pinning either constant.
+    const pastBoth = start + Math.max(DEEP_CAP + 2, 20) * 60_000;
+
+    // The shared clock reports the OVERRUN...
+    expect(remainingSoftMinutes(pastBoth)).toBeLessThan(0);
+    // ...while the outer recheck budget keeps its own clamp (0 = skip) — the
+    // two clocks are provably distinct, off one anchor.
+    expect(currentRecheckBudget(pastBoth)).toBe(0);
+  });
+
+  test("the tier cap comes from the engine table, per tier", () => {
     const start = 3_000_000;
     anchorRecheckDeadline(start, "quick");
     expect(remainingSoftMinutes(start)).toBe(QUICK_CAP);
     expect(remainingSoftMinutes(start, "deep")).toBe(DEEP_CAP);
     expect(remainingSoftMinutes(start, "default")).toBe(PR_REVIEW_TIER_BUDGETS.default.wallClockMinutes);
-    expect(QUICK_CAP).toBeLessThan(DEEP_CAP);
     // Leave the process on a FRESH clock (anchor == now) for later test files:
     // bun's module registry is process-global, and an ancient anchor here would
     // make every later `remainingSoftMinutes(Date.now())` a wild overrun.
     anchorRecheckDeadline(Date.now(), "default");
-    expect(remainingSoftMinutes(Date.now())).toBe(PR_REVIEW_TIER_BUDGETS.default.wallClockMinutes);
+    expect(remainingSoftMinutes(Date.now())).toBeCloseTo(
+      PR_REVIEW_TIER_BUDGETS.default.wallClockMinutes,
+      6,
+    );
   });
 });

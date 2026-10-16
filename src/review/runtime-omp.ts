@@ -470,6 +470,17 @@ function seatReconFacts(reconFacts: readonly string[], plan: SeatPlan): string[]
   return [...reconFacts, `File scope for this seat (review ONLY these files):`, ...plan.scope];
 }
 
+/**
+ * Whole-minute rendering of the shared soft remainder for a dispatch head:
+ * `remainingSoftMinutes` stays exact, and the prompt reads in minutes. A
+ * negative remainder keeps its sign and rounds to at least one minute over, so
+ * an overrun is never displayed as time left.
+ */
+function dispatchBudgetMinutes(level: ReviewLevel): number {
+  const minutes = remainingSoftMinutes(Date.now(), level);
+  return minutes >= 0 ? Math.round(minutes) : -Math.max(1, Math.round(-minutes));
+}
+
 /** Seat assignment = engine prReviewSeatPrompt — zero copies of harness text. */
 function seatAssignment(input: AgentRuntimeRunInput, pluginRoot: string, plan: SeatPlan): string {
   return prReviewSeatPrompt({
@@ -480,11 +491,10 @@ function seatAssignment(input: AgentRuntimeRunInput, pluginRoot: string, plan: S
     worktreePath: input.worktreePath,
     reconFacts: seatReconFacts(input.reconFacts, plan),
     tier: input.level,
-    // Plan 88 (§ One clock per review): the tier's SHARED soft remainder at
-    // dispatch — recomputed per seat from the one process anchor, so a later
-    // wave gets less and no seat ever sees a fresh allowance. The engine owns
-    // the head wording; negative = the review is already over cap.
-    budgetRemainingMinutes: remainingSoftMinutes(Date.now(), input.level),
+    // The tier's SHARED soft remainder at dispatch, recomputed from the one
+    // process anchor so a later wave gets less and no seat ever sees a fresh
+    // allowance. The engine owns the head wording; negative = already over cap.
+    budgetRemainingMinutes: dispatchBudgetMinutes(input.level),
   });
 }
 
@@ -720,12 +730,12 @@ function deepSessionOptions(opts: {
  */
 async function deepAssignment(input: AgentRuntimeRunInput, pluginRoot: string): Promise<string> {
   const command = await readFile(join(pluginRoot, "commands", "amazing-pr-review.md"), "utf8");
-  // Plan 88: the deep parent gets the SAME budget head as the Bun fan-out
-  // seats so it knows the clock it must finish inside. These lines are
-  // inspector-authored orchestration prose (the engine owns only the seat
-  // prompt) — every figure is read from the engine SSOT, never re-typed.
+  // The deep parent gets the SAME budget head as the Bun fan-out seats so it
+  // knows the clock it must finish inside. These lines are inspector-authored
+  // orchestration prose (the engine owns only the seat prompt); every figure is
+  // read from the engine budget table, never re-typed.
   const capMinutes = PR_REVIEW_TIER_BUDGETS[input.level].wallClockMinutes;
-  const remainingMinutes = remainingSoftMinutes(Date.now(), input.level);
+  const remainingMinutes = dispatchBudgetMinutes(input.level);
   return [
     "Review budget — the shared soft clock this session must finish inside:",
     `- Tier: \`${input.level}\` — review strength for this session.`,

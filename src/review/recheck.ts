@@ -26,10 +26,10 @@
  * loses the review. Validation is `validateRecheckDoc` (fail-closed, whole
  * document); the strict outputSchema only enforces shape.
  *
- * Shared soft clock (plan 88 `88-review-seat-time-budget`): the same
- * `anchorRecheckDeadline` call also anchors the tier's SOFT clock, and
- * `remainingSoftMinutes(now)` is its pure view — one anchor per review serves
- * both the recheck budget (outer, hard) and the seat dispatch head (soft).
+ * Shared soft clock: the same `anchorRecheckDeadline` call also anchors the
+ * tier's SOFT clock, and `remainingSoftMinutes(now)` is its pure view — one
+ * anchor per review serves both the recheck budget (outer, hard) and the seat
+ * dispatch head (soft).
  */
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent";
 import { runStructuredSubagent } from "@oh-my-pi/pi-coding-agent/task/structured-subagent";
@@ -146,7 +146,7 @@ let anchoredSoftLevel: ReviewLevel | undefined;
 export function anchorRecheckDeadline(startMs: number, level: ReviewLevel): void {
   anchoredDeadlineMs = startMs + OUTER_RUNNER_CAP_MS[level];
   // Same instant, same call: the soft clock shares the outer deadline's origin
-  // (plan § Clock origin — never a second anchor).
+  // — one anchor per review, never a second one.
   anchoredSoftStartMs = startMs;
   anchoredSoftLevel = level;
 }
@@ -158,17 +158,19 @@ export function anchorRecheckDeadline(startMs: number, level: ReviewLevel): void
  * already over its tier cap, reported as an overrun rather than clamped to 0
  * (the cap is a convergence target, never a hard stop). Unanchored → the
  * tier's full cap. `level` overrides the anchored tier for callers that
- * dispatch a different tier than the process anchor.
- * Tier minutes come from the engine SSOT (plan § Numbers have one source).
+ * dispatch a different tier than the process anchor. Tier minutes come from
+ * the engine budget table — the single numeric source.
  */
 export function remainingSoftMinutes(nowMs: number, level?: ReviewLevel): number {
   const tier = level ?? anchoredSoftLevel ?? "default";
   const capMinutes = PR_REVIEW_TIER_BUDGETS[tier].wallClockMinutes;
   const startMs = anchoredSoftStartMs ?? nowMs;
-  // Quantize the ELAPSED time to whole minutes, then subtract: exact at the
-  // anchor (cap), strictly decreasing as `now` advances, and negative once the
-  // review is past its cap — never clamped to 0 the way the outer budget is.
-  return capMinutes - Math.round((nowMs - startMs) / 60_000);
+  // Exact remaining time, never quantized: whole minutes are a DISPLAY concern
+  // (a seat prompt reads in minutes), so rounding lives at the render site and
+  // this value stays a correct elapsed source. Exact at the anchor, strictly
+  // decreasing as `now` advances, and negative the moment the review is past
+  // its cap — never clamped to 0 the way the outer budget is.
+  return capMinutes - (nowMs - startMs) / 60_000;
 }
 
 /**

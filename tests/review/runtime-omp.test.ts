@@ -44,7 +44,7 @@ import { parseAgent } from "@oh-my-pi/pi-coding-agent/task/agents";
 import { PR_REVIEW_TIER_BUDGETS } from "@mstar-harness/engine";
 
 import type { AgentRuntime } from "../../src/review/runtime";
-import { anchorRecheckDeadline, RECHECK_OUTPUT_SCHEMA, remainingSoftMinutes } from "../../src/review/recheck";
+import { anchorRecheckDeadline, RECHECK_OUTPUT_SCHEMA } from "../../src/review/recheck";
 import type { RecheckDoc, RecheckInput } from "../../src/contracts/recheck";
 import { PLUGIN_ROOT_FIXTURE } from "./plugin-root-fixture";
 
@@ -447,26 +447,32 @@ describe("ompAgentRuntime.runReview — seat fan-out", () => {
     expect(first.toLowerCase()).toContain("merge class");
   });
 
-  test("seat assignment carries the dispatch-time soft remainder through the engine option", async () => {
-    // A FRESH clock at the default tier's cap: the remainder cannot be 0 while
-    // this test runs, so `budgetRemainingMinutes` is unambiguous — and the tier
-    // cap itself is read from the engine, never re-typed here.
-    anchorRecheckDeadline(Date.now(), "default");
-    seatResults = [{ data: seatPayload() }, { data: seatPayload({ findings: [] }) }];
-    await ompAgentRuntime.runReview(BASE_INPUT);
+  test("the dispatch head carries the SHARED remainder from the one anchor, never a fresh allowance", async () => {
+    const cap = PR_REVIEW_TIER_BUDGETS.default.wallClockMinutes;
+    /** Dispatch at a controlled elapsed interval; returns that run's first assignment. */
+    const dispatch = async (elapsedMinutes: number): Promise<string> => {
+      anchorRecheckDeadline(Date.now() - elapsedMinutes * 60_000, "default");
+      seatResults = [{ data: seatPayload() }, { data: seatPayload({ findings: [] }) }];
+      const before = subagentRequests.length;
+      await ompAgentRuntime.runReview(BASE_INPUT);
+      return subagentRequests[before]!.assignment as string;
+    };
 
-    const first = subagentRequests[0]!.assignment as string;
-    // The engine's own head (plan 88): tier + whole-review soft cap + minutes
-    // left, rendered by prReviewSeatPrompt from the option we pass.
-    expect(first).toContain("- Tier: `default`");
-    expect(first).toContain(`${PR_REVIEW_TIER_BUDGETS.default.wallClockMinutes} min for the WHOLE review`);
-    expect(first).toMatch(/\(\d+ min left when you were dispatched\)/);
-    // The remainder is derived from the ONE process anchor at dispatch — not a
-    // fresh per-seat allowance; a later read in the same run is never larger.
-    const elapsed = remainingSoftMinutes(Date.now(), "default");
-    expect(elapsed).toBeLessThanOrEqual(PR_REVIEW_TIER_BUDGETS.default.wallClockMinutes);
-    expect(elapsed).toBeGreaterThanOrEqual(0);
-    expect(first).toContain(`(${elapsed} min left when you were dispatched)`);
+    // A KNOWN nonzero elapsed interval: the dispatched figure is the cap minus
+    // that interval, computed here rather than read back from the production
+    // helper. A refreshed per-seat allowance would say `cap` and fail.
+    const fourIn = await dispatch(4);
+    expect(fourIn).toContain(`${cap} min for the WHOLE review`);
+    expect(fourIn).toContain(`(${cap - 4} min left when you were dispatched)`);
+
+    // A LATER dispatch in the same review window is strictly smaller.
+    const sevenIn = await dispatch(7);
+    expect(sevenIn).toContain(`(${cap - 7} min left when you were dispatched)`);
+    expect(cap - 7).toBeLessThan(cap - 4);
+
+    // Past the cap the remainder is NEGATIVE and the head declares the overrun.
+    const overCap = await dispatch(cap + 3);
+    expect(overCap).toContain(`(3 min over it when you were dispatched)`);
   });
 
   test("quick level fans out exactly one seat", async () => {
@@ -676,24 +682,29 @@ describe("ompAgentRuntime.runReview — deep parent path", () => {
     expect(disposeCalls).toBe(1);
   });
 
-  test("deep parent assignment opens with the shared budget head and the non-fatal rule", async () => {
-    // Fresh clock at the deep tier's cap: the head's minutes-left figure is a
-    // real derivation, so it can be pinned without a re-typed literal.
-    anchorRecheckDeadline(Date.now(), "deep");
+  test("the parent session is dispatched with the shared budget head before the role context", async () => {
+    const cap = PR_REVIEW_TIER_BUDGETS.deep.wallClockMinutes;
+    const elapsedMinutes = 5;
+    // Controlled clock: a known nonzero elapsed interval, so the dispatched
+    // remainder provably differs from the full tier cap.
+    anchorRecheckDeadline(Date.now() - elapsedMinutes * 60_000, "deep");
     parentYields = [deepEnvelope()];
     await ompAgentRuntime.runReview(DEEP_INPUT);
 
     const prompt = promptTexts[0]!;
-    // Same head as the seat path: tier + whole-review cap + minutes left.
-    expect(prompt).toContain("- Tier: `deep`");
-    expect(prompt).toContain(`${PR_REVIEW_TIER_BUDGETS.deep.wallClockMinutes} min for the WHOLE review`);
-    expect(prompt).toMatch(/-?\d+ min left when this session was dispatched/);
-    expect(prompt).toContain(`${remainingSoftMinutes(Date.now(), "deep")} min left when this session was dispatched`);
-    // The non-fatal rule: summarize and return rather than fail.
-    expect(prompt).toMatch(/stop expanding,[\s\S]*summarize what you already have and return it/);
-    expect(prompt).toMatch(/never\s+fails the review for a session that ran out of clock/);
-    // The budget head precedes the role statement (the parent reads its clock first).
-    expect(prompt.indexOf("- Tier:")).toBeLessThan(prompt.indexOf("You are the parent session"));
+    // The head opens the assignment — before the role context (the worktree
+    // landmark the runtime also puts in this prompt).
+    const head = prompt.slice(0, prompt.indexOf(TEST_WORKTREE));
+    expect(head.length).toBeGreaterThan(0);
+    // It carries the tier, the whole-review cap and the SHARED remainder
+    // (cap minus elapsed, computed here — a fresh allowance would be `cap`).
+    expect(head).toContain("deep");
+    expect(head).toContain(`${cap} min`);
+    expect(head).toContain(`${cap - elapsedMinutes} min`);
+    expect(head).not.toContain(`${cap} min left`);
+    // ...plus a convergence instruction: stop and return what exists.
+    expect(head).toMatch(/summari[sz]e/i);
+    expect(head).toMatch(/return/i);
   });
 
   test("parent session keeps the isolation set and adds the task tool + strict yield schema", async () => {
