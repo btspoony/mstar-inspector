@@ -835,11 +835,14 @@ async function withoutGitHubTokenEnv<T>(review: () => Promise<T>): Promise<T> {
 }
 /**
  * Deep parent session options — the quick/default isolation set plus the
- * three deep-only deltas (spec Architect locks L1/L2): the SDK built-in
+ * deep-only deltas (spec Architect locks L1/L2): the SDK built-in
  * `task` tool joins the whitelist so the parent can dispatch seats
  * (`canSpawnAtDepth(task.maxRecursionDepth ?? 2, 0)` passes for a top-level
  * session), and the strict PARENT_OUTPUT_SCHEMA + required yield tool make
- * the turn's final act a schema-validated yield. GitHub write tools stay
+ * the turn's final act a schema-validated yield. The turn also carries an
+ * absolute `deadline` at the outer exec guard less the reserved seat tail —
+ * the deep tier's only in-process bound, landing on the same horizon every
+ * seat's hard cap does. GitHub write tools stay
  * structurally absent: restrictToolNames admits ONLY the four named tools,
  * extension/MCP discovery is disabled, and fetch is off.
  *
@@ -865,6 +868,8 @@ function deepSessionOptions(opts: {
   pluginRoot: string;
   skills: Skill[];
   modelPattern: string;
+  /** The review tier — the turn's hard `deadline` derives from its outer budget. */
+  level: ReviewLevel;
   fallbackChain?: string[];
   agentModelOverrides?: Record<string, string>;
   /** Directory of the synthesized per-review models.yml — required. */
@@ -874,6 +879,7 @@ function deepSessionOptions(opts: {
 }): CreateAgentSessionOptions {
   const overrides = opts.agentModelOverrides;
   const hasOverrides = overrides !== undefined && Object.keys(overrides).length > 0;
+  const nowMs = Date.now();
   return {
     ...buildSessionOptions(opts),
     ...(hasOverrides
@@ -892,6 +898,13 @@ function deepSessionOptions(opts: {
     outputSchema: PARENT_OUTPUT_SCHEMA,
     outputSchemaMode: "strict",
     requireYieldTool: true,
+    // The parent's hard bound: the outer exec guard less the same reserved
+    // tail the seats hold clear — ONE horizon for the whole review, so the
+    // parent turn can never outlive the seats it waits on. A spent budget
+    // yields a past instant (the SDK aborts the turn at once); unlike the seat
+    // cap there is no `0` sentinel to dodge, and clamping to `now` would
+    // extend the budget instead of enforcing it.
+    deadline: nowMs + remainingOuterMs(nowMs, opts.level) - SEAT_CAP_TAIL_MS,
   };
 }
 
@@ -1016,6 +1029,7 @@ async function runDeepReview(input: AgentRuntimeRunInput): Promise<ReviewRunResu
           pluginRoot,
           skills,
           modelPattern: input.modelSelectors[0] ?? DEFAULT_MODEL_PATTERN,
+          level: input.level,
           fallbackChain: [...input.modelSelectors],
           agentModelOverrides: input.modelOverrides,
           // The synthesized per-review models.yml directory —
