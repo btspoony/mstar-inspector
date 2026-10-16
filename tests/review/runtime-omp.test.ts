@@ -45,7 +45,7 @@ import { PR_REVIEW_NUDGE_CADENCE, PR_REVIEW_TIER_BUDGETS } from "@mstar-harness/
 
 import type { AgentRuntime, ReviewLevel } from "../../src/review/runtime";
 import type { SupervisedSeat } from "../../src/review/runtime-omp";
-import { anchorRecheckDeadline, RECHECK_OUTPUT_SCHEMA } from "../../src/review/recheck";
+import { anchorRecheckDeadline, RECHECK_OUTPUT_SCHEMA, remainingOuterMs, remainingSoftMinutes } from "../../src/review/recheck";
 import type { RecheckDoc, RecheckInput } from "../../src/contracts/recheck";
 import { PLUGIN_ROOT_FIXTURE } from "./plugin-root-fixture";
 
@@ -62,7 +62,15 @@ afterAll(() => {
 
 /** Captured createAgentSession options (one entry per runReview call). */
 const createdOptions: Record<string, unknown>[] = [];
-let seatResults: Array<{ error?: string; status?: string; data?: unknown; stderr?: string }> = [];
+/** Scripted per-seat settlements in dispatch order; `aborted` models a seat a cap stopped. */
+let seatResults: Array<{
+  error?: string;
+  status?: string;
+  data?: unknown;
+  stderr?: string;
+  aborted?: boolean;
+  abortReason?: string;
+}> = [];
 /** Definition content snapshotted from the PR-clone cwd at session creation. */
 let installedSeatAgent: string | null = null;
 /** Agents-dir listing snapshotted from the PR-clone cwd at session creation. */
@@ -280,6 +288,10 @@ mock.module("@oh-my-pi/pi-coding-agent/task/structured-subagent", () => ({
         output: "",
         stderr: plan.stderr ?? "",
         error: plan.error,
+        // A cap stop reaches the runtime as an abort on the settled result,
+        // exactly as the SDK's wall-clock watchdog reports one.
+        aborted: plan.aborted,
+        abortReason: plan.abortReason,
         structuredOutput:
           status === "absent"
             ? undefined
@@ -661,6 +673,106 @@ describe("ompAgentRuntime.runReview — seat fan-out", () => {
     await expect(ompAgentRuntime.runReview({ ...BASE_INPUT, level: "quick" })).rejects.toThrow(
       /no valid structured output/,
     );
+  });
+});
+
+describe("ompAgentRuntime.runReview — hard seat cap (collected vs uncollected)", () => {
+  /** The tier's soft cap in ms — the engine's figure, never a re-typed minute count. */
+  const softCapMs = PR_REVIEW_TIER_BUDGETS.default.wallClockMinutes * 60_000;
+  /** The tail the hard cap has to leave clear of the outer exec guard. */
+  const TAIL_MS = 60_000;
+
+  test("the seat call is capped by min(soft cap × 2, outer budget − 60s) — never the soft remainder", async () => {
+    jest.useFakeTimers();
+    seatResults = [{ data: seatPayload() }, { data: seatPayload({ findings: [] }) }];
+
+    // The outer guard still an hour ahead: the DOUBLED soft cap is the tighter
+    // term, so the cap is exactly that figure — while the shared soft remainder
+    // (a convergence target, counting that same hour) is nothing like it.
+    anchorRecheckDeadline(Date.now() + 3_600_000, "default");
+    await ompAgentRuntime.runReview(BASE_INPUT);
+
+    const cap = subagentRequests[0]!.maxRuntimeMs as number;
+    expect(cap).toBe(softCapMs * 2);
+    expect(cap).toBe(subagentRequests[1]!.maxRuntimeMs as number); // one figure for the wave
+
+    // A fresh anchor: the OUTER budget is now the tighter term, and the cap is
+    // that budget less the reserved tail — still not the remaining soft time.
+    seatResults = [{ data: seatPayload() }, { data: seatPayload({ findings: [] }) }];
+    anchorRecheckDeadline(Date.now(), "default");
+    const before = subagentRequests.length;
+    await ompAgentRuntime.runReview(BASE_INPUT);
+
+    const outerCapped = subagentRequests[before]!.maxRuntimeMs as number;
+    expect(outerCapped).toBe(remainingOuterMs(Date.now(), "default") - TAIL_MS);
+    expect(outerCapped).toBeLessThan(softCapMs * 2);
+    expect(outerCapped).not.toBe(remainingSoftMinutes(Date.now(), "default") * 60_000);
+  });
+
+  test("a spent outer budget still bounds the seat — never the SDK's 0 = no cap", async () => {
+    // Anchored past the outer exec guard: there is no outer budget left at all.
+    anchorRecheckDeadline(Date.now() - 700_000, "default");
+    seatResults = [{ data: seatPayload() }, { data: seatPayload({ findings: [] }) }];
+    await ompAgentRuntime.runReview(BASE_INPUT);
+
+    // The closure above yields a negative budget; handing the SDK `0` (its
+    // documented "no wall-clock limit") would remove the bound instead of
+    // enforcing it, so the cap floors at 1ms.
+    expect(subagentRequests[0]!.maxRuntimeMs as number).toBe(1);
+  });
+
+  test("a seat that returns inside its cap is collected: findings land, no coverage note", async () => {
+    seatResults = [{ data: seatPayload() }, { data: seatPayload({ findings: [] }) }];
+    const { envelope } = await ompAgentRuntime.runReview(BASE_INPUT);
+
+    expect(envelope.findings.map((finding) => finding.title)).toEqual(["Unbounded loop"]);
+    expect(envelope.summary_md).not.toContain("- notes:");
+  });
+
+  test("a seat stopped by its cap is uncollected: the review still lands and declares the gap", async () => {
+    seatResults = [
+      { status: "absent", aborted: true, abortReason: "Subagent runtime limit exceeded (task.maxRuntimeMs=540000)" },
+      { data: seatPayload() },
+    ];
+    const { envelope } = await ompAgentRuntime.runReview(BASE_INPUT);
+
+    // The capped seat contributed nothing — and did NOT fail the review: the
+    // seat that did return is synthesized as usual.
+    expect(envelope.findings.map((finding) => finding.title)).toEqual(["Unbounded loop"]);
+    // The gap is reader-visible on the review body: which seat, which cap fired,
+    // and the scope that was never scanned.
+    expect(envelope.summary_md).toContain("- notes:");
+    expect(envelope.summary_md).toContain("changeset-1-src");
+    expect(envelope.summary_md).toContain("Subagent runtime limit exceeded (task.maxRuntimeMs=540000)");
+    expect(envelope.summary_md).toContain("src/a.ts");
+  });
+
+  test("a cap that fires after the seat collected something keeps those findings and still declares the gap", async () => {
+    seatResults = [
+      {
+        aborted: true,
+        abortReason: "Subagent runtime limit exceeded (task.maxRuntimeMs=540000)",
+        data: {
+          findings: [
+            {
+              mergeClass: "should-fix",
+              title: "Missing null check",
+              body: "The handler assumes the payload is always present.",
+              file_path: "lib/c.ts",
+              line_start: 4,
+            },
+          ],
+        },
+      },
+      { data: seatPayload({ findings: [] }) },
+    ];
+    const { envelope } = await ompAgentRuntime.runReview(BASE_INPUT);
+
+    // "Returned what it collected" is a different outcome from "returned
+    // nothing": the partial payload still lands alongside the declared gap.
+    expect(envelope.findings.map((finding) => finding.title)).toEqual(["Missing null check"]);
+    expect(envelope.summary_md).toContain("- notes:");
+    expect(envelope.summary_md).toContain("changeset-1-src");
   });
 });
 

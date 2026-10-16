@@ -174,6 +174,17 @@ export function remainingSoftMinutes(nowMs: number, level?: ReviewLevel): number
 }
 
 /**
+ * Milliseconds left of the OUTER exec guard at `nowMs` — the budget a seat's
+ * hard cap derives from, as opposed to the soft convergence target
+ * `remainingSoftMinutes` reports. Same anchor and same purity; unanchored
+ * (direct runtime/test use) → the tier's full cap from `nowMs`, mirroring
+ * `currentRecheckBudget`'s convention.
+ */
+export function remainingOuterMs(nowMs: number, level: ReviewLevel): number {
+  return (anchoredDeadlineMs ?? nowMs + OUTER_RUNNER_CAP_MS[level]) - nowMs;
+}
+
+/**
  * The recheck budget available at `nowMs` given the anchored deadline
  * (full 180s cap from `nowMs` when no anchor was set). Pure view over
  * `recheckBudget` — exported for tests; `runRecheckSeat` calls it internally.

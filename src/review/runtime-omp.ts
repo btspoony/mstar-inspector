@@ -87,7 +87,7 @@ import {
   type MstarReviewV1,
 } from "@mstar-harness/engine";
 import { REVIEW_SEATS, type AgentRuntime, type AgentRuntimeRunInput, type ReviewLevel, type ReviewRunResult } from "./runtime";
-import { remainingSoftMinutes, runRecheckSeat } from "./recheck";
+import { remainingOuterMs, remainingSoftMinutes, runRecheckSeat } from "./recheck";
 import type { RecheckDoc } from "../contracts/recheck";
 
 /**
@@ -488,6 +488,26 @@ function dispatchBudgetMinutes(level: ReviewLevel): number {
 }
 
 /**
+ * Tail of the outer exec guard held clear of the seats: once the last seat
+ * stops, the runner still has to merge, synthesize and validate the envelope,
+ * so no seat may claim the whole remaining budget.
+ */
+const SEAT_CAP_TAIL_MS = 60_000;
+
+/**
+ * Hard wall-clock cap for one fan-out seat: twice the tier's SOFT cap, never
+ * beyond the remaining OUTER exec budget less the reserved tail. The two clocks
+ * are distinct by construction — the soft cap is a convergence target that
+ * aborts nothing (it only drives the dispatch head and the nudges), this is the
+ * only thing that stops a seat. A spent budget clamps to 1ms instead of `0`,
+ * which the SDK reads as "no cap at all".
+ */
+function seatMaxRuntimeMs(nowMs: number, level: ReviewLevel): number {
+  const softCapMs = PR_REVIEW_TIER_BUDGETS[level].wallClockMinutes * 60_000;
+  return Math.max(1, Math.min(softCapMs * 2, remainingOuterMs(nowMs, level) - SEAT_CAP_TAIL_MS));
+}
+
+/**
  * One progress nudge for a seat that is still running. The engine owns the
  * cadence and the tier figures; the harness `/amazing-pr-review` § Seat
  * supervision owns the model-facing procedure — this type carries only what the
@@ -609,21 +629,54 @@ function seatAssignment(input: AgentRuntimeRunInput, pluginRoot: string, plan: S
   });
 }
 
-/** Extract and guard the strict-validated seat payload. */
-function seatOutput(result: StructuredSubagentResult, index: number): SeatOutput {
+/**
+ * One settled seat: the payload it collected (`null` = nothing usable) and the
+ * coverage gap the review body must declare (`null` = the seat covered its
+ * whole scope).
+ */
+type SeatOutcome = { output: SeatOutput | null; gap: string | null };
+
+/** A seat's assigned scope, rendered for a coverage note — bounded so a wide diff cannot flood the review body. */
+function scopeSummary(plan: SeatPlan): string {
+  if (plan.scope.length === 0) return "the whole diff";
+  const shown = plan.scope.slice(0, 5);
+  return `${plan.scope.length} file(s): ${shown.join(", ")}${plan.scope.length > shown.length ? ", …" : ""}`;
+}
+
+/**
+ * Extract and guard the strict-validated seat payload.
+ *
+ * A seat the hard cap stopped is NOT a failure: whatever it collected is kept
+ * (possibly nothing) and its unscanned scope is declared for the reader-visible
+ * body, so the review still synthesizes — non-fatal is the contract. That is
+ * the ONLY non-fatal shortfall: an SDK error, or an invalid/absent payload from
+ * a seat no cap stopped, still throws.
+ */
+function seatOutput(result: StructuredSubagentResult, index: number, plan: SeatPlan, capMs: number): SeatOutcome {
   const single = result.result;
+  const structured = single.structuredOutput;
+  const collected =
+    structured?.status === "valid" && structured.data !== undefined ? (structured.data as SeatOutput) : null;
+  // Cap stop FIRST: an aborted run reports its stop through `error` too, so
+  // this branch must not fall into the failure path below.
+  if (single.aborted === true) {
+    const stoppedBy = single.abortReason?.trim() || `its ${Math.round(capMs / 1000)}s wall-clock cap`;
+    return {
+      output: collected,
+      gap: `seat ${plan.domain}-${plan.seat} was stopped by ${stoppedBy}; unscanned: ${scopeSummary(plan)}`,
+    };
+  }
   if (single.error) {
     throw new Error(`review seat ${index} (${single.agent}) failed: ${single.error}`);
   }
-  const structured = single.structuredOutput;
-  if (!structured || structured.status !== "valid" || structured.data === undefined) {
+  if (collected === null) {
     const detail = structured?.error ?? single.stderr.slice(-200);
     throw new Error(
       `review seat ${index} (${single.agent}) produced no valid structured output` +
         `(status ${structured?.status ?? "absent"})${detail ? `: ${detail}` : ""}`,
     );
   }
-  return structured.data as SeatOutput;
+  return { output: collected, gap: null };
 }
 
 /** Spec fingerprint: explicit hint, else the `file:line:title` composite. */
@@ -1203,6 +1256,9 @@ export const ompAgentRuntime: AgentRuntime = {
       // address THAT seat while it runs instead of racing the SDK's own
       // allocation for an id it never reports back.
       const seats = plans.map((plan, index) => ({ plan, index, id: `${plan.domain}-${plan.seat}` }));
+      // The hard cap this wave dispatches with: one figure for every seat of
+      // the review, read at the moment they actually start.
+      const seatCapMs = seatMaxRuntimeMs(Date.now(), input.level);
       // Per-seat stop state: a seat's OWN promise settlement — never "the whole
       // group finished". A seat that returned is never messaged again.
       const settledSeats = new Set<string>();
@@ -1224,8 +1280,9 @@ export const ompAgentRuntime: AgentRuntime = {
               schemaMode: "strict",
               enableLsp: false,
               enableIrc: false,
+              maxRuntimeMs: seatCapMs,
             });
-            return seatOutput(result, index);
+            return seatOutput(result, index, plan, seatCapMs);
           } finally {
             settledSeats.add(id);
           }
@@ -1243,15 +1300,15 @@ export const ompAgentRuntime: AgentRuntime = {
           deliver: (nudge) => nudgeSession(AgentRegistry.global().get(id)?.session, nudge),
         })),
       });
-      let outputs;
+      let outcomes: SeatOutcome[];
       try {
         const results = await group; // never rejects: the barrier absorbs every seat
-        // A failed seat (SDK error, or an invalid/absent payload rejected by
-        // seatOutput) stays fatal — it is rethrown here, after its siblings have
-        // settled, so it can no longer abandon them.
+        // A failed seat (SDK error, or a payload rejected by seatOutput) stays
+        // fatal — it is rethrown here, after its siblings have settled, so it
+        // can no longer abandon them.
         const failure = results.find((result) => result.status === "rejected");
         if (failure?.status === "rejected") throw failure.reason;
-        outputs = results.flatMap((result) => (result.status === "fulfilled" ? [result.value] : []));
+        outcomes = results.flatMap((result) => (result.status === "fulfilled" ? [result.value] : []));
       } catch (error) {
         recheckController.abort();
         if (recheckWork) await recheckWork;
@@ -1264,8 +1321,17 @@ export const ompAgentRuntime: AgentRuntime = {
       recheckController.abort();
       const recheck = recheckWork ? await recheckWork : null;
 
+      const outputs = outcomes.flatMap((outcome) => (outcome.output === null ? [] : [outcome.output]));
       const { findings, unverifiedCount } = mergeSeatOutputs(outputs);
       const envelope = synthesizeReview({ findings, unverifiedCount, target: parseTarget(input.reconFacts) });
+      // A capped seat's gap is declared on the body the user reads (the GitHub
+      // Review is rendered from `summary_md`) — never only in a log. The
+      // envelope schema and the engine's tally semantics stay untouched: an
+      // uncollected seat changes neither verdict nor counts.
+      const gaps = outcomes.flatMap((outcome) => (outcome.gap === null ? [] : [outcome.gap]));
+      if (gaps.length > 0) {
+        envelope.summary_md += `\n\n${gaps.map((gap) => `- notes: ${gap}`).join("\n")}`;
+      }
       const gate = validateMstarReviewV1(envelope);
       if (!gate.ok) {
         const detail = gate.violations.map((violation) => `${violation.code}: ${violation.message}`).join("; ");

@@ -20,7 +20,7 @@ import { describe, expect, test } from "bun:test";
 
 import { PR_REVIEW_TIER_BUDGETS } from "@mstar-harness/engine";
 
-import { anchorRecheckDeadline, currentRecheckBudget, RECHECK_OUTPUT_SCHEMA, recheckAssignment, recheckBudget, remainingSoftMinutes } from "../../src/review/recheck";
+import { anchorRecheckDeadline, currentRecheckBudget, RECHECK_OUTPUT_SCHEMA, recheckAssignment, recheckBudget, remainingOuterMs, remainingSoftMinutes } from "../../src/review/recheck";
 import { RECHECK_MAX_RUNTIME_MS, RECHECK_MIN_REMAINING_MS, type RecheckInput } from "../../src/contracts/recheck";
 
 const SHA = "0123456789abcdef0123456789abcdef01234567";
@@ -374,5 +374,27 @@ describe("remainingSoftMinutes (the shared soft clock at dispatch)", () => {
     const now = Date.now();
     anchorRecheckDeadline(now, "default");
     expect(remainingSoftMinutes(now)).toBe(PR_REVIEW_TIER_BUDGETS.default.wallClockMinutes);
+  });
+});
+
+describe("remainingOuterMs (the outer exec guard, as opposed to the soft clock)", () => {
+  test("counts down to the anchored outer deadline — and is never the soft remainder", () => {
+    // quick's outer guard is the 600,000ms entry of the same frozen §7.8 table
+    // the recheck budget reads.
+    const start = 5_000_000;
+    anchorRecheckDeadline(start, "quick");
+
+    expect(remainingOuterMs(start, "quick")).toBe(600_000);
+    expect(remainingOuterMs(start + 120_000, "quick")).toBe(remainingOuterMs(start, "quick") - 120_000);
+    // Past the outer deadline the remainder goes negative — never a fresh cap.
+    expect(remainingOuterMs(start + 700_000, "quick")).toBeLessThan(0);
+    // One anchor, two clocks: the soft figure is the tier's convergence target,
+    // this one the outer exec guard a hard cap derives from.
+    expect(remainingSoftMinutes(start, "quick") * 60_000).not.toBe(remainingOuterMs(start, "quick"));
+
+    // Leave the process neutral for later files (bun's module registry is
+    // process-global and this anchor is now ancient).
+    anchorRecheckDeadline(Date.now() + 3_600_000, "deep");
+    expect(currentRecheckBudget(Date.now())).toBe(180_000);
   });
 });
