@@ -630,17 +630,92 @@ function seatAssignment(input: AgentRuntimeRunInput, pluginRoot: string, plan: S
 }
 
 /**
+ * One capped seat's coverage gap: the seat, what stopped it, and the scope
+ * whose coverage the body has to declare incomplete.
+ */
+type SeatGap = { plan: SeatPlan; stoppedBy: string };
+
+/**
  * One settled seat: the payload it collected (`null` = nothing usable) and the
  * coverage gap the review body must declare (`null` = the seat covered its
  * whole scope).
  */
-type SeatOutcome = { output: SeatOutput | null; gap: string | null };
+type SeatOutcome = { output: SeatOutput | null; gap: SeatGap | null };
 
-/** A seat's assigned scope, rendered for a coverage note — bounded so a wide diff cannot flood the review body. */
-function scopeSummary(plan: SeatPlan): string {
-  if (plan.scope.length === 0) return "the whole diff";
-  const shown = plan.scope.slice(0, 5);
-  return `${plan.scope.length} file(s): ${shown.join(", ")}${plan.scope.length > shown.length ? ", …" : ""}`;
+/**
+ * The published review's `summary_md` budget in characters. The consumer
+ * truncates the summary to this many characters KEEPING THE HEAD
+ * (`src/pipeline/comment.ts`: SUMMARY_MD_LIMIT / `truncateSummary`), so anything
+ * the coverage notes push past it is lost from the END. Restated here with the
+ * publisher named because the in-image runner graph may not import that workerd
+ * face — the notes below have to fit inside the same budget.
+ */
+export const SUMMARY_MD_BUDGET = 8_000;
+
+/**
+ * Characters one capped seat's coverage line may spend, scope list included.
+ * Bounding lines by CHARACTERS (not by a file count) keeps a long path from
+ * crowding the line — or a second capped seat — out of the published body.
+ */
+export const SEAT_GAP_MAX_CHARS = 400;
+
+/**
+ * The scope list for a coverage note: whole paths while they fit in `budget`,
+ * then how many paths the line could not name — a cut list is always marked,
+ * never silent.
+ */
+function scopeList(paths: readonly string[], budget: number): string {
+  const listed: string[] = [];
+  for (const [index, path] of paths.entries()) {
+    const unlisted = paths.length - index - 1;
+    const candidate = `${[...listed, path].join(", ")}${unlisted > 0 ? `, and ${unlisted} more` : ""}`;
+    if (candidate.length > budget) break;
+    listed.push(path);
+  }
+  if (listed.length === paths.length) return listed.join(", ");
+  return listed.length === 0
+    ? `${paths.length} file(s)`
+    : `${listed.join(", ")}, and ${paths.length - listed.length} more`;
+}
+
+/**
+ * One capped seat's coverage line, never longer than `maxChars`. The line
+ * always names the seat and what stopped it, and describes the scope as the
+ * seat's ASSIGNED scope whose coverage is incomplete — never as untouched,
+ * which a finding the same seat returned from that very scope would contradict.
+ */
+function gapNote(gap: SeatGap, maxChars: number): string {
+  const { plan } = gap;
+  const head =
+    `- notes: seat ${plan.domain}-${plan.seat} was stopped by ${gap.stoppedBy}; ` +
+    `its assigned scope is not fully covered`;
+  const budget = maxChars - head.length - 2;
+  const list = plan.scope.length === 0 ? "the whole diff" : budget > 0 ? scopeList(plan.scope, budget) : "";
+  const line = list.length === 0 ? head : `${head}: ${list}`;
+  if (line.length <= maxChars) return line;
+  // A share too small even for the head still names the seat and its cause; the
+  // cut is marked with an ellipsis rather than hidden.
+  return maxChars > 1 ? `${line.slice(0, maxChars - 1)}…` : "";
+}
+
+/**
+ * The coverage block appended to `summary_md`, or "" when no seat was capped.
+ * The publisher cuts the summary from the HEAD, so a block that ran past
+ * {@link SUMMARY_MD_BUDGET} would lose its LAST seat silently: every line is
+ * character-capped and each cap is an equal share of what the summary still
+ * has, so no capped seat can be starved by a sibling's longer note.
+ */
+function gapNotes(existing: string, gaps: readonly SeatGap[]): string {
+  if (gaps.length === 0) return "";
+  // "\n\n" before the first line plus one "\n" between each following line.
+  let pool = SUMMARY_MD_BUDGET - existing.length - (2 + gaps.length - 1);
+  const notes = gaps.map((gap, index) => {
+    const note = gapNote(gap, Math.min(SEAT_GAP_MAX_CHARS, Math.floor(pool / (gaps.length - index))));
+    pool -= note.length;
+    return note;
+  });
+  const kept = notes.filter((note) => note.length > 0);
+  return kept.length === 0 ? "" : `\n\n${kept.join("\n")}`;
 }
 
 /**
@@ -657,11 +732,11 @@ const RUNTIME_LIMIT_ABORT_RE = /Subagent runtime limit exceeded \(task\.maxRunti
  * Extract and guard the strict-validated seat payload.
  *
  * A seat the hard cap stopped is NOT a failure: whatever it collected is kept
- * (possibly nothing) and its unscanned scope is declared for the reader-visible
- * body, so the review still synthesizes — non-fatal is the contract. The cap is
- * recognized ONLY by its own reason ({@link RUNTIME_LIMIT_ABORT_RE}): an SDK
- * error, an invalid/absent payload, and every abort the runtime limit did not
- * cause keep the fatal handling below.
+ * (possibly nothing) and the assigned scope whose coverage is now incomplete is
+ * declared for the reader-visible body, so the review still synthesizes —
+ * non-fatal is the contract. The cap is recognized ONLY by its own reason
+ * ({@link RUNTIME_LIMIT_ABORT_RE}): an SDK error, an invalid/absent payload, and
+ * every abort the runtime limit did not cause keep the fatal handling below.
  */
 function seatOutput(result: StructuredSubagentResult, index: number, plan: SeatPlan): SeatOutcome {
   const single = result.result;
@@ -672,10 +747,7 @@ function seatOutput(result: StructuredSubagentResult, index: number, plan: SeatP
   // must precede the failure path — but only a confirmed cap may enter it.
   const stoppedByCap = single.abortReason?.match(RUNTIME_LIMIT_ABORT_RE)?.[0];
   if (stoppedByCap !== undefined) {
-    return {
-      output: collected,
-      gap: `seat ${plan.domain}-${plan.seat} was stopped by ${stoppedByCap}; unscanned: ${scopeSummary(plan)}`,
-    };
+    return { output: collected, gap: { plan, stoppedBy: stoppedByCap } };
   }
   if (single.error) {
     throw new Error(`review seat ${index} (${single.agent}) failed: ${single.error}`);
@@ -1337,13 +1409,12 @@ export const ompAgentRuntime: AgentRuntime = {
       const { findings, unverifiedCount } = mergeSeatOutputs(outputs);
       const envelope = synthesizeReview({ findings, unverifiedCount, target: parseTarget(input.reconFacts) });
       // A capped seat's gap is declared on the body the user reads (the GitHub
-      // Review is rendered from `summary_md`) — never only in a log. The
-      // envelope schema and the engine's tally semantics stay untouched: an
-      // uncollected seat changes neither verdict nor counts.
+      // Review is rendered from `summary_md`) — never only in a log, and never
+      // past that body's character budget. The envelope schema and the engine's
+      // tally semantics stay untouched: an uncollected seat changes neither
+      // verdict nor counts.
       const gaps = outcomes.flatMap((outcome) => (outcome.gap === null ? [] : [outcome.gap]));
-      if (gaps.length > 0) {
-        envelope.summary_md += `\n\n${gaps.map((gap) => `- notes: ${gap}`).join("\n")}`;
-      }
+      envelope.summary_md += gapNotes(envelope.summary_md, gaps);
       const gate = validateMstarReviewV1(envelope);
       if (!gate.ok) {
         const detail = gate.violations.map((violation) => `${violation.code}: ${violation.message}`).join("; ");

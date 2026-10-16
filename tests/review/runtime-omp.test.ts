@@ -322,13 +322,17 @@ mock.module("@oh-my-pi/pi-coding-agent/task/structured-subagent", () => ({
 // The specifier goes through a const so tsc never resolves the query-suffixed
 // path (non-literal dynamic imports are untyped, hence the cast).
 const RUNTIME_OMP_SPEC = "../../src/review/runtime-omp.ts?test=runtime-omp";
-const { ompAgentRuntime, superviseSeats } = (await import(RUNTIME_OMP_SPEC)) as {
+const { ompAgentRuntime, superviseSeats, SUMMARY_MD_BUDGET, SEAT_GAP_MAX_CHARS } = (await import(RUNTIME_OMP_SPEC)) as {
   ompAgentRuntime: AgentRuntime;
   superviseSeats: (opts: {
     seats: readonly SupervisedSeat[];
     level: ReviewLevel;
     done: Promise<void>;
   }) => Promise<void>;
+  /** The body budget the coverage notes are fitted into. */
+  SUMMARY_MD_BUDGET: number;
+  /** The per-note character cap. */
+  SEAT_GAP_MAX_CHARS: number;
 };
 
 /** A valid strict seat payload the engine vocab accepts. */
@@ -810,6 +814,89 @@ describe("ompAgentRuntime.runReview — hard seat cap (collected vs uncollected)
 
     expect(envelope.findings.map((finding) => finding.title)).toEqual(["Unbounded loop"]);
     expect(envelope.summary_md).toContain(`- notes: seat changeset-1-src was stopped by ${reason}`);
+  });
+});
+
+describe("ompAgentRuntime.runReview — coverage note honesty and budget", () => {
+  /** The SDK's own reason for a wall-clock stop, verbatim as its resolver emits it. */
+  const CAP_REASON = "Subagent runtime limit exceeded (task.maxRuntimeMs=540000)";
+  /** The `- notes:` lines of a rendered body, in order. */
+  const noteLines = (summary: string): string[] =>
+    summary.split("\n").filter((line) => line.startsWith("- notes: "));
+
+  test("a capped seat that returned a finding never labels that scope unscanned", async () => {
+    seatResults = [
+      {
+        aborted: true,
+        abortReason: CAP_REASON,
+        data: {
+          findings: [
+            {
+              mergeClass: "must-fix",
+              title: "Unbounded loop",
+              body: "The loop never terminates on empty input.",
+              file_path: "src/a.ts",
+              line_start: 10,
+            },
+          ],
+        },
+      },
+      { data: seatPayload({ findings: [] }) },
+    ];
+
+    const { envelope } = await ompAgentRuntime.runReview(BASE_INPUT);
+
+    // The retained finding and the coverage note describe the SAME assigned
+    // scope: the note must report that coverage is incomplete, never that the
+    // scope went unscanned — the contradiction the reviewer called out.
+    const notes = noteLines(envelope.summary_md);
+    expect(envelope.findings.map((finding) => finding.file_path)).toEqual(["src/a.ts"]);
+    expect(notes).toHaveLength(1);
+    expect(notes[0]).toContain("its assigned scope is not fully covered");
+    expect(envelope.summary_md).not.toContain("unscanned");
+  });
+
+  test("a scope whose paths are long still fits the body, capped seats and all", async () => {
+    // Paths of the length the reviewer's 8,000-char premise implies: the whole
+    // assigned scope cannot be listed inside a bounded note.
+    const facts = [
+      ...Array.from({ length: 5 }, (_, index) => `5\t0\tsrc/file-${index}-${"x".repeat(1_600)}.ts`),
+      ...Array.from({ length: 5 }, (_, index) => `1\t0\tlib/file-${index}-${"x".repeat(1_600)}.ts`),
+    ];
+    seatResults = [
+      { status: "absent", aborted: true, abortReason: CAP_REASON },
+      { status: "absent", aborted: true, abortReason: CAP_REASON },
+    ];
+
+    const { envelope } = await ompAgentRuntime.runReview({ ...BASE_INPUT, reconFacts: facts });
+
+    const notes = noteLines(envelope.summary_md);
+    // Every capped seat keeps its coverage line (a note is never dropped by a
+    // sibling's length), each line is bounded by CHARACTERS, and the whole body
+    // stays inside the budget the publisher truncates at — so nothing that
+    // reaches the reader is cut off the end.
+    expect(notes).toHaveLength(2);
+    for (const note of notes) {
+      expect(note.length).toBeLessThanOrEqual(SEAT_GAP_MAX_CHARS);
+    }
+    expect(envelope.summary_md.length).toBeLessThanOrEqual(SUMMARY_MD_BUDGET);
+    expect(envelope.summary_md).toContain("changeset-1-src");
+    expect(envelope.summary_md).toContain("changeset-2-lib");
+  });
+
+  test("a cut scope list is marked explicitly, never silently", async () => {
+    // Forty short paths: far more of the assigned scope than a bounded list can
+    // name, so the note has to say how many it left out.
+    const facts = Array.from({ length: 40 }, (_, index) => `1\t0\tsrc/file-${String(index).padStart(2, "0")}.ts`);
+    seatResults = [{ status: "absent", aborted: true, abortReason: CAP_REASON }];
+
+    const { envelope } = await ompAgentRuntime.runReview({ ...BASE_INPUT, level: "quick", reconFacts: facts });
+
+    const notes = noteLines(envelope.summary_md);
+    expect(notes).toHaveLength(1);
+    expect(notes[0]).toContain("its assigned scope is not fully covered");
+    expect(notes[0]).toMatch(/, and \d+ more$/);
+    expect(notes[0]!.length).toBeLessThanOrEqual(SEAT_GAP_MAX_CHARS);
   });
 });
 
