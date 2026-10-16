@@ -95,10 +95,8 @@
  *     could reach must not stay selectable; evidence is keyed by the
  *     credential that produced it, so the surviving keys keep theirs). A
  *     MISSED delete (unknown key id / unconfigured provider) changes nothing
- *     at all — it is an idempotent no-op returning false. removeProviderKey
- *     removes the WHOLE pool of a provider plus every evidence row (the
- *     provider-level delete). Both return whether they removed a key row,
- *     like setAppStatus.
+ *     at all — it is an idempotent no-op returning false. It returns whether
+ *     it removed a key row, like setAppStatus.
  *   - getVerifiedModels returns the models the CURRENT pool AGREES on,
  *     recomputed per read as the intersection over the pool keys' own
  *     evidence rows; a key with no evidence row (e.g. an unverified sibling)
@@ -1459,24 +1457,6 @@ export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | un
     },
 
     /**
-     * Delete a provider's WHOLE pool — every key row of the (App, provider)
-     * pool, plus every verified-model evidence row — in ONE atomic batch (a
-     * removed pool must not linger as "verified" in the settings dropdown).
-     * Returns whether THIS call removed a key row (an unconfigured provider —
-     * or any provider the allowlist could never have stored — is a no-op
-     * returning false, mirroring removeCustomProvider's tolerance).
-     */
-    async removeProviderKey(appId: string, provider: string): Promise<boolean> {
-      const res = await db.batch([
-        db.prepare(`DELETE FROM app_provider_keys WHERE app_id = ? AND provider = ?`).bind(appId, provider),
-        db
-          .prepare(`DELETE FROM app_provider_models WHERE app_id = ? AND provider = ?`)
-          .bind(appId, modelCacheProviderKey(provider)),
-      ]);
-      return res[0]!.meta.changes > 0;
-    },
-
-    /**
      * The settings-page key list: one row per stored key — the provider, the
      * derived key id (the handle a per-key delete / re-verify call takes), the
      * masked tail and the per-key bookkeeping (migration 0012; NULL for rows
@@ -1673,8 +1653,7 @@ export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | un
      * the default chain). The reserved 'default' row cannot be removed here
      * (assertModelChainName rejects it — use setModelChain(null) to clear
      * the default). Returns whether THIS call removed a chain row (an
-     * unknown name is an idempotent no-op returning false, mirroring
-     * removeProviderKey's tolerance).
+     * unknown name is an idempotent no-op returning false).
      */
     async removeModelChain(appId: string, name: string): Promise<boolean> {
       assertModelChainName(name);
@@ -1726,8 +1705,7 @@ export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | un
     /**
      * Remove one seat's chain reference explicitly (idempotent — an
      * unmapped seat, like any role the vocabulary could never have stored,
-     * is a no-op returning nothing, mirroring removeProviderKey's
-     * tolerance).
+     * is a no-op returning nothing).
      */
     async clearModelChainSeat(appId: string, role: string): Promise<void> {
       assertModelRole(role);
@@ -1994,8 +1972,7 @@ export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | un
      * in ONE atomic batch (a leftover key row would be unreachable data, and
      * would resurface on a re-declaration of the same id). Returns whether
      * THIS call removed a declaration row (an undeclared provider id is an
-     * idempotent no-op returning false, mirroring removeProviderKey's
-     * tolerance).
+     * idempotent no-op returning false).
      */
     async removeCustomProvider(appId: string, providerId: string): Promise<boolean> {
       const res = await db.batch([

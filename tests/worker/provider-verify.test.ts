@@ -559,38 +559,6 @@ describe("store wiring — saveVerifiedKey + getVerifiedModels", () => {
     expect(cacheRow).toEqual([{ provider: "ark-plan", models_json: JSON.stringify(["doubao-seed-2-1-pro"]) }]);
   });
 
-  test("removeProviderKey deletes the verified-model cache row with the key (save → remove → getVerifiedModels empty)", async () => {
-    const db = createMigratedTestD1();
-    const app = await seedApp(db, "remove-app");
-    const store = configStore(db);
-    await store.saveVerifiedKey(app.id, "anthropic", PLAIN_KEY, ["claude-sonnet-4-6"]);
-    expect(await store.getVerifiedModels(app.id)).toHaveLength(1);
-    expect(await store.removeProviderKey(app.id, "anthropic")).toBe(true);
-    expect(await store.getVerifiedModels(app.id)).toEqual([]);
-    const cacheCount = db.raw
-      .query("SELECT COUNT(*) AS n FROM app_provider_models WHERE app_id = ?")
-      .get(app.id) as { n: number };
-    expect(cacheCount.n).toBe(0);
-  });
-
-  test("removeProviderKey('ark') deletes the ark-plan cache row (modelCacheProviderKey normalization)", async () => {
-    const db = createMigratedTestD1();
-    const app = await seedApp(db, "remove-ark-app");
-    const store = configStore(db);
-    await store.saveVerifiedKey(app.id, "ark", PLAIN_KEY, ["doubao-seed-2-1-pro"]);
-    expect((await store.getVerifiedModels(app.id)).map((c) => c.provider)).toEqual(["ark-plan"]);
-    expect(await store.removeProviderKey(app.id, "ark")).toBe(true);
-    expect(await store.getVerifiedModels(app.id)).toEqual([]);
-    const cacheCount = db.raw
-      .query("SELECT COUNT(*) AS n FROM app_provider_models WHERE app_id = ?")
-      .get(app.id) as { n: number };
-    expect(cacheCount.n).toBe(0);
-    const keyCount = db.raw
-      .query("SELECT COUNT(*) AS n FROM app_provider_keys WHERE app_id = ?")
-      .get(app.id) as { n: number };
-    expect(keyCount.n).toBe(0);
-  });
-
   test("addProviderKey overwriting a verified row resets verified_* to NULL (verification belongs to the (provider, key) pair)", async () => {
     const db = createMigratedTestD1();
     const app = await seedApp(db, "overwrite-app");
