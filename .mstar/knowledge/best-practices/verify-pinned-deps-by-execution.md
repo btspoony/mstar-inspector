@@ -39,7 +39,7 @@ Two layers, in the observed output of the pinned package:
 | declaration parse | an object-shaped `tools:` map and an explicit `tools: []` both become the **empty built-in allowlist**; the declaration parse adds nothing of its own | the package's `parseAgentFields` / `parseAgent` |
 | runtime augmentation | `yield` is pushed onto a requested list only when the spawn is structured (`requireYieldTool === true`) | the task executor and the tool registry |
 
-The layers have to be stated together. An empty declaration leaves a seat with none of the tools it may use **on an unstructured spawn** — but a *structured* spawn still adds `yield` at run time, so "the declaration names no tools, therefore the seat gets no `yield`" is false in exactly the case a deep seat cares about. That is also why a deep seat needs `yield` named explicitly **and** `structured: true`: two separate facts that a single "the SDK appends nothing" sentence flattens into a wrong one.
+The layers have to be stated together. An empty declaration leaves a seat with none of the tools it may use **on an unstructured spawn** — but a *structured* spawn still adds `yield` at run time, so "the declaration names no tools, therefore the seat gets no `yield`" is false in exactly the case a deep seat cares about. This repo's own seat definitions both name `yield` and set `structured: true`; that pairing is a repo convention, not an SDK requirement — once a spawn is structured, the tool arrives without the definition spelling it out.
 
 ## Why This Matters
 
