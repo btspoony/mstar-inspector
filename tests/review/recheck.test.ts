@@ -367,11 +367,12 @@ describe("remainingSoftMinutes (the shared soft clock at dispatch)", () => {
     expect(remainingSoftMinutes(start, "default")).toBe(PR_REVIEW_TIER_BUDGETS.default.wallClockMinutes);
     // Leave the process on a FRESH clock (anchor == now) for later test files:
     // bun's module registry is process-global, and an ancient anchor here would
-    // make every later `remainingSoftMinutes(Date.now())` a wild overrun.
-    anchorRecheckDeadline(Date.now(), "default");
-    expect(remainingSoftMinutes(Date.now())).toBeCloseTo(
-      PR_REVIEW_TIER_BUDGETS.default.wallClockMinutes,
-      6,
-    );
+    // make every later `remainingSoftMinutes(Date.now())` a wild overrun. ONE
+    // captured `now` feeds both the anchor and the read — the derivation is
+    // exact, so two ambient reads could straddle a millisecond and fail a
+    // correct clock.
+    const now = Date.now();
+    anchorRecheckDeadline(now, "default");
+    expect(remainingSoftMinutes(now)).toBe(PR_REVIEW_TIER_BUDGETS.default.wallClockMinutes);
   });
 });

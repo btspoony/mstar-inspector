@@ -412,6 +412,33 @@ describe("ompAgentRuntime.runReview — parent session", () => {
   });
 });
 
+/**
+ * The minute figures a rendered seat prompt states, with the direction the
+ * engine attached to each. Reads the number, the minute unit and the direction
+ * word only — no sentence shape, punctuation or dispatch phrasing is pinned, so
+ * harmless engine rewording cannot fail the suite.
+ */
+function statedMinutes(prompt: string): Array<{ minutes: number; over: boolean }> {
+  return [...prompt.matchAll(/(\d+(?:\.\d+)?)\s*min\w*(\s+\w+)?/gi)].map(([, value, marker]) => ({
+    minutes: Number(value),
+    over: /^over/i.test((marker ?? "").trim()),
+  }));
+}
+
+/**
+ * The signed shared-clock remainder a prompt states: the minute figure that is
+ * neither the tier cap nor positive-time-left. Throws when the prompt states no
+ * such figure — a fresh full-cap allowance states the cap as its own remainder
+ * and lands here.
+ */
+function statedRemainder(prompt: string, capMinutes: number): number {
+  const fact = statedMinutes(prompt).find((entry) => entry.minutes !== capMinutes || entry.over);
+  if (fact === undefined) {
+    throw new Error("rendered seat prompt states no shared-clock remainder");
+  }
+  return fact.over ? -fact.minutes : fact.minutes;
+}
+
 describe("ompAgentRuntime.runReview — seat fan-out", () => {
   test("default level fans out exactly two seats via runStructuredSubagent", async () => {
     seatResults = [{ data: seatPayload() }, { data: seatPayload({ findings: [] }) }];
@@ -447,9 +474,9 @@ describe("ompAgentRuntime.runReview — seat fan-out", () => {
     expect(first.toLowerCase()).toContain("merge class");
   });
 
-  test("the dispatch head carries the SHARED remainder from the one anchor, never a fresh allowance", async () => {
+  test("each dispatch states the SHARED remainder — never a fresh full allowance", async () => {
     const cap = PR_REVIEW_TIER_BUDGETS.default.wallClockMinutes;
-    /** Dispatch at a controlled elapsed interval; returns that run's first assignment. */
+    /** Dispatch at a controlled elapsed interval; returns that run's rendered assignment. */
     const dispatch = async (elapsedMinutes: number): Promise<string> => {
       anchorRecheckDeadline(Date.now() - elapsedMinutes * 60_000, "default");
       seatResults = [{ data: seatPayload() }, { data: seatPayload({ findings: [] }) }];
@@ -458,21 +485,27 @@ describe("ompAgentRuntime.runReview — seat fan-out", () => {
       return subagentRequests[before]!.assignment as string;
     };
 
-    // A KNOWN nonzero elapsed interval: the dispatched figure is the cap minus
-    // that interval, computed here rather than read back from the production
-    // helper. A refreshed per-seat allowance would say `cap` and fail.
+    // The inspected string is the REAL engine seat prompt (the SDK is mocked,
+    // the engine is not): these minute figures can only come from its rendered
+    // budget head.
     const fourIn = await dispatch(4);
-    expect(fourIn).toContain(`${cap} min for the WHOLE review`);
-    expect(fourIn).toContain(`(${cap - 4} min left when you were dispatched)`);
+    expect(fourIn).toContain(String(PR_REVIEW_TIER_BUDGETS.default.fileOpenCap));
+    // Known nonzero elapsed interval: the head states the whole-review cap AND
+    // a remainder of cap minus that interval. A fresh per-seat allowance would
+    // state the cap as its own remainder, so no `cap - 4` would appear.
+    expect(statedMinutes(fourIn)).toContainEqual({ minutes: cap, over: false });
+    expect(statedRemainder(fourIn, cap)).toBe(cap - 4);
 
-    // A LATER dispatch in the same review window is strictly smaller.
+    // A LATER dispatch states a strictly smaller remainder.
     const sevenIn = await dispatch(7);
-    expect(sevenIn).toContain(`(${cap - 7} min left when you were dispatched)`);
-    expect(cap - 7).toBeLessThan(cap - 4);
+    expect(statedRemainder(sevenIn, cap)).toBe(cap - 7);
+    expect(statedRemainder(sevenIn, cap)).toBeLessThan(statedRemainder(fourIn, cap));
 
-    // Past the cap the remainder is NEGATIVE and the head declares the overrun.
+    // Past the cap the stated remainder flips direction: an overrun, not time
+    // left — and it keeps the signed magnitude.
     const overCap = await dispatch(cap + 3);
-    expect(overCap).toContain(`(3 min over it when you were dispatched)`);
+    expect(statedMinutes(overCap)).toContainEqual({ minutes: 3, over: true });
+    expect(statedRemainder(overCap, cap)).toBe(-3);
   });
 
   test("quick level fans out exactly one seat", async () => {
