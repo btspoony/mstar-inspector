@@ -867,12 +867,11 @@ function stripFrontmatter(markdown: string): string {
  * as an object map), which the SDK `parseAgentFields` reads as NO tool list —
  * it parses an array or a CSV string, and a malformed declaration collapses
  * to an empty allowlist (logged, not repaired) — so a copied role file
- * declares a seat with no tools at all that cannot read the clone. The parse
- * adds nothing of its own: every tool the seat may use must be named in the
- * definition. The installed contract is the same as
- * ./seat-agent.md — name + description + the read-only seat tools — with
- * the harness role BODY kept verbatim (zero-copy: sourced from the plugin
- * root at runtime, never pasted into src/).
+ * declares a seat with no tools at all that cannot read the clone. The
+ * declaration parse adds no tools of its own. The installed contract is the
+ * same as ./seat-agent.md — name + description + the read-only seat tools —
+ * with the harness role BODY kept verbatim (zero-copy: sourced from the
+ * plugin root at runtime, never pasted into src/).
  *
  * `yield` is listed explicitly and `structured: true` is required: on SDK
  * >= 18.10.2 the deep parent's `task` tool runs with `task.structured` off,
