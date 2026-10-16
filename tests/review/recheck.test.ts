@@ -18,7 +18,9 @@
  */
 import { describe, expect, test } from "bun:test";
 
-import { anchorRecheckDeadline, currentRecheckBudget, RECHECK_OUTPUT_SCHEMA, recheckAssignment, recheckBudget } from "../../src/review/recheck";
+import { PR_REVIEW_TIER_BUDGETS } from "@mstar-harness/engine";
+
+import { anchorRecheckDeadline, currentRecheckBudget, RECHECK_OUTPUT_SCHEMA, recheckAssignment, recheckBudget, remainingSoftMinutes } from "../../src/review/recheck";
 import { RECHECK_MAX_RUNTIME_MS, RECHECK_MIN_REMAINING_MS, type RecheckInput } from "../../src/contracts/recheck";
 
 const SHA = "0123456789abcdef0123456789abcdef01234567";
@@ -296,5 +298,53 @@ describe("anchorRecheckDeadline / currentRecheckBudget (§7.8 outer caps)", () =
     // (budget-equivalent to unset: the full 180s cap from now).
     anchorRecheckDeadline(Date.now() + 3_600_000, "deep");
     expect(currentRecheckBudget(Date.now())).toBe(180_000);
+  });
+});
+
+describe("remainingSoftMinutes (plan 88 — the shared soft clock at dispatch)", () => {
+  /**
+   * The tier's soft cap in minutes IS the engine's figure — reading it here
+   * means the assertions below can never silently drift into a re-typed
+   * literal (plan § Numbers have one source).
+   */
+  const QUICK_CAP = PR_REVIEW_TIER_BUDGETS.quick.wallClockMinutes;
+  const DEEP_CAP = PR_REVIEW_TIER_BUDGETS.deep.wallClockMinutes;
+
+  test("derives cap minus elapsed for a fixed (anchor, now), shrinking across one run", () => {
+    const start = 1_000_000;
+    anchorRecheckDeadline(start, "quick");
+
+    expect(remainingSoftMinutes(start)).toBe(QUICK_CAP);
+    // A later 'now' in the SAME run is strictly smaller — never a fresh allowance.
+    const later = remainingSoftMinutes(start + 60_000);
+    expect(later).toBe(QUICK_CAP - 1);
+    expect(later).toBeLessThan(remainingSoftMinutes(start));
+    expect(remainingSoftMinutes(start + 150_000)).toBe(QUICK_CAP - 3);
+  });
+
+  test("past the cap the figure is NEGATIVE (over budget), never clamped to zero", () => {
+    const start = 2_000_000;
+    anchorRecheckDeadline(start, "deep");
+
+    const over = remainingSoftMinutes(start + (DEEP_CAP + 2) * 60_000);
+    expect(over).toBe(-2);
+    expect(over).toBeLessThan(0);
+    // The recheck budget CLAMPS at this same instant (0 = skip); the soft
+    // clock reports the overrun — the two clocks are provably distinct.
+    expect(currentRecheckBudget(start + (DEEP_CAP + 2) * 60_000)).toBe(0);
+  });
+
+  test("the tier cap comes from the engine SSOT, per tier", () => {
+    const start = 3_000_000;
+    anchorRecheckDeadline(start, "quick");
+    expect(remainingSoftMinutes(start)).toBe(QUICK_CAP);
+    expect(remainingSoftMinutes(start, "deep")).toBe(DEEP_CAP);
+    expect(remainingSoftMinutes(start, "default")).toBe(PR_REVIEW_TIER_BUDGETS.default.wallClockMinutes);
+    expect(QUICK_CAP).toBeLessThan(DEEP_CAP);
+    // Leave the process on a FRESH clock (anchor == now) for later test files:
+    // bun's module registry is process-global, and an ancient anchor here would
+    // make every later `remainingSoftMinutes(Date.now())` a wild overrun.
+    anchorRecheckDeadline(Date.now(), "default");
+    expect(remainingSoftMinutes(Date.now())).toBe(PR_REVIEW_TIER_BUDGETS.default.wallClockMinutes);
   });
 });

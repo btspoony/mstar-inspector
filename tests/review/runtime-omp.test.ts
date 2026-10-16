@@ -41,9 +41,10 @@ import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSy
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { parseAgent } from "@oh-my-pi/pi-coding-agent/task/agents";
+import { PR_REVIEW_TIER_BUDGETS } from "@mstar-harness/engine";
 
 import type { AgentRuntime } from "../../src/review/runtime";
-import { anchorRecheckDeadline, RECHECK_OUTPUT_SCHEMA } from "../../src/review/recheck";
+import { anchorRecheckDeadline, RECHECK_OUTPUT_SCHEMA, remainingSoftMinutes } from "../../src/review/recheck";
 import type { RecheckDoc, RecheckInput } from "../../src/contracts/recheck";
 import { PLUGIN_ROOT_FIXTURE } from "./plugin-root-fixture";
 
@@ -446,6 +447,28 @@ describe("ompAgentRuntime.runReview — seat fan-out", () => {
     expect(first.toLowerCase()).toContain("merge class");
   });
 
+  test("seat assignment carries the dispatch-time soft remainder through the engine option", async () => {
+    // A FRESH clock at the default tier's cap: the remainder cannot be 0 while
+    // this test runs, so `budgetRemainingMinutes` is unambiguous — and the tier
+    // cap itself is read from the engine, never re-typed here.
+    anchorRecheckDeadline(Date.now(), "default");
+    seatResults = [{ data: seatPayload() }, { data: seatPayload({ findings: [] }) }];
+    await ompAgentRuntime.runReview(BASE_INPUT);
+
+    const first = subagentRequests[0]!.assignment as string;
+    // The engine's own head (plan 88): tier + whole-review soft cap + minutes
+    // left, rendered by prReviewSeatPrompt from the option we pass.
+    expect(first).toContain("- Tier: `default`");
+    expect(first).toContain(`${PR_REVIEW_TIER_BUDGETS.default.wallClockMinutes} min for the WHOLE review`);
+    expect(first).toMatch(/\(\d+ min left when you were dispatched\)/);
+    // The remainder is derived from the ONE process anchor at dispatch — not a
+    // fresh per-seat allowance; a later read in the same run is never larger.
+    const elapsed = remainingSoftMinutes(Date.now(), "default");
+    expect(elapsed).toBeLessThanOrEqual(PR_REVIEW_TIER_BUDGETS.default.wallClockMinutes);
+    expect(elapsed).toBeGreaterThanOrEqual(0);
+    expect(first).toContain(`(${elapsed} min left when you were dispatched)`);
+  });
+
   test("quick level fans out exactly one seat", async () => {
     seatResults = [{ data: seatPayload() }];
     await ompAgentRuntime.runReview({ ...BASE_INPUT, level: "quick" });
@@ -651,6 +674,26 @@ describe("ompAgentRuntime.runReview — deep parent path", () => {
     expect(promptTexts[0]).toContain("acme/widgets#7");
     expect(envelope.schema).toBe("mstar.review/v1");
     expect(disposeCalls).toBe(1);
+  });
+
+  test("deep parent assignment opens with the shared budget head and the non-fatal rule", async () => {
+    // Fresh clock at the deep tier's cap: the head's minutes-left figure is a
+    // real derivation, so it can be pinned without a re-typed literal.
+    anchorRecheckDeadline(Date.now(), "deep");
+    parentYields = [deepEnvelope()];
+    await ompAgentRuntime.runReview(DEEP_INPUT);
+
+    const prompt = promptTexts[0]!;
+    // Same head as the seat path: tier + whole-review cap + minutes left.
+    expect(prompt).toContain("- Tier: `deep`");
+    expect(prompt).toContain(`${PR_REVIEW_TIER_BUDGETS.deep.wallClockMinutes} min for the WHOLE review`);
+    expect(prompt).toMatch(/-?\d+ min left when this session was dispatched/);
+    expect(prompt).toContain(`${remainingSoftMinutes(Date.now(), "deep")} min left when this session was dispatched`);
+    // The non-fatal rule: summarize and return rather than fail.
+    expect(prompt).toMatch(/stop expanding,[\s\S]*summarize what you already have and return it/);
+    expect(prompt).toMatch(/never\s+fails the review for a session that ran out of clock/);
+    // The budget head precedes the role statement (the parent reads its clock first).
+    expect(prompt.indexOf("- Tier:")).toBeLessThan(prompt.indexOf("You are the parent session"));
   });
 
   test("parent session keeps the isolation set and adds the task tool + strict yield schema", async () => {

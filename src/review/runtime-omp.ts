@@ -76,6 +76,7 @@ import {
 import { runStructuredSubagent, type StructuredSubagentResult } from "@oh-my-pi/pi-coding-agent/task/structured-subagent";
 import {
   MERGE_CLASSES,
+  PR_REVIEW_TIER_BUDGETS,
   PR_VERDICTS,
   prReviewSeatPrompt,
   synthesizeReview,
@@ -84,7 +85,7 @@ import {
   type MstarReviewV1,
 } from "@mstar-harness/engine";
 import { REVIEW_SEATS, type AgentRuntime, type AgentRuntimeRunInput, type ReviewLevel, type ReviewRunResult } from "./runtime";
-import { runRecheckSeat } from "./recheck";
+import { remainingSoftMinutes, runRecheckSeat } from "./recheck";
 import type { RecheckDoc } from "../contracts/recheck";
 
 /**
@@ -479,6 +480,11 @@ function seatAssignment(input: AgentRuntimeRunInput, pluginRoot: string, plan: S
     worktreePath: input.worktreePath,
     reconFacts: seatReconFacts(input.reconFacts, plan),
     tier: input.level,
+    // Plan 88 (§ One clock per review): the tier's SHARED soft remainder at
+    // dispatch — recomputed per seat from the one process anchor, so a later
+    // wave gets less and no seat ever sees a fresh allowance. The engine owns
+    // the head wording; negative = the review is already over cap.
+    budgetRemainingMinutes: remainingSoftMinutes(Date.now(), input.level),
   });
 }
 
@@ -714,7 +720,24 @@ function deepSessionOptions(opts: {
  */
 async function deepAssignment(input: AgentRuntimeRunInput, pluginRoot: string): Promise<string> {
   const command = await readFile(join(pluginRoot, "commands", "amazing-pr-review.md"), "utf8");
+  // Plan 88: the deep parent gets the SAME budget head as the Bun fan-out
+  // seats so it knows the clock it must finish inside. These lines are
+  // inspector-authored orchestration prose (the engine owns only the seat
+  // prompt) — every figure is read from the engine SSOT, never re-typed.
+  const capMinutes = PR_REVIEW_TIER_BUDGETS[input.level].wallClockMinutes;
+  const remainingMinutes = remainingSoftMinutes(Date.now(), input.level);
   return [
+    "Review budget — the shared soft clock this session must finish inside:",
+    `- Tier: \`${input.level}\` — review strength for this session.`,
+    `- Soft wall-clock cap: ${capMinutes} min for the WHOLE review — one shared`,
+    "  clock started when the runner began this review, not a fresh per-seat",
+    `  allowance (${remainingMinutes} min left when this session was dispatched;`,
+    "  a negative figure means the review is already over its cap).",
+    "- The cap is SOFT, never a hard stop: as you approach it, stop expanding,",
+    "  summarize what you already have and return it — a partial review that",
+    "  declares its unscanned scope is the expected outcome; the caller never",
+    "  fails the review for a session that ran out of clock.",
+    "",
     "You are the parent session of a deep (three-stage) code review.",
     "",
     "Recon facts:",
